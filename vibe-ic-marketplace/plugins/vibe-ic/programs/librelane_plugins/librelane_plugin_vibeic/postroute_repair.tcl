@@ -270,7 +270,9 @@ if {$::env(VIBEIC_PRR_SETUP_SEQUENCE) eq "sizeup,swap"} {
     log_cmd repair_design {*}$rd_args
 }
 
-set setup_args [list -setup -verbose]
+# Removing a buffer can merge the very fanout tree repair_design just built.
+# Let timing resize and add cells, then judge the complete result after RCX.
+set setup_args [list -setup -verbose -skip_buffer_removal]
 lappend setup_args -setup_margin $::env(VIBEIC_PRR_SETUP_MARGIN)
 lappend setup_args -max_buffer_percent $::env(VIBEIC_PRR_SETUP_MAX_BUFFER_PCT)
 if {$::env(VIBEIC_PRR_SETUP_SEQUENCE) ne "default"} {
@@ -281,7 +283,7 @@ log_cmd repair_timing {*}$setup_args
 
 # Hold after setup (review70 step 32: T60 moved spm SS hold -0.39 -> +0.039
 # only once hold ran after setup), and never at setup's expense.
-set hold_args [list -hold -verbose]
+set hold_args [list -hold -verbose -skip_buffer_removal]
 lappend hold_args -setup_margin $::env(VIBEIC_PRR_SETUP_MARGIN)
 lappend hold_args -hold_margin $::env(VIBEIC_PRR_HOLD_MARGIN)
 lappend hold_args -max_buffer_percent $::env(VIBEIC_PRR_HOLD_MAX_BUFFER_PCT)
@@ -289,9 +291,9 @@ log_cmd repair_timing {*}$hold_args
 # What repair_design left: every later edit in this step must keep it.
 set ::vic_fo_repaired [vic_fanout_over]
 
-# The timing repair may create new fanout/slew/cap loads. Re-run DRV repair
-# after the last repair_timing call; the routed re-check below remains the
-# authority for whether the declared limit was actually met.
+# Resizing and hold repair can disturb a fanout tree even with buffer removal
+# disabled. Re-run design repair after both timing passes; the post-route
+# STAPostPNR census decides whether every DRV row closed before adoption.
 log_cmd repair_design {*}$rd_args
 vic_census after_timing_drv_recheck
 

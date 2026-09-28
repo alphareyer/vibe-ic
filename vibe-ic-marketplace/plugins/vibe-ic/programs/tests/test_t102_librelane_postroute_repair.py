@@ -541,6 +541,14 @@ def test_the_deck_repairs_drv_again_after_both_timing_passes():
     assert calls[1] < tcl.index('vic_census after_timing_drv_recheck')
 
 
+def test_timing_cannot_remove_the_buffers_that_closed_declared_fanout():
+    tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    assert re.search(r'^set setup_args \[list -setup -verbose -skip_buffer_removal\]$',
+                     tcl, re.M)
+    assert re.search(r'^set hold_args \[list -hold -verbose -skip_buffer_removal\]$',
+                     tcl, re.M)
+
+
 def test_a_hard_repair_stops_at_the_declared_floor(tmp_path, monkeypatch):
     """T98's case (+3.33 -> +0.14) against a design that DECLARES 0.5 ns of
     setup margin: the floor is the declaration's, and 0.14 is below it."""
@@ -1013,6 +1021,90 @@ def test_in_the_chain_the_route_state_is_repaired_without_a_bridge(tmp_path, mon
     assert 'VIBEIC_PRR_REFILL_TCL' not in json.loads(
         Path(ctx['configs'][prr.REPAIR_STEP]).read_text()), \
         "the LL21 route's fillers are LibreLane's; the refill is too"
+
+
+def test_in_chain_clean_census_replaces_a_stale_repair_decision_before_stream(
+        tmp_path, monkeypatch):
+    import flow_step_output_content_check as content
+    import postroute_timing_repair_audit as audit
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': _base(4.0, 0.2)})
+    decision = put(project / 'phase3/stage3/postroute_timing_repair' /
+                   'postroute_timing_repair_decision.json', {'repair_needed': True})
+    write(decision.parent / 'repair_log.json', '{}\n')
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    assert report['verdict'] == 'PASS' and report['adopted'] is None
+    assert json.loads(decision.read_text())['repair_needed'] is False
+    assert not (decision.parent / 'repair_log.json').exists()
+    assert content.check(project, 'repair') == []
+    assert not [f for f in audit.audit(project)[0] if f.severity == 'ERROR']
+
+
+def test_in_chain_adopted_repair_keeps_its_input_trigger_and_passes_audit(
+        tmp_path, monkeypatch):
+    import postroute_timing_repair_audit as audit
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': _base(4.026052, -0.335),
+        '32-cand01': _cand(4.025948, 0.326)})
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    output = project / 'phase3/stage3/postroute_timing_repair'
+    decision = json.loads((output / 'postroute_timing_repair_decision.json').read_text())
+    log = json.loads((output / 'repair_log.json').read_text())
+    assert report['adopted'] == '32-cand01'
+    assert decision['repair_needed'] is True
+    assert decision['baseline']['hold_ws_min'] < 0 < decision['final']['hold_ws_min']
+    assert log['changes'][0]['candidate'] == report['adopted']
+    assert log['re_verified'] is True
+    assert not (output / 'no_repair_needed.flag').exists()
+    assert not [f for f in audit.audit(project)[0] if f.severity == 'ERROR']
+
+
+def test_in_chain_tool_refusal_invalidates_the_prior_declared_decision(
+        tmp_path, monkeypatch):
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {})
+    output = project / 'phase3/stage3/postroute_timing_repair'
+    decision = put(output / 'postroute_timing_repair_decision.json',
+                   {'repair_needed': False})
+    write(output / 'no_repair_needed.flag', 'stale\n')
+    write(output / 'repair_log.json', '{}\n')
+    monkeypatch.setattr(prr, 'fork_capability',
+                        lambda image, docker='docker': {'capable': False, 'image': image})
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    assert report['verdict'] != 'PASS'
+    assert not decision.exists()
+    assert not (output / 'no_repair_needed.flag').exists()
+    assert not (output / 'repair_log.json').exists()
+
+
+def test_in_chain_residual_drv_replaces_a_stale_clean_decision_before_stream(
+        tmp_path, monkeypatch):
+    import flow_step_output_content_check as content
+    import postroute_timing_repair_audit as audit
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': {'def': _def(True), 'sta_metrics': _sta_metrics(5.0, 0.4, (0, 0, 4)),
+                    'antenna_metrics': _ant(0),
+                    'repair_metrics': {'vibeic__prr__changed': 0}},
+        '32-cand01': _cand(1.6, 0.4, (0, 0, 1))})
+    output = project / 'phase3/stage3/postroute_timing_repair'
+    decision = put(output / 'postroute_timing_repair_decision.json',
+                   {'repair_needed': False})
+    write(output / 'no_repair_needed.flag', 'stale estimate\n')
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    assert report['verdict'] == 'PASS' and report['adopted'] is None
+    assert json.loads(decision.read_text())['repair_needed'] is True
+    assert not (output / 'no_repair_needed.flag').exists()
+    assert json.loads((output / 'repair_log.json').read_text())['candidates'][0]['decision'] == 'REFUSED'
+    assert content.check(project, 'repair') == []
+    errors = [f.category for f in audit.audit(project)[0] if f.severity == 'ERROR']
+    assert 'EMPTY_CHANGES' in errors and 'NOT_REVERIFIED' in errors
 
 
 def test_dual_runs_three_arms_and_selects_by_hold_then_setup(tmp_path, monkeypatch):

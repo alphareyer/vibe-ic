@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -73,7 +74,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _atomic_artefact import write_json  # noqa: E402
+from _atomic_artefact import write_json, write_text  # noqa: E402
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
 
 STEP = "32"
@@ -90,6 +91,7 @@ CONTEXT = "context.json"
 CURRENT = "current.json"
 LEDGER = "candidates.json"
 REPORT_REL = "reports/phase3/librelane_postroute_repair.json"
+DECLARED_REPAIR_REL = "phase3/stage3/postroute_timing_repair"
 #: The controllers this step runs, in order: setup, then hold (hold after
 #: setup), then design rules. Each is declared in the actuator registry.
 CONTROLLERS = ("postroute.repair_setup", "postroute.repair_hold",
@@ -734,6 +736,89 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
     return report
 
 
+def _clear_declared_repair(project: Path) -> None:
+    """A new step-32 attempt invalidates any prior decision and outcome."""
+    out = project / DECLARED_REPAIR_REL
+    for name in ("postroute_timing_repair_decision.json", "repair_log.json",
+                 "no_repair_needed.flag"):
+        (out / name).unlink(missing_ok=True)
+
+
+def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path) -> None:
+    """Publish step 32's measured decision before the pre-stream gate.
+
+    The later canonicalize pass cannot write this declaration when pre-stream
+    blocks it. A missing or malformed STAPostPNR census leaves no fresh output,
+    so the declared-output check refuses it instead of accepting a marker.
+    """
+    if report.get("verdict") != "PASS":
+        return
+    baseline = report.get("baseline") or {}
+    final = report.get("final") or {}
+    floors = report.get("floors") or {}
+    before = [baseline.get(k) for k in ("drv_count", "setup_ws_min", "hold_ws_min")]
+    after = [final.get(k) for k in ("drv_count", "setup_ws_min", "hold_ws_min")]
+    setup_floor = (floors.get("setup") or [None])[0]
+    hold_floor = (floors.get("hold") or [None])[0]
+    if (any(type(v) is not int for v in (before[0], after[0])) or
+            any(type(v) not in (int, float) or not math.isfinite(v)
+                for v in (*before[1:], *after[1:], setup_floor, hold_floor))):
+        return
+    import librelane_contract as _ll
+    # The trigger describes the INPUT route; a successfully repaired output
+    # does not retroactively make its repair unnecessary.
+    adopted = report.get("adopted")
+    needed = bool(before[0] or before[1] < setup_floor or
+                  before[2] < hold_floor or adopted)
+    candidates = report.get("candidates") or []
+    adopted_row = next((row for row in candidates
+                        if row.get("candidate") == adopted and
+                        row.get("closure_decision") == "PROMOTED"), None)
+    changed = ((adopted_row.get("repair_metrics") or {}).get("vibeic__prr__changed")
+               if adopted_row else None)
+    changes = ([{"candidate": adopted,
+                 "changed_instances": changed,
+                 "sta_state_sha256": after_state}]
+               if (type(changed) is int and changed > 0 and
+                   (after_state := final.get("sta_state_sha256")) and
+                   after_state == (adopted_row.get("measurement") or {}).get(
+                       "sta_state_sha256")) else [])
+    re_verified = bool(changes and after[0] == 0 and
+                       after[1] >= setup_floor and after[2] >= hold_floor and
+                       final.get("antenna_nets") == 0)
+    out = project / DECLARED_REPAIR_REL
+    write_json(out / "postroute_timing_repair_decision.json", {
+        "repair_needed": needed,
+        "action": "candidate_adopted" if adopted else "input_route_kept",
+        "candidate": adopted,
+        "baseline": dict(zip(("drv_count", "setup_ws_min", "hold_ws_min"), before)),
+        "final": dict(zip(("drv_count", "setup_ws_min", "hold_ws_min"), after)),
+        "floors": floors,
+        "source_report": str(source.relative_to(project)),
+        "source_report_sha256": _ll.digest(source),
+        "measured_by": "OpenROAD.STAPostPNR at every declared corner",
+    })
+    flag = out / "no_repair_needed.flag"
+    log = out / "repair_log.json"
+    if needed:
+        if flag.is_file():
+            flag.unlink()
+        write_json(log, {
+            "source_report": str(source.relative_to(project)),
+            "source_report_sha256": _ll.digest(source),
+            "candidates": candidates,
+            "adopted": adopted,
+            "changes": changes,
+            "re_verified": re_verified,
+            "baseline": baseline,
+            "final": final,
+        })
+    else:
+        if log.is_file():
+            log.unlink()
+        write_text(flag, "STAPostPNR: declared timing floors and DRV are met\n")
+
+
 def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
         views: Dict[str, Path], sdc: Path, derate: Tuple[float, float],
         aocv_table: Optional[str] = None,
@@ -750,6 +835,7 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
     report: Dict[str, Any] = {"step": STEP, "mode": "librelane", "image": image,
                               "site": "after_direct_route"}
     out = project / REPORT_REL
+    _clear_declared_repair(project)
     if _refused_by_tool(report, fork_capability(image, docker), out):
         return report
     configs, corners, mounts = _prepare(
@@ -768,6 +854,7 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
                             floors=declared_timing_floor(project, sdc)))
     _set_final_fanout_verdict(report)
     write_json(out, report)
+    _publish_declared_repair(project, report, out)
     return report
 
 
@@ -859,6 +946,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     report: Dict[str, Any] = {"step": STEP, "mode": mode, "image": image,
                               "site": "after_route", "route_state": str(route_state)}
     out = project / REPORT_REL
+    _clear_declared_repair(project)
     if _refused_by_tool(report, fork_capability(image, docker), out):
         return report
     configs, corners, mounts = _prepare(
@@ -873,6 +961,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
         report.update(close_arm(project, "librelane", route_state, **common))
         _set_final_fanout_verdict(report)
         write_json(out, report)
+        _publish_declared_repair(project, report, out)
         return report
     if variant_arm is None:
         raise ValueError("LL_PRR_DUAL_NEEDS_LL21: the pre-DRT arm is step 21's "
@@ -909,6 +998,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     report["selected_arm"] = sel["selection"]
     _set_final_fanout_verdict(report)
     write_json(out, report)
+    _publish_declared_repair(project, report, out)
     return report
 
 
