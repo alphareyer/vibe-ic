@@ -78,7 +78,12 @@ _PROGRAMS = _TESTS.parent
 sys.path.insert(0, str(_PROGRAMS))
 
 RUNNER = _PROGRAMS / "phase3_one_shot_runner.py"
-_STEP = "step_canonicalize_artefacts"
+#: RELOCATED, not deleted (FX_STEP8_SDC_CHECK): step 8's report is now
+#: produced AT step 8, and the runner's one spawn of the checker moved out of
+#: `step_canonicalize_artefacts` (the phase-3 tail, which now only regenerates
+#: a stale report through the same producer) into `_spawn_step8_checker`.
+#: Every assertion below holds against the new home unchanged.
+_STEP = "_spawn_step8_checker"
 _CHECKER = "sdc_syntax_check.py"
 
 #: Every spawn in this runner whose status was discarded, and the function it
@@ -89,7 +94,7 @@ _CHECKER = "sdc_syntax_check.py"
 #: an artefact -- so the remedy is the second one that instrument names: say so
 #: at the call site instead of leaving it inferred from silence.
 _SPAWNS = (
-    ("sdc_syntax_check.py", "step_canonicalize_artefacts"),
+    ("sdc_syntax_check.py", "_spawn_step8_checker"),
     ("dfm_screen_check.py", "step_canonicalize_artefacts"),
     ("thermal_screen_check.py", None),
     ("flow_compliance_check.py", None),

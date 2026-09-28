@@ -4406,6 +4406,50 @@ def _runner_module():
     return sys.modules[__name__]
 
 
+def _spawn_step8_checker(project: Path, report: Path,
+                         notes: List[str]) -> Optional[int]:
+    """Run step 8's checker into ``report``; return its rc (None: not run).
+
+    The ONE spawn of the step-8 checker in this runner (FX_STEP8_SDC_CHECK):
+    `_ppa.timing.emit_step8_sdc_check` -- step 8's producer, called at step 8
+    and, when its basis is stale, by the phase-3 tail -- calls this. It keeps
+    the contract `step_canonicalize_artefacts` held inline before: the rc is
+    READ, all three outcomes are noted and none is conflated, and it never
+    raises or returns early into its caller.
+    """
+    sdc_check_json = report
+    rc: Optional[int] = None
+    sdc_check_json.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(
+            [sys.executable,
+             str(PROGRAMS_DIR / "sdc_syntax_check.py"),
+             str(project), "--json", str(sdc_check_json)],
+            capture_output=True, text=True, timeout=60,
+        )
+        rc = r.returncode
+        # THE TWO OUTCOMES ARE NOT THE SAME THING and the note says which:
+        #   report written, rc != 0  -- NOT an emission failure: the checker
+        #       exits `0 if result.passed else 1`, so a non-zero code means the
+        #       SDC has real findings, and they are IN the JSON.
+        #   report NOT written        -- a genuine emission failure.
+        if sdc_check_json.is_file():
+            if r.returncode != 0:
+                notes.append(
+                    f"sdc_syntax_check reported findings (rc={r.returncode}); "
+                    f"the verdict is in "
+                    f"{sdc_check_json.relative_to(project)} and this step "
+                    "neither blocks on it nor hides it")
+        else:
+            tail = (r.stderr or r.stdout or "").strip().splitlines()
+            notes.append(
+                f"sdc_syntax_check emitted no report (rc={r.returncode}): "
+                + (tail[-1][:200] if tail else "no output"))
+    except Exception as exc:  # best-effort, never block the step
+        notes.append(f"sdc_syntax_check emit failed: {exc}")
+    return rc
+
+
 # ---------------------------------------------------------------------------
 # PDK auto-detection (chip-AGNOSTIC)
 # ---------------------------------------------------------------------------

@@ -1501,7 +1501,6 @@ def asic_sdc_for_pnr(rt: Any, project: Path, top: str, pdk: Any,
 # regenerate it through the same producer and say why.
 SDC_CHECK_REL = "reports/phase2/sdc_check.json"
 SDC_CHECK_BASIS_REL = "reports/phase2/sdc_check.basis.json"
-SDC_CHECK_DEADLINE_S = 60
 
 
 def _sdc_check_inputs(project: Path) -> Dict[str, str]:
@@ -1519,10 +1518,9 @@ def _sdc_check_inputs(project: Path) -> Dict[str, str]:
 
 def emit_step8_sdc_check(rt: Any, project: Path,
                          regenerated: Optional[str] = None) -> Dict[str, Any]:
-    """STEP 8's producer: run `sdc_syntax_check` (deadline
-    `SDC_CHECK_DEADLINE_S`) into the declared report, and write the basis:
+    """STEP 8's producer: run `sdc_syntax_check` through the runner's one
+    spawn of it (60 s deadline) into the declared report, and write the basis:
     the sha256 of every SDC it read, step 7's SDC and the report itself."""
-    import subprocess
     project = Path(project)
     report = project / SDC_CHECK_REL
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -1538,24 +1536,11 @@ def emit_step8_sdc_check(rt: Any, project: Path,
                             "sha256": step7.get("sha256")}
     except (OSError, ValueError):
         rec["step7_sdc"] = None
-    try:
-        r = subprocess.run(
-            [sys.executable, str(rt.PROGRAMS_DIR / "sdc_syntax_check.py"),
-             str(project), "--json", str(report)],
-            capture_output=True, text=True, timeout=SDC_CHECK_DEADLINE_S)
-        rec["rc"] = r.returncode
-        if not report.is_file():
-            tail = (r.stderr or r.stdout or "").strip().splitlines()
-            rec["note"] = (f"sdc_syntax_check emitted no report "
-                           f"(rc={r.returncode}): "
-                           + (tail[-1][:200] if tail else "no output"))
-        elif r.returncode != 0:
-            rec["note"] = (f"sdc_syntax_check reported findings "
-                           f"(rc={r.returncode}); the verdict is in "
-                           f"{SDC_CHECK_REL}")
-    except subprocess.TimeoutExpired:
-        rec["note"] = (f"sdc_syntax_check exceeded its "
-                       f"{SDC_CHECK_DEADLINE_S}s deadline; no report")
+    # The spawn itself is the runner's (`_spawn_step8_checker`), so the gate
+    # stays visibly invoked by a runner and keeps its rc/notes contract.
+    _notes: List[str] = []
+    rec["rc"] = rt._spawn_step8_checker(project, report, _notes)
+    rec["note"] = "; ".join(_notes)
     if report.is_file():
         rec["report_sha256"] = hashlib.sha256(report.read_bytes()).hexdigest()
     rt._aa.write_json(project / SDC_CHECK_BASIS_REL, rec)
