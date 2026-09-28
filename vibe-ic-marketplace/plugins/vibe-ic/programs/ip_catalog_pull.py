@@ -178,7 +178,8 @@ def _sha256_file(path: Path) -> str:
 
 def pull_catalog_ip(match: CatalogMatch,
                     project: Path,
-                    dest_subdir: str = "phase2/stage1/rtl") -> Dict[str, Any]:
+                    dest_subdir: str = "phase2/stage1/rtl",
+                    *, official_only: bool = False) -> Dict[str, Any]:
     """Pull a single catalog IP's RTL files into project's canonical rtl/ dir.
 
     Returns audit dict with files_pulled, sha256 of each, license, etc.
@@ -210,7 +211,8 @@ def pull_catalog_ip(match: CatalogMatch,
     # 2. Locate source — require the mirror to actually hold this manifest's
     #    RTL (an empty/un-initialized submodule dir must not short-circuit a
     #    populated fallback mirror; ORGANIC #665).
-    src_dir = find_local_mirror(match.ip_name, match.rtl_files)
+    src_dir = None if official_only else find_local_mirror(
+        match.ip_name, match.rtl_files)
     pull_method = "local_mirror"
     clone_pin: Optional[Dict[str, Any]] = None
     if src_dir is None:
@@ -228,13 +230,84 @@ def pull_catalog_ip(match: CatalogMatch,
             "clone_pin": clone_pin,
         }
 
+    official_payloads: Dict[str, bytes] = {}
+    errata_applied: List[Dict[str, Any]] = []
+    if official_only:
+        # The ordinary catalog path accepts user mirrors. An input-declared,
+        # versioned reuse must instead be the official repository at the exact
+        # catalog tag. Validate every byte and erratum before publishing any.
+        remote = _git(["-C", str(src_dir), "remote", "get-url", "origin"])
+        dirty = _git(["-C", str(src_dir), "status", "--porcelain"])
+        if (remote.returncode != 0 or
+                remote.stdout.strip().rstrip("/").removesuffix(".git") !=
+                match.canonical_url.rstrip("/").removesuffix(".git") or
+                dirty.returncode != 0 or dirty.stdout.strip()):
+            return {"ip_name": match.ip_name, "status": "FAIL",
+                    "reason": "IP_REUSE_OFFICIAL_SOURCE_UNVERIFIED"}
+        try:
+            for rel in match.rtl_files:
+                path = Path(rel)
+                if path.is_absolute() or ".." in path.parts or path.suffix not in _RTL_SOURCE_EXTS:
+                    raise ValueError(f"IP_REUSE_RTL_PATH_REFUSED: {rel}")
+                src = src_dir / path
+                if not src.is_file() or src.is_symlink():
+                    raise ValueError(f"IP_REUSE_RTL_MISSING: {rel}")
+                official_payloads[rel] = src.read_bytes()
+            if not official_payloads:
+                raise ValueError("IP_REUSE_EMPTY_RTL_FILESET")
+            for entry in match.errata:
+                if not isinstance(entry, dict):
+                    raise ValueError("IP_REUSE_ERRATUM_MALFORMED")
+                commit = entry.get("upstream_commit")
+                rel = entry.get("file")
+                if not isinstance(commit, str) or not isinstance(rel, str) or rel not in official_payloads:
+                    raise ValueError(f"IP_REUSE_ERRATUM_UNBOUND: {rel}")
+                ancestor = _git(["-C", str(src_dir), "merge-base", "--is-ancestor",
+                                 match.canonical_commit, commit])
+                before = _git(["-C", str(src_dir), "show", f"{commit}^:{rel}"])
+                after = _git(["-C", str(src_dir), "show", f"{commit}:{rel}"])
+                if (ancestor.returncode != 0 or before.returncode != 0 or
+                        after.returncode != 0 or
+                        official_payloads[rel] != before.stdout.encode()):
+                    raise ValueError(f"IP_REUSE_ERRATUM_BASE_MISMATCH: {rel}")
+                official_payloads[rel] = after.stdout.encode()
+                errata_applied.append({
+                    "upstream_commit": commit, "file": rel,
+                    "disclosure": entry.get("disclosure", ""),
+                    "before_sha256": hashlib.sha256(before.stdout.encode()).hexdigest(),
+                    "after_sha256": hashlib.sha256(after.stdout.encode()).hexdigest(),
+                })
+        except ValueError as exc:
+            return {"ip_name": match.ip_name, "status": "FAIL",
+                    "reason": str(exc), "clone_pin": clone_pin}
+
     # 3. Copy listed RTL files
     dest_dir = project / dest_subdir
+    if official_only:
+        names = [Path(rel).name for rel in match.rtl_files]
+        if len(names) != len(set(names)):
+            return {"ip_name": match.ip_name, "status": "FAIL",
+                    "reason": "IP_REUSE_RTL_BASENAME_COLLISION"}
+        occupied = [name for name in names if (dest_dir / name).exists()]
+        if occupied:
+            return {"ip_name": match.ip_name, "status": "FAIL",
+                    "reason": f"IP_REUSE_OUTPUT_EXISTS: {occupied}"}
     dest_dir.mkdir(parents=True, exist_ok=True)
     files_copied: List[Dict[str, Any]] = []
     files_missing: List[str] = []
 
     for rtl_rel in match.rtl_files:
+        if official_only:
+            dest_path = dest_dir / Path(rtl_rel).name
+            dest_path.write_bytes(official_payloads[rtl_rel])
+            files_copied.append({
+                "rtl_rel": rtl_rel,
+                "src": f"{match.canonical_url}@{(clone_pin or {}).get('checked_out_sha')}:{rtl_rel}",
+                "dest": str(dest_path),
+                "sha256": _sha256_file(dest_path),
+                "size_bytes": dest_path.stat().st_size,
+            })
+            continue
         src_path = src_dir / rtl_rel
         if not src_path.is_file():
             # Try basename only — manifest paths may differ from local mirror
@@ -314,11 +387,13 @@ def pull_catalog_ip(match: CatalogMatch,
         "canonical_url": match.canonical_url,
         "canonical_commit": match.canonical_commit,
         "pull_method": pull_method,
-        "source_dir": str(src_dir),
+        "source_dir": (f"{match.canonical_url}@{(clone_pin or {}).get('checked_out_sha')}"
+                       if official_only else str(src_dir)),
         "spec_match_pattern": match.matched_pattern,
         "spec_match_confidence": match.confidence,
         "local_mirror_audit": mirror_audit,
         "clone_pin": clone_pin,
+        "errata_applied": errata_applied,
         "files_copied": files_copied,
         "files_missing": files_missing,
         "n_files_copied": len(files_copied),
@@ -356,6 +431,7 @@ def pull_catalog_ip(match: CatalogMatch,
             "license": match.license,
             "commit_pinned": match.canonical_commit,
             "commit_checked_out": (clone_pin or {}).get("checked_out_sha"),
+            "errata_applied": errata_applied,
             "license_verified_against_mirror": (
                 None if mirror_audit is None
                 else mirror_audit.get("license_check", {}).get("match")),
@@ -539,11 +615,13 @@ def _git_clone_to_cache(match: CatalogMatch) -> tuple[Optional[Path], Dict[str, 
 
 
 def pull_all_catalog_matches(project: Path,
-                              matches: List[CatalogMatch]) -> Dict[str, Any]:
+                              matches: List[CatalogMatch],
+                              *, official_only: bool = False) -> Dict[str, Any]:
     """Pull every matching IP, return aggregated audit + update declaration.json."""
     audits: List[Dict[str, Any]] = []
     for m in matches:
-        audit = pull_catalog_ip(m, project)
+        audit = (pull_catalog_ip(m, project, official_only=True)
+                 if official_only else pull_catalog_ip(m, project))
         audits.append(audit)
 
     # Aggregate license set
@@ -607,6 +685,17 @@ def pull_all_catalog_matches(project: Path,
         mf["reused_ip"] = True
         mf["ip_list"] = ip_list
         mf["rtl_strategy"] = "catalog_lookup_plus_ai_glue"
+        if official_only:
+            mf["source_pins"] = [
+                {"ip_name": a["ip_name"], "version": a["version"],
+                 "canonical_url": a["canonical_url"],
+                 "canonical_commit": a["canonical_commit"],
+                 "checked_out_sha": (a.get("clone_pin") or {}).get("checked_out_sha"),
+                 "errata_applied": a.get("errata_applied", []),
+                 "files_sha256": {f["rtl_rel"]: f["sha256"]
+                                  for f in a.get("files_copied", [])}}
+                for a in audits if a.get("status") == "PASS"
+            ]
         mf.setdefault("generated_by", "ip_catalog_pull")
         manifest_path.write_text(json.dumps(mf, indent=2))
 

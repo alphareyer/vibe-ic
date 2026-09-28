@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _shape_refusal  # noqa: E402  (#991)
+from _prose_polarity import is_denied  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +82,7 @@ class CatalogMatch:
     # when instantiating the IP for synthesis (sim-only generate blocks
     # with PLI/system tasks are the canonical case).
     synth_safe_params: List[Dict[str, Any]] = field(default_factory=list)
+    errata: List[Dict[str, Any]] = field(default_factory=list)
     # #187 (BENCHMARK INTEGRITY) — set when this catalog entry would hand back
     # the IC-under-test's OWN reference design (its top/name intersects the IC
     # identity) rather than a leaf COMPONENT IP. Such an entry is REFUSED by
@@ -1283,7 +1285,7 @@ def _is_soc_top(manifest: Dict[str, Any]) -> bool:
 #:   synth_safe_params  `synth_param_overrides()` returns `{}`, so the glue
 #:                      author instantiates the IP with none of the pins the
 #:                      manifest says synthesis needs.
-_MANIFEST_LIST_FIELDS = ("rtl_files", "depends_on", "synth_safe_params")
+_MANIFEST_LIST_FIELDS = ("rtl_files", "depends_on", "synth_safe_params", "errata")
 
 
 def _shape_refusals_in(m: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1325,6 +1327,7 @@ def _manifest_to_match(m: Dict[str, Any], pattern: str,
             m.get("synth_safe_params", [])
             if isinstance(m.get("synth_safe_params"), list) else []
         ),
+        errata=m.get("errata", []) if isinstance(m.get("errata"), list) else [],
         shape_refusals=_shape_refusals_in(m),
     )
 
@@ -1486,6 +1489,55 @@ def _declared_origin_idents(facts: Dict[str, Any]) -> set:
     return out
 
 
+_REUSE_VLNV = re.compile(
+    r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+):"
+    r"([A-Za-z0-9_.-]+):(v?[0-9]+(?:\.[0-9]+)+)(?![A-Za-z0-9_-])"
+)
+
+
+def versioned_reuse_evidence(facts: Dict[str, Any],
+                             match: CatalogMatch) -> Tuple[bool, str]:
+    """Require an input-declared core, upstream identity, and exact version.
+
+    FuseSoC VLNV is a fixed-format source declaration, not free-form prose:
+    vendor:repository:module:version. The repository must identify the
+    catalog's official upstream and the version must equal its manifest pin.
+    A catalog predicate by itself never authorizes a fetch.
+    """
+    source = str((facts or {}).get("_full_text") or "")
+    name = str(match.ip_name or "").lower()
+    upstream = _norm_ident(match.canonical_url)
+    words = set(re.findall(r"[A-Za-z0-9_.-]+", source.lower()))
+    if not name or name not in words:
+        return False, f"IP_REUSE_NAME_UNDECLARED: {match.ip_name}"
+    if not upstream or not match.version or not match.canonical_commit:
+        return False, f"IP_REUSE_SOURCE_UNPINNED: {match.ip_name}"
+    own = []
+    denied = False
+    for line in source.splitlines():
+        for _vendor, repo, module, version in _REUSE_VLNV.findall(line):
+            if repo.lower() != upstream or name not in (repo.lower(), module.lower()):
+                continue
+            # Generated L-doc JSON wraps the whole record in braces; the
+            # default bracket blanking would erase its denial along with it.
+            if is_denied(line, ignore_bracketed=False):
+                denied = True
+                continue
+            if not re.search(r"\b(?:reuse|reused|source|from)\b|來源|沿用|引用|必含",
+                             line, re.IGNORECASE):
+                continue
+            own.append((repo.lower(), module.lower(), version.removeprefix("v")))
+    if not own:
+        if denied:
+            return False, f"IP_REUSE_DECLARATION_DENIED: {match.ip_name}"
+        return False, f"IP_REUSE_SOURCE_OR_VERSION_UNDECLARED: {match.ip_name}"
+    if match.version not in {version for _, _, version in own}:
+        versions = sorted({version for _, _, version in own})
+        return False, (f"IP_REUSE_VERSION_MISMATCH: {match.ip_name} input "
+                       f"{versions} versus catalog {match.version}")
+    return True, f"IP_REUSE_VERSIONED: {match.ip_name}@{match.version} from {upstream}"
+
+
 def declared_reuse_idents(project: Path) -> set:
     """The identity tokens the INPUT DOCS name as REUSED IP. RB2-01 (#2063).
 
@@ -1566,7 +1618,8 @@ def _origin_match_reason(mt: CatalogMatch, manifest: Dict[str, Any],
 
 
 def _self_match_reason(mt: CatalogMatch, manifest: Dict[str, Any],
-                       ic_ident: set, origin_idents: set | None = None) -> str:
+                       ic_ident: set, origin_idents: set | None = None,
+                       facts: Optional[Dict[str, Any]] = None) -> str:
     """Non-empty reason when the catalog entry would hand back the IC's OWN
     design — either because its top/name identity intersects the IC identity
     (#187), or because its upstream repo is the origin the input docs state
@@ -1576,6 +1629,10 @@ def _self_match_reason(mt: CatalogMatch, manifest: Dict[str, Any],
         return ("catalog entry supplies the IC-under-test's OWN design (shared "
                 f"top/identity token(s): {', '.join(inter)}) — offering it would "
                 "hand back the reference design; REFUSED (#187 benchmark integrity)")
+    # An explicit, versioned component declaration distinguishes a reusable
+    # leaf from an origin citation. The top-identity refusal above still wins.
+    if versioned_reuse_evidence(facts or {}, mt)[0]:
+        return ""
     return _origin_match_reason(mt, manifest, origin_idents or set())
 
 
@@ -1628,7 +1685,7 @@ def query_catalog(project: Path,
                 print(f"ip_catalog_query: REFUSED unreadable manifest shape "
                       f"{ip_name!r} — {_shape_reason}", file=sys.stderr)
                 continue
-            reason = _self_match_reason(mt, m, ic_ident, origin_idents)
+            reason = _self_match_reason(mt, m, ic_ident, origin_idents, facts)
             if reason:
                 mt.self_match = True
                 mt.self_match_reason = reason
@@ -1668,7 +1725,7 @@ def query_catalog(project: Path,
         # #187 — the self-match guard applies to auto-included dependencies too:
         # a dependency that is itself the IC's own design is refused.
         _dep_reason = _self_match_reason(dep_match, dm, ic_ident,
-                                         origin_idents)
+                                         origin_idents, facts)
         if _dep_reason:
             dep_match.self_match = True
             dep_match.self_match_reason = _dep_reason
