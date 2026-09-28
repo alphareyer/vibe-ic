@@ -97,51 +97,92 @@ def _route_image(tool: str, image: str | None) -> str | None:
     return image or default_image()
 
 
-#: Every tool run here has a deadline (owner rule). Seconds; overridable per
-#: host through the environment, never unbounded.
-DEADLINE_ENV = "VIBEIC_P0_FRONTEND_TIMEOUT_S"
-DEFAULT_DEADLINE_S = 900
+#: Every tool run here is SUPERVISED (owner rule: every run gets a deadline;
+#: #2051: a long EDA tool is stopped for making NO PROGRESS, never for taking
+#: long). `_watchdog.run_host_supervised` kills a run whose whole process tree
+#: shows no CPU / output progress for the stall grace; a wall clock remains
+#: only as the BACKSTOP (GNU `timeout` around the tool), for a tool that burns
+#: CPU forever. Both are seconds, overridable per host through the environment.
+STALL_ENV = "VIBEIC_P0_FRONTEND_STALL_S"
+DEADLINE_ENV = "VIBEIC_P0_FRONTEND_BACKSTOP_S"
+DEFAULT_DEADLINE_S = 14_400
+#: GNU `timeout`'s exit code when the backstop fires.
+_BACKSTOP_RC = 124
+_KILL_GRACE_S = 30
 
 
-def _deadline_s() -> int:
+def _env_seconds(name: str, default: float) -> float:
     try:
-        value = int(os.environ.get(DEADLINE_ENV, DEFAULT_DEADLINE_S))
+        value = float(os.environ.get(name, default))
     except (TypeError, ValueError):
-        value = DEFAULT_DEADLINE_S
-    return value if value > 0 else DEFAULT_DEADLINE_S
+        value = default
+    return value if value > 0 else default
+
+
+def _deadline_s() -> float:
+    """The wall-clock BACKSTOP, in seconds."""
+    return _env_seconds(DEADLINE_ENV, DEFAULT_DEADLINE_S)
+
+
+def _stall_s() -> float:
+    import _watchdog as _wd
+    return _env_seconds(STALL_ENV, _wd.DEFAULT_STALL_GRACE_S)
+
+
+class ToolNotMeasured(RuntimeError):
+    """The tool run measured nothing: it STALLED (no progress for the grace)
+    or hit the wall-clock BACKSTOP. An execution error, never a finding."""
+
+    def __init__(self, tool: str, how: str):
+        super().__init__(f"{tool} {how}")
+        self.tool, self.how = tool, how
 
 
 def _invoke(tool: str, args: list[str], project: Path,
             image: str | None) -> subprocess.CompletedProcess[str]:
-    """Run `tool` once, bounded by `_deadline_s()`.
+    """Run `tool` once under progress supervision, with a wall-clock backstop.
 
-    A run past its deadline raises `subprocess.TimeoutExpired`; on the docker
-    path the NAMED container is killed first, because killing the client does
-    not stop a `--rm` container."""
-    container = None
+    On the docker path the container is NAMED for this invocation, its CPU is
+    read from inside it (`_docker_watchdog.ephemeral_container_cpu_probe`), and
+    a stall reaps it by that name (`ephemeral_container_reap`) -- killing the
+    client alone would leave a `--rm` container holding its cores. A stall or
+    a fired backstop raises `ToolNotMeasured`."""
+    import _watchdog as _wd
+    import _docker_watchdog as _dwd
+    backstop = ["timeout", "-k", str(_KILL_GRACE_S), f"{_deadline_s():g}"]
+    kw: dict = {}
     if shutil.which(tool):
-        command = [tool, *args]
+        command = ([*backstop, tool, *args] if shutil.which("timeout")
+                   else [tool, *args])
     elif shutil.which("docker"):
         # Phase 2 needs only the released EDA image's tool binaries. LibreLane
         # CLI capability is neither requested nor assumed here.
         image = image or default_image()
         root = str(project.resolve())
-        container = f"vibeic-p0-{tool}-{os.getpid()}-{os.urandom(4).hex()}"
+        container = _dwd.ephemeral_container_name(f"vibeic_p0_{tool}")
         command = ["docker", "run", "--rm", "--name", container,
                    *_dmem.docker_memory_flags(),
                    "--network", "none",
-                   "-v", f"{root}:{root}:ro", "--entrypoint", tool,
-                   image, *args]
+                   "-v", f"{root}:{root}:ro", "--entrypoint", "timeout",
+                   image, *backstop[1:], tool, *args]
+        kw = {"kill": _dwd.ephemeral_container_reap(container),
+              "cpu_probe": _dwd.ephemeral_container_cpu_probe(container)}
     else:
         raise FileNotFoundError(f"{tool} and docker unavailable")
-    try:
-        return subprocess.run(command, cwd=project, capture_output=True,
-                              text=True, check=False, timeout=_deadline_s())
-    except subprocess.TimeoutExpired:
-        if container:
-            subprocess.run(["docker", "kill", container], capture_output=True,
-                           text=True, check=False, timeout=60)
-        raise
+    res = _wd.run_host_supervised(command, cwd=str(project),
+                                  stall_grace_s=_stall_s(), **kw)
+    if res.outcome == "launch_error":
+        raise FileNotFoundError(f"{tool}: could not be launched")
+    if res.outcome == "stalled" or res.rc == _wd.RC_STALLED:
+        raise ToolNotMeasured(tool, f"made no progress for {_stall_s():g} s "
+                                    f"({STALL_ENV}) and was stopped as STALLED")
+    wrapped = command[0] == "timeout" or (
+        "--entrypoint" in command
+        and command[command.index("--entrypoint") + 1] == "timeout")
+    if res.rc == _BACKSTOP_RC and wrapped:
+        raise ToolNotMeasured(tool, f"hit the {_deadline_s():g} s wall-clock "
+                                    f"backstop ({DEADLINE_ENV})")
+    return _wd.completed_process(command, res)
 
 
 #: FX_P2 — slang's declaration-order opt-out, and the disclosure that names it.
@@ -382,15 +423,13 @@ def check(project: Path, image: str | None = None) -> dict:
     except _eda_pin.ImageNotResolvable as exc:
         result["findings"].append(f"tool invocation refused: {exc}")
         return result
-    except subprocess.TimeoutExpired as exc:
-        # EXECUTION_ERROR, never retried: a front end past its deadline
-        # measured nothing, and a relaxed retry would not change that.
-        cmd = [str(c) for c in (exc.cmd or ["?"])]
-        tool = (cmd[cmd.index("--entrypoint") + 1]
-                if "--entrypoint" in cmd[:-1] else Path(cmd[0]).name)
-        result["findings"].append(
-            f"tool invocation timed out: {tool} exceeded its "
-            f"{exc.timeout:g} s deadline ({DEADLINE_ENV}) -- EXECUTION_ERROR")
+    except ToolNotMeasured as exc:
+        # NOT A FINDING. A front end that stalled or hit its backstop measured
+        # nothing, so it is NOT_MEASURED(EXECUTION_ERROR) -- never a FAIL, and
+        # never retried (a relaxed retry would not change that).
+        result["not_measured"] = {
+            "reason_class": "EXECUTION_ERROR",
+            "why": f"tool invocation {exc}: nothing was measured"}
         return result
     except (FileNotFoundError, OSError) as exc:
         result["findings"].append(f"tool invocation unavailable: {exc}")
