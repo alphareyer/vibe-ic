@@ -248,7 +248,11 @@ def _b_producer_not_measured(root: Path) -> Path:
     proj = _project(root)
     rp = proj / "reports/phase3/si_mcf_sta.json"
     doc = json.loads(rp.read_text())
-    doc.update(verdict="NOT_MEASURED", error="active Liberty has no nom_voltage")
+    # The emitter returns before creating SPEFs/corners when the active
+    # Liberty has no voltage. Model that actual refusal, not a complete
+    # measurement whose verdict string alone was changed.
+    doc = {"program": doc["program"], "verdict": "NOT_MEASURED",
+           "error": "active Liberty has no nom_voltage"}
     rp.write_text(json.dumps(doc))
     return proj
 
@@ -536,6 +540,37 @@ def test_a_defect_outranks_a_missing_input_in_the_same_run(tmp_path):
     assert "NO_BOUNDED_SPEF" in cats and "FOLD_NOT_APPLIED" in cats, cats
     assert doc["verdict"] == "FAIL", doc["verdict"]
     assert r.returncode == G.RC_FAIL
+
+
+def _relabel_dropped_fold(root: Path) -> Path:
+    """Change only producer metadata; leave the measured SPEFs untouched."""
+    proj = _b_fold_not_applied(root)
+    rp = proj / "reports/phase3/si_mcf_sta.json"
+    doc = json.loads(rp.read_text())
+    doc.update(verdict="NOT_MEASURED", error="producer declined this scene")
+    rp.write_text(json.dumps(doc))
+    return proj
+
+
+def test_producer_relabel_cannot_hide_independent_fold_failure(tmp_path):
+    proj = _relabel_dropped_fold(tmp_path / "relabel")
+    r, doc = _run(proj)
+    assert r.returncode == G.RC_FAIL, (r.returncode, doc)
+    assert doc["verdict"] == "FAIL", doc
+    assert "FOLD_NOT_APPLIED" in _categories(doc), doc["findings"]
+    assert doc["summary"]["denominator"]["examined"] > 0
+
+
+def test_producer_relabel_preserves_step27_failure(tmp_path):
+    import flow_compliance_check as F
+    proj = _relabel_dropped_fold(tmp_path / "relabel_flow")
+    step = {"id": 27, "name": "Signal Integrity", "stage": "stage3",
+            "required_outputs": [],
+            "gate": {"optional_program_exit_zero": _step27_si_gate_spec()}}
+    result = F.check_step(proj, step, {})
+    assert result.status == "FAIL", result.reasons
+    doc = json.loads((proj / "reports/phase3/si_mcf_sta_check.json").read_text())
+    assert "FOLD_NOT_APPLIED" in _categories(doc), doc["findings"]
 
 
 def test_a_partial_run_that_proved_something_is_not_called_not_run(tmp_path):
