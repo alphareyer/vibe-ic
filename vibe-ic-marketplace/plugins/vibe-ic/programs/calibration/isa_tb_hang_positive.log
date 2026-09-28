@@ -1,0 +1,5 @@
+ISA_TB HANG cycles=20000000
+- /tmp/isaprod/e2e/w1/env/isa_tb.v:51: Verilog $finish
+- S i m u l a t i o n   R e p o r t: Verilator 5.053 devel
+- Verilator: $finish at 200ms; walltime 7.843 s; speed 25.500 ms/s
+- Verilator: cpu 7.843 s on 1 threads; allocated 6 MB

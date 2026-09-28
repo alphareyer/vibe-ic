@@ -6763,7 +6763,8 @@ def step_reused_ip_consume(project: Path,
         # Nothing to consume (rtl/ already populated OR design ships no build
         # RTL). Clean SKIP — the WAIVE-to-catalog-glue-author path is unchanged.
         return StepResult("reused_ip_consume", "NOT_APPLICABLE", time.time() - t0,
-                          res.get("reason", "no design-provided build RTL"),
+                          res.get("reason", "no design-provided build RTL")
+                          + _deviation_note(res),
                           extras=res, declared_by=res.get("reason", "the design ships no build RTL to consume"))
     # Provided RTL staged — now make a synthesizable top exist, mirroring
     # step_yosys_synth's EXACT resolution ORDER so we never bind a DIFFERENT
@@ -7055,8 +7056,18 @@ def step_reused_ip_consume(project: Path,
         "reused_ip_consume", _cone_status, time.time() - t0,
         f"Staged {len(res['staged'])} design-provided build-RTL file(s) into "
         f"phase2/stage1/rtl/ so synth no longer halts on empty rtl/."
-        + _ct + _sv + _cone_note,
+        + _ct + _sv + _cone_note + _deviation_note(res),
         extras=res)
+
+
+def _deviation_note(res: dict) -> str:
+    """One line per disclosed reused-IP deviation (`reused_ip_erratum`), so the
+    flow record of the staging step says the staged RTL is not the input."""
+    lines = list(res.get("deviation_disclosures") or [])
+    for row in (res.get("errata") or {}).get("rows") or []:
+        if row.get("status") == "REFUSED":
+            lines.append(f"erratum {row.get('why')}")
+    return "".join(f" DISCLOSED: {x}." for x in lines)
 
 
 # ── THE AUTHORING HAND-OFF MUST SERVE BYTES, NOT A NAME (vibe-ic#2193) ───
@@ -10109,6 +10120,26 @@ def step_step4_functional_evidence(project: Path,
     oracle_detail = (oracle_out or oracle_err).strip()
     outputs = [str(vacuous_report.relative_to(project)),
                str(oracle_report.relative_to(project))]
+    # FX_P2 — the gate's NOT_MEASURED (rc 2, and its REPORT says so with a
+    # reason class): declared cases the design input supplies no stimulus for.
+    # The report decides, not the bare rc — rc 2 is also the gate's VACUOUS.
+    _oracle_verdict, _oracle_reason = "", None
+    try:
+        _orep = json.loads(oracle_report.read_text(errors="replace"))
+        _oracle_verdict = str(_orep.get("verdict") or "")
+        _oracle_reason = _V.step_reason_for_gate_reason(
+            _orep.get("reason_class"))
+    except (OSError, ValueError, AttributeError):
+        pass
+    if (oracle_rc == 2 and _oracle_verdict == "NOT_MEASURED"
+            and _oracle_reason is not None):
+        return StepResult(
+            "step4_functional_evidence", "NOT_MEASURED", time.time() - t0,
+            f"cpu functional evidence: {oracle_detail} [{instr_detail}]",
+            outputs,
+            extras={"fallback_skill": "testbench-gen",
+                    "program_first": "professional_tb_gen"},
+            reason_class=_oracle_reason)
     if oracle_rc != 0:
         return StepResult(
             "step4_functional_evidence", "FAIL", time.time() - t0,
@@ -22292,6 +22323,170 @@ def step_verilator_coverage(project: Path, top_name: str = "",
         [str(out_path.relative_to(project))])
 
 
+def _declaration_top_args(project: Path) -> List[str]:
+    """`--supplied-top <top>` for the contract emitter, or nothing: the top
+    `_v661_resolve_dut_module` resolves (synth-top override, then L9.top_module,
+    then the unique graph root), never the `--top-name` default."""
+    try:
+        _l9t = _rcvar_l9_top_ports(project)
+        _top = _v661_resolve_dut_module(project, "",
+                                        _l9t[0] if _l9t else None)
+        return ["--supplied-top", _top] if _top else []
+    except Exception:  # noqa: BLE001 — the record then says the top is unknown
+        return []
+
+
+#: Where the design's option selection is published.
+DECLARATION_REL = "plugin_output/declaration.json"
+
+
+def _d1_expert_selection_args(project: Path) -> Tuple[List[str], Dict[str, Any]]:
+    """Return validated D1 expert menu choices as contract-emitter arguments.
+
+    The D1 answer is the documented IC-Expert hand-off, not a free-form
+    declaration.  It becomes selectable only after the Phase-1 track has
+    consumed its exact bytes; a pending, stale, malformed, or mismatched answer
+    must not silently choose a Phase-2 option.
+    """
+    project = Path(project)
+    pack = project / "reports/audit/phase1/expert_parse_track_pack"
+    answer_path = pack / "l_doc_expectations.json"
+    report_path = project / "reports/audit/phase1/expert_parse_track.json"
+    rec: Dict[str, Any] = {"status": "ABSENT", "answer": str(answer_path)}
+    if not answer_path.is_file() or not report_path.is_file():
+        return [], rec
+    try:
+        answer_raw = answer_path.read_bytes()
+        answer = json.loads(answer_raw.decode("utf-8"))
+        report = json.loads(report_path.read_text())
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        rec.update(status="REFUSED", reason=f"cannot read D1 selection: {exc}")
+        return [], rec
+    execution = report.get("execution") if isinstance(report, dict) else None
+    ai = report.get("ai_subtrack") if isinstance(report, dict) else None
+    reported_sha = ai.get("answer_sha256") if isinstance(ai, dict) else None
+    actual_sha = hashlib.sha256(answer_raw).hexdigest()
+    if not (isinstance(execution, dict)
+            and execution.get("observed_ai_status") == "CONSUMED"
+            and isinstance(ai, dict) and ai.get("status") == "CONSUMED"
+            and reported_sha == actual_sha):
+        rec.update(status="REFUSED", reason="D1 answer was not consumed over its current bytes",
+                   answer_sha256=actual_sha, reported_sha256=reported_sha)
+        return [], rec
+    selection = answer.get("declaration_selection") if isinstance(answer, dict) else None
+    if selection is None:
+        return [], rec
+    if not (isinstance(selection, dict) and selection
+            and all(isinstance(k, str) and k.strip() and v is not None
+                    for k, v in selection.items())):
+        rec.update(status="REFUSED", reason="D1 declaration_selection must be a non-empty object of named values")
+        return [], rec
+    rec.update(status="CONSUMED", fields=selection, answer_sha256=actual_sha)
+    args: List[str] = []
+    for key in sorted(selection):
+        args += ["--set", f"{key}={json.dumps(selection[key], separators=(',', ':'))}"]
+    return args, rec
+
+
+def declaration_before_step4(project: Path) -> Dict[str, Any]:
+    """Emit the design's declaration BEFORE Step 4, from the SAME producer.
+
+    FX_P2_DECLARATION_BEFORE_STEP4. Step 4's gate narrows the conditional L10
+    cases (`applies_when`, R-0915-102) against the design's own selection in
+    `plugin_output/declaration.json`, but `step_arith_declaration_emit` runs
+    long after Step 4, so on a first run the gate could never see a selection
+    the producer was already able to derive -- only a re-run tree could. The
+    contract-driven producer (`spec_declaration_emit`) reads only the design
+    input (the spec's own designations), the staged / authored RTL (`key =
+    value` comment blocks) and a prior declaration; nothing Step 4 or
+    synthesis produces. So it is asked here too, exactly as the later step
+    asks it.
+
+    FAIL-CLOSED, AS THE PRODUCER IS. When it cannot determine every REQUIRED
+    choice it writes nothing, and nothing changes for Step 4. MEASURED on a
+    fresh subservient copy (input only, 2026-09-28): 7 REQUIRED choices
+    undetermined -- `isa_extensions` is a menu its spec never designates, and
+    the input says the plugin declares it -- so no declaration exists before
+    Step 4 or after it, and the conditional cases stay where R-0915-102 puts
+    them. Returns what happened, for Step 4's record and for the later
+    agreement check (`declaration_disagreement`)."""
+    out_p = Path(project) / DECLARATION_REL
+    prog = PROGRAMS_DIR / "spec_declaration_emit.py"
+    rec: Dict[str, Any] = {"producer": "spec_declaration_emit",
+                           "emitted": False}
+    if not prog.is_file():
+        rec["reason"] = "the contract-driven producer is not shipped"
+        return rec
+    expert_args, expert_selection = _d1_expert_selection_args(project)
+    rec["d1_expert_selection"] = expert_selection
+    try:
+        cp = subprocess.run([sys.executable, str(prog), str(project),
+                             *_declaration_top_args(project), *expert_args],
+                            capture_output=True, text=True, timeout=120)
+    except Exception as exc:  # noqa: BLE001 — named in the record
+        rec["reason"] = f"could not run: {type(exc).__name__}: {exc}"
+        return rec
+    rec["rc"] = cp.returncode
+    if cp.returncode == 0 and out_p.is_file():
+        try:
+            fields = json.loads(out_p.read_text())
+        except (OSError, ValueError) as exc:
+            rec["reason"] = f"wrote an unreadable {DECLARATION_REL}: {exc}"
+            return rec
+        if isinstance(fields, dict):
+            rec.update(emitted=True, fields=fields)
+            return rec
+    rec["reason"] = ((cp.stdout or cp.stderr or "").strip()
+                     .replace("\n", " ")[:300]
+                     or f"rc={cp.returncode}, no declaration written")
+    return rec
+
+
+def declaration_disagreement(early: Dict[str, Any],
+                             late: Any) -> List[str]:
+    """Every field the pre-Step-4 declaration stated that the later emission
+    drops or changes. Empty when the later one is identical or a superset --
+    the only relation in which Step 4 judged against the same selection the
+    run publishes."""
+    if not isinstance(late, dict):
+        return [f"the later {DECLARATION_REL} is absent or unreadable"]
+    out: List[str] = []
+    for key, value in early.items():
+        if key not in late:
+            out.append(f"{key}: dropped (was {value!r})")
+        elif late[key] != value:
+            out.append(f"{key}: {value!r} -> {late[key]!r}")
+    return out
+
+
+def _refuse_a_disagreeing_declaration(row: "StepResult", early: Any,
+                                      project: Path) -> "StepResult":
+    """Row 33 against the pre-Step-4 emission: a superset stands; anything
+    else REFUSES, naming each field, because Step 4 was judged against a
+    selection this run no longer publishes."""
+    if not (isinstance(early, dict) and early.get("emitted")):
+        return row
+    try:
+        late = json.loads((Path(project) / DECLARATION_REL).read_text())
+    except (OSError, ValueError):
+        late = None
+    diff = declaration_disagreement(early.get("fields") or {}, late)
+    if not diff:
+        row.detail += ("; agrees with the declaration emitted before Step 4 "
+                       "(identical or a superset)")
+        return row
+    return StepResult(
+        "arith_declaration_emit", "FAIL", row.duration_s,
+        "DECLARATION_DISAGREES_WITH_STEP4: the declaration emitted before "
+        "Step 4 and the one emitted now differ, so Step 4 judged its "
+        "conditional cases against a selection this run no longer publishes: "
+        + "; ".join(diff[:8]) + (f" (+{len(diff) - 8} more)"
+                                 if len(diff) > 8 else ""),
+        row.output_files,
+        extras={"declaration_disagreement": diff,
+                "finding": "DECLARATION_DISAGREES_WITH_STEP4"})
+
+
 def step_arith_declaration_emit(project: Path) -> StepResult:
     """Run the deterministic `plugin_output/declaration.json` emitter.
 
@@ -22355,15 +22550,7 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
     """
     t0 = time.time()
     out_p = project / "plugin_output" / "declaration.json"
-    _top_args: List[str] = []
-    try:
-        _l9t = _rcvar_l9_top_ports(project)
-        _top = _v661_resolve_dut_module(project, "",
-                                        _l9t[0] if _l9t else None)
-        if _top:
-            _top_args = ["--supplied-top", _top]
-    except Exception:  # noqa: BLE001 — the record then says the top is unknown
-        _top_args = []
+    _top_args = _declaration_top_args(project)
 
     def _fields_of(p: Path) -> str:
         try:
@@ -24008,6 +24195,58 @@ def run_is_bounded(entry_site, exit_pruned, site_order) -> bool:
     return False
 
 
+def _publish_record_before_audit(project: Path, plan: List["StepResult"],
+                                 ic_class: str, evidence: Any) -> Path:
+    """Publish THIS run's phase-2 record before the final audit reads the tree.
+
+    FX_P2 — the audit judges `reports/orchestrator/phase2_one_shot.json`, and
+    this runner used to write that record only AFTER the audit. So the audit
+    judged the PREVIOUS run's record. MEASURED on subservient (8HD-4,
+    2026-09-28, a fresh copy of an earlier run's tree): final_audit FAILed
+    `project_outputs_in_tree_check` on "2 dangling" `/tmp/vibeic-rtl-step-*/sub`
+    references -- both in the earlier run's record, written by code that cut a
+    stage path mid-token -- and phase 2 halted. This run's own record, written
+    25 s later, carried none, and the same gate passed on the finished tree.
+
+    Same shape as the tail's pre-audit `emit_final_summary`: written once before
+    the audit so the audit reads this run, and again after it by the tail, so
+    the record carries the audit's own row. The pre-audit copy says what it is
+    (`final_audit_pending`), and goes through the ONE write seam.
+
+    ITS VERDICT IS FAIL, NOT THE PRE-AUDIT AGGREGATE. Every reader of this
+    file takes a `verdict` written in this invocation as phase 2's account of
+    itself: the front door's `_row_verdict` reads it without looking at rc, and
+    `phase23_one_shot_runner` halts only on "FAIL". A green aggregate here would
+    survive a process that dies during the audit or the tail (an uncaught
+    exception, rc 1; the stall watchdog, rc 2; an OOM or deadline kill) as a
+    phase-2 PASS the audit never confirmed -- and without the tail's
+    ai_judgements demotion. Before this record existed, that death left no
+    fresh record and R-0915-160 turned the rc into FAIL. FAIL here keeps that:
+    the copy says why, the tail overwrites it with the real verdict, and a run
+    that never reaches the tail stays FAIL wherever it is read."""
+    out = _pl.report_path(project, "phase2_one_shot.json")
+    _write_phase2_report(out, {
+        "project": str(project),
+        "ic_class": ic_class,
+        "ic_class_evidence": evidence,
+        "steps": [asdict(s) for s in plan],
+        "verdict": "FAIL",
+        "verdict_reason": FINAL_AUDIT_PENDING_REASON,
+        "pre_audit_aggregate": _aggregate_verdict(plan),
+        "final_audit_pending": True,
+    }, project)
+    return out
+
+
+#: Why the pre-audit copy of the record is FAIL. Read by the front door
+#: (`vibe_ic_one_shot_runner._row_verdict`) when the record is still pending.
+FINAL_AUDIT_PENDING_REASON = (
+    "final audit pending: this copy was published before the phase-2 final "
+    "audit so the audit judges this run's record; the audit and the tail had "
+    "not completed when it was written, so it is no verdict of phase 2 -- the "
+    "tail overwrites it, and a run that never reaches the tail stays FAIL")
+
+
 def _audit_after_declared_producers(project: Path, skip_analog: bool) -> StepResult:
     """Run declared producers before the audit; their rc is a recorded fact.
 
@@ -25042,10 +25281,17 @@ def main() -> int:
     # stack paths have had their chance to create functional evidence, and
     # before synthesis/backend work can be mistaken for a certified Phase-2
     # result. The StepResult is blocking in the aggregate verdict.
+    _early_declaration: Optional[Dict[str, Any]] = None
     if _after_exit("sim"):
         plan.append(_exit_sentinel("step4_functional_evidence"))
     else:
-        plan.append(step_step4_functional_evidence(project, ic_class))
+        # FX_P2_DECLARATION_BEFORE_STEP4 — the design's selection, if the
+        # producer can derive it yet, exists before Step 4 reads it.
+        _early_declaration = declaration_before_step4(project)
+        _s4 = step_step4_functional_evidence(project, ic_class)
+        _s4.extras["declaration_before_step4"] = {
+            k: v for k, v in _early_declaration.items() if k != "fields"}
+        plan.append(_s4)
 
     # Step 4 — yosys offline synth (Docker fallback if host yosys absent)
     # PRE-FLIGHT (canonical step 9). Step 9 also declares step 7's
@@ -25263,7 +25509,8 @@ def main() -> int:
             "It is derived from the design's own RTL and the oracle TB's measured "
             "framing, not from any step's state, and the manifests this run does "
             "owe read it.")
-    plan.append(step_arith_declaration_emit(project))
+    plan.append(_refuse_a_disagreeing_declaration(
+        step_arith_declaration_emit(project), _early_declaration, project))
     # MEASURE coverage before the manifests/audit read it. Nothing used to run
     # the measurement at all — see step_verilator_coverage's docstring.
     if _after_exit("sim"):
@@ -25352,6 +25599,7 @@ def main() -> int:
                 "the gate reports every step's YAML checker re-emits"),
             declared_by=" ".join(_window_flags)))
     else:
+        _publish_record_before_audit(project, plan, ic_class, evidence)
         plan.append(_audit_after_declared_producers(project, args.skip_analog))
 
     # vibe-ic#2080 — the run's report card, asked by a gate that nothing ran.

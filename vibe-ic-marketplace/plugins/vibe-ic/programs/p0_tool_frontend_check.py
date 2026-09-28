@@ -97,23 +97,242 @@ def _route_image(tool: str, image: str | None) -> str | None:
     return image or default_image()
 
 
+#: Every tool run here is SUPERVISED (owner rule: every run gets a deadline;
+#: #2051: a long EDA tool is stopped for making NO PROGRESS, never for taking
+#: long). `_watchdog.run_host_supervised` kills a run whose whole process tree
+#: shows no CPU / output progress for the stall grace; a wall clock remains
+#: only as the BACKSTOP (GNU `timeout` around the tool), for a tool that burns
+#: CPU forever. Both are seconds, overridable per host through the environment.
+STALL_ENV = "VIBEIC_P0_FRONTEND_STALL_S"
+DEADLINE_ENV = "VIBEIC_P0_FRONTEND_BACKSTOP_S"
+DEFAULT_DEADLINE_S = 14_400
+#: GNU `timeout`'s exit code when the backstop fires.
+_BACKSTOP_RC = 124
+_KILL_GRACE_S = 30
+
+
+def _env_seconds(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return value if value > 0 else default
+
+
+def _deadline_s() -> float:
+    """The wall-clock BACKSTOP, in seconds."""
+    return _env_seconds(DEADLINE_ENV, DEFAULT_DEADLINE_S)
+
+
+def _stall_s() -> float:
+    import _watchdog as _wd
+    return _env_seconds(STALL_ENV, _wd.DEFAULT_STALL_GRACE_S)
+
+
+class ToolNotMeasured(RuntimeError):
+    """The tool run measured nothing: it STALLED (no progress for the grace)
+    or hit the wall-clock BACKSTOP. An execution error, never a finding."""
+
+    def __init__(self, tool: str, how: str):
+        super().__init__(f"{tool} {how}")
+        self.tool, self.how = tool, how
+
+
 def _invoke(tool: str, args: list[str], project: Path,
             image: str | None) -> subprocess.CompletedProcess[str]:
+    """Run `tool` once under progress supervision, with a wall-clock backstop.
+
+    On the docker path the container is NAMED for this invocation, its CPU is
+    read from inside it (`_docker_watchdog.ephemeral_container_cpu_probe`), and
+    a stall reaps it by that name (`ephemeral_container_reap`) -- killing the
+    client alone would leave a `--rm` container holding its cores. A stall or
+    a fired backstop raises `ToolNotMeasured`."""
+    import _watchdog as _wd
+    import _docker_watchdog as _dwd
+    backstop = ["timeout", "-k", str(_KILL_GRACE_S), f"{_deadline_s():g}"]
+    kw: dict = {}
     if shutil.which(tool):
-        command = [tool, *args]
+        command = ([*backstop, tool, *args] if shutil.which("timeout")
+                   else [tool, *args])
     elif shutil.which("docker"):
         # Phase 2 needs only the released EDA image's tool binaries. LibreLane
         # CLI capability is neither requested nor assumed here.
         image = image or default_image()
         root = str(project.resolve())
-        command = ["docker", "run", "--rm", *_dmem.docker_memory_flags(),
+        container = _dwd.ephemeral_container_name(f"vibeic_p0_{tool}")
+        command = ["docker", "run", "--rm", "--name", container,
+                   *_dmem.docker_memory_flags(),
                    "--network", "none",
-                   "-v", f"{root}:{root}:ro", "--entrypoint", tool,
-                   image, *args]
+                   "-v", f"{root}:{root}:ro", "--entrypoint", "timeout",
+                   image, *backstop[1:], tool, *args]
+        kw = {"kill": _dwd.ephemeral_container_reap(container),
+              "cpu_probe": _dwd.ephemeral_container_cpu_probe(container)}
     else:
         raise FileNotFoundError(f"{tool} and docker unavailable")
-    return subprocess.run(command, cwd=project, capture_output=True,
-                          text=True, check=False)
+    res = _wd.run_host_supervised(command, cwd=str(project),
+                                  stall_grace_s=_stall_s(), **kw)
+    if res.outcome == "launch_error":
+        raise FileNotFoundError(f"{tool}: could not be launched")
+    if res.outcome == "stalled" or res.rc == _wd.RC_STALLED:
+        raise ToolNotMeasured(tool, f"made no progress for {_stall_s():g} s "
+                                    f"({STALL_ENV}) and was stopped as STALLED")
+    wrapped = command[0] == "timeout" or (
+        "--entrypoint" in command
+        and command[command.index("--entrypoint") + 1] == "timeout")
+    if res.rc == _BACKSTOP_RC and wrapped:
+        raise ToolNotMeasured(tool, f"hit the {_deadline_s():g} s wall-clock "
+                                    f"backstop ({DEADLINE_ENV})")
+    return _wd.completed_process(command, res)
+
+
+#: FX_P2 — slang's declaration-order opt-out, and the disclosure that names it.
+DECL_RELAX_FLAG = "--allow-use-before-declare"
+DECL_RELAXED = "DECLARATION_ORDER_RELAXED"
+
+
+#: slang's own diagnostic grammar: `<file>:<line>:<col>: error: <message>`, and
+#: the ONE message the declaration-order retry may answer.
+_SLANG_ERROR = re.compile(r"^\S+:\d+:\d+: error: (.*)$", re.M)
+_SLANG_ERROR_AT = re.compile(r"^(\S+):\d+:\d+: error: (.*)$", re.M)
+_USE_BEFORE_DECLARE = re.compile(
+    r"^identifier '[^']+' used before its declaration$")
+_BUILD_FAILED = re.compile(r"^Build failed: (\d+) errors?,", re.M)
+
+
+def only_use_before_declare(log: str) -> bool:
+    """True only when slang refused SOLELY on use-before-declare.
+
+    At least one `error:` diagnostic, every one of them is slang's exact
+    "identifier '<x>' used before its declaration", and slang's own
+    `Build failed: N errors` agrees with that count -- so an error in another
+    grammar, a timeout, or a transcript with no diagnostic never qualifies."""
+    _calibration.assert_calibrated(
+        "p0_tool_frontend_check::only_use_before_declare")
+    errors = [m.group(1).strip() for m in _SLANG_ERROR.finditer(log or "")]
+    if not errors or not all(_USE_BEFORE_DECLARE.match(e) for e in errors):
+        return False
+    counts = [int(m.group(1)) for m in _BUILD_FAILED.finditer(log or "")]
+    return bool(counts) and counts[-1] == len(errors)
+
+
+def _is_reused_ip(project: Path) -> bool:
+    """The runner's `_is_reused_ip_project`, read through the SAME manifest
+    loader (SOURCE_MANIFEST reused_ip:true); False on any error."""
+    try:
+        import l9_rtl_pin_consistency_check as _l9
+        mf = _l9.load_source_manifest(project)
+        return bool(isinstance(mf, dict) and mf.get("reused_ip") is True)
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
+def _use_before_declare_files(log: str) -> list[str]:
+    """The file each slang use-before-declare diagnostic names, in order."""
+    return [m.group(1) for m in _SLANG_ERROR_AT.finditer(log or "")
+            if _USE_BEFORE_DECLARE.match(m.group(2).strip())]
+
+
+def _sha256(path: Path) -> str | None:
+    import hashlib
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _supplied_ip_sources(project: Path) -> dict[str, str]:
+    """`{resolved rtl path: where it came from}` for every RTL file that IS
+    the supplied IP, UNEDITED -- byte-identical to what the input delivered.
+
+    Two records say where a reused-IP file came from, and each is checked
+    against the bytes, not the name:
+      * SOURCE_MANIFEST `staged_from_input` (the design shipped its own RTL):
+        the staged file must equal the input file it names;
+      * provenance.jsonl `ip_catalog_pull` `outputs` (a catalog pull): the
+        file's sha256 must equal the one recorded when it was pulled.
+    A wrapper or chip_top the plugin authored appears in neither; a supplied
+    file the plugin has since edited no longer matches. Both stay FAILs and go
+    to repair."""
+    out: dict[str, str] = {}
+    try:
+        import l9_rtl_pin_consistency_check as _l9
+        mf = _l9.load_source_manifest(project) or {}
+    except Exception:                                        # noqa: BLE001
+        mf = {}
+    names: dict[str, list[Path]] = {}
+    for path in rtl_source_files(project):
+        names.setdefault(path.name, []).append(path)
+    for rel in mf.get("staged_from_input") or []:
+        if not isinstance(rel, str):
+            continue
+        src = project / rel
+        if not src.is_file():
+            continue
+        want = _sha256(src)
+        # Every RTL file with that leaf whose BYTES are the input's is that
+        # input's content; one the plugin edited, or wrote, is not.
+        for dst in names.get(Path(rel).name, []):
+            if want is not None and _sha256(dst) == want:
+                out[str(dst.resolve())] = f"staged_from_input {rel}"
+    prov = project / "provenance.jsonl"
+    try:
+        lines = prov.read_text(errors="replace").splitlines() \
+            if prov.is_file() else []
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("event") != "ip_catalog_pull":
+            continue
+        for rel, recorded in (entry.get("outputs") or {}).items():
+            dst = project / str(rel)
+            if not dst.is_file() or not isinstance(recorded, str):
+                continue
+            if recorded.split(":", 1)[-1] == _sha256(dst):
+                out[str(dst.resolve())] = (
+                    f"ip_catalog_pull {entry.get('ip')} {rel}")
+    return out
+
+
+def _all_in_supplied_ip(project: Path, log: str) -> tuple[bool, list[str]]:
+    """(every use-before-declare diagnostic is in an unedited supplied-IP
+    file, the files that are not)."""
+    files = _use_before_declare_files(log)
+    supplied = _supplied_ip_sources(project)
+    rtl = [str(p.resolve()) for p in rtl_source_files(project)]
+    outside = []
+    for name in files:
+        key = _diagnostic_file(name, rtl)
+        if key not in supplied and name not in outside:
+            outside.append(name)
+    return bool(files) and not outside, outside
+
+
+def _diagnostic_file(name: str, rtl: list[str]) -> str | None:
+    """The RTL file (resolved) a slang diagnostic names, or None.
+
+    slang prints the path relative to ITS working directory, which is the
+    image's, not ours: MEASURED in vibeic-eda 0.3.83 on a project under
+    /home/reyerchu, `../../home/reyerchu/<project>/phase2/stage1/rtl/
+    serv_state.v:111:52: error: ...`. So a relative path is matched by path
+    SUFFIX (its leading `..` segments dropped) against the files slang was
+    handed, and only a UNIQUE match counts; an absolute path is resolved."""
+    if Path(name).is_absolute():
+        try:
+            return str(Path(name).resolve())
+        except OSError:
+            return None
+    parts = [part for part in Path(os.path.normpath(name)).parts]
+    while parts and parts[0] == "..":
+        parts.pop(0)
+    if not parts:
+        return None
+    tail = "/" + "/".join(parts)
+    hits = [path for path in rtl if path.endswith(tail)]
+    return hits[0] if len(hits) == 1 else None
 
 
 def check(project: Path, image: str | None = None) -> dict:
@@ -136,14 +355,64 @@ def check(project: Path, image: str | None = None) -> dict:
     # write_json are the JsonHeader elaboration checks, without Phase-3 config.
     selected_top = f"--top {top} " if top else ""
     hierarchy = f"-top {top}" if top else "-auto-top"
-    script = ("read_slang --single-unit " + selected_top +
-              " ".join("-I " + directory for directory in include_dirs) +
-              " " + " ".join(names) +
-              "; hierarchy -check " + hierarchy + "; proc; write_json /dev/null")
+
+    def _script(extra: str = "") -> str:
+        return ("read_slang --single-unit " + extra + selected_top +
+                " ".join("-I " + directory for directory in include_dirs) +
+                " " + " ".join(names) +
+                "; hierarchy -check " + hierarchy +
+                "; proc; write_json /dev/null")
     import _eda_pin
     try:
         yosys_image = _route_image("yosys", image)
-        yosys = _invoke("yosys", ["-Q", "-T", "-p", script], project, yosys_image)
+        yosys = _invoke("yosys", ["-Q", "-T", "-p", _script()], project,
+                        yosys_image)
+        # Orchestrator ruling (2026-09-28), the D3 review's two conditions:
+        # (a) REUSED IP ONLY -- plugin-authored RTL that uses a name before
+        #     declaring it stays a FAIL and goes to repair, which can edit it;
+        # (b) only when EVERY error slang printed is its use-before-declare
+        #     diagnostic (`only_use_before_declare`) -- never on any other
+        #     refusal, a mix, or a run that printed none.
+        # FX_P2 — the D3 rule at this site. slang, like strict Icarus, refuses
+        # a net used before its declaration ("identifier 'x' used before its
+        # declaration"); Verilator and read_verilog accept it. MEASURED on
+        # subservient (reused serv 1.4.0): serv_state.v uses `trap_pending` at
+        # 111/118 and declares it at 223, and this gate FAILed the P0 umbrella
+        # over a closure that synthesises and simulates. Retried ONCE with
+        # slang's own `--allow-use-before-declare`, which changes only name
+        # lookup order and invents no net: only if THAT elaborates is the
+        # refusal booked as declaration order, and it is DISCLOSED with the
+        # strict output. An undeclared name, a missing module or a syntax
+        # error still fails, with the strict output (checked in the image:
+        # `use of undeclared identifier` under both).
+        # FX_P2 review: condition (a) is PER FILE, not per project. A
+        # reused-IP project still carries plugin-authored RTL (the wrapper,
+        # chip_top) that repair can edit; only a diagnostic in a file that IS
+        # the supplied IP, byte-identical to what the input delivered
+        # (`_supplied_ip_sources`), may be relaxed.
+        strict_log = yosys.stdout + yosys.stderr
+        strict_rc = yosys.returncode
+        in_ip, _outside = ((False, [])
+                           if not (strict_rc and _is_reused_ip(project)
+                                   and only_use_before_declare(strict_log))
+                           else _all_in_supplied_ip(project, strict_log))
+        if in_ip:
+            relaxed = _invoke("yosys", ["-Q", "-T", "-p",
+                                        _script(DECL_RELAX_FLAG + " ")],
+                              project, yosys_image)
+            if relaxed.returncode == 0:
+                files = sorted({Path(f).name for f in
+                                _use_before_declare_files(strict_log)})
+                result["disclosures"] = [
+                    f"{DECL_RELAXED}: strict read_slang refused (exit "
+                    f"{strict_rc}) and {DECL_RELAX_FLAG} elaborated, so "
+                    f"declaration order was the only obstacle -- in supplied "
+                    f"IP only ({', '.join(files)}); a portability finding in "
+                    f"the RTL, not an elaboration failure"]
+                result["strict_refusal"] = strict_log[-4000:]
+                result["strict_exit_code"] = strict_rc
+                result["relaxed_flags"] = [DECL_RELAX_FLAG]
+                yosys = relaxed
         verilator_args = ["--lint-only", "--Wall", "-Wno-fatal"]
         if top:
             verilator_args += ["--top-module", top]
@@ -154,12 +423,26 @@ def check(project: Path, image: str | None = None) -> dict:
     except _eda_pin.ImageNotResolvable as exc:
         result["findings"].append(f"tool invocation refused: {exc}")
         return result
+    except ToolNotMeasured as exc:
+        # NOT A FINDING. A front end that stalled or hit its backstop measured
+        # nothing, so it is NOT_MEASURED(EXECUTION_ERROR) -- never a FAIL, and
+        # never retried (a relaxed retry would not change that).
+        result["not_measured"] = {
+            "reason_class": "EXECUTION_ERROR",
+            "why": f"tool invocation {exc}: nothing was measured"}
+        return result
     except (FileNotFoundError, OSError) as exc:
         result["findings"].append(f"tool invocation unavailable: {exc}")
         return result
     result["tools"]["Yosys.JsonHeader"] = {"exit_code": yosys.returncode,
                                                "execution": "host" if shutil.which("yosys") else yosys_image,
                                                "output": (yosys.stdout + yosys.stderr)[-8000:]}
+    if "strict_exit_code" in result:
+        # The row says which run it shows: the strict refusal's exit code is
+        # kept beside the relaxed run's, never overwritten by it.
+        result["tools"]["Yosys.JsonHeader"].update(
+            strict_exit_code=result["strict_exit_code"],
+            relaxed_flags=list(result["relaxed_flags"]))
     lint_log = verilator.stdout + verilator.stderr
     try:
         diagnostics = _diagnostic_codes(lint_log)

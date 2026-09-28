@@ -999,6 +999,20 @@ def _row_verdict(project: Path, report_name: str, rc: int, started_at: float,
             f"{phase} exited 0 and its {report_name} predates {phase}'s start in this "
             f"invocation, so that file describes an earlier run and its verdict is not read")
     rep = _read_report(path)
+    # A COPY PUBLISHED BEFORE THE PHASE'S OWN FINAL AUDIT IS NOT ITS VERDICT.
+    # design_one_shot_runner publishes phase2_one_shot.json once before the
+    # final audit (so the audit judges this run's record) and again from its
+    # tail. A record still marked `final_audit_pending` means the process never
+    # reached the tail -- it raised, stalled or was killed during the audit --
+    # and whatever aggregate it carried was never confirmed. Same answer as the
+    # reportless rc != 0 case above: FAIL, and it halts.
+    if rep.get("final_audit_pending") is True:
+        return "FAIL", (
+            f"{phase}'s process exited {rc} leaving only the {report_name} it "
+            f"published BEFORE its final audit (final_audit_pending): the audit "
+            f"and the tail never completed, so this invocation published no "
+            f"final verdict for {phase}. A phase whose final audit did not "
+            f"finish is a FAIL, not a PASS carried over from before the audit")
     verdict = rep.get("verdict")
     if verdict:
         return str(verdict), None

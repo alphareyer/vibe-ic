@@ -1494,6 +1494,37 @@ _register(Instrument(
 ))
 
 
+def _judge_p0_slang_use_before_declare(log: str) -> Optional[str]:
+    import p0_tool_frontend_check as p0
+    return "USE_BEFORE_DECLARE_ONLY" if p0.only_use_before_declare(log) else None
+
+
+_register(Instrument(
+    name="p0_tool_frontend_check::only_use_before_declare",
+    reads="Yosys read_slang elaboration transcript",
+    ruling="FX_P2 (orchestrator 2026-09-28, D3 condition b)", owner="fxtb",
+    why=("The declaration-order retry may answer ONLY slang's use-before-"
+         "declare refusal. It must fire when that is the sole error and stay "
+         "silent when another error (an undeclared name) is beside it."),
+    judge=_judge_p0_slang_use_before_declare,
+    positive=Sample(
+        provenance=("Real Yosys 0.69+ (4d572059c) read_slang in the released "
+                    "vibeic-eda 0.3.83 image on 8HD-4 (.120), 2026-09-28, on "
+                    "a 4-line module that assigns a net above its "
+                    "declaration; the probe directory is rewritten to `rtl/` "
+                    "(no host path in a fixture). calibration/"
+                    "p0_slang_use_before_declare_positive.log."),
+        artefact=_read("p0_slang_use_before_declare_positive.log")),
+    expect="USE_BEFORE_DECLARE_ONLY",
+    negative=Sample(
+        provenance=("Same tool and image, the same module plus one "
+                    "genuinely undeclared identifier: 2 errors, one of them "
+                    "'use of undeclared identifier'. calibration/"
+                    "p0_slang_use_before_declare_negative.log."),
+        artefact=_read("p0_slang_use_before_declare_negative.log")),
+))
+
+
 # ---- LibreLane OpenROAD.STAPrePNR readers (steps 8 and 10, T92) -----------
 
 _STA_PREPNR_RUN = (
@@ -2812,6 +2843,70 @@ _STATUS_WORDS = set(VERDICTS) | {
 #: names WHY, and `_ratchet_verdict` refuses an entry whose function no longer
 #: exists — so this cannot rot into a list of things that used to be true.
 #: THERE IS NO FLAG THAT WRITES THIS. It is reviewed in the diff like any source.
+# ---- the ISA-suite producer's two readers (lane isaprod, 2026-09-28) ------
+
+def _judge_isa_objdump(dis: str) -> Optional[str]:
+    import isa_suite_producer as ISA
+    viol = ISA.objdump_guard(dis, allow_compressed=False)
+    return "NOT A PROGRAM OF THE DECLARED ISA" if viol else None
+
+
+def _judge_isa_tb(transcript: str) -> Optional[str]:
+    import isa_suite_producer as ISA
+    return "HANG" if ISA.parse_tb_transcript(transcript)["status"] == "hang" \
+        else None
+
+
+_register(Instrument(
+    name="isa_suite_producer::objdump_guard",
+    reads="`riscv64-unknown-elf-objdump -d -M no-aliases` of an ISA-suite image",
+    ruling="isaprod 2026-09-28 (research appendix D.7)",
+    owner="isaprod",
+    why=("Without `-mno-relax` the architecture suite's alignment emits a "
+         "16-bit parcel; the reference traps on it and a CSR-less core that "
+         "declares no C silently runs it and reports PASS. The pair is the "
+         "SAME source built both ways."),
+    judge=_judge_isa_objdump,
+    positive=Sample(
+        provenance=(
+            "REAL objdump 2.46 (vibeic-eda 0.3.84, .121) of riscv-arch-test "
+            "3.9.1 rv32i_m/I/src/fence-01.S built with riscv64-unknown-elf-gcc "
+            "16.1.0 -march=rv32i_zifencei WITHOUT -mno-relax, flow-authored "
+            "env: it carries `.insn 2, 0x0001` at 0x1a8 and 0x1be."),
+        artefact=_read("isa_objdump_rvc_parcel_positive.dis")),
+    expect="NOT A PROGRAM OF THE DECLARED ISA",
+    negative=Sample(
+        provenance=(
+            "The same source, same compiler and env, WITH -mno-relax: every "
+            "parcel is 32-bit and there is no CSR/system instruction."),
+        artefact=_read("isa_objdump_no_relax_negative.dis")),
+))
+
+_register(Instrument(
+    name="isa_suite_producer::parse_tb_transcript",
+    reads="the verilator transcript of the flow-authored ISA testbench",
+    ruling="isaprod 2026-09-28 (a hang is FAIL)",
+    owner="isaprod",
+    why=("A program that never stores to tohost must read as a HANG (a FAIL), "
+         "never as a missing result or a pass. The pair is two real runs of "
+         "the same testbench on the same RTL build."),
+    judge=_judge_isa_tb,
+    positive=Sample(
+        provenance=(
+            "REAL Verilator 5.053 transcript (vibeic-eda 0.3.84, .121): "
+            "riscv-arch-test 3.9.1 jalr-01 on a reused core's UNMODIFIED "
+            "input RTL at MEMSIZE=2097152, power-up 0xFF: no store to tohost "
+            "within the 20,000,000-cycle cap."),
+        artefact=_read("isa_tb_hang_positive.log")),
+    expect="HANG",
+    negative=Sample(
+        provenance=(
+            "The same testbench, add-01 on the erratum-applied staged RTL, "
+            "power-up 0xFF: halted with tohost=00000001 at cycle 154515."),
+        artefact=_read("isa_tb_halt_negative.log")),
+))
+
+
 _UNCALIBRATED_REGISTER: Dict[str, str] = {
     # ── magic's extraction channel ────────────────────────────────────────
     "magic_illegal_overlap_check::check":

@@ -26,6 +26,33 @@ class Refusal(RuntimeError):
         super().__init__(f"{code}: {detail}")
 
 
+# Tool stops answer no design question. Keep the later main watchdog's host
+# progress probe while retaining the stack's explicit refusal classification.
+TOOL_STOP_REASONS = {"LL_TOOL_STALLED": "stalled",
+                     "LL_TOOL_DEADLINE": "budget_exhausted"}
+
+
+def tool_stop_reason(code: str | None) -> str | None:
+    return TOOL_STOP_REASONS.get(code) if code else None
+
+
+def _tool_stop_session_rcs() -> dict[str, int]:
+    import _watchdog as _wd
+    return {"LL_TOOL_STALLED": _wd.RC_STALLED,
+            "LL_TOOL_DEADLINE": 124}
+
+
+def tool_stop_session_rc(code: str | None) -> int | None:
+    return _tool_stop_session_rcs().get(code) if code else None
+
+
+def session_stop_reason(rc: int | None) -> str | None:
+    for code, stop_rc in _tool_stop_session_rcs().items():
+        if rc == stop_rc:
+            return TOOL_STOP_REASONS[code]
+    return None
+
+
 #: How every container this module (and librelane_signoff) starts is bounded.
 #: Two kinds, bounded two different ways:
 #:

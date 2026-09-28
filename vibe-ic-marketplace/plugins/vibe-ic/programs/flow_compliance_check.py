@@ -3265,6 +3265,18 @@ def _resolve_program_cmd(cmd_str: str, cwd: Path | None = None) -> List[str]:
 _GATE_LEDGER: List[Dict[str, Any]] = []
 
 
+#: A gate's own disclosure line on stdout: `DISCLOSURE: <text>`, one per line.
+#: A fixed grammar this repo's gates print, not prose.
+_GATE_DISCLOSURE_RE = re.compile(r"^DISCLOSURE: (.+)$", re.M)
+
+
+def gate_stdout_disclosures(output: str) -> List[str]:
+    """The `DISCLOSURE:` lines a gate printed, in order (at most 8, each
+    bounded), for its ledger row."""
+    return [m.group(1).strip()[:600]
+            for m in _GATE_DISCLOSURE_RE.finditer(output or "")][:8]
+
+
 def _record_gate_execution(cmd: str, rc: Optional[int], verdict: str,
                            reason_class: Optional[str] = None,
                            evidence: Optional[Mapping[str, Any]] = None
@@ -3908,6 +3920,13 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
     _exact_rc = _actual_rc if _actual_rc is not None else rc
     _ledger_row["exit_code"] = _exact_rc
     _ledger_row["structured_verdict"] = _structured_verdict
+    # FX_P2 review: a gate that PASSED only by relaxing a tool says so on its
+    # stdout (`DISCLOSURE: ...`, e.g. flow_step_output_content_check --mode rtl
+    # after slang's declaration-order retry). The clause names no `--json`, so
+    # without this the relaxation reached no record of the run.
+    _disclosed = gate_stdout_disclosures(out)
+    if _disclosed:
+        _ledger_row["disclosures"] = _disclosed
     return _ProgramCheckResult(
         ok, out, _exact_rc, _structured_verdict, verdict,
         _ledger_row.get("reason_class"), vacuous_diagnostic)

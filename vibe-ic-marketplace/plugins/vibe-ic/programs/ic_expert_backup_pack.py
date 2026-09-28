@@ -572,7 +572,19 @@ def assemble(prompt: str, iface: Optional[List[Dict[str, Any]]], target: Optiona
         handoff["answer_contract"] = {
             "schema": "vibeic.phase1-expert-expectations.v1",
             "minimum_expectations": 1,
-            "shape": {"expectations": [shape]},
+            "shape": {
+                "expectations": [shape],
+                "declaration_selection": {
+                    "when": ("the design input explicitly delegates a finite "
+                             "declaration menu to the D1 IC Expert"),
+                    "shape": ("optional non-empty object mapping contract field "
+                              "names to selected JSON values"),
+                    "credit": ("the Phase-2 declaration emitter may use it only "
+                               "after this track records CONSUMED over the "
+                               "answer's exact SHA-256; pending, stale, malformed, "
+                               "or mismatched answers select nothing"),
+                },
+            },
             "split_shape": {
                 "when": ("the fact is ONE fact and the layers that carry it "
                          "are more than one — every branch must agree, and a "
@@ -587,6 +599,9 @@ def assemble(prompt: str, iface: Optional[List[Dict[str, Any]]], target: Optiona
                 "read only design_input.txt plus the two expert digests",
                 "never read an oracle, harness, golden artifact, or hidden answer",
                 "write the JSON object to l_doc_expectations.json",
+                "when selecting a delegated declaration menu, put the exact "
+                "contract-field mapping in declaration_selection and state "
+                "input-only evidence for every selected or excluded option",
                 "an empty expectations list is incomplete, not a completed review",
             ] + ([
                 "address a layer this pack's generated_layer_contract names — "

@@ -108,15 +108,39 @@ def main() -> int:
         print("FAIL:", error)
     if errors:
         return 1
+    _nm = (frontend or {}).get("not_measured")
+    if _nm:
+        # A tool that STALLED or hit its backstop measured nothing: a
+        # non-verdict (rc 2) the flow reads by the `INCOMPLETE` token and the
+        # declared class, never a FAIL and never a PASS.
+        print(f"INCOMPLETE: {args.mode} output content NOT_MEASURED -- "
+              f"{_nm.get('why')} [verdict=NOT_MEASURED, "
+              f"reason_class={_nm.get('reason_class')}]")
+        return 2
     print(f"PASS: {args.mode} output content")
     if frontend is not None:
-        print("TOOL_EVIDENCE:", json.dumps({
+        # A PASS the front end reached only by RELAXING a tool (e.g. slang's
+        # declaration order in supplied IP) says so here, where the flow's
+        # gate record keeps it (`flow_compliance_check.output_snippet` keeps
+        # the head of stdout): one DISCLOSURE line each, and the strict run's
+        # exit code and refusal beside the relaxed run's in TOOL_EVIDENCE.
+        for disclosure in frontend.get("disclosures") or []:
+            print("DISCLOSURE:", disclosure)
+        evidence = {
             "sources": frontend["sources"],
             "tools": {name: {"exit_code": row["exit_code"],
                              "execution": row["execution"],
-                             "diagnostics": row.get("diagnostics", [])}
+                             "diagnostics": row.get("diagnostics", []),
+                             **{k: row[k] for k in ("strict_exit_code",
+                                                    "relaxed_flags")
+                                if k in row}}
                       for name, row in frontend["tools"].items()},
-        }, sort_keys=True))
+        }
+        if frontend.get("disclosures"):
+            evidence["disclosures"] = list(frontend["disclosures"])
+            evidence["strict_refusal"] = str(
+                frontend.get("strict_refusal") or "")[-2000:]
+        print("TOOL_EVIDENCE:", json.dumps(evidence, sort_keys=True))
     return 0
 
 

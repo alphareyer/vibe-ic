@@ -97,6 +97,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # when the module body starts, and a sibling import placed first dies with
 # `No module named '_signoff_drc_format'`.
 import _signoff_drc_format as _sdf  # noqa: E402
+import _path_layout as _pl  # noqa: E402
 from l_doc_evidence_util import (  # noqa: E402
     EvidenceVerdict,
     find_layer_files,
@@ -479,10 +480,82 @@ def _phase3_has_run(project: Path) -> bool:
     measured it. Before that it is simply not yet measurable, and saying so is
     not the same as saying it was missed.
     """
-    if (project / "reports" / "orchestrator" / "phase3_one_shot.json").is_file():
-        return True
+    records = []
+    top = project / "reports" / "orchestrator" / "phase3_one_shot.json"
+    if top.is_file():
+        records.append(top)
     d = project / "reports" / "phase3"
-    return d.is_dir() and any(d.rglob("*.json"))
+    if d.is_dir():
+        # The AUDIT's own publication is not a phase-3 measurement, wherever
+        # it is written. MEASURED on subservient (8HD-4, 2026-09-28): the
+        # phase-2 final audit publishes `reports/phase3/gates/
+        # stage3_compliance.json` (`program: flow_compliance_check`), and this
+        # gate -- run inside that same audit -- then read "phase 3 has run"
+        # off the audit's own bookkeeping. Same rule as the requirement
+        # search's `reports/audit` exclusion, keyed on the record's own
+        # `program` because the path does not say it.
+        records.extend(r for r in d.rglob("*.json")
+                       if not _is_audit_publication(r))
+    if not records:
+        return False
+    # FX_P2 — PHASE 3 OF WHICH DESIGN? A phase-3 record older than this run's
+    # own phase-2 netlist measured a netlist that no longer exists, so it says
+    # nothing about the design being audited. MEASURED on subservient (8HD-4,
+    # 2026-09-28): the tree carried an earlier supplementary phase-3 attempt
+    # (phase3_one_shot.json 09-27 22:24, halted at pad_ring) while phase 2 had
+    # just re-synthesised (netlist 09-28 00:27); this gate read "phase 3 has
+    # run", booked four stated sign-off requirements UNMET, and final_audit
+    # halted phase 2 -- so the phase that would measure them could not start.
+    # With no phase-2 netlist on disk there is nothing to date the records
+    # against and they are taken as they are, exactly as before.
+    newest_record = max(_mtime(p) for p in records)
+    newest_netlist = _newest_phase2_netlist_mtime(project)
+    if newest_netlist is not None and newest_record < newest_netlist:
+        return False
+    return True
+
+
+def _is_audit_publication(path: Path) -> bool:
+    """Is this JSON the flow-compliance audit's own record?"""
+    try:
+        payload = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(payload, dict) and \
+        payload.get("program") == "flow_compliance_check"
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _phase3_record_predates_netlist(project: Path, rel: str,
+                                    newest_netlist: Optional[float]) -> bool:
+    """Is `rel` a PHASE-3 record written before this run's phase-2 netlist?
+
+    Only phase-3 records are dated: a phase-2 report (lint, LEC, a pre-layout
+    estimate) is legitimately older or newer than the netlist it sits beside.
+    With no netlist on disk nothing is dated, exactly as `_phase3_has_run`."""
+    if newest_netlist is None:
+        return False
+    parts = Path(rel).parts
+    if not (parts[:2] == ("reports", "phase3") or parts[:1] == ("phase3",)
+            or Path(rel).name == "phase3_one_shot.json"):
+        return False
+    path = Path(rel) if Path(rel).is_absolute() else project / rel
+    return path.is_file() and _mtime(path) < newest_netlist
+
+
+def _newest_phase2_netlist_mtime(project: Path) -> Optional[float]:
+    """mtime of the newest synthesised netlist phase 2 wrote, or None."""
+    d = _pl.synth_dir(project)
+    if not d.is_dir():
+        return None
+    stamps = [_mtime(p) for p in d.glob("*.v") if p.is_file()]
+    return max(stamps) if stamps else None
 
 
 def _declared_process_corner_roles(project: Path, native: Any, required: List[str]
@@ -701,6 +774,7 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
     failures: List[str] = []
     msgs: List[str] = []
     phase3 = _phase3_has_run(project)
+    newest_netlist = _newest_phase2_netlist_mtime(project)
     for row in rows:
         if not isinstance(row, dict) or not row.get("stated"):
             continue
@@ -726,6 +800,16 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
                             f"{'/'.join(_signoff_tokens(check))}")
         measured = [(p, v) for p, v in found
                     if v is not None and v not in _ABSENT_VERDICTS]
+        # FX_P2 review: the SAME dating `_phase3_has_run` applies. A phase-3
+        # record older than this run's phase-2 netlist measured a netlist that
+        # no longer exists, so its PASS backs nothing here -- it is read as
+        # absent (NOT_YET_MEASURABLE before this run's phase 3, UNMET after).
+        # A stale FAILING record is left where it is: dating never turns a
+        # red into an absence.
+        stale = [(p, v) for p, v in measured
+                 if v not in _FAILING_VERDICTS
+                 and _phase3_record_predates_netlist(project, p, newest_netlist)]
+        measured = [pv for pv in measured if pv not in stale]
         record: Dict[str, Any] = {
             "check": check,
             "requirement": requirement,
@@ -734,6 +818,11 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
             "declared_records": list(declared_paths),
             "records_read": [{"path": p, "verdict": v} for p, v in found],
         }
+        if stale:
+            record["stale_records"] = [
+                {"path": p, "verdict": v,
+                 "why": "older than this run's phase-2 netlist"}
+                for p, v in stale]
         rows_out.append(record)
         if not measured:
             looked = ", ".join(p for p, _ in found[:4]) or "no report"
