@@ -420,6 +420,23 @@ def test_a_reference_timeout_keeps_the_case_not_measured(tmp_path):
     assert rows["fence_ext"]["verdict"] == "PASS"
 
 
+def test_a_declared_unit_with_no_suite_binds_nothing(tmp_path):
+    """A case naming a declared extension the lock has no program for is not
+    this producer's: it is left to whatever owns it, never a NOT_MEASURED
+    row over an empty program set."""
+    p = _project(tmp_path, units=("I", "Zifencei", "Zicsr"))
+    l10 = p / "phase1" / "generated_docs" / "L10_TEST_CASES.json"
+    doc = json.loads(l10.read_text())
+    doc["fields"]["test_cases"].append(
+        {"name": "csr_ext", "kind": "functional_vector",
+         "stimulus": "Zicsr CSR access + timer IRQ", "expected": "PASS"})
+    l10.write_text(json.dumps(doc))
+    rec = _produce(p, {"s-add": (WORDS, 0, HALT, WORDS),
+                       "s-fencei": (WORDS, 0, HALT, WORDS)})
+    assert sorted(rec["bound_cases"]) == ["base_isa", "fence_ext"]
+    assert "csr_ext" not in {r["id"] for r in rec["rows"]}
+
+
 def test_a_design_with_no_isa_case_is_left_alone(tmp_path):
     p = _project(tmp_path, units=())
     rec = _produce(p, {})

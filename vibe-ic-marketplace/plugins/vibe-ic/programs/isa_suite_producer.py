@@ -485,7 +485,7 @@ def bound_cases(project: Path, units: List[str]) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
     for r in rows:
         name = r.get("name") or r.get("id") or r.get("case")
-        if not name or r.get("applies_when"):
+        if not name:
             continue
         u = bind_case(r, units)
         if u:
@@ -991,7 +991,12 @@ def produce(project: Path, *, executor: Optional[Callable[[Path, Path],
                                "producer": PRODUCER, "cases": {},
                                "rows": [], "refusal": None}
     decl = _declaration(project)
-    units = declared_units(decl)
+    # A declared unit binds a case only when the lock carries programs for it:
+    # a unit with no suite is not this producer's to judge (it stays with
+    # whatever else owns that case).
+    suite_units = {p.get("unit") for s in (lock.get("suites") or {}).values()
+                   for p in s.get("programs") or []}
+    units = [u for u in declared_units(decl) if u in suite_units]
     cases = bound_cases(project, units) if units else {}
     receipt["bound_cases"] = cases
     if not cases:
