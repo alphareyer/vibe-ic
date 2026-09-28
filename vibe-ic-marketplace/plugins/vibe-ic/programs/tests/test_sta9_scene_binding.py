@@ -79,6 +79,72 @@ def test_native_stapostpnr_ws_reports_supply_historical_scene_rows(tmp_path):
     assert all(r['measurement_status'] == 'MEASURED' for r in report['corners'])
 
 
+def test_partial_custom_report_preserves_violation_and_marks_gap(tmp_path):
+    project = l24_fixture(tool_project(
+        tmp_path, setup={'max_ss_125C_4v50': -0.5}))
+    folder = project / STA
+    missing = 'min_tt_025C_5v00'
+    for corner in json.loads((folder / 'config.json').read_text())['STA_CORNERS']:
+        for file, value in (('ws.max.rpt', 0.2), ('ws.min.rpt', 0.1),
+                            ('tns.max.rpt', 0.0), ('tns.min.rpt', 0.0)):
+            (folder / corner / file).write_text(f'{corner}: {value}\n')
+    (folder / missing / 'vibeic_signoff.rpt').unlink()
+    rebind(project)
+    rc, report = run_gate('sta_corner_record_completeness_check', project, tmp_path)
+    rows = {r['corner']: r for r in report['corners']}
+    assert rc == 1 and 'R3_SIGNOFF_CORNER_VIOLATION' in report['rules_violated'], report
+    assert rows['max_ss_125C_4v50']['setup_wns_ns'] == -0.5
+    assert rows[missing]['measurement_status'] == 'NOT_MEASURED'
+    assert rows[missing]['setup_wns_ns'] is None
+    rc, l24 = l24_run(project)
+    scenes = l24['requirements'][0]['corner_coverage']['scene_table']
+    assert rc == 1 and any(r['setup_wns_ns'] == -0.5 for r in scenes), l24
+
+
+def test_declared_custom_emitter_cannot_fall_back_when_all_reports_absent(tmp_path):
+    project = tool_project(tmp_path)
+    folder = project / STA
+    config = folder / 'config.json'
+    data = json.loads(config.read_text())
+    data['STA_EXTRA_CORNER_TCL_FILE'] = str(project / 'custom.tcl')
+    config.write_text(json.dumps(data))
+    for corner in data['STA_CORNERS']:
+        (folder / corner / 'vibeic_signoff.rpt').unlink()
+        for file, value in (('ws.max.rpt', 0.2), ('ws.min.rpt', 0.1),
+                            ('tns.max.rpt', 0.0), ('tns.min.rpt', 0.0)):
+            (folder / corner / file).write_text(f'{corner}: {value}\n')
+    rebind(project)
+    rc, report = run_gate('sta_corner_record_completeness_check', project, tmp_path)
+    assert rc == 1 and all(r['measurement_status'] == 'NOT_MEASURED'
+                           for r in report['corners']), report
+
+
+def test_liberty_drift_with_same_header_is_not_measured(tmp_path):
+    project = l24_fixture(tool_project(tmp_path))
+    liberty = (tmp_path / 'pdk_root/p/libs.ref/cells/lib/'
+               'cells__ss_125C_4v50.lib')
+    liberty.write_text(liberty.read_text() + '\ncell (changed) {}\n')
+    rc, report = run_gate('sta_corner_record_completeness_check', project, tmp_path)
+    row = next(r for r in report['corners'] if r['corner'] == 'max_ss_125C_4v50')
+    assert rc == 1 and row['measurement_status'] == 'NOT_MEASURED', report
+    assert 'liberty_digest' in row['scope_gaps']
+    rc, l24 = l24_run(project)
+    scenes = l24['requirements'][0]['corner_coverage']['scene_table']
+    assert rc == 1 and any('liberty_digest' in r.get('scope_gaps', {})
+                           for r in scenes), l24
+
+
+def test_unrecorded_liberty_input_digest_is_not_measured(tmp_path):
+    project = tool_project(tmp_path)
+    receipt = project / STA / 'vibeic_receipt.json'
+    data = json.loads(receipt.read_text())
+    data['input'].pop('liberty_files')
+    receipt.write_text(json.dumps(data))
+    rc, report = run_gate('sta_corner_record_completeness_check', project, tmp_path)
+    assert rc == 1 and all(r['measurement_status'] == 'NOT_MEASURED'
+                           for r in report['corners']), report
+
+
 def test_l24_carries_nine_scene_evidence_and_rejects_a_missing_scene(tmp_path):
     project = l24_fixture(tool_project(tmp_path))
     rc, report = l24_run(project)

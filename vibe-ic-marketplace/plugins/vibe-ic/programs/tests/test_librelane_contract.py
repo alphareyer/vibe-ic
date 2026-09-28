@@ -147,6 +147,38 @@ def test_synthesis_chain_accepts_pre_netlist_state_and_keeps_tool_output(tmp_pat
     assert json.loads((folder / 'state_out.json').read_text())['nl'].endswith('block.nl.v')
 
 
+def test_stapostpnr_receipt_binds_mounted_liberty_bytes(tmp_path, monkeypatch):
+    project = tmp_path / 'design'
+    pdk = tmp_path / 'pdk'
+    liberty = pdk / 'cells/a.lib'
+    liberty.parent.mkdir(parents=True)
+    liberty.write_text('library (a) { nom_voltage : 5.0; }\n')
+    guest = '/pdk/process/cells/a.lib'
+    views = {key: str(put(project / f'{key}.json', {}))
+             for key in ('odb', 'def', 'nl', 'sdc')}
+    initial = put(project / 'initial.json', views)
+    config = put(project / 'config.json', {
+        'meta': {'step': 'OpenROAD.STAPostPNR'},
+        'STA_CORNERS': ['nom_typ'], 'CELL_LIBS': {'*': [guest]}})
+
+    def tool_run(cmd, **_):
+        folder = Path(cmd[cmd.index('-o') + 1])
+        put(folder / 'state_out.json', views)
+        log = folder / 'nom_typ/sta.log'
+        log.parent.mkdir(parents=True)
+        log.write_text(f"Reading cell library for the 'nom_typ' corner at '{guest}'\n")
+        return SimpleNamespace(returncode=0, stdout='ok', stderr='')
+
+    monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
+    monkeypatch.setattr(contract, 'run_container', tool_run)
+    folder = contract.run_chain(project, 'candidate',
+                                [('OpenROAD.STAPostPNR', config, initial)],
+                                mounts=[(pdk, '/pdk/process')])[0]
+    receipt = json.loads((folder / 'vibeic_receipt.json').read_text())
+    assert receipt['input']['liberty_files'] == {guest: contract.digest(liberty)}
+    assert receipt['sha256']['nom_typ/sta.log'] == contract.digest(folder / 'nom_typ/sta.log')
+
+
 def test_stream_lane_and_synthesis_namespace_keep_separate_receipts(tmp_path, monkeypatch):
     p = design(tmp_path)
     netlist = p / 'block.nl.v'

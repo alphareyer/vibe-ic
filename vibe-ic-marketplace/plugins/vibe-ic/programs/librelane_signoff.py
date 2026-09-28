@@ -459,7 +459,8 @@ def _liberty_header_pvt(path: Path) -> dict[str, float] | None:
     return values
 
 
-def step23_tool_arm(project: Path, artefacts: tuple[str, ...] = (CORNER_REPORT,)) -> Optional[dict]:
+def step23_tool_arm(project: Path, artefacts: tuple[str, ...] = (CORNER_REPORT,),
+                    native_reports: tuple[str, ...] = ()) -> Optional[dict]:
     """What a step-23 gate judges when step 23 runs `librelane` or `dual`.
 
     ``None`` when step 23 runs ``direct`` (the gate reads the direct decks, as
@@ -510,6 +511,15 @@ def step23_tool_arm(project: Path, artefacts: tuple[str, ...] = (CORNER_REPORT,)
     if not declared:
         raise Refusal('LL_STA_NO_CORNER', f'{folder / "config.json"}: STA_CORNERS is empty')
     metrics = state.get('metrics') or {}
+    liberty_at_run = (receipt.get('input') or {}).get('liberty_files') or {}
+    # Native reports are eligible only for a run that declared no custom Tcl
+    # and wrote no custom report at any declared scene. A partial emitter is
+    # incomplete; it cannot substitute different slack values from ws.max.
+    native_only_run = (bool(native_reports) and
+                       not config.get('STA_EXTRA_CORNER_TCL_FILE') and
+                       all(not (folder / name / CORNER_REPORT).is_file() and
+                               f'{name}/{CORNER_REPORT}' not in bound
+                               for name in declared))
     corners: dict[str, Any] = {}
     for name in declared:
         matched = [p for p in spefs if fnmatch.fnmatch(name, p)]
@@ -530,6 +540,8 @@ def step23_tool_arm(project: Path, artefacts: tuple[str, ...] = (CORNER_REPORT,)
             gaps['rc_corner'] = 'scene, SPEF pattern and SPEF filename disagree'
         log = folder / name / 'sta.log'
         log_text = log.read_text(errors='replace') if log.is_file() else ''
+        if not log.is_file() or bound.get(f'{name}/sta.log') != digest(log):
+            gaps['sta_log'] = 'scene log was not bound by the tool receipt'
         logged_libs = re.findall(
             r"(?m)^Reading cell library for the '([^']+)' corner at '([^']+)'", log_text)
         logged_spefs = re.findall(
@@ -545,8 +557,12 @@ def step23_tool_arm(project: Path, artefacts: tuple[str, ...] = (CORNER_REPORT,)
                                       (receipt.get('input') or {}).get('image'))
             header = _liberty_header_pvt(host) if host else None
             lib_pvt = parse_liberty_pvt(lib)
-            liberty_views.append({'path': lib, 'sha256': digest(host) if host else None,
-                                  'header_pvt': header})
+            current_sha = digest(host) if host else None
+            run_sha = liberty_at_run.get(lib)
+            liberty_views.append({'path': lib, 'sha256': current_sha,
+                                  'run_sha256': run_sha, 'header_pvt': header})
+            if not run_sha or current_sha != run_sha:
+                gaps['liberty_digest'] = 'Liberty bytes differ from the STA run or were not bound'
             if header is None or lib_pvt.gaps:
                 gaps['liberty_header_pvt'] = 'Liberty bytes or header PVT unavailable'
             elif (lib_pvt.voltage_v != header['nom_voltage'] or
@@ -573,7 +589,15 @@ def step23_tool_arm(project: Path, artefacts: tuple[str, ...] = (CORNER_REPORT,)
         if len(matched) != 1:
             gaps['rc_corner'] = f'{len(matched)} SPEF patterns match'
         row['scope_gaps'] = gaps
-        for artefact in artefacts:
+        scene_artefacts = artefacts
+        if native_reports and CORNER_REPORT in artefacts and \
+                not (folder / name / CORNER_REPORT).is_file():
+            if native_only_run:
+                scene_artefacts = native_reports
+            else:
+                gaps['custom_report'] = 'custom report missing from this STA scene'
+                scene_artefacts = ()
+        for artefact in scene_artefacts:
             rel = f'{name}/{artefact}'
             path = folder / rel
             if not path.is_file():

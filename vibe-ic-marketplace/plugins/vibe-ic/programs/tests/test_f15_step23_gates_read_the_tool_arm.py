@@ -236,10 +236,13 @@ def tool_project(root: Path, *, mode='librelane', setup=None, hold=None,
         'spef': {k: str(v) for k, v in spef.items()}, 'metrics': metrics}))
     timed = [*views.values(), *spef.values()]
     bound = {str(p.relative_to(folder)): _sha(p) for p in folder.rglob('*')
-             if p.is_file() and p.name.endswith(('.json', '.rpt'))}
+             if p.is_file() and (p.name.endswith(('.json', '.rpt')) or p.name == 'sta.log')}
+    liberty_files = {lib: _sha(pdk_root / lib.lstrip('/').removeprefix('pdk/'))
+                     for libs in CELL_LIBS.values() for lib in libs}
     _write(folder / 'vibeic_receipt.json', json.dumps({
         'input': {'step': 'OpenROAD.STAPostPNR',
-                  'state_files': {str(p): _sha(p) for p in timed}},
+                  'state_files': {str(p): _sha(p) for p in timed},
+                  'liberty_files': liberty_files},
         'sha256': bound}))
     _write(project / signoff.SIGNOFF_RECORD, json.dumps({
         'step': '23', 'mode': mode, 'sta_state': str(folder / 'state_out.json'),
@@ -255,7 +258,7 @@ def rebind(project: Path) -> None:
     folder = project / STA
     receipt = json.loads((folder / 'vibeic_receipt.json').read_text())
     receipt['sha256'] = {str(p.relative_to(folder)): _sha(p) for p in folder.rglob('*')
-                         if p.is_file() and p.name.endswith(('.json', '.rpt'))
+                         if p.is_file() and (p.name.endswith(('.json', '.rpt')) or p.name == 'sta.log')
                          and p.name != 'vibeic_receipt.json'}
     (folder / 'vibeic_receipt.json').write_text(json.dumps(receipt))
     record = json.loads((project / signoff.SIGNOFF_RECORD).read_text())
@@ -387,6 +390,13 @@ def test_each_gate_refuses_a_missing_corner_artefact(tmp_path, name):
     (project / STA / 'max_ss_125C_4v50' / signoff.CORNER_REPORT).unlink()
     rc, doc = run_gate(name, project, tmp_path)
     assert rc == 1, (name, rc, doc)
+    if name == 'sta_corner_record_completeness_check':
+        missing = next(r for r in doc['corners'] if r['corner'] == 'max_ss_125C_4v50')
+        assert missing['measurement_status'] == 'NOT_MEASURED', doc
+        assert missing['scope_gaps']['custom_report']
+        assert all(r['measurement_status'] == 'MEASURED' for r in doc['corners']
+                   if r['corner'] != 'max_ss_125C_4v50')
+        return
     assert verdict(doc) == 'REFUSED', (name, doc)
 
 

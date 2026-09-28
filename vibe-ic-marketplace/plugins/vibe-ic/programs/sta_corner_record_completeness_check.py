@@ -1302,20 +1302,14 @@ _NATIVE_SCENE_REPORTS = ('ws.max.rpt', 'ws.min.rpt',
 
 
 def read_tool_arm(project: Path) -> Optional[Dict[str, object]]:
-    """Use the custom scene report when present, else receipt-bound native WS.
+    """Read each custom scene; use native WS only for a proven native-only run.
 
     Historical STAPostPNR steps predate the custom extra Tcl but already
     measured setup and hold per scene. Missing custom output only permits the
     native, receipt-bound reports; a stale or altered custom report never does.
     """
     import librelane_signoff as _ls
-    from librelane_contract import Refusal
-    try:
-        return _ls.step23_tool_arm(project)
-    except Refusal as exc:
-        if exc.code != 'LL_STA_CORNER_ARTEFACT_MISSING':
-            raise
-        return _ls.step23_tool_arm(project, _NATIVE_SCENE_REPORTS)
+    return _ls.step23_tool_arm(project, native_reports=_NATIVE_SCENE_REPORTS)
 
 
 def _native_scene_value(item: Dict[str, str], corner: str) -> Optional[float]:
@@ -1366,7 +1360,7 @@ def evaluate_tool(project: Path, arm: Dict[str, object],
     findings: List[str] = []
     rules: List[str] = []
     for name, row in arm["corners"].items():                  # type: ignore[union-attr]
-        native = _ls.CORNER_REPORT not in row['files']
+        native = 'ws.max.rpt' in row['files']
         if native:
             reports = row['files']
             report = reports['ws.max.rpt']
@@ -1374,10 +1368,15 @@ def evaluate_tool(project: Path, arm: Dict[str, object],
                     'hold_wns_ns': _native_scene_value(reports['ws.min.rpt'], name),
                     'tns_ns': _native_scene_value(reports['tns.max.rpt'], name)}
             text = ''
-        else:
+        elif _ls.CORNER_REPORT in row['files']:
             report = row["files"][_ls.CORNER_REPORT]
             text = report["text"]
             vals = extract_slacks(text)
+        else:
+            report = {'path': str(Path(arm['folder']) / name / _ls.CORNER_REPORT),
+                      'sha256': None}
+            text = ''
+            vals = {'setup_wns_ns': None, 'hold_wns_ns': None, 'tns_ns': None}
         table.append({
             "corner": name, "axis": AXIS_TOOL,
             "rc_corner": row["rc_corner"], "process": row["process"],
@@ -1388,7 +1387,7 @@ def evaluate_tool(project: Path, arm: Dict[str, object],
             "sta_log": row["sta_log"], "sta_log_sha256": row["sta_log_sha256"],
             "label": None, "liberty_aliases": [],
             "roles": ["setup", "hold"], "role_class": "signoff",
-            "declared": True, "reported": True,
+            "declared": True, "reported": bool(row['files']),
             # The tool's report states its own basis; unstamped is not post-route.
             "basis_used": {f: (BASIS_SIGNOFF if native or
                                _sta_basis.declared_basis(text) == "POST_ROUTE"

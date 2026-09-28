@@ -2307,6 +2307,39 @@ def resolve_step_config(project: Path, image: str, source: Path, output: Path,
                       (result.stderr or result.stdout)[-1000:])
     return output
 
+def _sta_liberty_input_hashes(config: dict, project: Path,
+                              mounts: list[tuple[Path, str]]) -> dict[str, str | None]:
+    """Hash the host bytes mounted at each STAPostPNR Liberty guest path.
+
+    The scene log later establishes which of these declared inputs was read.
+    Unknown paths stay unbound; a consumer cannot sign off from a filename.
+    """
+    libraries: set[str] = set()
+    for field in ('CELL_LIBS', 'PAD_LIBS', 'EXTRA_LIBS'):
+        value = config.get(field) or {}
+        groups = value.values() if isinstance(value, dict) else [value]
+        for group in groups:
+            if isinstance(group, str):
+                libraries.add(group)
+            elif isinstance(group, (list, tuple)):
+                libraries.update(v for v in group if isinstance(v, str))
+    roots = [(project.resolve(), project.resolve()),
+             *((Path(host).resolve(), Path(guest)) for host, guest in mounts)]
+    roots.sort(key=lambda item: len(str(item[1])), reverse=True)
+    result: dict[str, str | None] = {}
+    for library in sorted(libraries):
+        guest_path = Path(library)
+        host_path = None
+        for host_root, guest_root in roots:
+            try:
+                host_path = host_root / guest_path.relative_to(guest_root)
+                break
+            except ValueError:
+                continue
+        result[library] = digest(host_path) if host_path and host_path.is_file() else None
+    return result
+
+
 def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
               *, docker: str = 'docker', mounts: list[tuple[Path, str]] | None = None,
               lane: str | None = None, pdk_root: str | None = None,
@@ -2374,6 +2407,9 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                        'config_files': {str(path): digest(path) for path in _walk_paths(
                            _load(config)) if path.is_file()},
                        'step': step_id}
+        if step_id == 'OpenROAD.STAPostPNR':
+            fingerprint['liberty_files'] = _sta_liberty_input_hashes(
+                _load(config), project, mounts or [])
         if home:
             fingerprint['openroad_aliases'] = capability['openroad_aliases']
         if step_id.startswith(PLUGIN_STEP_PREFIX):
@@ -2435,12 +2471,17 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             raise Refusal('LL_STEP_FAILED', f'{step_id}: rc={completed.returncode}; {folder / "invocation.log"}')
         out_state = _load(folder / 'state_out.json')
         _check_state(out_state, outputs=True)
+        if step_id == 'OpenROAD.STAPostPNR' and fingerprint['liberty_files'] != \
+                _sta_liberty_input_hashes(_load(config), project, mounts or []):
+            raise Refusal('LL_STA_LIBERTY_CHANGED_DURING_RUN', str(folder))
         hashes = {'state_out.json': digest(folder / 'state_out.json')}
         for path in _walk_paths({k: v for k, v in out_state.items() if k != 'metrics'}):
             if path.is_relative_to(folder):
                 hashes[str(path.relative_to(folder))] = digest(path)
         for path in folder.rglob('*'):
             if path.is_file() and path.name.endswith(('.json', '.rpt')) and path.name not in ('vibeic_receipt.json',):
+                hashes[str(path.relative_to(folder))] = digest(path)
+            if step_id == 'OpenROAD.STAPostPNR' and path.is_file() and path.name == 'sta.log':
                 hashes[str(path.relative_to(folder))] = digest(path)
         write_json(receipt, {'input': fingerprint, 'sha256': hashes})
         previous = folder / 'state_out.json'
