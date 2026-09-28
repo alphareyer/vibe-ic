@@ -36257,7 +36257,10 @@ def _pad_ring_rc2_reason(project: Path,
         return _V.ReasonClass.EXECUTION_ERROR.value
     if not isinstance(doc, dict) or doc.get("program") != "pad_ring_gen" or doc.get("verdict") != "SKIP":
         return _V.ReasonClass.EXECUTION_ERROR.value
-    rules = {f.get("rule") for f in doc.get("findings", []) if isinstance(f, dict)}
+    findings = doc.get("findings")
+    if not isinstance(findings, list):
+        return _V.ReasonClass.EXECUTION_ERROR.value
+    rules = {f.get("rule") for f in findings if isinstance(f, dict)}
     if any(re.fullmatch(r"PAD_ROTATION_(?:VERTICAL|HORIZONTAL|CORNER)_NOT_HONOURED", str(r))
            for r in rules):
         return _V.ReasonClass.UNSUPPORTED_REQUEST.value
