@@ -155,15 +155,61 @@ def _wire_guard(before: Path, after: Path, targets: set[str]) -> tuple[bool, lis
     return not changed and not missing_target, changed + missing_target
 
 
-def _native_scoped_guard(log: str, targets: set[str]) -> bool:
+def _native_scoped_guard(log: str, targets: set[str], wireless_others: int = 0,
+                         basis: dict | None = None) -> bool:
+    """The router's own proof that only the named nets changed.
+
+    DRT-0634 counts the held-fixed nets it left byte-identical among nets that
+    HAVE a wire; a non-target net with no wire at all (a synthesised net with
+    no connection) is held but never counted. MEASURED on subservient x
+    gf180mcuD (cmpb, fxpad note6): 1050 held, 1039 identical, and the 11
+    were exactly the input DEF's zero-connection nets -- every trial of a
+    clean repair was refused. `wireless_others` is that count, taken from the
+    input DEF by the caller, whose own DEF diff proves those nets unchanged.
+    `basis`, when given, receives the counts the verdict was taken from.
+    """
     _instrument_calibration.assert_calibrated('drc_feedback_repair::_native_scoped_guard')
     held = _SCOPED_HELD.findall(log)
     identical = _SCOPED_IDENTICAL.findall(log)
-    if not held or not identical or not _SCOPED_DRC.search(log):
+    drc_zero = bool(_SCOPED_DRC.search(log))
+    if basis is not None:
+        basis.update({'targets': len(targets), 'wireless_others': wireless_others,
+                      'drc_zero_on_entry_and_exit': drc_zero,
+                      'named_held': list(map(int, held[-1])) if held else None,
+                      'touched_identical': list(map(int, identical[-1])) if identical else None})
+    if not held or not identical or not drc_zero:
         return False
     named, others = map(int, held[-1])
     touched, unchanged = map(int, identical[-1])
-    return named == len(targets) and touched == len(targets) and others == unchanged
+    return (named == len(targets) and touched == len(targets)
+            and others == unchanged + wireless_others)
+
+
+_WIRING = re.compile(r'\+\s*(?:ROUTED|FIXED|COVER|NOSHIELD)\b')
+
+
+def _wireless_nets(path: Path) -> set[str]:
+    """Nets of a DEF that carry no wiring at all."""
+    return {name for name, body in _def_nets(path)[1].items() if not _WIRING.search(body)}
+
+
+#: Where each trial's script, router log and DRC report are kept. A refusal
+#: that leaves nothing to audit discloses nothing (fxpad note6: cmpb's three
+#: refusals could not be read because the scratch directory was deleted).
+TRIALS_REL = 'reports/phase3/drc_feedback_trials'
+
+
+def _keep_trial_evidence(project: Path, basis_digest: str, trial_dir: Path) -> dict:
+    """Copy the trial's evidence out of scratch; return {file: sha256}."""
+    dest = project / TRIALS_REL / basis_digest[:16] / trial_dir.parent.name / trial_dir.name
+    dest.mkdir(parents=True, exist_ok=True)
+    kept = {}
+    for name in ('trial.tcl', 'trial.log', 'router.drc.rpt'):
+        src = trial_dir / name
+        if src.is_file():
+            shutil.copy2(src, dest / name)
+            kept[str((dest / name).relative_to(project))] = _sha(dest / name)
+    return kept
 
 
 def _antenna(log: str) -> tuple[int, int]:
@@ -369,7 +415,21 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
             raise ValueError('FEEDBACK_IMAGE_DIGEST_REQUIRED')
         design_cell = _def_design(source_def)
         record['design_cell'] = design_cell
-        lefs = [pdk.tech_lef, pdk.cell_lef, *pdk.macro_lefs]
+        # The tech LEF the ROUTE read: the flow's via-legalized copy when it
+        # staged one (bound by sha256, the reader LibreLane's steps share),
+        # else the PDK's. MEASURED (fxpad note6, subservient copy): the PDK's
+        # own LEF under the same DEF gave the scoped router 510 whole-design
+        # violations on untouched nets (497 Metal2 Min Area), so no trial
+        # could show "0 on entry", whatever it did.
+        import librelane_pv_signoff as _pv
+        try:
+            route_lef = _pv.route_tech_lef(project)
+        except _pv.Refusal as exc:
+            raise ValueError(f'FEEDBACK_ROUTE_TECH_LEF_UNBOUND: {exc}') from exc
+        tech_lef = str(route_lef[0]) if route_lef else pdk.tech_lef
+        record['tech_lef'] = {'path': tech_lef,
+                              'source': route_lef[1] if route_lef else 'pdk.tech_lef'}
+        lefs = [tech_lef, pdk.cell_lef, *pdk.macro_lefs]
         stream_script = pnr / 'stream_out.py'
         if stream_script_text is None and not stream_script.is_file():
             raise _Absent('FEEDBACK_STREAM_SCRIPT_MISSING',
@@ -424,7 +484,11 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
                                 trial['antenna'] = _antenna(log)
                             except ValueError:
                                 trial['antenna'] = None
-                            trial['native_wire_guard'] = _native_scoped_guard(log, set(targets))
+                            wireless = len(_wireless_nets(current) - set(targets))
+                            trial['native_wire_guard_basis'] = {}
+                            trial['native_wire_guard'] = _native_scoped_guard(
+                                log, set(targets), wireless,
+                                trial['native_wire_guard_basis'])
                             if not safe or not trial['native_wire_guard']:
                                 trial['refusal'] = 'NON_TARGET_WIRE_CHANGED'
                             elif trial['router_drc'] != 0:
@@ -447,6 +511,8 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
                                     accepted = True
                                 else:
                                     trial['refusal'] = 'SIGNOFF_RULE_NOT_DECREASING'
+                        trial['evidence'] = _keep_trial_evidence(
+                            project, basis_digest, trial_dir)
                         record['trials'].append(trial)
                         if accepted:
                             break
