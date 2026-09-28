@@ -126,10 +126,9 @@ def test_emit_lec_post_layout_reaches_the_liberty_probe(tmp_path,
         f"got {doc.get('lec_recipe')!r}, notes={notes}")
 
 
-def test_postlayout_producer_retains_decided_failure_when_sat_cannot_run(
+def test_postlayout_producer_refuses_parser_failure_without_sat_witness(
         tmp_path, stub_container, monkeypatch):
-    """A later missing terminal IL cannot turn the first pass's failure into
-    NOT_PROVEN. Exercise the actual Phase 3 artefact writer and gate."""
+    """A parser verdict/count cannot decide a residual with no SAT witness."""
     lib = tmp_path / "corner_tt.lib"
     lib.write_text("library(t){}\n")
     project = _routed_project(tmp_path)
@@ -144,8 +143,36 @@ def test_postlayout_producer_retains_decided_failure_when_sat_cannot_run(
         out_json, out_json.with_suffix(".rpt"), [])
     doc = json.loads(out_json.read_text())
     assert doc["counterexample_search"]["result"] == "NOT_RUN"
+    assert doc["counterexample_search"]["reason"] == (
+        "terminal equivalence IL was not written")
+    # owner LEC rule 2026-09-28 (R-0929-LEC-TEST): a parser word/count
+    # without a proven counterexample cannot decide NON_EQUIVALENT.
+    assert doc["verdict"] == "RUN_ERROR"
+    assert verdict == "RUN_ERROR"
+    assert "named 0" in doc["counterexample_search_error"]
+    assert LEC.evaluate_report(doc)["verdict"] == "RUN_ERROR"
+
+
+def test_postlayout_producer_retains_decided_failure_with_stateless_witness(
+        tmp_path, stub_container, monkeypatch):
+    """A complete stateless SAT mismatch still decides NON_EQUIVALENT."""
+    import test_lec_counterexample_candidate as F
+
+    captured = F._REAL_YOSYS
+    _post_fake(
+        monkeypatch,
+        [(captured / "diff_status.log").read_text()],
+        (captured / "diff_search.log").read_text(),
+        (captured / "diff_flat.il").read_text(),
+        json.loads((captured / "diff_trace.json").read_text()),
+    )
+    verdict, doc = _emit_post(tmp_path)
+    assert doc["counterexample_search"]["completeness"] == "COMPLETE"
+    assert doc["counterexample_search"]["result"] == "COUNTEREXAMPLE"
+    assert doc["counterexample_search"]["trace"][1]["mismatched_points"] == ["y"]
     assert doc["verdict"] == "NON_EQUIVALENT"
     assert verdict == "NON_EQUIVALENT"
+    assert LEC.evaluate_report(doc)["verdict"] == "NON_EQUIVALENT"
 
 
 def test_emit_lec_post_layout_does_not_raise_nameerror(tmp_path,
