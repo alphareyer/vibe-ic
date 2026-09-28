@@ -169,8 +169,8 @@ def test_each_real_main_refuses_by_name_and_writes_nothing(runner, project):
 # spawn: `_phase_runner("...")`, a quoted `*_one_shot_runner.py`, or the
 # runner's own `str(Path(__file__))`. PER SITE, the mode must be forwarded
 # (`_impl_flow.child_argv(`) between that line and the first call that runs the
-# child. Counting forwards per file could not tell a moved forward from a
-# missing one; this cannot. The pins make a NEW site red until it is looked at.
+# child. A forward on another runner's argv does not credit this site.
+# The pins make a NEW site red until it is looked at.
 _SPAWN = re.compile(r'_phase_runner\("|"[a-z0-9_]+_one_shot_runner\.py"'
                     r'|str\(Path\(__file__\)\)')
 _RUNS_CHILD = re.compile(r"\b_run_phase\(|\b_run\(|\b_pr\.run\("
@@ -201,6 +201,20 @@ def _is_run_call(node):
     return name in _RUN_FUNCS and bool(_RUNS_CHILD.search(ast.unparse(f) + "("))
 
 
+def _targets(stmt):
+    if isinstance(stmt, ast.Assign):
+        return {n.id for t in stmt.targets for n in ast.walk(t)
+                if isinstance(n, ast.Name)}
+    if isinstance(stmt, ast.AugAssign):
+        return {n.id for n in ast.walk(stmt.target) if isinstance(n, ast.Name)}
+    return set()
+
+
+def _uses(node, name):
+    return any(isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+               and n.id == name for n in ast.walk(node))
+
+
 def _spawn_sites(fname):
     """(line, run-call line, forwarded?) per spawn site, read from the AST."""
     src = (PROGRAMS / fname).read_text()
@@ -215,28 +229,60 @@ def _spawn_sites(fname):
             continue
         fn = min((f for f in funcs if f.lineno <= i <= f.end_lineno),
                  key=lambda f: f.end_lineno - f.lineno)
+        stmt = min((st for st in ast.walk(fn) if isinstance(st, ast.stmt)
+                    and st is not fn and st.lineno <= i <= st.end_lineno),
+                   key=lambda st: st.end_lineno - st.lineno)
+        inline_run = any(isinstance(c, ast.Call) and _is_run_call(c)
+                         and c.lineno <= i <= c.end_lineno
+                         for c in ast.walk(stmt))
+        runner_names = (_targets(stmt) if isinstance(stmt, ast.Assign)
+                        and not inline_run else set())
+        assignments = [st for st in ast.walk(fn)
+                       if isinstance(st, (ast.Assign, ast.AugAssign))]
+
+        def runs_this_site(call):
+            if call.lineno <= i <= call.end_lineno:
+                return True
+            for runner_name in runner_names:
+                # The call may use the runner directly, or through one argv
+                # assignment such as `cmd = [..., str(phase1), ...]`.
+                if _uses(call, runner_name):
+                    return True
+                if any(stmt.lineno < feed.lineno < call.lineno
+                       and isinstance(feed, ast.Assign)
+                       and _uses(feed.value, runner_name)
+                       and _targets(feed) & {n.id for n in ast.walk(call)
+                                             if isinstance(n, ast.Name)}
+                       for feed in assignments):
+                    return True
+            return False
+
         calls = sorted((c for c in ast.walk(fn) if isinstance(c, ast.Call)
-                        and _is_run_call(c) and c.end_lineno >= i),
+                        and _is_run_call(c) and c.end_lineno >= i
+                        and runs_this_site(c)),
                        key=lambda c: c.lineno)
         if not calls:
             # A BUILDER (e.g. phase3's `_phase3_enclosing_cmd`): it returns
             # the argv and another function runs it. The forward must then be
             # inside the statement that holds the spawn.
-            stmt = min((st for st in ast.walk(fn) if isinstance(st, ast.stmt)
-                        and st is not fn and st.lineno <= i <= st.end_lineno),
-                       key=lambda st: st.end_lineno - st.lineno)
             sites.append((i, stmt.lineno,
                           "_impl_flow.child_argv(" in ast.unparse(stmt)))
             continue
         call = calls[0]
         text = ast.unparse(call)
         names = {n.id for n in ast.walk(call) if isinstance(n, ast.Name)}
-        feeds = [st for st in ast.walk(fn)
-                 if isinstance(st, (ast.Assign, ast.AugAssign))
-                 and st.lineno < call.lineno
-                 and any(isinstance(t, ast.Name) and t.id in names
-                         for t in (st.targets if isinstance(st, ast.Assign)
-                                   else [st.target]))]
+        feeds = []
+        for name in names:
+            # A plain assignment replaces the argv. Forwards to an earlier
+            # value of the same name cannot reach this child.
+            last_bind = max((st.lineno for st in assignments
+                             if isinstance(st, ast.Assign)
+                             and st.lineno < call.lineno and name in _targets(st)),
+                            default=i)
+            lower_bound = max(i, last_bind) if runner_names else last_bind
+            feeds.extend(st for st in assignments
+                         if lower_bound <= st.lineno < call.lineno
+                         and name in _targets(st))
         forwarded = "_impl_flow.child_argv(" in text or any(
             "_impl_flow.child_argv(" in ast.unparse(st) for st in feeds)
         sites.append((i, call.lineno, forwarded))
@@ -257,15 +303,23 @@ def test_every_spawn_site_forwards_the_mode(fname):
             "is not told the project's mode")
 
 
-def test_the_census_sees_a_site_that_does_not_forward(tmp_path, monkeypatch):
-    """The census is not blind to the shapes it claims to see."""
-    src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
-    fake = tmp_path / "phase3_one_shot_runner.py"
-    fake.write_text(src.replace("*_impl_flow.child_argv(isolated)]", "]", 1))
-    assert fake.read_text() != src
+def test_the_census_sees_each_missing_forward(tmp_path, monkeypatch):
+    """Dropping any single child flag must fail its own site's contract."""
+    original = PROGRAMS
     monkeypatch.setattr(sys.modules[__name__], "PROGRAMS", tmp_path)
-    with pytest.raises(AssertionError, match="is not told the project's mode"):
-        test_every_spawn_site_forwards_the_mode("phase3_one_shot_runner.py")
+    checked = 0
+    for fname, count in _SPAWN_SITES.items():
+        src = (original / fname).read_text()
+        matches = list(re.finditer(r"_impl_flow\.child_argv\([^)]*\)", src))
+        assert len(matches) == count, fname
+        fake = tmp_path / fname
+        for match in matches:
+            fake.write_text(src[:match.start()] + "[]" + src[match.end():])
+            assert fake.read_text() != src
+            with pytest.raises(AssertionError, match="is not told the project's mode"):
+                test_every_spawn_site_forwards_the_mode(fname)
+            checked += 1
+    assert checked == 11
 
 
 def test_a_mapped_knob_does_not_claim_the_parents_default_is_explicit():
