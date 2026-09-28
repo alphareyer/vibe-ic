@@ -374,7 +374,14 @@ def _token_value(tok: str, params: Optional[Dict[str, int]]) -> Optional[int]:
         return base - int(mm.group(3)) if mm.group(2) == "-" else base + int(mm.group(3))
     if params and tok in params:
         return params[tok]
-    return None
+    # Use the shared bounded Verilog integer evaluator for compound bounds such
+    # as $clog2(memsize)-1. Unknown names still produce None, never a width.
+    try:
+        from register_bus_driver_gen import _int_expr
+        value = _int_expr(re.sub(r"`(?=[A-Za-z_])", "", tok), dict(params or {}))
+    except (ImportError, ValueError, TypeError):
+        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 #: A port INITIALISER -- `output reg rvfi_valid = 1'b0`. Legal, and it sits
@@ -1105,6 +1112,15 @@ def _design_declared_params(project: str) -> Dict[str, int]:
             out[name] = value
             if name.endswith("_param"):
                 out[name[: -len("_param")]] = value
+    # A core's elaboration choices are recorded under core_parameters in the
+    # same declaration. Keep the actual RTL parameter names; memsize_bytes is
+    # a different field and must not be guessed to mean memsize.
+    core = doc.get("core_parameters")
+    if isinstance(core, dict):
+        for key, value in core.items():
+            if (re.fullmatch(r"[A-Za-z_]\w*", str(key))
+                    and isinstance(value, int) and not isinstance(value, bool)):
+                out[str(key)] = value
     return out
 
 

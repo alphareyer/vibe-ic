@@ -13422,11 +13422,9 @@ def step_slot_pad_budget(project: Path, top_name: str) -> StepResult:
     THE THREE OUTCOMES ARE THREE, NOT TWO:
         rc 0  FITS / FITS_AFTER_FOLD — PASS
         rc 1  DOES_NOT_FIT           — FAIL, and the step is red
-        rc 2  UNDECIDED              — SKIP carrying the program's OWN reason.
-              This is the cell/IP path, which has no shuttle operator and
-              therefore no slot. A skip that printed nothing would read
-              downstream as "nothing needed doing", so the reason is quoted
-              into the record rather than inferred from an absence.
+        rc 2  NOT_APPLICABLE only for a design-declared route with no slot;
+              every UNDECIDED / CANNOT CHECK is NOT_MEASURED, carrying the
+              gate's reason. A missing report is also NOT_MEASURED.
 
     `--top` is the runner's own top name, not this program's `chip_top`
     default: a design whose top is named otherwise would otherwise answer
@@ -13437,6 +13435,13 @@ def step_slot_pad_budget(project: Path, top_name: str) -> StepResult:
     cmd = [sys.executable, str(Path(__file__).resolve().parent
                                / "slot_pad_budget_check.py"),
            str(project), "--top", top_name, "--json", out_rel]
+    # Do not let a report from an earlier invocation classify this rc 2.
+    try:
+        (project / out_rel).unlink(missing_ok=True)
+    except OSError as e:
+        return StepResult("slot_pad_budget", "NOT_MEASURED", time.time() - t0,
+                          f"cannot clear the prior pad-budget report: {e}",
+                          [out_rel], reason_class=_V.ReasonClass.EXECUTION_ERROR.value)
     try:
         r = _pr.run(cmd, capture_output=True, text=True, cwd=str(project))
         rc = r.returncode
@@ -13467,17 +13472,34 @@ def step_slot_pad_budget(project: Path, top_name: str) -> StepResult:
         # gate must not report that as the gate having nothing to say.
         status = "FAIL"
         detail = f"the pad-budget gate REJECTED this step's command line: {detail}"
+    elif rc == 2:
+        try:
+            gate = json.loads((project / out_rel).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            gate = None
+        if not isinstance(gate, dict):
+            gate = {}
+        # Only the gate's explicit design-declared N/A is an inapplicable
+        # question. A CANNOT CHECK, unknown reason, or missing report has no
+        # measured answer and cannot acquire a declaration from stdout.
+        if (gate.get("verdict") == "NOT_APPLICABLE"
+                and gate.get("reason_class") == "DESIGN_DECLARED_NA"):
+            status = "NOT_APPLICABLE"
+            reason_class = ""
+        else:
+            status = "NOT_MEASURED"
+            gate_reason = _V.step_reason_for_gate_reason(gate.get("reason_class"))
+            reason_class = (gate_reason or _V.ReasonClass.EXECUTION_ERROR).value
     else:
-        # R-0915-85 — rc 2 is the gate saying its INPUT is not applicable: this
-        # design declares no slot template, so there is no pad budget to
-        # measure. `NOT_APPLICABLE` is that sentence, and it must NAME the
-        # declaration that makes it — the gate's own reason, which is what
-        # `detail` already holds.
-        status = "NOT_APPLICABLE"
+        status = "FAIL"
+        detail = f"the pad-budget gate returned an unexpected exit code {rc}: {detail}"
+    if rc != 2:
+        reason_class = ""
     return StepResult("slot_pad_budget", status, time.time() - t0, detail,
                       [out_rel], extras={"exit_code": rc},
                       declared_by=(detail
-                                   if status == "NOT_APPLICABLE" else ""))
+                                   if status == "NOT_APPLICABLE" else ""),
+                      reason_class=reason_class)
 
 
 def step_stamp_gate_reports(project: Path,
