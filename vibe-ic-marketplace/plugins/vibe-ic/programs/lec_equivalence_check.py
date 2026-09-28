@@ -585,17 +585,13 @@ def audit(project: Path) -> AuditResult:
                            unproven_point_names=res.unproven_point_names,
                            counterexample_search=search)
         _verdict_word = str(lc.get("verdict") or "").upper()
-        # Only a model of a COMPLETE miter decides by itself. A stateful model
-        # starts from a state no declared reset constrains; a NON_EQUIVALENT
-        # count or word resting on such a candidate is not a decided FAIL.
-        if (lec_cex.decides_non_equivalence(search) or _verdict_word == "FAIL"
-                or (not lec_cex.is_model_candidate(search)
-                    and ((non_equiv or 0) > 0
-                         or _verdict_word == "NON_EQUIVALENT"))):
+        # A legacy FAIL word can mean only that equiv_status left points
+        # unproven. The word and a count alone are not counterexamples.
+        if lec_cex.decides_non_equivalence(search):
             res.findings.append(Finding(
                 rule="LEC_NOT_EQUIVALENT", severity="ERROR",
-                message=(f"LEC producer already decided FAIL or the SAT miter "
-                         f"found a counterexample for {res.unproven_point_names}; "
+                message=(f"The complete SAT miter found a counterexample "
+                         f"for {res.unproven_point_names}; "
                          f"trace: {search.get('trace', 'see producer report')}"),
                 file=LEC_JSON_REL))
             return res

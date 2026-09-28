@@ -266,9 +266,12 @@ def decide_residual(original_verdict: str, search: Dict[str, Any],
                 "explanation": (f"NON_EQUIVALENT: {len(points)} point(s) "
                                 f"{points} differ in the complete "
                                 f"combinational miter; {summary}.")}
-    if str(original_verdict or "").upper() in ("FAIL", "NON_EQUIVALENT", "RUN_ERROR"):
-        # A decided original comparison is not softened by a search that did
-        # not decide anything.
+    if str(original_verdict or "").upper() == "RUN_ERROR":
+        # A tool/run error remains an error. FAIL and NON_EQUIVALENT are not
+        # independent witnesses: the legacy equiv_status parser can assign
+        # FAIL solely because a point remains unproven. Only the complete
+        # counterexample above (or a separately proven reset replay) may
+        # decide a residual mismatch.
         return {"verdict": original_verdict, "explanation": None}
     if not _valid_point_names(point_names) or len(point_names) != unproven_points:
         return {"verdict": "RUN_ERROR", "names_unbound": True,
