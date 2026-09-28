@@ -739,15 +739,16 @@ def test_only_the_needed_supplied_files_are_staged(tmp_path, monkeypatch):
         "input/vendor_rtl/otp_mem.v", "input/vendor_rtl/otp_cell.v"}
 
 
-def test_a_supplied_module_that_cannot_be_staged_is_refused_and_restored(
+def test_a_supplied_module_that_cannot_be_staged_is_refused_without_publish(
         tmp_path, monkeypatch):
     """The post-condition answers NO: the supplied `otp_mem` lives in a file
     named like a generated one (`rx_phy.sv`), first-wins keeps the generated
-    file, so `otp_mem` would end up defined 0 times. The generated file is
-    restored and the step refuses by name, with the collision."""
+    file, so `otp_mem` would end up defined 0 times. The isolated stage is
+    refused by name and the canonical rtl/ remains unchanged."""
     monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
     monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
     p = _otp_project(tmp_path / "p")
+    before = set(_rtl_files(p))
     _vendor(p, {"rx_phy.sv": _SUPPLIED_OTP})
     res = R.step_rtl_gen(p, "mixed_signal_otp")
     assert res.status == "FAIL", res.detail[:300]
@@ -755,3 +756,48 @@ def test_a_supplied_module_that_cannot_be_staged_is_refused_and_restored(
     assert res.extras["staged_name_collisions"] == {
         "rx_phy.sv": ["input/vendor_rtl/rx_phy.sv"]}
     assert "otp_mem is defined 0 time(s)" in res.detail
+    assert set(_rtl_files(p)) == before
+    assert "Nothing was published" in res.detail
+    assert not R._RTL_SESSION_OWNED
+
+
+def test_same_named_supplied_dependency_collision_is_refused_and_reported(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
+    monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
+    p = _otp_project(tmp_path / "p")
+    _vendor(p, {
+        "rtl/otp_mem.v": "module otp_mem(input clk, output q); "
+                          "otp_bitcell u0(.q(q)); endmodule\n",
+        "asic/otp_mem.v": "module otp_bitcell(output q); "
+                          "assign q = 1'b0; endmodule\n",
+    })
+    before = set(_rtl_files(p))
+    res = R.step_rtl_gen(p, "mixed_signal_otp")
+    assert res.status == "FAIL", res.detail[:400]
+    assert res.extras["finding"] == "SUPPLIED_MODULE_NOT_STAGED"
+    assert "otp_bitcell required by input/vendor_rtl/rtl/otp_mem.v" in res.detail
+    assert res.extras["staged_name_collisions"] == {
+        "otp_mem.v": ["input/vendor_rtl/asic/otp_mem.v"]}
+    assert res.extras["supplied_replaces_generated"]["supplied_not_staged"] == [
+        "input/vendor_rtl/asic/otp_mem.v"]
+    assert "name collisions" in res.detail
+    assert set(_rtl_files(p)) == before
+
+
+def test_refusal_does_not_claim_force_regenerated_authored_rtl(tmp_path,
+                                                               monkeypatch):
+    monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
+    monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
+    p = _otp_project(tmp_path / "p")
+    authored = p / "phase2/stage1/rtl/chip_top.v"
+    authored.parent.mkdir(parents=True)
+    authored.write_text("module chip_top; endmodule\n")
+    before = set(_rtl_files(p))
+    assert R._rtl_prov.classify(p)[0] != R._rtl_prov.GENERATED
+    _vendor(p, {"rx_phy.sv": _SUPPLIED_OTP})
+    res = R.step_rtl_gen(p, "mixed_signal_otp", force_regen=True)
+    assert res.status == "FAIL", res.detail[:300]
+    assert set(_rtl_files(p)) == before
+    R._finalize_rtl_provenance()
+    assert R._rtl_prov.classify(p)[0] != R._rtl_prov.GENERATED

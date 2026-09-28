@@ -7524,6 +7524,7 @@ def _stage_supplied_closure(project: Path, rtl_dir: Path,
     staged: List[Path] = []
     provenance: List[str] = []
     collisions: Dict[str, List[str]] = {}
+    closure_sources: List[str] = []
     while queue:
         src = queue.pop(0)
         if src in seen:
@@ -7534,10 +7535,14 @@ def _stage_supplied_closure(project: Path, rtl_dir: Path,
         if dst.exists():
             if dst.read_bytes() != src.read_bytes():
                 collisions.setdefault(src.name, []).append(rel)
+                closure_sources.append(rel)
+            else:
+                closure_sources.append(rel)
             continue
         shutil.copy2(src, dst)
         staged.append(dst)
         provenance.append(rel)
+        closure_sources.append(rel)
         try:
             text = _pf._strip_comments(src.read_text(errors="replace"))
         except OSError:
@@ -7559,9 +7564,12 @@ def _stage_supplied_closure(project: Path, rtl_dir: Path,
     not_staged = sorted(str(f.relative_to(project)) for f in
                         _design_supplied_build_rtl(project)
                         if str(f) not in staged_rel
-                        and not (rtl_dir / f.name).is_file())
+                        and not ((rtl_dir / f.name).is_file()
+                                 and (rtl_dir / f.name).read_bytes()
+                                 == f.read_bytes()))
     return {"staged": sorted(p.name for p in staged),
             "staged_from": provenance, "collisions": collisions,
+            "closure_sources": sorted(set(closure_sources)),
             "supplied_not_staged": not_staged}
 
 
@@ -7579,6 +7587,28 @@ def _supplied_replacement_holds(project: Path, rtl_dir: Path,
         elif defs[0].read_bytes() != (project / rel).read_bytes():
             bad.append(f"{m} in rtl/{defs[0].name} is not the bytes of {rel}")
     return bad
+
+
+def _supplied_closure_holds(project: Path, rtl_dir: Path,
+                            supplied_sources: Sequence[str]) -> List[str]:
+    """Every input-provided module referenced by the staged closure resolves."""
+    supplied = _design_supplied_build_rtl(project)
+    by_module: Dict[str, Path] = {}
+    for source in supplied:
+        for module in _module_names([source]):
+            by_module.setdefault(module, source)
+    bad: List[str] = []
+    for rel in supplied_sources:
+        source = project / rel
+        try:
+            text = source.read_text(errors="replace")
+        except OSError:
+            continue
+        import staged_rtl_closure_preflight as _pf
+        for module, _pos in _pf._instantiations(_pf._strip_comments(text)):
+            if module in by_module and module not in _emitted_modules(rtl_dir):
+                bad.append(f"{module} required by {rel} is not defined in rtl/")
+    return sorted(set(bad))
 
 
 def _declared_reused_ip(project: Path) -> bool:
@@ -8037,6 +8067,7 @@ def _step_rtl_gen_bound(
     None (the default) the process-wide setting from ``--force-rtl-regen``
     applies. See ``rtl_provenance`` for what the guard protects.
     """
+    global _RTL_SESSION_OWNED, _RTL_SESSION_PROJECT, _RTL_SESSION_BINDING
     project_binding.require_current()
     # Operator-prose provenance is a pre-write boundary for the WHOLE dispatch,
     # not merely the behavioral-FSM branch.  Several earlier deterministic
@@ -8537,6 +8568,7 @@ def _step_rtl_gen_bound(
             except Exception as exc:                       # noqa: BLE001
                 _staged_now = {"staged": [], "collisions": {},
                                "supplied_not_staged": [],
+                               "closure_sources": [],
                                "reason": f"staging raised "
                                          f"{type(exc).__name__}: {exc}"}
             _partial["staged_by_rtl_gen"] = list(_staged_now.get("staged") or [])
@@ -8547,11 +8579,15 @@ def _step_rtl_gen_bound(
             # bytes. Otherwise put the generated files back and refuse by name.
             _violations = _supplied_replacement_holds(
                 project, rtl_dir, _partial["replaced_by"])
+            _violations += _supplied_closure_holds(
+                project, rtl_dir, _staged_now.get("closure_sources") or [])
             if _violations:
-                for _st in _staged_now.get("staged") or []:
-                    (rtl_dir / _st).unlink(missing_ok=True)
-                for _name, _data in _DROPPED_BYTES.items():
-                    (rtl_dir / _name).write_bytes(_data)
+                # The outer isolated-tree transaction publishes baseline for
+                # FAIL. Release this dispatch's claim so provenance is not
+                # stamped onto the unchanged canonical rtl/ at finalize.
+                _RTL_SESSION_OWNED = False
+                _RTL_SESSION_PROJECT = None
+                _RTL_SESSION_BINDING = None
                 project_binding.require_current()
                 return StepResult(
                     "rtl_gen", "FAIL", time.time() - t0,
@@ -8563,7 +8599,8 @@ def _step_rtl_gen_bound(
                        if _staged_now.get("collisions") else "")
                     + (f"; {_staged_now['reason']}"
                        if _staged_now.get("reason") else "")
-                    + ". The generated files were restored.",
+                    + ". Nothing was published; phase2/stage1/rtl/ remains "
+                      "as it was before this call.",
                     extras={"finding": "SUPPLIED_MODULE_NOT_STAGED",
                             "violations": _violations,
                             "staged_name_collisions":
@@ -8572,12 +8609,17 @@ def _step_rtl_gen_bound(
                             "class_config": config})
             files = sorted(p.name for p in rtl_dir.iterdir() if p.is_file())
             _pextras = {"supplied_replaces_generated": _partial}
+            _partial["staged_name_collisions"] = (
+                _staged_now.get("collisions") or {})
             _pnote = (f"; the input supplies module(s) "
                       f"{sorted(_partial['replaced_by'])} — the generated "
                       f"file(s) {_partial['dropped_generated_files']} were "
                       f"dropped and the supplied one(s) "
                       f"{_partial['staged_by_rtl_gen']} staged into the rest "
                       f"of this generated design"
+                      + (f"; supplied filename collisions: "
+                         f"{_partial['staged_name_collisions']}"
+                         if _partial["staged_name_collisions"] else "")
                       + (f"; supplied file(s) NOT staged (nothing in the "
                          f"design needs them): "
                          f"{_partial['supplied_not_staged'][:6]}"
