@@ -23942,17 +23942,22 @@ def _exit_pruned_sites(sites, exit_step):
     return _spf.exit_pruned_sites(sites, exit_step)
 
 
-def declared_window_flags(entry_step, exit_step) -> Tuple[str, ...]:
+def declared_window_flags(entry_step, exit_step,
+                          consumer_flag=None) -> Tuple[str, ...]:
     """The window flags this run declared, in the spelling the operator used.
 
     Empty means no window, and therefore the whole flow's proof burden. Module
     level and pure, so the decision can be DRIVEN by a test instead of inferred
     from the shape of the code that calls it: an arm that reads
-    `if _bounded: ...` cannot tell you `_bounded` was computed correctly."""
+    `if _bounded: ...` cannot tell you `_bounded` was computed correctly.
+
+    `consumer_flag` (llv1 W7b) is the external-flow flag (`--librelane`) when
+    the run is in consumer mode: it declares the phase-2 window "steps 1-8"
+    exactly as `--exit-step 8` would, so it is one of the window's flags."""
     return tuple(
         f"--{name} {value}" for name, value in (("entry-step", entry_step),
                                                 ("exit-step", exit_step))
-        if value)
+        if value) + ((consumer_flag,) if consumer_flag else ())
 
 
 def dispatched_step_ids(sites, sentinelled_sites) -> set:
@@ -24227,9 +24232,17 @@ def main() -> int:
     # refresh anybody asked for, and its cost is charged to a run that did not
     # want it.
     _run_started_at = time.time()
-    _window_flags = declared_window_flags(getattr(args, "entry_step", None),
-                                          getattr(args, "exit_step", None))
-    if getattr(args, "refresh_only", False) and _window_flags:
+    # llv1 W7b — CONSUMER MODE. Under an external flow, phase 2 is the window
+    # "steps 1-8"; the flag is one of this run's window flags.
+    # --refresh-only stays HONOURED under the flag (_impl_flow.KNOBS): it runs
+    # no step, so only an operator-declared window refuses it.
+    _consumer = _impl_flow.consumer_mode(args)
+    _consumer_flag = _impl_flow.FLAG_FOR[_consumer] if _consumer else None
+    _window_flags = declared_window_flags(
+        getattr(args, "entry_step", None), getattr(args, "exit_step", None),
+        _consumer_flag)
+    _operator_window = [f for f in _window_flags if f != _consumer_flag]
+    if getattr(args, "refresh_only", False) and _operator_window:
         print("REFUSED: --refresh-only rebuilds the WHOLE-FLOW documents and "
               "therefore has no window. Drop --entry-step/--exit-step to "
               "refresh, or drop --refresh-only to run the window.",
@@ -24359,6 +24372,19 @@ def main() -> int:
                   file=sys.stderr)
             return 2
 
+    # llv1 W7b — CONSUMER MODE. Under an external flow, phase 2 is the window
+    # "steps 1-8": every site whose span starts after step 8 (synthesis, the
+    # DFT/LEC chain) runs in phase 3. Pruned through the SAME exit machinery a
+    # declared --exit-step uses, and sentinelled with the flag that pruned it.
+    _consumer_pruned: list = []
+    if _consumer:
+        _cplan = _spf.RUNNER_PLANS.get("design_one_shot_runner")
+        _consumer_pruned = list(_exit_pruned_sites(
+            _cplan.sites if _cplan else (),
+            _impl_flow.CONSUMER_PHASE2_LAST_STEP) or [])
+        _exit_pruned = list(dict.fromkeys(
+            list(_exit_pruned or []) + _consumer_pruned))
+
     def _after_exit(site_name):
         """Is `site_name`'s whole span dispatched AFTER the declared exit?"""
         return bool(_exit_pruned) and site_name in _exit_pruned
@@ -24366,6 +24392,13 @@ def main() -> int:
     def _exit_sentinel(site_name):
         # Named so the report can never read as "the site was attempted and
         # produced nothing" — same disclosure rule as SKIPPED-BY-ENTRY.
+        if site_name in _consumer_pruned and not getattr(args, "exit_step", None):
+            _span = dict(_spf.RUNNER_PLANS["design_one_shot_runner"].sites
+                         ).get(site_name, ())
+            return StepResult(
+                site_name, "NOT_APPLICABLE", 0.0,
+                _impl_flow.consumer_sentinel_detail(_consumer, site_name, _span),
+                declared_by=_impl_flow.FLAG_FOR[_consumer])
         return StepResult(
             site_name, "NOT_APPLICABLE", 0.0,
             f"run declared --exit-step {args.exit_step}; this site's whole "
@@ -24477,7 +24510,8 @@ def main() -> int:
 
     # Under the lock -- it writes -- and BEFORE canonical span admission, which
     # admits a phase-2 span this call does not dispatch.
-    if not _bounded and getattr(args, "refresh_only", False):
+    if (not _bounded or not _operator_window) and getattr(
+            args, "refresh_only", False):
         return _run_refresh_only(project, args)
 
     _canonical = _canonical_admission.admit_span(

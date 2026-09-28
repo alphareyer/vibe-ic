@@ -480,8 +480,14 @@ CLI_REASON_CLASSES = (IMPL_KNOB_UNSUPPORTED, IMPL_NOT_YET_WIRED)
 #: The parser destinations the flags themselves own (never knobs).
 FLAG_DESTS = frozenset({"librelane", "orfs"})
 
-#: Runners whose consumer mode has landed. Empty in W1; W7b adds to it.
-WIRED_RUNNERS: frozenset = frozenset()
+#: Runners whose consumer mode has landed (W7b adds them one piece at a time).
+#: phase 2 (`design_one_shot_runner`): steps 1-8 unchanged; 9-14 run in phase 3.
+WIRED_RUNNERS: frozenset = frozenset({"design_one_shot_runner"})
+
+#: llv1 W7b -- the last canonical step Phase 2 runs under an external flow.
+#: Synthesis (9) is LibreLane segment 1 and the DFT/LEC chain (11-13) needs
+#: its netlist, so both run in phase 3; phase 2 is the window "steps 1-8".
+CONSUMER_PHASE2_LAST_STEP = "8"
 
 _WINDOW = ("the external flow runs one span per segment; mapping a window "
            "onto it is W7b, until then a window is refused under the flag")
@@ -831,3 +837,22 @@ def gate_or_exit(project: Path, args, *, runner: str, parser) -> Optional[int]:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
     return None
+
+
+
+def consumer_mode(args) -> Optional[str]:
+    """The external flow this invocation consumes, or None for the default.
+
+    Read off the invocation's own flag, which `gate` has already reconciled
+    with the project's record (a disagreement never reaches here)."""
+    impl = normalise(requested_from_args(args))
+    return None if impl == IMPL_DEFAULT else impl
+
+
+def consumer_sentinel_detail(impl: str, site: str, span) -> str:
+    """Why a phase-2 site is not dispatched under an external flow."""
+    return (f"under {FLAG_FOR.get(impl, impl)} this site (canonical steps "
+            f"{', '.join(span)}) runs in phase 3 -- LibreLane segment 1 "
+            f"synthesizes and vibe-ic runs steps 11-14 between the segments "
+            f"(llv1 W7b); phase 2 is steps 1-{CONSUMER_PHASE2_LAST_STEP}. Not "
+            f"dispatched here, not missing.")

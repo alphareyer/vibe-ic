@@ -150,7 +150,12 @@ def _run_main(runner: str, project: Path, *argv: str):
              "HOME": str(project.parent)})
 
 
-@pytest.mark.parametrize("runner", RUNNERS)
+#: Runners W7b has not wired yet: a flag on them is IMPL_NOT_YET_WIRED. A wired
+#: runner consumes the flag (tests/test_llv1_w7b_consumer.py drives it).
+UNWIRED = sorted(set(RUNNERS) - IF.WIRED_RUNNERS)
+
+
+@pytest.mark.parametrize("runner", UNWIRED)
 def test_each_real_main_refuses_by_name_and_writes_nothing(runner, project):
     before = _tree(project)
     # W24: a runner that takes --pdk must name an in-scope one under the flag.
