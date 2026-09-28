@@ -337,7 +337,8 @@ def test_missing_required_hint_resolves_phase1_layout(tmp_path):
     layout. Before the fix, a from-scratch run whose Phase 1 wrote
     generated_docs → phase1/generated_docs, extraction_patterns.json → phase1/,
     and the coverage reports → reports/phase1/ was FALSELY told those 3 were
-    'missing'. Only the genuinely-absent optional waivers.json should remain."""
+    'missing'. An absent waivers.json is optional owner approval, not a
+    missing required artifact."""
     (tmp_path / "phase1" / "generated_docs").mkdir(parents=True)
     (tmp_path / "reports" / "phase1").mkdir(parents=True)
     (tmp_path / "phase1" / "generated_docs" / "L1_DATASHEET.json").write_text("{}")
@@ -356,8 +357,8 @@ def test_missing_required_hint_resolves_phase1_layout(tmp_path):
     assert "extraction_patterns.json" not in missing
     assert "reports/extraction_coverage_report.md" not in missing
     assert "reports/extraction_coverage_report.json" not in missing
-    # waivers.json is genuinely absent (root-only, optional) → still listed.
-    assert "waivers.json" in missing
+    # No owner waiver is needed for this project; every required hint is clear.
+    assert missing == []
 
 
 def test_missing_required_hint_flags_genuinely_absent(tmp_path):
@@ -368,6 +369,8 @@ def test_missing_required_hint_flags_genuinely_absent(tmp_path):
     audit = tmp_path / "reports" / "audit" / "phase23_completion_audit.json"
     assert audit.is_file()
     missing = json.loads(audit.read_text())["missing_required_artifacts"]
-    for label in ("generated_docs", "extraction_patterns.json", "waivers.json",
+    for label in ("generated_docs", "extraction_patterns.json",
                   "reports/extraction_coverage_report.md"):
         assert label in missing
+    # A project may have no owner-approved waiver; its absence is not a gap.
+    assert "waivers.json" not in missing
