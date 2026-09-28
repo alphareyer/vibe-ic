@@ -2,9 +2,9 @@
 
 The closure, the registry, the measurement and actuator CLIs, the supply
 ownership gate and the runner's deck builder run for real. Only an EDA tool's
-file writes are substituted: `librelane_contract.run_chain` (the `docker run`
-of a LibreLane step) is replaced by a writer of the step folders a real run
-leaves (`state_out.json` with the tool's metric names, the repair step's DEF).
+file writes are substituted: `librelane_contract.run_chain` and the native
+OpenROAD timing measurement are replaced by writers of the step folders and
+scene metrics a real run leaves.
 """
 import importlib
 from types import SimpleNamespace
@@ -24,6 +24,7 @@ sys.path.insert(0, str(PROGRAMS / 'tests'))
 prr = importlib.import_module('librelane_postroute_repair')
 closure = importlib.import_module('_ppa.closure')
 contract = importlib.import_module('librelane_contract')
+native = importlib.import_module('_native_postroute_timing')
 
 from _stated_eda_image import state_the_image  # noqa: E402
 
@@ -36,6 +37,13 @@ def _stated_image(monkeypatch):
     state_the_image(monkeypatch)
     for name in ('VIBEIC_LIBRELANE_IMAGE', 'VIBEIC_LIBRELANE_PDK_ROOT'):
         monkeypatch.delenv(name, raising=False)
+    def tool_written_native_scene(ctx, repair_state, out_dir):
+        sta = repair_state.parent.parent / '04-openroad-stapostpnr/state_out.json'
+        metrics = json.loads(sta.read_text())['metrics']
+        summary = prr.summarize(metrics, ctx['corners'])
+        return {k: summary[k] for k in ('setup_ws', 'hold_ws',
+                                       'setup_ws_min', 'hold_ws_min')}
+    monkeypatch.setattr(native, 'measure', tool_written_native_scene)
 REGISTRY = PLUGIN / 'config' / 'ppa_actuator_registry.yaml'
 CORNERS = ['nom_tt_025C_5v00', 'nom_ss_125C_4v50', 'nom_ff_n40C_5v50']
 
@@ -207,6 +215,7 @@ SHIM = textwrap.dedent('''\
     sys.path.insert(0, os.environ["PRR_REAL_PROGRAMS"])
     import librelane_contract as ll
     import librelane_postroute_repair as prr
+    import _native_postroute_timing as native
     SCENARIO = json.loads(Path(os.environ["PRR_SCENARIO"]).read_text())
 
     def run_chain(project, image, steps, *, mounts=None, lane=None, **kw):
@@ -230,6 +239,17 @@ SHIM = textwrap.dedent('''\
         return folders
 
     ll.run_chain = run_chain
+    def native_scene(ctx, repair_state, out_dir):
+        lane = repair_state.parent.parent.name
+        spec = SCENARIO[lane]
+        summary = prr.summarize(spec["sta_metrics"], ctx["corners"])
+        result = {k: summary[k] for k in ("setup_ws", "hold_ws",
+                                         "setup_ws_min", "hold_ws_min")}
+        if "native_setup" in spec:
+            result["setup_ws_min"] = spec["native_setup"]
+            result["setup_ws"] = {c: spec["native_setup"] for c in ctx["corners"]}
+        return result
+    native.measure = native_scene
     sys.exit(prr.main())
     ''')
 
@@ -371,6 +391,23 @@ def test_hardness_and_floor_are_declared_in_the_registry(tmp_path):
     with pytest.raises(closure.RegistryError, match='HARD domain has no floor'):
         closure.load_registry(bad)
 
+
+def test_native_signoff_slack_controls_setup_stop_when_librelane_is_optimistic(tmp_path, monkeypatch):
+    """A positive LibreLane WNS cannot end closure while direct RCX is red."""
+    first = _cand(0.012, 0.2)
+    first['native_setup'] = -0.02
+    second = _cand(0.037, 0.2)
+    second['native_setup'] = 0.01
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(-0.2, 0.2), candidates=[first, second])
+    run = _controller(impl, arm, shim, monkeypatch, tmp_path).run_controller(
+        'postroute.repair_setup')
+    assert [it.decision for it in run.iterations] == ['PROMOTED', 'PROMOTED']
+    assert run.outcome is closure.Outcome.CONVERGED
+    final = json.loads((impl / prr.CURRENT).read_text())
+    assert final['candidate'] == '32-cand02'
+    assert final['measurement']['setup_ws_min'] == 0.01
+    assert final['measurement']['librelane_setup_ws']['nom_ss_125C_4v50'] == 0.037
 
 def test_a_setup_violation_is_repaired_and_the_improving_candidate_adopted(tmp_path, monkeypatch):
     project, arm, impl, shim = _scenario_impl(

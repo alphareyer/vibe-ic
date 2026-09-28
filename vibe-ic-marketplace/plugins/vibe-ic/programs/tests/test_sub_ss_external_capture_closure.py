@@ -1,10 +1,13 @@
 """The chip flow can recover a pad launched register to external capture path."""
 
 import importlib
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 PLUGIN = PROGRAMS.parent
@@ -136,3 +139,33 @@ puts [join [vic_retap_decide -0.5 -0.6 -0.5 0.1 -1.0 0.0 0.1 0.03] |]
         "REJECT|HOLD_REGRESSED", "KEEP|MEASURED_IMPROVEMENT",
         "REJECT|LOCAL_SETUP_NOT_IMPROVED",
     ]
+
+
+def test_native_slack_requires_both_numeric_tool_records(tmp_path, monkeypatch):
+    """A negated or missing OpenSTA line cannot turn into a met corner."""
+    native = importlib.import_module("_native_postroute_timing")
+    contract = importlib.import_module("librelane_contract")
+    odb = tmp_path / "route.odb"
+    sdc = tmp_path / "constraint.sdc"
+    odb.write_text("tool route")
+    sdc.write_text("create_clock -period 20 [get_ports clk]\n")
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"odb": str(odb), "sdc": str(sdc)}))
+    config = tmp_path / "rcx.json"
+    config.write_text(json.dumps({"DEFAULT_CORNER": "max_ss",
+                                  "RCX_RULESETS": {"max_*": "/pdk/rules"},
+                                  "CELL_LIBS": {"*_ss": ["/pdk/cell.lib"]}}))
+    ctx = {"project": str(tmp_path), "image": "resolved-image", "mounts": [],
+           "configs": {"OpenROAD.RCX": str(config)}, "corners": ["max_ss"]}
+    report = ["worst slack max 0.012345\nworst slack min 0.140000\n"]
+
+    def tool_write(_ctx, script, output):
+        output.write_text("*SPEF\n" if script.name.startswith("extract") else report[0])
+
+    monkeypatch.setattr(native, "_run", tool_write)
+    good = native.measure(ctx, state, tmp_path / "good")
+    assert good["setup_ws_min"] == 0.012345
+    assert good["hold_ws_min"] == 0.14
+    report[0] = "worst slack max 0.012345\nworst slack min NOT_MEASURED\n"
+    with pytest.raises(contract.Refusal, match="NATIVE_POSTROUTE_SLACK_MISSING"):
+        native.measure(ctx, state, tmp_path / "bad")

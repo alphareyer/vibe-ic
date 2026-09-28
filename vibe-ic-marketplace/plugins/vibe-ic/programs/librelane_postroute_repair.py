@@ -220,9 +220,19 @@ def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
         mounts=[(Path(h), g) for h, g in ctx["mounts"]], lane=lane)
     sta_state = folders[-1] / "state_out.json"
     summary = summarize(_load(sta_state).get("metrics") or {}, ctx["corners"])
+    # LibreLane RCX uses -lef_res, while the direct signoff extracts the
+    # same route with -corner_cnt 1 -max_res 50 -coupling_threshold 0.1.
+    # The latter is the acceptance instrument.  Keep the LibreLane values
+    # for diagnosis, and make a missing native scene a hard refusal.
+    import _native_postroute_timing as _native
+    native = _native.measure(ctx, folders[0] / "state_out.json",
+                             folders[0] / "native_signoff")
     antenna = antenna_census(folders[1])
     return folders[0], {"sta_state": str(sta_state),
-                        "sta_state_sha256": _ll.digest(sta_state), **summary,
+                        "sta_state_sha256": _ll.digest(sta_state),
+                        "librelane_setup_ws": summary["setup_ws"],
+                        "librelane_hold_ws": summary["hold_ws"],
+                        **summary, **native,
                         "antenna_nets": antenna["antenna__violating__nets"],
                         "antenna_pins": antenna["antenna__violating__pins"],
                         "antenna_state": str(folders[1] / "state_out.json")}
@@ -254,6 +264,12 @@ def measure(impl: Path, domain: str, json_out: Path) -> int:
         if _ll.digest(sta) != cur["measurement"]["sta_state_sha256"]:
             print(f"{sta}: not the state {CURRENT} adopted", file=sys.stderr)
             return RC_UNDETERMINED
+        native_hash = cur["measurement"].get("native_odb_sha256")
+        if native_hash is not None:
+            odb = Path(_load(Path(cur["repair_state"]))["odb"])
+            if _ll.digest(odb) != native_hash:
+                print(f"{odb}: not the ODB native timing measured", file=sys.stderr)
+                return RC_UNDETERMINED
     except (OSError, ValueError, KeyError) as exc:
         print(f"no adopted candidate to measure: {exc}", file=sys.stderr)
         return RC_UNDETERMINED

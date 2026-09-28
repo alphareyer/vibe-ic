@@ -460,8 +460,9 @@ controllers:
       - {setup_margin_ns: 0.2, setup_sequence: "sizeup,swap"}
       - {setup_margin_ns: 0.3, setup_sequence: "sizeup,swap"}
       - {setup_margin_ns: 0.2, setup_sequence: sizeup}
+      - {setup_margin_ns: 0.3, setup_sequence: sizeup}
     stop:
-      max_iterations: 5
+      max_iterations: 6
       plateau_patience: 4
       wall_seconds: 28800
 
