@@ -55,6 +55,7 @@ sys.path.insert(0, str(PROGRAMS))
 sys.path.insert(0, str(TESTS))
 
 import _designs_root as DR                              # noqa: E402
+import _l_doc_pad_placement as LPP                      # noqa: E402
 import test_io_pad_chip_top_gen as IO                   # noqa: E402
 import test_io_pad_power_domain_plan as PDP             # noqa: E402
 
@@ -219,6 +220,56 @@ def test_an_unreadable_test_access_plan_is_named_by_its_run_relative_path(
     assert rec["rule"] == "DFT_TEST_ACCESS_INVALID", rec
     assert not sorted({s for s in _strings(rec) if str(ctr) in s})
     assert "config/dft_test_access.json" in " ".join(rec["findings"])
+
+
+def test_a_permission_denied_test_access_plan_survives_relocation(tmp_path):
+    proj, _cfg, _plan = IO._scan_project(tmp_path)
+    IO._pdk(tmp_path / "pdk")
+    ctr, host = _spellings(tmp_path)
+    _relocate(proj, ctr)
+    plan = ctr / "config/dft_test_access.json"
+    plan.chmod(0o000)
+    try:
+        res = _produce(ctr, tmp_path)
+    finally:
+        plan.chmod(0o644)
+    assert res.returncode == 1, res.stdout + res.stderr
+    _relocate(ctr, host)
+    rec = json.loads((host / RECORD).read_text())
+    assert rec["rule"] == "DFT_TEST_ACCESS_INVALID", rec
+    assert "config/dft_test_access.json" in " ".join(rec["findings"])
+    assert str(ctr) not in json.dumps(rec), rec
+    assert "PermissionError" in " ".join(rec["findings"])
+    gate, flagged = _gate(host, tmp_path)
+    assert gate.returncode == 0, (gate.stdout + gate.stderr, flagged)
+    assert flagged == []
+
+
+def test_a_permission_denied_design_document_survives_relocation(tmp_path):
+    proj, _cfg, _plan = IO._scan_project(tmp_path)
+    IO._pdk(tmp_path / "pdk")
+    ctr, host = _spellings(tmp_path)
+    _relocate(proj, ctr)
+    doc = ctr / "input/docs/L3_external_interface.md"
+    doc.chmod(0o000)
+    try:
+        _placement, _params, unreadable, _scanned = LPP.read_project_placement(ctr)
+        res = _produce(ctr, tmp_path)
+    finally:
+        doc.chmod(0o644)
+    assert res.returncode == 1, res.stdout + res.stderr
+    _relocate(ctr, host)
+    rec = json.loads((host / RECORD).read_text())
+    assert rec["rule"] == "L_DOC_UNREADABLE", rec
+    assert unreadable[0]["file"] == (
+        "input/docs/L3_external_interface.md")
+    assert str(ctr) not in unreadable[0]["reason"], unreadable
+    assert "PermissionError" in unreadable[0]["reason"]
+    assert "input/docs/L3_external_interface.md" in " ".join(rec["findings"])
+    assert str(ctr) not in json.dumps(rec), rec
+    gate, flagged = _gate(host, tmp_path)
+    assert gate.returncode == 0, (gate.stdout + gate.stderr, flagged)
+    assert flagged == []
 
 
 # --------------------------------------------------------------------------- #
