@@ -6,6 +6,11 @@ Verifies that EVERY deterministic test vector enumerated in
 execution record written by the simulator runner.  Testbench source text and
 project-level PASS prose never decide a case verdict.
 
+An L10 pass-rate coverage goal is a separate population. Its bound scenarios
+and achieved percentage are measured by ``cpu_functional_oracle_waiver_check``;
+this gate discloses the goal but does not demand a unit TB under the goal's own
+name. Both gates import the same structural L10 classifier.
+
 This gate complements `cmd_response_conformance_check.py` which only
 verifies CRC-residue correctness of the host vectors; it does NOT verify
 that the tb harness actually drove them. l10_tb_conformance_check.py
@@ -19,7 +24,8 @@ Usage:
         --out reports/gates/l10_tb_conformance.json
 
 Exit code:
-    0 — every L10 case has tb evidence
+    0 — every L10 vector has TB evidence; coverage goals are delegated to the
+        independent Step-4 percentage instrument and disclosed by name
     1 — one or more cases lacked evidence
     2 — input artefacts missing / malformed
     3 — PASS_WITH_WAIVERS: every genuine-digital case had evidence AND the only
@@ -75,18 +81,17 @@ except Exception:  # pragma: no cover — never let a helper import break the ga
 # false; together they were unreadable, because the SKIP stated a fact about the
 # FILTER in the shape of a fact about the LAYER.
 #
-# The scope is now DECLARED once, in the producer (`testbench_gen.SCAFFOLD_KINDS`
-# / `producer_scope`), and imported here. This gate's VERDICT is unchanged — it
-# still grades every case and a case with no TB evidence still FAILs — but its
-# output now NAMES BOTH SCOPES, so a Step-4 FAIL that is a scope mismatch can no
-# longer read as an extraction gap. Narrowing this gate to the producer's scope
-# was considered and rejected: a design that ships no testbench for 95 declared
-# cases must still be marked down.
+# The scope is DECLARED once, in the producer (`testbench_gen.SCAFFOLD_KINDS`
+# / `producer_scope`), and imported here. Every declared executable case still
+# needs evidence, even if the producer omitted its TB; the only later exception
+# is a pass-rate goal, which has no one vector to execute and is measured by
+# the separate Step-4 goal instrument. The output names both populations.
 try:
     import testbench_gen as _tbg
 except Exception:  # pragma: no cover — never let a helper import break the gate
     _tbg = None
 import _l10_execution as _l10x
+import l10_coverage_goal_classify as _cgc
 
 
 # ----- helpers ------------------------------------------------------
@@ -1608,7 +1613,11 @@ def evaluate(
     producer_scaffold_kinds: Optional[frozenset] = None,
     execution_record: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], int, int]:
-    """Return (results, ok_count, fail_count).
+    """Return (results, ok_count, fail_count) for L10 vectors/checklists.
+
+    Pass-rate goals are measured by the Step-4 scenario/coverage instrument,
+    not by a per-goal unit TB. Partition through its shared classifier so a
+    direct ``evaluate`` caller cannot restore the old denominator.
 
     The per-case ``status`` field ("pass" / "fail" / ``NOT_EXECUTED`` /
     "waived" / "checklist_gap") and the project-level ``waive_count`` / checklist-gap
@@ -1648,6 +1657,7 @@ def evaluate(
         execution_record = {"available": False,
                             "reason": "no_execution_record",
                             "rows": {}, "malformed": []}
+    cases, _coverage_goals = _cgc.partition(cases)
     results: List[Dict[str, Any]] = []
     ok_count = 0
     fail_count = 0
@@ -2090,7 +2100,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = p.parse_args(argv)
 
     try:
-        cases = load_l10(args.l10)
+        all_cases = load_l10(args.l10)
+        cases, coverage_goals = _cgc.partition(all_cases)
     except Exception as e:
         print(f"[l10-tb-conformance] cannot load L10: {e}", file=sys.stderr)
         return 2
@@ -2179,6 +2190,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     out = {
         "total": len(cases),
+        "total_declared_l10_rows": len(all_cases),
+        "coverage_goal_population": {
+            "declared_count": len(coverage_goals),
+            "goals": [str(g.get("id", g.get("name", "")))
+                      for g in coverage_goals],
+            "measured_by": "cpu_functional_oracle_waiver_check",
+            "note": ("These rows remain declared and must meet their percentage "
+                     "in the independent Step-4 goal instrument; this gate "
+                     "counts only cases that can execute a unit TB oracle."),
+        },
         "ok": ok_count,
         "fail": fail_count,
         "not_executed": not_executed_count,
@@ -2194,7 +2215,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "malformed_rows": exec_record.get("malformed") or [],
             "unclaimed_rows": _l10x.unclaimed_rows(
                 [str(case.get("id", case.get("name", "")))
-                 for case in cases], exec_record),
+                 for case in all_cases], exec_record),
         },
         "waived": waive_count,
         "checklist_gaps": checklist_gap_count,
@@ -2269,8 +2290,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 bits.append(f"{gap_waived} WAIVED-DEFERRED for want of an oracle")
             _split = " and ".join(bits) if bits else f"{scope_gap} unclassified"
             print(
-                f"[l10-tb-conformance] SCOPE DISAGREEMENT — the L10 layer "
-                f"carries {len(cases)} case(s) of kind(s) "
+                f"[l10-tb-conformance] SCOPE DISAGREEMENT — the L10 "
+                f"executable population carries {len(cases)} case(s) "
+                f"(plus {len(coverage_goals)} separately measured coverage "
+                f"goal(s)) of kind(s) "
                 f"{{{', '.join(f'{k} {v}' for k, v in hist.items())}}}; the TB "
                 f"producer (testbench_gen) auto-emits a scaffold ONLY for "
                 f"{{{', '.join(scaffold)}}}. This gate grades ALL {len(cases)}. "
