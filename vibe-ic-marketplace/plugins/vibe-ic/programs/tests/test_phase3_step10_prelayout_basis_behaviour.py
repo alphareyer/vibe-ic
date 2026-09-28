@@ -198,6 +198,20 @@ def _run_step(proj):
     return R.step_prelayout_signoff(proj, TOP, _Pdk(), "harness-container")
 
 
+def _bind_current_inputs(proj: Path) -> str:
+    """Make a healthy cached report evidence for this netlist and SDC."""
+    netlist = R._pl.synth_dir(proj) / f"{TOP}_synth.v"
+    sdc = R._pl.pnr_dir(proj) / "constraint.sdc"
+    stamps = (f"STA_BASIS_NETLIST_SHA256: {R._file_sha256(netlist)}\n"
+              f"STA_BASIS_SDC_SHA256: {R._file_sha256(sdc)}\n")
+    for path in (R._pl.sta_dir(proj) / "per_corner").glob("sta_*.rpt"):
+        path.write_text(path.read_text() + stamps)
+    pre = R._pl.sta_dir(proj) / "pre_pnr_timing.rpt"
+    if pre.is_file():
+        pre.write_text(pre.read_text() + stamps)
+    return stamps
+
+
 # ---------------------------------------------------------------------------
 # BLOCKING 1 — a corner whose forced re-emit FAILS
 # ---------------------------------------------------------------------------
@@ -356,6 +370,9 @@ def test_reverse_healthy_pre_layout_rerun_is_left_byte_identical(tmp_path,
         tmp_path,
         per_corner_bodies={"sta_SS.rpt": body, "sta_TT.rpt": body},
         pre_pnr_body=pre)
+    stamps = _bind_current_inputs(proj)
+    body += stamps
+    pre += stamps
     _hermetic(monkeypatch, calls)
 
     res = _run_step(proj)
@@ -386,6 +403,9 @@ def test_reverse_whitespace_variant_stamp_is_still_pre_layout(tmp_path,
         tmp_path,
         per_corner_bodies={"sta_SS.rpt": body, "sta_TT.rpt": body},
         pre_pnr_body=pre)
+    stamps = _bind_current_inputs(proj)
+    body += stamps
+    pre += stamps
     _hermetic(monkeypatch, calls)
 
     res = _run_step(proj)
