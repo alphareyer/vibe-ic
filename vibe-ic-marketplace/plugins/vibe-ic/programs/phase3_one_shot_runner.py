@@ -19305,7 +19305,12 @@ def _compute_resized_die(die_w: int, die_h: int,
 # dense) is caught by the existing over-utilization upsize-retry loop, so this
 # only needs the right BALLPARK. chip-AGNOSTIC (PDK site area + cell count).
 _AUTO_DIE_MIN_SIDE_UM = 60           # floor: never smaller than a tiny core
-_AUTO_DIE_AVG_SITES_PER_CELL = 6.0   # sky130-hd-typical std-cell width in sites
+# The inset between die edge and core on a die with no ring. step_pnr cuts it
+# out of the die (`core_pad`), so the auto-sizer ADDS it to the core it sized.
+_AUTO_DIE_CORE_INSET_UM = 10
+# N4: there is deliberately NO average-cell constant here. A per-PDK "sites
+# per cell" guess (it was 6.0, sky130-hd) sized a gf180mcu die 2.46x too small;
+# the area is now read from the netlist (`_resolve_auto_die_um`).
 _AUTO_DIE_FALLBACK_CELL_UM2 = 7.5    # avg std-cell area when the LEF site parse fails
 _AUTO_DIE_DEFAULT_UTIL = 0.40        # internal safety fallback when a util is unusable
 # GAP-E2E-4 FOLLOW-UP — the auto-die geometry target is a ROUTING-HEADROOM
@@ -19361,39 +19366,10 @@ def _parse_site_area_um2(cell_lef_text: str,
     bound the block, and it would run on into the next MACRO and hand back
     THAT macro's footprint — the very defect above, in another spelling.
     """
-    if not isinstance(cell_lef_text, str) or not cell_lef_text:
-        return None
-    named = core = first = None
-    want = (site_name or "").strip().lower()
-    for m in re.finditer(r"^[ \t]*SITE[ \t]+([^\s;]+)[ \t\r]*$",
-                         cell_lef_text, re.MULTILINE | re.IGNORECASE):
-        name = m.group(1)
-        blk = cell_lef_text[m.end():]
-        end = re.search(rf"^[ \t]*END[ \t]+{re.escape(name)}[ \t\r]*$",
-                        blk, re.MULTILINE | re.IGNORECASE)
-        if end:
-            blk = blk[:end.start()]
-        sm = re.search(r"\bSIZE\s+([0-9.]+)\s+BY\s+([0-9.]+)\s*;",
-                       blk, re.IGNORECASE)
-        if not sm:
-            continue
-        try:
-            w, h = float(sm.group(1)), float(sm.group(2))
-        except ValueError:
-            continue
-        if not (w > 0 and h > 0):
-            continue
-        area = w * h
-        if want and name.lower() == want and named is None:
-            named = area
-        if (core is None
-                and re.search(r"\bCLASS\s+CORE\s*;", blk, re.IGNORECASE)):
-            core = area
-        if first is None:
-            first = area
-    if named is not None:
-        return named
-    return core if core is not None else first
+    # N4: the grammar lives in `_ppa.area.lef_site_dims_um` (it also serves
+    # the PDN floor's row step); this keeps the area view of the same answer.
+    dims = _ppa_area.lef_site_dims_um(cell_lef_text, site_name)
+    return dims[0] * dims[1] if dims else None
 
 
 def _auto_die_side_um(cell_count: int, util_frac: float,
@@ -20651,14 +20627,95 @@ def _effective_die_um(die_um_flag: str,
     return die_um_flag, None
 
 
+def _strap_plan_core_floor(pdk: "PdkConfig", container: str = "",
+                           detail: Optional[Dict[str, Any]] = None
+                           ) -> Tuple[Optional[int], str]:
+    """`(side_um, basis)`: the smallest SQUARE core on which the strap plan
+    this run's PDN deck will emit can be built -- the CONSERVATIVE floor an
+    auto-sized core is GROWN to -- or `(None, why)`.
+
+    `detail`, when given, receives what the EXACT check of a PINNED core
+    needs: the stripes, where they came from, each strap layer's DIRECTION
+    from the tech LEF, and the row site's dimensions. The pinned refusal must
+    not use the padded square floor (review wave 3, N4): an upper bound that
+    is right for growth is not a "below this pdngen fails" threshold.
+
+    The plan is taken from `_build_pdn_tcl`'s own `plan_out` -- the SAME
+    resolution the deck uses (registry `pdn_straps`, else the tech-LEF-derived
+    plan). A deck branch that draws straps without reporting them to
+    `plan_out` (the tuned sky130-style grid) is read from the deck text it
+    emits instead: its `add_pdn_stripe ... -pitch` lines are what pdngen gets.
+    The EM floor and the pre-route sweep may later change a strap; pdngen and
+    the grid-built check stay the authority for that geometry.
+    """
+    info: Dict[str, Any] = detail if detail is not None else {}
+    plan: Dict[str, Any] = {}
+    try:
+        deck = _build_pdn_tcl(pdk, container or None, plan_out=plan)
+    except Exception as exc:  # noqa: BLE001
+        why = (f"the PDN deck could not be built to read its strap plan "
+               f"({type(exc).__name__}: {exc})")
+        info.update(status="NOT_DETERMINED", reason=why)
+        return None, why
+    straps = [dict(st) for st in (plan.get("straps") or [])]
+    source = "the PDN deck's plan_out"
+    if not straps:
+        # Line by line: a follow-pin rail may carry `-pitch` too (the row
+        # pitch), and a rail is not a strap period.
+        for line in (deck or "").splitlines():
+            if "-followpins" in line:
+                continue
+            m = re.search(
+                r"add_pdn_stripe\s+-grid\s+\S+\s+-layer\s+(\S+)\s+-width\s+"
+                r"([0-9.]+)\s+-pitch\s+([0-9.]+)\s+-offset\s+([0-9.]+)", line)
+            if m:
+                straps.append({"layer": m.group(1), "width": float(m.group(2)),
+                               "pitch": float(m.group(3)),
+                               "offset": float(m.group(4))})
+        source = "the add_pdn_stripe lines of the emitted PDN deck"
+    if not straps:
+        why = ("the PDN deck this PDK emits draws no pitched strap (follow-pin "
+               "rails only, or no grid), so there is no strap period to fit")
+        info.update(status="NOT_DETERMINED", reason=why)
+        return None, why
+    site = str(getattr(pdk, "site", "") or "")
+    dims = None
+    dims_from = None
+    directions: Dict[str, str] = {}
+    for _lef in (getattr(pdk, "tech_lef", None), getattr(pdk, "cell_lef", None)):
+        try:
+            _txt = _read_pdk_text(_lef, container or None)
+        except Exception:  # noqa: BLE001
+            _txt = None
+        if not directions and _txt:
+            directions = {name: d for name, d, _p, _w
+                          in _techlef_routing_layers(_txt) if d}
+        if dims is None:
+            dims = _ppa_area.lef_site_dims_um(_txt or "", site)
+            dims_from = str(_lef) if dims else None
+    side, basis = _ppa_power.pdn_strap_min_core_span_um(
+        straps, nets=2, site_dims_um=dims)
+    info.update(status=("DERIVED" if side else "NOT_DETERMINED"),
+                reason=(None if side else basis),
+                growth_floor_um=side, growth_floor_basis=basis,
+                plan_source=source, stripes=straps,
+                directions={st["layer"]: directions.get(st["layer"])
+                            for st in straps},
+                site_dims_um=list(dims) if dims else None,
+                site_dims_from=dims_from)
+    return side, basis
+
+
 def _resolve_auto_die_um(die_um: str, netlist: Path, util: float,
                          pdk: "PdkConfig",
                          project: Optional[Path] = None,
                          top: str = "", container: str = "",
-                         metrics: Optional[dict] = None
+                         metrics: Optional[dict] = None,
+                         strap_core_floor: Optional[Tuple[Optional[int], str]] = None
                          ) -> Tuple[str, Optional[str]]:
-    """If `die_um` is the sentinel 'auto', compute a real 'WxH' from the synth
-    netlist's cell count + the PDK site area + a target util. Otherwise return
+    """If `die_um` is the sentinel 'auto', compute a real 'WxH': the CORE from
+    the synthesised netlist's own cell area at a target util, grown to hold one
+    period of the PDN straps (`strap_core_floor`), plus the core inset. Otherwise return
     `die_um` unchanged. Returns (die_um, note). Any failure falls back to a safe
     fixed die so the flow never breaks on a sizing error.
 
@@ -20684,67 +20741,52 @@ def _resolve_auto_die_um(die_um: str, netlist: Path, util: float,
     except Exception:
         nl = ""
     cells = _count_placed_cells_from_netlist(nl)
-    # The PDK's OWN declared row site — the same name that is handed to
-    # `initialize_floorplan -site` below, so the die model measures the site
-    # the floorplan will actually build rows from.
-    _site_name = str(getattr(pdk, "site", "") or "")
-    site_area = None
-    try:
-        site_area = _parse_site_area_um2(
-            Path(pdk.cell_lef).read_text(errors="ignore"), _site_name)
-    except Exception:
-        site_area = None
-    if site_area is None and container:
-        # TWO defects kept this branch dead on every containerised run:
-        #
-        # (1) the read cannot succeed — the PDK ships INSIDE the EDA image, so
-        #     `pdk.cell_lef` is an in-container path and the host-side
-        #     `read_text` above always raises FileNotFoundError (MEASURED on
-        #     sky130A: cell_lef=/foss/pdks/sky130A/.../sky130_fd_sc_hd.lef,
-        #     `is_file()` on the host = False);
-        # (2) the CELL lef is the wrong file — it carries only SITE
-        #     REFERENCES (`SITE unithd ;`, one per macro). The SITE DEFINITION
-        #     that owns the row geometry lives in the TECH lef (MEASURED on
-        #     sky130A: 0 site definitions in the cell lef, 2 in
-        #     `techlef/sky130_fd_sc_hd__nom.tlef`).
-        #
-        # Read through the container, TECH lef first (where the definition
-        # belongs), then the cell lef for PDKs that inline it there.
-        for _lef in (getattr(pdk, "tech_lef", "") or "", pdk.cell_lef or ""):
-            if not _lef:
-                continue
+    # N4 — THE CELL AREA IS READ FROM THIS NETLIST, NEVER GUESSED PER PDK.
+    #
+    # This used to be `site area x _AUTO_DIE_AVG_SITES_PER_CELL (6.0)`, a
+    # sky130-hd width in sites. MEASURED, spm x gf180mcuD as a HARDMACRO (lane
+    # cmpb, 2026-09-28): 2.195 um^2 x 6 = 13.17 um^2 per cell where this
+    # netlist's own synthesis stat says 8857.632 um^2 / 273 cells = 32.4, so the
+    # die came out 2.46x too small in area, OpenROAD reported `Effective
+    # utilization: 2.193`, and the core was narrower than one period of the
+    # PDK's own power straps (pdngen built no grid; pnr rc=1).
+    #
+    # Two measured sources, in order: the synthesis stat bound to THIS
+    # netlist's sha256 (unit established as um^2), else the sum of every
+    # instance's own LEF SIZE. Neither available -> the disclosed FALLBACK
+    # CONSTANT, labelled as one.
+    _area_why: List[str] = []
+    cell_area, _src = _ppa_area.synth_stat_cell_area_um2(netlist)
+    if cell_area is None:
+        _area_why.append(_src)
+        _counts: Dict[str, int] = {}
+        for _m in _NETLIST_INSTANCE_RE.finditer(nl):
+            if _m.group(1).lower() not in _NETLIST_NON_CELL_KEYWORDS:
+                _counts[_m.group(1)] = _counts.get(_m.group(1), 0) + 1
+        _sizes: Dict[str, Tuple[float, float]] = {}
+        if _counts:
             try:
-                _rc, _out, _ = _docker_exec(
-                    container, f"cat {shlex.quote(str(_lef))}", timeout=120)
-            except Exception:
-                continue
-            if _rc == 0 and _out:
-                site_area = _parse_site_area_um2(_out, _site_name)
-                if site_area:
-                    break
-    # DEGRADE LOUDLY, NEVER SILENTLY.
-    #
-    # The fallback prints `avg_cell=<constant>µm²` in exactly the format it
-    # uses for a MEASURED value, so without a source label nothing downstream —
-    # and no reader — can tell that the die was sized from a constant rather
-    # than from this PDK.
-    #
-    # Measured consequence on one real cell: the fallback over-estimated the
-    # average cell area by 5.3x against the design's OWN post-synthesis report,
-    # so `--die-um auto` produced a die 5.3x too large in area and OpenROAD
-    # reported `Effective utilization: 0.064` against a 0.25 target.
-    #
-    # The two reads above (host, then through the container) are what make the
-    # measured branch REACHABLE; this label is what makes the other branch
-    # ADMIT it is not a measurement.
-    _avg_cell_src = "site-LEF"
-    if site_area:
-        avg_cell = site_area * _AUTO_DIE_AVG_SITES_PER_CELL
+                _lef_txt = _read_pdk_text(getattr(pdk, "cell_lef", None),
+                                          container or None)
+                if _lef_txt:
+                    import _pad_ring as _pr_lef  # noqa: PLC0415
+                    _sizes = _pr_lef.parse_lef_macros(_lef_txt)
+            except Exception as exc:  # noqa: BLE001
+                _area_why.append(f"cell LEF unreadable ({type(exc).__name__})")
+        cell_area, _src = _ppa_area.instance_cell_area_um2(_counts, _sizes)
+        if cell_area is None:
+            _area_why.append(_src)
+    if cell_area is not None and cells > 0:
+        avg_cell = cell_area / cells
+        _avg_cell_src = _src
     else:
         avg_cell = _AUTO_DIE_FALLBACK_CELL_UM2
-        _avg_cell_src = ("FALLBACK CONSTANT — no SITE definition was found in "
-                         "this PDK's tech LEF or cell LEF, so the die is NOT "
-                         "sized from this process; verify the die/utilization")
+        cell_area = float(max(cells, 0)) * avg_cell
+        _avg_cell_src = ("FALLBACK CONSTANT — neither a synthesis stat bound to "
+                         "this netlist nor a LEF SIZE for every instance could "
+                         "be read, so the core is NOT sized from this design ("
+                         + "; ".join(_area_why)
+                         + "); verify the die/utilization")
     # die-util FIDELITY: honor the design's own declared core density; else the
     # routing-headroom default. `util` (placement) is deliberately unused here.
     # Precedence: L9 generated constraint (design's own authored target) > the
@@ -20782,7 +20824,25 @@ def _resolve_auto_die_um(die_um: str, netlist: Path, util: float,
                      f"→ {pin_side}x{pin_side} (pin_pitch={_pin_pitch:g}µm)"))
         return "1500x1500", ("die-um=auto but the netlist has 0 countable "
                              "cells; falling back to 1500x1500")
-    cell_side = _auto_die_side_um(cells, util_frac, avg_cell)
+    # N4 — THE UTILISATION IS THE CORE'S, SO THE AREA SIZES THE CORE. The die
+    # is that core plus the inset the floorplan cuts back out of it
+    # (`_AUTO_DIE_CORE_INSET_UM`, the same number step_pnr uses as `core_pad`).
+    # Sizing the DIE to the area and then cutting the inset out of it is what
+    # packed 2.19x the cell area into spm's core.
+    core_side = _auto_die_side_um(cells, util_frac, avg_cell, min_side=1)
+    # AND THE CORE MUST HOLD ONE PERIOD OF THE POWER STRAPS THE DECK WILL ASK
+    # pdngen FOR. Below that pdngen builds no grid at all and the run dies at
+    # the PDN step with a layout nobody can power; the caller hands the floor
+    # it derived from the same strap plan the deck emits.
+    _floor, _floor_basis = strap_core_floor or (None, "")
+    _pdn_note = ""
+    if _floor and core_side < int(_floor):
+        _pdn_note = (f"; PDN_CORE_GROWN: core {core_side} -> {int(_floor)} um "
+                     f"so every strap group fits ({_floor_basis})")
+        core_side = int(_floor)
+    cell_side = max(_AUTO_DIE_MIN_SIDE_UM,
+                    min(core_side + 2 * _AUTO_DIE_CORE_INSET_UM,
+                        _DEFAULT_DIE_MAX_UM))
     side = max(cell_side, pin_side)
     _pin_note = ""
     if pin_side > cell_side:
@@ -20800,13 +20860,18 @@ def _resolve_auto_die_um(die_um: str, netlist: Path, util: float,
     if metrics is not None:
         metrics.update(cells=cells, avg_cell_um2=avg_cell,
                        avg_cell_source=_avg_cell_src,
-                       cell_area_um2=float(cells) * float(avg_cell),
+                       cell_area_um2=float(cell_area),
                        die_target_util=util_frac, die_target_util_source=_util_src,
+                       core_side_um=side - 2 * _AUTO_DIE_CORE_INSET_UM,
+                       core_inset_um=_AUTO_DIE_CORE_INSET_UM,
+                       strap_core_floor_um=_floor,
                        auto_side_um=side)
     return (f"{side}x{side}",
-            f"die-um=auto → {side}x{side} (cells={cells}, "
+            f"die-um=auto → {side}x{side} (core "
+            f"{side - 2 * _AUTO_DIE_CORE_INSET_UM} + {_AUTO_DIE_CORE_INSET_UM}"
+            f" um inset; cells={cells}, cell_area={cell_area:.1f}µm², "
             f"avg_cell={avg_cell:.2f}µm² [{_avg_cell_src}], "
-            f"target_util={util_frac:g} [{_util_src}]{_pin_note})")
+            f"target_util={util_frac:g} [{_util_src}]{_pdn_note}{_pin_note})")
 
 
 def _compute_downsized_die(die_w: int, die_h: int,
@@ -21315,7 +21380,8 @@ def _floorplan_rectangles_record(project: Path,
                                  die_source: str,
                                  core_pad: int,
                                  ring_inset_um: Optional[float],
-                                 seal_ring: Optional[Dict[str, Any]] = None
+                                 seal_ring: Optional[Dict[str, Any]] = None,
+                                 pdn_core_floor: Optional[Dict[str, Any]] = None
                                  ) -> Dict[str, Any]:
     """Write both rectangles and say which is which. Written on EVERY run.
 
@@ -21334,6 +21400,9 @@ def _floorplan_rectangles_record(project: Path,
         "core_pad_um": int(core_pad),
         "ring_inset_um": ring_inset_um,
         "seal_ring_margin": seal_ring,
+        # N4: the strap floor this floorplan was grown to / checked against,
+        # or the NAMED reason it could not be derived (NOT_DETERMINED).
+        "pdn_core_floor": pdn_core_floor,
         "note": (
             "`floorplan_rect_um` is what OpenROAD was given as BOTH -die_area "
             "and -core_area. When it is not null the DEF's DIEAREA states it "
@@ -37337,10 +37406,27 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     if _l9_die_note:
         print(f"[phase3] {_l9_die_note}", file=sys.stderr)
     _auto_die_requested = str(die_um).lower() == "auto"
+    _die_source = ("--die-um auto" if _auto_die_requested
+                   else (_l9_die_note or f"--die-um {die_um} (explicit)"))
     _auto_die_metrics: dict = {}
+    # N4 — the core must hold one period of the strap plan the deck emits. The
+    # floor is derived ONCE here and read by both the auto-sizer (which grows
+    # the core to it) and the refusal below (a pinned core that cannot hold it).
+    _strap_floor_detail: Dict[str, Any] = {}
+    _strap_floor_um, _strap_floor_basis = _strap_plan_core_floor(
+        pdk, container, detail=_strap_floor_detail)
+    if _strap_floor_um is None:
+        # Named, printed and persisted (floorplan_rectangles.json): with no
+        # floor neither the growth nor the pinned-core check runs, and a run
+        # that skipped them must not look like one that passed them.
+        print(f"[phase3] PDN_CORE_FLOOR_NOT_DETERMINED: {_strap_floor_basis} "
+              f"-- the auto core is not grown to a strap floor and a pinned "
+              f"core is not pre-checked; pdngen and the grid-built check "
+              f"remain the only authority", file=sys.stderr)
     die_um, _auto_die_note = _resolve_auto_die_um(
         die_um, netlist, util, pdk, project, top=top, container=container,
-        metrics=_auto_die_metrics)
+        metrics=_auto_die_metrics,
+        strap_core_floor=(_strap_floor_um, _strap_floor_basis))
     if _auto_die_note:
         print(f"[phase3] {_auto_die_note}", file=sys.stderr)
     # THE PAD RING'S FLOOR. A die is a free parameter only until the design has
@@ -37387,7 +37473,13 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             # WHAT THE CORE NEEDED IS STILL TRUE AFTER THE RING GREW THE DIE.
             # Kept here, where the auto-sizer's answer is still in hand, and
             # applied to the CORE rectangle below.
-            _core_sized_um = (_cur_w, _cur_h) if _cur_w and _cur_h else None
+            # N4: the auto-sizer now reports its CORE; the die it returned is
+            # that core plus the inset, so the core is the number to keep.
+            _cs = _auto_die_metrics.get("core_side_um")
+            if isinstance(_cs, int) and _cs > 0:
+                _core_sized_um = (_cs, _cs)
+            else:
+                _core_sized_um = (_cur_w, _cur_h) if _cur_w and _cur_h else None
             die_um = f"{_ring_side}x{_ring_side}"
             # AND IT IS NO LONGER AUTO. `_auto_die_requested` is the opt-in for
             # the over-sparse DOWNSIZE retry, whose premise is that a die the
@@ -37407,7 +37499,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # it stays for a design with no ring; a design WITH one insets by the
     # ring's measured depth instead — see `_padring_core_inset_um` for the
     # 3104 Shorts the flat inset produced.
-    core_pad = 10
+    core_pad = _AUTO_DIE_CORE_INSET_UM
     _ring_inset, _ring_inset_why = _padring_core_inset_um(project, pdk)
     if _ring_inset_why:
         return StepResult(
@@ -37558,6 +37650,45 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
               f"core-boundary mode — cannot put a pin in the seal-ring band",
               file=sys.stderr)
 
+    # === N4 — A CORE THAT CANNOT HOLD ONE STRAP PERIOD IS REFUSED HERE ======
+    # pdngen would build no grid on it and the run would find out at the PDN
+    # step as an unpowered layout. An auto core was already grown to the floor;
+    # what reaches this is a core somebody pinned (an explicit or declared die,
+    # a slot, a ring interior, a seal band cut out of a pinned die), and
+    # growing it would replace their floorplan with ours. So the numbers are
+    # handed back instead.
+    _chk_w, _chk_h = core_w, core_h
+    if fp_rect:
+        _chk_w, _chk_h = fp_rect[2] - fp_rect[0], fp_rect[3] - fp_rect[1]
+    # EXACT, NOT PADDED (review wave 3): a pinned core is refused only when a
+    # strap group cannot fit its SNAPPED extent on the stripe's own axis --
+    # the check pdngen itself makes. The padded square floor above is for
+    # growing a core the flow owns and is never a refusal threshold.
+    _misfit = (_ppa_power.pdn_strap_core_misfit(
+                   _strap_floor_detail.get("stripes") or [], _chk_w, _chk_h,
+                   nets=2,
+                   site_dims_um=_strap_floor_detail.get("site_dims_um"),
+                   directions=_strap_floor_detail.get("directions"))
+               if _strap_floor_um else [])
+    _strap_floor_detail["pinned_core_checked_um"] = [_chk_w, _chk_h]
+    _strap_floor_detail["pinned_core_misfit"] = _misfit
+    if _misfit:
+        _src_now = (f"shuttle slot {_slot['slot']} CORE_AREA" if _slot
+                    else _die_source + (" inside the pad ring's die"
+                                        if _ring_pinned_die else ""))
+        _why = "; ".join(
+            f"{m['layer']} ({m['direction'] or 'direction unknown'}) needs "
+            f"{m['need_um']:g} um of core {m['axis']}, this core's snapped "
+            f"extent is {m['have_um']:g} um" for m in _misfit)
+        return StepResult(
+            "pnr", "FAIL", time.time() - t0,
+            f"PDN_CORE_TOO_SMALL: core {_chk_w}x{_chk_h} um: {_why} "
+            f"(strap plan: {_strap_floor_detail.get('plan_source')}; site "
+            f"{_strap_floor_detail.get('site_dims_um')}); the core comes from "
+            f"{_src_now}. pdngen refuses a strap group whose offset + width + "
+            f"half a pitch exceeds the rows' extent. State a die whose core "
+            f"holds it, or a strap plan that fits.")
+
     # === CT-03 — THE PINS, AND ONLY THE PINS ================================
     # MEASURED on spm x gf180mcuD (lane czspmtail, image 0.3.46): OpenROAD was
     # handed `-die_area "0 0 3162 3162"` — the RING-SIZED die — while the rows
@@ -37631,7 +37762,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                     else f"--die-um {die_w}x{die_h} at the origin"),
         core_pad=core_pad,
         ring_inset_um=_ring_inset,
-        seal_ring=_seal_rec)
+        seal_ring=_seal_rec,
+        pdn_core_floor=_strap_floor_detail)
 
     # Pick clock buffer cells: PdkConfig-carried masters win (every registry
     # PDK carries clk_buf_cell/root); otherwise DISCOVER them from the PDK's own
@@ -39194,7 +39326,13 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                 _meas = (_sd.get("fill_core_util_pct")
                          if _sd.get("fill_core_util_pct") is not None
                          else _sd.get("tapcell_core_util_pct"))
-                _dn = (_compute_downsized_die(die_w, die_h, _meas)
+                # N4: never tighten a die below the one whose core still holds
+                # one strap period — that is the die pdngen cannot power.
+                _dn = (_compute_downsized_die(
+                           die_w, die_h, _meas,
+                           die_min_um=max(_AUTO_DIE_MIN_SIDE_UM,
+                                          int(_strap_floor_um or 0)
+                                          + 2 * core_pad))
                        if _meas is not None else None)
                 if _dn is not None:
                     _new_w, _new_h = _dn
@@ -39333,7 +39471,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                          f"the origin"),
         core_pad=core_pad,
         ring_inset_um=_ring_inset,
-        seal_ring=_seal_rec)
+        seal_ring=_seal_rec,
+        pdn_core_floor=_strap_floor_detail)
 
     def_file = out_dir / f"{top}.def"
     sta_file = out_dir / "sta.rpt"

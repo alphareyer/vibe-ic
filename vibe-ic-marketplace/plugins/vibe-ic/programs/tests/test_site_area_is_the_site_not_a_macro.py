@@ -1,8 +1,9 @@
 """`--die-um auto` must size from the SITE definition, never from a macro.
 
-`_parse_site_area_um2` feeds `_resolve_auto_die_um`: `avg_cell = site_area *
-_AUTO_DIE_AVG_SITES_PER_CELL`, and the die side is `sqrt(cells * avg_cell /
-util)`. A wrong site area therefore propagates straight into the die AREA.
+`_parse_site_area_um2` fed `_resolve_auto_die_um` (`avg_cell = site_area x
+6.0`) until N4 (2026-09-28) replaced that per-PDK constant with the netlist's
+own measured cell area; the site now sets only the PDN floor's row step. A
+wrong site still propagates into geometry, so the parser's contract stands.
 
 Two defects, both MEASURED on sky130A (plugin 1.9.76, vibeic-eda image 0.2.58 —
 written WITHOUT the fully-qualified pull form on purpose: this records which
@@ -185,10 +186,19 @@ END unithd
 
 # ── the container read must actually RUN ─────────────────────────────────────
 #
-# A site of 1.00 x 2.00 is used below ON PURPOSE: 2.0 x 6.0 = 12.0 µm²/cell
-# gives a die that CANNOT be produced by the 7.5 fallback constant, so the die
-# NUMBER itself — not just a log label — proves which source was read.
+# N4 (FX_N4_autodie_sizing, 2026-09-28): the die is no longer sized from the
+# SITE (`site area x 6.0 sites/cell` was a sky130-hd constant that sized a
+# gf180mcu core 2.46x too small). The auto-sizer now reads each instance's own
+# MACRO SIZE from the CELL lef — which lives only inside the EDA image, so the
+# container read is still the thing that must actually RUN. The site parser
+# above is unchanged and still tested; it now feeds only the PDN row step.
+#
+# The netlist below instantiates `sky130_fd_sc_hd__inv_1` (1.38 x 2.72 um in
+# the fixture), so the measured core is sqrt(10000 x 3.7536 / 0.25) = 387.5 ->
+# 388 um and the die 388 + 2 x 10 = 408 — a number the 7.5 fallback constant
+# (core 548, die 568) cannot produce.
 
+# Landed fixture (restored verbatim): a site of 1.00 x 2.00.
 _TECH_LEF_DISTINCT = """\
 VERSION 5.7 ;
 LAYER met1
@@ -204,95 +214,201 @@ END unithd
 
 class _Pdk:
     """In-container PDK paths — neither exists on the host, which is the whole
-    point: this is the topology in which the site read used to be dead."""
+    point: this is the topology in which the LEF read used to be dead."""
     name = "openpdk"
     site = "unithd"
     cell_lef = "/in-container-only/lef/cells.lef"
     tech_lef = "/in-container-only/techlef/tech.tlef"
 
 
-def _netlist(tmp_path, n=10000):
+def _netlist(tmp_path, n=10000, master="sky130_fd_sc_hd__inv_1"):
     p = tmp_path / "netlist.v"
     p.write_text("module top ();\n" + "".join(
-        f"  inv_1 u{i} (.A(a), .Y(y{i}));\n" for i in range(n)) + "endmodule\n")
+        f"  {master} u{i} (.A(a), .Y(y{i}));\n" for i in range(n))
+        + "endmodule\n")
     return p
 
 
 def test_the_container_read_is_reached_and_the_die_comes_from_it(
         tmp_path, monkeypatch):
     """OBSERVED, not asserted on source: the fake `_docker_exec` RECORDS the
-    commands auto-die sizing issues. Pre-fix that list is EMPTY — the read
-    never happened on a containerised run — and the die is the constant's
-    548x548. Post-fix the tech LEF is `cat`-ed and the die is 693x693:
-    sqrt(10000 x (1.00 x 2.00 x 6.0) / 0.25) = 692.8 -> 693."""
+    commands auto-die sizing issues. The cell LEF must be `cat`-ed through the
+    container and the die must be the one its MACRO SIZEs imply."""
     calls = []
 
     def fake_exec(container, cmd, timeout=1800, **kw):
         calls.append(cmd)
-        if _Pdk.tech_lef in cmd:
-            return 0, _TECH_LEF_DISTINCT, ""
         if _Pdk.cell_lef in cmd:
             return 0, _CELL_LEF_MACROS_FIRST, ""
         return 1, "", "cat: no such file or directory"
 
     monkeypatch.setattr(R, "_docker_exec", fake_exec)
+    monkeypatch.setattr(R, "_container_file_text",
+                        lambda c, path: fake_exec(c, f"cat {path}")[1] or None)
     assert not Path(_Pdk.cell_lef).is_file()
-    assert not Path(_Pdk.tech_lef).is_file()
 
     die, note = R._resolve_auto_die_um(
         "auto", _netlist(tmp_path), 0.30, _Pdk(), project=None, top="",
         container="an-eda-container")
 
-    assert any(_Pdk.tech_lef in c for c in calls), (
-        f"the site read never reached the container — still dead code; "
-        f"commands issued: {calls}")
-    assert die == "693x693", (die, note)
-    assert "[site-LEF]" in note, note
+    assert any(_Pdk.cell_lef in c for c in calls), (
+        f"the cell LEF read never reached the container; commands: {calls}")
+    assert die == "408x408", (die, note)
+    assert "LEF SIZE" in note, note
     assert "FALLBACK CONSTANT" not in note, note
+
+
+def _deck_stub(pdk, container=None, plan_out=None, **kw):
+    """A PDN deck that draws two pitched strap layers and reports nothing to
+    `plan_out` -- the tuned-grid deck shape. Its text is what pdngen gets."""
+    return ("  add_pdn_stripe -grid grid -layer met4 -width 1.6 -pitch 40.0 "
+            "-offset 8.0\n"
+            "  add_pdn_stripe -grid grid -layer met5 -width 1.6 -pitch 40.0 "
+            "-offset 8.0\n")
 
 
 def test_the_cell_lef_is_tried_when_the_tech_lef_declares_no_site(
         tmp_path, monkeypatch):
     """Two of the four PDKs shipped in the EDA image keep the site definition
-    in the CELL lef, not the tech lef. The fall-through must reach it."""
+    in the CELL lef, not the tech lef. The fall-through must reach it.
+
+    RESTORED (review wave 3, N4). The landed body asserted `die == "693x693"`
+    and `"[site-LEF]" in note`: 693 = sqrt(10000 x 1.00 x 2.00 x 6.0 / 0.25),
+    i.e. the removed sites-per-cell constant, which N4 deletes by design, so
+    those two lines cannot hold on any tree carrying N4 (measured: the
+    verbatim body returns 568x568 there). The SUBJECT -- the tech-LEF-first,
+    cell-LEF-second site fall-through -- still exists: the row site now sets
+    the PDN floor's snapping step. The name, docstring, fixture and fake exec
+    are the landed ones; the assertion is made on the site's one consumer."""
     def fake_exec(container, cmd, timeout=1800, **kw):
         if _Pdk.tech_lef in cmd:
             return 0, "VERSION 5.7 ;\nEND LIBRARY\n", ""
         return 0, _TECH_LEF_DISTINCT, ""
 
     monkeypatch.setattr(R, "_docker_exec", fake_exec)
-    die, note = R._resolve_auto_die_um(
-        "auto", _netlist(tmp_path), 0.30, _Pdk(), project=None, top="",
-        container="an-eda-container")
-    assert die == "693x693", (die, note)
-    assert "[site-LEF]" in note, note
+    monkeypatch.setattr(R, "_container_file_text",
+                        lambda c, path: fake_exec(c, f"cat {path}")[1] or None)
+    monkeypatch.setattr(R, "_build_pdn_tcl", _deck_stub)
+    detail = {}
+    side, basis = R._strap_plan_core_floor(_Pdk(), "an-eda-container",
+                                           detail=detail)
+    assert detail["site_dims_um"] == [1.0, 2.0], detail
+    assert detail["site_dims_from"] == _Pdk.cell_lef, detail
+    assert "site/row steps 1/2" in basis, basis
+
+
+_CELL_LEF_OTHER_SITE = """\
+VERSION 5.7 ;
+SITE cellsite
+  CLASS CORE ;
+  SIZE 0.46 BY 2.72 ;
+END cellsite
+END LIBRARY
+"""
+
+
+def test_the_tech_lef_is_read_first_and_its_site_sets_the_floor(
+        tmp_path, monkeypatch):
+    """The first half of "tech LEF, then cell LEF" (review wave 5, N4).
+
+    On main this half was guarded by the landed
+    `test_the_container_read_is_reached_and_the_die_comes_from_it`: the tech
+    LEF had to be `cat`-ed through the container and the die came from its
+    1 x 2 site (693 = the removed sites-per-cell constant). The site now sets
+    the PDN floor's row step, so the value asserted is the one the NEW sizing
+    produces from that site -- derived here from the same strap plan, not a
+    remembered number. The cell LEF carries a DIFFERENT site (0.46 x 2.72,
+    which gives a different floor), so reading it first, or skipping the
+    tech LEF, turns this red."""
+    from _ppa import power as _pp
+    calls = []
+
+    def fake_read(container, path):
+        calls.append(path)
+        if path == _Pdk.tech_lef:
+            return _TECH_LEF_DISTINCT
+        if path == _Pdk.cell_lef:
+            return _CELL_LEF_OTHER_SITE
+        return None
+
+    monkeypatch.setattr(R, "_container_file_text", fake_read)
+    monkeypatch.setattr(R, "_build_pdn_tcl", _deck_stub)
+    detail = {}
+    side, basis = R._strap_plan_core_floor(_Pdk(), "an-eda-container",
+                                           detail=detail)
+    assert calls and calls[0] == _Pdk.tech_lef, calls   # read, and read first
+    assert detail["site_dims_um"] == [1.0, 2.0], detail
+    assert detail["site_dims_from"] == _Pdk.tech_lef, detail
+    stripes = detail["stripes"]
+    want, _ = _pp.pdn_strap_min_core_span_um(stripes, nets=2,
+                                             site_dims_um=(1.0, 2.0))
+    other, _ = _pp.pdn_strap_min_core_span_um(stripes, nets=2,
+                                              site_dims_um=(0.46, 2.72))
+    assert side == want and want != other, (side, want, other)
 
 
 def test_no_site_anywhere_degrades_loudly_instead_of_inventing_one(
         tmp_path, monkeypatch):
     """A PDK that declares no site must NOT get a constant dressed up as a
-    measurement. The line has to SAY it is a fallback."""
+    measurement. The line has to SAY it is a fallback.
+
+    RESTORED (review wave 3, N4). The landed body asserted the auto die
+    `548x548` from the fallback average cell; N4 adds the 2 x 10 um core inset
+    (568) and keeps that label in the die note -- covered beside this by
+    `test_no_lef_anywhere_degrades_loudly_instead_of_inventing_one`. The site
+    itself, where no LEF declares one, still degrades: the PDN floor's basis
+    must SAY the row step was unknown rather than invent one."""
     def fake_exec(container, cmd, timeout=1800, **kw):
         return 0, "VERSION 5.7 ;\nEND LIBRARY\n", ""
 
     monkeypatch.setattr(R, "_docker_exec", fake_exec)
+    monkeypatch.setattr(R, "_container_file_text",
+                        lambda c, path: fake_exec(c, f"cat {path}")[1])
+    monkeypatch.setattr(R, "_build_pdn_tcl", _deck_stub)
+    detail = {}
+    _side, basis = R._strap_plan_core_floor(_Pdk(), "an-eda-container",
+                                            detail=detail)
+    assert detail["site_dims_um"] is None
+    assert "site size unknown" in basis, basis
+
+
+def test_a_master_the_lef_does_not_size_is_named_not_guessed(
+        tmp_path, monkeypatch):
+    """A sum over only the masters one LEF happens to carry is an under-count
+    of unknown size. It must degrade to the LABELLED fallback and NAME the
+    master it could not size."""
+    monkeypatch.setattr(R, "_container_file_text",
+                        lambda c, path: _CELL_LEF_MACROS_FIRST)
+    die, note = R._resolve_auto_die_um(
+        "auto", _netlist(tmp_path, master="unknown_cell_x1"), 0.30, _Pdk(),
+        project=None, top="", container="an-eda-container")
+    assert "FALLBACK CONSTANT" in note, note
+    assert "unknown_cell_x1" in note, note
+    assert die == "568x568", (die, note)  # core sqrt(10000*7.5/0.25)=548 +2x10
+
+
+def test_no_lef_anywhere_degrades_loudly_instead_of_inventing_one(
+        tmp_path, monkeypatch):
+    """A PDK whose cell LEF cannot be read must NOT get a constant dressed up
+    as a measurement. The line has to SAY it is a fallback."""
+    monkeypatch.setattr(R, "_container_file_text", lambda c, path: None)
     die, note = R._resolve_auto_die_um(
         "auto", _netlist(tmp_path), 0.30, _Pdk(), project=None, top="",
         container="an-eda-container")
     assert "FALLBACK CONSTANT" in note, note
-    assert die == "548x548", (die, note)  # sqrt(10000 * 7.5 / 0.25) = 547.7
+    assert die == "568x568", (die, note)
 
 
 def test_a_container_read_that_fails_does_not_break_the_flow(
         tmp_path, monkeypatch):
-    """`docker exec` raising must degrade to the disclosed constant, not
+    """The container read raising must degrade to the disclosed constant, not
     propagate out of die sizing."""
-    def boom(container, cmd, timeout=1800, **kw):
+    def boom(container, path):
         raise RuntimeError("docker daemon is not reachable")
 
-    monkeypatch.setattr(R, "_docker_exec", boom)
+    monkeypatch.setattr(R, "_container_file_text", boom)
     die, note = R._resolve_auto_die_um(
         "auto", _netlist(tmp_path), 0.30, _Pdk(), project=None, top="",
         container="an-eda-container")
     assert "FALLBACK CONSTANT" in note, note
-    assert die == "548x548", (die, note)
+    assert die == "568x568", (die, note)

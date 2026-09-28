@@ -574,6 +574,11 @@ class TestSiliconCriticalPnrBlocks:
 # ---------------------------------------------------------------------------
 class TestDieAutoSizing:
     _SITE_AREA = 1.2512  # sky130_fd_sc_hd unithd: 0.46 x 2.72
+    # The fixture's own sky130-hd mean cell width in sites. It used to be read
+    # from the runner (`_AUTO_DIE_AVG_SITES_PER_CELL`); N4 removed that per-PDK
+    # constant from the flow, and these tests exercise only the side math,
+    # which takes the average cell area as an INPUT.
+    _SITES_PER_CELL = 6.0
 
     def test_parse_site_area_from_lef(self):
         lef = ("SITE unithd\n  SYMMETRY Y ;\n  CLASS CORE ;\n"
@@ -586,7 +591,7 @@ class TestDieAutoSizing:
         assert mod._parse_site_area_um2(None) is None
 
     def test_auto_die_sizes_to_target_util(self):
-        avg = self._SITE_AREA * mod._AUTO_DIE_AVG_SITES_PER_CELL
+        avg = self._SITE_AREA * self._SITES_PER_CELL
         side = mod._auto_die_side_um(22786, 0.40, avg)
         # design lands near the requested 40% util (not the fixed-die 4%)
         util = 22786 * avg / (side * side)
@@ -595,26 +600,26 @@ class TestDieAutoSizing:
 
     def test_auto_die_matches_aes_empirical_converge(self):
         # aes converged at 1400x1400 (~15% util); the helper reproduces it.
-        avg = self._SITE_AREA * mod._AUTO_DIE_AVG_SITES_PER_CELL
+        avg = self._SITE_AREA * self._SITES_PER_CELL
         side = mod._auto_die_side_um(39180, 0.15, avg)
         assert 1350 <= side <= 1450
 
     def test_auto_die_monotonic_in_cell_count(self):
-        avg = self._SITE_AREA * mod._AUTO_DIE_AVG_SITES_PER_CELL
+        avg = self._SITE_AREA * self._SITES_PER_CELL
         assert (mod._auto_die_side_um(1000, 0.4, avg)
                 < mod._auto_die_side_um(50000, 0.4, avg))
 
     def test_auto_die_clamps_tiny_to_floor(self):
-        avg = self._SITE_AREA * mod._AUTO_DIE_AVG_SITES_PER_CELL
+        avg = self._SITE_AREA * self._SITES_PER_CELL
         assert mod._auto_die_side_um(1, 0.4, avg) == mod._AUTO_DIE_MIN_SIDE_UM
 
     def test_auto_die_clamps_huge_to_max(self):
-        avg = self._SITE_AREA * mod._AUTO_DIE_AVG_SITES_PER_CELL
+        avg = self._SITE_AREA * self._SITES_PER_CELL
         assert (mod._auto_die_side_um(10_000_000, 0.4, avg)
                 == mod._DEFAULT_DIE_MAX_UM)
 
     def test_auto_die_bad_util_falls_back(self):
-        avg = self._SITE_AREA * mod._AUTO_DIE_AVG_SITES_PER_CELL
+        avg = self._SITE_AREA * self._SITES_PER_CELL
         # util 0 / >1 / negative → the default target util, never a crash
         assert mod._auto_die_side_um(1000, 0.0, avg) > 0
         assert mod._auto_die_side_um(1000, -1.0, avg) > 0

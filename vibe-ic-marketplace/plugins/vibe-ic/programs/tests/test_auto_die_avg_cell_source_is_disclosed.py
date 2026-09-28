@@ -67,7 +67,11 @@ def test_the_fallback_constant_itself_is_unchanged():
     ever changes, that is a physical-results change and belongs in its own
     swept PR, not in a logging fix."""
     assert R._AUTO_DIE_FALLBACK_CELL_UM2 == 7.5
-    assert R._AUTO_DIE_AVG_SITES_PER_CELL == 6.0
+    # N4 (FX_N4_autodie_sizing, 2026-09-28) is the "better estimate" this
+    # file deferred to its own change: the per-PDK `site x 6.0 sites/cell`
+    # constant is GONE and the area is read from the netlist. It must not come
+    # back under its old name.
+    assert not hasattr(R, "_AUTO_DIE_AVG_SITES_PER_CELL")
     assert R._AUTO_DIE_TARGET_UTIL == 0.25
 
 
