@@ -48,6 +48,8 @@ spelling participates in any decision. Every fixture below uses
 synthetic, vendor-neutral names.
 """
 import json
+import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -545,21 +547,102 @@ def test_typed_enum_gate_states_a_reason_when_it_examined_nothing():
 # (5) no regression, proved by sweeping the tracked corpus
 # ---------------------------------------------------------------------------
 
+def test_tracked_reader_collects_cleanly_with_or_without_corpus():
+    """The corpus reader itself must skip cleanly in an independent clone."""
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+               PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+    reader = (f"{__file__}::"
+              "test_tracked_package_routes_every_declaration_and_regresses_none")
+    timeout_s = 120
+    try:
+        cp = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+             reader],
+            capture_output=True, text=True, env=env, cwd=PLUGIN,
+            timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(
+            f"TimeoutExpired: {reader} exceeded {timeout_s}s; "
+            f"stdout={exc.stdout!r}; stderr={exc.stderr!r}", pytrace=False)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    expected = "1 passed" if TRACKED_PKG.is_file() else "1 skipped"
+    assert expected in cp.stdout, cp.stdout
+
+
+def test_tracked_reader_nested_pytest_has_a_local_deadline(monkeypatch):
+    observed = {}
+    expected = "1 passed" if TRACKED_PKG.is_file() else "1 skipped"
+
+    def completed(argv, **kwargs):
+        observed["timeout"] = kwargs.get("timeout", 0)
+        return subprocess.CompletedProcess(argv, 0, expected, "")
+
+    monkeypatch.setattr(subprocess, "run", completed)
+    test_tracked_reader_collects_cleanly_with_or_without_corpus()
+    assert observed["timeout"] == 120
+
+
+def test_tracked_reader_timeout_names_child_and_captured_output(monkeypatch):
+    def timed_out(argv, **_kwargs):
+        raise subprocess.TimeoutExpired(
+            argv, 0.01, output="partial stdout", stderr="partial stderr")
+
+    monkeypatch.setattr(subprocess, "run", timed_out)
+    with pytest.raises(pytest.fail.Exception) as failure:
+        test_tracked_reader_collects_cleanly_with_or_without_corpus()
+    detail = str(failure.value)
+    assert "TimeoutExpired" in detail
+    assert "test_tracked_package_routes_every_declaration_and_regresses_none" in detail
+    assert "partial stdout" in detail
+    assert "partial stderr" in detail
+
+
+def _declared_in_tracked_file(text):
+    """The declarations the tracked file itself makes, read with this test's
+    own regexes (not `_hdl_enum`'s), so the pin is derived from the file and
+    not from the code under test: every `typedef enum ... } name;`, and every
+    `localparam` bound to a SIZED literal (the form R-0915-113(6) made a
+    declaration too; an unsized, x/z or concatenated literal is not one)."""
+    code = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    code = re.sub(r"//[^\n]*", "", code)
+    enums = set(re.findall(r"typedef\s+enum\b[^{;]*\{[^}]*\}\s*(\w+)\s*;",
+                           code))
+    sized = set(re.findall(
+        r"^\s*localparam\b[^=;\n]*?\b(\w+)\s*=\s*\d+\s*'[sS]?[bBoOdDhH]"
+        r"\s*[0-9a-fA-F_]+\s*;", code, re.M))
+    return enums, sized
+
+
 @pytest.mark.skipif(not TRACKED_PKG.is_file(),
                     reason="tracked HDL corpus not present in this checkout")
 def test_tracked_package_routes_every_declaration_and_regresses_none():
     """The measured case, end to end on the tracked file.
 
-    25 declarations, every one decided. The two the type-name vocabulary
-    already routed keep their destination; the address map that had none
-    now has one; the remaining 22 carry a written refusal."""
-    inv = H.routing_inventory({TRACKED_PKG.name: TRACKED_PKG.read_text()})
-    assert len(inv) == 25
-    by_dest = H.routing_summary(inv)["by_destination"]
-    assert by_dest[H.DEST_L6_FSM_STATES] == 1
-    assert by_dest[H.DEST_L3_OPCODES] == 1
-    assert by_dest[H.DEST_L4_REGISTERS] == 1
-    assert by_dest["(no destination)"] == 22
+    Every declaration the file makes is decided, and the pin is its MEMBERS,
+    derived from the file. The two the type-name vocabulary already routed
+    keep their destination; the address map that had none now has one; every
+    other declaration carries a written refusal.
+
+    MEASURED when this pin was a count: 25 was every `typedef enum` in the
+    file. R-0915-113(6) (900109257) then made a same-width `localparam` block
+    a declaration form too, and this file carries one (`CSR_MCONFIGPTR_VALUE =
+    32'b0`), refused as no map; the count read 26 and was never re-measured,
+    because this test SKIPS wherever the corpus is absent."""
+    text = TRACKED_PKG.read_text()
+    enums, sized = _declared_in_tracked_file(text)
+    inv = H.routing_inventory({TRACKED_PKG.name: text})
+    enum_form = {r.type_name for r in inv
+                 if not r.type_name.startswith(H.LOCALPARAM_BLOCK_FORM)}
+    assert enum_form == enums
+    blocks = [b for b in H.harvest_localparam_address_blocks(
+        {TRACKED_PKG.name: text})]
+    assert {m["name"] for b in blocks for m in b["members"]} == sized
+    assert {r.type_name for r in inv} == enum_form | {b["type_name"]
+                                                      for b in blocks}
+    routed = {r.type_name: r.destination for r in inv if r.destination}
+    assert routed == {"ctrl_fsm_e": H.DEST_L6_FSM_STATES,
+                      "opcode_e": H.DEST_L3_OPCODES,
+                      "csr_num_e": H.DEST_L4_REGISTERS}
     for r in inv:
         assert r.reason.strip(), r.type_name
     l4 = [r for r in inv if r.destination == H.DEST_L4_REGISTERS][0]
