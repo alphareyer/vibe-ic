@@ -288,7 +288,10 @@ def emit_case_register_bus(project, case: dict, dut_module: str,
         d = root / sub
         if not d.is_dir():
             continue
+        import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
         for p in sorted(d.iterdir()):
+            if _rfb.design_input_denial(root, p):
+                continue  # `_ref.` / golden/ ... by NAME, never opened
             if p.is_file() and p.suffix.lower() in (".txt", ".md", ".rst"):
                 try:
                     corpus[p.name] = p.read_text(errors="replace")
@@ -415,6 +418,11 @@ def _bus_ports_from_rtl(root, dut_module: str, h2d_t: str, d2h_t: str
         if not d.is_dir():
             continue
         for p in sorted(d.rglob("*.sv")) + sorted(d.rglob("*.v")):
+            # §4.05 (FX_405): a golden/expected/`_ref.` file under the design
+            # input is judged by NAME before the open (phase2/ is untouched).
+            import _reference_flow_boundary as _rfb
+            if _rfb.design_input_denial(root, p):
+                continue
             try:
                 raw = p.read_text(errors="replace")
             except OSError:

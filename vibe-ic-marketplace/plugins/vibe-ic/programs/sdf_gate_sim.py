@@ -429,7 +429,15 @@ def find_pdk_verilog(project: Path, used_cells: set) -> Optional[Path]:
     if not root.is_dir():
         return None
     best, best_score = None, -1
+    import sys as _sys
+    if str(Path(__file__).resolve().parent) not in _sys.path:
+        _sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
     for vf in sorted(root.rglob("*.v")):
+        # A golden/expected cell model staged beside the PDK is an oracle:
+        # judged by NAME, never opened, never scored.
+        if _rfb.design_input_denial(project, vf):
+            continue
         try:
             txt = vf.read_text(errors="replace")
         except OSError:

@@ -2883,7 +2883,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         _doc_text = []
         _docs_dir = _iproj / "input" / "docs"
         if _docs_dir.is_dir():
+            import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
             for _md in sorted(_docs_dir.rglob("*.md")):
+                if _rfb.design_input_denial(_iproj, _md):
+                    continue  # input/docs/golden/, expected/ ... by NAME
                 try:
                     _doc_text.append(_md.read_text(errors='replace'))
                 except Exception:  # noqa: BLE001 — an unreadable doc states nothing

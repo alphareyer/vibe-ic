@@ -544,8 +544,10 @@ def input_documents(project_dir: Path) -> List[Path]:
     docs = project_dir / "input" / "docs"
     if not docs.is_dir():
         return []
+    import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
     return sorted(p for p in docs.rglob("*")
-                  if p.is_file() and p.suffix.lower() in _INPUT_DOC_SUFFIXES)
+                  if p.is_file() and p.suffix.lower() in _INPUT_DOC_SUFFIXES
+                  and not _rfb.design_input_denial(project_dir, p))
 
 
 def _l24_extract(project_dir: Path) -> Optional[Dict[str, Any]]:

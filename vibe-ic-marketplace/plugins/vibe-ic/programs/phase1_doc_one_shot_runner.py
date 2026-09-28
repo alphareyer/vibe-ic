@@ -7724,8 +7724,16 @@ def extract_text_pipeline(project: Path,
     out: Dict[str, str] = {}
     skipped: List[Dict[str, str]] = []
 
+    import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
     for f in sorted(src_dir.rglob("*")):
         if not f.is_file():
+            continue
+        # An oracle tree staged under input/docs (golden/, expected/ ...) is
+        # judged by NAME and never extracted; the skip is disclosed.
+        _deny = _rfb.design_input_denial(project, f)
+        if _deny:
+            skipped.append({"path": str(f.relative_to(project)),
+                            "reason": _deny})
             continue
         suf = f.suffix.lower()
         if suf in _SKIP_EXT:
@@ -8988,6 +8996,9 @@ def _labelled_pdk_declaration(project: Path, scope: str = "all"):
             return
         if rp in seen or not f.is_file():
             return
+        import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
+        if _rfb.design_input_denial(project, f):
+            return  # input/docs/golden/ ... by NAME, never opened
         seen.add(rp)
         try:
             t = f.read_text(errors="replace")[:_PDK_DECL_MAX_BYTES]
@@ -9670,10 +9681,13 @@ def _extract_pdk_target_with_provenance(project: Path):
                  project / "input" / "docs", project / "input_doc"):
         if not base.is_dir():
             continue
+        import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
         for f in sorted(base.rglob("*")):
             if not f.is_file() or f.suffix.lower() in (
                     ".png", ".jpg", ".pdf", ".gds", ".zip"):
                 continue
+            if _rfb.design_input_denial(project, f):
+                continue  # input/docs/golden/ ... by NAME, never opened
             try:
                 t = f.read_text(errors="replace")[:200_000]
             except OSError:
@@ -32647,7 +32661,10 @@ def _g19_post_emit_backfill_register_offsets(project: Path) -> None:
                      project / "input" / "docs"):
             if not root.is_dir():
                 continue
+            import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
             for p in sorted(root.iterdir()):
+                if _rfb.design_input_denial(project, p):
+                    continue  # `_ref.` / golden/ ... by NAME, never opened
                 if p.is_file() and p.suffix.lower() in (".txt", ".md", ".rst"):
                     try:
                         corpus[p.name] = p.read_text(errors="replace")
@@ -44422,7 +44439,12 @@ def _v1_14_50_present_but_never_ingested(project) -> list:
             return []
         visited = _v1_14_50_visited_input_paths(project)
         digests: set = set()
+        import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
         for rel in visited:
+            # The skip log names the oracle files the extractor refused; a
+            # refused file is visited by NAME and must not be hashed here.
+            if _rfb.design_input_denial(project, Path(project) / rel):
+                continue
             try:
                 digests.add(hashlib.sha256(
                     (Path(project) / rel).read_bytes()).hexdigest())
@@ -55509,9 +55531,12 @@ def _post_emit_l11_fsm_strict_gate(project: Path) -> None:
         d = project / sub
         if not d.is_dir():
             continue
+        import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
         for p in sorted(d.iterdir()):
             if not p.is_file():
                 continue
+            if _rfb.design_input_denial(project, p):
+                continue  # `_ref.` / golden/ ... by NAME, never opened
             source_filenames.append(p.name)
             try:
                 # Only read text-shaped files; skip large binaries.
@@ -56614,9 +56639,12 @@ def _post_emit_promote_pipe_tables_to_l1(project: Path) -> None:
     candidates: List[Path] = []
     for pattern in ("*.md", "*.markdown", "*.MD"):
         candidates.extend(sorted(docs.rglob(pattern)))
+    import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
     for fp in candidates:
         if not fp.is_file():
             continue
+        if _rfb.design_input_denial(project, fp):
+            continue  # input/docs/golden/ ... judged by NAME, never opened
         try:
             text = fp.read_text(encoding="utf-8", errors="ignore")
         except Exception:
@@ -60131,6 +60159,7 @@ def _load_extracted_docs_for_post_pass(project: Path) -> Dict[str, str]:
         d = project / sub
         if not d.is_dir():
             continue
+        import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
         for p in sorted(d.iterdir()):
             if not p.is_file():
                 continue
@@ -60138,6 +60167,8 @@ def _load_extracted_docs_for_post_pass(project: Path) -> Dict[str, str]:
                 ".txt", ".md", ".rst", ".adoc",
             ):
                 continue
+            if _rfb.design_input_denial(project, p):
+                continue  # `_ref.` / golden/ ... by NAME, never opened
             try:
                 out[p.name] = p.read_text(
                     encoding="utf-8", errors="ignore")
@@ -62184,9 +62215,13 @@ def _post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(
             _ds = _in / "design_src"
             if _ds.is_dir():
                 _roots.extend(d for d in sorted(_ds.rglob("rtl")) if d.is_dir())
+            import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
+            # `_ref.` / `verified_` / golden RTL beside the design is an
+            # oracle: judged by NAME before the recoverer opens it.
             _files = [f for r in _roots if r.is_dir()
                       for f in sorted(r.rglob("*"))
-                      if f.is_file() and f.suffix in (".v", ".sv")]
+                      if f.is_file() and f.suffix in (".v", ".sv")
+                      and not _rfb.design_input_denial(project, f)]
             if _files:
                 _tgt = (l9.get("top_module") or l1.get("ic_name") or None)
                 _rec = _rir.recover_from_files(_files, _tgt)
@@ -62351,7 +62386,10 @@ def _v1_6_collect_input_docs_text(project: Path) -> str:
               _pl.input_doc_dir(project) if hasattr(_pl, "input_doc_dir")
               else None):
         if d and d.is_dir():
+            import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
             for f in sorted(d.iterdir()):
+                if _rfb.design_input_denial(project, f):
+                    continue  # `_ref.` / golden/ ... by NAME, never opened
                 if f.is_file() and f.suffix.lower() in (
                         ".md", ".txt", ".rst", ".adoc", ".markdown", ""):
                     try:
@@ -63417,9 +63455,12 @@ def _backfill_auto_literals_into_typed(project: Path,
         d = project / sub_name
         if not d.is_dir():
             continue
+        import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
         for f in d.iterdir():
             if not f.is_file() or f.suffix.lower() not in (".txt", ".md"):
                 continue
+            if _rfb.design_input_denial(project, f):
+                continue  # `_ref.` / golden/ ... by NAME, never opened
             try:
                 txt = f.read_text(encoding="utf-8", errors="ignore")
             except Exception:

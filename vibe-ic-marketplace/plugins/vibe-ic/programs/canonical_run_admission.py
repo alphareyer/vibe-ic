@@ -64,13 +64,20 @@ def _file_digest(path: Path) -> Optional[str]:
         return None
 
 
-def _tree_digest(project: Path, relatives: Iterable[str]) -> str:
+def _tree_digest(project: Path, relatives: Iterable[str],
+                 excluded: Optional[list] = None) -> str:
     """Digest only canonical source inputs, never generated run outputs.
 
     ``reports/`` and PnR outputs deliberately do not belong here: a report
     rewrite must not masquerade as a source edit that buys another expensive
     run.  The Phase-1 receipt and P3 input artifact are separately bound below.
+
+    An oracle file staged under ``input/`` (golden/, expected/, score/,
+    ``_ref.``/``verified_`` forms, golden_*.sdc in constraints/ ...) is not a
+    source input either (§4.05): it is judged by NAME before any open and never
+    read, and its project-relative path is appended to ``excluded``.
     """
+    import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
     rows: list[tuple[str, str]] = []
     for rel in relatives:
         root = project / rel
@@ -80,6 +87,10 @@ def _tree_digest(project: Path, relatives: Iterable[str]) -> str:
                 rows.append((rel, digest))
         elif root.is_dir():
             for child in sorted(p for p in root.rglob("*") if p.is_file()):
+                if _rfb.design_input_denial(project, child):
+                    if excluded is not None:
+                        excluded.append(str(child.relative_to(project)))
+                    continue
                 digest = _file_digest(child)
                 if digest is not None:
                     rows.append((str(child.relative_to(project)), digest))
@@ -131,6 +142,7 @@ def build_identity(project: Path, span: str, *, container_image: str,
     project = Path(project).resolve()
     receipt = emit_attestation.phase1_provenance(project)
     phase1_receipt = receipt.get("digest") if receipt.get("ran") else "NO_PHASE1_RECEIPT"
+    excluded: list = []
     identity = {
         "schema": SCHEMA,
         "subject_id": _subject_id(project),
@@ -144,7 +156,7 @@ def build_identity(project: Path, span: str, *, container_image: str,
             "input", "phase1/input_doc", "SOURCE_MANIFEST.md",
             "phase2/stage1/rtl", "phase2/stage2/constraints",
             "input/constraints",
-        )),
+        ), excluded),
         "phase1_receipt_sha256": phase1_receipt,
         "phase3_input_sha256": (_phase3_input_digest(project)
                                 if span == "phase3" else None),
@@ -152,6 +164,10 @@ def build_identity(project: Path, span: str, *, container_image: str,
         "container_image": container_image or "IMAGE_UNAVAILABLE",
         "dispatch_config": config,
     }
+    if excluded:
+        # Disclosed by NAME only (never opened). Absent when nothing was
+        # excluded, so an oracle-free project keeps its identity.
+        identity["source_input_excluded_oracle"] = sorted(set(excluded))
     return identity
 
 

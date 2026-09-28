@@ -1783,6 +1783,11 @@ def _resolve_from_design_input(project: Path, module: str) -> Optional[Path]:
         if any(part in {"golden", "oracle", "reference_flow", "submission_template"}
                for part in f.relative_to(root).parts):
             continue
+        # The repo's §4.05 authority, by NAME before the open: expected/,
+        # canonical_samples/, score/, `_ref.` / `verified_` forms (FX_405).
+        import _reference_flow_boundary as _rfb
+        if _rfb.design_input_denial(project, f):
+            continue
         try:
             if pat.search(f.read_text(errors="replace")):
                 return f

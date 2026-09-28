@@ -79,6 +79,11 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import os as _os                                                    # noqa: E402
+if _os.path.dirname(_os.path.abspath(__file__)) not in sys.path:
+    # Loaded by path (#2104): the §4.05 authority is imported lazily below.
+    sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 PROGRAM = "l21_doc_supply_rail_synth"
 VERSION = "1.0.0"
 
@@ -349,6 +354,9 @@ def _doc_sources(proj: Path, doc_globs: Optional[List[str]] = None
         for p in sorted(proj.glob(pat)):
             if not p.is_file():
                 continue
+            import _reference_flow_boundary as _rfb  # §4.05 (FX_405)
+            if _rfb.design_input_denial(proj, p):
+                continue  # input/docs/golden/ ... by NAME, never opened
             try:
                 text = p.read_text(errors="replace")
             except OSError:

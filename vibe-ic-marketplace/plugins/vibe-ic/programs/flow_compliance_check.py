@@ -7497,6 +7497,9 @@ def _docs_name_no_further_fsm_states(project: Path, l6_data: dict) -> bool:
                     ".txt", ".md", ".json", ".rst", ".csv",
                     ".log", ".yaml", ".yml", ""):
                 continue
+            import _reference_flow_boundary as _rfb  # §4.05 (FX_405)
+            if _rfb.design_input_denial(project, f):
+                continue  # input/docs/golden/ ... by NAME, never opened
             # ORGANIC #708 round-2 (field-agent reopen) — RTL files
             # (.v/.sv/.svh) are EXCLUDED from the doc-enumeration scan. RTL is
             # NOT a "doc". A reused-IP design routinely STAGES a vendor RTL

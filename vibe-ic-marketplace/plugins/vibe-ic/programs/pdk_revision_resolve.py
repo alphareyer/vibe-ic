@@ -607,6 +607,11 @@ def candidate_trees_from_run(run: Path, fs: Fs, cap: int = 400
     for log in sorted(run.rglob("*.log"))[:cap]:
         if "/plugin_work/" in str(log) or "/plugin_" in str(log):
             continue                     # the plugin's own tree is not the run
+        # §4.05 (FX_405): a golden/expected run's log staged under input/ names
+        # the ORACLE's libraries; judged by NAME, never opened.
+        import _reference_flow_boundary as _rfb
+        if _rfb.design_input_denial(run, log):
+            continue
         try:
             text = log.read_text(errors="replace")
         except OSError:

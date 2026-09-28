@@ -372,6 +372,9 @@ def input_doc_texts(project: Path) -> List[Tuple[Path, str]]:
             if rp in seen:
                 continue
             seen.add(rp)
+            import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
+            if _rfb.design_input_denial(project, p):
+                continue  # `_ref.` / golden/ ... by NAME, never opened
             txt = _readable_text(p)
             if txt:
                 out.append((p, txt))
