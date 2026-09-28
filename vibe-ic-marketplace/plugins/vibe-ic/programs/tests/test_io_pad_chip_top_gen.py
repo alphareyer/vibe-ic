@@ -32,6 +32,7 @@ corner term, then the edge-spacing term — against the exact expression
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -674,6 +675,28 @@ def test_bussed_pad_connection_is_one_ordered_verilog_connection():
         [("DM[0]", "x"), ("DM[1]", "y"), ("DM[2]", "z")],
         {"reverse_pad": {"DM": (0, 2)}})
     assert reverse == [".DM({x, y, z})"]
+
+
+def test_emitted_bussed_pad_verilog_parses_in_the_pinned_eda_image(tmp_path):
+    """The real parser is the pinned EDA image, not a string-only proxy."""
+    wrapper = PAD._emit_verilog(
+        "chip", "core", {"S": ["u_pad"], "E": [], "N": [], "W": []},
+        {"u_pad": {"port": "rail", "master": "neutral_pad",
+                    "terminal": "DM[0]",
+                    "supply_connections": {"DM[0]": "x", "DM[1]": "y",
+                                           "DM[2]": "z"}}}, [],
+        bus_ports={"neutral_pad": {"DM": (2, 0)}})
+    source = ("module neutral_pad(input [2:0] DM); endmodule\n"
+              "module core(); endmodule\n" + wrapper)
+    dut = tmp_path / "chip.v"
+    dut.write_text(source)
+    image = os.environ.get("VIBEIC_EDA_IMAGE", "ghcr.io/vibeic/vibeic-eda:0.3.84")
+    run = subprocess.run(
+        ["docker", "run", "--rm", "--memory=1g", "-v",
+         f"{tmp_path}:/work:ro", image, "--skip", "/foss/tools/bin/iverilog", "-g2012",
+         "-s", "chip", "/work/chip.v"], capture_output=True, text=True,
+        timeout=120)
+    assert run.returncode == 0, run.stdout + run.stderr
 
 
 @pytest.mark.parametrize("pairs,buses,rule", [

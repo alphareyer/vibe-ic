@@ -1174,6 +1174,30 @@ def resolve_supply_pad_pair(
         return pair, plan, record
 
 
+def require_bonded_ring_rails(plan: Dict[str, object]) -> None:
+    """Refuse a chip top whose PDK-derived supply plan leaves a ring rail
+    without a bond-reachable supply pad or declared connector.
+
+    A multi-rail pad can prove the core pair while still carrying additional
+    rail pins.  Reporting that condition but writing the wrapper creates a
+    die with an electrically floating ring.  This producer has no input-side
+    freedom to choose a connector or short rails, so absence of a PDK-declared
+    bonded supply path is a named refusal, never a silently emitted topology.
+    """
+    raw = plan.get("ring_rails_unbound")
+    if not isinstance(raw, dict):
+        return
+    rails = sorted({str(rail) for values in raw.values()
+                    if isinstance(values, list) for rail in values})
+    if rails:
+        raise Refusal(
+            "RING_RAIL_BOND_UNDECLARED",
+            "the selected IO library's PDK supply-cell/netlist evidence leaves "
+            "ring rail(s) without a bond-reachable supply pad or a declared "
+            "connector: " + ", ".join(rails) + "; this producer will not "
+            "invent a rail short or choose an undeclared connector")
+
+
 _BIT_PIN_RE = re.compile(r"^([A-Za-z_]\w*)\[(-?\d+)\]$")
 
 
@@ -1669,6 +1693,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
             core_liberty=str(tie_liberty or ""))
         if _core_v is not None:
             rec["supply_core_voltage"] = _core_v
+        require_bonded_ring_rails(plan)
         # How far the PDN ring must stay from the pad edge for pdngen to strap
         # this pair to it (see `_supply_pad_strap_reach`); the runner reserves
         # it in the core inset. The first LEF to give a master its pins is

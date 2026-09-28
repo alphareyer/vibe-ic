@@ -180,6 +180,20 @@ def test_sky130_shape_resolves_the_core_rail_bridge_pair():
     assert core["volts"] == 1.8 and core["basis"] == "voltage_map(VPWR)"
 
 
+def test_unbonded_ring_rails_are_a_named_refusal_not_an_emitted_die():
+    """The core pair alone is insufficient: each remaining PDK ring rail
+    needs a bond-reachable pad or an explicit connector declaration."""
+    _pair, plan, _core = _resolve(
+        _lef(SKY_MACROS), "lib__", "VPWR", "VGND", SKY_TERMINALS,
+        [_sky_liberty()], [_sky_netlist()], SKY_CORE)
+    validate = getattr(G, "require_bonded_ring_rails", lambda _plan: None)
+    with pytest.raises(G.Refusal) as exc:
+        validate(plan)
+    assert exc.value.rule == "RING_RAIL_BOND_UNDECLARED"
+    assert "VCCHIB" in exc.value.message
+    assert "VSWITCH" in exc.value.message
+
+
 def test_ihp_shape_resolves_from_the_bonded_pg_pin():
     """RED on main: every cell carries vdd AND iovdd, so the same-domain rule
     finds two non-core POWER terminals."""
