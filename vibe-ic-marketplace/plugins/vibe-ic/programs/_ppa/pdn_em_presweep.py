@@ -247,11 +247,22 @@ def session_tcl(*, sweep_dir: str, python: str, nets: Mapping[str, float],
                     for n, v in nets.items())
     pads = " ".join(declared_pads)
     geom = _emcd.PG_GEOMETRY_TCL.replace("__GEOMETRY_PATH__", "$_pes_cd/em_pg_geometry.tsv")
+    # A padless block's promoted supply pins are its interface, not PSM's
+    # source model (`_psm_source_model`): every candidate is solved with them
+    # marked PSM_DISCONNECT, and the marks are removed again because this
+    # session goes on to write the database. Imported here, on the host: the
+    # staged copy the session execs only runs `next`.
+    import _psm_source_model as _psm_sm
+    psm_x = _psm_sm.exclude_promoted_pins_tcl()
+    psm_r = _psm_sm.restore_promoted_pins_tcl()
+    psm_clear = _psm_sm.clear_generated_supply_pins_tcl()
     return f'''# === T103 — size the PDN for EM before routing (_ppa/pdn_em_presweep) ===
 puts "{stage_marker} preroute_pdn_em_sizing"
 set _pes_dir {{{sweep_dir}}}
 proc _vibeic_pes_build {{k}} {{
   global _pes_dir
+{psm_clear}  # PdnGen retains FIRM pin boxes from the previous pitch. The
+  # padless grid owns those boxes; a die's pad-ring boxes are retained.
   foreach _n [[ord::get_db_block] getNets] {{
     if {{[$_n getSigType] ni {{POWER GROUND}}}} {{ continue }}
     foreach _sw [$_n getSWires] {{ odb::dbSWire_destroy $_sw }}
@@ -291,6 +302,7 @@ proc _vibeic_pes_measure {{k vsrc_opt}} {{
   set _pf [open $_pes_cd/power.rpt w]
   puts $_pf [report_power{corner_opt}]
   close $_pf
+{psm_x}  set _vibeic_psm_rc [catch {{
   foreach _n {{{net_list}}} {{
     set _vs [expr {{[dict exists $vsrc_opt $_n] ? [list -vsrc [dict get $vsrc_opt $_n]] : {{}}}}]
     analyze_power_grid -net $_n{corner_opt} -enable_em -em_outfile $_pes_cd/em_segments_$_n.csv -voltage_file $_pes_cd/voltage_$_n.txt {{*}}$_vs
@@ -298,6 +310,8 @@ proc _vibeic_pes_measure {{k vsrc_opt}} {{
       set _f [open $_pes_cd/cd_$_n.err w]; puts $_f $_e; close $_f
     }}
   }}
+  }} _vibeic_psm_e _vibeic_psm_o]
+{psm_r}  if {{$_vibeic_psm_rc}} {{ return -options $_vibeic_psm_o $_vibeic_psm_e }}
   set _f [open $_pes_cd/MEASURED w]; puts $_f $k; close $_f
 }}
 set _pes_k 0
@@ -338,6 +352,9 @@ if {{[catch {{
       }}
     }}
   }}
+  if {{$_pes_model eq "psm_default_bterms_undeclared_pads"}} {{
+{psm_x}    if {{[llength $_vibeic_psm_props]}} {{ set _pes_model "psm_generated_bumps_promoted_pins_excluded" }}
+{psm_r}  }}
   set _f [open $_pes_dir/source_model.txt w]; puts $_f $_pes_model; close $_f
   while 1 {{
     if {{$_pes_k ne "0"}} {{
