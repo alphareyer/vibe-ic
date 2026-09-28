@@ -508,6 +508,7 @@ def _prepare(project: Path, *, image: str, pdk: str, pdk_root: Path, sdc: Path,
              derate: Tuple[float, float], pg_rules_tcl: Optional[Path],
              refill_tcl: Optional[Path], docker: str,
              dont_use: Optional[Tuple[Callable[[str], List[str]], str]] = None,
+             max_fanout: Optional[Tuple[int, str]] = None,
              ) -> Tuple[Dict[str, Path], List[str], List[Tuple[Path, str]]]:
     """The resolved configs (repair step + the three measuring steps) in the
     sign-off scene, the STA corners, and the PDK mount."""
@@ -534,6 +535,8 @@ def _prepare(project: Path, *, image: str, pdk: str, pdk_root: Path, sdc: Path,
     if refill_tcl is not None:
         extra["VIBEIC_PRR_REFILL_TCL"] = (str(refill_tcl.resolve()),
                                           "the direct deck's own filler policy")
+    if max_fanout is not None:
+        extra["VIBEIC_PRR_MAX_FANOUT"] = max_fanout
     if dont_use is not None:
         excluded = repair_dont_use(configs[REPAIR_STEP], pdk_root, pdk, dont_use[0])
         if excluded:
@@ -581,7 +584,14 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
     report: Dict[str, Any] = {"arm": name, "input_state": str(state0), "corners": corners,
                               "floors": ctx["floors"],
                               "baseline": baseline,
-                              "baseline_antenna": baseline.get("antenna_nets")}
+                              "baseline_antenna": baseline.get("antenna_nets"),
+                              # The census step's own metrics on the arm's input
+                              # route (its unrouted census): what a promoter of
+                              # THIS route, with no candidate, measured.
+                              "baseline_repair_metrics": {
+                                  k: v for k, v in (_load(folder0 / "state_out.json")
+                                                    .get("metrics") or {}).items()
+                                  if k.startswith("vibeic__prr__")}}
     runs = []
     if controllers:
         reg = _cl.load_registry(registry, programs_dir=programs_dir)
@@ -612,7 +622,8 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
         pg_rules_tcl: Optional[Path] = None, refill_tcl: Optional[Path] = None,
         registry: Optional[Path] = None, programs_dir: Optional[Path] = None,
         docker: str = "docker",
-        dont_use: Optional[Tuple[Callable[[str], List[str]], str]] = None) -> Dict[str, Any]:
+        dont_use: Optional[Tuple[Callable[[str], List[str]], str]] = None,
+        max_fanout: Optional[Tuple[int, str]] = None) -> Dict[str, Any]:
     """Step 32 on LibreLane after a DIRECT route: bridge the routed views,
     then one closure arm. Returns the report (also written to `REPORT_REL`).
     `adopted` is the candidate the closure left adopted (`None`: the input
@@ -626,7 +637,7 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
     configs, corners, mounts = _prepare(
         project, image=image, pdk=pdk, pdk_root=pdk_root, sdc=sdc, derate=derate,
         pg_rules_tcl=pg_rules_tcl, refill_tcl=refill_tcl, docker=docker,
-        dont_use=dont_use)
+        dont_use=dont_use, max_fanout=max_fanout)
     state0 = _ll.state_from_direct(project, image, configs[REPAIR_STEP], views,
                                    project / "phase3/librelane/32-config/bridge",
                                    mounts=mounts,
@@ -713,6 +724,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
                  registry: Optional[Path] = None, programs_dir: Optional[Path] = None,
                  docker: str = "docker",
                  dont_use: Optional[Tuple[Callable[[str], List[str]], str]] = None,
+        max_fanout: Optional[Tuple[int, str]] = None,
                  ) -> Dict[str, Any]:
     """Step 32 on LibreLane INSIDE the step-21 LibreLane chain
     (LL21 -> Vibeic.PostRouteRepair -> tail): the routed State is the
@@ -732,7 +744,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     configs, corners, mounts = _prepare(
         project, image=image, pdk=pdk, pdk_root=pdk_root, sdc=sdc, derate=derate,
         pg_rules_tcl=pg_rules_tcl, refill_tcl=None, docker=docker,
-        dont_use=dont_use)
+        dont_use=dont_use, max_fanout=max_fanout)
     common = dict(image=image, pdk=pdk, configs=configs, corners=corners, mounts=mounts,
                   registry=registry, programs_dir=programs_dir,
                   floors=declared_timing_floor(project, sdc))
@@ -771,7 +783,8 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     report.update({k: chosen[k] for k in ("baseline", "final", "adopted", "adopted_state",
                                            "final_antenna", "baseline_antenna",
                                            "final_supply_ownership", "candidates",
-                                           "closure")})
+                                           "closure", "baseline_repair_metrics")
+                   if k in chosen})
     report["selected_arm"] = sel["selection"]
     report["verdict"] = "PASS"
     write_json(out, report)

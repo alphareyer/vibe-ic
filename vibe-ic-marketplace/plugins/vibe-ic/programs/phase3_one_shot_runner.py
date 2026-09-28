@@ -23508,6 +23508,24 @@ _STEP32_DONT_USE = (
     "resizer dont_use families) over the step's resolved CELL_LIBS")
 
 
+def _sdc_max_fanout_cap(sdc: Path) -> Optional[Tuple[int, str]]:
+    """The fanout cap sign-off judges on `sdc`: its strictest `set_max_fanout`
+    (the value repair_design meets), with its source; None when it has none.
+    Step 32 guards THIS value (cmp3 D14 review: LibreLane's
+    MAX_FANOUT_CONSTRAINT falls back to a PDK default of 10 when L19 declares
+    none, while the SDC carried 4 -- a diode's 5th load went unseen)."""
+    try:
+        text = Path(sdc).read_text(errors="replace")
+    except OSError:
+        return None
+    values = [float(m.group(2)) for m in _SDC_MAX_FANOUT_RE.finditer(text)]
+    values = [v for v in values if v > 0 and v.is_integer()]
+    if not values:
+        return None
+    return int(min(values)), (f"{Path(sdc).name}: strictest of {len(values)} "
+                              f"set_max_fanout line(s)")
+
+
 def _dont_use_family_fallback_tcl() -> str:
     """v1.2.86 — GENERAL, PDK-family fallback that excludes the physically
     unroutable characterization / low-power cell FAMILIES from the resizer/CTS/
@@ -44206,6 +44224,19 @@ def _step32_own_measurement(report: Dict[str, Any]) -> Dict[str, Any]:
     the repair step's unrouted census (`vibeic__prr__unrouted__added`)."""
     final = (report.get("final") or {})
     adopted = report.get("adopted")
+    if adopted is None:
+        # An arm that shipped its own route with no repair candidate (dual's
+        # pregrt): the census step measured that route; every one of its
+        # signal nets must carry a wire.
+        metrics = report.get("baseline_repair_metrics") or {}
+        unrouted = metrics.get("vibeic__prr__before__unrouted__count")
+        return {"antenna_nets": final.get("antenna_nets"),
+                "antenna_pins": final.get("antenna_pins"),
+                "antenna_source": final.get("antenna_state"),
+                "unrouted_added": unrouted if isinstance(unrouted, int)
+                and not isinstance(unrouted, bool) else None,
+                "unrouted_source": ("Vibeic.PostRouteRepair census "
+                                    "vibeic__prr__before__unrouted__count (no candidate)")}
     row = next((c for c in report.get("candidates") or []
                 if c.get("candidate") == adopted), {})
     metrics = row.get("repair_metrics") or {}
@@ -45205,7 +45236,8 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
         project, mode=selected, image=image, pdk=str(pdk.name), pdk_root=pdk_root,
         sdc=sdc, derate=(_FLAT_OCV_DERATE_EARLY, _FLAT_OCV_DERATE_LATE),
         route_state=route_state, route_drc=route_drc, variant_arm=variant_arm,
-        pg_rules_tcl=pg_rules, dont_use=_STEP32_DONT_USE)
+        pg_rules_tcl=pg_rules, dont_use=_STEP32_DONT_USE,
+        max_fanout=_sdc_max_fanout_cap(sdc))
     path = project / _llprr.REPORT_REL
     record = {"report": str(path.relative_to(project)), "report_sha256": _ll.digest(path),
               "mode": selected, "adopted": report.get("adopted"),
@@ -45222,6 +45254,8 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
         if refused:
             report["promotion_refused"] = refused
             _aa.write_text(path, json.dumps(report, indent=2) + "\n")
+            # The receipt binds the report by sha256: the rewrite is the report.
+            record["report_sha256"] = _ll.digest(path)
             record["promotion_refused"] = refused
             _drv_promotion_disclose(pnr_out, "librelane_promotion_unmeasured",
                                     f"{refused}; the input route was kept")
@@ -45391,7 +45425,8 @@ def step_postroute_repair_librelane(project: Path, top: str, pdk: "PdkConfig",
             project, image=image, pdk=str(pdk.name), pdk_root=pdk_root,
             views={"def": routed, "nl": netlist, "sdc": sdc}, sdc=sdc,
             derate=(_FLAT_OCV_DERATE_EARLY, _FLAT_OCV_DERATE_LATE),
-            pg_rules_tcl=pg_rules, refill_tcl=refill, dont_use=_STEP32_DONT_USE)
+            pg_rules_tcl=pg_rules, refill_tcl=refill, dont_use=_STEP32_DONT_USE,
+            max_fanout=_sdc_max_fanout_cap(sdc))
     except _ll.Refusal as exc:
         _drv_promotion_disclose(
             pnr_out, "librelane_refused",
@@ -69029,11 +69064,21 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
     _promoted_own: Optional[Dict[str, Any]] = None
     if _promotion is not None:
         _psha = _promotion.get("promoted_def_sha256")
-        if not (_psha and _psha == _file_sha256(def_file)):
+        if _psha and _psha == _file_sha256(def_file):
+            if _promoter != "signoff_spef_repair":
+                _promoted = True
+                _promoted_own = _promotion.get("measurement") or {}
+        elif _promoter == "librelane_step32_in_chain":
+            # Promoted INSIDE step 21's chain, before the direct tail: the tail
+            # wrote the shipped DEF and its in-session check is the measurement.
             _promoted = False
-        elif _promoter != "signoff_spef_repair":
+        else:
+            # Any other promoter whose DEF is not the shipped one (review of
+            # D15: signoff_spef_repair then the wire-length escalation) was
+            # replaced by a writer nobody measured: UNMEASURED, naming it --
+            # never credited with the PnR session's count.
             _promoted = True
-            _promoted_own = _promotion.get("measurement") or {}
+            _promoted_own = {}
     _ship_txt = (_ship_log.read_text(errors="ignore")
                  if (_promoted and _promoted_own is None
                      and _ship_log.is_file()) else "")
