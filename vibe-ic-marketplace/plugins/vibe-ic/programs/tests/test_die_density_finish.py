@@ -239,8 +239,8 @@ def test_top_up_refuses_unreadable_placed_design_before_gds_promotion(tmp_path, 
                             config, '37-missing-placement')
     except Refusal as exc:
         refusal = str(exc)
+    assert len(calls) == 0, 'unreadable placement must stop before the fill engine'
     assert refusal is not None and 'LL_DENSITY_FILL_PLACEMENT_UNREADABLE' in refusal
-    assert not calls
     assert not (project / 'phase3/librelane/37-missing-placement/'
                 'pdk_filled.topped.gds').exists()
 
