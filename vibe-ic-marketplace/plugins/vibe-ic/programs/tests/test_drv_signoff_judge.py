@@ -1379,3 +1379,64 @@ def test_stalled_opensta_retains_raw_log_and_is_unmeasured(tmp_path, monkeypatch
     with pytest.raises(RuntimeError, match="NOT_MEASURED.*stalled"):
         capture._run_fresh(script, {tmp_path}, image="test:image")
     assert "partial diagnostic" in script.with_suffix(".tool.log").read_text()
+
+
+def test_fresh_opensta_refuses_error_in_middle_of_raw_log(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import drv_signoff_capture as capture
+    script = tmp_path / "measure.tcl"
+    script.write_text("puts ready\n")
+    raw = script.with_suffix(".tool.log")
+    header = b"OpenSTA 3.1 aaaaaaaaaa\n"
+    filler = b"x" * (capture._READ_LOG_BYTES - 4 - len(header)) + b"\n"
+    transcript = (header + filler
+                  + b"Error: linked design is incomplete\n"
+                  + b"ordinary output\n" * 5000)
+    assert transcript.index(b"Error:") == capture._READ_LOG_BYTES - 3
+    assert len(transcript) - transcript.index(b"Error:") > 65536
+
+    def supervised(argv, **kw):
+        raw.write_bytes(transcript)
+        return SimpleNamespace(outcome="natural", rc=0, err="")
+
+    monkeypatch.setattr(capture, "_docker_memory",
+                        SimpleNamespace(memory_limit=lambda: "1g"), raising=False)
+    monkeypatch.setattr(capture, "_watchdog",
+                        SimpleNamespace(run_supervised=supervised), raising=False)
+    verdict = "MEASURED"
+    detail = ""
+    try:
+        capture._run_fresh(script, {tmp_path}, image="test:image")
+    except RuntimeError as exc:
+        detail = str(exc)
+        verdict = "NOT_MEASURED" if detail.startswith("NOT_MEASURED:") else "OTHER_ERROR"
+    assert verdict == "NOT_MEASURED", detail
+    assert "tool_error=True" in detail
+    assert raw.read_bytes() == transcript
+
+
+def test_fresh_opensta_refuses_log_at_byte_ceiling(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import drv_signoff_capture as capture
+    script = tmp_path / "measure.tcl"
+    script.write_text("puts ready\n")
+    raw = script.with_suffix(".tool.log")
+
+    def supervised(argv, **kw):
+        raw.write_bytes(b"OpenSTA 3.1 aaaaaaaaaa\n".ljust(
+            capture._MAX_TOOL_LOG_BYTES, b"x"))
+        return SimpleNamespace(outcome="natural", rc=0, err="")
+
+    monkeypatch.setattr(capture, "_docker_memory",
+                        SimpleNamespace(memory_limit=lambda: "1g"), raising=False)
+    monkeypatch.setattr(capture, "_watchdog",
+                        SimpleNamespace(run_supervised=supervised), raising=False)
+    verdict = "MEASURED"
+    detail = ""
+    try:
+        capture._run_fresh(script, {tmp_path}, image="test:image")
+    except RuntimeError as exc:
+        detail = str(exc)
+        verdict = "NOT_MEASURED" if detail.startswith("NOT_MEASURED:") else "OTHER_ERROR"
+    assert verdict == "NOT_MEASURED", detail
+    assert "raw log reached byte ceiling" in detail
