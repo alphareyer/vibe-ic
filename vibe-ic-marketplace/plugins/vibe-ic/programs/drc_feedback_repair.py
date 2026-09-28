@@ -587,6 +587,49 @@ def check_binding(project: Path, top: str, gds: Path) -> tuple[bool, str]:
     return False, 'FEEDBACK_LAYOUT_DIGEST_MISMATCH_OR_UNMEASURED'
 
 
+def declare_publication(project: Path, record: dict, image: str,
+                        command: str) -> dict | None:
+    """Append the ledger row of a rewrite this step PUBLISHED.
+
+    The runner declares its own call through `_log_invocation`; this is the
+    same declaration for the program's documented CLI, which publishes by
+    default. Without it the newest ledger row of `routed.def` is the
+    router's, naming bytes no longer on disk (PROVENANCE_HASH_MISMATCH).
+    A run that published nothing, or a project with no ledger, writes nothing.
+    """
+    pub = record.get('publication') if isinstance(record, dict) else None
+    ledger = Path(project) / 'provenance.jsonl'
+    if not isinstance(pub, dict) or not pub.get('output') or not ledger.is_file():
+        return None
+    root = Path(project).resolve()
+    outputs = {}
+    for item in [pub['output'], *(pub.get('replaced') or [])]:
+        path = Path(item).resolve()
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if path.is_file():
+            outputs[rel] = 'sha256:' + _sha(path)
+    if not outputs:
+        return None
+    import datetime
+    row = {
+        'record': 'invocation', 'tool': 'openroad', 'version': image,
+        'version_capture': 'image digest of the private docker run',
+        'command': command[:400], 'exec_route': 'container', 'exit_code': 0,
+        'measured': True,
+        'timestamp': datetime.datetime.now(datetime.timezone.utc)
+                     .strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'marker': str(Path(project) / 'reports/phase3/drc_feedback.json'),
+        'inputs': {str(record.get('source_def')): 'sha256:' + str(pub.get('from_sha256'))},
+        'outputs': outputs,
+    }
+    with ledger.open('a') as fh:
+        fh.write(json.dumps(row) + '\n')
+    return row
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     from types import SimpleNamespace
@@ -601,6 +644,12 @@ def main(argv: list[str] | None = None) -> int:
     pdk = SimpleNamespace(**json.loads(args.pdk_json.read_text()))
     result = run(args.project, args.top, pdk, args.image,
                  source_def=args.source_def, publish=not args.no_publish)
+    if result.get('status') == 'PASS':
+        declare_publication(
+            args.project, result, args.image,
+            'openroad -exit trial.tcl (drc_feedback_repair CLI scoped reroute: '
+            f"rules={','.join(result.get('rules') or [])} "
+            f"nets={','.join((result.get('publication') or {}).get('targets') or [])})")
     print(json.dumps(result, sort_keys=True))
     return 0 if result['status'] in ('PASS', 'NOT_APPLICABLE') else 1
 

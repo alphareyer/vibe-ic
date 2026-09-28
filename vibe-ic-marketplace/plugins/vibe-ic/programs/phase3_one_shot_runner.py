@@ -8602,6 +8602,15 @@ def _core_block_pin_layers_tcl(pin_layers: Sequence[str]) -> str:
     empty and the grid is the ordinary one. The supply NET names come from
     `set_voltage_domain` (pdngen promotes the domain's nets); the layers are
     the strap layers this PDN plan draws. No design, PDK or net literal.
+
+    THE PINS ARE AN INTERFACE, NOT A SOURCE MODEL. PSM, given no -vsrc,
+    sources from every BPin shape, so promoted straps would read as ideal
+    supplies (measured on spm: Metal4 strap current 0 A, EM peak 4.3x lower).
+    Every PSM session marks these pins PSM_DISCONNECT (`_psm_source_model`)
+    and solves on the generated pattern it used before they existed.
+    NOTE the grid itself changes too: with `-pins` pdngen keeps the upper strap
+    layer it otherwise drops as unconnected (spm: Metal5 straps + Metal4-5
+    vias appear), which is geometry, not a model, and is measured as such.
     """
     layers = []
     for lyr in pin_layers or ():
@@ -68451,6 +68460,11 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     _pb_tcl += ('puts "=== EM_POWER_BASIS ==="\n'
                 'if {[catch {report_power} _e]} { puts "EM_BASIS_POWER_UNREPORTED: $_e" }\n'
                 'puts "=== EM_POWER_BASIS_END ==="\n')
+    # A padless block's promoted supply pins are its interface, not PSM's
+    # source model: see `_psm_source_model`. The session marks them
+    # PSM_DISCONNECT and prints the model it solved on; the records below
+    # read that line instead of asserting a model.
+    import _psm_source_model as _psm_sm
     tcl_path = out_dir / f"ir_em_{top}.tcl"
     tcl_path.write_text(f"""
 read_lef {tech_lef_c}
@@ -68463,7 +68477,7 @@ if {{[catch {{set_wire_rc -signal -layer {mp}1}} _e1]}} {{
   catch {{set_wire_rc -layer {mp}1}}
 }}
 catch {{set_wire_rc -clock -layer {mp}5}}
-{via_rc_tcl}{''.join(psm_blocks)}exit
+{via_rc_tcl}{_psm_sm.exclude_promoted_pins_tcl()}{''.join(psm_blocks)}exit
 """)
     tcl_c = _to_container_path(str(tcl_path), container)
     cmd = (
@@ -68547,8 +68561,11 @@ catch {{set_wire_rc -clock -layer {mp}5}}
                             _counts["worst_ratio"] or 0.0, _ratio)
         _counts["psm_segments"] = _psm_segment_counts.get(_net, 0)
         _density_rows[_net] = _counts
+    _psm_model = _psm_sm.describe(log)
     _aa.write_text(out_dir / "em_openroad_density.json", json.dumps({
-        "tool": "OpenROAD.check_current_density", "source_model": "PSM default",
+        "tool": "OpenROAD.check_current_density",
+        "source_model": _psm_model["model"],
+        "psm_source_model": _psm_model,
         "sdc_spef_loaded": False, "nets": _density_rows,
         "verdict": ("MEASURED" if _audit_tool and _density_rows and all(
             r["checked"] > 0 and r["no_limit"] == 0 for r in _density_rows.values())
@@ -68664,6 +68681,10 @@ catch {{set_wire_rc -clock -layer {mp}5}}
                              "core -> CONSERVATIVE upper bound; real multi-bump "
                              "power delivery is lower" if _bump_m else
                              "PSM analyze_power_grid"),
+            # What the solver actually used, read from the session's own
+            # PSM_SOURCE_MODEL line (`_psm_source_model`), so a change of
+            # source model can never pass as a change of layout again.
+            "psm_source_model": _psm_model,
             "unconnected_supply_pins": _psm_unconn[:20],
             # F20 — what this number was solved on; the transient tier
             # reports it beside its own only on the same basis and power.
@@ -68766,7 +68787,8 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "power_nets": power_nets,
             "ground_nets": ground_nets,
             "nets_analysed": psm_nets,
-            "source_model": "PSM default sources (the supply BTerms); no pad VSRC file",
+            "source_model": _psm_model["model"],
+            "psm_source_model": _psm_model,
             "power_basis": _ppa_power.em_power_basis(
                 log, sdc=(str(_basis["sdc"].relative_to(project)) if _basis["sdc"] else None),
                 spef=(str(_basis["spef"].relative_to(project)) if _basis["spef"] else None),

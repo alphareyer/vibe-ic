@@ -22,8 +22,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,17 +35,16 @@ import drc_feedback_repair as feedback  # noqa: E402
 import phase3_one_shot_runner as R  # noqa: E402
 import provenance_output_hash_completeness_check as prov_check  # noqa: E402
 
-TCLSH = shutil.which("tclsh")
-needs_tclsh = pytest.mark.skipif(TCLSH is None, reason="tclsh not installed")
+from _tcl_walk import walk as _walk  # noqa: E402
 
 
 def _tclsh(script: str, tmp_path: Path) -> str:
-    f = tmp_path / "drive.tcl"
-    f.write_text(script)
-    cp = subprocess.run([TCLSH, str(f)], capture_output=True, text=True,
-                        timeout=60)
-    assert cp.returncode == 0, cp.stdout + cp.stderr
-    return cp.stdout
+    """Run a Tcl script the way the program runs Tcl: host tclsh, else the
+    runner's EDA container, else a NOT_MEASURED FAILURE (`_tcl_walk`), never a
+    skip. The script is the walker; it takes no deck."""
+    out, err, route = _walk(script, "", tmp_path)
+    assert "TCL_DONE" in out, f"Tcl did not finish via {route}:\n{out}\n{err}"
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -166,13 +163,12 @@ proc m_pad {m args} {
 
 def _grid_calls(tcl: str, insts: list[str], tmp_path: Path) -> list[str]:
     out = _tclsh(_DB_STUB + f"set ::insts {{{' '.join(insts)}}}\n" + tcl
-                 + "\nforeach c $::grid_calls { puts \"GRID_CALL $c\" }\n",
-                 tmp_path)
+                 + "\nforeach c $::grid_calls { puts \"GRID_CALL $c\" }\n"
+                 + "puts TCL_DONE\n", tmp_path)
     return [ln[len("GRID_CALL "):] for ln in out.splitlines()
             if ln.startswith("GRID_CALL ")]
 
 
-@needs_tclsh
 @pytest.mark.parametrize("ring", [None, RING], ids=["no_ring_cfg", "ring_cfg"])
 def test_core_only_block_promotes_straps_to_supply_pins(tmp_path, ring):
     tcl = R._build_pdn_tcl(_pdk(tmp_path, ring))
@@ -181,7 +177,6 @@ def test_core_only_block_promotes_straps_to_supply_pins(tmp_path, ring):
         calls
 
 
-@needs_tclsh
 def test_block_with_placed_pads_keeps_the_ordinary_grid(tmp_path):
     # A die: the supply enters through its pads, so the core grid grows no
     # top-level ports of its own.
@@ -190,7 +185,6 @@ def test_block_with_placed_pads_keeps_the_ordinary_grid(tmp_path):
     assert calls == ["-name grid -voltage_domains CORE"], calls
 
 
-@needs_tclsh
 def test_the_pin_layers_are_the_plans_own_strap_layers(tmp_path):
     pdk = _pdk(tmp_path, None)
     pdk.pdn_straps["stripes"] = [
@@ -261,7 +255,7 @@ proc write_def {path} { puts "OBSTRUCTIONS_IN_DB [llength $::obs] $::obs" }
 
 def _run_trial_script(script: Path, tmp_path: Path, pre=()) -> tuple[int, str]:
     out = _tclsh(f"set ::pre_existing {{{' '.join(pre)}}}\n" + _OR_STUB
-                 + script.read_text(), tmp_path)
+                 + script.read_text() + "\nputs TCL_DONE\n", tmp_path)
     line = next(ln for ln in out.splitlines()
                 if ln.startswith("OBSTRUCTIONS_IN_DB"))
     parts = line.split()
@@ -358,7 +352,6 @@ def _fake_eda(tmp_path: Path, seen: dict):
     return fake
 
 
-@needs_tclsh
 def test_published_route_carries_no_feedback_keepout(tmp_path, monkeypatch):
     project, pdk = _project(tmp_path)
     seen: dict = {}
@@ -375,7 +368,6 @@ def test_published_route_carries_no_feedback_keepout(tmp_path, monkeypatch):
     assert seen['obstructions_left'] == 0
 
 
-@needs_tclsh
 def test_reroute_removes_only_the_keepouts_it_made(tmp_path):
     scratch = tmp_path / 'trial'
     scratch.mkdir()
@@ -406,7 +398,6 @@ def test_reroute_removes_only_the_keepouts_it_made(tmp_path):
     assert 'FEEDBACK_OBSTRUCTIONS_REMOVED: 2' in out
 
 
-@needs_tclsh
 def test_prestream_declares_the_feedback_rewrite_in_the_ledger(tmp_path,
                                                               monkeypatch):
     project, pdk = _project(tmp_path)
@@ -461,3 +452,29 @@ def test_prestream_declares_the_feedback_rewrite_in_the_ledger(tmp_path,
     assert receipt['prior_publication']['to_sha256'] == \
         receipt['source_sha256']
     assert receipt['prior_publication']['targets'] == ['target']
+
+
+def test_cli_publication_is_declared_in_the_ledger(tmp_path, monkeypatch):
+    """The program's own CLI publishes by default; its rewrite must carry the
+    same ledger declaration the runner's call site writes (review MINOR)."""
+    project, pdk = _project(tmp_path)
+    seen: dict = {}
+    monkeypatch.setattr(feedback, '_docker', _fake_eda(tmp_path, seen))
+    # the CLI streams with the run's own script file (no text override)
+    (project / 'phase3/stage3/pnr/stream_out.py').write_text('print("EDA stream")\n')
+    pdk_json = tmp_path / 'pdk.json'
+    pdk_json.write_text(json.dumps(vars(pdk)))
+    rc = feedback.main([str(project), '--top', 'unit', '--image',
+                        'sha256:' + '0' * 64, '--pdk-json', str(pdk_json)])
+    assert rc == 0
+    _verdict, findings = prov_check.audit(project)
+    bad = [f for f in findings if f.rule == 'PROVENANCE_HASH_MISMATCH']
+    assert not bad, [f.detail for f in bad]
+    rows = [json.loads(ln) for ln in
+            (project / 'provenance.jsonl').read_text().splitlines()]
+    newest = [r for r in rows
+              if 'phase3/stage3/pnr/routed.def' in (r.get('outputs') or {})][-1]
+    assert 'drc_feedback_repair CLI' in newest['command']
+    assert newest['inputs'] == {
+        str((project / 'phase3/stage3/pnr/unit.def').resolve()):
+        'sha256:' + hashlib.sha256(BASE.encode()).hexdigest()}
