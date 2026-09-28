@@ -48097,23 +48097,35 @@ def publish_tapeout_declarations(project: Path, pdk: "PdkConfig",
                             recorded_by="phase3_one_shot_runner."
                                         "publish_tapeout_declarations",
                             outrank=dict(rec.get("superseded") or {}))
+                        applied = _impl_flow.read_record(project)["tool_defaults"]
+                        rec["applied_already_recorded"] = sorted(
+                            k for k in merge
+                            if k not in rec["recorded_as_applied"]
+                            and (applied.get(k) or {}).get("value") == merge[k])
                     except _impl_flow.ImplRefusal as exc:
                         # A NAMED refusal, never absorbed into a note: the
                         # callers turn `refused` into this step's FAIL.
                         rec["recorded_as_applied"] = []
                         rec["refused"] = {"reason_class": exc.reason_class,
                                           "detail": exc.detail}
-                    if rec.get("superseded"):
-                        rec["superseded"] = {
-                            k: (f"{v} -- under the {_impl_mode} flow it is "
-                                f"RECORDED AS APPLIED in the mode record, not "
-                                f"published into the declaration")
-                            for k, v in rec["superseded"].items()}
-                    rec["not_published_reason"] = (
-                        f"under the {_impl_mode} flow the tape-out declaration "
-                        f"stays the owner's (decision 6); the derived answers "
-                        f"are recorded as applied in "
-                        f"{_impl_flow.record_path(project)}")
+                    if rec.get("refused"):
+                        rec["not_published_reason"] = (
+                            f"under the {_impl_mode} flow the declaration stays "
+                            f"the owner's (decision 6); derived answers were "
+                            f"NOT recorded: {rec['refused']['reason_class']} "
+                            f"({rec['refused']['detail']})")
+                    else:
+                        if rec.get("superseded"):
+                            rec["superseded"] = {
+                                k: (f"{v} -- under the {_impl_mode} flow it is "
+                                    f"RECORDED AS APPLIED in the mode record, "
+                                    f"not published into the declaration")
+                                for k, v in rec["superseded"].items()}
+                        rec["not_published_reason"] = (
+                            f"under the {_impl_mode} flow the tape-out "
+                            f"declaration stays the owner's (decision 6); "
+                            f"the derived answers are recorded as applied in "
+                            f"{_impl_flow.record_path(project)}")
                 elif merge:
                     doc, ignored = _td.merge_answers(doc, merge)
                     decl_path.write_text(
@@ -48205,7 +48217,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # rungs report whichever they got.
     _decl_rec = publish_tapeout_declarations(project, pdk, container,
                                              def_file, top)
-    if _decl_rec.get("refused"):
+    if isinstance(_decl_rec, dict) and _decl_rec.get("refused"):
         _ref = _decl_rec["refused"]
         return StepResult("gds", "FAIL", time.time() - t0,
                           f"{_ref['reason_class']}: {_ref['detail']} "
@@ -48733,7 +48745,7 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     publish_database_unit_declaration(project, pdk, container, def_file)
     _decl_rec = publish_tapeout_declarations(project, pdk, container, def_file,
                                              physical_top)
-    if _decl_rec.get("refused"):
+    if isinstance(_decl_rec, dict) and _decl_rec.get("refused"):
         _ref = _decl_rec["refused"]
         return StepResult("gds", "FAIL", time.time() - t0,
                           f"{_ref['reason_class']}: {_ref['detail']} "

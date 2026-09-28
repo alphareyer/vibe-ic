@@ -11,8 +11,8 @@ Decision 6: the tape-out declaration is vibe-ic's and owner-answered,
      nothing without a non-default record.
   3. `record_applied_config` records a resolved config's die/core/sizing with
      the config provenance's own source, and skips what the declaration gave.
-  4. `applied_answer`: the declaration first; under the flag only, the
-     applied value; else NOT_DETERMINED with the reason.
+  4. `applied_answer`: a recorded supersede first, then the declaration;
+     under the flag only, the applied value; else NOT_DETERMINED with reason.
   5. Step 37.3's finishing core: the declared core; under the flag the
      applied one; neither is LL_FINISHING_CORE_UNDECLARED.
   6. (needs D1 on main: `librelane_contract._apply_runner_floorplan`) the Chip
@@ -313,6 +313,40 @@ def test_a_superseded_declared_answer_is_recorded_with_its_reason(tmp_path):
     assert "outranks the declared answer: the wrapper this run WROTE" in src
 
 
+def _wrapped_die(p):
+    doc, _ = td.load(p / td.DECLARATION_REL)
+    doc, _ = td.merge_answers(doc, {"top_cell": "spm"})
+    (p / td.DECLARATION_REL).write_text(json.dumps(doc))
+    wrapper = p / "reports/phase3/io_pad_chip_top.json"
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(json.dumps({"verdict": "WROTE", "core_module": "spm",
+                                   "chip_top_module": "chip_top"}))
+    return p / "phase3/stage3/pnr/routed.def"
+
+
+def test_the_publisher_supersede_reaches_the_applied_answer(tmp_path, no_seal):
+    r = _r()
+    p = _flagged(tmp_path)
+    def_file = _wrapped_die(p)
+    rec = r.publish_tapeout_declarations(p, _Pdk(), "c", def_file, "chip_top")
+    assert not rec.get("refused")
+    assert "top_cell" in rec["recorded_as_applied"]
+    answer, source = IF.applied_answer(p, "top_cell")
+    assert answer == "chip_top" and "wrapper" in source
+    assert IF.read_record(p)["tool_defaults"]["top_cell"]["outranks_declared"]
+
+
+def test_a_second_publish_accounts_for_values_already_recorded(tmp_path, no_seal):
+    r = _r()
+    p = _flagged(tmp_path)
+    def_file = p / "phase3/stage3/pnr/routed.def"
+    first = r.publish_tapeout_declarations(p, _Pdk(), "c", def_file, "spm")
+    second = r.publish_tapeout_declarations(p, _Pdk(), "c", def_file, "spm")
+    assert first["recorded_as_applied"]
+    assert second["recorded_as_applied"] == []
+    assert set(second["applied_already_recorded"]) == set(first["recorded_as_applied"])
+
+
 def _relative_core(p):
     doc, _ = td.load(p / td.DECLARATION_REL)
     doc, _ = td.merge_answers(doc, {"fp_sizing": "relative",
@@ -355,24 +389,26 @@ def test_an_applied_core_from_an_earlier_run_is_refused(tmp_path):
                       recorded_by="t")
     with pytest.raises(LC.Refusal, match="LL_APPLIED_CORE_STALE"):
         S37._finishing_core(p)
+    record = p / _r().FLOORPLAN_RECTANGLES_REL
+    record.unlink()
+    with pytest.raises(LC.Refusal, match="LL_APPLIED_CORE_UNVERIFIED"):
+        S37._finishing_core(p)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text('{"truncated": ')
+    with pytest.raises(LC.Refusal, match="LL_APPLIED_CORE_UNVERIFIED"):
+        S37._finishing_core(p)
 
 
 def test_a_conflict_while_publishing_is_a_named_gds_fail(tmp_path, no_seal):
     r = _r()
     p = _flagged(tmp_path)
+    def_file = _wrapped_die(p)
     IF.record_applied(p, {"core_area_um": {"value": [1, 1, 9, 9],
                                            "source": "an earlier run"}},
                       recorded_by="t")
     rec = r.publish_tapeout_declarations(
-        p, _Pdk(), "c", p / "phase3/stage3/pnr/routed.def", "spm")
+        p, _Pdk(), "c", def_file, "chip_top")
     assert rec["refused"]["reason_class"] == IF.IMPL_APPLIED_CONFLICT
-    import ast
-    src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
-    tree = ast.parse(src)
-    for name in ("_step_gds_direct", "step_gds"):
-        fn = next(n for n in tree.body
-                  if isinstance(n, ast.FunctionDef) and n.name == name)
-        body = ast.get_source_segment(src, fn)
-        call = body.index("publish_tapeout_declarations(")
-        guard = body.index('if _decl_rec.get("refused"):', call)
-        assert 'StepResult("gds", "FAIL"' in body[guard:guard + 300], name
+    assert "NOT recorded" in rec["not_published_reason"]
+    assert "RECORDED AS APPLIED" not in json.dumps(rec.get("superseded", {}))
+    assert "top_cell" not in IF.read_record(p)["tool_defaults"]

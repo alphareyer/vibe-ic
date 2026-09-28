@@ -304,3 +304,31 @@ def test_step_37_streams_out_on_the_resolved_root_with_no_declaration(env, monke
         runner.step_gds(env.project, 'top', pdk, 'c')
     assert Path(seen['root']) == env.tmp / 'cache' / IMAGE_ID.split(':')[1]
     assert seen['image'] == stated_image() and seen['pdk'] == 'stated_pdk'
+
+
+def test_step_37_refused_declaration_stops_before_the_tool(env, monkeypatch):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    import librelane_step37
+    import drc_feedback_repair
+
+    _switch(env.project, steps={'37': 'librelane'})
+    pnr = runner._pl.pnr_dir(env.project)
+    pnr.mkdir(parents=True, exist_ok=True)
+    for name in ('top.def', 'routed.def'):
+        (pnr / name).write_text('DESIGN top ;\n')
+    monkeypatch.setattr(runner, '_layout_basis', lambda *a, **k: ('digest', None))
+    monkeypatch.setattr(runner._ga, 'gate_passed', lambda *a, **k: True)
+    monkeypatch.setattr(runner, '_vacuous_on_unrouted', lambda *a, **k: None)
+    monkeypatch.setattr(drc_feedback_repair, 'has_reviewed_rule', lambda *a, **k: False)
+    monkeypatch.setattr(runner, '_streamout_top', lambda def_file, top: (top, ''))
+    monkeypatch.setattr(runner, 'publish_database_unit_declaration', lambda *a, **k: None)
+    monkeypatch.setattr(runner, 'publish_tapeout_declarations',
+                        lambda *a, **k: {'refused': {
+                            'reason_class': 'IMPL_APPLIED_CONFLICT', 'detail': 'x'},
+                            'record': 'r'})
+    monkeypatch.setattr(librelane_step37, 'run',
+                        lambda *a, **k: pytest.fail('refused run reached step 37'))
+    pdk = SimpleNamespace(name='stated_pdk', drc_deck=None)
+    result = runner.step_gds(env.project, 'top', pdk, 'c')
+    assert result.status == 'FAIL'
+    assert 'IMPL_APPLIED_CONFLICT' in result.detail

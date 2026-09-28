@@ -199,6 +199,11 @@ def validate_record(obj: Any) -> List[str]:
                     and isinstance(ans.get("source"), str) and ans["source"]):
                 problems.append(f"tool_defaults[{q!r}] needs a value and a "
                                 "non-empty source")
+            elif "outranks_declared" in ans and not (
+                    isinstance(ans["outranks_declared"], str)
+                    and ans["outranks_declared"].strip()):
+                problems.append(f"tool_defaults[{q!r}].outranks_declared "
+                                "needs a non-empty reason")
     if obj.get("image") is not None and not isinstance(obj.get("image"), str):
         problems.append("image is neither null nor a string")
     # #312/#365: an unknown image is None WITH its reason, never a bare null.
@@ -820,10 +825,12 @@ def record_applied(project: Path, answers: Dict[str, Dict[str, Any]], *,
             raise ImplRefusal(IMPL_RECORD_UNREADABLE,
                               f"applied {question!r} needs a value and a source")
         source = ans["source"]
+        outrank_reason = None
         if _answered(project, question):
             if question not in outrank:
                 continue
-            source += f" (outranks the declared answer: {outrank[question]})"
+            outrank_reason = outrank[question]
+            source += f" (outranks the declared answer: {outrank_reason})"
         old = table.get(question)
         if old is not None:
             if old.get("value") != ans["value"]:
@@ -831,9 +838,15 @@ def record_applied(project: Path, answers: Dict[str, Dict[str, Any]], *,
                     IMPL_APPLIED_CONFLICT,
                     f"{question}: recorded {old.get('value')!r} ({old.get('source')}) "
                     f"vs {ans['value']!r} ({ans['source']})")
+            if outrank_reason and not old.get("outranks_declared"):
+                table[question] = dict(old, source=source,
+                                       outranks_declared=outrank_reason)
+                written.append(question)
             continue
         table[question] = {"value": ans["value"], "source": source,
-                           "recorded_by": str(recorded_by)}
+                           "recorded_by": str(recorded_by),
+                           **({"outranks_declared": outrank_reason}
+                              if outrank_reason else {})}
         written.append(question)
     if written:
         new = dict(rec, tool_defaults=table)
@@ -896,12 +909,16 @@ def recorded_applied(project: Path, question: str) -> Optional[tuple]:
 
 
 def applied_answer(project: Path, question: str) -> tuple:
-    """(value, source) for a 0.5ic question: the declaration's answer (unless
-    `declaration_config` withholds it); else, under a recorded non-default
-    mode, the value the flow applied; else (NOT_DETERMINED, why). The default
-    flow never reads the record; an unreadable declaration is refused."""
+    """(value, source) for a 0.5ic question: a recorded, proven supersede;
+    otherwise the declaration's answer (unless withheld); otherwise an
+    applied value under a non-default mode; else NOT_DETERMINED. An unreadable
+    declaration is refused."""
     import _tapeout_declaration as TD  # noqa: PLC0415
     if _answered(project, question):
+        rec = read_record(project)
+        if (rec is not None and
+                (rec["tool_defaults"].get(question) or {}).get("outranks_declared")):
+            return recorded_applied(project, question)
         return (_declared(project, question),
                 f"{TD.DECLARATION_REL}.answers.{question}")
     got = recorded_applied(project, question)

@@ -102,25 +102,6 @@ def _vibeic_gds_gates(project: Path, image: str, pdk_root: Path, pdk: str,
     return results
 
 
-def _floorplan_record_core(project: Path):
-    """(core, source) of THIS run's own floorplan record, or (None, why)."""
-    path = project / "reports/phase3/floorplan_rectangles.json"
-    try:
-        rec = json.loads(path.read_text())
-    except (OSError, ValueError) as exc:
-        return None, f"{path}: {exc}"
-    rect, die, pad = (rec.get("floorplan_rect_um"), rec.get("die_rect_um"),
-                      rec.get("core_pad_um"))
-    if isinstance(rect, list) and len(rect) == 4:
-        return [float(v) for v in rect], f"{path}.floorplan_rect_um"
-    if (isinstance(die, list) and len(die) == 4
-            and isinstance(pad, (int, float)) and not isinstance(pad, bool)):
-        return ([float(die[0]) + pad, float(die[1]) + pad,
-                 float(die[2]) - pad, float(die[3]) - pad],
-                f"{path}.die_rect_um inset by core_pad_um")
-    return None, f"{path} names no core"
-
-
 def _finishing_core(project: Path) -> tuple:
     """(core, source) the finishing XOR checks against, or a named refusal.
 
@@ -142,8 +123,15 @@ def _finishing_core(project: Path) -> tuple:
             got = _impl_flow.recorded_applied(project, "core_area_um")
             if got is not None and isinstance(got[0], list) and len(got[0]) == 4:
                 core, core_source = [float(v) for v in got[0]], got[1]
-                run_core, run_why = _floorplan_record_core(project)
-                if run_core is not None and any(
+                from phase3_one_shot_runner import declared_core_rect
+                run_core, run_why = declared_core_rect(project)
+                if run_core is None:
+                    raise Refusal(
+                        "LL_APPLIED_CORE_UNVERIFIED",
+                        f"the mode record's applied core {core} ({core_source}) "
+                        f"cannot be tied to this run: {run_why}; run a fresh "
+                        f"project clone")
+                if any(
                         abs(a - b) > 1e-6 for a, b in zip(core, run_core)):
                     raise Refusal(
                         "LL_APPLIED_CORE_STALE",
