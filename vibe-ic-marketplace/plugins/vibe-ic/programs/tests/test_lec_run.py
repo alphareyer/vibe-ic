@@ -1865,6 +1865,20 @@ def _drive_lec(monkeypatch, tmp_path, stub, timeout_s, spend_per_attempt=0.0,
     return rc, rep, calls
 
 
+def test_decided_miter_failure_survives_unavailable_sat_search(monkeypatch, tmp_path):
+    # The proof has a completed equiv_status residual and the parser decides
+    # FAIL. The stub never writes the terminal IL, so SAT is genuinely NOT_RUN.
+    assert lec_run.parse_equiv_output(MISMATCH_OUTPUT)["verdict"] == "FAIL"
+    rc, rep, calls = _drive_lec(
+        monkeypatch, tmp_path,
+        lambda n, fe: (True, MISMATCH_OUTPUT), timeout_s=10)
+    assert calls
+    assert rep["counterexample_search"]["result"] == "NOT_RUN"
+    assert rep["verdict"] == "FAIL"
+    assert rep["equivalent"] is False
+    assert rc != 0
+
+
 def test_e2e_a_ground_out_proof_stops_instead_of_starting_over(monkeypatch,
                                                                tmp_path):
     """POLE A. The measured stall: attempt 1 grinds to the deadline. The step
@@ -2339,4 +2353,3 @@ def test_no_live_docker_exec_targets_the_bare_shared_container_name():
         f"line(s) {offenders} — pass `_live_container()` instead, so the name "
         f"carries the pin digest and cannot be squatted by another lane's "
         f"container (#2230)")
-
