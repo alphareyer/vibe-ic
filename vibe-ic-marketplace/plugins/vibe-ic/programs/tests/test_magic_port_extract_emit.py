@@ -56,8 +56,11 @@ class TestExtractionTcl:
     def test_flatten_default_on(self):
         tcl = mod.build_extraction_tcl("top", "/g.gds", "/o.spice")
         # N6: the flat cell keeps the top's own labels only (`-dotoplabels`);
-        # a bare flatten would hand every library pin to `port makeall`.
-        assert _flattens(tcl) == [["flatten", "-dotoplabels", "top"]]
+        # a bare flatten would hand every library pin to `port makeall`. The
+        # target is a NEW cell: flattening into `top` itself is refused by
+        # Magic ("top already exists") and extracts the hierarchy instead.
+        assert _flattens(tcl) == [["flatten", "-dotoplabels", "top_flat"]]
+        assert "load top_flat" in tcl.splitlines()
 
     def test_flatten_can_be_disabled(self):
         opts = mod.MagicExtractOptions(flatten_top=False)
@@ -88,7 +91,7 @@ class TestExtractionTcl:
     def test_chip_agnostic_arbitrary_top(self):
         tcl = mod.build_extraction_tcl("my_TOP_9", "/g.gds", "/o.spice")
         assert "load my_TOP_9" in tcl
-        assert ["flatten", "-dotoplabels", "my_TOP_9"] in _flattens(tcl)
+        assert ["flatten", "-dotoplabels", "my_TOP_9_flat"] in _flattens(tcl)
 
     def test_provenance(self):
         tcl = mod.build_extraction_tcl("top", "/g.gds", "/o.spice")
