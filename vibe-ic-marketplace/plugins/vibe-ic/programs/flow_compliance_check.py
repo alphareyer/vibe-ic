@@ -18269,6 +18269,165 @@ def not_owed_root(row: Any) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _attribute_halted_canonical_outputs(
+        project: Path, results: Sequence["StepResult"],
+        cascade_info: Dict[str, Any]) -> None:
+    """Charge an uninvoked canonical-output producer to its recorded halt.
+
+    The Phase-3 runner emits its step plan before the completion audit.  The
+    plan's ``canonicalize_artefacts`` row is the invocation witness; its
+    NOT_MEASURED/upstream_failed word says the canonicalizer never ran.  The
+    SDC alias and extracted SPEF are outputs of that producer (see
+    ``step_canonicalize_artefacts``), even though their canonical flow rows
+    precede the post-route repair site.  A ``blocks_on`` walk cannot express
+    that backwards execution dependency.  A declared gate document dependent
+    on the SPEF is witnessed separately by the producer-run report.
+
+    This is attribution only.  It runs after the ordinary cascade, touches
+    only absent outputs, and requires a typed failed step id corroborated by
+    the failed runner row.  A producer row that ran, an unbound halt, or a
+    step with an independent program failure retains its original verdict.
+    """
+    orch_path = project / "reports/orchestrator/phase3_one_shot.json"
+    try:
+        orch = json.loads(orch_path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(orch, dict):
+        return
+    # The pre-summary steps-only record says ``program``.  The terminal
+    # runner record replaces that with a producer identity and
+    # ``steps_verdict``; both are emitted by this same runner.
+    if not (orch.get("program") == "phase3_one_shot_runner"
+            or (isinstance(orch.get("producer"), dict)
+                and orch["producer"].get("recipe_sha256")
+                and orch.get("steps_verdict"))):
+        return
+    if orch.get("project") and Path(str(orch["project"])).resolve() != project.resolve():
+        return
+    if orch.get("bounded") or orch.get("verdict") in (
+            _T.Verdict.PASS.value, _T.Verdict.PASS_WITH_WAIVERS.value):
+        return
+    plan = orch.get("steps")
+    if not isinstance(plan, list):
+        return
+    producer_positions = [i for i, row in enumerate(plan)
+                          if isinstance(row, dict)
+                          and row.get("name") == "canonicalize_artefacts"
+                          and row.get("status") == _T.Verdict.NOT_MEASURED.value
+                          and row.get("reason_class")
+                          == _T.ReasonClass.UPSTREAM_FAILED.value]
+    if len(producer_positions) != 1:
+        return
+    producer_pos = producer_positions[0]
+    row_of = {str(r.id): r for r in results}
+
+    # The failed runner row is an execution record, but older rows have no
+    # canonical flow id.  Prefer an explicit typed id when present; otherwise
+    # bind its code to a producer-owned failed report carrying ``step``.  A
+    # name/order guess is never enough to move a FAIL row.
+    failed_rows = [row for row in plan[:producer_pos]
+                   if isinstance(row, dict)
+                   and row.get("status") == _T.Verdict.FAIL.value]
+    candidates: List[Tuple[str, str]] = []
+    for row in failed_rows:
+        explicit = (row.get("extras") or {}).get("flow_step")
+        if explicit is not None and str(explicit) in row_of:
+            candidates.append((str(explicit), str(row.get("name"))))
+            continue
+        for report_path in (project / "reports/phase3").glob("*.json"):
+            try:
+                report = json.loads(report_path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(report, dict) or report.get("verdict") != "FAIL":
+                continue
+            step_id = str(report.get("step") or "")
+            code = str(report.get("code") or "")
+            if (step_id in row_of and code
+                    and str(row.get("detail") or "").startswith(code + ":")):
+                candidates.append((step_id, str(row.get("name"))))
+    if len(set(candidates)) != 1:
+        return
+    halt_id, halt_name = candidates[0]
+    if row_of[halt_id].status != _T.Verdict.FAIL.value:
+        return
+
+    # These are the two canonical-output families at issue.  The paths are
+    # flow artefact contracts, not design/PDK names.  A gate document is also
+    # eligible only when the producer-run record explicitly says it skipped
+    # that target because its canonical-output sibling was absent.
+    canonical_outputs = ("phase2/stage2/constraints/*.sdc",
+                         "phase3/stage3/extracted/*.spef")
+
+    def canonical_spec(spec: str) -> bool:
+        return any(_flow_paths_meet(atom, pattern)
+                   for atom in _flow_path_atoms(spec)
+                   for pattern in canonical_outputs)
+
+    skipped_targets: Dict[str, set] = {}
+    try:
+        producer_run = json.loads((project / "reports/audit/flow_declared_producer_run.json").read_text())
+    except (OSError, ValueError):
+        producer_run = None
+    if (isinstance(producer_run, dict)
+            and producer_run.get("program") == "flow_declared_producer_run"):
+        for skipped in producer_run.get("skipped") or []:
+            if not isinstance(skipped, dict):
+                continue
+            target = str(skipped.get("target") or "")
+            siblings = skipped.get("siblings") or []
+            if (target and isinstance(siblings, list) and siblings
+                    and any(canonical_spec(str(s)) for s in siblings)
+                    and not any(_glob_first(project, str(s)) for s in siblings)
+                    and not _glob_first(project, target)):
+                skipped_targets.setdefault(str(skipped.get("step")), set()).add(target)
+
+    blocked = cascade_info.setdefault("blocked_by_upstream", {})
+    for row in results:
+        binding = row.output_binding or {}
+        absent = [str(spec.get("spec")) for spec in binding.get("specs") or []
+                  if isinstance(spec, dict) and not spec.get("satisfied")]
+        if not absent or row.status not in (
+                _T.Verdict.FAIL.value, _T.Verdict.NOT_MEASURED.value):
+            continue
+        if row.status == _T.Verdict.FAIL.value and any(
+                str(reason).startswith(("program failed:", "optional program failed:"))
+                for reason in row.reasons or []):
+            continue
+        if not all(canonical_spec(spec)
+                   or spec in skipped_targets.get(str(row.id), set())
+                   for spec in absent):
+            continue
+        prior_root = not_owed_root(row)
+        if prior_root == halt_id:
+            continue
+        if prior_root is not None:
+            prior_key = next((key for key in blocked if str(key) == prior_root), None)
+            if prior_key is not None:
+                blocked[prior_key] -= 1
+                if not blocked[prior_key]:
+                    del blocked[prior_key]
+        row.status = _T.Verdict.NOT_MEASURED.value
+        row.reason_class = _T.ReasonClass.UPSTREAM_FAILED.value
+        row.cascade_note = f"blocked-by-upstream({halt_id})"
+        row.reasons = [reason for reason in row.reasons or []
+                       if not str(reason).startswith("blocked-by-upstream(step ")]
+        row.reasons.append(
+            f"blocked-by-upstream(step {halt_id}): runner row {halt_name} "
+            f"FAILED and canonicalize_artefacts was never invoked; the "
+            f"declared output producer did not run, so these absent outputs "
+            f"are consequences of that halt; fix step {halt_id} first")
+        binding["producer_halt"] = {
+            "orchestrator": "reports/orchestrator/phase3_one_shot.json",
+            "producer_row": "canonicalize_artefacts",
+            "halt_row": halt_name, "halt_step": halt_id,
+            "absent_specs": absent,
+        }
+        row.output_binding = binding
+        blocked[halt_id] = blocked.get(halt_id, 0) + 1
+
+
 def _attribute_cascade_verdicts(
         results: List["StepResult"],
         steps: List[Dict[str, Any]],
@@ -20596,6 +20755,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         _existing[_owner] = _existing.get(_owner, 0) + _count
     cascade_info["condition_owner_blocks"] = (
         _condition_owner_info.get("records") or [])
+    _attribute_halted_canonical_outputs(project, results, cascade_info)
 
     # v0.100 H2: advisory — warn if post-route STA passed single-corner only
     advisories: List[str] = []
