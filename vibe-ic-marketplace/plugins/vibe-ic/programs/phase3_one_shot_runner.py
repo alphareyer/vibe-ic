@@ -49421,7 +49421,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         f"klayout -zz -b -r {script_c}"
     )
     rc, out, err = _docker_exec(container, cmd, marker=script_c, outputs=[stream_gds])
-    _record_stream_inputs(project, container, gds_out, "klayout", script,
+    _record_stream_inputs(project, container, stream_gds, "klayout", script,
                           def_file, top,
                           {"LEFS": lefs, "CELL_GDS": cell_gds_c,
                            "MACRO_GDS": macro_gds_arg,
