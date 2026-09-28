@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import math
 import re
 import shutil
 import sys
@@ -322,6 +323,118 @@ def _core_edge_keepout(die: list, core: list) -> float:
     return max(gaps)
 
 
+def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
+                          cfg: dict, folder: Path) -> dict:
+    """Read every placed PAD/BLOCK footprint from OpenDB, never DEF text.
+
+    The routed DEF and all physical LEFs are required even when the resulting
+    protected-instance set is empty.  An unreadable source must not turn into
+    an empty mask and permit GDS promotion.
+    """
+    routed = project / 'phase3/stage3/pnr/routed.def'
+    if not routed.is_file() or not routed.stat().st_size:
+        raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE', str(routed))
+    tech = cfg.get('TECH_LEFS') or {}
+    tech_lef = (tech.get('nom_*') or next(iter(tech.values()), None)
+                if isinstance(tech, dict) else next(iter(tech), None))
+    lefs = [tech_lef] if tech_lef else []
+    for key in ('CELL_LEFS', 'PAD_LEFS', 'MACRO_LEFS', 'EXTRA_LEFS'):
+        value = cfg.get(key) or []
+        lefs.extend(value.values() if isinstance(value, dict) else value)
+    for value in (cfg.get('MACROS') or {}).values():
+        if isinstance(value, str) and value.lower().endswith('.lef'):
+            lefs.append(value)
+        elif isinstance(value, dict):
+            for key in ('lef', 'LEF'):
+                if value.get(key):
+                    lefs.append(value[key])
+    if not lefs:
+        raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
+                      f'{routed}: no physical LEF views')
+    guest_lefs = []
+    extra_mounts = []
+    for value in dict.fromkeys(str(x) for x in lefs):
+        host = _host_pdk_path(value, pdk_root, pdk)
+        if not host.is_absolute():
+            host = project / host
+        if not host.is_file():
+            raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
+                          f'physical LEF unreadable: {host}')
+        guest = value if value.startswith(f'/pdk/{pdk}/') else str(host.resolve())
+        guest_lefs.append(guest)
+        if not (host.resolve().is_relative_to(project.resolve()) or
+                host.resolve().is_relative_to((pdk_root / pdk).resolve())):
+            extra_mounts.extend(['-v', f'{host.resolve()}:{guest}:ro'])
+
+    def word(value: Path | str) -> str:
+        return '{' + str(value).replace('\\', '\\\\').replace('}', '\\}') + '}'
+
+    folder.mkdir(parents=True, exist_ok=True)
+    output = folder / 'placed_keepouts.txt'
+    partial = folder / 'placed_keepouts.part'
+    output.unlink(missing_ok=True)
+    partial.unlink(missing_ok=True)
+    script = folder / 'placed_keepouts.tcl'
+    script.write_text('\n'.join([
+        *(f'read_lef {word(path)}' for path in guest_lefs),
+        f'read_def {word(routed.resolve())}',
+        'set _block [[[ord::get_db] getChip] getBlock]',
+        'if {$_block eq "NULL"} { error "placed design has no OpenDB block" }',
+        'set _dbu [$_block getDbUnitsPerMicron]',
+        'if {$_dbu <= 0} { error "placed design has invalid DBU" }',
+        f'set _out [open {word(partial.resolve())} w]',
+        'puts $_out "DBU $_dbu"',
+        'puts $_out "TOTAL [llength [$_block getInsts]]"',
+        'set _protected 0',
+        'foreach _inst [$_block getInsts] {',
+        '  set _master [$_inst getMaster]',
+        '  if {[$_master isPad]} { set _kind PAD } elseif {[$_master isBlock]} { set _kind BLOCK } else { continue }',
+        '  if {![$_inst isPlaced]} { error "unplaced protected instance: [$_inst getName]" }',
+        '  set _box [$_inst getBBox]',
+        '  if {[$_box xMin] >= [$_box xMax] || [$_box yMin] >= [$_box yMax]} { error "empty protected bbox: [$_inst getName]" }',
+        '  puts $_out "BOX $_kind [$_master getName] [$_box xMin] [$_box yMin] [$_box xMax] [$_box yMax]"',
+        '  incr _protected',
+        '}',
+        'puts $_out "END $_protected"',
+        'close $_out',
+        f'file rename -force {word(partial.resolve())} {word(output.resolve())}',
+    ]) + '\n')
+    cmd = ['docker', 'run', '--rm', '--network', 'none',
+           *_dmem.docker_memory_flags(),
+           '-v', f'{project.resolve()}:{project.resolve()}',
+           '-v', f'{(pdk_root / pdk).resolve()}:/pdk/{pdk}:ro',
+           *extra_mounts, image, '--skip', 'openroad', '-exit', str(script)]
+    result = run_container(cmd, supervised=True, log=folder / 'placed_keepouts.log')
+    if result.returncode != 0 or not output.is_file():
+        raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
+                      f'{routed}: OpenDB rc={result.returncode}; '
+                      f'{folder / "placed_keepouts.log"}')
+    try:
+        lines = output.read_text().splitlines()
+        if len(lines) < 3 or lines[0].split()[0] != 'DBU':
+            raise ValueError('missing DBU header')
+        dbu = int(lines[0].split()[1])
+        total = int(lines[1].split()[1]) if lines[1].startswith('TOTAL ') else -1
+        protected = int(lines[-1].split()[1]) if lines[-1].startswith('END ') else -1
+        if dbu <= 0 or total < 0 or protected < 0 or protected > total:
+            raise ValueError('invalid OpenDB census')
+        boxes = []
+        for line in lines[2:-1]:
+            fields = line.split()
+            if len(fields) != 7 or fields[0] != 'BOX' or fields[1] not in ('PAD', 'BLOCK'):
+                raise ValueError(f'invalid OpenDB box: {line}')
+            coords = tuple(int(x) for x in fields[3:])
+            if coords[0] >= coords[2] or coords[1] >= coords[3]:
+                raise ValueError(f'empty OpenDB box: {line}')
+            boxes.append((fields[1], fields[2], coords))
+        if len(boxes) != protected:
+            raise ValueError('truncated OpenDB protected-instance census')
+    except (OSError, ValueError, IndexError) as exc:
+        raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
+                      f'{output}: {exc}') from exc
+    return {'dbu': dbu, 'total': total, 'boxes': boxes, 'source': str(routed)}
+
+
 def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
                    gds: Path, density_config: Path, lane: str) -> Dict[str, Any]:
     """Use the PDK-derived dummy-metal engine after the PDK's own filler."""
@@ -330,25 +443,27 @@ def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
     fill_cfg = build_metal_fill_config(map_text, lef_text, deck_text)
     if not fill_cfg or not fill_cfg.get('layers'):
         raise Refusal('LL_DENSITY_FILL_NO_DERIVED_LAYERS', str(density_config))
-    if cfg.get('MACROS') or cfg.get('EXTRA_LEFS'):
-        # A centrally placed hard macro may obstruct a metal layer without
-        # drawing it in GDS.  This GDS-only engine cannot see LEF OBS, so it
-        # cannot safely top up such a design until an OBS mask is supplied.
-        raise Refusal('LL_DENSITY_FILL_MACRO_OBS_UNRESOLVED', str(density_config))
-    if cfg.get('PAD_LEFS'):
-        pad_paths = [_host_pdk_path(str(path), pdk_root, pdk)
-                     for path in cfg['PAD_LEFS']]
-        try:
-            pad_masters = set().union(*(set(re.findall(
-                r'(?m)^\s*MACRO\s+(\S+)\s*$', path.read_text()))
-                for path in pad_paths))
-            routed_def = project / 'phase3/stage3/pnr/routed.def'
-            placed = set(_components(routed_def.read_text()).values())
-        except OSError as exc:
-            raise Refusal('LL_DENSITY_FILL_PAD_VIEW_UNREADABLE', str(exc)) from exc
-        placed_pads = sorted(pad_masters & placed)
-    else:
-        placed_pads = []
+    root = project / 'phase3/librelane' / lane
+    placed = _placed_keepout_boxes(project, image, pdk_root, pdk, cfg, root)
+    try:
+        spacing = max(float(row['space_to_metal']) for row in fill_cfg['layers'])
+        if not math.isfinite(spacing) or spacing <= 0:
+            raise ValueError('nonpositive PDK spacing')
+    except (KeyError, TypeError, ValueError) as exc:
+        raise Refusal('LL_DENSITY_FILL_SPACING_UNREADABLE', str(exc)) from exc
+    fill_cfg['keepout_boxes_um'] = sorted([
+        [(box[0] / placed['dbu']) - spacing,
+         (box[1] / placed['dbu']) - spacing,
+         (box[2] / placed['dbu']) + spacing,
+         (box[3] / placed['dbu']) + spacing]
+        for _, _, box in placed['boxes']])
+    fill_cfg['_derivation']['placed_instance_keepout'] = {
+        'source': placed['source'], 'source_sha256': digest(Path(placed['source'])),
+        'basis': 'OpenDB placed PAD/BLOCK instance getBBox',
+        'instances_read': placed['total'],
+        'protected_count': len(placed['boxes']), 'spacing_um': spacing}
+    placed_pads = sorted({master for kind, master, _ in placed['boxes']
+                          if kind == 'PAD'})
     if placed_pads:
         try:
             declared, sources = declaration_config(project)
@@ -365,7 +480,6 @@ def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
                 'placed_pad_masters': placed_pads}
         else:
             raise Refusal('LL_DENSITY_FILL_CORE_UNDECLARED', str(density_config))
-    root = project / 'phase3/librelane' / lane
     root.mkdir(parents=True, exist_ok=True)
     config_path = root / 'pdk_fill_config.json'
     out = root / (gds.stem + '.topped.gds')

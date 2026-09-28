@@ -73,10 +73,17 @@ def test_top_up_uses_pdk_rules_and_only_promotes_measured_change(tmp_path, monke
     gds = project / 'pdk_filled.gds'
     gds.write_bytes(b'PDK filler GDS')
     root, cfg = _pdk(tmp_path)
+    routed = project / 'phase3/stage3/pnr/routed.def'
+    routed.parent.mkdir(parents=True)
+    routed.write_text('COMPONENTS 0 ; END COMPONENTS\n')
     calls = []
 
     def eda_write(cmd, **kwargs):
         calls.append(cmd)
+        if 'openroad' in cmd:
+            (Path(cmd[-1]).parent / 'placed_keepouts.txt').write_text(
+                'DBU 1000\nTOTAL 0\nEND 0\n')
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
         out = Path(cmd[cmd.index('--out') + 1])
         report = Path(cmd[cmd.index('--report') + 1])
         out.write_bytes(b'PDK filler GDS plus legal dummy metal')
@@ -93,7 +100,8 @@ def test_top_up_uses_pdk_rules_and_only_promotes_measured_change(tmp_path, monke
     assert [(r['layer'], r['fill_datatype']) for r in derived['layers']] == [
         ([61, 0], 7), ([62, 0], 7)]
     assert derived['_derivation']['density_floor_pct'] == 30
-    assert '--gds' in calls[0] and '--config' in calls[0]
+    assert '--gds' in calls[1] and '--config' in calls[1]
+    assert derived['keepout_boxes_um'] == []
     assert result['layers'][1]['density_after'] > .30
 
 
@@ -118,6 +126,13 @@ def test_pad_ring_stays_outside_declared_core_during_top_up(tmp_path, monkeypatc
         {'CORE_AREA': 'reviewed die declaration'}))
 
     def eda_write(cmd, **kwargs):
+        if 'openroad' in cmd:
+            content = (project / 'phase3/stage3/pnr/routed.def').read_text()
+            boxes = ('BOX PAD PAD_CELL 0 0 10000 8000\n'
+                     if 'PAD_0 PAD_CELL' in content else '')
+            (Path(cmd[-1]).parent / 'placed_keepouts.txt').write_text(
+                f'DBU 1000\nTOTAL 1\n{boxes}END {int(bool(boxes))}\n')
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
         Path(cmd[cmd.index('--out') + 1]).write_bytes(b'fill inside core only')
         _put(Path(cmd[cmd.index('--report') + 1]),
              {'verdict': 'PASS', 'layers': [{'name': 'metal2',
@@ -134,6 +149,7 @@ def test_pad_ring_stays_outside_declared_core_during_top_up(tmp_path, monkeypatc
         'reviewed die declaration'
     assert derived['_derivation']['pad_ring_exclusion']['placed_pad_masters'] == \
         ['PAD_CELL']
+    assert derived['keepout_boxes_um'] == [[-0.3, -0.3, 10.3, 8.3]]
     (project / 'phase3/stage3/pnr/routed.def').write_text(
         'COMPONENTS 1 ;\n- OTHER NEGATED_PAD + FIXED ( 0 0 ) N ;\n'
         'END COMPONENTS\n')
@@ -142,9 +158,91 @@ def test_pad_ring_stays_outside_declared_core_during_top_up(tmp_path, monkeypatc
     assert 'keepout_edge_um' not in json.loads(Path(absent['config']).read_text())
     cfg['MACROS'] = {'hardmacro': '/pdk/processA/hardmacro.lef'}
     _put(config, cfg)
-    with pytest.raises(Refusal, match='LL_DENSITY_FILL_MACRO_OBS_UNRESOLVED'):
+    with pytest.raises(Refusal, match='LL_DENSITY_FILL_PLACEMENT_UNREADABLE'):
         fill.top_up_density(project, 'image', root, 'processA', gds, config,
                             '37-unresolved-obs')
+
+
+def test_top_up_masks_every_placed_pad_and_macro_from_odb(tmp_path, monkeypatch):
+    project = tmp_path / 'project'
+    project.mkdir()
+    gds = project / 'pdk_filled.gds'
+    gds.write_bytes(b'PDK filler GDS')
+    root, config = _pdk(tmp_path)
+    tech = root / 'processA/tech'
+    (tech / 'pad.lef').write_text('MACRO PAD_CELL\n CLASS PAD ;\nEND PAD_CELL\n')
+    (tech / 'macro.lef').write_text('MACRO BLOCK_CELL\n CLASS BLOCK ;\nEND BLOCK_CELL\n')
+    cfg = json.loads(config.read_text())
+    cfg['PAD_LEFS'] = ['/pdk/processA/tech/pad.lef']
+    cfg['MACRO_LEFS'] = ['/pdk/processA/tech/macro.lef']
+    _put(config, cfg)
+    routed = project / 'phase3/stage3/pnr/routed.def'
+    routed.parent.mkdir(parents=True)
+    routed.write_text('COMPONENTS 3 ; - PAD_IN PAD_CELL + FIXED ( 40000 40000 ) N ; '
+                      '- PAD_EDGE PAD_CELL + FIXED ( 0 0 ) N ; '
+                      '- MACRO_0 BLOCK_CELL + FIXED ( 20000 30000 ) FS ; '
+                      'END COMPONENTS\n')
+    monkeypatch.setattr(fill, 'declaration_config', lambda project: (
+        {'CORE_AREA': [10, 12, 88, 90]}, {'CORE_AREA': 'reviewed core'}))
+    calls = []
+
+    def eda_write(cmd, **kwargs):
+        calls.append(cmd)
+        if 'openroad' in cmd:
+            (Path(cmd[-1]).parent / 'placed_keepouts.txt').write_text(
+                'DBU 1000\nTOTAL 3\nBOX PAD PAD_CELL 40000 40000 50000 48000\n'
+                'BOX PAD PAD_CELL 0 0 10000 8000\n'
+                'BOX BLOCK BLOCK_CELL 20000 30000 28000 37000\nEND 3\n')
+        else:
+            Path(cmd[cmd.index('--out') + 1]).write_bytes(b'protected fill')
+            _put(Path(cmd[cmd.index('--report') + 1]),
+                 {'verdict': 'PASS', 'layers': [{'name': 'metal1',
+                                                'density_before': .28,
+                                                'density_after': .34}]})
+        return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    monkeypatch.setattr(fill, 'run_container', eda_write)
+    result = fill.top_up_density(project, 'image', root, 'processA', gds,
+                                 config, '37-placed-masks')
+    derived = json.loads(Path(result['config']).read_text())
+    assert len(calls) == 2 and 'openroad' in calls[0]
+    assert derived['keepout_boxes_um'] == [
+        [-0.3, -0.3, 10.3, 8.3],
+        [19.7, 29.7, 28.3, 37.3],
+        [39.7, 39.7, 50.3, 48.3],
+    ]
+    assert derived['_derivation']['placed_instance_keepout']['protected_count'] == 3
+    assert derived['_derivation']['placed_instance_keepout']['source'] == str(routed)
+
+
+def test_top_up_refuses_unreadable_placed_design_before_gds_promotion(tmp_path, monkeypatch):
+    project = tmp_path / 'project'
+    project.mkdir()
+    gds = project / 'pdk_filled.gds'
+    gds.write_bytes(b'PDK filler GDS')
+    root, config = _pdk(tmp_path)
+    calls = []
+
+    def eda_write(cmd, **kwargs):
+        calls.append(cmd)
+        Path(cmd[cmd.index('--out') + 1]).write_bytes(b'unprotected fill')
+        _put(Path(cmd[cmd.index('--report') + 1]),
+             {'verdict': 'PASS', 'layers': [{'name': 'metal1',
+                                            'density_before': .28,
+                                            'density_after': .34}]})
+        return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    monkeypatch.setattr(fill, 'run_container', eda_write)
+    refusal = None
+    try:
+        fill.top_up_density(project, 'image', root, 'processA', gds,
+                            config, '37-missing-placement')
+    except Refusal as exc:
+        refusal = str(exc)
+    assert refusal is not None and 'LL_DENSITY_FILL_PLACEMENT_UNREADABLE' in refusal
+    assert not calls
+    assert not (project / 'phase3/librelane/37-missing-placement/'
+                'pdk_filled.topped.gds').exists()
 
 
 def test_density_ratios_require_every_deck_layer(tmp_path, monkeypatch):
