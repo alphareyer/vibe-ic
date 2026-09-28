@@ -32620,6 +32620,84 @@ def _g19_backfill_register_offsets(registers: Any,
 
 
 
+#: The L4/L5/L6 semantic layer gates (layergate-2), in order, with the report
+#: stem each is cited under.
+LAYERGATE2_GATES = (
+    ("l4_regmap_phase2_emitter_contract_check",
+     "l4_regmap_emitter_contract"),
+    ("l4_regmap_enumerated_values_typed_check",
+     "l4_regmap_enumerated_values"),
+    # v1.7.74 — for #507. L4's denominator: how many register
+    # address bindings the input DECLARES against how many L4
+    # carries. Without it a shortfall of any size sits behind the
+    # enum-typing gate's PASS, which audits only the fields that
+    # are already present.
+    ("l4_regmap_declared_register_coverage_check",
+     "l4_regmap_declared_register_coverage"),
+    ("l5_analog_block_spec_actionable_check",
+     "l5_analog_block_spec_actionable"),
+    ("l6_fsm_scaffold_actionable_check",
+     "l6_fsm_scaffold_actionable"),
+)
+
+
+def _run_layergate2(project: Path, gates=None, gate_dir=None) -> List[str]:
+    """Run the layergate-2 gates over the FINAL L4/L5/L6; return the names of
+    the gates that FAILed (a FAIL blocks phase 1). A gate that stalls or cannot
+    run is NOT_MEASURED and says so -- never a silent SKIP -- and every FAIL
+    line cites a report that exists (a gate with no --json of its own gets its
+    captured stdout written there)."""
+    gate_dir = gate_dir or Path(__file__).resolve().parent
+    failed: List[str] = []
+    for _gate_name, _report_stem in (gates or LAYERGATE2_GATES):
+        _gate_path = Path(gate_dir) / f"{_gate_name}.py"
+        if not _gate_path.is_file():
+            continue
+        _gate_report = _pl.report_path(
+            project, f"phase1/{_report_stem}.json")
+        _gate_report.parent.mkdir(parents=True, exist_ok=True)
+        _gate_cmd = [sys.executable, str(_gate_path), str(project)]
+        # Only the layergate-2 gates accept --json; the Wave-38 enum
+        # gate does not, so its verdict is captured from stdout, and the
+        # runner writes that capture to the report it cites (below).
+        _writes_json = _gate_name != "l4_regmap_enumerated_values_typed_check"
+        if _writes_json:
+            _gate_cmd += ["--json", str(_gate_report)]
+        _shown = (_gate_report.relative_to(project)
+                  if _gate_report.is_relative_to(project) else _gate_report)
+        # Supervised, not a wall clock (#2051, CZT-11): a gate that stalls
+        # is NOT_MEASURED and says so; it is never a silent SKIP.
+        try:
+            _gate_cp = _pr.run(_gate_cmd, capture_output=True, text=True)
+        except _pr.Stalled as _exc:
+            print(f"      {_gate_name}: NOT_MEASURED — stalled, the layer is "
+                  f"NOT judged ({_exc})")
+            continue
+        except OSError as _exc:
+            print(f"      {_gate_name}: NOT_MEASURED — not runnable, the "
+                  f"layer is NOT judged ({_exc})")
+            continue
+        if not _writes_json:
+            try:
+                _gate_report.write_text(json.dumps({
+                    "gate": _gate_name, "returncode": _gate_cp.returncode,
+                    "evidence": "the gate's own stdout/stderr (it writes no "
+                                "report of its own)",
+                    "stdout": _gate_cp.stdout, "stderr": _gate_cp.stderr},
+                    indent=2))
+            except OSError as _exc:
+                _shown = f"its stdout (report not written: {_exc})"
+        if _gate_cp.stdout:
+            print(f"      {_gate_name}: "
+                  f"{_gate_cp.stdout.strip().splitlines()[0]}")
+        # exit 1 == FAIL (blocks). exit 2 == SKIP / not applicable.
+        if _gate_cp.returncode == 1:
+            failed.append(_gate_name)
+            print(f"      {_gate_name}: FAIL — blocks phase1 "
+                  f"(see {_shown})")
+    return failed
+
+
 def _g19_post_emit_backfill_register_offsets(project: Path) -> None:
     """G19 follow-on — fill L4 register offsets from the design's OWN summary
     table, after every pass that can add a register has run.
@@ -67645,51 +67723,8 @@ def main() -> int:
     # to reports/phase1/, FAIL bubbles to the strict-mode exit via
     # `cov_gate_failed`. Chip-AGNOSTIC — every gate reads only the
     # project's own L docs and its consuming program.
-    for _gate_name, _report_stem in (
-        ("l4_regmap_phase2_emitter_contract_check",
-         "l4_regmap_emitter_contract"),
-        ("l4_regmap_enumerated_values_typed_check",
-         "l4_regmap_enumerated_values"),
-        # v1.7.74 — for #507. L4's denominator: how many register
-        # address bindings the input DECLARES against how many L4
-        # carries. Without it a shortfall of any size sits behind the
-        # enum-typing gate's PASS, which audits only the fields that
-        # are already present.
-        ("l4_regmap_declared_register_coverage_check",
-         "l4_regmap_declared_register_coverage"),
-        ("l5_analog_block_spec_actionable_check",
-         "l5_analog_block_spec_actionable"),
-        ("l6_fsm_scaffold_actionable_check",
-         "l6_fsm_scaffold_actionable"),
-    ):
-        _gate_path = (Path(__file__).resolve().parent
-                      / f"{_gate_name}.py")
-        if not _gate_path.is_file():
-            continue
-        _gate_report = _pl.report_path(
-            project, f"phase1/{_report_stem}.json")
-        _gate_report.parent.mkdir(parents=True, exist_ok=True)
-        _gate_cmd = [sys.executable, str(_gate_path), str(project)]
-        # Only the layergate-2 gates accept --json; the Wave-38 enum
-        # gate does not, so its verdict is captured from stdout only.
-        if _gate_name != "l4_regmap_enumerated_values_typed_check":
-            _gate_cmd += ["--json", str(_gate_report)]
-        try:
-            _gate_cp = subprocess.run(
-                _gate_cmd, capture_output=True, text=True, timeout=120)
-        except (OSError, subprocess.SubprocessError) as _exc:
-            print(f"      {_gate_name}: SKIP (not runnable: {_exc})")
-            continue
-        if _gate_cp.stdout:
-            print(f"      {_gate_name}: "
-                  f"{_gate_cp.stdout.strip().splitlines()[0]}")
-        # exit 1 == FAIL (blocks). exit 2 == SKIP / not applicable.
-        if _gate_cp.returncode == 1:
-            cov_gate_failed = True
-            _shown = (_gate_report.relative_to(project)
-                      if _gate_report.is_relative_to(project) else _gate_report)
-            print(f"      {_gate_name}: FAIL — blocks phase1 "
-                  f"(see {_shown})")
+    if _run_layergate2(project):
+        cov_gate_failed = True
 
     print(f"[15/15] coverage report ...")
     pct, report = emit_coverage_report(project, extracted, results)
@@ -68061,7 +68096,8 @@ def main() -> int:
         # consumer would silently emit a wrong port list / a hole where a
         # timing constant belongs / a dispatcher missing a command.
         print(f"FAIL: semantic layer gate(s) FAILed: "
-              f"{', '.join(layer_gate_failures)} — see reports/phase1/")
+              f"{', '.join(layer_gate_failures)} — see "
+              f"{_pl.report_path(project, 'phase1/x.json').parent.relative_to(project)}/")
         _drop_v0_3_7_exit_reason(project)
         return 1
     if args.strict and (pct < 80.0 or total_todo > 0):
