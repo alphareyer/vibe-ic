@@ -98,6 +98,7 @@ CONTROLLERS = ("postroute.repair_setup", "postroute.repair_hold",
 #: The actuator's parameters -> the plugin step's variables.
 PARAM_VARS = {
     "setup_margin_ns": "VIBEIC_PRR_SETUP_MARGIN",
+    "setup_sequence": "VIBEIC_PRR_SETUP_SEQUENCE",
     "hold_margin_ns": "VIBEIC_PRR_HOLD_MARGIN",
     "setup_max_buffer_pct": "VIBEIC_PRR_SETUP_MAX_BUFFER_PCT",
     "hold_max_buffer_pct": "VIBEIC_PRR_HOLD_MAX_BUFFER_PCT",
@@ -219,9 +220,19 @@ def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
         mounts=[(Path(h), g) for h, g in ctx["mounts"]], lane=lane)
     sta_state = folders[-1] / "state_out.json"
     summary = summarize(_load(sta_state).get("metrics") or {}, ctx["corners"])
+    # LibreLane RCX uses -lef_res, while the direct signoff extracts the
+    # same route with -corner_cnt 1 -max_res 50 -coupling_threshold 0.1.
+    # The latter is the acceptance instrument.  Keep the LibreLane values
+    # for diagnosis, and make a missing native scene a hard refusal.
+    import _native_postroute_timing as _native
+    native = _native.measure(ctx, folders[0] / "state_out.json",
+                             folders[0] / "native_signoff")
     antenna = antenna_census(folders[1])
     return folders[0], {"sta_state": str(sta_state),
-                        "sta_state_sha256": _ll.digest(sta_state), **summary,
+                        "sta_state_sha256": _ll.digest(sta_state),
+                        "librelane_setup_ws": summary["setup_ws"],
+                        "librelane_hold_ws": summary["hold_ws"],
+                        **summary, **native,
                         "antenna_nets": antenna["antenna__violating__nets"],
                         "antenna_pins": antenna["antenna__violating__pins"],
                         "antenna_state": str(folders[1] / "state_out.json")}
@@ -253,6 +264,12 @@ def measure(impl: Path, domain: str, json_out: Path) -> int:
         if _ll.digest(sta) != cur["measurement"]["sta_state_sha256"]:
             print(f"{sta}: not the state {CURRENT} adopted", file=sys.stderr)
             return RC_UNDETERMINED
+        native_hash = cur["measurement"].get("native_odb_sha256")
+        if native_hash is not None:
+            odb = Path(_load(Path(cur["repair_state"]))["odb"])
+            if _ll.digest(odb) != native_hash:
+                print(f"{odb}: not the ODB native timing measured", file=sys.stderr)
+                return RC_UNDETERMINED
     except (OSError, ValueError, KeyError) as exc:
         print(f"no adopted candidate to measure: {exc}", file=sys.stderr)
         return RC_UNDETERMINED
@@ -513,7 +530,9 @@ def _prepare(project: Path, *, image: str, pdk: str, pdk_root: Path, sdc: Path,
 
 def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
               configs: Dict[str, Path], corners: List[str],
-              mounts: List[Tuple[Path, str]], controllers: Sequence[str] = CONTROLLERS,
+              mounts: List[Tuple[Path, str]], derate: Tuple[float, float],
+              aocv_table: Optional[str] = None,
+              controllers: Sequence[str] = CONTROLLERS,
               registry: Optional[Path] = None,
               programs_dir: Optional[Path] = None,
               floors: Optional[Dict[str, Tuple[float, str]]] = None) -> Dict[str, Any]:
@@ -532,6 +551,7 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
            "mounts": [(str(h.resolve()), g) for h, g in mounts],
            "configs": {k: str(v.resolve()) for k, v in configs.items()},
            "corners": corners, "lane": lane, "arm": name,
+           "derate": list(derate), "aocv_table": aocv_table,
            "floors": {k: list(v) for k, v in (floors or {}).items()}}
     write_json(impl / CONTEXT, ctx)
     ledger = _ledger_path(impl)
@@ -575,6 +595,7 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
 
 def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
         views: Dict[str, Path], sdc: Path, derate: Tuple[float, float],
+        aocv_table: Optional[str] = None,
         pg_rules_tcl: Optional[Path] = None, refill_tcl: Optional[Path] = None,
         registry: Optional[Path] = None, programs_dir: Optional[Path] = None,
         docker: str = "docker") -> Dict[str, Any]:
@@ -598,6 +619,7 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
                                    docker=docker)
     report.update(close_arm(project, "librelane", state0, image=image, pdk=pdk,
                             configs=configs, corners=corners, mounts=mounts,
+                            derate=derate, aocv_table=aocv_table,
                             registry=registry, programs_dir=programs_dir,
                             floors=declared_timing_floor(project, sdc)))
     report["verdict"] = "PASS"
@@ -671,6 +693,7 @@ def select_dual(project: Path, arms: Dict[str, Dict[str, Any]],
 def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Path,
                  sdc: Path, derate: Tuple[float, float], route_state: Path,
                  route_drc: Optional[int],
+                 aocv_table: Optional[str] = None,
                  variant_arm: Optional[Callable[[str, Dict[str, Tuple[Any, str]]],
                                                 Dict[str, Any]]] = None,
                  pg_rules_tcl: Optional[Path] = None,
@@ -695,6 +718,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
         project, image=image, pdk=pdk, pdk_root=pdk_root, sdc=sdc, derate=derate,
         pg_rules_tcl=pg_rules_tcl, refill_tcl=None, docker=docker)
     common = dict(image=image, pdk=pdk, configs=configs, corners=corners, mounts=mounts,
+                  derate=derate, aocv_table=aocv_table,
                   registry=registry, programs_dir=programs_dir,
                   floors=declared_timing_floor(project, sdc))
     if mode != "dual":
@@ -754,7 +778,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     m.add_argument("--json", type=Path, required=True)
     a = sub.add_parser("actuate", help="one repair candidate from the adopted state")
     for name in PARAM_VARS:
-        a.add_argument("--" + name.replace("_", "-"), type=float, default=None)
+        a.add_argument("--" + name.replace("_", "-"),
+                       type=str if name == "setup_sequence" else float,
+                       default=None)
     args = parser.parse_args(argv)
     impl = Path.cwd()
     if args.command == "measure":
