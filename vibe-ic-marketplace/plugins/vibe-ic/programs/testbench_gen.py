@@ -1817,7 +1817,8 @@ def run_unit_tbs(project: Path, container: "str | None" = None,
                  report: "dict | None" = None,
                  build_timeout: int = 1800,
                  run_timeout: int = 600,
-                 dispatch=None) -> int:
+                 dispatch=None,
+                 isa_producer=None) -> int:
     """Build and RUN every emitted unit TB; write the Step-4 JUnit.
 
     Returns the number of testbenches that EXECUTED (built and ran), or a
@@ -1936,6 +1937,19 @@ def run_unit_tbs(project: Path, container: "str | None" = None,
                       "work_dir": str(wd),
                       "tb_file": str(tb),
                       "has_case_oracle": has_case_oracle})
+    isa_rows = _isa_suite_rows(project, report, isa_producer)
+    for row in isa_rows:
+        # A case the ISA suite producer EXECUTED is judged by the suite, not by
+        # the substance-floor scaffold that stood in for it.
+        if not row.get(_l10x.SIM_EXECUTED_KEY):
+            continue
+        cases[:] = [c for c in cases if c["name"] != row["id"]]
+        cases.append({"name": row["id"],
+                      "state": ("passed" if row["verdict"] == _l10x.PASS
+                                else "failed"),
+                      "message": row["detail"][:400], "log_tail": "",
+                      "time": 0.0, "work_dir": "", "tb_file": row["tb_file"],
+                      "has_case_oracle": True})
     executed = sum(1 for c in cases if c["state"] in ("passed", "failed"))
     report["cases"] = cases
     report["passed"] = sum(1 for c in cases if c["state"] == "passed")
@@ -1985,12 +1999,35 @@ def run_unit_tbs(project: Path, container: "str | None" = None,
             "tb_file": case["tb_file"],
             "detail": detail,
         })
+    if isa_rows:
+        import isa_suite_producer as _isa
+        rows = _isa.merge_rows(rows, isa_rows)
     execution_record = _l10x.write_record(
         project, l10_path, rows,
         producer="testbench_gen.run_unit_tbs",
         tb_dir=tb_dir, source_junit=results)
     report["execution_record"] = str(execution_record)
     return executed
+
+
+def _isa_suite_rows(project: Path, report: dict, producer=None) -> list:
+    """Execution rows for the declared L10 cases that ask for a public ISA
+    instruction-set suite (`isa_suite_producer`). Empty when no case binds.
+
+    Each row replaces the scaffold's row for the same case. A refusal (no
+    network, a lock mismatch, a design fact the producer cannot derive) is a
+    NOT_EXECUTED row that NAMES the refusal, never a PASS."""
+    try:
+        import isa_suite_producer as _isa
+        rec = (producer or _isa.produce)(project)
+    except Exception as exc:  # noqa: BLE001 — the executor never crashes
+        report["isa_suite"] = {"error": f"ISA suite producer failed: {exc!r}"}
+        return []
+    report["isa_suite"] = {"refusal": rec.get("refusal"),
+                           "cases": rec.get("cases"),
+                           "label": rec.get("label"),
+                           "receipt": _isa.RECEIPT_REL}
+    return list(rec.get("rows") or [])
 
 
 def main() -> int:
