@@ -1389,7 +1389,15 @@ def _expert_closed_obligations(formal_dir: Path, unresolved: List[dict],
         prop = str(d.get("property", "")).strip()
         if not prop:
             continue
-        if not re.search(r"\bproperty\s+" + re.escape(prop) + r"\b", text):
+        # OpenTitan/package RTL uses read_slang, whose supported assertion
+        # form is a labelled immediate assert.  Its label is an executable
+        # property name too: require the assert itself, never a bare label.
+        concurrent = (re.search(r"\bproperty\s+" + re.escape(prop) + r"\b", text)
+                      and re.search(r"\bassert\s+property\s*\(\s*"
+                                    + re.escape(prop) + r"\s*\)", text))
+        immediate = re.search(r"\b" + re.escape(prop)
+                              + r"\s*:\s*assert\s*\(", text)
+        if not (concurrent or immediate):
             continue
         out = dict(row)
         out.update({"property": prop, "status": "AUTHORED",
