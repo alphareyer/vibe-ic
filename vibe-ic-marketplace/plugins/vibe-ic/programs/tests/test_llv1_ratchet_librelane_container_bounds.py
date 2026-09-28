@@ -489,7 +489,7 @@ def member_audit(source: str, probes: set[str], tools: set[str]) -> list[str]:
 
 
 def subprocess_edge_members(source: str) -> Counter[tuple[str, str, str, str, bool]]:
-    """Count subprocess edges, including imported module and function aliases."""
+    """Count subprocess edges, including imported and assigned callable aliases."""
     tree = ast.parse(source)
     parents = {child: node for node in ast.walk(tree)
                for child in ast.iter_child_nodes(node)}
@@ -512,6 +512,16 @@ def subprocess_edge_members(source: str) -> Counter[tuple[str, str, str, str, bo
                 if alias.name in methods:
                     names[alias.asname or alias.name] = alias.name
 
+    def expression_kind(expr: ast.AST, aliases: dict[str, str]) -> str | None:
+        if isinstance(expr, ast.Name):
+            return "<module>" if expr.id == "subprocess" else aliases.get(expr.id)
+        if (isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name)
+                and expr.attr in methods
+                and (expr.value.id == "subprocess" or
+                     aliases.get(expr.value.id) == "<module>")):
+            return expr.attr
+        return None
+
     def subprocess_kind(call: ast.Call) -> str | None:
         scope = parents[call]
         while not isinstance(scope, scopes):
@@ -524,18 +534,28 @@ def subprocess_edge_members(source: str) -> Counter[tuple[str, str, str, str, bo
             scope = parents[scope]
             while not isinstance(scope, scopes):
                 scope = parents[scope]
-        for scope in chain:
-            aliases = imports.get(scope, {})
-            if isinstance(call.func, ast.Name):
-                kind = aliases.get(call.func.id)
-                if kind in methods:
-                    return kind
-            elif isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
-                module = call.func.value.id
-                if call.func.attr in methods and (module == "subprocess"
-                                                  or aliases.get(module) == "<module>"):
-                    return call.func.attr
-        return None
+        aliases: dict[str, str] = {}
+        call_position = (call.lineno, call.col_offset)
+        for scope in reversed(chain):
+            aliases.update(imports.get(scope, {}))
+            # Only direct, simple assignments are followed. Rebinding a name
+            # to an unknown value removes its old subprocess identity. A local
+            # assignment after the call cannot explain that earlier call.
+            for statement in scope.body:
+                if not isinstance(statement, ast.Assign):
+                    continue
+                if (not isinstance(scope, ast.Module) and
+                        (statement.lineno, statement.col_offset) >= call_position):
+                    continue
+                kind = expression_kind(statement.value, aliases)
+                for target in statement.targets:
+                    if isinstance(target, ast.Name):
+                        if kind is None:
+                            aliases.pop(target.id, None)
+                        else:
+                            aliases[target.id] = kind
+        kind = expression_kind(call.func, aliases)
+        return kind if kind in methods else None
 
     members: Counter[tuple[str, str, str, str, bool]] = Counter()
     for call in ast.walk(tree):
@@ -653,3 +673,34 @@ def unrelated(argv):
 '''
     assert subprocess_edge_members(source) == Counter({
         ("launch", "run", "[docker, *['run'], image]", "", False): 1})
+
+
+def test_an_assigned_subprocess_callable_cannot_hide_a_docker_run():
+    name = "librelane_contract.py"
+    source = (PROGRAMS / name).read_text(encoding="utf-8")
+    mutant = source + '''
+def _unbounded_container(docker, image):
+    launcher = subprocess.run
+    argv = [docker, *["run"], image]
+    launcher(argv)
+'''
+    assert audit(mutant) == []
+    assert bound_audit(mutant, TOOL_STEPS[name]) == []
+    assert member_audit(mutant, PROBES[name], TOOL_STEPS[name]) == [
+        "_unbounded_container: subprocess edge is not pinned"]
+
+
+def test_assigned_callable_chains_are_scoped_and_rebinding_clears_them():
+    source = '''
+import subprocess
+def launch(argv):
+    first = subprocess.run
+    second = first
+    second(argv)
+    second = unrelated
+    second(argv)
+def other(argv):
+    second(argv)
+'''
+    assert subprocess_edge_members(source) == Counter({
+        ("launch", "run", "argv", "", False): 1})
