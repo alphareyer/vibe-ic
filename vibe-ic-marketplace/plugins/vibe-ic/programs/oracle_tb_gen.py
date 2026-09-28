@@ -48,6 +48,7 @@ testbench-gen CONTRACT — $readmem mem-file staging (ORGANIC #476):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -221,6 +222,7 @@ def generate(project: Path):
         "program": "oracle_tb_gen",
         "verdict": "TB_EMITTED",
         "tb": str(tb_path.relative_to(project)),
+        "tb_sha256": hashlib.sha256(tb_path.read_bytes()).hexdigest(),
         "top": top,
         "vectors": [v["name"] for v in usable],
         "vector_count": len(usable),

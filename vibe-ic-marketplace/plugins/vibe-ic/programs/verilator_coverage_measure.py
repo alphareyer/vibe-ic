@@ -1099,17 +1099,27 @@ def _recorded_functional_testbenches(project: Path) -> set:
     L10 HDL unit tests are eligible through the same execution record.
     """
     recorded = set()
+    import _l10_execution as _l10
+
+    def matches_current(tb: Path, digest: Any) -> bool:
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            return False
+        try:
+            return tb.is_file() and _l10.file_sha256(tb) == digest
+        except OSError:
+            return False
     try:
         manifest = json.loads((project / "phase2/stage1/sim_full_stack"
                                / "oracle_manifest.json").read_text())
         if (manifest.get("program") == "oracle_tb_gen"
                 and manifest.get("verdict") == "TB_EMITTED"
                 and int(manifest.get("vector_count") or 0) > 0):
-            recorded.add((project / manifest["tb"]).resolve())
+            tb = (project / manifest["tb"]).resolve()
+            if matches_current(tb, manifest.get("tb_sha256")):
+                recorded.add(tb)
     except (OSError, ValueError, KeyError, TypeError):
         pass
     try:
-        import _l10_execution as _l10
         l10 = project / "phase1/generated_docs/L10_TEST_CASES.json"
         if not l10.is_file():
             raise FileNotFoundError(l10)
@@ -1119,7 +1129,7 @@ def _recorded_functional_testbenches(project: Path) -> set:
         if not isinstance(provenance, dict):
             raise ValueError("L10 provenance is not an object")
         sources = {Path(row["path"]).resolve() if Path(row["path"]).is_absolute()
-                   else (project / row["path"]).resolve(): row.get("source")
+                   else (project / row["path"]).resolve(): row
                    for row in provenance.get("cases", []) if row.get("path")}
         for row in (execution.get("rows") or {}).values():
             tb_file = row.get("tb_file")
@@ -1127,8 +1137,11 @@ def _recorded_functional_testbenches(project: Path) -> set:
                 continue
             tb = Path(tb_file)
             tb = (tb if tb.is_absolute() else project / tb).resolve()
-            if sources.get(tb) in {"GENERATED", "PRESERVED_AUTHORED",
-                                   "DELIVERED_INPUT"}:
+            source = sources.get(tb) or {}
+            if (source.get("source") in {"GENERATED", "PRESERVED_AUTHORED",
+                                          "DELIVERED_INPUT"}
+                    and matches_current(tb, row.get("tb_sha256"))
+                    and matches_current(tb, source.get("tb_sha256"))):
                 recorded.add(tb)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         pass
@@ -1154,6 +1167,8 @@ def _coverage_candidates(project: Path) -> Tuple[List[str], List[str]]:
             continue
         if (audit["self_declared_connectivity_only"]
                 or "VIBEIC_TB_ORACLE: NONE" in source):
+            continue
+        if audit["decidable"] and not audit["driven"]:
             continue
         if path.resolve() in recorded or (audit["decidable"] and audit["driven"]):
             eligible.append(candidate)

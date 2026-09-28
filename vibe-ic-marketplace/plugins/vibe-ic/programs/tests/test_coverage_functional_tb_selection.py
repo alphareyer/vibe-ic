@@ -124,6 +124,20 @@ def test_stale_same_path_execution_cannot_credit_inert_testbench(tmp_path):
     assert coverage.discover_measure_testbenches(project)[1] == []
 
 
+def test_stale_execution_cannot_credit_an_undecidable_replacement(tmp_path):
+    project = _project(tmp_path, unit=True)
+    tb = project / "phase2/stage1/sim/tb/case.v"
+    tb.write_text(
+        "module case;\n"
+        "logic clk, rst; logic [7:0] cmd;\n"
+        "dut u_dut(.clk(clk), .rst(rst), .cmd(cmd));\n"
+        "initial begin clk = 0; rst = 1; #10; rst = 0; #10; $finish; end\n"
+        "endmodule\n")
+    audit = coverage.functional_stimulus_audit(tb)
+    assert not audit["decidable"]
+    assert coverage.discover_measure_testbenches(project)[1] == []
+
+
 def test_stale_same_path_oracle_manifest_cannot_credit_inert_testbench(tmp_path):
     project = _project(tmp_path, unit=False)
     tb = project / "phase2/stage1/sim_full_stack/tb_dut_oracle.v"
