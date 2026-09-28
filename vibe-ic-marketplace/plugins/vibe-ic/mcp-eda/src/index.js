@@ -6050,10 +6050,18 @@ server.tool(
     const promoteClause = (promote_ports && output_format === "spice")
       ? "port makeall\n" : "";
 
+    // N6: `-dotoplabels`. A bare Magic `flatten` copies every library cell's
+    // pin labels into the flat cell under instance-prefixed names, and
+    // `port makeall` then promotes each one to a top port. Measured in the
+    // pinned image (magic 8.3.684) on a top with two labelled instances of
+    // a foundry inverter cell: bare -> `.subckt chip_flat TOPPIN
+    // <inst>_0.VSS <inst>_0.ZN ...` (11 library pins promoted);
+    // -dotoplabels -> `.subckt chip_flat TOPPIN VSUBS`. The flat cell keeps
+    // the top's own labels only; the library's stay with the library.
     const magicScript = `
 ${readCmd}
 load ${top_cell}
-flatten ${top_cell}_flat
+flatten -dotoplabels ${top_cell}_flat
 load ${top_cell}_flat
 select top cell
 ${promoteClause}extract all
