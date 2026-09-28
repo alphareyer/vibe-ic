@@ -135,7 +135,6 @@ def test_phase1_non_authority_keeps_extra_port_blocked(tmp_path, statement):
     phase1.gen_l9_integration_spec(
         project, {"L3_external_interface.md": document}, {})
     emitted = json.loads(spec.read_text())
-    assert emitted["plugin_declared_port_groups"] == []
     # Keep the ordinary table's two required ports as the checker contract.
     emitted["top_module"] = "dut"
     emitted["ports"] = emitted["top_ports"] = [
@@ -146,6 +145,7 @@ def test_phase1_non_authority_keeps_extra_port_blocked(tmp_path, statement):
     result, findings = _check(project, spec, rtl)
     assert result.returncode == 1
     assert ("port-extra", "o_sram_waddr") in _errors(findings)
+    assert emitted["plugin_declared_port_groups"] == []
 
 
 @pytest.mark.parametrize("statement", AUTHORITY_SENTENCE)
