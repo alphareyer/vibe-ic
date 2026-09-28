@@ -196,6 +196,8 @@ def test_route_option_writes_owner_answer_and_preserves_other_input(
     assert TD.answer(doc, "deliverable") == deliverable
     assert doc["answer_provenance"]["deliverable"]["answered_by"] == "owner"
     assert f"operator --route {route} on " in doc["answer_provenance"]["deliverable"]["citation"]
+    assert DR.report_label(tmp_path) == {
+        "delivery_route": route.upper(), "deliverable": deliverable}
 
 
 def test_contradicting_route_refuses_without_touching_answer(tmp_path, monkeypatch, capsys):

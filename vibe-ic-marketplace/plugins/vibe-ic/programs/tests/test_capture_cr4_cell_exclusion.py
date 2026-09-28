@@ -14,6 +14,7 @@ import librelane_cts_hold as C
 import librelane_postroute_repair as P
 import librelane_contract as L
 import phase3_one_shot_runner as R
+import excluded_master_census_check as EMC
 
 
 def _corner_configs(tmp_path: Path):
@@ -109,6 +110,7 @@ def _audit(config: Path, state: Path):
     checker = getattr(R, "_emc", None)
     if checker is None:
         return {"verdict": "NOT_MEASURED", "excluded_count": None}
+    assert checker is EMC, "the runner must use the tested census producer"
     return checker.audit(config, state, "OpenROAD.ResizerTimingPostCTS")
 
 

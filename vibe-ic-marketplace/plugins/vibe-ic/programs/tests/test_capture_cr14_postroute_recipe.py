@@ -10,6 +10,7 @@ PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 import phase3_one_shot_runner as R  # noqa: E402
 import synth_full_adder_map as FA  # noqa: E402
+import synth_recipe_postroute as SRP  # noqa: E402
 
 
 LIBERTY_FA = """library(neutral) {
@@ -48,6 +49,7 @@ def _pair(design: str, pdk: str = "famxD") -> list[dict]:
 
 def _select(pdk: str, rows: list[dict], *, liberty_sha256: str = "b" * 64,
             image_digest: str = "d" * 64) -> dict:
+    assert R._srp is SRP, "the runner must use the tested recipe selector"
     # The fallback lets this test make a behavioural assertion on main: the
     # missing selector produces NOT_MEASURED, while matched evidence elects it.
     select = getattr(R, "_select_postroute_synth_recipe",
