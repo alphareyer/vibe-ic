@@ -36,6 +36,11 @@ PER_CORNER = ("Path Type: max\n"
 
 def fixture(tmp_path, change=None):
     p = tmp_path
+    # Phase 3 reports must be newer than the netlist whose timing they
+    # measured. FX_P2 correctly treats older reports as historical.
+    netlist = p / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
     native = p / "phase3/stage3/sta"
     native.mkdir(parents=True)
     docs = p / "phase1/generated_docs"
@@ -80,6 +85,13 @@ def fixture(tmp_path, change=None):
     out = p / "reports/phase3/sta/post_route_summary.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(audit))
+    receipt = p / "reports/orchestrator/phase3_one_shot.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({
+        "verdict": "PASS",
+        "phase2_synth": G._pl.phase2_synth_input_identity(p),
+        "phase3_inputs": G._pl.phase3_signoff_input_identity(p),
+    }))
     return p
 
 

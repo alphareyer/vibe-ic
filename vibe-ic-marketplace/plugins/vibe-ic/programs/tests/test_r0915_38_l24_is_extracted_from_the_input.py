@@ -44,6 +44,7 @@ import pytest  # noqa: E402
 
 import l24_signoff_requirements_extract as X  # noqa: E402
 import phase1_post_process as P  # noqa: E402
+import _path_layout as PL  # noqa: E402
 
 GATE = PROGRAMS / "l24_signoff_evidence_backed_check.py"
 
@@ -240,7 +241,14 @@ def test_the_declared_absent_stub_carries_a_rationale(tmp_path):
 
 def _phase3_ran(proj):
     """Mark the run as having reached the phase that MEASURES sign-off."""
-    _report(proj, "orchestrator/phase3_one_shot.json", {"verdict": "PASS"})
+    netlist = proj / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    _report(proj, "orchestrator/phase3_one_shot.json", {
+        "verdict": "PASS",
+        "phase2_synth": PL.phase2_synth_input_identity(proj),
+        "phase3_inputs": PL.phase3_signoff_input_identity(proj),
+    })
     return proj
 
 
@@ -346,13 +354,45 @@ def test_the_same_run_once_phase3_HAS_run_FAILS(tmp_path):
     assert "the input REQUIRES DRC clean" in out
 
 
-def test_a_phase3_directory_with_reports_also_counts_as_having_run(tmp_path):
-    """The orchestrator record is the primary signal; a populated
-    reports/phase3/ is the fallback, so a run that produced phase-3 artefacts
-    without that record is still judged."""
+def test_a_phase3_producer_report_without_a_summary_still_counts(tmp_path):
+    """A netlist-bound LVS producer result is phase-3 evidence even if the
+    orchestrator aborted before publishing its summary."""
     proj = _project(tmp_path, spec_md="Sign-off requires DRC clean.\n")
     _emit_l24(proj)
-    _report(proj, "phase3/lvs_verdict.json", {"status": "PASS"})
+    netlist = proj / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    import hashlib
+    _report(proj, "phase3/lvs_verdict.json", {
+        "status": "PASS",
+        "generated_by": "phase3_one_shot_runner:_run_extraction_lvs (#477)",
+        "phase2_synth": {"path": "phase2/stage2/synth/netlist_yosys.v",
+                         "sha256": hashlib.sha256(netlist.read_bytes()).hexdigest()},
+        "phase3_inputs": PL.phase3_signoff_input_identity(proj),
+    })
     rc, out = _run_gate(proj)
     assert rc == 1, out
     assert "the input REQUIRES DRC clean" in out
+
+    netlist.write_text("module chip; wire new_build; endmodule\n")
+    rc, out = _run_gate(proj)
+    assert rc == 0, out
+    assert "not yet measurable" in out
+
+
+def test_real_lvs_producer_receipt_cannot_survive_a_constraint_change(tmp_path):
+    import l24_signoff_evidence_backed_check as L24
+    import phase3_one_shot_runner as P3
+
+    proj = _project(tmp_path, spec_md="Sign-off requires DRC clean.\n")
+    _emit_l24(proj)
+    netlist = proj / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    sdc = proj / "input/constraints/timing.sdc"
+    sdc.parent.mkdir(parents=True, exist_ok=True)
+    sdc.write_text("create_clock -period 10 [get_ports clk]\n")
+    P3._write_lvs_verdict(proj, "PASS", "LVS_MATCH", "fixture compare")
+    assert L24._phase3_has_run(proj) is True
+    sdc.write_text("create_clock -period 1 [get_ports clk]\n")
+    assert L24._phase3_has_run(proj) is False

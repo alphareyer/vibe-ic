@@ -38,6 +38,7 @@ name appears here.
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -49,6 +50,8 @@ if str(PROGRAMS) not in sys.path:
 import pytest  # noqa: E402
 
 import l24_signoff_requirements_extract as X  # noqa: E402
+import l24_signoff_evidence_backed_check as L24  # noqa: E402
+from _hostpaths import repo_path  # noqa: E402
 import phase1_post_process as P  # noqa: E402
 
 GATE = PROGRAMS / "l24_signoff_evidence_backed_check.py"
@@ -131,8 +134,112 @@ def _proj_requiring_sta(tmp_path):
     """A project whose input states a timing requirement, phase 3 reached."""
     proj = _project(tmp_path, spec_md="Sign-off requires STA met.\n")
     _emit_l24(proj)
-    _report(proj, "orchestrator/phase3_one_shot.json", {"verdict": "PASS"})
+    netlist = proj / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    _report(proj, "orchestrator/phase3_one_shot.json", {
+        "verdict": "PASS",
+        "phase2_synth": L24._pl.phase2_synth_input_identity(proj),
+        "phase3_inputs": getattr(
+            L24._pl, "phase3_signoff_input_identity",
+            lambda p: {"phase2_synth": L24._pl.phase2_synth_input_identity(p)}
+        )(proj),
+    })
     return proj
+
+
+def test_phase3_receipt_is_bound_to_the_current_phase2_netlist(tmp_path):
+    project = _proj_requiring_sta(tmp_path)
+    netlist = project / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    digest = hashlib.sha256(netlist.read_bytes()).hexdigest()
+    _report(project, "orchestrator/phase3_one_shot.json", {
+        "verdict": "PASS", "phase2_synth": {
+            "path": "phase2/stage2/synth/netlist_yosys.v", "sha256": digest},
+        "phase3_inputs": L24._pl.phase3_signoff_input_identity(project)})
+    before = L24._phase3_has_run(project)
+
+    # A later Phase 2 synthesis changes the input while leaving the prior
+    # Phase 3 report and its sign-off records in place.
+    netlist.write_text("module chip; wire changed; endmodule\n")
+    assert [before, L24._phase3_has_run(project)] == [True, False]
+
+
+def test_unbound_old_phase3_receipt_cannot_certify_a_present_netlist(tmp_path):
+    project = _proj_requiring_sta(tmp_path)
+    _report(project, "orchestrator/phase3_one_shot.json", {"verdict": "PASS"})
+    netlist = project / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    assert [L24._phase3_has_run(project)] == [False]
+
+
+def test_legacy_netlist_only_receipt_cannot_certify_current_signoff(tmp_path):
+    project = _proj_requiring_sta(tmp_path)
+    _report(project, "orchestrator/phase3_one_shot.json", {
+        "verdict": "PASS",
+        "phase2_synth": L24._pl.phase2_synth_input_identity(project),
+    })
+    assert L24._phase3_has_run(project) is False
+
+
+def test_changed_l9_declaration_invalidates_the_phase3_receipt(tmp_path):
+    project = _proj_requiring_sta(tmp_path)
+    assert L24._phase3_has_run(project) is True
+    (project / "phase1/generated_docs/L9_IO_PAD.json").write_text(
+        json.dumps({"pad_side": "changed"}))
+    assert L24._phase3_has_run(project) is False
+
+
+def test_changed_staged_sdc_invalidates_the_phase3_receipt(tmp_path):
+    project = _proj_requiring_sta(tmp_path)
+    netlist = project / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    sdc = project / "input/constraints/timing.sdc"
+    sdc.parent.mkdir(parents=True, exist_ok=True)
+    sdc.write_text("create_clock -period 10 [get_ports clk]\n")
+    # The reviewed checker ignores this producer-side binding; getattr lets
+    # the same control run on that older tree and observe its wrong verdict.
+    identity = getattr(L24._pl, "phase3_signoff_input_identity", lambda p: {
+        "phase2_synth": L24._pl.phase2_synth_input_identity(p)
+    })(project)
+    _report(project, "orchestrator/phase3_one_shot.json", {
+        "verdict": "PASS",
+        "phase2_synth": L24._pl.phase2_synth_input_identity(project),
+        "phase3_inputs": identity,
+    })
+    assert L24._phase3_has_run(project) is True
+    sdc.write_text("create_clock -period 1 [get_ports clk]\n")
+    assert L24._phase3_has_run(project) is False
+    rc, out = _run_gate(project)
+    assert rc == 0, out
+    assert "not yet measurable" in out
+
+
+def test_checked_in_constraint_change_invalidates_signoff(tmp_path):
+    source = repo_path(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
+        "fixtures", "ppa", "power", "activity_basis_pair", "constraint.sdc")
+    assert source.is_file(), source
+    project = _proj_requiring_sta(tmp_path)
+    staged = project / "input/constraints/timing.sdc"
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    original = source.read_bytes()
+    assert b"-period 24.0" in original
+    staged.write_bytes(original)
+    identity = getattr(L24._pl, "phase3_signoff_input_identity", lambda p: {
+        "phase2_synth": L24._pl.phase2_synth_input_identity(p)
+    })(project)
+    _report(project, "orchestrator/phase3_one_shot.json", {
+        "verdict": "PASS",
+        "phase2_synth": L24._pl.phase2_synth_input_identity(project),
+        "phase3_inputs": identity,
+    })
+    assert L24._phase3_has_run(project) is True
+    staged.write_bytes(original.replace(b"-period 24.0", b"-period 1.0"))
+    assert L24._phase3_has_run(project) is False
 
 
 def _signoff(proj, verdict):
@@ -140,6 +247,33 @@ def _signoff(proj, verdict):
     for rel in STA_RECORDS:
         _report(proj, rel[len("reports/"):], {"program": "eda_report_audit:sta",
                                               "passed": verdict == "pass"})
+
+
+def test_pass_reports_are_historical_after_phase3_inputs_change(tmp_path):
+    """A report read from disk cannot certify a new Phase 3 input identity."""
+    project = _proj_requiring_sta(tmp_path)
+    _signoff(project, "pass")
+    before_json = tmp_path / "before.json"
+    before_rc, before_out = _run_gate(project, before_json)
+    assert before_rc == 0, before_out
+    before = json.loads(before_json.read_text())
+    assert [r for r in before["requirements"] if r["check"] == "STA"][0]["outcome"] == "BACKED"
+
+    sdc = project / "input/constraints/timing.sdc"
+    sdc.parent.mkdir(parents=True, exist_ok=True)
+    sdc.write_text("create_clock -period 1 [get_ports clk]\n")
+    assert L24._phase3_has_run(project) is False
+
+    after_json = tmp_path / "after.json"
+    after_rc, after_out = _run_gate(project, after_json)
+    assert after_rc == 0, after_out
+    after = json.loads(after_json.read_text())
+    sta = [r for r in after["requirements"] if r["check"] == "STA"][0]
+    assert sta["outcome"] == "NOT_YET_MEASURABLE"
+    assert sta["evidence_scope"] == "HISTORICAL"
+    assert {r["path"] for r in sta["historical_records"]} == set(STA_RECORDS)
+    assert "historical" in after_out.lower()
+    assert "backed by" not in after_out.lower()
 
 
 # ── the derivation itself ────────────────────────────────────────────────
@@ -324,7 +458,14 @@ def test_an_input_that_DOES_state_SI_is_judged_on_the_SI_report(tmp_path):
     """And the control: name it, and the failing envelope is a real finding."""
     proj = _project(tmp_path, spec_md="Sign-off requires crosstalk clean.\n")
     _emit_l24(proj)
-    _report(proj, "orchestrator/phase3_one_shot.json", {"verdict": "PASS"})
+    netlist = proj / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    _report(proj, "orchestrator/phase3_one_shot.json", {
+        "verdict": "PASS",
+        "phase2_synth": L24._pl.phase2_synth_input_identity(proj),
+        "phase3_inputs": L24._pl.phase3_signoff_input_identity(proj),
+    })
     _report(proj, "phase3/si_mcf_sta.json",
             {"program": "si_mcf_sta", "verdict": "FAIL"})
     rc, out = _run_gate(proj)
