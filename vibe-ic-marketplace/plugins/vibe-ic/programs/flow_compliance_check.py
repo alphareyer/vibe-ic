@@ -14111,11 +14111,14 @@ def _delivery_declares_absence(project: Path, spec: Any
                         or "no_operator_slot").strip().lower()
     if corroboration == "no_operator_slot":
         try:
-            import submission_template_check as _stc  # noqa: PLC0415
-            owed, _why = _stc.slot_rules_are_owed(project, None)
+            import _tapeout_declaration as _td_mod  # noqa: PLC0415
+            owed = _td_mod.die_outputs_owed(project)
         except Exception:  # noqa: BLE001 — cannot read the route: run the step
             return None
-        if owed:
+        # None is the bought-slot HARDMACRO dispute. Preserve the landed
+        # #2277 owed-output verdict until the owner rules; the producer sees
+        # the same sentinel and preserves its own pre-existing behavior.
+        if owed is not False:
             return None
         _why_corroborated = "no operator slot is bound"
     elif corroboration == "owner_attestation":

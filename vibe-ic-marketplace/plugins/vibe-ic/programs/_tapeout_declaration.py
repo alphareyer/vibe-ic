@@ -835,6 +835,29 @@ def declared_route_on_disk(project: Path, has_slots: bool
 SLOTS_REL = "input/submission_template/slots"
 
 
+def die_outputs_owed(project: Path) -> Optional[bool]:
+    """Whether this delivery owes die-level outputs; None needs an owner ruling.
+
+    The unresolved case is an owner-declared HARDMACRO with an operator slot
+    binding. The declaration schema says a macro has no die edge, while the
+    landed #2277 flow conditions keep the die rows live for a purchase. Keep
+    that disagreement explicit at this one seam until the owner chooses the
+    interpretation. Changing the final ``return None`` to ``True`` or
+    ``False`` selects either reading for both the producer and the audit.
+    """
+    path = project / DECLARATION_REL
+    doc, err = load(path)
+    if err is not None or not isinstance(doc, dict):
+        return True
+    if answer(doc, "deliverable") != DELIVERABLE_HARDMACRO:
+        return True
+    from submission_template_check import slot_rules_are_owed
+    slot_owed, _why = slot_rules_are_owed(project, None)
+    if not slot_owed:
+        return False
+    return None  # HARDMACRO + bought/uncertain slot: owner ruling pending
+
+
 def requests_pad_ring(project: Path) -> bool:
     """Step 15.5ic's design-dependent condition: does this die carry a pad ring?
 
@@ -845,26 +868,17 @@ def requests_pad_ring(project: Path) -> bool:
     step's producer through the contract must see the producer the runner ran.
 
     A ring is requested by a self-tape-out (`SELF_TAPEOUT.txt`) or a slot
-    catalogue on disk, unless the delivery DECLARES itself a `HARDMACRO`: a
-    hardmacro is placed inside somebody else's die, which owns the pads
-    (a6a45babe). The deliverable is read through `answer()`, so an owner-only
-    answer nobody attested is no answer; an absent, unreadable or unanswered
-    declaration leaves the catalogue's request standing.
+    catalogue on disk, unless the delivery declares itself a `HARDMACRO`
+    without a slot. An owner-only answer nobody attested is no answer; an
+    absent, unreadable or unanswered declaration leaves the request standing.
+    The bought-slot HARDMACRO remains explicitly unresolved. Until the owner
+    rules, its production behavior stays the existing no-ring behavior.
     """
     slot_dir = project / SLOTS_REL
     if not ((project / SELF_TAPEOUT_REL).is_file()
             or (slot_dir.is_dir() and any(slot_dir.glob("*.yaml")))):
         return False
-    path = project / DECLARATION_REL
-    if not path.is_file():
-        return True
-    doc, err = load(path)
-    if err is not None or not isinstance(doc, dict):
-        return True
-    got = answer(doc, "deliverable")
-    if not is_answered(got):
-        return True
-    return str(got).strip().upper() != DELIVERABLE_HARDMACRO
+    return die_outputs_owed(project) is True
 
 
 def applicable(q: Question, deliverable: Any) -> bool:
