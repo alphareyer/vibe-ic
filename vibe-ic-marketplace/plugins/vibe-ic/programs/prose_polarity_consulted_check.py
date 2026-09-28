@@ -151,6 +151,18 @@ _NOT_PROSE: Dict[str, str] = {
         "produce NOT_DETERMINED, never a clean zero. Falsifier: "
         "tests/test_phase3_signoff_chain_organic.py::TestErcReport::"
         "test_missing_openroad_count_is_not_zero.",
+    "isa_suite_producer::objdump_guard":
+        "OBJDUMP INSTRUCTION GRAMMAR, NOT PROSE. The reader accepts only a "
+        "line-start hexadecimal address, then one four- or eight-hex-digit "
+        "instruction parcel and one mnemonic token; its anchored expression "
+        "does not capture comments, operands, or free text. A denial therefore "
+        "cannot reverse a decoded instruction: text such as `not c.nop` does "
+        "not make a parcel or mnemonic and is ignored, while a real c.nop "
+        "parcel is caught by the calibrated RVC fixture. A malformed or absent "
+        "instruction is not granted a clean result: it simply contributes no "
+        "decoded instruction and the actual built image remains independently "
+        "size-guarded. The fixed syntax has no negation production, and the "
+        "positive calibration includes a real CSR/system mnemonic as a control.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "
