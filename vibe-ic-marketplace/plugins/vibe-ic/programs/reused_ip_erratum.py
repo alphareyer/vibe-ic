@@ -252,11 +252,18 @@ def default_fetch(url: str) -> bytes:
                 worker.join()
                 raise TimeoutError(
                     f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
             if error.is_file():
                 raise OSError(error.read_text())
             if worker.exitcode != 0 or not result.is_file():
                 raise OSError(f"fetch worker exited {worker.exitcode} without a response")
-            return result.read_bytes()
+            data = result.read_bytes()
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
+            return data
         finally:
             if worker.is_alive():
                 worker.kill()
