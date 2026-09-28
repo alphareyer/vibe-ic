@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -312,3 +313,16 @@ def test_clean_rerun_removes_stale_tool_bytes_with_a_ledger_event(tmp_path):
             (tmp_path / "provenance.jsonl").read_text().splitlines() if ln.strip()]
     assert any(r.get("op") == "remove" and
                str(kept.relative_to(tmp_path)) in r.get("removed", []) for r in rows)
+
+
+def test_helper_loads_by_path_without_preloaded_siblings():
+    """The runner can import this helper by path in an isolated process."""
+    helper = PROG / "_netlist_port_decls.py"
+    script = ("import importlib.util; "
+              f"s=importlib.util.spec_from_file_location('probe', {str(helper)!r}); "
+              "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+              "assert m.parse('module dut (a); input a; endmodule', 'dut')"
+              "['status'] == 'PARSED'")
+    result = subprocess.run([sys.executable, "-I", "-c", script],
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr

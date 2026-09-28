@@ -26,10 +26,15 @@ reported UNPARSED, never judged.
 """
 from __future__ import annotations
 
+import os as _os
 import re
+import sys as _sys
 from typing import Dict, List, Optional, Tuple
 
-from _hdl_code_text import strip_hdl_comments_and_strings
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
+from _hdl_code_text import strip_hdl_comments_and_strings  # noqa: E402
 
 _HEADER_RE = re.compile(r"(?ms)^(\s*module\s+\\?(?P<top>\S+?)\s*\()(?P<ports>.*?)(\)\s*;)")
 _DECL_RE = re.compile(
