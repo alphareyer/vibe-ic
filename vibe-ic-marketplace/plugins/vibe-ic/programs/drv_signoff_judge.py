@@ -255,8 +255,16 @@ def _owner_records(project: Path | None, identity: dict, current: dict,
             if process.returncode:
                 continue
             record = json.loads(payload)
-            if (isinstance(record, dict) and record.get("identity") == expected
-                    and record.get("type") in
+            if not isinstance(record, dict):
+                continue
+            kind = record.get("type")
+            # A threshold freeze precedes the complete implementation run.
+            # Its routed netlist does not exist yet; the other owner decisions
+            # concern measured nets and keep the exact netlist binding.
+            binding = ({key: value for key, value in expected.items()
+                        if key != "netlist_sha256"}
+                       if kind == "threshold_freeze" else expected)
+            if (record.get("identity") == binding and kind in
                     ("waiver", "design_override", "clock_limits",
                      "threshold_freeze")):
                 approved.append(record)
@@ -277,7 +285,7 @@ def _approved_before_run(record: dict, identity: dict) -> bool:
 
 def _check_threshold_freeze(identity: dict, frozen: dict,
                             owner_records: list[dict],
-                            fails: list[str], missing: list[str]) -> None:
+                            fails: list[str], missing: list[str]) -> dict:
     """Reconcile the plan with committed values and a signed, prior-run receipt.
 
     The data file is independent of the capture plan.  Its PDK defaults and
@@ -286,12 +294,14 @@ def _check_threshold_freeze(identity: dict, frozen: dict,
     run begins.  A plan cannot authorize its own change to either source.
     """
     try:
-        doc = json.loads(_THRESHOLD_FREEZES.read_text())
+        payload = _THRESHOLD_FREEZES.read_bytes()
+        standard_sha = hashlib.sha256(payload).hexdigest()
+        doc = json.loads(payload)
         if doc.get("schema_version") != 1:
             raise ValueError("unsupported schema")
     except (OSError, ValueError, TypeError, AttributeError) as exc:
         missing.append(f"threshold freeze record absent or invalid: {exc}")
-        return
+        return {}
     pdk, library = identity.get("pdk"), identity.get("library")
     sources = frozen.get("sources") or {}
     pdk_defaults = [row for row in doc.get("defaults", [])
@@ -302,7 +312,7 @@ def _check_threshold_freeze(identity: dict, frozen: dict,
         (fails if pdk_defaults else missing).append(
             "threshold source changed: PDK config" if pdk_defaults else
             "threshold freeze record absent for PDK/library")
-        return
+        return {}
     source_pair = {key: sources.get(key) for key in ("l7", "l9")}
     pdk_designs = [row for row in doc.get("designs", [])
                    if row.get("pdk") == pdk and row.get("library") == library]
@@ -310,10 +320,15 @@ def _check_threshold_freeze(identity: dict, frozen: dict,
                if source_pair in (row.get("sources") if isinstance(
                    row.get("sources"), list) else [row.get("sources")])]
     if len(designs) != 1:
-        (fails if pdk_designs else missing).append(
-            "threshold source changed: L7/L9" if pdk_designs else
-            "threshold freeze record absent for design")
-        return
+        design_name = identity.get("design") or identity.get("ic_name")
+        project_parts = Path(str(identity.get("project") or "")).parts
+        same_design = [row for row in pdk_designs
+                       if row.get("design") == design_name or
+                       row.get("design") in project_parts]
+        (fails if same_design else missing).append(
+            "threshold source changed: L7/L9" if same_design else
+            "threshold freeze record absent for design/L7/L9")
+        return {}
     standard = designs[0]
     if not standard.get("owner_approval_citation"):
         missing.append("threshold freeze owner approval citation absent")
@@ -361,13 +376,18 @@ def _check_threshold_freeze(identity: dict, frozen: dict,
                 if record.get("type") == "threshold_freeze"]
     signed = [record for record in supplied
               if record.get("type") == "threshold_freeze"
-              and record.get("standard_sha256") == _sha(_THRESHOLD_FREEZES)
+              and record.get("standard_sha256") == standard_sha
               and record.get("thresholds") == frozen
               and _approved_before_run(record, identity)]
     if not signed:
         (fails if supplied else missing).append(
             "threshold source changed: signed threshold_freeze" if supplied else
             "validated threshold_freeze owner record absent before run")
+    return {"standard_sha256": standard_sha,
+            "design": standard.get("design"),
+            "issued_at": standard.get("issued_at"),
+            "owner_approval_citation": standard.get("owner_approval_citation"),
+            "signed_owner_record_verified": bool(signed)}
 
 
 def _annotate_limits(row: dict, kind: str, scene: dict, libs: dict,
@@ -534,8 +554,10 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     owner_records, owner_status = _owner_records(project, identity, current, frozen)
     declared = frozen.get("values") or {}
     run_id, tree_sha = identity.get("run_id"), identity.get("tree_sha")
+    freeze_evidence = {}
     if project is not None:
-        _check_threshold_freeze(identity, frozen, owner_records, fails, missing)
+        freeze_evidence = _check_threshold_freeze(
+            identity, frozen, owner_records, fails, missing)
         if Path(str(identity.get("project") or "")).resolve() != project.resolve():
             missing.append("project identity differs from judged project directory")
     if not run_id or not tree_sha or not identity.get("spec_version"):
@@ -1158,6 +1180,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                            "liberties": frozen.get("liberties"),
                            "scope": frozen.get("scope"),
                            "scenes": required_scenes},
+            "threshold_freeze": freeze_evidence,
             "stage_constraints": bundle.get("stages") or [],
             "io_margin_disclosures": io_margin_disclosures,
             "flow_defects": flow_defects,

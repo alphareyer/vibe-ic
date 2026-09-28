@@ -211,7 +211,7 @@ def _install_test_freeze(bundle: dict, root: Path, monkeypatch) -> None:
               "standard_sha256": drv._sha(static),
               "owner_timestamp": "2026-09-27T00:00:00+00:00",
               "owner_quote": "approved synthetic test contract"}
-    monkeypatch.setattr(drv, "_THRESHOLD_FREEZES", static)
+    monkeypatch.setattr(drv, "_THRESHOLD_FREEZES", static, raising=False)
     monkeypatch.setattr(drv, "_owner_records",
                         lambda *args: ([signed], "OWNER_APPROVAL_ABSENT"))
 
@@ -1297,6 +1297,34 @@ def test_committed_threshold_freeze_digest_is_owner_controlled():
     assert drv._sha(drv._THRESHOLD_FREEZES) == (
         "4a55fc6ef37e484318e391d05930e641656bbe180dc6e54f46baec55105193a0"
     ), "a threshold freeze change needs a RULINGS owner citation"
+
+
+def test_signed_pre_run_freeze_does_not_require_a_routed_netlist(tmp_path, monkeypatch):
+    import subprocess
+    bundle = _bundle(tmp_path)
+    signers = tmp_path / "allowed_signers"
+    signers.write_text("owner ssh-ed25519 test-key\n")
+    monkeypatch.setattr(drv, "_OWNER_SIGNERS", signers)
+    identity = bundle["identity"]
+    frozen = bundle["frozen"]
+    current = bundle["current"]
+    binding = {"run_id": identity["run_id"], "tree_sha": identity["tree_sha"],
+               "sdc_sha256": current["sources"]["signoff_sdc"]["sha256"],
+               "l7_sha256": frozen["sources"]["l7"],
+               "l9_sha256": frozen["sources"]["l9"],
+               "pdk_config_sha256": frozen["sources"]["pdk_config"],
+               "spec_version": identity["spec_version"]}
+    record = {"type": "threshold_freeze", "identity": binding,
+              "thresholds": frozen, "owner_quote": "approve before run",
+              "owner_timestamp": "2026-09-27T00:00:00+00:00"}
+    folder = tmp_path / "owner_approvals/drv"
+    folder.mkdir(parents=True)
+    (folder / "freeze.json").write_text(json.dumps(record))
+    (folder / "freeze.json.sig").write_text("synthetic signature\n")
+    monkeypatch.setattr(drv.subprocess, "run", lambda *a, **k:
+                        subprocess.CompletedProcess(a, 0, b"", b""))
+    approved, _ = drv._owner_records(tmp_path, identity, current, frozen)
+    assert approved == [record]
 
 
 def test_fresh_opensta_has_memory_ceiling_and_progress_watchdog(tmp_path, monkeypatch):
