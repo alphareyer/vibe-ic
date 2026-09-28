@@ -515,3 +515,23 @@ def test_an_interrupted_phase1_leaves_no_stamp_vouching(tmp_path,
     with pytest.raises(RuntimeError):
         P1.main_recorded()
     assert PID.assess(proj, PROGRAMS)["reason"] == "NO_PRODUCER_IDENTITY"
+
+
+def test_a_release_version_bump_is_not_a_producer_change(tmp_path):
+    """The manifest's version reaches a doc only through the `_generator`
+    stamp, whose drift `l_doc_generator_stamp` judges; recording it made
+    every landing demote every window run (measured on subservient)."""
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    man = plug / ".claude-plugin" / "plugin.json"
+    man.parent.mkdir()
+    man.write_text('{"version": "1.0.0"}')
+    rec = PID.ProducerRecorder(plug)
+    before = PID.input_tree_snapshot(proj)
+    with rec:
+        PID.void(proj)
+        _load(plug).produce(proj)
+        man.read_text()
+    PID.stamp(proj, rec, input_before=before, knobs=KNOBS)
+    man.write_text('{"version": "1.0.1"}')
+    assert _fresh(proj, plug)["state"] == "REUSE"
+

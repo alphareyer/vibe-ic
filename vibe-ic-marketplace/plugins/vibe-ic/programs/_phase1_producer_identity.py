@@ -170,6 +170,22 @@ def _install_hook() -> None:
         _HOOK_INSTALLED = True
 
 
+#: The plugin MANIFEST directory. Phase 1 reads it for the release version,
+#: which reaches an L doc only through the `_generator` stamp -- and that
+#: stamp's drift is already judged, with a tolerance, by
+#: `l_doc_generator_stamp`. Measured on subservient (.120): with it recorded,
+#: every landing (a version bump) would read as PRODUCER_CHANGED on every
+#: project and demote every window run -- the coarseness review wave8 named.
+_RELEASE_METADATA_DIRS = (".claude-plugin",)
+
+
+def _is_release_metadata(q: Path, root: Path) -> bool:
+    try:
+        return q.relative_to(root).parts[0] in _RELEASE_METADATA_DIRS
+    except (ValueError, IndexError):
+        return False
+
+
 class ProducerRecorder:
     """Which plugin code and data phase 1 USED, and which files it read,
     wrote and listed -- at FILE granularity, with no profiler.
@@ -328,7 +344,8 @@ class ProducerRecorder:
         data: Set[Path] = set()
         for r in self._reads:
             q = self._under_root(r, py_only=False)
-            if q is not None and q.suffix != ".py" and q not in written:
+            if q is not None and q.suffix != ".py" and q not in written \
+                    and not _is_release_metadata(q, self._root):
                 data.add(q)
         return code, data
 
