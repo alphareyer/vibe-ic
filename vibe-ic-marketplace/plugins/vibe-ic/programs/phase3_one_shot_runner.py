@@ -64656,7 +64656,8 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
             # `sta_*.rpt` can re-adopt them, and a reader can still see what
             # was displaced.
             _quar = rpt.parent / (rpt.name + (
-                ".stale_input" if not _inputs_match else ".stale_basis"))
+                ".stale_basis" if _existing_norm != basis_norm
+                else ".stale_input"))
             try:
                 rpt.replace(_quar)
                 notes.append(
