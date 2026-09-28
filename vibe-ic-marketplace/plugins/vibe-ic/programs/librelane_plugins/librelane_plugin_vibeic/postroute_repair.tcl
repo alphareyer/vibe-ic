@@ -156,6 +156,9 @@ vic_census before
 set ::vic_ant_before [check_antennas]
 utl::metric_integer vibeic__prr__before__antenna__violating_nets $::vic_ant_before
 set ::vic_unrouted_before [vic_unrouted_nets]
+# ... and every net the input carried a wire on: what the repair phase must
+# hand back (fxpad note7).
+set ::vic_routed_input [vic_routed_nets]
 utl::metric_integer vibeic__prr__before__unrouted__count [dict size $::vic_unrouted_before]
 if {[info exists ::env(VIBEIC_PRR_CENSUS_ONLY)] && $::env(VIBEIC_PRR_CENSUS_ONLY)} {
     utl::metric_integer vibeic__prr__changed 0
@@ -322,6 +325,26 @@ foreach inst [concat $::vic_created $::vic_resized $::vic_moved] {
         }
     }
 }
+# fxpad note7, MEASURED on subservient x gf180mcuD (fxpdn D16 arm B, replayed):
+# after repair_design/repair_timing and the legalizer, 741 signal nets had no
+# wire -- the 709 of the changed cells, and 32 more that no changed cell
+# touches. The ECO route below put back only the 709; the 32 reached
+# repair_antennas, whose checker builds global-route GUIDE wires for any net
+# without a detailed wire and, on a detailed-routed design, never removes
+# them: 31 gcell-centre wires (a clock net among them) over real routes,
+# 1,326 whole-design violations on the next route's entry. Every net the input
+# had routed and the repairs took is routed again here.
+set ::vic_repair_ripped [dict create]
+dict for {name net} [vic_lost_routes $::vic_routed_input] {
+    if {![dict exists $::vic_dirty $name]} {
+        dict set ::vic_repair_ripped $name $net
+        dict set ::vic_dirty $name $net
+    }
+}
+utl::metric_integer vibeic__prr__repair__ripped_unreported [dict size $::vic_repair_ripped]
+if {[dict size $::vic_repair_ripped]} {
+    vic_say "the repairs took the wire of [dict size $::vic_repair_ripped] net(s) no changed cell touches: [lrange [dict keys $::vic_repair_ripped] 0 19]"
+}
 vic_say "eco nets=[dict size $::vic_dirty]"
 utl::metric_integer vibeic__prr__eco_net__count [dict size $::vic_dirty]
 
@@ -408,6 +431,17 @@ if {!$::vic_eco_ok} {
 # `repair_antennas` (the PDK's DIODE_CELL, as LibreLane's drt.tcl runs it);
 # only the new diodes are legalized, and only their nets are routed again,
 # by the same scoped, guarded route. The judge downstream still counts.
+# repair_antennas on a detailed-routed design turns every signal net without
+# a wire into a guide-built one (see 6 above): it never runs with one.
+set ::vic_unrouted_pre_ant [vic_unrouted_nets]
+set ::vic_unrouted_pre_ant_new [list]
+dict for {name _} $::vic_unrouted_pre_ant {
+    if {![dict exists $::vic_unrouted_before $name]} { lappend ::vic_unrouted_pre_ant_new $name }
+}
+if {[llength $::vic_unrouted_pre_ant_new]} {
+    puts stderr "LL_PRR_ANTENNA_REPAIR_ON_UNROUTED_NETS: [llength $::vic_unrouted_pre_ant_new] signal net(s) the input had routed carry no wire before the antenna repair, which would give them guide-built wires: [lrange $::vic_unrouted_pre_ant_new 0 19]; the candidate is not written"
+    exit 1
+}
 set ::vic_ant_eco [check_antennas]
 set ::vic_diodes [list]
 set ::vic_ant_ripped [dict create]
