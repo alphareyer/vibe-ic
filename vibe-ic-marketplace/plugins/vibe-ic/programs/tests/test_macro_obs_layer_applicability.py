@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import macro_obs_geometry_intersect_check as gate
 import flow_compliance_check as audit
 from _hostpaths import require_repo
@@ -85,6 +87,25 @@ def test_unclassified_special_route_cannot_prove_no_supply(tmp_path):
     assert report["obs_layer_applicability"]["met1"]["verdict"] == "NOT_MEASURED"
 
 
+@pytest.mark.parametrize("use", ["MYSTERY", "POWERX", "POWER/OTHER", "+"])
+def test_unknown_or_malformed_use_cannot_prove_no_supply(tmp_path, use):
+    run, report = _run(tmp_path, _def("MET1", use=use))
+    assert run.returncode == 2, run.stdout + run.stderr
+    assert report["pdn_read_complete"] is False
+    assert "USE" in report["pdn_read_issue"]
+    assert report["reason_class"] == "BLOCKED_BY_UPSTREAM"
+    assert report["obs_layer_applicability"]["met1"]["verdict"] == "NOT_MEASURED"
+    assert report["obs_layer_applicability"]["met3"]["verdict"] == "NOT_MEASURED"
+
+
+@pytest.mark.parametrize("use", ["ANALOG", "CLOCK", "RESET", "SCAN", "TIEOFF"])
+def test_known_nonsupply_use_can_prove_supply_absence(tmp_path, use):
+    run, report = _run(tmp_path, _def("MET1", use=use))
+    assert run.returncode == 2, run.stdout + run.stderr
+    assert report["pdn_read_complete"] is True
+    assert report["reason_class"] == "NOT_APPLICABLE_BY_STRUCTURE"
+
+
 def test_unreadable_pdn_cannot_prove_absence(tmp_path):
     run, report = _run(tmp_path, _def(closed=False))
     assert run.returncode == 2, run.stdout + run.stderr
@@ -106,6 +127,12 @@ def test_step_audit_maps_proven_absence_but_not_unreadable_pdn(tmp_path):
     assert unknown.exit_code == 2
     assert unknown.verdict in {"BLOCKED", "INCOMPLETE"}
     assert unknown.reason_class != "NOT_APPLICABLE_BY_STRUCTURE"
+
+    _run(tmp_path, _def("MET1", use="MYSTERY"))
+    invalid = audit._check_program_exit_zero(tmp_path, clause)
+    assert invalid.exit_code == 2
+    assert invalid.verdict in {"BLOCKED", "INCOMPLETE"}
+    assert invalid.reason_class == "BLOCKED_BY_UPSTREAM"
 
 
 def test_checked_in_def_specialnet_population_is_read():

@@ -527,9 +527,31 @@ _PATH_KEYWORDS = {
 }
 
 
+_SPECIALNET_USE_VALUES = frozenset({
+    "ANALOG", "CLOCK", "GROUND", "POWER", "RESET", "SCAN", "SIGNAL", "TIEOFF",
+})
+
+
+def _specialnet_use(entry: str) -> Optional[str]:
+    """Return one complete, known DEF special-net USE value, or None.
+
+    A prefix such as POWER/OTHER cannot establish supply ownership, and an
+    unknown value cannot establish its absence. A second USE is ambiguous.
+    """
+    marks = list(re.finditer(r"\+\s*USE\b", entry, re.I))
+    if len(marks) != 1:
+        return None
+    tail = entry[marks[0].end():]
+    match = re.match(r"\s+([^\s;]+)(?=\s|;|$)", tail)
+    if match is None or not re.match(r"\s*(?:\+|;|$)", tail[match.end():]):
+        return None
+    value = match.group(1).upper()
+    return value if value in _SPECIALNET_USE_VALUES else None
+
+
 def _is_supply_specialnet(entry: str) -> bool:
     """DEF USE, not the net's spelling, identifies PDN power/ground metal."""
-    return bool(re.search(r"\+\s*USE\s+(?:POWER|GROUND)\b", entry, re.I))
+    return _specialnet_use(entry) in {"POWER", "GROUND"}
 
 
 def parse_via_layers(def_text: str) -> Dict[str, Tuple[str, str]]:
@@ -753,8 +775,11 @@ def pdn_read_evidence(def_text: str, gaps: Sequence[Dict[str, Any]]) -> Dict[str
         for entry in entries:
             route_markers = len(re.findall(r"\+\s*(?:ROUTED|FIXED|COVER)\b|\bNEW\b",
                                            entry, re.I))
-            use = re.search(r"\+\s*USE\s+\w+\b", entry, re.I)
-            if route_markers and use is None:
+            has_use = re.search(r"\+\s*USE\b", entry, re.I)
+            if has_use and _specialnet_use(entry) is None:
+                issue = "DEF special net has unknown or malformed USE classification"
+                break
+            if route_markers and has_use is None:
                 issue = "routed DEF special net has no USE classification"
                 break
             if not _is_supply_specialnet(entry):
