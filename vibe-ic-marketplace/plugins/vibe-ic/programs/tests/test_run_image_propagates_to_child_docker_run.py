@@ -41,6 +41,7 @@ chip — and the run's own declaration is not what governs.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import pathlib
 import sys
@@ -55,23 +56,36 @@ _SCAN_SRC = (_PROGRAMS / "fault_scan_chain_insert.py").read_text(
     encoding="utf-8")
 
 
-def _capture(monkeypatch_env: dict, rec: dict, tmp: pathlib.Path):
+def _capture(monkeypatch_env: dict, rec: dict, tmp: pathlib.Path,
+             docker_lookup=None):
     """Drive the runner's `_capture_container_image` with a stubbed prober and
-    a controlled environment; return (record, env_after)."""
-    spec = importlib.util.spec_from_file_location(
-        "vibe_ic_one_shot_runner", _PROGRAMS / "vibe_ic_one_shot_runner.py")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["vibe_ic_one_shot_runner"] = mod
-    try:
-        spec.loader.exec_module(mod)
-    except SystemExit:
-        pass
+    a controlled Docker lookup; return (record, env_after).
 
+    The synthetic container is called ``c``. Docker also accepts short ID
+    prefixes, so asking the host daemon about it could select an unrelated
+    container. Every caller states the lookup it needs; the default daemon
+    contains no images or containers.
+    """
+    import _eda_pin as _pin
     import container_image_provenance as _cip
     real_verify = _cip.verify
+    real_docker = _pin._docker
     saved = {k: os.environ.get(k)
              for k in ("VIBEIC_EDA_IMAGE", "IIC_EDA_IMAGE")}
+
+    def no_images(*_argv, timeout=None):
+        return 1, "", "synthetic Docker has no image or container"
+
     try:
+        _pin._docker = docker_lookup or no_images       # type: ignore
+        spec = importlib.util.spec_from_file_location(
+            "vibe_ic_one_shot_runner", _PROGRAMS / "vibe_ic_one_shot_runner.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["vibe_ic_one_shot_runner"] = mod
+        try:
+            spec.loader.exec_module(mod)
+        except SystemExit:
+            pass
         _cip.verify = lambda *a, **k: dict(rec)          # type: ignore
         for k in ("VIBEIC_EDA_IMAGE", "IIC_EDA_IMAGE"):
             os.environ.pop(k, None)
@@ -80,6 +94,7 @@ def _capture(monkeypatch_env: dict, rec: dict, tmp: pathlib.Path):
         return out, dict(os.environ)
     finally:
         _cip.verify = real_verify                        # type: ignore
+        _pin._docker = real_docker                       # type: ignore
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -163,9 +178,7 @@ def test_the_immutable_identity_wins_over_the_tag_in_a_shape_that_resolves():
 def test_the_repo_digest_beats_the_tag_the_container_was_started_from(tmp_path):
     """The behavioural half of the test above: started from a TAG, what
     propagates is the portable digest of the bytes that tag resolved to."""
-    import _eda_pin as _pin
     ref = "ghcr.io/vibeic/vibeic-eda@sha256:" + "7c" * 32
-    real = _pin._docker
 
     def fake(*argv, timeout=None):
         fmt = list(argv)[list(argv).index("--format") + 1]
@@ -175,15 +188,39 @@ def test_the_repo_digest_beats_the_tag_the_container_was_started_from(tmp_path):
             return 0, '["%s"]\n' % ref, ""
         return 1, "", "unexpected format"
 
-    _pin._docker = fake                                      # type: ignore
-    try:
-        _rec, env = _capture(
-            {}, {"verdict": "PASS",
-                 "image_ref": "ghcr.io/vibeic/vibeic-eda:0.2.58",
-                 "image_id": "sha256:" + "9f" * 32}, tmp_path)
-    finally:
-        _pin._docker = real                                  # type: ignore
+    _rec, env = _capture(
+        {}, {"verdict": "PASS",
+             "image_ref": "ghcr.io/vibeic/vibeic-eda:0.2.58",
+             "image_id": "sha256:" + "9f" * 32}, tmp_path,
+        docker_lookup=fake)
     assert env["VIBEIC_EDA_IMAGE"] == ref, env["VIBEIC_EDA_IMAGE"]
+
+
+def test_a_foreign_container_prefix_cannot_replace_the_verified_image(tmp_path):
+    """A second lookup by short container token must not replace the full Id
+    that the provenance record already measured, even when their Ids start
+    with the same bytes and each has a valid repository digest."""
+    verified_id = "sha256:" + "ab" * 32
+    foreign_id = "sha256:" + "ab" * 31 + "ac"
+    verified_ref = "ghcr.io/vibeic/vibeic-eda@sha256:" + "7c" * 32
+    foreign_ref = "vexaai/meeting-api@sha256:" + "ae" * 32
+
+    def fake(*argv, timeout=None):
+        if argv[0] == "inspect" and argv[-1] == "c":
+            return 0, f"{foreign_id}\tvexaai/meeting-api:latest\n", ""
+        if argv[:2] == ("image", "inspect"):
+            if argv[-1] == verified_id:
+                # The verified bytes may also have a local mirror name. The
+                # repository used to start the run must win when available.
+                return 0, json.dumps([foreign_ref, verified_ref]) + "\n", ""
+            if argv[-1] == foreign_id:
+                return 0, json.dumps([foreign_ref]) + "\n", ""
+        return 1, "", "not in the controlled daemon"
+
+    _, env = _capture(
+        {}, {"verdict": "PASS", "image_ref": "ghcr.io/vibeic/vibeic-eda:0.2.58",
+             "image_id": verified_id}, tmp_path, docker_lookup=fake)
+    assert env["VIBEIC_EDA_IMAGE"] == verified_ref
 
 
 def test_the_tag_is_used_when_no_portable_digest_could_be_named(tmp_path):
