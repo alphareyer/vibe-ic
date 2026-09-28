@@ -70772,17 +70772,26 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                 _state_def = Path(json.loads(Path(_after["adopted_state"]).read_text())["def"])
             except (OSError, ValueError, KeyError, TypeError):
                 _after, _state_def = {}, None
+            _adopted_def_sha256 = (_route_file_sha256(_state_def)
+                                   if _state_def is not None else None)
+            _shipped_def_sha256 = _route_file_sha256(def_file)
+            _promoted_def_sha256 = (_promotion or {}).get("promoted_def_sha256")
+            _own_measurement = _step32_own_measurement(_after)
+            _own_refusal = _promotion_unmeasured(_own_measurement)
             if (_after.get("site") != "after_direct_route"
                     or not _after.get("adopted") or _after.get("verdict") != "PASS"
-                    or _state_def is None
-                    or _route_file_sha256(_state_def) != _route_file_sha256(def_file)
-                    or (_promotion or {}).get("promoted_def_sha256") !=
-                    _route_file_sha256(def_file)
+                    or not _adopted_def_sha256
+                    or not _shipped_def_sha256
+                    or not _promoted_def_sha256
+                    or _adopted_def_sha256 != _shipped_def_sha256
+                    or _promoted_def_sha256 != _shipped_def_sha256
+                    or _own_refusal
                     or (_promotion or {}).get("measurement") !=
-                    _step32_own_measurement(_after)):
-                _promotion_refusal = ("the after-direct-route step-32 report "
+                    _own_measurement):
+                _promotion_refusal = (_own_refusal or
+                                      "the after-direct-route step-32 report "
                                       "is not bound to the shipped DEF and "
-                                      "its own antenna measurement")
+                                      "its own antenna and route measurement")
                 _promoted = True
                 _promoted_own = {}
             else:

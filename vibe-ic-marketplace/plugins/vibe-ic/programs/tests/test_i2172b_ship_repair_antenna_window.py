@@ -303,6 +303,43 @@ def test_missing_adopted_route_census_refuses_pnr_count(tmp_path):
     assert result["clean"] is False
 
 
+def test_after_direct_route_requires_its_own_unrouted_census(tmp_path):
+    """Matching nulls in a marker and report do not measure the shipped route."""
+    proj = _write_step32_evidence(
+        _write_run(tmp_path, promoted=True, ship_log=None),
+        steps={"21": "direct", "32": "librelane"},
+        site="after_direct_route")
+    candidate = proj / "phase3" / "candidate.def"
+    shipped = proj / "phase3" / "stage3" / "pnr" / "top.def"
+    shipped.write_bytes(candidate.read_bytes())
+    record_path = proj / "reports" / "phase3" / "route_promotion.json"
+    record = json.loads(record_path.read_text())
+    record["promoter"] = "librelane_step32_after_route"
+    record_path.write_text(json.dumps(record))
+    ok, rpt, _ = _emit(proj, tmp_path)
+    assert ok
+    valid = json.loads((rpt.parent / "antenna.json").read_text())
+    assert "antenna clean: YES" in rpt.read_text()
+    assert valid["shipped_route_measured"] is True
+
+    report_path = proj / PRR.REPORT_REL
+    report = json.loads(report_path.read_text())
+    del report["candidates"][0]["repair_metrics"]["vibeic__prr__unrouted__added"]
+    report_path.write_text(json.dumps(report))
+    record["measurement"]["unrouted_added"] = None
+    record_path.write_text(json.dumps(record))
+
+    ok, rpt, _ = _emit(proj, tmp_path)
+    assert ok
+    txt = rpt.read_text()
+    result = json.loads((rpt.parent / "antenna.json").read_text())
+    assert "antenna clean: NO" in txt
+    assert "antenna measured on: NOTHING" in txt
+    assert "unrouted_added absent" in result["promotion_binding_refusal"]
+    assert result["shipped_route_measured"] is False
+    assert result["clean"] is False
+
+
 @pytest.mark.parametrize("case", ["direct_route", "receipt_mismatch",
                                   "nothing_adopted", "unmeasured_verdict"])
 def test_unbound_step32_cannot_borrow_pnr_antenna_count(tmp_path, case):
