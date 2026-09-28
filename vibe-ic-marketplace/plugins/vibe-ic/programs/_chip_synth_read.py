@@ -181,18 +181,124 @@ def proved_record(project: Path) -> Optional[dict]:
     return res.get("chip_read") or {}
 
 
+def discard_built_record(project: Path) -> None:
+    """Remove a previous synthesis's record before this one writes its own, so
+    a write that fails leaves NO record rather than an older one that a later
+    bind could stamp onto a netlist it does not describe."""
+    try:
+        built_record_path(project).unlink()
+    except FileNotFoundError:
+        pass
+
+
 def write_built_record(project: Path, rtl_files: Sequence[Path],
-                       macro_files: Sequence, top: str) -> List[str]:
+                       macro_files: Sequence, top: str, *,
+                       synthesis_id: Optional[str] = None) -> List[str]:
     """Phase-3 synthesis: record the read it built and COMPARE it against the
-    read Step 5 proved. Returns the differences (also written)."""
+    read Step 5 proved. Returns the differences (also written).
+
+    ``synthesis_id`` names the synthesis that wrote the record; only that
+    synthesis may bind it (`bind_built_record_netlist`)."""
     rec = chip_read_record(rtl_files, macro_files, top)
     proved = proved_record(project)
     diffs = chip_read_differences(proved, rec) if proved is not None else []
     rec["stale_against_step5"] = diffs
+    if synthesis_id is not None:
+        rec["synthesis_id"] = synthesis_id
     path = built_record_path(project)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rec, indent=2) + "\n")
     return diffs
+
+
+#: The frontend that reads the closure under ``-DSYNTHESIS`` (and not
+#: SIMULATION) whatever the define decision said: phase-3 `step_synth`'s
+#: retry for an `ifdef SIMULATION` arm carrying a DV-only construct. Every
+#: other frontend reads with the decision's own ``-DSIMULATION`` prefix.
+SYNTHESIS_RETRY_FRONTEND = "yosys_slang_dsynthesis"
+
+
+def read_define_for_frontend(frontend: str, decided_simulation: bool) -> dict:
+    """What the attempt that produced the netlist actually defined."""
+    if frontend == SYNTHESIS_RETRY_FRONTEND:
+        return {"simulation": False, "synthesis": True}
+    return {"simulation": bool(decided_simulation), "synthesis": False}
+
+
+class BuiltRecordNotThisSynthesis(RuntimeError):
+    """The record on disk was not written by the synthesis asking to bind it."""
+
+
+def bind_built_record_netlist(project: Path, netlist: Path, *,
+                              synthesis_id: str, frontend: str) -> List[str]:
+    """Bind the built record to the netlist that read produced (path +
+    sha256), once synthesis has written it. A record with no binding, or
+    bound to other bytes, describes no netlist a later reader holds.
+
+    Only the record THIS synthesis wrote is bound (``synthesis_id``), and the
+    record is made to describe the attempt that produced the netlist: when
+    ``frontend`` read other defines than the decision the record was written
+    from (the ``-DSYNTHESIS`` retry), ``define`` is rewritten to what was read,
+    the decision is kept under ``define.decided``, and the Step-5 comparison is
+    recomputed. Returns the (recomputed) Step-5 differences."""
+    path = built_record_path(project)
+    rec = json.loads(path.read_text())
+    if not isinstance(rec, dict) or rec.get("synthesis_id") != synthesis_id:
+        got = rec.get("synthesis_id") if isinstance(rec, dict) else None
+        raise BuiltRecordNotThisSynthesis(
+            f"{BUILT_RECORD} was written by synthesis {got!r}, not {synthesis_id!r}")
+    decided = dict(rec.get("define") or {})
+    read = read_define_for_frontend(frontend, bool(decided.get("simulation")))
+    rec["frontend"] = frontend
+    if (read["simulation"] != bool(decided.get("simulation"))
+            or read["synthesis"]):
+        rec["define"] = {"simulation": read["simulation"],
+                         "synthesis": read["synthesis"],
+                         "verdict": f"READ_BY_{frontend.upper()}",
+                         "macro_cells": decided.get("macro_cells") or [],
+                         "macro_inputs": decided.get("macro_inputs") or [],
+                         "decided": decided}
+        proved = proved_record(project)
+        rec["stale_against_step5"] = (chip_read_differences(proved, rec)
+                                      if proved is not None else [])
+    netlist = Path(netlist)
+    try:
+        rel = str(netlist.resolve().relative_to(Path(project).resolve()))
+    except ValueError:
+        rel = str(netlist)
+    rec["netlist"] = {"path": rel, "sha256": _sha256(netlist)}
+    path.write_text(json.dumps(rec, indent=2) + "\n")
+    return list(rec.get("stale_against_step5") or [])
+
+
+def built_record_for_current_netlist(project: Path
+                                     ) -> Tuple[Optional[dict], str]:
+    """(the built record, "") when it describes the netlist on disk now,
+    else (None, why it cannot be compared). Only direct-mode synthesis
+    writes and binds the record; a LibreLane synthesis, a synthesis that
+    did not finish, or a later re-synthesis leaves it absent, unbound or
+    bound to bytes that are no longer the netlist."""
+    project = Path(project)
+    path = built_record_path(project)
+    if not path.is_file():
+        return None, f"no {BUILT_RECORD} (only direct-mode synthesis writes it)"
+    try:
+        rec = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return None, f"{BUILT_RECORD} is unreadable ({exc})"
+    bound = rec.get("netlist") if isinstance(rec, dict) else None
+    if not isinstance(bound, dict) or not bound.get("path") or not bound.get("sha256"):
+        return None, (f"{BUILT_RECORD} is bound to no netlist (synthesis did "
+                      f"not finish, or it predates the binding)")
+    netlist = project / str(bound["path"])
+    if not netlist.is_file():
+        return None, f"{BUILT_RECORD} describes {bound['path']}, which is absent"
+    now = _sha256(netlist)
+    if now != bound["sha256"]:
+        return None, (f"{BUILT_RECORD} describes {bound['path']} sha256 "
+                      f"{bound['sha256']}, but that netlist is now {now} "
+                      f"(re-synthesised since, e.g. by the LibreLane arm)")
+    return rec, ""
 
 
 def unstaged_analog_blocks(project: Path) -> List[str]:
