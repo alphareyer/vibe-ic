@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Emit the Step 32 post-route timing-repair status artefact.
 
-The flow expects exactly one of
+For a measured decision the flow expects exactly one of
 ``phase3/stage3/postroute_timing_repair/no_repair_needed.flag`` or
 ``phase3/stage3/postroute_timing_repair/repair_log.json``. This generator
 inspects the authoritative post-route STA result and emits the appropriate
-artefact.
+artefact. An unreadable timing basis emits ``measurement_not_available.json``
+and a non-success exit, without claiming a repair or a clean sign-off.
 
   * post-route TNS == 0 (or no slack violations) → `no_repair_needed.flag`
   * else → `repair_log.json` with a structured summary of remaining violations
@@ -14,7 +15,7 @@ chip-AGNOSTIC: works with any OpenROAD-style sta.rpt format.
 
 Exit codes:
     0 = wrote the appropriate artefact (PASS or PASS_WITH_NOTE)
-    2 = VACUOUS_PASS (no STA report yet — phase3 hasn't run)
+    2 = NOT_MEASURED (no STA report or no usable timing measurement)
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import _path_layout as _pl  # noqa: E402
+import _atomic_artefact as _aa  # noqa: E402
 import postroute_timing_repair_decision as _repair_dec  # noqa: E402
 import plugin_manifest_discovery as _pmd  # noqa: E402  (#800 ONE version reader)
 
@@ -58,7 +60,8 @@ def _parse_sta_for_violations(sta_text: str) -> dict:
     has_violated = "VIOLATED" in upper
     if ((tns_m and float(tns_m.group(1)) < 0)
             or (wns_m and float(wns_m.group(1)) < 0)
-            or re.search(r"\bslack\s*\(VIOLATED\)", sta_text, re.I)):
+            or re.search(r"\bslack\s*(?:\(VIOLATED\)|VIOLATED\b)",
+                         sta_text, re.I)):
         out["timing_measurement"] = "VIOLATED"
     elif tns_m and out["tns_zero"] and not out["wns_negative"]:
         out["timing_measurement"] = "CLEAN"
@@ -140,12 +143,54 @@ def main(argv=None) -> int:
         "tns_zero": info["tns_zero"],
         "repair_trigger_basis": decision["basis"],
         "mc_ocv_available": decision["mc_ocv_available"],
+        "timing_basis_status": decision["timing_basis_status"],
     }
     if decision["violated_corners"]:
         summary["violated_corners"] = decision["violated_corners"]
     summary["timing_repair_needed"] = decision["timing_repair_needed"]
     if decision["nontiming_failures"]:
         summary["nontiming_failures"] = decision["nontiming_failures"]
+
+    # A readable report header is not a timing measurement. Keep this state
+    # separate from a measured repair demand and from a non-timing failure.
+    # A previous run's flag or repair log must not certify this new run.
+    no_measurement = (not decision["timing_repair_needed"]
+                      and not decision["nontiming_failures"]
+                      and (decision["timing_basis_status"] == "NOT_MEASURED"
+                           or decision["nontiming_not_determined"]))
+    if no_measurement:
+        for stale in ("no_repair_needed.flag", "no_repair_summary.json",
+                      "repair_log.json"):
+            (postroute_timing_repair_dir / stale).unlink(missing_ok=True)
+        status_path = postroute_timing_repair_dir / "measurement_not_available.json"
+        remediation = (
+            "Re-run post-route STA and confirm it reports measured timing "
+            "slack or TNS/WNS before deciding whether repair is needed."
+            if decision["timing_basis_status"] == "NOT_MEASURED" else
+            "Re-run the incomplete non-timing sign-off domain(s) before "
+            "deciding whether repair is needed.")
+        status = {
+            "program": "postroute_timing_repair_status_gen",
+            "verdict": "NOT_MEASURED",
+            "sta_source": str(sta_rpt.relative_to(project)),
+            "timing_basis_status": decision["timing_basis_status"],
+            "timing_repair_needed": False,
+            "nontiming_failures": [],
+            "nontiming_not_determined": decision["nontiming_not_determined"],
+            "trigger_reason": decision["reason"],
+            "remediation": remediation,
+        }
+        _aa.write_json(status_path, status)
+        summary.update(verdict="NOT_MEASURED",
+                       artefact=str(status_path.relative_to(project)),
+                       remediation=remediation)
+        if args.json:
+            _aa.write_json(Path(args.json), summary)
+        print(json.dumps(summary, indent=2))
+        return 2
+
+    (postroute_timing_repair_dir / "measurement_not_available.json").unlink(
+        missing_ok=True)
 
     if not decision["repair_needed"]:
         flag = postroute_timing_repair_dir / "no_repair_needed.flag"
@@ -166,6 +211,8 @@ def main(argv=None) -> int:
         (postroute_timing_repair_dir / "no_repair_summary.json").write_text(
             json.dumps(summary, indent=2) + "\n")
     else:
+        (postroute_timing_repair_dir / "no_repair_needed.flag").unlink(
+            missing_ok=True)
         log_path = postroute_timing_repair_dir / "repair_log.json"
         minimal = {
             "program": "postroute_timing_repair_status_gen",

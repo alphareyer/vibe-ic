@@ -66,3 +66,26 @@ def test_falls_back_to_pnr_sta_rpt(tmp_path):
     r = _run(tmp_path)
     assert r.returncode == 0
     assert (tmp_path / "phase3/stage3/postroute_timing_repair/no_repair_needed.flag").is_file()
+
+
+def test_readable_sta_without_a_measurement_is_not_a_repair_diagnosis(tmp_path):
+    sta = tmp_path / "phase3/stage3/sta/sta_spef_based.rpt"
+    sta.parent.mkdir(parents=True)
+    sta.write_text("Post-route STA report header only\n")
+    repair_dir = tmp_path / "phase3/stage3/postroute_timing_repair"
+    repair_dir.mkdir(parents=True)
+    flag = repair_dir / "no_repair_needed.flag"
+    flag.write_text("stale clean certificate\n")
+
+    result = _run(tmp_path)
+    assert result.returncode != 0
+    summary = json.loads(result.stdout)
+    status = json.loads((repair_dir / "measurement_not_available.json").read_text())
+    assert summary["verdict"] == status["verdict"] == "NOT_MEASURED"
+    assert status["timing_basis_status"] == "NOT_MEASURED"
+    assert status["timing_repair_needed"] is False
+    assert status["nontiming_failures"] == []
+    assert "STA" in status["remediation"] and "Re-run" in status["remediation"]
+    assert "non-timing sign-off domain FAILED" not in status["remediation"]
+    assert not flag.exists()
+    assert not (repair_dir / "repair_log.json").exists()
