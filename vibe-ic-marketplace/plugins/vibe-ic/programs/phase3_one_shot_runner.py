@@ -44223,8 +44223,8 @@ def _density_metal_fill(project: Path, top: str, pdk: PdkConfig,
         # rc 2 is the program's NAMED disclosed-skip; rc 1 is PARTIAL/FAIL with
         # the achieved density in its report. Both are reported, never hidden.
         tail = ((cp.stdout or "") + (cp.stderr or "")).strip().splitlines()
-        return False, ("density fill did NOT complete: "
-                       + (tail[0][:200] if tail else f"rc={cp.returncode}"))
+        return False, (f"density fill did NOT complete: rc={cp.returncode}"
+                       + (f"; {tail[0][:200]}" if tail else ""))
     return True, ("per-layer density fill reached target on every layer"
                   + (" (config derived chip-AGNOSTIC from PDK files)" if derived else ""))
 

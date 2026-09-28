@@ -162,7 +162,8 @@ def test_partial_failing_fill_cannot_publish_a_finished_gds(tmp_path, monkeypatc
     project = _project(tmp_path)
     pdk = SimpleNamespace(drc_deck=None, stdcell_marker_layer=None,
                           dummy_fill=None, same_net_heal=None,
-                          port_label_restore=None)
+                          port_label_restore=None,
+                          metal_fill_density={"layers": [{"layer": [7, 0]}]})
     monkeypatch.setattr(R, "_layout_basis", lambda *a: ("basis", None))
     monkeypatch.setattr(R._ga, "gate_passed", lambda *a: True)
     monkeypatch.setattr(R, "_vacuous_on_unrouted", lambda *a: None)
@@ -178,16 +179,18 @@ def test_partial_failing_fill_cannot_publish_a_finished_gds(tmp_path, monkeypatc
         R._log_invocation("layout gds write", 0, 1, outputs=[path])
         return True, "streamed"
 
-    def partial_fill(_project, _top, _pdk, path, _container):
+    def partial_fill_tool(argv, **_kwargs):
+        assert Path(argv[1]).name == "metal_fill_emit.py"
+        path = Path(argv[argv.index("--gds") + 1])
         path.write_bytes(path.read_bytes() + b" + incomplete fill")
-        R._log_invocation("layout partial fill", 1, 1, outputs=[path])
-        return False, "fill failed rc=1"
+        return SimpleNamespace(returncode=1, stdout="partial geometry written",
+                               stderr="tool exited 1")
 
     monkeypatch.setattr(R, "_magic_def_to_gds", stream)
     monkeypatch.setattr(R, "_gds_grid_snap", lambda *a: (False, "no snap"))
     monkeypatch.setattr(R, "_die_finishing", lambda *a: (False, "no seal"))
     monkeypatch.setattr(R, "_step34_gds_tool_arm", lambda *a: None)
-    monkeypatch.setattr(R, "_density_metal_fill", partial_fill)
+    monkeypatch.setattr(R._pr, "run_best_effort", partial_fill_tool)
     monkeypatch.setattr(R, "_die_density_fill", lambda *a: (False, "no die fill"))
     monkeypatch.setattr(R, "_restore_port_labels_if_missing",
                         lambda *a: (False, "no labels"))
