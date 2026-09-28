@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 BASELINE = "fanout_buffer"
-VARIANTS = {"abc_alt_buffer", "abc_no_buffer"}
+VARIANTS = {"abc_alt_buffer", "abc_no_buffer", "fa_map_alt_buffer",
+            "fa_map_fanout_buffer", "fa_map_no_buffer"}
 IDENTITY = ("pdk", "design", "source_sha256", "liberty_sha256",
             "constraints_sha256", "image_digest", "fanout_cap")
 
@@ -44,15 +45,19 @@ def select(pdk: str, rows: Sequence[Mapping[str, Any]],
     """Require two distinct matched designs with no sign-off regression.
 
     A variant must be no worse in BOTH post-route area and slack on each
-    design, and strictly improve at least one metric. No full-adder mapping is
-    elected here: a mapped multi-output cell needs its own working actuator,
-    equivalence proof and measured post-route pair before it can be a variant.
+    design, and strictly improve at least one metric. A full-adder arm also
+    needs a successful equivalence proof and a nonzero mapped-cell census.
     """
     valid = [r for r in rows if isinstance(r, Mapping) and _valid(r)
              and r.get("pdk") == pdk and r.get("fanout_cap") == fanout_cap]
     for variant in sorted(VARIANTS):
         pairs: dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
         for candidate in (r for r in valid if r.get("recipe") == variant):
+            if variant.startswith("fa_map_") and (
+                    candidate.get("lec") != "PASS" or
+                    type(candidate.get("mapped_fa_count")) is not int or
+                    candidate["mapped_fa_count"] <= 0):
+                continue
             matched = [r for r in valid if r.get("recipe") == BASELINE
                        and all(r[k] == candidate[k] for k in IDENTITY)]
             if len(matched) != 1:

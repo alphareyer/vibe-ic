@@ -116,6 +116,7 @@ import _signoff_drc_format as _sdf  # sign-off DRC producer classification (ONE 
 import step_metrics as _sm  # vibe-ic#1080 — the ONE per-step metrics mechanism
 import synth_area_stats_emit as _sas  # #457 — synth area figure -> declared artefact
 import synth_recipe_postroute as _srp  # post-route PDK recipe election
+import synth_full_adder_map as _sfam  # Liberty-proven multi-output actuator
 import _gate_invocation  # #492/#544 — tell a gate's verdict from a bad invocation
 import _sta_basis  # the ONE reader of the `STA_BASIS:` stamp (no second copy)
 import emitted_script_portability_check as _esp  # the ONE host-path predicate
@@ -17351,16 +17352,18 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         _active_recipe = (_recipe_choice["recipe"]
                           if _recipe_choice["verdict"] == "PASS"
                           else "fanout_buffer")
-        if _active_recipe == "abc_no_buffer":
+        if _active_recipe in ("abc_no_buffer", "fa_map_no_buffer"):
             _abc_fanout = ""
         else:
             _recipe_template = (_ABC_ALT_FANOUT_SCRIPT
-                                if _active_recipe == "abc_alt_buffer"
+                                if _active_recipe in ("abc_alt_buffer",
+                                                      "fa_map_alt_buffer")
                                 else _ABC_FANOUT_SCRIPT)
             _abc_fanout = _recipe_template.format(cap=int(_fo_cap))
         _fo_notes.append(f"max_fanout {_fo_cap}; ABC recipe {_active_recipe}; "
                          f"cap from {_fo_why}")
     else:
+        _active_recipe = "fanout_buffer"
         _fo_notes.append(
             "max_fanout UNRESOLVED -> abc recipe UNCHANGED (no fabricated "
             "cap)")
@@ -17378,6 +17381,26 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # (techmap), applied after hierarchy/proc (so $add cells exist) and before
     # the generic `synth` mapping. Empty when neither knob is present.
     _arith_pre_clause = _swap_arith_clause + _adder_map_clause
+    _fa_clause = ""
+    if _active_recipe.startswith("fa_map_"):
+        _liberty_text, _liberty_why = read_text_or_container_cat(
+            str(pdk.liberty), container)
+        _fa_spec = _sfam.discover(_liberty_text or "")
+        if _fa_spec is None:
+            return StepResult("synth", "FAIL", time.time() - t0,
+                              "FA_MAP_CELL_UNAVAILABLE: " +
+                              (_liberty_why or "no unique truth-table-proven cell"))
+        try:
+            (out_dir / "_measured_fa_map.v").write_text(
+                _sfam.verilog_map(_fa_spec))
+        except OSError as _exc:
+            return StepResult("synth", "FAIL", time.time() - t0,
+                              f"FA_MAP_STAGE_FAILED: {type(_exc).__name__}")
+        _fa_clause = (f"read_liberty -lib -ignore_miss_dir {liberty_c}; "
+                      "extract_fa -fa; opt_clean; "
+                      f"techmap -map {out_dir_c}/_measured_fa_map.v; "
+                      "opt_clean; ")
+        _fo_notes.append(f"full-adder map cell {_fa_spec[0]} from active Liberty")
     yosys_cmd = (
         f"{setup}cd {out_dir_c} && "
         f"export PATH={TOOLS_IN_CONTAINER}/yosys/bin:"
@@ -17386,6 +17409,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         f"{pre_synth}"
         f"{_arith_pre_clause}"
         f"{_fsm_synth_clause}"
+        f"{_fa_clause}"
         f"dfflibmap{_du_flags} -liberty {liberty_c}; "
         f"{dlatch_clause}"
         f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
@@ -17494,6 +17518,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
             f"hierarchy -top {top}; proc; flatten; tribuf -logic; "
             f"{_arith_pre_clause}"
             f"{_fsm_synth_clause}"
+            f"{_fa_clause}"
             f"dfflibmap{_du_flags} -liberty {liberty_c}; "
             f"{dlatch_clause}"
             f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
@@ -17526,6 +17551,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 f"hierarchy -check -top {top}; proc; flatten; tribuf -logic; "
                 f"{_arith_pre_clause}"
                 f"{_fsm_synth_clause}"
+                f"{_fa_clause}"
                 f"dfflibmap{_du_flags} -liberty {liberty_c}; "
                 f"{dlatch_clause}"
                 f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
@@ -17580,6 +17606,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 f"hierarchy -top {top}; proc; flatten; tribuf -logic; "
                 f"{_arith_pre_clause}"
                 f"{_fsm_synth_clause}"
+                f"{_fa_clause}"
                 f"dfflibmap{_du_flags} -liberty {liberty_c}; "
                 f"{dlatch_clause}"
                 f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
@@ -17613,6 +17640,23 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                           extras={"synth_frontend": "none",
                                   "synth_frontend_reason": fe_reason,
                                   "macro_define_decision": _macro_def})
+    if _active_recipe.startswith("fa_map_"):
+        _fa_extracted = len(re.findall(r"Created \$fa cell\b", out + "\n" + err))
+        try:
+            _fa_netlist = netlist.read_text(encoding="utf-8", errors="ignore")
+        except OSError as _exc:
+            return StepResult("synth", "FAIL", time.time() - t0,
+                              f"FA_MAP_CENSUS_UNREADABLE: {type(_exc).__name__}",
+                              [str(log)])
+        _fa_mapped = len(re.findall(
+            rf"^\s*{re.escape(_fa_spec[0])}\s+\S+\s*\(", _fa_netlist, re.M))
+        if _fa_extracted and _fa_mapped < _fa_extracted:
+            return StepResult("synth", "FAIL", time.time() - t0,
+                              f"FA_MAP_LOST: extracted={_fa_extracted} "
+                              f"mapped={_fa_mapped}", [str(netlist), str(log)])
+        _recipe_choice = dict(
+            _recipe_choice, fa_cell=_fa_spec[0], mapped_fa_count=_fa_mapped,
+            actuator=("APPLIED" if _fa_mapped else "NO_EXTRACTABLE_FA"))
     # v1.6.596 — for #404 P3 ORGANIC. Defence-in-depth post-synth
     # net-rename pass. Even with hilomap applied, some Yosys versions
     # emit intermediate named tie nets that survive into the final

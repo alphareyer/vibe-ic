@@ -9,6 +9,28 @@ import pytest
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 import phase3_one_shot_runner as R  # noqa: E402
+import synth_full_adder_map as FA  # noqa: E402
+
+
+LIBERTY_FA = """library(neutral) {
+  cell(FA_SMALL) {
+    area: 2.0;
+    pin(P) { direction: input; }
+    pin(Q) { direction: input; }
+    pin(R) { direction: input; }
+    pin(CARRY) { direction: output; function: "(P&Q)|(P&R)|(Q&R)"; }
+    pin(SUM) { direction: output; function: "P^Q^R"; }
+  }
+  cell(FA_LARGE) {
+    area: 4.0;
+    pin(P) { direction: input; }
+    pin(Q) { direction: input; }
+    pin(R) { direction: input; }
+    pin(CARRY) { direction: output; function: "(P&Q)|(P&R)|(Q&R)"; }
+    pin(SUM) { direction: output; function: "P^Q^R"; }
+  }
+}
+"""
 
 
 def _pair(design: str, pdk: str = "famxD") -> list[dict]:
@@ -62,12 +84,78 @@ def test_buffer_choice_is_measured_and_cap_scoped():
     assert _select("famxD", rows)["verdict"] == "NOT_MEASURED"
 
 
-def test_unimplemented_full_adder_mapping_cannot_be_elected():
+def test_full_adder_mapping_needs_proof_and_nonzero_cell_census():
     rows = _pair("logic_a") + _pair("logic_b")
     for row in rows:
         if row["recipe"] == "abc_alt_buffer":
             row["recipe"] = "fa_map_alt_buffer"
     assert _select("famxD", rows)["verdict"] == "NOT_MEASURED"
+    for row in rows:
+        if row["recipe"] == "fa_map_alt_buffer":
+            row.update(lec="PASS", mapped_fa_count=2)
+    got = _select("famxD", rows)
+    assert got["verdict"] == "PASS" and got["recipe"] == "fa_map_alt_buffer"
+    rows[-1]["mapped_fa_count"] = 0
+    assert _select("famxD", rows)["verdict"] == "NOT_MEASURED"
+
+
+def test_liberty_truth_table_and_area_discover_neutral_full_adder():
+    spec = FA.discover(LIBERTY_FA)
+    assert spec == ("FA_SMALL", ("P", "Q", "R"), "CARRY", "SUM")
+    mapping = FA.verilog_map(spec)
+    assert ".CARRY(X[i])" in mapping and ".SUM(Y[i])" in mapping
+    assert FA.discover(LIBERTY_FA.replace('function: "P^Q^R"',
+                                          'function: "P|Q|R"')) is None
+    assert FA.discover(LIBERTY_FA.replace('function: "P^Q^R"',
+                                          'function: "P?Q:R"')) is None
+    assert FA.discover(LIBERTY_FA.replace("area: 4.0", "area: 2.0")) is None
+
+
+def test_step_synth_stages_elected_full_adder_actuator(tmp_path, monkeypatch):
+    project = tmp_path / "run"
+    rtl = project / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "core.v").write_text(
+        "module core(input a,b,c, output s,k); "
+        "assign s=a^b^c; assign k=(a&b)|(a&c)|(b&c); endmodule\n")
+    lib = tmp_path / "neutral.lib"
+    lib.write_text(LIBERTY_FA)
+    pdk = R.PdkConfig(name="famxD", liberty=str(lib), tech_lef="test.lef",
+                      cell_lef="test.lef", cell_gds=None, site="unit",
+                      drc_deck=None)
+    monkeypatch.setattr(R, "_to_container_path", lambda path, _c: path)
+    monkeypatch.setattr(R, "_synth_max_fanout",
+                        lambda *_a, **_k: (3, "declared", []))
+    rows = _pair("logic_a") + _pair("logic_b")
+    for row in rows:
+        if row["recipe"] == "abc_alt_buffer":
+            row.update(recipe="fa_map_alt_buffer", lec="PASS",
+                       mapped_fa_count=1)
+    monkeypatch.setattr(R._srp, "load", lambda _path: (rows, ""))
+    commands = []
+    monkeypatch.setattr(R, "_docker_exec",
+                        lambda _c, command, **_k:
+                        (commands.append(command) or 1, "", "synthetic failure"))
+    result = R.step_synth(project, "core", pdk, "fake")
+    assert result.status == "FAIL"
+    command = next(c for c in commands if "extract_fa -fa" in c)
+    assert "read_liberty -lib" in command
+    assert "techmap -map" in command
+    assert "&dch;&nf,{D};&put;buffer,-N,3" in command
+    assert "FA_SMALL mapped" in (R._pl.synth_dir(project) /
+                                 "_measured_fa_map.v").read_text()
+
+    # A successful Yosys rc that reports extracted adders but drops the
+    # mapped cell must not advance synthesis to PASS.
+    def fake_lost_cell(_container, _command, **_kwargs):
+        (R._pl.synth_dir(project) / "core_synth.v").write_text(
+            "module core(input a,b,c, output s,k); "
+            "assign s=a^b^c; assign k=a&b; endmodule\n")
+        return 0, "Created $fa cell synthetic_extraction", ""
+
+    monkeypatch.setattr(R, "_docker_exec", fake_lost_cell)
+    lost = R.step_synth(project, "core", pdk, "fake")
+    assert lost.status == "FAIL" and "FA_MAP_LOST" in lost.detail
 
 
 def test_postroute_metrics_and_signoff_are_required():

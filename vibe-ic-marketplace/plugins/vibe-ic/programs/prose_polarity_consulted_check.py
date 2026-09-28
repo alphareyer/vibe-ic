@@ -119,6 +119,15 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "synth_full_adder_map::discover":
+        "ONE MACHINE GRAMMAR, NO SENTENCE. The input is the active PDK Liberty "
+        "file: cell/pin blocks, area numbers, directions and quoted Boolean "
+        "functions. A candidate is accepted only when all eight evaluated "
+        "input combinations equal XOR3 and majority3; an unsupported token, "
+        "missing function, nonpositive area or ambiguous minimum refuses it. "
+        "There is no prose denial form in these fields. Falsifier: "
+        "test_capture_cr14_postroute_recipe.py::"
+        "test_liberty_truth_table_and_area_discover_neutral_full_adder.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "
