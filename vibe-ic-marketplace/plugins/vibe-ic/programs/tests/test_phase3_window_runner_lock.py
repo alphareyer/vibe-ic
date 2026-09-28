@@ -439,6 +439,32 @@ def test_window_publishes_in_tree_input_with_provenance(project, monkeypatch):
     assert "phase3/input.def" in publication["inputs"]
 
 
+def test_enclosing_window_stops_before_publishing_missing_citation(
+        project, monkeypatch):
+    report = _rows(("sta_signoff", "PASS", "", ""))
+    report["verdict"] = "PASS"
+    output = "reports/phase3/sta/post_route_summary.json"
+    code = ("import json, pathlib, sys\n"
+            "iso = pathlib.Path(sys.argv[1])\n"
+            f"out = iso / {output!r}\n"
+            "out.parent.mkdir(parents=True, exist_ok=True)\n"
+            "out.write_text(json.dumps({'output_files': ['./missing.def']}))\n"
+            "record = iso / 'reports/orchestrator/phase3_one_shot.json'\n"
+            "record.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"record.write_text(json.dumps({report!r}))\n"
+            f"print({BANNER!r})\n")
+
+    row = _enclose_with(project, monkeypatch, code, "missing-citation",
+                        steps=("23",))
+
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.MISSING_ARTEFACT
+    assert "window cited input absent: ./missing.def" in row.detail
+    assert not (project / output).exists()
+    assert not (project / "reports/audit/windows/missing-citation/"
+            "publication.json").exists()
+
+
 def test_window_publishes_dot_relative_file_reference(project, tmp_path):
     isolated = tmp_path / "isolated"
     isolated.mkdir()
