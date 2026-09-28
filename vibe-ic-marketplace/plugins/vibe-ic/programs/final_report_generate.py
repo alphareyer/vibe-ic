@@ -273,6 +273,20 @@ MANUFACTURING_STEP_ID_MIN = 40
 MANUFACTURING_STEP_ID_MAX = 44
 
 
+def _deviation_section(project: Path) -> List[str]:
+    """`## Disclosed deviations` — one line per applied (or refused) reused-IP
+    erratum, or nothing when the staged RTL is the input RTL."""
+    try:
+        import reused_ip_erratum as _erratum
+        lines = _erratum.disclosure_lines(project)
+    except Exception as exc:  # noqa: BLE001 — the card never crashes
+        lines = [f"deviation record unreadable: {exc!r}"]
+    if not lines:
+        return []
+    return (["## Disclosed deviations", ""]
+            + [f"- {line}" for line in lines] + [""])
+
+
 def _is_manufacturing_step(step: Dict[str, Any]) -> bool:
     """True iff `step` belongs to the silicon-dependent manufacturing
     stage. Structural + chip-AGNOSTIC: prefers the explicit `stage`
@@ -2345,6 +2359,11 @@ def _render(project: Path, run_audit: bool = True,
                  if overall == "NOT_PROVEN" else
                  "INCOMPLETE — inspect the outstanding verdicts before claiming."))
     md.append("")
+
+    # A staged RTL that differs from the design input says so on the card, one
+    # line per disclosed deviation (`reused_ip_erratum`) — directly under the
+    # verdict it qualifies.
+    md.extend(_deviation_section(project))
 
     # Stage-level summary
     md.append("## Stage breakdown")
