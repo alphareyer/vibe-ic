@@ -475,10 +475,41 @@ def _refused_by_tool(report: Dict[str, Any], cap: Dict[str, Any], out: Path) -> 
     return True
 
 
+def repair_dont_use(config: Path, pdk_root: Path, pdk: str,
+                    rule: Callable[[str], List[str]]) -> List[str]:
+    """The cells this step's resizer may not insert: `rule` (the direct deck's
+    dont_use families, supplied by the runner) over the step's own resolved
+    CELL_LIBS, read through the PDK mount the step runs with.
+
+    cmp3 D14, MEASURED on spm x gf180mcuD (32-cand01): with no exclusion,
+    repair_design split high-fanout nets with `dlya_1`/`dlyb_1` delay cells
+    (setup 5.15 -> 3.07 ns), and a second fanout round on a delay cell took
+    setup to -0.015 ns. The direct deck and the LL placement chain exclude
+    that family; step 32 now does too. A library the step names that cannot
+    be read refuses: an exclusion computed over part of the library is not
+    the exclusion."""
+    import librelane_contract as _ll
+    libs = _load(config).get("CELL_LIBS") or {}
+    paths = sorted({p for v in (libs.values() if isinstance(libs, dict) else [libs])
+                    for p in (v if isinstance(v, list) else [v])})
+    guest = f"/pdk/{pdk}/"
+    excluded: set = set()
+    for value in paths:
+        host = (pdk_root / pdk / value[len(guest):] if str(value).startswith(guest)
+                else Path(value))
+        try:
+            excluded.update(rule(host.read_text(errors="replace")))
+        except OSError as exc:
+            raise _ll.Refusal("LL_PRR_LIBERTY_UNREADABLE", f"{value} ({host}): {exc}")
+    return sorted(excluded)
+
+
 def _prepare(project: Path, *, image: str, pdk: str, pdk_root: Path, sdc: Path,
              derate: Tuple[float, float], pg_rules_tcl: Optional[Path],
-             refill_tcl: Optional[Path], docker: str) -> Tuple[Dict[str, Path], List[str],
-                                                               List[Tuple[Path, str]]]:
+             refill_tcl: Optional[Path], docker: str,
+             dont_use: Optional[Tuple[Callable[[str], List[str]], str]] = None,
+             max_fanout: Optional[Tuple[int, str]] = None,
+             ) -> Tuple[Dict[str, Path], List[str], List[Tuple[Path, str]]]:
     """The resolved configs (repair step + the three measuring steps) in the
     sign-off scene, the STA corners, and the PDK mount."""
     import librelane_contract as _ll
@@ -504,6 +535,15 @@ def _prepare(project: Path, *, image: str, pdk: str, pdk_root: Path, sdc: Path,
     if refill_tcl is not None:
         extra["VIBEIC_PRR_REFILL_TCL"] = (str(refill_tcl.resolve()),
                                           "the direct deck's own filler policy")
+    if max_fanout is not None:
+        extra["VIBEIC_PRR_MAX_FANOUT"] = max_fanout
+    if dont_use is not None:
+        excluded = repair_dont_use(configs[REPAIR_STEP], pdk_root, pdk, dont_use[0])
+        source = dont_use[1]
+        if not excluded:
+            source += "; no cell matched in the resolved CELL_LIBS"
+            print(f"LL_PRR_DONT_USE_EMPTY: {source}")
+        extra["EXTRA_EXCLUDED_CELLS"] = (excluded, source)
     if extra:
         configs[REPAIR_STEP] = _ll.derive_step_config(configs[REPAIR_STEP],
                                                       configs[REPAIR_STEP], extra)
@@ -547,7 +587,14 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
     report: Dict[str, Any] = {"arm": name, "input_state": str(state0), "corners": corners,
                               "floors": ctx["floors"],
                               "baseline": baseline,
-                              "baseline_antenna": baseline.get("antenna_nets")}
+                              "baseline_antenna": baseline.get("antenna_nets"),
+                              # The census step's own metrics on the arm's input
+                              # route (its unrouted census): what a promoter of
+                              # THIS route, with no candidate, measured.
+                              "baseline_repair_metrics": {
+                                  k: v for k, v in (_load(folder0 / "state_out.json")
+                                                    .get("metrics") or {}).items()
+                                  if k.startswith("vibeic__prr__")}}
     runs = []
     if controllers:
         reg = _cl.load_registry(registry, programs_dir=programs_dir)
@@ -577,7 +624,9 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
         views: Dict[str, Path], sdc: Path, derate: Tuple[float, float],
         pg_rules_tcl: Optional[Path] = None, refill_tcl: Optional[Path] = None,
         registry: Optional[Path] = None, programs_dir: Optional[Path] = None,
-        docker: str = "docker") -> Dict[str, Any]:
+        docker: str = "docker",
+        dont_use: Optional[Tuple[Callable[[str], List[str]], str]] = None,
+        max_fanout: Optional[Tuple[int, str]] = None) -> Dict[str, Any]:
     """Step 32 on LibreLane after a DIRECT route: bridge the routed views,
     then one closure arm. Returns the report (also written to `REPORT_REL`).
     `adopted` is the candidate the closure left adopted (`None`: the input
@@ -590,7 +639,8 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
         return report
     configs, corners, mounts = _prepare(
         project, image=image, pdk=pdk, pdk_root=pdk_root, sdc=sdc, derate=derate,
-        pg_rules_tcl=pg_rules_tcl, refill_tcl=refill_tcl, docker=docker)
+        pg_rules_tcl=pg_rules_tcl, refill_tcl=refill_tcl, docker=docker,
+        dont_use=dont_use, max_fanout=max_fanout)
     state0 = _ll.state_from_direct(project, image, configs[REPAIR_STEP], views,
                                    project / "phase3/librelane/32-config/bridge",
                                    mounts=mounts,
@@ -675,7 +725,10 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
                                                 Dict[str, Any]]] = None,
                  pg_rules_tcl: Optional[Path] = None,
                  registry: Optional[Path] = None, programs_dir: Optional[Path] = None,
-                 docker: str = "docker") -> Dict[str, Any]:
+                 docker: str = "docker",
+                 dont_use: Optional[Tuple[Callable[[str], List[str]], str]] = None,
+        max_fanout: Optional[Tuple[int, str]] = None,
+                 ) -> Dict[str, Any]:
     """Step 32 on LibreLane INSIDE the step-21 LibreLane chain
     (LL21 -> Vibeic.PostRouteRepair -> tail): the routed State is the
     selected route arm's own (no DEF crosses a session), and the route's
@@ -693,7 +746,8 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
         return report
     configs, corners, mounts = _prepare(
         project, image=image, pdk=pdk, pdk_root=pdk_root, sdc=sdc, derate=derate,
-        pg_rules_tcl=pg_rules_tcl, refill_tcl=None, docker=docker)
+        pg_rules_tcl=pg_rules_tcl, refill_tcl=None, docker=docker,
+        dont_use=dont_use, max_fanout=max_fanout)
     common = dict(image=image, pdk=pdk, configs=configs, corners=corners, mounts=mounts,
                   registry=registry, programs_dir=programs_dir,
                   floors=declared_timing_floor(project, sdc))
@@ -732,7 +786,8 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     report.update({k: chosen[k] for k in ("baseline", "final", "adopted", "adopted_state",
                                            "final_antenna", "baseline_antenna",
                                            "final_supply_ownership", "candidates",
-                                           "closure")})
+                                           "closure", "baseline_repair_metrics")
+                   if k in chosen})
     report["selected_arm"] = sel["selection"]
     report["verdict"] = "PASS"
     write_json(out, report)

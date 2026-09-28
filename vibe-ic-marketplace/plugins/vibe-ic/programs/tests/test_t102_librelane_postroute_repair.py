@@ -669,9 +669,15 @@ def test_the_runner_hands_the_adopted_route_to_the_direct_paths(tmp_path, monkey
         d = write(folder / 'top.def', 'DESIGN top ;\n# repaired\nEND DESIGN\n')
         n = write(folder / 'top.nl.v', 'module top(); /* repaired */ endmodule\n')
         state = put(folder / 'state_out.json', {'def': str(d), 'nl': str(n)})
+        # the adopted candidate's own measurement of its output (cmp3 D15):
+        # OpenROAD.CheckAntennas after the repair, and its unrouted census
         return {'verdict': 'PASS', 'adopted': '32-cand01', 'adopted_state': str(state),
                 'baseline': {'hold_ws_min': -0.335, 'drv_count': 0},
-                'final': {'hold_ws_min': 0.326, 'drv_count': 0}, 'corners': CORNERS,
+                'final': {'hold_ws_min': 0.326, 'drv_count': 0, 'antenna_nets': 0,
+                          'antenna_pins': 0, 'antenna_state': 'cand01/02-checkantennas'},
+                'candidates': [{'candidate': '32-cand01',
+                                'repair_metrics': {'vibeic__prr__unrouted__added': 0}}],
+                'corners': CORNERS,
                 'final_supply_ownership': {'verdict': 'PASS'}}
     runner, project, pnr, result, calls = _runner_step(tmp_path, monkeypatch, report)
     assert result.status == 'PASS' and result.detail.startswith('ADOPTED 32-cand01'), result.detail
@@ -830,7 +836,11 @@ def test_the_runner_records_the_in_chain_repair_without_repairing_twice(tmp_path
         {'steps': {'21': 'librelane', '32': 'librelane'}})
     report = put(project / prr.REPORT_REL, {
         'verdict': 'PASS', 'site': 'after_route', 'adopted': '32-cand01',
-        'baseline': {'hold_ws_min': -0.3}, 'final': {'hold_ws_min': 0.3}})
+        'baseline': {'hold_ws_min': -0.3},
+        'final': {'hold_ws_min': 0.3, 'antenna_nets': 0, 'antenna_pins': 0,
+                  'antenna_state': 'cand01/02-checkantennas'},
+        'candidates': [{'candidate': '32-cand01',
+                        'repair_metrics': {'vibeic__prr__unrouted__added': 0}}]})
     put(project / 'reports/phase3/librelane_route_handoff.json',
         {'postroute_repair': {'report_sha256': contract.digest(report)}})
     monkeypatch.setattr(prr, 'run', lambda *a, **k: pytest.fail('repaired twice'))
@@ -860,7 +870,13 @@ def test_the_route_hook_hands_on_the_adopted_database_and_keeps_the_base(tmp_pat
         calls.update(kw)
         return put(project_ / prr.REPORT_REL, {'verdict': 'PASS', 'adopted': '32-postdrt-cand01',
                                                'adopted_state': str(adopted),
-                                               'selected_arm': 'postdrt'}) and \
+                                               'selected_arm': 'postdrt',
+                                               # its own measurement (cmp3 D15)
+                                               'final': {'antenna_nets': 0, 'antenna_pins': 0},
+                                               'candidates': [{
+                                                   'candidate': '32-postdrt-cand01',
+                                                   'repair_metrics': {
+                                                       'vibeic__prr__unrouted__added': 0}}]}) and \
             json.loads((project_ / prr.REPORT_REL).read_text())
     monkeypatch.setattr(prr, 'run_in_chain', run_in_chain)
     pdk = ring_fixture._pdk(tmp_path, ring=None)
