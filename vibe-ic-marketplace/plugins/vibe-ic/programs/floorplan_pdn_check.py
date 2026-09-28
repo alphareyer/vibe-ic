@@ -41,10 +41,18 @@ substance:
            ``+ USE GROUND``. The DEF role, not the net name, is authoritative.
        A bare ``pdn.done`` marker with NO strap evidence anywhere does
        NOT satisfy this — "no PG straps" is a real FAIL.
-  6. Built stripe census — only ``SHAPE STRIPE`` geometry on explicitly
-       POWER/GROUND special nets counts. A budget in apply mode blocks when
-       either role is short; without a budget, ambiguous role evidence is
-       reported as NOT_MEASURED instead of a clean built grid.
+  6. Built stripe census — only ``SHAPE STRIPE`` WIRES (a positive width and
+       two routing points) on explicitly POWER/GROUND special nets count; a
+       stripe-crossing via (``NEW Metal4 0 + SHAPE STRIPE ( x y ) via4_5``)
+       is not a strap. The census reads the DEF that carries the grid pdngen
+       built: the first DEF pnr.tcl writes after its ``pdngen`` (the direct
+       deck writes floorplan.def BEFORE the PDN, so that file never holds the
+       stripes), or floorplan.def when the deck runs no pdngen (the grid was
+       handed over, e.g. LibreLane state). A budget in apply mode blocks when
+       either role is short and is NOT_MEASURED when no such DEF can be read;
+       in advisory mode a declared supply role with no built stripe is
+       reported as NOT_MEASURED instead of a clean built grid, with or
+       without a budget.
 
 Verdicts
 --------
@@ -58,7 +66,9 @@ Verdicts
                  this gate is a real failure, never a vacuous pass.
 * WAIVED (rc=0) — waivers.json declares the step waived (ticket + reason).
 * NOT_MEASURED (rc=2) — apparent DEF stripe metal lacks a complete typed
-                        POWER/GROUND pair; no built PDN is certified.
+                        POWER/GROUND pair; no built PDN is certified. Also
+                        an apply-mode budget whose built-grid DEF could not
+                        be read.
 * SKIP  (rc=2) — project dir not found (operational, not a chip failure).
 
 chip-AGNOSTIC. No vendor / IC / tool-specific number is hard-coded; the
@@ -271,15 +281,78 @@ def _pdn_tcl_evidence(pnr: Path):
     return False, None, []
 
 
+#: A line-start `pdngen` or `write_def <path>` command in the deck that ran.
+_RE_DECK_GRID_OR_DEF = re.compile(
+    r"(?m)^[ \t]*(?:(pdngen)\b|write_def[ \t]+(\S+))")
+
+
+def _census_source_def(pnr: Path) -> tuple[Path | None, str]:
+    """`(def_path | None, basis)`: the DEF that carries the grid pdngen built.
+
+    The direct deck writes ``floorplan.def`` right after the floorplan, BEFORE
+    tapcell and ``pdngen`` -- MEASURED on a gf180 direct run: floorplan.def
+    held 0 STRIPE wires while the DEF written after pdngen held every strap.
+    So the order is read from pnr.tcl itself, the deck that ran, not assumed:
+
+      * pnr.tcl runs ``pdngen``: the first DEF it writes after that command.
+        When it writes none after, but did write floorplan.def before, the
+        only DEF on record predates the grid -> None (not measurable).
+      * pnr.tcl runs no ``pdngen``: the grid was not drawn by this deck; it
+        arrived in the handed-over floorplan.def (e.g. a LibreLane State).
+      * no pnr.tcl: floorplan.def, the step's own record.
+    Comment lines are removed first, so a Tcl remark cannot move the source.
+    """
+    floorplan = pnr / "floorplan.def"
+    try:
+        deck = (pnr / "pnr.tcl").read_text(errors="replace")
+    except OSError:
+        return floorplan, ("no pnr.tcl orders the stage DEFs; floorplan.def is "
+                           "the step's record")
+    written_before = []
+    after_pdngen = False
+    for step in _RE_DECK_GRID_OR_DEF.finditer(
+            re.sub(r"(?m)^[ \t]*#.*$", "", deck)):
+        if step.group(1):
+            after_pdngen = True
+            continue
+        name = step.group(2).strip("\"{}").rsplit("/", 1)[-1]
+        if not name.lower().endswith(".def"):
+            continue
+        if after_pdngen:
+            return pnr / name, f"pnr.tcl writes {name} first after pdngen"
+        written_before.append(name)
+    if not after_pdngen:
+        return floorplan, ("pnr.tcl runs no pdngen; the grid is the one handed "
+                           "over in floorplan.def")
+    if "floorplan.def" in written_before:
+        return None, ("pnr.tcl writes floorplan.def before pdngen and no DEF "
+                      "after it, so no DEF on record carries the built grid")
+    return floorplan, ("pnr.tcl runs pdngen but writes no DEF; floorplan.def "
+                       "is the only DEF on record")
+
+
 def _def_stripe_census(pnr: Path) -> dict:
-    """Count tool-written PG STRIPE shapes by supply role and layer."""
-    path = pnr / "floorplan.def"
+    """Count tool-written PG STRIPE wires by supply role and layer.
+
+    Only a WIRE is a strap: a path with a positive width and at least two
+    routing points, not ending in a via. OpenROAD writes every stripe
+    crossing as its own path on the lower layer --
+    ``NEW Metal4 0 + SHAPE STRIPE ( x y ) via4_5_...`` (width 0, one point,
+    a via name). MEASURED on a real post-placement DEF: a rail with 5 Metal4
+    wires and 25 such vias was credited as 30 Metal4 stripes.
+    """
+    path, basis = _census_source_def(pnr)
+    if path is None:
+        return {"status": "NOT_MEASURED", "count": None, "source": None,
+                "source_basis": basis}
     try:
         body = path.read_text(errors="replace")
     except OSError:
-        return {"status": "NOT_MEASURED", "count": None, "source": str(path)}
+        return {"status": "NOT_MEASURED", "count": None, "source": str(path),
+                "source_basis": basis}
     count = 0
     non_pg_stripes = 0
+    stripe_vias = 0
     by_role_layer = {"POWER": {}, "GROUND": {}}
     declared_roles = set()
     for net in _specialnet_records(body):
@@ -294,8 +367,16 @@ def _def_stripe_census(pnr: Path) -> dict:
         for index, match in enumerate(paths):
             end = paths[index + 1].start() if index + 1 < len(paths) else len(net)
             segment = net[match.end():end].split(";", 1)[0]
-            if re.search(r"\bSHAPE\s+STRIPE\b", segment, re.I):
+            if not re.search(r"\bSHAPE\s+STRIPE\b", segment, re.I):
+                continue
+            width = re.match(r"\s*(\d+(?:\.\d+)?)(?!\S)", segment)
+            points = list(re.finditer(r"\([^()]*\)", segment))
+            tail = segment[points[-1].end():].split() if points else []
+            if (width and float(width.group(1)) > 0 and len(points) >= 2
+                    and (not tail or tail[0].startswith("+"))):
                 shapes.append(match.group(1))
+            else:
+                stripe_vias += 1
         if role in by_role_layer:
             count += len(shapes)
             for layer in shapes:
@@ -307,7 +388,9 @@ def _def_stripe_census(pnr: Path) -> dict:
     return {"status": "MEASURED", "count": count,
             "by_role_layer": by_role_layer,
             "declared_roles": sorted(declared_roles),
-            "non_pg_stripes": non_pg_stripes, "source": str(path)}
+            "non_pg_stripes": non_pg_stripes,
+            "stripe_vias_not_counted": stripe_vias,
+            "source": str(path), "source_basis": basis}
 
 
 def _complete_budget_rows(budget: dict) -> list[dict] | None:
@@ -651,24 +734,34 @@ def main(argv=None) -> int:
         findings.append({
             "severity": "FAIL" if blocking else "ADVISORY",
             "rule": "PDN_DEF_STRAP_SHORTFALL",
-            "message": (f"floorplan DEF has {census['count']} PG STRIPE shape(s); "
+            "message": (f"{Path(census['source']).name} has {census['count']} "
+                        "PG STRIPE wire(s); "
                         f"the {budget.get('mode', 'advisory')} plan needs "
                         f"at least {required}: {', '.join(shortfalls)}. "
                         "Tcl commands are not built metal."),
         })
         fail = fail or blocking
     elif census["status"] == "NOT_MEASURED":
-        findings.append({"severity": "ADVISORY", "rule": "PDN_DEF_STRAPS_NOT_MEASURED",
-                         "message": "floorplan DEF could not be read for strap census"})
+        # An apply-mode requirement on BUILT metal cannot pass on a DEF that
+        # was never read: that is not measured, never a clean pass.
+        findings.append({
+            "severity": "NOT_MEASURED" if apply_requested else "ADVISORY",
+            "rule": "PDN_DEF_STRAPS_NOT_MEASURED",
+            "message": ("no DEF carrying the built grid could be read for the "
+                        f"strap census: {census.get('source_basis')}")})
+        budget_unmeasured = budget_unmeasured or apply_requested
 
     role_totals = {
         role: sum(census.get("by_role_layer", {}).get(role, {}).values())
         for role in ("POWER", "GROUND")}
     # An advisory grid with a typed supply rail but no built metal cannot be
-    # certified, even when only one of the two roles was declared. A role-free
-    # legacy DEF with no PG shapes remains distinguishable from that evidence.
+    # certified, even when only one of the two roles was declared, and whether
+    # or not a budget candidate exists: a budget's per-layer shortfalls stay
+    # advisory, but a budget never turns a declared rail with zero metal into
+    # a clean grid. A role-free legacy DEF with no PG shapes remains
+    # distinguishable from that evidence.
     role_undetermined = (census["status"] == "MEASURED"
-                         and not apply_requested and not candidate_ready
+                         and not apply_requested
                          and ((non_pg > 0 and census["count"] == 0)
                               or (census["count"] > 0 or
                                   bool(census["declared_roles"]))

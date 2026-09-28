@@ -9023,21 +9023,32 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
         _o45 = 8.0 if _p45 == 40.0 else round(_p45 / _PDN_STRAP_OFFSET_DIV, 3)
         _p4, _p5, _o4, _o5 = _p45, _p45, _o45, _o45
         if strap_override:
+            # CR-7 — an override only TIGHTENS the EM remedy drawn above
+            # (`_pdn_small.merge_override`); verbatim when no EM floor hit.
+            _sky_tlef = None
             for _layer, _target in (("met4", 4), ("met5", 5)):
                 _ov = next((v for k, v in strap_override.items()
                             if str(k).lower() == _layer), None)
-                if _ov:
-                    if _target == 4:
-                        _w4, _p4, _o4 = (float(_ov[k]) for k in
-                                          ("width", "pitch", "offset"))
-                    else:
-                        _w5, _p5, _o5 = (float(_ov[k]) for k in
-                                          ("width", "pitch", "offset"))
+                if not _ov:
+                    continue
+                if _sky_tlef is None:
+                    _sky_tlef = _read_pdk_text(
+                        getattr(pdk, "tech_lef", None), container) or ""
+                _cur = (_w4, _p4, _o4) if _target == 4 else (_w5, _p5, _o5)
+                _drawn = _pdn_small.merge_override(
+                    _layer, _ov, _cur if (_f4 or _f5) else None,
+                    spacing_um=_techlef_layer_spacing(_sky_tlef, _layer))
+                if _target == 4:
+                    _w4, _p4, _o4 = _drawn["width"], _drawn["pitch"], _drawn["offset"]
+                else:
+                    _w5, _p5, _o5 = _drawn["width"], _drawn["pitch"], _drawn["offset"]
         _em_note = ""
         if _f4 or _f5:
             _em_note = (
                 f"# EM-derived strap floor applied (pdn_em_sizing.json): "
-                f"met4 {_w4} met5 {_w5} pitch {_p45}\n")
+                f"met4 {_w4} met5 {_w5} pitch "
+                + (f"{_p4}" if _p4 == _p5 else f"met4 {_p4} met5 {_p5}")
+                + "\n")
         return (
             "# === v0.1.47 PDN: global connections + grid + ring ===\n"
             + _em_note +
@@ -9147,6 +9158,10 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
         # project's own measurement demands it. Pitch is re-derived with the
         # auto plan's documented spacing ratio when the wider strap needs it.
         _em_widened: List[str] = []
+        # The geometry before the EM floor, so a later budget override can
+        # tell which layers carry an EM remedy it must never loosen.
+        _pre_em_geom = [(st.get("width"), st.get("pitch"), st.get("offset"))
+                        for st in _stripes]
         if _emfl and _stripes:
             _stripes = [dict(st) for st in _stripes]
             for st in _stripes:
@@ -9312,11 +9327,39 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                     _em_widened.append(
                         f"{st['layer']} rail span pitch {_old_pitch}->{_new_pitch}um")
         if strap_override and _stripes:
+            # CR-7 — the budget override only TIGHTENS an EM remedy (pitch =
+            # min, width = max; `_pdn_small.merge_override`), and the record
+            # the deck already wrote into em_floor["applied"] is rewritten to
+            # the geometry actually drawn, keeping both inputs beside it.
             _stripes = [dict(st) for st in _stripes]
-            for st in _stripes:
+            for st, _pre in zip(_stripes, _pre_em_geom):
                 _ov = strap_override.get(str(st.get("layer")))
-                if _ov:
-                    st.update({k: _ov[k] for k in ("width", "pitch", "offset")})
+                if not _ov:
+                    continue
+                _lk = str(st.get("layer")).lower()
+                _em_geom = (None if (st.get("width"), st.get("pitch"),
+                                     st.get("offset")) == _pre
+                            else (st.get("width"), st.get("pitch"),
+                                  st.get("offset") or 0.0))
+                _drawn = _pdn_small.merge_override(
+                    str(st.get("layer")), _ov, _em_geom,
+                    spacing_um=_techlef_layer_spacing(_tlef_txt or "",
+                                                      str(st.get("layer"))),
+                    routing_fraction_max=float((straps or {}).get(
+                        "max_routing_fraction", 0.5)))
+                st.update({k: _drawn[k] for k in ("width", "pitch", "offset")})
+                if _em_geom is not None and isinstance(em_floor, dict):
+                    for _row in em_floor.get("applied", []):
+                        if str(_row.get("layer", "")).lower() != _lk:
+                            continue
+                        _row.update({
+                            "pitch_um": st["pitch"], "width_um": st["width"],
+                            "width_kept": (_pre[0] is not None and
+                                           float(st["width"]) == float(_pre[0])),
+                            "offset_um": st["offset"],
+                            "pitch_source": _drawn["pitch_source"],
+                            "em_remedy": _drawn["em_remedy"],
+                            "budget_override": _drawn["budget_override"]})
         if isinstance(plan_out, dict):
             plan_out.update({
                 "power_net": pwr, "ground_net": gnd,
@@ -37147,6 +37190,7 @@ def _prepare_librelane_floorplan_for_route(
         generic_pnr_tcl: str, modes: Dict[str, str],
         io_view_discover=_discover_padring_io_views,
         placement: Optional[Dict[str, Any]] = None,
+        strap_override: Optional[Mapping[str, Mapping[str, Any]]] = None,
         ) -> Tuple[StepResult, Optional[str]]:
     """Steps 15/15.5ic through LibreLane, handed to the direct routing deck.
 
@@ -37165,6 +37209,12 @@ def _prepare_librelane_floorplan_for_route(
     tie-low cell. The final ODB/DEF are handed to `librelane_placed.odb` /
     `placed.def`, and the deck is `librelane_contract.placement_consumer_tcl`:
     `read_db` of that ODB, then the direct deck from CTS on.
+
+    ``strap_override`` is the applied CR-7 budget pitch. With step 15 on
+    LibreLane nothing would draw it -- the grid comes from the image's
+    PDN_CFG (`emit_pdn_cfg`) and the direct deck's PDN block is elided -- while
+    the core was already floored on it, so it is refused by name
+    (`PDN_BUDGET_OVERRIDE_NOT_WIRED`) before any tool runs.
     """
     import librelane_contract as _ll
     t0 = time.time()
@@ -37194,6 +37244,16 @@ def _prepare_librelane_floorplan_for_route(
         return _fail("LL_FLOORPLAN_PADRING_SPLIT_UNSUPPORTED",
                      "LibreLane PadRing runs between Floorplan and TapEndcap; "
                      "select 15.5ic=librelane with 15=librelane")
+    if modes["15"] == "librelane" and strap_override:
+        return _fail("PDN_BUDGET_OVERRIDE_NOT_WIRED",
+                     "input/pdn_budget_pitch_policy.json mode=apply sized the "
+                     "core on the budget strap pitch ("
+                     + ", ".join(f"{k}: pitch {v.get('pitch')}"
+                                 for k, v in sorted(strap_override.items()))
+                     + "), but step 15 on LibreLane draws the image's own "
+                     "PDN_CFG grid and elides the direct PDN block, so that "
+                     "pitch would never be built; select 15=direct or remove "
+                     "mode=apply")
     try:
         image = _ll.resolve_image(project)
     except _ll.Refusal as exc:
@@ -39576,7 +39636,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                 placement=({"spare_plan": spare_plan, "mode": _ll_pl_modes["17"],
                             "tie_lo": (f"{_tie_lo_cell}/{_tie_lo_pin}"
                                        if _tie_lo_cell else None)}
-                           if _ll_pl_modes["17"] != "direct" else None))
+                           if _ll_pl_modes["17"] != "direct" else None),
+                strap_override=_budget_override or None)
             if (pad_result.status == "PASS" and _ll_pl_modes["17"] != "direct"
                     and "LIBRELANE_PLACEMENT_CONSUMED" in (consumer_tcl or "")):
                 _merge_librelane_spare_record(

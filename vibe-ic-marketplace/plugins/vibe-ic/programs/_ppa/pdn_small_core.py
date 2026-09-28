@@ -68,6 +68,51 @@ def plan_for_core(project: Path, tech_lef_text: str | None,
                 design_input=str(policy.relative_to(project)) if policy.is_file() else None)
 
 
+def merge_override(layer: str, override: Mapping[str, Any],
+                   em_remedy: Sequence[float] | None, *,
+                   spacing_um: float | None = None,
+                   routing_fraction_max: float = 0.5) -> dict[str, Any]:
+    """The strap geometry a deck draws when a budget override meets the EM remedy.
+
+    The budget candidate is sized from the PDK strap, before any EM floor, so
+    applying it verbatim could replace a measured EM remedy with a sparser
+    pitch or a narrower width. It may only TIGHTEN that remedy: the pitch is
+    ``min(override, EM)``, the width ``max(override, EM)``, and the offset is
+    the one that belongs to the winning pitch. With no EM remedy on the layer
+    (``em_remedy`` None) the override is drawn verbatim, which is what the
+    pre-route EM sweep's candidates rely on.
+
+    A width from one plan with a pitch from the other is a pair neither plan
+    checked; it must satisfy the same legality rule `plan` uses
+    (``max(2*(width+spacing), 2*width/routing_fraction_max)``) or it is refused
+    by name -- pdngen would otherwise emit no grid for it.
+    """
+    ow, op, oo = (float(override[k]) for k in ("width", "pitch", "offset"))
+    budget = {"width_um": ow, "pitch_um": op, "offset_um": oo}
+    if em_remedy is None:
+        return {"width": ow, "pitch": op, "offset": oo,
+                "pitch_source": "budget_override", "budget_override": budget,
+                "em_remedy": None}
+    ew, ep, eo = (float(v) for v in em_remedy)
+    width = max(ow, ew)
+    pitch, offset, source = ((op, oo, "budget_override") if op <= ep
+                             else (ep, eo, "em_remedy"))
+    if (width, pitch) not in ((ow, op), (ew, ep)):
+        space = float(spacing_um or 0.0)
+        if not 0 < routing_fraction_max <= 1:
+            raise ValueError(f"PDN_BUDGET_EM_CONFLICT: {layer}: routing budget "
+                             f"{routing_fraction_max} invalid")
+        legal = max(2 * (width + space), 2 * width / routing_fraction_max)
+        if pitch + 1e-9 < legal:
+            raise ValueError(
+                f"PDN_BUDGET_EM_CONFLICT: {layer}: the EM remedy needs width "
+                f"{width:g} um and the budget needs pitch {pitch:g} um, but that "
+                f"width needs pitch >= {legal:g} um")
+    return {"width": width, "pitch": pitch, "offset": offset,
+            "pitch_source": source, "budget_override": budget,
+            "em_remedy": {"width_um": ew, "pitch_um": ep, "offset_um": eo}}
+
+
 def plan(straps: Sequence[Mapping[str, Any]], *, core_w_um: float,
          core_h_um: float, current_A: float | None,
          jmax_A_per_um: Mapping[str, float],
