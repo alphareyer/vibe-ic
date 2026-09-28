@@ -783,6 +783,31 @@ def audit(project: Path) -> AuditResult:
     if is_inconclusive and (non_equiv in (None, 0)):
         res.inconclusive = True
         res.passed = False
+        # What the zero means depends on the producer. A record carrying a
+        # `bmc` block comes from lec_run's search from reset (FX_LEC_BMC_CEX):
+        # the field is then a MEASURED 0 to the stated depth, or null when
+        # the search did not run. A record without one comes from a producer
+        # that wrote the field as a constant, and the old sentence is true of
+        # it (review wave 7).
+        _bmc = lc.get("bmc") if isinstance(lc, dict) else None
+        if isinstance(_bmc, dict):
+            _zero_note = (
+                "NOTE on `non_equivalent_points` — ON THE YOSYS PATH it comes "
+                "from lec_run's bounded search from reset, not from the "
+                f"ladder: result {_bmc.get('result')}, "
+                f"{_bmc.get('depth_reached')} of {_bmc.get('depth_target')} "
+                f"cycle(s) after reset searched ({_bmc.get('reason')}). A "
+                "zero is 'no differing output within that bound', not a "
+                "proof beyond it; a genuine difference deeper than the bound "
+                "still surfaces as an UNPROVEN point, i.e. inside the count "
+                "above.")
+        else:
+            _zero_note = (
+                "NOTE on `non_equivalent_points: 0` — ON THE YOSYS PATH that "
+                "zero is not evidence: no pass in yosys's passes/equiv emits "
+                "a counterexample, and lec_run.py hardcodes that field to 0 "
+                "for this tool, so a genuine difference surfaces as an "
+                "UNPROVEN point, i.e. inside the count above.")
         res.findings.append(Finding(
             rule="LEC_INCONCLUSIVE_NONCONVERGENCE", severity="WARNING",
             message=("LEC verdict is INCONCLUSIVE — a completed equivalence "
@@ -791,14 +816,9 @@ def audit(project: Path) -> AuditResult:
                      "INCONCLUSIVE, NOT NOT_EQUIVALENT — a disclosed "
                      "sequential-depth capability gap. Close with sign-off LEC "
                      "(Conformal/VC LEC), which handles deep sequential "
-                     "induction. NOTE on `non_equivalent_points: 0` — ON THE "
-                     "YOSYS PATH that zero is not evidence: no pass in yosys's "
-                     "passes/equiv emits a counterexample, and lec_run.py "
-                     "hardcodes that field to 0 for this tool, so a genuine "
-                     "difference surfaces as an UNPROVEN point, i.e. inside the "
-                     "count above. (A sign-off LEC report CAN carry a real "
-                     "count, and there the field means what it says.) Visible "
-                     "non-PASS (never a vacuous PASS)."),
+                     "induction. " + _zero_note + " (A sign-off LEC report "
+                     "CAN carry a real count, and there the field means what "
+                     "it says.) Visible non-PASS (never a vacuous PASS)."),
             file=LEC_JSON_REL))
         return res
 

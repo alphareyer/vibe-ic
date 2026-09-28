@@ -1,0 +1,607 @@
+
+ /----------------------------------------------------------------------------\
+ |  yosys -- Yosys Open SYnthesis Suite                                       |
+ |  Copyright (C) 2012 - 2026  Claire Xenia Wolf <claire@yosyshq.com>         |
+ |  Distributed under an ISC-like license, type "license" to see terms        |
+ \----------------------------------------------------------------------------/
+ Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]
+
+-- Executing script file `<project>/reports/lec_bmc_replay.ys' --
+
+1. Executing Verilog-2005 frontend: <project>/phase2/stage1/rtl/cal_bmc_rtl.v
+Parsing SystemVerilog input from `<project>/phase2/stage1/rtl/cal_bmc_rtl.v' to AST representation.
+Generating RTLIL representation for module `\cal_bmc'.
+Successfully finished Verilog frontend.
+
+2. Executing PREP pass.
+
+2.1. Executing HIERARCHY pass (managing design hierarchy).
+
+2.1.1. Analyzing design hierarchy..
+Top module:  \cal_bmc
+
+2.1.2. Analyzing design hierarchy..
+Top module:  \cal_bmc
+Removed 0 unused modules.
+
+2.2. Executing PROC pass (convert processes to netlists).
+
+2.2.1. Executing PROC_CLEAN pass (remove empty switches from decision trees).
+Cleaned up 0 empty switches.
+
+2.2.2. Executing PROC_RMDEAD pass (remove dead branches from decision trees).
+Marked 1 switch rules as full_case in process $proc$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:4$1 in module cal_bmc.
+Removed a total of 0 dead cases.
+
+2.2.3. Executing PROC_PRUNE pass (remove redundant assignments in processes).
+Removed 0 redundant assignments.
+Promoted 0 assignments to connections.
+
+2.2.4. Executing PROC_INIT pass (extract init attributes).
+
+2.2.5. Executing PROC_ARST pass (detect async resets in processes).
+
+2.2.6. Executing PROC_ROM pass (convert switches to ROMs).
+Converted 0 switches.
+<suppressed ~2 debug messages>
+
+2.2.7. Executing PROC_MUX pass (convert decision trees to multiplexers).
+Creating decoders for process `\cal_bmc.$proc$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:4$1'.
+     1/2: $0\hit[0:0]
+     2/2: $0\q[3:0]
+
+2.2.8. Executing PROC_DLATCH pass (convert process syncs to latches).
+
+2.2.9. Executing PROC_DFF pass (convert process syncs to FFs).
+Creating register for signal `\cal_bmc.\q' using process `\cal_bmc.$proc$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:4$1'.
+  created $dff cell `$procdff$14' with positive edge clock.
+Creating register for signal `\cal_bmc.\hit' using process `\cal_bmc.$proc$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:4$1'.
+  created $dff cell `$procdff$15' with positive edge clock.
+
+2.2.10. Executing PROC_MEMWR pass (convert process memory writes to cells).
+
+2.2.11. Executing PROC_CLEAN pass (remove empty switches from decision trees).
+Found and cleaned up 2 empty switches in `\cal_bmc.$proc$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:4$1'.
+Removing empty process `cal_bmc.$proc$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:4$1'.
+Cleaned up 2 empty switches.
+
+2.2.12. Executing OPT_EXPR pass (perform const folding).
+Optimizing module cal_bmc.
+
+2.3. Executing FUTURE pass.
+
+2.4. Executing OPT_EXPR pass (perform const folding).
+Optimizing module cal_bmc.
+
+2.5. Executing CHECK pass (checking for obvious problems).
+Checking module cal_bmc...
+Found and reported 0 problems.
+
+2.6. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \cal_bmc..
+Removed 0 unused cells and 6 unused wires.
+<suppressed ~1 debug messages>
+
+2.7. Executing OPT pass (performing simple optimizations).
+
+2.7.1. Executing OPT_EXPR pass (perform const folding).
+Optimizing module cal_bmc.
+
+2.7.2. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\cal_bmc'.
+Computing hashes of 8 cells of `\cal_bmc'.
+Finding duplicate cells in `\cal_bmc'.
+Removed a total of 0 cells.
+
+2.7.3. Executing OPT_MUXTREE pass (detect dead branches in mux trees).
+Running muxtree optimizer on module \cal_bmc..
+  Creating internal representation of mux trees.
+  Evaluating internal representation of mux trees.
+  Analyzing evaluation results.
+Removed 0 multiplexer ports.
+<suppressed ~6 debug messages>
+
+2.7.4. Executing OPT_REDUCE pass (consolidate $*mux and $reduce_* inputs).
+  Optimizing cells in module \cal_bmc.
+Performed a total of 0 changes.
+
+2.7.5. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\cal_bmc'.
+Computing hashes of 8 cells of `\cal_bmc'.
+Finding duplicate cells in `\cal_bmc'.
+Removed a total of 0 cells.
+
+2.7.6. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \cal_bmc..
+
+2.7.7. Executing OPT_EXPR pass (perform const folding).
+Optimizing module cal_bmc.
+
+2.7.8. Finished fast OPT passes. (There is nothing left to do.)
+
+2.8. Executing WREDUCE pass (reducing word size of cells).
+Removed top 3 bits (of 4) from port B of cell cal_bmc.$add$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:6$2 ($add).
+Removed top 1 bits (of 4) from port B of cell cal_bmc.$eq$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:6$3 ($eq).
+
+2.9. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \cal_bmc..
+
+2.10. Executing MEMORY_COLLECT pass (generating $mem cells).
+
+2.11. Executing OPT pass (performing simple optimizations).
+
+2.11.1. Executing OPT_EXPR pass (perform const folding).
+Optimizing module cal_bmc.
+
+2.11.2. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\cal_bmc'.
+Computing hashes of 8 cells of `\cal_bmc'.
+Finding duplicate cells in `\cal_bmc'.
+Removed a total of 0 cells.
+
+2.11.3. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \cal_bmc..
+
+2.11.4. Finished fast OPT passes.
+
+2.12. Executing SORT pass.
+
+2.13. Printing statistics.
+
+=== cal_bmc ===
+
+        +----------Local Count, excluding submodules.
+        | 
+       11 wires
+       23 wire bits
+        5 public wires
+        8 public wire bits
+        5 ports
+        8 port bits
+        8 cells
+        1   $add
+        2   $dff
+        1   $eq
+        4   $mux
+
+2.14. Executing CHECK pass (checking for obvious problems).
+Checking module cal_bmc...
+Found and reported 0 problems.
+
+3. Executing MEMORY_MAP pass (converting memories to logic and flip-flops).
+
+4. Executing FLATTEN pass (flatten design).
+
+5. Executing ASYNC2SYNC pass.
+
+6. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \cal_bmc..
+
+7. Executing SPLITNETS pass (splitting up multi-bit signals).
+
+8. Executing Liberty frontend: /foss/pdks/ciel/gf180mcu/versions/b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00.lib
+Imported 229 cell types from liberty file.
+<suppressed ~24 debug messages>
+
+9. Executing Verilog-2005 frontend: <project>/phase2/stage2/synth/netlist.v
+Parsing Verilog input from `<project>/phase2/stage2/synth/netlist.v' to AST representation.
+Generating RTLIL representation for module `\cal_bmc'.
+Successfully finished Verilog frontend.
+
+10. Executing HIERARCHY pass (managing design hierarchy).
+
+10.1. Analyzing design hierarchy..
+Top module:  \cal_bmc
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__dffq_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__aoi21_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__oai21_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__or4_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__nor3_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__and3_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__nor2_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__xnor2_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__and4_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__clkinv_1
+
+10.2. Analyzing design hierarchy..
+Top module:  \cal_bmc
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__dffq_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__aoi21_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__oai21_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__or4_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__nor3_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__and3_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__nor2_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__xnor2_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__and4_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__clkinv_1
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xor3_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xor3_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xor3_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xor2_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xor2_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xor2_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xnor3_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xnor3_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xnor3_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xnor2_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xnor2_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__tiel'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__tieh'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffsnq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffsnq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffsnq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffrsnq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffrsnq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffrsnq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffrnq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffrnq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffrnq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or4_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or4_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or3_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or3_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or3_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or2_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or2_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or2_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai222_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai222_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai222_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai221_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai221_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai221_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai211_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai211_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai211_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai33_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai33_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai33_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai32_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai32_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai32_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai31_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai31_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai31_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai22_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai22_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai22_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai21_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__oai21_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor4_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor4_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor4_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor3_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor3_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor2_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor2_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand4_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand4_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand4_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand3_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand3_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand3_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand2_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand2_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand2_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__mux4_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__mux4_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__mux4_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__mux2_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__mux2_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__mux2_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__latsnq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__latsnq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__latsnq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__latrsnq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__latrsnq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__latrsnq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__latrnq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__latrnq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__latrnq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__latq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__latq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__latq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__invz_16'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__invz_12'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__invz_8'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__invz_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__invz_3'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__invz_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__invz_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__inv_20'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__inv_16'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__inv_12'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__inv_8'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__inv_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__inv_3'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__inv_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__inv_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__icgtp_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__icgtp_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__icgtp_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__icgtn_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__icgtn_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__icgtn_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__hold'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__filltie'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__fillcap_64'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__fillcap_32'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__fillcap_16'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__fillcap_8'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__fillcap_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__fill_64'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__fill_32'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__fill_16'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__fill_8'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__fill_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__fill_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__fill_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__endcap'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dlyd_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dlyd_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dlyd_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dlyc_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dlyc_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dlyc_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dlyb_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dlyb_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dlyb_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dlya_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dlya_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dlya_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffsnq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffsnq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffsnq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffrsnq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffrsnq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffrsnq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffrnq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffrnq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffrnq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffnsnq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffnsnq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffnsnq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffnrsnq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffnrsnq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffnrsnq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffnrnq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffnrnq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffnrnq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffnq_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffnq_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__dffnq_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkinv_20'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkinv_16'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkinv_12'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkinv_8'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkinv_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkinv_3'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkinv_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkbuf_20'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkbuf_16'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkbuf_12'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkbuf_8'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkbuf_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkbuf_3'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkbuf_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__clkbuf_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__bufz_16'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__bufz_12'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__bufz_8'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__bufz_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__bufz_3'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__bufz_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__bufz_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__buf_20'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__buf_16'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__buf_12'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__buf_8'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__buf_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__buf_3'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__buf_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__buf_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi222_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi222_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi222_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi221_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi221_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi221_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi211_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi211_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi211_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi22_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi22_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi22_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi21_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi21_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__antenna'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and4_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and4_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and3_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and3_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and2_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and2_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and2_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__addh_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__addh_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__addh_1'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__addf_4'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__addf_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__addf_1'.
+Removed 219 unused modules.
+
+11. Executing MEMORY_MAP pass (converting memories to logic and flip-flops).
+
+12. Executing FLATTEN pass (flatten design).
+Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__dffq_1.
+Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__and3_1.
+Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__nor3_1.
+Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__xnor2_1.
+Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__aoi21_1.
+Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__nor2_1.
+Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__oai21_1.
+Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__clkinv_1.
+Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__and4_1.
+Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__or4_1.
+<suppressed ~20 debug messages>
+
+13. Executing ASYNC2SYNC pass.
+
+14. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \cal_bmc..
+Removed 11 unused cells and 41 unused wires.
+<suppressed ~18 debug messages>
+
+15. Executing SPLITNETS pass (splitting up multi-bit signals).
+
+16. Executing MITER pass (creating miter circuit).
+Creating miter cell "lec_bmc_miter" with gold cell "gold" and gate cell "gate".
+
+16.1. Executing FLATTEN pass (flatten design).
+<suppressed ~2 debug messages>
+
+16.2. Executing OPT_EXPR pass (perform const folding).
+Optimizing module lec_bmc_miter.
+<suppressed ~4 debug messages>
+Removed 2 unused cells and 10 unused wires.
+
+17. Executing HIERARCHY pass (managing design hierarchy).
+
+17.1. Analyzing design hierarchy..
+Top module:  \lec_bmc_miter
+
+17.2. Analyzing design hierarchy..
+Top module:  \lec_bmc_miter
+Removing unused module `\gate'.
+Removing unused module `\gold'.
+Removed 2 unused modules.
+LEC_BMC_DEPTH_BEGIN 2
+
+18. Executing SAT pass (solving SAT problems in the circuit).
+Using SAT solver `minisat`.
+
+Setting up time step 1:
+Import set-constraint for this timestep: \in_clk = 1'0
+Import set-constraint for this timestep: \in_en = 1'0
+Import set-constraint for this timestep: \in_rst = 1'1
+Final constraint equation: { \in_rst \in_en \in_clk } = 3'100
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 109 cells to SAT database.
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
+
+Setting up time step 2:
+Import set-constraint for this timestep: \in_clk = 1'0
+Import set-constraint for this timestep: \in_en = 1'1
+Import set-constraint for this timestep: \in_rst = 1'0
+Final constraint equation: { \in_rst \in_en \in_clk } = 3'010
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 109 cells to SAT database.
+Import proof-constraint: \trigger = 1'0
+Final proof equation: \trigger = 1'0
+
+Setting up time step 3:
+Import set-constraint for this timestep: \in_clk = 1'0
+Import set-constraint for this timestep: \in_en = 1'0
+Import set-constraint for this timestep: \in_rst = 1'1
+Final constraint equation: { \in_rst \in_en \in_clk } = 3'100
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 109 cells to SAT database.
+Import proof-constraint: \trigger = 1'0
+Final proof equation: \trigger = 1'0
+Import show expression: \in_rst
+Import show expression: \in_en
+Import show expression: \in_clk
+Import show expression: \trigger
+Import show expression: \gate_hit
+Import show expression: \gold_hit
+Import show expression: \gate_q[0]
+Import show expression: \gold_q[0]
+Import show expression: \gate_q[1]
+Import show expression: \gold_q[1]
+Import show expression: \gate_q[2]
+Import show expression: \gold_q[2]
+Import show expression: \gate_q[3]
+Import show expression: \gold_q[3]
+
+Solving problem with 5029 variables and 13276 clauses..
+SAT proof finished - model found: FAIL!
+
+   ______                   ___       ___       _ _            _ _ 
+  (_____ \                 / __)     / __)     (_) |          | | |
+   _____) )___ ___   ___ _| |__    _| |__ _____ _| | _____  __| | |
+  |  ____/ ___) _ \ / _ (_   __)  (_   __|____ | | || ___ |/ _  |_|
+  | |   | |  | |_| | |_| || |       | |  / ___ | | || ____( (_| |_ 
+  |_|   |_|   \___/ \___/ |_|       |_|  \_____|_|\_)_____)\____|_|
+
+
+  Time Signal Name                 Dec       Hex           Bin
+  ---- ------------------- ----------- --------- -------------
+  init \gate._30_.IQ1               --        --             x
+  init \gate._31_.IQ1               --        --             x
+  init \gate._32_.IQ1               --        --             x
+  init \gate._33_.IQ1               --        --             x
+  init \gate._34_.IQ1               --        --             x
+  init \gold.hit                    --        --             x
+  init \gold.q[0]                   --        --             x
+  init \gold.q[1]                   --        --             x
+  init \gold.q[2]                   --        --             x
+  init \gold.q[3]                   --        --             x
+  ---- ------------------- ----------- --------- -------------
+     1 \gate_hit                    --        --             x
+     1 \gate_q[0]                   --        --             x
+     1 \gate_q[1]                   --        --             x
+     1 \gate_q[2]                   --        --             x
+     1 \gate_q[3]                   --        --             x
+     1 \gold_hit                    --        --             x
+     1 \gold_q[0]                   --        --             x
+     1 \gold_q[1]                   --        --             x
+     1 \gold_q[2]                   --        --             x
+     1 \gold_q[3]                   --        --             x
+     1 \in_clk                       0         0             0
+     1 \in_en                        0         0             0
+     1 \in_rst                       1         1             1
+     1 \trigger                      0         0             0
+  ---- ------------------- ----------- --------- -------------
+     2 \gate_hit                     0         0             0
+     2 \gate_q[0]                    0         0             0
+     2 \gate_q[1]                    0         0             0
+     2 \gate_q[2]                    0         0             0
+     2 \gate_q[3]                    0         0             0
+     2 \gold_hit                     0         0             0
+     2 \gold_q[0]                    0         0             0
+     2 \gold_q[1]                    0         0             0
+     2 \gold_q[2]                    0         0             0
+     2 \gold_q[3]                    0         0             0
+     2 \in_clk                       0         0             0
+     2 \in_en                        1         1             1
+     2 \in_rst                       0         0             0
+     2 \trigger                      0         0             0
+  ---- ------------------- ----------- --------- -------------
+     3 \gate_hit                     1         1             1
+     3 \gate_q[0]                    1         1             1
+     3 \gate_q[1]                    0         0             0
+     3 \gate_q[2]                    0         0             0
+     3 \gate_q[3]                    0         0             0
+     3 \gold_hit                     0         0             0
+     3 \gold_q[0]                    1         1             1
+     3 \gold_q[1]                    0         0             0
+     3 \gold_q[2]                    0         0             0
+     3 \gold_q[3]                    0         0             0
+     3 \in_clk                       0         0             0
+     3 \in_en                        0         0             0
+     3 \in_rst                       1         1             1
+     3 \trigger                      1         1             1
+
+ERROR: Called with -verify and proof did fail!

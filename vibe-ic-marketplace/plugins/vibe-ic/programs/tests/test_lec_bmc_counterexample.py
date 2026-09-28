@@ -31,6 +31,10 @@ XDC_LOG = CAL / "lec_bmc_xdc_negative.log"
 RSYNC_LOG = CAL / "lec_bmc_rsync_negative.log"
 RSYNC_ZERO_TRACE = CAL / "lec_bmc_rsync_initzero_trace.log"
 PARTIAL_LOG = CAL / "lec_bmc_deadline_partial.log"
+REPLAY_CONFIRMED = CAL / "lec_bmc_replay_confirmed.log"
+PDX_CANDIDATE = CAL / "lec_bmc_pdx_candidate.log"
+PDX_REPLAY = CAL / "lec_bmc_replay_pdx_unconfirmed.log"
+INIT_NEGATIVE = CAL / "lec_bmc_init_negative.log"
 RESET = {"resets": [{"port": "rst", "polarity": "active_high",
                      "asserted": 1}],
          "clock": "clk", "source": "test"}
@@ -43,18 +47,24 @@ UNCLOSED = {"proven": 3, "unproven": 2, "total": 5, "equivalent": False,
             "unproven_cells": ["\\hit"], "verdict_explanation": "x"}
 
 
-def _replay(monkeypatch, log: Path, rc: int, oom=(0, 0)):
+def _replay(monkeypatch, log: Path, rc: int, oom=(0, 0), replay=None):
     """The container run, reduced to what the tool writes: its log, at the
     path the command names (`-l`, also handed to the supervisor), and the
-    container's OOM counter before and after."""
+    container's OOM counter before and after. A candidate model is replayed
+    in a second run (`lec_bmc_replay.ys`), which writes `replay`."""
     seen = []
     counts = iter(oom)
     monkeypatch.setattr(lec_run, "probe_cgroup_memory", lambda c, *a: {
         "oom_kills": next(counts), "memory_max_bytes": 4 << 30})
 
     def fake(container, cmd, timeout=120, *, marker=None, log_path=None, **_kw):
-        seen.append({"cmd": cmd, "timeout": timeout, "marker": marker})
+        seen.append({"cmd": cmd, "timeout": timeout, "marker": marker,
+                     "script": Path(marker).read_text() if marker else ""})
         assert str(Path(log_path).resolve()) in cmd
+        if str(marker).endswith("lec_bmc_replay.ys"):
+            assert replay is not None, "a replay was run that the test did not expect"
+            shutil.copyfile(replay, log_path)
+            return lec_run.subprocess.CompletedProcess(cmd, 1, "", "")
         shutil.copyfile(log, log_path)
         return lec_run.subprocess.CompletedProcess(cmd, rc, "", "")
     monkeypatch.setattr(lec_run, "_docker", fake)
@@ -142,7 +152,7 @@ def test_a_gold_x_bit_is_not_a_differing_output():
 
 def test_non_equivalent_points_come_from_the_search_not_a_constant(
         tmp_path, monkeypatch):
-    _replay(monkeypatch, CEX_LOG, 1)
+    _replay(monkeypatch, CEX_LOG, 1, replay=REPLAY_CONFIRMED)
     bmc = lec_run.run_bmc("c", "PREFIX\n", RESET, tmp_path, None,
                           deadline_s=60, depth_target=16)
     report = lec_run.build_report(UNCLOSED, "cal_bmc", "netlist.v", None,
@@ -223,7 +233,8 @@ def test_a_killed_search_names_what_killed_it(tmp_path, monkeypatch, rc, oom,
 
 def test_the_script_asserts_the_declared_reset_then_compares(tmp_path):
     ys = lec_run.bmc_script("PREFIX\n", RESET, [1, 2], "t.vcd")
-    assert ys.startswith("PREFIX\nsetundef -zero -init gate\n"
+    assert ys.startswith("PREFIX\nsetattr -unset init gold/w:* gate/w:*\n"
+                         "setundef -zero -init gate\n"
                          "miter -equiv -flatten -make_outputs -ignore_gold_x gold gate")
     assert "-seq 2 -set-init-undef -set-at 1 in_rst 1 -prove-skip 1" in ys
     assert "-seq 3 " in ys
@@ -383,7 +394,7 @@ def test_the_summary_says_how_far_a_stopped_search_looked():
 
 def test_the_producers_own_explanation_says_what_the_search_found(tmp_path,
                                                                   monkeypatch):
-    _replay(monkeypatch, CEX_LOG, 1)
+    _replay(monkeypatch, CEX_LOG, 1, replay=REPLAY_CONFIRMED)
     bmc = lec_run.run_bmc("c", "PREFIX\n", RESET, tmp_path, None,
                           deadline_s=60, depth_target=16)
     report = lec_run.build_report(UNCLOSED, "cal_bmc", "netlist.v", None)
@@ -502,3 +513,120 @@ def test_lec_run_end_to_end_on_the_calibration_pair(rtl, top, gate, expect):
             assert report["bmc"]["result"] == "NONE_WITHIN_BOUND", report["bmc"]
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+# ── review wave 7: power-up is a don't-care on both sides ────────────────────
+
+def test_initialisers_are_dropped_on_both_sides_before_the_gate_is_zeroed():
+    """`sat` loads an `init` attribute before `-set-init-undef`, so a gold
+    `reg r = 8'hA5;` started DEFINED against a gate written `-noattr`
+    (no init): a false counterexample (MEASURED, cal_bmc_init_*). Both
+    sides' inits go first, as the ladder ignores them."""
+    ys = lec_run.bmc_script("P\n", RESET, [1], "t.vcd")
+    assert ys.index("setattr -unset init gold/w:* gate/w:*") \
+        < ys.index("setundef -zero -init gate") < ys.index("miter -equiv")
+    # The search on the init pair with the inits dropped: none to 16.
+    assert lec_run.parse_bmc_log(INIT_NEGATIVE.read_text(), 16)["result"] \
+        == "NONE_WITHIN_BOUND"
+
+
+def test_the_replay_pins_the_models_inputs_and_starts_both_sides_undefined():
+    inputs = lec_run.bmc_model_inputs(PDX_CANDIDATE.read_text(), 2)
+    assert inputs == {1: {"in_abort": "1", "in_clk": "0", "in_go": "0",
+                          "in_rst": "1"},
+                      2: {"in_abort": "1", "in_clk": "0", "in_go": "1",
+                          "in_rst": "0"}}
+    ys = lec_run.bmc_replay_script("P\n", inputs, 2)
+    assert "setundef" not in ys
+    assert "setattr -unset init gold/w:* gate/w:*" in ys
+    assert "-seq 2 -set-init-undef " in ys and "-prove-skip 1" in ys
+    assert "-set-at 1 in_rst 1'b1" in ys and "-set-at 2 in_go 1'b1" in ys
+
+
+def test_a_difference_only_the_all_zero_gate_start_makes_is_no_counterexample(
+        tmp_path, monkeypatch):
+    """cal_bmc_pdx: the reset reaches a one-hot FSM a cycle late and `abort`
+    defines gold bits first. From the gate's all-zero start the search
+    found `notrun` differing; replayed from an undefined power-up the
+    gate's `notrun` is x. NOT_RUN, named -- never a counterexample."""
+    seen = _replay(monkeypatch, PDX_CANDIDATE, 1, replay=PDX_REPLAY)
+    bmc = lec_run.run_bmc("c", "PREFIX\n", RESET, tmp_path, None,
+                          deadline_s=60, depth_target=16)
+    assert len(seen) == 2 and "setundef" not in seen[1]["script"]
+    assert "-set-at 2 in_go 1'b1" in seen[1]["script"]
+    assert bmc["result"] == "NOT_RUN", bmc
+    assert "invented start state" in bmc["reason"] and "notrun" in bmc["reason"]
+    assert bmc["replay"]["confirmed"] is False
+    assert lec_run.bmc_non_equivalent_points(bmc) is None
+    report = lec_run.build_report(UNCLOSED, "cal_bmc_pdx", "netlist.v", None,
+                                  bmc=bmc)
+    assert report["non_equivalent_points"] != 1
+
+
+def test_a_candidate_the_replay_confirms_is_the_counterexample(
+        tmp_path, monkeypatch):
+    seen = _replay(monkeypatch, CEX_LOG, 1, replay=REPLAY_CONFIRMED)
+    bmc = lec_run.run_bmc("c", "PREFIX\n", RESET, tmp_path, None,
+                          deadline_s=60, depth_target=16)
+    assert len(seen) == 2
+    assert bmc["result"] == "COUNTEREXAMPLE", bmc
+    assert bmc["replay"]["confirmed"] is True
+    assert bmc["counterexample"]["differing_outputs"] == ["hit"]
+
+
+def test_lec_run_end_to_end_on_the_power_up_pairs(monkeypatch):
+    """The real tool on the two review-wave-7 pairs. pdx: the ladder leaves
+    points and the search's candidate is refused by the replay. init: the
+    ladder proves it (it ignores init), so the search is forced here, and
+    finds nothing to its bound."""
+    lib = _liberty()
+    if shutil.which("yosys") is None or lib is None:
+        skip_not_verified(
+            "yosys or the gf180mcu standard-cell Liberty is not on this host",
+            "tools/ci/run_suite_in_eda_image.sh -- "
+            "programs/tests/test_lec_bmc_counterexample.py")
+    monkeypatch.setenv(lec_run.BMC_DEPTH_ENV, "16")
+    orig = lec_run._bmc_after_ladder
+    monkeypatch.setattr(lec_run, "_bmc_after_ladder", lambda parsed, *a, **k:
+                        orig(dict(parsed, unproven=max(
+                            1, parsed.get("unproven") or 0)), *a, **k))
+    for rtl, top, gate, result in (
+            ("cal_bmc_pdx_rtl.v", "cal_bmc_pdx", "cal_bmc_pdx_gate.v", "NOT_RUN"),
+            ("cal_bmc_init_rtl.v", "cal_bmc_init", "cal_bmc_init_gate.v",
+             "NONE_WITHIN_BOUND")):
+        root = Path(tempfile.mkdtemp(prefix="lecbmc_"))
+        try:
+            (root / "phase2/stage1/rtl").mkdir(parents=True)
+            (root / "phase2/stage2/synth").mkdir(parents=True)
+            shutil.copy(CAL / rtl, root / "phase2/stage1/rtl" / rtl)
+            shutil.copy(CAL / gate, root / "phase2/stage2/synth/netlist.v")
+            _l8(root, L8)
+            assert lec_run.main([str(root), "--top", top, "--container", "",
+                                 "--liberty", lib]) == 0
+            report = json.loads((root / "reports/lec.json").read_text())
+            assert report["bmc"]["result"] == result, report["bmc"]
+            assert report["non_equivalent_points"] != 1, report["bmc"]
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_gate_describes_the_searched_zero_not_a_hardcoded_one(tmp_path):
+    """Review wave 7 MINOR: lec_equivalence_check's (d2) note said lec_run
+    hardcodes `non_equivalent_points` to 0. A record carrying the search's
+    `bmc` block has a MEASURED zero to a stated depth, and is described as
+    such; a record without one keeps the old sentence (test_issue2050)."""
+    import lec_equivalence_check as gate
+    from test_issue2050_lec_fsm_recode_breaks_the_miter import _DEPTH_WALL
+    bmc = {"result": "NONE_WITHIN_BOUND", "depth_reached": 64,
+           "depth_target": 64, "reason": "no output differs within 64 "
+           "cycle(s) from reset", "counterexample": None}
+    r = lec_run.build_report(lec_run.parse_equiv_output(_DEPTH_WALL),
+                             "chip_top", "netlist.v", None, bmc=bmc)
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "lec.json").write_text(json.dumps(r))
+    (tmp_path / "reports" / "lec.rpt").write_text(_DEPTH_WALL)
+    msg = [f.message for f in gate.audit(tmp_path).findings
+           if f.rule == "LEC_INCONCLUSIVE_NONCONVERGENCE"][0]
+    assert "hardcodes that field to 0" not in msg
+    assert "bounded search from reset" in msg
+    assert "NONE_WITHIN_BOUND, 64 of 64 cycle(s) after reset searched" in msg

@@ -1072,6 +1072,54 @@ _register(Instrument(
         artefact=_read("lec_bmc_rsync_negative.log")),
 ))
 
+def _judge_bmc_replay(log: str) -> Optional[str]:
+    import lec_run
+    got = lec_run.bmc_replay_confirms(log)
+    if got["result"] != lec_run.BMC_COUNTEREXAMPLE:
+        return None
+    cex = got["counterexample"]
+    return (f"CONFIRMED cycle={cex['cycle']} "
+            f"outputs={','.join(cex['differing_outputs'])}")
+
+_register(Instrument(
+    name="lec_run::bmc_replay_confirms",
+    reads="yosys `sat -seq` replay of a candidate model, both sides from an "
+          "undefined power-up",
+    ruling="FX_LEC_BMC_CEX (review wave 7)",
+    owner="fxlock",
+    why=("The search starts the gate at all-zero, and all-zero may be a state "
+         "no gold state matches (a one-hot FSM whose reset arrives late). A "
+         "candidate model is a counterexample only if a DEFINED gate output "
+         "still differs when both sides start undefined; this reader decides "
+         "that, so it must confirm a real mismatch and refuse one that only "
+         "the invented start produced."),
+    judge=_judge_bmc_replay,
+    positive=Sample(
+        provenance=(
+            "yosys 0.69+ 4d572059c in vibeic-eda 0.3.83 (8HD-4, 2026-09-28), "
+            "lec_run's own `bmc_replay_script` for the model the search found "
+            "on calibration/cal_bmc_rtl.v against cal_bmc_gate_planted.v "
+            "(the planted or4 edit): the same inputs pinned at every step, "
+            "`init` dropped on both sides, both sides `-set-init-undef`, no "
+            "setundef. Predicted before the run: the reset defines both "
+            "counters, so gate `hit` is defined and differs at step 3. Paths "
+            "rewritten to <project>."),
+        artefact=_read("lec_bmc_replay_confirmed.log")),
+    expect="CONFIRMED cycle=3 outputs=hit",
+    negative=Sample(
+        provenance=(
+            "Same yosys and replay for the model the search found on "
+            "calibration/cal_bmc_pdx_rtl.v (reset registered once before the "
+            "FSM; `abort` fixes gold state bits before it arrives) against "
+            "its stock gf180mcuD netlist cal_bmc_pdx_gate.v (FSM re-encoded "
+            "one-hot). The search, gate at all-zero, reported `notrun` "
+            "differing at step 2 (calibration/lec_bmc_pdx_candidate.log); "
+            "replayed from an undefined power-up the gate's `notrun` is x, "
+            "so no defined output differs. Review wave 7 measured the same "
+            "false counterexample end to end (LEC_NOT_EQUIVALENT)."),
+        artefact=_read("lec_bmc_replay_pdx_unconfirmed.log")),
+))
+
 _register(Instrument(
     name="analog_resolution_stimulus::incremental_tone",
     reads="the emitted deck's decoded conversion-window plan",

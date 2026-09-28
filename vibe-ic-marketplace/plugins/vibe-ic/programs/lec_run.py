@@ -4697,16 +4697,27 @@ BMC_DEFAULT_DEADLINE_S = 900
 BMC_DEPTH_ENV = "VIBEIC_LEC_BMC_DEPTH"
 BMC_DEFAULT_DEPTH = 64
 #: Cycles the declared reset port is held asserted before outputs are
-#: compared. Nothing is assumed about the GOLD's power-up state: its
-#: registers start UNDEFINED (`-set-init-undef`), so an output whose state
-#: no reset has reached yet is x -- a don't-care (`-ignore_gold_x`) --
-#: however many cycles its reset takes to arrive (a synchroniser, a
-#: registered reset, no reset), and a re-encoded gate register is never
-#: paired with an invented gold value. The GATE starts at a DEFINED value
-#: (`setundef -zero -init gate`): an undefined gate state is x-pessimistic
-#: (a structural netlist propagates x where the RTL does not), and MEASURED
-#: on subservient that alone produced a gate-x vs gold-0 "difference" at
-#: step 2. The L-docs declare no reset LENGTH, so none is assumed either.
+#: compared. POWER-UP STATE IS A DON'T-CARE ON BOTH SIDES, as it is for the
+#: ladder (whose `equiv_*` rungs ignore `init`) and for the flow's gate
+#: netlist (written `-noattr`, so it carries no `init` at all):
+#:   * every `init` attribute is dropped on BOTH sides first
+#:     (`setattr -unset init`). `sat` loads an `init` attribute BEFORE
+#:     `-set-init-undef`, so a gold `reg r = 8'hA5;` would otherwise start
+#:     DEFINED against a gate that cannot know it (review wave 7, MEASURED:
+#:     a false counterexample on an LFSR with an initialiser and no reset);
+#:   * the GOLD then starts UNDEFINED (`-set-init-undef`): an output whose
+#:     state no reset has reached is x, a don't-care (`-ignore_gold_x`);
+#:   * the search starts the GATE at a DEFINED value (`setundef -zero -init
+#:     gate`), because an undefined gate state is x-pessimistic (MEASURED on
+#:     subservient: gate-x vs gold-0 at step 2) -- and so a model it finds is
+#:     only a CANDIDATE: all-zero may be a state no gold state matches (a
+#:     one-hot FSM whose reset arrives late, with an abort that fixes gold
+#:     bits first; MEASURED, review wave 7). A candidate is REPLAYED with the
+#:     same inputs from an undefined power-up on BOTH sides
+#:     (`bmc_replay_script`), and only a defined gate bit that differs from
+#:     a defined gold bit there -- the same value for every power-up -- is a
+#:     counterexample.
+#: The L-docs declare no reset LENGTH, so none is assumed either.
 BMC_RESET_CYCLES = 1
 BMC_MITER = "lec_bmc_miter"
 _BMC_DEPTH_MARK = "LEC_BMC_DEPTH_BEGIN"
@@ -4877,7 +4888,8 @@ def bmc_script(prefix: str, reset: Dict, depths: List[int],
     # anything (`-enable_undef`; `-set-def-inputs` keeps the inputs 0/1).
     # MEASURED: `-ignore_gold_x` WITHOUT `-enable_undef` masked a real
     # mismatch; neither flag reads a synthesised don't-care as a mismatch.
-    body = (f"setundef -zero -init gate\n"
+    body = (_BMC_NO_INIT
+            + f"setundef -zero -init gate\n"
             f"miter -equiv -flatten -make_outputs -ignore_gold_x "
             f"gold gate {BMC_MITER}\n"
             f"hierarchy -top {BMC_MITER}\n")
@@ -4888,6 +4900,70 @@ def bmc_script(prefix: str, reset: Dict, depths: List[int],
                  f"-prove-skip {BMC_RESET_CYCLES} -prove trigger 0 "
                  f"-show-ports -dump_vcd {shlex.quote(vcd_path)} {BMC_MITER}\n")
     return prefix + body
+
+
+#: Power-up is a don't-care on both sides: no `init` attribute survives.
+_BMC_NO_INIT = "setattr -unset init gold/w:* gate/w:*\n"
+
+
+def bmc_model_inputs(text: str, cycle: int) -> Dict[int, Dict[str, str]]:
+    """The miter inputs (`in_*`) of the model a `bmc_script` log found, per
+    `sat` time step up to `cycle`: what the replay pins."""
+    fail = list(_BMC_FAIL_RE.finditer(text or ""))
+    if not fail:
+        return {}
+    table = text[fail[-1].end():]
+    nxt = _BMC_MARK_RE.search(table)
+    table = table[:nxt.start()] if nxt else table
+    steps: Dict[int, Dict[str, str]] = {}
+    for row in _BMC_ROW_RE.finditer(table):
+        t, name, bits = int(row.group(1)), row.group(2), row.group(3)
+        if t <= cycle and name.startswith("in_") and set(bits) <= set("01"):
+            steps.setdefault(t, {})[name] = bits
+    return steps
+
+
+def bmc_replay_script(prefix: str, inputs: Dict[int, Dict[str, str]],
+                      cycle: int) -> str:
+    """Replay a candidate model: the same inputs at every step, BOTH sides
+    from an undefined power-up (no `setundef`), read by `parse_bmc_log`. A
+    gate bit that is defined here has that value for every power-up."""
+    pins = " ".join(f"-set-at {t} {name} {len(bits)}'b{bits}"
+                    for t in sorted(inputs)
+                    for name, bits in sorted(inputs[t].items()))
+    return (prefix + _BMC_NO_INIT
+            + f"miter -equiv -flatten -make_outputs -ignore_gold_x "
+            f"gold gate {BMC_MITER}\n"
+            f"hierarchy -top {BMC_MITER}\n"
+            f"log {_BMC_DEPTH_MARK} {cycle - BMC_RESET_CYCLES}\n"
+            f"sat -verify -enable_undef -set-def-inputs -seq {cycle} "
+            f"-set-init-undef {pins} -prove-skip {BMC_RESET_CYCLES} "
+            f"-prove trigger 0 -show-ports {BMC_MITER}\n")
+
+
+def bmc_replay_confirms(text: str) -> Dict:
+    """Read a `bmc_replay_script` log: COUNTEREXAMPLE only when, from an
+    undefined power-up on both sides, a DEFINED gate output still differs
+    from a defined gold output (`parse_bmc_log`'s own rule); anything else
+    is NOT_RUN, the candidate unconfirmed."""
+    import instrument_calibration as _cal
+    _cal.assert_calibrated("lec_run::bmc_replay_confirms")
+    marks = _BMC_MARK_RE.findall(text or "")
+    if not marks:
+        return {"result": BMC_NOT_RUN, "depth_reached": 0,
+                "reason": "the replay wrote no log"}
+    return parse_bmc_log(text, int(marks[-1]))
+
+
+def _bmc_depth_completed(text: str) -> int:
+    """The deepest rung of a `bmc_script` log that completed with no model."""
+    marks = list(_BMC_MARK_RE.finditer(text or ""))
+    done = 0
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+        if _BMC_OK_RE.search(text[m.end():end]):
+            done = int(m.group(1))
+    return done
 
 
 def parse_bmc_log(text: str, depth_target: int) -> Dict:
@@ -4993,25 +5069,33 @@ def run_bmc(container: str, prefix: str, reset: Dict, reports_dir: Path,
                                                 BMC_DEFAULT_DEPTH)
     ys, log = reports_dir / "lec_bmc.ys", reports_dir / "lec_bmc.log"
     vcd = reports_dir / "lec_bmc_cex.vcd"
-    for stale in (log, vcd):
+    rys, rlog = (reports_dir / "lec_bmc_replay.ys",
+                 reports_dir / "lec_bmc_replay.log")
+    for stale in (log, vcd, rlog):
         stale.unlink(missing_ok=True)
-    ys.write_text(bmc_script(prefix, reset, bmc_depth_schedule(depth_target),
-                             str(vcd.resolve())), encoding="utf-8")
-    cmd = (f"yosys -q -l {shlex.quote(str(log.resolve()))} "
-           f"-s {shlex.quote(str(ys.resolve()))} >/dev/null 2>&1")
-    if workdir:
-        cmd = f"cd {shlex.quote(workdir)} && " + cmd
-    # The deadline is the in-container `timeout`. The marked path supervises
-    # the container's own process tree: a `sat` solve writes nothing for
-    # minutes and the host `docker exec` client idles, so a host-side monitor
-    # reads a working search as a stall (MEASURED: subservient, 347 s).
-    if _dw_mod() is not None:
-        cmd = _dw_mod().wrap_with_container_timeout(cmd, deadline_s)
+
+    def _yosys(script: str, ys_path: Path, log_path: Path, deadline: int):
+        ys_path.write_text(script, encoding="utf-8")
+        cmd = (f"yosys -q -l {shlex.quote(str(log_path.resolve()))} "
+               f"-s {shlex.quote(str(ys_path.resolve()))} >/dev/null 2>&1")
+        if workdir:
+            cmd = f"cd {shlex.quote(workdir)} && " + cmd
+        # The deadline is the in-container `timeout`. The marked path
+        # supervises the container's own process tree: a `sat` solve writes
+        # nothing for minutes and the host `docker exec` client idles, so a
+        # host-side monitor reads a working search as a stall (MEASURED:
+        # subservient, 347 s).
+        if _dw_mod() is not None:
+            cmd = _dw_mod().wrap_with_container_timeout(cmd, deadline)
+        return _docker(container, cmd, timeout=deadline,
+                       marker=str(ys_path.resolve()),
+                       log_path=log_path).returncode
+
     mem_before = probe_cgroup_memory(container)
     t0 = time.monotonic()
     try:
-        rc = _docker(container, cmd, timeout=deadline_s,
-                     marker=str(ys.resolve()), log_path=log).returncode
+        rc = _yosys(bmc_script(prefix, reset, bmc_depth_schedule(depth_target),
+                               str(vcd.resolve())), ys, log, deadline_s)
     except (subprocess.SubprocessError, OSError) as exc:
         return bmc_not_run(f"the search could not be launched: {exc}",
                            depth_target=depth_target, deadline_s=deadline_s)
@@ -5022,6 +5106,43 @@ def run_bmc(container: str, prefix: str, reset: Dict, reports_dir: Path,
                  and mem_before["oom_kills"] is not None else None)
     text = log.read_text(errors="replace") if log.is_file() else ""
     got = parse_bmc_log(text, depth_target)
+    replay = None
+    if got["result"] == BMC_COUNTEREXAMPLE:
+        # A candidate found from the gate's all-zero start: confirm it from
+        # an undefined power-up on both sides, with the same inputs.
+        cycle = got["counterexample"]["cycle"]
+        left = max(60, int(deadline_s - elapsed))
+        try:
+            rrc = _yosys(bmc_replay_script(prefix, bmc_model_inputs(text, cycle),
+                                           cycle), rys, rlog, left)
+        except (subprocess.SubprocessError, OSError) as exc:
+            rrc, rtext = None, ""
+            rgot = {"result": BMC_NOT_RUN, "reason": f"the replay could not "
+                                                     f"be launched: {exc}"}
+        else:
+            rtext = rlog.read_text(errors="replace") if rlog.is_file() else ""
+            rgot = bmc_replay_confirms(rtext)
+        elapsed = round(time.monotonic() - t0, 2)
+        confirmed = rgot["result"] == BMC_COUNTEREXAMPLE
+        replay = {"confirmed": confirmed, "rc": rrc, "log_path": str(rlog),
+                  "result": rgot["result"], "reason": rgot.get("reason")}
+        if confirmed:
+            got = dict(got, counterexample=dict(
+                got["counterexample"],
+                differing_outputs=rgot["counterexample"]["differing_outputs"]))
+        else:
+            got = {"result": BMC_NOT_RUN,
+                   "depth_reached": _bmc_depth_completed(text),
+                   "reason": (
+                       f"a model at {cycle - BMC_RESET_CYCLES} cycle(s) after "
+                       f"reset made output(s) "
+                       f"{', '.join(got['counterexample']['differing_outputs'])}"
+                       f" differ only from the gate's all-zero power-up: "
+                       f"replayed with the same inputs from an undefined "
+                       f"power-up on both sides, no defined gate output "
+                       f"differs ({rgot.get('reason')}), so the difference "
+                       f"depends on an invented start state and is no "
+                       f"counterexample; the search stops there")}
     if got["result"] == BMC_NONE_WITHIN_BOUND and rc != 0:
         got = {"result": BMC_NOT_RUN, "depth_reached": got["depth_reached"],
                "reason": f"yosys exited rc={rc} after the last rung"}
@@ -5040,7 +5161,8 @@ def run_bmc(container: str, prefix: str, reset: Dict, reports_dir: Path,
               "elapsed_s": elapsed, "reset": reset,
               "oom_kill_delta": oom_delta,
               "memory_max_bytes": mem_after["memory_max_bytes"],
-              "log_path": str(log), "counterexample": None}
+              "log_path": str(log), "counterexample": None,
+              "replay": replay}
     if got["result"] == BMC_COUNTEREXAMPLE:
         record["counterexample"] = dict(
             got["counterexample"],
