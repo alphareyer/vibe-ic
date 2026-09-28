@@ -20,6 +20,7 @@ import json
 import re
 import sys
 import tarfile
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -142,7 +143,9 @@ def _fake_executor(outcome: dict):
                 ref.write_text("\n".join(ref_words) + "\n")
             res["programs"][prog["id"]] = {
                 "build": {"ok": True, "size": 4096, "ref_size": 4096,
-                          "tohost": 100, "disassembly": str(d / "dut.dis")},
+                          "tohost": 100, "disassembly": str(d / "dut.dis"),
+                          "objdump_rc": 0, "nm_rc": 0, "nm_ref_rc": 0,
+                          "objcopy_rc": 0},
                 "ref": {"rc": ref_rc, "sig": str(ref) if ref else None}}
             for arm in job["arms"]:
                 for iv in job["init_patterns"]:
@@ -196,6 +199,48 @@ def test_the_verified_tarball_extracts_only_locked_files(tmp_path):
     assert root is not None and "3 locked file(s) verified" in why
     assert sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()) \
         == sorted(FILES)
+
+
+def test_fetch_refuses_an_oversize_stream_before_keeping_it(monkeypatch):
+    monkeypatch.setattr(I, "FETCH_MAX_BYTES", 1024, raising=False)
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def read(self, _size=-1):
+            return b"x" * 1025
+
+        read1 = read
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: Stream())
+    with pytest.raises(ValueError, match="byte ceiling"):
+        I.default_fetch("https://example.invalid/suite.tar.gz")
+
+
+def test_fetch_refuses_a_continuously_streaming_deadline(monkeypatch):
+    clock = [0.0]
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def read(self, _size=-1):
+            clock[0] += I.FETCH_DEADLINE_S / 3
+            return b"x"
+
+        read1 = read
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: Stream())
+    monkeypatch.setattr(I.time, "monotonic", lambda: clock[0])
+    with pytest.raises(TimeoutError, match="overall fetch deadline"):
+        I.default_fetch("https://example.invalid/suite.tar.gz")
 
 
 def test_no_network_makes_every_bound_case_not_measured(tmp_path):
@@ -291,6 +336,16 @@ def test_a_planted_compressed_parcel_is_caught():
 def test_a_clean_image_passes_the_guard():
     clean = (CAL / "isa_objdump_no_relax_negative.dis").read_text()
     assert I.objdump_guard(clean, allow_compressed=False) == []
+
+
+def test_empty_or_malformed_objdump_is_not_a_clean_image():
+    assert any("decoded instructions" in issue for issue in
+               I.objdump_guard("", allow_compressed=False))
+    assert any("decoded instructions" in issue for issue in
+               I.objdump_guard("objdump: failed to decode\n", allow_compressed=False))
+    partial = "   0:\t00000013\taddi\ta0,a0,0\n   4:\t123456\tbroken\n"
+    assert any("parsed 1 of 2" in issue for issue in
+               I.objdump_guard(partial, allow_compressed=False))
 
 
 def test_a_csr_instruction_and_an_oversized_image_are_caught():
@@ -411,6 +466,72 @@ def test_a_passing_suite_writes_pass_rows_and_the_coverage_line(tmp_path):
     assert "excluded from the instruction total: ecall, ebreak" in text
     assert "(parameter only); delivered-size subset at memsize 1024" in text
     assert (p / I.RECEIPT_REL).is_file()
+
+
+def test_completed_results_with_failed_executor_refuse_every_case(tmp_path):
+    p = _project(tmp_path)
+    completed = _fake_executor({"s-add": (WORDS, 0, HALT, WORDS),
+                                "s-fencei": (WORDS, 0, HALT, WORDS)})
+
+    def failed_after_write(job_path, work):
+        completed(job_path, work)
+        return 42, "container failed after results.json was written"
+
+    rec = I.produce(p, executor=failed_after_write, fetch=lambda _u: TARBALL,
+                    lock=_lock(), pol=ALLOW)
+    assert rec["executor_rc"] == 42
+    assert "rc 42" in rec["refusal"]
+    assert "container failed after" in rec["refusal"]
+    assert {r["verdict"] for r in rec["rows"]} == {"NOT_EXECUTED"}
+    assert all(not r["sim_executed"] for r in rec["rows"])
+
+
+def test_failed_objdump_rc_refuses_a_valid_looking_disassembly(tmp_path):
+    p = _project(tmp_path)
+    completed = _fake_executor({"s-add": (WORDS, 0, HALT, WORDS),
+                                "s-fencei": (WORDS, 0, HALT, WORDS)})
+
+    def failed_objdump(job_path, work):
+        result = completed(job_path, work)
+        path = Path(work) / "results.json"
+        doc = json.loads(path.read_text())
+        for prog in doc["programs"].values():
+            prog["build"]["objdump_rc"] = 127
+        path.write_text(json.dumps(doc))
+        return result
+
+    rec = I.produce(p, executor=failed_objdump, fetch=lambda _u: TARBALL,
+                    lock=_lock(), pol=ALLOW)
+    assert all(r["verdict"] == "NOT_EXECUTED" for r in rec["rows"])
+    assert all("objdump" in r["detail"] for r in rec["rows"])
+
+
+def test_inside_carries_failed_objdump_rc_into_build_record(tmp_path, monkeypatch):
+    work = tmp_path / "inside"
+    work.mkdir()
+    job = {"work": str(work), "march": "rv32i", "spike_isa": "rv32i_zicsr",
+           "reset_pc": 0, "rf_reserved_bytes": 0, "memsize_declared": 4096,
+           "arms": [], "init_patterns": [],
+           "programs": [{"id": "p", "judge": "tohost", "src": "p.S",
+                         "include_dirs": []}]}
+    job_path = work / "job.json"
+    job_path.write_text(json.dumps(job))
+
+    def tool(argv, _cwd, _log, **_kw):
+        name = argv[0]
+        if name == I.TOOLS["objdump"]:
+            return 127, "objdump: failed"
+        if name == I.TOOLS["nm"]:
+            return 0, ("80001000 T _end\n00000010 T tohost\n" if
+                       "ref.elf" in argv[-1] else
+                       "00001000 T _end\n00000010 T tohost\n")
+        return 0, ""
+
+    monkeypatch.setattr(I, "_run", tool)
+    assert I.inside(job_path) == 0
+    build = json.loads((work / "results.json").read_text())["programs"]["p"]["build"]
+    assert build["objdump_rc"] == 127
+    assert build["ok"] is False
 
 
 def test_a_mismatch_or_a_hang_fails_the_case(tmp_path):
