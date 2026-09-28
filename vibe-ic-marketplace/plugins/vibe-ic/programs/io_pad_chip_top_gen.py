@@ -1438,17 +1438,55 @@ def connect_bonded_ring_rails(
         supply_group: Sequence[Dict[str, object]], plan: Dict[str, object],
         pin_roles: Dict[str, Dict[str, Tuple[str, str]]],
         power_net: str, ground_net: str) -> None:
-    """Put every scheduled bonded rail on every pad's matching LEF pin.
+    """Put every sourced rail on every matching LEF pin.
 
-    The selected core pair and the supplemental PDK pads share ring rails.
-    Leaving their non-core pins open would turn catalogue reachability into a
-    false physical claim, even though a bridge cell exists in the PDK.
+    A PDK connector physically shorts its declared pin pairs. OpenROAD's
+    pad-ring builder requires each such pair to carry ONE logical net before
+    it joins touching filler shapes. The alias is therefore derived from the
+    connector's Verilog/LEF/CDL proof, with a single bond-fed source per
+    connected component; resistor-fed quiet rails remain separate nets.
     """
     core_ring = plan.get("core_rails_on_ring") or {}
     net_for_rail = {str(core_ring["power"]): power_net,
                     str(core_ring["ground"]): ground_net} if core_ring else {}
     net_for_rail.update({str(rail): str(rail) for rail in
                          (plan.get("ring_rail_bond_paths") or {})})
+    bonded = {str(core_ring["power"]): power_net,
+              str(core_ring["ground"]): ground_net} if core_ring else {}
+    for entry in supply_group:
+        if entry.get("is_supply_pad") and entry.get("kind") not in ("power", "ground"):
+            rail = str((entry.get("derivation") or {}).get("fed_rail") or "")
+            if rail:
+                bonded[rail] = str(entry["port"])
+    parent: Dict[str, str] = {}
+
+    def root(rail: str) -> str:
+        parent.setdefault(rail, rail)
+        if parent[rail] != rail:
+            parent[rail] = root(parent[rail])
+        return parent[rail]
+
+    for entry in supply_group:
+        if not entry.get("is_ring_connector"):
+            continue
+        for target, source in (entry.get("derivation") or {}).get("shorts", []):
+            parent[root(str(target))] = root(str(source))
+    groups: Dict[str, set] = {}
+    for rail in parent:
+        groups.setdefault(root(rail), set()).add(rail)
+    aliases = {}
+    for rails in groups.values():
+        sources = {bonded[rail] for rail in rails if rail in bonded}
+        if len(sources) != 1:
+            raise Refusal(
+                "RING_CONNECTOR_SOURCE_UNRESOLVED",
+                f"PDK connector shorts {sorted(rails)}, but the scheduled "
+                f"bond pads give {sorted(sources)} distinct source nets")
+        source_net = next(iter(sources))
+        for rail in rails:
+            net_for_rail[rail] = source_net
+            aliases[rail] = source_net
+    plan["ring_rail_net_aliases"] = dict(sorted(aliases.items()))
     for entry in supply_group:
         roles = pin_roles[str(entry["master"])]
         connections = dict(entry["supply_connections"])

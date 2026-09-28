@@ -59,16 +59,31 @@ def test_minimum_bond_pads_with_documented_connector_slices():
     assert "KEEP" not in no_connector[2]
 
 
-def test_wrapper_keeps_connector_rails_on_distinct_named_nets():
-    chosen = {"u_connector": {
-        "port": "io__bridge", "master": "io__bridge",
-        "supply_connections": {"RA": "VPWR", "RB": "KEEP"},
-        "is_ring_connector": True}}
+def test_wrapper_aliases_only_the_pdk_documented_connector_shorts():
+    source = {"kind": "power", "port": "VPWR", "master": "io__source",
+              "supply_connections": {"RA": "VPWR"},
+              "is_supply_pad": True}
+    connector = {"kind": "connector_0", "port": "io__bridge",
+                 "master": "io__bridge", "supply_connections": {},
+                 "is_ring_connector": True,
+                 "derivation": {"shorts": [("RB", "RA")]}}
+    plan = {"core_rails_on_ring": {"power": "RA", "ground": "RG"},
+            "ring_rail_bond_paths": {"RB": {"master": "io__bridge"},
+                                     "QUIET": {"master": "io__source"}}}
+    roles = {"io__source": {"RA": ("INOUT", "POWER"),
+                             "QUIET": ("INOUT", "POWER")},
+             "io__bridge": {"RA": ("INOUT", "POWER"),
+                             "RB": ("INOUT", "POWER")}}
+    G.connect_bonded_ring_rails([source, connector], plan, roles,
+                                "VPWR", "VGND")
+    assert connector["supply_connections"] == {"RA": "VPWR", "RB": "VPWR"}
+    assert source["supply_connections"]["QUIET"] == "QUIET"
+    assert plan["ring_rail_net_aliases"]["RB"] == "VPWR"
+    chosen = {"u_connector": connector}
     ordered = {s: ["u_connector"] if s == "S" else [] for s in G.SIDES}
     wrapper = G._emit_verilog("top", "core", ordered, chosen, [], ["VPWR"])
-    assert "wire KEEP;" in wrapper
-    assert ".RA(VPWR)" in wrapper and ".RB(KEEP)" in wrapper
-    assert "inout KEEP" not in wrapper
+    assert ".RA(VPWR)" in wrapper and ".RB(VPWR)" in wrapper
+    assert "wire RB;" not in wrapper
 
 
 def test_installed_io_pdk_has_complete_minimal_ring_sources():
@@ -116,3 +131,9 @@ def test_installed_io_pdk_has_complete_minimal_ring_sources():
     assert len(plan["supplemental_supply_pads"]) == 2
     assert len(plan["ring_connector_cells"]) == 2
     G.require_bonded_ring_rails(plan)
+    group = pair + plan["supplemental_supply_pads"] + plan["ring_connector_cells"]
+    G.connect_bonded_ring_rails(group, plan, roles, "VPWR", "VGND")
+    for entry in plan["ring_connector_cells"]:
+        for target, source in entry["derivation"]["shorts"]:
+            conns = entry["supply_connections"]
+            assert conns[target] == conns[source]
