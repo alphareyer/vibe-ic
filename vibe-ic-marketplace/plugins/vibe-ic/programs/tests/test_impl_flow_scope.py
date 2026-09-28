@@ -13,7 +13,6 @@ Owner ruling 2026-09-28: v1 is gf180mcuD, digital, no macros; analog is out
 """
 from __future__ import annotations
 
-import ast
 import json
 import hashlib
 import subprocess
@@ -150,6 +149,26 @@ def test_a_refusal_after_the_record_names_a_remedy_that_works(tmp_path):
     assert "run the default flow (no flag), which runs it" in str(early)
 
 
+@pytest.mark.parametrize("case", ["named_pdk", "auto_pdk", "macro", "analog_runner"])
+def test_gate_refusal_on_a_recorded_project_names_a_fresh_clone(tmp_path, case):
+    p = _make(tmp_path / case)
+    IF.write_record(p, "librelane", resolved_by="test")
+    runner = "analog_one_shot_runner" if case == "analog_runner" else "phase3_one_shot_runner"
+    argv = ["--librelane"]
+    if runner == "phase3_one_shot_runner":
+        argv += ["--pdk", "auto" if case == "auto_pdk" else
+                 "sky130A" if case == "named_pdk" else "gf180mcuD"]
+    if case == "macro":
+        macro = p / "input/pdk_local/vendor/m.lef"
+        macro.parent.mkdir(parents=True)
+        macro.write_text("MACRO m\nEND m\n")
+    cp = _run_main(runner, p, *argv)
+    assert cp.returncode == 2, cp.stderr[-2000:]
+    assert "fresh project clone" in cp.stderr
+    with pytest.raises(IF.ImplRefusal, match=IF.IMPL_MODE_CONFLICT):
+        IF.resolve(p, None)
+
+
 def test_phase3_backstop_refuses_with_a_report(monkeypatch, tmp_path, capsys):
     """The BACKSTOP behind the gate: phase 3, wired, with a named in-scope
     --pdk. Its resolver is stubbed to disagree -- the only way to reach the
@@ -216,21 +235,55 @@ def test_the_front_door_refuses_declared_analog_before_recording(
     assert not IF.record_path(p).exists()
 
 
-def test_the_front_door_books_phase1_revealed_analog_as_a_plan_row():
-    """After Phase 1 the mode is recorded: the refusal is a plan row and the
-    run halts every later phase and still writes its report tail -- no bare
-    return. One decision: it reads the front door's own `run_analog`."""
-    tree = ast.parse((PROGRAMS / "vibe_ic_one_shot_runner.py").read_text())
-    main = next(n for n in tree.body
-                if isinstance(n, ast.FunctionDef) and n.name == "main")
-    body = main.body
-    i = next(k for k, st in enumerate(body)
-             if isinstance(st, ast.Assign)
-             and ast.unparse(st.targets[0]) == "run_analog")
-    assert "_need_analog" in ast.unparse(body[i].value)
-    nxt = ast.unparse(body[i + 1])
-    assert "_impl_flow.analog_scope_refusal(project, run_analog)" in nxt
-    guard = ast.unparse(body[i + 2])
-    assert "plan.append(('analog', f'REFUSED-" in guard
-    assert "halted_at = 'analog'" in guard
-    assert "return" not in guard
+def test_phase1_revealed_analog_refusal_reaches_the_report_tail(
+        monkeypatch, tmp_path, capsys):
+    """The real front door must stop dispatch and publish the named refusal."""
+    import ai_signed_judgement as AI
+    import vibe_ic_one_shot_runner as V
+
+    project = _make(tmp_path / "revealed")
+    spawned = []
+    monkeypatch.setattr(IF, "WIRED_RUNNERS",
+                        frozenset({"vibe_ic_one_shot_runner"}))
+    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k: (True, "docs"))
+    monkeypatch.setattr(V, "_capture_container_image", lambda *a, **k: {})
+    monkeypatch.setattr(V, "_capture_pdk_revision", lambda *a, **k: {})
+    monkeypatch.setattr(V._pl, "emit_final_summary", lambda *a, **k: True)
+    monkeypatch.setattr(V._pl, "emit_steps_view",
+                        lambda *a, **k: {"status": "OK"})
+    monkeypatch.setattr(AI, "pending", lambda *a, **k: {})
+
+    def _spawn(label, runner, argv, env=None):
+        spawned.append(runner.name)
+        if runner.name == "phase1_one_shot_runner.py":
+            report = V._pl.report_path(project, "phase1_one_shot.json")
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text('{"verdict": "PASS"}\n')
+            analog = V._pl.analog_dir(project) / "analog_block_list.json"
+            analog.parent.mkdir(parents=True, exist_ok=True)
+            analog.write_text('{"blocks": ["a"]}\n')
+            return 0
+        return 2
+
+    monkeypatch.setattr(V, "_run_phase", _spawn)
+    argv = ["vibe_ic_one_shot_runner", str(project), "--no-dashboard",
+            "--librelane", "--pdk", "gf180mcuD"]
+    monkeypatch.setattr(sys, "argv", argv)
+    rc = V.main()
+    report = json.loads(V._pl.report_path(project,
+                                          "vibe_ic_one_shot.json").read_text())
+    assert rc != 0
+    assert report["verdict"] == "NOT_MEASURED"
+    assert any(IF.IMPL_ANALOG_UNSUPPORTED in reason
+               for reason in report["verdict_reasons"])
+    assert [row["name"] for row in report["phases"]] == [
+        "phase1", "phase2", "analog", "phase3", "mixed_signal"]
+    assert [row["verdict"] for row in report["phases"] if row["name"] == "analog"] == [
+        "REFUSED-IMPL_ANALOG_UNSUPPORTED"]
+    assert spawned == ["phase1_one_shot_runner.py"]
+    assert "fresh project clone" in capsys.readouterr().err
+
+    # A second invocation sees the record and must give a usable remedy too.
+    monkeypatch.setattr(sys, "argv", argv)
+    assert V.main() == 2
+    assert "fresh project clone" in capsys.readouterr().err

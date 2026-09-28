@@ -1494,9 +1494,12 @@ def main() -> int:
         return _impl_rc
     # llv1 W24: analog the INPUTS already declare is refused before the mode
     # is recorded, so the remedy it names (the default flow) still works.
-    _impl_early = _impl_flow.analog_scope_refusal(
-        project, _need_analog(project, args.skip_analog),
-        requested=_impl_flow.requested_from_args(args))
+    _impl_early = None
+    _impl_requested = _impl_flow.requested_from_args(args)
+    if _impl_requested is not None:
+        _impl_early = _impl_flow.analog_scope_refusal(
+            project, _need_analog(project, args.skip_analog),
+            requested=_impl_requested)
     if _impl_early is not None:
         print(f"REFUSED: {_impl_early}", file=sys.stderr)
         return 2
@@ -2004,12 +2007,11 @@ def main() -> int:
     run_analog = _need_analog(project, args.skip_analog)
     # llv1 W24: analog is out of --librelane v1 (decision 13). Analog the
     # inputs declared was refused before the mode was recorded (above); what
-    # Phase 1 revealed is refused here, AFTER the record: a plan row, and the
+    # Phase 1 revealed is refused here, AFTER the record: named phase rows, and the
     # run goes on to its report tail with every later phase halted.
     _impl_scope = _impl_flow.analog_scope_refusal(project, run_analog)
     if _impl_scope is not None:
         print(f"REFUSED: {_impl_scope}", file=sys.stderr)
-        plan.append(("analog", f"REFUSED-{_impl_scope.reason_class}", 2))
         halted_at = "analog"
 
     # ---------------- Top-module resolution (once, for BOTH phase 2 & 3) ------
@@ -2094,7 +2096,8 @@ def main() -> int:
         # downstream Phase 3 still proceeds (analog hardmacros land
         # via Step 14 floorplan in a future iteration).
     else:
-        _analog_row = ("analog", "SKIPPED", 0)
+        _analog_row = (("analog", f"REFUSED-{_impl_scope.reason_class}", 2)
+                       if _impl_scope is not None else ("analog", "SKIPPED", 0))
 
     # ---------------- Phase 2 ----------------
     if not halted_at:
@@ -2161,7 +2164,10 @@ def main() -> int:
             if verdict == "FAIL":
                 halted_at = "phase2"
     else:
-        plan.append(("phase2", "SKIPPED", 0))
+        if _impl_scope is not None:
+            plan.append(("phase2", f"REFUSED-{_impl_scope.reason_class}", 2))
+        else:
+            plan.append(("phase2", "SKIPPED", 0))
 
     plan.append(_analog_row)
 
@@ -2187,7 +2193,7 @@ def main() -> int:
     # ``audit_created`` and cannot count as evidence produced by the run it is
     # judging.  This pre-production is non-blocking: the A-track and the
     # Step-14 gate retain ownership of their own verdicts.
-    if halted_at != "phase1" and not _p3_skip_by_exit:
+    if halted_at not in ("phase1", "analog") and not _p3_skip_by_exit:
         _analog_stage_json = (project / "reports" / "analog"
                               / "stage_analog_compliance.json")
         _analog_stage_rc = _run_phase(
@@ -2341,7 +2347,7 @@ def main() -> int:
     # Its inputs are the analog hardmacro GDS/Verilog (A8) and the phase-3
     # sign-off GDS + gate netlist, so it runs only when BOTH tracks ran.
     _ms_dispatch = (run_analog and not args.skip_phase3 and not _p3_skip_by_exit
-                    and halted_at not in ("phase1", "phase2"))
+                    and halted_at not in ("phase1", "phase2", "analog"))
     if _ms_dispatch:
         _ms_json = (project / "reports" / "analog" / "mixed_signal"
                     / "top_lvs_run.json")

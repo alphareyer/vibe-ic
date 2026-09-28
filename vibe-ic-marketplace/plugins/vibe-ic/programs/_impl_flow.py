@@ -708,6 +708,13 @@ _SCOPE_REMEDY = "Remedy: run the default flow (no flag), which runs it."
 _SCOPE_REMEDY_RECORDED = ("Remedy: this project is now recorded as {impl!r}; "
                           "run the default flow (no flag) on a fresh project "
                           "clone, which runs it.")
+
+
+def _scope_remedy(project: Path) -> str:
+    """Name a default-flow route that the project's mode record permits."""
+    recorded = recorded_impl(project)
+    return (_SCOPE_REMEDY if recorded == IMPL_DEFAULT else
+            _SCOPE_REMEDY_RECORDED.format(impl=recorded))
 #: Where the flow's own A8 hard macros land (mirrors
 #: phase3_one_shot_runner._discover_local_macros).
 EMITTED_MACRO_ROOTS = ("phase3/analog/hardmacro", "analog/hardmacro")
@@ -735,14 +742,15 @@ def require_pdk_in_scope(impl: str, pdk_name: str, *,
             f"run's PDK is {pdk_name!r}. {remedy}")
 
 
-def require_no_macros(project: Path, impl: str) -> None:
+def require_no_macros(project: Path, impl: str, *,
+                      remedy: str = _SCOPE_REMEDY) -> None:
     macros = staged_macros(project)
     if impl != IMPL_DEFAULT and macros:
         raise ImplRefusal(
             IMPL_MACROS_UNSUPPORTED,
             f"{FLAG_FOR.get(impl, impl)} v1 implements designs without hard "
             f"macros; this design stages {len(macros)} macro view(s), e.g. "
-            f"{', '.join(macros[:3])}. {_SCOPE_REMEDY}")
+            f"{', '.join(macros[:3])}. {remedy}")
 
 
 def require_no_analog(impl: str, runs_analog: bool, why: str, *,
@@ -759,8 +767,10 @@ def refuse_out_of_scope(project: Path, args, *, runner: str) -> None:
     an explicitly named PDK, and staged macros. A PDK left to `auto` is
     judged where it is resolved (`scope_exit_after_pdk`)."""
     impl = normalise(requested_from_args(args))
+    remedy = _scope_remedy(project)
     if runner == "analog_one_shot_runner":
-        require_no_analog(impl, True, "the analog track was invoked")
+        require_no_analog(impl, True, "the analog track was invoked",
+                          remedy=remedy)
     if hasattr(args, "pdk"):
         named = str(getattr(args, "pdk") or "").strip()
         if named.lower() in ("", "auto"):
@@ -774,10 +784,11 @@ def refuse_out_of_scope(project: Path, args, *, runner: str) -> None:
                     f"{sorted(SUPPORTED_PDKS)} and this run leaves the PDK to "
                     f"`auto`. Remedy: name --pdk "
                     f"{sorted(SUPPORTED_PDKS)[0]}, or run the default flow "
-                    f"(no flag).")
+                    f"(no flag)"
+                    f"{' on a fresh project clone' if recorded_impl(project) != IMPL_DEFAULT else ''}.")
         else:
-            require_pdk_in_scope(impl, named)
-    require_no_macros(project, impl)
+            require_pdk_in_scope(impl, named, remedy=remedy)
+    require_no_macros(project, impl, remedy=remedy)
 
 
 def scope_refusal_after_pdk(project: Path,
@@ -804,10 +815,10 @@ def analog_scope_refusal(project: Path, runs_analog: bool, *,
     project's recorded mode is judged and the remedy says a fresh clone.
     """
     if requested is not None:
-        impl, remedy = normalise(requested), _SCOPE_REMEDY
+        impl = normalise(requested)
     else:
         impl = recorded_impl(project)
-        remedy = _SCOPE_REMEDY_RECORDED.format(impl=impl)
+    remedy = _scope_remedy(project)
     try:
         require_no_analog(impl, runs_analog,
                           "the design declares analog blocks", remedy=remedy)
