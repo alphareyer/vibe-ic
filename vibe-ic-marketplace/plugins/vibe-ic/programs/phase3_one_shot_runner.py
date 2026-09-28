@@ -63073,10 +63073,15 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # IR-drop sign-off still wrote no_repair_needed.flag. The timing-repair TCL
     # stays gated on `timing_repair_needed`, so a non-timing failure withholds the
     # certificate WITHOUT firing a repair that does not address it.
-    _single_corner_evidence = (
-        "CLEAN" if tns_zero else
-        "VIOLATED" if _repair_dec.post_route_timing_violation_measured(_sta_for_repair)
-        else "NOT_MEASURED")
+    # Parse the selected STA's complete setup/hold result. The same parser is
+    # used by the independent Step-32 status generator; TNS=0 alone is not a
+    # clean certificate when another path reports slack (VIOLATED).
+    try:
+        from postroute_timing_repair_status_gen import _parse_sta_for_violations
+        _single_corner_evidence = _parse_sta_for_violations(
+            _sta_for_repair.read_text(errors="replace"))["timing_measurement"]
+    except OSError:
+        _single_corner_evidence = "NOT_MEASURED"
     _repair_decision = _repair_dec.decide(
         mc_ocv_stance, tns_zero, project=project,
         single_corner_evidence=_single_corner_evidence)

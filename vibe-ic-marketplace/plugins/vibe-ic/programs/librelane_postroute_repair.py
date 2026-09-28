@@ -63,6 +63,8 @@ registry's declared ladder.
 """
 from __future__ import annotations
 
+import math
+
 import argparse
 import json
 import math
@@ -326,9 +328,16 @@ DOMAIN_VALUE = {
 def measured_repair_trigger(measurement: Dict[str, Any]) -> Dict[str, Any]:
     """Start a late repair only for a violation measured on its input route."""
     needed = ("setup_ws_min", "hold_ws_min", "drv_count")
-    missing = [key for key in needed
-               if not isinstance(measurement.get(key), (int, float))
-               or isinstance(measurement.get(key), bool)]
+    missing = []
+    for key in needed:
+        value = measurement.get(key)
+        if key == "drv_count":
+            valid = isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else:
+            valid = (isinstance(value, (int, float))
+                     and not isinstance(value, bool) and math.isfinite(value))
+        if not valid:
+            missing.append(key)
     violated = [key for key in needed if key not in missing and
                 (measurement[key] > 0 if key == "drv_count"
                  else measurement[key] < 0)]

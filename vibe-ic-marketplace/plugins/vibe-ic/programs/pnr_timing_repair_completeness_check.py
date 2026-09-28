@@ -232,22 +232,32 @@ def drv_sequence(text: str) -> Dict[str, Any]:
     sign-off report remains the authority for that verdict.
     """
     active = _strip_commented(text)
-    events = sorted(
-        (m.start(), kind, m.group(0))
-        for kind, rx in (
-            ("edit", re.compile(r"\b(?:repair_timing|repair_antennas)\b")),
-            ("repair", re.compile(r"\brepair_design\b")),
-            ("census", re.compile(r"\b(?:report_check_types|vic_census)\b")),
-        ) for m in rx.finditer(active))
+    # Commands may be nested in Tcl catch braces or separated by semicolons.
+    # An unanchored token search also accepts puts "report_check_types", which
+    # is merely a string and cannot have queried OpenROAD.
+    command = re.compile(
+        r"(?m)(?:^|[;{])\s*(repair_timing|repair_antennas|repair_design|"
+        r"report_check_types)\b([^\n;}]*)")
+    events = [(m.start(), m.group(1), m.group(2)) for m in command.finditer(active)]
     pending = None
-    for _, kind, token in events:
-        if kind == "edit":
-            pending = token
-        elif kind in ("repair", "census"):
+    axes = set()
+    for _, kind, options in events:
+        if kind in ("repair_timing", "repair_antennas"):
+            pending = kind
+            axes.clear()
+        elif kind == "repair_design":
             pending = None
+            axes.clear()
+        elif kind == "report_check_types" and pending:
+            axes.update(flag for flag in ("max_slew", "max_capacitance", "max_fanout")
+                        if re.search(rf"(?<!\S)-{flag}(?!\S)", options))
+            if len(axes) == 3:
+                pending = None
     return {"verdict": "FAIL" if pending else "PASS",
             "severity": "ADVISORY", "last_unchecked_edit": pending,
-            "event_count": len(events)}
+            "event_count": len(events),
+            "missing_axes": sorted({"max_slew", "max_capacitance", "max_fanout"} - axes)
+            if pending else []}
 
 
 def _sha256(path: Path) -> str:

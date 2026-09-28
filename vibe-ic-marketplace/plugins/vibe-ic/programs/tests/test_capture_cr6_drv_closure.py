@@ -42,7 +42,17 @@ def test_antenna_edit_without_a_later_drv_census_is_disclosed():
     assert result["verdict"] == "FAIL"
     assert result["last_unchecked_edit"] == "repair_antennas"
     assert _sequence(deck + "report_check_types -max_fanout -violators\n")[
-        "verdict"] == "PASS"
+        "verdict"] == "FAIL"
+    assert _sequence(deck +
+                     "report_check_types -max_slew -max_capacitance -violators\n"
+                     "report_check_types -max_fanout -violators\n")["verdict"] == "PASS"
+
+
+def test_drv_census_requires_executed_complete_three_axis_commands():
+    edit = "repair_timing -setup\n"
+    assert _sequence(edit + 'puts "report_check_types -max_slew -max_capacitance -max_fanout"\n')["verdict"] != "PASS"
+    assert _sequence(edit + "report_check_types -max_fanout -violators\n")["verdict"] != "PASS"
+    assert _sequence(edit + "# report_check_types -max_slew -max_capacitance -max_fanout\n")["verdict"] != "PASS"
 
 
 def test_clean_input_skips_late_repair_and_one_violation_runs():
@@ -51,6 +61,16 @@ def test_clean_input_skips_late_repair_and_one_violation_runs():
     assert _trigger(**dict(clean, drv_count=1))["action"] == "RUN"
     assert _trigger(**dict(clean, hold_ws_min=-0.01))["action"] == "RUN"
     assert _trigger(setup_ws_min=0.3, hold_ws_min=0.2)["action"] == "NOT_MEASURED"
+
+
+def test_invalid_numeric_measurements_cannot_certify_clean_route():
+    clean = {"setup_ws_min": 0.3, "hold_ws_min": 0.2, "drv_count": 0}
+    for key, value in (("setup_ws_min", float("nan")),
+                       ("hold_ws_min", float("inf")),
+                       ("drv_count", -1), ("drv_count", 0.5)):
+        result = _trigger(**dict(clean, **{key: value}))
+        assert result["action"] == "NOT_MEASURED", (key, result)
+        assert key in result["missing"]
 
 
 def test_direct_deck_emits_a_final_tool_drv_probe():
@@ -116,3 +136,25 @@ def test_missing_sta_is_not_a_measured_violation_or_a_clean_certificate():
         "timing_measurement") == "NOT_MEASURED"
     assert S._parse_sta_for_violations("tns -0.02\n")[
         "timing_measurement"] == "VIOLATED"
+
+
+def test_explicit_single_corner_violation_outranks_zero_tns():
+    report = "tns 0.00\nslack (VIOLATED) -0.05\n"
+    parsed = S._parse_sta_for_violations(report)
+    assert parsed["tns_zero"] is True
+    assert parsed["timing_measurement"] == "VIOLATED"
+    result = D.decide(None, parsed["tns_zero"], single_corner_evidence=parsed["timing_measurement"])
+    assert result["timing_repair_needed"] is True
+    assert result["repair_needed"] is True
+
+
+def test_status_consumer_withholds_clean_flag_on_zero_tns_violated_path(
+        tmp_path, monkeypatch):
+    sta = tmp_path / "phase3/stage3/sta/sta_spef_based.rpt"
+    sta.parent.mkdir(parents=True)
+    sta.write_text("tns 0.00\nslack (VIOLATED) -0.05\n")
+    monkeypatch.setattr(sys, "argv", ["status_gen", str(tmp_path)])
+    assert S.main() == 0
+    repair = tmp_path / "phase3/stage3/postroute_timing_repair"
+    assert not (repair / "no_repair_needed.flag").exists()
+    assert (repair / "repair_log.json").exists()

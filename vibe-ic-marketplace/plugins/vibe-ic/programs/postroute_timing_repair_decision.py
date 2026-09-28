@@ -382,7 +382,15 @@ def decide(stance: Union["Path", str, dict, None],
     }
     if single_corner_evidence not in (None, "CLEAN", "VIOLATED", "NOT_MEASURED"):
         raise ValueError("single_corner_evidence must name a measured state")
-    if single_corner_evidence == "NOT_MEASURED":
+    if single_corner_evidence == "VIOLATED":
+        # The measured state outranks the legacy TNS-only boolean. A zero
+        # setup TNS can coexist with a violated hold path in the same report.
+        out["timing_repair_needed"] = True
+        out["repair_needed"] = True
+    elif single_corner_evidence == "CLEAN":
+        out["timing_repair_needed"] = False
+        out["repair_needed"] = False
+    elif single_corner_evidence == "NOT_MEASURED":
         # A missing/ambiguous STA is neither a violation that can trigger a
         # netlist edit nor evidence that permits no_repair_needed.flag.
         out["timing_repair_needed"] = False
