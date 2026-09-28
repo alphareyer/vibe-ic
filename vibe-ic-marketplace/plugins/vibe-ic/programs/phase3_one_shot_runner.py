@@ -75980,10 +75980,10 @@ def main() -> int:
             {"program": "phase3_one_shot_runner",
              "record": "in-progress (steps only; the full record is written "
                        "at the end of this run)",
-             "steps": [asdict(s) for s in plan],
              # llv1 W14: the summary emitted next echoes the implementation
              # flow from THIS record (ORGANIC #399). {} by default.
-             **_io_pre.report_fields(project)},
+             **_io_pre.report_fields(project),
+             "steps": [asdict(s) for s in plan]},
             indent=2, ensure_ascii=False) + "\n")
     except Exception as _pre_exc:      # best-effort; never crash finalize
         print(f"[WARN] pre-summary step record non-fatal: {_pre_exc}",
