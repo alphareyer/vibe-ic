@@ -1882,6 +1882,24 @@ def tool_default_die(config_root: Path) -> dict[str, dict[str, Any]]:
     return found
 
 
+def apply_flow_die(project: Path, config: dict, sources: dict,
+                   step_ids: list[str], flow: str) -> None:
+    """The die a config hands the tool, by flow (the 0.5ic row).
+
+    Chip: the run's own floorplan record when nothing is declared (D1).
+    Classic: a declared die wins; else a declared utilisation sizes it
+    (`FP_SIZING relative`, sourced to the declaration); else the tool sizes it
+    and `tool_default_die` records what it applied. The direct deck's
+    floorplan record is never a Classic die source."""
+    if flow == FLOW_CHIP:
+        _apply_runner_floorplan(project, config, sources, step_ids)
+    elif 'FP_CORE_UTIL' in config and 'DIE_AREA' not in config:
+        # A declared utilisation sizes a Classic die; the tool's own
+        # FP_SIZING default is not relied on to honour it.
+        _set(config, sources, 'FP_SIZING', 'relative',
+             sources['FP_CORE_UTIL'] + ' (a declared utilisation sizes the die)')
+
+
 def resolve_step_configs(project: Path, image: str, pdk: str,
                          step_ids: list[str], *, pdk_root: Path,
                          docker: str = 'docker',
@@ -1909,13 +1927,7 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     emitted = emit_config(project, pdk, design)
     sources = _load(design.with_suffix('.provenance.json'))
     _check_synthesised_read(project, emitted, sources)
-    if flow == FLOW_CHIP:
-        _apply_runner_floorplan(project, emitted, sources, step_ids)
-    elif 'FP_CORE_UTIL' in emitted and 'DIE_AREA' not in emitted:
-        # A declared utilisation sizes a Classic die; the tool's own
-        # FP_SIZING default is not relied on to honour it.
-        _set(emitted, sources, 'FP_SIZING', 'relative',
-             sources['FP_CORE_UTIL'] + ' (a declared utilisation sizes the die)')
+    apply_flow_die(project, emitted, sources, step_ids, flow)
     _apply_layout_top(project, emitted, sources)
     for key, (value, source) in (overlay or {}).items():
         for older in _LEVER_SUPERSEDES.get(key, ()):

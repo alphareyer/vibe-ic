@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import librelane_whole_flow as W  # noqa: E402
 import librelane_contract as LC  # noqa: E402
 
-FLOW = ["Lint", "JsonHeader", "Synthesis", W.SEGMENT1_LAST, W.SEGMENT2_FIRST,
+FLOW = ["Lint", W.JSON_HEADER_STEP, "Synthesis", W.SEGMENT1_LAST, W.SEGMENT2_FIRST,
         "STAPrePNR", "Floorplan", "RepairAntennas", "StreamOut"]
 SEG1 = FLOW[:4]
 SEG2 = FLOW[4:]
@@ -51,6 +51,16 @@ class FakeLibreLane:
     def __call__(self, argv, **kw):
         self.calls.append((argv, kw))
         opt = lambda k: argv[argv.index(k) + 1] if k in argv else None
+        if "-c" in argv and argv[argv.index("-c") + 1] == W._PLANNED_STEPS_SCRIPT:
+            first, last = argv[-2], argv[-1]
+            rows = [{"id": s, "gated_off_by": ["RUN_X"] if s in self.skip else []}
+                    for s in FLOW[FLOW.index(first):FLOW.index(last) + 1]]
+            return type("R", (), {"returncode": 0, "stdout": json.dumps(rows), "stderr": ""})
+        if opt("--only"):
+            argv = [x for x in argv]
+            i = argv.index("--only")
+            argv[i:i + 2] = ["--from", opt("--only"), "--to", opt("--only")]
+            opt = lambda k: argv[argv.index(k) + 1] if k in argv else None
         design_dir, tag = Path(opt("--design-dir")), opt("--run-tag")
         run = design_dir / "runs" / tag
         run.mkdir(parents=True, exist_ok=True)
@@ -80,7 +90,7 @@ class FakeLibreLane:
                 nl = folder / "core.nl.v"
                 nl.write_text("module core(); endmodule\n")
                 state["nl"] = str(nl)
-            if step == "JsonHeader":
+            if step == W.JSON_HEADER_STEP:
                 jh = folder / "core.h.json"
                 jh.write_text("{}")
                 state["json_h"] = str(jh)
@@ -230,3 +240,136 @@ def test_a_master_serving_two_directions_refuses(project):
 
 def test_no_record_ignores_nothing(project):
     assert W.ignore_disconnected_masters(project)[0] == []
+
+
+# ── segment configs and the orchestration ───────────────────────────────────
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_t95_mig_front import design, put  # noqa: E402
+import _owner_declared as _OD  # noqa: E402
+import _declared_die as DD  # noqa: E402
+import _impl_flow as IF  # noqa: E402
+
+FLOORPLAN = {"program": "phase3_one_shot_runner.step_prepnr", "die_rect_um": [0, 0, 3000, 3000],
+             "die_source": "auto-die", "floorplan_rect_um": None,
+             "floorplan_rect_is_the_die": True, "core_pad_um": 300}
+
+
+def _chip(tmp_path):
+    p = design(tmp_path, {})
+    st = p / "input/submission_template"
+    (st / "SELF_TAPEOUT.txt").write_text("# self\n")
+    (st / "tapeout_declaration.json").write_text(json.dumps(_OD.attest(
+        {"schema": "vibe-ic/tapeout_declaration/1",
+         "answers": {"deliverable": "DIE", "top_cell": "core"}})))
+    put(p / "phase2/stage1/rtl/core.v", "module core(input clk); endmodule\n")
+    put(p / "phase3/stage3/pnr/chip_top_io.v", "module chip_top(); core u(); endmodule\n")
+    put(p / W.CHIP_TOP_RECORD_REL, {
+        "verdict": "WROTE", "chip_top_module": "chip_top", "core_module": "core",
+        "chip_top_verilog": "phase3/stage3/pnr/chip_top_io.v",
+        "pad_instances": {"u_p": {"port": "p", "master": "BI_M", "direction": "output"},
+                          "u_c": {"port": "clk", "master": "IN_M", "direction": "input"}}})
+    put(p / DD.FLOORPLAN_RECTANGLES_REL, FLOORPLAN)
+    IF.write_record(p, "librelane", resolved_by="test")
+    return p
+
+
+def _macro(tmp_path):
+    p = design(tmp_path, {})
+    (p / "input/submission_template/tapeout_declaration.json").write_text(json.dumps(_OD.attest(
+        {"schema": "vibe-ic/tapeout_declaration/1",
+         "answers": {"deliverable": "HARDMACRO", "top_cell": "core"}})))
+    put(p / "phase2/stage1/rtl/core.v", "module core(input clk); endmodule\n")
+    put(p / DD.FLOORPLAN_RECTANGLES_REL, FLOORPLAN)
+    IF.write_record(p, "librelane", resolved_by="test")
+    return p
+
+
+def test_segment2_config_on_the_chip_path(tmp_path):
+    p = _chip(tmp_path)
+    sdc = put(p / "phase2/stage2/constraints/core.sdc", "create_clock -period 10 clk\n")
+    layout = put(p / "L.nl.v", "module chip_top(); endmodule\n")
+    out = W.segment2_config(p, "processA", p / "seg2.json", layout_netlist=layout,
+                            sdc=sdc, sdc_source="step 7's declared SDC")
+    cfg = json.loads(out.read_text())
+    src = json.loads(out.with_suffix(".provenance.json").read_text())
+    assert cfg["DESIGN_NAME"] == "chip_top"                    # D7: the layout top
+    assert cfg["VERILOG_FILES"] == [str(layout.resolve())]
+    assert cfg["DIE_AREA"] == [0, 0, 3000, 3000]              # D1: the run's die
+    assert cfg["PNR_SDC_FILE"] == cfg["SIGNOFF_SDC_FILE"] == str(sdc.resolve())
+    assert cfg["IGNORE_DISCONNECTED_MODULES"] == ["BI_M"]
+    assert "pad_instances" in src["IGNORE_DISCONNECTED_MODULES"]
+    assert "handoff" in src["VERILOG_FILES"]
+
+
+def test_segment2_config_on_a_hardmacro_takes_no_runner_die(tmp_path):
+    p = _macro(tmp_path)
+    layout = put(p / "L.nl.v", "module core(); endmodule\n")
+    cfg = json.loads(W.segment2_config(p, "processA", p / "seg2.json", layout_netlist=layout,
+                                       sdc=None, sdc_source="SDC_SEAM_PENDING").read_text())
+    assert cfg["DESIGN_NAME"] == "core" and "DIE_AREA" not in cfg
+    assert "PNR_SDC_FILE" not in cfg and "IGNORE_DISCONNECTED_MODULES" not in cfg
+
+
+def test_an_absent_sdc_is_named_in_the_provenance(tmp_path):
+    p = _macro(tmp_path)
+    layout = put(p / "L.nl.v", "module core(); endmodule\n")
+    out = W.segment2_config(p, "processA", p / "seg2.json", layout_netlist=layout,
+                            sdc=None, sdc_source="SDC_SEAM_PENDING: step 7 absent")
+    src = json.loads(out.with_suffix(".provenance.json").read_text())
+    assert src["PNR_SDC_FILE"].startswith("ABSENT: SDC_SEAM_PENDING")
+
+
+def _run_two(p, monkeypatch, wrapper: bool):
+    fake = FakeLibreLane()
+    monkeypatch.setattr(W.subprocess, "run", fake)
+    seg1 = put(p / "seg1.json", "{}")
+
+    def between(project, state):
+        st = json.loads(Path(state).read_text())
+        out = {"netlist": Path(st["nl"]), "top": "chip_top" if wrapper else "core",
+               "sdc": None, "sdc_source": "SDC_SEAM_PENDING"}
+        out["wrapper"] = (p / "phase3/stage3/pnr/chip_top_io.v") if wrapper else None
+        return out
+
+    summary = W.run_two_segments(p, "img", pdk="processA", pdk_root=p, scl="libA",
+                                 segment1=seg1, between=between, segment2_kwargs={},
+                                 first_step=FLOW[0], last_step=FLOW[-1], deadline_s=5)
+    names = [a[a.index("--run-tag") + 1] for a, _ in fake.calls if "--run-tag" in a]
+    return summary, names
+
+
+def test_the_chip_path_runs_segment1_the_header_then_segment2(tmp_path, monkeypatch):
+    p = _chip(tmp_path)
+    summary, names = _run_two(p, monkeypatch, wrapper=True)
+    assert names == ["segment1", "json_header", "segment2"]
+    assert summary["segment1"]["steps"] == SEG1 and summary["segment2"]["steps"] == SEG2
+    assert summary["netlist_identity"]["verdict"] == "PASS"
+    rec = summary["handoff"]
+    assert rec["wrapper"] and "json_header/" in rec["json_header"]
+    on_disk = json.loads((W.whole_dir(p) / "whole_flow.json").read_text())
+    assert on_disk["netlist_identity"]["verdict"] == "PASS"
+
+
+def test_a_hardmacro_reuses_segment1s_header(tmp_path, monkeypatch):
+    p = _macro(tmp_path)
+    summary, names = _run_two(p, monkeypatch, wrapper=False)
+    assert names == ["segment1", "segment2"]
+    assert "segment1/" in summary["handoff"]["json_header"]
+    assert summary["netlist_identity"]["verdict"] == "PASS"
+
+
+def test_a_between_that_refuses_stops_the_run(tmp_path, monkeypatch):
+    p = _macro(tmp_path)
+    fake = FakeLibreLane()
+    monkeypatch.setattr(W.subprocess, "run", fake)
+
+    def between(project, state):
+        raise LC.Refusal("LEC_NOT_PROVEN", "step 13 did not prove the netlist")
+
+    with pytest.raises(LC.Refusal):
+        W.run_two_segments(p, "img", pdk="processA", pdk_root=p, scl="libA",
+                           segment1=put(p / "seg1.json", "{}"), between=between,
+                           segment2_kwargs={}, first_step=FLOW[0], last_step=FLOW[-1])
+    names = [a[a.index("--run-tag") + 1] for a, _ in fake.calls if "--run-tag" in a]
+    assert names == ["segment1"]
