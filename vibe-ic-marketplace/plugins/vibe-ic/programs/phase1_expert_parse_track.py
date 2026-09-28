@@ -2740,16 +2740,41 @@ def ai_subtrack(project: Path, prompt: str, out_dir: Path,
         status["authoring_schema_layer_count"] = len(schema.get("layers") or {})
         # The old answer belongs to the old handoff's L-doc root. A producer
         # re-run can write identical bytes, in which case it is still valid.
-        # Compare roots BEFORE assemble overwrites authoring_schema.json; if
-        # the bytes changed, retain the entire old pack outside the live read
-        # path so this pass emits a new handoff instead of consuming it.
+        # Compare roots BEFORE assemble overwrites authoring_schema.json. An
+        # answer without a readable prior root cannot be tied to these L-docs,
+        # even if the current root happens to have unchanged bytes. Retain the
+        # entire old pack outside the live read path and issue a new handoff.
         answer = out_dir / "l_doc_expectations.json"
         prior_schema = out_dir / "authoring_schema.json"
-        if answer.is_file() and prior_schema.is_file():
-            old = json.loads(prior_schema.read_text())
-            old_root = (old.get("phase1_root") or {}).get("digest")
-            new_root = (schema.get("phase1_root") or {}).get("digest")
-            if old_root and new_root and old_root != new_root:
+        if answer.is_file():
+            old_root = None
+            if prior_schema.is_file():
+                try:
+                    old = json.loads(prior_schema.read_text())
+                    if isinstance(old, dict):
+                        prior_identity = old.get("phase1_root")
+                        if isinstance(prior_identity, dict):
+                            old_root = prior_identity.get("digest")
+                except (OSError, ValueError):
+                    pass
+            current_identity = schema.get("phase1_root")
+            new_root = (current_identity.get("digest")
+                        if isinstance(current_identity, dict) else None)
+            valid_digest = lambda value: (isinstance(value, str) and
+                                          re.fullmatch(r"[0-9a-f]{64}", value))
+            if not valid_digest(old_root):
+                stale_reason = (
+                    "EXPERT_PRIOR_ROOT_UNVERIFIABLE: existing answer has no "
+                    "readable prior authoring schema with a root digest")
+            elif not valid_digest(new_root):
+                stale_reason = (
+                    "EXPERT_CURRENT_ROOT_UNVERIFIABLE: current L-doc root "
+                    "has no digest")
+            elif old_root != new_root:
+                stale_reason = f"EXPERT_ROOT_CHANGED: {old_root} -> {new_root}"
+            else:
+                stale_reason = None
+            if stale_reason:
                 import os
                 import uuid
                 archive = (project / ".vibeic-state" /
@@ -2757,8 +2782,7 @@ def ai_subtrack(project: Path, prompt: str, out_dir: Path,
                 archive.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(out_dir, archive)
                 status["stale_pack_archived_at"] = str(archive)
-                status["stale_pack_reason"] = (
-                    f"EXPERT_ROOT_CHANGED: {old_root} -> {new_root}")
+                status["stale_pack_reason"] = stale_reason
         handoff = _pack.assemble(
             prompt=prompt, iface=None, target=None,
             expert_skills=[], verify_gates=[PROGRAM],
