@@ -63075,7 +63075,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # certificate WITHOUT firing a repair that does not address it.
     _single_corner_evidence = (
         "CLEAN" if tns_zero else
-        "VIOLATED" if _post_route_timing_violation_measured(_sta_for_repair)
+        "VIOLATED" if _repair_dec.post_route_timing_violation_measured(_sta_for_repair)
         else "NOT_MEASURED")
     _repair_decision = _repair_dec.decide(
         mc_ocv_stance, tns_zero, project=project,
@@ -64809,17 +64809,6 @@ def _post_route_tns_zero(sta_rpt: Path) -> bool:
         return True
     # Conservative default: not proven to be zero.
     return False
-
-
-def _post_route_timing_violation_measured(sta_rpt: Path) -> bool:
-    """A negative timing number or violated path in the selected STA report."""
-    try:
-        text = sta_rpt.read_text(errors="replace")
-    except OSError:
-        return False
-    if re.search(r"\b(?:tns|wns)\s+-(?:\d+(?:\.\d*)?|\.\d+)\b", text, re.I):
-        return True
-    return bool(re.search(r"\bslack\s*\(VIOLATED\)", text, re.I))
 
 
 #: Slack is signed: MORE NEGATIVE is worse, so a negative delta is a
