@@ -1148,9 +1148,10 @@ def test_unmeasured_publication_names_its_missing_floor_in_step32_report(
                               pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
                               route_state=route, route_drc=0, programs_dir=shim)
     record = json.loads((project / prr.REPORT_REL).read_text())
-    assert record['declared_repair_publication']['status'] == 'NOT_MEASURED'
-    assert 'timing floors' in record['declared_repair_publication']['reason']
-    assert report['declared_repair_publication'] == record['declared_repair_publication']
+    publication = record.get('declared_repair_publication')
+    assert publication and publication.get('status') == 'NOT_MEASURED'
+    assert 'timing floors' in publication.get('reason', '')
+    assert report.get('declared_repair_publication') == publication
     assert not (project / prr.DECLARED_REPAIR_REL /
                 'postroute_timing_repair_decision.json').exists()
 
@@ -1196,7 +1197,7 @@ def test_refused_candidate_names_the_residual_drv_in_the_audit(tmp_path, monkeyp
     decision_path = project / prr.DECLARED_REPAIR_REL / 'postroute_timing_repair_decision.json'
     decision = json.loads(decision_path.read_text())
     assert decision['action'] == 'input_route_kept'
-    assert decision['residual']['drv_count'] > 0
+    assert (decision.get('residual') or {}).get('drv_count', 0) > 0
     errors = [f.category for f in audit.audit(project)[0] if f.severity == 'ERROR']
     assert 'REPAIR_REFUSED_RESIDUAL_DRV' in errors
     assert 'EMPTY_CHANGES' not in errors and 'NOT_REVERIFIED' not in errors
@@ -1246,10 +1247,11 @@ def test_dual_publishes_decision_from_step32_input_when_pregrt_route_wins(
                               pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
                               route_state=route, route_drc=0, variant_arm=variant_arm,
                               programs_dir=shim)
+    assert report['selected_arm'] == 'pregrt'
+    assert report.get('floors') == report['arms']['pregrt']['floors']
+    assert (report.get('input_baseline') or {}).get('hold_ws_min') == -0.3
     decision = json.loads((project / prr.DECLARED_REPAIR_REL /
                            'postroute_timing_repair_decision.json').read_text())
-    assert report['selected_arm'] == 'pregrt'
-    assert report['floors'] and report['input_baseline']['hold_ws_min'] == -0.3
     assert decision['repair_needed'] is True
     assert decision['action'] == 'alternate_route_selected'
     assert decision['baseline']['hold_ws_min'] == -0.3
