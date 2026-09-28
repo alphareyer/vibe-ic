@@ -1382,6 +1382,30 @@ class TestPercEquivalent:
         j = json.loads((rpt3 / "perc_equivalent.json").read_text())
         assert j["verdict"] == "PERC_EQUIV_INCOMPLETE"
 
+    def test_caught_erc_failure_remains_incomplete_in_perc(
+            self, tmp_path, monkeypatch):
+        project = _mk_project(tmp_path, _DEF_WITH_PDN)
+        self._seed_subreports(project, erc=None)
+        rpt3 = runner._pl.reports_phase3_dir(project)
+        monkeypatch.setattr(runner, "_to_container_path", lambda p, c: p)
+        stdout = ("=== ERC: floating nets ===\n"
+                  "[INFO] 0 floating nets.\n"
+                  "=== ERC metrics ===\n"
+                  "ERC_METRICS_NONFATAL: simulated command failed\n")
+        monkeypatch.setattr(runner, "_docker_exec",
+                            lambda c, cmd, timeout=0, **_: (0, stdout, ""))
+        assert runner._emit_erc_report(
+            project, "chip_top", _fake_pdk(), "x", rpt3 / "erc.rpt", [])
+        assert runner._emit_perc_equivalent(
+            project, "chip_top", _fake_pdk(), "x", [])
+        result = json.loads((rpt3 / "perc_equivalent.json").read_text())
+        erc_category = next(c for c in result["categories"]
+                            if c["category"] == "Floating nets")
+        assert erc_category["source_verdict"] == "NOT_DETERMINED"
+        assert erc_category["result"] == "INCOMPLETE"
+        assert result["verdict"] == "PERC_EQUIV_INCOMPLETE"
+        assert "Floating nets" in result["automated_incomplete"]
+
     def test_rpt_states_honesty_and_no_pdn_skips(self, tmp_path):
         # rpt carries the honest "Calibre PERC NOT run" statement.
         project = _mk_project(tmp_path, _DEF_WITH_PDN)

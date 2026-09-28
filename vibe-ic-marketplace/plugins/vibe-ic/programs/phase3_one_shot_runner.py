@@ -73290,12 +73290,16 @@ def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
         # still maps to FAIL. (§4.05 no-leak; chip-AGNOSTIC token mapping.)
         result = "PASS" if verdict == "PASS" else (
             "REVIEW" if verdict in ("REVIEW", "BENIGN-ERC") else
-            "INCOMPLETE" if verdict == "MEASURED" else "FAIL")
+            "INCOMPLETE" if verdict in ("MEASURED", "NOT_DETERMINED")
+            else "FAIL")
         out = {"category": name, "status": "AUTOMATED", "result": result,
                "tool": tool, "evidence": evidence, "source_verdict": verdict}
         if verdict == "MEASURED":
             out["note"] = ("measurement-only artifact (no budget "
                            "comparison applied) — review required (#444)")
+        elif verdict == "NOT_DETERMINED":
+            out["note"] = ("tool measurement incomplete; inspect the source "
+                           "report before sign-off")
         elif verdict == "BENIGN-ERC":
             out["note"] = ("benign float verdict from the #696 ERC screen "
                            "(VPWR/VGND/zero_/spare structural floats) — "
