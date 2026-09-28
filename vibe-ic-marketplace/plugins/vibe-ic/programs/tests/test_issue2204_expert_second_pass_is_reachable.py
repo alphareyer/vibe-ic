@@ -63,9 +63,11 @@ if str(_PROGRAMS) not in sys.path:
 
 import vibe_ic_one_shot_runner as ORCH        # noqa: E402
 import _p1_identity_fixture  # noqa: E402  FX_STALE_LDOCS
+import _phase1_producer_identity as _p1id  # noqa: E402
 import phase1_one_shot_runner as P1           # noqa: E402
 import phase1_expert_parse_track as TRACK     # noqa: E402
 import _path_layout as _pl                    # noqa: E402
+from _hostpaths import require_repo  # noqa: E402
 from _ai_judgement_fixture import sign as _sign_ai_fixture  # noqa: E402
 
 #: WHERE PASS 1's RECORD LIVES, asked of the router. R-0915-151 moved
@@ -357,6 +359,82 @@ def test_a_delivered_answer_is_consumed_and_the_front_door_then_skips(tmp_path):
 
     # …and the front door stops re-entering. AT MOST ONCE per delivered answer.
     assert ORCH._phase1_decision(p, force_skip=False) == (False, "")
+
+
+def test_changed_root_recovers_through_two_one_shot_runs(tmp_path, monkeypatch):
+    """A stale reading must reach its owner before a new answer can be read."""
+    p = _project(tmp_path, "root_recovery", report=False)
+    handoff = _invoke_lifecycle(p, "01_handoff", track=True)
+    assert handoff["track"]["ai_subtrack"]["status"] == TRACK.AI_HANDOFF_EMITTED
+    _pass1_record(p).write_text(json.dumps({
+        "phase": 1, "mode": "docs", "verdict": "PASS",
+        "steps": [{"name": "doc_extract", "status": "PASS"}],
+    }))
+    _answer_path(p).write_text(json.dumps(_ANSWER))
+    _sign_ai_fixture(p, "D1")
+    consumed = _invoke_lifecycle(p, "02_consumed")
+    assert consumed["rc"] == 0, consumed
+    assert consumed["track"]["ai_subtrack"]["status"] == TRACK.AI_CONSUMED
+
+    # A checked-in L document enters through the real flow-derivation API.
+    source = require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
+        "fixtures", "a9_cosim_scenarios", "phase1", "generated_docs",
+        "L1_DATASHEET.json")
+    doc = _pl.generated_docs_dir(p) / "L1_LAYER.json"
+    doc.write_bytes(source.read_bytes())
+    assert _p1id.record_derivation(
+        p, doc.name, hashlib.sha256(doc.read_bytes()).hexdigest(),
+        "later-flow-writer")
+    current_root = TRACK.phase1_root_identity(p)["digest"]
+    assert current_root != consumed["track"]["phase1_root"]["digest"]
+    assert ORCH._expert_root_stale(p).startswith("EXPERT_ROOT_CHANGED")
+    assert ORCH._expert_answer_pending(p)[0] is False
+
+    monkeypatch.setattr(ORCH, "_capture_container_image",
+                        lambda *_a, **_k: {"verdict": "SKIP"})
+    monkeypatch.setattr(ORCH, "_capture_pdk_revision",
+                        lambda *_a, **_k: {"verdict": "SKIP"})
+    run_phase = ORCH._run_phase
+    downstream_roots = []
+
+    def observe_phase(label, runner, args, env=None):
+        if runner.name == "phase2_one_shot_runner.py":
+            downstream_roots.append(json.loads(_report(p).read_text())[
+                "phase1_root"]["digest"])
+        return run_phase(label, runner, args, env=env)
+
+    monkeypatch.setattr(ORCH, "_run_phase", observe_phase)
+
+    def front_door():
+        monkeypatch.setattr(sys, "argv", [
+            "vibe_ic_one_shot_runner.py", str(p), "--no-dashboard",
+            "--entry-step", "D1", "--exit-step", "1",
+            "--skip-phase3", "--skip-analog", "--ic-name", ""])
+        rc = ORCH.main()
+        summary = json.loads(_pl.report_path(p, "vibe_ic_one_shot.json").read_text())
+        return rc, summary, json.loads(_report(p).read_text())
+
+    first_rc, first, first_track = front_door()
+    assert first_rc != 0 and first["phases"][0]["verdict"] == "NOT_MEASURED", first
+    assert first_track["phase1_root"]["digest"] == current_root
+    assert first_track["ai_subtrack"]["status"] == TRACK.AI_HANDOFF_EMITTED
+    archive = Path(first_track["ai_subtrack"]["stale_pack_archived_at"])
+    assert (archive / "l_doc_expectations.json").is_file()
+    assert not _answer_path(p).exists()
+
+    _answer_path(p).write_text(json.dumps(_ANSWER, indent=2) + "\n")
+    _sign_ai_fixture(p, "D1")
+    second_rc, second, second_track = front_door()
+    # Phase 2 has a separate synthetic-fixture outcome. The second run must
+    # finish Phase 1 itself, and each downstream dispatch sees this root.
+    assert second["phases"][0]["verdict"] == "PASS", (second_rc, second)
+    assert downstream_roots and set(downstream_roots) == {current_root}
+    assert second_track["phase1_root"]["digest"] == current_root
+    assert second_track["ai_subtrack"]["status"] == TRACK.AI_CONSUMED
+    assert second_track["ai_subtrack"]["answer_sha256"] == hashlib.sha256(
+        _answer_path(p).read_bytes()).hexdigest()
+    assert ORCH._phase1_decision(p, False)[0] is False
 
 
 # ── the front door's own half: the mode must reach the runner as an argv ───

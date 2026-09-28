@@ -241,7 +241,7 @@ def test_answer_without_a_verifiable_prior_root_gets_a_new_handoff(
         TRACK.phase1_root_identity(proj)["digest"])
 
 
-def test_real_l_doc_flow_rewrite_refuses_the_old_expert_reading(
+def test_real_l_doc_flow_rewrite_routes_the_old_reading_to_its_consumer(
         tmp_path, monkeypatch):
     plug, proj = _plugin(tmp_path), _project(tmp_path)
     _phase1(proj, plug)
@@ -266,9 +266,9 @@ def test_real_l_doc_flow_rewrite_refuses_the_old_expert_reading(
         proj, doc.name, hashlib.sha256(doc.read_bytes()).hexdigest(),
         "flow-fixture")
     assert _fresh(proj, plug)["state"] == PID.REUSE
-    assert _decide(proj, plug, monkeypatch) == (
-        False, "refused_stale_expert_reading")
     assert "EXPERT_ROOT_CHANGED" in ORCH._expert_root_stale(proj)
+    assert _decide(proj, plug, monkeypatch) == (
+        True, "expert_second_pass")
 
 
 def test_docs_with_no_producer_identity_are_regenerated(tmp_path,
