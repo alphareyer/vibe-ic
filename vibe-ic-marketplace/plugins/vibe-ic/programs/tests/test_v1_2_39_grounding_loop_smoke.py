@@ -60,15 +60,12 @@ def test_committed_fixture_grounding_clean(proj):
 def test_fixtures_present():
     # the corpus should exist so the loop guard actually runs (not vacuous).
     # It is built privately by its generator at import (see `_FIX`), so it is
-    # present on every checkout; the skip below now fires only if the
-    # generator itself yields no project, which is a real finding to see
-    # rather than a thin environment.
+    # present on every checkout. An empty corpus means the generator or its
+    # output contract regressed; skipping would make the guard vacuous.
     n = len(_fixture_projects())
-    if n == 0:
-        import pytest
-        pytest.skip("synthetic_benchmark_phase1 corpus absent (author-local, "
-                    "uncommitted); nothing to ground-check on this checkout")
-    assert n >= 4
+    assert n >= 4, (f"the synthetic generator built {n} project(s) with "
+                    f"phase1/generated_docs under {_FIX}; the grounding "
+                    "guard would run on nothing")
 
 
 def test_gate_stays_effective_on_fabrication(tmp_path):
@@ -76,8 +73,9 @@ def test_gate_stays_effective_on_fabrication(tmp_path):
     # name is nowhere in the input, and assert the gate still FAILs. A plugin
     # change that weakens the gate (stops catching fabrication) trips this.
     projs = _fixture_projects()
-    if not projs:
-        pytest.skip("no committed fixtures")
+    assert len(projs) >= 4, (f"the synthetic generator built {len(projs)} "
+                             f"grounding project(s) under {_FIX}; refusing "
+                             "to skip the fabrication check")
     src = projs[0]
     dst = tmp_path / src.name
     shutil.copytree(src, dst)

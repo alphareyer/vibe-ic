@@ -54,6 +54,9 @@ PATH RESOLUTION -- six calibrations, all measured:
     directory that already exists changes nothing. Seven such events (tracked
     fixture dirs, `_shared/integration_fixtures`, the plugin root itself)
     came out of one sweep; a mkdir whose target already exists is not recorded.
+THREADING: the re-entrancy guard is thread-local. A process-wide guard would
+silently discard a second thread's audit event while the first thread resolves
+or logs its path; the concurrent-writer calibration exercises this boundary.
 """
 from __future__ import annotations
 
@@ -101,6 +104,7 @@ _EV = {
     "shutil.move": ((0, None, False), (1, None, False)),
     "os.mkfifo": ((0, 2, False),), "os.mknod": ((0, 3, False),),
 }
+import threading as _th
 _busy = [False]
 
 

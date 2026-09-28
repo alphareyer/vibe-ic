@@ -269,6 +269,39 @@ def test_the_audit_sees_a_write_and_only_a_write(tmp_path):
     assert (root / "programs" / "real.py").read_text() == "x\n"
 
 
+def test_the_audit_records_concurrent_thread_writes(tmp_path):
+    """Each thread's hook re-entry guard must be independent."""
+    root = tmp_path / "tree"
+    (root / "programs").mkdir(parents=True)
+    child = tmp_path / "threaded_writer.py"
+    child.write_text(textwrap.dedent("""
+        import sys, threading
+        from pathlib import Path
+        root = Path(sys.argv[1]) / "programs"
+        def write_many(worker):
+            for i in range(500):
+                p = root / f"probe_{worker}_{i}.py"
+                p.write_text("x\\n")
+                p.unlink()
+        threads = [threading.Thread(target=write_many, args=(n,))
+                   for n in range(4)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+    """))
+    work = tmp_path / "audit"
+    work.mkdir()
+    r = _pr.run([sys.executable, str(child), str(root)], cwd=str(root),
+                env=TWA.audit_env(root, work), capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    events = TWA.read_events(work)
+    seen = {(e["event"], e["path"]) for e in events}
+    missing = [f"programs/probe_{worker}_{i}.py"
+               for worker in range(4) for i in range(500)
+               if ("open", f"programs/probe_{worker}_{i}.py") not in seen
+               or ("os.remove", f"programs/probe_{worker}_{i}.py") not in seen]
+    assert not missing, f"threaded writes were dropped: {missing[:20]} ({len(missing)} total)"
+
+
 def test_no_former_writer_plants_anything_in_the_shipped_tree():
     """ONE child session for every former writer, and ONE test, on purpose: a
     module-scoped fixture is instantiated once per xdist WORKER, so spreading
