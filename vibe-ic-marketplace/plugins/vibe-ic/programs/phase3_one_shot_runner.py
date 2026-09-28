@@ -63121,6 +63121,13 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     import _declared_process_record as _dpr
     sources = {}      # corner -> source rows, filled once inputs resolve
     native_logs = []  # the tool's own out/err of a failed invocation
+    attempted = False
+
+    def attempt_path():
+        if rpt_out.is_file():
+            return rpt_out
+        partial = rpt_out.with_suffix(rpt_out.suffix + '.timeout.partial')
+        return partial if partial.is_file() else None
 
     def write_record(status, reason, values=None, row_reasons=None,
                      census=None, promoted=False):
@@ -63128,10 +63135,16 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
         # report its MEASURED rows were read from, with its sha256, and the
         # population beside it -- `report` stays the promoted basis only.
         attempt = None
-        if not promoted and rpt_out.is_file():
-            pop = rpt_out.with_name(rpt_out.name + '.population.json')
-            attempt = {'path': _rel_to_project(rpt_out, project),
-                       'sha256': (_file_sha256(rpt_out) or '').replace('sha256:', '') or None,
+        if not promoted and attempted:
+            kept = attempt_path()
+            # A first-corner error may happen before Tcl opens the report.
+            # Record the attempted path and native log even then; a missing
+            # sha256 states explicitly that no report bytes survived.
+            named = kept or rpt_out
+            pop = named.with_name(named.name + '.population.json')
+            attempt = {'path': _rel_to_project(named, project),
+                       'sha256': ((_file_sha256(kept) or '').replace('sha256:', '') or None)
+                       if kept is not None else None,
                        'population': (_rel_to_project(pop, project)
                                       if pop.is_file() else None),
                        'native_logs': [_rel_to_project(x, project)
@@ -63223,6 +63236,7 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
                  'sha256': _lib_digest.get(x) or None}
                 for x in inventory[c][1:]]}
     failed = None     # (corner, reason) of the first native failure
+    dispatch_corner = None
     try:
         rpt_out.parent.mkdir(parents=True, exist_ok=True)
         report = _to_container_path(str(rpt_out), container)
@@ -63259,8 +63273,10 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
             path = rpt_out.parent / f'sta_declared_{c.lower()}.tcl'
             scripts.append((c, path, tcl))
         for c, path, tcl in scripts:
+            dispatch_corner = c
             path.write_text(tcl)
             mapped = _to_container_path(str(path), container)
+            attempted = True
             rc, out, err = _docker_exec(container, f'sta -no_init -exit {shlex.quote(mapped)} 2>&1', marker=mapped, isolate=[rpt_out], inputs=[netlist, sdc, spef_path, path] + ([_pl.pnr_dir(project) / f'{top}.def'] if (_pl.pnr_dir(project) / f'{top}.def').is_file() else []) + [Path(x) for x in inventory[c] if Path(x).is_file()])
             if rc != 0 or re.search(r'(?mi)^\s*Error(?:\s|:)', (out or '') + '\n' + (err or '')):
                 # The tool's own words are KEPT, verbatim, and the reason
@@ -63276,19 +63292,24 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
                 failed = (c, f'native execution failed rc={rc} at {c}{_where}')
                 break
     except (OSError, ValueError) as exc:
-        return refuse(str(exc))
-    if not rpt_out.is_file():
-        return refuse(failed[1] if failed else 'native report absent')
+        if not attempted or dispatch_corner is None:
+            return refuse(str(exc))
+        failed = (dispatch_corner, f'native dispatch failed at {dispatch_corner}: {exc}')
+    kept = attempt_path()
+    if kept is None and failed is None:
+        return refuse('native report absent')
     measured = set()
     populations = {}
     from sta_annotation_population import classify
-    sections = _split_sections(rpt_out.read_text(errors='replace'))
+    sections = _split_sections(kept.read_text(errors='replace')) if kept else []
     def_file = _pl.pnr_dir(project) / f'{top}.def'
     io_masters = _io_masters_for(project)
     for role, corner, body in sections:
         if role == 'SETUP':
             populations[corner] = classify(body, def_file, io_masters=io_masters)
-    rpt_out.with_name(rpt_out.name + '.population.json').write_text(json.dumps(populations, indent=2) + '\n')
+    if kept is not None:
+        kept.with_name(kept.name + '.population.json').write_text(
+            json.dumps(populations, indent=2) + '\n')
     # Measure EVERY section first, then decide: a refusal must not erase a
     # slack the run measured (review wave 5).
     values = {}
@@ -63309,7 +63330,7 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
                 _names = (f'{len(_unknown)} unclassified unannotated driver(s): '
                           + ', '.join(_unknown[:8])
                           + (f', ... (+{len(_unknown) - 8} more; see '
-                             f'{_rel_to_project(rpt_out, project)}.population.json)'
+                             f'{_rel_to_project(kept, project)}.population.json)'
                              if len(_unknown) > 8 else '')) if _unknown else ''
                 census[corner] = 'INCOMPLETE' + (f': {_names}' if _names else '')
                 if census_refusal is None:
@@ -63372,11 +63393,18 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
                           + next(d for d in _inf.values() if d.get('count')).get('basis', ''))
     _lines += _inf_lines
     if _lines:
+        disclosure = rpt_out.with_name(rpt_out.name + '.disclosure.tmp')
         try:
-            rpt_out.write_text('\n'.join(_lines) + '\n'
-                               + rpt_out.read_text(errors='replace'))
-        except OSError as exc:                             # pragma: no cover
-            return refuse(f'could not disclose the off-die census: {exc}')
+            disclosure.write_text('\n'.join(_lines) + '\n'
+                                  + rpt_out.read_text(errors='replace'))
+            disclosure.replace(rpt_out)
+        except OSError as exc:
+            try:
+                disclosure.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return refuse(f'could not disclose the annotation exclusions: {exc}',
+                          values, row_reasons, census)
     rpt_out.replace(destination)
     # R-0915-123 / ORGANIC-443. THE ATTESTATION NAMES THE PATH THAT SURVIVES.
     # `rpt_out` is a transient: every check above reads it, and the line before
