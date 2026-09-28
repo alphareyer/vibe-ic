@@ -156,6 +156,7 @@ vic_census before
 set ::vic_ant_before [check_antennas]
 utl::metric_integer vibeic__prr__before__antenna__violating_nets $::vic_ant_before
 set ::vic_unrouted_before [vic_unrouted_nets]
+set ::vic_routed_before [vic_routed_nets]
 utl::metric_integer vibeic__prr__before__unrouted__count [dict size $::vic_unrouted_before]
 if {[info exists ::env(VIBEIC_PRR_CENSUS_ONLY)] && $::env(VIBEIC_PRR_CENSUS_ONLY)} {
     utl::metric_integer vibeic__prr__changed 0
@@ -328,9 +329,10 @@ proc vic_violation_neighbours {drc named} {
 proc vic_eco_route {varname tag} {
     upvar #0 $varname dirty
     if {[dict size $dirty] == 0} { return 1 }
-    # global_route may remove wires outside the nominal ECO set. Keep the
-    # complete entry route as the obligation for every scoped retry.
-    set expected [vic_routed_nets]
+    # Resizer and global_route may remove wires outside the nominal ECO set.
+    # The step's input route and wires newly present after repair are both
+    # obligations for every scoped retry.
+    set expected [dict merge $::vic_routed_before [vic_routed_nets]]
     set_thread_count $::env(DRT_THREADS)
     set limit [expr {[info exists ::env(VIBEIC_PRR_ECO_EXPANSIONS)]
                      ? $::env(VIBEIC_PRR_ECO_EXPANSIONS) : 2}]

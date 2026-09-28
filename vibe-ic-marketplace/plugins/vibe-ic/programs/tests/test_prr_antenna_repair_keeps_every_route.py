@@ -208,7 +208,7 @@ def test_the_census_is_taken_before_the_repair_and_checked_after_the_reroute():
     assert at('set ::vic_unrouted_before [vic_unrouted_nets]') < at('log_cmd repair_design')
 
 
-def _global_route_loss_replay(tmp_path, *, unrouteable=()):
+def _global_route_loss_replay(tmp_path, *, unrouteable=(), loss_phase='global_route'):
     """Run the shipped ECO proc with a GRT side effect seen on the routed chip.
 
     The tool's grt.tcl drops an existing wire outside the original ECO set;
@@ -219,7 +219,8 @@ def _global_route_loss_replay(tmp_path, *, unrouteable=()):
     end = body.index('\nset ::vic_eco_attempts 0', start)
     grt = tmp_path / 'openroad/common/grt.tcl'
     grt.parent.mkdir(parents=True)
-    grt.write_text('set ::W(other) 0\n')
+    assert loss_phase in {'global_route', 'repair'}
+    grt.write_text('set ::W(other) 0\n' if loss_phase == 'global_route' else '')
     script = (HARNESS + _script_procs(body) + r'''
 rename netcall original_netcall
 proc netcall {name sig terms abut method args} {
@@ -247,7 +248,11 @@ set ::env(DRT_OPT_ITERS) 1
 set ::env(VIBEIC_PRR_ECO_EXPANSIONS) 2
 set ::vic_dirty [dict create netA [dict get $::nets netA]]
 set ::vic_eco_attempts 0
-'''.replace('set ::vic_dirty', f'set ::UNROUTABLE {{{" ".join(unrouteable)}}}\nset ::vic_dirty')
+'''.replace('set ::vic_dirty',
+            f'set ::UNROUTABLE {{{" ".join(unrouteable)}}}\n'
+            'set ::vic_routed_before [vic_routed_nets]\n'
+            + ('set ::W(other) 0\n' if loss_phase == 'repair' else '')
+            + 'set ::vic_dirty')
               + body[start:end]
               + '\nset outcome [vic_eco_route ::vic_dirty eco_route]\n'
                 'puts "RESULT $outcome $::W(other) [lsort [dict keys $::vic_dirty]]"\n')
@@ -262,6 +267,12 @@ def test_global_route_loss_joins_the_scoped_eco_route(tmp_path):
     assert out.returncode == 0, out.stderr
     assert 'RESULT 1 1 netA other' in out.stdout, out.stdout
     assert (tmp_path / 'eco_route.drc').is_file()
+
+
+def test_repair_tool_loss_joins_the_scoped_eco_route(tmp_path):
+    out = _global_route_loss_replay(tmp_path, loss_phase='repair')
+    assert out.returncode == 0, out.stderr
+    assert 'RESULT 1 1 netA other' in out.stdout, out.stdout
 
 
 def test_unrecoverable_global_route_loss_refuses_the_candidate(tmp_path):
