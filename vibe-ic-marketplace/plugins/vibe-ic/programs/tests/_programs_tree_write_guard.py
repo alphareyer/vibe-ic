@@ -70,6 +70,10 @@ def _hook(event: str, args) -> None:
             target = args[0]
     elif event in ("os.mkdir", "os.symlink", "os.link"):
         target = args[1] if event in ("os.symlink", "os.link") else args[0]
+        if event == "os.mkdir" and os.path.lexists(target):
+            # Path.mkdir(parents=True, exist_ok=True) audits the attempted
+            # mkdir even when the directory already exists. No path changed.
+            return
     elif event in ("os.rename", "os.replace"):
         target = args[1]
     else:
@@ -90,20 +94,35 @@ def _install() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _no_write_into_the_programs_tree(request):
-    """Fail the test that created or wrote a path under `programs/`."""
+def _no_write_into_the_programs_tree():
+    """Collect writes for the call-phase hook to report as a plain FAIL."""
     global _CURRENT
     _install()
     _CURRENT = []
     try:
         yield
     finally:
-        hits, _CURRENT = _CURRENT, None
-    if hits:
-        pytest.fail(
-            f"{request.node.nodeid} wrote into the repository's programs/ tree "
-            f"({len(hits)}): {sorted(set(hits))[:8]}. Nothing that reads this "
-            f"tree may write to it, even briefly: a concurrent reader (another "
-            f"xdist worker's write guard, a census) sees the path. Build it "
-            f"under tmp_path and point the code at it through its own seam.",
-            pytrace=False)
+        _CURRENT = None
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Record transient writes as a call-phase FAIL, never a teardown ERROR."""
+    outcome = yield
+    report = outcome.get_result()
+    if report.when != "call":
+        return
+    hits = _CURRENT or []
+    if not hits:
+        return
+    message = (
+        f"{item.nodeid} wrote into the repository's programs/ tree "
+        f"({len(hits)}): {sorted(set(hits))[:8]}. Nothing that reads this "
+        f"tree may write to it, even briefly: a concurrent reader (another "
+        f"xdist worker's write guard, a census) sees the path. Build it "
+        f"under tmp_path and point the code at it through its own seam.")
+    if report.failed:
+        report.sections.append(("programs tree write", message))
+    else:
+        report.outcome = "failed"
+        report.longrepr = message
