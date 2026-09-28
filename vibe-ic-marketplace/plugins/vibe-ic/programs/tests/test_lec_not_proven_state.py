@@ -142,6 +142,48 @@ def test_each_not_run_field_is_required_by_both_gates(tmp_path, missing):
     assert any(f.rule == "LEC_NOT_RUN_EVIDENCE_INVALID" for f in pre_result.findings)
 
 
+@pytest.mark.parametrize("bad_names", [42, "out", [""], ["out", 42]])
+def test_malformed_not_run_point_names_are_named_run_errors(tmp_path, bad_names):
+    doc = _residual()
+    search = cex.not_run("SAT executable unavailable", ["out"],
+                         run_identity="fixture-run")
+    search["point_names"] = bad_names
+    doc["counterexample_search"] = search
+
+    post_result = post.evaluate_report(doc)
+    assert post_result["result"] == "FAIL"
+    assert post_result["verdict"] == "RUN_ERROR"
+    assert any("LEC_POST_NOT_RUN_EVIDENCE_INVALID" in finding
+               and "point_names" in finding
+               for finding in post_result["findings"])
+
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "lec.json").write_text(json.dumps(doc))
+    pre_result = pre.audit(tmp_path)
+    assert pre_result.verdict == "RUN_ERROR"
+    assert any(f.rule == "LEC_NOT_RUN_EVIDENCE_INVALID"
+               and "point_names" in f.message for f in pre_result.findings)
+
+
+def test_malformed_not_run_cli_writes_verdict_json(tmp_path, capsys):
+    doc = _residual()
+    search = cex.not_run("SAT executable unavailable", ["out"],
+                         run_identity="fixture-run")
+    search["point_names"] = 42
+    doc["counterexample_search"] = search
+    report = tmp_path / "reports" / "phase3" / "lec_post_layout.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps(doc))
+    output = tmp_path / "verdict.json"
+
+    assert post.main([str(tmp_path), "--json", str(output)]) == 1
+    verdict_doc = json.loads(output.read_text())
+    assert verdict_doc["verdict"] == "RUN_ERROR"
+    assert "point_names" in verdict_doc["findings"][0]
+    assert json.loads(capsys.readouterr().out)["verdict"] == "RUN_ERROR"
+
+
 def test_complete_sat_disposition_requires_the_named_search(tmp_path):
     doc = _residual()
     doc.update(equivalent=True, verdict="PROVEN_EQUIVALENT",
