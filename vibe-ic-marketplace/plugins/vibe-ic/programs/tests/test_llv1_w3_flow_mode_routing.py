@@ -142,7 +142,7 @@ def _aliases(module: ast.Module) -> tuple[set, set]:
     import and assignment statements, anywhere in the file."""
     funcs, mods = set(), set()
     for node in ast.walk(module):
-        if isinstance(node, ast.ImportFrom) and node.module == CONTRACT_MODULE:
+        if isinstance(node, ast.ImportFrom):
             for a in node.names:
                 if a.name == FUNCTION:
                     funcs.add(a.asname or a.name)
@@ -188,7 +188,11 @@ def call_sites(root: Path = PROGRAMS, used: dict | None = None):
                     or (isinstance(node, ast.Name) and node.id in funcs))
 
         def walk(node, parents):
-            if isinstance(node, ast.Assign) and is_ref(node.value):
+            # Only this assignment form is followed by _aliases.  Every
+            # other storage shape must remain loose so the census refuses a
+            # call it cannot trace, rather than silently losing that site.
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], ast.Name) and is_ref(node.value):
                 accounted.add(id(node.value))
             if isinstance(node, ast.Call) and is_ref(node.func):
                 accounted.add(id(node.func))
@@ -437,6 +441,46 @@ def test_a_reference_the_census_cannot_follow_fails_it(tmp_path):
         "TABLE = {'m': selected_mode}\n"))
     with pytest.raises(UnaccountedReference):
         call_sites(root)
+
+
+@pytest.mark.parametrize("body", [
+    (
+        "import librelane_contract as _ll\n"
+        "class Holder:\n"
+        "    def f(self, project):\n"
+        "        self.mode = _ll.selected_mode\n"
+        "        return self.mode(project, '40')\n"
+    ),
+    (
+        "from librelane_contract import selected_mode\n"
+        "TABLE = {}\n"
+        "TABLE['mode'] = selected_mode\n"
+        "def f(project):\n"
+        "    return TABLE['mode'](project, '40')\n"
+    ),
+    (
+        "import librelane_contract as _ll\n"
+        "pick = other = _ll.selected_mode\n"
+        "def f(project):\n"
+        "    return other(project, '40')\n"
+    ),
+])
+def test_assignment_shapes_the_census_cannot_follow_refuse(tmp_path, body):
+    with pytest.raises(UnaccountedReference):
+        call_sites(_scratch(tmp_path, body))
+
+
+def test_the_census_counts_a_reexported_function_import(tmp_path):
+    root = tmp_path / "programs"
+    root.mkdir()
+    (root / "some_helper.py").write_text(
+        "from librelane_contract import selected_mode\n")
+    (root / "reexport_site.py").write_text(
+        "from some_helper import selected_mode\n"
+        "def f(project):\n"
+        "    return selected_mode(project, 'Z7')\n")
+    assert [(Path(f).name, steps) for f, _, steps in call_sites(root)] == [
+        ("reexport_site.py", ("Z7",))]
 
 
 # ── review fix 2 (review_wave4c W3): a dynamic site is keyed by its call ────
