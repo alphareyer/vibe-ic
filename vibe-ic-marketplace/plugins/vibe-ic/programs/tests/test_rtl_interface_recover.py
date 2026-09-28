@@ -260,3 +260,26 @@ def test_recover_from_prose_files_refuses_a_name_only_mention(tmp_path):
     rec = R.recover_from_prose_files([p], "fifo")
     assert rec == {"top_module": "fifo", "top_ports": [],
                    "source": "no-declaration-in-prose"}
+
+
+def test_a_commented_out_declaration_is_not_the_declaration():
+    text = ("```verilog\n"
+            "// module decoder(input a); -- old interface\n"
+            "module decoder(input [3:0] sel, output [15:0] y);\n"
+            "```\n")
+    decl = R.declared_module_text(text, "decoder")
+    assert decl is not None
+    ports = _by_name(R.recover_interface_from_text(decl, "decoder"))
+    assert set(ports) == {"sel", "y"}, ports
+    assert (ports["sel"]["width"], ports["y"]["width"]) == (4, 16)
+
+
+def test_an_unbalanced_paren_in_a_header_comment_does_not_hide_the_ports():
+    text = ("```verilog\n"
+            "module decoder(input [3:0] sel, // select (one-hot\n"
+            "               output [15:0] y);\n"
+            "```\n")
+    decl = R.declared_module_text(text, "decoder")
+    assert decl is not None
+    ports = _by_name(R.recover_interface_from_text(decl, "decoder"))
+    assert set(ports) == {"sel", "y"}, ports

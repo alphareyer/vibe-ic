@@ -494,6 +494,18 @@ def _declaration_end(text: str, start: int, target: str) -> Optional[int]:
     return sm.end() if sm else None
 
 
+def _blank_comments(s: str) -> str:
+    """`s` with every comment replaced by spaces of equal length.
+
+    Newlines inside a block comment are kept, so every offset still names
+    the same character: a match on this copy can be sliced from this copy.
+    """
+    def blank(m: "re.Match[str]") -> str:
+        return re.sub(r"[^\n]", " ", m.group(0))
+    s = re.sub(r"/\*.*?\*/", blank, s, flags=re.S)
+    return re.sub(r"//[^\n]*", blank, s)
+
+
 def declared_module_text(text: str, target: str) -> Optional[str]:
     """The text from the first real `module <target>` DECLARATION onward.
 
@@ -502,10 +514,18 @@ def declared_module_text(text: str, target: str) -> Optional[str]:
     text; within each, every `module <target>` occurrence is tried and the
     first with the declaration shape (see :func:`_declaration_end`) wins.
     None when no occurrence is a declaration. Chip-AGNOSTIC.
+
+    COMMENTS ARE NOT DECLARATIONS. The search runs on a copy whose comments
+    are blanked to equal-length spaces, and the result is sliced from that
+    copy. So a commented-out `// module <top>(...);` is never taken for the
+    declaration after it, and a `(` inside a header comment cannot unbalance
+    the port list. The parser strips comments anyway, so nothing it needs is
+    lost.
     """
     if not isinstance(text, str) or not text or not target:
         return None
-    regions = [m.group(1) for m in _HDL_FENCE_RE.finditer(text)] + [text]
+    regions = [_blank_comments(m.group(1))
+               for m in _HDL_FENCE_RE.finditer(text)] + [_blank_comments(text)]
     for region in regions:
         for m in re.finditer(rf"\bmodule\s+{re.escape(target)}\b", region):
             if _declaration_end(region, m.start(), target) is not None:
