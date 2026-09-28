@@ -165,20 +165,21 @@ if {[info exists ::env(VIBEIC_PRR_CENSUS_ONLY)] && $::env(VIBEIC_PRR_CENSUS_ONLY
 
 # ---- the fanout limit, counted on the database ----------------------------
 # name -> load count for every driven signal net with more loads than the
-# declared cap (MAX_FANOUT_CONSTRAINT, the `set_max_fanout` the sign-off SDC
-# carries). A load is what STA counts: every input pin on the net and every
+# cap sign-off judges (VIBEIC_PRR_MAX_FANOUT: the strictest `set_max_fanout`
+# of the SDC this step reads, which repair_design meets -- not LibreLane's
+# MAX_FANOUT_CONSTRAINT, a PDK default when L19 declares none). A load is what STA counts: every input pin on the net and every
 # top-level output port. Counted here rather than by
 # sta::max_fanout_violation_count, which takes Signal 11 in a multi-corner
 # session (see vic_census). Without a declared cap the dict is empty and
 # the caller says the limit was not declared.
 proc vic_fanout_declared {} {
-    return [expr {[info exists ::env(MAX_FANOUT_CONSTRAINT)]
-                  && [string is double -strict $::env(MAX_FANOUT_CONSTRAINT)]}]
+    return [expr {[info exists ::env(VIBEIC_PRR_MAX_FANOUT)]
+                  && [string is double -strict $::env(VIBEIC_PRR_MAX_FANOUT)]}]
 }
 proc vic_fanout_over {} {
     set out [dict create]
     if {![vic_fanout_declared]} { return $out }
-    set cap $::env(MAX_FANOUT_CONSTRAINT)
+    set cap $::env(VIBEIC_PRR_MAX_FANOUT)
     foreach net [$::block getNets] {
         if {[$net isSpecial] || [$net getSigType] in {POWER GROUND}} { continue }
         set loads 0
@@ -493,13 +494,13 @@ vic_say "antenna after eco=$::vic_ant_eco diodes=[llength $::vic_diodes]"
 set ::vic_fo_rounds 0
 # (the declared-cap test is spelled inline: this section is also exercised
 # on its own, with none of the procs above it)
-set ::vic_fo_declared [expr {[info exists ::env(MAX_FANOUT_CONSTRAINT)]
-    && [string is double -strict $::env(MAX_FANOUT_CONSTRAINT)]}]
+set ::vic_fo_declared [expr {[info exists ::env(VIBEIC_PRR_MAX_FANOUT)]
+    && [string is double -strict $::env(VIBEIC_PRR_MAX_FANOUT)]}]
 set ::vic_fo_added [expr {$::vic_fo_declared
     ? [vic_fanout_added $::vic_fo_repaired [vic_fanout_over]] : [dict create]}]
 while {[dict size $::vic_fo_added] && $::vic_fo_rounds < 2} {
     incr ::vic_fo_rounds
-    vic_say "round $::vic_fo_rounds: [dict size $::vic_fo_added] net(s) pushed over max_fanout $::env(MAX_FANOUT_CONSTRAINT) after repair_design: $::vic_fo_added"
+    vic_say "round $::vic_fo_rounds: [dict size $::vic_fo_added] net(s) pushed over max_fanout $::env(VIBEIC_PRR_MAX_FANOUT) after repair_design: $::vic_fo_added"
     set names [dict create]
     foreach inst [$::block getInsts] { dict set names [$inst getName] [[$inst getMaster] getName] }
     log_cmd repair_design {*}$rd_args
@@ -578,14 +579,14 @@ if {[llength $::vic_unrouted_new]} {
 if {!$::vic_fo_declared} {
     # No declared cap: nothing to keep, and nothing is claimed kept.
     utl::metric_integer vibeic__prr__fanout__added -1
-    vic_say "fanout limit: MAX_FANOUT_CONSTRAINT not declared; not measured"
+    vic_say "fanout limit: the SDC declares no set_max_fanout; not measured"
     set ::vic_fo_final [dict create]
 } else {
     set ::vic_fo_final [vic_fanout_added $::vic_fo_repaired [vic_fanout_over]]
     utl::metric_integer vibeic__prr__fanout__added [dict size $::vic_fo_final]
 }
 if {[dict size $::vic_fo_final]} {
-    puts stderr "LL_PRR_FANOUT_LIMIT_BROKEN: [dict size $::vic_fo_final] net(s) over max_fanout $::env(MAX_FANOUT_CONSTRAINT) that repair_design had within it: $::vic_fo_final; the candidate is not written"
+    puts stderr "LL_PRR_FANOUT_LIMIT_BROKEN: [dict size $::vic_fo_final] net(s) over max_fanout $::env(VIBEIC_PRR_MAX_FANOUT) that repair_design had within it: $::vic_fo_final; the candidate is not written"
     exit 1
 }
 

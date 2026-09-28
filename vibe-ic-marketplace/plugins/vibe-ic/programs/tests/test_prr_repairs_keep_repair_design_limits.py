@@ -178,7 +178,10 @@ def run(tmp_path, *, cap='4', fix=True):
              # D11's census procs, when the script carries them
              + _region(text, 'proc vic_needs_wire', '\n# ---- 0.'))
     section = text[text.index(START):text.index(END)]
-    env = '' if cap is None else f'set ::env(MAX_FANOUT_CONSTRAINT) {cap}\n'
+    # LibreLane's MAX_FANOUT_CONSTRAINT is the PDK default (10) whatever the
+    # SDC says; the cap the step must keep is the SDC's (VIBEIC_PRR_MAX_FANOUT).
+    env = 'set ::env(MAX_FANOUT_CONSTRAINT) 10\n' + (
+        '' if cap is None else f'set ::env(VIBEIC_PRR_MAX_FANOUT) {cap}\n')
     script = (HARNESS + env + f'set ::FIX {int(fix)}\n' + procs
               # what repair_design left: the cap held everywhere
               + 'set ::vic_fo_repaired [dict create]\n'
@@ -215,7 +218,7 @@ def test_without_a_declared_cap_nothing_is_claimed_kept(tmp_path):
     assert out.returncode == 0, out.stdout + out.stderr
     assert 'RD_CALLS 0' in out.stdout
     assert 'METRIC vibeic__prr__fanout__added -1' in out.stdout
-    assert 'MAX_FANOUT_CONSTRAINT not declared; not measured' in out.stdout
+    assert 'the SDC declares no set_max_fanout; not measured' in out.stdout
 
 
 def test_a_load_is_what_sta_counts(tmp_path):
@@ -223,7 +226,7 @@ def test_a_load_is_what_sta_counts(tmp_path):
     text = TCL.read_text()
     procs = _region(text, '# ---- the fanout limit', '# ---- 4. repair')
     assert procs, 'the script carries no fanout instrument'
-    script = (HARNESS + 'set ::env(MAX_FANOUT_CONSTRAINT) 4\n' + procs
+    script = (HARNESS + 'set ::env(VIBEIC_PRR_MAX_FANOUT) 4\n' + procs
               + 'puts "BEFORE [vic_fanout_over]"\n'
               + 'repair_antennas\n'
               + 'puts "AFTER [vic_fanout_over]"\n'
@@ -290,3 +293,54 @@ def test_the_repair_config_carries_the_exclusion(tmp_path, monkeypatch):
                                            'the rule under test'))
     repair = json.loads(configs[prr.REPAIR_STEP].read_text())
     assert repair['EXTRA_EXCLUDED_CELLS'] == ['std__dlyb_1']
+
+
+def test_the_cap_is_the_sdcs_not_librelanes_pdk_default(tmp_path):
+    """cmp3 D14 review: L19 declared no MAX_FANOUT_CONSTRAINT, so LibreLane
+    carried its PDK default 10, while the sign-off SDC said 4. The diode's
+    5th load must be caught against 4."""
+    out = run(tmp_path, cap='4')
+    assert 'RD_CALLS 1' in out.stdout, out.stdout + out.stderr
+    assert 'pushed over max_fanout 4' in out.stdout
+
+
+def test_the_runner_reads_the_strictest_set_max_fanout_of_the_sdc(tmp_path):
+    import importlib
+    runner = importlib.import_module('phase3_one_shot_runner')
+    sdc = tmp_path / 'constraint.sdc'
+    sdc.write_text('create_clock -period 10 clk\n'
+                   'set_max_fanout 8 [current_design]\n'
+                   'set_max_fanout 4 $_vibeic_drv_signal_in_ports\n')
+    cap, source = runner._sdc_max_fanout_cap(sdc)
+    assert cap == 4 and 'constraint.sdc' in source and '2 set_max_fanout' in source
+    sdc.write_text('create_clock -period 10 clk\n')
+    assert runner._sdc_max_fanout_cap(sdc) is None
+
+
+def test_the_repair_config_carries_the_sdc_cap(tmp_path, monkeypatch):
+    import importlib
+    import json
+    prr = importlib.import_module('librelane_postroute_repair')
+    contract = importlib.import_module('librelane_contract')
+
+    def resolve(project, image, pdk, ids, *, pdk_root, folder, overlay, docker):
+        out = {}
+        for step in ids:
+            path = project / 'phase3/librelane' / folder / f'{step}.json'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({'meta': {'step': step}, 'STA_CORNERS': ['c1'],
+                                        'MAX_FANOUT_CONSTRAINT': 10}))
+            path.with_name(path.stem + '.views.json').write_text(
+                json.dumps({'step': step, 'inputs': [], 'outputs': []}))
+            out[step] = path
+        return out
+    monkeypatch.setattr(contract, 'resolve_step_configs', resolve)
+    monkeypatch.setattr(prr, 'signoff_scene_sdc', lambda sdc, out, *d: out)
+    sdc = tmp_path / 'c.sdc'
+    sdc.write_text('set_max_fanout 4 [current_design]\n')
+    configs, _, _ = prr._prepare(tmp_path / 'proj', image='img', pdk='pdkA',
+                                 pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                                 pg_rules_tcl=None, refill_tcl=None, docker='docker',
+                                 max_fanout=(4, 'c.sdc: strictest of 1'))
+    repair = json.loads(configs[prr.REPAIR_STEP].read_text())
+    assert repair['VIBEIC_PRR_MAX_FANOUT'] == 4

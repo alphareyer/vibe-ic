@@ -124,6 +124,14 @@ class PostRouteRepair(ResizerStep):
                 units="%",
             ),
             Variable(
+                "VIBEIC_PRR_MAX_FANOUT",
+                Optional[int],
+                "The fanout cap sign-off judges: the strictest set_max_fanout "
+                "of the SDC this step reads (supplied by the caller with its "
+                "source). repair_design meets it; every later repair in the "
+                "step must keep it. Unset: the SDC declares none.",
+            ),
+            Variable(
                 "VIBEIC_PRR_ECO_EXPANSIONS",
                 int,
                 "How many times a refused ECO route (the fork's DRT-0712: the "
