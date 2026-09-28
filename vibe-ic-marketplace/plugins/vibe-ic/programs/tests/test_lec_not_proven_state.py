@@ -5,6 +5,8 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 from _plugin_tree import plugin_path
 
 sys.path.insert(0, str(plugin_path() / "programs"))
@@ -61,15 +63,15 @@ def test_not_run_is_explicit_and_never_passes(tmp_path):
     result = post.evaluate_report(doc)
     assert result["result"] == "NOT_PROVEN"
     assert result["counterexample_search"]["reason"] == "solver unavailable"
-    assert any("counterexample search NOT RUN: solver unavailable" in f
-               for f in result["findings"])
+    assert result["findings"][0].split("cycles: ", 1)[-1] == (
+        "counterexample search NOT RUN: solver unavailable")
     reports = tmp_path / "reports"
     reports.mkdir()
     (reports / "lec.json").write_text(json.dumps(doc))
     pre_result = pre.audit(tmp_path)
     assert pre_result.verdict == "NOT_PROVEN"
-    assert any("counterexample search NOT RUN: solver unavailable" in f.message
-               for f in pre_result.findings)
+    assert pre_result.findings[-1].message.split("cycles: ", 1)[-1] == (
+        "counterexample search NOT RUN: solver unavailable.")
 
 
 def test_decided_failure_survives_not_run_at_both_gates(tmp_path):
@@ -124,6 +126,27 @@ def test_bare_not_run_is_invalid_evidence_at_both_gates(tmp_path):
     assert pre_result.verdict != "NOT_PROVEN"
     assert any("NOT_RUN" in f.message for f in pre_result.findings)
     assert all("no counterexample found" not in f.message for f in pre_result.findings)
+
+
+@pytest.mark.parametrize("missing", ["reason", "method", "bound_cycles", "run_identity"])
+def test_each_not_run_field_is_required_by_both_gates(tmp_path, missing):
+    doc = _residual()
+    search = {
+        "result": "NOT_RUN", "reason": "SAT executable unavailable",
+        "method": "Yosys equiv_miter SAT", "bound_cycles": 20,
+        "run_identity": "fixture-run", "completeness": "BOUNDED",
+    }
+    del search[missing]
+    doc["counterexample_search"] = search
+    post_result = post.evaluate_report(doc)
+    assert post_result["verdict"] == "RUN_ERROR"
+    assert post_result["result"] == "FAIL"
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "lec.json").write_text(json.dumps(doc))
+    pre_result = pre.audit(tmp_path)
+    assert pre_result.verdict == "RUN_ERROR"
+    assert any(f.rule == "LEC_NOT_RUN_EVIDENCE_INVALID" for f in pre_result.findings)
 
 
 def test_complete_sat_disposition_requires_the_named_search(tmp_path):
