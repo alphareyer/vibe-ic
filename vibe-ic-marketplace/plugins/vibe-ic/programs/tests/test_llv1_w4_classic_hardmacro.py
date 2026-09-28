@@ -113,6 +113,21 @@ def chip(tmp_path):
     return p
 
 
+def chip_without_declared_die(tmp_path):
+    """A flagged Chip run relies on D1's run-local floorplan record."""
+    p = design(tmp_path, {'deliverable': 'DIE', 'top_cell': 'core'},
+               pads={'PAD_SOUTH': ['u_a'], 'PAD_NORTH': ['u_b'], 'PAD_EAST': [], 'PAD_WEST': []})
+    st = p / 'input' / 'submission_template'
+    (st / 'SELF_TAPEOUT.txt').write_text('# self tape-out\n')
+    (st / 'tapeout_declaration.json').write_text(json.dumps(_OD.attest(
+        {'schema': 'vibe-ic/tapeout_declaration/1',
+         'answers': {'deliverable': 'DIE', 'top_cell': 'core'}})))
+    put(p / DD.FLOORPLAN_RECTANGLES_REL, RECORD)
+    (tmp_path / 'pdkroot' / 'processA').mkdir(parents=True, exist_ok=True)
+    IF.write_record(p, 'librelane', resolved_by='test')
+    return p
+
+
 def resolve(tmp_path, p, steps=CHAIN):
     configs = contract.resolve_step_configs(p, 'img', 'processA', steps,
                                             pdk_root=tmp_path / 'pdkroot',
@@ -145,6 +160,14 @@ def test_under_the_flag_a_pad_ring_die_still_resolves_through_chip(tmp_path, res
     assert contract.librelane_flow(p)[0] == 'Chip'
     resolve(tmp_path, p, ['OpenROAD.Floorplan'])
     assert resolver[-1]['flow'] == 'Chip'
+
+
+def test_flagged_chip_keeps_d1s_runner_die(tmp_path, resolver):
+    p = chip_without_declared_die(tmp_path)
+    configs, sources, _ = resolve(tmp_path, p, ['OpenROAD.Floorplan'])
+    assert resolver[-1]['flow'] == 'Chip'
+    assert configs['OpenROAD.Floorplan']['DIE_AREA'] == RECORD['die_rect_um']
+    assert DD.FLOORPLAN_RECTANGLES_REL in sources['DIE_AREA']
 
 
 def test_classic_verilog_files_is_the_build_closure_without_a_wrapper(tmp_path, resolver):
