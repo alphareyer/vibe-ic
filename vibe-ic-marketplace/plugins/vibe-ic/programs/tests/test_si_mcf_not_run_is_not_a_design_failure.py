@@ -50,6 +50,7 @@ umbrella test below drives each missing-input category through that boundary.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -60,6 +61,7 @@ if str(_PROGRAMS) not in sys.path:
 
 import si_mcf_sta as M            # noqa: E402
 import si_mcf_sta_check as G      # noqa: E402
+from _hostpaths import repo_path  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
@@ -571,6 +573,26 @@ def test_producer_relabel_preserves_step27_failure(tmp_path):
     assert result.status == "FAIL", result.reasons
     doc = json.loads((proj / "reports/phase3/si_mcf_sta_check.json").read_text())
     assert "FOLD_NOT_APPLIED" in _categories(doc), doc["findings"]
+
+
+def test_complete_checked_in_spefs_do_not_become_unmeasured_by_relabel(tmp_path):
+    source = repo_path(
+        "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/"
+        "si_mcf_zero_coupling/coupled")
+    proj = tmp_path / "checked_in"
+    shutil.copytree(source, proj)
+    clean_rc, clean = _run(proj)
+    assert clean_rc.returncode == 0 and clean["verdict"] == "PASS", clean
+
+    rp = proj / "reports/phase3/si_mcf_sta.json"
+    producer = json.loads(rp.read_text())
+    producer.update(verdict="NOT_MEASURED", error="producer declined this scene")
+    rp.write_text(json.dumps(producer))
+    relabeled_rc, relabeled = _run(proj)
+    assert relabeled_rc.returncode == G.RC_FAIL, relabeled
+    assert relabeled["verdict"] == "FAIL", relabeled
+    assert relabeled["summary"]["denominator"]["examined"] > 0
+    assert "PRODUCER_NOT_MEASURED" in _categories(relabeled)
 
 
 def test_a_partial_run_that_proved_something_is_not_called_not_run(tmp_path):
