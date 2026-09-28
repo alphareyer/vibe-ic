@@ -479,10 +479,13 @@ def _phase3_has_run(project: Path) -> bool:
     measured it. Before that it is simply not yet measurable, and saying so is
     not the same as saying it was missed.
     """
-    if (project / "reports" / "orchestrator" / "phase3_one_shot.json").is_file():
-        return True
-    d = project / "reports" / "phase3"
-    return d.is_dir() and any(d.rglob("*.json"))
+    # Phase 2 deliberately writes phase-3 *inputs* and planning receipts under
+    # reports/phase3 (padring, pre-PnR STA, floorplan, and compliance records).
+    # They prove preparation, not that a sign-off producer ran.  The phase-3
+    # runner's own orchestrator receipt is the sole completion witness; using
+    # directory presence made a fresh phase-2 tree look completed and restored
+    # the P2 -> L24 -> P3 deadlock.
+    return (project / "reports" / "orchestrator" / "phase3_one_shot.json").is_file()
 
 
 def _declared_process_corner_roles(project: Path, native: Any, required: List[str]

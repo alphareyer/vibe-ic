@@ -295,6 +295,19 @@ def test_no_signoff_record_before_phase3_is_not_yet_measurable(tmp_path):
     assert "REQUIRES" not in out
 
 
+def test_phase2_phase3_planning_receipts_do_not_pretend_signoff_ran(tmp_path):
+    """Fresh Phase 2 writes this namespace before Phase 3 is allowed to run.
+    Treating its mere presence as Phase 3 made L24 demand impossible evidence
+    and halted the front door before its producers could execute."""
+    proj = _project(tmp_path, spec_md="Sign-off requires STA met.\n")
+    _emit_l24(proj)
+    _report(proj, "phase3/padring.json", {"program": "pad_ring"})
+    _report(proj, "phase3/sta/pre_pnr_summary.json", {"passed": True})
+    rc, out = _run_gate(proj)
+    assert rc == 0, out
+    assert "not yet measurable" in out
+
+
 def test_no_signoff_record_after_phase3_FAILS(tmp_path):
     """And the control that keeps it honest."""
     proj = _proj_requiring_sta(tmp_path)
