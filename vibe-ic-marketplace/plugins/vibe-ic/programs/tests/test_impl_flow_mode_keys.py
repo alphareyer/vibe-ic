@@ -167,7 +167,13 @@ def test_the_real_main_admits_with_the_mode(monkeypatch, tmp_path, module_name):
     assert not IF.record_path(a).exists()   # the default wrote nothing
 
     flagged = _run_to_admission(monkeypatch, module_name, b, "--librelane", *pdk)
-    assert flagged == {**default, "impl": "librelane"}
+    # The mode is spread on top of the default config, unchanged. W3 (the
+    # flow-mode layer) adds its own two keys to the same identity under a
+    # flag -- named here, so any OTHER extra key is still a failure.
+    assert {k: flagged[k] for k in default} == default
+    assert flagged["impl"] == "librelane"
+    assert set(flagged) - set(default) - {"impl"} <= {
+        "librelane_impl_layer", "librelane_contract_sha256"}
     rec = IF.read_record(b)
     assert rec["impl"] == "librelane" and rec["resolved_by"] == module_name
 
