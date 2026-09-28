@@ -1198,6 +1198,31 @@ def test_missing_input_pin_census_refuses_declared_repair(
                                     if f.severity == 'ERROR']
 
 
+@pytest.mark.parametrize('which', ['baseline', 'final'])
+def test_missing_sta_digest_cannot_publish_a_measured_repair(
+        tmp_path, monkeypatch, which):
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': _base(4.0, -0.3),
+        '32-cand01': _cand(3.99995, 0.3)})
+    report = prr.run_in_chain(
+        project, mode='librelane', image='img', pdk='pdk', pdk_root=tmp_path,
+        sdc=sdc, derate=(0.95, 1.05), route_state=route, route_drc=0,
+        programs_dir=shim)
+    assert report['adopted'] == '32-cand01'
+    # A producer that loses either digest must invalidate its earlier receipt.
+    report[which].pop('sta_state_sha256')
+    prr._clear_declared_repair(project)
+    prr._set_census_verdict(report, report['baseline'], report['final'])
+    source = project / prr.REPORT_REL
+    prr.write_json(source, report)
+    prr._publish_declared_repair(project, report, source)
+    assert report['verdict'] == 'NOT_MEASURED'
+    assert report['declared_repair_publication']['status'] == 'NOT_MEASURED'
+    assert 'digest' in report['declared_repair_publication']['reason']
+    assert not (project / prr.DECLARED_REPAIR_REL /
+                'postroute_timing_repair_decision.json').exists()
+
+
 def test_in_chain_tool_refusal_invalidates_the_prior_declared_decision(
         tmp_path, monkeypatch):
     project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {})
