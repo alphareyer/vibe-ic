@@ -52163,6 +52163,7 @@ def _write_lvs_verdict(project: Path, status: str, finding: str,
     if extras:
         payload.update(extras)
     payload["phase2_synth"] = _pl.phase2_synth_input_identity(project)
+    payload["phase3_inputs"] = _pl.phase3_signoff_input_identity(project)
     path.write_text(json.dumps(payload, indent=2) + "\n")
     try:
         return str(path.relative_to(project))
@@ -73866,6 +73867,7 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     report = {
         "program": "phase3_one_shot_runner", "bounded": True,
         "phase2_synth": _pl.phase2_synth_input_identity(project),
+        "phase3_inputs": _pl.phase3_signoff_input_identity(project),
         "window_run_id": os.environ.get("VIBEIC_PHASE3_WINDOW_RUN_ID"),
         "declared_window": {"entry_step": args.entry_step,
                             "exit_step": args.exit_step,
@@ -75431,6 +75433,7 @@ def main() -> int:
     summary = {
         "project": str(project),
         "phase2_synth": _pl.phase2_synth_input_identity(project),
+        "phase3_inputs": _pl.phase3_signoff_input_identity(project),
         "pdk": pdk.name,
         "top": args.top_name,
         # WHICH BUILD produced this record. Reading a published report, there

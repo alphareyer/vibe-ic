@@ -487,17 +487,17 @@ def _phase3_has_run(project: Path) -> bool:
     # directory presence made a fresh phase-2 tree look completed and restored
     # the P2 -> L24 -> P3 deadlock.
     receipt = project / "reports" / "orchestrator" / "phase3_one_shot.json"
-    current = _pl.phase2_synth_input_identity(project)
-    if receipt.is_file() and current is None:
-        return True
+    current = _pl.phase3_signoff_input_identity(project)
     if current is None:
         return False
     if receipt.is_file():
         try:
-            published = json.loads(receipt.read_text()).get("phase2_synth")
+            published = json.loads(receipt.read_text())
         except (OSError, ValueError, AttributeError):
             published = None
-        if published == current:
+        if (isinstance(published, dict) and
+                published.get("phase2_synth") == current["phase2_synth"] and
+                published.get("phase3_inputs") == current):
             return True
     # An LVS producer may have run even if Phase 3 aborted before writing its
     # orchestrator summary. Retain that evidence path only when the producer's
@@ -510,7 +510,8 @@ def _phase3_has_run(project: Path) -> bool:
     return (isinstance(row, dict) and
             row.get("generated_by") ==
             "phase3_one_shot_runner:_run_extraction_lvs (#477)" and
-            row.get("phase2_synth") == current)
+            row.get("phase2_synth") == current["phase2_synth"] and
+            row.get("phase3_inputs") == current)
 
 
 def _declared_process_corner_roles(project: Path, native: Any, required: List[str]
