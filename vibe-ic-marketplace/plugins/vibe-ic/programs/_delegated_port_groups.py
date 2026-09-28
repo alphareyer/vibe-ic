@@ -75,12 +75,11 @@ def _identifiers(sections: list[tuple[str, str, list[str]]]) -> dict[str, set[st
         # A single example's final token is the signal, not a group prefix.
         if len(names) == 1 and common:
             common.pop()
-        if common:
+        semantic = (common[1:] if common and common[0] in {"i", "o", "io"}
+                    else common)
+        if semantic:
             owned.add("_".join(common) + "_")
-        if common and common[0] in {"i", "o", "io"}:
-            common.pop(0)
-        if common:
-            owned.add(common[0])
+            owned.add(semantic[0])
     return identities
 
 

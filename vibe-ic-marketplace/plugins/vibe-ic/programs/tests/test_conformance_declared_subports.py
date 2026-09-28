@@ -223,6 +223,17 @@ def test_sibling_sections_do_not_delegate_the_previous_heading():
                        {"L3_external_interface.md": document}))
 
 
+def test_generic_direction_prefix_of_sibling_does_not_veto_own_group():
+    sys.path.insert(0, str(PROGRAMS))
+    import _delegated_port_groups as groups
+
+    sibling = SIBLING_SECTION.replace("o_debug_req", "o_addr").replace(
+        "o_debug_ack", "o_we")
+    rows = groups.extract_delegated_groups(
+        {"L3_external_interface.md": DELEGATION + sibling})
+    assert any(row["group"] == "sram" for row in rows)
+
+
 @pytest.mark.parametrize("statement", AUTHORITY_SENTENCE)
 def test_phase1_keeps_explicit_port_name_authority(statement):
     sys.path.insert(0, str(PROGRAMS))
