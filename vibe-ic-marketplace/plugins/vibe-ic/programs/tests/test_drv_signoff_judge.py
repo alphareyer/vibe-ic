@@ -98,7 +98,7 @@ def _bundle(tmp_path: Path) -> dict:
             stage["clock_driver_fanout"] = []
         stages.append(stage)
     clean = _file(tmp_path, "violators.rpt", _report(violators=True))
-    all_limits = _file(tmp_path, "all.rpt", _report())
+    all_limits = _file(tmp_path, "all.rpt", _report(fanout=2))
     positive = _file(tmp_path, "control.rpt", _report(fanout=2, fanout_limit=1,
                        cap_limit=.01, slew_limit=.01, violators=True))
     layout = _file(tmp_path, "routed.def", "ROUTED DEF\n")
@@ -134,7 +134,9 @@ def _bundle(tmp_path: Path) -> dict:
     scene["spef_extraction_receipt"] = _file(
         tmp_path, "spef_extraction.json", json.dumps({
             "routed_def_sha256": layout["sha256"],
-            "spef_sha256": scene["spef"]["sha256"]}))
+            "spef_sha256": scene["spef"]["sha256"],
+            "rc_corner": "nom",
+            "extraction_command_sha256": "a" * 64}))
     digest = netlist["sha256"]
     return {"identity": {"run_id": "run-1", "tree_sha": "tree-a",
              "project": str(tmp_path), "pdk": "synthetic", "library": "logic",
@@ -155,7 +157,7 @@ def _bundle(tmp_path: Path) -> dict:
 def _violate(bundle: dict, root: Path, kind: str, *, value: float,
              limit: float, net_class="data", cell_class="std") -> None:
     scene = bundle["scenes"][0]
-    numbers = {"fanout": 1, "fanout_limit": 4, "cap": .1,
+    numbers = {"fanout": 2, "fanout_limit": 4, "cap": .1,
                "cap_limit": .2, "slew": .1, "slew_limit": 3}
     numbers[{"max_slew": "slew", "max_capacitance": "cap",
              "max_fanout": "fanout"}[kind]] = value
@@ -265,7 +267,7 @@ def test_all_limits_report_cannot_hide_a_named_violator(tmp_path):
         tmp_path, "counter.log", "".join(
             f"DRV_COUNTER {k} 0\n" for k in drv.KINDS))
     result = drv.judge(bundle)
-    assert result["verdict"] == "NOT_MEASURED"
+    assert result["verdict"] == "FAIL"
     assert any("all-limits vs violator names" in n
                for n in result["not_measured"])
 
@@ -287,7 +289,8 @@ def test_signoff_sdc_ten_against_declared_four_fails_even_if_report_clean(tmp_pa
     (lambda b: b["scenes"][0]["counters"].update(max_fanout=1), "names != counter"),
     (lambda b: b["scenes"][0].update(unannotated_nets=1), "annotation"),
     (lambda b: b["scenes"][0].update(propagated_clocks=False), "propagated"),
-    (lambda b: b["scenes"][0]["positive_control_expected"].update(max_slew=2), "planted"),
+    (lambda b: b["scenes"][0]["positive_control_counters"].update(max_slew=2),
+     "positive control"),
 ])
 def test_missing_instrument_evidence_is_not_measured(tmp_path, mutation, needle):
     bundle = _bundle(tmp_path)
@@ -517,4 +520,222 @@ def test_step32_rechecks_final_state_identity_after_late_repair(tmp_path):
         tmp_path, "other.def", "OTHER ROUTE\n")
     source.write_text(json.dumps(bundle))
     repair._step32_drv_signoff(tmp_path, report)
-    assert report["drv_signoff"]["verdict"] == "FAIL"
+    assert report["drv_signoff"]["verdict"] == "NOT_MEASURED"
+    assert report["verdict"] == "NOT_MEASURED"
+
+
+def test_scene_linked_liberty_is_the_hard_slew_limit(tmp_path):
+    bundle = _bundle(tmp_path)
+    ff = _file(tmp_path, "ff.lib", '''library (ff) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ nom_process : 1; nom_voltage : 5; nom_temperature : 25;
+ cell (logic) { pin (Y) { max_transition : 2.6;
+   max_capacitance : 20; } }
+}''')
+    bundle["current"]["liberties"] = [{"name": "ff", **ff}]
+    bundle["frozen"]["liberties"] = {"ff": ff["sha256"]}
+    bundle["frozen"]["scene_liberties"]["typ_nom"] = ["ff"]
+    bundle["current"]["scene_liberties"]["typ_nom"] = ["ff"]
+    bundle["scenes"][0]["linked_liberties"] = [{"name": "ff", **ff}]
+    bundle["scenes"][0]["liberty"] = "ff"
+    _violate(bundle, tmp_path, "max_slew", value=3.2, limit=2.6)
+    result = drv.judge(bundle)
+    assert result["findings"][0]["failed_tier"] == "T1_LIBERTY"
+    assert result["findings"][0]["waivable"] is False
+
+
+def test_clean_tool_flag_cannot_hide_wider_cap_limit(tmp_path):
+    bundle = _bundle(tmp_path)
+    bundle["scenes"][0]["all_limits_report"] = _file(
+        tmp_path, "all.rpt", _report(cap=.3, cap_limit=.4))
+    result = drv.judge(bundle)
+    assert result["verdict"] == "FAIL"
+    assert any("max_capacitance" in error and "limit" in error
+               for error in result["failures"])
+
+
+def test_control_expected_is_recomputed_from_real_population(tmp_path):
+    bundle = _bundle(tmp_path)
+    # Fanout one is part of the all-limits census but cannot violate limit one.
+    # A fabricated control row/count of one used to make this bundle pass.
+    bundle["scenes"][0]["all_limits_report"] = _file(
+        tmp_path, "all.rpt", _report(fanout=1))
+    result = drv.judge(bundle)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert any("max_fanout" in reason and "control" in reason
+               for reason in result["not_measured"])
+
+
+def test_partially_unannotated_drivers_block_a_clean_verdict(tmp_path):
+    bundle = _bundle(tmp_path)
+    bundle["scenes"][0]["parasitic_annotation_report"] = _file(
+        tmp_path, "annotation.rpt",
+        "Found 0 unannotated drivers.\n"
+        "Found 1 partially unannotated drivers.\n")
+    result = drv.judge(bundle)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert any("unannotated" in reason for reason in result["not_measured"])
+
+
+def test_missing_routed_def_downgrades_waived_to_not_measured(tmp_path):
+    bundle = _bundle(tmp_path)
+    _violate(bundle, tmp_path, "max_fanout", value=5, limit=4)
+    bundle["pins"]["u/Y"]["loads"] = {"logical": 4, "antenna_diode": 1,
+                                          "cts_buffer": 0}
+    row = drv.judge(bundle)["findings"][0]
+    bundle["waiver_ledger"] = [_owner_waiver(bundle, tmp_path, row)]
+    source = tmp_path / "reports/phase3/sta/drv_signoff_bundle.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(json.dumps(bundle))
+    output = tmp_path / "receipt.json"
+    assert drv.main([str(tmp_path), "--json", str(output)]) != 0
+    assert json.loads(output.read_text())["verdict"] == "NOT_MEASURED"
+
+
+def test_step23_without_capture_plan_is_not_measured(tmp_path):
+    import flow_compliance_check as flow
+    step = {"id": 23, "name": "post-route STA", "stage": "phase3/stage3/sta",
+            "required_outputs": [], "gate": {"all_of": [
+                {"program_exit_zero": "drv_signoff_judge . --json "
+                 "reports/phase3/sta/drv_signoff.json"}]}}
+    result = flow.check_step(tmp_path, step, {})
+    assert result.status == "NOT_MEASURED", result.reasons
+
+
+def test_runner_cannot_reuse_stale_pass_receipt_after_judge_crash(tmp_path, monkeypatch):
+    import subprocess
+    import phase3_one_shot_runner as runner
+    output = tmp_path / "reports/phase3/sta/drv_signoff.json"
+    output.parent.mkdir(parents=True)
+    output.write_text(json.dumps({"name": "DRV(tran/cap/fanout)",
+                                  "verdict": "PASS"}))
+    monkeypatch.setattr(runner._pr, "run", lambda *a, **k:
+                        subprocess.CompletedProcess(a, 1, "", "judge crashed"))
+    row = runner._run_declared_signoff_gate(
+        tmp_path, "drv_signoff", "drv_signoff_judge.py",
+        "reports/phase3/sta/drv_signoff.json")
+    assert row.status == "NOT_MEASURED"
+
+
+def test_plan_override_flag_cannot_authorize_wider_slew(tmp_path):
+    bundle = _bundle(tmp_path)
+    bundle["frozen"]["values"]["slew_ns"] = 4
+    bundle["current"]["values"]["slew_ns"] = 4
+    bundle["owner_design_override"] = {"slew_ns": "approved"}
+    sdc = _file(tmp_path, "signoff_sdc",
+                "set_max_fanout 4 [current_design]\n"
+                "set_max_transition 4 [current_design]\n"
+                "set_max_capacitance 0.2 [current_design]\n")
+    bundle["current"]["sources"]["signoff_sdc"] = sdc
+    bundle["frozen"]["sources"]["signoff_sdc"] = sdc["sha256"]
+    signoff = next(s for s in bundle["stages"] if s["name"] == "signoff_sta")
+    signoff["applied"]["slew_ns"] = 4
+    signoff["sdc_snapshot"] = sdc
+    bundle["scenes"][0]["all_limits_report"] = _file(
+        tmp_path, "all.rpt", _report(fanout=2, slew_limit=4))
+    result = drv.judge(bundle)
+    assert result["verdict"] == "FAIL"
+    assert any("design override" in error for error in result["failures"])
+
+
+def test_directory_judge_binds_project_to_argument(tmp_path):
+    bundle = _bundle(tmp_path)
+    other = tmp_path / "other_project"
+    l9 = other / "phase1/generated_docs/L9.md"
+    l9.parent.mkdir(parents=True)
+    l9.write_text("| SYNTH_MAX_FANOUT | 4 |\n")
+    bundle["identity"]["project"] = str(other)
+    source = tmp_path / "reports/phase3/sta/drv_signoff_bundle.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(json.dumps(bundle))
+    routed = tmp_path / "phase3/stage3/pnr/routed.def"
+    routed.parent.mkdir(parents=True)
+    routed.write_text("ROUTED DEF\n")
+    output = tmp_path / "receipt.json"
+    drv.main([str(tmp_path), "--json", str(output)])
+    result = json.loads(output.read_text())
+    assert result["verdict"] == "NOT_MEASURED"
+    assert any("project" in reason for reason in result["not_measured"])
+
+
+def test_declared_signoff_rollup_separates_waived_from_unchecked():
+    import phase3_one_shot_runner as runner
+    row = runner.StepResult(
+        "drv_signoff", "WAIVED", waiver_rows=[{"id": "u/Y",
+        "reason": "owner DRV deviation", "owner": "reyerchu"}])
+    rollup = runner.declared_signoff_rollup([row])
+    assert rollup["waived"] == ["drv_signoff"]
+    assert rollup["not_checked"] == []
+    assert "WAIVED" in rollup["line"]
+
+
+def test_completion_audit_names_waived_without_a_pass_claim(
+        tmp_path, monkeypatch, capsys):
+    import phase23_completion_self_audit_check as audit
+    monkeypatch.setattr(audit, "_run_compliance", lambda *a, **k:
+                        (1, "Overall: WAIVED  (strict=True)\n"
+                            "Steps: 34 total (33/34 executed PASS, 0 DEFERRED)\n"))
+    monkeypatch.setattr(sys, "argv", ["phase23_completion_self_audit_check",
+                                      str(tmp_path)])
+    assert audit.main() == 1
+    output = capsys.readouterr().out
+    assert "[WAIVED] phase23_completion_self_audit_check" in output
+    assert "below the recorded baseline quality" in output.lower()
+
+
+def test_unrelated_missing_measurement_does_not_invalidate_owner_waiver(tmp_path):
+    bundle = _bundle(tmp_path)
+    _violate(bundle, tmp_path, "max_capacitance", value=.3, limit=.2)
+    row = drv.judge(bundle)["findings"][0]
+    bundle["waiver_ledger"] = [_owner_waiver(bundle, tmp_path, row)]
+    bundle["scenes"][0]["unannotated_nets"] = 1
+    result = drv.judge(bundle)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert result["waived"]
+    assert not any("no valid owner waiver" in failure
+                   for failure in result["failures"])
+
+
+def test_scene_rc_suffix_must_match_extraction_rc(tmp_path):
+    bundle = _bundle(tmp_path)
+    scene = bundle["scenes"][0]
+    bundle["frozen"]["rc_corners"].append("min")
+    scene["rc_corner"] = "min"
+    scene["spef_extraction_receipt"] = _file(
+        tmp_path, "spef_extraction.json", json.dumps({
+            "routed_def_sha256": bundle["identity"]["artifacts"]["def"]["sha256"],
+            "spef_sha256": scene["spef"]["sha256"],
+            "rc_corner": "min", "extraction_command_sha256": "a" * 64}))
+    result = drv.judge(bundle)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert any("RC corner" in reason for reason in result["not_measured"])
+
+
+def test_unmatched_l9_fanout_scope_cannot_fall_back_to_pdk_ten(tmp_path):
+    bundle = _bundle(tmp_path)
+    l9 = _file(tmp_path, "phase1/generated_docs/L9.md",
+               "| Library | MAX_FANOUT_CONSTRAINT |\n"
+               "| --- | --- |\n| neutral_* | 4 |\n")
+    bundle["current"]["sources"]["l9"] = l9
+    bundle["frozen"]["sources"]["l9"] = l9["sha256"]
+    bundle["identity"]["library"] = "other_library"
+    bundle["frozen"]["values"]["fanout"] = 10
+    bundle["current"]["values"]["fanout"] = 10
+    sdc = _file(tmp_path, "signoff_sdc",
+                "set_max_fanout 10 [current_design]\n"
+                "set_max_transition 3 [current_design]\n"
+                "set_max_capacitance 0.2 [current_design]\n")
+    bundle["current"]["sources"]["signoff_sdc"] = sdc
+    bundle["frozen"]["sources"]["signoff_sdc"] = sdc["sha256"]
+    for stage in bundle["stages"]:
+        stage["applied"]["fanout"] = 10
+        if stage["name"] == "synth":
+            stage["abc_script"] = _file(tmp_path, "abc.script", "buffer -N 10\n")
+        else:
+            stage["sdc_snapshot"] = sdc
+            stage["fanout_check_limit"] = 10
+    bundle["scenes"][0]["all_limits_report"] = _file(
+        tmp_path, "all.rpt", _report(fanout=2, fanout_limit=10))
+    result = drv.judge(bundle)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert any("L9 fanout scope" in reason for reason in result["not_measured"])

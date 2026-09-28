@@ -17,9 +17,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_text  # noqa: E402
+import _eda_image  # noqa: E402
 from drv_signoff_judge import KINDS, _COMMAND, _sha  # noqa: E402
 
-_IMAGE = "ghcr.io/vibeic/vibeic-eda:0.3.84"
 _COUNTER = re.compile(
     r"(?m)^DRV_COUNTER\s+(max_slew|max_capacitance|max_fanout)\s+(\d+)\s*$")
 
@@ -90,22 +90,31 @@ def _script(plan: dict, scene: dict, out: Path, *, control: bool,
                 for kind in KINDS) + "close $_f\n")
 
 
-def capture(plan: dict, out_dir: Path, *, image: str = _IMAGE) -> dict:
+def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
     """Run each scene and its planted control; return a content-addressed bundle."""
     import instrument_calibration
     instrument_calibration.assert_calibrated("drv_signoff_capture::capture")
+    image = image or _eda_image.resolve()
     out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     bundle = {k: plan[k] for k in ("identity", "frozen", "current", "stages",
-                                  "pins", "waiver_ledger")}
+                                  "pins")}
     bundle["identity"] = dict(bundle["identity"])
     image_info = subprocess.run(
-        ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
+        ["docker", "image", "inspect", image, "--format", "{{json .}}"],
         capture_output=True, text=True, check=False)
-    if image_info.returncode or not image_info.stdout.strip().startswith("sha256:"):
+    try:
+        image_doc = json.loads(image_info.stdout)
+        digest = image_doc["Id"]
+        version = (image_doc.get("Config") or {}).get("Labels", {}).get(
+            "org.opencontainers.image.version")
+    except (ValueError, TypeError, KeyError, AttributeError):
+        digest, version = None, None
+    if image_info.returncode or not str(digest).startswith("sha256:"):
         raise ValueError("pinned OpenSTA image identity unavailable")
     bundle["identity"]["tool_image"] = image
-    bundle["identity"]["tool_image_digest"] = image_info.stdout.strip()
+    bundle["identity"]["tool_image_digest"] = digest
+    bundle["identity"]["tool_image_oci_version"] = version
     bundle["postroute_repair_ran"] = bool(plan.get("postroute_repair_ran"))
     bundle["scenes"] = []
     roots = {out_dir}
@@ -137,15 +146,13 @@ def capture(plan: dict, out_dir: Path, *, image: str = _IMAGE) -> dict:
             raise ValueError("OpenSTA did not emit every DRV counter")
         annotation = (scene_dir / "annotation.rpt").read_text()
         unannotated = re.findall(
-            r"Found\s+(\d+)\s+unannotated\s+(?:drivers|nets)", annotation)
+            r"Found\s+(\d+)\s+(?:partially\s+)?unannotated\s+(?:drivers|nets)",
+            annotation)
         row = dict(scene)
         row.update(fresh_process=True, postroute=True, propagated_clocks=True,
                    command=_COMMAND, all_limits_max_count=max_count,
                    positive_control_fresh_process=True,
                    counters=counts, positive_control_counters=control_counts,
-                   # Expected population comes from the independent pin
-                   # census, never from the control report being graded.
-                   positive_control_expected={k: population[k] for k in KINDS},
                    unannotated_nets=(sum(map(int, unannotated))
                                      if unannotated else None),
                    report=_ref(scene_dir / "violators.rpt"),

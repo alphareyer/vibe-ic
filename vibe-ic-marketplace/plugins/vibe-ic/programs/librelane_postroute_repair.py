@@ -331,22 +331,29 @@ def _step32_drv_signoff(project: Path, report: Dict[str, Any]) -> None:
     result: Dict[str, Any]
     try:
         bundle = json.loads(source.read_text())
-        result = _drv.judge(bundle)
+        result = _drv.judge(bundle, project=project)
         state_path = report.get("adopted_state")
         state = _load(Path(state_path)) if state_path else {}
         final_def = Path(str(state.get("def") or ""))
         recorded = ((bundle.get("identity") or {}).get("artifacts") or {}).get(
             "def", {}).get("sha256")
         if not final_def.is_file() or _drv._sha(final_def) != recorded:
-            result["verdict"] = "FAIL" if final_def.is_file() else "NOT_MEASURED"
-            result.setdefault("failures" if final_def.is_file() else
-                              "not_measured", []).append(
+            result.setdefault("not_measured", []).append(
                 "step 32 final routed DEF differs from DRV bundle identity"
                 if final_def.is_file() else "step 32 final routed DEF absent")
+            result["verdict"] = ("FAIL" if result.get("failures") else
+                                 "NOT_MEASURED")
     except (OSError, ValueError, TypeError) as exc:
         result = {"name": "DRV(tran/cap/fanout)", "verdict": "NOT_MEASURED",
                   "not_measured": [f"step 32 DRV evidence unavailable: {exc}"]}
     report["drv_signoff"] = result
+    # The rejudge is a gate on the adopted layout, not an unused sidecar.
+    if result["verdict"] == "FAIL":
+        report["verdict"] = "FAIL"
+    elif result["verdict"] == "NOT_MEASURED" and report.get("verdict") != "FAIL":
+        report["verdict"] = "NOT_MEASURED"
+    elif result["verdict"] == "WAIVED" and report.get("verdict") == "PASS":
+        report["verdict"] = "WAIVED"
     output = project / "reports/phase3/sta/drv_signoff_step32.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     write_json(output, result)

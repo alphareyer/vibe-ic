@@ -9,9 +9,11 @@ Noise/SI, EM and max_length remain separately NOT_MEASURED.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,7 @@ _COMMAND = "report_check_types -max_slew -max_capacitance -max_fanout -violators
 _REQUIRED_STAGES = ("synth", "placement_repair", "cts", "post_grt_repair", "signoff_sta")
 _FORBIDDEN_SDC = re.compile(r"\b(set_case_analysis|set_disable_timing|set_ideal_network|set_ideal_net)\b")
 _SCENE_PROFILES = Path(__file__).resolve().parent / "data/drv_signoff_scene_profiles.json"
+_OWNER_SIGNERS = Path(__file__).resolve().parent / "data/drv_owner_allowed_signers"
 
 
 def _sha(path: Path) -> str:
@@ -185,9 +188,123 @@ def _integrator_value(body: str, *keys: str) -> float | None:
     return None
 
 
+def _owner_records(project: Path | None, identity: dict, current: dict,
+                   frozen: dict) -> tuple[list[dict], str]:
+    """Read only independently signed owner records, never the capture plan."""
+    try:
+        signers = _OWNER_SIGNERS.read_text()
+    except OSError:
+        return [], "OWNER_SIGNATURE_UNAVAILABLE"
+    if not any(line.strip().startswith("owner ") for line in signers.splitlines()):
+        return [], "OWNER_SIGNATURE_UNAVAILABLE"
+    if project is None:
+        return [], "OWNER_PROJECT_UNBOUND"
+    expected = {
+        "run_id": identity.get("run_id"),
+        "tree_sha": identity.get("tree_sha"),
+        "netlist_sha256": identity.get("sta_netlist"),
+        "sdc_sha256": (current.get("sources") or {}).get("signoff_sdc", {}).get("sha256"),
+        "l7_sha256": (frozen.get("sources") or {}).get("l7"),
+        "l9_sha256": (frozen.get("sources") or {}).get("l9"),
+        "pdk_config_sha256": (frozen.get("sources") or {}).get("pdk_config"),
+        "spec_version": identity.get("spec_version"),
+    }
+    approved: list[dict] = []
+    folder = project / "owner_approvals" / "drv"
+    for path in sorted(folder.glob("*.json")):
+        signature = path.with_suffix(path.suffix + ".sig")
+        if not signature.is_file():
+            continue
+        try:
+            payload = path.read_bytes()
+            process = subprocess.run(
+                ["ssh-keygen", "-Y", "verify", "-f", str(_OWNER_SIGNERS),
+                 "-I", "owner", "-n", "vibeic-drv-owner", "-s", str(signature)],
+                input=payload, capture_output=True, check=False)
+            if process.returncode:
+                continue
+            record = json.loads(payload)
+            if (isinstance(record, dict) and record.get("identity") == expected
+                    and record.get("type") in
+                    ("waiver", "design_override", "clock_limits")):
+                approved.append(record)
+        except (OSError, ValueError, TypeError):
+            continue
+    return approved, "OWNER_APPROVAL_ABSENT"
+
+
+def _approved_before_run(record: dict, identity: dict) -> bool:
+    try:
+        approved = datetime.fromisoformat(record["owner_timestamp"])
+        started = datetime.fromisoformat(identity["run_started_at"])
+        return bool(record.get("owner_quote")) and approved.tzinfo is not None and (
+            started.tzinfo is not None and approved < started)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _annotate_limits(row: dict, kind: str, scene: dict, libs: dict,
+                     pins: dict, declared: dict, missing: list[str]) -> bool:
+    """Resolve a pin against the Liberty files linked by this STA scene."""
+    meta = pins.get(row["pin"])
+    if not isinstance(meta, dict):
+        missing.append(f"{scene['name']}: pin metadata absent for {row['pin']}")
+        return False
+    row.update({key: value for key, value in meta.items() if key != "liberty"})
+    if row.get("net_class") not in ("clock", "data", "IO", "constant"):
+        missing.append(f"{scene['name']}: pin/net class absent for {row['pin']}")
+        return False
+    cell, cell_pin = row.get("cell"), row.get("cell_pin")
+    matched = []
+    for linked in scene.get("linked_liberties") or []:
+        lib = libs.get(linked.get("name")) if isinstance(linked, dict) else None
+        if lib and cell in lib["limits"]["cells"]:
+            pin_table = lib["limits"]["cells"][cell].get(cell_pin)
+            if pin_table is not None:
+                matched.append((linked["name"], lib, pin_table))
+    if len(matched) != 1:
+        missing.append(f"{scene['name']}: cell/pin Liberty identity unresolved for "
+                       f"{row['pin']} ({len(matched)} matches)")
+        return False
+    lib_name, lib, pin_table = matched[0]
+    pin_limit = pin_table.get(kind)
+    if pin_limit is None:
+        pin_limit = lib["limits"]["defaults"].get(kind)
+    explicit = declared.get({"max_slew": "slew_ns",
+                             "max_capacitance": "cap_pf",
+                             "max_fanout": "fanout"}[kind])
+    if kind == "max_capacitance" and row.get("cell_class") == "IO":
+        explicit = declared.get("io_cap_pf")
+    if kind == "max_fanout" and row["net_class"] == "clock":
+        explicit = declared.get("clock_fanout", explicit)
+    limits = [v for v in (pin_limit, explicit) if _positive_number(v)]
+    if not limits:
+        missing.append(f"{scene['name']}: no Liberty or declared limit for "
+                       f"{kind} {row['pin']}")
+        return False
+    row["kind"] = kind
+    row["liberty_limit"] = pin_limit
+    row["explicit_limit"] = explicit
+    row["effective_limit"] = min(limits)
+    row["liberty_source"] = {"name": lib_name,
+                              "path": lib["identity"].get("path"),
+                              "sha256": lib["identity"].get("sha256"),
+                              "pin": cell_pin}
+    row["limit_source"] = (
+        "Liberty" if _positive_number(pin_limit) and
+        pin_limit <= (explicit if _positive_number(explicit) else pin_limit)
+        else "design/PDK sign-off declaration")
+    row["load_pin"] = (kind == "max_slew" and
+                       row.get("driver_pin", row["pin"]) != row["pin"])
+    row["liberty_usage"] = (row["measured"] / pin_limit
+                            if _positive_number(pin_limit) else None)
+    return True
+
+
 def _waiver_support(waiver: dict, row: dict, bundle: dict,
                     source_errors: list[str]) -> bool:
     """Section 6: accept numerical, content-addressed timing/EM evidence."""
+    local_errors: list[str] = []
     identity = bundle["identity"]
     declared = bundle["frozen"]["values"]
     scenes = set(bundle["frozen"]["scenes"])
@@ -203,15 +320,15 @@ def _waiver_support(waiver: dict, row: dict, bundle: dict,
                 not isinstance(receipt.get("hold_slack_ns"), (int, float)) or
                 receipt["setup_slack_ns"] < 0 or receipt["hold_slack_ns"] < 0):
             return False
-        _evidence(receipt.get("report") or {}, source_errors,
+        _evidence(receipt.get("report") or {}, local_errors,
                   "waiver timing " + str(receipt.get("scene")))
     em = waiver.get("signal_em") or {}
     if (em.get("netlist_sha256") != identity.get("sta_netlist") or
             em.get("scene") not in scenes or not em.get("worst_scene") or
             not em.get("drm_source")):
         return False
-    _evidence(em.get("report") or {}, source_errors, "waiver signal EM")
-    _evidence(em.get("drm_source") or {}, source_errors, "waiver DRM")
+    _evidence(em.get("report") or {}, local_errors, "waiver signal EM")
+    _evidence(em.get("drm_source") or {}, local_errors, "waiver DRM")
     for axis in ("average", "rms", "peak"):
         measured = (em.get("currents") or {}).get(axis)
         limit = (em.get("limits") or {}).get(axis)
@@ -231,10 +348,11 @@ def _waiver_support(waiver: dict, row: dict, bundle: dict,
                 waiver.get("upstream_issue") and waiver.get("pinned_tool_reproducer")
                 and waiver.get("upstream_unfixed") is True):
             return False
-    return not source_errors
+    source_errors.extend(local_errors)
+    return not local_errors
 
 
-def judge(bundle: dict) -> dict:
+def judge(bundle: dict, *, project: Path | None = None) -> dict:
     """Judge measured rows independently of tool rc/checker summaries."""
     import instrument_calibration
     instrument_calibration.assert_calibrated("drv_signoff_judge::parse_check_types")
@@ -246,8 +364,12 @@ def judge(bundle: dict) -> dict:
     identity = bundle.get("identity") or {}
     frozen = bundle.get("frozen") or {}
     current = bundle.get("current") or {}
+    owner_records, owner_status = _owner_records(project, identity, current, frozen)
     declared = frozen.get("values") or {}
     run_id, tree_sha = identity.get("run_id"), identity.get("tree_sha")
+    if project is not None:
+        if Path(str(identity.get("project") or "")).resolve() != project.resolve():
+            missing.append("project identity differs from judged project directory")
     if not run_id or not tree_sha or not identity.get("spec_version"):
         missing.append("run ID, tree SHA or specification version absent")
     for name in ("sta_netlist", "lvs_netlist", "gds_netlist"):
@@ -298,13 +420,25 @@ def judge(bundle: dict) -> dict:
             missing.append(f"PDK integrator {field} not extracted")
         elif field == "fanout" and declared.get("default_fanout_ceiling") != value:
             fails.append("default fanout ceiling != installed PDK config")
-        elif field != "fanout" and declared.get(field) != value and not (
-                bundle.get("owner_design_override") or {}).get(field):
-            fails.append(f"{field}: design override lacks prior owner rationale")
+        elif field != "fanout" and declared.get(field) != value:
+            signed_override = any(
+                record.get("type") == "design_override" and
+                record.get("field") == field and
+                record.get("value") == declared.get(field) and
+                record.get("reason") and
+                _approved_before_run(record, identity)
+                for record in owner_records)
+            if not signed_override:
+                fails.append(f"{field}: design override lacks signed prior owner "
+                             f"rationale ({owner_status})")
     try:
-        from declared_knob_applied_parity_check import collect_declared
-        project = Path(str(identity.get("project") or ""))
-        declared_l9 = collect_declared(project, pdk=str(identity.get("pdk") or ""),
+        from declared_knob_applied_parity_check import collect_declared, _source_files
+        declaration_project = project or Path(str(identity.get("project") or ""))
+        if project is not None:
+            l9_path = Path(str((current.get("sources") or {}).get("l9", {}).get("path") or ""))
+            if l9_path.resolve() not in {p.resolve() for p in _source_files(project)}:
+                missing.append("project L9 source is not a declaration file in judged project")
+        declared_l9 = collect_declared(declaration_project, pdk=str(identity.get("pdk") or ""),
                                        library=str(identity.get("library") or ""))
         l9_fanout = declared_l9.get("SYNTH_MAX_FANOUT")
         if l9_fanout and l9_fanout[0] != declared.get("fanout"):
@@ -412,6 +546,7 @@ def judge(bundle: dict) -> dict:
     seen: dict[str, set[tuple]] = {k: set() for k in KINDS}
     rows_by_kind: dict[str, list[dict]] = {k: [] for k in KINDS}
     scene_names = set()
+    spef_by_pvt: dict[str, dict[str, str]] = {}
     for scene in bundle.get("scenes") or []:
         name, mode = scene.get("name"), scene.get("mode")
         if not name or name in scene_names or name not in required_scenes:
@@ -424,7 +559,8 @@ def judge(bundle: dict) -> dict:
             missing.append(f"{name}: parasitic annotation incomplete")
         ann = _evidence(scene.get("parasitic_annotation_report") or {}, missing,
                         name + " parasitic annotation")
-        counts_ann = re.findall(r"Found\s+(\d+)\s+unannotated\s+(?:drivers|nets)", ann)
+        counts_ann = re.findall(
+            r"Found\s+(\d+)\s+(?:partially\s+)?unannotated\s+(?:drivers|nets)", ann)
         if not counts_ann or any(int(count) for count in counts_ann):
             missing.append(f"{name}: unannotated parasitic census not zero")
         if scene.get("propagated_clocks") is not True or not scene.get("clock_properties"):
@@ -445,6 +581,11 @@ def judge(bundle: dict) -> dict:
                 missing.append(f"{name}: {field} absent")
         if scene.get("rc_corner") not in (frozen.get("rc_corners") or []):
             missing.append(f"{name}: RC corner not frozen")
+        pvt_name, _, name_rc = name.rpartition("_")
+        if not pvt_name or name_rc != scene.get("rc_corner"):
+            missing.append(f"{name}: scene RC corner differs from declared RC corner")
+        spef_by_pvt.setdefault(pvt_name, {})[str(scene.get("rc_corner"))] = (
+            (scene.get("spef") or {}).get("sha256", ""))
         if scene.get("spef_layout_sha256") != (identity.get("artifacts") or {}).get("def", {}).get("sha256"):
             missing.append(f"{name}: SPEF not bound to routed DEF identity")
         extraction_text = _evidence(scene.get("spef_extraction_receipt") or {},
@@ -454,7 +595,10 @@ def judge(bundle: dict) -> dict:
             if (extraction.get("routed_def_sha256") !=
                     (identity.get("artifacts") or {}).get("def", {}).get("sha256")
                     or extraction.get("spef_sha256") !=
-                    (scene.get("spef") or {}).get("sha256")):
+                    (scene.get("spef") or {}).get("sha256") or
+                    extraction.get("rc_corner") != scene.get("rc_corner") or
+                    not re.fullmatch(r"[0-9a-f]{64}", str(
+                        extraction.get("extraction_command_sha256") or ""))):
                 missing.append(f"{name}: SPEF extraction input/output hashes differ")
         except (TypeError, ValueError):
             missing.append(f"{name}: SPEF extraction provenance unreadable")
@@ -532,13 +676,20 @@ def judge(bundle: dict) -> dict:
                 missing.append(f"{name}: {kind} all-limits population incomplete")
             if any("limit" not in row for row in all_rows[kind]):
                 missing.append(f"{name}: {kind} row without limit")
-            expected_control = (scene.get("positive_control_expected") or {}).get(kind)
+            control_limit = controls.get(kind)
+            expected_control = sum(
+                1 for row in all_rows[kind]
+                if _positive_number(control_limit) and
+                isinstance(row.get("measured"), (int, float)) and
+                row["measured"] > control_limit)
             actual_control = (scene.get("positive_control_counters") or {}).get(kind)
-            if (not isinstance(expected_control, int) or expected_control < 1 or
+            if (expected_control < 1 or
                     len(control_rows[kind]) != expected_control or
                     actual_control != expected_control):
-                missing.append(f"{name}: {kind} planted violation not detected")
-            for row in parsed[kind]:
+                missing.append(f"{name}: {kind} positive control did not detect "
+                               "the measured eligible population")
+            independent_bad = set()
+            for row in all_rows[kind]:
                 key = _key(kind, row)
                 if key in seen[kind] and kind != "max_fanout":
                     missing.append(f"duplicate {kind} key {key}")
@@ -548,15 +699,44 @@ def judge(bundle: dict) -> dict:
                     continue
                 if kind == "max_slew" and row["direction"] not in ("rise", "fall"):
                     missing.append(f"{name}: slew rise/fall absent for {row['pin']}")
-                meta = pins.get(row["pin"])
-                if not meta or meta.get("net_class") not in ("clock", "data", "IO", "constant"):
-                    missing.append(f"{name}: pin/net class absent for {row['pin']}")
+                if not _annotate_limits(row, kind, scene, libs, pins,
+                                        declared, missing):
                     continue
-                row.update(meta)
-                row["kind"] = kind
-                rows_by_kind[kind].append(row)
+                effective = row["effective_limit"]
+                tolerance = max(1e-6, abs(effective) * 1e-6)
+                io_disclosure = (kind == "max_capacitance" and
+                                 row.get("cell_class") == "IO" and
+                                 row.get("explicit_limit") is None and
+                                 row["measured"] <= effective and
+                                 row["limit"] == declared.get("cap_pf"))
+                if io_disclosure:
+                    row["failed_tier"] = "IO_STD_CELL_MARGIN_DISCLOSURE"
+                    io_margin_disclosures.append(row)
+                elif row["limit"] > effective + tolerance:
+                    fails.append(f"{name}: {kind} {row['pin']} tool limit "
+                                 f"{row['limit']} exceeds frozen effective limit {effective}")
+                elif row["limit"] < effective - tolerance:
+                    missing.append(f"{name}: {kind} {row['pin']} tool limit "
+                                   "differs from frozen effective limit")
+                independently_violated = row["measured"] > effective + tolerance
+                if not io_disclosure and independently_violated != bool(row.get("violated")):
+                    missing.append(f"{name}: {kind} {row['pin']} tool/slack vs "
+                                   "frozen limit disagree")
+                if independently_violated:
+                    independent_bad.add(key)
+                    rows_by_kind[kind].append(row)
+            if independent_bad != keys and not (
+                    kind == "max_capacitance" and
+                    keys - independent_bad == {
+                        _key(kind, row) for row in io_margin_disclosures
+                        if row["scene"] == name}):
+                missing.append(f"{name}: {kind} independent violators differ "
+                               "from tool report")
     if scene_names != set(required_scenes):
         missing.append("required PVT/RC scenes absent")
+    for pvt_name, rc_sha in spef_by_pvt.items():
+        if len(rc_sha) > 1 and len(set(rc_sha.values())) != len(rc_sha):
+            missing.append(f"{pvt_name}: RC corner SPEFs have identical hashes")
     # Fanout is invariant to RC; repeated corner rows describe one driver/mode.
     dedup = {}
     for row in rows_by_kind["max_fanout"]:
@@ -568,41 +748,9 @@ def judge(bundle: dict) -> dict:
     rows_by_kind["max_fanout"] = list(dedup.values())
     for kind, rows in rows_by_kind.items():
         for row in rows:
-            lib = libs.get(row.get("liberty"))
-            pin_limit = None
-            if lib:
-                limit_table = lib["limits"]
-                pin_limit = (limit_table["cells"].get(row.get("cell"), {})
-                             .get(row.get("cell_pin"), {}).get(kind))
-                if pin_limit is None:
-                    pin_limit = limit_table["defaults"].get(kind)
-            explicit = declared.get({"max_slew": "slew_ns",
-                                     "max_capacitance": "cap_pf",
-                                     "max_fanout": "fanout"}[kind])
-            if kind == "max_capacitance" and row.get("cell_class") == "IO":
-                explicit = declared.get("io_cap_pf")
-            if kind == "max_fanout" and row["net_class"] == "clock":
-                explicit = declared.get("clock_fanout", explicit)
-            limits = [v for v in (pin_limit, explicit) if _positive_number(v)]
-            if not limits:
-                missing.append(f"no limit for {kind} {row['pin']}")
-                continue
-            effective = min(limits)
-            row["liberty_limit"] = pin_limit
-            row["effective_limit"] = effective
-            row["liberty_source"] = (
-                {"name": row.get("liberty"),
-                 "path": (lib or {}).get("identity", {}).get("path"),
-                 "sha256": (lib or {}).get("identity", {}).get("sha256"),
-                 "pin": row.get("cell_pin")})
-            row["limit_source"] = (
-                "Liberty" if _positive_number(pin_limit) and
-                pin_limit <= (explicit if _positive_number(explicit) else pin_limit)
-                else "design/PDK sign-off declaration")
-            row["load_pin"] = (kind == "max_slew" and
-                               row.get("driver_pin", row["pin"]) != row["pin"])
-            row["liberty_usage"] = (row["measured"] / pin_limit
-                                    if _positive_number(pin_limit) else None)
+            pin_limit = row["liberty_limit"]
+            explicit = row["explicit_limit"]
+            effective = row["effective_limit"]
             if (kind == "max_capacitance" and row.get("cell_class") == "IO" and
                     explicit is None and _positive_number(pin_limit) and
                     row["measured"] <= pin_limit):
@@ -611,9 +759,6 @@ def judge(bundle: dict) -> dict:
                 continue
             # OpenSTA's displayed precision can differ by one last digit;
             # the tool's negative slack and independent source tier must agree.
-            independently_bad = row["measured"] > effective
-            if independently_bad != bool(row.get("violated")):
-                missing.append(f"{kind} {row['pin']}: tool/slack vs frozen limit disagree")
             if pin_limit is not None and row["measured"] > pin_limit:
                 tier, waivable = ("T1_LIBERTY_FANOUT" if kind == "max_fanout"
                                   else "T1_LIBERTY"), False
@@ -645,7 +790,8 @@ def judge(bundle: dict) -> dict:
         fails.append("post-route violation with broader implementation constraint")
     elif broad_stage:
         flow_defects.append("implementation constraint broader than declared; open flow-defect issue")
-    ledger = bundle.get("waiver_ledger") or []
+    ledger = [r.get("waiver") for r in owner_records
+              if r.get("type") == "waiver" and isinstance(r.get("waiver"), dict)]
     for row in findings:
         if not row["waivable"] or (broad_stage and findings):
             fails.append(f"{row['failed_tier']}: {row['pin']} {row['scene']}")
@@ -658,8 +804,7 @@ def judge(bundle: dict) -> dict:
                "scene_or_mode": row["mode"] if row["kind"] == "max_fanout" else row["scene"],
                "sdc_sha256": sdc.get("sha256")}
         matches = [w for w in ledger if all(w.get(k) == v for k, v in key.items())]
-        valid = [w for w in matches if w.get("issuer") == "reyerchu" and
-                 w.get("origin") == "owner" and w.get("owner_quote") and
+        valid = [w for w in matches if w.get("owner_quote") and
                  w.get("owner_timestamp") and
                  _positive_number(w.get("approved_value")) and
                  w["approved_value"] >= row["measured"] and
@@ -669,7 +814,8 @@ def judge(bundle: dict) -> dict:
                            "owner_timestamp": valid[0]["owner_timestamp"],
                            "below_baseline_quality": True})
         else:
-            fails.append(f"{row['failed_tier']}: no valid owner waiver for {row['pin']}")
+            fails.append(f"{row['failed_tier']}: no valid signed owner waiver "
+                         f"for {row['pin']} ({owner_status})")
     verdict = ("FAIL" if fails else "NOT_MEASURED" if missing else
                "WAIVED" if waived else "PASS")
     return {"schema_version": 1, "name": "DRV(tran/cap/fanout)",
@@ -705,22 +851,25 @@ def main(argv: list[str] | None = None) -> int:
         source = (args.bundle / "reports/phase3/sta/drv_signoff_bundle.json"
                   if args.bundle.is_dir() else args.bundle)
         bundle = json.loads(source.read_text())
-        result = judge(bundle)
+        result = judge(bundle, project=args.bundle if args.bundle.is_dir() else None)
         if args.bundle.is_dir():
             routed = args.bundle / "phase3/stage3/pnr/routed.def"
             recorded = ((bundle.get("identity") or {}).get("artifacts") or {}).get("def", {}).get("sha256")
             if not routed.is_file():
-                if result["verdict"] == "PASS":
-                    result["verdict"] = "NOT_MEASURED"
                 result.setdefault("not_measured", []).append(
                     "current routed DEF absent")
             elif _sha(routed) != recorded:
-                result["verdict"] = "FAIL"
-                result.setdefault("failures", []).append(
+                result.setdefault("not_measured", []).append(
                     "current routed DEF differs from judged layout identity")
-    except (OSError, ValueError, TypeError) as exc:
+            result["verdict"] = ("FAIL" if result.get("failures") else
+                                 "NOT_MEASURED" if result.get("not_measured") else
+                                 result["verdict"])
+    except Exception as exc:  # noqa: BLE001 - a crashed instrument has no verdict
         result = {"name": "DRV(tran/cap/fanout)", "verdict": "NOT_MEASURED",
                   "not_measured": [f"bundle unreadable: {exc}"]}
+    if result["verdict"] == "NOT_MEASURED":
+        result["reason_class"] = ("input_absent" if not source.is_file()
+                                  else "partial_population")
     write_text(args.json, json.dumps(result, indent=2) + "\n")
     print(result["verdict"], result["name"])
     return 0 if result["verdict"] == "PASS" else 1
