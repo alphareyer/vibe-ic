@@ -74,6 +74,7 @@ import _hardmacro_stage as _hms  # noqa: E402 — staged SRAM/IP macro blackbox
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
+import lec_counterexample_search as _lec_cex  # noqa: E402
 from _prose_polarity import is_denied, sentence_scope  # noqa: E402
 
 PROGRAM = "lec_run"
@@ -2980,6 +2981,8 @@ def build_report(parsed: Dict, top: str, gate_netlist: str,
     unproven = parsed["unproven"]
     return {
         "equivalent": parsed["equivalent"],
+        "total_points": parsed.get("total"),
+        "proven_points": proven,
         # proven $equiv cell count — >0 required for a non-vacuous PASS.
         "compared_points": proven if proven is not None else 0,
         # The SIZE of the proof obligation, i.e. how many $equiv points
@@ -5381,6 +5384,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # yosys read the RTL/netlist by their host absolute paths).
     ys_host = rpt_out.parent / "lec_equiv.ys"
     ys_in_container = str(ys_host.resolve())
+    final_equiv_il = rpt_out.parent / f"lec_equiv_final.{invocation_id}.il"
     # CWD: read the gold from the GATE NETLIST'S OWN DIRECTORY — the directory
     # the flow stages the gate's companion resources into (memory-init images,
     # `include headers). A design's `$readmemh`/`$readmemb`/`` `include ``
@@ -5999,7 +6003,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 script = _make_script(frontend, slang_prefix, defines,
                                       checkpoint_dir=str(ckpt_dir),
                                       resume_from=resume_from, ladder_rungs=1)
-            ys_host.write_text(script, encoding="utf-8")
+            # Keep the final $equiv population for the *separate* bounded SAT
+            # search. A killed leg must not leave the prior leg's IL readable.
+            final_equiv_il.unlink(missing_ok=True)
+            executed_script = script + f"write_rtlil {final_equiv_il.resolve()}\n"
+            ys_host.write_text(executed_script, encoding="utf-8")
+            proof_execution["equivalence_script_sha256_executed"] = _sha256_bytes(
+                executed_script.encode("utf-8"))
             # THE TOTAL, NOT A FRESH COPY. Handing `args.timeout` here is the
             # defect measured on 2026-08-27: it re-armed the deadline on every
             # attempt. Every attempt — and every RUNG — draws from the SAME
@@ -6652,6 +6662,58 @@ def main(argv: Optional[List[str]] = None) -> int:
             gold_defines if gold_frontend == "slang" else None)
         report["gold_frontend_reason"] = gold_frontend_reason or None
         report["execution_mode"] = "fresh-yosys-proof"
+    # Yosys equiv_status folds a genuine mismatch into UNPROVEN. Search the
+    # remaining $equiv cells before naming the outcome. This is a new SAT run
+    # under the same container-aware stall watchdog as the proof ladder.
+    if (report.get("unproven_points") or 0) > 0:
+        _last_status = raw.rfind("Executing EQUIV_STATUS pass")
+        _names = (unproven_names(raw[_last_status:]) if _last_status >= 0
+                  else [str(n) for n in report.get("unproven_cells") or []])
+        report["unproven_point_names_complete"] = (
+            len(_names) == int(report["unproven_points"]))
+        try:
+            _cfg = _lec_cex.setting()
+            if not final_equiv_il.is_file():
+                raise FileNotFoundError("terminal equivalence IL was not written")
+            _search_ys = rpt_out.parent / f"lec_cex.{invocation_id}.ys"
+            _flat_il = rpt_out.parent / f"lec_cex_flat.{invocation_id}.il"
+            _trace_json = rpt_out.parent / f"lec_cex_trace.{invocation_id}.json"
+            _search_ys.write_text(_lec_cex.script(
+                str(final_equiv_il.resolve()), str(_flat_il.resolve()),
+                str(_trace_json.resolve()), int(_cfg["bound_cycles"]),
+                int(_cfg["sat_timeout_seconds"])), encoding="utf-8")
+            _launched, _search_log = run_yosys_equiv(
+                container, str(_search_ys.resolve()),
+                timeout=int(_cfg["sat_timeout_seconds"]),
+                workdir=equiv_workdir)
+            _search_rpt = rpt_out.parent / f"lec_cex.{invocation_id}.rpt"
+            _atomic_write_bytes(_search_rpt, _search_log.encode("utf-8"))
+            _search = _lec_cex.interpret(
+                _search_log, _flat_il, _trace_json,
+                bound=int(_cfg["bound_cycles"]),
+                bound_source=str(_cfg["source"]), point_names=_names,
+                tool_version=str(runtime_yosys_version or "unknown"),
+                run_identity=invocation_id,
+                reason="Yosys counterexample search did not launch" if not _launched else "")
+            _search["log"] = str(_search_rpt.relative_to(project))
+        except (OSError, ValueError, KeyError, TypeError) as _exc:
+            _search = _lec_cex.not_run(str(_exc), _names,
+                                       run_identity=invocation_id)
+        report["counterexample_search"] = _search
+        report["unproven_point_names"] = _names
+        if _search["result"] == "COUNTEREXAMPLE":
+            report["verdict"] = "NON_EQUIVALENT"
+            report["non_equivalent_points"] = len(_names)
+        elif (len(_names) == report["unproven_points"]
+              and _lec_cex.complete_resolution_valid(_search, _names)):
+            report["verdict"] = "PROVEN_EQUIVALENT"
+            report["equivalent"] = True
+            report["proven_points"] = report.get("miter_points")
+            report["compared_points"] = report.get("miter_points")
+            report["unproven_points"] = 0
+        else:
+            report["verdict"] = "NOT_PROVEN"
+            report["equivalent"] = False
     # THE BOUND AND WHETHER IT WAS HIT. Without these a reader of lec.json
     # cannot tell a proof that DECIDED nothing from a proof that was never
     # given enough resources to decide anything -- the exact confusion that

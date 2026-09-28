@@ -568,7 +568,7 @@ def _result_md_verdict(result_md: Path) -> Optional[str]:
         start = m.end()
         nxt = re.search(r"^#{1,6}\s", upper[start:], re.MULTILINE)
         region = upper[start:start + nxt.start()] if nxt else upper[start:]
-    for tok in ("PASS_WITH_WAIVERS", "PASS", "FAIL"):
+    for tok in ("PASS_WITH_WAIVERS", "NOT_PROVEN", "PASS", "FAIL"):
         for tm in re.finditer(r"\b" + re.escape(tok) + r"\b", region):
             if tok == "PASS" and region[tm.start():tm.start() + 17] == "PASS_WITH_WAIVERS":
                 continue

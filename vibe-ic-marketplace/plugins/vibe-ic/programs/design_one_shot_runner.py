@@ -20168,9 +20168,17 @@ def lec_step_status_from_report(lec_json: Path) -> Tuple[str, str]:
     verdict = str(doc.get("verdict", "")).strip().upper()
     if verdict == "PASS":
         return _V.Verdict.PASS.value, verdict
+    if verdict == "PROVEN_EQUIVALENT":
+        return _V.Verdict.PASS.value, verdict
     if verdict == "FAIL":
         return _V.Verdict.FAIL.value, verdict
+    if verdict == "NON_EQUIVALENT":
+        return _V.Verdict.FAIL.value, verdict
+    if verdict == "NOT_PROVEN":
+        return _V.Verdict.NOT_PROVEN.value, verdict
     if verdict == "INCONCLUSIVE":
+        if int(doc.get("unproven_points") or 0) > 0:
+            return _V.Verdict.NOT_PROVEN.value, verdict
         return lec_inconclusive_disposition(doc)[0], verdict
     if verdict == "SKIPPED-CONDITION":
         return _V.Verdict.NOT_MEASURED.value, verdict
@@ -21903,9 +21911,20 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
                     _lec_doc = json.loads(lec_json.read_text(errors="replace"))
                 except (OSError, ValueError):
                     _lec_doc = {}
-                _lec_reason = (lec_inconclusive_disposition(_lec_doc)[1]
-                               if str(_verdict).upper() == "INCONCLUSIVE"
-                               else "")
+                if _status == _V.Verdict.NOT_PROVEN.value:
+                    _search = (_lec_doc.get("counterexample_search") or {})
+                    _total = (_lec_doc.get("total_points")
+                              or _lec_doc.get("miter_points") or "unknown")
+                    _lec_reason = (
+                        f"LEC NOT_PROVEN: {_lec_doc.get('unproven_points')} "
+                        f"of {_total} points unproven; bounded counterexample "
+                        f"search ({_search.get('method', 'NOT_RUN')}, "
+                        f"K={_search.get('bound_cycles', 'unknown')} cycles) "
+                        f"{_search.get('result', 'NOT_RUN')}")
+                else:
+                    _lec_reason = (lec_inconclusive_disposition(_lec_doc)[1]
+                                   if str(_verdict).upper() == "INCONCLUSIVE"
+                                   else "")
                 _lec_reuse = lec_record_reuse_note(_lec_doc)
                 # R-0915-85 — the two fields that make pass 2 legible. The
                 # reason class says WHY nothing was measured (budget_exhausted
@@ -23839,6 +23858,9 @@ def step_final_audit(project: Path, phase: int = 3,
     # so the flow proceeds and still refuses to certify. What changes is that it
     # stops calling an absence a failure, and it CARRIES THE ROWS: a reader sees
     # which steps were not measured and why, instead of one translated word.
+    if _verdict_word == _V.Verdict.NOT_PROVEN.value:
+        return StepResult("final_audit", _V.Verdict.NOT_PROVEN.value,
+                          time.time() - t0, head, [str(transcript)])
     if _verdict_word == _V.Verdict.NOT_MEASURED.value:
         _nm_rows = _not_measured_rows(out)
         _nm_note = ""

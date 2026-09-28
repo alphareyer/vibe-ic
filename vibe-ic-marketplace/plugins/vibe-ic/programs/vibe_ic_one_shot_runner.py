@@ -735,6 +735,15 @@ def _aggregate(rows: Any,
     return _roll_up(_as_rows(rows), completion_audit_verdicts)[0]
 
 
+def _bounded_window_verdict(window_verdict: str, stale_downstream: Any) -> str:
+    """An open LEC obligation survives a downstream freshness gap."""
+    if window_verdict == "FAIL":
+        return "FAIL"
+    if window_verdict == "NOT_PROVEN":
+        return "NOT_PROVEN"
+    return "NOT_MEASURED" if stale_downstream else window_verdict
+
+
 def _as_rows(rows: Any) -> List[Tuple[str, str, int]]:
     """Accept `["PASS", ...]`, `[(name, verdict, rc), ...]`, or a longer tuple.
 
@@ -802,6 +811,7 @@ def _roll_up(rows: List[Tuple[str, str, int]],
     reasons travel into the report and onto stdout.
     """
     fails: List[str] = []
+    not_proven: List[str] = []
     unmeasured: List[str] = []
     notes: List[str] = []
     #: Things a reader must be told that do NOT move the tier. A disclosure is not
@@ -815,6 +825,8 @@ def _roll_up(rows: List[Tuple[str, str, int]],
             rc_i = 0
         if v == "FAIL":
             fails.append(f"{name} FAIL (rc={rc_i})")
+        elif v == "NOT_PROVEN":
+            not_proven.append(f"{name} NOT_PROVEN (rc={rc_i})")
         elif v in _PHASE_PASS or v in _PHASE_PASS_WITH_NOTE:
             _dem = (demoted or {}).get(name) or {}
             _demoted_here = (str(_dem.get("token") or "")
@@ -860,13 +872,18 @@ def _roll_up(rows: List[Tuple[str, str, int]],
         _raw = [str(v or "").strip().upper()
                 for v in (completion_audit_verdicts or [])]
         axis = ({"state": "FAIL", "reason": f"verdict(s) {sorted(set(_raw))}"}
-                if any(t == "FAIL" for t in _raw)
-                else {"state": "NOT_APPLICABLE", "reason": ""})
+                if "FAIL" in _raw else
+                {"state": "NOT_PROVEN", "reason": f"verdict(s) {sorted(set(_raw))}"}
+                if "NOT_PROVEN" in _raw else
+                {"state": "NOT_APPLICABLE", "reason": ""})
     _axis_state = str(axis.get("state") or "NOT_MEASURED").upper()
     _axis_why = str(axis.get("reason") or "")
     if _axis_state == "FAIL":
         fails.append(f"the phase2/3 completion audit says FAIL — {_axis_why}"
                      if _axis_why else "the phase2/3 completion audit says FAIL")
+    elif _axis_state == "NOT_PROVEN":
+        not_proven.append("the phase2/3 completion audit says NOT_PROVEN"
+                          + (f" — {_axis_why}" if _axis_why else ""))
     elif _axis_state == "PASS_WITH_WAIVERS":
         notes.append(f"the phase2/3 completion audit passed with waivers"
                      + (f" — {_axis_why}" if _axis_why else ""))
@@ -885,7 +902,9 @@ def _roll_up(rows: List[Tuple[str, str, int]],
             + (f" — {_axis_why}" if _axis_why else ""))
 
     if fails:
-        return "FAIL", fails + unmeasured + disclosed
+        return "FAIL", fails + not_proven + unmeasured + disclosed
+    if not_proven:
+        return "NOT_PROVEN", not_proven + unmeasured + disclosed
     if unmeasured:
         return "NOT_MEASURED", unmeasured + disclosed
     if notes:
@@ -911,6 +930,9 @@ def _audit_axis_from_verdicts(verdicts: Optional[List[str]]) -> Dict[str, Any]:
                 "reason": "no completion audit verdict could be read"}
     if any(t == "FAIL" for t in toks):
         return {"state": "FAIL", "reason": f"verdict(s) {sorted(set(toks))}"}
+    if "NOT_PROVEN" in toks:
+        return {"state": "NOT_PROVEN",
+                "reason": f"verdict(s) {sorted(set(toks))}"}
     unknown = [t for t in toks
                if t not in _AUDIT_AXIS_PASS and t not in _AUDIT_AXIS_WAIVERS]
     if unknown:
@@ -1763,8 +1785,7 @@ def main() -> int:
                    "phases": [{"name": "phase3", "verdict": phase3_verdict,
                                "rc": rc}],
                    "dispatched_verdict": phase3_verdict,
-                   "verdict": ("FAIL" if phase3_verdict == "FAIL" else
-                               "NOT_MEASURED" if p3_stale else phase3_verdict),
+                   "verdict": _bounded_window_verdict(phase3_verdict, p3_stale),
                    "audit_verdict": "NOT_MEASURED",
                    "audit_scope": ("bounded; whole-flow audit not refreshed"
                                    if p3 else "not measured; child report absent"),
@@ -2414,8 +2435,7 @@ def main() -> int:
             "phases": [{"name": n, "verdict": v, "rc": rc}
                        for n, v, rc in plan],
             "dispatched_verdict": window_verdict,
-            "verdict": ("FAIL" if window_verdict == "FAIL" else
-                        "NOT_MEASURED" if stale else window_verdict),
+            "verdict": _bounded_window_verdict(window_verdict, stale),
             "audit_verdict": "NOT_MEASURED",
             "audit_scope": "bounded; whole-flow audit not refreshed",
             "stale_downstream": stale,

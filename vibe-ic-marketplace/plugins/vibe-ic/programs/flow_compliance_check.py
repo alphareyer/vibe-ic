@@ -3648,6 +3648,18 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
     report_cls = _reason_taxonomy.report_reason_class(report)
     report_message = _report_reason_text(report)
     _structured_verdict = _report_verdict(report)
+    if (_actual_rc == 5 and _structured_verdict == _T.Verdict.NOT_PROVEN.value
+            and isinstance(report, dict)
+            and (report.get("unproven_points") or
+                 (report.get("summary") or {}).get("unproven_points"))):
+        # A nonzero gate exit must not be mistaken for a design FAIL. Require
+        # the report's own residual census as well as the dedicated rc.
+        ok = True
+        findings = report.get("findings") or []
+        first = findings[0] if findings else ""
+        detail = (first.get("message", "") if isinstance(first, dict)
+                  else str(first))
+        out = f"{_NOT_PROVEN_HINT_PREFIX}{detail or cmd_str}"
     reason_class: Optional[str] = None
     vacuous_diagnostic = ""
     if out.startswith(_VACUOUS_HINT_PREFIX):
@@ -3762,6 +3774,8 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
                    f"{detail}")
     elif out.startswith(_WAIVER_HINT_PREFIX):
         verdict, rc = "PASS_WITH_WAIVERS", _WAIVER_EXIT_CODE
+    elif out.startswith(_NOT_PROVEN_HINT_PREFIX):
+        verdict, rc = _T.Verdict.NOT_PROVEN.value, 5
     elif out.startswith("program not found:"):
         verdict, rc = "NOT_FOUND", None
         reason_class = _reason_taxonomy.EXECUTION_ERROR
@@ -5020,6 +5034,7 @@ _SELF_SKIP_VERDICTS = frozenset({
 # (CLAUDE.md rule 11). Requiring BOTH the rc AND the sentinel keeps an
 # unrelated rc-3 program from being mis-promoted into a waiver.
 _WAIVER_HINT_PREFIX = "__WAIVER_HINT__: "
+_NOT_PROVEN_HINT_PREFIX = "__NOT_PROVEN_HINT__: "
 _WAIVER_EXIT_CODE = 3
 _WAIVER_STDOUT_SENTINEL = "PASS_WITH_WAIVERS"
 
@@ -12636,6 +12651,8 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
             reasons.append(f"output: {out[:200]}")
         elif out.startswith(_EXECUTED_DECLARED_NA_HINT_PREFIX):
             reasons.append(out)
+        elif out.startswith(_NOT_PROVEN_HINT_PREFIX):
+            reasons.append(out)
         elif out.startswith(_VACUOUS_HINT_PREFIX):
             # Wave 93 — bubble the rc=2 vacuous signal up so check_step
             # promotes the step's status to VACUOUS_PASS instead of PASS.
@@ -12790,6 +12807,8 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
             # `__WAIVER_HINT__:` tuple; forward it so check_step promotes the
             # step to WAIVED-DEFERRED (Overall PASS_WITH_WAIVERS) instead of a
             # bare PASS — mirrors the non-optional `program_exit_zero` branch.
+            reasons.append(out)
+        elif out.startswith(_NOT_PROVEN_HINT_PREFIX):
             reasons.append(out)
         elif out.startswith(_VACUOUS_HINT_PREFIX):
             # An OPTIONAL gate program may signal the disclosed-skip tier by
@@ -16885,6 +16904,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # Overall verdict resolves to PASS_WITH_WAIVERS, never a bare PASS.
         waiver_hints = [r for r in reasons
                         if r.startswith(_WAIVER_HINT_PREFIX)]
+        not_proven_hints = [r for r in reasons
+                            if r.startswith(_NOT_PROVEN_HINT_PREFIX)]
         # Human prose for a structured nonblocking warning. Refusals are plain
         # failure reasons and therefore never reach this held-out bucket.
         advisory_hints = [r for r in reasons
@@ -16969,6 +16990,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                             and not r.startswith(_VACUOUS_HINT_PREFIX)
                             and not r.startswith(_SKIP_HINT_PREFIX)
                             and not r.startswith(_WAIVER_HINT_PREFIX)
+                            and not r.startswith(_NOT_PROVEN_HINT_PREFIX)
                             and not r.startswith(_STRUCTURE_ONLY_HINT_PREFIX)
                             and not r.startswith(_ADVISORY_HINT_PREFIX)
                             and not r.startswith(_ADVISORY_RECORD_HINT_PREFIX)
@@ -16978,7 +17000,11 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                             and not r.startswith(_NOT_APPLICABLE_HINT_PREFIX)
                             and not r.startswith(
                                 _EXECUTED_DECLARED_NA_HINT_PREFIX)]
-        if passed and incomplete_hints and not non_hint_reasons:
+        if passed and not_proven_hints and not non_hint_reasons:
+            result.status = _T.Verdict.NOT_PROVEN.value
+            for h in not_proven_hints:
+                result.reasons.append(h[len(_NOT_PROVEN_HINT_PREFIX):])
+        elif passed and incomplete_hints and not non_hint_reasons:
             # An applicable question that was not examined outranks every
             # benign non-pass tier beside it.  In particular, a declared N/A
             # sibling or a waiver must not launder the incomplete clause into
@@ -21222,6 +21248,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"PASS_WITH_WAIVERS={counts['PASS_WITH_WAIVERS']}  "
         f"WAIVED-DEFERRED={counts['PASS_WITH_WAIVERS']}  "
         f"{fail_str}  "
+        f"NOT_PROVEN={counts['NOT_PROVEN']}  "
         f"NOT_MEASURED={counts['NOT_MEASURED']}  "
         f"NOT_APPLICABLE={counts['NOT_APPLICABLE']}"
     )
@@ -21271,6 +21298,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     _icon = {_T.Verdict.PASS.value: "✓",
              _T.Verdict.PASS_WITH_WAIVERS.value: "~",
              _T.Verdict.FAIL.value: "✗",
+             _T.Verdict.NOT_PROVEN.value: "?",
              _T.Verdict.NOT_MEASURED.value: "…",
              _T.Verdict.NOT_APPLICABLE.value: "-"}
     _label = {v.value: v.value for v in _T.Verdict}
@@ -21588,6 +21616,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # does not have to be either.
     if not ok or forced_fail:
         overall = _T.Verdict.FAIL.value
+    elif any(r.status == _T.Verdict.NOT_PROVEN.value for r in scoped):
+        overall = _T.Verdict.NOT_PROVEN.value
     elif any(r.status == _T.Verdict.NOT_MEASURED.value
              # R-0915-140 (review wttwkqmyu) — LENIENT TREATS A NOT-OWED ROW
              # EXACTLY AS IT TREATS ITS ROOT. The root is always a FAIL: a gate

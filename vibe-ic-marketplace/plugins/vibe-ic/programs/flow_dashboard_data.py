@@ -82,7 +82,7 @@ _OR_RE = re.compile(r"\s+OR\s+")
 #              fab / wafer-sort / packaging / final-test / qual). Also never run
 #              by us, but for a different reason than `na`.
 _STATUSES = (
-    "pass", "skipped", "waived", "fail", "missing",
+    "pass", "skipped", "waived", "not_proven", "fail", "missing",
     "running", "partial", "na", "external", "pending",
 )
 
@@ -100,7 +100,7 @@ _STATUSES = (
 # why running --full must not inflate Done: a MISSING gate verdict is a gap, not
 # a completion.)
 _RESOLVED = frozenset(
-    {"pass", "skipped", "waived", "fail", "na", "external"}
+    {"pass", "skipped", "waived", "not_proven", "fail", "na", "external"}
 )
 _UNRESOLVED = frozenset({"running", "pending", "partial", "missing"})
 
@@ -572,7 +572,8 @@ def _is_failure_verdict(raw: str) -> bool:
     # dashboard at all, which is the one place an operator looks for it.
     up = str(raw or "").upper()
     return ("FAIL" in up
-            or up == _V.Verdict.NOT_MEASURED.value)
+            or up in (_V.Verdict.NOT_MEASURED.value,
+                      _V.Verdict.NOT_PROVEN.value))
 
 
 def _runner_verdict_overrides(project: Path) -> Dict[str, dict]:
@@ -625,7 +626,8 @@ def _runner_verdict_overrides(project: Path) -> Dict[str, dict]:
                 this_report.setdefault(sid, None)
                 continue
             this_report[sid] = {
-                "status": "fail",
+                "status": ("not_proven" if raw.upper() == "NOT_PROVEN"
+                           else "fail"),
                 "detail": (f"{runner}:{name} {raw}"
                            + (f" - {st.get('detail')}" if st.get("detail")
                               else "")),
@@ -711,6 +713,8 @@ def _map_compliance_status(raw_status: str) -> str:
         return "waived"
     if raw == "FAIL":
         return "fail"
+    if raw == "NOT-PROVEN":
+        return "not_proven"
     if raw == "MISSING":
         return "missing"
     # robustness beyond the enumerated set: obvious pass/waiver tiers

@@ -91,6 +91,7 @@ _STATUS_STYLE = {
     "pass": ("✔", ("green",)),        # ✔ done · verdict PASS
     "skipped": ("⏭", ("cyan", "dim")),  # ⏭
     "waived": ("⚑", ("yellow",)),     # ⚑
+    "not_proven": ("?", ("yellow",)),
     "fail": ("✗", ("red", "bold")),   # ✗
     "missing": ("∅", ("red",)),       # ∅
     "running": ("▸", ("blue",)),      # ▸
@@ -185,6 +186,7 @@ _SUMMARY_ORDER = [
     ("external", "external", ("grey", "dim")),
     ("skipped", "skipped", ("cyan", "dim")),
     ("waived", "waived", ("yellow",)),
+    ("not_proven", "not proven", ("yellow",)),
     ("fail", "fail", ("red", "bold")),
     ("missing", "missing", ("red",)),
 ]

@@ -311,6 +311,7 @@ header.bar{
 .chip[data-k="pass"]{background:var(--done-bg)} .chip[data-k="pass"] .dot{background:var(--done)}
 .chip[data-k="skipped"]{background:var(--skipped-bg)} .chip[data-k="skipped"] .dot{background:var(--skipped)}
 .chip[data-k="waived"]{background:var(--waived-bg)} .chip[data-k="waived"] .dot{background:var(--waived)}
+.chip[data-k="not_proven"]{background:var(--waived-bg)} .chip[data-k="not_proven"] .dot{background:var(--waived)}
 .chip[data-k="fail"]{background:var(--fail-bg)} .chip[data-k="fail"] .dot{background:var(--fail)}
 .chip[data-k="missing"]{background:var(--fail-bg)} .chip[data-k="missing"] .dot{background:var(--fail)}
 .chip[data-k="running"]{background:var(--running-bg)} .chip[data-k="running"] .dot{background:var(--running)}
@@ -353,6 +354,7 @@ section.phase{
 .step[data-s="pass"]{border-left-color:var(--done)}
 .step[data-s="skipped"]{border-left-color:var(--skipped)}
 .step[data-s="waived"]{border-left-color:var(--waived)}
+.step[data-s="not_proven"]{border-left-color:var(--waived)}
 .step[data-s="fail"]{border-left-color:var(--fail)}
 .step[data-s="missing"]{border-left-color:var(--fail)}
 .step[data-s="partial"]{border-left-color:var(--partial)}
@@ -363,6 +365,7 @@ section.phase{
 .step[data-s="pass"] .sq{background:var(--done)}
 .step[data-s="skipped"] .sq{background:var(--skipped)}
 .step[data-s="waived"] .sq{background:var(--waived)}
+.step[data-s="not_proven"] .sq{background:var(--waived)}
 .step[data-s="fail"] .sq{background:var(--fail)}
 .step[data-s="missing"] .sq{background:var(--fail)}
 .step[data-s="partial"] .sq{background:var(--partial)}
@@ -431,8 +434,8 @@ section.phase{
   if(tb){ tb.addEventListener("click", toggleTheme); }
 
   // ---- helpers ----
-  var STATUSES = ["pass","skipped","waived","fail","missing","running","partial","na","external","pending"];
-  var CHIP_ORDER = ["pass","running","partial","pending","na","external","skipped","waived","fail","missing"];
+  var STATUSES = ["pass","skipped","waived","not_proven","fail","missing","running","partial","na","external","pending"];
+  var CHIP_ORDER = ["pass","running","partial","pending","na","external","skipped","waived","not_proven","fail","missing"];
   function fmtSize(n){
     if(n === null || n === undefined || isNaN(n)) return "";
     if(n < 1024) return n + " B";
@@ -776,6 +779,7 @@ header.bar{
 .chip[data-k="pass"]{background:var(--done-bg)} .chip[data-k="pass"] .dot{background:var(--done)}
 .chip[data-k="skipped"]{background:var(--skipped-bg)} .chip[data-k="skipped"] .dot{background:var(--skipped)}
 .chip[data-k="waived"]{background:var(--waived-bg)} .chip[data-k="waived"] .dot{background:var(--waived)}
+.chip[data-k="not_proven"]{background:var(--waived-bg)} .chip[data-k="not_proven"] .dot{background:var(--waived)}
 .chip[data-k="fail"]{background:var(--fail-bg)} .chip[data-k="fail"] .dot{background:var(--fail)}
 .chip[data-k="missing"]{background:var(--fail-bg)} .chip[data-k="missing"] .dot{background:var(--fail)}
 .chip[data-k="running"]{background:var(--running-bg)} .chip[data-k="running"] .dot{background:var(--running)}
@@ -883,7 +887,7 @@ main#fleet{display:grid; gap:.8rem; align-items:start;
   var tb = document.getElementById("themebtn");
   if(tb){ tb.addEventListener("click", toggleTheme); }
 
-  var CHIP_ORDER = ["pass","running","partial","pending","na","external","skipped","waived","fail","missing"];
+  var CHIP_ORDER = ["pass","running","partial","pending","na","external","skipped","waived","not_proven","fail","missing"];
   function el(tag, cls){ var e = document.createElement(tag); if(cls) e.className = cls; return e; }
   function setText(e, t){ e.textContent = (t === null || t === undefined) ? "" : String(t); }
   function num(v){ return (v === null || v === undefined || isNaN(v)) ? 0 : v; }

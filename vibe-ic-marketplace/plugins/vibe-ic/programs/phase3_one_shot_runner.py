@@ -60243,6 +60243,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # of here would kill the runner mid-step and destroy the very report the
     # failure is supposed to appear in.
     signoff_failures: List[str] = []
+    signoff_not_proven: List[str] = []
     pnr_out = _pl.pnr_dir(project)
     sta_out = _pl.sta_dir(project)
     cts_out = _pl.cts_dir(project)
@@ -61311,6 +61312,15 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     if _lec_refusal:
         signoff_failures.append(_lec_refusal)
         notes.append(_lec_refusal)
+    else:
+        try:
+            _post_result = _lec_post_layout_module().check(project)
+        except Exception:
+            _post_result = {}
+        if _post_result.get("result") == "NOT_PROVEN":
+            _line = "; ".join(_post_result.get("findings") or [])
+            signoff_not_proven.append(_line)
+            notes.append(_line)
 
     # --- TAPEOUT-SIGNOFF: emit the reports the new sign-off gates consume ----
     # §4.05: every emission is best-effort + disclosed; a tool that cannot run
@@ -62778,6 +62788,10 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             (f"; notes: {'; '.join(notes)}" if notes else ""),
             written,
         )
+    if signoff_not_proven:
+        return StepResult(
+            "canonicalize_artefacts", "NOT_PROVEN", time.time() - t0,
+            "; ".join(signoff_not_proven), written)
     return StepResult(
         "canonicalize_artefacts", "PASS", time.time() - t0,
         f"emitted {len(written)} canonical artefacts" +
@@ -67435,6 +67449,8 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
             _gcf_memo.append(_v)
         return _gcf_memo[0]
 
+    final_equiv_il = out_json.parent / "lec_post_layout_final.il"
+
     def _run_lec(functional_lib: bool, blacklist_c: Optional[str] = None,
                  gate_renames: Optional[List[Tuple[str, str]]] = None,
                  screen_only: bool = False):
@@ -67470,7 +67486,10 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                                               supply_constant_assumptions),
                                           functional_lib=functional_lib,
                                           **_kw)
-        ys_path.write_text(ys)
+        final_equiv_il.unlink(missing_ok=True)
+        ys_path.write_text(ys + "\nwrite_rtlil "
+                           + _to_container_path(str(final_equiv_il), container)
+                           + "\n")
         cmd = (f"export PATH={TOOLS_IN_CONTAINER}/yosys/bin:"
                f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
                f"yosys -s {ys_c} 2>&1 | tee {log_c}")
@@ -67778,6 +67797,67 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                 "post-layout LEC: UNPROVEN points are NOT all pin-permutation "
                 f"artefacts ({len(pin_perm['accepted'])} accepted, "
                 f"{len(pin_perm['rejected'])} rejected) — verdict stands")
+    cex_search = None
+    unproven_names = []
+    if (parsed.get("unproven") or 0) > 0:
+        unproven_names = mod.parse_unproven_points(log_text)
+        cex = mod.lec_cex
+        search_id = str(time.time_ns())
+        try:
+            cfg = cex.setting()
+            if not final_equiv_il.is_file():
+                raise FileNotFoundError("terminal equivalence IL was not written")
+            if pin_perm and pin_perm.get("denominator_moved"):
+                raise ValueError("re-proof denominator moved; retained first pass has no matching IL")
+            search_ys = out_json.parent / f"lec_post_cex.{search_id}.ys"
+            flat_il = out_json.parent / f"lec_post_cex_flat.{search_id}.il"
+            trace_json = out_json.parent / f"lec_post_cex_trace.{search_id}.json"
+            search_log = out_json.parent / f"lec_post_cex.{search_id}.rpt"
+            search_ys.write_text(cex.script(
+                _to_container_path(str(final_equiv_il), container),
+                _to_container_path(str(flat_il), container),
+                _to_container_path(str(trace_json), container),
+                int(cfg["bound_cycles"]), int(cfg["sat_timeout_seconds"])))
+            search_c = _to_container_path(str(search_ys), container)
+            log_c = _to_container_path(str(search_log), container)
+            rc_cex, out_cex, err_cex = _docker_exec(
+                container,
+                (f"export PATH={TOOLS_IN_CONTAINER}/yosys/bin:"
+                 f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
+                 f"set -o pipefail; yosys -s {search_c} 2>&1 | tee {log_c}"),
+                marker=search_c, log_path=search_log)
+            text_cex = (search_log.read_text(errors="replace")
+                        if search_log.is_file() else (out_cex or "") + (err_cex or ""))
+            _, version_out, _ = _docker_exec(
+                container,
+                f"{TOOLS_IN_CONTAINER}/yosys/bin/yosys -V", timeout=30)
+            cex_search = cex.interpret(
+                text_cex, flat_il, trace_json,
+                bound=int(cfg["bound_cycles"]),
+                bound_source=str(cfg["source"]), point_names=unproven_names,
+                tool_version=version_out.strip() or "unknown",
+                run_identity=search_id,
+                reason=f"SAT run rc={rc_cex} did not finish")
+            if rc_cex != 0:
+                cex_search = cex.not_run(
+                    f"Yosys SAT exited rc={rc_cex}", unproven_names,
+                    run_identity=search_id)
+            cex_search["log"] = str(search_log)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            cex_search = cex.not_run(str(exc), unproven_names,
+                                     run_identity=search_id)
+        if cex_search["result"] == "COUNTEREXAMPLE":
+            parsed["verdict"] = "NON_EQUIVALENT"
+            parsed["non_equivalent"] = len(unproven_names)
+        elif (len(unproven_names) == parsed.get("unproven")
+              and cex.complete_resolution_valid(cex_search, unproven_names)):
+            parsed["verdict"] = "PROVEN_EQUIVALENT"
+            parsed["proven"] = parsed.get("total")
+            parsed["unproven"] = 0
+            parsed["equivalent"] = True
+        else:
+            parsed["verdict"] = "NOT_PROVEN"
+            parsed["equivalent"] = False
     doc = {
         "tool": "yosys-equiv",
         "top": top,
@@ -67801,6 +67881,8 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
         "unproven_points": parsed.get("unproven"),
         "total_points": parsed.get("total"),
         "non_equivalent_points": parsed.get("non_equivalent"),
+        "unproven_point_names": unproven_names,
+        "counterexample_search": cex_search,
         "equivalent": parsed.get("equivalent"),
         "sat_unsupported_cells": parsed.get("sat_unsupported_cells", []),
         "verdict": parsed.get("verdict"),
@@ -74743,6 +74825,24 @@ def _phase3_window_output_audit(project: Path, step_ids: Set[str]
     return checks
 
 
+def _bounded_window_verdict(step_verdict: str,
+                            gate_statuses: Iterable[str]) -> str:
+    """Combine selected runner steps with the gates actually refreshed."""
+    words = {str(step_verdict), *(str(s) for s in gate_statuses)}
+    if _V.Verdict.FAIL.value in words:
+        return _V.Verdict.FAIL.value
+    if _V.Verdict.NOT_PROVEN.value in words:
+        return _V.Verdict.NOT_PROVEN.value
+    known = {v.value for v in _V.Verdict}
+    if _V.Verdict.NOT_MEASURED.value in words or words - known:
+        return _V.Verdict.NOT_MEASURED.value
+    if _V.Verdict.PASS_WITH_WAIVERS.value in words:
+        return _V.Verdict.PASS_WITH_WAIVERS.value
+    if _V.Verdict.PASS.value in words:
+        return _V.Verdict.PASS.value
+    return _V.Verdict.NOT_MEASURED.value
+
+
 def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                        args, selected: List[str]) -> int:
     """Dispatch only selected sites and publish a bounded audit of this run.
@@ -74884,16 +74984,11 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     audit_doc["declared_gate_checks"] = gate_results
     audit_doc["declared_output_checks"] = _phase3_window_output_audit(
         project, window_ids)
-    audit_doc["verdict"] = (_aggregate_verdict(rows) if rows else "NOT_MEASURED")
-    gate_statuses = {item.get("status") for item in gate_results.values()}
-    if "FAIL" in gate_statuses:
-        audit_doc["verdict"] = "FAIL"
-    elif any(status not in ("PASS", "PASS_WITH_WAIVERS",
-                            "NOT_APPLICABLE") for status in gate_statuses):
-        audit_doc["verdict"] = "NOT_MEASURED"
+    audit_doc["verdict"] = _bounded_window_verdict(
+        _aggregate_verdict(rows) if rows else "NOT_MEASURED",
+        (item.get("status") for item in gate_results.values()))
     report["audit_verdict"] = audit_doc["verdict"]
-    if audit_doc["verdict"] in ("FAIL", "NOT_MEASURED"):
-        report["verdict"] = audit_doc["verdict"]
+    report["verdict"] = audit_doc["verdict"]
     report["audit_scope"] = "bounded; full declared gates for selected steps"
     report["bounded_disclosures"][0] = {
         "refresh": "flow_compliance_check.check_step", "kind": "executed",
@@ -76623,6 +76718,7 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
     _rows = list(
         _V.StepVerdict(
             verdict=_V.parse(s.status), step_id=s.name, name=s.name,
+            reason=getattr(s, "detail", "") or "",
             reason_class=(_V.ReasonClass(s.reason_class)
                           if getattr(s, "reason_class", "") else None),
             declared_by=getattr(s, "declared_by", "") or "",

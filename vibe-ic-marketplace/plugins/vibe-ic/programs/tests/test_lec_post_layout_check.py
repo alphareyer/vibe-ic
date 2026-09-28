@@ -212,7 +212,7 @@ def test_parser_matched_output_function_bug_is_not_pass():
     assert r["equivalent"] is False
     assert L.evaluate_report({"verdict": r["verdict"], "total_points": 1,
                               "proven_points": 0, "unproven_points": 1,
-                              "equivalent": False})["result"] == "FAIL"
+                              "equivalent": False})["result"] == "NOT_PROVEN"
 
 
 def test_parser_buffer_insert_positive_proves():
@@ -438,8 +438,9 @@ def test_gate_fail_on_unproven():
     doc = {"verdict": L.V_UNPROVEN, "total": 64, "proven": 32, "unproven": 32,
            "equivalent": False}
     res = L.evaluate_report(doc)
-    assert res["result"] == "FAIL"
-    assert any("UNPROVEN" in f for f in res["findings"])
+    assert res["result"] == "NOT_PROVEN"
+    assert res["counterexample_search"]["result"] == "NOT_RUN"
+    assert any("NOT_PROVEN" in f for f in res["findings"])
 
 
 def test_gate_fail_on_vacuous_true():
@@ -485,7 +486,7 @@ def test_cli_pass(tmp_path):
 def test_cli_fail_on_unproven(tmp_path):
     _write(tmp_path, {"verdict": L.V_UNPROVEN, "total": 64, "proven": 32,
                       "unproven": 32, "equivalent": False})
-    assert L.main([str(tmp_path)]) == 1
+    assert L.main([str(tmp_path)]) == 5
 
 
 def test_cli_fail_on_unparseable(tmp_path):

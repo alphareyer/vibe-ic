@@ -60,13 +60,15 @@ because neither defect exists in a fixture. They exist only when a real run
 reaches a later step CARRYING an earlier step's word. That is why the rule
 below is a function with tests in both directions, and not a convention.
 
-THE FIVE VERDICTS, and nothing else
+THE SIX VERDICTS, and nothing else
 -----------------------------------
 
     PASS                the step ran and what it examined was good
     PASS_WITH_WAIVERS   the same, with named rows somebody must close
     FAIL                the step ran and what it examined was not good;
                         or a required artefact does not exist
+    NOT_PROVEN          LEC has residual points, with a bounded SAT search
+                        finding no counterexample or stating why it did not run
     NOT_MEASURED        nobody measured it — `reason_class` says why
     NOT_APPLICABLE      the input says there is nothing here to measure —
                         `declared_by` says which line of the input says so
@@ -79,7 +81,7 @@ THE RULE FOR THE NEXT PERSON
 ----------------------------
 
 **A new status word is a schema change, not a string.** If you are about to
-write a sixth word, you are about to do what the 2026-09-16 runs above did.
+write a seventh word, you are about to do what the 2026-09-16 runs above did.
 What you actually have is one of:
 
   * a new REASON why something was not measured  -> add a `ReasonClass`
@@ -103,11 +105,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 #: Bumped by every report schema that carries a step status. A report written
 #: with `step_status_schema_version < 2` uses the deleted vocabulary and is
 #: refused by `parse`, not translated.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class UnknownVerdictWord(ValueError):
-    """A status word outside the five. Raised, never absorbed.
+    """A status word outside the six. Raised, never absorbed.
 
     This is the schema refusal the DESIGN note promises. It exists so that the
     r26 chain cannot happen again by accident: a producer that still writes
@@ -117,7 +119,7 @@ class UnknownVerdictWord(ValueError):
 
 
 class Verdict(str, enum.Enum):
-    """The only five words a step may wear.
+    """The only six words a step may wear.
 
     `str`-valued so a record serialises to JSON as the bare word and so
     `record["status"] == Verdict.PASS` is true from either side — but the
@@ -147,6 +149,12 @@ class Verdict(str, enum.Enum):
     #: the run, not an absence of measurement — `reason_class` is
     #: `MISSING_ARTEFACT` and the rule is stated in `cascade_to_dependent`.
     FAIL = "FAIL"
+
+    #: LEC examined a nonzero point population but did not prove every point.
+    #: A bounded counterexample search found none, or records why it could not
+    #: run. This is a measured open proof obligation: it blocks a run PASS,
+    #: does not assert a design defect, and cannot become a waiver.
+    NOT_PROVEN = "NOT_PROVEN"
 
     #: Nobody measured it. `reason_class` says why; `reason` says it in
     #: sentences. Replaces `SKIP`, `SKIPPED`, `SKIPPED-SETUP-REQUIRED`,
@@ -356,11 +364,11 @@ class WaiverRow:
 class StepVerdict:
     """One step's result: the verdict, plus every distinction the old words carried.
 
-    Construct through the five classmethods below rather than by hand — they
+    Construct through the six classmethods below rather than by hand — they
     are what make the required field required.
     """
 
-    #: One of the five. Never a string outside `Verdict`.
+    #: One of the six. Never a string outside `Verdict`.
     verdict: Verdict
 
     #: The step this is about, for the report and for `cascade_to_dependent`'s
@@ -424,8 +432,10 @@ class StepVerdict:
                 f"on step {self.step_id or self.name!r} — a waived step with "
                 f"no row to close reaches no must-close list, which is the "
                 f"defect the bare word permitted.")
+        if self.verdict is Verdict.NOT_PROVEN and not self.reason:
+            raise ValueError("NOT_PROVEN requires the residual proof counts and search result")
 
-    # ── the five constructors ────────────────────────────────────────────
+    # ── the six constructors ─────────────────────────────────────────────
     @classmethod
     def pass_(cls, step_id: str = "", name: str = "", *,
               disclosures: Sequence[Disclosure] = (), **kw) -> "StepVerdict":
@@ -461,6 +471,11 @@ class StepVerdict:
                    reason_class=reason_class, reason=reason, **kw)
 
     @classmethod
+    def not_proven(cls, step_id: str = "", name: str = "", *,
+                   reason: str, **kw) -> "StepVerdict":
+        return cls(Verdict.NOT_PROVEN, step_id, name, reason=reason, **kw)
+
+    @classmethod
     def not_applicable(cls, step_id: str = "", name: str = "", *,
                        declared_by: str, reason: str = "",
                        **kw) -> "StepVerdict":
@@ -480,7 +495,8 @@ class StepVerdict:
         FAIL and NOT_MEASURED do; NOT_APPLICABLE does not, and neither does a
         disclosure. See `run_verdict`.
         """
-        return self.verdict in (Verdict.FAIL, Verdict.NOT_MEASURED)
+        return self.verdict in (Verdict.FAIL, Verdict.NOT_PROVEN,
+                                Verdict.NOT_MEASURED)
 
     @property
     def cascades(self) -> bool:
@@ -538,7 +554,7 @@ def parse(word: Any) -> Verdict:
     that upper-cased and swapped `_` for `-` because the producer wrote
     `VACUOUS_PASS` and the reports said `VACUOUS-PASS` — two spellings of one
     word, and a classifier that saw two answered differently about one step.
-    With five words and one producer vocabulary there is nothing to
+    With six words and one producer vocabulary there is nothing to
     normalise, and tolerating a second spelling is how a third arrives.
     """
     if isinstance(word, Verdict):
@@ -547,7 +563,7 @@ def parse(word: Any) -> Verdict:
         return Verdict(word)
     except (ValueError, KeyError):
         raise UnknownVerdictWord(
-            f"{word!r} is not one of the five step verdicts "
+            f"{word!r} is not one of the six step verdicts "
             f"{[v.value for v in Verdict]}. It is either a word from the "
             f"vocabulary R-0915-85 deleted — in which case the producer that "
             f"wrote it has not been migrated, and translating it here is the "
@@ -559,7 +575,7 @@ def parse(word: Any) -> Verdict:
 
 
 def validate_step_row(row: Any) -> None:
-    """Enforce the five-word contract on a RUNNER's own `StepResult` row.
+    """Enforce the six-word contract on a RUNNER's own `StepResult` row.
 
     The runners keep their own lightweight dataclass (it carries durations,
     output files and per-step extras this module has no business knowing
@@ -568,7 +584,7 @@ def validate_step_row(row: Any) -> None:
 
     THREE REFUSALS, each naming the defect it prevents, and ONE derivation:
 
-      * a word outside the five             -> `UnknownVerdictWord`
+      * a word outside the six              -> `UnknownVerdictWord`
       * NOT_MEASURED with no `reason_class` -> the undifferentiated bag
       * NOT_APPLICABLE with no `declared_by`-> the run16 laundering
 
@@ -686,7 +702,7 @@ def as_verdict_or_none(word: Any) -> Optional[Verdict]:
     card — `ic_run_status_derive.disagreements` asks whether a sentence claims
     a pass the machine record does not support. Prose is not a status, so
     `parse` raising on it would be wrong; returning `None` says "that text is
-    not one of the five", which is exactly the question being asked.
+    not one of the six", which is exactly the question being asked.
 
     It is NOT a fallback reader for reports. A step record's `status` goes
     through `parse` and an old word stops the reader — see the module DESIGN.
@@ -789,6 +805,7 @@ def review_gate_verdict(step_id: str, name: str, *, inputs_present: bool,
 #: a measured defect outranks a hole.
 RUN_PRECEDENCE: Sequence[Verdict] = (
     Verdict.FAIL,
+    Verdict.NOT_PROVEN,
     Verdict.NOT_MEASURED,
     Verdict.PASS_WITH_WAIVERS,
     Verdict.PASS,
@@ -845,8 +862,8 @@ def run_verdict_record(steps: Sequence[StepVerdict]) -> Dict[str, Any]:
 # tomorrow would be adjudicated without anyone remembering to register it.
 #
 # That was the right answer to a vocabulary that could grow. This one cannot:
-# `parse` refuses a sixth word. So the derivation goes too, and each predicate
-# below is a one-line statement over the five. The MODULE is gone, not moved —
+# `parse` refuses a seventh word. So the derivation goes too, and each predicate
+# below is a one-line statement over the six. The MODULE is gone, not moved —
 # a second classifier beside this one is the 疊床架屋 the ruling forbids.
 
 #: The whole vocabulary, for a consumer that wants to assert against it.
@@ -860,7 +877,8 @@ EXCUSED = frozenset({Verdict.NOT_APPLICABLE.value})
 
 #: The step is a defect or a hole — what keeps a run from being green.
 #: Replaces `NON_GREEN`.
-NON_GREEN = frozenset({Verdict.FAIL.value, Verdict.NOT_MEASURED.value})
+NON_GREEN = frozenset({Verdict.FAIL.value, Verdict.NOT_PROVEN.value,
+                       Verdict.NOT_MEASURED.value})
 
 #: The one word that satisfies a predecessor outright.
 FULL_PASS = Verdict.PASS.value
@@ -873,7 +891,8 @@ def is_excused(status: Any) -> bool:
 
 def is_non_green(status: Any) -> bool:
     """Keeps the run off a pass: a measured defect, or a hole."""
-    return parse(status) in (Verdict.FAIL, Verdict.NOT_MEASURED)
+    return parse(status) in (Verdict.FAIL, Verdict.NOT_PROVEN,
+                             Verdict.NOT_MEASURED)
 
 
 def is_full_pass(status: Any) -> bool:

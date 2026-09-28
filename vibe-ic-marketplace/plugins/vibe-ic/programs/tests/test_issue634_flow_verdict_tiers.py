@@ -42,10 +42,10 @@ import verdict as T  # noqa: E402
 
 # ── the vocabulary is closed, and that is now a fact not a convention ────
 
-def test_the_producer_vocabulary_is_exactly_the_five():
+def test_the_producer_vocabulary_includes_the_lec_residual():
     assert T.PRODUCER_STATUSES == frozenset(
         {"PASS", "PASS_WITH_WAIVERS", "FAIL", "NOT_MEASURED",
-         "NOT_APPLICABLE"})
+         "NOT_APPLICABLE", "NOT_PROVEN"})
 
 
 def test_a_word_registered_nowhere_is_refused_not_adjudicated():
@@ -77,6 +77,7 @@ def test_the_two_negative_sets_still_partition_the_vocabulary():
     ("PASS_WITH_WAIVERS", False, False, True,  False),
     ("FAIL",              False, True,  False, False),
     ("NOT_MEASURED",      False, True,  False, False),
+    ("NOT_PROVEN",        False, True,  False, False),
     ("NOT_APPLICABLE",    True,  False, False, False),
 ])
 def test_each_word_is_classified_one_way(word, excused, non_green, done, full):
@@ -110,7 +111,7 @@ def test_only_the_full_pass_satisfies_a_predecessor_outright():
 
 def test_only_a_declared_inapplicable_step_is_out_of_the_verdict_scope():
     assert not T.scoped_into_verdict({"status": "NOT_APPLICABLE"})
-    for w in ("PASS", "PASS_WITH_WAIVERS", "FAIL", "NOT_MEASURED"):
+    for w in ("PASS", "PASS_WITH_WAIVERS", "FAIL", "NOT_MEASURED", "NOT_PROVEN"):
         assert T.scoped_into_verdict({"status": w}), w
 
 
