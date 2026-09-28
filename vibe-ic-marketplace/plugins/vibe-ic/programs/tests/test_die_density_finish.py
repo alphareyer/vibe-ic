@@ -10,6 +10,7 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 import librelane_fill_dfm as fill
 import librelane_step37 as step37
+from metal_fill_config_gen import build_metal_fill_config
 from librelane_contract import Refusal
 
 
@@ -117,6 +118,18 @@ def test_density_ratios_require_every_deck_layer(tmp_path, monkeypatch):
     with pytest.raises(Refusal, match='LL_DENSITY_RATIOS_NOT_MEASURED'):
         fill.measure_density_ratios(project, 'image', root, 'processA', gds, cfg,
                                     '37-test-ratios')
+
+
+def test_density_specs_ignore_comment_claims_and_refuse_missing_layers(tmp_path):
+    root, cfg = _pdk(tmp_path)
+    _, layer_map, tech_lef, deck = fill._density_source(root, 'processA', cfg)
+    derived = build_metal_fill_config(layer_map, tech_lef, deck)
+    claimed = deck + '\n# extract_single_layer_from_design.call(:poly2_dummy, 99, 99)\n'
+    specs = fill._density_ratio_specs(claimed, derived)
+    assert specs['PL.8']['layers'] == [[50, 0], [50, 4]]
+    missing = claimed.replace(
+        'extract_single_layer_from_design.call(:poly2_dummy, 50, 4)', '')
+    assert fill._density_ratio_specs(missing, derived)['PL.8']['status'] == 'NOT_MEASURED'
 
 
 def test_step37_rechecks_topped_gds_before_selection(tmp_path, monkeypatch):

@@ -596,6 +596,7 @@ def test_step_31_resolves_its_configs_with_the_routes_tech_lef(tmp_path, monkeyp
 # ── step 37: the finishing XOR decides a stream's feasibility ───────────────
 def _step37_world(tmp_path, monkeypatch, finishing):
     step37 = importlib.import_module("librelane_step37")
+    fill = importlib.import_module("librelane_fill_dfm")
     project = tmp_path / "p"
     tlef = _legalized(project)
     pnr = project / "phase3/stage3/pnr"
@@ -639,6 +640,14 @@ def _step37_world(tmp_path, monkeypatch, finishing):
                         lambda *a, **k: {"substance": {"rc": 0, "sha256": "x"}})
     monkeypatch.setattr(step37, "_measured_drc",
                         lambda *a, **k: {"magic": 0, "klayout": 0, "total": 0, "report": "r"})
+    def measured_ratios(project_, image, pdk_root, pdk, gds, config, lane):
+        report = project_ / "phase3/librelane" / lane / "density_ratios.json"
+        _put(report, {"status": "MEASURED", "layers": {
+            "M2.4": {"status": "MEASURED", "ratio": 0.35}}})
+        return {"report": str(report), "report_sha256": contract.digest(report),
+                "subject": str(gds), "subject_sha256": contract.digest(gds),
+                "layers": {"M2.4": {"status": "MEASURED", "ratio": 0.35}}}
+    monkeypatch.setattr(fill, "measure_density_ratios", measured_ratios)
     calls = []
 
     def finishing_xor(project_, image, pdk_root, pdk, *, pre, sealed, final, core,
