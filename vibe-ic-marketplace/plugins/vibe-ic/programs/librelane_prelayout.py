@@ -163,7 +163,7 @@ def pre_pnr_setup_gate(pvt_matrix: Path, reports: Path, output: Path,
                     "LIBERTY_SHA256": expected_sha or ""}
         reported = {}
         for field in expected:
-            match = re.search(rf"(?m)^STA_BASIS_{field}:[ \t]*(\S+)[ \t]*$", body)
+            match = re.search(rf"(?m)^STA_BASIS_{field}:[ \t]*(.+?)[ \t]*$", body)
             reported[field] = match.group(1) if match else None
         if not all(expected.values()) or reported != expected:
             result = {"verdict": "NOT_MEASURED",

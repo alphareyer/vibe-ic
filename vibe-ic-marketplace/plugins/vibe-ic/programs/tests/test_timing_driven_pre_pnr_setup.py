@@ -150,6 +150,34 @@ def test_setup_gate_rejects_changed_liberty_or_pvt_mapping(tmp_path):
     )["reason"] == "SS_REPORT_LIBERTY_IDENTITY_STALE"
 
 
+def test_librelane_corner_composer_binds_the_library_it_read(tmp_path):
+    matrix, reports, output = _fixture(tmp_path, 0.43)
+    lib = tmp_path / "slow.lib"
+    netlist = tmp_path / "netlist.v"
+    sdc = tmp_path / "constraints.sdc"
+    netlist.write_text("module t; endmodule\n")
+    sdc.write_text("create_clock -period 20 clk\n")
+    folder = tmp_path / "step10"
+    corner = folder / "slow"
+    corner.mkdir(parents=True)
+    (corner / "sta.log").write_text("OpenSTA linked design\n")
+    (corner / "max.rpt").write_text(_path(0.43))
+    (folder / "config.json").write_text(json.dumps({
+        "CELL_LIBS": {"*": str(lib)}, "PNR_SDC_FILE": str(sdc)}))
+    (folder / "state_out.json").write_text(json.dumps({
+        "nl": str(netlist), "metrics": {}}))
+
+    prelayout.compose_corner_reports(folder, reports, lambda _: "SS")
+    body = (reports / "sta_SS.rpt").read_text()
+    assert f"STA_BASIS_LIBERTY_SHA256: sha256:{prelayout.digest(lib)}" in body
+    assert prelayout.pre_pnr_setup_gate(
+        matrix, reports, output, netlist=netlist, sdc=sdc)["verdict"] == "PASS"
+    lib.write_text("library(slow){ cell(revised){} }\n")
+    assert prelayout.pre_pnr_setup_gate(
+        matrix, reports, output, netlist=netlist, sdc=sdc
+    )["reason"] == "SS_REPORT_LIBERTY_IDENTITY_STALE"
+
+
 @pytest.mark.parametrize("cached", [False, True])
 def test_step10_black_box_blocks_both_pnr_paths(tmp_path, monkeypatch, cached):
     """A positive, current SS path cannot override Step 10's failed link check."""

@@ -439,6 +439,28 @@ def test_changed_pvt_selection_cannot_keep_step10_pass(tmp_path, monkeypatch):
     assert calls == [], "the library bytes were unchanged, so no STA is owed"
 
 
+def test_container_only_liberty_is_hashed_fresh_on_each_retry(tmp_path, monkeypatch):
+    """A mutable container-side view cannot inherit a process-cached digest."""
+    from types import SimpleNamespace
+    import _container_exec as cx
+
+    missing_on_host = tmp_path / "container_only.lib"
+    digests = ["1" * 64, "2" * 64]
+
+    def hash_in_container(container, command, **kwargs):
+        assert container == "image-container"
+        assert str(missing_on_host) in command
+        return SimpleNamespace(
+            returncode=0, stdout=f"{digests.pop(0)}  {missing_on_host}\n")
+
+    monkeypatch.setattr(cx, "run_in_container_supervised", hash_in_container)
+    first = R._prelayout_liberty_identity(missing_on_host, "image-container")
+    second = R._prelayout_liberty_identity(missing_on_host, "image-container")
+    assert first[1] == "sha256:" + "1" * 64
+    assert second[1] == "sha256:" + "2" * 64
+    assert digests == []
+
+
 def test_reverse_healthy_pre_layout_rerun_is_left_byte_identical(tmp_path,
                                                                  monkeypatch):
     """The over-correction this stops: quarantine/re-emit unconditionally.
