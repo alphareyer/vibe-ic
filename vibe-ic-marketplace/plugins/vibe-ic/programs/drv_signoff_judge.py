@@ -335,7 +335,7 @@ def _annotate_limits(row: dict, kind: str, scene: dict, libs: dict,
 
 
 def _waiver_support(waiver: dict, row: dict, bundle: dict,
-                    source_errors: list[str]) -> bool:
+                    source_errors: list[str], owner_records: list[dict]) -> bool:
     """Section 6: accept numerical, content-addressed timing/EM evidence."""
     local_errors: list[str] = []
     identity = bundle["identity"]
@@ -353,15 +353,30 @@ def _waiver_support(waiver: dict, row: dict, bundle: dict,
                 not isinstance(receipt.get("hold_slack_ns"), (int, float)) or
                 receipt["setup_slack_ns"] < 0 or receipt["hold_slack_ns"] < 0):
             return False
-        _evidence(receipt.get("report") or {}, local_errors,
-                  "waiver timing " + str(receipt.get("scene")))
+        timing_text = _evidence(receipt.get("report") or {}, local_errors,
+                                "waiver timing " + str(receipt.get("scene")))
+        from sta_corner_record_completeness_check import extract_slacks
+        slacks = extract_slacks(timing_text)
+        if (slacks["setup_wns_ns"] is None or slacks["hold_wns_ns"] is None or
+                slacks["setup_wns_ns"] < 0 or slacks["hold_wns_ns"] < 0 or
+                abs(slacks["setup_wns_ns"] - receipt["setup_slack_ns"]) > 1e-6 or
+                abs(slacks["hold_wns_ns"] - receipt["hold_slack_ns"]) > 1e-6):
+            return False
     em = waiver.get("signal_em") or {}
     if (em.get("netlist_sha256") != identity.get("sta_netlist") or
             em.get("scene") not in scenes or not em.get("worst_scene") or
             not em.get("drm_source")):
         return False
-    _evidence(em.get("report") or {}, local_errors, "waiver signal EM")
+    em_text = _evidence(em.get("report") or {}, local_errors,
+                        "waiver signal EM")
     _evidence(em.get("drm_source") or {}, local_errors, "waiver DRM")
+    try:
+        measured_em = json.loads(em_text)
+        if (measured_em.get("currents") != em.get("currents") or
+                measured_em.get("limits") != em.get("limits")):
+            return False
+    except (ValueError, TypeError, AttributeError):
+        return False
     for axis in ("average", "rms", "peak"):
         measured = (em.get("currents") or {}).get(axis)
         limit = (em.get("limits") or {}).get(axis)
@@ -369,11 +384,24 @@ def _waiver_support(waiver: dict, row: dict, bundle: dict,
             return False
     if row["net_class"] == "clock":
         clocks = waiver.get("clock_metrics") or {}
-        if (not _positive_number(waiver.get("predeclared_clock_skew_limit")) or
-                not _positive_number(waiver.get("predeclared_clock_latency_limit")) or
-                clocks.get("skew") is None or clocks.get("latency") is None or
-                clocks["skew"] > waiver["predeclared_clock_skew_limit"] or
-                clocks["latency"] > waiver["predeclared_clock_latency_limit"] or
+        prior = next((record for record in owner_records
+                      if record.get("type") == "clock_limits" and
+                      _approved_before_run(record, identity) and
+                      _positive_number(record.get("skew_limit")) and
+                      _positive_number(record.get("latency_limit"))), None)
+        clock_text = _evidence(clocks.get("report") or {}, local_errors,
+                               "waiver clock metrics")
+        try:
+            measured_clocks = json.loads(clock_text)
+        except (ValueError, TypeError):
+            measured_clocks = {}
+        if (prior is None or
+                clocks.get("skew") != measured_clocks.get("skew") or
+                clocks.get("latency") != measured_clocks.get("latency") or
+                not isinstance(clocks.get("skew"), (int, float)) or
+                not isinstance(clocks.get("latency"), (int, float)) or
+                clocks["skew"] > prior["skew_limit"] or
+                clocks["latency"] > prior["latency_limit"] or
                 waiver.get("clock_reason") not in
                 ("intentional_cts_tradeoff", "unfixed_tool_defect")):
             return False
@@ -945,7 +973,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                  w.get("owner_timestamp") and
                  _positive_number(w.get("approved_value")) and
                  w["approved_value"] >= row["measured"] and
-                 _waiver_support(w, row, bundle, missing)]
+                 _waiver_support(w, row, bundle, missing, owner_records)]
         if valid:
             waived.append({"key": key, "owner_quote": valid[0]["owner_quote"],
                            "owner_timestamp": valid[0]["owner_timestamp"],

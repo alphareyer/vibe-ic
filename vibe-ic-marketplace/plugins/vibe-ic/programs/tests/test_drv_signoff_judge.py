@@ -169,6 +169,7 @@ def _bundle(tmp_path: Path) -> dict:
             "extraction_command_sha256": "a" * 64}))
     digest = netlist["sha256"]
     bundle = {"identity": {"run_id": "run-1", "tree_sha": "tree-a",
+             "run_started_at": "2026-09-28T12:00:00+08:00",
              "project": str(tmp_path), "pdk": "synthetic", "library": "logic",
              "spec_version": "contract-a", "sta_netlist": digest,
              "lvs_netlist": digest, "gds_netlist": digest,
@@ -223,20 +224,24 @@ def _owner_waiver(bundle: dict, root: Path, row: dict) -> dict:
                         "sdc_sha256": sdc, "period_ns": 24,
                         "io_delay_ns": 4.8, "setup_slack_ns": 1,
                         "hold_slack_ns": .1,
-                        "report": _file(root, "timing.rpt", "setup 1 hold .1\n")}],
+                        "report": _file(root, "timing.rpt",
+                                        "worst slack max 1\nworst slack min 0.1\n")}],
             "signal_em": {"scene": "typ_nom", "worst_scene": True,
                           "netlist_sha256": netlist,
-                          "report": _file(root, "em.rpt", "EM screened\n"),
+                          "report": _file(root, "em.rpt", json.dumps({
+                              "currents": {"average": .1, "rms": .2, "peak": .3},
+                              "limits": {"average": 1, "rms": 1, "peak": 1}})),
                           "drm_source": _file(root, "drm.txt", "current limits\n"),
                           "currents": {"average": .1, "rms": .2, "peak": .3},
             "limits": {"average": 1, "rms": 1, "peak": 1}}}
 
 
-def _mock_verified_owner_record(monkeypatch, waiver):
+def _mock_verified_owner_record(monkeypatch, waiver, extra=()):
     # Isolate downstream waiver semantics from ssh-keygen verification. The
     # unsigned bundle ledger still has separate real-path refusal controls.
     monkeypatch.setattr(drv, "_owner_records",
-                        lambda *args: ([{"type": "waiver", "waiver": waiver}],
+                        lambda *args: ([{"type": "waiver", "waiver": waiver},
+                                        *extra],
                                        "TEST_VERIFIED"))
 
 
@@ -409,6 +414,52 @@ def test_data_margin_can_only_be_waived_by_exact_owner_record(
     _mock_verified_owner_record(monkeypatch, bundle["waiver_ledger"][0])
     assert drv.judge(bundle)["verdict"] == "WAIVED"
     bundle["waiver_ledger"][0]["sdc_sha256"] = "0" * 64
+    assert drv.judge(bundle)["verdict"] == "FAIL"
+
+
+@pytest.mark.parametrize("false_report", ["timing", "em"])
+def test_signed_waiver_cannot_self_report_good_timing_or_em(
+        tmp_path, monkeypatch, false_report):
+    bundle = _bundle(tmp_path)
+    _violate(bundle, tmp_path, "max_capacitance", value=.3, limit=.2)
+    row = drv.judge(bundle)["findings"][0]
+    waiver = _owner_waiver(bundle, tmp_path, row)
+    if false_report == "timing":
+        waiver["timing"][0]["report"] = _file(
+            tmp_path, "timing.rpt",
+            "worst slack max -1\nworst slack min 0.1\n")
+    else:
+        waiver["signal_em"]["report"] = _file(
+            tmp_path, "em.rpt", json.dumps({
+                "currents": {"average": 2, "rms": .2, "peak": .3},
+                "limits": {"average": 1, "rms": 1, "peak": 1}}))
+    _mock_verified_owner_record(monkeypatch, waiver)
+    result = drv.judge(bundle)
+    assert result["verdict"] == "FAIL"
+    assert not result["waived"]
+
+
+def test_clock_waiver_needs_signed_limits_preceding_run(tmp_path, monkeypatch):
+    bundle = _bundle(tmp_path)
+    _violate(bundle, tmp_path, "max_fanout", value=5, limit=4,
+             net_class="clock")
+    row = drv.judge(bundle)["findings"][0]
+    waiver = _owner_waiver(bundle, tmp_path, row)
+    waiver.update(clock_reason="intentional_cts_tradeoff",
+                  predeclared_clock_skew_limit=100,
+                  predeclared_clock_latency_limit=100,
+                  clock_metrics={"skew": .5, "latency": .8,
+                                 "report": _file(tmp_path, "clock.json",
+                                                 json.dumps({"skew": .5,
+                                                             "latency": .8}))})
+    _mock_verified_owner_record(monkeypatch, waiver)
+    assert drv.judge(bundle)["verdict"] == "FAIL"
+    prior = {"type": "clock_limits", "owner_quote": "Approve clock limits",
+             "owner_timestamp": "2026-09-28T10:00:00+08:00",
+             "skew_limit": 1, "latency_limit": 1}
+    _mock_verified_owner_record(monkeypatch, waiver, [prior])
+    assert drv.judge(bundle)["verdict"] == "WAIVED"
+    prior["owner_timestamp"] = "2026-09-28T13:00:00+08:00"
     assert drv.judge(bundle)["verdict"] == "FAIL"
 
 
