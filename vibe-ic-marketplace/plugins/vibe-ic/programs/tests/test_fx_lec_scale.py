@@ -75,6 +75,14 @@ def test_the_reader_reads_only_the_last_induct_pass_and_not_simple():
     assert L.induct_decision_progress("no pass here\n") is None
 
 
+def test_the_reader_does_not_take_progress_from_an_echoed_hdl_comment():
+    """A quoted source comment is not a LEC workset or a decided point."""
+    quoted = ("// 4. Executing EQUIV_INDUCT pass.\n"
+              "// Found 999 unproven $equiv cells in module equiv:\n"
+              "//   Trying to prove $equiv for \\spoof: success!\n")
+    assert L.induct_decision_progress(quoted) is None
+
+
 # ── the probe ─────────────────────────────────────────────────────────────
 
 def _probe(tmp_path, total_s, *, offset=0):

@@ -1118,10 +1118,14 @@ def induct_decision_progress(raw: str) -> Optional[Dict[str, int]]:
         "lec_run::induct_decision_progress")
     if not raw:
         return None
-    starts = list(_INDUCT_PASS_RE.finditer(raw))
+    # A Yosys error can echo HDL source into the live log.  This progress
+    # reader is evidence-only, but its result controls the projection probe;
+    # quoted comments must therefore not manufacture a workset or decisions.
+    scanned = strip_echoed_hdl_comments(raw)
+    starts = list(_INDUCT_PASS_RE.finditer(scanned))
     if not starts:
         return None
-    tail = raw[starts[-1].end():]
+    tail = scanned[starts[-1].end():]
     ws = _INDUCT_WORKSET_RE.search(tail)
     if not ws:
         return None
