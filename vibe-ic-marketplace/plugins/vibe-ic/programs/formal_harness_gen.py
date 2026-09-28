@@ -2110,6 +2110,23 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
                            expert_properties=(EXPERT_PROPERTIES_SVH
                                               if _expert.is_file() else ""),
                            l8_props=l8_props, observers=l8_obs)
+    # A direct hierarchy reference in an immediate expert assertion needs
+    # read_slang: read_verilog would turn that reference into a free wire.
+    # read_slang refuses concurrent SVA, so emit the equivalent same-edge
+    # immediate reset assertion before the runner chooses its frontend. Scan
+    # the complete harness: only it contains the instance declaration needed
+    # to distinguish a hierarchy reference from a package or struct member.
+    if assertion_form == "concurrent" and _expert.is_file():
+        _expert_text = _expert.read_text(errors="replace")
+        if (re.search(r"\bassert\s*\(", _expert_text)
+                and not re.search(r"\bassert\s+property\b", _expert_text)):
+            import formal_property_run as _fpr
+            if _fpr.unbound_hierarchical_refs(harness + "\n" + _expert_text):
+                harness = emit_harness(
+                    iface, clock, reset_name, active_low, props,
+                    assertion_form="immediate",
+                    expert_properties=EXPERT_PROPERTIES_SVH,
+                    l8_props=l8_props, observers=l8_obs)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(harness)
     generated = [{

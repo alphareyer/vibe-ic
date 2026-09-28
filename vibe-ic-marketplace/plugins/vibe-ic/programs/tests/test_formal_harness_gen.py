@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import formal_harness_gen as G  # noqa: E402
+import formal_property_run as FPR  # noqa: E402
 
 
 # A shaped-like-real synchronous, active-high reset multiplier: output `p` is a
@@ -49,6 +50,27 @@ module chip_top #( parameter size = 32 ) (
   spm #(.size(size)) u_dut (.clk(clk), .rst(rst), .x(x), .y(y), .p(p));
 endmodule
 """
+
+
+def test_generated_harness_with_expert_hierarchy_selects_slang(tmp_path):
+    rtl = tmp_path / "spm.v"
+    rtl.write_text(_SPM_LIKE)
+    formal_dir = tmp_path / "phase2/stage1/formal"
+    formal_dir.mkdir(parents=True)
+    harness = formal_dir / "formal_spm.sv"
+    (formal_dir / G.EXPERT_PROPERTIES_SVH).write_text(
+        "wire expert_acc = dut.acc[0];\n"
+        "always @(posedge clk) if (f_past_valid && $past(rst)) "
+        "p_expert_acc: assert (expert_acc == 1'b0);\n")
+    generated = G.generate(rtl=[rtl], out=harness, top="spm")
+    assert generated["verdict"] == "EMITTED"
+    emitted = FPR.run(tmp_path, harness=harness, rtl=[rtl], top="spm",
+                      emit_only=True)
+    assert emitted["verdict"] == "EMIT_ONLY"
+    sby = (tmp_path / emitted["sby"]).read_text()
+    assert "read_slang --single-unit" in sby
+    assert "read_verilog" not in sby
+    assert "assert property" not in harness.read_text()
 
 
 def _gen(tmp_path, text, name="dut.v", **kw):
