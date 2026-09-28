@@ -13,7 +13,8 @@ remembering to register it.
 
 WHY THAT MODULE IS GONE, AND THIS FILE IS NOT. Derivation-by-subtraction was the
 right answer to a vocabulary that could grow. R-0915-85 made it a vocabulary
-that cannot: five words at the producers, `verdict.parse` refusing a sixth, and
+that cannot: declared words at the producers, `verdict.parse` refusing an
+unregistered word, and
 a tree-wide ratchet (`step_verdict_vocabulary_ratchet`) that fails at the commit
 which introduces one. So the derivation goes with the module it lived in — but
 #634's PROPERTY does not, and it is pinned here against the replacement.
@@ -37,15 +38,16 @@ from _plugin_tree import plugin_path
 
 sys.path.insert(0, str(plugin_path() / "programs"))
 
+import die_level_deck_rule_attribution as D  # noqa: E402
 import verdict as T  # noqa: E402
 
 
 # ── the vocabulary is closed, and that is now a fact not a convention ────
 
-def test_the_producer_vocabulary_is_exactly_the_five():
+def test_the_producer_vocabulary_includes_the_declared_attribution_tier():
     assert T.PRODUCER_STATUSES == frozenset(
-        {"PASS", "PASS_WITH_WAIVERS", "FAIL", "NOT_MEASURED",
-         "NOT_APPLICABLE"})
+        {"PASS", "PASS_WITH_WAIVERS", D.TIER_PASS_WITH_ATTRIBUTION,
+         "FAIL", "NOT_MEASURED", "NOT_APPLICABLE"})
 
 
 def test_a_word_registered_nowhere_is_refused_not_adjudicated():
@@ -63,7 +65,7 @@ def test_a_word_registered_nowhere_is_refused_not_adjudicated():
 
 def test_the_two_negative_sets_still_partition_the_vocabulary():
     """EXCUSED and NON_GREEN are disjoint, and what is in neither is a
-    done-claim — #634's derivation, asserted over the five it now covers."""
+    done-claim — #634's derivation, asserted over the declared vocabulary."""
     assert not (T.EXCUSED & T.NON_GREEN)
     derived = T.PRODUCER_STATUSES - T.EXCUSED - T.NON_GREEN
     assert derived == {w for w in T.PRODUCER_STATUSES if T.is_done_claim(w)}
@@ -75,6 +77,7 @@ def test_the_two_negative_sets_still_partition_the_vocabulary():
 @pytest.mark.parametrize("word,excused,non_green,done,full", [
     ("PASS",              False, False, True,  True),
     ("PASS_WITH_WAIVERS", False, False, True,  False),
+    (D.TIER_PASS_WITH_ATTRIBUTION, False, True, False, False),
     ("FAIL",              False, True,  False, False),
     ("NOT_MEASURED",      False, True,  False, False),
     ("NOT_APPLICABLE",    True,  False, False, False),

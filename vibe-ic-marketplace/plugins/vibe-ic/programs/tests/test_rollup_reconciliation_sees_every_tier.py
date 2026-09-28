@@ -51,6 +51,7 @@ frg = pytest.importorskip("final_report_generate")
 # these seven tests stopped running and nothing said so except the
 # zero-test census. Imported outright now, so a missing vocabulary module is
 # a collection ERROR and not a quiet skip.
+import die_level_deck_rule_attribution as D  # noqa: E402
 import verdict as tiers  # noqa: E402
 
 
@@ -76,7 +77,7 @@ def test_the_deliberate_aliases_still_win():
     bucket and the fix would trade one drift for another.
 
     R-0915-85 — there is exactly ONE alias left, and that is the point: the
-    five words are their own buckets, and `WAIVED-DEFERRED` is the CONTRACT
+    declared words are their own buckets, and `WAIVED-DEFERRED` is the CONTRACT
     label the audit's tally line prints beside `PASS_WITH_WAIVERS`. `SKIPPED`
     and `SKIPPED-CONDITION` were two spellings of one tier and are one word.
     """
@@ -92,14 +93,14 @@ def test_the_nine_original_mappings_are_unchanged():
     If a later change alters one of these, it must be done on purpose — a
     silently different bucket would move published reconciliation results.
     """
-    # R-0915-85 — NINE MAPPINGS BECAME SIX, and the reduction is the change:
-    # each of the five words is its own bucket, plus the one contract alias.
+    # The declared words each have their own bucket, plus the contract alias.
     # Published reconciliation results DO move, which is why this pin is
     # rewritten rather than deleted -- the new map is stated in full here so a
     # later drift is still a test failure.
     expected = {
         "PASS": "PASS",
         "PASS_WITH_WAIVERS": "PASS_WITH_WAIVERS",
+        D.TIER_PASS_WITH_ATTRIBUTION: D.TIER_PASS_WITH_ATTRIBUTION,
         "FAIL": "FAIL",
         "NOT_MEASURED": "NOT_MEASURED",
         "NOT_APPLICABLE": "NOT_APPLICABLE",
@@ -139,7 +140,7 @@ def test_a_disagreement_in_a_formerly_blind_tier_is_reported(tier):
 def test_an_unregistered_tier_cannot_reach_the_rollup_at_all():
     """The `values()` guard still filters a bucket nobody registered, and that
     is now UNREACHABLE rather than a blind spot: `verdict.parse` refuses a
-    sixth word at the row that carries it, so no producer can put one in a
+    word outside the declaration at the row that carries it, so no producer can put one in a
     roll-up. Asserted at the refusal rather than left to the filter.
     """
     with pytest.raises(tiers.UnknownVerdictWord):

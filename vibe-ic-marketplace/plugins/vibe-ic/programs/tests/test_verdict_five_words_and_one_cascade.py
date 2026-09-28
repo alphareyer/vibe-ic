@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """`programs/verdict.py` — every rule, exercised in BOTH directions.
 
-R-0915-85 reduced the flow's step vocabulary to five words at its PRODUCERS.
+R-0915-85 reduced the generic step vocabulary to five words. The producer's
+preexisting die-density attribution tier remains a distinct declared word.
 The two runs that made the case are in the module's own DESIGN section; this
 file is the executable half of it.
 
@@ -22,19 +23,21 @@ from _plugin_tree import plugin_path
 
 sys.path.insert(0, str(plugin_path() / "programs"))
 
+import die_level_deck_rule_attribution as D  # noqa: E402
 import verdict as V  # noqa: E402
 
 
 # ── the vocabulary is closed ─────────────────────────────────────────────
 
-def test_there_are_exactly_five_verdicts():
-    """The count is load-bearing: a sixth word is a schema change (module rule)."""
+def test_five_generic_verdicts_and_the_declared_attribution_tier():
+    """Only the producer-declared density tier extends the generic vocabulary."""
     assert [v.value for v in V.Verdict] == [
-        "PASS", "PASS_WITH_WAIVERS", "FAIL", "NOT_MEASURED", "NOT_APPLICABLE"]
+        "PASS", "PASS_WITH_WAIVERS", D.TIER_PASS_WITH_ATTRIBUTION,
+        "FAIL", "NOT_MEASURED", "NOT_APPLICABLE"]
 
 
 @pytest.mark.parametrize("word", [v.value for v in V.Verdict])
-def test_parse_accepts_each_of_the_five(word):
+def test_parse_accepts_each_declared_word(word):
     assert V.parse(word).value == word
 
 
@@ -46,7 +49,7 @@ def test_parse_accepts_each_of_the_five(word):
     "NO_TOOL", "ENV_UNAVAILABLE", "BLOCKED", "BLOCKED_BY_UPSTREAM",
     "DEFERRED-BY-UPSTREAM", "DEFERRED", "WAIVED", "WAIVED-DEFERRED",
     "PASS_VOIDED_BY_DEPENDENCY", "PASS-VOIDED-BY-DEPENDENCY",
-    "PASS_WITH_ATTRIBUTION", "REFUSED", "ERROR", "MISSING", "STALLED",
+    "REFUSED", "ERROR", "MISSING", "STALLED",
     "VACUOUS_PASS", "VACUOUS-PASS", "PARTIALLY-VACUOUS", "STRUCTURE-ONLY",
     "ADVISORY", "RTL_REPAIR_RETRY", "FAIL_RTL_REPAIR_INERT",
     "STALE_BOARD_DETECTED", "LEC_BUDGET_EXHAUSTED",
@@ -160,7 +163,7 @@ def test_a_dependent_of_a_pass_is_untouched():
 
 
 def test_only_fail_cascades():
-    """Stated as a property over the whole enum, so a sixth word cannot arrive
+    """Stated over the whole enum, so an undeclared word cannot arrive
     and quietly inherit cascading."""
     cascading = {v for v in V.Verdict
                  if _example(v).cascades}

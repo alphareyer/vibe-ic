@@ -84,7 +84,7 @@ from typing import (Any, Callable, Dict, FrozenSet, Iterable, List, Mapping,
 import _audit_scope
 import _path_layout as _pl
 import _gds_admission as _ga
-import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
+import verdict as _V  # declared step verdicts + the one cascade rule
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _prose_polarity as _pp
 import _runner_measurement as _rmeas
@@ -606,8 +606,8 @@ class StepResult:
     output_files: List[str] = field(default_factory=list)
     extras: Dict[str, Any] = field(default_factory=dict)
     # ── the structured fields R-0915-85 put beside the verdict ──────────
-    # `status` above is now one of the FIVE words in `programs/verdict.py`, and
-    # every distinction the deleted vocabulary carried lives here. The module's
+    # `status` is a declared word in `programs/verdict.py`, including the
+    # distinct DRC attribution tier. Other distinctions live here. The module's
     # DESIGN section says why; `_V.StepVerdict` is where the same rules are
     # enforced for readers. Validated in `__post_init__` below, so a site that
     # says NOT_MEASURED without a reason — or NOT_APPLICABLE without naming the
@@ -637,7 +637,7 @@ class StepResult:
 # the tool IS present and the input IS present, but the input cannot support
 # the operation, so NOTHING is known about the design. Never green — see
 # `_aggregate_verdict`.
-# R-0915-85 — THE DECLARED VOCABULARY IS THE FIVE, AND IT IS DERIVED.
+# R-0915-85 — THE DECLARED VOCABULARY IS DERIVED FROM verdict.Verdict.
 #
 # The six words above are what this module used to declare, and the comments
 # that precede them are the argument for the collapse rather than against it:
@@ -51466,7 +51466,9 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
         pass
     return StepResult("drc", status, time.time() - t0,
                       detail, [str(rpt)], extras=extras,
-                      waiver_rows=waiver_rows, attribution=attribution)
+                      waiver_rows=(waiver_rows if status ==
+                                   _V.Verdict.PASS_WITH_WAIVERS.value else []),
+                      attribution=attribution)
 
 
 # ---------------------------------------------------------------------------
@@ -76618,7 +76620,7 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
     vocabulary now, so there is one roll-up, and the tier table is gone rather
     than migrated.
 
-    The refusal survives, and is now `verdict.parse`'s: a word outside the five
+    The refusal survives, and is now `verdict.parse`'s: an undeclared word
     raises `UnknownVerdictWord` at the row that carries it, which is earlier
     and louder than a headline string nobody greps for.
     """

@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _owner_declared as owner_declared  # noqa: E402
 import die_level_deck_rule_attribution as dla  # noqa: E402
@@ -72,7 +74,7 @@ def test_stdcell_only_drc_uses_five_word_waiver_with_named_row(
     assert "foundry-qualified" in row.waiver_rows[0]["reason"]
 
 
-def test_die_density_attribution_uses_five_word_waiver_and_handoff(
+def test_die_density_attribution_keeps_declared_tier_and_handoff(
         tmp_path, monkeypatch):
     source = (f"{dla.FILE_SEP}/fixture/density.rb\n"
               "chip_area = extent.sized(0.0).area\n"
@@ -100,15 +102,34 @@ def test_die_density_attribution_uses_five_word_waiver_and_handoff(
 
     row, observed = _observed_drc(project, pdk)
 
-    assert observed == "PASS_WITH_WAIVERS"
+    assert observed == dla.TIER_PASS_WITH_ATTRIBUTION
     assert row.extras["die_level_rule_attribution"]["drc_tier"] == (
         dla.TIER_PASS_WITH_ATTRIBUTION)
-    assert row.attribution == "integrator"
+    assert row.attribution == ""
     assert row.extras["unattributed_violations"] == 0
-    assert row.waiver_rows[0]["id"] == "DRC-DIE-DENSITY-INTEGRATOR"
+    assert row.waiver_rows == []
     handoff = project / "phase3/stage4/hardmacro" / dla.HANDOFF_NAME
     assert handoff.is_file()
     assert json.loads(handoff.read_text())["requirements"]
+
+
+def test_declared_attribution_tier_is_accepted_but_retired_word_is_refused():
+    tier = dla.TIER_PASS_WITH_ATTRIBUTION
+    try:
+        row = runner.StepResult("drc", tier)
+    except verdict.UnknownVerdictWord as exc:
+        observed = f"UnknownVerdictWord:{str(exc).split()[0]}"
+    else:
+        observed = row.status
+    assert observed == tier
+    assert row.waiver_rows == []
+    assert runner._aggregate_verdict([row]) == tier
+    canonical = verdict.StepVerdict.from_dict({"status": tier, "name": "drc"})
+    assert canonical.blocks_run_pass and not canonical.is_green
+    assert verdict.is_non_green(tier)
+    assert verdict.run_verdict_record([canonical])["causes"][0]["status"] == tier
+    with pytest.raises(verdict.UnknownVerdictWord):
+        runner.StepResult("drc", "ENV_UNAVAILABLE")
 
 
 def test_user_routing_drc_violation_remains_fail(tmp_path, monkeypatch):
