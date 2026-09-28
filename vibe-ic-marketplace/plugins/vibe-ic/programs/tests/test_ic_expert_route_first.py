@@ -62,6 +62,19 @@ def test_explicit_route_conflict_names_both_answers(tmp_path):
     assert path.read_bytes() == before
 
 
+def test_direct_second_pass_records_its_explicit_route_before_reporting(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(P1, "run_phase1_second_track", lambda *_: 0)
+    monkeypatch.setattr(P1, "_expert_track_summary", lambda *_: "stubbed")
+    rc = P1.run_second_pass_only(tmp_path, "test", route="ip")
+    assert rc == 1  # pass 1 was absent; the route does not certify extraction
+    assert DR.report_label(tmp_path) == {
+        "delivery_route": "IP", "deliverable": "HARDMACRO"}
+    summary = json.loads(P1._pl.report_path(
+        tmp_path, "phase1_one_shot.json").read_text())
+    assert summary["delivery_route"] == "IP"
+
+
 def test_expert_rule_is_first_and_names_both_routes():
     page = (PLUGIN / "agents/ic-expert-agent.md").read_text()
     first = next(line for line in page.splitlines() if line.startswith("## "))

@@ -138,6 +138,9 @@ def test_issue1900_phase1_emits_topmodule_into_l9(tmp_path):
         _INTAKE_FIXTURE.read_text(encoding="utf-8"),
         encoding="utf-8",
     )
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(project, "ic")
 
     result = run_phase1_with_expert_answer(project,
         [sys.executable, str(_PROGRAMS / "phase1_one_shot_runner.py"), str(project)],

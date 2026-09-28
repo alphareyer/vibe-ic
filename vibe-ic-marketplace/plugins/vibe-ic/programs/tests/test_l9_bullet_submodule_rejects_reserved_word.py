@@ -84,6 +84,9 @@ def _emitted_submodule_names(tmp_path: Path, keyword: str = "signed"):
         "# L1 — Product Metadata\n\n"
         "| Field | Value |\n|---|---|\n"
         "| product_name | `widget_core` |\n")
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(tmp_path, "ic")
     # Bounded at the harness ceiling `ci_harness_timeout_ceiling_check`
     # enforces (60s vs the 180s session bound), so THIS call's own timeout
     # fires and fails the test rather than the harness killing the session.
