@@ -446,4 +446,4 @@ def test_route_a_flattens_with_the_top_labels_only():
     tcl = M.build_extraction_tcl("chip", "/g.gds", "/o.spice")
     flat = [ln.split() for ln in tcl.splitlines()
             if ln.split()[:1] == ["flatten"]]
-    assert flat == [["flatten", "-dotoplabels", "chip"]], flat
+    assert flat == [["flatten", "-dotoplabels", "chip_flat"]], flat

@@ -15,7 +15,8 @@ The emitted script does:
     gds read   <gds>
     load       <top>
     select top cell
-    [optional] flatten -dotoplabels <top>  ; flat .subckt, top labels only
+    [optional] flatten -dotoplabels <top>_flat ; a NEW flat cell, top labels only
+               load <top>_flat                 ; ... and extract THAT
     port makeall                       ; promote pin labels -> ports
     extract all
     ext2spice lvs
@@ -88,11 +89,13 @@ def _normalize_pdk(pdk: str) -> str:
 class MagicExtractOptions:
     """Knobs for the emitted extraction TCL, all deterministic.
 
-    `flatten_top`: when True, emit `flatten -dotoplabels <top>` (the top's
-                   own labels only) so ext2spice produces a
-                   single flat device-level `.subckt <top>` (matching the
-                   20937-device HDLC layout) instead of a cell-hierarchical
-                   netlist. Default True for LVS device-level compare.
+    `flatten_top`: when True, flatten the top into a NEW cell
+                   `flat_cell_name(top)` = `<top>_flat` with `-dotoplabels`
+                   (the top's own labels only) and extract THAT, so ext2spice
+                   produces a single flat device-level `.subckt <top>_flat`
+                   (the shape of the 20937-device HDLC result) instead of a
+                   cell-hierarchical netlist. Default True for LVS
+                   device-level compare.
     `port_makeall`: emit `port makeall` to promote pin labels to ports.
     `relabel_from`: optional ordered list of (port_name, layer) to re-assert
                     as labels + `port make` BEFORE port makeall — for GDS whose
@@ -105,6 +108,17 @@ class MagicExtractOptions:
     port_makeall: bool = True
     relabel_from: List[Tuple[str, str]] = field(default_factory=list)
     ext2spice_scale_off: bool = True
+
+
+def flat_cell_name(top_cell: str) -> str:
+    """The cell `flatten_top` flattens into, and so the extracted `.subckt`.
+
+    It must differ from `top_cell`: Magic's `flatten <name>` refuses a name
+    that already exists ("<name> already exists") and writes nothing, so
+    flattening into the loaded top's own name leaves the extraction
+    hierarchical. Magic's own convention (`<top>_flat`, as the eda_extraction
+    tool and the eda_lvs name alignment use)."""
+    return f"{top_cell}_flat"
 
 
 def build_shell_preamble(pdk: str, pdk_root: str, script_path: str) -> str:
@@ -152,22 +166,35 @@ def build_extraction_tcl(
     out.append(f"load {top_cell}")
     out.append("select top cell")
 
+    extracted = top_cell
     if opts.flatten_top:
+        extracted = flat_cell_name(top_cell)
         out.append(
-            "# Flatten so ext2spice emits ONE flat device-level .subckt\n"
-            "# (matches the post-PnR device count for the LVS compare)."
+            "# Flatten into a NEW cell and extract that, so ext2spice emits ONE\n"
+            "# flat device-level .subckt (the post-PnR device count for the\n"
+            "# LVS compare)."
+        )
+        # The target must not exist. MEASURED in the pinned image (magic
+        # 8.3.684): `flatten <name>` onto an existing cell prints "<name>
+        # already exists", writes nothing and carries on, so this script used
+        # to flatten into the top's own name and extract the HIERARCHICAL top
+        # while promising a flat one. A GDS that already holds a cell of the
+        # target name is refused here rather than silently extracted.
+        out.append(
+            f"if {{[lsearch -exact [cellname list allcells] {extracted}] >= 0}} {{\n"
+            f"    puts stderr \"MAGIC_PORT_EXTRACT_REFUSED: cell {extracted} "
+            f"already exists, so `flatten` would write nothing and the "
+            f"extraction would not be flat\"\n"
+            f"    exit 3\n"
+            f"}}"
         )
         # N6: `-dotoplabels` keeps only the top's own labels in the flat cell.
-        # A bare flatten copies every library cell's pin labels into it, and
-        # `port makeall` below would promote each to a top port (measured
-        # through the eda_extraction script in the pinned image, magic
-        # 8.3.684: 11 library pins promoted vs top labels only). Also measured
-        # there: flattening into the loaded top's own name prints "<top>
-        # already exists" and flattens nothing, so this line is inert today
-        # and the extraction stays hierarchical; the option keeps it safe if
-        # the target is ever renamed.
-        out.append(f"flatten -dotoplabels {top_cell}")
-        out.append(f"load {top_cell}")
+        # A bare flatten copies every library cell's pin labels into it under
+        # instance-prefixed names, and `port makeall` below would promote each
+        # to a top port (measured through the eda_extraction script in the
+        # pinned image: 11 library pins promoted vs top labels only).
+        out.append(f"flatten -dotoplabels {extracted}")
+        out.append(f"load {extracted}")
         out.append("select top cell")
 
     # Optional explicit relabel pass for GDS whose pin text is on a drawing
@@ -197,7 +224,7 @@ def build_extraction_tcl(
         "# Audit: a non-empty `.subckt {top}` port list confirms label\n"
         "# promotion succeeded; an empty one means the GDS lacks pin-purpose\n"
         "# labels -> fall back to Route B (programs/lvs_def_port_seed.py)."
-        .replace("{top}", top_cell)
+        .replace("{top}", extracted)
     )
     out.append(f"puts stdout \"MAGIC_PORT_EXTRACT_DONE {top_cell} -> {out_spice}\"")
     # TERMINATE THE SCRIPT. magic run with `-noconsole` and no terminal
