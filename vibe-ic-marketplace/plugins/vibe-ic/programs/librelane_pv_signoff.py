@@ -88,9 +88,9 @@ def route_tech_lef(project: Path) -> tuple[Path, str] | None:
     renders the same DEF's vias with the PDK's smaller landings: MEASURED on
     spm x gf180mcuD, 1,386 extra Metal2/3/4 minimum-area and spacing markers
     in Magic DRC on the LibreLane stream, 0 of them on the direct stream.
-    The file is bound by the record's ``derived_sha256`` (looked for at the
-    recorded path, then in the run's pnr directory, where the flow stages
-    it); an APPLIED record whose file cannot be found by that hash refuses
+    The file is bound by the record's ``derived_sha256`` (looked for in the
+    run's pnr directory, where the flow stages it, then at a recorded path
+    inside this project); an APPLIED record whose file cannot be found by that hash refuses
     ``LL_ROUTE_TECH_LEF_UNBOUND``.  None: the route read the PDK's own.
     """
     path = project / VIA_LEGALIZATION_REL
@@ -103,9 +103,15 @@ def route_tech_lef(project: Path) -> tuple[Path, str] | None:
     if not (isinstance(want, str) and want and isinstance(derived, str) and derived):
         raise Refusal('LL_ROUTE_TECH_LEF_UNBOUND',
                       f'{VIA_LEGALIZATION_REL}: APPLIED without derived_tech_lef/sha256')
-    for candidate in (Path(derived), _pl.pnr_dir(project) / Path(derived).name):
-        if candidate.is_file() and digest(candidate) == want:
-            return candidate.resolve(), f'{VIA_LEGALIZATION_REL}: derived_tech_lef sha256 {want}'
+    local = _pl.pnr_dir(project) / Path(derived).name
+    if local.is_file():
+        if digest(local) == want:
+            return local.resolve(), f'{VIA_LEGALIZATION_REL}: derived_tech_lef sha256 {want}'
+        raise Refusal('LL_ROUTE_TECH_LEF_UNBOUND',
+                      f'{VIA_LEGALIZATION_REL}: staged file hash differs from {want}: {local}')
+    recorded = Path(derived).resolve()
+    if recorded.is_relative_to(project.resolve()) and recorded.is_file() and digest(recorded) == want:
+        return recorded, f'{VIA_LEGALIZATION_REL}: derived_tech_lef sha256 {want}'
     raise Refusal('LL_ROUTE_TECH_LEF_UNBOUND',
                   f'{VIA_LEGALIZATION_REL}: no file with sha256 {want} at {derived} '
                   f'or in {_pl.pnr_dir(project)}')
