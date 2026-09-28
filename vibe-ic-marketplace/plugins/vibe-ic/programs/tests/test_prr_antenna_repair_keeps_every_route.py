@@ -49,6 +49,7 @@ proc mknet {name {sig SIGNAL} {terms 2} {abut 0}} {
 proc netcall {name sig terms abut method args} {
     switch -- $method {
         getName { return $name }
+        getMaster { return master }
         getSigType { return $sig }
         isSpecial { return [expr {$sig in {POWER GROUND}}] }
         getITerms { return [lrepeat $terms x] }
@@ -58,6 +59,7 @@ proc netcall {name sig terms abut method args} {
         default { error "net $name: $method" }
     }
 }
+proc master {method args} { if {$method eq "getName"} { return neutral_cell } }
 set ::insts [list]
 proc mkinst {name net} {
     set obj ::inst_$name
@@ -131,6 +133,7 @@ set ::env(STEP_DIR) [pwd]
 set ::vic_ant_before 0
 set ::vic_created [list]
 set ::vic_changed 1
+set rd_args [list]
 set ::vic_unrouted_before [dict create stub 1]
 set ::vic_fillers 0
 '''
