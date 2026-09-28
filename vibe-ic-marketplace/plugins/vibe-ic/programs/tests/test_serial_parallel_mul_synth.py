@@ -45,6 +45,13 @@ def _mk_project(tmp: Path, *, ports, l2_text, top="spm") -> Path:
     root = tmp / top
     gd = root / "phase1" / "generated_docs"
     gd.mkdir(parents=True)
+    # The generator now requires the fixture to state its reset style. These
+    # tests concern multiplication, declarations and transactional writes;
+    # a separate CR-12 fixture checks that a silent input is refused.
+    rst_name = next((p["name"] for p in ports
+                     if p["name"] in ("rst", "rst_n", "reset", "reset_n")), "rst")
+    polarity = "active-low" if rst_name.endswith("_n") else "active-high"
+    l2_text += f"; synchronous {polarity} reset"
     (gd / "L2_FRS.json").write_text(json.dumps(
         {"ic_name": top, "frs_sections": [{"content": l2_text}]},
         ensure_ascii=False))

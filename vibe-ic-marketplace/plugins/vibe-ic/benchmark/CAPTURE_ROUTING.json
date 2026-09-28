@@ -49,6 +49,11 @@
       "ic_expert_db": "agents/ic_expert_db/ic_expert_db.json",
       "ic_expert_db_note": "A recovery that is generalizable DESIGN-CLASS CRAFT (algorithm correctness / interface convention / latency-reset discipline / a common trap) — but is NOT a deterministic rule a gate can enforce — is distilled as a chip-AGNOSTIC lesson into the IC Expert DB (keyed by ic_class). It ADVISES the general spec-to-rtl author via _lesson_digest (surfaced for any Phase-1 doc, not just benchmarks); it NEVER overrides a gate/program verdict. Enforce with ic_expert_db_consistency_check.py (blindness + no-override). This is the 4th distill target alongside program (Bucket A) / skill (Bucket B) / backlog (Bucket C)."
     },
+    "phase2.rtl_gen.serial_parallel_multiplier": {
+      "description": "Deterministic serial multiplier template; reset mode and polarity must come from the design input before emission.",
+      "bucket_A_program": "programs/serial_parallel_mul_synth.py",
+      "bucket_B_skill_file": "agents/ic-expert-agent.md"
+    },
     "phase2.rtl_gen.canonical_primitive": {
       "description": "Phase 2 deterministic canonical-primitive recognition and RTL emission from a prompt-visible architecture",
       "bucket_A_program": "programs/canonical_primitive_synth.py",
