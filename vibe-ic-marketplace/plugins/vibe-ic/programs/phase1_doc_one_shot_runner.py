@@ -127,6 +127,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 import _path_layout as _pl
+import _atomic_artefact as _aa
 import phase1_protocol_spec_extract as _l15x
 import phase1_port_extract as _ppx
 import _input_corpus_scope as _ics
@@ -32641,21 +32642,34 @@ LAYERGATE2_GATES = (
 )
 
 
-def _run_layergate2(project: Path, gates=None, gate_dir=None) -> List[str]:
-    """Run the layergate-2 gates over the FINAL L4/L5/L6; return the names of
-    the gates that FAILed (a FAIL blocks phase 1). A gate that stalls or cannot
-    run is NOT_MEASURED and says so -- never a silent SKIP -- and every FAIL
-    line cites a report that exists (a gate with no --json of its own gets its
-    captured stdout written there)."""
+class _Layergate2Result(list):
+    """Blocking gate names, with unmeasured names kept distinct from FAILs."""
+
+    def __init__(self):
+        super().__init__()
+        self.failed: List[str] = []
+        self.not_measured: List[str] = []
+        self.not_applicable: List[str] = []
+
+
+def _run_layergate2(project: Path, gates=None, gate_dir=None) -> _Layergate2Result:
+    """BLOCKING: judge every selected final-layer gate and record its run.
+
+    FAIL and NOT_MEASURED both block Phase 1. An explicit gate SKIP is a
+    terminal NOT_APPLICABLE verdict with its reason captured in the receipt.
+    """
     gate_dir = gate_dir or Path(__file__).resolve().parent
-    failed: List[str] = []
+    result = _Layergate2Result()
     for _gate_name, _report_stem in (gates or LAYERGATE2_GATES):
         _gate_path = Path(gate_dir) / f"{_gate_name}.py"
-        if not _gate_path.is_file():
-            continue
         _gate_report = _pl.report_path(
             project, f"phase1/{_report_stem}.json")
-        _gate_report.parent.mkdir(parents=True, exist_ok=True)
+        _run_report = _pl.report_path(
+            project, f"phase1/{_report_stem}.run.json")
+        _run_report.parent.mkdir(parents=True, exist_ok=True)
+        # A receipt from an earlier Phase-1 attempt cannot certify this run.
+        _gate_report.unlink(missing_ok=True)
+        _run_report.unlink(missing_ok=True)
         _gate_cmd = [sys.executable, str(_gate_path), str(project)]
         # Only the layergate-2 gates accept --json; the Wave-38 enum
         # gate does not, so its verdict is captured from stdout, and the
@@ -32665,37 +32679,73 @@ def _run_layergate2(project: Path, gates=None, gate_dir=None) -> List[str]:
             _gate_cmd += ["--json", str(_gate_report)]
         _shown = (_gate_report.relative_to(project)
                   if _gate_report.is_relative_to(project) else _gate_report)
-        # Supervised, not a wall clock (#2051, CZT-11): a gate that stalls
-        # is NOT_MEASURED and says so; it is never a silent SKIP.
-        try:
-            _gate_cp = _pr.run(_gate_cmd, capture_output=True, text=True)
-        except _pr.Stalled as _exc:
-            print(f"      {_gate_name}: NOT_MEASURED — stalled, the layer is "
-                  f"NOT judged ({_exc})")
-            continue
-        except OSError as _exc:
-            print(f"      {_gate_name}: NOT_MEASURED — not runnable, the "
-                  f"layer is NOT judged ({_exc})")
-            continue
-        if not _writes_json:
+        _gate_cp = None
+        _reason = None
+        if not _gate_path.is_file():
+            _reason = "missing_script"
+        else:
+            # The progress supervisor aborts only after measured stall.
             try:
-                _gate_report.write_text(json.dumps({
+                _gate_cp = _pr.run(_gate_cmd, capture_output=True, text=True)
+            except _pr.Stalled as _exc:
+                _reason = "stalled"
+                _error = str(_exc)
+            except OSError as _exc:
+                _reason = "launch_error"
+                _error = str(_exc)
+        if _gate_cp is not None and not _writes_json:
+            try:
+                _aa.write_json(_gate_report, {
                     "gate": _gate_name, "returncode": _gate_cp.returncode,
                     "evidence": "the gate's own stdout/stderr (it writes no "
                                 "report of its own)",
-                    "stdout": _gate_cp.stdout, "stderr": _gate_cp.stderr},
-                    indent=2))
+                    "stdout": _gate_cp.stdout, "stderr": _gate_cp.stderr})
             except OSError as _exc:
+                _reason = "report_write_error"
+                _error = str(_exc)
                 _shown = f"its stdout (report not written: {_exc})"
-        if _gate_cp.stdout:
+        if _gate_cp is not None and _gate_cp.stdout.strip():
             print(f"      {_gate_name}: "
                   f"{_gate_cp.stdout.strip().splitlines()[0]}")
-        # exit 1 == FAIL (blocks). exit 2 == SKIP / not applicable.
-        if _gate_cp.returncode == 1:
-            failed.append(_gate_name)
+        _rc = _gate_cp.returncode if _gate_cp is not None else None
+        if _reason is None and _rc == 0:
+            _verdict = "PASS"
+        elif _reason is None and _rc == 1:
+            _verdict = "FAIL"
+        elif (_reason is None and _rc == 2 and _gate_cp is not None
+              and _gate_cp.stdout.lstrip().startswith("[SKIP]")):
+            _verdict = "NOT_APPLICABLE"
+            _reason = "gate_declared_skip"
+        else:
+            _verdict = "NOT_MEASURED"
+            _reason = _reason or "no_terminal_verdict"
+        _receipt = {"gate": _gate_name, "verdict": _verdict,
+                    "reason": _reason, "returncode": _rc,
+                    "stdout": _gate_cp.stdout if _gate_cp is not None else "",
+                    "stderr": _gate_cp.stderr if _gate_cp is not None else "",
+                    "gate_report": str(_shown) if _gate_report.is_file() else None}
+        if _reason in ("stalled", "launch_error", "report_write_error"):
+            _receipt["error"] = _error
+        try:
+            _aa.write_json(_run_report, _receipt)
+        except OSError as _exc:
+            _verdict = "NOT_MEASURED"
+            _reason = "receipt_write_error"
+            print(f"      {_gate_name}: NOT_MEASURED — cannot publish run "
+                  f"receipt ({_exc})")
+        if _verdict == "FAIL":
+            result.failed.append(_gate_name)
+            result.append(_gate_name)
             print(f"      {_gate_name}: FAIL — blocks phase1 "
                   f"(see {_shown})")
-    return failed
+        elif _verdict == "NOT_MEASURED":
+            result.not_measured.append(_gate_name)
+            result.append(_gate_name)
+            print(f"      {_gate_name}: NOT_MEASURED — {_reason}, the layer "
+                  f"is NOT judged (see {_run_report})")
+        elif _verdict == "NOT_APPLICABLE":
+            result.not_applicable.append(_gate_name)
+    return result
 
 
 def _g19_post_emit_backfill_register_offsets(project: Path) -> None:
@@ -63628,7 +63678,8 @@ def _drop_v0_3_7_exit_reason(project) -> None:
 
 
 def _v0_3_7_classify_phase1_exit(cov_gate_failed: bool, strict: bool,
-                                 pct: float, total_todo: int) -> dict:
+                                 pct: float, total_todo: int,
+                                 semantic_gate_failed: bool = False) -> dict:
     """v0.3.7 — ORGANIC #505. Classify the phase1 (doc-extraction) exit at
     the END of main(), where all L docs are already emitted (a hard
     ingest / protocol error sys.exit's earlier, never reaching here — so
@@ -63645,13 +63696,15 @@ def _v0_3_7_classify_phase1_exit(cov_gate_failed: bool, strict: bool,
     A TODO-stub failure is NOT coverage-only — TODO stubs are a real
     generated-doc incompleteness that keeps the FAIL. Chip-AGNOSTIC:
     pure arithmetic over the runner's own counters."""
-    will_fail = bool(cov_gate_failed) or (strict and (pct < 80.0 or total_todo > 0))
-    coverage_only = will_fail and total_todo == 0
+    will_fail = bool(cov_gate_failed or semantic_gate_failed) or (
+        strict and (pct < 80.0 or total_todo > 0))
+    coverage_only = will_fail and total_todo == 0 and not semantic_gate_failed
     return {
         "verdict": "FAIL" if will_fail else "PASS",
         "coverage_pct": round(float(pct), 1),
         "total_todo": int(total_todo),
         "cov_gate_failed": bool(cov_gate_failed),
+        "semantic_gate_failed": bool(semantic_gate_failed),
         "strict": bool(strict),
         "coverage_only_failure": bool(coverage_only),
     }
@@ -67754,7 +67807,8 @@ def main() -> int:
     # to reports/phase1/, FAIL bubbles to the strict-mode exit via
     # `cov_gate_failed`. Chip-AGNOSTIC — every gate reads only the
     # project's own L docs and its consuming program.
-    if _run_layergate2(project):
+    _layergate2_result = _run_layergate2(project)
+    if _layergate2_result:
         cov_gate_failed = True
 
     print(f"[15/15] coverage report ...")
@@ -68066,7 +68120,8 @@ def main() -> int:
     # FAIL to a non-gating COVERAGE-INCOMPLETE advisory. Advisory file:
     # never let it abort the run.
     _exit_reason = _v0_3_7_classify_phase1_exit(
-        cov_gate_failed, bool(args.strict), pct, total_todo)
+        cov_gate_failed, bool(args.strict), pct, total_todo,
+        semantic_gate_failed=bool(_layergate2_result))
     try:
         # THE PRODUCER READS THE SAME DECLARATION AS ITS READERS
         # (next/icslot-sidecarpath). This is the half that makes

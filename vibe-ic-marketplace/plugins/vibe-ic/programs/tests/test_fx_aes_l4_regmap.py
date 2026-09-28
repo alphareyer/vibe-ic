@@ -290,9 +290,61 @@ def test_a_stalled_gate_is_not_measured_not_skipped(tmp_path, capsys,
     failed = R._run_layergate2(proj, gates=(("fake_json_check", "fake"),),
                                gate_dir=gates)
     out = capsys.readouterr().out
-    assert failed == []
+    assert failed == ["fake_json_check"]
+    assert failed.failed == [] and failed.not_measured == ["fake_json_check"]
     assert "NOT_MEASURED — stalled, the layer is NOT judged" in out
+    receipt = json.loads(R._pl.report_path(proj, "phase1/fake.run.json").read_text())
+    assert receipt["verdict"] == "NOT_MEASURED" and receipt["reason"] == "stalled"
     assert "SKIP" not in out
+
+
+@pytest.mark.parametrize("failure", ["missing_script", "launch_error"])
+def test_an_unrun_selected_gate_blocks_and_has_a_typed_receipt(
+        tmp_path, monkeypatch, failure):
+    gates = tmp_path / "gates"
+    gates.mkdir()
+    if failure == "launch_error":
+        (gates / "fake_json_check.py").write_text(_FAKE_JSON)
+
+        def cannot_launch(*args, **kwargs):
+            raise OSError("synthetic launch refusal")
+
+        monkeypatch.setattr(R._pr, "run", cannot_launch)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    stale = R._pl.report_path(proj, "phase1/fake.run.json")
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text('{"verdict": "PASS"}')
+    result = R._run_layergate2(
+        proj, gates=(("fake_json_check", "fake"),), gate_dir=gates)
+    assert result == ["fake_json_check"], (
+        "an unrun required gate must block Phase 1")
+    assert result.failed == [] and result.not_measured == ["fake_json_check"]
+    report = R._pl.report_path(proj, "phase1/fake.run.json")
+    payload = json.loads(report.read_text())
+    assert payload["gate"] == "fake_json_check"
+    assert payload["verdict"] == "NOT_MEASURED"
+    assert payload["reason"] == failure
+    assert payload["gate_report"] is None
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("[SKIP] no register map applies", "NOT_APPLICABLE"),
+    ("", "NOT_MEASURED"),
+])
+def test_rc2_needs_an_explicit_nonapplicable_verdict(tmp_path, line, expected):
+    gates = tmp_path / "gates"
+    gates.mkdir()
+    (gates / "fake_json_check.py").write_text(
+        f"import sys\nprint({line!r})\nsys.exit(2)\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    result = R._run_layergate2(
+        proj, gates=(("fake_json_check", "fake"),), gate_dir=gates)
+    receipt = json.loads(
+        R._pl.report_path(proj, "phase1/fake.run.json").read_text())
+    assert receipt["verdict"] == expected
+    assert result == ([] if expected == "NOT_APPLICABLE" else ["fake_json_check"])
 
 
 def test_the_tail_failure_line_names_the_report_directory():
