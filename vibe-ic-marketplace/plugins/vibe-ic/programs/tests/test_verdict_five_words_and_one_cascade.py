@@ -30,9 +30,11 @@ import verdict as V  # noqa: E402
 # ── the vocabulary is closed ─────────────────────────────────────────────
 
 def test_five_generic_verdicts_and_the_declared_attribution_tier():
-    """Only the producer-declared density tier extends the generic vocabulary."""
+    """Only the producer-declared density tier extends the generic vocabulary --
+    and the DRV sign-off standard's WAIVED (owner-approved 2026-09-28, schema 3),
+    a measured residual under an owner waiver that cannot be mapped to PASS."""
     assert [v.value for v in V.Verdict] == [
-        "PASS", "PASS_WITH_WAIVERS", D.TIER_PASS_WITH_ATTRIBUTION,
+        "PASS", "PASS_WITH_WAIVERS", D.TIER_PASS_WITH_ATTRIBUTION, "WAIVED",
         "FAIL", "NOT_MEASURED", "NOT_APPLICABLE"]
 
 
@@ -47,7 +49,7 @@ def test_parse_accepts_each_declared_word(word):
     "SKIPPED-BY-ENTRY", "SKIPPED-BY-EXIT", "OUT-OF-SCOPE-BY-ENTRY",
     "INCOMPLETE", "INCONCLUSIVE", "NOT_CHECKED", "NOT_EXECUTED", "NOT-MEASURED",
     "NO_TOOL", "ENV_UNAVAILABLE", "BLOCKED", "BLOCKED_BY_UPSTREAM",
-    "DEFERRED-BY-UPSTREAM", "DEFERRED", "WAIVED", "WAIVED-DEFERRED",
+    "DEFERRED-BY-UPSTREAM", "DEFERRED", "WAIVED-DEFERRED",
     "PASS_VOIDED_BY_DEPENDENCY", "PASS-VOIDED-BY-DEPENDENCY",
     "REFUSED", "ERROR", "MISSING", "STALLED",
     "VACUOUS_PASS", "VACUOUS-PASS", "PARTIALLY-VACUOUS", "STRUCTURE-ONLY",
@@ -208,6 +210,9 @@ def _example(v: V.Verdict) -> V.StepVerdict:
         return V.StepVerdict.not_applicable("x", declared_by="input line")
     if v is V.Verdict.PASS_WITH_WAIVERS:
         return V.StepVerdict.pass_with_waivers("x", attribution="integrator")
+    if v is V.Verdict.WAIVED:
+        return V.StepVerdict.waived(
+            "x", waiver_rows=[V.WaiverRow("pin", "owner approved", "reyerchu")])
     if v is V.Verdict.FAIL:
         return V.StepVerdict.fail("x")
     return V.StepVerdict.pass_("x")
@@ -215,6 +220,13 @@ def _example(v: V.Verdict) -> V.StepVerdict:
 
 def test_a_run_of_passes_is_a_pass():
     assert V.run_verdict([_example(V.Verdict.PASS)] * 3) is V.Verdict.PASS
+
+
+def test_drv_waived_is_carried_by_rollup_without_becoming_pass():
+    waived = _example(V.Verdict.WAIVED)
+    assert waived.blocks_run_pass and not waived.is_green
+    assert V.run_verdict([_example(V.Verdict.PASS), waived]) is V.Verdict.WAIVED
+    assert not V.is_full_pass("WAIVED")
 
 
 def test_one_fail_makes_the_run_fail():
@@ -325,7 +337,7 @@ def test_from_dict_refuses_a_record_written_by_an_unmigrated_producer():
 
 def test_only_not_applicable_is_out_of_scope():
     assert not V.scoped_into_verdict({"status": "NOT_APPLICABLE"})
-    for w in ("PASS", "PASS_WITH_WAIVERS", "FAIL", "NOT_MEASURED"):
+    for w in ("PASS", "PASS_WITH_WAIVERS", "WAIVED", "FAIL", "NOT_MEASURED"):
         assert V.scoped_into_verdict({"status": w}), w
 
 

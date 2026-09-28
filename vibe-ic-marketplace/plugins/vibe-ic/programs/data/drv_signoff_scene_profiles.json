@@ -1,0 +1,10 @@
+{
+  "gf180mcuD": {
+    "pvt": {
+      "ss_125C_4v50": {"nom_voltage": 4.5, "nom_temperature": 125},
+      "tt_025C_5v00": {"nom_voltage": 5.0, "nom_temperature": 25},
+      "ff_n40C_5v50": {"nom_voltage": 5.5, "nom_temperature": -40}
+    },
+    "rc_corners": ["min", "nom", "max"]
+  }
+}

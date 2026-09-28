@@ -300,9 +300,11 @@ def fanout_residue(measurement: Dict[str, Any], corners: Sequence[str]) -> Dict[
 
 
 def _set_final_fanout_verdict(report: Dict[str, Any]) -> None:
+    """Repair-actuator fanout filter, not the IC DRV sign-off verdict."""
     fanout = fanout_residue(report.get("final") or {}, report.get("corners") or [])
     report["final_fanout"] = fanout
     report["verdict"] = fanout["verdict"]
+    report["verdict_scope"] = "repair_candidate_fanout_only"
     if fanout["verdict"] != "PASS":
         report["code"] = ("LL_PRR_FANOUT_VIOLATION" if fanout["verdict"] == "FAIL"
                           else "LL_PRR_FANOUT_NOT_MEASURED")
@@ -323,6 +325,38 @@ def _set_final_drv_verdict(report: Dict[str, Any]) -> None:
     elif count and report["verdict"] == "PASS":
         report.update(verdict="FAIL", code="LL_PRR_DRV_VIOLATION",
                       reason=f"declared postroute DRV has {count} residual pin/check violations")
+
+
+def _step32_drv_signoff(project: Path, report: Dict[str, Any]) -> None:
+    """Rejudge the final candidate with the one DRV judge after late repair.
+
+    A missing or stale bundle is named NOT_MEASURED.  The repair actuator's
+    own verdict remains a candidate-selection record, never sign-off evidence.
+    """
+    import drv_signoff_judge as _drv
+    source = project / "reports/phase3/sta/drv_signoff_bundle.json"
+    result: Dict[str, Any]
+    try:
+        bundle = json.loads(source.read_text())
+        result = _drv.judge(bundle)
+        state_path = report.get("adopted_state")
+        state = _load(Path(state_path)) if state_path else {}
+        final_def = Path(str(state.get("def") or ""))
+        recorded = ((bundle.get("identity") or {}).get("artifacts") or {}).get(
+            "def", {}).get("sha256")
+        if not final_def.is_file() or _drv._sha(final_def) != recorded:
+            result["verdict"] = "FAIL" if final_def.is_file() else "NOT_MEASURED"
+            result.setdefault("failures" if final_def.is_file() else
+                              "not_measured", []).append(
+                "step 32 final routed DEF differs from DRV bundle identity"
+                if final_def.is_file() else "step 32 final routed DEF absent")
+    except (OSError, ValueError, TypeError) as exc:
+        result = {"name": "DRV(tran/cap/fanout)", "verdict": "NOT_MEASURED",
+                  "not_measured": [f"step 32 DRV evidence unavailable: {exc}"]}
+    report["drv_signoff"] = result
+    output = project / "reports/phase3/sta/drv_signoff_step32.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    write_json(output, result)
 
 
 def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
@@ -1263,6 +1297,7 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
                             registry=registry, programs_dir=programs_dir,
                             floors=declared_timing_floor(project, sdc)))
     _stamp_verdict(report)
+    _step32_drv_signoff(project, report)
     write_json(out, report)
     _publish_declared_repair(project, report, out)
     return report
@@ -1371,6 +1406,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     if mode != "dual":
         report.update(close_arm(project, "librelane", route_state, **common))
         _stamp_verdict(report)
+        _step32_drv_signoff(project, report)
         write_json(out, report)
         _publish_declared_repair(project, report, out)
         return report
@@ -1410,6 +1446,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     report["repair_trigger"] = chosen.get("repair_trigger")
     report["selected_arm"] = sel["selection"]
     _stamp_verdict(report)
+    _step32_drv_signoff(project, report)
     write_json(out, report)
     _publish_declared_repair(project, report, out)
     return report
