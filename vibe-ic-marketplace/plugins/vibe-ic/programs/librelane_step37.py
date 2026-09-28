@@ -102,6 +102,29 @@ def _vibeic_gds_gates(project: Path, image: str, pdk_root: Path, pdk: str,
     return results
 
 
+#: The image's KLayout.SealRing handles a die off the origin only when it (1)
+#: sizes the ring from the die's spans, (2) moves what the PDK script drew at
+#: (0,0) onto DIE_AREA (`place_sealring.py`), and (3) fails the step unless a
+#: ring encloses DIE_AREA (`verify_ring`). MEASURED on the released images:
+#: 0.3.79 has none of the three, 0.3.83 has all three (llv1 W5).
+_SEALRING_ORIGIN_PROBE = (
+    'import os, librelane\n'
+    'from librelane.steps.klayout import SealRing\n'
+    'place = os.path.join(os.path.dirname(librelane.__file__), "scripts", "klayout",'
+    ' "place_sealring.py")\n'
+    'print(hasattr(SealRing, "die_dimensions") and hasattr(SealRing, "verify_ring")'
+    ' and os.path.isfile(place))\n')
+
+
+def sealring_origin_supported(image: str) -> bool:
+    """Read from the resolved image at run time, never assumed from a version."""
+    completed = subprocess.run(["docker", "run", "--rm", *_dmem.docker_memory_flags(),
+                                "--network", "none", "--entrypoint", "python3",
+                                image, "-c", _SEALRING_ORIGIN_PROBE],
+                               capture_output=True, text=True, timeout=300)
+    return completed.returncode == 0 and completed.stdout.strip() == "True"
+
+
 def run(project: Path, image: str, pdk_root: Path, pdk: str,
         routed_def: Path, netlist: Path, sdc: Path,
         canonical_gds: Path) -> dict:
@@ -112,10 +135,12 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
     configs = resolve_step_configs(project, image, pdk, list(STEPS), pdk_root=pdk_root,
                                    overlay=_pv.tech_lef_overlay(project))
     die = json.loads(configs["KLayout.SealRing"].read_text()).get("DIE_AREA")
-    if die and [float(die[0]), float(die[1])] != [0.0, 0.0]:
-        # Upstream SealRing currently treats x1/y1 as width/height.  Until its
-        # fork fix is in the image, a nonzero-origin die cannot be signed off.
-        raise Refusal("LL_SEALRING_ORIGIN_UNSUPPORTED", str(die))
+    if die and [float(die[0]), float(die[1])] != [0.0, 0.0] \
+            and not sealring_origin_supported(image):
+        # An image whose SealRing treats x1/y1 as width/height, or draws at
+        # (0,0) and never checks, cannot seal a die off the origin.
+        raise Refusal("LL_SEALRING_ORIGIN_UNSUPPORTED",
+                      f"{die}: {image} neither sizes, places nor verifies a ring off the origin")
     declared, sources = declaration_config(project)
     core = declared.get("CORE_AREA")
     if not core:
