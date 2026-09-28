@@ -27,7 +27,9 @@ The unit is resolved by `_project_declared_timescale` and stated by
 `_state_declared_timescale` — v1.18.7's own functions, the only implementations.
 """
 import ast
+import errno
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -68,9 +70,32 @@ BEHAVIORAL_PROSE = (
 
 @pytest.fixture(autouse=True)
 def _isolated_runner_session(monkeypatch):
-    """Each case models one runner process and leaves no atexit target."""
+    """Each case releases its held root before monkeypatch restores state."""
+    R._phase1_replace_session_binding(None)
     monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
     monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
+    yield
+    R._phase1_replace_session_binding(None)
+
+
+def test_isolated_runner_session_closes_held_directory_fds(tmp_path, monkeypatch):
+    """Fixture teardown closes the two FDs held after successful publication."""
+    project = tmp_path / "session_project"
+    project.mkdir()
+    with monkeypatch.context() as isolated_patch:
+        session = _isolated_runner_session.__wrapped__(isolated_patch)
+        next(session)
+        binding = R._Phase1ProjectBinding.open(project)
+        R._phase1_replace_session_binding(binding)
+        held_fds = (binding.parent_fd, binding.project_fd)
+        assert all(os.fstat(fd) for fd in held_fds)
+        with pytest.raises(StopIteration):
+            next(session)
+        assert R._RTL_SESSION_BINDING is None
+        for fd in held_fds:
+            with pytest.raises(OSError) as exc:
+                os.fstat(fd)
+            assert exc.value.errno == errno.EBADF
     # The third session global. A run binds it and nothing unbinds it, so
     # without this every later file inherited this file's last project.
     monkeypatch.setattr(R, "_RTL_SESSION_BINDING", None)
