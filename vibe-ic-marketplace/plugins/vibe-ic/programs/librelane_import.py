@@ -38,7 +38,9 @@ The two-segment plan (W5) is ONE call: ``import_segments(project,
 [(seg1_run_dir, "Checker.NetlistAssignStatements"), (seg2_run_dir, None)])``
 (CLI: ``librelane_import.py <project> <seg1>=Checker.NetlistAssignStatements
 <seg2>``). Each rule is taken from the one segment that ran it (two segments
-running it is refused), and ``not_performed`` is computed over the union.
+running it is refused). Consecutive segments must meet at adjacent top-level
+flow-loop slots; a step skipped by both is a segment gap, not a flow step the
+tool does not perform. ``not_performed`` is computed only after that check.
 
 WHAT IT WRITES
 --------------
@@ -74,7 +76,9 @@ Every rule is planned, and every refusal raised, BEFORE anything is written.
 The writes then run under a journal: if one still fails, every path is
 restored. A project whose manifest records an import of OTHER runs is refused
 (a different run needs a fresh project); re-importing the same runs removes
-the canonical files the earlier import wrote and this one does not.
+the canonical files the earlier import wrote and this one does not, only while
+their bytes still match the previous manifest. Importer records and any run
+tree can never be deletion targets.
 
 WHAT IT DOES NOT DO
 -------------------
@@ -296,14 +300,15 @@ def _last_invocation(flow_log: str) -> List[str]:
     return lines[starts[-1] + 1:] if starts else lines
 
 
-def run_cuts(flow_log: str) -> Dict[str, List[str]]:
+def run_cuts(flow_log: str) -> Dict[str, Any]:
     """Which steps the LAST invocation deliberately did not run.
 
     ``before``: ``Skipping step`` lines before its first started step (the
     ``--from`` signature); ``after``: after its last started step (``--to``);
     ``between``: between two started steps (``--skip``). A skip right after
     its ``Gating variable for step '<id>'`` notice is a RUN_* variable, not a
-    cut: its step id goes to ``gated``.
+    cut: its step id goes to ``gated``. ``slots`` keeps each top-level loop
+    iteration in order, including gated skips, for adjacent segment checks.
     """
     import instrument_calibration
     instrument_calibration.assert_calibrated("librelane_import::run_cuts")
@@ -311,15 +316,25 @@ def run_cuts(flow_log: str) -> Dict[str, List[str]]:
     running = [i for i, l in enumerate(tail) if _tlp._RUNNING_RE.match(l)]
     first = running[0] if running else len(tail)
     last = running[-1] if running else -1
-    out: Dict[str, List[str]] = {"before": [], "between": [], "after": [],
-                                 "gated": []}
+    out: Dict[str, Any] = {"before": [], "between": [], "after": [],
+                           "gated": [], "slots": []}
     for i, line in enumerate(tail):
+        started = _tlp._RUNNING_RE.match(line)
+        if started:
+            parts = Path(started.group(2)).parts
+            # Nested STA/corner runs have more folders after runs/<tag>.
+            if "runs" in parts and len(parts) - 1 - parts.index("runs") == 2:
+                out["slots"].append(("running", started.group(1)))
+            continue
         g = _GATING_RE.match(line)
         if g:
             out["gated"].append(g.group(1))
             continue
         m = _SKIP_STEP_RE.match(line)
-        if not m or (i and _GATING_RE.match(tail[i - 1])):
+        if not m:
+            continue
+        out["slots"].append(("skipped", m.group(1)))
+        if i and _GATING_RE.match(tail[i - 1]):
             continue
         key = "before" if i < first else "after" if i > last else "between"
         out[key].append(m.group(1))
@@ -804,14 +819,93 @@ def _previous_import(project: Path) -> Optional[Dict[str, Any]]:
         doc = _load(path)
     except (OSError, ValueError) as exc:
         raise Refusal("LL_IMPORT_MANIFEST_UNREADABLE", f"{path}: {exc}")
-    # Its canonical paths decide what this import deletes: trust them only
-    # once W0's validator has (relative, inside the project, outside every
-    # run). The disk is not checked: the files may since have been removed.
+    # Its canonical paths decide what this import deletes: W0 validates the
+    # rows, then this importer protects its own records and EVERY segment's
+    # run tree. The stale-file digest is checked below before any deletion.
     problems = _efm.validate_manifest(doc, project, verify_disk=False)
     if problems:
         raise Refusal("LL_IMPORT_MANIFEST_UNREADABLE",
                       f"{path} does not validate: {'; '.join(problems)}")
+    all_runs = [Path(s["run_dir"]) for s in _efm.segments_of(doc)]
+    protected = (Path("provenance.jsonl"), Path(MANIFEST_REL),
+                 Path(RECEIPT_DIR_REL))
+    for seg in _efm.segments_of(doc):
+        for row in seg.get("rows") or []:
+            dest = Path(row["canonical_path"])
+            if any(dest == p or dest.is_relative_to(p) for p in protected) or \
+                    any(dest == p or dest.is_relative_to(p) for p in all_runs):
+                raise Refusal("LL_IMPORT_MANIFEST_UNREADABLE",
+                              f"{path} claims importer-owned or run-tree "
+                              f"canonical path {dest}; it cannot decide a "
+                              "deletion")
     return doc
+
+
+def _check_previous_ownership(project: Path, previous: Dict[str, Any]) -> None:
+    """Authenticate old deletion candidates against this importer's rules.
+
+    W0's manifest validator checks row shape without disk verification here:
+    stale canonical files may legitimately be missing. Reconstruct the old
+    rule's destinations from its recorded run and top, and independently hash
+    the tool file. A matching canonical hash alone proves no ownership.
+    """
+    planned: Dict[Tuple[str, str, str, str], List[Tuple[Path, Path, Optional[str]]]] = {}
+    for seg in _efm.segments_of(previous):
+        run_dir = project / seg["run_dir"]
+        status = seg.get("flow_status") or {}
+        top = status.get("design_name")
+        if not isinstance(top, str) or not top:
+            raise Refusal("LL_IMPORT_MANIFEST_UNREADABLE",
+                          f"{project / MANIFEST_REL}: previous segment "
+                          f"{seg['run_dir']} has no recorded design name")
+        for row in seg.get("rows") or []:
+            rule = next((r for r in IMPORT_RULES
+                         if r.flow_step == row["step_id"]
+                         and r.step == _class_of(row["tool_step_id"])), None)
+            rel = Path(row["step_dir"])
+            source = run_dir / row["tool_run_path"]
+            key = (seg["run_dir"], row["step_dir"], row["step_id"], top)
+            if rule is None or len(rel.parts) != 1 or source.is_symlink() \
+                    or not source.is_file():
+                raise Refusal("LL_IMPORT_MANIFEST_UNREADABLE",
+                              f"{project / MANIFEST_REL}: previous row "
+                              f"{row['canonical_path']} has no owned tool source")
+            config = run_dir / rel / "config.json"
+            try:
+                recorded = (_load(config).get("meta") or {}).get("step")
+            except (OSError, ValueError, AttributeError):
+                recorded = None
+            if recorded != rule.step:
+                raise Refusal("LL_IMPORT_MANIFEST_UNREADABLE",
+                              f"{project / MANIFEST_REL}: previous row "
+                              f"{row['canonical_path']} has no matching step")
+            if "sha256:" + digest(source) != row["tool_run_sha256"]:
+                raise Refusal("LL_IMPORT_MANIFEST_UNREADABLE",
+                              f"{project / MANIFEST_REL}: previous row "
+                              f"{row['canonical_path']} does not hash to its "
+                              "tool-run source")
+            if key not in planned:
+                ran = Ran(row["tool_step_id"], rule.step, row["step_dir"],
+                          run_dir / rel, 0, run_dir)
+                try:
+                    plan = _plan_step(project, ran, rule, top,
+                                      project / RECEIPT_DIR_REL)
+                except (Refusal, OSError, ValueError) as exc:
+                    raise Refusal("LL_IMPORT_MANIFEST_UNREADABLE",
+                                  f"{project / MANIFEST_REL}: cannot reconstruct "
+                                  f"previous row {row['canonical_path']}: {exc}") from exc
+                planned[key] = [(dest, call.sources[view], view)
+                                for call in plan.views
+                                for view, dest in call.targets.items()]
+                planned[key] += [(dest, src, None) for src, dest in plan.files]
+            dest = project / row["canonical_path"]
+            if not any(dest == expected_dest and source.resolve() == expected_source
+                       and row.get("view") == view
+                       for expected_dest, expected_source, view in planned[key]):
+                raise Refusal("LL_IMPORT_MANIFEST_UNREADABLE",
+                              f"{project / MANIFEST_REL}: previous row "
+                              f"{row['canonical_path']} is not a destination "
+                              f"this importer produces from {row['tool_run_path']}")
 
 
 def _fixed_dests(rule: Rule, project: Path, top: str) -> List[Path]:
@@ -866,11 +960,14 @@ def import_segments(project: Path,
     segments: List[Dict[str, Any]] = []
     seg_of: Dict[Path, Dict[str, Any]] = {}
     indexes: List[List[Ran]] = []
+    loops: List[List[Tuple[str, str]]] = []
     for i, (run_dir, to) in enumerate(segs):
         index = run_index(run_dir)
         status = _require_finished(run_dir, index, to)
         status["flow_log_sha256"] = "sha256:" + digest(run_dir / "flow.log")
         status["design_name"] = top_of[run_dir]
+        loops.append(run_cuts((run_dir / "flow.log").read_text(errors="replace"))
+                     ["slots"])
         if i == 0 and status["from_cut"]:
             raise Refusal(
                 "LL_IMPORT_STARTS_MID_FLOW",
@@ -890,6 +987,30 @@ def import_segments(project: Path,
                          "run_dir": run_dir.relative_to(project).as_posix(),
                          "flow_status": status, "rows": []})
         seg_of[run_dir] = segments[-1]
+    for i in range(len(loops) - 1):
+        earlier, later = loops[i], loops[i + 1]
+        if not any(kind == "running" for kind, _ in earlier) or not any(
+                kind == "running" for kind, _ in later):
+            raise Refusal(
+                "LL_IMPORT_LOOP_UNVERIFIED",
+                f"the top-level loop slots of {segs[i][0]} and "
+                f"{segs[i + 1][0]} cannot be read from their flow.logs")
+        last = max(j for j, (kind, _) in enumerate(earlier)
+                   if kind == "running")
+        first = next(j for j, (kind, _) in enumerate(later)
+                     if kind == "running")
+        if first < last + 1:
+            raise Refusal(
+                "LL_IMPORT_SEGMENT_OVERLAP",
+                f"{segs[i][0]} ends at loop slot {last}, but {segs[i + 1][0]} "
+                f"starts at slot {first}; their top-level runs overlap")
+        if first > last + 1:
+            missed = [name for kind, name in later[last + 1:first]]
+            raise Refusal(
+                "LL_IMPORT_SEGMENT_GAP",
+                f"{segs[i][0]} ends at loop slot {last}, but {segs[i + 1][0]} "
+                f"starts at slot {first}: {first - last - 1} step(s) between "
+                f"segments were skipped by both: {missed}")
     previous = _previous_import(project)
     if previous is not None:
         before = [s.get("run_dir") for s in _efm.segments_of(previous)]
@@ -899,6 +1020,7 @@ def import_segments(project: Path,
                           f"of {before}; importing {run_rels} over it would "
                           "leave files of both. A different run needs a fresh "
                           "project")
+        _check_previous_ownership(project, previous)
     receipts = project / RECEIPT_DIR_REL
     plans: List[_StepPlan] = []
     for rule in IMPORT_RULES:
@@ -943,11 +1065,21 @@ def import_segments(project: Path,
                               f"{dest.relative_to(project)} would be written "
                               f"from both {writes[dest]} and {src}")
             writes[dest] = src
-    stale = sorted({project / r["canonical_path"]
-                    for seg in (_efm.segments_of(previous) if previous else [])
-                    for r in seg.get("rows") or []
-                    if isinstance(r, dict) and r.get("canonical_path")}
-                   - set(writes))
+    stale_rows = {project / r["canonical_path"]: r
+                  for seg in (_efm.segments_of(previous) if previous else [])
+                  for r in seg.get("rows") or []
+                  if isinstance(r, dict) and r.get("canonical_path")
+                  and project / r["canonical_path"] not in writes}
+    stale = sorted(path for path in stale_rows
+                   if path.exists() or path.is_symlink())
+    for path in stale:
+        row = stale_rows[path]
+        if (path.is_symlink() or not path.is_file() or
+                "sha256:" + digest(path) != row["canonical_sha256"]):
+            raise Refusal(
+                "LL_IMPORT_STALE_CANONICAL",
+                f"{path} is no longer the file this import recorded "
+                f"({row['canonical_sha256']}); leave it untouched")
     for entry in manifest["not_performed"]:
         rule = next(r for r in IMPORT_RULES if r.step == entry["tool_step"]
                     and r.flow_step == entry["flow_step"])

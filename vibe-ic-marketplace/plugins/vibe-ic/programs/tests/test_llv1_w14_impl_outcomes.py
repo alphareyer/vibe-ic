@@ -322,8 +322,19 @@ def imported_in_segments(tmp_path):
     cut = next(i for i, l in enumerate(lines) if l.startswith("Running")
                and "'OpenROAD.CheckSDCFiles'" in l)
     end = [l for l in lines if l.startswith(("Saving views", "Flow complete."))]
-    (proj / SEG1 / "flow.log").write_text("".join(lines[:cut] + end))
-    (proj / SEG2 / "flow.log").write_text("Starting…\n" + "".join(lines[cut:]))
+    head, rest = lines[:cut], lines[cut:]
+
+    # LibreLane (flows/sequential.py) prints `Skipping step` for every
+    # top-level step outside a --to / --from range; W6's importer places each
+    # segment by those loop slots and refuses segments that overlap or leave
+    # a gap (test_llv1_w6_librelane_import._segment_project cuts the same way).
+    def skips(part):
+        return [f"Skipping step '{l.split(chr(39))[1]}'…\n" for l in part
+                if l.startswith("Running '") and "/" not in
+                l.split(" at ")[1].strip("'…\n").split("runs/cmp3/", 1)[1]]
+    (proj / SEG1 / "flow.log").write_text("".join(head + skips(rest) + end))
+    (proj / SEG2 / "flow.log").write_text(
+        "Starting…\n" + "".join(skips(head[1:]) + rest))
     # the trim kept state_out.json only where a rule imports; LibreLane
     # writes one for every step that returns, the declared end included
     (proj / SEG1 / "09-checker-netlistassignstatements/state_out.json") \
