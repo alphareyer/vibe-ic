@@ -15426,14 +15426,20 @@ def _rf_pnr_scan(project: Path) -> Dict[str, object]:
     # extractor; no value from it reaches the flow or the report.
     #
     # FX_405: an entry inside an off-limits DIRECTORY (golden/, score/,
-    # metrics/ ...) is excluded unopened by the repo's one authority. The file
-    # NAME's words are not judged here — this loop takes no value, and the
-    # contract for this bucket is content (a non-QoR `rules.json` is "not
-    # examined"). A dangling link cannot be read, so it keeps its bucket.
+    # metrics/ ...) is excluded unopened by the repo's one authority. A file
+    # whose name unambiguously says result/oracle is also excluded before the
+    # authority's content classifier can open it. Ambiguous names such as
+    # `rules.json` still need shape classification: a non-QoR file is "not
+    # examined" under the existing coverage contract. A dangling link with
+    # an ordinary name cannot be read, so it keeps its bucket.
     for entry in sorted(rdir.rglob("*")):
         if entry.is_dir() or entry.suffix in _RF_SCANNED_SUFFIXES:
             continue
         rel_entry = _rel(entry)
+        if _rfb.has_name_word(
+                entry.name, _rfb.RESULT_NAME_WORDS | _rfb.ORACLE_TREE_SEGMENTS):
+            excluded_oracle.append(rel_entry)
+            continue
         if entry.is_file() and _rfb.design_input_denial(
                 project, entry, file_name_words=False):
             excluded_oracle.append(rel_entry)
