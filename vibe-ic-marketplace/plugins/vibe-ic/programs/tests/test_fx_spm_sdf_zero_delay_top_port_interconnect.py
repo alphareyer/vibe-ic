@@ -90,6 +90,21 @@ def test_a_nonzero_delay_to_a_top_port_stays_unexplained():
     assert got["by_class"] == {} and got["unexplained"] == 1
 
 
+def test_multiple_records_on_one_error_line_are_not_mixed_or_guessed():
+    """The error gives a line number, not the identity of a record on it."""
+    original = "(INTERCONNECT _416_/Q p (0.000:0.000:0.000))"
+    mixed = ("(INTERCONNECT _416_/Q p (0.000:0.012:0.020)) "
+             "(INTERCONNECT _417_/Q other (0.000:0.000:0.000))")
+    got = _classify(sdf=SDF.replace(original, mixed))
+    assert got["by_class"] == {} and got["unexplained"] == 1, got
+    assert not SG._all_delays_zero(mixed)
+
+    both_zero = (original + " " +
+                 "(INTERCONNECT _417_/Q other (0.000:0.000:0.000))")
+    got = _classify(sdf=SDF.replace(original, both_zero))
+    assert got["by_class"] == {} and got["unexplained"] == 1, got
+
+
 def test_an_incomplete_record_is_not_read_as_zero():
     assert not SG._all_delays_zero("(INTERCONNECT a p ()")
     assert not SG._all_delays_zero("(INTERCONNECT a p ( : : ))")

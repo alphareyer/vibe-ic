@@ -2149,21 +2149,21 @@ _IFNONE_EDGE_PATH_RE = re.compile(
     r"\s*[+-]?\s*[=*]>\s*\(\s*([A-Za-z_][\w$]*)\s*[+-]?\s*:")
 _SDF_CELLTYPE_RE = re.compile(r"\(\s*CELLTYPE\s+\"([^\"]+)\"\s*\)")
 _SDF_DIVIDER_RE = re.compile(r"\(\s*DIVIDER\s+(\S)\s*\)")
-_SDF_INTERCONNECT_RE = re.compile(r"\(\s*INTERCONNECT\s+(\S+)\s+(\S+)")
-#: One whole INTERCONNECT record on one line: endpoints, then its delay
-#: triples, then the record's own closing paren.
+#: A simulator error supplies only an SDF line number. Classify it only when
+#: that entire line is one complete INTERCONNECT record, so endpoints and
+#: delays cannot come from different records on an ambiguous line.
 _SDF_INTERCONNECT_RECORD_RE = re.compile(
-    r"\(\s*INTERCONNECT\s+\S+\s+\S+((?:\s*\([^()]*\))+)\s*\)\s*$")
+    r"\s*\(\s*INTERCONNECT\s+(\S+)\s+(\S+)((?:\s*\([^()]*\))+)\s*\)\s*")
 _SDF_TRIPLE_RE = re.compile(r"\(([^()]*)\)")
 
 
 def _all_delays_zero(sdf_line: str) -> bool:
     """True iff the line is ONE complete INTERCONNECT record whose every
     delay value is a number equal to 0 (an empty triple `()` is not a zero)."""
-    rec = _SDF_INTERCONNECT_RECORD_RE.search(sdf_line or "")
+    rec = _SDF_INTERCONNECT_RECORD_RE.fullmatch(sdf_line or "")
     if not rec:
         return False
-    triples = _SDF_TRIPLE_RE.findall(rec.group(1))
+    triples = _SDF_TRIPLE_RE.findall(rec.group(3))
     if not triples:
         return False
     for triple in triples:
@@ -2286,7 +2286,7 @@ def classify_sdf_errors(transcript: str, *, compile_log: str, sdf_text: str,
             if any(site in sorry for site in dropped):
                 cls = "IFNONE_EDGE_PATH_DROPPED"
         elif msg.startswith("Could not find intermodpath") and 0 < lineno <= len(lines):
-            ic = _SDF_INTERCONNECT_RE.search(lines[lineno - 1])
+            ic = _SDF_INTERCONNECT_RECORD_RE.fullmatch(lines[lineno - 1])
             if ic and "inout" in (explainer.endpoint_dir(ic.group(1), divider.group(1)),
                                   explainer.endpoint_dir(ic.group(2), divider.group(1))):
                 cls = "INOUT_PORT_INTERCONNECT"
