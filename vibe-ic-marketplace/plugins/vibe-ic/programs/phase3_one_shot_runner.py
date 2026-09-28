@@ -75675,6 +75675,14 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
         "dispatched_sites": selected,
         "stale_downstream": stale}, indent=2) + "\n")
     audit_doc = json.loads(audit.read_text())
+    # The enclosing unit published the selected producer outputs. Refresh
+    # those steps' own write records before check_step consumes attribution;
+    # the collector's only_steps path carries every unselected row unchanged.
+    # Building this view in a disposable clone left the project's old
+    # written.json in place and gave the gate a false resolver disagreement.
+    report["steps_view"] = _pl.emit_steps_view(
+        project, PROGRAMS_DIR, runner="phase3_one_shot_runner",
+        only_steps=window_ids)
     gate_results = _phase3_window_full_gate_audit(project, window_ids)
     audit_doc["audit_kind"] = "bounded_full_declared_gates"
     audit_doc["declared_gate_checks"] = gate_results
@@ -75695,23 +75703,6 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
         "refresh": "flow_compliance_check.check_step", "kind": "executed",
         "why": "all gate clauses of selected canonical steps ran on an isolated copy"}
     audit.write_text(json.dumps(audit_doc, indent=2) + "\n")
-    # The steps-view emitter refreshes every steps/* write record. Isolate it
-    # and publish only its bounded report, preserving every unselected record.
-    import tempfile
-    with tempfile.TemporaryDirectory(prefix="phase3-steps-view-",
-                                     dir=project.parent) as temp:
-        isolated = Path(temp) / project.name
-        _phase3_window_clone(project, isolated)
-        report["steps_view"] = _pl.emit_steps_view(
-            isolated, PROGRAMS_DIR, runner="phase3_one_shot_runner",
-            only_steps=window_ids)
-        source_view = _pl.report_path(isolated, "steps_view.json")
-        if source_view.is_file():
-            target_view = _pl.report_path(project, "steps_view.json")
-            target_view.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_view, target_view)
-            report["steps_view"]["steps_root"] = str(project / "steps")
-            report["steps_view"]["record_path"] = str(target_view)
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(f"[phase3] bounded sites={selected}; changed={len(changed)}; "
           f"stale={list(stale)}")
