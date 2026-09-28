@@ -595,6 +595,12 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             try:
                 recorded_repair = json.loads(repair_report.read_text())
                 postroute_repair_ran = bool(recorded_repair.get("adopted"))
+                if recorded_repair.get("site") == "after_route":
+                    route_handoff = project / "reports/phase3/librelane_route_handoff.json"
+                    handoff = json.loads(route_handoff.read_text())
+                    if ((handoff.get("postroute_repair") or {}).get(
+                            "report_sha256") != _sha(repair_report)):
+                        missing.append("step 32 in-chain repair receipt not bound to route handoff")
             except (OSError, ValueError, TypeError, AttributeError):
                 missing.append("step 32 repair adoption receipt unreadable")
             if postroute_repair_ran != bool(bundle.get("postroute_repair_ran")):
