@@ -252,6 +252,16 @@ def _check_block(project: Path, block: str, max_delta_pct: float
             "block": block, "rule": "A7_POSTSIM_INVALID_JSON",
             "rel_path": rel, "detail": "top-level not a JSON object",
         }]
+    provenance = data.get("_provenance")
+    incomplete = (provenance.get("not_compared")
+                  if isinstance(provenance, dict) else None)
+    if incomplete:
+        return "MISSING", [{
+            "block": block, "rule": "A7_POSTSIM_INCOMPLETE",
+            "rel_path": rel,
+            "detail": ("one or more extraction styles were not compared; "
+                       "this partial pre_vs_post.json is not certifiable"),
+        }]
 
     # Force-fail when A4 says SPICE never ran for this block.
     if _a4_simulator_ran(project, block) is False:

@@ -652,12 +652,9 @@ def measurement_span(tb_text: str) -> dict:
     so they follow the span and are listed as doing so. Cards inside an
     `.include`d file are not seen: the A3 testbench writes its cards inline."""
     lines = _joined_lines(tb_text or "")
-    declared = None
-    for line in lines:
-        m = _TRAN_CARD_RE.match(line)
-        if m:
-            declared = _seconds(m.group(4))
-            break
+    trans = [line for line in lines if _TRAN_CARD_RE.match(line)]
+    declared = (_seconds(_TRAN_CARD_RE.match(trans[0]).group(4))
+                if trans else None)
     # ONE READER for the stop and its rewrite: the card is cut only where
     # `bound_transient` can rewrite it, i.e. its stop sits on the card's own
     # line. A `.tran 5n` / `+ 28673000n` split is read here but not cut.
@@ -720,6 +717,9 @@ def measurement_span(tb_text: str) -> dict:
             "holds_declared_record": holds}
     if declared is None:
         span.update(stop_s=None, rule="no_transient_card")
+        return span
+    if len(trans) != 1:
+        span.update(stop_s=declared, rule="more_than_one_transient_card")
         return span
     if not rewritable:
         span.update(stop_s=declared,
@@ -945,8 +945,10 @@ def run(project: Path, block: str, container: str, image: str,
     a3_devices = device_instances(netlist.read_text(errors="replace"), block)
 
     host_root = dr.resolve_host_root(project, container)
-    # ONE span and ONE budget for the pre deck and every post deck: the
-    # comparison reads the same window in each, and no style gets more time.
+    # ONE span and ONE recorded budget for the pre deck and every post deck:
+    # the comparison reads the same window in each.  The budget is evidence,
+    # never a wall-clock kill; a progressing circuit simulation is supervised
+    # for stalls by the container runner (#2051/#2062).
     tb_text, span = bound_transient(tb.read_text(errors="replace"))
     net_text = netlist.read_text(errors="replace")
     spec_path = bdir / "spec.json"
@@ -965,7 +967,8 @@ def run(project: Path, block: str, container: str, image: str,
         t0 = time.monotonic()
         ok, meas, raw, status = ars._run_ngspice(
             container, ars._container_path(container, host_root, deck),
-            deck_text=deck.read_text(errors="replace"), deadline_s=budget_s)
+            deck_text=deck.read_text(errors="replace"),
+            run_to_completion=True)
         wall = time.monotonic() - t0
         write_text(deck.with_suffix(".ngspice.log"), raw or "")
         return {"ok": ok, "meas": meas, "status": status, "wall_s": wall,

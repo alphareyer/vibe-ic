@@ -226,26 +226,25 @@ def test_the_delivered_a3_testbench_keeps_its_full_record(stub):
     assert (project / "phase3/analog/blk/tb_blk.sp").read_text() == TB
 
 
-# ── 2. every simulation carries a deadline; `timeout 0` is refused ────────
-def test_every_a7_simulation_carries_the_same_positive_deadline(stub):
+# ── 2. A7 is supervised without a wall-clock kill ─────────────────────────
+def test_every_a7_simulation_uses_the_supervised_no_clock_route(stub):
     project = _project(stub)
     assert A7.run(project, "blk", "vibeic-eda", IMAGE) == 0
     durations = [s["timeout"] for s in _sims(stub)]
-    assert len(durations) == 3 and None not in durations
-    assert all(int(d) > 0 for d in durations), durations
-    assert len(set(durations)) == 1, durations      # pre == every post
+    assert len(durations) == 3
+    assert durations == ["0"] * 3, durations
     budget = _record(project)["budget"]
     assert budget["source"] == "default_per_clock"
     expected = (getattr(A7, "BUDGET_FLOOR_S", 0)
                 + 1026 * getattr(A7, "BUDGET_S_PER_CLOCK", 0))
-    assert int(durations[0]) == pytest.approx(expected, abs=1)
+    assert budget["seconds"] == pytest.approx(expected, abs=1)
 
 
-def test_a_budget_the_block_states_is_the_deadline(stub):
+def test_a_budget_the_block_states_is_recorded_not_a_kill_clock(stub):
     project = _project(stub, spec={"block": "blk", "specs": [],
                                    SPEC_BUDGET_KEY: 4321})
     assert A7.run(project, "blk", "vibeic-eda", IMAGE) == 0
-    assert [s["timeout"] for s in _sims(stub)] == ["4321"] * 3
+    assert [s["timeout"] for s in _sims(stub)] == ["0"] * 3
     assert _record(project)["budget"]["source"] == \
         f"spec.json:{SPEC_BUDGET_KEY}"
 
@@ -483,6 +482,17 @@ def test_a_transient_card_split_across_lines_is_not_reported_as_cut(stub):
     assert span["rule"] == "transient_card_continued_across_lines"
 
 
+def test_two_transient_cards_keep_the_declared_record_without_a_partial_cut():
+    tb = TB.replace("meas tran vavg avg v(b) from=523240n to=1025000n",
+                    "meas tran vavg avg v(b) from=523240n to=1025000n\n"
+                    "alter vload dc=2\ntran 5n 28673000n\n"
+                    "meas tran vload avg v(b) from=523240n to=1025000n")
+    out, span = A7.bound_transient(tb)
+    assert out == tb
+    assert span["rule"] == "more_than_one_transient_card"
+    assert span["stop_s"] == pytest.approx(28673e-6)
+
+
 # ── review wave 5 (T130): one style's spent budget voids only that style ──
 def test_a_measured_degradation_is_a_fail_even_if_a_later_style_expires(
         stub, monkeypatch):
@@ -536,7 +546,7 @@ def test_the_projects_budget_file_wins_and_the_remedy_points_to_it(
         json.dumps({"blk": 777}))
     monkeypatch.setenv("STUB_EXPIRE", "all")
     assert A7.run(project, "blk", "vibeic-eda", IMAGE) == EX_BUDGET_EXHAUSTED
-    assert [s["timeout"] for s in _sims(stub)] == ["777"]
+    assert [s["timeout"] for s in _sims(stub)] == ["0"]
     rec = _record(project)
     assert rec["budget"]["source"] == \
         "phase3/analog/simulation_budgets.json:blk"
