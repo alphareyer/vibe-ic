@@ -177,6 +177,97 @@ if {$::env(VIBEIC_PRR_SETUP_SEQUENCE) eq "sizeup,swap"} {
     log_cmd repair_design {*}$rd_args
 }
 
+proc vic_pad_input_slew_sizeup {{tag before}} {
+    # The resizer can split a core-to-pad wire with a minimum buffer yet
+    # leave the pad input over its own Liberty max_transition at the slow
+    # corner.  Size only the buffer that directly drives a violating PAD
+    # input, from this run's Liberty cells and this route's STA report.
+    # No clock/IO exception or design-specific net name is introduced.
+    set report "$::env(STEP_DIR)/pad_input_slew_${tag}.rpt"
+    report_check_types -max_slew -violators > $report
+    set fh [open $report]
+    set rows [split [read $fh] "\n"]
+    close $fh
+    set changed 0
+    set ::vic_pad_dirty [dict create]
+    set ::vic_pad_resized [list]
+    set seen [dict create]
+    foreach row $rows {
+        if {![regexp {^\s*(\S+/\S+)\s+([0-9.]+)\s+([0-9.]+)\s+(-[0-9.]+)\s+\(VIOLATED\)} $row -> path limit slew slack]} {
+            continue
+        }
+        set cut [string last / $path]
+        set inst_name [string range $path 0 [expr {$cut - 1}]]
+        set pin_name [string range $path [expr {$cut + 1}] end]
+        set pad [$::block findInst $inst_name]
+        if {$pad eq "NULL" || ![string match PAD* [[$pad getMaster] getType]]} { continue }
+        set sink "NULL"
+        foreach it [$pad getITerms] {
+            if {[[$it getMTerm] getName] eq $pin_name && [$it getIoType] eq "INPUT"} {
+                set sink $it
+                break
+            }
+        }
+        if {$sink eq "NULL" || [$sink getNet] eq "NULL"} { continue }
+        set driver "NULL"
+        foreach it [[$sink getNet] getITerms] {
+            if {[$it getIoType] eq "OUTPUT"} {
+                if {$driver ne "NULL"} { set driver "NULL"; break }
+                set driver $it
+            }
+        }
+        if {$driver eq "NULL"} { continue }
+        set name [[$driver getInst] getName]
+        if {[dict exists $seen $name]} { continue }
+        dict set seen $name 1
+        set old [get_lib_cells -of_objects [get_cells $name]]
+        if {[llength $old] != 1 || ![get_property $old is_buffer]} { continue }
+        set output [get_lib_pins -of_objects $old -filter {direction==output}]
+        if {[llength $output] != 1} { continue }
+        set old_r [get_property $output drive_resistance_max_rise]
+        set old_f [get_property $output drive_resistance_max_fall]
+        if {$old_r <= 0 || $old_f <= 0} { continue }
+        set old_ports [list]
+        foreach lp [get_lib_pins -of_objects $old] { lappend old_ports [get_property $lp name] }
+        set old_ports [lsort $old_ports]
+        set lib [get_property $old library]
+        set best ""
+        set best_area 1e99
+        foreach cell [get_lib_cells -filter {is_buffer==1}] {
+            if {[get_property $cell library] ne $lib || [get_property $cell dont_use]} { continue }
+            set ports [list]
+            foreach lp [get_lib_pins -of_objects $cell] { lappend ports [get_property $lp name] }
+            if {[lsort $ports] ne $old_ports} { continue }
+            set out [get_lib_pins -of_objects $cell -filter {direction==output}]
+            if {[llength $out] != 1} { continue }
+            set rise [get_property $out drive_resistance_max_rise]
+            set fall [get_property $out drive_resistance_max_fall]
+            if {$rise <= 0 || $fall <= 0 || $rise > 0.60*$old_r || $fall > 0.60*$old_f} { continue }
+            set area [get_property $cell area]
+            if {$area < $best_area} { set best $cell; set best_area $area }
+        }
+        if {$best eq ""} { continue }
+        replace_cell $name [get_property $best name]
+        incr changed
+        lappend ::vic_pad_resized [$driver getInst]
+        foreach term [[$driver getInst] getITerms] {
+            set touched [$term getNet]
+            if {$touched ne "NULL" && [$touched getSigType] ni {POWER GROUND}} {
+                dict set ::vic_pad_dirty [$touched getName] $touched
+            }
+        }
+        vic_say "pad input slew: $path limit=$limit measured=$slew driver=$name sized to [get_property $best name]"
+    }
+    utl::metric_integer vibeic__prr__pad_slew_sizeups__${tag} $changed
+    vic_say "pad input slew: sized $changed violating driver buffer(s)"
+    return $changed
+}
+
+if {[info exists ::env(VIBEIC_PRR_DRV_ONLY)] && $::env(VIBEIC_PRR_DRV_ONLY)} {
+    vic_pad_input_slew_sizeup
+}
+
+if {![info exists ::env(VIBEIC_PRR_DRV_ONLY)] || !$::env(VIBEIC_PRR_DRV_ONLY)} {
 set setup_args [list -setup -verbose]
 lappend setup_args -setup_margin $::env(VIBEIC_PRR_SETUP_MARGIN)
 lappend setup_args -max_buffer_percent $::env(VIBEIC_PRR_SETUP_MAX_BUFFER_PCT)
@@ -193,6 +284,9 @@ lappend hold_args -setup_margin $::env(VIBEIC_PRR_SETUP_MARGIN)
 lappend hold_args -hold_margin $::env(VIBEIC_PRR_HOLD_MARGIN)
 lappend hold_args -max_buffer_percent $::env(VIBEIC_PRR_HOLD_MAX_BUFFER_PCT)
 log_cmd repair_timing {*}$hold_args
+} else {
+    vic_say "DRV-only candidate: setup/hold repair skipped; both are re-measured"
+}
 
 # ---- 5. what changed -------------------------------------------------------
 set ::vic_created [list]
@@ -414,6 +508,37 @@ utl::metric_integer vibeic__prr__eco_net__final_count [dict size $::vic_dirty]
 if {!$::vic_eco_ok} {
     puts stderr "VIBEIC_PRR_ECO_ROUTE_REFUSED: the scoped route added whole-design violations on every attempt ($::vic_eco_attempts); the candidate is not written"
     exit 1
+}
+
+# A scoped reroute changes RC.  Re-extract the actual new wires and, when a
+# PAD input still violates its own pin limit, size its direct driver once more
+# and route only the touched nets.  Each pass uses the same full-route DRC
+# refusal as the first ECO.  The final signoff scene remains the adoption gate.
+if {[info exists ::env(VIBEIC_PRR_DRV_ONLY)] && $::env(VIBEIC_PRR_DRV_ONLY)} {
+    for {set pass 1} {$pass <= 2} {incr pass} {
+        vic_annotate pad_eco_$pass
+        if {[vic_pad_input_slew_sizeup eco_$pass] == 0} { break }
+        set mine [dict create]
+        foreach inst $::vic_pad_resized { dict set mine [$inst getName] 1 }
+        set locked [list]
+        foreach inst [$::block getInsts] {
+            if {[dict exists $mine [$inst getName]]} { continue }
+            set status [$inst getPlacementStatus]
+            if {$status ni {LOCKED FIRM COVER}} {
+                lappend locked [list $inst $status]
+                $inst setPlacementStatus LOCKED
+            }
+        }
+        log_cmd detailed_placement \
+            -max_displacement [subst { $::env(PL_MAX_DISPLACEMENT_X) $::env(PL_MAX_DISPLACEMENT_Y) }]
+        foreach pair $locked { [lindex $pair 0] setPlacementStatus [lindex $pair 1] }
+        check_placement -verbose
+        global_connect
+        if {![vic_eco_route ::vic_pad_dirty pad_eco_$pass]} {
+            puts stderr "PRR_PAD_SLEW_ECO_REFUSED: pass $pass failed the full-route DRC guard"
+            exit 1
+        }
+    }
 }
 
 # ---- 6b. antenna residue -> the tool's antenna repair ----------------------

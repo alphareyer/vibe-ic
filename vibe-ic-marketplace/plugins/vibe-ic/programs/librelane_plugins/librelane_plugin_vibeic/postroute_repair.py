@@ -157,6 +157,14 @@ class PostRouteRepair(ResizerStep):
                 default=False,
             ),
             Variable(
+                "VIBEIC_PRR_DRV_ONLY",
+                bool,
+                "Repair routed design-rule violations without setup/hold moves. "
+                "The latter can disturb the DRV repair or crash in route-guide "
+                "restoration; candidate timing is still measured before adoption.",
+                default=False,
+            ),
+            Variable(
                 "VIBEIC_PRR_PG_RULES_TCL",
                 Optional[str],
                 "A Tcl file of add_global_connection rules (the direct deck's "

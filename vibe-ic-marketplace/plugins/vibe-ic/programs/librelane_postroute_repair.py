@@ -103,6 +103,8 @@ PARAM_VARS = {
     "setup_max_buffer_pct": "VIBEIC_PRR_SETUP_MAX_BUFFER_PCT",
     "hold_max_buffer_pct": "VIBEIC_PRR_HOLD_MAX_BUFFER_PCT",
     "repair_tns_pct": "VIBEIC_PRR_SETUP_REPAIR_TNS_PCT",
+    "drv_only": "VIBEIC_PRR_DRV_ONLY",
+    "slew_margin_pct": "VIBEIC_PRR_SLEW_MARGIN_PCT",
 }
 
 #: `measure` exits with this when the adopted state cannot answer; the
@@ -779,7 +781,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     a = sub.add_parser("actuate", help="one repair candidate from the adopted state")
     for name in PARAM_VARS:
         a.add_argument("--" + name.replace("_", "-"),
-                       type=str if name == "setup_sequence" else float,
+                       type=str if name == "setup_sequence" else
+                       (lambda value: value.lower() in ("true", "1")) if name == "drv_only" else float,
                        default=None)
     args = parser.parse_args(argv)
     impl = Path.cwd()
