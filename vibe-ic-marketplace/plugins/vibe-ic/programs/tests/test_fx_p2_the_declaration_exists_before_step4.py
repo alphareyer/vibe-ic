@@ -111,6 +111,23 @@ def test_a_selection_the_input_does_not_designate_is_not_invented(tmp_path):
     assert rc == 1, (rc, msg)
 
 
+def test_published_step4_report_names_the_undecided_conditional_reason(tmp_path):
+    """The JSON a flow reader receives must retain the computed reason.
+
+    This exercises the actual gate CLI/report writer rather than only the
+    private classifier: a menu is fail-closed, and the reader must learn why
+    the M case stayed blocking.
+    """
+    proj = _fresh(tmp_path, UNDESIGNATED)
+    report = tmp_path / "reports" / "step4.json"
+    assert GATE.main([str(proj), "--json", str(report)]) == 1
+    published = json.loads(report.read_text(encoding="utf-8"))
+    assert published["verdict"] == "FAIL"
+    assert COND["name"] in published["message"]
+    assert "applies only if the design selects option 'M'" in published["message"]
+    assert "declares no selection at this point" in published["message"]
+
+
 def test_main_emits_before_step4_reads_it():
     """Wiring, read off the AST: the early emission precedes Step 4 in main,
     and row 33 is checked against it."""
