@@ -306,15 +306,15 @@ def _offered_corpus():
     ``corpus_root()`` does: a named-but-unreadable corpus is a wrong path, not
     an absent one (``_published_corpus.CorpusPointerBroken``).
     """
-    corpus = _pc.corpus_root()
-    if corpus is None:
-        return None
-    repo = _plugin_tree.repo_root()
-    if repo is not None and corpus.resolve() == (repo / _CORPUS_DIR).resolve():
-        # Already reached by the in-repo arm; yielding it twice would double
-        # count the same root under two labels.
-        return None
-    return corpus
+    # A corpus at `<repo>/benchmark-data` is NOT thereby "already reached by
+    # the in-repo arm": that arm reads the REPOSITORY's `git ls-tree HEAD`, and
+    # since the subtree left the repository that commit carries nothing under
+    # `benchmark-data/`. Returning None for that location (the one
+    # `_corpus_location` resolves first) made the population empty with the
+    # corpus sitting in the checkout. The double count this guarded against
+    # cannot happen: both arms label a root `benchmark-data/<rel>`, and
+    # `record_roots` keeps the first label it sees.
+    return _pc.corpus_root()
 
 
 #: Bound for the `git ls-tree` below. NOT a round number picked by feel:

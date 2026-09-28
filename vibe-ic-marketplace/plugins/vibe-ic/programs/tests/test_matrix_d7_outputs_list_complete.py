@@ -2322,9 +2322,55 @@ def test_d7_a_record_whose_emitter_withheld_the_residual_is_refused(monkeypatch)
 #: Declaring any of them is the yaml+manifest PAIR (the d7 -> d3 relocation
 #: this module documents) plus a census regeneration, and it is left to the
 #: flow's owner with the three findings named here rather than half-done.
+#: MOVED 2 ROOTS -> 3 ON 2026-09-28 (FX_IMAGE_ONLY_REDS_B), AND THE PIN FIRED
+#: FIRST — but on the WRONG population, which is the finding. The in-image
+#: sweep (vibeic-eda 0.3.84, corpus at the checkout's own `benchmark-data/`)
+#: reported "measured: []": `matrix_d7_write_record._offered_corpus` dropped a
+#: corpus at `<repo>/benchmark-data` as "already reached by the in-repo arm",
+#: and that arm reads the REPOSITORY's `git ls-tree HEAD`, which carries
+#: nothing under `benchmark-data/` since the subtree left it. Neither arm
+#: harvested; the pin read an empty population with three records on disk.
+#: `test_a_corpus_inside_the_checkout_is_still_harvested` holds the repair.
+#:
+#: With discovery repaired, ``benchmark-data`` @ ``f06ccc0`` carries a third
+#: record: ``ic/spm/v1.21.6_gf180mcuD`` (published 2026-09-16, PASS_WITH_WAIVERS).
+#: RE-MEASURED on main 3f332d152 + the repair:
+#:
+#:     v1.10.18_sky130A     captured 2026-08-09T11:11:08Z
+#:                          399 candidates, 143 refused (absent 143)
+#:     v1.14.88_gf180mcuD   captured 2026-08-31T18:09:41Z
+#:                          476 candidates, 144 refused (absent 144)
+#:     v1.21.6_gf180mcuD    captured 2026-09-16T01:06:42Z
+#:                          1183 candidates, 699 refused (absent 699, 0-byte 0,
+#:                          symlinked 0, untracked 0)
+#:
+#: The A/B against a forced-empty ``observed_writes()`` over all 70 steps:
+#: **13** promotions on **9** steps, **0** findings lost. The six marked (new)
+#: are carried by v1.21.6 alone; the other seven are also promoted by the two
+#: roots already pinned, on the flow as it stands today:
+#:
+#:     step 7     reports/phase2/gates/stage1_compliance.json
+#:     step 11    phase2/stage2/dft/dft_atpg_not_run.json          (new)
+#:     step DT2   phase2/stage2/dft/path_delay_atpg_not_run.json   (new)
+#:     step DT3   phase2/stage2/dft/sdd_atpg_not_run.json          (new)
+#:     step 23    phase3/stage3/sta/sta_mcorner_ocv.rpt, sta_spef_multicorner.rpt
+#:                and their reports/phase3 mirrors                  WAIVED
+#:     step 37.3  reports/phase3/die_density_fill.json
+#:     step 37.3  reports/phase3/technology_units.json              (new)
+#:     step 37.4  reports/phase3/floorplan_rectangles.json          (new)
+#:     step 37.4  reports/phase3/lec_post_layout.json
+#:     step 39    reports/phase3/gates/stage4_compliance.json       (new)
+#:
+#: NOT DISPOSED HERE, stated so the pin is not read as a certificate. Every
+#: row but step 23's is a W2 finding the empty discovery was hiding. The three
+#: `*_not_run.json` rows are CONDITIONAL skip sentinels, the class the module
+#: docstring says must not be declared. The rest are the yaml+manifest PAIR plus
+#: a census regeneration, and are left to the flow's owner with each finding
+#: named here, as the 2026-08-15 move did for D1, 21 and 34.
 RECORD_BOUND_ROOTS: Tuple[str, ...] = (
     "benchmark-data/ic/spm/v1.10.18_sky130A",
     "benchmark-data/ic/spm/v1.14.88_gf180mcuD",
+    "benchmark-data/ic/spm/v1.21.6_gf180mcuD",
 )
 
 
@@ -2418,6 +2464,57 @@ def test_d7_the_write_record_population_is_named_root_by_root():
         and R._load(r)[0] is not None))
     assert pin_complaints(
         RECORD_BOUND_ROOTS, measured, observed, R.binding_notes()) == []
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                    "-c", "commit.gpgsign=false", *args],
+                   cwd=str(cwd), check=True, capture_output=True, timeout=60)
+
+
+def _record_tree(root: Path, rels) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q")
+    (root / "README").write_text("x\n")
+    for rel in rels:
+        p = root / rel / R.RECORD_REL
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "seed")
+
+
+def test_a_corpus_inside_the_checkout_is_still_harvested(tmp_path, monkeypatch):
+    """The corpus location `_corpus_location` resolves FIRST is
+    `<repo>/benchmark-data`. The repository's own HEAD tracks nothing there
+    (the subtree left it), so dropping that corpus as "already reached by the
+    in-repo arm" emptied the population with every record on disk. MEASURED
+    in-image on 3f332d152: `measured: []` against a corpus carrying three.
+
+    CONTROL, same test: a repository that DOES track the root under
+    `benchmark-data/` yields it ONCE, not twice under one label."""
+    repo = tmp_path / "repo"
+    _record_tree(repo, [])
+    corpus = repo / R._CORPUS_DIR
+    _record_tree(corpus, ["ic/a/run1", "ic/b/run2"])
+    monkeypatch.setattr(R._plugin_tree, "repo_root", lambda: repo)
+    monkeypatch.setattr(R._pc, "corpus_root", lambda: corpus)
+    R.clear_caches()
+    try:
+        assert [r.label for r in R.record_roots()] == [
+            "benchmark-data/ic/a/run1", "benchmark-data/ic/b/run2"]
+
+        tracked = tmp_path / "tracked"
+        _record_tree(tracked, ["benchmark-data/ic/a/run1"])
+        monkeypatch.setattr(R._plugin_tree, "repo_root", lambda: tracked)
+        monkeypatch.setattr(R._pc, "corpus_root",
+                            lambda: tracked / R._CORPUS_DIR)
+        R.clear_caches()
+        assert [r.label for r in R.record_roots()] == [
+            "benchmark-data/ic/a/run1"]
+    finally:
+        monkeypatch.undo()
+        R.clear_caches()
 
 
 def test_the_pin_FIRES_when_the_binding_goes_inert():
