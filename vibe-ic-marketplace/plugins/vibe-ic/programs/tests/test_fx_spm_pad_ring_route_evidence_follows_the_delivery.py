@@ -109,14 +109,7 @@ def test_a_die_that_has_it_passes(tmp_path):
     {}, {"deliverable": "DIE"}, {"deliverable": "DIE", "self_tapeout": True},
 ], ids=["hardmacro", "die", "die-self-tapeout"])
 def test_the_requirement_asks_the_producers_own_question(tmp_path, kw):
-    """On a live route, owed exactly when the runner writes the attestation.
-
-    NOT PINNED HERE, a pre-existing split for the owner (FX_SPM_GATES_2
-    report): a HARDMACRO that BOUGHT a slot. #2277's `delivery_declares`
-    keeps die outputs owed for a purchase, while the producer's
-    `_tapeout_declaration.requests_pad_ring` builds no ring for any declared
-    HARDMACRO. That disagreement predates this change and already applies to
-    15.5ic's own outputs; which side is right is a ruling, not a test."""
+    """On valid live routes, the requirement agrees with the producer."""
     project = H._project(tmp_path, **kw)
     owed = F._output_not_owed(project, _step37(), EVIDENCE) is None
     assert owed is bool(TD.requests_pad_ring(project))
