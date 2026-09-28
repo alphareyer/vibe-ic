@@ -343,6 +343,9 @@ NOT_RUN_CATEGORIES = frozenset({
     "NO_SPEF",           # the SPEF the report names is not on this host
     "NO_CORNER",         # the report carries no record for a corner
     "NO_BOUNDED_SPEF",   # ... or names a bounded SPEF that is not there
+    "NO_WINDOWS",        # declared timing windows were not measured
+    "PATH_OUTSIDE_PROJECT", # embedded evidence points outside this project
+    "PRODUCER_NOT_MEASURED", # emitter could not measure its active scene
 })
 
 #: The vacuity codes a tapeout acceptance MAY quote (#535). See the
@@ -479,6 +482,18 @@ def _load_windows(report: dict, net_driver_pins) -> Tuple[Optional[dict], bool]:
     return None, False
 
 
+def _input_path(project_dir: Path, value: str) -> Optional[Path]:
+    """Resolve a reported evidence path, refusing traversal and symlink escape."""
+    path = Path(value)
+    path = path if path.is_absolute() else project_dir / path
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(project_dir.resolve())
+    except ValueError:
+        return None
+    return resolved
+
+
 def audit(project_dir: Path,
           report_path: Optional[Path] = None) -> Tuple[List[Finding], dict]:
     findings: List[Finding] = []
@@ -498,12 +513,40 @@ def audit(project_dir: Path,
         return findings, stats
     stats["report_read"] = True
 
+    if report.get("verdict") == "NOT_MEASURED":
+        why = str(report.get("error") or "producer reported no measured scene")
+        stats["input_refusal"] = ("PRODUCER_NOT_MEASURED", why)
+        findings.append(Finding("ERROR", "PRODUCER_NOT_MEASURED", why))
+        return findings, stats
+
+    embedded = [("spef", report.get("spef")),
+                ("clk_source", report.get("clk_source"))]
+    for scene in ("setup", "hold"):
+        cinfo = (report.get("corners") or {}).get(scene) or {}
+        embedded.append((f"{scene}.bounded_spef", cinfo.get("bounded_spef")))
+        embedded.append((f"{scene}.windows_json", cinfo.get("windows_json")))
+    embedded.append(("windows_json", report.get("windows_json")))
+    for scene, path in (report.get("windows_json_by_scene") or {}).items():
+        embedded.append((f"windows_json_by_scene.{scene}", path))
+    resolved_paths = {}
+    for field, path in embedded:
+        if not path:
+            continue
+        resolved = _input_path(project_dir, str(path))
+        if resolved is None:
+            why = f"{field} points outside project {project_dir.resolve()}: {path}"
+            stats["input_refusal"] = ("PATH_OUTSIDE_PROJECT", why)
+            findings.append(Finding("ERROR", "PATH_OUTSIDE_PROJECT", why))
+            return findings, stats
+        resolved_paths[field] = resolved
+
     orig_spef = report.get("spef")
-    if not orig_spef or not Path(orig_spef).exists():
+    orig_path = resolved_paths.get("spef")
+    if not orig_path or not orig_path.exists():
         findings.append(Finding("ERROR", "NO_SPEF",
                                 f"original coupling SPEF missing: {orig_spef}"))
         return findings, stats
-    orig_text = Path(orig_spef).read_text(errors="replace")
+    orig_text = orig_path.read_text(errors="replace")
     stats["spef_read"] = True
     sp = M.parse_spef(orig_text)
     pairs = M.coupling_pairs(sp)
@@ -565,8 +608,37 @@ def audit(project_dir: Path,
             f"finds 0 — the SPEF is not the one the reported slacks were "
             f"derived from"))
 
-    net_windows, exact = _load_windows(report, sp["net_driver_pins"])
-    stats["windows_exact"] = exact
+    scene_windows = {}
+    for scene in ("setup", "hold"):
+        cinfo = (report.get("corners") or {}).get(scene) or {}
+        value = (cinfo.get("windows_json") or
+                 (report.get("windows_json_by_scene") or {}).get(scene) or
+                 report.get("windows_json"))
+        if value:
+            path = _input_path(project_dir, str(value))
+            rc = cinfo.get("windows_rc", report.get("windows_rc", 0))
+            if path is None or not path.is_file() or rc != 0:
+                why = f"{scene}: timing windows unavailable at {value} (rc={rc})"
+                stats["input_refusal"] = ("NO_WINDOWS", why)
+                findings.append(Finding("ERROR", "NO_WINDOWS", why))
+                return findings, stats
+            try:
+                timing = json.loads(path.read_text())
+                net_windows = M.net_windows_from_timing(timing, sp["net_driver_pins"])
+            except (OSError, ValueError, TypeError) as exc:
+                why = f"{scene}: timing windows unreadable at {value}: {exc}"
+                stats["input_refusal"] = ("NO_WINDOWS", why)
+                findings.append(Finding("ERROR", "NO_WINDOWS", why))
+                return findings, stats
+            if not any(v is not None for v in net_windows.values()):
+                why = f"{scene}: timing window file {value} resolved zero driver windows"
+                stats["input_refusal"] = ("NO_WINDOWS", why)
+                findings.append(Finding("ERROR", "NO_WINDOWS", why))
+                return findings, stats
+            scene_windows[scene] = (net_windows, True)
+        else:
+            scene_windows[scene] = (None, False)
+    stats["windows_exact"] = all(exact for _, exact in scene_windows.values())
     # `windows_exact` says only that a window FILE was found and parsed. It has
     # never said how many nets that file actually resolved, and a net it does
     # not resolve is folded at the WORST-CASE Miller factor ("unknown window =>
@@ -578,9 +650,17 @@ def audit(project_dir: Path,
     # CONSERVATIVE direction, so partial coverage can only overstate the
     # crosstalk penalty, never hide one. It must be visible; it must not
     # silently flip a design's sign-off verdict.
-    if isinstance(net_windows, dict) and net_windows:
-        _res = sum(1 for v in net_windows.values() if v is not None)
-        _tot = len(net_windows)
+    per_scene_windows = (bool(report.get("windows_json_by_scene")) or
+                         any(((report.get("corners") or {}).get(scene) or {}).get(
+                             "windows_json") for scene in ("setup", "hold")))
+    metric_scenes = ("setup", "hold") if per_scene_windows else ("setup",)
+    window_union = {f"{scene}:{net}": value
+                    for scene in metric_scenes
+                    for windows in (scene_windows[scene][0],)
+                    for net, value in (windows or {}).items()}
+    if window_union:
+        _res = sum(1 for v in window_union.values() if v is not None)
+        _tot = len(window_union)
         stats["windows_resolved"] = _res
         stats["windows_total"] = _tot
         stats["windows_coverage"] = round(_res / _tot, 6)
@@ -598,17 +678,19 @@ def audit(project_dir: Path,
     corners = report.get("corners", {})
     nominal = report.get("nominal", {})
     for corner in ("setup", "hold"):
+        net_windows, exact = scene_windows[corner]
         cinfo = corners.get(corner)
         if not isinstance(cinfo, dict):
             findings.append(Finding("ERROR", "NO_CORNER",
                                     f"report missing corner '{corner}'"))
             continue
         bounded = cinfo.get("bounded_spef")
-        if not bounded or not Path(bounded).exists():
+        bounded_path = resolved_paths.get(f"{corner}.bounded_spef")
+        if not bounded_path or not bounded_path.exists():
             findings.append(Finding("ERROR", "NO_BOUNDED_SPEF",
                                     f"{corner}: bounded SPEF missing: {bounded}"))
             continue
-        bounded_text = Path(bounded).read_text(errors="replace")
+        bounded_text = bounded_path.read_text(errors="replace")
 
         # (1-3) independent cap-level recount (the false-clean-proof).
         # `expected` is computed HERE for both modes — identical arithmetic to
@@ -719,7 +801,9 @@ def _vacuity(stats: dict) -> Tuple[str, str]:
     r_nets = int(stats.get("spef_r_net_records") or 0)
     compared = sum(int((v or {}).get("nets_checked", 0) or 0)
                    for v in recount.values())
-    if not stats.get("report_read"):
+    if stats.get("input_refusal"):
+        code, why = stats["input_refusal"]
+    elif not stats.get("report_read"):
         code = "EMITTER_REPORT_UNREADABLE"
         why = ("the emitter's si_mcf_sta.json could not be read, so no fold "
                "was re-derived.")
@@ -975,7 +1059,7 @@ def verdict_for(defect: bool, not_run: bool, vacuous: bool) -> str:
         return "FAIL"
     if not_run and vacuous:
         # Could not obtain the input, and proved nothing. The fourth state.
-        return "NOT_RUN"
+        return "NOT_MEASURED"
     if not_run:
         # PARTIAL, and the other direction of the same lie. Some corner's fold
         # WAS re-derived and proved; another corner's input was missing. Calling
@@ -1038,7 +1122,7 @@ def build_report(findings: List[Finding], stats: dict, project_dir: str) -> dict
         # now means "this run reached no conclusion", which is exactly the set
         # {NOT_RUN, VACUOUS_PASS}. The raw count is unmodified and still
         # visible at `summary.denominator.examined`.
-        "vacuous": verdict in ("NOT_RUN", "VACUOUS_PASS"),
+        "vacuous": verdict in ("NOT_MEASURED", "VACUOUS_PASS"),
     }
     if _vacuity_code:
         # The classification, beside the machine-citable name of the state and
@@ -1213,8 +1297,12 @@ RECORD_ADJUDICATION = _ra.declare(
     # RECORDED SHAPE, not from the published files. The rule reads only fields
     # a record carries, which is why that substitution is sound for THIS rule
     # and would not be for one that re-opened an artefact.
+    # 2026-09-28: re-reviewed after the zero-corner verdict became
+    # NOT_MEASURED and input paths/windows became project-bound. The published
+    # zero-coupling rule still decides from coupling_pairs and findings alone;
+    # neither new path/window state can be inferred from an old record.
     decision_digest=(
-        "67a5a6c5d5a4e3673bbbf8a559e4d88e21dd61366419f94cd4b2344556d88dad"),
+        "84c1055e932f8573d07c31908c80c47962d69a4460eb1342ed6c6b7f08934cca"),
     rules=(
         _ra.Rule(
             rule_id="si_mcf_sta_check.zero-fold-is-not-a-signoff",
@@ -1265,13 +1353,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"VACUOUS_PASS: {denom['not_applicable_reason']}",
               file=sys.stderr)
         return RC_VACUOUS
-    if report["verdict"] == "NOT_RUN":
+    if report["verdict"] == "NOT_MEASURED":
         # #506 — the text channel for the fourth state, and it must NOT be the
         # `VACUOUS_PASS` token: `flow_compliance_check._stdout_signals_vacuous`
         # matches that at line start and would promote the step to the pass
         # tier, which is precisely the trade the rc decision refuses (see the
         # module docstring). rc stays 1, so the step FAILs exactly as before.
-        print(f"NOT_RUN: {denom['not_applicable_reason']}", file=sys.stderr)
+        print(f"NOT_MEASURED: {denom['not_applicable_reason']}", file=sys.stderr)
         return RC_FAIL
     return RC_PASS if report["verdict"] == "PASS" else RC_FAIL
 

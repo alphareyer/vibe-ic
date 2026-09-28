@@ -83,7 +83,7 @@ CLI
 ---
     python3 si_mcf_sta.py run <project_dir> [--container vibeic-eda] \\
         [--spef ...] [--netlist ...] [--sdc ...] [--liberty ...] [--top ...] \\
-        [--vdd 1.8] [--overlap-guard-ns 0.0]
+        [--overlap-guard-ns 0.0]
     python3 si_mcf_sta.py emit <coupling.spef> --timing <windows.json> \\
         --corner setup --out <bounded.spef>     # pure emit (no tools)
 """
@@ -108,6 +108,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 import argparse
 import json
+import math
 import re
 import subprocess
 import sys
@@ -783,6 +784,63 @@ def _resolve_flow_liberty(project: Path) -> Optional[str]:
     return None
 
 
+def _resolve_scene_liberties(project: Path) -> Dict[str, str]:
+    """Select the libraries the existing setup and hold STA scenes read."""
+    sta = project / "phase3/stage3/sta"
+    scenes: Dict[str, str] = {}
+    for scene in ("setup", "hold"):
+        deck = sta / f"sta_spef_{scene}.tcl"
+        if deck.is_file():
+            for line in deck.read_text(errors="replace").splitlines():
+                lib = _liberty_path_from_read_liberty(line.strip())
+                if lib:
+                    scenes[scene] = lib
+                    break
+    pnr = project / "phase3/stage3/pnr/pnr.tcl"
+    if pnr.is_file() and len(scenes) < 2:
+        by_corner: Dict[str, str] = {}
+        for line in pnr.read_text(errors="replace").splitlines():
+            line = line.strip()
+            lib = _liberty_path_from_read_liberty(line)
+            match = re.search(r"(?:^|\s)-corner\s+(\S+)", line)
+            if lib and match:
+                by_corner.setdefault(match.group(1).lower(), lib)
+        if by_corner:
+            scenes.setdefault("setup", by_corner.get("ss") or next(iter(by_corner.values())))
+            scenes.setdefault("hold", by_corner.get("ff") or next(iter(by_corner.values())))
+    return scenes
+
+
+def nom_voltage_from_liberty_header(text: str) -> Optional[float]:
+    """Read a unique, positive top-level nom_voltage; never infer from a name."""
+    header = re.split(r"^\s*cell\s*\(", text, maxsplit=1, flags=re.M)[0]
+    vals = re.findall(r"^\s*nom_voltage\s*:\s*"
+                      r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*;",
+                      header, re.M)
+    if len(vals) != 1:
+        return None
+    volts = float(vals[0])
+    return volts if math.isfinite(volts) and volts > 0 else None
+
+
+def _scene_nom_voltage(liberty: str, container: str) -> Optional[float]:
+    """Read the active Liberty header on the host or in the active EDA image."""
+    path = Path(liberty)
+    if path.is_file():
+        try:
+            return nom_voltage_from_liberty_header(
+                path.open(errors="replace").read(262144))
+        except OSError:
+            return None
+    try:
+        cp = subprocess.run(
+            _ce.docker_exec_argv(container, "head", "-c", "262144", liberty),
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return nom_voltage_from_liberty_header(cp.stdout) if cp.returncode == 0 else None
+
+
 def _docker_exec_raw(container: str, cmd: str, timeout: int = 15
                      ) -> Tuple[int, str, str]:
     """Bounded, UNSUPERVISED `docker exec` — for the watchdog's OWN short
@@ -924,7 +982,7 @@ def build_window_tcl(read_block: str, top: str, out_json_c: str) -> str:
 
 def _run_windows(container: str, work: Path, liberty_c: str, netlist_c: str,
                  top: str, sdc_c: str, spef_c: str, macro_libs_c: List[str],
-                 vdd_v: float, out_json_host: Path, timeout: int = 1800
+                 out_json_host: Path, timeout: int = 1800
                  ) -> Tuple[dict, int]:
     """Produce the OpenSTA per-pin arrival-window JSON via a minimal robust TCL."""
     out_json_c = _to_container_path(str(out_json_host), container)
@@ -1068,7 +1126,7 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
         spef: Optional[str] = None, netlist: Optional[str] = None,
         sdc: Optional[str] = None, liberty: Optional[str] = None,
         top: Optional[str] = None, macro_libs: Optional[List[str]] = None,
-        vdd_v: float = 1.8, overlap_guard_ns: float = 0.0,
+        overlap_guard_ns: float = 0.0,
         out_json: Optional[PathLike] = None, timeout: int = 1800,
         work_dir: Optional[PathLike] = None) -> dict:
     """End-to-end: OpenSTA windows -> MCF fold (setup + hold) -> re-STA -> report.
@@ -1094,6 +1152,7 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
     sdc_p = Path(sdc) if sdc else (pnr / "constraint.sdc")
     if top is None:
         top = _top_from_netlist(netlist_p) or "top"
+    scene_libs = _resolve_scene_liberties(project) if liberty is None else {}
     if liberty is None:
         libs = sorted((project / "input" / "pdk" / "liberty").glob("*_typ.lib"))
         if not libs:
@@ -1106,7 +1165,9 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
         # the whole SI STA reported a SELF-INFLICTED ERROR instead of a real
         # verdict. Recover the liberty the phase-3 flow already resolved.
         if not liberty:
-            liberty = _resolve_flow_liberty(project) or ""
+            liberty = scene_libs.get("setup") or _resolve_flow_liberty(project) or ""
+    scene_libs = {scene: scene_libs.get(scene) or str(liberty)
+                  for scene in ("setup", "hold")}
     macro_libs = macro_libs or []
 
     # field (caravel SI-STA liberty) — hard guard: a genuinely UNRESOLVABLE
@@ -1118,7 +1179,7 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
         report = {
             "program": _PROGRAM, "version": _VERSION,
             "tool": "opensta-mcf-bounded-si-sta", "design_top": top,
-            "verdict": "ERROR",
+            "verdict": "NOT_MEASURED", "vdd_v": None,
             "error": ("no timing liberty resolvable: none staged under "
                       "input/pdk/liberty/ and no read_liberty found in the "
                       "phase-3 PnR/STA TCLs — cannot run SI STA without a "
@@ -1162,32 +1223,58 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
             pp = cand if cand.exists() else pp
         return str(pp.resolve()) if pp.exists() else str(pp)
 
-    liberty_c = _to_container_path(_abs(str(liberty)), container)
+    liberty_by_scene = {scene: _to_container_path(_abs(path), container)
+                        for scene, path in scene_libs.items()}
+    voltage_by_scene = {scene: _scene_nom_voltage(path, container)
+                        for scene, path in liberty_by_scene.items()}
+    unknown = [scene for scene, volts in voltage_by_scene.items() if volts is None]
+    if unknown:
+        report = {
+            "program": _PROGRAM, "version": _VERSION,
+            "tool": "opensta-mcf-bounded-si-sta", "design_top": top,
+            "verdict": "NOT_MEASURED", "vdd_v": None,
+            "voltage_source": "liberty.nom_voltage",
+            "liberty_by_scene": liberty_by_scene,
+            "voltage_by_scene": voltage_by_scene,
+            "error": (f"no readable positive nom_voltage in active Liberty for "
+                      f"scene(s): {', '.join(unknown)}"),
+        }
+        out_json_p = (Path(out_json) if out_json
+                      else _pl.report_path(project, "si_mcf_sta.json"))
+        out_json_p.parent.mkdir(parents=True, exist_ok=True)
+        out_json_p.write_text(json.dumps(report, indent=2) + "\n")
+        report["out_json"] = str(out_json_p)
+        return report
     netlist_c = _to_container_path(_abs(str(netlist_p)), container)
     sdc_c = _to_container_path(_abs(str(sdc_p)), container)
     spef_c = _to_container_path(_abs(str(spef_p)), container)
     macro_libs_c = [_to_container_path(_abs(str(m)), container) for m in macro_libs]
 
-    # (1) timing windows
-    win_json = work / "si_mcf_windows.json"
-    timing, win_rc = _run_windows(container, work, liberty_c, netlist_c, top,
-                                  sdc_c, spef_c, macro_libs_c, vdd_v, win_json,
-                                  timeout)
-
-    # (2) parse coupling + build windows-per-net
+    # (1) parse coupling; each scene uses its own Liberty and timing windows.
     spef_text = spef_p.read_text(errors="replace")
     sp = parse_spef(spef_text)
     pairs = coupling_pairs(sp)
-    windows = net_windows_from_timing(timing, sp["net_driver_pins"])
-
-    # (3) nominal grounded STA (the reference; coupling lumped by OpenSTA)
-    nom_setup, nom_hold, nom_rpt, nom_rc = _run_sta_slack(
-        container, work, "nominal", liberty_c, netlist_c, top, sdc_c, spef_c,
-        macro_libs_c, timeout)
+    windows_by_scene: Dict[str, dict] = {}
+    windows_json_by_scene: Dict[str, str] = {}
+    windows_rc_by_scene: Dict[str, int] = {}
+    nominal_by_scene: Dict[str, tuple] = {}
+    for scene in ("setup", "hold"):
+        win_json = work / f"si_mcf_windows_{scene}.json"
+        timing, win_rc = _run_windows(
+            container, work, liberty_by_scene[scene], netlist_c, top,
+            sdc_c, spef_c, macro_libs_c, win_json, timeout)
+        windows_by_scene[scene] = net_windows_from_timing(
+            timing, sp["net_driver_pins"])
+        windows_json_by_scene[scene] = str(win_json)
+        windows_rc_by_scene[scene] = win_rc
+        nominal_by_scene[scene] = _run_sta_slack(
+            container, work, f"nominal_{scene}", liberty_by_scene[scene],
+            netlist_c, top, sdc_c, spef_c, macro_libs_c, timeout)
 
     corners_out: Dict[str, dict] = {}
-    for corner, ref_slack, ref_key in (("setup", nom_setup, "worst_setup"),
-                                       ("hold", nom_hold, "worst_hold")):
+    for corner in ("setup", "hold"):
+        windows = windows_by_scene[corner]
+        ref_slack = nominal_by_scene[corner][0 if corner == "setup" else 1]
         folded, worst = victim_folded_caps(pairs, windows, corner,
                                            overlap_guard_ns)
         bounded_text, fstats = rewrite_spef_folded(
@@ -1196,7 +1283,7 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
         bounded_p.write_text(bounded_text)
         bounded_c = _to_container_path(str(bounded_p), container)
         b_setup, b_hold, b_rpt, b_rc = _run_sta_slack(
-            container, work, f"mcf_{corner}", liberty_c, netlist_c, top, sdc_c,
+            container, work, f"mcf_{corner}", liberty_by_scene[corner], netlist_c, top, sdc_c,
             bounded_c, macro_libs_c, timeout)
         after = b_setup if corner == "setup" else b_hold
         # worst victim = the net whose worst-aggressor contributes most fold
@@ -1206,6 +1293,10 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
                          if corner == "setup" else worst[k]["cc"])
             wv = worst[wv_net]
         corners_out[corner] = {
+            "liberty": liberty_by_scene[corner],
+            "vdd_v": voltage_by_scene[corner],
+            "windows_json": windows_json_by_scene[corner],
+            "windows_rc": windows_rc_by_scene[corner],
             "mcf_worst": MCF_SETUP_WORST if corner == "setup" else MCF_HOLD_WORST,
             "bounded_spef": str(bounded_p),
             "worst_slack_before_ns": ref_slack,
@@ -1235,13 +1326,19 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
     # is an ERROR, never a soft ADVISORY: an unreadable liberty/spef path or a
     # crashed run must NOT be able to masquerade as a pass. ADVISORY stays only
     # for a legitimate no-data case (STA succeeded but produced no slack).
-    _sta_failed = (nom_rc != 0
+    _sta_failed = (any(n[3] != 0 for n in nominal_by_scene.values())
+                   or any(rc != 0 for rc in windows_rc_by_scene.values())
                    or corners_out["setup"].get("sta_rc") not in (0, None)
                    or corners_out["hold"].get("sta_rc") not in (0, None))
-    verdict = "PASS" if (_pos(setup_after) and _pos(hold_after)) else (
+    windows_measured = all(
+        windows_rc_by_scene[scene] == 0 and
+        any(v is not None for v in windows_by_scene[scene].values())
+        for scene in ("setup", "hold"))
+    verdict = "NOT_MEASURED" if not windows_measured else (
+        "PASS" if (_pos(setup_after) and _pos(hold_after)) else (
         "FAIL" if (setup_after is not None and hold_after is not None)
         else "ERROR" if _sta_failed
-        else "ADVISORY")
+        else "ADVISORY"))
 
     report = {
         "program": _PROGRAM,
@@ -1260,8 +1357,13 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
         "clk_source": str(sdc_p),
         "design_top": top,
         "spef": str(spef_p),
-        "windows_json": str(win_json),
-        "vdd_v": vdd_v,
+        "windows_json": windows_json_by_scene["setup"],
+        "windows_json_by_scene": windows_json_by_scene,
+        "vdd_v": (voltage_by_scene["setup"] if len(set(voltage_by_scene.values())) == 1
+                  else None),
+        "voltage_source": "liberty.nom_voltage",
+        "liberty_by_scene": liberty_by_scene,
+        "voltage_by_scene": voltage_by_scene,
         "overlap_guard_ns": overlap_guard_ns,
         "mcf_model": {"quiet": MCF_QUIET, "setup_worst": MCF_SETUP_WORST,
                       "hold_worst": MCF_HOLD_WORST},
@@ -1274,17 +1376,19 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
         # hid that: 465 read as a number, not as 465-of-1558. The denominator
         # and the assumed-overlap count are stated here so the degradation is
         # loud in the artefact itself.
-        "nets_with_windows": sum(1 for v in windows.values() if v is not None),
-        "nets_total": len(windows),
-        "nets_assumed_overlap": sum(1 for v in windows.values() if v is None),
+        "nets_with_windows": sum(1 for v in windows_by_scene["setup"].values() if v is not None),
+        "nets_total": len(windows_by_scene["setup"]),
+        "nets_assumed_overlap": sum(1 for v in windows_by_scene["setup"].values() if v is None),
         "window_coverage": (
-            round(sum(1 for v in windows.values() if v is not None)
-                  / len(windows), 6) if windows else None),
-        "windows_rc": win_rc,
+            round(sum(1 for v in windows_by_scene["setup"].values() if v is not None)
+                  / len(windows_by_scene["setup"]), 6)
+            if windows_by_scene["setup"] else None),
+        "windows_rc": windows_rc_by_scene["setup"],
+        "windows_measured": windows_measured,
         "nominal": {
-            "worst_setup_slack_ns": nom_setup,
-            "worst_hold_slack_ns": nom_hold,
-            "sta_rc": nom_rc,
+            "worst_setup_slack_ns": nominal_by_scene["setup"][0],
+            "worst_hold_slack_ns": nominal_by_scene["hold"][1],
+            "sta_rc": max(n[3] for n in nominal_by_scene.values()),
         },
         "corners": corners_out,
         "verdict": verdict,
@@ -1299,7 +1403,10 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
     # ── THE SI STA REPORT, PUBLISHED AND STAMPED (R-0915-107) ───────────────
     published = publish_si_sta_report(
         project, out_json_p, out_json, top=top, spef_name=spef_p.name,
-        verdict=verdict, nom_setup=nom_setup, nom_hold=nom_hold, nom_rc=nom_rc,
+        verdict=verdict,
+        nom_setup=nominal_by_scene["setup"][0],
+        nom_hold=nominal_by_scene["hold"][1],
+        nom_rc=max(n[3] for n in nominal_by_scene.values()),
         corners=corners_out)
     if published is not None:
         report["out_rpt"] = str(published)
@@ -1329,17 +1436,16 @@ def _cmd_emit(args) -> int:
 def _cmd_run(args) -> int:
     rep = run(args.project, container=args.container, spef=args.spef,
               netlist=args.netlist, sdc=args.sdc, liberty=args.liberty,
-              top=args.top, macro_libs=args.macro_lib, vdd_v=args.vdd,
+              top=args.top, macro_libs=args.macro_lib,
               overlap_guard_ns=args.overlap_guard_ns, out_json=args.out_json,
               timeout=args.timeout)
     print(json.dumps({
         "verdict": rep["verdict"],
-        "coupling_pairs": rep["coupling_pairs"],
-        "nominal": rep["nominal"],
-        "setup": {k: rep["corners"]["setup"][k] for k in
-                  ("worst_slack_before_ns", "worst_slack_after_ns", "delta_ns")},
-        "hold": {k: rep["corners"]["hold"][k] for k in
-                 ("worst_slack_before_ns", "worst_slack_after_ns", "delta_ns")},
+        "coupling_pairs": rep.get("coupling_pairs"),
+        "nominal": rep.get("nominal"),
+        "setup": rep.get("corners", {}).get("setup"),
+        "hold": rep.get("corners", {}).get("hold"),
+        "error": rep.get("error"),
         "out_json": rep.get("out_json"),
     }, indent=2))
     return 0 if rep["verdict"] in ("PASS", "ADVISORY") else 1
@@ -1359,7 +1465,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     r.add_argument("--liberty", default=None)
     r.add_argument("--top", default=None)
     r.add_argument("--macro-lib", action="append", default=[])
-    r.add_argument("--vdd", type=float, default=1.8)
     r.add_argument("--overlap-guard-ns", type=float, default=0.0)
     r.add_argument("--out-json", default=None)
     r.add_argument("--timeout", type=int, default=1800)

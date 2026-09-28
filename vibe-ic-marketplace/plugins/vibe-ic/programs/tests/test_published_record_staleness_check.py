@@ -208,7 +208,7 @@ def test_error_findings_route_a_zero_to_the_gate_own_precedence(tmp_path):
     assert rc == 1
     issued = {f["record"].split("/")[1]: f["would_issue"]
               for f in rep["findings"] if f["kind"] == P.STALE}
-    assert issued == {"d": "FAIL", "e": "NOT_RUN"}
+    assert issued == {"d": "FAIL", "e": "NOT_MEASURED"}
 
 
 # ── 2. the denominator: undecidable is DISCLOSED, never skipped ────────────
