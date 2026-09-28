@@ -46,6 +46,8 @@ import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _specrtl_common import _detect_reset
 
 _CLK_NAMES = {"clk", "clock", "clk_i", "i_clk", "sysclk", "clk_in"}
 _RST_NAMES = {"rst", "reset", "rst_n", "reset_n", "rstn", "i_rst",
@@ -75,6 +77,45 @@ def _is_active_low(rst_name: str, ports_blob: str) -> bool:
        rst_name.lower() in {"rstn", "resetn"}:
         return True
     return bool(re.search(r"active[\s_-]*low", ports_blob, re.I))
+
+
+def _reset_style(gd: Path, rst_name: str) -> Tuple[Optional[Tuple[str, bool]], str]:
+    """Read a declared reset style from design input; never choose a mode."""
+    modes, polarities = set(), set()
+    for stem in ("L2_FRS.json", "L2_ARCHITECTURE.json", "L3_DETAIL_SPEC.json",
+                 "L9_INTEGRATION_SPEC.json"):
+        doc = _find_doc(gd, stem)
+        if not doc:
+            continue
+        doc_text = json.dumps(doc, ensure_ascii=False)
+        if (re.search(r"\basynchronous\b", doc_text, re.I)
+                and re.search(r"\bsynchronous\b", doc_text, re.I)):
+            return None, "reset mode is contradictory; defer to spec-to-rtl AI"
+        mode, polarity, _ = _detect_reset(doc_text)
+        if mode:
+            modes.add(mode)
+        if polarity:
+            polarities.add(polarity)
+        rst = doc.get("reset")
+        if isinstance(rst, dict):
+            if rst.get("mode") in ("synchronous", "asynchronous"):
+                modes.add(rst["mode"])
+            if rst.get("polarity") in ("active-high", "active-low"):
+                polarities.add(rst["polarity"])
+    if len(modes) != 1:
+        return None, "reset mode is absent or contradictory; defer to spec-to-rtl AI"
+    if len(polarities) > 1:
+        return None, "reset polarity is contradictory; defer to spec-to-rtl AI"
+    name_low = _is_active_low(rst_name, "")
+    if polarities:
+        active_low = next(iter(polarities)) == "active-low"
+        if name_low and not active_low:
+            return None, "reset polarity conflicts with reset port name"
+    elif name_low:
+        active_low = True
+    else:
+        return None, "reset polarity is absent; defer to spec-to-rtl AI"
+    return (next(iter(modes)), active_low), "reset style declared in design input"
 
 
 def _port_width_is_wide(port: Dict[str, Any]) -> bool:
@@ -183,7 +224,10 @@ def extract_serial_parallel_mul_spec(
         return None, f"missing required port role(s): {miss}"
 
     size_name, size_def = _size_param_from(par[1])
-    active_low = _is_active_low(rst, ports_blob)
+    reset_style, reset_reason = _reset_style(gd, rst)
+    if reset_style is None:
+        return None, reset_reason
+    reset_mode, active_low = reset_style
     spec = {
         "topology": "serial_parallel",
         "operator": "*",
@@ -191,6 +235,7 @@ def extract_serial_parallel_mul_spec(
         "clk": clk,
         "rst": rst,
         "rst_active_low": active_low,
+        "reset_mode": reset_mode,
         "parallel": par[0],
         "serial_in": ser_in,
         "serial_out": ser_out,
@@ -208,6 +253,12 @@ def emit_rtl(spec: Dict[str, Any]) -> str:
     x, y, p = spec["parallel"], spec["serial_in"], spec["serial_out"]
     rst_expr = f"!{rst}" if spec["rst_active_low"] else rst
     rst_word = "active-low" if spec["rst_active_low"] else "active-high"
+    reset_mode = spec["reset_mode"]
+    if reset_mode not in ("synchronous", "asynchronous"):
+        raise ValueError("reset mode must be declared")
+    sensitivity = f"posedge {clk}"
+    if reset_mode == "asynchronous":
+        sensitivity += f" or {'negedge' if spec['rst_active_low'] else 'posedge'} {rst}"
     return f"""`default_nettype none
 //============================================================================
 // {top} — serial-parallel (carry-save) integer multiplier
@@ -217,7 +268,7 @@ def emit_rtl(spec: Dict[str, Any]) -> str:
 //   {x} : parallel {sz}-bit multiplicand, held stable during a computation
 //   {y} : serial multiplier, one bit per clock, LSB-first
 //   {p} : serial product,   one bit per clock, LSB-first
-// Reset    : synchronous, {rst_word}
+// Reset    : {reset_mode}, {rst_word}
 // Algorithm: textbook carry-save shift-add serial-parallel multiplier. Latency
 //   and bit-order are Plugin-chosen (spec R3 freedom); the flow's serial-
 //   parallel oracle self-calibrates them, so any functionally-correct variant
@@ -241,7 +292,7 @@ module {top} #(
     wire [{sz}-1:0] so = m ^ s ^ c;                    // carry-save sum
     wire [{sz}-1:0] co = (m & s) | (m & c) | (s & c);  // carry-save carry
 
-    always @(posedge {clk}) begin
+    always @({sensitivity}) begin
         if ({rst_expr}) begin
             s  <= {{{sz}{{1'b0}}}};
             c  <= {{{sz}{{1'b0}}}};

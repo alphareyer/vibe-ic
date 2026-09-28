@@ -269,6 +269,17 @@ doubt, do NOT file it — the DB is advisory, so a missed capture costs nothing,
 
 ## Reset-value default thinking (gshare lesson, 2026-06-23)
 
+### Reset mode when the input is silent
+
+For a clocked block, read the design input for both reset mode (synchronous or
+asynchronous) and polarity before writing the sensitivity list. A deterministic
+template must defer if the mode is absent or conflicting. In the AI handoff,
+choose a mode only after checking which resettable flops the selected PDK
+provides and the resulting recovery/removal or setup timing; record that
+choice in the declaration and keep the reset behavior consistent in RTL and
+verification. A reset port name can suggest polarity but cannot establish
+whether reset is synchronous or asynchronous.
+
 A spec very often states the reset POLARITY/TIMING ("asynchronous active-high") but
 is SILENT on the reset VALUE. Do not halt and do not silently guess — apply the
 per-element default from `agents/defaults/industry_std.yaml::reset_defaults` as
