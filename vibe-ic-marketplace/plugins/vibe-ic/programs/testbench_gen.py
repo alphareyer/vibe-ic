@@ -1128,10 +1128,37 @@ def delivered_case_program(project: Path, stimulus: str) -> "Path | None":
 # it is this flow's work, and stays blocking.
 
 #: Program / data images a stimulus can name. File FORMATS, never a design.
+#: A path prefix (`sw/`, `input/sim/programs/`) is allowed and is not part of
+#: the name: group 1 is the LEAF, which is what `input/**` is searched for
+#: (FX_P2 review wave 6 -- a lookbehind that refused `/` made every
+#: path-qualified image invisible).
 _STIMULUS_IMAGE_RE = re.compile(
-    r"(?<![\w./-])([A-Za-z0-9_][\w.-]*\."
+    r"(?<![\w.-])(?:[\w.-]+/)*([A-Za-z0-9_][\w.-]*\."
     r"(?:hex|ihex|mem|memh|vmem|bin|elf|srec|s19|coe|mif|dat|vec))\b",
     re.IGNORECASE)
+
+#: The ONLY expected halves that are no statement of a result: a bare verdict
+#: word, the verdict of a program the input would have to deliver. A CLOSED
+#: list, compared whole after dropping case, spaces and punctuation -- never a
+#: search. Anything else the input writes as the expected half (a behaviour in
+#: words, a quoted string, a signal name, an equation, a number) is a result a
+#: testbench can check, so the case is this flow's to run (FX_P2 review wave 6:
+#: "no number" was read as "no result", and worded behaviours such as "full
+#: flag asserted and further writes are ignored" were booked input_absent).
+_BARE_VERDICT_WORDS = frozenset({
+    "pass", "passed", "passes", "ok", "success", "succeeds", "allpass",
+    "allpassed", "passfail", "通過", "成功", "全部通過", "全數通過"})
+_VERDICT_NOISE_RE = re.compile(r"[\s\W_]+", re.UNICODE)
+
+
+def expected_is_a_bare_verdict(case: dict) -> bool:
+    """True only when the case's expected half is nothing but a verdict word
+    (`_BARE_VERDICT_WORDS`) and it carries no `expected_outputs`."""
+    outs = case.get("expected_outputs")
+    if outs:
+        return False
+    text = _VERDICT_NOISE_RE.sub("", str(case.get("expected") or "")).lower()
+    return bool(text) and text in _BARE_VERDICT_WORDS
 
 
 #: `oracle_family_claiming`'s answer when a family's detector (or its module)
@@ -1270,12 +1297,15 @@ def case_input_gap(project: Path, case: dict,
         answer (`FAMILY_UNKNOWN`);
       * it states no stimulus at all (no evidence either way);
       * every image its stimulus names IS in the design input;
-      * it names no image and its expected half STATES a checkable value --
-        the stated-vector family's (`oracle_family_claiming`): the input
-        supplied both halves, so the missing piece is a driver.
+      * it is conditional on a design option (`applies_when`);
+      * `delivered_case_program` finds the program its stimulus names;
+      * it names no image and its expected half is anything but a bare
+        verdict word (`expected_is_a_bare_verdict`) -- a behaviour in words is
+        a result a testbench can check, so the missing piece is this flow's.
     The input's gap is exactly: a named image absent from `input/**`, or no
-    named image, no delivered program and an expected half that states no
-    value (e.g. "PASS" -- the verdict of a program the input never delivers).
+    named image, no delivered program and an expected half that is only a
+    verdict word (e.g. "PASS" -- the verdict of a program the input never
+    delivers).
     """
     name = str(case.get("name") or case.get("id") or "")
     if not name:
@@ -1286,12 +1316,24 @@ def case_input_gap(project: Path, case: dict,
         return None
     if _family_by_detector(case, ic_class) is not None:
         return None
+    # A CONDITIONAL case (R-0915-102 `applies_when`) is never the input's gap.
+    # The input stated it "applies only if <option> is selected": when the
+    # design's declaration excludes the option the gate books it
+    # NOT_APPLICABLE citing that declaration; while no selection is declared
+    # it stays where R-0915-102's fail-closed rule puts it. Booking it
+    # input_absent would drop the condition from the reason (lane fxrtl,
+    # subservient M / Zicsr / C).
+    _aw = case.get("applies_when")
+    if isinstance(_aw, dict) and _aw.get("option"):
+        return None
     stimulus = str(case.get("stimulus") or "").strip()
     if not stimulus:
         # POSITIVE EVIDENCE ONLY. A row that states no stimulus at all says
         # nothing about what the input supplies; its non-execution stays
         # blocking rather than being read as the input's gap.
         return None
+    if delivered_case_program(project, stimulus) is not None:
+        return None           # the flow's own delivery reader finds it
     named = named_stimulus_images(stimulus)
     present = _input_file_leaves(project)
     missing = [n for n in named if n.lower() not in present]
@@ -1302,7 +1344,7 @@ def case_input_gap(project: Path, case: dict,
     # names hello.hex and expects a UART string "by 115200 baud" -- a number,
     # but nothing can run without the image). Without a named image, a case
     # whose expected half states a value is the stated-vector family's.
-    if not missing and states_a_checkable_answer(case):
+    if not missing and not expected_is_a_bare_verdict(case):
         return None
     looked = list(_DELIVERED_TB_DIRS) + ["input/** (every file, by name)"]
     expected = str(case.get("expected") or "").strip()
@@ -1313,8 +1355,9 @@ def case_input_gap(project: Path, case: dict,
         what = (f"the design input states its stimulus only as "
                 f"{stimulus[:120]!r}, delivers no program or testbench for "
                 f"it, and states its expected result only as "
-                f"{expected[:60]!r} (no value a testbench could check) -- the "
-                f"verdict of a program the input does not deliver")
+                f"{expected[:60]!r} -- a bare verdict, not a result a "
+                f"testbench could check: the verdict of a program the input "
+                f"does not deliver")
     return {
         "case": name,
         "missing_from_input": missing or [

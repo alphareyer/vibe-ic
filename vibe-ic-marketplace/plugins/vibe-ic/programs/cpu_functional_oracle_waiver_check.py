@@ -515,6 +515,18 @@ def _oracles_that_actually_ran(project: Path) -> dict:
                                        "missing_from_input":
                                            gap["missing_from_input"]})
         else:
+            row = rows.get(case_id) if isinstance(rows.get(case_id), dict) \
+                else {}
+            aw = row.get("applies_when")
+            opt = aw.get("option") if isinstance(aw, dict) else None
+            if opt and state == _l10x.NOT_EXECUTED:
+                # R-0915-102 left it in the denominator because the design
+                # has declared no selection yet (a declaration that excludes
+                # it removes it before this loop, as NOT_APPLICABLE citing
+                # that declaration). Say so: it is not the input's gap.
+                why = (f"{why}; applies only if the design selects option "
+                       f"{opt!r}, and {_DECLARATION_REL} declares no "
+                       f"selection at this point")
             not_executed.append({"case": case_id, "state": state, "why": why})
     return {
         "declared": declared,
