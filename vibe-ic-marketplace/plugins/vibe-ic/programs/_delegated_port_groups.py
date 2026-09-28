@@ -20,7 +20,7 @@ def _sections(extracted: dict[str, str]) -> list[tuple[str, str, list[str]]]:
             match = _HEADING.match(line.strip())
             if match is None:
                 continue
-            section = []
+            section = [line]
             for following in lines[i + 1:]:
                 if following.lstrip().startswith("#"):
                     break
@@ -95,7 +95,7 @@ def _source_mentions_declaration(project: Path, source: str, group: str) -> bool
             if not (input_docs or docs_tree or readme):
                 continue
             body = path.read_text()
-        except (OSError, ValueError):
+        except (OSError, UnicodeError, ValueError):
             continue
         if any(section_group == group and
                any(_DECLARATION.search(line) for line in section)

@@ -339,6 +339,25 @@ def test_own_mention_and_entry_work_without_example_table(tmp_path):
         {**L9_GROUP[0], "example_ports": []}]
 
 
+def test_declaration_mention_in_group_heading_counts(tmp_path):
+    sys.path.insert(0, str(PROGRAMS))
+    import _delegated_port_groups as groups
+
+    document = DELEGATION.replace(
+        "### SRAM port group sub-ports (typical)",
+        "### SRAM port group declaration.json").replace(
+        "The concrete signal names for this port group are declared by the "
+        "plugin in declaration.json.", "The table is illustrative.")
+    project, _, _ = _project(tmp_path)
+    (project / "input/docs/L3_external_interface.md").write_text(document)
+    rows = groups.extract_delegated_groups(
+        {"L3_external_interface.md": document})
+    assert rows == L9_GROUP
+    assert groups.resolve_delegated_groups(
+        project, {"plugin_declared_port_groups": rows})[0][
+            "declared_ports"] == {"o_sram_addr", "o_sram_we", "o_sram_waddr"}
+
+
 @pytest.mark.parametrize("statement", (
     "The debug signal names are defined in declaration.json.",
     "The debug sub-port names are defined in declaration.json.",
