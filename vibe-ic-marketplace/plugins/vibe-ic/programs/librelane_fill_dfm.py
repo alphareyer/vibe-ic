@@ -338,16 +338,24 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
     tech_lef = (tech.get('nom_*') or next(iter(tech.values()), None)
                 if isinstance(tech, dict) else next(iter(tech), None))
     lefs = [tech_lef] if tech_lef else []
-    for key in ('CELL_LEFS', 'PAD_LEFS', 'MACRO_LEFS', 'EXTRA_LEFS'):
-        value = cfg.get(key) or []
-        lefs.extend(value.values() if isinstance(value, dict) else value)
-    for value in (cfg.get('MACROS') or {}).values():
-        if isinstance(value, str) and value.lower().endswith('.lef'):
-            lefs.append(value)
+
+    def lef_paths(value):
+        if isinstance(value, (str, Path)):
+            yield str(value)
         elif isinstance(value, dict):
-            for key in ('lef', 'LEF'):
-                if value.get(key):
-                    lefs.append(value[key])
+            for nested in value.values():
+                yield from lef_paths(nested)
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                yield from lef_paths(nested)
+        elif value is not None:
+            raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
+                          f'invalid physical LEF path: {value!r}')
+
+    for key in ('CELL_LEFS', 'PAD_LEFS', 'MACRO_LEFS', 'EXTRA_LEFS'):
+        lefs.extend(lef_paths(cfg.get(key) or []))
+    lefs.extend(path for path in lef_paths(cfg.get('MACROS') or {})
+                if path.lower().endswith(('.lef', '.lef.gz')))
     if not lefs:
         raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
                       f'{routed}: no physical LEF views')
