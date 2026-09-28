@@ -933,9 +933,13 @@ def _declare_immutable_transform(project: Path, source: Path, output: Path,
         if in_rel and in_sha and declared and declared != in_sha:
             _record_unexplained_rewrite(project, in_rel, declared, in_sha, step)
         return False
+    # #365: the RUNNER writes this row after the finishing writer returned (or,
+    # for `finish`, with no invocation at all); nothing timed the tool, so the
+    # duration is `null` and the row says it was reconstructed, not observed.
     entry = {
         "record": "declared_transform", "tool": tool, "command": command,
         "producing_step": step, "exit_code": 0, "duration_ms": None,
+        "reconstructed": True,
         "timestamp": __import__("datetime").datetime.now(
             __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "inputs": {in_rel: in_sha}, "outputs": {out_rel: out_sha},
