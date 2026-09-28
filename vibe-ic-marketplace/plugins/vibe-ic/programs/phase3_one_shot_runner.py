@@ -48415,8 +48415,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         # undeclared or geometry-bearing layer remains for the strict precheck.
         try:
             import gds_text_layer_map as _text_map
-            text_map_receipt = _text_map.apply_declared(
-                gds_out, str(getattr(pdk, "name", "")))
+            text_map_receipt = _text_map.apply_declared(gds_out, pdk.name)
         except (OSError, ValueError) as exc:
             return StepResult("gds", "FAIL", time.time() - t0,
                               f"GDS_TEXT_LAYER_MAP_REFUSED: {exc}")
@@ -48717,8 +48716,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         project, top, pdk, container, gds_out, def_file))
     try:
         import gds_text_layer_map as _text_map
-        text_map_receipt = _text_map.apply_declared(
-            gds_out, str(getattr(pdk, "name", "")))
+        text_map_receipt = _text_map.apply_declared(gds_out, pdk.name)
     except (OSError, ValueError) as exc:
         return StepResult("gds", "FAIL", time.time() - t0,
                           f"GDS_TEXT_LAYER_MAP_REFUSED: {exc}")
