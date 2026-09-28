@@ -259,6 +259,33 @@ def _signoff(proj, verdict):
                                               "passed": verdict == "pass"})
 
 
+def test_pass_reports_are_historical_after_phase3_inputs_change(tmp_path):
+    """A report read from disk cannot certify a new Phase 3 input identity."""
+    project = _proj_requiring_sta(tmp_path)
+    _signoff(project, "pass")
+    before_json = tmp_path / "before.json"
+    before_rc, before_out = _run_gate(project, before_json)
+    assert before_rc == 0, before_out
+    before = json.loads(before_json.read_text())
+    assert [r for r in before["requirements"] if r["check"] == "STA"][0]["outcome"] == "BACKED"
+
+    sdc = project / "input/constraints/timing.sdc"
+    sdc.parent.mkdir(parents=True, exist_ok=True)
+    sdc.write_text("create_clock -period 1 [get_ports clk]\n")
+    assert L24._phase3_has_run(project) is False
+
+    after_json = tmp_path / "after.json"
+    after_rc, after_out = _run_gate(project, after_json)
+    assert after_rc == 0, after_out
+    after = json.loads(after_json.read_text())
+    sta = [r for r in after["requirements"] if r["check"] == "STA"][0]
+    assert sta["outcome"] == "NOT_YET_MEASURABLE"
+    assert sta["evidence_scope"] == "HISTORICAL"
+    assert {r["path"] for r in sta["historical_records"]} == set(STA_RECORDS)
+    assert "historical" in after_out.lower()
+    assert "backed by" not in after_out.lower()
+
+
 # ── the derivation itself ────────────────────────────────────────────────
 
 def test_the_flow_declares_a_signoff_record_for_STA():
@@ -454,7 +481,14 @@ def test_an_input_that_DOES_state_SI_is_judged_on_the_SI_report(tmp_path):
     """And the control: name it, and the failing envelope is a real finding."""
     proj = _project(tmp_path, spec_md="Sign-off requires crosstalk clean.\n")
     _emit_l24(proj)
-    _report(proj, "orchestrator/phase3_one_shot.json", {"verdict": "PASS"})
+    netlist = proj / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    _report(proj, "orchestrator/phase3_one_shot.json", {
+        "verdict": "PASS",
+        "phase2_synth": L24._pl.phase2_synth_input_identity(proj),
+        "phase3_inputs": L24._pl.phase3_signoff_input_identity(proj),
+    })
     _report(proj, "phase3/si_mcf_sta.json",
             {"program": "si_mcf_sta", "verdict": "FAIL"})
     rc, out = _run_gate(proj)

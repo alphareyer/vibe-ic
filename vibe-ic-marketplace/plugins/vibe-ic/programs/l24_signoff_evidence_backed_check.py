@@ -764,19 +764,25 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
             "records_read": [{"path": p, "verdict": v} for p, v in found],
         }
         rows_out.append(record)
+        if not phase3:
+            # A report from an earlier Phase 3 run may still be on disk after
+            # synthesis or staged constraints change. Its verdict describes
+            # that earlier input identity, even when the value is PASS.
+            record["outcome"] = "NOT_YET_MEASURABLE"
+            record["evidence_scope"] = "HISTORICAL" if found else "NONE"
+            if found:
+                record["historical_records"] = record["records_read"]
+            msgs.append(
+                f"{rel}: {check} "
+                f"{requirement or '(prose)'} required at {where} — "
+                "recorded; this run has not reached phase 3 for its current "
+                "inputs, so it is not yet measurable"
+                + ("; existing sign-off reports are historical evidence"
+                   if found else ""))
+            continue
+        record["evidence_scope"] = "CURRENT"
         if not measured:
             looked = ", ".join(p for p, _ in found[:4]) or "no report"
-            if not phase3:
-                # NOT YET MEASURABLE, not missed. The requirement is recorded
-                # and named so it is visible, but this run has not reached the
-                # phase that measures it and the gate does not block on it.
-                record["outcome"] = "NOT_YET_MEASURABLE"
-                msgs.append(
-                    f"{rel}: {check} "
-                    f"{requirement or '(prose)'} required at {where} — "
-                    f"recorded; this run has not reached phase 3, so it is "
-                    f"not yet measurable")
-                continue
             record["outcome"] = "UNMET_NO_READING"
             failures.append(
                 f"{rel}: the input REQUIRES {check} "

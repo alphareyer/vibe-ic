@@ -4,6 +4,19 @@ import _audit_receipt as AR
 import l24_signoff_evidence_backed_check as G
 
 
+def _publish_current_phase3_receipt(project):
+    netlist = project / 'phase2/stage2/synth/netlist_yosys.v'
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text('module chip; endmodule\n')
+    receipt = project / 'reports/orchestrator/phase3_one_shot.json'
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({
+        'verdict': 'PASS',
+        'phase2_synth': G._pl.phase2_synth_input_identity(project),
+        'phase3_inputs': G._pl.phase3_signoff_input_identity(project),
+    }))
+
+
 def fixture(tmp_path,change=None):
     p=tmp_path;native=p/'phase3/stage3/sta';native.mkdir(parents=True)
     docs=p/'phase1/generated_docs';docs.mkdir(parents=True)
@@ -25,6 +38,7 @@ def fixture(tmp_path,change=None):
     if change=='stale':paths[-1].write_text(paths[-1].read_text()+'changed\n')
     if change=='no-binding':report.pop('subject')
     out=p/'reports/phase3/sta/post_route_summary.json';out.parent.mkdir(parents=True);out.write_text(json.dumps(report))
+    _publish_current_phase3_receipt(p)
     return p
 
 
@@ -46,4 +60,5 @@ def test_incomplete_or_unbound_corners_refuse_closure(tmp_path,case):
 
 def test_no_corner_requirement_keeps_existing_sta_scope(tmp_path):
     p=fixture(tmp_path,'missing-FF');f=p/'phase1/generated_docs/L24_SIGNOFF.json';d=json.loads(f.read_text());d['fields']['signoff_requirements'][0]['corners']=[];f.write_text(json.dumps(d))
+    _publish_current_phase3_receipt(p)
     rc,rep=run(p);assert rc==0 and rep['requirements'][0]['outcome']=='BACKED'
