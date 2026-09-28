@@ -127,25 +127,7 @@ def _observed(value: Any, provenance: str, detail: str) -> Dict[str, Any]:
 def derive(project: Path, contract: Dict[str, Any], top: Optional[str],
            supplied: Optional[Dict[str, Any]]) -> Tuple[Dict[str, Dict[str, Any]], List[str], List[str]]:
     """Return (single-source facts, named source conflicts, named tool gaps)."""
-    if not supplied or not top:
-        return {}, [], []
-    entries = supplied.get("files") or []
-    staged = [e for e in entries if e.get("status") == "staged"
-              and e.get("byte_identical") is True]
-    if (not staged or any(e.get("status") not in
-                          ("staged", "pruned_out_of_cone") for e in entries)
-            or any(e.get("status") == "staged"
-                   and e.get("byte_identical") is not True for e in entries)):
-        return {}, [], ["supplied RTL staging is incomplete or differs from input"]
-    files = [e["staged"] for e in staged]
-    try:
-        elaborated = elaborate_supplied(project, top, files)
-        module = elaborated["modules"][top]
-    except Exception as exc:  # tool unavailability is an explicit gap
-        return {}, [], ["supplied RTL Yosys elaboration: %s" % exc]
-    ports = module.get("ports") or {}
     names = {f["name"] for f in contract["fields"]}
-    source = (module.get("attributes") or {}).get("src", "Yosys top")
     facts: Dict[str, Dict[str, Any]] = {}
     conflicts: List[str] = []
 
@@ -161,6 +143,50 @@ def derive(project: Path, contract: Dict[str, Any], top: Optional[str],
             facts[name] = _observed(value, provenance, detail)
         elif detail != old["provenance_detail"]:
             old.setdefault("corroborated_by", []).append(detail)
+
+    # An explicitly annotated design choice needs no tool or supplied RTL.
+    # Resolve it before deciding whether Yosys has anything to contribute.
+    for field in contract["fields"]:
+        choices = [(value, annotation) for value, annotation in
+                   (field.get("value_annotations") or {}).items()
+                   if annotation.strip().lower() in (
+                       "this design choice", "selected for this design",
+                       "本 chip 設計選擇", "本設計選擇")]
+        if len(choices) == 1:
+            value = choices[0][0]
+            try:
+                value = json.loads(value)
+            except (ValueError, TypeError):
+                pass
+            line = field.get("line")
+            rel = contract["source"]
+            add(field["name"], value,
+                "derived_from_ldoc:%s:%s" % (rel, line),
+                "%s:%s explicitly marks %r as this design's choice" % (
+                    rel, line, value))
+        elif len(choices) > 1:
+            conflicts.append("%s: input contract designates multiple choices" % field["name"])
+
+    needs_yosys = any(name in ("top_module", "clock_port_name", "reset_polarity")
+                      or name.endswith(("_bytes", "_pin_count")) for name in names)
+    if not supplied or not top or not needs_yosys:
+        return facts, conflicts, []
+    entries = supplied.get("files") or []
+    staged = [e for e in entries if e.get("status") == "staged"
+              and e.get("byte_identical") is True]
+    if (not staged or any(e.get("status") not in
+                          ("staged", "pruned_out_of_cone") for e in entries)
+            or any(e.get("status") == "staged"
+                   and e.get("byte_identical") is not True for e in entries)):
+        return {}, [], ["supplied RTL staging is incomplete or differs from input"]
+    files = [e["staged"] for e in staged]
+    try:
+        elaborated = elaborate_supplied(project, top, files)
+        module = elaborated["modules"][top]
+    except Exception as exc:  # tool unavailability is an explicit gap
+        return {}, [], ["supplied RTL Yosys elaboration: %s" % exc]
+    ports = module.get("ports") or {}
+    source = (module.get("attributes") or {}).get("src", "Yosys top")
 
     add("top_module", top, "derived_from_supplied_rtl",
         "Yosys hierarchy -top %s, %s" % (top, source))
@@ -252,27 +278,4 @@ def derive(project: Path, contract: Dict[str, Any], top: Optional[str],
                     "Yosys top output %s width %d, named by %s:%d" % (
                         port, width, rel, n))
 
-    # A contract example becomes a fact only when its adjacent annotation
-    # expressly says it is this design's selected choice.  Other examples and
-    # menus stay unresolved for the D1 expert hand-off.
-    for field in contract["fields"]:
-        choices = [(value, annotation) for value, annotation in
-                   (field.get("value_annotations") or {}).items()
-                   if annotation.strip().lower() in (
-                       "this design choice", "selected for this design",
-                       "本 chip 設計選擇", "本設計選擇")]
-        if len(choices) == 1:
-            value = choices[0][0]
-            try:
-                value = json.loads(value)
-            except (ValueError, TypeError):
-                pass
-            line = field.get("line")
-            rel = contract["source"]
-            add(field["name"], value,
-                "derived_from_ldoc:%s:%s" % (rel, line),
-                "%s:%s explicitly marks %r as this design's choice" % (
-                    rel, line, value))
-        elif len(choices) > 1:
-            conflicts.append("%s: input contract designates multiple choices" % field["name"])
     return facts, conflicts, []
