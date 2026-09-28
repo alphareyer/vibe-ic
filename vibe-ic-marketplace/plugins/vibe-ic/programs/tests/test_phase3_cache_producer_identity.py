@@ -51,6 +51,7 @@ PROGS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGS))
 
 import phase3_one_shot_runner as R  # noqa: E402
+import librelane_prelayout as _prelayout  # noqa: E402
 from _delivery_declaration import declare_delivery as _declare  # noqa: E402
 
 TOP = "chip_top"
@@ -452,6 +453,24 @@ def _project(tmp_path: Path, *, stamp: bool) -> Path:
     R._write_synth_inputs_sidecar(synth / f"{TOP}_synth.v", rtl)
     _provenance(tmp_path)
     _span_inputs(tmp_path, TOP)
+    # A cached route can only be considered after current pre-layout setup
+    # and the typed Step 8/10 producer both pass. Supply a bound, positive SS
+    # path before stamping the cache identities this fixture is about.
+    matrix = R._pl.constraints_dir(tmp_path) / "pvt_matrix.json"
+    matrix.write_text(json.dumps({"corners": [
+        {"label": "SS", "name": "slow", "liberty": "slow.lib"}]}))
+    reports = R._pl.sta_dir(tmp_path) / "per_corner"
+    reports.mkdir(parents=True, exist_ok=True)
+    netlist = synth / f"{TOP}_synth.v"
+    sdc = pnr / "constraint.sdc"
+    (reports / "sta_SS.rpt").write_text(
+        "Startpoint: in_a (input port clocked by clk)\n"
+        "Endpoint: out_z (output port clocked by clk)\n"
+        "Path Group: clk\nPath Type: max\n\n"
+        "          0.43   slack (MET)\n\n"
+        "STA_BASIS: PRE_LAYOUT_ESTIMATE\n"
+        f"STA_BASIS_NETLIST_SHA256: sha256:{_prelayout.digest(netlist)}\n"
+        f"STA_BASIS_SDC_SHA256: sha256:{_prelayout.digest(sdc)}\n")
     # Step 9's first declared input; it must exist before the identity that
     # hashes it is stamped. Declared again below, where the comment that
     # explains why it is here at all lives; declaring twice is idempotent.
@@ -548,6 +567,20 @@ def _drive(monkeypatch, project: Path) -> list:
                             "fixture routed basis admitted",
                             extras={"layout_digest": basis})
     monkeypatch.setattr(R, "step_prestream_gate", _fake_gate)
+    def _passing_prelayout(*_a, **_k):
+        # The Step 10 status comes from a real checked-in OpenSTA log. The
+        # test substitutes only the tool write edge, as the runner's own
+        # Step 10 integration is covered by test_mig_sdcsta.
+        from test_mig_sdcsta import sta_folder
+        tool_root = project.parent / f"{project.name}_cache_step10"
+        folder, _ = sta_folder(tool_root)
+        gate_path = tool_root / "step10.json"
+        gate = _prelayout.judge_slack(folder, gate_path)
+        assert gate["verdict"] == "PASS", gate
+        return R.StepResult("prelayout_signoff", gate["verdict"], 0.0,
+                            "fixture Step 10 OpenSTA link and setup PASS",
+                            [str(gate_path)])
+    monkeypatch.setattr(R, "step_prelayout_signoff", _passing_prelayout)
     monkeypatch.setattr(R, "_detect_pdk",
                         lambda *a, **k: _pdk(project))
     # R-0924-3: an image nobody can name is not a proven image, so the
