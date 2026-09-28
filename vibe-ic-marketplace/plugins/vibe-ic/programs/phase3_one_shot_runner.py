@@ -4357,11 +4357,15 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
     _env, _env_unread = _sdc_environment_values(
         project, liberty_path, container, drv_slew_ns, drv_cap_pf,
         _to_container_path)
-    sdc_text += _sdc_environment_prefix(_env, _env_unread)
+    sdc_text += _sdc_environment_prefix(_env, _env_unread, time_scale=_tu_scale)
     _env_slew = _env.get("set_max_transition")
     _env_cap = _env.get("set_max_capacitance")
+    # Design and LibreLane config time values are ns. A default read directly
+    # from Liberty is already expressed in that Liberty's own time_unit.
+    _env_slew_scale = (1.0 if _env_slew and
+                       _env_slew[1].startswith("liberty default ") else _tu_scale)
     sdc_text += _drv_constraints_sdc_block(
-        float(_env_slew[0]) if _env_slew else None,
+        float(_env_slew[0]) * _env_slew_scale if _env_slew else None,
         float(_env_cap[0]) if _env_cap else None, drv_note,
         max_fanout=_l9_fanout, fanout_note=_fanout_note,
         supply_ports=_producer_supply_ports_for_drv(project),

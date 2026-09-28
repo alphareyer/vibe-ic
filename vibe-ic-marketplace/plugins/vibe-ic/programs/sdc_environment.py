@@ -135,16 +135,28 @@ def _sdc_environment_values(project: Path, liberty_path: str, container: str,
 
 
 def _sdc_environment_prefix(values: Dict[str, Tuple[str, str]],
-                            unread: Sequence[str]) -> str:
-    """Emit the four non-DRV R8 lines, each immediately preceded by its source."""
+                            unread: Sequence[str], time_scale: float = 1.0) -> str:
+    """Emit sourced commands and name every command that could not be emitted.
+
+    Time-valued declarations are in ns; OpenSTA reads the active Liberty unit.
+    ``NOT_READ`` names an inaccessible tier; ``NOT_MEASURED`` names each
+    command it leaves unresolved. Readable tiers with no declaration use
+    ``UNDECLARED`` instead.
+    """
     lines = [f"# {item}" for item in unread]
+    for name in _SDC_ENV_KEYS:
+        if name not in values:
+            status = "NOT_MEASURED" if unread else "UNDECLARED"
+            reason = ("at least one source tier NOT_READ" if unread else
+                      "no value in design, pinned PDK, or Liberty")
+            lines.append(f"# {status}: {_SDC_ENV_KEYS[name]}; {reason}")
     for name in ("set_clock_uncertainty", "set_clock_transition",
                  "set_driving_cell", "set_load"):
         if name not in values:
             continue
         raw, source = values[name]
         if name.startswith("set_clock_"):
-            command = f"{name} {raw} [all_clocks]"
+            command = f"{name} {float(raw) * time_scale:g} [all_clocks]"
         elif name == "set_driving_cell":
             cell, pin = raw.split("/", 1)
             command = f"set_driving_cell -lib_cell {cell} -pin {pin} [all_inputs]"
