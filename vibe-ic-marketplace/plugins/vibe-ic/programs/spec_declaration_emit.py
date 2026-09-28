@@ -355,6 +355,22 @@ def _same_declared_value(a: Any, b: Any) -> bool:
         return type(a) is type(b) and a == b
 
 
+_JSON_NUMBER_TEXT = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
+
+
+def _same_spec_example_value(declared: Any, example: str) -> bool:
+    """Compare a Markdown example with JSON, parsing only explicit number text.
+
+    Provenance comparison remains type strict.  A Boolean is deliberately not a
+    number here even though Python regards it as an ``int`` subclass.
+    """
+    if _same_declared_value(declared, example):
+        return True
+    if type(declared) not in (int, float) or not _JSON_NUMBER_TEXT.fullmatch(example):
+        return False
+    return _same_declared_value(declared, json.loads(example))
+
+
 def _contained_artifact_path(project: Path, rel: str) -> Optional[Path]:
     """The absolute path for a spec-declared artifact, or None if it escapes.
 
@@ -1703,8 +1719,6 @@ def verify_declaration(project: Path, contract: Dict[str, Any],
         rationales = {}
     for field in contract["fields"]:
         name = field["name"]
-        if name not in loaded:
-            continue
         annotations = field.get("value_annotations") or {}
         examples = [value for value, note in annotations.items()
                     if re.fullmatch(r"(?i)(?:golden|reference|worked[- ]example)",
@@ -1714,7 +1728,9 @@ def verify_declaration(project: Path, contract: Dict[str, Any],
                 "field": name, "values": sorted(set(examples)),
                 "source": contract["source"]})
             continue
-        if not examples or _same_declared_value(loaded[name], examples[0]):
+        if name not in loaded:
+            continue
+        if not examples or _same_spec_example_value(loaded[name], examples[0]):
             continue
         reason = rationales.get(name)
         result["spec_example_disclosures"].append({

@@ -341,8 +341,9 @@ def _substance_of(run_dir: Path, artifact_path: str, resolved: Path):
             rep = _sde.verify_declaration(run_dir, contract, resolved)
         except Exception as exc:  # noqa: BLE001
             return None, "NOT_MEASURED: verify raised %s" % exc, "CONTRACT"
-        if rep.get("verdict") in ("PASS", "PASS_INFORMATIONAL",
-                                  "DISCLOSE", "OWNER_REVIEW"):
+        if rep.get("verdict") == "OWNER_REVIEW":
+            return "OWNER_REVIEW", rep.get("note", ""), "CONTRACT"
+        if rep.get("verdict") in ("PASS", "PASS_INFORMATIONAL", "DISCLOSE"):
             return "PASS", rep.get("note", ""), "CONTRACT"
         bits = []
         for name in rep.get("missing_required", []):
@@ -494,7 +495,10 @@ def main(argv: list[str] | None = None) -> int:
         return _emit_preflight(results)
 
     # Determine overall verdict
-    fails = [r for r in results if r["status"] != "PASS"]
+    # OWNER_REVIEW is a machine-readable advisory, not an unsatisfied
+    # artifact. Keep the gate's historical non-blocking behavior for it.
+    fails = [r for r in results if r["status"] not in ("PASS", "OWNER_REVIEW")]
+    owner_reviews = [r for r in results if r["status"] == "OWNER_REVIEW"]
     if not results:
         verdict = "VACUOUS_PASS"
         note = ("No path-shaped MUST-emit clauses found in input docs — "
@@ -529,6 +533,8 @@ def main(argv: list[str] | None = None) -> int:
                 f" against JSON emptiness, "
                 f"{sum(1 for r in results if r.get('substance_status') == 'NOT_MEASURED')}"
                 f" NOT_MEASURED).")
+        if owner_reviews:
+            note += f" {len(owner_reviews)} OWNER_REVIEW advisory item(s)."
 
     report = {
         "schema_version": 1,
@@ -539,6 +545,8 @@ def main(argv: list[str] | None = None) -> int:
         "note": note,
         "clauses_found": len(results),
         "failed_count": len(fails),
+        "advisory_status": "OWNER_REVIEW" if owner_reviews else None,
+        "advisory_count": len(owner_reviews),
         "results": results,
         # WHICH input-doc roots were actually read, and how many docs each
         # yielded.  A VACUOUS_PASS is only trustworthy if you can see that the
