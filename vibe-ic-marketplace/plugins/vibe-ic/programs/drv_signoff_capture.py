@@ -18,12 +18,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_text  # noqa: E402
 import _eda_image  # noqa: E402
+import _docker_memory  # noqa: E402
+import _docker_watchdog  # noqa: E402
+import _watchdog  # noqa: E402
 from drv_signoff_anchor import image_pdk_anchor  # noqa: E402
 from drv_signoff_census import derive as derive_census  # noqa: E402
 from drv_signoff_judge import KINDS, _COMMAND, _sha, parse_check_types  # noqa: E402
 
 _COUNTER = re.compile(
     r"(?m)^DRV_COUNTER\s+(max_slew|max_capacitance|max_fanout)\s+(\d+)\s*$")
+_MAX_TOOL_LOG_BYTES = 16 * 1024 * 1024
+_READ_LOG_BYTES = 64 * 1024
 
 
 def _ref(path: Path) -> dict:
@@ -40,18 +45,55 @@ def _tcl(path: Path) -> str:
 
 
 def _run_fresh(script: Path, roots: set[Path], *, image: str) -> str:
+    """Supervise this one named OpenSTA container; retain its bounded raw log."""
     mounts = []
     for root in sorted(roots):
         root = root.resolve()
         mounts.extend(("-v", f"{root}:{root}"))
-    proc = subprocess.run(
-        ["docker", "run", "--rm", *mounts, image, "--skip", "bash", "-c",
-         f"sta -no_init -exit {shlex.quote(str(script.resolve()))}"],
-        capture_output=True, text=True, check=False)
-    body = proc.stdout + "\n" + proc.stderr
-    if proc.returncode or re.search(r"(?m)^Error(?:\s|:)", body):
-        raise RuntimeError(f"fresh OpenSTA process failed rc={proc.returncode}: "
-                           + body[-1000:])
+    limit = _docker_memory.memory_limit()
+    if not limit:
+        raise RuntimeError("NOT_MEASURED: OpenSTA memory ceiling unavailable")
+    name = _docker_watchdog.ephemeral_container_name("vibeic_drv_sta")
+    raw = script.with_suffix(".tool.log")
+    argv = ["docker", "run", "--rm", "--name", name,
+            "--memory", limit, "--memory-swap", limit,
+            *mounts, image, "--skip", "bash", "-c",
+            f"sta -no_init -exit {shlex.quote(str(script.resolve()))}"]
+
+    def launch(cmd, **kw):
+        kw.pop("stdout", None)
+        kw.pop("stderr", None)
+        with raw.open("wb") as stream:
+            return subprocess.Popen(cmd, stdout=stream, stderr=subprocess.STDOUT,
+                                    start_new_session=True, **kw)
+
+    def output_limit():
+        try:
+            if raw.stat().st_size > _MAX_TOOL_LOG_BYTES:
+                return f"OpenSTA raw log exceeded {_MAX_TOOL_LOG_BYTES} bytes"
+        except OSError:
+            pass
+        return None
+
+    result = _watchdog.run_supervised(
+        argv, log_path=raw, output_progress=False,
+        cpu_probe=_docker_watchdog.ephemeral_container_cpu_probe(name),
+        kill=_docker_watchdog.ephemeral_container_reap(name),
+        popen_factory=launch, abort_probe=output_limit)
+    try:
+        with raw.open("rb") as stream:
+            head = stream.read(4096)
+            stream.seek(max(0, raw.stat().st_size - _READ_LOG_BYTES))
+            tail = stream.read(_READ_LOG_BYTES)
+        body = (head + b"\n" + tail).decode("utf-8", errors="replace")
+    except OSError:
+        body = ""
+    if result.outcome != "natural" or result.rc or re.search(
+            r"(?m)^Error(?:\s|:)", body):
+        raise RuntimeError(
+            f"NOT_MEASURED: fresh OpenSTA stopped/over-limit "
+            f"outcome={result.outcome} rc={result.rc}; raw={raw}; "
+            f"watchdog={result.err[-500:]}; tool={body[-1000:]}")
     return body
 
 
