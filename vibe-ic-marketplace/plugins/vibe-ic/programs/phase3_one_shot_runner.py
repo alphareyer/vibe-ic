@@ -75625,12 +75625,18 @@ def main() -> int:
                              "path_classes": [], "setup_slack_ns": None}
                 _llp.write_json(_pre_gate_path, _pre_gate)
             _pre_pnr_gate_ok = _pre_gate["verdict"] == "PASS"
+            _prelayout_ok = _pls.status == "PASS"
             plan.append(StepResult(
                 "pre_pnr_setup", _pre_gate["verdict"], 0.0,
                 f"{_pre_gate['reason']}; SS setup slack "
                 f"{_pre_gate.get('setup_slack_ns')} ns; "
                 f"path classes {_pre_gate.get('path_classes', [])}",
-                [str(_pre_gate_path)]))
+                [str(_pre_gate_path)],
+                reason_class=(_V.ReasonClass.EXECUTION_ERROR
+                              if _pre_gate["reason"].startswith(
+                                  "PRE_PNR_GATE_INPUT_UNREADABLE")
+                              else _V.ReasonClass.INCONCLUSIVE)
+                if _pre_gate["verdict"] == "NOT_MEASURED" else ""))
             # ORGANIC #593 — geometry-aware cache: a DEF that exists may
             # only be reused when the requested --die-um/--util match the
             # cached run's geometry (pnr_args.json). A congestion-recovery
@@ -75645,29 +75651,40 @@ def main() -> int:
             # where a 0-byte antenna report inherited from the cached run is
             # removed: on this path `step_pnr` never runs, so #2157's sweep,
             # which lives inside its approach loop, is never reached.
-            _pnr_cache = _cached_stage_decision(
+            _pnr_cache = (_cached_stage_decision(
                 project, _pnr_out, def_existing, kind="pnr",
                 top=effective_top, die_um=args.die_um, util=args.util,
                 pdk=pdk, container=args.container, args=args)
-            _cache_msg = _pnr_cache.reason
-            if not _pre_pnr_gate_ok:
+                if _prelayout_ok and _pre_pnr_gate_ok else None)
+            if _pnr_cache is None:
+                _blocked_reasons = []
+                if not _prelayout_ok:
+                    _blocked_reasons.append(
+                        f"prelayout_signoff={_pls.status}: {_pls.detail}")
+                if not _pre_pnr_gate_ok:
+                    _blocked_reasons.append(
+                        f"pre_pnr_setup={_pre_gate['verdict']}: "
+                        f"{_pre_gate['reason']}; "
+                        f"{_pre_gate.get('path_classes', [])} at "
+                        f"{_pre_gate.get('setup_slack_ns')} ns")
                 plan.append(StepResult(
                     "pnr", "NOT_MEASURED", 0.0,
-                    "BLOCKED_BY_PRE_PNR_SETUP_GATE: "
-                    f"{_pre_gate['reason']}; return to synthesis/STA "
-                    "before placement; "
-                    f"{_pre_gate.get('path_classes', [])} at "
-                    f"{_pre_gate.get('setup_slack_ns')} ns",
-                    [str(_pre_gate_path)]))
+                    "BLOCKED_BY_PRELAYOUT_SIGNOFF_OR_SETUP_GATE: "
+                    + " | ".join(_blocked_reasons),
+                    list(dict.fromkeys(_pls.output_files + [str(_pre_gate_path)])),
+                    reason_class=(_V.ReasonClass.UPSTREAM_FAILED
+                                  if _pls.status == "FAIL"
+                                  or _pre_gate["verdict"] == "FAIL"
+                                  else _V.ReasonClass.UPSTREAM_REFUSED)))
             elif _pnr_cache.accept:
                 plan.append(StepResult(
                     "pnr", "PASS", 0.0,
                     f"DEF already present: {def_existing.name} (skipped "
-                    f"re-run; {_cache_msg})",
+                    f"re-run; {_pnr_cache.reason})",
                     [str(def_existing)]))
             else:
                 if def_existing.is_file():
-                    print(f"[pnr] cache invalid — {_cache_msg}",
+                    print(f"[pnr] cache invalid — {_pnr_cache.reason}",
                           file=sys.stderr)
                 # Canonical 15.5ic is executed inside this dispatch at the
                 # real floorplan->route seam. Its row is returned separately
