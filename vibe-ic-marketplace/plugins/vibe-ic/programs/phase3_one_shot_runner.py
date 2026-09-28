@@ -57266,6 +57266,17 @@ def _netlist_port_decls_row(nports: Dict[str, Any]) -> Optional[StepResult]:
         reason_class=_V.ReasonClass.INCONCLUSIVE)
 
 
+def _prestream_status(rows: List[StepResult]) -> Tuple[str, list, list, list]:
+    """Keep a missing measurement distinct from a measured pre-stream failure."""
+    failed = [r for r in rows if r.status == "FAIL"]
+    unmeasured = [r for r in rows
+                  if r.status not in ("PASS", "WAIVED", "FAIL")]
+    waived = [r for r in rows if r.status == "WAIVED"]
+    verdict = ("FAIL" if failed else "NOT_MEASURED" if unmeasured
+               else "WAIVED" if waived else "PASS")
+    return verdict, failed, unmeasured, waived
+
+
 def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
                         container: str, *, _si_retry: bool = False,
                         _feedback_retry: bool = False) -> StepResult:
@@ -57478,13 +57489,13 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
             "layout_basis", "layout changed during pre-stream verification"))
     for row in rows:
         row.extras["layout_digest"] = digest
-    failed = [r for r in rows if r.status not in ("PASS", "WAIVED")]
-    drv_waived = [r for r in rows if r.status == "WAIVED"]
-    prestream_verdict = ("FAIL" if failed else "WAIVED" if drv_waived
-                         else "PASS")
+    prestream_verdict, failed, unmeasured, drv_waived = _prestream_status(rows)
     receipt = {"layout_digest": digest, "basis": "DEF/netlist/SDC/PDK",
                "verdict": prestream_verdict,
+               "reason_class": (_V.ReasonClass.PARTIAL_POPULATION.value
+                                if prestream_verdict == "NOT_MEASURED" else None),
                "failed_gates": [r.name for r in failed],
+               "unmeasured_gates": [r.name for r in unmeasured],
                "gates": [asdict(r) for r in rows],
                "evidence": asdict(evidence)}
     out = _pl.reports_phase3_dir(project) / "prestream_gate.json"
@@ -57493,9 +57504,16 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
     return StepResult("prestream_gate", prestream_verdict,
                       time.time() - t0,
                       f"layout_digest={digest}; failed gates: "
-                      + (", ".join(r.name for r in failed) if failed else "none"),
+                      + (", ".join(r.name for r in failed) if failed else "none")
+                      + "; unmeasured gates: "
+                      + (", ".join(r.name for r in unmeasured)
+                         if unmeasured else "none"),
                       [str(out)], extras={"layout_digest": digest,
-                                          "failed_gates": receipt["failed_gates"]},
+                                          "failed_gates": receipt["failed_gates"],
+                                          "unmeasured_gates": receipt["unmeasured_gates"]},
+                      reason_class=(
+                          _V.ReasonClass.PARTIAL_POPULATION.value
+                          if prestream_verdict == "NOT_MEASURED" else ""),
                       waiver_rows=[w for r in drv_waived
                                    for w in r.waiver_rows])
 
