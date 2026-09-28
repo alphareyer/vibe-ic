@@ -13228,15 +13228,15 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
 #: it on entry so repeated calls in one process do not accumulate.
 _ENV_WAIVER_REJECTIONS: List[str] = []
 
-#: #524 — ENV_UNAVAILABLE waivers that WERE honoured but whose `evidence` no
-#: independent artefact corroborates. Surfaced as report advisories next to the
-#: rejections, so a WAIVED step no longer reads identically whether its
-#: deferral rested on an independent artefact or on the producing run pointing
-#: at its own orchestrator report.
+#: #524 — owner-approved ENV_UNAVAILABLE entries whose `evidence` no
+#: independent artefact corroborates. These provisional loader notes are
+#: distinct from the final report advisories: a fallback may go unused when
+#: the step passes on its own evidence. The report derives its wording from
+#: the final step verdict via `_final_env_waiver_evidence_notes`.
 #:
 #: A SEPARATE list from `_ENV_WAIVER_REJECTIONS` on purpose: these waivers are
-#: APPLIED. Filing them as rejections would say the step lost its exemption
-#: when it did not, which is a different lie from the one being fixed.
+#: APPROVED for fallback. Filing them as rejections would say the entry lost
+#: its approval when it did not, which is a different lie from the one fixed.
 #: Populated by `_load_waivers`, which clears it on entry.
 _ENV_WAIVER_EVIDENCE_NOTES: List[str] = []
 
@@ -13253,8 +13253,8 @@ _ENV_WAIVER_EVIDENCE_NOTES: List[str] = []
 #:   * not `_ENV_WAIVER_REJECTIONS` — nothing here was refused. A WAIVED-tier
 #:     entry is not an error; calling it a rejection would say the step lost an
 #:     exemption it never asked this module for, which is the opposite lie.
-#:   * not `_ENV_WAIVER_EVIDENCE_NOTES` — those waivers were APPLIED and the
-#:     note qualifies them. These were not applied at all.
+#:   * not `_ENV_WAIVER_EVIDENCE_NOTES` — those owner-approved entries are
+#:     eligible for a fallback, while these tiers never bind to a step.
 #: Every entry here is INFORMATIONAL: it changes no step verdict, no count and
 #: no exit code. It exists so a reader can tell "read and inapplicable" from
 #: "nobody read this file".
@@ -13824,12 +13824,13 @@ def _load_waivers(project: Path, max_step: int = 40) -> Dict[int, Dict[str, str]
             # only the producing run's own probe. Keep the independent-evidence
             # advisory so the report states that limitation explicitly.
             _assess = _ev_ind.assess(evidence, project)
+            _disclosure = (_ev_ind.disclosure(step_name, _assess)
+                           if not _assess.corroborated else "")
             if not _assess.corroborated:
                 _ENV_WAIVER_EVIDENCE_NOTES.append(
-                    "HONOURED but UNCORROBORATED — " +
-                    _ev_ind.disclosure(step_name, _assess) +
-                    f" The step (flow step {sid}) remains WAIVED-DEFERRED on "
-                    f"ticket {ticket}; review_required stays true.")
+                    "OWNER-APPROVED but UNCORROBORATED — " + _disclosure +
+                    f" Flow step {sid} may use ticket {ticket} only if its "
+                    "natural verdict fails; review_required stays true.")
             out[sid] = _owner_waiver.ValidatedOwnerEnvWaiver(
                 w, data, step_id=sid,
                 reason=(
@@ -13839,7 +13840,8 @@ def _load_waivers(project: Path, max_step: int = 40) -> Dict[int, Dict[str, str]
                     + ("" if _assess.corroborated
                        else ", NO independent corroboration") + "]"
                 ),
-                evidence_assessment=_assess.as_dict())
+                evidence_assessment=_assess.as_dict(),
+                evidence_disclosure=_disclosure)
         # Check execution conditions on the remaining owner-approved entries.
         _refuse_stale_waivers(project, out)
         return out
@@ -13847,6 +13849,35 @@ def _load_waivers(project: Path, max_step: int = 40) -> Dict[int, Dict[str, str]
         print(f"flow_compliance_check: cannot parse {wpath}: {exc}",
               file=sys.stderr)
         raise SystemExit(1)
+
+
+def _final_env_waiver_evidence_notes(
+        waivers: Dict[Any, Dict[str, Any]],
+        results: List[StepResult]) -> List[str]:
+    """Describe independent evidence only after the step verdict is final."""
+    by_id = {str(row.id): row for row in results}
+    notes = []
+    for sid, entry in waivers.items():
+        if not isinstance(entry, _owner_waiver.ValidatedOwnerEnvWaiver):
+            continue
+        if entry.get("evidence_assessment", {}).get("corroborated"):
+            continue
+        row = by_id.get(str(sid))
+        applied = bool(row and row.status == _T.Verdict.PASS_WITH_WAIVERS.value
+                       and any(str(reason).startswith(
+                           "ENV_UNAVAILABLE waiver applied")
+                           for reason in row.reasons))
+        prefix = ("HONOURED but UNCORROBORATED" if applied else
+                  "OWNER-APPROVED but NOT APPLIED; evidence UNCORROBORATED")
+        outcome = ("the final step verdict is PASS_WITH_WAIVERS"
+                   if applied else
+                   f"the final step verdict is {row.status if row else 'NOT_EVALUATED'}"
+                   "; no waiver credit was used")
+        notes.append(
+            f"{prefix} — {entry['_evidence_disclosure']} Flow step {sid}: "
+            f"{outcome}; ticket {entry.get('ticket')}; review_required "
+            "stays true.")
+    return notes
 
 
 #: The `l_doc_declares` predicate's answer, when it has one: the cited
@@ -20711,11 +20742,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Without this the step showed a bare MISSING and the reader could not
     # tell that a waiver had been attempted, let alone why it did not apply.
     advisories.extend(_ENV_WAIVER_REJECTIONS)
-    # #524 — an APPLIED ENV_UNAVAILABLE waiver whose evidence nothing
-    # independent corroborates is disclosed here. The step stays WAIVED; what
-    # changes is that the reader can now tell which kind of evidence bought
-    # the deferral, instead of the verdict reading identically either way.
-    advisories.extend(_ENV_WAIVER_EVIDENCE_NOTES)
+    # #524 — describe the evidence alongside the FINAL step verdict. A
+    # loader-approved fallback can remain unused when the step passes on its
+    # own evidence, so the loader's provisional note is not a verdict.
+    advisories.extend(_final_env_waiver_evidence_notes(waivers, results))
     # #529 — a `waivers`-dialect entry this run READ but did not bind is
     # disclosed here. Informational only: it changes no verdict, no count and
     # no exit code. Without it a compliance report was byte-identical whether
