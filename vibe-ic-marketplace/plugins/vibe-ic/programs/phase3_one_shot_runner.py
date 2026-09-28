@@ -57731,18 +57731,11 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
         return _signoff_not_checked(
             name, t0, f"cannot create {out_json.parent}: {exc}")
     if name == "drv_signoff":
-        plan_path = project / "reports/phase3/sta/drv_capture_plan.json"
-        if not plan_path.is_file():
-            return _signoff_not_checked(
-                name, t0, "DRV capture plan absent; fresh measurement unavailable")
+        # A failed new capture must also invalidate an earlier judge receipt.
+        out_json.unlink(missing_ok=True)
         try:
-            import drv_signoff_capture as _drv_capture
-            from _atomic_artefact import write_text as _drv_write
-            plan = json.loads(plan_path.read_text())
-            bundle = _drv_capture.capture(
-                plan, project / "reports/phase3/sta/drv_capture")
-            _drv_write(project / "reports/phase3/sta/drv_signoff_bundle.json",
-                       json.dumps(bundle, indent=2) + "\n")
+            import drv_capture_plan as _drv_plan
+            _drv_plan.capture_and_publish(project)
         except (OSError, ValueError, RuntimeError, KeyError) as exc:
             return _signoff_not_checked(
                 name, t0, f"fresh DRV capture did not complete: {exc}")
