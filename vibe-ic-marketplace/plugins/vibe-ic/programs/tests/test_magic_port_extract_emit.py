@@ -10,6 +10,12 @@ import pytest
 mod = importlib.import_module("magic_port_extract_emit")
 
 
+def _flattens(tcl):
+    """The token list of every Magic `flatten` command line in `tcl`."""
+    return [ln.split() for ln in tcl.splitlines()
+            if ln.split()[:1] == ["flatten"]]
+
+
 class TestShellPreamble:
     def test_exports_pdk_before_magic(self):
         pre = mod.build_shell_preamble("sky130A", "/foss/pdks/x", "/tmp/s.tcl")
@@ -49,12 +55,15 @@ class TestExtractionTcl:
 
     def test_flatten_default_on(self):
         tcl = mod.build_extraction_tcl("top", "/g.gds", "/o.spice")
-        assert "flatten top" in tcl
+        # N6: the flat cell keeps the top's own labels only (`-dotoplabels`);
+        # a bare flatten would hand every library pin to `port makeall`.
+        assert _flattens(tcl) == [["flatten", "-dotoplabels", "top"]]
 
     def test_flatten_can_be_disabled(self):
         opts = mod.MagicExtractOptions(flatten_top=False)
         tcl = mod.build_extraction_tcl("top", "/g.gds", "/o.spice", opts)
-        assert "flatten top" not in tcl
+        # Per command line, so no spelling of the flatten can slip past.
+        assert _flattens(tcl) == []
 
     def test_port_makeall_can_be_disabled(self):
         opts = mod.MagicExtractOptions(port_makeall=False)
@@ -79,7 +88,7 @@ class TestExtractionTcl:
     def test_chip_agnostic_arbitrary_top(self):
         tcl = mod.build_extraction_tcl("my_TOP_9", "/g.gds", "/o.spice")
         assert "load my_TOP_9" in tcl
-        assert "flatten my_TOP_9" in tcl
+        assert ["flatten", "-dotoplabels", "my_TOP_9"] in _flattens(tcl)
 
     def test_provenance(self):
         tcl = mod.build_extraction_tcl("top", "/g.gds", "/o.spice")
