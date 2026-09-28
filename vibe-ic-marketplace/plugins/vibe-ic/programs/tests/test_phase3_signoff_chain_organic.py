@@ -1079,9 +1079,9 @@ class TestErcReport:
             project, "chip_top", _fake_pdk(), "x", rpt3 / "erc.rpt", [])
         result = json.loads((rpt3 / "erc.json").read_text())
         report = (rpt3 / "erc.rpt").read_text()
+        assert result["verdict"] == "NOT_DETERMINED"
         assert result["floating_nets"] is None
         assert result["clean"] is False
-        assert result["verdict"] == "NOT_DETERMINED"
         assert result["not_determined_reason"] == "ERC_SUBCOMMAND_FAILED"
         assert result["measurement_errors"] == [error]
         assert "ERC clean: NOT_DETERMINED" in report
