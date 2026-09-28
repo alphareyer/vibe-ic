@@ -330,7 +330,7 @@ def test_step31_reports_chain_stall_as_unmeasured(tmp_path, monkeypatch):
     result = runner._step31_librelane(
         tmp_path, 'block', SimpleNamespace(name='processA'), 'lvs', publish=False)
     assert result.status == 'NOT_MEASURED'
-    assert result.reason_class == runner._V.ReasonClass.EXECUTION_ERROR
+    assert result.reason_class == runner._V.ReasonClass.STALLED
     assert 'LL_TOOL_STALLED' in result.detail
 
 

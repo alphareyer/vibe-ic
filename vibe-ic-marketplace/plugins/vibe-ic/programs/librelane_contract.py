@@ -26,6 +26,21 @@ class Refusal(RuntimeError):
         super().__init__(f"{code}: {detail}")
 
 
+#: The refusals that say the TOOL was stopped, not what the design is, and the
+#: `verdict.ReasonClass` value a consumer books them NOT_MEASURED with.
+#: `run_container` raises both: a supervised tool step that made no progress
+#: (container CPU and output flat for the stall grace) and a probe that passed
+#: its deadline. The tool never answered, so neither is a FAIL; every other
+#: refusal keeps whatever its consumer already decides.
+TOOL_STOP_REASONS = {'LL_TOOL_STALLED': 'stalled',
+                     'LL_TOOL_DEADLINE': 'budget_exhausted'}
+
+
+def tool_stop_reason(code: str | None) -> str | None:
+    """The NOT_MEASURED reason class for a tool-stop refusal code, else None."""
+    return TOOL_STOP_REASONS.get(code) if code else None
+
+
 #: How every container this module (and librelane_signoff) starts is bounded.
 #: Two kinds, bounded two different ways:
 #:
@@ -46,7 +61,7 @@ TOOL_BUDGET_S = 86_400
 #: The refusals caused by TIME, not by the design or by a tool verdict: a probe
 #: past its deadline, a tool the watchdog reaped as stalled. Only a plain FAIL
 #: is red, so a consumer books these NOT_MEASURED with the refusal as reason.
-TIME_REFUSALS = frozenset({'LL_TOOL_DEADLINE', 'LL_TOOL_STALLED'})
+TIME_REFUSALS = frozenset(TOOL_STOP_REASONS)
 TOOL_STALL_GRACE_S: float | None = None
 _REAP_DEADLINE_S = 30
 _OUTPUT_TAIL = 2000

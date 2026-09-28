@@ -17007,7 +17007,10 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
                           "LibreLane netlist checkers ran",
                           [str(netlist), str(stat), str(stats), str(folder / "state_out.json")])
     except (_ll.Refusal, OSError, ValueError) as exc:
-        return StepResult("synth", "FAIL", time.time() - t0, str(exc))
+        stopped = (_ll.tool_stop_reason(exc.code)
+                   if isinstance(exc, _ll.Refusal) else None)
+        return StepResult("synth", "NOT_MEASURED" if stopped else "FAIL",
+                          time.time() - t0, str(exc), reason_class=stopped or "")
 
 
 def step_synth(project: Path, top: str, pdk: PdkConfig,
@@ -36330,6 +36333,47 @@ def _pad_ring_process_note(rc: int, out: str, err: str) -> str:
     return error if rc != 0 and error else (lines[0] if lines else "")
 
 
+#: Step 15.5ic's programs, and what each DOCUMENTS its non-zero exits to
+#: mean, as (verdict, reason class). rc 1 of the producers and the ring gate is
+#: a refusal or a finding, so FAIL; every rc 2 is that program's own
+#: could-not-measure tier. `pad_bterm_coincidence_check` says "1 a net could
+#: not be decided, 2 nothing to decide": neither is a finding about the ring.
+#: An exit no program documents is an execution error, never an exception.
+_PAD_RING_RC_OUTCOMES: Dict[str, Dict[int, Tuple[str, str]]] = {
+    "pad_assignment_gen.py": {
+        1: (_V.Verdict.FAIL.value, ""),  # REFUSE: answers still owed
+        2: (_V.Verdict.NOT_MEASURED.value,  # NOT_ASKED: nothing declared
+            _V.ReasonClass.NOT_EXECUTED.value)},
+    "pad_ring_gen.py": {
+        1: (_V.Verdict.FAIL.value, ""),
+        2: (_V.Verdict.NOT_MEASURED.value,  # SKIP: inputs absent, or a
+            _V.ReasonClass.INPUT_ABSENT.value)},  # rotation it cannot honour
+    "pad_ring_check.py": {
+        1: (_V.Verdict.FAIL.value, ""),  # a wrong or a silent report
+        2: (_V.Verdict.NOT_MEASURED.value,  # a disclosed absence
+            _V.ReasonClass.INPUT_ABSENT.value)},
+    "pad_bterm_coincidence_check.py": {
+        1: (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.INCONCLUSIVE.value),
+        2: (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.NO_POPULATION.value)},
+}
+
+
+def _pad_ring_rc_outcome(name: str, rc: int) -> Tuple[str, str]:
+    """Book a supervised stop before a producer's documented exit codes."""
+    if rc == _RC_STALLED:
+        return _V.Verdict.NOT_MEASURED.value, _V.ReasonClass.STALLED.value
+    if rc == 124:
+        return _V.Verdict.NOT_MEASURED.value, _V.ReasonClass.BUDGET_EXHAUSTED.value
+    # The fixed-base pad-ring contract books these unknown tool exits as
+    # tool_absent. Preserve it while classifying the remaining undocumented
+    # exits as execution errors.
+    if rc in (7, 127):
+        return _V.Verdict.NOT_MEASURED.value, _V.ReasonClass.TOOL_ABSENT.value
+    return _PAD_RING_RC_OUTCOMES[name].get(
+        rc, (_V.Verdict.NOT_MEASURED.value,
+             _V.ReasonClass.EXECUTION_ERROR.value))
+
+
 def step_pad_ring_gen(project: Path, container: Optional[str] = None,
                       pdk: Optional[PdkConfig] = None) -> StepResult:
     """Canonical step 15.5ic producer + independent gate, before routing.
@@ -36399,12 +36443,7 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
         if rc == 0:
             status, reason = _V.Verdict.PASS.value, ""
             continue
-        status, reason = {
-            1: (_V.Verdict.FAIL.value, ""),
-            2: (_V.Verdict.NOT_MEASURED.value,
-                _V.ReasonClass.NOT_EXECUTED.value),
-        }.get(rc, (_V.Verdict.NOT_MEASURED.value,
-                   _V.ReasonClass.TOOL_ABSENT.value))
+        status, reason = _pad_ring_rc_outcome(name, rc)
         break
 
     out_files = [
@@ -36422,7 +36461,7 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
     missing = sorted(str(p.relative_to(project)) for p in required
                      if not p.is_file())
     if status == "PASS" and missing:
-        status = "FAIL"
+        status, reason = "FAIL", ""
         notes.append("producer/gate returned rc=0 but required output(s) are "
                      f"absent: {missing}")
     # The reason class computed above travels with the row: a NOT_MEASURED
@@ -36933,12 +36972,21 @@ def _prepare_librelane_floorplan_for_route(
 
     def _fail(code: str, detail: str, status: str = "FAIL",
               reason_class: str = "") -> Tuple[StepResult, None]:
+        stopped = _ll.tool_stop_reason(code)
+        if stopped:
+            status = "NOT_MEASURED"
         return StepResult("pad_ring_gen", status, time.time() - t0,
                           detail if detail.startswith(code) else f"{code}: {detail}",
                           extras={"finding": code, "librelane_modes": modes},
-                          reason_class=(reason_class or (
+                          reason_class=(stopped or reason_class or (
                               _V.ReasonClass.INPUT_ABSENT.value
                               if status == "NOT_MEASURED" else ""))), None
+
+    def _code(exc: BaseException, default: str) -> str:
+        """The refusal's own code when it is a tool stop, else ``default``:
+        a handler that names its step keeps that name for real refusals."""
+        code = getattr(exc, "code", None)
+        return code if _ll.tool_stop_reason(code) else default
 
     if "dual" in modes.values():
         return _fail("LL_DUAL_FLOORPLAN_NOT_READY",
@@ -36954,7 +37002,7 @@ def _prepare_librelane_floorplan_for_route(
     try:
         pdk_root = _ll.pdk_root_resolution(project, pdk.name, image=image)["path"]
     except _ll.Refusal as exc:
-        return _fail("LL_PDK_ROOT_NOT_DECLARED", str(exc), "NOT_MEASURED")
+        return _fail(_code(exc, "LL_PDK_ROOT_NOT_DECLARED"), str(exc), "NOT_MEASURED")
     producer = (StepResult("io_pad_chip_top_gen", "PASS", 0.0, "already run")
                 if _padring_chip_top_record(project) is not None
                 else step_io_pad_chip_top_gen(project, container, pdk))
@@ -36983,7 +37031,7 @@ def _prepare_librelane_floorplan_for_route(
         pdk_root_c, pdk_tree = _padring_pdk_root_and_tree(pdk, container)
         pdk_args = ["--pdk-root", str(pdk_root_c), "--pdk", str(pdk_tree)]
     except ValueError as exc:
-        return _fail("LL_PDK_TREE_UNRESOLVED", str(exc))
+        return _fail(_code(exc, "LL_PDK_TREE_UNRESOLVED"), str(exc))
     # The PAD_* translation (librelane_config harvest) is the design's
     # declared input to the tool placer; the Python ring placer does not run.
     for name, extra in (("pad_assignment_gen.py", pdk_args),):
@@ -36993,7 +37041,9 @@ def _prepare_librelane_floorplan_for_route(
         rc, out, err = _docker_exec(container, cmd, marker=prog_c)
         notes.append(f"{name}: rc={rc}")
         if rc != 0:
-            return _fail("LL_PAD_ASSIGNMENT_FAILED", f"{name} rc={rc}: {(out + err)[-800:]}")
+            status, reason = _pad_ring_rc_outcome(name, rc)
+            return _fail("LL_PAD_ASSIGNMENT_FAILED",
+                         f"{name} rc={rc}: {(out + err)[-800:]}", status, reason)
     unplaceable: List[str] = []
     last = ("OpenROAD.DetailedPlacement" if placement is not None
             else "Odb.RemovePDNObstructions" if modes["15"] == "librelane"
@@ -37054,9 +37104,8 @@ def _prepare_librelane_floorplan_for_route(
                                 mounts=mounts, lane="15-floorplan", pdk_root=_ll.PDK_GUEST_ROOT)
     except (_ll.Refusal, OSError, ValueError, KeyError) as exc:
         code = getattr(exc, "code", "LL_FLOORPLAN_CHAIN_FAILED")
-        if code in _ll.TIME_REFUSALS:  # time, not a verdict: never a plain red
-            return _fail(code, str(exc), "NOT_MEASURED",
-                         _V.ReasonClass.EXECUTION_ERROR.value)
+        if _ll.tool_stop_reason(code):
+            return _fail(code, str(exc))
         return _fail(code, str(exc))
     by_step = dict(zip(steps, folders))
     for step_id, folder in by_step.items():
@@ -37127,7 +37176,10 @@ def _prepare_librelane_floorplan_for_route(
                    capture_output=True, text=True, errors="replace")
     notes.append(f"pad_ring_check --librelane-state: rc={gate.returncode}")
     if gate.returncode != 0:
-        return _fail("PADRING_TOOL_GATE_FAILED", (gate.stdout + gate.stderr)[-800:])
+        status, reason = _pad_ring_rc_outcome("pad_ring_check.py", gate.returncode)
+        return _fail("PADRING_TOOL_GATE_FAILED",
+                     f"pad_ring_check.py rc={gate.returncode}: {(gate.stdout + gate.stderr)[-800:]}",
+                     status, reason)
     # F30: the step's PRODUCER record. The gate above writes only its own
     # verdict document to `reports/phase3/padring.json`, and the audit rightly
     # refuses a declared output only the step's gate authored (audit_created):
@@ -37145,7 +37197,9 @@ def _prepare_librelane_floorplan_for_route(
                      capture_output=True, text=True, errors="replace")
         notes.append(f"{name} {' '.join(extra[:1])}: rc={cp.returncode}".replace(" :", ":"))
         if cp.returncode != 0:
-            return _fail(code, (cp.stdout + cp.stderr)[-800:])
+            status, reason = _pad_ring_rc_outcome(name, cp.returncode)
+            return _fail(code, f"{name} rc={cp.returncode}: {(cp.stdout + cp.stderr)[-800:]}",
+                         status, reason)
     if getattr(pdk, "tech_lef", None):
         prog_c = _to_container_path(str(PROGRAMS_DIR / "pad_bterm_coincidence_check.py"),
                                     container)
@@ -37155,7 +37209,10 @@ def _prepare_librelane_floorplan_for_route(
         rc, out, err = _docker_exec(container, cmd, marker=prog_c)
         notes.append(f"pad_bterm_coincidence_check.py: rc={rc}")
         if rc != 0:
-            return _fail("PADRING_BTERM_GATE_FAILED", (out + err)[-800:])
+            status, reason = _pad_ring_rc_outcome("pad_bterm_coincidence_check.py", rc)
+            return _fail("PADRING_BTERM_GATE_FAILED",
+                         f"pad_bterm_coincidence_check.py rc={rc}: {(out + err)[-800:]}",
+                         status, reason)
     consumed = out_dir / ("floorplan.def" if modes["15"] == "librelane" else "padring.def")
     try:
         io_lefs, io_gds = io_view_discover(pdk, container)
@@ -37195,14 +37252,14 @@ def _prepare_librelane_floorplan_for_route(
                     f'{{ $_stn setDoNotTouch true; puts "SPARE_TIE_NET_DONT_TOUCH: {n}" }}\n'
                     for n in _tie_nets))
     except (OSError, ValueError) as exc:
-        return _fail("LL_FLOORPLAN_NO_CONSUMER", str(exc))
+        return _fail(_code(exc, "LL_FLOORPLAN_NO_CONSUMER"), str(exc))
     if placement is not None and placement.get("mode") == "dual":
         try:
             selection = _select_placement_arm(
                 project, image, container, out_dir, configs,
                 folders[-1] / "state_out.json", direct_consumer, mounts)
         except (_ll.Refusal, OSError, ValueError, KeyError) as exc:
-            return _fail("LL_DUAL_PLACEMENT_FAILED", str(exc))
+            return _fail(_code(exc, "LL_DUAL_PLACEMENT_FAILED"), str(exc))
         notes.append(f"step 17 dual: selection={selection.get('selection')} "
                      f"({selection.get('reason') or 'dominates'}; "
                      "phase3/tool_arms/17/selection.json)")
@@ -39096,12 +39153,15 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         if pad_ring_results is not None:
             pad_ring_results[:] = [pad_result]
         if pad_result.status != "PASS" or consumer_tcl is None:
+            upstream_refused = pad_result.status == "NOT_MEASURED"
             return StepResult(
-                "pnr", "FAIL", time.time() - t0,
+                "pnr", "NOT_MEASURED" if upstream_refused else "FAIL", time.time() - t0,
                 "routing refused because the chip-path pad ring was not a "
                 f"verified routing input: {pad_result.detail}",
                 pad_result.output_files,
-                extras={"finding": "PADRING_PREROUTE_BLOCKED"})
+                extras={"finding": "PADRING_PREROUTE_BLOCKED"},
+                reason_class=(_V.ReasonClass.UPSTREAM_REFUSED.value
+                              if upstream_refused else ""))
         pnr_tcl.write_text(consumer_tcl)
         _sdr_child_deck_failures.clear()
         _sdr_child_deck_failures.update(
@@ -48999,7 +49059,7 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     """Opt-in tool stream-out; direct remains the production default."""
     if candidate:
         return _step_gds_direct(project, top, pdk, container, candidate=True)
-    from librelane_contract import (Refusal, TIME_REFUSALS, resolve_image,
+    from librelane_contract import (Refusal, tool_stop_reason, resolve_image,
                                     resolve_pdk_root, selected_mode)
     mode = selected_mode(project, "37")
     if mode == "direct":
@@ -49008,10 +49068,10 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     t0 = time.time()
 
     def _librelane_refused(exc: BaseException, context: str) -> StepResult:
-        stopped = isinstance(exc, Refusal) and exc.code in TIME_REFUSALS
+        stopped = tool_stop_reason(exc.code) if isinstance(exc, Refusal) else None
         return StepResult("gds", "NOT_MEASURED" if stopped else "FAIL",
                           time.time() - t0, f"{context}: {exc}",
-                          reason_class=(_V.ReasonClass.EXECUTION_ERROR if stopped else ""))
+                          reason_class=(stopped or ""))
 
     digest, refusal = _layout_basis(project, top, pdk, container)
     if refusal or not _ga.gate_passed(project, digest):
@@ -50934,7 +50994,7 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
     """
     t0 = time.time()
     import librelane_pv_signoff as _pv
-    from librelane_contract import Refusal, TIME_REFUSALS, resolve_image, resolve_pdk_root
+    from librelane_contract import Refusal, tool_stop_reason, resolve_image, resolve_pdk_root
     pnr = _pl.pnr_dir(project)
     try:
         image = resolve_image(project)
@@ -50955,10 +51015,10 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
         if exc.code in ("LL_PV_VIEW_MISSING", "LL_BRIDGE_VIEW_MISSING"):
             return StepResult(half, "NOT_MEASURED", time.time() - t0, str(exc),
                               reason_class=_V.ReasonClass.INPUT_ABSENT)
-        if exc.code in TIME_REFUSALS:  # time, not a verdict: never a plain red
+        if stopped := tool_stop_reason(exc.code):
             return StepResult(half, "NOT_MEASURED", time.time() - t0,
                               f"LibreLane step 31: {exc}",
-                              reason_class=_V.ReasonClass.EXECUTION_ERROR)
+                              reason_class=stopped)
         return StepResult(half, "FAIL", time.time() - t0, f"LibreLane step 31: {exc}")
     record_path = project / _pv.RECORD_REL.format(half=half)
     extras: Dict[str, Any] = {"librelane_pv": str(record_path),
@@ -58732,9 +58792,12 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
             _ll = _prelayout_librelane(project, top, pdk, runner_sdc,
                                        design_staged, _ll_modes, notes)
         except (_llc.Refusal, OSError, ValueError) as exc:
-            return StepResult("prelayout_signoff", "FAIL", time.time() - t0,
+            stopped = (_llc.tool_stop_reason(exc.code)
+                       if isinstance(exc, _llc.Refusal) else None)
+            return StepResult("prelayout_signoff", "NOT_MEASURED" if stopped else "FAIL",
+                              time.time() - t0,
                               f"LibreLane pre-layout path ({_ll_modes}): {exc}",
-                              written)
+                              written, reason_class=stopped or "")
 
     # --- Step 7c: pvt_matrix.json (design-staged Liberty corners) --------
     pvt_path = constraints_out / "pvt_matrix.json"
@@ -65574,7 +65637,8 @@ def _librelane_signoff_run(project: Path, top: str, pdk: PdkConfig, *,
     try:
         root = _ll.pdk_root_resolution(project, pdk.name)["path"]
     except _ll.Refusal as exc:
-        raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
+        raise _ll.Refusal(exc.code if _ll.tool_stop_reason(exc.code)
+                          else "LL_PDK_ROOT_NOT_DECLARED",
                           f"steps 22/23 on LibreLane: {exc}") from None
     image = _ll.resolve_image(project)
     result = _ls.run(project, image, Path(root), pdk.name,
@@ -65787,7 +65851,8 @@ def _librelane_step_ctx(project: Path, steps: str, pdk: str) -> Tuple[str, Path]
     try:
         root = _ll.pdk_root_resolution(project, pdk, image=image)["path"]
     except _ll.Refusal as exc:
-        raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
+        raise _ll.Refusal(exc.code if _ll.tool_stop_reason(exc.code)
+                          else "LL_PDK_ROOT_NOT_DECLARED",
                           f"step(s) {steps} on LibreLane: {exc}") from None
     return image, Path(root)
 
@@ -68209,7 +68274,8 @@ def _step30_tool_arm(project: Path, pdk: PdkConfig, written: List[str],
         try:
             root = _ll.pdk_root_resolution(project, pdk.name, image=image)["path"]
         except _ll.Refusal as exc:
-            raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
+            raise _ll.Refusal(exc.code if _ll.tool_stop_reason(exc.code)
+                              else "LL_PDK_ROOT_NOT_DECLARED",
                               f"step 30 on LibreLane: {exc}") from None
         doc = _pst.run_step30(project, image, Path(root), pdk.name)
         written.append(str(project / "reports/phase3/spice_path_tool.json"))
@@ -68235,7 +68301,8 @@ def _step29_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
         try:
             root = _ll.pdk_root_resolution(project, pdk.name, image=image)["path"]
         except _ll.Refusal as exc:
-            raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
+            raise _ll.Refusal(exc.code if _ll.tool_stop_reason(exc.code)
+                              else "LL_PDK_ROOT_NOT_DECLARED",
                               f"step 29 on LibreLane: {exc}") from None
         # The direct arm writes ONE SDF (`_emit_sdf`, the PDK's default liberty).
         judged = _lp.gate_level_sim(project, top, image,

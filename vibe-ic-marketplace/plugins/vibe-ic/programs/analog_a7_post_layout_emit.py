@@ -1012,8 +1012,9 @@ def _unmeasured(record: dict, out: Path, rule: str, reason_class: str,
     return EX_BUDGET_EXHAUSTED
 
 
-def _refuse(record: dict, out: Path, rule: str, detail: str, rc: int) -> int:
-    record.update({"result": "REFUSED" if rc == 1 else "NOT_PRODUCED",
+def _refuse(record: dict, out: Path, rule: str, detail: str, rc: int,
+            result: Optional[str] = None) -> int:
+    record.update({"result": result or ("REFUSED" if rc == 1 else "NOT_PRODUCED"),
                    "rule": rule, "detail": detail})
     write_json(out, record)
     token = _pc.HONEST_GAP_TOKEN if rc == 2 else (
@@ -1184,9 +1185,16 @@ def run(project: Path, block: str, container: str, image: str,
                                    namespace=f"analog/{block}/a7_{slug}",
                                    pdk_root=pdk_root)
         except lc.Refusal as exc:
+            # A tool the contract STOPPED (no progress, or a probe past its
+            # deadline) never answered: the environment tier with that
+            # reason, never the `FAIL:` an extraction finding earns.
+            stopped = lc.tool_stop_reason(exc.code)
+            if stopped:
+                record.update({"reason_class": stopped})
+                return _refuse(record, record_path, exc.code, str(exc),
+                               _pc.EX_ENV_REFUSED, result="NOT_MEASURED")
             rc = _pc.EX_ENV_REFUSED if exc.code in (
-                "LL_IMAGE_INCAPABLE", "LL_CONFIG_RESOLVE_FAILED",
-                *lc.TIME_REFUSALS) else 1
+                "LL_IMAGE_INCAPABLE", "LL_CONFIG_RESOLVE_FAILED") else 1
             return _refuse(record, record_path, exc.code, str(exc), rc)
         folder = folders[-1]
         state = json.loads((folder / "state_out.json").read_text())

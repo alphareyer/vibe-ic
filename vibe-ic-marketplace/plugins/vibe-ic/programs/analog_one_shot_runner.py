@@ -446,6 +446,23 @@ def _try_native_a6_pv(project: Path, block: str, container: str):
         return None
 
 
+def _record_reason_class(record: Optional[Path]) -> str:
+    """The NOT_MEASURED reason a producer wrote in its own block record, or the
+    runner's environment-refusal class when it wrote none.
+
+    A producer that exits `EX_ENV_REFUSED` knows WHY it measured nothing -- a
+    LibreLane tool the contract stopped (`stalled`, `budget_exhausted`) is not
+    an input that is absent -- and A6's LibreLane arm and A7 record it as
+    `reason_class`. Only a value `verdict.ReasonClass` defines is carried."""
+    try:
+        doc = json.loads(Path(record).read_text()) if record else {}
+    except (OSError, ValueError):
+        doc = {}
+    reason = doc.get("reason_class") if isinstance(doc, dict) else None
+    return (reason if reason in {r.value for r in _V.ReasonClass}
+            else _spf.REFUSAL_REASON_CLASS)
+
+
 def _a6_librelane_arm(project: Path, block: str, container: str,
                       mode: str) -> Dict[str, Any]:
     """Run `analog_a6_librelane_drc` beside native A6 PV (T94, opt-in).
@@ -1312,6 +1329,16 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                 (getattr(args, "container", None)
                  or os.environ.get("VIBEIC_ANALOG_CONTAINER")
                  or _pin.default_container_name()), _a6_mode)
+            if _a6_arm.get("rc") == _pc.EX_ENV_REFUSED:
+                # The arm measured nothing: an environment refusal, or a tool
+                # the contract stopped. Its record says which.
+                return StepResult(
+                    step_name, bname, _spf.REFUSAL_STATUS, time.time() - t0,
+                    f"LibreLane DRC arm ({_a6_mode}): {_a6_arm.get('detail')}",
+                    output_files=_step_outputs(project, bname, step_name),
+                    extras={"librelane_arm": _a6_arm,
+                            "verdict_tier": "ENV_UNAVAILABLE"},
+                    reason_class=_record_reason_class(_a6_arm.get("record")))
             if _a6_arm.get("blocking"):
                 return StepResult(
                     step_name, bname, _V.Verdict.FAIL.value, time.time() - t0,
@@ -1803,7 +1830,9 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                             extras={"producer": a7_prog.name,
                                     "producer_rc": a7_cp.returncode,
                                     "verdict_tier": "ENV_UNAVAILABLE"},
-                            reason_class=_spf.REFUSAL_REASON_CLASS)
+                            reason_class=_record_reason_class(
+                                _pl.analog_dir(project) / bname
+                                / "a7_post_layout.json"))
                     _a7_tail = ((a7_cp.stderr or "").strip().splitlines()
                                 or (a7_cp.stdout or "").strip().splitlines()
                                 or ["no output"])[-1]

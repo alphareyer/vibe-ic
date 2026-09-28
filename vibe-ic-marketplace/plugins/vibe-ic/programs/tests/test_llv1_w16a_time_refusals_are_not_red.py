@@ -74,7 +74,10 @@ def test_step15_books_a_time_refusal_not_measured(tmp_path, monkeypatch, code):
     assert consumer is None
     assert result.status == "NOT_MEASURED", (result.status, result.detail)
     assert result.detail.startswith(code)
-    assert result.reason_class == runner._V.ReasonClass.EXECUTION_ERROR.value
+    assert result.reason_class == {
+        "LL_TOOL_STALLED": runner._V.ReasonClass.STALLED.value,
+        "LL_TOOL_DEADLINE": runner._V.ReasonClass.BUDGET_EXHAUSTED.value,
+    }[code]
 
 
 def test_step15_still_books_a_tool_refusal_fail(tmp_path, monkeypatch):

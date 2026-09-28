@@ -205,8 +205,8 @@ def test_librelane_mode_lints_the_synthesis_file_set_and_blocks(tmp_path, monkey
 
 
 @pytest.mark.parametrize('code,status,reason', [
-    ('LL_TOOL_STALLED', 'NOT_MEASURED', 'execution_error'),
-    ('LL_TOOL_DEADLINE', 'NOT_MEASURED', 'execution_error'),
+    ('LL_TOOL_STALLED', 'NOT_MEASURED', 'stalled'),
+    ('LL_TOOL_DEADLINE', 'NOT_MEASURED', 'budget_exhausted'),
     ('LL_STEP_FAILED', 'FAIL', ''),
 ])
 def test_step2_books_the_shared_supervisor_refusal(tmp_path, monkeypatch,
