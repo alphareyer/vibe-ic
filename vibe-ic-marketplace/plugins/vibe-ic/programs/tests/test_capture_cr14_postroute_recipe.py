@@ -46,12 +46,14 @@ def _pair(design: str, pdk: str = "famxD") -> list[dict]:
                  postroute_slack_ns=1.2)]
 
 
-def _select(pdk: str, rows: list[dict]) -> dict:
+def _select(pdk: str, rows: list[dict], *, liberty_sha256: str = "b" * 64,
+            image_digest: str = "d" * 64) -> dict:
     # The fallback lets this test make a behavioural assertion on main: the
     # missing selector produces NOT_MEASURED, while matched evidence elects it.
     select = getattr(R, "_select_postroute_synth_recipe",
                      lambda *_a, **_k: {"verdict": "NOT_MEASURED"})
-    return select(pdk, rows, fanout_cap=3)
+    return select(pdk, rows, fanout_cap=3,
+                  liberty_sha256=liberty_sha256, image_digest=image_digest)
 
 
 def test_two_neutral_designs_elect_a_measured_recipe():
@@ -65,6 +67,69 @@ def test_second_pdk_and_unmatched_inputs_cannot_borrow_a_win():
     assert _select("famyD", rows)["verdict"] == "NOT_MEASURED"
     rows[-1]["source_sha256"] = "e" * 64
     assert _select("famxD", rows)["verdict"] == "NOT_MEASURED"
+
+
+def test_history_without_current_liberty_and_image_cannot_elect_recipe():
+    rows = _pair("logic_a") + _pair("logic_b")
+    # The A/B rows agree with each other, but a caller that has not supplied
+    # this synthesis invocation's two identities has no matching evidence.
+    assert R._select_postroute_synth_recipe("famxD", rows, fanout_cap=3)[
+        "verdict"] == "NOT_MEASURED"
+    assert _select("famxD", rows, liberty_sha256="e" * 64)["verdict"] == "NOT_MEASURED"
+    assert _select("famxD", rows, image_digest="f" * 64)["verdict"] == "NOT_MEASURED"
+    assert _select("famxD", rows)["verdict"] == "PASS"
+
+
+def test_step_synth_keeps_buffer_for_stale_environment(tmp_path, monkeypatch):
+    project = tmp_path / "run"
+    rtl = project / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "core.v").write_text("module core(input a, output y); assign y=a; endmodule\n")
+    lib = tmp_path / "current.lib"
+    lib.write_text("library(neutral) { cell(INV) { area : 1.0; } }\n")
+    pdk = R.PdkConfig(name="famxD", liberty=str(lib), tech_lef="test.lef",
+                      cell_lef="test.lef", cell_gds=None, site="unit", drc_deck=None)
+    rows = _pair("logic_a") + _pair("logic_b")
+    for row in rows:
+        if row["recipe"] == "abc_alt_buffer":
+            row["recipe"] = "abc_no_buffer"
+    monkeypatch.setattr(R._srp, "load", lambda _path: (rows, ""))
+    monkeypatch.setattr(R, "_to_container_path", lambda path, _c: path)
+    monkeypatch.setattr(R, "_synth_max_fanout", lambda *_a, **_k: (3, "declared", []))
+    monkeypatch.setattr(R, "_current_synth_liberty_sha256",
+                        lambda _path, _container: hashlib.sha256(lib.read_bytes()).hexdigest(),
+                        raising=False)
+    monkeypatch.setattr(R, "_step_image_digest", lambda _container: "d" * 64)
+    commands = []
+    monkeypatch.setattr(R, "_docker_exec", lambda _c, command, **_k:
+                        (commands.append(command) or 1, "", "synthetic tool failure"))
+    R.step_synth(project, "core", pdk, "fake")
+    synth = next(c for c in commands if "abc -liberty" in c)
+    assert "buffer,-N,3" in synth
+
+
+def test_current_liberty_identity_reads_active_bytes_each_time(tmp_path, monkeypatch):
+    lib = tmp_path / "active.lib"
+    lib.write_bytes(b"first")
+    monkeypatch.setattr(R._cex, "no_container_route", lambda: True)
+    assert R._current_synth_liberty_sha256(str(lib), "") == hashlib.sha256(b"first").hexdigest()
+    lib.write_bytes(b"second")
+    assert R._current_synth_liberty_sha256(str(lib), "") == hashlib.sha256(b"second").hexdigest()
+
+    calls = []
+    monkeypatch.setattr(R._cex, "no_container_route", lambda: False)
+
+    def measured_container_hash(container, command, **_kwargs):
+        calls.append((container, command))
+        class Result:
+            returncode = 0
+            stdout = hashlib.sha256(b"container bytes").hexdigest() + "  /mounted/active.lib\n"
+        return Result()
+
+    monkeypatch.setattr(R._cex, "run_in_container_supervised", measured_container_hash)
+    assert R._current_synth_liberty_sha256("/mounted/active.lib", "active") == (
+        hashlib.sha256(b"container bytes").hexdigest())
+    assert calls == [("active", "sha256sum /mounted/active.lib")]
 
 
 def test_second_design_regression_blocks_the_recipe():
@@ -126,6 +191,9 @@ def test_step_synth_stages_elected_full_adder_actuator(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "_to_container_path", lambda path, _c: path)
     monkeypatch.setattr(R, "_synth_max_fanout",
                         lambda *_a, **_k: (3, "declared", []))
+    monkeypatch.setattr(R, "_current_synth_liberty_sha256",
+                        lambda _path, _container: "b" * 64)
+    monkeypatch.setattr(R, "_step_image_digest", lambda _container: "d" * 64)
     rows = _pair("logic_a") + _pair("logic_b")
     for row in rows:
         if row["recipe"] == "abc_alt_buffer":
@@ -189,6 +257,9 @@ def test_step_synth_emits_only_the_elected_abc_variant(tmp_path, monkeypatch,
     monkeypatch.setattr(R, "_to_container_path", lambda path, container: path)
     monkeypatch.setattr(R, "_synth_max_fanout",
                         lambda *_a, **_k: (3, "declared", []))
+    monkeypatch.setattr(R, "_current_synth_liberty_sha256",
+                        lambda _path, _container: "b" * 64)
+    monkeypatch.setattr(R, "_step_image_digest", lambda _container: "d" * 64)
     if hasattr(R, "_srp"):
         rows = _pair("logic_a") + _pair("logic_b")
         for row in rows:

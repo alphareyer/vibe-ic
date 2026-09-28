@@ -41,15 +41,22 @@ def _valid(row: Mapping[str, Any]) -> bool:
 
 
 def select(pdk: str, rows: Sequence[Mapping[str, Any]],
-           *, fanout_cap: int = 0) -> dict[str, Any]:
+           *, fanout_cap: int = 0,
+           liberty_sha256: str | None = None,
+           image_digest: str | None = None) -> dict[str, Any]:
     """Require two distinct matched designs with no sign-off regression.
 
     A variant must be no worse in BOTH post-route area and slack on each
     design, and strictly improve at least one metric. A full-adder arm also
     needs a successful equivalence proof and a nonzero mapped-cell census.
     """
+    if not liberty_sha256 or not image_digest:
+        return {"verdict": "NOT_MEASURED", "recipe": BASELINE, "pdk": pdk,
+                "reason": "CURRENT_SYNTH_IDENTITY_UNAVAILABLE"}
     valid = [r for r in rows if isinstance(r, Mapping) and _valid(r)
-             and r.get("pdk") == pdk and r.get("fanout_cap") == fanout_cap]
+             and r.get("pdk") == pdk and r.get("fanout_cap") == fanout_cap
+             and r.get("liberty_sha256") == liberty_sha256
+             and r.get("image_digest") == image_digest]
     for variant in sorted(VARIANTS):
         pairs: dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
         for candidate in (r for r in valid if r.get("recipe") == variant):
@@ -76,7 +83,7 @@ def select(pdk: str, rows: Sequence[Mapping[str, Any]],
                     "pdk": pdk, "designs": sorted(pairs),
                     "evidence": "matched_postroute_area_slack_drc_lvs_fanout"}
     return {"verdict": "NOT_MEASURED", "recipe": BASELINE,
-            "pdk": pdk, "reason": "NO_TWO_MATCHED_POSTROUTE_AB_DESIGNS"}
+            "pdk": pdk, "reason": "NO_TWO_MATCHED_CURRENT_POSTROUTE_AB_DESIGNS"}
 
 
 def load(path: Path) -> tuple[list[dict[str, Any]], str]:

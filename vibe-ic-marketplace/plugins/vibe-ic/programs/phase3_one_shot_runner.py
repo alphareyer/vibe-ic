@@ -17342,9 +17342,20 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     _abc_fanout = ""
     _recipe_rows, _recipe_load_error = _srp.load(
         PROGRAMS_DIR / "synth_recipe_postroute.json")
+    # The ledger's A/B identities must also match the bytes and tool image
+    # used by THIS invocation. Resolve lazily: an empty ledger has no recipe
+    # to elect and does not need a container probe.
+    _recipe_liberty_sha256 = (
+        _current_synth_liberty_sha256(liberty_c, container)
+        if _recipe_rows else None)
+    _recipe_image_digest = _step_image_digest(container) if _recipe_rows else None
+    if _recipe_image_digest in ("LOCAL_EXEC", "NO_CONTAINER"):
+        _recipe_image_digest = None
     _recipe_choice = _select_postroute_synth_recipe(
         str(getattr(pdk, "name", "") or ""), _recipe_rows,
-        fanout_cap=int(_fo_cap or 0))
+        fanout_cap=int(_fo_cap or 0),
+        liberty_sha256=_recipe_liberty_sha256,
+        image_digest=_recipe_image_digest)
     if _recipe_load_error:
         _recipe_choice = dict(_recipe_choice, verdict="NOT_MEASURED",
                               reason=_recipe_load_error)
@@ -19779,10 +19790,34 @@ _ABC_ALT_FANOUT_SCRIPT = (
     "&get,-n;&dch;&nf,{{D}};&put;buffer,-N,{cap}")
 
 
+def _current_synth_liberty_sha256(liberty_path: str, container: str) -> Optional[str]:
+    """Hash the exact Liberty path Yosys reads in the current execution route."""
+    try:
+        if _cex.no_container_route():
+            return hashlib.sha256(Path(liberty_path).read_bytes()).hexdigest()
+        if not container:
+            return None
+        cp = _cex.run_in_container_supervised(
+            container, f"sha256sum {shlex.quote(liberty_path)}", ceiling_s=120)
+        if cp.returncode == 0:
+            line = (cp.stdout or "").splitlines()
+            if len(line) == 1:
+                match = re.fullmatch(r"([0-9a-fA-F]{64})\s+\*?.+", line[0])
+                if match:
+                    return match.group(1).lower()
+    except Exception:  # noqa: BLE001 — an unavailable probe cannot elect a recipe
+        pass
+    return None
+
+
 def _select_postroute_synth_recipe(pdk_name: str, rows: Sequence[Mapping[str, Any]],
-                                   *, fanout_cap: int = 0) -> Dict[str, Any]:
+                                   *, fanout_cap: int = 0,
+                                   liberty_sha256: Optional[str] = None,
+                                   image_digest: Optional[str] = None) -> Dict[str, Any]:
     """Select a PDK recipe only with matched post-route A/B on two designs."""
-    return _srp.select(pdk_name, rows, fanout_cap=fanout_cap)
+    return _srp.select(pdk_name, rows, fanout_cap=fanout_cap,
+                       liberty_sha256=liberty_sha256,
+                       image_digest=image_digest)
 
 
 def _flow_default_max_fanout_read(project: Path, pdk: str):
