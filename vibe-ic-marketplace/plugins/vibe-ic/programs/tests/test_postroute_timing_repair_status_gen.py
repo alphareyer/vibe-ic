@@ -116,3 +116,13 @@ def test_missing_sta_revokes_old_clean_certificate_and_names_missing_sources(tmp
     report = json.loads((tmp_path / "audit.json").read_text())
     assert report["summary"]["pass"] is False
     assert "STA_REPORT_MISSING" in {f["category"] for f in report["findings"]}
+
+    _write_sta(tmp_path, "report_tns\ntns 0.00\nwns 0.05\n")
+    measured = _run(tmp_path)
+    assert measured.returncode == 0
+    assert json.loads(measured.stdout)["verdict"] == "PASS"
+    assert not (repair_dir / "measurement_not_available.json").exists()
+    assert (repair_dir / "no_repair_needed.flag").is_file()
+    assert subprocess.run(
+        [sys.executable, str(PROG.with_name("postroute_timing_repair_audit.py")),
+         str(tmp_path)], capture_output=True, text=True).returncode == 0
