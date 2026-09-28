@@ -18,7 +18,8 @@ means the verdict is a function of WHICH HOST reads the file.
 THE TWO GROUPS OF ERROR ARE NOT ONE KIND OF THING.
 
     NO_REPORT  BAD_JSON  NO_SPEF  NO_CORNER  NO_BOUNDED_SPEF
-        -> the gate never got to look                          (NOT_RUN)
+    NO_WINDOWS  PATH_OUTSIDE_PROJECT  PRODUCER_NOT_MEASURED
+        -> the gate never got to look                          (NOT_MEASURED)
     SPEF_NO_NET_RECORDS  COUPLING_LOST_SINCE_EMIT
     FOLD_WITHOUT_SOURCE  FOLD_NOT_APPLIED  SLACK_BETTER_THAN_BOUND
         -> the gate looked at a real artefact and it was wrong  (FAIL)
@@ -30,26 +31,21 @@ WHAT THIS FILE PINS, IN ORDER OF LOAD.
      sweep, so a future relaxation of the split cannot silently demote a real
      crosstalk finding into the skip tier. This is the half that guards the
      rule the gate was written for.
-  2. THE FOURTH STATE EXISTS. Every category in the first group keeps rc 1 —
-     the resolution deliberately does NOT change any exit code — and moves to
-     the distinct verdict token "NOT_RUN", so the artefact stops claiming a
-     design defect it never measured.
+  2. THE FOURTH STATE EXISTS. Every category in the first group publishes
+     NOT_MEASURED / EXECUTION_ERROR. The flow consumes that typed report and
+     keeps Step 27 NOT_MEASURED, never a skip or a design failure.
   3. VERDICT AND VACUOUS NEVER CONTRADICT, checked as an invariant over the
      whole category table rather than restated per case: a FAIL is never
-     `vacuous`, never carries the NOT-CHECKED disclaimer, and a NOT_RUN /
+     `vacuous`, never carries the NOT-CHECKED disclaimer, and a NOT_MEASURED /
      VACUOUS_PASS always carries both.
   4. THE UMBRELLA'S BUCKET IS DRIVEN, NOT REASONED ABOUT. `_evaluate_gate` is
      handed the REAL step-27 sub-gate spec read out of the shipped flow YAML,
      so the assertion cannot drift from what the flow actually wires.
 
-WHY rc 1 AND NOT rc 2 FOR THE NOT-RUN TIER — the road not taken, pinned so it
-stays a decision. rc 2 is the disclosed-skip tier and
-`flow_compliance_check._check_program_exit_zero` credits it as a PASS
-unconditionally. `NO_BOUNDED_SPEF` fires when the emitter's own report names a
-bounded SPEF that is not there: a sign-off whose artefacts are incomplete. Under
-rc 2 that step would render as a vacuous pass and the incomplete sign-off would
-look skipped rather than broken. `test_the_not_run_tier_is_not_credited_as_a_
-skip_by_the_flow` drives exactly that state through the umbrella.
+The prior rc=1 rule prevented an untyped rc=2 from being credited as a skip.
+The current checker declares a non-skip-eligible EXECUTION_ERROR in its JSON;
+the real flow consumes the report and records Step 27 as NOT_MEASURED. The
+umbrella test below drives each missing-input category through that boundary.
 """
 from __future__ import annotations
 
@@ -437,15 +433,14 @@ def test_a_grounded_only_run_still_takes_the_disclosed_skip(tmp_path):
 # (2) THE FOURTH STATE — "could not obtain the input" has its own token
 # ===========================================================================
 def test_every_could_not_run_category_reports_not_run_at_the_same_rc(tmp_path):
-    """THE FIX. The verdict token changes; the exit code deliberately does
-    NOT, because rc 2 is the tier the flow credits as a pass (see the module
-    docstring). A reader gets ONE answer and it is the true one."""
+    """Each absent input is typed NOT_MEASURED, never a PASS or design FAIL."""
     for cat, build in NOT_RUN_CASES.items():
         proj = build(tmp_path / f"notrun_{cat.lower()}")
         r, doc = _run(proj)
         assert cat in _categories(doc), (cat, doc["findings"])
         assert doc["verdict"] == "NOT_MEASURED", (cat, doc["verdict"])
-        assert r.returncode == G.RC_FAIL, (cat, r.returncode)
+        assert r.returncode == G.RC_NOT_MEASURED, (cat, r.returncode)
+        assert doc["summary"]["reason_class"] == "EXECUTION_ERROR", cat
         assert doc["summary"]["pass"] is False, cat
 
 
@@ -459,7 +454,7 @@ def test_the_reproducer_from_the_issue_no_longer_says_two_things(tmp_path):
     assert doc["verdict"] == "NOT_MEASURED", doc["verdict"]
     assert doc["summary"]["vacuous"] is True, doc["summary"]
     assert _NOT_CHECKED in _reason(doc), _reason(doc)
-    assert r.returncode == G.RC_FAIL, r.returncode
+    assert r.returncode == G.RC_NOT_MEASURED, r.returncode
     # ... and the one thing a reader must NOT be told:
     assert doc["verdict"] != "FAIL", (
         "a run that could not read its input reported the design as failing "
@@ -584,13 +579,7 @@ def test_the_flow_still_wires_this_gate_the_way_the_test_drives_it():
 
 
 def test_the_not_run_tier_is_not_credited_as_a_skip_by_the_flow(tmp_path):
-    """REQUIREMENT 3, DRIVEN. Whatever rc the fix chose, the umbrella must put
-    a could-not-run gate in the FAILING bucket — never the vacuous-pass one.
-
-    NO_BOUNDED_SPEF is the case that decides the rc: the emitter's own report
-    names a bounded SPEF that is absent, i.e. an INCOMPLETE SIGN-OFF. Had the
-    fix moved the not-run tier to rc 2, `_check_program_exit_zero` would credit
-    it as a pass and this incomplete sign-off would render as a skipped step."""
+    """Every absent-input case stays a non-green Step-27 NOT_MEASURED."""
     import flow_compliance_check as F
     spec = _step27_si_gate_spec()
     gate = {"optional_program_exit_zero": spec}
@@ -602,10 +591,26 @@ def test_the_not_run_tier_is_not_credited_as_a_skip_by_the_flow(tmp_path):
             # when the emitter produced no report; that N/A is the flow's
             # decision, not this gate's, and is asserted separately below.
             continue
-        passed, reasons = F._evaluate_gate(proj, gate)
-        assert passed is False, (cat, reasons)
-        assert not any(str(x).startswith(F._VACUOUS_HINT_PREFIX)
-                       for x in reasons), (cat, reasons)
+        step = {"id": 27, "name": "Signal Integrity", "stage": "stage3",
+                "required_outputs": [], "gate": gate}
+        result = F.check_step(proj, step, {})
+        assert result.status == "NOT_MEASURED", (cat, result.reasons)
+        assert result.status not in ("PASS", "VACUOUS_PASS"), cat
+        doc = json.loads((proj / "reports/phase3/si_mcf_sta_check.json").read_text())
+        assert doc["summary"]["reason_class"] == "EXECUTION_ERROR", cat
+
+
+def test_missing_windows_is_a_not_measured_step_not_a_design_fail(tmp_path):
+    """Drive the actual Step-27 clause through the real step adjudicator."""
+    import flow_compliance_check as F
+    proj = _b_no_windows(tmp_path / "missing_windows_step")
+    step = {"id": 27, "name": "Signal Integrity", "stage": "stage3",
+            "required_outputs": [],
+            "gate": {"optional_program_exit_zero": _step27_si_gate_spec()}}
+    result = F.check_step(proj, step, {})
+    assert result.status == "NOT_MEASURED", result.reasons
+    doc = json.loads((proj / "reports/phase3/si_mcf_sta_check.json").read_text())
+    assert doc["summary"]["reason_class"] == "EXECUTION_ERROR"
 
 
 def test_the_examined_and_wrong_tier_still_fails_the_step(tmp_path):
@@ -662,9 +667,9 @@ def test_no_report_is_the_flows_own_n_a_and_not_this_gates_verdict(tmp_path):
     assert len(na) == 1 and "si_mcf_sta.json" in na[0], reasons
     assert not [r for r in reasons
                 if not r.startswith(F._NOT_APPLICABLE_HINT_PREFIX)], reasons
-    # ... and invoked directly it is a NOT_RUN, not a design failure.
+    # ... and invoked directly it is NOT_MEASURED, not a design failure.
     r, doc = _run(proj)
-    assert (r.returncode, doc["verdict"]) == (G.RC_FAIL, "NOT_MEASURED")
+    assert (r.returncode, doc["verdict"]) == (G.RC_NOT_MEASURED, "NOT_MEASURED")
 
 
 # ===========================================================================

@@ -715,9 +715,8 @@ def test_the_declaration_is_keyed_to_the_channel_that_means_it_looked(tmp_path):
     """WHY THE FIELD AND NOT A SECOND LIST. `vacuity_code` is non-empty exactly
     when the gate examined nothing, rejected nothing, AND held every input it
     audits -- `vacuity_publication`'s guarantee. A run that never obtained an
-    input publishes its name in `unwaivable_code` instead, and declares no
-    class: whether THAT is a zero denominator or an upstream cascade is a
-    different decision, and this gate does not pretend to have taken it."""
+    input publishes its name in `unwaivable_code` and declares EXECUTION_ERROR,
+    which the Step-27 consumer retains as NOT_MEASURED."""
     proj = _grounded_only_project(tmp_path)
     for f in proj.glob("design.mcf_*.spef"):      # the inputs never arrive
         f.unlink()
@@ -725,7 +724,7 @@ def test_the_declaration_is_keyed_to_the_channel_that_means_it_looked(tmp_path):
     denom = doc["summary"]["denominator"]
     assert not denom["details"]["vacuity_code"], denom
     assert denom["details"]["unwaivable_code"], denom
-    assert "reason_class" not in doc["summary"], doc["summary"]
+    assert doc["summary"]["reason_class"] == "EXECUTION_ERROR", doc["summary"]
 
 
 def test_declaring_the_class_changes_no_step_verdict(tmp_path):
