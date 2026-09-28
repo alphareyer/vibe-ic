@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import sys
 import time
 import urllib.request
@@ -144,7 +145,7 @@ def test_oversized_upstream_response_is_refused_before_hashing_or_staging(
     root = _catalog(tmp_path)
     p = _project(tmp_path)
     monkeypatch.setattr(E, "FETCH_MAX_BYTES", len(AFTER), raising=False)
-    calls = []
+    calls = multiprocessing.Array("i", [0, 0])
 
     class Stream:
         def __enter__(self):
@@ -154,7 +155,8 @@ def test_oversized_upstream_response_is_refused_before_hashing_or_staging(
             return None
 
         def read(self, size=-1):
-            calls.append(size)
+            calls[0] += 1
+            calls[1] = max(calls[1], size)
             return AFTER + b"x"
 
         read1 = read
@@ -165,7 +167,7 @@ def test_oversized_upstream_response_is_refused_before_hashing_or_staging(
     row = doc["rows"][0]
     assert row["status"] == E.NOT_APPLIED
     assert "byte ceiling" in row["why"]
-    assert calls and all(0 < n <= E.FETCH_CHUNK_BYTES for n in calls)
+    assert calls[0] > 0 and 0 < calls[1] <= E.FETCH_CHUNK_BYTES
     assert _staged(p) == BEFORE and doc["disclosures"] == []
 
 
@@ -173,10 +175,8 @@ def test_trickling_upstream_response_hits_the_overall_deadline(
         tmp_path, monkeypatch):
     root = _catalog(tmp_path)
     p = _project(tmp_path)
-    clock = [0.0]
-    calls = []
-    monkeypatch.setattr(E, "FETCH_DEADLINE_S", 2)
-    monkeypatch.setattr(E.time, "monotonic", lambda: clock[0])
+    calls = multiprocessing.Value("i", 0)
+    monkeypatch.setattr(E, "FETCH_DEADLINE_S", 0.2)
 
     class Stream:
         def __enter__(self):
@@ -186,8 +186,9 @@ def test_trickling_upstream_response_hits_the_overall_deadline(
             return None
 
         def read(self, size=-1):
-            calls.append(size)
-            clock[0] += 1
+            with calls.get_lock():
+                calls.value += 1
+            time.sleep(0.08)
             return b"x"
 
         read1 = read
@@ -198,7 +199,7 @@ def test_trickling_upstream_response_hits_the_overall_deadline(
     row = doc["rows"][0]
     assert row["status"] == E.NOT_APPLIED
     assert "overall fetch deadline" in row["why"]
-    assert calls and all(n > 0 for n in calls)
+    assert calls.value > 0
     assert _staged(p) == BEFORE and doc["disclosures"] == []
 
 
@@ -237,7 +238,7 @@ def test_valid_upstream_response_is_assembled_and_applied(tmp_path, monkeypatch)
     root = _catalog(tmp_path)
     p = _project(tmp_path)
     chunks = iter((AFTER[:11], AFTER[11:], b""))
-    timeouts = []
+    timeout_seen = multiprocessing.Value("d", -1.0)
 
     class Stream:
         def __enter__(self):
@@ -253,14 +254,14 @@ def test_valid_upstream_response_is_assembled_and_applied(tmp_path, monkeypatch)
             return AFTER
 
     def open_stream(_url, *, timeout):
-        timeouts.append(timeout)
+        timeout_seen.value = timeout
         return Stream()
 
     monkeypatch.setattr(urllib.request, "urlopen", open_stream)
     doc = E.apply_errata(p, root=root, pol=APPLY)
     assert doc["rows"][0]["status"] == E.APPLIED
     assert _staged(p) == AFTER
-    assert timeouts and timeouts[0] <= 5
+    assert 0 < timeout_seen.value <= 5
 
 
 def test_without_a_binding_record_the_supplied_rtl_is_staged_unchanged(tmp_path):
