@@ -28,6 +28,8 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+
+import pytest
 import sys
 from pathlib import Path
 
@@ -186,66 +188,113 @@ def test_an_ambiguous_file_name_is_never_relaxed(monkeypatch, tmp_path):
     assert len(_yosys(calls)) == 1
 
 
-# ---- (6a) deadlines -------------------------------------------------------
-def test_every_invocation_carries_a_deadline_and_kills_its_container(
-        monkeypatch, tmp_path):
-    seen = []
+# ---- (6a) supervision, not a wall clock (review wave 6: #2051) ------------
+def _supervised(monkeypatch, *, rc=0, outcome="natural", docker=True):
+    """Capture what `_invoke` hands the repo's supervisor, and answer as it
+    would. Only the process launch is faked."""
+    import _watchdog as WD
+    seen = {}
 
-    def _run(cmd, **kw):
-        seen.append((list(cmd), kw.get("timeout")))
-        if cmd[:2] == ["docker", "run"]:
-            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
-        return subprocess.CompletedProcess(cmd, 0, "", "")
+    def _rhs(cmd, **kw):
+        seen["cmd"], seen["kw"] = list(cmd), kw
+        return WD.SupervisedResult(rc=rc, out="", err="", outcome=outcome)
 
+    monkeypatch.setattr(WD, "run_host_supervised", _rhs)
     monkeypatch.setattr(F.shutil, "which",
-                        lambda t: "/usr/bin/docker" if t == "docker" else None)
-    monkeypatch.setattr(F.subprocess, "run", _run)
-    monkeypatch.setenv(getattr(F, "DEADLINE_ENV",
-                               "VIBEIC_P0_FRONTEND_TIMEOUT_S"), "7")
-    try:
+                        lambda t: ("/usr/bin/docker" if t == "docker" and docker
+                                   else ("/usr/bin/" + t if not docker
+                                         else None)))
+    return seen
+
+
+def test_a_tool_run_is_supervised_by_progress_with_a_backstop(monkeypatch,
+                                                              tmp_path):
+    seen = _supervised(monkeypatch)
+    F._invoke("yosys", ["-p", "x"], tmp_path, "img@sha256:" + "0" * 64)
+    cmd, kw = seen["cmd"], seen["kw"]
+    assert cmd[:3] == ["docker", "run", "--rm"]
+    name = cmd[cmd.index("--name") + 1]
+    assert name.startswith("vibeic_p0_yosys")
+    # the wall clock is only the BACKSTOP, around the tool, inside the container
+    assert cmd[cmd.index("--entrypoint") + 1] == "timeout"
+    assert "yosys" in cmd and "-k" in cmd
+    # the stall is judged from inside the container, and reaped by name
+    assert callable(kw.get("kill")) and callable(kw.get("cpu_probe"))
+    assert kw.get("stall_grace_s", 0) > 0
+
+
+def test_a_stall_is_not_measured_not_a_finding(monkeypatch, tmp_path):
+    import _watchdog as WD
+    _supervised(monkeypatch, rc=WD.RC_STALLED, outcome="stalled")
+    with pytest.raises(F.ToolNotMeasured):
         F._invoke("yosys", ["-p", "x"], tmp_path, "img@sha256:" + "0" * 64)
-    except subprocess.TimeoutExpired:
-        pass
-    else:
-        raise AssertionError("a run past its deadline must not return")
-    assert seen[0][1] == 7, seen          # the run carried the deadline
-    assert len(seen) == 2, seen           # and its container was killed
-    run, kill = seen
-    name = run[0][run[0].index("--name") + 1]
-    assert kill[0] == ["docker", "kill", name] and kill[1]
 
 
-def test_a_strict_timeout_is_an_execution_error_not_a_retry(monkeypatch,
-                                                            tmp_path):
+def test_a_fired_backstop_is_not_measured_either(monkeypatch, tmp_path):
+    _supervised(monkeypatch, rc=124)
+    with pytest.raises(F.ToolNotMeasured):
+        F._invoke("yosys", ["-p", "x"], tmp_path, "img@sha256:" + "0" * 64)
+
+
+def test_a_strict_stall_is_an_execution_error_not_a_retry(monkeypatch,
+                                                          tmp_path):
     root = _project(tmp_path)
     calls = []
 
     def _invoke(tool, args, project, image):
         calls.append(tool)
-        raise subprocess.TimeoutExpired(["docker", "run", "--entrypoint",
-                                         tool, "img"], 7)
+        raise F.ToolNotMeasured(tool, "made no progress")
 
     monkeypatch.setattr(F, "_invoke", _invoke)
     r = F.check(root)
     assert r["passed"] is False
-    assert any("timed out" in f and "EXECUTION_ERROR" in f and "yosys" in f
-               for f in r["findings"]), r["findings"]
+    assert r["findings"] == [], r["findings"]
+    assert r["not_measured"]["reason_class"] == "EXECUTION_ERROR"
+    assert "yosys" in r["not_measured"]["why"]
     assert calls == ["yosys"]
 
 
-def test_a_relaxed_retry_timeout_counts_for_nothing(monkeypatch, tmp_path):
+def test_a_relaxed_retry_stall_counts_for_nothing(monkeypatch, tmp_path):
     root = _project(tmp_path)
     strict = _in(root, "ip_core.v")
 
     def _invoke(tool, args, project, image):
         if tool == "yosys" and FLAG in args[-1]:
-            raise subprocess.TimeoutExpired(["yosys"], 7)
+            raise F.ToolNotMeasured(tool, "made no progress")
         return subprocess.CompletedProcess([tool], 1 if tool == "yosys"
                                            else 0, "", strict)
 
     monkeypatch.setattr(F, "_invoke", _invoke)
     r = F.check(root)
     assert r["passed"] is False and not r.get("disclosures")
+    assert r.get("not_measured"), r
+
+
+def test_the_flow_books_a_stalled_front_end_not_measured(monkeypatch,
+                                                         tmp_path, capsys):
+    """The gate's REAL stdout and rc, through the audit's real reader: a
+    non-verdict (INCOMPLETE / EXECUTION_ERROR), never FAIL and never PASS."""
+    import flow_compliance_check as FCC
+    root = _project(tmp_path)
+    monkeypatch.setattr(F, "_invoke", lambda *a: (_ for _ in ()).throw(
+        F.ToolNotMeasured("yosys", "made no progress")))
+    monkeypatch.setattr(sys, "argv", ["flow_step_output_content_check.py",
+                                      str(root), "--mode", "rtl"])
+    rc = C.main()
+    out = capsys.readouterr().out
+    assert rc == 2, out
+    assert out.startswith("INCOMPLETE:") and "FAIL" not in out.split("[")[0]
+    assert "reason_class=EXECUTION_ERROR" in out
+    snippet = FCC.output_snippet(out, "")
+    monkeypatch.setattr(FCC, "__check_program_exit_zero",
+                        lambda p, c: FCC._ProgramCheckOutcome(
+                            True, f"{FCC._VACUOUS_HINT_PREFIX}{c}\n{snippet}",
+                            2))
+    FCC._check_program_exit_zero(root, "flow_step_output_content_check . "
+                                       "--mode rtl")
+    row = FCC._GATE_LEDGER[-1]
+    assert row["verdict"] == "INCOMPLETE", row
+    assert row["reason_class"] == "EXECUTION_ERROR", row
 
 
 # ---- (5) the flow's record carries the relaxation -------------------------
