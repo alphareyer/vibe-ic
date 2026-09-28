@@ -15,13 +15,13 @@
     },
     "programs_tree_all_py": {
       "definition": "Every *.py at ANY depth under plugins/vibe-ic/programs/, including programs/tests/ and the sub-packages. Roughly programs_top_level + test_files + sub-package modules.",
-      "count": 5689,
-      "sha256_of_sorted_paths": "28a7ee591e8f1ba491e21dc09c53dcc4c5ea0a2b1e4fc4b6e6b5ca48612e8b5b"
+      "count": 5691,
+      "sha256_of_sorted_paths": "623df5d3d56b1723653aa96d432d76d60b606e139998b2c7aa8b39339dad0793"
     },
     "test_files": {
       "definition": "Every test_*.py at any depth under plugins/vibe-ic/programs/tests/.",
-      "count": 4086,
-      "sha256_of_sorted_paths": "8011edffebce066bd0a8bd109c0b36d184561872fb21318efde7f326bc1d55a0"
+      "count": 4087,
+      "sha256_of_sorted_paths": "98c511d81388cae1734c2f718a6e70d4afaae253862e4aad1772c380b9e1d2b3"
     },
     "mcp_eda_test_files": {
       "definition": "Every test_*.py directly under plugins/vibe-ic/mcp-eda/test/.",
