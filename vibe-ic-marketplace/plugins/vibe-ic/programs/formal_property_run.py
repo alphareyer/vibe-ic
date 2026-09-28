@@ -2277,6 +2277,82 @@ def _ensure_expert_fragment_staged(sby_path: Path, formal_dir: Path) -> bool:
     return True
 
 
+def _ensure_expert_observers_bound(sby_path: Path, formal_dir: Path) -> bool:
+    """Bind observers newly declared by an expert fragment in a reused task.
+
+    A fragment may add ``@observe`` declarations after the original ``.sby``
+    was emitted.  Staging that fragment alone is insufficient: the old task
+    has no ``connect -set`` commands, so the pre-proof refusal correctly sees
+    undriven observer wires.  Add only absent bindings immediately before the
+    existing ``prep -top``.  A pre-existing incompatible binding is deliberately
+    left for ``observer_binding_mismatches`` to refuse rather than overwritten.
+    """
+    observers = parse_observers(_harness_texts(sby_path, formal_dir, None))
+    if not observers:
+        return False
+    try:
+        text = sby_path.read_text(errors="replace")
+    except OSError:
+        return False
+    head, marker, after_script = text.partition("[script]")
+    script, files_marker, tail = after_script.partition("[files]")
+    if not marker or not files_marker:
+        return False
+    top_match = re.search(r"(?m)^\s*prep\s+-top\s+([A-Za-z_]\w*)\s*$", script)
+    if top_match is None:
+        return False
+    declared: Dict[str, str] = {}
+    for lhs, rhs in observers:
+        if lhs in declared and declared[lhs] != rhs:
+            return False
+        declared[lhs] = rhs
+    strict_connect = re.compile(
+        r"^[ \t]*connect[ \t]+-set[ \t]+(?P<lhs>\S+)[ \t]+"
+        r"(?P<rhs>\S+)[ \t]*$")
+    lines_before = script.splitlines(keepends=True)
+    found: Dict[str, List[str]] = {}
+    for line in lines_before:
+        match = strict_connect.match(line.rstrip("\n"))
+        if match and match.group("lhs") in declared:
+            found.setdefault(match.group("lhs"), []).append(match.group("rhs"))
+    if any(any(rhs != declared[lhs] for rhs in rhss)
+           for lhs, rhss in found.items()):
+        return False
+    if all(found.get(lhs) == [rhs] for lhs, rhs in declared.items()):
+        return False
+    stripped: List[str] = []
+    select_re = re.compile(r"^[ \t]*select[ \t]+-assert-any[ \t]+"
+                           r"(?P<net>\S+)[ \t]*$")
+    for line in lines_before:
+        match = strict_connect.match(line.rstrip("\n"))
+        if (match and match.group("lhs") in declared
+                and match.group("rhs") == declared[match.group("lhs")]):
+            wanted = f"{top_match.group(1)}/w:{match.group('rhs')}"
+            if stripped:
+                prior = select_re.match(stripped[-1].rstrip("\n"))
+                if prior and prior.group("net") == wanted:
+                    stripped.pop()
+            continue
+        stripped.append(line)
+    script = "".join(stripped)
+    top_match = re.search(r"(?m)^\s*prep\s+-top\s+([A-Za-z_]\w*)\s*$", script)
+    if top_match is None:
+        return False
+    lines = []
+    if not re.search(r"(?m)^\s*flatten\s*$", script):
+        lines += [f"hierarchy -top {top_match.group(1)}", "proc", "flatten"]
+    for lhs, rhs in declared.items():
+        lines += [f"select -assert-any {top_match.group(1)}/w:{rhs}",
+                  f"connect -set {lhs} {rhs}"]
+    prep_at = top_match.start()
+    revised = script[:prep_at] + "\n".join(lines) + "\n" + script[prep_at:]
+    try:
+        sby_path.write_text(head + marker + revised + files_marker + tail)
+    except OSError:
+        return False
+    return True
+
+
 def _stage_include_headers(rtl: List[Path], formal_dir: Path,
                            already: Optional[List[str]] = None) -> List[str]:
     """Copy the headers `rtl` includes into `formal_dir`; return their names.
@@ -2493,6 +2569,7 @@ def run(project: Path, harness: Optional[Path] = None,
     # that can be right: a task file that names a source must stage it.
     if sby_path is not None and sby_path.is_file():
         _ensure_expert_fragment_staged(sby_path, formal_dir)
+        _ensure_expert_observers_bound(sby_path, formal_dir)
 
     if sby_path is None:
         # need to author a .sby from a harness
