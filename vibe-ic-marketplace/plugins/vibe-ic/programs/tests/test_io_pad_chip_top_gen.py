@@ -32,6 +32,7 @@ corner term, then the edge-spacing term — against the exact expression
 from __future__ import annotations
 
 import json
+import inspect
 import subprocess
 import sys
 from pathlib import Path
@@ -674,6 +675,32 @@ def test_bussed_pad_connection_is_one_ordered_verilog_connection():
         [("DM[0]", "x"), ("DM[1]", "y"), ("DM[2]", "z")],
         {"reverse_pad": {"DM": (0, 2)}})
     assert reverse == [".DM({x, y, z})"]
+
+
+def test_pdk_bus_parser_does_not_accept_a_comment_as_a_declaration():
+    text = ("// module invented_pad(input [2:0] DM); endmodule\n"
+            "module neutral_pad(input [2:0] DM); endmodule\n")
+    assert PAD.io_bus_ports([text]) == {"neutral_pad": {"DM": (2, 0)}}
+
+
+def test_emitted_wrapper_has_one_legal_named_connection_for_pad_bus():
+    """Exercise the wrapper producer, including its auxiliary tie-cell nets."""
+    options = {"tie_cells": {0: {"master": "TIELO", "pin": "Q"}}}
+    if "bus_ports" in inspect.signature(PAD._emit_verilog).parameters:
+        options["bus_ports"] = {"neutral_pad": {"DM": (2, 0)}}
+    wrapper = PAD._emit_verilog(
+        "wrapper", "core", {"N": ["u_pad"]},
+        {"u_pad": {"master": "neutral_pad", "port": "signal",
+                   "terminal": "PAD", "core_pin": "Y",
+                   "ties": {"DM[0]": 0, "DM[1]": 0, "DM[2]": 0}}},
+        [{"name": "signal", "direction": "input", "width": 1}],
+        **options,
+    )
+    assert wrapper.count(".DM({") == 1
+    assert ".DM[" not in wrapper
+    assert "neutral_pad u_pad" in wrapper
+    assert ".DM({_vibeic_aux_tie_0002, _vibeic_aux_tie_0001, " \
+           "_vibeic_aux_tie_0000})" in wrapper
 
 
 @pytest.mark.parametrize("pairs,buses,rule", [
