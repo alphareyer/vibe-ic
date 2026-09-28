@@ -48,6 +48,7 @@ spelling participates in any decision. Every fixture below uses
 synthetic, vendor-neutral names.
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -546,8 +547,19 @@ def test_typed_enum_gate_states_a_reason_when_it_examined_nothing():
 # (5) no regression, proved by sweeping the tracked corpus
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(not TRACKED_PKG.is_file(),
-                    reason="tracked HDL corpus not present in this checkout")
+def test_tracked_reader_collects_cleanly_with_or_without_corpus():
+    """The corpus reader itself must skip cleanly in an independent clone."""
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+               PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+    cp = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         f"{__file__}::test_tracked_package_routes_every_declaration_and_regresses_none"],
+        capture_output=True, text=True, env=env, cwd=PLUGIN)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    expected = "1 passed" if TRACKED_PKG.is_file() else "1 skipped"
+    assert expected in cp.stdout, cp.stdout
+
+
 def _declared_in_tracked_file(text):
     """The declarations the tracked file itself makes, read with this test's
     own regexes (not `_hdl_enum`'s), so the pin is derived from the file and
@@ -564,6 +576,8 @@ def _declared_in_tracked_file(text):
     return enums, sized
 
 
+@pytest.mark.skipif(not TRACKED_PKG.is_file(),
+                    reason="tracked HDL corpus not present in this checkout")
 def test_tracked_package_routes_every_declaration_and_regresses_none():
     """The measured case, end to end on the tracked file.
 
