@@ -754,6 +754,47 @@ def test_control_expected_is_recomputed_from_real_population(tmp_path):
                for reason in result["not_measured"])
 
 
+def test_capture_ignores_plan_population_and_excluded_pin_assertions(
+        tmp_path, monkeypatch):
+    import subprocess
+    import drv_signoff_capture as capture
+    plan = _bundle(tmp_path)
+    plan["top"] = "top"
+    scene = plan["scenes"][0]
+    scene["population"] = {kind: 0 for kind in drv.KINDS}
+    scene["excluded_pins"] = [{"pin": "u/Y", "reason": "constant",
+                               "fanout": 0, "cap_pf": 0,
+                               "slew_rise_ns": 0, "slew_fall_ns": 0}]
+    def fake_fresh(script, roots, *, image):
+        folder = script.parent
+        if script.name == "positive_control.tcl":
+            (folder / "positive_control.rpt").write_text(_report(
+                fanout=2, fanout_limit=1, cap_limit=.01,
+                slew_limit=.01, violators=True))
+            (folder / "positive_control_counters.log").write_text(
+                "".join(f"DRV_COUNTER {kind} 1\n" for kind in drv.KINDS))
+        else:
+            (folder / "annotation.rpt").write_text(
+                "Found 0 unannotated drivers.\n")
+            (folder / "clocks.rpt").write_text("propagated\n")
+            (folder / "violators.rpt").write_text(_report(violators=True))
+            (folder / "all_limits.rpt").write_text(_report(fanout=2))
+            (folder / "counters.log").write_text(
+                "".join(f"DRV_COUNTER {kind} 0\n" for kind in drv.KINDS))
+        return "OpenSTA 3.1 aaaaaaaaaa\n"
+    monkeypatch.setattr(capture, "_run_fresh", fake_fresh)
+    monkeypatch.setattr(capture.subprocess, "run", lambda *a, **k:
+        subprocess.CompletedProcess(a, 0, json.dumps({
+            "Id": "sha256:" + "a" * 64,
+            "Config": {"Labels": {"org.opencontainers.image.version": "test"}}}), ""))
+    bundle = capture.capture(plan, tmp_path / "captured", image="synthetic:test")
+    row = bundle["scenes"][0]
+    assert row["population"] == {kind: 1 for kind in drv.KINDS}
+    assert row["all_limits_max_count"] > 1
+    assert row["excluded_pins_recorded"] is False
+    assert "excluded_pins" not in row
+
+
 def test_partially_unannotated_drivers_block_a_clean_verdict(tmp_path):
     bundle = _bundle(tmp_path)
     bundle["scenes"][0]["parasitic_annotation_report"] = _file(
