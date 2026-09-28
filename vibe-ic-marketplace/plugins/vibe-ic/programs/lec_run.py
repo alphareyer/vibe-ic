@@ -6019,10 +6019,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             # Keep the final $equiv population for the *separate* bounded SAT
             # search. A killed leg must not leave the prior leg's IL readable.
             final_equiv_il.unlink(missing_ok=True)
-            executed_script = script + f"write_rtlil {final_equiv_il.resolve()}\n"
+            # The writable-directory probe also protects this SAT handoff.
+            # With checkpointing disabled, keep the original write-free recipe.
+            executed_script = (script + f"write_rtlil {final_equiv_il.resolve()}\n"
+                               if checkpoint_enabled else script)
             ys_host.write_text(executed_script, encoding="utf-8")
-            proof_execution["equivalence_script_sha256_executed"] = _sha256_bytes(
-                executed_script.encode("utf-8"))
+            if not ladder_legs:
+                proof_execution["equivalence_script_sha256_executed"] = (
+                    _sha256_bytes(executed_script.encode("utf-8")))
             # THE TOTAL, NOT A FRESH COPY. Handing `args.timeout` here is the
             # defect measured on 2026-08-27: it re-armed the deadline on every
             # attempt. Every attempt — and every RUNG — draws from the SAME
@@ -6085,7 +6089,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     0 if _at_top else
                     (1 if _per_rung else len(LEC_LADDER) - _start_index)),
                 "resumed_from_rung": (resume_from or {}).get("rung"),
-                "script_sha256": _sha256_bytes(script.encode("utf-8")),
+                "script_sha256": _sha256_bytes(executed_script.encode("utf-8")),
                 "budget_sec": _attempt_budget,
                 "elapsed_sec": round(budget.elapsed_s() - _started, 2),
                 "launched": _leg_launched,
@@ -6678,14 +6682,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Yosys equiv_status folds a genuine mismatch into UNPROVEN. Search the
     # remaining $equiv cells before naming the outcome. This is a new SAT run
     # under the same container-aware stall watchdog as the proof ladder.
-    if (report.get("unproven_points") or 0) > 0:
+    _last_status = raw.rfind("Executing EQUIV_STATUS pass")
+    _residual_names = (unproven_names(raw[_last_status:]) if _last_status >= 0
+                       else [str(n) for n in report.get("unproven_cells") or []])
+    # A stopped/partial ladder, or a log without a terminal status header, may
+    # have a count but no named residual. It cannot make a SAT claim; preserve
+    # the parser's INCONCLUSIVE verdict and disclose why search could not start.
+    _search_has_no_model = (
+        report.get("verdict") == "INCONCLUSIVE"
+        and not _residual_names
+        and (ladder_record.get("complete") is False or _last_status < 0))
+    if (report.get("unproven_points") or 0) > 0 and _search_has_no_model:
+        report["counterexample_search_unavailable"] = (
+            "the incomplete or headerless equivalence log recorded no "
+            "residual point names")
+        report["verdict_explanation"] = (
+            f"{report.get('verdict_explanation') or ''} Counterexample search "
+            f"could not start: {report['counterexample_search_unavailable']}.").strip()
+    if (report.get("unproven_points") or 0) > 0 and not _search_has_no_model:
         _stateless, _stateless_evidence = miter_is_stateless(raw)
         report["miter_stateless"] = _stateless
         report["miter_state_evidence"] = _stateless_evidence
         _original_verdict = report["verdict"]
-        _last_status = raw.rfind("Executing EQUIV_STATUS pass")
-        _names = (unproven_names(raw[_last_status:]) if _last_status >= 0
-                  else [str(n) for n in report.get("unproven_cells") or []])
+        _names = _residual_names
         report["unproven_point_names_complete"] = (
             len(_names) == int(report["unproven_points"]))
         try:
