@@ -339,22 +339,22 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
                 if isinstance(tech, dict) else next(iter(tech), None))
     lefs = [tech_lef] if tech_lef else []
 
-    def lef_paths(value):
+    def lef_paths(value, *, strict=True):
         if isinstance(value, (str, Path)):
             yield str(value)
         elif isinstance(value, dict):
             for nested in value.values():
-                yield from lef_paths(nested)
+                yield from lef_paths(nested, strict=strict)
         elif isinstance(value, (list, tuple)):
             for nested in value:
-                yield from lef_paths(nested)
-        elif value is not None:
+                yield from lef_paths(nested, strict=strict)
+        elif value is not None and strict:
             raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
                           f'invalid physical LEF path: {value!r}')
 
     for key in ('CELL_LEFS', 'PAD_LEFS', 'MACRO_LEFS', 'EXTRA_LEFS'):
         lefs.extend(lef_paths(cfg.get(key) or []))
-    lefs.extend(path for path in lef_paths(cfg.get('MACROS') or {})
+    lefs.extend(path for path in lef_paths(cfg.get('MACROS') or {}, strict=False)
                 if path.lower().endswith(('.lef', '.lef.gz')))
     if not lefs:
         raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
