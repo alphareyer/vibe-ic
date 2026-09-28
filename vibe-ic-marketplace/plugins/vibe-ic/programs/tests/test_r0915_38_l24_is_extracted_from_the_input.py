@@ -346,13 +346,26 @@ def test_the_same_run_once_phase3_HAS_run_FAILS(tmp_path):
     assert "the input REQUIRES DRC clean" in out
 
 
-def test_a_phase3_directory_with_reports_also_counts_as_having_run(tmp_path):
-    """The orchestrator record is the primary signal; a populated
-    reports/phase3/ is the fallback, so a run that produced phase-3 artefacts
-    without that record is still judged."""
+def test_a_phase3_producer_report_without_a_summary_still_counts(tmp_path):
+    """A netlist-bound LVS producer result is phase-3 evidence even if the
+    orchestrator aborted before publishing its summary."""
     proj = _project(tmp_path, spec_md="Sign-off requires DRC clean.\n")
     _emit_l24(proj)
-    _report(proj, "phase3/lvs_verdict.json", {"status": "PASS"})
+    netlist = proj / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    import hashlib
+    _report(proj, "phase3/lvs_verdict.json", {
+        "status": "PASS",
+        "generated_by": "phase3_one_shot_runner:_run_extraction_lvs (#477)",
+        "phase2_synth": {"path": "phase2/stage2/synth/netlist_yosys.v",
+                         "sha256": hashlib.sha256(netlist.read_bytes()).hexdigest()},
+    })
     rc, out = _run_gate(proj)
     assert rc == 1, out
     assert "the input REQUIRES DRC clean" in out
+
+    netlist.write_text("module chip; wire new_build; endmodule\n")
+    rc, out = _run_gate(proj)
+    assert rc == 0, out
+    assert "not yet measurable" in out

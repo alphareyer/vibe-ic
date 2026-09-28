@@ -1097,6 +1097,46 @@ def _derive_multi_rail_supply_pair(
                            "fed_rail_volts": volts(master, str(c["fed"])),
                            "candidates_from": basis},
         })
+    # A core bridge cell carries every ring rail, but only bonds the one its
+    # own pad terminal feeds. Resolve the other rails against ALL PDK-declared
+    # supply cells. A declared cell is a usable path only when its bond and
+    # fed rail are proved by the Liberty/netlist above; it must also be put in
+    # the wrapper below, since a catalogue cell alone is not a bond.
+    needed = sorted({r for rails in unbound.values() for r in rails})
+    auxiliary: List[Dict[str, object]] = []
+    bond_paths: Dict[str, Dict[str, str]] = {}
+    selected_uses: Dict[str, set] = {}
+    for master in (p_master, ground[0]):
+        for rail, (_direction, use) in pin_roles[master].items():
+            if use in ("POWER", "GROUND"):
+                selected_uses.setdefault(rail, set()).add(use)
+    for rail in needed:
+        if len(selected_uses.get(rail, set())) != 1:
+            continue
+        required_use = next(iter(selected_uses[rail]))
+        candidates = sorted(m for m, c in cells.items()
+                            if c["fed"] == rail and
+                            c["use"] == required_use
+                            and m not in (p_master, ground[0]))
+        if len(candidates) != 1:
+            continue
+        master = candidates[0]
+        c = cells[master]
+        bond_paths[rail] = {"master": master, "bond": str(c["bond"]),
+                            "basis": str(c["how"])}
+        auxiliary.append({
+            "kind": f"ring_{len(auxiliary)}", "port": rail,
+            "master": master, "terminal": c["bond"],
+            "supply_connections": {str(c["bond"]): rail, rail: rail},
+            "chosen_for_class": "PAD POWER", "direction": "inout",
+            "class_fallback": False, "selection_declines": list(why),
+            "source_lefs": [{"path": str(src), "sha256": _sha256(src)}
+                            for src in sorted(set(macro_sources.get(master, [])))],
+            "is_supply_pad": True,
+            "derivation": {"bond": c["bond"], "fed_rail": rail,
+                           "fed_rail_basis": c["how"],
+                           "candidates_from": basis},
+        })
     return pair, {
         "domain_topology": "single_domain",
         "power_net": power_net,
@@ -1108,6 +1148,9 @@ def _derive_multi_rail_supply_pair(
         "core_rails_on_ring": {"power": p_rail, "ground": g_rail,
                                "core_voltage": core_voltage},
         "ring_rails_unbound": unbound,
+        "ring_rails_without_bond": sorted(set(needed) - set(bond_paths)),
+        "ring_rail_bond_paths": bond_paths,
+        "supplemental_supply_pads": auxiliary,
         "selection_rule": (
             "multi-rail IO library: the bond terminal's fed rail at the core "
             "voltage (Liberty) is the power bridge; the ground rail the "
@@ -1189,13 +1232,46 @@ def require_bonded_ring_rails(plan: Dict[str, object]) -> None:
         return
     rails = sorted({str(rail) for values in raw.values()
                     if isinstance(values, list) for rail in values})
+    paths = plan.get("ring_rail_bond_paths")
+    if isinstance(paths, dict):
+        scheduled = plan.get("supplemental_supply_pads")
+        scheduled_rails = {
+            str(item.get("port")) for item in scheduled
+            if isinstance(item, dict) and item.get("is_supply_pad")
+        } if isinstance(scheduled, list) else set()
+        rails = [rail for rail in rails
+                 if rail not in paths or rail not in scheduled_rails]
     if rails:
         raise Refusal(
             "RING_RAIL_BOND_UNDECLARED",
             "the selected IO library's PDK supply-cell/netlist evidence leaves "
-            "ring rail(s) without a bond-reachable supply pad or a declared "
-            "connector: " + ", ".join(rails) + "; this producer will not "
+            "ring rail(s) without a scheduled bond-reachable supply pad or a "
+            "declared connector: " + ", ".join(rails) + "; this producer will not "
             "invent a rail short or choose an undeclared connector")
+
+
+def connect_bonded_ring_rails(
+        supply_group: Sequence[Dict[str, object]], plan: Dict[str, object],
+        pin_roles: Dict[str, Dict[str, Tuple[str, str]]],
+        power_net: str, ground_net: str) -> None:
+    """Put every scheduled bonded rail on every pad's matching LEF pin.
+
+    The selected core pair and the supplemental PDK pads share ring rails.
+    Leaving their non-core pins open would turn catalogue reachability into a
+    false physical claim, even though a bridge cell exists in the PDK.
+    """
+    core_ring = plan.get("core_rails_on_ring") or {}
+    net_for_rail = {str(core_ring["power"]): power_net,
+                    str(core_ring["ground"]): ground_net} if core_ring else {}
+    net_for_rail.update({str(rail): str(rail) for rail in
+                         (plan.get("ring_rail_bond_paths") or {})})
+    for entry in supply_group:
+        roles = pin_roles[str(entry["master"])]
+        connections = dict(entry["supply_connections"])
+        for rail, net in net_for_rail.items():
+            if rail in roles:
+                connections[rail] = net
+        entry["supply_connections"] = dict(sorted(connections.items()))
 
 
 _BIT_PIN_RE = re.compile(r"^([A-Za-z_]\w*)\[(-?\d+)\]$")
@@ -1693,6 +1769,9 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         if _core_v is not None:
             rec["supply_core_voltage"] = _core_v
         require_bonded_ring_rails(plan)
+        supply_group = pair + list(plan.get("supplemental_supply_pads") or [])
+        connect_bonded_ring_rails(supply_group, plan, pin_roles,
+                                  power_net, ground_net)
         # How far the PDN ring must stay from the pad edge for pdngen to strap
         # this pair to it (see `_supply_pad_strap_reach`); the runner reserves
         # it in the core inset. The first LEF to give a master its pins is
@@ -1720,7 +1799,8 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                 raise Refusal("SUPPLY_ENTRY_PLAN_INVALID",
                               "the measured-current supply plan lacks a positive count or subject")
             pair_count = int(supply_plan["pair_count"])
-        pair_width = sum(sizes[str(entry["master"])][0] for entry in pair)
+        pair_width = sum(sizes[str(entry["master"])][0]
+                         for entry in supply_group)
         supply_placement: Dict[str, List[List[str]]] = {s: [] for s in SIDES}
         if supply_plan is None:
             side = min(SIDES, key=lambda s: (side_widths[s], SIDES.index(s)))
@@ -1773,7 +1853,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                 base_widths = [int(round(sizes[str(chosen[i]["master"])][0] * units))
                                for i in ordered[side]]
                 supply_widths = [int(round(sizes[str(entry["master"])][0] * units))
-                                 for entry in pair]
+                                 for entry in supply_group]
                 legal[side] = []
                 final_widths[side] = {}
                 for count in range(pair_count + 1):
@@ -1823,7 +1903,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         supply_instances: List[str] = []
         for index, side in enumerate(allocation):
             group = []
-            for entry in pair:
+            for entry in supply_group:
                 suffix = "" if pair_count == 1 else f"_{index}"
                 inst = f"u_pad_supply_{entry['kind']}{suffix}"
                 if inst in chosen:
@@ -1844,7 +1924,8 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                 buckets[(n * len(buckets)) // len(groups)].extend(group)
             ordered[side] = [item for n, signal in enumerate(signals)
                              for item in [*buckets[n], signal]] + buckets[-1]
-        supply_ports = [power_net, ground_net]
+        supply_ports = [power_net, ground_net] + sorted(
+            str(entry["port"]) for entry in supply_group[2:])
         source_file = (Path(pdk_root) / str(pdk) / "SOURCES"
                        if pdk_root and pdk else None)
         plan.update({

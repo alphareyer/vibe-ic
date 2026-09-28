@@ -97,6 +97,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # when the module body starts, and a sibling import placed first dies with
 # `No module named '_signoff_drc_format'`.
 import _signoff_drc_format as _sdf  # noqa: E402
+import _path_layout as _pl  # noqa: E402
 from l_doc_evidence_util import (  # noqa: E402
     EvidenceVerdict,
     find_layer_files,
@@ -485,7 +486,31 @@ def _phase3_has_run(project: Path) -> bool:
     # runner's own orchestrator receipt is the sole completion witness; using
     # directory presence made a fresh phase-2 tree look completed and restored
     # the P2 -> L24 -> P3 deadlock.
-    return (project / "reports" / "orchestrator" / "phase3_one_shot.json").is_file()
+    receipt = project / "reports" / "orchestrator" / "phase3_one_shot.json"
+    current = _pl.phase2_synth_input_identity(project)
+    if receipt.is_file() and current is None:
+        return True
+    if current is None:
+        return False
+    if receipt.is_file():
+        try:
+            published = json.loads(receipt.read_text()).get("phase2_synth")
+        except (OSError, ValueError, AttributeError):
+            published = None
+        if published == current:
+            return True
+    # An LVS producer may have run even if Phase 3 aborted before writing its
+    # orchestrator summary. Retain that evidence path only when the producer's
+    # own receipt is bound to this same netlist; a planning JSON cannot qualify.
+    lvs = project / "reports" / "phase3" / "lvs_verdict.json"
+    try:
+        row = json.loads(lvs.read_text())
+    except (OSError, ValueError):
+        return False
+    return (isinstance(row, dict) and
+            row.get("generated_by") ==
+            "phase3_one_shot_runner:_run_extraction_lvs (#477)" and
+            row.get("phase2_synth") == current)
 
 
 def _declared_process_corner_roles(project: Path, native: Any, required: List[str]
