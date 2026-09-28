@@ -25,6 +25,7 @@ of 6 ps of setup (SHIP_WNS_POSTROUTE -1.234340664617269 -> -1.2403163291940147).
 
 Every assertion here fails against the pre-fix runner.
 """
+import json
 import re
 import sys
 from pathlib import Path
@@ -174,16 +175,74 @@ def test_report_credits_a_repaired_promoted_route(tmp_path):
     assert "PROMOTED signoff_spef_repair route" in txt
 
 
-def test_a_promotion_nothing_measured_is_not_a_clean_pass(tmp_path):
+def test_a_promotion_nothing_measured_is_not_a_clean_pass(tmp_path, monkeypatch):
     """The exact silent hole: a promotion replaced the route the count was taken
     on, and no antenna check ran on the replacement."""
     proj = _write_run(tmp_path, promoted=True, ship_log="SHIP_SIGNOFF_REPAIR_DONE\n")
+    monkeypatch.setattr(R, "_docker_exec", lambda *a, **k: (1, "SHIP_ANT_ERROR: tool refused", ""))
     ok, rpt, notes = _emit(proj, tmp_path)
     assert ok
     txt = rpt.read_text()
     assert "antenna clean: NO" in txt
     assert "antenna measured on: NOTHING" in txt
     assert any("SHIPPED ROUTE UNMEASURED" in n for n in notes)
+
+
+def test_missing_window_checks_exact_promoted_def_without_reroute(tmp_path, monkeypatch):
+    proj = _write_run(tmp_path, promoted=True, ship_log="SHIP_SIGNOFF_REPAIR_DONE\n")
+    (proj / "phase3/stage3/pnr/pnr.tcl").write_text(
+        "read_lef /resolved/tech.tlef\nread_lef /resolved/pad.lef\n"
+        "read_def /old/placed.def\n")
+    monkeypatch.setattr(R, "_to_container_path", lambda path, container: path)
+    def fake_exec(container, cmd, **kwargs):
+        deck = (tmp_path / "reports/phase3/antenna_shipped_top.tcl").read_text()
+        assert "read_def " in deck and "top.def" in deck
+        assert "read_lef /resolved/tech.tlef" in deck
+        assert "read_lef /resolved/pad.lef" in deck
+        assert "read_def /old/placed.def" not in deck
+        assert "check_antennas -verbose" in deck
+        assert "global_route" not in deck and "detailed_route" not in deck
+        return (0, "SHIP_ANT_BEGIN\n[INFO ANT-0002] Found 0 net violations.\n"
+                   "[INFO ANT-0001] Found 0 pin violations.\nSHIP_ANT_END\n", "")
+    monkeypatch.setattr(R, "_docker_exec", fake_exec)
+    ok, rpt, _ = _emit(proj, tmp_path)
+    assert ok
+    record = json.loads((rpt.parent / "antenna.json").read_text())
+    assert record["clean"] is True
+    assert record["net_violations"] == 0 and record["pin_violations"] == 0
+    assert record["verdict"] == "PASS" and record["shipped_route_measured"] is True
+    assert "antenna_shipped_top.log" in record["source"]
+    assert "PROMOTED shipped DEF" in rpt.read_text()
+
+
+def test_missing_window_real_violations_and_tool_error_never_pass(tmp_path, monkeypatch):
+    proj = _write_run(tmp_path, promoted=True, ship_log="SHIP_SIGNOFF_REPAIR_DONE\n")
+    monkeypatch.setattr(R, "_to_container_path", lambda path, container: path)
+    monkeypatch.setattr(R, "_docker_exec", lambda *a, **k: (
+        0, "SHIP_ANT_BEGIN\n[INFO ANT-0002] Found 2 net violations.\n"
+           "[INFO ANT-0001] Found 1 pin violations.\nSHIP_ANT_END\n", ""))
+    _, rpt, _ = _emit(proj, tmp_path)
+    record = json.loads((rpt.parent / "antenna.json").read_text())
+    assert (record["net_violations"], record["pin_violations"]) == (2, 1)
+    assert record["verdict"] == "FAIL" and record["shipped_route_measured"] is True
+
+    monkeypatch.setattr(R, "_docker_exec", lambda *a, **k: (
+        0, "SHIP_ANT_BEGIN\n[ERROR ANT-0008] No routing found.\n"
+           "[INFO ANT-0002] Found 0 net violations.\n"
+           "[INFO ANT-0001] Found 0 pin violations.\nSHIP_ANT_END\n", ""))
+    _, rpt, _ = _emit(proj, tmp_path)
+    record = json.loads((rpt.parent / "antenna.json").read_text())
+    assert record["verdict"] == "FAIL" and record["shipped_route_measured"] is False
+    assert record["net_violations"] is None
+
+    def moved_def(*args, **kwargs):
+        (proj / "phase3/stage3/pnr/top.def").write_text("DESIGN changed ;\nEND DESIGN\n")
+        return (0, "SHIP_ANT_BEGIN\n[INFO ANT-0002] Found 0 net violations.\n"
+                   "[INFO ANT-0001] Found 0 pin violations.\nSHIP_ANT_END\n", "")
+    monkeypatch.setattr(R, "_docker_exec", moved_def)
+    _, rpt, _ = _emit(proj, tmp_path)
+    record = json.loads((rpt.parent / "antenna.json").read_text())
+    assert record["verdict"] == "FAIL" and record["shipped_route_measured"] is False
 
 
 def test_no_promotion_leaves_the_pnr_verdict_exactly_as_it_was(tmp_path):

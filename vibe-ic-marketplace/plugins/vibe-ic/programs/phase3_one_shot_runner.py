@@ -69308,16 +69308,67 @@ def antenna_cosmetic_reroute_refusals(log_txt: str) -> int:
                    _ANTENNA_COSMETIC_REROUTE_CAUSE})
 
 
+def _measure_shipped_def_antenna(project: Path, top: str, pdk: PdkConfig,
+                                 container: str, out_dir: Path) -> tuple[str, Path] | None:
+    """Read the promoted DEF's committed wires and measure antenna without rerouting.
+
+    The promoting session may omit its antenna window. A fresh ``read_def`` plus
+    ``check_antennas`` reads the route that ships; ``global_route`` would replace
+    that subject. A missing count, tool error, or moving DEF is NOT_MEASURED.
+    """
+    def_file = _pl.pnr_dir(project) / f"{top}.def"
+    before = hashlib.sha256(def_file.read_bytes()).hexdigest()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tcl_path = out_dir / f"antenna_shipped_{top}.tcl"
+    log_path = out_dir / f"antenna_shipped_{top}.log"
+    # Reuse the producer's resolved LEF inventory, including selected IO pads
+    # and its legalized tech LEF. PdkConfig alone need not carry pad masters.
+    pnr_deck = _pl.pnr_dir(project) / "pnr.tcl"
+    resolved_lefs = []
+    if pnr_deck.is_file():
+        for line in pnr_deck.read_text(errors="ignore").splitlines():
+            if line.startswith("read_def "):
+                break
+            if line.startswith("read_lef "):
+                resolved_lefs.append(line)
+    if not resolved_lefs:
+        lefs = [pdk.tech_lef, pdk.cell_lef, *pdk.macro_lefs]
+        resolved_lefs = [
+            f"read_lef {_to_container_path(str(path), container)}"
+            for path in lefs]
+    deck = "\n".join(resolved_lefs)
+    deck += ("\nread_liberty " + _to_container_path(str(pdk.liberty), container)
+             + "\nread_def " + _to_container_path(str(def_file), container)
+             + "\nputs SHIP_ANT_BEGIN\n"
+             + "if {[catch {check_antennas -verbose} _ant_err]} { "
+               "puts \"SHIP_ANT_ERROR: $_ant_err\" }\n"
+             + "puts SHIP_ANT_END\n")
+    _aa.write_text(tcl_path, deck)
+    cmd = (f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
+           f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
+           f"openroad -no_init -exit {_to_container_path(str(tcl_path), container)}")
+    rc, out, err = _docker_exec(container, cmd, marker=str(tcl_path))
+    log = (out or "") + ("\n" + err if err else "")
+    after = hashlib.sha256(def_file.read_bytes()).hexdigest()
+    _aa.write_text(log_path, f"DEF_SHA256_BEFORE {before}\n{log}\nDEF_SHA256_AFTER {after}\n")
+    window = log.split("SHIP_ANT_BEGIN", 1)[-1].split("SHIP_ANT_END", 1)[0]
+    complete = (rc == 0 and before == after and "SHIP_ANT_BEGIN" in log
+                and "SHIP_ANT_END" in log and "SHIP_ANT_ERROR" not in window
+                and not re.search(r"\[ERROR\s", window)
+                and re.search(r"Found\s+\d+\s+net violations", window)
+                and re.search(r"Found\s+\d+\s+pin violations", window))
+    return (window, log_path) if complete else None
+
+
 def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                          container: str, antenna_rpt: Path,
                          notes: List[str]) -> bool:
-    """OpenROAD check_antennas on the routed DEF (no SPEF required).
+    """Publish antenna evidence for the route that ships, without SPEF.
 
-    The detailed router already ran antenna checks during routing, but the
-    result was not re-emitted to the audit's expected path. This re-runs
-    check_antennas after a fresh global_route (which check_antennas needs
-    to find routing) and writes reports/phase3/antenna.{rpt,json}.
-    chip-AGNOSTIC. Best-effort."""
+    Prefer the producing session's count. If a later session promoted a new
+    DEF without a count, re-read its committed wires and check that exact DEF.
+    An unmeasured shipped route is a failing report, never an inferred zero.
+    """
     pnr_out = _pl.pnr_dir(project)
     def_file = pnr_out / f"{top}.def"
     if not def_file.is_file():
@@ -69351,6 +69402,16 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
     _ship_txt = (_ship_log.read_text(errors="ignore")
                  if (_promoted and _ship_log.is_file()) else "")
     _ship_measured = "SHIP_ANT_END" in _ship_txt
+    _ship_probe_log = None
+    if _promoted and not _ship_measured:
+        # The promoted DEF may have been routed by a producer without an
+        # in-session antenna window. Measure that exact DEF before reporting
+        # it unmeasured; never infer its count from the older PnR route.
+        _probe = _measure_shipped_def_antenna(
+            project, top, pdk, container, antenna_rpt.parent)
+        if _probe is not None:
+            _ship_txt, _ship_probe_log = _probe
+            _ship_measured = True
     pnr_log = pnr_out / "openroad.log"
     if pnr_log.is_file():
         log_txt = pnr_log.read_text(errors="ignore")
@@ -69415,8 +69476,11 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                         net_viol = int(_s_nets[-1])
                         pin_viol = int(_s_pins[-1])
                         have_counts = True
-                        _measured_on = ("the PROMOTED signoff_spef_repair route "
-                                        "(the one that ships)")
+                        _measured_on = (
+                            "the PROMOTED shipped DEF (fresh read_def, no reroute)"
+                            if _ship_probe_log else
+                            "the PROMOTED signoff_spef_repair route "
+                            "(the one that ships)")
                     else:
                         _shipped_unmeasured = True
                 elif _promoted:
@@ -69491,16 +69555,15 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     "# last change to the route. The extraction gate (step 31) is\n"
                     "# what measures what that change did.\n"
                     if (_unverified_after and not routing_incomplete) else "")
-                _subject = _measured_subject(project, top, [def_file],
-                                             tool_log=pnr_log)
+                _subject = _measured_subject(
+                    project, top, [def_file],
+                    tool_log=_ship_probe_log or pnr_log)
                 antenna_rpt.write_text(
                     _measured_subject_lines(_subject) +
-                    "# OpenROAD antenna check (gate-oxide protection) — IN-SESSION\n"
-                    "# post-repair result captured during PnR (incremental loop:\n"
-                    "# repair_antennas -iterations 1 -> incremental detailed_route ->\n"
-                    "# check_antennas, until 0), and — when a promotion replaced\n"
-                    "# that route — from the promoting session instead; the\n"
-                    "# `antenna measured on:` line below says which.\n"
+                    "# OpenROAD antenna check (gate-oxide protection) on the\n"
+                    "# route named by `antenna measured on:` below. Counts come\n"
+                    "# from its producing session or a fresh, unchanged read of\n"
+                    "# the committed shipped DEF, with no reroute.\n"
                     "# The old rationale here read \"a separate re-read cannot\n"
                     "# credit the jumpers\", and it is FALSE at this base:\n"
                     "# `read_lef` x2 + `read_def` + `check_antennas`, with NO\n"
@@ -69592,7 +69655,7 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     "verdict": verdict,
                 }, indent=2) + "\n")
                 notes.append(
-                    f"antenna: in-session post-repair check {_count_str} "
+                    f"antenna: {'fresh shipped-DEF check' if _ship_probe_log else 'in-session post-repair check'} {_count_str} "
                     f"(measured on {_measured_on})"
                     + (" — ROUTING INCOMPLETE (detailed_route aborted; "
                        "reported FAIL, not a clean pass on an unrouted design)"
