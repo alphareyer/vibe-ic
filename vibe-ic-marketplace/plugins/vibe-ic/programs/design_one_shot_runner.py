@@ -8324,7 +8324,8 @@ def _step_rtl_gen_bound(
             catalog_hint = f"\n(ip-catalog query skipped: {_e})"
 
         if versioned_matches:
-            from ip_catalog_pull import pull_all_catalog_matches as _pull_versioned
+            from ip_catalog_pull import (pull_all_catalog_matches as _pull_versioned,
+                                         verify_existing_official_pins as _verify_pins)
             source_manifest = (_pl.rtl_dir(project) / "SOURCE_MANIFEST.json")
             existing = None
             if source_manifest.is_file():
@@ -8333,21 +8334,11 @@ def _step_rtl_gen_bound(
                 except (OSError, ValueError):
                     existing = None
             if isinstance(existing, dict) and existing.get("source_pins"):
-                pins = {p.get("ip_name"): p for p in existing["source_pins"]
-                        if isinstance(p, dict)}
-                for m in versioned_matches:
-                    pin = pins.get(m.ip_name) or {}
-                    digests = pin.get("files_sha256") or {}
-                    if (pin.get("version") != m.version or
-                            pin.get("canonical_url") != m.canonical_url or
-                            not isinstance(digests, dict) or
-                            set(digests) != set(m.rtl_files) or
-                            any(not (_pl.rtl_dir(project) / Path(rel).name).is_file() or
-                                hashlib.sha256((_pl.rtl_dir(project) / Path(rel).name).read_bytes()).hexdigest()
-                                != digest for rel, digest in digests.items())):
-                        return StepResult(
-                            "rtl_gen", "FAIL", time.time() - t0,
-                            f"IP_REUSE_FETCH_PIN_MISMATCH: {m.ip_name}")
+                if not _verify_pins(project, versioned_matches, existing):
+                    return StepResult(
+                        "rtl_gen", "FAIL", time.time() - t0,
+                        "IP_REUSE_FETCH_PIN_MISMATCH: official source, "
+                        "errata, receipt or output bytes differ")
                 pull_audit = {"status": "ALREADY_FETCHED",
                               "n_ips_pulled": len(versioned_matches),
                               "source_manifest": str(source_manifest)}
