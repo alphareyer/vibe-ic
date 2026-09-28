@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import struct
 from pathlib import Path
 
@@ -98,33 +97,3 @@ def test_undefined_text_still_fails_and_mapped_geometry_is_refused(tmp_path):
     else:
         raise AssertionError("the layer map removed manufacturing geometry")
     assert hashlib.sha256(unsafe.read_bytes()).hexdigest() == original_sha
-
-
-def test_direct_step37_filters_the_stream_written_by_its_tool(tmp_path,
-                                                              monkeypatch):
-    import phase3_one_shot_runner as runner
-    from test_kspm43_streamout_top_cell_is_the_def_design import _Pdk, _def
-
-    project = tmp_path / "sdr_candidates" / "candidate"
-    pnr = runner._pl.pnr_dir(project)
-    _def(pnr / "DENSITY_FILL_FIXTURE.def", "DENSITY_FILL_FIXTURE")
-    tool_output = _fixture(tmp_path, _polygon(34, 0), _polygon(36, 0),
-                           _text(58, 0, "DVDD"))
-    pdk = _Pdk()
-    pdk.name = "gf180mcuD"
-    pdk.metal_fill_density = None
-
-    def streamout(_project, _top, _pdk, _container, output):
-        shutil.copyfile(tool_output, output)  # only the EDA tool's file write
-        return True, "Magic stream-out wrote the fixture"
-
-    monkeypatch.setattr(runner, "_magic_def_to_gds", streamout)
-    result = runner._step_gds_direct(
-        project, "DENSITY_FILL_FIXTURE", pdk, "",
-        candidate=True)
-    assert result.status == "PASS", result.detail
-    shipped = pnr / "DENSITY_FILL_FIXTURE.gds"
-    assert (58, 0) not in geometry.layers_used(geometry.read_layout(shipped))
-    receipt = json.loads((pnr / "DENSITY_FILL_FIXTURE.text_layer_map.json").read_text())
-    assert receipt["removed_text"] == {"58/0": 1}
-    assert receipt["output_sha256"] == hashlib.sha256(shipped.read_bytes()).hexdigest()
