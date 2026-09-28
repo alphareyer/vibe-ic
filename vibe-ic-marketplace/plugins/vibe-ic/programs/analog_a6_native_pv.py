@@ -44,6 +44,7 @@ import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 import _a6_drc_authority as _auth  # noqa: E402 — q1: whose word stands
+import _atomic_artefact as _aa  # noqa: E402 — publish complete reports
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
 _SVRFDRC_BIN = "svrfdrc"
@@ -1293,12 +1294,12 @@ def run_block_pv(project: Path, block: str, res: Dict[str, Any],
         # this one (FX_A7_RCX_INVENTORY). The refusal is written where the
         # gate reads the verdict, so no older `comp.json` is left standing.
         _ident, _why = _layout_identity(bdir, netlist)
-        (bdir / "comp.json").write_text(json.dumps({
+        _aa.write_json(bdir / "comp.json", {
             "block": block, "result": "refused",
             "rule": "A6_LAYOUT_NOT_OF_THIS_NETLIST",
             "layout_netlist_identity": {"state": _ident, "detail": _why},
             "note": "LVS not run: the layout is not of this netlist"},
-            indent=2) + "\n")
+            indent=2, ensure_ascii=True)
         reasons.append(f"A6_LAYOUT_NOT_OF_THIS_NETLIST: {_why}")
         lvs_result = {"executed": False, "verdict": "refused",
                       "rule": "A6_LAYOUT_NOT_OF_THIS_NETLIST", "detail": _why,
