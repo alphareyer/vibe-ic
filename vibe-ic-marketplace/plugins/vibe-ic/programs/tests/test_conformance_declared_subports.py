@@ -38,6 +38,22 @@ AUTHORITY_SENTENCE = (
     "The actual port names for this group come from declaration.json.",
     "此 port group 的訊號名稱由 Plugin 在 declaration.json 宣告。",
     "The SRAM interface port names are defined by declaration.json.",
+    "In declaration.json live the port names for this interface.",
+)
+
+OTHER_GROUP_SENTENCE = (
+    "The port names of the debug interface are defined by declaration.json.",
+    "The port names for the debug interface come from declaration.json.",
+    "In declaration.json live the port names for the debug interface.",
+    "The debug interface has its port names in declaration.json.",
+    "The debug interface port names and SRAM port names are in declaration.json.",
+    "The port names for o_debug_req are in declaration.json.",
+)
+
+SIBLING_SECTION = (
+    "\n### debug port group sub-ports (typical)\n\n"
+    "| Sub-port | Direction |\n|---|---|\n"
+    "| `o_debug_req` | output |\n| `o_debug_ack` | input |\n"
 )
 
 
@@ -152,6 +168,44 @@ def test_phase1_non_authority_keeps_extra_port_blocked(tmp_path, statement):
     assert result.returncode == 1
     assert ("port-extra", "o_sram_waddr") in _errors(findings)
     assert emitted["plugin_declared_port_groups"] == []
+
+
+@pytest.mark.parametrize("statement", OTHER_GROUP_SENTENCE)
+def test_phase1_sibling_reference_never_delegates_current_group(tmp_path, statement):
+    sys.path.insert(0, str(PROGRAMS))
+    import phase1_doc_one_shot_runner as phase1
+
+    project, spec, rtl = _project(tmp_path, delegation=False)
+    document = DELEGATION.replace(
+        "The concrete signal names for this port group are declared by the "
+        "plugin in declaration.json.", statement) + SIBLING_SECTION
+    (project / "input/docs/L3_external_interface.md").write_text(document)
+    phase1.gen_l9_integration_spec(
+        project, {"L3_external_interface.md": document}, {})
+    emitted = json.loads(spec.read_text())
+    emitted["top_module"] = "dut"
+    emitted["ports"] = emitted["top_ports"] = [
+        {"name": "o_sram_addr", "direction": "output", "width": 10},
+        {"name": "o_sram_we", "direction": "output", "width": 1},
+    ]
+    spec.write_text(json.dumps(emitted))
+    result, findings = _check(project, spec, rtl)
+    assert result.returncode == 1
+    assert ("port-extra", "o_sram_waddr") in _errors(findings)
+    assert not any(row["group"] == "sram" for row in
+                   emitted["plugin_declared_port_groups"])
+
+
+def test_sibling_declaration_map_cannot_authorize_group_port(tmp_path):
+    project, spec, rtl = _project(tmp_path)
+    (project / "plugin_output/declaration.json").write_text(json.dumps({
+        "sram_interface": {"read_address": "o_sram_addr",
+                           "write_enable": "o_sram_we"},
+        "debug_interface": {"other": "o_sram_waddr"},
+    }))
+    result, findings = _check(project, spec, rtl)
+    assert result.returncode == 1
+    assert ("port-extra", "o_sram_waddr") in _errors(findings)
 
 
 @pytest.mark.parametrize("statement", AUTHORITY_SENTENCE)

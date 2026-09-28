@@ -25,18 +25,78 @@ _DECLARATION = r"(?:plugin_output/)?declaration\.json"
 _PORT_NAMES = r"(?:\b(?:port|signal|pin|sub-?port)\s+names?\b|\bnames?\s+(?:of|for)\s+(?:this|the)\s+(?:port|signal|pin|sub-?port)\b)"
 _ZH_PORT_NAMES = r"(?:訊號|信号|埠|端口)\s*(?:名稱|名称)"
 _CLAUSES = re.compile(r"[;；。]|[.!?](?=\s|$)")
-_QUALIFIED_NAMES = re.compile(
-    r"\b(?P<label>[A-Za-z][\w-]*)\s+(?:interface\s+)?"
-    r"(?:port|signal|pin|sub-?port)\s+names?\b", re.I)
+_INTERFACE_OWNER = re.compile(
+    r"\b([A-Za-z][\w-]*)\s+(?:interface|port\s+group)\b", re.I)
 
 
-def _names_another_group(clause: str, group: str) -> bool:
-    """A named interface in the port-name noun phrase overrides the heading."""
-    generic = {"the", "this", "these", "actual", "concrete", "exact",
-               "all", "its", "defines", "declares", "specifies", "sets",
-               "determines", "for", "of", "from"}
-    return any(match.group("label").lower() not in generic | {group.lower()}
-               for match in _QUALIFIED_NAMES.finditer(clause))
+def _sections(extracted: dict[str, str]) -> list[tuple[str, str, list[str]]]:
+    """Keep each port group inside its own Markdown heading boundary."""
+    sections = []
+    for source, body in sorted((extracted or {}).items()):
+        lines = (body or "").splitlines()
+        for i, line in enumerate(lines):
+            match = _HEADING.match(line.strip())
+            if match is None:
+                continue
+            section = []
+            for following in lines[i + 1:]:
+                if following.lstrip().startswith("#"):
+                    break
+                section.append(following)
+            sections.append((source, match.group(1).lower(), section))
+    return sections
+
+
+def _examples(section: list[str]) -> list[str]:
+    examples = []
+    for row in section:
+        if row.lstrip().startswith("|"):
+            first_cell = row.split("|", 2)[1]
+            for name in _PORT.findall(first_cell):
+                if name not in examples:
+                    examples.append(name)
+    return examples
+
+
+def _identifiers(sections: list[tuple[str, str, list[str]]]) -> dict[str, set[str]]:
+    """Learn sibling identities from headings and their example-port prefixes."""
+    identities: dict[str, set[str]] = {}
+    for _, group, section in sections:
+        owned = identities.setdefault(group, {group})
+        names = _examples(section)
+        if not names:
+            continue
+        tokens = [name.lower().split("_") for name in names]
+        common = []
+        for position in range(min(map(len, tokens))):
+            if len({parts[position] for parts in tokens}) != 1:
+                break
+            common.append(tokens[0][position])
+        # A single example's final token is the signal, not a group prefix.
+        if len(names) == 1 and common:
+            common.pop()
+        if common:
+            owned.add("_".join(common) + "_")
+        if common and common[0] in {"i", "o", "io"}:
+            common.pop(0)
+        if common:
+            owned.add(common[0])
+    return identities
+
+
+def _names_another_group(clause: str, group: str,
+                         identifiers: dict[str, set[str]]) -> bool:
+    """A sibling heading or port prefix anywhere in the sentence vetoes it."""
+    others = set().union(*(names for owner, names in identifiers.items()
+                           if owner != group)) if identifiers else set()
+    if any(re.search(rf"\b{re.escape(name)}" +
+                     ("" if name.endswith("_") else r"\b"), clause, re.I)
+           for name in others):
+        return True
+    # An explicit interface owner can be foreign even when that interface has
+    # no heading in this document. This also covers of/for and passive forms.
+    return any(match.group(1).lower() not in {group, "this", "the", "its"}
+               for match in _INTERFACE_OWNER.finditer(clause))
 
 
 def _table_fixes_group(section: list[str], group: str) -> bool:
@@ -52,34 +112,15 @@ def _table_fixes_group(section: list[str], group: str) -> bool:
     return False
 
 
-def _delegates_names(line: str, group: str) -> bool:
-    """Require an affirmative grammatical link from group port names to the file.
-
-    A filename and a port word in adjacent statements are not authority. Split
-    at clause boundaries before checking either the relation or its polarity.
-    """
-    modifier = rf"(?:(?:the|this|actual|concrete|exact|{re.escape(group)})\s+)*"
-    relationships = (
-        # The port names are declared by the plugin in declaration.json.
-        rf"{_PORT_NAMES}[^;；。]{{0,100}}?\b(?:declared|defined|specified|"
-        rf"determined|set|named)\s+(?:by\s+(?:the\s+)?plugin\s+)?"
-        rf"(?:by|in|via|through|from)\s+{_DECLARATION}",
-        # The port names come from declaration.json.
-        rf"{_PORT_NAMES}[^;；。]{{0,70}}?\b(?:come|derive|are\s+sourced)\s+"
-        rf"from\s+{_DECLARATION}",
-        # declaration.json defines the group's port names.
-        rf"{_DECLARATION}\s+(?:declares|defines|specifies|determines|sets)\s+"
-        rf"{modifier}{_PORT_NAMES}",
-        rf"{_DECLARATION}\s+is\s+(?:the\s+)?(?:authority|source\s+of\s+truth)\s+"
-        rf"for\s+{modifier}{_PORT_NAMES}",
-        rf"{_ZH_PORT_NAMES}[^;；。]{{0,50}}?由\s*(?:Plugin\s*)?(?:在|於|透過)?\s*"
-        rf"{_DECLARATION}\s*(?:宣告|聲明|指定|定義|定义)",
-        rf"{_DECLARATION}\s*(?:宣告|聲明|指定|定義|定义)[^;；。]{{0,30}}?"
-        rf"{_ZH_PORT_NAMES}",
-    )
+def _delegates_names(line: str, group: str,
+                     identifiers: dict[str, set[str]]) -> bool:
+    """Use section, subject, source, and group identity instead of verb lists."""
     for clause in _CLAUSES.split(line):
-        if is_denied(clause) is None and not _names_another_group(clause, group) and any(
-                re.search(pattern, clause, re.I) for pattern in relationships):
+        if (re.search(_DECLARATION, clause, re.I)
+                and (re.search(_PORT_NAMES, clause, re.I)
+                     or re.search(_ZH_PORT_NAMES, clause))
+                and is_denied(clause) is None
+                and not _names_another_group(clause, group, identifiers)):
             return True
     return False
 
@@ -92,36 +133,21 @@ def extract_delegated_groups(extracted: dict[str, str]) -> list[dict]:
     mention of declaration.json does not delegate any other group.
     """
     groups: list[dict] = []
-    for source, body in sorted((extracted or {}).items()):
-        lines = (body or "").splitlines()
-        for i, line in enumerate(lines):
-            match = _HEADING.match(line.strip())
-            if not match:
-                continue
-            section = []
-            for following in lines[i + 1:]:
-                if following.lstrip().startswith("#"):
-                    break
-                section.append(following)
-            authority_lines = [row for row in section
-                               if _delegates_names(row, match.group(1))]
-            if not authority_lines or _table_fixes_group(section, match.group(1)):
-                continue
-            examples = []
-            for row in section:
-                if not row.lstrip().startswith("|"):
-                    continue
-                first_cell = row.split("|", 2)[1]
-                for name in _PORT.findall(first_cell):
-                    if name not in examples:
-                        examples.append(name)
-            if examples:
-                groups.append({
-                    "group": match.group(1).lower(),
-                    "authority": "plugin_output/declaration.json",
-                    "example_ports": examples,
-                    "source_document": source,
-                })
+    sections = _sections(extracted)
+    identifiers = _identifiers(sections)
+    for source, group, section in sections:
+        authority_lines = [row for row in section
+                           if _delegates_names(row, group, identifiers)]
+        if not authority_lines or _table_fixes_group(section, group):
+            continue
+        examples = _examples(section)
+        if examples:
+            groups.append({
+                "group": group,
+                "authority": "plugin_output/declaration.json",
+                "example_ports": examples,
+                "source_document": source,
+            })
     return groups
 
 
