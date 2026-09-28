@@ -687,7 +687,15 @@ def _collect_path_literals(tree: ast.AST) -> Set[str]:
 # ──────────────────────────────────────────────────────────────────────
 # Whole-tree indices (parsed once per process)
 # ──────────────────────────────────────────────────────────────────────
-@lru_cache(maxsize=None)
+#: How many single-program ASTs the lookup memo keeps. A LOOKUP memo, not a
+#: store: the whole-tree pass below releases what it parsed, and a caller that
+#: needs a tree again after it fell out simply parses it again. Unbounded, this
+#: memo held every program's AST for the life of the process — see
+#: :func:`_whole_tree_facts` for what that cost.
+_TREE_MEMO = 64
+
+
+@lru_cache(maxsize=_TREE_MEMO)
 def _tree(program: str) -> Optional[ast.AST]:
     """The parsed AST of ONE ``programs/<program>.py``, or ``None``.
 
@@ -710,7 +718,8 @@ def _tree(program: str) -> Optional[ast.AST]:
     ceiling is `180 // 3`). See vibe-ic#1391 thread on #1412.
 
     Like `_trees`, this memo is a function of ``programs/*.py`` and is NOT
-    dropped by :func:`clear_flow_caches` — a yaml swap cannot change it.
+    dropped by :func:`clear_flow_caches` — a yaml swap cannot change it. It
+    is bounded (`_TREE_MEMO`), and the whole-tree pass empties it.
     """
     if not program or "/" in program or "\\" in program or "." in program:
         return None
@@ -775,15 +784,52 @@ def _trees() -> Dict[str, ast.AST]:
 
 
 @lru_cache(maxsize=1)
+def _whole_tree_facts(programs_dir: str) -> Dict[str, Tuple[FrozenSet[Tuple[str, ...]], FrozenSet[str]]]:
+    """``{program: (written tails, path literals)}`` for the whole tree, and
+    NOTHING ELSE survives the call.
+
+    WHY THE ASTS ARE DROPPED HERE. `write_index` and `literal_index` need two
+    small facts per program; they used to keep every program's full AST alive
+    (in `_trees` and in `_tree`'s memo) for the life of the process to get
+    them. MEASURED (S39_EXIT_STALL, image 0.3.83 host, 1 502 programs): at the
+    end of a `test_matrix_d3_outputs_produced.py` session that was 7.25 M
+    GC-tracked objects, 1.57 GB, almost all `ast` nodes. Every full collection
+    walked them (~3 s each on a quiet host), and the three that run after
+    pytest's summary (its unraisable-exception cleanup, one more gen-2, and
+    interpreter finalization) plus freeing the heap made the process linger
+    ~17 s after its own summary. At 5x load that is past the nested driver's
+    60 s stall window, which then correctly reports a silent process.
+
+    So the facts are extracted once, the ASTs are released, and every consumer
+    reads the facts. The progress scopes are the ones the two indices always
+    published, each once, over the same population. Keyed on the programs
+    directory the facts describe, so a caller that points `F.PROGRAMS_DIR`
+    elsewhere and clears the two indices gets facts about THAT tree.
+    """
+    trees = _trees()
+    writes: Dict[str, FrozenSet[Tuple[str, ...]]] = {}
+    step = _stride_publisher("d7-write-index", len(trees))
+    for seen, (name, tree) in enumerate(trees.items(), start=1):
+        writes[name] = frozenset(_collect_writes(tree))
+        step(seen)
+    literals: Dict[str, FrozenSet[str]] = {}
+    step = _stride_publisher("d7-literal-index", len(trees))
+    for seen, (name, tree) in enumerate(trees.items(), start=1):
+        literals[name] = frozenset(_collect_path_literals(tree))
+        step(seen)
+    del trees
+    _trees.cache_clear()
+    _tree.cache_clear()
+    return {name: (writes[name], literals[name]) for name in writes}
+
+
+@lru_cache(maxsize=1)
 def write_index() -> Dict[Tuple[str, ...], FrozenSet[str]]:
     """``{tail_segments: {program basenames that write it}}`` for the whole tree."""
     acc: Dict[Tuple[str, ...], Set[str]] = {}
-    trees = _trees()
-    step = _stride_publisher("d7-write-index", len(trees))
-    for seen, (name, tree) in enumerate(trees.items(), start=1):
-        for tail in _collect_writes(tree):
+    for name, (tails, _literals) in _whole_tree_facts(str(F.PROGRAMS_DIR)).items():
+        for tail in tails:
             acc.setdefault(tail, set()).add(name)
-        step(seen)
     return {k: frozenset(v) for k, v in acc.items()}
 
 
@@ -791,12 +837,9 @@ def write_index() -> Dict[Tuple[str, ...], FrozenSet[str]]:
 def literal_index() -> Dict[str, FrozenSet[str]]:
     """``{path literal: {program basenames whose source names it}}``."""
     acc: Dict[str, Set[str]] = {}
-    trees = _trees()
-    step = _stride_publisher("d7-literal-index", len(trees))
-    for seen, (name, tree) in enumerate(trees.items(), start=1):
-        for lit in _collect_path_literals(tree):
+    for name, (_tails, lits) in _whole_tree_facts(str(F.PROGRAMS_DIR)).items():
+        for lit in lits:
             acc.setdefault(lit, set()).add(name)
-        step(seen)
     return {k: frozenset(v) for k, v in acc.items()}
 
 
