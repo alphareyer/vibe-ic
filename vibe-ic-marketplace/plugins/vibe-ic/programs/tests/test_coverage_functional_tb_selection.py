@@ -95,3 +95,16 @@ def test_skeleton_only_remains_unmeasured_and_names_handoff(tmp_path):
     assert result.status == "NOT_MEASURED"
     assert "testbench-gen hand-off" in result.detail
     assert not stale.exists()
+
+
+def test_unmarked_inert_tb_is_not_functional_coverage(tmp_path):
+    project = _project(tmp_path, unit=False)
+    tb = project / "phase2/stage1/sim_full_stack/tb_dut_full.v"
+    tb.write_text(tb.read_text().replace("// CONNECTIVITY-ONLY skeleton\n", ""))
+    audit = coverage.functional_stimulus_audit(tb)
+    assert audit["decidable"] and audit["driven"] == []
+    assert coverage.discover_measure_inputs(project)[1] == str(tb)
+    assert coverage.discover_measure_testbenches(project)[1] == []
+    result = runner.step_verilator_coverage(project, "dut")
+    assert result.status == "NOT_MEASURED"
+    assert "testbench-gen hand-off" in result.detail

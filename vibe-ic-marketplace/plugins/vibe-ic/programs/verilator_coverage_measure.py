@@ -1144,7 +1144,6 @@ def _coverage_candidates(project: Path) -> Tuple[List[str], List[str]]:
                     candidates.append(str(path))
     recorded = _recorded_functional_testbenches(project)
     eligible: List[str] = []
-    fallback: List[str] = []
     for candidate in candidates:
         path = Path(candidate)
         audit = functional_stimulus_audit(path)
@@ -1155,12 +1154,9 @@ def _coverage_candidates(project: Path) -> Tuple[List[str], List[str]]:
         if (audit["self_declared_connectivity_only"]
                 or "VIBEIC_TB_ORACLE: NONE" in source):
             continue
-        fallback.append(candidate)
         if path.resolve() in recorded or (audit["decidable"] and audit["driven"]):
             eligible.append(candidate)
-    # Retain the legacy undecidable fallback for unmarked, hand-authored TBs.
-    # A marked connectivity-only scaffold is never that fallback.
-    return candidates, eligible or fallback[:1]
+    return candidates, eligible
 
 
 def discover_measure_inputs(project: Path) -> Tuple[List[str], Optional[str]]:
@@ -1220,9 +1216,8 @@ def discover_measure_testbenches(project: Path) -> Tuple[List[str], List[str]]:
     below a 70% floor the suite clears at 98.52%. Nothing about the design had
     changed; the verification had got BETTER.
 
-    Order is the discovery order, de-duplicated. An unmarked, undecidable TB
-    retains the one-TB selector's fallback. A marked connectivity-only
-    skeleton never enters the coverage build, even as a fallback."""
+    Order is the discovery order, de-duplicated. The one-TB selector retains
+    its legacy fallback; this suite selector requires functional evidence."""
     rtl_dir = project / "phase2" / "stage1" / "rtl"
     rtl, _first = discover_measure_inputs(project)
     _candidates, chosen = _coverage_candidates(project)

@@ -123,6 +123,9 @@ INIT_PATTERNS = ("ff", "a5")
 #: The stall grace of the one supervised container job (no forward progress).
 STALL_GRACE_S = 1800
 FETCH_DEADLINE_S = 300
+FETCH_MAX_BYTES = 64 * 1024 * 1024
+FETCH_CHUNK_BYTES = 64 * 1024
+FETCH_IO_TIMEOUT_S = 1
 
 TOOLS = {
     "gcc": "riscv64-unknown-elf-gcc",
@@ -212,8 +215,26 @@ def extract_verified(data: bytes, suite: Dict[str, Any], dest: Path
 
 def default_fetch(url: str) -> bytes:
     import urllib.request
-    with urllib.request.urlopen(url, timeout=FETCH_DEADLINE_S) as r:  # noqa: S310
-        return r.read()
+    deadline = time.monotonic() + FETCH_DEADLINE_S
+    chunks: List[bytes] = []
+    total = 0
+    with urllib.request.urlopen(  # noqa: S310 — public, lock-pinned input
+            url, timeout=min(FETCH_IO_TIMEOUT_S, FETCH_DEADLINE_S)) as r:
+        # read1 returns available bytes without waiting to fill the chunk. A
+        # streaming peer cannot evade the monotonic deadline by trickling.
+        read1 = r.read1
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
+            chunk = read1(min(FETCH_CHUNK_BYTES, FETCH_MAX_BYTES - total + 1))
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
+            if not chunk:
+                return b"".join(chunks)
+            total += len(chunk)
+            if total > FETCH_MAX_BYTES:
+                raise ValueError(f"tarball byte ceiling {FETCH_MAX_BYTES} exceeded")
+            chunks.append(chunk)
 
 
 def cache_dir() -> Path:
@@ -232,9 +253,13 @@ def acquire(suite_name: str, suite: Dict[str, Any], dest: Path,
     data: Optional[bytes] = None
     source = ""
     if use_cache and cached.is_file():
-        blob = cached.read_bytes()
-        if verify_tarball(blob, suite)[0]:
-            data, source = blob, f"cache {cached}"
+        try:
+            with cached.open("rb") as fh:
+                blob = fh.read(FETCH_MAX_BYTES + 1)
+            if len(blob) <= FETCH_MAX_BYTES and verify_tarball(blob, suite)[0]:
+                data, source = blob, f"cache {cached}"
+        except OSError:
+            pass
     if data is None:
         try:
             data = fetch(str(suite["tarball_url"]))
@@ -242,6 +267,9 @@ def acquire(suite_name: str, suite: Dict[str, Any], dest: Path,
             return None, (f"{suite_name}: could not fetch "
                           f"{suite.get('tarball_url')}: {exc!r}")
         source = f"fetched {suite.get('tarball_url')}"
+        if len(data) > FETCH_MAX_BYTES:
+            return None, (f"{suite_name}: tarball byte ceiling "
+                          f"{FETCH_MAX_BYTES} exceeded")
         ok, why = verify_tarball(data, suite)
         if not ok:
             return None, f"{suite_name}: {why}"
@@ -632,6 +660,7 @@ endmodule
 _OBJDUMP_LINE_RE = re.compile(
     r"^\s*[0-9a-f]+:\s+(?P<hex>[0-9a-f]{4}(?:[0-9a-f]{4})?)\s+(?P<mn>\S+)",
     re.M)
+_OBJDUMP_CODE_ROW_RE = re.compile(r"^\s*[0-9a-f]+:\s+[0-9a-f]{2,}(?:\s|$)", re.M)
 _SYSTEM_MNEMONICS = ("ecall", "ebreak", "mret", "sret", "uret", "wfi")
 _TB_HALT_RE = re.compile(r"^ISA_TB HALT tohost=(?P<th>[0-9a-fA-FxXzZ]{8}) cycles=(?P<cyc>\d+)", re.M)
 _TB_HANG_RE = re.compile(r"^ISA_TB HANG cycles=(?P<cyc>\d+)", re.M)
@@ -651,7 +680,13 @@ def objdump_guard(disassembly: str, *, allow_compressed: bool,
     out: List[str] = []
     n16 = 0
     sysn: Dict[str, int] = {}
-    for m in _OBJDUMP_LINE_RE.finditer(disassembly):
+    decoded = list(_OBJDUMP_LINE_RE.finditer(disassembly))
+    code_rows = list(_OBJDUMP_CODE_ROW_RE.finditer(disassembly))
+    if not decoded:
+        out.append("objdump has 0 decoded instructions")
+    elif len(decoded) != len(code_rows):
+        out.append(f"objdump parsed {len(decoded)} of {len(code_rows)} code rows")
+    for m in decoded:
         mn = m.group("mn").lower()
         if len(m.group("hex")) == 4 or mn.startswith("c."):
             n16 += 1
@@ -785,7 +820,10 @@ def _sym(nm_text: str, name: str) -> Optional[int]:
     for line in nm_text.splitlines():
         parts = line.split()
         if len(parts) == 3 and parts[2] == name:
-            return int(parts[0], 16)
+            try:
+                return int(parts[0], 16)
+            except ValueError:
+                return None
     return None
 
 
@@ -829,17 +867,23 @@ def inside(job_path: Path) -> int:
             res["programs"][pid] = r
             _save()
             continue
-        _rc, dis = _run([TOOLS["objdump"], "-d", "-M", "no-aliases",
-                         str(d / "dut.elf")], d, log)
+        objdump_rc, dis = _run([TOOLS["objdump"], "-d", "-M", "no-aliases",
+                                str(d / "dut.elf")], d, log)
         (d / "dut.dis").write_text(dis)
-        _rc, nm = _run([TOOLS["nm"], str(d / "dut.elf")], d, log)
-        _rc, nm_ref = _run([TOOLS["nm"], str(d / "ref.elf")], d, log)
+        nm_rc, nm = _run([TOOLS["nm"], str(d / "dut.elf")], d, log)
+        nm_ref_rc, nm_ref = _run([TOOLS["nm"], str(d / "ref.elf")], d, log)
         end, th = _sym(nm, "_end"), _sym(nm, "tohost")
         sb, se = _sym(nm, "begin_signature"), _sym(nm, "end_signature")
         end_ref = _sym(nm_ref, "_end")
-        _run([TOOLS["objcopy"], "-O", "verilog", str(d / "dut.elf"),
-              str(d / "dut.hex")], d, log)
-        r["build"] = {"ok": end is not None and th is not None,
+        objcopy_rc, objcopy_log = _run(
+            [TOOLS["objcopy"], "-O", "verilog", str(d / "dut.elf"),
+             str(d / "dut.hex")], d, log)
+        tool_rcs = {"objdump_rc": objdump_rc, "nm_rc": nm_rc,
+                    "nm_ref_rc": nm_ref_rc, "objcopy_rc": objcopy_rc}
+        r["build"] = {"ok": all(rc == 0 for rc in tool_rcs.values())
+                      and end is not None and th is not None,
+                      **tool_rcs,
+                      "log": (dis + nm + nm_ref + objcopy_log)[-1500:],
                       "end": end, "tohost": th, "sigbeg": sb, "sigend": se,
                       "size": None if end is None else end - job["reset_pc"],
                       "ref_size": None if end_ref is None
@@ -1099,7 +1143,7 @@ def produce(project: Path, *, executor: Optional[Callable[[Path, Path],
         rc, transcript = (executor or docker_executor)(job_path, work)
         results = load_json(work / "results.json")
         receipt["executor_rc"] = rc
-        if not results.get("done"):
+        if rc != 0 or not results.get("done"):
             return _refuse(f"the container job did not complete (rc {rc}): "
                            f"{transcript[-800:]}")
         vb = (results.get("builds") or {}).get("staged_full") or {}
@@ -1138,6 +1182,13 @@ def judge_all(progs: List[Dict[str, Any]], results: Dict[str, Any],
                                  "role": p["role"], "judge": p["judge"],
                                  "size": b.get("size"), "arms": {}}
         per[pid] = entry
+        bad_tools = [f"{name} rc {b.get(name)}" for name in
+                     ("objdump_rc", "nm_rc", "nm_ref_rc", "objcopy_rc")
+                     if b.get(name) != 0]
+        if bad_tools:
+            entry["pre"] = (NOT_MEASURED, "build tool failed: "
+                            + ", ".join(bad_tools))
+            continue
         if not b.get("ok"):
             entry["pre"] = (NOT_MEASURED, "build failed: "
                             + str(b.get("log", ""))[-300:])
@@ -1304,12 +1355,20 @@ def _case_rows(receipt: Dict[str, Any], cases: Dict[str, List[str]],
                                   "primary_programs": len(states),
                                   "coverage": cov}
         row_verdict = verdict if verdict in (PASS, FAIL) else "NOT_EXECUTED"
+        refusal_reasons = [
+            f"{pid}: {_prog_state(e, verdict_key)[1]}"
+            for pid, e in per.items() if e["unit"] in units
+            and e["role"] == "primary"
+            and _prog_state(e, verdict_key)[0] == NOT_MEASURED
+        ]
         receipt["rows"].append({
             "id": case, "verdict": row_verdict,
             "sim_executed": verdict in (PASS, FAIL),
             "tb_file": str(project / RECEIPT_REL),
             "detail": (f"ISA suite ({receipt.get('label')}): {passed}/"
                        f"{len(states)} primary programs pass"
+                       + ("; NOT_MEASURED: " + "; ".join(refusal_reasons[:3])
+                          if refusal_reasons else "")
                        + "".join(f"; DISCLOSED {d}" for d in
                                  receipt.get("deviation_disclosures") or []))})
         if write:
