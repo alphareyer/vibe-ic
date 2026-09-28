@@ -22298,6 +22298,120 @@ def step_verilator_coverage(project: Path, top_name: str = "",
         [str(out_path.relative_to(project))])
 
 
+def _declaration_top_args(project: Path) -> List[str]:
+    """`--supplied-top <top>` for the contract emitter, or nothing: the top
+    `_v661_resolve_dut_module` resolves (synth-top override, then L9.top_module,
+    then the unique graph root), never the `--top-name` default."""
+    try:
+        _l9t = _rcvar_l9_top_ports(project)
+        _top = _v661_resolve_dut_module(project, "",
+                                        _l9t[0] if _l9t else None)
+        return ["--supplied-top", _top] if _top else []
+    except Exception:  # noqa: BLE001 — the record then says the top is unknown
+        return []
+
+
+#: Where the design's option selection is published.
+DECLARATION_REL = "plugin_output/declaration.json"
+
+
+def declaration_before_step4(project: Path) -> Dict[str, Any]:
+    """Emit the design's declaration BEFORE Step 4, from the SAME producer.
+
+    FX_P2_DECLARATION_BEFORE_STEP4. Step 4's gate narrows the conditional L10
+    cases (`applies_when`, R-0915-102) against the design's own selection in
+    `plugin_output/declaration.json`, but `step_arith_declaration_emit` runs
+    long after Step 4, so on a first run the gate could never see a selection
+    the producer was already able to derive -- only a re-run tree could. The
+    contract-driven producer (`spec_declaration_emit`) reads only the design
+    input (the spec's own designations), the staged / authored RTL (`key =
+    value` comment blocks) and a prior declaration; nothing Step 4 or
+    synthesis produces. So it is asked here too, exactly as the later step
+    asks it.
+
+    FAIL-CLOSED, AS THE PRODUCER IS. When it cannot determine every REQUIRED
+    choice it writes nothing, and nothing changes for Step 4. MEASURED on a
+    fresh subservient copy (input only, 2026-09-28): 7 REQUIRED choices
+    undetermined -- `isa_extensions` is a menu its spec never designates, and
+    the input says the plugin declares it -- so no declaration exists before
+    Step 4 or after it, and the conditional cases stay where R-0915-102 puts
+    them. Returns what happened, for Step 4's record and for the later
+    agreement check (`declaration_disagreement`)."""
+    out_p = Path(project) / DECLARATION_REL
+    prog = PROGRAMS_DIR / "spec_declaration_emit.py"
+    rec: Dict[str, Any] = {"producer": "spec_declaration_emit",
+                           "emitted": False}
+    if not prog.is_file():
+        rec["reason"] = "the contract-driven producer is not shipped"
+        return rec
+    try:
+        cp = subprocess.run([sys.executable, str(prog), str(project),
+                             *_declaration_top_args(project)],
+                            capture_output=True, text=True, timeout=120)
+    except Exception as exc:  # noqa: BLE001 — named in the record
+        rec["reason"] = f"could not run: {type(exc).__name__}: {exc}"
+        return rec
+    rec["rc"] = cp.returncode
+    if cp.returncode == 0 and out_p.is_file():
+        try:
+            fields = json.loads(out_p.read_text())
+        except (OSError, ValueError) as exc:
+            rec["reason"] = f"wrote an unreadable {DECLARATION_REL}: {exc}"
+            return rec
+        if isinstance(fields, dict):
+            rec.update(emitted=True, fields=fields)
+            return rec
+    rec["reason"] = ((cp.stdout or cp.stderr or "").strip()
+                     .replace("\n", " ")[:300]
+                     or f"rc={cp.returncode}, no declaration written")
+    return rec
+
+
+def declaration_disagreement(early: Dict[str, Any],
+                             late: Any) -> List[str]:
+    """Every field the pre-Step-4 declaration stated that the later emission
+    drops or changes. Empty when the later one is identical or a superset --
+    the only relation in which Step 4 judged against the same selection the
+    run publishes."""
+    if not isinstance(late, dict):
+        return [f"the later {DECLARATION_REL} is absent or unreadable"]
+    out: List[str] = []
+    for key, value in early.items():
+        if key not in late:
+            out.append(f"{key}: dropped (was {value!r})")
+        elif late[key] != value:
+            out.append(f"{key}: {value!r} -> {late[key]!r}")
+    return out
+
+
+def _refuse_a_disagreeing_declaration(row: "StepResult", early: Any,
+                                      project: Path) -> "StepResult":
+    """Row 33 against the pre-Step-4 emission: a superset stands; anything
+    else REFUSES, naming each field, because Step 4 was judged against a
+    selection this run no longer publishes."""
+    if not (isinstance(early, dict) and early.get("emitted")):
+        return row
+    try:
+        late = json.loads((Path(project) / DECLARATION_REL).read_text())
+    except (OSError, ValueError):
+        late = None
+    diff = declaration_disagreement(early.get("fields") or {}, late)
+    if not diff:
+        row.detail += ("; agrees with the declaration emitted before Step 4 "
+                       "(identical or a superset)")
+        return row
+    return StepResult(
+        "arith_declaration_emit", "FAIL", row.duration_s,
+        "DECLARATION_DISAGREES_WITH_STEP4: the declaration emitted before "
+        "Step 4 and the one emitted now differ, so Step 4 judged its "
+        "conditional cases against a selection this run no longer publishes: "
+        + "; ".join(diff[:8]) + (f" (+{len(diff) - 8} more)"
+                                 if len(diff) > 8 else ""),
+        row.output_files,
+        extras={"declaration_disagreement": diff,
+                "finding": "DECLARATION_DISAGREES_WITH_STEP4"})
+
+
 def step_arith_declaration_emit(project: Path) -> StepResult:
     """Run the deterministic `plugin_output/declaration.json` emitter.
 
@@ -22361,15 +22475,7 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
     """
     t0 = time.time()
     out_p = project / "plugin_output" / "declaration.json"
-    _top_args: List[str] = []
-    try:
-        _l9t = _rcvar_l9_top_ports(project)
-        _top = _v661_resolve_dut_module(project, "",
-                                        _l9t[0] if _l9t else None)
-        if _top:
-            _top_args = ["--supplied-top", _top]
-    except Exception:  # noqa: BLE001 — the record then says the top is unknown
-        _top_args = []
+    _top_args = _declaration_top_args(project)
 
     def _fields_of(p: Path) -> str:
         try:
@@ -25100,10 +25206,17 @@ def main() -> int:
     # stack paths have had their chance to create functional evidence, and
     # before synthesis/backend work can be mistaken for a certified Phase-2
     # result. The StepResult is blocking in the aggregate verdict.
+    _early_declaration: Optional[Dict[str, Any]] = None
     if _after_exit("sim"):
         plan.append(_exit_sentinel("step4_functional_evidence"))
     else:
-        plan.append(step_step4_functional_evidence(project, ic_class))
+        # FX_P2_DECLARATION_BEFORE_STEP4 — the design's selection, if the
+        # producer can derive it yet, exists before Step 4 reads it.
+        _early_declaration = declaration_before_step4(project)
+        _s4 = step_step4_functional_evidence(project, ic_class)
+        _s4.extras["declaration_before_step4"] = {
+            k: v for k, v in _early_declaration.items() if k != "fields"}
+        plan.append(_s4)
 
     # Step 4 — yosys offline synth (Docker fallback if host yosys absent)
     # PRE-FLIGHT (canonical step 9). Step 9 also declares step 7's
@@ -25323,7 +25436,8 @@ def main() -> int:
             "It is derived from the design's own RTL and the oracle TB's measured "
             "framing, not from any step's state, and the manifests this run does "
             "owe read it.")
-    plan.append(step_arith_declaration_emit(project))
+    plan.append(_refuse_a_disagreeing_declaration(
+        step_arith_declaration_emit(project), _early_declaration, project))
     # MEASURE coverage before the manifests/audit read it. Nothing used to run
     # the measurement at all — see step_verilator_coverage's docstring.
     if _after_exit("sim"):
