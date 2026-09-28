@@ -30,6 +30,17 @@ import flow_phase_attribution as fpa                    # noqa: E402
 import task_nature_route as tnr                         # noqa: E402
 from _hostpaths import require_repo                     # noqa: E402
 import _runtime_pair_fixture as _rt_pair                # noqa: E402
+import _ai_route_fixture as _ai_route                    # noqa: E402
+
+
+def _solve_after_ai_route(bench, dataset, run, *, jobs=1,
+                          heavy_jobs=None, worker_threads=0):
+    assert bd.cmd_solve(bench, str(dataset), str(run), jobs=jobs,
+                        heavy_jobs=heavy_jobs,
+                        worker_threads=worker_threads) == 2
+    return _ai_route.complete_ai_routes(bd, bench, dataset, run, jobs=jobs,
+                                        heavy_jobs=heavy_jobs,
+                                        worker_threads=worker_threads)
 
 
 def _phase_record() -> dict:
@@ -56,9 +67,10 @@ def _install_common_fakes(monkeypatch) -> None:
     monkeypatch.setattr(
         tnr, "classify_task_nature",
         lambda *_a, **_k: {"nature": "fixture", "entry_nature": "fixture",
-                           "plugin_entry": {}})
+                           "route": "plugin_loop", "plugin_entry": {}})
     monkeypatch.setattr(tnr, "NATURE_ENTRY", {
-        "fixture": {"entry_step": "D1", "default_evidence": "RTL_SIM"}})
+        "fixture": {"entry_step": "D1", "default_evidence": "RTL_SIM",
+                    "route": "plugin_loop", "plugin_entry": {}}})
     monkeypatch.setattr(tnr, "EVIDENCE_EXIT", {
         "RTL_SIM": {"exit_step": "8"}})
     monkeypatch.setattr(tnr, "flow_step_ids", lambda: ["D1", "2", "8", "15"])
@@ -73,6 +85,10 @@ def _install_solve_fakes(monkeypatch, intervals: dict[str, tuple[float, float]],
         run.mkdir(parents=True, exist_ok=True)
         for child in ("projects", "responses", "reports", "transcripts"):
             (run / child).mkdir(parents=True, exist_ok=True)
+        bd._atomic_write_json(run / ".bench_config.json", {
+            "bench": _bench, "dataset": str(Path(_dataset).resolve()),
+            "format": _fmt, "diagnostic_limit": int(_limit or 0),
+        })
 
     monkeypatch.setattr(bd, "_prepare_general_solve_run", prepare)
     monkeypatch.setattr(
@@ -225,9 +241,9 @@ def test_solve_jobs_overlap_and_commit_shared_artifacts_in_dataset_order(
     serial = tmp_path / "serial"
     parallel = tmp_path / "parallel"
 
-    assert bd.cmd_solve(
+    assert _solve_after_ai_route(
         "rtllm", str(dataset), str(serial), jobs=1) == 1
-    assert bd.cmd_solve(
+    assert _solve_after_ai_route(
         "rtllm", str(dataset), str(parallel), jobs=2) == 1
 
     assert _overlap(intervals["parallel:p1"], intervals["parallel:p2"])
@@ -257,6 +273,11 @@ def test_solve_jobs_overlap_and_commit_shared_artifacts_in_dataset_order(
             f"the {label} workers did not run, so comparing the two reports "
             f"proves nothing: {errored}\n"
             + json.dumps(report["results"], indent=1)[:1200])
+    # Route responses bind the distinct run roots, so their hashes differ;
+    # compare execution outcomes after excluding that expected identity.
+    for report in (serial_report, parallel_report):
+        for row in report["results"]:
+            row["routing_verdict"].pop("ai_route_response_sha256", None)
     assert parallel_report == serial_report
     for name in (bd._BACKUP_WORKLIST, bd._REVIEW_WORKLIST,
                  bd._ACCEPTANCE_REPORT):
@@ -307,7 +328,7 @@ def test_one_runner_worker_error_is_loud_and_does_not_erase_other_results(
     dataset.mkdir()
     run = tmp_path / "worker-error"
 
-    assert bd.cmd_solve("rtllm", str(dataset), str(run), jobs=2) == 1
+    assert _solve_after_ai_route("rtllm", dataset, run, jobs=2) == 1
     results = json.loads((run / "solve_report.json").read_text())["results"]
     assert [row["id"] for row in results] == ["p1", "p2"]
     assert results[0]["worker_status"] == "ERROR"
@@ -335,7 +356,7 @@ def test_heavy_jobs_and_worker_threads_are_independent_resource_bounds(
     dataset.mkdir()
     run = tmp_path / "bounded"
 
-    assert bd.cmd_solve(
+    assert _solve_after_ai_route(
         "rtllm", str(dataset), str(run), jobs=2, heavy_jobs=1,
         worker_threads=3) == 1
     assert not _overlap(intervals["bounded:p1"], intervals["bounded:p2"])
