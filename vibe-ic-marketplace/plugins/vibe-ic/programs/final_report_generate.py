@@ -213,7 +213,7 @@ def section_heading(canonical: str) -> str:
 #
 # Order: full pass, then qualified done-claims, then excused, then non-green.
 ROLLUP_ORDER = (
-    # R-0915-85 — FIVE SLOTS, in the order this list has always had: full pass,
+    # R-0915-85 — full pass, qualified done-claims, excused, then non-green.
     # then the qualified done-claim, then excused, then non-green. The
     # eighteen-word ladder it replaces is in the history above and every one of
     # its entries is now either one of these or a `reason_class` / `Disclosure`
@@ -228,6 +228,7 @@ ROLLUP_ORDER = (
     # it beside FAIL says what the word adjudicates instead of the opposite.
     # `NOT_APPLICABLE` keeps the excused slot it always had.
     "PASS",
+    "PASS_WITH_ATTRIBUTION",
     "PASS_WITH_WAIVERS",
     "NOT_APPLICABLE",
     "NOT_MEASURED",
