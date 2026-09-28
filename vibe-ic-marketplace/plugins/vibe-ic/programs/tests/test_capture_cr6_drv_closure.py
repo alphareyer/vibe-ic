@@ -55,6 +55,20 @@ def test_drv_census_requires_executed_complete_three_axis_commands():
     assert _sequence(edit + "# report_check_types -max_slew -max_capacitance -max_fanout\n")["verdict"] != "PASS"
 
 
+def test_braced_data_does_not_clear_unchecked_drv_axes():
+    edit = "repair_timing -setup\n"
+    axes = "report_check_types -max_slew -max_capacitance -max_fanout"
+    for data in (f"puts {{{axes}}}\n", f"set reminder {{{axes}}}\n"):
+        result = _sequence(edit + data)
+        assert result["verdict"] == "FAIL"
+        assert result["missing_axes"] == ["max_capacitance", "max_fanout", "max_slew"]
+    # The same words are a real query when catch executes them as a script.
+    assert _sequence(edit + f"catch {{{axes}}}\n")["verdict"] == "PASS"
+    assert _sequence(edit + f"if {{[catch {{{axes}}} err]}} {{ puts err }}\n")[
+        "verdict"] == "PASS"
+    assert _sequence(edit + f"if {{0}} {{{axes}}}\n")["verdict"] == "FAIL"
+
+
 def test_clean_input_skips_late_repair_and_one_violation_runs():
     clean = {"setup_ws_min": 0.3, "hold_ws_min": 0.2, "drv_count": 0}
     assert _trigger(**clean)["action"] == "SKIP"

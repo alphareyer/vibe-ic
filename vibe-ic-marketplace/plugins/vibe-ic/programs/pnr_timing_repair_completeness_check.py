@@ -87,14 +87,14 @@ while every deck that placed or optimised carried the chain. The rule reads
 what the deck does, not its name; see `_checkpoint_session_without_timing_work`.
 Every audited deck also carries its sha256, so the verdict names the bytes.
 
-KNOWN HARDENING GAP (disclosed, not fixed here)
------------------------------------------------
-This is a token audit, not a Tcl interpreter. Two shapes still read as present:
-a chain inside a disabled ``if {0} { ... }`` block, and the command names
-quoted inside a ``puts "TODO: add set_wire_rc …"`` string. Both are false
-PASSes on a script a human wrote to be obviously dead. The gate is still the
-declared inverse of ``openroad_tcl_deprecation_check`` and still catches the
-absence it was written for (see the negative control in the PR that wired it).
+KNOWN HARDENING GAP
+-------------------
+The blocking setup-chain audit below remains a token audit, not a Tcl
+interpreter. A chain inside a disabled ``if {0} { ... }`` block or quoted in a
+``puts`` string can still satisfy that separate audit. The advisory DRV
+ordering check parses command words and executable catch/script bodies, so
+braced ``puts``/``set`` data cannot masquerade as a DRV census. Neither static
+check proves that a conditional command ran; the tool report is the authority.
 
 CLI::
 
@@ -223,6 +223,146 @@ def _checkpoint_session_without_timing_work(text: str) -> bool:
             and not _TIMING_BEARING.search(active))
 
 
+def _tcl_commands(script: str, base: int = 0) -> List[Tuple[int, str]]:
+    """Split commands at Tcl separators outside braced/quoted/script words."""
+    commands = []
+    start = 0
+    braces = brackets = 0
+    quoted = escaped = False
+    for i, ch in enumerate(script):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+        elif ch == '"' and braces == 0:
+            quoted = not quoted
+        elif not quoted:
+            if ch == "{":
+                braces += 1
+            elif ch == "}" and braces:
+                braces -= 1
+            elif ch == "[" and braces == 0:
+                brackets += 1
+            elif ch == "]" and braces == 0 and brackets:
+                brackets -= 1
+            elif ch in ";\n" and braces == brackets == 0:
+                if script[start:i].strip():
+                    commands.append((base + start, script[start:i]))
+                start = i + 1
+    if script[start:].strip():
+        commands.append((base + start, script[start:]))
+    return commands
+
+
+def _tcl_words(command: str, base: int) -> List[Tuple[str, str, int]]:
+    """Return word kind, content and source offset; braces are data by default."""
+    words = []
+    i = 0
+    while i < len(command):
+        while i < len(command) and command[i].isspace():
+            i += 1
+        if i == len(command):
+            break
+        start = i
+        if command[i] in '{"':
+            opening = command[i]
+            closing = "}" if opening == "{" else '"'
+            depth = 1
+            i += 1
+            content_start = i
+            while i < len(command) and depth:
+                if command[i] == "\\":
+                    i += 2
+                    continue
+                if command[i] == opening and opening == "{":
+                    depth += 1
+                elif command[i] == closing:
+                    depth -= 1
+                i += 1
+            words.append(("braced" if opening == "{" else "quoted",
+                          command[content_start:i - 1], base + content_start))
+            continue
+        braces = brackets = 0
+        while i < len(command):
+            ch = command[i]
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == "{" and brackets:
+                braces += 1
+            elif ch == "}" and braces:
+                braces -= 1
+            elif ch == "[" and not braces:
+                brackets += 1
+            elif ch == "]" and not braces and brackets:
+                brackets -= 1
+            elif ch.isspace() and braces == brackets == 0:
+                break
+            i += 1
+        words.append(("bare", command[start:i], base + start))
+    return words
+
+
+def _tcl_script_events(script: str, base: int = 0) -> List[Tuple[int, str, set[str]]]:
+    """Find commands, including executed catch bodies and substitutions.
+
+    A braced word is literal data unless its command treats it as a script.
+    This keeps `puts {report_check_types ...}` from becoming a DRV census.
+    """
+    events = []
+
+    def substitutions(word: Tuple[str, str, int]) -> None:
+        _, content, offset = word
+        for match in re.finditer(r"\[([^\[\]]+)\]", content, re.S):
+            events.extend(_tcl_script_events(match.group(1), offset + match.start(1)))
+
+    for offset, command in _tcl_commands(script, base):
+        words = _tcl_words(command, offset)
+        if not words or words[0][0] != "bare" or words[0][1].startswith("#"):
+            continue
+        name = words[0][1]
+        if name in ("repair_timing", "repair_antennas", "repair_design",
+                    "report_check_types"):
+            flags = {word[1][1:] for word in words[1:]
+                     if word[0] == "bare" and word[1].startswith("-")}
+            events.append((words[0][2], name, flags))
+        if name in ("catch", "eval", "uplevel"):
+            body = next((word for word in words[1:] if word[0] == "braced"), None)
+            if body:
+                events.extend(_tcl_script_events(body[1], body[2]))
+        elif name == "if":
+            index = 1
+            while index < len(words):
+                if words[index][1] == "elseif":
+                    index += 1
+                    continue
+                if words[index][1] == "else":
+                    index += 1
+                    if index < len(words) and words[index][0] == "braced":
+                        events.extend(_tcl_script_events(words[index][1], words[index][2]))
+                    break
+                condition = words[index]
+                substitutions(condition)
+                index += 1
+                if index < len(words):
+                    body = words[index]
+                    if body[0] == "braced" and condition[1].strip() != "0":
+                        events.extend(_tcl_script_events(body[1], body[2]))
+                    index += 1
+        elif name in ("while", "foreach", "for"):
+            for word in words[1:-1]:
+                if word[0] != "braced":
+                    substitutions(word)
+            if len(words) > 1 and words[-1][0] == "braced":
+                events.extend(_tcl_script_events(words[-1][1], words[-1][2]))
+        else:
+            for word in words[1:]:
+                if word[0] != "braced":
+                    substitutions(word)
+    return events
+
+
 def drv_sequence(text: str) -> Dict[str, Any]:
     """Advisory ordering proof for the last cell-changing repair.
 
@@ -232,16 +372,10 @@ def drv_sequence(text: str) -> Dict[str, Any]:
     sign-off report remains the authority for that verdict.
     """
     active = _strip_commented(text)
-    # Commands may be nested in Tcl catch braces or separated by semicolons.
-    # An unanchored token search also accepts puts "report_check_types", which
-    # is merely a string and cannot have queried OpenROAD.
-    command = re.compile(
-        r"(?m)(?:^|[;{])\s*(repair_timing|repair_antennas|repair_design|"
-        r"report_check_types)\b([^\n;}]*)")
-    events = [(m.start(), m.group(1), m.group(2)) for m in command.finditer(active)]
+    events = sorted(_tcl_script_events(active), key=lambda event: event[0])
     pending = None
     axes = set()
-    for _, kind, options in events:
+    for _, kind, flags in events:
         if kind in ("repair_timing", "repair_antennas"):
             pending = kind
             axes.clear()
@@ -249,8 +383,7 @@ def drv_sequence(text: str) -> Dict[str, Any]:
             pending = None
             axes.clear()
         elif kind == "report_check_types" and pending:
-            axes.update(flag for flag in ("max_slew", "max_capacitance", "max_fanout")
-                        if re.search(rf"(?<!\S)-{flag}(?!\S)", options))
+            axes.update(flags & {"max_slew", "max_capacitance", "max_fanout"})
             if len(axes) == 3:
                 pending = None
     return {"verdict": "FAIL" if pending else "PASS",
