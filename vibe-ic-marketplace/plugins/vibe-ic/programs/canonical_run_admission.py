@@ -172,7 +172,12 @@ def build_identity(project: Path, span: str, *, container_image: str,
 
 
 def identity_sha256(identity: Dict[str, Any]) -> str:
-    return _sha256_bytes(json.dumps(identity, sort_keys=True,
+    # The excluded names are an audit disclosure, not design evidence. Keep
+    # them visible in `identity` and the ledger, but adding an oracle file
+    # must not buy a fresh expensive run when every consumed input is fixed.
+    hashable = {key: value for key, value in identity.items()
+                if key != "source_input_excluded_oracle"}
+    return _sha256_bytes(json.dumps(hashable, sort_keys=True,
                                     separators=(",", ":")).encode("utf-8"))
 
 

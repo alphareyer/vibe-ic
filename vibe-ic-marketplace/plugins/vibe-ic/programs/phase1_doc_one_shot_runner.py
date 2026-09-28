@@ -7723,17 +7723,36 @@ def extract_text_pipeline(project: Path,
 
     out: Dict[str, str] = {}
     skipped: List[Dict[str, str]] = []
+    excluded_oracle: List[Dict[str, str]] = []
 
     import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
     for f in sorted(src_dir.rglob("*")):
         if not f.is_file():
             continue
+        # Use the same cache name on both the allowed and denied paths. A
+        # pre-fix run may have extracted this file already; declining to open
+        # it now must also remove Phase 1's own stale extract.
+        rel = f.relative_to(src_dir)
+        if rel.parent == Path("."):
+            stem_out = f.stem
+        else:
+            stem_out = (str(rel.parent).replace("/", "__")
+                        + "__" + f.stem)
+        if len(stem_out) > 200:
+            stem_out = stem_out[:200]
+        target = dst_dir / (stem_out + ".txt")
         # An oracle tree staged under input/docs (golden/, expected/ ...) is
-        # judged by NAME and never extracted; the skip is disclosed.
+        # judged by NAME and never extracted. It was never an intended input
+        # document, so it must not enter the ingester's UNREAD skip bucket.
         _deny = _rfb.design_input_denial(project, f)
         if _deny:
-            skipped.append({"path": str(f.relative_to(project)),
-                            "reason": _deny})
+            try:
+                target.unlink(missing_ok=True)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"cannot remove excluded Phase-1 extract {target}: {exc}") from exc
+            excluded_oracle.append({"path": str(f.relative_to(project)),
+                                    "reason": _deny})
             continue
         suf = f.suffix.lower()
         if suf in _SKIP_EXT:
@@ -7760,20 +7779,6 @@ def extract_text_pipeline(project: Path,
                 "reason": reason,
             })
             continue
-        # Encode subdir relative to src_dir into the output filename to
-        # avoid collisions between same-basename files in different
-        # subdirs. `__` is the separator (POSIX-safe + visible).
-        rel = f.relative_to(src_dir)
-        if rel.parent == Path("."):
-            stem_out = f.stem
-        else:
-            stem_out = (str(rel.parent).replace("/", "__")
-                        + "__" + f.stem)
-        # Defensive: cap output filename length so deep nested trees
-        # don't hit OS path-length limits.
-        if len(stem_out) > 200:
-            stem_out = stem_out[:200]
-        target = dst_dir / (stem_out + ".txt")
         # Cache short-circuit (unchanged from prior behaviour).
         if not force and target.exists() and target.stat().st_size > 0:
             try:
@@ -7893,6 +7898,11 @@ def extract_text_pipeline(project: Path,
                 if "readme" not in cand.name.lower():
                     continue
                 if cand.suffix.lower() not in _ROOT_README_EXTS:
+                    continue
+                _deny = _rfb.design_input_denial(project, cand)
+                if _deny:
+                    excluded_oracle.append({"path": str(cand.relative_to(project)),
+                                            "reason": _deny})
                     continue
                 try:
                     text = cand.read_text(encoding="utf-8", errors="ignore")
@@ -8099,6 +8109,11 @@ def extract_text_pipeline(project: Path,
                     # nested layer (boards/<board>/<rev>/README.md).
                     if len(rel.parts) > 4:
                         continue
+                    _deny = _rfb.design_input_denial(project, readme)
+                    if _deny:
+                        excluded_oracle.append({"path": rel.as_posix(),
+                                                "reason": _deny})
+                        continue
                     if any(seg in _v1_6_343_skip_segments
                            for seg in rel.parts):
                         continue
@@ -8286,12 +8301,16 @@ def extract_text_pipeline(project: Path,
                   file=sys.stderr)
             continue
 
-    # Emit the skip log. Empty list = clean run; non-empty = audit
-    # surface for what was visited but not extracted.
+    # Emit the skip log. `skipped` describes intended documents the converter
+    # could not render; §4.05 refusals have their own disclosure and cannot
+    # turn a complete design input into an UNREAD finding.
     # #497: stamp the per-design identity so an honestly-empty skip log
     # (the common clean-run shape) DIFFERS per design and is not flagged
     # as a canned cross-design report. At Step 1 only the project name is
     # known (L docs are generated later); that already differs per design.
+    excluded_oracle_rows = sorted(
+        {row["path"]: row for row in excluded_oracle}.values(),
+        key=lambda row: row["path"])
     skip_log_payload = json.dumps({
         "_schema_version": "1",
         "_comment": (
@@ -8301,6 +8320,8 @@ def extract_text_pipeline(project: Path,
             "skip (binary/archive/raster) or converter gap — investigate."),
         "design_identity": _design_identity_fields(project),
         "skipped": skipped,
+        "excluded_oracle": excluded_oracle_rows,
+        "excluded_oracle_count": len(excluded_oracle_rows),
         "total_visited": len(out) + len(skipped),
         "total_extracted": len(out),
     }, indent=2, ensure_ascii=False) + "\n"
@@ -9083,6 +9104,7 @@ def _staged_pdk_enablement_files(project: Path) -> List[str]:
     """#513 — project-relative paths of the PDK enablement the design
     stages under its own `input/pdk*/` tree, sorted (deterministic) and
     capped. Empty list when the design stages nothing."""
+    import _reference_flow_boundary as _rfb  # §4.05 authority
     out: List[str] = []
     for pat in _STAGED_PDK_GLOBS:
         try:
@@ -9096,6 +9118,8 @@ def _staged_pdk_enablement_files(project: Path) -> List[str]:
             except OSError:
                 continue
             if f.suffix.lower() not in _STAGED_PDK_SUFFIXES:
+                continue
+            if _rfb.design_input_denial(project, f):
                 continue
             try:
                 out.append(str(f.relative_to(project)))
@@ -9190,6 +9214,7 @@ def _declared_library_names(project: Path, files: List[str]):
     library name in its own header. Deterministic (input order kept),
     bounded per file and in file count. A file whose header is not
     Liberty contributes nothing — no guess is made from its name."""
+    import _reference_flow_boundary as _rfb  # §4.05 authority
     out: List[Tuple[str, str]] = []
     opened = 0
     for rel in files:
@@ -9198,6 +9223,8 @@ def _declared_library_names(project: Path, files: List[str]):
         if not rel.lower().endswith(_STAGED_CONTENT_SUFFIXES):
             continue
         f = project / rel
+        if _rfb.design_input_denial(project, f):
+            continue
         try:
             with f.open("rb") as fh:
                 head = fh.read(_STAGED_CONTENT_HEAD_BYTES)

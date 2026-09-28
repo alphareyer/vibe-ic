@@ -55,6 +55,7 @@ ORACLE = {
         "module dut(input h2d_t gold_h2d, output d2h_t gold_d2h);\nendmodule\n",
     "input/pdk/verilog/golden/cells.v":
         "module g(input a, output y);\nspecify\nendspecify\nendmodule\n",
+    "input/pdk/liberty/typ_ref.lib": "library(oracle_cells) {}\n",
 }
 
 LEGIT = {
@@ -63,6 +64,7 @@ LEGIT = {
     "input/design_src/rtl/dut.sv":
         "module dut(input h2d_t h2d_i, output d2h_t d2h_o);\nendmodule\n",
     "input/pdk/verilog/cells.v": "module g(input a, output y);\nendmodule\n",
+    "input/pdk/liberty/typ.lib": "library(design_cells) {}\n",
     "phase3/stage3/pnr/openroad.log": "",         # body written per run
     "phase2/stage1/rtl/top.v":
         "module top(input clk, output q);\nassign q = clk;\nendmodule\n",
@@ -180,30 +182,13 @@ READERS = {
         "phase1_doc_one_shot_runner", "m.gen_l11_otp_content(P, {})", set()),
     "_apply_alias_normalization": (
         "phase1_doc_one_shot_runner", "m._apply_alias_normalization(P, {})", set()),
-    # These read no file under input/ by construction (see the report): the
-    # flow's own products (phase2/stage1/rtl, synth/dft dirs), a caller-given
-    # rtl_dir, or fixed NON-recursive PDK globs (input/pdk/liberty/*typ*.lib,
-    # input/otp/*.hex) that no oracle TREE can reach. Driven so a future read
-    # that does reach one is caught.
+    # These read products or use non-recursive PDK globs. The two liberty
+    # resolvers below return paths rather than opening them, so their values
+    # are pinned after the reader matrix against an oracle-named sibling.
     "_v629_rtl_top_ports": (
         "design_one_shot_runner", "m._v629_rtl_top_ports(P, 'top')", set()),
-    "_autoemit_chip_top_wrapper": (
-        "design_one_shot_runner",
-        "m._autoemit_chip_top_wrapper(P, P / 'phase2/stage1/rtl', 'top')", set()),
-    "step_dft_lec_chain": (
-        "design_one_shot_runner",
-        "m.step_dft_lec_chain(P, 'top', 'none', 'unknown_protocol_class')", set()),
-    "_design_top_input_ports": (
-        "phase3_one_shot_runner", "m._design_top_input_ports(P, 'top')", set()),
     "step_synth": (
         "phase3_one_shot_runner", "m.step_synth(P, 'top', PDK(P), 'none')", set()),
-    "step_prelayout_signoff": (
-        "phase3_one_shot_runner",
-        "m.step_prelayout_signoff(P, 'top', PDK(P), 'none')", set()),
-    "_emit_declared_process_sta": (
-        "phase3_one_shot_runner",
-        "m._emit_declared_process_sta(P, 'top', PDK(P), 'none', P / 'x.spef', "
-        "P / 'reports/r.rpt', [], ['typ'])", set()),
     "_augment_defaults": (
         "sdd_atpg_run",
         "vars((lambda a: (m._augment_defaults(P, a), a)[1])(__import__('types')"
@@ -211,6 +196,16 @@ READERS = {
         "'sta_netlist', 'spef')})))", set()),
     "_resolve_design_liberty": (
         "transition_fault_atpg_run", "m._resolve_design_liberty(P, None)", set()),
+}
+
+# These five returned before reaching a read on this fixture. They are
+# reviewed statically, not counted among the exercised READERS above.
+STATIC_ONLY = {
+    "_autoemit_chip_top_wrapper": "no wrapper source to emit",
+    "step_dft_lec_chain": "container none returns NOT_MEASURED first",
+    "_design_top_input_ports": "no qualifying top port source",
+    "step_prelayout_signoff": "container none returns NOT_MEASURED first",
+    "_emit_declared_process_sta": "no process STA input to execute",
 }
 
 #: Readers that raise or exit by design on this fixture; their opens still count.
@@ -334,6 +329,17 @@ def test_run_identity_ignores_oracle_edits_and_discloses_them(observed):
     assert "input/constraints/golden_timing.sdc" in got["excluded"]
     assert not any(e.startswith(("input/docs/L1", "input/rtl/top.v"))
                    for e in got["excluded"])
+
+
+def test_liberty_resolvers_return_design_path_with_oracle_sibling(
+        observed, tmp_path):
+    import _reference_flow_boundary as rfb
+    expected = "input/pdk/liberty/typ.lib"
+    denied = "input/pdk/liberty/typ_ref.lib"
+    assert rfb.design_input_denial(tmp_path, tmp_path / denied)
+    assert observed["_augment_defaults"]["value"]["liberty"] == expected
+    assert observed["_resolve_design_liberty"]["value"] == expected
+    assert rfb.design_input_denial(tmp_path, tmp_path / expected) is None
 
 
 def test_tb_resolves_modules_from_the_design_input_only(observed):
