@@ -480,6 +480,7 @@ def test_librelane_views_reach_the_paths_the_direct_route_reads(tmp_path, monkey
     run = _run_split(tmp_path, monkeypatch)
     assert run.rc == 0
     assert run.seen['steps'] == ['OpenROAD.CTS', 'Vibeic.ClockPathDriveSizing',
+                                 'Vibeic.ExternalCaptureLaunchRetap',
                                  'OpenROAD.ResizerTimingPostCTS'] + ['OpenROAD.STAMidPNR'] * 3
     assert run.seen['kwargs']['lane'] == '19-cts-hold'
     # head, then the tail appended to the same log, never the unsplit deck
@@ -489,18 +490,22 @@ def test_librelane_views_reach_the_paths_the_direct_route_reads(tmp_path, monkey
     receipt = json.loads((run.project / llev.RECEIPT_REL).read_text())
     base = run.project / 'phase3/librelane/19-cts-hold'
     assert (run.out_dir / 'post_cts.def').read_text() == \
-        (base / '02-vibeic-clockpathdrivesizing/chip_top.def').read_text()
+        (base / '03-vibeic-externalcapturelaunchretap/chip_top.def').read_text()
     assert (run.out_dir / 'post_hold.odb').read_text() == \
-        (base / '03-openroad-resizertimingpostcts/chip_top.odb').read_text()
+        (base / '04-openroad-resizertimingpostcts/chip_top.odb').read_text()
     assert (run.project / 'phase3/stage3/cts/clock_tree.rpt').read_text().startswith(
         'Total number of Buffers Inserted: 7.')
     for view in receipt['views'].values():
         assert contract.digest(run.project / view['dest']) == view['dest_sha256']
-    assert receipt['measured_state'].endswith('06-openroad-stamidpnr/state_out.json')
+    assert receipt['measured_state'].endswith('07-openroad-stamidpnr/state_out.json')
     # the per-corner STA configs each name one corner
-    assert [json.loads(c.read_text())['PNR_CORNERS'] for c in run.seen['configs'][3:]] == \
+    assert [json.loads(c.read_text())['PNR_CORNERS'] for c in run.seen['configs'][4:]] == \
         [[c] for c in CORNERS]
     sizing = json.loads(run.seen['configs'][1].read_text())
+    assert sizing['PNR_CORNERS'] == CORNERS
+    retap = json.loads(run.seen['configs'][2].read_text())
+    assert retap['PNR_CORNERS'] == CORNERS
+    assert Path(retap['VIBEIC_CLKPATH_PRECTS_INSTANCES']).is_file()
     assert Path(sizing['VIBEIC_CLKPATH_SIZING_TCL']).read_text() == \
         runner._clock_path_drive_sizing_tcl()
     log = (run.out_dir / 'openroad.log').read_text()

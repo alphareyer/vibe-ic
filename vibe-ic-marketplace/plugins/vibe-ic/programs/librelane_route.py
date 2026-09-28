@@ -670,6 +670,7 @@ def execute(
             try:
                 post32 = step32(project=project, pdk=pdk, image=image,
                                 pdk_root=Path(pdk_root), sdc=sdc, deck=deck,
+                                container=container,
                                 route_state=(arms[selected]["final"]
                                              if selected in arms else None),
                                 route_views={k: views[k] for k in ("odb", "def")},

@@ -153,6 +153,23 @@ _NOT_PROSE: Dict[str, str] = {
         "The field is a number, so no denial can be spelled in it, and a corner "
         "with no such line is not read as no-slack: it REFUSES "
         "(LL_STA_CORNER_SLACK_MISSING).",
+    "_native_postroute_timing::measure":
+        "ONE OPENSTA MACHINE RECORD PER CHECK. `report_worst_slack -max/-min "
+        "-digits 6` writes `worst slack max|min <number>` at the start and end "
+        "of a line. The only payload is a numeric slack; a denial cannot be "
+        "spelled in that grammar. Both checks must be present for every "
+        "declared corner or NATIVE_POSTROUTE_SLACK_MISSING refuses the scene. "
+        "Falsifier: test_sub_ss_external_capture_closure.py::"
+        "test_native_slack_requires_both_numeric_tool_records.",
+    "_native_postroute_timing::_measurement_sdc":
+        "ONE TCL COMMAND GRAMMAR, NO SENTENCE. Only whole lines beginning "
+        "`set_timing_derate -early|-late <number>` are parsed from OpenROAD "
+        "write_sdc output; the remainder is an optional Tcl comment. A "
+        "different value, duplicate command, incomplete pair, or unsupported "
+        "command shape REFUSES rather than becoming an OCV measurement. "
+        "No negated declaration exists in this command grammar. Falsifier: "
+        "test_t102_librelane_postroute_repair.py::"
+        "test_native_sdc_derate_parser_refuses_nonformal_commands.",
     "post_route_signoff_corner_check::evaluate_tool":
         "ONE OPENSTA RECORD. `worst slack max|min <v>` is report_worst_slack's "
         "fixed output in each STAPostPNR corner report, one line per analysis, "

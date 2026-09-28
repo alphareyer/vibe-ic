@@ -76,6 +76,14 @@ class PostRouteRepair(ResizerStep):
                 units="ns",
             ),
             Variable(
+                "VIBEIC_PRR_SETUP_SEQUENCE",
+                str,
+                "OpenROAD repair_timing setup move sequence. 'default' keeps "
+                "the tool's own sequence; 'sizeup,swap' changes cell masters "
+                "without creating setup buffers on the routed design.",
+                default="default",
+            ),
+            Variable(
                 "VIBEIC_PRR_HOLD_MARGIN",
                 Decimal,
                 "Hold slack margin for repair_timing -hold.",

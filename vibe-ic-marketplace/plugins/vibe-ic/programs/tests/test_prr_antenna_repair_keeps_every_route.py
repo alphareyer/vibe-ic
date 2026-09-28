@@ -206,3 +206,101 @@ def test_the_census_is_taken_before_the_repair_and_checked_after_the_reroute():
         < at('set ::vic_unrouted_after [vic_unrouted_nets]') < at('write_views')
     # the input census is the baseline the loss is measured against
     assert at('set ::vic_unrouted_before [vic_unrouted_nets]') < at('log_cmd repair_design')
+
+
+def _global_route_loss_replay(tmp_path, *, unrouteable=(), loss_phase='global_route',
+                              drc_neighbour=''):
+    """Run the shipped ECO proc with a GRT side effect seen on the routed chip.
+
+    The tool's grt.tcl drops an existing wire outside the original ECO set;
+    detailed_route routes exactly the names passed to -nets.
+    """
+    body = TCL.read_text()
+    start = body.index('proc vic_eco_route {varname tag}')
+    end = body.index('\nset ::vic_eco_attempts 0', start)
+    grt = tmp_path / 'openroad/common/grt.tcl'
+    grt.parent.mkdir(parents=True)
+    assert loss_phase in {'global_route', 'repair'}
+    grt.write_text('set ::W(other) 0\n' if loss_phase == 'global_route' else '')
+    script = (HARNESS + _script_procs(body) + r'''
+rename netcall original_netcall
+proc netcall {name sig terms abut method args} {
+    if {$method eq "setWireOrdered"} { return }
+    return [original_netcall $name $sig $terms $abut $method {*}$args]
+}
+namespace eval odb {
+    proc dbWire_destroy {wire} { set ::W([string range $wire 5 end]) 0 }
+}
+proc set_thread_count {n} {}
+proc log_cmd {command args} {
+    if {$command ne "detailed_route"} { error "unexpected command $command" }
+    set i [lsearch -exact $args -nets]
+    set nets [lindex $args [expr {$i + 1}]]
+    foreach n $nets {
+        if {$n ni $::UNROUTABLE} { set ::W($n) 1 }
+    }
+    set j [lsearch -exact $args -output_drc]
+    set report [open [lindex $args [expr {$j + 1}]] w]
+    if {$::DRC_NEIGHBOUR ne "" && ($::DRC_NEIGHBOUR eq "netA" || $::DRC_NEIGHBOUR ni $nets)} {
+        puts $report "violation type: Short"
+        puts $report "\tsrcs: net:netA net:$::DRC_NEIGHBOUR"
+    }
+    close $report
+}
+set ::env(SCRIPTS_DIR) [pwd]
+set ::env(STEP_DIR) [pwd]
+set ::env(DRT_THREADS) 1
+set ::env(DRT_OPT_ITERS) 1
+set ::env(VIBEIC_PRR_ECO_EXPANSIONS) 2
+set ::vic_dirty [dict create netA [dict get $::nets netA]]
+set ::vic_eco_attempts 0
+'''.replace('set ::vic_dirty',
+            f'set ::UNROUTABLE {{{" ".join(unrouteable)}}}\n'
+            f'set ::DRC_NEIGHBOUR {{{drc_neighbour}}}\n'
+            'set ::vic_routed_before [vic_routed_nets]\n'
+            + ('set ::W(other) 0\n' if loss_phase == 'repair' else '')
+            + 'set ::vic_dirty')
+              + body[body.index('proc vic_violation_neighbours'):start]
+              + body[start:end]
+              + '\nset outcome [vic_eco_route ::vic_dirty eco_route]\n'
+                'puts "RESULT $outcome $::W(other) [lsort [dict keys $::vic_dirty]]"\n')
+    deck = tmp_path / 'eco.tcl'
+    deck.write_text(script)
+    return subprocess.run(['tclsh', str(deck)], capture_output=True, text=True,
+                          cwd=tmp_path, timeout=30)
+
+
+def test_global_route_loss_joins_the_scoped_eco_route(tmp_path):
+    out = _global_route_loss_replay(tmp_path)
+    assert out.returncode == 0, out.stderr
+    assert 'RESULT 1 1 netA other' in out.stdout, out.stdout
+    assert (tmp_path / 'eco_route.drc').is_file()
+
+
+def test_repair_tool_loss_joins_the_scoped_eco_route(tmp_path):
+    out = _global_route_loss_replay(tmp_path, loss_phase='repair')
+    assert out.returncode == 0, out.stderr
+    assert 'RESULT 1 1 netA other' in out.stdout, out.stdout
+
+
+def test_unrecoverable_global_route_loss_refuses_the_candidate(tmp_path):
+    out = _global_route_loss_replay(tmp_path, unrouteable=('other',))
+    assert out.returncode == 0, out.stderr
+    assert 'RESULT 0 0 netA other' in out.stdout, out.stdout
+    assert not (tmp_path / 'eco_route.drc').exists()
+
+
+def test_successful_router_with_verified_drc_expands_to_neighbour(tmp_path):
+    """DRT-0701 can report four violations after a successful routing loop."""
+    out = _global_route_loss_replay(tmp_path, drc_neighbour='netB')
+    assert out.returncode == 0, out.stderr
+    assert 'RESULT 1 1 netA netB other' in out.stdout, out.stdout
+    assert 'verified 1 DRC violation(s)' in out.stdout
+    assert (tmp_path / 'eco_route.drc').read_text() == ''
+
+
+def test_successful_router_with_unresolved_drc_refuses_candidate(tmp_path):
+    out = _global_route_loss_replay(tmp_path, drc_neighbour='netA')
+    assert out.returncode == 0, out.stderr
+    assert 'RESULT 0 1 netA other' in out.stdout, out.stdout
+    assert not (tmp_path / 'eco_route.drc').exists()

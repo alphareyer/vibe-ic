@@ -156,6 +156,7 @@ vic_census before
 set ::vic_ant_before [check_antennas]
 utl::metric_integer vibeic__prr__before__antenna__violating_nets $::vic_ant_before
 set ::vic_unrouted_before [vic_unrouted_nets]
+set ::vic_routed_before [vic_routed_nets]
 utl::metric_integer vibeic__prr__before__unrouted__count [dict size $::vic_unrouted_before]
 if {[info exists ::env(VIBEIC_PRR_CENSUS_ONLY)] && $::env(VIBEIC_PRR_CENSUS_ONLY)} {
     utl::metric_integer vibeic__prr__changed 0
@@ -213,11 +214,20 @@ set rd_args [list -verbose]
 append_if_exists_argument rd_args VIBEIC_PRR_MAX_WIRE_LENGTH -max_wire_length
 append_if_exists_argument rd_args VIBEIC_PRR_SLEW_MARGIN_PCT -slew_margin
 append_if_exists_argument rd_args VIBEIC_PRR_CAP_MARGIN_PCT -cap_margin
-log_cmd repair_design {*}$rd_args
+if {$::env(VIBEIC_PRR_SETUP_SEQUENCE) eq "sizeup,swap"} {
+    # This candidate must stay sizing-only on the routed design. The DRV
+    # controller can run repair_design in its own candidate when needed.
+    vic_say "setup sequence sizeup,swap: design buffering deferred to DRV controller"
+} else {
+    log_cmd repair_design {*}$rd_args
+}
 
 set setup_args [list -setup -verbose]
 lappend setup_args -setup_margin $::env(VIBEIC_PRR_SETUP_MARGIN)
 lappend setup_args -max_buffer_percent $::env(VIBEIC_PRR_SETUP_MAX_BUFFER_PCT)
+if {$::env(VIBEIC_PRR_SETUP_SEQUENCE) ne "default"} {
+    lappend setup_args -sequence $::env(VIBEIC_PRR_SETUP_SEQUENCE)
+}
 append_if_exists_argument setup_args VIBEIC_PRR_SETUP_REPAIR_TNS_PCT -repair_tns
 log_cmd repair_timing {*}$setup_args
 
@@ -361,6 +371,20 @@ proc vic_violation_neighbours {drc named} {
     return $found
 }
 
+# The scoped router can return success when its post-route verifier finds
+# violations that its routing loop did not see (DRT-0701/0711). Its exit code
+# alone is therefore not a clean-route verdict.
+proc vic_drc_count {drc} {
+    if {![file exists $drc]} { return -1 }
+    set fh [open $drc]
+    set count 0
+    foreach line [split [read $fh] "\n"] {
+        if {[string match "violation type:*" [string trim $line]]} { incr count }
+    }
+    close $fh
+    return $count
+}
+
 # The fork's scoped route (`detailed_route -nets`) refuses a result with more
 # whole-design violations than it was given (DRT-0712). A refusal names the
 # violations; the nets that share one with a routed net join the set and the
@@ -371,6 +395,10 @@ proc vic_violation_neighbours {drc named} {
 proc vic_eco_route {varname tag} {
     upvar #0 $varname dirty
     if {[dict size $dirty] == 0} { return 1 }
+    # Resizer and global_route may remove wires outside the nominal ECO set.
+    # The step's input route and wires newly present after repair are both
+    # obligations for every scoped retry.
+    set expected [dict merge $::vic_routed_before [vic_routed_nets]]
     set_thread_count $::env(DRT_THREADS)
     set limit [expr {[info exists ::env(VIBEIC_PRR_ECO_EXPANSIONS)]
                      ? $::env(VIBEIC_PRR_ECO_EXPANSIONS) : 2}]
@@ -382,12 +410,44 @@ proc vic_eco_route {varname tag} {
             $net setWireOrdered 0
         }
         source $::env(SCRIPTS_DIR)/openroad/common/grt.tcl
+        set grt_lost [vic_lost_routes $expected]
+        set added 0
+        dict for {name net} $grt_lost {
+            if {![dict exists $dirty $name]} {
+                dict set dirty $name $net
+                incr added
+            }
+        }
+        if {$added} {
+            vic_say "$tag global_route took $added routed net(s) outside the ECO set; adding them to -nets"
+        }
         set drc $::env(STEP_DIR)/${tag}.$attempt.drc
         set drt_args [list -droute_end_iter $::env(DRT_OPT_ITERS) -or_seed 42 -verbose 1 \
                           -output_drc $drc -nets [dict keys $dirty]]
         incr attempt
         incr ::vic_eco_attempts
         if {![catch {log_cmd detailed_route {*}$drt_args} err]} {
+            set lost [vic_lost_routes $expected]
+            dict for {name net} $dirty {
+                if {[vic_needs_wire $net] && [$net getWire] eq "NULL"} {
+                    dict set lost $name $net
+                }
+            }
+            if {[dict size $lost]} {
+                vic_say "$tag scoped route left [dict size $lost] required net(s) without wire: [dict keys $lost]"
+                if {$attempt > $limit} { return 0 }
+                set dirty [dict merge $dirty $lost]
+                continue
+            }
+            set violations [vic_drc_count $drc]
+            if {$violations != 0} {
+                vic_say "$tag scoped route verified $violations DRC violation(s); expanding or refusing"
+                set more [vic_violation_neighbours $drc $dirty]
+                if {$attempt > $limit || [dict size $more] == 0} { return 0 }
+                vic_say "$tag expands by [dict size $more] DRC neighbour net(s): [dict keys $more]"
+                set dirty [dict merge $dirty $more]
+                continue
+            }
             file copy -force $drc $::env(STEP_DIR)/eco_route.drc
             return 1
         }

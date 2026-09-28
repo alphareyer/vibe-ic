@@ -2,9 +2,9 @@
 
 The closure, the registry, the measurement and actuator CLIs, the supply
 ownership gate and the runner's deck builder run for real. Only an EDA tool's
-file writes are substituted: `librelane_contract.run_chain` (the `docker run`
-of a LibreLane step) is replaced by a writer of the step folders a real run
-leaves (`state_out.json` with the tool's metric names, the repair step's DEF).
+file writes are substituted: `librelane_contract.run_chain` and the native
+OpenROAD timing measurement are replaced by writers of the step folders and
+scene metrics a real run leaves.
 """
 import importlib
 from types import SimpleNamespace
@@ -25,6 +25,8 @@ sys.path.insert(0, str(PROGRAMS / 'tests'))
 prr = importlib.import_module('librelane_postroute_repair')
 closure = importlib.import_module('_ppa.closure')
 contract = importlib.import_module('librelane_contract')
+native = importlib.import_module('_native_postroute_timing')
+REAL_NATIVE_MEASURE = native.measure
 
 from _stated_eda_image import state_the_image  # noqa: E402
 
@@ -37,6 +39,13 @@ def _stated_image(monkeypatch):
     state_the_image(monkeypatch)
     for name in ('VIBEIC_LIBRELANE_IMAGE', 'VIBEIC_LIBRELANE_PDK_ROOT'):
         monkeypatch.delenv(name, raising=False)
+    def tool_written_native_scene(ctx, repair_state, out_dir):
+        sta = repair_state.parent.parent / '04-openroad-stapostpnr/state_out.json'
+        metrics = json.loads(sta.read_text())['metrics']
+        summary = prr.summarize(metrics, ctx['corners'])
+        return {k: summary[k] for k in ('setup_ws', 'hold_ws',
+                                       'setup_ws_min', 'hold_ws_min')}
+    monkeypatch.setattr(native, 'measure', tool_written_native_scene)
 REGISTRY = PLUGIN / 'config' / 'ppa_actuator_registry.yaml'
 CORNERS = ['nom_tt_025C_5v00', 'nom_ss_125C_4v50', 'nom_ff_n40C_5v50']
 
@@ -139,6 +148,116 @@ def test_an_incapable_image_refuses_before_any_state_is_built(tmp_path, monkeypa
 
 
 # ------------------------------------------------------------- measurement ---
+
+def test_native_sta_applies_and_attests_signoff_ocv_before_slack(tmp_path, monkeypatch):
+    """An undrated positive candidate must be red under signoff's OCV recipe.
+
+    Only OpenROAD's file writes are substituted; the real native measurement
+    builds its Tcl and the real controller consumes the returned worst slack.
+    """
+    runner = importlib.import_module('phase3_one_shot_runner')
+    early = runner._FLAT_OCV_DERATE_EARLY
+    late = runner._FLAT_OCV_DERATE_LATE
+    odb = write(tmp_path / 'route.odb', 'routed database')
+    sdc = write(tmp_path / 'route.sdc', 'create_clock -period 20 [get_ports clk]\n')
+    lib = write(tmp_path / 'cells.lib', 'liberty view')
+    rules = write(tmp_path / 'rules.rcx', 'extraction rules')
+    state = put(tmp_path / 'state.json', {'odb': str(odb), 'sdc': str(sdc)})
+    cfg = put(tmp_path / 'rcx.json', {
+        'RCX_RULESETS': {'*': str(rules)},
+        'CELL_LIBS': {'*': [str(lib)]},
+        'DEFAULT_CORNER': 'nom_ss_125C_4v50',
+    })
+    ctx = {'project': str(tmp_path), 'image': 'tool image', 'mounts': [],
+           'configs': {'OpenROAD.RCX': str(cfg)},
+           'corners': ['nom_ss_125C_4v50'], 'derate': [early, late]}
+    seen = []
+
+    def tool_writes(_ctx, script, output):
+        text = script.read_text()
+        if script.name.startswith('extract_'):
+            output.write_text('*SPEF "IEEE 1481-1998"\n')
+            return
+        seen.append(text)
+        early_cmd = f'set_timing_derate -early {early}'
+        late_cmd = f'set_timing_derate -late {late}'
+        derated = (early_cmd in text and late_cmd in text
+                   and text.index(late_cmd) < text.index('report_worst_slack -max'))
+        output.write_text(('OCV_BASIS flat_ocv\n' if derated else '')
+                          + f'worst slack max {"-0.040000" if derated else "0.010000"}\n'
+                          + 'worst slack min 0.200000\n')
+
+    monkeypatch.setattr(native, '_run', tool_writes)
+    result = REAL_NATIVE_MEASURE(ctx, state, tmp_path / 'native')
+    assert seen and result['setup_ws_min'] == -0.04
+    assert result['ocv_applied'] == {'mode': 'flat_ocv', 'early': early, 'late': late}
+    assert result['measurement_basis'].endswith('+flat_ocv')
+
+
+def test_native_sta_removes_embedded_flat_derate_before_explicit_recipe(tmp_path, monkeypatch):
+    """A LibreLane write_sdc can already contain OCV; normalize it once."""
+    runner = importlib.import_module('phase3_one_shot_runner')
+    early = runner._FLAT_OCV_DERATE_EARLY
+    late = runner._FLAT_OCV_DERATE_LATE
+    odb = write(tmp_path / 'route.odb', 'routed database')
+    sdc = write(tmp_path / 'route.sdc',
+                f'create_clock -period 20 [get_ports clk]\n'
+                f'set_timing_derate -early {early:.4f}\n'
+                f'set_timing_derate -late {late:.4f}\n')
+    lib = write(tmp_path / 'cells.lib', 'liberty view')
+    rules = write(tmp_path / 'rules.rcx', 'extraction rules')
+    state = put(tmp_path / 'state.json', {'odb': str(odb), 'sdc': str(sdc)})
+    cfg = put(tmp_path / 'rcx.json', {
+        'RCX_RULESETS': {'*': str(rules)}, 'CELL_LIBS': {'*': [str(lib)]},
+        'DEFAULT_CORNER': 'nom_ss_125C_4v50'})
+    ctx = {'project': str(tmp_path), 'image': 'tool image', 'mounts': [],
+           'configs': {'OpenROAD.RCX': str(cfg)},
+           'corners': ['nom_ss_125C_4v50'], 'derate': [early, late]}
+
+    def tool_writes(_ctx, script, output):
+        if script.name.startswith('extract_'):
+            output.write_text('*SPEF "IEEE 1481-1998"\n')
+            return
+        text = script.read_text()
+        match = re.search(r'^read_sdc \{([^}]+)\}$', text, re.M)
+        assert match is not None
+        measured_sdc = Path(match.group(1)).read_text()
+        assert 'set_timing_derate' not in measured_sdc
+        assert text.count('set_timing_derate -early') == 1
+        assert text.count('set_timing_derate -late') == 1
+        output.write_text('OCV_BASIS flat_ocv\nworst slack max -0.040000\n'
+                          'worst slack min 0.200000\n')
+
+    monkeypatch.setattr(native, '_run', tool_writes)
+    result = REAL_NATIVE_MEASURE(ctx, state, tmp_path / 'native')
+    assert result['setup_ws_min'] == -0.04
+    assert result['native_sdc_sha256'] == contract.digest(sdc)
+
+
+def test_native_sdc_derate_parser_refuses_nonformal_commands(tmp_path):
+    """The SDC reader recognizes executable Tcl, never prose or a near-match."""
+    runner = importlib.import_module('phase3_one_shot_runner')
+    early = runner._FLAT_OCV_DERATE_EARLY
+    late = runner._FLAT_OCV_DERATE_LATE
+    ctx = {'derate': [early, late]}
+    out = tmp_path / 'native'
+    out.mkdir()
+    valid = write(tmp_path / 'valid.sdc',
+                  f'# no derate claim in this comment\n'
+                  f'set_timing_derate -early {early:.4f}\n'
+                  f'set_timing_derate -late {late:.4f}\n')
+    measured, _, _ = native._measurement_sdc(ctx, valid, out)
+    assert measured.read_text() == '# no derate claim in this comment\n'
+    wrong = write(tmp_path / 'wrong.sdc',
+                  f'set_timing_derate -early {early:.4f}\n'
+                  'set_timing_derate -late 1.10\n')
+    with pytest.raises(contract.Refusal, match='NATIVE_POSTROUTE_OCV_MISMATCH'):
+        native._measurement_sdc(ctx, wrong, out)
+    malformed = write(tmp_path / 'malformed.sdc',
+                      f'set_timing_derate -early {early:.4f}\n'
+                      f'set_timing_derate -late {late:.4f} -cell_delay\n')
+    with pytest.raises(contract.Refusal, match='NATIVE_POSTROUTE_OCV_AMBIGUOUS'):
+        native._measurement_sdc(ctx, malformed, out)
 
 def _sta_metrics(setup, hold, drv=(0, 0, 0), corners=CORNERS):
     metrics = {}
@@ -252,6 +371,7 @@ SHIM = textwrap.dedent('''\
     sys.path.insert(0, os.environ["PRR_REAL_PROGRAMS"])
     import librelane_contract as ll
     import librelane_postroute_repair as prr
+    import _native_postroute_timing as native
     SCENARIO = json.loads(Path(os.environ["PRR_SCENARIO"]).read_text())
 
     def run_chain(project, image, steps, *, mounts=None, lane=None, **kw):
@@ -275,6 +395,17 @@ SHIM = textwrap.dedent('''\
         return folders
 
     ll.run_chain = run_chain
+    def native_scene(ctx, repair_state, out_dir):
+        lane = repair_state.parent.parent.name
+        spec = SCENARIO[lane]
+        summary = prr.summarize(spec["sta_metrics"], ctx["corners"])
+        result = {k: summary[k] for k in ("setup_ws", "hold_ws",
+                                         "setup_ws_min", "hold_ws_min")}
+        if "native_setup" in spec:
+            result["setup_ws_min"] = spec["native_setup"]
+            result["setup_ws"] = {c: spec["native_setup"] for c in ctx["corners"]}
+        return result
+    native.measure = native_scene
     sys.exit(prr.main())
     ''')
 
@@ -442,6 +573,23 @@ def test_hardness_and_floor_are_declared_in_the_registry(tmp_path):
     with pytest.raises(closure.RegistryError, match='HARD domain has no floor'):
         closure.load_registry(bad)
 
+
+def test_native_signoff_slack_controls_setup_stop_when_librelane_is_optimistic(tmp_path, monkeypatch):
+    """A positive LibreLane WNS cannot end closure while direct RCX is red."""
+    first = _cand(0.012, 0.2)
+    first['native_setup'] = -0.02
+    second = _cand(0.037, 0.2)
+    second['native_setup'] = 0.01
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(-0.2, 0.2), candidates=[first, second])
+    run = _controller(impl, arm, shim, monkeypatch, tmp_path).run_controller(
+        'postroute.repair_setup')
+    assert [it.decision for it in run.iterations] == ['PROMOTED', 'PROMOTED']
+    assert run.outcome is closure.Outcome.CONVERGED
+    final = json.loads((impl / prr.CURRENT).read_text())
+    assert final['candidate'] == '32-cand02'
+    assert final['measurement']['setup_ws_min'] == 0.01
+    assert final['measurement']['librelane_setup_ws']['nom_ss_125C_4v50'] == 0.037
 
 def test_a_setup_violation_is_repaired_and_the_improving_candidate_adopted(tmp_path, monkeypatch):
     project, arm, impl, shim = _scenario_impl(
@@ -835,6 +983,8 @@ def test_in_the_chain_the_route_state_is_repaired_without_a_bridge(tmp_path, mon
     assert report['site'] == 'after_route' and report['adopted'] == '32-cand01'
     assert report['baseline']['hold_ws_min'] == -0.335
     ctx = json.loads((project / prr.ARM_REL / prr.IMPL_DIR / prr.CONTEXT).read_text())
+    assert ctx['derate'] == [0.95, 1.05]
+    assert ctx['aocv_table'] is None
     assert 'VIBEIC_PRR_REFILL_TCL' not in json.loads(
         Path(ctx['configs'][prr.REPAIR_STEP]).read_text()), \
         "the LL21 route's fillers are LibreLane's; the refill is too"
@@ -950,13 +1100,16 @@ def test_the_route_hook_hands_on_the_adopted_database_and_keeps_the_base(tmp_pat
                                                        'vibeic__prr__unrouted__added': 0}}]}) and \
             json.loads((project_ / prr.REPORT_REL).read_text())
     monkeypatch.setattr(prr, 'run_in_chain', run_in_chain)
+    monkeypatch.setattr(runner, '_discover_aocv_table',
+                        lambda project_, pdk_, container_: '/declared/table.aocv')
     pdk = ring_fixture._pdk(tmp_path, ring=None)
     out = runner.postroute_repair_after_route(
         project=project, pdk=pdk, image='img', pdk_root=tmp_path, sdc=base_def,
         deck='add_global_connection -net VDD -pin_pattern {^VDD$} -power\n',
         route_state=route_state, route_views={'odb': tmp_path / 'r.odb', 'def': base_def},
-        route_drc=0, variant_arm=lambda *a: None)
+        route_drc=0, variant_arm=lambda *a: None, container='eda')
     assert calls['mode'] == 'dual' and calls['route_state'] == route_state
+    assert calls['aocv_table'] == '/declared/table.aocv'
     assert out['views'] == {'odb': tmp_path / 'c.odb', 'def': tmp_path / 'c.def'}
     assert out['record']['report_sha256'] == contract.digest(project / prr.REPORT_REL)
     assert (runner._pl.pnr_dir(project) / 'routed_base_prerepair.def').read_text() == base_def.read_text()
