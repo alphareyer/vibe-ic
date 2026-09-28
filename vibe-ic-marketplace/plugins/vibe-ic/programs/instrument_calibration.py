@@ -2161,6 +2161,51 @@ def _judge_tap_row_coverage(pair: Tuple[str, str]) -> Optional[str]:
     return "TAP_ROW_COVERAGE_GAP" if rec["uncovered"] else None
 
 
+def _judge_excluded_master_census(sample: Tuple[str, bool]) -> Optional[str]:
+    """Run the shipped census over a real OpenROAD DEF and a declared policy."""
+    import json as _json
+    import tempfile as _tempfile
+    import excluded_master_census_check as C
+    import tap_row_coverage_check as T
+    body, exclude_present_master = sample
+    components = T.read_def(body)["components"]
+    if not components:
+        raise ValueError("calibration DEF has no placed master")
+    policy = [components[0][1]] if exclude_present_master else [
+        "__calibration_master_absent_from_this_def__"]
+    with _tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        layout, config, state = (root / "out.def", root / "config.json",
+                                  root / "state.json")
+        layout.write_text(body)
+        config.write_text(_json.dumps({"EXTRA_EXCLUDED_CELLS": policy}))
+        state.write_text(_json.dumps({"def": str(layout)}))
+        result = C.audit(config, state, "OpenROAD.Calibration")
+    return result.get("finding") if result["verdict"] == "FAIL" else None
+
+
+_register(Instrument(
+    name="excluded_master_census_check::audit",
+    reads="a real OpenROAD DEF COMPONENTS population and the resolved master policy",
+    ruling="CAPTURE_C CR-4 (one cell-exclusion policy at every inserting step)",
+    owner="capcx",
+    why=("The census must distinguish an excluded master in the tool DEF from "
+         "a nonexcluded master; an empty or missing DEF cannot count as clean."),
+    judge=_judge_excluded_master_census,
+    positive=Sample(
+        provenance=("Unedited OpenROAD write_def output from the tap-row "
+                    "calibration structure; a policy names a master present "
+                    "in calibration/tap_coverage_gap_positive.def."),
+        artefact=lambda: (_read("tap_coverage_gap_positive.def")(), True)),
+    expect="EXCLUDED_MASTER_INSERTED",
+    negative=Sample(
+        provenance=("Unedited OpenROAD write_def output from the same "
+                    "calibration structure; the policy names no master in "
+                    "calibration/tap_coverage_covered_negative.def."),
+        artefact=lambda: (_read("tap_coverage_covered_negative.def")(), False)),
+))
+
+
 _TAP_COVERAGE_CAL_PROV = (
     "Real OpenROAD 26Q3-2963-gc73a322d30 (the pinned vibeic-eda 0.3.79, 8HD-8, "
     "2026-09-27), unedited `write_def` output: gf180mcu_fd_sc_mcu7t5v0 nom tech "

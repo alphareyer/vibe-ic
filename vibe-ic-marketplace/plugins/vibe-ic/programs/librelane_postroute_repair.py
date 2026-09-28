@@ -263,11 +263,16 @@ def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
         [(REPAIR_STEP, config, state)]
         + [(step, Path(ctx["configs"][step]), state) for step in MEASURE_STEPS],
         mounts=[(Path(h), g) for h, g in ctx["mounts"]], lane=lane)
+    import excluded_master_census_check as _emc
+    excluded_census = _emc.write_audit(
+        config, folders[0] / "state_out.json", REPAIR_STEP,
+        folders[0] / "excluded_master_census.json")
     sta_state = folders[-1] / "state_out.json"
     summary = summarize(_load(sta_state).get("metrics") or {}, ctx["corners"])
     antenna = antenna_census(folders[1])
     return folders[0], {"sta_state": str(sta_state),
                         "sta_state_sha256": _ll.digest(sta_state), **summary,
+                        "excluded_master_census": excluded_census,
                         "antenna_nets": antenna["antenna__violating__nets"],
                         "antenna_pins": antenna["antenna__violating__pins"],
                         "antenna_state": str(folders[1] / "state_out.json")}
@@ -549,20 +554,25 @@ def repair_dont_use(config: Path, pdk_root: Path, pdk: str,
     setup to -0.015 ns. The direct deck and the LL placement chain exclude
     that family; step 32 now does too. A library the step names that cannot
     be read refuses: an exclusion computed over part of the library is not
-    the exclusion."""
+    the exclusion. The PDK may give each corner a different Liberty file, so
+    every corner's file is read; a step that declares no CELL_LIBS at all is
+    an undeclared population and refuses (CR4), never an empty policy."""
     import librelane_contract as _ll
     libs = _load(config).get("CELL_LIBS") or {}
-    paths = sorted({p for v in (libs.values() if isinstance(libs, dict) else [libs])
+    paths = sorted({str(p) for v in (libs.values() if isinstance(libs, dict) else [libs])
                     for p in (v if isinstance(v, list) else [v])})
+    if not paths:
+        raise _ll.Refusal("LL_PRR_LIBERTY_UNDECLARED", str(config))
     guest = f"/pdk/{pdk}/"
     excluded: set = set()
     for value in paths:
-        host = (pdk_root / pdk / value[len(guest):] if str(value).startswith(guest)
+        host = (pdk_root / pdk / value[len(guest):] if value.startswith(guest)
                 else Path(value))
         try:
             excluded.update(rule(host.read_text(errors="replace")))
         except OSError as exc:
-            raise _ll.Refusal("LL_PRR_LIBERTY_UNREADABLE", f"{value} ({host}): {exc}")
+            raise _ll.Refusal("LL_PRR_LIBERTY_UNREADABLE",
+                              f"{value} ({host}): {exc}") from exc
     return sorted(excluded)
 
 
@@ -600,12 +610,22 @@ def _prepare(project: Path, *, image: str, pdk: str, pdk_root: Path, sdc: Path,
     if max_fanout is not None:
         extra["VIBEIC_PRR_MAX_FANOUT"] = max_fanout
     if dont_use is not None:
-        excluded = repair_dont_use(configs[REPAIR_STEP], pdk_root, pdk, dont_use[0])
+        # CR4: EXTRA_EXCLUDED_CELLS is a set of forbidden masters, not a
+        # replacement value -- the PDK/design exclusions the resolved config
+        # already carries are kept, and the family rule is added to them.
+        config = configs[REPAIR_STEP]
+        inherited = _load(config).get("EXTRA_EXCLUDED_CELLS") or []
+        if not isinstance(inherited, list) or any(
+                not isinstance(name, str) for name in inherited):
+            raise _ll.Refusal("LL_PRR_EXCLUSION_POLICY_INVALID", str(config))
+        excluded = repair_dont_use(config, pdk_root, pdk, dont_use[0])
         source = dont_use[1]
         if not excluded:
             source += "; no cell matched in the resolved CELL_LIBS"
             print(f"LL_PRR_DONT_USE_EMPTY: {source}")
-        extra["EXTRA_EXCLUDED_CELLS"] = (excluded, source)
+        if inherited:
+            source += "; union with declared/PDK exclusions"
+        extra["EXTRA_EXCLUDED_CELLS"] = (sorted(set(inherited) | set(excluded)), source)
     if extra:
         configs[REPAIR_STEP] = _ll.derive_step_config(configs[REPAIR_STEP],
                                                       configs[REPAIR_STEP], extra)

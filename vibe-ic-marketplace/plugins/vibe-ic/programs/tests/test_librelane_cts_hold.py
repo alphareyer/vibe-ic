@@ -392,10 +392,16 @@ def _fake_tool_run(project, corners, *, hold, cts_buffers=7, fail_step=None):
     def resolve(proj, image, pdk, step_ids, **kwargs):
         seen['overlay'] = kwargs.get('overlay')
         root = proj / 'phase3/librelane' / kwargs['folder']
+        lib = write(proj.parent / 'pdkroot' / pdk / 'neutral.lib',
+                    'library(x) {\n cell (neutral__dly_1) { }\n}\n')
         out = {}
         for step in step_ids:
-            out[step] = put(root / f'{step}.json', {'meta': {'step': step}, 'STA_CORNERS': corners,
-                                                   'PNR_CORNERS': None})
+            doc = {'meta': {'step': step}, 'STA_CORNERS': corners,
+                   'PNR_CORNERS': None}
+            if step in ('OpenROAD.CTS', 'OpenROAD.ResizerTimingPostCTS'):
+                doc.update(CELL_LIBS={'nom': [f'/pdk/{pdk}/{lib.name}']},
+                           EXTRA_EXCLUDED_CELLS=[])
+            out[step] = put(root / f'{step}.json', doc)
             put(root / f'{step}.views.json', {'inputs': ['odb'], 'outputs': []})
         return out
 

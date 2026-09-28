@@ -187,7 +187,8 @@ def _switch_knobs(project: Path) -> Dict[str, Tuple[Any, str]]:
 
 def overlay(R, project: Path, pdk_name: str, knobs: Dict[str, Any],
             fanout_target: Optional[int], fanout_source: str,
-            scratch: Path) -> Dict[str, Tuple[Any, str]]:
+            scratch: Path, excluded_cells: Optional[Sequence[str]] = ()
+            ) -> Dict[str, Tuple[Any, str]]:
     """Declared step-19/20 config for LibreLane, each value with its source.
 
     * `CTS_SINK_CLUSTERING_SIZE`: a reference-flow `CTS_CLUSTER_SIZE` (the
@@ -207,6 +208,17 @@ def overlay(R, project: Path, pdk_name: str, knobs: Dict[str, Any],
     scratch.mkdir(parents=True, exist_ok=True)
     emitted = _ll.emit_config(project, pdk_name, scratch / "emitted_probe.json")
     overlay: Dict[str, Tuple[Any, str]] = {}
+    # Step 19's hold resizer inserts ordinary cells. Apply the SAME run policy
+    # as direct PnR and the placement arm, including delay-family masters.
+    # Keep exclusions the PDK/design already supplied to LibreLane.
+    inherited = emitted.get("EXTRA_EXCLUDED_CELLS") or []
+    if not isinstance(inherited, list):
+        raise ValueError("LL_CTS_EXCLUSION_POLICY_INVALID: EXTRA_EXCLUDED_CELLS")
+    if excluded_cells is not None:
+        overlay["EXTRA_EXCLUDED_CELLS"] = (
+            sorted(set(inherited) | set(excluded_cells)),
+            "resolved EXTRA_EXCLUDED_CELLS plus "
+            "phase3_one_shot_runner._DONT_USE_FAMILY_PATTERNS over the run liberty")
     declared_cap = emitted.get("MAX_FANOUT_CONSTRAINT")
     candidate = _switch_knobs(project)
     if "CTS_SINK_CLUSTERING_SIZE" in candidate:
@@ -383,6 +395,9 @@ def execute(
                 str(scene_sdc.resolve()),
                 f"{sdc.name} + the sign-off STA's flat-OCV derate "
                 "(phase3_one_shot_runner._FLAT_OCV_DERATE_EARLY/LATE)")))
+        configs, policy_steps = R._resolved_cell_policy(
+            configs, Path(pdk_root), str(pdk.name),
+            required=("OpenROAD.CTS", "OpenROAD.ResizerTimingPostCTS"))
         configs["Vibeic.ClockPathDriveSizing"] = _ll.derive_step_config(
             configs["Vibeic.ClockPathDriveSizing"],
             configs["Vibeic.ClockPathDriveSizing"],
@@ -421,6 +436,13 @@ def execute(
     except (_ll.Refusal, ValueError, OSError) as exc:
         return _refuse(getattr(exc, "code", "LL_CTS_HOLD_CHAIN_FAILED"), str(exc), out)
     cts_folder, sizing_folder, rsz_folder = folders[0], folders[1], folders[2]
+    import excluded_master_census_check as _emc
+    excluded_census = {
+        step: _emc.write_audit(config, folder / "state_out.json", step,
+                               folder / "excluded_master_census.json",
+                               policy_complete=step in policy_steps)
+        for (step, config), folder in zip(chain, folders)
+        if step in ("OpenROAD.CTS", "OpenROAD.ResizerTimingPostCTS")}
     arms_root = project / "phase3/tool_arms/19"
     scope = {"steps": "19,20", "design": _ll._def_design_name(pre["def"]) or "",
              "corners": ",".join(corners), "measured_by": "OpenROAD.STAMidPNR",
@@ -522,6 +544,7 @@ def execute(
         "measured_state": str(measured_state.relative_to(project)),
         "measured_state_sha256": _ll.digest(measured_state),
         "selection": selection, "views": {}}
+    receipt["excluded_master_census"] = excluded_census
     # Written in this order so every report is newer than the DEF it
     # describes (the #519 emitter keys on that).
     for name in ("post_cts_def", "post_hold_def", "post_hold_odb", "cts_rpt"):

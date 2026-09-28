@@ -117,6 +117,7 @@ import step_metrics as _sm  # vibe-ic#1080 — the ONE per-step metrics mechanis
 import synth_area_stats_emit as _sas  # #457 — synth area figure -> declared artefact
 import synth_recipe_postroute as _srp  # post-route PDK recipe election
 import synth_full_adder_map as _sfam  # Liberty-proven multi-output actuator
+import excluded_master_census_check as _emc  # advisory cell-policy census
 import _gate_invocation  # #492/#544 — tell a gate's verdict from a bad invocation
 import _sta_basis  # the ONE reader of the `STA_BASIS:` stamp (no second copy)
 import emitted_script_portability_check as _esp  # the ONE host-path predicate
@@ -23665,7 +23666,6 @@ def _emit_step18_spare_record(project: Path, out_dir: Path, log_path: Path,
 _DONT_USE_FAMILY_PATTERNS = (".*probe_.*", ".*probec_.*", ".*lpflow.*",
                              ".*clkdly.*", ".*dly.*", ".*delay.*")
 
-
 def _dont_use_family_cells(cell_names: Sequence[str]) -> List[str]:
     """The library cells `_DONT_USE_FAMILY_PATTERNS` exclude, by whole name."""
     rx = [re.compile(p, re.I) for p in _DONT_USE_FAMILY_PATTERNS]
@@ -23679,6 +23679,64 @@ _STEP32_DONT_USE = (
     lambda text: _dont_use_family_cells(_V1_6_596_RE_CELL_DECL.findall(text)),
     "phase3_one_shot_runner._DONT_USE_FAMILY_PATTERNS (the direct deck's "
     "resizer dont_use families) over the step's resolved CELL_LIBS")
+
+
+def _resolved_cell_policy(configs: Dict[str, Path], pdk_root: Path,
+                          pdk_name: str, *, required: Sequence[str] = (
+                          )) -> Tuple[Dict[str, Path], List[str]]:
+    """Derive exclusions from every active Liberty in each resolved step.
+
+    The resolver, not ``pdk.liberty``, chooses CELL_LIBS. A partial read is a
+    refusal because an omitted corner could still insert an excluded master.
+    """
+    import librelane_contract as _ll
+    out = dict(configs)
+    covered: List[str] = []
+    guest = f"/pdk/{pdk_name}/"
+    for step, config in configs.items():
+        doc = json.loads(config.read_text())
+        if "EXTRA_EXCLUDED_CELLS" not in doc:
+            continue
+        inherited = doc["EXTRA_EXCLUDED_CELLS"] or []
+        if not isinstance(inherited, list) or any(
+                not isinstance(name, str) for name in inherited):
+            raise _ll.Refusal("LL_CELL_POLICY_INVALID", f"{step}: {config}")
+        libs = doc.get("CELL_LIBS")
+        groups = libs.values() if isinstance(libs, dict) else [libs]
+        paths: set[str] = set()
+        for group in groups:
+            members = group if isinstance(group, list) else [group]
+            if any(not isinstance(path, str) or not path for path in members):
+                raise _ll.Refusal("LL_CELL_POLICY_LIBERTY_UNDECLARED",
+                                  f"{step}: {config}")
+            paths.update(members)
+        if not paths:
+            raise _ll.Refusal("LL_CELL_POLICY_LIBERTY_UNDECLARED",
+                              f"{step}: {config}")
+        excluded = set(inherited)
+        for value in sorted(paths):
+            host = (Path(pdk_root) / pdk_name / value[len(guest):]
+                    if value.startswith(guest) else Path(value))
+            try:
+                text = host.read_text(errors="replace")
+            except OSError as exc:
+                raise _ll.Refusal("LL_CELL_POLICY_LIBERTY_UNREADABLE",
+                                  f"{step}: {value} ({host}): {exc}") from exc
+            excluded.update(_dont_use_family_cells(
+                _V1_6_596_RE_CELL_DECL.findall(text)))
+        out[step] = _ll.derive_step_config(
+            config, config.with_name(config.stem + ".cell-policy.json"),
+            {"EXTRA_EXCLUDED_CELLS": (
+                sorted(excluded),
+                "phase3_one_shot_runner._DONT_USE_FAMILY_PATTERNS over "
+                f"{step} resolved CELL_LIBS ({len(paths)} active Liberty files); "
+                "union with declared/PDK exclusions")})
+        covered.append(step)
+    missing = sorted(set(required) - set(covered))
+    if missing or not covered:
+        raise _ll.Refusal("LL_CELL_POLICY_NO_CONSUMER",
+                          f"missing exclusion-bearing resolved configs: {missing or list(configs)}")
+    return out, covered
 
 
 def _dont_use_family_fallback_tcl() -> str:
@@ -36952,6 +37010,10 @@ def _prepare_librelane_floorplan_for_route(
                                 "image librelane/scripts/openroad/common/pdn_cfg.tcl + "
                                 f"pdk_registry.json pdks[name={pdk.name}].pdn_ring.connects")}
                    if pdn_cfg and modes["15"] == "librelane" else None)
+        # One run-wide master policy covers floorplan, placement, CTS/hold and
+        # post-route repair. A floorplan without the spare-placement arm still
+        # contains cell-inserting steps, so this is outside that arm's guard.
+        overlay = dict(overlay or {})
         if placement is not None:
             steps.append("Vibeic.InsertSpareCells")
             overlay = dict(overlay or {})
@@ -36962,13 +37024,6 @@ def _prepare_librelane_floorplan_for_route(
             overlay["VIBEIC_SPARE_PLAN"] = (
                 str(plan_path.resolve()),
                 "phase3_one_shot_runner step-18 plan (_spare_plan, --spare-density)")
-            _lib_text = _v1_6_604_read_text_or_container_cat(pdk.liberty, container) or ""
-            _excluded = _dont_use_family_cells(_V1_6_596_RE_CELL_DECL.findall(_lib_text))
-            if _excluded:
-                overlay["EXTRA_EXCLUDED_CELLS"] = (
-                    _excluded,
-                    "phase3_one_shot_runner._DONT_USE_FAMILY_PATTERNS (the direct "
-                    "deck's resizer dont_use families) over the PDK liberty")
             if placement.get("tie_lo"):
                 overlay["VIBEIC_SPARE_TIELO_CELL"] = (
                     placement["tie_lo"],
@@ -36976,6 +37031,8 @@ def _prepare_librelane_floorplan_for_route(
         configs = _ll.resolve_step_configs(project, image, str(pdk.name), steps,
                                            pdk_root=Path(pdk_root), folder="15-config",
                                            overlay=overlay)
+        configs, _policy_steps = _resolved_cell_policy(
+            configs, Path(pdk_root), str(pdk.name))
         state0 = _ll.state_from_direct(
             project, image, configs[steps[0]],
             {"nl": [netlist, wrapper]},
@@ -37002,6 +37059,14 @@ def _prepare_librelane_floorplan_for_route(
                          _V.ReasonClass.EXECUTION_ERROR.value)
         return _fail(code, str(exc))
     by_step = dict(zip(steps, folders))
+    for step_id, folder in by_step.items():
+        census = _emc.write_audit(
+            configs[step_id], folder / "state_out.json", step_id,
+            folder / "excluded_master_census.json",
+            policy_complete=step_id in _policy_steps)
+        if census["verdict"] != "PASS":
+            notes.append(f"excluded-master census {step_id}: "
+                         f"{census['verdict']} {census.get('reason') or census.get('excluded_instances')}")
     ring_state = by_step["OpenROAD.PadRing"] / "state_out.json"
     final_state = (by_step["Odb.RemovePDNObstructions"] / "state_out.json"
                    if placement is not None else folders[-1] / "state_out.json")
@@ -39055,7 +39120,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                 "phase3_one_shot_runner._cts_fanout_target (the SDC / sign-off "
                 "set_max_fanout: L9, RTL replication bound or liberty "
                 "default_max_fanout)",
-                project / "phase3/librelane/19-config")
+                project / "phase3/librelane/19-config",
+                excluded_cells=None)
         except (ValueError, OSError) as exc:
             return StepResult("pnr", "FAIL", time.time() - t0,
                               f"LL_CTS_HOLD_CONFIG_REFUSED: {exc}",

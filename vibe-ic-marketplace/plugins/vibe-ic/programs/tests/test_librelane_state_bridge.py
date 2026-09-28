@@ -398,15 +398,30 @@ def test_step15_on_librelane_leaves_the_tool_taps_alone(tmp_path, monkeypatch):
     assert 'DIRECT_WELLTIE_REPAIR' not in ll['filler_block']
 
 
-def _declared(tmp_path, step):
-    """The views LibreLane 3.1.0.dev1 declares for the floorplan segment's steps."""
+def _declared(tmp_path, step, pdk_root=None):
+    """The views LibreLane 3.1.0.dev1 declares for the floorplan segment's steps.
+
+    With ``pdk_root`` (the run's PDK root), an `OpenROAD.*` step also carries
+    what the resolver gives every OpenROAD step and the CR4 run-wide cell
+    policy reads: its CELL_LIBS (a PDK-mount path to a Liberty written under
+    ``pdk_root``) and its EXTRA_EXCLUDED_CELLS -- the same shape
+    test_t96_floorplan_cutover and test_mig97_placement_spares give them."""
     if step == 'Yosys.JsonHeader':
-        return _resolved(tmp_path, step, [], ['json_h'])
-    if step == 'OpenROAD.Floorplan':
-        return _resolved(tmp_path, step, ['nl'], GEOMETRY)
-    if step == 'Odb.SetPowerConnections':
-        return _resolved(tmp_path, step, ['odb', 'json_h'], ['odb', 'def'])
-    return _resolved(tmp_path, step, ['odb'], GEOMETRY)
+        cfg = _resolved(tmp_path, step, [], ['json_h'])
+    elif step == 'OpenROAD.Floorplan':
+        cfg = _resolved(tmp_path, step, ['nl'], GEOMETRY)
+    elif step == 'Odb.SetPowerConnections':
+        cfg = _resolved(tmp_path, step, ['odb', 'json_h'], ['odb', 'def'])
+    else:
+        cfg = _resolved(tmp_path, step, ['odb'], GEOMETRY)
+    if pdk_root is not None and step.startswith('OpenROAD.'):
+        write(Path(pdk_root) / 'probe_pdk/libs.ref/cells.lib',
+              'library(x) {\n cell (probe__dly_1) { }\n}\n')
+        doc = json.loads(cfg.read_text())
+        doc.update(CELL_LIBS={'nom': ['/pdk/probe_pdk/libs.ref/cells.lib']},
+                   EXTRA_EXCLUDED_CELLS=[])
+        cfg = put(cfg, doc)
+    return cfg
 
 
 def _pdk(tmp_path):
@@ -473,7 +488,7 @@ def test_librelane_floorplan_state_reaches_the_direct_routing_deck(tmp_path, mon
     def resolve(project, image, pdk, step_ids, **k):
         seen['image'], seen['folder'] = image, k['folder']
         seen['overlay'] = k.get('overlay')
-        return {s: _declared(tmp_path, s) for s in step_ids}
+        return {s: _declared(tmp_path, s, tmp_path / 'pdkroot') for s in step_ids}
     monkeypatch.setattr(contract, 'resolve_step_configs', resolve)
     monkeypatch.setattr(contract, 'emit_pdn_cfg', lambda image, pdk, out, **k: write(out, 'pdn\n'))
 
@@ -545,7 +560,7 @@ def test_padring_only_keeps_the_direct_taps_and_pdn(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, '_docker_exec', lambda *a, **k: (0, 'ok', ''))
     monkeypatch.setattr(contract, 'flow_segment', lambda image, first, last, **k: [first, last])
     monkeypatch.setattr(contract, 'resolve_step_configs', lambda p, i, pdk, ids, **k: {
-        s: _declared(tmp_path, s) for s in ids})
+        s: _declared(tmp_path, s, tmp_path) for s in ids})
     monkeypatch.setattr(contract, 'emit_pdn_cfg', lambda *a, **k: None)
 
     def chain(project, image, triples, **k):
@@ -580,7 +595,7 @@ def test_a_failing_tool_gate_blocks_routing(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, '_docker_exec', lambda *a, **k: (0, 'ok', ''))
     monkeypatch.setattr(contract, 'flow_segment', lambda image, first, last, **k: [first, last])
     monkeypatch.setattr(contract, 'resolve_step_configs', lambda p, i, pdk, ids, **k: {
-        s: _declared(tmp_path, s) for s in ids})
+        s: _declared(tmp_path, s, tmp_path) for s in ids})
     monkeypatch.setattr(contract, 'emit_pdn_cfg', lambda *a, **k: None)
 
     def chain(project, image, triples, **k):

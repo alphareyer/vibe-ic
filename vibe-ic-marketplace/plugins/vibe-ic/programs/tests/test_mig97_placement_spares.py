@@ -358,7 +358,8 @@ def _ll_deck():
             f"{runner._PNR_RESUME_ELIDE_END}\n")
 
 
-def _placement_producer(tmp_path, monkeypatch, *, spare_record=True):
+def _placement_producer(tmp_path, monkeypatch, *, spare_record=True,
+                        liberty_text='library(x) {\n cell (lib__buf_1) { }\n}\n'):
     project = tmp_path / 'project'
     out_dir = project / 'phase3/stage3/pnr'
     wrapper = write(out_dir / 'chip_top_io.v', 'module chip_top(a);\n  input a;\n  core u_core (.a(a));\nendmodule\n')
@@ -367,6 +368,7 @@ def _placement_producer(tmp_path, monkeypatch, *, spare_record=True):
         'steps': {'15': 'librelane', '15.5ic': 'librelane', '17': 'librelane'},
         'pdk_root_host': str(tmp_path / 'pdkroot'),
         'placement_levers': {'PL_TIMING_DRIVEN': True}})
+    write(tmp_path / 'pdkroot/probe_pdk/libs.ref/active.lib', liberty_text)
     monkeypatch.setattr(runner, '_padring_chip_top_record', lambda p: {
         'core_module': 'core', 'chip_top_module': 'chip_top',
         'chip_top_verilog': str(wrapper.relative_to(project))})
@@ -381,12 +383,21 @@ def _placement_producer(tmp_path, monkeypatch, *, spare_record=True):
 
     def resolve(project, image, pdk, step_ids, **k):
         seen['overlay'] = k.get('overlay')
-        return {s: bridge._declared(tmp_path, s) for s in step_ids}
+        out = {}
+        for s in step_ids:
+            path = bridge._declared(tmp_path, s)
+            doc = json.loads(path.read_text())
+            if s.startswith('OpenROAD.'):
+                doc.update(CELL_LIBS={'nom': ['/pdk/probe_pdk/libs.ref/active.lib']},
+                           EXTRA_EXCLUDED_CELLS=[])
+            out[s] = put(path, doc)
+        return out
     monkeypatch.setattr(contract, 'resolve_step_configs', resolve)
     monkeypatch.setattr(contract, 'emit_pdn_cfg', lambda image, pdk, out, **k: None)
 
     def chain(project, image, triples, **k):
         seen['steps'] = [t[0] for t in triples]
+        seen['configs'] = {step: cfg for step, cfg, _ in triples}
         folders = []
         for step, _cfg, _st in triples:
             f = project / 'phase3/librelane/15-floorplan' / step
@@ -1092,11 +1103,16 @@ def test_the_tool_arm_excludes_the_same_cell_families_as_the_direct_deck():
 
 
 def test_the_placement_overlay_carries_the_excluded_families(tmp_path, monkeypatch):
-    monkeypatch.setattr(runner, '_v1_6_604_read_text_or_container_cat', lambda *a: (
-        'library(x) {\n cell (lib__buf_1) {\n }\n cell (lib__dlyb_1) {\n }\n}\n'))
-    _p, _o, seen, result, _c, _plan = _placement_producer(tmp_path, monkeypatch)
-    cells, source = seen['overlay']['EXTRA_EXCLUDED_CELLS']
-    assert cells == ['lib__dlyb_1'] and '_DONT_USE_FAMILY_PATTERNS' in source
+    _p, _o, seen, result, _c, _plan = _placement_producer(
+        tmp_path, monkeypatch,
+        liberty_text='library(x) {\n cell (lib__buf_1) {\n }\n'
+                     ' cell (lib__dlyb_1) {\n }\n}\n')
+    assert result.status == 'PASS', result.detail
+    config = seen['configs']['OpenROAD.GlobalPlacement']
+    assert json.loads(config.read_text())['EXTRA_EXCLUDED_CELLS'] == ['lib__dlyb_1']
+    source = json.loads(config.with_suffix('.provenance.json').read_text())['keys'][
+        'EXTRA_EXCLUDED_CELLS']
+    assert '_DONT_USE_FAMILY_PATTERNS' in source
 
 
 def test_an_equal_measurement_is_a_tie_the_tool_wins(tmp_path, monkeypatch):

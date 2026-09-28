@@ -235,6 +235,8 @@ def _floorplan_producer(tmp_path, monkeypatch, tap_def):
         'steps': {'15': 'librelane', '15.5ic': 'librelane'},
         'pdk_root_host': str(tmp_path / 'pdkroot')})
     write(tmp_path / 'pdkroot/probe_pdk/libs.ref/cells.lef', LEF.read_text())
+    write(tmp_path / 'pdkroot/probe_pdk/libs.ref/cells.lib',
+          'library(x) {\n cell (probe__dly_1) { }\n}\n')
     monkeypatch.setattr(runner, '_padring_chip_top_record', lambda p: {
         'core_module': 'core', 'chip_top_module': 'chip_top',
         'chip_top_verilog': str(wrapper.relative_to(project))})
@@ -252,8 +254,11 @@ def _floorplan_producer(tmp_path, monkeypatch, tap_def):
             cfg = bridge._declared(tmp_path, s)
             doc = json.loads(cfg.read_text())
             doc.update({'CELL_LEFS': ['/pdk/probe_pdk/libs.ref/cells.lef'],
-                        'EXTRA_EXCLUDED_CELLS': [], 'WELLTAP_CELL': TAP,
+                        'WELLTAP_CELL': TAP,
                         'ENDCAP_CELL': ENDCAP, 'FP_TAPCELL_DIST': 20})
+            if s.startswith('OpenROAD.'):
+                doc.update({'CELL_LIBS': {'nom': ['/pdk/probe_pdk/libs.ref/cells.lib']},
+                            'EXTRA_EXCLUDED_CELLS': []})
             out[s] = put(project / 'phase3/librelane/15-config' / f'{s}.json', doc)
         return out
     monkeypatch.setattr(contract, 'resolve_step_configs', resolve)

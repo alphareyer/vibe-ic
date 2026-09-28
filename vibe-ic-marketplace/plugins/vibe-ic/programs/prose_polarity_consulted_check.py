@@ -1336,13 +1336,6 @@ _NOT_PROSE: Dict[str, str] = {
         "SDC is a Tcl command grammar: a clock is created by the command or it "
         "is not, and no neighbouring text can deny it -- a disabled clock is a "
         "deleted or commented command, which the strip removes before matching.",
-    "phase3_one_shot_runner::_prepare_librelane_floorplan_for_route":
-        "Liberty `cell ( <name> )` group headers (`_V1_6_596_RE_CELL_DECL`), "
-        "read to list the library's cell NAMES for the step-17 "
-        "EXTRA_EXCLUDED_CELLS derivation. Liberty is a formal group grammar: a "
-        "cell group is declared or it is not; there is no prose form that denies "
-        "a declared cell, and the name filter that follows is the same family "
-        "regex set the direct deck applies with `get_lib_cells`.",
     "phase3_one_shot_runner::_select_placement_arm":
         "The runner's OWN marker line `DIRECT_ARM_CHECK_PLACEMENT_VIOLATIONS <n>`, "
         "printed by `_build_check_placement_verdict_tcl` in the arm deck this "

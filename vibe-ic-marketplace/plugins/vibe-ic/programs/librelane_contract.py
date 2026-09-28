@@ -2055,6 +2055,16 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     _apply_runner_floorplan(project, emitted, sources, step_ids)
     _apply_layout_top(project, emitted, sources)
     for key, (value, source) in (overlay or {}).items():
+        if key == 'EXTRA_EXCLUDED_CELLS':
+            # This knob is a set of forbidden masters, not a replacement
+            # value: the run-wide policy must retain PDK/design exclusions.
+            inherited = emitted.get(key) or []
+            if (not isinstance(inherited, list) or not isinstance(value, list)
+                    or any(not isinstance(x, str) for x in inherited + value)):
+                raise Refusal('LL_EXCLUSION_POLICY_INVALID', key)
+            value = sorted(set(inherited) | set(value))
+            source = (source + '; union with declared/PDK ' +
+                      str(sources.get(key, 'none')))
         for older in _LEVER_SUPERSEDES.get(key, ()):
             if older in emitted:
                 emitted.pop(older)
