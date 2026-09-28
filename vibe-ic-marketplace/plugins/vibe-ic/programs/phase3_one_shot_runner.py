@@ -115,6 +115,7 @@ import metal_layer_density_check as _mld  # metal-layer NAME authority (producer
 import _signoff_drc_format as _sdf  # sign-off DRC producer classification (ONE answer)
 import step_metrics as _sm  # vibe-ic#1080 — the ONE per-step metrics mechanism
 import synth_area_stats_emit as _sas  # #457 — synth area figure -> declared artefact
+import synth_recipe_postroute as _srp  # post-route PDK recipe election
 import _gate_invocation  # #492/#544 — tell a gate's verdict from a bad invocation
 import _sta_basis  # the ONE reader of the `STA_BASIS:` stamp (no second copy)
 import emitted_script_portability_check as _esp  # the ONE host-path predicate
@@ -17338,11 +17339,27 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # fail, correctly.
     _fo_notes: List[str] = []
     _abc_fanout = ""
+    _recipe_rows, _recipe_load_error = _srp.load(
+        PROGRAMS_DIR / "synth_recipe_postroute.json")
+    _recipe_choice = _select_postroute_synth_recipe(
+        str(getattr(pdk, "name", "") or ""), _recipe_rows,
+        fanout_cap=int(_fo_cap or 0))
+    if _recipe_load_error:
+        _recipe_choice = dict(_recipe_choice, verdict="NOT_MEASURED",
+                              reason=_recipe_load_error)
     if _fo_cap:
-        _abc_fanout = _ABC_FANOUT_SCRIPT.format(cap=int(_fo_cap))
-        _fo_notes.append(
-            f"max_fanout {_fo_cap} -> abc `buffer -N {_fo_cap}` after the "
-            f"stock mapping (no upsize/dnsize pass); cap from {_fo_why}")
+        _active_recipe = (_recipe_choice["recipe"]
+                          if _recipe_choice["verdict"] == "PASS"
+                          else "fanout_buffer")
+        if _active_recipe == "abc_no_buffer":
+            _abc_fanout = ""
+        else:
+            _recipe_template = (_ABC_ALT_FANOUT_SCRIPT
+                                if _active_recipe == "abc_alt_buffer"
+                                else _ABC_FANOUT_SCRIPT)
+            _abc_fanout = _recipe_template.format(cap=int(_fo_cap))
+        _fo_notes.append(f"max_fanout {_fo_cap}; ABC recipe {_active_recipe}; "
+                         f"cap from {_fo_why}")
     else:
         _fo_notes.append(
             "max_fanout UNRESOLVED -> abc recipe UNCHANGED (no fabricated "
@@ -17937,6 +17954,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                               "chip_read_record": _chip_read_bound,
                               "reference_flow_qor_knobs": _rf_notes,
                               "synth_max_fanout": _fo_notes,
+                              "synth_recipe_evidence": _recipe_choice,
                               "macro_define_decision": _macro_def,
                               "area_stats": (str(_area_stats)
                                              if _area_stats else None)})
@@ -19709,6 +19727,18 @@ def parse_flow_pdk_max_fanout(text: str, pdk: str):
 _ABC_FANOUT_SCRIPT = (
     " -script +strash;&get,-n;&fraig,-x;&put;scorr;dc2;dretime;strash;"
     "&get,-n;&dch,-f;&nf,{{D}};&put;buffer,-N,{cap}")
+
+# An alternative ABC mapping is reachable ONLY through matched post-route
+# evidence.  It retains the fanout bound and changes only the dch option.
+_ABC_ALT_FANOUT_SCRIPT = (
+    " -script +strash;&get,-n;&fraig,-x;&put;scorr;dc2;dretime;strash;"
+    "&get,-n;&dch;&nf,{{D}};&put;buffer,-N,{cap}")
+
+
+def _select_postroute_synth_recipe(pdk_name: str, rows: Sequence[Mapping[str, Any]],
+                                   *, fanout_cap: int = 0) -> Dict[str, Any]:
+    """Select a PDK recipe only with matched post-route A/B on two designs."""
+    return _srp.select(pdk_name, rows, fanout_cap=fanout_cap)
 
 
 def _flow_default_max_fanout_read(project: Path, pdk: str):
