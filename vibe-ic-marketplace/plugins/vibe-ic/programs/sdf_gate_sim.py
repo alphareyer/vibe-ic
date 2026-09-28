@@ -2106,12 +2106,12 @@ def bind_bench_clock(tb_text: str, dut_instance: str, declared: Dict[str, object
 #
 #  ZERO_DELAY_TOP_PORT_INTERCONNECT: `(INTERCONNECT _416_/Q p (0.000:0.000:
 #    0.000))` on spm x gf180mcuD (lane cmpb, N5 run): the sink is the TOP
-#    module's own output port, so there is no inter-module path for Icarus to
-#    put the delay on (`Could not find intermodpath!`, 1 per case), and the
-#    record's delay is exactly zero. Legal SDF (OpenSTA writes it for a port
-#    driven straight by a cell pin); the annotated simulation loses a delay of
-#    0, so nothing a vector can see. A NON-zero delay to a top port is NOT
-#    this class: that would be a real delay dropped.
+#    module's own output port, driven through `assign p = pr;`. Icarus cannot
+#    insert an intermodpath there (`Could not find intermodpath!`, 1 per case).
+#    A separate Icarus probe reproduces this for an assign-aliased scalar port
+#    and a vector bit, even when the bit is directly cell-connected; a directly
+#    cell-connected scalar port annotates. Every delay in this class is zero,
+#    so simulation drops no delay. A NON-zero delay remains unexplained.
 #
 # A record is EXPLAINED only when this run's own artefacts prove the cause: the
 # compile log's `sorry` names the model line of that cell's `ifnone` path; the
@@ -2132,9 +2132,11 @@ SDF_ERROR_CLASSES = {
         "why": "-ginterconnect cannot put a delay on an inout port's net"},
     "ZERO_DELAY_TOP_PORT_INTERCONNECT": {
         "owner": "sdf:legal", "fork": None,
-        "why": "the INTERCONNECT's sink is the top module's own port, which "
-               "has no inter-module path to annotate, and every delay on the "
-               "record is 0: legal SDF, and the simulation drops nothing"},
+        "why": "Icarus reports no intermodpath for this top-port sink: "
+               "measured cases include an assign alias to a scalar output "
+               "and a vector bit (even with a direct cell connection); a "
+               "direct scalar connection annotates. Every delay on this "
+               "record is 0, so simulation drops no delay"},
 }
 _SDF_ERROR_LINE_RE = re.compile(r"^SDF ERROR: (.+?):(\d+): (.*)$", re.M)
 _MODPATH_MSG_RE = re.compile(
@@ -2178,6 +2180,11 @@ def _all_delays_zero(sdf_line: str) -> bool:
 _PORT_DECL_RE = re.compile(
     r"\b(input|output|inout)\b\s*(?:wire\b|reg\b|tri\b)?\s*(?:\[[^\]]*\]\s*)?"
     r"([A-Za-z_][\w$]*(?:\s*,\s*[A-Za-z_][\w$]*)*)")
+_VECTOR_PORT_DECL_RE = re.compile(
+    r"\b(?:input|output|inout)\b\s*(?:wire\b|reg\b|tri\b)?\s*"
+    r"\[[^\]]+\]\s*"
+    r"([A-Za-z_][\w$]*(?:\s*,\s*[A-Za-z_][\w$]*)*)")
+_TOP_PORT_BIT_RE = re.compile(r"([A-Za-z_][\w$]*)\s*\[\s*\d+\s*\]$")
 
 
 class SdfErrorExplainer:
@@ -2187,9 +2194,15 @@ class SdfErrorExplainer:
         self.masters = {name: master for name, (master, _)
                         in _instances(netlist_text).items()}
         top = _netlist_top(netlist_text)
-        self.top_dirs = (self._dirs(re.search(
+        top_match = (re.search(
             r"(?ms)^\s*module\s+" + re.escape(top[0]) + r"\b(.*?)\bendmodule\b",
-            netlist_text).group(0)) if top else {})
+            netlist_text) if top else None)
+        top_text = top_match.group(0) if top_match else ""
+        self.top_dirs = self._dirs(top_text)
+        self.top_vectors = {
+            name.strip()
+            for m in _VECTOR_PORT_DECL_RE.finditer(strip_comments(top_text))
+            for name in m.group(1).split(",")}
         self.modules: Dict[str, Tuple[str, str, int]] = {}
         for path, text in models.items():
             for m in re.finditer(r"(?m)^\s*module\s+([A-Za-z_][\w$]*)\b", text):
@@ -2223,12 +2236,21 @@ class SdfErrorExplainer:
         """The endpoint is a port of the netlist's top module itself."""
         if re.split(r"(?<!\\)" + re.escape(divider), name)[1:]:
             return False
-        return name.replace("\\", "") in self.top_dirs
+        return self._top_port_base(name) is not None
+
+    def _top_port_base(self, name: str) -> Optional[str]:
+        clean = name.replace("\\", "").strip()
+        bit = _TOP_PORT_BIT_RE.fullmatch(clean)
+        if bit:
+            base = bit.group(1)
+            return base if base in self.top_vectors and base in self.top_dirs else None
+        return clean if clean in self.top_dirs else None
 
     def endpoint_dir(self, name: str, divider: str) -> Optional[str]:
         parts = re.split(r"(?<!\\)" + re.escape(divider), name)
         if len(parts) == 1:
-            return self.top_dirs.get(name.replace("\\", ""))
+            base = self._top_port_base(name)
+            return self.top_dirs.get(base) if base else None
         inst = divider.join(parts[:-1]).replace("\\", "")
         master = self.masters.get(inst)
         if master not in self.modules:

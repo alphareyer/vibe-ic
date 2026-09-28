@@ -7400,11 +7400,15 @@ steps:
     # HARDMACRO, core-only): this step FAILED `required_outputs missing:
     # [...pad_ring_route_evidence.json]` (missing_artefact) for a file that is
     # correctly never written. `flow_compliance_check._output_not_owed` makes
-    # the ENTRY (not the step) NOT_APPLICABLE only when the design's own
-    # declaration says so -- the same `delivery_declares` clause as the die
-    # steps, cited in the reason -- and a DIE stays held to it.
+    # the ENTRY (not the step) NOT_APPLICABLE under the producer's full 15.5ic
+    # condition: an owner-declared hardmacro without a bound slot, or no live
+    # slot/SELF_TAPEOUT marker. A DIE with a live route stays held to it.
     output_conditions:
       "reports/phase3/pad_ring_route_evidence.json":
+        any_of: true
+        files_exist:
+          - "input/submission_template/slots/*.yaml"
+          - "input/submission_template/SELF_TAPEOUT.txt"
         delivery_declares:
           declaration: "input/submission_template/tapeout_declaration.json"
           field: "answers.deliverable"

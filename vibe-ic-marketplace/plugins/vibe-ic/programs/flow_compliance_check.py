@@ -16173,31 +16173,38 @@ def _output_not_owed(project: Path, step: Dict[str, Any], spec: Any
     """The reason ONE declared output is not owed by this delivery, or None.
 
     FX_SPM_GATES_2. A step may declare `output_conditions`, mapping one of
-    its own `required_outputs` entries to a `delivery_declares` clause -- the
-    same grammar the die steps (15.5ic, 26.5ic, 37.5ic) condition on. MEASURED
+    its own `required_outputs` entries to the producer's full step condition:
+    `delivery_declares` and the slot/SELF_TAPEOUT route markers for 15.5ic.
+    MEASURED
     on the same-RTL spm x gf180mcuD run (deliverable HARDMACRO, core-only):
     step 37 FAILED `required_outputs missing: [...pad_ring_route_evidence.json]`
     for an artefact its only producer (`step_pad_ring_final_evidence`, under
     `_chip_path_requests_pad_ring`) correctly never writes for a hardmacro.
 
-    NOT APPLICABLE ONLY BY DECLARATION. The entry is exempt only when
-    `_delivery_declares_absence` CITES the design's own declaration (a
-    positively declared die-less delivery that bought no slot), and the
-    reason names it. Every other answer -- no clause, an absent or unreadable
-    declaration, a DIE, a bought slot -- leaves the entry owed exactly as
-    before: absence of a declaration is not a declaration of absence."""
+    NOT APPLICABLE only when the producer's condition is false. One reason
+    cites an owner-declared die-less delivery with no bound slot. The other
+    cites absence of both route markers, where even a DIE or unreadable
+    declaration has no producer. A DIE with a live route remains owed."""
     conds = step.get("output_conditions")
     if not isinstance(conds, dict):
         return None
     cond = conds.get(str(spec))
     if not isinstance(cond, dict) or not cond.get("delivery_declares"):
         return None
-    cited = _delivery_declares_absence(project, cond.get("delivery_declares"))
-    if cited is None:
+    if _check_condition(project, cond):
         return None
-    rel, detail = cited[0], cited[1]
-    return (f"declared output {spec!r} NOT_APPLICABLE for this delivery: "
-            f"{rel} records {detail}, so its producer owes it nothing")
+    cited = _delivery_declares_absence(project, cond.get("delivery_declares"))
+    if cited is not None:
+        rel, detail = cited[0], cited[1]
+        return (f"declared output {spec!r} NOT_APPLICABLE for this delivery: "
+                f"{rel} records {detail}, so its producer owes it nothing")
+    files = cond.get("files_exist")
+    if files and not _check_condition(project, {
+            "files_exist": files, "any_of": cond.get("any_of", False)}):
+        return (f"declared output {spec!r} NOT_APPLICABLE for this delivery: "
+                f"no route marker satisfies {files!r}, so its producer "
+                "does not run")
+    return None
 
 
 @_with_child_gate_step
@@ -16465,7 +16472,9 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         result.output_binding = {
             "mode": ("step_attributed" if _n_glob == 0 else
                      "project_glob" if _n_attr == 0 else "mixed"),
-            "n_specs": len(outputs), "n_step_attributed": _n_attr,
+            "n_specs": len(outputs) - len(_not_owed),
+            "not_owed": _not_owed,
+            "n_step_attributed": _n_attr,
             # SATISFACTION, WHICH IS A DIFFERENT QUESTION FROM MODE.
             # `_resolve_required_output` returns mode `step_attributed` with
             # satisfied=False for wildcard_unbound, recorded_but_absent and

@@ -10,9 +10,9 @@ writes.
 
 The rule: step 37 keeps declaring the attestation (every other reader --
 matrix pins, the publisher, d4 grounding -- sees the step unchanged), and
-`output_conditions` makes that ONE entry NOT_APPLICABLE when, and only when,
-the design's own delivery declaration says there is no die (the #2277
-`delivery_declares` clause, cited in the reason). A DIE stays held to it.
+`output_conditions` makes that ONE entry NOT_APPLICABLE when the step-15.5ic
+route condition is false: an owner-declared hardmacro with no operator slot,
+or no live slot/SELF_TAPEOUT route marker. A DIE on a live route still owes it.
 """
 import sys
 from pathlib import Path
@@ -48,8 +48,13 @@ def _mini_step():
             "blocks_on": []}
 
 
-def _run(tmp_path, *, with_evidence=False, **kw):
+def _run(tmp_path, *, with_evidence=False, no_route=False, **kw):
     project = H._project(tmp_path, **kw)
+    if no_route:
+        for slot in (project / "input/submission_template/slots").glob("*.yaml"):
+            slot.unlink()
+        (project / "input/submission_template/SELF_TAPEOUT.txt").unlink(
+            missing_ok=True)
     gds = project / GDS
     gds.parent.mkdir(parents=True, exist_ok=True)
     gds.write_bytes(b"\x00\x06\x00\x02\x02\x58" * 64)
@@ -67,6 +72,7 @@ def test_step_37_still_declares_it_with_the_die_steps_own_clause():
     assert cond, "step 37 declares no condition for the attestation"
     assert cond["delivery_declares"] == \
         H._steps()["15.5ic"]["condition"]["delivery_declares"]
+    assert cond == H._steps()["15.5ic"]["condition"]
 
 
 def test_a_declared_hardmacro_does_not_owe_the_route_attestation(tmp_path):
@@ -77,6 +83,10 @@ def test_a_declared_hardmacro_does_not_owe_the_route_attestation(tmp_path):
     assert f"required_outputs missing" not in blob
     assert f"declared output {EVIDENCE!r} NOT_APPLICABLE for this delivery" in blob
     assert "tapeout_declaration.json" in blob and "HARDMACRO" in blob
+    binding = r.output_binding
+    assert binding["n_specs"] == binding["n_satisfied"] == \
+        len(binding["specs"]) == 1
+    assert binding["not_owed"] == [EVIDENCE]
 
 
 @pytest.mark.parametrize("kw", [
@@ -99,7 +109,7 @@ def test_a_die_that_has_it_passes(tmp_path):
     {}, {"deliverable": "DIE"}, {"deliverable": "DIE", "self_tapeout": True},
 ], ids=["hardmacro", "die", "die-self-tapeout"])
 def test_the_requirement_asks_the_producers_own_question(tmp_path, kw):
-    """Owed exactly when the runner writes the attestation.
+    """On a live route, owed exactly when the runner writes the attestation.
 
     NOT PINNED HERE, a pre-existing split for the owner (FX_SPM_GATES_2
     report): a HARDMACRO that BOUGHT a slot. #2277's `delivery_declares`
@@ -110,6 +120,22 @@ def test_the_requirement_asks_the_producers_own_question(tmp_path, kw):
     project = H._project(tmp_path, **kw)
     owed = F._output_not_owed(project, _step37(), EVIDENCE) is None
     assert owed is bool(TD.requests_pad_ring(project))
+
+
+@pytest.mark.parametrize("kw", [
+    {"deliverable": "DIE"}, {"declaration": False},
+], ids=["die-no-route", "unreadable-declaration-no-route"])
+def test_no_route_has_no_attestation_producer_or_requirement(tmp_path, kw):
+    project = H._project(tmp_path, **kw)
+    for slot in (project / "input/submission_template/slots").glob("*.yaml"):
+        slot.unlink()
+    assert TD.requests_pad_ring(project) is False
+    assert F._check_condition(project, H._steps()["15.5ic"]["condition"]) is False
+    why = F._output_not_owed(project, _step37(), EVIDENCE)
+    assert why and "NOT_APPLICABLE" in why and "slots" in why, why
+    r = _run(tmp_path / "audit", no_route=True, **kw)
+    assert r.status != "FAIL", r.reasons
+    assert r.output_binding["not_owed"] == [EVIDENCE]
 
 
 def test_an_entry_without_a_condition_is_always_owed(tmp_path):

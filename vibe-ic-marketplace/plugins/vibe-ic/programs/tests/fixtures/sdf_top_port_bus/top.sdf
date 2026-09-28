@@ -1,0 +1,20 @@
+(DELAYFILE
+ (SDFVERSION "3.0")
+ (DESIGN "top")
+ (DATE "2026-09-28")
+ (VENDOR "Parallax")
+ (PROGRAM "STA")
+ (VERSION "3.1.0")
+ (DIVIDER /)
+ (TIMESCALE 1ns)
+ (CELL
+  (CELLTYPE "top")
+  (INSTANCE)
+  (DELAY
+   (ABSOLUTE
+    (INTERCONNECT u1/Z q[1] (0.000:0.000:0.000))
+    (INTERCONNECT u2/Z p (0.000:0.000:0.000))
+   )
+  )
+ )
+)
