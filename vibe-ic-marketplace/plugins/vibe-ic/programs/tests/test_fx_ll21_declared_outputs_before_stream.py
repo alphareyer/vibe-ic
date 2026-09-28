@@ -224,3 +224,15 @@ def test_an_empty_report_beside_a_nonzero_final_count_is_not_a_zero(tmp_path):
     msg = next(f["message"] for f in p["findings"]
                if f["rule"] == "DRC_EMPTY_NOT_MEASURED")
     assert "(3)" in msg
+
+
+def test_a_zero_beside_a_disagreeing_final_count_does_not_corroborate(tmp_path):
+    """One log says 0, another says 3: the evidence disagrees, so the empty
+    report is not a measured zero."""
+    project = _empty_scope(tmp_path, "[INFO DRT-0199]   Number of violations = 3.\n")
+    (project / "phase3/stage3/pnr/earlier.log").write_text(
+        "[INFO DRT-0199]   Number of violations = 0.\n")
+    rc, p = _drc_audit(project)
+    assert rc == 1 and p["passed"] is False
+    assert "DRC_EMPTY_NOT_MEASURED" in _rules(p, "ERROR")
+    assert p["summary"]["empty_report_evidence"] == {}
