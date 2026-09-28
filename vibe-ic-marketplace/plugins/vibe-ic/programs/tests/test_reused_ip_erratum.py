@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -198,6 +199,37 @@ def test_trickling_upstream_response_hits_the_overall_deadline(
     assert row["status"] == E.NOT_APPLIED
     assert "overall fetch deadline" in row["why"]
     assert calls and all(n > 0 for n in calls)
+    assert _staged(p) == BEFORE and doc["disclosures"] == []
+
+
+def test_stalled_urlopen_is_cut_off_by_the_overall_deadline(
+        tmp_path, monkeypatch):
+    root = _catalog(tmp_path)
+    p = _project(tmp_path)
+    monkeypatch.setattr(E, "FETCH_DEADLINE_S", 0.05)
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read1(self, _size):
+            return AFTER
+
+    def stalled_open(_url, *, timeout):
+        time.sleep(0.2)
+        return Stream()
+
+    monkeypatch.setattr(urllib.request, "urlopen", stalled_open)
+    start = time.monotonic()
+    doc = E.apply_errata(p, root=root, pol=APPLY)
+    elapsed = time.monotonic() - start
+    row = doc["rows"][0]
+    assert row["status"] == E.NOT_APPLIED
+    assert "overall fetch deadline" in row["why"]
+    assert elapsed < 0.15, elapsed
     assert _staged(p) == BEFORE and doc["disclosures"] == []
 
 
