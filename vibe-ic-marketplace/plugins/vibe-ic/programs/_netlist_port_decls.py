@@ -44,16 +44,33 @@ def _top_span(text: str, top: str) -> Optional[Tuple[re.Match, int]]:
     return None
 
 
-def _header_names(ports: str) -> Optional[List[str]]:
-    names: List[str] = []
+def _header_tokens(ports: str) -> Optional[List[Tuple[str, str]]]:
+    """`[(name, raw_token)]` of a non-ANSI header, or None for an ANSI one.
+
+    `raw_token` is the text between two commas EXACTLY as written, so a
+    rebuilt header keeps the whitespace that TERMINATES a Verilog escaped
+    identifier (`\\a.b ,`): dropping it glues the comma into the name, and
+    no Verilog reader accepts the result (review wave 7, N9 MINOR). An
+    escaped identifier is recognised BEFORE the ANSI heuristic, so a `[`
+    inside one (`\\d[0] `, a bit-blasted port) is part of a name, not a
+    range."""
+    out: List[Tuple[str, str]] = []
     for raw in ports.split(","):
         tok = re.sub(r"/\*.*?\*/|//[^\n]*", " ", raw, flags=re.S).strip()
         if not tok:
             continue
+        if tok.startswith("\\"):
+            out.append((tok.split()[0], raw))
+            continue
         if re.search(r"\b(input|output|inout)\b|\[", tok):
             return None  # ANSI-style header: out of scope
-        names.append(tok.split()[-1])
-    return names
+        out.append((tok.split()[-1], raw))
+    return out
+
+
+def _header_names(ports: str) -> Optional[List[str]]:
+    toks = _header_tokens(ports)
+    return None if toks is None else [n for n, _raw in toks]
 
 
 def parse(text: str, top: str) -> Dict[str, object]:
@@ -147,5 +164,13 @@ def dedupe(text: str, top: str) -> Tuple[str, Dict[str, object]]:
         new = new[:s] + new[end:]
     hs, he = p["header_span"]  # type: ignore[misc]
     if len(uniq) != len(header):
-        new = new[:hs] + ",\n    ".join(uniq) + new[he:]
+        # keep each FIRST occurrence's own text (see `_header_tokens`); only
+        # the repeated tokens go
+        kept: List[str] = []
+        seen_names: set = set()
+        for name, raw in _header_tokens(new[hs:he]) or []:
+            if name not in seen_names:
+                seen_names.add(name)
+                kept.append(raw)
+        new = new[:hs] + ",".join(kept) + new[he:]
     return new, {"status": "DEDUPED", "removed": removed}

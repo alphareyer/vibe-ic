@@ -56020,6 +56020,10 @@ def _prestream_route_census(project: Path, top: str, pdk: PdkConfig,
     return record, ""
 
 
+#: suffix of the kept copy of a netlist's tool-written bytes (N9); it does not
+#: end in `.v`, so no `*.v` / `*_pnr.v` netlist discovery ever picks it up
+_NETLIST_TOOL_BYTES_SUFFIX = ".tool_bytes"
+
 def _dedupe_shipped_netlist_ports(project: Path, top: str,
                                   stage: str) -> Dict[str, Any]:
     """N9 — remove EXACT repeated top-port names/declarations from the
@@ -56031,22 +56035,61 @@ def _dedupe_shipped_netlist_ports(project: Path, top: str,
     call adds another), not a design fact: the routed DEF carries no such
     terminal at all. The rule is structural (`_netlist_port_decls`): a
     conflicting repeat is never merged, and a header this parser does not
-    understand is left untouched and recorded UNPARSED."""
+    understand is left untouched and recorded UNPARSED.
+
+    MODULE (review wave 7, MAJOR): the file keeps the file-naming top's name,
+    but after step 15.5ic its module is the physical chip top. The module is
+    taken from the routed DEF's own `DESIGN` line (`_streamout_top`, the same
+    resolution every other consumer of this netlist uses), never assumed.
+
+    PROVENANCE (review wave 7, BLOCKER): `<top>_pnr.v` is a declared output
+    of the PnR OpenROAD session. The rewrite goes through the runner's one
+    rule for rewriting a declared file (`_declared_transform_exec`: credited
+    only when the bytes it read are the newest declared bytes), so the ledger
+    carries the derivation -- input sha256, output sha256 and the rule -- in
+    its own row. The tool's bytes are kept beside it
+    (`<top>_pnr.v{_NETLIST_TOOL_BYTES_SUFFIX}`, declared too), so what
+    OpenROAD wrote stays inspectable after the derived netlist replaces it."""
     import _netlist_port_decls as _npd  # noqa: PLC0415
-    netlist = _pl.pnr_dir(project) / f"{top}_pnr.v"
-    row: Dict[str, Any] = {"stage": stage, "netlist": str(netlist)}
+    pnr = _pl.pnr_dir(project)
+    netlist = pnr / f"{top}_pnr.v"
+    module = top
+    routed = pnr / "routed.def"
+    if routed.is_file():
+        try:
+            module = _streamout_top(routed, top)[0] or top
+        except Exception:  # noqa: BLE001 — an unreadable DEF keeps `top`
+            module = top
+    row: Dict[str, Any] = {"stage": stage, "netlist": str(netlist),
+                           "module": module}
     try:
         text = netlist.read_text(errors="replace")
     except OSError as exc:
         row.update(status="ABSENT", why=f"{type(exc).__name__}: {exc}")
     else:
-        new, rec = _npd.dedupe(text, top)
+        new, rec = _npd.dedupe(text, module)
         row.update(rec)
-        row["sha256_before"] = hashlib.sha256(text.encode()).hexdigest()
+        before = hashlib.sha256(text.encode()).hexdigest()
+        row["sha256_before"] = before
         if new != text:
-            netlist.write_text(new)
+            rel = _project_rel(project, netlist) or str(netlist)
+            kept = netlist.with_name(netlist.name + _NETLIST_TOOL_BYTES_SUFFIX)
+            shutil.copy2(netlist, kept)
+            _restamp_provenance_output(
+                project, _project_rel(project, kept) or str(kept), kept,
+                "phase3_one_shot_runner",
+                f"N9: {rel} exactly as its producer wrote it "
+                f"(sha256:{before}), kept before the port dedupe")
+            row["tool_bytes"] = str(kept)
+            _declared_transform_exec(
+                project, netlist, f"{stage}:netlist_port_dedupe",
+                "phase3_one_shot_runner",
+                f"N9 _netlist_port_decls.dedupe on module {module}: exact "
+                f"repeated top-port names/declarations removed; input "
+                f"sha256:{before}",
+                lambda: _aa.write_text(netlist, new))
             row["sha256_after"] = hashlib.sha256(new.encode()).hexdigest()
-        row["check_status"], row["findings"] = _npd.problems(new, top)
+        row["check_status"], row["findings"] = _npd.problems(new, module)
     record = _pl.reports_dir(project) / "phase3" / "netlist_port_decls.json"
     try:
         doc = json.loads(record.read_text()) if record.is_file() else {}
@@ -56056,9 +56099,28 @@ def _dedupe_shipped_netlist_ports(project: Path, top: str,
     try:
         _aa.write_json(record, {"schema": "vibe-ic/netlist-port-decls/1",
                                 "rows": rows + [row]})
-    except Exception:  # noqa: BLE001 — the record never blocks the step
-        pass
+    except Exception as exc:  # noqa: BLE001 — never blocks the step, never silent
+        row["record_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[WARN] N9 netlist_port_decls record not written ({stage}): "
+              f"{row['record_error']}", file=sys.stderr)
     return row
+
+
+def _netlist_port_decls_row(nports: Dict[str, Any]) -> Optional[StepResult]:
+    """The pre-stream row for a PRESENT netlist whose ports could not be
+    checked (review wave 7): an UNPARSED result is not a pass, and it is
+    visible in the gate, not only in the side record. ABSENT is left to the
+    gate's own input check; a finding is the gate's FAIL above."""
+    if nports.get("status") == "ABSENT" or nports.get("check_status") != "UNPARSED":
+        return None
+    why = "; ".join(str(f) for f in (nports.get("findings") or [])) or str(
+        nports.get("why") or "unparsed")
+    return StepResult(
+        "netlist_port_decls", "NOT_MEASURED", 0.0,
+        f"NETLIST_PORT_DECL_UNCHECKED: module {nports.get('module')!r} in "
+        f"{Path(str(nports.get('netlist'))).name}: {why}",
+        [str(nports.get("netlist"))],
+        reason_class=_V.ReasonClass.INCONCLUSIVE)
 
 
 def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
@@ -56171,6 +56233,9 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
             return rerun
     rows = [_run_declared_signoff_gate(project, *spec)
             for spec in _PRESTREAM_GATES]
+    _nports_row = _netlist_port_decls_row(_nports)
+    if _nports_row is not None:
+        rows.append(_nports_row)
     if evidence.status != "PASS":
         rows.append(_upstream_signoff_not_measured(
             "prestream_evidence", evidence.detail))

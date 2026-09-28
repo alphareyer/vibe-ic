@@ -142,3 +142,103 @@ def test_the_pnr_step_dedupes_where_the_netlist_is_first_written():
 def test_the_helper_records_an_absent_netlist_without_raising(tmp_path):
     row = R._dedupe_shipped_netlist_ports(tmp_path, "dut", "pnr")
     assert row["status"] == "ABSENT"
+
+
+# ── review wave 7 ─────────────────────────────────────────────────────────
+import hashlib  # noqa: E402
+
+import provenance_output_hash_completeness_check as C  # noqa: E402
+
+_REL = "phase3/stage3/pnr/dut_pnr.v"
+
+
+def _sha(b: bytes) -> str:
+    return "sha256:" + hashlib.sha256(b).hexdigest()
+
+
+def _declared(tmp_path: Path, text: str) -> Path:
+    """A project whose PnR OpenROAD session DECLARED the netlist it wrote."""
+    nl = _stage(tmp_path, text)
+    (tmp_path / "provenance.jsonl").write_text(json.dumps({
+        "record": "invocation", "tool": "openroad",
+        "command": "openroad -exit pnr.tcl", "exit_code": 0,
+        "timestamp": "2026-09-28T01:00:00Z",
+        "outputs": {_REL: _sha(nl.read_bytes())}}) + "\n")
+    return nl
+
+
+def test_the_dedupe_keeps_the_provenance_chain_intact(tmp_path):
+    """BLOCKER (both reviewers): a plain write_text broke the #365 chain --
+    PROVENANCE_HASH_MISMATCH on the tool's declared output. The rewrite is a
+    declared transform whose input is the newest declared sha."""
+    nl = _declared(tmp_path, _netlist(5))
+    tool = nl.read_bytes()
+    row = R._dedupe_shipped_netlist_ports(tmp_path, "dut", "pnr")
+    assert row["status"] == "DEDUPED"
+    verdict, findings = C.audit(tmp_path)
+    assert verdict == "PASS", [(f.rule, f.message) for f in findings]
+    assert R._record_reemitted_outputs(tmp_path) in (None, "", [])
+    assert not (tmp_path / "reports/phase3/provenance_unexplained_rewrites.json").is_file()
+    rows = [json.loads(ln) for ln in
+            (tmp_path / "provenance.jsonl").read_text().splitlines() if ln.strip()]
+    derived = [r for r in rows if _REL in (r.get("outputs") or {})][-1]
+    assert derived["outputs"][_REL] == _sha(nl.read_bytes())
+    assert derived["producing_step"] == "pnr:netlist_port_dedupe"
+    assert _sha(tool)[len("sha256:"):] in derived["command"]  # the input sha
+    # the tool's bytes are kept, declared, and never look like a netlist
+    kept = Path(row["tool_bytes"])
+    assert kept.read_bytes() == tool and not kept.name.endswith(".v")
+    kept_rel = str(kept.relative_to(tmp_path))
+    assert any(kept_rel in (r.get("outputs") or {}) for r in rows)
+
+
+def test_the_module_is_the_one_the_file_contains_not_the_file_name(tmp_path):
+    """MAJOR: after the pad ring the file keeps `<logical>_pnr.v` but its
+    module is the physical chip top named by the routed DEF."""
+    nl = _stage(tmp_path, _netlist(3, top="chip_top"))
+    (nl.parent / "routed.def").write_text(
+        "VERSION 5.8 ;\nDESIGN chip_top ;\nUNITS DISTANCE MICRONS 1000 ;\nEND DESIGN\n")
+    row = R._dedupe_shipped_netlist_ports(tmp_path, "dut", "prestream")
+    assert row["module"] == "chip_top" and row["status"] == "DEDUPED", row
+    assert N.problems(nl.read_text(), "chip_top") == ("PARSED", [])
+
+
+def test_an_unparsed_present_netlist_is_a_prestream_row_not_a_silent_pass(tmp_path):
+    """MAJOR: UNPARSED lived only in the side JSON; the gate now carries it."""
+    _stage(tmp_path, "module other (a);\n input a;\nendmodule\n")
+    row = R._dedupe_shipped_netlist_ports(tmp_path, "dut", "prestream")
+    assert row["check_status"] == "UNPARSED"
+    res = R._netlist_port_decls_row(row)
+    assert res is not None and res.status == "NOT_MEASURED"
+    assert "NETLIST_PORT_DECL_UNCHECKED" in res.detail and "dut" in res.detail
+    assert R._netlist_port_decls_row({"status": "ABSENT"}) is None
+    assert R._netlist_port_decls_row({"status": "CLEAN", "check_status": "PARSED",
+                                      "findings": []}) is None
+
+
+def test_the_prestream_gate_appends_the_unchecked_row():
+    src = (PROG / "phase3_one_shot_runner.py").read_text()
+    fn = next(n for n in ast.parse(src).body
+              if isinstance(n, ast.FunctionDef) and n.name == "step_prestream_gate")
+    called = {getattr(c.func, "id", None) for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert "_netlist_port_decls_row" in called
+
+
+def test_an_escaped_header_name_keeps_its_terminating_space():
+    """MINOR: `\\a.b ,` rebuilt as `\\a.b,` glues the comma into the name."""
+    text = ("module dut (\\a.b ,\n    o_q,\n    VDD,\n    VSS,\n    VDD,\n    VSS,\n"
+            "    \\q$x );\n input \\a.b ;\n output o_q;\n output \\q$x ;\n"
+            " inout VDD;\n inout VSS;\n inout VDD;\n inout VSS;\nendmodule\n")
+    new, rec = N.dedupe(text, "dut")
+    assert rec["status"] == "DEDUPED"
+    header = new.split(";", 1)[0]
+    assert "\\a.b ," in header and "\\q$x )" in header
+    assert header.count("VDD") == 1 and header.count("VSS") == 1
+
+
+def test_an_escaped_bit_blasted_port_is_a_name_not_an_ansi_range():
+    text = ("module dut (\\d[0] ,\n    VDD,\n    VSS,\n    VDD,\n    VSS);\n"
+            " input \\d[0] ;\n inout VDD;\n inout VSS;\n inout VDD;\n inout VSS;\nendmodule\n")
+    new, rec = N.dedupe(text, "dut")
+    assert rec["status"] == "DEDUPED", rec
+    assert N.problems(new, "dut") == ("PARSED", [])
