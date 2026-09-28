@@ -23,6 +23,19 @@ import _tapeout_declaration as _td
 ROUTES = {"ic": _td.DELIVERABLE_DIE, "ip": _td.DELIVERABLE_HARDMACRO}
 
 
+def _disclose_undeclared(reason: str, doc: object) -> str:
+    """Quote the staged route and its attestation in a front-door refusal."""
+    staged = doc if isinstance(doc, dict) else {}
+    answers = staged.get("answers")
+    value = (_td.raw_answer(staged, "deliverable")
+             if isinstance(answers, dict) else None)
+    attestation = _td.attestation_of(staged, "deliverable")
+    return (f"{reason}; staged answers.deliverable={value!r}; "
+            "answer_provenance.deliverable "
+            f"answered_by={attestation['answered_by']!r}, "
+            f"citation={attestation['citation']!r}")
+
+
 def admit(project: Path, route: Optional[str] = None) -> Optional[str]:
     """Return a refusal, or write/accept the owner's route before Phase 1.
 
@@ -77,11 +90,13 @@ def admit(project: Path, route: Optional[str] = None) -> Optional[str]:
 
     rel = raw_rel if raw_path.exists() else _td.DECLARATION_REL
     if rel == _td.DECLARATION_REL and not declaration.exists():
-        return f"{raw_rel}: no owner-attested DIE or HARDMACRO answer"
+        return _disclose_undeclared(
+            f"{raw_rel}: no owner-attested DIE or HARDMACRO answer", {})
+    staged, _ = _td.load(project / rel)
     try:
         _td.read_owner_delivery(project, rel)
     except (OSError, ValueError, TypeError, AttributeError) as exc:
-        return str(exc)
+        return _disclose_undeclared(str(exc), staged)
     return None
 
 

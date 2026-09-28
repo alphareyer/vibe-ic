@@ -108,6 +108,43 @@ def test_undeclared_route_refuses_before_phase1_artifact(
     assert ST.DESIGN_ANSWERS_REL in err and "answer_provenance.deliverable" in err
 
 
+@pytest.mark.parametrize("answer,provenance,disclosure", [
+    (None, None, ("staged answers.deliverable=None", "answered_by='missing'",
+                  "citation=None")),
+    ("DIE", {"answered_by": "agent", "citation": "I inferred a die"},
+     ("staged answers.deliverable='DIE'", "answered_by='agent'",
+      "citation='I inferred a die'")),
+    ("HARDMACRO", {"answered_by": "owner"},
+     ("staged answers.deliverable='HARDMACRO'", "answered_by='owner'",
+      "citation=None")),
+])
+def test_route_refusal_discloses_staged_answer_and_attestation(
+        tmp_path, monkeypatch, capsys, answer, provenance, disclosure):
+    project = tmp_path / "project"
+    project.mkdir()
+    if answer is not None:
+        path = project / ST.DESIGN_ANSWERS_REL
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({
+            "answers": {"deliverable": answer},
+            "answer_provenance": {"deliverable": provenance},
+        }))
+    reached = []
+    monkeypatch.setattr(P1._runner_lock, "acquire_or_reenter",
+                        lambda *a: SimpleNamespace(release=lambda: None))
+    monkeypatch.setattr(P1, "run_second_pass_only",
+                        lambda *a: reached.append("phase1") or 0)
+    monkeypatch.setattr(sys, "argv", ["phase1_one_shot_runner.py", str(project),
+                                   "--second-track-only"])
+    assert _call_p1() == 2
+    assert reached == []
+    err = capsys.readouterr().err
+    assert "REFUSED: DELIVERY_ROUTE_UNDECLARED" in err
+    assert "--route ic|ip" in err
+    for field in disclosure:
+        assert field in err
+
+
 @pytest.mark.parametrize("route,deliverable", [("ic", "DIE"), ("ip", "HARDMACRO")])
 def test_route_option_writes_owner_answer_and_preserves_other_input(
         tmp_path, monkeypatch, route, deliverable):
