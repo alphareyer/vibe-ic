@@ -75,6 +75,7 @@ def _project(tmp_path, *, delegation=True, extra="o_sram_waddr", declaration=Non
         {"name": "o_sram_addr", "direction": "output", "width": 10},
         {"name": "o_sram_we", "direction": "output", "width": 1}]
     l9 = {"top_module": "dut", "ports": l9_ports, "top_ports": l9_ports,
+        "source_documents": ["input/docs/L3_external_interface.md"],
         "plugin_declared_port_groups": L9_GROUP if delegation else []}
     (gd / "L9_INTEGRATION_SPEC.json").write_text(json.dumps(l9))
     ports = "output [9:0] o_sram_addr, output o_sram_we"
@@ -317,6 +318,106 @@ def test_l9_locator_cannot_read_a_generated_section(tmp_path):
     assert ("port-extra", "o_sram_waddr") in _errors(findings)
 
 
+def test_forged_oracle_locator_is_never_opened(tmp_path, monkeypatch):
+    sys.path.insert(0, str(PROGRAMS))
+    import _delegated_port_groups as groups
+
+    project, spec, _ = _project(tmp_path)
+    (project / "input/docs/L3_external_interface.md").write_text(
+        DELEGATION.replace("declaration.json", "a separate file"))
+    oracle = project / "docs/oracle/README.md"
+    oracle.parent.mkdir(parents=True)
+    oracle.write_text(DELEGATION)
+    l9 = json.loads(spec.read_text())
+    l9["plugin_declared_port_groups"][0]["source_document"] = (
+        "__chip_root_docs__/docs/oracle/README.md")
+    l9["source_documents"].append("docs/oracle/README.md")
+
+    original_read_text = Path.read_text
+
+    def audited_read_text(path, *args, **kwargs):
+        if path.resolve() == oracle.resolve():
+            raise AssertionError("oracle source was opened")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", audited_read_text)
+    assert groups.resolve_delegated_groups(project, l9) == []
+
+
+def test_forged_oracle_locator_cannot_clear_port_extra(tmp_path):
+    project, spec, rtl = _project(tmp_path)
+    (project / "input/docs/L3_external_interface.md").write_text(
+        DELEGATION.replace("declaration.json", "a separate file"))
+    oracle = project / "docs/oracle/README.md"
+    oracle.parent.mkdir(parents=True)
+    oracle.write_text(DELEGATION)
+    l9 = json.loads(spec.read_text())
+    l9["plugin_declared_port_groups"][0]["source_document"] = (
+        "__chip_root_docs__/docs/oracle/README.md")
+    l9["source_documents"].append("docs/oracle/README.md")
+    spec.write_text(json.dumps(l9))
+
+    result, findings = _check(project, spec, rtl)
+    assert result.returncode == 1
+    assert ("port-extra", "o_sram_waddr") in _errors(findings)
+
+
+def test_oracle_nested_under_input_docs_is_never_opened(tmp_path, monkeypatch):
+    sys.path.insert(0, str(PROGRAMS))
+    import _delegated_port_groups as groups
+
+    project, spec, _ = _project(tmp_path)
+    oracle = project / "input/docs/oracle/README.md"
+    oracle.parent.mkdir(parents=True)
+    oracle.write_text(DELEGATION)
+    l9 = json.loads(spec.read_text())
+    l9["plugin_declared_port_groups"][0]["source_document"] = (
+        "oracle/README.md")
+    l9["source_documents"].append("input/docs/oracle/README.md")
+
+    original_read_text = Path.read_text
+
+    def audited_read_text(path, *args, **kwargs):
+        if path.resolve() == oracle.resolve():
+            raise AssertionError("oracle source was opened")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", audited_read_text)
+    assert groups.resolve_delegated_groups(project, l9) == []
+
+
+def test_uninventoried_input_doc_cannot_grant_a_port(tmp_path):
+    project, spec, rtl = _project(tmp_path)
+    l9 = json.loads(spec.read_text())
+    l9["source_documents"] = []
+    spec.write_text(json.dumps(l9))
+    result, findings = _check(project, spec, rtl)
+    assert result.returncode == 1
+    assert ("port-extra", "o_sram_waddr") in _errors(findings)
+
+
+def test_inventoried_symlink_cannot_read_unlisted_source(tmp_path, monkeypatch):
+    sys.path.insert(0, str(PROGRAMS))
+    import _delegated_port_groups as groups
+
+    project, spec, _ = _project(tmp_path)
+    target = project / "input/docs/unlisted.md"
+    target.write_text(DELEGATION)
+    link = project / "input/docs/L3_external_interface.md"
+    link.unlink()
+    link.symlink_to(target)
+    l9 = json.loads(spec.read_text())
+    original_read_text = Path.read_text
+
+    def audited_read_text(path, *args, **kwargs):
+        if path.resolve() == target.resolve():
+            raise AssertionError("unlisted source was opened")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", audited_read_text)
+    assert groups.resolve_delegated_groups(project, l9) == []
+
+
 def test_own_mention_and_entry_work_without_example_table(tmp_path):
     sys.path.insert(0, str(PROGRAMS))
     import phase1_doc_one_shot_runner as phase1
@@ -354,7 +455,8 @@ def test_declaration_mention_in_group_heading_counts(tmp_path):
         {"L3_external_interface.md": document})
     assert rows == L9_GROUP
     assert groups.resolve_delegated_groups(
-        project, {"plugin_declared_port_groups": rows})[0][
+        project, {"source_documents": ["input/docs/L3_external_interface.md"],
+                  "plugin_declared_port_groups": rows})[0][
             "declared_ports"] == {"o_sram_addr", "o_sram_we", "o_sram_waddr"}
 
 
