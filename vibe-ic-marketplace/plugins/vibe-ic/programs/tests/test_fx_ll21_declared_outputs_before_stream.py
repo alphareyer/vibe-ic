@@ -38,6 +38,7 @@ sys.path.insert(0, str(PROG / "tests"))
 
 import phase3_one_shot_runner as R  # noqa: E402
 import eda_report_audit as A  # noqa: E402
+from _ppa import power as P  # noqa: E402
 from test_postlayout_lec_nameerror import (  # noqa: E402
     TOP, _canonicalize_project, _pdk, _quiet_canonicalize)
 
@@ -73,6 +74,18 @@ def _ll_chain(project: Path, counts=(None, 0, 0)) -> None:
                                "15-floorplan/11-openroad-generatepdn/state_out.json"}))
 
 
+def _emit_pdn(project: Path) -> str:
+    """The runner's step-15 block, as `step_canonicalize_artefacts` runs it."""
+    pnr = R._pl.pnr_dir(project)
+    d = pnr / f"{TOP}.def"
+    ok, mk = R._pnr_pdn_status(project)
+    text = P.pdn_done_text(project, pnr, d, ok, mk,
+                           R._def_pdn_evidence(d.read_text()))
+    if text is not None:
+        (pnr / "pdn.done").write_text(text)
+    return (pnr / "pdn.done").read_text()
+
+
 def _prestream(project: Path, monkeypatch, tmp_path: Path):
     _quiet_canonicalize(monkeypatch)
     return R.step_canonicalize_artefacts(
@@ -106,9 +119,7 @@ def test_the_librelane_grid_is_read_from_librelanes_own_measurement(tmp_path):
     pnr = R._pl.pnr_dir(project)
     (pnr / "openroad.log").write_text(_LL_ROUTE_LOG)
     _ll_chain(project)
-    w = []
-    R._emit_pdn_done(project, pnr, pnr / f"{TOP}.def", w)
-    text = (pnr / "pdn.done").read_text()
+    text = _emit_pdn(project)
     assert "# PDN status: CONNECTED" in text, text
     # the step that MEASURED it (not the last one carrying it forward), and
     # the bytes it was read from
@@ -125,8 +136,7 @@ def test_a_librelane_grid_with_violations_is_not_connected(tmp_path):
     pnr = R._pl.pnr_dir(project)
     (pnr / "openroad.log").write_text(_LL_ROUTE_LOG)
     _ll_chain(project, counts=(None, 7, 7))
-    R._emit_pdn_done(project, pnr, pnr / f"{TOP}.def", [])
-    text = (pnr / "pdn.done").read_text()
+    text = _emit_pdn(project)
     assert "# PDN status: NOT CONNECTED" in text and "count=7" in text
 
 
@@ -135,8 +145,7 @@ def test_no_marker_and_no_librelane_measurement_is_not_measured(tmp_path):
     project = _canonicalize_project(tmp_path)
     pnr = R._pl.pnr_dir(project)
     (pnr / "openroad.log").write_text("[INFO] nothing about a grid\n")
-    R._emit_pdn_done(project, pnr, pnr / f"{TOP}.def", [])
-    text = (pnr / "pdn.done").read_text()
+    text = _emit_pdn(project)
     assert "# PDN status: NOT MEASURED" in text, text
     assert "NOT CONNECTED" not in text
 
@@ -149,30 +158,32 @@ def test_the_flag_follows_the_def_it_describes(tmp_path):
     (pnr / "openroad.log").write_text(_LL_ROUTE_LOG)
     _ll_chain(project)
     d = pnr / f"{TOP}.def"
-    R._emit_pdn_done(project, pnr, d, [])
-    first = (pnr / "pdn.done").read_text()
-    R._emit_pdn_done(project, pnr, d, [])
-    assert (pnr / "pdn.done").read_text() == first
+    first = _emit_pdn(project)
+    assert P.pdn_done_text(project, pnr, d, False, "no PDN insertion marker",
+                           {}) is None, "an unchanged DEF must not be re-measured"
+    assert _emit_pdn(project) == first
     d.write_text(d.read_text() + "# promoted\n")
-    R._emit_pdn_done(project, pnr, d, [])
+    _emit_pdn(project)
     new_sha = R._file_sha256(d).split(":", 1)[1]
     assert f"# measured_def_sha256: {new_sha}" in (pnr / "pdn.done").read_text()
 
 
 def test_the_prestream_return_is_preceded_by_both_emitters():
-    """The two calls sit INSIDE the `if prestream:` block that returns, so a
-    later edit cannot move them behind the return unnoticed."""
+    """Both outputs are produced BEFORE the `if prestream:` return, so a later
+    edit cannot move them behind it unnoticed."""
     import ast
     tree = ast.parse((PROG / "phase3_one_shot_runner.py").read_text())
     fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
               and n.name == "step_canonicalize_artefacts")
-    blocks = [n for n in ast.walk(fn) if isinstance(n, ast.If)
-              and isinstance(n.test, ast.Name) and n.test.id == "prestream"
-              and any(isinstance(s, ast.Return) for s in n.body)]
-    assert len(blocks) == 1
-    called = {getattr(c.func, "id", None) for c in ast.walk(blocks[0])
-              if isinstance(c, ast.Call)}
-    assert {"_emit_pdn_done", "_emit_router_drc_report"} <= called
+    ret = [n for n in ast.walk(fn) if isinstance(n, ast.If)
+           and isinstance(n.test, ast.Name) and n.test.id == "prestream"
+           and any(isinstance(s, ast.Return) for s in n.body)]
+    assert len(ret) == 1
+    ret_line = next(s for s in ret[0].body if isinstance(s, ast.Return)).lineno
+    calls = [(getattr(c.func, "id", None) or getattr(c.func, "attr", None), c.lineno)
+             for c in ast.walk(fn) if isinstance(c, ast.Call)]
+    for name in ("pdn_done_text", "_emit_router_drc_report"):
+        assert any(n == name and ln < ret_line for n, ln in calls), name
 
 
 # ── one answer for an empty router report ──────────────────────────────────

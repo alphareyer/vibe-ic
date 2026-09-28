@@ -2671,3 +2671,111 @@ def em_power_basis(log: str, *, sdc: Optional[str], spef: Optional[str],
                       if sdc and spef else
                       "declared SDC (propagated clocks), no SPEF" if sdc else
                       "no SDC: OpenSTA default activity, not the design's clock")}
+
+
+# ── Step 15's declared `pdn.done` (FX_LL21_DECLARED_OUTPUTS) ───────────────
+
+def _sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _rel(path: Path, project: Path) -> str:
+    try:
+        return str(Path(path).resolve().relative_to(Path(project).resolve()))
+    except ValueError:
+        return str(path)
+
+
+def librelane_pdn_evidence(project: Path) -> Optional[Dict[str, Any]]:
+    """The power-grid verdict LibreLane's OWN step-15 chain measured, or None.
+
+    On the LibreLane path the grid is built by LibreLane's PDN step and judged
+    by its power-grid checker; `pnr.tcl` never runs `pdngen`, so the PnR
+    transcript carries none of the direct deck's `PDN_*` markers. The chain
+    is the one the floorplan handoff record names
+    (`reports/phase3/librelane_floorplan_handoff.json` -> `state`), read under
+    THIS project (the record stores an absolute path). LibreLane carries a
+    metric forward in every later state, so the step that MEASURED the value
+    is the one where `design__power_grid_violation__count` first took it.
+    chip- and PDK-agnostic: the metric names are LibreLane's."""
+    project = Path(project)
+    rec = project / "reports/phase3/librelane_floorplan_handoff.json"
+    try:
+        parts = Path(json.loads(rec.read_text())["state"]).parts
+        k = next(i for i in range(len(parts) - 1)
+                 if parts[i] == "phase3" and parts[i + 1] == "librelane")
+        chain = project.joinpath(*parts[k:]).parent.parent
+        steps = sorted((d for d in chain.iterdir()
+                        if d.is_dir() and d.name.split("-", 1)[0].isdigit()),
+                       key=lambda d: int(d.name.split("-", 1)[0]))
+    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+        return None
+    found: Optional[Dict[str, Any]] = None
+    for d in steps:
+        so = d / "state_out.json"
+        try:
+            metrics = json.loads(so.read_text()).get("metrics") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        n = metrics.get("design__power_grid_violation__count")
+        if not isinstance(n, (int, float)) or isinstance(n, bool):
+            continue
+        per_net = {k.rsplit(":", 1)[-1]: v for k, v in metrics.items()
+                   if k.startswith("design__power_grid_violation__count__net:")}
+        if found is None or (found["count"], found["per_net"]) != (int(n), per_net):
+            found = {"step": _rel(d, project), "state_sha256": _sha256_of(so),
+                     "count": int(n), "per_net": per_net}
+    return found
+
+
+def pdn_done_text(project: Path, pnr_out: Path, primary_def: Path,
+                  pdn_ok: bool, pdn_marker: str,
+                  def_evidence: Mapping[str, Any]) -> Optional[str]:
+    """The text of Step 15's declared `<pnr>/pdn.done`, or None when the flag
+    on disk already describes exactly this DEF.
+
+    `pdn_ok` / `pdn_marker` are the direct deck's transcript verdict
+    (`phase3_one_shot_runner._pnr_pdn_status`), `def_evidence` the DEF's own
+    SPECIALNETS census. The flag is BOUND to the DEF it measured
+    (`measured_def_sha256`) so a pass that wrote it never speaks for a later
+    layout. When the transcript carries no marker at all, LibreLane's own
+    measurement is read (`librelane_pdn_evidence`); with neither the status is
+    NOT MEASURED -- a missing marker is not a disconnected grid."""
+    project, pnr_out = Path(project), Path(pnr_out)
+    flag = pnr_out / "pdn.done"
+    def_sha = _sha256_of(primary_def)
+    try:
+        if flag.is_file() and (f"# measured_def_sha256: {def_sha}\n"
+                               in flag.read_text(errors="replace")):
+            return None
+    except OSError:
+        pass
+    ll = (None if pdn_ok or pdn_marker != "no PDN insertion marker"
+          else librelane_pdn_evidence(project))
+    if ll is not None:
+        status = "CONNECTED" if ll["count"] == 0 else "NOT CONNECTED"
+        marker = (f"LibreLane {ll['step']}: design__power_grid_violation__count="
+                  f"{ll['count']} (per net {ll['per_net']})")
+        source = f"{ll['step']}/state_out.json sha256:{ll['state_sha256']}"
+        tool = f"openroad, run by LibreLane (chain of {ll['step']})"
+    else:
+        status = ("CONNECTED" if pdn_ok else
+                  "NOT MEASURED" if pdn_marker == "no PDN insertion marker"
+                  else "NOT CONNECTED")
+        marker = pdn_marker
+        source = _rel(pnr_out / "openroad.log", project)
+        tool = f"openroad (see {_rel(pnr_out / 'pnr.tcl', project)})"
+    ev = def_evidence or {}
+    return (f"# PDN status: {status}\n"
+            f"# marker: {marker}\n"
+            f"# measured in {Path(primary_def).name} SPECIALNETS: "
+            f"follow-pin rails={ev.get('followpin', '?')} "
+            f"straps={ev.get('stripe', '?')} ring={ev.get('ring', '?')} "
+            f"vias={ev.get('vias', '?')} layers={ev.get('layers', '?')}\n"
+            f"# measured_def_sha256: {def_sha}\n"
+            f"# source: {source}\n"
+            f"# tool: {tool}\n")
