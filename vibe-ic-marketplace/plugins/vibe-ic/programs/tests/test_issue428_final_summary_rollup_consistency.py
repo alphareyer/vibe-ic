@@ -514,9 +514,100 @@ def test_archived_audit_json_agrees_with_the_quoted_tally_not_the_table():
                      .read_text(encoding="utf-8", errors="replace"))["step_counts"]
     js = {C._AUDIT_JSON_KEY_TO_BUCKET[k]: v for k, v in raw.items()
           if k in C._AUDIT_JSON_KEY_TO_BUCKET}
-    tally = F._parse_audit_tally(md)
+    # The summary is written in the vocabulary R-0915-85 retired, which the
+    # renderer's own parser (five words only, by `verdict.py`'s rule) no longer
+    # reads; the gate's document reader reads it in its own words.
+    tally = C.parse_quoted_tally(md)
     # The audit JSON and the tally quoted in the summary are the SAME
     # measurement, bucket for bucket …
     assert C.compare_buckets(js, tally) == {}
     # … and the recomputed table is the one that disagrees with both.
     assert C.compare_buckets(C.parse_rollup_table(md), tally) != {}
+
+
+# ─── 9. a summary rendered before the vocabulary rename (R-0915-85) ──────
+
+_RETIRED_SUMMARY = """# Final summary
+
+```
+=== Vibe-IC phase1_phase2_phase3 compliance ===
+Steps: 10 total
+  PASS=6  FAIL=0  MISSING=0  WAIVED-DEFERRED=1  SKIPPED=3  VACUOUS-PASS=0
+```
+
+- PASS=6 (+VACUOUS-PASS=0 -> executed PASS=6) -- prose, not the tally.
+
+### Verdict roll-up
+
+| Verdict | Count |
+|---|---:|
+| \u2705 PASS | 4 |
+| \u26a0\ufe0f WAIVED-DEFERRED | 1 |
+| \u23ed\ufe0f SKIPPED-CONDITION | 3 |
+| \u2753 MISSING | 2 |
+| **Total** | **10** |
+"""
+
+
+def _retired_project(tmp_path, text):
+    (tmp_path / "reports").mkdir(parents=True)
+    (tmp_path / "reports" / "final_summary.md").write_text(text,
+                                                          encoding="utf-8")
+    return tmp_path
+
+
+def test_a_retired_vocabulary_summary_is_compared_in_its_own_words(tmp_path):
+    """RED before: the gate said the summary quotes NO tally line -- false,
+    it quotes one in the words of its day -- and so could not name the
+    disagreement #428 is about."""
+    ok, notes = C.check_project(_retired_project(tmp_path, _RETIRED_SUMMARY))
+    blob = "\n".join(notes)
+    assert not ok
+    assert "quotes no flow_compliance_check tally line" not in blob
+    assert C.RETIRED_VOCABULARY_RULING in blob
+    assert "MISSING: table=2 checker=0" in blob
+    assert "PASS: table=4 checker=6" in blob
+    assert "PASS: roll-up rows sum to the printed Total=10." in blob
+
+
+def test_an_agreeing_retired_summary_passes_and_says_which_words(tmp_path):
+    text = (_RETIRED_SUMMARY.replace("| 4 |", "| 6 |")
+            .replace("MISSING | 2 |", "MISSING | 0 |"))
+    ok, notes = C.check_project(_retired_project(tmp_path, text))
+    blob = "\n".join(notes)
+    assert ok, blob
+    assert C.RETIRED_VOCABULARY_RULING in blob
+
+
+def test_the_prose_bullet_alone_is_still_not_a_tally(tmp_path):
+    """The retired quartet is what keeps the report's own prose out, as the
+    five do for a current summary: no agreement by construction."""
+    lines = [ln for ln in _RETIRED_SUMMARY.splitlines()
+             if "MISSING=0  WAIVED-DEFERRED" not in ln]
+    ok, notes = C.check_project(_retired_project(tmp_path, "\n".join(lines)))
+    assert not ok
+    assert "quotes no flow_compliance_check tally line" in "\n".join(notes)
+
+
+def test_the_renderer_still_refuses_the_retired_words():
+    """`verdict.py` keeps no tolerant reader: the renderer's parser still
+    reads only the five. The document reader is the gate's, not a leak."""
+    assert F._parse_audit_tally(_RETIRED_SUMMARY) is None
+
+
+def test_the_not_prose_claim_for_the_retired_tally_reader_is_falsifiable():
+    """The `_NOT_PROSE` claim for `_parse_retired_tally`: it reads only a line
+    made entirely of `LABEL=N` tokens. A line that carries the whole quartet
+    AND a word -- a sentence, a denial -- is refused; the bare machine line is
+    read."""
+    line = "  PASS=6  FAIL=0  MISSING=0  WAIVED-DEFERRED=1  SKIPPED=3"
+    assert C._parse_retired_tally(line) == {
+        "PASS": 6, "FAIL": 0, "MISSING": 0, "WAIVED-DEFERRED": 1,
+        "SKIPPED-CONDITION": 3}
+    for denial in (line + "  is NOT the tally",
+                   "It is not true that" + line,
+                   "- " + line.strip()):
+        assert C._parse_retired_tally(denial) is None, denial
+    # Token-only but without the whole quartet the checker always printed:
+    # not its tally either.
+    assert C._parse_retired_tally("  PASS=6  VACUOUS-PASS=0") is None

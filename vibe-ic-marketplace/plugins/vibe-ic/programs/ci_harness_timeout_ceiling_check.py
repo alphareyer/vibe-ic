@@ -337,7 +337,7 @@ _LANDING_WINDOW_ANCHOR = "lane_emit_window"
 # did not move, and the three lane bodies are unchanged; this prefix and the
 # whole file are the two faces a comment edit ahead of the anchor moves.
 _LANDING_EXECUTION_PREFIX_SHA256 = (
-    '9fb2b30048dccf46dede498dea0770646f46bb82342306354548f0246672bdb0'
+    '4c9c17b480d0487a8615d1c815ff5a8e815eea79d1db9e876af4a98da74be1f6'
 )
 # RE-PINNED when the landing gained its runtime PREFLIGHT. Both digests below
 # moved for one reason and it is stated here rather than left to `git log`: the
@@ -877,8 +877,13 @@ _LANDING_EXECUTION_PREFIX_SHA256 = (
 # ones `next` records" refusal. A PREPARE authorises BYTES, so every gate that
 # can force a byte change must be satisfied BEFORE the PREPARE is rendered, not
 # between the two landings. See vibe-ic#2202.
+# RE-PINN 2026-09-28 for 654ecf410: the runtime preflight's nonzero path now
+# prints STOPPED and preserves its own cause above that line. It still exits 2
+# before any test arm or stamp. This edit precedes lane_emit_window, so the
+# whole script and execution prefix moved; all three pytest lane bodies and the
+# semantic driver were observed unchanged by --repin-out.
 _LANDING_SCRIPT_SHA256 = (
-    'ebca0f4943ba415f74aff9891235c076daf7c1f3080d0d73d4bdcf62b97b6fda'
+    '84486f22c847cff9f490f590bb516ccfa219ea4b45e58fe3c26ea2e267ee8a79'
 )
 # The helper AST is not enough: a counterfeit CLI can define the expected
 # helper and never call it.  Bind the policy to the complete reviewed driver

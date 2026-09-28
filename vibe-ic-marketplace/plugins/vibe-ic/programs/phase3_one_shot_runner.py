@@ -8584,6 +8584,72 @@ def _io_pg_global_connect_tcl(pdk: "PdkConfig", container: Optional[str],
     return out
 
 
+def _core_block_pin_layers_tcl(pin_layers: Sequence[str]) -> str:
+    """Tcl that decides, from the placed database, whether the core grid's
+    straps become the supply PINS of the block.
+
+    A block with no placed pad master is delivered as a core (a hard macro):
+    whoever instantiates it reaches its supply through its own ports, so the
+    routed DEF must declare them. Before this the core grid never asked, and
+    the spm core-only DEF carried VDD/VSS in SPECIALNETS only -- no PINS row --
+    while its GDS and its power-aware netlist both declared them as ports; the
+    judge's LVS was left with exactly that one top-level port mismatch.
+    LibreLane does the same thing with the same tool (`define_pdn_grid -pins`
+    on the PDN's strap layers, `PDN_ENABLE_PINS`).
+
+    A block WITH placed pads is a die: its supply enters through the pads and
+    the core grid must not grow top-level ports of its own, so the list stays
+    empty and the grid is the ordinary one. The supply NET names come from
+    `set_voltage_domain` (pdngen promotes the domain's nets); the layers are
+    the strap layers this PDN plan draws. No design, PDK or net literal.
+
+    THE PINS ARE AN INTERFACE, NOT A SOURCE MODEL. PSM, given no -vsrc,
+    sources from every BPin shape, so promoted straps would read as ideal
+    supplies (measured on spm: Metal4 strap current 0 A, EM peak 4.3x lower).
+    Every PSM session marks these pins PSM_DISCONNECT (`_psm_source_model`)
+    and solves on the generated pattern it used before they existed.
+    NOTE the grid itself changes too: with `-pins` pdngen keeps the upper strap
+    layer it otherwise drops as unconnected (spm: Metal5 straps + Metal4-5
+    vias appear), which is geometry, not a model, and is measured as such.
+    """
+    layers = []
+    for lyr in pin_layers or ():
+        lyr = str(lyr)
+        if lyr and lyr not in layers:
+            layers.append(lyr)
+    if not layers or any(not re.fullmatch(r"[A-Za-z0-9_.\-]+", l)
+                         for l in layers):
+        return ("  set _vibeic_core_pin_layers {}\n"
+                "  puts \"PDN_SUPPLY_PINS_NOT_PROMOTED: no strap layer in the "
+                "PDN plan to promote\"\n")
+    lyr_s = " ".join(layers)
+    return (
+        "  set _vibeic_core_pin_layers {}\n"
+        "  set _vibeic_core_pads 0\n"
+        "  foreach _vibeic_cp_i [[ord::get_db_block] getInsts] {\n"
+        "    if {[[$_vibeic_cp_i getMaster] isPad] && [$_vibeic_cp_i isPlaced]} "
+        "{ incr _vibeic_core_pads }\n"
+        "  }\n"
+        "  if {$_vibeic_core_pads == 0} {\n"
+        f"    set _vibeic_core_pin_layers {{{lyr_s}}}\n"
+        "    puts \"PDN_SUPPLY_PINS: no placed pad master; the core grid "
+        f"promotes its straps on {lyr_s} to the supply pins of the block\"\n"
+        "  } else {\n"
+        "    puts \"PDN_SUPPLY_PINS_NOT_PROMOTED: $_vibeic_core_pads placed pad "
+        "master(s) carry the supply\"\n"
+        "  }\n")
+
+
+_CORE_GRID_DEFINE_TCL = (
+    "  if {[info exists _vibeic_core_pin_layers] && "
+    "[llength $_vibeic_core_pin_layers]} {\n"
+    "    define_pdn_grid -name grid -voltage_domains CORE "
+    "-pins $_vibeic_core_pin_layers\n"
+    "  } else {\n"
+    "  define_pdn_grid -name grid -voltage_domains CORE\n"
+    "  }\n")
+
+
 def _pad_connected_ring_tcl(pdk: "PdkConfig",
                             ring_plan: Optional[Dict[str, Any]] = None
                             ) -> Dict[str, str]:
@@ -8604,7 +8670,7 @@ def _pad_connected_ring_tcl(pdk: "PdkConfig",
     cfg = getattr(pdk, "pdn_ring", None) or {}
     if not cfg:
         return {
-            "grid": "  define_pdn_grid -name grid -voltage_domains CORE\n",
+            "grid": _CORE_GRID_DEFINE_TCL,
             "extend": "",
             "connects": "",
             "note": "",
@@ -8672,7 +8738,11 @@ def _pad_connected_ring_tcl(pdk: "PdkConfig",
     }}
   }}
   if {{$_vibeic_pr_pad_count == 0}} {{
+    if {{[info exists _vibeic_core_pin_layers] && [llength $_vibeic_core_pin_layers]}} {{
+      define_pdn_grid -name grid -voltage_domains CORE -pins $_vibeic_core_pin_layers
+    }} else {{
     define_pdn_grid -name grid -voltage_domains CORE
+    }}
     puts "PDN_PAD_RING_INERT: no placed PAD-class masters; ordinary core grid retained"
   }} elseif {{$_vibeic_pr_power_pad_count == 0 || $_vibeic_pr_side_count == 0 || $_vibeic_pr_gap_dbu < 0}} {{
     puts "PDN_PAD_RING_REFUSED: placed_pads=$_vibeic_pr_pad_count power_pads=$_vibeic_pr_power_pad_count but no side supply-pad/core gap was measurable"
@@ -8834,7 +8904,8 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
             "  add_global_connection -net VGND -pin_pattern \"^VNB$\"  -ground\n"
             "  global_connect\n"
             "  set_voltage_domain -name CORE -power VPWR -ground VGND\n"
-            "  define_pdn_grid -name grid -voltage_domains CORE\n"
+            + _core_block_pin_layers_tcl(["met4", "met5"])
+            + _CORE_GRID_DEFINE_TCL +
             "  add_pdn_stripe -grid grid -layer met1 -width 0.48 -pitch 5.44 -offset 0 -followpins\n"
             f"  add_pdn_stripe -grid grid -layer met4 -width {_w4} -pitch {_p45} -offset {_o45} -extend_to_core_ring\n"
             f"  add_pdn_stripe -grid grid -layer met5 -width {_w5} -pitch {_p45} -offset {_o45} -extend_to_core_ring\n"
@@ -9311,6 +9382,8 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
             + _sec["enumerate"]
             + f"  set_voltage_domain -name CORE -power {pwr} -ground {gnd}"
             + _sec["domain_opt"] + "\n"
+            + _core_block_pin_layers_tcl(
+                [st.get("layer") for st in _stripes if st.get("layer")])
             + ring["grid"]
             + f"  add_pdn_stripe -grid grid -layer {fpl} -width {w} -followpins{ring['extend']}\n"
             + strap_tcl
@@ -41094,7 +41167,14 @@ if {[info exists env(MACRO_GDS)] && [string trim $env(MACRO_GDS)] ne ""} {
         if {[string trim $mg] ne ""} { gds read $mg }
     }
 }
-def read $env(DEF)
+# A DEF routing BLOCKAGE is a keep-out for the router, not mask geometry.
+# Without `-noblockage` magic paints it as the layer's obstruction type
+# (tech `obs obsmN MetalN`), the GDS output below carries it on the layer's
+# blockage datatype, and the PDK's own magic deck counts obsmN as metal
+# (gf180mcuD `area allm2,obsm2 ... (M2.3)`): spm shipped one 0.22 um
+# keep-out that way and failed sign-off on metal that does not exist.
+# LibreLane streams with the same flag. chip-AGNOSTIC: no layer named.
+def read $env(DEF) -noblockage
 load $env(TOP)
 select top cell
 cellname rename $env(TOP) $env(TOP)
@@ -55931,10 +56011,30 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
     # here, before the pre-stream gate certifies a fixed layout identity.
     import drc_feedback_repair as _drc_feedback
     if _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None)):
+        _fb_t0 = time.time()
         _feedback = _drc_feedback.run(
             project, top, pdk,
             _drc_feedback.image_for_container(container),
             stream_script_text=_GDS_STREAMOUT_PY)
+        _fb_pub = _feedback.get("publication") or {}
+        if _feedback.get("status") == "PASS" and _fb_pub.get("output"):
+            # The feedback reroute is a LAYOUT WRITER: it replaces the routed
+            # DEF after the router's own ledger row. Undeclared, the newest
+            # row for routed.def names bytes that are no longer on disk
+            # (PROVENANCE_HASH_MISMATCH on spm), and nothing says who wrote
+            # the ones that are. Declare its output and the two canonical
+            # DEFs it replaced, with the DEF it read as the input.
+            _log_invocation(
+                "openroad -exit trial.tcl (drc_feedback_repair scoped reroute: "
+                f"rules={','.join(_feedback.get('rules') or [])} "
+                f"nets={','.join(_fb_pub.get('targets') or [])})",
+                0, int((time.time() - _fb_t0) * 1000),
+                marker=str(project / "reports/phase3/drc_feedback.json"),
+                container=container,
+                outputs=[Path(_fb_pub["output"]),
+                         *[Path(p) for p in _fb_pub.get("replaced") or []]],
+                input_hashes={str(_feedback.get("source_def")):
+                              "sha256:" + str(_fb_pub.get("from_sha256"))})
         if _feedback.get("status") != "PASS":
             return StepResult("prestream_gate", "FAIL", time.time() - t0,
                               "SIGNOFF_DECK_FEEDBACK_REFUSED: " +
@@ -60508,7 +60608,14 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # cross-check.  The direct session above still runs: step 25's EM reads it.
     _ll_m24 = _ll_selected_mode(project, "24")
     if primary_def.is_file() and _ll_m24 != "direct":
-        if _signoff_regen(rpt_phase3 / _LL_IR_RECORD, primary_def, spef_out):
+        _ll_old_record = None
+        try:
+            _ll_old_record = json.loads((rpt_phase3 / _LL_IR_RECORD).read_text()).get("record")
+        except (OSError, ValueError, AttributeError):
+            pass
+        if (_signoff_regen(rpt_phase3 / _LL_IR_RECORD, primary_def, spef_out)
+                or (isinstance(_ll_old_record, dict) and _ll_old_record
+                    and "source_probe" not in _ll_old_record)):
             _librelane_step24_record(project, top, pdk, _ll_m24, spef_out, written)
         if _ll_m24 == "librelane":
             try:
@@ -60516,6 +60623,9 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 if _ll_ir_doc.get("record") and _ll_ir_doc.get("def_sha256") == \
                         _sha256_file(primary_def):
                     _librelane_step24_publish(project, _ll_ir_doc)
+                elif (_ll_ir_doc.get("def_sha256") == _sha256_file(primary_def)
+                      and (_ll_ir_doc.get("judgment") or {}).get("verdict") == "NOT_MEASURED"):
+                    _librelane_step24_refusal_publish(project, _ll_ir_doc)
             except (OSError, ValueError, KeyError) as exc:
                 notes.append(f"step 24 LibreLane publish: {exc}")
 
@@ -64905,6 +65015,27 @@ def _librelane_step24_record(project: Path, top: str, pdk: PdkConfig, mode: str,
     written.append(str(rpt / _LL_IR_RECORD))
 
 
+def _librelane_step24_refusal_publish(project: Path, doc: Dict[str, Any]) -> None:
+    """Replace a direct result when selected LibreLane step 24 refused to solve.
+
+    A prior direct ir_drop.json can otherwise remain green even though the
+    selected tool path refused the promoted-pin source model.
+    """
+    rpt = _pl.reports_phase3_dir(project)
+    reasons = (doc.get("judgment") or {}).get("reasons") or ["LibreLane IR unmeasured"]
+    reason = "; ".join(str(item) for item in reasons)
+    _aa.write_text(rpt / "ir_drop.rpt",
+                   "# OpenROAD PSM IR-drop report — LibreLane step 24\n"
+                   f"# NOT_MEASURED: {reason}\n# end of ir_drop.rpt\n")
+    _aa.write_json(rpt / "ir_drop.json", {
+        "tool": "openroad-psm", "producer": doc.get("producer"),
+        "mode": "static_ir_drop", "source": "reports/phase3/ir_drop.rpt",
+        "worst_ir_uv": None, "supply_model": f"NOT_MEASURED: {reason}",
+        "verdict_basis": reason, "verdict": "UNMEASURED",
+        "def_sha256": doc.get("def_sha256"),
+    })
+
+
 def _librelane_step24_publish(project: Path, doc: Dict[str, Any]) -> None:
     """Mode `librelane`: `ir_drop.{json,rpt}` from the tool's measurement, in
     the direct producer's schema so the step-24 gates read it unchanged."""
@@ -68361,6 +68492,11 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     _pb_tcl += ('puts "=== EM_POWER_BASIS ==="\n'
                 'if {[catch {report_power} _e]} { puts "EM_BASIS_POWER_UNREPORTED: $_e" }\n'
                 'puts "=== EM_POWER_BASIS_END ==="\n')
+    # A padless block's promoted supply pins are its interface, not PSM's
+    # source model: see `_psm_source_model`. The session marks them
+    # PSM_DISCONNECT and prints the model it solved on; the records below
+    # read that line instead of asserting a model.
+    import _psm_source_model as _psm_sm
     tcl_path = out_dir / f"ir_em_{top}.tcl"
     tcl_path.write_text(f"""
 read_lef {tech_lef_c}
@@ -68373,7 +68509,7 @@ if {{[catch {{set_wire_rc -signal -layer {mp}1}} _e1]}} {{
   catch {{set_wire_rc -layer {mp}1}}
 }}
 catch {{set_wire_rc -clock -layer {mp}5}}
-{via_rc_tcl}{''.join(psm_blocks)}exit
+{via_rc_tcl}{_psm_sm.exclude_promoted_pins_tcl()}{''.join(psm_blocks)}exit
 """)
     tcl_c = _to_container_path(str(tcl_path), container)
     cmd = (
@@ -68457,8 +68593,11 @@ catch {{set_wire_rc -clock -layer {mp}5}}
                             _counts["worst_ratio"] or 0.0, _ratio)
         _counts["psm_segments"] = _psm_segment_counts.get(_net, 0)
         _density_rows[_net] = _counts
+    _psm_model = _psm_sm.describe(log)
     _aa.write_text(out_dir / "em_openroad_density.json", json.dumps({
-        "tool": "OpenROAD.check_current_density", "source_model": "PSM default",
+        "tool": "OpenROAD.check_current_density",
+        "source_model": _psm_model["model"],
+        "psm_source_model": _psm_model,
         "sdc_spef_loaded": False, "nets": _density_rows,
         "verdict": ("MEASURED" if _audit_tool and _density_rows and all(
             r["checked"] > 0 and r["no_limit"] == 0 for r in _density_rows.values())
@@ -68574,6 +68713,10 @@ catch {{set_wire_rc -clock -layer {mp}5}}
                              "core -> CONSERVATIVE upper bound; real multi-bump "
                              "power delivery is lower" if _bump_m else
                              "PSM analyze_power_grid"),
+            # What the solver actually used, read from the session's own
+            # PSM_SOURCE_MODEL line (`_psm_source_model`), so a change of
+            # source model can never pass as a change of layout again.
+            "psm_source_model": _psm_model,
             "unconnected_supply_pins": _psm_unconn[:20],
             # F20 — what this number was solved on; the transient tier
             # reports it beside its own only on the same basis and power.
@@ -68676,7 +68819,8 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "power_nets": power_nets,
             "ground_nets": ground_nets,
             "nets_analysed": psm_nets,
-            "source_model": "PSM default sources (the supply BTerms); no pad VSRC file",
+            "source_model": _psm_model["model"],
+            "psm_source_model": _psm_model,
             "power_basis": _ppa_power.em_power_basis(
                 log, sdc=(str(_basis["sdc"].relative_to(project)) if _basis["sdc"] else None),
                 spef=(str(_basis["spef"].relative_to(project)) if _basis["spef"] else None),

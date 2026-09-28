@@ -414,6 +414,7 @@ def test_the_full_tier_refuses_once_when_it_cannot_run_the_test_runtime(tmp_path
     assert "REACHED_THE_FIRST_ARM" not in combined, (
         "the preflight is not fatal — the landing continued into the arms, "
         "which is the every-file-NORECORD run this guard exists to prevent")
+    assert "=== STOPPED — the runtime preflight did not pass" in combined
     # The CAUSE, named. A refusal a reader cannot attribute is the defect.
     assert "REFUSE" in combined
     assert "CAUSE" in combined

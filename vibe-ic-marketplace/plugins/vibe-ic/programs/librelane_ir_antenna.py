@@ -75,6 +75,7 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
+import _psm_source_model as _psm_sm  # noqa: E402
 from librelane_contract import (PLUGIN_ROOT, Refusal, _load, digest,  # noqa: E402
                                 resolve_step_configs, run_chain, state_from_direct)
 
@@ -443,6 +444,50 @@ def chain_folder(project: Path, lane: str, steps, step: str) -> Path:
     return project / 'phase3/librelane' / lane / f"{index:02d}-{step.lower().replace('.', '-')}"
 
 
+def require_safe_default_sources(project: Path, image: str, state: Path,
+                                 mounts: List[tuple]) -> Dict[str, int]:
+    """Refuse a bridge whose promoted BPin shapes would become PSM sources.
+
+    This probes the exact ODB all three step-24 arms would consume. Until the
+    LibreLane plugin can apply PSM_DISCONNECT to that ODB, a padless block with
+    such pins cannot publish an IR result. The probe's properties live only in
+    its own OpenROAD process and never alter the shipped route or bridge.
+    """
+    odb = Path(_load(state)['odb'])
+    folder = state.parent
+    tcl = folder / 'psm_source_probe.tcl'
+    log = folder / 'psm_source_probe.log'
+    tcl.write_text(f'read_db {{{odb}}}\n'
+                   + _psm_sm.exclude_promoted_pins_tcl()
+                   + 'set _vibeic_psm_bpins 0\n'
+                   + 'foreach _n [[ord::get_db_block] getNets] {\n'
+                   + '  if {[$_n getSigType] ni {POWER GROUND}} { continue }\n'
+                   + '  foreach _t [$_n getBTerms] {\n'
+                   + '    if {![$_t isSpecial]} { continue }\n'
+                   + '    incr _vibeic_psm_bpins [llength [$_t getBPins]]\n'
+                   + '  }\n'
+                   + '}\n'
+                   + 'puts "PSM_PROMOTED_PIN_PROBE: supply_bpins=$_vibeic_psm_bpins"\nexit\n')
+    rc = _run_openroad(project, image, tcl, log, mounts)
+    output = log.read_text(errors='replace') if log.is_file() else ''
+    marker = _psm_sm.read(output)
+    count = re.search(r'^PSM_PROMOTED_PIN_PROBE: supply_bpins=(\d+)\s*$', output, re.M)
+    if rc or marker is None or count is None:
+        raise Refusal('LL_IR_SOURCE_PROBE_UNMEASURED',
+                      f'bridge={odb} probe_rc={rc} log={log}')
+    result = {**marker, 'supply_bpins': int(count.group(1))}
+    if (result['placed_pads'] == 0
+            and result['promoted_supply_pins_excluded'] != result['supply_bpins']):
+        raise Refusal('LL_IR_SOURCE_PROBE_INCONSISTENT',
+                      f'bridge={odb} marker={result} log={log}')
+    if result['placed_pads'] == 0 and result['promoted_supply_pins_excluded']:
+        raise Refusal('LL_IR_PROMOTED_PIN_SOURCES_UNSAFE',
+                      f"bridge={odb} has {result['promoted_supply_pins_excluded']} "
+                      'special supply BPins and no placed pad master; LibreLane '
+                      'PSM would use their strap shapes as ideal sources')
+    return result
+
+
 def run_ir(project: Path, image: str, pdk_root: Path, pdk: str, *, routed_def: Path,
            netlist: Path, sdc: Path, spef: Path, budget_pct: Optional[float],
            budget_source: str, lane: str = '24', decap_f: Optional[float] = None,
@@ -498,13 +543,15 @@ def run_ir(project: Path, image: str, pdk_root: Path, pdk: str, *, routed_def: P
                                'spef': {spef_key: spef}},
                               project / 'phase3/librelane/24-config/bridge',
                               chain=[configs['Vibeic.IRDropChecker']], mounts=mounts)
+    source_probe = require_safe_default_sources(project, image, state, mounts)
     vdd, gnd = list(cfg.get('VDD_NETS') or []), list(cfg.get('GND_NETS') or [])
     pads = declared_supply_pads(project)
     record: Dict[str, Any] = {'image': image, 'rc_source': RC_SOURCE, 'rc_cleared': cleared,
                               'vdd_nets': vdd, 'gnd_nets': gnd, 'pad_plan': pads,
                               'spef': str(spef), 'spef_sha256': digest(spef),
                               'routed_def': str(routed_def), 'def_sha256': digest(routed_def),
-                              'budget_pct': budget_pct, 'budget_source': budget_source}
+                              'budget_pct': budget_pct, 'budget_source': budget_source,
+                              'source_probe': source_probe}
     sources = None
     if pads['declared']:
         geometry = supply_geometry(project, image, Path(_load(state)['odb']), vdd + gnd,
@@ -515,8 +562,6 @@ def run_ir(project: Path, image: str, pdk_root: Path, pdk: str, *, routed_def: P
                                   'same shapes' if sources['coincident'] else
                                   'declared supply pads through VSRC_LOC_FILES')
         record['sources'] = sources
-    else:
-        record['source_model'] = 'undeclared: PSM default sources (BTerms, else generated)'
     steps = [(s, configs[s], state) for s in IR_STEPS]
     checker_error = None
     try:
@@ -544,6 +589,24 @@ def run_ir(project: Path, image: str, pdk_root: Path, pdk: str, *, routed_def: P
                       openroad_init=PSM_RESISTANCE_DEBUG)
     else:
         vsrc = {}
+    probe_log = (state.parent / 'psm_source_probe.log').read_text(errors='replace')
+    observed_source = _psm_sm.describe(probe_log + '\n' + _step_log(tool))
+    if observed_source['model'].startswith('NOT_MEASURED'):
+        raise Refusal('LL_IR_SOURCE_MODEL_UNMEASURED', observed_source['model'])
+    if (sources is None and source_probe['placed_pads'] == 0
+            and source_probe['supply_bpins'] == 0
+            and observed_source['psm_0073'] is None):
+        raise Refusal('LL_IR_SOURCE_MODEL_UNRESOLVED',
+                      'padless ODB has no supply BPin source and the tool log has no PSM-0073')
+    record['psm_source_model'] = observed_source
+    if sources is None:
+        record['source_model'] = observed_source['model']
+    elif sources['coincident']:
+        record['source_model'] += f"; PSM log: {observed_source['model']}"
+    else:
+        record['source_model'] += ('; PSM-0073 observed in tool log' if
+                                   observed_source['psm_0073'] else
+                                   '; PSM-0073 absent in tool log')
     transient = chain_folder(project, lane, IR_STEPS, 'Vibeic.TransientIR')
     record['transient'] = (_load(transient / 'transient_ir.json')
                            if transient and (transient / 'transient_ir.json').is_file() else

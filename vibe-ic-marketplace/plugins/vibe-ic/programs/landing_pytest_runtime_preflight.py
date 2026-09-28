@@ -2,7 +2,9 @@
 """landing_pytest_runtime_preflight.py — can this host RUN the protected
 landing test runtime at all?  Asked ONCE, before the arms, attributably.
 
-THIS GATE REFUSES (rc=2).  It is not a test verdict and never becomes one.
+THIS GATE REFUSES (rc=2) when the runtime cannot report, or says
+NOT_MEASURED (rc=3) when a probe stopped without a verdict. Neither is a test
+verdict.
 
 THE DEFECT IT EXISTS FOR (v1.10.69)
 ===================================
@@ -66,6 +68,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -201,6 +204,80 @@ def entry_probe(python: str, entry: Path) -> subprocess.CompletedProcess:
                     cwd=subject, env=env)
 
 
+#: What a probe outcome IS, decided from the evidence the child leaves -- never
+#: from one generic sentence. The reason used to be "the trusted entry could
+#: not execute and report one synthetic test" for EVERY outcome but a pass, and
+#: the result kept none of the child's output, so a census failure (8HD-4,
+#: stack38: `probe_returncode 2` twice, host load 60-85) could not be
+#: attributed: an entry refusal, an interrupted session and a kill all read
+#: the same. A stall did worse: it escaped `preflight()` as an exception, and
+#: the CLI exited 2 through `exit_undetermined_on_stall` -- the refusal's own
+#: rc -- so a busy host read as a broken runtime.
+VERDICT_PASS = "PASS"
+VERDICT_REFUSE = "REFUSE"
+VERDICT_NOT_MEASURED = "NOT_MEASURED"
+#: Exit codes: 0 pass, 2 refuse (a runtime that cannot report), 3 not measured
+#: (the probe could not finish looking: stalled or stopped from outside).
+EXIT_NOT_MEASURED = 3
+_ENTRY_REFUSAL_MARK = "[NORECORD] trusted pytest entry:"
+_TAIL_LINES = 6
+_EXTERNAL_SIGNALS = frozenset(int(sig) for sig in (
+    signal.SIGHUP, signal.SIGINT, signal.SIGKILL, signal.SIGTERM,
+    getattr(signal, "SIGXCPU", None),
+) if sig is not None)
+
+
+def _tail(text: str) -> List[str]:
+    return [ln for ln in (text or "").splitlines() if ln.strip()][-_TAIL_LINES:]
+
+
+def _host_load() -> str:
+    try:
+        load1 = os.getloadavg()[0]
+    except OSError:
+        return "load unreadable"
+    return f"load1 {load1:.2f} over {os.cpu_count() or '?'} cores"
+
+
+def classify_probe(probe: Optional[subprocess.CompletedProcess],
+                   stalled: Optional[BaseException] = None,
+                   *, stage: str = "trusted entry",
+                   ) -> Tuple[str, str]:
+    """(verdict, cause) for one probe run, from what the child left behind.
+
+    PASS only for a recorded pass. NOT_MEASURED for a stopped probe or an
+    external interrupt. A synchronous crash is a completed failure to report
+    and REFUSEs, naming its signal. The host load is context, not a diagnosis
+    of why a child stopped moving."""
+    if stalled is not None:
+        looks = getattr(stalled, "looks", "?")
+        return (VERDICT_NOT_MEASURED,
+                f"STALLED: the {stage} probe child stopped moving (readable "
+                f"output, CPU and I/O signals still for {looks} looks; hung "
+                f"or frozen); undecided ({_host_load()}): {stalled}")
+    if probe is None:
+        raise ValueError("a probe result or stall is required")
+    rc = probe.returncode
+    if rc == 0 and "1 passed" in probe.stdout:
+        return VERDICT_PASS, "the synthetic test ran and was reported"
+    signum = -rc if rc < 0 else (rc - 128 if 128 < rc <= 192 else 0)
+    if signum in _EXTERNAL_SIGNALS:
+        return (VERDICT_NOT_MEASURED,
+                f"the {stage} probe was killed by signal {signum} from "
+                f"outside (rc {rc}, {_host_load()}); undecided")
+    if signum:
+        return (VERDICT_REFUSE,
+                f"the runtime crashed with signal {signum} (rc {rc})")
+    refusal = [ln for ln in (probe.stderr or "").splitlines()
+               if ln.startswith(_ENTRY_REFUSAL_MARK)]
+    if refusal:
+        return VERDICT_REFUSE, f"the entry refused: {refusal[-1].strip()}"
+    last = (_tail(probe.stdout) or _tail(probe.stderr) or ["(no output)"])[-1]
+    return (VERDICT_REFUSE,
+            f"the runner ran and did not report the synthetic test (rc {rc}); "
+            f"its last line: {last.strip()}")
+
+
 def _runner_image_or_refusal() -> str:
     try:
         return runner_image()
@@ -210,6 +287,7 @@ def _runner_image_or_refusal() -> str:
 
 def _refusal_lines(*, python: str, isolated_ok: bool, resolved: str,
                    lane: Optional[str], probe: Optional[subprocess.CompletedProcess],
+                   cause: Optional[str] = None,
                    ) -> List[str]:
     """The one attributable refusal.  Every line here is measured, not inferred."""
     out = [
@@ -257,6 +335,8 @@ def _refusal_lines(*, python: str, isolated_ok: bool, resolved: str,
             f"            lane        {lane or 'image (system site directory)'}",
             f"            runner      {resolved or 'unresolved'}",
         ]
+        if cause:
+            out.append(f"            {cause}")
         if probe is not None:
             out.append(f"            probe rc    {probe.returncode}")
             for stream, label in ((probe.stderr, "stderr"), (probe.stdout, "stdout")):
@@ -295,38 +375,84 @@ def _refusal_lines(*, python: str, isolated_ok: bool, resolved: str,
     return out
 
 
+def _probe_tail(probe: Optional[subprocess.CompletedProcess],
+                stalled: Optional[BaseException] = None) -> Dict[str, List[str]]:
+    source = stalled if stalled is not None else probe
+    return {"stdout": _tail(getattr(source, "stdout", "")),
+            "stderr": _tail(getattr(source, "stderr", ""))}
+
+
+def _not_measured_result(*, lane: Optional[str], isolated_ok: bool,
+                         resolved: str, probe: Optional[subprocess.CompletedProcess],
+                         stalled: Optional[BaseException], cause: str,
+                         ) -> Dict[str, object]:
+    tail = _probe_tail(probe, stalled)
+    lines = [f"  NOT_MEASURED  the landing test runtime probe is undecided: {cause}",
+             "          MEASURED — the child's last output, if any:"]
+    for stream in ("stderr", "stdout"):
+        for line in tail[stream]:
+            lines.append(f"            {stream}      {line}")
+    lines.append("          The landing is stopped; inspect this probe and host "
+                 "before another attempt.")
+    return {"ok": False, "verdict": VERDICT_NOT_MEASURED, "lane": lane,
+            "isolated_import": isolated_ok, "runner": resolved,
+            "probe_returncode": None if probe is None else probe.returncode,
+            "probe_tail": tail, "reason": cause, "lines": lines}
+
+
 def preflight(*, programs: Path, python: Optional[str] = None) -> Dict[str, object]:
     """Decide, once, whether the landing arms can produce a record at all."""
     python = python or sys.executable
     entry = Path(programs) / "trusted_pytest_entry.py"
     lane = os.environ.get(HOST_LANE_ENV) or None
     if not entry.is_file():
-        return {"ok": False, "lane": lane, "isolated_import": False,
+        return {"ok": False, "verdict": VERDICT_REFUSE, "lane": lane,
+                "isolated_import": False,
                 "runner": "", "probe_returncode": None,
                 "reason": "trusted_pytest_entry.py is absent",
                 "lines": ["  REFUSE  the protected landing test runtime is not "
                           "installed in this tree.",
                           f"          expected {entry}"]}
-    isolated_ok, resolved = isolated_import_lane(python)
+    try:
+        isolated_ok, resolved = isolated_import_lane(python)
+    except _pr.Stalled as exc:
+        _, cause = classify_probe(None, exc, stage="isolated import")
+        return _not_measured_result(lane=lane, isolated_ok=False,
+                                    resolved="", probe=None, stalled=exc,
+                                    cause=cause)
     if not isolated_ok and lane is None:
-        return {"ok": False, "lane": None, "isolated_import": False,
+        return {"ok": False, "verdict": VERDICT_REFUSE, "lane": None,
+                "isolated_import": False,
                 "runner": resolved, "probe_returncode": None,
                 "reason": "isolated interpreter cannot import the test runner "
                           "and no host lane is configured",
                 "lines": _refusal_lines(python=python, isolated_ok=False,
                                         resolved=resolved, lane=None, probe=None)}
-    probe = entry_probe(python, entry)
-    recorded = probe.returncode == 0 and "1 passed" in probe.stdout
-    if not recorded:
-        return {"ok": False, "lane": lane, "isolated_import": isolated_ok,
-                "runner": resolved, "probe_returncode": probe.returncode,
+    probe: Optional[subprocess.CompletedProcess] = None
+    stalled: Optional[BaseException] = None
+    try:
+        probe = entry_probe(python, entry)
+    except _pr.Stalled as exc:
+        stalled = exc
+    verdict, cause = classify_probe(probe, stalled)
+    tail = _probe_tail(probe, stalled)
+    if verdict == VERDICT_NOT_MEASURED:
+        return _not_measured_result(lane=lane, isolated_ok=isolated_ok,
+                                    resolved=resolved, probe=probe,
+                                    stalled=stalled, cause=cause)
+    if verdict == VERDICT_REFUSE:
+        return {"ok": False, "verdict": verdict, "lane": lane,
+                "isolated_import": isolated_ok, "runner": resolved,
+                "probe_returncode": probe.returncode, "probe_tail": tail,
                 "reason": "the trusted entry could not execute and report one "
-                          "synthetic test",
+                          f"synthetic test: {cause}",
                 "lines": _refusal_lines(python=python, isolated_ok=isolated_ok,
-                                        resolved=resolved, lane=lane, probe=probe)}
+                                        resolved=resolved, lane=lane,
+                                        probe=probe, cause=cause)}
     where = "host lane" if lane is not None else "image lane"
     detail = f" ({HOST_LANE_ENV}={lane})" if lane is not None else ""
-    return {"ok": True, "lane": lane, "isolated_import": isolated_ok,
+    return {"ok": True, "verdict": VERDICT_PASS, "lane": lane,
+            "isolated_import": isolated_ok,
             "runner": resolved, "probe_returncode": 0,
             "reason": f"the protected landing test runtime executes and reports "
                       f"via the {where}",
@@ -353,10 +479,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         stream = sys.stdout if result["ok"] else sys.stderr
         for line in result["lines"]:                      # type: ignore[union-attr]
             print(line, file=stream)
-    return 0 if result["ok"] else 2
+    if result["ok"]:
+        return 0
+    return EXIT_NOT_MEASURED if result.get("verdict") == VERDICT_NOT_MEASURED else 2
 
 
 if __name__ == "__main__":
-    # A stall is not a verdict about the subject: it reaches the exit
-    # code as rc 2 (UNDETERMINED), announced, never as a finding.
+    # Both supervised probe stages return rc 3 for a stall. This outer guard
+    # handles only an unexpected supervision escape as rc 2 UNDETERMINED.
     raise SystemExit(_pr.exit_undetermined_on_stall(main))
