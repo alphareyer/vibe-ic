@@ -83,7 +83,6 @@ from the deck, the tech LEF, the session and the design's declarations.
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import math
 import os
@@ -740,11 +739,11 @@ def librelane_pdn_config(project: Path) -> Tuple[Dict[str, Any], Optional[str]]:
     try:
         rec = json.loads(path.read_text())
     except (OSError, ValueError):
-        return librelane_prior_measured_pdn_config(project)
+        return {}, None
     straps = rec.get("chosen_straps") or {}
     dirs = (rec.get("lattice") or {}).get("directions") or {}
     if rec.get("verdict") not in ("PASS", "PASS_WITHOUT_HEADROOM") or not straps:
-        return librelane_prior_measured_pdn_config(project)
+        return {}, None
     by_dir: Dict[str, List[str]] = {}
     for layer in straps:
         by_dir.setdefault(str(dirs.get(layer) or ""), []).append(layer)
@@ -758,123 +757,6 @@ def librelane_pdn_config(project: Path) -> Tuple[Dict[str, Any], Optional[str]]:
         out[f"PDN_{key}PITCH"] = straps[layer]["pitch"]
     return out, (f"{REPORT_REL}.chosen_straps (candidate {rec.get('chosen')}, "
                  f"{rec.get('verdict')}: this design's pre-route PSM EM search)")
-
-
-def librelane_prior_measured_pdn_config(
-        project: Path) -> Tuple[Dict[str, Any], Optional[str]]:
-    """Feed a *measured* previous route's EM bottleneck into the next PDN.
-
-    The prior route is an explicitly identified planning input, not signoff for
-    the route about to be built.  Require its DEF digest, current netlist hash,
-    calibrated post-route power basis, and a fresh EM screen.  A committed
-    decision is reused for this input identity so repeated config emission
-    cannot progressively squeeze the pitch without a new physical review.
-    Final EM must still be measured on the new route.
-    """
-    report = project / "reports/phase3/pdn_em_prior_config.json"
-    pnr = project / "phase3/stage3/pnr"
-    em_path = project / "reports/phase3/em.json"
-    auth_path = project / "reports/phase3/em_current_authority.json"
-    cfg_path = project / "phase3/librelane/15-floorplan/11-openroad-generatepdn/config.json"
-    try:
-        em = json.loads(em_path.read_text())
-        auth = json.loads(auth_path.read_text())
-        identity = json.loads((pnr / "step_identity.json").read_text())["pnr"]
-        netlist_row = next(s for s in identity["evidence"]["inputs"]
-                           if s.startswith("netlist="))
-        rel, expected_hash = netlist_row[8:].rsplit("@", 1)
-        netlist_hash = hashlib.sha256((project / rel).read_bytes()).hexdigest()
-        subject = hashlib.sha256((pnr / "routed.def").read_bytes()).hexdigest()
-        if (not netlist_hash.startswith(expected_hash)
-                or em.get("subject_def_sha256") != subject
-                or em.get("verdict") != "MEASURED"
-                or em.get("power_basis", {}).get("calibration") != "CALIBRATED"
-                or not isinstance(em.get("max_segment_current_A"), (int, float))
-                or em["max_segment_current_A"] <= 0
-                or auth_path.stat().st_mtime_ns < em_path.stat().st_mtime_ns):
-            return {}, None
-        if report.is_file():
-            prior = json.loads(report.read_text())
-            if (prior.get("netlist_sha256") == netlist_hash
-                    and prior.get("subject_def_sha256") == em["subject_def_sha256"]):
-                return prior["config"], str(report.relative_to(project))
-            if prior.get("netlist_sha256") == netlist_hash:
-                # One candidate per design netlist.  A still-red next route
-                # needs diagnosis, not an implicit unbounded pitch loop.
-                return {}, None
-        cfg = json.loads(cfg_path.read_text())
-        screen = auth["jmax_screen"]
-        if screen.get("verdict") != "FAIL":
-            return {}, None
-        layer_rows = screen["summary"]["per_layer"]
-        offender = {k: float(v["max_utilization"])
-                    for k, v in layer_rows.items()
-                    if float(v.get("max_utilization") or 0) >= 0.9}
-        if not offender:
-            return {}, None
-        tech = (pnr / "active_via_legalized.tlef").read_text()
-        layers = [m.group(1) for m in re.finditer(
-            r"^\s*LAYER\s+(\S+)\s*$", tech, re.M)
-            if _layer_body(tech, m.group(1)).upper().find("TYPE ROUTING") >= 0]
-        index = {name.lower(): i for i, name in enumerate(layers)}
-        straps = {key: str(cfg[f"PDN_{key}_LAYER"])
-                  for key in ("VERTICAL", "HORIZONTAL")}
-        if any(s.lower() not in index for s in straps.values()):
-            return {}, None
-        # A narrow via/entry layer is served by the closest strap ABOVE it
-        # in the stack.  The prior EM population decides which layer needs
-        # more parallel feed; no chip or metal name is baked into the rule.
-        factors = {k: 1 for k in straps}
-        for layer, util in offender.items():
-            if layer.lower() not in index:
-                return {}, None
-            reachable = [(index[v.lower()] - index[layer.lower()], k)
-                         for k, v in straps.items()
-                         if index[v.lower()] >= index[layer.lower()]]
-            if not reachable:
-                return {}, None
-            _, key = min(reachable)
-            factors[key] = max(factors[key], math.ceil(util / 0.9))
-        rules = _emcd.parse_lef_jmax(tech)
-        grid = manufacturing_grid(tech)
-        quantum = 2 * grid
-        drive = float(em["max_segment_current_A"]) * 2.0
-        chosen: Dict[str, Any] = {}
-        details: Dict[str, Any] = {}
-        for key, layer in straps.items():
-            letter = "V" if key == "VERTICAL" else "H"
-            old_width = float(cfg[f"PDN_{letter}WIDTH"])
-            old_pitch = float(cfg[f"PDN_{letter}PITCH"])
-            jmax = rules[layer.lower()].get("jmax_per_width_A_per_um")
-            if not jmax or jmax <= 0:
-                return {}, None
-            bound = drive / (float(jmax) * 0.9)
-            width = max(old_width, (math.floor(bound / quantum) + 1) * quantum)
-            width = math.ceil(width / quantum - 1e-9) * quantum
-            pitch = math.floor(old_pitch / factors[key] / grid + 1e-9) * grid
-            spacing = layer_rules(tech, layer)["spacing_um"]
-            if pitch <= 2 * (width + float(spacing or 0)):
-                return {}, None
-            chosen[f"PDN_{letter}WIDTH"] = round(width, 4)
-            chosen[f"PDN_{letter}PITCH"] = round(pitch, 4)
-            details[layer] = {"measured_peak_current_A": em["max_segment_current_A"],
-                              "jmax_A_per_um": jmax, "margin": 0.1,
-                              "old_width_um": old_width, "new_width_um": chosen[f"PDN_{letter}WIDTH"],
-                              "old_pitch_um": old_pitch, "new_pitch_um": chosen[f"PDN_{letter}PITCH"],
-                              "parallel_feed_factor": factors[key]}
-        record = {"schema": "vibeic.ppa.pdn_em_prior_config.v1",
-                  "verdict": "CANDIDATE_REQUIRES_NEW_ROUTE_EM",
-                  "subject_def_sha256": subject,
-                  "netlist_sha256": netlist_hash,
-                  "source_em": str(em_path.relative_to(project)),
-                  "source_screen": str(auth_path.relative_to(project)),
-                  "offender_utilization": offender,
-                  "config": chosen, "derivation": details}
-        report.parent.mkdir(parents=True, exist_ok=True)
-        report.write_text(json.dumps(record, indent=2) + "\n")
-        return chosen, str(report.relative_to(project))
-    except (OSError, ValueError, KeyError, TypeError, StopIteration, ZeroDivisionError):
-        return {}, None
 
 
 def main(argv: Optional[List[str]] = None) -> int:
