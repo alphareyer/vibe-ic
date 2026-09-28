@@ -56,6 +56,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent))
 import _path_layout as _pl  # noqa: E402
+from serial_latency_contract import LATENCY_ORIGIN, POST_EDGE_SETTLE_VERILOG  # noqa: E402
 
 # ── the arithmetic-primitive class family (registry name + synonyms) ──────────
 _ARITH_CLASSES = {
@@ -1001,7 +1002,11 @@ def emit_serial_oracle_module(module_name: str, spec: dict,
     L.append(f"          {sin} = (inorder == 0) ? ((_bv[_vi] >> _k) & 1'b1)")
     L.append("                                  : ((_bv[_vi] >> (N-1-_k)) & 1'b1);")
     L.append(f"        else {sin} = 1'b0;")
+    # The declared offset counts from the edge sampling input bit 0, with the
+    # output observed after nonblocking assignments for that SAME edge settle.
+    # Sampling in the active region inflated the measured offset by one.
     L.append(f"        @(posedge {clk});")
+    L.append(POST_EDGE_SETTLE_VERILOG)
     L.append(f"        _word[_k] = {sout};")
     L.append(f"        @(negedge {clk});")
     L.append("      end")
@@ -1194,6 +1199,7 @@ def generate(project: Path,
             "signed": serial_spec["signed"],
             "declared_bit_order": serial_spec.get("declared_bit_order"),
             "declared_latency": serial_spec.get("declared_latency"),
+            "latency_origin": LATENCY_ORIGIN,
             "framing": "self-calibrated (in_order x out_order x offset search)",
             "parallel_operand": serial_spec["parallel"],
             "serial_operand": serial_spec["serial_in"],

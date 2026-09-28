@@ -13463,6 +13463,8 @@ def _persist_oracle_calibrated_framing(project: Path, log_text: str) -> None:
     d["calibrated_bit_order"] = order.get(int(m.group(1)))
     d["calibrated_out_bit_order"] = order.get(int(m.group(2)))
     d["calibrated_latency"] = int(m.group(3))
+    from serial_latency_contract import LATENCY_ORIGIN
+    d["latency_origin"] = LATENCY_ORIGIN
     d["calibrated_source"] = (
         "measured by the oracle TB framing search (single framing matched "
         "every vector); NOT copied from declaration.json")
@@ -22357,6 +22359,19 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
         except Exception:
             return "(unreadable)"
 
+    def _attach_serial_measurement(result: StepResult) -> StepResult:
+        # Advisory until a published-corpus sweep proves an enforcing gate
+        # would not reject a legitimate cell.  The independent measurement
+        # remains visible even when the declaration emitter itself succeeded.
+        manifest = _pl.sim_full_stack_dir(project) / "arith_oracle_manifest.json"
+        if manifest.is_file():
+            import declaration_measurement_consistency_check as _dmc
+            comparison = _dmc.check(project)
+            result.extras["declaration_measurement_consistency"] = comparison
+            result.detail += ("; serial declaration/measurement ADVISORY "
+                              + comparison["verdict"])
+        return result
+
     def _run(prog_name: str,
              extra: Optional[List[str]] = None
              ) -> Optional[subprocess.CompletedProcess]:
@@ -22377,11 +22392,11 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
     spec_cp = _run("spec_declaration_emit.py", _top_args)
     if spec_cp is not None and spec_cp.returncode not in (3, 4):
         if spec_cp.returncode == 0 and out_p.is_file():
-            return StepResult("arith_declaration_emit", "PASS",
+            return _attach_serial_measurement(StepResult("arith_declaration_emit", "PASS",
                               time.time() - t0,
                               f"spec_declaration_emit emitted "
                               f"plugin_output/declaration.json "
-                              f"[{_fields_of(out_p)}]", [str(out_p)])
+                              f"[{_fields_of(out_p)}]", [str(out_p)]))
         reason = (spec_cp.stderr or spec_cp.stdout
                   or "").strip().replace("\n", " ")[:400]
         # What THIS run of the emitter did, from its own marker line -- not
@@ -22399,12 +22414,12 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
                       "plugin_output/declaration.json was left untouched)")
         else:
             _wrote = "no file written"
-        return StepResult("arith_declaration_emit", "NOT_MEASURED", time.time() - t0,
+        return _attach_serial_measurement(StepResult("arith_declaration_emit", "NOT_MEASURED", time.time() - t0,
                           f"spec_declaration_emit fail-closed "
                           f"(rc={spec_cp.returncode}); {_wrote} — "
                           f"{reason}",
                           [str(_rec)] if _rec is not None and _rec.is_file() else [],
-                          reason_class=_V.ReasonClass.EXECUTION_ERROR)
+                          reason_class=_V.ReasonClass.EXECUTION_ERROR))
 
     # 2. No spec-declared contract — the previous behaviour, byte for byte.
     prog = PROGRAMS_DIR / "arith_declaration_emit.py"
@@ -22416,13 +22431,13 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
         return StepResult("arith_declaration_emit", "NOT_MEASURED", time.time() - t0,
                           "emitter did not run", reason_class=_V.ReasonClass.NOT_EXECUTED)
     if cp.returncode == 0 and out_p.is_file():
-        return StepResult("arith_declaration_emit", "PASS", time.time() - t0,
+        return _attach_serial_measurement(StepResult("arith_declaration_emit", "PASS", time.time() - t0,
                           f"emitted plugin_output/declaration.json "
-                          f"[{_fields_of(out_p)}]", [str(out_p)])
+                          f"[{_fields_of(out_p)}]", [str(out_p)]))
     reason = (cp.stderr or cp.stdout or "").strip().replace("\n", " ")[:400]
-    return StepResult("arith_declaration_emit", "NOT_MEASURED", time.time() - t0,
+    return _attach_serial_measurement(StepResult("arith_declaration_emit", "NOT_MEASURED", time.time() - t0,
                       f"emitter fail-closed (rc={cp.returncode}); no file "
-                      f"written — {reason}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
+                      f"written — {reason}", reason_class=_V.ReasonClass.EXECUTION_ERROR))
 
 
 def step_emit_phase2_manifests(project: Path,

@@ -32,6 +32,8 @@ import json
 import re
 import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from serial_latency_contract import LATENCY_ORIGIN
 
 # Stable stderr banner printed on the fail-closed path (and ONLY there).
 # Keyed on by tests; see the module docstring for why rc alone is not enough.
@@ -270,12 +272,22 @@ def main(argv: list[str] | None = None) -> int:
     if integer_encoding is None:
         errors.append("integer_encoding: signed_2c/unsigned not found in L2_FRS.json")
 
-    # --- latency_cycles (measured — prefer _verify_scale, fallback to GLS) ---
-    latency_cycles = _derive_latency_from_verify_scale(run_dir)
-    if latency_cycles is None:
-        latency_cycles = _derive_latency_from_gls(run_dir)
-    if latency_cycles is None:
-        latency_cycles = _derive_latency_from_oracle_manifest(run_dir)
+    # A serial oracle owns its own rising-edge origin.  The older scale/GLS
+    # reports may count from reset release, so they cannot override it.
+    serial_manifest = _oracle_manifest(run_dir) or {}
+    if serial_manifest.get("topology") == "serial_parallel":
+        latency_cycles = (serial_manifest.get("calibrated_latency")
+                          if serial_manifest.get("latency_origin") == LATENCY_ORIGIN
+                          else None)
+        if type(latency_cycles) is not int:
+            errors.append("latency_cycles: serial calibration lacks the "
+                          "shared rising-edge origin")
+    else:
+        latency_cycles = _derive_latency_from_verify_scale(run_dir)
+        if latency_cycles is None:
+            latency_cycles = _derive_latency_from_gls(run_dir)
+        if latency_cycles is None:
+            latency_cycles = _derive_latency_from_oracle_manifest(run_dir)
     if latency_cycles is None:
         errors.append(
             "latency_cycles: cannot determine from _verify_scale/REPORT.md, "

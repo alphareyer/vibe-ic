@@ -46,6 +46,8 @@ import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from serial_latency_contract import GENERATED_INPUT_REGISTER_LATENCY, LATENCY_ORIGIN
 
 _CLK_NAMES = {"clk", "clock", "clk_i", "i_clk", "sysclk", "clk_in"}
 _RST_NAMES = {"rst", "reset", "rst_n", "reset_n", "rstn", "i_rst",
@@ -222,6 +224,7 @@ def emit_rtl(spec: Dict[str, Any]) -> str:
 //   and bit-order are Plugin-chosen (spec R3 freedom); the flow's serial-
 //   parallel oracle self-calibrates them, so any functionally-correct variant
 //   verifies. Provenance: public/textbook algorithm, not any reference RTL.
+// Latency origin: {LATENCY_ORIGIN}.
 //============================================================================
 module {top} #(
     parameter {sz} = {szd}
@@ -291,7 +294,7 @@ def plugin_declaration(spec: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "bit_order": "LSB_first",
         "reset_polarity": "active_low" if spec["rst_active_low"] else "active_high",
-        "latency_cycles": 1,
+        "latency_cycles": GENERATED_INPUT_REGISTER_LATENCY,
         "integer_encoding": "unsigned",
     }
 
