@@ -1398,6 +1398,13 @@ _NOT_PROSE: Dict[str, str] = {
         "DEF UNITS and SPECIALNETS ROUTED/NEW wire productions are formal layout "
         "grammar. Width tokens cannot be negated in that grammar; missing or "
         "unreadable declarations already produce an empty measured authority.",
+    "em_current_density_check::_def_via_cuts":
+        "DEF VIAS LAYERS/ROWCOL/RECT and SPECIALNETS coordinate-plus-via-name "
+        "productions are fixed layout grammar, not natural-language claims. "
+        "Their numeric cut counts have no negated form. A missing definition, "
+        "unknown name, ambiguous placement, or missing matching cut layer "
+        "produces no cut count and leaves the EM segment unscreened; the "
+        "unmatched-via regression proves that this cannot yield PASS.",
     "pdk_analog_characterize::simulator_provenance":
         "The scan reads ngspice's machine/tool version banner, not a design "
         "document. A version token has no surrounding natural-language denial "
