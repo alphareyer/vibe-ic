@@ -108,3 +108,39 @@ def test_unmarked_inert_tb_is_not_functional_coverage(tmp_path):
     result = runner.step_verilator_coverage(project, "dut")
     assert result.status == "NOT_MEASURED"
     assert "testbench-gen hand-off" in result.detail
+
+
+def test_stale_same_path_execution_cannot_credit_inert_testbench(tmp_path):
+    project = _project(tmp_path, unit=True)
+    tb = project / "phase2/stage1/sim/tb/case.v"
+    tb.write_text(
+        "module case;\n"
+        "reg clk = 0; reg rst = 0; reg [7:0] cmd = 0;\n"
+        "dut u_dut(.clk(clk), .rst(rst), .cmd(cmd));\n"
+        "initial begin rst = 1; #10; rst = 0; #10; $finish; end\n"
+        "endmodule\n")
+    audit = coverage.functional_stimulus_audit(tb)
+    assert audit["decidable"] and audit["driven"] == []
+    assert coverage.discover_measure_testbenches(project)[1] == []
+
+
+def test_stale_same_path_oracle_manifest_cannot_credit_inert_testbench(tmp_path):
+    project = _project(tmp_path, unit=False)
+    tb = project / "phase2/stage1/sim_full_stack/tb_dut_oracle.v"
+    tb.write_text(
+        "module tb_dut_oracle;\n"
+        "reg clk = 0; reg rst = 0; reg [7:0] cmd = 0;\n"
+        "dut u_dut(.clk(clk), .rst(rst), .cmd(cmd));\n"
+        "initial begin cmd = 8'h5a; #10; $finish; end\n"
+        "endmodule\n")
+    manifest = tb.parent / "oracle_manifest.json"
+    manifest.write_text(json.dumps({
+        "program": "oracle_tb_gen", "verdict": "TB_EMITTED",
+        "vector_count": 1, "tb": str(tb.relative_to(project)),
+        "tb_sha256": l10.file_sha256(tb),
+    }))
+    assert [Path(p).name for p in coverage.discover_measure_testbenches(project)[1]] == [
+        "tb_dut_oracle.v"]
+    tb.write_text(tb.read_text().replace("cmd = 8'h5a;", "rst = 1;"))
+    assert coverage.functional_stimulus_audit(tb)["driven"] == []
+    assert coverage.discover_measure_testbenches(project)[1] == []
