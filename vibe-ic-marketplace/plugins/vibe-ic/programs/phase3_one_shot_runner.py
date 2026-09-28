@@ -73377,6 +73377,105 @@ def _phase3_window_steps(entry: str, exit_: str) -> List[str]:
     return ids[lo:hi + 1]
 
 
+def _phase3_step_sites() -> Dict[str, str]:
+    """Canonical step id -> the Phase-3 dispatch site (and report row) that
+    runs it: the runner plan's spans, plus the sites that own one step each.
+    The one map both the window's dispatch and its enclosing verdict read."""
+    sites = _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites
+    direct = {str(sid): name for name, span in sites for sid in span}
+    direct.update({"15.5ic": "pnr",
+                   "36": "tapeout_checklist",
+                   "37.3": "gds_xor",
+                   "37.4": "signoff_metrics_aggregate",
+                   "38": "foundry_handoff"})
+    return direct
+
+
+#: The steps `step_canonicalize_artefacts` (report row
+#: `canonicalize_artefacts`) runs: the enclosing unit the window dispatches
+#: for any span inside them, and the row that answers for them.
+_PHASE3_CANONICALIZER_IDS = frozenset({"23", "24", "25", "26", "26.5ic", "27",
+                                       "28", "29", "30", "32", "33", "34", "35"})
+
+
+def _phase3_steps_of_row(name: str) -> FrozenSet[str]:
+    """The canonical step ids a Phase-3 report row answers for, from the
+    same sources the window's dispatch reads, plus the flow's own
+    declaration for the rows the dispatch has no site for:
+      * a plan site (`RUNNER_PLANS` spans) or a one-step site
+        (`_phase3_step_sites`);
+      * `canonicalize_artefacts`: `_PHASE3_CANONICALIZER_IDS`;
+      * a row of a gate table (`_PHASE3_GATE_TABLES`): the flow steps whose
+        `programs` or gate `program_exit_zero` name its program, or whose
+        `required_outputs` name its report;
+      * any other row named after a program: the flow steps naming it.
+    Empty when nothing places the row (it may belong to any step)."""
+    return (_phase3_row_step_map().get(name)
+            or _phase3_flow_steps_naming(
+                name, str(Path("reports") / "phase3" / f"{name}.json")))
+
+
+def _PHASE3_GATE_TABLES() -> Tuple[Tuple[Any, ...], ...]:
+    """Every (row, program, report, argv) table `main` runs gates from."""
+    return (_PRESTREAM_GATES + _FINAL_LAYOUT_GATES + _DECLARED_SIGNOFF_GATES
+            + _PRE_AUDIT_PRODUCERS + (_DRV_PROMOTION_GATE,))
+
+
+@functools.lru_cache(maxsize=1)
+def _phase3_row_step_map() -> Dict[str, FrozenSet[str]]:
+    rows: Dict[str, Set[str]] = {
+        name: {str(sid) for sid in span}
+        for name, span in _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites}
+    for sid, site in _phase3_step_sites().items():
+        rows.setdefault(site, set()).add(sid)
+    rows.setdefault("canonicalize_artefacts", set()).update(
+        _PHASE3_CANONICALIZER_IDS)
+    for gate in _PHASE3_GATE_TABLES():
+        name, program, output = gate[0], gate[1], gate[2]
+        rows.setdefault(name, set()).update(
+            _phase3_flow_steps_naming(Path(program).stem, output))
+    return {name: frozenset(ids) for name, ids in rows.items()}
+
+
+@functools.lru_cache(maxsize=None)
+def _phase3_flow_steps_naming(program: str,
+                              output: Optional[str] = None) -> FrozenSet[str]:
+    import flow_compliance_check as _fcc                    # noqa: PLC0415
+    import _flow_yaml                                        # noqa: PLC0415
+    flow = _flow_yaml.load(_fcc.DEFAULT_FLOW_DEF) or {}
+
+    def commands(node: Any):
+        # Every clause that runs a program: `program_exit_zero` and its
+        # optional_/advisory_ forms, as a string or as `{command: ...}`.
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if str(key).endswith("program_exit_zero"):
+                    if isinstance(value, str):
+                        yield value
+                    elif isinstance(value, dict) and isinstance(
+                            value.get("command"), str):
+                        yield value["command"]
+                    else:
+                        yield from commands(value)
+                else:
+                    yield from commands(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from commands(item)
+
+    found = set()
+    for step in flow.get("steps", []):
+        if not isinstance(step, dict) or step.get("stage") not in ("stage3", "stage4"):
+            continue
+        programs = {Path(str(x)).stem for x in step.get("programs") or []}
+        runs = {Path(c.split()[0]).stem for c in commands(step.get("gate")) if c.split()}
+        outputs = {part.strip() for spec in step.get("required_outputs") or []
+                   for part in str(spec).split(" OR ")}
+        if program in programs or program in runs or (output and output in outputs):
+            found.add(str(step["id"]))
+    return frozenset(found)
+
+
 def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
     """Select a real dispatch unit for every canonical backend step.
 
@@ -73385,19 +73484,12 @@ def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
     """
     ids = _phase3_window_steps(entry, exit_)
     sites = _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites
-    direct = {str(sid): name for name, span in sites for sid in span}
-    direct.update({"15.5ic": "pnr",
-                   "36": "tapeout_checklist",
-                   "37.3": "gds_xor",
-                   "37.4": "signoff_metrics_aggregate",
-                   "38": "foundry_handoff"})
+    direct = _phase3_step_sites()
     spans = dict(sites)
     pnr_ids = set(spans["pnr"]) | {"15.5ic"}
-    canonicalizer_ids = {"23", "24", "25", "26", "26.5ic", "27",
-                         "28", "29", "30", "32", "33", "34", "35"}
     if set(ids).issubset(pnr_ids) and not set(spans["pnr"]).issubset(ids):
         return ["enclosing_pnr"]
-    if set(ids).issubset(canonicalizer_ids):
+    if set(ids).issubset(_PHASE3_CANONICALIZER_IDS):
         return ["enclosing_canonicalize"]
     if (any(sid not in direct for sid in ids) or
             any(not set(map(str, spans[direct[sid]])).issubset(ids)
@@ -73611,10 +73703,25 @@ def _stderr_tail(err: str, lines: int = _ENCLOSING_STDERR_TAIL_LINES) -> str:
 
 def _phase3_enclosing_cmd(isolated: Path, top: str, pdk: PdkConfig,
                           args) -> List[str]:
-    """The unbounded Phase-3 run on the window's private copy."""
-    return [sys.executable, str(Path(__file__)), str(isolated),
-            "--top-name", top, "--pdk", pdk.name,
-            "--container", args.container]
+    """The unbounded Phase-3 run on the window's private copy, asked the
+    OPERATOR's questions: the `--pdk` they gave (not the parent's resolved
+    name -- a staged input/pdk resolves to a synthetic `custom:<dir>` that
+    `_assert_pdk_name_resolvable` refuses), and the window's own geometry
+    and acknowledgements, so the child builds what the window would."""
+    cmd = [sys.executable, str(Path(__file__)), str(isolated),
+           "--top-name", top, "--pdk", str(getattr(args, "pdk", None) or "auto"),
+           "--container", args.container]
+    for flag, attr in (("--die-um", "die_um"), ("--util", "util"),
+                       ("--spare-density", "spare_density"),
+                       ("--ic-name", "ic_name")):
+        value = getattr(args, attr, None)
+        if value is not None:
+            cmd += [flag, str(value)]
+    for flag, attr in (("--allow-oss-pdk-fallback", "allow_oss_pdk_fallback"),
+                       ("--allow-pdk-target-mismatch", "allow_pdk_target_mismatch")):
+        if getattr(args, attr, False):
+            cmd.append(flag)
+    return cmd
 
 
 def _phase3_enclosing_supervised(project: Path, isolated: Path,
@@ -73630,7 +73737,9 @@ def _phase3_enclosing_supervised(project: Path, isolated: Path,
 
     Its stderr is kept, never swallowed: written to a log beside the
     project, in the window's own run dir (the window never writes window
-    control state into the project), and the tail is printed on failure."""
+    control state into the project), and the tail is printed on failure.
+    Its stdout and its own report are kept beside it, since the private
+    copy that held them is deleted with the window."""
     run_id = re.sub(r"[^A-Za-z0-9._-]", "_",
                     os.environ.get("VIBEIC_PHASE3_WINDOW_RUN_ID")
                     or f"{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}")
@@ -73647,6 +73756,10 @@ def _phase3_enclosing_supervised(project: Path, isolated: Path,
     try:
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(res.err or "")
+        log.with_name("enclosing_phase3.stdout.log").write_text(res.out or "")
+        unit_report = _pl.report_path(isolated, "phase3_one_shot.json")
+        if unit_report.is_file():
+            shutil.copy2(unit_report, log.with_name("phase3_one_shot.json"))
     except OSError as exc:
         log = Path(f"(unwritten: {exc})")
     if res.rc != 0:
@@ -73654,6 +73767,201 @@ def _phase3_enclosing_supervised(project: Path, isolated: Path,
               f"{res.elapsed_s:.0f}s); stderr log {log}; tail:\n"
               f"{_stderr_tail(res.err)}", file=sys.stderr)
     return res, log
+
+
+#: What `main` prints on stdout once admission and PDK resolution are done
+#: and the first step is about to run. A child that never printed it never
+#: ran a step, whatever its exit code: every refusal before it (delivery,
+#: canonical admission, the lock, `_detect_pdk`'s ValueError / SystemExit,
+#: the no-PDK `[SKIP]` that exits 0) is a unit that did not run.
+_PHASE3_RUN_BANNER = "=== phase3_one_shot_runner — pdk="
+#: `_progress_run.exit_undetermined_on_stall` prints this on stderr and exits
+#: RC_UNDETERMINED when a supervised call inside `main` stalled.
+_UNDETERMINED_MARK = "[UNDETERMINED]"
+
+
+def _print_run_banner(pdk_name: str, top: str, requested_top: str) -> None:
+    """The run banner, FLUSHED: stdout is a block-buffered file when a
+    supervisor captures it, and a child that crashes before its buffer
+    fills would otherwise lose the one line that says it started."""
+    print(f"{_PHASE3_RUN_BANNER}{pdk_name} top={top}"
+          f"{' (override of ' + requested_top + ')' if top != requested_top else ''} ===",
+          flush=True)
+#: Signals that stop a run from OUTSIDE it (an operator, the OOM killer, a
+#: reaper). The window's own watchdog stops are STALLED before this is read.
+_EXTERNAL_STOP_SIGNALS = frozenset({signal.SIGKILL, signal.SIGTERM,
+                                    signal.SIGINT, signal.SIGHUP})
+
+
+def _signal_of(rc: int) -> Optional[signal.Signals]:
+    """The signal a child died of: Popen's -N, or a shell's 128+N."""
+    num = -rc if rc < 0 else (rc - 128 if 128 < rc <= 192 else 0)
+    try:
+        return signal.Signals(num) if num else None
+    except ValueError:
+        return None
+
+
+#: Host shortfalls visible in a reportless unit's stderr: the host, not
+#: the design, stopped the run, so it is not red (outcome-state ruling).
+_HOST_SHORTFALL_MARKS = (
+    ("No space left on device", "disk full (ENOSPC)"),
+    ("MemoryError", "out of memory (MemoryError)"),
+    ("Cannot allocate memory", "out of memory (ENOMEM)"),
+    ("No such file or directory: 'docker'", "no docker binary on the host"),
+    ("docker: command not found", "no docker binary on the host"),
+)
+
+
+def _enclosing_phase3_outcome(rc: int, out: str, err: str,
+                              report: Optional[Dict[str, Any]],
+                              step_ids: Set[str], produced: bool,
+                              launch_error: bool = False
+                              ) -> Tuple[str, str, str]:
+    """(status, reason_class, what happened) for the unbounded Phase-3 child.
+
+    Decided from the evidence the child leaves, not from an exit-code set:
+    its own report when it wrote one, judged ONLY on the rows of the steps
+    this window owns; otherwise whether it ever started a step (its run
+    banner), how it stopped (a signal, the progress watchdog), and its rc.
+    A unit that ran and failed is FAIL; NOT_MEASURED names why nothing
+    was measured."""
+    if launch_error:
+        return ("NOT_MEASURED", _V.ReasonClass.EXECUTION_ERROR,
+                "the unit could not be spawned")
+    if report is not None:
+        return _enclosing_report_outcome(report, rc, step_ids, produced)
+    sig = _signal_of(rc)
+    if sig is not None and sig in _EXTERNAL_STOP_SIGNALS:
+        return ("NOT_MEASURED", _V.ReasonClass.EXECUTION_ERROR,
+                f"the unit was killed by {sig.name} from outside the run "
+                f"(rc={rc}); a stopped run judged nothing")
+    if rc == _pr.RC_UNDETERMINED and any(
+            line.startswith(_UNDETERMINED_MARK) for line in err.splitlines()):
+        return ("NOT_MEASURED", _V.ReasonClass.STALLED,
+                "a supervised call inside the unit stalled and it stopped "
+                "undetermined (see the stderr tail)")
+    if not any(line.startswith(_PHASE3_RUN_BANNER) for line in out.splitlines()):
+        return ("NOT_MEASURED", _V.ReasonClass.INPUT_ABSENT,
+                f"the unit stopped before running a step (rc={rc}; its "
+                f"refusal is in the stderr tail)")
+    host_mark = next(((err.find(needle), what)
+                      for needle, what in _HOST_SHORTFALL_MARKS
+                      if needle in err), None)
+    if host_mark is not None:
+        char_offset, host = host_mark
+        byte_offset = len(err[:char_offset].encode("utf-8", errors="replace"))
+        return ("NOT_MEASURED", _V.ReasonClass.EXECUTION_ERROR,
+                f"the unit ran and stopped on a host shortfall ({host}, "
+                f"rc={rc}; stderr byte offset {byte_offset}); the host, not "
+                "the design, stopped it")
+    # A unit that ran and then crashed or exited non-zero on its own with no
+    # report is a FAIL of the run -- this runner's rule, the precedent being
+    # the front door's reportless rc!=0 row (R-0915-160). The repo-wide
+    # EXECUTION_ERROR definition (verdict.py) is not changed by it.
+    if sig is not None:
+        return ("FAIL", "", f"the unit ran and crashed with {sig.name} "
+                            f"(rc={rc}) before writing its report")
+    return ("FAIL", "", f"the unit ran and exited rc={rc} with no verdict"
+            if rc else "the unit ran and exited 0 without writing its report")
+
+
+def _enclosing_report_outcome(report: Dict[str, Any], rc: int,
+                              step_ids: Set[str], produced: bool
+                              ) -> Tuple[str, str, str]:
+    """Judge the window's own steps from the unit's per-step rows.
+
+    The child ran every Phase-3 site, so its headline covers steps outside
+    the window. A row decides the window only when it answers for one of
+    the window's steps (`_phase3_steps_of_row`); every other non-passing row
+    is disclosed by name -- as a row of a step outside the window, or as a
+    row mapped to no step. A non-passing row mapped to no step may be one of
+    the window's, so it never lets the window PASS: it makes the window
+    INCONCLUSIVE, by name."""
+    verdict = report.get("verdict")
+    if rc == 0 and verdict in ("PASS", "PASS_WITH_WAIVERS"):
+        if produced:
+            return "PASS", "", "the unit ran and passed"
+        return ("NOT_MEASURED", _V.ReasonClass.INPUT_ABSENT,
+                "the unit passed but produced none of the selected outputs")
+    rows = [r for r in report.get("steps") or [] if isinstance(r, dict)]
+    steps_of = {str(r.get("name")): _phase3_steps_of_row(str(r.get("name")))
+                for r in rows}
+    owned = [r for r in rows if steps_of[str(r.get("name"))] & step_ids]
+    covered = set().union(*(steps_of[str(r.get("name"))] for r in owned)) \
+        if owned else set()
+    bad = [r for r in rows if r.get("status") not in
+           ("PASS", "PASS_WITH_WAIVERS", "NOT_APPLICABLE")]
+
+    def _name(r: Dict[str, Any]) -> str:
+        where = sorted(steps_of.get(str(r.get("name")), ()),
+                       key=lambda sid: (float(re.match(r"\d+(?:\.\d+)?", sid)
+                                              .group()), sid))
+        return (f"{r.get('name')} ({','.join(where) or 'no step'}) "
+                f"{r.get('status')}")
+
+    outside = [r for r in bad if r not in owned and steps_of[str(r.get("name"))]]
+    unmapped = [r for r in bad if not steps_of[str(r.get("name"))]]
+    told = (("; rows of steps outside the window: "
+             + "; ".join(_name(r) for r in outside)) if outside else "") + (
+        ("; rows mapped to no step (they may be this window's): "
+         + "; ".join(_name(r) for r in unmapped)) if unmapped else "")
+    owned_fail = [r for r in owned if r.get("status") == "FAIL"]
+    if owned_fail:
+        return ("FAIL", "", "the window's own step(s) FAILed in the unit: "
+                + "; ".join(f"{_name(r)}: {str(r.get('detail') or '')[-300:]}"
+                            for r in owned_fail) + told)
+    unplaced = sorted(step_ids - covered)
+    owned_bad = [r for r in owned if r in bad]
+    if owned_bad:
+        return ("NOT_MEASURED",
+                owned_bad[0].get("reason_class") or _V.ReasonClass.INPUT_ABSENT,
+                "the window's own step(s) were not measured in the unit: "
+                + "; ".join(_name(r) for r in owned_bad) + told)
+    if owned and not unplaced and unmapped:
+        # The window's rows all passed, but a row the map cannot place did
+        # not: it may answer for one of these steps, so it may not be
+        # ignored (review wave 7).
+        return ("NOT_MEASURED", _V.ReasonClass.INCONCLUSIVE,
+                "every row placed on the window's steps passed, but the unit "
+                "also reports non-passing row(s) no step map places, which "
+                "may be this window's: "
+                + "; ".join(f"{_name(r)}: {str(r.get('detail') or '')[-200:]}"
+                            for r in unmapped)
+                + (("; rows of steps outside the window: "
+                    + "; ".join(_name(r) for r in outside)) if outside else ""))
+    if owned and not unplaced:
+        if produced:
+            return ("PASS", "", "every row of the window's steps passed in "
+                                "the unit" + told)
+        return ("NOT_MEASURED", _V.ReasonClass.INPUT_ABSENT,
+                "the window's rows passed but produced none of the selected "
+                "outputs" + told)
+    # A failing row that names no step may or may not be one of these.
+    return ("NOT_MEASURED", _V.ReasonClass.INCONCLUSIVE,
+            f"the unit's verdict is {verdict} and the window's steps "
+            f"{', '.join(unplaced)} have no row of their own, so whether "
+            f"they passed cannot be read" + told)
+
+
+def _enclosing_outcome(unit: str, unit_ok: bool, unit_rc: int,
+                       unit_verdict: Optional[str], unit_reason: str,
+                       unit_detail: str = ""
+                       ) -> Tuple[str, str, str]:
+    """(status, reason_class, what happened) for an in-process enclosing
+    unit (pnr, canonicalize): its own row decides. A unit that RAN and failed
+    is a plain FAIL; NOT_MEASURED keeps the row's own reason. The Phase-3
+    child is judged by `_enclosing_phase3_outcome`."""
+    if unit_ok:
+        return "PASS", "", "the unit ran and passed"
+    if unit_verdict == "FAIL":
+        return "FAIL", "", ("the unit ran and its verdict is FAIL: "
+                            + (unit_detail[-400:] or "(no detail)"))
+    if unit_verdict in ("PASS", "PASS_WITH_WAIVERS"):
+        return ("NOT_MEASURED", _V.ReasonClass.INPUT_ABSENT,
+                "the unit passed but produced none of the selected outputs")
+    return ("NOT_MEASURED", unit_reason or _V.ReasonClass.INPUT_ABSENT,
+            f"the unit ran and could not measure (verdict {unit_verdict})")
 
 
 def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
@@ -73676,6 +73984,8 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
             unit_rc = 0 if canonical_row.status in (
                 "PASS", "PASS_WITH_WAIVERS") else 1
             unit_verdict = canonical_row.status
+            unit_reason = canonical_row.reason_class
+            unit_detail = canonical_row.detail or ""
         elif unit == "pnr":
             pnr_row = step_pnr(isolated, top, pdk, args.container,
                                die_um=args.die_um, util=args.util,
@@ -73683,7 +73993,13 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                                pad_ring_step=step_pad_ring_gen)
             unit_rc = 0 if pnr_row.status in ("PASS", "PASS_WITH_WAIVERS") else 1
             unit_verdict = pnr_row.status
+            unit_reason = pnr_row.reason_class
+            unit_detail = pnr_row.detail or ""
         else:
+            unit_report = _pl.report_path(isolated, "phase3_one_shot.json")
+            # The copy carries the project's previous report; only the one
+            # this run writes may speak for it.
+            unit_report.unlink(missing_ok=True)
             res, log = _phase3_enclosing_supervised(
                 project, isolated,
                 _phase3_enclosing_cmd(isolated, top, pdk, args))
@@ -73700,11 +74016,14 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                     f"{_stderr_tail(res.err)}",
                     [], reason_class=_V.ReasonClass.STALLED)
             unit_rc = res.rc
-            unit_report = _pl.report_path(isolated, "phase3_one_shot.json")
+            unit_reason = ""
+            unit_detail = ""
             try:
-                unit_verdict = json.loads(unit_report.read_text()).get("verdict")
+                unit_doc = json.loads(unit_report.read_text())
             except (OSError, ValueError):
-                unit_verdict = None
+                unit_doc = None
+            unit_verdict = (unit_doc.get("verdict")
+                            if isinstance(unit_doc, dict) else None)
         copied = []
         produced = []
         for step in steps:
@@ -73722,10 +74041,19 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                                 copied.append(str(target))
         unit_ok = unit_rc == 0 and bool(produced) and unit_verdict in (
             "PASS", "PASS_WITH_WAIVERS")
+        if unit == "phase3":
+            status, reason_class, outcome = _enclosing_phase3_outcome(
+                unit_rc, res.out or "", res.err or "",
+                unit_doc if isinstance(unit_doc, dict) else None,
+                step_ids, bool(produced),
+                launch_error=res.outcome == "launch_error")
+        else:
+            status, reason_class, outcome = _enclosing_outcome(
+                unit, unit_ok, unit_rc, unit_verdict, unit_reason, unit_detail)
         unit_log = ""
         if unit == "phase3":
-            unit_log = f"; stderr log {log}"
-            if not unit_ok:
+            unit_log = f"; stderr log {log} (stdout and report beside it)"
+            if status != "PASS":
                 unit_log += f"; stderr tail: {_stderr_tail(res.err)}"
         name = "enclosing_" + unit
         enclosing = {"pnr": "step_pnr",
@@ -73733,15 +74061,13 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                      "phase3": "phase3_one_shot_runner"}[unit]
         execution_note = ("ran as part of" if produced else
                           "requested through; no selected output was produced by")
-        return StepResult(name, "PASS" if unit_ok
-                          else "NOT_MEASURED", time.time() - t0,
+        return StepResult(name, status, time.time() - t0,
                           f"steps {', '.join(sorted(step_ids))} {execution_note} "
-                          f"{enclosing}; enclosing rc={unit_rc}; "
+                          f"{enclosing}; {outcome}; enclosing rc={unit_rc}; "
                           f"verdict={unit_verdict}; selected outputs newly "
                           f"produced={len(produced)}; only selected declared "
                           f"outputs published{unit_log}",
-                          copied, reason_class=("" if unit_ok else
-                                                _V.ReasonClass.INPUT_ABSENT))
+                          copied, reason_class=reason_class)
 
 
 def _phase3_file_manifest(project: Path) -> Dict[str, str]:
@@ -74364,8 +74690,7 @@ def main() -> int:
               f"(instantiation-graph root; parity with phase-2 synth)",
               file=sys.stderr)
 
-    print(f"=== phase3_one_shot_runner — pdk={pdk.name} top={effective_top}"
-          f"{' (override of '+args.top_name+')' if effective_top != args.top_name else ''} ===")
+    _print_run_banner(pdk.name, effective_top, args.top_name)
     if _window_sites is not None:
         _analog_only, _analog_reason = _is_pure_analog_no_rtl_track(project)
         if _analog_only:

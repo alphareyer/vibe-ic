@@ -219,21 +219,26 @@ def test_enclosing_phase3_hang_is_stopped_by_the_watchdog(
 def test_enclosing_phase3_failure_keeps_and_surfaces_stderr(
         project, monkeypatch, capsys):
     fail = ("import sys\n"
+            f"print({BANNER!r})\n"
             "for i in range(30): sys.stderr.write(f'line-{i}\\n')\n"
             "sys.exit(7)\n")
     monkeypatch.setattr(p3, "_phase3_enclosing_cmd",
                         lambda *a: [sys.executable, "-c", fail])
     monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "failrun")
     row = _enclose(project)
-    # Only the surfacing is this test's subject.  The status main gives a
-    # unit that ran and exited non-zero is not pinned here.
+    # It RAN and failed: a plain FAIL (owner outcome-state ruling), never a
+    # NOT_MEASURED about something that could not be run.
+    assert row.status == "FAIL", row.detail
+    assert not row.reason_class
     assert "enclosing rc=7" in row.detail
+    assert "ran and exited rc=7 with no verdict" in row.detail
     assert "line-29" in row.detail and "line-5\n" not in row.detail
     log = _window_log(project, "failrun")
     assert log.read_text().splitlines() == [f"line-{i}" for i in range(30)]
     err = capsys.readouterr().err
     assert "ENCLOSING_PHASE3_RC=7" in err and "line-29" in err
     assert str(log) in err
+    assert "top=top" in log.with_name("enclosing_phase3.stdout.log").read_text()
 
 
 def test_a_zombie_is_not_a_surviving_orphan():
@@ -261,3 +266,401 @@ def test_a_zombie_is_not_a_surviving_orphan():
     finally:
         sleeper.kill()
         sleeper.wait(timeout=10)
+
+
+#: What `main` prints once admission and PDK resolution are done (the run
+#: banner), spelled as the runner prints it.
+BANNER = "=== phase3_one_shot_runner — pdk=x top=top ==="
+
+
+def test_the_run_banner_is_the_one_main_prints():
+    src = Path(p3.__file__).read_text()
+    assert BANNER.startswith(p3._PHASE3_RUN_BANNER)
+    assert "_print_run_banner(pdk.name, effective_top, args.top_name)" in src
+
+
+def _enclose_with(project, monkeypatch, code, run_id, steps=("23",)):
+    """A stand-in unit: `code` runs with the private copy as argv[1]."""
+    monkeypatch.setattr(p3, "_phase3_enclosing_cmd",
+                        lambda iso, *a: [sys.executable, "-c", code, str(iso)])
+    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", run_id)
+    return p3._phase3_window_enclosing(
+        project, "top", SimpleNamespace(name="gf180mcuD"),
+        SimpleNamespace(container="vibeic-eda"), set(steps), unit="phase3")
+
+
+def _unit(report=None, rc=1, banner=True, outputs=()):
+    """A unit that got past admission (its banner), wrote `outputs` and its
+    own report in the copy it was handed, then exited `rc`."""
+    rel = str(p3._pl.report_path(Path("ISO"), "phase3_one_shot.json")
+              .relative_to("ISO"))
+    code = "import json, pathlib, sys\niso = pathlib.Path(sys.argv[1])\n"
+    if banner:
+        code += f"print({BANNER!r})\n"
+    for out in outputs:
+        code += (f"q = iso / {out!r}; q.parent.mkdir(parents=True, exist_ok=True);"
+                 f" q.write_text('produced')\n")
+    if report is not None:
+        code += (f"q = iso / {rel!r}; q.parent.mkdir(parents=True, exist_ok=True)\n"
+                 f"q.write_text(json.dumps({report!r}))\n")
+    return code + f"sys.exit({rc})\n"
+
+
+def _rows(*rows):
+    return {"verdict": "FAIL", "steps": [
+        dict(zip(("name", "status", "detail", "reason_class"), r)) for r in rows]}
+
+
+def test_reportless_host_shortfall_is_found_beyond_the_display_tail():
+    banner = p3._PHASE3_RUN_BANNER + "fixture"
+    marker = "No space left on device"
+    stderr = marker + "\n" + ("x" * 5000)
+    status, reason, detail = p3._enclosing_phase3_outcome(
+        1, banner, stderr, None, {"15"}, False)
+    assert status == "NOT_MEASURED"
+    assert reason == p3._V.ReasonClass.EXECUTION_ERROR
+    assert "stderr byte offset 0" in detail
+    assert p3._enclosing_phase3_outcome(
+        1, banner, "x" * 5000, None, {"15"}, False)[0] == "FAIL"
+
+
+def test_a_fail_in_the_windows_own_step_is_fail_and_names_it(project, monkeypatch):
+    report = _rows(("pnr", "FAIL", "global route diverged", ""),
+                   ("drc", "NOT_MEASURED", "upstream", "upstream_failed"))
+    row = _enclose_with(project, monkeypatch, _unit(report), "ownfail",
+                        steps=("15", "16"))
+    assert row.status == "FAIL", row.detail
+    assert "pnr (15,15.5ic,16,17,18,19,20,21,22) FAIL: global route diverged" in row.detail
+    # The row outside the window is disclosed, not blamed.
+    assert "rows of steps outside the window: drc (31) NOT_MEASURED" in row.detail
+
+
+def test_a_fail_outside_the_window_is_not_the_windows_fail(project, monkeypatch):
+    """The unit ran every site. Its PnR FAILed and an unplaceable row
+    FAILed, but both rows of the window's own step 31 passed: the window
+    PASSes and the other rows are named."""
+    outputs = ["reports/phase3/drc_signoff.rpt"]
+    report = _rows(("pnr", "FAIL", "x", ""), ("drc", "PASS", "", ""),
+                   ("lvs", "PASS", "", ""), ("sta_signoff", "FAIL", "y", ""))
+    row = _enclose_with(project, monkeypatch, _unit(report, outputs=outputs),
+                        "outfail", steps=("31",))
+    assert row.status == "PASS", row.detail
+    assert "rows of steps outside the window: pnr (15,15.5ic,16,17,18,19,20,21,22) FAIL" in row.detail
+    assert "sta_signoff (23) FAIL" in row.detail
+
+
+def test_a_fail_that_names_no_step_cannot_decide_an_unplaced_window(
+        project, monkeypatch):
+    """A window step with no row of its own (39: no Phase-3 row runs it) and
+    a failing row mapped to no step: the row may be this window's."""
+    report = _rows(("mystery_gate", "FAIL", "y", ""))
+    row = _enclose_with(project, monkeypatch, _unit(report), "unplaced",
+                        steps=("39",))
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.INCONCLUSIVE
+    assert "steps 39 have no row of their own" in row.detail
+    assert ("rows mapped to no step (they may be this window's): "
+            "mystery_gate (no step) FAIL") in row.detail
+
+
+def test_a_sign_off_row_of_the_windows_step_decides_it(project, monkeypatch):
+    """Window 22..23 (enclosing): post-route STA is step 23's own gate. Its
+    FAIL is the window's FAIL, named, never "no row of their own"."""
+    assert p3._phase3_window_sites("22", "23") == ["enclosing_phase3"]
+    report = _rows(("pnr", "PASS", "", ""),
+                   ("sta_signoff", "FAIL", "WNS -0.42ns", ""))
+    row = _enclose_with(project, monkeypatch, _unit(report), "sta23",
+                        steps=p3._phase3_window_steps("22", "23"))
+    assert row.status == "FAIL", row.detail
+    assert "sta_signoff (23) FAIL: WNS -0.42ns" in row.detail
+
+
+def test_an_out_of_window_drc_fail_does_not_decide_window_9_to_30(
+        project, monkeypatch):
+    """The front door's `--exit-step 30` window: every row of steps 9..30
+    passes and only DRC (31, outside it) fails. The window PASSes."""
+    steps = p3._phase3_window_steps("9", "30")
+    assert p3._phase3_window_sites("9", "30") == ["enclosing_phase3"]
+    names = ["synth", "pad_ring_gen", "pnr", "canonicalize_artefacts",
+             "sta_signoff", "sta_corner", "sta_record", "em_signoff",
+             "ir_drop_final", "antenna_final", "si_final", "gds", "lvs"]
+    report = _rows(*[(n, "PASS", "", "") for n in names],
+                   ("drc", "FAIL", "12 violations", ""))
+    row = _enclose_with(project, monkeypatch,
+                        _unit(report, outputs=["reports/phase3/sta/post_route_summary.json"]),
+                        "win930", steps=steps)
+    assert row.status == "PASS", row.detail
+    assert "rows of steps outside the window: drc (31) FAIL" in row.detail
+
+
+def _rows_main_emits():
+    """Every StepResult row name `phase3_one_shot_runner` spells literally,
+    plus its declared gate tables: the rows a report can carry. The
+    pre-audit producers (tapeout_checklist, gds_xor, foundry_handoff) are
+    NOT: main keeps them out of `plan`, so they never reach the report's
+    `steps` (review wave 7)."""
+    import ast
+    tree = ast.parse(Path(p3.__file__).read_text())
+    names = {node.args[0].value for node in ast.walk(tree)
+             if isinstance(node, ast.Call)
+             and getattr(node.func, "id", None) == "StepResult"
+             and node.args and isinstance(node.args[0], ast.Constant)
+             and isinstance(node.args[0].value, str)}
+    pre_audit = {g[0] for g in p3._PRE_AUDIT_PRODUCERS}
+    return (names | {g[0] for g in p3._PHASE3_GATE_TABLES()}) - pre_audit
+
+
+def test_every_phase3_step_is_answered_for_by_a_row_main_emits():
+    """One map: dispatch and verdict read the same canonicalizer set, and
+    every canonical Phase-3 step 9..38 but the pre-audit producers' has a
+    report row that answers for it. Steps 36, 37.3 and 38 (their rows never
+    reach the report) and 39 (FPGA sign-off: no Phase-3 row runs it) have
+    none, so a window over them is read from the unit's headline or is
+    INCONCLUSIVE, which the test above pins."""
+    assert p3._phase3_steps_of_row("canonicalize_artefacts") == \
+        p3._PHASE3_CANONICALIZER_IDS
+    assert p3._phase3_window_sites("24", "25") == ["enclosing_canonicalize"]
+    covered = set().union(*(p3._phase3_steps_of_row(n) for n in _rows_main_emits()))
+    ids = p3._phase3_window_steps("9", "39")
+    assert {i for i in ids if i not in covered} == {"36", "37.3", "38", "39"}
+
+
+def test_every_row_main_emits_has_a_step_or_cannot_let_a_window_pass():
+    """The other direction (review wave 7): a row either answers for a step,
+    or -- when no map places it -- its FAIL keeps EVERY window from PASSing
+    (it may be that window's). Checked for every row main emits, for every
+    window whose own rows all pass."""
+    windows = [("9", "21"), ("22", "23"), ("9", "30"), ("9", "37")]
+    unplaced = sorted(n for n in _rows_main_emits()
+                      if not p3._phase3_steps_of_row(n))
+    for entry, exit_ in windows:
+        ids = set(p3._phase3_window_steps(entry, exit_))
+        own = sorted(n for n in _rows_main_emits()
+                     if p3._phase3_steps_of_row(n) & ids)
+        passing = [{"name": n, "status": "PASS"} for n in own]
+        assert p3._enclosing_report_outcome(
+            {"verdict": "FAIL", "steps": passing}, 1, ids, True)[0] == "PASS"
+        for name in unplaced:
+            got = p3._enclosing_report_outcome(
+                {"verdict": "FAIL", "steps": passing + [
+                    {"name": name, "status": "FAIL", "detail": "boom"}]},
+                1, ids, True)
+            assert got[:2] == ("NOT_MEASURED", p3._V.ReasonClass.INCONCLUSIVE), \
+                (entry, exit_, name, got)
+            assert f"{name} (no step) FAIL: boom" in got[2]
+
+
+@pytest.mark.parametrize("window, row, step", [
+    (("22", "23"), "drv_promotion_corroboration", "23"),   # optional {command:} clause
+    (("9", "37"), "pad_ring_route_evidence", "37"),        # a required_output of 37
+])
+def test_a_row_the_flow_places_by_clause_or_output_decides_its_window(
+        project, monkeypatch, window, row, step):
+    """Review wave 7: these two FAILed rows were unplaced, so the window
+    PASSed. They are placed now -- one through step 23's optional
+    `{command: ...}` clause, one through step 37's required output -- and
+    their FAIL is the window's, by name."""
+    ids = set(p3._phase3_window_steps(*window))
+    assert step in p3._phase3_steps_of_row(row)
+    own = sorted(n for n in _rows_main_emits()
+                 if p3._phase3_steps_of_row(n) & ids and n != row)
+    report = _rows(*[(n, "PASS", "", "") for n in own],
+                   (row, "FAIL", "contradiction", ""))
+    got = p3._enclosing_report_outcome(report, 1, ids, True)
+    assert got[0] == "FAIL", got
+    assert f"{row} ({step}) FAIL: contradiction" in got[2]
+
+
+def test_an_unplaced_fail_keeps_window_9_to_30_from_passing(project, monkeypatch):
+    """Through the real window: every placed row of 9..30 passes and only
+    `pad_side_constraint` (placed by no map) FAILs. It may be this window's:
+    INCONCLUSIVE, by name -- no longer PASS."""
+    steps = p3._phase3_window_steps("9", "30")
+    names = ["synth", "pad_ring_gen", "pnr", "canonicalize_artefacts",
+             "sta_signoff", "sta_corner", "sta_record", "em_signoff",
+             "ir_drop_final", "antenna_final", "si_final", "gds", "lvs"]
+    report = _rows(*[(n, "PASS", "", "") for n in names],
+                   ("pad_side_constraint", "FAIL", "pad on the wrong side", ""))
+    row = _enclose_with(project, monkeypatch,
+                        _unit(report, outputs=["reports/phase3/sta/post_route_summary.json"]),
+                        "padside", steps=steps)
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.INCONCLUSIVE
+    assert "pad_side_constraint (no step) FAIL: pad on the wrong side" in row.detail
+
+
+def test_the_child_is_asked_the_operators_questions():
+    """Not the parent's resolved `custom:<dir>` name (refused by
+    `_assert_pdk_name_resolvable`), and the window's own geometry."""
+    args = SimpleNamespace(pdk="auto", container="c", die_um="600", util=0.4,
+                           spare_density=0.02, ic_name="chip",
+                           allow_oss_pdk_fallback=True,
+                           allow_pdk_target_mismatch=False)
+    cmd = p3._phase3_enclosing_cmd(Path("/x/p"), "top",
+                                   SimpleNamespace(name="custom:pdk"), args)
+    assert cmd[cmd.index("--pdk") + 1] == "auto" and "custom:pdk" not in cmd
+    assert cmd[cmd.index("--die-um") + 1] == "600"
+    assert cmd[cmd.index("--util") + 1] == "0.4"
+    assert cmd[cmd.index("--spare-density") + 1] == "0.02"
+    assert cmd[cmd.index("--ic-name") + 1] == "chip"
+    assert "--allow-oss-pdk-fallback" in cmd
+    assert "--allow-pdk-target-mismatch" not in cmd
+
+
+def test_a_window_step_not_measured_keeps_its_own_reason(project, monkeypatch):
+    report = _rows(("drc", "NOT_MEASURED", "", "tool_absent"),
+                   ("lvs", "PASS", "", ""))
+    row = _enclose_with(project, monkeypatch, _unit(report), "ownnm",
+                        steps=("31",))
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == "tool_absent"
+
+
+def test_a_previous_report_in_the_copy_does_not_speak_for_this_run(
+        project, monkeypatch):
+    """The copy carries the project's last report (PASS). A unit that ran
+    and died without writing one must not be read as that PASS."""
+    old = p3._pl.report_path(project, "phase3_one_shot.json")
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_text(json.dumps({"verdict": "PASS"}))
+    row = _enclose_with(project, monkeypatch, _unit(rc=9), "stale")
+    assert row.status == "FAIL", row.detail
+    assert "verdict=None" in row.detail
+
+
+@pytest.mark.parametrize("rc", [0, 1, 2, 3, 4])
+def test_a_unit_that_never_started_a_step_is_not_measured_whatever_its_rc(
+        project, monkeypatch, rc):
+    """No run banner, no report: every refusal before the first step,
+    including rc 1 (a PDK ValueError/SystemExit) and rc 0 (the no-PDK
+    `[SKIP]`), is a unit that did not run."""
+    code = ("import sys; sys.stderr.write('REFUSED: test\\n'); "
+            f"sys.exit({rc})")
+    row = _enclose_with(project, monkeypatch, code, f"norun{rc}")
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.INPUT_ABSENT
+    assert "stopped before running a step" in row.detail
+    assert "REFUSED: test" in row.detail
+
+
+def test_the_real_pdk_refusal_is_a_unit_that_never_ran(project, monkeypatch):
+    """`_detect_pdk`'s own refusal, run for real in the child on a project
+    with a staged input/pdk: a named PDK it cannot resolve raises
+    ValueError, the child exits 1 with a traceback and no report."""
+    (project / "input" / "pdk" / "lib").mkdir(parents=True)
+    (project / "input" / "pdk" / "lib" / "cells.lib").write_text("library(x){}\n")
+    code = ("import sys, pathlib\n"
+            f"sys.path.insert(0, {str(Path(p3.__file__).parent)!r})\n"
+            "import phase3_one_shot_runner as p\n"
+            "p._detect_pdk(pathlib.Path(sys.argv[1]), 'no_such_pdk_name')\n"
+            f"print({BANNER!r})\n")
+    row = _enclose_with(project, monkeypatch, code, "pdkrefusal")
+    assert row.status == "NOT_MEASURED", row.detail
+    assert "enclosing rc=1" in row.detail
+    assert "ValueError" in row.detail and "no_such_pdk_name" in row.detail
+
+
+def test_the_real_runner_refusing_an_unadmitted_copy_stays_not_measured(
+        project, monkeypatch):
+    """No stand-in: the real phase-3 CLI on an empty project refuses at
+    admission, which is a unit that never ran a step."""
+    monkeypatch.setattr(p3, "_WATCHDOG_STALL_GRACE_S", 120)
+    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "realrefusal")
+    monkeypatch.delenv(_runner_lock.REENTRANCY_ENV, raising=False)
+    row = _enclose(project)
+    assert row.status == "NOT_MEASURED", row.detail
+    assert "stopped before running a step" in row.detail
+
+
+@pytest.mark.parametrize("sig, status", [("SIGTERM", "NOT_MEASURED"),
+                                         ("SIGKILL", "NOT_MEASURED"),
+                                         ("SIGSEGV", "FAIL")])
+def test_a_unit_killed_by_a_signal(project, monkeypatch, sig, status):
+    """Stopped from outside (TERM/KILL): an environment stop, NOT_MEASURED
+    naming the signal. A crash of the unit's own (SEGV) after it ran: FAIL."""
+    # The banner is printed by main's own `_print_run_banner` -- NOT flushed
+    # here -- so a crash right after it keeps the banner only if main does.
+    # No core file: the host's core_pattern writes one into the cwd, and in
+    # the image `ulimit -c` is unlimited -- set it to 0 in the CHILD (it is
+    # inherited) and crash from a scratch cwd (review wave 7).
+    code = ("import os, resource, signal, sys, tempfile\n"
+            "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
+            "os.chdir(tempfile.mkdtemp())\n"
+            f"sys.path.insert(0, {str(Path(p3.__file__).parent)!r})\n"
+            "import phase3_one_shot_runner as p\n"
+            "p._print_run_banner('x', 'top', 'top')\n"
+            f"os.kill(os.getpid(), signal.{sig})\n")
+    row = _enclose_with(project, monkeypatch, code, f"sig{sig}")
+    assert row.status == status, row.detail
+    assert sig in row.detail
+    if status == "NOT_MEASURED":
+        assert row.reason_class == p3._V.ReasonClass.EXECUTION_ERROR
+
+
+def test_a_stall_inside_the_unit_is_stalled_not_a_refusal(project, monkeypatch):
+    """rc 2 is also RC_UNDETERMINED: the real `exit_undetermined_on_stall`
+    around a step that stalled after the unit started."""
+    code = ("import sys\n"
+            f"sys.path.insert(0, {str(Path(p3.__file__).parent)!r})\n"
+            "import _progress_run as pr\n"
+            "def main():\n"
+            f"    print({BANNER!r})\n"
+            "    raise pr.Stalled(['tool'], 3, 1.0, 3.0, {'cpu': True})\n"
+            "sys.exit(pr.exit_undetermined_on_stall(main))\n")
+    row = _enclose_with(project, monkeypatch, code, "undetermined")
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.STALLED
+    assert "enclosing rc=2" in row.detail and "stalled" in row.detail
+
+
+def test_a_unit_that_cannot_be_spawned_stays_not_measured(project, monkeypatch):
+    monkeypatch.setattr(p3, "_phase3_enclosing_cmd",
+                        lambda *a: [str(project / "no-such-interpreter")])
+    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "nospawn")
+    row = _enclose(project)
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.EXECUTION_ERROR
+    assert "could not be spawned" in row.detail
+
+
+@pytest.mark.parametrize("status, expected", [("FAIL", "FAIL"),
+                                              ("NOT_MEASURED", "NOT_MEASURED")])
+def test_an_in_process_unit_keeps_what_it_found(project, monkeypatch, status,
+                                                expected):
+    monkeypatch.setattr(p3, "step_canonicalize_artefacts", lambda *a, **k:
+                        p3.StepResult("canonicalize", status, 0.0, "x",
+                                      reason_class=("" if status == "FAIL" else
+                                                    p3._V.ReasonClass.TOOL_ABSENT)))
+    row = p3._phase3_window_enclosing(
+        project, "top", SimpleNamespace(name="gf180mcuD"),
+        SimpleNamespace(container="vibeic-eda"), {"24"}, unit="canonicalize")
+    assert row.status == expected, row.detail
+    if expected == "NOT_MEASURED":
+        assert row.reason_class == p3._V.ReasonClass.TOOL_ABSENT
+
+
+def test_an_in_process_fail_names_what_failed(project, monkeypatch):
+    """Review wave 7: the unit's own detail is kept -- canonicalize answers
+    for 13 steps, and a red with no subject needs a re-run to explain."""
+    monkeypatch.setattr(p3, "step_canonicalize_artefacts", lambda *a, **k:
+                        p3.StepResult("canonicalize", "FAIL", 0.0,
+                                      "sign-off emit FAILED: post-layout LEC "
+                                      "emit FAILED (rc=1)"))
+    row = p3._phase3_window_enclosing(
+        project, "top", SimpleNamespace(name="gf180mcuD"),
+        SimpleNamespace(container="vibeic-eda"), {"24", "25"},
+        unit="canonicalize")
+    assert row.status == "FAIL", row.detail
+    assert "post-layout LEC emit FAILED" in row.detail
+
+
+@pytest.mark.parametrize("stderr", ["OSError: [Errno 28] No space left on device",
+                                    "MemoryError"])
+def test_a_host_shortfall_after_the_unit_ran_is_not_red(project, monkeypatch,
+                                                        stderr):
+    code = (f"import sys\nprint({BANNER!r})\n"
+            f"sys.stderr.write({stderr!r} + '\\n')\nsys.exit(1)\n")
+    row = _enclose_with(project, monkeypatch, code, "host" + str(len(stderr)))
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.EXECUTION_ERROR
+    assert "host shortfall" in row.detail

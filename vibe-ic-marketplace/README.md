@@ -13,7 +13,7 @@ and the contribution guides for extending it.
 | | |
 |---|---|
 | Plugins in this marketplace | **1** — [`plugins/vibe-ic`](plugins/vibe-ic/) |
-| Plugin version | **1.26.1** |
+| Plugin version | **1.26.2** |
 | Deterministic programs | **1506** top level (`plugins/vibe-ic/programs/*.py`), of which **1370** are catalogued in [`INDEX.md`](plugins/vibe-ic/programs/INDEX.md) |
 | Skills | **60** (`plugins/vibe-ic/skills/*/SKILL.md`, each with a `compliance.yaml`) |
 | Slash commands | **7** (`plugins/vibe-ic/commands/*.md`) |
@@ -546,7 +546,7 @@ vibe-ic-marketplace/
 ├── templates/partner-plugin-skeleton/
 ├── community/backlogs/
 └── plugins/
-    └── vibe-ic/                         ← the single plugin (v1.26.1)
+    └── vibe-ic/                         ← the single plugin (v1.26.2)
         ├── .claude-plugin/plugin.json
         ├── flow/
         │   └── phase1_phase2_phase3.yaml   ← 70-step source of truth
