@@ -404,3 +404,40 @@ def test_checked_in_stream_retains_its_original_metal(tmp_path):
         after = pya.Region(emitted.top_cell().begin_shapes_rec(emitted.layer(number, datatype)))
         assert not before.is_empty(), "checked-in stream must exercise real geometry"
         assert (before - after).is_empty()
+
+
+def test_placed_instance_boxes_mask_fill_without_changing_density_area(tmp_path):
+    """The protected center has fill without a box and none with the box."""
+    pya = _pya_or_skip()
+    layout = pya.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(99, 0)).insert(pya.Box(0, 0, 20000, 20000))
+    source = tmp_path / "source.gds"
+    layout.write(str(source))
+    base = {
+        "boundary_layer": [99, 0], "window_um": None, "max_passes": 2,
+        "mfg_grid_um": 0.1,
+        "layers": [{"name": "m", "layer": [36, 0], "target": 0.20,
+                    "max": 0.9, "space": 0.3, "space_to_metal": 0.3,
+                    "width": 1.0, "fill_datatype": 4}],
+    }
+
+    def fill_in_box(boxes, name):
+        output = tmp_path / f"{name}.gds"
+        report = metal_fill.run(str(source), {**base, "keepout_boxes_um": boxes},
+                                str(output), "TOP")
+        result = pya.Layout()
+        result.read(str(output))
+        layer = result.find_layer(36, 4)
+        fill = pya.Region(result.cell("TOP").begin_shapes_rec(layer))
+        center = pya.Region(pya.Box(8000, 8000, 12000, 12000))
+        return (fill & center).area(), report
+
+    open_area, open_report = fill_in_box([], "unprotected")
+    masked_area, masked_report = fill_in_box([[8, 8, 12, 12]], "protected")
+    assert open_area > 0
+    assert masked_area == 0
+    assert open_report["keepout"]["measurement_bbox_um"] == \
+        masked_report["keepout"]["measurement_bbox_um"]
+    assert masked_report["keepout"]["sources"] == ["placed-instance-boxes:1"]
