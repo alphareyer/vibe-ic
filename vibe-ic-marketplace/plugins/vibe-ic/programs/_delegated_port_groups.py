@@ -21,11 +21,42 @@ from _prose_polarity import is_denied
 
 _HEADING = re.compile(r"^#{2,6}\s*([A-Za-z][\w-]*)\s+port\s+group\b", re.I)
 _PORT = re.compile(r"`([A-Za-z_][A-Za-z_0-9]*)`")
-_DELEGATION = re.compile(
-    r"declaration\.json.*(?:declar\w*|plugin|signal|port|訊號|名称|名稱|聲明|指定)"
-    r"|(?:declar\w*|plugin|signal|port|訊號|名称|名稱|聲明|指定).*declaration\.json",
-    re.I,
-)
+_DECLARATION = r"(?:plugin_output/)?declaration\.json"
+_PORT_NAMES = r"(?:\b(?:port|signal|pin|sub-?port)\s+names?\b|\bnames?\s+(?:of|for)\s+(?:this|the)\s+(?:port|signal|pin|sub-?port)\b)"
+_ZH_PORT_NAMES = r"(?:訊號|信号|埠|端口)\s*(?:名稱|名称)"
+_CLAUSES = re.compile(r"[;；。]|[.!?](?=\s|$)")
+
+
+def _delegates_names(line: str, group: str) -> bool:
+    """Require an affirmative grammatical link from group port names to the file.
+
+    A filename and a port word in adjacent statements are not authority. Split
+    at clause boundaries before checking either the relation or its polarity.
+    """
+    modifier = rf"(?:(?:the|this|actual|concrete|exact|{re.escape(group)})\s+)*"
+    relationships = (
+        # The port names are declared by the plugin in declaration.json.
+        rf"{_PORT_NAMES}[^;；。]{{0,100}}?\b(?:declared|defined|specified|"
+        rf"determined|set|named)\s+(?:by\s+(?:the\s+)?plugin\s+)?"
+        rf"(?:by|in|via|through|from)\s+{_DECLARATION}",
+        # The port names come from declaration.json.
+        rf"{_PORT_NAMES}[^;；。]{{0,70}}?\b(?:come|derive|are\s+sourced)\s+"
+        rf"from\s+{_DECLARATION}",
+        # declaration.json defines the group's port names.
+        rf"{_DECLARATION}\s+(?:declares|defines|specifies|determines|sets)\s+"
+        rf"{modifier}{_PORT_NAMES}",
+        rf"{_DECLARATION}\s+is\s+(?:the\s+)?(?:authority|source\s+of\s+truth)\s+"
+        rf"for\s+{modifier}{_PORT_NAMES}",
+        rf"{_ZH_PORT_NAMES}[^;；。]{{0,50}}?由\s*(?:Plugin\s*)?(?:在|於|透過)?\s*"
+        rf"{_DECLARATION}\s*(?:宣告|聲明|指定|定義|定义)",
+        rf"{_DECLARATION}\s*(?:宣告|聲明|指定|定義|定义)[^;；。]{{0,30}}?"
+        rf"{_ZH_PORT_NAMES}",
+    )
+    for clause in _CLAUSES.split(line):
+        if is_denied(clause) is None and any(
+                re.search(pattern, clause, re.I) for pattern in relationships):
+            return True
+    return False
 
 
 def extract_delegated_groups(extracted: dict[str, str]) -> list[dict]:
@@ -47,8 +78,8 @@ def extract_delegated_groups(extracted: dict[str, str]) -> list[dict]:
                 if following.lstrip().startswith("#"):
                     break
                 section.append(following)
-            authority_lines = [row for row in section if _DELEGATION.search(row)
-                               and is_denied(row) is None]
+            authority_lines = [row for row in section
+                               if _delegates_names(row, match.group(1))]
             if not authority_lines:
                 continue
             examples = []
