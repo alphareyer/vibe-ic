@@ -49,7 +49,8 @@ from metal_fill_config_gen import (build_metal_fill_config,
                                    density_rule_layer_identifiers)
 import die_level_deck_rule_attribution as _dla
 from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, digest,  # noqa: E402
-                                resolve_step_configs, run_chain, select_arms,
+                                declaration_config, resolve_step_configs,
+                                run_chain, select_arms,
                                 state_from_direct, run_container)
 
 ODB_FILL_STEP = 'OpenROAD.FillInsertion'
@@ -309,6 +310,18 @@ def _density_ratio_specs(deck_text: str, fill_cfg: dict) -> dict:
     return out
 
 
+def _core_edge_keepout(die: list, core: list) -> float:
+    """Inset a whole-die fill region until it lies entirely inside the core."""
+    if not (len(die) == len(core) == 4):
+        raise Refusal('LL_DENSITY_FILL_CORE_UNDECLARED', repr(core))
+    dx1, dy1, dx2, dy2 = map(float, die)
+    cx1, cy1, cx2, cy2 = map(float, core)
+    gaps = (cx1 - dx1, cy1 - dy1, dx2 - cx2, dy2 - cy2)
+    if min(gaps) < 0 or not (dx1 < dx2 and dy1 < dy2 and cx1 < cx2 and cy1 < cy2):
+        raise Refusal('LL_DENSITY_FILL_CORE_OUTSIDE_DIE', f'{core} vs {die}')
+    return max(gaps)
+
+
 def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
                    gds: Path, density_config: Path, lane: str) -> Dict[str, Any]:
     """Use the PDK-derived dummy-metal engine after the PDK's own filler."""
@@ -317,6 +330,41 @@ def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
     fill_cfg = build_metal_fill_config(map_text, lef_text, deck_text)
     if not fill_cfg or not fill_cfg.get('layers'):
         raise Refusal('LL_DENSITY_FILL_NO_DERIVED_LAYERS', str(density_config))
+    if cfg.get('MACROS') or cfg.get('EXTRA_LEFS'):
+        # A centrally placed hard macro may obstruct a metal layer without
+        # drawing it in GDS.  This GDS-only engine cannot see LEF OBS, so it
+        # cannot safely top up such a design until an OBS mask is supplied.
+        raise Refusal('LL_DENSITY_FILL_MACRO_OBS_UNRESOLVED', str(density_config))
+    if cfg.get('PAD_LEFS'):
+        pad_paths = [_host_pdk_path(str(path), pdk_root, pdk)
+                     for path in cfg['PAD_LEFS']]
+        try:
+            pad_masters = set().union(*(set(re.findall(
+                r'(?m)^\s*MACRO\s+(\S+)\s*$', path.read_text()))
+                for path in pad_paths))
+            routed_def = project / 'phase3/stage3/pnr/routed.def'
+            placed = set(_components(routed_def.read_text()).values())
+        except OSError as exc:
+            raise Refusal('LL_DENSITY_FILL_PAD_VIEW_UNREADABLE', str(exc)) from exc
+        placed_pads = sorted(pad_masters & placed)
+    else:
+        placed_pads = []
+    if placed_pads:
+        try:
+            declared, sources = declaration_config(project)
+        except (OSError, ValueError, Refusal):
+            declared, sources = {}, {}
+        core = declared.get('CORE_AREA')
+        if core:
+            edge = _core_edge_keepout(cfg.get('DIE_AREA') or [], core)
+            fill_cfg['keepout_edge_um'] = max(
+                float(fill_cfg.get('keepout_edge_um') or 0), edge)
+            fill_cfg['_derivation']['pad_ring_exclusion'] = {
+                'region': 'outside declared core', 'edge_um': edge,
+                'core': core, 'source': sources.get('CORE_AREA'),
+                'placed_pad_masters': placed_pads}
+        else:
+            raise Refusal('LL_DENSITY_FILL_CORE_UNDECLARED', str(density_config))
     root = project / 'phase3/librelane' / lane
     root.mkdir(parents=True, exist_ok=True)
     config_path = root / 'pdk_fill_config.json'

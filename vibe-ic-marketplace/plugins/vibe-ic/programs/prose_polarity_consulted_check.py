@@ -143,6 +143,15 @@ _NOT_PROSE: Dict[str, str] = {
         "returns no PVT, and the scene becomes NOT_MEASURED. A denial cannot "
         "be encoded in this grammar. Falsifier: "
         "tests/test_sta9_scene_binding.py::test_wrong_liberty_header_is_not_measured.",
+    "librelane_fill_dfm::top_up_density":
+        "ONE LEF MACHINE GRAMMAR, NO SENTENCE. The only text extraction is an "
+        "anchored MACRO declaration from the PDK's resolved PAD_LEFS, matched "
+        "against placed master tokens in the routed DEF COMPONENTS section. "
+        "LEF comments begin with # and cannot match the anchored MACRO line; "
+        "no comment or quoted diagnostic can place a pad. If the master is "
+        "absent, no pad ring is inferred; if a pad is present without a core "
+        "rectangle, fill REFUSES. Falsifier: tests/test_die_density_finish.py::"
+        "test_pad_ring_stays_outside_declared_core_during_top_up.",
     "librelane_fill_dfm::_density_ratio_specs":
         "ONE RUBY MACHINE GRAMMAR, NO SENTENCE. The PDK deck is filtered through "
         "deck_code_only before reading extract_single_layer_from_design.call "
