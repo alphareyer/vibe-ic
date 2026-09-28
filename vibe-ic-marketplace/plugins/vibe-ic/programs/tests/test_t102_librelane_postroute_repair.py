@@ -106,7 +106,24 @@ def test_fork_capability_deadline_is_unmeasured(monkeypatch):
     monkeypatch.setattr(contract, "run_container", deadline)
     result = prr.fork_capability("img")
     assert result["capable"] is None
+    assert result["code"] == "LL_TOOL_DEADLINE"
     assert "LL_TOOL_DEADLINE" in result["reason"]
+
+
+def test_probe_deadline_is_recorded_as_unmeasured_not_incapable(tmp_path,
+                                                                monkeypatch):
+    monkeypatch.setattr(prr, "fork_capability", lambda *_a, **_k: {
+        "capable": None, "image": "img", "code": "LL_TOOL_DEADLINE",
+        "reason": "LL_TOOL_DEADLINE: named probe container was reaped"})
+    monkeypatch.setattr(contract, "resolve_step_configs",
+                        lambda *_a, **_k: pytest.fail("no config may be resolved"))
+    report = prr.run(tmp_path, image="img", pdk="processA", pdk_root=tmp_path,
+                     views={}, sdc=tmp_path / "x.sdc", derate=(0.95, 1.05))
+    assert report["verdict"] == "NOT_MEASURED"
+    assert report["code"] == "LL_TOOL_DEADLINE"
+    assert report["reason_class"] == "execution_error"
+    assert "named probe container" in report["reason"]
+    assert json.loads((tmp_path / prr.REPORT_REL).read_text()) == report
 
 
 def test_an_incapable_image_refuses_before_any_state_is_built(tmp_path, monkeypatch):
