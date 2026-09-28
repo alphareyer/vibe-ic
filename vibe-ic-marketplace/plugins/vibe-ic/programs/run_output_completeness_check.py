@@ -1007,10 +1007,10 @@ def _check_artifacts(run_dir: Path, req: List[str]) -> Dict[str, object]:
 
 
 def _adopted_route_views(run_dir: Path) -> Optional[Dict[str, List[Path]]]:
-    """Read the route the closure actually adopted, when it adopted one.
+    """Read the route selected by closure, including a pre-GRT baseline arm.
 
-    A broken adoption receipt must not fall back to an arbitrary older DEF or
-    SPEF. ``None`` means there was no adopted candidate to select.
+    A broken selection receipt must not fall back to an arbitrary older DEF or
+    SPEF. ``None`` means no route was selected.
     """
     report = run_dir / "reports/phase3/librelane_postroute_repair.json"
     if not report.is_file():
@@ -1018,7 +1018,7 @@ def _adopted_route_views(run_dir: Path) -> Optional[Dict[str, List[Path]]]:
     try:
         doc = json.loads(report.read_text())
         adopted = doc.get("adopted")
-        if not adopted:
+        if not adopted and not doc.get("selected_arm"):
             return None
         root = run_dir.resolve()
         state_path = Path(doc["adopted_state"])

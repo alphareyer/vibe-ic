@@ -75523,7 +75523,8 @@ def _phase3_window_run_id() -> str:
 
 
 def _phase3_window_publication(project: Path, isolated: Path,
-                               sources: List[Path]) -> Tuple[List[str], str]:
+                               sources: List[Path],
+                               window_run_id: str) -> Tuple[List[str], str]:
     """Publish selected outputs with their in-tree inputs and a SHA receipt.
 
     Preflight *all* selected JSON before copying anything. A path into the
@@ -75584,7 +75585,7 @@ def _phase3_window_publication(project: Path, isolated: Path,
 
             visit(doc)
         receipt = (root / "reports/audit/windows"
-                   / _phase3_window_run_id() / "publication.json")
+                   / window_run_id / "publication.json")
         import _cited_artefacts as _ca
         try:
             run_record = json.loads((root / _ca.REPORT_REL).read_text())
@@ -75606,7 +75607,7 @@ def _phase3_window_publication(project: Path, isolated: Path,
         inputs = {**(existing.get("inputs") or {}), **inputs}
         for rel, source in to_copy.items():
             outputs[rel] = _sha256_file(source)
-        publication = {"window_run_id": _phase3_window_run_id(),
+        publication = {"window_run_id": window_run_id,
                        "outputs": outputs, "inputs": inputs}
         _aa.write_json(receipt, {**publication, "status": "PREPARING"})
         copied = []
@@ -75650,7 +75651,8 @@ def _phase3_window_full_gate_audit(project: Path, step_ids: Set[str]
 
 
 def _direct_flow_window(project: Path, top: str, pdk: PdkConfig,
-                               args, site: str, window_gate) -> StepResult:
+                               args, site: str, window_gate,
+                               window_run_id: str) -> StepResult:
     """Dispatch an existing site privately; publish only its declared outputs."""
     import tempfile
     import yaml
@@ -75733,7 +75735,8 @@ def _direct_flow_window(project: Path, top: str, pdk: PdkConfig,
             if row.status == "PASS" and source.is_file():
                 selected_sources.extend((source, _ga.admission_path(isolated)))
         outputs, publication_error = _phase3_window_publication(
-            project, isolated, selected_sources) if selected_sources else ([], "")
+            project, isolated, selected_sources, window_run_id
+        ) if selected_sources else ([], "")
         if publication_error:
             row.status = "NOT_MEASURED"
             row.reason_class = _V.ReasonClass.MISSING_ARTEFACT.value
@@ -75742,7 +75745,7 @@ def _direct_flow_window(project: Path, top: str, pdk: PdkConfig,
         return row
 
 
-def _phase3_window_metrics(project: Path) -> StepResult:
+def _phase3_window_metrics(project: Path, window_run_id: str) -> StepResult:
     """Step 37.4 producer on a private tree; publish its two declared outputs."""
     import tempfile
     with tempfile.TemporaryDirectory(prefix="phase3-metrics-",
@@ -75756,7 +75759,8 @@ def _phase3_window_metrics(project: Path) -> StepResult:
             source = isolated / rel
             if source.is_file():
                 sources.append(source)
-        outputs, error = _phase3_window_publication(project, isolated, sources)
+        outputs, error = _phase3_window_publication(
+            project, isolated, sources, window_run_id)
         if error:
             result.status = "NOT_MEASURED"
             result.reason_class = _V.ReasonClass.MISSING_ARTEFACT.value
@@ -75766,7 +75770,8 @@ def _phase3_window_metrics(project: Path) -> StepResult:
 
 
 def _phase3_window_pre_audit_producer(project: Path, site: str,
-                                      container: str) -> StepResult:
+                                      container: str,
+                                      window_run_id: str) -> StepResult:
     """Run one declared producer without refreshing any sibling output."""
     import tempfile
     table = {name: (program, out_rel, extra)
@@ -75793,7 +75798,8 @@ def _phase3_window_pre_audit_producer(project: Path, site: str,
                 for source in isolated.glob(pattern.strip()):
                     if source.is_file():
                         sources.append(source)
-        outputs, error = _phase3_window_publication(project, isolated, sources)
+        outputs, error = _phase3_window_publication(
+            project, isolated, sources, window_run_id)
         if error:
             row.status = "NOT_MEASURED"
             row.reason_class = _V.ReasonClass.MISSING_ARTEFACT.value
@@ -76074,7 +76080,10 @@ def _enclosing_outcome(unit: str, unit_ok: bool, unit_rc: int,
 
 def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                              args, step_ids: Set[str],
-                             unit: str = "phase3") -> StepResult:
+                             unit: str = "phase3",
+                             window_run_id: Optional[str] = None) -> StepResult:
+    if window_run_id is None:
+        window_run_id = _phase3_window_run_id()
     """Run the unsplit Phase-3 unit privately and publish only selected outputs."""
     import tempfile
     import yaml
@@ -76147,7 +76156,8 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                                 produced.append(str(source.relative_to(isolated)))
                                 selected_sources.append(source)
         copied, publication_error = _phase3_window_publication(
-            project, isolated, selected_sources) if selected_sources else ([], "")
+            project, isolated, selected_sources, window_run_id
+        ) if selected_sources else ([], "")
         unit_ok = unit_rc == 0 and bool(produced) and unit_verdict in (
             "PASS", "PASS_WITH_WAIVERS")
         if unit == "phase3":
@@ -76277,15 +76287,17 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                     "enclosing_canonicalize"):
             row = _phase3_window_enclosing(
                 project, top, pdk, args, window_ids,
-                unit=site.removeprefix("enclosing_"))
+                unit=site.removeprefix("enclosing_"),
+                window_run_id=window_run_id)
         elif site == "signoff_metrics_aggregate":
-            row = _phase3_window_metrics(project)
+            row = _phase3_window_metrics(project, window_run_id)
         elif site in ("tapeout_checklist", "gds_xor", "foundry_handoff"):
             row = _phase3_window_pre_audit_producer(
-                project, site, args.container)
+                project, site, args.container, window_run_id)
         else:
             row = _direct_flow_window(
-                project, top, pdk, args, site, window_gate)
+                project, top, pdk, args, site, window_gate,
+                window_run_id)
         rows.append(row)
         site_after = _phase3_file_manifest(project)
         if any(site_before.get(k) != site_after.get(k)

@@ -23,7 +23,8 @@ def digest(path: Path) -> str:
     return h.hexdigest()
 
 
-def _in_tree_file(project: Path, value: str) -> tuple[str, Path] | None:
+def _in_tree_file(project: Path, value: str, *, include_missing: bool = False,
+                  explicit: bool = False) -> tuple[str, Path] | None:
     token = value.split("#", 1)[0].strip()
     if not token or "\n" in token or len(token) > 4096:
         return None
@@ -33,7 +34,15 @@ def _in_tree_file(project: Path, value: str) -> tuple[str, Path] | None:
             path = project / path
         path = path.resolve()
         root = project.resolve()
-        if not path.is_relative_to(root) or not path.is_file():
+        if not path.is_relative_to(root) or path.is_dir():
+            return None
+        # The step record contains prose and verdict tokens as well as paths.
+        # An absent file is a citation only when its token has file-path shape,
+        # or when the caller explicitly supplied the path.
+        path_shaped = ("/" in token and bool(Path(token).suffix)
+                       and not any(c.isspace() for c in token))
+        if not path.is_file() and not (include_missing and
+                                       (explicit or path_shaped)):
             return None
     except (OSError, ValueError):
         return None
@@ -41,15 +50,16 @@ def _in_tree_file(project: Path, value: str) -> tuple[str, Path] | None:
 
 
 def bind(project: Path, record: Any, *, extra_paths: tuple[str, ...] = ()) -> dict[str, str]:
-    """Hash existing in-tree files named in the runner's step record."""
+    """Bind in-tree file citations, including absent files, at run time."""
     found: dict[str, str] = {}
 
-    def add(value: str) -> None:
-        hit = _in_tree_file(project, value)
+    def add(value: str, *, explicit: bool = False) -> None:
+        hit = _in_tree_file(project, value, include_missing=True,
+                            explicit=explicit)
         if hit:
             rel, path = hit
             if rel != REPORT_REL:
-                found[rel] = digest(path)
+                found[rel] = digest(path) if path.is_file() else "MISSING"
 
     def walk(value: Any) -> None:
         if isinstance(value, dict):
@@ -65,7 +75,7 @@ def bind(project: Path, record: Any, *, extra_paths: tuple[str, ...] = ()) -> di
 
     walk(record)
     for name in extra_paths:
-        add(name)
+        add(name, explicit=True)
     return dict(sorted(found.items()))
 
 
@@ -87,6 +97,7 @@ def check(project: Path, record: dict) -> tuple[str, list[dict]]:
                      "status": ("PASS" if valid and actual == expected
                                 else "NOT_MEASURED"),
                      "reason": (None if valid and actual == expected
+                                else "MISSING_CITATION" if expected == "MISSING"
                                 else "STALE_CITATION")})
     return ("PASS" if rows and all(row["status"] == "PASS" for row in rows)
             else "NOT_MEASURED"), rows
