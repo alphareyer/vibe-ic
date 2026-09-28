@@ -350,15 +350,19 @@ def test_no_shipped_gds_is_blocked_never_a_pass(tmp_path, monkeypatch, runner):
 
 
 # ── a core-only design (no chip top) resolves at all ─────────────────────
-def test_a_core_only_design_declares_its_rtl_to_the_resolver(tmp_path):
-    """LibreLane's resolver requires VERILOG_FILES of every flow config. The
-    contract emitted it only on the chip path (RTL + chip_top_io.v), so no step
-    config of a core-only design resolved -- the spm core-only run's step 31
-    on `librelane` died at LL_CONFIG_RESOLUTION_FAILED before comparing
-    anything. The design's own build closure is the declared value (cmp3 D8's
-    reader, as on the chip path, minus the chip top)."""
-    project, _pnr, _root = _project(tmp_path)
-    out = contract.emit_config(project, PDK, project / "cfg.json")
-    assert out["VERILOG_FILES"] == ["dir::phase2/stage1/rtl/chip.v"]
-    prov = json.loads((project / "cfg.provenance.json").read_text())
+def test_a_core_only_design_hands_the_resolver_its_rtl(tmp_path, monkeypatch):
+    """LibreLane's resolver requires VERILOG_FILES of every flow config, and
+    `emit_config` declares it only beside a chip top (cmp3 D8, whose control
+    `test_no_wrapper_emits_no_verilog_files` stands). So no step-31 config of
+    a core-only design resolved: the spm core-only run's step 31 on
+    `librelane` died at LL_CONFIG_RESOLUTION_FAILED before comparing anything.
+    The half's own overlay hands the build closure by D8's reader."""
+    project, _record, image = _run(tmp_path, monkeypatch)
+    assert image.resolved[-1]["design"]["VERILOG_FILES"] == [
+        "dir::phase2/stage1/rtl/chip.v"]
+    prov = json.loads((project / "phase3/librelane/31-lvs-config/"
+                       "design.provenance.json").read_text())
     assert "core-only" in prov["VERILOG_FILES"], prov["VERILOG_FILES"]
+    # emit_config itself is unchanged: D8's no-wrapper control.
+    assert "VERILOG_FILES" not in contract.emit_config(
+        project, PDK, tmp_path / "emit.json")

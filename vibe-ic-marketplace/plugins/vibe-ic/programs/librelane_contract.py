@@ -251,16 +251,6 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
              ['dir::' + str(path.relative_to(project)) for path in (*rtl, chip_top)],
              '_chip_synth_read.chip_rtl_files(phase2/stage1/rtl) (the read phase-3 '
              'synthesis and the Step-5 proof take) + phase3/stage3/pnr/chip_top_io.v')
-    elif rtl:
-        # A core-only design has no chip top. LibreLane's resolver requires
-        # VERILOG_FILES of every flow config (MEASURED, 3.1.0.dev1: "Required
-        # variable 'VERILOG_FILES' did not get a specified value"), so without
-        # this no step config of a core-only design resolved at all (lane fxlvs:
-        # step 31 on `librelane` died at LL_CONFIG_RESOLUTION_FAILED on spm).
-        _set(result, sources, 'VERILOG_FILES',
-             ['dir::' + str(path.relative_to(project)) for path in rtl],
-             '_chip_synth_read.chip_rtl_files(phase2/stage1/rtl) (the read phase-3 '
-             'synthesis and the Step-5 proof take; core-only: no chip_top_io.v)')
     sdc = project / 'phase3/stage3/pnr/constraint.sdc'
     if sdc.is_file():
         for key in ('PNR_SDC_FILE', 'SIGNOFF_SDC_FILE'):

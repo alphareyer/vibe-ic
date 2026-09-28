@@ -128,9 +128,29 @@ GDS_EXTRACTION_SOURCE = ('step 31 LVS signs off on the shipped GDS, the layout t
                          'ships, not the routed DEF (lane fxlvs)')
 
 
+#: The chip-top wrapper step 15.5ic writes; `emit_config` declares
+#: VERILOG_FILES only beside it (cmp3 D8), so its absence is a core-only design.
+CHIP_TOP_WRAPPER_REL = 'phase3/stage3/pnr/chip_top_io.v'
+
+
 def half_overlay(project: Path, half: str) -> dict[str, tuple[Any, str]] | None:
-    """The ``resolve_step_configs`` overlay of one step-31 half."""
+    """The ``resolve_step_configs`` overlay of one step-31 half.
+
+    A core-only design: LibreLane's resolver requires VERILOG_FILES of every
+    flow config (MEASURED, 3.1.0.dev1: "Required variable 'VERILOG_FILES' did
+    not get a specified value") and `emit_config` declares it only beside a
+    chip top, so step 31 on `librelane` died at LL_CONFIG_RESOLUTION_FAILED on
+    the spm core-only run before comparing anything. The PV steps never read
+    it; the value handed is the design's build closure by D8's own reader."""
     overlay = dict(tech_lef_overlay(project) or {})
+    if not (project / CHIP_TOP_WRAPPER_REL).is_file():
+        import _chip_synth_read as CSR
+        rtl = CSR.chip_rtl_files(project / 'phase2/stage1/rtl')
+        if rtl:
+            overlay['VERILOG_FILES'] = (
+                ['dir::' + str(path.relative_to(project)) for path in rtl],
+                '_chip_synth_read.chip_rtl_files(phase2/stage1/rtl) (core-only: '
+                'LibreLane requires the variable; the step-31 PV steps do not read it)')
     if half == 'lvs':
         overlay[GDS_EXTRACTION_VAR] = (True, GDS_EXTRACTION_SOURCE)
     return overlay or None
