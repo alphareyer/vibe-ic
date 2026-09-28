@@ -41,6 +41,7 @@ import eda_report_audit as A  # noqa: E402
 from _ppa import power as P  # noqa: E402
 from test_postlayout_lec_nameerror import (  # noqa: E402
     TOP, _canonicalize_project, _pdk, _quiet_canonicalize)
+from _hostpaths import require_repo  # noqa: E402
 
 # LibreLane's detailed-routing log, as `openroad.log` splices it in
 _LL_ROUTE_LOG = (
@@ -56,16 +57,28 @@ def _ll_chain(project: Path, counts=(None, 0, 0)) -> None:
     """A LibreLane step-15 chain and the handoff record that names it. The
     metric is carried forward, as LibreLane does."""
     chain = project / "phase3/librelane/15-floorplan"
+    routed = R._pl.pnr_dir(project) / f"{TOP}.def"
+    # Model the tool's own measured DEF and a later routed DEF with identical
+    # supply geometry. The state must identify the bytes it measured.
+    if "SPECIALNETS" not in routed.read_text():
+        routed.write_text(routed.read_text() + """SPECIALNETS 2 ;
+    - vp ( PIN vp ) + USE POWER + ROUTED M1 100 + SHAPE STRIPE ( 20 30 ) ( 20 80 ) ;
+    - vg ( PIN vg ) + USE GROUND + ROUTED M1 100 + SHAPE STRIPE ( 40 30 ) ( 40 80 ) ;
+END SPECIALNETS
+""")
     names = ["10-odb-addpdnobstructions", "11-openroad-generatepdn",
              "18-checker-powergridviolations"]
     for name, n in zip(names, counts):
         d = chain / name
         d.mkdir(parents=True)
+        source_def = d / f"{TOP}.def"
+        source_def.write_text(routed.read_text())
         m = {} if n is None else {
             "design__power_grid_violation__count": n,
             "design__power_grid_violation__count__net:VDD": n,
             "design__power_grid_violation__count__net:VSS": 0}
-        (d / "state_out.json").write_text(json.dumps({"metrics": m}))
+        (d / "state_out.json").write_text(json.dumps({"def": str(source_def),
+                                                        "metrics": m}))
     rec = project / "reports/phase3/librelane_floorplan_handoff.json"
     rec.parent.mkdir(parents=True, exist_ok=True)
     # an ABSOLUTE path, as the record stores it -- under another root, to
@@ -169,6 +182,71 @@ def test_the_flag_follows_the_def_it_describes(tmp_path):
     _emit_pdn(project)
     new_sha = R._file_sha256(d).split(":", 1)[1]
     assert f"# measured_def_sha256: {new_sha}" in (pnr / "pdn.done").read_text()
+
+
+def test_a_new_source_state_replaces_an_old_connected_verdict(tmp_path):
+    project = _canonicalize_project(tmp_path)
+    pnr = R._pl.pnr_dir(project)
+    (pnr / "openroad.log").write_text(_LL_ROUTE_LOG)
+    _ll_chain(project)
+    assert "# PDN status: CONNECTED" in _emit_pdn(project)
+    state = project / "phase3/librelane/15-floorplan/11-openroad-generatepdn/state_out.json"
+    doc = json.loads(state.read_text())
+    doc["metrics"]["design__power_grid_violation__count"] = 7
+    doc["metrics"]["design__power_grid_violation__count__net:vp"] = 7
+    state.write_text(json.dumps(doc))
+    refreshed = _emit_pdn(project)
+    assert "# PDN status: NOT CONNECTED" in refreshed, refreshed
+    assert "count=7" in refreshed
+
+
+def test_a_changed_direct_log_replaces_an_old_connected_verdict(tmp_path):
+    project = _canonicalize_project(tmp_path)
+    pnr = R._pl.pnr_dir(project)
+    _ll_chain(project)
+    log = pnr / "openroad.log"
+    log.write_text("PDN_INSERTED\n")
+    assert "# PDN status: CONNECTED" in _emit_pdn(project)
+    log.write_text("PDN_NONFATAL\n")
+    refreshed = _emit_pdn(project)
+    assert "# PDN status: NOT CONNECTED" in refreshed, refreshed
+    assert "PDN_NONFATAL" in refreshed
+
+
+def test_old_grid_measurement_cannot_be_stamped_on_a_new_grid(tmp_path):
+    project = _canonicalize_project(tmp_path)
+    pnr = R._pl.pnr_dir(project)
+    (pnr / "openroad.log").write_text(_LL_ROUTE_LOG)
+    _ll_chain(project)
+    assert "# PDN status: CONNECTED" in _emit_pdn(project)
+    routed = pnr / f"{TOP}.def"
+    routed.write_text(routed.read_text().replace("( 20 80 )", "( 20 90 )"))
+    refreshed = _emit_pdn(project)
+    assert "# PDN status: NOT MEASURED" in refreshed, refreshed
+    assert "supply geometry" in refreshed
+
+
+def test_changed_source_def_invalidates_the_metric_even_if_state_json_is_unchanged(tmp_path):
+    project = _canonicalize_project(tmp_path)
+    pnr = R._pl.pnr_dir(project)
+    (pnr / "openroad.log").write_text(_LL_ROUTE_LOG)
+    _ll_chain(project)
+    assert "# PDN status: CONNECTED" in _emit_pdn(project)
+    state = json.loads((project / "phase3/librelane/15-floorplan/"
+                        "11-openroad-generatepdn/state_out.json").read_text())
+    source_def = Path(state["def"])
+    source_def.write_text(source_def.read_text().replace("( 20 80 )", "( 20 90 )"))
+    refreshed = _emit_pdn(project)
+    assert "# PDN status: NOT MEASURED" in refreshed, refreshed
+
+
+def test_checked_in_supply_defs_have_distinct_subjects():
+    owned = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic",
+                         "programs", "calibration", "pg_supply_owned_negative.def")
+    unowned = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic",
+                           "programs", "calibration", "pg_supply_unowned_positive.def")
+    a, b = P._def_supply_subject_sha256(owned), P._def_supply_subject_sha256(unowned)
+    assert a and b and a != b
 
 
 def test_the_prestream_return_is_preceded_by_both_emitters():

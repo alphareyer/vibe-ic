@@ -2690,6 +2690,43 @@ def _rel(path: Path, project: Path) -> str:
         return str(path)
 
 
+def _def_supply_subject_sha256(path: Path) -> Optional[str]:
+    """Hash the POWER/GROUND special nets a PDN measurement is about.
+
+    Route DEFs may reorder BTerm connections and signal special nets while
+    retaining the same supply grid. Canonicalize those harmless differences,
+    but retain every supply connection and routed shape. An unparseable or
+    absent grid has no subject identity and cannot corroborate a zero count.
+    """
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return None
+    section = re.search(
+        r"(?ms)^SPECIALNETS\s+(\d+)\s*;(.*?)^END SPECIALNETS\s*$", text)
+    if section is None:
+        return None
+    rows = list(re.finditer(r"(?ms)^\s*-\s+(\S+)\s+(.*?);", section.group(2)))
+    if len(rows) != int(section.group(1)):
+        return None
+    supplies = []
+    for row in rows:
+        head, delimiter, tail = row.group(2).partition("+ USE ")
+        if not delimiter:
+            return None
+        use = tail.split(None, 1)[0] if tail.split() else ""
+        if use not in ("POWER", "GROUND"):
+            continue
+        connections = sorted(re.sub(r"\s+", " ", item).strip()
+                             for item in re.findall(r"\([^()]*\)", head))
+        supplies.append((row.group(1), connections,
+                         re.sub(r"\s+", " ", tail).strip()))
+    if not supplies:
+        return None
+    canonical = json.dumps(sorted(supplies), separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def librelane_pdn_evidence(project: Path) -> Optional[Dict[str, Any]]:
     """The power-grid verdict LibreLane's OWN step-15 chain measured, or None.
 
@@ -2699,8 +2736,9 @@ def librelane_pdn_evidence(project: Path) -> Optional[Dict[str, Any]]:
     is the one the floorplan handoff record names
     (`reports/phase3/librelane_floorplan_handoff.json` -> `state`), read under
     THIS project (the record stores an absolute path). LibreLane carries a
-    metric forward in every later state, so the step that MEASURED the value
-    is the one where `design__power_grid_violation__count` first took it.
+    metric forward in later states. A carried zero cannot erase a nonzero
+    measurement from this chain; the highest observed count is retained, and
+    every state and the selected source DEF bind the freshness key.
     chip- and PDK-agnostic: the metric names are LibreLane's."""
     project = Path(project)
     rec = project / "reports/phase3/librelane_floorplan_handoff.json"
@@ -2714,21 +2752,45 @@ def librelane_pdn_evidence(project: Path) -> Optional[Dict[str, Any]]:
                        key=lambda d: int(d.name.split("-", 1)[0]))
     except (OSError, ValueError, KeyError, TypeError, StopIteration):
         return None
-    found: Optional[Dict[str, Any]] = None
+    measured: List[Dict[str, Any]] = []
+    chain_inputs: List[Tuple[str, str]] = []
     for d in steps:
         so = d / "state_out.json"
         try:
-            metrics = json.loads(so.read_text()).get("metrics") or {}
+            state = json.loads(so.read_text())
+            metrics = state.get("metrics") or {}
         except (OSError, ValueError, AttributeError):
             continue
+        chain_inputs.append((_rel(so, project), _sha256_of(so)))
         n = metrics.get("design__power_grid_violation__count")
         if not isinstance(n, (int, float)) or isinstance(n, bool):
             continue
         per_net = {k.rsplit(":", 1)[-1]: v for k, v in metrics.items()
                    if k.startswith("design__power_grid_violation__count__net:")}
-        if found is None or (found["count"], found["per_net"]) != (int(n), per_net):
-            found = {"step": _rel(d, project), "state_sha256": _sha256_of(so),
-                     "count": int(n), "per_net": per_net}
+        source_def = Path(state.get("def") or "")
+        if not source_def.is_absolute():
+            source_def = project / source_def
+        try:
+            in_project = source_def.resolve().is_relative_to(project.resolve())
+        except (OSError, RuntimeError):
+            in_project = False
+        measured.append({"step": _rel(d, project),
+                         "state_sha256": chain_inputs[-1][1],
+                         "count": int(n), "per_net": per_net,
+                         "source_def_sha256": (_sha256_of(source_def)
+                                               if in_project and source_def.is_file()
+                                               else None),
+                         "supply_subject_sha256": (_def_supply_subject_sha256(source_def)
+                                                   if in_project else None)})
+    if not measured:
+        return None
+    # A later carried-forward zero cannot erase an earlier native violation.
+    # The whole chain is bound, so changing any metric-bearing state refreshes
+    # pdn.done even if a later state kept its old bytes.
+    found = max(measured, key=lambda row: row["count"])
+    found["chain_sha256"] = hashlib.sha256(json.dumps(
+        (chain_inputs, found["source_def_sha256"]),
+        separators=(",", ":")).encode()).hexdigest()
     return found
 
 
@@ -2740,26 +2802,38 @@ def pdn_done_text(project: Path, pnr_out: Path, primary_def: Path,
 
     `pdn_ok` / `pdn_marker` are the direct deck's transcript verdict
     (`phase3_one_shot_runner._pnr_pdn_status`), `def_evidence` the DEF's own
-    SPECIALNETS census. The flag is BOUND to the DEF it measured
-    (`measured_def_sha256`) so a pass that wrote it never speaks for a later
-    layout. When the transcript carries no marker at all, LibreLane's own
-    measurement is read (`librelane_pdn_evidence`); with neither the status is
+    SPECIALNETS census. The flag is bound to the DEF, the source transcript or
+    LibreLane state chain, and the POWER/GROUND special-net subject. A changed
+    source remeasures; a changed grid without matching source geometry is NOT
+    MEASURED. With neither tool marker nor LibreLane metric, the status is
     NOT MEASURED -- a missing marker is not a disconnected grid."""
     project, pnr_out = Path(project), Path(pnr_out)
     flag = pnr_out / "pdn.done"
     def_sha = _sha256_of(primary_def)
-    try:
-        if flag.is_file() and (f"# measured_def_sha256: {def_sha}\n"
-                               in flag.read_text(errors="replace")):
-            return None
-    except OSError:
-        pass
+    supply_subject = _def_supply_subject_sha256(primary_def)
     ll = (None if pdn_ok or pdn_marker != "no PDN insertion marker"
           else librelane_pdn_evidence(project))
+    log_path = pnr_out / "openroad.log"
+    source_sha = (ll["chain_sha256"] if ll is not None else
+                  _sha256_of(log_path) if log_path.is_file() else None)
+    try:
+        prior = flag.read_text(errors="replace") if flag.is_file() else ""
+    except OSError:
+        prior = ""
+    if (source_sha is not None and supply_subject is not None
+            and f"# measured_def_sha256: {def_sha}\n" in prior
+            and f"# source_identity_sha256: {source_sha}\n" in prior
+            and f"# supply_subject_sha256: {supply_subject}\n" in prior):
+        return None
     if ll is not None:
-        status = "CONNECTED" if ll["count"] == 0 else "NOT CONNECTED"
+        subject_matches = (supply_subject is not None
+                           and ll["supply_subject_sha256"] == supply_subject)
+        status = ("NOT MEASURED" if not subject_matches else
+                  "CONNECTED" if ll["count"] == 0 else "NOT CONNECTED")
         marker = (f"LibreLane {ll['step']}: design__power_grid_violation__count="
-                  f"{ll['count']} (per net {ll['per_net']})")
+                  f"{ll['count']} (per net {ll['per_net']})"
+                  + ("; source and routed DEF supply geometry do not match"
+                     if not subject_matches else ""))
         source = f"{ll['step']}/state_out.json sha256:{ll['state_sha256']}"
         tool = f"openroad, run by LibreLane (chain of {ll['step']})"
     else:
@@ -2767,8 +2841,17 @@ def pdn_done_text(project: Path, pnr_out: Path, primary_def: Path,
                   "NOT MEASURED" if pdn_marker == "no PDN insertion marker"
                   else "NOT CONNECTED")
         marker = pdn_marker
-        source = _rel(pnr_out / "openroad.log", project)
+        source = _rel(log_path, project)
         tool = f"openroad (see {_rel(pnr_out / 'pnr.tcl', project)})"
+        # A direct transcript from the old DEF cannot certify changed supply
+        # geometry. Same geometry under a new DEF hash remains the same subject.
+        old_source = re.search(r"(?m)^# source_identity_sha256: (\w+)$", prior)
+        old_subject = re.search(r"(?m)^# supply_subject_sha256: (\w+)$", prior)
+        if (status == "CONNECTED" and old_source and old_subject
+                and old_source.group(1) == source_sha
+                and old_subject.group(1) != supply_subject):
+            status = "NOT MEASURED"
+            marker += "; direct log is unchanged but DEF supply geometry changed"
     ev = def_evidence or {}
     return (f"# PDN status: {status}\n"
             f"# marker: {marker}\n"
@@ -2777,5 +2860,7 @@ def pdn_done_text(project: Path, pnr_out: Path, primary_def: Path,
             f"straps={ev.get('stripe', '?')} ring={ev.get('ring', '?')} "
             f"vias={ev.get('vias', '?')} layers={ev.get('layers', '?')}\n"
             f"# measured_def_sha256: {def_sha}\n"
+            f"# supply_subject_sha256: {supply_subject or 'NOT_MEASURED'}\n"
+            f"# source_identity_sha256: {source_sha or 'NOT_MEASURED'}\n"
             f"# source: {source}\n"
             f"# tool: {tool}\n")
