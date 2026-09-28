@@ -61274,13 +61274,12 @@ def _v1_6_397_merge_clock_domains(clock_domains: list) -> list:
 
 
 def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
-        project: Path) -> None:
+        project: Path) -> List[str]:
     """v1.6.311 — for #210 P1 ORGANIC. Mirror
-    L8_RTL_CONSTANTS.clock_domains into L9.clock_domains (when
-    L9 slot is empty/missing) and derive L9.resets[] from
+    L8_RTL_CONSTANTS.clock_domains into L9.clock_domains and derive L9.resets[] from
     L9.top_ports whose names match the conventional reset shape.
 
-    Chip-AGNOSTIC: the reset-port regex uses only the
+    Returns blocking cross-layer clock conflicts. Chip-AGNOSTIC: the reset-port regex uses only the
     open-standard rst*/reset* naming convention; no chip-class
     string literal participates.
     """
@@ -61293,8 +61292,9 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
     except Exception:
         l9 = None
     if not isinstance(l9, dict):
-        return
+        return []
     changed = False
+    conflicts: List[Dict[str, Any]] = []
     l8_cds = (l8 or {}).get("clock_domains") or []
     if isinstance(l8_cds, list) and l8_cds:
         existing = l9.get("clock_domains")
@@ -61302,6 +61302,103 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
             l9["clock_domains"] = [dict(cd) if isinstance(cd, dict)
                                    else cd for cd in l8_cds]
             changed = True
+        elif isinstance(existing, list):
+            # The final L8 record owns staged-SDC timing. L9 may already
+            # carry a primary row from before that input was read. Reconcile
+            # its timing while retaining integration-only metadata.
+            l19 = _try_load_l_doc(project, "L19_CONSTRAINTS_PDK") or {}
+            target = str((l19.get("fields") or {}).get("pdk_target") or "").lower()
+
+            def _sdc_identity(entry: dict) -> str:
+                evidence = str(entry.get("evidence") or "")
+                source = str(entry.get("source") or "")
+                if evidence.endswith(".sdc"):
+                    return evidence
+                if source.endswith(".sdc"):
+                    return source
+                return ""
+
+            for cd in l8_cds:
+                if not isinstance(cd, dict):
+                    continue
+                name = str(cd.get("name") or "").strip()
+                scope = str(cd.get("pdk_scoped_target") or "").lower()
+                if not name or (scope and scope != target):
+                    continue
+                same_name = [row for row in existing
+                             if isinstance(row, dict)
+                             and str(row.get("name") or "").lower() == name.lower()]
+                matches = [row for row in same_name
+                           if not row.get("pdk_scoped_target") or
+                           str(row["pdk_scoped_target"]).lower() == target]
+                if not matches:
+                    # The old mirror left an out-of-scope same-name row
+                    # untouched. Keep that behavior until the downstream
+                    # name-deduper can preserve PDK scope on two such rows.
+                    if same_name:
+                        continue
+                    existing.append(dict(cd))
+                    changed = True
+                    continue
+                l8_period = _cc.entry_period_ns(cd)
+                l8_sdc = _sdc_identity(cd)
+                l9_owner_periods = _cc.distinct_periods([
+                    p for row in matches
+                    if _cc.entry_owns_name(row)
+                    for p in [_cc.entry_period_ns(row)] if p is not None])
+                if len(l9_owner_periods) > 1:
+                    conflicts.append({
+                        "clock": name,
+                        "periods_ns": l9_owner_periods,
+                        "resolution": "refused",
+                        "reason": "L9 has independent incompatible clock declarations",
+                        "records": [
+                            {"layer": "L9_INTEGRATION_SPEC", "value": dict(row)}
+                            for row in matches],
+                    })
+                    continue
+                for row in matches:
+                    l9_period = _cc.entry_period_ns(row)
+                    l9_sdc = _sdc_identity(row)
+                    incompatible = (l8_period is not None
+                                    and l9_period is not None
+                                    and not _cc.periods_agree(l8_period,
+                                                              l9_period))
+                    # Different concrete SDC files are independent input
+                    # declarations. A same-file or unsourced L9 row is the
+                    # pre-SDC snapshot that the final L8 record supersedes.
+                    independent_sdc = (l9_sdc and l9_sdc != l8_sdc
+                                       and l9_sdc != "input/constraints/*.sdc")
+                    if incompatible and ((l8_sdc and independent_sdc) or
+                                         (not l8_sdc and
+                                          _cc.entry_owns_name(cd) and
+                                          _cc.entry_owns_name(row))):
+                        conflicts.append({
+                            "clock": name,
+                            "periods_ns": [l8_period, l9_period],
+                            "resolution": "refused",
+                            "reason": "independent L8 and L9 clock declarations disagree",
+                            "records": [
+                                {"layer": "L8_RTL_CONSTANTS", "value": dict(cd)},
+                                {"layer": "L9_INTEGRATION_SPEC", "value": dict(row)},
+                            ],
+                        })
+                        continue
+                    if l8_sdc and l8_period is not None:
+                        for key in ("period_ns", "freq_hz", "freq_mhz",
+                                    "source", "evidence"):
+                            if independent_sdc and key in ("source", "evidence"):
+                                continue
+                            if key in cd and row.get(key) != cd[key]:
+                                row[key] = cd[key]
+                                changed = True
+    if conflicts:
+        if l9.get("clock_contract_conflicts") != conflicts:
+            l9["clock_contract_conflicts"] = conflicts
+            changed = True
+    elif "clock_contract_conflicts" in l9:
+        del l9["clock_contract_conflicts"]
+        changed = True
     # v1.6.510 — for #352 P3 ORGANIC. Mirror L8.synthesis_targets
     # into L9.synthesis_targets when the L9 slot is empty/missing.
     # Same mirror pattern as L8.clock_domains above. Chip-AGNOSTIC.
@@ -61323,7 +61420,7 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
     # name. Primary role + freq_mhz priority preserved; low/high
     # envelope widened.
     cur_cds = l9.get("clock_domains") or []
-    if isinstance(cur_cds, list) and len(cur_cds) >= 2:
+    if isinstance(cur_cds, list) and len(cur_cds) >= 2 and not conflicts:
         merged = _v1_6_397_merge_clock_domains(cur_cds)
         if len(merged) != len(cur_cds):
             l9["clock_domains"] = merged
@@ -61368,6 +61465,9 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
         out = (_pl.generated_docs_dir(project)
                / "L9_INTEGRATION_SPEC.json")
         _stamp.dump(out, l9)
+    return [f"L9_INTEGRATION_SPEC: clock {c['clock']!r} has incompatible "
+            f"L8/L9 periods {c['periods_ns']} ns — REFUSED"
+            for c in conflicts]
 
 
 # v1.6.323 — for #222 P1 ORGANIC. Symmetric clock-port shape regex
@@ -67930,6 +68030,14 @@ def main() -> int:
     for _msg in clock_contract_conflicts:
         print(f"      {_msg}", file=sys.stderr)
 
+    # The staged SDC and reference-flow readers run after the first L8→L9
+    # mirror. They can add another L8 clock domain. Reconcile the final L8
+    # population now, before the layer gates and Phase 2 read L9.
+    _l9_clock_conflicts = _post_emit_mirror_clock_resets_to_l9_v1_6_311(project)
+    clock_contract_conflicts.extend(_l9_clock_conflicts)
+    for _msg in _l9_clock_conflicts:
+        print(f"      {_msg}", file=sys.stderr)
+
     # ------------------------------------------------------------------
     # POST-EMIT L-DOC GATES (batch layergate-1, + portability)
     #
@@ -68132,9 +68240,15 @@ def main() -> int:
         # the document (`clock_contract_conflicts[]`) with both records and
         # their provenance; fix the extraction that produced the second
         # period, do not delete one record to make this green.
-        print("FAIL: L8 declares a clock with conflicting periods — "
-              f"{len(clock_contract_conflicts)} conflict(s); see "
-              "clock_contract_conflicts[] in generated_docs/L8_*.json")
+        if _l9_clock_conflicts:
+            print("FAIL: L8/L9 declare incompatible clock periods — "
+                  f"{len(clock_contract_conflicts)} conflict(s); see "
+                  "clock_contract_conflicts[] in "
+                  "generated_docs/L9_INTEGRATION_SPEC.json")
+        else:
+            print("FAIL: L8 declares a clock with conflicting periods — "
+                  f"{len(clock_contract_conflicts)} conflict(s); see "
+                  "clock_contract_conflicts[] in generated_docs/L8_*.json")
         _drop_v0_3_7_exit_reason(project)
         return 1
     if _extraction_gap:
