@@ -485,6 +485,64 @@ _E2E_RTL = "module m(input clk, input rst, output y); endmodule\n"
 _E2E_GATE = ("module m(input clk, input rst, output y);\n"
              "  DFF u0 (.D(rst), .CLK(clk), .Q(y));\n"
              "endmodule\n")
+# Measured with vibeic-eda:0.3.84 / Yosys 0.69+.  The two source designs
+# reset to corresponding states and emit y on every fourth state.  A one-rung
+# proof leaves y open; the bounded search starts h at illegal 0000 and finds
+# a model at cycle 4.  The full proof can prove this small pair, but an open
+# rung must never turn the unreachable model into NON_EQUIVALENT.
+_BINARY_GOLD = """module top(input clk, input rst, output y);
+  reg [1:0] s;
+  always @(posedge clk) if (rst) s <= 2'b00; else s <= s + 2'b01;
+  assign y = (s == 2'b11);
+endmodule
+"""
+_ONEHOT_GATE = """module top(input clk, input rst, output y);
+  reg [3:0] h;
+  always @(posedge clk) if (rst) h <= 4'b0001;
+  else h <= {h[2:0], h[3]};
+  assign y = h[3];
+endmodule
+"""
+_ONEHOT_FLAT = """wire input 1 \\clk
+wire input 2 \\rst
+wire output 3 \\cmp_y
+cell $dff $gold_state
+cell $dff $gate_state
+"""
+_ONEHOT_MODEL = """SAT proof finished - model found: FAIL!
+  Time Signal Name             Dec       Hex           Bin
+  ---- --------------- ----------- --------- -------------
+  init \\h[0]_gate                0         0             0
+  init \\h[1]_gate                0         0             0
+  init \\h[2]_gate                0         0             0
+  init \\h[3]_gate                0         0             0
+  init \\s[0]_gold                0         0             0
+  init \\s[1]_gold                0         0             0
+  ---- --------------- ----------- --------- -------------
+     1 \\clk                      0         0             0
+     1 \\cmp_y                    1         1             1
+     1 \\rst                      0         0             0
+  ---- --------------- ----------- --------- -------------
+     2 \\clk                      0         0             0
+     2 \\cmp_y                    1         1             1
+     2 \\rst                      0         0             0
+  ---- --------------- ----------- --------- -------------
+     3 \\clk                      0         0             0
+     3 \\cmp_y                    1         1             1
+     3 \\rst                      0         0             0
+  ---- --------------- ----------- --------- -------------
+     4 \\clk                      0         0             0
+     4 \\cmp_y                    0         0             0
+     4 \\rst                      1         1             1
+  ---- --------------- ----------- --------- -------------
+"""
+_ONEHOT_WAVE = {"signal": [
+    {"name": "cmp_y", "wave": "41..0"},
+    {"name": "rst", "wave": "40..1"},
+    {"name": "clk", "wave": "40..."},
+    {"name": "h[0]_gate", "wave": "04444"},
+    {"name": "s[0]_gold", "wave": "04444"},
+]}
 # A stateful miter whose induction made no progress on one point.
 _STATEFUL_PROOF_LOG = """\
 === equiv ===
@@ -506,7 +564,7 @@ Found a total of 1 unproven $equiv cells.
 
 
 def _drive_lec_run(monkeypatch, tmp_path, proof_log, search_log, flat,
-                   trace_doc):
+                   trace_doc, *, gold=_E2E_RTL, gate=_E2E_GATE, top="m"):
     """Every file the real yosys runs would write is written: the terminal
     equivalence IL, the flattened search miter and the WaveJSON dump."""
     def fake_run(_container, script, *_a, **_k):
@@ -527,11 +585,30 @@ def _drive_lec_run(monkeypatch, tmp_path, proof_log, search_log, flat,
     project = tmp_path / "project"
     (project / "phase2/stage1/rtl").mkdir(parents=True)
     (project / "phase2/stage2/synth").mkdir(parents=True)
-    (project / "phase2/stage1/rtl/m.v").write_text(_E2E_RTL)
-    (project / "phase2/stage2/synth/netlist.v").write_text(_E2E_GATE)
-    lec_run.main([str(project), "--top", "m", "--container", "fake",
+    (project / "phase2/stage1/rtl/m.v").write_text(gold)
+    (project / "phase2/stage2/synth/netlist.v").write_text(gate)
+    lec_run.main([str(project), "--top", top, "--container", "fake",
                   "--liberty", "/missing"])
     return json.loads((project / "reports/lec.json").read_text())
+
+
+def test_binary_counter_and_onehot_ring_never_become_non_equivalent(
+        monkeypatch, tmp_path):
+    # This is the real Yosys model from the declared-reset pair above.  The
+    # initial all-zero one-hot register is unreachable after reset.  Drive
+    # the actual producer and both gates, while faking only Yosys file writes.
+    report = _drive_lec_run(
+        monkeypatch, tmp_path, _STATEFUL_PROOF_LOG, _ONEHOT_MODEL,
+        _ONEHOT_FLAT, _ONEHOT_WAVE, gold=_BINARY_GOLD, gate=_ONEHOT_GATE,
+        top="top")
+    assert report["verdict"] == "NOT_PROVEN"
+    assert report["counterexample_search"]["result"] == cex.CANDIDATE
+    assert report["counterexample_search"]["initial_state"]["h[0]_gate"] == "0"
+    assert report["counterexample_search"]["trace"][3]["mismatched_points"] == ["y"]
+    assert post.evaluate_report(report)["verdict"] == "NOT_PROVEN"
+    project = tmp_path / "gate"
+    _write_lec(project, report)
+    assert pre.audit(project).verdict == "NOT_PROVEN"
 
 
 def test_lec_run_keeps_a_stateful_model_not_proven_and_says_so(monkeypatch, tmp_path):
