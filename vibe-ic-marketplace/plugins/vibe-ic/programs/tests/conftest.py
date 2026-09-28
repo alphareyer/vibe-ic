@@ -68,7 +68,9 @@ from _nda_fixture_tokens import FICTIONAL_NDA_TOKENS  # noqa: E402
 # see that module for the measured race it closes.
 from _programs_tree_write_guard import (  # noqa: E402,F401
     _no_write_into_the_programs_tree,
+    pytest_collection_finish,
     pytest_runtest_makereport,
+    pytest_sessionstart,
 )
 
 

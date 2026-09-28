@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
 import _programs_tree_write_guard as guard
 
 
@@ -39,3 +45,43 @@ def test_mkdir_of_an_existing_fixture_does_not_report_a_write(
     before = list(guard._CURRENT)
     programs.mkdir(parents=True, exist_ok=True)
     assert guard._CURRENT == before
+
+
+def _collect_probe(tmp_path, *, write_into_programs):
+    """Run the shipped guard as a pytest plugin against a private programs/."""
+    tests = tmp_path / "programs" / "tests"
+    tests.mkdir(parents=True)
+    shutil.copyfile(Path(guard.__file__), tests / "_programs_tree_write_guard.py")
+    (tests / "conftest.py").write_text(
+        "pytest_plugins = ['_programs_tree_write_guard']\n")
+    victim_rel = "transient.py" if write_into_programs else "../scratch.txt"
+    body = (
+        "from pathlib import Path\n"
+        "root = Path(__file__).resolve().parents[1]\n"
+        f"victim = root / {victim_rel!r}\n"
+        "victim.write_text('transient\\n')\n"
+        "victim.unlink()\n"
+        "def test_benign(): assert True\n"
+    )
+    (tests / "test_collection_probe.py").write_text(body)
+    env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    env["PYTHONPATH"] = str(tests)
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q",
+         "-p", "no:cacheprovider", str(tests / "test_collection_probe.py")],
+        cwd=tmp_path, env=env, text=True, capture_output=True, timeout=30)
+
+
+def test_collect_only_refuses_an_undone_programs_write(tmp_path):
+    result = _collect_probe(tmp_path, write_into_programs=True)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "FAIL: collection wrote into" in result.stdout + result.stderr
+    assert "transient.py" in result.stdout + result.stderr
+
+
+def test_collect_only_accepts_a_scratch_write(tmp_path):
+    result = _collect_probe(tmp_path, write_into_programs=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 test collected" in result.stdout + result.stderr

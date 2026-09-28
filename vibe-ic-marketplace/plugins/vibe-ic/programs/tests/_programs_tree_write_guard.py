@@ -13,8 +13,9 @@ write every concurrent reader of the tree can see.
 HOW. One audit hook (`sys.addaudithook`, installed once per process) records
 every in-process event that can create or modify a path — `open` in a write
 mode or with write/create flags, `os.mkdir`, `os.rename`/`os.replace`,
-`os.symlink`, `os.link` — whose target resolves under `programs/`. The autouse
-fixture names the test it happened in and fails that test at teardown.
+`os.symlink`, `os.link` — whose target resolves under `programs/`. Collection
+writes fail the session before tests run, including `--collect-only`. The autouse
+fixture names call-time writes and reports a call-phase FAIL.
 `__pycache__` is not the test's doing and is ignored.
 
 WHAT IT CANNOT SEE: a write made by a SUBPROCESS (a gate run by `subprocess`,
@@ -35,9 +36,10 @@ _PROGRAMS = os.path.dirname(_TESTS)
 
 _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
 
-#: Paths written under programs/ since the current test started (None = no
-#: test is running, e.g. collection; those are not attributed here).
+#: Paths written under programs/ since the current test started.
 _CURRENT: Optional[List[str]] = None
+_COLLECTION_ACTIVE = False
+_COLLECTION_HITS: List[str] = []
 
 
 def _inside_programs(path) -> Optional[str]:
@@ -62,7 +64,7 @@ def _is_write_open(mode, flags) -> bool:
 
 
 def _hook(event: str, args) -> None:
-    if _CURRENT is None:
+    if _CURRENT is None and not _COLLECTION_ACTIVE:
         return
     target = None
     if event == "open":
@@ -80,7 +82,11 @@ def _hook(event: str, args) -> None:
         return
     hit = _inside_programs(target) if target is not None else None
     if hit is not None:
-        _CURRENT.append(f"{event} {os.path.relpath(hit, _PROGRAMS)}")
+        record = f"{event} {os.path.relpath(hit, _PROGRAMS)}"
+        if _CURRENT is not None:
+            _CURRENT.append(record)
+        elif _COLLECTION_ACTIVE:
+            _COLLECTION_HITS.append(record)
 
 
 _INSTALLED = False
@@ -91,6 +97,24 @@ def _install() -> None:
     if not _INSTALLED:
         sys.addaudithook(_hook)
         _INSTALLED = True
+
+
+def pytest_sessionstart(session):
+    """Start the blocking collection audit before any test module is imported."""
+    global _COLLECTION_ACTIVE
+    _install()
+    _COLLECTION_HITS.clear()
+    _COLLECTION_ACTIVE = True
+
+
+def pytest_collection_finish(session):
+    """Refuse collection writes even when pytest was asked only to collect."""
+    global _COLLECTION_ACTIVE
+    _COLLECTION_ACTIVE = False
+    if _COLLECTION_HITS:
+        pytest.exit(
+            "FAIL: collection wrote into the repository's programs/ tree: "
+            f"{sorted(set(_COLLECTION_HITS))[:8]}", returncode=1)
 
 
 @pytest.fixture(autouse=True)
