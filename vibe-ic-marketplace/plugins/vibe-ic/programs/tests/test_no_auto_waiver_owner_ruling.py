@@ -119,6 +119,37 @@ def test_dated_owner_record_is_waived_not_pass(tmp_path):
     assert row.status != "PASS"
 
 
+def test_a9_skip_hardware_without_owner_record_is_unmeasured(tmp_path):
+    project = tmp_path / "analog"
+    project.mkdir()
+    step = {"id": "A9", "name": "Analog bench correlation",
+            "stage": "stage_analog"}
+    row = audit.check_step(project, step, {}, skip_hardware=True)
+    assert row.status == "NOT_MEASURED", (row.status, row.reasons)
+    assert row.reason_class == "input_absent"
+    assert any("skip-hardware" in reason and "bench" in reason
+               for reason in row.reasons)
+
+
+def test_a9_skip_hardware_with_accepted_owner_record_is_waived(tmp_path):
+    project = tmp_path / "analog"
+    project.mkdir()
+    (project / "waivers.json").write_text(json.dumps({"waived_steps": [{
+        "id": "A9", "reason": "Owner defers analog bench measurement",
+        "approver": "reyerchu", "approved_at": "2026-09-28",
+        "owner_statement": "I approve this specific A9 bench deferral for this run.",
+        "ticket": "owner-review-A9", "review_required": True,
+    }]}))
+    waivers = audit._load_waivers(project)
+    assert "A9" in waivers
+    row = audit.check_step(project, {"id": "A9",
+                                     "name": "Analog bench correlation",
+                                     "stage": "stage_analog"},
+                           waivers, skip_hardware=True)
+    assert row.status == "PASS_WITH_WAIVERS", (row.status, row.reasons)
+    assert any("approver: reyerchu" in reason for reason in row.reasons)
+
+
 @pytest.mark.parametrize("change", [
     {"approver": "field-agent-attest"},
     {"approved_at": ""},

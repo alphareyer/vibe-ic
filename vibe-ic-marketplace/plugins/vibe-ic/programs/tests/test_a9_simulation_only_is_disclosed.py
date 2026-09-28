@@ -203,10 +203,10 @@ def test_skip_hardware_reaches_the_lettered_analog_step():
     assert all(isinstance(x, str) for x in FCC._ANALOG_BENCH_STEP_IDS)
 
 
-def test_skip_hardware_waives_a9_like_step_6(tmp_path):
+def test_skip_hardware_discloses_a9_without_owner_waiver(tmp_path):
     r = FCC.check_step(_project(tmp_path, hw=None), _a9(), {}, None,
                        skip_hardware=True)
-    assert r.status == "PASS_WITH_WAIVERS", (r.status, r.reasons)
+    assert r.status == "NOT_MEASURED", (r.status, r.reasons)
     assert any("skip-hardware" in x for x in r.reasons), r.reasons
 
 
