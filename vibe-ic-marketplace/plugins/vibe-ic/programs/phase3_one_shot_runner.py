@@ -44499,7 +44499,7 @@ def _record_route_promotion(project: Path, source: Path,
 ROUTE_PROMOTION_REL = "reports/phase3/route_promotion.json"
 
 
-def _file_sha256(path: Path) -> Optional[str]:
+def _route_file_sha256(path: Path) -> Optional[str]:
     try:
         import hashlib as _hl
         return _hl.sha256(Path(path).read_bytes()).hexdigest()
@@ -44513,7 +44513,7 @@ def _route_promotion_write(project: Path, promoter: str, promoted_def: Path,
     _aa.write_text(Path(project) / ROUTE_PROMOTION_REL, json.dumps({
         "promoter": promoter,
         "promoted_def": str(promoted_def),
-        "promoted_def_sha256": _file_sha256(promoted_def),
+        "promoted_def_sha256": _route_file_sha256(promoted_def),
         "measurement": measurement,
     }, indent=2) + "\n")
 
@@ -69473,7 +69473,7 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
     _promoted_own: Optional[Dict[str, Any]] = None
     if _promotion is not None:
         _psha = _promotion.get("promoted_def_sha256")
-        if _psha and _psha == _file_sha256(def_file):
+        if _psha and _psha == _route_file_sha256(def_file):
             if _promoter != "signoff_spef_repair":
                 _promoted = True
                 _promoted_own = _promotion.get("measurement") or {}
