@@ -55,6 +55,12 @@ def test_phase3_boundary_names_one_owner_for_every_moved_step():
     assert boundary["admission_digest_roots"] == ("phase2", "stage2", "synth")
 
 
+def test_phase3_windows_are_refused_as_atomic_external_spans():
+    disposition, reason = IF.KNOBS["phase3_one_shot_runner"]["entry_step"]
+    assert disposition == IF.REFUSED
+    assert "atomic manifest/import span" in reason
+
+
 def test_the_sentinel_names_the_flag_and_the_phase():
     d = IF.consumer_sentinel_detail(IF.IMPL_LIBRELANE, "yosys_synth", ("9",))
     assert "--librelane" in d and "phase 3" in d and "9" in d

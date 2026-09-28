@@ -518,8 +518,9 @@ def consumer_phase3_boundary() -> Dict[str, object]:
     return {key: tuple(value) if isinstance(value, tuple) else value
             for key, value in CONSUMER_PHASE3_BOUNDARY.items()}
 
-_WINDOW = ("the external flow runs one span per segment; mapping a window "
-           "onto it is W7b, until then a window is refused under the flag")
+_WINDOW = ("W7b deliberately refuses numeric windows: an external segment "
+           "is an atomic manifest/import span, so a 9..37 sub-window cannot "
+           "be represented without dropping its producer or importer")
 _P1 = "Phase 1 runs unchanged under the flag"
 _P2 = "Phase 2 steps 1-8 run unchanged under the flag"
 _ANALOG = ("the analog track is out of v1 and is refused as a whole under the "
