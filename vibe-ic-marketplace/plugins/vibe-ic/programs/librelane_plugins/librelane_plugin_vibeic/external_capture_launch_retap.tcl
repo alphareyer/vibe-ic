@@ -47,10 +47,21 @@ proc vic_upstream_cts_root {block inst pin_name prects} {
 set paths [find_timing_paths -path_delay max -to [all_outputs] -group_path_count 5000 -endpoint_path_count 100]
 set worst_out ""
 if {[llength $paths]} { set worst_out [get_property [lindex $paths 0] slack] }
-if {![string is double -strict $worst_out] || $worst_out >= 0} {
-    puts "VIC_RETAP none: output setup has no measured violation ($worst_out)"
+set _vic_ext_period ""
+foreach _vic_ext_clk [all_clocks] {
+    set p [get_property $_vic_ext_clk period]
+    if {[string is double -strict $p] && $p > 0 && ($_vic_ext_period eq "" || $p < $_vic_ext_period)} {
+        set _vic_ext_period $p
+    }
+}
+# Placement RC can make the external-capture path appear met at CTS even
+# though routed RCX fails it. Examine paths within 5% of the shortest active
+# clock period; the per-retap setup/hold checks still decide every change.
+set margin ""
+if {$_vic_ext_period ne ""} { set margin [expr {0.05 * $_vic_ext_period}] }
+if {![string is double -strict $worst_out] || $margin eq "" || $worst_out > $margin} {
+    puts "VIC_RETAP none: output setup is outside the near-critical window ($worst_out, limit=$margin)"
 } else {
-    set margin [expr {-$worst_out}]
     set regs [dict create]
     foreach r [all_registers] { dict set regs [get_full_name $r] 1 }
     set candidates [dict create]

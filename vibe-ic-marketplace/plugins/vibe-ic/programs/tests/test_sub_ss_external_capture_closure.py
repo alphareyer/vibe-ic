@@ -1,6 +1,8 @@
 """The chip flow can recover a pad launched register to external capture path."""
 
 import importlib
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -69,3 +71,37 @@ def test_setup_controller_reaches_size_only_after_two_tool_written_stagnations(
     assert plan[1]["setup_margin_ns"] == 0.05
     assert plan[2]["setup_margin_ns"] == 0.2
     assert plan[2]["setup_sequence"] == "sizeup,swap"
+
+
+def test_cts_considers_output_path_within_five_percent_of_clock_period():
+    """A routed risk can be hidden by the CTS placement estimate."""
+    helper = (PROGRAMS / "librelane_plugins/librelane_plugin_vibeic"
+              / "external_capture_launch_retap.tcl")
+    stub = r'''
+set _vic_prects_insts [dict create]
+proc all_clocks {} { return clk0 }
+proc all_outputs {} { return out0 }
+proc all_registers {} { return {} }
+proc find_timing_paths {args} { return path0 }
+proc get_cells {args} { return {} }
+proc get_property {obj field} {
+    if {$field eq "is_propagated"} { return 1 }
+    if {$field eq "period"} { return 20.0 }
+    if {$field eq "slack"} { return $::env(MOCK_SLACK) }
+    if {$field eq "startpoint"} { return pin0 }
+    error "unexpected property $obj/$field"
+}
+namespace eval ord { proc get_db_block {} { return block0 } }
+source $::env(RETAP_HELPER)
+'''
+    for slack, should_consider in (("0.387953", True), ("2.0", False)):
+        run = subprocess.run(
+            ["tclsh"], input=stub, text=True, capture_output=True,
+            env={**os.environ, "RETAP_HELPER": str(helper), "MOCK_SLACK": slack},
+            check=False, timeout=10,
+        )
+        assert run.returncode == 0, run.stderr
+        if should_consider:
+            assert "VIC_RETAP margin=1.0 candidates=0" in run.stdout
+        else:
+            assert "VIC_RETAP none:" in run.stdout
