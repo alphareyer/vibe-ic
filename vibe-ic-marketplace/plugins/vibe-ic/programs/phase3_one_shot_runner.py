@@ -24777,6 +24777,15 @@ def _write_router_drc_receipt(out_dir: Path, routed_def: Path,
     return receipt
 
 
+def _empty_router_report_status(pnr_out: Path) -> Tuple[bool, Optional[Path]]:
+    """Use the audit's one digest-bound decision for the router's empty report."""
+    report = pnr_out / ROUTER_DRC_REPORT_NAME
+    if not report.is_file() or report.stat().st_size != 0:
+        return False, None
+    from eda_report_audit import _empty_router_drc_receipt  # noqa: PLC0415
+    return True, _empty_router_drc_receipt(report)
+
+
 def _router_drc_report_block(pnr_out: Path, log_text: str) -> str:
     """The router's OWN DRC report for this route, as a block for
     `routed.drc.rpt` -- or a named statement of why there is none.
@@ -24805,9 +24814,13 @@ def _router_drc_report_block(pnr_out: Path, log_text: str) -> str:
         body = rpt.read_text(errors="ignore").strip()
         head = (f"# source: detailed_route -output_drc "
                 f"{ROUTER_DRC_REPORT_NAME} ({len(body)} B)\n")
-        return head + (body if body else
-                       "# (the router wrote an EMPTY report -- it found no "
-                       "residual violations)")
+        if body:
+            return head + body
+        _, receipt = _empty_router_report_status(pnr_out)
+        return head + ("# DRC_EMPTY_ZERO_CORROBORATED: current digest-bound "
+                       "route receipt proves final count zero"
+                       if receipt else "# DRC_EMPTY_NOT_MEASURED: no current "
+                       "digest-bound route receipt proves final count zero")
     if "ROUTE_DRC_REPORT_UNSUPPORTED" in log_text:
         return ("# UNAVAILABLE: this OpenROAD build's detailed_route does not\n"
                 "# accept -output_drc (the run logged "
@@ -59139,7 +59152,7 @@ def _canonical_step_condition(project: Path, step_id: str
 _DRC_ATTRIBUTION_JOBS_BASE = (
     ("drc_report_check", "reports/phase3/drc_router.json",
      "reports/phase3/drc_router.rpt",
-     ("--mode", "drc", "--under", "phase3/stage3/pnr",
+     ("--mode", "drc", "--under", "phase3/stage3/pnr/routed_router.drc.rpt",
       "--under", "reports/phase3/drc_router.rpt")),
     ("drc_report_check", "reports/phase3/drc_signoff.json",
      "reports/phase3/drc_signoff.rpt",
@@ -60116,6 +60129,21 @@ def _emit_router_drc_report(project: Path, pnr_out: Path, rpt_phase3: Path,
     routed_drc = pnr_out / "routed.drc.rpt"
     log_path = pnr_out / "openroad.log"
     if log_path.is_file():
+        is_empty, zero_receipt = _empty_router_report_status(pnr_out)
+        if is_empty and zero_receipt is None:
+            # A transcript alone cannot identify which invocation wrote the
+            # zero-byte report. Keep both declared outputs, but give neither
+            # a parseable zero that another DRC consumer could credit.
+            body = ("# OpenROAD router DRC: DRC_EMPTY_NOT_MEASURED\n"
+                    "# The final report is empty without a current "
+                    "digest-bound route receipt.\n")
+            _aa.write_text(routed_drc, body)
+            rpt_phase3.mkdir(parents=True, exist_ok=True)
+            _aa.write_text(rpt_phase3 / "drc_router.rpt", body)
+            for path in (routed_drc, rpt_phase3 / "drc_router.rpt"):
+                if str(path) not in written:
+                    written.append(str(path))
+            return
         log_text = log_path.read_text(errors="ignore")
         # Keep the raw "violation"/DRT log lines for the reviewer-context block.
         router_drc_block = _router_drc_report_block(pnr_out, log_text)
@@ -60193,7 +60221,7 @@ def _emit_router_drc_report(project: Path, pnr_out: Path, rpt_phase3: Path,
             f"{full_log_tail}\n"
             f"# end of routed.drc.rpt\n"
         )
-        routed_drc.write_text(body)
+        _aa.write_text(routed_drc, body)
         if str(routed_drc) not in written:
             written.append(str(routed_drc))
         # Mirror to reports/phase3/ where the gate's --json output lands

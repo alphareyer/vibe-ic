@@ -5292,6 +5292,9 @@ steps:
       # output, and Step 21 gates read it.  It is route evidence, not an
       # external input and not a Step-37.4 aggregation artefact.
       - "phase3/stage3/pnr/openroad.log"
+      # The final router's native -output_drc report. Iteration snapshots
+      # (`*.iterN.rpt`) are diagnostics for older routes, not final subjects.
+      - "phase3/stage3/pnr/routed_router.drc.rpt"
       # The router-DRC report the phase-3 runner actually emits is
       # `routed.drc.rpt` (phase3_one_shot_runner.py, Step-21 emitter). Nothing
       # in the plugin has ever written `phase3/stage3/pnr/drc.rpt` — that
@@ -5363,7 +5366,7 @@ steps:
         # report of its own — its PASS was earned entirely by the DRC reports
         # of the nested clean_run_* snapshots underneath it. rc=1 there is the
         # correct verdict, and it is the rc=1 path having been SEEN to execute.
-        - program_exit_zero: "drc_report_check . --mode drc --under phase3/stage3/pnr --under reports/phase3/drc_router.rpt --json reports/phase3/drc_router.json"
+        - program_exit_zero: "drc_report_check . --mode drc --under phase3/stage3/pnr/routed_router.drc.rpt --under reports/phase3/drc_router.rpt --json reports/phase3/drc_router.json"
         # Anti-fabrication: all 5 stage DEFs must be byte-distinct,
         # size-monotone, instance-count growing, and routed.def must
         # contain `+ ROUTED` geometry. Added 2026-04-22 after bench-a
