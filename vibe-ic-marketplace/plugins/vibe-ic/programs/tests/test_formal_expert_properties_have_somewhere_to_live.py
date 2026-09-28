@@ -254,6 +254,28 @@ def test_a_reused_sby_gains_the_fragment_in_its_files_block(tmp_path):
     assert sby.read_text().count(G.EXPERT_PROPERTIES_SVH) == 1
 
 
+def test_a_reused_sby_binds_observers_added_by_the_expert_fragment(tmp_path):
+    """A stale task must bind an expert observer, not merely stage its text."""
+    d = _formal_dir(tmp_path, fragment="""\\
+    // @observe observed_state = dut.state
+    (* keep *) wire observed_state;
+    """)
+    sby = d / "formal_fixture_core.sby"
+    sby.write_text("[script]\n"
+                   "read_verilog -formal -sv formal_fixture_core.sv\n"
+                   "hierarchy -top formal_fixture_core\nproc\nflatten\n"
+                   "prep -top formal_fixture_core\n\n[files]\n"
+                   "formal_fixture_core.sv\n")
+    result = R.run(tmp_path, top="fixture_core", emit_only=True)
+    assert result["verdict"] == "EMIT_ONLY"
+    text = sby.read_text()
+    assert "select -assert-any formal_fixture_core/w:dut.state" in text
+    assert "connect -set observed_state dut.state" in text
+    assert text.count("connect -set observed_state dut.state") == 1
+    assert text.index("connect -set observed_state dut.state") < text.index("prep -top")
+    assert R._ensure_expert_observers_bound(sby, d) is False
+
+
 def test_a_project_with_no_fragment_leaves_its_sby_byte_identical(tmp_path):
     d = _formal_dir(tmp_path, fragment=None)
     sby = d / "formal_fixture_core.sby"
