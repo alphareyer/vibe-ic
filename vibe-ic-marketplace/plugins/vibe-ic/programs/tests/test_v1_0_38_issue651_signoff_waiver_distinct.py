@@ -11,15 +11,13 @@ rc 0, identical to a clean PASS. The Step-36 tapeout flow gate
 
 FIX (two-sided, self-consistent):
   (a) signoff_audit.main() returns a DISTINCT, documented exit code
-      (WAIVER_EXIT_CODE=3) when verdict_tier=='PASS_WITH_WAIVERS', prints
-      a `PASS_WITH_WAIVERS:` stdout sentinel, and emits a waivers.json
-      Step-36 entry (ticket + review_required + evidence) so the waiver
-      is visible to flow waiver accounting. Clean PASS stays rc 0; FAIL
-      stays rc 1.
+      (WAIVER_EXIT_CODE=3) when verdict_tier=='PASS_WITH_WAIVERS' and prints
+      a `PASS_WITH_WAIVERS:` stdout sentinel. It does not approve or write
+      a Step-36 waiver. Clean PASS stays rc 0; FAIL stays rc 1.
   (b) flow_compliance_check._check_program_exit_zero recognises rc 3 +
-      the sentinel and bubbles a `__WAIVER_HINT__` so check_step promotes
-      the step to WAIVED-DEFERRED (→ Overall PASS_WITH_WAIVERS), never a
-      bare PASS. A bare rc 3 with NO sentinel is NOT silently waived.
+      the sentinel and bubbles a `__WAIVER_HINT__` with sign-off credit
+      details. check_step requires an accepted owner record before a waiver
+      affects its verdict. A bare rc 3 with NO sentinel is refused.
 
 chip-AGNOSTIC: the distinction is carried by the verdict_tier + structural
 Step-36 id + the rc/sentinel convention — no chip/vendor/SKU literal. Any
@@ -147,6 +145,17 @@ def _signed_waiver_project(path: Path) -> Path:
     return project
 
 
+def _approve_tapeout(project: Path) -> dict:
+    (project / "waivers.json").write_text(json.dumps({"waived_steps": [{
+        "id": 36, "reason": "Owner accepts this specific library DRC deferral",
+        "approver": "reyerchu", "approved_at": "2026-09-28",
+        "owner_statement": "I approve this specific tapeout deferral for this run.",
+        "ticket": "owner-review-36", "review_required": True,
+    }]}))
+    _sign_ai_fixture(project, "36")
+    return fc._load_waivers(project)
+
+
 # ---------------------------------------------------------------------------
 # Layer 1 — signoff_audit exit code is verdict-tier-aware (#651 acceptance)
 # ---------------------------------------------------------------------------
@@ -195,35 +204,20 @@ def test_clean_run_does_not_print_waiver_sentinel(tmp_path):
 # ---------------------------------------------------------------------------
 # Layer 1b — waivers.json step entry is emitted + schema-valid + idempotent
 # ---------------------------------------------------------------------------
-def test_waiver_run_emits_schema_valid_waivers_json(tmp_path):
+def test_waiver_run_discloses_tier_without_issuing_waivers_json(tmp_path):
     p = _waiver_project(tmp_path)
     sa.main([str(p), "--mode", "tapeout"])
     wfile = p / "waivers.json"
-    assert wfile.exists()
-    import json
-    data = json.loads(wfile.read_text())
-    entry = next(w for w in data["waived_steps"]
-                 if str(w["id"]) == str(sa._TAPEOUT_STEP_ID))
-    assert entry["review_required"] is True
-    assert entry["ticket"]
-    assert entry["evidence"]
-    assert entry["verdict_tier"] == "PASS_WITH_WAIVERS"
-    # schema gate (flow_compliance_check loads via this) must see 0 errors.
-    from waivers_schema_check import validate
-    findings, _ = validate(p, max_step=40)
-    errors = [f for f in findings if f.severity == "error"]
-    assert errors == [], errors
+    assert not wfile.exists()
+    assert sa._check_tapeout(p).summary["verdict_tier"] == "PASS_WITH_WAIVERS"
 
 
-def test_waiver_emission_is_idempotent(tmp_path):
+def test_repeated_waiver_tier_never_creates_approval(tmp_path):
     p = _waiver_project(tmp_path)
     sa.main([str(p), "--mode", "tapeout"])
     sa.main([str(p), "--mode", "tapeout"])
-    import json
-    data = json.loads((p / "waivers.json").read_text())
-    step36 = [w for w in data["waived_steps"]
-              if str(w["id"]) == str(sa._TAPEOUT_STEP_ID)]
-    assert len(step36) == 1  # not duplicated on re-run
+    assert not (p / "waivers.json").exists()
+    assert sa._check_tapeout(p).summary["evidence"]["drc"] == "library_internal_waived"
 
 
 def test_handauthored_waiver_takes_precedence(tmp_path):
@@ -266,19 +260,47 @@ def test_flow_gate_program_exit_zero_three_way(tmp_path):
 
 
 def test_check_step_three_way_status(tmp_path):
-    """End-to-end: the Step-36 gate maps each tier to a DISTINCT status —
-    WAIVED (→ PASS_WITH_WAIVERS), PASS (bare), FAIL — never PASS for the
-    waived case."""
+    """Step 36 distinguishes owner waiver, clean PASS, and gate FAIL."""
     step = {"id": 36, "name": "Tapeout checklist", "stage": "stage4",
             "gate": {"program_exit_zero":
                      "tapeout_signoff_check . --mode tapeout"}}
     waiver_p = _signed_waiver_project((tmp_path / "w"))
+    owner_waivers = _approve_tapeout(waiver_p)
     clean_p = _clean_project((tmp_path / "c"))
     fail_p = _fail_project((tmp_path / "f"))
 
-    assert fc.check_step(waiver_p, step, waivers={}).status == "PASS_WITH_WAIVERS"
+    assert fc.check_step(waiver_p, step, waivers=owner_waivers).status == "PASS_WITH_WAIVERS"
     assert fc.check_step(clean_p, step, waivers={}).status == "PASS"
     assert fc.check_step(fail_p, step, waivers={}).status == "FAIL"
+
+
+def test_tapeout_gate_hint_without_owner_record_cannot_waive_step(tmp_path):
+    project = _signed_waiver_project(tmp_path)
+    assert not (project / "waivers.json").exists()
+    step = {"id": 36, "name": "Tapeout checklist", "stage": "stage4",
+            "gate": {"program_exit_zero":
+                     "tapeout_signoff_check . --mode tapeout "
+                     "--json reports/audit/tapeout_signoff.json"}}
+    row = fc.check_step(project, step, waivers={})
+    assert row.status == "FAIL", (row.status, row.reasons)
+    assert any("owner" in reason.lower() and "PASS_WITH_WAIVERS" in reason
+               and "library_internal_waived" in reason
+               for reason in row.reasons), row.reasons
+    report = json.loads((project / "reports/audit/tapeout_signoff.json").read_text())
+    assert report["summary"]["verdict_tier"] == "PASS_WITH_WAIVERS"
+    assert report["summary"]["evidence"]["drc"] == "library_internal_waived"
+
+
+def test_tapeout_gate_hint_with_owner_record_is_a_reviewable_waiver(tmp_path):
+    project = _signed_waiver_project(tmp_path)
+    waivers = _approve_tapeout(project)
+    assert 36 in waivers
+    row = fc.check_step(project, {
+        "id": 36, "name": "Tapeout checklist", "stage": "stage4",
+        "gate": {"program_exit_zero":
+                 "tapeout_signoff_check . --mode tapeout"}}, waivers)
+    assert row.status == "PASS_WITH_WAIVERS", (row.status, row.reasons)
+    assert any("approver: reyerchu" in reason for reason in row.reasons)
 
 
 def test_waived_status_is_not_bare_pass(tmp_path):
@@ -288,11 +310,12 @@ def test_waived_status_is_not_bare_pass(tmp_path):
     step = {"id": 36, "name": "Tapeout checklist", "stage": "stage4",
             "gate": {"program_exit_zero":
                      "tapeout_signoff_check . --mode tapeout"}}
-    r = fc.check_step(_signed_waiver_project((tmp_path / "w")), step, waivers={})
+    project = _signed_waiver_project((tmp_path / "w"))
+    r = fc.check_step(project, step, waivers=_approve_tapeout(project))
     assert r.status != "PASS"
     assert r.status == "PASS_WITH_WAIVERS"
-    # the reason makes the deferral explicit + cites #651.
-    assert any("PASS_WITH_WAIVERS" in reason and "#651" in reason
+    # The accepted owner record, rather than the gate hint, grants this tier.
+    assert any("approver: reyerchu" in reason
                for reason in r.reasons)
 
 
