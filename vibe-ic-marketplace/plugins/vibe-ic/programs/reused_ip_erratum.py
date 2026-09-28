@@ -94,6 +94,11 @@ _UPSTREAM_RE = re.compile(r"(?P<repo>[\w.\-]+(?:/[\w.\-]+)+)@(?P<commit>[0-9a-f]
 #: The fetch deadline, in seconds. A fetch of one source file is a network
 #: round trip, not a long tool; a stalled socket is refused, never waited on.
 FETCH_DEADLINE_S = 60
+# A pinned fix is one RTL source file, not a suite archive. Keep the socket
+# operation short so a stalled read cannot consume the whole overall deadline.
+FETCH_MAX_BYTES = 8 * 1024 * 1024
+FETCH_CHUNK_BYTES = 64 * 1024
+FETCH_IO_TIMEOUT_S = 1
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -191,8 +196,28 @@ def record_applies(record: Dict[str, Any],
 
 def default_fetch(url: str) -> bytes:
     import urllib.request
-    with urllib.request.urlopen(url, timeout=FETCH_DEADLINE_S) as r:  # noqa: S310
-        return r.read()
+    deadline = time.monotonic() + FETCH_DEADLINE_S
+    chunks: List[bytes] = []
+    total = 0
+    with urllib.request.urlopen(  # noqa: S310 — hash-pinned upstream fix
+            url, timeout=min(FETCH_IO_TIMEOUT_S, FETCH_DEADLINE_S)) as r:
+        # read1 returns available bytes without waiting for a full chunk.
+        # A trickling peer must still cross the monotonic deadline.
+        read1 = r.read1
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
+            chunk = read1(min(FETCH_CHUNK_BYTES, FETCH_MAX_BYTES - total + 1))
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
+            if not chunk:
+                return b"".join(chunks)
+            total += len(chunk)
+            if total > FETCH_MAX_BYTES:
+                raise ValueError(f"RTL fix byte ceiling {FETCH_MAX_BYTES} exceeded")
+            chunks.append(chunk)
 
 
 def _input_original(project: Path, basename: str) -> Optional[Path]:
