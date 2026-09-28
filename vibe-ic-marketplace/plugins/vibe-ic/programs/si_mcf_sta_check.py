@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """si_mcf_sta_check.py — GATE for the MCF-bounded SI-aware STA (si_mcf_sta.py).
 
+CURRENT ZERO-CORNER RULE (2026-09-28): a report with no measurable windows,
+missing inputs, or project-external evidence paths is NOT_MEASURED. It carries
+an explicit EXECUTION_ERROR reason class; the flow consumes that typed class
+and keeps Step 27 NOT_MEASURED rather than a design FAIL or vacuous PASS.
+Historical NOT_RUN/rc=1 discussion below describes the earlier #506 contract.
+
 WHAT IT VERIFIES (false-clean-proof)
 ====================================
 The emitter (`si_mcf_sta.py`) folds every coupling cap ``Cc`` into the victim's
@@ -319,12 +325,13 @@ import _path_layout as _pl
 import _record_adjudication as _ra
 import si_mcf_sta as M
 
-#: Exit codes. 2 is the DISCLOSED SKIP tier, never an error tier — see the
-#: module docstring. The ``NOT_RUN`` verdict shares ``RC_FAIL`` on purpose: it
-#: is a distinct ANSWER, not a quieter one (#506).
+#: Exit codes. The same numeric rc=2 is classified by the declared report:
+#: ZERO_DENOMINATOR is a vacuity; EXECUTION_ERROR is an unmeasured applicable
+#: step. A bare rc=2 is never enough to certify either state.
 RC_PASS = 0
 RC_FAIL = 1
 RC_VACUOUS = 2
+RC_NOT_MEASURED = 2  # the flow reads typed EXECUTION_ERROR, never skip-eligible
 
 #: The ERROR categories that mean THE GATE NEVER GOT TO LOOK — the input it
 #: audits could not be obtained, read, or located (#506).
@@ -1129,6 +1136,12 @@ def build_report(findings: List[Finding], stats: dict, project_dir: str) -> dict
         # the written reason. All three describe the same zero; none of them
         # replaces another.
         summary["reason_class"] = _reason_taxonomy.ZERO_DENOMINATOR
+    if verdict == "NOT_MEASURED":
+        # rc=2 alone is a generic non-verdict at the flow boundary. The
+        # explicit, non-skip-eligible class makes the optional Step-27 clause
+        # INCOMPLETE, so check_step records NOT_MEASURED rather than PASS,
+        # VACUOUS_PASS, or a design FAIL for inputs the checker never saw.
+        summary["reason_class"] = _reason_taxonomy.EXECUTION_ERROR
     _gd.attach(summary, denom)
     return {
         "program": "si_mcf_sta_check",
@@ -1302,7 +1315,7 @@ RECORD_ADJUDICATION = _ra.declare(
     # zero-coupling rule still decides from coupling_pairs and findings alone;
     # neither new path/window state can be inferred from an old record.
     decision_digest=(
-        "84c1055e932f8573d07c31908c80c47962d69a4460eb1342ed6c6b7f08934cca"),
+        "c7ac677971244f6a3f5a91367a25e9bde7b52941ef4fbe4e170851a960b163e2"),
     rules=(
         _ra.Rule(
             rule_id="si_mcf_sta_check.zero-fold-is-not-a-signoff",
@@ -1354,13 +1367,11 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return RC_VACUOUS
     if report["verdict"] == "NOT_MEASURED":
-        # #506 — the text channel for the fourth state, and it must NOT be the
-        # `VACUOUS_PASS` token: `flow_compliance_check._stdout_signals_vacuous`
-        # matches that at line start and would promote the step to the pass
-        # tier, which is precisely the trade the rc decision refuses (see the
-        # module docstring). rc stays 1, so the step FAILs exactly as before.
+        # The JSON's typed EXECUTION_ERROR makes numeric rc=2 an applicable
+        # incomplete measurement in the Step-27 consumer. Keep VACUOUS_PASS
+        # off stderr so a text-only reader cannot mistake it for a skip.
         print(f"NOT_MEASURED: {denom['not_applicable_reason']}", file=sys.stderr)
-        return RC_FAIL
+        return RC_NOT_MEASURED
     return RC_PASS if report["verdict"] == "PASS" else RC_FAIL
 
 
