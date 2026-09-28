@@ -710,6 +710,35 @@ def _register(inst: Instrument) -> None:
     INSTRUMENTS[inst.name] = inst
 
 
+def _judge_native_antenna_rdb(report: str) -> Optional[str]:
+    import eda_report_audit as audit
+    count = audit._antenna_klayout_count(report)
+    return f"ANTENNA_VIOLATIONS={count}" if count else None
+
+
+_register(Instrument(
+    name="eda_report_audit::_antenna_klayout_count",
+    reads="the PDK-native KLayout antenna report database",
+    ruling="U5 geometry antenna native-deck acceptance",
+    owner="u5",
+    why=("A native KLayout report has an empty top-level description and "
+         "<name>ANT.*</name> categories. The old classifier missed the XML "
+         "name elements and called a measured clean run unmeasured."),
+    judge=_judge_native_antenna_rdb,
+    positive=Sample(
+        provenance=("Real KLayout 0.30.9 PDK-native `decks=antenna` RDB from "
+                    "a synthetic poly gate with a long conductor, generated "
+                    "on 8HD-6 in vibeic-eda 0.3.84; ANT.1 fires once. "
+                    "Rule SHA-256 f82e2aed8c5c7b9d92146b135affe78c1d2779511e8be0062d0d4e52b499567f."),
+        artefact=_read("native_antenna_violation.lyrdb")),
+    expect="ANTENNA_VIOLATIONS=1",
+    negative=Sample(
+        provenance=("Same real tool, PDK and synthetic gate, with the poly "
+                    "conductor shortened; 24 ANT categories and zero items."),
+        artefact=_read("native_antenna_clean.lyrdb")),
+))
+
+
 _register(Instrument(
     name="phase3_one_shot_runner::antenna_routing_incomplete",
     reads="the PnR log (`phase3/stage3/pnr/openroad.log`)",

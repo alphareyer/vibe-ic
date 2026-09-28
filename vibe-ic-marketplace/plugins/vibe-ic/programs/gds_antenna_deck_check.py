@@ -9,14 +9,21 @@ ROUTER-REPORT consumer — it can only repeat what the router already believed. 
 the router's antenna model misses a violation, the report is clean and the gate
 passes, with no second opinion anywhere in the flow.
 
-This gate adds the missing INDEPENDENT, authoritative opinion: it runs the
-KLayout fork's GDS-geometry antenna deck (`gds_antenna/antenna_check.py`) on the
-STREAMED GDS and computes, per metal layer, the per-net antenna ratio
+This gate adds the missing INDEPENDENT GDS opinion. When the selected PDK ships
+a native KLayout antenna deck, it runs that deck on the STREAMED GDS and judges
+the deck's own ANT rules. The PDK bridge receipt selects the tree; the report
+binds the PDK rule, runnable parent, GDS, RDB and transcript by SHA-256.
+
+For a PDK that instead declares a JSON geometry config, it runs the KLayout
+fork's GDS-geometry engine (`gds_antenna/antenna_check.py`) and computes, per
+metal layer, the per-net antenna ratio
     ratio = (connected metal area) / (connected gate area)
 from the as-fabricated geometry, using STAGED connectivity (at the layer-k etch
 stage only layers 1..k exist, so an upper-metal jumper cannot relieve a
 lower-stage antenna — a relief the router's final-netlist view credits) plus
 cumulative-antenna-area (CAA) charge sharing, which no per-layer check can see.
+Those staged/CAA claims apply to the JSON engine; the native path measures the
+rules its PDK actually executes and does not infer an extra rule class.
 
 It does NOT replace `antenna_report_check` — both run at Step 26. Where a router
 report exists, the two independent counts are CROSS-CHECKED
@@ -48,8 +55,10 @@ from the caller's deck config; no vendor, foundry or design literal appears here
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -79,10 +88,15 @@ _BRIDGE_KEY = "antenna_deck"
 # adopted the deck would see spurious ANTENNA_VIOLATION_COUNT errors and, with
 # no genuine antenna.rpt present, a hard FAIL of the sibling gate. Hence
 # "gate_oxide", not "antenna".
-_CFG_GLOBS = (
+_GEOMETRY_CFG_GLOBS = (
     "signoff/gate_oxide_deck.json",
     "input/pdk/bridge/gate_oxide_deck.json",
 )
+# The PDK-root receipt is emitted by the PDK bridge used by the real backend.
+# It names both the selected PDK and the image-bound tree, so discovery cannot
+# accidentally borrow an antenna deck from another installed PDK.
+_PDK_ROOT_RECEIPT = "phase3/librelane_pdk_root.provenance.json"
+_CFG_GLOBS = _GEOMETRY_CFG_GLOBS + (_PDK_ROOT_RECEIPT,)
 _ROUTER_GLOBS = (
     "reports/phase3/antenna.rpt",
     "**/antenna*.rpt",
@@ -121,8 +135,8 @@ def _resolve_config(project: Path, explicit: Optional[str]) -> tuple:
     if bridge.is_file():
         try:
             declared = json.loads(bridge.read_text()).get(_BRIDGE_KEY)
-        except (ValueError, OSError):
-            declared = None
+        except (ValueError, OSError, AttributeError) as exc:
+            return None, None, f"{_BRIDGE_CFG} is unreadable: {exc}"
         if isinstance(declared, dict):
             return None, declared, f"{_BRIDGE_CFG}:{_BRIDGE_KEY} (inline)"
         if isinstance(declared, str):
@@ -132,11 +146,177 @@ def _resolve_config(project: Path, explicit: Optional[str]) -> tuple:
                     f"{_BRIDGE_CFG}:{_BRIDGE_KEY} -> {declared}"
             return None, None, (f"{_BRIDGE_CFG}:{_BRIDGE_KEY} points at a "
                                 f"missing deck: {declared}")
-    found = _first(project, _CFG_GLOBS)
+    found = _first(project, _GEOMETRY_CFG_GLOBS)
     if found:
         return found, json.loads(found.read_text()), \
             str(found.relative_to(project))
     return None, None, "no antenna deck config declared for this PDK"
+
+
+def _sha(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _native_deck(project: Path):
+    """Discover a PDK's own antenna rule and its runnable parent deck.
+
+    The rule file is not an executable KLayout script on its own: the parent
+    loads layers, options and the rule registry. Only a parent that declares
+    the native ``decks`` selection grammar may be run with ``decks=antenna``.
+    No PDK name, layer number or antenna ratio is supplied by this program.
+    """
+    receipt = project / _PDK_ROOT_RECEIPT
+    if not receipt.is_file():
+        return None, "no PDK-root bridge receipt to discover an antenna deck"
+    try:
+        doc = json.loads(receipt.read_text())
+        root = Path(doc["path"])
+        pdk = doc["derivation"]["pdk"]
+        guest = doc["derivation"].get("guest_path")
+        if not isinstance(pdk, str) or not pdk or "/" in pdk or pdk in (".", ".."):
+            raise ValueError("invalid PDK identity")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return None, f"PDK-root bridge receipt is unusable: {exc}"
+    drc = root / pdk / "libs.tech" / "klayout" / "tech" / "drc"
+    rule = drc / "rule_decks" / "antenna.rb"
+    if not rule.is_file():
+        return None, f"selected PDK has no native antenna rule deck: {rule}"
+    parents = []
+    for candidate in sorted(drc.glob("*.drc")):
+        source = candidate.read_text(errors="replace")
+        if "decks: $decks" in source and "rule_decks" in source:
+            parents.append(candidate)
+    if len(parents) != 1:
+        return None, (f"native antenna rule exists, but exactly one runnable "
+                      f"parent with deck selection was required; found {len(parents)}")
+    return {"rule": rule, "parent": parents[0], "guest": guest,
+            "receipt": receipt}, ""
+
+
+_BIND_PREFIX = "VIBEIC_GDS_SHA256="
+_NATIVE_RDB = "gate_oxide_native.lyrdb"
+_NATIVE_LOG = "gate_oxide_native.log"
+
+
+def _bound_native_count(gds: Path, rdb: Path, transcript: Path, gds_sha: str):
+    """Read a fresh native result only while all three artefacts share a basis.
+
+    The transcript is written by this invocation after its KLayout process
+    exits. Its first line binds the process output to the pre-execution GDS
+    hash; the caller also checks that the GDS did not change during execution.
+    The returned hashes bind both tool outputs into the published gate report.
+    """
+    if not rdb.is_file() or not transcript.is_file() or _sha(gds) != gds_sha:
+        return None, "GDS or native output missing/changed", {}
+    log = transcript.read_text(errors="replace")
+    if not log.startswith(_BIND_PREFIX + gds_sha + "\n"):
+        return None, "native transcript is bound to another GDS SHA-256", {}
+    if not re.search(r"Executing rule\s+ANT\.", log):
+        return None, "native transcript names no executed ANT rule", {}
+    import eda_report_audit as _audit  # existing calibrated KLayout RDB reader
+    count = _audit._antenna_klayout_count(rdb.read_text(errors="replace"))
+    if count is None:
+        return None, "native RDB has no usable ANT measurement", {}
+    return count, "", {"rdb_sha256": _sha(rdb),
+                       "transcript_sha256": _sha(transcript)}
+
+
+def _run_native(project: Path, gds: Optional[str], router: Optional[str],
+                cell: Optional[str], native: dict) -> Dict[str, Any]:
+    if gds:
+        gds_path = Path(gds)
+    else:
+        # A directory with multiple streams does not identify the delivered
+        # one. Sorting filenames is not a sign-off selection rule.
+        staged = sorted((project / "phase3/stage4/gds").glob("*.gds"))
+        if len(staged) > 1:
+            return {"verdict": "DISCLOSED_SKIP", "check": "gds_geometry_antenna_deck",
+                    "reason": "multiple streamed GDS files; select the delivered GDS with --gds"}
+        gds_path = staged[0] if staged else _first(project, _GDS_GLOBS)
+    if gds_path is not None and not gds_path.is_absolute():
+        gds_path = project / gds_path
+    if gds_path is None or not gds_path.is_file():
+        return {"verdict": "DISCLOSED_SKIP", "check": "gds_geometry_antenna_deck",
+                "reason": "no streamed GDS for the selected native PDK deck"}
+    runner = _kl.find_runner(project=project)
+    if runner is None or not runner.covers(gds_path):
+        return {"verdict": "DISCLOSED_SKIP", "check": "gds_geometry_antenna_deck",
+                "reason": "no KLayout runner reaches the streamed GDS"}
+    work = project / "reports" / "phase3"
+    work.mkdir(parents=True, exist_ok=True)
+    rdb, transcript = work / _NATIVE_RDB, work / _NATIVE_LOG
+    if not runner.covers(work):
+        return {"verdict": "DISCLOSED_SKIP", "check": "gds_geometry_antenna_deck",
+                "reason": "KLayout runner cannot write native antenna evidence"}
+    for old in (rdb, transcript):
+        old.unlink(missing_ok=True)
+    before = _sha(gds_path)
+    parent = native["parent"]
+    if runner.kind == "container":
+        guest = native.get("guest")
+        if not isinstance(guest, str) or not guest:
+            return {"verdict": "DISCLOSED_SKIP", "check": "gds_geometry_antenna_deck",
+                    "reason": "PDK bridge has no container path for its native deck"}
+        parent_arg = str(Path(guest) / parent.relative_to(parent.parents[4]))
+        rule_arg = str(Path(guest) / native["rule"].relative_to(parent.parents[4]))
+        rc_probe, out_probe, _ = runner.run_argv(
+            ["sha256sum", parent_arg, rule_arg], {}, timeout=30)
+        found = [line.split()[0] for line in out_probe.splitlines()]
+        if rc_probe != 0 or found != [_sha(parent), _sha(native["rule"])]:
+            return {"verdict": "DISCLOSED_SKIP", "check": "gds_geometry_antenna_deck",
+                    "reason": "container PDK deck bytes differ from the image-bound bridge tree"}
+    else:
+        parent_arg = str(parent)
+    argv = [runner.klayout_bin(), "-b", "-r", parent_arg,
+            "-rd", f"input={runner.cpath(gds_path)}",
+            "-rd", f"report={runner.cpath(rdb)}", "-rd", "decks=antenna"]
+    if cell:
+        argv.extend(["-rd", f"topcell={cell}"])
+    rc, out, err = runner.run_argv(argv, {}, timeout=1800)
+    _atomic_write_bytes(transcript, (_BIND_PREFIX + before + "\n" + out + err).encode())
+    if rc != 0:
+        return {"check": "gds_geometry_antenna_deck", "verdict": "FAIL",
+                "method": "pdk_native_klayout", "rc": rc,
+                "gds": str(gds_path), "gds_sha256": before,
+                "pdk_rule": str(native["rule"]),
+                "pdk_rule_sha256": _sha(native["rule"]),
+                "transcript": str(transcript),
+                "transcript_sha256": _sha(transcript),
+                "reason": f"declared native KLayout deck failed rc={rc}"}
+    count, why, hashes = _bound_native_count(gds_path, rdb, transcript, before)
+    base = {"check": "gds_geometry_antenna_deck", "method": "pdk_native_klayout",
+            "gds": str(gds_path), "gds_sha256": before,
+            "pdk_rule": str(native["rule"]), "pdk_rule_sha256": _sha(native["rule"]),
+            "pdk_parent": str(parent), "pdk_parent_sha256": _sha(parent),
+            "rdb": str(rdb), "transcript": str(transcript), "rc": rc,
+            **hashes}
+    if why:
+        return {**base, "verdict": "DISCLOSED_SKIP", "reason": why}
+    raw = work / _RAW_REPORT_NAME
+    _atomic_write_bytes(raw, json.dumps({"verdict": "PASS" if count == 0 else "FAIL",
+                                         "violations": count}).encode())
+    res = {**base, "verdict": "PASS" if count == 0 else "FAIL",
+           "violations": count, "worst_ratio": None,
+           "reason": f"{count} PDK-native antenna violation(s)" if count else ""}
+    xtool = _kl.find_engine("gds_antenna", "xcheck_router.py")
+    rpt = Path(router) if router else _first(project, _ROUTER_GLOBS)
+    if rpt is not None and not rpt.is_absolute():
+        rpt = project / rpt
+    if xtool is not None and rpt is not None and rpt.is_file():
+        try:
+            x = _load_module(xtool, "_vibeic_xcheck_router").cross_check(raw, rpt)
+        except Exception as exc:  # noqa: BLE001
+            x = {"verdict": "ERROR", "detail": f"cross-check failed: {exc}"}
+        res["cross_check"] = {**x, "router_report": str(rpt)}
+        if x.get("verdict") == "DISAGREE":
+            res.update(verdict="FAIL", reason=f"router-vs-geometry antenna DISAGREEMENT: {x.get('detail')}")
+    else:
+        res["cross_check"] = {"verdict": "NOT_RUN", "reason": "no router report or cross-check engine"}
+    return res
 
 
 def _load_module(path: Path, name: str):
@@ -199,15 +379,20 @@ def run(project: Path, gds: Optional[str], config: Optional[str],
         return {"verdict": "DISCLOSED_SKIP", "reason": reason,
                 "check": "gds_geometry_antenna_deck", **extra}
 
+    cfg_path, deck, cfg_src = _resolve_config(project, config)
+    if deck is None:
+        if config or cfg_src != "no antenna deck config declared for this PDK":
+            return skip(cfg_src, config_source=cfg_src)
+        native, why = _native_deck(project)
+        if native is None:
+            return skip(f"{cfg_src}; {why}", config_source=cfg_src)
+        return _run_native(project, gds, router, cell, native)
+
     engine = _kl.find_engine("gds_antenna", "antenna_check.py")
     if engine is None:
         return skip("GDS-geometry antenna engine not found "
                     "(gds_antenna/antenna_check.py missing; set "
                     "$VIBEIC_KLAYOUT_TOOLS to a KLayout-fork checkout)")
-
-    cfg_path, deck, cfg_src = _resolve_config(project, config)
-    if deck is None:
-        return skip(cfg_src, config_source=cfg_src)
 
     gds_path = (Path(gds) if gds else _first(project, _GDS_GLOBS))
     if gds_path is not None and not gds_path.is_absolute():
@@ -217,7 +402,7 @@ def run(project: Path, gds: Optional[str], config: Optional[str],
                     f"(looked for {', '.join(_GDS_GLOBS)})",
                     config_source=cfg_src)
 
-    runner = _kl.find_runner()
+    runner = _kl.find_runner(project=project)
     if runner is None:
         return skip("no KLayout runner available (no strmrun/klayout on PATH "
                     "and no KLayout in $VIBEIC_EDA_CONTAINER) — the antenna "
@@ -370,9 +555,13 @@ def main(argv=None) -> int:
         return SKIP
     print(json.dumps(res, indent=2))
     if verdict == "PASS":
-        print("gds_antenna_deck_check: PASS "
-              f"(0 geometry antenna violations, worst ratio "
-              f"{res.get('worst_ratio')})")
+        if res.get("method") == "pdk_native_klayout":
+            print("gds_antenna_deck_check: PASS "
+                  "(0 PDK-native antenna violations on the bound GDS)")
+        else:
+            print("gds_antenna_deck_check: PASS "
+                  f"(0 geometry antenna violations, worst ratio "
+                  f"{res.get('worst_ratio')})")
         return PASS
     print(f"gds_antenna_deck_check: FAIL — {res.get('reason')}")
     return FAIL
