@@ -341,8 +341,10 @@ def _step32_drv_signoff(project: Path, report: Dict[str, Any]) -> None:
         # The candidate's own final STA state is available before this step's
         # report is published. Capture from it; an older bundle cannot grade
         # a newly adopted layout.
-        if report.get("final", {}).get("sta_state"):
-            _drv_plan.capture_and_publish(project, final_state=report)
+        source.unlink(missing_ok=True)
+        if not report.get("final", {}).get("sta_state"):
+            raise ValueError("final STAPostPNR state absent")
+        _drv_plan.capture_and_publish(project, final_state=report)
         bundle = json.loads(source.read_text())
         result = _drv.judge(bundle, project=project)
         state_path = report.get("adopted_state")
@@ -361,12 +363,12 @@ def _step32_drv_signoff(project: Path, report: Dict[str, Any]) -> None:
                   "not_measured": [f"step 32 DRV evidence unavailable: {exc}"]}
     report["drv_signoff"] = result
     # The rejudge is a gate on the adopted layout, not an unused sidecar.
-    if source.is_file() and result["verdict"] == "FAIL":
+    if result["verdict"] == "FAIL":
         report["verdict"] = "FAIL"
-    elif (source.is_file() and result["verdict"] == "NOT_MEASURED"
+    elif (result["verdict"] == "NOT_MEASURED"
           and report.get("verdict") != "FAIL"):
         report["verdict"] = "NOT_MEASURED"
-    elif (source.is_file() and result["verdict"] == "WAIVED"
+    elif (result["verdict"] == "WAIVED"
           and report.get("verdict") == "PASS"):
         report["verdict"] = "WAIVED"
     output = project / "reports/phase3/sta/drv_signoff_step32.json"

@@ -697,6 +697,7 @@ def test_flow_step_refuses_unsigned_owner_ledger(tmp_path):
 
 def test_step32_rechecks_final_state_identity_after_late_repair(tmp_path, monkeypatch):
     import librelane_postroute_repair as repair
+    import drv_capture_plan
     monkeypatch.setattr(drv, "judge", lambda *a, **k: {
         "name": "DRV(tran/cap/fanout)", "verdict": "PASS",
         "failures": [], "not_measured": []})
@@ -706,7 +707,11 @@ def test_step32_rechecks_final_state_identity_after_late_repair(tmp_path, monkey
     source.write_text(json.dumps(bundle))
     state = tmp_path / "final_state.json"
     state.write_text(json.dumps({"def": bundle["identity"]["artifacts"]["def"]["path"]}))
-    report = {"adopted_state": str(state)}
+    sta_state = tmp_path / "sta_state.json"
+    sta_state.write_text("{}")
+    report = {"adopted_state": str(state), "final": {"sta_state": str(sta_state)}}
+    monkeypatch.setattr(drv_capture_plan, "capture_and_publish",
+                        lambda *a, **k: source.write_text(json.dumps(bundle)))
     repair._step32_drv_signoff(tmp_path, report)
     assert report["drv_signoff"]["verdict"] == "PASS"
     bundle["identity"]["artifacts"]["def"] = _file(
@@ -715,6 +720,34 @@ def test_step32_rechecks_final_state_identity_after_late_repair(tmp_path, monkey
     repair._step32_drv_signoff(tmp_path, report)
     assert report["drv_signoff"]["verdict"] == "NOT_MEASURED"
     assert report["verdict"] == "NOT_MEASURED"
+
+
+def test_step32_missing_final_state_refuses_stale_pass(tmp_path, monkeypatch):
+    import librelane_postroute_repair as repair
+    monkeypatch.setattr(drv, "judge", lambda *a, **k: {
+        "name": "DRV(tran/cap/fanout)", "verdict": "PASS",
+        "failures": [], "not_measured": []})
+    source = tmp_path / "reports/phase3/sta/drv_signoff_bundle.json"
+    source.parent.mkdir(parents=True)
+    bundle = _bundle(tmp_path)
+    source.write_text(json.dumps(bundle))
+    state = tmp_path / "adopted_state.json"
+    state.write_text(json.dumps({"def": bundle["identity"]["artifacts"]["def"]["path"]}))
+    report = {"verdict": "PASS", "adopted_state": str(state)}
+    repair._step32_drv_signoff(tmp_path, report)
+    assert report["drv_signoff"]["verdict"] == "NOT_MEASURED"
+    assert report["verdict"] == "NOT_MEASURED"
+    assert not source.exists()
+
+
+def test_capture_plan_reads_applied_clock_and_io_values():
+    from drv_capture_plan import _clock_io_values
+    sdc = ("# create_clock -period 99 [get_ports clk]\n"
+           "create_clock -name clk -period 24.0 [get_ports clk]\n"
+           "set_input_delay 4.8 -clock clk [all_inputs]\n"
+           "set_output_delay 4.8 -clock clk [all_outputs]\n")
+    assert _clock_io_values(sdc) == (24.0, 4.8)
+    assert _clock_io_values(sdc + "set_output_delay 5 -clock clk [all_outputs]\n") == (24.0, None)
 
 
 def test_scene_linked_liberty_is_the_hard_slew_limit(tmp_path):
