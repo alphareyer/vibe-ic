@@ -70707,6 +70707,8 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
     _promotion = _route_promotion_read(project)
     _promoter = (_promotion or {}).get("promoter")
     _promoted_own: Optional[Dict[str, Any]] = None
+    _promotion_refusal = ""
+    _ll21_handed = False
     if _promotion is not None:
         _psha = _promotion.get("promoted_def_sha256")
         if _psha and _psha == _route_file_sha256(def_file):
@@ -70724,8 +70726,67 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
             # never credited with the PnR session's count.
             _promoted = True
             _promoted_own = {}
+    # A LibreLane step 32 and signoff_spef_repair cannot run in the same
+    # invocation. A signoff log beside this route belongs to an older run.
+    # The in-chain handoff is accepted only through its receipt's report hash;
+    # a bare marker or an unbound route-promotion record cannot certify it.
+    if _librelane_postroute_repair_mode(project) != "direct":
+        if _promoter == "librelane_step32_in_chain":
+            _chain, _why = _postroute_repair_in_chain(project)
+            _state = (_chain or {}).get("adopted_state")
+            _state_def = None
+            if _state:
+                try:
+                    _state_def = Path(json.loads(Path(_state).read_text())["def"])
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+            if (not _chain or not _chain.get("adopted")
+                    or _chain.get("verdict") != "PASS"
+                    or _state_def is None
+                    or _route_file_sha256(_state_def) !=
+                    (_promotion or {}).get("promoted_def_sha256")
+                    or (_promotion or {}).get("measurement") !=
+                    _step32_own_measurement(_chain)):
+                _promotion_refusal = (_why if not _chain else
+                                      "the receipt-bound step-32 report, adopted "
+                                      "route and promotion measurement disagree")
+                _promoted = True
+                _promoted_own = {}
+            else:
+                _promoted = False
+                _promoted_own = None
+                _ll21_handed = True
+        elif _promoter == "librelane_step32_after_route":
+            import librelane_postroute_repair as _llprr  # noqa: PLC0415
+            try:
+                _after = json.loads((project / _llprr.REPORT_REL).read_text())
+                _state_def = Path(json.loads(Path(_after["adopted_state"]).read_text())["def"])
+            except (OSError, ValueError, KeyError, TypeError):
+                _after, _state_def = {}, None
+            if (_after.get("site") != "after_direct_route"
+                    or not _after.get("adopted") or _after.get("verdict") != "PASS"
+                    or _state_def is None
+                    or _route_file_sha256(_state_def) != _route_file_sha256(def_file)
+                    or (_promotion or {}).get("promoted_def_sha256") !=
+                    _route_file_sha256(def_file)
+                    or (_promotion or {}).get("measurement") !=
+                    _step32_own_measurement(_after)):
+                _promotion_refusal = ("the after-direct-route step-32 report "
+                                      "is not bound to the shipped DEF and "
+                                      "its own antenna measurement")
+                _promoted = True
+                _promoted_own = {}
+            else:
+                _promoted = True
+                _promoted_own = (_promotion or {}).get("measurement") or {}
+        elif _promoted:
+            _promotion_refusal = ("no route-promotion record binds this "
+                                  "LibreLane step-32 route to its report")
+            _promoter = "postroute_repair_librelane"
+            _promoted_own = {}
     _ship_txt = (_ship_log.read_text(errors="ignore")
-                 if (_promoted and _promoted_own is None
+                 if (_librelane_postroute_repair_mode(project) == "direct"
+                     and _promoted and _promoted_own is None
                      and _ship_log.is_file()) else "")
     _ship_measured = "SHIP_ANT_END" in _ship_txt
     pnr_log = pnr_out / "openroad.log"
@@ -70781,7 +70842,8 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     net_viol = -1  # could not measure (ANT-0008 after failed route)
                     pin_viol = -1
                 # G-SHIP-ANTENNA — override with the SHIPPING session's counts.
-                _measured_on = "the PnR route"
+                _measured_on = ("the PnR tail after LL21 step-32 adoption"
+                                if _ll21_handed else "the PnR route")
                 _shipped_unmeasured = False
                 _own_n = (_promoted_own or {}).get("antenna_nets")
                 _own_p = (_promoted_own or {}).get("antenna_pins")
@@ -70822,7 +70884,9 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     _measured_on = (f"NOTHING — {_promoter or 'signoff_spef_repair'} "
                                     "PROMOTED a "
                                     "re-routed design over the shipped DEF and "
-                                    "no antenna check ran on it")
+                                    "no antenna check bound to this run ran on it"
+                                    + (f" ({_promotion_refusal})"
+                                       if _promotion_refusal else ""))
                 if routing_incomplete:
                     clean = False
                     verdict = "FAIL"
@@ -70882,6 +70946,11 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     "# last change to the route. The extraction gate (step 31) is\n"
                     "# what measures what that change did.\n"
                     if (_unverified_after and not routing_incomplete) else "")
+                _stale_ship_note = (
+                    "\n# STALE signoff_spef_repair.log NOT READ: step 32 ran on "
+                    "LibreLane in this invocation.\n"
+                    if (_librelane_postroute_repair_mode(project) != "direct"
+                        and _ship_log.is_file()) else "")
                 _subject = _measured_subject(project, top, [def_file],
                                              tool_log=pnr_log)
                 antenna_rpt.write_text(
@@ -70945,13 +71014,18 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                        f"can continue, so it is NOT visible as a routing "
                        f"failure)\n" if pins_unaccessed else "")
                     + _incomplete_note + _cosmetic_note
-                    + _unverified_note)
+                    + _unverified_note + _stale_ship_note)
                 _aa.write_text(antenna_rpt.parent / "antenna.json", json.dumps({
                     "tool": "openroad",
                     "mode": "antenna_check_in_session_post_repair",
                     "net_violations": net_viol if have_counts else None,
                     "pin_violations": pin_viol if have_counts else None,
                     "clean": clean,
+                    "promoted_by": _promoter,
+                    "promotion_binding_refusal": _promotion_refusal or None,
+                    "stale_signoff_spef_repair_log": (
+                        _rel_to_project(_ship_log, project)
+                        if _stale_ship_note else None),
                     # G-SHIP-ANTENNA — WHICH state of the design the numbers
                     # above describe. A count and the route it was taken on are
                     # two facts; publishing only the first is how a clean PnR
