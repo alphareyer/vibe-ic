@@ -60,6 +60,8 @@ ORACLE = {
         "create_clock -name clk -period 1.234 [get_ports clk]\n",
     "input/constraints/golden_timing.sdc":
         "create_clock -name clk -period 2.5 [get_ports clk]\n",
+    "input/constraints/oracle.sdc":
+        "create_clock -name clk -period 2.5 [get_ports clk]\n",
     "input/golden/top.v":
         "module top(\n  input wire clk,\n  output wire q\n);\n"
         "parameter GOLDEN_P = 1;\nendmodule\n",
@@ -275,6 +277,7 @@ def test_clock_period_is_the_design_one_not_the_golden_one(observed):
 def test_sdc_survey_names_the_oracle_files_as_excluded_unread(observed):
     rows = observed["_staged_sdc_survey"]["value"]
     for rel in ("input/constraints/golden_timing.sdc",
+                "input/constraints/oracle.sdc",
                 "input/reference_flow/golden/golden.sdc"):
         consumed, reason = rows[rel]
         assert not consumed and reason.startswith("§4.05"), (rel, reason)
@@ -370,3 +373,22 @@ def test_l19_traceability_corpus_holds_only_design_tokens(observed):
 
 def test_register_census_counts_an_excluded_doc_as_excluded_not_read(observed):
     assert observed["documentary_census"]["value"] == [2, 1]
+
+
+def test_register_census_pins_excluded_member_and_scope_disclosure(tmp_path):
+    import sys
+    sys.path.insert(0, str(PROGRAMS))
+    import l4_regmap_declared_register_coverage_check as l4
+    docs = tmp_path / "input" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "regmap_ref.md").write_text(
+        "| Address | Name |\n|---|---|\n| 0x20 | REF_REG |\n")
+    census = l4.documentary_census(tmp_path)
+    assert [entry.split(" (")[0] for entry in census["excluded_oracle"]] == [
+        "input/docs/regmap_ref.md"]
+    assert all(entry.split(" (", 1)[1].startswith("§4.05")
+               for entry in census["excluded_oracle"])
+    _, summary = l4.evaluate(tmp_path)
+    reason = summary["denominator"]["not_applicable_reason"]
+    assert "deliberately did not read 1 file(s)" in reason
+    assert "input/docs/regmap_ref.md" in reason

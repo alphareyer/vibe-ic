@@ -228,7 +228,7 @@ def design_input_denial(project: Union[str, Path], path: Union[str, Path],
     root = project / "input"
     try:
         rel = Path(path).resolve().relative_to(root.resolve())
-    except ValueError:
+    except (ValueError, OSError, RuntimeError):
         try:
             rel = Path(path).relative_to(root)
         except ValueError:
@@ -238,15 +238,20 @@ def design_input_denial(project: Union[str, Path], path: Union[str, Path],
         return None
     import step_input_scope as _sis  # lazy: it imports this module
     name = parts[-1]
-    if parts[0] in STAGED_CONFIG_ROOTS and len(parts) > 1:
-        words = is_oracle_name if parts[0] in RECIPE_ROOTS else is_result_name
+    staged_root = next((i for i, part in enumerate(parts[:-1])
+                        if part in STAGED_CONFIG_ROOTS), None)
+    if staged_root is not None:
+        root_name = parts[staged_root]
+        words = (is_oracle_name if root_name in RECIPE_ROOTS else
+                 lambda value: is_result_name(value) or
+                 has_name_word(value, ORACLE_TREE_SEGMENTS))
         segments = set(_sis.deny_segments()) | set(ORACLE_TREE_SEGMENTS)
-        for part in parts[1:-1]:
+        for part in parts[staged_root + 1:-1]:
             if part.lower() in segments or words(part):
-                return f"§4.05: off-limits directory {part}/ inside input/{parts[0]}/"
+                return f"§4.05: off-limits directory {part}/ inside input/{root_name}/"
         if ((file_name_words and words(name))
                 or re.search(_sis.DENY_FILENAME_RE, name.lower())):
-            return f"§4.05: oracle-named file {name} inside input/{parts[0]}/"
+            return f"§4.05: oracle-named file {name} inside input/{root_name}/"
     elif file_name_words and is_result_name(name) and name.lower().endswith(CONFIG_SUFFIXES):
         return f"§4.05: result-named config file {name} under input/"
     deny = set(_sis.deny_segments())

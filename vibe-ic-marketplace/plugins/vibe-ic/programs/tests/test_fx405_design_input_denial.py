@@ -37,6 +37,7 @@ DENIED = {
     "input/reference_flow/orfs_rules.json": _QOR,
     "input/reference_flow/qor.json": _QOR,          # judged by CONTENT
     "input/constraints/golden_timing.sdc": "create_clock -period 1\n",
+    "input/constraints/oracle.sdc": "create_clock -period 2.5\n",
     "input/golden/top.v": "module top; endmodule\n",
     "input/expected/out.txt": "x\n",
     "input/score/score.py": "x = 1\n",
@@ -51,6 +52,7 @@ DENIED = {
     # digit, a space or a capital is still the word.
     "input/reference_flow/oracle.mk": "export X = 1\n",
     "input/reference_flow/ground_truth_qor/flow.mk": "export X = 1\n",
+    "input/ip/reference_flow/golden/config.tcl": "set ::env(DIE_AREA) \"0 0 200 200\"\n",
     "input/reference_flow/golden2.mk": "export X = 1\n",
     "input/reference_flow/results1/flow.mk": "export X = 1\n",
     "input/reference_flow/GoldenConfig.mk": "export X = 1\n",
@@ -183,6 +185,18 @@ def test_a_dangling_design_recipe_is_not_called_an_oracle(project):
     link = project / "input/reference_flow/linked.mk"
     link.symlink_to(project / "input/reference_flow/does_not_exist.mk")
     assert rfb.design_input_denial(project, link) is None
+
+
+def test_a_symlink_loop_falls_through_to_reader_unreadable_handling(project):
+    for rel in ("input/constraints/loop.sdc", "input/reference_flow/loop.mk"):
+        link = project / rel
+        link.symlink_to(link.name)
+        assert rfb.design_input_denial(project, link) is None
+
+
+def test_nested_reference_flow_oracle_directory_is_denied(project):
+    path = project / "input/ip/reference_flow/golden/config.tcl"
+    assert rfb.design_input_denial(project, path).startswith("§4.05")
 
 
 def test_an_unreadable_oracle_is_still_denied_by_its_name(project):
