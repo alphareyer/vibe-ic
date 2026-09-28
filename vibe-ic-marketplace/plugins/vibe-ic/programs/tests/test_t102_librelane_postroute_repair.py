@@ -188,6 +188,32 @@ def test_native_sta_removes_embedded_flat_derate_before_explicit_recipe(tmp_path
     assert result['setup_ws_min'] == -0.04
     assert result['native_sdc_sha256'] == contract.digest(sdc)
 
+
+def test_native_sdc_derate_parser_refuses_nonformal_commands(tmp_path):
+    """The SDC reader recognizes executable Tcl, never prose or a near-match."""
+    runner = importlib.import_module('phase3_one_shot_runner')
+    early = runner._FLAT_OCV_DERATE_EARLY
+    late = runner._FLAT_OCV_DERATE_LATE
+    ctx = {'derate': [early, late]}
+    out = tmp_path / 'native'
+    out.mkdir()
+    valid = write(tmp_path / 'valid.sdc',
+                  f'# no derate claim in this comment\n'
+                  f'set_timing_derate -early {early:.4f}\n'
+                  f'set_timing_derate -late {late:.4f}\n')
+    measured, _, _ = native._measurement_sdc(ctx, valid, out)
+    assert measured.read_text() == '# no derate claim in this comment\n'
+    wrong = write(tmp_path / 'wrong.sdc',
+                  f'set_timing_derate -early {early:.4f}\n'
+                  'set_timing_derate -late 1.10\n')
+    with pytest.raises(contract.Refusal, match='NATIVE_POSTROUTE_OCV_MISMATCH'):
+        native._measurement_sdc(ctx, wrong, out)
+    malformed = write(tmp_path / 'malformed.sdc',
+                      f'set_timing_derate -early {early:.4f}\n'
+                      f'set_timing_derate -late {late:.4f} -cell_delay\n')
+    with pytest.raises(contract.Refusal, match='NATIVE_POSTROUTE_OCV_AMBIGUOUS'):
+        native._measurement_sdc(ctx, malformed, out)
+
 def _sta_metrics(setup, hold, drv=(0, 0, 0), corners=CORNERS):
     metrics = {}
     for c in corners:
