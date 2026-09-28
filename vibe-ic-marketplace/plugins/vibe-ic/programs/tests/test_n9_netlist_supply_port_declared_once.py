@@ -193,6 +193,27 @@ def test_the_dedupe_keeps_the_provenance_chain_intact(tmp_path):
     assert any(kept_rel in (r.get("outputs") or {}) for r in rows)
 
 
+def test_pnr_then_prestream_keeps_this_runs_tool_bytes(tmp_path):
+    """A recheck of the derived netlist is not a new OpenROAD production."""
+    nl = _declared(tmp_path, _netlist(5))
+    original = nl.read_bytes()
+    pnr = R._dedupe_shipped_netlist_ports(tmp_path, "dut", "pnr")
+    kept = Path(pnr["tool_bytes"])
+    assert pnr["status"] == "DEDUPED" and kept.read_bytes() == original
+
+    R.step_prestream_gate(tmp_path, "dut", None, "")
+    rows = json.loads((tmp_path / "reports/phase3/netlist_port_decls.json").read_text())["rows"]
+    prestream = next(row for row in rows if row["stage"] == "prestream")
+    assert prestream["status"] == "CLEAN", prestream
+    ledger = [json.loads(line) for line in (tmp_path / "provenance.jsonl").read_text().splitlines()]
+    assert sum(r.get("op") == "remove" and
+               str(kept.relative_to(tmp_path)) in r.get("removed", []) for r in ledger) == 0
+    assert prestream.get("stale_tool_bytes_removed") is None, prestream
+    assert prestream["tool_bytes"] == str(kept)
+    assert kept.read_bytes() == original
+    assert C.audit(tmp_path)[0] == "PASS"
+
+
 def test_the_module_is_the_one_the_file_contains_not_the_file_name(tmp_path):
     """MAJOR: after the pad ring the file keeps `<logical>_pnr.v` but its
     module is the physical chip top named by the routed DEF."""

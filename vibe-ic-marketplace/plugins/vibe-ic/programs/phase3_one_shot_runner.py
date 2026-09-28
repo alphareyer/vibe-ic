@@ -56024,6 +56024,65 @@ def _prestream_route_census(project: Path, top: str, pdk: PdkConfig,
 #: end in `.v`, so no `*.v` / `*_pnr.v` netlist discovery ever picks it up
 _NETLIST_TOOL_BYTES_SUFFIX = ".tool_bytes"
 
+
+def _new_clean_netlist_supersedes_tool_bytes(project: Path, netlist: Path,
+                                             kept: Path) -> bool:
+    """True only for a newer, declared clean OpenROAD output.
+
+    A CLEAN parse can also be the second reading of our own deduped netlist.
+    The latest netlist declaration must therefore be a successful OpenROAD
+    invocation after the kept-byte declaration, and both current files must
+    still match their newest declared hashes. Missing ledger evidence retains
+    the producer bytes.
+    """
+    net_rel = _project_rel(project, netlist)
+    kept_rel = _project_rel(project, kept)
+    if net_rel is None or kept_rel is None:
+        return False
+    latest_net: Optional[Tuple[int, Dict[str, Any], str]] = None
+    latest_kept: Optional[Tuple[int, Dict[str, Any], str]] = None
+    try:
+        lines = (Path(project) / "provenance.jsonl").read_text().splitlines()
+    except OSError:
+        return False
+    for index, line in enumerate(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if _is_removal_record(record):
+            if _removes(record, net_rel):
+                latest_net = None
+            if _removes(record, kept_rel):
+                latest_kept = None
+            continue
+        try:
+            if int(record.get("exit_code", 0)) != 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        outputs = record.get("outputs") or {}
+        if not isinstance(outputs, dict):
+            continue
+        net_sha = outputs.get(net_rel)
+        kept_sha = outputs.get(kept_rel)
+        if isinstance(net_sha, str):
+            latest_net = (index, record, net_sha)
+        if isinstance(kept_sha, str):
+            latest_kept = (index, record, kept_sha)
+    if latest_net is None or latest_kept is None:
+        return False
+    net_index, producer, net_sha = latest_net
+    kept_index, _, kept_sha = latest_kept
+    return (net_index > kept_index
+            and producer.get("record") == "invocation"
+            and producer.get("tool") == "openroad"
+            and net_sha == _file_sha256(netlist)
+            and kept_sha == _file_sha256(kept))
+
+
 def _dedupe_shipped_netlist_ports(project: Path, top: str,
                                   stage: str) -> Dict[str, Any]:
     """N9 — remove EXACT repeated top-port names/declarations from the
@@ -56099,23 +56158,31 @@ def _dedupe_shipped_netlist_ports(project: Path, top: str,
                 lambda: _aa.write_text(netlist, new))
             row["sha256_after"] = hashlib.sha256(new.encode()).hexdigest()
         elif rec.get("status") == "CLEAN":
-            # The previous run may have needed a dedupe while this new tool
-            # netlist does not. Retire that old run's kept bytes, including
-            # their ledger declaration, so they cannot pose as this run's.
+            # CLEAN also describes our own already-deduped netlist when the
+            # pre-stream gate checks it again in the SAME run. Retire previous
+            # producer bytes only after a newer clean OpenROAD output is
+            # declared and matches disk.
             kept = netlist.with_name(netlist.name + _NETLIST_TOOL_BYTES_SUFFIX)
             if kept.is_file():
-                old_sha = _sha256_of_file(kept)
-                try:
-                    kept.unlink()
-                except OSError as exc:
-                    row["stale_tool_bytes_removal_error"] = (
-                        f"{type(exc).__name__}: {exc}")
+                if not _new_clean_netlist_supersedes_tool_bytes(
+                        project, netlist, kept):
+                    row["tool_bytes"] = str(kept)
+                    row["tool_bytes_retained_reason"] = (
+                        "no newer declared clean OpenROAD output supersedes "
+                        "these producer bytes")
                 else:
-                    _append_removal_event(
-                        project, "netlist_tool_bytes_prune",
-                        [(_project_rel(project, kept) or str(kept), old_sha)],
-                        "new tool netlist needs no port dedupe")
-                    row["stale_tool_bytes_removed"] = str(kept)
+                    old_sha = _sha256_of_file(kept)
+                    try:
+                        kept.unlink()
+                    except OSError as exc:
+                        row["stale_tool_bytes_removal_error"] = (
+                            f"{type(exc).__name__}: {exc}")
+                    else:
+                        _append_removal_event(
+                            project, "netlist_tool_bytes_prune",
+                            [(_project_rel(project, kept) or str(kept), old_sha)],
+                            "new declared clean OpenROAD netlist needs no port dedupe")
+                        row["stale_tool_bytes_removed"] = str(kept)
         row["check_status"], row["findings"] = _npd.problems(new, module)
     record = _pl.reports_dir(project) / "phase3" / "netlist_port_decls.json"
     try:
