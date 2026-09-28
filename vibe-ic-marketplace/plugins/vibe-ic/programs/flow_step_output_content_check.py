@@ -108,6 +108,15 @@ def main() -> int:
         print("FAIL:", error)
     if errors:
         return 1
+    _nm = (frontend or {}).get("not_measured")
+    if _nm:
+        # A tool that STALLED or hit its backstop measured nothing: a
+        # non-verdict (rc 2) the flow reads by the `INCOMPLETE` token and the
+        # declared class, never a FAIL and never a PASS.
+        print(f"INCOMPLETE: {args.mode} output content NOT_MEASURED -- "
+              f"{_nm.get('why')} [verdict=NOT_MEASURED, "
+              f"reason_class={_nm.get('reason_class')}]")
+        return 2
     print(f"PASS: {args.mode} output content")
     if frontend is not None:
         # A PASS the front end reached only by RELAXING a tool (e.g. slang's
