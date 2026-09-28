@@ -138,10 +138,12 @@ def test_the_phase2_emitter_builds_the_named_map(tmp_path):
 
 
 # ── the order: layer gates judge the final layers ─────────────────────────
-
-_PRODUCER_PREFIXES = ("_post_emit_", "gen_l4_", "gen_l5_", "gen_l6_",
-                      "_g19_post_emit_", "reconcile_register_map_claims")
-
+#
+# DERIVED FROM THE WRITES, not from names (review wave 8): a producer is any
+# function that both names a judged document (L4_REGMAP / L5_ADI_SPEC /
+# L6_CONTROL_LOGIC) and writes a file, directly or through its callees -- in
+# the runner, or in a program module `main` imports it from (the protocol-synth
+# overlays) -- plus any statement in `main` that does both in line.
 
 def _main():
     tree = ast.parse(RUNNER.read_text())
@@ -150,50 +152,150 @@ def _main():
 
 
 def _layergate2_loop(fn):
-    for n in ast.walk(fn):
-        if isinstance(n, ast.For) and isinstance(n.iter, ast.Tuple):
-            names = [e.elts[0].value for e in n.iter.elts
-                     if isinstance(e, ast.Tuple) and e.elts
-                     and isinstance(e.elts[0], ast.Constant)]
-            if "l4_regmap_declared_register_coverage_check" in names:
-                return n
-    raise AssertionError("the layergate-2 loop is gone")
+    """The one place `main` runs the layergate-2 gates."""
+    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "_run_layergate2"]
+    if len(calls) != 1:
+        raise AssertionError(f"main runs the layergate-2 gates {len(calls)} times")
+    return calls[0]
 
 
-#: A producer that may run after the gate loop ONLY because the documents
-#: it writes are declared, by the runner itself, and exclude the judged ones.
-_DECLARED_WRITES = {
-    "_post_emit_enforce_clock_contract": R._CLOCK_CONTRACT_DOCS,
-}
-_JUDGED = ("L4_", "L5_", "L6_")
+_JUDGED = ("L4_REGMAP", "L5_ADI_SPEC", "L6_CONTROL_LOGIC")
+_WRITES = ("dump", "write_text", "write_json", "write_bytes")
+
+
+def _names_doc(node) -> bool:
+    return any(isinstance(c, ast.Constant) and isinstance(c.value, str)
+               and any(j in c.value for j in _JUDGED) for c in ast.walk(node))
+
+
+def _writes(node) -> bool:
+    return any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+               and c.func.attr in _WRITES for c in ast.walk(node))
+
+
+def _producers(tree) -> set:
+    funcs = {n.name: n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    def calls(f):
+        return {c.func.id for c in ast.walk(f)
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+    doc = {n for n, f in funcs.items() if _names_doc(f)}
+    wr = {n for n, f in funcs.items() if _writes(f)}
+    for grow in (doc, wr):
+        changed = True
+        while changed:
+            changed = False
+            for n, f in funcs.items():
+                if n not in grow and calls(f) & grow:
+                    grow.add(n)
+                    changed = True
+    return {n for n in doc & wr if n != "main"}
+
+
+def _late_producers(source: str) -> tuple:
+    tree = ast.parse(source)
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    loop = _layergate2_loop(main)
+    prod = _producers(tree)
+    for n in ast.walk(main):
+        if isinstance(n, ast.ImportFrom) and n.module \
+                and (PROGRAMS / f"{n.module}.py").is_file():
+            mod = _producers(ast.parse((PROGRAMS / f"{n.module}.py").read_text()))
+            prod |= {a.asname or a.name for a in n.names if a.name in mod}
+    late = [f"{n.func.id}@{n.lineno}" for n in ast.walk(main)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id in prod and n.lineno > loop.end_lineno]
+    late += [f"inline@{st.lineno}" for st in main.body
+             if st.lineno > loop.end_lineno and _names_doc(st) and _writes(st)]
+    return prod, late
 
 
 def test_the_layer_gates_run_after_every_producer_of_their_layers():
-    """Derived, not hand-listed: every call in `main` to a layer generator
-    or a post-emit producer precedes the loop that judges those layers,
-    unless the runner declares that producer's documents and they are not
-    L4/L5/L6."""
-    for fn_name, docs in _DECLARED_WRITES.items():
-        assert not any(d.startswith(_JUDGED) for d in docs), (fn_name, docs)
-    fn = _main()
-    loop = _layergate2_loop(fn)
-    late = []
-    for n in ast.walk(fn):
-        if not isinstance(n, ast.Call):
-            continue
-        f = n.func
-        name = f.id if isinstance(f, ast.Name) else (
-            f.attr if isinstance(f, ast.Attribute) else "")
-        if (name.startswith(_PRODUCER_PREFIXES) and n.lineno > loop.lineno
-                and name not in _DECLARED_WRITES):
-            late.append(f"{name}@{n.lineno}")
-    assert late == [], (f"producers of the judged layers run after the gate "
-                        f"loop at line {loop.lineno}: {late}")
+    prod, late = _late_producers(RUNNER.read_text())
+    # the population is real: the unprefixed writers and the overlays are in it
+    assert {"gen_l4_regmap", "_v1_6_295_propagate_class_path_to_layer_docs",
+            "_v1_6_350_post_emit_spice_metadata",
+            "_g19_post_emit_backfill_register_offsets"} <= prod, sorted(prod)
+    assert "_apply_can" in prod
+    assert late == [], f"producers of the judged layers after the gate loop: {late}"
 
 
-def test_a_blocking_gate_names_the_report_where_it_was_written():
-    """The FAIL line cites the path `_pl.report_path` wrote to."""
-    loop = _layergate2_loop(_main())
-    src = ast.get_source_segment(RUNNER.read_text(), loop)
-    assert "see reports/phase1/{_report_stem}.json" not in src
-    assert "_gate_report.relative_to(project)" in src
+@pytest.mark.parametrize("call", [
+    "_v1_6_350_post_emit_spice_metadata(project)",
+    "_v1_6_295_propagate_class_path_to_layer_docs(project)",
+])
+def test_the_order_guard_sees_a_producer_with_no_prefix(call):
+    """Self-mutation: move an unprefixed producer below the loop; the guard
+    must report it."""
+    src = RUNNER.read_text()
+    line = f"    {call}\n"
+    assert src.count(line) == 1, call
+    src = src.replace(line, "", 1)
+    anchor = '    print(f"[15/15] coverage report ...")\n'
+    src = src.replace(anchor, line + anchor, 1)
+    _prod, late = _late_producers(src)
+    assert any(l.startswith(call.split("(")[0]) for l in late), late
+
+
+_FAKE_ENUM = """import sys
+print("[FAIL] l4_regmap_enumerated_values_typed_check: 1 field lacks codes")
+sys.exit(1)
+"""
+_FAKE_JSON = """import json, sys
+out = sys.argv[sys.argv.index("--json") + 1]
+open(out, "w").write(json.dumps({"verdict": "FAIL"}))
+print("[FAIL] fake_json_check: a real finding")
+sys.exit(1)
+"""
+
+
+def test_every_blocking_line_cites_a_report_that_exists(tmp_path, capsys):
+    """Behaviour, not a source string (review wave 8): a gate with no --json
+    of its own still gets a report at the path its FAIL line cites."""
+    gates = tmp_path / "gates"
+    gates.mkdir()
+    (gates / "l4_regmap_enumerated_values_typed_check.py").write_text(_FAKE_ENUM)
+    (gates / "fake_json_check.py").write_text(_FAKE_JSON)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    failed = R._run_layergate2(
+        proj, gates=(("l4_regmap_enumerated_values_typed_check", "l4_enum"),
+                     ("fake_json_check", "fake_json")), gate_dir=gates)
+    out = capsys.readouterr().out
+    assert failed == ["l4_regmap_enumerated_values_typed_check",
+                      "fake_json_check"]
+    cited = [l.split("(see ", 1)[1].rstrip(")") for l in out.splitlines()
+             if "FAIL — blocks phase1" in l]
+    assert len(cited) == 2, out
+    for rel in cited:
+        assert (proj / rel).is_file(), rel
+    enum = json.loads((proj / cited[0]).read_text())
+    assert "lacks codes" in enum["stdout"] and enum["returncode"] == 1
+
+
+def test_a_stalled_gate_is_not_measured_not_skipped(tmp_path, capsys,
+                                                    monkeypatch):
+    gates = tmp_path / "gates"
+    gates.mkdir()
+    (gates / "fake_json_check.py").write_text(_FAKE_JSON)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+
+    def stall(*a, **kw):
+        raise R._pr.Stalled(["gate"], 3, 1.0, 9.0, {"cpu": 0})
+    monkeypatch.setattr(R._pr, "run", stall)
+    failed = R._run_layergate2(proj, gates=(("fake_json_check", "fake"),),
+                               gate_dir=gates)
+    out = capsys.readouterr().out
+    assert failed == []
+    assert "NOT_MEASURED — stalled, the layer is NOT judged" in out
+    assert "SKIP" not in out
+
+
+def test_the_tail_failure_line_names_the_report_directory():
+    src = RUNNER.read_text()
+    assert "— see reports/phase1/\")" not in src
+    assert "and reports/phase1/*.json" not in src
