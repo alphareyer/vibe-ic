@@ -174,7 +174,7 @@ def test_top_up_masks_every_placed_pad_and_macro_from_odb(tmp_path, monkeypatch)
     (tech / 'macro.lef').write_text('MACRO BLOCK_CELL\n CLASS BLOCK ;\nEND BLOCK_CELL\n')
     cfg = json.loads(config.read_text())
     cfg['PAD_LEFS'] = ['/pdk/processA/tech/pad.lef']
-    cfg['MACRO_LEFS'] = ['/pdk/processA/tech/macro.lef']
+    cfg['MACRO_LEFS'] = [str(tech / 'macro.lef')]
     _put(config, cfg)
     routed = project / 'phase3/stage3/pnr/routed.def'
     routed.parent.mkdir(parents=True)
@@ -206,6 +206,8 @@ def test_top_up_masks_every_placed_pad_and_macro_from_odb(tmp_path, monkeypatch)
                                  config, '37-placed-masks')
     derived = json.loads(Path(result['config']).read_text())
     assert len(calls) == 2 and 'openroad' in calls[0]
+    script = Path(calls[0][-1]).read_text()
+    assert 'read_lef {/pdk/processA/tech/macro.lef}' in script
     assert derived['keepout_boxes_um'] == [
         [-0.3, -0.3, 10.3, 8.3],
         [19.7, 29.7, 28.3, 37.3],
