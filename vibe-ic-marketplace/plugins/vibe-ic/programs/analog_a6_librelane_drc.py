@@ -123,11 +123,11 @@ def _image_run(image: str, entrypoint: str, args: List[str],
     """One throw-away container of the pinned image: a PDK file lives there
     and nowhere on this host."""
     import _docker_memory as _dmem
-    from librelane_contract import supervised_docker_run
-    return supervised_docker_run(
+    from librelane_contract import PROBE_DEADLINE_S, run_container
+    return run_container(
         [docker, "run", "--rm", *_dmem.docker_memory_flags(),
          "--entrypoint", entrypoint, image, *args],
-        label=f"a6-drc-{entrypoint}")
+        probe_deadline_s=PROBE_DEADLINE_S)
 
 
 def image_extra_runsets(image: str, main_runset: str) -> List[str]:
@@ -412,15 +412,17 @@ def _capability_controls(arm: "_Arm", block: str, image: str,
             if not dst.is_file():
                 import subprocess
                 import _docker_memory as _dmem
-                from librelane_contract import supervised_docker_run
-                cp = supervised_docker_run(
+                from librelane_contract import PROBE_DEADLINE_S, run_container
+                import base64
+                cp = run_container(
                     ["docker", "run", "--rm", *_dmem.docker_memory_flags(),
-                     "--entrypoint", "cat", image, f"{unit_dir}/{tc}"],
-                    label=f"a6-drc-unit-{tc}", as_text=False)
+                     "--entrypoint", "python3", image, "-c",
+                     "import base64,pathlib,sys;print(base64.b64encode(pathlib.Path(sys.argv[1]).read_bytes()).decode())",
+                     f"{unit_dir}/{tc}"], probe_deadline_s=PROBE_DEADLINE_S)
                 if cp.returncode or not cp.stdout:
                     results[tc] = None
                     continue
-                write_bytes(dst, cp.stdout)
+                write_bytes(dst, base64.b64decode(cp.stdout.strip(), validate=True))
             if len(top) != 1:
                 results[tc] = None
                 continue

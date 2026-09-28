@@ -697,10 +697,9 @@ def test_standalone_sta_uses_shared_supervisor_and_preserves_log(tmp_path,
         calls.append((cmd, kwargs))
         return SimpleNamespace(returncode=0, stdout="STA complete", stderr="")
 
-    monkeypatch.setattr(signoff, "supervised_docker_run", run)
+    monkeypatch.setattr(signoff, "run_container", run)
     log = tmp_path / "sta" / "arm.log"
     cp = signoff.run_sta_script(tmp_path, "img", [], tmp_path / "arm.tcl", log)
     assert cp.returncode == 0
     assert log.read_text() == "STA complete\n"
-    assert calls[0][1] == {"label": "signoff-standalone-sta",
-                           "progress_dir": log.parent}
+    assert calls[0][1] == {"supervised": True, "log": log}

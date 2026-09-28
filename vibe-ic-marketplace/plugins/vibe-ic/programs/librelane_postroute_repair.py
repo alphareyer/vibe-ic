@@ -165,11 +165,19 @@ def fork_capability(image: str, docker: str = "docker") -> Dict[str, Any]:
            "set -o pipefail; printf '%s' \"$1\" | openroad -no_init "
            "-no_splash -exit /dev/stdin 2>&1", "vibeic-probe", tcl]
     try:
+        from librelane_contract import PROBE_DEADLINE_S
         import librelane_contract as _ll
-        done = _ll.supervised_docker_run(cmd, label='postroute-repair-capability')
+        done = _ll.run_container(cmd, probe_deadline_s=PROBE_DEADLINE_S)
         transcript = (done.stdout or "") + "\n" + (done.stderr or "")
     except (OSError, subprocess.SubprocessError) as exc:
         return {"capable": None, "image": image, "reason": f"probe could not run: {exc}"}
+    except RuntimeError as exc:
+        # run_container reports an expired probe deadline as Refusal, which
+        # inherits RuntimeError. Capability then remains unmeasured; a probe
+        # timeout cannot establish that the image lacks this fork feature.
+        if getattr(exc, "code", None) != "LL_TOOL_DEADLINE":
+            raise
+        return {"capable": None, "image": image, "reason": str(exc)}
     capable = flag_accepted_vs_control(transcript)
     return {"capable": capable, "image": image,
             "transcript_tail": transcript.strip()[-600:]}

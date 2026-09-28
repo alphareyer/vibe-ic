@@ -241,6 +241,12 @@ def test_chain_stall_is_reaped_by_its_name_and_recorded_unmeasured(tmp_path, mon
     names = []
 
     def tool_run(cmd, **_):
+        if len(cmd) > 1 and cmd[1] == 'inspect':
+            return SimpleNamespace(returncode=0, stdout='0', stderr='')
+        if len(cmd) > 1 and cmd[1] == 'rm':
+            names.append((cmd[-1], 'stalled'))
+            reaped.set()
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
         launched.append(cmd)
         folder = Path(cmd[cmd.index('-o') + 1])
         put(folder / 'state_out.json', {'nl': str(source)})
@@ -253,19 +259,11 @@ def test_chain_stall_is_reaped_by_its_name_and_recorded_unmeasured(tmp_path, mon
 
     monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
     monkeypatch.setattr(contract.subprocess, 'run', tool_run)
-    monkeypatch.setattr(contract, 'STALL_GRACE_S', 0.15, raising=False)
-    if hasattr(contract, '_dwd'):
-        monkeypatch.setattr(contract._dwd, 'ephemeral_container_cpu_probe',
-                            lambda name: lambda proc: None)
+    monkeypatch.setattr(contract, 'TOOL_STALL_GRACE_S', 0.15)
+    import _watchdog
+    monkeypatch.setattr(_watchdog, 'host_tree_progress', lambda pid: None)
 
-        def reap(name):
-            def stop(proc, reason):
-                names.append((name, reason))
-                reaped.set()
-            return stop
-        monkeypatch.setattr(contract._dwd, 'ephemeral_container_reap', reap)
-
-    with pytest.raises(contract.Refusal, match='LL_STALLED'):
+    with pytest.raises(contract.Refusal, match='LL_TOOL_STALLED'):
         contract.run_chain(p, 'candidate', [('OpenROAD.Floorplan', config, initial)])
     folder = p / 'phase3/librelane/01-openroad-floorplan'
     record = json.loads((folder / 'vibeic_stalled.json').read_text())
@@ -274,7 +272,8 @@ def test_chain_stall_is_reaped_by_its_name_and_recorded_unmeasured(tmp_path, mon
     assert not (folder / 'state_out.json').exists()
     assert (folder / 'state_out.stalled.json').is_file()
     assert not (folder / 'vibeic_receipt.json').exists()
-    assert len(names) == 1 and names[0][1] == 'stalled'
+    assert names and all(reason == 'stalled' for _name, reason in names)
+    assert len({name for name, _reason in names}) == 1
     assert launched[0][launched[0].index('--name') + 1] == names[0][0]
     assert '--memory' in launched[0] and '--memory-swap' in launched[0]
 
@@ -288,6 +287,11 @@ def test_chain_progressing_past_stall_grace_is_not_killed(tmp_path, monkeypatch)
     reaped = []
 
     def tool_run(cmd, **_):
+        if len(cmd) > 1 and cmd[1] == 'inspect':
+            return SimpleNamespace(returncode=0, stdout='123', stderr='')
+        if len(cmd) > 1 and cmd[1] == 'rm':
+            reaped.append((cmd[-1], 'stalled'))
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
         folder = Path(cmd[cmd.index('-o') + 1])
         log = folder / 'tool.log'
         for i in range(7):
@@ -298,12 +302,10 @@ def test_chain_progressing_past_stall_grace_is_not_killed(tmp_path, monkeypatch)
 
     monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
     monkeypatch.setattr(contract.subprocess, 'run', tool_run)
-    monkeypatch.setattr(contract, 'STALL_GRACE_S', 0.15, raising=False)
-    if hasattr(contract, '_dwd'):
-        monkeypatch.setattr(contract._dwd, 'ephemeral_container_cpu_probe',
-                            lambda name: lambda proc: None)
-        monkeypatch.setattr(contract._dwd, 'ephemeral_container_reap',
-                            lambda name: lambda proc, reason: reaped.append((name, reason)))
+    monkeypatch.setattr(contract, 'TOOL_STALL_GRACE_S', 0.15)
+    import _watchdog
+    readings = iter(range(1, 1000))
+    monkeypatch.setattr(_watchdog, 'host_tree_progress', lambda pid: next(readings))
 
     folder = contract.run_chain(
         p, 'candidate', [('OpenROAD.Floorplan', config, initial)])[0]
@@ -320,14 +322,14 @@ def test_step31_reports_chain_stall_as_unmeasured(tmp_path, monkeypatch):
                         lambda project, pdk, image=None: str(tmp_path))
 
     def stalled(*args, **kwargs):
-        raise contract.Refusal('LL_STALLED', 'the step made no forward progress')
+        raise contract.Refusal('LL_TOOL_STALLED', 'the step made no forward progress')
 
     monkeypatch.setattr(pv, 'run_half', stalled)
     result = runner._step31_librelane(
         tmp_path, 'block', SimpleNamespace(name='processA'), 'lvs', publish=False)
     assert result.status == 'NOT_MEASURED'
-    assert result.reason_class == 'stalled'
-    assert 'LL_STALLED' in result.detail
+    assert result.reason_class == runner._V.ReasonClass.EXECUTION_ERROR
+    assert 'LL_TOOL_STALLED' in result.detail
 
 
 def test_floorplan_accepts_netlist_only_before_it_creates_geometry(tmp_path, monkeypatch):

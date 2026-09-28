@@ -2303,7 +2303,23 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                '-i', str(state_path), '-o', str(folder)]
         if pdk_root:
             cmd.extend(['--pdk-root', pdk_root])
-        completed = run_container(cmd, supervised=True, log=folder / 'invocation.log')
+        try:
+            completed = run_container(cmd, supervised=True,
+                                      log=folder / 'invocation.log')
+        except Refusal as exc:
+            if exc.code != 'LL_TOOL_STALLED':
+                raise
+            partial = folder / 'state_out.json'
+            moved = folder / 'state_out.stalled.json'
+            if partial.is_file():
+                partial.replace(moved)
+            write_json(folder / 'vibeic_stalled.json', {
+                'verdict': 'NOT_MEASURED', 'reason_class': 'stalled',
+                'step': step_id, 'detail': str(exc),
+                'partial_state': str(moved) if moved.is_file() else None,
+                'invocation_log': str(folder / 'invocation.log')})
+            raise Refusal(exc.code, f'{step_id}: {exc}; '
+                          f'evidence={folder / "vibeic_stalled.json"}') from exc
         (folder / 'invocation.log').write_text(completed.stdout + '\n' + completed.stderr)
         if completed.returncode or not (folder / 'state_out.json').exists():
             raise Refusal('LL_STEP_FAILED', f'{step_id}: rc={completed.returncode}; {folder / "invocation.log"}')

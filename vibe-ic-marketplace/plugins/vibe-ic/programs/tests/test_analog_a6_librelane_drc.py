@@ -171,10 +171,10 @@ def test_a6_image_probe_uses_shared_container_supervisor(monkeypatch):
         return type("CP", (), {"returncode": 0, "stdout": "probe",
                                 "stderr": ""})()
 
-    monkeypatch.setattr(contract, "supervised_docker_run", run)
+    monkeypatch.setattr(contract, "run_container", run)
     result = A6._image_run("img", "python3", ["-c", "print('probe')"])
     assert result.returncode == 0
-    assert calls[0][1] == {"label": "a6-drc-python3"}
+    assert calls[0][1] == {"probe_deadline_s": contract.PROBE_DEADLINE_S}
     assert calls[0][0][:3] == ["docker", "run", "--rm"]
 
 

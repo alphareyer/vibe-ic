@@ -16,8 +16,7 @@ from _atomic_artefact import write_json
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
 from librelane_contract import (Refusal, declaration_config, digest, judge_step,
                                 resolve_step_configs, run_chain, select_arms,
-                                supervised_docker_run,
-                                state_from_direct)
+                                run_container, state_from_direct)
 
 STEPS = ("Magic.StreamOut", "KLayout.StreamOut", "KLayout.XOR",
          "Magic.DRC", "KLayout.DRC", "KLayout.SealRing",
@@ -95,8 +94,9 @@ def _vibeic_gds_gates(project: Path, image: str, pdk_root: Path, pdk: str,
                "--json", str(report)]
         if name == "port_labels" and tech:
             cmd.extend(["--pdk-tech", tech])
-        completed = supervised_docker_run(
-            cmd, label=f"step37-{arm}-{name}", progress_dir=base)
+        base.mkdir(parents=True, exist_ok=True)
+        completed = run_container(
+            cmd, supervised=True, log=base / f"37-{arm}-{name}.log")
         (base / f"37-{arm}-{name}.log").write_text(
             completed.stdout + "\n" + completed.stderr)
         results[name] = {"rc": completed.returncode, "report": str(report),

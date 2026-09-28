@@ -454,11 +454,10 @@ def test_standalone_ir_openroad_and_capability_probe_use_shared_supervisor(
         return type("CP", (), {"returncode": 0, "stdout": "True\n",
                                 "stderr": ""})()
 
-    monkeypatch.setattr(la, "supervised_docker_run", run)
+    monkeypatch.setattr(la, "run_container", run)
     log = tmp_path / "ir" / "openroad.log"
     log.parent.mkdir(parents=True)
     assert la._run_openroad(tmp_path, "img", tmp_path / "x.tcl", log, []) == 0
     assert la.sealring_spans_capable("img")
-    assert {kw["label"] for _cmd, kw in calls} == {
-        "ir-antenna-openroad", "ir-sealring-capability"}
-    assert calls[0][1]["progress_dir"] == log.parent
+    assert calls[0][1] == {"supervised": True, "log": log}
+    assert calls[1][1] == {"probe_deadline_s": ll.PROBE_DEADLINE_S}

@@ -98,7 +98,7 @@ def test_each_finished_stream_runs_both_existing_gds_gates(tmp_path, monkeypatch
         return SimpleNamespace(returncode=0 if substance else 1,
                                stdout="tool result", stderr="")
 
-    monkeypatch.setattr(step37, "supervised_docker_run", tool_writes)
+    monkeypatch.setattr(step37, "run_container", tool_writes)
     result = step37._vibeic_gds_gates(project, "candidate", pdk_root, "processA",
                                      gds, routed, "magic", config)
     assert result["substance"]["rc"] == 0
@@ -106,7 +106,6 @@ def test_each_finished_stream_runs_both_existing_gds_gates(tmp_path, monkeypatch
     assert all(row["sha256"] for row in result.values())
     assert len(calls) == 2
     assert "--pdk-tech" in calls[1][0]
-    assert {kw["label"] for _cmd, kw in calls} == {
-        "step37-magic-substance", "step37-magic-port_labels"}
-    assert all(kw["progress_dir"] == project / "phase3/librelane"
-               for _cmd, kw in calls)
+    assert all(kw["supervised"] is True for _cmd, kw in calls)
+    assert {Path(kw["log"]).name for _cmd, kw in calls} == {
+        "37-magic-substance.log", "37-magic-port_labels.log"}

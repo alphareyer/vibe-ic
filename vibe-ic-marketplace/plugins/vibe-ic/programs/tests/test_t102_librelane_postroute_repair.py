@@ -91,12 +91,22 @@ def test_fork_capability_probe_uses_shared_supervisor_without_raw_stdin(
         return subprocess.CompletedProcess(
             cmd, 0, stdout=FORK_TRANSCRIPT, stderr="")
 
-    monkeypatch.setattr(contract, "supervised_docker_run", run)
+    monkeypatch.setattr(contract, "run_container", run)
     result = prr.fork_capability("img")
     assert result["capable"] is True
-    assert calls[0][1] == {"label": "postroute-repair-capability"}
+    assert calls[0][1] == {"probe_deadline_s": contract.PROBE_DEADLINE_S}
     assert "-i" not in calls[0][0]
     assert prr._PROBE_REAL in calls[0][0][-1]
+
+
+def test_fork_capability_deadline_is_unmeasured(monkeypatch):
+    def deadline(*_args, **_kwargs):
+        raise contract.Refusal("LL_TOOL_DEADLINE", "probe deadline elapsed")
+
+    monkeypatch.setattr(contract, "run_container", deadline)
+    result = prr.fork_capability("img")
+    assert result["capable"] is None
+    assert "LL_TOOL_DEADLINE" in result["reason"]
 
 
 def test_an_incapable_image_refuses_before_any_state_is_built(tmp_path, monkeypatch):
