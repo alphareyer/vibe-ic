@@ -45,6 +45,7 @@ chip-AGNOSTIC: flow-step ids only; no design, PDK or cell literal.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -179,9 +180,87 @@ def _gap(sid: str, impl: str, project: Optional[Path],
             "remedy": remedy(sid, impl)}
 
 
+def _flow_steps() -> Dict[str, Dict[str, Any]]:
+    """The declared inputs and outputs of the gates, from the canonical flow."""
+    import _flow_yaml
+    import flow_compliance_check as _F
+    return {str(step["id"]): step for step in
+            (_flow_yaml.load(_F.DEFAULT_FLOW_DEF) or {}).get("steps") or []
+            if isinstance(step, dict) and "id" in step}
+
+
+def _nearest_imports(sid: str, steps: Dict[str, Dict[str, Any]],
+                     seen: Optional[set] = None) -> set:
+    """First LibreLane-owned prerequisite on each declared input path."""
+    if sid in LIBRELANE_STEPS:
+        return {sid}
+    seen = set() if seen is None else seen
+    if sid in seen or sid not in steps:
+        return set()
+    seen.add(sid)
+    spec = steps[sid]
+    parents = [str(inp["from"]) for inp in spec.get("required_inputs") or []
+               if isinstance(inp, dict) and "from" in inp]
+    if not parents:
+        parents = [str(parent) for parent in spec.get("blocks_on") or []]
+    found: set = set()
+    for parent in parents:
+        found.update(_nearest_imports(parent, steps, seen.copy()))
+    return found
+
+
+def _fresh_gate_rows(project: Path, run_started_at: Optional[float]
+                     ) -> Dict[str, Dict[str, Any]]:
+    """Only the completion audit written by this invocation can witness a gate.
+
+    A prior audit in the same project is not evidence for a new import. The
+    caller passes its start time only at finalization, after the audit refresh.
+    """
+    if run_started_at is None:
+        return {}
+    path = project / "reports/audit/phase23_completion_audit.json"
+    try:
+        if path.stat().st_mtime < run_started_at:
+            return {}
+        audit = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    scope = audit.get("scope") or {}
+    judged = {str(sid) for sid in scope.get("steps_judged") or []}
+    if not judged:
+        return {}
+    return {str(row["id"]): row for row in audit.get("steps") or []
+            if isinstance(row, dict) and str(row.get("id")) in judged
+            and row.get("status") in ("PASS", "PASS_WITH_WAIVERS", "FAIL")
+            and (row.get("gate_output") or row.get("evidence"))}
+
+
+def _fresh_step_output(project: Path, spec: Dict[str, Any],
+                       run_started_at: Optional[float]) -> Optional[str]:
+    """A declared Vibe-IC output written during this run, not an old report."""
+    if run_started_at is None:
+        return None
+    outputs = [out.get("path") for out in spec.get("program_outputs") or []
+               if isinstance(out, dict)]
+    if not outputs:
+        outputs = [out for out in spec.get("required_outputs") or []
+                   if isinstance(out, str)]
+    for pattern in outputs:
+        if not isinstance(pattern, str):
+            continue
+        for path in project.glob(pattern):
+            try:
+                if path.is_file() and path.stat().st_mtime >= run_started_at:
+                    return path.relative_to(project).as_posix()
+            except OSError:
+                continue
+    return None
+
+
 def step_producers(impl: str, manifest: Optional[Dict[str, Any]],
                    manifest_error: Optional[str] = None,
-                   project: Optional[Path] = None
+                   project: Optional[Path] = None,
+                   run_started_at: Optional[float] = None
                    ) -> Dict[str, Dict[str, Any]]:
     """Per flow step: who produced it under ``impl``. ``{}`` for the default.
 
@@ -246,14 +325,27 @@ def step_producers(impl: str, manifest: Optional[Dict[str, Any]],
             out[sid] = {"state": NOT_ATTRIBUTED, "producer": impl,
                         "reason": unclaimed or
                         "the import names no file for this step"}
+    steps = _flow_steps() if project is not None and manifest is not None else {}
+    gates = _fresh_gate_rows(Path(project), run_started_at) if steps else {}
+    imported = {str(r.get("step_id")) for _, r in rows}
     for sid in sorted(VIBEIC_MEASURES):
-        # The role is planned; the subject is claimed only once a validated
-        # import of the tool's output exists.
-        out[sid] = {"state": MEASURED_BY_VIBEIC, "producer": IMPL_DEFAULT}
-        if manifest is not None:
-            out[sid]["subject"] = f"{impl} output"
+        inputs = _nearest_imports(sid, steps) if steps else set()
+        gate = gates.get(sid)
+        output = (_fresh_step_output(Path(project), steps.get(sid, {}),
+                                     run_started_at) if gate is not None else None)
+        if (inputs and inputs <= imported and not any(missing.get(i) for i in inputs)
+                and gate is not None and output is not None):
+            out[sid] = {"state": MEASURED_BY_VIBEIC,
+                        "producer": IMPL_DEFAULT, "subject": f"{impl} output",
+                        "imported_steps": sorted(inputs),
+                        "gate_verdict": gate["status"],
+                        "gate_report": "reports/audit/phase23_completion_audit.json",
+                        "output": output}
         else:
-            out[sid]["role"] = "planned; no validated import of the output yet"
+            out[sid] = {"state": NOT_ATTRIBUTED, "producer": IMPL_DEFAULT,
+                        "role": "planned; no witnessed measurement by this run",
+                        "reason": unclaimed or
+                        "the imported input, this run's gate verdict, or its output is missing"}
     # The vibe-ic plugin steps run INSIDE LibreLane (decision 12) are claimed
     # only from the runs' own flow.logs, never from the plan.
     runs: Dict[str, List[Dict[str, Any]]] = {}
@@ -303,7 +395,8 @@ def not_performed_verdicts(producers: Dict[str, Dict[str, Any]],
     return rows
 
 
-def report_fields(project: Path, impl: Optional[str] = None) -> Dict[str, Any]:
+def report_fields(project: Path, impl: Optional[str] = None,
+                  run_started_at: Optional[float] = None) -> Dict[str, Any]:
     """What the phase one-shot reports add under a flag; ``{}`` by default."""
     impl = resolve_impl(project) if impl is None else impl
     if impl == IMPL_DEFAULT:
@@ -313,7 +406,8 @@ def report_fields(project: Path, impl: Optional[str] = None) -> Dict[str, Any]:
     except _M.ManifestError as exc:
         manifest, error = None, str(exc)
     return {"impl": impl,
-            "step_producers": step_producers(impl, manifest, error, project)}
+            "step_producers": step_producers(impl, manifest, error, project,
+                                              run_started_at)}
 
 
 def demote_verdict(summary: Dict[str, Any]) -> None:

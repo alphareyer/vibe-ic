@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -150,7 +152,7 @@ def test_each_changed_step_names_its_producer(imported):
     assert route["state"] == IO.DONE_BY_TOOL
     assert route["tool_steps"] == ["OpenROAD.DetailedRouting"]
     assert route["provenance"] == {"witnessed": route["files"]}
-    assert prod["31"]["state"] == IO.MEASURED_BY_VIBEIC
+    assert prod["31"]["state"] == IO.NOT_ATTRIBUTED
     # CMP3 is plain LibreLane Classic: its flow.log starts no Vibeic.* step,
     # so no plugin step is claimed (review W14 wave 7)
     for sid, step in (("18", "Vibeic.InsertSpareCells"),
@@ -165,6 +167,45 @@ def test_each_changed_step_names_its_producer(imported):
     for sid, p in prod.items():
         if p["state"] == IO.DONE_BY_TOOL:
             assert sid in IO.LIBRELANE_STEPS
+
+
+def test_import_alone_does_not_claim_vibeic_gates(imported):
+    """A validated CMP3 import has no evidence that our 31/35 gates ran."""
+    prod = IO.report_fields(imported, IO.IMPL_LIBRELANE)["step_producers"]
+    for sid in IO.VIBEIC_MEASURES:
+        assert prod[sid]["state"] == IO.NOT_ATTRIBUTED, (sid, prod[sid])
+        assert "subject" not in prod[sid], (sid, prod[sid])
+
+
+@pytest.mark.parametrize("sid,output", [
+    ("31", "reports/phase3/pnr_via_stack_completeness.json"),
+    ("35", "reports/phase3/dfm_screen.json"),
+])
+def test_measurement_requires_this_runs_gate_and_output(imported, sid, output):
+    """The real importer supplies the input; only a fresh gate can claim it."""
+    started = time.time()
+    path = imported / output
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"verdict": "PASS"}))
+    os.utime(path, (started + 1, started + 1))
+    audit = imported / "reports/audit/phase23_completion_audit.json"
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text(json.dumps({
+        "scope": {"steps_judged": [sid]},
+        "steps": [{"id": sid, "status": "PASS",
+                   "gate_output": "the declared gate ran"}],
+    }))
+    os.utime(audit, (started + 1, started + 1))
+    prod = IO.report_fields(imported, IO.IMPL_LIBRELANE,
+                            run_started_at=started)["step_producers"]
+    assert prod[sid]["state"] == IO.MEASURED_BY_VIBEIC, prod[sid]
+    assert prod[sid]["imported_steps"] == ["21" if sid == "31" else "34"]
+    assert prod[sid]["output"] == output
+    # A gate decision without the Vibe-IC output is only a plan.
+    path.unlink()
+    prod = IO.report_fields(imported, IO.IMPL_LIBRELANE,
+                            run_started_at=started)["step_producers"]
+    assert prod[sid]["state"] == IO.NOT_ATTRIBUTED
 
 
 def test_without_an_import_no_step_is_claimed(tmp_path):
@@ -453,11 +494,10 @@ def test_without_a_validated_import_nothing_is_claimed_in_any_state(
     (imported / "phase3/stage3/pnr/routed.def").write_text("edited\n")
     broken = IO.report_fields(imported, IO.IMPL_LIBRELANE)["step_producers"]
     for prod in (empty, broken):
-        assert {p["state"] for p in prod.values()} == \
-            {IO.NOT_ATTRIBUTED, IO.MEASURED_BY_VIBEIC}
+        assert {p["state"] for p in prod.values()} == {IO.NOT_ATTRIBUTED}
         for sid, p in prod.items():
             assert "disclosure" not in p and "subject" not in p, (sid, p)
-            if p["state"] == IO.MEASURED_BY_VIBEIC:
+            if sid in IO.VIBEIC_MEASURES:
                 assert p["role"].startswith("planned")
 
 
@@ -478,7 +518,7 @@ def test_a_run_with_a_gap_is_never_pass(imported):
                                     "design_one_shot_runner.py"])
 def test_each_runner_demotes_right_after_the_fields(runner):
     src = (PROGRAMS / runner).read_text()
-    a = src.index("summary.update(_io.report_fields(project))")
+    a = src.index("summary.update(_io.report_fields(project")
     assert src[a:].split("\n")[1].strip().startswith(
         "_io.demote_verdict(summary)")
 

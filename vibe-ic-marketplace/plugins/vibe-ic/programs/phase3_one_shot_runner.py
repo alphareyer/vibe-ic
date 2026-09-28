@@ -76194,7 +76194,7 @@ def main() -> int:
     # llv1 W14: the implementation flow and each step's producer. {} for the
     # default flow, so a default run's record is byte-for-byte unchanged.
     import _impl_outcomes as _io
-    summary.update(_io.report_fields(project))
+    summary.update(_io.report_fields(project, run_started_at=_RUN_STARTED_AT))
     _io.demote_verdict(summary)    # a step the flow did not do: never PASS
     # Per-step output view — <project>/steps/<phase>/<stage>/<id>_<slug>/.
     # A phase3-driven run used to end with NO steps tree (only the top
