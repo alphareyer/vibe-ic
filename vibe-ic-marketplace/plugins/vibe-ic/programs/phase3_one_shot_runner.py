@@ -57274,6 +57274,10 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
     if refusal:
         return StepResult("prestream_gate", "NOT_MEASURED", 0.0,
                           refusal, reason_class=_V.ReasonClass.INPUT_ABSENT)
+    # Step 32 or a later route promotion may have changed routed.def since
+    # the post-PnR publication. Refresh the five route-only outputs by digest
+    # before the broader prestream pass; equal bytes leave them untouched.
+    _canonicalize_postpnr_prerequisites(project, top, pdk, container)
     evidence = step_canonicalize_artefacts(
         project, top, pdk, container, prestream=True)
     mcf_producer_error = ""
@@ -61122,6 +61126,153 @@ def _emit_router_drc_report(project: Path, pnr_out: Path, rpt_phase3: Path,
         if str(rpt_phase3 / "drc_router.rpt") not in written:
             written.append(str(rpt_phase3 / "drc_router.rpt"))
 
+
+
+def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
+                                        container: str) -> StepResult:
+    """Publish Steps 7/8/15/16/22 from a retained route, before Step 32.
+
+    These outputs read the route, constraints and extraction only. The receipt
+    binds their bytes to routed.def, so a copied tree or an equal-mtime route
+    change cannot make an old SPEF appear current. This is an advisory producer
+    row: the existing prestream gate still decides admission after repairs.
+    """
+    t0 = time.time()
+    pnr = _pl.pnr_dir(project)
+    primary_def = pnr / f"{top}.def"
+    routed_def = pnr / "routed.def"
+    receipt = _pl.reports_phase3_dir(project) / "postpnr_canonical_basis.json"
+    if not (primary_def.is_file() and routed_def.is_file()
+            and primary_def.stat().st_size and routed_def.stat().st_size):
+        return StepResult("postpnr_canonical", "NOT_MEASURED", time.time() - t0,
+                          "routed DEF or extraction input absent; Steps 7/8/15/16/22 "
+                          "were not canonicalized", reason_class=_V.ReasonClass.INPUT_ABSENT)
+    route_sha = _sha256_file(routed_def)
+    if _sha256_file(primary_def) != route_sha:
+        return StepResult("postpnr_canonical", "NOT_MEASURED", time.time() - t0,
+                          "top DEF differs from routed DEF; extraction basis is "
+                          "ambiguous", reason_class=_V.ReasonClass.INPUT_ABSENT)
+
+    try:
+        prior = json.loads(receipt.read_text())
+    except (OSError, ValueError):
+        prior = {}
+    prior = prior if isinstance(prior, dict) else {}
+    written: List[str] = []
+    notes: List[str] = []
+
+    # The sign-off SDC is a stamped copy of the one PnR actually read. Its
+    # content, rather than existence or mtime, determines whether it changes.
+    source_sdc = pnr / "constraint.sdc"
+    canonical_sdc = _pl.constraints_dir(project) / f"{top}.sdc"
+    if source_sdc.is_file():
+        body = _stamp_sdc_provenance(source_sdc.read_text(), pdk.name)
+        if not canonical_sdc.is_file() or canonical_sdc.read_text() != body:
+            _aa.write_text(canonical_sdc, body)
+            written.append(str(canonical_sdc))
+    sdc_sha = _sha256_file(canonical_sdc) if canonical_sdc.is_file() else None
+    sdc_report = project / "reports/phase2/sdc_check.json"
+    if sdc_sha and (not sdc_report.is_file()
+                    or prior.get("sdc_sha256") != sdc_sha):
+        try:
+            check = subprocess.run(
+                [sys.executable, str(PROGRAMS_DIR / "sdc_syntax_check.py"),
+                 str(project), "--json", str(sdc_report)],
+                capture_output=True, text=True, timeout=60)
+            if sdc_report.is_file():
+                written.append(str(sdc_report))
+            if check.returncode:
+                notes.append(f"sdc_syntax_check rc={check.returncode}; "
+                             "its report retains the findings")
+        except Exception as exc:
+            notes.append(f"sdc_syntax_check NOT_MEASURED: {exc}")
+
+    pdn_path = pnr / "pdn.done"
+    pdn_ok, pdn_marker = _pnr_pdn_status(project)
+    try:
+        pdn_evidence = _def_pdn_evidence(primary_def.read_text(errors="replace"))
+    except OSError:
+        pdn_evidence = {}
+    pdn_text = _ppa_power.pdn_done_text(
+        project, pnr, primary_def, pdn_ok, pdn_marker, pdn_evidence)
+    if pdn_text is not None:
+        _aa.write_text(pdn_path, pdn_text)
+        written.append(str(pdn_path))
+
+    clock_path = _pl.cts_dir(project) / "clock_plan.json"
+    plan_path = emit_clock_plan(project, clock_path, primary_def, pnr, notes)
+    if plan_path:
+        written.append(plan_path)
+
+    spef = _pl.extracted_dir(project) / f"{top}.spef"
+    # A receipt is required even for a pre-existing SPEF: mtime alone cannot
+    # bind copied bytes to this DEF. A changed route invalidates the old file
+    # before extraction, so an extraction refusal never leaves a stale pass.
+    spef_current = (spef.is_file() and spef.stat().st_size > 0
+                    and prior.get("routed_def_sha256") == route_sha
+                    and prior.get("spef_sha256") == _sha256_file(spef))
+    if not spef_current:
+        spef.unlink(missing_ok=True)
+        mode, _ = _librelane_signoff_modes(project)
+        if mode == "librelane":
+            try:
+                _librelane_rcx_publish(
+                    project, top, pdk, spef,
+                    spef.parent / "spef_corners",
+                    _pl.reports_phase3_dir(project) / "librelane_rcx_handoff.json")
+            except Exception as exc:
+                notes.append(f"step 22 LibreLane RCX NOT_MEASURED: {exc}")
+        else:
+            try:
+                _emit_spef(project, top, pdk, container, spef, notes)
+            except Exception as exc:
+                notes.append(f"step 22 extraction NOT_MEASURED: {exc}")
+        if spef.is_file() and spef.stat().st_size > 0:
+            written.append(str(spef))
+
+    spef_sha = (_sha256_file(spef) if spef.is_file()
+                and spef.stat().st_size > 0 else None)
+    extraction_report = project / "reports/phase2/gates/spef_extraction.json"
+    if spef_sha and (not extraction_report.is_file()
+                     or prior.get("routed_def_sha256") != route_sha
+                     or prior.get("spef_sha256") != spef_sha):
+        import spef_extraction_check as _sec
+        findings, stats = _sec.audit(project)
+        report = _sec.build_report(findings, stats, str(project))
+        report["routed_def_sha256"] = route_sha
+        report["spef_sha256"] = spef_sha
+        _aa.write_json(extraction_report, report)
+        written.append(str(extraction_report))
+    if not spef_sha:
+        extraction_report.unlink(missing_ok=True)
+        notes.append("step 22 NOT_MEASURED: no extracted SPEF")
+
+    try:
+        extraction_summary = json.loads(extraction_report.read_text())["summary"]
+        extraction_ok = (bool(extraction_summary["pass"])
+                         and bool(extraction_summary["has_nets"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        extraction_ok = False
+    status = ("PASS" if sdc_sha and sdc_report.is_file()
+              and pdn_path.is_file() and clock_path.is_file() and spef_sha
+              and extraction_ok else "NOT_MEASURED")
+    record = {"schema": "vibeic.postpnr_canonical_basis.v1",
+              "status": status, "routed_def_sha256": route_sha,
+              "sdc_sha256": sdc_sha,
+              "pdn_sha256": _sha256_file(pdn_path) if pdn_path.is_file() else None,
+              "clock_plan_sha256": (_sha256_file(clock_path)
+                                    if clock_path.is_file() else None),
+              "spef_sha256": spef_sha,
+              "spef_extraction_sha256": (_sha256_file(extraction_report)
+                                          if extraction_report.is_file() else None)}
+    body = json.dumps(record, indent=2, ensure_ascii=False) + "\n"
+    if not receipt.is_file() or receipt.read_text() != body:
+        _aa.write_text(receipt, body)
+        written.append(str(receipt))
+    return StepResult("postpnr_canonical", status, time.time() - t0,
+                      "; ".join(notes) or "routed canonical producers checked",
+                      written, reason_class=("" if status == "PASS" else
+                                             _V.ReasonClass.INPUT_ABSENT))
 
 
 def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
@@ -76715,6 +76866,15 @@ def main() -> int:
         _pnr_reran = (_pnr_row is not None
                       and "skipped" not in _pnr_row.detail)
         _chain_ok = _pnr_step_passed
+
+        if _pnr_step_passed:
+            # Steps 7/8/15/16/22 consume only the routed design. Publish
+            # them before the independently blocking Step 32 repair. Their
+            # typed receipt reports absence honestly and does not grant
+            # stream-out admission.
+            _postpnr = _canonicalize_postpnr_prerequisites(
+                project, effective_top, pdk, args.container)
+            print(f"[postpnr] {_postpnr.status}: {_postpnr.detail}")
 
         # FIX capture/pad-side-constraint-and-postlayout-lec (Defect 1a):
         # Run the pad-side gate RIGHT AFTER PnR so the violation is always
