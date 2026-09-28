@@ -33,7 +33,8 @@ TAIL = "END SPECIALNETS\nEND DESIGN\n"
 
 
 def _def(layer="MET2", *, closed=True, use="POWER"):
-    body = (f"- supply ( * pin ) + USE {use} + ROUTED {layer} 480 "
+    use_clause = f"+ USE {use} " if use else ""
+    body = (f"- supply ( * pin ) {use_clause}+ ROUTED {layer} 480 "
             "+ SHAPE STRIPE ( 0 130000 ) ( 300000 * ) ;\n")
     return HEAD + body + (TAIL if closed else "END DESIGN\n")
 
@@ -75,6 +76,13 @@ def test_special_signal_net_is_not_a_pdn_supply_segment(tmp_path):
     assert run.returncode == 2, run.stdout + run.stderr
     assert report["reason_class"] == "NOT_APPLICABLE_BY_STRUCTURE"
     assert report["pdn_supply_layers_read"] == []
+
+
+def test_unclassified_special_route_cannot_prove_no_supply(tmp_path):
+    run, report = _run(tmp_path, _def("MET1", use=None))
+    assert run.returncode == 2, run.stdout + run.stderr
+    assert report["reason_class"] != "NOT_APPLICABLE_BY_STRUCTURE"
+    assert report["obs_layer_applicability"]["met1"]["verdict"] == "NOT_MEASURED"
 
 
 def test_unreadable_pdn_cannot_prove_absence(tmp_path):

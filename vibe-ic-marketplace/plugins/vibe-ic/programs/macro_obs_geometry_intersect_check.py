@@ -751,10 +751,14 @@ def pdn_read_evidence(def_text: str, gaps: Sequence[Dict[str, Any]]) -> Dict[str
         issue = f"{len(gaps)} special-net path(s) abandoned before their end"
     else:
         for entry in entries:
-            if not _is_supply_specialnet(entry):
-                continue
             route_markers = len(re.findall(r"\+\s*(?:ROUTED|FIXED|COVER)\b|\bNEW\b",
                                            entry, re.I))
+            use = re.search(r"\+\s*USE\s+\w+\b", entry, re.I)
+            if route_markers and use is None:
+                issue = "routed DEF special net has no USE classification"
+                break
+            if not _is_supply_specialnet(entry):
+                continue
             if route_markers != len(_PATH_HEAD_RE.findall(entry)):
                 issue = "DEF SPECIALNETS contains route grammar not read as a path"
                 break
