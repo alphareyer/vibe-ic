@@ -145,12 +145,15 @@ RETIRED_TALLY_LABEL_TO_BUCKET = {
 RETIRED_TALLY_MANDATORY_BUCKETS = frozenset(
     {"PASS", "FAIL", "MISSING", "WAIVED-DEFERRED"})
 _LABEL_TOKEN_RE = re.compile(r"\b([A-Z][A-Z_-]*[A-Z])=(\d+)")
+#: The checker's tally line is nothing but `LABEL=N` tokens (its own f-string).
+#: A line carrying any other word -- a sentence, a denial -- is not it.
+_TALLY_LINE_RE = re.compile(r"(?:[A-Z][A-Z_-]*[A-Z]=\d+\s*)+")
 
 
 def _parse_retired_tally(summary_text: str) -> Optional[Dict[str, int]]:
     """The checker's tally line in the retired vocabulary, or None."""
     for ln in summary_text.splitlines():
-        if "PASS=" not in ln:
+        if "PASS=" not in ln or not _TALLY_LINE_RE.fullmatch(ln.strip()):
             continue
         found: Dict[str, int] = {}
         for m in _LABEL_TOKEN_RE.finditer(ln):

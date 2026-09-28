@@ -593,3 +593,21 @@ def test_the_renderer_still_refuses_the_retired_words():
     """`verdict.py` keeps no tolerant reader: the renderer's parser still
     reads only the five. The document reader is the gate's, not a leak."""
     assert F._parse_audit_tally(_RETIRED_SUMMARY) is None
+
+
+def test_the_not_prose_claim_for_the_retired_tally_reader_is_falsifiable():
+    """The `_NOT_PROSE` claim for `_parse_retired_tally`: it reads only a line
+    made entirely of `LABEL=N` tokens. A line that carries the whole quartet
+    AND a word -- a sentence, a denial -- is refused; the bare machine line is
+    read."""
+    line = "  PASS=6  FAIL=0  MISSING=0  WAIVED-DEFERRED=1  SKIPPED=3"
+    assert C._parse_retired_tally(line) == {
+        "PASS": 6, "FAIL": 0, "MISSING": 0, "WAIVED-DEFERRED": 1,
+        "SKIPPED-CONDITION": 3}
+    for denial in (line + "  is NOT the tally",
+                   "It is not true that" + line,
+                   "- " + line.strip()):
+        assert C._parse_retired_tally(denial) is None, denial
+    # Token-only but without the whole quartet the checker always printed:
+    # not its tally either.
+    assert C._parse_retired_tally("  PASS=6  VACUOUS-PASS=0") is None
