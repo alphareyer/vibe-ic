@@ -89,7 +89,7 @@ def test_die_generated_top_binds_four_l8_claims_to_core_and_proves(tmp_path, mon
     assert result["all_proved"] is True
     assert contract["chip_read_top"] == "core"
     assert contract["flow_generated_core_binding"]["ports"] == {"clk": "clk", "rst": "rst", "d": "d"}
-    assert set(result.get("discharged_by_program") or []) >= L8_IDS
+    assert set(result.get("program_discharged_obligations") or []) >= L8_IDS
     assert NAME_ID in checked.get("discharged_by_binding", [])
 
 
