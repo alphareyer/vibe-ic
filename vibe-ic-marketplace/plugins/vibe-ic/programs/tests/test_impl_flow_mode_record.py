@@ -201,8 +201,9 @@ def test_a_tool_default_with_its_source_is_a_valid_record():
 
 
 def test_every_reason_class_is_distinct_and_named():
-    assert len(set(IF.REASON_CLASSES)) == len(IF.REASON_CLASSES) == 5
-    assert all(r.startswith("IMPL_") for r in IF.REASON_CLASSES)
+    assert IF.REASON_CLASSES == (
+        "IMPL_UNKNOWN", "IMPL_NOT_YET_SUPPORTED", "IMPL_MODE_CONFLICT",
+        "IMPL_RECORD_UNREADABLE", "IMPL_IMAGE_CHANGED")
 
 
 def test_a_record_is_not_overruled_by_later_rows_without_impl(project):
@@ -318,3 +319,30 @@ def test_filling_the_image_validates_first(project):
     assert ei.value.reason_class == IF.IMPL_RECORD_UNREADABLE
     assert IF.record_path(project).read_bytes() == before
     assert IF.read_record(project)["image"] is None
+
+
+def test_blank_image_is_not_captured_on_create_or_fill(project):
+    IF.write_record(project, "librelane", resolved_by="test", image="  ")
+    rec = IF.read_record(project)
+    assert rec["image"] is None
+    assert rec["image_capture"].startswith("NOT CAPTURED:")
+
+    other = project.parent / "null-image"
+    IF.write_record(other, "librelane", resolved_by="test")
+    path = IF.record_path(other)
+    before = path.read_bytes()
+    assert IF.write_record(other, "librelane", resolved_by="blank", image=" \t") == path
+    assert path.read_bytes() == before
+    IF.write_record(other, "librelane", resolved_by="phase3", image="img-A")
+    filled = IF.read_record(other)
+    assert filled["image"] == "img-A"
+    assert filled["image_capture"].startswith("FILLED by phase3 at ")
+
+
+def test_validation_rejects_blank_image_with_pass_none_guidance(project):
+    IF.write_record(project, "librelane", resolved_by="test", image="img-A")
+    record = IF.read_record(project)
+    record["image"] = "   "
+    problems = IF.validate_record(record)
+    assert any("image is blank" in problem and "pass None" in problem
+               for problem in problems)

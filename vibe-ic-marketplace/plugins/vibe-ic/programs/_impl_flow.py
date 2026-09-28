@@ -201,6 +201,8 @@ def validate_record(obj: Any) -> List[str]:
                                 "non-empty source")
     if obj.get("image") is not None and not isinstance(obj.get("image"), str):
         problems.append("image is neither null nor a string")
+    elif isinstance(obj.get("image"), str) and not obj["image"].strip():
+        problems.append("image is blank; pass None when no image was resolved")
     # #312/#365: an unknown image is None WITH its reason, never a bare null.
     if obj.get("image") is None and not str(
             obj.get("image_capture") or "").startswith(NOT_CAPTURED):
@@ -375,6 +377,8 @@ def write_record(project: Path, impl: str, *, resolved_by: str,
     a record for a different mode is refused.
     """
     impl = require_supported(normalise(impl))
+    if isinstance(image, str) and not image.strip():
+        image = None
     if impl == IMPL_DEFAULT:
         have = recorded_impl(project)
         if have != IMPL_DEFAULT:
