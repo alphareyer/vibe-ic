@@ -24741,6 +24741,40 @@ def _macro_supply_preroute_decision(project: "Path", pdk: "PdkConfig",
 
 
 ROUTER_DRC_REPORT_NAME = "routed_router.drc.rpt"
+ROUTER_DRC_RECEIPT_NAME = "routed_router.drc.receipt.json"
+
+
+def _write_router_drc_receipt(out_dir: Path, routed_def: Path,
+                              invocation_output: str) -> Optional[Path]:
+    """Record one completed route's report, transcript and final DEF together.
+
+    Called from step_pnr after its route invocation returned and the final
+    count was read. A canonicalize pass cannot mint this receipt from a stale
+    log left beside an empty report.
+    """
+    receipt = out_dir / ROUTER_DRC_RECEIPT_NAME
+    receipt.unlink(missing_ok=True)
+    report = out_dir / ROUTER_DRC_REPORT_NAME
+    log = out_dir / "openroad.log"
+    if not (report.is_file() and log.is_file() and routed_def.is_file()):
+        return None
+    body = log.read_text(errors="replace")
+    count = _drt_final_violations(body)
+    if (count is None or not _detail_route_completed(body)
+            or not _detail_route_completed(invocation_output)
+            or _drt_final_violations(invocation_output) != count):
+        return None
+    _aa.write_json(receipt, {
+        "schema": "vibeic.router_drc_receipt.v1",
+        "producer": "phase3_one_shot_runner.step_pnr",
+        "report": report.name, "report_sha256": _sha256_file(report),
+        "log": log.name, "log_sha256": _sha256_file(log),
+        "routed_def": routed_def.name,
+        "routed_def_sha256": _sha256_file(routed_def),
+        "final_drt_count": count, "route_completed": True,
+        "current_invocation_count": count,
+    })
+    return receipt
 
 
 def _router_drc_report_block(pnr_out: Path, log_text: str) -> str:
@@ -37155,6 +37189,11 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
              em_floor_for_resize: Optional[Dict[str, Any]] = None,
              density_from_tool_default: bool = False) -> StepResult:
     t0 = time.time()
+    out_dir = _pl.pnr_dir(project)
+    # No old route receipt can certify this invocation, including a preflight
+    # failure before the router or wrapper checks run.
+    (out_dir / ROUTER_DRC_RECEIPT_NAME).unlink(missing_ok=True)
+    (out_dir / _ppa_power.DIRECT_PDN_RECEIPT_NAME).unlink(missing_ok=True)
     netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
     print(f"[pnr] netlist: {_nl_note}", flush=True)
     if not netlist.is_file():
@@ -37176,7 +37215,6 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                     "Add a wrapper-glue layer + author "
                     "pin_order.cfg from the harness template"),
             })
-    out_dir = _pl.pnr_dir(project)
     out_dir.mkdir(parents=True, exist_ok=True)
     # The active tech LEF itself can contain a contradiction: a VIA landing
     # smaller than the routing layer's own MINWIDTH/AREA.  Post-route RECT
@@ -39853,6 +39891,14 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         if _lp.is_file():
             _drt_final = _sdf.router_post_route_final_count(
                 _lp.read_text(errors="ignore"))
+    # The route just ran in this invocation. Bind its empty DRC output to the
+    # transcript and shipped geometry before later canonicalize/audit passes.
+    route_drc_receipt = _write_router_drc_receipt(out_dir, def_file, out + err)
+    direct_pdn_receipt = None
+    if _ll_route_mode == "direct":
+        _direct_pdn_ok, _direct_pdn_marker = _pnr_pdn_status(project)
+        direct_pdn_receipt = _ppa_power._write_direct_pdn_receipt(
+            out_dir, def_file, out + err, _direct_pdn_ok, _direct_pdn_marker)
     _drt_extras["sdr_transactions"] = _sdr_txn_records
     if _sdr_adopt_records:
         _drt_extras["sdr_adoptions"] = _sdr_adopt_records
@@ -40327,6 +40373,10 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                    f"final {die_w}x{die_h}µm")
     spare_json_path = out_dir / "spare_cells.json"
     pnr_outputs = [str(def_file), str(sta_file)]
+    if route_drc_receipt is not None:
+        pnr_outputs.append(str(route_drc_receipt))
+    if direct_pdn_receipt is not None:
+        pnr_outputs.append(str(direct_pdn_receipt))
     if spare_json_path.is_file():
         pnr_outputs.append(str(spare_json_path))
     # PG net ownership is sign-off evidence, so it is stated on the PASS path
@@ -60047,6 +60097,113 @@ def _append_removal_event(project: Path, event: str,
         return
 
 
+def _emit_router_drc_report(project: Path, pnr_out: Path, rpt_phase3: Path,
+                            written: List[str]) -> None:
+    """Step 21's declared outputs `<pnr>/routed.drc.rpt` and its mirror
+    `reports/phase3/drc_router.rpt`, projected from the PnR transcript.
+
+    FX_LL21_DECLARED_OUTPUTS: these describe the ROUTED design and read no GDS,
+    so they are emitted in the PRE-STREAM canonicalize pass too -- before, they
+    were written only after the pre-stream gate had admitted the layout, so a
+    run stopped by that gate (any path, direct or LibreLane) left step 21
+    without its declared outputs although the route had run. On the LibreLane
+    path the transcript is `openroad.log` with each LibreLane step's log
+    spliced in, so the router's own `DRT-0199` is the one read here."""
+    # OpenROAD's detailed_route emits DRC violations to its log; the gate
+    # expects a *drc*.rpt artefact carrying the openroad/detailed_route
+    # tool signature. We emit a real summary derived from the log;
+    # absence of "violation" in log = clean.
+    routed_drc = pnr_out / "routed.drc.rpt"
+    log_path = pnr_out / "openroad.log"
+    if log_path.is_file():
+        log_text = log_path.read_text(errors="ignore")
+        # Keep the raw "violation"/DRT log lines for the reviewer-context block.
+        router_drc_block = _router_drc_report_block(pnr_out, log_text)
+        viol_lines = [ln for ln in log_text.splitlines()
+                      if "violation" in ln.lower() or "DRT" in ln]
+        # ORGANIC #585 fix — the authoritative post-route DRC count is the LAST
+        # `[INFO DRT-0199] Number of violations = N` (detailed_route's final
+        # CONVERGED state), NOT the number of log LINES mentioning "violation".
+        # The old line-count summed every "Completing X% with N violations"
+        # progress line + every "Number of violations = N" iteration line, so a
+        # route that CONVERGED to 0 was mis-reported as dozens ("DRC clean: NO"),
+        # directly contradicting the pnr-step verdict (which already reads the
+        # final DRT-0199 via _drt_final_violations). Reuse that same canonical
+        # parser so this projection agrees with the authoritative verdict.
+        _drt_final = _drt_final_violations(log_text)
+        violations = _drt_final if _drt_final is not None else 0
+        _drt_count_known = _drt_final is not None
+        # Include the route-summary block so the report carries
+        # tool-signature anchors + ≥ 2048 B substance for the
+        # eda_report_audit:drc anti-stub heuristic.
+        rt_summary_lines = [ln for ln in log_text.splitlines()
+                            if any(t in ln for t in (
+                                "ODB-", "ORD-", "RT-", "DRT-",
+                                "detailed_route", "global_route",
+                                "Repaired", "Total wire length",
+                                "Number of"))]
+        # Trim to last 200 lines but keep total within 4 KB
+        relevant = ("\n".join(rt_summary_lines[-200:]) or
+                    "(no detailed_route / DRT output captured)")
+        # Include the FULL OpenROAD log so the report size is comfortably
+        # above the eda_report_audit:drc 2048 B anti-stub threshold (and
+        # so reviewers see the same authoritative log content).
+        full_log_tail = log_text[-3000:] if len(log_text) > 3000 else log_text
+        body = (
+            f"# OpenROAD detailed_route DRC summary -- emitted by\n"
+            f"# phase3_one_shot_runner v1.6.36 (canonicalize_artefacts step).\n"
+            f"# Tool: openroad detailed_route (drt)\n"
+            f"# Source log: {log_path.relative_to(project)}\n"
+            f"#\n"
+            f"# This report is the runner-side projection of OpenROAD\n"
+            f"# detailed_route output. Tool signature is `openroad` /\n"
+            f"# `detailed_route`; `violation report` line + per-violation\n"
+            f"# detail (when present) populate the substance check.\n"
+            f"#\n"
+            f"# Substance: post-route DRC count derived from openroad\n"
+            f"# detailed_route's per-net congestion/violation log lines. This is\n"
+            f"# the router's own in-loop DRC pass.\n"
+            f"# Sign-off DRC runs SEPARATELY at Step 31: when the PDK ships a\n"
+            f"# Calibre/Assura `.rule` deck (input/pdk/calibre/), the runner\n"
+            f"# executes that foundry deck NATIVELY via the vibeic KLayout SVRF\n"
+            f"# engine (_try_svrf_native_drc) — NO Calibre license/binary\n"
+            f"# required; that IS the sign-off-grade verdict. A KLayout `.lydrc`\n"
+            f"# or `magic` deck is only the fallback when no SVRF deck exists.\n"
+            f"#\n"
+            f"openroad / drt-pass: detailed_route invoked\n"
+            f"violation report: {violations}\n"
+            f"violation count summary: {violations} violation(s) found\n"
+            f"drc source: final [INFO DRT-0199] count"
+            f"{'' if _drt_count_known else ' (ABSENT — no detailed_route count in log)'}\n"
+            f"DRC clean: "
+            f"{'YES' if (_drt_count_known and violations == 0) else 'NO'}\n"
+            f"tool: openroad\n"
+            f"\n"
+            f"# === detailed_route + global_route summary lines from openroad.log ===\n"
+            f"{relevant}\n"
+            f"\n"
+            f"# === router DRC report (detailed_route -output_drc) ===\n"
+            f"{router_drc_block}\n"
+            f"\n"
+            f"# === violation lines (last 100, if any) ===\n"
+            + ("\n".join(viol_lines[-100:]) or
+               "# No DRC violations detected by openroad detailed_route\n")
+            + f"\n"
+            f"# === full openroad.log (last 3 KB, for reviewer context) ===\n"
+            f"{full_log_tail}\n"
+            f"# end of routed.drc.rpt\n"
+        )
+        routed_drc.write_text(body)
+        if str(routed_drc) not in written:
+            written.append(str(routed_drc))
+        # Mirror to reports/phase3/ where the gate's --json output lands
+        rpt_phase3.mkdir(parents=True, exist_ok=True)
+        _aa.write_text(rpt_phase3 / "drc_router.rpt", body)
+        if str(rpt_phase3 / "drc_router.rpt") not in written:
+            written.append(str(rpt_phase3 / "drc_router.rpt"))
+
+
+
 def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                                 container: str, *, prestream: bool = False,
                                 prepv: bool = False) -> StepResult:
@@ -61032,10 +61189,42 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             written.append(str(si_rpt))
             written.append(str(rpt_phase3 / "si_crosstalk.json"))
 
+    # --- Step 15: pdn.done (FX_LL21_DECLARED_OUTPUTS) ---------------------
+    # Step 15's declared flag reads no GDS, so it is written HERE, before the
+    # pre-stream return, in both passes: a run the pre-stream gate stops still
+    # carries it. It is bound to the DEF it measured and rewritten only when
+    # that DEF changes (`_ppa_power.pdn_done_text`). Record the MEASURED grid,
+    # not the assertion that one exists: the verdict is the direct deck's
+    # transcript marker or -- when there is none because LibreLane built the
+    # grid -- LibreLane's own power-grid measurement; with neither, NOT
+    # MEASURED, never a disconnected grid read out of a missing marker.
+    if primary_def.is_file():
+        _pdn_ok, _pdn_mk = _pnr_pdn_status(project)
+        try:
+            _pdn_ev = _def_pdn_evidence(primary_def.read_text(errors="replace"))
+        except OSError:
+            _pdn_ev = {}
+        _pdn_txt = _ppa_power.pdn_done_text(
+            project, pnr_out, primary_def, _pdn_ok, _pdn_mk, _pdn_ev)
+        if _pdn_txt is not None:
+            _aa.write_text(pnr_out / "pdn.done", _pdn_txt)
+        if (pnr_out / "pdn.done").is_file() and str(pnr_out / "pdn.done") not in written:
+            written.append(str(pnr_out / "pdn.done"))
+
     if prestream:
         # The routed-design measurements above have no GDS input. Run them
         # before stream-out; leave fill, final PV and handoff to the frozen
         # post-stream phase. The caller checks every required verdict.
+        # FX_LL21_DECLARED_OUTPUTS: steps 15, 16 and 21 declare outputs that
+        # read no GDS either; a run the pre-stream gate stops must still carry
+        # them (the post-stream pass below refreshes them).
+        _emit_router_drc_report(project, pnr_out, rpt_phase3, written)
+        # step 16's plan is derived from the SDCs alone (digest-keyed and
+        # idempotent; the post-stream pass re-checks it)
+        _plan_pre = emit_clock_plan(project, cts_out / "clock_plan.json",
+                                    primary_def, pnr_out, notes)
+        if _plan_pre:
+            written.append(_plan_pre)
         return StepResult("prestream_evidence", "PASS", time.time() - t0,
                           "; ".join(notes), written)
 
@@ -61353,32 +61542,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                    else "No resume was recorded.")
                 + " A complete stage-DEF set here is therefore NOT evidence "
                   "of an uninterrupted run.")
-    if primary_def.is_file():
-        # PDN done flag
-        pdn_flag = pnr_out / "pdn.done"
-        if not pdn_flag.is_file():
-            # Record the MEASURED grid, not the assertion that one exists.
-            # The previous text claimed "PDN inserted" unconditionally, so a
-            # run whose DEF held isolated per-row rails still dropped a
-            # success flag on disk — a third hollow success marker alongside
-            # the log marker and the green PnR verdict.
-            _pdn_ok, _pdn_mk = _pnr_pdn_status(project)
-            _ev = {}
-            try:
-                _ev = _def_pdn_evidence(primary_def.read_text(errors="replace"))
-            except OSError:
-                _ev = {}
-            pdn_flag.write_text(
-                f"# PDN status: {'CONNECTED' if _pdn_ok else 'NOT CONNECTED'}\n"
-                f"# marker: {_pdn_mk}\n"
-                f"# measured in {primary_def.name} SPECIALNETS: "
-                f"follow-pin rails={_ev.get('followpin', '?')} "
-                f"straps={_ev.get('stripe', '?')} ring={_ev.get('ring', '?')} "
-                f"vias={_ev.get('vias', '?')} layers={_ev.get('layers', '?')}\n"
-                f"# source: {(pnr_out / 'openroad.log').relative_to(project)}\n"
-                f"# tool: openroad (see {(pnr_out / 'pnr.tcl').relative_to(project)})\n"
-            )
-            written.append(str(pdn_flag))
+    # PDN done flag: written before the pre-stream return above, in BOTH
+    # passes (FX_LL21_DECLARED_OUTPUTS)
     if missing_stages:
         notes.append(
             f"per-stage DEFs missing: {missing_stages}. "
@@ -62338,99 +62503,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         _step33_tool_arm(project, top, pdk, _m33, power_rpt,
                          _power_direct_ran, written, notes)
 
-    # --- Step 21: routed.drc.rpt — derived from OpenROAD routing log ---
-    # OpenROAD's detailed_route emits DRC violations to its log; the gate
-    # expects a *drc*.rpt artefact carrying the openroad/detailed_route
-    # tool signature. We emit a real summary derived from the log;
-    # absence of "violation" in log = clean.
-    routed_drc = pnr_out / "routed.drc.rpt"
-    log_path = pnr_out / "openroad.log"
-    if log_path.is_file():
-        log_text = log_path.read_text(errors="ignore")
-        # Keep the raw "violation"/DRT log lines for the reviewer-context block.
-        router_drc_block = _router_drc_report_block(pnr_out, log_text)
-        viol_lines = [ln for ln in log_text.splitlines()
-                      if "violation" in ln.lower() or "DRT" in ln]
-        # ORGANIC #585 fix — the authoritative post-route DRC count is the LAST
-        # `[INFO DRT-0199] Number of violations = N` (detailed_route's final
-        # CONVERGED state), NOT the number of log LINES mentioning "violation".
-        # The old line-count summed every "Completing X% with N violations"
-        # progress line + every "Number of violations = N" iteration line, so a
-        # route that CONVERGED to 0 was mis-reported as dozens ("DRC clean: NO"),
-        # directly contradicting the pnr-step verdict (which already reads the
-        # final DRT-0199 via _drt_final_violations). Reuse that same canonical
-        # parser so this projection agrees with the authoritative verdict.
-        _drt_final = _drt_final_violations(log_text)
-        violations = _drt_final if _drt_final is not None else 0
-        _drt_count_known = _drt_final is not None
-        # Include the route-summary block so the report carries
-        # tool-signature anchors + ≥ 2048 B substance for the
-        # eda_report_audit:drc anti-stub heuristic.
-        rt_summary_lines = [ln for ln in log_text.splitlines()
-                            if any(t in ln for t in (
-                                "ODB-", "ORD-", "RT-", "DRT-",
-                                "detailed_route", "global_route",
-                                "Repaired", "Total wire length",
-                                "Number of"))]
-        # Trim to last 200 lines but keep total within 4 KB
-        relevant = ("\n".join(rt_summary_lines[-200:]) or
-                    "(no detailed_route / DRT output captured)")
-        # Include the FULL OpenROAD log so the report size is comfortably
-        # above the eda_report_audit:drc 2048 B anti-stub threshold (and
-        # so reviewers see the same authoritative log content).
-        full_log_tail = log_text[-3000:] if len(log_text) > 3000 else log_text
-        body = (
-            f"# OpenROAD detailed_route DRC summary -- emitted by\n"
-            f"# phase3_one_shot_runner v1.6.36 (canonicalize_artefacts step).\n"
-            f"# Tool: openroad detailed_route (drt)\n"
-            f"# Source log: {log_path.relative_to(project)}\n"
-            f"#\n"
-            f"# This report is the runner-side projection of OpenROAD\n"
-            f"# detailed_route output. Tool signature is `openroad` /\n"
-            f"# `detailed_route`; `violation report` line + per-violation\n"
-            f"# detail (when present) populate the substance check.\n"
-            f"#\n"
-            f"# Substance: post-route DRC count derived from openroad\n"
-            f"# detailed_route's per-net congestion/violation log lines. This is\n"
-            f"# the router's own in-loop DRC pass.\n"
-            f"# Sign-off DRC runs SEPARATELY at Step 31: when the PDK ships a\n"
-            f"# Calibre/Assura `.rule` deck (input/pdk/calibre/), the runner\n"
-            f"# executes that foundry deck NATIVELY via the vibeic KLayout SVRF\n"
-            f"# engine (_try_svrf_native_drc) — NO Calibre license/binary\n"
-            f"# required; that IS the sign-off-grade verdict. A KLayout `.lydrc`\n"
-            f"# or `magic` deck is only the fallback when no SVRF deck exists.\n"
-            f"#\n"
-            f"openroad / drt-pass: detailed_route invoked\n"
-            f"violation report: {violations}\n"
-            f"violation count summary: {violations} violation(s) found\n"
-            f"drc source: final [INFO DRT-0199] count"
-            f"{'' if _drt_count_known else ' (ABSENT — no detailed_route count in log)'}\n"
-            f"DRC clean: "
-            f"{'YES' if (_drt_count_known and violations == 0) else 'NO'}\n"
-            f"tool: openroad\n"
-            f"\n"
-            f"# === detailed_route + global_route summary lines from openroad.log ===\n"
-            f"{relevant}\n"
-            f"\n"
-            f"# === router DRC report (detailed_route -output_drc) ===\n"
-            f"{router_drc_block}\n"
-            f"\n"
-            f"# === violation lines (last 100, if any) ===\n"
-            + ("\n".join(viol_lines[-100:]) or
-               "# No DRC violations detected by openroad detailed_route\n")
-            + f"\n"
-            f"# === full openroad.log (last 3 KB, for reviewer context) ===\n"
-            f"{full_log_tail}\n"
-            f"# end of routed.drc.rpt\n"
-        )
-        routed_drc.write_text(body)
-        if str(routed_drc) not in written:
-            written.append(str(routed_drc))
-        # Mirror to reports/phase3/ where the gate's --json output lands
-        rpt_phase3.mkdir(parents=True, exist_ok=True)
-        _aa.write_text(rpt_phase3 / "drc_router.rpt", body)
-        if str(rpt_phase3 / "drc_router.rpt") not in written:
-            written.append(str(rpt_phase3 / "drc_router.rpt"))
+    # --- Step 21: routed.drc.rpt -- `_emit_router_drc_report` (FX_LL21) ---
+    _emit_router_drc_report(project, pnr_out, rpt_phase3, written)
 
     # --- ORGANIC-20260531: Step 31 sign-off DRC report-path alias -------
     # THE ROUTER IS NO LONGER A SOURCE (subservient run2, step 31). Its third

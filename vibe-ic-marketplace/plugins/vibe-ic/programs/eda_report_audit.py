@@ -1568,6 +1568,40 @@ def _drc_tool_final_violation_count(text: str) -> Optional[int]:
     return _sdf.router_iter_last_count(text)
 
 
+def _empty_router_drc_receipt(report: Path) -> Optional[Path]:
+    """The completed route's digest-bound zero receipt for this empty report.
+
+    An adjacent log, including an older route's log, is not evidence that the
+    invocation which wrote this report finished cleanly.
+    """
+    if report.name != "routed_router.drc.rpt":
+        return None
+    receipt = report.parent / "routed_router.drc.receipt.json"
+    log = report.parent / "openroad.log"
+    try:
+        rec = json.loads(receipt.read_text())
+        def_name = rec.get("routed_def")
+        if (rec.get("schema") != "vibeic.router_drc_receipt.v1"
+                or rec.get("producer") != "phase3_one_shot_runner.step_pnr"
+                or rec.get("report") != report.name or rec.get("log") != log.name
+                or rec.get("route_completed") is not True
+                or rec.get("current_invocation_count") != 0
+                or not isinstance(def_name, str)
+                or Path(def_name).name != def_name or not def_name.endswith(".def")
+                or rec.get("final_drt_count") != 0):
+            return None
+        routed_def = report.parent / def_name
+        for path, key in ((report, "report_sha256"), (log, "log_sha256"),
+                          (routed_def, "routed_def_sha256")):
+            if hashlib.sha256(path.read_bytes()).hexdigest() != rec.get(key):
+                return None
+        if _drc_tool_final_violation_count(log.read_text(errors="replace")) != 0:
+            return None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    return receipt
+
+
 def _measured_klayout_receipt_files(project_dir: Path,
                                     files: Sequence[Path]) -> set[Path]:
     """Return RDB reports bound to one successful measured KLayout invocation.
@@ -1866,6 +1900,7 @@ def _check_drc(project_dir: Path) -> AuditResult:
     # `unreadable` because they are different answers -- see the
     # three-state note in the read loop below.
     empty: List[str] = []
+    empty_paths: List[Path] = []
     # THE TOOL'S OWN FINAL WORD, alongside the summary that claims to report it.
     # Both are recorded per file and BOTH are disclosed, so a reader never has
     # to take the gate's word for which one the number came from.
@@ -1937,6 +1972,7 @@ def _check_drc(project_dir: Path) -> AuditResult:
         # PDK, layer or vendor literal.
         if n is None and not text.strip():
             empty.append(_rel(fp, project_dir))
+            empty_paths.append(fp)
             determined_files += 1
         elif n is None:
             unreadable.append(str(fp))
@@ -1997,7 +2033,15 @@ def _check_drc(project_dir: Path) -> AuditResult:
                 message=_category_absence_message(cat, regex, files,
                                                   project_dir),
                 file=best_file))
-    if not cats_found:
+    # FX_LL21_DECLARED_OUTPUTS -- ONE ANSWER FOR AN EMPTY REPORT. An EMPTY
+    # report has no category to name BY CONSTRUCTION, so "no categories" is
+    # not a finding about it; whether its zero is a measurement is decided
+    # below by the current route's digest-bound completion receipt.
+    # (MEASURED, spm x gf180mcuD full chip, 2026-09-28: a scope of two empty
+    # router reports read `DRC_REPORT_EMPTY ... read as ZERO` at INFO and
+    # `DRC_CATEGORIES_EXIST: No DRC violation categories` at ERROR.)
+    all_empty = bool(files) and len(empty_paths) == len(files)
+    if not cats_found and not all_empty:
         result.findings.append(Finding(
             rule="DRC_CATEGORIES_EXIST", severity="ERROR",
             message="No DRC violation categories found in report",
@@ -2038,7 +2082,9 @@ def _check_drc(project_dir: Path) -> AuditResult:
             rule="DRC_REPORT_EMPTY", severity="INFO",
             message=(f"{len(empty)} of {len(files)} discovered DRC report(s) "
                      f"are PRESENT and EMPTY -- the tool wrote its report and "
-                     f"had no violation to write, read as ZERO violations. "
+                     f"had no violation to write; each is a ZERO only with the "
+                     f"current route's digest-bound final-count receipt "
+                     f"(DRC_EMPTY_ZERO_CORROBORATED / DRC_EMPTY_NOT_MEASURED). "
                      f"This is NOT an absent report, which is not measured at "
                      f"all and still refuses: {_e_shown}{_e_more}"),
             file=empty[0]))
@@ -2052,6 +2098,44 @@ def _check_drc(project_dir: Path) -> AuditResult:
                      f"were NOT MEASURED — not zero, not clean: {_shown}"
                      f"{_more}"),
             file=unreadable[0].split(" (")[0]))
+
+    # AN EMPTY REPORT IS A ZERO ONLY WITH THIS ROUTE'S RECEIPT. The receipt
+    # names the report, current log and routed DEF by digest and records the
+    # router's final count. Arbitrary sibling reports/logs cannot speak for it.
+    empty_evidence: Dict[str, List[str]] = {}
+    empty_uncorroborated: List[str] = []
+    for fp in empty_paths:
+        rel = _rel(fp, project_dir)
+        receipt = _empty_router_drc_receipt(fp)
+        if receipt is not None:
+            empty_evidence[rel] = [_rel(receipt, project_dir)]
+        else:
+            log = fp.parent / "openroad.log"
+            try:
+                count = _drc_tool_final_violation_count(
+                    log.read_text(errors="replace"))
+            except OSError:
+                count = None
+            empty_uncorroborated.append(rel + " -- no current digest-bound "
+                                       "routing receipt proves final count 0"
+                                       + (f" ({count})" if count is not None else ""))
+    if empty_uncorroborated:
+        result.findings.append(Finding(
+            rule="DRC_EMPTY_NOT_MEASURED", severity="ERROR",
+            message=(f"{len(empty_uncorroborated)} PRESENT-and-EMPTY DRC "
+                     f"report(s) have no current digest-bound completion "
+                     f"evidence from the tool "
+                     f"that wrote them, so their zero is NOT_MEASURED, not "
+                     f"clean: {'; '.join(empty_uncorroborated[:5])}"),
+            file=str(empty_paths[0])))
+    elif all_empty and empty_evidence:
+        result.findings.append(Finding(
+            rule="DRC_EMPTY_ZERO_CORROBORATED", severity="INFO",
+            message=("every discovered DRC report is PRESENT and EMPTY and the "
+                     "router's digest-bound final count for each is 0: "
+                     + "; ".join(f"{k} <- {', '.join(v)}"
+                                 for k, v in sorted(empty_evidence.items()))),
+            file=str(empty_paths[0])))
 
     # THE GATING CHECK — the real count, not the vocabulary.
     if determined_files == 0:
@@ -2119,12 +2203,8 @@ def _check_drc(project_dir: Path) -> AuditResult:
     # "clean" was therefore formed from a report that stated no count and that
     # nothing corroborated -- a zero produced by not looking.
     #
-    # THE EMPTY RULING IS UNTOUCHED, and the guard is written so it cannot
-    # reach it. The 2026-08-30 decision is that a PRESENT and EMPTY report is a
-    # legitimate zero (OpenROAD writes a zero-byte file exactly when the route
-    # is clean), and that case has `empty_report_files > 0`; this condition
-    # requires `not empty`, so an empty report still reads as clean and the
-    # measured spm case that ruling was made on does not move.
+    # The empty case has its own receipt requirement above; this guard only
+    # applies to nonempty reports whose prose does not state a count.
     #
     # NOR IS THIS A RELAXATION IN THE OTHER DIRECTION: it can only ever turn a
     # PASS into a refusal, never a FAIL into a pass. `real_total > 0` already
@@ -2145,9 +2225,14 @@ def _check_drc(project_dir: Path) -> AuditResult:
                 f"not certify a design on a zero it did not establish. "
                 f"An EMPTY report is a legitimate zero and is not this."),
             file=best_file))
+    # An all-empty scope carries no bytes a signature check could read; the
+    # route receipt bound to each report, log and DEF (above) attests that the
+    # tool ran and finished this invocation.
+    if all_empty and empty_evidence and not empty_uncorroborated:
+        authentic = True
     result.passed = (own_design and determined_files > 0 and real_total == 0 and authentic
                      and not unreadable and not contradictions
-                     and not _uncorroborated_zero)
+                     and not _uncorroborated_zero and not empty_uncorroborated)
     result.subject_files = [str(f) for f in files]
     result.summary = {"files_found": len(files), "categories_found": cats_found,
                       "design_binding": design_binding,
@@ -2175,7 +2260,9 @@ def _check_drc(project_dir: Path) -> AuditResult:
                       # PRESENT-and-EMPTY, kept apart from both `unreadable`
                       # (present, unparseable) and absence (never discovered).
                       "empty_report_files": len(empty),
-                      "empty_reports": empty[:20]}
+                      "empty_reports": empty[:20],
+                      "empty_report_evidence": empty_evidence,
+                      "empty_reports_not_measured": empty_uncorroborated[:20]}
     return result
 
 
