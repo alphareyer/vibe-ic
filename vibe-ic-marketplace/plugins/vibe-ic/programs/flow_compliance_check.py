@@ -22430,6 +22430,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # swallows every exception, and a canary a swallowed exception can hide is
     # not a canary.
     _audit_did_not_reconcile: Optional[Dict[str, Any]] = None
+    _citation_stale = False
 
     # vibe-ic#2092 — the disclosure record, computed BEFORE the audit block so
     # the final stdout lines carry it even on the run where the audit emission
@@ -22530,7 +22531,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         # name it: it is written after the post-scan is taken, so measurement
         # cannot see it, and leaving it in would make the PREVIOUS run's audit
         # an input to THIS run's design hash.
+        import _cited_artefacts as _ca
         audit_path = _pl.report_path(project, "phase23_completion_audit.json")
+        try:
+            _phase3_record = json.loads((project / _ca.REPORT_REL).read_text())
+            if not isinstance(_phase3_record, dict):
+                _phase3_record = {}
+        except (OSError, ValueError):
+            _phase3_record = {}
+        _recheck = _ca.recheck_path(
+            project, _phase3_record,
+            _did_scan.hashes if _did_scan is not None else {})
+        if _recheck is not None:
+            audit_path = _recheck
+        _citation_verdict, _citation_rows = _ca.check(project, _phase3_record)
+        _citation_stale = _citation_verdict == "NOT_MEASURED"
         # ONE CANONICAL AUDIT, AND IT SAYS WHAT IT JUDGED. R-0915-150, second cut.
         #
         # My first cut had a SCOPED pass write its audit elsewhere, so a reader asking for
@@ -22637,6 +22652,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     and _r.reason_class
                     != _T.ReasonClass.MISSING_ARTEFACT.value)),
         )
+        if _citation_stale and _audit_verdict in GREEN_RUN_STATUSES:
+            _audit_verdict = "NOT_MEASURED"
+            _audit_refusal = "the Phase-3 run cites changed or missing artefacts"
 
         # vibe-ic#2092 — THE JOIN between the red and what caused it. Computed
         # from the SAME objects the dict publishes (`_step_rows` below is the
@@ -22679,6 +22697,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             "strict_structural": bool(args.strict_structural),
             "strict_step_artifacts": bool(args.strict_step_artifacts),
             "verdict": _audit_verdict,
+            "citation_verdict": _citation_verdict,
+            "cited_artefact_checks": _citation_rows,
+            "recheck_of": (_ca.AUDIT_REL if _recheck is not None else None),
             # Non-null ONLY when this audit refused (`INSUFFICIENT_DATA`): the
             # denominator that made it refuse, so the refusal can be read
             # without re-deriving it from the counts below.
@@ -22952,6 +22973,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         for _b in _audit_did_not_reconcile["broken"]:
             print(f"  ✗ [{_b['id']}] {_b['equation']} — {_b['detail']}")
         print(f"  (the run's own status is unchanged and still {overall}.)")
+        return 1
+
+    if _citation_stale:
+        print("flow_compliance_check: STALE_CITATION — cited Phase-3 "
+              "artefact bytes changed; this audit is NOT_MEASURED for the "
+              "run's cited evidence")
         return 1
 
     # THE EXIT CODE IS THE RUN WORD. `NOT_MEASURED` exits non-zero and that is
