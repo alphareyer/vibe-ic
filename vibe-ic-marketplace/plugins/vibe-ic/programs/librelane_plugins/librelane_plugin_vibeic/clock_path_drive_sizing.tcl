@@ -27,6 +27,11 @@ source $::env(VIBEIC_CLKPATH_SIZING_TCL)
 
 if {$_vic_was_propagated} { set_propagated_clock [all_clocks] }
 
+# Register-to-output paths captured by the board clock pay launch clock-tree
+# insertion with no matching capture insertion. Use the same CTS snapshot to
+# try an earlier pure-buffer net, and retain only measured safe improvements.
+source [file join [file dirname [info script]] external_capture_launch_retap.tcl]
+
 # The clock tree's fanout, measured here because this is the one session
 # that knows which instances CTS created (not in the snapshot): the largest
 # number of loads on a net such an instance drives. `cts_quality_check`

@@ -168,11 +168,20 @@ set rd_args [list -verbose]
 append_if_exists_argument rd_args VIBEIC_PRR_MAX_WIRE_LENGTH -max_wire_length
 append_if_exists_argument rd_args VIBEIC_PRR_SLEW_MARGIN_PCT -slew_margin
 append_if_exists_argument rd_args VIBEIC_PRR_CAP_MARGIN_PCT -cap_margin
-log_cmd repair_design {*}$rd_args
+if {$::env(VIBEIC_PRR_SETUP_SEQUENCE) eq "sizeup,swap"} {
+    # This candidate must stay sizing-only on the routed design. The DRV
+    # controller can run repair_design in its own candidate when needed.
+    vic_say "setup sequence sizeup,swap: design buffering deferred to DRV controller"
+} else {
+    log_cmd repair_design {*}$rd_args
+}
 
 set setup_args [list -setup -verbose]
 lappend setup_args -setup_margin $::env(VIBEIC_PRR_SETUP_MARGIN)
 lappend setup_args -max_buffer_percent $::env(VIBEIC_PRR_SETUP_MAX_BUFFER_PCT)
+if {$::env(VIBEIC_PRR_SETUP_SEQUENCE) ne "default"} {
+    lappend setup_args -sequence $::env(VIBEIC_PRR_SETUP_SEQUENCE)
+}
 append_if_exists_argument setup_args VIBEIC_PRR_SETUP_REPAIR_TNS_PCT -repair_tns
 log_cmd repair_timing {*}$setup_args
 

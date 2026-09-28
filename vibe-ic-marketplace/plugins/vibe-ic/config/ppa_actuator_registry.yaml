@@ -342,6 +342,8 @@ actuators:
         - "actuate"
         - "--setup-margin-ns"
         - "{setup_margin_ns}"
+        - "--setup-sequence"
+        - "{setup_sequence}"
         - "--hold-margin-ns"
         - "{hold_margin_ns}"
         - "--setup-max-buffer-pct"
@@ -352,6 +354,13 @@ actuators:
         - "{repair_tns_pct}"
     parameters:
       setup_margin_ns: {type: number, unit: ns, minimum: 0, maximum: 1.0, default: 0}
+      setup_sequence:
+        type: string
+        enum: [default, "sizeup,swap"]
+        default: default
+        description: >-
+          Setup repair move sequence. The sizing-only arm changes masters
+          without adding setup buffers that need new route guides.
       hold_margin_ns: {type: number, unit: ns, minimum: 0, maximum: 0.5, default: 0}
       setup_max_buffer_pct:
         type: number
@@ -447,10 +456,11 @@ controllers:
     plan:
       - {setup_margin_ns: 0}
       - {setup_margin_ns: 0.05}
-      - {setup_margin_ns: 0.1, setup_max_buffer_pct: 10}
+      - {setup_margin_ns: 0.2, setup_sequence: "sizeup,swap"}
+      - {setup_margin_ns: 0.3, setup_sequence: "sizeup,swap"}
     stop:
-      max_iterations: 3
-      plateau_patience: 2
+      max_iterations: 4
+      plateau_patience: 3
       wall_seconds: 28800
 
   postroute.repair_hold:
