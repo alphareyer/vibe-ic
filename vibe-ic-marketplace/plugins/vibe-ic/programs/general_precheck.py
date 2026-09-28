@@ -185,6 +185,8 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
 import json
 import subprocess
 import sys
@@ -946,13 +948,55 @@ def _step_zero_area(ev: StepEvidence, geom: Optional[Dict[str, Any]]) -> None:
                        f"{geom['zero_area_polygons'][0]}")
 
 
+def _pdk_cell_hashes(volume: Optional[Path], reader: Any,
+                     wanted: Dict[str, str]) -> Tuple[Dict[str, Dict[str, str]], List[str]]:
+    """Find byte-identical structures in the run's PDK GDS libraries."""
+    found: Dict[str, Dict[str, str]] = {}
+    tried: List[str] = []
+    if volume is None or reader is None or not hasattr(reader, "read_bytes"):
+        return found, ["PDK GDS bytes unavailable"]
+    remaining = dict(wanted)
+    for pattern in ("libs.ref/*/gds/*.gds", "libs.ref/*/gds/*.gds.gz"):
+        if not remaining:
+            break
+        try:
+            paths = reader.glob(str(volume), pattern)
+        except (OSError, ValueError) as exc:
+            tried.append(f"{pattern}: {exc}")
+            continue
+        for path in paths:
+            if not remaining:
+                break
+            path = str(path)
+            tried.append(path)
+            try:
+                raw = reader.read_bytes(path)
+                if raw is None:
+                    tried.append(f"{path}: bytes unreadable")
+                    continue
+                stream = gzip.decompress(raw) if path.endswith(".gz") else raw
+                hashes = _geom.cell_content_hashes(stream)
+            except (OSError, ValueError, _geom.GdsError) as exc:
+                tried.append(f"{path}: {exc}")
+                continue
+            source_sha = hashlib.sha256(raw).hexdigest()
+            for name, digest in list(remaining.items()):
+                if hashes.get(name) == digest:
+                    found.setdefault(name, {})[digest] = f"{path}#sha256={source_sha}"
+                    del remaining[name]
+    return found, tried
+
+
 def _step_forbidden_layers(ev: StepEvidence, layers: Optional[Dict[Any, int]],
                            forbidden: Any,
                            allowed: Optional[set] = None,
                            authority: Optional[str] = None,
                            authority_tried: Optional[List[str]] = None,
                            authority_why: str = "",
-                           flow_markers: Optional[Tuple] = None) -> None:
+                           flow_markers: Optional[Tuple] = None,
+                           layout: Optional[_geom.Layout] = None,
+                           volume: Optional[Path] = None,
+                           reader: Any = None) -> None:
     """FORBIDDEN IS THE COMPLEMENT OF THE PROCESS, NOT A LIST SOMEBODY TYPED.
 
     Owner ruling, 2026-09-06 (vibe-ic#2058): this rung is DERIVED, never
@@ -1034,11 +1078,54 @@ def _step_forbidden_layers(ev: StepEvidence, layers: Optional[Dict[Any, int]],
     _mine = sorted((f"{l}/{d}" for (l, d) in _outside
                     if _pdkauth.is_flow_marker(l, d, _flow_exact, _flow_base)),
                    key=_key)
-    unmapped = sorted((f"{l}/{d}" for (l, d) in _outside
-                       if not _pdkauth.is_flow_marker(l, d, _flow_exact,
-                                                      _flow_base)),
-                      key=_key)
+    unknown = {(l, d) for l, d in _outside
+               if not _pdkauth.is_flow_marker(l, d, _flow_exact, _flow_base)}
+    accepted: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+    pdk_tried: List[str] = []
+    if unknown and layout is not None:
+        candidates = {(cell.name, key): count
+                      for cell in layout.cells.values()
+                      for key in unknown
+                      if (count := sum(1 for el in cell.elements
+                                       if el.kind == "TEXT" and
+                                       (el.layer, el.datatype or 0) == key))}
+        try:
+            raw = _geom._read_bytes(Path(layout.path))
+            cell_hashes = _geom.cell_content_hashes(raw)
+        except (OSError, _geom.GdsError) as exc:
+            cell_hashes = {}
+            pdk_tried.append(f"layout structure bytes unreadable: {exc}")
+        wanted = {name: cell_hashes[name] for name, _ in candidates
+                  if name in cell_hashes}
+        source, source_tried = _pdk_cell_hashes(volume, reader, wanted)
+        pdk_tried.extend(source_tried)
+        for (name, key), count in sorted(candidates.items()):
+            digest = cell_hashes.get(name)
+            match = source.get(name, {}).get(digest) if digest else None
+            row = {"layer": f"{key[0]}/{key[1]}", "cell": name,
+                   "text_count": count, "cell_sha256": digest,
+                   "pdk_gds": match}
+            (accepted if match else rejected).append(row)
+        for cell in layout.cells.values():
+            for el in cell.elements:
+                key = (el.layer, el.datatype or 0)
+                if key in unknown and el.kind != "TEXT":
+                    rejected.append({"layer": f"{key[0]}/{key[1]}",
+                                     "cell": cell.name, "kind": el.kind,
+                                     "reason": "undefined-layer geometry"})
+    unresolved = {f"{l}/{d}" for l, d in unknown}
+    for row in accepted:
+        if not any(r["layer"] == row["layer"] for r in rejected):
+            unresolved.discard(row["layer"])
+    # A pair with no candidate TEXT, or any unverified element, stays forbidden.
+    if layout is None:
+        unresolved = {f"{l}/{d}" for l, d in unknown}
+    unmapped = sorted(unresolved, key=_key)
     ev.measured["unmapped_layers"] = unmapped
+    ev.measured["foundry_text_annotations"] = accepted
+    ev.measured["unverified_undefined_elements"] = rejected
+    ev.measured["pdk_gds_tried"] = pdk_tried
     ev.measured["flow_marker_layers"] = _mine
     ev.measured["flow_marker_basis"] = _flow_why
     if unmapped or declared_hits:
@@ -1058,7 +1145,8 @@ def _step_forbidden_layers(ev: StepEvidence, layers: Optional[Dict[Any, int]],
         ev.verdict = PASS
         ev.evidence = (f"every one of the {len(used)} layer/datatype pair(s) "
                        f"in this layout is accounted for: "
-                       f"{len(used) - len(_mine)} by the technology's own "
+                       f"{len(used) - len(_mine) - len({r['layer'] for r in accepted})} "
+                       f"by the technology's own "
                        f"layer table ({authority}, {len(allowed)} pair(s))"
                        + (f" and {len(_mine)} by this flow's own marker "
                           f"declaration ({', '.join(_mine)}), which "
@@ -1067,6 +1155,11 @@ def _step_forbidden_layers(ev: StepEvidence, layers: Optional[Dict[Any, int]],
                        + (f". None of the {len(declared)} additionally "
                           f"declared forbidden layer(s) is in use"
                           if declared else ""))
+    if accepted:
+        ev.evidence += (f"; {sum(r['text_count'] for r in accepted)} "
+                        f"undefined-layer TEXT annotation(s) in "
+                        f"{len(accepted)} exact PDK GDS cell/layer match(es); "
+                        "counts and source hashes are in foundry_text_annotations")
 
 
 def _step_flow_marker_layers(ev: StepEvidence,
@@ -1553,7 +1646,9 @@ def evaluate(project: Path,
                 ev, layers, _decl.answer(doc, _decl.FORBIDDEN_LAYERS_KEY),
                 allowed=allowed, authority=layer_authority,
                 authority_tried=(layer_tried or _volume_tried),
-                authority_why=volume_why, flow_markers=flow_markers)
+                authority_why=volume_why, flow_markers=flow_markers,
+                layout=lay if layers is not None else None,
+                volume=volume, reader=_pdk_reader)
         elif step.step_id == "General.FlowMarkerLayers":
             _step_flow_marker_layers(ev, layers, flow_markers)
         elif step.delegate is not None:
