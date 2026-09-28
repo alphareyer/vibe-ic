@@ -63,6 +63,8 @@ def produce(project, n=13, skip=(), declaration=False, raise_after=None):
         d = Path(project) / "input" / "submission_template"
         d.mkdir(parents=True, exist_ok=True)
         (d / "tapeout_declaration.json").write_text('{"answers": {}}')
+        (d / "tapeout_declaration.json").read_text()   # phase 1 reads its own
+        list(os.scandir(d))
     gd = Path(project) / "phase1" / "generated_docs"
     gd.mkdir(parents=True, exist_ok=True)
     for i in range(1, n + 1):
