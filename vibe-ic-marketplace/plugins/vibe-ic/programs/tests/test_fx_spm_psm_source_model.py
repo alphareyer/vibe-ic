@@ -45,8 +45,9 @@ def _t103():
     return mod
 
 
-# The database: VDD/VSS each carry one SPECIAL BTerm (the promoted pins),
-# a signal net carries an ordinary one. `analyze_power_grid` reports how many
+# The database: VDD/VSS each carry one SPECIAL BTerm (the promoted pins); a
+# second supply VAUX carries an ORDINARY BTerm (a declared port, not a
+# promoted strap), which must stay a source; a signal net carries one too. `analyze_power_grid` reports how many
 # supply BPins PSM would still source from.
 _DB = r"""
 namespace eval ord {}
@@ -57,12 +58,12 @@ rename exit _tcl_exit
 proc exit {args} { puts TCL_DONE; _tcl_exit 0 }
 set ::pv [dict create]
 set ::psm_fail 0
-set ::supply_bpins {bp_v1 bp_v2 bp_g1}
+set ::supply_bpins {bp_v1 bp_v2 bp_g1 bp_a1}
 proc ord::get_db_block {} { return blk }
 proc blk {m args} {
   switch -- $m {
     getInsts { return $::insts }
-    getNets { return {net_vdd net_vss net_sig} }
+    getNets { return {net_vdd net_vss net_sig net_aux} }
     default { return "" }
   }
 }
@@ -71,6 +72,8 @@ proc net_vss {m args} { switch -- $m { getSigType {return GROUND} getBTerms {ret
 proc net_sig {m args} { switch -- $m { getSigType {return SIGNAL} getBTerms {return bt_s} default {return ""} } }
 proc bt_v {m args} { switch -- $m { isSpecial {return 1} getBPins {return {bp_v1 bp_v2}} default {return ""} } }
 proc bt_g {m args} { switch -- $m { isSpecial {return 1} getBPins {return {bp_g1}} default {return ""} } }
+proc net_aux {m args} { switch -- $m { getSigType {return POWER} getBTerms {return bt_a} getName {return VAUX} default {return ""} } }
+proc bt_a {m args} { switch -- $m { isSpecial {return 0} getBPins {return {bp_a1}} default {return ""} } }
 proc bt_s {m args} { switch -- $m { isSpecial {return 0} getBPins {return {bp_s1}} default {return ""} } }
 proc inst_core {m args} { switch -- $m { getMaster {return m_core} isPlaced {return 1} isDoNotTouch {return 0} default {return ""} } }
 proc inst_pad {m args} { switch -- $m { getMaster {return m_pad} isPlaced {return 1} isDoNotTouch {return 0} default {return ""} } }
@@ -129,14 +132,14 @@ def static_ir_em(tmp_path, monkeypatch):
 def test_static_ir_em_on_a_padless_block_sources_from_no_promoted_pin(static_ir_em, tmp_path):
     _project, tcl, _doc = static_ir_em
     out = _run(tcl, ["inst_core"], tmp_path / "t")
-    assert _solves(out) and set(_solves(out)) == {"0"}, out
+    assert _solves(out) and set(_solves(out)) == {"1"}, out
     assert "PSM_SOURCE_MODEL: promoted_supply_pins_excluded=3 placed_pads=0" in out
 
 
 def test_static_ir_em_on_a_die_keeps_its_pin_sources(static_ir_em, tmp_path):
     _project, tcl, _doc = static_ir_em
     out = _run(tcl, ["inst_core", "inst_pad"], tmp_path / "t")
-    assert _solves(out) and set(_solves(out)) == {"3"}, out
+    assert _solves(out) and set(_solves(out)) == {"4"}, out
     assert "promoted_supply_pins_excluded=0 placed_pads=1" in out
 
 
@@ -160,9 +163,9 @@ def test_transient_ir_sources_from_no_promoted_pin(tmp_path):
         tmp_path / "d.def", tmp_path / "t.lef", tmp_path / "c.lef", lib, [],
         None, ["VDD", "VSS"], 24.0, 10, None, {}, "Metal")
     out = _run(tcl, ["inst_core"], tmp_path / "t")
-    assert _solves(out) and set(_solves(out)) == {"0"}, out
+    assert _solves(out) and set(_solves(out)) == {"1"}, out
     out = _run(tcl, ["inst_pad"], tmp_path / "d")
-    assert set(_solves(out)) == {"3"}, out
+    assert set(_solves(out)) == {"4"}, out
 
 
 # ---- pre-route EM presweep (inside the PnR session) -----------------------
@@ -181,7 +184,7 @@ def test_presweep_measures_without_pin_sources_and_restores_the_pins(tmp_path):
     procs = tcl[:tcl.index("set _pes_k 0")]
     out = _run(procs, ["inst_core"], tmp_path / "ok",
                "_vibeic_pes_measure 0 {}\nputs \"PROPS_LEFT [dict size $::pv]\"")
-    assert _solves(out) and set(_solves(out)) == {"0"}, out
+    assert _solves(out) and set(_solves(out)) == {"1"}, out
     # this session writes the DEF later: no mark may survive the measurement
     assert "PROPS_LEFT 0" in out
 
