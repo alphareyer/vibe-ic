@@ -39901,6 +39901,25 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                         "non_signoff_outputs": _iso,
                         "resize_history": resize_history,
                         "loosen_declines": loosen_declines})
+    # A SESSION THE RUNNER STOPPED IS NOT A FINDING. The watchdog's stall kill
+    # (no progress) and the ceiling's 124 end a session whose tool never
+    # answered; a LibreLane chain inside the session (steps 19/20, 21) reports
+    # a contract stop with the same codes (`librelane_contract.
+    # tool_stop_session_rc`). NOT_MEASURED with the contract's reason, never
+    # FAIL; a tool that ran and failed still reaches the gate below.
+    import librelane_contract as _ll_stop
+    _stop_reason = _ll_stop.session_stop_reason(rc)
+    if _stop_reason is not None:
+        return StepResult("pnr", _V.Verdict.NOT_MEASURED.value, time.time() - t0,
+                          f"PNR_SESSION_STOPPED rc={rc}{spare_note}: the tool was "
+                          f"stopped, not answered ({_stop_reason}); "
+                          f"log_tail={(out+err)[-2000:]}",
+                          [str(out_dir / "openroad.log")],
+                          extras={"finding": "PNR_SESSION_STOPPED",
+                                  "resize_history": resize_history,
+                                  "spare_record_written": _spare_record_written,
+                                  "loosen_declines": loosen_declines},
+                          reason_class=_stop_reason)
     if rc != 0 or not def_file.is_file():
         # `spare_note` rides along: this is the gate a run that died BEFORE
         # the Step-18 block actually reaches (no insertion => no route), so
