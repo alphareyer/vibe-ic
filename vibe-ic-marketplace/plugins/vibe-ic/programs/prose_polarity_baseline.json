@@ -6,7 +6,6 @@
     "_yosys_stat::_histogram",
     "aid_class_rtl_gen::_collect_port_decls",
     "analog_oracle_compare::_count_spice_devices",
-    "analog_real_corner_sweep::_run_ngspice",
     "analog_real_corner_sweep::build_design_deck",
     "arith_oracle_tb_gen::read_declared_conventions",
     "arithmetic_synth::_recognize_multiplier",

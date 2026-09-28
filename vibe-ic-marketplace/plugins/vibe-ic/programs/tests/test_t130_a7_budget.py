@@ -80,6 +80,8 @@ meas tran railx_min_b min v(b)
 .end
 """
 
+EXPECTED_MEASUREMENTS = {"density", "vavg", "vmax", "railx_max_b", "railx_min_b"}
+
 #: Plays docker. `exec` of ngspice records the container-side `timeout`
 #: DURATION and the deck, then either answers (a completed run) or prints
 #: ngspice's progress lines and exits 124 (the deadline fired).
@@ -123,7 +125,11 @@ if a[0] == "exec":
         print("/foss/tools/bin/ngspice"); sys.exit(0)
     if " -b " in cmd:
         deck = cmd.split()[-2].strip("'")
-        dur = a[a.index("timeout") + 3] if "timeout" in a else None
+        # Both `timeout 0` and an identity-stamped progress supervisor impose
+        # no wall deadline. Record the same semantic zero for either route;
+        # the T131 transport test separately proves the identity stamp.
+        dur = (a[a.index("timeout") + 3] if "timeout" in a else
+               "0" if "__vic_st" in cmd and "exec bash -lc" in cmd else None)
         with open(os.environ["STUB_EXEC_LOG"], "a") as fh:
             fh.write(json.dumps({"deck": deck, "timeout": dur}) + "\n")
         if os.environ.get("STUB_STALL"):
@@ -137,6 +143,21 @@ if a[0] == "exec":
                              "Reference value :  4.13724e-06\r")
             sys.exit(124)
         post = "_post_" in os.path.basename(deck)
+        # ngspice-47 prints one native row per declared measurement.
+        for line in open(deck).read().splitlines():
+            m = re.match(r"\s*meas\s+tran\s+(\w+)\s+(.*)$", line, re.I)
+            if not m:
+                continue
+            name = m.group(1).lower()
+            if name == os.environ.get("STUB_FAIL_MEAS"):
+                print(f"Error: measure {name} failed!")
+                continue
+            val = float(os.environ.get("STUB_RAIL_POST", "0.59")
+                        if post and name.startswith("railx_") else
+                        os.environ.get("STUB_RAIL_PRE", "0.60")
+                        if name.startswith("railx_") else
+                        "0.59" if post else "0.60")
+            print(f"{name} = {val:.5e} at= 1.00000e-06")
         print("MEAS density= " + ((os.environ.get("STUB_POST_DENSITY")
                                    or "0.59") if post else "0.60"))
         sys.exit(0)
@@ -293,7 +314,8 @@ def test_a_post_run_that_spends_its_budget_keeps_the_pre_result(
         EX_BUDGET_EXHAUSTED
     rec = _record(project)
     assert rec["result"] == "NOT_MEASURED"
-    assert rec["pre"]["measurements"] == {"density": 0.60}
+    assert rec["pre"]["measurements"] == {
+        name: 0.60 for name in EXPECTED_MEASUREMENTS}
     assert rec["external_stop"]["deck"].endswith("tb_blk_post_ngspice.sp")
 
 
@@ -633,7 +655,8 @@ def test_a_measured_degradation_is_a_fail_even_if_a_later_style_expires(
     assert rec["stopped_styles"] == ["ngspice(hrhc)"]
     doc = json.loads((project / "phase3/analog/blk/pre_vs_post.json")
                      .read_text())
-    assert [s["name"] for s in doc["specs"]] == ["density@ngspice()"]
+    assert {s["name"] for s in doc["specs"]} == {
+        f"{name}@ngspice()" for name in EXPECTED_MEASUREMENTS}
     assert "*@ngspice(hrhc)" in doc["_provenance"]["not_compared"]
 
 
@@ -650,7 +673,8 @@ def test_a_later_style_that_expires_keeps_the_rows_already_measured(
         "tb_blk_post_ngspice_hrhc.sp")
     doc = json.loads((project / "phase3/analog/blk/pre_vs_post.json")
                      .read_text())
-    assert [s["name"] for s in doc["specs"]] == ["density@ngspice()"]
+    assert {s["name"] for s in doc["specs"]} == {
+        f"{name}@ngspice()" for name in EXPECTED_MEASUREMENTS}
 
 
 def test_first_stopped_style_cannot_supply_a_completed_rows_provenance(
@@ -661,7 +685,8 @@ def test_first_stopped_style_cannot_supply_a_completed_rows_provenance(
     rec = _record(project)
     doc = json.loads((project / "phase3/analog/blk/pre_vs_post.json")
                      .read_text())
-    assert [s["name"] for s in doc["specs"]] == ["density@ngspice(hrhc)"]
+    assert {s["name"] for s in doc["specs"]} == {
+        f"{name}@ngspice(hrhc)" for name in EXPECTED_MEASUREMENTS}
     measured = next(c for c in rec["corners"]
                     if c["extraction_style"] == "ngspice(hrhc)")
     assert doc["_provenance"]["extracted_netlist"] == \

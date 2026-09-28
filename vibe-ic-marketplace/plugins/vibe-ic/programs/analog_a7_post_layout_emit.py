@@ -74,6 +74,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -270,7 +271,9 @@ def post_layout_testbench(tb_text: str, block: str, post_name: Optional[str],
 
 def compare(pre: Dict[str, Optional[float]], post: Dict[str, Optional[float]],
             style: str, not_compared: Optional[Dict[str, str]] = None,
-            missing: Optional[List[str]] = None) -> List[dict]:
+            missing: Optional[List[str]] = None,
+            rail_supply_v: Optional[float] = None,
+            rail_margin_fraction: Optional[float] = None) -> List[dict]:
     """One row per measurement both runs produced. NOTHING IS DROPPED
     SILENTLY: a measurement with no pre-layout value, or taken out of the post
     deck because its net is absent after extraction (`not_compared` on the
@@ -294,10 +297,54 @@ def compare(pre: Dict[str, Optional[float]], post: Dict[str, Optional[float]],
             continue
         row = {"name": f"{name}@{style}", "metric": name, "extraction_style": style,
                "pre_value": a, "post_value": b}
-        if a != 0:
+        if re.match(r"^railx_(?:min|max)_", name, re.I) and \
+                rail_supply_v and rail_margin_fraction:
+            # A rail extremum near ground has no useful relative denominator.
+            # Measure its absolute voltage movement against the supply and
+            # the same declared rail margin used by A3's transient check.
+            margin_v = rail_supply_v * rail_margin_fraction
+            row["delta_pct"] = 100.0 * (b - a) / margin_v
+            row["comparison_basis"] = "absolute_voltage_over_supply_margin"
+            row["rail_supply_v"] = rail_supply_v
+            row["rail_margin_v"] = margin_v
+            row["rail_reference_v"] = margin_v
+            row["rail_delta_v"] = b - a
+        elif a == 0 and b == 0:
+            row["delta_pct"] = 0.0
+        elif a != 0:
             row["delta_pct"] = 100.0 * (b - a) / abs(a)
         rows.append(row)
     return rows
+
+
+def rail_reference_voltage(tb_text: str) -> Optional[float]:
+    """Read the positive supply A3 actually drives, including its PWL ramp."""
+    for line in _joined_lines(tb_text):
+        fields = line.strip().split(None, 3)
+        if len(fields) != 4 or fields[0].lower() != "v_vdd" \
+                or fields[2] != "0":
+            continue
+        source = fields[3].strip()
+        if source.lower().startswith("pwl(") and source.endswith(")"):
+            values = source[4:-1].replace(",", " ").split()
+            volts = [spice_number(values[i]) for i in range(1, len(values), 2)]
+            positive = [v for v in volts if v is not None and v > 0]
+            return max(positive) if positive else None
+        value = spice_number(source)
+        return value if value is not None and value > 0 else None
+    return None
+
+
+def _declared_rail_reference(tb_text: str) -> tuple[Optional[float], Optional[float]]:
+    """Pair A3's driven supply with its declared transient rail margin."""
+    supply_v = rail_reference_voltage(tb_text)
+    if supply_v is None:
+        return None, None
+    import analog_a3_netlist_emit as a3
+    fraction = float(a3.TRAN_RAIL_MARGIN_FRACTION)
+    if not math.isfinite(fraction) or fraction <= 0:
+        return None, None
+    return supply_v, fraction
 
 
 #: SPICE magnitude suffixes, longest first (`meg` before `m`).
@@ -940,6 +987,31 @@ def _not_measured(record: dict, out: Path, deck: Path, sim: dict,
     return EX_BUDGET_EXHAUSTED
 
 
+def declared_measurements(tb_text: str) -> List[str]:
+    """The names of the `meas` cards the deck declares (comments skipped),
+    lower-cased as ngspice prints them."""
+    out = []
+    for line in _joined_lines(tb_text or ""):
+        if line.lstrip().startswith("*"):
+            continue
+        m = _MEAS_NAME_RE.match(line)
+        if m and m.group(1).lower() not in out:
+            out.append(m.group(1).lower())
+    return out
+
+
+def _unmeasured(record: dict, out: Path, rule: str, reason_class: str,
+                detail: str, **facts) -> int:
+    """NOT_MEASURED for a reason other than a spent budget (T131): the step ran
+    and a row it declared is genuinely absent, so it may not PASS on the rest
+    -- and nothing about the circuit was learned, so it is not a FAIL."""
+    record.update({"result": "NOT_MEASURED", "reason_class": reason_class,
+                   "rule": rule, "detail": detail, **facts})
+    write_json(out, record)
+    print(f"{NOT_MEASURED_TOKEN} {PRODUCER} {rule}: {detail}", file=sys.stderr)
+    return EX_BUDGET_EXHAUSTED
+
+
 def _refuse(record: dict, out: Path, rule: str, detail: str, rc: int) -> int:
     record.update({"result": "REFUSED" if rc == 1 else "NOT_PRODUCED",
                    "rule": rule, "detail": detail})
@@ -1022,6 +1094,14 @@ def run(project: Path, block: str, container: str, image: str,
     budget_s, budget_src = simulation_budget(
         spec if isinstance(spec, dict) else {}, tb_text, span.get("stop_s"),
         declared_budget(project, block))
+    rail_supply_v, rail_margin_fraction = _declared_rail_reference(tb_text)
+    if rail_supply_v is not None and rail_margin_fraction is not None:
+        record["rail_reference"] = {
+            "supply_v": rail_supply_v,
+            "margin_fraction": rail_margin_fraction,
+            "comparison_scale_v": rail_supply_v * rail_margin_fraction,
+            "source": "A3 testbench v_vdd and A3 transient rail margin",
+        }
     record["transient_span"] = span
     record["budget"] = {"seconds": round(budget_s, 1), **budget_src,
                         "applies_to": "each simulation (pre and every post)",
@@ -1066,6 +1146,15 @@ def run(project: Path, block: str, container: str, image: str,
     record["pre"] = {"testbench": str(pre_tb.relative_to(project)),
                      "relocated_from": str(tb.relative_to(project)),
                      "measurements": pre["meas"], "log": pre["log"]}
+    # T131: EVERY declared row is read, or the step says it was not. A `meas`
+    # card that produced no pre-layout value leaves a hole the 10 % rule would
+    # pass over silently.
+    got = {k.lower() for k, v in (pre["meas"] or {}).items() if v is not None}
+    absent = [n for n in declared_measurements(tb_text) if n not in got]
+    if absent:
+        # Keep the hole visible, but continue the post runs. A measured
+        # degradation on another row is a FAIL and must outrank this gap.
+        record["absent_measurements"] = absent
 
     specs: List[dict] = []
     corners: List[dict] = []
@@ -1175,7 +1264,8 @@ def run(project: Path, block: str, container: str, image: str,
                            f"{post_tb.name} did not simulate ({post['log']})", 1)
         skipped: Dict[str, str] = dict(dropped)
         lost: List[str] = []
-        measured_rows = compare(pre["meas"], post["meas"], style, skipped, lost)
+        measured_rows = compare(pre["meas"], post["meas"], style, skipped, lost,
+                                rail_supply_v, rail_margin_fraction)
         for row in measured_rows:
             row["extracted_netlist"] = corner["extracted_netlist"]
             row["post_layout_netlist"] = corner["post_layout_netlist"]
@@ -1190,13 +1280,42 @@ def run(project: Path, block: str, container: str, image: str,
                            f"{lost} and the post-layout run did not, on nets "
                            f"the extraction kept ({post['log']})", 1)
     record["corners"] = corners
+    record["compared_specs_count"] = len(specs)
     if exhausted and not specs:
         _style, post_tb, post = exhausted[0]
         record["stopped_styles"] = [e[0] for e in exhausted]
         return _not_measured(record, record_path, post_tb, post, project)
     if not specs:
+        if absent:
+            return _unmeasured(
+                record, record_path, "A7_PRE_MEASUREMENT_ABSENT",
+                "partial_population",
+                f"{pre_tb.name}: no comparable post-layout row and "
+                f"{len(absent)} declared pre-layout measurement(s) absent "
+                f"({', '.join(absent[:8])})",
+                absent_measurements=absent)
         return _refuse(record, record_path, "A7_NOTHING_COMPARED",
                        "pre and post runs share no numeric measurement", 1)
+    if absent and not exhausted:
+        import analog_a7_post_layout_resim_check as _gate
+        deltas, _pairs = _gate._check_specs(specs)
+        worst = max(deltas) if deltas else 0.0
+        if worst > _gate.DEFAULT_MAX_DELTA_PCT:
+            bad = sorted(s["name"] for s in specs
+                         if any(d > _gate.DEFAULT_MAX_DELTA_PCT
+                                for d in _gate._check_specs([s])[0]))
+            return _refuse(
+                record, record_path, "A7_POSTSIM_DELTA_TOO_BIG",
+                f"measured post-layout degradation {bad[:8]} exceeds "
+                f"{_gate.DEFAULT_MAX_DELTA_PCT}% (max {worst:.2f}%); "
+                f"pre-layout rows absent: {absent[:8]}", 1)
+        return _unmeasured(
+            record, record_path, "A7_PRE_MEASUREMENT_ABSENT",
+            "partial_population",
+            f"{pre_tb.name}: {len(absent)} declared measurement(s) produced "
+            f"no pre-layout value ({', '.join(absent[:8])}"
+            f"{', ...' if len(absent) > 8 else ''}; {pre['log']})",
+            absent_measurements=absent)
     measured_styles = {row["extraction_style"] for row in specs}
     typical = next(c for c in corners
                    if c.get("extraction_style") in measured_styles)

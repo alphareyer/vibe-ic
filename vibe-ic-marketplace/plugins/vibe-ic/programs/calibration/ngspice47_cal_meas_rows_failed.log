@@ -1,0 +1,38 @@
+[INFO] Final PATH variable: /headless/.local/bin:/foss/tools/bin:/foss/tools/sak:/usr/local/sbin:/headless/.local/bin:/foss/tools/bin:/foss/tools/sak:/foss/tools/kactus2:/foss/tools/klayout:/foss/tools/osic-multitool:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/foss/tools/kactus2:/foss/tools/klayout:/foss/tools/osic-multitool
+[INFO] Final PYTHONPATH variable: /headless/.local/lib/python3.12/site-packages:/foss/tools/yosys/share/yosys/python3:/usr/lib/python312.zip:/usr/lib/python3.12:/usr/lib/python3.12/lib-dynload:/usr/local/lib/python3.12/dist-packages:/opt/vibeic-forks/pyuvm/src:/opt/vibeic-forks/cocotb/src:/usr/lib/python3/dist-packages:/foss/tools/ngspyce/local/lib/python3.12/dist-packages:/foss/tools/openems/local/lib/python3.12/dist-packages:/foss/tools/pyopus/local/lib/python3.12/dist-packages:/foss/tools/yosys/share/yosys/python3:/foss/tools/klayout/pymod:/foss/tools/vacask/lib/vacask/python
+
+Note: No compatibility mode selected!
+
+
+Circuit: * calibration: ngspice native meas result rows (rc low-pass, pulse drive)
+
+Doing analysis at TEMP = 27.000000 and TNOM = 27.000000
+
+Using SPARSE 1.3 as Direct Linear Solver
+
+Initial Transient Solution
+--------------------------
+
+Node                                   Voltage
+----                                   -------
+in                                           0
+out                                          0
+v1#branch                                    0
+
+
+Error: measure  cal_avg  avg(TRIG) : no such vector as 'v(nosuch)'
+ meas tran cal_avg avg v(nosuch) from=10u to=29u failed!
+
+
+No. of Data Rows : 3071
+
+Error: measure  cal_max  when(WHEN) : out of interval
+ meas tran cal_max when v(out)=5 failed!
+
+
+Error: measure  cal_at  find(AT) : out of interval
+ meas tran cal_at find v(out) at=50u failed!
+
+Error: &cal_avg: no such variable.
+MEAS cal_echo=
+Note: Simulation executed from .control section 

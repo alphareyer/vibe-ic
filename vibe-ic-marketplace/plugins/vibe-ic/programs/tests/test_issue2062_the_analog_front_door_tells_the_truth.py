@@ -125,7 +125,7 @@ def test_R1_a_project_that_stages_its_own_pdk_is_UNTOUCHED(tmp_path):
     assert r["drc_deck"].endswith("mypdk.drc")
 
 
-# ── R12: no corner is ended by a clock ────────────────────────────────────
+# ── R12: every corner run has a deadline (T131; was: no corner is ended by a clock)
 class _Fine:
     returncode = 0
     stdout = "vavg = 6.000000e-01\nMEAS density= 0.6  swing= 1.0\n"
@@ -141,8 +141,8 @@ def _stub(monkeypatch, seen, cp=_Fine):
 
 
 def test_R12_a_corner_run_is_given_no_deadline(monkeypatch):
-    """GNU `timeout` documents DURATION 0 as "disable the associated timeout",
-    measured both directions on this image (coreutils 9.4)."""
+    """A progressing run is not stopped by a raw wall-clock deadline.
+    The A4 fresh-container path has its own progress-stall supervisor."""
     seen = {}
     _stub(monkeypatch, seen)
     ARS._run_ngspice("c", "/tmp/d.sp", deck_text="tran 0.5n 51200n\n",
@@ -172,8 +172,9 @@ def test_R12_the_corner_call_site_hands_the_deck_over():
     # between `deck_text=deck,` and `run_to_completion=True`, which turned a
     # substring match into a red about layout. Whitespace between the two
     # kwargs is nothing this test measures.
-    assert re.search(r"deck_text=tb,\s*run_to_completion=True", src)     # base run
-    assert re.search(r"deck_text=deck,\s*run_to_completion=True", src)   # PVT corner
+    assert re.search(r"deck_text=tb,\s*run_to_completion=True", src)
+    assert re.search(r"deck_text=deck,\s*run_to_completion=True", src)
+    assert 'corner_job={"id":' in src
 
 
 # ── R12c: an attempted corner that produced nothing says why ──────────────

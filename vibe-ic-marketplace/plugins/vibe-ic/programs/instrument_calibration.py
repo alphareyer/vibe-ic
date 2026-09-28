@@ -2512,6 +2512,43 @@ _register(Instrument(
                                  "44-openroad-detailedrouting")),
 ))
 
+def _judge_native_meas_rows(transcript: str) -> Optional[str]:
+    import analog_real_corner_sweep as ARS
+    rows = ARS.native_meas_rows(transcript)
+    got = sorted(k for k in ("cal_avg", "cal_max", "cal_at") if k in rows)
+    return f"NATIVE MEAS ROWS: {', '.join(got)}" if got else None
+
+
+_register(Instrument(
+    name="analog_real_corner_sweep::native_meas_rows",
+    reads="an ngspice batch transcript (A4 corners, A7 pre/post, A9)",
+    ruling="T131 (A7 must compare the rails)",
+    owner="rfa7",
+    why=("The row pattern demanded end-of-line right after the value, so every "
+         "windowed (`from= to=`) and extremum (`at=`) result ngspice prints was "
+         "read as ABSENT -- on the delta_sigma A3 deck 243 of 245 results -- and "
+         "A7's 10 % rule compared no rail at all. The pair is three measures that "
+         "succeed (one windowed, one extremum, one `find ... at=`) against the "
+         "same three failing, whose card text ngspice echoes back with `failed!`."),
+    judge=_judge_native_meas_rows,
+    positive=Sample(
+        provenance=(
+            "REAL ngspice-47 transcript (vibeic-eda 0.3.83, 8hd-3, 2026-09-28): "
+            "`calibration/ngspice47_cal_meas_rows.sp`, an RC low-pass under a "
+            "pulse, run as `ngspice -b` -- `cal_avg ... from= to=`, `cal_max ... "
+            "at=`, `cal_at` all measured. Unedited."),
+        artefact=_read("ngspice47_cal_meas_rows.log")),
+    expect="NATIVE MEAS ROWS: cal_at, cal_avg, cal_max",
+    negative=Sample(
+        provenance=(
+            "The SAME circuit and run, `calibration/ngspice47_cal_meas_rows_"
+            "failed.sp`: the three measures made to fail (a vector that does not "
+            "exist, a `when` never met, a `find` past the stop). ngspice prints "
+            "`Error: measure ...` and echoes each card with `failed!`, and no "
+            "result row. Unedited."),
+        artefact=_read("ngspice47_cal_meas_rows_failed.log")),
+))
+
 
 # ---- LibreLane flow.log: did the run finish? (llv1 W6 review) ----
 

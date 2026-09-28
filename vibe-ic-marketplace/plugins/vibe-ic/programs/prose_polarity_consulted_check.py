@@ -933,7 +933,7 @@ _NOT_PROSE: Dict[str, str] = {
         "position of every card kind and requires the output to be the "
         "neutral-name output with the name substituted, while the same "
         "strings read as prose are denied. Owner: lane mig109.",
-    "analog_a7_post_layout_emit::measurement_span":
+    "analog_real_corner_sweep::measurement_span":
         "NGSPICE TRANSIENT CARDS of the A3 testbench -- `tran <step> <stop>`, "
         "`meas tran <name> ...` with its `from=`/`to=`/`at=`/`td=` keywords "
         "and `trig`/`targ`/`when` clauses, and the `fourier`/`wrdata` command "

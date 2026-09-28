@@ -1157,6 +1157,14 @@ def _a7_stopped_reason(path: Path, before: Optional[tuple], block: str,
             raise ValueError("producer record identity/result mismatch")
         reason = record.get("reason_class")
         rule = record.get("rule")
+        if (reason, rule) == ("partial_population",
+                              "A7_PRE_MEASUREMENT_ABSENT"):
+            absent = record.get("absent_measurements")
+            if (not isinstance(absent, list) or not absent
+                    or not all(isinstance(name, str) and name
+                               for name in absent)):
+                raise ValueError("A7 absent-measurement evidence missing")
+            return _V.ReasonClass.PARTIAL_POPULATION, None
         cases = {
             ("execution_error", "A7_SIMULATION_STOPPED_EXTERNALLY"):
                 (_V.ReasonClass.EXECUTION_ERROR, "external_stop"),

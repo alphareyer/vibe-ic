@@ -215,8 +215,18 @@ def _check_specs(specs: list) -> tuple[list[float], list[tuple]]:
             post_f = float(post)
         except (TypeError, ValueError):
             continue
-        if pre_f != 0:
-            pairs.append((pre_f, post_f))
+        pairs.append((pre_f, post_f))
+        if str(s.get("metric") or "").lower().startswith("railx_"):
+            try:
+                rail_v = float(s.get("rail_reference_v"))
+            except (TypeError, ValueError):
+                rail_v = 0.0
+            if rail_v > 0:
+                # The producer reports the scale, but the gate computes the
+                # drift from the measured voltages. A copied delta_pct cannot
+                # hide a real rail movement.
+                deltas.append(abs(100.0 * (post_f - pre_f) / rail_v))
+                continue
         if "delta_pct" in s:
             try:
                 deltas.append(abs(float(s["delta_pct"])))
@@ -224,7 +234,7 @@ def _check_specs(specs: list) -> tuple[list[float], list[tuple]]:
                 pass
             continue
         if pre_f == 0:
-            deltas.append(float("inf"))
+            deltas.append(0.0 if post_f == 0 else float("inf"))
             continue
         deltas.append(abs(100.0 * (post_f - pre_f) / pre_f))
     return deltas, pairs
