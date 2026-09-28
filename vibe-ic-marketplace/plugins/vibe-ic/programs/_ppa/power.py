@@ -2737,6 +2737,57 @@ def _def_supply_subject_sha256(path: Path) -> Optional[str]:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+DIRECT_PDN_RECEIPT_NAME = "direct_pdn.receipt.json"
+
+
+def _write_direct_pdn_receipt(pnr_out: Path, routed_def: Path,
+                              invocation_output: str, pdn_ok: bool,
+                              pdn_marker: str) -> Optional[Path]:
+    """Bind this direct route's PDN marker to the DEF it actually emitted.
+
+    Only step_pnr calls this after the route invocation returns. Canonicalize
+    may consume the receipt, but cannot mint one from a sibling log.
+    """
+    receipt = Path(pnr_out) / DIRECT_PDN_RECEIPT_NAME
+    receipt.unlink(missing_ok=True)
+    log = Path(pnr_out) / "openroad.log"
+    subject = _def_supply_subject_sha256(routed_def)
+    source_sha = _sha256_of(log) if log.is_file() else None
+    marker_line = re.compile(rf"(?m)^{re.escape(pdn_marker)}(?=[:\s]|$)")
+    if (not pdn_ok or pdn_marker not in ("PDN_INSERTED", "PDN_INSERTED_ADAPTIVE")
+            or not subject or not source_sha
+            or not marker_line.search(invocation_output)
+            or not marker_line.search(log.read_text(errors="replace"))):
+        return None
+    receipt.write_text(json.dumps({
+        "schema": "vibeic.direct_pdn_receipt.v1",
+        "producer": "phase3_one_shot_runner.step_pnr",
+        "marker": pdn_marker,
+        "log_sha256": source_sha,
+        "routed_def": Path(routed_def).name,
+        "routed_def_sha256": _sha256_of(routed_def),
+        "supply_subject_sha256": subject,
+    }, sort_keys=True, indent=2) + "\n")
+    return receipt
+
+
+def _direct_pdn_receipt_matches(pnr_out: Path, source_sha: Optional[str],
+                                supply_subject: Optional[str],
+                                pdn_marker: str) -> bool:
+    receipt = Path(pnr_out) / DIRECT_PDN_RECEIPT_NAME
+    try:
+        rec = json.loads(receipt.read_text())
+    except (OSError, ValueError):
+        return False
+    return (isinstance(rec, dict)
+            and rec.get("schema") == "vibeic.direct_pdn_receipt.v1"
+            and rec.get("producer") == "phase3_one_shot_runner.step_pnr"
+            and rec.get("marker") == pdn_marker
+            and source_sha is not None and rec.get("log_sha256") == source_sha
+            and supply_subject is not None
+            and rec.get("supply_subject_sha256") == supply_subject)
+
+
 def librelane_pdn_evidence(project: Path) -> Optional[Dict[str, Any]]:
     """The power-grid verdict LibreLane's OWN step-15 chain measured, or None.
 
@@ -2830,11 +2881,6 @@ def pdn_done_text(project: Path, pnr_out: Path, primary_def: Path,
         prior = flag.read_text(errors="replace") if flag.is_file() else ""
     except OSError:
         prior = ""
-    if (source_sha is not None and supply_subject is not None
-            and f"# measured_def_sha256: {def_sha}\n" in prior
-            and f"# source_identity_sha256: {source_sha}\n" in prior
-            and f"# supply_subject_sha256: {supply_subject}\n" in prior):
-        return None
     if ll is not None:
         subject_matches = (supply_subject is not None
                            and ll["supply_subject_sha256"] == supply_subject)
@@ -2853,15 +2899,18 @@ def pdn_done_text(project: Path, pnr_out: Path, primary_def: Path,
         marker = pdn_marker
         source = _rel(log_path, project)
         tool = f"openroad (see {_rel(pnr_out / 'pnr.tcl', project)})"
-        # A direct transcript from the old DEF cannot certify changed supply
-        # geometry. Same geometry under a new DEF hash remains the same subject.
-        old_source = re.search(r"(?m)^# source_identity_sha256: (\w+)$", prior)
-        old_subject = re.search(r"(?m)^# supply_subject_sha256: (\w+)$", prior)
-        if (status == "CONNECTED" and old_source and old_subject
-                and old_source.group(1) == source_sha
-                and old_subject.group(1) != supply_subject):
+        # The first flag needs the same route-time binding as every later one.
+        # A log by itself never proves that this DEF population was measured.
+        if (status == "CONNECTED" and not _direct_pdn_receipt_matches(
+                pnr_out, source_sha, supply_subject, pdn_marker)):
             status = "NOT MEASURED"
-            marker += "; direct log is unchanged but DEF supply geometry changed"
+            marker += "; direct route receipt missing or DEF supply subject changed"
+    if (source_sha is not None and supply_subject is not None
+            and f"# PDN status: {status}\n" in prior
+            and f"# measured_def_sha256: {def_sha}\n" in prior
+            and f"# source_identity_sha256: {source_sha}\n" in prior
+            and f"# supply_subject_sha256: {supply_subject}\n" in prior):
+        return None
     ev = def_evidence or {}
     return (f"# PDN status: {status}\n"
             f"# marker: {marker}\n"

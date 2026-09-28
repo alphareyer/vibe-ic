@@ -208,11 +208,46 @@ def test_a_changed_direct_log_replaces_an_old_connected_verdict(tmp_path):
     _ll_chain(project)
     log = pnr / "openroad.log"
     log.write_text("PDN_INSERTED\n")
+    ok, marker = R._pnr_pdn_status(project)
+    assert P._write_direct_pdn_receipt(
+        pnr, pnr / f"{TOP}.def", "PDN_INSERTED\n", ok, marker)
     assert "# PDN status: CONNECTED" in _emit_pdn(project)
     log.write_text("PDN_NONFATAL\n")
     refreshed = _emit_pdn(project)
     assert "# PDN status: NOT CONNECTED" in refreshed, refreshed
     assert "PDN_NONFATAL" in refreshed
+
+
+def test_first_direct_flag_needs_this_routes_supply_subject(tmp_path):
+    project = _canonicalize_project(tmp_path)
+    pnr = R._pl.pnr_dir(project)
+    _ll_chain(project)
+    log = pnr / "openroad.log"
+    log.write_text("PDN_INSERTED\n")
+    routed = pnr / f"{TOP}.def"
+    assert not (pnr / "pdn.done").exists()
+    assert "# PDN status: NOT MEASURED" in _emit_pdn(project)
+    (pnr / "pdn.done").unlink()
+    measured = P._def_supply_subject_sha256(routed)
+    assert measured
+    ok, marker = R._pnr_pdn_status(project)
+    assert P._write_direct_pdn_receipt(
+        pnr, routed, "PDN_INSERTED\n", ok, marker)
+    assert "# PDN status: CONNECTED" in _emit_pdn(project)
+    assert P._write_direct_pdn_receipt(
+        pnr, routed, "[INFO] canonicalize only; no route ran\n", ok, marker) is None
+    assert "# PDN status: NOT MEASURED" in _emit_pdn(project)
+    assert P._write_direct_pdn_receipt(
+        pnr, routed, "PDN_INSERTED\n", ok, marker)
+    (pnr / "pdn.done").unlink()
+    # The log remains from an earlier route while a new, unpowered cell is
+    # added before the first canonicalize pass sees this DEF.
+    routed.write_text(routed.read_text().replace(
+        "COMPONENTS 0 ;\nEND COMPONENTS",
+        "COMPONENTS 1 ;\n- u_unpowered BUF + PLACED ( 0 0 ) N ;\nEND COMPONENTS"))
+    assert P._def_supply_subject_sha256(routed) != measured
+    first = _emit_pdn(project)
+    assert "# PDN status: NOT MEASURED" in first, first
 
 
 def test_old_grid_measurement_cannot_be_stamped_on_a_new_grid(tmp_path):
@@ -344,6 +379,20 @@ def test_old_log_cannot_mint_a_receipt_for_an_invocation_that_did_not_route(tmp_
     rc, payload = _drc_audit(project)
     assert rc == 1 and payload["passed"] is False
     assert "DRC_EMPTY_NOT_MEASURED" in _rules(payload, "ERROR")
+
+
+def test_pnr_preflight_failure_invalidates_old_empty_drc_receipt(tmp_path):
+    project = _empty_scope(tmp_path, _LL_ROUTE_LOG)
+    before_rc, before = _drc_audit(project)
+    assert before_rc == 0 and before["passed"] is True
+    # No synth netlist: step_pnr returns before starting a new route.
+    result = R.step_pnr(project, TOP,
+                        _pdk(str(tmp_path / "x.lib"), str(tmp_path / "x.lef")),
+                        "nocontainer", "100x100", 0.5)
+    assert result.status == "FAIL" and "netlist missing" in result.detail
+    after_rc, after = _drc_audit(project)
+    assert after_rc == 1 and after["passed"] is False
+    assert "DRC_EMPTY_NOT_MEASURED" in _rules(after, "ERROR")
 
 
 def test_an_empty_report_with_no_completion_evidence_is_not_measured(tmp_path):

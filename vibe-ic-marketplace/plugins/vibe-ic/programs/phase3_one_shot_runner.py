@@ -37189,6 +37189,11 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
              em_floor_for_resize: Optional[Dict[str, Any]] = None,
              density_from_tool_default: bool = False) -> StepResult:
     t0 = time.time()
+    out_dir = _pl.pnr_dir(project)
+    # No old route receipt can certify this invocation, including a preflight
+    # failure before the router or wrapper checks run.
+    (out_dir / ROUTER_DRC_RECEIPT_NAME).unlink(missing_ok=True)
+    (out_dir / _ppa_power.DIRECT_PDN_RECEIPT_NAME).unlink(missing_ok=True)
     netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
     print(f"[pnr] netlist: {_nl_note}", flush=True)
     if not netlist.is_file():
@@ -37210,11 +37215,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                     "Add a wrapper-glue layer + author "
                     "pin_order.cfg from the harness template"),
             })
-    out_dir = _pl.pnr_dir(project)
     out_dir.mkdir(parents=True, exist_ok=True)
-    # A previous route's zero receipt cannot answer for this invocation if it
-    # fails before reaching the route completion point below.
-    (out_dir / ROUTER_DRC_RECEIPT_NAME).unlink(missing_ok=True)
     # The active tech LEF itself can contain a contradiction: a VIA landing
     # smaller than the routing layer's own MINWIDTH/AREA.  Post-route RECT
     # patching is too late (the router did not reserve the required spacing),
@@ -39893,6 +39894,11 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # The route just ran in this invocation. Bind its empty DRC output to the
     # transcript and shipped geometry before later canonicalize/audit passes.
     route_drc_receipt = _write_router_drc_receipt(out_dir, def_file, out + err)
+    direct_pdn_receipt = None
+    if _ll_route_mode == "direct":
+        _direct_pdn_ok, _direct_pdn_marker = _pnr_pdn_status(project)
+        direct_pdn_receipt = _ppa_power._write_direct_pdn_receipt(
+            out_dir, def_file, out + err, _direct_pdn_ok, _direct_pdn_marker)
     _drt_extras["sdr_transactions"] = _sdr_txn_records
     if _sdr_adopt_records:
         _drt_extras["sdr_adoptions"] = _sdr_adopt_records
@@ -40369,6 +40375,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     pnr_outputs = [str(def_file), str(sta_file)]
     if route_drc_receipt is not None:
         pnr_outputs.append(str(route_drc_receipt))
+    if direct_pdn_receipt is not None:
+        pnr_outputs.append(str(direct_pdn_receipt))
     if spare_json_path.is_file():
         pnr_outputs.append(str(spare_json_path))
     # PG net ownership is sign-off evidence, so it is stated on the PASS path
