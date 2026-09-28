@@ -191,6 +191,26 @@ def _integrator_value(body: str, *keys: str) -> float | None:
     return None
 
 
+def _installed_image_digest(image: str) -> str | None:
+    """Read the actual local image identity; a bundle cannot assert its own pin."""
+    try:
+        process = subprocess.run(
+            ["docker", "image", "inspect", image, "--format", "{{json .}}"],
+            capture_output=True, text=True, check=False, timeout=15)
+        if process.returncode:
+            return None
+        value = json.loads(process.stdout).get("Id")
+        return value if re.fullmatch(r"sha256:[0-9a-f]{64}", str(value)) else None
+    except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+        return None
+
+
+def _script_reads(body: str) -> list[tuple[str, str]]:
+    return re.findall(
+        r"(?m)^\s*(read_liberty|read_verilog|read_sdc|read_spef)\s+\{([^{}]+)\}\s*$",
+        body)
+
+
 def _owner_records(project: Path | None, identity: dict, current: dict,
                    frozen: dict) -> tuple[list[dict], str]:
     """Read only independently signed owner records, never the capture plan."""
@@ -229,7 +249,8 @@ def _owner_records(project: Path | None, identity: dict, current: dict,
             record = json.loads(payload)
             if (isinstance(record, dict) and record.get("identity") == expected
                     and record.get("type") in
-                    ("waiver", "design_override", "clock_limits")):
+                    ("waiver", "design_override", "clock_limits",
+                     "threshold_freeze")):
                 approved.append(record)
         except (OSError, ValueError, TypeError):
             continue
@@ -398,12 +419,40 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     for name in ("openroad_commit", "opensta_commit", "pdk_commit"):
         if not identity.get(name):
             missing.append(f"{name} absent")
+    image = identity.get("tool_image")
+    digest = identity.get("tool_image_digest")
+    if (not isinstance(image, str) or
+            not re.fullmatch(r"sha256:[0-9a-f]{64}", str(digest)) or
+            _installed_image_digest(image) != digest):
+        missing.append("OpenSTA image digest not bound to installed image")
     source_texts = {}
     for name in ("l7", "l9", "pdk_config", "signoff_sdc"):
         item = (current.get("sources") or {}).get(name) or {}
         source_texts[name] = _evidence(item, fails, name)
         if item.get("sha256") != (frozen.get("sources") or {}).get(name):
             fails.append(f"{name}: 門檻來源已變更")
+    if project is not None:
+        for layer in ("l7", "l9"):
+            source_path = Path(str((current.get("sources") or {}).get(
+                layer, {}).get("path") or "")).resolve()
+            allowed = (project / "input/docs", project / "phase1/generated_docs")
+            if not any(source_path.is_relative_to(root.resolve()) and
+                       source_path.name.upper().startswith(layer.upper())
+                       for root in allowed):
+                missing.append(f"{layer}: declaration file outside judged project")
+        provenance = project / "phase3/librelane_pdk_root.provenance.json"
+        try:
+            root_doc = json.loads(provenance.read_text())
+            pdk_root = Path(root_doc["path"]).resolve() / str(identity.get("pdk") or "")
+            pdk_source = Path(str((current.get("sources") or {}).get(
+                "pdk_config", {}).get("path") or "")).resolve()
+            if not pdk_root.is_dir() or not pdk_source.is_relative_to(pdk_root):
+                missing.append("PDK config is not inside installed PDK root")
+            if ((root_doc.get("derivation") or {}).get("image_id") !=
+                    identity.get("tool_image_digest")):
+                missing.append("installed PDK root image identity differs from STA image")
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            missing.append("installed PDK root provenance unavailable")
     sdc = (current.get("sources") or {}).get("signoff_sdc") or {}
     sdc_text = _evidence(sdc, fails, "signoff_sdc")
     if _FORBIDDEN_SDC.search(sdc_text) and not bundle.get("owner_exclusion_declaration"):
@@ -421,6 +470,8 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             frozen.get("scope") != current.get("scope") or
             frozen.get("scene_liberties") != current.get("scene_liberties")):
         fails.append("門檻來源已變更: value/scope/scene")
+    if frozen.get("scope") != "whole final netlist":
+        fails.append("sign-off scope is not the whole final netlist")
     pdk_text = source_texts.get("pdk_config", "")
     integrator = {
         "fanout": _integrator_value(pdk_text, "MAX_FANOUT_CONSTRAINT", "SYNTH_MAX_FANOUT"),
@@ -603,9 +654,42 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         if not isinstance(excluded, list) or any(
                 not isinstance(p, dict) or not p.get("pin") or
                 p.get("reason") not in ("constant", "disabled", "ideal") or
-                any(axis not in p for axis in ("fanout", "cap_pf", "slew_ns"))
+                any(not isinstance(p.get(axis), (int, float)) for axis in
+                    ("fanout", "cap_pf", "slew_rise_ns", "slew_fall_ns"))
                 for p in (excluded or [])):
             missing.append(f"{name}: excluded pin values incomplete")
+        excluded_text = _evidence(scene.get("excluded_pins_report") or {},
+                                  missing, name + " excluded pin report")
+        try:
+            if json.loads(excluded_text) != excluded:
+                missing.append(f"{name}: excluded pins differ from raw tool report")
+        except (ValueError, TypeError):
+            missing.append(f"{name}: excluded pin report unreadable")
+        for item in excluded or []:
+            if not isinstance(item, dict) or not item.get("pin"):
+                continue
+            for kind, axis, direction in (
+                    ("max_fanout", "fanout", "none"),
+                    ("max_capacitance", "cap_pf", "none"),
+                    ("max_slew", "slew_rise_ns", "rise"),
+                    ("max_slew", "slew_fall_ns", "fall")):
+                measured = item.get(axis)
+                if not isinstance(measured, (int, float)):
+                    continue
+                row = {"pin": item["pin"], "scene": name, "mode": mode,
+                       "direction": direction, "measured": measured,
+                       "excluded_reason": item.get("reason")}
+                if not _annotate_limits(row, kind, scene, libs, pins,
+                                        declared, missing):
+                    continue
+                row["limit"] = row["effective_limit"]
+                row["slack"] = row["effective_limit"] - measured
+                row["violated"] = measured > row["effective_limit"]
+                if row["violated"]:
+                    rows_by_kind[kind].append(row)
+                    if item.get("reason") != "constant":
+                        fails.append(f"{name}: excluded {item.get('reason')} pin "
+                                     f"{item['pin']} violates {kind}")
         for field in ("spef", "clock_properties", "all_limits_report", "positive_control_report"):
             if isinstance(scene.get(field), dict):
                 _evidence(scene[field], missing, name + " " + field)
@@ -645,6 +729,27 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                            for key in expected_links if key in libs} or
                 set(linked) != set(expected_links)):
             missing.append(f"{name}: process did not link its frozen full Liberty set")
+        expected_reads = ([
+            ("read_liberty", str(Path(item["path"]).resolve()))
+            for item in scene.get("linked_liberties") or []
+            if isinstance(item, dict) and item.get("path")]
+            + [("read_verilog", str(Path((identity.get("artifacts") or {}).get(
+                "sta_netlist", {}).get("path") or "").resolve())),
+               ("read_sdc", str(Path(sdc.get("path") or "").resolve())),
+               ("read_spef", str(Path((scene.get("spef") or {}).get("path") or "").resolve()))])
+        scripts = scene.get("tool_scripts") or []
+        if not isinstance(scripts, list) or len(scripts) != 2:
+            missing.append(f"{name}: fresh STA tool scripts absent")
+        else:
+            for index, script in enumerate(scripts):
+                body = _evidence(script, missing, f"{name} STA tool script {index}")
+                if (_script_reads(body) != expected_reads or
+                        _COMMAND not in body or
+                        re.search(r"(?m)^\s*(?:source|eval|exec)\b", body)):
+                    missing.append(f"{name}: STA tool script reads differ from frozen inputs")
+                if index == 1 and not re.search(
+                        r"(?m)^set_max_fanout\s+1\s+\[current_design\]\s*$", body):
+                    missing.append(f"{name}: positive control fanout injection absent")
         expected_pvt = (frozen.get("pvt") or {}).get(name)
         actual_pvt = (libs.get(scene.get("liberty")) or {}).get("header")
         if (not isinstance(expected_pvt, dict) or
@@ -884,7 +989,12 @@ def main(argv: list[str] | None = None) -> int:
                   if args.bundle.is_dir() else args.bundle)
         bundle = json.loads(source.read_text())
         result = judge(bundle, project=args.bundle if args.bundle.is_dir() else None)
-        if args.bundle.is_dir():
+        if not args.bundle.is_dir():
+            result.setdefault("not_measured", []).append(
+                "project context absent; threshold sources cannot be authenticated")
+            result["verdict"] = ("FAIL" if result.get("failures") else
+                                 "NOT_MEASURED")
+        else:
             if not (args.bundle / "reports/phase3/sta/drv_capture_plan.json").is_file():
                 result.setdefault("not_measured", []).append(
                     "fresh DRV capture plan absent")
