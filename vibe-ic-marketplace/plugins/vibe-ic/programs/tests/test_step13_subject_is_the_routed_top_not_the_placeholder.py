@@ -211,3 +211,19 @@ def test_binding_under_the_placeholder_matches_the_routed_file(tmp_path,
     # phase 3 finds the proof current and does not re-prove it
     assert P3.run_step13_lec_on_pnr_input(proj, CORE, "") == []
     assert len(lec_runs) == 1
+
+
+def test_both_step13_arms_are_handed_the_routed_top(tmp_path, lec_runs,
+                                                    monkeypatch):
+    """Arm B (LibreLane EQY, opt-in) proves the same subject under the same
+    top as arm A; its handoff probe is `<top>_synth.v` of that top."""
+    proj = _tree(tmp_path)
+    seen = []
+
+    def _arm_b(project, top, gate_netlist, results):
+        seen.append((top, gate_netlist))
+        return results
+    monkeypatch.setattr(R, "_lec_eqy_arm", _arm_b)
+    R.step_lec_equivalence(proj, PLACEHOLDER, "")
+    assert seen == [(CORE, ROUTED)]
+    assert _arg(lec_runs[0], "--top") == CORE

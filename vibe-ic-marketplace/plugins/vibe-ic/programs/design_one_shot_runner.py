@@ -21830,10 +21830,16 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
                        time.time() - t0, _why,
                        reason_class=_V.ReasonClass.INPUT_ABSENT))
         return results
+    # The top BOTH arms prove is the module whose netlist the subject IS: the
+    # top step 15 is handed, resolved by the same function that named the
+    # subject above. `top_name` is the REQUESTED top, and on a from-documents
+    # run it is still the runner's placeholder default (spm DIE, 2026-09-28:
+    # `chip_top`, while the subject is `spm_synth.v`).
+    lec_top = _lec_gns.step15_top(project, top_name)
     lec_run = PROGRAMS_DIR / "lec_run.py"
     if lec_run.is_file():
         cmd = _lec_run_argv(
-            project, lec_run, gate_netlist, top_name, container,
+            project, lec_run, gate_netlist, lec_top, container,
             lec_max_completed_rungs=lec_max_completed_rungs)
         # FUNCTIONAL-MODE CONSTRAINTS — only when this run really has a scan
         # chain. The gate netlist then carries `sin`/`shift`/`test`/`tck`/`sout`,
@@ -21960,7 +21966,7 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
                            "unavailable")
         results.append(StepResult("lec_equivalence", "NOT_MEASURED", time.time() - t0,
                        "lec_run.py missing → disclosed-skip", reason_class=_V.ReasonClass.TOOL_ABSENT))
-    return _lec_eqy_arm(project, top_name, gate_netlist, results)
+    return _lec_eqy_arm(project, lec_top, gate_netlist, results)
 
 
 def _lec_eqy_arm(project: Path, top_name: str, gate_netlist: str,

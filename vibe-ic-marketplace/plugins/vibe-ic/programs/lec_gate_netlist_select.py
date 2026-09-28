@@ -98,7 +98,10 @@ about the chip.
 post-DFT netlist when step 11's published scan record authorises it, the mapped
 pre-DFT netlist otherwise.  One implementation, so the proof and the router
 cannot disagree about the file.  The flow YAML declares the same edge: step 13
-and step 15 both read step 12's output.
+and step 15 both read step 12's output.  It is asked with the top step 15 is
+handed (``step15_top``: phase 3's ``effective_top`` resolution of the
+requested name), never with the requested name raw, which on a
+from-documents run is still the runner's placeholder default.
 
 ``proof_subject_binding`` is the check behind the gate's refusal: the sha256
 the proof recorded for its gate side (``lec.json:proof_identity.gate_netlist``)
@@ -491,18 +494,42 @@ BINDING_NO_CONSUMER = "NO_CONSUMER"        # step 15's input does not exist yet
 BINDING_TOP_UNKNOWN = "TOP_UNKNOWN"
 
 
+def step15_top(project: Path, top: str) -> str:
+    """The module whose netlist step 15 routes, for a REQUESTED top.
+
+    ``_chip_synth_read.effective_top`` — the ONE resolution phase 3 main
+    applies to ``--top-name`` before it calls ``step_synth`` and ``step_pnr``
+    (``<top>_asic`` / ``<top>_pad_wrapper`` when rtl/ stages one, else the
+    structural resolver; a real module is returned unchanged). Step 13 must
+    apply it too: the name it is handed is the runner's REQUESTED top, which
+    on a from-documents run is still the placeholder ``--top-name`` default,
+    because the front door resolves the top before phase 2 writes the RTL.
+
+    MEASURED on the spm DIE run (2026-09-28): phase 2 got ``chip_top``, asked
+    step 15's resolver with it, and recorded step 13 as NOT_MEASURED against
+    ``phase2/stage2/synth/chip_top_synth.v`` — a file no producer declares or
+    writes. Phase 3 built and routed ``spm_synth.v`` (plus the pad wrapper it
+    generates for the die), so that row could never have been measured, and
+    it was triaged as a phase-2 producer that failed to emit a netlist.
+    """
+    import _chip_synth_read as _csr
+    return _csr.effective_top(Path(project), top)
+
+
 def pnr_consumed_netlist(project: Path,
                          top: str) -> Tuple[Optional[Path], str, bool]:
     """``(path, note, is_scan_inserted)`` of the netlist step 15 routes.
 
     Asks ``phase3_one_shot_runner.pnr_input_netlist``, the resolver
-    ``step_pnr`` itself calls, and restates none of its rule. ``path`` is None
-    only when that resolver cannot be asked; a returned path may not exist yet
-    (the mapped netlist is written by phase 3's synthesis half).
+    ``step_pnr`` itself calls, with the top ``step_pnr`` is handed
+    (``step15_top``), and restates none of its rule. ``path`` is None only
+    when that resolver cannot be asked; a returned path may not exist yet (the
+    mapped netlist is written by phase 3's synthesis half).
     """
     try:
         import phase3_one_shot_runner as _p3
-        path, note, is_scan = _p3.pnr_input_netlist(Path(project), top)
+        path, note, is_scan = _p3.pnr_input_netlist(
+            Path(project), step15_top(project, top))
     except Exception as exc:  # noqa: BLE001 — an unanswerable resolver is data
         return None, (f"step-15 netlist resolver unavailable: "
                       f"{type(exc).__name__}: {exc}"), False
