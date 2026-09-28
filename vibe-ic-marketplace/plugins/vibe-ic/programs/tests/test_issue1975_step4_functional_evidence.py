@@ -88,7 +88,8 @@ def _connectivity_bridge(project: Path) -> None:
 def _declarations_and_coverage(project: Path) -> None:
     docs = project / "phase1/generated_docs"
     docs.mkdir(parents=True, exist_ok=True)
-    (docs / "L10_TEST_CASES.json").write_text(json.dumps({
+    l10 = docs / "L10_TEST_CASES.json"
+    l10.write_text(json.dumps({
         "test_cases": [{"id": "add_nominal"}, {"id": "add_corner"}]}))
     (docs / "L12_BEHAVIORAL_SEQUENCES.json").write_text(json.dumps({
         "sequences": [{"id": "reset_then_add"}]}))
@@ -104,6 +105,7 @@ def _declarations_and_coverage(project: Path) -> None:
     ex.mkdir(parents=True, exist_ok=True)
     (ex / "l10_execution.json").write_text(json.dumps({
         "schema": "vibeic.l10_execution.v1",
+        "l10_sha256": ORACLE._l10x.file_sha256(l10),
         "cases": [{"id": "add_nominal", "verdict": "PASS",
                    "sim_executed": True},
                   {"id": "add_corner", "verdict": "PASS",
