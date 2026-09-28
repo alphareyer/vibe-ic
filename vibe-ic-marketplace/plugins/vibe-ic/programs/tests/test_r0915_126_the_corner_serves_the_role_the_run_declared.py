@@ -80,6 +80,16 @@ def fixture(tmp_path, change=None):
     out = p / "reports/phase3/sta/post_route_summary.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(audit))
+    netlist = p / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    receipt = p / "reports/orchestrator/phase3_one_shot.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({
+        "verdict": "PASS",
+        "phase2_synth": G._pl.phase2_synth_input_identity(p),
+        "phase3_inputs": G._pl.phase3_signoff_input_identity(p),
+    }))
     return p
 
 
