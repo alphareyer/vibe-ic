@@ -61,8 +61,9 @@ REAL_PROBE = {
     'librelane_version': '3.1.0.dev1',
     'openroad_version': '26Q3-3002-gda11f47e14',
     'orfs_commit': 'c9c22caf9bf9cfe46c5a4236c6ec7e7ae9863cc3',
-    # An EXCERPT of config_variables: 5 of the 440 rows the 0.3.83 probe records (196 measured,
-    # 148 PDK-sourced, 96 decided at run time). The real probe also counts the last two groups
+    # An EXCERPT of config_variables: 5 of the 440 rows the 0.3.83 probe records (192 measured,
+    # 148 PDK-sourced, 96 decided at run time, 4 required without a default).
+    # The real probe also counts the latter three groups
     # in not_measured; that is left out of this snapshot, whose empty not_measured the
     # test_facts_come_from_the_image_through_two_capped_named_containers pins.
     'config_variables': {
@@ -369,7 +370,8 @@ _STAND_IN = {
         class _F:
             config_vars = [_v('FLOW_LEVEL', 'x', str)]
             Steps = [_S('A.One', [_v('UTIL', 50), _v('ROOT', pathlib.Path('/r')), _v('SHARED', 1),
-                                  _v('PDKV', None, str, pdk=True), _v('OPTV', None, typing.Optional[int])]),
+                                  _v('PDKV', None, str, pdk=True), _v('OPTV', None, typing.Optional[int]),
+                                  _v('PEP604', None, int | None), _v('REQUIRED', None, int)]),
                      _S('B.Two', [_v('DYN', lambda: 3), _v('SHARED', 1)])]
         class _Factory:
             @staticmethod
@@ -453,18 +455,34 @@ def test_the_probe_itself_records_the_variable_registry(tmp_path):
                            'pdk': False, 'flows': ['Classic']}
 
 
-@pytest.mark.parametrize('var, group, why', [
-    ('PDKV', 'pdk_defaults', 'the PDK supplies'),
-    ('OPTV', 'runtime_defaults', 'Optional with no declared default'),
-    ('DYN', 'callable_defaults', 'a function decides')])
-def test_a_default_the_declaration_does_not_fix_is_not_measured(tmp_path, var, group, why):
+@pytest.mark.parametrize('var, group, why, count', [
+    ('PDKV', 'pdk_defaults', 'the PDK supplies', 1),
+    ('OPTV', 'runtime_defaults', 'Optional with no declared default', 2),
+    ('DYN', 'callable_defaults', 'a function decides', 1)])
+def test_a_default_the_declaration_does_not_fix_is_not_measured(tmp_path, var, group, why, count):
     """Review W22REG: 148 PDK-sourced and 96 run-time variables on 0.3.83 were
     recorded as measured defaults (RT_MAX_LAYER: None)."""
     out = _run_probe(tmp_path)
     row = out['config_variables'][var]
     assert row['default_measured'] is False and row['default'] is None, row
     assert row['not_measured_reason'].startswith(why), row
-    assert out['not_measured'][f'config_variables.{group}'].startswith(f'1 variable(s): {why}')
+    assert out['not_measured'][f'config_variables.{group}'].startswith(f'{count} variable(s): {why}')
+
+
+def test_pep604_optional_none_is_a_runtime_default(tmp_path):
+    out = _run_probe(tmp_path)
+    row = out['config_variables']['PEP604']
+    assert row['default'] is None and row['default_measured'] is False, row
+    assert row['not_measured_reason'].startswith('Optional with no declared default')
+    assert 'PEP604' in out['not_measured']['config_variables.runtime_defaults']
+
+
+def test_required_none_is_not_a_measured_default(tmp_path):
+    out = _run_probe(tmp_path)
+    row = out['config_variables']['REQUIRED']
+    assert row['default'] is None and row['default_measured'] is False, row
+    assert 'MissingRequiredVariable' in row['not_measured_reason']
+    assert 'REQUIRED' in out['not_measured']['config_variables.required_defaults']
 
 
 def test_the_pdk_flag_is_recorded(tmp_path):
@@ -501,6 +519,28 @@ def _run_probe_with(tmp_path, overrides):
                           capture_output=True, text=True, env=env, timeout=120)
     assert done.returncode == 0, done.stderr
     return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def test_the_probe_uses_the_variables_own_optional_answer(tmp_path):
+    flow = textwrap.dedent('''
+        class _Var:
+            name, default, type, pdk, optional = 'OWN_OPT', None, int, False, True
+        class _Step:
+            id = 'A.One'
+            @staticmethod
+            def get_all_config_variables(): return [_Var()]
+        class _Classic:
+            config_vars, Steps = [], [_Step()]
+        class _Factory:
+            @staticmethod
+            def get(name): return _Classic if name == 'Classic' else None
+        class Flow:
+            factory = _Factory
+        ''')
+    out = _run_probe_with(tmp_path, {'librelane/flows/__init__.py': flow})
+    row = out['config_variables']['OWN_OPT']
+    assert row['default_measured'] is False and row['default'] is None, row
+    assert row['not_measured_reason'].startswith('Optional with no declared default')
 
 
 def test_declarations_that_disagree_across_flows_are_not_measured_in_the_row(tmp_path):

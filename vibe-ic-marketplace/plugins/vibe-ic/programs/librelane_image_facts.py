@@ -17,7 +17,8 @@ some earlier image:
 * ``config_variables``: every configuration variable the read flows and their
   steps declare, with its declared default, type, PDK flag and flows. A
   default the declaration does not fix (a callable, a PDK-sourced variable,
-  an Optional with no default, declarations that disagree) is
+  an Optional with no default, a required variable with no default, or
+  declarations that disagree) is
   ``default_measured: False`` with ``default`` None and a
   ``not_measured_reason``; ``tool_registry(facts)`` hands the rows to
   `staged_tool_config.resolve`.
@@ -129,17 +130,26 @@ def options(command, cli):
         rows.append(row)
     return rows
 try:
-    import typing
+    import types, typing
     from librelane.flows import Flow
     # A declared default is the value the tool applies only when nothing else
     # decides it. Each case below is a default the declaration does NOT fix.
     WHY = {"callable_defaults": "a function decides the default at run time",
            "pdk_defaults": "the PDK supplies the value at run time (Variable.pdk)",
            "runtime_defaults": "Optional with no declared default: the step or the tool decides at run time",
+           "required_defaults": "no default: LibreLane refuses a run that leaves it unset (MissingRequiredVariable)",
            "differing_defaults": "declared with different defaults; see defaults_by_flow"}
 
-    def optional(t):
-        return typing.get_origin(t) is typing.Union and type(None) in typing.get_args(t)
+    def optional(v):
+        # LibreLane's Variable.optional knows both Union spellings; use its
+        # own answer when present. Stand-ins and older declarations need the
+        # equivalent type-based fallback.
+        own = getattr(v, "optional", None)
+        if isinstance(own, bool):
+            return own
+        t = v.type
+        return (typing.get_origin(t) in (typing.Union, getattr(types, "UnionType", None))
+                and type(None) in typing.get_args(t))
     registry, first, by_flow = {}, {}, {}
     for name in flows:
         flow = Flow.factory.get(name)
@@ -154,8 +164,8 @@ try:
                 kind = "callable_defaults"
             elif pdk:
                 kind = "pdk_defaults"
-            elif v.default is None and optional(v.type):
-                kind = "runtime_defaults"
+            elif v.default is None:
+                kind = "runtime_defaults" if optional(v) else "required_defaults"
             else:
                 kind = None
             default = None if kind else json.loads(json.dumps(v.default, default=str))
@@ -369,7 +379,8 @@ def tool_registry(facts: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
     the tool applies, and ``default`` is then None and is NOT that value. The
     row says why in ``not_measured_reason``: a callable default, a PDK-sourced
     variable (``pdk``), an Optional variable with no declared default (the
-    step or the tool decides at run time), or declarations that disagree
+    step or the tool decides at run time), a required variable with no default
+    (LibreLane refuses if it stays unset), or declarations that disagree
     (``defaults_by_flow`` names each one). Each group is also counted in
     ``not_measured`` as ``config_variables.<group>``."""
     registry = facts.get('config_variables')
