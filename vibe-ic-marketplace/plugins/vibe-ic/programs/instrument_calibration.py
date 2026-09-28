@@ -1653,6 +1653,36 @@ _register(Instrument(
 ))
 
 
+def _judge_step32_timing_basis(rpt: str) -> Optional[str]:
+    import postroute_timing_repair_status_gen as S
+    state = S._parse_sta_for_violations(rpt)["timing_measurement"]
+    return "TIMING_VIOLATED" if state == "VIOLATED" else None
+
+
+_register(Instrument(
+    name="postroute_timing_repair_status_gen::_parse_sta_for_violations",
+    reads="OpenSTA report_checks and report_tns/wns/worst_slack stdout",
+    ruling="fx26cr Step 32", owner="fx26cr",
+    why=("Step 32 must distinguish an actual violated timing path from a "
+         "measured clean path; zero DRV counts or a report header alone cannot "
+         "supply timing evidence. The pair differs only in clock period."),
+    judge=_judge_step32_timing_basis,
+    positive=Sample(
+        provenance=("Real OpenSTA 3.1.0 cdd8ae4d66 in released vibeic-eda "
+                    "0.3.84 on 8HD-6, 2026-09-28. Synthetic cal_chain_gf180.v "
+                    "and tt_025C_5v00 Liberty, period 0.1 ns; unedited stdout "
+                    "from calibration/sta_step32_calibrate.tcl. "
+                    "sha256 dcd461e2e2cd5c53d470e27767e2aafcbf755c701709c01669a2890a3f23ac8f."),
+        artefact=_read("sta_step32_violated_positive.rpt")),
+    expect="TIMING_VIOLATED",
+    negative=Sample(
+        provenance=("Same OpenSTA image, chain, Liberty and script, period "
+                    "10 ns; unedited stdout. sha256 "
+                    "18297210112924cc317035849865a407efffb378cd8a370455c0d616fd5be00e."),
+        artefact=_read("sta_step32_clean_negative.rpt")),
+))
+
+
 def _eqy_scratch(name: str) -> Callable[[], Path]:
     """Unpack an EQY sample (its unedited status files and partition.list,
     stored as one tar so every fixture stays a flat file) into a temp dir."""
