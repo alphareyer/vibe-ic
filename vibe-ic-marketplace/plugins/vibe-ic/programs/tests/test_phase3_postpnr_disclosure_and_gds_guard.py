@@ -35,6 +35,7 @@ PROGS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGS))
 
 import phase3_one_shot_runner as R  # noqa: E402
+import librelane_prelayout as _prelayout  # noqa: E402
 from _delivery_declaration import declare_delivery as _declare  # noqa: E402
 
 TOP = "chip_top"
@@ -202,6 +203,24 @@ def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
     # the original comment is left where it explains itself.)
     _declare(tmp_path, "DIE")
     _span_inputs(tmp_path, TOP)
+    # The geometry decision is reached only after current Step 10 and SS
+    # setup evidence pass. Bind this fixture's positive path to its own mapped
+    # netlist and SDC before writing the cache identity stamps.
+    matrix = R._pl.constraints_dir(tmp_path) / "pvt_matrix.json"
+    matrix.write_text(json.dumps({"corners": [
+        {"label": "SS", "name": "slow", "liberty": "slow.lib"}]}))
+    reports = R._pl.sta_dir(tmp_path) / "per_corner"
+    reports.mkdir(parents=True, exist_ok=True)
+    netlist = synth / f"{TOP}_synth.v"
+    sdc = pnr / "constraint.sdc"
+    (reports / "sta_SS.rpt").write_text(
+        "Startpoint: in_a (input port clocked by clk)\n"
+        "Endpoint: out_z (output port clocked by clk)\n"
+        "Path Group: clk\nPath Type: max\n\n"
+        "          0.43   slack (MET)\n\n"
+        "STA_BASIS: PRE_LAYOUT_ESTIMATE\n"
+        f"STA_BASIS_NETLIST_SHA256: sha256:{_prelayout.digest(netlist)}\n"
+        f"STA_BASIS_SDC_SHA256: sha256:{_prelayout.digest(sdc)}\n")
     _ctx = dict(project=tmp_path, pdk=_pdk(tmp_path), container="",
                 top=TOP, args=_IdentityArgs())
     _seed_recording("synth")
@@ -338,6 +357,17 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
                             "fixture's routed basis admitted",
                             extras={"layout_digest": basis})
     monkeypatch.setattr(R, "step_prestream_gate", _fake_gate)
+    def _passing_prelayout(*_a, **_k):
+        from test_mig_sdcsta import sta_folder
+        tool_root = project.parent / f"{project.name}_postpnr_step10"
+        folder, _ = sta_folder(tool_root)
+        gate_path = tool_root / "step10.json"
+        gate = _prelayout.judge_slack(folder, gate_path)
+        assert gate["verdict"] == "PASS", gate
+        return R.StepResult("prelayout_signoff", "PASS", 0.0,
+                            "fixture Step 10 OpenSTA link and setup PASS",
+                            [str(gate_path)])
+    monkeypatch.setattr(R, "step_prelayout_signoff", _passing_prelayout)
 
     monkeypatch.setattr(R, "_detect_pdk",
                         lambda *a, **k: _pdk(project))
