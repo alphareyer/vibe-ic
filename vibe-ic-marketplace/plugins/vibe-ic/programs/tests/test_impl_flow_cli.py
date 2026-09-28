@@ -105,14 +105,15 @@ def test_the_gate_on_the_real_phase3_parser(project, monkeypatch):
     assert gate() == IF.IMPL_DEFAULT
     # A window is the parser default's opposite, and a default is no request.
     assert gate("--entry-step", "17", "--exit-step", "17") == IF.IMPL_DEFAULT
+    # W7b wires this runner. The supported, explicit PDK and geometry reach
+    # the consumer; the unsupported spans below still refuse by name.
+    assert gate("--librelane", "--pdk", "gf180mcuD") == IF.IMPL_LIBRELANE
+    assert gate("--librelane", "--pdk", "gf180mcuD", "--die-um",
+                "400x400", "--util", "0.5", "--spare-density",
+                "0.05") == IF.IMPL_LIBRELANE
     for argv, cls in ((["--orfs"], IF.IMPL_NOT_YET_SUPPORTED),
                       # W24: an `auto` PDK is refused at the gate under a flag
                       (["--librelane"], IF.IMPL_PDK_UNSUPPORTED),
-                      (["--librelane", "--pdk", "gf180mcuD"],
-                       IF.IMPL_NOT_YET_WIRED),
-                      (["--librelane", "--pdk", "gf180mcuD", "--die-um",
-                        "400x400", "--util", "0.5", "--spare-density", "0.05"],
-                       IF.IMPL_NOT_YET_WIRED),
                       (["--librelane", "--entry-step", "17", "--exit-step",
                         "17"], IF.IMPL_KNOB_UNSUPPORTED),
                       (["--librelane", "--force-step", "pnr"],
