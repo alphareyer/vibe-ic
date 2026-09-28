@@ -117,12 +117,12 @@ def test_immediate_assertion_without_reset_guard_does_not_close_binding():
     assert gate._reset_guarded_properties(harness) == []
 
 
-def _immediate_binding_row(tmp_path, guard, predicate="q == 4'd0"):
+def _immediate_binding_row(tmp_path, guard, predicate="q == 4'd0", harness_edit=None):
     project = _project(tmp_path)
     formal = project / "phase2/stage1/formal"
     formal.mkdir(parents=True)
     harness = formal / "formal_ctr.sv"
-    body = f"""module formal_ctr(input rst, input clk, input [3:0] q);
+    body = f"""module formal_ctr(input rst, input clk);
     wire rst_active = rst;
     wire rst_active_q = rst;
     wire [3:0] q;
@@ -132,6 +132,8 @@ def _immediate_binding_row(tmp_path, guard, predicate="q == 4'd0"):
         a_reset_safety_1: assert ({predicate});
     endmodule
     """
+    if harness_edit:
+        body = harness_edit(body)
     harness.write_text(body)
     results = {
         "unresolved_obligations": [{"id": NAME_ID}],
@@ -169,6 +171,19 @@ def test_immediate_non_dut_predicate_cannot_discharge_reset_binding(tmp_path):
 
 def test_immediate_self_equality_cannot_discharge_reset_binding(tmp_path):
     row = _immediate_binding_row(tmp_path, "f_past_valid && rst_active", "q == q")
+    assert row["status"] == gate.BINDING_OUTSTANDING, row
+    assert "no substantive reset assertion" in row["reason"]
+
+
+def test_other_instance_output_connection_cannot_discharge_reset_binding(tmp_path):
+    def disconnected_dut(body):
+        return (body.replace("wire [3:0] q;", "wire [3:0] q = 4'd0;")
+                .replace("ctr dut (.rst(rst), .q(q));",
+                         "ctr dut (.rst(rst), .q());\n    dummy other (.q(q));")
+                + "\nmodule dummy(input [3:0] q); endmodule\n")
+
+    row = _immediate_binding_row(tmp_path, "f_past_valid && rst_active",
+                                 harness_edit=disconnected_dut)
     assert row["status"] == gate.BINDING_OUTSTANDING, row
     assert "no substantive reset assertion" in row["reason"]
 

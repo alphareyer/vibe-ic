@@ -381,10 +381,35 @@ def _harness_not_proven(files: List[Path], results: dict) -> Optional[str]:
     return None
 
 
+def _dut_instance(harness: str) -> tuple[str | None, dict[str, str]]:
+    """DUT module and its named port connections, excluding other instances."""
+    instance = re.search(r"\b([A-Za-z_]\w*)\s*(?:#\s*\([^;]*?\)\s*)?dut\s*\(",
+                         harness, re.S)
+    if not instance:
+        return None, {}
+    start = instance.end()
+    depth = 1
+    end = start
+    while end < len(harness) and depth:
+        if harness[end] == "(":
+            depth += 1
+        elif harness[end] == ")":
+            depth -= 1
+        end += 1
+    if depth or not re.match(r"\s*;", harness[end:]):
+        return None, {}
+    connections = harness[start:end - 1]
+    # A direct identifier is the only connection that can bind the asserted
+    # signal. Empty, concatenated, sliced, and expression connections fail closed.
+    ports = {m.group(1): m.group(2).strip() for m in re.finditer(
+        r"\.\s*([A-Za-z_]\w*)\s*\(\s*([^()]*)\s*\)", connections)}
+    return instance.group(1), ports
+
+
 def _harness_connects(harness: str, port: str) -> bool:
-    """The DUT instance connects `port` (`.port(port)`)."""
-    p = re.escape(port)
-    return bool(re.search(rf"\.{p}\s*\(\s*{p}\s*\)", harness))
+    """The proved DUT instance directly connects `.port(port)`."""
+    _, ports = _dut_instance(harness)
+    return ports.get(port) == port
 
 
 def _harness_binds_reset(harness: str, port: str) -> bool:
@@ -396,11 +421,9 @@ def _harness_binds_reset(harness: str, port: str) -> bool:
 def _dut_output_ports(project: Path, harness: str) -> set[str]:
     """Output ports of the DUT instance actually named by the proved harness."""
     import formal_harness_gen as _fhg
-    instance = re.search(r"\b([A-Za-z_]\w*)\s*(?:#\s*\([^;]*?\)\s*)?dut\s*\(",
-                         harness, re.S)
-    if not instance:
+    name, _ = _dut_instance(harness)
+    if name is None:
         return set()
-    name = instance.group(1)
     rtl_dir = project / "phase2/stage1/rtl"
     for path in sorted(list(rtl_dir.rglob("*.v")) + list(rtl_dir.rglob("*.sv"))):
         iface = _fhg.parse_module(path.read_text(errors="replace"), name)
