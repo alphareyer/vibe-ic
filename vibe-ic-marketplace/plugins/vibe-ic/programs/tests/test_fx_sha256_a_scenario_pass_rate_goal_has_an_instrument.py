@@ -16,7 +16,8 @@ goals) and is unchanged. What was missing is the instrument:
   * PASS iff every bound case ran its own oracle and the pass fraction meets
     the stated percentage (for 100%: all passed);
   * FAIL when they all ran and the fraction misses it (for 100%: any failed);
-  * NOT_MEASURED, naming why, when nothing is bound or a bound case did not run.
+  * NOT_MEASURED, naming why, when nothing is bound or unrun cases could still
+    change whether the stated threshold is met.
 
 Drives the real Step-4 gate helpers over a real execution record.
 """
@@ -124,6 +125,39 @@ def test_a_bound_case_that_did_not_run_is_NOT_MEASURED_and_named(tmp_path):
     row = _rows(W._coverage_goal_summary(p))[goal["name"]]
     assert row["verdict"] == G.NOT_MEASURED, row
     assert "second_vector" in row["why"]
+
+
+@pytest.mark.parametrize("stated,expect", [
+    (100, G.FAIL),
+    (75, G.FAIL),
+    (50, G.NOT_MEASURED),
+])
+def test_observed_failure_and_unrun_case_use_the_maximum_possible_rate(
+        tmp_path, stated, expect):
+    goal = {"name": "rate_goal", "kind": "coverage_goal",
+            "expected": f"{stated}% PASS", "coverage_scope": "four scenarios",
+            "covered_by": ["a", "b", "c", "d"]}
+    vecs = [dict(VEC, name=n) for n in ("a", "b", "c", "d")]
+    p = _project(tmp_path, vecs + [goal])
+    _record(p, {"a": "PASS", "b": "FAIL", "c": "FAIL", "d": "NOT_RUN"})
+    row = _rows(W._coverage_goal_summary(p))["rate_goal"]
+    assert row["verdict"] == expect, row
+    assert row["failed"] == ["b", "c"], row
+    assert "b" in row["why"] and "c" in row["why"], row
+    assert "d" in row["why"], row
+
+
+def test_a_failed_case_defeats_a_two_case_100_percent_goal_even_if_one_did_not_run(
+        tmp_path):
+    goal = {"name": "rate_goal", "kind": "coverage_goal",
+            "expected": "100% PASS", "coverage_scope": "a and b scenarios",
+            "covered_by": ["a", "b"]}
+    p = _project(tmp_path, [dict(VEC, name="a"), dict(VEC, name="b"), goal])
+    _record(p, {"a": "FAIL", "b": "NOT_RUN"})
+    row = _rows(W._coverage_goal_summary(p))["rate_goal"]
+    assert row["verdict"] == G.FAIL, row
+    assert row["failed"] == ["a"], row
+    assert "a" in row["why"] and "b" in row["why"], row
 
 
 def test_a_case_can_declare_the_goal_it_covers(tmp_path):
