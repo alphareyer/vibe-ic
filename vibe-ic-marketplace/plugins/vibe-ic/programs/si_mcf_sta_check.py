@@ -1383,8 +1383,17 @@ RECORD_ADJUDICATION = _ra.declare(
     # NOT_MEASURED even if the diagnostic floor recounted nets; this rule calls
     # verdict_for with vacuous=True because zero coupling proves no fold, so
     # its answer is unchanged. A recorded substantive defect still issues FAIL.
+    # 2026-09-29: re-reviewed after floor coverage was retained in the
+    # denominator, PATH_OUTSIDE_PROJECT joined the unavailable-window verdict
+    # path, and each bounded SPEF became an independent recount prerequisite.
+    # The post-hoc rule still reads only recorded coupling_pairs and findings:
+    # zero pairs prove examined == 0, so clean records remain VACUOUS_PASS,
+    # missing/external inputs remain NOT_MEASURED, and a recorded substantive
+    # defect remains FAIL. Nonzero pairs remain undecidable by this rule.
+    # Moving path validation changes which findings a NEW run can retain; it
+    # does not let this rule infer absent SPEF bytes from an old record.
     decision_digest=(
-        "63bd0f7f62fa573dec309d4b33ef9bf089f500dee740b03853dbef66dead1927"),
+        "ca248dafbce785d76d375c51d402dfcd270ecb7a2f154a53438f7f3e351488cd"),
     rules=(
         _ra.Rule(
             rule_id="si_mcf_sta_check.zero-fold-is-not-a-signoff",
