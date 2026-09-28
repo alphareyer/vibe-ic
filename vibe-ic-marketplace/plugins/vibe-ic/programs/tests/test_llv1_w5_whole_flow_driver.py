@@ -472,3 +472,23 @@ def test_a_between_that_refuses_stops_the_run(tmp_path, monkeypatch):
                            segment2_kwargs={}, first_step=FLOW[0], last_step=FLOW[-1])
     names = [a[a.index("--run-tag") + 1] for a, _ in fake.calls if "--run-tag" in a]
     assert names == ["segment1"]
+
+
+def test_segment1_checker_findings_stop_before_the_between_step(tmp_path,
+                                                                monkeypatch):
+    p = _macro(tmp_path)
+    fake = FakeLibreLane(rc=2, errors=["netlist checker failed - deferred"])
+    monkeypatch.setattr(W.subprocess, "run", fake)
+    monkeypatch.setattr(W, "_run_segment_process",
+                        lambda argv, **kw: fake(argv))
+    between = []
+    with pytest.raises(LC.Refusal) as ei:
+        W.run_two_segments(
+            p, "img", pdk="processA", pdk_root=p, scl="libA",
+            segment1=put(p / "seg1.json", "{}"),
+            between=lambda *a: between.append(True), segment2_kwargs={},
+            first_step=FLOW[0], last_step=FLOW[-1])
+    assert ei.value.code == "LL_SEGMENT1_CHECKER_FAILED"
+    assert between == []
+    names = [a[a.index("--run-tag") + 1] for a, _ in fake.calls if "--run-tag" in a]
+    assert names == ["segment1"]

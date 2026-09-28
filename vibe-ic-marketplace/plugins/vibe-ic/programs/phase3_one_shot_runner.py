@@ -74328,6 +74328,180 @@ def _postcheck_step(project: Path, top: str, pdk: Any,
 
 
 @_restores_the_container_env
+def _run_librelane_consumer_phase3(project: Path, top: str, pdk: PdkConfig,
+                                   args) -> int:
+    """Dispatch the two external segments through their typed W5/W6 seams.
+
+    This is a blocking consumer boundary. A refused between-segment check
+    prevents segment 2; an incomplete post-import gate cannot become PASS.
+    The direct Phase-3 dispatch below is never entered under this mode.
+    """
+    import librelane_contract as _ll
+    import librelane_whole_flow as _whole
+    from _rtl_include_hub import silicon_rtl_selection
+
+    rows: List[StepResult] = []
+    report = _pl.reports_orchestrator_dir(project) / "phase3_one_shot.json"
+
+    class _Stopped(Exception):
+        pass
+
+    def _append(row: StepResult, *, blocking: bool = True) -> None:
+        rows.append(row)
+        print(f"[librelane] {row.status:12s} {row.name}: {row.detail}",
+              flush=True)
+        if blocking and row.status not in ("PASS", "NOT_APPLICABLE"):
+            raise _Stopped()
+
+    def _publish() -> int:
+        verdict = ("FAIL" if any(r.status == "FAIL" for r in rows)
+                   else "NOT_MEASURED" if any(r.status == "NOT_MEASURED"
+                                              for r in rows)
+                   else "PASS")
+        _aa.write_json(report, {
+            "program": "phase3_one_shot_runner", "impl_flow": "librelane",
+            "verdict": verdict, "steps": [asdict(r) for r in rows],
+        }, indent=2)
+        return 0 if verdict == "PASS" else 1 if verdict == "FAIL" else 2
+
+    try:
+        image = _ll.resolve_image(project)
+        root = _ll.pdk_root_resolution(project, str(pdk.name), image=image)["path"]
+        if not root:
+            raise _ll.Refusal("LL_PDK_ROOT_MISSING", "no host PDK root")
+        pdk_root = Path(root)
+        rtl = silicon_rtl_selection(_pl.rtl_dir(project))
+        if not rtl:
+            raise _ll.Refusal("LL_SYNTH_INPUT_MISSING", "no silicon RTL selected")
+        macro = _sf.decide_macro_aware_sim_define(
+            _sf.read_text_blob(rtl),
+            list(pdk.macro_libs) + list(pdk.macro_lefs) + list(pdk.macro_v))
+        defines = ["SIMULATION"] if macro["define_sim"] else []
+        stem = Path(str(pdk.liberty)).stem
+        if "__" not in stem:
+            raise _ll.Refusal("LL_SCL_UNRESOLVED", str(pdk.liberty))
+        scl = stem.split("__", 1)[0]
+        liberty = Path(str(pdk.liberty))
+        synth_liberty = ("/pdk/" + str(liberty.relative_to(pdk_root))
+                         if liberty.is_relative_to(pdk_root) else str(liberty))
+        segment1 = _whole.segment1_config(
+            project, str(pdk.name), _whole.whole_dir(project) / "segment1.json",
+            top=top, rtl_files=rtl, defines=defines,
+            use_slang=any(p.suffix == ".sv" for p in rtl), scl=scl,
+            synth_liberty=synth_liberty,
+            top_source="phase3_one_shot_runner effective_top")
+
+        def _between(subject: Path, segment1_state: Path) -> Dict[str, Any]:
+            state = json.loads(Path(segment1_state).read_text())
+            source = Path(str(state.get("nl") or ""))
+            if not source.is_file() or not source.resolve().is_relative_to(subject):
+                raise _ll.Refusal("LL_SEGMENT1_NETLIST_MISSING", str(source))
+            synth = _pl.synth_dir(subject)
+            synth.mkdir(parents=True, exist_ok=True)
+            mapped = synth / f"{top}_synth.v"
+            canonical = synth / "netlist.v"
+            shutil.copy2(source, mapped)
+            shutil.copy2(source, canonical)
+            _write_synth_inputs_sidecar(mapped, _pl.rtl_dir(subject))
+            _append(StepResult("synth", "PASS", 0.0,
+                               "LibreLane segment 1 mapped netlist; native "
+                               "netlist checkers completed",
+                               [str(mapped), str(canonical), str(segment1_state)]))
+            for row in run_step11_dft_after_synth(subject, top, args.container):
+                _append(row)
+            for row in run_step13_lec_on_pnr_input(subject, top, args.container):
+                _append(row)
+            _append(StepResult(
+                "synth_handoff", "PASS", 0.0,
+                "canonical step 14: segment 1's native netlist checkers "
+                "completed and the mapped netlist remains the handoff input",
+                [str(segment1_state)]))
+            _append(step_prelayout_signoff(subject, top, pdk, args.container),
+                    blocking=False)  # canonical 7/8/10 are advisory here
+            prepared = step_prepnr(subject, top, pdk, args.container,
+                                   args.die_um, args.util)
+            _append(prepared)
+            netlist, _, _ = pnr_input_netlist(subject, top)
+            if not netlist.is_file():
+                raise _ll.Refusal("LL_PNR_NETLIST_MISSING", str(netlist))
+            record = subject / _whole.CHIP_TOP_RECORD_REL
+            wrapper = None
+            layout_top = top
+            if _chip_path_requests_pad_ring(subject):
+                data = json.loads(record.read_text()) if record.is_file() else {}
+                layout_top = str(data.get("chip_top_module") or "")
+                rel = str(data.get("chip_top_verilog") or "")
+                wrapper = subject / rel if rel else None
+                if not layout_top or wrapper is None or not wrapper.is_file():
+                    raise _ll.Refusal("LL_CHIP_TOP_MISSING", str(record))
+            sdc_data = prepared.extras.get("sdc") or {}
+            sdc = Path(sdc_data["path"]) if sdc_data.get("path") else None
+            if sdc is None or not sdc.is_file():
+                raise _ll.Refusal("SDC_SEAM_PENDING", str(sdc_data.get("basis")))
+            if wrapper is not None:
+                from _ppa import timing as _ppa_timing
+                derive = getattr(_ppa_timing, "asic_sdc_for_pnr", None)
+                if not callable(derive):
+                    raise _ll.Refusal(
+                        "SDC_PNR_DERIVATION_PENDING",
+                        "the chip ring needs FXPORT's typed PnR-time "
+                        "supply-port DRV derivation before segment 2")
+                derived = derive(sys.modules[__name__], subject, top, pdk,
+                                 args.container)
+                if not isinstance(derived.get("text"), str):
+                    raise _ll.Refusal("SDC_PNR_DERIVATION_INVALID",
+                                      "the derivation returned no SDC text")
+                sdc = _whole.whole_dir(subject) / "pnr_derived.sdc"
+                _aa.write_text(sdc, derived["text"])
+                _aa.write_json(sdc.with_suffix(".provenance.json"), {
+                    "schema": "vibe-ic/librelane-pnr-sdc/1",
+                    "step7_sdc": derived.get("path"),
+                    "step7_sha256": derived.get("step7_sha256"),
+                    "pnr_time_derivation": derived.get("derivation"),
+                    "deck_sha256": hashlib.sha256(
+                        derived["text"].encode("utf-8")).hexdigest(),
+                }, indent=2)
+            return {"netlist": netlist, "wrapper": wrapper,
+                    "top": layout_top, "sdc": sdc,
+                    "sdc_source": str(sdc_data.get("basis") or "step 7")}
+
+        pdn = _ll.emit_pdn_cfg(image, str(pdk.name),
+                               _whole.whole_dir(project) / "pdn_cfg.tcl")
+        summary = _whole.run_two_segments(
+            project, image, pdk=str(pdk.name), pdk_root=pdk_root, scl=scl,
+            segment1=segment1, between=_between,
+            segment2_kwargs={"pdn_cfg": pdn},
+            first_step="Verilator.Lint", last_step=None,
+            deadline_s=_whole.DEFAULT_DEADLINE_S)
+        identity = summary.get("netlist_identity") or {}
+        if identity.get("verdict") != "PASS":
+            raise _ll.Refusal("LL_NETLIST_IDENTITY_FAILED", str(identity))
+        segment2_verdict = (summary.get("segment2") or {}).get("tool_verdict")
+        if segment2_verdict == "FINDINGS":
+            _append(StepResult(
+                "librelane_segment2", "FAIL", 0.0,
+                "LibreLane segment 2 completed with deferred checker "
+                f"findings: {(summary.get('segment2') or {}).get('tool_findings')}"))
+        _append(StepResult("librelane_import", "PASS", 0.0,
+                           "W6 imported both completed segments through one "
+                           "external-flow manifest",
+                           [str(project / _whole.WHOLE_REL / "whole_flow.json")]))
+        _append(StepResult(
+            "post_import_signoff", "NOT_MEASURED", 0.0,
+            "the kept Phase-3 signoff consumers have not run on this imported "
+            "layout; run the default flow on a fresh project clone until the "
+            "measurement-only post-import dispatcher is integrated",
+            reason_class=_V.ReasonClass.INPUT_ABSENT), blocking=False)
+    except _Stopped:
+        pass
+    except _ll.Refusal as exc:
+        rows.append(StepResult("librelane_segment", "FAIL", 0.0, str(exc)))
+    except Exception as exc:
+        rows.append(StepResult("librelane_dispatch", "FAIL", 0.0,
+                               f"LL_DISPATCH_ERROR: {type(exc).__name__}: {exc}"))
+    return _publish()
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("project", type=Path)
@@ -74690,6 +74864,8 @@ def main() -> int:
 
     print(f"=== phase3_one_shot_runner — pdk={pdk.name} top={effective_top}"
           f"{' (override of '+args.top_name+')' if effective_top != args.top_name else ''} ===")
+    if _impl_flow.consumer_mode(args) == _impl_flow.IMPL_LIBRELANE:
+        return _run_librelane_consumer_phase3(project, effective_top, pdk, args)
     if _window_sites is not None:
         _analog_only, _analog_reason = _is_pure_analog_no_rtl_track(project)
         if _analog_only:

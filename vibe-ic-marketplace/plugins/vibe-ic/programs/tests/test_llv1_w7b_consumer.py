@@ -146,3 +146,164 @@ def test_refresh_only_under_the_flag_stays_honoured(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["design_one_shot_runner", str(project),
                                       "--librelane", "--refresh-only"])
     assert D.main() == 17
+
+
+def _consumer_stub(monkeypatch, tmp_path, *, prepnr_status="PASS"):
+    import phase3_one_shot_runner as R
+    import librelane_contract as LC
+    import librelane_whole_flow as W
+    import _rtl_include_hub as HUB
+
+    project = _project(tmp_path / "consumer")
+    trace = []
+    pdk_root = tmp_path / "pdk"
+    pdk_root.mkdir()
+    liberty = pdk_root / "libA__tt.lib"
+    liberty.write_text("library (libA) {}\n")
+    pdk = SimpleNamespace(name="processA", liberty=str(liberty),
+                          macro_libs=[], macro_lefs=[], macro_v=[])
+    sdc = project / "phase2/stage2/constraints/top.sdc"
+    sdc.parent.mkdir(parents=True)
+    sdc.write_text("create_clock -period 10 [get_ports clk]\n")
+    monkeypatch.setattr(LC, "resolve_image", lambda project: "img")
+    monkeypatch.setattr(LC, "pdk_root_resolution",
+                        lambda *a, **k: {"path": str(pdk_root)})
+    monkeypatch.setattr(LC, "emit_pdn_cfg", lambda *a, **k: None)
+    monkeypatch.setattr(HUB, "silicon_rtl_selection",
+                        lambda root: [root / "top.v"])
+    monkeypatch.setattr(R._sf, "read_text_blob", lambda files: "")
+    monkeypatch.setattr(R._sf, "decide_macro_aware_sim_define",
+                        lambda *a: {"define_sim": False})
+    monkeypatch.setattr(R, "_write_synth_inputs_sidecar", lambda *a: None)
+    monkeypatch.setattr(R, "run_step11_dft_after_synth",
+                        lambda *a: trace.append("11-12") or [])
+    monkeypatch.setattr(R, "run_step13_lec_on_pnr_input",
+                        lambda *a: trace.append("13") or [])
+    monkeypatch.setattr(R, "step_prelayout_signoff",
+                        lambda *a: trace.append("7-8-10") or
+                        R.StepResult("prelayout", "PASS", 0.0, "advisory"))
+    monkeypatch.setattr(R, "step_prepnr",
+                        lambda *a: trace.append("prepnr") or
+                        R.StepResult("prepnr", prepnr_status, 0.0,
+                                     "measured" if prepnr_status == "PASS"
+                                     else "SDC_SEAM_PENDING",
+                                     extras={"sdc": {"path": str(sdc),
+                                                     "basis": "step 7"}},
+                                     reason_class=("" if prepnr_status == "PASS"
+                                                   else "input_absent")))
+    monkeypatch.setattr(R, "_chip_path_requests_pad_ring", lambda *a: False)
+    monkeypatch.setattr(R, "pnr_input_netlist",
+                        lambda subject, top: (
+                            R._pl.synth_dir(subject) / f"{top}_synth.v", "", False))
+
+    def config(subject, pdk_name, out, **kw):
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("{}\n")
+        return out
+
+    monkeypatch.setattr(W, "segment1_config", config)
+
+    def two_segments(subject, image, **kw):
+        trace.append("segment1")
+        nl = subject / "runs/segment1/01-yosys/core.nl.v"
+        nl.parent.mkdir(parents=True)
+        nl.write_text("module top(input clk); endmodule\n")
+        state = nl.parent / "state_out.json"
+        state.write_text(json.dumps({"nl": str(nl)}))
+        kw["between"](subject, state)
+        trace.extend(("segment2", "import"))
+        return {"netlist_identity": {"verdict": "PASS"}, "import": {}}
+
+    monkeypatch.setattr(W, "run_two_segments", two_segments)
+    args = SimpleNamespace(container="eda", die_um="auto", util=.5)
+    return R, project, pdk, args, trace
+
+
+def test_phase3_consumer_orders_segments_checks_and_import(monkeypatch, tmp_path):
+    R, project, pdk, args, trace = _consumer_stub(monkeypatch, tmp_path)
+    assert "phase3_one_shot_runner" in IF.WIRED_RUNNERS
+    assert R._run_librelane_consumer_phase3(project, "top", pdk, args) == 2
+    assert trace == ["segment1", "11-12", "13", "7-8-10", "prepnr",
+                     "segment2", "import"]
+    record = json.loads((project / "reports/orchestrator/phase3_one_shot.json").read_text())
+    assert record["verdict"] == "NOT_MEASURED"
+    assert [r["name"] for r in record["steps"]][-2:] == [
+        "librelane_import", "post_import_signoff"]
+
+
+def test_nonmeasured_prepnr_cannot_start_segment2(monkeypatch, tmp_path):
+    R, project, pdk, args, trace = _consumer_stub(
+        monkeypatch, tmp_path, prepnr_status="NOT_MEASURED")
+    assert R._run_librelane_consumer_phase3(project, "top", pdk, args) == 2
+    assert len(trace) == 5  # no segment 2 or importer may follow this refusal
+    assert trace == ["segment1", "11-12", "13", "7-8-10", "prepnr"]
+    record = json.loads((project / "reports/orchestrator/phase3_one_shot.json").read_text())
+    assert record["verdict"] == "NOT_MEASURED"
+    assert record["steps"][-1]["name"] == "prepnr"
+
+
+def test_chip_segment_uses_fxports_typed_pnr_sdc_derivation(monkeypatch,
+                                                            tmp_path):
+    R, project, pdk, args, trace = _consumer_stub(monkeypatch, tmp_path)
+    import _ppa.timing as timing
+    from _atomic_artefact import write_json
+    monkeypatch.setattr(R, "_chip_path_requests_pad_ring", lambda *a: True)
+    wrapper = project / "phase3/stage3/pnr/chip_top_io.v"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("module chip_top(input clk); top u(clk); endmodule\n")
+    write_json(project / "reports/phase3/io_pad_chip_top.json", {
+        "chip_top_module": "chip_top",
+        "chip_top_verilog": str(wrapper.relative_to(project))})
+    calls = []
+
+    def derive(rt, subject, top, selected_pdk, container):
+        calls.append((rt, subject, top, selected_pdk, container))
+        return {"text": "create_clock -period 11 [get_ports clk]\n",
+                "path": "phase2/stage2/constraints/top.asic.sdc",
+                "step7_sha256": "sha256:source", "derivation": {"applied": True}}
+
+    monkeypatch.setattr(timing, "asic_sdc_for_pnr", derive, raising=False)
+    assert R._run_librelane_consumer_phase3(project, "top", pdk, args) == 2
+    assert trace[-2:] == ["segment2", "import"]
+    assert len(calls) == 1 and calls[0][1:4] == (project, "top", pdk)
+    derived = project / "phase3/librelane/whole/pnr_derived.sdc"
+    assert derived.read_text() == "create_clock -period 11 [get_ports clk]\n"
+    record = json.loads(derived.with_suffix(".provenance.json").read_text())
+    assert record["pnr_time_derivation"] == {"applied": True}
+    assert record["step7_sha256"] == "sha256:source"
+
+
+def test_phase3_main_dispatches_the_flag_before_the_direct_flow(monkeypatch,
+                                                                 tmp_path):
+    import phase3_one_shot_runner as R
+    import _chip_synth_read as CSR
+    project = _project(tmp_path / "main")
+    calls = []
+    monkeypatch.setattr(R._impl_flow, "gate_or_exit", lambda *a, **k: None)
+    monkeypatch.setattr(R._impl_flow, "record_after_lock", lambda *a, **k: None)
+    monkeypatch.setattr(R._runner_lock, "acquire_or_reenter",
+                        lambda *a, **k: object())
+    monkeypatch.setattr(R, "_delivery_admission_refusal", lambda *a: None)
+    monkeypatch.setattr(R._canonical_admission, "admit_span",
+                        lambda *a, **k: SimpleNamespace(admitted=True))
+    monkeypatch.setattr(R, "_detect_pdk",
+                        lambda *a: SimpleNamespace(name="gf180mcuD",
+                                                    tech_lef="", cell_lef="",
+                                                    macro_lefs=[]))
+    monkeypatch.setattr(R._impl_flow, "scope_refusal_after_pdk",
+                        lambda *a: None)
+    monkeypatch.setattr(R, "commercial_pdk_fallback_guard",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(R, "declared_pdk_target_guard",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(R, "macro_lef_layer_compat_guard",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(CSR, "effective_top", lambda *a: "top")
+    monkeypatch.setattr(R, "_run_librelane_consumer_phase3",
+                        lambda *a: calls.append("consumer") or 37,
+                        raising=False)
+    monkeypatch.setattr(sys, "argv", ["phase3_one_shot_runner", str(project),
+                                      "--librelane", "--pdk", "gf180mcuD",
+                                      "--top-name", "top"])
+    assert R.main() == 37
+    assert calls == ["consumer"]

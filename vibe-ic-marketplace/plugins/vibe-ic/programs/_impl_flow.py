@@ -484,7 +484,8 @@ FLAG_DESTS = frozenset({"librelane", "orfs"})
 #: runner property, not a switch-file convention: both runners must agree on
 #: who owns step 9 before either writes an artefact.
 #: phase 2 (`design_one_shot_runner`): steps 1-8 unchanged; 9-14 run in phase 3.
-WIRED_RUNNERS: frozenset = frozenset({"design_one_shot_runner"})
+WIRED_RUNNERS: frozenset = frozenset({"design_one_shot_runner",
+                                      "phase3_one_shot_runner"})
 
 #: llv1 W7b -- the last canonical step Phase 2 runs under an external flow.
 #: Synthesis (9) is LibreLane segment 1 and the DFT/LEC chain (11-13) needs

@@ -210,15 +210,23 @@ def _run_segment_process(argv: List[str], *, run_dir: Path, base: Path,
     command = [*argv[:2], "--cidfile", str(cidfile), *argv[2:]]
 
     def _reap(proc, _reason):
-        if cidfile.is_file():
-            cid = cidfile.read_text().strip()
-            if re.fullmatch(r"[0-9a-f]{64}", cid):
-                subprocess.run([docker, "stop", "--time", "10", cid],
-                               capture_output=True, text=True, timeout=30)
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+            if cidfile.is_file():
+                cid = cidfile.read_text().strip()
+                if re.fullmatch(r"[0-9a-f]{64}", cid):
+                    try:
+                        subprocess.run([docker, "stop", "--time", "10", cid],
+                                       capture_output=True, text=True, timeout=30)
+                    except (OSError, subprocess.TimeoutExpired):
+                        # The process group still has to be reaped if Docker's
+                        # client itself is unavailable or has stopped making
+                        # progress. The CID remains in the retained receipt.
+                        pass
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
     env = dict(os.environ)
     env.pop("VIBEIC_EDA_IMAGE_REPO", None)
@@ -498,6 +506,10 @@ def run_two_segments(project: Path, image: str, *, pdk: str, pdk_root: Path,
     s1 = run_segment(project, image, segment1, name="segment1",
                      extra=["--to", SEGMENT1_LAST], expected=plan1["run"],
                      deadline_s=deadline_s, docker=docker, **common)
+    if s1["tool_verdict"] != "CLEAN":
+        raise Refusal("LL_SEGMENT1_CHECKER_FAILED",
+                      f"segment 1 checker finding(s): {s1['tool_findings']}; "
+                      "steps 11-14 cannot consume a rejected netlist")
     handed = between(project, s1["state"])
     state1 = json.loads(Path(s1["state"]).read_text())
     seg2 = segment2_config(project, pdk, base / "segment2.json",
