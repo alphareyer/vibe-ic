@@ -143,6 +143,14 @@ _NOT_PROSE: Dict[str, str] = {
         "returns no PVT, and the scene becomes NOT_MEASURED. A denial cannot "
         "be encoded in this grammar. Falsifier: "
         "tests/test_sta9_scene_binding.py::test_wrong_liberty_header_is_not_measured.",
+    "librelane_fill_dfm::_density_ratio_specs":
+        "ONE RUBY MACHINE GRAMMAR, NO SENTENCE. The PDK deck is filtered through "
+        "deck_code_only before reading extract_single_layer_from_design.call "
+        "numeric GDS pairs, STATIC_LAYERS union expressions, or METAL_STACK_MAP "
+        "aliases. Comments and quoted messages cannot declare a layer, and "
+        "unknown rule identifiers remain NOT_MEASURED rather than receiving "
+        "a guessed ratio. Falsifier: tests/test_die_density_finish.py::"
+        "test_density_specs_ignore_comment_claims_and_refuse_missing_layers.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "

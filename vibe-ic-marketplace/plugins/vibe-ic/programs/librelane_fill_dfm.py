@@ -47,6 +47,7 @@ from _atomic_artefact import write_json  # noqa: E402
 import _docker_memory as _dmem
 from metal_fill_config_gen import (build_metal_fill_config,
                                    density_rule_layer_identifiers)
+import die_level_deck_rule_attribution as _dla
 from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, digest,  # noqa: E402
                                 resolve_step_configs, run_chain, select_arms,
                                 state_from_direct, run_container)
@@ -268,16 +269,19 @@ def _density_ratio_specs(deck_text: str, fill_cfg: dict) -> dict:
     Unknown aliases remain absent and are reported as NOT_MEASURED.  The
     foundry deck is still the only authority for the rule verdict.
     """
+    # Ruby comments and quoted diagnostic messages are prose.  Read only the
+    # deck's executable grammar; the rule-id parser uses the same filter.
+    code = _dla.deck_code_only(deck_text)
     layers = {row['name']: row for row in fill_cfg['layers']}
     extracted = {name: [int(number), int(datatype)]
                  for name, number, datatype in re.findall(
                      r'extract_single_layer_from_design\.call\(:([A-Za-z]\w*),\s*(\d+),\s*(\d+)\)',
-                     deck_text)}
+                     code)}
     unions = {name: (left, right) for name, left, right in re.findall(
         r'name:\s*:([A-Za-z]\w*),\s*calc:\s*->\(ctx\)\s*\{\s*ctx\[:([A-Za-z]\w*)\]\s*\+\s*ctx\[:([A-Za-z]\w*)\]',
-        deck_text)}
+        code)}
     top_aliases = {int(level): name for level, name in re.findall(
-        r'(\d+)\s*=>\s*\{[^\n]*top_metal:\s*:([A-Za-z]\w*)', deck_text)}
+        r'(\d+)\s*=>\s*\{[^\n]*top_metal:\s*:([A-Za-z]\w*)', code)}
     highest = max((int(re.search(r'\d+$', name).group()) for name in layers
                    if re.search(r'\d+$', name)), default=None)
     out = {}

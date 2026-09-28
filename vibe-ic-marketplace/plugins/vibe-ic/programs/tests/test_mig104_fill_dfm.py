@@ -469,6 +469,7 @@ def _gds_stage(tmp_path, monkeypatch, mode, counts):
             filled = tmp_path / "tool.gds"
             filled.write_bytes(Path(gds).read_bytes() + b"+pdkfill")
             out["filler"] = {"filled_gds": str(filled), "script": "fill.rb"}
+            out["subject"] = str(filled)
         return out
     monkeypatch.setattr(LF, "run_density", _density)
     return project, gds, calls
