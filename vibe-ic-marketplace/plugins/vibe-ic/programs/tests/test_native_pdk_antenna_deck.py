@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import sys
 from pathlib import Path
 
@@ -26,14 +27,30 @@ def test_real_native_rdb_calibration_pair():
     assert "Executing rule ANT.1" in (samples / "native_antenna_clean.log").read_text()
 
 
-def _rdb(violations: int) -> str:
+def _rdb(violations: int, script: str = "/pdk/tech/drc/main.drc") -> str:
     items = "".join("<item><category>ANT.1</category></item>" for _ in range(violations))
     return ("<?xml version='1.0'?><report-database>"
             "<description>Report for antenna_native</description>"
-            "<generator>drc: script='/pdk/tech/drc/main.drc'</generator>"
+            f"<generator>drc: script='{script}'</generator>"
             "<categories><category><name>ANT.1</name><description>ANT.1: gate ratio"
             "</description></category></categories><items>" + items +
             "</items></report-database>")
+
+
+def _script(argv) -> str:
+    return argv[argv.index("-r") + 1]
+
+
+def _transcript(argv, violations: int) -> str:
+    """The native deck's own transcript shape, as the real tool writes it
+    (calibration/native_antenna_*.log): the rule file each deck came from,
+    the executed ANT rules, and the completion tally."""
+    rule = posixpath.join(posixpath.dirname(_script(argv)), "rule_decks", "antenna.rb")
+    tally = ("DRC RESULT: SUCCESS (0 violations)" if violations == 0
+             else f"DRC RESULT: FAILURE ({violations} violation(s))")
+    return (f"2026-09-28: Executing deck antenna_poly2 from {rule}\n"
+            "2026-09-28: Executing rule ANT.1\n"
+            f"2026-09-28: {tally}\n")
 
 
 class NativeRunner:
@@ -56,8 +73,8 @@ class NativeRunner:
         self.argv = argv
         assert "decks=antenna" in argv
         target = Path(next(x.split("=", 1)[1] for x in argv if x.startswith("report=")))
-        target.write_text(_rdb(self.violations))
-        return 0, "2026-09-28: Executing rule ANT.1\n", ""
+        target.write_text(_rdb(self.violations, _script(argv)))
+        return 0, _transcript(argv, self.violations), ""
 
     def run_argv_supervised(self, argv, env, *, stall_grace_s,
                             memory_limit_mb, progress_paths):
@@ -203,9 +220,9 @@ def test_native_progress_continues_past_former_wall_clock(tmp_path, monkeypatch)
             assert progress_paths
             target = Path(next(x.split("=", 1)[1] for x in argv
                                if x.startswith("report=")))
-            target.write_text(_rdb(0))
+            target.write_text(_rdb(0, _script(argv)))
             return watchdog.SupervisedResult(
-                0, "Executing rule ANT.1\n", "", "natural", 1801.0,
+                0, _transcript(argv, 0), "", "natural", 1801.0,
                 supervision={"hard_ceiling_exceeded": True})
 
     runner = ProgressRunner()
