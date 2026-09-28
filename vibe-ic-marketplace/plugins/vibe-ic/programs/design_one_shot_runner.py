@@ -22287,9 +22287,16 @@ def step_verilator_coverage(project: Path, top_name: str = "",
         return StepResult("verilator_coverage", "NOT_MEASURED", time.time() - t0,
                           "no RTL sources to instrument", [], reason_class=_V.ReasonClass.INPUT_ABSENT)
     if not tbs:
+        # A previous run's measurement cannot stand in for this run after
+        # discovery refused a connectivity-only testbench.
+        _pl.report_path(project, _vcm.COVERAGE_MEASUREMENT_REL).unlink(
+            missing_ok=True)
         return StepResult("verilator_coverage", "NOT_MEASURED", time.time() - t0,
-                          "no testbench to instrument — coverage cannot be "
-                          "measured without a stimulus that actually ran", [], reason_class=_V.ReasonClass.INPUT_ABSENT)
+                          "no testbench to instrument: no functional "
+                          "stimulus exists; "
+                          "testbench-gen hand-off must author and execute an "
+                          "oracle or professional L10 unit TB before coverage "
+                          "can be measured", [], reason_class=_V.ReasonClass.INPUT_ABSENT)
     tb = tbs[0]
     have = bool(container and _tool_in_container(container, "verilator")) \
         or bool(_shutil.which("verilator"))

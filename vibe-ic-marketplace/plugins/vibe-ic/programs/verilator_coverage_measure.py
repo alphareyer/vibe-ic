@@ -1088,6 +1088,81 @@ _TB_DISCOVERY_ORDER = (
 )
 
 
+def _recorded_functional_testbenches(project: Path) -> set:
+    """HDL testbenches backed by the flow's oracle or L10 execution record.
+
+    The L10 provenance separates an authored/generated oracle from the
+    substance-floor scaffold.  Its execution record also has to bind to the
+    current L10 declaration and say that this exact TB was simulated.  A
+    professional cocotb Python test is not an HDL top for ``--binary``; its
+    L10 HDL unit tests are eligible through the same execution record.
+    """
+    recorded = set()
+    try:
+        manifest = json.loads((project / "phase2/stage1/sim_full_stack"
+                               / "oracle_manifest.json").read_text())
+        if (manifest.get("program") == "oracle_tb_gen"
+                and manifest.get("verdict") == "TB_EMITTED"
+                and int(manifest.get("vector_count") or 0) > 0):
+            recorded.add((project / manifest["tb"]).resolve())
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        import _l10_execution as _l10
+        l10 = project / "phase1/generated_docs/L10_TEST_CASES.json"
+        if not l10.is_file():
+            raise FileNotFoundError(l10)
+        execution = _l10.load_record(project, l10)
+        provenance = json.loads((project / "reports/phase2/sim"
+                                 / "l10_oracle_provenance.json").read_text())
+        if not isinstance(provenance, dict):
+            raise ValueError("L10 provenance is not an object")
+        sources = {Path(row["path"]).resolve() if Path(row["path"]).is_absolute()
+                   else (project / row["path"]).resolve(): row.get("source")
+                   for row in provenance.get("cases", []) if row.get("path")}
+        for row in (execution.get("rows") or {}).values():
+            tb_file = row.get("tb_file")
+            if not (row.get("sim_executed") and tb_file):
+                continue
+            tb = Path(tb_file)
+            tb = (tb if tb.is_absolute() else project / tb).resolve()
+            if sources.get(tb) in {"GENERATED", "PRESERVED_AUTHORED",
+                                   "DELIVERED_INPUT"}:
+                recorded.add(tb)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
+    return recorded
+
+
+def _coverage_candidates(project: Path) -> Tuple[List[str], List[str]]:
+    """Return candidates and eligible stimulus; never admit a marked scaffold."""
+    candidates: List[str] = []
+    for rel, pat in _TB_DISCOVERY_ORDER:
+        if (project / rel).is_dir():
+            for path in sorted((project / rel).glob(pat)):
+                if str(path) not in candidates:
+                    candidates.append(str(path))
+    recorded = _recorded_functional_testbenches(project)
+    eligible: List[str] = []
+    fallback: List[str] = []
+    for candidate in candidates:
+        path = Path(candidate)
+        audit = functional_stimulus_audit(path)
+        try:
+            source = path.read_text(errors="replace")
+        except OSError:
+            continue
+        if (audit["self_declared_connectivity_only"]
+                or "VIBEIC_TB_ORACLE: NONE" in source):
+            continue
+        fallback.append(candidate)
+        if path.resolve() in recorded or (audit["decidable"] and audit["driven"]):
+            eligible.append(candidate)
+    # Retain the legacy undecidable fallback for unmarked, hand-authored TBs.
+    # A marked connectivity-only scaffold is never that fallback.
+    return candidates, eligible or fallback[:1]
+
+
 def discover_measure_inputs(project: Path) -> Tuple[List[str], Optional[str]]:
     """(RTL sources, testbench) for `project`, or ([], None) when absent.
 
@@ -1112,10 +1187,8 @@ def discover_measure_inputs(project: Path) -> Tuple[List[str], Optional[str]]:
             candidates.extend(
                 str(path) for path in sorted((project / rel).glob(pat)))
 
-    # Keep the declared path order as the fallback, but do not prefer an inert
-    # connectivity harness over a later testbench that demonstrably drives a
-    # functional input.  The audit is the single producer of that vocabulary;
-    # discovery does not maintain a second definition of "stimulus".
+    # This single-TB query retains its existing fallback contract. Coverage
+    # builds use discover_measure_testbenches, which refuses marked scaffolds.
     tb: Optional[str] = candidates[0] if candidates else None
     for candidate in candidates:
         audit = functional_stimulus_audit(Path(candidate))
@@ -1147,21 +1220,12 @@ def discover_measure_testbenches(project: Path) -> Tuple[List[str], List[str]]:
     below a 70% floor the suite clears at 98.52%. Nothing about the design had
     changed; the verification had got BETTER.
 
-    Order is the discovery order, de-duplicated. Falls back to the single
-    first candidate when NONE is decidably driven, which is what the one-TB
-    selector does, so a project with no functional stimulus is unaffected."""
+    Order is the discovery order, de-duplicated. An unmarked, undecidable TB
+    retains the one-TB selector's fallback. A marked connectivity-only
+    skeleton never enters the coverage build, even as a fallback."""
     rtl_dir = project / "phase2" / "stage1" / "rtl"
     rtl, _first = discover_measure_inputs(project)
-    candidates: List[str] = []
-    for rel, pat in _TB_DISCOVERY_ORDER:
-        if (project / rel).is_dir():
-            for path in sorted((project / rel).glob(pat)):
-                if str(path) not in candidates:
-                    candidates.append(str(path))
-    driving = [c for c in candidates
-               if (lambda a: a["decidable"] and a["driven"])(
-                   functional_stimulus_audit(Path(c)))]
-    chosen = driving or ([candidates[0]] if candidates else [])
+    _candidates, chosen = _coverage_candidates(project)
     for tb in chosen:
         for extra in _cov_sources_for_tb(project, Path(tb), rtl):
             if extra not in rtl:
@@ -1331,10 +1395,16 @@ def cmd_measure_tb(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
     if not tbs:
-        print("[measure-tb] no testbench found to instrument — coverage "
-              "cannot be measured without a stimulus that actually ran",
+        print("[measure-tb] no functional testbench to instrument; "
+              "testbench-gen hand-off must author and execute an oracle or "
+              "professional L10 unit TB",
               file=sys.stderr)
         return 1
+    for tb in tbs:
+        if functional_stimulus_audit(Path(tb))["self_declared_connectivity_only"]:
+            print(f"[measure-tb] refusing CONNECTIVITY-ONLY testbench {tb}",
+                  file=sys.stderr)
+            return 1
 
     default_build = (Path(args.project) / "phase2" / "stage1" / "sim"
                      / "cov_build") if args.project \
