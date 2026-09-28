@@ -61,7 +61,7 @@ def test_missing_geometry_is_not_measured_even_with_lef_default(tmp_path):
     assert report["summary"]["segments_screened"] == 0
     assert report["not_measured_segments"][0]["status"] == "NOT_MEASURED"
     assert report["not_measured_segments"][0]["reason"] == (
-        "segment_conductor_geometry_unproven")
+        "psm_edge_without_same_net_metal")
 
 
 def test_port_gap_cannot_inherit_neighbor_width(tmp_path):
@@ -97,3 +97,137 @@ def test_producer_collects_transformed_lef_pg_ports():
     assert "getITerms" in E.PG_GEOMETRY_TCL
     assert "getGeometries" in E.PG_GEOMETRY_TCL
     assert "pg_port" in E.PG_GEOMETRY_TCL
+    assert "stdcell_pg_port" in E.PG_GEOMETRY_TCL
+
+
+def test_edge_on_abutting_port_boundary_has_real_cross_section(tmp_path):
+    csv, jmax, geom = _fixture(
+        tmp_path, "VDD\tMetal3\t0\t9\t4\t10\tpg_port\n"
+                  "VDD\tMetal3\t0\t10\t4\t11\tpg_port\n")
+    verdict, report = E.evaluate(csv, jmax, None, 0.1, 2.0, None, 20,
+                                 pg_geometry_path=geom)
+    assert verdict == "PASS"
+    assert report["worst_segments"][0]["width_um"] == pytest.approx(2.0)
+
+
+def test_diagonal_inside_one_real_metal_box_uses_perpendicular_chord(tmp_path):
+    csv, jmax, geom = _fixture(
+        tmp_path, "VDD\tMetal3\t0\t9\t4\t11\tspecial_wire\n")
+    csv.write_text(
+        "Net,Node0 Layer,Node0 X location,Node0 Y location,"
+        "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
+        "VDD,Metal3,0.5,9.5,Metal3,1.5,10.5,0.00026\n")
+    verdict, report = E.evaluate(csv, jmax, None, 0.1, 2.0, None, 20,
+                                 pg_geometry_path=geom)
+    assert verdict == "PASS"
+    assert report["worst_segments"][0]["width_um"] == pytest.approx(1.41421356)
+
+
+def test_virtual_diagonal_leaving_port_is_named_not_measured(tmp_path):
+    csv, jmax, geom = _fixture(
+        tmp_path, "VDD\tMetal3\t0\t9\t1\t11\tpg_port\n")
+    csv.write_text(
+        "Net,Node0 Layer,Node0 X location,Node0 Y location,"
+        "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
+        "VDD,Metal3,0.5,10,Metal3,1.5,12,0.00026\n")
+    verdict, report = E.evaluate(csv, jmax, None, 0.1, 2.0, None, 20,
+                                 pg_geometry_path=geom)
+    assert verdict == "NOT_MEASURED"
+    assert report["not_measured_segments"][0]["reason"] == (
+        "psm_virtual_diagonal_leaves_pg_port")
+
+
+def test_diagonal_rail_to_abutting_stdcell_port_uses_real_neck(tmp_path):
+    csv, jmax, geom = _fixture(
+        tmp_path, "VDD\tMetal3\t0\t10\t4\t11\tspecial_wire\n"
+                  "VDD\tMetal3\t1.5\t8\t1.8\t10\tstdcell_pg_port\n")
+    csv.write_text(
+        "Net,Node0 Layer,Node0 X location,Node0 Y location,"
+        "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
+        "VDD,Metal3,1.5,10.5,Metal3,1.65,9,0.00001\n")
+    verdict, report = E.evaluate(csv, jmax, None, 0.1, 2.0, None, 20,
+                                 pg_geometry_path=geom)
+    assert verdict == "PASS"
+    edge = report["worst_segments"][0]
+    assert edge["width_um"] > 0
+    assert edge["width_um"] == pytest.approx(0.3)
+    assert set(edge["geometry_sources"]) == {"special_wire", "stdcell_pg_port"}
+
+
+def test_diagonal_rail_to_port_with_gap_stays_not_measured(tmp_path):
+    csv, jmax, geom = _fixture(
+        tmp_path, "VDD\tMetal3\t0\t10\t4\t11\tspecial_wire\n"
+                  "VDD\tMetal3\t1.5\t8\t1.8\t9.9\tstdcell_pg_port\n")
+    csv.write_text(
+        "Net,Node0 Layer,Node0 X location,Node0 Y location,"
+        "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
+        "VDD,Metal3,1.5,10.5,Metal3,1.65,9,0.00001\n")
+    verdict, report = E.evaluate(csv, jmax, None, 0.1, 2.0, None, 20,
+                                 pg_geometry_path=geom)
+    assert verdict == "NOT_MEASURED"
+    assert report["not_measured_segments"][0]["reason"] == (
+        "psm_virtual_diagonal_two_shapes_path_unproven")
+
+
+def test_two_ports_joined_by_one_real_followpin_rail_use_contact_width(tmp_path):
+    csv, jmax, geom = _fixture(
+        tmp_path, "VDD\tMetal3\t0\t10\t4\t11\tspecial_wire\n"
+                  "VDD\tMetal3\t1\t9\t1.3\t10\tstdcell_pg_port\n"
+                  "VDD\tMetal3\t1.1\t11\t1.4\t12\tstdcell_pg_port\n")
+    csv.write_text(
+        "Net,Node0 Layer,Node0 X location,Node0 Y location,"
+        "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
+        "VDD,Metal3,1.15,9.5,Metal3,1.25,11.5,0.00001\n")
+    verdict, report = E.evaluate(csv, jmax, None, 0.1, 2.0, None, 20,
+                                 pg_geometry_path=geom)
+    assert verdict == "PASS"
+    edge = report["worst_segments"][0]
+    assert edge["width_um"] == pytest.approx(0.3)
+    assert set(edge["geometry_sources"]) == {"special_wire", "stdcell_pg_port"}
+
+
+def test_virtual_diagonal_across_abutting_pad_rails_and_port(tmp_path):
+    csv, jmax, geom = _fixture(
+        tmp_path, "VDD\tMetal3\t0\t9\t1\t12\tpg_port\n"
+                  "VDD\tMetal3\t1\t9\t2\t12\tpg_port\n"
+                  "VDD\tMetal3\t2\t9\t3\t12\tother_pg_port\n"
+                  "VDD\tMetal3\t3\t10\t6\t10.38\tother_pg_port\n")
+    csv.write_text(
+        "Net,Node0 Layer,Node0 X location,Node0 Y location,"
+        "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
+        "VDD,Metal3,0.5,10.5,Metal3,4,10.2,0.00001\n")
+    verdict, report = E.evaluate(csv, jmax, None, 0.1, 2.0, None, 20,
+                                 pg_geometry_path=geom)
+    assert verdict == "PASS"
+    assert report["worst_segments"][0]["width_um"] == pytest.approx(0.38)
+
+
+def test_virtual_diagonal_with_different_contact_widths_is_unmeasured(tmp_path):
+    csv, jmax, geom = _fixture(
+        tmp_path, "VDD\tMetal3\t0\t10\t4\t11\tspecial_wire\n"
+                  "VDD\tMetal3\t1\t8\t1.3\t10\tstdcell_pg_port\n"
+                  "VDD\tMetal3\t1.2\t8\t1.3\t10\tvia_metal\n")
+    csv.write_text(
+        "Net,Node0 Layer,Node0 X location,Node0 Y location,"
+        "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
+        "VDD,Metal3,1.1,10.5,Metal3,1.25,9,0.00001\n")
+    verdict, report = E.evaluate(csv, jmax, None, 0.1, 2.0, None, 20,
+                                 pg_geometry_path=geom)
+    assert verdict == "NOT_MEASURED"
+    assert report["not_measured_segments"][0]["reason"] == (
+        "psm_virtual_diagonal_ambiguous_contact_width")
+
+
+def test_virtual_diagonal_point_touch_proves_no_conductor_width(tmp_path):
+    csv, jmax, geom = _fixture(
+        tmp_path, "VDD\tMetal3\t0\t10\t1\t11\tspecial_wire\n"
+                  "VDD\tMetal3\t1\t9\t2\t10\tstdcell_pg_port\n")
+    csv.write_text(
+        "Net,Node0 Layer,Node0 X location,Node0 Y location,"
+        "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
+        "VDD,Metal3,0.5,10.5,Metal3,1.5,9.5,0.00001\n")
+    verdict, report = E.evaluate(csv, jmax, None, 0.1, 2.0, None, 20,
+                                 pg_geometry_path=geom)
+    assert verdict == "NOT_MEASURED"
+    assert report["not_measured_segments"][0]["reason"] == (
+        "psm_virtual_diagonal_two_shapes_path_unproven")
