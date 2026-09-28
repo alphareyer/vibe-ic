@@ -242,10 +242,12 @@ and #712 (wrapper-exposed output) are **dead code without this file**.
 >    That is a design document that could not be read, a placement token whose
 >    bit range does not resolve from a declared parameter (`o_x[SW-1:2]`, SW
 >    undeclared), or a port whose width neither its RTL header nor L9 states.
->    Fix the document or the declaration, not the pairs. An RTL width the header
->    cannot state (`[DW/8-1:0]`) is counted at L9's width, as 15.5ic does. Fix the pair, never the check. A
->    port you reported under rule 1 keeps rc 1. That is the honest state until
->    the document places it, so say so in the hand-off.
+>    State the missing parameter or width in the design input to resolve rc 3.
+>    An RTL width the header cannot state (`[DW/8-1:0]`) is counted at L9's
+>    width, as 15.5ic does. A definite two-side placement remains rc 1 even
+>    when an extent is unknown; correct the placement in the design document.
+>    A port you reported under rule 1 keeps rc 1 until the document places it,
+>    so say so in the hand-off.
 
 > **`{l9, rtl}` schema (HARD doc-and-code contract, #775).** Every `{l9, rtl}`
 > dict above is parsed by `l9_rtl_pin_consistency_check._manifest_name_set()`:

@@ -927,16 +927,53 @@ def test_an_open_range_token_split_is_not_measured_not_fail(tmp_path, capsys):
     assert (rc, res["verdict"]) == (0, "PASS"), res
 
 
+def test_a_group_whole_and_open_token_on_another_side_fail(tmp_path, capsys):
+    """The open endpoint is unknown in width, but the token names this port;
+    a group row places every bit on W, so E overlaps W for every SW."""
+    doc = (_GROUP_ROWS + "| **East (E)** | `clk` / `rst` / `o_status[SW-1:0]` |\n"
+           "| **West (W)** | status pin(s) |\n")
+    proj = _project(tmp_path, impl=_IMPL_STATUS4, doc=doc)
+    _emit(proj)
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (1, "FAIL"), res
+    assert any(set(sides) == {"E", "W"} for sides in
+               res["nets_on_two_sides"].values()), res
+
+
+@pytest.mark.parametrize("token", ["`o_status[3:0]`", "`o_status`"],
+                         ids=["part-range", "bare-port"])
+def test_a_group_whole_and_exact_token_fail_without_a_width(
+        tmp_path, capsys, token):
+    """A named port plus a whole-port group contradict even when no source
+    states how many bits the port has."""
+    doc = (_GROUP_ROWS + f"| **East (E)** | `clk` / `rst` / {token} |\n"
+           "| **West (W)** | status pin(s) |\n")
+    proj = _project(tmp_path, impl=_IMPL_STATUS4, doc=doc)
+    _rtl_width_unreadable(proj, _IMPL_STATUS4, _MACRO_STATUS_RTL)
+    spec = proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    l9 = json.loads(spec.read_text())
+    next(q for q in l9["top_ports"] if q["name"] == "o_status")["width"] = "`STATUS_W"
+    spec.write_text(json.dumps(l9))
+    _emit(proj)
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (1, "FAIL"), res
+    assert res["nets_on_two_sides"]["o_status"] == ["E", "W"]
+
+
 @pytest.mark.parametrize("rows,verdict", [
     ("| **East (E)** | `clk` / `rst` |\n| **West (W)** | status pin(s) |\n",
      "PASS"),
     ("| **East (E)** | `clk` / `rst` |\n", None),
-], ids=["whole-port-one-side", "no-row-for-it"])
+    ("| **East (E)** | `clk` / `rst` |\n"
+     "| **West (W)** | status pin(s) |\n", "TWO"),
+], ids=["whole-port-one-side", "no-row-for-it", "two-whole-port-sides"])
 def test_a_port_placed_whole_needs_no_width(tmp_path, capsys, rows, verdict):
     """The paired half of 'a width nobody states': a group row places a port
     WHOLE, so its answer does not depend on the width. One whole-port side is
     PASS. The second id keeps the no-side case a FAIL whatever the width."""
     doc = _GROUP_ROWS + rows
+    if verdict == "TWO":
+        doc = doc.replace("memory data bus", "memory data bus + status")
     proj = _project(tmp_path, impl=_IMPL_STATUS4, doc=doc)
     _rtl_width_unreadable(proj, _IMPL_STATUS4, _MACRO_STATUS_RTL)
     spec = proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
@@ -950,6 +987,27 @@ def test_a_port_placed_whole_needs_no_width(tmp_path, capsys, rows, verdict):
     assert res["unresolved_width_ports"] == ["o_status"]
     if verdict == "PASS":
         assert (rc, res["verdict"]) == (0, "PASS"), res
+    elif verdict == "TWO":
+        assert (rc, res["verdict"]) == (1, "FAIL"), res
+        assert res["nets_on_two_sides"]["o_status"] == ["N", "W"]
     else:
         assert (rc, res["verdict"]) == (1, "FAIL"), res
         assert "o_status" in res["nets_without_side"]
+
+
+def test_l9_nonzero_lsb_is_used_when_rtl_width_is_unreadable(tmp_path, capsys):
+    doc = (_GROUP_ROWS + "| **East (E)** | `clk` / `rst` |\n"
+           "| **West (W)** | `o_status[7:4]` |\n")
+    proj = _project(tmp_path, impl=_IMPL_STATUS4, doc=doc)
+    spec = proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    l9 = json.loads(spec.read_text())
+    status = next(q for q in l9["top_ports"] if q["name"] == "o_status")
+    status.update(msb=7, lsb=4)
+    spec.write_text(json.dumps(l9))
+    assert _rtl_width_unreadable(proj, _IMPL_STATUS4, lambda i:
+                                 _verilog(i).replace("[3:0] o_status",
+                                                     "[B+3:B] o_status"))["o_status"] is None
+    _emit(proj)
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (0, "PASS"), res
+    assert res["widths_from_l9"] == {"o_status": 4}

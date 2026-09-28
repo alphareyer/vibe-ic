@@ -333,6 +333,17 @@ def _named_on(placement) -> Dict[str, Set[str]]:
     return named
 
 
+def _whole_port_sides(placement, impl_ports, renames) -> Dict[str, Set[str]]:
+    """Sides assigned to every bit of a port by a matched group or pair."""
+    _grouped, records = LPP.resolve_declared_pad_groups(
+        placement, impl_ports, renames=list(renames))
+    whole: Dict[str, Set[str]] = {}
+    for record in records:
+        for name in record["matched_ports"]:
+            whole.setdefault(name, set()).add(record["side"])
+    return whole
+
+
 def _document_sides(placement, params, impl_ports,
                     uncountable: "Tuple[str, ...] | List[str]" = ()
                     ) -> Dict[str, Dict[str, Any]]:
@@ -602,13 +613,13 @@ def check(project: Path, pairs: Any,
     A net with no side is PORT_WITHOUT_A_SIDE at 15.5ic; a net on two sides is
     PORT_ON_TWO_SIDES.
 
-    AN UNKNOWN BIT EXTENT IS NEVER A DEFINITE VERDICT. Two things are unknown,
-    and neither enters the FAIL sets. Either one, with no definite defect,
-    makes the answer NOT_MEASURED (rc 3), never PASS:
+    An unknown bit extent alone never enters a FAIL set. Either of these,
+    with no definite defect, makes the answer NOT_MEASURED (rc 3):
       * which bits an open-range token names (`o_x[SW-1:2]`, SW undeclared).
-        Its sides are kept apart (`_net_sides(split=True)`); a net is "on two
-        sides" only on two DEFINITE sides, and a net an open token reaches is
-        not "without a side";
+        Its sides are kept apart (`_net_sides(split=True)`); an unknown span
+        alone does not prove a particular bit is on two sides. A group placing
+        the WHOLE port on another side does prove an overlap, whatever the
+        span, and a net an open token reaches is not "without a side";
       * how many bits a port has, when neither its RTL header nor L9 states a
         number (`_countable_ports`). Its bits are not counted. A port with no
         side at all is still FAIL: that holds whatever its width."""
@@ -629,6 +640,7 @@ def check(project: Path, pairs: Any,
     definite, from_open = _net_sides(placement, params, counted, renames,
                                      split=True)
     named = _named_on(placement)
+    whole_sides = _whole_port_sides(placement, counted, renames)
     nets = [n for p in counted if str(p["name"]) not in uncountable
             for n in LPP.bit_names(p)]
     without = [n for n in nets if not definite.get(n) and not from_open.get(n)]
@@ -638,17 +650,33 @@ def check(project: Path, pairs: Any,
                 if not definite.get(n) and not from_open.get(n)
                 and not named.get(n)]
     two = {n: sorted(definite[n]) for n in nets if len(definite.get(n, ())) > 1}
+    # A group/pair covers the WHOLE port. Any token naming that port from a
+    # different side therefore overlaps at least one bit, even if the token's
+    # span or the port's width is unknown. Record a port-level witness when
+    # bit-level witnesses are unavailable; do not invent which bits overlap.
+    for p in counted:
+        name = str(p["name"])
+        whole = whole_sides.get(name, set())
+        other = named.get(name, set())
+        if whole and other - whole:
+            if name in uncountable or not any(
+                    bit in two for bit in LPP.bit_names(p)):
+                two[name] = sorted(whole | other)
     # A group row or a pair places a port WHOLE, so for a port whose bits
     # cannot be counted that answer holds whatever its width: one whole-port
     # side is placed, two are on two sides. Only an exact row naming SOME of its
     # bits leaves the extent open.
     whole_only: List[str] = []
     for n in uncountable:
-        if n in without or named.get(n) or from_open.get(n):
+        if n in without:
             continue
-        whole = definite.get(n) or set()
+        whole = whole_sides.get(n) or set()
         if len(whole) > 1:
             two[n] = sorted(whole)
+            whole_only.append(n)
+            continue
+        if named.get(n) or from_open.get(n):
+            continue
         whole_only.append(n)
     ports_without = sorted({str(p["name"]) for p in counted
                             if any(n in without for n in LPP.bit_names(p))}
