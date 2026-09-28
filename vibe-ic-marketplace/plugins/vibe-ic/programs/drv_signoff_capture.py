@@ -160,6 +160,7 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
         row.pop("excluded_pins", None)
         row.pop("excluded_pins_recorded", None)
         row.pop("excluded_pins_report", None)
+        row.pop("clock_network_pins", None)
         row.update(fresh_process=True, postroute=True, propagated_clocks=True,
                    excluded_pins_recorded=False,
                    command=_COMMAND, all_limits_max_count=max_count,
