@@ -348,6 +348,29 @@ def test_the_ll21_max_fanout_repair_is_adopted_with_setup_still_met(tmp_path, mo
     assert json.loads((impl / prr.CURRENT).read_text())['candidate'] == '32-cand01'
 
 
+def test_drv_controller_uses_a_separate_routed_slew_candidate(tmp_path, monkeypatch):
+    """A pad-input slew violation must request DRV repair without invoking
+    routed setup moves.  The setup and hold measurements still gate adoption.
+    The tool is replaced only at its view-writing boundary.
+    """
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(0.8, 0.391, (3, 0, 0)),
+        candidates=[_cand(0.7, 0.391, (0, 0, 0))])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_drv')
+    assert run.iterations[0].decision == 'PROMOTED', run.to_record()
+    ledger = json.loads((arm / prr.LEDGER).read_text())['candidates']
+    row = ledger[0]
+    cfg = json.loads(Path(row['config']).read_text())
+    assert row['params']['drv_only'] is True
+    assert 0 < row['params']['slew_margin_pct'] <= 50
+    assert cfg['VIBEIC_PRR_DRV_ONLY'] is True
+    assert cfg['VIBEIC_PRR_SLEW_MARGIN_PCT'] == row['params']['slew_margin_pct']
+    script = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    assert 'repair_design {*}$rd_args' in script
+    assert '!$::env(VIBEIC_PRR_DRV_ONLY)' in script
+
+
 def test_a_hard_repair_that_makes_setup_negative_is_rejected(tmp_path, monkeypatch):
     project, arm, impl, shim = _scenario_impl(
         tmp_path, baseline=(0.8, 0.391, (0, 0, 3)),
