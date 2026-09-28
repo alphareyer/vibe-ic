@@ -2309,7 +2309,7 @@ def test_lec_cache_second_identical_invocation_launches_no_yosys(monkeypatch,
     assert att["source_proof_timestamp"] == first["source_proof_timestamp"]
 
 
-def test_w23_step13_producer_keeps_original_fail_when_sat_cannot_run(
+def test_w23_step13_stateless_residual_without_sat_is_run_error(
         monkeypatch, tmp_path):
     log = ("=== equiv ===\n"
            "  1  $equiv\n"
@@ -2334,7 +2334,7 @@ def test_w23_step13_producer_keeps_original_fail_when_sat_cannot_run(
     report = json.loads((project / "reports/lec.json").read_text())
     assert report["counterexample_search"]["result"] == "NOT_RUN"
     assert "terminal equivalence IL" in report["counterexample_search"]["reason"]
-    assert report["verdict"] == "FAIL"
+    assert report["verdict"] == "RUN_ERROR"
     assert report["miter_stateless"] is True
 
 
