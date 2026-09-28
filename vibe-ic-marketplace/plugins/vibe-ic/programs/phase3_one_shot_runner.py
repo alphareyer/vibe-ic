@@ -23676,24 +23676,6 @@ _STEP32_DONT_USE = (
     "resizer dont_use families) over the step's resolved CELL_LIBS")
 
 
-def _sdc_max_fanout_cap(sdc: Path) -> Optional[Tuple[int, str]]:
-    """The fanout cap sign-off judges on `sdc`: its strictest `set_max_fanout`
-    (the value repair_design meets), with its source; None when it has none.
-    Step 32 guards THIS value (cmp3 D14 review: LibreLane's
-    MAX_FANOUT_CONSTRAINT falls back to a PDK default of 10 when L19 declares
-    none, while the SDC carried 4 -- a diode's 5th load went unseen)."""
-    try:
-        text = Path(sdc).read_text(errors="replace")
-    except OSError:
-        return None
-    values = [float(m.group(2)) for m in _SDC_MAX_FANOUT_RE.finditer(text)]
-    values = [v for v in values if v > 0 and v.is_integer()]
-    if not values:
-        return None
-    return int(min(values)), (f"{Path(sdc).name}: strictest of {len(values)} "
-                              f"set_max_fanout line(s)")
-
-
 def _dont_use_family_fallback_tcl() -> str:
     """v1.2.86 — GENERAL, PDK-family fallback that excludes the physically
     unroutable characterization / low-power cell FAMILIES from the resizer/CTS/
@@ -45563,7 +45545,7 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
         sdc=sdc, derate=(_FLAT_OCV_DERATE_EARLY, _FLAT_OCV_DERATE_LATE),
         route_state=route_state, route_drc=route_drc, variant_arm=variant_arm,
         pg_rules_tcl=pg_rules, dont_use=_STEP32_DONT_USE,
-        max_fanout=_sdc_max_fanout_cap(sdc))
+        max_fanout=__import__("_ppa.timing", fromlist=["timing"]).sdc_max_fanout_cap(sdc))
     path = project / _llprr.REPORT_REL
     record = {"report": str(path.relative_to(project)), "report_sha256": _ll.digest(path),
               "mode": selected, "adopted": report.get("adopted"),
@@ -45752,7 +45734,7 @@ def step_postroute_repair_librelane(project: Path, top: str, pdk: "PdkConfig",
             views={"def": routed, "nl": netlist, "sdc": sdc}, sdc=sdc,
             derate=(_FLAT_OCV_DERATE_EARLY, _FLAT_OCV_DERATE_LATE),
             pg_rules_tcl=pg_rules, refill_tcl=refill, dont_use=_STEP32_DONT_USE,
-            max_fanout=_sdc_max_fanout_cap(sdc))
+            max_fanout=__import__("_ppa.timing", fromlist=["timing"]).sdc_max_fanout_cap(sdc))
     except _ll.Refusal as exc:
         _drv_promotion_disclose(
             pnr_out, "librelane_refused",

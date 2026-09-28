@@ -304,17 +304,17 @@ def test_the_cap_is_the_sdcs_not_librelanes_pdk_default(tmp_path):
     assert 'pushed over max_fanout 4' in out.stdout
 
 
-def test_the_runner_reads_the_strictest_set_max_fanout_of_the_sdc(tmp_path):
+def test_the_strictest_set_max_fanout_of_the_sdc_is_the_cap(tmp_path):
     import importlib
-    runner = importlib.import_module('phase3_one_shot_runner')
+    timing = importlib.import_module('_ppa.timing')
     sdc = tmp_path / 'constraint.sdc'
     sdc.write_text('create_clock -period 10 clk\n'
                    'set_max_fanout 8 [current_design]\n'
                    'set_max_fanout 4 $_vibeic_drv_signal_in_ports\n')
-    cap, source = runner._sdc_max_fanout_cap(sdc)
+    cap, source = timing.sdc_max_fanout_cap(sdc)
     assert cap == 4 and 'constraint.sdc' in source and '2 set_max_fanout' in source
     sdc.write_text('create_clock -period 10 clk\n')
-    assert runner._sdc_max_fanout_cap(sdc) is None
+    assert timing.sdc_max_fanout_cap(sdc) is None
 
 
 def test_the_repair_config_carries_the_sdc_cap(tmp_path, monkeypatch):
