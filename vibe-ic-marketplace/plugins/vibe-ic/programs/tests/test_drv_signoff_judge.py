@@ -765,6 +765,7 @@ def test_capture_ignores_plan_population_and_excluded_pin_assertions(
     scene["excluded_pins"] = [{"pin": "u/Y", "reason": "constant",
                                "fanout": 0, "cap_pf": 0,
                                "slew_rise_ns": 0, "slew_fall_ns": 0}]
+    scene["clock_network_pins"] = ["u/Y"]
     def fake_fresh(script, roots, *, image):
         folder = script.parent
         if script.name == "positive_control.tcl":
@@ -793,6 +794,7 @@ def test_capture_ignores_plan_population_and_excluded_pin_assertions(
     assert row["all_limits_max_count"] > 1
     assert row["excluded_pins_recorded"] is False
     assert "excluded_pins" not in row
+    assert "clock_network_pins" not in row
 
 
 def test_partially_unannotated_drivers_block_a_clean_verdict(tmp_path):
