@@ -37224,6 +37224,9 @@ def _prepare_librelane_floorplan_for_route(
         # that `Odb.SetPowerConnections` declares; it reads the declared RTL.
         steps = ["Yosys.JsonHeader"] + _ll.flow_segment(
             image, "OpenROAD.Floorplan", last)
+        if placement is not None:
+            repair_index = steps.index("OpenROAD.RepairDesignPostGPL")
+            steps.insert(repair_index + 1, "Vibeic.PostGPLFanoutClosure")
         pdn_cfg = _ll.emit_pdn_cfg(image, str(pdk.name),
                                    project / "phase3/librelane/15-config/pdn_cfg.tcl")
         overlay = ({"PDN_CFG": (str(pdn_cfg.resolve()),

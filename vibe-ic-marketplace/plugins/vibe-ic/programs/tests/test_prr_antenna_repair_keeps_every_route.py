@@ -113,6 +113,7 @@ proc check_placement {args} {}
 proc global_connect {args} {}
 namespace eval utl { proc metric_integer {name value} { puts "METRIC $name $value" } }
 proc vic_say {line} { puts "PRR: $line" }
+proc vic_fanout_target_limits {} { return [dict create] }
 proc vic_eco_route {varname tag} {
     upvar #0 $varname dirty
     puts "ROUTED $tag [lsort [dict keys $dirty]]"
@@ -129,6 +130,7 @@ set ::env(PL_MAX_DISPLACEMENT_Y) 100
 set ::env(STEP_DIR) [pwd]
 set ::vic_ant_before 0
 set ::vic_created [list]
+set ::vic_changed 1
 set ::vic_unrouted_before [dict create stub 1]
 set ::vic_fillers 0
 '''

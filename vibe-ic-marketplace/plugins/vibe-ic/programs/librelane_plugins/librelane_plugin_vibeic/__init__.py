@@ -170,6 +170,12 @@ from .postroute_repair import PostRouteRepair  # noqa: E402,F401
 
 __all__ += ["PostRouteRepair"]
 
+# Step 17: close the fanout of buffers created by RepairDesignPostGPL before
+# DetailedPlacement and all later physical stages consume the placed state.
+from .postgpl_fanout_closure import PostGPLFanoutClosure  # noqa: E402,F401
+
+__all__ += ["PostGPLFanoutClosure"]
+
 
 @Step.factory.register()
 class GateLevelSim(Step):
