@@ -63676,10 +63676,13 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             _repair_decision["action"] = "repair_required_single_corner_fallback"
             notes.append("post-route repair required at single-corner tt basis (multi-corner "
                          "OCV unavailable) — honest fallback, not auto-run.")
-    # Durable disclosure of the trigger decision (§4.05 audit trail).
+    # Durable disclosure of the trigger decision (§4.05 audit trail), bound to
+    # the report it was decided from (`_step32_decision_record`).
     try:
         _aa.write_text(postroute_timing_repair_out / "postroute_timing_repair_decision.json",
-            json.dumps(_repair_decision, indent=2) + "\n")
+            json.dumps(_step32_decision_record(project, _repair_decision,
+                                               mc_ocv_stance, _sta_for_repair),
+                       indent=2) + "\n")
         written.append(str(postroute_timing_repair_out / "postroute_timing_repair_decision.json"))
     except Exception:  # pragma: no cover — defensive
         pass
@@ -65136,6 +65139,46 @@ def _post_route_tns_zero(sta_rpt: Path) -> bool:
         return True
     # Conservative default: not proven to be zero.
     return False
+
+
+def _step32_decision_record(project: Path, decision: Dict[str, Any],
+                            stance: Path, single_corner_sta: Path
+                            ) -> Dict[str, Any]:
+    """The canonical Step-32 decision record: the decision, bound to the
+    measurement it was taken on.
+
+    WHY. ``postroute_timing_repair_decision.json`` is the receipt a Step-32
+    consumer reads to learn whether a post-route repair was needed. The
+    Step-32 LibreLane producer publishes that receipt with
+    ``source_report`` (project-relative path) and ``source_report_sha256``
+    (hex sha256 of its bytes), so a reader can prove the decision still
+    describes the report on disk; a status generator that verifies the
+    receipt refuses one it cannot bind -- it withdraws
+    ``no_repair_needed.flag`` and reports NOT_MEASURED. This site wrote the
+    bare decision. MEASURED on an IC-path gf180mcuD run (2026-09-28): the
+    canonical record said ``repair_needed=false`` (multi-corner OCV, setup
+    +2.68 ns, hold +0.44 ns), canonicalize wrote ``no_repair_needed.flag``,
+    and the Step-32 status generator dispatched after it rejected the record
+    ("measured source or sha256 absent"), unlinked the flag and exited 2.
+    Step 32 then failed with neither ``repair_log.json`` nor the flag on disk
+    while this runner's own output list still named the flag.
+
+    The bound report is the one ``decide`` read for its timing basis: the
+    multi-corner OCV stance when that basis was authoritative, else the
+    single-corner STA report. The digest is taken when the record is written,
+    after any repair re-measurement in the same pass. No report on disk (or
+    one outside the project) binds nothing: both fields are null, which a
+    verifying reader refuses, as it must -- nothing measured is not a
+    certificate.
+    """
+    basis = stance if decision.get("mc_ocv_available") else single_corner_sta
+    try:
+        rel = str(basis.relative_to(project)) if basis.is_file() else None
+    except ValueError:
+        rel = None
+    return {**decision,
+            "source_report": rel,
+            "source_report_sha256": _sha256_file(basis) if rel else None}
 
 
 #: Slack is signed: MORE NEGATIVE is worse, so a negative delta is a
@@ -75334,6 +75377,67 @@ _DERIVED_ARTEFACT_GENERATORS = (
     ("tapeout_checklist_gen.py", "tapeout checklist"),
 )
 
+
+def _run_derived_artefact_generators(project: Path, effective_top: Optional[str]
+                                     ) -> List[Dict[str, Any]]:
+    """Run `_DERIVED_ARTEFACT_GENERATORS` in order and return each outcome.
+
+    Best-effort as before: a generator's exit status never changes the run's
+    verdict here (each artefact has its own gate). What changed is that the
+    outcome is no longer thrown away. The loop used to capture every
+    generator's stdout/stderr and drop the CompletedProcess, so a generator
+    that refused -- and removed the artefact it owns -- left no trace in the
+    run. MEASURED on an IC-path gf180mcuD run (2026-09-28): the Step-32
+    status generator exited 2 ("NOT_MEASURED: Step-32 decision invalid ...")
+    after unlinking ``no_repair_needed.flag``; the run log said nothing, the
+    step failed at the audit with the flag simply "absent", and finding the
+    cause took a replay on a copy. A non-zero exit is now printed with the
+    generator's own message, and every outcome is returned to the caller.
+    """
+    outcomes: List[Dict[str, Any]] = []
+    for gen, kind in _DERIVED_ARTEFACT_GENERATORS:
+        gen_path = PROGRAMS_DIR / gen
+        if not gen_path.is_file():
+            continue
+        if gen == "foundry_handoff_pack_gen.py":
+            import foundry_handoff_package_check as _handoff_check
+            sources = _handoff_check.layout_member_sources(project)
+            if ((_ga.visible_gds(project) or _ga.gate_record(project))
+                    and not _ga.admitted_package_sources(project, sources)):
+                _ga.quarantine_visible_gds(
+                    project, "foundry handoff: current layout admission absent")
+                _ga.quarantine_handoff_package(
+                    project, "foundry handoff: current layout admission absent")
+                print("[WARN] foundry handoff skipped: current digest-bound "
+                      "GDS admission absent", file=sys.stderr)
+                outcomes.append({"program": gen, "rc": None,
+                                 "message": "skipped: current digest-bound GDS "
+                                            "admission absent"})
+                continue
+        cmd = [sys.executable, str(gen_path), str(project)]
+        # #467: hand the resolved top to the handoff generator as the
+        # design_top fallback (used only when L1 ic_name is empty).
+        if gen == "foundry_handoff_pack_gen.py" and effective_top:
+            cmd += ["--top", str(effective_top)]
+        try:
+            cp = subprocess.run(
+                cmd,
+                timeout=120, check=False,
+                capture_output=True, text=True,
+            )
+        except Exception as exc:
+            print(f"[WARN] {kind} generator failed: {exc}",
+                  file=sys.stderr)
+            outcomes.append({"program": gen, "rc": None, "message": str(exc)})
+            continue
+        message = _stderr_tail(cp.stderr or cp.stdout, 5)
+        if cp.returncode != 0:
+            print(f"[WARN] {kind} generator {gen} exited rc={cp.returncode}: "
+                  f"{message}", file=sys.stderr)
+        outcomes.append({"program": gen, "rc": cp.returncode,
+                         "message": message})
+    return outcomes
+
 # ORGANIC #655 — POST-HOC audits of the finished run: read what the tools
 # actually did, and record it. Distinct from the pre-flight guards above main(),
 # which decide whether to START; these can only be answered afterwards, from the
@@ -77631,35 +77735,7 @@ def main() -> int:
     # ORGANIC #621 — order is the module constant: foundry_handoff_pack_gen
     # runs BEFORE tapeout_checklist_gen so the checklist grades artefacts that
     # already exist (not a snapshot written moments too early).
-    for gen, kind in _DERIVED_ARTEFACT_GENERATORS:
-        gen_path = PROGRAMS_DIR / gen
-        if gen_path.is_file():
-            if gen == "foundry_handoff_pack_gen.py":
-                import foundry_handoff_package_check as _handoff_check
-                sources = _handoff_check.layout_member_sources(project)
-                if ((_ga.visible_gds(project) or _ga.gate_record(project))
-                        and not _ga.admitted_package_sources(project, sources)):
-                    _ga.quarantine_visible_gds(
-                        project, "foundry handoff: current layout admission absent")
-                    _ga.quarantine_handoff_package(
-                        project, "foundry handoff: current layout admission absent")
-                    print("[WARN] foundry handoff skipped: current digest-bound "
-                          "GDS admission absent", file=sys.stderr)
-                    continue
-            cmd = [sys.executable, str(gen_path), str(project)]
-            # #467: hand the resolved top to the handoff generator as the
-            # design_top fallback (used only when L1 ic_name is empty).
-            if gen == "foundry_handoff_pack_gen.py" and effective_top:
-                cmd += ["--top", str(effective_top)]
-            try:
-                subprocess.run(
-                    cmd,
-                    timeout=120, check=False,
-                    capture_output=True, text=True,
-                )
-            except Exception as exc:
-                print(f"[WARN] {kind} generator failed: {exc}",
-                      file=sys.stderr)
+    _run_derived_artefact_generators(project, effective_top)
 
     # ORGANIC #655 — the post-hoc audits, on the run that just finished.
     for prog, rel_json, kind in _POST_RUN_AUDITS:
