@@ -174,7 +174,8 @@ def test_top_up_masks_every_placed_pad_and_macro_from_odb(tmp_path, monkeypatch)
     (tech / 'macro.lef').write_text('MACRO BLOCK_CELL\n CLASS BLOCK ;\nEND BLOCK_CELL\n')
     cfg = json.loads(config.read_text())
     cfg['PAD_LEFS'] = ['/pdk/processA/tech/pad.lef']
-    cfg['MACROS'] = {'block': {'views': {'lef': [str(tech / 'macro.lef')]}}}
+    cfg['MACROS'] = {'block': {'views': {'lef': [str(tech / 'macro.lef')]},
+                               'halo_um': 1.5}}
     _put(config, cfg)
     routed = project / 'phase3/stage3/pnr/routed.def'
     routed.parent.mkdir(parents=True)
