@@ -38,6 +38,7 @@ name appears here.
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -49,6 +50,7 @@ if str(PROGRAMS) not in sys.path:
 import pytest  # noqa: E402
 
 import l24_signoff_requirements_extract as X  # noqa: E402
+import l24_signoff_evidence_backed_check as L24  # noqa: E402
 import phase1_post_process as P  # noqa: E402
 
 GATE = PROGRAMS / "l24_signoff_evidence_backed_check.py"
@@ -133,6 +135,31 @@ def _proj_requiring_sta(tmp_path):
     _emit_l24(proj)
     _report(proj, "orchestrator/phase3_one_shot.json", {"verdict": "PASS"})
     return proj
+
+
+def test_phase3_receipt_is_bound_to_the_current_phase2_netlist(tmp_path):
+    project = _proj_requiring_sta(tmp_path)
+    netlist = project / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    digest = hashlib.sha256(netlist.read_bytes()).hexdigest()
+    _report(project, "orchestrator/phase3_one_shot.json", {
+        "verdict": "PASS", "phase2_synth": {
+            "path": "phase2/stage2/synth/netlist_yosys.v", "sha256": digest}})
+    before = L24._phase3_has_run(project)
+
+    # A later Phase 2 synthesis changes the input while leaving the prior
+    # Phase 3 report and its sign-off records in place.
+    netlist.write_text("module chip; wire changed; endmodule\n")
+    assert [before, L24._phase3_has_run(project)] == [True, False]
+
+
+def test_unbound_old_phase3_receipt_cannot_certify_a_present_netlist(tmp_path):
+    project = _proj_requiring_sta(tmp_path)
+    netlist = project / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    assert [L24._phase3_has_run(project)] == [False]
 
 
 def _signoff(proj, verdict):
@@ -293,6 +320,19 @@ def test_no_signoff_record_before_phase3_is_not_yet_measurable(tmp_path):
     assert rc == 0, out
     assert "not yet measurable" in out
     assert "REQUIRES" not in out
+
+
+def test_phase2_phase3_planning_receipts_do_not_pretend_signoff_ran(tmp_path):
+    """Fresh Phase 2 writes this namespace before Phase 3 is allowed to run.
+    Treating its mere presence as Phase 3 made L24 demand impossible evidence
+    and halted the front door before its producers could execute."""
+    proj = _project(tmp_path, spec_md="Sign-off requires STA met.\n")
+    _emit_l24(proj)
+    _report(proj, "phase3/padring.json", {"program": "pad_ring"})
+    _report(proj, "phase3/sta/pre_pnr_summary.json", {"passed": True})
+    rc, out = _run_gate(proj)
+    assert rc == 0, out
+    assert "not yet measurable" in out
 
 
 def test_no_signoff_record_after_phase3_FAILS(tmp_path):
