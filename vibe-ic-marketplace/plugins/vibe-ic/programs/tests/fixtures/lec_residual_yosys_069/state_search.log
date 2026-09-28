@@ -1,0 +1,170 @@
+
+ /----------------------------------------------------------------------------\
+ |  yosys -- Yosys Open SYnthesis Suite                                       |
+ |  Copyright (C) 2012 - 2026  Claire Xenia Wolf <claire@yosyshq.com>         |
+ |  Distributed under an ISC-like license, type "license" to see terms        |
+ \----------------------------------------------------------------------------/
+ Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]
+
+-- Executing script file `/work/state_search.ys' --
+
+1. Executing RTLIL frontend.
+Input filename: /work/state_equiv.il
+
+2. Executing EQUIV_MITER pass.
+Creating miter lec_cex_miter from module equiv.
+Seed $equiv cell: $auto$equiv_make.cc:258:find_same_wires$15
+Gold cone: 4 cells (0 leaves).
+Gate cone: 2 cells (0 leaves).
+Selected 5 miter cells.
+Selected 7 miter wires.
+Created miter input port rst.
+Created miter input port clk.
+
+3. Executing HIERARCHY pass (managing design hierarchy).
+
+3.1. Analyzing design hierarchy..
+Top module:  \lec_cex_miter
+
+3.2. Analyzing design hierarchy..
+Top module:  \lec_cex_miter
+Removing unused module `\equiv'.
+Removed 1 unused modules.
+
+4. Executing FLATTEN pass (flatten design).
+
+5. Executing RTLIL backend.
+Output filename: /work/state_flat.il
+
+6. Executing SAT pass (solving SAT problems in the circuit).
+Using SAT solver `minisat`.
+
+Setting up time step 1:
+Final constraint equation: { } = { }
+Import def constraint for this timestep: \clk
+Import def constraint for this timestep: \rst
+Imported 10 cells to SAT database.
+Final init constraint equation: { \h_gate \s_gold } = 6'000000
+Import proof-constraint: \trigger = 1'0
+Final proof equation: \trigger = 1'0
+
+Setting up time step 2:
+Final constraint equation: { } = { }
+Import def constraint for this timestep: \clk
+Import def constraint for this timestep: \rst
+Imported 10 cells to SAT database.
+Import proof-constraint: \trigger = 1'0
+Final proof equation: \trigger = 1'0
+
+Setting up time step 3:
+Final constraint equation: { } = { }
+Import def constraint for this timestep: \clk
+Import def constraint for this timestep: \rst
+Imported 10 cells to SAT database.
+Import proof-constraint: \trigger = 1'0
+Final proof equation: \trigger = 1'0
+
+Setting up time step 4:
+Final constraint equation: { } = { }
+Import def constraint for this timestep: \clk
+Import def constraint for this timestep: \rst
+Imported 10 cells to SAT database.
+Import proof-constraint: \trigger = 1'0
+Final proof equation: \trigger = 1'0
+
+Setting up time step 5:
+Final constraint equation: { } = { }
+Import def constraint for this timestep: \clk
+Import def constraint for this timestep: \rst
+Imported 10 cells to SAT database.
+Import proof-constraint: \trigger = 1'0
+Final proof equation: \trigger = 1'0
+
+Setting up time step 6:
+Final constraint equation: { } = { }
+Import def constraint for this timestep: \clk
+Import def constraint for this timestep: \rst
+Imported 10 cells to SAT database.
+Import proof-constraint: \trigger = 1'0
+Final proof equation: \trigger = 1'0
+
+Setting up time step 7:
+Final constraint equation: { } = { }
+Import def constraint for this timestep: \clk
+Import def constraint for this timestep: \rst
+Imported 10 cells to SAT database.
+Import proof-constraint: \trigger = 1'0
+Final proof equation: \trigger = 1'0
+
+Setting up time step 8:
+Final constraint equation: { } = { }
+Import def constraint for this timestep: \clk
+Import def constraint for this timestep: \rst
+Imported 10 cells to SAT database.
+Import proof-constraint: \trigger = 1'0
+Final proof equation: \trigger = 1'0
+Import show expression: \rst
+Import show expression: \clk
+Import show expression: \trigger
+Import show expression: \cmp_y
+
+Solving problem with 2349 variables and 6256 clauses..
+SAT proof finished - model found: FAIL!
+
+   ______                   ___       ___       _ _            _ _ 
+  (_____ \                 / __)     / __)     (_) |          | | |
+   _____) )___ ___   ___ _| |__    _| |__ _____ _| | _____  __| | |
+  |  ____/ ___) _ \ / _ (_   __)  (_   __|____ | | || ___ |/ _  |_|
+  | |   | |  | |_| | |_| || |       | |  / ___ | | || ____( (_| |_ 
+  |_|   |_|   \___/ \___/ |_|       |_|  \_____|_|\_)_____)\____|_|
+
+
+  Time Signal Name             Dec       Hex           Bin
+  ---- --------------- ----------- --------- -------------
+  init \h_gate                   0         0          0000
+  init \s_gold                   0         0            00
+  ---- --------------- ----------- --------- -------------
+     1 \clk                      0         0             0
+     1 \cmp_y                    1         1             1
+     1 \rst                      0         0             0
+     1 \trigger                  0         0             0
+  ---- --------------- ----------- --------- -------------
+     2 \clk                      0         0             0
+     2 \cmp_y                    1         1             1
+     2 \rst                      0         0             0
+     2 \trigger                  0         0             0
+  ---- --------------- ----------- --------- -------------
+     3 \clk                      0         0             0
+     3 \cmp_y                    1         1             1
+     3 \rst                      0         0             0
+     3 \trigger                  0         0             0
+  ---- --------------- ----------- --------- -------------
+     4 \clk                      0         0             0
+     4 \cmp_y                    0         0             0
+     4 \rst                      1         1             1
+     4 \trigger                  1         1             1
+  ---- --------------- ----------- --------- -------------
+     5 \clk                      0         0             0
+     5 \cmp_y                    1         1             1
+     5 \rst                      0         0             0
+     5 \trigger                  0         0             0
+  ---- --------------- ----------- --------- -------------
+     6 \clk                      0         0             0
+     6 \cmp_y                    1         1             1
+     6 \rst                      0         0             0
+     6 \trigger                  0         0             0
+  ---- --------------- ----------- --------- -------------
+     7 \clk                      0         0             0
+     7 \cmp_y                    1         1             1
+     7 \rst                      0         0             0
+     7 \trigger                  0         0             0
+  ---- --------------- ----------- --------- -------------
+     8 \clk                      0         0             0
+     8 \cmp_y                    1         1             1
+     8 \rst                      0         0             0
+     8 \trigger                  0         0             0
+Dumping SAT model to WaveJSON file '/work/state_trace.json'.
+
+End of script. Logfile hash: d3ff03f255, time: 0.03s, user: 0.04s, system: 0.02s, MEM: 33.25 MB peak
+Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]
+Time spent: 89% 1x sat (0 sec), 4% 1x equiv_miter (0 sec), ...

@@ -1,0 +1,108 @@
+
+ /----------------------------------------------------------------------------\
+ |  yosys -- Yosys Open SYnthesis Suite                                       |
+ |  Copyright (C) 2012 - 2026  Claire Xenia Wolf <claire@yosyshq.com>         |
+ |  Distributed under an ISC-like license, type "license" to see terms        |
+ \----------------------------------------------------------------------------/
+ Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]
+
+-- Executing script file `/work/diff_search.ys' --
+
+1. Executing RTLIL frontend.
+Input filename: /work/diff_equiv.il
+
+2. Executing EQUIV_MITER pass.
+Creating miter lec_cex_miter from module equiv.
+Seed $equiv cell: $auto$equiv_make.cc:258:find_same_wires$3
+Gold cone: 2 cells (0 leaves).
+Gate cone: 2 cells (0 leaves).
+Selected 3 miter cells.
+Selected 5 miter wires.
+Created miter input port b.
+Created miter input port a.
+Created miter output port y.
+
+3. Executing HIERARCHY pass (managing design hierarchy).
+
+3.1. Analyzing design hierarchy..
+Top module:  \lec_cex_miter
+
+3.2. Analyzing design hierarchy..
+Top module:  \lec_cex_miter
+Removing unused module `\equiv'.
+Removed 1 unused modules.
+
+4. Executing FLATTEN pass (flatten design).
+
+5. Executing RTLIL backend.
+Output filename: /work/diff_flat.il
+
+6. Executing SAT pass (solving SAT problems in the circuit).
+Using SAT solver `minisat`.
+
+Setting up time step 1:
+Final constraint equation: { } = { }
+Import def constraint for this timestep: \a
+Import def constraint for this timestep: \b
+Imported 8 cells to SAT database.
+No constraints for initial state found.
+
+Import proof-constraint: \trigger = 1'0
+Final proof equation: \trigger = 1'0
+
+Setting up time step 2:
+Final constraint equation: { } = { }
+Import def constraint for this timestep: \a
+Import def constraint for this timestep: \b
+Imported 8 cells to SAT database.
+Import proof-constraint: \trigger = 1'0
+Final proof equation: \trigger = 1'0
+
+Setting up time step 3:
+Final constraint equation: { } = { }
+Import def constraint for this timestep: \a
+Import def constraint for this timestep: \b
+Imported 8 cells to SAT database.
+Import proof-constraint: \trigger = 1'0
+Final proof equation: \trigger = 1'0
+Import show expression: \b
+Import show expression: \a
+Import show expression: \trigger
+Import show expression: \cmp_y
+Import show expression: \y
+
+Solving problem with 429 variables and 1111 clauses..
+SAT proof finished - model found: FAIL!
+
+   ______                   ___       ___       _ _            _ _ 
+  (_____ \                 / __)     / __)     (_) |          | | |
+   _____) )___ ___   ___ _| |__    _| |__ _____ _| | _____  __| | |
+  |  ____/ ___) _ \ / _ (_   __)  (_   __|____ | | || ___ |/ _  |_|
+  | |   | |  | |_| | |_| || |       | |  / ___ | | || ____( (_| |_ 
+  |_|   |_|   \___/ \___/ |_|       |_|  \_____|_|\_)_____)\____|_|
+
+
+  Time Signal Name             Dec       Hex           Bin
+  ---- --------------- ----------- --------- -------------
+     1 \a                        0         0             0
+     1 \b                        0         0             0
+     1 \cmp_y                    1         1             1
+     1 \trigger                  0         0             0
+     1 \y                        0         0             0
+  ---- --------------- ----------- --------- -------------
+     2 \a                        1         1             1
+     2 \b                        0         0             0
+     2 \cmp_y                    0         0             0
+     2 \trigger                  1         1             1
+     2 \y                        0         0             0
+  ---- --------------- ----------- --------- -------------
+     3 \a                        0         0             0
+     3 \b                        0         0             0
+     3 \cmp_y                    1         1             1
+     3 \trigger                  0         0             0
+     3 \y                        0         0             0
+Dumping SAT model to WaveJSON file '/work/diff_trace.json'.
+
+End of script. Logfile hash: e0bbe036c0, time: 0.03s, user: 0.04s, system: 0.02s, MEM: 31.75 MB peak
+Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]
+Time spent: 71% 1x sat (0 sec), 11% 1x equiv_miter (0 sec), ...
