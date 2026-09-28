@@ -439,6 +439,28 @@ def test_window_publishes_in_tree_input_with_provenance(project, monkeypatch):
     assert "phase3/input.def" in publication["inputs"]
 
 
+def test_window_publishes_dot_relative_file_reference(project, tmp_path):
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    payload = isolated / "payload with space.def"
+    payload.write_text("private output")
+    result = isolated / "result.json"
+    result.write_text(json.dumps({"output_file": "./payload with space.def"}))
+
+    published, error = p3._phase3_window_publication(
+        project, isolated, [result], "dot-relative")
+
+    assert error == "", error
+    assert set(published) == {str(project / "result.json"),
+                              str(project / payload.name)}
+    assert (project / payload.name).read_text() == "private output"
+    receipt = json.loads((project / "reports/audit/windows/dot-relative/"
+                          "publication.json").read_text())
+    assert receipt["status"] == "PUBLISHED"
+    assert payload.name in receipt["outputs"]
+    assert payload.name in receipt["inputs"]
+
+
 def test_window_does_not_replace_a_run_cited_artefact(project, monkeypatch):
     import hashlib
     output = "reports/phase3/sta/post_route_summary.json"
