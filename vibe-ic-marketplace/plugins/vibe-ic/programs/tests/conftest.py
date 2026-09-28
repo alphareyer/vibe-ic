@@ -64,6 +64,11 @@ import os as _os                                     # noqa: E402
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 from _nda_fixture_tokens import FICTIONAL_NDA_TOKENS  # noqa: E402
+# No test may create or write a path inside programs/ (FX_559_WRITES_INTO_TREE);
+# see that module for the measured race it closes.
+from _programs_tree_write_guard import (  # noqa: E402,F401
+    _no_write_into_the_programs_tree,
+)
 
 
 def _is_usable_token_store(raw) -> bool:
