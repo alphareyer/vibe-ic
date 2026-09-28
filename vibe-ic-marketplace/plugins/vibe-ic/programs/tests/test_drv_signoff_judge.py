@@ -740,6 +740,21 @@ def test_step32_missing_final_state_refuses_stale_pass(tmp_path, monkeypatch):
     assert not source.exists()
 
 
+def test_step32_capture_runtime_failure_is_named_not_measured(tmp_path, monkeypatch):
+    import librelane_postroute_repair as repair
+    import drv_capture_plan
+    source = tmp_path / "reports/phase3/sta/drv_signoff_bundle.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(json.dumps(_bundle(tmp_path)))
+    monkeypatch.setattr(drv_capture_plan, "capture_and_publish",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("EDA stopped")))
+    report = {"verdict": "PASS", "final": {"sta_state": "candidate/state_out.json"}}
+    repair._step32_drv_signoff(tmp_path, report)
+    assert report["drv_signoff"]["verdict"] == "NOT_MEASURED"
+    assert "EDA stopped" in report["drv_signoff"]["not_measured"][0]
+    assert not source.exists()
+
+
 def test_capture_plan_reads_applied_clock_and_io_values():
     from drv_capture_plan import _clock_io_values
     sdc = ("# create_clock -period 99 [get_ports clk]\n"
