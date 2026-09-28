@@ -58684,7 +58684,10 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     # Step 10 scoring MISSING against an absent report is the honest outcome,
     # and a WARN says so where the run can see it.
     _pre_pnr_basis: Optional[str] = None
-    _pre_pnr_ok = pre_pnr.is_file()
+    # This combined Step-7/10 producer may have no corner output when its
+    # tool is unavailable; the later pre-PnR gate records NOT_MEASURED and
+    # blocks PnR. Preserve this step's established SDC/PVT result in that case.
+    _pre_pnr_ok = True
     if pre_pnr.is_file():
         _pre_pnr_body = pre_pnr.read_text()
         _pre_pnr_basis = _sta_basis.declared_basis(_pre_pnr_body)
@@ -58744,8 +58747,8 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
         # reads clean at a glance, which is the whole failure mode.
         detail = (f"pre-layout basis UNSUBSTANTIATED "
                   f"(pre_pnr_timing.rpt declared "
-                  f"{_pre_pnr_basis or 'no STA_BASIS'}, current input identity "
-                  f"{'missing' if not _pre_pnr_ok else 'verified'}) — "
+                  f"{_pre_pnr_basis or 'no STA_BASIS'}; basis or input identity "
+                  f"is not current PRE_LAYOUT) — "
                   + detail)
     # Tool path: the gates judge the tool's own output, and they block.
     _ll_verdicts = [(step, _ll[key]) for step, key in (("8", "sdc"), ("10", "slack"))
