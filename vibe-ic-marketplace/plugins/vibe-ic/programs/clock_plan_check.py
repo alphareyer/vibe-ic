@@ -104,8 +104,14 @@ _NAME_RE = re.compile(r"-name\s+(?P<q>['\"{]?)(?P<name>[\w\\/\[\].:$-]+)(?P=q)?"
 _PERIOD_RE = re.compile(r"-period\s+(?P<val>[\w.+\-]+)", re.IGNORECASE)
 # A source object: [get_ports ...], [get_pins ...], or a trailing bare token.
 _GET_OBJ_RE = re.compile(
-    r"\[\s*get_(?:ports|pins|nets)\s+\{?\s*(?P<obj>[\w\\/\[\].:$-]+)",
+    r"\[\s*get_(?:ports|pins|nets)\s+(?:\{(?P<braced>[^}]+)\}|"
+    r"(?P<plain>[^\s\]]+))",
     re.IGNORECASE)
+
+
+def _source_object(match):
+    """The object inside get_ports/pins/nets, never its closing Tcl bracket."""
+    return (match.group("braced") or match.group("plain")).strip()
 
 
 # ----------------------------------------------------------------------
@@ -355,7 +361,7 @@ def _sdc_clock_names(sdc_files):
             else:
                 gm = _GET_OBJ_RE.search(body)
                 if gm:
-                    name = gm.group("obj")
+                    name = _source_object(gm)
             if not name:
                 name = f"__unnamed_clock_{f.name}_{idx}"
             names.append(name)
@@ -404,9 +410,9 @@ def _sdc_primary_clock_sources(sdc_files):
             body = m.group("body") or ""
             src = _GET_OBJ_RE.search(body)
             nm = _NAME_RE.search(body)
-            name = nm.group("name") if nm else (src.group("obj") if src else None)
+            name = nm.group("name") if nm else (_source_object(src) if src else None)
             if name and src:
-                out.setdefault(name, src.group("obj"))
+                out.setdefault(name, _source_object(src))
     return out
 
 
@@ -507,6 +513,12 @@ def cts_transcript(project: Path):
 def cts_missing_clocks(text: str, sources):
     """SDC clocks (`{name: source}`) whose root CTS never names."""
     clocks, roots = cts_clock_roots(text)
+    # CTS-0007 names both the SDC clock and the physical net it found. A
+    # second SDC (for example an FPGA prototype) may give that same source
+    # another clock name. The one observed root covers both names; requiring
+    # CTS to print both aliases would mistake a naming difference for an
+    # unbuilt clock tree. A genuinely different source still fails below.
+    roots.update(clocks.values())
     return sorted(n for n, src in sources.items()
                   if n not in clocks and src not in roots)
 
@@ -529,8 +541,13 @@ def _tool_clock_findings(project: Path, sdc_files):
             })
         _, ports, net = configs[0]
         declared = set(ports) | ({net} if net else set())
+        # CLOCK_PORT may use one clock name while another SDC names the same
+        # source differently. Treat names sharing an actual source as aliases
+        # of one physical clock, not as independently missing CTS inputs.
+        covered_sources = {src for n, src in sources.items()
+                           if n in declared or src in declared}
         missing = sorted(n for n, src in sources.items()
-                         if src not in declared and n not in declared)
+                         if src not in covered_sources)
         if missing:
             findings.append({
                 "severity": "FAIL", "rule": "LIBRELANE_CLOCK_MISSING",
