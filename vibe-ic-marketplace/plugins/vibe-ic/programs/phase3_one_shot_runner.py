@@ -70740,11 +70740,15 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     _state_def = Path(json.loads(Path(_state).read_text())["def"])
                 except (OSError, ValueError, KeyError, TypeError):
                     pass
+            _adopted_def_sha256 = (_route_file_sha256(_state_def)
+                                   if _state_def is not None
+                                   and _state_def.is_file() else None)
+            _promoted_def_sha256 = (_promotion or {}).get("promoted_def_sha256")
             if (not _chain or not _chain.get("adopted")
                     or _chain.get("verdict") != "PASS"
-                    or _state_def is None
-                    or _route_file_sha256(_state_def) !=
-                    (_promotion or {}).get("promoted_def_sha256")
+                    or not _adopted_def_sha256
+                    or not _promoted_def_sha256
+                    or _adopted_def_sha256 != _promoted_def_sha256
                     or (_promotion or {}).get("measurement") !=
                     _step32_own_measurement(_chain)):
                 _promotion_refusal = (_why if not _chain else
