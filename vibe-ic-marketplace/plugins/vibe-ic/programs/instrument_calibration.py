@@ -1624,6 +1624,48 @@ _register(Instrument(
 ))
 
 
+def _judge_pre_pnr_setup_report(body: str) -> Optional[str]:
+    """Exercise the shipped gate on a real OpenSTA path table."""
+    import librelane_prelayout as L
+    with tempfile.TemporaryDirectory(prefix="cal_pre_pnr_setup_") as td:
+        root = Path(td)
+        (root / "pvt_matrix.json").write_text(json.dumps({"corners": [
+            {"label": "SS", "name": "calibration_ss", "liberty": "calibration.lib"}]}))
+        reports = root / "per_corner"
+        reports.mkdir()
+        (reports / "sta_SS.rpt").write_text(body)
+        result = L.pre_pnr_setup_gate(root / "pvt_matrix.json", reports,
+                                      root / "gate.json")
+    return None if result["verdict"] == "PASS" else result["reason"]
+
+
+_register(Instrument(
+    name="librelane_prelayout::pre_pnr_setup_gate",
+    reads="OpenSTA report_checks max path and runner PRE_LAYOUT basis stamp",
+    ruling="U8 pre-PnR setup gate", owner="u8",
+    why=("The same linked two-flop calibration chain must be refused when "
+         "its SS setup path misses the declared period, and admitted when "
+         "the period leaves positive slack. The gate reads the actual "
+         "OpenSTA path table and reports its path class."),
+    judge=_judge_pre_pnr_setup_report,
+    positive=Sample(
+        provenance=("OpenSTA 3.1.0 cdd8ae4d66 in vibeic-eda 0.3.84 on "
+                    "8HD-4 (.120), 2026-09-28; calibration/cal_chain_gf180.v "
+                    "at SS, clock period 0.1 ns, input/output delay 0.02 ns. "
+                    "Raw report_checks output plus the runner's PRE_LAYOUT "
+                    "stamp; slack -1.86 ns. calibration/"
+                    "pre_pnr_setup_negative.rpt"),
+        artefact=_read("pre_pnr_setup_negative.rpt")),
+    expect="NEGATIVE_PRE_PNR_SETUP_SLACK",
+    negative=Sample(
+        provenance=("Same OpenSTA and linked calibration chain at SS, clock "
+                    "period 10 ns, input/output delay 2 ns. Raw report_checks "
+                    "output plus the same runner PRE_LAYOUT stamp; slack "
+                    "+6.75 ns. calibration/pre_pnr_setup_positive.rpt"),
+        artefact=_read("pre_pnr_setup_positive.rpt")),
+))
+
+
 def _eqy_scratch(name: str) -> Callable[[], Path]:
     """Unpack an EQY sample (its unedited status files and partition.list,
     stored as one tar so every fixture stays a flat file) into a temp dir."""
