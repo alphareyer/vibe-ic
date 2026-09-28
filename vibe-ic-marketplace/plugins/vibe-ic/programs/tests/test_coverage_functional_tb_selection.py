@@ -155,6 +155,11 @@ def test_stale_same_path_oracle_manifest_cannot_credit_inert_testbench(tmp_path)
     }))
     assert [Path(p).name for p in coverage.discover_measure_testbenches(project)[1]] == [
         "tb_dut_oracle.v"]
-    tb.write_text(tb.read_text().replace("cmd = 8'h5a;", "rst = 1;"))
-    assert coverage.functional_stimulus_audit(tb)["driven"] == []
+    tb.write_text(
+        "module tb_dut_oracle;\n"
+        "logic clk, rst; logic [7:0] cmd;\n"
+        "dut u_dut(.clk(clk), .rst(rst), .cmd(cmd));\n"
+        "initial begin rst = 1; #10; $finish; end\n"
+        "endmodule\n")
+    assert not coverage.functional_stimulus_audit(tb)["decidable"]
     assert coverage.discover_measure_testbenches(project)[1] == []
