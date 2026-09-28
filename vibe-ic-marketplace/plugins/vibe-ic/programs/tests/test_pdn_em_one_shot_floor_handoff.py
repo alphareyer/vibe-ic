@@ -70,6 +70,8 @@ def test_measured_floor_is_drawn_and_clears_the_same_jmax_rule(tmp_path,
         "measured_max_segment"
     screened = EMC._screen_segment(
         {"layer0": "met4", "layer1": "met4", "net": "VDD",
-         "current_A": current, "width_um": None},
+         # This synthetic DEF has one placed strap on met4, so its measured
+         # width is the segment cross section supplied to the Jmax screen.
+         "current_A": current, "width_um": drawn["met4"]},
         EMC.parse_lef_jmax(tech.read_text()), 0.1, 2.0, drawn)
     assert screened["status"] == "ok", screened
