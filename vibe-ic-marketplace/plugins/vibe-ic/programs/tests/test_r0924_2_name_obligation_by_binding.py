@@ -97,6 +97,24 @@ def test_the_name_obligation_is_classified_as_a_binding(tmp_path):
     assert fhg.binding_obligation(bare, prose) is None
 
 
+def test_immediate_reset_assertion_from_slang_frontend_closes_binding():
+    # formal_harness_gen emits this equivalent immediate form when the
+    # read_slang frontend is needed; the gate must recognize the reset guard.
+    harness = """\
+    always @(posedge clk) if (f_past_valid && rst_active)
+        a_reset_safety_1: assert (q == 4'd0);
+    """
+    assert gate._reset_guarded_properties(harness) == ["a_reset_safety_1"]
+
+
+def test_immediate_assertion_without_reset_guard_does_not_close_binding():
+    harness = """\
+    always @(posedge clk) if (f_past_valid)
+        a_reset_safety_1: assert (q == 4'd0);
+    """
+    assert gate._reset_guarded_properties(harness) == []
+
+
 def test_bound_and_proven_is_discharged_by_binding(tmp_path):
     res, rep = _step5(_project(tmp_path))
     assert res["all_proved"] is True

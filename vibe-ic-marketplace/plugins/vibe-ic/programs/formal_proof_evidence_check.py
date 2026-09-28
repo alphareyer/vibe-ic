@@ -394,10 +394,20 @@ def _harness_binds_reset(harness: str, port: str) -> bool:
 
 
 def _reset_guarded_properties(harness: str) -> List[str]:
-    """Asserted properties whose body is guarded by the bound reset."""
+    """Asserted properties whose body is guarded by the bound reset.
+
+    `formal_harness_gen` emits concurrent `assert property` statements for
+    `read_verilog -sv`. Its equivalent `read_slang` form is an immediate
+    labelled assertion inside `if (f_past_valid && rst_active)`. Both forms
+    are proved by the same SBY tasks; recognize both as binding evidence.
+    """
     asserted = set(re.findall(r"\bassert\s+property\s*\(\s*(\w+)\s*\)", harness))
-    return sorted(n for n, body in _PROPERTY_RE.findall(harness)
-                  if n in asserted and re.search(r"\brst_active(?:_q)?\b", body))
+    concurrent = {n for n, body in _PROPERTY_RE.findall(harness)
+                  if n in asserted and re.search(r"\brst_active(?:_q)?\b", body)}
+    immediate = {m.group("name") for m in re.finditer(
+        r"\bif\s*\((?P<guard>[^)]*\brst_active(?:_q)?\b[^)]*)\)\s*"
+        r"(?P<name>[A-Za-z_]\w*)\s*:\s*assert\s*\(", harness)}
+    return sorted(concurrent | immediate)
 
 
 def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List[dict]:

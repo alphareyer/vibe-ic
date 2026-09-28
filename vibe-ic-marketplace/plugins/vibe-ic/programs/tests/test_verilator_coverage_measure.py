@@ -49,6 +49,19 @@ def test_parse_coverage_dat_counts_covered_vs_total(tmp_path):
     assert result["per_file"]["rtl/foo.v"]["line"]["total"] == 2
 
 
+def test_union_line_map_keeps_verilator_expression_with_apostrophe(tmp_path):
+    # Real Verilator records can include SystemVerilog literals such as 32'h1
+    # inside the `o` field. The record terminator is the quote followed by
+    # the hit count, not the first quote in the payload.
+    dat = tmp_path / "cov.dat"
+    dat.write_text(
+        "C '\x01f\x02rtl/aes_cipher_control.sv\x01l\x02334"
+        "\x01t\x02expr\x01o\x02(value == 32'h1)\x01h\x02tb.dut' 7\n"
+    )
+    result = gate.union_line_map([str(dat)])
+    assert result["rtl/aes_cipher_control.sv"][334] == 7
+
+
 def test_parse_coverage_dat_ignores_non_matching_lines(tmp_path):
     dat = tmp_path / "cov.dat"
     dat.write_text(
