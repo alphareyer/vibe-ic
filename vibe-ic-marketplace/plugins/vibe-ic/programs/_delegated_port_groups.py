@@ -66,7 +66,9 @@ def _source_mentions_declaration(project: Path, source: str, group: str) -> bool
     if source.startswith("__chip_root_docs__/"):
         candidates = [project / source.removeprefix("__chip_root_docs__/")]
     elif source.startswith("__chip_root__/"):
-        candidates = [project / source.removeprefix("__chip_root__/")]
+        name = source.removeprefix("__chip_root__/")
+        candidates = [project / directory / name
+                      for directory in ("", "doc", "docs", "input")]
     else:
         docs = project / "input" / "docs"
         candidates = []
@@ -80,7 +82,17 @@ def _source_mentions_declaration(project: Path, source: str, group: str) -> bool
     root = project.resolve()
     for path in candidates:
         try:
-            if not path.resolve().is_relative_to(root):
+            relative = path.resolve().relative_to(root)
+            parts = relative.parts
+            input_docs = parts[:2] == ("input", "docs")
+            docs_tree = parts[:1] in {
+                ("doc",), ("docs",), ("Documentation",),
+                ("documentation",)}
+            readme = (len(parts) <= 4 and path.name.lower().startswith("readme")
+                      and not set(parts).intersection({
+                          "phase1", "phase2", "phase3", "reports",
+                          "oracle", "golden", "harness"}))
+            if not (input_docs or docs_tree or readme):
                 continue
             body = path.read_text()
         except (OSError, ValueError):
