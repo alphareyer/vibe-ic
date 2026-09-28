@@ -189,6 +189,15 @@ def test_an_ambiguous_file_name_is_never_relaxed(monkeypatch, tmp_path):
 
 
 # ---- (6a) supervision, not a wall clock (review wave 6: #2051) ------------
+#: Read through `getattr`, so a tree without the class raises what IT raised
+#: for a run that measured nothing, and ANSWERS (wrongly) instead of erroring.
+_NM = getattr(F, "ToolNotMeasured", None)
+
+
+def _not_measured(tool):
+    return (_NM(tool, "made no progress") if _NM is not None
+            else subprocess.TimeoutExpired([tool], 7))
+
 def _supervised(monkeypatch, *, rc=0, outcome="natural", docker=True):
     """Capture what `_invoke` hands the repo's supervisor, and answer as it
     would. Only the process launch is faked."""
@@ -200,6 +209,11 @@ def _supervised(monkeypatch, *, rc=0, outcome="natural", docker=True):
         return WD.SupervisedResult(rc=rc, out="", err="", outcome=outcome)
 
     monkeypatch.setattr(WD, "run_host_supervised", _rhs)
+    # A tree that does not supervise would launch the tool itself: answer it
+    # with a clean exit so no real process ever starts, on either tree.
+    monkeypatch.setattr(F.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(
+                            cmd, 0, "", ""))
     monkeypatch.setattr(F.shutil, "which",
                         lambda t: ("/usr/bin/docker" if t == "docker" and docker
                                    else ("/usr/bin/" + t if not docker
@@ -211,6 +225,7 @@ def test_a_tool_run_is_supervised_by_progress_with_a_backstop(monkeypatch,
                                                               tmp_path):
     seen = _supervised(monkeypatch)
     F._invoke("yosys", ["-p", "x"], tmp_path, "img@sha256:" + "0" * 64)
+    assert "cmd" in seen, "the tool run did not go through the supervisor"
     cmd, kw = seen["cmd"], seen["kw"]
     assert cmd[:3] == ["docker", "run", "--rm"]
     name = cmd[cmd.index("--name") + 1]
@@ -226,13 +241,13 @@ def test_a_tool_run_is_supervised_by_progress_with_a_backstop(monkeypatch,
 def test_a_stall_is_not_measured_not_a_finding(monkeypatch, tmp_path):
     import _watchdog as WD
     _supervised(monkeypatch, rc=WD.RC_STALLED, outcome="stalled")
-    with pytest.raises(F.ToolNotMeasured):
+    with pytest.raises(_NM or subprocess.TimeoutExpired):
         F._invoke("yosys", ["-p", "x"], tmp_path, "img@sha256:" + "0" * 64)
 
 
 def test_a_fired_backstop_is_not_measured_either(monkeypatch, tmp_path):
     _supervised(monkeypatch, rc=124)
-    with pytest.raises(F.ToolNotMeasured):
+    with pytest.raises(_NM or subprocess.TimeoutExpired):
         F._invoke("yosys", ["-p", "x"], tmp_path, "img@sha256:" + "0" * 64)
 
 
@@ -243,13 +258,14 @@ def test_a_strict_stall_is_an_execution_error_not_a_retry(monkeypatch,
 
     def _invoke(tool, args, project, image):
         calls.append(tool)
-        raise F.ToolNotMeasured(tool, "made no progress")
+        raise _not_measured(tool)
 
     monkeypatch.setattr(F, "_invoke", _invoke)
     r = F.check(root)
     assert r["passed"] is False
     assert r["findings"] == [], r["findings"]
-    assert r["not_measured"]["reason_class"] == "EXECUTION_ERROR"
+    assert (r.get("not_measured") or {}).get("reason_class") == \
+        "EXECUTION_ERROR", r
     assert "yosys" in r["not_measured"]["why"]
     assert calls == ["yosys"]
 
@@ -260,7 +276,7 @@ def test_a_relaxed_retry_stall_counts_for_nothing(monkeypatch, tmp_path):
 
     def _invoke(tool, args, project, image):
         if tool == "yosys" and FLAG in args[-1]:
-            raise F.ToolNotMeasured(tool, "made no progress")
+            raise _not_measured(tool)
         return subprocess.CompletedProcess([tool], 1 if tool == "yosys"
                                            else 0, "", strict)
 
@@ -277,7 +293,7 @@ def test_the_flow_books_a_stalled_front_end_not_measured(monkeypatch,
     import flow_compliance_check as FCC
     root = _project(tmp_path)
     monkeypatch.setattr(F, "_invoke", lambda *a: (_ for _ in ()).throw(
-        F.ToolNotMeasured("yosys", "made no progress")))
+        _not_measured("yosys")))
     monkeypatch.setattr(sys, "argv", ["flow_step_output_content_check.py",
                                       str(root), "--mode", "rtl"])
     rc = C.main()
