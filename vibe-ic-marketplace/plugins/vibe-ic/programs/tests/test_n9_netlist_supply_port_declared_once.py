@@ -221,8 +221,15 @@ def test_the_prestream_gate_appends_the_unchecked_row():
     src = (PROG / "phase3_one_shot_runner.py").read_text()
     fn = next(n for n in ast.parse(src).body
               if isinstance(n, ast.FunctionDef) and n.name == "step_prestream_gate")
-    called = {getattr(c.func, "id", None) for c in ast.walk(fn) if isinstance(c, ast.Call)}
-    assert "_netlist_port_decls_row" in called
+    made = {t.id for a in ast.walk(fn) if isinstance(a, ast.Assign)
+            and isinstance(a.value, ast.Call)
+            and getattr(a.value.func, "id", None) == "_netlist_port_decls_row"
+            for t in a.targets if isinstance(t, ast.Name)}
+    appended = {a.id for c in ast.walk(fn) if isinstance(c, ast.Call)
+                and isinstance(c.func, ast.Attribute) and c.func.attr == "append"
+                and getattr(c.func.value, "id", None) == "rows"
+                for a in c.args if isinstance(a, ast.Name)}
+    assert made and made & appended, (made, appended)
 
 
 def test_an_escaped_header_name_keeps_its_terminating_space():
