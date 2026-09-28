@@ -2034,12 +2034,29 @@ def step_phase1(project: Path) -> StepResult:
     gd = _pl.generated_docs_dir(project)
     L_files = list(gd.glob("L*.json")) if gd.is_dir() else []
     if len(L_files) >= 13:
-        # main: SKIP. The documents this step emits are already on disk,
-        # so the outcome is present and was NOT computed in this run.
-        return StepResult("phase1", "PASS",
-                          time.time() - t0,
-                          f"generated_docs already has {len(L_files)} L docs",
-                          disclosures=[_V.Disclosure.REUSED_RECORD])
+        # FX_STALE_LDOCS (review wave8): existence is not currency. Reuse only
+        # what the CURRENT producer wrote; refuse an unexplained edit;
+        # otherwise fall through and regenerate (from design input, if any).
+        import _phase1_producer_identity as _p1id_mod
+        _fr = _p1id_mod.assess(project, PROGRAMS_DIR)
+        if _fr["state"] == _p1id_mod.REFUSE:
+            return StepResult("phase1", "NOT_MEASURED", time.time() - t0,
+                              f"phase1 REFUSED — {_fr['reason']}: {_fr['why']}",
+                              reason_class=_V.ReasonClass.INPUT_ABSENT)
+        if _fr["state"] == _p1id_mod.REUSE:
+            return StepResult("phase1", "PASS",
+                              time.time() - t0,
+                              f"generated_docs already has {len(L_files)} L "
+                              f"docs, current: {_fr['why']}",
+                              disclosures=[_V.Disclosure.REUSED_RECORD])
+        if not _p1id_mod.design_input_mode(project)[0]:
+            # HANDED docs: no design input to regenerate them from -- they
+            # are the project's input, kept, never judged stale.
+            return StepResult("phase1", "PASS", time.time() - t0,
+                              f"generated_docs holds {len(L_files)} L docs "
+                              f"with no design input behind them: kept as "
+                              f"input", disclosures=[_V.Disclosure.REUSED_RECORD])
+        _p1id_mod.supersede_docs(project, f"{_fr['reason']}: {_fr['why']}")
     runner = PROGRAMS_DIR / "phase1_one_shot_runner.py"
     if not runner.is_file():
         return StepResult("phase1", "FAIL",
@@ -24724,8 +24741,20 @@ def main() -> int:
         print(f"\n=== design_one_shot_runner DONE — {out}")
         print(f"verdict: FAIL — phase1 precondition unmet")
         return 1
+    # FX_STALE_LDOCS (review wave8) — a phase-2 entry never regenerates phase
+    # 1, but it must SAY when the docs it reads are not the current
+    # producer's; the front door demotes a PASS over them.
+    _p1_note = ""
+    try:
+        import _phase1_producer_identity as _p1id_mod
+        _fr = _p1id_mod.assess(project, PROGRAMS_DIR)
+        if _fr.get("state") != _p1id_mod.REUSE:
+            _p1_note = (f"; STALE_GENERATED_DOCS: {_fr.get('state')} "
+                        f"({_fr.get('reason')}): {_fr.get('why')}")
+    except Exception:                                      # noqa: BLE001
+        pass
     plan.append(StepResult("phase1_precheck", "PASS", 0.0,
-                           f"{L_count}/13 L docs present"))
+                           f"{L_count}/13 L docs present{_p1_note}"))
 
     # Step 1 — class detect (always)
     ic_class, evidence = detect_ic_class(project)

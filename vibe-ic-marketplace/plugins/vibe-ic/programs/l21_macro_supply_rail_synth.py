@@ -738,7 +738,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             container["power_domains"] = list(existing) + added
             if "power_intent_present" in container:
                 container["power_intent_present"] = True
-        l21.write_text(json.dumps(doc, indent=1, ensure_ascii=False))
+        # Through THE L-doc write chokepoint (`l_doc_generator_stamp.dump`),
+        # like every other writer of generated_docs/L*.json: it stamps the
+        # document and records this rewrite as a FLOW derivation in the
+        # phase-1 producer identity, so the next run does not mistake analog
+        # A8's rails for a hand edit (FX_STALE_LDOCS, review wave8).
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import l_doc_generator_stamp as _stamp
+        _stamp.dump(l21, doc, emitter=PROGRAM)
         result["applied"] = True
 
     if args.json:

@@ -1596,7 +1596,8 @@ def _czl9_sufficiency_gate(project: Path) -> Tuple[bool, str]:
 
 #: The project THIS invocation of `main` resolved (None until it has one).
 #: Read only by `main_recorded`, right after `main` returns, to stamp it.
-_RUN = {"project": None, "second_track_only": False, "extracting": False}
+_RUN = {"project": None, "second_track_only": False, "extracting": False,
+        "knobs": None}
 
 
 def main_recorded() -> int:
@@ -1614,32 +1615,53 @@ def main_recorded() -> int:
     format, with no profiler -- and, as its last act, stamps
     `phase1/step_identity.json` (kind `phase1`).
 
-    Stamped only when THIS run dispatched extraction (a refused or locked-out
-    run did not, and must not claim the docs on disk). A `--second-track-only` pass
-    is not the doc producer: it refreshes the recorded output digests of the
-    docs it legitimately rewrote and leaves the producer's recording alone."""
+    Stamped only when THIS run dispatched D1 (`_as_the_producer`); a refused
+    or locked-out run did not, and must not claim the docs on disk. The stamp
+    covers only the docs this run WROTE. A `--second-track-only` pass is not
+    the doc producer: the docs it rewrote are recorded as derivations, and the
+    producer's recording, inputs and every other doc are left alone."""
     import _phase1_producer_identity as _pid
-    _RUN.update(project=None, second_track_only=False, extracting=False)
-    # A second-track pass is judged by CONTENT, not by clock: a filesystem
-    # mtime is coarser than time.time(), and "mtime >= start" missed docs
-    # written in the first tick (measured: 2 runs in 3).
-    before = _pid.docs_snapshot(_project_arg())
-    recorder = _pid.ProducerRecorder(PROGRAMS_DIR)
+    _RUN.update(project=None, second_track_only=False, extracting=False,
+                knobs=None)
+    # The design-input tree BEFORE phase 1: whatever it creates or rewrites
+    # there -- in this process or a launched one (step 0.5ic's declaration) --
+    # is the flow's own output, not design input (review wave8 BLOCKER 1).
+    _proj0 = _project_arg()
+    input_before = (_pid.input_tree_snapshot(_proj0)
+                    if _proj0 is not None and _proj0.is_dir() else None)
+    recorder = _pid.ProducerRecorder()
     with recorder:
         rc = globals()["main"]()
     project = _RUN["project"]
     try:
-        after = _pid.docs_snapshot(project)
-        if project is not None and after:
+        if project is not None and _pid.docs_snapshot(project):
             if _RUN["extracting"]:
-                _pid.stamp(project, recorder)
-            elif _RUN["second_track_only"] and after != before:
-                _pid.restamp_outputs(project)
+                _pid.stamp(project, recorder, input_before=input_before,
+                           knobs=_RUN.get("knobs"))
+            elif _RUN["second_track_only"]:
+                _pid.restamp_outputs(project, recorder.written_docs(project))
     except Exception as exc:                               # noqa: BLE001
         print(f"[phase1] producer identity NOT stamped ({exc}); the next run "
               f"will regenerate these docs rather than trust them",
               file=sys.stderr)
     return rc
+
+
+def _as_the_producer(fn):
+    """`fn` is the D1 extraction: when the preflight lets it RUN, this run is
+    the doc producer of record.
+
+    FX_STALE_LDOCS (review wave8). Set only here, where D1 is actually
+    dispatched -- a D1-REFUSED run wrote nothing and must not stamp -- and the
+    previous stamp is voided at this same point, so a run that dies half way
+    through regenerating leaves NO_PRODUCER_IDENTITY (which regenerates),
+    never an old stamp vouching for half-new docs (which would refuse)."""
+    def _run(project, *a, **k):
+        import _phase1_producer_identity as _pid
+        _RUN["extracting"] = True
+        _pid.void(project)
+        return fn(project, *a, **k)
+    return _run
 
 
 def _project_arg() -> Optional[Path]:
@@ -1684,7 +1706,10 @@ def main() -> int:
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
-    _RUN.update(project=project, second_track_only=bool(args.second_track_only))
+    _RUN.update(project=project, second_track_only=bool(args.second_track_only),
+                knobs={"ic_name": args.ic_name, "pdk": _pdk_of_this_run(extras),
+                       "mode": "docs" if args.mode in ("auto", "docs")
+                       else args.mode})
 
     # ORGANIC #588 — single-driver lock, honored by the standalone phase
     # runner too (not just the orchestrator). Re-enters cleanly when the
@@ -1700,12 +1725,6 @@ def main() -> int:
     # of it, so it runs the second track alone and re-runs nothing.
     if args.second_track_only:
         return run_second_pass_only(project, args.ic_name)
-    # FX_STALE_LDOCS — from here on THIS run is the doc producer: `main`
-    # stamps its identity over whatever docs it leaves, even byte-identical
-    # ones (a changed producer that happens to write the same bytes is still
-    # the producer of record, or every later run would regenerate forever).
-    _RUN["extracting"] = True
-
     # PASS 1 BEGINS HERE, so this is where an EARLIER pass's coverage-only sidecar stops being
     # this project's answer. R-0915-160. Below the second-pass short-circuit on purpose: the
     # second pass carries pass 1's sidecar and must not erase it. See
@@ -1747,7 +1766,7 @@ def main() -> int:
         _pf = _spf.gate(
             project, "phase1_one_shot_runner", "doc_extract",
             _preflight_refusal(D1_STEP_NAME),
-            _run_docs_mode, project, args.ic_name, extras)
+            _as_the_producer(_run_docs_mode), project, args.ic_name, extras)
         # `_run_docs_mode` returns an int rc; the refusal factory returns a
         # StepResult. The TYPE is the discriminator, and it is exact — there is
         # no rc value that is also a StepResult.
@@ -1844,7 +1863,7 @@ def main() -> int:
     plan.append(_spf.gate(
         project, "phase1_one_shot_runner", "doc_extract",
         _preflight_refusal(D1_STEP_NAME),
-        step_ingest_render, project, args.ic_name))
+        _as_the_producer(step_ingest_render), project, args.ic_name))
     plan.append(step_human_docs(project))
 
     # The prompt path emits the same L-docs, so it gets the same second track

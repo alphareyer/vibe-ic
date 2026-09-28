@@ -472,7 +472,8 @@ def _expert_answer_pending(project: Path) -> Tuple[bool, str]:
                    f"(ai_subtrack.status={status!r})")
 
 
-def _phase1_decision(project: Path, force_skip: bool) -> Tuple[bool, str]:
+def _phase1_decision(project: Path, force_skip: bool,
+                     knobs: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
     """Decide whether to run Phase 1 and in which mode.
 
     Returns (run, mode) where:
@@ -509,7 +510,7 @@ def _phase1_decision(project: Path, force_skip: bool) -> Tuple[bool, str]:
         # stale cache: a phase-1 producer fix never reached an existing
         # project (measured, subservient f4). Reuse needs the producer's own
         # identity to match; see `_phase1_producer_identity`.
-        fresh = _phase1_freshness(project)
+        fresh = _phase1_freshness(project, knobs)
         if fresh["state"] == _p1id.REUSE:
             return (False, "")
         if fresh["state"] == _p1id.REFUSE:
@@ -523,8 +524,9 @@ def _phase1_decision(project: Path, force_skip: bool) -> Tuple[bool, str]:
     return _phase1_decision_from_inputs(project)
 
 
-def _stale_generated_docs_note(run_phase1: bool, force_skip: bool,
+def _stale_generated_docs_note(regenerating: bool,
                                fresh: Optional[Dict[str, Any]],
+                               design_input: bool,
                                skipped_by: str) -> Optional[str]:
     """The disclosure a phase-1-skipping run owes when it reads stale docs.
 
@@ -534,11 +536,19 @@ def _stale_generated_docs_note(run_phase1: bool, force_skip: bool,
     FAIL: nothing was found wrong with the design, and a FAIL would say it
     was. Not a PASS either: `_demote_for_stale_generated_docs` turns a PASS
     over docs whose currency is not established into NOT_MEASURED, with this
-    sentence as the reason."""
-    if run_phase1 or not force_skip or fresh is None \
+    sentence as the reason.
+
+    Owed by EVERY run that proceeds over those docs without regenerating them
+    -- a window run, and the expert second pass too (review wave8 MINOR: it
+    re-enters phase 1 but re-extracts nothing). Never owed for L docs with no
+    design input behind them: they are the project's INPUT, exactly as
+    `_phase1_decision` rules, and input is never judged stale (review wave8
+    MAJOR: 33 corpus projects were NOT_MEASURED for good)."""
+    if regenerating or not design_input or fresh is None \
             or fresh.get("state") == _p1id.REUSE:
         return None
-    return (f"STALE_GENERATED_DOCS: this run skipped phase 1 ({skipped_by}) "
+    return (f"STALE_GENERATED_DOCS: this run did not regenerate phase 1 "
+            f"({skipped_by}) "
             f"and read generated L docs that are {fresh.get('state')} "
             f"({fresh.get('reason')}): {fresh.get('why')}")
 
@@ -558,10 +568,12 @@ def _design_input_present(project: Path) -> bool:
     return _phase1_decision_from_inputs(project) == (True, "docs")
 
 
-def _phase1_freshness(project: Path) -> Dict[str, Any]:
-    """`_phase1_producer_identity.assess` against THIS plugin's programs."""
+def _phase1_freshness(project: Path,
+                      knobs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """`_phase1_producer_identity.assess` against THIS plugin, with the knobs
+    this run would hand phase 1 (None: not known, the recorded ones apply)."""
     try:
-        return _p1id.assess(project, PROGRAMS_DIR)
+        return _p1id.assess(project, PROGRAMS_DIR, knobs)
     except Exception as exc:                               # noqa: BLE001
         return {"state": _p1id.REGENERATE,
                 "reason": _p1id.NO_PRODUCER_IDENTITY,
@@ -569,40 +581,12 @@ def _phase1_freshness(project: Path) -> Dict[str, Any]:
 
 
 def _phase1_decision_from_inputs(project: Path) -> Tuple[bool, str]:
-    """The no-L-docs half of `_phase1_decision`: which design input exists."""
-    p1_struct = project / "input" / "phase1_structured.yaml"
-    p1_prompt = project / "input" / "phase1_prompt.md"
-    docs = project / "input" / "docs"
-    input_doc = (_pl.input_doc_dir(project)
-                 if hasattr(_pl, "input_doc_dir") else None)
+    """The no-L-docs half of `_phase1_decision`: which design input exists.
 
-    def _has_extractable(d: Path) -> bool:
-        # #583 — "populated" means at least one real, non-empty,
-        # non-hidden document (a .gitkeep placeholder must not flip a
-        # prompt-only project into docs mode).
-        if not d.is_dir():
-            return False
-        for f in d.rglob("*"):
-            if f.is_file() and not f.name.startswith(".") \
-                    and f.stat().st_size > 0:
-                return True
-        return False
-
-    docs_populated = _has_extractable(docs)
-    input_doc_populated = bool(input_doc) and _has_extractable(input_doc)
-    # UNIFIED DOC->JSON backend (owner directive 2026-06-20): EVERY front-end —
-    # vendor docs, a free-text prompt, OR a dialogue convergence fact-graph —
-    # flows through the one doc-extraction track so the L1-L24 JSON is
-    # homogeneous. So the orchestrator now resolves ALL of them to "docs";
-    # phase1_one_shot_runner --mode docs render-bridges a phase1_structured.yaml
-    # (dialogue) / phase1_prompt.md (prose) into input/docs/ and re-detects the
-    # precise mode. The legacy engine reverse-extractor stays reachable only via
-    # an explicit `phase1_one_shot_runner --mode prompt` invocation.
-    if (p1_struct.is_file() or docs_populated or input_doc_populated
-            or p1_prompt.is_file()):
-        return (True, "docs")
-    # No inputs at all — phase1 will SKIP gracefully (don't run).
-    return (False, "")
+    One predicate for every entry (`_phase1_producer_identity.
+    design_input_mode`), so the front door and phase 2's `step_phase1` agree
+    on what counts as design input (FX_STALE_LDOCS)."""
+    return _p1id.design_input_mode(project)
 
 
 def _need_phase1(project: Path, force_skip: bool) -> bool:
@@ -1852,25 +1836,43 @@ def main() -> int:
                                 "why": why})
         print(f"[bounded] SKIPPED {refresh} -- {why}")
         return why
-    run_phase1, p1_mode = _phase1_decision(project, _force_skip_p1)
-    # FX_STALE_LDOCS — what the generated L docs on disk ARE, asked once and
-    # carried into the report whatever is decided from it.
+    # FX_STALE_LDOCS — the knobs THIS run hands phase 1, so a doc written
+    # under another `--pdk` / `--ic-name` is not reused (review wave8 MAJOR).
+    _p1_knobs = {"ic_name": args.ic_name, "pdk": args.pdk, "mode": "docs"}
+    run_phase1, p1_mode = _phase1_decision(project, _force_skip_p1, _p1_knobs)
+    # What the generated L docs on disk ARE, asked once and carried into the
+    # report whatever is decided from it.
     _gd_now = _pl.generated_docs_dir(project)
-    _p1_fresh = (_phase1_freshness(project)
+    _p1_fresh = (_phase1_freshness(project, _p1_knobs)
                  if _gd_now.is_dir() and len(list(_gd_now.glob("L*.json"))) >= 13
                  else None)
-    _p1_stale_why = None
+    _p1_design_input = _design_input_present(project)
+    if _p1_fresh is not None and not _p1_design_input:
+        _p1_fresh = {"state": "KEPT_AS_INPUT", "reason": "NO_DESIGN_INPUT",
+                     "why": "these L docs have no design input behind them: "
+                            "they were handed to the project and ARE its "
+                            "input, never regenerated or judged stale"}
+    _p1_regenerating = (run_phase1 and p1_mode == "docs"
+                        and _p1_fresh is not None
+                        and _p1_fresh["state"] == _p1id.REGENERATE)
     if _p1_fresh is not None:
         print(f"[phase1] generated L docs: {_p1_fresh['state']} "
               f"({_p1_fresh['reason']}) — {_p1_fresh['why']}")
-    if run_phase1 and p1_mode == "docs" and _p1_fresh is not None \
-            and _p1_fresh["state"] == _p1id.REGENERATE:
+    if _p1_regenerating:
+        # Move the stale docs aside first, so a layer step that fails during
+        # regeneration cannot leave an older producer's doc in place.
+        _moved = _p1id.supersede_docs(
+            project, f"{_p1_fresh['reason']}: {_p1_fresh['why']}")
         advisories.append(
             f"phase1 REGENERATED the generated L docs — "
-            f"{_p1_fresh['reason']}: {_p1_fresh['why']}")
+            f"{_p1_fresh['reason']}: {_p1_fresh['why']}"
+            + (f" (the previous docs are kept at {_moved})" if _moved else ""))
     _p1_stale_why = _stale_generated_docs_note(
-        run_phase1, _force_skip_p1, _p1_fresh,
+        _p1_regenerating or (run_phase1 and p1_mode == "docs"),
+        _p1_fresh, _p1_design_input,
         "--skip-phase1" if args.skip_phase1
+        else "the expert second pass re-extracts nothing"
+        if p1_mode == _P1_MODE_EXPERT_SECOND_PASS
         else "its entry step is past phase 1")
     if _p1_stale_why:
         advisories.append(_p1_stale_why)
@@ -2077,6 +2079,14 @@ def main() -> int:
                 halted_at = "phase1"
     else:
         plan.append(("phase1", "SKIPPED", 0))
+
+    # FX_STALE_LDOCS (review wave8 BLOCKER 2) — the generated docs as phase 1
+    # left them. Anything that changes them from here to the end of this run
+    # is THIS FLOW's doing (phase 2's `restamp_l_doc_skeletons`, analog A8's
+    # rail synth, …), recorded as a derivation before the run ends, so the
+    # next run does not mistake it for a hand edit -- whether or not the
+    # writer went through the `dump` chokepoint, which records it too.
+    _p1_docs_after = _p1id.docs_snapshot(project)
 
     # ---------------- Analog-applicability decision ----------------
     # Single source of truth (ORGANIC-20260606 #459): the analog-track
@@ -2454,6 +2464,17 @@ def main() -> int:
             f"{_pdk_rec['refusal']}: {_pdk_rec.get('reason')} — this run's "
             f"sign-off cannot be re-derived, and benchmark_evidence_publish "
             f"will REFUSE to stage it (see reports/pdk_revision.json)")
+
+    try:
+        _derived = _p1id.record_flow_changes(
+            project, _p1_docs_after, "vibe_ic_one_shot_runner:after-phase1")
+        if _derived:
+            advisories.append(
+                f"generated L doc(s) rewritten by this run after phase 1, "
+                f"recorded as flow derivations: {', '.join(_derived)}")
+    except Exception as _exc:                              # noqa: BLE001
+        advisories.append(f"flow derivations NOT recorded ({_exc}); a later "
+                          f"run may read those rewrites as hand edits")
 
     # ---------------- Aggregate ----------------
     digital_rows = [(n, v, rc) for n, v, rc in plan
