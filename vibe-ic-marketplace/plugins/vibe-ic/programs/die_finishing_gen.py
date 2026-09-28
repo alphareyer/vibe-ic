@@ -49,9 +49,19 @@ Read out of `librelane/steps/klayout.py` in the pinned image, not remembered:
 
   TAKEN  the interface. `KLayout.SealRing.run_generic` is exactly
          `python3 <KLAYOUT_SEALRING_SCRIPT> --input <gds> --output <gds>
-         --die-width <DIE_AREA[2]> --die-height <DIE_AREA[3]>` with PDK_ROOT
-         and PDK in the environment. Four flags; that is the whole contract,
-         and this program uses it unchanged.
+         --die-width <X span> --die-height <Y span>` with PDK_ROOT and PDK in
+         the environment. Four flags; that is the whole contract, and this
+         program uses it unchanged. (To vibeic-eda 0.3.79 upstream passed
+         DIE_AREA[2]/[3], the far corner, equal to the spans only for a die at
+         the origin; from 0.3.83 it passes x1-x0 / y1-y0, which `die_size`
+         here always computed.)
+  NOT TAKEN (reported) upstream's corner move. From 0.3.83, for a die NOT at
+         the origin upstream moves what the script drew to DIE_AREA's
+         lower-left (`place_sealring.py`; `offset_x/offset_y` on its second
+         path). This program does not: the script draws from (0,0). Every
+         DIEAREA in the published corpus is at (0,0) (3 of 3, measured
+         2026-09-28), so it has not been exercised, and the ring verifier is
+         what would see a ring drawn off the die.
   TAKEN  the skip. Upstream: "KLAYOUT_SEALRING_SCRIPT is unset.
          KLayout.SealRing may not be supported for the {PDK} PDK. This step
          will be skipped." Same shape here, PDK named, plus the list of
@@ -703,8 +713,9 @@ def _emit_argv(form: str, runner, script: str, py: str, tech: Optional[str],
 
     `pya-cli` mirrors `KLayout.SealRing.run_generic`; `klayout-rd` mirrors
     `run_ihp_sg13g2`. The width/height ORDER of the second one is upstream's:
-    it passes `width=DIE_AREA[3]` and `height=DIE_AREA[2]`, i.e. transposed
-    against the first. That is reproduced rather than corrected — this program
+    it passes the Y span as `width` and the X span as `height` (DIE_AREA[3]
+    and DIE_AREA[2] to vibeic-eda 0.3.79; upstream now states it is that
+    PDK's own naming), i.e. transposed against the first. That is reproduced rather than corrected — this program
     drives the PDK's script, and quietly disagreeing with the reference caller
     about its own arguments is not a fix, it is a second opinion nobody asked
     for. It is recorded in the report so a PDK integrator can see it.

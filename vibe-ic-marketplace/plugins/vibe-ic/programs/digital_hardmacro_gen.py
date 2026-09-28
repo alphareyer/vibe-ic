@@ -602,6 +602,13 @@ def build_lef_tcl(top: str, gds: str, def_file: str, out_lef: str,
     So: the GDS supplies the GEOMETRY, the DEF supplies the PORTS, and the
     abstraction knobs are upstream's own — `-hide` unless
     `MAGIC_WRITE_FULL_LEF`, plus `-pinonly` when `MAGIC_WRITE_LEF_PINONLY`.
+
+    AN ABSENT CELL IS REFUSED BEFORE IT IS LOADED, as upstream's `lef.tcl`
+    does since vibeic-eda 0.3.83: `gds read` brings a cell into view only when
+    the GDS carries it, and `load` of a cell that does not exist silently
+    creates an EMPTY one — here the DEF read would then hang ports on a cell
+    with no geometry and the write would still succeed. So the script exits 1,
+    naming the cell and the GDS, and no LEF is written.
     """
     opts = []
     if not full_lef:
@@ -614,6 +621,10 @@ def build_lef_tcl(top: str, gds: str, def_file: str, out_lef: str,
             f"# DEF — the GDS-only route yields an abstract with no pin at all.\n"
             f"drc off\n"
             f"gds read {gds}\n"
+            f"if {{ [cellname list exists {top}] == 0 }} {{\n"
+            f"    puts stderr \"\\[ERROR\\] '{top}' is not a cell of {gds}\"\n"
+            f"    exit 1\n"
+            f"}}\n"
             f"load {top}\n"
             f"def read {def_file}\n"
             f"load {top}\n"

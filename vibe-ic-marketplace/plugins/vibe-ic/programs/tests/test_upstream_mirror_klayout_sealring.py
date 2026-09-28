@@ -102,40 +102,109 @@ def test_upstream_second_path_still_exports_the_tool_search_path():
         f"dropped it, one of the two is now wrong.")
 
 
-def test_upstream_generic_path_maps_die_area_indices_to_the_right_dimension():
-    """The mapping this module relies on: index 2 is the WIDTH, index 3 the
-    HEIGHT.
+def _generic_die_args(body: str, rect) -> tuple:
+    """(width, height) upstream's generic path passes for DIE_AREA = rect.
 
-    Upstream declares the variable as the four-corner rectangle "x0 y0 x1 y1",
-    so index 2 is an x and index 3 is a y. The generic path passes them that
-    way round and this module mirrors it.
+    EVALUATED, not pattern-matched: the path has been written two ways --
+    `f"{self.config['DIE_AREA'][2]:f}"` inline (to vibeic-eda 0.3.79), and
+    `die_width, die_height = self.die_dimensions(self.config["DIE_AREA"])`
+    (0.3.83 on) -- and a regex for one shape reads the other as unreadable.
+    The statements of `run_generic` that can be evaluated against a stub
+    `self` (config = {DIE_AREA: rect} plus the class's own staticmethods) are,
+    and the two values after `--die-width`/`--die-height` are read back."""
+    import ast
+    import types
+
+    body = body.split("\n@", 1)[0]    # the NEXT class's decorator
+    cls = next(n for n in ast.parse(body).body
+               if isinstance(n, ast.ClassDef) and n.name == "SealRing")
+    fns = {f.name: f for f in cls.body if isinstance(f, ast.FunctionDef)}
+    gen = fns.get("run_generic")
+    assert gen is not None, "upstream no longer has a generic seal-ring path."
+
+    class StepError(Exception):
+        pass
+
+    g = {"StepError": StepError, "os": os}
+    stub = types.SimpleNamespace(config={"DIE_AREA": rect})
+    for name, f in fns.items():
+        if any(isinstance(d, ast.Name) and d.id == "staticmethod"
+               for d in f.decorator_list):
+            plain = ast.FunctionDef(name=f.name, args=f.args, body=f.body,
+                                    decorator_list=[], returns=None,
+                                    type_comment=None, type_params=[])
+            mod = ast.fix_missing_locations(ast.Module([plain], []))
+            exec(compile(mod, "<upstream>", "exec"), g)
+            setattr(stub, name, g[name])
+    local = {"self": stub}
+    for st in gen.body:
+        if isinstance(st, ast.Assign):
+            try:
+                exec(compile(ast.fix_missing_locations(ast.Module([st], [])),
+                             "<upstream>", "exec"), g, local)
+            except Exception:  # noqa: BLE001 -- a statement about the run
+                pass           # environment, not about the die
+    found = {}
+    for node in ast.walk(gen):
+        if isinstance(node, ast.List):
+            for i, e in enumerate(node.elts[:-1]):
+                if (isinstance(e, ast.Constant)
+                        and e.value in ("--die-width", "--die-height")):
+                    found[e.value] = node.elts[i + 1]
+    out = []
+    for flag in ("--die-width", "--die-height"):
+        if flag not in found:
+            return None
+        try:
+            out.append(float(eval(compile(ast.Expression(found[flag]),
+                                          "<upstream>", "eval"), g, local)))
+        except Exception:  # noqa: BLE001
+            return None
+    return tuple(out)
+
+
+def test_upstream_generic_path_maps_die_area_indices_to_the_right_dimension():
+    """Upstream's width is the die's X SPAN and its height the Y SPAN -- the
+    numbers this module passes (`die_size`: x1-x0, y1-y0 of the DIEAREA).
+
+    Upstream declares DIE_AREA as the four-corner rectangle "x0 y0 x1 y1".
+    To vibeic-eda 0.3.79 its generic path passed DIE_AREA[2] and DIE_AREA[3]
+    -- the far CORNER, equal to the spans only for a die at the origin. From
+    0.3.83 it passes `die_dimensions` = (x1-x0, y1-y0), which is what this
+    module always computed. So the pin is measured on a die NOT at the origin,
+    the one case where "which index" and "which span" differ, and compared
+    against this module's own computation -- not against a remembered index.
 
     THIS PIN IS SCOPED TO THE GENERIC PATH ON PURPOSE. Upstream's OTHER
-    seal-ring path passes the same two indices to `width` and `height` in the
-    OPPOSITE order — measured, and filed as a forked-tool finding rather than
-    asserted here, because pinning it either way would mean this repo either
-    blesses the transposition or reddens over a defect in a path it does not
-    drive. On a square die the two are indistinguishable, which is why it has
-    survived.
+    seal-ring path passes the Y span as `width` and the X span as `height`
+    (upstream now says why: that PDK's own naming). Pinning it either way
+    would bless or redden a path this module does not drive.
     """
     rel = DF.UPSTREAM_MIRROR["upstream"]
     src = _upstream(rel)
     if src is None:
         _skip(rel)
     body = _sealring_body(src.read_text(errors="replace"))
-    generic = body[body.find("def run_generic"):body.find("def run_ihp")]
-    assert generic, f"{src}: upstream no longer has a generic seal-ring path."
+    rect_um = (10.0, 20.0, 110.0, 70.0)          # a die NOT at the origin
+    up = _generic_die_args(body, rect_um)
+    assert up is not None, (
+        f"{src}: could not evaluate what the generic path passes as "
+        f"--die-width and --die-height for DIE_AREA={list(rect_um)}. The "
+        f"mapping is what this module mirrors, so an unreadable one is a "
+        f"finding, not a pass.")
 
-    w = re.search(r'"--die-width",\s*\n?\s*f"\{self\.config\[.DIE_AREA.\]\[(\d)\]',
-                  generic)
-    h = re.search(r'"--die-height",\s*\n?\s*f"\{self\.config\[.DIE_AREA.\]\[(\d)\]',
-                  generic)
-    assert w and h, (
-        f"{src}: could not read which DIE_AREA index the generic path passes "
-        f"as width and as height. The mapping is what this module mirrors, so "
-        f"an unreadable one is a finding, not a pass.")
-    assert (w.group(1), h.group(1)) == ("2", "3"), (
-        f"{src}: upstream's generic path now passes DIE_AREA[{w.group(1)}] as "
-        f"the width and DIE_AREA[{h.group(1)}] as the height. DIE_AREA is "
-        f'declared "x0 y0 x1 y1", so width is index 2 and height is index 3. '
-        f"One of upstream and this module has moved.")
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        d = proj / "phase3" / "stage3" / "pnr"
+        d.mkdir(parents=True)
+        (d / "routed.def").write_text(
+            "UNITS DISTANCE MICRONS 1000 ;\n"
+            "DIEAREA ( 10000 20000 ) ( 110000 70000 ) ;\n")
+        w, h, _src = DF.die_size(proj, proj / "x.gds", None, None)
+    assert (w, h) == (100.0, 50.0), (w, h, _src)
+    assert up == (w, h), (
+        f"{src}: for DIE_AREA={list(rect_um)} upstream's generic path passes "
+        f"--die-width {up[0]} --die-height {up[1]}; this module passes "
+        f"{w} x {h} (the X and Y spans). One of upstream and this module has "
+        f"moved.")
