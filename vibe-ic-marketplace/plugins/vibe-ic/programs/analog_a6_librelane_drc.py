@@ -222,10 +222,16 @@ def run(project: Path, block: str, image: str,
     arm = _Arm(project, image, pdk, pdk_root, work)
 
     def refused(step: str, exc: "lc.Refusal") -> int:
-        rc = _pc.EX_ENV_REFUSED if exc.code in (
+        # A tool the contract STOPPED (no progress, or a probe past its
+        # deadline) never answered: the environment tier with that reason,
+        # never the `FAIL:` a finding about the layout earns.
+        stopped = lc.tool_stop_reason(exc.code)
+        rc = _pc.EX_ENV_REFUSED if stopped or exc.code in (
             "LL_IMAGE_INCAPABLE", "LL_CONFIG_RESOLVE_FAILED") else 1
         record.update({"result": "NOT_MEASURED", "rule": exc.code,
                        "detail": f"{step}: {exc}"})
+        if stopped:
+            record["reason_class"] = stopped
         write_json(out, record)
         tok = _pc.ENV_REFUSED_TOKEN if rc == _pc.EX_ENV_REFUSED else "FAIL:"
         print(f"{tok} {PRODUCER} {step}: {exc}", file=sys.stderr)
