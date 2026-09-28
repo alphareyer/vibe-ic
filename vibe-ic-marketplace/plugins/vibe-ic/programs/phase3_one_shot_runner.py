@@ -59797,7 +59797,9 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
         # composed report is always re-derived from THIS run.
         import librelane_prelayout as _llp
         _ll_reports = _llp.compose_corner_reports(
-            _ll["folder"], per_corner, _classify_corner_from_name)
+            _ll["folder"], per_corner, _classify_corner_from_name,
+            hash_liberty=lambda path: _prelayout_liberty_identity(
+                Path(path), container)[1])
         written.append(str(per_corner))
         pre_pnr.unlink(missing_ok=True)
     elif runner_sdc.is_file():
@@ -59812,7 +59814,10 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
             import librelane_prelayout as _llp
             _arm = project / "phase3/tool_arms/10/librelane/per_corner"
             _llp.compose_corner_reports(_ll["folder"], _arm,
-                                        _classify_corner_from_name)
+                                        _classify_corner_from_name,
+                                        hash_liberty=lambda path:
+                                        _prelayout_liberty_identity(
+                                            Path(path), container)[1])
             notes.append(f"step 10 dual: LibreLane arm reports in "
                          f"{_arm.relative_to(project)}; direct arm published")
     # Compose pre_pnr_timing.rpt from a GENUINE per-corner report (setup-worst
@@ -59822,11 +59827,53 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     pre_pnr = sta_out / "pre_pnr_timing.rpt"
     _pre_nl_sha = _file_sha256(_pl.synth_dir(project) / f"{top}_synth.v")
     _pre_sdc_sha = _file_sha256(runner_sdc)
+    import librelane_prelayout as _llp
+    try:
+        _matrix_rows = json.loads(pvt_path.read_text()).get("corners", [])
+    except (OSError, ValueError, TypeError):
+        _matrix_rows = []
+    _matrix_libs = {}
+    for _row in _matrix_rows:
+        if not isinstance(_row, dict):
+            continue
+        _label = _row.get("label")
+        _selected = _llp.matrix_liberty_path(pvt_path, _row.get("liberty"))
+        _selection = (_row.get("name"), _selected)
+        _matrix_libs[_label] = (_selection if _label not in _matrix_libs
+                                else None)  # duplicate process selection is ambiguous
+    if _ll and _ll_modes["10"] == "librelane":
+        import librelane_prelayout as _llp
+        _active = _llp.pvt_matrix_from_sta_corners(
+            _ll["resolved"], _ll["folder"], _classify_corner_from_name)
+        _pre_libs = {
+            row["label"]: (str(row["liberty"]),
+                           _prelayout_liberty_identity(
+                               Path(row["liberty"]), container)[1], row["name"])
+            for row in _active["corners"]
+            if isinstance(row.get("liberty"), str)
+        }
+    else:
+        _pre_libs = {
+            _classify_corner_from_name(lib.name): _prelayout_liberty_identity(lib, container)
+            for lib in staged_libs
+        }
+    _pvt_selection_ok = all(
+        _matrix_libs.get(corner) == (identity[2], identity[0])
+        for corner, identity in _pre_libs.items())
+    if not _pvt_selection_ok:
+        notes.append("PRELAYOUT_PVT_SELECTION_STALE: pvt_matrix.json does not "
+                     "name the Liberty selection timed by Step 10")
 
     def _current_prelayout_report(body: str) -> bool:
+        _corner_match = re.search(r"(?m)^STA_BASIS_CORNER: (\S+)$", body)
+        _corner = _corner_match.group(1) if _corner_match else None
         return bool(
             _sta_basis.declared_basis(body) == "PRE_LAYOUT"
             and _pre_nl_sha and _pre_sdc_sha
+            and _corner in _pre_libs
+            and _matrix_libs.get(_corner) == (_pre_libs[_corner][2],
+                                               _pre_libs[_corner][0])
+            and _prelayout_report_liberty_matches(body, _corner, _pre_libs[_corner])
             and re.search(r"(?m)^STA_BASIS_NETLIST_SHA256: "
                           + re.escape(_pre_nl_sha) + r"$", body)
             and re.search(r"(?m)^STA_BASIS_SDC_SHA256: "
@@ -59871,7 +59918,7 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
             notes.append(
                 "pre-layout compose REFUSED corner report(s) "
                 + ", ".join(_rejected)
-                + " — they do not declare current PRE_LAYOUT netlist/SDC "
+                + " — they do not declare current PRE_LAYOUT netlist/SDC/Liberty "
                   "identity; an unbound report cannot establish current timing")
         if src is not None:
             pre_pnr.write_text(
@@ -59936,7 +59983,7 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                 try:
                     pre_pnr.replace(_q)
                     notes.append(
-                        "pre_pnr_timing.rpt has stale/absent netlist or SDC "
+                        "pre_pnr_timing.rpt has stale/absent netlist, SDC or Liberty "
                         f"identity and no current corner could replace it; "
                         f"quarantined to {_q.name}; Step 10 is MISSING")
                     if str(pre_pnr) in written:
@@ -59955,7 +60002,7 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     # Step 7's declared SDC is now written in BOTH cases (FX_STEP7_ASIC_SDC),
     # so it is part of the predicate unconditionally.
     ok = runner_sdc.is_file() and pvt_path.is_file() and (
-        canon_sdc.is_file()) and _pre_pnr_ok
+        canon_sdc.is_file()) and _pre_pnr_ok and _pvt_selection_ok
     detail = (f"pre-layout stage-2 sign-off emitted BEFORE PnR: "
               f"{len(written)} artefact(s)"
               + ("; " + "; ".join(notes[-2:]) if notes else ""))
@@ -66200,6 +66247,32 @@ def _reused_report_basis(rpt: Path) -> Tuple[Optional[str], Optional[str]]:
     return (raw, _sta_basis.declared_basis(text))
 
 
+def _prelayout_liberty_identity(lib: Path, container: str) -> Tuple[str, Optional[str], str]:
+    """Identify the bytes OpenSTA reads, including container-resident PDKs.
+
+    Host-staged files are hashed afresh: a same-process retry may follow an
+    edit, so the general PDK hasher's process cache is unsuitable for them.
+    """
+    path = str(lib)
+    host_sha = _file_sha256(lib)
+    if host_sha:
+        return path, host_sha, lib.stem
+    remote_sha = _step_pdk_hasher(container)([path]).get(path)
+    return path, "sha256:" + remote_sha if remote_sha else None, lib.stem
+
+
+def _prelayout_report_liberty_matches(
+        body: str, corner: str,
+        identity: Tuple[str, Optional[str], str]) -> bool:
+    """A cached corner is current only for its actual PVT/library selection."""
+    path, sha, pvt_name = identity
+    return bool(sha and all(re.search(
+        rf"(?m)^STA_BASIS_{field}: {re.escape(value)}$", body)
+        for field, value in (("CORNER", corner), ("LIBERTY", path),
+                             ("LIBERTY_SHA256", sha),
+                             ("PVT_NAME", pvt_name))))
+
+
 # OpenSTA's unresolved-master warning. The phrase "Creating black box" is the
 # stable part across OpenSTA versions; the `Warning 198` number is not matched
 # so a renumbering upstream cannot silently disable this check.
@@ -66299,6 +66372,8 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
     reused_unstamped: List[str] = []
     for lib in libs:
         corner = _classify_corner_from_name(lib.name)
+        _lib_identity = (_prelayout_liberty_identity(lib, container)
+                         if force_prelayout else None)
         rpt = out_dir / f"sta_{corner}.rpt"
         # Existence-only reuse is correct for the post-route caller, but a
         # FORCED pre-layout emit must NOT reuse a stale report left by an
@@ -66371,7 +66446,9 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
                     _inputs_match = bool(
                         _pre_nl_sha and _pre_sdc_sha
                         and f"STA_BASIS_NETLIST_SHA256: {_pre_nl_sha}" in _old_body
-                        and f"STA_BASIS_SDC_SHA256: {_pre_sdc_sha}" in _old_body)
+                        and f"STA_BASIS_SDC_SHA256: {_pre_sdc_sha}" in _old_body
+                        and _prelayout_report_liberty_matches(
+                            _old_body, corner, _lib_identity))
                 except OSError:
                     _inputs_match = False
             if _inputs_match and (not force_prelayout or (basis_norm is not None
@@ -66514,7 +66591,11 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
                 with rpt.open("a") as _sta_out:
                     _sta_out.write(
                         f"STA_BASIS_NETLIST_SHA256: {_pre_nl_sha}\n"
-                        f"STA_BASIS_SDC_SHA256: {_pre_sdc_sha}\n")
+                        f"STA_BASIS_SDC_SHA256: {_pre_sdc_sha}\n"
+                        f"STA_BASIS_CORNER: {corner}\n"
+                        f"STA_BASIS_LIBERTY: {_lib_identity[0]}\n"
+                        f"STA_BASIS_LIBERTY_SHA256: {_lib_identity[1] or 'UNAVAILABLE'}\n"
+                        f"STA_BASIS_PVT_NAME: {_lib_identity[2]}\n")
             # The corner LINKED and its report survives, so now it
             # is an artefact this run can be held to.
             _log_surviving_artefact(
@@ -77802,7 +77883,9 @@ def main() -> int:
                     _pre_matrix, _pl.sta_dir(project) / "per_corner",
                     _pre_gate_path,
                     netlist=_pl.synth_dir(project) / f"{effective_top}_synth.v",
-                    sdc=_pl.pnr_dir(project) / "constraint.sdc")
+                    sdc=_pl.pnr_dir(project) / "constraint.sdc",
+                    hash_liberty=lambda path: _prelayout_liberty_identity(
+                        Path(path), args.container)[1])
             except (OSError, ValueError, TypeError) as exc:
                 _pre_gate = {"verdict": "NOT_MEASURED",
                              "reason": f"PRE_PNR_GATE_INPUT_UNREADABLE:{type(exc).__name__}",

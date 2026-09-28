@@ -76,9 +76,24 @@ _SETUP_PATH = re.compile(
     re.M | re.I)
 
 
+def matrix_liberty_path(pvt_matrix: Path, selected: Any) -> Optional[str]:
+    """Resolve a matrix Liberty against the project whose Step 7 wrote it."""
+    if not isinstance(selected, str) or not selected:
+        return None
+    path = Path(selected)
+    if not path.is_absolute():
+        project = (pvt_matrix.parents[3]
+                   if pvt_matrix.parent.name == "constraints"
+                   and pvt_matrix.parent.parent.name == "stage2"
+                   else pvt_matrix.parent)
+        path = project / path
+    return str(path)
+
+
 def pre_pnr_setup_gate(pvt_matrix: Path, reports: Path, output: Path,
                        *, netlist: Optional[Path] = None,
-                       sdc: Optional[Path] = None) -> dict:
+                       sdc: Optional[Path] = None,
+                       hash_liberty: Optional[Callable[[str], Optional[str]]] = None) -> dict:
     """BLOCKING before PnR: a measured negative setup path returns FAIL.
 
     Only a PRE_LAYOUT report at the declared setup process corner may admit
@@ -129,6 +144,32 @@ def pre_pnr_setup_gate(pvt_matrix: Path, reports: Path, output: Path,
                       "corner": setup, "path_classes": [], "setup_slack_ns": None,
                       "expected": expected,
                       "reported": actual.group(1) if actual else None}
+            write_json(output, result)
+            return result
+    # The production caller supplies both netlist and SDC. Bind its setup
+    # slack to the matrix's current PVT selection and actual Liberty bytes as
+    # well; an old positive report cannot admit routing after a library edit.
+    if netlist is not None or sdc is not None:
+        selected_path = matrix_liberty_path(pvt_matrix, setup.get("liberty"))
+        expected_sha = None
+        if selected_path is not None:
+            try:
+                expected_sha = (hash_liberty(selected_path) if hash_liberty
+                                else "sha256:" + digest(Path(selected_path)))
+            except OSError:
+                pass
+        expected = {"CORNER": "SS", "PVT_NAME": str(setup.get("name") or ""),
+                    "LIBERTY": selected_path or "",
+                    "LIBERTY_SHA256": expected_sha or ""}
+        reported = {}
+        for field in expected:
+            match = re.search(rf"(?m)^STA_BASIS_{field}:[ \t]*(\S+)[ \t]*$", body)
+            reported[field] = match.group(1) if match else None
+        if not all(expected.values()) or reported != expected:
+            result = {"verdict": "NOT_MEASURED",
+                      "reason": "SS_REPORT_LIBERTY_IDENTITY_STALE",
+                      "corner": setup, "path_classes": [], "setup_slack_ns": None,
+                      "expected": expected, "reported": reported}
             write_json(output, result)
             return result
     paths = []
@@ -444,7 +485,9 @@ def judge_slack(folder: Path, output: Path) -> dict:
 
 
 def compose_corner_reports(folder: Path, out_dir: Path,
-                           classify: Callable[[str], str]) -> dict[str, Path]:
+                           classify: Callable[[str], str],
+                           hash_liberty: Optional[Callable[[str], Optional[str]]] = None,
+                           ) -> dict[str, Path]:
     """Publish STAPrePNR corner reports under the step-10 per-corner names.
 
     The body is the tool's own path tables; the summary lines transcribe its
@@ -483,6 +526,14 @@ def compose_corner_reports(folder: Path, out_dir: Path,
                    for lib in (group if isinstance(group, list) else [group])]
         if len(liberty) == 1:
             summary.append(f"STA_BASIS_LIBERTY: {liberty[0]}")
+            try:
+                lib_sha = (hash_liberty(str(liberty[0])) if hash_liberty
+                           else "sha256:" + digest(Path(liberty[0])))
+            except OSError:
+                lib_sha = None
+            summary.append(f"STA_BASIS_LIBERTY_SHA256: {lib_sha or 'UNAVAILABLE'}")
+        summary.append(f"STA_BASIS_CORNER: {label}")
+        summary.append(f"STA_BASIS_PVT_NAME: {corner.name}")
         if state.get("nl"):
             summary.append(f"STA_BASIS_NETLIST: {state['nl']}")
             source = Path(str(state["nl"]))
