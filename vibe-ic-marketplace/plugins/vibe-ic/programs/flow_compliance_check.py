@@ -106,6 +106,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor
 import _path_layout as _pl
 import _tapeout_declaration as _td_route
+import eda_report_audit as _era  # shared completed-route zero receipt validator
 import _gate_authorship as _ga
 import _auditor_write as _aw   # R-0915-168 (the one auditor writer)
 import _reused_ip_predicate as _reused_ip
@@ -2244,8 +2245,9 @@ def _live_artefact_state(p: Path) -> Tuple[bool, str]:
     the 20 real run directories on this host that carry a `steps/` tree, ZERO
     of the 92-106 declared outputs per run is a symlink, so the widening
     costs nothing measurable and the narrowing would have been an unmeasured
-    risk taken for free. A DANGLING link and a ZERO-BYTE file are not
-    artefacts either way.
+    risk taken for free. A dangling link and an uncorroborated zero-byte file
+    are not artefacts. A router DRC zero is credited only with its current
+    completed-route receipt.
     """
     try:
         st = os.lstat(str(p))
@@ -2264,7 +2266,11 @@ def _live_artefact_state(p: Path) -> Tuple[bool, str]:
         return (tst.st_size > 0), (
             "symlink_alias" if tst.st_size > 0 else "symlink_to_empty_file")
     if _stat.S_ISREG(st.st_mode):
-        return (st.st_size > 0), ("file" if st.st_size > 0 else "empty_file")
+        if st.st_size > 0:
+            return True, "file"
+        if _era._empty_router_drc_receipt(p) is not None:
+            return True, "receipted_empty_zero"
+        return False, "empty_file"
     if _stat.S_ISDIR(st.st_mode):
         # `_glob_first` accepts a directory match today; keeping that keeps
         # this resolver monotone.
@@ -14835,7 +14841,9 @@ def _evidence_integrity_scan(project: Path,
         p = Path(rel_s) if rel_s.startswith("/") else project / rel_s
         try:
             if p.stat().st_size == 0:
-                broken.append(f"{rel} (0 bytes)")
+                if _era._empty_router_drc_receipt(p) is not None:
+                    continue
+                broken.append(f"{rel} (0 bytes, no current zero receipt)")
                 continue
             # #525 perf — the old `read_text()[:8000]` read the ENTIRE
             # file (evidence lists routinely include multi-hundred-MB
