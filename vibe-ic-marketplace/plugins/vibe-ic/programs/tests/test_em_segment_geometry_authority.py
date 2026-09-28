@@ -151,7 +151,8 @@ def test_diagonal_rail_to_abutting_stdcell_port_uses_real_neck(tmp_path):
     edge = report["worst_segments"][0]
     assert edge["width_um"] > 0
     assert edge["width_um"] == pytest.approx(0.3)
-    assert set(edge["geometry_sources"]) == {"special_wire", "stdcell_pg_port"}
+    assert set(edge["geometry_sources"]) == {
+        "special_wire", "stdcell_pg_port", "same_net_union_manhattan_path"}
 
 
 def test_diagonal_rail_to_port_with_gap_stays_not_measured(tmp_path):
@@ -183,7 +184,8 @@ def test_two_ports_joined_by_one_real_followpin_rail_use_contact_width(tmp_path)
     assert verdict == "PASS"
     edge = report["worst_segments"][0]
     assert edge["width_um"] == pytest.approx(0.3)
-    assert set(edge["geometry_sources"]) == {"special_wire", "stdcell_pg_port"}
+    assert set(edge["geometry_sources"]) == {
+        "special_wire", "stdcell_pg_port", "same_net_union_manhattan_path"}
 
 
 def test_virtual_diagonal_across_abutting_pad_rails_and_port(tmp_path):
@@ -203,8 +205,8 @@ def test_virtual_diagonal_across_abutting_pad_rails_and_port(tmp_path):
 
 
 @pytest.mark.parametrize("current, expected", [
-    (0.00001, "PASS"), (0.0001, "FAIL")])
-def test_virtual_diagonal_uses_minimum_real_contact_width(tmp_path, current, expected):
+    (0.00001, "PASS"), (0.0001, "PASS"), (0.0004, "NOT_MEASURED")])
+def test_virtual_diagonal_uses_union_cross_section_and_bounds(tmp_path, current, expected):
     csv, jmax, geom = _fixture(
         tmp_path, "VDD\tMetal3\t0\t10\t4\t11\tspecial_wire\n"
                   "VDD\tMetal3\t1\t8\t1.3\t10\tstdcell_pg_port\n"
@@ -217,10 +219,13 @@ def test_virtual_diagonal_uses_minimum_real_contact_width(tmp_path, current, exp
                                  pg_geometry_path=geom)
     assert verdict == expected
     edge = report["summary"]["conservative_width_bounds"][0]
-    assert edge["width_um"] == pytest.approx(0.1)
+    width = edge.get("width_um", edge.get("width_lower_bound_um"))
+    assert width == pytest.approx(0.3)
     assert [row["width_um"] for row in edge["width_candidate_contacts"]] == (
         pytest.approx([0.1, 0.3]))
-    assert edge["width_bound"] == "minimum_proven_same_net_contact"
+    assert edge["width_bound"] == "same_net_union_manhattan_path"
+    if expected == "NOT_MEASURED":
+        assert edge["reason"] == "metal_upper_bound_over_jmax_without_exact_width"
 
 
 def test_virtual_diagonal_point_touch_proves_no_conductor_width(tmp_path):

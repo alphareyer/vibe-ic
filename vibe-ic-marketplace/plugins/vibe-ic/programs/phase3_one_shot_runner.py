@@ -70875,7 +70875,10 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     for old in (em_geometry, out_dir / "em_pg_geometry_subject.json",
                 out_dir / "em_segments.csv", out_dir / "em_openroad_density.json",
                 out_dir / "em_openroad_ab.json", _em_limits,
+                out_dir / "em_psm_via_resistors.tsv",
+                out_dir / "em_psm_via_resistors_subject.json",
                 *(out_dir / f"em_segments_{net}.csv" for net in psm_nets),
+                *(out_dir / f"em_psm_{net}.spice" for net in psm_nets),
                 *(out_dir / f"em_openroad_density_{net}.csv" for net in psm_nets)):
         try:
             old.unlink()
@@ -70904,6 +70907,7 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     psm_blocks = []
     for net in psm_nets:
         _net_csv = f"{out_dir_c}/em_segments_{net}.csv"
+        _net_spice = f"{out_dir_c}/em_psm_{net}.spice"
         _density_csv = f"{out_dir_c}/em_openroad_density_{net}.csv"
         _density_tcl = (
             f'if {{[catch {{check_current_density -net {net} '
@@ -70916,7 +70920,11 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
             f'if {{[catch {{analyze_power_grid -net {net} -enable_em '
             f'-em_outfile {_net_csv}}} _psm_err]}} {{\n'
             f'  puts "PSM_NONFATAL {net}: $_psm_err"\n'
-            f'}} else {{\n{_density_tcl}}}\n')
+            f'}} else {{\n{_density_tcl}'
+            f'  if {{[catch {{write_pg_spice -net {net} {_net_spice}}} '
+            f'_psm_spice_err]}} {{\n'
+            f'    puts "PSM_VIA_RESISTORS_UNAVAILABLE {net}: $_psm_spice_err"\n'
+            f'  }}\n}}\n')
     # #362 — select the liberty's own operating condition when it declares
     # one but names no default. Without this PSM cannot determine the supply
     # voltage and aborts PSM-0079, taking static IR and EM with it. Emitted
@@ -71041,6 +71049,25 @@ catch {{set_wire_rc -clock -layer {mp}5}}
                     _n += 1
                 _psm_segment_counts[_net] = _n
     os.replace(_temp_name, _merged)
+    _spices = {net: out_dir / f"em_psm_{net}.spice" for net in psm_nets}
+    if _header_written and _spices and all(p.is_file() for p in _spices.values()):
+        try:
+            _compact = _emcd.compact_psm_spice_vias(_spices)
+            _resistors = out_dir / "em_psm_via_resistors.tsv"
+            _aa.write_text(_resistors, _compact)
+            _aa.write_text(out_dir / "em_psm_via_resistors_subject.json",
+                           json.dumps({
+                               "schema": "em_psm_via_resistors/1",
+                               "def_sha256": hashlib.sha256(def_file.read_bytes()).hexdigest(),
+                               "em_segments_sha256": hashlib.sha256(
+                                   _merged.read_bytes()).hexdigest(),
+                               "resistors_file": _resistors.name,
+                               "resistors_sha256": hashlib.sha256(
+                                   _resistors.read_bytes()).hexdigest(),
+                               "producer": "OpenROAD PSM write_pg_spice after analyze_power_grid",
+                           }, indent=2) + "\n")
+        except (OSError, ValueError) as _resistor_error:
+            notes.append(f"PSM via-resistor proof unavailable: {_resistor_error}")
     _density_rows = {}
     for _net in psm_nets:
         _path = out_dir / f"em_openroad_density_{_net}.csv"
