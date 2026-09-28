@@ -33,19 +33,21 @@ from _stated_eda_image import state_the_image  # noqa: E402
 STEP_DIR = PROGRAMS / 'librelane_plugins' / 'librelane_plugin_vibeic'
 
 
+def _tool_written_native_scene(ctx, repair_state, out_dir):
+    sta = repair_state.parent.parent / '04-openroad-stapostpnr/state_out.json'
+    metrics = json.loads(sta.read_text())['metrics']
+    summary = prr.summarize(metrics, ctx['corners'])
+    return {k: summary[k] for k in ('setup_ws', 'hold_ws',
+                                   'setup_ws_min', 'hold_ws_min')}
+
+
 @pytest.fixture(autouse=True)
 def _stated_image(monkeypatch):
     # the identity is stated, never asked of this host (no docker in the image)
     state_the_image(monkeypatch)
     for name in ('VIBEIC_LIBRELANE_IMAGE', 'VIBEIC_LIBRELANE_PDK_ROOT'):
         monkeypatch.delenv(name, raising=False)
-    def tool_written_native_scene(ctx, repair_state, out_dir):
-        sta = repair_state.parent.parent / '04-openroad-stapostpnr/state_out.json'
-        metrics = json.loads(sta.read_text())['metrics']
-        summary = prr.summarize(metrics, ctx['corners'])
-        return {k: summary[k] for k in ('setup_ws', 'hold_ws',
-                                       'setup_ws_min', 'hold_ws_min')}
-    monkeypatch.setattr(native, 'measure', tool_written_native_scene)
+    monkeypatch.setattr(native, 'measure', _tool_written_native_scene)
 REGISTRY = PLUGIN / 'config' / 'ppa_actuator_registry.yaml'
 CORNERS = ['nom_tt_025C_5v00', 'nom_ss_125C_4v50', 'nom_ff_n40C_5v50']
 
