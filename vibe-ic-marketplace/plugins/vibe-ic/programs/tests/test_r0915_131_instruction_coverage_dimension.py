@@ -209,6 +209,19 @@ def test_a_tally_from_a_case_that_did_not_pass_is_refused_and_named(tmp_path):
     assert "did not execute and pass" in r["refusals"][0]["why"]
 
 
+def test_a_tally_from_an_old_l10_record_is_refused(tmp_path):
+    p = _project(tmp_path, goals=[GOAL_INSTRUCTION],
+                 transcripts={"rv32i_40": EMIT_FULL},
+                 states={"rv32i_40": "PASS"})
+    l10 = p / "phase1" / "generated_docs" / "L10_TEST_CASES.json"
+    doc = json.loads(l10.read_text())
+    doc["cases"][0]["revision"] = "changed declaration"
+    l10.write_text(json.dumps(doc))
+    r = M.measure(p)
+    assert r["totals"] == {}, r
+    assert r["refusals"] and "execution_record_l10_hash_mismatch" in r["refusals"][0]["why"]
+
+
 def test_a_binding_goal_with_no_tally_stays_NOT_MEASURED_with_the_reason(
         tmp_path):
     p = _project(tmp_path, goals=[GOAL_INSTRUCTION],

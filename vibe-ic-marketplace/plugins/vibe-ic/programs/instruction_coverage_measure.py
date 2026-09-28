@@ -158,7 +158,8 @@ def _emissions(project: Path, dimension: str = DIMENSION) -> Tuple[
     A contribution is a tally from a case that EXECUTED AND PASSED. Anything
     else is a refusal that names itself, so the receipt shows what was looked
     at rather than only what was counted."""
-    record = _l10x.load_record(project)
+    l10 = _pl.generated_docs_dir(project) / "L10_TEST_CASES.json"
+    record = _l10x.load_record(project, l10)
     contributions: List[dict] = []
     refusals: List[dict] = []
     for case_id in _contributing_case_ids(project):

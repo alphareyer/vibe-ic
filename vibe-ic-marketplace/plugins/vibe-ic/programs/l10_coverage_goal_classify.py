@@ -373,9 +373,19 @@ def measure_scenario_goal(case: dict, stated: float, rows: Sequence[dict],
             not_run.append(f"{c} ({why})")
     out.update(passed=passed, failed=failed)
     if not_run:
-        out.update(verdict=NOT_MEASURED, why=(
-            f"case {name!r}: {len(not_run)} of {len(bound)} bound case(s) did "
-            f"not run their own oracle: {'; '.join(not_run[:4])}"))
+        # Missing cases can still raise the final rate, but cannot erase a
+        # failure that already makes the stated threshold unreachable.
+        best_possible = 100.0 * (len(passed) + len(not_run)) / len(bound)
+        unreachable = best_possible < stated
+        out.update(
+            verdict=FAIL if unreachable else NOT_MEASURED,
+            best_possible_pct=best_possible,
+            why=(f"case {name!r}: best possible pass rate is "
+                 f"{best_possible:g}% vs the {stated:g}% stated; "
+                 f"{len(not_run)} of {len(bound)} bound case(s) did not run "
+                 f"their own oracle: {'; '.join(not_run[:4])}"
+                 + (f"; failed: {', '.join(failed)}" if failed else "")),
+        )
         return out
     rate = 100.0 * len(passed) / len(bound)
     out["achieved_pct"] = rate
