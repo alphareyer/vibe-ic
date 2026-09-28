@@ -267,6 +267,9 @@ def _stage_one_input(project: Path) -> None:
     (project / "input").mkdir(parents=True, exist_ok=True)
     (project / "input" / "phase1_prompt.md").write_text(
         "# a 4-bit up counter with a synchronous reset\n")
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(project, "ic")
 
 
 def test_real_orchestrator_run_leaves_the_tree(tmp_path):

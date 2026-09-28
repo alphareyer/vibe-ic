@@ -1386,7 +1386,8 @@ def _name_the_sidecar_this_pass_wrote(project: Path, summary: Dict[str, Any],
             f"{_pl.COVERAGE_ONLY_SIDECAR_REL} could not be read to name it")
 
 
-def run_second_pass_only(project: Path, ic_name: str) -> int:
+def run_second_pass_only(project: Path, ic_name: str,
+                         route: Optional[str]) -> int:
     """PASS 2 of the Phase-1 expert hand-off, and NOTHING else (#2204).
 
     `phase1_expert_parse_track` ends its first pass by telling the operator to
@@ -1406,6 +1407,10 @@ def run_second_pass_only(project: Path, ic_name: str) -> int:
     own report in order to close a hand-off. The prior summary is carried
     forward and only the fields THIS pass re-measured are rewritten.
     """
+    route_refusal = _delivery_route.admit(project, route)
+    if route_refusal:
+        print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
+        return 2
     print("[phase1] EXPERT SECOND PASS — consuming the delivered IC-Expert "
           "answer; the doc-extraction track is NOT re-run")
     reports = project / "reports"
@@ -1742,7 +1747,7 @@ def main() -> int:
     # this entry exists to read one delivered answer and record what it made
     # of it, so it runs the second track alone and re-runs nothing.
     if args.second_track_only:
-        return run_second_pass_only(project, args.ic_name)
+        return run_second_pass_only(project, args.ic_name, args.route)
     # PASS 1 BEGINS HERE, so this is where an EARLIER pass's coverage-only sidecar stops being
     # this project's answer. R-0915-160. Below the second-pass short-circuit on purpose: the
     # second pass carries pass 1's sidecar and must not erase it. See

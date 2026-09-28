@@ -66,6 +66,7 @@ import _p1_identity_fixture  # noqa: E402  FX_STALE_LDOCS
 import phase1_one_shot_runner as P1           # noqa: E402
 import phase1_expert_parse_track as TRACK     # noqa: E402
 import _path_layout as _pl                    # noqa: E402
+from _route_fixture import stage_owner_route  # noqa: E402
 from _ai_judgement_fixture import sign as _sign_ai_fixture  # noqa: E402
 
 #: WHERE PASS 1's RECORD LIVES, asked of the router. R-0915-151 moved
@@ -126,6 +127,8 @@ def _project(tmp_path: Path, name: str, *, l_docs: int = 28,
     p = tmp_path / name
     (p / "input" / "docs").mkdir(parents=True)
     (p / "input" / "docs" / "spec.md").write_text(_INPUT_DOC)
+    # owner route rule 2026-09-28 (ICROUTE)
+    stage_owner_route(p, "ic")
     gd = p / "phase1" / "generated_docs"
     gd.mkdir(parents=True)
     for i in range(1, l_docs + 1):
@@ -298,7 +301,7 @@ def test_the_second_pass_runs_the_second_track_and_re_extracts_nothing(
 
     monkeypatch.setattr(P1, "run_phase1_second_track", _fake_second_track)
     _sign_ai_fixture(p, "D1")
-    rc = P1.run_second_pass_only(p, "UNNAMED_CHIP")
+    rc = P1.run_second_pass_only(p, "UNNAMED_CHIP", route="ic")
 
     assert rc == 0
     assert calls == [p], "the second track is the ONE thing this pass runs"
@@ -443,7 +446,8 @@ def test_the_dispatched_argv_actually_consumes_the_answer(tmp_path):
 
     cp2 = subprocess.run(
         [sys.executable, str(_PROGRAMS / "phase1_one_shot_runner.py"),
-         str(p), "--ic-name", "UNNAMED_CHIP", "--second-track-only"],
+         str(p), "--ic-name", "UNNAMED_CHIP", "--second-track-only",
+         "--route", "ic"],
         capture_output=True, text=True)
     assert cp2.returncode == 0, (cp2.stdout[-1500:], cp2.stderr[-1500:])
 
@@ -470,7 +474,7 @@ def _invoke_lifecycle(project, label, *, track=False, first_pass=False,
     if not track:
         argv += ["--ic-name", "review_counter"]
         if not first_pass:
-            argv += ["--second-track-only"]
+            argv += ["--second-track-only", "--route", "ic"]
     if extract_rc is not None:
         # Only the extraction delegate is a seam. main(), preflight, route,
         # expert subprocess, summary and CLI return path are the real code.
@@ -593,6 +597,8 @@ def test_changed_consumed_answer_reenters_but_mtime_alone_does_not(tmp_path):
 def test_actual_first_pass_failure_survives_consumption(tmp_path):
     p = tmp_path / "no_input"
     p.mkdir()
+    # owner route rule 2026-09-28 (ICROUTE)
+    stage_owner_route(p, "ic")
     first = _invoke_lifecycle(p, "01_no_input", first_pass=True)
     # R-0915-85 — rc 1 is unchanged and is what this case is about: a first
     # pass over a project with NO INPUT is not green. The WORD is NOT_MEASURED,
