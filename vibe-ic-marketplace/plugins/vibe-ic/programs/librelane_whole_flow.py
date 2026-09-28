@@ -358,6 +358,21 @@ def netlist_identity(project: Path, proven_netlist: Path) -> Dict[str, Any]:
             "proven_sha256": proven, "consumed_sha256": rec["layout_netlist_sha256"]}
 
 
+def import_completed_segments(project: Path, segment1: Path, segment2: Path,
+                              *, importer=None) -> Dict[str, Any]:
+    """Atomically import the two completed external runs through W6.
+
+    This is intentionally a thin call-through: W6 owns the run-log checks,
+    manifest schema, copy journal and per-view provenance.  The driver only
+    supplies the ordered, already-completed segment directories.
+    """
+    if importer is None:
+        import librelane_import as _importer
+        importer = _importer.import_segments
+    return importer(Path(project), [(Path(segment1), SEGMENT1_LAST),
+                                     (Path(segment2), None)])
+
+
 # ── segment configs, from the contract's emitters ──────────────────────────
 
 def _write_config(out: Path, config: dict, sources: dict) -> Path:

@@ -216,6 +216,19 @@ def test_no_handoff_is_not_measured(project):
     assert W.netlist_identity(project, project / "cfg.json")["verdict"] == "NOT_MEASURED"
 
 
+def test_completed_segments_use_w6_once_and_in_order(project):
+    seen = []
+    def importer(proj, segments):
+        seen.extend((proj, segments))
+        return {"imported": True}
+    got = W.import_completed_segments(project, project / "runs" / "segment1",
+                                      project / "runs" / "segment2", importer=importer)
+    assert got == {"imported": True}
+    assert seen[0] == project
+    assert seen[1] == [(project / "runs" / "segment1", W.SEGMENT1_LAST),
+                       (project / "runs" / "segment2", None)]
+
+
 def _pads(project, rows):
     path = project / W.CHIP_TOP_RECORD_REL
     path.parent.mkdir(parents=True, exist_ok=True)
