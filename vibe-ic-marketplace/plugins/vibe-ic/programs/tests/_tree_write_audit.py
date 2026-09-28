@@ -105,7 +105,7 @@ _EV = {
     "os.mkfifo": ((0, 2, False),), "os.mknod": ((0, 3, False),),
 }
 import threading as _th
-_busy = [False]
+_thread_state = _th.local()
 
 
 def _rel(p, dir_fd=None, follow=True):
@@ -172,10 +172,10 @@ def _log(ev, rel):
 
 
 def _hook(ev, args):
-    if _busy[0]:
+    if getattr(_thread_state, "busy", False):
         return
     try:
-        _busy[0] = True
+        _thread_state.busy = True
         if ev == "open":
             path, mode, flags = (list(args) + [None, None, None])[:3]
             if isinstance(path, int):
@@ -215,7 +215,7 @@ def _hook(ev, args):
     except Exception:
         pass
     finally:
-        _busy[0] = False
+        _thread_state.busy = False
 
 
 if _ROOT and _LOG:
