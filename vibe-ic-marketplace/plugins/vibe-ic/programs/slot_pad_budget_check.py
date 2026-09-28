@@ -1575,8 +1575,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             _groups_unresolved = list(_ring.get("groups_unresolved") or [])
             _renames_rejected = list(
                 _ring.get("renamed_interfaces_rejected") or [])
+            _splits_rejected = list(
+                _ring.get("exposed_output_splits_rejected") or [])
             _fits = (_inv["unbonded_count"] == 0 and not _two_sides
-                     and not _groups_unresolved)
+                     and not _groups_unresolved and not _splits_rejected)
             # THE ARITHMETIC, STATED (R-0915-101): pads owed, pads the ring
             # places, and the supply pair the ring must also carry. The supply
             # COUNT is an obligation this gate states and does NOT decide on:
@@ -1644,6 +1646,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     ("source", "heading", "by_side", "groups",
                      "groups_unresolved", "renamed_interfaces",
                      "renamed_interfaces_rejected",
+                     "exposed_output_splits", "exposed_output_splits_rejected",
                      "nets_on_two_sides", "documents_scanned",
                      "documents_unreadable", "parameter_defaults")
                     if k in _derived}
@@ -1676,6 +1679,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                                + ", ".join(r["reasons"])
                                for r in _renames_rejected[:4])
                            if _renames_rejected else ""))
+                if _splits_rejected:
+                    _why.append(
+                        f"{len(_splits_rejected)} declared exposed output "
+                        "split(s) were rejected by the selected-core and L9 "
+                        "interface check (EXPOSED_OUTPUT_SPLIT_INVALID at step "
+                        f"{OWN_RING_STEP}): "
+                        + "; ".join(str(row.get("reasons"))
+                                    for row in _splits_rejected[:4]))
                 rep["reason"] = "; ".join(_why)
             rc = rep["rc"]
 

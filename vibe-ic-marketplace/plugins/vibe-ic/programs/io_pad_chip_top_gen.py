@@ -1152,6 +1152,28 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
 
     ports, not_implemented = _drop_unimplemented_optional_ports(
         project, _read_top_ports(project))
+    selected_core = _implemented_core_ports(project)
+    splits, rejected_splits = LPP.accepted_exposed_output_splits(
+        project, selected_core[1] if selected_core else None)
+    if rejected_splits:
+        rec["exposed_output_splits_rejected"] = rejected_splits
+        raise Refusal("EXPOSED_OUTPUT_SPLIT_INVALID",
+                      "a declared extra output is not a same-width output "
+                      "of the selected core and L9 carrier: "
+                      + json.dumps(rejected_splits, sort_keys=True))
+    if splits:
+        implemented_by_name = {str(p["name"]): p for p in selected_core[1]}
+        for _carrier, targets in splits:
+            for name in sorted(targets):
+                width = int(implemented_by_name[name]["width"])
+                ports.append({"name": name, "direction": "output",
+                              "mode": "output", "width": width,
+                              "msb": width - 1, "lsb": 0,
+                              "evidence": "phase2/stage1/rtl/SOURCE_MANIFEST.json",
+                              "extraction_strategy": "authored_manifest_exposed_output"})
+        rec["exposed_output_splits"] = [
+            {"l9": sorted(carrier), "rtl": sorted(targets)}
+            for carrier, targets in splits]
     optional_absent = [d for d in not_implemented if d.get("optional") is True]
     doc_only_absent = [d for d in not_implemented if d not in optional_absent]
     if optional_absent:
@@ -1178,9 +1200,8 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
     # SOURCE_MANIFEST pairs, read by the same function step 2 reads them with.
     # Only a pair phase 2's spec_conformance_check would accept counts
     # (`accept_renames`); a rejected one is recorded with its reasons.
-    _selected = _implemented_core_ports(project)
     renames, rejected_renames = LPP.accepted_renames(
-        project, _selected[1] if _selected else None)
+        project, selected_core[1] if selected_core else None)
     if renames:
         rec["renamed_interfaces"] = [
             {"l9": sorted(l9), "rtl": sorted(rtl)} for l9, rtl in renames]
@@ -1191,7 +1212,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
     if rejected_renames:
         rec["renamed_interfaces_rejected"] = rejected_renames
     grouped, group_records = _resolve_declared_pad_groups(
-        placement, functional_ports, renames=renames)
+        placement, functional_ports, renames=renames + splits)
     if group_records:
         rec["pad_group_resolution"] = group_records
     unresolved_groups = [r for r in group_records if not r["resolved_nets"]]
