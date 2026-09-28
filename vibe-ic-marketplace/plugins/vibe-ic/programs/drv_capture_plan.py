@@ -84,8 +84,7 @@ def _clock_io_values(sdc: str) -> tuple[float | None, float | None]:
     return period, io_delay
 
 
-def _scene_files(env: dict, root: Path, pdk: str, pvt: str,
-                 macro_lib: Path) -> tuple[list[dict], list[dict]]:
+def _scene_files(env: dict, root: Path, pdk: str, pvt: str) -> tuple[list[dict], list[dict]]:
     libs = []
     lefs = []
     for key in ("CELL_LIBS", "PAD_LIBS"):
@@ -93,8 +92,6 @@ def _scene_files(env: dict, root: Path, pdk: str, pvt: str,
         selected = [_pdk_path(value, root, pdk) for value in paths if pvt in value]
         for path in selected:
             libs.append({"name": path.stem, **_ref(path)})
-    if macro_lib.is_file():
-        libs.append({"name": macro_lib.stem, **_ref(macro_lib)})
     for key in ("CELL_LEFS", "PAD_LEFS", "MACRO_LEFS"):
         for value in re.findall(r"/[^\s\"\\]+\.lef\b", env.get(key, "")):
             path = _pdk_path(value, root, pdk)
@@ -289,8 +286,11 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
         if signoff_sdc is not None and sdc != signoff_sdc:
             raise ValueError("scene sign-off SDC differs")
         signoff_sdc = sdc
-        macro = _run_path(project, state["lib"][actual_name])
-        linked, lefs = _scene_files(env, root, pdk, pvt, macro)
+        # state["lib"] is STAPostPNR's generated top Liberty output. It was
+        # not linked as an input by this scene; only the environment's CELL_LIBS
+        # and PAD_LIBS were read into STA.
+        generated_liberty = _run_path(project, state["lib"][actual_name])
+        linked, lefs = _scene_files(env, root, pdk, pvt)
         for item in linked:
             existing = liberties.setdefault(item["name"], item)
             if existing != item:
@@ -299,6 +299,7 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
         spef = _run_path(project, state["spef"][rc + "_*"])
         scenes.append({"name": name, "mode": "functional", "rc_corner": rc,
                        "spef": _ref(spef), "spef_layout_sha256": artifacts["def"]["sha256"],
+                       "generated_top_liberty": _ref(generated_liberty),
                        "liberty": linked[0]["name"], "linked_liberties": linked,
                        "linked_lefs": lefs,
                        "positive_control_limits": {"max_fanout": 1,
