@@ -27,6 +27,7 @@ new interface is called), so a red on it is the leak, not a refusal.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -86,14 +87,42 @@ CASES = [
     ("test_flow_dashboard_web.py", ["flow_dashboard_data"]),
     # `importlib.reload`: same object, every attribute rebound
     ("test_phase2_issue13_null_crc_attribute_error.py", ["aid_class_rtl_gen"]),
+    # a file whose OWN view replaces the entry, and whose test also
+    # monkeypatches it: the own view installed outside that monkeypatch was
+    # undone first, and monkeypatch's undo then wrote the file's copy back
+    # (review of the per-module own view)
+    ("test_issue559_drift_check_rule_b_blindspot.py", ["flow_compliance_check"]),
 ]
 
 
-def _pytest(*paths: Path) -> subprocess.CompletedProcess:
+#: The suite's own conftest, loaded as a plugin under a name of its own, for a
+#: synthetic test file that lives outside programs/tests (pytest applies a
+#: conftest only below its directory, and `-p conftest` would resolve to a
+#: different file of that name).
+_CONFTEST_AS_PLUGIN = '''\
+import importlib.util, sys
+_spec = importlib.util.spec_from_file_location(
+    "vibeic_programs_tests_conftest", {conftest!r})
+_mod = importlib.util.module_from_spec(_spec)
+sys.modules["vibeic_programs_tests_conftest"] = _mod
+_spec.loader.exec_module(_mod)
+globals().update({{k: v for k, v in vars(_mod).items() if not k.startswith("__")}})
+'''
+
+
+def _pytest(*paths: Path, plugin_dir: Path = None) -> subprocess.CompletedProcess:
+    extra = []
+    env = dict(os.environ)
+    if plugin_dir is not None:
+        (plugin_dir / "tests_conftest_as_plugin.py").write_text(
+            _CONFTEST_AS_PLUGIN.format(conftest=str(_TESTS / "conftest.py")))
+        extra = ["-p", "tests_conftest_as_plugin"]
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(plugin_dir)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-rA", "-p", "no:cacheprovider",
-         *[str(p) for p in paths]],
-        cwd=str(_PLUGIN), capture_output=True, text=True, timeout=900)
+         *extra, *[str(p) for p in paths]],
+        cwd=str(_PLUGIN), capture_output=True, text=True, timeout=900, env=env)
 
 
 def _passed(out: str, suffix: str) -> bool:
@@ -147,3 +176,38 @@ def test_a_file_keeps_its_own_registrations_for_its_own_tests(tmp_path):
                         "test_the_label_check_and_the_merge_share_ONE_rule"), \
         out[-3000:]
     assert cp.returncode == 0, out[-3000:]
+
+
+def test_a_removed_at_collection_entry_is_restored_through_monkeypatch(tmp_path):
+    """An own-view entry that is a REMOVAL (None), plus a test that registers
+    a fresh copy through monkeypatch, must still leave the original behind.
+
+    The own view is applied per test; if it is applied outside the test's
+    `monkeypatch`, fixture teardown (LIFO) restores the global entry first and
+    monkeypatch's undo then writes the test's copy over it."""
+    name = "def_gds_port_power_restore"
+    first = tmp_path / "test_aaa_order_probe_first.py"
+    last = tmp_path / "test_zzz_order_probe_last.py"
+    first.write_text(_PROBE_FIRST.format(programs=str(_TESTS.parent),
+                                         names=[name]))
+    last.write_text(_PROBE_LAST.format(programs=str(_TESTS.parent)))
+    remover = tmp_path / "test_mmm_removes_at_collection.py"
+    remover.write_text(
+        "import importlib, sys\n"
+        "sys.modules.pop(%r, None)          # removed while COLLECTED\n\n"
+        "def test_runs_against_its_own_view(monkeypatch):\n"
+        "    assert %r not in sys.modules\n"
+        "    fresh = importlib.import_module(%r)\n"
+        "    monkeypatch.setitem(sys.modules, %r, fresh)\n"
+        % (name, name, name, name))
+    # The remover lives outside programs/tests, so the suite's own conftest
+    # is loaded as a plugin: the file then runs under the SAME fixtures a real
+    # test file does (the isolation hooks, and the autouse fixture that sets
+    # `monkeypatch` up before them -- the order the defect needs).
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    cp = _pytest(first, remover, last, plugin_dir=plugin_dir)
+    out = cp.stdout + cp.stderr
+    assert _passed(out, "::test_runs_against_its_own_view"), out[-3000:]
+    assert _passed(out, "::test_the_program_modules_are_as_they_were"), \
+        out[-3000:]

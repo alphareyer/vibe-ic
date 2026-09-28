@@ -97,15 +97,27 @@ def pytest_make_collect_report(collector):
 
 
 @pytest.fixture(autouse=True)
-def _program_modules_are_restored_after_each_test(request):
+def _program_modules_are_restored_after_each_test(request, monkeypatch):
     """Run each test against its own module's collection-time view, and
-    leave the global view as it found it."""
+    leave the global view as it found it.
+
+    The own view goes in through the test's OWN `monkeypatch`, never by
+    writing `sys.modules` directly. Fixture teardown is LIFO and `monkeypatch`
+    is set up before this fixture, so its undo runs AFTER this restore. A test
+    that `monkeypatch.setitem`s an entry the own view had already replaced
+    records the own-view copy as "the old value"; with a direct install, the
+    restore below put the global copy back and monkeypatch then wrote the
+    file's copy over it, for every later test in the worker (review of the
+    per-module own view: `test_issue559_drift_check_rule_b_blindspot` left its
+    `flow_compliance_check` behind). Through the same instance the undo stack
+    unwinds past the test's own entry to the own view's, and ends on the
+    value this fixture found."""
     before = dict(sys.modules)
     for name, mod in _OWN_VIEW.get(str(request.node.path), {}).items():
         if mod is None:
-            sys.modules.pop(name, None)
+            monkeypatch.delitem(sys.modules, name, raising=False)
         else:
-            sys.modules[name] = mod
+            monkeypatch.setitem(sys.modules, name, mod)
     yield
     restore_program_modules(before)
 
