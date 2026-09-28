@@ -347,7 +347,8 @@ def _run_two(p, monkeypatch, wrapper: bool):
 
     summary = W.run_two_segments(p, "img", pdk="processA", pdk_root=p, scl="libA",
                                  segment1=seg1, between=between, segment2_kwargs={},
-                                 first_step=FLOW[0], last_step=FLOW[-1], deadline_s=5)
+                                 first_step=FLOW[0], last_step=FLOW[-1], deadline_s=5,
+                                 importer=lambda project, segments: {"segments": len(segments)})
     names = [a[a.index("--run-tag") + 1] for a, _ in fake.calls if "--run-tag" in a]
     return summary, names
 

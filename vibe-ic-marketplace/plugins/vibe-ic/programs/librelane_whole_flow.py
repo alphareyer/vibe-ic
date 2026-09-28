@@ -438,7 +438,7 @@ def run_two_segments(project: Path, image: str, *, pdk: str, pdk_root: Path,
                      scl: Optional[str], segment1: Path, between,
                      segment2_kwargs: Dict[str, Any], first_step: str,
                      last_step: str, deadline_s: int = DEFAULT_DEADLINE_S,
-                     docker: str = "docker") -> Dict[str, Any]:
+                     docker: str = "docker", importer=None) -> Dict[str, Any]:
     """Segment 1, vibe-ic's between-segments work, segment 2.
 
     `between(project, segment1_state) -> dict` is the runner's: steps 11-14 and
@@ -482,6 +482,8 @@ def run_two_segments(project: Path, image: str, *, pdk: str, pdk_root: Path,
     s2 = run_segment(project, image, seg2, name="segment2",
                      extra=["--from", SEGMENT2_FIRST, "--with-initial-state", rec["state_in"]],
                      expected=plan2["run"], deadline_s=deadline_s, docker=docker, **common)
+    imported = import_completed_segments(project, s1["run_dir"], s2["run_dir"],
+                                         importer=importer)
     summary = {"flow": flow, "image": image,
                "segment1": {"steps": [s for s, _ in s1["steps"]], "state": str(s1["state"]),
                             "tool_verdict": s1["tool_verdict"]},
@@ -490,6 +492,7 @@ def run_two_segments(project: Path, image: str, *, pdk: str, pdk_root: Path,
                             "tool_findings": s2["tool_findings"],
                             "gated_off": plan2["gated_off"]},
                "handoff": rec,
+               "import": imported,
                "netlist_identity": netlist_identity(project, Path(handed["netlist"]))}
     _atomic_artefact.write_json(base / "whole_flow.json", summary, indent=2)
     return summary
