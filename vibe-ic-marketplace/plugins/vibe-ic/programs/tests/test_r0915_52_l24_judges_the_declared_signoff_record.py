@@ -133,7 +133,17 @@ def _proj_requiring_sta(tmp_path):
     """A project whose input states a timing requirement, phase 3 reached."""
     proj = _project(tmp_path, spec_md="Sign-off requires STA met.\n")
     _emit_l24(proj)
-    _report(proj, "orchestrator/phase3_one_shot.json", {"verdict": "PASS"})
+    netlist = proj / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    _report(proj, "orchestrator/phase3_one_shot.json", {
+        "verdict": "PASS",
+        "phase2_synth": L24._pl.phase2_synth_input_identity(proj),
+        "phase3_inputs": getattr(
+            L24._pl, "phase3_signoff_input_identity",
+            lambda p: {"phase2_synth": L24._pl.phase2_synth_input_identity(p)}
+        )(proj),
+    })
     return proj
 
 
@@ -145,7 +155,8 @@ def test_phase3_receipt_is_bound_to_the_current_phase2_netlist(tmp_path):
     digest = hashlib.sha256(netlist.read_bytes()).hexdigest()
     _report(project, "orchestrator/phase3_one_shot.json", {
         "verdict": "PASS", "phase2_synth": {
-            "path": "phase2/stage2/synth/netlist_yosys.v", "sha256": digest}})
+            "path": "phase2/stage2/synth/netlist_yosys.v", "sha256": digest},
+        "phase3_inputs": L24._pl.phase3_signoff_input_identity(project)})
     before = L24._phase3_has_run(project)
 
     # A later Phase 2 synthesis changes the input while leaving the prior
@@ -156,10 +167,64 @@ def test_phase3_receipt_is_bound_to_the_current_phase2_netlist(tmp_path):
 
 def test_unbound_old_phase3_receipt_cannot_certify_a_present_netlist(tmp_path):
     project = _proj_requiring_sta(tmp_path)
+    _report(project, "orchestrator/phase3_one_shot.json", {"verdict": "PASS"})
     netlist = project / "phase2/stage2/synth/netlist_yosys.v"
     netlist.parent.mkdir(parents=True, exist_ok=True)
     netlist.write_text("module chip; endmodule\n")
     assert [L24._phase3_has_run(project)] == [False]
+
+
+def test_legacy_netlist_only_receipt_cannot_certify_current_signoff(tmp_path):
+    project = _proj_requiring_sta(tmp_path)
+    _report(project, "orchestrator/phase3_one_shot.json", {
+        "verdict": "PASS",
+        "phase2_synth": L24._pl.phase2_synth_input_identity(project),
+    })
+    assert L24._phase3_has_run(project) is False
+
+
+def test_changed_l9_declaration_invalidates_the_phase3_receipt(tmp_path):
+    project = _proj_requiring_sta(tmp_path)
+    assert L24._phase3_has_run(project) is True
+    (project / "phase1/generated_docs/L9_IO_PAD.json").write_text(
+        json.dumps({"pad_side": "changed"}))
+    assert L24._phase3_has_run(project) is False
+
+
+def test_old_phase3_receipt_without_current_netlist_is_historical(tmp_path):
+    project = _project(tmp_path, spec_md="Sign-off requires STA met.\n")
+    _emit_l24(project)
+    _report(project, "orchestrator/phase3_one_shot.json", {"verdict": "PASS"})
+    assert L24._phase3_has_run(project) is False
+    rc, out = _run_gate(project)
+    assert rc == 0, out
+    assert "not yet measurable" in out
+
+
+def test_changed_staged_sdc_invalidates_the_phase3_receipt(tmp_path):
+    project = _proj_requiring_sta(tmp_path)
+    netlist = project / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True, exist_ok=True)
+    netlist.write_text("module chip; endmodule\n")
+    sdc = project / "input/constraints/timing.sdc"
+    sdc.parent.mkdir(parents=True, exist_ok=True)
+    sdc.write_text("create_clock -period 10 [get_ports clk]\n")
+    # The reviewed checker ignores this producer-side binding; getattr lets
+    # the same control run on that older tree and observe its wrong verdict.
+    identity = getattr(L24._pl, "phase3_signoff_input_identity", lambda p: {
+        "phase2_synth": L24._pl.phase2_synth_input_identity(p)
+    })(project)
+    _report(project, "orchestrator/phase3_one_shot.json", {
+        "verdict": "PASS",
+        "phase2_synth": L24._pl.phase2_synth_input_identity(project),
+        "phase3_inputs": identity,
+    })
+    assert L24._phase3_has_run(project) is True
+    sdc.write_text("create_clock -period 1 [get_ports clk]\n")
+    assert L24._phase3_has_run(project) is False
+    rc, out = _run_gate(project)
+    assert rc == 0, out
+    assert "not yet measurable" in out
 
 
 def _signoff(proj, verdict):

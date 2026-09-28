@@ -309,6 +309,56 @@ def phase2_synth_input_identity(project: Path):
     return {"path": str(path.relative_to(project)), "sha256": digest}
 
 
+def phase3_signoff_input_identity(project: Path):
+    """Content identity of the current inputs to Phase-3 sign-off.
+
+    The netlist is mandatory.  Include the design's L-layer declarations and
+    every staged constraint source the backend can consume, including the
+    legacy constraint locations and Phase-3 generated SDCs.  Reports are
+    deliberately excluded: rewriting a verdict cannot make its own old
+    producer receipt current.  A missing or unreadable input fails closed.
+    """
+    import hashlib
+
+    project = Path(project).resolve()
+    netlist = phase2_synth_input_identity(project)
+    if netlist is None:
+        return None
+    roots = (
+        "input/constraints", "input/reference_flow", "constraints",
+        "phase2/stage2/constraints", "phase3/stage3/constraints",
+        "phase3/stage3/cts/constraints",
+    )
+    paths = [project / "phase3/librelane_switch.json"]
+    docs = project / "phase1/generated_docs"
+    if docs.is_symlink() and not docs.resolve().is_relative_to(project):
+        return None
+    if docs.is_dir():
+        paths.extend(docs.glob("L*.json"))
+    for rel in roots:
+        root = project / rel
+        if root.is_symlink() and not root.resolve().is_relative_to(project):
+            return None
+        if root.is_dir():
+            paths.extend(path for path in root.rglob("*") if path.is_file())
+    files = {}
+    for path in sorted(set(paths)):
+        if path.is_symlink() and not path.exists():
+            return None
+        if not path.exists():
+            continue
+        resolved = path.resolve()
+        if not resolved.is_relative_to(project) or not resolved.is_file():
+            return None
+        try:
+            files[path.relative_to(project).as_posix()] = hashlib.sha256(
+                resolved.read_bytes()).hexdigest()
+        except OSError:
+            return None
+    return {"schema": "vibeic.phase3_signoff_inputs.v1",
+            "phase2_synth": netlist, "files": files}
+
+
 def dft_dir(project: Path) -> Path:
     return project / "phase2/stage2/dft"
 
