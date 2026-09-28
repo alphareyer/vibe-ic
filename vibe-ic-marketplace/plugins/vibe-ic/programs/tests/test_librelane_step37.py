@@ -91,18 +91,22 @@ def test_each_finished_stream_runs_both_existing_gds_gates(tmp_path, monkeypatch
     calls = []
 
     def tool_writes(cmd, **kwargs):
-        calls.append(cmd)
+        calls.append((cmd, kwargs))
         report = Path(cmd[cmd.index("--json") + 1])
         substance = any(str(part).endswith("gds_substance_check.py") for part in cmd)
         _put(report, {"verdict": "PASS" if substance else "FINDINGS"})
         return SimpleNamespace(returncode=0 if substance else 1,
                                stdout="tool result", stderr="")
 
-    monkeypatch.setattr(step37.subprocess, "run", tool_writes)
+    monkeypatch.setattr(step37, "supervised_docker_run", tool_writes)
     result = step37._vibeic_gds_gates(project, "candidate", pdk_root, "processA",
                                      gds, routed, "magic", config)
     assert result["substance"]["rc"] == 0
     assert result["port_labels"]["rc"] == 1
     assert all(row["sha256"] for row in result.values())
     assert len(calls) == 2
-    assert "--pdk-tech" in calls[1]
+    assert "--pdk-tech" in calls[1][0]
+    assert {kw["label"] for _cmd, kw in calls} == {
+        "step37-magic-substance", "step37-magic-port_labels"}
+    assert all(kw["progress_dir"] == project / "phase3/librelane"
+               for _cmd, kw in calls)

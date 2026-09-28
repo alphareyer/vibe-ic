@@ -122,11 +122,12 @@ def _image_run(image: str, entrypoint: str, args: List[str],
                docker: str = "docker") -> "subprocess.CompletedProcess":
     """One throw-away container of the pinned image: a PDK file lives there
     and nowhere on this host."""
-    import subprocess
     import _docker_memory as _dmem
-    return subprocess.run([docker, "run", "--rm", *_dmem.docker_memory_flags(),
-                           "--entrypoint", entrypoint, image, *args],
-                          capture_output=True, text=True)
+    from librelane_contract import supervised_docker_run
+    return supervised_docker_run(
+        [docker, "run", "--rm", *_dmem.docker_memory_flags(),
+         "--entrypoint", entrypoint, image, *args],
+        label=f"a6-drc-{entrypoint}")
 
 
 def image_extra_runsets(image: str, main_runset: str) -> List[str]:
@@ -411,11 +412,11 @@ def _capability_controls(arm: "_Arm", block: str, image: str,
             if not dst.is_file():
                 import subprocess
                 import _docker_memory as _dmem
-                cp = subprocess.run(["docker", "run", "--rm",
-                                     *_dmem.docker_memory_flags(),
-                                     "--entrypoint", "cat", image,
-                                     f"{unit_dir}/{tc}"],
-                                    capture_output=True)
+                from librelane_contract import supervised_docker_run
+                cp = supervised_docker_run(
+                    ["docker", "run", "--rm", *_dmem.docker_memory_flags(),
+                     "--entrypoint", "cat", image, f"{unit_dir}/{tc}"],
+                    label=f"a6-drc-unit-{tc}", as_text=False)
                 if cp.returncode or not cp.stdout:
                     results[tc] = None
                     continue

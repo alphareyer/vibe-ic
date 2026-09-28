@@ -161,11 +161,12 @@ def fork_capability(image: str, docker: str = "docker") -> Dict[str, Any]:
            f"if {{[catch {{estimate_parasitics {_CTRL_FLAG}}} e]}} "
            f"{{ puts \"{_PROBE_CTRL} $e\" }} else {{ puts \"{_PROBE_CTRL} <accepted>\" }}\n")
     cmd = [docker, "run", "--rm", "--network", "none", *_dmem.docker_memory_flags(),
-           "-i", image, "--skip", "bash", "-c",
-           "openroad -no_init -no_splash -exit /dev/stdin 2>&1"]
+           image, "--skip", "bash", "-c",
+           "set -o pipefail; printf '%s' \"$1\" | openroad -no_init "
+           "-no_splash -exit /dev/stdin 2>&1", "vibeic-probe", tcl]
     try:
-        done = subprocess.run(cmd, input=tcl, capture_output=True, text=True,
-                              timeout=300)
+        import librelane_contract as _ll
+        done = _ll.supervised_docker_run(cmd, label='postroute-repair-capability')
         transcript = (done.stdout or "") + "\n" + (done.stderr or "")
     except (OSError, subprocess.SubprocessError) as exc:
         return {"capable": None, "image": image, "reason": f"probe could not run: {exc}"}

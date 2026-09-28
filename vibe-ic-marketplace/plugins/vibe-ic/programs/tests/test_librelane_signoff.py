@@ -687,3 +687,20 @@ def test_a_deck_with_a_different_derate_is_not_comparable(tmp_path):
     doc = signoff.deck_agreement(text, folder, tmp_path / 'deck.json', spef_dir=spef_dir)
     rows = {r['stanza']: r['verdict'] for r in doc['stanzas']}
     assert rows == {'SETUP': 'NOT_COMPARABLE', 'HOLD': 'AGREE'} and doc['verdict'] == 'AGREE'
+
+
+def test_standalone_sta_uses_shared_supervisor_and_preserves_log(tmp_path,
+                                                                 monkeypatch):
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return SimpleNamespace(returncode=0, stdout="STA complete", stderr="")
+
+    monkeypatch.setattr(signoff, "supervised_docker_run", run)
+    log = tmp_path / "sta" / "arm.log"
+    cp = signoff.run_sta_script(tmp_path, "img", [], tmp_path / "arm.tcl", log)
+    assert cp.returncode == 0
+    assert log.read_text() == "STA complete\n"
+    assert calls[0][1] == {"label": "signoff-standalone-sta",
+                           "progress_dir": log.parent}

@@ -162,6 +162,22 @@ def test_a_runset_that_graded_nothing_is_not_clean(stub, monkeypatch):
     assert A6.run(_project(stub), "blk", IMAGE, None) == 1
 
 
+def test_a6_image_probe_uses_shared_container_supervisor(monkeypatch):
+    import librelane_contract as contract
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return type("CP", (), {"returncode": 0, "stdout": "probe",
+                                "stderr": ""})()
+
+    monkeypatch.setattr(contract, "supervised_docker_run", run)
+    result = A6._image_run("img", "python3", ["-c", "print('probe')"])
+    assert result.returncode == 0
+    assert calls[0][1] == {"label": "a6-drc-python3"}
+    assert calls[0][0][:3] == ["docker", "run", "--rm"]
+
+
 def test_the_runner_runs_the_arm_only_when_selected_and_it_is_stricter(
         tmp_path, monkeypatch):
     import analog_one_shot_runner as R
