@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1372
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1372)
+- **Total programs (excluding helpers / shims):** 1373
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1373)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1363 |
+| `any` | 1364 |
 
 ## Alphabetical listing
 
@@ -426,6 +426,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `fix_surface_classify` | any | — | ORGANIC #602 — fix_surface_classify: deterministic consumer-vs-producer classification of a closed fix's diff, so the field agent KNOWS w... |
 | `flexray_protocol_synth` | any | — | FlexRay Communications System protocol synth helper (protocol #49). |
 | `floorplan_contract` | any | — | G-FIXED-DIE-1 — shared design-PROVIDED fixed-floorplan-contract helpers. |
+| `floorplan_knobs` | any | — | CR-3 L9 floorplan knob parsing and pinned flow defaults. |
 | `floorplan_pdn_check` | any | — | Step 15 (Floorplan + PDN) SUBSTANCE gate. |
 | `flow_compliance_check` | any | Wave 91 | Strict Vibe-IC phase 2+3 gate (40 main-track steps + A1-A9 analog + M1-M4 mixed-signal + P0 structural-RTL umbrella in v1.6.15). |
 | `flow_condition_reachability_check` | any | — | the self-disabling-condition guard. |
@@ -1444,7 +1445,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1363 programs)
+### `any` (1364 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1842,6 +1843,7 @@ _(no programs in this group)_
 - `fix_surface_classify` — ORGANIC #602 — fix_surface_classify: deterministic consumer-vs-producer classification of a closed fix's diff, so the field agent KNOWS w...
 - `flexray_protocol_synth` — FlexRay Communications System protocol synth helper (protocol #49).
 - `floorplan_contract` — G-FIXED-DIE-1 — shared design-PROVIDED fixed-floorplan-contract helpers.
+- `floorplan_knobs` — CR-3 L9 floorplan knob parsing and pinned flow defaults.
 - `floorplan_pdn_check` — Step 15 (Floorplan + PDN) SUBSTANCE gate.
 - `flow_compliance_check` — Strict Vibe-IC phase 2+3 gate (40 main-track steps + A1-A9 analog + M1-M4 mixed-signal + P0 structural-RTL umbrella in v1.6.15).  _[Wave 91]_
 - `flow_condition_reachability_check` — the self-disabling-condition guard.
