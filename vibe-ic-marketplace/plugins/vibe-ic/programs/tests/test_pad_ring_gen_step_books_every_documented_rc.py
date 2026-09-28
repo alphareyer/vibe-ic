@@ -20,12 +20,17 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from contextlib import redirect_stdout
+from io import StringIO
+import json
 
 import pytest
 
 import _plugin_tree  # noqa: F401 -- puts programs/ on sys.path
 import phase3_one_shot_runner as R
 import verdict as _V
+import pad_ring_gen as GEN
+import test_pad_ring as PAD
 
 NM = _V.Verdict.NOT_MEASURED.value
 FAIL = _V.Verdict.FAIL.value
@@ -111,3 +116,33 @@ def test_all_zero_without_the_declared_outputs_is_fail(tmp_path, monkeypatch):
     assert ran == PROGRAMS
     assert (result.status, result.reason_class) == (FAIL, "")
     assert "required output(s) are absent" in result.detail
+
+
+@pytest.mark.parametrize("rotation,rule,reason", [
+    (None, "REQUIRED_INPUT_ABSENT", "input_absent"),
+    ("R90", "PAD_ROTATION_VERTICAL_NOT_HONOURED", "unsupported_request"),
+])
+def test_pad_ring_rc2_uses_the_producers_named_report(
+        tmp_path, monkeypatch, rotation, rule, reason):
+    """The same rc=2 carries two different producer explanations."""
+    cfg = None if rotation is None else PAD._config(PAD_ROTATION_VERTICAL=rotation)
+    root = PAD._project(tmp_path, config=cfg)
+    monkeypatch.setattr(R, "_padring_pdk_root_and_tree",
+                        lambda pdk, container: (str(root / "pdk"), "proc"))
+
+    def run(argv, **_kw):
+        name = Path(argv[1]).name
+        if name == "pad_assignment_gen.py":
+            return SimpleNamespace(returncode=0, stdout="assignment ready", stderr="")
+        assert name == "pad_ring_gen.py"
+        output = StringIO()
+        with redirect_stdout(output):
+            rc = GEN.main(argv[2:])
+        return SimpleNamespace(returncode=rc, stdout=output.getvalue(), stderr="")
+
+    monkeypatch.setattr(R._pr, "run", run)
+    result = R.step_pad_ring_gen(root, None, _pdk(root))
+    producer = json.loads((root / "reports/phase3/padring.json").read_text())
+    assert producer["verdict"] == "SKIP"
+    assert rule in {f["rule"] for f in producer["findings"]}
+    assert (result.status, result.reason_class) == (NM, reason)

@@ -58,6 +58,17 @@ PROBES = {"librelane_contract.py": {"image_capability", "resolve_step_configs", 
           "librelane_signoff.py": set()}
 TOOL_STEPS = {"librelane_contract.py": {"run_chain", "_openroad_convert"},
               "librelane_signoff.py": {"agreement", "run_sta_script"}}
+# A respelled argv can evade every literal docker-run audit. Pin the owners of
+# all direct subprocess edges in these modules, including non-Docker metadata
+# queries, so a new call site requires an explicit review of its bound.
+SUBPROCESS_MEMBERS = {
+    "librelane_contract.py": {
+        "_reap", "_Client.__init__.work", "run_container",
+        "run_container.rebound", "run_container.cpu_probe", "image_pdk_root._inspect",
+        "_materialise_image_pdk", "_docker_lines",
+    },
+    "librelane_signoff.py": set(),
+}
 
 
 def _is_docker_head(node: ast.AST) -> bool:
@@ -447,7 +458,37 @@ def member_audit(source: str, probes: set[str], tools: set[str]) -> list[str]:
         if not any(k.arg == "supervised" and isinstance(k.value, ast.Constant) and k.value.value is True
                    for c in callers[f] for k in c.keywords):
             problems.append(f"{f}: no supervised run")
+    module = next((name for name in RATCHETED
+                   if probes == PROBES[name] and tools == TOOL_STEPS[name]), None)
+    if module is not None:
+        actual = subprocess_edge_members(source)
+        expected = SUBPROCESS_MEMBERS[module]
+        problems += [f"{f}: subprocess edge is not pinned" for f in sorted(actual - expected)]
+        problems += [f"{f}: pinned subprocess edge disappeared" for f in sorted(expected - actual)]
     return problems
+
+
+def subprocess_edge_members(source: str) -> set[str]:
+    """Qualified functions containing direct run/Popen/check_output calls."""
+    tree = ast.parse(source)
+    parents = {child: node for node in ast.walk(tree)
+               for child in ast.iter_child_nodes(node)}
+    members = set()
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+            continue
+        if not (isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "subprocess"
+                and call.func.attr in {"run", "Popen", "check_output"}):
+            continue
+        names = []
+        owner = parents[call]
+        while not isinstance(owner, ast.Module):
+            if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.append(owner.name)
+            owner = parents[owner]
+        members.add(".".join(reversed(names)) if names else "<module>")
+    return members
 
 
 @pytest.mark.parametrize("name", RATCHETED)
@@ -480,3 +521,19 @@ def test_the_member_audit_sees_a_respelled_tool_step():
         "run_sta_script: runs no container through run_container",
         "helper: calls run_container but is not pinned",
         "_openroad_convert: no supervised run"]
+
+
+@pytest.mark.parametrize("edge", ["run", "Popen", "check_output"])
+def test_a_new_subprocess_edge_cannot_hide_behind_respelled_docker_argv(edge):
+    """Pin every subprocess owner, even when no literal docker-run list appears."""
+    name = "librelane_contract.py"
+    source = (PROGRAMS / name).read_text(encoding="utf-8")
+    mutant = source + f'''
+def _unbounded_container(docker, image):
+    argv = [docker, *["run"], image]
+    subprocess.{edge}(argv)
+'''
+    assert audit(mutant) == []
+    assert bound_audit(mutant, TOOL_STEPS[name]) == []
+    assert member_audit(mutant, PROBES[name], TOOL_STEPS[name]) == [
+        "_unbounded_container: subprocess edge is not pinned"]

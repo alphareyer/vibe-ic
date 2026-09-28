@@ -218,6 +218,10 @@ class ReasonClass(str, enum.Enum):
     #: this step owed and did not produce.
     INPUT_ABSENT = "input_absent"
 
+    #: The design declared a value, but this implementation cannot honour it.
+    #: The input is present; calling this `input_absent` hides a flow limitation.
+    UNSUPPORTED_REQUEST = "unsupported_request"
+
     #: The step dispatched and the dispatch itself broke — an exception, a
     #: crash, a non-zero exit with no verdict. Replaces `ERROR` and the
     #: exception-handler half of `SKIP`.

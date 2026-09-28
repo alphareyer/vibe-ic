@@ -459,6 +459,48 @@ def test_prune_removes_nothing_when_docker_cannot_look(env, verb):
     assert old.is_dir() and record['removed'] == [] and record['refused'], record
 
 
+@pytest.mark.parametrize('verb', ['image ls', 'ps', 'inspect'])
+def test_prune_docker_metadata_deadline_is_named_and_keeps_copies(
+        env, monkeypatch, verb):
+    _copy(env, IMAGE_ID, 0)
+    _copy(env, OLD[0], 10)
+    old = _copy(env, OLD[1], 20)
+    env.fake.mounts.append('/elsewhere')
+    seen = []
+
+    def stopped(argv, **kw):
+        query = ' '.join(argv[1:3]) if argv[1] == 'image' else argv[1]
+        if query == verb:
+            seen.append(kw.get('timeout'))
+            raise subprocess.TimeoutExpired(argv, kw.get('timeout'))
+        return env.fake(argv, **kw)
+
+    monkeypatch.setattr(contract.subprocess, 'run', stopped)
+    record = _prune(env)
+    assert seen and isinstance(seen[0], (int, float)) and seen[0] > 0
+    assert old.is_dir() and record['removed'] == []
+    assert record['refused'].startswith('LL_PDK_CACHE_DOCKER_QUERY_DEADLINE:'), record
+    log = [json.loads(l) for l in (env.tmp / 'cache/pdk_root_prune.log.jsonl').read_text().splitlines()]
+    assert log[-1]['refused'] == record['refused']
+
+
+def test_new_pdk_copy_records_a_prune_query_deadline(env, monkeypatch):
+    for i, age in zip(OLD, (10, 20)):
+        _copy(env, i, age)
+
+    def stopped(argv, **kw):
+        if argv[1:3] == ['image', 'ls']:
+            raise subprocess.TimeoutExpired(argv, kw.get('timeout'))
+        return env.fake(argv, **kw)
+
+    monkeypatch.setattr(contract.subprocess, 'run', stopped)
+    answer = contract.pdk_root_resolution(env.project, PDK)
+    refusal = answer['derivation']['cache_prune']['refused']
+    assert refusal.startswith('LL_PDK_CACHE_DOCKER_QUERY_DEADLINE:')
+    written = json.loads((env.project / contract.PDK_ROOT_PROVENANCE_REL).read_text())
+    assert written['derivation']['cache_prune']['refused'] == refusal
+
+
 def test_a_new_copy_prunes_and_records_it_in_the_provenance(env):
     for i, age in zip(OLD, (10, 20)):
         _copy(env, i, age)

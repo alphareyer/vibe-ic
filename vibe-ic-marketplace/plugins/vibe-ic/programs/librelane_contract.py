@@ -1344,12 +1344,18 @@ def _materialise_image_pdk(image: str, found: dict[str, str], pdk: str,
 #: is removed only when its image is gone from this host and nothing uses it.
 PDK_ROOT_KEEP_PREVIOUS = 1
 PDK_ROOT_PRUNE_LOG = 'pdk_root_prune.log.jsonl'
+DOCKER_METADATA_DEADLINE_S = 30
 
 
 def _docker_lines(docker: str, *argv: str) -> list[str] | None:
     """stdout lines of a docker query, or None when docker could not answer."""
     try:
-        done = subprocess.run([docker, *argv], capture_output=True, text=True)
+        done = subprocess.run([docker, *argv], capture_output=True, text=True,
+                              timeout=DOCKER_METADATA_DEADLINE_S)
+    except subprocess.TimeoutExpired:
+        raise Refusal('LL_PDK_CACHE_DOCKER_QUERY_DEADLINE',
+                      f'{docker} {" ".join(argv)} exceeded the '
+                      f'{DOCKER_METADATA_DEADLINE_S} s metadata deadline') from None
     except OSError:
         return None
     return None if done.returncode else [l.strip() for l in done.stdout.splitlines() if l.strip()]
@@ -1386,14 +1392,18 @@ def prune_pdk_root_cache(current_image_id: str, docker: str = 'docker') -> dict[
     candidates = others[PDK_ROOT_KEEP_PREVIOUS:]
     held = sources = None
     if candidates:
-        held = _docker_lines(docker, 'image', 'ls', '--no-trunc', '--format', '{{.ID}}')
-        running = _docker_lines(docker, 'ps', '-q', '--no-trunc')
-        sources = [] if running == [] else (_docker_lines(
-            docker, 'inspect', '--format', '{{range .Mounts}}{{.Source}}\n{{end}}', *running)
-            if running is not None else None)
+        try:
+            held = _docker_lines(docker, 'image', 'ls', '--no-trunc', '--format', '{{.ID}}')
+            running = _docker_lines(docker, 'ps', '-q', '--no-trunc')
+            sources = [] if running == [] else (_docker_lines(
+                docker, 'inspect', '--format', '{{range .Mounts}}{{.Source}}\n{{end}}', *running)
+                if running is not None else None)
+        except Refusal as exc:
+            record['refused'] = str(exc)
     if candidates and (held is None or sources is None):
-        record['refused'] = ('docker could not list the host images or the running '
-                             "containers' mounts; nothing removed")
+        if record['refused'] is None:
+            record['refused'] = ('docker could not list the host images or the running '
+                                 "containers' mounts; nothing removed")
     elif candidates:
         used = {Path(src).relative_to(base).parts[0] for src in sources
                 for base in {cache, cache.resolve()}

@@ -36233,6 +36233,39 @@ def _pad_ring_process_note(rc: int, out: str, err: str) -> str:
     return error if rc != 0 and error else (lines[0] if lines else "")
 
 
+def _pad_ring_report_stamp(path: Path) -> Optional[Tuple[int, int, int, int]]:
+    """Identify the report present before a producer runs, so it cannot be reused."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size
+
+
+def _pad_ring_rc2_reason(project: Path,
+                         prior: Optional[Tuple[int, int, int, int]]) -> str:
+    """Distinguish absent inputs from a declared rotation the producer cannot place."""
+    report = project / "reports/phase3/padring.json"
+    stamp = _pad_ring_report_stamp(report)
+    if stamp is None or stamp == prior:
+        # Older producers may have no report. Preserve their documented rc=2
+        # meaning without trusting a report left by another invocation.
+        return _V.ReasonClass.INPUT_ABSENT.value
+    try:
+        doc = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _V.ReasonClass.EXECUTION_ERROR.value
+    if not isinstance(doc, dict) or doc.get("program") != "pad_ring_gen" or doc.get("verdict") != "SKIP":
+        return _V.ReasonClass.EXECUTION_ERROR.value
+    rules = {f.get("rule") for f in doc.get("findings", []) if isinstance(f, dict)}
+    if any(re.fullmatch(r"PAD_ROTATION_(?:VERTICAL|HORIZONTAL|CORNER)_NOT_HONOURED", str(r))
+           for r in rules):
+        return _V.ReasonClass.UNSUPPORTED_REQUEST.value
+    if "REQUIRED_INPUT_ABSENT" in rules:
+        return _V.ReasonClass.INPUT_ABSENT.value
+    return _V.ReasonClass.EXECUTION_ERROR.value
+
+
 #: Step 15.5ic's programs, and what each DOCUMENTS its non-zero exits to
 #: mean, as (verdict, reason class). rc 1 of the producers and the ring gate is
 #: a refusal or a finding, so FAIL; every rc 2 is that program's own
@@ -36246,8 +36279,8 @@ _PAD_RING_RC_OUTCOMES: Dict[str, Dict[int, Tuple[str, str]]] = {
             _V.ReasonClass.INPUT_ABSENT.value)},
     "pad_ring_gen.py": {
         1: (_V.Verdict.FAIL.value, ""),
-        2: (_V.Verdict.NOT_MEASURED.value,  # SKIP: inputs absent, or a
-            _V.ReasonClass.INPUT_ABSENT.value)},  # rotation it cannot honour
+        2: (_V.Verdict.NOT_MEASURED.value,  # refined from the producer report
+            _V.ReasonClass.INPUT_ABSENT.value)},
     "pad_ring_check.py": {
         1: (_V.Verdict.FAIL.value, ""),  # a wrong or a silent report
         2: (_V.Verdict.NOT_MEASURED.value,  # a disclosed absence
@@ -36311,6 +36344,8 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
                               _V.ReasonClass.TOOL_ABSENT.value)
             notes.append(f"{name}: program absent")
             break
+        prior_ring_report = (_pad_ring_report_stamp(project / "reports/phase3/padring.json")
+                             if name == "pad_ring_gen.py" else None)
         if container:
             prog_c = _to_container_path(str(prog), container)
             project_c = _to_container_path(str(project), container)
@@ -36330,6 +36365,8 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
         status, reason = _PAD_RING_RC_OUTCOMES[name].get(
             rc, (_V.Verdict.NOT_MEASURED.value,
                  _V.ReasonClass.EXECUTION_ERROR.value))
+        if name == "pad_ring_gen.py" and rc == 2:
+            reason = _pad_ring_rc2_reason(project, prior_ring_report)
         break
 
     out_files = [
