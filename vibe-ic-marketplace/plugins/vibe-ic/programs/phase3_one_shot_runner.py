@@ -48410,15 +48410,6 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         "port_labels (in place) (phase3_one_shot_runner step_gds)",
         lambda: _restore_port_labels_if_missing(
             project, top, pdk, container, gds_out, def_file))
-        # Apply the PDK's explicit TEXT-only layer map to the finished stream.
-        # The map's own receipt binds its bytes and both GDS digests; an
-        # undeclared or geometry-bearing layer remains for the strict precheck.
-        try:
-            import gds_text_layer_map as _text_map
-            text_map_receipt = _text_map.apply_declared(gds_out, pdk.name)
-        except (OSError, ValueError) as exc:
-            return StepResult("gds", "FAIL", time.time() - t0,
-                              f"GDS_TEXT_LAYER_MAP_REFUSED: {exc}")
         # R-0915-148 — THIS BRANCH RETAINS NO FINISHING BOUNDARY, SO IT MUST NOT
         # LEAVE SOMEBODY ELSE'S LYING AROUND.
         #
@@ -48474,7 +48465,6 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
             f"{'; ' + label_note if label_ok else ''})",
             [str(gds_out)],
             extras={"streamout_engine": "magic",
-                    "text_layer_map_receipt": str(text_map_receipt) if text_map_receipt else None,
                     "die_finishing": seal_ok, "die_finishing_note": seal_note,
                     "grid_snap": snap_ok, "grid_snap_note": snap_note,
                     "density_fill": dfill_ok,
@@ -48714,12 +48704,6 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         "port_labels (in place) (phase3_one_shot_runner step_gds)",
         lambda: _restore_port_labels_if_missing(
         project, top, pdk, container, gds_out, def_file))
-    try:
-        import gds_text_layer_map as _text_map
-        text_map_receipt = _text_map.apply_declared(gds_out, pdk.name)
-    except (OSError, ValueError) as exc:
-        return StepResult("gds", "FAIL", time.time() - t0,
-                          f"GDS_TEXT_LAYER_MAP_REFUSED: {exc}")
     # A map can also be present but WRONG or partial, which the pre-flight
     # gate above cannot see. Verify the finished artifact instead: every layer
     # carrying shapes must be accounted for by the map, the library GDS or the
@@ -48790,7 +48774,6 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
                       f"{'; ' + label_note if label_ok else ''})",
                       [str(gds_out)],
                       extras={"streamout_engine": "klayout",
-                              "text_layer_map_receipt": str(text_map_receipt) if text_map_receipt else None,
                               "die_finishing": seal_ok,
                               "die_finishing_note": seal_note,
                               "density_fill": dfill_ok,

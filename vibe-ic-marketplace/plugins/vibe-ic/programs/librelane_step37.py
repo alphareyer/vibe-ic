@@ -147,7 +147,6 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
     density_errors = {}
     gates = {}
     finishing = {}
-    text_maps = {}
     for arm, path in paths.items():
         state_path = _gds_state(compare[-1] / "state_out.json", path,
                                 root / f"37-{arm}-finish-state.json")
@@ -171,14 +170,6 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
         # Step 37.3 (mig105): finishing never removes, covers or touches the
         # design geometry of the stream it started from.
         sealed = Path(json.loads((finish[0] / "state_out.json").read_text())["gds"])
-        # The map is an explicit stream-out transform before finishing XOR and
-        # every final GDS gate.  Those consumers must hash the exact final bytes.
-        # It strips only declared TEXT; unexpected geometry is a refusal.
-        import gds_text_layer_map as _text_map
-        try:
-            text_maps[arm] = _text_map.apply_declared(final_paths[arm], pdk)
-        except (OSError, ValueError) as exc:
-            raise Refusal("LL_GDS_TEXT_LAYER_MAP_REFUSED", str(exc)) from exc
         finishing[arm] = _pv.run_finishing_xor(
             project, image, pdk_root, pdk, pre=path, sealed=sealed,
             final=final_paths[arm], core=core, core_source=sources["CORE_AREA"],
@@ -220,7 +211,6 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
     write_json(root / "37-promotion.json", {"selection": winner,
                "selection_detail": selection, "streams": {k: str(v) for k, v in paths.items()},
                "finished": {k: str(v) for k, v in final_paths.items()},
-               "text_layer_maps": {k: str(v) if v else None for k, v in text_maps.items()},
                "drc": counts, "xor": 0, "density": density_errors, "gates": gates,
                "finishing_xor": {arm: row["verdict"] for arm, row in finishing.items()},
                "source": str(final_gds), "source_sha256": digest(final_gds),

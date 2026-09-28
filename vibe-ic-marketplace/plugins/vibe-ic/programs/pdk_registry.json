@@ -410,7 +410,6 @@
       "tech_lef_glob": "libs.ref/gf180mcu_fd_sc_mcu7t5v0/techlef/*__nom.tlef",
       "cell_lef_glob": "libs.ref/gf180mcu_fd_sc_mcu7t5v0/lef/*.lef",
       "cell_gds_glob": "libs.ref/gf180mcu_fd_sc_mcu7t5v0/gds/*.gds",
-      "streamout_text_layer_map": "pdk_gds_maps/gf180mcuD_text.json",
       "site": "GF018hv5v_mcu_sc7",
       "metal_prefix": "Metal",
       "clk_buf_cell": "gf180mcu_fd_sc_mcu7t5v0__clkbuf_4",
