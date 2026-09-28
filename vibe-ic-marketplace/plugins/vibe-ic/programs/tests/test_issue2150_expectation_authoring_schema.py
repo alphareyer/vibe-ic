@@ -147,6 +147,8 @@ def test_the_answer_contract_declares_field_path_and_the_split(tmp_path):
     ac = h["answer_contract"]
     assert "authoring_schema.json" in \
         ac["shape"]["expectations"][0]["field_path"]
+    assert "declaration_selection" in ac["shape"]
+    assert any("declaration_selection" in r for r in ac["rules"])
     # A grammar the author is never shown is a grammar nobody writes.
     assert "sub_expectations" in ac["split_shape"]["expectations"][0]
     assert "never easier to satisfy" in ac["split_shape"]["not_a_disjunction"]

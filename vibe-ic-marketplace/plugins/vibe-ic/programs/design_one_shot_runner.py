@@ -21641,6 +21641,54 @@ def _declaration_top_args(project: Path) -> List[str]:
 DECLARATION_REL = "plugin_output/declaration.json"
 
 
+def _d1_expert_selection_args(project: Path) -> Tuple[List[str], Dict[str, Any]]:
+    """Return validated D1 expert menu choices as contract-emitter arguments.
+
+    The D1 answer is the documented IC-Expert hand-off, not a free-form
+    declaration.  It becomes selectable only after the Phase-1 track has
+    consumed its exact bytes; a pending, stale, malformed, or mismatched answer
+    must not silently choose a Phase-2 option.
+    """
+    project = Path(project)
+    pack = project / "reports/audit/phase1/expert_parse_track_pack"
+    answer_path = pack / "l_doc_expectations.json"
+    report_path = project / "reports/audit/phase1/expert_parse_track.json"
+    rec: Dict[str, Any] = {"status": "ABSENT", "answer": str(answer_path)}
+    if not answer_path.is_file() or not report_path.is_file():
+        return [], rec
+    try:
+        answer_raw = answer_path.read_bytes()
+        answer = json.loads(answer_raw.decode("utf-8"))
+        report = json.loads(report_path.read_text())
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        rec.update(status="REFUSED", reason=f"cannot read D1 selection: {exc}")
+        return [], rec
+    execution = report.get("execution") if isinstance(report, dict) else None
+    ai = report.get("ai_subtrack") if isinstance(report, dict) else None
+    reported_sha = ai.get("answer_sha256") if isinstance(ai, dict) else None
+    actual_sha = hashlib.sha256(answer_raw).hexdigest()
+    if not (isinstance(execution, dict)
+            and execution.get("observed_ai_status") == "CONSUMED"
+            and isinstance(ai, dict) and ai.get("status") == "CONSUMED"
+            and reported_sha == actual_sha):
+        rec.update(status="REFUSED", reason="D1 answer was not consumed over its current bytes",
+                   answer_sha256=actual_sha, reported_sha256=reported_sha)
+        return [], rec
+    selection = answer.get("declaration_selection") if isinstance(answer, dict) else None
+    if selection is None:
+        return [], rec
+    if not (isinstance(selection, dict) and selection
+            and all(isinstance(k, str) and k.strip() and v is not None
+                    for k, v in selection.items())):
+        rec.update(status="REFUSED", reason="D1 declaration_selection must be a non-empty object of named values")
+        return [], rec
+    rec.update(status="CONSUMED", fields=selection, answer_sha256=actual_sha)
+    args: List[str] = []
+    for key in sorted(selection):
+        args += ["--set", f"{key}={json.dumps(selection[key], separators=(',', ':'))}"]
+    return args, rec
+
+
 def declaration_before_step4(project: Path) -> Dict[str, Any]:
     """Emit the design's declaration BEFORE Step 4, from the SAME producer.
 
@@ -21670,9 +21718,11 @@ def declaration_before_step4(project: Path) -> Dict[str, Any]:
     if not prog.is_file():
         rec["reason"] = "the contract-driven producer is not shipped"
         return rec
+    expert_args, expert_selection = _d1_expert_selection_args(project)
+    rec["d1_expert_selection"] = expert_selection
     try:
         cp = subprocess.run([sys.executable, str(prog), str(project),
-                             *_declaration_top_args(project)],
+                             *_declaration_top_args(project), *expert_args],
                             capture_output=True, text=True, timeout=120)
     except Exception as exc:  # noqa: BLE001 — named in the record
         rec["reason"] = f"could not run: {type(exc).__name__}: {exc}"
