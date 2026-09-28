@@ -489,17 +489,60 @@ def member_audit(source: str, probes: set[str], tools: set[str]) -> list[str]:
 
 
 def subprocess_edge_members(source: str) -> Counter[tuple[str, str, str, str, bool]]:
-    """Count each direct subprocess edge by owner, call, argv and bound."""
+    """Count subprocess edges, including imported module and function aliases."""
     tree = ast.parse(source)
     parents = {child: node for node in ast.walk(tree)
                for child in ast.iter_child_nodes(node)}
+    methods = {"run", "Popen", "check_output"}
+    scopes = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    imports: dict[ast.AST, dict[str, str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        scope = parents[node]
+        while not isinstance(scope, scopes):
+            scope = parents[scope]
+        names = imports.setdefault(scope, {})
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "subprocess":
+                    names[alias.asname or "subprocess"] = "<module>"
+        elif node.module == "subprocess" and node.level == 0:
+            for alias in node.names:
+                if alias.name in methods:
+                    names[alias.asname or alias.name] = alias.name
+
+    def subprocess_kind(call: ast.Call) -> str | None:
+        scope = parents[call]
+        while not isinstance(scope, scopes):
+            scope = parents[scope]
+        chain = []
+        while True:
+            chain.append(scope)
+            if isinstance(scope, ast.Module):
+                break
+            scope = parents[scope]
+            while not isinstance(scope, scopes):
+                scope = parents[scope]
+        for scope in chain:
+            aliases = imports.get(scope, {})
+            if isinstance(call.func, ast.Name):
+                kind = aliases.get(call.func.id)
+                if kind in methods:
+                    return kind
+            elif isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
+                module = call.func.value.id
+                if call.func.attr in methods and (module == "subprocess"
+                                                  or aliases.get(module) == "<module>"):
+                    return call.func.attr
+        return None
+
     members: Counter[tuple[str, str, str, str, bool]] = Counter()
     for call in ast.walk(tree):
-        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+        if not isinstance(call, ast.Call):
             continue
-        if not (isinstance(call.func.value, ast.Name)
-                and call.func.value.id == "subprocess"
-                and call.func.attr in {"run", "Popen", "check_output"}):
+        kind = subprocess_kind(call)
+        if kind is None:
             continue
         names = []
         owner = parents[call]
@@ -512,7 +555,7 @@ def subprocess_edge_members(source: str) -> Counter[tuple[str, str, str, str, bo
                         if kw.arg == "timeout"), "")
         forwarded = any(kw.arg is None for kw in call.keywords)
         argv = ast.unparse(call.args[0]) if call.args else "<missing argv>"
-        members[(owner_name, call.func.attr, argv, timeout, forwarded)] += 1
+        members[(owner_name, kind, argv, timeout, forwarded)] += 1
     return members
 
 
@@ -576,3 +619,37 @@ def test_a_second_subprocess_edge_inside_a_pinned_function_is_detected():
     assert bound_audit(mutant, TOOL_STEPS[name]) == []
     assert member_audit(mutant, PROBES[name], TOOL_STEPS[name]) == [
         "_docker_lines: subprocess edge is not pinned"]
+
+
+@pytest.mark.parametrize("import_line, invocation", [
+    ("from subprocess import run as _launch", "_launch(argv)"),
+    ("from subprocess import run", "run(argv)"),
+    ("import subprocess as process", "process.run(argv)"),
+])
+def test_an_imported_subprocess_alias_cannot_hide_a_dynamic_docker_run(
+    import_line, invocation
+):
+    name = "librelane_contract.py"
+    source = (PROGRAMS / name).read_text(encoding="utf-8")
+    mutant = source + f'''
+{import_line}
+def _unbounded_container(docker, image):
+    argv = [docker, *["run"], image]
+    {invocation}
+'''
+    assert audit(mutant) == []
+    assert bound_audit(mutant, TOOL_STEPS[name]) == []
+    assert member_audit(mutant, PROBES[name], TOOL_STEPS[name]) == [
+        "_unbounded_container: subprocess edge is not pinned"]
+
+
+def test_a_local_subprocess_alias_is_scoped_to_its_function():
+    source = '''
+def launch(docker, image):
+    from subprocess import run as _launch
+    _launch([docker, *["run"], image])
+def unrelated(argv):
+    _launch(argv)
+'''
+    assert subprocess_edge_members(source) == Counter({
+        ("launch", "run", "[docker, *['run'], image]", "", False): 1})
