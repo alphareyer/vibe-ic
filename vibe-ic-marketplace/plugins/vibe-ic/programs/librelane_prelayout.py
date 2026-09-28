@@ -86,6 +86,15 @@ def pre_pnr_setup_gate(pvt_matrix: Path, reports: Path, output: Path,
     class names the violating path actually printed by OpenSTA; it is not a
     census of all possible endpoints.
     """
+    try:
+        instrument_calibration.assert_calibrated(
+            "librelane_prelayout::pre_pnr_setup_gate")
+    except instrument_calibration.Uncalibrated as exc:
+        result = {"verdict": "NOT_MEASURED", "reason": "UNCALIBRATED_SETUP_READER",
+                  "reason_class": "uncalibrated", "detail": str(exc),
+                  "path_classes": [], "setup_slack_ns": None}
+        write_json(output, result)
+        return result
     matrix = json.loads(pvt_matrix.read_text())
     corners = matrix.get("corners") or []
     setup = next((c for c in corners if c.get("label") == "SS"), None)
