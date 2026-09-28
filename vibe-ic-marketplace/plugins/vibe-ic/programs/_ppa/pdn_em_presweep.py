@@ -255,11 +255,14 @@ def session_tcl(*, sweep_dir: str, python: str, nets: Mapping[str, float],
     import _psm_source_model as _psm_sm
     psm_x = _psm_sm.exclude_promoted_pins_tcl()
     psm_r = _psm_sm.restore_promoted_pins_tcl()
+    psm_clear = _psm_sm.clear_generated_supply_pins_tcl()
     return f'''# === T103 — size the PDN for EM before routing (_ppa/pdn_em_presweep) ===
 puts "{stage_marker} preroute_pdn_em_sizing"
 set _pes_dir {{{sweep_dir}}}
 proc _vibeic_pes_build {{k}} {{
   global _pes_dir
+{psm_clear}  # PdnGen retains FIRM pin boxes from the previous pitch. The
+  # padless grid owns those boxes; a die's pad-ring boxes are retained.
   foreach _n [[ord::get_db_block] getNets] {{
     if {{[$_n getSigType] ni {{POWER GROUND}}}} {{ continue }}
     foreach _sw [$_n getSWires] {{ odb::dbSWire_destroy $_sw }}

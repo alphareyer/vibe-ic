@@ -84,6 +84,33 @@ def restore_promoted_pins_tcl(var: str = "_vibeic_psm_props") -> str:
             f"set {var} {{}}\n")
 
 
+def clear_generated_supply_pins_tcl() -> str:
+    """Remove a padless grid's fixed supply BPins before rebuilding its PDN.
+
+    PdnGen preserves FIRM BPins across ``pdngen -reset``. They describe the
+    previous candidate's straps and obstruct a candidate at another pitch.
+    Placed pad masters identify a die: its supply BPins belong to the pad ring
+    and must survive the rebuild.
+    """
+    return (
+        "set _vibeic_psm_pads 0\n"
+        "foreach _vibeic_psm_i [[ord::get_db_block] getInsts] {\n"
+        "  if {[[$_vibeic_psm_i getMaster] isPad] && [$_vibeic_psm_i isPlaced]} "
+        "{ incr _vibeic_psm_pads }\n"
+        "}\n"
+        "if {$_vibeic_psm_pads == 0} {\n"
+        "  foreach _vibeic_psm_n [[ord::get_db_block] getNets] {\n"
+        "    if {[$_vibeic_psm_n getSigType] ni {POWER GROUND}} { continue }\n"
+        "    foreach _vibeic_psm_t [$_vibeic_psm_n getBTerms] {\n"
+        "      if {![$_vibeic_psm_t isSpecial]} { continue }\n"
+        "      foreach _vibeic_psm_b [$_vibeic_psm_t getBPins] {\n"
+        "        odb::dbBPin_destroy $_vibeic_psm_b\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "}\n")
+
+
 def read(log: str) -> Optional[Dict[str, int]]:
     """The last ``PSM_SOURCE_MODEL:`` line of a session log, or None when the
     session printed none (a producer that does not run this rule)."""

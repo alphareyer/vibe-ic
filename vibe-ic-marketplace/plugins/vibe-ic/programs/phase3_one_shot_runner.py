@@ -60607,7 +60607,14 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # cross-check.  The direct session above still runs: step 25's EM reads it.
     _ll_m24 = _ll_selected_mode(project, "24")
     if primary_def.is_file() and _ll_m24 != "direct":
-        if _signoff_regen(rpt_phase3 / _LL_IR_RECORD, primary_def, spef_out):
+        _ll_old_record = None
+        try:
+            _ll_old_record = json.loads((rpt_phase3 / _LL_IR_RECORD).read_text()).get("record")
+        except (OSError, ValueError, AttributeError):
+            pass
+        if (_signoff_regen(rpt_phase3 / _LL_IR_RECORD, primary_def, spef_out)
+                or (isinstance(_ll_old_record, dict) and _ll_old_record
+                    and "source_probe" not in _ll_old_record)):
             _librelane_step24_record(project, top, pdk, _ll_m24, spef_out, written)
         if _ll_m24 == "librelane":
             try:
@@ -60615,6 +60622,9 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 if _ll_ir_doc.get("record") and _ll_ir_doc.get("def_sha256") == \
                         _sha256_file(primary_def):
                     _librelane_step24_publish(project, _ll_ir_doc)
+                elif (_ll_ir_doc.get("def_sha256") == _sha256_file(primary_def)
+                      and (_ll_ir_doc.get("judgment") or {}).get("verdict") == "NOT_MEASURED"):
+                    _librelane_step24_refusal_publish(project, _ll_ir_doc)
             except (OSError, ValueError, KeyError) as exc:
                 notes.append(f"step 24 LibreLane publish: {exc}")
 
@@ -65002,6 +65012,27 @@ def _librelane_step24_record(project: Path, top: str, pdk: PdkConfig, mode: str,
         doc["judgment"] = {"verdict": "NOT_MEASURED", "reasons": [f"refused: {exc}"]}
     _aa.write_json(rpt / _LL_IR_RECORD, doc)
     written.append(str(rpt / _LL_IR_RECORD))
+
+
+def _librelane_step24_refusal_publish(project: Path, doc: Dict[str, Any]) -> None:
+    """Replace a direct result when selected LibreLane step 24 refused to solve.
+
+    A prior direct ir_drop.json can otherwise remain green even though the
+    selected tool path refused the promoted-pin source model.
+    """
+    rpt = _pl.reports_phase3_dir(project)
+    reasons = (doc.get("judgment") or {}).get("reasons") or ["LibreLane IR unmeasured"]
+    reason = "; ".join(str(item) for item in reasons)
+    _aa.write_text(rpt / "ir_drop.rpt",
+                   "# OpenROAD PSM IR-drop report — LibreLane step 24\n"
+                   f"# NOT_MEASURED: {reason}\n# end of ir_drop.rpt\n")
+    _aa.write_json(rpt / "ir_drop.json", {
+        "tool": "openroad-psm", "producer": doc.get("producer"),
+        "mode": "static_ir_drop", "source": "reports/phase3/ir_drop.rpt",
+        "worst_ir_uv": None, "supply_model": f"NOT_MEASURED: {reason}",
+        "verdict_basis": reason, "verdict": "UNMEASURED",
+        "def_sha256": doc.get("def_sha256"),
+    })
 
 
 def _librelane_step24_publish(project: Path, doc: Dict[str, Any]) -> None:
