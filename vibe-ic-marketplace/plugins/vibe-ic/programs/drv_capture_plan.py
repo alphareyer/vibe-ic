@@ -74,6 +74,16 @@ def _pdk_path(value: str, root: Path, pdk: str) -> Path:
     return Path(value)
 
 
+def _clock_io_values(sdc: str) -> tuple[float | None, float | None]:
+    """Read applied numeric clock and IO constraints from the run's SDC."""
+    numbers = r"[0-9]+(?:\.[0-9]+)?"
+    periods = re.findall(rf"(?m)^\s*create_clock\b[^\n;]*?-period\s+({numbers})(?=\s|$)", sdc)
+    delays = re.findall(rf"(?m)^\s*set_(?:input|output)_delay\s+({numbers})(?=\s|$)", sdc)
+    period = float(periods[0]) if len(set(periods)) == 1 and periods else None
+    io_delay = float(delays[0]) if len(set(delays)) == 1 and delays else None
+    return period, io_delay
+
+
 def _scene_files(env: dict, root: Path, pdk: str, pvt: str,
                  macro_lib: Path) -> tuple[list[dict], list[dict]]:
     libs = []
@@ -133,13 +143,16 @@ def _build_direct(project: Path) -> dict:
     i = parts.index("libs.ref")
     pdk, library = parts[i - 1], parts[i + 1]
     image = _eda_image.resolve()
-    root = librelane_contract.resolve_pdk_root(project, pdk, image=image)
+    resolved_root = librelane_contract.resolve_pdk_root(project, pdk, image=image)
+    if not resolved_root:
+        raise ValueError("direct STA PDK root unavailable")
+    root = Path(resolved_root)
     profile = next((v for k, v in json.loads(_SCENE_PROFILES.read_text()).items()
                     if pdk.lower().startswith(k.lower())), None)
     if profile is None:
         raise ValueError("PDK has no declared DRV scene profile")
-    expected = sorted(f"{pvt}_{rc}" for pvt in profile["pvt"]
-                      for rc in profile["rc_corners"])
+    expected = [f"{pvt}_{rc}" for pvt in profile["pvt"]
+                for rc in profile["rc_corners"]]
     def host_lib(value: str) -> Path:
         components = Path(value).parts
         marker = components.index(pdk)
@@ -197,11 +210,13 @@ def _build_direct(project: Path) -> dict:
     from declared_knob_applied_parity_check import collect_declared
     declared = collect_declared(project, pdk=pdk, library=library)
     fanout = _integrator_value(pdk_text, "MAX_FANOUT_CONSTRAINT", "SYNTH_MAX_FANOUT")
+    sdc_text = sdc.read_text()
+    period, io_delay = _clock_io_values(sdc_text)
     values = {"fanout": (declared.get("SYNTH_MAX_FANOUT") or (fanout,))[0],
               "slew_ns": _integrator_value(pdk_text, "MAX_TRANSITION_CONSTRAINT", "MAX_SLEW_CONSTRAINT"),
               "cap_pf": _integrator_value(pdk_text, "MAX_CAPACITANCE_CONSTRAINT", "MAX_CAP_CONSTRAINT"),
               "default_fanout_ceiling": fanout,
-              "period_ns": None, "io_delay_ns": None}
+              "period_ns": period, "io_delay_ns": io_delay}
     frozen = {"sources": {k: v["sha256"] for k, v in sources.items()},
               "liberties": {k: v["sha256"] for k, v in linked_all.items()},
               "values": values, "scope": "whole final netlist", "scenes": expected,
@@ -214,6 +229,7 @@ def _build_direct(project: Path) -> dict:
     identity = {"project": str(project), "run_id": project.name,
                 "tree_sha": None, "spec_version": None, "pdk": pdk,
                 "library": library, "artifacts": artifacts,
+                "source_tool_image": image,
                 "sta_netlist": artifacts["sta_netlist"]["sha256"],
                 "lvs_netlist": None, "gds_netlist": None}
     return {"top": decks[0]["top"], "identity": identity,
@@ -253,8 +269,9 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
                     if pdk.lower().startswith(k.lower())), None)
     if profile is None:
         raise ValueError("PDK has no declared DRV scene profile")
-    expected = {f"{pvt}_{rc}" for pvt in profile["pvt"]
-                for rc in profile["rc_corners"]}
+    expected_order = [f"{pvt}_{rc}" for pvt in profile["pvt"]
+                      for rc in profile["rc_corners"]]
+    expected = set(expected_order)
     actual_scenes = {f"{rc}_{pvt}" for pvt in profile["pvt"]
                      for rc in profile["rc_corners"]}
     if set(state.get("lib") or {}) != actual_scenes:
@@ -302,19 +319,21 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
     from declared_knob_applied_parity_check import collect_declared
     declared = collect_declared(project, pdk=pdk, library=env["STD_CELL_LIBRARY"])
     integrator_fanout = _integrator_value(pdk_text, "MAX_FANOUT_CONSTRAINT", "SYNTH_MAX_FANOUT")
+    period, io_delay = _clock_io_values(sdc_text)
     values = {"fanout": (declared.get("SYNTH_MAX_FANOUT") or (integrator_fanout,))[0],
               "slew_ns": _integrator_value(pdk_text, "MAX_TRANSITION_CONSTRAINT", "MAX_SLEW_CONSTRAINT"),
               "cap_pf": _integrator_value(pdk_text, "MAX_CAPACITANCE_CONSTRAINT", "MAX_CAP_CONSTRAINT"),
               "default_fanout_ceiling": integrator_fanout,
-              "period_ns": None, "io_delay_ns": None}
+              "period_ns": period, "io_delay_ns": io_delay}
+    observed = {}
     for field, command in (("fanout", "set_max_fanout"),
                            ("slew_ns", "set_max_transition"),
                            ("cap_pf", "set_max_capacitance")):
-        values[field + "_sdc_observed"] = _sdc_values(sdc_text, command)
+        observed[field] = _sdc_values(sdc_text, command)
     frozen = {"sources": {k: v["sha256"] for k, v in sources.items()},
               "liberties": {k: v["sha256"] for k, v in liberties.items()},
               "values": values, "scope": "whole final netlist",
-              "scenes": sorted(expected), "scene_profile_sha256": _sha(_SCENE_PROFILES),
+              "scenes": expected_order, "scene_profile_sha256": _sha(_SCENE_PROFILES),
               "scene_liberties": scene_libs, "rc_corners": profile["rc_corners"],
               "pvt": {name: _liberty_header(Path(next(item["path"] for item in scene["linked_liberties"]
                                                      if item["name"] == scene["liberty"])).read_text())
@@ -322,10 +341,13 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
                       for scene in scenes if scene["name"] == name}}
     current = {"sources": sources, "liberties": list(liberties.values()),
                "values": values, "scope": frozen["scope"],
-               "scenes": frozen["scenes"], "scene_liberties": scene_libs}
+               "scenes": frozen["scenes"], "scene_liberties": scene_libs,
+               "applied_sdc": observed}
     identity = {"project": str(project), "run_id": project.name,
                 "tree_sha": None, "spec_version": None,
                 "pdk": pdk, "library": env["STD_CELL_LIBRARY"],
+                "source_tool_image": image,
+                "source_tool_image_id": provenance["derivation"]["image_id"],
                 "artifacts": artifacts,
                 **{key: artifacts[key].get("sha256") for key in
                    ("sta_netlist", "lvs_netlist", "gds_netlist")}}
@@ -344,10 +366,12 @@ def publish(project: Path, *, final_state: dict | None = None) -> Path:
 def capture_and_publish(project: Path, *, final_state: dict | None = None) -> Path:
     """Measure the current routed state and publish the judge's only input."""
     import drv_signoff_capture
+    output = project / "reports/phase3/sta/drv_signoff_bundle.json"
+    output.unlink(missing_ok=True)
     plan_path = publish(project, final_state=final_state)
     plan = json.loads(plan_path.read_text())
     bundle = drv_signoff_capture.capture(
-        plan, project / "reports/phase3/sta/drv_capture")
-    output = project / "reports/phase3/sta/drv_signoff_bundle.json"
+        plan, project / "reports/phase3/sta/drv_capture",
+        image=plan["identity"]["source_tool_image"])
     write_text(output, json.dumps(bundle, indent=2) + "\n")
     return output

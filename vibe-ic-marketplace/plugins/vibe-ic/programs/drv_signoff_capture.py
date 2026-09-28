@@ -261,6 +261,9 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
         digest, version = None, None
     if image_info.returncode or not str(digest).startswith("sha256:"):
         raise ValueError("pinned OpenSTA image identity unavailable")
+    expected_id = bundle["identity"].get("source_tool_image_id")
+    if expected_id and digest != expected_id:
+        raise ValueError("capture image differs from final STA image identity")
     bundle["identity"]["tool_image"] = image
     bundle["identity"]["tool_image_digest"] = digest
     bundle["identity"]["tool_image_oci_version"] = version
