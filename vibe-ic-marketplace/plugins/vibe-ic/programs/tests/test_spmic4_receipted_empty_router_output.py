@@ -96,3 +96,37 @@ def test_step_snapshot_symlink_uses_the_canonical_zero_receipt(tmp_path):
     assert refusal["passed"] is False
     assert any(item["rule"] == "DRC_EMPTY_NOT_MEASURED"
                for item in refusal["findings"])
+
+
+def test_router_iteration_report_does_not_vote_on_final_route(tmp_path):
+    """The source broad scope contains a zero-byte intermediate iteration."""
+    report = _route(tmp_path)
+    report.with_name("routed_router.drc.iter0.rpt").write_bytes(b"")
+    sibling = tmp_path / "reports/phase3/drc_router.rpt"
+    sibling.parent.mkdir(parents=True)
+    body = ("# OpenROAD detailed_route DRC summary\n"
+            "# Tool: openroad detailed_route (drt)\n"
+            "violation report: 0\ntotal violations: 0\n"
+            "categories: spacing width density antenna via enclosure\n")
+    sibling.write_text(body + "    Completing 100% with 0 violations.\n" * 70)
+    out = tmp_path / "broad_audit.json"
+    cmd = [sys.executable, str(Path(audit.__file__)), str(tmp_path),
+           "--mode", "drc", "--under", "phase3/stage3/pnr",
+           "--under", "reports/phase3/drc_router.rpt", "--json", str(out)]
+    run = subprocess.run(cmd, capture_output=True, text=True)
+    result = json.loads(out.read_text())
+    assert run.returncode == 0, result
+    assert result["passed"] is True
+    assert not any("iter0" in path for path in result["summary"]["empty_reports"])
+    assert result["summary"]["ignored_intermediate_reports"] == [
+        "phase3/stage3/pnr/routed_router.drc.iter0.rpt"]
+
+
+def test_step_alias_cannot_borrow_another_projects_receipt(tmp_path):
+    foreign = _route(tmp_path / "foreign")
+    alias = (tmp_path / "subject/steps/phase3/stage3/21_routing_global_detailed"
+             / "routed_router.drc.rpt")
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(os.path.relpath(foreign, alias.parent))
+    assert audit._empty_router_drc_receipt(alias) is None
+    assert flow._live_artefact_state(alias)[0] is False
