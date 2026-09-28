@@ -465,6 +465,47 @@ def test_enclosing_window_stops_before_publishing_missing_citation(
             "publication.json").exists()
 
 
+@pytest.mark.parametrize("case", ["missing_component", "symlink_parent"])
+def test_enclosing_window_resolves_citation_components_before_publication(
+        project, tmp_path, monkeypatch, case):
+    decoy = project / "payload.def"
+    decoy.write_text("decoy bytes")
+    if case == "missing_component":
+        citation = "absent/../payload.def"
+        assert not (project / "absent").exists()
+    else:
+        outside = tmp_path / "outside"
+        child = outside / "child"
+        child.mkdir(parents=True)
+        (outside / "payload.def").write_text("outside bytes")
+        (project / "link").symlink_to(child, target_is_directory=True)
+        citation = "link/../payload.def"
+        assert (project / citation).resolve(strict=True) == outside / "payload.def"
+
+    report = _rows(("sta_signoff", "PASS", "", ""))
+    report["verdict"] = "PASS"
+    output = "reports/phase3/sta/post_route_summary.json"
+    code = ("import json, pathlib, sys\n"
+            "iso = pathlib.Path(sys.argv[1])\n"
+            f"out = iso / {output!r}\n"
+            "out.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"out.write_text(json.dumps({{'output_files': [{citation!r}]}}))\n"
+            "record = iso / 'reports/orchestrator/phase3_one_shot.json'\n"
+            "record.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"record.write_text(json.dumps({report!r}))\n"
+            f"print({BANNER!r})\n")
+
+    row = _enclose_with(project, monkeypatch, code, case, steps=("23",))
+
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.MISSING_ARTEFACT
+    assert ("window cited input absent" if case == "missing_component"
+            else "window input outside project") in row.detail
+    assert decoy.read_text() == "decoy bytes"
+    assert not (project / output).exists()
+    assert not (project / f"reports/audit/windows/{case}/publication.json").exists()
+
+
 def test_window_publishes_dot_relative_file_reference(project, tmp_path):
     isolated = tmp_path / "isolated"
     isolated.mkdir()
