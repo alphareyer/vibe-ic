@@ -107,6 +107,22 @@ def test_ambiguous_l9_mapping_stays_open(tmp_path, monkeypatch):
     assert (tmp_path / "phase2/stage1/formal/formal_authoring_request.json").is_file()
 
 
+def test_two_pads_for_one_reset_port_stay_open(tmp_path):
+    _project(tmp_path)
+    record = tmp_path / "reports/phase3/io_pad_chip_top.json"
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({
+        "verdict": "WROTE", "chip_top_module": "chip_top",
+        "core_module": "core", "pad_instances": {
+            "pad_clk": {"port": "clk", "direction": "input"},
+            "pad_rst_a": {"port": "rst", "direction": "input"},
+            "pad_rst_b": {"port": "rst", "direction": "input"}}}))
+    emitted = gen.generate(project=tmp_path, top="chip_top", container=None)
+    rows = {r["id"]: r for r in emitted["unresolved_obligations"]}
+    assert "program_refused" in rows[NAME_ID]
+    assert (tmp_path / "phase2/stage1/formal/formal_authoring_request.json").is_file()
+
+
 def test_failed_proof_cannot_close_mapped_reset(tmp_path, monkeypatch):
     emitted, result, checked = _run(tmp_path, monkeypatch, "FAIL")
     rows = {r["id"]: r for r in emitted["unresolved_obligations"]}

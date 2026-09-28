@@ -1924,6 +1924,8 @@ def _flow_generated_core_binding(project: Optional[Path], declared_top: Optional
             continue
         if row.get("direction", row.get("mode")) != "input":
             continue
+        if row.get("width") != 1:
+            continue
         by_external.setdefault(external, []).append(internal)
         by_core.setdefault(internal, []).append(external)
     mapping = {external: targets[0] for external, targets in by_external.items()
@@ -2309,7 +2311,7 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
             # the R-0915-155 gate is re-applied by the check that answers
             "clock": clock,
             # R-0915-157: the chip's define decision, the same read the proof uses
-            "simdef": _simdef if _top_found else "",
+            "simdef": _simdef if (_top_found or _mapped_core) else "",
             "resets": sorted({c["signal"] for o in declared
                               for c in (o.get("program_rule") or {}).get("claims") or []
                               if c.get("rule", "").startswith("reset_")
