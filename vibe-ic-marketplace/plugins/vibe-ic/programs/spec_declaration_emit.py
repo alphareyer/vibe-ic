@@ -359,13 +359,16 @@ _JSON_NUMBER_TEXT = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-
 
 
 def _same_spec_example_value(declared: Any, example: str) -> bool:
-    """Compare a Markdown example with JSON, parsing only explicit number text.
+    """Compare a Markdown example with JSON, parsing exact Boolean/number text.
 
-    Provenance comparison remains type strict.  A Boolean is deliberately not a
+    Provenance comparison remains type strict. A Boolean is deliberately not a
     number here even though Python regards it as an ``int`` subclass.
     """
     if _same_declared_value(declared, example):
         return True
+    if type(declared) is bool:
+        return example in ("true", "false") and _same_declared_value(
+            declared, json.loads(example))
     if type(declared) not in (int, float) or not _JSON_NUMBER_TEXT.fullmatch(example):
         return False
     return _same_declared_value(declared, json.loads(example))

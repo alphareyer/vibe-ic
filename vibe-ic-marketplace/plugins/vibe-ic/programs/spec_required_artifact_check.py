@@ -328,7 +328,8 @@ def _project_contract(run_dir: Path, artifact_path: str):
     return ans
 
 
-def _substance_of(run_dir: Path, artifact_path: str, resolved: Path):
+def _substance_of(run_dir: Path, artifact_path: str, resolved: Path,
+                  detail_out: dict | None = None):
     """(status|None, reason, source).
 
     `status` is None when no substance question could be asked, in which case
@@ -341,9 +342,14 @@ def _substance_of(run_dir: Path, artifact_path: str, resolved: Path):
             rep = _sde.verify_declaration(run_dir, contract, resolved)
         except Exception as exc:  # noqa: BLE001
             return None, "NOT_MEASURED: verify raised %s" % exc, "CONTRACT"
+        if detail_out is not None:
+            detail_out["spec_example_disclosures"] = rep.get("spec_example_disclosures", [])
+            detail_out["spec_example_conflicts"] = rep.get("spec_example_conflicts", [])
         if rep.get("verdict") == "OWNER_REVIEW":
             return "OWNER_REVIEW", rep.get("note", ""), "CONTRACT"
-        if rep.get("verdict") in ("PASS", "PASS_INFORMATIONAL", "DISCLOSE"):
+        if rep.get("verdict") == "DISCLOSE":
+            return "DISCLOSE", rep.get("note", ""), "CONTRACT"
+        if rep.get("verdict") in ("PASS", "PASS_INFORMATIONAL"):
             return "PASS", rep.get("note", ""), "CONTRACT"
         bits = []
         for name in rep.get("missing_required", []):
@@ -410,7 +416,7 @@ def _check_artifact(run_dir: Path, artifact_path: str) -> dict:
         out["status"] = "FAIL_EMPTY"
         return out
     sub_status, sub_reason, sub_source = _substance_of(
-        run_dir, artifact_path, resolved)
+        run_dir, artifact_path, resolved, detail_out=out)
     out["substance_source"] = sub_source
     out["substance_reason"] = sub_reason
     out["status"] = sub_status if sub_status is not None else "PASS"
@@ -432,7 +438,8 @@ def _emit_preflight(results: list[dict]) -> int:
     (nobody has authored them yet), so a non-zero exit here would block every
     correct run. The blocking assertion stays in the normal end-of-phase mode.
     """
-    outstanding = [r for r in results if r["status"] != "PASS"]
+    outstanding = [r for r in results if r["status"] not in
+                   ("PASS", "DISCLOSE", "OWNER_REVIEW")]
     if not results:
         print("spec_required_artifact_preflight: NONE — the input docs declare "
               "no path-shaped mandatory artifact.")
@@ -495,10 +502,12 @@ def main(argv: list[str] | None = None) -> int:
         return _emit_preflight(results)
 
     # Determine overall verdict
-    # OWNER_REVIEW is a machine-readable advisory, not an unsatisfied
-    # artifact. Keep the gate's historical non-blocking behavior for it.
-    fails = [r for r in results if r["status"] not in ("PASS", "OWNER_REVIEW")]
+    # DISCLOSE and OWNER_REVIEW are machine-readable advisories, not
+    # unsatisfied artifacts. Keep the gate non-blocking for both.
+    fails = [r for r in results if r["status"] not in
+             ("PASS", "DISCLOSE", "OWNER_REVIEW")]
     owner_reviews = [r for r in results if r["status"] == "OWNER_REVIEW"]
+    disclosures = [r for r in results if r["status"] == "DISCLOSE"]
     if not results:
         verdict = "VACUOUS_PASS"
         note = ("No path-shaped MUST-emit clauses found in input docs — "
@@ -535,6 +544,8 @@ def main(argv: list[str] | None = None) -> int:
                 f" NOT_MEASURED).")
         if owner_reviews:
             note += f" {len(owner_reviews)} OWNER_REVIEW advisory item(s)."
+        if disclosures:
+            note += f" {len(disclosures)} DISCLOSE advisory item(s)."
 
     report = {
         "schema_version": 1,
@@ -545,8 +556,9 @@ def main(argv: list[str] | None = None) -> int:
         "note": note,
         "clauses_found": len(results),
         "failed_count": len(fails),
-        "advisory_status": "OWNER_REVIEW" if owner_reviews else None,
-        "advisory_count": len(owner_reviews),
+        "advisory_status": ("OWNER_REVIEW" if owner_reviews else
+                            "DISCLOSE" if disclosures else None),
+        "advisory_count": len(owner_reviews) + len(disclosures),
         "results": results,
         # WHICH input-doc roots were actually read, and how many docs each
         # yielded.  A VACUOUS_PASS is only trustworthy if you can see that the

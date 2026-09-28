@@ -91,7 +91,7 @@ def test_boolean_example_matches_only_the_same_json_boolean(
     assert emitter._same_declared_value(declared, int(declared)) is False
 
 
-def test_artifact_gate_preserves_a_disclosed_spec_example_difference(tmp_path):
+def test_artifact_gate_preserves_a_disclosed_spec_example_difference(tmp_path, capsys):
     root, contract = _project(tmp_path, "declared_order", "wire_order",
                               "little", "big")
     declaration = {"wire_order": "big"}
@@ -106,6 +106,11 @@ def test_artifact_gate_preserves_a_disclosed_spec_example_difference(tmp_path):
     item = report["results"][0]
     assert item["status"] == item["substance_status"] == "DISCLOSE"
     assert item["spec_example_disclosures"] == verified["spec_example_disclosures"]
+    assert item["spec_example_disclosures"][0] == {
+        "field": "wire_order", "declared": "big", "spec_example": "little",
+        "source": contract["source"], "reason": None, "reason_present": False}
+    assert artifact_gate.main([str(root), "--preflight"]) == 0
+    assert "ALL 1 spec-declared artifact(s) already present" in capsys.readouterr().out
 
 
 def test_optional_conflicting_examples_are_reported_and_gate_keeps_owner_review(tmp_path):
