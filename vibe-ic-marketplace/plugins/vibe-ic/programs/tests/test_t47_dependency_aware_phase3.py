@@ -111,13 +111,16 @@ def test_real_prestream_gate_refuses_unidentified_routed_basis(tmp_path, monkeyp
     drive = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
     # The shared cache fixture now carries a complete routed basis. Remove
     # this input to exercise this test's original unidentified-basis premise.
-    (R._pl.pnr_dir(project) / "constraint.sdc").unlink()
+    # SDC is consumed by prelayout admission, so removing it correctly blocks
+    # before the prestream gate. Remove the routed DEF to exercise this gate's
+    # own unidentified-layout-basis path while Step 10 remains current.
+    (R._pl.pnr_dir(project) / "routed.def").unlink()
     monkeypatch.setattr(R, "step_prestream_gate", real_gate)
     R.main()
     plan = _plan(project)
     assert "gds" not in drive.called
     assert plan["prestream_gate"]["status"] == "NOT_MEASURED"
-    assert "layout input sdc" in plan["prestream_gate"]["detail"]
+    assert "layout input def" in plan["prestream_gate"]["detail"]
     assert plan["gds"]["status"] == "NOT_MEASURED"
 
 
