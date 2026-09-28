@@ -18,6 +18,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_text  # noqa: E402
 import _eda_image  # noqa: E402
+from drv_signoff_anchor import image_pdk_anchor  # noqa: E402
+from drv_signoff_census import derive as derive_census  # noqa: E402
 from drv_signoff_judge import KINDS, _COMMAND, _sha, parse_check_types  # noqa: E402
 
 _COUNTER = re.compile(
@@ -53,6 +55,75 @@ def _run_fresh(script: Path, roots: set[Path], *, image: str) -> str:
     return body
 
 
+def _census_script(out: Path) -> str:
+    """Ask linked OpenSTA for the final netlist's pins, nets and clock cone."""
+    return '''
+set _drv_clock_pins [list]
+set _drv_sinks [get_pins -hierarchical * -filter {is_register_clock==true}]
+if {[llength $_drv_sinks]} {
+  foreach _p [get_fanin -to $_drv_sinks -flat -trace_arcs enabled] {
+    lappend _drv_clock_pins [get_full_name $_p]
+  }
+}
+foreach _clock [all_clocks] {
+  foreach _p [get_property $_clock sources] {
+    lappend _drv_clock_pins [get_full_name $_p]
+  }
+}
+set _drv_clock_pins [lsort -unique $_drv_clock_pins]
+set _drv_f [open ''' + _tcl(out / "pin_census.tsv") + ''' w]
+foreach _kind {port pin} {
+  if {$_kind eq "port"} { set _pins [get_ports *] } else { set _pins [get_pins -hierarchical *] }
+foreach _p $_pins {
+  set _name [get_full_name $_p]
+  if {[string first "\\t" $_name] >= 0 || [string first "\\n" $_name] >= 0} {
+    error "unsafe pin name in DRV census"
+  }
+  set _inst ""
+  if {$_kind eq "pin"} { set _inst [get_cells -of_objects $_p] }
+  if {$_kind eq "pin" && [get_property $_p is_hierarchical]} { continue }
+  set _cell ""
+  set _inst_name ""
+  set _cell_pin ""
+  if {$_kind eq "pin"} {
+    set _inst_name [get_full_name $_inst]
+    set _cell [get_property $_inst ref_name]
+    set _cell_pin [get_property $_p lib_pin_name]
+    set _driver [sta::Pin_is_driver $_p]
+    set _logic [sta::pin_sim_logic_value $_p]
+    set _ideal [sta::is_ideal_clock $_p]
+  } else {
+    set _driver [expr {[get_property $_p direction] in {input inout}}]
+    set _logic X
+    set _ideal 0
+  }
+  if {$_kind eq "port"} {
+    set _net [get_nets -quiet $_name]
+  } else {
+    set _net [get_nets -of_objects $_p]
+  }
+  set _net_name ""
+  if {[llength $_net] && $_net ne "NULL"} { set _net_name [get_full_name $_net] }
+  set _activity [get_property $_p activity]
+  set _origin [lindex $_activity end]
+  set _rise [get_property $_p slew_max_rise]
+  set _fall [get_property $_p slew_max_fall]
+  puts $_drv_f [join [list $_name $_kind [get_property $_p direction] $_driver \
+       $_inst_name $_cell $_cell_pin $_net_name $_origin $_rise $_fall \
+       [expr {$_origin eq "clock" || $_name in $_drv_clock_pins}] \
+       $_logic $_ideal] "\\t"]
+}
+}
+close $_drv_f
+report_disabled_edges > ''' + _tcl(out / "disabled_edges.rpt") + '''
+set _drv_n [open ''' + _tcl(out / "net_census.rpt") + ''' w]
+close $_drv_n
+foreach _net [get_nets -hierarchical *] {
+  report_net -digits 9 [get_full_name $_net] >> ''' + _tcl(out / "net_census.rpt") + '''
+}
+'''
+
+
 def _script(plan: dict, scene: dict, out: Path, *, control: bool,
             max_count: int) -> str:
     libs = [Path(item["path"]) for item in scene["linked_liberties"]]
@@ -80,6 +151,7 @@ def _script(plan: dict, scene: dict, out: Path, *, control: bool,
                     f'puts $_f "DRV_COUNTER {kind} [sta::{kind}_violation_count]"\n'
                     for kind in KINDS) + "close $_f\n")
     return (prefix
+            + _census_script(out)
             + f"report_parasitic_annotation -report_unannotated > {_tcl(out / 'annotation.rpt')}\n"
             + f"report_clock_properties [all_clocks] > {_tcl(out / 'clocks.rpt')}\n"
             + f"{_COMMAND} -digits 6 -max_count {max_count} > {_tcl(out / 'violators.rpt')}\n"
@@ -115,8 +187,18 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
     bundle["identity"]["tool_image"] = image
     bundle["identity"]["tool_image_digest"] = digest
     bundle["identity"]["tool_image_oci_version"] = version
+    try:
+        bundle["threshold_anchor"] = image_pdk_anchor(
+            image, str(bundle["identity"].get("pdk") or ""),
+            str(bundle["identity"].get("library") or ""))
+        bundle["identity"]["pdk_commit"] = bundle["threshold_anchor"]["pdk_commit"]
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        # Keep the run inspectable.  The judge must refuse PASS without this
+        # independent source and must never accept a plan-supplied substitute.
+        bundle["threshold_anchor_error"] = str(exc)
     bundle["postroute_repair_ran"] = bool(plan.get("postroute_repair_ran"))
     bundle["scenes"] = []
+    bundle["pins"] = {}
     roots = {out_dir}
     for scene in plan["scenes"]:
         for item in (*scene["linked_liberties"], scene["spef"],
@@ -153,8 +235,15 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
                                      scene=scene["name"],
                                      mode=scene["mode"], violators_only=False)
         population = {kind: len(all_rows[kind]) for kind in KINDS}
-        if any(value < 1 for value in population.values()):
-            raise ValueError("fresh OpenSTA all-limits population empty")
+        census = None
+        try:
+            census = derive_census(scene_dir, scene["linked_liberties"], all_rows)
+            population = census["population"]
+            if bundle["pins"] and bundle["pins"] != census["pins"]:
+                raise ValueError("OpenSTA pin identity differs between scenes")
+            bundle["pins"] = census["pins"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            census_error = str(exc)
         # A plan is only a request for measurement. It cannot attest which
         # pins OpenSTA excluded from its own DRV checks.
         row.pop("excluded_pins", None)
@@ -162,7 +251,7 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
         row.pop("excluded_pins_report", None)
         row.pop("clock_network_pins", None)
         row.update(fresh_process=True, postroute=True, propagated_clocks=True,
-                   excluded_pins_recorded=False,
+                   excluded_pins_recorded=census is not None,
                    command=_COMMAND, all_limits_max_count=max_count,
                    population=population,
                    positive_control_fresh_process=True,
@@ -177,6 +266,18 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
                    clock_properties=_ref(scene_dir / "clocks.rpt"),
                    tool_scripts=[_ref(scene_dir / "measure.tcl"),
                                  _ref(scene_dir / "positive_control.tcl")])
+        if census is not None:
+            excluded_path = scene_dir / "excluded_pins.json"
+            write_text(excluded_path, json.dumps(census["excluded"], sort_keys=True) + "\n")
+            row.update(excluded_pins=census["excluded"],
+                       excluded_pins_report=_ref(excluded_path),
+                       clock_network_pins=census["clock_network_pins"],
+                       driver_pin_census=census["driver_pins"],
+                       pin_census_report=_ref(scene_dir / "pin_census.tsv"),
+                       net_census_report=_ref(scene_dir / "net_census.rpt"),
+                       disabled_edges_report=_ref(scene_dir / "disabled_edges.rpt"))
+        else:
+            row["census_error"] = census_error
         bundle["scenes"].append(row)
     return bundle
 

@@ -20,6 +20,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_text  # noqa: E402
+from drv_signoff_anchor import image_pdk_anchor  # noqa: E402
 
 KINDS = ("max_slew", "max_capacitance", "max_fanout")
 _TITLES = {"max slew": KINDS[0], "max capacitance": KINDS[1],
@@ -147,6 +148,7 @@ def _liberty_limits(body: str) -> dict:
         return value * scales[kind] if value is not None else None
     defaults = {kind: scaled(body[:body.find("cell (")], kind, "default_")
                 for kind in KINDS}
+    default_fanout_load = _attribute(body[:body.find("cell (")], "default_fanout_load")
     cells: dict[str, dict] = {}
     pad_cells: set[str] = set()
     for cell in re.finditer(r'\bcell\s*\(\s*"?([^"\)]+)"?\s*\)\s*\{', body):
@@ -161,8 +163,10 @@ def _liberty_limits(body: str) -> dict:
             pins[pin.group(1).strip()] = {
                 kind: scaled(direct, kind)
                 for kind in KINDS}
+            pins[pin.group(1).strip()]["fanout_load"] = _attribute(direct, "fanout_load")
         cells[cell.group(1).strip()] = pins
-    return {"defaults": defaults, "cells": cells, "pad_cells": pad_cells}
+    return {"defaults": defaults, "cells": cells, "pad_cells": pad_cells,
+            "default_fanout_load": default_fanout_load}
 
 
 def _liberty_header(body: str) -> dict[str, float | None]:
@@ -286,22 +290,25 @@ def _annotate_limits(row: dict, kind: str, scene: dict, libs: dict,
             pin_table = lib["limits"]["cells"][cell].get(cell_pin)
             if pin_table is not None:
                 matched.append((linked["name"], lib, pin_table))
-    if len(matched) != 1:
+    is_port = row.get("cell_class") == "port" and not cell and not cell_pin
+    is_internal = row.get("cell_class") == "internal" and not row.get("net")
+    if len(matched) != 1 and not (is_port or is_internal):
         missing.append(f"{scene['name']}: cell/pin Liberty identity unresolved for "
                        f"{row['pin']} ({len(matched)} matches)")
         return False
-    lib_name, lib, pin_table = matched[0]
-    actual_io = cell in lib["limits"]["pad_cells"]
+    lib_name, lib, pin_table = matched[0] if matched else (None, None, {})
+    actual_io = bool(lib and cell in lib["limits"]["pad_cells"])
     if row.get("cell_class") == "IO" and not actual_io:
         missing.append(f"{scene['name']}: IO class lacks Liberty pad_cell proof for {row['pin']}")
         return False
-    row["cell_class"] = "IO" if actual_io else "std"
+    row["cell_class"] = ("port" if is_port else "internal" if is_internal else
+                         "IO" if actual_io else "std")
     if row["net_class"] == "clock" and row["pin"] not in (
             scene.get("clock_network_pins") or []):
         missing.append(f"{scene['name']}: clock net classification lacks tool proof for {row['pin']}")
         return False
     pin_limit = pin_table.get(kind)
-    if pin_limit is None:
+    if pin_limit is None and lib is not None:
         pin_limit = lib["limits"]["defaults"].get(kind)
     explicit = declared.get({"max_slew": "slew_ns",
                              "max_capacitance": "cap_pf",
@@ -319,10 +326,10 @@ def _annotate_limits(row: dict, kind: str, scene: dict, libs: dict,
     row["liberty_limit"] = pin_limit
     row["explicit_limit"] = explicit
     row["effective_limit"] = min(limits)
-    row["liberty_source"] = {"name": lib_name,
-                              "path": lib["identity"].get("path"),
-                              "sha256": lib["identity"].get("sha256"),
-                              "pin": cell_pin}
+    row["liberty_source"] = ({"name": lib_name,
+                               "path": lib["identity"].get("path"),
+                               "sha256": lib["identity"].get("sha256"),
+                               "pin": cell_pin} if lib is not None else None)
     row["limit_source"] = (
         "Liberty" if _positive_number(pin_limit) and
         pin_limit <= (explicit if _positive_number(explicit) else pin_limit)
@@ -453,6 +460,21 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             not re.fullmatch(r"sha256:[0-9a-f]{64}", str(digest)) or
             _installed_image_digest(image) != digest):
         missing.append("OpenSTA image digest not bound to installed image")
+    if project is not None:
+        try:
+            anchor = image_pdk_anchor(
+                image, str(identity.get("pdk") or ""),
+                str(identity.get("library") or ""))
+            if bundle.get("threshold_anchor") != anchor:
+                missing.append("frozen threshold anchor differs from installed image")
+            if ((frozen.get("sources") or {}).get("pdk_config") != anchor["sha256"] or
+                    (current.get("sources") or {}).get("pdk_config", {}).get("sha256")
+                    != anchor["sha256"]):
+                fails.append("PDK threshold source differs from pinned image")
+            if identity.get("pdk_commit") != anchor.get("pdk_commit"):
+                missing.append("PDK commit differs from pinned image version")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            missing.append(f"installed PDK threshold anchor unavailable: {exc}")
     source_texts = {}
     for name in ("l7", "l9", "pdk_config", "signoff_sdc"):
         item = (current.get("sources") or {}).get(name) or {}
@@ -688,6 +710,9 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         if not isinstance(excluded, list) or any(
                 not isinstance(p, dict) or not p.get("pin") or
                 p.get("reason") not in ("constant", "disabled", "ideal") or
+                ("excluded_kinds" in p and
+                 (not isinstance(p["excluded_kinds"], list) or
+                  any(kind not in KINDS for kind in p["excluded_kinds"]))) or
                 any(not isinstance(p.get(axis), (int, float)) for axis in
                     ("fanout", "cap_pf", "slew_rise_ns", "slew_fall_ns"))
                 for p in (excluded or [])):
@@ -707,6 +732,8 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                     ("max_capacitance", "cap_pf", "none"),
                     ("max_slew", "slew_rise_ns", "rise"),
                     ("max_slew", "slew_fall_ns", "fall")):
+                if kind not in item.get("excluded_kinds", KINDS):
+                    continue
                 measured = item.get(axis)
                 if not isinstance(measured, (int, float)):
                     continue
@@ -816,6 +843,30 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                              name + " all limits")
         all_rows = parse_check_types(all_text, scene=name, mode=mode,
                                      violators_only=False)
+        if project is not None:
+            census_refs = ("pin_census_report", "net_census_report",
+                           "disabled_edges_report")
+            census_paths = []
+            for field in census_refs:
+                item = scene.get(field) or {}
+                _evidence(item, missing, name + " " + field)
+                census_paths.append(Path(str(item.get("path") or "")))
+            if (all(path.is_file() for path in census_paths) and
+                    len({path.parent for path in census_paths}) == 1):
+                try:
+                    from drv_signoff_census import derive as derive_census
+                    census = derive_census(census_paths[0].parent,
+                                           scene.get("linked_liberties") or [], all_rows)
+                    if (bundle.get("pins") != census["pins"] or
+                            scene.get("excluded_pins") != census["excluded"] or
+                            scene.get("clock_network_pins") != census["clock_network_pins"] or
+                            scene.get("driver_pin_census") != census["driver_pins"] or
+                            scene.get("population") != census["population"]):
+                        missing.append(f"{name}: independent OpenSTA pin census differs from bundle")
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    missing.append(f"{name}: independent OpenSTA pin census incomplete: {exc}")
+            else:
+                missing.append(f"{name}: independent OpenSTA pin census absent")
         control_text = _evidence(scene.get("positive_control_report") or {},
                                  missing, name + " positive control")
         control_rows = parse_check_types(control_text, scene=name, mode=mode,
