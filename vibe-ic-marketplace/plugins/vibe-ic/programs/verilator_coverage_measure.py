@@ -308,7 +308,9 @@ def verilate_tb_and_run(rtl_files: List[str], tb_path: str, build_dir: str,
             "-Mdir", str(build_dir)]
     if build_jobs > 0:
         vcmd += ["--build-jobs", str(build_jobs)]
-    vcmd += [str(tb)] + [str(f) for f in rtl_files]
+    # Package declarations in the RTL must be parsed before a testbench that
+    # imports their types.  Verilator processes files in command-line order.
+    vcmd += [str(f) for f in rtl_files] + [str(tb)]
     rc, out, err = exec_fn(vcmd, run_dir)
     if rc != 0:
         raise SystemExit(

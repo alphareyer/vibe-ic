@@ -223,7 +223,8 @@ _ENV_GAP_SIGNATURES = (
 # properties, and its verdict.
 _FRONTEND_ABORT_RE = re.compile(
     r"unexpected TOK_IMPORT|unexpected TOK_PACKAGE|unexpected TOK_TYPEDEF"
-    r"|unexpected ':'|Executing Verilog-2005 frontend")
+    r"|unexpected ':'|Executing Verilog-2005 frontend"
+    r"|ERROR: syntax error, unexpected")
 
 
 def frontend_aborted_the_read(transcript: str) -> bool:
@@ -236,6 +237,8 @@ def frontend_aborted_the_read(transcript: str) -> bool:
     if not transcript:
         return False
     if not _FRONTEND_ABORT_RE.search(transcript):
+        return False
+    if re.search(r"\breturned\s+(?:PASS|FAIL|UNKNOWN|TIMEOUT)\b", transcript):
         return False
     return ("did not return a status" in transcript
             or "ERROR: syntax error" in transcript)
@@ -872,7 +875,8 @@ def emit_sby(rtl_files: List[str], harness_file: str, top: str,
              frontend: str = "read_verilog",
              observers: Optional[List[Tuple[str, str]]] = None,
              dut_simdef: Optional[str] = None,
-             kind_engine: Optional[str] = None) -> str:
+             kind_engine: Optional[str] = None,
+             harness_top: Optional[str] = None) -> str:
     """Emit a two-task .sby: a `safety` task (unbounded prove) and a `bmc`
     task (bounded model check). Files are listed under [files] so the Step-5
     evidence gate can resolve every referenced source.
@@ -984,21 +988,22 @@ def emit_sby(rtl_files: List[str], harness_file: str, top: str,
     # stops the task with an ERROR, so an observer can never be left undriven
     # (a free variable) behind a proof. No observers → byte-identical script.
     bind_lines = ""
+    model_top = harness_top or top
     dut_lines = ""
     if dut_simdef is not None and frontend != "read_slang":
         import _chip_synth_read as _csr
         dut_lines = "\n".join(_csr.chip_read_lines(
             [Path(f) for f in rtl_files], dut_simdef)) + "\n"
     if observers or dut_lines:
-        _b = [f"hierarchy -top {top}", "proc", "flatten"]
+        _b = [f"hierarchy -top {model_top}", "proc", "flatten"]
         if dut_lines:
             # SILICON HAS NO INITIALIZERS (R-0915-157): every flattened DUT
             # wire (`<inst>.<net>`) loses its `init`, so design flops start
             # from ARBITRARY state. The harness's own registers (no dot) keep
             # theirs — `f_past_valid` must start at 0.
-            _b.append(f"setattr -unset init {top}/w:*.*")
+            _b.append(f"setattr -unset init {model_top}/w:*.*")
         for lhs, rhs in observers or []:
-            _b.append(f"select -assert-any {top}/w:{rhs}")
+            _b.append(f"select -assert-any {model_top}/w:{rhs}")
             _b.append(f"connect -set {lhs} {rhs}")
         bind_lines = "\n".join(_b) + "\n"
     if kind_engine:
@@ -1027,7 +1032,7 @@ bmc:    {engine_bmc}
 {dut_lines}safety: {_safety_read}
 {kt}: {_safety_read}
 bmc: {_bmc_read}
-{bind_lines}prep -top {top}
+{bind_lines}prep -top {model_top}
 
 [files]
 {files_block}
@@ -1051,7 +1056,7 @@ bmc:    {engine_bmc}
 [script]
 {dut_lines}safety: {_safety_read}
 ~safety: {_bmc_read}
-{bind_lines}prep -top {top}
+{bind_lines}prep -top {model_top}
 
 [files]
 {files_block}
@@ -2566,10 +2571,30 @@ def run(project: Path, harness: Optional[Path] = None,
                 engine_note = ("prove_engines=dual requested; yices-smt2 is "
                                "ABSENT, so only abc pdr ran — no second arm "
                                "was fabricated")
+        # The proof artifact is named for the DUT (`top`), while the formal
+        # harness normally wraps that DUT in its own module. Yosys must prep
+        # the module actually read as the proof root.
+        _htxt = hdst.read_text(errors="replace")
+        _htxt = re.sub(r"/\*.*?\*/|//[^\n]*", "", _htxt, flags=re.S)
+        _hm = re.search(r"\bmodule\s+(?:automatic\s+|static\s+)?([A-Za-z_$][\w$]*)",
+                        _htxt)
+        _harness_top = _hm.group(1) if _hm else top
+        # read_verilog treats a hierarchical expression in the harness as an
+        # implicit free wire. read_slang resolves it during elaboration and
+        # rejects a misspelled path (measured on the shipped SV frontend).
+        # Use that frontend up front for an immediate assertion with a direct
+        # reference; a concurrent SVA still follows the older guarded path.
+        _full_harness = _harness_texts(None, formal_dir, harness)
+        _direct = unbound_hierarchical_refs(_full_harness)
+        _direct_slang = bool(_direct and
+                             re.search(r"\bassert\s*\(", _full_harness) and
+                             not re.search(r"\bassert\s+property\b", _full_harness))
         sby_text = emit_sby(staged_rtl, harness.name, top,
                             safety_depth=safety_depth, bmc_depth=bmc_depth,
                             include_files=staged_hdrs, observers=_observers,
-                            dut_simdef=_dut_simdef, kind_engine=_kind)
+                            dut_simdef=_dut_simdef, kind_engine=_kind,
+                            harness_top=_harness_top,
+                            frontend="read_slang" if _direct_slang else "read_verilog")
         sby_path = formal_dir / f"{top}_formal.sby"
         sby_path.write_text(sby_text)
     else:
@@ -2610,7 +2635,10 @@ def run(project: Path, harness: Optional[Path] = None,
         f"{top or (sby_path.stem if sby_path else 'formal')}_inductive_results.json"
         if inv_h is not None else "results.json")
     _hier = unbound_hierarchical_refs(_htext)
-    if _hier:
+    _sby_text = sby_path.read_text(errors="replace") if sby_path else ""
+    _slang_read = ("read_slang" in _sby_text and
+                   "read_verilog" not in _sby_text)
+    if _hier and not _slang_read:
         return _refuse_hierarchical(formal_dir, project, sby_path, _hier,
                                     "the harness text",
                                     results_name=_refusal_results_name)
@@ -2618,7 +2646,6 @@ def run(project: Path, harness: Optional[Path] = None,
     # task file that runs it. An unbound observer is an undriven wire — the
     # same free variable as `dut.<net>` — so it is refused the same way. This
     # is what catches a REUSED .sby written before the observers existed.
-    _sby_text = sby_path.read_text(errors="replace") if sby_path else ""
     _unreadable = unreadable_observers(_htext)
     if _unreadable:
         return _refuse_hierarchical(formal_dir, project, sby_path, _unreadable,
@@ -2668,7 +2695,8 @@ def run(project: Path, harness: Optional[Path] = None,
                 safety_depth=safety_depth, bmc_depth=bmc_depth,
                 include_files=staged_hdrs, frontend="read_slang",
                 observers=parse_observers(
-                    _harness_texts(None, formal_dir, harness))))
+                    _harness_texts(None, formal_dir, harness)),
+                harness_top=_harness_top))
             transcript = _run_sby(sby_path, formal_dir, container, timeout,
                                   mem_limit_kb=eff_mem_kb)
             transcript = (f"# {_slang_note}\n" + transcript)
