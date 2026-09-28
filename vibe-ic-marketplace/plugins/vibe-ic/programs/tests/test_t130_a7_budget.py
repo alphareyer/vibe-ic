@@ -16,12 +16,11 @@ The rules the producer follows now, each pinned here against the shipped
 
   1. the transient stops at the end of the last measurement window plus one
      sample clock, identically in the pre deck and every post deck;
-  2. every simulation carries a positive deadline -- the same one for pre and
-     post -- from the block's `spec.json` when it states one, else derived
-     from the clock count; `deadline_s=0` is refused;
-  3. a simulation that spends its budget is NOT_MEASURED (exit 75, reason
-     `budget_exhausted`) with the time reached / requested, the wall and the
-     remedy -- never a FAIL, never a hang;
+  2. every simulation records a positive planning budget, while the runner
+     supervises progress rather than killing a healthy simulation by clock;
+  3. an externally stopped simulation is NOT_MEASURED (exit 75, reason
+     `execution_error`) with the time reached / requested and the wall. A
+     budget is exhausted only with proof that it was enforced and spent;
   4. a card that genuinely needs a longer record still gets it, and is named.
 """
 from __future__ import annotations
@@ -127,6 +126,9 @@ if a[0] == "exec":
         dur = a[a.index("timeout") + 3] if "timeout" in a else None
         with open(os.environ["STUB_EXEC_LOG"], "a") as fh:
             fh.write(json.dumps({"deck": deck, "timeout": dur}) + "\n")
+        if os.environ.get("STUB_STALL"):
+            print("WATCHDOG_STALLED: no simulator progress")
+            sys.exit(199)
         mode = os.environ.get("STUB_EXPIRE")
         base = os.path.basename(deck)
         if mode and (mode == "all" or (mode == "post" and "_post_" in base)
@@ -176,6 +178,7 @@ def stub(tmp_path, monkeypatch):
                        str(tmp_path / "pdkroot/tpdk/libs.tech/magic/t.tech"))
     monkeypatch.setenv("STUB_EXEC_LOG", str(tmp_path / "exec.jsonl"))
     monkeypatch.delenv("STUB_EXPIRE", raising=False)
+    monkeypatch.delenv("STUB_STALL", raising=False)
     monkeypatch.delenv("STUB_POST_DENSITY", raising=False)
     monkeypatch.setenv("VIBEIC_DESIGNS_HOST_ROOT", str(tmp_path))
     rcx = tmp_path / "rcx.spice"
@@ -247,6 +250,7 @@ def test_a_budget_the_block_states_is_recorded_not_a_kill_clock(stub):
     assert [s["timeout"] for s in _sims(stub)] == ["0"] * 3
     assert _record(project)["budget"]["source"] == \
         f"spec.json:{SPEC_BUDGET_KEY}"
+    assert _record(project)["budget"]["enforced"] is False
 
 
 @pytest.mark.parametrize("bad", [0, 0.0, -5])
@@ -261,7 +265,7 @@ def test_a_declared_budget_cannot_also_ask_to_run_to_completion():
                          run_to_completion=True)
 
 
-# ── 3. a spent budget is NOT_MEASURED, with its reason ────────────────────
+# ── 3. external stops are NOT_MEASURED, with their own reason ─────────────
 def test_a_pre_run_that_spends_its_budget_is_not_measured_not_failed(
         stub, monkeypatch):
     monkeypatch.setenv("STUB_EXPIRE", "all")
@@ -270,13 +274,13 @@ def test_a_pre_run_that_spends_its_budget_is_not_measured_not_failed(
         EX_BUDGET_EXHAUSTED
     rec = _record(project)
     assert (rec["result"], rec["reason_class"], rec["rule"]) == (
-        "NOT_MEASURED", "budget_exhausted", "A7_SIM_BUDGET_EXHAUSTED")
-    why = rec["budget_exhausted"]
+        "NOT_MEASURED", "execution_error", "A7_SIMULATION_STOPPED_EXTERNALLY")
+    why = rec["external_stop"]
     assert why["simulated_time_reached_s"] == pytest.approx(4.13724e-06)
     assert why["simulated_time_requested_s"] == pytest.approx(1026e-6)
-    assert why["wall_s"] >= 0 and why["budget_s"] > 0
-    assert why["budget_source"] == "default_per_clock"
-    assert "phase3/analog/simulation_budgets.json" in why["remedy"]
+    assert why["wall_s"] >= 0 and why["recorded_budget_s"] > 0
+    assert rec["budget"]["source"] == "default_per_clock"
+    assert why["run_to_completion"] is True
     assert why["deck"].endswith("tb_blk_pre.sp")
     assert not (project / "phase3/analog/blk/pre_vs_post.json").exists()
 
@@ -290,7 +294,7 @@ def test_a_post_run_that_spends_its_budget_keeps_the_pre_result(
     rec = _record(project)
     assert rec["result"] == "NOT_MEASURED"
     assert rec["pre"]["measurements"] == {"density": 0.60}
-    assert rec["budget_exhausted"]["deck"].endswith("tb_blk_post_ngspice.sp")
+    assert rec["external_stop"]["deck"].endswith("tb_blk_post_ngspice.sp")
 
 
 def test_the_runner_reports_a_spent_budget_as_not_measured(
@@ -502,7 +506,7 @@ def test_a_measured_degradation_is_a_fail_even_if_a_later_style_expires(
     assert A7.run(project, "blk", "vibeic-eda", IMAGE) == 1
     rec = _record(project)
     assert rec["rule"] == "A7_POSTSIM_DELTA_TOO_BIG"
-    assert rec["exhausted_styles"] == ["ngspice(hrhc)"]
+    assert rec["stopped_styles"] == ["ngspice(hrhc)"]
     doc = json.loads((project / "phase3/analog/blk/pre_vs_post.json")
                      .read_text())
     assert [s["name"] for s in doc["specs"]] == ["density@ngspice()"]
@@ -516,13 +520,72 @@ def test_a_later_style_that_expires_keeps_the_rows_already_measured(
     assert A7.run(project, "blk", "vibeic-eda", IMAGE) == EX_BUDGET_EXHAUSTED
     rec = _record(project)
     assert (rec["result"], rec["reason_class"]) == ("NOT_MEASURED",
-                                                    "budget_exhausted")
-    assert rec["exhausted_styles"] == ["ngspice(hrhc)"]
-    assert rec["budget_exhausted"]["deck"].endswith(
+                                                    "execution_error")
+    assert rec["stopped_styles"] == ["ngspice(hrhc)"]
+    assert rec["external_stop"]["deck"].endswith(
         "tb_blk_post_ngspice_hrhc.sp")
     doc = json.loads((project / "phase3/analog/blk/pre_vs_post.json")
                      .read_text())
     assert [s["name"] for s in doc["specs"]] == ["density@ngspice()"]
+
+
+def test_first_stopped_style_cannot_supply_a_completed_rows_provenance(
+        stub, monkeypatch):
+    monkeypatch.setenv("STUB_EXPIRE", "post_ngspice.sp")
+    project = _project(stub)
+    assert A7.run(project, "blk", "vibeic-eda", IMAGE) == EX_BUDGET_EXHAUSTED
+    rec = _record(project)
+    doc = json.loads((project / "phase3/analog/blk/pre_vs_post.json")
+                     .read_text())
+    assert [s["name"] for s in doc["specs"]] == ["density@ngspice(hrhc)"]
+    measured = next(c for c in rec["corners"]
+                    if c["extraction_style"] == "ngspice(hrhc)")
+    assert doc["_provenance"]["extracted_netlist"] == \
+        measured["extracted_netlist"]
+    assert doc["_provenance"]["post_layout_netlist"] == \
+        measured["post_layout_netlist"]
+    assert doc["specs"][0]["extracted_netlist"] == \
+        measured["extracted_netlist"]
+    assert doc["specs"][0]["post_layout_netlist"] == \
+        measured["post_layout_netlist"]
+
+
+def test_an_external_stop_before_the_recorded_budget_is_not_exhaustion(
+        stub, monkeypatch):
+    monkeypatch.setenv("STUB_EXPIRE", "all")
+    project = _project(stub)
+    assert A7.run(project, "blk", "vibeic-eda", IMAGE) == EX_BUDGET_EXHAUSTED
+    rec = _record(project)
+    assert (rec["result"], rec["reason_class"], rec["rule"]) == (
+        "NOT_MEASURED", "execution_error", "A7_SIMULATION_STOPPED_EXTERNALLY")
+    assert rec["budget"]["enforced"] is False
+    assert rec["external_stop"]["wall_s"] < rec["budget"]["seconds"]
+    assert rec["external_stop"]["simulated_time_reached_s"] == \
+        pytest.approx(4.13724e-06)
+    assert "budget_exhausted" not in rec
+
+
+def test_a_progress_stall_is_not_a_design_failure_or_spent_budget(
+        stub, monkeypatch):
+    monkeypatch.setenv("STUB_STALL", "1")
+    project = _project(stub)
+    assert A7.run(project, "blk", "vibeic-eda", IMAGE) == EX_BUDGET_EXHAUSTED
+    rec = _record(project)
+    assert (rec["result"], rec["reason_class"], rec["rule"]) == (
+        "NOT_MEASURED", "progress_stalled", "A7_SIMULATION_PROGRESS_STALLED")
+    assert rec["progress_stalled"]["simulator_rc"] == 199
+    assert "budget_exhausted" not in rec
+
+
+def test_budget_exhaustion_requires_the_matching_enforced_deadline():
+    budget = {"seconds": 900}
+    sim = {"stopped": True, "wall_s": 901,
+           "status": {"deadline_s": 900, "run_to_completion": False}}
+    assert A7._budget_spent_proven(sim, budget)
+    assert not A7._budget_spent_proven(
+        {**sim, "status": {**sim["status"], "run_to_completion": True}}, budget)
+    assert not A7._budget_spent_proven({**sim, "wall_s": 898}, budget)
+    assert not A7._budget_spent_proven(sim, {"seconds": 1800})
 
 
 # ── review wave 5 (T130): budgets for decks with no clock, and where ──────
@@ -550,5 +613,5 @@ def test_the_projects_budget_file_wins_and_the_remedy_points_to_it(
     rec = _record(project)
     assert rec["budget"]["source"] == \
         "phase3/analog/simulation_budgets.json:blk"
-    assert "phase3/analog/simulation_budgets.json" in \
-        rec["budget_exhausted"]["remedy"]
+    assert rec["external_stop"]["recorded_budget_s"] == 777
+    assert rec["budget"]["enforced"] is False
