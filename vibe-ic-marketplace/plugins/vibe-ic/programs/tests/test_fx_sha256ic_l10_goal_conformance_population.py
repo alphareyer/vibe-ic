@@ -105,13 +105,17 @@ def test_literal_expected_value_is_never_reclassified_as_a_goal(tmp_path):
                r["status"] == X.NOT_EXECUTED for r in report["results"])
 
 
-def test_percentage_goal_mislabeled_vector_is_not_demanded_as_a_vector(tmp_path):
+def test_explicit_percentage_vector_still_owes_its_own_tb_execution(tmp_path):
+    """A row typed functional_vector keeps its execution debt at this gate even
+    when its expected half states a percentage (ORGANIC #778 no-leak). The
+    goal instrument still measures that percentage (the next test): the row
+    answers to both authorities, and neither drops it."""
     project, l10, tb_dir = _project(tmp_path, percent_vector=True)
     run, report = _gate(project, l10, tb_dir)
-    assert run.returncode == 0, run.stderr
-    assert [r["id"] for r in report["results"]] == [VECTOR["name"]]
-    assert report["coverage_goal_population"]["goals"] == [
-        GOAL["name"], PERCENT_VECTOR["name"]]
+    assert run.returncode == 1, run.stderr
+    assert any(r["id"] == PERCENT_VECTOR["name"] and
+               r["status"] == X.NOT_EXECUTED for r in report["results"])
+    assert report["coverage_goal_population"]["goals"] == [GOAL["name"]]
 
 
 def test_goal_instrument_measures_mislabeled_percentage_goal(tmp_path):
