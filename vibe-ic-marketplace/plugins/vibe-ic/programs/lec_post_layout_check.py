@@ -1511,15 +1511,12 @@ def evaluate_report(doc: dict) -> Dict[str, object]:
                 "producer supplied no counterexample search record", names)
         outcome = search.get("result")
         search_error = lec_cex.residual_search_evidence_error(search, names)
-        # Only a model of a COMPLETE miter decides by itself. A stateful model
-        # starts from a state no declared reset constrains; a NON_EQUIVALENT
-        # count or word resting on such a candidate is not a decided FAIL.
-        if (lec_cex.decides_non_equivalence(search) or verdict_in == "FAIL"
-                or (not lec_cex.is_model_candidate(search)
-                    and ((non_equiv or 0) > 0 or verdict_in == V_NONEQUIV))):
+        # A legacy FAIL word can mean only that equiv_status left points
+        # unproven. The word and a count alone are not counterexamples.
+        if lec_cex.decides_non_equivalence(search):
             result = "FAIL"
-            finding = (f"LEC_POST_NONEQUIV: producer already decided non-equivalence "
-                       f"or SAT miter found a counterexample for {names}; "
+            finding = (f"LEC_POST_NONEQUIV: complete SAT miter found a "
+                       f"counterexample for {names}; "
                        f"trace: {search.get('trace', 'see producer report')}")
         elif verdict_in == V_RUN_ERROR:
             result = "FAIL"
