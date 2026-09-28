@@ -13,6 +13,13 @@ from typing import Any
 AUDIT_REL = "reports/audit/phase23_completion_audit.json"
 REPORT_REL = "reports/orchestrator/phase3_one_shot.json"
 _SHA = re.compile(r"^[0-9a-f]{64}$")
+_PATH_FIELDS = frozenset({"file", "path", "filepath"})
+
+
+def _path_field(key: Any) -> bool:
+    """Structured file fields are citations regardless of filename spelling."""
+    return isinstance(key, str) and (
+        key in _PATH_FIELDS or key.endswith(("_file", "_files", "_path", "_paths")))
 
 
 def digest(path: Path) -> str:
@@ -61,17 +68,18 @@ def bind(project: Path, record: Any, *, extra_paths: tuple[str, ...] = ()) -> di
             if rel != REPORT_REL:
                 found[rel] = digest(path) if path.is_file() else "MISSING"
 
-    def walk(value: Any) -> None:
+    def walk(value: Any, *, explicit: bool = False) -> None:
         if isinstance(value, dict):
-            for item in value.values():
-                walk(item)
+            for key, item in value.items():
+                walk(item, explicit=_path_field(key))
         elif isinstance(value, (list, tuple)):
             for item in value:
-                walk(item)
+                walk(item, explicit=explicit)
         elif isinstance(value, str):
-            add(value)
-            for match in re.finditer(r"(?<![A-Za-z0-9:/])/(?!/)[^\s,;\"'()\[\]{}]+", value):
-                add(match.group().rstrip("."))
+            add(value, explicit=explicit)
+            if not explicit:
+                for match in re.finditer(r"(?<![A-Za-z0-9:/])/(?!/)[^\s,;\"'()\[\]{}]+", value):
+                    add(match.group().rstrip("."))
 
     walk(record)
     for name in extra_paths:
