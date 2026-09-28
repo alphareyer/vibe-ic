@@ -1,0 +1,21 @@
+VPI error: Could not insert intermodpath!
+	port1 = Z, port1_has_index = 0, port1_bit_index = 0
+	port2 = q, port2_has_index = 1, port2_bit_index = 1
+VPI error: Could not insert intermodpath!
+	port1 = Z, port1_has_index = 0, port1_bit_index = 0
+	port2 = p, port2_has_index = 0, port2_bit_index = 0
+SDF INFO: Loading top.sdf from tb.v:7
+SDF INFO: top.sdf:2: Version: 3.0
+SDF INFO: top.sdf:3: Design: top
+SDF INFO: top.sdf:4: Date: 2026-09-28
+SDF INFO: top.sdf:5: Vendor: Parallax
+SDF INFO: top.sdf:6: Program: STA
+SDF INFO: top.sdf:7: Program Version: 3.1.0
+SDF INFO: top.sdf:8: Divider: "/"
+SDF INFO: top.sdf:9: Timescale: 1ns
+SDF INFO: top.sdf:15: INTERCONNECT with port1 = u1.Z index = 0, port2 = q index = 1
+SDF INFO: top.sdf:15: Substituting vpiPort with vpiPortBit for destination port
+SDF ERROR: top.sdf:15: Could not find intermodpath!
+SDF INFO: top.sdf:16: INTERCONNECT with port1 = u2.Z index = 0, port2 = p index = 0
+SDF ERROR: top.sdf:16: Could not find intermodpath!
+tb.v:9: $finish called at 3 (1s)
