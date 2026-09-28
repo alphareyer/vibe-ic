@@ -282,7 +282,12 @@ def _not_measured_finding(record_path: Path,
     pending = rec.get("nontiming_not_determined") or []
     domains = ", ".join(str(r.get("domain")) for r in pending
                         if isinstance(r, dict) and r.get("domain"))
-    if status == "NOT_MEASURED":
+    if rec.get("reason_class") == "missing_sta_report":
+        category = "STA_REPORT_MISSING"
+        candidates = rec.get("sta_candidates") or []
+        what = ("no post-route STA report exists at the checked paths: "
+                + ", ".join(str(path) for path in candidates))
+    elif status == "NOT_MEASURED":
         category = "TIMING_BASIS_NOT_MEASURED"
         what = (f"the post-route timing basis {rec.get('sta_source')!r} carries "
                 "no setup/hold slack or TNS/WNS")
@@ -323,15 +328,25 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
             flag_present=no_repair.exists(),
             log_present=repair_log.exists()))
 
+    named = _not_measured_finding(
+        postroute_timing_repair_dir / MEASUREMENT_NOT_AVAILABLE, decision)
+    if named is not None:
+        stats["not_measured"] = True
+        findings.append(named)
+        if no_repair.exists():
+            findings.append(Finding(
+                "ERROR", "STALE_CLEAN_CERTIFICATE",
+                "no_repair_needed.flag coexists with a NOT_MEASURED Step 32 "
+                "record; the clean certificate cannot be accepted"))
+        return findings, stats
+
     if no_repair.exists():
         stats["repair_needed"] = False
         return findings, stats
 
     if not repair_log.exists():
-        named = _not_measured_finding(
-            postroute_timing_repair_dir / MEASUREMENT_NOT_AVAILABLE, decision)
-        stats["not_measured"] = named is not None
-        findings.append(named or Finding(
+        stats["not_measured"] = False
+        findings.append(Finding(
             "ERROR", "NO_REPAIR_ARTIFACT",
             "Neither postroute_timing_repair/repair_log.json nor "
             "postroute_timing_repair/no_repair_needed.flag found"))

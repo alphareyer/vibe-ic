@@ -89,3 +89,30 @@ def test_readable_sta_without_a_measurement_is_not_a_repair_diagnosis(tmp_path):
     assert "non-timing sign-off domain FAILED" not in status["remediation"]
     assert not flag.exists()
     assert not (repair_dir / "repair_log.json").exists()
+
+
+def test_missing_sta_revokes_old_clean_certificate_and_names_missing_sources(tmp_path):
+    repair_dir = tmp_path / "phase3/stage3/postroute_timing_repair"
+    repair_dir.mkdir(parents=True)
+    for name in ("no_repair_needed.flag", "no_repair_summary.json", "repair_log.json"):
+        (repair_dir / name).write_text("stale result\n")
+
+    result = _run(tmp_path)
+    assert result.returncode == 2
+    status = json.loads((repair_dir / "measurement_not_available.json").read_text())
+    assert status["verdict"] == "NOT_MEASURED"
+    assert status["reason_class"] == "missing_sta_report"
+    assert status["sta_source"] is None
+    assert "phase3/stage3/sta/sta_spef_based.rpt" in status["sta_candidates"]
+    assert "Re-run post-route STA" in status["remediation"]
+    assert all(not (repair_dir / name).exists() for name in
+               ("no_repair_needed.flag", "no_repair_summary.json", "repair_log.json"))
+
+    audit = subprocess.run(
+        [sys.executable, str(PROG.with_name("postroute_timing_repair_audit.py")),
+         str(tmp_path), "--json", str(tmp_path / "audit.json")],
+        capture_output=True, text=True)
+    assert audit.returncode == 1
+    report = json.loads((tmp_path / "audit.json").read_text())
+    assert report["summary"]["pass"] is False
+    assert "STA_REPORT_MISSING" in {f["category"] for f in report["findings"]}

@@ -119,6 +119,9 @@ def test_real_arm_skips_clean_input_but_runs_on_injected_violation(tmp_path,
     monkeypatch.setattr(closure, "load_registry", registry)
     monkeypatch.setattr(closure, "ClosureController", Controller)
     candidate = {"setup_ws_min": 0.3, "hold_ws_min": 0.2, "drv_count": 0}
+    # The mainline arm now also reads the census step's state_out metrics.
+    # Supply that EDA output while _candidate is replaced by this fixture.
+    (tmp_path / "state_out.json").write_text(json.dumps({"metrics": {}}))
     monkeypatch.setattr(P, "_candidate", lambda *_args: (tmp_path, dict(candidate)))
 
     def run(label):

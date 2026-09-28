@@ -32,6 +32,26 @@ def test_pass_no_repair_needed(tmp_path):
     assert report["summary"]["repair_needed"] is False
 
 
+def test_unmeasured_record_refuses_stale_clean_flag(tmp_path):
+    repair_dir = tmp_path / "phase3/stage3/postroute_timing_repair"
+    repair_dir.mkdir(parents=True)
+    (repair_dir / "no_repair_needed.flag").write_text("old clean certificate\n")
+    _write_json(repair_dir / "measurement_not_available.json", {
+        "verdict": "NOT_MEASURED", "reason_class": "missing_sta_report",
+        "sta_source": None,
+        "sta_candidates": ["phase3/stage3/sta/sta_spef_based.rpt"],
+        "timing_basis_status": "NOT_MEASURED",
+        "remediation": "Re-run post-route STA before deciding whether repair is needed.",
+    })
+
+    result = _run(tmp_path)
+    assert result.returncode == 1
+    report = json.loads((tmp_path / "out.json").read_text())
+    assert report["summary"]["pass"] is False
+    assert report["summary"]["repair_needed"] is None
+    assert "STA_REPORT_MISSING" in {f["category"] for f in report["findings"]}
+
+
 def test_pass_repair_reverified(tmp_path):
     _write_json(tmp_path / "phase3" / "stage3" / "postroute_timing_repair" / "repair_log.json", {
         "changes": [{"type": "buffer_insert", "net": "clk"}],

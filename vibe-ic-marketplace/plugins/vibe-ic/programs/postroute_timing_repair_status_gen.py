@@ -83,6 +83,13 @@ _TRAILING_NEG_RE = re.compile(rf"\s(-(?:\d+(?:\.\d*)?|\.\d+))\s*$")
 _MAX_ROWS = 20
 
 
+def _revoke_stale_outcomes(repair_dir: Path) -> None:
+    """An unmeasured run cannot retain a prior clean or repaired certificate."""
+    for name in ("no_repair_needed.flag", "no_repair_summary.json",
+                 "repair_log.json"):
+        (repair_dir / name).unlink(missing_ok=True)
+
+
 def _parse_sta_for_violations(sta_text: str) -> dict:
     """Classify one STA report into a timing measurement and the rest.
 
@@ -229,8 +236,30 @@ def main(argv=None) -> int:
     ]
     sta_rpt = next((p for p in sta_candidates if p.is_file()), None)
     if sta_rpt is None:
-        print("VACUOUS_PASS: no STA report found — phase3 not yet run.",
-              file=sys.stderr)
+        _revoke_stale_outcomes(postroute_timing_repair_dir)
+        status_path = postroute_timing_repair_dir / "measurement_not_available.json"
+        remediation = ("Re-run post-route STA and confirm it reports measured "
+                       "timing slack or TNS/WNS before deciding whether repair "
+                       "is needed.")
+        status = {
+            "program": "postroute_timing_repair_status_gen",
+            "verdict": "NOT_MEASURED",
+            "reason_class": "missing_sta_report",
+            "sta_source": None,
+            "sta_candidates": [str(path.relative_to(project)) for path in sta_candidates],
+            "timing_basis_status": "NOT_MEASURED",
+            "timing_repair_needed": False,
+            "nontiming_failures": [],
+            "nontiming_not_determined": [],
+            "trigger_reason": "No candidate post-route STA report exists.",
+            "remediation": remediation,
+        }
+        _aa.write_json(status_path, status)
+        summary = {**status, "project": str(project),
+                   "artefact": str(status_path.relative_to(project))}
+        if args.json:
+            _aa.write_json(Path(args.json), summary)
+        print(json.dumps(summary, indent=2))
         return 2
 
     text = sta_rpt.read_text(errors="ignore")
@@ -285,9 +314,7 @@ def main(argv=None) -> int:
                       and (decision["timing_basis_status"] == "NOT_MEASURED"
                            or decision["nontiming_not_determined"]))
     if no_measurement:
-        for stale in ("no_repair_needed.flag", "no_repair_summary.json",
-                      "repair_log.json"):
-            (postroute_timing_repair_dir / stale).unlink(missing_ok=True)
+        _revoke_stale_outcomes(postroute_timing_repair_dir)
         status_path = postroute_timing_repair_dir / "measurement_not_available.json"
         remediation = (
             _rerun_sta
