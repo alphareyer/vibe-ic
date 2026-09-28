@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1370
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1370)
+- **Total programs (excluding helpers / shims):** 1371
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1371)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1361 |
+| `any` | 1362 |
 
 ## Alphabetical listing
 
@@ -729,6 +729,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `librelane_eqy` | any | — | Step 13 arm B: LibreLane Yosys.EQY beside lec_run (arm A). |
 | `librelane_fill_dfm` | any | — | Steps 34 (fill) and 35 (DFM) on the tool, opt-in through the contract. |
 | `librelane_image_facts` | any | — | What the vibeic-eda image in hand says about its own LibreLane: read at run time, never stored. |
+| `librelane_import` | any | — | import a LibreLane run into the canonical tree (llv1 W6). |
 | `librelane_ir_antenna` | any | — | Opt-in steps 24, 26 and 26.5ic through LibreLane tool steps. |
 | `librelane_postroute` | any | — | Steps 28, 29 and 33 read the post-route state the tool already produced. |
 | `librelane_postroute_repair` | any | — | step 32 (post-route repair) on LibreLane (T102). |
@@ -1442,7 +1443,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1361 programs)
+### `any` (1362 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2142,6 +2143,7 @@ _(no programs in this group)_
 - `librelane_eqy` — Step 13 arm B: LibreLane Yosys.EQY beside lec_run (arm A).
 - `librelane_fill_dfm` — Steps 34 (fill) and 35 (DFM) on the tool, opt-in through the contract.
 - `librelane_image_facts` — What the vibeic-eda image in hand says about its own LibreLane: read at run time, never stored.
+- `librelane_import` — import a LibreLane run into the canonical tree (llv1 W6).
 - `librelane_ir_antenna` — Opt-in steps 24, 26 and 26.5ic through LibreLane tool steps.
 - `librelane_postroute` — Steps 28, 29 and 33 read the post-route state the tool already produced.
 - `librelane_postroute_repair` — step 32 (post-route repair) on LibreLane (T102).

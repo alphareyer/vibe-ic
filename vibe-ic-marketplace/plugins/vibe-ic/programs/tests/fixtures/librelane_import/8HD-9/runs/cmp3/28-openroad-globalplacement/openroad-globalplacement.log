@@ -1,0 +1,64 @@
+Reading timing models for corner nom_tt_025C_5v00…
+Reading timing library for the 'nom_tt_025C_5v00' corner at '/foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00.lib'…
+Reading timing library for the 'nom_tt_025C_5v00' corner at '/foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_io/lib/gf180mcu_fd_io__tt_025C_5v00.lib'…
+Reading OpenROAD database at '/host/cmp3/librelane_8HD-9/design/runs/cmp3/26-odb-customioplacement/spm.odb'…
+Reading design constraints file at '/host/cmp3/librelane_8HD-9/design/src/impl.sdc'…
+[INFO] Using clock clk…
+[INFO] Setting output delay to: 4.8
+[INFO] Setting input delay to: 4.8
+[INFO] Setting load to: 0.07291
+[INFO] Setting clock uncertainty to: 0.25
+[INFO] Setting clock transition to: 0.15
+[INFO] Setting timing derate to: 5%
+[INFO] No information on clock propagation in input SDC file-- propagating all clocks.
+[INFO] Setting signal min routing layer to: Metal2 and clock min routing layer to Metal2. 
+[INFO] Setting signal max routing layer to: Metal5 and clock max routing layer to Metal5. 
++ global_placement -density 0.5 -routability_driven -pad_right 0 -pad_left 0 -init_wirelength_coef 0.25
+[INFO GPL-0001] ---- Initialize GPL Main Data Structures
+[INFO GPL-0002] DBU: 2000
+[INFO GPL-0003] SiteSize: (  0.560  3.920 ) um
+[INFO GPL-0004] CoreBBox: (  6.720 15.680 ) ( 156.800 164.640 ) um
+[INFO GPL-0016] Core area:                   22355.917 um^2
+[INFO GPL-0036] Movable instances area:       8572.256 um^2
+[INFO GPL-0037] Total instances area:         9520.582 um^2
+[INFO GPL-0035] Pin density area adjust:       243.234 um^2
+[INFO GPL-0032] ---- Initialize Region: Top-level
+[INFO GPL-0006] Number of instances:               469
+[INFO GPL-0007] Movable instances:                 253
+[INFO GPL-0008] Fixed instances:                   216
+[INFO GPL-0009] Dummy instances:                     0
+[INFO GPL-0010] Number of nets:                    288
+[INFO GPL-0011] Number of pins:                    954
+[INFO GPL-0012] Die BBox:       (  0.000  0.000 ) ( 163.635 181.555 ) um
+[INFO GPL-0013] Placement BBox: (  6.720 15.680 ) ( 156.800 164.640 ) um
+[INFO GPL-0014] Region name: top-level.
+[INFO GPL-0015] Region area:                 22355.917 um^2
+[INFO GPL-0017] Fixed instances area:          948.326 um^2
+[INFO GPL-0018] Movable instances area:       8815.490 um^2
+[INFO GPL-0019] Utilization:                    41.179 %
+[INFO GPL-0020] Standard cells area:          8815.490 um^2
+[INFO GPL-0021] Large instances area:            0.000 um^2
+[INFO GPL-0005] ---- Execute Conjugate Gradient Initial Placement.
+[INFO GPL-0051] Source of initial instance position counters:
+	Odb location = 0	Core center = 253	Region center = 0
+[InitialPlace]  Iter: 1 conjugate gradient residual: 0.00000008 HPWL: 26962630
+[InitialPlace]  Iter: 2 conjugate gradient residual: 0.00000288 HPWL: 17266736
+[InitialPlace]  Iter: 3 conjugate gradient residual: 0.00000184 HPWL: 13406820
+[InitialPlace]  Iter: 4 conjugate gradient residual: 0.00000011 HPWL: 12874619
+[InitialPlace]  Iter: 5 conjugate gradient residual: 0.00000011 HPWL: 12765585
+[INFO GPL-0033] ---- Initialize Nesterov Region: Top-level
+[INFO GPL-0023] Placement target density:       0.5000
+[INFO GPL-0024] Movable insts average area:     34.844 um^2
+[INFO GPL-0025] Ideal bin area:                 69.688 um^2
+[INFO GPL-0026] Ideal bin count:                   320
+[INFO GPL-0027] Total bin area:              22355.917 um^2
+[INFO GPL-0028] Bin count (X, Y):          16 ,     16
+[INFO GPL-0029] Bin size (W * H):       9.380 *  9.310 um
+[INFO GPL-0030] Number of bins:                    256
+[INFO GPL-0084] ---- Execute Nesterov Global Placement.
+[INFO GPL-0031] HPWL: Half-Perimeter Wirelength
+Iteration | Overflow |     HPWL (um) |  HPWL(%) |   Penalty | Group
+---------------------------------------------------------------
+        0 |   0.8596 |  3.301829e+03 |   +0.00% |  2.40e-15 |      
+       10 |   0.8566 |  3.602282e+03 |   +9.10% |  3.91e-15 |      
+       20 |   0.8606 |  3.702381e+03 |   +2.78% |  6.36e-15 |      

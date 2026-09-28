@@ -1,0 +1,42 @@
+[WARNING ORD-0039] .openroad ignored with -python
+[WARNING] Overriding minimum distance 0.1 with 0.84 for pins on side N to avoid overlap.
+Top-level design name: spm
+Block boundaries: 0 0 327270 363110
+Horizontal Tracks Origin: 560, Count: 324, Step: 1120
+Vertical Tracks Origin: 560, Count: 292, Step: 1120
+Placement details for the N side
+Virtual pin count:  0
+Actual pin count:  32
+Total pin count:  32
+Tracks count:  146
+Tracks per pin:  4
+Used tracks count:  125
+Unused track count:  21
+Starting track index:  10
+Placement details for the E side
+Virtual pin count:  0
+Actual pin count:  1
+Total pin count:  1
+Tracks count:  162
+Tracks per pin:  162
+Used tracks count:  1
+Unused track count:  161
+Starting track index:  80
+Placement details for the W side
+Virtual pin count:  0
+Actual pin count:  2
+Total pin count:  2
+Tracks count:  162
+Tracks per pin:  81
+Used tracks count:  82
+Unused track count:  80
+Starting track index:  40
+Placement details for the S side
+Virtual pin count:  1
+Actual pin count:  1
+Total pin count:  2
+Tracks count:  146
+Tracks per pin:  73
+Used tracks count:  74
+Unused track count:  72
+Starting track index:  36

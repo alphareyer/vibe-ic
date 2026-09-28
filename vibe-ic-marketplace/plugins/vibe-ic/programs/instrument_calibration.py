@@ -2468,6 +2468,137 @@ _register(Instrument(
 ))
 
 
+# ---- LibreLane flow.log: did the run finish? (llv1 W6 review) ----
+
+_LL_FLOW_END_PROV = (
+    "Real LibreLane flow.log (LibreLane 3.1.0.dev1, Classic flow, 8hd-3 "
+    "`librelane_spm/runs/`). Kept byte-unedited, only the flow's own grammar "
+    "lines: `Starting…`, `Running '<id>' at '<dir>'…`, `Logging subprocess to "
+    "'<path>'…`, `Skipping …`, `Returning state unaltered…`, `Saving views to "
+    "'<dir>'…` and `Flow complete.`; every other line is dropped because it "
+    "names the design. ")
+
+
+def _judge_flow_finished(log: str) -> Optional[str]:
+    import librelane_import as L
+    return None if L.flow_status(log)["complete"] else "FLOW_INCOMPLETE"
+
+
+_register(Instrument(
+    name="librelane_import::flow_status",
+    reads="LibreLane's own run-level flow.log (`Starting…` / `Flow complete.`)",
+    ruling="llv1: when LibreLane fails, an honest FAIL (W6 review)",
+    owner="rvw6",
+    why=("A run LibreLane did not finish must never be imported as final, "
+         "with its missing steps read as steps the flow does not do. "
+         "LibreLane prints its failure after flow.log is closed, so an "
+         "aborted log simply stops. The pair is a real aborted run and a "
+         "real finished run of the same flow."),
+    judge=_judge_flow_finished,
+    positive=Sample(
+        provenance=(_LL_FLOW_END_PROV + "Run t89_ref_077_pure_fail: "
+                    "OpenROAD.STAMidPNR (step 30) died in a Tcl error in "
+                    "sta/corner.tcl and wrote no state_out.json; flow.log "
+                    "sha256 486e6ee114cb4a14022645edb83d42976b6ade4c3879595c"
+                    "2e6a3d31c1d721df, 77 lines, 54 kept. calibration/"
+                    "librelane_flow_log_failed_positive.log"),
+        artefact=_read("librelane_flow_log_failed_positive.log")),
+    expect="FLOW_INCOMPLETE",
+    negative=Sample(
+        provenance=(_LL_FLOW_END_PROV + "Run t78_ref_0925 (the clean "
+                    "reference, rc 0): flow.log sha256 d9ac3abe43292932485f"
+                    "3697429a4551ec75bfb2d525dd5442405cf2181b846d, 317 lines, "
+                    "166 kept. calibration/"
+                    "librelane_flow_log_finished_negative.log"),
+        artefact=_read("librelane_flow_log_finished_negative.log")),
+))
+
+
+# ---- LibreLane flow.log: cut runs and deferred errors (llv1 W6 review 3) ----
+
+_LL_FLOW_CUT_PROV = (
+    "Real LibreLane flow.log (LibreLane 3.1.0.dev1, Classic flow, 8hd-3 "
+    "`librelane_spm/runs/`). Kept byte-unedited, only the flow's own grammar "
+    "lines: `Starting…`, `Running '<id>' at '<dir>'…`, `Logging subprocess "
+    "to '<path>'…`, `Skipping …`, `Gating variable for step '<id>' set to "
+    "'False'…`, `Returning state unaltered…`, `Saving views to '<dir>'…`, "
+    "`Flow complete.` and checker lines ending ` - deferred`; every other "
+    "line is dropped because it names the design. ")
+
+
+def _judge_run_cut(log: str) -> Optional[str]:
+    import librelane_import as L
+    cuts = L.run_cuts(log)
+    return "RUN_CUT" if (cuts["before"] or cuts["between"]
+                         or cuts["after"]) else None
+
+
+_register(Instrument(
+    name="librelane_import::run_cuts",
+    reads="LibreLane's own run-level flow.log (`Skipping step` / `Gating "
+          "variable` lines around the started steps)",
+    ruling="llv1: a step a run was cut off from is not a step the flow "
+           "does not perform (W6 review 3)",
+    owner="rvw6",
+    why=("A run stopped with --to (or --from / --skip) still prints `Flow "
+         "complete.`, so the steps it never reached would read as steps "
+         "LibreLane does not do. The reader must tell a real --to run from a "
+         "full run whose only skips are RUN_* gated steps. The pair is a real "
+         "--to run and the real clean reference, which gates four steps."),
+    judge=_judge_run_cut,
+    positive=Sample(
+        provenance=(_LL_FLOW_CUT_PROV + "Run t79_076_smoke: 6 steps started "
+                    "(up to Yosys.Synthesis), then 77 `Skipping step` lines "
+                    "and `Flow complete.`; flow.log sha256 01b97bd5270d6196c5b"
+                    "7f6c9a3042be8017d11c021707cfb69a263d63fc98391, 97 lines, "
+                    "93 kept. calibration/librelane_flow_log_cut_to_positive.log"),
+        artefact=_read("librelane_flow_log_cut_to_positive.log")),
+    expect="RUN_CUT",
+    negative=Sample(
+        provenance=(_LL_FLOW_CUT_PROV + "Run t78_ref_0925 (the clean "
+                    "reference, rc 0), every skip preceded by its gating line; "
+                    "flow.log sha256 d9ac3abe43292932485f3697429a4551ec75bfb2d5"
+                    "25dd5442405cf2181b846d, 317 lines, 170 kept. calibration/"
+                    "librelane_flow_log_gated_negative.log"),
+        artefact=_read("librelane_flow_log_gated_negative.log")),
+))
+
+
+def _judge_deferred(log: str) -> Optional[str]:
+    import librelane_import as L
+    return "DEFERRED_ERROR" if L.deferred_errors(log) else None
+
+
+_register(Instrument(
+    name="librelane_import::deferred_errors",
+    reads="LibreLane's own run-level flow.log (checker lines ending "
+          "` - deferred`, in the block of the step that raised them)",
+    ruling="llv1: when LibreLane fails, an honest FAIL naming the step "
+           "(W6 review 3)",
+    owner="rvw6",
+    why=("A checker's deferred error lets every step run and then withholds "
+         "`Flow complete.`; blaming the last started step names the wrong "
+         "step and log. The pair is a real run that ended that way and the "
+         "real clean reference."),
+    judge=_judge_deferred,
+    positive=Sample(
+        provenance=(_LL_FLOW_CUT_PROV + "Run t79_076_full_rc9_failed: "
+                    "Checker.TrDRC logged `2 Routing DRC errors found. - "
+                    "deferred`, every later step ran, `Saving views` was "
+                    "written and `Flow complete.` never was; flow.log sha256 "
+                    "4f4db576869ad3761125eac43371261a08f54b5e128bb0e3bebad9aa8"
+                    "3426beb, 316 lines, 170 kept. calibration/"
+                    "librelane_flow_log_deferred_positive.log"),
+        artefact=_read("librelane_flow_log_deferred_positive.log")),
+    expect="DEFERRED_ERROR",
+    negative=Sample(
+        provenance=(_LL_FLOW_CUT_PROV + "Run t78_ref_0925 (the clean "
+                    "reference, rc 0). calibration/"
+                    "librelane_flow_log_gated_negative.log"),
+        artefact=_read("librelane_flow_log_gated_negative.log")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════

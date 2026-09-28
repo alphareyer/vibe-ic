@@ -1,0 +1,27 @@
+103. Printing statistics.
+
+=== spm ===
+
+        +----------Local Count, excluding submodules.
+        |        +-Local Area, excluding submodules.
+        |        | 
+      257        - wires
+      288        - wire bits
+      132        - public wires
+      163        - public wire bits
+        5        - ports
+       36        - port bits
+      253 8.57E+03 cells
+        1   21.952   gf180mcu_fd_sc_mcu7t5v0__and3_1
+       32  561.971   gf180mcu_fd_sc_mcu7t5v0__aoi21_1
+       31  272.205   gf180mcu_fd_sc_mcu7t5v0__clkinv_1
+       64 4.78E+03   gf180mcu_fd_sc_mcu7t5v0__dffrnq_1
+       31  340.256   gf180mcu_fd_sc_mcu7t5v0__nand2_1
+       31  476.358   gf180mcu_fd_sc_mcu7t5v0__nand3_1
+        1   13.171   gf180mcu_fd_sc_mcu7t5v0__nor2_1
+       31   544.41   gf180mcu_fd_sc_mcu7t5v0__oai21_1
+       31 1.57E+03   gf180mcu_fd_sc_mcu7t5v0__xor3_1
+
+   Chip area for module '\spm': 8572.256000
+     of which used for sequential elements: 4776.755200 (55.72%)
+

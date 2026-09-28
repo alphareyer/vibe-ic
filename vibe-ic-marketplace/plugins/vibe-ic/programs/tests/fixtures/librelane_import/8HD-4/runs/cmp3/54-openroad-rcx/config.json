@@ -1,0 +1,7 @@
+{
+  "DEFAULT_CORNER": "nom_tt_025C_5v00",
+  "meta": {
+    "librelane_version": "3.1.0.dev1",
+    "step": "OpenROAD.RCX"
+  }
+}

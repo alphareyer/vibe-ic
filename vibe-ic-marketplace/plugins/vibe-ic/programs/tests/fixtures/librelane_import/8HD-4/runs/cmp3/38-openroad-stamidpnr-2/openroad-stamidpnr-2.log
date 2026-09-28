@@ -1,0 +1,57 @@
+Reading timing models for corner nom_tt_025C_5v00…
+Reading timing library for the 'nom_tt_025C_5v00' corner at '/foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00.lib'…
+Reading timing library for the 'nom_tt_025C_5v00' corner at '/foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_io/lib/gf180mcu_fd_io__tt_025C_5v00.lib'…
+Reading OpenROAD database at '/host/cmp3/librelane_8HD-4/design/runs/cmp3/37-openroad-resizertimingpostcts/spm.odb'…
+Reading design constraints file at '/host/cmp3/librelane_8HD-4/design/src/impl.sdc'…
+[INFO] Using clock clk…
+[INFO] Setting output delay to: 4.8
+[INFO] Setting input delay to: 4.8
+[INFO] Setting load to: 0.07291
+[INFO] Setting clock uncertainty to: 0.25
+[INFO] Setting clock transition to: 0.15
+[INFO] Setting timing derate to: 5%
+[INFO] No information on clock propagation in input SDC file-- propagating all clocks.
+%OL_CREATE_REPORT min.rpt
+
+===========================================================================
+report_checks -path_delay min (Hold)
+============================================================================
+======================= nom_tt_025C_5v00 Corner ===================================
+
+Startpoint: _375_ (rising edge-triggered flip-flop clocked by clk)
+Endpoint: _375_ (rising edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: min
+
+Fanout         Cap        Slew       Delay        Time   Description
+---------------------------------------------------------------------------------------------
+                                  0.000000    0.000000   clock clk (rise edge)
+                                  0.000000    0.000000   clock source latency
+     1    0.033293    0.168726    0.082616    0.082616 ^ clk (in)
+                                                         clk (net)
+                      0.168727    0.000000    0.082616 ^ clkbuf_0_clk/I (gf180mcu_fd_sc_mcu7t5v0__clkbuf_16)
+    16    0.233660    0.281464    0.371277    0.453893 ^ clkbuf_0_clk/Z (gf180mcu_fd_sc_mcu7t5v0__clkbuf_16)
+                                                         clknet_0_clk (net)
+                      0.281473    0.002386    0.456279 ^ clkbuf_4_0_0_clk/I (gf180mcu_fd_sc_mcu7t5v0__clkbuf_8)
+     2    0.050822    0.158506    0.310416    0.766694 ^ clkbuf_4_0_0_clk/Z (gf180mcu_fd_sc_mcu7t5v0__clkbuf_8)
+                                                         clknet_4_0_0_clk (net)
+                      0.158506    0.000629    0.767323 ^ clkbuf_5_0__f_clk/I (gf180mcu_fd_sc_mcu7t5v0__clkbuf_16)
+     2    0.012730    0.081930    0.229337    0.996660 ^ clkbuf_5_0__f_clk/Z (gf180mcu_fd_sc_mcu7t5v0__clkbuf_16)
+                                                         clknet_5_0__leaf_clk (net)
+                      0.081930    0.000112    0.996773 ^ _375_/CLK (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+     1    0.005018    0.114351    0.682802    1.679574 v _375_/Q (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                                                         dsa[30].last_carry (net)
+                      0.114351    0.000046    1.679620 v _237_/I (gf180mcu_fd_sc_mcu7t5v0__clkinv_1)
+     2    0.012332    0.242770    0.175954    1.855574 ^ _237_/ZN (gf180mcu_fd_sc_mcu7t5v0__clkinv_1)
+                                                         _003_ (net)
+                      0.242770    0.000083    1.855657 ^ _260_/A1 (gf180mcu_fd_sc_mcu7t5v0__oai21_1)
+     1    0.004268    0.150971    0.124660    1.980317 v _260_/ZN (gf180mcu_fd_sc_mcu7t5v0__oai21_1)
+                                                         dsa[30].last_carry_next (net)
+                      0.150971    0.000038    1.980355 v _375_/D (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                                              1.980355   data arrival time
+
+                                  0.000000    0.000000   clock clk (rise edge)
+                                  0.000000    0.000000   clock source latency
+     1    0.033293    0.168726    0.082616    0.082616 ^ clk (in)
+                                                         clk (net)
+                      0.16872

@@ -1,0 +1,13 @@
+{
+    "json_h": "/host/cmp3/librelane_8HD-4/design/runs/cmp3/05-yosys-jsonheader/spm.h.json",
+    "nl": "/host/cmp3/librelane_8HD-4/design/runs/cmp3/21-openroad-generatepdn/spm.nl.v",
+    "sdf": {
+        "nom_tt_025C_5v00": "/host/cmp3/librelane_8HD-4/design/runs/cmp3/12-openroad-staprepnr/nom_tt_025C_5v00/spm__nom_tt_025C_5v00.sdf",
+        "nom_ss_125C_4v50": "/host/cmp3/librelane_8HD-4/design/runs/cmp3/12-openroad-staprepnr/nom_ss_125C_4v50/spm__nom_ss_125C_4v50.sdf",
+        "nom_ff_n40C_5v50": "/host/cmp3/librelane_8HD-4/design/runs/cmp3/12-openroad-staprepnr/nom_ff_n40C_5v50/spm__nom_ff_n40C_5v50.sdf"
+    },
+    "odb": "/host/cmp3/librelane_8HD-4/design/runs/cmp3/21-openroad-generatepdn/spm.odb",
+    "def": "/host/cmp3/librelane_8HD-4/design/runs/cmp3/21-openroad-generatepdn/spm.def",
+    "sdc": "/host/cmp3/librelane_8HD-4/design/runs/cmp3/21-openroad-generatepdn/spm.sdc",
+    "pnl": "/host/cmp3/librelane_8HD-4/design/runs/cmp3/21-openroad-generatepdn/spm.pnl.v"
+}

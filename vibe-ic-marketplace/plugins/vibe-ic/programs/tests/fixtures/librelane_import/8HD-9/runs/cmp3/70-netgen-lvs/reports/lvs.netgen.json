@@ -1,0 +1,317 @@
+{
+  "verdict": "match",
+  "verdict_reason": "circuits match uniquely",
+  "summary": {
+    "devices": {"ckt1": 411, "ckt2": 411},
+    "nets": {"ckt1": 443, "ckt2": 443},
+    "unmatched_nets": {"ckt1": 0, "ckt2": 0},
+    "unmatched_devices": {"ckt1": 0, "ckt2": 0},
+    "property_error_count": 0,
+    "property_error_cells": [],
+    "failed_subcells": []
+  },
+  "shorts": [],
+  "opens": [],
+  "filtered_devices": {"total": 0, "rules": []},
+  "pin_mismatches": [],
+  "property_mismatches": [],
+  "worst_property_mismatch": null,
+  "cells": [
+  {
+   "pins": [
+      [
+        "D",
+        "RN",
+        "CLK",
+        "Q",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "D",
+        "RN",
+        "CLK",
+        "Q",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "A1",
+        "A2",
+        "B",
+        "ZN",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "A1",
+        "A2",
+        "B",
+        "ZN",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "I",
+        "Z",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "I",
+        "Z",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "A1",
+        "A2",
+        "B",
+        "ZN",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "A1",
+        "A2",
+        "B",
+        "ZN",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "I",
+        "Z",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "I",
+        "Z",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "A1",
+        "A2",
+        "A3",
+        "ZN",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "A1",
+        "A2",
+        "A3",
+        "ZN",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "A1",
+        "A2",
+        "A3",
+        "Z",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "A1",
+        "A2",
+        "A3",
+        "Z",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "I",
+        "ZN",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "I",
+        "ZN",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "A1",
+        "A2",
+        "ZN",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "A1",
+        "A2",
+        "ZN",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "I",
+        "Z",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ], [
+        "I",
+        "Z",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+      ]
+   ]
+  },
+  {
+   "pins": [
+      [
+        "A1",
+        "A2",
+        "ZN",
+        "VDD",
+        "VNW",
+        "VPW",
+        "VSS"
+     

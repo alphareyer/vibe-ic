@@ -1,0 +1,39 @@
+[WARNING ORD-0039] .openroad ignored with -python
+                                Cells by Master                                 
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
+┃ Cell                                                            ┃ Count      ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
+│ gf180mcu_fd_sc_mcu7t5v0__and3_1                                 │ 1          │
+│ gf180mcu_fd_sc_mcu7t5v0__aoi21_1                                │ 32         │
+│ gf180mcu_fd_sc_mcu7t5v0__clkbuf_16                              │ 33         │
+│ gf180mcu_fd_sc_mcu7t5v0__clkbuf_8                               │ 16         │
+│ gf180mcu_fd_sc_mcu7t5v0__clkinv_1                               │ 31         │
+│ gf180mcu_fd_sc_mcu7t5v0__dffrnq_1                               │ 64         │
+│ gf180mcu_fd_sc_mcu7t5v0__dlyb_1                                 │ 104        │
+│ gf180mcu_fd_sc_mcu7t5v0__endcap                                 │ 76         │
+│ gf180mcu_fd_sc_mcu7t5v0__fill_1                                 │ 111        │
+│ gf180mcu_fd_sc_mcu7t5v0__fill_2                                 │ 127        │
+│ gf180mcu_fd_sc_mcu7t5v0__fillcap_16                             │ 15         │
+│ gf180mcu_fd_sc_mcu7t5v0__fillcap_32                             │ 14         │
+│ gf180mcu_fd_sc_mcu7t5v0__fillcap_4                              │ 62         │
+│ gf180mcu_fd_sc_mcu7t5v0__fillcap_64                             │ 10         │
+│ gf180mcu_fd_sc_mcu7t5v0__fillcap_8                              │ 22         │
+│ gf180mcu_fd_sc_mcu7t5v0__filltie                                │ 140        │
+│ gf180mcu_fd_sc_mcu7t5v0__nand2_1                                │ 31         │
+│ gf180mcu_fd_sc_mcu7t5v0__nand3_1                                │ 31         │
+│ gf180mcu_fd_sc_mcu7t5v0__nor2_1                                 │ 1          │
+│ gf180mcu_fd_sc_mcu7t5v0__oai21_1                                │ 31         │
+│ gf180mcu_fd_sc_mcu7t5v0__xor3_1                                 │ 31         │
+└─────────────────────────────────────────────────────────────────┴────────────┘
+                               Cells by Function                                
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
+┃ Cell Function                                                  ┃ Count       ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
+│ gf180mcu_fd_sc_mcu7t5v0__and3                                  │ 1           │
+│ gf180mcu_fd_sc_mcu7t5v0__aoi21                                 │ 32          │
+│ gf180mcu_fd_sc_mcu7t5v0__clkbuf                                │ 49          │
+│ gf180mcu_fd_sc_mcu7t5v0__clkinv                                │ 31          │
+│ gf180mcu_fd_sc_mcu7t5v0__dffrnq                                │ 64          │
+│ gf180mcu_fd_sc_mcu7t5v0__dlyb                                  │ 104         │
+│ gf180mcu_fd_sc_mcu7t5v0__fill                                  │ 238         │
+│ gf180mcu_fd_sc_mcu7t5v0__fillcap                               �

@@ -75973,12 +75973,16 @@ def main() -> int:
     # A steps-only record is published here so the summary can only ever
     # quote THIS run; the full record still overwrites it at the end.
     try:
+        import _impl_outcomes as _io_pre
         _pre = project / "reports" / "orchestrator" / "phase3_one_shot.json"
         _pre.parent.mkdir(parents=True, exist_ok=True)
         _pre.write_text(json.dumps(
             {"program": "phase3_one_shot_runner",
              "record": "in-progress (steps only; the full record is written "
                        "at the end of this run)",
+             # llv1 W14: the summary emitted next echoes the implementation
+             # flow from THIS record (ORGANIC #399). {} by default.
+             **_io_pre.report_fields(project),
              "steps": [asdict(s) for s in plan]},
             indent=2, ensure_ascii=False) + "\n")
     except Exception as _pre_exc:      # best-effort; never crash finalize
@@ -76187,6 +76191,11 @@ def main() -> int:
     }
     if verdict_note:
         summary["verdict_note"] = verdict_note
+    # llv1 W14: the implementation flow and each step's producer. {} for the
+    # default flow, so a default run's record is byte-for-byte unchanged.
+    import _impl_outcomes as _io
+    summary.update(_io.report_fields(project, run_started_at=_RUN_STARTED_AT))
+    _io.demote_verdict(summary)    # a step the flow did not do: never PASS
     # Per-step output view — <project>/steps/<phase>/<stage>/<id>_<slug>/.
     # A phase3-driven run used to end with NO steps tree (only the top
     # orchestrator built one), so the backend evidence had no per-step folder

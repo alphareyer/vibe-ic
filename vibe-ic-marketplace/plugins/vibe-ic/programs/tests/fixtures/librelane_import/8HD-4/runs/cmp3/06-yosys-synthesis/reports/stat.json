@@ -1,0 +1,59 @@
+{
+   "creator": "Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]",
+   "invocation": "stat -json -liberty /host/cmp3/librelane_8HD-4/design/runs/cmp3/tmp/8e7f8903e57a478581f249af22418aca.lib -liberty /host/cmp3/librelane_8HD-4/design/runs/cmp3/tmp/57393131a7ba4274b5994833b9cb5b44.lib ",
+   "modules": {
+      "\\spm": {
+         "num_wires":         257,
+         "num_wire_bits":     288,
+         "num_pub_wires":     132,
+         "num_pub_wire_bits": 163,
+         "num_ports":         5,
+         "num_port_bits":     36,
+         "num_memories":      0,
+         "num_memory_bits":   0,
+         "num_processes":     0,
+         "num_cells":         253,
+         "num_submodules":       0,
+         "area":              8572.256000,
+         "sequential_area":    4776.755200,
+         "num_cells_by_type": {
+            "gf180mcu_fd_sc_mcu7t5v0__and3_1": 1,
+            "gf180mcu_fd_sc_mcu7t5v0__aoi21_1": 32,
+            "gf180mcu_fd_sc_mcu7t5v0__clkinv_1": 31,
+            "gf180mcu_fd_sc_mcu7t5v0__dffrnq_1": 64,
+            "gf180mcu_fd_sc_mcu7t5v0__nand2_1": 31,
+            "gf180mcu_fd_sc_mcu7t5v0__nand3_1": 31,
+            "gf180mcu_fd_sc_mcu7t5v0__nor2_1": 1,
+            "gf180mcu_fd_sc_mcu7t5v0__oai21_1": 31,
+            "gf180mcu_fd_sc_mcu7t5v0__xor3_1": 31
+         }
+      }
+   },
+      "design": {
+         "num_wires":         257,
+         "num_wire_bits":     288,
+         "num_pub_wires":     132,
+         "num_pub_wire_bits": 163,
+         "num_ports":         5,
+         "num_port_bits":     36,
+         "num_memories":      0,
+         "num_memory_bits":   0,
+         "num_processes":     0,
+         "num_cells":         253,
+         "num_submodules":       0,
+         "area":              8572.256000,
+         "sequential_area":    4776.755200,
+         "num_cells_by_type": {
+            "gf180mcu_fd_sc_mcu7t5v0__and3_1": 1,
+            "gf180mcu_fd_sc_mcu7t5v0__aoi21_1": 32,
+            "gf180mcu_fd_sc_mcu7t5v0__clkinv_1": 31,
+            "gf180mcu_fd_sc_mcu7t5v0__dffrnq_1": 64,
+            "gf180mcu_fd_sc_mcu7t5v0__nand2_1": 31,
+            "gf180mcu_fd_sc_mcu7t5v0__nand3_1": 31,
+            "gf180mcu_fd_sc_mcu7t5v0__nor2_1": 1,
+            "gf180mcu_fd_sc_mcu7t5v0__oai21_1": 31,
+            "gf180mcu_fd_sc_mcu7t5v0__xor3_1": 31
+         }
+      }
+}
+
