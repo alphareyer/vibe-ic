@@ -119,6 +119,23 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "_pad_ring::parse_verilog_bus_ports":
+        "ONE VERILOG GRAMMAR, NO SENTENCE. The IO model is stripped of comments "
+        "and strings before module and input/output/inout declarations with "
+        "literal integer ranges are parsed. A denial in prose cannot become "
+        "a port declaration; an absent range remains undeclared and the "
+        "wrapper refuses a bit connection without that declaration. Falsifier: "
+        "tests/test_io_pad_chip_top_gen.py::test_pdk_bus_parser_does_not_accept_"
+        "a_comment_as_a_declaration.",
+    "io_pad_chip_top_gen::run":
+        "ONE FORMAL PIN TOKEN, NO SENTENCE. The only regex match in run asks "
+        "whether a PDK-resolved pad pin is spelled NAME[integer], to decide "
+        "whether to load the IO model's Verilog bus declarations. It does "
+        "not extract a value from design prose. A bit connection without a "
+        "matching declared bus refuses PAD_BUS_PIN_UNDECLARED or "
+        "PAD_BUS_PARTIALLY_CONNECTED. Falsifier: "
+        "tests/test_io_pad_chip_top_gen.py::test_bussed_pad_connection_refuses_"
+        "when_the_pdk_cannot_prove_it.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "
