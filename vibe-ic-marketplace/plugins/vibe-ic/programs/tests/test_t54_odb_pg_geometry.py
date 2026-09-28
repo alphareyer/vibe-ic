@@ -51,6 +51,16 @@ def test_psm_producer_writes_odb_via_geometry_for_the_measured_def(
             "Node0 Layer,Node0 X location,Node0 Y location,"
             "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
             "M3,10,5,M3,10,8,0.002\n")
+        (rpt / "em_psm_VPWR.spice").write_text(
+            "* Resistive network\n"
+            "R0 Node_M2_10000_5000 Node_M3_10000_5000 R=1.500000e+00\n"
+            "R1 Node_M3_10000_5000 Node_M3_10000_8000 R=5.000000e-01\n")
+        (rpt / "em_segments_VGND.csv").write_text(
+            "Node0 Layer,Node0 X location,Node0 Y location,"
+            "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
+            "M3,10,5,M3,10,8,0.001\n")
+        (rpt / "em_psm_VGND.spice").write_text(
+            "R0 Node_M2_10000_5000 Node_M3_10000_5000 R=1.500000e+00\n")
         return 0, "Maximum current : 2.0e-03 A\n", ""
 
     monkeypatch.setattr(R, "_docker_exec", fake_eda)
@@ -59,11 +69,22 @@ def test_psm_producer_writes_odb_via_geometry_for_the_measured_def(
     tcl = (rpt / "ir_em_chip_top.tcl").read_text()
     assert "getViaXY" in tcl and "getBlockVia" in tcl
     assert "getBoxes" in tcl and "via_metal" in tcl
+    assert "write_pg_spice -net VPWR" in tcl
     manifest = json.loads((rpt / "em_pg_geometry_subject.json").read_text())
     import hashlib
     measured_def = R._pl.pnr_dir(project) / "chip_top.def"
     assert manifest["def_sha256"] == hashlib.sha256(
         measured_def.read_bytes()).hexdigest()
+    resistor_file = rpt / "em_psm_via_resistors.tsv"
+    assert ("VPWR\tM2\t10000\t5000\tM3\t10000\t5000\t1.5"
+            in resistor_file.read_text().splitlines())
+    resistor_subject = json.loads(
+        (rpt / "em_psm_via_resistors_subject.json").read_text())
+    assert resistor_subject["def_sha256"] == manifest["def_sha256"]
+    assert resistor_subject["em_segments_sha256"] == hashlib.sha256(
+        (rpt / "em_segments.csv").read_bytes()).hexdigest()
+    assert resistor_subject["resistors_sha256"] == hashlib.sha256(
+        resistor_file.read_bytes()).hexdigest()
 
 
 def test_psm_keeps_both_rails_and_audits_tool_density_on_the_same_def(

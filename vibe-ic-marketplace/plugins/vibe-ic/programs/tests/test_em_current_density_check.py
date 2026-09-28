@@ -59,6 +59,9 @@ def _run(*args) -> subprocess.CompletedProcess:
         geom = Path(args[0]).with_name("em_pg_geometry.tsv")
         if geom.is_file():
             cmd.extend(("--pg-geometry", str(geom)))
+        via_resistors = Path(args[0]).with_name("em_psm_via_resistors.tsv")
+        if via_resistors.is_file():
+            cmd.extend(("--psm-via-resistors", str(via_resistors)))
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
@@ -240,6 +243,7 @@ LAYER lower
 END lower
 LAYER cut
   TYPE CUT ;
+  RESISTANCE 4.5 ;
   DCCURRENTDENSITY AVERAGE 0.18 ;
 END cut
 LAYER upper
@@ -255,7 +259,8 @@ def _via_subject(tmp_path):
     routed = _write(tmp_path / "routed.def", """
 UNITS DISTANCE MICRONS 1000 ;
 VIAS 1 ;
-  - array + CUTSIZE 200 200 + LAYERS lower cut upper
+  - array + CUTSIZE 200 200 + CUTSPACING 200 200
+    + LAYERS lower cut upper
     + ROWCOL 1 3 ;
 END VIAS
 SPECIALNETS 1 ;
@@ -264,11 +269,14 @@ SPECIALNETS 1 ;
     NEW lower 1000 + SHAPE STRIPE ( 1000 1000 ) ( 2000 1000 ) ;
 END SPECIALNETS
 """)
+    _write(tmp_path / "em_psm_via_resistors.tsv",
+           "net\tlayer0\tx0_dbu\ty0_dbu\tlayer1\tx1_dbu\ty1_dbu\tresistance_ohm\n"
+           "SUPPLY\tlower\t10000\t10000\tupper\t10000\t10000\t1.5\n")
     return lef, routed
 
 
 def _via_csv(tmp_path, current, *, with_metal=False, via_at=10):
-    rows = (f"lower,0,0,upper,{via_at},10,{current}\n" +
+    rows = (f"lower,{via_at},10,upper,{via_at},10,{current}\n" +
             ("lower,1,1,lower,2,1,0.00001\n" if with_metal else ""))
     return _write(tmp_path / "em_segments.csv", CSV_HEADER + rows)
 
@@ -283,6 +291,9 @@ def test_metal_endpoint_via_over_cut_jmax_fails(tmp_path):
     assert rep["verdict"] == "FAIL"
     assert rep["offenders"][0]["layer"] == "cut"
     assert rep["offenders"][0]["cut_count"] == 3
+    assert rep["offenders"][0]["cut_count_exact"] is True
+    assert rep["offenders"][0]["cut_count_source"] == (
+        "psm_resistor_def_array_exact_cuts")
     assert rep["offenders"][0]["value_A_per_cut"] > 0.00018
 
 
@@ -328,11 +339,74 @@ SPECIALNETS 1 ;
 END SPECIALNETS
 """)
     csv = _via_csv(tmp_path, 0.0004)
+    _write(tmp_path / "em_psm_via_resistors.tsv",
+           "net\tlayer0\tx0_dbu\ty0_dbu\tlayer1\tx1_dbu\ty1_dbu\tresistance_ohm\n"
+           "SUPPLY\tlower\t10000\t10000\tupper\t10000\t10000\t2.25\n")
     r = _run(csv, "--tech-lef", lef, "--def-file", routed,
              "--net", "SUPPLY", "--json", tmp_path / "out.json")
     rep = json.loads((tmp_path / "out.json").read_text())
     assert r.returncode == 1, rep
     assert rep["offenders"][0]["cut_count"] == 2
+
+
+def test_split_via_array_charges_each_psm_edge_its_resistor_cut_count(tmp_path):
+    lef, routed = _via_subject(tmp_path)
+    csv = _write(tmp_path / "em_segments.csv", CSV_HEADER +
+                 "lower,9.6,10,upper,9.6,10,0.0002\n"
+                 "lower,10,10,upper,10,10,0.0002\n")
+    _write(tmp_path / "em_psm_via_resistors.tsv",
+           "net\tlayer0\tx0_dbu\ty0_dbu\tlayer1\tx1_dbu\ty1_dbu\tresistance_ohm\n"
+           "SUPPLY\tlower\t9600\t10000\tupper\t9600\t10000\t4.5\n"
+           "SUPPLY\tlower\t10000\t10000\tupper\t10000\t10000\t2.25\n")
+    result = _run(csv, "--tech-lef", lef, "--def-file", routed,
+                  "--net", "SUPPLY", "--json", tmp_path / "split.json")
+    rep = json.loads((tmp_path / "split.json").read_text())
+    assert result.returncode == 1, rep
+    assert rep["verdict"] == "FAIL"
+    assert rep["summary"]["segments_screened"] == 2
+    assert rep["offender_count"] == 1
+    assert rep["offenders"][0]["cut_count"] == 1
+    safe = next(r for r in rep["worst_segments"] if r["status"] == "ok")
+    assert safe["cut_count"] == 2
+    assert safe["cut_count_exact"] is True
+
+
+def test_genuine_single_cut_overloaded_via_still_fails(tmp_path):
+    lef = _write(tmp_path / "tech.lef", VIA_TECH_LEF)
+    routed = _write(tmp_path / "routed.def", """
+UNITS DISTANCE MICRONS 1000 ;
+VIAS 1 ;
+  - single + CUTSIZE 200 200 + CUTSPACING 200 200
+    + LAYERS lower cut upper + ROWCOL 1 1 ;
+END VIAS
+SPECIALNETS 1 ;
+  - SUPPLY + USE POWER + ROUTED lower 1000 ( 10000 10000 ) single ;
+END SPECIALNETS
+""")
+    csv = _write(tmp_path / "em_segments.csv", CSV_HEADER +
+                 "lower,10,10,upper,10,10,0.0002\n")
+    result = _run(csv, "--tech-lef", lef, "--def-file", routed,
+                  "--net", "SUPPLY", "--json", tmp_path / "single.json")
+    rep = json.loads((tmp_path / "single.json").read_text())
+    assert result.returncode == 1, rep
+    assert rep["verdict"] == "FAIL"
+    assert rep["offenders"][0]["cut_count"] == 1
+    assert rep["offenders"][0]["cut_count_exact"] is True
+
+
+def test_noninteger_psm_resistance_cannot_authorize_multicut_pass(tmp_path):
+    lef, routed = _via_subject(tmp_path)
+    _write(tmp_path / "em_psm_via_resistors.tsv",
+           "net\tlayer0\tx0_dbu\ty0_dbu\tlayer1\tx1_dbu\ty1_dbu\tresistance_ohm\n"
+           "SUPPLY\tlower\t10000\t10000\tupper\t10000\t10000\t2.0\n")
+    csv = _via_csv(tmp_path, 0.0002)
+    result = _run(csv, "--tech-lef", lef, "--def-file", routed,
+                  "--net", "SUPPLY", "--json", tmp_path / "bad_resistance.json")
+    rep = json.loads((tmp_path / "bad_resistance.json").read_text())
+    assert result.returncode == 3, rep
+    assert rep["verdict"] == "NOT_MEASURED"
+    assert rep["summary"]["unscreened_reasons"] == {
+        "via_cut_geometry_unavailable": 1}
 
 
 def test_same_def_placed_cut_center_bounds_virtual_via_to_one_cut(tmp_path):
@@ -351,12 +425,12 @@ def test_same_def_placed_cut_center_bounds_virtual_via_to_one_cut(tmp_path):
                  "--pg-geometry", geom, "--net", "SUPPLY",
                  "--json", tmp_path / "found.json")
     rep = json.loads((tmp_path / "found.json").read_text())
-    assert found.returncode == 1, rep
-    assert rep["verdict"] == "FAIL"
-    offender = rep["offenders"][0]
-    assert offender["cut_count"] == 1
-    assert offender["cut_count_source"] == "odb_placed_cut_single_cut_bound"
-    assert offender["cut_geometry"][0]["cut_bbox_um"] == [8.9, 9.9, 9.1, 10.1]
+    assert found.returncode == 3, rep
+    assert rep["verdict"] == "NOT_MEASURED"
+    edge = rep["not_measured_segments"][0]
+    assert edge["reason"] == "via_cut_upper_bound_over_jmax_without_exact_count"
+    assert edge["cut_count_lower_bound"] == 1
+    assert edge["cut_geometry"][0]["cut_bbox_um"] == [8.9, 9.9, 9.1, 10.1]
 
 
 def test_named_via_at_virtual_edges_orthogonal_corner_bounds_one_cut(tmp_path):
@@ -378,13 +452,13 @@ def test_named_via_at_virtual_edges_orthogonal_corner_bounds_one_cut(tmp_path):
                   "--pg-geometry", geom, "--net", "SUPPLY",
                   "--json", tmp_path / "corner.json")
     rep = json.loads((tmp_path / "corner.json").read_text())
-    assert result.returncode == 1, rep
-    assert rep["verdict"] == "FAIL"
-    offender = rep["offenders"][0]
-    assert offender["cut_count"] == 1
-    assert offender["cut_count_source"] == "def_named_corner_via_single_cut_bound"
-    assert offender["cut_geometry"][0]["via_center_um"] == [10.0, 10.0]
-    assert offender["cut_geometry"][0]["metal_leg_widths_um"] == [1.0, 1.0]
+    assert result.returncode == 3, rep
+    assert rep["verdict"] == "NOT_MEASURED"
+    edge = rep["not_measured_segments"][0]
+    assert edge["reason"] == "via_cut_upper_bound_over_jmax_without_exact_count"
+    assert edge["cut_count_source"] == "def_named_corner_one_cut_bound"
+    assert edge["cut_geometry"][0]["via_center_um"] == [10.0, 10.0]
+    assert edge["cut_geometry"][0]["metal_leg_widths_um"] == [1.0, 1.0]
 
 
 def test_measured_metal_offender_precedes_unmeasured_via(tmp_path):
