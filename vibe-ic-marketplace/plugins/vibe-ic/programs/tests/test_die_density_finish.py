@@ -217,6 +217,49 @@ def test_top_up_masks_every_placed_pad_and_macro_from_odb(tmp_path, monkeypatch)
     assert derived['_derivation']['placed_instance_keepout']['source'] == str(routed)
 
 
+def test_compact_def_cannot_hide_a_pad_inside_the_core(tmp_path, monkeypatch):
+    project = tmp_path / 'project'
+    project.mkdir()
+    gds = project / 'pdk_filled.gds'
+    gds.write_bytes(b'PDK filler GDS')
+    root, config = _pdk(tmp_path)
+    tech = root / 'processA/tech'
+    (tech / 'pad.lef').write_text(
+        'MACRO PAD_CELL\n CLASS PAD ;\n SIZE 10 BY 8 ;\nEND PAD_CELL\n')
+    cfg = json.loads(config.read_text())
+    cfg['PAD_LEFS'] = ['/pdk/processA/tech/pad.lef']
+    _put(config, cfg)
+    routed = project / 'phase3/stage3/pnr/routed.def'
+    routed.parent.mkdir(parents=True)
+    routed.write_text('COMPONENTS 1 ; - PAD_CENTER PAD_CELL '
+                      '+ FIXED ( 40000 40000 ) N ; END COMPONENTS\n')
+    monkeypatch.setattr(fill, 'declaration_config', lambda project: (
+        {'CORE_AREA': [10, 12, 88, 90]}, {'CORE_AREA': 'reviewed core'}))
+    calls = []
+
+    def eda_write(cmd, **kwargs):
+        calls.append(cmd)
+        if 'openroad' in cmd:
+            (Path(cmd[-1]).parent / 'placed_keepouts.txt').write_text(
+                'DBU 1000\nTOTAL 1\n'
+                'BOX PAD PAD_CELL 40000 40000 50000 48000\nEND 1\n')
+        else:
+            Path(cmd[cmd.index('--out') + 1]).write_bytes(b'protected fill')
+            _put(Path(cmd[cmd.index('--report') + 1]),
+                 {'verdict': 'PASS', 'layers': [{'name': 'metal1',
+                                                'density_before': .28,
+                                                'density_after': .34}]})
+        return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    monkeypatch.setattr(fill, 'run_container', eda_write)
+    result = fill.top_up_density(project, 'image', root, 'processA', gds,
+                                 config, '37-compact-pad')
+    derived = json.loads(Path(result['config']).read_text())
+    assert len(calls) == 2 and 'openroad' in calls[0]
+    assert derived['keepout_boxes_um'] == [[39.7, 39.7, 50.3, 48.3]]
+    assert derived['_derivation']['placed_instance_keepout']['protected_count'] == 1
+
+
 def test_top_up_refuses_unreadable_placed_design_before_gds_promotion(tmp_path, monkeypatch):
     project = tmp_path / 'project'
     project.mkdir()
