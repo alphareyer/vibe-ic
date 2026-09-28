@@ -22364,12 +22364,31 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
         # would not reject a legitimate cell.  The independent measurement
         # remains visible even when the declaration emitter itself succeeded.
         manifest = _pl.sim_full_stack_dir(project) / "arith_oracle_manifest.json"
-        if manifest.is_file():
+        # The author-supplied serial field pair identifies the comparison even
+        # when its measurement manifest is absent.  Presence of the manifest
+        # cannot be the prerequisite for reporting that it is missing.
+        serial_fields = False
+        if out_p.is_file():
+            try:
+                declared = json.loads(out_p.read_text())
+                serial_fields = (isinstance(declared, dict) and
+                                 {"bit_order", "latency_cycles"} <= declared.keys())
+            except (OSError, ValueError):
+                pass
+        if manifest.is_file() or serial_fields:
             import declaration_measurement_consistency_check as _dmc
             comparison = _dmc.check(project)
             result.extras["declaration_measurement_consistency"] = comparison
             result.detail += ("; serial declaration/measurement ADVISORY "
                               + comparison["verdict"])
+            if comparison["verdict"] == "NOT_MEASURED":
+                result.detail += ": " + str(comparison.get("reason", "unspecified"))
+                if result.status == "PASS":
+                    result.status = "NOT_MEASURED"
+                    result.reason_class = (_V.ReasonClass.INPUT_ABSENT
+                                           if not manifest.is_file() else
+                                           _V.ReasonClass.INCONCLUSIVE)
+                    _V.validate_step_row(result)
         return result
 
     def _run(prog_name: str,

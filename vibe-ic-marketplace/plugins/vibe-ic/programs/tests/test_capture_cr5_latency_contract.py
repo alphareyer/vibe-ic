@@ -60,3 +60,40 @@ def test_calibrated_framing_carries_origin_and_refuses_bad_values(tmp_path):
     assert "output_bit_order" in check(tmp_path)["mismatches"]
     path.write_text("{}")
     assert check(tmp_path)["verdict"] == "NOT_MEASURED"
+
+
+def test_serial_declaration_missing_manifest_is_not_measured_in_step_result(tmp_path):
+    docs = tmp_path / "input/docs"
+    docs.mkdir(parents=True)
+    (docs / "declaration.md").write_text(
+        "The Plugin MUST declare `plugin_output/declaration.json` before authoring:\n\n"
+        "| Field | Required | Example |\n|---|---|---|\n"
+        "| `bit_order` | Yes | `LSB_first` |\n"
+        "| `latency_cycles` | Yes | `1` |\n")
+    declaration = tmp_path / "plugin_output/declaration.json"
+    declaration.parent.mkdir()
+    declaration.write_text(json.dumps({"bit_order": "LSB_first", "latency_cycles": 1}))
+    from declaration_measurement_consistency_check import check
+    assert check(tmp_path)["verdict"] == "NOT_MEASURED"
+    step = runner.step_arith_declaration_emit(tmp_path)
+    assert step.status == "NOT_MEASURED"
+    measurement = step.extras["declaration_measurement_consistency"]
+    assert measurement["verdict"] == "NOT_MEASURED"
+    assert "arith_oracle_manifest.json" in measurement["reason"]
+    assert "NOT_MEASURED" in step.detail
+    assert "arith_oracle_manifest.json" in step.detail
+
+
+def test_nonserial_declaration_does_not_require_serial_manifest(tmp_path):
+    docs = tmp_path / "input/docs"
+    docs.mkdir(parents=True)
+    (docs / "declaration.md").write_text(
+        "The Plugin MUST declare `plugin_output/declaration.json` before authoring:\n\n"
+        "| Field | Required | Example |\n|---|---|---|\n"
+        "| `mode` | Yes | `fast` |\n")
+    declaration = tmp_path / "plugin_output/declaration.json"
+    declaration.parent.mkdir()
+    declaration.write_text(json.dumps({"mode": "fast"}))
+    step = runner.step_arith_declaration_emit(tmp_path)
+    assert step.status == "PASS"
+    assert "declaration_measurement_consistency" not in step.extras
