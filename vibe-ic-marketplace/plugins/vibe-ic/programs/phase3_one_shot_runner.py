@@ -45712,12 +45712,14 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
     already wrote them."""
     import librelane_postroute_repair as _llprr  # noqa: PLC0415
     if report.get("verdict") != "PASS":
-        _drv_promotion_disclose(pnr_out, "tool_unsupported",
+        _drv_promotion_disclose(pnr_out, "postroute_repair_refused",
                                 str(report.get("reason") or report.get("code")))
-        return StepResult("postroute_repair_librelane", "NOT_MEASURED",
+        return StepResult("postroute_repair_librelane",
+                          "FAIL" if report.get("verdict") == "FAIL" else "NOT_MEASURED",
                           time.time() - t0,
                           f"{report.get('code')}: {report.get('reason')}",
-                          reason_class=_V.ReasonClass.EXECUTION_ERROR)
+                          reason_class=(_V.ReasonClass.EXECUTION_ERROR
+                                        if report.get("verdict") != "FAIL" else ""))
     base, final = report.get("baseline") or {}, report.get("final") or {}
     summary = (f"setup {base.get('setup_ws_min')} -> {final.get('setup_ws_min')} ns, "
                f"hold {base.get('hold_ws_min')} -> {final.get('hold_ws_min')} ns, "

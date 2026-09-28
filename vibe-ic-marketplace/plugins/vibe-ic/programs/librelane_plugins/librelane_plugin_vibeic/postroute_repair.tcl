@@ -612,20 +612,10 @@ if {$::vic_fillers > 0} {
 }
 
 vic_annotate after
-# CR-2 POSTROUTE FANOUT BEGIN
-# The design's set_max_fanout remains a hard constraint after route. The
-# pinned OpenSTA provides this counter; an unreadable count is NOT_MEASURED,
-# and any measured residual refuses the repaired candidate.
-if {[catch {sta::max_fanout_violation_count} _vic_fo_count]} {
-    puts stderr "vibeic_prr_fanout_not_measured: $_vic_fo_count"
-    exit 2
-}
-utl::metric_integer vibeic__prr__after__fanout_violations $_vic_fo_count
-if {$_vic_fo_count > 0} {
-    puts stderr "vibeic_prr_fanout_violation: $_vic_fo_count; declared postroute cap not met"
-    exit 1
-}
-# CR-2 POSTROUTE FANOUT END
+# The consumer runs RCX + STAPostPNR on both changed and no-op candidates.
+# Its fresh per-corner OpenROAD processes count max-fanout violations and
+# refuse any residual (or disclose NOT_MEASURED).  Do not call the counter in
+# this multi-corner repair session: CheckFanouts::check has signalled 11 here.
 vic_census after
 
 unset_dont_touch_objects

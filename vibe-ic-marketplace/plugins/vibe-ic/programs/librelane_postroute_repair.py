@@ -222,6 +222,36 @@ def summarize(metrics: Dict[str, Any], corners: Sequence[str]) -> Dict[str, Any]
     return out
 
 
+def fanout_residue(measurement: Dict[str, Any], corners: Sequence[str]) -> Dict[str, Any]:
+    """BLOCKING: judge routed fanout from STAPostPNR's separate corner runs.
+
+    The repair session is multi-corner; its OpenSTA fanout counter has crashed
+    inside CheckFanouts.  STAPostPNR owns a fresh, single-corner process for
+    each declared corner.  A missing count is never interpreted as zero.
+    """
+    values = (measurement.get("drv") or {}).get("fanout") or {}
+    missing = [c for c in corners if not isinstance(values.get(c), int)
+               or isinstance(values.get(c), bool) or values[c] < 0]
+    if not corners or missing:
+        return {"verdict": "NOT_MEASURED", "violations": None,
+                "reason": f"STAPostPNR fanout count absent in corners: {missing or ['<none declared>']}"}
+    count = sum(values[c] for c in corners)
+    return {"verdict": "FAIL" if count else "PASS", "violations": count,
+            "source": "OpenROAD.STAPostPNR per-corner routed State metrics"}
+
+
+def _set_final_fanout_verdict(report: Dict[str, Any]) -> None:
+    fanout = fanout_residue(report.get("final") or {}, report.get("corners") or [])
+    report["final_fanout"] = fanout
+    report["verdict"] = fanout["verdict"]
+    if fanout["verdict"] != "PASS":
+        report["code"] = ("LL_PRR_FANOUT_VIOLATION" if fanout["verdict"] == "FAIL"
+                          else "LL_PRR_FANOUT_NOT_MEASURED")
+        report["reason"] = (f"declared postroute max fanout has "
+                            f"{fanout['violations']} residual violations"
+                            if fanout["verdict"] == "FAIL" else fanout["reason"])
+
+
 def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
                lane: str) -> Tuple[Path, Dict[str, Any]]:
     """The repair step (a candidate, or the census) then RCX + STAPostPNR:
@@ -358,6 +388,14 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
     row.update(repair_state=str(repaired), measurement=measurement,
                repair_metrics={k: v for k, v in metrics.items()
                                if k.startswith("vibeic__prr__")})
+    row["fanout"] = fanout_residue(measurement, ctx["corners"])
+    if row["fanout"]["verdict"] != "PASS":
+        row.update(decision="REFUSED", reason=(
+            f"routed max fanout: {row['fanout']['violations']} violations"
+            if row["fanout"]["verdict"] == "FAIL" else row["fanout"]["reason"]))
+        _ledger_append(impl, row)
+        print(f"candidate {lane} refused: {row['reason']}")
+        return 0
     pg = (supply_ownership(ctx, Path(state["def"]))
           if metrics.get("vibeic__prr__changed") != 0 else
           {"verdict": "NOT_APPLICABLE", "reason": "no instance changed; the input DEF"})
@@ -674,7 +712,7 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
                             configs=configs, corners=corners, mounts=mounts,
                             registry=registry, programs_dir=programs_dir,
                             floors=declared_timing_floor(project, sdc)))
-    report["verdict"] = "PASS"
+    _set_final_fanout_verdict(report)
     write_json(out, report)
     return report
 
@@ -777,7 +815,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
                   floors=declared_timing_floor(project, sdc))
     if mode != "dual":
         report.update(close_arm(project, "librelane", route_state, **common))
-        report["verdict"] = "PASS"
+        _set_final_fanout_verdict(report)
         write_json(out, report)
         return report
     if variant_arm is None:
@@ -801,7 +839,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     scope = {"step": STEP, "corners": ",".join(corners),
              "measured_by": "OpenROAD.CheckAntennas + RCX + STAPostPNR (sign-off scene)"}
     sel = select_dual(project, arms, drcs, scope)
-    report.update(arms=arms, route_drc=drcs, selection=sel)
+    report.update(arms=arms, route_drc=drcs, selection=sel, corners=corners)
     chosen = arms.get(sel.get("selection"))
     if chosen is None:
         report.update(verdict="NOT_MEASURED", code="LL_PRR_DUAL_UNDETERMINED")
@@ -813,7 +851,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
                                            "closure", "baseline_repair_metrics")
                    if k in chosen})
     report["selected_arm"] = sel["selection"]
-    report["verdict"] = "PASS"
+    _set_final_fanout_verdict(report)
     write_json(out, report)
     return report
 

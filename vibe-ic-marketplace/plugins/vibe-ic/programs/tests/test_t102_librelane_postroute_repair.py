@@ -348,6 +348,32 @@ def test_the_ll21_max_fanout_repair_is_adopted_with_setup_still_met(tmp_path, mo
     assert json.loads((impl / prr.CURRENT).read_text())['candidate'] == '32-cand01'
 
 
+@pytest.mark.parametrize('changed', [0, 1])
+def test_residual_fanout_refuses_even_a_noop_candidate(tmp_path, monkeypatch, changed):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, 0.2, (0, 0, 3)),
+        candidates=[_cand(4.0, 0.2, (0, 0, 3), changed=changed)])
+    _controller(impl, arm, shim, monkeypatch, tmp_path).run_controller(
+        'postroute.repair_drv')
+    rows = json.loads((arm / prr.LEDGER).read_text())['candidates']
+    assert rows[0]['decision'] == 'REFUSED'
+    assert rows[0]['fanout']['verdict'] == 'FAIL'
+    assert rows[0]['fanout']['violations'] == 3
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+
+
+def test_routed_fanout_failure_blocks_the_phase3_step(tmp_path):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    result = runner._postroute_repair_librelane_result(
+        tmp_path, tmp_path / 'pnr',
+        {'verdict': 'FAIL', 'code': 'LL_PRR_FANOUT_VIOLATION',
+         'reason': 'declared postroute max fanout has 3 residual violations'},
+        0.0, handed=False)
+    assert result.status == 'FAIL'
+    assert 'LL_PRR_FANOUT_VIOLATION' in result.detail
+    assert result.reason_class == ''
+
+
 def test_a_hard_repair_that_makes_setup_negative_is_rejected(tmp_path, monkeypatch):
     project, arm, impl, shim = _scenario_impl(
         tmp_path, baseline=(0.8, 0.391, (0, 0, 3)),
