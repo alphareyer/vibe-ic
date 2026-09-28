@@ -146,9 +146,11 @@ def _liberty_limits(body: str) -> dict:
     def scaled(block: str, kind: str, prefix: str = "") -> float | None:
         value = _attribute(block, prefix + kind.replace("max_slew", "max_transition"))
         return value * scales[kind] if value is not None else None
-    defaults = {kind: scaled(body[:body.find("cell (")], kind, "default_")
+    first_cell = re.search(r"\bcell\s*\(", body)
+    header = body[:first_cell.start()] if first_cell else body
+    defaults = {kind: scaled(header, kind, "default_")
                 for kind in KINDS}
-    default_fanout_load = _attribute(body[:body.find("cell (")], "default_fanout_load")
+    default_fanout_load = _attribute(header, "default_fanout_load")
     cells: dict[str, dict] = {}
     pad_cells: set[str] = set()
     for cell in re.finditer(r'\bcell\s*\(\s*"?([^"\)]+)"?\s*\)\s*\{', body):
@@ -170,7 +172,8 @@ def _liberty_limits(body: str) -> dict:
 
 
 def _liberty_header(body: str) -> dict[str, float | None]:
-    head = body[:body.find("cell (")]
+    first_cell = re.search(r"\bcell\s*\(", body)
+    head = body[:first_cell.start()] if first_cell else body
     return {key: _attribute(head, key) for key in
             ("nom_process", "nom_voltage", "nom_temperature")}
 

@@ -121,7 +121,7 @@ def derive(scene_dir: Path, linked_liberties: list[dict],
         if pin["net"] and net is None:
             raise ValueError(f"OpenSTA net {pin['net']} absent for excluded pin")
         fanout = 0.0
-        for load_name in (net or {}).get("loads", []):
+        for load_name in ((net or {}).get("loads", []) if pin["driver"] else []):
             load = pins.get(load_name)
             if load is None:
                 raise ValueError(f"OpenSTA load {load_name} absent from pin census")
@@ -132,8 +132,11 @@ def derive(scene_dir: Path, linked_liberties: list[dict],
             if len(matches) != 1:
                 raise ValueError(f"OpenSTA load {load_name} lacks unique Liberty pin")
             limit = matches[0]
-            fanout += (limit["cells"][load["cell"]][load["cell_pin"]]
-                       .get("fanout_load") or limit.get("default_fanout_load") or 0.0)
+            load_weight = limit["cells"][load["cell"]][load["cell_pin"]].get(
+                "fanout_load")
+            if load_weight is None:
+                load_weight = limit.get("default_fanout_load")
+            fanout += load_weight if load_weight is not None else 0.0
         kinds = [kind for kind in KINDS if name not in all_names[kind] and
                  (kind == "max_slew" or pin["driver"])]
         excluded.append({"pin": name, "reason": reason, "excluded_kinds": kinds,
@@ -141,8 +144,9 @@ def derive(scene_dir: Path, linked_liberties: list[dict],
                          "cap_pf": (net or {}).get("cap_pf", 0.0),
                          "slew_rise_ns": pin["slew_rise_ns"],
                          "slew_fall_ns": pin["slew_fall_ns"]})
-    if drivers - {item["pin"] for item in excluded
-                  if "max_fanout" in item["excluded_kinds"]} != all_names["max_fanout"]:
+    expected_fanout = drivers - {item["pin"] for item in excluded
+                                 if "max_fanout" in item["excluded_kinds"]}
+    if expected_fanout != all_names["max_fanout"]:
         raise ValueError("OpenSTA driver census disagrees with all-limits fanout rows")
     expected_cap = drivers - {item["pin"] for item in excluded
                               if "max_capacitance" in item["excluded_kinds"]}
@@ -157,4 +161,4 @@ def derive(scene_dir: Path, linked_liberties: list[dict],
             "driver_pins": sorted(drivers),
             "population": {"max_slew": len(slew_pins),
                            "max_capacitance": len(expected_cap),
-                           "max_fanout": len(expected_cap)}}
+                           "max_fanout": len(expected_fanout)}}
