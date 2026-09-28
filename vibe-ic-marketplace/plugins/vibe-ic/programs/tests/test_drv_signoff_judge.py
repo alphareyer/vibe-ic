@@ -920,6 +920,53 @@ def test_project_clean_opensta_census_can_reach_pass(tmp_path, monkeypatch):
                  disabled_edges_report=_file(folder, "disabled_edges.rpt", ""))
     result = drv.judge(bundle, project=tmp_path)
     assert result["verdict"] == "PASS", result
+    scene["pin_census_report"] = {}
+    result = drv.judge(bundle, project=tmp_path)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert any("pin_census_report" in reason for reason in result["not_measured"])
+
+
+def test_opensta_census_io_label_comes_from_linked_pad_cell(tmp_path):
+    from drv_signoff_census import derive
+    folder = tmp_path / "tool"
+    _file(folder, "pin_census.tsv",
+          "u/Y\tpin\toutput\t1\tu\tpad\tY\tn\tinput\t0.1\t0.1\t0\tX\t0\n")
+    _file(folder, "net_census.rpt",
+          "Net n\n Total capacitance: 0.1\n Number of drivers: 1\n"
+          " Number of loads: 0\n Number of pins: 1\n")
+    _file(folder, "disabled_edges.rpt", "")
+    rows = drv.parse_check_types(_report(fanout=2), scene="typ_nom",
+                                 mode="functional", violators_only=False)
+    body = '''library (lib) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ cell (pad) { pad_cell : true; pin (Y) { direction : output; } }
+}'''
+    lib = _file(tmp_path, "pad.lib", body)
+    assert derive(folder, [{"name": "io", **lib}], rows)["pins"]["u/Y"]["cell_class"] == "IO"
+    lib = _file(tmp_path, "pad.lib", body.replace("pad_cell : true;", ""))
+    assert derive(folder, [{"name": "io", **lib}], rows)["pins"]["u/Y"]["cell_class"] == "std"
+
+
+def test_unreported_unexcluded_driver_blocks_census(tmp_path):
+    from drv_signoff_census import derive
+    folder = tmp_path / "tool"
+    _file(folder, "pin_census.tsv",
+          "u/Y\tpin\toutput\t1\tu\tlogic\tY\tn\tinput\t0.1\t0.1\t0\tX\t0\n"
+          "u2/Y\tpin\toutput\t1\tu2\tlogic\tY\tn2\tinput\t0.1\t0.1\t0\tX\t0\n")
+    _file(folder, "net_census.rpt",
+          "Net n\n Total capacitance: 0.1\n Number of drivers: 1\n"
+          " Number of loads: 0\n Number of pins: 1\n\n"
+          "Net n2\n Total capacitance: 0.1\n Number of drivers: 1\n"
+          " Number of loads: 0\n Number of pins: 1\n")
+    _file(folder, "disabled_edges.rpt", "")
+    lib = _file(tmp_path, "logic.lib", '''library (lib) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ cell (logic) { pin (Y) { direction : output; } }
+}''')
+    rows = drv.parse_check_types(_report(fanout=2), scene="typ_nom",
+                                 mode="functional", violators_only=False)
+    with pytest.raises(ValueError, match="omitted driver"):
+        derive(folder, [{"name": "std", **lib}], rows)
 
 
 def test_partially_unannotated_drivers_block_a_clean_verdict(tmp_path):

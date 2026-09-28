@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import math
 import sys
 from pathlib import Path
 
@@ -27,6 +28,9 @@ def _pins(path: Path) -> dict[str, dict]:
                       "origin": origin, "clock": clock == "1",
                       "logic": logic, "ideal": ideal == "1",
                       "slew_rise_ns": float(rise), "slew_fall_ns": float(fall)}
+        if not all(math.isfinite(pins[name][axis]) and pins[name][axis] >= 0
+                   for axis in ("slew_rise_ns", "slew_fall_ns")):
+            raise ValueError("OpenSTA pin slew census is not finite")
     if not pins:
         raise ValueError("OpenSTA pin census empty")
     return pins
@@ -45,7 +49,10 @@ def _nets(path: Path) -> dict[str, dict]:
                        if line.strip()] if loads is not None else [])
         if len(load_names) != int(count.group(1)):
             raise ValueError("OpenSTA net load count differs from raw report")
-        nets[name] = {"cap_pf": float(cap.group(1)), "loads": load_names}
+        cap_pf = float(cap.group(1))
+        if not math.isfinite(cap_pf) or cap_pf < 0:
+            raise ValueError("OpenSTA net capacitance census is not finite")
+        nets[name] = {"cap_pf": cap_pf, "loads": load_names}
     return nets
 
 
