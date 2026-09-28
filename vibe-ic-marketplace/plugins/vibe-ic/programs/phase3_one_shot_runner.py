@@ -75555,8 +75555,27 @@ def _phase3_window_publication(project: Path, isolated: Path,
                 elif isinstance(value, str):
                     # Both a complete path field and one embedded in prose
                     # are references. The latter is common in tool reports.
-                    paths = re.findall(
-                        r"(?<![A-Za-z0-9:/])/(?!/)[^\s,;\"'()\[\]{}]+", value)
+                    if value.startswith(("http:", "https:")):
+                        return
+                    path_value = Path(value)
+                    if path_value.is_absolute():
+                        paths = [value]
+                    else:
+                        candidate = private / path_value
+                        normalized = Path(os.path.normpath(candidate))
+                        if candidate.is_file():
+                            resolved = candidate.resolve()
+                            if (not normalized.is_relative_to(private)
+                                    or resolved != normalized):
+                                raise ValueError(
+                                    f"relative window input outside private tree or symlink: {value}")
+                            if resolved != source.resolve():
+                                name = str(resolved.relative_to(private))
+                                inputs[name] = _sha256_file(resolved)
+                                pending.append(resolved)
+                            return
+                        paths = re.findall(
+                            r"(?<![A-Za-z0-9:/.])/(?!/)[^\s,;\"'()\[\]{}]+", value)
                     for token in paths:
                         path = Path(token.rstrip("."))
                         if not path.resolve().is_relative_to(root):
@@ -75566,12 +75585,6 @@ def _phase3_window_publication(project: Path, isolated: Path,
                             raise ValueError(f"embedded project input absent: {path}")
                         name = str(path.resolve().relative_to(root))
                         inputs[name] = _sha256_file(path)
-                    if not value.startswith(("/", ".", "http:")):
-                        candidate = private / value
-                        if candidate.is_file() and candidate != source:
-                            name = str(candidate.relative_to(private))
-                            inputs[name] = _sha256_file(candidate)
-                            pending.append(candidate)
 
             visit(doc)
         receipt = (root / "reports/audit/windows"
