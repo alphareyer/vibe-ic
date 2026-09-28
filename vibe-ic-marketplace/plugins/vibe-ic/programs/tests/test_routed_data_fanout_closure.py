@@ -230,3 +230,39 @@ def test_noop_decision_uses_sta_violator_even_when_diodes_add_loads(
                          capture_output=True, check=False)
     assert run.returncode == 0, run.stderr
     assert ("REACHED_CLOSURE" in run.stdout) is expected_reached, run.stdout
+
+
+def test_fanout_reroute_antenna_residue_is_repaired_and_reclosed(tmp_path):
+    source = (STEP / "postroute_repair.tcl").read_text()
+    marker = "if {$::vic_fanout_modified} {"
+    assert marker in source
+    section = source[source.index(marker):source.index("# ---- 7. re-verify", source.index(marker))]
+    section_file = tmp_path / "antenna_loop.tcl"
+    section_file.write_text(section)
+    harness = textwrap.dedent(r"""
+        namespace eval utl { proc metric_integer {args} {} }
+        namespace eval grt { proc repaired_net_names {} {return {}} }
+        set ::env(DIODE_CELL) diode/I
+        set ::env(VIBEIC_PRR_ANTENNA_REPAIR) 1
+        set ::vic_ant_before 0
+        set ::vic_fanout_modified 1
+        set ::ant_read 0
+        set ::repairs 0
+        set ::closures 0
+        set ::block block
+        proc block {method args} {if {$method eq "getInsts"} {return {}}}
+        proc check_antennas {} {incr ::ant_read; return [expr {$::ant_read == 1}]}
+        proc vic_routed_nets {} {return [dict create]}
+        proc vic_lost_routes {before} {return [dict create]}
+        proc repair_antennas {args} {incr ::repairs}
+        proc log_cmd {args} {uplevel 1 $args}
+        proc append_if_exists_argument {args} {}
+        proc vic_eco_route {varname tag} {return 1}
+        proc vic_close_data_fanout {} {incr ::closures; return 1}
+        source __SECTION__
+        puts "REPAIRS $::repairs CLOSURES $::closures ROUNDS $::vic_fanout_ant_rounds"
+    """).replace("__SECTION__", str(section_file))
+    run = subprocess.run(["tclsh"], input=harness, text=True,
+                         capture_output=True, check=False)
+    assert run.returncode == 0, run.stderr
+    assert "REPAIRS 1 CLOSURES 1 ROUNDS 1" in run.stdout, run.stdout
