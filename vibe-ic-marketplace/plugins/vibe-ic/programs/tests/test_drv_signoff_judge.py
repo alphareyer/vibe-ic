@@ -13,6 +13,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import drv_signoff_judge as drv  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _synthetic_scene_profile(tmp_path, monkeypatch):
+    """Unit fixtures use a declared one-scene PDK profile, never a wildcard."""
+    profiles = json.loads(drv._SCENE_PROFILES.read_text())
+    profiles["synthetic"] = {"pvt": {"typ": {"nom_voltage": 5,
+                            "nom_temperature": 25}}, "rc_corners": ["nom"]}
+    path = tmp_path / "scene_profiles.json"
+    path.write_text(json.dumps(profiles))
+    monkeypatch.setattr(drv, "_SCENE_PROFILES", path)
+
+
 def _file(root: Path, name: str, body: str) -> dict:
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,6 +80,7 @@ def _bundle(tmp_path: Path) -> dict:
     frozen = {"sources": {n: v["sha256"] for n, v in sources.items()},
               "liberties": {"std": lib["sha256"]}, "values": values,
               "scope": "whole final netlist", "scenes": ["typ_nom"],
+              "scene_profile_sha256": drv._sha(drv._SCENE_PROFILES),
               "scene_liberties": {"typ_nom": ["std"]},
               "rc_corners": ["nom"],
               "pvt": {"typ_nom": {"nom_process": 1,
@@ -169,6 +181,8 @@ def _violate(bundle: dict, root: Path, kind: str, *, value: float,
     scene["counter_report"] = _file(root, "counter.log", "".join(
         f"DRV_COUNTER {k} {scene['counters'][k]}\n" for k in drv.KINDS))
     bundle["pins"]["u/Y"].update(net_class=net_class, cell_class=cell_class)
+    if net_class == "clock":
+        scene["clock_network_pins"] = ["u/Y"]
 
 
 def _owner_waiver(bundle: dict, root: Path, row: dict) -> dict:
@@ -192,11 +206,28 @@ def _owner_waiver(bundle: dict, root: Path, row: dict) -> dict:
                           "report": _file(root, "em.rpt", "EM screened\n"),
                           "drm_source": _file(root, "drm.txt", "current limits\n"),
                           "currents": {"average": .1, "rms": .2, "peak": .3},
-                          "limits": {"average": 1, "rms": 1, "peak": 1}}}
+            "limits": {"average": 1, "rms": 1, "peak": 1}}}
+
+
+def _mock_verified_owner_record(monkeypatch, waiver):
+    # Isolate downstream waiver semantics from ssh-keygen verification. The
+    # unsigned bundle ledger still has separate real-path refusal controls.
+    monkeypatch.setattr(drv, "_owner_records",
+                        lambda *args: ([{"type": "waiver", "waiver": waiver}],
+                                       "TEST_VERIFIED"))
 
 
 def test_complete_measured_bundle_passes(tmp_path):
     assert drv.judge(_bundle(tmp_path))["verdict"] == "PASS"
+
+
+def test_unknown_pdk_cannot_use_bundle_selected_scene_set(tmp_path):
+    bundle = _bundle(tmp_path)
+    bundle["identity"]["pdk"] = "unknown_pdk"
+    result = drv.judge(bundle)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert any("scene profile unresolved" in reason
+               for reason in result["not_measured"])
 
 
 def test_broader_implementation_stage_is_disclosed_when_final_route_clean(tmp_path):
@@ -320,7 +351,7 @@ def test_clock_slew_is_hard_fail(tmp_path):
 @pytest.mark.parametrize("kind,value,limit", [
     ("max_slew", 4, 3), ("max_capacitance", .3, .2)])
 def test_data_margin_can_only_be_waived_by_exact_owner_record(
-        tmp_path, kind, value, limit):
+        tmp_path, monkeypatch, kind, value, limit):
     bundle = _bundle(tmp_path)
     _violate(bundle, tmp_path, kind, value=value, limit=limit)
     first = drv.judge(bundle)
@@ -328,6 +359,9 @@ def test_data_margin_can_only_be_waived_by_exact_owner_record(
     assert first["findings"][0]["failed_tier"] == "T3_MARGIN"
     bundle["waiver_ledger"] = [_owner_waiver(bundle, tmp_path,
                                                first["findings"][0])]
+    assert drv.judge(bundle)["verdict"] == "FAIL"
+    assert "OWNER_SIGNATURE_UNAVAILABLE" in " ".join(drv.judge(bundle)["failures"])
+    _mock_verified_owner_record(monkeypatch, bundle["waiver_ledger"][0])
     assert drv.judge(bundle)["verdict"] == "WAIVED"
     bundle["waiver_ledger"][0]["sdc_sha256"] = "0" * 64
     assert drv.judge(bundle)["verdict"] == "FAIL"
@@ -340,7 +374,7 @@ def test_io_default_fanout_one_catches_three_below_design_four(tmp_path):
  nom_process : 1; nom_voltage : 5; nom_temperature : 25;
  default_max_fanout : 1;
  default_max_capacitance : 999;
- cell (pad) { pin (Y) { direction : output; } }
+ cell (pad) { pad_cell : true; pin (Y) { direction : output; } }
 }''')
     bundle["current"]["liberties"].append({"name": "io", **io})
     bundle["frozen"]["liberties"]["io"] = io["sha256"]
@@ -364,7 +398,7 @@ def test_std_cell_cap_margin_on_io_is_disclosed_separately(tmp_path):
  time_unit : "1ns"; capacitive_load_unit (1, pf);
  nom_process : 1; nom_voltage : 5; nom_temperature : 25;
  default_max_capacitance : 999;
- cell (pad) { pin (Y) { direction : output; } }
+ cell (pad) { pad_cell : true; pin (Y) { direction : output; } }
 }''')
     bundle["current"]["liberties"].append({"name": "io", **io})
     bundle["frozen"]["liberties"]["io"] = io["sha256"]
@@ -393,7 +427,7 @@ def test_liberty_slew_and_cap_are_hard_floors(tmp_path, kind, value, limit):
     assert result["findings"][0]["failed_tier"] == "T1_LIBERTY"
 
 
-def test_antenna_excess_needs_exact_owner_ledger(tmp_path):
+def test_antenna_excess_needs_exact_owner_ledger(tmp_path, monkeypatch):
     bundle = _bundle(tmp_path)
     _violate(bundle, tmp_path, "max_fanout", value=5, limit=4)
     bundle["pins"]["u/Y"]["loads"] = {"logical": 4, "antenna_diode": 1,
@@ -402,11 +436,13 @@ def test_antenna_excess_needs_exact_owner_ledger(tmp_path):
     assert first["verdict"] == "FAIL"
     row = first["findings"][0]
     bundle["waiver_ledger"].append(_owner_waiver(bundle, tmp_path, row))
+    assert drv.judge(bundle)["verdict"] == "FAIL"
+    _mock_verified_owner_record(monkeypatch, bundle["waiver_ledger"][0])
     assert drv.judge(bundle)["verdict"] == "WAIVED"
     bundle["identity"]["run_id"] = "run-2"
     assert drv.judge(bundle)["verdict"] == "FAIL"
     bundle["identity"]["run_id"] = "run-1"
-    bundle["waiver_ledger"][0]["origin"] = "flow"
+    bundle["waiver_ledger"][0]["sdc_sha256"] = "0" * 64
     assert drv.judge(bundle)["verdict"] == "FAIL"
 
 
@@ -450,17 +486,20 @@ def test_prestream_signoff_consumer_reads_judge_receipt_not_exit_code(tmp_path):
     import phase3_one_shot_runner as runner
     _file(tmp_path, "phase3/stage3/pnr/routed.def", "ROUTED DEF\n")
     source = tmp_path / "reports/phase3/sta/drv_signoff_bundle.json"
-    source.parent.mkdir(parents=True)
+    source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(json.dumps(_bundle(tmp_path)))
     row = runner._run_declared_signoff_gate(
         tmp_path, "drv_signoff", "drv_signoff_judge.py",
         "reports/phase3/sta/drv_signoff.json")
-    assert row.status == "PASS"
+    assert row.status == "NOT_MEASURED"
+    assert "capture plan absent" in row.detail
     assert any(s[0] == "drv_signoff" for s in runner._PRESTREAM_GATES)
     assert any(s[0] == "drv_signoff" for s in runner._DECLARED_SIGNOFF_GATES)
 
 
-def test_consumer_preserves_waived_word_and_owner_row(tmp_path):
+def test_consumer_preserves_waived_word_and_owner_row(tmp_path, monkeypatch):
+    import subprocess
+    import drv_signoff_capture as capture
     import phase3_one_shot_runner as runner
     _file(tmp_path, "phase3/stage3/pnr/routed.def", "ROUTED DEF\n")
     bundle = _bundle(tmp_path)
@@ -470,8 +509,15 @@ def test_consumer_preserves_waived_word_and_owner_row(tmp_path):
                                             "cts_buffer": 0}
     row = drv.judge(bundle)["findings"][0]
     bundle["waiver_ledger"] = [_owner_waiver(bundle, tmp_path, row)]
+    _mock_verified_owner_record(monkeypatch, bundle["waiver_ledger"][0])
+    _file(tmp_path, "reports/phase3/sta/drv_capture_plan.json", "{}")
+    monkeypatch.setattr(capture, "capture", lambda *a, **k: bundle)
+    def run_judge(cmd, **kwargs):
+        rc = drv.main([str(tmp_path), "--json", cmd[-1]])
+        return subprocess.CompletedProcess(cmd, rc, "", "")
+    monkeypatch.setattr(runner._pr, "run", run_judge)
     source = tmp_path / "reports/phase3/sta/drv_signoff_bundle.json"
-    source.parent.mkdir(parents=True)
+    source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(json.dumps(bundle))
     gate = runner._run_declared_signoff_gate(
         tmp_path, "drv_signoff", "drv_signoff_judge.py",
@@ -480,7 +526,7 @@ def test_consumer_preserves_waived_word_and_owner_row(tmp_path):
     assert gate.waiver_rows[0]["owner"] == "reyerchu"
 
 
-def test_flow_step_keeps_owner_drv_waiver_out_of_pass(tmp_path):
+def test_flow_step_refuses_unsigned_owner_ledger(tmp_path):
     import flow_compliance_check as flow
     _file(tmp_path, "phase3/stage3/pnr/routed.def", "ROUTED DEF\n")
     bundle = _bundle(tmp_path)
@@ -498,7 +544,9 @@ def test_flow_step_keeps_owner_drv_waiver_out_of_pass(tmp_path):
                 {"program_exit_zero": "drv_signoff_judge . --json "
                  "reports/phase3/sta/drv_signoff.json"}]}}
     result = flow.check_step(tmp_path, step, {})
-    assert result.status == "WAIVED", result.reasons
+    assert result.status == "FAIL", result.reasons
+    receipt = json.loads((tmp_path / "reports/phase3/sta/drv_signoff.json").read_text())
+    assert "OWNER_SIGNATURE_UNAVAILABLE" in " ".join(receipt["failures"])
     bundle["waiver_ledger"][0]["origin"] = "flow"
     source.write_text(json.dumps(bundle))
     result = flow.check_step(tmp_path, step, {})
@@ -577,15 +625,17 @@ def test_partially_unannotated_drivers_block_a_clean_verdict(tmp_path):
     assert any("unannotated" in reason for reason in result["not_measured"])
 
 
-def test_missing_routed_def_downgrades_waived_to_not_measured(tmp_path):
+def test_missing_routed_def_downgrades_waived_to_not_measured(tmp_path, monkeypatch):
     bundle = _bundle(tmp_path)
     _violate(bundle, tmp_path, "max_fanout", value=5, limit=4)
     bundle["pins"]["u/Y"]["loads"] = {"logical": 4, "antenna_diode": 1,
                                           "cts_buffer": 0}
     row = drv.judge(bundle)["findings"][0]
     bundle["waiver_ledger"] = [_owner_waiver(bundle, tmp_path, row)]
+    _mock_verified_owner_record(monkeypatch, bundle["waiver_ledger"][0])
+    _file(tmp_path, "reports/phase3/sta/drv_capture_plan.json", "{}")
     source = tmp_path / "reports/phase3/sta/drv_signoff_bundle.json"
-    source.parent.mkdir(parents=True)
+    source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(json.dumps(bundle))
     output = tmp_path / "receipt.json"
     assert drv.main([str(tmp_path), "--json", str(output)]) != 0
@@ -683,11 +733,12 @@ def test_completion_audit_names_waived_without_a_pass_claim(
     assert "below the recorded baseline quality" in output.lower()
 
 
-def test_unrelated_missing_measurement_does_not_invalidate_owner_waiver(tmp_path):
+def test_unrelated_missing_measurement_does_not_invalidate_owner_waiver(tmp_path, monkeypatch):
     bundle = _bundle(tmp_path)
     _violate(bundle, tmp_path, "max_capacitance", value=.3, limit=.2)
     row = drv.judge(bundle)["findings"][0]
     bundle["waiver_ledger"] = [_owner_waiver(bundle, tmp_path, row)]
+    _mock_verified_owner_record(monkeypatch, bundle["waiver_ledger"][0])
     bundle["scenes"][0]["unannotated_nets"] = 1
     result = drv.judge(bundle)
     assert result["verdict"] == "NOT_MEASURED"

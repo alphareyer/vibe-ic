@@ -148,8 +148,11 @@ def _liberty_limits(body: str) -> dict:
     defaults = {kind: scaled(body[:body.find("cell (")], kind, "default_")
                 for kind in KINDS}
     cells: dict[str, dict] = {}
+    pad_cells: set[str] = set()
     for cell in re.finditer(r'\bcell\s*\(\s*"?([^"\)]+)"?\s*\)\s*\{', body):
         cell_body = _balanced_block(body, cell.start())
+        if re.search(r"\bpad_cell\s*:\s*true\s*;", cell_body, re.I):
+            pad_cells.add(cell.group(1).strip())
         pins = {}
         for pin in re.finditer(r'\bpin\s*\(\s*"?([^"\)]+)"?\s*\)\s*\{', cell_body):
             pin_body = _balanced_block(cell_body, pin.start())
@@ -159,7 +162,7 @@ def _liberty_limits(body: str) -> dict:
                 kind: scaled(direct, kind)
                 for kind in KINDS}
         cells[cell.group(1).strip()] = pins
-    return {"defaults": defaults, "cells": cells}
+    return {"defaults": defaults, "cells": cells, "pad_cells": pad_cells}
 
 
 def _liberty_header(body: str) -> dict[str, float | None]:
@@ -267,6 +270,15 @@ def _annotate_limits(row: dict, kind: str, scene: dict, libs: dict,
                        f"{row['pin']} ({len(matched)} matches)")
         return False
     lib_name, lib, pin_table = matched[0]
+    actual_io = cell in lib["limits"]["pad_cells"]
+    if row.get("cell_class") == "IO" and not actual_io:
+        missing.append(f"{scene['name']}: IO class lacks Liberty pad_cell proof for {row['pin']}")
+        return False
+    row["cell_class"] = "IO" if actual_io else "std"
+    if row["net_class"] == "clock" and row["pin"] not in (
+            scene.get("clock_network_pins") or []):
+        missing.append(f"{scene['name']}: clock net classification lacks tool proof for {row['pin']}")
+        return False
     pin_limit = pin_table.get(kind)
     if pin_limit is None:
         pin_limit = lib["limits"]["defaults"].get(kind)
@@ -438,11 +450,18 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             l9_path = Path(str((current.get("sources") or {}).get("l9", {}).get("path") or ""))
             if l9_path.resolve() not in {p.resolve() for p in _source_files(project)}:
                 missing.append("project L9 source is not a declaration file in judged project")
+        if not identity.get("pdk") or not identity.get("library"):
+            missing.append("L9 fanout scope identity lacks PDK or library")
         declared_l9 = collect_declared(declaration_project, pdk=str(identity.get("pdk") or ""),
                                        library=str(identity.get("library") or ""))
         l9_fanout = declared_l9.get("SYNTH_MAX_FANOUT")
+        scoped_fanout = bool(re.search(
+            r"(?im)^\s*\|\s*(?:pdk|library|lib|standard_cell_library)\s*\|[^\n]*"
+            r"\bMAX_FANOUT_CONSTRAINT\b", source_texts.get("l9", "")))
         if l9_fanout and l9_fanout[0] != declared.get("fanout"):
             fails.append("L9 declared fanout != frozen sign-off value")
+        elif not l9_fanout and scoped_fanout:
+            missing.append("L9 fanout scope did not match judged PDK/library")
         elif not l9_fanout and declared.get("fanout") != integrator["fanout"]:
             fails.append("fanout has no L9 declaration or PDK-default basis")
     except (OSError, ValueError) as exc:
@@ -453,7 +472,9 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     profiles = json.loads(_SCENE_PROFILES.read_text())
     profile = next((value for key, value in profiles.items()
                     if str(identity.get("pdk", "")).lower().startswith(key.lower())), None)
-    if profile:
+    if profile is None:
+        missing.append("installed PDK sign-off scene profile unresolved")
+    else:
         expected_scenes = {f"{pvt}_{rc}" for pvt in profile["pvt"]
                            for rc in profile["rc_corners"]}
         if set(required_scenes) != expected_scenes or len(required_scenes) != len(expected_scenes):
@@ -853,6 +874,9 @@ def main(argv: list[str] | None = None) -> int:
         bundle = json.loads(source.read_text())
         result = judge(bundle, project=args.bundle if args.bundle.is_dir() else None)
         if args.bundle.is_dir():
+            if not (args.bundle / "reports/phase3/sta/drv_capture_plan.json").is_file():
+                result.setdefault("not_measured", []).append(
+                    "fresh DRV capture plan absent")
             routed = args.bundle / "phase3/stage3/pnr/routed.def"
             recorded = ((bundle.get("identity") or {}).get("artifacts") or {}).get("def", {}).get("sha256")
             if not routed.is_file():
