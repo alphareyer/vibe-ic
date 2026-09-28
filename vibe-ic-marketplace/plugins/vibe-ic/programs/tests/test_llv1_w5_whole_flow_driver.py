@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -53,6 +54,8 @@ class FakeLibreLane:
         opt = lambda k: argv[argv.index(k) + 1] if k in argv else None
         if "-c" in argv and argv[argv.index("-c") + 1] == W._PLANNED_STEPS_SCRIPT:
             first, last = argv[-2], argv[-1]
+            if last == "__FLOW_END__":
+                last = FLOW[-1]
             rows = [{"id": s, "gated_off_by": ["RUN_X"] if s in self.skip else []}
                     for s in FLOW[FLOW.index(first):FLOW.index(last) + 1]]
             return type("R", (), {"returncode": 0, "stdout": json.dumps(rows), "stderr": ""})
@@ -110,9 +113,65 @@ def project(tmp_path):
 
 def _seg(project, fake, monkeypatch, name, extra, expected):
     monkeypatch.setattr(W.subprocess, "run", fake)
+    monkeypatch.setattr(W, "_run_segment_process",
+                        lambda argv, **kw: fake(argv))
     return W.run_segment(project, "img", project / "cfg.json", name=name, flow="F",
                          pdk="processA", pdk_root=project, scl="libA", extra=extra,
                          expected=expected, deadline_s=77)
+
+
+def test_segment_process_uses_progress_watchdog_and_records_budget(project,
+                                                                   monkeypatch):
+    seen = {}
+
+    def supervised(argv, **kw):
+        seen.update(argv=argv, kw=kw)
+        return SimpleNamespace(rc=0, out="done", err="", outcome="natural",
+                               elapsed_s=42, supervision={"progress": "flow.log"})
+
+    monkeypatch.setattr(W._watchdog, "run_supervised", supervised)
+    monkeypatch.setattr(W.subprocess, "run", lambda *a, **k:
+                        pytest.fail("a long EDA run used subprocess.run"))
+    base = W.whole_dir(project)
+    base.mkdir(parents=True)
+    run = project / "runs" / "segment1"
+    monkeypatch.setenv("VIBEIC_EDA_IMAGE_REPO", "must-not-propagate")
+    result = W._run_segment_process(["docker", "run", "--rm", "image"],
+                                    run_dir=run, base=base, name="segment1",
+                                    budget_s=77, docker="docker")
+    assert result.returncode == 0 and result.stdout == "done"
+    assert seen["argv"][:4] == ["docker", "run", "--cidfile",
+                                 str(base / "segment1.cid")]
+    assert seen["kw"]["log_path"] == run / "flow.log"
+    assert seen["kw"]["hard_ceiling_s"] == 77
+    assert "VIBEIC_EDA_IMAGE_REPO" not in seen["kw"]["env"]
+    receipt = json.loads((base / "segment1.supervision.json").read_text())
+    assert receipt["outcome"] == "natural" and receipt["rc"] == 0
+
+
+def test_stall_stops_only_the_private_container_id(project, monkeypatch):
+    seen = []
+    base = W.whole_dir(project)
+    base.mkdir(parents=True)
+    cid = "a" * 64
+
+    def supervised(argv, **kw):
+        (base / "segment1.cid").write_text(cid)
+        kw["kill"](SimpleNamespace(pid=123), "stalled")
+        return SimpleNamespace(rc=199, out="", err="stalled", outcome="stalled",
+                               elapsed_s=1800, supervision={"progress": "none"})
+
+    monkeypatch.setattr(W._watchdog, "run_supervised", supervised)
+    monkeypatch.setattr(W.subprocess, "run", lambda argv, **kw:
+                        seen.append(argv) or SimpleNamespace(returncode=0))
+    monkeypatch.setattr(W.os, "killpg", lambda pid, sig: seen.append((pid, sig)))
+    result = W._run_segment_process(["docker", "run", "image"],
+                                    run_dir=project / "runs" / "segment1",
+                                    base=base, name="segment1", budget_s=77,
+                                    docker="docker")
+    assert result.returncode == 199
+    assert seen[0] == ["docker", "stop", "--time", "10", cid]
+    assert seen[1][0] == 123
 
 
 def test_the_invocation_shape(project, monkeypatch):
@@ -126,7 +185,9 @@ def test_the_invocation_shape(project, monkeypatch):
     for flag, value in (("--pdk", "processA"), ("--scl", "libA"), ("--flow", "F"),
                         ("--design-dir", str(project.resolve())), ("--run-tag", "seg1")):
         assert argv[argv.index(flag) + 1] == value
-    assert "--manual-pdk" in argv and kw["timeout"] == 77
+    assert "--manual-pdk" in argv
+    invocation = json.loads((W.whole_dir(project) / "seg1.invocation.json").read_text())
+    assert invocation["deadline_s"] == 77
     rec = json.loads((W.whole_dir(project) / "seg1.invocation.json").read_text())
     assert rec["argv"] == argv and rec["config_sha256"] == LC.digest(project / "cfg.json")
 
@@ -336,6 +397,8 @@ def test_an_absent_sdc_is_named_in_the_provenance(tmp_path):
 def _run_two(p, monkeypatch, wrapper: bool):
     fake = FakeLibreLane()
     monkeypatch.setattr(W.subprocess, "run", fake)
+    monkeypatch.setattr(W, "_run_segment_process",
+                        lambda argv, **kw: fake(argv))
     seg1 = put(p / "seg1.json", "{}")
 
     def between(project, state):
@@ -373,10 +436,32 @@ def test_a_hardmacro_reuses_segment1s_header(tmp_path, monkeypatch):
     assert summary["netlist_identity"]["verdict"] == "PASS"
 
 
+def test_the_real_dispatcher_can_plan_to_the_images_flow_end(tmp_path,
+                                                             monkeypatch):
+    p = _macro(tmp_path)
+    fake = FakeLibreLane()
+    monkeypatch.setattr(W.subprocess, "run", fake)
+    monkeypatch.setattr(W, "_run_segment_process",
+                        lambda argv, **kw: fake(argv))
+    result = W.run_two_segments(
+        p, "img", pdk="processA", pdk_root=p, scl="libA",
+        segment1=put(p / "seg1.json", "{}"),
+        between=lambda project, state: {
+            "netlist": Path(json.loads(Path(state).read_text())["nl"]),
+            "top": "core", "wrapper": None, "sdc": None,
+            "sdc_source": "SDC_SEAM_PENDING"},
+        segment2_kwargs={}, first_step=FLOW[0],
+        importer=lambda project, segments: {"segments": len(segments)})
+    assert result["segment2"]["steps"] == SEG2
+    assert result["import"]["segments"] == 2
+
+
 def test_a_between_that_refuses_stops_the_run(tmp_path, monkeypatch):
     p = _macro(tmp_path)
     fake = FakeLibreLane()
     monkeypatch.setattr(W.subprocess, "run", fake)
+    monkeypatch.setattr(W, "_run_segment_process",
+                        lambda argv, **kw: fake(argv))
 
     def between(project, state):
         raise LC.Refusal("LEC_NOT_PROVEN", "step 13 did not prove the netlist")

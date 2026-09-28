@@ -50,6 +50,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -61,6 +62,7 @@ if _PROGRAMS_DIR not in sys.path:
 
 import _atomic_artefact  # noqa: E402
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
+import _watchdog  # noqa: E402 — EDA completion is supervised by progress
 import librelane_contract as _ll  # noqa: E402
 from librelane_contract import Refusal, digest  # noqa: E402
 
@@ -155,11 +157,9 @@ def run_segment(project: Path, image: str, config: Path, *, name: str, flow: str
                                 {"argv": argv, "config": str(config),
                                  "config_sha256": digest(Path(config)),
                                  "deadline_s": deadline_s}, indent=2)
-    try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=deadline_s)
-        rc, out = done.returncode, (done.stdout or "") + (done.stderr or "")
-    except subprocess.TimeoutExpired as exc:
-        rc, out = "TIMEOUT", f"deadline {deadline_s}s exceeded: {exc}"
+    done = _run_segment_process(argv, run_dir=run_dir, base=base,
+                                name=name, budget_s=deadline_s, docker=docker)
+    rc, out = done.returncode, (done.stdout or "") + (done.stderr or "")
     (base / f"{name}.console.log").write_text(out)
     steps = started_steps(run_dir)
     ids = [s for s, _ in steps]
@@ -194,6 +194,44 @@ def run_segment(project: Path, image: str, config: Path, *, name: str, flow: str
     return {"run_dir": run_dir, "steps": steps, "state": final, "tool_rc": rc,
             "tool_findings": findings or [],
             "tool_verdict": "FINDINGS" if completed_with_findings else "CLEAN"}
+
+
+def _run_segment_process(argv: List[str], *, run_dir: Path, base: Path,
+                         name: str, budget_s: int, docker: str):
+    """Supervise the exact Docker run by progress and reap only its CID.
+
+    The budget is recorded, never used as a clock kill.  A stalled Docker
+    client is stopped by its private CID before the supervised process group
+    is reaped, so it cannot leave an orphaned EDA container running.
+    """
+    cidfile = base / f"{name}.cid"
+    if cidfile.exists():
+        cidfile.unlink()
+    command = [*argv[:2], "--cidfile", str(cidfile), *argv[2:]]
+
+    def _reap(proc, _reason):
+        if cidfile.is_file():
+            cid = cidfile.read_text().strip()
+            if re.fullmatch(r"[0-9a-f]{64}", cid):
+                subprocess.run([docker, "stop", "--time", "10", cid],
+                               capture_output=True, text=True, timeout=30)
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    env = dict(os.environ)
+    env.pop("VIBEIC_EDA_IMAGE_REPO", None)
+    result = _watchdog.run_supervised(
+        command, log_path=run_dir / "flow.log", stall_grace_s=1800,
+        hard_ceiling_s=budget_s, poll_s=10, kill=_reap, env=env)
+    _atomic_artefact.write_json(base / f"{name}.supervision.json",
+                                {"outcome": result.outcome, "rc": result.rc,
+                                 "elapsed_s": result.elapsed_s,
+                                 "supervision": result.supervision}, indent=2)
+    return type("SegmentProcess", (), {"returncode": result.rc,
+                                         "stdout": result.out,
+                                         "stderr": result.err})()
 
 
 def deferred_findings(run_dir: Path) -> Optional[List[str]]:
@@ -231,6 +269,8 @@ if scl:
     kwargs["scl"] = scl
 flow = cls(**kwargs)
 ids = [s.id for s in flow.Steps]
+if last == "__FLOW_END__":
+    last = ids[-1]
 gates = {}
 for key, value in (flow.gating_config_vars or {}).items():
     targets = [key] if key in ids else list(Filter([key]).filter(ids))
@@ -247,7 +287,8 @@ print(json.dumps(out))
 
 
 def planned_steps(project: Path, image: str, config: Path, *, flow: str, pdk: str,
-                  pdk_root: Path, scl: Optional[str], first: str, last: str,
+                  pdk_root: Path, scl: Optional[str], first: str,
+                  last: Optional[str],
                   docker: str = "docker", deadline_s: int = 600) -> Dict[str, Any]:
     """The steps `first..last` the image's own Flow will run for this config:
     its step order, minus every step whose gating variable the resolved config
@@ -257,7 +298,8 @@ def planned_steps(project: Path, image: str, config: Path, *, flow: str, pdk: st
     argv = [docker, "run", "--rm", *_dmem.docker_memory_flags(), "--network", "none",
             "-v", f"{project}:{project}", "-v", f"{Path(pdk_root).resolve()}:/pdk:ro",
             "--entrypoint", "python3", image, "-c", _PLANNED_STEPS_SCRIPT, flow,
-            str(Path(config).resolve()), pdk, scl or "", str(project), first, last]
+            str(Path(config).resolve()), pdk, scl or "", str(project), first,
+            last or "__FLOW_END__"]
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=deadline_s)
     except subprocess.TimeoutExpired as exc:
@@ -437,7 +479,8 @@ def segment2_config(project: Path, pdk: str, out: Path, *, layout_netlist: Path,
 def run_two_segments(project: Path, image: str, *, pdk: str, pdk_root: Path,
                      scl: Optional[str], segment1: Path, between,
                      segment2_kwargs: Dict[str, Any], first_step: str,
-                     last_step: str, deadline_s: int = DEFAULT_DEADLINE_S,
+                     last_step: Optional[str] = None,
+                     deadline_s: int = DEFAULT_DEADLINE_S,
                      docker: str = "docker", importer=None) -> Dict[str, Any]:
     """Segment 1, vibe-ic's between-segments work, segment 2.
 
