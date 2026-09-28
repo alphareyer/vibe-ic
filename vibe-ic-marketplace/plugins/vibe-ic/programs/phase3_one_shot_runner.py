@@ -915,6 +915,93 @@ def _declared_transform_exec(project: Optional[Path], path: Path, step: str,
     return result
 
 
+def _declare_immutable_transform(project: Path, source: Path, output: Path,
+                                 step: str, tool: str, command: str) -> bool:
+    """Declare a finished output only when its preserved input is ledgered.
+
+    The tool's original bytes remain at ``source``.  The finishing writer may
+    work on ``output`` until it is complete; this one record then binds the
+    two *different* paths and their actual digests.  A missing or stale input
+    declaration cannot be repaired by claiming the current output digest.
+    """
+    source, output = Path(source), Path(output)
+    in_rel, out_rel = _project_rel(project, source), _project_rel(project, output)
+    in_sha, out_sha = _file_sha256(source), _file_sha256(output)
+    declared = _newest_declared_sha(project, in_rel) if in_rel else None
+    if (not in_rel or not out_rel or in_rel == out_rel or not in_sha or
+            not out_sha or declared != in_sha):
+        if in_rel and in_sha and declared and declared != in_sha:
+            _record_unexplained_rewrite(project, in_rel, declared, in_sha, step)
+        return False
+    entry = {
+        "record": "declared_transform", "tool": tool, "command": command,
+        "producing_step": step, "exit_code": 0, "duration_ms": None,
+        "timestamp": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "inputs": {in_rel: in_sha}, "outputs": {out_rel: out_sha},
+    }
+    _rmeas.attach(project, entry)
+    with (Path(project) / "provenance.jsonl").open("a") as stream:
+        stream.write(json.dumps(entry) + "\n")
+    return True
+
+
+class _GdsTransformChain:
+    """Keep every successful finishing state while the delivery path is built.
+
+    Existing GDS writers work in place.  Their working path is deliberately
+    unledgered until publication; after each changed pass, a separate snapshot
+    is declared from the preceding immutable head.  The pre-pass comparison
+    catches an edit to the working file between two finishing writers.
+    """
+
+    def __init__(self, project: Path, source: Path, working: Path,
+                 *, declare: bool = True):
+        self.project, self.head, self.working = project, source, working
+        self.declare = declare and (project / "provenance.jsonl").is_file()
+        self.failed: Optional[str] = None
+        self.count = 0
+
+    def run(self, _unused: Optional[Path], path: Path, step: str,
+            tool: str, command: str, run: Callable[[], Any]) -> Any:
+        if Path(path) != self.working:
+            self.failed = f"{step}: unexpected GDS working path"
+        if self.failed:
+            return run()
+        before = _file_sha256(self.working)
+        head_sha = _file_sha256(self.head)
+        if before != head_sha:
+            self.failed = f"{step}: GDS changed between declared transforms"
+            return run()
+        if self.declare and _newest_declared_sha(
+                self.project, _project_rel(self.project, self.head) or "") != head_sha:
+            self.failed = f"{step}: GDS input does not match its declaration"
+            return run()
+        result = run()
+        after = _file_sha256(self.working)
+        if after is None:
+            self.failed = f"{step}: GDS writer removed its output"
+            return result
+        if after == before:
+            return result
+        self.count += 1
+        snapshot = self.head.parent / f"{self.working.stem}.{self.count}.{time.time_ns()}.gds"
+        shutil.copyfile(self.working, snapshot)
+        if self.declare and not _declare_immutable_transform(
+                self.project, self.head, snapshot, step, tool, command):
+            self.failed = f"{step}: GDS transform input was not declared"
+            return result
+        self.head = snapshot
+        return result
+
+    def finish(self, command: str) -> bool:
+        if self.failed or _file_sha256(self.working) != _file_sha256(self.head):
+            return False
+        return (not self.declare or _declare_immutable_transform(
+            self.project, self.head, self.working, "gds:finishing", "klayout",
+            command))
+
+
 def set_invocation_provenance_sink(project: Optional[Path]) -> None:
     """Point per-invocation logging at `<project>/provenance.jsonl`, or None to
     disable. Unset means no logging at all — a library caller (several gates
@@ -49061,6 +49148,10 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     pnr_dir = _pl.pnr_dir(project)
     def_file = pnr_dir / f"{top}.def"
     gds_out = pnr_dir / f"{top}.gds"
+    # Each tool invocation gets its own retained stream.  Finishing works on
+    # the canonical delivery path, whose digest is declared only at the end.
+    stream_gds = pnr_dir / "streamout" / f"{top}.{time.time_ns()}.gds"
+    stream_gds.parent.mkdir(parents=True, exist_ok=True)
     for _old_lvs in (gds_out.with_suffix(".lvs.gds"),
                      gds_out.with_suffix(".lvs.gds.receipt.json")):
         _old_lvs.unlink(missing_ok=True)
@@ -49142,7 +49233,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
             "port-label restore)")
     else:
         magic_ok, magic_transcript = _magic_def_to_gds(
-            project, top, pdk, container, gds_out)
+            project, top, pdk, container, stream_gds)
     # sha256×sky130A / #SS-SETUP — FORCE klayout streamout (A/B probe). Magic's
     # native geometry merge fuses the met2 landings of a STACKED via1+via2 into a
     # shape the KLayout deck reads as enclosure-deficient (m2.4/m2.5) even though
@@ -49153,17 +49244,32 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         magic_ok, magic_transcript = False, (
             "magic streamout forced-skip (VIBEIC_FORCE_KLAYOUT_STREAMOUT=1): "
             "avoid the stacked-via met2-enclosure merge artefact")
-    if magic_ok and gds_out.is_file():
+    if magic_ok and stream_gds.is_file():
+        shutil.copyfile(stream_gds, gds_out)
+        chain = _GdsTransformChain(project, stream_gds, gds_out, declare=not candidate)
         # ORGANIC #600 — manufacturing-grid snap before signoff DRC.
-        snap_ok, snap_note = _declared_transform_exec(project, gds_out, "gds:grid_snap", "klayout",
+        snap_ok, snap_note = chain.run(None, gds_out, "gds:grid_snap", "klayout",
         "grid_snap (in place) (phase3_one_shot_runner step_gds)",
         lambda: _gds_grid_snap(project, top, pdk, container,
                                             gds_out))
+        # The XOR reference is the actual pre-finishing layout from this run.
+        # Retain it after grid snap and bind it to the routed DEF, as on the
+        # KLayout arm, so a re-stream is unnecessary and cannot drift.
+        prefinish_gds = pnr_dir / f"{top}.prefinish.gds"
+        shutil.copyfile(gds_out, prefinish_gds)
+        prefinish_gds.with_suffix(".gds.receipt.json").write_text(json.dumps({
+            "program": "phase3_one_shot_runner", "artefact": prefinish_gds.name,
+            "sha256": _sha256_file(prefinish_gds),
+            "size": prefinish_gds.stat().st_size,
+            "mtime_ns": prefinish_gds.stat().st_mtime_ns,
+            "top": str(top), "streamed_from_def": def_file.name,
+            "def_sha256": _sha256_file(def_file), "engine": "magic",
+        }, indent=2) + "\n")
         # Step 26.5ic — die finishing (the PDK's OWN seal ring), BEFORE the
         # fill and before the sign-off DRC/LVS read this GDS, so the ring is
         # verified with the rest of the die instead of appearing after its
         # evidence.
-        seal_ok, seal_note = _declared_transform_exec(project, gds_out, "gds:die_finishing", "klayout",
+        seal_ok, seal_note = chain.run(None, gds_out, "gds:die_finishing", "klayout",
         "die_finishing (in place) (phase3_one_shot_runner step_gds)",
         lambda: _die_finishing(project, top, pdk, gds_out,
                                             container))
@@ -49174,7 +49280,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         if _t34 is None or _t34["mode"] == "dual":
             # Per-layer density fill BEFORE the density checks / sign-off DRC read
             # this GDS. Config-gated + NONFATAL; the note always discloses.
-            dfill_ok, dfill_note = _declared_transform_exec(project, gds_out, "gds:density_metal_fill", "klayout",
+            dfill_ok, dfill_note = chain.run(None, gds_out, "gds:density_metal_fill", "klayout",
             "density_metal_fill (in place) (phase3_one_shot_runner step_gds)",
             lambda: _density_metal_fill(project, top, pdk, gds_out, container))
             # DIE-WIDE fill by the PDK's own generator, LAST of the fill passes
@@ -49182,7 +49288,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
             # The pass above measures and fills the streamed geometry's BOUNDING
             # BOX; a foundry minimum-density rule is written over the entire DIE,
             # and on a slot submission those are different rectangles. NONFATAL.
-            ddfill_ok, ddfill_note = _declared_transform_exec(project, gds_out, "gds:die_density_fill", "klayout",
+            ddfill_ok, ddfill_note = chain.run(None, gds_out, "gds:die_density_fill", "klayout",
             "die_density_fill (in place) (phase3_one_shot_runner step_gds)",
             lambda: _die_density_fill(project, top, pdk, gds_out,
                                                        container))
@@ -49190,45 +49296,15 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
             dfill_ok, dfill_note = ddfill_ok, ddfill_note = (False, _t34["not_run"])
         if _t34 is not None:
             dfill_ok, dfill_note = _step34_gds_ship(project, gds_out, _t34,
-                                                    (dfill_ok, dfill_note))
+                                                    (dfill_ok, dfill_note), chain=chain)
         # vibe-ic#613 — the port-label restore is a POST-streamout pass over the
         # finished GDS, so it belongs on BOTH engines. Gating it on the KLayout
         # path alone would have made "which streamout ran" decide whether a
         # sign-off GDS can be pin-matched. Last, so labels land on final geometry.
-        label_ok, label_note = _declared_transform_exec(project, gds_out, "gds:port_labels", "klayout",
+        label_ok, label_note = chain.run(None, gds_out, "gds:port_labels", "klayout",
         "port_labels (in place) (phase3_one_shot_runner step_gds)",
         lambda: _restore_port_labels_if_missing(
             project, top, pdk, container, gds_out, def_file))
-        # R-0915-148 — THIS BRANCH RETAINS NO FINISHING BOUNDARY, SO IT MUST NOT
-        # LEAVE SOMEBODY ELSE'S LYING AROUND.
-        #
-        # Only the KLayout branch writes `{top}.prefinish.gds`. Magic retains
-        # nothing and, until now, deleted nothing -- and nothing anywhere in the
-        # plugin ever unlinked one. So an earlier KLayout invocation (or one forced
-        # with VIBEIC_FORCE_KLAYOUT_STREAMOUT=1) left a boundary in the project, a
-        # later Magic invocation in the same directory left it there STALE, and
-        # `gds_xor_check` would compare this run's GDS against the previous run's
-        # layout under the banner "design-layer differences expected to be exactly
-        # 0" -- reporting any routing change between the two runs as a design FAIL
-        # about a layout nobody asked about.
-        #
-        # An absent boundary is a KNOWN, handled state: the consumer re-streams.
-        # A stale one is not. So this branch removes what it did not produce, and
-        # says so.
-        for _stale in sorted(pnr_dir.glob("*.prefinish.gds")):
-            try:
-                _stale_rec = _stale.with_suffix(".gds.receipt.json")
-                _stale.unlink()
-                if _stale_rec.is_file():
-                    _stale_rec.unlink()
-                print(f"[gds] removed a finishing boundary this run did not "
-                      f"produce ({_stale.name}): the magic stream-out retains "
-                      f"none, and a stale one would be compared as if it were "
-                      f"this run's")
-            except OSError as _stale_exc:                  # pragma: no cover
-                print(f"[gds] could NOT remove the stale finishing boundary "
-                      f"{_stale.name} ({type(_stale_exc).__name__}: "
-                      f"{_stale_exc}); gds_xor_check must refuse it by receipt")
 
         # #306 — BOTH stream-out engines get the substance gate. A stub GDS
         # out of Magic is the same defect as a stub GDS out of KLayout, and
@@ -49242,6 +49318,9 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
                 # failure is losing it when a reader most needs it: "which
                 # streamout produced this bad GDS" is the first question.
                 extras={"streamout_engine": "magic"})
+        if not chain.finish("finish the retained Magic stream for sign-off"):
+            return StepResult("gds", "FAIL", time.time() - t0,
+                              chain.failed or "GDS finishing input has no matching tool declaration")
         return StepResult(
             "gds", "PASS", time.time() - t0,
             f"gds={gds_out.name} size={gds_out.stat().st_size} "
@@ -49270,7 +49349,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # container and host paths are not visible there.
     script_c = _to_container_path(str(script), container)
     def_c = _to_container_path(str(def_file), container)
-    gds_out_c = _to_container_path(str(gds_out), container)
+    gds_out_c = _to_container_path(str(stream_gds), container)
     # Include macro LEFs + macro PA-GDS so hard-macro outlines flatten
     # into the merged GDS. chip-AGNOSTIC.
     lef_list = [pdk.tech_lef, pdk.cell_lef] + list(pdk.macro_lefs)
@@ -49341,7 +49420,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         f"STDCELL_MARKER_LAYER=\"{marker_arg}\" && "
         f"klayout -zz -b -r {script_c}"
     )
-    rc, out, err = _docker_exec(container, cmd, marker=script_c, outputs=[gds_out])
+    rc, out, err = _docker_exec(container, cmd, marker=script_c, outputs=[stream_gds])
     _record_stream_inputs(project, container, gds_out, "klayout", script,
                           def_file, top,
                           {"LEFS": lefs, "CELL_GDS": cell_gds_c,
@@ -49357,11 +49436,13 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         stream_log.write_text((out or "") + ("\n" + err if err else ""))
     except Exception:
         pass
-    if rc != 0 or not gds_out.is_file():
+    if rc != 0 or not stream_gds.is_file():
         return StepResult("gds", "FAIL", time.time() - t0,
                           f"rc={rc} log_tail={(out+err)[-1500:]}")
+    shutil.copyfile(stream_gds, gds_out)
+    chain = _GdsTransformChain(project, stream_gds, gds_out, declare=not candidate)
     # ORGANIC #600 — manufacturing-grid snap before signoff DRC.
-    snap_ok, snap_note = _declared_transform_exec(project, gds_out, "gds:grid_snap", "klayout",
+    snap_ok, snap_note = chain.run(None, gds_out, "gds:grid_snap", "klayout",
         "grid_snap (in place) (phase3_one_shot_runner step_gds)",
         lambda: _gds_grid_snap(project, top, pdk, container, gds_out))
     # ORGANIC #601 — KLayout streamout does NOT merge abutting same-layer
@@ -49369,7 +49450,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # DRC removes boundary edge-pair false m1.2. Magic-merge cannot be
     # assumed (it core-dumps on the very DEFs that force this fallback), so
     # the merge is KLayout-native. Never ship an un-merged KLayout GDS.
-    merge_ok, merge_note = _declared_transform_exec(project, gds_out, "gds:layer_merge", "klayout",
+    merge_ok, merge_note = chain.run(None, gds_out, "gds:layer_merge", "klayout",
         "layer_merge (in place) (phase3_one_shot_runner step_gds)",
         lambda: _klayout_merge_layers(project, top, pdk, container,
                                                  gds_out))
@@ -49377,7 +49458,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # router's same-net metal shapes left in the (0, min-space) no-man's land
     # (config-gated; each max_bridge_um < the layer min-space so it can only
     # merge same-net shapes, never short or mask a different-net violation).
-    heal_ok, heal_note = ((_declared_transform_exec(project, gds_out, "gds:same_net_heal", "klayout",
+    heal_ok, heal_note = ((chain.run(None, gds_out, "gds:same_net_heal", "klayout",
         "same_net_heal (in place) (phase3_one_shot_runner step_gds)",
         lambda: _klayout_same_net_heal(project, top, pdk, container,
                                                   gds_out)))
@@ -49446,7 +49527,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # GDS. That is LibreLane's chip-flow order, SealRing -> Filler -> Density;
     # adding the ring later would put metal on the die after Step 31 signed it
     # off — the artefact changing after the evidence.
-    seal_ok, seal_note = _declared_transform_exec(project, gds_out, "gds:die_finishing", "klayout",
+    seal_ok, seal_note = chain.run(None, gds_out, "gds:die_finishing", "klayout",
         "die_finishing (in place) (phase3_one_shot_runner step_gds)",
         lambda: _die_finishing(project, top, pdk, gds_out, container))
     # Step 34 on LibreLane (mig104): the tool arm fills a snapshot of the
@@ -49457,7 +49538,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # v1.3.83 — config-driven dummy-METAL fill AFTER merge, BEFORE the
     # sign-off DRC consumes this GDS (the deck's own density + spacing +
     # wide-metal rules then verify the fill honestly — no rule is waived).
-    fill_ok, fill_note = ((_declared_transform_exec(project, gds_out, "gds:dummy_fill", "klayout",
+    fill_ok, fill_note = ((chain.run(None, gds_out, "gds:dummy_fill", "klayout",
         "dummy_fill (in place) (phase3_one_shot_runner step_gds)",
         lambda: _klayout_dummy_fill(project, top, pdk, container,
                                                gds_out)))
@@ -49468,7 +49549,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # window and tops it up to the foundry target, after the fixed dummy-fill
     # PATTERN above and before the density checks / sign-off DRC consume this
     # GDS. Config-gated + NONFATAL; the note always discloses the outcome.
-    dfill_ok, dfill_note = (_declared_transform_exec(project, gds_out, "gds:density_metal_fill", "klayout",
+    dfill_ok, dfill_note = (chain.run(None, gds_out, "gds:density_metal_fill", "klayout",
         "density_metal_fill (in place) (phase3_one_shot_runner step_gds)",
         lambda: _density_metal_fill(project, top, pdk, gds_out, container))
         if _t34_direct else (False, _t34["not_run"]))
@@ -49477,19 +49558,19 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # above measures and fills the streamed geometry's BOUNDING BOX; a foundry
     # minimum-density rule is written over the entire DIE, and on a slot
     # submission those are different rectangles. NONFATAL, always disclosed.
-    ddfill_ok, ddfill_note = (_declared_transform_exec(project, gds_out, "gds:die_density_fill", "klayout",
+    ddfill_ok, ddfill_note = (chain.run(None, gds_out, "gds:die_density_fill", "klayout",
         "die_density_fill (in place) (phase3_one_shot_runner step_gds)",
         lambda: _die_density_fill(project, top, pdk, gds_out,
                                                container))
         if _t34_direct else (False, _t34["not_run"]))
     if _t34 is not None:
         dfill_ok, dfill_note = _step34_gds_ship(project, gds_out, _t34,
-                                                (dfill_ok, dfill_note))
+                                                (dfill_ok, dfill_note), chain=chain)
     # v1.3.91 — restore top PORT text labels + VDD/VSS rail markers LAST (after
     # merge/heal/fill so the labels/markers land on the final geometry): makes
     # the KLayout-streamed GDS LVS-able by the geometric extractor. Config-gated
     # (no-op for OSS PDKs).
-    label_ok, label_note = _declared_transform_exec(project, gds_out, "gds:port_labels", "klayout",
+    label_ok, label_note = chain.run(None, gds_out, "gds:port_labels", "klayout",
         "port_labels (in place) (phase3_one_shot_runner step_gds)",
         lambda: _restore_port_labels_if_missing(
         project, top, pdk, container, gds_out, def_file))
@@ -49549,6 +49630,9 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
             # failure is losing it when a reader most needs it: "which
             # streamout produced this bad GDS" is the first question.
             extras={"streamout_engine": "klayout"})
+    if not chain.finish("finish the retained KLayout stream for sign-off"):
+        return StepResult("gds", "FAIL", time.time() - t0,
+                          chain.failed or "GDS finishing input has no matching tool declaration")
     return StepResult("gds", "PASS", time.time() - t0,
                       f"gds={gds_out.name} size={gds_out.stat().st_size} "
                       f"{'[' + _top_note + '] ' if _top_note else ''}"
@@ -55837,7 +55921,8 @@ def _v1_6_620_append_pv_signoff_provenance(project: Path, top: str) -> List[str]
             # the measured run produced"). Overwriting it with a reconstructed
             # entry carrying the CURRENT digest would turn that FAIL into a
             # PASS, which is the same class of defect this change closes.
-            if _prev.get("measured") or _prev.get("record") == "invocation":
+            if (_prev.get("measured") or _prev.get("record") in
+                    ("invocation", "declared_transform")):
                 continue
             _prev_sha = str((_prev.get("outputs") or {}).get(rel, ""))
             if _prev_sha == _sha(fp) and str(_prev.get("tool")) == tool:
@@ -62427,7 +62512,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # OpenROAD/Magic extraction the runner just invoked. chip-AGNOSTIC:
         # keyed on the canonical extracted-SPEF path, not any chip name.
         spef_rel = f"phase3/stage3/extracted/{top}.spef"
-        if spef_out.is_file() and spef_rel not in existing:
+        if (spef_out.is_file() and spef_rel not in existing
+                and _newest_declared_sha(project, spef_rel) is None):
             spef_entry = {
                 "tool": "openroad",
                 "command": ("openroad -no_init -exit (RC extraction → SPEF) "
@@ -65612,7 +65698,9 @@ def _emit_spef(project: Path, top: str, pdk: PdkConfig, container: str,
     tech_lef_c = _to_container_path(str(pdk.tech_lef), container)
     cell_lef_c = _to_container_path(str(pdk.cell_lef), container)
     liberty_c = _to_container_path(str(pdk.liberty), container)
-    spef_c = _to_container_path(str(spef_out), container)
+    raw_spef = spef_out.parent / "raw" / f"{spef_out.stem}.{time.time_ns()}.spef"
+    raw_spef.parent.mkdir(parents=True, exist_ok=True)
+    spef_c = _to_container_path(str(raw_spef), container)
     # A routed chip DEF names IO masters as well as standard cells. Reuse
     # the same DEF-driven library resolver as the other reopening consumers.
     macro_lefs_tcl = _extra_lef_read_block(
@@ -65723,9 +65811,10 @@ exit
     # A SPEF left by an earlier extraction (another ruleset, another route)
     # must not survive a failed re-extraction as if this one produced it: the
     # declaration recorded beside it would then vouch for bytes it never made.
+    # A failed re-extraction cannot leave an older canonical SPEF looking new.
     spef_out.unlink(missing_ok=True)
-    rc, out, err = _docker_exec(container, cmd, marker=tcl_c, outputs=[spef_out])
-    if not spef_out.is_file() or spef_out.stat().st_size == 0:
+    rc, out, err = _docker_exec(container, cmd, marker=tcl_c, outputs=[raw_spef])
+    if not raw_spef.is_file() or raw_spef.stat().st_size == 0:
         notes.append(
             f"SPEF extraction did not produce {spef_out.name} "
             f"(rc={rc}). Tool: openroad. "
@@ -65746,7 +65835,16 @@ exit
     # GATED: only runs when the SPEF is grounded-ONLY (no captable coupling to
     # double-count) and the geometry actually yields coupling; NONFATAL — any
     # error leaves the valid grounded SPEF intact.  Disable: VIBEIC_SPEF_COUPLING=0.
+    shutil.copyfile(raw_spef, spef_out)
     _emit_spef_coupling_augment(def_file, pdk.tech_lef, spef_out, notes)
+    if ((project / "provenance.jsonl").is_file()
+            and not _declare_immutable_transform(
+                project, raw_spef, spef_out, "spef:extraction_finishing",
+                "openroad", "publish and augment retained OpenRCX SPEF")):
+        spef_out.unlink(missing_ok=True)
+        notes.append("SPEF transform refused: OpenRCX input has no matching "
+                     "tool declaration")
+        return False
     return True
 
 
@@ -72137,7 +72235,8 @@ def _step34_gds_tool_arm(project: Path, pdk: PdkConfig,
 
 
 def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
-                     direct_fill: Tuple[bool, str]) -> Tuple[bool, str]:
+                     direct_fill: Tuple[bool, str],
+                     chain: Optional[_GdsTransformChain] = None) -> Tuple[bool, str]:
     """Decide which step-34 GDS fill ships, record both arms, and return the
     (ok, note) the stream-out discloses for its density-fill slot. `dual`
     measures the direct fill already in `gds_out` with the same deck."""
@@ -72161,7 +72260,7 @@ def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
     result = direct_fill
     if shipped == "librelane" and tool:
         filled = Path(tool["filler"]["filled_gds"])
-        _declared_transform_exec(project, gds_out, "gds:librelane_filler", "klayout",
+        (chain.run if chain else _declared_transform_exec)(None, gds_out, "gds:librelane_filler", "klayout",
             "KLayout.Filler (LibreLane) (phase3_one_shot_runner step_gds)",
             lambda: shutil.copyfile(filled, gds_out))
         result = (True, f"LibreLane KLayout.Filler ({tool['filler']['script']}); PDK "
