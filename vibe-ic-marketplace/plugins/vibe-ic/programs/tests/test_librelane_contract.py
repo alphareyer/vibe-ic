@@ -2,6 +2,8 @@
 import importlib
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -226,6 +228,106 @@ def test_chain_resumes_success_and_reruns_failed_step(tmp_path, monkeypatch):
     (folder / 'state_out.json').unlink()
     contract.run_chain(p, 'candidate', steps)
     assert len(calls) == 2
+
+
+def test_chain_stall_is_reaped_by_its_name_and_recorded_unmeasured(tmp_path, monkeypatch):
+    p = design(tmp_path)
+    source = p / 'block.nl.v'
+    source.write_text('module block; endmodule\n')
+    initial = put(p / 'initial.json', {'nl': str(source)})
+    config = put(p / 'config.json', {'meta': {'step': 'OpenROAD.Floorplan'}})
+    reaped = threading.Event()
+    launched = []
+    names = []
+
+    def tool_run(cmd, **_):
+        launched.append(cmd)
+        folder = Path(cmd[cmd.index('-o') + 1])
+        put(folder / 'state_out.json', {'nl': str(source)})
+        # The fake tool is allowed to finish on its own, so the pre-fix path
+        # returns PASS after one second instead of hanging the test session.
+        stopped = reaped.wait(1.0)
+        if stopped:
+            return SimpleNamespace(returncode=137, stdout='', stderr='stopped')
+        return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
+    monkeypatch.setattr(contract.subprocess, 'run', tool_run)
+    monkeypatch.setattr(contract, 'STALL_GRACE_S', 0.15, raising=False)
+    if hasattr(contract, '_dwd'):
+        monkeypatch.setattr(contract._dwd, 'ephemeral_container_cpu_probe',
+                            lambda name: lambda proc: None)
+
+        def reap(name):
+            def stop(proc, reason):
+                names.append((name, reason))
+                reaped.set()
+            return stop
+        monkeypatch.setattr(contract._dwd, 'ephemeral_container_reap', reap)
+
+    with pytest.raises(contract.Refusal, match='LL_STALLED'):
+        contract.run_chain(p, 'candidate', [('OpenROAD.Floorplan', config, initial)])
+    folder = p / 'phase3/librelane/01-openroad-floorplan'
+    record = json.loads((folder / 'vibeic_stalled.json').read_text())
+    assert record['verdict'] == 'NOT_MEASURED'
+    assert record['reason_class'] == 'stalled'
+    assert not (folder / 'state_out.json').exists()
+    assert (folder / 'state_out.stalled.json').is_file()
+    assert not (folder / 'vibeic_receipt.json').exists()
+    assert len(names) == 1 and names[0][1] == 'stalled'
+    assert launched[0][launched[0].index('--name') + 1] == names[0][0]
+    assert '--memory' in launched[0] and '--memory-swap' in launched[0]
+
+
+def test_chain_progressing_past_stall_grace_is_not_killed(tmp_path, monkeypatch):
+    p = design(tmp_path)
+    source = p / 'block.nl.v'
+    source.write_text('module block; endmodule\n')
+    initial = put(p / 'initial.json', {'nl': str(source)})
+    config = put(p / 'config.json', {'meta': {'step': 'OpenROAD.Floorplan'}})
+    reaped = []
+
+    def tool_run(cmd, **_):
+        folder = Path(cmd[cmd.index('-o') + 1])
+        log = folder / 'tool.log'
+        for i in range(7):
+            log.write_text('working\n' * (i + 1))
+            time.sleep(0.08)
+        put(folder / 'state_out.json', {'nl': str(source)})
+        return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
+    monkeypatch.setattr(contract.subprocess, 'run', tool_run)
+    monkeypatch.setattr(contract, 'STALL_GRACE_S', 0.15, raising=False)
+    if hasattr(contract, '_dwd'):
+        monkeypatch.setattr(contract._dwd, 'ephemeral_container_cpu_probe',
+                            lambda name: lambda proc: None)
+        monkeypatch.setattr(contract._dwd, 'ephemeral_container_reap',
+                            lambda name: lambda proc, reason: reaped.append((name, reason)))
+
+    folder = contract.run_chain(
+        p, 'candidate', [('OpenROAD.Floorplan', config, initial)])[0]
+    assert (folder / 'state_out.json').is_file()
+    assert not (folder / 'vibeic_stalled.json').exists()
+    assert not reaped
+
+
+def test_step31_reports_chain_stall_as_unmeasured(tmp_path, monkeypatch):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    pv = importlib.import_module('librelane_pv_signoff')
+    monkeypatch.setattr(contract, 'resolve_image', lambda project: 'candidate')
+    monkeypatch.setattr(contract, 'resolve_pdk_root',
+                        lambda project, pdk, image=None: str(tmp_path))
+
+    def stalled(*args, **kwargs):
+        raise contract.Refusal('LL_STALLED', 'the step made no forward progress')
+
+    monkeypatch.setattr(pv, 'run_half', stalled)
+    result = runner._step31_librelane(
+        tmp_path, 'block', SimpleNamespace(name='processA'), 'lvs', publish=False)
+    assert result.status == 'NOT_MEASURED'
+    assert result.reason_class == 'stalled'
+    assert 'LL_STALLED' in result.detail
 
 
 def test_floorplan_accepts_netlist_only_before_it_creates_geometry(tmp_path, monkeypatch):

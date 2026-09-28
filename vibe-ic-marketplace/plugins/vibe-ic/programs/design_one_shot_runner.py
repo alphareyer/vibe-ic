@@ -13281,7 +13281,10 @@ def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
                              ("Yosys.JsonHeader", header_resolved, state_in)],
             mounts=mounts, pdk_root=pdk_root, lane="step2")
     except (_ll.Refusal, OSError, ValueError) as exc:
-        return StepResult("rtl_lint_tool", "FAIL", time.time() - t0, str(exc))
+        stalled = _ll.refusal_is_stalled(exc)
+        return StepResult("rtl_lint_tool", "NOT_MEASURED" if stalled else "FAIL",
+                          time.time() - t0, str(exc),
+                          reason_class=(_V.ReasonClass.STALLED if stalled else ""))
     # The step-2 port conformance, against the tool's elaborated interface.
     # Advisory like its flow clause: recorded, never the lint verdict.
     conformance = project / "reports/phase2/gates/spec_conformance_tool_ports.json"
