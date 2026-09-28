@@ -400,6 +400,30 @@ def test_changed_cited_artefact_is_not_run_evidence(tmp_path):
                for row in audit.get("cited_artefact_checks", []))
 
 
+def test_missing_step_file_is_retained_in_citation_verdict(tmp_path):
+    sys.path.insert(0, str(PROG.parent))
+    import _cited_artefacts as cited
+
+    audit = tmp_path / cited.AUDIT_REL
+    audit.parent.mkdir(parents=True)
+    audit.write_text('{"verdict":"PASS"}\n')
+    citations = cited.bind(
+        tmp_path, {"output_files": ["phase3/missing.def"]},
+        extra_paths=(cited.AUDIT_REL,))
+
+    assert citations.get("phase3/missing.def") == "MISSING"
+    assert citations[cited.AUDIT_REL] == cited.digest(audit)
+    verdict, rows = cited.check(tmp_path, {"cited_artefacts": citations})
+    assert verdict == "NOT_MEASURED"
+    assert any(row["path"] == "phase3/missing.def"
+               and row["status"] == "NOT_MEASURED"
+               and row["reason"] == "MISSING_CITATION" for row in rows)
+    missing = tmp_path / "phase3/missing.def"
+    missing.parent.mkdir(parents=True)
+    missing.write_text("arrived after binding")
+    assert cited.check(tmp_path, {"cited_artefacts": citations})[0] == "NOT_MEASURED"
+
+
 def test_recheck_preserves_the_run_cited_audit(tmp_path):
     audit_path = tmp_path / "reports/audit/phase23_completion_audit.json"
     audit_path.parent.mkdir(parents=True)

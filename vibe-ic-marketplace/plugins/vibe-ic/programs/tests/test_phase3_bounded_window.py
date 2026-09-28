@@ -131,6 +131,40 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
                           "phase3_one_shot.json").read_bytes() == window_bytes
 
 
+def test_publication_uses_enclosing_window_id_when_clock_advances(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    calls = []
+
+    def advancing_id():
+        calls.append(None)
+        return "started" if len(calls) == 1 else "later"
+
+    def metric_writer(isolated):
+        for rel in ("phase3/final/metrics.json",
+                    "reports/phase3/signoff_metrics_aggregate.json"):
+            out = isolated / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text('{"verdict":"PASS"}\n')
+        return p3.StepResult("signoff_metrics_aggregate", "PASS", 0.0,
+                             "wrote metrics", [])
+
+    monkeypatch.setattr(p3, "_phase3_window_run_id", advancing_id)
+    monkeypatch.setattr(p3, "step_signoff_metrics_aggregate", metric_writer)
+    args = SimpleNamespace(entry_step="37.4", exit_step="37.4", container="")
+    p3._run_phase3_window(project, "top", object(), args,
+                          ["signoff_metrics_aggregate"])
+
+    report = project / "reports/orchestrator/windows/started/phase3_one_shot.json"
+    publication = project / "reports/audit/windows/started/publication.json"
+    assert len(calls) == 1
+    assert report.is_file()
+    assert publication.is_file()
+    receipt = json.loads(publication.read_text())
+    assert receipt["status"] == "PUBLISHED"
+    assert receipt["window_run_id"] == "started"
+
+
 def test_every_canonical_phase3_step_is_accepted_from_yaml():
     import yaml
     import flow_compliance_check as fcc
