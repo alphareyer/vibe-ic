@@ -102,6 +102,7 @@ def test_immediate_reset_assertion_from_slang_frontend_closes_binding():
     # formal_harness_gen emits this equivalent immediate form when the
     # read_slang frontend is needed; the gate must recognize the reset guard.
     harness = """\
+    ctr dut (.q(q));
     always @(posedge clk) if (f_past_valid && rst_active)
         a_reset_safety_1: assert (q == 4'd0);
     """
@@ -116,7 +117,7 @@ def test_immediate_assertion_without_reset_guard_does_not_close_binding():
     assert gate._reset_guarded_properties(harness) == []
 
 
-def _immediate_binding_row(tmp_path, guard):
+def _immediate_binding_row(tmp_path, guard, predicate="q == 4'd0"):
     project = _project(tmp_path)
     formal = project / "phase2/stage1/formal"
     formal.mkdir(parents=True)
@@ -124,10 +125,11 @@ def _immediate_binding_row(tmp_path, guard):
     body = f"""module formal_ctr(input rst, input clk, input [3:0] q);
     wire rst_active = rst;
     wire rst_active_q = rst;
-    ctr dut (.rst(rst));
+    wire [3:0] q;
+    ctr dut (.rst(rst), .q(q));
     reg f_past_valid = 1'b1;
     always @(posedge clk) if ({guard})
-        a_reset_safety_1: assert (q == 4'd0);
+        a_reset_safety_1: assert ({predicate});
     endmodule
     """
     harness.write_text(body)
@@ -144,13 +146,31 @@ def _immediate_binding_row(tmp_path, guard):
 def test_immediate_disjunction_cannot_discharge_reset_binding(tmp_path):
     row = _immediate_binding_row(tmp_path, "rst_active || f_past_valid")
     assert row["status"] == gate.BINDING_OUTSTANDING, row
-    assert "no asserted property is guarded" in row["reason"]
+    assert "no substantive reset assertion" in row["reason"]
 
 
 def test_immediate_generated_sync_guard_discharges_binding(tmp_path):
     row = _immediate_binding_row(tmp_path, "f_past_valid && rst_active_q")
     assert row["status"] == gate.DISCHARGED_BY_BINDING, row
     assert row["property"] == "a_reset_safety_1"
+
+
+def test_immediate_tautology_cannot_discharge_reset_binding(tmp_path):
+    row = _immediate_binding_row(tmp_path, "f_past_valid && rst_active", "1'b1")
+    assert row["status"] == gate.BINDING_OUTSTANDING, row
+    assert "no substantive reset assertion" in row["reason"]
+
+
+def test_immediate_non_dut_predicate_cannot_discharge_reset_binding(tmp_path):
+    row = _immediate_binding_row(tmp_path, "f_past_valid && rst_active", "rst_active == 1'b1")
+    assert row["status"] == gate.BINDING_OUTSTANDING, row
+    assert "no substantive reset assertion" in row["reason"]
+
+
+def test_immediate_self_equality_cannot_discharge_reset_binding(tmp_path):
+    row = _immediate_binding_row(tmp_path, "f_past_valid && rst_active", "q == q")
+    assert row["status"] == gate.BINDING_OUTSTANDING, row
+    assert "no substantive reset assertion" in row["reason"]
 
 
 def test_bound_and_proven_is_discharged_by_binding(tmp_path):
