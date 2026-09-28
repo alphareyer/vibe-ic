@@ -551,13 +551,50 @@ def test_tracked_reader_collects_cleanly_with_or_without_corpus():
     """The corpus reader itself must skip cleanly in an independent clone."""
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
                PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
-    cp = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-         f"{__file__}::test_tracked_package_routes_every_declaration_and_regresses_none"],
-        capture_output=True, text=True, env=env, cwd=PLUGIN)
+    reader = (f"{__file__}::"
+              "test_tracked_package_routes_every_declaration_and_regresses_none")
+    timeout_s = 120
+    try:
+        cp = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+             reader],
+            capture_output=True, text=True, env=env, cwd=PLUGIN,
+            timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(
+            f"TimeoutExpired: {reader} exceeded {timeout_s}s; "
+            f"stdout={exc.stdout!r}; stderr={exc.stderr!r}", pytrace=False)
     assert cp.returncode == 0, cp.stdout + cp.stderr
     expected = "1 passed" if TRACKED_PKG.is_file() else "1 skipped"
     assert expected in cp.stdout, cp.stdout
+
+
+def test_tracked_reader_nested_pytest_has_a_local_deadline(monkeypatch):
+    observed = {}
+    expected = "1 passed" if TRACKED_PKG.is_file() else "1 skipped"
+
+    def completed(argv, **kwargs):
+        observed["timeout"] = kwargs.get("timeout", 0)
+        return subprocess.CompletedProcess(argv, 0, expected, "")
+
+    monkeypatch.setattr(subprocess, "run", completed)
+    test_tracked_reader_collects_cleanly_with_or_without_corpus()
+    assert observed["timeout"] == 120
+
+
+def test_tracked_reader_timeout_names_child_and_captured_output(monkeypatch):
+    def timed_out(argv, **_kwargs):
+        raise subprocess.TimeoutExpired(
+            argv, 0.01, output="partial stdout", stderr="partial stderr")
+
+    monkeypatch.setattr(subprocess, "run", timed_out)
+    with pytest.raises(pytest.fail.Exception) as failure:
+        test_tracked_reader_collects_cleanly_with_or_without_corpus()
+    detail = str(failure.value)
+    assert "TimeoutExpired" in detail
+    assert "test_tracked_package_routes_every_declaration_and_regresses_none" in detail
+    assert "partial stdout" in detail
+    assert "partial stderr" in detail
 
 
 def _declared_in_tracked_file(text):
