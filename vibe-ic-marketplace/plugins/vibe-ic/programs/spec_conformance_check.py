@@ -2074,7 +2074,8 @@ def check(spec: SpecContract, rtl_name: str, rtl_ports: List[Port],
           renamed_groups: Optional[List[tuple]] = None,
           input_prose: str = '',
           alt_spellings: Optional[List[tuple]] = None,
-          declared_spellings: Optional[set] = None) -> List[Finding]:
+          declared_spellings: Optional[set] = None,
+          delegated_groups: Optional[List[dict]] = None) -> List[Finding]:
     f: List[Finding] = []
 
     # ---- structural sanity: zero output-capable ports -----------------------
@@ -2209,6 +2210,15 @@ def check(spec: SpecContract, rtl_name: str, rtl_ports: List[Port],
     # spec snippet (0 ports) must not flag every RTL port as "extra".
     rmap = {p.name: p for p in rtl_ports}
     smap = {p.name: p for p in spec.ports} if spec.ports else {}
+    delegated_examples = set()
+    delegated_names = set()
+    for group in delegated_groups or []:
+        delegated_examples.update(group["example_ports"])
+        delegated_names.update(group["declared_ports"])
+    for nm in sorted(delegated_names - rmap.keys()):
+        f.append(Finding(path, 'ERROR', 'port-declared-missing', nm,
+            f"plugin_output/declaration.json declares port '{nm}' in a "
+            "plugin-delegated group, but the RTL does not carry it."))
 
     # ---- ORGANIC — declared interface RENAME (SOURCE_MANIFEST #711) --------
     # The flow already HAS a way for a design to declare that an L9 illustrative
@@ -2342,6 +2352,10 @@ def check(spec: SpecContract, rtl_name: str, rtl_ports: List[Port],
         if nm in renamed_ok_spec:
             continue
         if nm not in rmap:
+            if nm in delegated_examples:
+                # A typical table is illustrative once the input delegates
+                # this group's names. The declaration is checked above.
+                continue
             # A pin the INPUT marks optional may be left out: not implementing an
             # offered pin is a declared design choice, not a conformance defect.
             # l9_rtl_pin_consistency_check already reads this same L9 flag and
@@ -2372,6 +2386,8 @@ def check(spec: SpecContract, rtl_name: str, rtl_ports: List[Port],
     if smap:
         for nm in rmap:
             if nm in renamed_ok_rtl:
+                continue
+            if nm in delegated_names:
                 continue
             if nm not in smap:
                 f.append(Finding(path, 'ERROR', 'port-extra', nm,
@@ -2894,10 +2910,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     _alt_spellings += [pr for pr in _input_stated_alternatives(spec_body)
                        if pr not in _alt_spellings]
 
+    # Only Phase 1's structured L9 delegation may authorize names from the
+    # declaration. A declaration file by itself never relaxes port-extra.
+    _delegated_groups: List[dict] = []
+    if spec_path.suffix == '.json' and _iproj is not None:
+        try:
+            from _delegated_port_groups import resolve_delegated_groups
+            _delegated_groups = resolve_delegated_groups(
+                _iproj, json.loads(spec_raw))
+        except (ImportError, ValueError):
+            _delegated_groups = []
+
     findings = check(spec, rtl_name, rtl_ports, rtl_resets, rtl_registered, chosen,
                      rtl_body, spec_text=spec_body,
                      renamed_groups=_renamed_groups, input_prose=input_prose,
-                     alt_spellings=_alt_spellings, declared_spellings=_declared)
+                     alt_spellings=_alt_spellings, declared_spellings=_declared,
+                     delegated_groups=_delegated_groups)
 
     # Per the semantic-confirm rule: a finding resting on a prose-inferred field that an
     # LLM has NOT confirmed is a CANDIDATE, not truth — annotate it so the agent confirms.

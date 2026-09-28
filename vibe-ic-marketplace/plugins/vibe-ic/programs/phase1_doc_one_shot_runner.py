@@ -50258,6 +50258,8 @@ def gen_l9_integration_spec(project: Path,
                             extracted: Dict[str, str],
                             l3: dict) -> LDocResult:
     """L9: module hierarchy + top-level pins + expected_verdict_byte_hex."""
+    from _delegated_port_groups import extract_delegated_groups
+
     ic_name = _ic_name_from_docs(extracted, project)
     evidence: Dict[str, List[Dict[str, str]]] = {}
 
@@ -51817,6 +51819,9 @@ def gen_l9_integration_spec(project: Path,
         "ports": top_module_pins,           # mirrored legacy alias
         "top_ports": top_module_pins,       # CANONICAL (#490)
         "top_module_pins": top_module_pins, # mirrored legacy alias
+        # The example names in a delegated group are illustrative. Phase 2
+        # resolves this field against the design's authored declaration.
+        "plugin_declared_port_groups": extract_delegated_groups(extracted),
         "no_integration_in_input": no_integration_in_input,
         "submodules": submodules,
         "no_submodules_in_input": no_submodules_in_input,

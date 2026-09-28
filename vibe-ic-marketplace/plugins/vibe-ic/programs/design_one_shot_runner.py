@@ -10892,6 +10892,12 @@ def step_full_stack_tb_gen(project: Path,
         return StepResult("full_stack_tb_gen", "NOT_MEASURED",
                           time.time() - t0,
                           f"L9 has no top_ports (top_module={top_module!r})", reason_class=_V.ReasonClass.INPUT_ABSENT)
+    from _delegated_port_groups import resolve_delegated_groups
+    _delegated_groups = resolve_delegated_groups(project, l9)
+    _delegated_examples = set().union(
+        *(row["example_ports"] for row in _delegated_groups))
+    _delegated_names = set().union(
+        *(row["declared_ports"] for row in _delegated_groups))
 
     # ORGANIC #629 — reconcile the DUT binding against the parsed synthesizable
     # RTL top surface, NOT L9.top_ports verbatim. A mis-extracted L9 (a width-
@@ -10911,11 +10917,22 @@ def step_full_stack_tb_gen(project: Path,
     # the reference_tb does not FAIL with "port `x` is not a port of u_dut".
     _tb_defines = _v671_tb_compile_defines(project)
     _rtl_ports = _v629_rtl_top_ports(project, top_module, _tb_defines)
+    if not _rtl_ports and _delegated_groups:
+        return StepResult("full_stack_tb_gen", "NOT_MEASURED",
+                          time.time() - t0,
+                          "plugin-declared port group needs the RTL top surface "
+                          "to supply directions and widths", reason_class=_V.ReasonClass.INPUT_ABSENT)
     _reconcile_note = ""
     if _rtl_ports:
         _l9_names = {(_p.get("name") or "").strip()
                      for _p in top_ports if isinstance(_p, dict)}
+        _l9_names = (_l9_names - _delegated_examples) | _delegated_names
         _rtl_names = {n for _d, n, _w in _rtl_ports}
+        _missing_declared = sorted(_delegated_names - _rtl_names)
+        if _missing_declared:
+            return StepResult("full_stack_tb_gen", "FAIL", time.time() - t0,
+                              "RTL omits plugin-declared port(s): "
+                              + ", ".join(_missing_declared))
         # ORGANIC #766 round-2 — PRESERVE L9 POWER/ground supply pins the RTL
         # surface does not expose. Supply pins are declared ONLY inside
         # `ifdef USE_POWER_PINS, and the RTL surface is parsed under the
