@@ -2568,6 +2568,30 @@ _register(Instrument(
 ))
 
 
+# W5's error-log grammar is distinct from W6's flow.log grammar.  Keep this
+# calibrated entry when W5 is consumed by W7b; otherwise a deferred tool
+# finding would be indistinguishable from an aborted segment.
+def _judge_ll_whole_deferred(text: str) -> Optional[str]:
+    import librelane_whole_flow as whole
+    return "DEFERRED_ONLY" if whole.deferred_lines(text) else None
+
+
+_register(Instrument(
+    name="librelane_whole_flow::deferred_lines",
+    reads="LibreLane run error.log",
+    ruling="llv1 W5/W7b", owner="lla",
+    why="A completed segment may exit nonzero only for deferred checker findings.",
+    judge=_judge_ll_whole_deferred,
+    positive=Sample(
+        provenance="LibreLane deferred checker findings; calibration/librelane_error_log_deferred_pos.log",
+        artefact=_read("librelane_error_log_deferred_pos.log")),
+    expect="DEFERRED_ONLY",
+    negative=Sample(
+        provenance="LibreLane aborted error; calibration/librelane_error_log_abort_neg.log",
+        artefact=_read("librelane_error_log_abort_neg.log")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════
