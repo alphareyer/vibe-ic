@@ -792,7 +792,13 @@ def _oracle_execution_refusal(project: Path, transcript: str) -> "str | None":
         return (f"{transcript} is a passing transcript and every declared "
                 f"functional vector executed its own oracle, but "
                 f"{goal_refusal}") if goal_refusal else None
-    named = ", ".join(f"{r['case']} [{r['state']}]"
+    # The per-case ``why`` is the consumer-facing explanation for a
+    # NOT_EXECUTED conditional row.  Do not reduce this published refusal to
+    # just its state: in particular, R-0915-102's undecided option selection
+    # is neither an input gap nor a silent exemption.  The gate JSON carries
+    # this message, so rendering the reason here keeps the booking explainable
+    # at the record a downstream reader actually receives.
+    named = ", ".join(f"{r['case']} [{r['state']}]: {r['why']}"
                       for r in ran["not_executed"][:6])
     more = ran["not_executed_count"] - 6
     return (
