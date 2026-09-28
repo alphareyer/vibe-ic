@@ -1548,6 +1548,21 @@ _NOT_PROSE: Dict[str, str] = {
         "An attribute that is absent stays absent and its consumer refuses. "
         "Falsifier: tests/test_fx_supply_pad_pair_multi_rail.py::test_the_"
         "not_prose_claim_for_the_liberty_supply_view_is_falsifiable.",
+    "_pad_ring::parse_verilog_bus_ports":
+        "Verilog ANSI port-declaration grammar only: `module <id> ... "
+        "endmodule` and `input|output|inout [<integer>:<integer>] <id>`. "
+        "A range in this grammar has no negation production; an absent or "
+        "non-literal range is omitted and the chip-top producer refuses the "
+        "corresponding bit connection. Falsifier: "
+        "tests/test_io_pad_chip_top_gen.py::test_bussed_pad_connection_is_"
+        "one_ordered_verilog_connection.",
+    "io_pad_chip_top_gen::run":
+        "The only newly read text is the selected PDK IO Verilog model, passed "
+        "to `_pad_ring.parse_verilog_bus_ports`, whose formal ANSI declaration "
+        "grammar has no denial production. The reader runs only when a PDK LEF "
+        "pin has an explicit bit subscript; otherwise no Verilog is read. "
+        "Falsifier: tests/test_io_pad_chip_top_gen.py::test_emitted_bussed_pad_"
+        "verilog_parses_in_the_pinned_eda_image.",
     "_pad_ring::parse_def":
         "LEF/DEF 5.8 UNITS / DIEAREA / COMPONENTS records. The matched text is "
         "`UNITS DISTANCE MICRONS <n> ;`, `DIEAREA ( x y ) ( x y ) ;` and the "
