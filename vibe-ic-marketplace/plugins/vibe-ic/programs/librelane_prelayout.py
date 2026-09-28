@@ -76,7 +76,9 @@ _SETUP_PATH = re.compile(
     re.M | re.I)
 
 
-def pre_pnr_setup_gate(pvt_matrix: Path, reports: Path, output: Path) -> dict:
+def pre_pnr_setup_gate(pvt_matrix: Path, reports: Path, output: Path,
+                       *, netlist: Optional[Path] = None,
+                       sdc: Optional[Path] = None) -> dict:
     """BLOCKING before PnR: a measured negative setup path returns FAIL.
 
     Only a PRE_LAYOUT report at the declared setup process corner may admit
@@ -104,6 +106,22 @@ def pre_pnr_setup_gate(pvt_matrix: Path, reports: Path, output: Path) -> dict:
                   "corner": setup, "path_classes": [], "setup_slack_ns": None}
         write_json(output, result)
         return result
+    for label, source in (("NETLIST", netlist), ("SDC", sdc)):
+        if source is None:
+            continue
+        try:
+            expected = "sha256:" + digest(source)
+        except OSError:
+            expected = None
+        actual = re.search(rf"(?m)^STA_BASIS_{label}_SHA256:\s*(\S+)\s*$", body)
+        if expected is None or actual is None or actual.group(1) != expected:
+            result = {"verdict": "NOT_MEASURED",
+                      "reason": f"SS_REPORT_{label}_IDENTITY_STALE",
+                      "corner": setup, "path_classes": [], "setup_slack_ns": None,
+                      "expected": expected,
+                      "reported": actual.group(1) if actual else None}
+            write_json(output, result)
+            return result
     paths = []
     for match in _SETUP_PATH.finditer(body):
         start, start_desc, end, end_desc, raw_slack, tag = match.groups()
@@ -458,6 +476,12 @@ def compose_corner_reports(folder: Path, out_dir: Path,
             summary.append(f"STA_BASIS_LIBERTY: {liberty[0]}")
         if state.get("nl"):
             summary.append(f"STA_BASIS_NETLIST: {state['nl']}")
+            source = Path(str(state["nl"]))
+            if source.is_file():
+                summary.append(f"STA_BASIS_NETLIST_SHA256: sha256:{digest(source)}")
+        deck = resolved.get("PNR_SDC_FILE")
+        if deck and Path(str(deck)).is_file():
+            summary.append(f"STA_BASIS_SDC_SHA256: sha256:{digest(Path(str(deck)))}")
         path = out_dir / f"sta_{label}.rpt"
         path.write_text("\n".join(parts) + "\n" + "\n".join(summary) + "\n"
                         "STA_BASIS: PRE_LAYOUT_ESTIMATE\n"

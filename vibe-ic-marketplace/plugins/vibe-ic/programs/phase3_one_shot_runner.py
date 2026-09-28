@@ -64542,6 +64542,10 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
     # audit never raises. `MISSING` normalises to None, which the forced path
     # below treats as "not reusable" — the fail-safe direction.
     basis_norm = _sta_basis.normalise_basis(basis)
+    # A matching PRE_LAYOUT stamp alone is not a current measurement: the
+    # netlist or SDC may have been replaced after this report was written.
+    _pre_nl_sha = _file_sha256(netlist) if force_prelayout else None
+    _pre_sdc_sha = _file_sha256(sdc_path) if force_prelayout else None
     any_emitted = False
     # Corner reports REUSED from a previous call, bucketed by whether their own
     # stamped basis agrees with the basis the inputs now resolve to. See the
@@ -64615,8 +64619,18 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
             # `_reused_report_basis` also absorbs the read error a bare
             # `rpt.read_text()` would raise out of this loop.
             _existing_raw, _existing_norm = _reused_report_basis(rpt)
-            if not force_prelayout or (basis_norm is not None
-                                       and _existing_norm == basis_norm):
+            _inputs_match = True
+            if force_prelayout:
+                try:
+                    _old_body = rpt.read_text(errors="replace")
+                    _inputs_match = bool(
+                        _pre_nl_sha and _pre_sdc_sha
+                        and f"STA_BASIS_NETLIST_SHA256: {_pre_nl_sha}" in _old_body
+                        and f"STA_BASIS_SDC_SHA256: {_pre_sdc_sha}" in _old_body)
+                except OSError:
+                    _inputs_match = False
+            if _inputs_match and (not force_prelayout or (basis_norm is not None
+                                                          and _existing_norm == basis_norm)):
                 if _existing_norm is None:
                     # Unreadable, unstamped, or an unrecognised token: cannot be
                     # confirmed to match, so disclose as unverified — never as
@@ -64641,12 +64655,14 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
             # next to it under a non-`.rpt` suffix so nothing globbing
             # `sta_*.rpt` can re-adopt them, and a reader can still see what
             # was displaced.
-            _quar = rpt.parent / (rpt.name + ".stale_basis")
+            _quar = rpt.parent / (rpt.name + (
+                ".stale_input" if not _inputs_match else ".stale_basis"))
             try:
                 rpt.replace(_quar)
                 notes.append(
                     f"forced pre-layout STA: quarantined {corner} report "
-                    f"declaring basis {_existing_raw or 'UNDECLARED'} -> "
+                    f"declaring basis {_existing_raw or 'UNDECLARED'} "
+                    f"(input identity {'matched' if _inputs_match else 'stale/absent'}) -> "
                     f"{_quar.name} before re-emit (a failed re-emit must "
                     f"leave NO report, never a mislabelled one)")
             except OSError as exc:
@@ -64748,6 +64764,11 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
                 f"netlist's technology and that every hard-macro .lib is staged.")
         else:
             any_emitted = True
+            if force_prelayout and _pre_nl_sha and _pre_sdc_sha:
+                with rpt.open("a") as _sta_out:
+                    _sta_out.write(
+                        f"STA_BASIS_NETLIST_SHA256: {_pre_nl_sha}\n"
+                        f"STA_BASIS_SDC_SHA256: {_pre_sdc_sha}\n")
             # The corner LINKED and its report survives, so now it
             # is an artefact this run can be held to.
             _log_surviving_artefact(
@@ -75568,13 +75589,15 @@ def main() -> int:
             try:
                 _pre_gate = _llp.pre_pnr_setup_gate(
                     _pre_matrix, _pl.sta_dir(project) / "per_corner",
-                    _pre_gate_path)
+                    _pre_gate_path,
+                    netlist=_pl.synth_dir(project) / f"{effective_top}_synth.v",
+                    sdc=_pl.pnr_dir(project) / "constraint.sdc")
             except (OSError, ValueError, TypeError) as exc:
                 _pre_gate = {"verdict": "NOT_MEASURED",
                              "reason": f"PRE_PNR_GATE_INPUT_UNREADABLE:{type(exc).__name__}",
                              "path_classes": [], "setup_slack_ns": None}
                 _llp.write_json(_pre_gate_path, _pre_gate)
-            _pre_pnr_gate_ok = _pre_gate["verdict"] != "FAIL"
+            _pre_pnr_gate_ok = _pre_gate["verdict"] == "PASS"
             plan.append(StepResult(
                 "pre_pnr_setup", _pre_gate["verdict"], 0.0,
                 f"{_pre_gate['reason']}; SS setup slack "
@@ -75603,8 +75626,9 @@ def main() -> int:
             if not _pre_pnr_gate_ok:
                 plan.append(StepResult(
                     "pnr", "NOT_MEASURED", 0.0,
-                    "BLOCKED_BY_NEGATIVE_PRE_PNR_SETUP: return to synthesis "
-                    "or timing restructure before placement; "
+                    "BLOCKED_BY_PRE_PNR_SETUP_GATE: "
+                    f"{_pre_gate['reason']}; return to synthesis/STA "
+                    "before placement; "
                     f"{_pre_gate.get('path_classes', [])} at "
                     f"{_pre_gate.get('setup_slack_ns')} ns",
                     [str(_pre_gate_path)]))

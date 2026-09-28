@@ -79,3 +79,25 @@ def test_checked_in_opensta_ss_report_blocks(tmp_path):
     assert result["verdict"] == "FAIL"
     assert result["setup_slack_ns"] == -6.10
     assert result["path_classes"] == ["reg-to-reg"]
+
+
+def test_report_must_bind_current_netlist_and_sdc(tmp_path):
+    matrix, reports, output = _fixture(tmp_path, 0.43)
+    netlist = tmp_path / "netlist.v"
+    sdc = tmp_path / "constraints.sdc"
+    netlist.write_text("module t; endmodule\n")
+    sdc.write_text("create_clock -period 20 clk\n")
+    assert prelayout.pre_pnr_setup_gate(
+        matrix, reports, output, netlist=netlist, sdc=sdc
+    )["reason"] == "SS_REPORT_NETLIST_IDENTITY_STALE"
+    with (reports / "sta_SS.rpt").open("a") as report:
+        report.write(
+            f"STA_BASIS_NETLIST_SHA256: sha256:{prelayout.digest(netlist)}\n"
+            f"STA_BASIS_SDC_SHA256: sha256:{prelayout.digest(sdc)}\n")
+    assert prelayout.pre_pnr_setup_gate(
+        matrix, reports, output, netlist=netlist, sdc=sdc
+    )["verdict"] == "PASS"
+    netlist.write_text("module t(input a); endmodule\n")
+    assert prelayout.pre_pnr_setup_gate(
+        matrix, reports, output, netlist=netlist, sdc=sdc
+    )["reason"] == "SS_REPORT_NETLIST_IDENTITY_STALE"
