@@ -1459,6 +1459,42 @@ def supplied_rtl_record(project: Path,
                                     "module %r has no parseable ANSI header "
                                     "in the staged files" % top)}
     return record
+def _outside_contract(overrides: Dict[str, Any], names: List[str]
+                      ) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """(fields to write, {field: why refused}) for the author's declarations
+    that name no contract field. A value that states no choice is refused by
+    name exactly as a contract field's would be; `null` is a retraction."""
+    keep: Dict[str, Any] = {}
+    refused: Dict[str, str] = {}
+    for k, v in overrides.items():
+        if k in names:
+            continue
+        if v is UNDETERMINED:
+            keep[k] = v
+            continue
+        why = _placeholder_reason(v)
+        if why is not None:
+            refused[k] = why
+        else:
+            keep[k] = v
+    return keep, refused
+
+
+def _report_outside(outside: Dict[str, Any], refused: Dict[str, str],
+                    written: bool, stream) -> None:
+    for k, v in sorted(outside.items()):
+        if not written:
+            print("  NOT written: %s (declared outside the spec's contract; "
+                  "nothing is written while a REQUIRED field is undetermined)"
+                  % k, file=stream)
+        elif v is UNDETERMINED:
+            print("  retracted outside the contract: %s" % k, file=stream)
+        else:
+            print("  declared outside the spec's contract (no contract field "
+                  "of that name; kept as the author's declaration): %s = %r"
+                  % (k, v), file=stream)
+    for k, why in sorted(refused.items()):
+        print("  REFUSED, not written: %s — %s" % (k, why), file=stream)
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -1811,6 +1847,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         overrides[k.strip()] = _coerce(v)
 
     names = [f["name"] for f in contract["fields"]]
+    # A field the author declares that the spec's contract does not list (a
+    # choice a consumer of this file reads, such as a register byte order).
+    # It is WRITTEN with its provenance, or REFUSED by name -- never dropped
+    # while this program prints PASS, which is what `resolve` alone did.
+    outside, outside_refused = _outside_contract(overrides, names)
     rtl_rejected: List[Dict[str, Any]] = []
     rtl_declared = (_rtl_declared(project, names, rtl_rejected)
                     if args.from_rtl_declaration else {})
@@ -1876,6 +1917,8 @@ def main(argv: Optional[List[str]] = None) -> int:
               "No contract field written — a default-filled declaration would "
               "turn the required-artifact gate green against a value nobody "
               "chose.", file=sys.stderr)
+        _report_outside(outside, outside_refused, written=False,
+                        stream=sys.stderr)
         for r in rtl_rejected:
             print("  NOT read from %s:%d — %s: %s"
                   % (r["file"], r["line"], r["reason"], r["text"]),
@@ -1901,6 +1944,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("  Declare at least one with --set <field>=<value>, or correct "
               "the spec clause that demands a declaration with no substance.",
               file=sys.stderr)
+        _report_outside(outside, outside_refused, written=False,
+                        stream=sys.stderr)
         return 4
 
     # --- write -------------------------------------------------------------
@@ -1921,6 +1966,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             # — or by carrying a placeholder that states no choice, so nothing
             # a designer actually declared is dropped by accident.
             declaration.pop(n, None)
+    for k, v in outside.items():
+        if v is UNDETERMINED:
+            declaration.pop(k, None)             # an explicit retraction
+        else:
+            declaration[k] = v
     supplied = supplied_rtl_record(project, args.supplied_top)
     if supplied is not None:
         declaration[SUPPLIED_RTL_KEY] = supplied
@@ -1943,7 +1993,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             n for n, e in status.items() if e.get("recovered_from_prose")),
         "existing_without_recorded_provenance": unverified,
         "preserved_foreign_keys": sorted(
-            k for k in existing if k not in status),
+            k for k in existing if k not in status and k not in outside),
+        "declared_outside_contract": {
+            k: ({"status": "retracted", "provenance": "author_declared"}
+                if v is UNDETERMINED else
+                {"value": v, "provenance": "author_declared"})
+            for k, v in sorted(outside.items())},
+        "refused_outside_contract": outside_refused,
         "rtl_declaration_scan": {
             "enabled": bool(args.from_rtl_declaration),
             "accepted": sorted(rtl_declared),
@@ -1953,6 +2009,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print("spec_declaration_emit: PASS — %d/%d contract field(s) declared -> %s"
           % (n_determined, len(status), out_path))
+    _report_outside(outside, outside_refused, written=True, stream=sys.stdout)
     if undetermined_optional:
         print("  informational field(s) OMITTED as undetermined (not "
               "defaulted): %s" % ", ".join(undetermined_optional))
