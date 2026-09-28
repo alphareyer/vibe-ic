@@ -1064,3 +1064,68 @@ def test_PAIRED_an_EMITTED_id_is_not_counted_as_a_denial(tmp_path):
     merged = SM.collect(project)[0]
     assert merged[f"{_STEP}__tool__denied__diagnostic_count"] == 0
     assert merged[f"{_STEP}__tool__id__rsz_0104__warning_count"] == 1
+
+
+# ===========================================================================
+# A NAMED CELL IS KEYED BY ITS NAME; ITS RECORDS CANNOT HIDE A PREDECESSOR
+# ===========================================================================
+# MEASURED on benchmark-data f06ccc0b: spm/v1.14.88_gf180mcuD records
+# "pdk": "sky130" six times (foundry handoff) against "gf180mcuD" three times,
+# so the record-first key read it as sky130 and spm/v1.21.6_gf180mcuD resolved
+# NO_BASELINE -- "no previous run" -- over a comparison that exits rc 1.
+
+def _records(cell: Path, votes) -> None:
+    """Write `"pdk"` records into a cell: [(value, count), ...]."""
+    d = cell / "reports" / "records"
+    d.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for value, count in votes:
+        for _ in range(count):
+            (d / f"r{n}.json").write_text(json.dumps({"pdk": value}) + "\n")
+            n += 1
+
+
+def test_records_that_outvote_the_name_do_not_hide_the_predecessor(tmp_path):
+    prev = _cell(tmp_path, "v1.0.0_pdkX", _PREV_LOG)
+    _records(prev, [("pdkY", 6), ("pdkX", 3)])
+    cur = _cell(tmp_path, "v1.1.0_pdkX", _NEW_ID_LOG)
+    _records(cur, [("pdkX", 3)])
+
+    assert G.measured_pdk(prev) == "pdkY"          # the precondition
+    assert G.find_previous(cur) == prev, G.find_previous(cur)
+
+    rc, out = _run(cur, _acc(tmp_path / "a.json", []))
+    assert rc == 1, f"a comparable pair was not compared: rc={rc}\n{out}"
+    assert "GRT-0043" in out, out
+    # the contradiction is disclosed, naming the sibling and both readings
+    assert ("v1.0.0_pdkX is named for PDK 'pdkX' but its own records mostly "
+            "say 'pdkY'") in out, out
+
+
+def test_PAIRED_a_sibling_NAMED_for_another_pdk_is_not_a_predecessor(tmp_path):
+    """The name decides in both directions: records that agree with MY PDK do
+    not make a sibling named for another PDK my predecessor."""
+    other = _cell(tmp_path, "v1.0.0_pdkY", _PREV_LOG)
+    _records(other, [("pdkX", 6)])
+    cur = _cell(tmp_path, "v1.1.0_pdkX", _NEW_ID_LOG)
+
+    assert G.find_previous(cur) is None, G.find_previous(cur)
+    rc, out = _run(cur, _acc(tmp_path / "a.json", []))
+    assert rc == 2 and "[NO_BASELINE]" in out, out
+    assert "keyed to PDK 'pdkX'" in out, out
+
+
+@needs_corpus
+@pytest.mark.skipif(not BD_IC.is_dir(), reason="no benchmark-data/ic in tree")
+def test_the_later_gf180_spm_cell_resolves_its_published_predecessor():
+    """The measured pair on f06ccc0b, skipped only when a cell is absent."""
+    prev = BD_IC / "spm" / "v1.14.88_gf180mcuD"
+    cur = BD_IC / "spm" / "v1.21.6_gf180mcuD"
+    for p in (prev, cur):
+        if not p.is_dir():
+            pytest.skip(f"published cell absent from this checkout: {p}")
+    found = G.find_previous(cur)
+    assert found is not None and found.name == prev.name, (
+        f"{cur.name} did not resolve {prev.name}: got {found}. Both directories "
+        f"name gf180mcuD; records of {prev.name} say "
+        f"{G.measured_pdk(prev)!r}.")

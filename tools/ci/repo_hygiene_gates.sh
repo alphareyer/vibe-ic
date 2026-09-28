@@ -1409,10 +1409,16 @@ cannot be formed and its four per-cell gates were NOT declared (vibe-ic#2011)"
   # Wired here rather than into a flow step because its argument IS a published
   # cell, so this loop is the one place the flow already hands it its subject.
   #
-  # rc 2 = NO_BASELINE remains possible for the earliest published version;
-  # later same-design, same-PDK versions are independently compared. rc 1,
-  # a genuinely new diagnostic id, still fails the suite.
-  uncheckable_until 2027-02-28 "per published cell: rc 2 = NO_BASELINE when no earlier same-design, same-PDK run exists; a genuinely new diagnostic id remains rc 1"
+  # WHICH CELLS COMPARE, MEASURED on benchmark-data f06ccc0b. A version-named
+  # cell is keyed to the PDK its directory names (`tool_diagnostic_id_gate.
+  # pdk_key`), so a later version compares against the highest lower version
+  # of the same design and PDK. spm/v1.21.6_gf180mcuD compares against
+  # v1.14.88_gf180mcuD, and that comparison is rc 1 (ODB-0383, ORD-2056 new).
+  # spm/v1.14.88_gf180mcuD and spm/v1.5.65_sky130A are the genuine first
+  # versions on their PDKs and are NO_BASELINE. Before that key, v1.14.88's own
+  # records (six "pdk": "sky130" in its foundry handoff) outvoted its name, so
+  # v1.21.6 read "no previous run" and this exemption covered a real rc 1.
+  uncheckable_until 2027-02-28 "per published cell: rc 2 = NO_BASELINE only for the genuine first version, i.e. no lower version of the same design has a directory naming the same PDK; rc 2 = VACUOUS when the cell yields zero gated diagnostic ids; a later version is compared against its predecessor, and a new diagnostic id there is rc 1"
   run_tolerating_uncheckable "new tool diagnostic id ($(_routed_cell_id "$_cell"))" \
     "$PLUGIN" python3 programs/tool_diagnostic_id_gate.py "$_cell"
 }

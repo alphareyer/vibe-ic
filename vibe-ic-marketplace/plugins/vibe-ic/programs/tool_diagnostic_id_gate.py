@@ -185,6 +185,15 @@ never resolve to "same". ``test_the_corpus_pair_resolves_and_the_gate_fires``
 pins the pair and the finding, so this is backed by a committed artefact and not
 only by fixtures authored beside it.
 
+THE KEY ORDER WAS LATER REVERSED FOR NAMED CELLS. The table above is keyed
+record-first. On benchmark-data ``f06ccc0b`` that let one producer's typo hide
+a predecessor: ``spm/v1.14.88_gf180mcuD`` records ``"pdk": "sky130"`` six times
+in its foundry handoff, so ``spm/v1.21.6_gf180mcuD`` resolved NO_BASELINE over
+a comparison that exits rc 1. A cell whose name states a PDK is now keyed by
+that name, the records are disclosed when they disagree, and a
+``clean_run_*`` cell (no PDK in its name) is still keyed by its records. See
+:func:`pdk_key`.
+
 TWO SPELLINGS OF ONE PDK, AND WHY IT IS STILL SAFE. The recorded values are not
 normalised: caravel and sha256 record ``sky130`` while spm records ``sky130A``.
 Comparison is exact, so a cell pair that disagreed in spelling would resolve to
@@ -849,29 +858,50 @@ def measured_pdk(cell_dir: Path) -> Optional[str]:
 
 
 def pdk_key(cell_dir: Path) -> Optional[str]:
-    """The PDK to compare on: MEASURED if the run records one, else the NAME.
+    """The PDK to compare on: the NAME where the name states one, else MEASURED.
 
-    A FALLBACK, not a replacement, and the difference is a behaviour rule rather
-    than a convenience. Requiring the measured value outright was written first
-    and was wrong: a run that records no `"pdk"` field would silently lose its
-    predecessor, so a gate that used to compare would quietly stop — the same
-    "degrade to nothing without saying so" this whole file argues against. It
-    was caught by the existing fixtures, which record no PDK and are named
-    `v1.0.0_pdkX`, all of which went NO_BASELINE.
+    A published ``v<version>_<pdk>`` cell is named by its publisher, and that
+    name IS the cell's identity everywhere else (``routed_cell_identity``, the
+    routed-DEF corpus, the gate labels). The run's own ``"pdk"`` records are
+    written by many producers, and a modal vote over them lets a defective
+    producer outvote the identity. MEASURED on benchmark-data f06ccc0b:
+    ``spm/v1.14.88_gf180mcuD`` records ``"pdk": "sky130"`` six times in its
+    foundry-handoff JSON against ``gf180mcuD`` three times in the orchestrator
+    and LVS records, so the modal value was ``sky130``. That hid it from its
+    sibling ``v1.21.6_gf180mcuD``: the gate printed "no previous run" and exited
+    NO_BASELINE (rc 2) over a comparison that runs and exits rc 1 with two new
+    ids. A predecessor hidden by one producer's typo reads as "nothing to
+    compare", which is the defect this program exists to remove.
 
-    So: prefer the run's own record; fall back to the name where the name
-    carries it. Both sides must yield a key and the keys must be EQUAL — a cell
-    that yields nothing is refused rather than matched, because "I could not
-    tell" must not resolve to "same". Mixing sources is safe in the only
-    direction that matters: if one side measured `sky130` and the other can only
-    offer the name's `sky130A`, they differ and the pair is refused. A missed
-    comparison, never a wrong one.
+    So the name decides for a cell whose name states a PDK, and the records
+    become a DISCLOSURE (:func:`pdk_record_disagreement`), not a vote. The
+    records remain the only source for a naming family whose names carry no
+    PDK (``clean_run_v<seq>_<date>``). Both sides of a pair are in one family,
+    so a pair is never keyed from two different sources. A cell that yields no
+    key from either source is refused rather than matched, because "I could
+    not tell" must not resolve to "same".
     """
-    m = measured_pdk(cell_dir)
-    if m:
-        return m
     named = _RE_CELL.match(cell_dir.name)
-    return named.group("pdk") if named else None
+    if named:
+        return named.group("pdk")
+    return measured_pdk(cell_dir)
+
+
+def pdk_record_disagreement(cell_dir: Path) -> Optional[Dict[str, str]]:
+    """``{"cell", "named", "recorded"}`` when a cell's own ``"pdk"`` records
+    disagree with the PDK its name states, else None.
+
+    Reported, never used to drop a predecessor. The records are what the
+    producers wrote about the run. When they contradict the publisher's name,
+    one of them is wrong, and a reader must see both readings beside the
+    verdict rather than a silent NO_BASELINE.
+    """
+    named = _RE_CELL.match(cell_dir.name)
+    recorded = measured_pdk(cell_dir)
+    if named and recorded and recorded != named.group("pdk"):
+        return {"cell": cell_dir.name, "named": named.group("pdk"),
+                "recorded": recorded}
+    return None
 
 
 def find_previous(cell_dir: Path) -> Optional[Path]:
@@ -881,10 +911,10 @@ def find_previous(cell_dir: Path) -> Optional[Path]:
     Three rules, and the second is the one that was silently excluding runs:
 
     1. same design — siblings of the same parent directory only;
-    2. same PDK via :func:`pdk_key` — the run's own record where it has one,
-       the name where it does not. Both sides must yield a key and the keys must
-       match; a side that yields neither is refused, because "I could not tell"
-       must not resolve to "same";
+    2. same PDK via :func:`pdk_key` — the name where the name states one,
+       the run's own record where it does not. Both sides must yield a key and
+       the keys must match; a side that yields neither is refused, because "I
+       could not tell" must not resolve to "same";
     3. same naming FAMILY and a lower ordinal (:func:`_cell_ordinal`), so the
        comparison is never ordered across two conventions whose numbers mean
        different things.
@@ -940,6 +970,12 @@ def compare(cell_dir: Path, prev_dir: Path, acceptance: Path,
         "new_ids_blocking": {i: sorted(s)
                              for i, s in sorted(blocking_new.items())},
         "acceptance_problems": problems,
+        # A cell whose own "pdk" records contradict the PDK its name states.
+        # The pair is still compared (the name is the identity); the
+        # contradiction is disclosed with both readings.
+        "pdk_record_disagreements": [
+            d for d in (pdk_record_disagreement(cell_dir),
+                        pdk_record_disagreement(prev_dir)) if d],
         # NOT a footnote. Without this a reader takes "0 new ids" for "0 new
         # warnings", and families C exists precisely where ids do not.
         "unkeyed_not_compared": {
@@ -1088,12 +1124,14 @@ def _main_parsed(args) -> int:
         report = {"schema": SCHEMA, "cell": cell.name, "previous_cell": None,
                   "verdict": "NO_BASELINE",
                   "disclosure": "no previous run; nothing compared",
+                  "pdk_key": pdk_key(cell),
                   "census_current": cen}
         _emit(report, args.json)
         print(f"[NO_BASELINE] tool_diagnostic_id_gate: no previous run of "
-              f"{cell.name} — nothing compared. A first run is not a clean "
-              f"run; {len(gated_ids(cen))} gated id(s) recorded as the future "
-              f"baseline.")
+              f"{cell.name} — nothing compared: no lower-ordinal sibling of "
+              f"the same naming family is keyed to PDK {pdk_key(cell)!r}. A "
+              f"first run is not a clean run; {len(gated_ids(cen))} gated "
+              f"id(s) recorded as the future baseline.")
         # THE METRIC IS EMITTED EVEN HERE, and that is the point of the
         # metric. NO_BASELINE means the COMPARISON could not run; it does not
         # mean nothing was measured. Publishing this run's per-step counts is
@@ -1107,6 +1145,10 @@ def _main_parsed(args) -> int:
     rc, report = compare(cell, prev, Path(args.acceptance), today)
     _emit(report, args.json)
 
+    for d in report["pdk_record_disagreements"]:
+        print(f"[WARN] tool_diagnostic_id_gate: {d['cell']} is named for PDK "
+              f"{d['named']!r} but its own records mostly say {d['recorded']!r}; "
+              f"compared on the name, and the records need correcting.")
     u = report["unkeyed_not_compared"]
     if rc == 2:
         print(f"[VACUOUS] tool_diagnostic_id_gate: {cell.name} vs "
