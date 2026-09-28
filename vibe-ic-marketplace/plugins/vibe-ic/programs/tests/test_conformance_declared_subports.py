@@ -304,6 +304,19 @@ def test_l9_row_without_own_section_mention_grants_nothing(tmp_path):
     assert ("port-extra", "o_sram_waddr") in _errors(findings)
 
 
+def test_l9_locator_cannot_read_a_generated_section(tmp_path):
+    project, spec, rtl = _project(tmp_path)
+    generated = project / "phase2" / "evidence.md"
+    generated.write_text(DELEGATION)
+    l9 = json.loads(spec.read_text())
+    l9["plugin_declared_port_groups"][0]["source_document"] = (
+        "__chip_root_docs__/phase2/evidence.md")
+    spec.write_text(json.dumps(l9))
+    result, findings = _check(project, spec, rtl)
+    assert result.returncode == 1
+    assert ("port-extra", "o_sram_waddr") in _errors(findings)
+
+
 def test_own_mention_and_entry_work_without_example_table(tmp_path):
     sys.path.insert(0, str(PROGRAMS))
     import phase1_doc_one_shot_runner as phase1
