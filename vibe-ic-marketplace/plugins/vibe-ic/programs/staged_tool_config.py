@@ -217,11 +217,25 @@ def _name_denial(rel_in_tree: str) -> Optional[str]:
     for part in parts[:-1]:
         if part.lower() in segments or _rfb.is_oracle_name(part):
             return DENIED_ORACLE_TREE
+    if not parts:
+        # A directory symlink to the staged root itself has relpath ".".
+        # It is in-tree and must be recorded as NOT_TRAVERSED by the caller.
+        return None
     name = parts[-1]
     if (_rfb.is_oracle_name(name) or re.search(_scope.DENY_FILENAME_RE, name.lower())
             or _scope.oracle_reason(rel_in_tree) is not None):
         return DENIED_ORACLE_NAME
     return None
+
+
+def _effective_suffix(path: Path) -> str:
+    """Use a link target's suffix for recipe/shape classification."""
+    if not path.is_symlink():
+        return path.suffix
+    try:
+        return path.resolve(strict=True).suffix
+    except (OSError, RuntimeError):
+        return path.suffix
 
 
 def _denial(root: Path, path: Path) -> Optional[str]:
@@ -243,10 +257,12 @@ def _denial(root: Path, path: Path) -> Optional[str]:
         verdict = _name_denial(str(rel))
         if verdict:
             return verdict
-    if path.suffix not in _rfb.RECIPE_SUFFIXES:
+    suffix = target.suffix if path.is_symlink() else path.suffix
+    if suffix not in _rfb.RECIPE_SUFFIXES:
         try:
             # a classifier, never an extractor: the parsed content is dropped here
-            if _rfb.is_oracle_qor_rules(path.read_text(errors='ignore')):
+            classifier_path = target if path.is_symlink() else path
+            if _rfb.is_oracle_qor_rules(classifier_path.read_text(errors='ignore')):
                 return DENIED_ORACLE_SHAPE
         except OSError:
             return None
@@ -338,7 +354,8 @@ def read_staged(project: Path, runner: Any = None) -> Dict[str, Any]:
             row['disposition'] = denied
             out['files'].append(row)
             continue
-        if path.suffix not in _rfb.RECIPE_SUFFIXES:
+        suffix = _effective_suffix(path)
+        if suffix not in _rfb.RECIPE_SUFFIXES:
             row['disposition'] = NOT_PARSED
             out['files'].append(row)
             continue
@@ -347,7 +364,7 @@ def read_staged(project: Path, runner: Any = None) -> Dict[str, Any]:
             row['sha256'] = _sha(path)
         except OSError as exc:
             raise Refusal(STAGED_CONFIG_UNREADABLE, f'{rel}: {type(exc).__name__}: {exc}') from None
-        is_tcl = path.suffix == '.tcl'
+        is_tcl = suffix == '.tcl'
         if R._rf_recipe_is_unrecognised(text, is_tcl):
             row['disposition'] = UNRECOGNISED_DIALECT
             out['files'].append(row)
@@ -500,11 +517,21 @@ def resolve(project: Path, tool: str, design: Mapping[str, Any],
         for c in cands:
             notes.append({k: v for k, v in c.items() if k not in ('kind', 'converted')}
                          | {'disposition': c['kind']})
+        registry_row = ((tool_registry.get(var) or {})
+                        if tool_registry is not None else {})
+        default_measured = registry_row.get('default_measured', True)
         rows[var] = {'tier': TIER_TOOL, 'emitted': False,
-                     'tool_default': (tool_registry.get(var) or {}).get('default')
-                     if tool_registry is not None else None,
                      'source': (f'{tool} variable default (not emitted)' if tool_registry is not None
                                 else f'{tool} variable default (not emitted; registry not supplied)')}
+        if default_measured:
+            rows[var]['tool_default'] = (registry_row.get('default')
+                                         if tool_registry is not None else None)
+        else:
+            rows[var]['tool_default_measured'] = False
+            if 'not_measured_reason' in registry_row:
+                rows[var]['not_measured_reason'] = registry_row['not_measured_reason']
+            if 'defaults_by_flow' in registry_row:
+                rows[var]['defaults_by_flow'] = registry_row['defaults_by_flow']
         if unknown:
             rows[var].update({'disposition': TARGET_UNKNOWN,
                               'reason': 'the tool registry declares no such variable; nothing is '
