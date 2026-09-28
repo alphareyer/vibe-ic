@@ -96,6 +96,8 @@ def _attestation(**over):
         "evidence": [SELF_REF],
         "ticket": "TAPEOUT-ENV-LVS-NETGEN",
         "review_required": True,
+        "approver": "reyerchu", "approved_at": "2026-09-28",
+        "owner_statement": "I approve this specific LVS deferral for the test run.",
     }
     entry.update(over)
     return entry
@@ -414,12 +416,8 @@ def test_incomplete_waiver_still_gets_its_216_advisory(tmp_path):
 # 5. Why the disclosure, and not a refusal — pinned against the producer
 # ----------------------------------------------------------------------
 
-def test_producer_always_appends_the_self_reference(tmp_path):
-    """`_autogen_waivers_json` appends the run-record index unconditionally, so
-    the self-reference is on EVERY auto-generated entry. This is the reason
-    `evidence[] non-empty` could never discriminate, and the reason a refusal
-    would hit every honestly-disclosed deferral rather than the dishonest
-    ones."""
+def test_producer_does_not_write_self_referential_approval(tmp_path):
+    """A missing tool remains a run observation, never an approval document."""
     import phase3_one_shot_runner as p3
 
     plan = [p3.StepResult(
@@ -427,28 +425,16 @@ def test_producer_always_appends_the_self_reference(tmp_path):
         "open-source LVS needs magic+netgen in container PATH",
         extras={"missing_tool": "magic,netgen"}, reason_class="tool_absent")]
     p3._autogen_waivers_json(tmp_path, plan)
-    emitted = json.loads((tmp_path / "waivers.json").read_text())
-
-    entry = emitted["waivers"][0]
-    assert entry["verdict_tier"] == "ENV_UNAVAILABLE", entry
-    assessment = _ei.assess(entry["evidence"], tmp_path)
-    assert assessment.self_report == 1, entry["evidence"]
-    # and the harvested `extras` scalar is a tool name, not a path — the same
-    # shape as the corpus's free-text sub-case, from the same harvester.
-    assert assessment.unresolvable >= 1, entry["evidence"]
-    assert not assessment.corroborated, entry["evidence"]
+    assert not (tmp_path / "waivers.json").exists()
 
 
-def test_that_producers_output_is_honoured_not_refused(tmp_path):
-    """The consequence, stated as a test: what the runner emits on a host
-    missing the tool is honoured. If a future change made uncorroborated
-    evidence a refusal, this run would lose its deferral and the tier would
-    stop working for the case it exists for."""
+def test_missing_tool_producer_cannot_grant_a_waiver(tmp_path):
+    """The producer cannot turn its own missing-tool report into a waiver."""
     import phase3_one_shot_runner as p3
 
     p3._autogen_waivers_json(tmp_path, [p3.StepResult(
         "lvs", "NOT_MEASURED", 0.1, "needs netgen in PATH",
         extras={"missing_tool": "netgen"}, reason_class="tool_absent")])
     fcc, waivers = _load(tmp_path)
-    assert 31 in waivers and waivers[31]["_env_unavailable"] is True
-    assert len(fcc._ENV_WAIVER_EVIDENCE_NOTES) == 1
+    assert waivers == {}
+    assert not (tmp_path / "waivers.json").exists()

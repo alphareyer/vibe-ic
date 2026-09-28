@@ -102,6 +102,9 @@ def fpga_absent_from_run(project: Path) -> bool:
 # declarations, not kept as a list of step ids or role names beside it: a
 # renumbered, renamed or added board step moves the set with the yaml.
 BITSTREAM_SUFFIX = ".sof"
+OWNER_EXCLUSION_RULING = (
+    "owner 2026-09-25: steps 6 and 39 (FPGA on-board) are excluded from "
+    "the IC PASS goal; reported NOT_MEASURED, never PASS")
 
 
 def step_owes_bitstream(step: dict) -> bool:

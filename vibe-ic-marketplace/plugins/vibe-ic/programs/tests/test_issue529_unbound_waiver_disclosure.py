@@ -131,6 +131,8 @@ def _entry(**over):
         "evidence": [SELF_REF],
         "ticket": "TAPEOUT-AUTOGEN-LVS",
         "review_required": True,
+        "approver": "reyerchu", "approved_at": "2026-09-28",
+        "owner_statement": "I approve this specific LVS deferral for the test run.",
     }
     e.update(over)
     return e
@@ -502,12 +504,13 @@ def test_a_superseded_entry_is_disclosed_and_the_step_stays_waived(tmp_path):
         "waived_steps": [{
             "id": 31, "reason": "hand-authored deferral for physical "
                                 "verification pending the foundry deck",
-            "approver": "signoff-engineer", "approved_at": "2026-01-01"}],
+                "approver": "reyerchu", "approved_at": "2026-01-01",
+                "owner_statement": "I approve this physical verification deferral."}],
         "waivers": [_entry(verdict_tier="ENV_UNAVAILABLE")],
     }, indent=2))
     fcc, waivers = _load(tmp_path)
     assert 31 in waivers
-    assert waivers[31]["approver"] == "signoff-engineer"
+    assert waivers[31]["approver"] == "reyerchu"
     notes = fcc._WAIVER_NOT_BOUND_DISCLOSURES
     assert len(notes) == 1, notes
     assert notes[0].startswith("WAIVER SUPERSEDED"), notes[0]
@@ -645,10 +648,9 @@ def test_pass_structural_is_written_by_no_producer():
     # step. The step's own word now travels beside it as `step_verdict`, so
     # this half of the finding is asserted on BOTH fields.
     emitted_tiers = _tiers_the_producer_emits()
-    assert emitted_tiers == {"WAIVED", "ENV_UNAVAILABLE"}, emitted_tiers
+    assert emitted_tiers == set(), emitted_tiers
     assert "PASS_STRUCTURAL" not in emitted_tiers
-    assert _tiers_the_producer_emits(field="step_verdict") == {
-        "PASS_WITH_WAIVERS", "NOT_MEASURED"}
+    assert _tiers_the_producer_emits(field="step_verdict") == set()
 
 
 def test_pass_structural_is_read_by_no_consumer_yet_sits_in_the_corpus():

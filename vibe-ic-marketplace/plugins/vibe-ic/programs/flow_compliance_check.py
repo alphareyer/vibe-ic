@@ -110,6 +110,7 @@ import _gate_authorship as _ga
 import _auditor_write as _aw   # R-0915-168 (the one auditor writer)
 import _reused_ip_predicate as _reused_ip
 import _waiver_entries as _we
+import _owner_waiver as _owner_waiver
 import _evidence_independence as _ev_ind  # #524
 import _sim_results_bridge as _srb
 import _sta_supersession                          # R-0915-28 (amended)
@@ -6857,19 +6858,10 @@ def _os_constraints_prereq_satisfied(result: Any,
                                      waivers: Dict[Any, Any]) -> bool:
     """Has this prerequisite step NOT FAILED?  (R-0915-55 part 1.)
 
-    The guard used to demand PASS. On SPM that refused the promotion because
-    step 6 is WAIVED under the flow's OWN declared capability gap — the
-    ENV_UNAVAILABLE fpga-board-prototype tier, carrying
-    `ticket=fpga-board-prototype-capgap-v1.0.18`, `review_required=True` and
-    `approver="field-agent-attest (fpga-board cap-gap tier)"`. The promotion
-    exists to forgive exactly that class of gap, and its own precondition was
-    being defeated by it.
-
-    A waiver counts ONLY when the flow recorded the things that make it
-    reviewable: a ticket, an approver, and review_required. FAIL, MISSING,
-    INCOMPLETE — or a waiver without those — still block, because then nobody
-    has undertaken to close it. The promoted verdict is
-    PASS_WITH_OPEN_SOURCE_CONSTRAINTS carrying these rows, never bare PASS.
+    An owner-approved waiver can satisfy this prerequisite, while the
+    specifically excluded FPGA board row remains NOT_MEASURED. FAIL, MISSING,
+    INCOMPLETE, and other unmeasured prerequisites still block. The promoted
+    verdict is PASS_WITH_OPEN_SOURCE_CONSTRAINTS, never bare PASS.
     """
     status = getattr(result, "status", None)
     if status == _T.Verdict.PASS.value:
@@ -13452,79 +13444,17 @@ _fpga_skip_disclosed = _fpga_cap.fpga_skip_disclosed
 
 def _synthesise_fpga_skip_waivers(
         project: Path, out: Dict[Any, Dict[str, Any]]) -> None:
-    """ORGANIC #607 — when the runner discloses a deliberate FPGA skip
-    (quartus_map_audit.json verdict=SKIP, sof_present=false — e.g. an IC class
-    with no DE10 board-pin contract, or no Quartus on host), add an
-    ENV_UNAVAILABLE-tier cap-gap waiver for EVERY FPGA-board step so its
-    natural MISSING/FAIL (no .sof) converts to WAIVED-DEFERRED via check_step's
-    existing fallback, instead of hard-FAILing and cascading
-    blocked-by-upstream across stage2/stage3 → Overall:FAIL. Mirrors
-    `_synthesise_pdk_substitution_waivers` (#496) and the #430 cap-gap doctrine.
-    Mutates `out` in place; no-op when nothing is disclosed (undisclosed missing
-    .sof still hard-FAILs). chip-AGNOSTIC.
+    """Retired: check_step classifies board absence as NOT_MEASURED."""
+    return
 
-    ORGANIC #663 — the early-prototype step (id 6) AND the final on-board
-    sign-off step (id 39) are BOTH board-absent capability gaps under the SAME
-    disclosed-skip predicate. v1.0.18 hard-coded only the early-prototype id, so
-    the canonical no-flag `--strict` audit left the final-signoff step at a hard
-    FAIL ('no-hardware-evidence' from the program_exit_zero attestation gate)
-    while only the early step deferred — asymmetric with the --skip-hardware
-    board-step downgrade (which already covers the whole renumber-proof set
-    `_FPGA_BOARD_STEP_IDS`). Iterate that same renumber-proof set so the cap-gap
-    auto-deferral is SYMMETRIC across all board steps. The waiver-synthesis layer
-    is the right place because the final-signoff gate is an all_of containing a
-    program_exit_zero attestation check that the #608 json_field_true self-skip
-    promotion never reaches; check_step's fallback honours this waiver."""
-    if not _fpga_skip_disclosed(project):
-        return
-    _cause_key, _cause_sentence, _cause_evidence = _fpga_skip_cause(project)
-    # renumber-proof: derive from the canonical step-name→id table (single
-    # source of truth, kept in sync with the flow YAML) rather than literals.
-    for sid in sorted(_FPGA_BOARD_STEP_IDS, key=lambda x: (str(type(x)), x)):
-        if sid in out:
-            continue  # an explicit waiver for this step takes precedence
-        out[sid] = {
-            "id": sid,
-            "reason": (
-                "ENV_UNAVAILABLE (fpga-board-prototype cap-gap): the runner "
-                "HONESTLY self-reports a deliberate FPGA skip "
-                "(reports/phase2/fpga/quartus_map_audit.json verdict=SKIP, "
-                "sof_present=false) — " + _cause_sentence + ". The on-board .sof "
-                "(early-prototype AND final sign-off) is DEFERRED to board "
-                "bring-up (NOT executed-PASS) "
-                f"[ticket={_FPGA_SKIP_WAIVER_TICKET}, review_required=True, "
-                "cap:fpga_board_prototype]"),
-            "approver": "field-agent-attest (fpga-board cap-gap tier)",
-            "ticket": _FPGA_SKIP_WAIVER_TICKET,
-            "verdict_tier": "ENV_UNAVAILABLE",
-            "review_required": True,
-            "evidence": ["reports/phase2/fpga/quartus_map_audit.json"]
-                        + _cause_evidence,
-            "cause": _cause_key,
-            "_env_unavailable": True,
-            "_fpga_skip": True,
-        }
-
-
-# F10 — THE OWNER RULE: a step that was not measured is NOT_MEASURED and is
-# excluded from the verdict; it is never a waiver. A waiver is an authored
-# undertaking (evidence, a ticket, review_required) about a step that RAN. The
-# row `_synthesise_fpga_skip_waivers` builds is none of that: the audit writes
-# it itself from the producer's skip record, about a board step that could not
-# run. So where that row (or --skip-hardware) would have promoted the step to
-# PASS_WITH_WAIVERS, the step is NOT_MEASURED, its reason class is read off the
-# cause the record names, and `excluded_from_verdict` carries the sentence that
-# takes it out of the run verdict. An authored waivers.json entry is untouched.
+# F10 — Board absence is NOT_MEASURED and excluded from the verdict. The
+# producer's cause selects the reason class; only a dated owner record can
+# authorize an actual waiver on another step.
 _BOARD_ABSENT_REASON_CLASS = {
     "quartus_absent": _T.ReasonClass.TOOL_ABSENT.value,
     "board_pin_contract_absent": _T.ReasonClass.INPUT_ABSENT.value,
     "cause_not_recorded": _T.ReasonClass.NOT_EXECUTED.value,
 }
-
-
-def _is_synthesised_board_skip(entry: Any) -> bool:
-    """The audit's OWN cap-gap row for a board step (never an authored one)."""
-    return isinstance(entry, dict) and bool(entry.get("_fpga_skip"))
 
 
 def _board_step_not_measured(result: "StepResult", sid: Any, *,
@@ -13538,6 +13468,24 @@ def _board_step_not_measured(result: "StepResult", sid: Any, *,
     result.reasons = [result.excluded_from_verdict] + [
         f"  ↳ natural: {r}" for r in list(natural)[:3]]
     return result
+
+
+def _board_bitstream_present(project: Path, step: Dict[str, Any]) -> bool:
+    """A declared board output actually exists, despite an older SKIP record."""
+    specs = list(step.get("required_outputs") or ())
+    gate = step.get("gate") or {}
+    if isinstance(gate, dict):
+        specs.extend(gate.get("files_exist") or ())
+    for spec in specs:
+        for alternative in str(spec).split(" OR "):
+            pattern = alternative.strip()
+            if pattern.lower().endswith(_fpga_cap.BITSTREAM_SUFFIX):
+                try:
+                    if any(path.is_file() for path in project.glob(pattern)):
+                        return True
+                except (OSError, ValueError):
+                    pass
+    return False
 
 
 _PHASE2_REPORT = "reports/orchestrator/phase2_one_shot.json"
@@ -13585,45 +13533,8 @@ def _fpga_skip_cause(project: Path) -> Tuple[str, str, List[str]]:
 
 def _synthesise_pdk_substitution_waivers(
         project: Path, out: Dict[Any, Dict[str, Any]]) -> None:
-    """v0.2.103 (#496) — when the disclosed-substitution predicate holds,
-    add an ENV_UNAVAILABLE-tier waiver for each affected analog A-step that
-    is not already explicitly waived. Mutates `out` in place; mirrors the
-    shape of the digital ENV_UNAVAILABLE waivers (reason + ticket +
-    review_required + evidence + `_env_unavailable` flag) so `check_step`'s
-    existing fallback path converts the natural FAIL/MISSING to
-    WAIVED-DEFERRED. No-op when nothing is disclosed (→ undisclosed
-    mismatch hard-FAILs as before)."""
-    disclosure = _pdk_substitution_disclosed(project)
-    if not disclosure:
-        return
-    for sid in _PDK_SUBSTITUTION_AFFECTED_A_STEPS:
-        if sid in out:
-            continue  # explicit waiver takes precedence
-        rationale = (
-            f"PDK_SUBSTITUTION: L19 declares target process "
-            f"'{disclosure['target']}' which has no public ngspice models; "
-            f"the analog deck ({disclosure['deck']}) HONESTLY discloses it "
-            f"substitutes the open-source default PDK '{disclosure['substitute']}'. "
-            f"The #438b PDK-mismatch gate correctly intercepts this own-deck "
-            f"substitution, so step {sid} is DEFERRED for foundry "
-            f"re-characterisation against the real target PDK (not "
-            f"executed-PASS)."
-        )
-        out[sid] = {
-            "id": sid,
-            "reason": (
-                f"ENV_UNAVAILABLE (pdk-substitution): {rationale} "
-                f"[ticket={_PDK_SUBSTITUTION_TICKET}, review_required=True]"
-            ),
-            "approver": "field-agent-attest (pdk-substitution tier)",
-            "ticket": _PDK_SUBSTITUTION_TICKET,
-            "verdict_tier": "ENV_UNAVAILABLE",
-            "review_required": True,
-            "evidence": [disclosure["deck"]],
-            "_env_unavailable": True,
-            "_pdk_substitution": True,
-        }
-
+    """Retired: process substitution cannot mint a waiver automatically."""
+    return
 
 def _refuse_stale_waivers(project: Path, out: Dict[Any, Dict[str, Any]]) -> None:
     """FALSE-CLEAN GUARD — refuse a STALE waiver (in-place on `out`).
@@ -13716,15 +13627,7 @@ def _load_waivers(project: Path, max_step: int = 40) -> Dict[int, Dict[str, str]
     _WAIVER_NOT_BOUND_DISCLOSURES.clear()  # #529 — fresh per call
     wpath = project / "waivers.json"
     if not wpath.exists():
-        # v0.2.103 (#496) — even with no waivers.json, the disclosed
-        # PDK-substitution predicate auto-synthesises the A-step deferral
-        # waivers so a non-default-target analog chip on the open path is
-        # not permanently unpassable. An UNDISCLOSED mismatch → {} → FAIL.
-        out: Dict[Any, Dict[str, Any]] = {}
-        _synthesise_pdk_substitution_waivers(project, out)
-        _synthesise_fpga_skip_waivers(project, out)  # ORGANIC #607
-        _refuse_stale_waivers(project, out)
-        return out
+        return {}
     # Reuse waivers_schema_check for validation
     try:
         from waivers_schema_check import validate as _validate
@@ -13759,6 +13662,12 @@ def _load_waivers(project: Path, max_step: int = 40) -> Dict[int, Dict[str, str]
         out: Dict[Any, Dict[str, Any]] = {}
         for w in data.get("waived_steps", []):
             root_id = _parse_id(w["id"])
+            refusal = _owner_waiver.refusal(w, data)
+            if refusal:
+                _ENV_WAIVER_REJECTIONS.append(
+                    f"OWNER WAIVER REFUSED — step {root_id}: {refusal}; "
+                    "entry was reported but cannot change the step verdict.")
+                continue
             # ORGANIC-20260606 #437(e): waiver authors use `rationale` and
             # `reason` interchangeably, but every consumer read ONLY
             # `reason` — a valid rationale-keyed waiver then displayed as
@@ -13820,6 +13729,12 @@ def _load_waivers(project: Path, max_step: int = 40) -> Dict[int, Dict[str, str]
                     f"step, tier, ticket or rationale could be read from it "
                     f"and it was skipped. No step verdict is affected. Fix or "
                     f"remove the entry.")
+                continue
+            refusal = _owner_waiver.refusal(w, data)
+            if refusal:
+                _ENV_WAIVER_REJECTIONS.append(
+                    f"OWNER WAIVER REFUSED — waivers entry {_idx}: {refusal}; "
+                    "entry was reported but cannot change the step verdict.")
                 continue
             # DEFENSIVE READ, NOT a schema opinion (#519's rule: a schema error
             # must not take the report down). `verdict_tier` holding a non-string
@@ -13893,34 +13808,9 @@ def _load_waivers(project: Path, max_step: int = 40) -> Dict[int, Dict[str, str]
                     f"entry's rationale is the accurate one, remove the "
                     f"competing `waived_steps` entry.")
                 continue
-            # #524 — the attestation quartet stands in for a human signature
-            # (#519), so `evidence` carries the signature's weight. But the
-            # test above is `evidence[] non-empty`, a LENGTH test, and a list
-            # holding one pointer back at the producing run's own orchestrator
-            # report satisfies it exactly as well as a pointer to an
-            # independent artefact. Measured on the real producer:
-            # `phase3_one_shot_runner._autogen_waivers_json` appends that
-            # self-reference UNCONDITIONALLY, and harvests the step's `extras`
-            # values as though every one were a path — so an ENV_UNAVAILABLE
-            # waiver's evidence is typically `["<tool name>", "<self-ref>"]`
-            # and, when extras are empty, the self-reference ALONE.
-            #
-            # The waiver is still HONOURED. Refusing it would be the wrong
-            # repair: this tier's claim is that a tool was ABSENT, and no
-            # independent artefact can corroborate a non-execution — the run's
-            # own probe record is the only witness that can exist. Since every
-            # ENV_UNAVAILABLE waiver the producer can emit is uncorroborated,
-            # refusing them would make an honest, correctly disclosed,
-            # tool-less-host deferral impossible to honour, i.e. would break
-            # "disclosure buys deferral" for precisely the population the tier
-            # was built for.
-            #
-            # So the repair is to stop the report reading IDENTICALLY in the
-            # two cases. The assessment rides on the waiver record and, when
-            # nothing independent corroborates it, is surfaced as a named
-            # advisory. Classification only — never raises, never rejects,
-            # never changes a step verdict. chip-AGNOSTIC (structural path
-            # tests only).
+            # #524 — An owner-approved ENV_UNAVAILABLE entry can still cite
+            # only the producing run's own probe. Keep the independent-evidence
+            # advisory so the report states that limitation explicitly.
             _assess = _ev_ind.assess(evidence, project)
             if not _assess.corroborated:
                 _ENV_WAIVER_EVIDENCE_NOTES.append(
@@ -13946,11 +13836,7 @@ def _load_waivers(project: Path, max_step: int = 40) -> Dict[int, Dict[str, str]
                 "evidence_assessment": _assess.as_dict(),
                 "_env_unavailable": True,
             }
-        # v0.2.103 (#496) — auto-synthesise the analog PDK-substitution
-        # deferral waivers (no-op when nothing is disclosed). Runs after
-        # explicit waivers so hand-authored A-step entries take precedence.
-        _synthesise_pdk_substitution_waivers(project, out)
-        _synthesise_fpga_skip_waivers(project, out)  # ORGANIC #607
+        # Check execution conditions on the remaining owner-approved entries.
         _refuse_stale_waivers(project, out)
         return out
     except Exception as exc:
@@ -16286,9 +16172,19 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     if skip_hardware and isinstance(sid, int) and sid in _FPGA_BOARD_STEP_IDS:
         return _board_step_not_measured(
             result, sid, reason_class=_T.ReasonClass.INPUT_ABSENT.value,
-            basis=("--skip-hardware declares no physical FPGA board for this "
+            basis=(_fpga_cap.OWNER_EXCLUSION_RULING + "; "
+                   "--skip-hardware declares no physical FPGA board for this "
                    "headless doc→GDS run, so no board test was performed "
                    "(GDS/STA/DRC/LVS sign-off unaffected)"))
+
+    if (sid in _FPGA_BOARD_STEP_IDS and _fpga_skip_disclosed(project)
+            and not _board_bitstream_present(project, step)):
+        cause, detail, _evidence = _fpga_skip_cause(project)
+        return _board_step_not_measured(
+            result, sid,
+            reason_class=_BOARD_ABSENT_REASON_CLASS.get(
+                cause, _T.ReasonClass.NOT_EXECUTED.value),
+            basis=f"{_fpga_cap.OWNER_EXCLUSION_RULING}; {detail}")
 
     # A9 is the ANALOG bench-hardware step, and the allowlist entry that exempts
     # its hw-correlation sub-gate calls it "the analog analogue of
@@ -16585,17 +16481,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 f"gate output target(s). The auditor will not run that gate "
                 f"to manufacture completion evidence; wire a pre-audit "
                 f"producer into the owning runner.")
-        # v1.6.269 (#126) — ENV_UNAVAILABLE fallback at early MISSING.
-        if (sid in waivers and _is_synthesised_board_skip(waivers[sid])
-                and sid in _FPGA_BOARD_STEP_IDS):
-            _board_step_not_measured(
-                result, sid,
-                reason_class=_BOARD_ABSENT_REASON_CLASS.get(
-                    waivers[sid].get("cause"),
-                    _T.ReasonClass.NOT_EXECUTED.value),
-                basis=waivers[sid].get("reason", "(no reason)"),
-                natural=result.reasons)
-        elif sid in waivers and bool(waivers[sid].get("_env_unavailable")):
+        # An owner-approved ENV_UNAVAILABLE waiver may cover an early MISSING.
+        if sid in waivers and bool(waivers[sid].get("_env_unavailable")):
             natural_reason = result.reasons[-1] if result.reasons else "MISSING"
             result.status = _T.Verdict.PASS_WITH_WAIVERS.value
             result.reasons = [
@@ -17849,16 +17736,6 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # tapeout review must still close it before production. The PASS
     # path is NOT touched — a real evidence + gate-PASS keeps PASS.
     if (result.status == _T.Verdict.FAIL.value
-            and sid in waivers
-            and _is_synthesised_board_skip(waivers[sid])
-            and sid in _FPGA_BOARD_STEP_IDS):
-        _board_step_not_measured(
-            result, sid,
-            reason_class=_BOARD_ABSENT_REASON_CLASS.get(
-                waivers[sid].get("cause"), _T.ReasonClass.NOT_EXECUTED.value),
-            basis=waivers[sid].get("reason", "(no reason)"),
-            natural=result.reasons)
-    elif (result.status == _T.Verdict.FAIL.value
             and sid in waivers
             and bool(waivers[sid].get("_env_unavailable"))):
         original_reasons = list(result.reasons)
@@ -22545,7 +22422,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             "reports/extraction_coverage_report.json": (
                 "reports/extraction_coverage_report.json",
                 "reports/phase1/extraction_coverage_report.json"),
-            "waivers.json": ("waivers.json",),
             "generated_docs": ("generated_docs", "phase1/generated_docs"),
             "extraction_patterns.json": (
                 "extraction_patterns.json", "phase1/extraction_patterns.json"),

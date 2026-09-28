@@ -81,6 +81,16 @@ def _materialised_waiver(project: Path, step_id=39) -> None:
     })
 
 
+def _owner_waiver(project: Path, step_id=39) -> None:
+    _write(project / "waivers.json", {"waived_steps": [{
+        "id": step_id,
+        "reason": "Owner authorizes the specifically named board deferral",
+        "approver": "reyerchu", "approved_at": "2026-09-28",
+        "owner_statement": "I approve the stated board deferral for this run.",
+        "ticket": "owner-board-review", "review_required": True,
+    }]})
+
+
 def _sha(b: bytes) -> str:
     return "sha256:" + hashlib.sha256(b).hexdigest()
 
@@ -132,12 +142,12 @@ def test_skip_manifest_is_not_a_waiver_tier(tmp_path):
         + r.stdout + r.stderr)
 
 
-def test_waived_short_circuit_still_writes_the_declared_json_report(tmp_path):
+def test_owner_waived_short_circuit_writes_the_declared_json_report(tmp_path):
     """Step 39's gate declares `--json reports/phase2/fpga/on_board_attestation.json`.
     The old short-circuit returned BEFORE writing it, so the declared audit
     artefact silently never landed on exactly the runs that took the shortcut."""
     _self_waiving_manifest(tmp_path, "WAIVED")
-    _materialised_waiver(tmp_path)
+    _owner_waiver(tmp_path)
     out = tmp_path / "reports/phase2/fpga/on_board_attestation.json"
     r = _run(tmp_path, "--json", str(out))
     assert r.returncode == 0, r.stdout + r.stderr
@@ -161,13 +171,13 @@ def guard_real_hardware_evidence_still_passes(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
 
 
-def guard_materialised_env_unavailable_waiver_still_resolves(tmp_path):
-    """The sanctioned no-rig route: a disclosed FPGA-skip project carrying the
-    machinery-written ENV_UNAVAILABLE waiver must NOT become a hard FAIL."""
+def guard_materialised_env_unavailable_waiver_is_refused(tmp_path):
+    """A machine-written cap-gap entry cannot buy a hardware short circuit."""
     _self_waiving_manifest(tmp_path, "WAIVED")
     _materialised_waiver(tmp_path)
     r = _run(tmp_path)
-    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "OWNER WAIVER REFUSED" in r.stderr
 
 
 def guard_pure_json_self_attestation_still_fails(tmp_path):
@@ -199,8 +209,8 @@ def guard_not_a_directory_is_rc2(tmp_path):
 # pytest collects `test_*`; run the guards under the same names so a normal
 # `pytest <file>` exercises both sets.
 test_guard_real_hardware_evidence_still_passes = guard_real_hardware_evidence_still_passes
-test_guard_materialised_env_unavailable_waiver_still_resolves = \
-    guard_materialised_env_unavailable_waiver_still_resolves
+test_guard_materialised_env_unavailable_waiver_is_refused = \
+    guard_materialised_env_unavailable_waiver_is_refused
 test_guard_pure_json_self_attestation_still_fails = guard_pure_json_self_attestation_still_fails
 test_guard_missing_manifest_still_fails = guard_missing_manifest_still_fails
 test_guard_not_a_directory_is_rc2 = guard_not_a_directory_is_rc2
