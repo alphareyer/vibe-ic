@@ -215,6 +215,54 @@ def test_declared_power_roles_count_with_arbitrary_net_names(tmp_path):
                                        "GROUND": {"m5": 3}}
 
 
+def test_multiline_special_wire_shape_counts_by_role_and_layer(tmp_path):
+    project = _project(tmp_path, 6)
+    path = project / "phase3/stage3/pnr/floorplan.def"
+    path.write_text(path.read_text().replace(
+        "NEW M5 1000 + SHAPE STRIPE",
+        "NEW M5 1000\n      + SHAPE STRIPE"))
+    rc, report = _check(project)
+    assert rc == 0 and report["verdict"] == "PASS"
+    assert report["def_stripe_census"]["by_role_layer"] == {
+        "POWER": {"m5": 3}, "GROUND": {"m5": 3}}
+
+
+def test_apply_policy_rejects_unresolved_pitch_budget(tmp_path):
+    project = _project(tmp_path, 2)
+    policy = project / "input/pdn_budget_pitch_policy.json"
+    policy.parent.mkdir(parents=True)
+    policy.write_text('{"mode":"apply"}')
+    report_path = project / "reports/phase3/floorplan_rectangles.json"
+    reason = "M5: IR sheet resistance/budget absent"
+    report_path.write_text(json.dumps({"pdn_core_floor": {"budget_pitch": {
+        "mode": "apply", "verdict": "NOT_MEASURED", "reason": reason}}}))
+    rc, report = _check(project)
+    assert rc == 2 and report["verdict"] == "NOT_MEASURED"
+    finding = next(f for f in report["findings"]
+                   if f["rule"] == "PDN_BUDGET_PITCH_UNRESOLVED")
+    assert reason in finding["message"]
+
+
+def test_apply_policy_rejects_infeasible_or_incomplete_candidate(tmp_path):
+    project = _project(tmp_path, 2)
+    policy = project / "input/pdn_budget_pitch_policy.json"
+    policy.parent.mkdir(parents=True)
+    policy.write_text('{"mode":"apply"}')
+    report_path = project / "reports/phase3/floorplan_rectangles.json"
+    report_path.write_text(json.dumps({"pdn_core_floor": {"budget_pitch": {
+        "mode": "apply", "verdict": "INFEASIBLE",
+        "reason": "M5: no legal pitch"}}}))
+    rc, report = _check(project)
+    assert rc == 1 and report["verdict"] == "FAIL"
+    assert "M5: no legal pitch" in next(f["message"] for f in report["findings"]
+                                    if f["rule"] == "PDN_BUDGET_PITCH_UNRESOLVED")
+    report_path.write_text(json.dumps({"pdn_core_floor": {"budget_pitch": {
+        "mode": "apply", "verdict": "CANDIDATE", "rows": []}}}))
+    rc, report = _check(project)
+    assert rc == 2 and report["verdict"] == "NOT_MEASURED"
+    assert "PDN_BUDGET_PITCH_UNRESOLVED" in {f["rule"] for f in report["findings"]}
+
+
 def test_signal_stripes_without_budget_cannot_certify_pdn(tmp_path):
     project = _project(tmp_path, 2)
     path = project / "phase3/stage3/pnr/floorplan.def"
@@ -235,6 +283,15 @@ def test_no_budget_still_requires_both_supply_roles(tmp_path):
     rc, report = _check(project)
     assert rc == 2 and report["verdict"] == "NOT_MEASURED"
     assert report["def_stripe_census"]["by_role_layer"]["GROUND"] == {}
+    assert "PDN_DEF_STRAP_SHORTFALL" in {f["rule"] for f in report["findings"]}
+
+
+def test_no_budget_zero_stripes_on_declared_supply_pair_is_not_measured(tmp_path):
+    project = _project(tmp_path, 0)
+    (project / "reports/phase3/floorplan_rectangles.json").write_text("{}")
+    rc, report = _check(project)
+    assert rc == 2 and report["verdict"] == "NOT_MEASURED"
+    assert report["def_stripe_census"]["count"] == 0
     assert "PDN_DEF_STRAP_SHORTFALL" in {f["rule"] for f in report["findings"]}
 
 

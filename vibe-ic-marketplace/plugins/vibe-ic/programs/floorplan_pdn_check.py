@@ -281,11 +281,21 @@ def _def_stripe_census(pnr: Path) -> dict:
     count = 0
     non_pg_stripes = 0
     by_role_layer = {"POWER": {}, "GROUND": {}}
+    declared_roles = set()
     for net in _specialnet_records(body):
         role = _specialnet_role(net)
-        shapes = re.findall(
-            r"\b(?:ROUTED|NEW)\s+(\S+)\b[^;\n]*?\bSHAPE\s+STRIPE\b",
-            net, re.I)
+        if role in by_role_layer:
+            declared_roles.add(role)
+        # Each ROUTED/NEW token begins one special-wire path. Keep its layer
+        # attached to that path until the next path (or net terminator), so
+        # a SHAPE on the next path cannot be credited to the previous layer.
+        paths = list(re.finditer(r"\b(?:ROUTED|NEW)\s+(\S+)", net, re.I))
+        shapes = []
+        for index, match in enumerate(paths):
+            end = paths[index + 1].start() if index + 1 < len(paths) else len(net)
+            segment = net[match.end():end].split(";", 1)[0]
+            if re.search(r"\bSHAPE\s+STRIPE\b", segment, re.I):
+                shapes.append(match.group(1))
         if role in by_role_layer:
             count += len(shapes)
             for layer in shapes:
@@ -296,7 +306,27 @@ def _def_stripe_census(pnr: Path) -> dict:
             non_pg_stripes += len(shapes)
     return {"status": "MEASURED", "count": count,
             "by_role_layer": by_role_layer,
+            "declared_roles": sorted(declared_roles),
             "non_pg_stripes": non_pg_stripes, "source": str(path)}
+
+
+def _complete_budget_rows(budget: dict) -> list[dict] | None:
+    """A candidate needs one positive, layer-bound group count per row."""
+    rows = budget.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return None
+    layers = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        layer = row.get("layer")
+        groups = row.get("required_groups")
+        if (not isinstance(layer, str) or not layer.strip()
+                or layer.lower() in layers
+                or type(groups) is not int or groups <= 0):
+            return None
+        layers.add(layer.lower())
+    return rows
 
 
 def _measured_utilization(pnr: Path):
@@ -566,6 +596,30 @@ def main(argv=None) -> int:
         budget = floor.get("budget_pitch") or {}
     except (OSError, ValueError, AttributeError):
         budget = {}
+    if not isinstance(budget, dict):
+        budget = {}
+    policy_path = project / "input/pdn_budget_pitch_policy.json"
+    try:
+        policy_mode = json.loads(policy_path.read_text()).get("mode")
+    except (OSError, ValueError, AttributeError):
+        policy_mode = None
+    apply_requested = policy_mode == "apply" or budget.get("mode") == "apply"
+    rows = _complete_budget_rows(budget) if budget.get("verdict") == "CANDIDATE" else None
+    candidate_ready = (rows is not None and
+                       (not apply_requested or budget.get("mode") == "apply"))
+    budget_unmeasured = False
+    if apply_requested and not candidate_ready:
+        state = str(budget.get("verdict") or "MISSING")
+        reason = str(budget.get("reason") or "candidate rows or apply mode missing")
+        infeasible = state == "INFEASIBLE"
+        findings.append({
+            "severity": "FAIL" if infeasible else "NOT_MEASURED",
+            "rule": "PDN_BUDGET_PITCH_UNRESOLVED",
+            "message": f"apply policy requires a complete CANDIDATE budget_pitch; "
+                       f"planner verdict={state}: {reason}",
+        })
+        fail = fail or infeasible
+        budget_unmeasured = not infeasible
     census = _def_stripe_census(pnr)
     extra["def_stripe_census"] = census
     non_pg = census.get("non_pg_stripes", 0)
@@ -575,14 +629,12 @@ def main(argv=None) -> int:
             "message": f"ignored {non_pg} DEF STRIPE shape(s) whose net is not "
                        "declared + USE POWER or GROUND; they cannot prove a PDN grid",
         })
-    rows = budget.get("rows") or []
-    required = (2 * sum(int(row.get("required_groups") or 0) for row in rows)
-                if budget.get("verdict") == "CANDIDATE" else 2)
+    required = 2 * sum(row["required_groups"] for row in rows) if rows else 2
     shortfalls = []
-    if budget.get("verdict") == "CANDIDATE" and rows:
+    if candidate_ready:
         for row in rows:
             layer = str(row.get("layer") or "").lower()
-            groups = int(row.get("required_groups") or 0)
+            groups = row["required_groups"]
             for role in ("POWER", "GROUND"):
                 found = census.get("by_role_layer", {}).get(role, {}).get(layer, 0)
                 if found < groups:
@@ -595,7 +647,7 @@ def main(argv=None) -> int:
             if found < 1:
                 shortfalls.append(f"{role}: {found} < 1")
     if census["status"] == "MEASURED" and shortfalls:
-        blocking = budget.get("mode") == "apply"
+        blocking = apply_requested
         findings.append({
             "severity": "FAIL" if blocking else "ADVISORY",
             "rule": "PDN_DEF_STRAP_SHORTFALL",
@@ -615,13 +667,15 @@ def main(argv=None) -> int:
     # An advisory grid with no typed supply role but apparent STRIPE metal,
     # or only one typed rail, cannot be certified as a built two-rail PDN.
     role_undetermined = (census["status"] == "MEASURED"
-                         and budget.get("mode") != "apply"
+                         and not apply_requested and not candidate_ready
                          and ((non_pg > 0 and census["count"] == 0)
-                              or (census["count"] > 0
-                                  and any(v == 0 for v in role_totals.values()))))
-    verdict = "FAIL" if fail else "NOT_MEASURED" if role_undetermined else "PASS"
+                              or (census["count"] > 0 or
+                                  set(census["declared_roles"]) == {"POWER", "GROUND"})
+                              and any(v == 0 for v in role_totals.values())))
+    verdict = ("FAIL" if fail else "NOT_MEASURED"
+               if role_undetermined or budget_unmeasured else "PASS")
     _emit(args, project, verdict, findings, extra)
-    return 1 if fail else 2 if role_undetermined else 0
+    return 1 if fail else 2 if role_undetermined or budget_unmeasured else 0
 
 
 if __name__ == "__main__":
