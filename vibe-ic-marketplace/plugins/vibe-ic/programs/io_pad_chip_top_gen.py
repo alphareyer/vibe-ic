@@ -1174,6 +1174,85 @@ def resolve_supply_pad_pair(
         return pair, plan, record
 
 
+_BIT_PIN_RE = re.compile(r"^([A-Za-z_]\w*)\[(-?\d+)\]$")
+
+
+def _named_connections(inst: str, master: str,
+                       pairs: Sequence[Tuple[str, str]],
+                       bus_ports: Optional[Dict[str, Dict[str, Tuple[int, int]]]]
+                       ) -> List[str]:
+    """`.pin(net)` for each pair; the bits of one BUS become ONE connection.
+
+    A named port connection cannot select a bit (`.DM[0](x)` is not Verilog).
+    Bits of the same pin are grouped and emitted as a concatenation ordered by
+    the range the IO library's own Verilog declares (`.DM({b2,b1,b0})` for
+    `[2:0]`). A bit whose bus the PDK Verilog does not declare, or a bus only
+    partly connected, is REFUSED by name: no order is assumed and no fill
+    value is invented (this producer reads no PDK-stated default)."""
+    items: List[Tuple[str, str, str]] = []
+    groups: Dict[str, Dict[int, str]] = {}
+    for pin, net in pairs:
+        m = _BIT_PIN_RE.match(str(pin))
+        if m is None:
+            items.append(("pin", str(pin), str(net)))
+            continue
+        base, idx = m.group(1), int(m.group(2))
+        if base not in groups:
+            items.append(("bus", base, ""))
+            groups[base] = {}
+        if idx in groups[base]:
+            raise Refusal("PAD_BUS_BIT_CONNECTED_TWICE",
+                          f"{inst} ({master}): bit {pin} is connected twice")
+        groups[base][idx] = str(net)
+    out: List[str] = []
+    for kind, name, net in items:
+        if kind == "pin":
+            out.append(".%s(%s)" % (name, net))
+            continue
+        decl = (bus_ports or {}).get(master, {}).get(name)
+        if decl is None:
+            raise Refusal(
+                "PAD_BUS_PIN_UNDECLARED",
+                f"{inst} ({master}): bits {sorted(groups[name])} of pin "
+                f"{name!r} are connected, but the IO library's Verilog "
+                f"declares no range for {master}.{name}, so neither the "
+                f"width nor the bit order of the concatenation is known")
+        msb, lsb = decl
+        step = -1 if msb >= lsb else 1
+        want = list(range(msb, lsb + step, step))
+        missing = [i for i in want if i not in groups[name]]
+        extra = sorted(set(groups[name]) - set(want))
+        if missing or extra:
+            raise Refusal(
+                "PAD_BUS_PARTIALLY_CONNECTED",
+                f"{inst} ({master}): pin {name}[{msb}:{lsb}] has bits "
+                f"{sorted(groups[name])} connected; missing {missing}, outside "
+                f"the declared range {extra}. No PDK-stated default fill is "
+                f"read by this producer, so none is invented")
+        out.append(".%s({%s})" % (name, ", ".join(groups[name][i]
+                                                   for i in want)))
+    return out
+
+
+def io_bus_ports(verilog_texts: Sequence[str]
+                 ) -> Dict[str, Dict[str, Tuple[int, int]]]:
+    """Merge every IO Verilog file's bus declarations; two files that
+    declare one port with different ranges are REFUSED, never resolved by
+    file order."""
+    merged: Dict[str, Dict[str, Tuple[int, int]]] = {}
+    for text in verilog_texts:
+        for module, buses in PR.parse_verilog_bus_ports(text).items():
+            for port, rng in buses.items():
+                have = merged.setdefault(module, {}).get(port)
+                if have is not None and have != rng:
+                    raise Refusal(
+                        "PAD_BUS_DECLARATION_CONFLICT",
+                        f"the IO library's Verilog declares {module}.{port} "
+                        f"as both [{have[0]}:{have[1]}] and [{rng[0]}:{rng[1]}]")
+                merged[module][port] = rng
+    return merged
+
+
 def _emit_verilog(top: str, core: str,
                   ordered: Dict[str, List[str]],
                   chosen: Dict[str, Dict[str, object]],
@@ -1181,6 +1260,7 @@ def _emit_verilog(top: str, core: str,
                   supply_ports: Sequence[str] = (),
                   tie_cells: Optional[Dict[int, Dict[str, str]]] = None,
                   tie_liberty: str = "",
+                  bus_ports: Optional[Dict[str, Dict[str, Tuple[int, int]]]] = None,
                   ) -> str:
     """The chip-top: core instance plus one pad instance per top-level port.
 
@@ -1257,20 +1337,19 @@ def _emit_verilog(top: str, core: str,
             rec = chosen[inst]
             lines.append("    // %s edge -- %s" % (side, rec["port"]))
             if rec.get("supply_connections"):
-                conn = [".%s(%s)" % (pin, net) for pin, net in
-                        sorted(dict(rec["supply_connections"]).items())]
+                pairs = sorted(dict(rec["supply_connections"]).items())
             else:
-                conn = [".%s(%s)" % (rec["terminal"], rec["port"])]
+                pairs = [(rec["terminal"], rec["port"])]
             if rec.get("core_pin"):
-                conn.append(".%s(%s)" % (rec["core_pin"],
-                                         _core_bit(str(rec["port"]))))
+                pairs.append((rec["core_pin"], _core_bit(str(rec["port"]))))
             # Never use Verilog constants or direct POWER/GROUND nets for IO
             # control SIGNAL pins.  Constants once materialised unrouted
             # zero_/one_ nets; direct rails put these signal ITerms into
             # regular VDD/VSS NETS that neither PDN nor detailed routing
             # completed.  A PDK tie-cell output is an ordinary routed signal.
-            conn.extend(".%s(%s)" % (pin, net) for pin, net in
-                        sorted(auxiliary_signals.get(inst, {}).items()))
+            pairs.extend(sorted(auxiliary_signals.get(inst, {}).items()))
+            conn = _named_connections(inst, str(rec["master"]), pairs,
+                                      bus_ports)
             lines.append("    %s %s (%s);"
                          % (rec["master"], inst, ", ".join(conn)))
     lines.append("")
@@ -1854,9 +1933,23 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
 
     out_v = project / "phase3" / "stage3" / "pnr" / "chip_top_io.v"
     out_v.parent.mkdir(parents=True, exist_ok=True)
+    # A bussed pad pin is connected as one concatenation ordered by the IO
+    # library's own Verilog; read it only when some connection selects a bit.
+    _pins = [str(p) for r in chosen.values()
+             for p in (list((r.get("ties") or {}).keys())
+                       + list((r.get("supply_connections") or {}).keys())
+                       + [r.get("terminal") or "", r.get("core_pin") or ""])]
+    bus_ports = (io_bus_ports([x.read_text(errors="replace") for x in
+                               PR.discover_io_verilog(pdk_root, pdk)])
+                 if any(_BIT_PIN_RE.match(p) for p in _pins) else None)
+    if bus_ports is not None:
+        rec["io_bus_ports"] = {m: {p: list(r) for p, r in b.items()}
+                               for m, b in sorted(bus_ports.items())
+                               if m in {str(c.get("master")) for c in
+                                        chosen.values()}}
     out_v.write_text(_emit_verilog(top, core, ordered, chosen, ports,
                                    supply_ports, tie_cells,
-                                   str(tie_liberty or "")))
+                                   str(tie_liberty or ""), bus_ports))
 
     rec["verdict"] = "WROTE"
     rec["chip_top_module"] = top

@@ -892,6 +892,51 @@ def bond_fed_rails(subckts: Dict[str, Tuple[List[str], List[List[str]]]],
                          "through a series resistor")
 
 
+# ── BUSSED PORTS of the IO library's own Verilog ──────────────────────────
+# A LEF lists a bus bit by bit (`DM[0]`, `DM[1]`, ...) and says nothing about
+# which end is the MSB; a named connection cannot select one bit. The IO
+# library's Verilog declares the range, so it is what a concatenation is
+# ordered by.
+_V_MODULE_RE = re.compile(r"\bmodule\s+([A-Za-z_]\w*)(.*?)\bendmodule\b", re.S)
+_V_BUS_DECL_RE = re.compile(
+    r"\b(?:input|output|inout)\s+(?:(?:wire|reg|tri|logic|signed)\s+)*"
+    r"\[\s*(-?\d+)\s*:\s*(-?\d+)\s*\]\s*([A-Za-z_][\w\s,]*?)\s*(?=[;,)])")
+
+
+def discover_io_verilog(pdk_root: Optional[str] = None,
+                        pdk: Optional[str] = None, reader=None) -> List[Path]:
+    """The IO library's Verilog models, sibling `verilog/` of its `lef/`."""
+    out: Dict[str, Path] = {}
+    for lef in discover_io_lefs(pdk_root, pdk, reader=reader):
+        d = lef.parent.parent / "verilog"
+        if _ask(d, "is_dir", reader=reader):
+            for q in _ask(d, "glob", "*.v", reader=reader):
+                out.setdefault(str(q), Path(q))
+    return list(out.values())
+
+
+def parse_verilog_bus_ports(text: str) -> Dict[str, Dict[str, Tuple[int, int]]]:
+    """`{module: {port: (msb, lsb)}}` for every port declared with a constant
+    integer range. Comments and strings are blanked first; a range that is not
+    two integer literals is not read (its bits stay undeclared)."""
+    import _hdl_code_text as _hct
+    code = _hct.strip_hdl_comments_and_strings(text)
+    out: Dict[str, Dict[str, Tuple[int, int]]] = {}
+    for m in _V_MODULE_RE.finditer(code):
+        buses: Dict[str, Tuple[int, int]] = {}
+        for d in _V_BUS_DECL_RE.finditer(m.group(2)):
+            rng = (int(d.group(1)), int(d.group(2)))
+            for name in re.split(r"\s*,\s*", d.group(3).strip()):
+                if re.fullmatch(r"[A-Za-z_]\w*", name) and name not in (
+                        "input", "output", "inout"):
+                    buses.setdefault(name, rng)
+        if buses:
+            out.setdefault(m.group(1), {}).update(
+                {k: v for k, v in buses.items()
+                 if k not in out.get(m.group(1), {})})
+    return out
+
+
 _LITERAL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
 
 
