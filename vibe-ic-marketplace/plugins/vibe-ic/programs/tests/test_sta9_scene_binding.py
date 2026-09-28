@@ -1,6 +1,7 @@
 """The STA and L24 consumers bind the same STAPostPNR scene matrix."""
 import json
 
+from _hostpaths import require_repo
 from test_f15_step23_gates_read_the_tool_arm import (STA, rebind, run_gate,
                                                       tool_project)
 from test_l24_required_sta_corners import fixture as l24_fixture, run as l24_run
@@ -77,6 +78,26 @@ def test_native_stapostpnr_ws_reports_supply_historical_scene_rows(tmp_path):
     assert rc == 1 and report['rules_violated'] == ['R5_DRV_UNQUERIED'], report
     assert len(report['corners']) == 9
     assert all(r['measurement_status'] == 'MEASURED' for r in report['corners'])
+
+
+def test_historical_native_fallback_reads_real_stapostpnr_scene_reports(tmp_path):
+    source = require_repo('vibe-ic-marketplace', 'plugins', 'vibe-ic',
+                          'programs', 'tests', 'fixtures', 'librelane_import',
+                          '8HD-4', 'runs', 'cmp3', '55-openroad-stapostpnr')
+    project = tool_project(tmp_path)
+    folder = project / STA
+    for corner in json.loads((folder / 'config.json').read_text())['STA_CORNERS']:
+        for file in ('ws.max.rpt', 'ws.min.rpt', 'tns.max.rpt', 'tns.min.rpt'):
+            (folder / corner / file).write_bytes((source / corner / file).read_bytes())
+        (folder / corner / 'vibeic_signoff.rpt').unlink()
+    rebind(project)
+    rc, report = run_gate('sta_corner_record_completeness_check', project, tmp_path)
+    rows = {r['corner']: r for r in report['corners']}
+    assert rc == 1 and report['rules_violated'] == ['R5_DRV_UNQUERIED'], report
+    assert len(rows) == 9 and all(r['measurement_status'] == 'MEASURED'
+                                  for r in rows.values())
+    assert rows['max_ss_125C_4v50']['setup_wns_ns'] == 3.0357548445415716
+    assert rows['max_ss_125C_4v50']['hold_wns_ns'] == 1.5086778919839563
 
 
 def test_partial_custom_report_preserves_violation_and_marks_gap(tmp_path):

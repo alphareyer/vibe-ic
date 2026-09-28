@@ -178,6 +178,17 @@ def test_stapostpnr_receipt_binds_mounted_liberty_bytes(tmp_path, monkeypatch):
     assert receipt['input']['liberty_files'] == {guest: contract.digest(liberty)}
     assert receipt['sha256']['nom_typ/sta.log'] == contract.digest(folder / 'nom_typ/sta.log')
 
+    def drifting_tool_run(cmd, **kwargs):
+        result = tool_run(cmd, **kwargs)
+        liberty.write_text(liberty.read_text() + 'cell (changed) {}\n')
+        return result
+
+    monkeypatch.setattr(contract, 'run_container', drifting_tool_run)
+    with pytest.raises(contract.Refusal, match='LL_STA_LIBERTY_CHANGED_DURING_RUN'):
+        contract.run_chain(project, 'candidate',
+                           [('OpenROAD.STAPostPNR', config, initial)],
+                           mounts=[(pdk, '/pdk/process')], lane='drift')
+
 
 def test_stream_lane_and_synthesis_namespace_keep_separate_receipts(tmp_path, monkeypatch):
     p = design(tmp_path)
