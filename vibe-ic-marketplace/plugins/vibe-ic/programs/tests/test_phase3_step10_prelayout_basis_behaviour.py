@@ -157,6 +157,7 @@ def _fake_opensta(calls: list, fail_corners=()):
         _write(rpt,
                "Startpoint: reg_a (rising edge-triggered flip-flop)\n"
                "Endpoint: reg_b (rising edge-triggered flip-flop)\n"
+               "Path Group: clk\nPath Type: max\n\n"
                "  0.42   slack (MET)\n"
                "tns 0.00\n"
                "wns 0.00\n"
@@ -198,17 +199,24 @@ def _run_step(proj):
     return R.step_prelayout_signoff(proj, TOP, _Pdk(), "harness-container")
 
 
-def _bind_current_inputs(proj: Path) -> str:
-    """Make a healthy cached report evidence for this netlist and SDC."""
+def _bind_current_inputs(proj: Path) -> dict[str, str]:
+    """Make each healthy cached report evidence for its timed corner."""
     netlist = R._pl.synth_dir(proj) / f"{TOP}_synth.v"
     sdc = R._pl.pnr_dir(proj) / "constraint.sdc"
-    stamps = (f"STA_BASIS_NETLIST_SHA256: {R._file_sha256(netlist)}\n"
+    common = (f"STA_BASIS_NETLIST_SHA256: {R._file_sha256(netlist)}\n"
               f"STA_BASIS_SDC_SHA256: {R._file_sha256(sdc)}\n")
+    stamps = {}
+    for corner in ("SS", "TT"):
+        lib = proj / "input/pdk/liberty" / f"x__{corner.lower()}.lib"
+        stamps[corner] = (common + f"STA_BASIS_CORNER: {corner}\n"
+                          f"STA_BASIS_LIBERTY: {lib}\n"
+                          f"STA_BASIS_LIBERTY_SHA256: {R._file_sha256(lib)}\n"
+                          f"STA_BASIS_PVT_NAME: {lib.stem}\n")
     for path in (R._pl.sta_dir(proj) / "per_corner").glob("sta_*.rpt"):
-        path.write_text(path.read_text() + stamps)
+        path.write_text(path.read_text() + stamps[path.stem.removeprefix("sta_")])
     pre = R._pl.sta_dir(proj) / "pre_pnr_timing.rpt"
     if pre.is_file():
-        pre.write_text(pre.read_text() + stamps)
+        pre.write_text(pre.read_text() + stamps["SS"])
     return stamps
 
 
@@ -376,6 +384,61 @@ def test_stale_input_identity_remeasures_and_recomposes(tmp_path, monkeypatch):
     assert res.status == "PASS", (res.status, res.detail)
 
 
+def test_changed_ss_liberty_remeasures_and_rebinds_setup_gate(tmp_path, monkeypatch):
+    """A changed timing library invalidates only its corner's cached slack."""
+    calls: list = []
+    proj = _rerun_project(tmp_path, per_corner_bodies={}, pre_pnr_body=None)
+    _hermetic(monkeypatch, calls)
+    assert _run_step(proj).status == "PASS"
+    sta = R._pl.sta_dir(proj)
+    ss = sta / "per_corner" / "sta_SS.rpt"
+    old_report = ss.read_text()
+    assert calls == ["SS", "TT"]
+    import librelane_prelayout as prelayout
+    matrix = R._pl.constraints_dir(proj) / "pvt_matrix.json"
+    gate = sta / "pre_pnr_setup.json"
+    netlist = R._pl.synth_dir(proj) / f"{TOP}_synth.v"
+    sdc = R._pl.pnr_dir(proj) / "constraint.sdc"
+    assert prelayout.pre_pnr_setup_gate(
+        matrix, sta / "per_corner", gate, netlist=netlist, sdc=sdc
+    )["verdict"] == "PASS"
+    calls.clear()
+    assert _run_step(proj).status == "PASS"
+    assert calls == []
+
+    lib = proj / "input/pdk/liberty/x__ss.lib"
+    lib.write_text("library(ss){ cell(revised){} }\n")
+    assert prelayout.pre_pnr_setup_gate(
+        matrix, sta / "per_corner", gate, netlist=netlist, sdc=sdc
+    )["reason"] == "SS_REPORT_LIBERTY_IDENTITY_STALE"
+    calls.clear()
+    assert _run_step(proj).status == "PASS"
+    assert calls == ["SS"], calls
+    assert ss.read_text() != old_report
+    assert f"STA_BASIS_LIBERTY_SHA256: {R._file_sha256(lib)}" in ss.read_text()
+    assert f"STA_BASIS_LIBERTY_SHA256: {R._file_sha256(lib)}" in (
+        sta / "pre_pnr_timing.rpt").read_text()
+    assert prelayout.pre_pnr_setup_gate(
+        matrix, sta / "per_corner", gate, netlist=netlist, sdc=sdc
+    )["verdict"] == "PASS"
+
+
+def test_changed_pvt_selection_cannot_keep_step10_pass(tmp_path, monkeypatch):
+    calls: list = []
+    proj = _rerun_project(tmp_path, per_corner_bodies={}, pre_pnr_body=None)
+    _hermetic(monkeypatch, calls)
+    assert _run_step(proj).status == "PASS"
+    matrix = R._pl.constraints_dir(proj) / "pvt_matrix.json"
+    import json
+    data = json.loads(matrix.read_text())
+    next(c for c in data["corners"] if c["label"] == "SS")["name"] = "other_pvt"
+    matrix.write_text(json.dumps(data))
+    calls.clear()
+    res = _run_step(proj)
+    assert res.status != "PASS", res.detail
+    assert calls == [], "the library bytes were unchanged, so no STA is owed"
+
+
 def test_reverse_healthy_pre_layout_rerun_is_left_byte_identical(tmp_path,
                                                                  monkeypatch):
     """The over-correction this stops: quarantine/re-emit unconditionally.
@@ -393,16 +456,17 @@ def test_reverse_healthy_pre_layout_rerun_is_left_byte_identical(tmp_path,
         per_corner_bodies={"sta_SS.rpt": body, "sta_TT.rpt": body},
         pre_pnr_body=pre)
     stamps = _bind_current_inputs(proj)
-    body += stamps
-    pre += stamps
+    ss_body = body + stamps["SS"]
+    tt_body = body + stamps["TT"]
+    pre += stamps["SS"]
     _hermetic(monkeypatch, calls)
 
     res = _run_step(proj)
 
     sta = R._pl.sta_dir(proj)
     assert calls == [], f"burned an OpenSTA run on healthy reports: {calls}"
-    assert (sta / "per_corner" / "sta_SS.rpt").read_text() == body
-    assert (sta / "per_corner" / "sta_TT.rpt").read_text() == body
+    assert (sta / "per_corner" / "sta_SS.rpt").read_text() == ss_body
+    assert (sta / "per_corner" / "sta_TT.rpt").read_text() == tt_body
     assert (sta / "pre_pnr_timing.rpt").read_text() == pre
     assert not list(sta.rglob("*.stale_basis")), "quarantined a healthy report"
     assert res.status == "PASS", (res.status, res.detail)
@@ -426,8 +490,7 @@ def test_reverse_whitespace_variant_stamp_is_still_pre_layout(tmp_path,
         per_corner_bodies={"sta_SS.rpt": body, "sta_TT.rpt": body},
         pre_pnr_body=pre)
     stamps = _bind_current_inputs(proj)
-    body += stamps
-    pre += stamps
+    pre += stamps["SS"]
     _hermetic(monkeypatch, calls)
 
     res = _run_step(proj)

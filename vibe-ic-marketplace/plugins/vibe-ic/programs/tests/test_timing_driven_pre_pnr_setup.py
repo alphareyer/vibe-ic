@@ -26,9 +26,11 @@ def _path(slack: float) -> str:
 
 
 def _fixture(tmp_path: Path, slack: float) -> tuple[Path, Path, Path]:
+    liberty = tmp_path / "slow.lib"
+    liberty.write_text("library(slow){}\n")
     matrix = tmp_path / "pvt_matrix.json"
     matrix.write_text(json.dumps({"corners": [
-        {"label": "SS", "name": "slow", "liberty": "slow.lib"}]}))
+        {"label": "SS", "name": "slow", "liberty": str(liberty)}]}))
     reports = tmp_path / "per_corner"
     reports.mkdir()
     (reports / "sta_SS.rpt").write_text(_path(slack))
@@ -95,9 +97,14 @@ def test_report_must_bind_current_netlist_and_sdc(tmp_path):
         matrix, reports, output, netlist=netlist, sdc=sdc
     )["reason"] == "SS_REPORT_NETLIST_IDENTITY_STALE"
     with (reports / "sta_SS.rpt").open("a") as report:
+        lib = tmp_path / "slow.lib"
         report.write(
             f"STA_BASIS_NETLIST_SHA256: sha256:{prelayout.digest(netlist)}\n"
-            f"STA_BASIS_SDC_SHA256: sha256:{prelayout.digest(sdc)}\n")
+            f"STA_BASIS_SDC_SHA256: sha256:{prelayout.digest(sdc)}\n"
+            "STA_BASIS_CORNER: SS\n"
+            "STA_BASIS_PVT_NAME: slow\n"
+            f"STA_BASIS_LIBERTY: {lib}\n"
+            f"STA_BASIS_LIBERTY_SHA256: sha256:{prelayout.digest(lib)}\n")
     assert prelayout.pre_pnr_setup_gate(
         matrix, reports, output, netlist=netlist, sdc=sdc
     )["verdict"] == "PASS"
@@ -105,6 +112,34 @@ def test_report_must_bind_current_netlist_and_sdc(tmp_path):
     assert prelayout.pre_pnr_setup_gate(
         matrix, reports, output, netlist=netlist, sdc=sdc
     )["reason"] == "SS_REPORT_NETLIST_IDENTITY_STALE"
+
+
+def test_setup_gate_rejects_changed_liberty_or_pvt_mapping(tmp_path):
+    matrix, reports, output = _fixture(tmp_path, 0.43)
+    netlist = tmp_path / "netlist.v"
+    sdc = tmp_path / "constraints.sdc"
+    netlist.write_text("module t; endmodule\n")
+    sdc.write_text("create_clock -period 20 clk\n")
+    lib = tmp_path / "slow.lib"
+    (reports / "sta_SS.rpt").write_text(
+        _path(0.43)
+        + f"STA_BASIS_NETLIST_SHA256: sha256:{prelayout.digest(netlist)}\n"
+        + f"STA_BASIS_SDC_SHA256: sha256:{prelayout.digest(sdc)}\n"
+        + "STA_BASIS_CORNER: SS\nSTA_BASIS_PVT_NAME: slow\n"
+        + f"STA_BASIS_LIBERTY: {lib}\n"
+        + f"STA_BASIS_LIBERTY_SHA256: sha256:{prelayout.digest(lib)}\n")
+    assert prelayout.pre_pnr_setup_gate(
+        matrix, reports, output, netlist=netlist, sdc=sdc)["verdict"] == "PASS"
+    lib.write_text("library(slow){ cell(revised){} }\n")
+    assert prelayout.pre_pnr_setup_gate(
+        matrix, reports, output, netlist=netlist, sdc=sdc
+    )["reason"] == "SS_REPORT_LIBERTY_IDENTITY_STALE"
+    lib.write_text("library(slow){}\n")
+    matrix.write_text(json.dumps({"corners": [
+        {"label": "SS", "name": "different_pvt", "liberty": str(lib)}]}))
+    assert prelayout.pre_pnr_setup_gate(
+        matrix, reports, output, netlist=netlist, sdc=sdc
+    )["reason"] == "SS_REPORT_LIBERTY_IDENTITY_STALE"
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -115,14 +150,19 @@ def test_step10_black_box_blocks_both_pnr_paths(tmp_path, monkeypatch, cached):
     netlist = runner._pl.synth_dir(project) / "chip_top_synth.v"
     sdc = runner._pl.pnr_dir(project) / "constraint.sdc"
     matrix = runner._pl.constraints_dir(project) / "pvt_matrix.json"
+    lib = project / "slow.lib"
+    lib.write_text("library(slow){}\n")
     matrix.write_text(json.dumps({"corners": [
-        {"label": "SS", "name": "slow", "liberty": "slow.lib"}]}))
+        {"label": "SS", "name": "slow", "liberty": str(lib)}]}))
     reports = runner._pl.sta_dir(project) / "per_corner"
     reports.mkdir(parents=True, exist_ok=True)
     (reports / "sta_SS.rpt").write_text(
         _path(0.43)
         + f"STA_BASIS_NETLIST_SHA256: sha256:{prelayout.digest(netlist)}\n"
-        + f"STA_BASIS_SDC_SHA256: sha256:{prelayout.digest(sdc)}\n")
+        + f"STA_BASIS_SDC_SHA256: sha256:{prelayout.digest(sdc)}\n"
+        + "STA_BASIS_CORNER: SS\nSTA_BASIS_PVT_NAME: slow\n"
+        + f"STA_BASIS_LIBERTY: {lib}\n"
+        + f"STA_BASIS_LIBERTY_SHA256: sha256:{prelayout.digest(lib)}\n")
 
     # Replay a typed Step 10 producer row judged from a checked-in OpenSTA
     # black-box log. The consumer under test is the real runner main().
