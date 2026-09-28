@@ -304,7 +304,7 @@ def test_native_a6_defers_a_controlled_disagreement_and_names_the_artefact(
 
 # ── LibreLane arm, end to end, against a stub docker ──────────────────────
 STUB = r'''#!/usr/bin/env python3
-import json, os, re, sys
+import base64, json, os, re, sys
 a = sys.argv[1:]
 j = " ".join(a)
 if a[0] == "run":
@@ -323,6 +323,10 @@ if a[0] == "run":
         sys.exit(0)
     if "--entrypoint" in a and a[a.index("--entrypoint") + 1] == "cat":
         sys.stdout.write("GDSBYTES")
+        sys.exit(0)
+    if "--entrypoint" in a and a[a.index("--entrypoint") + 1] == "python3" \
+            and "base64.b64encode" in j:
+        print(base64.b64encode(b"GDSBYTES").decode())
         sys.exit(0)
     if "-c" in a and "Config.load" in a[-1]:
         src = re.search(r"p='([^']+)'", a[-1]).group(1)
