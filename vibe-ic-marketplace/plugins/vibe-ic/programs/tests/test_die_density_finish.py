@@ -245,6 +245,49 @@ def test_top_up_refuses_unreadable_placed_design_before_gds_promotion(tmp_path, 
                 'pdk_filled.topped.gds').exists()
 
 
+@pytest.mark.parametrize('odb_result', ['failed', 'truncated'])
+def test_top_up_refuses_failed_odb_census_before_fill(tmp_path, monkeypatch,
+                                                       odb_result):
+    project = tmp_path / 'project'
+    project.mkdir()
+    gds = project / 'pdk_filled.gds'
+    gds.write_bytes(b'PDK filler GDS')
+    root, config = _pdk(tmp_path)
+    routed = project / 'phase3/stage3/pnr/routed.def'
+    routed.parent.mkdir(parents=True)
+    routed.write_text('COMPONENTS 1 ; - P PAD_CELL + FIXED ( 0 0 ) N ; '
+                      'END COMPONENTS\n')
+    calls = []
+
+    def eda_write(cmd, **kwargs):
+        calls.append(cmd)
+        if 'openroad' in cmd:
+            if odb_result == 'truncated':
+                (Path(cmd[-1]).parent / 'placed_keepouts.txt').write_text(
+                    'DBU 1000\nTOTAL 1\nBOX PAD PAD_CELL 0 0 10000 8000\n'
+                    'END 2\n')
+            return SimpleNamespace(returncode=int(odb_result == 'failed'),
+                                   stdout='', stderr='')
+        Path(cmd[cmd.index('--out') + 1]).write_bytes(b'unprotected fill')
+        _put(Path(cmd[cmd.index('--report') + 1]),
+             {'verdict': 'PASS', 'layers': [{'name': 'metal1',
+                                            'density_before': .28,
+                                            'density_after': .34}]})
+        return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    monkeypatch.setattr(fill, 'run_container', eda_write)
+    refusal = None
+    try:
+        fill.top_up_density(project, 'image', root, 'processA', gds,
+                            config, f'37-{odb_result}-odb')
+    except Refusal as exc:
+        refusal = str(exc)
+    assert len(calls) == 1 and 'openroad' in calls[0]
+    assert refusal is not None and 'LL_DENSITY_FILL_PLACEMENT_UNREADABLE' in refusal
+    assert not (project / 'phase3/librelane' / f'37-{odb_result}-odb' /
+                'pdk_filled.topped.gds').exists()
+
+
 def test_density_ratios_require_every_deck_layer(tmp_path, monkeypatch):
     project = tmp_path / 'project'
     project.mkdir()
