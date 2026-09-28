@@ -1,0 +1,9 @@
+read_verilog /work/diff_gold.v
+rename top gold
+read_verilog /work/diff_gate.v
+rename top gate
+equiv_make gold gate equiv
+hierarchy -top equiv
+equiv_induct -seq 1
+write_rtlil /work/diff_equiv_induct.il
+equiv_status
