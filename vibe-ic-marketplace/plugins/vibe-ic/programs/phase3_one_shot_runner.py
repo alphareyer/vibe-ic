@@ -37787,22 +37787,53 @@ PREPNR_DISPATCH_SITE = "pnr"
 PREPNR_CANONICAL_HEAD = "15"
 
 
-def _prepnr_constraint_file(project: Path, top: str) -> Tuple[Optional[Path], str]:
+#: Step 7's own record of the SDC it authored (lane fxport,
+#: `next/claude-fx-step7-asic-sdc`: `_ppa.timing.ASIC_SDC_RECORD`).
+PREPNR_STEP7_SDC_RECORD = "asic_sdc.json"
+PREPNR_STEP7_SDC_SCHEMA = "vibe-ic/step7-asic-sdc/1"
+
+
+def _prepnr_constraint_file(project: Path, top: str,
+                            pdk_name: str) -> Tuple[Optional[Path], str]:
     """SEAM (llv1 W7a): the SDC the implementation segment reads.
 
-    This step AUTHORS NO SDC. Step 7 authors the design-intent ASIC SDC once
-    at its declared output (lane fxport, `next/claude-fx-step7-asic-sdc`:
-    `phase2/stage2/constraints/<top>.sdc`); the between-segments step READS
-    it. Until that lands, an absent file is named as the seam, never filled
-    in here.
+    This step AUTHORS NO SDC, and it does not take a file's PRESENCE as step
+    7's SDC: on main, `constraints/<top>.sdc` is also the copy
+    `step_canonicalize_artefacts` makes of step_pnr's own `constraint.sdc`
+    after a run, never refreshed -- a previous run's deck. Step 7's SDC is the
+    one step 7's RECORD names (`constraints/asic_sdc.json`, written by lane
+    fxport's step-7 producer): the record's path must exist, hash to the
+    record's sha256, and have been authored for this top and PDK. When
+    fxport lands, its `read_step7_asic_sdc` (which also binds the deck to its
+    inputs) replaces this check. Without a record the answer is
+    SDC_SEAM_PENDING -- the default flow is untouched: step_pnr still authors
+    its own SDC exactly as main does.
     """
-    path = Path(project) / "phase2" / "stage2" / "constraints" / f"{top}.sdc"
-    if path.is_file():
-        return path, f"step 7's declared SDC ({path.relative_to(project)})"
-    return None, ("SDC_SEAM_PENDING: step 7 declares "
-                  f"phase2/stage2/constraints/{top}.sdc and it is absent; the "
-                  "between-segments step reads that file and authors none "
-                  "(fxport: next/claude-fx-step7-asic-sdc)")
+    import hashlib  # noqa: PLC0415
+    rec_path = _pl.constraints_dir(project) / PREPNR_STEP7_SDC_RECORD
+    pending = ("SDC_SEAM_PENDING: no step-7 SDC record "
+               f"({rec_path.relative_to(project)}); the between-segments "
+               "step reads the SDC step 7 records and authors none "
+               "(fxport: next/claude-fx-step7-asic-sdc)")
+    try:
+        rec = json.loads(rec_path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None, pending
+    if not isinstance(rec, dict) or rec.get("schema") != PREPNR_STEP7_SDC_SCHEMA:
+        return None, f"SDC_SEAM_PENDING: {rec_path.name} is not a step-7 record"
+    path = Path(project) / str(rec.get("path") or "")
+    if not rec.get("path") or not path.is_file():
+        return None, (f"SDC_SEAM_PENDING: the step-7 SDC {rec.get('path')!r} "
+                      "the record names is absent")
+    text = path.read_text(errors="replace")
+    if hashlib.sha256(text.encode("utf-8")).hexdigest() != rec.get("sha256"):
+        return None, (f"SDC_SEAM_PENDING: the step-7 SDC {rec.get('path')} "
+                      "changed after step 7 recorded it")
+    if rec.get("top") != top or rec.get("pdk") != pdk_name:
+        return None, (f"SDC_SEAM_PENDING: the step-7 SDC was authored for top "
+                      f"{rec.get('top')!r} / PDK {rec.get('pdk')!r}, not "
+                      f"{top!r} / {pdk_name!r}")
+    return path, f"step 7's recorded SDC ({rec.get('path')})"
 
 
 def step_prepnr(project: Path, top: str, pdk: PdkConfig, container: str,
@@ -37813,25 +37844,43 @@ def step_prepnr(project: Path, top: str, pdk: PdkConfig, container: str,
 
     llv1 W7a: the chip-top producer (`_padring_producer_dispatch`, the same
     dispatch `step_pnr` makes), the step-7 SDC it reads (a seam, see
-    `_prepnr_constraint_file`), the pad assignment (`step_pad_assignment`,
-    when the chip path requests a ring) and the die/core floorplan with its
-    record (`_prepnr_floorplan`) -- the same code the default flow runs inside
-    `step_pnr`, in the same order. Callable in the default mode too; the
-    default flow does not dispatch it (it runs the pieces in `step_pnr`).
+    `_prepnr_constraint_file`), the die/core floorplan with its record
+    (`_prepnr_floorplan`) and, when the chip path requests a ring, the pad
+    assignment (`step_pad_assignment`) -- in `step_pnr`'s order: the producer,
+    then the die and its record, then the pad-ring work (whose first program
+    is the assignment). Callable in the default mode too; the default flow
+    does not dispatch it (it runs the pieces in `step_pnr`).
+
+    A chip-top producer that did not PASS on a chip path requesting a ring
+    stops the step with its own verdict: step_pnr's pad-ring gate turns that
+    producer's FAIL red too, and nothing after this step would.
     """
     t0 = time.time()
+    set_invocation_provenance_sink(project)
     netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
     if not netlist.is_file():
         return StepResult("prepnr", "FAIL", time.time() - t0,
                           f"synth netlist missing: {netlist}")
     extras: Dict[str, Any] = {"netlist": str(netlist)}
+    ring = _chip_path_requests_pad_ring(project)
     padring = _padring_producer_dispatch(
         project, container, pdk,
         supply_plan=(em_floor_for_resize or {}).get("supply_entry_plan"))
     extras["chip_top"] = {"status": padring.status, "detail": padring.detail}
-    sdc, sdc_why = _prepnr_constraint_file(project, top)
+    if ring and padring.status != _V.Verdict.PASS.value:
+        return StepResult("prepnr", padring.status, time.time() - t0,
+                          f"chip-top producer: {padring.detail}",
+                          extras=extras,
+                          reason_class=getattr(padring, "reason_class", ""))
+    sdc, sdc_why = _prepnr_constraint_file(project, top, str(pdk.name))
     extras["sdc"] = {"path": str(sdc) if sdc else None, "basis": sdc_why}
-    if _chip_path_requests_pad_ring(project):
+    fp = _prepnr_floorplan(project, top, pdk, container, die_um, util,
+                           netlist, t0)
+    if isinstance(fp, StepResult):
+        return StepResult("prepnr", fp.status, time.time() - t0, fp.detail,
+                          extras=extras, reason_class=fp.reason_class)
+    extras["floorplan"] = asdict(fp)
+    if ring:
         assign = step_pad_assignment(project, container, pdk)
         extras["pad_assignment"] = {"status": assign.status,
                                     "detail": assign.detail}
@@ -37839,12 +37888,6 @@ def step_prepnr(project: Path, top: str, pdk: PdkConfig, container: str,
             return StepResult("prepnr", assign.status, time.time() - t0,
                               f"pad assignment: {assign.detail}",
                               extras=extras, reason_class=assign.reason_class)
-    fp = _prepnr_floorplan(project, top, pdk, container, die_um, util,
-                           netlist, t0)
-    if isinstance(fp, StepResult):
-        return StepResult("prepnr", fp.status, time.time() - t0, fp.detail,
-                          extras=extras, reason_class=fp.reason_class)
-    extras["floorplan"] = asdict(fp)
     status = (_V.Verdict.PASS.value if sdc is not None
               else _V.Verdict.NOT_MEASURED.value)
     return StepResult(

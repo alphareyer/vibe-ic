@@ -110,7 +110,8 @@ def staged(monkeypatch, tmp_path):
 
     def _padring(project, container, pdk, supply_plan=None):
         order.append("chip_top")
-        return r.StepResult("io_pad_chip_top_gen", "PASS", 0.0, "ok")
+        return r.StepResult("io_pad_chip_top_gen", state.chip_top, 0.0, "ct",
+                            reason_class=state.chip_top_reason)
 
     def _assign(project, container, pdk):
         order.append("pad_assignment")
@@ -127,7 +128,10 @@ def staged(monkeypatch, tmp_path):
             ring_pinned_die=False, seal_rec={}, slot=None,
             strap_floor_detail={}, strap_floor_um=None, ct03_pin_rect=None)
 
-    state = SimpleNamespace(assign="PASS", fp_fail=False, ring=True)
+    state = SimpleNamespace(assign="PASS", fp_fail=False, ring=True,
+                            chip_top="PASS", chip_top_reason="")
+    monkeypatch.setattr(r, "set_invocation_provenance_sink",
+                        lambda p: order.append("provenance_sink"))
     monkeypatch.setattr(r, "_padring_producer_dispatch", _padring)
     monkeypatch.setattr(r, "step_pad_assignment", _assign)
     monkeypatch.setattr(r, "_prepnr_floorplan", _floorplan)
@@ -137,13 +141,31 @@ def staged(monkeypatch, tmp_path):
 
 
 def _run(st):
-    return st.r.step_prepnr(st.project, "top", SimpleNamespace(), "c",
-                            "auto", 0.4)
+    return st.r.step_prepnr(st.project, "top", SimpleNamespace(name="gf180mcuD"),
+                            "c", "auto", 0.4)
+
+
+def _step7_record(project, *, name="top.asic.sdc", top="top",
+                  pdk="gf180mcuD", text="create_clock -period 10 [get_ports clk]\n"):
+    import hashlib
+    import json
+    d = project / "phase2" / "stage2" / "constraints"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(text)
+    (d / "asic_sdc.json").write_text(json.dumps({
+        "schema": "vibe-ic/step7-asic-sdc/1", "step": 7, "top": top,
+        "pdk": pdk, "path": f"phase2/stage2/constraints/{name}",
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}))
+    return d / name
 
 
 def test_prepnr_runs_the_pieces_in_step_pnrs_order(staged):
+    """step_pnr's order: the provenance sink, the chip-top producer, the die
+    and its record, then the pad-ring work (whose first program is the
+    assignment) -- review wave8 caught the assignment ahead of the floorplan."""
     res = _run(staged)
-    assert staged.order == ["chip_top", "pad_assignment", "floorplan"]
+    assert staged.order == ["provenance_sink", "chip_top", "floorplan",
+                            "pad_assignment"]
     assert res.status == "NOT_MEASURED"                  # no step-7 SDC yet
     assert "SDC_SEAM_PENDING" in res.detail
     assert res.extras["floorplan"]["die_w"] == 100
@@ -151,28 +173,73 @@ def test_prepnr_runs_the_pieces_in_step_pnrs_order(staged):
     assert not list(staged.project.rglob("constraint.sdc"))
 
 
-def test_prepnr_reads_step_7s_sdc(staged):
-    sdc = staged.project / "phase2" / "stage2" / "constraints" / "top.sdc"
-    sdc.parent.mkdir(parents=True)
-    sdc.write_text("create_clock -period 10 [get_ports clk]\n")
+def test_prepnr_reads_step_7s_sdc_by_its_record(staged):
+    sdc = _step7_record(staged.project)
     res = _run(staged)
     assert res.status == "PASS"
     assert res.extras["sdc"]["path"] == str(sdc)
     assert sdc.read_text() == "create_clock -period 10 [get_ports clk]\n"
 
 
+def test_a_canonicalized_copy_without_a_record_is_not_step_7s(staged):
+    """Review wave8 MAJOR: on main, constraints/<top>.sdc is also the copy
+    step_canonicalize_artefacts makes of step_pnr's own constraint.sdc -- a
+    previous run's deck. Its presence proves nothing."""
+    d = staged.project / "phase2" / "stage2" / "constraints"
+    d.mkdir(parents=True)
+    (d / "top.sdc").write_text("create_clock -period 20 [get_ports clk]\n")
+    res = _run(staged)
+    assert res.status == "NOT_MEASURED" and res.extras["sdc"]["path"] is None
+    assert "SDC_SEAM_PENDING" in res.detail
+
+
+@pytest.mark.parametrize("damage", ["sha", "top", "pdk", "schema", "absent"])
+def test_a_step7_record_that_does_not_hold_is_pending(staged, damage):
+    import json
+    sdc = _step7_record(staged.project,
+                        top="other" if damage == "top" else "top",
+                        pdk="sky130A" if damage == "pdk" else "gf180mcuD")
+    rec = sdc.parent / "asic_sdc.json"
+    if damage == "sha":
+        sdc.write_text(sdc.read_text() + "# edited\n")
+    if damage == "schema":
+        rec.write_text(json.dumps({**json.loads(rec.read_text()),
+                                   "schema": "x"}))
+    if damage == "absent":
+        sdc.unlink()
+    res = _run(staged)
+    assert res.status == "NOT_MEASURED" and "SDC_SEAM_PENDING" in res.detail
+
+
+@pytest.mark.parametrize("status,reason", [("FAIL", ""),
+                                           ("NOT_MEASURED", "tool_absent")])
+def test_a_chip_top_that_did_not_pass_stops_a_ring_path(staged, status, reason):
+    """Review wave8 MAJOR: the producer's verdict is the step's when the chip
+    path requests a ring, as step_pnr's pad-ring gate makes it."""
+    staged.state.chip_top, staged.state.chip_top_reason = status, reason
+    _step7_record(staged.project)
+    res = _run(staged)
+    assert (res.status, res.reason_class) == (status, reason)
+    assert staged.order == ["provenance_sink", "chip_top"]
+    staged.order.clear()
+    staged.state.ring = False                  # no ring requested: not a gate
+    assert _run(staged).status == "PASS"
+
+
 def test_prepnr_refusals_stop_it(staged):
     staged.state.assign = "FAIL"
     assert _run(staged).status == "FAIL"
-    assert staged.order == ["chip_top", "pad_assignment"]
+    assert staged.order == ["provenance_sink", "chip_top", "floorplan",
+                            "pad_assignment"]
     staged.order.clear()
     staged.state.assign, staged.state.fp_fail = "PASS", True
     res = _run(staged)
     assert res.status == "FAIL" and "PDN_CORE_TOO_SMALL" in res.detail
+    assert staged.order == ["provenance_sink", "chip_top", "floorplan"]
     staged.order.clear()
     staged.state.fp_fail, staged.state.ring = False, False
     _run(staged)
-    assert staged.order == ["chip_top", "floorplan"]     # no ring, no assignment
+    assert staged.order == ["provenance_sink", "chip_top", "floorplan"]
 
 
 def test_the_default_flow_and_the_step_run_the_same_code():
