@@ -27,6 +27,7 @@ all under phase 1's own `ProducerRecorder`. chip-AGNOSTIC.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import subprocess
 import sys
@@ -40,6 +41,8 @@ if str(PROGRAMS) not in sys.path:
 
 import _step_identity as SI  # noqa: E402
 import vibe_ic_one_shot_runner as ORCH  # noqa: E402
+import phase1_expert_parse_track as TRACK  # noqa: E402
+from _hostpaths import require_repo  # noqa: E402
 
 try:                                   # absent on the unfixed tree
     import _phase1_producer_identity as PID  # noqa: E402
@@ -150,6 +153,55 @@ def test_docs_written_by_an_older_producer_are_regenerated(tmp_path,
     src.write_text(src.read_text() + "\n# the producer fix lands\n")
     assert _decide(proj, plug, monkeypatch) == (True, "docs")
     assert _fresh(proj, plug)["reason"] == "PRODUCER_CHANGED"
+
+
+def test_producer_change_precedes_unread_expert_answer_and_archives_its_pack(
+        tmp_path, monkeypatch):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    pack = proj / "reports/audit/phase1/expert_parse_track_pack"
+    pack.mkdir(parents=True)
+    (pack / "l_doc_expectations.json").write_text('{"expectations": []}')
+    (pack / "ic_expert_agent_handoff.json").write_text('{"role": "expert"}')
+    src = plug / "programs/fake_l_producer.py"
+    src.write_text(src.read_text() + "\n# revised producer\n")
+    # The old decision consumed the delivered answer before checking whether
+    # its L-doc root would be regenerated.
+    assert _decide(proj, plug, monkeypatch) == (True, "docs")
+    archive = PID.supersede_docs(proj, "PRODUCER_CHANGED")
+    assert archive is not None
+    assert (archive / "expert_parse_track_pack/l_doc_expectations.json").is_file()
+    assert not pack.exists()
+
+
+def test_real_l_doc_flow_rewrite_refuses_the_old_expert_reading(
+        tmp_path, monkeypatch):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    # Exercise a checked-in L document, not a schema invented by this test.
+    source = require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
+        "fixtures", "a9_cosim_scenarios", "phase1", "generated_docs",
+        "L1_DATASHEET.json")
+    doc = proj / "phase1/generated_docs/L1_DATASHEET.json"
+    doc.write_bytes(source.read_bytes())
+    assert PID.record_derivation(
+        proj, doc.name, hashlib.sha256(doc.read_bytes()).hexdigest(),
+        "flow-fixture")
+    report = proj / "reports/audit/phase1/expert_parse_track.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({
+        "phase1_root": TRACK.phase1_root_identity(proj),
+        "ai_subtrack": {"status": "CONSUMED", "answer_sha256": "0" * 64},
+    }))
+    doc.write_bytes(doc.read_bytes() + b"\n")
+    assert PID.record_derivation(
+        proj, doc.name, hashlib.sha256(doc.read_bytes()).hexdigest(),
+        "flow-fixture")
+    assert _fresh(proj, plug)["state"] == PID.REUSE
+    assert _decide(proj, plug, monkeypatch) == (
+        False, "refused_stale_expert_reading")
+    assert "EXPERT_ROOT_CHANGED" in ORCH._expert_root_stale(proj)
 
 
 def test_docs_with_no_producer_identity_are_regenerated(tmp_path,
