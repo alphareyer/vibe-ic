@@ -1283,3 +1283,19 @@ def answer(doc: Dict[str, Any], key: str) -> Any:
     if key in OWNER_ANSWERED and not attestation_of(doc, key)["declares"]:
         return NOT_DETERMINED
     return v
+
+
+def read_owner_delivery(project: Path, rel: str) -> Tuple[Dict[str, Any], str]:
+    """Read the owner-attested route used by Phase 3 and both front doors.
+
+    An unattested value is NOT_DETERMINED through ``answer``. Keep this one
+    predicate for raw design answers and the generated declaration.
+    """
+    doc, err = load(project / rel)
+    if (err or not isinstance(doc, dict)
+            or not isinstance(doc.get("answers"), dict)):
+        raise ValueError(f"{rel}: {err or 'invalid answer mapping'}")
+    delivery = str(answer(doc, "deliverable")).strip().upper()
+    if delivery not in DELIVERABLES:
+        raise ValueError(f"{rel}: no owner-attested DIE or HARDMACRO answer")
+    return doc, delivery

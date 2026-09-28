@@ -1,8 +1,10 @@
 ---
 name: vibe-ic-phase1
 description: Run Phase 1 (natural-language → L1-L27 JSON + human MD) via the deterministic phase1_one_shot_runner. AI-monitored + close-loop.
-argument-hint: <project-dir> [--ic-name <name>]
+argument-hint: <project-dir> [--route ic|ip] [--ic-name <name>]
 ---
+**First: IC path or IP path?** Read [IC Expert § 0.0](../agents/ic-expert-agent.md) before Phase 1. Use the prompt's route or ask the operator if unclear; record the owner answer in `input/step_0_5ic_answers.json`. Pass `--route ic` or `--route ip` when stating it on this command.
+
 > **Missing arg?** When `$ARGUMENTS` is empty, prompt the user first:
 > `/vibe-ic-phase1 <project-dir>` (e.g. `/vibe-ic-phase1 1st_benchmark_example/phase2_v0119.48-vendor`).
 > The AI must NOT guess the path; a concrete project path is required before continuing.

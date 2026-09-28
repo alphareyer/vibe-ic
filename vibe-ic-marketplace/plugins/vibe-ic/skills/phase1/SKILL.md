@@ -5,6 +5,8 @@ description: Phase 1 = the **prompt / dialogue entry point** to the Vibe-IC plat
 
 # Phase 1 — prompt / dialogue entry point
 
+**First: IC path or IP path?** Read [IC Expert § 0.0](../../agents/ic-expert-agent.md) before Phase 1. Decide from the prompt or ask the person running it when neither or both routes are stated; record the owner answer with its quotation in `input/step_0_5ic_answers.json`.
+
 This is **one of two entry points** to the Vibe-IC platform. See "Two
 entry points" below for the complete picture.
 

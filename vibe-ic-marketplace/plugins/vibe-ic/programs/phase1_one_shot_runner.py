@@ -68,6 +68,7 @@ import _path_layout as _pl
 import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _runner_lock  # ORGANIC #588 — single-driver lock (all 4 runners)
+import _delivery_route
 import _watchdog as _wd  # progress supervision — never a runtime bound
 import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch site
 # THE L-document write chokepoint — records the producing release on the
@@ -1469,6 +1470,7 @@ def run_second_pass_only(project: Path, ic_name: str) -> int:
             f"UNREADABLE — the pass-1 record could not be carried forward "
             f"({exc}); this file now describes the second pass ONLY")
         carried = False
+    summary.update(_delivery_route.report_label(project))
     # Freeze the extraction/route outcome independently of replaceable expert
     # retries. Old second-pass FAIL summaries cannot tell which pass failed;
     # retain that uncertainty instead of manufacturing a successful extraction.
@@ -1681,6 +1683,9 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("project", type=Path)
     p.add_argument("--ic-name", default="UNNAMED_CHIP")
+    p.add_argument("--route", choices=("ic", "ip"),
+                   help="Owner-stated delivery route: ic=DIE, ip=HARDMACRO. "
+                        "Required unless already owner-declared in this project.")
     p.add_argument("--mode",
                    choices=REQUESTABLE_MODES,
                    default="auto",
@@ -1718,6 +1723,11 @@ def main() -> int:
     _lock = _runner_lock.acquire_or_reenter(project, "phase1_one_shot_runner")
     if _lock is None:
         return 3
+    route_refusal = _delivery_route.admit(project, args.route)
+    if route_refusal:
+        print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
+        _lock.release()
+        return 2
 
     # #2204 — the expert second pass short-circuits EVERYTHING below. Step
     # 0.5ic and D1 both already ran in the pass that emitted the hand-off;
@@ -1796,6 +1806,7 @@ def main() -> int:
             "phase": 1,
             "mode": "docs",
             "project": str(project),
+            **_delivery_route.report_label(project),
             "ic_name": args.ic_name,
             "delegated_to": "phase1_doc_one_shot_runner",
             "delegated_rc": rc_extract,
@@ -1904,6 +1915,7 @@ def main() -> int:
     summary = {
         "phase": 1,
         "mode": mode,
+        **_delivery_route.report_label(project),
         "mode_requested": args.mode,
         "mode_detected": detected,
         "mode_redirect": mode_redirect,

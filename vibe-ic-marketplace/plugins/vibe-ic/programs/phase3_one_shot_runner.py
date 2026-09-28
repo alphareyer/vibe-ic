@@ -47969,20 +47969,10 @@ def _delivery_admission_refusal(project: Path) -> Optional[str]:
     import _submission_template as _st                         # noqa: PLC0415
     import _tapeout_declaration as _td                          # noqa: PLC0415
 
-    def read_delivery(rel: str) -> Tuple[Dict[str, Any], str]:
-        doc, err = _td.load(project / rel)
-        if (err or not isinstance(doc, dict)
-                or not isinstance(doc.get("answers"), dict)):
-            raise ValueError(f"{rel}: {err or 'invalid answer mapping'}")
-        answer = str(_td.answer(doc, "deliverable")).strip().upper()
-        if answer not in _td.DELIVERABLES:
-            raise ValueError(f"{rel}: no owner-attested DIE or HARDMACRO answer")
-        return doc, answer
-
     try:
-        declaration, delivery = read_delivery(_td.DECLARATION_REL)
+        declaration, delivery = _td.read_owner_delivery(project, _td.DECLARATION_REL)
         if (project / _st.DESIGN_ANSWERS_REL).exists():
-            raw, current = read_delivery(_st.DESIGN_ANSWERS_REL)
+            raw, current = _td.read_owner_delivery(project, _st.DESIGN_ANSWERS_REL)
             if (current != delivery or
                     _td.attestation_of(raw, "deliverable") !=
                     _td.attestation_of(declaration, "deliverable")):

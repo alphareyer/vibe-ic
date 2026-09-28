@@ -80,7 +80,7 @@ _RUN_TIMEOUT_S = 60
 def _run(args: list,
          timeout: int = _RUN_TIMEOUT_S) -> subprocess.CompletedProcess:
     return _pr.run(
-        [sys.executable, str(PROG)] + args,
+        [sys.executable, str(PROG)] + args + ["--route", "ic"],
         capture_output=True, text=True)
 
 
@@ -213,6 +213,7 @@ def test_integration_report_shape(tmp_path):
         _phase1_report(project).read_text())
     for k in ("phase", "project", "ic_name", "steps", "verdict"):
         assert k in body, f"missing key {k} in report"
+    assert (body["delivery_route"], body["deliverable"]) == ("IC", "DIE")
     assert body["ic_name"] == "TST_CHIP"
     assert isinstance(body["steps"], list)
     assert len(body["steps"]) >= 2  # ingest + human_docs

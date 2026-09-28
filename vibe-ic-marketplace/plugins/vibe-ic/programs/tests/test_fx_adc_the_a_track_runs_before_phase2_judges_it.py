@@ -32,12 +32,17 @@ if str(PROGRAMS) not in sys.path:
     sys.path.insert(0, str(PROGRAMS))
 
 import vibe_ic_one_shot_runner as orch  # noqa: E402
+import _owner_declared as OD  # noqa: E402
+import _submission_template as ST  # noqa: E402
 
 
 def _drive(tmp_path: Path, monkeypatch, *, need_analog: bool,
            verdicts: dict) -> dict:
     project = tmp_path / "proj"
     project.mkdir()
+    answers = project / ST.DESIGN_ANSWERS_REL
+    answers.parent.mkdir(parents=True)
+    answers.write_text(json.dumps(OD.attest({"answers": {"deliverable": "DIE"}})))
     cap = {"order": []}
 
     def fake_run_phase(label, runner, args, env=None):

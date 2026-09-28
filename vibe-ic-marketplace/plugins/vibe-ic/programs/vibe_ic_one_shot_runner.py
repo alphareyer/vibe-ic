@@ -60,6 +60,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 
 import argparse
+import _delivery_route
 import hashlib
 import json
 import os
@@ -1483,6 +1484,9 @@ def main() -> int:
                         "DISPATCHED STEPS ONLY; whole-flow verdicts come from "
                         "--refresh-only or an unbounded run.")
     p.add_argument("--skip-phase1", action="store_true")
+    p.add_argument("--route", choices=("ic", "ip"),
+                   help="Owner-stated delivery route: ic=DIE, ip=HARDMACRO. "
+                        "Required unless already owner-declared in this project.")
     p.add_argument("--skip-analog", action="store_true")
     p.add_argument("--skip-phase3", action="store_true")
     p.add_argument("--die-um", default="auto",
@@ -1565,6 +1569,13 @@ def main() -> int:
     lock = _runner_lock.acquire_or_reenter(project, "vibe_ic_one_shot_runner")
     if lock is None:
         return 3
+    # The route is an owner decision. Refuse before image capture, dashboard,
+    # Phase 1, or any other producer can create a misleading partial run.
+    route_refusal = _delivery_route.admit(project, args.route)
+    if route_refusal:
+        print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
+        lock.release()
+        return 2
     # ---------------- Container IMAGE provenance (capture always) ----------
     # Every containerised step downstream is dispatched as
     # `docker exec <container> ...`, so `--container` selects a CONTAINER and
@@ -1757,6 +1768,7 @@ def main() -> int:
         phase3_verdict = p3.get("verdict", "NOT_MEASURED")
         p3_stale = p3.get("stale_downstream") or {}
         summary = {"program": "vibe_ic_one_shot_runner", "bounded": bool(p3),
+                   **_delivery_route.report_label(project),
                    "declared_window": {"entry_step": args.entry_step,
                                        "exit_step": args.exit_step,
                                        "entry_runner": _entry_runner},
@@ -2388,6 +2400,7 @@ def main() -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps({
             "program": "vibe_ic_one_shot_runner", "bounded": False,
+            **_delivery_route.report_label(project),
             "window_requested": {"entry_step": args.entry_step,
                                  "exit_step": args.exit_step},
             "verdict": "NOT_MEASURED",
@@ -2408,6 +2421,7 @@ def main() -> int:
         window_verdict = p3_window.get("verdict", "NOT_MEASURED")
         summary = {
             "program": "vibe_ic_one_shot_runner", "bounded": True,
+            **_delivery_route.report_label(project),
             "declared_window": {"entry_step": args.entry_step,
                                 "exit_step": args.exit_step,
                                 "entry_runner": _entry_runner},
@@ -2534,6 +2548,7 @@ def main() -> int:
     summary = {
         "phase": "vibe-ic",
         "project": str(project),
+        **_delivery_route.report_label(project),
         "duration_s": time.time() - t0,
         "halted_at": halted_at or None,
         "phases": [{"name": n, "verdict": v, "rc": rc} for n, v, rc in plan],
