@@ -149,7 +149,13 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
             r"Found\s+(\d+)\s+(?:partially\s+)?unannotated\s+(?:drivers|nets)",
             annotation)
         row = dict(scene)
+        # A plan is only a request for measurement. It cannot attest which
+        # pins OpenSTA excluded from its own DRV checks.
+        row.pop("excluded_pins", None)
+        row.pop("excluded_pins_recorded", None)
+        row.pop("excluded_pins_report", None)
         row.update(fresh_process=True, postroute=True, propagated_clocks=True,
+                   excluded_pins_recorded=False,
                    command=_COMMAND, all_limits_max_count=max_count,
                    positive_control_fresh_process=True,
                    counters=counts, positive_control_counters=control_counts,

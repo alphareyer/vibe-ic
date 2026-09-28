@@ -22,6 +22,9 @@ def _synthetic_scene_profile(tmp_path, monkeypatch):
     path = tmp_path / "scene_profiles.json"
     path.write_text(json.dumps(profiles))
     monkeypatch.setattr(drv, "_SCENE_PROFILES", path)
+    monkeypatch.setattr(drv, "_installed_image_digest",
+                        lambda image: "sha256:" + "a" * 64
+                        if image == "synthetic:test" else None)
 
 
 def _file(root: Path, name: str, body: str) -> dict:
@@ -48,6 +51,20 @@ def _report(*, fanout=1, fanout_limit=4, cap=.1, cap_limit=.2,
                           ("(VIOLATED)" if slack < 0 else "(MET)") + "\n"))
         parts.append("\n")
     return "".join(parts)
+
+
+def _refresh_scripts(bundle: dict, root: Path) -> None:
+    scene = bundle["scenes"][0]
+    reads = "".join(
+        f"read_liberty {{{item['path']}}}\n"
+        for item in scene["linked_liberties"])
+    reads += (f"read_verilog {{{bundle['identity']['artifacts']['sta_netlist']['path']}}}\n"
+              f"read_sdc {{{bundle['current']['sources']['signoff_sdc']['path']}}}\n"
+              f"read_spef {{{scene['spef']['path']}}}\n")
+    scene["tool_scripts"] = [
+        _file(root, "measure.tcl", reads + drv._COMMAND + "\n"),
+        _file(root, "control.tcl", reads +
+              "set_max_fanout 1 [current_design]\n" + drv._COMMAND + "\n")]
 
 
 def _bundle(tmp_path: Path) -> dict:
@@ -125,6 +142,7 @@ def _bundle(tmp_path: Path) -> dict:
              "propagated_clocks": True,
              "clock_properties": _file(tmp_path, "clocks.rpt", "propagated\n"),
              "excluded_pins_recorded": True, "excluded_pins": [],
+             "excluded_pins_report": _file(tmp_path, "excluded.json", "[]"),
              "spef": _file(tmp_path, "x.spef", "SPEF\n"),
              "rc_corner": "nom", "spef_layout_sha256": layout["sha256"],
              "liberty": "std", "liberty_header_match": True,
@@ -150,11 +168,13 @@ def _bundle(tmp_path: Path) -> dict:
             "rc_corner": "nom",
             "extraction_command_sha256": "a" * 64}))
     digest = netlist["sha256"]
-    return {"identity": {"run_id": "run-1", "tree_sha": "tree-a",
+    bundle = {"identity": {"run_id": "run-1", "tree_sha": "tree-a",
              "project": str(tmp_path), "pdk": "synthetic", "library": "logic",
              "spec_version": "contract-a", "sta_netlist": digest,
              "lvs_netlist": digest, "gds_netlist": digest,
              "artifacts": artifacts,
+             "tool_image": "synthetic:test",
+             "tool_image_digest": "sha256:" + "a" * 64,
              "openroad_commit": "tool-a", "opensta_commit": "tool-b",
              "pdk_commit": "pdk-a"},
             "frozen": frozen, "current": current, "stages": stages,
@@ -164,6 +184,8 @@ def _bundle(tmp_path: Path) -> dict:
                 "driver_cell": "logic", "loads": {"logical": 1,
                                                  "antenna_diode": 0, "cts_buffer": 0}}},
             "waiver_ledger": []}
+    _refresh_scripts(bundle, tmp_path)
+    return bundle
 
 
 def _violate(bundle: dict, root: Path, kind: str, *, value: float,
@@ -183,6 +205,7 @@ def _violate(bundle: dict, root: Path, kind: str, *, value: float,
     bundle["pins"]["u/Y"].update(net_class=net_class, cell_class=cell_class)
     if net_class == "clock":
         scene["clock_network_pins"] = ["u/Y"]
+    _refresh_scripts(bundle, root)
 
 
 def _owner_waiver(bundle: dict, root: Path, row: dict) -> dict:
@@ -535,8 +558,12 @@ def test_consumer_preserves_waived_word_and_owner_row(tmp_path, monkeypatch):
     _file(tmp_path, "reports/phase3/sta/drv_capture_plan.json", "{}")
     monkeypatch.setattr(capture, "capture", lambda *a, **k: bundle)
     def run_judge(cmd, **kwargs):
-        rc = drv.main([str(tmp_path), "--json", cmd[-1]])
-        return subprocess.CompletedProcess(cmd, rc, "", "")
+        # A separately verified judge receipt is the consumer's contract.
+        Path(cmd[-1]).write_text(json.dumps({
+            "name": "DRV(tran/cap/fanout)", "verdict": "WAIVED",
+            "waived": [{"key": {"driver_pin": "u/Y"},
+                        "below_baseline_quality": True}]}))
+        return subprocess.CompletedProcess(cmd, 1, "", "")
     monkeypatch.setattr(runner._pr, "run", run_judge)
     source = tmp_path / "reports/phase3/sta/drv_signoff_bundle.json"
     source.parent.mkdir(parents=True, exist_ok=True)
@@ -575,8 +602,11 @@ def test_flow_step_refuses_unsigned_owner_ledger(tmp_path):
     assert result.status == "FAIL"
 
 
-def test_step32_rechecks_final_state_identity_after_late_repair(tmp_path):
+def test_step32_rechecks_final_state_identity_after_late_repair(tmp_path, monkeypatch):
     import librelane_postroute_repair as repair
+    monkeypatch.setattr(drv, "judge", lambda *a, **k: {
+        "name": "DRV(tran/cap/fanout)", "verdict": "PASS",
+        "failures": [], "not_measured": []})
     bundle = _bundle(tmp_path)
     source = tmp_path / "reports/phase3/sta/drv_signoff_bundle.json"
     source.parent.mkdir(parents=True)
@@ -624,6 +654,28 @@ def test_clean_tool_flag_cannot_hide_wider_cap_limit(tmp_path):
                for error in result["failures"])
 
 
+def test_tool_script_cannot_link_an_unrecorded_sdc(tmp_path):
+    bundle = _bundle(tmp_path)
+    script = Path(bundle["scenes"][0]["tool_scripts"][0]["path"])
+    bad = script.read_text().replace(
+        bundle["current"]["sources"]["signoff_sdc"]["path"],
+        str(tmp_path / "substitute.sdc"))
+    bundle["scenes"][0]["tool_scripts"][0] = _file(
+        tmp_path, "measure.tcl", bad)
+    result = drv.judge(bundle)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert any("STA tool script reads" in reason
+               for reason in result["not_measured"])
+
+
+def test_bundle_image_digest_must_match_installed_image(tmp_path):
+    bundle = _bundle(tmp_path)
+    bundle["identity"]["tool_image_digest"] = "sha256:" + "b" * 64
+    result = drv.judge(bundle)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert any("image digest" in reason for reason in result["not_measured"])
+
+
 def test_control_expected_is_recomputed_from_real_population(tmp_path):
     bundle = _bundle(tmp_path)
     # Fanout one is part of the all-limits census but cannot violate limit one.
@@ -645,6 +697,29 @@ def test_partially_unannotated_drivers_block_a_clean_verdict(tmp_path):
     result = drv.judge(bundle)
     assert result["verdict"] == "NOT_MEASURED"
     assert any("unannotated" in reason for reason in result["not_measured"])
+
+
+def test_excluded_constant_driver_is_rejudged_from_raw_values(tmp_path):
+    bundle = _bundle(tmp_path)
+    bundle["pins"]["u/Y"]["net_class"] = "constant"
+    excluded = [{"pin": "u/Y", "reason": "constant", "fanout": 5,
+                 "cap_pf": .1, "slew_rise_ns": .1, "slew_fall_ns": .1}]
+    bundle["scenes"][0]["excluded_pins"] = excluded
+    bundle["scenes"][0]["excluded_pins_report"] = _file(
+        tmp_path, "excluded.json", json.dumps(excluded))
+    result = drv.judge(bundle)
+    assert result["verdict"] == "FAIL"
+    assert any(row["pin"] == "u/Y" and row["excluded_reason"] == "constant"
+               for row in result["findings"])
+
+
+def test_plan_exclusion_without_tool_report_is_unmeasured(tmp_path):
+    bundle = _bundle(tmp_path)
+    bundle["scenes"][0]["excluded_pins_report"] = {}
+    result = drv.judge(bundle)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert any("excluded pin report" in reason
+               for reason in result["not_measured"])
 
 
 def test_missing_routed_def_downgrades_waived_to_not_measured(tmp_path, monkeypatch):
@@ -743,6 +818,28 @@ def test_directory_judge_binds_project_to_argument(tmp_path):
     result = json.loads(output.read_text())
     assert result["verdict"] == "NOT_MEASURED"
     assert any("project" in reason for reason in result["not_measured"])
+
+
+def test_project_judge_refuses_pdk_config_outside_installed_root(tmp_path):
+    bundle = _bundle(tmp_path)
+    root = tmp_path / "installed_pdks"
+    (root / "synthetic").mkdir(parents=True)
+    _file(tmp_path, "phase3/librelane_pdk_root.provenance.json",
+          json.dumps({"path": str(root),
+                      "derivation": {"image_id": "sha256:" + "a" * 64}}))
+    result = drv.judge(bundle, project=tmp_path)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert any("PDK config is not inside installed PDK root" in reason
+               for reason in result["not_measured"])
+
+
+def test_json_only_cli_cannot_issue_project_signoff_pass(tmp_path):
+    bundle = _bundle(tmp_path)
+    source = tmp_path / "bundle.json"
+    source.write_text(json.dumps(bundle))
+    output = tmp_path / "receipt.json"
+    assert drv.main([str(source), "--json", str(output)]) != 0
+    assert json.loads(output.read_text())["verdict"] == "NOT_MEASURED"
 
 
 def test_declared_signoff_rollup_separates_waived_from_unchecked():
