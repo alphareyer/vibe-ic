@@ -130,10 +130,12 @@ def _fake_executor(outcome: dict):
                "memsize_full": 1 << 21}
         for arm in job["arms"]:
             res["builds"][f"{arm['name']}_full"] = {"ok": True}
+            res["builds"][f"{arm['name']}_delivered"] = {"ok": True}
         for prog in job["programs"]:
             item = outcome[prog["id"]]
             ref_words, ref_rc, tr, dut_words = item[:4]
             dut_rc = item[4] if len(item) > 4 else 0
+            size = item[5] if len(item) > 5 else 512
             d = Path(work) / "o" / prog["id"]
             d.mkdir(parents=True)
             (d / "dut.dis").write_text((CAL / "isa_objdump_no_relax_negative.dis").read_text())
@@ -142,21 +144,24 @@ def _fake_executor(outcome: dict):
                 ref = d / "ref.sig"
                 ref.write_text("\n".join(ref_words) + "\n")
             res["programs"][prog["id"]] = {
-                "build": {"ok": True, "size": 4096, "ref_size": 4096,
+                "build": {"ok": True, "size": size, "ref_size": size,
                           "tohost": 100, "disassembly": str(d / "dut.dis"),
                           "objdump_rc": 0, "nm_rc": 0, "nm_ref_rc": 0,
                           "objcopy_rc": 0},
                 "ref": {"rc": ref_rc, "sig": str(ref) if ref else None}}
             for arm in job["arms"]:
-                for iv in job["init_patterns"]:
-                    sig = None
-                    if dut_words is not None:
-                        sig = d / f"{arm['name']}_{iv}.sig"
-                        sig.write_text("\n".join(dut_words) + "\n")
-                    res["sims"].setdefault(prog["id"], {}).setdefault(
-                        f"{arm['name']}_full", {})[iv] = {
-                        "rc": dut_rc, "transcript": tr,
-                        "sig": str(sig) if sig else None}
+                for label in ("full", "delivered"):
+                    if label == "delivered" and size + job["rf_reserved_bytes"] > job["memsize_declared"]:
+                        continue
+                    for iv in job["init_patterns"]:
+                        sig = None
+                        if dut_words is not None:
+                            sig = d / f"{arm['name']}_{label}_{iv}.sig"
+                            sig.write_text("\n".join(dut_words) + "\n")
+                        res["sims"].setdefault(prog["id"], {}).setdefault(
+                            f"{arm['name']}_{label}", {})[iv] = {
+                            "rc": dut_rc, "transcript": tr,
+                            "sig": str(sig) if sig else None}
         (Path(work) / "results.json").write_text(json.dumps(res))
         return 0, "fake"
     return _run
@@ -338,11 +343,34 @@ def test_direction_disambiguates_shared_sram_data_ports_through_producer(tmp_pat
 def test_ambiguous_shared_sram_data_output_refuses(tmp_path):
     p = _project(tmp_path)
     rtl = p / "phase2/stage1/rtl/soc_top.v"
-    rtl.write_text(RTL.replace("o_m_wdata", "o_m_data, output wire [7:0] o_aux_data")
+    rtl.write_text(RTL.replace("o_m_wdata", "o_m_data, output wire [7:0] m_data")
                       .replace("i_m_rdata", "i_m_data"))
     facts, why = I.design_facts(p)
     assert facts is None
-    assert "wdata" in why and "o_m_data" in why and "o_aux_data" in why
+    assert "wdata" in why and "o_m_data" in why and "m_data" in why
+
+
+def test_other_interface_data_cannot_be_bound_as_sram_write_data(tmp_path):
+    p = _project(tmp_path)
+    rtl = p / "phase2/stage1/rtl/soc_top.v"
+    rtl.write_text(RTL.replace("o_m_wdata", "o_uart_data")
+                      .replace("i_m_rdata", "i_m_data"))
+    rec = _produce(p, {"s-add": (WORDS, 0, HALT, WORDS),
+                       "s-fencei": (WORDS, 0, HALT, WORDS)})
+    assert (rec.get("design_facts") or {}).get("sram_ports", {}).get("wdata") != "o_uart_data"
+    assert rec["design_facts"] is None
+    assert "wdata" in rec["refusal"] and "o_uart_data" in rec["refusal"]
+    assert {r["verdict"] for r in rec["rows"]} == {"NOT_EXECUTED"}
+
+
+def test_explicit_sram_role_from_another_interface_is_refused(tmp_path):
+    p = _project(tmp_path)
+    rtl = p / "phase2/stage1/rtl/soc_top.v"
+    rtl.write_text(RTL.replace("o_m_wdata", "o_uart_wdata"))
+    facts, why = I.design_facts(p)
+    assert (facts or {}).get("sram_ports", {}).get("wdata") != "o_uart_wdata"
+    assert facts is None
+    assert "wdata" in why and "o_uart_wdata" in why
 
 
 def test_an_unmodellable_sram_protocol_is_refused_by_name(tmp_path):
@@ -487,6 +515,8 @@ def test_a_passing_suite_writes_pass_rows_and_the_coverage_line(tmp_path):
     rows = {r["id"]: r for r in rec["rows"]}
     assert rows["base_isa"]["verdict"] == "PASS"
     assert rows["base_isa"]["sim_executed"] is True
+    assert rec["cases"]["base_isa"].get("full_parameter", {"verdict": "PASS"})["verdict"] == "PASS"
+    assert rec["cases"]["base_isa"].get("delivered", {"verdict": "PASS"})["verdict"] == "PASS"
     assert rows["fence_ext"]["verdict"] == "PASS"
     cov = rec["cases"]["base_isa"]["coverage"]
     assert cov == {"covered": 1, "total": 2, "excluded": ["ecall", "ebreak"],
@@ -496,6 +526,21 @@ def test_a_passing_suite_writes_pass_rows_and_the_coverage_line(tmp_path):
     assert "excluded from the instruction total: ecall, ebreak" in text
     assert "(parameter only); delivered-size subset at memsize 1024" in text
     assert (p / I.RECEIPT_REL).is_file()
+
+
+def test_full_parameter_pass_does_not_publish_delivered_l10_pass(tmp_path):
+    p = _project(tmp_path)
+    oversized = (WORDS, 0, HALT, WORDS, 0, 4096)
+    rec = _produce(p, {"s-add": oversized, "s-fencei": oversized})
+    case = rec["cases"]["base_isa"]
+    row = next(r for r in rec["rows"] if r["id"] == "base_isa")
+    assert rec["programs"]["s-add"]["fits_declared_memsize"] is False
+    assert case.get("full_parameter", {"verdict": case["verdict"]})["verdict"] == "PASS"
+    assert case.get("delivered", {"verdict": case["verdict"]})["verdict"] == "NOT_MEASURED"
+    assert case["verdict"] == "NOT_MEASURED"
+    assert row["verdict"] == "NOT_EXECUTED"
+    assert row["sim_executed"] is False
+    assert "delivered" in row["detail"] and "4096" in row["detail"]
 
 
 def test_completed_results_with_failed_executor_refuse_every_case(tmp_path):

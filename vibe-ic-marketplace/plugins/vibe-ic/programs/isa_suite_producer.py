@@ -46,8 +46,9 @@ WHAT IT DOES, step by step (each step is a refusal, never a default):
                program has a cycle cap, and a hang is a FAIL.
   7. JUDGE.    By each suite's own criterion: a signature equal to Spike's
                word for word (the first differing word is named), or
-               `tohost == 1`. A case is PASS only if every program of its set
-               passes on every power-up arm.
+               `tohost == 1`. A delivered L10 case is PASS only if every
+               primary program of its set fits and passes at the declared
+               memsize on every power-up arm.
   8. SUBSET.   Every program that fits the program area at the DECLARED
                memsize also runs there, and is reported as its own row.
   9. ARMS.     When a disclosed reused-IP erratum changed the staged RTL
@@ -381,24 +382,53 @@ def bind_sram_ports(ports: List[Tuple[str, str, str]]
     A byte SRAM may expose its read and write data as `i_*_data` and
     `o_*_data`; the direction distinguishes the roles. The read address may
     be `_addr` and write enable `_we`. Explicit role suffixes take precedence.
-    An ambiguous alias is a refusal.
+    The explicit roles establish one interface prefix after the conventional
+    input/output marker. Data aliases must belong to that interface. An
+    ambiguous or cross-interface role is a refusal.
     """
+    def _prefix(name: str, suffix: str) -> str:
+        stem = name[:-(len(suffix) + 1)] if name != suffix else ""
+        return re.sub(r"^(?:i|o)_", "", stem)
+
     out: Dict[str, str] = {}
+    explicit: Dict[str, str] = {}
     for role in _SDP_ROLES:
         want_dir = "input" if role == "rdata" else "output"
         hits = [n for d, _w, n in ports
                 if (n == role or n.endswith("_" + role))
                 and (d or "").strip().lower().startswith(want_dir)]
-        aliases = {"wdata": "data", "rdata": "data",
-                   "wen": "we", "raddr": "addr"}
-        if not hits and role in aliases:
-            alias = aliases[role]
-            hits = [n for d, _w, n in ports
-                    if (n == alias or n.endswith("_" + alias))
-                    and (d or "").strip().lower().startswith(want_dir)]
-        if len(hits) != 1:
+        if len(hits) > 1:
             return None, (f"SRAM role {role!r}: {len(hits)} {want_dir} port(s) "
                           f"end in '_{role}' ({hits}) — need exactly one")
+        if hits:
+            out[role] = hits[0]
+            explicit[role] = _prefix(hits[0], role)
+    for anchor in ("waddr", "ren"):
+        if anchor not in explicit:
+            return None, f"SRAM role {anchor!r}: no explicit top port establishes its interface"
+    interfaces = set(explicit.values())
+    if len(interfaces) != 1:
+        names = ", ".join(f"{role}={out[role]}" for role in _SDP_ROLES
+                          if role in explicit)
+        return None, f"SRAM explicit roles span different interfaces: {names}"
+    interface = interfaces.pop()
+    aliases = {"wdata": "data", "rdata": "data",
+               "wen": "we", "raddr": "addr"}
+    for role in _SDP_ROLES:
+        if role in out:
+            continue
+        alias = aliases.get(role)
+        if alias is None:
+            return None, f"SRAM role {role!r}: no explicit top port"
+        want_dir = "input" if role == "rdata" else "output"
+        candidates = [n for d, _w, n in ports
+                      if (n == alias or n.endswith("_" + alias))
+                      and (d or "").strip().lower().startswith(want_dir)]
+        hits = [n for n in candidates if _prefix(n, alias) == interface]
+        if len(hits) != 1:
+            return None, (f"SRAM role {role!r}: {len(hits)} {want_dir} alias(es) "
+                          f"in interface {interface!r} ({hits}); candidates "
+                          f"{candidates} — need exactly one")
         out[role] = hits[0]
     return out, "every SRAM role bound to exactly one top port"
 
@@ -1322,64 +1352,99 @@ def _case_rows(receipt: Dict[str, Any], cases: Dict[str, List[str]],
                facts: Dict[str, Any], total: int, excluded: List[str],
                project: Path, write: bool) -> None:
     per = receipt["programs"]
-    verdict_key = "staged_full"
+    scopes = {"full_parameter": "staged_full",
+              "delivered": "staged_delivered"}
+
+    def _scope_state(entry: Dict[str, Any], scope: str) -> Tuple[str, str]:
+        if scope == "delivered" and entry.get("fits_declared_memsize") is False:
+            return NOT_MEASURED, (
+                f"image {entry.get('size')} B + reserved "
+                f"{facts['rf_reserved_bytes']} B exceeds declared memsize "
+                f"{facts['memsize_declared']} B")
+        return _prog_state(entry, scopes[scope])
+
     for case, units in cases.items():
         lines = [f"ISA suite producer — case {case} — units {units}",
                  receipt.get("label", "")]
         for d in receipt.get("deviation_disclosures") or []:
             lines.append(f"DISCLOSED {d}")
-        states, primary = [], []
+        primary = []
         for pid, e in per.items():
             if e["unit"] not in units:
                 continue
-            for key in sorted({k for k in e["arms"]} | {verdict_key}):
+            for key in sorted({k for k in e["arms"]} | set(scopes.values())):
                 st, why = _prog_state(e, key)
                 lines.append(f"  [{st}] {e['role']:13s} {pid} @ {key}: {why}")
             if e["role"] == "primary":
-                st, _w = _prog_state(e, verdict_key)
-                states.append(st)
                 primary.append(pid)
-        verdict = fold(states)
-        passed = sum(1 for s in states if s == PASS)
+        summaries = {}
+        for scope in scopes:
+            states = [_scope_state(per[pid], scope)[0] for pid in primary]
+            summaries[scope] = {"verdict": fold(states),
+                                "passed": sum(s == PASS for s in states),
+                                "primary_programs": len(states),
+                                "memsize": (receipt.get("memsize_full") if
+                                            scope == "full_parameter" else
+                                            facts["memsize_declared"])}
+        delivered = summaries["delivered"]
+        full = summaries["full_parameter"]
+        verdict = delivered["verdict"]
         for arm in receipt.get("arms") or []:
             if arm != "staged":
                 s = [_prog_state(per[p], f"{arm}_full")[0] for p in primary]
                 lines.append(f"ARM {arm}: {sum(1 for x in s if x == PASS)}/{len(s)} "
-                             f"primary programs pass — evidence, not the verdict")
-        lines.append(f"CASE {case} {verdict}: {passed}/{len(states)} primary "
-                     f"programs pass on the verdict arm (staged RTL)")
-        cov = None
+                             f"primary programs pass at full parameter size — "
+                             "evidence, not the delivered verdict")
+        lines.append(f"CORE ISA (parameter only) {full['verdict']}: "
+                     f"{full['passed']}/{len(primary)} primary programs pass "
+                     f"at MEMSIZE={full['memsize']}")
+        lines.append(f"CASE {case} {verdict}: {delivered['passed']}/"
+                     f"{len(primary)} primary programs pass on the delivered "
+                     f"configuration at memsize {facts['memsize_declared']}")
+        full_cov = delivered_cov = None
         if "I" in units:
             unit = (lock.get("isa_units") or {}).get("I") or {}
             enum = [i for i in unit.get("instructions") or [] if i not in excluded]
-            ok = []
-            for ins in enum:
-                ps = [e for e in per.values() if e["unit"] == "I"
-                      and e["role"] == "primary" and e.get("instruction") == ins]
-                if ps and all(_prog_state(e, verdict_key)[0] == PASS for e in ps):
-                    ok.append(ins)
-            cov = {"covered": len(ok), "total": total, "excluded": excluded,
-                   "uncovered": [i for i in enum if i not in ok]}
+            def _coverage(scope: str) -> Dict[str, Any]:
+                ok = []
+                for ins in enum:
+                    ps = [e for e in per.values() if e["unit"] == "I"
+                          and e["role"] == "primary" and
+                          e.get("instruction") == ins]
+                    if ps and all(_scope_state(e, scope)[0] == PASS for e in ps):
+                        ok.append(ins)
+                return {"covered": len(ok), "total": total,
+                        "excluded": excluded,
+                        "uncovered": [i for i in enum if i not in ok]}
+            full_cov = _coverage("full_parameter")
+            delivered_cov = _coverage("delivered")
             lines.append(f"excluded from the instruction total: "
                          f"{', '.join(excluded) or 'none'} "
                          f"({receipt['instruction_total']['why']})")
-            lines.append(coverage_line(len(ok), total))
-        receipt["cases"][case] = {"verdict": verdict, "passed": passed,
-                                  "primary_programs": len(states),
-                                  "coverage": cov}
+            lines.append(f"CORE ISA (parameter only) instruction coverage "
+                         f"{full_cov['covered']}/{total}")
+            lines.append(coverage_line(delivered_cov["covered"], total))
+        full["coverage"] = full_cov
+        delivered["coverage"] = delivered_cov
+        receipt["cases"][case] = {
+            "verdict": verdict, "passed": delivered["passed"],
+            "primary_programs": len(primary), "coverage": delivered_cov,
+            "full_parameter": full, "delivered": delivered}
         row_verdict = verdict if verdict in (PASS, FAIL) else "NOT_EXECUTED"
         refusal_reasons = [
-            f"{pid}: {_prog_state(e, verdict_key)[1]}"
+            f"{pid}: {_scope_state(e, 'delivered')[1]}"
             for pid, e in per.items() if e["unit"] in units
             and e["role"] == "primary"
-            and _prog_state(e, verdict_key)[0] == NOT_MEASURED
+            and _scope_state(e, "delivered")[0] == NOT_MEASURED
         ]
         receipt["rows"].append({
             "id": case, "verdict": row_verdict,
             "sim_executed": verdict in (PASS, FAIL),
             "tb_file": str(project / RECEIPT_REL),
-            "detail": (f"ISA suite ({receipt.get('label')}): {passed}/"
-                       f"{len(states)} primary programs pass"
+            "detail": (f"ISA suite delivered memsize {facts['memsize_declared']}: "
+                       f"{delivered['passed']}/{len(primary)} primary programs "
+                       f"pass; core ISA parameter-only MEMSIZE={full['memsize']}: "
+                       f"{full['verdict']} {full['passed']}/{len(primary)}"
                        + ("; NOT_MEASURED: " + "; ".join(refusal_reasons[:3])
                           if refusal_reasons else "")
                        + "".join(f"; DISCLOSED {d}" for d in
