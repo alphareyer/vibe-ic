@@ -73,6 +73,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -201,11 +202,17 @@ def sdc_max_fanout_cap(sdc: Path) -> Optional[Tuple[int, str]]:
     except OSError:
         return None
     values = [float(m.group(1)) for m in _SDC_SET_MAX_FANOUT.finditer(text)]
-    values = [v for v in values if v > 0 and v.is_integer()]
+    values = [v for v in values if v > 0 and math.isfinite(v)]
     if not values:
         return None
-    return int(min(values)), (f"{Path(sdc).name}: strictest of {len(values)} "
-                              f"set_max_fanout line(s)")
+    strictest = min(values)
+    # Fanout is an integer load count. For any positive fractional SDC limit,
+    # floor(limit) is the largest count that satisfies the original limit.
+    cap = int(strictest)
+    rounding = (f"; integer load cap floored from {strictest:g}"
+                if not strictest.is_integer() else "")
+    return cap, (f"{Path(sdc).name}: strictest of {len(values)} "
+                 f"set_max_fanout line(s){rounding}")
 
 
 def _parser_identity() -> Tuple[str, Optional[str]]:

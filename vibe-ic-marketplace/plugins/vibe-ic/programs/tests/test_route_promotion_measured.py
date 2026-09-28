@@ -153,8 +153,10 @@ def _after_route(tmp_path, monkeypatch, *, measured, pregrt_census=None):
 
     def run_in_chain(project_, **kw):
         seen.update(kw)
-        return _chain_report(project_, adopted, measured=measured,
-                             pregrt_census=pregrt_census)
+        report = _chain_report(project_, adopted, measured=measured,
+                               pregrt_census=pregrt_census)
+        seen['producer_bytes'] = (project_ / prr.REPORT_REL).read_bytes()
+        return report
     monkeypatch.setattr(prr, 'run_in_chain', run_in_chain)
     out = R.postroute_repair_after_route(
         project=project, pdk=ring_fixture._pdk(tmp_path, ring=None), image='img',
@@ -166,6 +168,7 @@ def _after_route(tmp_path, monkeypatch, *, measured, pregrt_census=None):
     assert seen['dont_use'] is R._STEP32_DONT_USE
     # D14 review: the fanout cap step 32 keeps is the one this SDC declares
     assert seen['max_fanout'][0] == 4 and 'c.sdc' in seen['max_fanout'][1]
+    out['producer_bytes'] = seen['producer_bytes']
     return project, out, cdef
 
 
@@ -173,8 +176,15 @@ def test_step32_does_not_promote_a_candidate_it_did_not_measure(tmp_path, monkey
     project, out, _ = _after_route(tmp_path, monkeypatch, measured=False)
     assert out['views'] == {}, out
     assert 'did not measure its own output' in out['record']['promotion_refused']
-    report = json.loads((project / prr.REPORT_REL).read_text())
-    assert 'did not measure its own output' in report['promotion_refused']
+    producer_path = project / prr.REPORT_REL
+    assert producer_path.read_bytes() == out['producer_bytes']
+    assert 'promotion_refused' not in json.loads(producer_path.read_text())
+    sidecar = project / R._POSTROUTE_PROMOTION_DECISION_REL
+    decision = json.loads(sidecar.read_text())
+    assert 'did not measure its own output' in decision['reason']
+    assert decision['source_report_sha256'] == contract.digest(producer_path)
+    assert out['record']['report_sha256'] == contract.digest(producer_path)
+    assert out['record']['promotion_decision_sha256'] == contract.digest(sidecar)
     assert not (R._pl.pnr_dir(project) / 'routed_base_prerepair.def').exists()
     assert not (project / RECORD).exists()
 
@@ -223,9 +233,7 @@ def test_a_replaced_signoff_promotion_is_not_credited_with_the_pnr_count(tmp_pat
 
 
 def test_an_in_chain_refusal_stays_bound_and_is_not_repaired_twice(tmp_path, monkeypatch):
-    """D15 review: the refusal rewrites the step-32 report; the receipt must
-    bind the rewrite, or the tail-side step 32 disowns the report and runs the
-    whole repair again on the tail's route."""
+    """The receipt binds producer and decision separately; step 32 runs once."""
     import test_pad_connected_pdn_ring as ring_fixture
     project, out, _ = _after_route(tmp_path, monkeypatch, measured=False)
     assert out['record']['report_sha256'] == contract.digest(project / prr.REPORT_REL)
@@ -243,6 +251,47 @@ def test_an_in_chain_refusal_stays_bound_and_is_not_repaired_twice(tmp_path, mon
                                                ring_fixture._pdk(tmp_path, ring=None), 'unused')
     assert result.status == 'PASS' and 'NOT promoted' in result.detail, result.detail
     assert 'did not measure its own output' in result.detail
+
+
+def test_a_tampered_promotion_decision_is_not_read_as_the_chain(tmp_path, monkeypatch):
+    project, out, _ = _after_route(tmp_path, monkeypatch, measured=False)
+    put(project / 'reports/phase3/librelane_route_handoff.json',
+        {'postroute_repair': out['record']})
+    sidecar = project / R._POSTROUTE_PROMOTION_DECISION_REL
+    decision = json.loads(sidecar.read_text())
+    decision['reason'] = 'unbound replacement'
+    put(sidecar, decision)
+    report, why = R._postroute_repair_in_chain(project)
+    assert report is None and 'decision is not bound' in why
+
+
+def test_fractional_sdc_cap_reaches_step32_as_strict_integer_count(tmp_path, monkeypatch):
+    # A five-load route violates set_max_fanout 4.5; the runner must not omit
+    # the cap just because the SDC spelled it with a decimal point.
+    import test_pad_connected_pdn_ring as ring_fixture
+    project = tmp_path / 'proj'
+    put(project / 'phase3/librelane_switch.json',
+        {'steps': {'21': 'librelane', '32': 'librelane'}})
+    base_def = put(tmp_path / 'route.def', 'DESIGN top ;\nEND DESIGN\n')
+    route_state = put(tmp_path / 'route_state.json',
+                      {'odb': 'r.odb', 'def': str(base_def)})
+    sdc = put(tmp_path / 'constraint.sdc',
+              'set_max_fanout 4.5 [current_design]\n')
+    seen = {}
+
+    def run_in_chain(project_, **kw):
+        seen.update(kw)
+        return _chain_report(project_, route_state, measured=True)
+
+    monkeypatch.setattr(prr, 'run_in_chain', run_in_chain)
+    R.postroute_repair_after_route(
+        project=project, pdk=ring_fixture._pdk(tmp_path, ring=None),
+        image='img', pdk_root=tmp_path, sdc=sdc, deck='',
+        route_state=route_state,
+        route_views={'odb': tmp_path / 'r.odb', 'def': base_def},
+        route_drc=0, variant_arm=lambda *a: None)
+    assert seen['max_fanout'][0] == 4
+    assert 'floored from 4.5' in seen['max_fanout'][1]
 
 
 def test_a_dual_pregrt_arm_is_measured_by_its_own_census(tmp_path, monkeypatch):

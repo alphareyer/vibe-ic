@@ -317,6 +317,28 @@ def test_the_strictest_set_max_fanout_of_the_sdc_is_the_cap(tmp_path):
     assert timing.sdc_max_fanout_cap(sdc) is None
 
 
+def test_fractional_sdc_fanout_is_not_lost(tmp_path):
+    import importlib
+    timing = importlib.import_module('_ppa.timing')
+    sdc = tmp_path / 'constraint.sdc'
+    sdc.write_text('set_max_fanout 4.5 [current_design]\n')
+    assert timing.sdc_max_fanout_cap(sdc) == (
+        4, 'constraint.sdc: strictest of 1 set_max_fanout line(s); '
+           'integer load cap floored from 4.5')
+    sdc.write_text('set_max_fanout 4 [current_design]\n')
+    assert timing.sdc_max_fanout_cap(sdc)[0] == 4
+
+
+def test_existing_calibration_sdc_with_no_fanout_declares_no_cap():
+    import importlib
+    from _hostpaths import require_repo
+    timing = importlib.import_module('_ppa.timing')
+    sdc = require_repo('vibe-ic-marketplace', 'plugins', 'vibe-ic',
+                       'programs', 'calibration', 'cal_full.sdc')
+    assert 'create_clock' in sdc.read_text()
+    assert timing.sdc_max_fanout_cap(sdc) is None
+
+
 def test_the_repair_config_carries_the_sdc_cap(tmp_path, monkeypatch):
     import importlib
     import json

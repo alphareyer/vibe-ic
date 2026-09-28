@@ -45486,6 +45486,10 @@ def _librelane_postroute_repair_mode(project: Path) -> str:
         return "direct"
 
 
+_POSTROUTE_PROMOTION_DECISION_REL = (
+    "reports/phase3/librelane_postroute_repair_promotion_decision.json")
+
+
 def _postroute_repair_in_chain(project: Path) -> Tuple[Optional[Dict[str, Any]], str]:
     """(the step-32 report `postroute_repair_after_route` wrote inside THIS
     run's step-21 LibreLane chain, or None; why it is or is not that). Bound
@@ -45511,6 +45515,28 @@ def _postroute_repair_in_chain(project: Path) -> Tuple[Optional[Dict[str, Any]],
     doc = json.loads(report.read_text())
     if doc.get("site") != "after_route":
         return None, f"{_llprr.REPORT_REL} was written at site {doc.get('site')!r}"
+    if rec.get("promotion_decision_report") is not None:
+        if rec["promotion_decision_report"] != _POSTROUTE_PROMOTION_DECISION_REL:
+            return None, "step-32 promotion decision names an unexpected path"
+        decision_path = project / _POSTROUTE_PROMOTION_DECISION_REL
+        if (not decision_path.is_file()
+                or rec.get("promotion_decision_sha256") != _ll.digest(decision_path)):
+            return None, "step-32 promotion decision is not bound by sha256"
+        try:
+            decision = json.loads(decision_path.read_text())
+        except (OSError, ValueError):
+            return None, "step-32 promotion decision is unreadable"
+        if (not isinstance(decision, dict)
+                or decision.get("source_report") != str(report.relative_to(project))
+                or decision.get("source_report_sha256") != rec["report_sha256"]
+                or decision.get("decision") != "REFUSED"
+                or not isinstance(decision.get("reason"), str)
+                or not decision["reason"]
+                or rec.get("promotion_refused") != decision["reason"]):
+            return None, "step-32 promotion decision does not match its report"
+        # The producer report stays byte-for-byte intact. This copy combines
+        # its facts with the runner's separately bound promotion decision.
+        doc = {**doc, "promotion_refused": decision["reason"]}
     return doc, "the step-21 chain's own step-32 report"
 
 
@@ -45560,10 +45586,14 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
         pnr_out = _pl.pnr_dir(project)
         pnr_out.mkdir(parents=True, exist_ok=True)
         if refused:
-            report["promotion_refused"] = refused
-            _aa.write_text(path, json.dumps(report, indent=2) + "\n")
-            # The receipt binds the report by sha256: the rewrite is the report.
-            record["report_sha256"] = _ll.digest(path)
+            decision_path = project / _POSTROUTE_PROMOTION_DECISION_REL
+            _aa.write_json(decision_path, {
+                "source_report": str(path.relative_to(project)),
+                "source_report_sha256": record["report_sha256"],
+                "decision": "REFUSED", "reason": refused})
+            record["promotion_decision_report"] = (
+                _POSTROUTE_PROMOTION_DECISION_REL)
+            record["promotion_decision_sha256"] = _ll.digest(decision_path)
             record["promotion_refused"] = refused
             _drv_promotion_disclose(pnr_out, "librelane_promotion_unmeasured",
                                     f"{refused}; the input route was kept")
