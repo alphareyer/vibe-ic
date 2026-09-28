@@ -203,6 +203,10 @@ def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
     # the original comment is left where it explains itself.)
     _declare(tmp_path, "DIE")
     _span_inputs(tmp_path, TOP)
+    # The dependency-aware runner fixture later writes this same deck. Bind
+    # Step 10 to those final bytes so that rerun does not stale its report.
+    sdc = pnr / "constraint.sdc"
+    sdc.write_text("create_clock -period 10 [get_ports clk]\n")
     # The geometry decision is reached only after current Step 10 and SS
     # setup evidence pass. Bind this fixture's positive path to its own mapped
     # netlist and SDC before writing the cache identity stamps.
@@ -212,7 +216,6 @@ def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
     reports = R._pl.sta_dir(tmp_path) / "per_corner"
     reports.mkdir(parents=True, exist_ok=True)
     netlist = synth / f"{TOP}_synth.v"
-    sdc = pnr / "constraint.sdc"
     (reports / "sta_SS.rpt").write_text(
         "Startpoint: in_a (input port clocked by clk)\n"
         "Endpoint: out_z (output port clocked by clk)\n"
