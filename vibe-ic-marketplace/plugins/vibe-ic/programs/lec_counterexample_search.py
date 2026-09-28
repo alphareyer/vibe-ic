@@ -114,40 +114,42 @@ def not_run(reason: str, point_names: List[str], *, run_identity: str = "") -> D
             "initial_state_policy": INITIAL_STATE_POLICY}
 
 
-def unresolved_search_error(search: Dict[str, Any]) -> str:
-    """Name why an open miter cannot honestly be classified NOT_PROVEN.
-
-    A NOT_RUN record is an admission that SAT supplied no negative result. It
-    needs the producer's concrete reason and execution context. A combinational
-    residual additionally needs a complete SAT decision; an unknown miter shape
-    cannot be assumed sequential merely to soften the verdict.
-    """
+def residual_search_evidence_error(search: Dict[str, Any],
+                                   point_names: List[str]) -> str:
+    """Name missing provenance before a residual is classified NOT_PROVEN."""
     outcome = search.get("result")
-    if outcome is None and not search:
-        return "LEC_NOT_RUN_EVIDENCE_INVALID: producer supplied no search record"
+    if outcome not in ("NOT_RUN", "NONE_FOUND"):
+        return "counterexample search has no recognized residual outcome"
+    reason = search.get("reason")
+    if (not isinstance(reason, str) or not reason.strip()
+            or reason.strip().lower() in
+            ("unknown", "not run", "no counterexample found")):
+        return f"{outcome} has no concrete producer reason"
+    if not isinstance(search.get("method"), str) or not search["method"].strip():
+        return f"{outcome} has no search method"
+    bound = search.get("bound_cycles")
+    if isinstance(bound, bool) or not isinstance(bound, int) or bound <= 0:
+        return f"{outcome} has no positive search bound"
+    if not isinstance(search.get("bound_source"), str) or not search["bound_source"].strip():
+        return f"{outcome} has no bound source"
+    if not isinstance(search.get("run_identity"), str) or not search["run_identity"].strip():
+        return f"{outcome} has no run identity"
+    if search.get("tool") != "yosys":
+        return f"{outcome} has no Yosys tool identity"
+    if not point_names or sorted(search.get("point_names") or []) != sorted(point_names):
+        return f"{outcome} is not bound to the named residual points"
     if outcome == "NOT_RUN":
-        reason = search.get("reason")
-        if (not isinstance(reason, str) or not reason.strip()
-                or reason.strip().lower() in
-                {"unknown", "not run", "no counterexample found"}):
-            return "LEC_NOT_RUN_EVIDENCE_INVALID: producer reason is missing or vague"
-        for field in ("method", "run_identity"):
-            value = search.get(field)
-            if not isinstance(value, str) or not value.strip():
-                return f"LEC_NOT_RUN_EVIDENCE_INVALID: {field} is missing"
-        bound = search.get("bound_cycles")
-        if not isinstance(bound, int) or isinstance(bound, bool) or bound <= 0:
-            return "LEC_NOT_RUN_EVIDENCE_INVALID: positive bound_cycles is missing"
-        if search.get("completeness") != "BOUNDED":
-            return ("LEC_SAT_UNAVAILABLE: complete combinational SAT was not "
-                    "established; counterexample search NOT RUN: " + reason.strip())
-    elif outcome == "NONE_FOUND":
-        if search.get("completeness") == "COMPLETE":
-            return "LEC_SAT_DISPOSITION_UNBOUND: complete SAT claim lacks valid provenance"
-        if search.get("completeness") != "BOUNDED":
-            return "LEC_SAT_DISPOSITION_UNBOUND: SAT completeness is unknown"
+        if search.get("completeness") not in ("UNKNOWN", "BOUNDED", "COMPLETE"):
+            return "NOT_RUN has no miter completeness record"
+        if not isinstance(search.get("tool_version"), str) or not search["tool_version"].strip():
+            return "NOT_RUN has no tool version field"
+        if not isinstance(search.get("initial_state_policy"), str) or not search["initial_state_policy"].strip():
+            return "NOT_RUN has no initial-state policy"
     else:
-        return f"LEC_SAT_DISPOSITION_UNBOUND: unsupported search result {outcome!r}"
+        if search.get("completeness") not in ("BOUNDED", "COMPLETE"):
+            return "NONE_FOUND has no SAT completeness record"
+        if not search.get("tool_version") or str(search["tool_version"]).lower() == "unknown":
+            return "NONE_FOUND has no Yosys version"
     return ""
 
 
@@ -156,6 +158,8 @@ def complete_resolution_valid(search: Dict[str, Any], point_names: List[str]) ->
     return bool(
         search.get("result") == "NONE_FOUND"
         and search.get("completeness") == "COMPLETE"
+        and isinstance(search.get("reason"), str)
+        and search["reason"].strip()
         and search.get("method") and search.get("tool_version")
         and str(search.get("tool_version")).lower() != "unknown"
         and search.get("tool") == "yosys"
