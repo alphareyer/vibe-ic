@@ -10534,7 +10534,6 @@ def _p0_gate_record(name: str,
     }
 
 
-@functools.lru_cache(maxsize=1)
 def _two_source_advisory_gates() -> frozenset:
     """Structural gates that BOTH their own module AND the flow call advisory.
 
@@ -10560,6 +10559,9 @@ def _two_source_advisory_gates() -> frozenset:
     time), which is precisely why it is advisory; enforcing it here failed a
     design whose input documents legitimately delegate microarchitecture.
     """
+    # The registry can be scoped by a caller.  Caching this zero-argument
+    # result would keep that caller's population after the registry is restored.
+    # The per-gate declaration lookup below has its own name-keyed cache.
     return frozenset(g for g in _STRUCTURAL_RTL_GATES
                      if _gate_is_two_source_advisory(g))
 

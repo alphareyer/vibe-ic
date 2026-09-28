@@ -224,6 +224,32 @@ def test_ordinary_actionability_debt_is_still_deferred(tmp_path, monkeypatch):
         + json.dumps(rec, sort_keys=True))
 
 
+def test_advisory_class_survives_a_scoped_gate_population(tmp_path, monkeypatch):
+    """A prior scoped run must not freeze another run's advisory population."""
+    clear = getattr(fcc._two_source_advisory_gates, "cache_clear", None)
+    if clear:
+        clear()
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(fcc, "_STRUCTURAL_RTL_GATES",
+                           ("json_schema_check",))
+            assert GATE not in fcc._two_source_advisory_gates()
+
+        ordinary = _l6_record(
+            _ordinary_debt_project(tmp_path, "after_scoped_population"),
+            monkeypatch)
+        assert ordinary["verdict"] == "WAIVED", ordinary
+
+        contradiction = _l6_record(
+            _contradiction_project(tmp_path, "after_scoped_contradiction"),
+            monkeypatch)
+        assert contradiction["verdict"] == "FAIL", contradiction
+        assert contradiction["evidence"].get("non_waiverable")
+    finally:
+        if clear:
+            clear()
+
+
 def test_the_advisory_step_arm_still_passes_ordinary_debt(tmp_path):
     proj = _ordinary_debt_project(tmp_path, "advisory_arm_debt")
     ok, _reasons = fcc._evaluate_gate(
