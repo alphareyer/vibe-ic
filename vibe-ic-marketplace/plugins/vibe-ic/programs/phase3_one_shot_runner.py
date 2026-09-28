@@ -61263,8 +61263,17 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
     except Exception as exc:
         mode = "invalid"
         notes.append(f"step 22 extraction mode NOT_MEASURED: {exc}")
-    extraction_inputs, input_note = _postpnr_extraction_inputs(
-        project, top, pdk, container, mode)
+    # This producer row is advisory: a failure to read the extraction inputs is
+    # NOT_MEASURED for Step 22 (no identity, so no SPEF reuse), never an abort
+    # of the prestream gate that calls it -- the same contract the extractor
+    # call below already keeps.
+    try:
+        extraction_inputs, input_note = _postpnr_extraction_inputs(
+            project, top, pdk, container, mode)
+    except Exception as exc:  # noqa: BLE001 — disclosed, never a pass
+        extraction_inputs, input_note = None, (
+            f"step 22 extraction inputs NOT_MEASURED: "
+            f"{type(exc).__name__}: {exc}")
     if input_note:
         notes.append(input_note)
     # A receipt is required even for a pre-existing SPEF: mtime alone cannot
