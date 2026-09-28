@@ -36709,12 +36709,14 @@ def _prepare_librelane_floorplan_for_route(
     import librelane_contract as _ll
     t0 = time.time()
 
-    def _fail(code: str, detail: str, status: str = "FAIL") -> Tuple[StepResult, None]:
+    def _fail(code: str, detail: str, status: str = "FAIL",
+              reason_class: str = "") -> Tuple[StepResult, None]:
         return StepResult("pad_ring_gen", status, time.time() - t0,
                           detail if detail.startswith(code) else f"{code}: {detail}",
                           extras={"finding": code, "librelane_modes": modes},
-                          reason_class=(_V.ReasonClass.INPUT_ABSENT.value
-                                        if status == "NOT_MEASURED" else "")), None
+                          reason_class=(reason_class or (
+                              _V.ReasonClass.INPUT_ABSENT.value
+                              if status == "NOT_MEASURED" else ""))), None
 
     if "dual" in modes.values():
         return _fail("LL_DUAL_FLOORPLAN_NOT_READY",
@@ -36830,7 +36832,11 @@ def _prepare_librelane_floorplan_for_route(
         folders = _ll.run_chain(project, image, [(s, configs[s], state0) for s in steps],
                                 mounts=mounts, lane="15-floorplan")
     except (_ll.Refusal, OSError, ValueError, KeyError) as exc:
-        return _fail(getattr(exc, "code", "LL_FLOORPLAN_CHAIN_FAILED"), str(exc))
+        code = getattr(exc, "code", "LL_FLOORPLAN_CHAIN_FAILED")
+        if code in _ll.TIME_REFUSALS:  # time, not a verdict: never a plain red
+            return _fail(code, str(exc), "NOT_MEASURED",
+                         _V.ReasonClass.EXECUTION_ERROR.value)
+        return _fail(code, str(exc))
     by_step = dict(zip(steps, folders))
     ring_state = by_step["OpenROAD.PadRing"] / "state_out.json"
     final_state = (by_step["Odb.RemovePDNObstructions"] / "state_out.json"
@@ -50455,7 +50461,7 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
     """
     t0 = time.time()
     import librelane_pv_signoff as _pv
-    from librelane_contract import Refusal, resolve_image, resolve_pdk_root
+    from librelane_contract import Refusal, TIME_REFUSALS, resolve_image, resolve_pdk_root
     pnr = _pl.pnr_dir(project)
     try:
         image = resolve_image(project)
@@ -50476,6 +50482,10 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
         if exc.code in ("LL_PV_VIEW_MISSING", "LL_BRIDGE_VIEW_MISSING"):
             return StepResult(half, "NOT_MEASURED", time.time() - t0, str(exc),
                               reason_class=_V.ReasonClass.INPUT_ABSENT)
+        if exc.code in TIME_REFUSALS:  # time, not a verdict: never a plain red
+            return StepResult(half, "NOT_MEASURED", time.time() - t0,
+                              f"LibreLane step 31: {exc}",
+                              reason_class=_V.ReasonClass.EXECUTION_ERROR)
         return StepResult(half, "FAIL", time.time() - t0, f"LibreLane step 31: {exc}")
     record_path = project / _pv.RECORD_REL.format(half=half)
     extras: Dict[str, Any] = {"librelane_pv": str(record_path),
@@ -69655,8 +69665,13 @@ def _librelane_si_windows_json(project: Path, top: str, tool: dict, out_json: Pa
         extra_liberties=tool["liberties"][1:], propagated_clock=True)
     tcl_path = out_json.parent / f"si_timing_{top}.librelane.tcl"
     tcl_path.write_text(tcl)
-    done = _ls.run_sta_script(project, tool["image"], tool["mounts"], tcl_path,
-                              out_json.parent / "si_timing.log")
+    try:
+        done = _ls.run_sta_script(project, tool["image"], tool["mounts"], tcl_path,
+                                  out_json.parent / "si_timing.log")
+    except _ls.Refusal as exc:  # e.g. LL_TOOL_STALLED: advisory, never blocks
+        notes.append(f"SI timing-aware: the tool-corner STA run was refused "
+                     f"({exc}) — keeping the floating-victim screen.")
+        return False
     try:
         json.loads(out_json.read_text(errors="replace"))
     except (OSError, ValueError) as exc:
@@ -69682,8 +69697,21 @@ def _librelane_si_kernel_check(project: Path, top: str, tool: dict, spef: Path,
                                             str(timing_json))
     script = timing_json.parent / f"si_kernel_overlap_{top}.tcl"
     script.write_text(mod.kernel_overlap_tcl(rows))
-    done = _ls.run_sta_script(project, tool["image"], tool["mounts"], script,
-                              timing_json.parent / "si_kernel_overlap.log")
+    try:
+        done = _ls.run_sta_script(project, tool["image"], tool["mounts"], script,
+                                  timing_json.parent / "si_kernel_overlap.log")
+    except _ls.Refusal as exc:  # e.g. LL_TOOL_STALLED: the cross-check did not run
+        sbody["kernel_cross_check"] = {
+            "verdict": "NOT_MEASURED", "reason": str(exc),
+            "kernel": "timing_window_overlap (vibeic OpenSTA fork)"}
+        if isinstance(sbody.get("delta_delay"), dict):
+            sbody["delta_delay"]["verdict"] = "NOT_MEASURED"
+            sbody["delta_delay"]["withdrawn_because"] = (
+                f"the OpenSTA kernel cross-check was refused ({exc})")
+            sbody["delta_delay_verdict"] = "NOT_MEASURED"
+        notes.append(f"SI kernel cross-check: NOT_MEASURED — the run was "
+                     f"refused ({exc}).")
+        return
     result = mod.compare_kernel_overlap(rows, done.stdout)
     result.update(rc=done.returncode, unknown_window_directions=unknown,
                   kernel="timing_window_overlap (vibeic OpenSTA fork)")
