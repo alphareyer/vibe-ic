@@ -2382,6 +2382,47 @@ _register(Instrument(
 ))
 
 
+# ---- lec_run: equiv_induct's per-point decisions (FX_AES_LEC_SCALE) --------
+
+_LEC_INDUCT_PROV = (
+    "Real Yosys 0.69+ (git 4d572059c, released vibeic-eda 0.3.83, run by "
+    "digest on 8HD-8, 2026-09-28): `equiv_make` of calibration/"
+    "cal_lec_pair_gold.v against calibration/cal_lec_pair_gate.v (two "
+    "flops; the gate feeds y from x, so y matches only from reachable "
+    "states), then `equiv_induct -seq 1`. The whole-set induction step fails "
+    "and the pass decides each point: `\\y: failed.`, `\\x: success!`. "
+    "Only the working directory is replaced by <cal>. ")
+
+
+def _judge_induct_decisions(log: str) -> Optional[str]:
+    import lec_run as L
+    prog = L.induct_decision_progress(log)
+    return "DECIDING" if prog and prog["decided"] > 0 else None
+
+
+_register(Instrument(
+    name="lec_run::induct_decision_progress",
+    reads="the Yosys `equiv_induct` log (workset line + per-point decisions)",
+    ruling="FX_AES_LEC_SCALE", owner="llb",
+    why=("The rung's budget predicate may stop a rung only on the proof's own "
+         "decision rate. It must count the pass's per-point decisions and stay "
+         "silent while the pass is still building its model. The pair is the "
+         "same real log, whole and cut at the workset line."),
+    judge=_judge_induct_decisions,
+    positive=Sample(
+        provenance=(_LEC_INDUCT_PROV + "Whole. calibration/"
+                    "lec_induct_decisions_positive.log"),
+        artefact=_read("lec_induct_decisions_positive.log")),
+    expect="DECIDING",
+    negative=Sample(
+        provenance=(_LEC_INDUCT_PROV + "Its real prefix through the pass's "
+                    "`Found 2 unproven $equiv cells` line, the shape the log "
+                    "has while the model is built. calibration/"
+                    "lec_induct_workset_only_negative.log"),
+        artefact=_read("lec_induct_workset_only_negative.log")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════
