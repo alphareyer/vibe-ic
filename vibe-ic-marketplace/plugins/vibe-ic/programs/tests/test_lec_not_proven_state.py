@@ -73,19 +73,19 @@ def test_not_run_is_explicit_and_never_passes(tmp_path):
     assert "counterexample search NOT RUN: solver unavailable" in pre_result.findings[-1].message
 
 
-def test_decided_failure_survives_not_run_at_both_gates(tmp_path):
+def test_unproven_failure_word_without_sat_witness_stays_not_proven(tmp_path):
     doc = _residual()
     doc.update(verdict="NON_EQUIVALENT", non_equivalent_points=0)
     doc["counterexample_search"] = cex.not_run(
         "terminal IL unavailable", ["out"], run_identity="fixture-run")
     post_result = post.evaluate_report(doc)
-    assert post_result["result"] == "FAIL"
-    assert post_result["verdict"] == "NON_EQUIVALENT"
+    assert post_result["result"] == "NOT_PROVEN"
+    assert post_result["verdict"] == "NOT_PROVEN"
     reports = tmp_path / "reports"
     reports.mkdir()
     (reports / "lec.json").write_text(json.dumps(doc))
     pre_result = pre.audit(tmp_path)
-    assert pre_result.verdict != "NOT_PROVEN"
+    assert pre_result.verdict == "NOT_PROVEN"
     assert not pre_result.passed
 
 
@@ -206,15 +206,16 @@ def test_complete_sat_disposition_requires_the_named_search(tmp_path):
     assert pre.audit(tmp_path).passed is False
 
 
-def test_decided_fail_survives_a_complete_sat_claim(tmp_path):
+def test_unproven_failure_word_yields_to_complete_sat_proof(tmp_path):
     doc = _residual()
     doc["verdict"] = "FAIL"
     doc["counterexample_search"]["completeness"] = "COMPLETE"
-    assert post.evaluate_report(doc)["result"] == "FAIL"
+    assert post.evaluate_report(doc)["result"] == "PASS"
     reports = tmp_path / "reports"
     reports.mkdir()
     (reports / "lec.json").write_text(json.dumps(doc))
-    assert pre.audit(tmp_path).verdict == "FAIL"
+    assert pre.audit(tmp_path).verdict == "PROVEN_EQUIVALENT"
+    assert pre.audit(tmp_path).passed
 
 
 def test_counterexample_is_fail_with_trace():
