@@ -382,7 +382,10 @@ def test_an_out_of_window_drc_fail_does_not_decide_window_9_to_30(
 
 def _rows_main_emits():
     """Every StepResult row name `phase3_one_shot_runner` spells literally,
-    plus its declared gate tables: the rows a report can carry."""
+    plus its declared gate tables: the rows a report can carry. The
+    pre-audit producers (tapeout_checklist, gds_xor, foundry_handoff) are
+    NOT: main keeps them out of `plan`, so they never reach the report's
+    `steps` (review wave 7)."""
     import ast
     tree = ast.parse(Path(p3.__file__).read_text())
     names = {node.args[0].value for node in ast.walk(tree)
@@ -390,20 +393,87 @@ def _rows_main_emits():
              and getattr(node.func, "id", None) == "StepResult"
              and node.args and isinstance(node.args[0], ast.Constant)
              and isinstance(node.args[0].value, str)}
-    return names | {g[0] for g in p3._PHASE3_GATE_TABLES()}
+    pre_audit = {g[0] for g in p3._PRE_AUDIT_PRODUCERS}
+    return (names | {g[0] for g in p3._PHASE3_GATE_TABLES()}) - pre_audit
 
 
 def test_every_phase3_step_is_answered_for_by_a_row_main_emits():
     """One map: dispatch and verdict read the same canonicalizer set, and
-    every canonical Phase-3 step 9..38 has a row family that answers for
-    it. Step 39 (FPGA sign-off) has none -- no Phase-3 row runs it -- so a
-    window over it can only be INCONCLUSIVE, which the test above pins."""
+    every canonical Phase-3 step 9..38 but the pre-audit producers' has a
+    report row that answers for it. Steps 36, 37.3 and 38 (their rows never
+    reach the report) and 39 (FPGA sign-off: no Phase-3 row runs it) have
+    none, so a window over them is read from the unit's headline or is
+    INCONCLUSIVE, which the test above pins."""
     assert p3._phase3_steps_of_row("canonicalize_artefacts") == \
         p3._PHASE3_CANONICALIZER_IDS
     assert p3._phase3_window_sites("24", "25") == ["enclosing_canonicalize"]
     covered = set().union(*(p3._phase3_steps_of_row(n) for n in _rows_main_emits()))
     ids = p3._phase3_window_steps("9", "39")
-    assert [i for i in ids if i not in covered] == ["39"]
+    assert {i for i in ids if i not in covered} == {"36", "37.3", "38", "39"}
+
+
+def test_every_row_main_emits_has_a_step_or_cannot_let_a_window_pass():
+    """The other direction (review wave 7): a row either answers for a step,
+    or -- when no map places it -- its FAIL keeps EVERY window from PASSing
+    (it may be that window's). Checked for every row main emits, for every
+    window whose own rows all pass."""
+    windows = [("9", "21"), ("22", "23"), ("9", "30"), ("9", "37")]
+    unplaced = sorted(n for n in _rows_main_emits()
+                      if not p3._phase3_steps_of_row(n))
+    for entry, exit_ in windows:
+        ids = set(p3._phase3_window_steps(entry, exit_))
+        own = sorted(n for n in _rows_main_emits()
+                     if p3._phase3_steps_of_row(n) & ids)
+        passing = [{"name": n, "status": "PASS"} for n in own]
+        assert p3._enclosing_report_outcome(
+            {"verdict": "FAIL", "steps": passing}, 1, ids, True)[0] == "PASS"
+        for name in unplaced:
+            got = p3._enclosing_report_outcome(
+                {"verdict": "FAIL", "steps": passing + [
+                    {"name": name, "status": "FAIL", "detail": "boom"}]},
+                1, ids, True)
+            assert got[:2] == ("NOT_MEASURED", p3._V.ReasonClass.INCONCLUSIVE), \
+                (entry, exit_, name, got)
+            assert f"{name} (no step) FAIL: boom" in got[2]
+
+
+@pytest.mark.parametrize("window, row, step", [
+    (("22", "23"), "drv_promotion_corroboration", "23"),   # optional {command:} clause
+    (("9", "37"), "pad_ring_route_evidence", "37"),        # a required_output of 37
+])
+def test_a_row_the_flow_places_by_clause_or_output_decides_its_window(
+        project, monkeypatch, window, row, step):
+    """Review wave 7: these two FAILed rows were unplaced, so the window
+    PASSed. They are placed now -- one through step 23's optional
+    `{command: ...}` clause, one through step 37's required output -- and
+    their FAIL is the window's, by name."""
+    ids = set(p3._phase3_window_steps(*window))
+    assert step in p3._phase3_steps_of_row(row)
+    own = sorted(n for n in _rows_main_emits()
+                 if p3._phase3_steps_of_row(n) & ids and n != row)
+    report = _rows(*[(n, "PASS", "", "") for n in own],
+                   (row, "FAIL", "contradiction", ""))
+    got = p3._enclosing_report_outcome(report, 1, ids, True)
+    assert got[0] == "FAIL", got
+    assert f"{row} ({step}) FAIL: contradiction" in got[2]
+
+
+def test_an_unplaced_fail_keeps_window_9_to_30_from_passing(project, monkeypatch):
+    """Through the real window: every placed row of 9..30 passes and only
+    `pad_side_constraint` (placed by no map) FAILs. It may be this window's:
+    INCONCLUSIVE, by name -- no longer PASS."""
+    steps = p3._phase3_window_steps("9", "30")
+    names = ["synth", "pad_ring_gen", "pnr", "canonicalize_artefacts",
+             "sta_signoff", "sta_corner", "sta_record", "em_signoff",
+             "ir_drop_final", "antenna_final", "si_final", "gds", "lvs"]
+    report = _rows(*[(n, "PASS", "", "") for n in names],
+                   ("pad_side_constraint", "FAIL", "pad on the wrong side", ""))
+    row = _enclose_with(project, monkeypatch,
+                        _unit(report, outputs=["reports/phase3/sta/post_route_summary.json"]),
+                        "padside", steps=steps)
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.INCONCLUSIVE
+    assert "pad_side_constraint (no step) FAIL: pad on the wrong side" in row.detail
 
 
 def test_the_child_is_asked_the_operators_questions():
@@ -497,7 +567,12 @@ def test_a_unit_killed_by_a_signal(project, monkeypatch, sig, status):
     naming the signal. A crash of the unit's own (SEGV) after it ran: FAIL."""
     # The banner is printed by main's own `_print_run_banner` -- NOT flushed
     # here -- so a crash right after it keeps the banner only if main does.
-    code = ("import os, signal, sys\n"
+    # No core file: the host's core_pattern writes one into the cwd, and in
+    # the image `ulimit -c` is unlimited -- set it to 0 in the CHILD (it is
+    # inherited) and crash from a scratch cwd (review wave 7).
+    code = ("import os, resource, signal, sys, tempfile\n"
+            "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
+            "os.chdir(tempfile.mkdtemp())\n"
             f"sys.path.insert(0, {str(Path(p3.__file__).parent)!r})\n"
             "import phase3_one_shot_runner as p\n"
             "p._print_run_banner('x', 'top', 'top')\n"
@@ -549,3 +624,30 @@ def test_an_in_process_unit_keeps_what_it_found(project, monkeypatch, status,
     assert row.status == expected, row.detail
     if expected == "NOT_MEASURED":
         assert row.reason_class == p3._V.ReasonClass.TOOL_ABSENT
+
+
+def test_an_in_process_fail_names_what_failed(project, monkeypatch):
+    """Review wave 7: the unit's own detail is kept -- canonicalize answers
+    for 13 steps, and a red with no subject needs a re-run to explain."""
+    monkeypatch.setattr(p3, "step_canonicalize_artefacts", lambda *a, **k:
+                        p3.StepResult("canonicalize", "FAIL", 0.0,
+                                      "sign-off emit FAILED: post-layout LEC "
+                                      "emit FAILED (rc=1)"))
+    row = p3._phase3_window_enclosing(
+        project, "top", SimpleNamespace(name="gf180mcuD"),
+        SimpleNamespace(container="vibeic-eda"), {"24", "25"},
+        unit="canonicalize")
+    assert row.status == "FAIL", row.detail
+    assert "post-layout LEC emit FAILED" in row.detail
+
+
+@pytest.mark.parametrize("stderr", ["OSError: [Errno 28] No space left on device",
+                                    "MemoryError"])
+def test_a_host_shortfall_after_the_unit_ran_is_not_red(project, monkeypatch,
+                                                        stderr):
+    code = (f"import sys\nprint({BANNER!r})\n"
+            f"sys.stderr.write({stderr!r} + '\\n')\nsys.exit(1)\n")
+    row = _enclose_with(project, monkeypatch, code, "host" + str(len(stderr)))
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.EXECUTION_ERROR
+    assert "host shortfall" in row.detail

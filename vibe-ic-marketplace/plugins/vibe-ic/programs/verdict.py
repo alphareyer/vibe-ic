@@ -218,12 +218,9 @@ class ReasonClass(str, enum.Enum):
     #: this step owed and did not produce.
     INPUT_ABSENT = "input_absent"
 
-    #: The step could not reach a verdict because its DISPATCH broke: it
-    #: could not be spawned, the flow's own harness raised around it, or the
-    #: run was stopped from outside (an operator, the OOM killer, a reaper).
-    #: A tool or unit that RAN and then exited non-zero or crashed on its own
-    #: is a plain FAIL, not this (outcome-state ruling, 2026-09-27).
-    #: Replaces `ERROR` and the exception-handler half of `SKIP`.
+    #: The step dispatched and the dispatch itself broke — an exception, a
+    #: crash, a non-zero exit with no verdict. Replaces `ERROR` and the
+    #: exception-handler half of `SKIP`.
     EXECUTION_ERROR = "execution_error"
 
     #: The step was never dispatched, and no other reason above fits.

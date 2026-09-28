@@ -73410,13 +73410,15 @@ def _phase3_steps_of_row(name: str) -> FrozenSet[str]:
         `required_outputs` name its report;
       * any other row named after a program: the flow steps naming it.
     Empty when nothing places the row (it may belong to any step)."""
-    return _phase3_row_step_map().get(name) or _phase3_flow_steps_naming(name)
+    return (_phase3_row_step_map().get(name)
+            or _phase3_flow_steps_naming(
+                name, str(Path("reports") / "phase3" / f"{name}.json")))
 
 
 def _PHASE3_GATE_TABLES() -> Tuple[Tuple[Any, ...], ...]:
     """Every (row, program, report, argv) table `main` runs gates from."""
     return (_PRESTREAM_GATES + _FINAL_LAYOUT_GATES + _DECLARED_SIGNOFF_GATES
-            + _PRE_AUDIT_PRODUCERS)
+            + _PRE_AUDIT_PRODUCERS + (_DRV_PROMOTION_GATE,))
 
 
 @functools.lru_cache(maxsize=1)
@@ -73443,10 +73445,18 @@ def _phase3_flow_steps_naming(program: str,
     flow = _flow_yaml.load(_fcc.DEFAULT_FLOW_DEF) or {}
 
     def commands(node: Any):
+        # Every clause that runs a program: `program_exit_zero` and its
+        # optional_/advisory_ forms, as a string or as `{command: ...}`.
         if isinstance(node, dict):
             for key, value in node.items():
-                if key == "program_exit_zero" and isinstance(value, str):
-                    yield value
+                if str(key).endswith("program_exit_zero"):
+                    if isinstance(value, str):
+                        yield value
+                    elif isinstance(value, dict) and isinstance(
+                            value.get("command"), str):
+                        yield value["command"]
+                    else:
+                        yield from commands(value)
                 else:
                     yield from commands(value)
         elif isinstance(node, list):
@@ -73792,6 +73802,17 @@ def _signal_of(rc: int) -> Optional[signal.Signals]:
         return None
 
 
+#: Host shortfalls visible in a reportless unit's stderr tail: the host, not
+#: the design, stopped the run, so it is not red (outcome-state ruling).
+_HOST_SHORTFALL_MARKS = (
+    ("No space left on device", "disk full (ENOSPC)"),
+    ("MemoryError", "out of memory (MemoryError)"),
+    ("Cannot allocate memory", "out of memory (ENOMEM)"),
+    ("No such file or directory: 'docker'", "no docker binary on the host"),
+    ("docker: command not found", "no docker binary on the host"),
+)
+
+
 def _enclosing_phase3_outcome(rc: int, out: str, err: str,
                               report: Optional[Dict[str, Any]],
                               step_ids: Set[str], produced: bool,
@@ -73824,6 +73845,16 @@ def _enclosing_phase3_outcome(rc: int, out: str, err: str,
         return ("NOT_MEASURED", _V.ReasonClass.INPUT_ABSENT,
                 f"the unit stopped before running a step (rc={rc}; its "
                 f"refusal is in the stderr tail)")
+    host = next((what for needle, what in _HOST_SHORTFALL_MARKS
+                 if needle in err[-4000:]), None)
+    if host is not None:
+        return ("NOT_MEASURED", _V.ReasonClass.EXECUTION_ERROR,
+                f"the unit ran and stopped on a host shortfall ({host}, "
+                f"rc={rc}); the host, not the design, stopped it")
+    # A unit that ran and then crashed or exited non-zero on its own with no
+    # report is a FAIL of the run -- this runner's rule, the precedent being
+    # the front door's reportless rc!=0 row (R-0915-160). The repo-wide
+    # EXECUTION_ERROR definition (verdict.py) is not changed by it.
     if sig is not None:
         return ("FAIL", "", f"the unit ran and crashed with {sig.name} "
                             f"(rc={rc}) before writing its report")
@@ -73840,7 +73871,9 @@ def _enclosing_report_outcome(report: Dict[str, Any], rc: int,
     the window. A row decides the window only when it answers for one of
     the window's steps (`_phase3_steps_of_row`); every other non-passing row
     is disclosed by name -- as a row of a step outside the window, or as a
-    row mapped to no step -- and decides nothing."""
+    row mapped to no step. A non-passing row mapped to no step may be one of
+    the window's, so it never lets the window PASS: it makes the window
+    INCONCLUSIVE, by name."""
     verdict = report.get("verdict")
     if rc == 0 and verdict in ("PASS", "PASS_WITH_WAIVERS"):
         if produced:
@@ -73881,6 +73914,18 @@ def _enclosing_report_outcome(report: Dict[str, Any], rc: int,
                 owned_bad[0].get("reason_class") or _V.ReasonClass.INPUT_ABSENT,
                 "the window's own step(s) were not measured in the unit: "
                 + "; ".join(_name(r) for r in owned_bad) + told)
+    if owned and not unplaced and unmapped:
+        # The window's rows all passed, but a row the map cannot place did
+        # not: it may answer for one of these steps, so it may not be
+        # ignored (review wave 7).
+        return ("NOT_MEASURED", _V.ReasonClass.INCONCLUSIVE,
+                "every row placed on the window's steps passed, but the unit "
+                "also reports non-passing row(s) no step map places, which "
+                "may be this window's: "
+                + "; ".join(f"{_name(r)}: {str(r.get('detail') or '')[-200:]}"
+                            for r in unmapped)
+                + (("; rows of steps outside the window: "
+                    + "; ".join(_name(r) for r in outside)) if outside else ""))
     if owned and not unplaced:
         if produced:
             return ("PASS", "", "every row of the window's steps passed in "
@@ -73896,7 +73941,8 @@ def _enclosing_report_outcome(report: Dict[str, Any], rc: int,
 
 
 def _enclosing_outcome(unit: str, unit_ok: bool, unit_rc: int,
-                       unit_verdict: Optional[str], unit_reason: str
+                       unit_verdict: Optional[str], unit_reason: str,
+                       unit_detail: str = ""
                        ) -> Tuple[str, str, str]:
     """(status, reason_class, what happened) for an in-process enclosing
     unit (pnr, canonicalize): its own row decides. A unit that RAN and failed
@@ -73905,7 +73951,8 @@ def _enclosing_outcome(unit: str, unit_ok: bool, unit_rc: int,
     if unit_ok:
         return "PASS", "", "the unit ran and passed"
     if unit_verdict == "FAIL":
-        return "FAIL", "", "the unit ran and its verdict is FAIL"
+        return "FAIL", "", ("the unit ran and its verdict is FAIL: "
+                            + (unit_detail[-400:] or "(no detail)"))
     if unit_verdict in ("PASS", "PASS_WITH_WAIVERS"):
         return ("NOT_MEASURED", _V.ReasonClass.INPUT_ABSENT,
                 "the unit passed but produced none of the selected outputs")
@@ -73934,6 +73981,7 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                 "PASS", "PASS_WITH_WAIVERS") else 1
             unit_verdict = canonical_row.status
             unit_reason = canonical_row.reason_class
+            unit_detail = canonical_row.detail or ""
         elif unit == "pnr":
             pnr_row = step_pnr(isolated, top, pdk, args.container,
                                die_um=args.die_um, util=args.util,
@@ -73942,6 +73990,7 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
             unit_rc = 0 if pnr_row.status in ("PASS", "PASS_WITH_WAIVERS") else 1
             unit_verdict = pnr_row.status
             unit_reason = pnr_row.reason_class
+            unit_detail = pnr_row.detail or ""
         else:
             unit_report = _pl.report_path(isolated, "phase3_one_shot.json")
             # The copy carries the project's previous report; only the one
@@ -73964,6 +74013,7 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                     [], reason_class=_V.ReasonClass.STALLED)
             unit_rc = res.rc
             unit_reason = ""
+            unit_detail = ""
             try:
                 unit_doc = json.loads(unit_report.read_text())
             except (OSError, ValueError):
@@ -73995,7 +74045,7 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                 launch_error=res.outcome == "launch_error")
         else:
             status, reason_class, outcome = _enclosing_outcome(
-                unit, unit_ok, unit_rc, unit_verdict, unit_reason)
+                unit, unit_ok, unit_rc, unit_verdict, unit_reason, unit_detail)
         unit_log = ""
         if unit == "phase3":
             unit_log = f"; stderr log {log} (stdout and report beside it)"
