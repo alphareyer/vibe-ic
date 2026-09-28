@@ -268,7 +268,7 @@ def test_step32_hands_its_resizer_the_direct_decks_dont_use_families(tmp_path):
     assert got == ['std__dlya_2', 'std__dlyb_1', 'std__probe_1'], got
 
 
-def test_the_repair_config_carries_the_exclusion(tmp_path, monkeypatch):
+def test_the_repair_config_carries_the_exclusion(tmp_path, monkeypatch, capsys):
     """_prepare hands the step's own resolved repair config EXTRA_EXCLUDED_CELLS,
     which LibreLane turns into the resizer's set_dont_use (_PNR_EXCLUDED_CELLS)."""
     import importlib
@@ -303,6 +303,18 @@ def test_the_repair_config_carries_the_exclusion(tmp_path, monkeypatch):
                                            'the rule under test'))
     repair = json.loads(configs[prr.REPAIR_STEP].read_text())
     assert repair['EXTRA_EXCLUDED_CELLS'] == ['std__dlyb_1']
+
+    configs, _, _ = prr._prepare(tmp_path / 'proj', image='img', pdk='pdkA',
+                                 pdk_root=tmp_path / 'pdkroot', sdc=sdc,
+                                 derate=(0.95, 1.05), pg_rules_tcl=None,
+                                 refill_tcl=None, docker='docker',
+                                 dont_use=(lambda text: [], 'the rule under test'))
+    repair = json.loads(configs[prr.REPAIR_STEP].read_text())
+    provenance = json.loads(configs[prr.REPAIR_STEP].with_suffix(
+        '.provenance.json').read_text())
+    assert repair['EXTRA_EXCLUDED_CELLS'] == []
+    assert 'no cell matched' in provenance['keys']['EXTRA_EXCLUDED_CELLS']
+    assert 'LL_PRR_DONT_USE_EMPTY:' in capsys.readouterr().out
 
 
 def test_the_cap_is_the_sdcs_not_librelanes_pdk_default(tmp_path):

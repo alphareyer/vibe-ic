@@ -539,8 +539,11 @@ def _prepare(project: Path, *, image: str, pdk: str, pdk_root: Path, sdc: Path,
         extra["VIBEIC_PRR_MAX_FANOUT"] = max_fanout
     if dont_use is not None:
         excluded = repair_dont_use(configs[REPAIR_STEP], pdk_root, pdk, dont_use[0])
-        if excluded:
-            extra["EXTRA_EXCLUDED_CELLS"] = (excluded, dont_use[1])
+        source = dont_use[1]
+        if not excluded:
+            source += "; no cell matched in the resolved CELL_LIBS"
+            print(f"LL_PRR_DONT_USE_EMPTY: {source}")
+        extra["EXTRA_EXCLUDED_CELLS"] = (excluded, source)
     if extra:
         configs[REPAIR_STEP] = _ll.derive_step_config(configs[REPAIR_STEP],
                                                       configs[REPAIR_STEP], extra)
