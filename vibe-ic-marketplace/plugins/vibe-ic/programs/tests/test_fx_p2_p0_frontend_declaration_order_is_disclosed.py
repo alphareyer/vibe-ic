@@ -108,6 +108,7 @@ def test_reused_ip_declaration_order_refusal_is_disclosed(monkeypatch,
     assert "used before its declaration" in r.get("strict_refusal", "")
     ys = _yosys(calls)
     assert len(ys) == 2 and FLAG not in ys[0][-1] and FLAG in ys[1][-1]
+    assert {FLAG in args[-1] for args in ys} == {False, True}
     assert ys[1][-1].index(FLAG) < ys[1][-1].index("top.v")
 
 

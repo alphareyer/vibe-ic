@@ -108,7 +108,9 @@ def test_supplied_ip_staged_from_input_is_relaxed(monkeypatch, tmp_path):
     calls = _fake(monkeypatch, _in(root, "ip_core.v"))
     r = F.check(root)
     assert r["passed"] is True, r["findings"]
-    assert len(_yosys(calls)) == 2
+    ys = _yosys(calls)
+    assert len(ys) == 2
+    assert {FLAG in args[-1] for args in ys} == {False, True}
     assert "ip_core.v" in r["disclosures"][0]
 
 
@@ -170,7 +172,9 @@ def test_a_cwd_relative_diagnostic_path_is_matched(monkeypatch, tmp_path):
     calls = _fake(monkeypatch, LATE.replace("rtl/late.v", "../../" + ip))
     r = F.check(root)
     assert r["passed"] is True, r["findings"]
-    assert len(_yosys(calls)) == 2
+    ys = _yosys(calls)
+    assert len(ys) == 2
+    assert {FLAG in args[-1] for args in ys} == {False, True}
 
 
 def test_an_ambiguous_file_name_is_never_relaxed(monkeypatch, tmp_path):
