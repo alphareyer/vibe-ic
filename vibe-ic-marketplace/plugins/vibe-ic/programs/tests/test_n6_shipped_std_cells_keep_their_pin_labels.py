@@ -416,8 +416,12 @@ def test_every_magic_flatten_over_a_gds_keeps_only_top_labels():
         got = [o for _l, _s, o in _magic_sites_in(src, suffix)]
         assert got == want, (src, got)
     sites = list(_magic_flatten_sites())
-    assert len({p for p, *_ in sites}) >= 2, (
-        f"the census went blind: {len(sites)} Magic flattens found")
+    members = {p for p, *_ in sites}
+    required = {INDEX_JS, PROG / "magic_port_extract_emit.py"}
+    assert required <= members, (
+        "the Magic flatten census must keep every known GDS-reading source "
+        f"in scope; missing={sorted(map(str, required - members))}, "
+        f"found={sorted(map(str, members))}")
     bare = [f"{p.relative_to(PLUGIN)}:{i} `{ln}`"
             for p, i, ln, opts in sites if "-dotoplabels" not in opts]
     assert not bare, ("a bare Magic flatten copies every library cell's pin "
