@@ -52045,6 +52045,20 @@ def gen_l9_integration_spec(project: Path,
     _czl9_prose_port_fallback(content, extracted)
     _czl9_emit_interface_prose(content, extracted)
 
+    # A prompt's response tie-off is integration intent, not a word to append
+    # to notes. Carry it only when a staged RTL wrapper proves the exact
+    # request/ack/constant-data connection. The Phase-2 wrapper consumes and
+    # re-verifies this same typed record; an unproved directive leaves L9 red.
+    import _source_response_binding as _srb
+    _response_bindings = _srb.discover(project, extracted)
+    if _response_bindings:
+        content["response_bindings"] = _response_bindings
+        for _binding in _response_bindings:
+            evidence.setdefault(_binding["source"], []).append({
+                "literal": _binding["source_expression"],
+                "label": "source-verified response tie-off",
+            })
+
     return _write_l_doc(
         project, "L9_INTEGRATION_SPEC", content, evidence,
         source_documents=_source_documents_from_extracted(project, extracted))

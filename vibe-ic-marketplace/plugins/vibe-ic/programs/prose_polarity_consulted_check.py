@@ -119,6 +119,13 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "_source_response_binding::discover":
+        "The prose tie-off request is checked for denial by _requested_stems "
+        "before this function looks at RTL. This function reads only the "
+        "SystemVerilog instance grammar `.port({wire, 1'b1, constant})`; "
+        "comments are removed first, and RTL has no sentence form that "
+        "negates a port connection. A zero acknowledgment or unmatched "
+        "request is refused by verify_source, not declared as a responder.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "

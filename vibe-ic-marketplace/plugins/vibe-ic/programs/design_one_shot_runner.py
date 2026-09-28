@@ -17010,82 +17010,63 @@ def _chip_top_verified_response_bindings(project: Path, rtl_dir: Path,
     connection is the authority for the bits; the manifest cannot invent an
     expression. A malformed or unproved request refuses wrapper emission.
     """
+    import _source_response_binding as _srb
     mf_path = rtl_dir / "SOURCE_MANIFEST.json"
-    if not mf_path.is_file():
-        return port_block, connects, []
-    try:
-        manifest = json.loads(mf_path.read_text())
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"unreadable SOURCE_MANIFEST: {exc}") from exc
-    if not isinstance(manifest, dict):
-        raise ValueError("SOURCE_MANIFEST must be an object")
+    manifest = {}
+    if mf_path.is_file():
+        try:
+            manifest = json.loads(mf_path.read_text())
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"unreadable SOURCE_MANIFEST: {exc}") from exc
+        if not isinstance(manifest, dict):
+            raise ValueError("SOURCE_MANIFEST must be an object")
     specs = manifest.get("response_bindings", [])
     if not isinstance(specs, list):
         raise ValueError("response_bindings must be a list")
+    l9_path = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    l9_rows = []
+    if l9_path.is_file():
+        try:
+            l9 = json.loads(l9_path.read_text())
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"unreadable L9 response binding: {exc}") from exc
+        if not isinstance(l9, dict):
+            raise ValueError("L9 response binding document must be an object")
+        l9_rows = l9.get("response_bindings", [])
+        if not isinstance(l9_rows, list):
+            raise ValueError("L9 response_bindings must be a list")
+    def _identity(row):
+        if not isinstance(row, dict):
+            raise ValueError("response binding must be an object")
+        identity = tuple(row.get(k) for k in
+                         ("input_port", "request_port", "source"))
+        if not all(isinstance(part, str) for part in identity):
+            raise ValueError("response binding identity must be named")
+        return identity
+    if l9_rows:
+        if specs and sorted(map(_identity, specs)) != sorted(map(_identity, l9_rows)):
+            raise ValueError("SOURCE_MANIFEST response bindings disagree with L9")
+        if not specs:
+            specs = l9_rows
     if not specs:
         return port_block, connects, []
-    if manifest.get("reused_ip") is not True:
+    if mf_path.is_file() and manifest.get("reused_ip") is not True:
         raise ValueError("response_bindings requires reused_ip=true")
-
-    def _port_expression(block: str, name: str) -> str:
-        matches = list(re.finditer(r"\.\s*" + re.escape(name) + r"\s*\(", block))
-        if len(matches) != 1:
-            raise ValueError(f"source wrapper must bind {name} exactly once")
-        op = block.find("(", matches[0].start())
-        close = _chip_top_match_paren(block, op)
-        if close < 0:
-            raise ValueError(f"unclosed source binding {name}")
-        return block[op + 1:close].strip()
 
     rows = []
     new_ports, new_connects = port_block, connects
     for spec in specs:
-        if not isinstance(spec, dict):
-            raise ValueError("response binding must be an object")
-        inp, req, rel = (spec.get(k) for k in
-                         ("input_port", "request_port", "source"))
-        if not all(isinstance(v, str) and re.fullmatch(r"[A-Za-z_]\w*", v)
-                   for v in (inp, req)):
-            raise ValueError("response binding needs named input/request ports")
-        if not isinstance(rel, str) or not rel.startswith("input/"):
-            raise ValueError("response binding source must be staged input RTL")
-        src = (project / rel).resolve()
-        if not src.is_relative_to((project / "input").resolve()) or src.suffix not in (".v", ".sv"):
-            raise ValueError("response binding source escapes staged input RTL")
-        try:
-            scan = _chip_top_mask_comments(src.read_text())
-        except OSError as exc:
-            raise ValueError(f"response binding source unreadable: {rel}") from exc
-        # Find the one instance of the selected DUT in the cited source.
-        instances = []
-        for m in re.finditer(r"\b" + re.escape(dut) + r"\b\s*", scan):
-            pos = m.end()
-            if pos < len(scan) and scan[pos] == "#":
-                pos += 1
-                while pos < len(scan) and scan[pos].isspace():
-                    pos += 1
-                if pos >= len(scan) or scan[pos] != "(":
-                    continue
-                pos = _chip_top_match_paren(scan, pos) + 1
-            tail = re.match(r"\s*[A-Za-z_]\w*\s*\(", scan[pos:])
-            if not tail:
-                continue
-            op = scan.find("(", pos + tail.start())
-            close = _chip_top_match_paren(scan, op)
-            if close >= 0 and scan[close + 1:].lstrip().startswith(";"):
-                instances.append(scan[op + 1:close])
-        if len(instances) != 1:
-            raise ValueError(f"{rel} must contain one instance of {dut}")
-        block = instances[0]
-        req_wire = _port_expression(block, req)
-        resp = _port_expression(block, inp)
-        if not re.fullmatch(r"[A-Za-z_]\w*", req_wire):
-            raise ValueError("source request binding is not a named wire")
-        pattern = (r"\{\s*" + re.escape(req_wire) +
-                   r"\s*,\s*(1'[bB]1)\s*,\s*(\d+'[hHbBdD][0-9a-fA-F_]+)\s*\}")
-        match = re.fullmatch(pattern, resp)
-        if not match:
-            raise ValueError("source response is not request-ack plus constant data")
+        row = _srb.verify_source(project, dut, spec)
+        inp, req = row["input_port"], row["request_port"]
+        if l9_rows:
+            declared = [item for item in l9_rows
+                        if _identity(item) == _identity(spec)]
+            if len(declared) != 1 or any(
+                    declared[0].get(key) != value
+                    for key, value in row.items()):
+                raise ValueError("L9 response binding disagrees with staged source")
+            if declared[0].get("directive") != "tie-off":
+                raise ValueError("L9 response binding lacks tie-off directive")
         inner = new_ports.strip()
         if not (inner.startswith("(") and inner.endswith(")")):
             raise ValueError("unsupported wrapper port grammar")
@@ -17100,11 +17081,9 @@ def _chip_top_verified_response_bindings(project: Path, rtl_dir: Path,
         if new_connects.count(old_conn) != 1:
             raise ValueError("response port connection is not unique")
         new_ports = "(" + ",".join(c for c in chunks if c != in_chunks[0]) + ")"
-        new_expr = "{" + req + ", " + match.group(1) + ", " + match.group(2) + "}"
+        new_expr = row["emitted_expression"]
         new_connects = new_connects.replace(old_conn, f".{inp}({new_expr})")
-        rows.append({"input_port": inp, "request_port": req, "source": rel,
-                     "source_expression": resp, "emitted_expression": new_expr,
-                     "entropy": "constant_non_random_test_only"})
+        rows.append(row)
     return new_ports, new_connects, rows
 
 
