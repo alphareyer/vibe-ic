@@ -1351,8 +1351,14 @@ RECORD_ADJUDICATION = _ra.declare(
     # NOT_MEASURED and input paths/windows became project-bound. The published
     # zero-coupling rule still decides from coupling_pairs and findings alone;
     # neither new path/window state can be inferred from an old record.
+    # 2026-09-29: re-reviewed after a missing window sidecar stopped aborting
+    # the SPEF recount. The zero-fold rule still uses coupling_pairs=0 and the
+    # recorded findings only. A NO_WINDOWS finding without a defect now keeps
+    # NOT_MEASURED even if the diagnostic floor recounted nets; this rule calls
+    # verdict_for with vacuous=True because zero coupling proves no fold, so
+    # its answer is unchanged. A recorded substantive defect still issues FAIL.
     decision_digest=(
-        "c7ac677971244f6a3f5a91367a25e9bde7b52941ef4fbe4e170851a960b163e2"),
+        "63bd0f7f62fa573dec309d4b33ef9bf089f500dee740b03853dbef66dead1927"),
     rules=(
         _ra.Rule(
             rule_id="si_mcf_sta_check.zero-fold-is-not-a-signoff",
