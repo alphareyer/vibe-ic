@@ -1996,8 +1996,10 @@ def main() -> int:
     # ---------------- Analog A1..A8 ----------------
     # FX_ADC_PHASE_ORDER — DISPATCHED BEFORE PHASE 2, reported after it.
     #
-    # The A-track reads only phase-1 artefacts (L5_ADI_SPEC / the block list)
-    # and nothing phase 2 writes. Phase 2, though, JUDGES the A-track: its
+    # The A-track reads phase-1 artefacts (L5_ADI_SPEC / the block list) and,
+    # for A8's inline macro/RTL comparison, may read supplied build RTL under
+    # input/ through the same §4.05-safe discovery Phase 2 uses. It reads no
+    # Phase-2-produced RTL. Phase 2, though, JUDGES the A-track: its
     # Step-4 acceptance run reads A4's corner records, and its final audit
     # (`flow_compliance_check --phase 2`) judges A1..A9, which the flow yaml
     # declares `phase_scope: agnostic` (R-0915-158: in BOTH scopes). With the
@@ -2131,14 +2133,12 @@ def main() -> int:
     # ORGANIC #2064 — RE-EVALUATE THE ANALOG ACCEPTANCE, NOW THAT A4 HAS RUN.
     #
     # `design_one_shot_runner` emits and runs the acceptance checks beside the
-    # L10 unit-TB pair, which is where Step 4 reads their JUnit — and that is
-    # BEFORE this A-track, so on a COLD project every clause is honestly
-    # NOT_MEASURED ("flow step A4 has not produced a corner record"). The
-    # checks are pure record reads with no simulator, so re-running them here,
-    # after A4 has written its records, is cheap and idempotent, and the
-    # refreshed JUnit is what the whole-flow audit below and at the end of the
-    # run actually reads. Non-blocking and byte-for-byte a no-op for a design
-    # with no analog verification plan.
+    # L10 unit-TB pair, which is where Step 4 reads their JUnit. The A-track
+    # has already run on this front-door path, so this is a cheap idempotent
+    # refresh of the record-read checks, not a promised future measurement.
+    # The refreshed JUnit is what the whole-flow audit below and at the end of
+    # the run reads. Non-blocking and byte-for-byte a no-op for a design with
+    # no analog verification plan.
     if _analog_dispatch:
         _acc_json = _pl.report_path(project, "analog/analog_acceptance_run.json")
         _run_phase("ANALOG ACCEPTANCE (re-evaluated after A4)",

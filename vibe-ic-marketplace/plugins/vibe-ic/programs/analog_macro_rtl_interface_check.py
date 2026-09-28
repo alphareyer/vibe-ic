@@ -182,6 +182,17 @@ def _find_rtl(project: Path) -> List[Path]:
     for pat in ("phase2/stage1/rtl/*.v", "phase2/stage1/rtl/*.sv",
                 "rtl/*.v", "rtl/*.sv", "phase2/stage2/synth/netlist.v"):
         out += sorted(project.glob(pat))
+    # A8 now runs before Phase 2 on a cold analog/mixed-signal invocation.
+    # The supplied design RTL has not been staged yet, but it remains legitimate
+    # input evidence.  Reuse Phase 2's own §4.05-safe discoverer rather than
+    # spelling a second input-tree walk (or reading a harness/oracle path).
+    if not out:
+        try:
+            import reused_ip_rtl_consume as _consume
+            out = [f for f in _consume.discover_provided_build_rtl(project)
+                   if f.suffix in (".v", ".sv")]
+        except Exception:  # noqa: BLE001 -- preserve the former empty result
+            pass
     return out
 
 

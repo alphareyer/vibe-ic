@@ -99,8 +99,43 @@ def test_clauses_the_analog_track_has_not_measured_yet_are_not_a_fail(
     row = _acceptance(_project(tmp_path))
     assert row.extras["not_measured"] >= 1 and row.extras["failed"] == 0
     assert row.status == "NOT_MEASURED", (row.status, row.detail)
-    assert _rc(row) == "not_executed", row.reason_class
-    assert "A-track" in row.detail
+    assert _rc(row) == "input_absent", row.reason_class
+    assert "no analog A-track record" in row.detail
+    assert "writes AFTER" not in row.detail
+
+
+def test_an_a4_record_with_no_measured_clause_is_no_population(tmp_path):
+    project = _project(tmp_path, values=_IN)
+    rec = project / "phase3/analog/block_a/corner_results.json"
+    data = json.loads(rec.read_text())
+    for corner in data["corners"]:
+        corner.pop("vout_v", None)
+    data.pop("spec_results", None)
+    _write(rec, data)
+    _write(D._pl.report_path(project, "analog_one_shot.json"),
+           {"verdict": "PASS"})
+    gen = D.step_analog_acceptance_tb_gen(project)
+    assert gen.status == "PASS", (gen.status, gen.detail)
+    row = D.step_analog_acceptance_tb_run(project)
+    assert row.status == "NOT_MEASURED", (row.status, row.detail)
+    assert _rc(row) == "no_population", row.reason_class
+    assert "record exists" in row.detail
+    assert "writes AFTER" not in row.detail
+
+
+def test_a_refused_clause_is_still_a_fail(tmp_path):
+    project = _project(tmp_path)
+    plan = project / "phase1/generated_docs/L22_VERIFICATION_PLAN.json"
+    doc = json.loads(plan.read_text())
+    spec = doc["fields"]["verification_plan"]["analog"][0]["specifications"][0]
+    for key in ("target_raw", "range_raw", "target", "min", "max"):
+        spec.pop(key, None)
+    _write(plan, doc)
+    gen = D.step_analog_acceptance_tb_gen(project)
+    assert gen.status == "NOT_MEASURED", (gen.status, gen.detail)
+    row = D.step_analog_acceptance_tb_run(project)
+    assert row.status == "FAIL", (row.status, row.detail)
+    assert row.extras["refused"] >= 1
 
 
 def test_a_measured_value_outside_its_bound_is_still_a_fail(tmp_path):

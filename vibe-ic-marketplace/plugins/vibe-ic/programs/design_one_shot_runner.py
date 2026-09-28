@@ -10305,16 +10305,11 @@ def step_analog_acceptance_tb_run(project: Path) -> StepResult:
     # declaration a permanent red. It stays visible in the detail line above,
     # in the JUnit and in the ledger.
     #
-    # FX_ADC_PHASE_ORDER — ONLY A PLAIN FAIL IS RED. A clause that measured a
-    # value outside its bound, or that was refused by name, is a FAIL. A clause
-    # that is NOT_MEASURED here is not: this step runs in phase 2, BEFORE the
-    # analog A-track, and the records it reads (A4's corner sweep) are written
-    # by that track -- each such clause says so itself ("flow step A4 has not
-    # produced one ... it is not a pass and it is not a failure"). The front
-    # door re-evaluates the same checks after the A-track (#2064), which is
-    # where those clauses can first be measured. MEASURED on u_hawaii_adc
-    # (IC_STATUS_0928): 0 pass, 0 fail, 15 NOT_MEASURED was booked FAIL, and
-    # that FAIL alone made phase 2 red.
+    # FX_ADC_PHASE_ORDER — ONLY A PLAIN FAIL IS RED. A measured out-of-bound
+    # clause or a named refusal is FAIL. A NOT_MEASURED clause remains honest
+    # NOT_MEASURED, but its reason comes from the record/run state below, not
+    # from a presumed ordering: the A-track runs before Phase 2 in the front
+    # door, while standalone Phase 2 may have no A-track record at all.
     status = ("FAIL" if (rep.get("failed", 0) or rep.get("refused", 0))
               else NOT_EXECUTED_STATUS if (rep.get("not_measured", 0)
                                            or not rep.get("passed", 0))
@@ -10322,11 +10317,27 @@ def step_analog_acceptance_tb_run(project: Path) -> StepResult:
     reason = None
     if status == NOT_EXECUTED_STATUS:
         if rep.get("not_measured", 0):
-            reason = _V.ReasonClass.NOT_EXECUTED
-            detail += (
-                "; NOT_MEASURED, not FAIL: the unmeasured clauses read records "
-                "the analog A-track writes AFTER this phase-2 step (A4 corner "
-                "sweep), and the front door re-evaluates them once it has run")
+            analog_run = _pl.report_path(project, "analog_one_shot.json")
+            analog_verdict = None
+            try:
+                analog_verdict = json.loads(analog_run.read_text()).get("verdict")
+            except (OSError, ValueError, AttributeError):
+                pass
+            if analog_verdict == _spf.REFUSAL_STATUS:
+                reason = _V.ReasonClass.UPSTREAM_REFUSED
+                detail += "; NOT_MEASURED: analog A-track refused before A4 recorded the clause"
+            elif analog_verdict == "FAIL":
+                reason = _V.ReasonClass.UPSTREAM_FAILED
+                detail += "; NOT_MEASURED: analog A-track failed before A4 recorded the clause"
+            elif rep.get("passed", 0):
+                reason = _V.ReasonClass.PARTIAL_POPULATION
+                detail += "; NOT_MEASURED: some acceptance clauses passed but others have no measured A4 value"
+            elif analog_run.is_file():
+                reason = _V.ReasonClass.NO_POPULATION
+                detail += "; NOT_MEASURED: the analog A-track record exists but no acceptance clause was measured"
+            else:
+                reason = _V.ReasonClass.INPUT_ABSENT
+                detail += "; NOT_MEASURED: no analog A-track record is present for the required A4 corner measurement"
         else:
             reason = _V.ReasonClass.NO_POPULATION
             detail += "; NOT_MEASURED: no clause passed, failed or was refused"
