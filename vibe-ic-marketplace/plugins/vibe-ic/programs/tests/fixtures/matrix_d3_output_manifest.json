@@ -750,6 +750,12 @@
     },
     "reports/phase3/pad_assignment.json": {
      "status": "UNPROVEN"
+    },
+    "reports/phase3/io_pad_chip_top.json": {
+     "status": "UNPROVEN",
+     "producer": "phase3_one_shot_runner",
+     "writes": "reports/phase3/io_pad_chip_top.json",
+     "note": "2026-09-28: declared 15.5ic output. resolve_anywhere for this step and path found no hit among the one admissible published run root (benchmark-data/ic/spm/v1.10.18_sky130A). Production remains UNPROVEN and is rechecked live."
     }
    },
    "condition_files": [
@@ -1379,6 +1385,18 @@
      "producer": "phase3_one_shot_runner",
      "writes": "phase3/stage3/pnr/*stream_out.log",
      "note": "DECLARED 2026-09-22 to close W2 on step 37.3 (the stream-out transcript step 37 writes; step 37.3 reads it to recover the library set for a re-streamed fidelity reference), and RE-MEASURED 2026-09-23 under the GLOB spelling this record now carries. THE KEY CHANGED BECAUSE THE DECLARATION DID, and the reason is the engine: `stream_out.log` is written by the KLAYOUT stream-out only, while the Magic engine beside it writes `<top>.magic_stream_out.log`, so the single name demanded of every Magic-streamed run a file its engine never writes. Step 37 now declares `phase3/stage3/pnr/*stream_out.log`, its own gate asserts the same glob, and `gds_xor_check` reads the same glob -- one set, three readers. This manifest was the THIRD reader and `test_flow_manifest_declaration_parity` named both halves of the drift: the glob had no entry, and the FILE record named a path no step declares any more. Renaming the key is both halves in one move. RE-MEASURED, NOT CARRIED: `resolve_anywhere('phase3/stage3/pnr/*stream_out.log', '37')` returns no hit with the published corpus BOUND (VIBE_IC_BENCHMARK_DATA pointed at a clone; 1 admissible run root, benchmark-data/ic/spm/v1.10.18_sky130A) and none unbound (0 admissible roots) -- the same answer the FILE spelling got, and for the same reason: that root carries none of step 37's report outputs. So this cell was ALREADY failing at base (measured: 'declares 2 required_outputs; 1 are NOT produced') and this entry adds to an existing gap rather than creating one. UNPROVEN is decided LIVE: the branch re-searches every root and says so the moment one resolves -- including a Magic transcript, which the glob can now see and the old key could not."
+    },
+    "phase3/stage3/pnr/*.stream_inputs.json": {
+     "status": "UNPROVEN",
+     "producer": "phase3_one_shot_runner",
+     "writes": "phase3/stage3/pnr/*.stream_inputs.json",
+     "note": "2026-09-28: declared step 37 stream-input record. resolve_anywhere found no hit among the one admissible published run root (benchmark-data/ic/spm/v1.10.18_sky130A). Production remains UNPROVEN and is rechecked live."
+    },
+    "phase3/stage3/pnr/magic_stream_out.tcl OR phase3/stage3/pnr/stream_out.py": {
+     "status": "UNPROVEN",
+     "producer": "phase3_one_shot_runner",
+     "writes": "phase3/stage3/pnr/magic_stream_out.tcl OR phase3/stage3/pnr/stream_out.py",
+     "note": "2026-09-28: declared step 37 engine recipe alternatives. resolve_anywhere found no hit among the one admissible published run root (benchmark-data/ic/spm/v1.10.18_sky130A). Production remains UNPROVEN and is rechecked live."
     },
     "reports/phase3/pad_ring_route_evidence.json": {
      "status": "UNPROVEN",

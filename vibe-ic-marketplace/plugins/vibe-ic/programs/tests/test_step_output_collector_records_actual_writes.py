@@ -106,9 +106,8 @@ def _declared_outputs(step_id: str) -> list:
 
 
 def _concrete(rel: str) -> str:
-    """A declared spec as one path a fixture can write. A `*` becomes a name;
-    everything else is already a path."""
-    return rel.replace("*", "chip") if "*" in rel else rel
+    """One real path satisfying a declared output, including an OR choice."""
+    return rel.split(" OR ", 1)[0].replace("*", "chip")
 
 
 def _mk_project(tmp_path: Path, *, zero_byte: bool,
