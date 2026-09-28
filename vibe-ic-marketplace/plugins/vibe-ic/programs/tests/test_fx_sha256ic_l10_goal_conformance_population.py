@@ -105,21 +105,21 @@ def test_literal_expected_value_is_never_reclassified_as_a_goal(tmp_path):
                r["status"] == X.NOT_EXECUTED for r in report["results"])
 
 
-def test_explicit_percentage_vector_still_owes_its_own_tb_execution(tmp_path):
+def test_percentage_goal_mislabeled_vector_is_not_demanded_as_a_vector(tmp_path):
     project, l10, tb_dir = _project(tmp_path, percent_vector=True)
     run, report = _gate(project, l10, tb_dir)
-    assert run.returncode == 1, run.stderr
-    assert any(r["id"] == PERCENT_VECTOR["name"] and
-               r["status"] == X.NOT_EXECUTED for r in report["results"])
-    assert report["coverage_goal_population"]["goals"] == [GOAL["name"]]
+    assert run.returncode == 0, run.stderr
+    assert [r["id"] for r in report["results"]] == [VECTOR["name"]]
+    assert report["coverage_goal_population"]["goals"] == [
+        GOAL["name"], PERCENT_VECTOR["name"]]
 
 
-def test_goal_instrument_cannot_credit_explicit_percentage_vector(tmp_path):
+def test_goal_instrument_measures_mislabeled_percentage_goal(tmp_path):
     project, _l10, _tb_dir = _project(tmp_path, percent_vector=True)
     coverage = project / "reports/phase2/coverage/coverage_verilator.json"
     coverage.parent.mkdir(parents=True)
     coverage.write_text(json.dumps({"totals": {"line": {"pct": 100.0}}}))
     summary = W._coverage_goal_summary(project)
-    assert summary["declared_count"] == 1, summary
+    assert summary["declared_count"] == 2, summary
     assert [(r["case"], r["verdict"]) for r in summary["rows"]] == [
-        (GOAL["name"], "PASS")]
+        (GOAL["name"], "PASS"), (PERCENT_VECTOR["name"], "PASS")]
