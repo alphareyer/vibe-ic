@@ -665,6 +665,7 @@ utl::metric_integer vibeic__prr__fanout__rounds $::vic_fo_rounds
 
 # ---- 6d. residual data fanout closure --------------------------------------
 proc vic_close_data_fanout {} {
+    set ::vic_fanout_modified 0
     set target_limits [vic_fanout_target_limits]
     set diode_master [expr {[info exists ::env(DIODE_CELL)]
                             ? [lindex [split $::env(DIODE_CELL) /] 0] : ""}]
@@ -761,6 +762,7 @@ proc vic_close_data_fanout {} {
         }
     }
     if {![llength $created]} { return 1 }
+    set ::vic_fanout_modified 1
     set mine [dict create]
     foreach inst $created { dict set mine [$inst getName] 1 }
     set locked [list]
@@ -791,6 +793,78 @@ if {![vic_close_data_fanout]} {
     exit 1
 }
 utl::metric_integer vibeic__prr__changed $::vic_changed
+
+# Splitting and rerouting a data net can expose antenna violations.  Give
+# OpenROAD two bounded chances to add diodes, then close any new fanout again.
+# The final census below still refuses a candidate whose residue remains.
+if {$::vic_fanout_modified} {
+    set ::vic_fanout_ant [check_antennas]
+    set ::vic_fanout_ant_rounds 0
+    while {$::vic_fanout_ant > $::vic_ant_before && $::vic_fanout_ant_rounds < 2
+           && [info exists ::env(DIODE_CELL)] && $::env(VIBEIC_PRR_ANTENNA_REPAIR)} {
+        incr ::vic_fanout_ant_rounds
+        set routed [vic_routed_nets]
+        set names [dict create]
+        foreach inst [$::block getInsts] { dict set names [$inst getName] 1 }
+        set ant_args [list [lindex [split $::env(DIODE_CELL) "/"] 0]]
+        append_if_exists_argument ant_args DRT_ANTENNA_REPAIR_MARGIN -ratio_margin
+        if {[catch {log_cmd repair_antennas {*}$ant_args} err]} {
+            puts stderr "PRR_FANOUT_ANTENNA_REPAIR_FAILED: $err"
+            exit 1
+        }
+        set mine [dict create]
+        foreach inst [$::block getInsts] {
+            if {![dict exists $names [$inst getName]]} { dict set mine [$inst getName] $inst }
+        }
+        if {[dict size $mine]} {
+            set locked [list]
+            foreach inst [$::block getInsts] {
+                if {[dict exists $mine [$inst getName]]} { continue }
+                set status [$inst getPlacementStatus]
+                if {$status ni {LOCKED FIRM COVER}} {
+                    lappend locked [list $inst $status]
+                    $inst setPlacementStatus LOCKED
+                }
+            }
+            log_cmd detailed_placement \
+                -max_displacement [subst { $::env(PL_MAX_DISPLACEMENT_X) $::env(PL_MAX_DISPLACEMENT_Y) }]
+            foreach pair $locked { [lindex $pair 0] setPlacementStatus [lindex $pair 1] }
+            global_connect
+        }
+        set dirty [dict create]
+        dict for {name inst} $mine {
+            lappend ::vic_created $inst
+            foreach it [$inst getITerms] {
+                set net [$it getNet]
+                if {$net ne "NULL" && [$net getSigType] ni {POWER GROUND}} {
+                    dict set dirty [$net getName] $net
+                }
+            }
+        }
+        if {[llength [info commands grt::repaired_net_names]]} {
+            foreach name [grt::repaired_net_names] {
+                set net [$::block findNet $name]
+                if {$net ne "NULL"} { dict set dirty $name $net }
+            }
+        }
+        dict for {name net} [vic_lost_routes $routed] { dict set dirty $name $net }
+        set ::vic_fanout_ant_dirty $dirty
+        if {![vic_eco_route ::vic_fanout_ant_dirty fanout_antenna_route]} {
+            puts stderr "PRR_FANOUT_ANTENNA_ROUTE_REFUSED: candidate is not written"
+            exit 1
+        }
+        if {![vic_close_data_fanout]} {
+            puts stderr "PRR_FANOUT_CLOSURE_REFUSED: after antenna repair"
+            exit 1
+        }
+        set ::vic_fanout_ant [check_antennas]
+    }
+    utl::metric_integer vibeic__prr__fanout__antenna_rounds $::vic_fanout_ant_rounds
+    if {$::vic_fanout_ant > $::vic_ant_before} {
+        puts stderr "PRR_FANOUT_ANTENNA_RESIDUE: $::vic_fanout_ant violating nets after bounded repair"
+        exit 1
+    }
+}
 
 # ---- 7. re-verify ------------------------------------------------------------
 # Router DRC: the fork's scoped route refuses a result with more whole-design

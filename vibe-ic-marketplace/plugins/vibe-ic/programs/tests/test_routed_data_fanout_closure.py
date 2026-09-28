@@ -2,6 +2,7 @@
 from pathlib import Path
 import subprocess
 import textwrap
+import pytest
 
 STEP = (Path(__file__).resolve().parents[1] / "librelane_plugins"
         / "librelane_plugin_vibeic")
@@ -15,7 +16,15 @@ def test_second_placement_repair_uses_the_active_sdc_and_legalizes():
     assert "read_sdc" not in script  # read_current_odb supplies the step's SDC
 
 
-def test_logic_loads_are_rebuffered_without_stranding_antenna_diodes(tmp_path):
+@pytest.mark.parametrize("case,limit,protected,expected_moved,expected_after", [
+    ("normal", 4, 0, "logic1/I logic2/I", 4),
+    ("mixed_pin_limit", 3, 0, "logic1/I logic2/I logic3/I", 3),
+    ("constant_driver", 4, 0, "", 5),
+    ("protected_net", 4, 1, "", 5),
+    ("unsupported_limit", 1, 0, "", 5),
+])
+def test_logic_loads_are_rebuffered_without_stranding_antenna_diodes(
+        tmp_path, case, limit, protected, expected_moved, expected_after):
     """Execute the shipped Tcl proc on a neutral five-load DB model.
 
     The pre-fix flow has no such proc; its equivalent no-op leaves the measured
@@ -37,9 +46,14 @@ def test_logic_loads_are_rebuffered_without_stranding_antenna_diodes(tmp_path):
     harness = textwrap.dedent(r"""
         namespace eval sta { proc max_fanout_check_limit {} { return 4.0 } }
         set ::env(STEP_DIR) __STEP_DIR__
+        set ::case __CASE__
+        set ::limit __LIMIT__
+        set ::protected __PROTECTED__
         proc report_check_types {args} {
             set f [open [lindex $args end] w]
-            puts $f {driver/Z 4.0 5.0 -1.0 (VIOLATED)}
+            if {$::case ne "constant_driver"} {
+                puts $f "driver/Z $::limit 5.0 -1.0 (VIOLATED)"
+            }
             close $f
         }
         proc get_nets {args} { return data_net }
@@ -77,7 +91,7 @@ def test_logic_loads_are_rebuffered_without_stranding_antenna_diodes(tmp_path):
                 getSigType {return SIGNAL}
                 getITerms {return $::root}
                 getName {return data_net}
-                isDoNotTouch {return 0}
+                isDoNotTouch {return $::protected}
             }
         }
         proc net1 {method args} {
@@ -131,8 +145,12 @@ def test_logic_loads_are_rebuffered_without_stranding_antenna_diodes(tmp_path):
         proc insert_buffer {args} {
             set i [lsearch -exact $args -load_pins]
             set ::moved [lindex $args [expr {$i + 1}]]
-            if {$::moved ne {logic1/I logic2/I}} {error "wrong load selection $::moved"}
-            set ::root {out d1 d2 l3 newin}
+            if {$::moved ne {__EXPECTED_MOVED__}} {error "wrong load selection $::moved"}
+            if {$::limit == 3} {
+                set ::root {out d1 d2 newin}
+            } else {
+                set ::root {out d1 d2 l3 newin}
+            }
             set ::buffer_added 1
         }
         proc detailed_placement {args} {return}
@@ -150,12 +168,65 @@ def test_logic_loads_are_rebuffered_without_stranding_antenna_diodes(tmp_path):
         puts "RESULT [vic_close_data_fanout]"
         puts "AFTER [expr {[llength $::root] - 1}]"
         puts "BUFFER_LOADS [expr {$::buffer_added ? 2 : 0}]"
+        puts "MOVED $::moved"
         puts "ROUTED $::routed"
     """).replace("__PROC_PATH__", str(proc_file)).replace("__STEP_DIR__", str(tmp_path))
+    harness = (harness.replace("__CASE__", case).replace("__LIMIT__", str(limit))
+               .replace("__PROTECTED__", str(protected))
+               .replace("__EXPECTED_MOVED__", expected_moved))
     run = subprocess.run(["tclsh"], input=harness, text=True,
                          capture_output=True, check=False)
     assert run.returncode == 0, run.stderr
     assert "RESULT 1" in run.stdout, run.stdout
-    assert "AFTER 4" in run.stdout, run.stdout
-    assert "BUFFER_LOADS 2" in run.stdout, run.stdout
-    assert "ROUTED data_net new_net" in run.stdout, run.stdout
+    assert f"AFTER {expected_after}" in run.stdout, run.stdout
+    assert f"MOVED {expected_moved}" in run.stdout, run.stdout
+    if expected_moved:
+        assert "ROUTED data_net new_net" in run.stdout, run.stdout
+    else:
+        assert "ROUTED " in run.stdout, run.stdout
+
+
+@pytest.mark.parametrize("sta_violator,expected_reached", [(True, True), (False, False)])
+def test_noop_decision_uses_sta_violator_even_when_diodes_add_loads(
+        tmp_path, sta_violator, expected_reached):
+    """A diode can create real pending work; a constant tie's raw loads cannot."""
+    source = (STEP / "postroute_repair.tcl").read_text()
+    start = source.index("set ::vic_changed [expr")
+    end = source.index("# ---- 6. legalize", start)
+    section = source[start:end]
+    harness = textwrap.dedent(r"""
+        namespace eval sta { proc max_fanout_check_limit {} {return 4.0} }
+        namespace eval utl { proc metric_integer {args} {} }
+        set ::vic_created {}
+        set ::vic_resized {}
+        set ::vic_removed 0
+        set ::violator __VIOLATOR__
+        proc vic_say {line} { puts $line }
+        proc vic_fanout_target_limits {} {
+            if {$::violator} {return [dict create data_net 4]}
+            return [dict create]
+        }
+        proc block {method args} { if {$method eq "getNets"} {return {net0}} }
+        set ::block block
+        proc net0 {method args} {
+            switch -- $method {
+                isSpecial {return 0}
+                getSigType {return SIGNAL}
+                getITerms {return {out l1 l2 l3 d1 d2}}
+            }
+        }
+        proc out {method args} {if {$method eq "getIoType"} {return OUTPUT}}
+        foreach pin {l1 l2 l3 d1 d2} {
+            interp alias {} $pin {} load_pin
+        }
+        proc load_pin {method args} {if {$method eq "getIoType"} {return INPUT}}
+        source __SECTION__
+        puts REACHED_CLOSURE
+    """).replace("__VIOLATOR__", "1" if sta_violator else "0")
+    section_file = tmp_path / "noop_section.tcl"
+    section_file.write_text(section)
+    harness = harness.replace("__SECTION__", str(section_file))
+    run = subprocess.run(["tclsh"], input=harness, text=True,
+                         capture_output=True, check=False)
+    assert run.returncode == 0, run.stderr
+    assert ("REACHED_CLOSURE" in run.stdout) is expected_reached, run.stdout
