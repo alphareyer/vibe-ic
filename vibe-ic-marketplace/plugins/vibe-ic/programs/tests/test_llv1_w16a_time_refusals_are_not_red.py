@@ -31,7 +31,7 @@ sys.path.insert(0, str(PROGRAMS))
 import librelane_contract as contract  # noqa: E402
 import phase3_one_shot_runner as runner  # noqa: E402
 
-TIME = ["LL_TOOL_DEADLINE", "LL_TOOL_STALLED"]  # pinned below against contract.TIME_REFUSALS
+TIME = ["LL_TOOL_DEADLINE", "LL_TOOL_STALLED"]
 
 
 def _load(name: str):
@@ -42,7 +42,10 @@ def _load(name: str):
 
 
 def test_the_time_refusals_are_the_two_run_container_raises():
-    assert contract.TIME_REFUSALS == {"LL_TOOL_DEADLINE", "LL_TOOL_STALLED"}
+    assert contract.TOOL_STOP_REASONS == {
+        "LL_TOOL_STALLED": runner._V.ReasonClass.STALLED.value,
+        "LL_TOOL_DEADLINE": runner._V.ReasonClass.BUDGET_EXHAUSTED.value,
+    }
 
 
 # ── phase 3 step 15 ─────────────────────────────────────────────────────────
@@ -74,7 +77,7 @@ def test_step15_books_a_time_refusal_not_measured(tmp_path, monkeypatch, code):
     assert consumer is None
     assert result.status == "NOT_MEASURED", (result.status, result.detail)
     assert result.detail.startswith(code)
-    assert result.reason_class == runner._V.ReasonClass.EXECUTION_ERROR.value
+    assert result.reason_class == contract.tool_stop_reason(code)
 
 
 def test_step15_still_books_a_tool_refusal_fail(tmp_path, monkeypatch):

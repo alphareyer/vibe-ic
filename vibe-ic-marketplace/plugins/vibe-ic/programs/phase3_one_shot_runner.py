@@ -623,6 +623,20 @@ class StepResult:
         _V.validate_step_row(self)
 
 
+def _time_refusal_result(name: str, started: float, exc: BaseException,
+                         *, detail: Optional[str] = None,
+                         output_files: Optional[List[str]] = None) -> Optional[StepResult]:
+    """Book a LibreLane stall/deadline as unmeasured, preserving its reason."""
+    import librelane_contract as _ll
+    reason = _ll.tool_stop_reason(getattr(exc, "code", None))
+    if reason is None:
+        return None
+    return StepResult(name, "NOT_MEASURED", time.time() - started,
+                      detail if detail is not None else str(exc),
+                      output_files or [],
+                      reason_class=reason)
+
+
 # v1.6.54 — verdict-tier vocabulary. ENV_UNAVAILABLE distinguishes
 # "tool absent in this environment" (e.g. Calibre on an open-source
 # OS-only host, missing STA binary, klayout not in PATH) from WAIVED
@@ -16945,7 +16959,8 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
                           "LibreLane netlist checkers ran",
                           [str(netlist), str(stat), str(stats), str(folder / "state_out.json")])
     except (_ll.Refusal, OSError, ValueError) as exc:
-        return StepResult("synth", "FAIL", time.time() - t0, str(exc))
+        stopped = _time_refusal_result("synth", t0, exc)
+        return stopped or StepResult("synth", "FAIL", time.time() - t0, str(exc))
 
 
 def step_synth(project: Path, top: str, pdk: PdkConfig,
@@ -36846,11 +36861,6 @@ def _prepare_librelane_floorplan_for_route(
                               if status == "NOT_MEASURED" else ""))), None
 
     def _code(exc: BaseException, default: str) -> str:
-        """Use the tool stop code if this is a time refusal, else default."""
-        code = getattr(exc, "code", None)
-        return code if _ll.tool_stop_reason(code) else default
-
-    def _code(exc: BaseException, default: str) -> str:
         """The refusal's own code when it is a tool stop, else ``default``:
         a handler that names its step keeps that name for real refusals."""
         code = getattr(exc, "code", None)
@@ -36971,9 +36981,10 @@ def _prepare_librelane_floorplan_for_route(
                                 mounts=mounts, lane="15-floorplan")
     except (_ll.Refusal, OSError, ValueError, KeyError) as exc:
         code = getattr(exc, "code", "LL_FLOORPLAN_CHAIN_FAILED")
-        if code in _ll.TIME_REFUSALS:  # time, not a verdict: never a plain red
+        reason_class = _ll.tool_stop_reason(code)
+        if reason_class:  # time, not a verdict: never a plain red
             return _fail(code, str(exc), "NOT_MEASURED",
-                         _V.ReasonClass.EXECUTION_ERROR.value)
+                         reason_class)
         return _fail(code, str(exc))
     by_step = dict(zip(steps, folders))
     ring_state = by_step["OpenROAD.PadRing"] / "state_out.json"
@@ -48760,7 +48771,10 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
                                 pnr_dir / "routed.def", pnr_dir / f"{top}_pnr.v",
                                 pnr_dir / "constraint.sdc", gds_out)
     except (Refusal, OSError, ValueError, KeyError) as exc:
-        return StepResult("gds", "FAIL", time.time() - t0, f"LibreLane step 37: {exc}")
+        stopped = _time_refusal_result(
+            "gds", t0, exc, detail=f"LibreLane step 37: {exc}")
+        return stopped or StepResult("gds", "FAIL", time.time() - t0,
+                                     f"LibreLane step 37: {exc}")
     substance = _gds_substance_gate(result["gds"], def_file)
     if substance:
         return StepResult("gds", "FAIL", time.time() - t0,
@@ -48797,8 +48811,10 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
             dual = execute_dual(project, "37", _arm(gds_out, "librelane"),
                                 _arm(direct_gds, "direct"), {"drc_total": "min"})
         except (Refusal, OSError, ValueError, KeyError) as exc:
-            return StepResult("gds", "FAIL", time.time() - t0,
-                              f"dual GDS measurement failed: {exc}")
+            stopped = _time_refusal_result(
+                "gds", t0, exc, detail=f"dual GDS measurement failed: {exc}")
+            return stopped or StepResult("gds", "FAIL", time.time() - t0,
+                                         f"dual GDS measurement failed: {exc}")
         if dual.get("selection") == "UNDETERMINED":
             return StepResult("gds", "NOT_MEASURED", time.time() - t0,
                               f"dual GDS selection undecided: {dual.get('reason')}",
@@ -50626,7 +50642,7 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
     """
     t0 = time.time()
     import librelane_pv_signoff as _pv
-    from librelane_contract import Refusal, TIME_REFUSALS, resolve_image, resolve_pdk_root
+    from librelane_contract import Refusal, resolve_image, resolve_pdk_root, tool_stop_reason
     pnr = _pl.pnr_dir(project)
     try:
         image = resolve_image(project)
@@ -50647,10 +50663,11 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
         if exc.code in ("LL_PV_VIEW_MISSING", "LL_BRIDGE_VIEW_MISSING"):
             return StepResult(half, "NOT_MEASURED", time.time() - t0, str(exc),
                               reason_class=_V.ReasonClass.INPUT_ABSENT)
-        if exc.code in TIME_REFUSALS:  # time, not a verdict: never a plain red
+        stop_reason = tool_stop_reason(exc.code)
+        if stop_reason:  # time, not a verdict: never a plain red
             return StepResult(half, "NOT_MEASURED", time.time() - t0,
                               f"LibreLane step 31: {exc}",
-                              reason_class=_V.ReasonClass.EXECUTION_ERROR)
+                              reason_class=stop_reason)
         return StepResult(half, "FAIL", time.time() - t0, f"LibreLane step 31: {exc}")
     record_path = project / _pv.RECORD_REL.format(half=half)
     extras: Dict[str, Any] = {"librelane_pv": str(record_path),
@@ -58202,9 +58219,14 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
             _ll = _prelayout_librelane(project, top, pdk, runner_sdc,
                                        design_staged, _ll_modes, notes)
         except (_llc.Refusal, OSError, ValueError) as exc:
+            stopped = _time_refusal_result(
+                "prelayout_signoff", t0, exc,
+                detail=f"LibreLane pre-layout path ({_ll_modes}): {exc}",
+                output_files=written)
+            if stopped is not None:
+                return stopped
             return StepResult("prelayout_signoff", "FAIL", time.time() - t0,
-                              f"LibreLane pre-layout path ({_ll_modes}): {exc}",
-                              written)
+                              f"LibreLane pre-layout path ({_ll_modes}): {exc}", written)
 
     # --- Step 7c: pvt_matrix.json (design-staged Liberty corners) --------
     pvt_path = constraints_out / "pvt_matrix.json"
@@ -59813,6 +59835,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # of here would kill the runner mid-step and destroy the very report the
     # failure is supposed to appear in.
     signoff_failures: List[str] = []
+    signoff_time_refusal: Optional[Tuple[str, str]] = None
     pnr_out = _pl.pnr_dir(project)
     sta_out = _pl.sta_dir(project)
     cts_out = _pl.cts_dir(project)
@@ -60201,7 +60224,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                                        _ll_rcx_receipt)
                 written.append(str(spef_out))
             except Exception as exc:  # a refusal names itself; never direct
-                signoff_failures.append(f"step 22 LibreLane RCX: {exc}")
+                signoff_time_refusal = _step22_rcx_failure(signoff_failures, exc)
     elif primary_def.is_file() and _signoff_regen(spef_out, primary_def):
         if _emit_spef(project, top, pdk, container, spef_out, notes):
             written.append(str(spef_out))
@@ -62425,6 +62448,11 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             (f"; notes: {'; '.join(notes)}" if notes else ""),
             written,
         )
+    if signoff_time_refusal is not None:
+        reason, detail = signoff_time_refusal
+        return StepResult("canonicalize_artefacts", "NOT_MEASURED",
+                          time.time() - t0, detail, written,
+                          reason_class=reason)
     return StepResult(
         "canonicalize_artefacts", "PASS", time.time() - t0,
         f"emitted {len(written)} canonical artefacts" +
@@ -64843,6 +64871,18 @@ def _librelane_rcx_publish(project: Path, top: str, pdk: PdkConfig,
     import librelane_signoff as _ls
     result = _librelane_signoff_run(project, top, pdk, extract=True, time=False)
     _ls.publish_spefs(result, top, spef_out, corner_dir, receipt)
+
+
+def _step22_rcx_failure(signoff_failures: List[str],
+                        exc: BaseException) -> Optional[Tuple[str, str]]:
+    """Separate a stopped RCX tool from a sign-off failure."""
+    import librelane_contract as _ll
+    detail = f"step 22 LibreLane RCX: {exc}"
+    reason = _ll.tool_stop_reason(getattr(exc, "code", None))
+    if reason:
+        return reason, detail
+    signoff_failures.append(detail)
+    return None
 
 
 def _librelane_handed_spefs(receipt: Path) -> Dict[str, Path]:

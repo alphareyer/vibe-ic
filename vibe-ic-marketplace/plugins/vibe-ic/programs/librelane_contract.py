@@ -81,10 +81,6 @@ def session_stop_reason(rc: int | None) -> str | None:
 #:   `VIBEIC_CEILING_CROSSED` line; it kills nothing.
 PROBE_DEADLINE_S = 600
 TOOL_BUDGET_S = 86_400
-#: The refusals caused by TIME, not by the design or by a tool verdict: a probe
-#: past its deadline, a tool the watchdog reaped as stalled. Only a plain FAIL
-#: is red, so a consumer books these NOT_MEASURED with the refusal as reason.
-TIME_REFUSALS = frozenset({'LL_TOOL_DEADLINE', 'LL_TOOL_STALLED'})
 TOOL_STALL_GRACE_S: float | None = None
 _REAP_DEADLINE_S = 30
 _OUTPUT_TAIL = 2000

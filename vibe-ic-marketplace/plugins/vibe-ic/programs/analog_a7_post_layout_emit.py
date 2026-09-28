@@ -683,8 +683,7 @@ def run(project: Path, block: str, container: str, image: str,
                 return _refuse(record, record_path, exc.code, str(exc),
                                _pc.EX_ENV_REFUSED, result="NOT_MEASURED")
             rc = _pc.EX_ENV_REFUSED if exc.code in (
-                "LL_IMAGE_INCAPABLE", "LL_CONFIG_RESOLVE_FAILED",
-                *lc.TIME_REFUSALS) else 1
+                "LL_IMAGE_INCAPABLE", "LL_CONFIG_RESOLVE_FAILED") else 1
             return _refuse(record, record_path, exc.code, str(exc), rc)
         folder = folders[-1]
         state = json.loads((folder / "state_out.json").read_text())
