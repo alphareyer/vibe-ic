@@ -63262,16 +63262,18 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
             path.write_text(tcl)
             mapped = _to_container_path(str(path), container)
             rc, out, err = _docker_exec(container, f'sta -no_init -exit {shlex.quote(mapped)} 2>&1', marker=mapped, isolate=[rpt_out], inputs=[netlist, sdc, spef_path, path] + ([_pl.pnr_dir(project) / f'{top}.def'] if (_pl.pnr_dir(project) / f'{top}.def').is_file() else []) + [Path(x) for x in inventory[c] if Path(x).is_file()])
-            _err = re.search(r'(?mi)^\s*Error(?:\s|:).*$', (out or '') + '\n' + (err or ''))
-            if rc != 0 or _err:
+            if rc != 0 or re.search(r'(?mi)^\s*Error(?:\s|:)', (out or '') + '\n' + (err or '')):
+                # The tool's own words are KEPT, verbatim, and the reason
+                # points at them -- the reason itself parses nothing out of
+                # the tool's free-form message.
                 _log = rpt_out.with_name(rpt_out.name + f'.{c}.native.log')
                 try:
                     _log.write_text((out or '') + '\n' + (err or ''))
                     native_logs.append(_log)
-                except OSError:                           # pragma: no cover
-                    pass
-                failed = (c, f'native execution failed rc={rc} at {c}: '
-                             + (_err.group(0).strip() if _err else 'no Error line'))
+                    _where = f'; the tool\'s own output: {_rel_to_project(_log, project)}'
+                except OSError as exc:                    # pragma: no cover
+                    _where = f'; its output could not be kept: {exc}'
+                failed = (c, f'native execution failed rc={rc} at {c}{_where}')
                 break
     except (OSError, ValueError) as exc:
         return refuse(str(exc))

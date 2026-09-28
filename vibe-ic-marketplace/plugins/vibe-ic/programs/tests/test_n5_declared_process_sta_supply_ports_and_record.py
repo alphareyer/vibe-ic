@@ -323,12 +323,13 @@ def test_a_native_failure_at_the_last_corner_keeps_the_earlier_corners(
     for role in ("setup", "hold"):
         row = rec["corners"]["TT"][role]
         assert row["status"] == "NOT_MEASURED" and row["wns_ns"] is None, row
-        assert row["reason"] == ("native execution failed rc=1 at TT: "
-                                 "Error: something failed at TT"), row
-    # the tool's own words are kept, and named
+    # the tool's own words are kept verbatim, and the row's reason names them
     logs = rec["attempt_report"]["native_logs"]
     assert len(logs) == 1 and logs[0].endswith(".TT.native.log")
-    assert "something failed at TT" in (s["tmp_path"] / logs[0]).read_text()
+    assert "Error: something failed at TT" in (s["tmp_path"] / logs[0]).read_text()
+    for role in ("setup", "hold"):
+        assert rec["corners"]["TT"][role]["reason"] == (
+            f"native execution failed rc=1 at TT; the tool's own output: {logs[0]}")
 
 
 def test_a_native_failure_at_a_middle_corner_names_the_later_corner_not_run(
@@ -340,7 +341,7 @@ def test_a_native_failure_at_a_middle_corner_names_the_later_corner_not_run(
     rec = json.loads((s["tmp_path"] / _REC).read_text())
     assert rec["corners"]["FF"]["setup"]["status"] == "MEASURED"
     assert rec["corners"]["SS"]["hold"]["reason"].startswith(
-        "native execution failed rc=1 at SS:")
+        "native execution failed rc=1 at SS; the tool's own output: ")
     assert rec["corners"]["TT"]["setup"]["reason"] == "not run: sweep stopped at SS"
     assert rec["corners"]["TT"]["hold"]["status"] == "NOT_MEASURED"
 
