@@ -628,7 +628,7 @@ def test_prestream_signoff_consumer_reads_judge_receipt_not_exit_code(tmp_path):
         tmp_path, "drv_signoff", "drv_signoff_judge.py",
         "reports/phase3/sta/drv_signoff.json")
     assert row.status == "NOT_MEASURED"
-    assert "capture plan absent" in row.detail
+    assert "fresh DRV capture did not complete" in row.detail
     assert any(s[0] == "drv_signoff" for s in runner._PRESTREAM_GATES)
     assert any(s[0] == "drv_signoff" for s in runner._DECLARED_SIGNOFF_GATES)
 
@@ -636,6 +636,7 @@ def test_prestream_signoff_consumer_reads_judge_receipt_not_exit_code(tmp_path):
 def test_consumer_preserves_waived_word_and_owner_row(tmp_path, monkeypatch):
     import subprocess
     import drv_signoff_capture as capture
+    import drv_capture_plan as capture_plan
     import phase3_one_shot_runner as runner
     _file(tmp_path, "phase3/stage3/pnr/routed.def", "ROUTED DEF\n")
     bundle = _bundle(tmp_path)
@@ -648,6 +649,7 @@ def test_consumer_preserves_waived_word_and_owner_row(tmp_path, monkeypatch):
     _mock_verified_owner_record(monkeypatch, bundle["waiver_ledger"][0])
     _file(tmp_path, "reports/phase3/sta/drv_capture_plan.json", "{}")
     monkeypatch.setattr(capture, "capture", lambda *a, **k: bundle)
+    monkeypatch.setattr(capture_plan, "capture_and_publish", lambda *a, **k: source)
     def run_judge(cmd, **kwargs):
         # A separately verified judge receipt is the consumer's contract.
         Path(cmd[-1]).write_text(json.dumps({
@@ -900,6 +902,45 @@ def test_net_census_rejects_negated_count(tmp_path):
                       " Number of loads: NOT 0\n")
     with pytest.raises(ValueError, match="malformed"):
         _nets(report)
+
+
+def test_annotation_exclusion_requires_lef_pg_and_no_liberty_arc(tmp_path):
+    from drv_signoff_annotation import derive as annotation
+    folder = tmp_path / "scene"
+    _file(folder, "annotation.rpt", "Found 2 unannotated drivers.\n"
+          " u/VDD\n p\nFound 0 partially unannotated drivers.\n")
+    lef = _file(tmp_path, "pad.lef", "MACRO pad\n PIN VDD\n USE POWER ;\n"
+                " END VDD\n PIN PAD\n USE SIGNAL ;\n END PAD\nEND pad\n")
+    lib = _file(tmp_path, "pad.lib", '''library (lib) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ cell (pad) { pad_cell : true;
+  pin (VDD) { direction : input; }
+  pin (PAD) { direction : input; timing () { related_pin : "PAD"; } }
+ }
+}''')
+    routed = _file(tmp_path, "route.def", "NETS 1 ;\n - p ( PIN p ) ( u PAD ) ;\nEND NETS\n")
+    spef = _file(tmp_path, "route.spef", "*D_NET supply 0.1\n*END\n")
+    pins = {
+        "u/VDD": {"kind": "pin", "cell": "pad", "cell_pin": "VDD",
+                  "cell_class": "IO", "net": "supply"},
+        "p": {"kind": "port", "cell": None, "cell_pin": None,
+              "cell_class": "port", "net": "p"},
+        "u/PAD": {"kind": "pin", "cell": "pad", "cell_pin": "PAD",
+                  "cell_class": "IO", "net": "p"},
+    }
+    args = (folder, pins, [lib], [lef], Path(routed["path"]), Path(spef["path"]))
+    clean = annotation(*args)
+    assert {row["reason"] for row in clean["resolved"]} == {
+        "lef_pg_no_liberty_arc", "port_pad_zero_routed_segments"}
+    assert clean["unresolved"] == []
+    Path(lef["path"]).write_text(Path(lef["path"]).read_text().replace(
+        "USE POWER", "USE SIGNAL"))
+    Path(routed["path"]).write_text("NETS 1 ;\n - p ( PIN p ) ( u PAD ) + ROUTED metal1 ( 0 0 ) ( 1 0 ) ;\nEND NETS\n")
+    bad = annotation(*args)
+    assert {row["pin"] for row in bad["unresolved"]} == {"u/VDD", "p"}
+    Path(spef["path"]).write_text("*D_NET p 0.1\n*END\n")
+    restored = annotation(*args)
+    assert [row["pin"] for row in restored["unresolved"]] == ["u/VDD"]
 
 
 def test_project_clean_opensta_census_can_reach_pass(tmp_path, monkeypatch):

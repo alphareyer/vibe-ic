@@ -334,9 +334,15 @@ def _step32_drv_signoff(project: Path, report: Dict[str, Any]) -> None:
     own verdict remains a candidate-selection record, never sign-off evidence.
     """
     import drv_signoff_judge as _drv
+    import drv_capture_plan as _drv_plan
     source = project / "reports/phase3/sta/drv_signoff_bundle.json"
     result: Dict[str, Any]
     try:
+        # The candidate's own final STA state is available before this step's
+        # report is published. Capture from it; an older bundle cannot grade
+        # a newly adopted layout.
+        if report.get("final", {}).get("sta_state"):
+            _drv_plan.capture_and_publish(project, final_state=report)
         bundle = json.loads(source.read_text())
         result = _drv.judge(bundle, project=project)
         state_path = report.get("adopted_state")
