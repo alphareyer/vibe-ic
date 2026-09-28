@@ -461,6 +461,77 @@ def test_window_publishes_dot_relative_file_reference(project, tmp_path):
     assert payload.name in receipt["inputs"]
 
 
+@pytest.mark.parametrize("spelling", [
+    "./payload.def", "payload.def", "a/../payload.def",
+    "dir with space/payload.def",
+])
+@pytest.mark.parametrize("present", [True, False])
+def test_window_structured_relative_citation_requires_file(
+        project, tmp_path, spelling, present):
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    target = isolated / spelling
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if present:
+        target.write_text("cited output")
+    result = isolated / "result.json"
+    result.write_text(json.dumps({"output_files": [spelling]}))
+
+    published, error = p3._phase3_window_publication(
+        project, isolated, [result], "structured-relative")
+    receipt = project / "reports/audit/windows/structured-relative/publication.json"
+    if present:
+        rel = str(target.resolve().relative_to(isolated.resolve()))
+        assert error == "", error
+        assert set(published) == {str(project / "result.json"), str(project / rel)}
+        assert (project / rel).read_text() == "cited output"
+        body = json.loads(receipt.read_text())
+        assert body["status"] == "PUBLISHED"
+        assert rel in body["inputs"] and rel in body["outputs"]
+    else:
+        assert published == []
+        assert "absent" in error or "missing" in error
+        assert not (project / "result.json").exists()
+        assert not receipt.exists()
+
+
+@pytest.mark.parametrize("location", ["project", "outside", "escaping_symlink"])
+@pytest.mark.parametrize("present", [True, False])
+def test_window_structured_absolute_and_symlink_citations(
+        project, tmp_path, location, present):
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    if location == "project":
+        target = project / "input.def"
+        citation = str(target)
+    else:
+        target = tmp_path / "outside.def"
+        if location == "escaping_symlink":
+            link = isolated / "escape.def"
+            link.symlink_to(target)
+            citation = "escape.def"
+        else:
+            citation = str(target)
+    if present:
+        target.write_text("cited input")
+    result = isolated / "result.json"
+    result.write_text(json.dumps({"output_files": [citation]}))
+
+    published, error = p3._phase3_window_publication(
+        project, isolated, [result], "structured-absolute")
+    receipt = project / "reports/audit/windows/structured-absolute/publication.json"
+    if location == "project" and present:
+        assert error == "", error
+        assert published == [str(project / "result.json")]
+        assert json.loads(receipt.read_text())["inputs"]["input.def"]
+    else:
+        assert published == []
+        assert ("outside" in error if location != "project"
+                else "absent" in error or "missing" in error)
+        assert not (project / "result.json").exists()
+        assert not receipt.exists()
+
+
 def test_window_does_not_replace_a_run_cited_artefact(project, monkeypatch):
     import hashlib
     output = "reports/phase3/sta/post_route_summary.json"
