@@ -13,11 +13,34 @@ MACHINE_MARKERS = ("auto_synthesized", "_autogen", "_env_unavailable",
                    "_fpga_skip", "_pdk_substitution")
 
 
+class ValidatedOwnerEnvWaiver(dict):
+    """An owner entry validated before the loader adds its internal tier flag.
+
+    A waivers.json object cannot acquire this type.  Direct check_step callers
+    still present ordinary mappings and must pass the full marker check.
+    """
+
+    def __init__(self, entry: Mapping[str, Any], document: Any, *,
+                 step_id: int, reason: str, evidence_assessment: Any):
+        refusal_reason = refusal(entry, document)
+        if refusal_reason:
+            raise ValueError(f"owner waiver refused: {refusal_reason}")
+        super().__init__(entry)
+        self.update({"id": step_id, "reason": reason,
+                     "verdict_tier": "ENV_UNAVAILABLE",
+                     "evidence_assessment": evidence_assessment,
+                     "_env_unavailable": True})
+
+
 def refusal(entry: Any, document: Any = None) -> str:
     """Return a reason for refusing a waiver, or empty string when owner signed."""
     if not isinstance(entry, Mapping):
         return "entry is not an object"
-    if any(entry.get(key) is True for key in MACHINE_MARKERS):
+    # Only the loader's validated record may carry its internal tier flag.
+    # A raw entry carrying the same marker is still a machine proposal.
+    if any(entry.get(key) is True for key in MACHINE_MARKERS
+           if key != "_env_unavailable"
+           or not isinstance(entry, ValidatedOwnerEnvWaiver)):
         return "machine-generated waiver marker is present"
     if isinstance(document, Mapping) and document.get("_generator") in {
             "waivers_materialize.py", "phase3_one_shot_runner.py"}:
