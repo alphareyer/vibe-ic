@@ -113,6 +113,11 @@ proc check_antennas {} { set v [lindex $::ANT 0]; set ::ANT [lrange $::ANT 1 end
 proc append_if_exists_argument {args} {}
 proc check_placement {args} {}
 proc global_connect {args} {}
+proc report_check_types {args} {
+    # This route-loss fixture has no DRV violators.  The real step queries
+    # OpenSTA after antenna repair before deciding on an extra resizer round.
+    close [open [lindex $args end] w]
+}
 namespace eval utl { proc metric_integer {name value} { puts "METRIC $name $value" } }
 proc vic_say {line} { puts "PRR: $line" }
 proc vic_fanout_target_limits {} { return [dict create] }

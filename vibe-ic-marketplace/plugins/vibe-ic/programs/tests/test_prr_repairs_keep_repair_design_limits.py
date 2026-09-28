@@ -105,6 +105,10 @@ proc get_name {net} { return [string range $net 6 end] }
 proc report_check_types {args} {
     set path [lindex $args end]
     set fh [open $path w]
+    if {[info exists ::SLEW_OVER] && $::SLEW_OVER &&
+        [lsearch -exact $args -max_slew] >= 0} {
+        puts $fh "drv/Z 1.0 2.0 (VIOLATED)"
+    }
     if {[info exists ::env(VIBEIC_PRR_MAX_FANOUT)]} {
         set cap $::env(VIBEIC_PRR_MAX_FANOUT)
         foreach net $::netnames {
@@ -204,7 +208,7 @@ def _region(text, start, end):
     return '' if i < 0 else text[i:text.index(end, i)]
 
 
-def run(tmp_path, *, cap='4', fix=True, baseline_over=False):
+def run(tmp_path, *, cap='4', fix=True, baseline_over=False, slew_over=False):
     text = TCL.read_text()
     procs = (_region(text, '# ---- the fanout limit', '# ---- 4. repair')
              # D11's census procs, when the script carries them
@@ -214,7 +218,8 @@ def run(tmp_path, *, cap='4', fix=True, baseline_over=False):
     # SDC says; the cap the step must keep is the SDC's (VIBEIC_PRR_MAX_FANOUT).
     env = 'set ::env(MAX_FANOUT_CONSTRAINT) 10\n' + (
         '' if cap is None else f'set ::env(VIBEIC_PRR_MAX_FANOUT) {cap}\n')
-    script = (HARNESS + env + f'set ::FIX {int(fix)}\n' + procs
+    script = (HARNESS + env + f'set ::FIX {int(fix)}\n'
+              + f'set ::SLEW_OVER {int(slew_over)}\n' + procs
               + ('mkinst l5 and2 {A hot INPUT}\n' if baseline_over else '')
               + ('set ::vic_fo_repaired [vic_fanout_over]\n'
                  if baseline_over else 'set ::vic_fo_repaired [dict create]\n')
@@ -261,6 +266,14 @@ def test_without_a_declared_cap_nothing_is_claimed_kept(tmp_path):
     assert 'RD_CALLS 0' in out.stdout
     assert 'METRIC vibeic__prr__fanout__added -1' in out.stdout
     assert 'the SDC declares no set_max_fanout; not measured' in out.stdout
+
+
+def test_without_a_fanout_cap_a_measured_slew_violator_gets_a_repair_round(tmp_path):
+    out = run(tmp_path, cap=None, slew_over=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert 'RD_CALLS 1' in out.stdout
+    assert 'measured post-antenna slew/capacitance repair' in out.stdout
+    assert 'METRIC vibeic__prr__fanout__added -1' in out.stdout
 
 
 def test_a_load_is_what_sta_counts(tmp_path):
