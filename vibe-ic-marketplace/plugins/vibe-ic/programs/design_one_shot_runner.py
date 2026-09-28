@@ -7487,10 +7487,98 @@ def _yield_generated_modules(project: Path, rtl_dir: Path,
         if mods & set(overlap):
             owed |= mods - set(supplied_by)
             dropped.append(f.name)
+            _DROPPED_BYTES[f.name] = f.read_bytes()
             f.unlink()
     return {"replaced_by": {m: supplied_by[m] for m in sorted(overlap)},
             "dropped_generated_files": dropped,
             "modules_now_owed": sorted(owed)}
+
+
+#: The bytes of the generated files the last partial overlap dropped, so a
+#: refused staging can put them back (never serialised into a result).
+_DROPPED_BYTES: Dict[str, bytes] = {}
+
+
+def _stage_supplied_closure(project: Path, rtl_dir: Path,
+                            replaced_by: Dict[str, str]) -> Dict[str, Any]:
+    """Stage ONLY the supplied files a partial overlap needs (review_wave7).
+
+    The `replaced_by` sources, plus the supplied files they recursively
+    instantiate (a module rtl/ does not define) or `include`, first-wins by
+    file name; recorded through consume's own manifest writer (sha per
+    source). Every other supplied design source is NOT staged and is listed,
+    so it is disclosed rather than silently dragged into the build. Not
+    consume's cone reduction: that would also move the generator's files."""
+    import shutil
+    import reused_ip_rtl_consume as _c
+    import staged_rtl_closure_preflight as _pf
+    supplied = _c.discover_provided_build_rtl(project)
+    by_module: Dict[str, Path] = {}
+    by_name: Dict[str, Path] = {}
+    for f in supplied:
+        by_name.setdefault(f.name, f)
+        for m in sorted(_module_names([f])):
+            by_module.setdefault(m, f)
+    queue = [project / r for r in dict.fromkeys(replaced_by.values())]
+    seen: set = set()
+    staged: List[Path] = []
+    provenance: List[str] = []
+    collisions: Dict[str, List[str]] = {}
+    while queue:
+        src = queue.pop(0)
+        if src in seen:
+            continue
+        seen.add(src)
+        dst = rtl_dir / src.name
+        rel = str(src.relative_to(project))
+        if dst.exists():
+            if dst.read_bytes() != src.read_bytes():
+                collisions.setdefault(src.name, []).append(rel)
+            continue
+        shutil.copy2(src, dst)
+        staged.append(dst)
+        provenance.append(rel)
+        try:
+            text = _pf._strip_comments(src.read_text(errors="replace"))
+        except OSError:
+            continue
+        defined = _emitted_modules(rtl_dir)
+        for m, _pos in _pf._instantiations(text):
+            if m not in defined and m in by_module:
+                queue.append(by_module[m])
+        for inc in re.findall(r'`include\s+"([^"]+)"', text):
+            hit = by_name.get(Path(inc).name)
+            if hit is not None:
+                queue.append(hit)
+    if staged:
+        try:
+            _c.emit_consume_manifest(project, staged, provenance)
+        except Exception:                                    # noqa: BLE001
+            pass
+    staged_rel = {str(project / p) for p in provenance}
+    not_staged = sorted(str(f.relative_to(project)) for f in
+                        _design_supplied_build_rtl(project)
+                        if str(f) not in staged_rel
+                        and not (rtl_dir / f.name).is_file())
+    return {"staged": sorted(p.name for p in staged),
+            "staged_from": provenance, "collisions": collisions,
+            "supplied_not_staged": not_staged}
+
+
+def _supplied_replacement_holds(project: Path, rtl_dir: Path,
+                                replaced_by: Dict[str, str]) -> List[str]:
+    """Violations of the partial-overlap post-condition: every replaced module
+    is defined EXACTLY once in rtl/, and by the recorded supplied bytes."""
+    bad: List[str] = []
+    for m, rel in sorted(replaced_by.items()):
+        defs = [f for f in rtl_dir.rglob("*")
+                if f.is_file() and f.suffix in (".v", ".sv")
+                and m in _module_names([f])]
+        if len(defs) != 1:
+            bad.append(f"{m} is defined {len(defs)} time(s) in rtl/")
+        elif defs[0].read_bytes() != (project / rel).read_bytes():
+            bad.append(f"{m} in rtl/{defs[0].name} is not the bytes of {rel}")
+    return bad
 
 
 def _declared_reused_ip(project: Path) -> bool:
@@ -8393,6 +8481,7 @@ def _step_rtl_gen_bound(
         _gen_tops = _generated_tops(project, rtl_dir)
         _partial: Dict[str, Any] = {}
         if _overlap and not (_gen_tops and _gen_tops <= _supplied_mods):
+            _DROPPED_BYTES.clear()
             _partial = _yield_generated_modules(project, rtl_dir, _overlap)
             _overlap = []
         if _overlap:
@@ -8443,12 +8532,44 @@ def _step_rtl_gen_bound(
             # after the power-up fix and the stamp, so neither touches or
             # claims the supplied bytes; files already present are kept.
             try:
-                import reused_ip_rtl_consume as _consume_stage
-                _staged_now = _consume_stage.consume_reused_ip_rtl(project)
+                _staged_now = _stage_supplied_closure(
+                    project, rtl_dir, _partial["replaced_by"])
             except Exception as exc:                       # noqa: BLE001
-                _staged_now = {"staged": [], "reason":
-                               f"staging raised {type(exc).__name__}: {exc}"}
+                _staged_now = {"staged": [], "collisions": {},
+                               "supplied_not_staged": [],
+                               "reason": f"staging raised "
+                                         f"{type(exc).__name__}: {exc}"}
             _partial["staged_by_rtl_gen"] = list(_staged_now.get("staged") or [])
+            _partial["supplied_not_staged"] = list(
+                _staged_now.get("supplied_not_staged") or [])
+            # THE POST-CONDITION, checked, not assumed (review_wave7): each
+            # replaced module defined exactly once, by the recorded supplied
+            # bytes. Otherwise put the generated files back and refuse by name.
+            _violations = _supplied_replacement_holds(
+                project, rtl_dir, _partial["replaced_by"])
+            if _violations:
+                for _st in _staged_now.get("staged") or []:
+                    (rtl_dir / _st).unlink(missing_ok=True)
+                for _name, _data in _DROPPED_BYTES.items():
+                    (rtl_dir / _name).write_bytes(_data)
+                project_binding.require_current()
+                return StepResult(
+                    "rtl_gen", "FAIL", time.time() - t0,
+                    f"SUPPLIED_MODULE_NOT_STAGED: the input supplies module(s) "
+                    f"{sorted(_partial['replaced_by'])} the generator "
+                    f"{gen_name!r} also emits, and they could not be staged "
+                    f"in its place: {'; '.join(_violations)}"
+                    + (f"; name collisions {_staged_now.get('collisions')}"
+                       if _staged_now.get("collisions") else "")
+                    + (f"; {_staged_now['reason']}"
+                       if _staged_now.get("reason") else "")
+                    + ". The generated files were restored.",
+                    extras={"finding": "SUPPLIED_MODULE_NOT_STAGED",
+                            "violations": _violations,
+                            "staged_name_collisions":
+                                _staged_now.get("collisions") or {},
+                            "supplied_replaces_generated": _partial,
+                            "class_config": config})
             files = sorted(p.name for p in rtl_dir.iterdir() if p.is_file())
             _pextras = {"supplied_replaces_generated": _partial}
             _pnote = (f"; the input supplies module(s) "
@@ -8456,7 +8577,11 @@ def _step_rtl_gen_bound(
                       f"file(s) {_partial['dropped_generated_files']} were "
                       f"dropped and the supplied one(s) "
                       f"{_partial['staged_by_rtl_gen']} staged into the rest "
-                      f"of this generated design")
+                      f"of this generated design"
+                      + (f"; supplied file(s) NOT staged (nothing in the "
+                         f"design needs them): "
+                         f"{_partial['supplied_not_staged'][:6]}"
+                         if _partial["supplied_not_staged"] else ""))
             # D10 review_wave4c — a supplied file replaces a generated module
             # SILENTLY only when it is reused IP. A CONTEXT file (input/rtl,
             # design_src: e.g. a completion stub) is the starting point a task
@@ -8500,7 +8625,7 @@ def _step_rtl_gen_bound(
                           f"stale → {backup_dir.name}/{fix_note}"
                           f"{preserved_note}){_pnote}",
                           [str(rtl_dir / f) for f in files],
-                          extras=_pextras)
+                          extras=_pextras or {})
     # Generation crashed or produced nothing. Restore prior rtl/ so
     # the project is not left in an unrecoverable empty-rtl state.
     if had_prior_rtl and backup_dir.exists():
