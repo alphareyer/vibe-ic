@@ -358,7 +358,7 @@ def _step32_drv_signoff(project: Path, report: Dict[str, Any]) -> None:
                 if final_def.is_file() else "step 32 final routed DEF absent")
             result["verdict"] = ("FAIL" if result.get("failures") else
                                  "NOT_MEASURED")
-    except (OSError, ValueError, TypeError) as exc:
+    except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
         result = {"name": "DRV(tran/cap/fanout)", "verdict": "NOT_MEASURED",
                   "not_measured": [f"step 32 DRV evidence unavailable: {exc}"]}
     report["drv_signoff"] = result
