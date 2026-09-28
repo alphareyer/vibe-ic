@@ -19,7 +19,8 @@ FLOW = PLUGIN / "flow" / "phase1_phase2_phase3.yaml"
 def _case(tmp_path: Path, *, producer_ran: bool = False,
           halt_recorded: bool = True,
           terminal_record: bool = False,
-          independent_gate_failure: bool = False) -> tuple[Path, Path]:
+          independent_gate_failure: bool = False,
+          independent_condition_failure: bool = False) -> tuple[Path, Path]:
     """Use the shipped declarations, with a tiny runner record and no EDA."""
     canonical = yaml.safe_load(FLOW.read_text())
     declared = {str(s["id"]): s for s in canonical["steps"]}
@@ -32,6 +33,13 @@ def _case(tmp_path: Path, *, producer_ran: bool = False,
     if independent_gate_failure:
         steps[0]["gate"] = {"files_exist": [
             "reports/phase2/gates/independent.flag"]}
+    if independent_condition_failure:
+        steps[0]["condition_owner"] = {"step": 6, "declaration": "route"}
+        steps.insert(0, {"id": 6, "name": "Route declaration owner",
+                         "stage": "stage2",
+                         "required_outputs": ["reports/phase2/owner_record.json"],
+                         "condition_declarations": {"route": {"files_exist": [
+                             "reports/phase2/owner_decl.flag"]}}})
     steps.append({"id": 32, "name": declared["32"]["name"],
                   "stage": "stage3",
                   "required_outputs": ["reports/phase3/repair_gate.json"],
@@ -39,8 +47,9 @@ def _case(tmp_path: Path, *, producer_ran: bool = False,
     flow = tmp_path / "flow.yaml"
     flow.write_text(yaml.safe_dump({
         "version": 2, "flow_name": "halt_attribution",
-        "total_steps": 3, "analog_steps": 0,
-        "stages": [{"id": "stage2", "name": "pre-layout", "steps": [7]},
+        "total_steps": len(steps), "analog_steps": 0,
+        "stages": [{"id": "stage2", "name": "pre-layout",
+                    "steps": ([6, 7] if independent_condition_failure else [7])},
                    {"id": "stage3", "name": "backend", "steps": [22, 32]}],
         "steps": steps,
     }))
@@ -49,6 +58,9 @@ def _case(tmp_path: Path, *, producer_ran: bool = False,
     (project / "phase2/stage2/constraints/pvt_matrix.json").write_text("{}\n")
     (project / "reports/phase3").mkdir(parents=True)
     (project / "reports/phase3/repair_gate.json").write_text("{}\n")
+    if independent_condition_failure:
+        (project / "reports/phase2").mkdir(parents=True)
+        (project / "reports/phase2/owner_record.json").write_text("{}\n")
     (project / "reports/orchestrator").mkdir(parents=True)
     (project / "reports/audit").mkdir(parents=True)
     repair_status = "FAIL" if halt_recorded else "PASS"
@@ -144,3 +156,19 @@ def test_independent_gate_failure_survives_producer_halt(tmp_path):
     assert "producer_halt" not in (independent["output_binding"] or {})
     assert rows["22"]["status"] == "NOT_MEASURED", rows["22"]
     assert rows["22"]["cascade_note"] == "blocked-by-upstream(32)"
+
+
+def test_independent_condition_failure_survives_producer_halt(tmp_path):
+    project, flow = _case(tmp_path, independent_condition_failure=True)
+    proc, audit = _audit(project, flow)
+    rows = _rows(audit)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert rows["6"]["status"] == "PASS", rows["6"]
+    independent = rows["7"]
+    assert independent["status"] == "FAIL", independent
+    assert independent["reason_class"] == "missing_artefact", independent
+    assert any("route declaration is MISSING" in reason
+               for reason in independent["reasons"]), independent
+    assert independent["cascade_note"] == "blocked-by-upstream(6)"
+    assert "producer_halt" not in (independent["output_binding"] or {})
+    assert rows["22"]["status"] == "NOT_MEASURED", rows["22"]
