@@ -331,6 +331,16 @@ _NOT_PROSE: Dict[str, str] = {
         "None when the header is absent, so an unwritten section is "
         "NOT_MEASURED, never zero. Calibrated on real STAPrePNR checks.rpt "
         "pairs (instrument_calibration).",
+    "librelane_prelayout::pre_pnr_setup_gate":
+        "TWO CLOSED MACHINE RECORDS, NOT SENTENCES. The Step 7 PVT matrix is "
+        "JSON with name, label and Liberty path fields. The Step 10 report "
+        "carries exact STA_BASIS_CORNER, PVT_NAME, LIBERTY and SHA256 lines "
+        "that the runner writes from its resolved inputs. The reader requires "
+        "all fields to equal the current selection and digest; an absent or "
+        "negated path has no grammar production and returns NOT_MEASURED, "
+        "never PASS. Falsifier: test_timing_driven_pre_pnr_setup.py::"
+        "test_setup_gate_rejects_changed_liberty_or_pvt_mapping mutates the "
+        "library, mapping and stamp, and observes the named stale refusal.",
     "drc_feedback_repair::_def_nets":
         "DEF is a closed machine grammar: UNITS DISTANCE MICRONS, NETS, "
         "ROUTED and END NETS are parser tokens, not sentences. A denial such "

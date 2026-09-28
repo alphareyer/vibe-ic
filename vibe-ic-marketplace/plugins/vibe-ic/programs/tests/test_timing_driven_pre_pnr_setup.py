@@ -140,6 +140,14 @@ def test_setup_gate_rejects_changed_liberty_or_pvt_mapping(tmp_path):
     assert prelayout.pre_pnr_setup_gate(
         matrix, reports, output, netlist=netlist, sdc=sdc
     )["reason"] == "SS_REPORT_LIBERTY_IDENTITY_STALE"
+    matrix.write_text(json.dumps({"corners": [
+        {"label": "SS", "name": "slow", "liberty": str(lib)}]}))
+    report = reports / "sta_SS.rpt"
+    report.write_text(report.read_text().replace(
+        f"STA_BASIS_LIBERTY: {lib}", f"STA_BASIS_LIBERTY: not {lib}"))
+    assert prelayout.pre_pnr_setup_gate(
+        matrix, reports, output, netlist=netlist, sdc=sdc
+    )["reason"] == "SS_REPORT_LIBERTY_IDENTITY_STALE"
 
 
 @pytest.mark.parametrize("cached", [False, True])

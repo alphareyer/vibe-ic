@@ -19244,14 +19244,16 @@ def _step_pdk_hasher(container: str, *, use_cache: bool = True):
     there, otherwise inside the container.
 
     Cached per (container, paths) for the life of the process, so the three
-    kinds do not pay for the same five files three times.
+    kinds do not pay for the same five files three times. Callers that test a
+    mutable live Liberty for pre-layout report reuse request ``fresh=True``.
 
     A probe that fails returns nothing for that path, and
     `_step_identity.pdk_digest` then REFUSES — an unreadable PDK is not a
     matching PDK."""
-    def _hash(paths: Sequence[str]) -> Dict[str, str]:
+    def _hash(paths: Sequence[str], *, fresh: bool = False) -> Dict[str, str]:
         key = (container or "", tuple(paths))
-        hit = _STEP_PDK_HASH_CACHE.get(key) if use_cache else None
+        hit = (_STEP_PDK_HASH_CACHE.get(key) if use_cache and not fresh
+               else None)
         if hit is not None:
             return hit
         out: Dict[str, str] = {}
@@ -19284,7 +19286,7 @@ def _step_pdk_hasher(container: str, *, use_cache: bool = True):
                         out[parts[1].strip()] = parts[0]
             except Exception:  # noqa: BLE001 — a failed probe is not a match
                 pass
-        if use_cache:
+        if use_cache and not fresh:
             _STEP_PDK_HASH_CACHE[key] = out
         return out
     return _hash
@@ -66257,7 +66259,7 @@ def _prelayout_liberty_identity(lib: Path, container: str) -> Tuple[str, Optiona
     host_sha = _file_sha256(lib)
     if host_sha:
         return path, host_sha, lib.stem
-    remote_sha = _step_pdk_hasher(container)([path]).get(path)
+    remote_sha = _step_pdk_hasher(container)([path], fresh=True).get(path)
     return path, "sha256:" + remote_sha if remote_sha else None, lib.stem
 
 
