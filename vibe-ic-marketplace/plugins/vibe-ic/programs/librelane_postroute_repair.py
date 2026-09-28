@@ -309,6 +309,12 @@ def _antenna_counts(measurement: Dict[str, Any]) -> Optional[Tuple[int, int]]:
     return nets, pins
 
 
+def _has_sta_digest(measurement: Dict[str, Any]) -> bool:
+    value = measurement.get("sta_state_sha256")
+    return (isinstance(value, str) and len(value) == 64 and
+            all(c in "0123456789abcdef" for c in value))
+
+
 DOMAIN_VALUE = {
     "setup": lambda cur: cur["measurement"].get("setup_ws_min"),
     "hold": lambda cur: cur["measurement"].get("hold_ws_min"),
@@ -761,15 +767,25 @@ def _clear_declared_repair(project: Path) -> None:
 
 def _set_census_verdict(report: Dict[str, Any], *measurements: Dict[str, Any]) -> None:
     antenna_measured = all(_antenna_counts(m) is not None for m in measurements)
+    sta_digest_measured = all(_has_sta_digest(m) for m in measurements)
     report["antenna_census"] = {"verdict": "PASS" if antenna_measured else "NOT_MEASURED"}
+    report["sta_digest_census"] = {"verdict": "PASS" if sta_digest_measured else "NOT_MEASURED"}
     _set_final_fanout_verdict(report)
+    missing = []
     if not antenna_measured:
+        missing.append("input or final antenna net/pin census is absent")
+    if not sta_digest_measured:
+        missing.append("input or final STAPostPNR state digest is absent")
+    if missing:
         if report["verdict"] == "PASS":
-            report.update(verdict="NOT_MEASURED", code="LL_PRR_ANTENNA_NOT_MEASURED",
-                          reason="input or final antenna net/pin census is absent")
+            report.update(verdict="NOT_MEASURED",
+                          code=("LL_PRR_ANTENNA_NOT_MEASURED" if not antenna_measured
+                                else "LL_PRR_STA_DIGEST_NOT_MEASURED"),
+                          reason="; ".join(missing))
         else:
-            report["reason"] = (report.get("reason", "") +
-                                "; input or final antenna net/pin census is absent")
+            report["reason"] = "; ".join(filter(None, (report.get("reason"), *missing)))
+    elif report["verdict"] == "PASS":
+        report.pop("code", None)
 
 
 def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path) -> None:
@@ -787,6 +803,8 @@ def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path
     if report.get("verdict") != "PASS":
         reason = ("the input/final OpenROAD.CheckAntennas net and pin census "
                   "is missing" if report.get("code") == "LL_PRR_ANTENNA_NOT_MEASURED"
+                  else "the input/final STAPostPNR state digest is missing"
+                  if report.get("code") == "LL_PRR_STA_DIGEST_NOT_MEASURED"
                   else f"step 32 verdict {report.get('verdict')!r} is not PASS")
         refuse(reason)
         return
@@ -806,6 +824,9 @@ def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path
     final_antenna = _antenna_counts(final)
     if input_antenna is None or final_antenna is None:
         refuse("the input/final OpenROAD.CheckAntennas net and pin census is missing")
+        return
+    if not _has_sta_digest(baseline) or not _has_sta_digest(final):
+        refuse("the input/final STAPostPNR state digest is missing")
         return
     import librelane_contract as _ll
     # The trigger describes the INPUT route; a successfully repaired output
