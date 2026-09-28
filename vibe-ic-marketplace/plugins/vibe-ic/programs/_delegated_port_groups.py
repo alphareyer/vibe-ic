@@ -25,6 +25,31 @@ _DECLARATION = r"(?:plugin_output/)?declaration\.json"
 _PORT_NAMES = r"(?:\b(?:port|signal|pin|sub-?port)\s+names?\b|\bnames?\s+(?:of|for)\s+(?:this|the)\s+(?:port|signal|pin|sub-?port)\b)"
 _ZH_PORT_NAMES = r"(?:訊號|信号|埠|端口)\s*(?:名稱|名称)"
 _CLAUSES = re.compile(r"[;；。]|[.!?](?=\s|$)")
+_QUALIFIED_NAMES = re.compile(
+    r"\b(?P<label>[A-Za-z][\w-]*)\s+(?:interface\s+)?"
+    r"(?:port|signal|pin|sub-?port)\s+names?\b", re.I)
+
+
+def _names_another_group(clause: str, group: str) -> bool:
+    """A named interface in the port-name noun phrase overrides the heading."""
+    generic = {"the", "this", "these", "actual", "concrete", "exact",
+               "all", "its", "defines", "declares", "specifies", "sets",
+               "determines", "for", "of", "from"}
+    return any(match.group("label").lower() not in generic | {group.lower()}
+               for match in _QUALIFIED_NAMES.finditer(clause))
+
+
+def _table_fixes_group(section: list[str], group: str) -> bool:
+    """An explicit table assignment cannot coexist with name delegation."""
+    group_ref = rf"(?:{re.escape(group)}|(?:this|the)\s+(?:port\s+)?group)"
+    name_ref = (rf"(?:\b{group_ref}\s+(?:(?:port|signal|pin)\s+)?names?\b|"
+                rf"\b(?:port|signal|pin)\s+names?\s+(?:of|for)\s+{group_ref}\b)")
+    table_rule = rf"(?:{name_ref}.{{0,100}}\b(?:fixed|defined|specified|determined|set|listed)\s+(?:by|in)\s+(?:the\s+)?table\b|\btable\b.{{0,100}}\b(?:fixes|defines|specifies|determines|sets|lists)\b.{{0,100}}{name_ref})"
+    for line in section:
+        for clause in _CLAUSES.split(line):
+            if is_denied(clause) is None and re.search(table_rule, clause, re.I):
+                return True
+    return False
 
 
 def _delegates_names(line: str, group: str) -> bool:
@@ -53,7 +78,7 @@ def _delegates_names(line: str, group: str) -> bool:
         rf"{_ZH_PORT_NAMES}",
     )
     for clause in _CLAUSES.split(line):
-        if is_denied(clause) is None and any(
+        if is_denied(clause) is None and not _names_another_group(clause, group) and any(
                 re.search(pattern, clause, re.I) for pattern in relationships):
             return True
     return False
@@ -80,7 +105,7 @@ def extract_delegated_groups(extracted: dict[str, str]) -> list[dict]:
                 section.append(following)
             authority_lines = [row for row in section
                                if _delegates_names(row, match.group(1))]
-            if not authority_lines:
+            if not authority_lines or _table_fixes_group(section, match.group(1)):
                 continue
             examples = []
             for row in section:
