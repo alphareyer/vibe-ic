@@ -32,8 +32,8 @@ the library cells' pin labels.)
 
 Locally verifiable here: that both Region passes carry texts, that the values
 are copied out BEFORE `clear()` (reading a Shape handle after clear aborts the
-interpreter), that only the top cell is preserved, and that the label anchor is
-snapped rather than the transform rebuilt.
+interpreter), that only the top cell's texts survive a flatten, and that the
+label anchor is snapped rather than the transform rebuilt.
 """
 import sys
 from pathlib import Path

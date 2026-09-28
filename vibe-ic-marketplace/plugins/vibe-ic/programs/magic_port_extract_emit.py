@@ -15,7 +15,7 @@ The emitted script does:
     gds read   <gds>
     load       <top>
     select top cell
-    [optional] flatten <top>           ; for a single flat device-level .subckt
+    [optional] flatten -dotoplabels <top>  ; flat .subckt, top labels only
     port makeall                       ; promote pin labels -> ports
     extract all
     ext2spice lvs
@@ -88,7 +88,8 @@ def _normalize_pdk(pdk: str) -> str:
 class MagicExtractOptions:
     """Knobs for the emitted extraction TCL, all deterministic.
 
-    `flatten_top`: when True, emit `flatten <top>` so ext2spice produces a
+    `flatten_top`: when True, emit `flatten -dotoplabels <top>` (the top's
+                   own labels only) so ext2spice produces a
                    single flat device-level `.subckt <top>` (matching the
                    20937-device HDLC layout) instead of a cell-hierarchical
                    netlist. Default True for LVS device-level compare.
@@ -156,7 +157,16 @@ def build_extraction_tcl(
             "# Flatten so ext2spice emits ONE flat device-level .subckt\n"
             "# (matches the post-PnR device count for the LVS compare)."
         )
-        out.append(f"flatten {top_cell}")
+        # N6: `-dotoplabels` keeps only the top's own labels in the flat cell.
+        # A bare flatten copies every library cell's pin labels into it, and
+        # `port makeall` below would promote each to a top port (measured
+        # through the eda_extraction script in the pinned image, magic
+        # 8.3.684: 11 library pins promoted vs top labels only). Also measured
+        # there: flattening into the loaded top's own name prints "<top>
+        # already exists" and flattens nothing, so this line is inert today
+        # and the extraction stays hierarchical; the option keeps it safe if
+        # the target is ever renamed.
+        out.append(f"flatten -dotoplabels {top_cell}")
         out.append(f"load {top_cell}")
         out.append("select top cell")
 

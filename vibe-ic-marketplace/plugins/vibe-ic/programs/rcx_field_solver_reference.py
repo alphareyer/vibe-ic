@@ -135,7 +135,14 @@ for k in ("produce_cell_outlines", "produce_blockages", "produce_obstructions",
     setattr(c, k, False)
 ly = db.Layout(); ly.dbu = cfg["dbu"]
 ly.read(cfg["def"], opt)
-top = ly.top_cell(); top.flatten(-1, True)
+top = ly.top_cell()
+# A flatten lifts a child cell's texts into the top. This read produces none
+# (every label producer is off above); the clear keeps that true for any input.
+for _c in ly.each_cell():
+    if _c.cell_index() != top.cell_index():
+        for _l in ly.layer_indexes():
+            _c.shapes(_l).clear(db.Shapes.STexts)
+top.flatten(-1, True)
 stack = [(n, k, tuple(p)) for n, k, p in cfg["stack"]]
 li = {n: ly.layer(*p) for n, _k, p in stack}
 l2n = db.LayoutToNetlist(db.RecursiveShapeIterator(ly, top, []))
