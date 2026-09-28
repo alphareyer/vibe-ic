@@ -3,6 +3,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 import spec_declaration_emit as emitter
@@ -68,6 +70,42 @@ def test_numeric_example_matches_numeric_declaration_without_weakening_provenanc
     assert emitter._same_declared_value(1, "1") is False
     assert emitter._same_declared_value(1, True) is False
     assert _verify(root, contract, {"latency_cycles": 2})["verdict"] == "DISCLOSE"
+
+
+@pytest.mark.parametrize("example,declared,other", [
+    ("true", True, False),
+    ("false", False, True),
+])
+def test_boolean_example_matches_only_the_same_json_boolean(
+    tmp_path, example, declared, other
+):
+    root, contract = _project(tmp_path, "boolean_choice", "signed_mode",
+                              example, str(other).lower())
+    same = _verify(root, contract, {"signed_mode": declared})
+    assert same["verdict"] == "PASS"
+    assert same["spec_example_disclosures"] == []
+    different = _verify(root, contract, {"signed_mode": other})
+    assert different["verdict"] == "DISCLOSE"
+    assert different["spec_example_disclosures"][0]["declared"] is other
+    assert emitter._same_declared_value(declared, example) is False
+    assert emitter._same_declared_value(declared, int(declared)) is False
+
+
+def test_artifact_gate_preserves_a_disclosed_spec_example_difference(tmp_path):
+    root, contract = _project(tmp_path, "declared_order", "wire_order",
+                              "little", "big")
+    declaration = {"wire_order": "big"}
+    verified = _verify(root, contract, declaration)
+    assert verified["verdict"] == "DISCLOSE"
+    assert artifact_gate.main([str(root)]) == 0
+    report = json.loads((root / "reports/phase2/gates/spec_required_artifacts.json").read_text())
+    assert report["verdict"] == "PASS"
+    assert report["failed_count"] == 0
+    assert report["advisory_status"] == "DISCLOSE"
+    assert report["advisory_count"] == 1
+    item = report["results"][0]
+    assert item["status"] == item["substance_status"] == "DISCLOSE"
+    assert item["spec_example_disclosures"] == verified["spec_example_disclosures"]
 
 
 def test_optional_conflicting_examples_are_reported_and_gate_keeps_owner_review(tmp_path):
