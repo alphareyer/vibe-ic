@@ -76,6 +76,7 @@ import subprocess
 import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent))
+import _psm_source_model as _psm_sm  # noqa: E402
 import _docker_watchdog as _dw    # noqa: E402  the canonical supervised
 # `docker exec` primitive: identity-stamped reap, container-side ceiling, and
 # the IN-CONTAINER CPU probe this call site cannot do without (see `emit`).
@@ -918,6 +919,9 @@ def _build_transient_tcl(def_file: Path, tech_lef: Path, cell_lef: Path,
         f"{{ catch {{set_wire_rc -layer {metal_prefix}1}} }}\n"
         f"catch {{set_wire_rc -clock -layer {metal_prefix}5}}\n"
         f"{via_tcl}"
+        # A padless block's promoted supply pins are its interface, not the
+        # solver's source model (`_psm_source_model`).
+        f"{_psm_sm.exclude_promoted_pins_tcl()}"
         f"{solves}"
         f"exit\n"
     )
@@ -1198,6 +1202,8 @@ def emit(def_file: Path, tech_lef: Path, cell_lef: Path, liberty: Path,
     payload["per_net"] = per_net
     payload["power_basis"] = basis
     payload["static_tier"] = static_tier
+    # The source model the solver used, read from its own log.
+    payload["psm_source_model"] = _psm_sm.describe(log)
     # local budget verdict (the authoritative gate re-derives it from budget_pct)
     payload["budget_pct"] = budget_pct
     if vdd is not None:

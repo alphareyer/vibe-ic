@@ -2296,6 +2296,61 @@ _register(Instrument(
 ))
 
 
+# ---- PSM's source model on a block with promoted supply pins (FX_SPM_DEF review) ----
+
+def _judge_psm_source_model(log: str) -> Optional[str]:
+    """The IR/EM session's own transcript: the promoted supply pins were
+    excluded and PSM solved on its generated pattern -> PROMOTED_PINS_EXCLUDED;
+    a session that sourced from the pins (no exclusion, no PSM-0073) -> silent."""
+    import _psm_source_model as M
+    rec = M.describe(log)
+    marker = rec.get("marker") or {}
+    return ("PROMOTED_PINS_EXCLUDED"
+            if marker.get("promoted_supply_pins_excluded") and rec.get("psm_0073")
+            else None)
+
+
+_PSM_SM_CAL_PROV = (
+    "Real OpenROAD 26Q3-3002-gda11f47e14 transcripts, vibeic-eda 0.3.83 (the "
+    "image the lane's runs pinned by digest), 8HD-4, 2026-09-28. Calibration "
+    "structure, no design under test: a two-inverter chain of the PDK's own "
+    "`gf180mcu_fd_sc_mcu7t5v0__inv_1`, die 60x60 um, core 10..50 um, "
+    "initialize_floorplan / place_pins / global_connect (VDD, VSS, VNW->VDD, "
+    "VPW->VSS), `define_pdn_grid -pins {Metal4 Metal5}` with Metal1 follow-pins "
+    "and Metal4/Metal5 straps (1.6 um, pitch 20), pdngen, global + detailed "
+    "placement, `set_operating_conditions` tt_025C_5v00, then "
+    "`analyze_power_grid -net VDD`. The two sessions are byte-identical up to "
+    "the solve. Unedited. ")
+
+_register(Instrument(
+    name="_psm_source_model::describe",
+    reads="the IR/EM/transient PSM session transcript (PSM_SOURCE_MODEL line + PSM-0073)",
+    ruling="FX_SPM_DEF review wave7 (SPMDEF BLOCKER/MAJOR)", owner="fxspm1",
+    why=("Promoting a padless block's straps to supply pins made PSM source "
+         "from every strap (no -vsrc), and the IR/EM records kept describing "
+         "the old conservative model. The pair is the same structure solved "
+         "twice: once with the promoted pins marked PSM_DISCONNECT (PSM falls "
+         "back to its generated bump pattern and says so), once with the pins "
+         "as sources (no PSM-0073)."),
+    judge=_judge_psm_source_model,
+    positive=Sample(
+        provenance=(_PSM_SM_CAL_PROV + "Positive: `_psm_source_model."
+                    "exclude_promoted_pins_tcl()` before the solve: "
+                    "`PSM_SOURCE_MODEL: promoted_supply_pins_excluded=2 "
+                    "placed_pads=0`, `[INFO PSM-0073] Using bump pattern on "
+                    "Metal5`, worst IR 9.40e-06 V. calibration/"
+                    "psm_source_model_promoted_pins_excluded_positive.log"),
+        artefact=_read("psm_source_model_promoted_pins_excluded_positive.log")),
+    expect="PROMOTED_PINS_EXCLUDED",
+    negative=Sample(
+        provenance=(_PSM_SM_CAL_PROV + "Negative: the same session with no "
+                    "exclusion: the two strap pins are PSM's sources, no "
+                    "PSM-0073, worst IR 8.59e-06 V. calibration/"
+                    "psm_source_model_pins_as_sources_negative.log"),
+        artefact=_read("psm_source_model_pins_as_sources_negative.log")),
+))
+
+
 # ---- LibreLane flow.log as a provenance witness (llv1 W19, decision 4a) ----
 
 _LL_FLOW_LOG_PROV = (

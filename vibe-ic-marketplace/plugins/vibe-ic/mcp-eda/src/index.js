@@ -3764,6 +3764,32 @@ catch {
   pdngen
 }`;
 
+    // Mirror _psm_source_model.exclude_promoted_pins_tcl(). This MCP session
+    // reads the shipped DEF independently of the flow's OpenROAD sessions.
+    // A padless block's strap BPins are interface pins, not ideal PSM sources.
+    const psmSourceTcl = `
+set _vibeic_psm_props {}
+set _vibeic_psm_pads 0
+foreach _vibeic_psm_i [[ord::get_db_block] getInsts] {
+  if {[[$_vibeic_psm_i getMaster] isPad] && [$_vibeic_psm_i isPlaced]} { incr _vibeic_psm_pads }
+}
+if {$_vibeic_psm_pads == 0} {
+  foreach _vibeic_psm_n [[ord::get_db_block] getNets] {
+    if {[$_vibeic_psm_n getSigType] ni {POWER GROUND}} { continue }
+    foreach _vibeic_psm_t [$_vibeic_psm_n getBTerms] {
+      if {![$_vibeic_psm_t isSpecial]} { continue }
+      foreach _vibeic_psm_b [$_vibeic_psm_t getBPins] {
+        set _vibeic_psm_p [odb::dbBoolProperty_find $_vibeic_psm_b PSM_DISCONNECT]
+        if {$_vibeic_psm_p eq "NULL"} {
+          set _vibeic_psm_p [odb::dbBoolProperty_create $_vibeic_psm_b PSM_DISCONNECT 1]
+        } else { $_vibeic_psm_p setValue 1 }
+        lappend _vibeic_psm_props $_vibeic_psm_p
+      }
+    }
+  }
+}
+puts "PSM_SOURCE_MODEL: promoted_supply_pins_excluded=[llength $_vibeic_psm_props] placed_pads=$_vibeic_psm_pads"`;
+
     // SITE 4/5 — item 1. NOTE: `analyze_power_grid` is deliberately wrapped in
     // a Tcl `catch` here, so a PSM connectivity failure is a WARN by design and
     // still exits 0. What the file argument adds is that a failure BEFORE that
@@ -3790,6 +3816,7 @@ if {$_vddnet eq ""} {
 } else {
 ${ttlEnvVoltage}
 ${pdnStripeTcl}
+${psmSourceTcl}
 set rc [catch {analyze_power_grid -net $_vddnet} err]
 if {$rc} {
   puts "PSM_CONNECTIVITY_WARN: $err"
@@ -3816,8 +3843,19 @@ if {$rc} {
     // exactly what the (now real) exit code reports. Absent/unknown must never
     // upgrade a verdict — but a caught error must not downgrade one either.
     const irFailed = irRun.rc !== 0;
-    const isComplete = result.output.includes("IR_DROP_COMPLETE") && !irFailed;
-    const isWarn = result.output.includes("IR_DROP_WARN") && !irFailed;
+    const marker = result.output.match(/^PSM_SOURCE_MODEL: promoted_supply_pins_excluded=(\d+) placed_pads=(\d+)\s*$/m);
+    const promotedExcluded = marker ? Number(marker[1]) : null;
+    const placedPads = marker ? Number(marker[2]) : null;
+    const psmGeneratedBumps = /PSM-0073/.test(result.output);
+    const sourceModel = !marker ? "NOT_MEASURED: PSM_SOURCE_MODEL marker absent"
+      : psmGeneratedBumps
+        ? `PSM default sources: generated bump pattern (PSM-0073); ${promotedExcluded} promoted pin(s) excluded`
+        : promotedExcluded > 0
+          ? "NOT_MEASURED: promoted pins excluded but PSM-0073 absent"
+          : `PSM default sources: supply BTerms (placed pads ${placedPads})`;
+    const sourceModelMeasured = !sourceModel.startsWith("NOT_MEASURED");
+    const isComplete = result.output.includes("IR_DROP_COMPLETE") && !irFailed && sourceModelMeasured;
+    const isWarn = result.output.includes("IR_DROP_WARN") && !irFailed && sourceModelMeasured;
 
     // P-5: what the DEF actually declared, and which net was analysed.
     const _grab = (re) => { const m = result.output.match(re); return m ? m[1].trim() : null; };
@@ -3838,7 +3876,7 @@ if {$rc} {
     // as a confident number.
     const ir = parseIrReport(result.output);
     const power = parseReportPower(result.output);
-    const irMeasured = ir.worst_ir_drop_v !== null && ir.total_power_w !== null;
+    const irMeasured = ir.worst_ir_drop_v !== null && ir.total_power_w !== null && sourceModelMeasured;
 
     // P-2. `success: isComplete || isWarn`, where isWarn means the Tcl
     // `catch {analyze_power_grid}` FIRED — PSM produced no IR report at all. The
@@ -3884,6 +3922,10 @@ if {$rc} {
         tool: "OpenROAD PSM",
         net: vddNet,
         ir_status: irStatus,
+        source_model: sourceModel,
+        promoted_supply_pins_excluded: promotedExcluded,
+        placed_pads: placedPads,
+        psm_0073_generated_bumps: psmGeneratedBumps,
         voltage_v: effVoltage,
         lib_nom_voltage_v: nomVoltage,
         voltage_source: voltageSupplied ? "caller"
@@ -3947,6 +3989,9 @@ if {$rc} {
     if (isWarn) {
       warnings.push("PSM connectivity check failed — cross-layer PDN stripes were injected but connectivity still incomplete. Downgraded to WARN.");
     }
+    if (!sourceModelMeasured) {
+      warnings.push(`PSM source model could not be verified: ${sourceModel}`);
+    }
     if (irFailed) {
       warnings.push(
         `openroad exited ${irRun.rc}`
@@ -3964,6 +4009,10 @@ if {$rc} {
           openroad_error_count: irRun.errorCount,
           status: irStatus,
           measured: irMeasured,
+          source_model: sourceModel,
+          promoted_supply_pins_excluded: promotedExcluded,
+          placed_pads: placedPads,
+          psm_0073_generated_bumps: psmGeneratedBumps,
           voltage_v: effVoltage,
           lib_nom_voltage_v: nomVoltage,
           voltage_source: voltageSupplied ? "caller"
