@@ -30,7 +30,14 @@ if str(_PROG) not in sys.path:
 
 import phase1_evidence_grounding_check as G  # noqa: E402
 
-_FIX = _PROG / "tests" / "fixtures" / "synthetic_benchmark_phase1"
+# The synthetic corpus, built privately by its generator. This used to be the
+# shipped `tests/fixtures/synthetic_benchmark_phase1/`, which held a corpus only
+# when `test_protocol_detector_no_misfire` had written one there at import time,
+# so this file's population depended on which module a checkout had run first.
+sys.path.insert(0, str(_PROG / "tests" / "fixtures"))
+from synthetic_protocol_blobs import private_synthetic_benchmark_phase1  # noqa: E402
+
+_FIX = private_synthetic_benchmark_phase1()
 
 
 def _fixture_projects():
@@ -52,11 +59,10 @@ def test_committed_fixture_grounding_clean(proj):
 
 def test_fixtures_present():
     # the corpus should exist so the loop guard actually runs (not vacuous).
-    # It lives under programs/tests/fixtures/synthetic_benchmark_phase1/ but is
-    # NOT git-tracked (author-local test data); on a clean checkout / CI it is
-    # absent, so SKIP rather than hard-fail — the grounding guard itself is
-    # exercised elsewhere (test_committed_fixture_grounding_clean parametrizes
-    # over whatever IS present).
+    # It is built privately by its generator at import (see `_FIX`), so it is
+    # present on every checkout; the skip below now fires only if the
+    # generator itself yields no project, which is a real finding to see
+    # rather than a thin environment.
     n = len(_fixture_projects())
     if n == 0:
         import pytest

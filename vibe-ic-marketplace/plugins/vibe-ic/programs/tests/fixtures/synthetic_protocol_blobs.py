@@ -22,7 +22,10 @@ superset blob; claude_extracted L1-L3 for the gold blob).
 """
 from __future__ import annotations
 
+import atexit
 import json
+import shutil
+import tempfile
 from pathlib import Path
 
 # stem -> structural spec text. Each is the smallest blob that satisfies its own
@@ -129,6 +132,31 @@ def build_synthetic_benchmark_phase1(root: Path) -> Path:
             (docdir / "L2_FRS.json").write_text(l2, encoding="utf-8")
             (docdir / "L3_CMD_PROTOCOL.json").write_text(l3, encoding="utf-8")
     return root
+
+
+_PRIVATE_ROOT = None
+
+
+def private_synthetic_benchmark_phase1() -> Path:
+    """The synthetic corpus, built ONCE per process into a PRIVATE temp dir.
+
+    Every test module that reads the synthetic corpus takes it from here and
+    never from ``programs/tests/fixtures/synthetic_benchmark_phase1/``. Two
+    test modules used to materialise it INTO that shipped directory at import
+    time, so under xdist several workers collecting them wrote the same files
+    at once (``write_text`` truncates before it writes) while other workers
+    globbed and read them; every other reader's population depended on
+    whether a writer had been imported first in that checkout; and a corpus
+    left on disk by an older generator was read in preference to the current
+    one. A private build has none of those: it is complete before the path
+    is returned, it is this generator's output, and nothing else writes it.
+    """
+    global _PRIVATE_ROOT
+    if _PRIVATE_ROOT is None:
+        root = Path(tempfile.mkdtemp(prefix="synthetic_bp1_"))
+        atexit.register(shutil.rmtree, str(root), True)
+        _PRIVATE_ROOT = build_synthetic_benchmark_phase1(root)
+    return _PRIVATE_ROOT
 
 
 if __name__ == "__main__":  # pragma: no cover - manual regen helper
