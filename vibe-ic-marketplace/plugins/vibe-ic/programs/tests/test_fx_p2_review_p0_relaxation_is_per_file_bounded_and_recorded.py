@@ -13,9 +13,10 @@ use-before-declare. Three things the review found:
      diagnostic in a file that IS the supplied IP, byte-identical to what the
      input delivered (SOURCE_MANIFEST `staged_from_input`, or the sha256 an
      `ip_catalog_pull` recorded), may be relaxed.
-(6a) `_invoke` ran `subprocess.run` with no timeout, for the strict call and
-     the new relaxed one. Now both are bounded; on the docker path the named
-     container is killed; a timeout is an execution error, never retried.
+(6a) `_invoke` once ran unsupervised. Strict and relaxed calls now use a
+     progress-stall watchdog; on the docker path a stalled named container is
+     reaped. The review-wave-11 correction removed GNU `timeout`, which killed
+     healthy long elaborations. Its former limit is only a recorded budget.
 (5)  The flow's only caller, `flow_step_output_content_check --mode rtl`, kept
      only findings/sources/exit codes, so the relaxation was silent in the run:
      the Yosys row showed the RELAXED exit 0 and the strict refusal was gone.
@@ -221,8 +222,8 @@ def _supervised(monkeypatch, *, rc=0, outcome="natural", docker=True):
     return seen
 
 
-def test_a_tool_run_is_supervised_by_progress_with_a_backstop(monkeypatch,
-                                                              tmp_path):
+def test_a_tool_run_is_supervised_by_progress_without_a_clock_kill(monkeypatch,
+                                                                   tmp_path):
     seen = _supervised(monkeypatch)
     F._invoke("yosys", ["-p", "x"], tmp_path, "img@sha256:" + "0" * 64)
     assert "cmd" in seen, "the tool run did not go through the supervisor"
@@ -230,12 +231,13 @@ def test_a_tool_run_is_supervised_by_progress_with_a_backstop(monkeypatch,
     assert cmd[:3] == ["docker", "run", "--rm"]
     name = cmd[cmd.index("--name") + 1]
     assert name.startswith("vibeic_p0_yosys")
-    # the wall clock is only the BACKSTOP, around the tool, inside the container
-    assert cmd[cmd.index("--entrypoint") + 1] == "timeout"
-    assert "yosys" in cmd and "-k" in cmd
+    assert cmd[cmd.index("--entrypoint") + 1] == "yosys"
+    assert "timeout" not in cmd and "-k" not in cmd
+    assert "--memory" in cmd and "--memory-swap" in cmd
     # the stall is judged from inside the container, and reaped by name
     assert callable(kw.get("kill")) and callable(kw.get("cpu_probe"))
     assert kw.get("stall_grace_s", 0) > 0
+    assert kw.get("hard_ceiling_s", 0) > 0  # observation, not a kill
 
 
 def test_a_stall_is_not_measured_not_a_finding(monkeypatch, tmp_path):
@@ -245,10 +247,13 @@ def test_a_stall_is_not_measured_not_a_finding(monkeypatch, tmp_path):
         F._invoke("yosys", ["-p", "x"], tmp_path, "img@sha256:" + "0" * 64)
 
 
-def test_a_fired_backstop_is_not_measured_either(monkeypatch, tmp_path):
+def test_tool_rc_124_is_not_misreported_as_a_removed_clock_backstop(
+        monkeypatch, tmp_path):
     _supervised(monkeypatch, rc=124)
-    with pytest.raises(_NM or subprocess.TimeoutExpired):
-        F._invoke("yosys", ["-p", "x"], tmp_path, "img@sha256:" + "0" * 64)
+    result = F._invoke("yosys", ["-p", "x"], tmp_path,
+                       "img@sha256:" + "0" * 64)
+    assert result.returncode == 124
+    assert "timeout" not in result.args
 
 
 def test_a_strict_stall_is_an_execution_error_not_a_retry(monkeypatch,

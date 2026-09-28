@@ -466,6 +466,52 @@ def _reports_for_check(project: Path, check: str
     return out
 
 
+_PHASE3_MEASUREMENT_RECORDS = frozenset({
+    # Fixed producer outputs, not every JSON in reports/phase3.  In
+    # particular technology_units.json is a synthesis-time preparation
+    # publication by publish_database_unit_declaration, not sign-off work.
+    "reports/phase3/drc_signoff.json",
+    "reports/phase3/lvs_verdict.json",
+    "reports/phase3/sta/post_route_summary.json",
+    "reports/phase3/si_mcf_sta.json",
+    "reports/phase3/antenna.json",
+    "reports/phase3/ir_drop.json",
+    "reports/phase3/em.json",
+})
+
+
+def _phase3_measurement_witness(project: Path, path: Path) -> bool:
+    """A current Phase-3 producer/completion publication, not preparation.
+
+    The exact orchestrator receipt and the named sign-off producer outputs are
+    the provenance boundary.  A populated directory, a preparation record, or
+    this gate's own compliance audit cannot establish that Phase 3 measured the
+    design.  A named output also needs an actual terminal verdict.
+    """
+    try:
+        rel = path.relative_to(project).as_posix()
+    except ValueError:
+        return False
+    if (rel != "reports/orchestrator/phase3_one_shot.json"
+            and rel not in _PHASE3_MEASUREMENT_RECORDS):
+        return False
+    try:
+        payload = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("program") in {
+            "flow_compliance_check",
+            "phase3_one_shot_runner.publish_database_unit_declaration"}:
+        return False
+    if rel == "reports/orchestrator/phase3_one_shot.json" and \
+            payload.get("program") not in (None, "phase3_one_shot_runner"):
+        return False
+    verdict = _report_verdict_of(payload)
+    return verdict is not None and verdict not in _ABSENT_VERDICTS
+
+
 def _phase3_has_run(project: Path) -> bool:
     """Has this run reached the phase that MEASURES sign-off?
 
@@ -482,20 +528,15 @@ def _phase3_has_run(project: Path) -> bool:
     """
     records = []
     top = project / "reports" / "orchestrator" / "phase3_one_shot.json"
-    if top.is_file():
+    if top.is_file() and _phase3_measurement_witness(project, top):
         records.append(top)
     d = project / "reports" / "phase3"
     if d.is_dir():
-        # The AUDIT's own publication is not a phase-3 measurement, wherever
-        # it is written. MEASURED on subservient (8HD-4, 2026-09-28): the
-        # phase-2 final audit publishes `reports/phase3/gates/
-        # stage3_compliance.json` (`program: flow_compliance_check`), and this
-        # gate -- run inside that same audit -- then read "phase 3 has run"
-        # off the audit's own bookkeeping. Same rule as the requirement
-        # search's `reports/audit` exclusion, keyed on the record's own
-        # `program` because the path does not say it.
+        # Only a producer publication with a terminal verdict is a witness.
+        # The audit's own report and technology preparation are excluded by
+        # their producer role, even when written after the phase-2 netlist.
         records.extend(r for r in d.rglob("*.json")
-                       if not _is_audit_publication(r))
+                       if _phase3_measurement_witness(project, r))
     if not records:
         return False
     # FX_P2 — PHASE 3 OF WHICH DESIGN? A phase-3 record older than this run's
@@ -513,16 +554,6 @@ def _phase3_has_run(project: Path) -> bool:
     if newest_netlist is not None and newest_record < newest_netlist:
         return False
     return True
-
-
-def _is_audit_publication(path: Path) -> bool:
-    """Is this JSON the flow-compliance audit's own record?"""
-    try:
-        payload = json.loads(path.read_text(errors="replace"))
-    except (OSError, ValueError):
-        return False
-    return isinstance(payload, dict) and \
-        payload.get("program") == "flow_compliance_check"
 
 
 def _mtime(path: Path) -> float:
