@@ -1,0 +1,11 @@
+{ "signal": [
+    { "name": "y", "wave": "0.." },
+    { "name": "trigger", "wave": "010" },
+    { "name": "cmp_y", "wave": "101" },
+    { "name": "b", "wave": "0.." },
+    { "name": "a", "wave": "010" }
+  ],
+  "config": {
+    "hscale": 0.25
+  }
+}

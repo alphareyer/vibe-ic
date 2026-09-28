@@ -543,6 +543,7 @@ _ONEHOT_WAVE = {"signal": [
     {"name": "h[0]_gate", "wave": "04444"},
     {"name": "s[0]_gold", "wave": "04444"},
 ]}
+_REAL_YOSYS = Path(__file__).resolve().parent / "fixtures/lec_residual_yosys_069"
 # A stateful miter whose induction made no progress on one point.
 _STATEFUL_PROOF_LOG = """\
 === equiv ===
@@ -614,6 +615,72 @@ def test_binary_counter_and_onehot_ring_never_become_non_equivalent(
     project = tmp_path / "gate"
     _write_lec(project, report)
     assert pre.audit(project).verdict == "NOT_PROVEN"
+
+
+@pytest.mark.parametrize("shape,parser_verdict", [
+    ("status", "FAIL"), ("induct", "INCONCLUSIVE")])
+def test_real_yosys_stateful_residual_is_not_proven_at_producer_and_gates(
+        monkeypatch, tmp_path, shape, parser_verdict):
+    """Both Yosys log shapes leave the reset-equivalent stateful pair open."""
+    proof_log = (_REAL_YOSYS / f"{shape}.log").read_text()
+    assert lec_run.parse_equiv_output(proof_log)["verdict"] == parser_verdict
+    assert ("Proved 0 previously unproven" in proof_log) == (shape == "induct")
+    report = _drive_lec_run(
+        monkeypatch, tmp_path, proof_log,
+        (_REAL_YOSYS / "state_search.log").read_text(),
+        (_REAL_YOSYS / "state_flat.il").read_text(),
+        json.loads((_REAL_YOSYS / "state_trace.json").read_text()),
+        gold=(_REAL_YOSYS / "gold.v").read_text(),
+        gate=(_REAL_YOSYS / "gate.v").read_text(), top="top")
+    assert report["counterexample_search"]["result"] == cex.CANDIDATE
+    assert report["counterexample_search"]["completeness"] == "BOUNDED"
+    assert report["counterexample_search"]["initial_state"]["h_gate"] == "0000"
+    assert report["non_equivalent_points"] == 0
+    assert report["verdict"] == "NOT_PROVEN"
+    assert post.evaluate_report(report)["verdict"] == "NOT_PROVEN"
+    project = tmp_path / "gate"
+    _write_lec(project, report)
+    assert pre.audit(project).verdict == "NOT_PROVEN"
+
+
+@pytest.mark.parametrize("shape", ["status", "induct"])
+def test_real_yosys_provisional_fail_word_cannot_decide_either_gate(
+        monkeypatch, tmp_path, shape):
+    """A legacy producer's FAIL word cannot certify a stateful SAT model."""
+    report = _drive_lec_run(
+        monkeypatch, tmp_path, (_REAL_YOSYS / f"{shape}.log").read_text(),
+        (_REAL_YOSYS / "state_search.log").read_text(),
+        (_REAL_YOSYS / "state_flat.il").read_text(),
+        json.loads((_REAL_YOSYS / "state_trace.json").read_text()),
+        gold=(_REAL_YOSYS / "gold.v").read_text(),
+        gate=(_REAL_YOSYS / "gate.v").read_text(), top="top")
+    report["verdict"] = "FAIL"  # exact pre-fix producer word on the status log
+    assert post.evaluate_report(report)["verdict"] == "NOT_PROVEN"
+    project = tmp_path / "gate"
+    _write_lec(project, report)
+    assert pre.audit(project).verdict == "NOT_PROVEN"
+
+
+@pytest.mark.parametrize("shape", ["status", "induct"])
+def test_real_yosys_complete_difference_still_fails_producer_and_gates(
+        monkeypatch, tmp_path, shape):
+    proof_log = (_REAL_YOSYS / f"diff_{shape}.log").read_text()
+    assert lec_run.parse_equiv_output(proof_log)["verdict"] == (
+        "FAIL" if shape == "status" else "INCONCLUSIVE")
+    report = _drive_lec_run(
+        monkeypatch, tmp_path, proof_log,
+        (_REAL_YOSYS / "diff_search.log").read_text(),
+        (_REAL_YOSYS / "diff_flat.il").read_text(),
+        json.loads((_REAL_YOSYS / "diff_trace.json").read_text()),
+        gold=(_REAL_YOSYS / "diff_gold.v").read_text(),
+        gate=(_REAL_YOSYS / "diff_gate.v").read_text(), top="top")
+    assert report["counterexample_search"]["completeness"] == "COMPLETE"
+    assert report["counterexample_search"]["result"] == "COUNTEREXAMPLE"
+    assert report["verdict"] == "NON_EQUIVALENT"
+    assert post.evaluate_report(report)["verdict"] == "NON_EQUIVALENT"
+    project = tmp_path / "gate"
+    _write_lec(project, report)
+    assert any(f.rule == "LEC_NOT_EQUIVALENT" for f in pre.audit(project).findings)
 
 
 def test_lec_run_keeps_a_stateful_model_not_proven_and_says_so(monkeypatch, tmp_path):

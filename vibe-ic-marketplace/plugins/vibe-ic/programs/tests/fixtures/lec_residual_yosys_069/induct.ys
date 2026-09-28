@@ -1,0 +1,10 @@
+read_verilog /work/gold.v
+rename top gold
+read_verilog /work/gate.v
+rename top gate
+proc
+opt
+equiv_make gold gate equiv
+hierarchy -top equiv
+equiv_induct -seq 1
+equiv_status
