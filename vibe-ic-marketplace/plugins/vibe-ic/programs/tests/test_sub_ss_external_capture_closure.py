@@ -156,8 +156,10 @@ def test_native_slack_requires_both_numeric_tool_records(tmp_path, monkeypatch):
                                   "RCX_RULESETS": {"max_*": "/pdk/rules"},
                                   "CELL_LIBS": {"*_ss": ["/pdk/cell.lib"]}}))
     ctx = {"project": str(tmp_path), "image": "resolved-image", "mounts": [],
-           "configs": {"OpenROAD.RCX": str(config)}, "corners": ["max_ss"]}
-    report = ["worst slack max 0.012345\nworst slack min 0.140000\n"]
+           "configs": {"OpenROAD.RCX": str(config)}, "corners": ["max_ss"],
+           "derate": [0.95, 1.05]}
+    report = ["OCV_BASIS flat_ocv\nworst slack max 0.012345\n"
+              "worst slack min 0.140000\n"]
 
     def tool_write(_ctx, script, output):
         output.write_text("*SPEF\n" if script.name.startswith("extract") else report[0])
@@ -166,6 +168,7 @@ def test_native_slack_requires_both_numeric_tool_records(tmp_path, monkeypatch):
     good = native.measure(ctx, state, tmp_path / "good")
     assert good["setup_ws_min"] == 0.012345
     assert good["hold_ws_min"] == 0.14
-    report[0] = "worst slack max 0.012345\nworst slack min NOT_MEASURED\n"
+    report[0] = ("OCV_BASIS flat_ocv\nworst slack max 0.012345\n"
+                 "worst slack min NOT_MEASURED\n")
     with pytest.raises(contract.Refusal, match="NATIVE_POSTROUTE_SLACK_MISSING"):
         native.measure(ctx, state, tmp_path / "bad")
