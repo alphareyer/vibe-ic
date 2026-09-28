@@ -17000,6 +17000,114 @@ def _chip_top_resolve_excluded_variant_params(project, rtl_dir, param_block,
     return param_block, resolved, refusals
 
 
+def _chip_top_verified_response_bindings(project: Path, rtl_dir: Path,
+                                         dut: str, port_block: str,
+                                         connects: str):
+    """Apply only input-RTL-proven constant responders requested by the glue.
+
+    An AI-authored SOURCE_MANIFEST may name a staged wrapper that already binds
+    this DUT's request/output to a constant response. The observed source
+    connection is the authority for the bits; the manifest cannot invent an
+    expression. A malformed or unproved request refuses wrapper emission.
+    """
+    mf_path = rtl_dir / "SOURCE_MANIFEST.json"
+    if not mf_path.is_file():
+        return port_block, connects, []
+    try:
+        manifest = json.loads(mf_path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"unreadable SOURCE_MANIFEST: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError("SOURCE_MANIFEST must be an object")
+    specs = manifest.get("response_bindings", [])
+    if not isinstance(specs, list):
+        raise ValueError("response_bindings must be a list")
+    if not specs:
+        return port_block, connects, []
+    if manifest.get("reused_ip") is not True:
+        raise ValueError("response_bindings requires reused_ip=true")
+
+    def _port_expression(block: str, name: str) -> str:
+        matches = list(re.finditer(r"\.\s*" + re.escape(name) + r"\s*\(", block))
+        if len(matches) != 1:
+            raise ValueError(f"source wrapper must bind {name} exactly once")
+        op = block.find("(", matches[0].start())
+        close = _chip_top_match_paren(block, op)
+        if close < 0:
+            raise ValueError(f"unclosed source binding {name}")
+        return block[op + 1:close].strip()
+
+    rows = []
+    new_ports, new_connects = port_block, connects
+    for spec in specs:
+        if not isinstance(spec, dict):
+            raise ValueError("response binding must be an object")
+        inp, req, rel = (spec.get(k) for k in
+                         ("input_port", "request_port", "source"))
+        if not all(isinstance(v, str) and re.fullmatch(r"[A-Za-z_]\w*", v)
+                   for v in (inp, req)):
+            raise ValueError("response binding needs named input/request ports")
+        if not isinstance(rel, str) or not rel.startswith("input/"):
+            raise ValueError("response binding source must be staged input RTL")
+        src = (project / rel).resolve()
+        if not src.is_relative_to((project / "input").resolve()) or src.suffix not in (".v", ".sv"):
+            raise ValueError("response binding source escapes staged input RTL")
+        try:
+            scan = _chip_top_mask_comments(src.read_text())
+        except OSError as exc:
+            raise ValueError(f"response binding source unreadable: {rel}") from exc
+        # Find the one instance of the selected DUT in the cited source.
+        instances = []
+        for m in re.finditer(r"\b" + re.escape(dut) + r"\b\s*", scan):
+            pos = m.end()
+            if pos < len(scan) and scan[pos] == "#":
+                pos += 1
+                while pos < len(scan) and scan[pos].isspace():
+                    pos += 1
+                if pos >= len(scan) or scan[pos] != "(":
+                    continue
+                pos = _chip_top_match_paren(scan, pos) + 1
+            tail = re.match(r"\s*[A-Za-z_]\w*\s*\(", scan[pos:])
+            if not tail:
+                continue
+            op = scan.find("(", pos + tail.start())
+            close = _chip_top_match_paren(scan, op)
+            if close >= 0 and scan[close + 1:].lstrip().startswith(";"):
+                instances.append(scan[op + 1:close])
+        if len(instances) != 1:
+            raise ValueError(f"{rel} must contain one instance of {dut}")
+        block = instances[0]
+        req_wire = _port_expression(block, req)
+        resp = _port_expression(block, inp)
+        if not re.fullmatch(r"[A-Za-z_]\w*", req_wire):
+            raise ValueError("source request binding is not a named wire")
+        pattern = (r"\{\s*" + re.escape(req_wire) +
+                   r"\s*,\s*(1'[bB]1)\s*,\s*(\d+'[hHbBdD][0-9a-fA-F_]+)\s*\}")
+        match = re.fullmatch(pattern, resp)
+        if not match:
+            raise ValueError("source response is not request-ack plus constant data")
+        inner = new_ports.strip()
+        if not (inner.startswith("(") and inner.endswith(")")):
+            raise ValueError("unsupported wrapper port grammar")
+        chunks = inner[1:-1].split(",")
+        in_chunks = [c for c in chunks if re.search(r"\binput\b", c)
+                     and re.search(r"\b" + re.escape(inp) + r"\s*$", c)]
+        out_chunks = [c for c in chunks if re.search(r"\boutput\b", c)
+                      and re.search(r"\b" + re.escape(req) + r"\s*$", c)]
+        if len(in_chunks) != 1 or len(out_chunks) != 1:
+            raise ValueError("response/request not unique ANSI input/output ports")
+        old_conn = f".{inp}({inp})"
+        if new_connects.count(old_conn) != 1:
+            raise ValueError("response port connection is not unique")
+        new_ports = "(" + ",".join(c for c in chunks if c != in_chunks[0]) + ")"
+        new_expr = "{" + req + ", " + match.group(1) + ", " + match.group(2) + "}"
+        new_connects = new_connects.replace(old_conn, f".{inp}({new_expr})")
+        rows.append({"input_port": inp, "request_port": req, "source": rel,
+                     "source_expression": resp, "emitted_expression": new_expr,
+                     "entropy": "constant_non_random_test_only"})
+    return new_ports, new_connects, rows
+
+
 def _autoemit_chip_top_wrapper(project: Path, rtl_dir: Path,
                               synth_top: str):
     """Deterministic chip_top wrapper auto-emit (extracted from
@@ -17367,6 +17475,9 @@ def _autoemit_chip_top_wrapper(project: Path, rtl_dir: Path,
     # `output reg p` on an instance-driven wrapper output is lint-fatal
     # in strict SV.
     wrapper_port_block = _chip_top_strip_output_storage(port_block)
+    wrapper_port_block, connects, response_bindings = (
+        _chip_top_verified_response_bindings(
+            project, rtl_dir, mod_name, wrapper_port_block, connects))
     # #115 follow-up — the copied block may carry the reset-alias
     # wrapper's `ifdef VERILATOR tri port pulls. chip_top KEEPS them
     # (outermost face owns the pull) and the INNER wrapper's port-face
@@ -17473,6 +17584,10 @@ def _autoemit_chip_top_wrapper(project: Path, rtl_dir: Path,
     else:
         chip_top_dst = chip_top_v
     chip_top_dst.write_text(wrapper)
+    if response_bindings:
+        _aa.write_json(rtl_dir / f".{synth_top}__response_bindings.json",
+                       {"program": "design_one_shot_runner",
+                        "bindings": response_bindings})
     return chip_top_dst
 
 
