@@ -460,10 +460,13 @@ def cmd_show(bench: str):
                          if shape == "B" else "blind_instructions_shape_c.md"))
         print("  1. Use a fresh run directory; do not use a separate scaffold "
               "or benchmark-specific authoring harness.")
-        print("  2. Solve EVERY problem through the general IC-design path:")
+        print("  2. Stage EVERY input and issue an AI-first route task:")
         print(f"     python3 {Path(__file__).name} {bench} --solve "
               "--dataset <DATASET> --run <RUNDIR>")
-        print(f"  3. Complete blind AI worklists per: {bi}")
+        print(f"  3. Complete input-only AI routing per: {bi}")
+        print("     needs_ai_routing.jsonl binds each model decision to the prompt;")
+        print("     resume once to run the normal Program path, then complete")
+        print("     the resulting blind AI backup/review/repair worklists.")
         print("     needs_ai_backup.jsonl authors only runner-declared WAIVEs;")
         print("     needs_ai_review.jsonl reviews every exact candidate hash.")
         print(f"  4. Resume until {_ACCEPTANCE_REPORT} is COMPLETE:")
@@ -586,6 +589,9 @@ _CHALLENGE_SCHEMA = "vibeic.benchmark.ai_verification_challenge.v1"
 _CHALLENGE_SUPERSESSION_SCHEMA = \
     "vibeic.benchmark.challenge_supersession.v1"
 _AI_REPAIR_RECORD_SCHEMA = "vibeic.benchmark.ai_repair_record.v1"
+_ROUTE_TASK_SCHEMA = "vibeic.task_route_task.v1"
+_AI_ROUTE_SCHEMA = "vibeic.task_route_review.v1"
+_ROUTE_WORKLIST = "needs_ai_routing.jsonl"
 _REVIEW_WORKLIST = "needs_ai_review.jsonl"
 _BACKUP_WORKLIST = "needs_ai_backup.jsonl"
 _REPAIR_WORKLIST = "needs_ai_repair.jsonl"
@@ -4368,6 +4374,144 @@ def _public_input_reasons(task: dict) -> list[str]:
     return []
 
 
+def _route_contract_sha256() -> str:
+    """Bind an AI decision to the general nature-to-flow mapping it selects."""
+    import task_nature_route as tnr                       # noqa: PLC0415
+    return _sha256_text(json.dumps(
+        {"nature_entry": tnr.NATURE_ENTRY, "evidence_exit": tnr.EVIDENCE_EXIT},
+        sort_keys=True))
+
+
+def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
+                        proposal: dict, run_p: Path) -> dict:
+    """Issue an input-only route question before any design runner executes."""
+    import task_nature_route as tnr                       # noqa: PLC0415
+    project, run_p = Path(project).resolve(), Path(run_p).resolve()
+    prompt = project / "input" / "phase1_prompt.md"
+    prompt_sha = _sha256_text(prompt.read_text(errors="replace"))
+    safe = _safe_problem_id(str(problem_id))
+    task = {
+        "schema": _ROUTE_TASK_SCHEMA,
+        "id": str(problem_id),
+        "project": str(project),
+        "prompt_path": str(prompt),
+        "prompt_sha256": prompt_sha,
+        "prompt_chars": int(staged.get("prompt_chars") or 0),
+        "public_original_input": staged["public_original_input"],
+        "program_proposal": proposal,
+        "routing_contract_sha256": _route_contract_sha256(),
+        "allowed_natures": sorted(tnr.NATURE_ENTRY),
+        "response_path": str((run_p / "ai_routes" / safe /
+                              f"{prompt_sha}.json").resolve()),
+        "response_contract": {
+            "schema": _AI_ROUTE_SCHEMA,
+            "bindings": ["id", "task_sha256", "prompt_sha256",
+                         "source_sha256", "routing_contract_sha256"],
+            "disposition": "CONFIRM, OVERRIDE, or NEEDS_CLARIFICATION",
+            "ai_nature": "one allowed_natures member for CONFIRM or OVERRIDE",
+            "author": {"kind": "AI", "model": "<named model>"},
+            "blind": {"oracle_accessed": False},
+            "prompt_evidence": "excerpt/supports records from visible input only",
+            "rationale": "<at least 24 characters>",
+        },
+    }
+    task["task_sha256"] = _sha256_text(json.dumps(task, sort_keys=True))
+    _write_immutable_json(run_p / "ai_route_tasks" /
+                          f"{task['task_sha256']}.json", task)
+    return task
+
+
+def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]:
+    """Fail closed on an unsigned, stale, non-blind, or ungrounded route."""
+    import task_nature_route as tnr                       # noqa: PLC0415
+    run_p = Path(run_p).resolve()
+    reasons = _public_input_reasons(task)
+    try:
+        task_hash = task["task_sha256"]
+        body = {k: v for k, v in task.items() if k != "task_sha256"}
+        if _sha256_text(json.dumps(body, sort_keys=True)) != task_hash:
+            raise ValueError("issued route task identity changed")
+        issued = run_p / "ai_route_tasks" / f"{task_hash}.json"
+        if json.loads(issued.read_text()) != task:
+            raise ValueError("route task differs from coordinator issue")
+        project = Path(str(task["project"])).resolve()
+        if project != run_p / "projects" / _safe_problem_id(str(task["id"])):
+            raise ValueError("route project is not owned by this run/task")
+        prompt = project / "input" / "phase1_prompt.md"
+        prompt_text = prompt.read_text(errors="replace")
+        if _sha256_text(prompt_text) != task["prompt_sha256"]:
+            raise ValueError("route prompt changed after issue")
+        if task.get("routing_contract_sha256") != _route_contract_sha256():
+            raise ValueError("general route table changed after issue")
+        response_path = Path(str(task["response_path"]))
+        expected_path = (run_p / "ai_routes" / _safe_problem_id(str(task["id"])) /
+                         f"{task['prompt_sha256']}.json")
+        response_ancestors = [response_path]
+        parent = response_path.parent
+        while parent != run_p and parent != parent.parent:
+            response_ancestors.append(parent)
+            parent = parent.parent
+        if (response_path != expected_path or parent != run_p
+                or any(path.is_symlink() for path in response_ancestors)):
+            raise ValueError("route response path is not coordinator-owned regular path")
+        if not response_path.is_file():
+            return None, reasons + ["AI_ROUTE_PENDING: no response"]
+        response = json.loads(response_path.read_text(errors="replace"))
+        if not isinstance(response, dict):
+            raise ValueError("route response must be an object")
+        required = {
+            "schema": _AI_ROUTE_SCHEMA,
+            "id": task["id"],
+            "task_sha256": task_hash,
+            "prompt_sha256": task["prompt_sha256"],
+            "source_sha256": task["public_original_input"].get("source_sha256"),
+            "routing_contract_sha256": task["routing_contract_sha256"],
+        }
+        for key, value in required.items():
+            if key not in response or response.get(key) != value:
+                reasons.append(f"AI_ROUTE_INVALID: {key} is stale or wrong")
+        author = response.get("author")
+        if (not isinstance(author, dict) or author.get("kind") != "AI"
+                or not str(author.get("model") or "").strip()
+                or str(author.get("model")).lower() in
+                {"unknown", "unspecified", "n/a"}):
+            reasons.append("AI_ROUTE_INVALID: named AI author required")
+        blind = response.get("blind")
+        if not isinstance(blind, dict) or blind.get("oracle_accessed") is not False:
+            reasons.append("AI_ROUTE_INVALID: blind.oracle_accessed must be false")
+        if len(str(response.get("rationale") or "").strip()) < 24:
+            reasons.append("AI_ROUTE_INVALID: route rationale too short")
+        disposition = response.get("disposition")
+        if disposition not in {"CONFIRM", "OVERRIDE", "NEEDS_CLARIFICATION"}:
+            reasons.append("AI_ROUTE_INVALID: unknown disposition")
+        nature = response.get("ai_nature")
+        if disposition != "NEEDS_CLARIFICATION":
+            if nature not in tnr.NATURE_ENTRY:
+                reasons.append("AI_ROUTE_INVALID: ai_nature is not a product nature")
+            if (disposition == "CONFIRM"
+                    and nature != task["program_proposal"].get("entry_nature")):
+                reasons.append("AI_ROUTE_INVALID: CONFIRM differs from proposal")
+            evidence = _verified_prompt_evidence(
+                response.get("prompt_evidence"), prompt_text)
+            if not evidence and len(str(response.get("rationale") or "").strip()) < 160:
+                reasons.append("AI_ROUTE_INVALID: prompt evidence or detailed rationale required")
+        if reasons:
+            return None, reasons
+        if disposition == "NEEDS_CLARIFICATION":
+            return None, ["AI_ROUTE_NEEDS_CLARIFICATION: AI could not select a route"]
+        entry = tnr.NATURE_ENTRY[nature]
+        return {
+            "nature": nature, "entry_nature": nature,
+            "route": entry["route"], "plugin_entry": entry["plugin_entry"],
+            "source": "ai_confirmed" if disposition == "CONFIRM" else "ai_override",
+            "needs_ai_parse": False,
+            "ai_route_response_sha256": hashlib.sha256(response_path.read_bytes()).hexdigest(),
+            "program_proposal": task["program_proposal"],
+        }, []
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        return None, reasons + [f"AI_ROUTE_INVALID: {exc}"]
+
+
 def _backup_output_manifest(project: Path) -> list[dict]:
     """Exact author deliverable set, including public include dependencies."""
     root = Path(project) / "phase2" / "stage1" / "rtl"
@@ -4678,7 +4822,9 @@ def _runtime_pair_gate(run_p: Path, operation: str,
 
 def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                       jobs: int = 1, heavy_jobs: int | None = None,
-                      worker_threads: int = 0) -> int:
+                      worker_threads: int = 0,
+                      routed_tasks: list[dict] | None = None,
+                      route_decisions: dict[str, dict] | None = None) -> int:
     """Solve every problem through the GENERAL flow.
 
     This verb did not exist. A separate scaffold prepared the run and
@@ -4691,8 +4837,9 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
 
         benchmark_io_adapter.stage   record/files -> a project (INPUT only;
                                      reading an oracle path RAISES)
-        task_nature_route            prompt + supplied RTL -> nature ->
-                                     entry_step + evidence class -> exit step
+        task_nature_route            input-only advisory proposal
+        AI route handoff             hash-bound nature confirmation/override
+        task_nature_route            confirmed nature -> general entry + exit
         vibe_ic_one_shot_runner      --entry-step <entry>, the one real runner
         benchmark_io_adapter.collect the artefact -> the scorer's shape
 
@@ -4729,18 +4876,32 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
         return 2
 
     ds, run_p = Path(dataset).resolve(), Path(run).resolve()
-    gate_rc, pair_record = _runtime_pair_gate(run_p, "solve", pristine=True)
+    fresh = routed_tasks is None
+    gate_rc, pair_record = _runtime_pair_gate(
+        run_p, "solve" if fresh else "resume:ai-route", pristine=fresh)
     if gate_rc is not None:
         return gate_rc
-    _prepare_general_solve_run(bench, ds, run_p, fmt, limit)
+    if fresh:
+        _prepare_general_solve_run(bench, ds, run_p, fmt, limit)
+    else:
+        config = json.loads((run_p / ".bench_config.json").read_text())
+        if (config.get("bench") != bench or config.get("format") != fmt
+                or config.get("dataset") != str(ds)
+                or config.get("diagnostic_limit") != int(limit or 0)):
+            print("ERROR: route continuation differs from original run", file=sys.stderr)
+            return 2
     _write_runtime_pair_record(run_p, pair_record)
     runner = Path(__file__).resolve().parent / "vibe_ic_one_shot_runner.py"
     runner_budget = _RunnerBudget(jobs, heavy_jobs, worker_threads)
-    problem_rows = []
-    for index, prob in enumerate(bio.problems(fmt, ds)):
-        if limit and index >= limit:
-            break
-        problem_rows.append((index, prob))
+    if fresh:
+        problem_rows = []
+        for index, prob in enumerate(bio.problems(fmt, ds)):
+            if limit and index >= limit:
+                break
+            problem_rows.append((index, prob))
+    else:
+        problem_rows = [(index, {"id": task["id"]})
+                        for index, task in enumerate(routed_tasks)]
     problem_ids = [str(prob.get("id", f"problem-{index}"))
                    for index, prob in problem_rows]
     project_keys = [re.sub(r"[^\w.-]", "_", pid) for pid in problem_ids]
@@ -4748,6 +4909,62 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
             or len(set(project_keys)) != len(project_keys)):
         print("ERROR: duplicate problem id or project-path collision in "
               "benchmark dataset", file=sys.stderr)
+        return 2
+
+    if fresh:
+        route_tasks = []
+        for index, prob in problem_rows:
+            pid = problem_ids[index]
+            proj = run_p / "projects" / _safe_problem_id(pid)
+            proj.mkdir(parents=True, exist_ok=True)
+            staged = bio.stage(fmt, prob, proj)
+            prompt_text = (proj / "input" / "phase1_prompt.md").read_text(
+                errors="replace")
+            try:
+                proposal = tnr.classify_task_nature(
+                    prompt_text, fpa.rtl_present_at_input(proj), None)
+            except Exception as exc:                       # noqa: BLE001
+                # The Program router is advisory at this boundary. Its own
+                # failure must not preclude an input-bound AI decision.
+                proposal = {
+                    "nature": None, "entry_nature": None,
+                    "route": None, "plugin_entry": None,
+                    "source": "router_error", "needs_ai_parse": True,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            route_tasks.append(_make_ai_route_task(
+                pid, proj, staged, proposal, run_p))
+        _write_jsonl(run_p / _ROUTE_WORKLIST, route_tasks)
+        for name in (_BACKUP_WORKLIST, _REVIEW_WORKLIST, _REPAIR_WORKLIST):
+            _write_jsonl(run_p / name, [])
+        _atomic_write_json(run_p / "solve_report.json", {
+            "bench": bench, "format": fmt, "dataset": str(ds),
+            "solved": 0, "accepted": 0, "total": len(route_tasks),
+            "routing_phase": "PENDING", "route_confirmed": 0,
+            "acceptance_policy": {
+                "required": True, "review_task_schema": _REVIEW_TASK_SCHEMA,
+                "review_schema": _AI_REVIEW_SCHEMA,
+                "score_gate": _ACCEPTANCE_REPORT,
+            },
+            "results": [{"id": task["id"], "accepted": False,
+                         "candidate_ready": False,
+                         "worker_status": "ROUTE_PENDING"}
+                        for task in route_tasks],
+        })
+        _atomic_write_json(run_p / _ACCEPTANCE_REPORT, {
+            "schema": _ACCEPTANCE_SCHEMA, "status": "PENDING",
+            "accepted": 0, "total": len(route_tasks), "accepted_ids": [],
+            "pending_routing": len(route_tasks),
+        })
+        print(f"{len(route_tasks)} input-only AI route task(s) -> "
+              f"{run_p / _ROUTE_WORKLIST}; no design runner launched")
+        return 2
+
+    task_by_route_id = {str(task["id"]): task for task in routed_tasks}
+    if (route_decisions is None
+            or set(route_decisions) != set(problem_ids)
+            or len(task_by_route_id) != len(routed_tasks)):
+        print("ERROR: AI routes do not cover the issued input set", file=sys.stderr)
         return 2
 
     def _solve_one(row) -> _SolveWorkerOutcome:
@@ -4772,8 +4989,11 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
         route_backup: dict = {"status": "NOT_MEASURED", "skills": []}
         phase1_frontdoor = None
         try:
-            proj.mkdir(parents=True, exist_ok=True)
-            staged = bio.stage(fmt, prob, proj)
+            route_task = task_by_route_id[pid]
+            if proj.resolve() != Path(route_task["project"]):
+                raise ValueError("AI route project identity changed")
+            staged = {"prompt_chars": route_task["prompt_chars"],
+                      "public_original_input": route_task["public_original_input"]}
             staged_chars = int(staged.get("prompt_chars") or 0)
 
             # One detector, not a second inline copy: `input/rtl/` is only ONE
@@ -4792,7 +5012,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                     completeness = (
                         f"UNAVAILABLE: {type(exc).__name__}: {exc}")
 
-            verdict = tnr.classify_task_nature(prompt_text, rtl_present, None)
+            verdict = route_decisions[pid]
             nature = verdict["nature"]
             # `entry_nature` is the NATURE_ENTRY key on every branch; `nature`
             # may be the disclosing unpinned-transform label, which is not.
@@ -4960,6 +5180,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
         "bench": bench, "format": fmt, "dataset": str(ds),
         "solved": sum(1 for r in results if r["ok"]),
         "accepted": 0, "total": len(results),
+        "routing_phase": "COMPLETE", "route_confirmed": len(results),
         "acceptance_policy": {
             "required": True,
             "rule": ("runner-owned RTL gate PASS (or supplied-RTL re-entry), "
@@ -5054,6 +5275,37 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
     if fmt is None:
         print(f"ERROR: no IO adapter bound for {bench!r}", file=sys.stderr)
         return 2
+    if solve.get("routing_phase") == "PENDING":
+        try:
+            route_tasks = _read_jsonl(run_p / _ROUTE_WORKLIST)
+            config = json.loads((run_p / ".bench_config.json").read_text())
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"ERROR: AI route worklist unreadable: {exc}", file=sys.stderr)
+            return 2
+        if (len(route_tasks) != solve.get("total")
+                or [task.get("id") for task in route_tasks] !=
+                [row.get("id") for row in solve.get("results") or []]):
+            print("ERROR: AI route worklist differs from issued solve population",
+                  file=sys.stderr)
+            return 2
+        decisions = {}
+        pending = []
+        for task in route_tasks:
+            decision, reasons = _validate_ai_route(task, run_p)
+            if decision is None:
+                pending.append((task.get("id"), reasons))
+            else:
+                decisions[str(task["id"])] = decision
+        if pending:
+            for pid, reasons in pending:
+                print(f"  {pid}: {'; '.join(reasons)}")
+            print(f"{len(pending)}/{len(route_tasks)} AI route(s) pending; "
+                  "zero design runners launched")
+            return 2
+        return _cmd_solve_locked(
+            bench, dataset, run, limit=int(config.get("diagnostic_limit") or 0),
+            jobs=jobs, heavy_jobs=heavy_jobs, worker_threads=worker_threads,
+            routed_tasks=route_tasks, route_decisions=decisions)
     runner = Path(__file__).resolve().parent / "vibe_ic_one_shot_runner.py"
     runner_budget = _RunnerBudget(jobs, heavy_jobs, worker_threads)
 
@@ -6900,21 +7152,23 @@ def main():
                     help="print the full registry entry for <bench> (#532)")
     ap.add_argument("--score", action="store_true", help="invoke the scorer on an existing run dir")
     ap.add_argument("--solve", action="store_true",
-                    help="SOLVE the benchmark through the general flow. This is "
+                    help="Start the benchmark through the general flow. This is "
                          "the verb that closes the old scaffold-to-score gap: "
                          "there was no program that solved, and that hole is "
                          "where an agent hand-rolls a benchmark-only harness — "
                          "the thing RULE 0 forbids. Each problem is staged by "
-                         "the thin IO adapter, routed by task_nature_route to an "
-                         "entry step and an evidence class, and run through "
-                         "vibe_ic_one_shot_runner. Every PROGRAM candidate is "
+                         "the thin IO adapter, then receives an input-only "
+                         "AI route task. --resume validates all hash-bound "
+                         "AI routes before running vibe_ic_one_shot_runner. "
+                         "Every PROGRAM candidate is "
                          "hash-bound to a mandatory blind AI route + semantic "
                          "review before it can be scored. AI may issue an "
                          "evidence-backed OVERRIDE_PROGRAM and is the final "
                          "semantic authority. No benchmark-specific solver is "
                          "involved.")
     ap.add_argument("--resume", action="store_true",
-                    help="Advance needs_ai_backup.jsonl, needs_ai_review.jsonl, "
+                    help="Advance needs_ai_routing.jsonl before any runner, "
+                         "then needs_ai_backup.jsonl, needs_ai_review.jsonl, "
                          "and needs_ai_repair.jsonl. AI-authored/modified RTL is "
                          "allowed only after a prompt-derived executable test "
                          "proves the frozen candidate wrong, then is re-gated "

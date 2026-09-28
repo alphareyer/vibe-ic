@@ -9,9 +9,18 @@ python3 ${CLAUDE_PLUGIN_ROOT}/programs/benchmark_dispatch.py <bench> \
 ```
 
 The dispatcher stages only the current problem's declared input, asks
-`task_nature_route` for the normal flow entry, and invokes
+`task_nature_route` for an advisory proposal, and emits
+`needs_ai_routing.jsonl`. An AI judges each route from the visible input;
+`--resume` validates the hash-bound decision before invoking
 `vibe_ic_one_shot_runner`. Do not manually build projects, invoke a per-design
 runner, copy RTL into samples, or use a benchmark-specific solver.
+
+The route response binds the issued task, prompt, public-input source and
+product route-table hash; names the AI model; declares `oracle_accessed: false`;
+and gives an input-grounded nature choice. A missing or invalid response launches
+zero design workers for the batch. Correct only pending responses and repeat
+`--resume`; inputs and valid responses stay staged. Routing alone is neither
+RTL authoring nor acceptance.
 
 ## AI backup and review
 
@@ -45,7 +54,7 @@ reaching for it to settle an ambiguity is the leak this rule exists to stop.
   `blindness audit unavailable`.
 - The score front door invokes `programs/blindness_audit.py`; do not self-score
   or attempt to bypass that audit.
-- Work only from the paths in `needs_ai_backup.jsonl`,
+- Work only from the paths in `needs_ai_routing.jsonl`, `needs_ai_backup.jsonl`,
   `needs_ai_review.jsonl`, and `needs_ai_repair.jsonl`.
 - Read the current design's prompt and staged input RTL only. Never read its or
   another problem's testbench, verified RTL, build scripts, prior runs, or
@@ -62,8 +71,8 @@ reaching for it to settle an ambiguity is the leak this rule exists to stop.
 
 ## ORCHESTRATION RULES (for the caller spawning the worklist agents — ORGANIC-20260605)
 
-Shape B fans its AI backup / review / repair work out over the worklists the
-dispatcher writes (`needs_ai_backup.jsonl`, `needs_ai_review.jsonl`,
+Shape B fans its AI route / backup / review / repair work out over the worklists the
+dispatcher writes (`needs_ai_routing.jsonl`, `needs_ai_backup.jsonl`, `needs_ai_review.jsonl`,
 `needs_ai_repair.jsonl`), so the caller-side rules Shape C learned from a
 312-problem clean-room run bind here too. The full doctrine and its rationale
 live in `blind_instructions_shape_c.md` § ORCHESTRATION RULES; the rules are:
