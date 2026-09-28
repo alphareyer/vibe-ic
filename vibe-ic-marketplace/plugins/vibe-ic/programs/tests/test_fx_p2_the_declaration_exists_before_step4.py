@@ -20,6 +20,7 @@ writes). chip-AGNOSTIC: synthetic options and cases.
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 import sys
@@ -109,6 +110,36 @@ def test_a_selection_the_input_does_not_designate_is_not_invented(tmp_path):
     assert not (proj / DECL).exists()
     rc, msg = GATE._evaluate(proj)
     assert rc == 1, (rc, msg)
+
+
+def test_a_consumed_d1_expert_selection_is_available_before_step4(tmp_path):
+    """D1's documented answer may choose an otherwise-open contract menu."""
+    proj = _fresh(tmp_path, UNDESIGNATED)
+    pack = (proj / "reports/audit/phase1/expert_parse_track_pack")
+    pack.mkdir(parents=True)
+    answer = {
+        "expectations": [{
+            "id": "subservient-isa-menu",
+            "layer": "L1_DATASHEET",
+            "requirement": "the supplied top implements RV32I plus Zifencei",
+            "evidence": ["supplied top WITH_CSR=0"],
+            "expected_tokens": ["RV32I", "Zifencei"],
+        }],
+        "declaration_selection": {"isa_extensions": ["I", "Zifencei"]},
+    }
+    answer_path = pack / "l_doc_expectations.json"
+    answer_path.write_text(json.dumps(answer), encoding="utf-8")
+    digest = hashlib.sha256(answer_path.read_bytes()).hexdigest()
+    report = {
+        "execution": {"observed_ai_status": "CONSUMED"},
+        "ai_subtrack": {"status": "CONSUMED", "answer_sha256": digest},
+    }
+    (proj / "reports/audit/phase1/expert_parse_track.json").write_text(
+        json.dumps(report), encoding="utf-8")
+
+    rec = _early(proj)
+    assert rec["emitted"] is True, rec
+    assert rec["fields"]["isa_extensions"] == ["I", "Zifencei"]
 
 
 def test_published_step4_report_names_the_undecided_conditional_reason(tmp_path):
