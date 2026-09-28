@@ -21,7 +21,8 @@ class ValidatedOwnerEnvWaiver(dict):
     """
 
     def __init__(self, entry: Mapping[str, Any], document: Any, *,
-                 step_id: int, reason: str, evidence_assessment: Any):
+                 step_id: int, reason: str, evidence_assessment: Any,
+                 evidence_disclosure: str):
         refusal_reason = refusal(entry, document)
         if refusal_reason:
             raise ValueError(f"owner waiver refused: {refusal_reason}")
@@ -29,6 +30,7 @@ class ValidatedOwnerEnvWaiver(dict):
         self.update({"id": step_id, "reason": reason,
                      "verdict_tier": "ENV_UNAVAILABLE",
                      "evidence_assessment": evidence_assessment,
+                     "_evidence_disclosure": evidence_disclosure,
                      "_env_unavailable": True})
 
 

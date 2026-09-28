@@ -334,7 +334,7 @@ def test_owner_env_approval_survives_loader_and_step_check(tmp_path,
     notes = fcc._ENV_WAIVER_EVIDENCE_NOTES
     assert len(notes) == (0 if corroborated else 1), notes
     if notes:
-        assert "HONOURED but UNCORROBORATED" in notes[0]
+        assert "OWNER-APPROVED but UNCORROBORATED" in notes[0]
 
     # The report's advisory must describe the actual step verdict.
     out = tmp_path / "report.json"
@@ -347,6 +347,20 @@ def test_owner_env_approval_survives_loader_and_step_check(tmp_path,
     disclosures = [a for a in report.get("advisories", [])
                    if "UNCORROBORATED" in a]
     assert len(disclosures) == (0 if corroborated else 1), disclosures
+    if disclosures:
+        assert "HONOURED but UNCORROBORATED" in disclosures[0]
+        assert "final step verdict is PASS_WITH_WAIVERS" in disclosures[0]
+
+
+def test_unused_owner_env_fallback_is_not_reported_as_honoured(tmp_path):
+    fcc, waivers = _load(_project(tmp_path, _attestation()))
+    natural_pass = fcc.StepResult(id=31, name="DRC", stage="stage4",
+                                  status="PASS")
+    notes = fcc._final_env_waiver_evidence_notes(waivers, [natural_pass])
+    assert len(notes) == 1
+    assert "OWNER-APPROVED but NOT APPLIED" in notes[0]
+    assert "final step verdict is PASS" in notes[0]
+    assert "HONOURED" not in notes[0]
 
 
 def test_raw_machine_marker_still_cannot_impersonate_owner_approval(tmp_path):
