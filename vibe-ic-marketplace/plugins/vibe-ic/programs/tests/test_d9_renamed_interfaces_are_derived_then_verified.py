@@ -836,13 +836,19 @@ def test_an_rtl_width_the_header_cannot_state_takes_the_l9_width(
     """RED on ed2d863c7 (reviewer scen2, the Wishbone `sel` shape). The RTL
     says `[DW/8-1:0]`, which the header reader cannot state; it was expanded
     as ONE scalar net, so a port the document places in full (`[3:0]`) was a
-    FAIL and a "placement gap in the document". 15.5ic places by L9's width."""
+    FAIL and a "placement gap in the document". 15.5ic places by L9's width.
+
+    DW's default is a compile-time macro the header never defines. The header
+    reader now evaluates a compound bound over a parameter it CAN read
+    (`DW = 32` states `[DW/8-1:0]` as 4 bits), so a literal default would no
+    longer reach the case this test is about: a width nobody in the header
+    states, which only L9 can supply."""
     impl = IMPL + [_p("o_status_sel", "output", True, 4)]
     doc = (_GROUP_ROWS + "| **East (E)** | `clk` / `rst` |\n"
            "| **West (W)** | `o_status` / `o_status_sel[3:0]` |\n")
     proj = _project(tmp_path, impl=impl, doc=doc)
     widths = _rtl_width_unreadable(proj, impl, lambda i: _verilog(i).replace(
-        "module core (", "module core #(parameter DW = 32) (").replace(
+        "module core (", "module core #(parameter DW = `WB_DW) (").replace(
         "[3:0] o_status_sel", "[DW/8-1:0] o_status_sel"))
     assert widths["o_status_sel"] is None, widths      # the premise
     mf = _emit(proj)
