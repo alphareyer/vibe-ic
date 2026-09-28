@@ -765,7 +765,8 @@ def test_a_repair_that_creates_an_antenna_violation_is_never_adopted(tmp_path, m
     assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
     row = json.loads((arm / prr.LEDGER).read_text())['candidates'][0]
     assert row['decision'] == 'REFUSED' and row['reason'].startswith('antenna (OpenROAD.CheckAntennas)')
-    assert row['antenna'] == {'before': 0, 'after': antenna}
+    assert row['antenna'] == {'before': 0, 'after': antenna,
+                              'before_pins': 0, 'after_pins': antenna}
 
 
 @pytest.mark.parametrize('missing', [None, 'baseline', 'candidate'])

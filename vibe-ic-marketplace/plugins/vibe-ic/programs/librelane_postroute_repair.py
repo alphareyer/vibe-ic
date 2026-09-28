@@ -49,10 +49,9 @@ HARD REFUSALS, BEFORE A CANDIDATE CAN BE ADOPTED
 ================================================
 * supply ownership (F24): `pg_supply_pin_ownership_check` on the candidate's
   own DEF. A proven off-supply pin keeps the pointer where it was;
-* antenna, by the step-26 instrument (`OpenROAD.CheckAntennas`
-  `antenna__violating__nets`): a candidate with more violating nets than the
-  state it was built from, or an uncounted one, keeps the pointer where it
-  was (lane mig99 measured the direct SDR candidate adding 4 on spm);
+* antenna, by the step-26 instrument (`OpenROAD.CheckAntennas`): a candidate
+  with more violating nets OR pins than the state it was built from, or an
+  uncounted dimension, keeps the pointer where it was;
 * the repair step's own `check_placement` (it fails the step);
 * router DRC: the fork's scoped `detailed_route -nets` refuses a route with
   more whole-design violations than it was given (DRT-0712), which fails the
@@ -301,6 +300,15 @@ def antenna_census(folder: Path) -> Dict[str, Optional[int]]:
             for k in ANTENNA_METRICS}
 
 
+def _antenna_counts(measurement: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    """Both step-26 dimensions must be measured nonnegative integer counts."""
+    nets, pins = (measurement.get("antenna_nets"),
+                  measurement.get("antenna_pins"))
+    if any(type(v) is not int or v < 0 for v in (nets, pins)):
+        return None
+    return nets, pins
+
+
 DOMAIN_VALUE = {
     "setup": lambda cur: cur["measurement"].get("setup_ws_min"),
     "hold": lambda cur: cur["measurement"].get("hold_ws_min"),
@@ -433,13 +441,20 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
     # Antenna, by the step-26 instrument, on the candidate and on what it was
     # built from: a candidate that creates an antenna violation (or cannot be
     # counted) never moves the pointer, whatever it did for timing or DRV.
-    before = (cur.get("measurement") or {}).get("antenna_nets")
-    after = measurement.get("antenna_nets")
-    row["antenna"] = {"before": before, "after": after}
-    if after is None or (before is not None and after > before):
+    before = cur.get("measurement") or {}
+    row["antenna"] = {"before": before.get("antenna_nets"),
+                      "after": measurement.get("antenna_nets"),
+                      "before_pins": before.get("antenna_pins"),
+                      "after_pins": measurement.get("antenna_pins")}
+    before_counts = _antenna_counts(before)
+    after_counts = _antenna_counts(measurement)
+    if (before_counts is None or after_counts is None or
+            any(a > b for b, a in zip(before_counts, after_counts))):
         row.update(decision="REFUSED",
-                   reason=(f"antenna (OpenROAD.CheckAntennas): violating nets "
-                           f"{before} -> {after}"))
+                   reason=("antenna (OpenROAD.CheckAntennas): violating "
+                           f"nets {row['antenna']['before']} -> {row['antenna']['after']}; "
+                           f"pins {row['antenna']['before_pins']} -> "
+                           f"{row['antenna']['after_pins']}"))
         _ledger_append(impl, row)
         print(f"candidate {lane} refused: {row['reason']}")
         return 0
@@ -744,6 +759,19 @@ def _clear_declared_repair(project: Path) -> None:
         (out / name).unlink(missing_ok=True)
 
 
+def _set_census_verdict(report: Dict[str, Any], *measurements: Dict[str, Any]) -> None:
+    antenna_measured = all(_antenna_counts(m) is not None for m in measurements)
+    report["antenna_census"] = {"verdict": "PASS" if antenna_measured else "NOT_MEASURED"}
+    _set_final_fanout_verdict(report)
+    if not antenna_measured:
+        if report["verdict"] == "PASS":
+            report.update(verdict="NOT_MEASURED", code="LL_PRR_ANTENNA_NOT_MEASURED",
+                          reason="input or final antenna net/pin census is absent")
+        else:
+            report["reason"] = (report.get("reason", "") +
+                                "; input or final antenna net/pin census is absent")
+
+
 def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path) -> None:
     """Publish step 32's measured decision before the pre-stream gate.
 
@@ -771,6 +799,11 @@ def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path
                 for v in (*before[1:], *after[1:], setup_floor, hold_floor))):
         refuse("the input/final STAPostPNR census or timing floors are missing")
         return
+    input_antenna = _antenna_counts(baseline)
+    final_antenna = _antenna_counts(final)
+    if input_antenna is None or final_antenna is None:
+        refuse("the input/final OpenROAD.CheckAntennas net and pin census is missing")
+        return
     import librelane_contract as _ll
     # The trigger describes the INPUT route; a successfully repaired output
     # does not retroactively make its repair unnecessary.
@@ -778,7 +811,8 @@ def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path
     route_changed = bool(report.get("route_state") and report.get("adopted_state")
                          and Path(report["adopted_state"]) != Path(report["route_state"]))
     needed = bool(before[0] or before[1] < setup_floor or
-                  before[2] < hold_floor or route_changed or adopted)
+                  before[2] < hold_floor or route_changed or adopted or
+                  any(input_antenna) or any(final_antenna))
     candidates = report.get("candidates") or []
     adopted_row = next((row for row in candidates
                         if row.get("candidate") == adopted and
@@ -800,7 +834,7 @@ def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path
                         "sta_state_sha256": after_state}]
     re_verified = bool(changes and after[0] == 0 and
                        after[1] >= setup_floor and after[2] >= hold_floor and
-                       final.get("antenna_nets") == 0)
+                       final_antenna == (0, 0))
     out = project / DECLARED_REPAIR_REL
     action = ("candidate_adopted" if adopted else
               "alternate_route_selected" if route_changed else "input_route_kept")
@@ -877,7 +911,7 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
                             derate=derate, aocv_table=aocv_table,
                             registry=registry, programs_dir=programs_dir,
                             floors=declared_timing_floor(project, sdc)))
-    _set_final_fanout_verdict(report)
+    _set_census_verdict(report, report["baseline"], report["final"])
     write_json(out, report)
     _publish_declared_repair(project, report, out)
     return report
@@ -899,7 +933,7 @@ def _arm_gate(folder: Path, arm: Dict[str, Any], route_drc: Optional[int],
     final = arm.get("final") or {}
     rows = {k: ({"status": "MEASURED", "value": final.get(k)}
                 if isinstance(final.get(k), (int, float)) else {"status": "NOT_MEASURED"})
-            for k in (*DUAL_OBJECTIVES, "drv_count", "antenna_nets")}
+            for k in (*DUAL_OBJECTIVES, "drv_count", "antenna_nets", "antenna_pins")}
     rows["route_drc"] = ({"status": "MEASURED", "value": route_drc}
                          if isinstance(route_drc, int) else {"status": "NOT_MEASURED"})
     verdict = "PASS" if all(r["status"] == "MEASURED" for r in rows.values()) else "NOT_MEASURED"
@@ -925,6 +959,7 @@ def select_dual(project: Path, arms: Dict[str, Dict[str, Any]],
 
     feasible = [n for n in arms if docs[n]["verdict"] == "PASS"
                 and value(n, "route_drc") == 0 and value(n, "antenna_nets") == 0
+                and value(n, "antenna_pins") == 0
                 and value(n, "drv_count") == 0]
     pool = feasible or [n for n in arms if docs[n]["verdict"] == "PASS"]
     if not pool:
@@ -984,7 +1019,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
                   floors=declared_timing_floor(project, sdc))
     if mode != "dual":
         report.update(close_arm(project, "librelane", route_state, **common))
-        _set_final_fanout_verdict(report)
+        _set_census_verdict(report, report["baseline"], report["final"])
         write_json(out, report)
         _publish_declared_repair(project, report, out)
         return report
@@ -1022,7 +1057,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
                    if k in chosen})
     report["input_baseline"] = arms["postdrt"]["baseline"]
     report["selected_arm"] = sel["selection"]
-    _set_final_fanout_verdict(report)
+    _set_census_verdict(report, report["input_baseline"], report["final"])
     write_json(out, report)
     _publish_declared_repair(project, report, out)
     return report
