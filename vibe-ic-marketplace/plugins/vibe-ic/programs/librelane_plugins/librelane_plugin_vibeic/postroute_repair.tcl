@@ -231,6 +231,11 @@ log_cmd repair_timing {*}$hold_args
 # What repair_design left: every later edit in this step must keep it.
 set ::vic_fo_repaired [vic_fanout_over]
 
+# The timing repair may create new fanout/slew/cap loads. Re-run DRV repair
+# after the last repair_timing call; the routed re-check below remains the
+# authority for whether the declared limit was actually met.
+log_cmd repair_design {*}$rd_args
+
 # ---- 5. what changed -------------------------------------------------------
 set ::vic_created [list]
 set ::vic_resized [list]
@@ -607,6 +612,20 @@ if {$::vic_fillers > 0} {
 }
 
 vic_annotate after
+# CR-2 POSTROUTE FANOUT BEGIN
+# The design's set_max_fanout remains a hard constraint after route. The
+# pinned OpenSTA provides this counter; an unreadable count is NOT_MEASURED,
+# and any measured residual refuses the repaired candidate.
+if {[catch {sta::max_fanout_violation_count} _vic_fo_count]} {
+    puts stderr "vibeic_prr_fanout_not_measured: $_vic_fo_count"
+    exit 2
+}
+utl::metric_integer vibeic__prr__after__fanout_violations $_vic_fo_count
+if {$_vic_fo_count > 0} {
+    puts stderr "vibeic_prr_fanout_violation: $_vic_fo_count; declared postroute cap not met"
+    exit 1
+}
+# CR-2 POSTROUTE FANOUT END
 vic_census after
 
 unset_dont_touch_objects
