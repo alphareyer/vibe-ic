@@ -905,6 +905,8 @@ def _not_measured(record: dict, out: Path, deck: Path, sim: dict,
         return EX_BUDGET_EXHAUSTED
     need = (sim["wall_s"] * requested / reached
             if reached and requested else None)
+    budget["enforced"] = True
+    budget["policy"] = "simulator_reported_enforced_deadline"
     record.update({
         "result": "NOT_MEASURED", "reason_class": "budget_exhausted",
         "rule": "A7_SIM_BUDGET_EXHAUSTED",
@@ -913,6 +915,7 @@ def _not_measured(record: dict, out: Path, deck: Path, sim: dict,
             "simulated_time_reached_s": reached,
             "simulated_time_requested_s": requested,
             "wall_s": round(sim["wall_s"], 1),
+            "enforced_deadline_s": float(enforced_s),
             "budget_s": budget.get("seconds"),
             "budget_source": budget.get("source"),
             "remedy": (

@@ -315,6 +315,17 @@ def test_the_runner_reports_a_spent_budget_as_not_measured(
 
     def fake_run(cmd, *a, **k):
         if any(str(x).endswith("analog_a7_post_layout_emit.py") for x in cmd):
+            (project / "phase3/analog/blk/a7_post_layout.json").write_text(
+                json.dumps({
+                    "producer": A7.PRODUCER, "schema": 1, "block": "blk",
+                    "step": A7.STEP, "result": "NOT_MEASURED",
+                    "reason_class": "budget_exhausted",
+                    "rule": "A7_SIM_BUDGET_EXHAUSTED",
+                    "budget": {"seconds": 900, "enforced": True},
+                    "budget_exhausted": {"budget_s": 900,
+                                         "enforced_deadline_s": 900,
+                                         "wall_s": 901},
+                }))
             return _CP()
         return real_run(cmd, *a, **k)
 
@@ -327,6 +338,119 @@ def test_the_runner_reports_a_spent_budget_as_not_measured(
     assert str(getattr(res.reason_class, "value", res.reason_class)) == \
         "budget_exhausted"
     assert "A7_SIM_BUDGET_EXHAUSTED" in res.detail
+
+
+def test_the_runner_uses_the_current_external_stop_record(
+        tmp_path, monkeypatch):
+    import analog_one_shot_runner as R
+    project = _project(tmp_path)
+    (project / "phase3/analog/analog_block_list.json").write_text(
+        json.dumps({"blocks": [{"name": "blk", "type": "ldo"}]}))
+    (project / "phase3/librelane_switch.json").write_text(
+        json.dumps({"steps": {"A7": "librelane"}}))
+    record_path = project / "phase3/analog/blk/a7_post_layout.json"
+    real_run = R._pr.run
+
+    class _CP:
+        returncode = 75
+        stdout = ""
+        stderr = ("NOT_MEASURED: analog_a7_post_layout_emit "
+                  "A7_SIMULATION_STOPPED_EXTERNALLY: stopped after 0.1 s")
+
+    def fake_run(cmd, *a, **k):
+        if any(str(x).endswith("analog_a7_post_layout_emit.py") for x in cmd):
+            record_path.write_text(json.dumps({
+                "producer": A7.PRODUCER, "schema": 1, "block": "blk",
+                "step": A7.STEP, "result": "NOT_MEASURED",
+                "reason_class": "execution_error",
+                "rule": "A7_SIMULATION_STOPPED_EXTERNALLY",
+                "external_stop": {"wall_s": 0.1,
+                                  "enforced_deadline_s": None},
+            }))
+            return _CP()
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(R._pr, "run", fake_run)
+    monkeypatch.setattr(R._pin, "container_image_digest",
+                        lambda c: (PIN.IMAGE_DIGEST, ""))
+    res = R.step_for_block(project, {"name": "blk", "type": "ldo"},
+                           "A7_post_layout_resim", None)
+    assert res.status == "NOT_MEASURED"
+    assert str(getattr(res.reason_class, "value", res.reason_class)) == \
+        "execution_error"
+    assert "A7_SIMULATION_STOPPED_EXTERNALLY" in res.detail
+
+
+@pytest.mark.parametrize("case, expected", [
+    ("progress_stalled", "stalled"),
+    ("stale_budget", "execution_error"),
+    ("unproved_budget", "execution_error"),
+    ("wrong_block", "execution_error"),
+])
+def test_runner_requires_a_current_consistent_a7_stop_record(
+        tmp_path, monkeypatch, case, expected):
+    import analog_one_shot_runner as R
+    project = _project(tmp_path)
+    (project / "phase3/analog/analog_block_list.json").write_text(
+        json.dumps({"blocks": [{"name": "blk", "type": "ldo"}]}))
+    (project / "phase3/librelane_switch.json").write_text(
+        json.dumps({"steps": {"A7": "librelane"}}))
+    record_path = project / "phase3/analog/blk/a7_post_layout.json"
+    record = {
+        "producer": A7.PRODUCER, "schema": 1, "block": "blk",
+        "step": A7.STEP, "result": "NOT_MEASURED",
+        "reason_class": "budget_exhausted",
+        "rule": "A7_SIM_BUDGET_EXHAUSTED",
+        "budget": {"seconds": 900},
+        "budget_exhausted": {"budget_s": 900, "wall_s": 901},
+    }
+    if case == "progress_stalled":
+        record.update(reason_class="progress_stalled",
+                      rule="A7_SIMULATION_PROGRESS_STALLED",
+                      progress_stalled={"wall_s": 0.1})
+    elif case == "wrong_block":
+        record["block"] = "another_block"
+    if case == "stale_budget":
+        record_path.write_text(json.dumps(record))
+    real_run = R._pr.run
+
+    class _CP:
+        returncode = 75
+        stdout = ""
+        stderr = "NOT_MEASURED: analog_a7_post_layout_emit stopped"
+
+    def fake_run(cmd, *a, **k):
+        if any(str(x).endswith("analog_a7_post_layout_emit.py") for x in cmd):
+            if case != "stale_budget":
+                record_path.write_text(json.dumps(record))
+            return _CP()
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(R._pr, "run", fake_run)
+    monkeypatch.setattr(R._pin, "container_image_digest",
+                        lambda c: (PIN.IMAGE_DIGEST, ""))
+    res = R.step_for_block(project, {"name": "blk", "type": "ldo"},
+                           "A7_post_layout_resim", None)
+    assert res.status == "NOT_MEASURED"
+    assert str(getattr(res.reason_class, "value", res.reason_class)) == expected
+    if case != "progress_stalled":
+        assert "A7 producer record:" in res.detail
+
+
+def test_producer_budget_record_names_the_enforced_deadline(tmp_path):
+    deck = tmp_path / "tb_blk_pre.sp"
+    deck.write_text("* simulated deck\n")
+    record_path = tmp_path / "a7_post_layout.json"
+    record = {"block": "blk", "budget": {"seconds": 900},
+              "transient_span": {"stop_s": 8e-6}}
+    sim = {"stopped": True, "stalled": False, "wall_s": 901,
+           "reached_s": 4e-6, "log": "ngspice.log",
+           "status": {"deadline_s": 900, "run_to_completion": False}}
+    assert A7._not_measured(record, record_path, deck, sim, tmp_path) == 75
+    saved = json.loads(record_path.read_text())
+    assert saved["reason_class"] == "budget_exhausted"
+    assert saved["budget"]["enforced"] is True
+    assert saved["budget_exhausted"]["enforced_deadline_s"] == 900
 
 
 # ── 4. a card that needs a longer record still gets it, and is named ──────

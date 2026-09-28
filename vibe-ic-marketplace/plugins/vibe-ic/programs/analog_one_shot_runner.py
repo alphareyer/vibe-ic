@@ -52,6 +52,7 @@ import argparse
 import contextlib
 import io
 import json
+import math
 import os
 import subprocess
 import sys
@@ -1120,6 +1121,73 @@ def _producer_gap(project: Path, block: str,
     return None
 
 
+def _a7_record_stamp(path: Path) -> Optional[tuple]:
+    """File identity before/after a producer call; an old A7 record is not
+    evidence for the current rc 75."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_size,
+            stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def _a7_stopped_reason(path: Path, before: Optional[tuple], block: str,
+                       producer: str, step: str) -> tuple:
+    """Map a current, internally consistent A7 producer record to a reason.
+
+    A process exit 75 means only that A7 did not measure. It cannot establish
+    why; a missing, stale, or malformed record is an execution error.
+    """
+    try:
+        if path.is_symlink():
+            raise ValueError("producer record is a symlink")
+        after = _a7_record_stamp(path)
+        if after is None:
+            raise ValueError("producer record missing")
+        if before is not None and after == before:
+            raise ValueError("producer record unchanged by this run")
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if (not isinstance(record, dict)
+                or record.get("producer") != producer
+                or record.get("schema") != 1
+                or record.get("block") != block
+                or record.get("step") != step
+                or record.get("result") != "NOT_MEASURED"):
+            raise ValueError("producer record identity/result mismatch")
+        reason = record.get("reason_class")
+        rule = record.get("rule")
+        cases = {
+            ("execution_error", "A7_SIMULATION_STOPPED_EXTERNALLY"):
+                (_V.ReasonClass.EXECUTION_ERROR, "external_stop"),
+            ("progress_stalled", "A7_SIMULATION_PROGRESS_STALLED"):
+                (_V.ReasonClass.STALLED, "progress_stalled"),
+            ("budget_exhausted", "A7_SIM_BUDGET_EXHAUSTED"):
+                (_V.ReasonClass.BUDGET_EXHAUSTED, "budget_exhausted"),
+        }
+        case = cases.get((reason, rule))
+        if case is None or not isinstance(record.get(case[1]), dict):
+            raise ValueError("producer stop class/rule/evidence mismatch")
+        if reason == "budget_exhausted":
+            stop = record["budget_exhausted"]
+            budget = record.get("budget") or {}
+            if budget.get("enforced") is not True:
+                raise ValueError("A7 budget was not enforced")
+            deadline = float(stop["enforced_deadline_s"])
+            planned = float(budget["seconds"])
+            stated = float(stop["budget_s"])
+            wall = float(stop["wall_s"])
+            if (not all(math.isfinite(v) and v > 0
+                        for v in (deadline, planned, stated, wall))
+                    or abs(deadline - planned) > 1
+                    or abs(deadline - stated) > 1
+                    or wall < deadline - 1):
+                raise ValueError("enforced A7 deadline not proved spent")
+        return case[0], None
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return _V.ReasonClass.EXECUTION_ERROR, str(exc)
+
+
 def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     args=None
                     ) -> StepResult:
@@ -1710,6 +1778,8 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                             extras={"producer": a7_prog.name,
                                     "verdict_tier": "ENV_UNAVAILABLE"},
                             reason_class=_spf.REFUSAL_REASON_CLASS)
+                    a7_record = out_dir / "a7_post_layout.json"
+                    a7_before = _a7_record_stamp(a7_record)
                     a7_cp = _pr.run(
                         [sys.executable, str(a7_prog), str(project),
                          "--block", bname, "--container", _a7_container,
@@ -1736,17 +1806,25 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                             extras={"producer": a7_prog.name,
                                     "producer_rc": 1,
                                     "mode": _a7_mode})
-                    # T130: a simulation spent its declared budget. Nothing
-                    # about the circuit was learned, so it is not a FAIL; the
-                    # record names the time reached, the wall and the remedy.
+                    # Rc 75 means A7 did not measure. The current producer
+                    # record, not the rc, says whether its enforced deadline
+                    # was spent, a simulator stalled, or an external stop won.
                     if a7_cp.returncode == _a7_emit.EX_BUDGET_EXHAUSTED:
+                        a7_reason, a7_record_error = _a7_stopped_reason(
+                            a7_record, a7_before, bname,
+                            _a7_emit.PRODUCER, _a7_emit.STEP)
                         return StepResult(
                             step_name, bname, _V.Verdict.NOT_MEASURED.value,
-                            time.time() - t0, f"{a7_prog.name}: {_a7_tail}",
+                            time.time() - t0,
+                            (f"{a7_prog.name}: {_a7_tail}"
+                             + (f"; A7 producer record: {a7_record_error}"
+                                if a7_record_error else "")),
                             extras={"producer": a7_prog.name,
                                     "producer_rc": a7_cp.returncode,
-                                    "mode": _a7_mode},
-                            reason_class=_V.ReasonClass.BUDGET_EXHAUSTED)
+                                    "mode": _a7_mode,
+                                    "producer_record": str(
+                                        a7_record.relative_to(project))},
+                            reason_class=a7_reason)
                     if a7_cp.returncode == 0:
                         cp_real = _pr.run(cmd, capture_output=True, text=True)
                         _gate_tail = (cp_real.stdout.strip().splitlines()[-1]
