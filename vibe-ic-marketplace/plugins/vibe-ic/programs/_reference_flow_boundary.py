@@ -217,6 +217,10 @@ def design_input_denial(project: Union[str, Path], path: Union[str, Path],
     step-scope guard keeps `oracle_reason`'s fail-closed reading of the same
     case; that is where refusing is the safe direction.
 
+    A readable link inside input/ whose resolved file is outside input/ is
+    denied before a reader can open it. A dangling or looping link remains the
+    reader's unreadable input; resolving one does not make it design evidence.
+
     ``file_name_words=False`` drops the word rules for the FILE name only
     (directories keep them). It is for a CLASSIFIER that never takes a value
     from the file: the phase-3 reference-flow audit files a non-recipe file as
@@ -226,13 +230,25 @@ def design_input_denial(project: Union[str, Path], path: Union[str, Path],
     """
     project = Path(project)
     root = project / "input"
+    candidate = Path(path)
     try:
-        rel = Path(path).resolve().relative_to(root.resolve())
-    except (ValueError, OSError, RuntimeError):
+        resolved = candidate.resolve()
+        resolved_root = root.resolve()
+    except (OSError, RuntimeError):
         try:
-            rel = Path(path).relative_to(root)
+            rel = candidate.relative_to(root)
         except ValueError:
             return None
+    else:
+        try:
+            rel = resolved.relative_to(resolved_root)
+        except ValueError:
+            try:
+                rel = candidate.relative_to(root)
+            except ValueError:
+                return None
+            if candidate.is_file():
+                return "§4.05: input file resolves outside input/"
     parts = rel.parts
     if not parts:
         return None
