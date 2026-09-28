@@ -376,13 +376,26 @@ def parse_sram_protocol(token: str) -> Tuple[Optional[Dict[str, Any]], str]:
 
 def bind_sram_ports(ports: List[Tuple[str, str, str]]
                     ) -> Tuple[Optional[Dict[str, str]], str]:
-    """role -> the DUT's unique top port whose name ends in `_<role>`."""
+    """Bind unique SRAM roles, including direction-qualified shared data names.
+
+    A byte SRAM may expose its read and write data as `i_*_data` and
+    `o_*_data`; the direction distinguishes the roles. The read address may
+    be `_addr` and write enable `_we`. Explicit role suffixes take precedence.
+    An ambiguous alias is a refusal.
+    """
     out: Dict[str, str] = {}
     for role in _SDP_ROLES:
         want_dir = "input" if role == "rdata" else "output"
         hits = [n for d, _w, n in ports
                 if (n == role or n.endswith("_" + role))
                 and (d or "").strip().lower().startswith(want_dir)]
+        aliases = {"wdata": "data", "rdata": "data",
+                   "wen": "we", "raddr": "addr"}
+        if not hits and role in aliases:
+            alias = aliases[role]
+            hits = [n for d, _w, n in ports
+                    if (n == alias or n.endswith("_" + alias))
+                    and (d or "").strip().lower().startswith(want_dir)]
         if len(hits) != 1:
             return None, (f"SRAM role {role!r}: {len(hits)} {want_dir} port(s) "
                           f"end in '_{role}' ({hits}) — need exactly one")

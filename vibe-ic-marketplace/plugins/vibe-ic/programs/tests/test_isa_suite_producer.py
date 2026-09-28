@@ -315,6 +315,36 @@ def test_design_facts_come_from_the_declaration_and_the_ports(tmp_path):
     assert "mem[i] = iv[7:0]" in tb           # powered up to +init, not zero
 
 
+def test_direction_disambiguates_shared_sram_data_ports_through_producer(tmp_path):
+    p = _project(tmp_path)
+    rtl = p / "phase2/stage1/rtl/soc_top.v"
+    rtl.write_text(RTL.replace("o_m_wdata", "o_m_data")
+                      .replace("i_m_rdata", "i_m_data")
+                      .replace("o_m_wen", "o_m_we")
+                      .replace("o_m_raddr", "o_m_addr"))
+    rec = _produce(p, {
+        "s-add": (WORDS, 0, HALT, WORDS),
+        "s-fencei": (WORDS, 0, HALT, WORDS),
+    })
+    assert rec["refusal"] is None
+    assert rec["design_facts"]["sram_ports"]["wdata"] == "o_m_data"
+    assert rec["design_facts"]["sram_ports"]["rdata"] == "i_m_data"
+    assert rec["design_facts"]["sram_ports"]["wen"] == "o_m_we"
+    assert rec["design_facts"]["sram_ports"]["raddr"] == "o_m_addr"
+    assert {r["id"]: r["verdict"] for r in rec["rows"]} == {
+        "base_isa": "PASS", "fence_ext": "PASS"}
+
+
+def test_ambiguous_shared_sram_data_output_refuses(tmp_path):
+    p = _project(tmp_path)
+    rtl = p / "phase2/stage1/rtl/soc_top.v"
+    rtl.write_text(RTL.replace("o_m_wdata", "o_m_data, output wire [7:0] o_aux_data")
+                      .replace("i_m_rdata", "i_m_data"))
+    facts, why = I.design_facts(p)
+    assert facts is None
+    assert "wdata" in why and "o_m_data" in why and "o_aux_data" in why
+
+
 def test_an_unmodellable_sram_protocol_is_refused_by_name(tmp_path):
     p = _project(tmp_path, sram_interface_protocol="wishbone_classic")
     facts, why = I.design_facts(p)
