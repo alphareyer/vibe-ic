@@ -308,6 +308,62 @@ def test_corroborated_waiver_is_not_disclosed(tmp_path):
     assert waivers[31]["evidence_assessment"]["corroborated"] is True
 
 
+@pytest.mark.parametrize("corroborated", [False, True])
+def test_owner_env_approval_survives_loader_and_step_check(tmp_path,
+                                                            corroborated):
+    """The tier flag is internal; it must not erase the owner's approval."""
+    evidence = [SELF_REF]
+    if corroborated:
+        (tmp_path / "phase3").mkdir()
+        (tmp_path / "phase3" / "probe.rpt").write_text("probe completed\n")
+        evidence.insert(0, "phase3/probe.rpt")
+    entry = _attestation(evidence=evidence)
+    fcc, waivers = _load(_project(tmp_path, entry))
+    step = {"id": 31, "name": "DRC", "stage": "stage4",
+            "required_outputs": ["reports/physical/absent.json"],
+            "gate": {"files_exist": ["reports/physical/absent.json"]}}
+    row = fcc.check_step(tmp_path, step, waivers)
+    assert row.status == "PASS_WITH_WAIVERS", row.reasons
+    assert waivers[31]["approved_at"] == entry["approved_at"]
+    assert waivers[31]["owner_statement"] == entry["owner_statement"]
+    assert waivers[31]["_env_unavailable"] is True
+    assert any("ENV_UNAVAILABLE waiver applied" in reason
+               for reason in row.reasons), row.reasons
+    assert not any("OWNER WAIVER REFUSED" in reason
+                   for reason in row.reasons), row.reasons
+    notes = fcc._ENV_WAIVER_EVIDENCE_NOTES
+    assert len(notes) == (0 if corroborated else 1), notes
+    if notes:
+        assert "HONOURED but UNCORROBORATED" in notes[0]
+
+    # The report's advisory must describe the actual step verdict.
+    out = tmp_path / "report.json"
+    run = _pr.run([sys.executable, str(FCC), str(tmp_path), "--json", str(out)],
+                  capture_output=True, text=True)
+    assert out.is_file(), run.stdout + run.stderr
+    report = json.loads(out.read_text())
+    step31 = next(s for s in report["steps"] if str(s.get("id")) == "31")
+    assert step31["status"] == "PASS_WITH_WAIVERS", step31
+    disclosures = [a for a in report.get("advisories", [])
+                   if "UNCORROBORATED" in a]
+    assert len(disclosures) == (0 if corroborated else 1), disclosures
+
+
+def test_raw_machine_marker_still_cannot_impersonate_owner_approval(tmp_path):
+    entry = _attestation(_env_unavailable=True)
+    fcc, waivers = _load(_project(tmp_path, entry))
+    assert 31 not in waivers
+    assert any("machine-generated waiver marker" in note
+               for note in fcc._ENV_WAIVER_REJECTIONS)
+    direct = {**entry, "id": 31, "reason": entry["rationale"]}
+    row = fcc.check_step(tmp_path, {
+        "id": 31, "name": "DRC", "stage": "stage4",
+        "required_outputs": ["missing.rpt"]}, {31: direct})
+    assert row.status != "PASS_WITH_WAIVERS"
+    assert any("machine-generated waiver marker" in reason
+               for reason in row.reasons)
+
+
 def test_free_text_evidence_is_disclosed_as_uncorroborated(tmp_path):
     """#524's separate sub-case: the field used as free text. It is non-empty,
     so the length test passes; it references nothing, so it corroborates
