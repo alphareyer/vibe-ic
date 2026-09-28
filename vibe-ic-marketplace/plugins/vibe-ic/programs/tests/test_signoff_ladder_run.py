@@ -98,6 +98,7 @@ def _stage_em_conductor(project):
                "SPECIALNETS 1 ;\n- VDD + ROUTED met1 140 + SHAPE STRIPE "
                "( 0 0 ) ( 1000 0 ) ;\nEND SPECIALNETS\nEND DESIGN\n")
     _write_json(project / "reports/phase3/em.json", {
+        "subject_def": "phase3/stage3/pnr/routed.def",
         "subject_def_sha256": hashlib.sha256(routed.read_bytes()).hexdigest()})
 
 

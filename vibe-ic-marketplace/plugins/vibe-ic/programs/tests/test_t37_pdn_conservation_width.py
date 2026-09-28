@@ -1,4 +1,5 @@
 """A one-shot EM repair must carry the measured supply current on any segment."""
+import hashlib
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -76,7 +77,13 @@ def test_lef_comments_and_denied_statements_cannot_set_spacing_or_maxwidth(tmp_p
 def test_second_pass_is_blocked_by_its_own_segment_result(tmp_path, monkeypatch):
     pnr = R._pl.pnr_dir(tmp_path)
     pnr.mkdir(parents=True)
-    (pnr / "unit.def").write_text("DESIGN unit ;\nEND DESIGN\n")
+    routed = pnr / "routed.def"
+    routed.write_text(
+        "VERSION 5.8 ;\nUNITS DISTANCE MICRONS 1000 ;\n"
+        "SPECIALNETS 1 ;\n- PWRNET + ROUTED M4 200 "
+        "+ SHAPE STRIPE ( 0 0 ) ( 2000 0 ) ;\n"
+        "END SPECIALNETS\nEND DESIGN\n")
+    (pnr / "unit.def").write_bytes(routed.read_bytes())
     peak = {"current": 1.0e-3}
     def fake_psm(project, _top, _pdk, _container, _ir, em, _notes):
         p = peak["current"]
@@ -86,11 +93,16 @@ def test_second_pass_is_blocked_by_its_own_segment_result(tmp_path, monkeypatch)
             "Maximum current : %s A\n" % (p, p))
         rpt = R._pl.reports_phase3_dir(project)
         (rpt / "em.json").write_text(
-            '{"segments_analysed":2,"max_segment_current_A":%s}' % p)
+            '{"segments_analysed":2,"max_segment_current_A":%s,'
+            '"power_nets":["PWRNET"],'
+            '"subject_def":"phase3/stage3/pnr/routed.def",'
+            '"subject_def_sha256":"%s"}' % (
+                p, hashlib.sha256(routed.read_bytes()).hexdigest()))
         (rpt / "em_segments.csv").write_text(
             "Node0 Layer,Node0 X location,Node0 Y location,"
-            "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
-            "M4,0,0,M4,1,0,%s\nM4,1,0,M4,2,0,1.0e-6\n" % p)
+            "Node1 Layer,Node1 X location,Node1 Y location,Current,Net\n"
+            "M4,0,0,M4,1,0,%s,PWRNET\n"
+            "M4,1,0,M4,2,0,1.0e-6,PWRNET\n" % p)
         return False, True  # IR is not emitted; this segment EM run succeeded.
     monkeypatch.setattr(R, "_emit_ir_em_reports", fake_psm)
     status, detail = R._ppa_power._pdn_em_post_resize_check(
