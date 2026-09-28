@@ -960,6 +960,22 @@ def test_declared_signoff_rollup_separates_waived_from_unchecked():
     assert "WAIVED" in rollup["line"]
 
 
+def test_prestream_keeps_unmeasured_drv_distinct_from_failed_and_waived():
+    import phase3_one_shot_runner as runner
+    clean = runner.StepResult("route", "PASS")
+    unmeasured = runner.StepResult(
+        "drv_signoff", "NOT_MEASURED", reason_class="partial_population")
+    waived = runner.StepResult(
+        "drv_signoff", "WAIVED", waiver_rows=[{
+            "id": "u/Y", "reason": "owner DRV deviation",
+            "owner": "reyerchu"}])
+    failed = runner.StepResult("route", "FAIL")
+    assert runner._prestream_status([clean, unmeasured])[0] == "NOT_MEASURED"
+    assert runner._prestream_status([clean, waived])[0] == "WAIVED"
+    assert runner._prestream_status([clean, failed, unmeasured])[0] == "FAIL"
+    assert runner._prestream_status([clean])[0] == "PASS"
+
+
 def test_completion_audit_names_waived_without_a_pass_claim(
         tmp_path, monkeypatch, capsys):
     import phase23_completion_self_audit_check as audit
