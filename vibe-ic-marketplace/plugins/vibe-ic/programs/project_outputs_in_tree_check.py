@@ -145,7 +145,6 @@ if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _inplace_chain as _chain                                   # noqa: E402
-import _atomic_artefact as _aa                                    # noqa: E402
 
 
 WAIVER_KEY = "project_artifacts_external_storage_intentional"
@@ -687,6 +686,10 @@ def _write_report(report: Optional[str], verdict: str, rc: int,
     """The findings IN FULL, beside the capped stdout line (see --json)."""
     if not report:
         return
+    # Imported HERE, not at module load: `scratch_root_guard` loads this file BY
+    # PATH (with only its module-level siblings beside it) to read
+    # `_VOLATILE_PREFIXES`, and a report is written only when one was asked for.
+    import _atomic_artefact as _aa                                # noqa: E402
     _aa.write_json(Path(report), {
         "gate": "project_outputs_in_tree_check",
         "verdict": verdict,
