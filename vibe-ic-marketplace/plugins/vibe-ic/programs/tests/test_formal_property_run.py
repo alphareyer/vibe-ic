@@ -581,3 +581,17 @@ def test_both_sby_emitters_agree_on_the_frontend():
         for ln in script.splitlines():
             if "read_verilog" in ln:
                 assert " -sv " in ln, ln
+
+
+def test_frontend_retry_detects_assignment_pattern_parse_error_before_engine():
+    log = ("SBY 00:00:01 [formal_aes_safety] base: "
+           "aes_pkg.sv:579: ERROR: syntax error, unexpected ':'\n"
+           "SBY 00:00:01 [formal_aes_safety] task failed. ERROR.\n"
+           "SBY 00:00:01 [formal_aes_safety] DONE (ERROR, rc=16)\n")
+    assert FPR.frontend_aborted_the_read(log)
+
+
+def test_frontend_retry_does_not_mask_solver_inconclusive():
+    log = ("SBY 00:00:01 [formal_aes_safety] engine_0: abc pdr\n"
+           "SBY 00:00:02 [formal_aes_safety] DONE (UNKNOWN, rc=4)\n")
+    assert not FPR.frontend_aborted_the_read(log)
