@@ -121,7 +121,8 @@ def _project(tmp: Path, units=("I", "Zifencei"), **decl_over) -> Path:
 
 def _fake_executor(outcome: dict):
     """Writes the results.json the container job would write. `outcome` maps
-    program id -> (ref_words|None, ref_rc, dut transcript, dut words|None)."""
+    program id -> (ref_words|None, ref_rc, dut transcript, dut words|None
+    [, dut_rc])."""
     def _run(job_path: Path, work: Path):
         job = json.loads(Path(job_path).read_text())
         res = {"programs": {}, "builds": {}, "sims": {}, "done": True,
@@ -129,7 +130,9 @@ def _fake_executor(outcome: dict):
         for arm in job["arms"]:
             res["builds"][f"{arm['name']}_full"] = {"ok": True}
         for prog in job["programs"]:
-            ref_words, ref_rc, tr, dut_words = outcome[prog["id"]]
+            item = outcome[prog["id"]]
+            ref_words, ref_rc, tr, dut_words = item[:4]
+            dut_rc = item[4] if len(item) > 4 else 0
             d = Path(work) / "o" / prog["id"]
             d.mkdir(parents=True)
             (d / "dut.dis").write_text((CAL / "isa_objdump_no_relax_negative.dis").read_text())
@@ -149,7 +152,8 @@ def _fake_executor(outcome: dict):
                         sig.write_text("\n".join(dut_words) + "\n")
                     res["sims"].setdefault(prog["id"], {}).setdefault(
                         f"{arm['name']}_full", {})[iv] = {
-                        "rc": 0, "transcript": tr, "sig": str(sig) if sig else None}
+                        "rc": dut_rc, "transcript": tr,
+                        "sig": str(sig) if sig else None}
         (Path(work) / "results.json").write_text(json.dumps(res))
         return 0, "fake"
     return _run
@@ -323,6 +327,14 @@ def test_a_reference_timeout_or_missing_signature_is_not_measured():
     assert I.judge_tohost(124, dut)[0] == I.NOT_MEASURED
 
 
+def test_a_nonzero_reference_rc_with_a_residual_signature_is_not_measured():
+    """A partial Spike signature is not oracle evidence after its process fails."""
+    dut = I.parse_tb_transcript(HALT)
+    st, why = I.judge_signature(["00000001"], 1, dut, ["00000001"])
+    assert st == I.NOT_MEASURED
+    assert why == "the reference model itself does not pass this program (rc 1)"
+
+
 def test_a_matching_signature_and_a_tohost_of_one_pass():
     dut = I.parse_tb_transcript(HALT)
     assert dut == {"status": "halted", "tohost": 1, "cycles": 154515}
@@ -418,6 +430,20 @@ def test_a_reference_timeout_keeps_the_case_not_measured(tmp_path):
     assert rows["base_isa"]["verdict"] == "NOT_EXECUTED"
     assert rows["base_isa"]["sim_executed"] is False
     assert rows["fence_ext"]["verdict"] == "PASS"
+
+
+def test_a_nonzero_dut_sim_rc_cannot_promote_halt_text_to_pass(tmp_path):
+    """The results.json native rc is authoritative over a HALT marker."""
+    p = _project(tmp_path)
+    rec = _produce(p, {"s-add": (WORDS, 0, HALT, WORDS, 1),
+                       "s-fencei": (WORDS, 0, HALT, WORDS)})
+    states = rec["programs"]["s-add"]["arms"]["staged_full"]["by_init"]
+    assert states and all(x["state"] == I.NOT_MEASURED for x in states)
+    assert all(x["rc"] == 1 for x in states)
+    assert all("DUT simulation exited nonzero (rc 1)" == x["why"]
+               for x in states)
+    rows = {r["id"]: r for r in rec["rows"]}
+    assert rows["base_isa"]["verdict"] == "NOT_EXECUTED"
 
 
 def test_a_declared_unit_with_no_suite_binds_nothing(tmp_path):
