@@ -84,12 +84,12 @@ import re
 import shutil
 import tarfile
 import tempfile
-import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import _atomic_artefact as _aa
+import _bounded_fetch
 
 HERE = Path(__file__).resolve().parent
 LOCK_PATH = HERE / "isa_suites.lock.json"
@@ -214,27 +214,11 @@ def extract_verified(data: bytes, suite: Dict[str, Any], dest: Path
 
 
 def default_fetch(url: str) -> bytes:
-    import urllib.request
-    deadline = time.monotonic() + FETCH_DEADLINE_S
-    chunks: List[bytes] = []
-    total = 0
-    with urllib.request.urlopen(  # noqa: S310 — public, lock-pinned input
-            url, timeout=min(FETCH_IO_TIMEOUT_S, FETCH_DEADLINE_S)) as r:
-        # read1 returns available bytes without waiting to fill the chunk. A
-        # streaming peer cannot evade the monotonic deadline by trickling.
-        read1 = r.read1
-        while True:
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
-            chunk = read1(min(FETCH_CHUNK_BYTES, FETCH_MAX_BYTES - total + 1))
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
-            if not chunk:
-                return b"".join(chunks)
-            total += len(chunk)
-            if total > FETCH_MAX_BYTES:
-                raise ValueError(f"tarball byte ceiling {FETCH_MAX_BYTES} exceeded")
-            chunks.append(chunk)
+    """Fetch one hash-pinned tarball inside the shared total deadline."""
+    return _bounded_fetch.fetch(
+        url, deadline_s=FETCH_DEADLINE_S, max_bytes=FETCH_MAX_BYTES,
+        chunk_bytes=FETCH_CHUNK_BYTES, io_timeout_s=FETCH_IO_TIMEOUT_S,
+        byte_label="tarball")
 
 
 def cache_dir() -> Path:
