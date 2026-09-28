@@ -27,11 +27,17 @@ NO_DELEGATION = (
     "declaration.json records plugin metadata about ports; this table fixes their names.",
     "The table, not declaration.json, determines the signal names for this port group.",
     "declaration.json does not define the signal names for this port group.",
+    "The debug interface port names are defined by declaration.json.",
+    "The debug interface port names are defined by declaration.json; "
+    "SRAM names are fixed by the table below.",
+    "The concrete signal names for this port group are declared by the plugin "
+    "in declaration.json. SRAM names are fixed by the table below.",
 )
 AUTHORITY_SENTENCE = (
     "declaration.json defines the concrete signal names for this port group.",
     "The actual port names for this group come from declaration.json.",
     "此 port group 的訊號名稱由 Plugin 在 declaration.json 宣告。",
+    "The SRAM interface port names are defined by declaration.json.",
 )
 
 
