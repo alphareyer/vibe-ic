@@ -61,6 +61,7 @@ if _PROGRAMS_DIR not in sys.path:
 
 import _atomic_artefact  # noqa: E402
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
+import librelane_contract as _ll  # noqa: E402
 from librelane_contract import Refusal, digest  # noqa: E402
 
 SEGMENT1_LAST = "Checker.NetlistAssignStatements"
@@ -355,3 +356,125 @@ def netlist_identity(project: Path, proven_netlist: Path) -> Dict[str, Any]:
         problems.append(f"{layout} changed after the handoff")
     return {"verdict": "FAIL" if problems else "PASS", "problems": problems,
             "proven_sha256": proven, "consumed_sha256": rec["layout_netlist_sha256"]}
+
+
+# ── segment configs, from the contract's emitters ──────────────────────────
+
+def _write_config(out: Path, config: dict, sources: dict) -> Path:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_artefact.write_json(out, config, indent=2)
+    _atomic_artefact.write_json(out.with_suffix(".provenance.json"), sources, indent=2)
+    return out
+
+
+def segment1_config(project: Path, pdk: str, out: Path, *, top: str,
+                    rtl_files: Sequence[Path], defines: Sequence[str], use_slang: bool,
+                    scl: Optional[str] = None, synth_liberty: Optional[str] = None,
+                    top_source: str = "caller (the resolved synthesis top)") -> Path:
+    """Segment 1 synthesises the CORE: `emit_synthesis_config` (the chip read,
+    its defines, the FSM table step 13 needs) with DESIGN_NAME = the core."""
+    config = _ll.emit_synthesis_config(project, pdk, out, list(rtl_files), list(defines),
+                                       use_slang, std_cell_library=scl,
+                                       synth_liberty=synth_liberty, top=top)
+    sources = json.loads(out.with_suffix(".provenance.json").read_text())
+    _ll._set(config, sources, "DESIGN_NAME", top, top_source)
+    return _write_config(out, config, sources)
+
+
+def segment2_config(project: Path, pdk: str, out: Path, *, layout_netlist: Path,
+                    sdc: Optional[Path], sdc_source: str,
+                    pdn_cfg: Optional[Path] = None) -> Path:
+    """Segment 2 implements the LAYOUT top over the handed netlist.
+
+    `emit_config` (declared inputs only), the die by flow
+    (`librelane_contract.apply_flow_die`), the chip top as DESIGN_NAME on the
+    chip path (`_apply_layout_top`, D7), VERILOG_FILES = the handed layout
+    netlist (the only file Yosys.JsonHeader reads there), the SDC step 7
+    declared, the pad-connect PDN script, and the output-only pad masters the
+    disconnected-pin checker must ignore."""
+    flow = _ll.librelane_flow(project)[0]
+    config = _ll.emit_config(project, pdk, out)
+    sources = json.loads(out.with_suffix(".provenance.json").read_text())
+    _ll.apply_flow_die(project, config, sources,
+                       ["OpenROAD.Floorplan", "OpenROAD.PadRing"], flow)
+    _ll._apply_layout_top(project, config, sources)
+    _ll._set(config, sources, "VERILOG_FILES", [str(Path(layout_netlist).resolve())],
+             f"{WHOLE_REL}/handoff/{HANDOFF_RECORD}.layout_netlist")
+    if sdc is not None:
+        for key in ("PNR_SDC_FILE", "SIGNOFF_SDC_FILE"):
+            _ll._set(config, sources, key, str(Path(sdc).resolve()), sdc_source)
+    else:
+        for key in ("PNR_SDC_FILE", "SIGNOFF_SDC_FILE"):
+            config.pop(key, None)
+            sources[key] = f"ABSENT: {sdc_source}"
+    if pdn_cfg is not None:
+        _ll._set(config, sources, "PDN_CFG", str(Path(pdn_cfg).resolve()),
+                 "librelane_contract.emit_pdn_cfg (the image's pdn_cfg.tcl + the "
+                 "PDK registry's pad-facing connects)")
+    masters, why = ignore_disconnected_masters(project)
+    if masters:
+        _ll._set(config, sources, "IGNORE_DISCONNECTED_MODULES", masters, why)
+    return _write_config(out, config, sources)
+
+
+# ── the two segments ───────────────────────────────────────────────────────
+
+def run_two_segments(project: Path, image: str, *, pdk: str, pdk_root: Path,
+                     scl: Optional[str], segment1: Path, between,
+                     segment2_kwargs: Dict[str, Any], first_step: str,
+                     last_step: str, deadline_s: int = DEFAULT_DEADLINE_S,
+                     docker: str = "docker") -> Dict[str, Any]:
+    """Segment 1, vibe-ic's between-segments work, segment 2.
+
+    `between(project, segment1_state) -> dict` is the runner's: steps 11-14 and
+    `step_prepnr` (W7a). It returns `netlist` (what step 13 proved: the core,
+    or the scan netlist when DFT is declared), `wrapper` (the chip top's
+    Verilog, or None), `top` (the layout top) and `sdc` / `sdc_source`. A
+    `between` that raises stops the run there; nothing after it runs.
+    """
+    flow = _ll.librelane_flow(project)[0]
+    base = whole_dir(project)
+    common = dict(flow=flow, pdk=pdk, pdk_root=pdk_root, scl=scl)
+    plan1 = planned_steps(project, image, segment1, first=first_step,
+                          last=SEGMENT1_LAST, docker=docker, **common)
+    s1 = run_segment(project, image, segment1, name="segment1",
+                     extra=["--to", SEGMENT1_LAST], expected=plan1["run"],
+                     deadline_s=deadline_s, docker=docker, **common)
+    handed = between(project, s1["state"])
+    state1 = json.loads(Path(s1["state"]).read_text())
+    seg2 = segment2_config(project, pdk, base / "segment2.json",
+                           layout_netlist=base / "handoff" / f"{handed['top']}.nl.v",
+                           sdc=handed.get("sdc"), sdc_source=handed.get("sdc_source", ""),
+                           **segment2_kwargs)
+    if handed.get("wrapper") is not None:
+        # The wrapper changes the netlist the header describes: regenerate it
+        # with the image's own Yosys.JsonHeader over the layout netlist.
+        layout = base / "handoff" / f"{handed['top']}.nl.v"
+        layout.parent.mkdir(parents=True, exist_ok=True)
+        layout.write_bytes(Path(handed["netlist"]).read_bytes()
+                           + Path(handed["wrapper"]).read_bytes())
+        jh = run_segment(project, image, seg2, name="json_header",
+                         extra=["--only", JSON_HEADER_STEP], expected=[JSON_HEADER_STEP],
+                         deadline_s=deadline_s, docker=docker, **common)
+        json_header = Path(json.loads(Path(jh["state"]).read_text())["json_h"])
+    else:
+        json_header = Path(state1["json_h"])
+    rec = handoff(project, s1["state"], netlist=Path(handed["netlist"]),
+                  wrapper=handed.get("wrapper"), json_header=json_header,
+                  top=handed["top"])
+    plan2 = planned_steps(project, image, seg2, first=SEGMENT2_FIRST, last=last_step,
+                          docker=docker, **common)
+    s2 = run_segment(project, image, seg2, name="segment2",
+                     extra=["--from", SEGMENT2_FIRST, "--with-initial-state", rec["state_in"]],
+                     expected=plan2["run"], deadline_s=deadline_s, docker=docker, **common)
+    summary = {"flow": flow, "image": image,
+               "segment1": {"steps": [s for s, _ in s1["steps"]], "state": str(s1["state"]),
+                            "tool_verdict": s1["tool_verdict"]},
+               "segment2": {"steps": [s for s, _ in s2["steps"]], "state": str(s2["state"]),
+                            "tool_verdict": s2["tool_verdict"],
+                            "tool_findings": s2["tool_findings"],
+                            "gated_off": plan2["gated_off"]},
+               "handoff": rec,
+               "netlist_identity": netlist_identity(project, Path(handed["netlist"]))}
+    _atomic_artefact.write_json(base / "whole_flow.json", summary, indent=2)
+    return summary

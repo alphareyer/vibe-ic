@@ -2033,6 +2033,29 @@ def _check_synthesised_read(project: Path, config: dict, sources: dict) -> None:
          f"{built.get('frontend', 'unrecorded')})")
 
 
+# W5/W7b resolve the external flow before either segment runs.  The existing
+# direct config resolver below intentionally keeps its historical Chip path.
+FLOW_CHIP = "Chip"
+FLOW_CLASSIC = "Classic"
+
+
+def librelane_flow(project: Path) -> tuple[str, str]:
+    """Return the declaration-selected LibreLane flow."""
+    if design_class(project) == DESIGN_CLASS_CHIP_PAD_RING:
+        return FLOW_CHIP, "design class chip_pad_ring"
+    return FLOW_CLASSIC, "no pad ring requested"
+
+
+def apply_flow_die(project: Path, config: dict, sources: dict,
+                   step_ids: list[str], flow: str) -> None:
+    """Apply only the flow-specific floorplan source to a segment config."""
+    if flow == FLOW_CHIP:
+        _apply_runner_floorplan(project, config, sources, step_ids)
+    elif "FP_CORE_UTIL" in config and "DIE_AREA" not in config:
+        _set(config, sources, "FP_SIZING", "relative",
+             sources["FP_CORE_UTIL"] + " (declared utilisation sizes die)")
+
+
 def resolve_step_configs(project: Path, image: str, pdk: str,
                          step_ids: list[str], *, pdk_root: Path,
                          docker: str = 'docker',
