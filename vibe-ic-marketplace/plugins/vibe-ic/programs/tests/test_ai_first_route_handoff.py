@@ -14,6 +14,7 @@ import task_nature_route as tnr  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _runtime_pair_fixture as runtime_pair  # noqa: E402
+from _hostpaths import require_repo  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -234,3 +235,38 @@ def test_batch_waits_for_every_route_then_resumes_without_restaging(
     report = json.loads((run / "solve_report.json").read_text())
     assert report["routing_phase"] == "COMPLETE"
     assert report["route_confirmed"] == 2
+
+
+def test_checked_in_prompt_reaches_runner_only_after_ai_route(tmp_path,
+                                                                monkeypatch):
+    # This is a real checked-in benchmark input, not prose authored alongside
+    # the route implementation. It exercises the consumer's staged prompt.
+    prompt = require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
+        "fixtures", "real_benchmark",
+        "directional_bump_fall_moore_prompt.md").read_text()
+    assert "module TopModule" in prompt
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    (dataset / "real_fsm_prompt.txt").write_text(prompt)
+    run = tmp_path / "run"
+    calls = []
+    monkeypatch.setattr(
+        bd._RunnerBudget, "run",
+        lambda _budget, argv: calls.append(argv) or bd._ProcessOutcome(rc=1))
+
+    assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
+    assert calls == []
+    task = _task(run)
+    assert task["prompt_sha256"] == bd._sha256_text(prompt)
+    response = _answer(task, "spec_generation")
+    response["prompt_evidence"] = [{
+        "excerpt": "Create a Moore state machine for a creature that walks and falls.",
+        "supports": "The input requests a new Moore FSM from prose.",
+    }]
+    _write_answer(task, response)
+    assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
+    assert len(calls) == 1
+    report = json.loads((run / "solve_report.json").read_text())
+    assert report["routing_phase"] == "COMPLETE"
+    assert report["results"][0]["routing_verdict"]["source"] == "ai_confirmed"
