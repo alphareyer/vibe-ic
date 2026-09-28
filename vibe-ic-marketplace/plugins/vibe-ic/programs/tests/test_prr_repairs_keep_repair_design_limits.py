@@ -172,7 +172,7 @@ def _region(text, start, end):
     return '' if i < 0 else text[i:text.index(end, i)]
 
 
-def run(tmp_path, *, cap='4', fix=True):
+def run(tmp_path, *, cap='4', fix=True, baseline_over=False):
     text = TCL.read_text()
     procs = (_region(text, '# ---- the fanout limit', '# ---- 4. repair')
              # D11's census procs, when the script carries them
@@ -183,8 +183,9 @@ def run(tmp_path, *, cap='4', fix=True):
     env = 'set ::env(MAX_FANOUT_CONSTRAINT) 10\n' + (
         '' if cap is None else f'set ::env(VIBEIC_PRR_MAX_FANOUT) {cap}\n')
     script = (HARNESS + env + f'set ::FIX {int(fix)}\n' + procs
-              # what repair_design left: the cap held everywhere
-              + 'set ::vic_fo_repaired [dict create]\n'
+              + ('mkinst l5 and2 {A hot INPUT}\n' if baseline_over else '')
+              + ('set ::vic_fo_repaired [vic_fanout_over]\n'
+                 if baseline_over else 'set ::vic_fo_repaired [dict create]\n')
               + section + 'puts "EXIT 0"\nputs "RD_CALLS $::RD_CALLS"\n')
     path = tmp_path / 'prr.tcl'
     path.write_text(script)
@@ -210,6 +211,15 @@ def test_a_candidate_still_over_the_cap_is_refused(tmp_path):
     assert out.returncode == 1, out.stdout + out.stderr
     assert 'LL_PRR_FANOUT_LIMIT_BROKEN: 1 net(s) over max_fanout 4' in out.stderr
     assert 'hot 5' in out.stderr
+    assert 'METRIC vibeic__prr__fanout__added 1' in out.stdout
+
+
+def test_an_already_over_cap_net_cannot_gain_another_load(tmp_path):
+    # repair_design left five loads on hot; antenna repair adds the sixth.
+    # The old name-only comparison discarded this worsening from its dict.
+    out = run(tmp_path, fix=False, baseline_over=True)
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert 'hot 6' in out.stderr
     assert 'METRIC vibeic__prr__fanout__added 1' in out.stdout
 
 

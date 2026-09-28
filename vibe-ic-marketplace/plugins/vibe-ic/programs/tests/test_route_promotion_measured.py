@@ -249,8 +249,31 @@ def test_an_in_chain_refusal_stays_bound_and_is_not_repaired_twice(tmp_path, mon
     monkeypatch.setattr(prr, 'run', lambda *a, **k: pytest.fail('repaired twice'))
     result = R.step_postroute_repair_librelane(project, 'dut',
                                                ring_fixture._pdk(tmp_path, ring=None), 'unused')
-    assert result.status == 'PASS' and 'NOT promoted' in result.detail, result.detail
+    assert result.status == 'NOT_MEASURED' and 'NOT promoted' in result.detail, result.detail
     assert 'did not measure its own output' in result.detail
+    assert '->' not in result.detail  # discarded candidate metrics cannot speak for the kept route
+
+
+def test_after_direct_route_refusal_does_not_claim_the_discarded_slack(tmp_path, monkeypatch):
+    import test_t102_librelane_postroute_repair as t102
+
+    def report(project):
+        folder = project / 'phase3/librelane/32-cand01'
+        candidate = put(folder / 'top.def', 'DESIGN top ;\n# repaired\nEND DESIGN\n')
+        netlist = put(folder / 'top.nl.v', 'module top(); endmodule\n')
+        state = put(folder / 'state_out.json', {'def': str(candidate), 'nl': str(netlist)})
+        return {'verdict': 'PASS', 'adopted': '32-cand01',
+                'adopted_state': str(state),
+                'baseline': {'setup_ws_min': -1.0},
+                'final': {'setup_ws_min': 0.1},
+                'corners': ['slow']}
+
+    runner, project, pnr, result, _ = t102._runner_step(tmp_path, monkeypatch, report)
+    assert result.status == 'NOT_MEASURED', result
+    assert 'NOT promoted' in result.detail and 'input route kept' in result.detail
+    assert '0.1' not in result.detail
+    assert (pnr / 'routed.def').read_text() == 'DESIGN top ;\nEND DESIGN\n'
+    assert not (pnr / 'routed_base_prerepair.def').exists()
 
 
 def test_a_tampered_promotion_decision_is_not_read_as_the_chain(tmp_path, monkeypatch):

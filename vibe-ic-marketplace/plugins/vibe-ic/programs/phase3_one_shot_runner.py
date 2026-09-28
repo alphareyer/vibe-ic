@@ -45630,13 +45630,15 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
                f"(OpenROAD.STAPostPNR, sign-off scene)")
     refused = report.get("promotion_refused") or (
         _promotion_unmeasured(_step32_own_measurement(report))
-        if report.get("adopted") and handed else "")
+        if report.get("adopted") else "")
     if refused:
         _drv_promotion_disclose(pnr_out, "librelane_promotion_unmeasured",
                                 f"{refused}; the input route was kept")
-        return StepResult("postroute_repair_librelane", "PASS", time.time() - t0,
+        return StepResult("postroute_repair_librelane", "NOT_MEASURED", time.time() - t0,
                           f"{report.get('adopted')} adopted by the closure but NOT "
-                          f"promoted ({refused}); input route kept: {summary}")
+                          f"promoted ({refused}); input route kept; its closure "
+                          "was not established by step 32",
+                          reason_class=_V.ReasonClass.INCONCLUSIVE)
     if not report.get("adopted"):
         _drv_promotion_disclose(
             pnr_out, "librelane_closure_kept_input",

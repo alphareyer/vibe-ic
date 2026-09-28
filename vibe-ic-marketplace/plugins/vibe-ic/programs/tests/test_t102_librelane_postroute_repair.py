@@ -836,7 +836,11 @@ def test_the_runner_records_the_in_chain_repair_without_repairing_twice(tmp_path
         {'steps': {'21': 'librelane', '32': 'librelane'}})
     report = put(project / prr.REPORT_REL, {
         'verdict': 'PASS', 'site': 'after_route', 'adopted': '32-cand01',
-        'baseline': {'hold_ws_min': -0.3}, 'final': {'hold_ws_min': 0.3}})
+        'baseline': {'hold_ws_min': -0.3},
+        'final': {'hold_ws_min': 0.3, 'antenna_nets': 0, 'antenna_pins': 0,
+                  'antenna_state': 'cand01/02-checkantennas'},
+        'candidates': [{'candidate': '32-cand01',
+                        'repair_metrics': {'vibeic__prr__unrouted__added': 0}}]})
     put(project / 'reports/phase3/librelane_route_handoff.json',
         {'postroute_repair': {'report_sha256': contract.digest(report)}})
     monkeypatch.setattr(prr, 'run', lambda *a, **k: pytest.fail('repaired twice'))

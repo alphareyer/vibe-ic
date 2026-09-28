@@ -196,11 +196,14 @@ proc vic_fanout_over {} {
     }
     return $out
 }
-# The nets over the cap in `now` that were not over it in `before`.
+# Nets newly over the cap, or already over it but given still more loads.
+# The latter also worsens the signoff violation and must refuse the candidate.
 proc vic_fanout_added {before now} {
     set added [dict create]
     dict for {name loads} $now {
-        if {![dict exists $before $name]} { dict set added $name $loads }
+        if {![dict exists $before $name] || $loads > [dict get $before $name]} {
+            dict set added $name $loads
+        }
     }
     return $added
 }
@@ -586,7 +589,7 @@ if {!$::vic_fo_declared} {
     utl::metric_integer vibeic__prr__fanout__added [dict size $::vic_fo_final]
 }
 if {[dict size $::vic_fo_final]} {
-    puts stderr "LL_PRR_FANOUT_LIMIT_BROKEN: [dict size $::vic_fo_final] net(s) over max_fanout $::env(VIBEIC_PRR_MAX_FANOUT) that repair_design had within it: $::vic_fo_final; the candidate is not written"
+    puts stderr "LL_PRR_FANOUT_LIMIT_BROKEN: [dict size $::vic_fo_final] net(s) over max_fanout $::env(VIBEIC_PRR_MAX_FANOUT) that became newly over or worsened after repair_design: $::vic_fo_final; the candidate is not written"
     exit 1
 }
 
