@@ -39785,6 +39785,17 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                           extras={"resize_history": resize_history,
                                   "spare_record_written": _spare_record_written,
                                  "loosen_declines": loosen_declines})
+    # N9 — the routed netlist names each supply port once. `pdngen` leaks one
+    # STA top port per supply per call (see `_netlist_port_decls`), and the
+    # PDN EM pre-sweep calls it once per candidate, so `write_verilog` above
+    # wrote `inout VDD;` as many times. Exact repeats are removed here, where
+    # the netlist is first written; a conflicting repeat is left for
+    # `step_prestream_gate` to refuse by name.
+    _netlist_ports = _dedupe_shipped_netlist_ports(project, top, "pnr")
+    if _netlist_ports.get("status") == "DEDUPED":
+        print(f"[pnr] NETLIST_PORT_DECLS_DEDUPED: "
+              f"{len(_netlist_ports.get('removed') or [])} exact repeat(s) "
+              f"removed from {top}_pnr.v", file=sys.stderr)
     # ORGANIC #585 — route-convergence gate. TritonRoute can run out of
     # iterations and COMPLETE with violations remaining (rc=0,
     # `Completing 100% with N violations`). A nonzero final DRT-0199
@@ -56009,11 +56020,221 @@ def _prestream_route_census(project: Path, top: str, pdk: PdkConfig,
     return record, ""
 
 
+#: suffix of the kept copy of a netlist's tool-written bytes (N9); it does not
+#: end in `.v`, so no `*.v` / `*_pnr.v` netlist discovery ever picks it up
+_NETLIST_TOOL_BYTES_SUFFIX = ".tool_bytes"
+
+
+def _new_clean_netlist_supersedes_tool_bytes(project: Path, netlist: Path,
+                                             kept: Path) -> bool:
+    """True only for a newer, declared clean OpenROAD output.
+
+    A CLEAN parse can also be the second reading of our own deduped netlist.
+    The latest netlist declaration must therefore be a successful OpenROAD
+    invocation after the kept-byte declaration, and both current files must
+    still match their newest declared hashes. Missing ledger evidence retains
+    the producer bytes.
+    """
+    net_rel = _project_rel(project, netlist)
+    kept_rel = _project_rel(project, kept)
+    if net_rel is None or kept_rel is None:
+        return False
+    latest_net: Optional[Tuple[int, Dict[str, Any], str]] = None
+    latest_kept: Optional[Tuple[int, Dict[str, Any], str]] = None
+    try:
+        lines = (Path(project) / "provenance.jsonl").read_text().splitlines()
+    except OSError:
+        return False
+    for index, line in enumerate(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if _is_removal_record(record):
+            if _removes(record, net_rel):
+                latest_net = None
+            if _removes(record, kept_rel):
+                latest_kept = None
+            continue
+        try:
+            if int(record.get("exit_code", 0)) != 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        outputs = record.get("outputs") or {}
+        if not isinstance(outputs, dict):
+            continue
+        net_sha = outputs.get(net_rel)
+        kept_sha = outputs.get(kept_rel)
+        if isinstance(net_sha, str):
+            latest_net = (index, record, net_sha)
+        if isinstance(kept_sha, str):
+            latest_kept = (index, record, kept_sha)
+    if latest_net is None or latest_kept is None:
+        return False
+    net_index, producer, net_sha = latest_net
+    kept_index, _, kept_sha = latest_kept
+    return (net_index > kept_index
+            and producer.get("record") == "invocation"
+            and producer.get("tool") == "openroad"
+            and net_sha == _file_sha256(netlist)
+            and kept_sha == _file_sha256(kept))
+
+
+def _dedupe_shipped_netlist_ports(project: Path, top: str,
+                                  stage: str) -> Dict[str, Any]:
+    """N9 — remove EXACT repeated top-port names/declarations from the
+    shipped `<pnr>/<top>_pnr.v`, and record what was done (or why nothing
+    was) in `reports/phase3/netlist_port_decls.json`, one row per stage.
+
+    The repeats are an OpenROAD session artefact (`pdngen` creates and then
+    destroys a supply BTerm; the STA top port it made is not removed, so each
+    call adds another), not a design fact: the routed DEF carries no such
+    terminal at all. The rule is structural (`_netlist_port_decls`): a
+    conflicting repeat is never merged, and a header this parser does not
+    understand is left untouched and recorded UNPARSED.
+
+    MODULE (review wave 7, MAJOR): the file keeps the file-naming top's name,
+    but after step 15.5ic its module is the physical chip top. The module is
+    taken from the routed DEF's own `DESIGN` line (`_streamout_top`, the same
+    resolution every other consumer of this netlist uses), never assumed.
+
+    PROVENANCE (review wave 7, BLOCKER): `<top>_pnr.v` is a declared output
+    of the PnR OpenROAD session. The rewrite goes through the runner's one
+    rule for rewriting a declared file (`_declared_transform_exec`: credited
+    only when the bytes it read are the newest declared bytes), so the ledger
+    carries the derivation -- input sha256, output sha256 and the rule -- in
+    its own row. The tool's bytes are kept beside it
+    (`<top>_pnr.v{_NETLIST_TOOL_BYTES_SUFFIX}`, declared too), so what
+    OpenROAD wrote stays inspectable after the derived netlist replaces it."""
+    import _netlist_port_decls as _npd  # noqa: PLC0415
+    pnr = _pl.pnr_dir(project)
+    netlist = pnr / f"{top}_pnr.v"
+    module = top
+    routed = pnr / "routed.def"
+    if routed.is_file():
+        try:
+            module = _streamout_top(routed, top)[0] or top
+        except Exception:  # noqa: BLE001 — an unreadable DEF keeps `top`
+            module = top
+    row: Dict[str, Any] = {"stage": stage, "netlist": str(netlist),
+                           "module": module}
+    try:
+        text = netlist.read_text(errors="replace")
+    except OSError as exc:
+        row.update(status="ABSENT", why=f"{type(exc).__name__}: {exc}")
+    else:
+        new, rec = _npd.dedupe(text, module)
+        row.update(rec)
+        before = hashlib.sha256(text.encode()).hexdigest()
+        row["sha256_before"] = before
+        if new != text:
+            rel = _project_rel(project, netlist) or str(netlist)
+            kept = netlist.with_name(netlist.name + _NETLIST_TOOL_BYTES_SUFFIX)
+            keep_command = (f"N9: {rel} exactly as its producer wrote it "
+                            f"(sha256:{before}), kept before the port dedupe")
+            if kept.is_file():
+                # A reused project has an earlier declaration of this side
+                # file. Its next copy must be a transform from the newly
+                # declared tool netlist, never an uncredited overwrite.
+                _declared_transform_exec(
+                    project, kept, f"{stage}:netlist_tool_bytes",
+                    "phase3_one_shot_runner", keep_command,
+                    lambda: shutil.copyfile(netlist, kept), input_path=netlist)
+            else:
+                shutil.copyfile(netlist, kept)
+                _restamp_provenance_output(
+                    project, _project_rel(project, kept) or str(kept), kept,
+                    "phase3_one_shot_runner", keep_command)
+            row["tool_bytes"] = str(kept)
+            _declared_transform_exec(
+                project, netlist, f"{stage}:netlist_port_dedupe",
+                "phase3_one_shot_runner",
+                f"N9 _netlist_port_decls.dedupe on module {module}: exact "
+                f"repeated top-port names/declarations removed; input "
+                f"sha256:{before}",
+                lambda: _aa.write_text(netlist, new))
+            row["sha256_after"] = hashlib.sha256(new.encode()).hexdigest()
+        elif rec.get("status") == "CLEAN":
+            # CLEAN also describes our own already-deduped netlist when the
+            # pre-stream gate checks it again in the SAME run. Retire previous
+            # producer bytes only after a newer clean OpenROAD output is
+            # declared and matches disk.
+            kept = netlist.with_name(netlist.name + _NETLIST_TOOL_BYTES_SUFFIX)
+            if kept.is_file():
+                if not _new_clean_netlist_supersedes_tool_bytes(
+                        project, netlist, kept):
+                    row["tool_bytes"] = str(kept)
+                    row["tool_bytes_retained_reason"] = (
+                        "no newer declared clean OpenROAD output supersedes "
+                        "these producer bytes")
+                else:
+                    old_sha = _sha256_of_file(kept)
+                    try:
+                        kept.unlink()
+                    except OSError as exc:
+                        row["stale_tool_bytes_removal_error"] = (
+                            f"{type(exc).__name__}: {exc}")
+                    else:
+                        _append_removal_event(
+                            project, "netlist_tool_bytes_prune",
+                            [(_project_rel(project, kept) or str(kept), old_sha)],
+                            "new declared clean OpenROAD netlist needs no port dedupe")
+                        row["stale_tool_bytes_removed"] = str(kept)
+        row["check_status"], row["findings"] = _npd.problems(new, module)
+    record = _pl.reports_dir(project) / "phase3" / "netlist_port_decls.json"
+    try:
+        doc = json.loads(record.read_text()) if record.is_file() else {}
+    except (OSError, ValueError):
+        doc = {}
+    rows = [r for r in (doc.get("rows") or []) if r.get("stage") != stage]
+    try:
+        _aa.write_json(record, {"schema": "vibe-ic/netlist-port-decls/1",
+                                "rows": rows + [row]})
+    except Exception as exc:  # noqa: BLE001 — never blocks the step, never silent
+        row["record_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[WARN] N9 netlist_port_decls record not written ({stage}): "
+              f"{row['record_error']}", file=sys.stderr)
+    return row
+
+
+def _netlist_port_decls_row(nports: Dict[str, Any]) -> Optional[StepResult]:
+    """The pre-stream row for a PRESENT netlist whose ports could not be
+    checked (review wave 7): an UNPARSED result is not a pass, and it is
+    visible in the gate, not only in the side record. ABSENT is left to the
+    gate's own input check; a finding is the gate's FAIL above."""
+    if nports.get("status") == "ABSENT" or nports.get("check_status") != "UNPARSED":
+        return None
+    why = "; ".join(str(f) for f in (nports.get("findings") or [])) or str(
+        nports.get("why") or "unparsed")
+    return StepResult(
+        "netlist_port_decls", "NOT_MEASURED", 0.0,
+        f"NETLIST_PORT_DECL_UNCHECKED: module {nports.get('module')!r} in "
+        f"{Path(str(nports.get('netlist'))).name}: {why}",
+        [str(nports.get("netlist"))],
+        reason_class=_V.ReasonClass.INCONCLUSIVE)
+
+
 def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
                         container: str, *, _si_retry: bool = False,
                         _feedback_retry: bool = False) -> StepResult:
     """Measure the current routed revision before allowing any GDS stream."""
     t0 = time.time()
+    # N9 — the netlist this gate freezes names each port once and declares
+    # it once. Runs BEFORE the layout digest so the digest is of the netlist
+    # that ships; every promotion below re-enters this gate from the top.
+    _nports = _dedupe_shipped_netlist_ports(project, top, "prestream")
+    if _nports.get("check_status") == "PARSED" and _nports.get("findings"):
+        return StepResult(
+            "prestream_gate", "FAIL", time.time() - t0,
+            f"NETLIST_PORT_DECL_INVALID: {top}_pnr.v -- "
+            + "; ".join(_nports["findings"][:6])
+            + (f" ({_nports.get('why')})" if _nports.get("why") else "")
+            + ". iverilog and yosys refuse a netlist that names or declares "
+              "a port twice; it is not shipped.",
+            [str(_pl.reports_dir(project) / "phase3" / "netlist_port_decls.json")])
     digest, refusal = _layout_basis(project, top, pdk, container)
     if refusal:
         return StepResult("prestream_gate", "NOT_MEASURED", 0.0,
@@ -56106,6 +56327,9 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
             return rerun
     rows = [_run_declared_signoff_gate(project, *spec)
             for spec in _PRESTREAM_GATES]
+    _nports_row = _netlist_port_decls_row(_nports)
+    if _nports_row is not None:
+        rows.append(_nports_row)
     if evidence.status != "PASS":
         rows.append(_upstream_signoff_not_measured(
             "prestream_evidence", evidence.detail))
