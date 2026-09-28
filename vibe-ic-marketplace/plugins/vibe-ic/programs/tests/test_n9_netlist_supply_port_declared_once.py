@@ -250,3 +250,65 @@ def test_an_escaped_bit_blasted_port_is_a_name_not_an_ansi_range():
     new, rec = N.dedupe(text, "dut")
     assert rec["status"] == "DEDUPED", rec
     assert N.problems(new, "dut") == ("PARSED", [])
+
+
+def test_comments_cannot_supply_the_module_header_or_end_marker():
+    text = ("/*\nmodule dut (ghost);\n input ghost;\nendmodule\n*/\n"
+            "module dut (a, VDD, VDD);\n"
+            "/*\n input ghost;\n endmodule\n*/\n"
+            " input a;\n inout VDD;\n inout VDD;\nendmodule\n")
+    new, rec = N.dedupe(text, "dut")
+    assert rec["status"] == "DEDUPED", rec
+    assert new.startswith(text.split("*/", 1)[0] + "*/")
+    assert N.problems(new, "dut") == ("PARSED", [])
+    assert new.count("inout VDD;") == 1
+
+
+def test_two_dedupes_redeclare_kept_tool_bytes_on_the_chain(tmp_path):
+    nl = _declared(tmp_path, _netlist(5))
+    first = R._dedupe_shipped_netlist_ports(tmp_path, "dut", "pnr")
+    assert first["status"] == "DEDUPED"
+    assert C.audit(tmp_path)[0] == "PASS"
+
+    second_tool_text = _netlist(3).replace("cell_x u0", "cell_y u0")
+    nl.write_text(second_tool_text)
+    with (tmp_path / "provenance.jsonl").open("a") as out:
+        out.write(json.dumps({
+            "record": "invocation", "tool": "openroad",
+            "command": "openroad -exit pnr.tcl", "exit_code": 0,
+            "timestamp": "2026-09-28T02:00:00Z",
+            "outputs": {_REL: _sha(nl.read_bytes())}}) + "\n")
+
+    second = R._dedupe_shipped_netlist_ports(tmp_path, "dut", "pnr")
+    assert second["status"] == "DEDUPED"
+    kept = Path(second["tool_bytes"])
+    assert kept.read_text() == second_tool_text
+    verdict, findings = C.audit(tmp_path)
+    assert verdict == "PASS", [(f.rule, str(f)) for f in findings]
+    assert R._record_reemitted_outputs(tmp_path) in (None, "", [])
+    assert not (tmp_path / "reports/phase3/provenance_unexplained_rewrites.json").is_file()
+
+
+def test_clean_rerun_removes_stale_tool_bytes_with_a_ledger_event(tmp_path):
+    nl = _declared(tmp_path, _netlist(5))
+    first = R._dedupe_shipped_netlist_ports(tmp_path, "dut", "pnr")
+    kept = Path(first["tool_bytes"])
+    assert kept.is_file() and C.audit(tmp_path)[0] == "PASS"
+
+    nl.write_text(_netlist(1))
+    with (tmp_path / "provenance.jsonl").open("a") as out:
+        out.write(json.dumps({
+            "record": "invocation", "tool": "openroad",
+            "command": "openroad -exit pnr.tcl", "exit_code": 0,
+            "timestamp": "2026-09-28T03:00:00Z",
+            "outputs": {_REL: _sha(nl.read_bytes())}}) + "\n")
+
+    second = R._dedupe_shipped_netlist_ports(tmp_path, "dut", "pnr")
+    assert second["status"] == "CLEAN"
+    assert second["stale_tool_bytes_removed"] == str(kept)
+    assert not kept.exists()
+    assert C.audit(tmp_path)[0] == "PASS"
+    rows = [json.loads(ln) for ln in
+            (tmp_path / "provenance.jsonl").read_text().splitlines() if ln.strip()]
+    assert any(r.get("op") == "remove" and
+               str(kept.relative_to(tmp_path)) in r.get("removed", []) for r in rows)

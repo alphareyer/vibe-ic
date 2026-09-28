@@ -29,19 +29,13 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional, Tuple
 
+from _hdl_code_text import strip_hdl_comments_and_strings
+
 _HEADER_RE = re.compile(r"(?ms)^(\s*module\s+\\?(?P<top>\S+?)\s*\()(?P<ports>.*?)(\)\s*;)")
 _DECL_RE = re.compile(
     r"^(?P<indent>[ \t]*)(?P<dir>input|output|inout)\b(?P<rest>[^;]*);[ \t]*\r?$",
     re.M)
 _RANGE_RE = re.compile(r"^\s*(?:wire\s+|reg\s+)?(?P<range>\[[^\]]*\])?\s*(?P<names>.*)$")
-
-
-def _top_span(text: str, top: str) -> Optional[Tuple[re.Match, int]]:
-    for m in _HEADER_RE.finditer(text):
-        if m.group("top").lstrip("\\") == top:
-            end = text.find("endmodule", m.end())
-            return m, (len(text) if end < 0 else end)
-    return None
 
 
 def _header_tokens(ports: str) -> Optional[List[Tuple[str, str]]]:
@@ -75,15 +69,21 @@ def _header_names(ports: str) -> Optional[List[str]]:
 
 def parse(text: str, top: str) -> Dict[str, object]:
     """`{status, header, decls}`; status is PARSED or UNPARSED (with why)."""
-    span = _top_span(text, top)
-    if span is None:
+    # The blanker keeps every offset, so matches from `code` can still slice
+    # the original bytes. Comments and strings cannot invent a declaration.
+    code = strip_hdl_comments_and_strings(text)
+    match = next((m for m in _HEADER_RE.finditer(code)
+                  if m.group("top").lstrip("\\") == top), None)
+    if match is None:
         return {"status": "UNPARSED", "why": f"no `module {top} (...);` header"}
-    m, body_end = span
-    header = _header_names(m.group("ports"))
+    m = match
+    end = code.find("endmodule", m.end())
+    body_end = len(code) if end < 0 else end
+    header = _header_names(text[m.start("ports"):m.end("ports")])
     if header is None:
         return {"status": "UNPARSED", "why": "ANSI-style header (not what this checks)"}
     decls: List[Tuple[str, str, str, int, int]] = []  # name, dir, range, start, end
-    for d in _DECL_RE.finditer(text, m.end(), body_end):
+    for d in _DECL_RE.finditer(code, m.end(), body_end):
         r = _RANGE_RE.match(d.group("rest"))
         rng = (r.group("range") or "").replace(" ", "") if r else ""
         for name in (r.group("names") if r else d.group("rest")).split(","):

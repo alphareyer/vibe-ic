@@ -56074,12 +56074,21 @@ def _dedupe_shipped_netlist_ports(project: Path, top: str,
         if new != text:
             rel = _project_rel(project, netlist) or str(netlist)
             kept = netlist.with_name(netlist.name + _NETLIST_TOOL_BYTES_SUFFIX)
-            shutil.copy2(netlist, kept)
-            _restamp_provenance_output(
-                project, _project_rel(project, kept) or str(kept), kept,
-                "phase3_one_shot_runner",
-                f"N9: {rel} exactly as its producer wrote it "
-                f"(sha256:{before}), kept before the port dedupe")
+            keep_command = (f"N9: {rel} exactly as its producer wrote it "
+                            f"(sha256:{before}), kept before the port dedupe")
+            if kept.is_file():
+                # A reused project has an earlier declaration of this side
+                # file. Its next copy must be a transform from the newly
+                # declared tool netlist, never an uncredited overwrite.
+                _declared_transform_exec(
+                    project, kept, f"{stage}:netlist_tool_bytes",
+                    "phase3_one_shot_runner", keep_command,
+                    lambda: shutil.copyfile(netlist, kept), input_path=netlist)
+            else:
+                shutil.copyfile(netlist, kept)
+                _restamp_provenance_output(
+                    project, _project_rel(project, kept) or str(kept), kept,
+                    "phase3_one_shot_runner", keep_command)
             row["tool_bytes"] = str(kept)
             _declared_transform_exec(
                 project, netlist, f"{stage}:netlist_port_dedupe",
@@ -56089,6 +56098,24 @@ def _dedupe_shipped_netlist_ports(project: Path, top: str,
                 f"sha256:{before}",
                 lambda: _aa.write_text(netlist, new))
             row["sha256_after"] = hashlib.sha256(new.encode()).hexdigest()
+        elif rec.get("status") == "CLEAN":
+            # The previous run may have needed a dedupe while this new tool
+            # netlist does not. Retire that old run's kept bytes, including
+            # their ledger declaration, so they cannot pose as this run's.
+            kept = netlist.with_name(netlist.name + _NETLIST_TOOL_BYTES_SUFFIX)
+            if kept.is_file():
+                old_sha = _sha256_of_file(kept)
+                try:
+                    kept.unlink()
+                except OSError as exc:
+                    row["stale_tool_bytes_removal_error"] = (
+                        f"{type(exc).__name__}: {exc}")
+                else:
+                    _append_removal_event(
+                        project, "netlist_tool_bytes_prune",
+                        [(_project_rel(project, kept) or str(kept), old_sha)],
+                        "new tool netlist needs no port dedupe")
+                    row["stale_tool_bytes_removed"] = str(kept)
         row["check_status"], row["findings"] = _npd.problems(new, module)
     record = _pl.reports_dir(project) / "phase3" / "netlist_port_decls.json"
     try:
