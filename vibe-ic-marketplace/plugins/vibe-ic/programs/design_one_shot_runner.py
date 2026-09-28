@@ -22320,9 +22320,9 @@ def declaration_before_step4(project: Path) -> Dict[str, Any]:
     `plugin_output/declaration.json`, but `step_arith_declaration_emit` runs
     long after Step 4, so on a first run the gate could never see a selection
     the producer was already able to derive -- only a re-run tree could. The
-    contract-driven producer (`spec_declaration_emit`) reads only the design
-    input (the spec's own designations), the staged / authored RTL (`key =
-    value` comment blocks) and a prior declaration; nothing Step 4 or
+    contract-driven producer (`spec_declaration_emit`) reads the design's
+    L-docs, its supplied RTL where the consume manifest proves provenance,
+    explicit author declarations, and a prior declaration; nothing Step 4 or
     synthesis produces. So it is asked here too, exactly as the later step
     asks it.
 
@@ -22464,17 +22464,19 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
     STILL NON-BLOCKING BY CONSTRUCTION: every path here returns PASS or SKIP,
     never FAIL, so no IC that passes today can newly fail.
 
-    A DESIGN THAT SUPPLIES ITS RTL. The contract emitter also records what the
-    flow knows about supplied RTL (the staged files, the top, its ports) under
-    its own key, and it needs the top to do so: `_v661_resolve_dut_module`
+    A DESIGN THAT SUPPLIES ITS RTL. The contract emitter records what the flow
+    knows about supplied RTL (the staged files, the top, its ports) under its
+    own key, and derives contract fields only from matching input evidence.
+    It needs the top to do so: `_v661_resolve_dut_module`
     (synth-top override, then L9.top_module, then the unique graph root), never
     a name absent from rtl/ -- so not the `--top-name` default `chip_top`.
-    That record declares no free choice, so the file can now exist while the
-    spec's required choices are still undeclared; the detail says which.
+    That record declares no free choice. The file can exist while required
+    choices remain undeclared; the detail says which.
     """
     t0 = time.time()
     out_p = project / "plugin_output" / "declaration.json"
-    _top_args = _declaration_top_args(project)
+    _expert_args, _ = _d1_expert_selection_args(project)
+    _top_args = _declaration_top_args(project) + _expert_args
 
     def _fields_of(p: Path) -> str:
         try:

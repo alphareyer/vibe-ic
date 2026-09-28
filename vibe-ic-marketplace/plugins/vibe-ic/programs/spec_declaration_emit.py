@@ -35,16 +35,14 @@ IS      a contract-DRIVEN emitter.  The field list, the required/informational
         ``_PRIMARY_VALUE_MARKERS``.  A menu the spec designates nothing in is
         still refused — that part has not moved.
 
-IS NOT  an inference engine.  It will not read an ``always`` block and conclude
-        a reset polarity, nor scan a whole RTL file for an ``LSB-first`` token,
-        nor read an elaborated ``parameter`` out of the RTL and call it a
-        declaration — the elaborated value is the CONSEQUENCE of the choice,
-        not a record of it, and a build that ran at a wrong value would then
-        certify itself.
-        That is exactly the recovery-from-prose this program exists to retire.
-        The ONLY prose source it will touch is an explicit, opt-in, key=value
-        DECLARATION block (``--from-rtl-declaration``) — the designer's own
-        words in the wrong file format — and every field taken that way is
+IS NOT  a guesser.  For authored RTL, an elaborated parameter is only the
+        CONSEQUENCE of the author's choice.  For reused IP, the RTL the design
+        SUPPLIED is input: Yosys elaborates its selected top, and an input
+        L-doc's explicit statements identify the port roles and units.  Two
+        input sources that disagree REFUSE by field name.  No suggestive name
+        or example value alone is a choice.  The only RTL-comment prose this
+        program reads is an opt-in key=value DECLARATION block
+        (``--from-rtl-declaration``); every field taken that way is
         stamped ``recovered_from_prose`` in the provenance sidecar so the debt
         is visible rather than laundered.
 
@@ -133,24 +131,21 @@ clean declaration.
 
 A DESIGN THAT SUPPLIES ITS OWN RTL
 ---------------------------------
-When the design's input supplied the RTL (the consume step's SOURCE_MANIFEST
-says ``build_rtl_provided`` and lists ``staged_from_input``), the flow KNOWS
-facts about the implementation no author has to choose: which input files were
-staged, with their hashes, the top (``--supplied-top``, resolved by the
-caller against the staged modules) and that top's ports.  Those are written
-under ``SUPPLIED_RTL_KEY`` with the source of each, on the emit path AND on
-the fail-closed path.  They are NOT contract fields and declare no free
-choice: on the fail-closed path the file then holds that record and nothing
-else, and ``verify_declaration`` still names every REQUIRED field as absent.
-So the required-artifact gate stays red for the reason that is true (the
-choices are undeclared) instead of "the file does not exist".
+When the design's input supplied RTL, the consume manifest identifies its
+staged files.  Yosys checks the selected top's ports and parameter values;
+explicit L-doc lines supply port roles, units and selected choices.  Derived
+contract fields carry ``derived_from_supplied_rtl`` or
+``derived_from_ldoc:<file:line>`` provenance.  The separate
+``SUPPLIED_RTL_KEY`` record still describes staged files, hashes, top and
+ports; it does not itself declare a choice.  If a required field remains
+unresolved, only that record is written and verification still refuses.
 
 Exit codes
   0  emitted (or --contract, always; or --verify passed)
   1  one or more REQUIRED fields undetermined — no contract field written
      (only the supplied-RTL record, when the design supplied its RTL)
      (or, under --verify, the declaration on disk fails the contract)
-  2  usage / I/O error
+  2  usage / I/O error, or supplied-RTL derivation not measured
   3  NO_CONTRACT / NO_FIELDS — this project's spec declares no machine-readable
      declaration contract, so there was nothing to emit.  Distinct from 0 so a
      caller expecting a file never reads silence as success.
@@ -182,6 +177,7 @@ _HERE = str(Path(__file__).resolve().parent)
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import spec_required_artifact_check as _srac  # noqa: E402
+import _declaration_input_derive as _input  # noqa: E402
 
 STDERR_BANNER = "spec_declaration_emit: UNDETERMINED"
 
@@ -556,7 +552,7 @@ def _parse_field_table(text: str, start: int) -> Optional[Dict[str, Any]]:
 
     fields: List[Dict[str, Any]] = []
     ignored: List[Dict[str, Any]] = []
-    for r in data:
+    for row_offset, r in enumerate(data):
         if field_col >= len(r):
             continue
         name = _clean_cell(r[field_col])
@@ -579,6 +575,7 @@ def _parse_field_table(text: str, start: int) -> Optional[Dict[str, Any]]:
         entries = _extract_example_entries(ex_cell)
         fields.append({
             "name": name,
+            "line": text[:start].count("\n") + 1 + first + sep_idx + 1 + row_offset,
             "required": required,
             "required_marker": _clean_cell(marker),
             "required_marker_recognized": recognized,
@@ -1667,8 +1664,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "the RTL-authoring handoff, BEFORE any RTL exists.")
     ap.add_argument("--supplied-top", metavar="MODULE", default=None,
                     help="The top module of RTL the design supplied, as the "
-                         "caller resolved it. Used only for the supplied-RTL "
-                         "record (see SUPPLIED_RTL_KEY); declares nothing.")
+                         "caller resolved it. Yosys verifies its ports and "
+                         "parameters for input-derived contract fields; the "
+                         "supplied-RTL record remains a separate fact.")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="Declare one field. Value is JSON-decoded when it "
                          "parses as JSON, else kept as a string. Repeatable. "
@@ -1831,6 +1829,37 @@ def main(argv: Optional[List[str]] = None) -> int:
     prior = _load_prior_provenance(sidecar)
 
     status = resolve(contract, overrides, rtl_declared, existing, prior)
+
+    supplied = supplied_rtl_record(project, args.supplied_top)
+    input_facts, input_conflicts, input_gaps = _input.derive(
+        project, contract, args.supplied_top, supplied)
+    for name, fact in input_facts.items():
+        entry = status[name]
+        if entry["status"] == "determined":
+            if not _same_declared_value(entry["value"], fact["value"]):
+                input_conflicts.append(
+                    "%s: %r from %s conflicts with %r from %s" % (
+                        name, entry["value"],
+                        entry.get("provenance_detail", entry.get("provenance", "declaration")),
+                        fact["value"], fact["provenance_detail"]))
+        elif entry["status"] == "undetermined" and name not in overrides:
+            entry.update(status="determined", value=fact["value"],
+                         provenance=fact["provenance"],
+                         provenance_detail=fact["provenance_detail"],
+                         recovered_from_prose=False, provenance_verified=True)
+    if input_conflicts:
+        print("spec_declaration_emit: FIELD_CONFLICT — no declaration written:",
+              file=sys.stderr)
+        for detail in sorted(set(input_conflicts)):
+            print("  - " + detail, file=sys.stderr)
+        return 1
+    for gap in input_gaps:
+        print("spec_declaration_emit: INPUT_DERIVATION_NOT_MEASURED — " + gap,
+              file=sys.stderr)
+    if input_gaps:
+        print("  No declaration written: the supplied RTL could not be checked "
+              "against the contract fields on this run.", file=sys.stderr)
+        return 2
 
     undetermined_required = sorted(
         n for n, e in status.items()
