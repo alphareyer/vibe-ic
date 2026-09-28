@@ -281,3 +281,132 @@ def test_the_io_pad_liberties_are_hashed_too(scene, monkeypatch):
         assert io and all(o["sha256"] == p3._file_sha256(Path(o["path"])).split(":", 1)[1]
                           for o in io), others
     assert "STA_BASIS_SHA256_IO_LIBERTY:" in s["rpt"].read_text()
+
+
+# ── review wave 7 ────────────────────────────────────────────────────────────
+
+_REC = "reports/phase3/sta/declared_process_sta.json"
+
+
+def _fail_at(corner: str, census: str = _CENSUS_WITH_SUPPLY_PORTS):
+    """The same Tcl-faithful double, except that the invocation for `corner`
+    writes its SETUP header and dies the way `sta` does: rc 1 plus an
+    `Error:` line (e.g. the preamble's `unreadable STA input`)."""
+    base = _native_double(census)
+
+    def run(container, cmd, **kw):
+        tcl = Path(kw["marker"]).read_text()
+        if f"process={corner} ===" in tcl:
+            out = Path(kw["isolate"][0])
+            with out.open("a" if out.exists() else "w") as f:
+                f.write(f"=== SETUP corner: process={corner} ===\n"
+                        "worst slack max 9.99\n")
+            return 1, f"Error: something failed at {corner}\n", ""
+        return base(container, cmd, **kw)
+    return run
+
+
+def test_a_native_failure_at_the_last_corner_keeps_the_earlier_corners(
+        scene, monkeypatch):
+    """MAJOR (both reviewers): corner 3 of 3 failing erased FF and SS."""
+    s = scene
+    _def(s["tmp_path"])
+    monkeypatch.setattr(p3, "_docker_exec", _fail_at("TT"))
+    assert not s["emit"]()
+    rec = json.loads((s["tmp_path"] / _REC).read_text())
+    assert rec["status"] == "REFUSED" and "at TT" in rec["reason"], rec
+    for c in ("FF", "SS"):
+        for role, wns in (("setup", 1.25), ("hold", 0.40)):
+            row = rec["corners"][c][role]
+            assert row["status"] == "MEASURED" and row["wns_ns"] == wns, row
+            assert row["promoted"] is False
+    for role in ("setup", "hold"):
+        row = rec["corners"]["TT"][role]
+        assert row["status"] == "NOT_MEASURED" and row["wns_ns"] is None, row
+        assert row["reason"] == ("native execution failed rc=1 at TT: "
+                                 "Error: something failed at TT"), row
+    # the tool's own words are kept, and named
+    logs = rec["attempt_report"]["native_logs"]
+    assert len(logs) == 1 and logs[0].endswith(".TT.native.log")
+    assert "something failed at TT" in (s["tmp_path"] / logs[0]).read_text()
+
+
+def test_a_native_failure_at_a_middle_corner_names_the_later_corner_not_run(
+        scene, monkeypatch):
+    s = scene
+    _def(s["tmp_path"])
+    monkeypatch.setattr(p3, "_docker_exec", _fail_at("SS"))
+    assert not s["emit"]()
+    rec = json.loads((s["tmp_path"] / _REC).read_text())
+    assert rec["corners"]["FF"]["setup"]["status"] == "MEASURED"
+    assert rec["corners"]["SS"]["hold"]["reason"].startswith(
+        "native execution failed rc=1 at SS:")
+    assert rec["corners"]["TT"]["setup"]["reason"] == "not run: sweep stopped at SS"
+    assert rec["corners"]["TT"]["hold"]["status"] == "NOT_MEASURED"
+
+
+def test_a_refused_record_names_the_attempt_report_its_slacks_came_from(
+        scene, monkeypatch):
+    """MINOR (both reviewers): `report` is the promoted basis only, so a
+    refused record must say which `.attempt-*` file holds its numbers."""
+    s = scene
+    _def(s["tmp_path"], vdd_use="SIGNAL")
+    monkeypatch.setattr(p3, "_docker_exec", _native_double(_CENSUS_WITH_SUPPLY_PORTS))
+    assert not s["emit"]()
+    rec = json.loads((s["tmp_path"] / _REC).read_text())
+    assert rec["report"] is None
+    att = rec["attempt_report"]
+    path = s["tmp_path"] / att["path"]
+    assert ".attempt-" in path.name and path.is_file()
+    assert att["sha256"] == p3._file_sha256(path).split(":", 1)[1]
+    assert (s["tmp_path"] / att["population"]).is_file()
+    assert "worst slack max 1.25" in path.read_text()
+
+
+def test_a_promoted_record_carries_no_attempt_report(scene, monkeypatch):
+    s = scene
+    _def(s["tmp_path"])
+    monkeypatch.setattr(p3, "_docker_exec", _native_double(_CENSUS_WITH_SUPPLY_PORTS))
+    assert s["emit"]()
+    rec = json.loads((s["tmp_path"] / _REC).read_text())
+    assert rec["report"] and "attempt_report" not in rec
+
+
+def test_a_long_unknown_driver_list_states_its_count_and_that_it_was_cut(
+        scene, monkeypatch):
+    """MINOR (integrity): `_unknown[:8]` read as 'there are 8'."""
+    s = scene
+    _def(s["tmp_path"])
+    names = [f"X{i}" for i in range(12)]
+    census = ("STA_LINK_INSTANCE u1 core/INV\n"
+              "STA_LINK_CENSUS total=1 linked=1 missing=0\n"
+              f"Found {len(names)} unannotated drivers.\n"
+              + "".join(f" {n}\n" for n in names)
+              + "Found 0 partially unannotated drivers.\n")
+    monkeypatch.setattr(p3, "_docker_exec", _native_double(census))
+    assert not s["emit"]()
+    rec = json.loads((s["tmp_path"] / _REC).read_text())
+    assert "12 unclassified unannotated driver(s)" in rec["reason"], rec["reason"]
+    assert "+4 more; see " in rec["reason"] and ".population.json" in rec["reason"]
+    assert "(+4 more" in rec["corners"]["FF"]["setup"]["annotation_census"]
+
+
+def test_a_supply_port_inferred_by_name_is_not_recorded_as_a_def_binding(tmp_path):
+    """MINOR (integrity): the name-match inference was published as
+    `def_bindings`, the same shape as a real bound PG pin."""
+    res = classify(_CENSUS_WITH_SUPPLY_PORTS, _def(tmp_path))
+    for r in res["drivers"]:
+        assert r["def_bindings"] == [], r
+        assert r["basis"] == "supply_by_same_name_net"
+        assert r["supply_by_same_name_net"]["net"] == r["driver"]
+    assert res["supply_by_same_name_net"]["count"] == 2
+
+
+def test_the_promoted_report_discloses_the_pg_by_name_exclusions(scene, monkeypatch):
+    s = scene
+    _def(s["tmp_path"])
+    monkeypatch.setattr(p3, "_docker_exec", _native_double(_CENSUS_WITH_SUPPLY_PORTS))
+    assert s["emit"]()
+    head = s["rpt"].read_text().split("===", 1)[0]
+    assert "# STA_ANNOTATION_PG_BY_NAME FF: 2 supply port(s)" in head, head
+    assert "# STA_ANNOTATION_PG_BY_NAME basis:" in head

@@ -113,8 +113,15 @@ def classify(body, def_file, io_masters=None):
         # port and the net it drives share one name, so the DEF's own typing
         # of THAT net is the evidence: exactly one statement, USE POWER or
         # GROUND. Duplicate or conflicting typing stays unknown.
+        #
+        # That is an INFERENCE from a name match, not a DEF binding (review
+        # wave 7): `def_bindings` keeps only what the DEF binds, and the
+        # inference is recorded as its own field and basis, and counted.
+        bound = list(evidence)
+        inferred = None
         if inst is None and not evidence and len(net_uses.get(driver, ())) == 1:
             evidence = [(driver, net_uses[driver][0])]
+            inferred = {'net': driver, 'use': net_uses[driver][0], 'statements': 1}
         if evidence and len(set(evidence)) == 1 and all(use in ('POWER', 'GROUND') for net, use in evidence):
             classification = 'EXPLICIT_PG_NOT_SIGNAL_PARASITICS'
         elif not evidence and inst in linked and driver in disconnected:
@@ -124,8 +131,14 @@ def classify(body, def_file, io_masters=None):
             classification = OFF_DIE
         else:
             classification = 'REQUIRED_OR_UNKNOWN'
-        result['drivers'].append({'driver': driver, 'classification': classification,
-                                  'def_bindings': evidence})
+        row = {'driver': driver, 'classification': classification,
+               'def_bindings': bound}
+        if inferred is not None and classification == 'EXPLICIT_PG_NOT_SIGNAL_PARASITICS':
+            row['basis'] = 'supply_by_same_name_net'
+            row['supply_by_same_name_net'] = inferred
+        elif bound:
+            row['basis'] = 'def_binding'
+        result['drivers'].append(row)
     result['complete'] = all(row['classification'] != 'REQUIRED_OR_UNKNOWN'
                              for row in result['drivers'])
     # CONDITION (b): disclosed by name and count, so a reader sees what was
@@ -144,6 +157,16 @@ def classify(body, def_file, io_masters=None):
             f"{len(off)} off-die driver(s): {len(pins_only)} top-level pin(s) + "
             f"{len(off) - len(pins_only)} PAD terminal(s), not annotated by "
             f"construction"),
+    }
+    inferred_pg = [row['driver'] for row in result['drivers']
+                   if row.get('basis') == 'supply_by_same_name_net']
+    result['supply_by_same_name_net'] = {
+        'count': len(inferred_pg), 'drivers': inferred_pg,
+        'basis': ('a top-level port with no DEF binding whose same-named net '
+                  'the DEF types USE POWER/GROUND in exactly one statement'),
+        'disclosure': (f"{len(inferred_pg)} supply port(s) excluded as PG by a "
+                       f"same-name net match, not by a DEF binding"
+                       + (f": {', '.join(inferred_pg)}" if inferred_pg else "")),
     }
     return result
 

@@ -63120,23 +63120,38 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     # sweep did not count lived nowhere a reader of the record would look.
     import _declared_process_record as _dpr
     sources = {}      # corner -> source rows, filled once inputs resolve
+    native_logs = []  # the tool's own out/err of a failed invocation
 
     def write_record(status, reason, values=None, row_reasons=None,
                      census=None, promoted=False):
+        # review wave 7 (MINOR): a refused record names the `.attempt-*`
+        # report its MEASURED rows were read from, with its sha256, and the
+        # population beside it -- `report` stays the promoted basis only.
+        attempt = None
+        if not promoted and rpt_out.is_file():
+            pop = rpt_out.with_name(rpt_out.name + '.population.json')
+            attempt = {'path': _rel_to_project(rpt_out, project),
+                       'sha256': (_file_sha256(rpt_out) or '').replace('sha256:', '') or None,
+                       'population': (_rel_to_project(pop, project)
+                                      if pop.is_file() else None),
+                       'native_logs': [_rel_to_project(x, project)
+                                       for x in native_logs]}
         try:
             _dpr.write(project, _dpr.build(
                 required, status=status, reason=reason,
                 report=(_rel_to_project(destination, project) if promoted
                         else None),
                 values=values, row_reasons=row_reasons, census=census,
-                sources=sources, promoted=promoted))
+                sources=sources, promoted=promoted, attempt_report=attempt))
         except Exception as exc:                          # pragma: no cover
             notes.append(f'declared process STA record not written: {exc}')
 
     def refuse(reason, values=None, row_reasons=None, census=None):
-        # A refusal BEFORE the native report exists measured nothing, so every
-        # row carries this reason. A refusal AFTER it keeps every row that WAS
-        # measured (review wave 5): `values` / `row_reasons` say which.
+        # A refusal BEFORE any invocation ran measured nothing, so every row
+        # carries this reason. A refusal AFTER one keeps every row that WAS
+        # measured (review waves 5 and 7): `values` / `row_reasons` say which
+        # -- including a native failure at a LATER corner, whose earlier
+        # corners' sections are already in the attempt report.
         notes.append('declared process STA refused: ' + reason)
         write_record('REFUSED', reason, values, row_reasons, census)
         return False
@@ -63207,6 +63222,7 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
                 {'path': x, 'kind': ('io' if x in io_views else 'macro'),
                  'sha256': _lib_digest.get(x) or None}
                 for x in inventory[c][1:]]}
+    failed = None     # (corner, reason) of the first native failure
     try:
         rpt_out.parent.mkdir(parents=True, exist_ok=True)
         report = _to_container_path(str(rpt_out), container)
@@ -63246,12 +63262,21 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
             path.write_text(tcl)
             mapped = _to_container_path(str(path), container)
             rc, out, err = _docker_exec(container, f'sta -no_init -exit {shlex.quote(mapped)} 2>&1', marker=mapped, isolate=[rpt_out], inputs=[netlist, sdc, spef_path, path] + ([_pl.pnr_dir(project) / f'{top}.def'] if (_pl.pnr_dir(project) / f'{top}.def').is_file() else []) + [Path(x) for x in inventory[c] if Path(x).is_file()])
-            if rc != 0 or re.search(r'(?mi)^\s*Error(?:\s|:)', out + '\n' + err):
-                return refuse(f'native execution failed rc={rc}; partial report is not complete')
+            _err = re.search(r'(?mi)^\s*Error(?:\s|:).*$', (out or '') + '\n' + (err or ''))
+            if rc != 0 or _err:
+                _log = rpt_out.with_name(rpt_out.name + f'.{c}.native.log')
+                try:
+                    _log.write_text((out or '') + '\n' + (err or ''))
+                    native_logs.append(_log)
+                except OSError:                           # pragma: no cover
+                    pass
+                failed = (c, f'native execution failed rc={rc} at {c}: '
+                             + (_err.group(0).strip() if _err else 'no Error line'))
+                break
     except (OSError, ValueError) as exc:
         return refuse(str(exc))
     if not rpt_out.is_file():
-        return refuse('native report absent')
+        return refuse(failed[1] if failed else 'native report absent')
     measured = set()
     populations = {}
     from sta_annotation_population import classify
@@ -63277,13 +63302,17 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
                 _unknown = [d['driver'] for d in
                             (populations.get(corner) or {}).get('drivers') or []
                             if d.get('classification') == 'REQUIRED_OR_UNKNOWN']
-                census[corner] = ('INCOMPLETE' + (
-                    f': unclassified unannotated driver(s) {", ".join(_unknown[:8])}'
-                    if _unknown else ''))
+                # review wave 7: the list is a population -- say its size,
+                # and say when it is cut and where the rest is
+                _names = (f'{len(_unknown)} unclassified unannotated driver(s): '
+                          + ', '.join(_unknown[:8])
+                          + (f', ... (+{len(_unknown) - 8} more; see '
+                             f'{_rel_to_project(rpt_out, project)}.population.json)'
+                             if len(_unknown) > 8 else '')) if _unknown else ''
+                census[corner] = 'INCOMPLETE' + (f': {_names}' if _names else '')
                 if census_refusal is None:
                     census_refusal = (f'{corner}: incomplete linked-master or parasitic annotation census'
-                                      + (f' (unclassified unannotated driver(s): {", ".join(_unknown[:8])})'
-                                         if _unknown else ''))
+                                      + (f' ({_names})' if _names else ''))
         if role in ('SETUP', 'HOLD'):
             value = extract_slacks(body).get('setup_wns_ns' if role == 'SETUP' else 'hold_wns_ns')
             if value is not None and math.isfinite(value):
@@ -63297,6 +63326,22 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
             if (c, role) not in seen:
                 row_reasons[(c, role)] = (
                     f'no {role} section for {c} in the native report')
+    if failed is not None:
+        # review wave 7 (MAJOR): each corner is its own `sta` call, in
+        # `required` order. The corners that finished keep their slacks; the
+        # failed corner's rows (whatever partial section it wrote) and every
+        # corner after it carry their OWN reason.
+        _order = list(required)
+        _stop = _order.index(failed[0])
+        for c in _order[_stop:]:
+            for role in ('SETUP', 'HOLD'):
+                values.pop((c, role), None)
+                measured.discard((c, role))
+                row_reasons[(c, role)] = (
+                    failed[1] if c == failed[0]
+                    else f'not run: sweep stopped at {failed[0]}')
+        return refuse(failed[1] + '; the corners before it keep their measured slacks',
+                      values, row_reasons, census)
     if census_refusal is not None:
         return refuse(census_refusal, values, row_reasons, census)
     if measured != {(c, role) for c in required for role in ('SETUP', 'HOLD')}:
@@ -63314,6 +63359,17 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     if _lines:
         _lines.append('# STA_ANNOTATION_OFF_DIE basis: '
                       + next(iter(_off.values())).get('basis', ''))
+    # review wave 7: the supply ports excluded by a same-name net match are a
+    # derivation too, and are disclosed beside the off-die ones
+    _inf = {c: (populations.get(c) or {}).get('supply_by_same_name_net') or {}
+            for c in populations}
+    _inf_lines = [f'# STA_ANNOTATION_PG_BY_NAME {c}: {d["disclosure"]}'
+                  for c, d in sorted(_inf.items()) if d.get('count')]
+    if _inf_lines:
+        _inf_lines.append('# STA_ANNOTATION_PG_BY_NAME basis: '
+                          + next(d for d in _inf.values() if d.get('count')).get('basis', ''))
+    _lines += _inf_lines
+    if _lines:
         try:
             rpt_out.write_text('\n'.join(_lines) + '\n'
                                + rpt_out.read_text(errors='replace'))

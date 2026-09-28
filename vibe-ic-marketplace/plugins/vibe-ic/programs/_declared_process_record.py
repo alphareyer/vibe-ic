@@ -36,8 +36,15 @@ def build(required: Iterable[str], *, status: str, reason: Optional[str],
           row_reasons: Optional[Mapping[Tuple[str, str], str]] = None,
           census: Optional[Mapping[str, str]] = None,
           sources: Optional[Mapping[str, Mapping[str, Any]]] = None,
-          promoted: bool = False) -> Dict[str, Any]:
-    """The record. `values` / `row_reasons` are keyed `(CORNER, 'SETUP'|'HOLD')`."""
+          promoted: bool = False,
+          attempt_report: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """The record. `values` / `row_reasons` are keyed `(CORNER, 'SETUP'|'HOLD')`.
+
+    `attempt_report` (review wave 7): when the sweep was NOT promoted, the
+    `.attempt-*` report its MEASURED rows were read from -- path, sha256, the
+    population beside it and any failed invocation's own log -- so every
+    slack in a refused record can be traced to the bytes it came from.
+    `report` stays the promoted basis only."""
     values = values or {}
     row_reasons = row_reasons or {}
     rows: Dict[str, Dict[str, Any]] = {}
@@ -57,9 +64,12 @@ def build(required: Iterable[str], *, status: str, reason: Optional[str],
                 row["annotation_census"] = census[c]
             row.update(dict((sources or {}).get(c) or {}))
             rows[c][role] = row
-    return {"schema": SCHEMA, "status": status, "reason": reason,
-            "required_corners": list(required), "report": report,
-            "corners": rows}
+    out = {"schema": SCHEMA, "status": status, "reason": reason,
+           "required_corners": list(required), "report": report,
+           "corners": rows}
+    if attempt_report is not None:
+        out["attempt_report"] = dict(attempt_report)
+    return out
 
 
 def write(project: Path, record: Mapping[str, Any]) -> Path:
