@@ -2080,13 +2080,30 @@ def tool_default_die(config_root: Path) -> dict[str, dict[str, Any]]:
     """
     design = _load(config_root / 'design.json')
     found: dict[str, dict[str, Any]] = {}
-    for path in sorted(config_root.glob('*.json')):
-        if path.name in ('design.json', 'steps.json', 'flow_gates.json') or \
-                path.name.endswith(('.views.json', '.provenance.json')):
+    try:
+        requested = _load(config_root / 'steps.json')
+    except (OSError, ValueError):
+        return found
+    if not isinstance(requested, list):
+        return found
+    for step_id in requested:
+        if not isinstance(step_id, str):
+            continue
+        path = config_root / f'{step_id}.json'
+        if not path.is_file():
             continue
         cfg = _load(path)
         meta = cfg.get('meta') or {}
+        if meta.get('step') != step_id:
+            continue
+        sizing = cfg.get('FP_SIZING', design.get('FP_SIZING'))
         for key in _DIE_DEFAULT_KEYS:
+            # A resolved config carries defaults for variables its active
+            # sizing mode does not consume.  They are not applied defaults.
+            if sizing == 'absolute' and key in ('FP_SIZING', 'FP_CORE_UTIL'):
+                continue
+            if sizing == 'relative' and key in ('DIE_AREA', 'CORE_AREA'):
+                continue
             if key in cfg and key not in design and cfg[key] is not None \
                     and key not in found:
                 found[key] = {'value': cfg[key],
@@ -2128,8 +2145,14 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     elif 'FP_CORE_UTIL' in emitted and 'DIE_AREA' not in emitted:
         # A declared utilisation sizes a Classic die; the tool's own
         # FP_SIZING default is not relied on to honour it.
-        _set(emitted, sources, 'FP_SIZING', 'relative',
-             sources['FP_CORE_UTIL'] + ' (a declared utilisation sizes the die)')
+        if emitted.get('FP_SIZING') == 'absolute':
+            raise Refusal('LL_CLASSIC_DIE_UNDERIVABLE',
+                          f"FP_SIZING=absolute ({sources.get('FP_SIZING')}) has no "
+                          f"DIE_AREA; utilisation {emitted['FP_CORE_UTIL']} "
+                          f"({sources['FP_CORE_UTIL']}) cannot replace the declaration")
+        if 'FP_SIZING' not in emitted:
+            _set(emitted, sources, 'FP_SIZING', 'relative',
+                 sources['FP_CORE_UTIL'] + ' (a declared utilisation sizes the die)')
     _apply_layout_top(project, emitted, sources)
     for key, (value, source) in (overlay or {}).items():
         for older in _LEVER_SUPERSEDES.get(key, ()):

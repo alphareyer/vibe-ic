@@ -186,7 +186,23 @@ def test_a_declared_macro_area_wins(tmp_path, resolver):
     fp = configs['OpenROAD.Floorplan']
     assert fp['DIE_AREA'] == [0, 0, 250, 300] and fp['FP_SIZING'] == 'absolute'
     assert 'macro_area_um' in sources['DIE_AREA']
-    assert 'DIE_AREA' not in contract.tool_default_die(root)
+    assert contract.tool_default_die(root) == {}
+
+
+def test_a_declared_absolute_sizing_is_not_replaced_by_utilisation(tmp_path, resolver):
+    p = macro(tmp_path, fp_sizing='absolute',
+              l19=[{'token': 'FP_CORE_UTIL', 'value': '35%', 'source': 'L9', 'line': 7}])
+    with pytest.raises(contract.Refusal) as exc:
+        resolve(tmp_path, p)
+    assert exc.value.code == 'LL_CLASSIC_DIE_UNDERIVABLE'
+
+
+def test_tool_defaults_ignore_a_stale_unrequested_step_config(tmp_path, resolver):
+    p = macro(tmp_path, l19=[{'token': 'FP_CORE_UTIL', 'value': '35%', 'source': 'L9', 'line': 7}])
+    _, _, root = resolve(tmp_path, p, ['OpenROAD.Floorplan'])
+    (p / 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json').unlink()
+    resolve(tmp_path, p, ['OpenROAD.IOPlacement'])
+    assert contract.tool_default_die(root)['FP_CORE_UTIL']['value'] == '50'
 
 
 def test_an_unknown_flow_is_refused(tmp_path, resolver):
