@@ -564,7 +564,8 @@ Found a total of 1 unproven $equiv cells.
 
 
 def _drive_lec_run(monkeypatch, tmp_path, proof_log, search_log, flat,
-                   trace_doc, *, gold=_E2E_RTL, gate=_E2E_GATE, top="m"):
+                   trace_doc, *, gold=_E2E_RTL, gate=_E2E_GATE, top="m",
+                   capture_log=None):
     """Every file the real yosys runs would write is written: the terminal
     equivalence IL, the flattened search miter and the WaveJSON dump."""
     def fake_run(_container, script, *_a, **_k):
@@ -574,7 +575,11 @@ def _drive_lec_run(monkeypatch, tmp_path, proof_log, search_log, flat,
                                   else "module \\equiv\nend\n")
         for path in re.findall(r"-dump_json (\S+)", text):
             Path(path).write_text(json.dumps(trace_doc))
-        return True, (search_log if "equiv_miter" in text else proof_log)
+        if "equiv_miter" in text:
+            return True, search_log
+        if "lec_equiv_capture." in Path(script).name and capture_log is not None:
+            return True, capture_log
+        return True, proof_log
 
     monkeypatch.setattr(lec_run, "run_yosys_equiv", fake_run)
     monkeypatch.setattr(lec_run, "_container_available", lambda _c: True)
@@ -621,6 +626,19 @@ def test_lec_run_keeps_a_stateful_model_not_proven_and_says_so(monkeypatch, tmp_
     assert report["verdict_explanation"].startswith("NOT_PROVEN")
     assert "first mismatch at cycle 4" in report["verdict_explanation"]
     assert "INCONCLUSIVE" not in report["verdict_explanation"]
+
+
+def test_sat_handoff_refuses_a_recaptured_different_residual(monkeypatch,
+                                                             tmp_path):
+    changed = _STATEFUL_PROOF_LOG.replace(
+        "Of those cells 0 are proven and 1 are unproven.",
+        "Of those cells 1 are proven and 0 are unproven.")
+    report = _drive_lec_run(monkeypatch, tmp_path, _STATEFUL_PROOF_LOG,
+                            COUNTER_LOG, COUNTER_FLAT, COUNTER_JSON,
+                            capture_log=changed)
+    assert report["counterexample_handoff_capture"]["status"] == "NOT_RUN"
+    assert report["counterexample_search"]["result"] == "NOT_RUN"
+    assert report["verdict"] == "NOT_PROVEN"
 
 
 def test_lec_run_rewrites_the_explanation_when_a_complete_model_decides(
