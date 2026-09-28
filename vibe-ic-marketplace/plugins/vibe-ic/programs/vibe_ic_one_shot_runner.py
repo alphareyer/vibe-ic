@@ -431,10 +431,9 @@ _P1_MODE_EXPERT_SECOND_PASS = "expert_second_pass"
 #: FX_STALE_LDOCS — a generated L doc no longer holds the bytes phase 1
 #: recorded: neither regenerated over the edit nor reused as current.
 _P1_MODE_REFUSED = "refused_generated_doc_edited"
-_P1_MODE_EXPERT_STALE = "refused_stale_expert_reading"
 
 
-def _expert_root_stale(project: Path) -> Optional[str]:
+def _expert_root_stale(project: Path, *, require_report: bool = False) -> Optional[str]:
     """Name an expert reading whose L-doc bytes are no longer its subject.
 
     A delivered answer cannot be retried against a different root. The
@@ -443,13 +442,15 @@ def _expert_root_stale(project: Path) -> Optional[str]:
     """
     report = _pl.report_path(project, _EXPERT_TRACK_REPORT_REL)
     if not report.is_file():
-        return None
+        return ("EXPERT_REPORT_MISSING: the expert second pass wrote no report"
+                if require_report else None)
     try:
         prior = json.loads(report.read_text())
         root = prior.get("phase1_root") if isinstance(prior, dict) else None
         digest = root.get("digest") if isinstance(root, dict) else None
         if not isinstance(digest, str):
-            return None
+            return ("EXPERT_ROOT_UNVERIFIABLE: the expert report has no root "
+                    "digest" if require_report else None)
         import phase1_expert_parse_track as _track
         current = _track.phase1_root_identity(project).get("digest")
     except (OSError, ValueError, TypeError) as exc:
@@ -517,8 +518,8 @@ def _phase1_decision(project: Path, force_skip: bool,
       run  -> True if phase1 must run before phase2
       mode -> "prompt" (Path A NL inputs), "docs" (Path B vendor docs),
               "expert_second_pass" (#2204: the L documents already exist AND a
-              delivered IC-Expert answer is on disk that the expert track's own
-              record says nobody has read — the SECOND pass of the hand-off,
+              delivered IC-Expert answer is unread, or its prior reading is
+              bound to a different L-doc root — the SECOND pass of the hand-off,
               which re-runs the expert track ALONE and re-extracts nothing),
               or "" when run is False.
 
@@ -550,9 +551,12 @@ def _phase1_decision(project: Path, force_skip: bool,
         if fresh["state"] == _p1id.REGENERATE and _design_input_present(project):
             return (True, "docs")
         # A flow derivation may change L-doc bytes without changing the
-        # extraction producer. Never consume an old answer on that new root.
+        # extraction producer. Let the expert consumer archive any old answer
+        # and publish a handoff for this root. This must run even when the old
+        # answer was already read: the pending-answer test cannot see a root
+        # change, and refusing here makes the consumer unreachable forever.
         if _expert_root_stale(project):
-            return (False, _P1_MODE_EXPERT_STALE)
+            return (True, _P1_MODE_EXPERT_SECOND_PASS)
         pending, _why = _expert_answer_pending(project)
         if pending:
             return (True, _P1_MODE_EXPERT_SECOND_PASS)
@@ -1887,6 +1891,8 @@ def main() -> int:
     # under another `--pdk` / `--ic-name` is not reused (review wave8 MAJOR).
     _p1_knobs = {"ic_name": args.ic_name, "pdk": args.pdk, "mode": "docs"}
     run_phase1, p1_mode = _phase1_decision(project, _force_skip_p1, _p1_knobs)
+    _stale_expert_before = (_expert_root_stale(project)
+                            if p1_mode == _P1_MODE_EXPERT_SECOND_PASS else None)
     # What the generated L docs on disk ARE, asked once and carried into the
     # report whatever is decided from it.
     _gd_now = _pl.generated_docs_dir(project)
@@ -1937,10 +1943,8 @@ def main() -> int:
         _p1_fresh, _p1_design_input, _p1_skipped_by)
     if _p1_stale_why:
         advisories.append(_p1_stale_why)
-    if p1_mode == _P1_MODE_REFUSED or p1_mode == _P1_MODE_EXPERT_STALE:
-        refusal = (_expert_root_stale(project)
-                   if p1_mode == _P1_MODE_EXPERT_STALE else
-                   f"{_p1_fresh['reason'] if _p1_fresh else ''}: "
+    if p1_mode == _P1_MODE_REFUSED:
+        refusal = (f"{_p1_fresh['reason'] if _p1_fresh else ''}: "
                    f"{_p1_fresh['why'] if _p1_fresh else ''}")
         advisories.append(
             f"phase1 REFUSED — {refusal}")
@@ -1957,7 +1961,9 @@ def main() -> int:
         if p1_mode == _P1_MODE_EXPERT_SECOND_PASS:
             p1_args += ["--second-track-only"]
             _pending, _why = _expert_answer_pending(project)
-            print(f"[phase1] EXPERT SECOND PASS — {_why}")
+            if _stale_expert_before:
+                advisories.append(f"phase1 expert reading recovery — {_stale_expert_before}")
+            print(f"[phase1] EXPERT SECOND PASS — {_stale_expert_before or _why}")
         # Path B (vendor docs, no L docs yet): force docs mode so the
         # doc-extraction track runs and produces L*.json for phase2.
         elif p1_mode == "docs":
@@ -1985,6 +1991,16 @@ def main() -> int:
         if _fresh_why:
             advisories.append(_fresh_why)
         rep = _read_report(_phase_report_path(project, "phase1_one_shot.json"))
+        if _stale_expert_before:
+            # The stale reading was why this pass ran. Even a successful
+            # wrapper cannot release Phase 2 until the expert producer wrote
+            # a report for the current L-doc bytes.
+            _still_stale = _expert_root_stale(project, require_report=True)
+            if _still_stale:
+                advisories.append(f"phase1 REFUSED — {_still_stale}")
+                verdict = "NOT_MEASURED"
+                rc = rc or 1
+                halted_at = "phase1"
         plan.append(("phase1", verdict, rc))
         reports["phase1"] = rep
         if verdict == "FAIL":
