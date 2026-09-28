@@ -220,6 +220,24 @@ def test_a_declared_absolute_sizing_is_not_replaced_by_utilisation(tmp_path, res
     assert exc.value.code == 'LL_CLASSIC_DIE_UNDERIVABLE'
 
 
+def test_a_declared_absolute_sizing_without_die_is_refused_even_without_utilisation(
+        tmp_path, resolver):
+    p = macro(tmp_path, fp_sizing='absolute')
+    with pytest.raises(contract.Refusal) as exc:
+        resolve(tmp_path, p)
+    assert exc.value.code == 'LL_CLASSIC_DIE_UNDERIVABLE'
+    assert 'fp_sizing' in str(exc.value)
+
+
+def test_a_declared_relative_sizing_keeps_its_own_provenance(tmp_path, resolver):
+    p = macro(tmp_path, fp_sizing='relative',
+              l19=[{'token': 'FP_CORE_UTIL', 'value': '35%', 'source': 'L9', 'line': 7}])
+    configs, sources, _ = resolve(tmp_path, p)
+    assert configs['OpenROAD.Floorplan']['FP_SIZING'] == 'relative'
+    assert 'fp_sizing' in sources['FP_SIZING']
+    assert 'L19' not in sources['FP_SIZING']
+
+
 def test_tool_defaults_ignore_a_stale_unrequested_step_config(tmp_path, resolver):
     p = macro(tmp_path, l19=[{'token': 'FP_CORE_UTIL', 'value': '35%', 'source': 'L9', 'line': 7}])
     _, _, root = resolve(tmp_path, p, ['OpenROAD.Floorplan'])

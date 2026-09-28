@@ -2145,11 +2145,6 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     elif 'FP_CORE_UTIL' in emitted and 'DIE_AREA' not in emitted:
         # A declared utilisation sizes a Classic die; the tool's own
         # FP_SIZING default is not relied on to honour it.
-        if emitted.get('FP_SIZING') == 'absolute':
-            raise Refusal('LL_CLASSIC_DIE_UNDERIVABLE',
-                          f"FP_SIZING=absolute ({sources.get('FP_SIZING')}) has no "
-                          f"DIE_AREA; utilisation {emitted['FP_CORE_UTIL']} "
-                          f"({sources['FP_CORE_UTIL']}) cannot replace the declaration")
         if 'FP_SIZING' not in emitted:
             _set(emitted, sources, 'FP_SIZING', 'relative',
                  sources['FP_CORE_UTIL'] + ' (a declared utilisation sizes the die)')
@@ -2160,6 +2155,14 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
                 emitted.pop(older)
                 sources[older] = f'superseded by {key} ({source})'
         _set(emitted, sources, key, value, source)
+    if flow == FLOW_CLASSIC and emitted.get('FP_SIZING') == 'absolute' \
+            and 'DIE_AREA' not in emitted:
+        util = (f"; utilisation {emitted['FP_CORE_UTIL']} "
+                f"({sources['FP_CORE_UTIL']}) cannot replace the declaration"
+                if 'FP_CORE_UTIL' in emitted else '')
+        raise Refusal('LL_CLASSIC_DIE_UNDERIVABLE',
+                      f"FP_SIZING=absolute ({sources.get('FP_SIZING')}) has no "
+                      f"DIE_AREA{util}")
     # The explicit overlay outranks every declared or derived rectangle, and
     # the rules that judged those judged them BEFORE it; what the tool is
     # handed is judged here, whoever supplied each half.
