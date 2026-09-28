@@ -381,10 +381,35 @@ def _harness_not_proven(files: List[Path], results: dict) -> Optional[str]:
     return None
 
 
+def _dut_instance(harness: str) -> tuple[str | None, dict[str, str]]:
+    """DUT module and its named port connections, excluding other instances."""
+    instance = re.search(r"\b([A-Za-z_]\w*)\s*(?:#\s*\([^;]*?\)\s*)?dut\s*\(",
+                         harness, re.S)
+    if not instance:
+        return None, {}
+    start = instance.end()
+    depth = 1
+    end = start
+    while end < len(harness) and depth:
+        if harness[end] == "(":
+            depth += 1
+        elif harness[end] == ")":
+            depth -= 1
+        end += 1
+    if depth or not re.match(r"\s*;", harness[end:]):
+        return None, {}
+    connections = harness[start:end - 1]
+    # A direct identifier is the only connection that can bind the asserted
+    # signal. Empty, concatenated, sliced, and expression connections fail closed.
+    ports = {m.group(1): m.group(2).strip() for m in re.finditer(
+        r"\.\s*([A-Za-z_]\w*)\s*\(\s*([^()]*)\s*\)", connections)}
+    return instance.group(1), ports
+
+
 def _harness_connects(harness: str, port: str) -> bool:
-    """The DUT instance connects `port` (`.port(port)`)."""
-    p = re.escape(port)
-    return bool(re.search(rf"\.{p}\s*\(\s*{p}\s*\)", harness))
+    """The proved DUT instance directly connects `.port(port)`."""
+    _, ports = _dut_instance(harness)
+    return ports.get(port) == port
 
 
 def _harness_binds_reset(harness: str, port: str) -> bool:
@@ -393,11 +418,64 @@ def _harness_binds_reset(harness: str, port: str) -> bool:
         rf"\bwire\s+rst_active\s*=\s*[!~]?\s*{re.escape(port)}\s*;", harness))
 
 
-def _reset_guarded_properties(harness: str) -> List[str]:
-    """Asserted properties whose body is guarded by the bound reset."""
+def _dut_output_ports(project: Path, harness: str) -> set[str]:
+    """Output ports of the DUT instance actually named by the proved harness."""
+    import formal_harness_gen as _fhg
+    name, _ = _dut_instance(harness)
+    if name is None:
+        return set()
+    rtl_dir = project / "phase2/stage1/rtl"
+    for path in sorted(list(rtl_dir.rglob("*.v")) + list(rtl_dir.rglob("*.sv"))):
+        iface = _fhg.parse_module(path.read_text(errors="replace"), name)
+        if iface is not None:
+            return {p.name for p in iface.ports if p.direction == "output"}
+    return set()
+
+
+_RESET_LITERAL = r"(?:'0|'1|\d+'[sS]?[bBoOdDhH][0-9a-fA-F_xXzZ]+|[01])"
+_RESET_PREDICATE_RE = re.compile(
+    rf"^\s*\(?\s*(?P<output>[A-Za-z_]\w*)\s*==\s*{_RESET_LITERAL}\s*\)?\s*$")
+
+
+def _substantive_reset_predicate(harness: str, predicate: str,
+                                 output_ports: set[str] | None) -> bool:
+    """A direct reset-value check on a connected DUT output, not a tautology."""
+    match = _RESET_PREDICATE_RE.fullmatch(predicate)
+    if not match:
+        return False
+    output = match.group("output")
+    return ((output_ports is None or output in output_ports)
+            and _harness_connects(harness, output))
+
+
+def _reset_guarded_properties(harness: str,
+                              output_ports: set[str] | None = None) -> List[str]:
+    """Asserted, reset-guarded checks of a connected DUT output's reset value.
+
+    `formal_harness_gen` emits concurrent `assert property` statements for
+    `read_verilog -sv`. Its equivalent `read_slang` form is an immediate
+    labelled assertion inside `if (f_past_valid && rst_active)`. Both forms
+    are proved by the same SBY tasks; recognize both as binding evidence.
+    """
     asserted = set(re.findall(r"\bassert\s+property\s*\(\s*(\w+)\s*\)", harness))
-    return sorted(n for n, body in _PROPERTY_RE.findall(harness)
-                  if n in asserted and re.search(r"\brst_active(?:_q)?\b", body))
+    concurrent = set()
+    for name, body in _PROPERTY_RE.findall(harness):
+        consequent = re.search(
+            r"\(\s*f_past_valid\s*&&\s*rst_active(?:_q)?\s*\)\s*\|->\s*"
+            r"\((?P<predicate>[^;]+)\)\s*;", body)
+        if (name in asserted and consequent and
+                _substantive_reset_predicate(harness, consequent.group("predicate"),
+                                             output_ports)):
+            concurrent.add(name)
+    # Accept the immediate form the generator actually emits. Merely finding
+    # `rst_active` somewhere in an if condition is insufficient: under `||`,
+    # the assertion may run when reset is inactive and prove no reset binding.
+    immediate = {m.group("name") for m in re.finditer(
+        r"\bif\s*\(\s*f_past_valid\s*&&\s*rst_active(?:_q)?\s*\)\s*"
+        r"(?P<name>[A-Za-z_]\w*)\s*:\s*assert\s*\((?P<predicate>[^;]+)\)\s*;",
+        harness) if _substantive_reset_predicate(harness, m.group("predicate"),
+                                                 output_ports)}
+    return sorted(concurrent | immediate)
 
 
 def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List[dict]:
@@ -422,7 +500,7 @@ def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List
               and any(t.get("bound") == "unbounded" for t in tasks))
     proof_status = ", ".join(f"{t.get('task')}:{t.get('status')}"
                              f"({t.get('bound')})" for t in tasks) or "no proof task"
-    covering = _reset_guarded_properties(harness)
+    covering = _reset_guarded_properties(harness, _dut_output_ports(project, harness))
     out: List[dict] = []
     for row, b in rows:
         rec = {"id": str(row.get("id")), "kind": "binding", "role": b["role"],
@@ -439,7 +517,7 @@ def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List
         if covering:
             rec["property"] = covering[0]
         else:
-            why.append("no asserted property is guarded by that reset")
+            why.append("no substantive reset assertion on a connected DUT output is guarded by that reset")
         if stale:
             why.append(stale)
         if not proven:

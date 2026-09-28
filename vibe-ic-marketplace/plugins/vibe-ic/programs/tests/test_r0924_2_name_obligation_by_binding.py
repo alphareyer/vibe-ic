@@ -26,6 +26,7 @@ a bare `pytest.skip` would read as a pass; neither is true. chip-AGNOSTIC.
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import sys
 from pathlib import Path
@@ -95,6 +96,96 @@ def test_the_name_obligation_is_classified_as_a_binding(tmp_path):
     assert fhg.binding_obligation(dict(bare, id=NAME_ID.replace("name", "sync")), proj) is None
     prose = _project(tmp_path / "p", reset_name="the reset pin")
     assert fhg.binding_obligation(bare, prose) is None
+
+
+def test_immediate_reset_assertion_from_slang_frontend_closes_binding():
+    # formal_harness_gen emits this equivalent immediate form when the
+    # read_slang frontend is needed; the gate must recognize the reset guard.
+    harness = """\
+    ctr dut (.q(q));
+    always @(posedge clk) if (f_past_valid && rst_active)
+        a_reset_safety_1: assert (q == 4'd0);
+    """
+    assert gate._reset_guarded_properties(harness) == ["a_reset_safety_1"]
+
+
+def test_immediate_assertion_without_reset_guard_does_not_close_binding():
+    harness = """\
+    always @(posedge clk) if (f_past_valid)
+        a_reset_safety_1: assert (q == 4'd0);
+    """
+    assert gate._reset_guarded_properties(harness) == []
+
+
+def _immediate_binding_row(tmp_path, guard, predicate="q == 4'd0", harness_edit=None):
+    project = _project(tmp_path)
+    formal = project / "phase2/stage1/formal"
+    formal.mkdir(parents=True)
+    harness = formal / "formal_ctr.sv"
+    body = f"""module formal_ctr(input rst, input clk);
+    wire rst_active = rst;
+    wire rst_active_q = rst;
+    wire [3:0] q;
+    ctr dut (.rst(rst), .q(q));
+    reg f_past_valid = 1'b1;
+    always @(posedge clk) if ({guard})
+        a_reset_safety_1: assert ({predicate});
+    endmodule
+    """
+    if harness_edit:
+        body = harness_edit(body)
+    harness.write_text(body)
+    results = {
+        "unresolved_obligations": [{"id": NAME_ID}],
+        "all_proved": True,
+        "properties": [{"task": "prove", "status": "PASS", "bound": "unbounded"}],
+        "proof_inputs": {"files": {harness.name: hashlib.sha256(body.encode()).hexdigest()}},
+    }
+    row, = gate.binding_dispositions(project, formal, results)
+    return row
+
+
+def test_immediate_disjunction_cannot_discharge_reset_binding(tmp_path):
+    row = _immediate_binding_row(tmp_path, "rst_active || f_past_valid")
+    assert row["status"] == gate.BINDING_OUTSTANDING, row
+    assert "no substantive reset assertion" in row["reason"]
+
+
+def test_immediate_generated_sync_guard_discharges_binding(tmp_path):
+    row = _immediate_binding_row(tmp_path, "f_past_valid && rst_active_q")
+    assert row["status"] == gate.DISCHARGED_BY_BINDING, row
+    assert row["property"] == "a_reset_safety_1"
+
+
+def test_immediate_tautology_cannot_discharge_reset_binding(tmp_path):
+    row = _immediate_binding_row(tmp_path, "f_past_valid && rst_active", "1'b1")
+    assert row["status"] == gate.BINDING_OUTSTANDING, row
+    assert "no substantive reset assertion" in row["reason"]
+
+
+def test_immediate_non_dut_predicate_cannot_discharge_reset_binding(tmp_path):
+    row = _immediate_binding_row(tmp_path, "f_past_valid && rst_active", "rst_active == 1'b1")
+    assert row["status"] == gate.BINDING_OUTSTANDING, row
+    assert "no substantive reset assertion" in row["reason"]
+
+
+def test_immediate_self_equality_cannot_discharge_reset_binding(tmp_path):
+    row = _immediate_binding_row(tmp_path, "f_past_valid && rst_active", "q == q")
+    assert row["status"] == gate.BINDING_OUTSTANDING, row
+    assert "no substantive reset assertion" in row["reason"]
+
+
+def test_other_instance_output_connection_cannot_discharge_reset_binding(tmp_path):
+    def disconnected_dut(body):
+        return (body.replace("wire [3:0] q;", "wire [3:0] q = 4'd0;")
+                .replace("ctr dut (.rst(rst), .q(q));",
+                         "ctr dut (.rst(rst), .q());\n    dummy other (.q(q));")
+                + "\nmodule dummy(input [3:0] q); endmodule\n")
+
+    row = _immediate_binding_row(tmp_path, "f_past_valid && rst_active",
+                                 harness_edit=disconnected_dut)
+    assert row["status"] == gate.BINDING_OUTSTANDING, row
+    assert "no substantive reset assertion" in row["reason"]
 
 
 def test_bound_and_proven_is_discharged_by_binding(tmp_path):
