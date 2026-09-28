@@ -44,9 +44,12 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
+import _docker_memory as _dmem
+from metal_fill_config_gen import (build_metal_fill_config,
+                                   density_rule_layer_identifiers)
 from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, digest,  # noqa: E402
                                 resolve_step_configs, run_chain, select_arms,
-                                state_from_direct)
+                                state_from_direct, run_container)
 
 ODB_FILL_STEP = 'OpenROAD.FillInsertion'
 GDS_FILL_STEPS = ('KLayout.Filler', 'KLayout.Density', 'Checker.KLayoutDensity')
@@ -189,6 +192,19 @@ def run_density(project: Path, image: str, pdk_root: Path, pdk: str, *,
                          'gds_in': str(gds), 'gds_in_sha256': digest(Path(gds)),
                          'filled_gds': str(filled), 'filled_sha256': digest(Path(filled))}
         out['subject'], out['subject_sha256'] = str(filled), digest(Path(filled))
+        if count:
+            topup = top_up_density(project, image, pdk_root, pdk, Path(filled),
+                                   configs['KLayout.Density'], f'{lane}-topup')
+            again = run_density(project, image, pdk_root, pdk,
+                                gds=Path(topup['gds']), lane=f'{lane}-topped',
+                                configs=configs, steps=DENSITY_STEPS)
+            again['filler'] = out['filler']
+            again['density_topup'] = topup
+            again['pdk_density_before_topup'] = count
+            return again
+    out['ratios'] = measure_density_ratios(
+        project, image, pdk_root, pdk, Path(out['subject']),
+        configs['KLayout.Density'], f'{lane}-ratios')
     return out
 
 
@@ -210,6 +226,165 @@ def density_rules(report: Path) -> Optional[Dict[str, int]]:
                     out[name] = out.get(name, 0) + (_count(row.get('count')) or 1)
             return out
     return None
+
+
+def _host_pdk_path(value: str, pdk_root: Path, pdk: str) -> Path:
+    """Translate a resolved LibreLane /pdk path to its mounted host source."""
+    path = Path(value)
+    prefix = Path('/pdk') / pdk
+    if path == prefix or prefix in path.parents:
+        return pdk_root / pdk / path.relative_to(prefix)
+    return path
+
+
+def _density_source(pdk_root: Path, pdk: str,
+                    density_config: Path) -> tuple[dict, str, str, str]:
+    cfg = _load(density_config)
+    layer_map = cfg.get('KLAYOUT_DEF_LAYER_MAP')
+    tech_lefs = cfg.get('TECH_LEFS') or {}
+    deck = cfg.get('KLAYOUT_DENSITY_RUNSET')
+    if not (layer_map and tech_lefs and deck):
+        raise Refusal('LL_DENSITY_FILL_PDK_INPUT_MISSING', str(density_config))
+    map_path = _host_pdk_path(str(layer_map), pdk_root, pdk)
+    lef_paths = [_host_pdk_path(str(p), pdk_root, pdk)
+                 for p in tech_lefs.values()]
+    deck_path = _host_pdk_path(str(deck), pdk_root, pdk)
+    try:
+        map_text = map_path.read_text()
+        lef_text = '\n'.join(p.read_text() for p in lef_paths)
+        # The master deck loads rule_decks/*.rb and generic_layers.rb.  Include
+        # these declarations so the fill engine sees the same dummy datatypes,
+        # spacing, density floor and exclusion markers as the foundry checker.
+        deck_files = [deck_path, *sorted(deck_path.parent.rglob('*.rb'))]
+        deck_text = '\n'.join(p.read_text() for p in deck_files)
+    except OSError as exc:
+        raise Refusal('LL_DENSITY_FILL_PDK_UNREADABLE', str(exc)) from exc
+    return cfg, map_text, lef_text, deck_text
+
+
+def _density_ratio_specs(deck_text: str, fill_cfg: dict) -> dict:
+    """Resolve die-density identifiers to the PDK's drawn+dummy GDS pairs.
+
+    Unknown aliases remain absent and are reported as NOT_MEASURED.  The
+    foundry deck is still the only authority for the rule verdict.
+    """
+    layers = {row['name']: row for row in fill_cfg['layers']}
+    extracted = {name: [int(number), int(datatype)]
+                 for name, number, datatype in re.findall(
+                     r'extract_single_layer_from_design\.call\(:([A-Za-z]\w*),\s*(\d+),\s*(\d+)\)',
+                     deck_text)}
+    unions = {name: (left, right) for name, left, right in re.findall(
+        r'name:\s*:([A-Za-z]\w*),\s*calc:\s*->\(ctx\)\s*\{\s*ctx\[:([A-Za-z]\w*)\]\s*\+\s*ctx\[:([A-Za-z]\w*)\]',
+        deck_text)}
+    top_aliases = {int(level): name for level, name in re.findall(
+        r'(\d+)\s*=>\s*\{[^\n]*top_metal:\s*:([A-Za-z]\w*)', deck_text)}
+    highest = max((int(re.search(r'\d+$', name).group()) for name in layers
+                   if re.search(r'\d+$', name)), default=None)
+    out = {}
+    for rule, identifiers in density_rule_layer_identifiers(deck_text).items():
+        pairs = None
+        for symbol in identifiers:
+            resolved = symbol
+            if symbol == 'top_metal' and highest in top_aliases:
+                resolved = top_aliases[highest]
+            if resolved in layers:
+                row = layers[resolved]
+                pairs = [row['layer'],
+                         [row['layer'][0], row.get('fill_datatype', row['layer'][1])]]
+            elif resolved in extracted:
+                pairs = [extracted[resolved]]
+            elif resolved in unions:
+                pair_names = unions[resolved]
+                if all(name in extracted for name in pair_names):
+                    pairs = [extracted[name] for name in pair_names]
+            if pairs:
+                break
+        out[rule] = {'status': 'MEASURED' if pairs else 'NOT_MEASURED',
+                     'identifier': symbol if pairs else identifiers,
+                     'layers': pairs}
+    return out
+
+
+def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
+                   gds: Path, density_config: Path, lane: str) -> Dict[str, Any]:
+    """Use the PDK-derived dummy-metal engine after the PDK's own filler."""
+    cfg, map_text, lef_text, deck_text = _density_source(pdk_root, pdk,
+                                                         density_config)
+    fill_cfg = build_metal_fill_config(map_text, lef_text, deck_text)
+    if not fill_cfg or not fill_cfg.get('layers'):
+        raise Refusal('LL_DENSITY_FILL_NO_DERIVED_LAYERS', str(density_config))
+    root = project / 'phase3/librelane' / lane
+    root.mkdir(parents=True, exist_ok=True)
+    config_path = root / 'pdk_fill_config.json'
+    out = root / (gds.stem + '.topped.gds')
+    report = root / 'fill_report.json'
+    write_json(config_path, fill_cfg)
+    programs = Path(__file__).resolve().parent
+    cmd = ['docker', 'run', '--rm', *_dmem.docker_memory_flags(),
+           '-v', f'{project.resolve()}:{project.resolve()}',
+           '-v', f'{programs.resolve()}:{programs.resolve()}:ro',
+           image, '--skip', 'python3', str(programs / 'metal_fill_emit.py'),
+           str(project), '--gds', str(gds), '--config', str(config_path),
+           '--out', str(out), '--report', str(report),
+           '--cell', str(cfg.get('DESIGN_NAME') or '')]
+    result = run_container(cmd, supervised=True, log=root / 'fill.log')
+    if result.returncode != 0 or not out.is_file() or not report.is_file():
+        raise Refusal('LL_DENSITY_FILL_FAILED',
+                      f'{root}: rc={result.returncode}')
+    measured = _load(report)
+    if not (measured.get('verdict') == 'PASS' or
+            (measured.get('verdict') == 'PARTIAL' and
+             measured.get('promoted_on_foundry_floor'))) or not measured.get('layers'):
+        raise Refusal('LL_DENSITY_FILL_NOT_MEASURED', str(report))
+    if digest(out) == digest(gds):
+        raise Refusal('LL_DENSITY_FILL_NO_CHANGE', str(report))
+    return {'gds': str(out), 'gds_sha256': digest(out),
+            'input_sha256': digest(gds), 'report': str(report),
+            'report_sha256': digest(report), 'config': str(config_path),
+            'config_sha256': digest(config_path),
+            'layers': measured['layers']}
+
+
+def measure_density_ratios(project: Path, image: str, pdk_root: Path, pdk: str,
+                           gds: Path, density_config: Path, lane: str) -> Dict[str, Any]:
+    """Emit drawn+dummy coverage for every resolvable PDK die-density rule."""
+    cfg, map_text, lef_text, deck_text = _density_source(pdk_root, pdk,
+                                                         density_config)
+    fill_cfg = build_metal_fill_config(map_text, lef_text, deck_text)
+    if not fill_cfg:
+        raise Refusal('LL_DENSITY_RATIOS_UNRESOLVED', str(density_config))
+    specs = _density_ratio_specs(deck_text, fill_cfg)
+    die = cfg.get('DIE_AREA')
+    if not specs or not isinstance(die, list) or len(die) != 4:
+        raise Refusal('LL_DENSITY_RATIOS_UNRESOLVED', str(density_config))
+    root = project / 'phase3/librelane' / lane
+    root.mkdir(parents=True, exist_ok=True)
+    specs_path = root / 'density_specs.json'
+    report = root / 'density_ratios.json'
+    write_json(specs_path, specs)
+    programs = Path(__file__).resolve().parent
+    before = digest(gds)
+    cmd = ['docker', 'run', '--rm', *_dmem.docker_memory_flags(),
+           '-v', f'{project.resolve()}:{project.resolve()}',
+           '-v', f'{programs.resolve()}:{programs.resolve()}:ro',
+           image, '--skip', 'python3', str(programs / 'die_density_ratio_emit.py'),
+           '--gds', str(gds), '--specs', str(specs_path),
+           '--die', json.dumps(die), '--out', str(report)]
+    result = run_container(cmd, supervised=True, log=root / 'density_ratios.log')
+    if not report.is_file():
+        raise Refusal('LL_DENSITY_RATIOS_NOT_MEASURED',
+                      f'{root}: rc={result.returncode}')
+    measured = _load(report)
+    if (result.returncode != 0 or measured.get('status') != 'MEASURED' or
+            digest(gds) != before or
+            set(measured.get('layers') or {}) != set(specs) or
+            any(not isinstance(row.get('ratio'), (int, float)) or
+                isinstance(row.get('ratio'), bool) or
+                not 0 <= row['ratio'] <= 1 for row in measured['layers'].values())):
+        raise Refusal('LL_DENSITY_RATIOS_NOT_MEASURED', str(report))
+    return {'report': str(report), 'report_sha256': digest(report),
+            'subject': str(gds), 'subject_sha256': before,
+            'layers': measured['layers']}
 
 
 # --- row occupancy, from the DEF and the LEFs that define its masters -------
