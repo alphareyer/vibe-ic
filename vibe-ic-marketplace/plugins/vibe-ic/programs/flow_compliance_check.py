@@ -2263,6 +2263,8 @@ def _live_artefact_state(p: Path) -> Tuple[bool, str]:
             return True, "symlink_to_dir"
         if not _stat.S_ISREG(tst.st_mode):
             return False, "symlink_to_non_file"
+        if tst.st_size == 0 and _era._empty_router_drc_receipt(p) is not None:
+            return True, "symlink_to_receipted_empty_zero"
         return (tst.st_size > 0), (
             "symlink_alias" if tst.st_size > 0 else "symlink_to_empty_file")
     if _stat.S_ISREG(st.st_mode):
