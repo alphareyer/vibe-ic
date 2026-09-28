@@ -36,6 +36,7 @@ _REQUIRED_STAGES = ("synth", "placement_repair", "cts", "post_grt_repair", "sign
 _FORBIDDEN_SDC = re.compile(r"\b(set_case_analysis|set_disable_timing|set_ideal_network|set_ideal_net)\b")
 _SCENE_PROFILES = Path(__file__).resolve().parent / "data/drv_signoff_scene_profiles.json"
 _OWNER_SIGNERS = Path(__file__).resolve().parent / "data/drv_owner_allowed_signers"
+_THRESHOLD_FREEZES = Path(__file__).resolve().parent / "data/drv_threshold_freezes.json"
 
 
 def _sha(path: Path) -> str:
@@ -274,6 +275,101 @@ def _approved_before_run(record: dict, identity: dict) -> bool:
         return False
 
 
+def _check_threshold_freeze(identity: dict, frozen: dict,
+                            owner_records: list[dict],
+                            fails: list[str], missing: list[str]) -> None:
+    """Reconcile the plan with committed values and a signed, prior-run receipt.
+
+    The data file is independent of the capture plan.  Its PDK defaults and
+    design declarations are pinned by source hashes; the signed receipt binds
+    the remaining run-specific SDC and complete Liberty selection before the
+    run begins.  A plan cannot authorize its own change to either source.
+    """
+    try:
+        doc = json.loads(_THRESHOLD_FREEZES.read_text())
+        if doc.get("schema_version") != 1:
+            raise ValueError("unsupported schema")
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        missing.append(f"threshold freeze record absent or invalid: {exc}")
+        return
+    pdk, library = identity.get("pdk"), identity.get("library")
+    sources = frozen.get("sources") or {}
+    pdk_defaults = [row for row in doc.get("defaults", [])
+                    if row.get("pdk") == pdk and row.get("library") == library]
+    defaults = [row for row in pdk_defaults
+                if row.get("pdk_config_sha256") == sources.get("pdk_config")]
+    if len(defaults) != 1:
+        (fails if pdk_defaults else missing).append(
+            "threshold source changed: PDK config" if pdk_defaults else
+            "threshold freeze record absent for PDK/library")
+        return
+    source_pair = {key: sources.get(key) for key in ("l7", "l9")}
+    pdk_designs = [row for row in doc.get("designs", [])
+                   if row.get("pdk") == pdk and row.get("library") == library]
+    designs = [row for row in pdk_designs
+               if source_pair in (row.get("sources") if isinstance(
+                   row.get("sources"), list) else [row.get("sources")])]
+    if len(designs) != 1:
+        (fails if pdk_designs else missing).append(
+            "threshold source changed: L7/L9" if pdk_designs else
+            "threshold freeze record absent for design")
+        return
+    standard = designs[0]
+    if not standard.get("owner_approval_citation"):
+        missing.append("threshold freeze owner approval citation absent")
+    try:
+        issued = datetime.fromisoformat(standard["issued_at"])
+        started = datetime.fromisoformat(identity["run_started_at"])
+        if issued.tzinfo is None or started.tzinfo is None or issued >= started:
+            missing.append("threshold freeze record was not issued before run")
+    except (KeyError, TypeError, ValueError):
+        missing.append("threshold freeze issuance or run start is unverified")
+    default_values = defaults[0].get("values") or {}
+    values = frozen.get("values") or {}
+    for field, expected in default_values.items():
+        if field == "fanout":
+            if values.get("default_fanout_ceiling") != expected:
+                fails.append("threshold source changed: PDK fanout ceiling")
+        elif values.get(field) != expected:
+            fails.append(f"threshold source changed: PDK {field}")
+    if values != standard.get("values"):
+        fails.append("threshold source changed: declared values")
+    for field in ("scope", "scenes", "rc_corners", "scene_profile_sha256"):
+        if frozen.get(field) != standard.get(field):
+            fails.append(f"threshold source changed: {field}")
+    for scene, expected in (standard.get("pvt") or {}).items():
+        actual = (frozen.get("pvt") or {}).get(scene) or {}
+        if any(actual.get(key) != value for key, value in expected.items()):
+            fails.append(f"threshold source changed: {scene} PVT")
+    if set(frozen.get("pvt") or {}) != set(standard.get("pvt") or {}):
+        fails.append("threshold source changed: PVT scene set")
+    actual_libs = frozen.get("liberties") or {}
+    standard_libs = standard.get("liberties") or {}
+    if sorted(actual_libs.values()) != sorted(standard_libs.values()):
+        fails.append("threshold source changed: Liberty identities")
+    actual_links = frozen.get("scene_liberties") or {}
+    standard_links = standard.get("scene_liberties") or {}
+    if set(actual_links) != set(standard_links):
+        fails.append("threshold source changed: scene Liberty set")
+    else:
+        for scene, names in standard_links.items():
+            expected = [standard_libs.get(name) for name in names]
+            actual = [actual_libs.get(name) for name in actual_links[scene]]
+            if None in expected or None in actual or sorted(expected) != sorted(actual):
+                fails.append(f"threshold source changed: {scene} Liberty selection")
+    supplied = [record for record in owner_records
+                if record.get("type") == "threshold_freeze"]
+    signed = [record for record in supplied
+              if record.get("type") == "threshold_freeze"
+              and record.get("standard_sha256") == _sha(_THRESHOLD_FREEZES)
+              and record.get("thresholds") == frozen
+              and _approved_before_run(record, identity)]
+    if not signed:
+        (fails if supplied else missing).append(
+            "threshold source changed: signed threshold_freeze" if supplied else
+            "validated threshold_freeze owner record absent before run")
+
+
 def _annotate_limits(row: dict, kind: str, scene: dict, libs: dict,
                      pins: dict, declared: dict, missing: list[str]) -> bool:
     """Resolve a pin against the Liberty files linked by this STA scene."""
@@ -439,6 +535,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     declared = frozen.get("values") or {}
     run_id, tree_sha = identity.get("run_id"), identity.get("tree_sha")
     if project is not None:
+        _check_threshold_freeze(identity, frozen, owner_records, fails, missing)
         if Path(str(identity.get("project") or "")).resolve() != project.resolve():
             missing.append("project identity differs from judged project directory")
     if not run_id or not tree_sha or not identity.get("spec_version"):

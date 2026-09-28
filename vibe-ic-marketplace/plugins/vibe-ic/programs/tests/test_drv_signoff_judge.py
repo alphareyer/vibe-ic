@@ -191,6 +191,31 @@ def _bundle(tmp_path: Path) -> dict:
     return bundle
 
 
+def _install_test_freeze(bundle: dict, root: Path, monkeypatch) -> None:
+    frozen, identity = bundle["frozen"], bundle["identity"]
+    static = root / "threshold_freezes.json"
+    static.write_text(json.dumps({"schema_version": 1, "defaults": [{
+        "pdk": identity["pdk"], "library": identity["library"],
+        "pdk_config_sha256": frozen["sources"]["pdk_config"],
+        "values": {"fanout": frozen["values"]["default_fanout_ceiling"],
+                   "slew_ns": frozen["values"]["slew_ns"],
+                   "cap_pf": frozen["values"]["cap_pf"]}}],
+        "designs": [{"pdk": identity["pdk"], "library": identity["library"],
+                     "sources": {k: frozen["sources"][k] for k in ("l7", "l9")},
+                     **{k: copy.deepcopy(frozen[k]) for k in
+                        ("values", "scope", "scenes", "rc_corners", "pvt",
+                         "liberties", "scene_liberties", "scene_profile_sha256")},
+                     "issued_at": "2026-09-27T00:00:00+00:00",
+                     "owner_approval_citation": "approved synthetic test contract"}]}))
+    signed = {"type": "threshold_freeze", "thresholds": copy.deepcopy(frozen),
+              "standard_sha256": drv._sha(static),
+              "owner_timestamp": "2026-09-27T00:00:00+00:00",
+              "owner_quote": "approved synthetic test contract"}
+    monkeypatch.setattr(drv, "_THRESHOLD_FREEZES", static)
+    monkeypatch.setattr(drv, "_owner_records",
+                        lambda *args: ([signed], "OWNER_APPROVAL_ABSENT"))
+
+
 def _violate(bundle: dict, root: Path, kind: str, *, value: float,
              limit: float, net_class="data", cell_class="std") -> None:
     scene = bundle["scenes"][0]
@@ -918,6 +943,7 @@ def test_project_clean_opensta_census_can_reach_pass(tmp_path, monkeypatch):
                  net_census_report=_file(folder, "net_census.rpt",
                                          (folder / "net_census.rpt").read_text()),
                  disabled_edges_report=_file(folder, "disabled_edges.rpt", ""))
+    _install_test_freeze(bundle, tmp_path, monkeypatch)
     result = drv.judge(bundle, project=tmp_path)
     assert result["verdict"] == "PASS", result
     scene["pin_census_report"] = {}
@@ -1233,3 +1259,95 @@ def test_unmatched_l9_fanout_scope_cannot_fall_back_to_pdk_ten(tmp_path):
     result = drv.judge(bundle)
     assert result["verdict"] == "NOT_MEASURED"
     assert any("L9 fanout scope" in reason for reason in result["not_measured"])
+
+
+def test_independent_pre_run_freeze_rejects_plan_value_edit(tmp_path, monkeypatch):
+    bundle = _bundle(tmp_path)
+    profile = tmp_path / "scene_profile.json"
+    profile.write_text(json.dumps({"synthetic": {
+        "pvt": {"typ": {"nom_process": 1, "nom_voltage": 5,
+                        "nom_temperature": 25}}, "rc_corners": ["nom"]}}))
+    monkeypatch.setattr(drv, "_SCENE_PROFILES", profile)
+    monkeypatch.setattr(drv, "_installed_image_digest",
+                        lambda _: bundle["identity"]["tool_image_digest"])
+    bundle["frozen"]["scene_profile_sha256"] = drv._sha(profile)
+    _install_test_freeze(bundle, tmp_path, monkeypatch)
+    baseline = drv.judge(bundle, project=tmp_path)
+    assert not any("threshold source changed" in reason.lower()
+                   for reason in baseline["failures"]), baseline
+    bundle["frozen"]["values"]["period_ns"] = 25
+    bundle["current"]["values"]["period_ns"] = 25
+    edited = drv.judge(bundle, project=tmp_path)
+    assert edited["verdict"] == "FAIL", edited
+    assert any("threshold source changed" in reason.lower()
+               for reason in edited["failures"]), edited
+
+
+def test_missing_committed_threshold_freeze_is_not_measured(tmp_path, monkeypatch):
+    bundle = _bundle(tmp_path)
+    monkeypatch.setattr(drv, "_THRESHOLD_FREEZES",
+                        tmp_path / "absent.json", raising=False)
+    result = drv.judge(bundle, project=tmp_path)
+    assert result["verdict"] == "NOT_MEASURED", result
+    assert any("threshold freeze record absent" in reason.lower()
+               for reason in result["not_measured"]), result
+
+
+def test_committed_threshold_freeze_digest_is_owner_controlled():
+    assert drv._sha(drv._THRESHOLD_FREEZES) == (
+        "4a55fc6ef37e484318e391d05930e641656bbe180dc6e54f46baec55105193a0"
+    ), "a threshold freeze change needs a RULINGS owner citation"
+
+
+def test_fresh_opensta_has_memory_ceiling_and_progress_watchdog(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    import drv_signoff_capture as capture
+    script = tmp_path / "measure.tcl"
+    script.write_text("puts ready\n")
+    seen = []
+
+    def supervised(argv, **kw):
+        seen.append((argv, kw))
+        Path(kw["log_path"]).write_text("OpenSTA 3.1 aaaaaaaaaa\n")
+        return SimpleNamespace(outcome="natural", rc=0, err="")
+
+    monkeypatch.setattr(capture, "_docker_memory",
+                        SimpleNamespace(memory_limit=lambda: "1g"), raising=False)
+    monkeypatch.setattr(capture, "_watchdog",
+                        SimpleNamespace(run_supervised=supervised), raising=False)
+    monkeypatch.setattr(capture.subprocess, "run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, 0,
+                            "OpenSTA 3.1 aaaaaaaaaa\n", ""))
+    assert "OpenSTA" in capture._run_fresh(script, {tmp_path}, image="test:image")
+    assert len(seen) == 1
+    argv, options = seen[0]
+    assert argv[argv.index("--memory") + 1] == "1g"
+    assert argv[argv.index("--memory-swap") + 1] == "1g"
+    assert "--name" in argv and callable(options["cpu_probe"])
+    assert callable(options["kill"]) and callable(options["abort_probe"])
+    assert options["log_path"] == script.with_suffix(".tool.log")
+
+
+def test_stalled_opensta_retains_raw_log_and_is_unmeasured(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    import drv_signoff_capture as capture
+    script = tmp_path / "measure.tcl"
+    script.write_text("puts ready\n")
+
+    def supervised(argv, **kw):
+        Path(kw["log_path"]).write_text("OpenSTA partial diagnostic\n")
+        return SimpleNamespace(outcome="stalled", rc=125,
+                               err="no forward progress")
+
+    monkeypatch.setattr(capture, "_docker_memory",
+                        SimpleNamespace(memory_limit=lambda: "1g"), raising=False)
+    monkeypatch.setattr(capture, "_watchdog",
+                        SimpleNamespace(run_supervised=supervised), raising=False)
+    monkeypatch.setattr(capture.subprocess, "run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, 0,
+                            "OpenSTA 3.1 aaaaaaaaaa\n", ""))
+    with pytest.raises(RuntimeError, match="NOT_MEASURED.*stalled"):
+        capture._run_fresh(script, {tmp_path}, image="test:image")
+    assert "partial diagnostic" in script.with_suffix(".tool.log").read_text()

@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "owner_approval": {
+    "citation": "/home/reyerchu/codex_tasks/DRV_SIGNOFF_STANDARD.md section 0, owner approval 2026-09-28",
+    "quote": "扇出標準那 4 個決定-> go"
+  },
+  "defaults": [
+    {
+      "pdk": "gf180mcuD",
+      "library": "gf180mcu_fd_sc_mcu7t5v0",
+      "pdk_config_sha256": "2941595ae7e516ad910e2d50c9a405d31401e6e5c93d6bd7edff6c82d26d31f7",
+      "pdk_commit": "b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0",
+      "values": {
+        "fanout": 10,
+        "slew_ns": 3,
+        "cap_pf": 0.2
+      }
+    },
+    {
+      "pdk": "sky130A",
+      "library": "sky130_fd_sc_hd",
+      "pdk_config_sha256": "95e3255c71e104c9b050f5758f64607683b9cddf17c910687b8aa033b3bf2667",
+      "pdk_commit": "b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0",
+      "values": {
+        "fanout": 10,
+        "slew_ns": 0.75,
+        "cap_pf": 0.2
+      }
+    }
+  ],
+  "designs": [
+    {
+      "design": "spm",
+      "pdk": "gf180mcuD",
+      "library": "gf180mcu_fd_sc_mcu7t5v0",
+      "issued_at": "2026-09-28T18:00:32+00:00",
+      "owner_approval_citation": "/home/reyerchu/codex_tasks/DRV_SIGNOFF_STANDARD.md section 0 and owner approval 2026-09-28; spm input L9 section 9.1B",
+      "sources": [
+        {
+          "l7": "465dfa3d935d577d040e42e41af3abf17d233cd813ec7b71ad5e885f244265c2",
+          "l9": "17920001322a50abdedbdd058d2903637145f8d61f5120e8c5a1a79212241666"
+        },
+        {
+          "l7": "b0d0ce01b2ba148b9abe3b657c3dfe1cec9c2329d3d6c24b87f7112a29931fd6",
+          "l9": "16ba0da5b2b4306bd49a12ea53a9f509ca4a2771870654809be5b46cac5ab6e9"
+        }
+      ],
+      "values": {
+        "fanout": 4,
+        "slew_ns": 3,
+        "cap_pf": 0.2,
+        "period_ns": 24,
+        "io_delay_ns": 4.8,
+        "default_fanout_ceiling": 10
+      },
+      "scope": "whole final netlist",
+      "scenes": [
+        "ss_125C_4v50_min",
+        "ss_125C_4v50_nom",
+        "ss_125C_4v50_max",
+        "tt_025C_5v00_min",
+        "tt_025C_5v00_nom",
+        "tt_025C_5v00_max",
+        "ff_n40C_5v50_min",
+        "ff_n40C_5v50_nom",
+        "ff_n40C_5v50_max"
+      ],
+      "rc_corners": [
+        "min",
+        "nom",
+        "max"
+      ],
+      "pvt": {
+        "ss_125C_4v50_min": {
+          "nom_voltage": 4.5,
+          "nom_temperature": 125
+        },
+        "ss_125C_4v50_nom": {
+          "nom_voltage": 4.5,
+          "nom_temperature": 125
+        },
+        "ss_125C_4v50_max": {
+          "nom_voltage": 4.5,
+          "nom_temperature": 125
+        },
+        "tt_025C_5v00_min": {
+          "nom_voltage": 5.0,
+          "nom_temperature": 25
+        },
+        "tt_025C_5v00_nom": {
+          "nom_voltage": 5.0,
+          "nom_temperature": 25
+        },
+        "tt_025C_5v00_max": {
+          "nom_voltage": 5.0,
+          "nom_temperature": 25
+        },
+        "ff_n40C_5v50_min": {
+          "nom_voltage": 5.5,
+          "nom_temperature": -40
+        },
+        "ff_n40C_5v50_nom": {
+          "nom_voltage": 5.5,
+          "nom_temperature": -40
+        },
+        "ff_n40C_5v50_max": {
+          "nom_voltage": 5.5,
+          "nom_temperature": -40
+        }
+      },
+      "scene_profile_sha256": "d0daf9f97e58e65d4648915bcf0021831b95e2908fdee6b42cd217777a759c49",
+      "liberties": {
+        "std_ss": "4c2657ae12581bc18ed408f3fda0accd10b855118b9993070dbb360dfa3aa874",
+        "std_tt": "330aa9439255e3870ad7adfb987cd4d7bcfa7b6f9fb0cd0a712400e9bd80e38a",
+        "std_ff": "6e04fbedf4279c89a73d6caebe55de27bd760f1aa7c24a4c015489724e4c2439",
+        "io_ss": "99fb6af8227ec2b09971d03ca42c6dcf0663904de8ac5a06504c1ad88a81b9b2",
+        "io_tt": "17a72c0ba2659c00775f444fb5cff152c40cca102671af0f6c5e3043648932c7",
+        "io_ff": "c9bfb14869c6235f3703102bff9899f22720b4373afd5254bef16c15bc9b467e"
+      },
+      "scene_liberties": {
+        "ss_125C_4v50_min": [
+          "std_ss",
+          "io_ss"
+        ],
+        "ss_125C_4v50_nom": [
+          "std_ss",
+          "io_ss"
+        ],
+        "ss_125C_4v50_max": [
+          "std_ss",
+          "io_ss"
+        ],
+        "tt_025C_5v00_min": [
+          "std_tt",
+          "io_tt"
+        ],
+        "tt_025C_5v00_nom": [
+          "std_tt",
+          "io_tt"
+        ],
+        "tt_025C_5v00_max": [
+          "std_tt",
+          "io_tt"
+        ],
+        "ff_n40C_5v50_min": [
+          "std_ff",
+          "io_ff"
+        ],
+        "ff_n40C_5v50_nom": [
+          "std_ff",
+          "io_ff"
+        ],
+        "ff_n40C_5v50_max": [
+          "std_ff",
+          "io_ff"
+        ]
+      }
+    }
+  ]
+}
