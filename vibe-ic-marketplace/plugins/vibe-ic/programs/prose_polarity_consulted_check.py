@@ -136,14 +136,6 @@ _NOT_PROSE: Dict[str, str] = {
         "negated value cannot satisfy either grammar and falls through to "
         "the pinned PDK tier. Falsifier: tests/test_capture_cr8_sdc_environment.py"
         "::test_negated_table_value_is_not_a_design_declaration.",
-    "floorplan_pdn_check::_def_stripe_census":
-        "OpenROAD writes formal DEF SPECIALNETS with ROUTED/NEW layer and "
-        "+ SHAPE STRIPE productions and + USE POWER/GROUND attributes. A DEF "
-        "wire has no grammatical negation of SHAPE; comments are stripped "
-        "before matching, and missing or short metal remains a shortfall. "
-        "Falsifier: test_capture_cr7_pdn_budget verifies zero shapes with a "
-        "Tcl command fail, six built rail shapes pass, and comment text saying "
-        "'not SHAPE STRIPE' cannot manufacture a strap.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "
