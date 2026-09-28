@@ -286,6 +286,37 @@ def _pdn_tcl_evidence(pnr: Path):
     return False, None, []
 
 
+def _def_stripe_census(pnr: Path) -> dict:
+    """Count tool-written PG STRIPE shapes by supply role and layer."""
+    path = pnr / "floorplan.def"
+    try:
+        body = re.sub(r"(?m)#.*$", "", path.read_text(errors="replace"))
+    except OSError:
+        return {"status": "NOT_MEASURED", "count": None, "source": str(path)}
+    section = re.search(r"\bSPECIALNETS\s+\d+\s*;(.*?)\bEND\s+SPECIALNETS\b",
+                        body, re.S | re.I)
+    if not section:
+        return {"status": "MEASURED", "count": 0, "source": str(path)}
+    count = 0
+    by_role_layer = {"POWER": {}, "GROUND": {}}
+    for net in re.split(r"(?m)^\s*-\s+", section.group(1))[1:]:
+        name = net.split(None, 1)[0].lower() if net.split() else ""
+        if any(token in name for token in _PG_NET_TOKENS):
+            role_match = re.search(r"\+\s+USE\s+(POWER|GROUND)\b", net, re.I)
+            role = role_match.group(1).upper() if role_match else None
+            shapes = re.findall(
+                r"\b(?:ROUTED|NEW)\s+(\S+)\b[^;\n]*?\bSHAPE\s+STRIPE\b",
+                net, re.I)
+            count += len(shapes)
+            if role:
+                for layer in shapes:
+                    key = layer.lower()
+                    rows = by_role_layer[role]
+                    rows[key] = rows.get(key, 0) + 1
+    return {"status": "MEASURED", "count": count,
+            "by_role_layer": by_role_layer, "source": str(path)}
+
+
 def _measured_utilization(pnr: Path):
     """Return (util_pct: float|None, source: str|None) parsed from an
     OpenROAD log under pnr/. Prefers GPL-0019 (explicit percent), falls
@@ -542,6 +573,47 @@ def main(argv=None) -> int:
                        "pdn.done marker is not strap evidence.",
         })
         fail = True
+
+    # CR-7: a Tcl command is intent, not the grid pdngen wrote. Existing
+    # published cells are advisory until the owner resolves the N4 corpus
+    # sweep; an explicit input/pdn_budget_pitch_policy.json mode=apply makes
+    # this new design's requirement blocking.
+    plan_path = project / "reports/phase3/floorplan_rectangles.json"
+    try:
+        floor = json.loads(plan_path.read_text()).get("pdn_core_floor") or {}
+        budget = floor.get("budget_pitch") or {}
+    except (OSError, ValueError, AttributeError):
+        budget = {}
+    census = _def_stripe_census(pnr)
+    extra["def_stripe_census"] = census
+    rows = budget.get("rows") or []
+    required = (2 * sum(int(row.get("required_groups") or 0) for row in rows)
+                if budget.get("verdict") == "CANDIDATE" else 2)
+    shortfalls = []
+    if budget.get("verdict") == "CANDIDATE" and rows:
+        for row in rows:
+            layer = str(row.get("layer") or "").lower()
+            groups = int(row.get("required_groups") or 0)
+            for role in ("POWER", "GROUND"):
+                found = census.get("by_role_layer", {}).get(role, {}).get(layer, 0)
+                if found < groups:
+                    shortfalls.append(f"{role}/{layer}: {found} < {groups}")
+    elif census["status"] == "MEASURED" and census["count"] < required:
+        shortfalls.append(f"total: {census['count']} < {required}")
+    if census["status"] == "MEASURED" and shortfalls:
+        blocking = budget.get("mode") == "apply"
+        findings.append({
+            "severity": "FAIL" if blocking else "ADVISORY",
+            "rule": "PDN_DEF_STRAP_SHORTFALL",
+            "message": (f"floorplan DEF has {census['count']} PG STRIPE shape(s); "
+                        f"the {budget.get('mode', 'advisory')} plan needs "
+                        f"at least {required}: {', '.join(shortfalls)}. "
+                        "Tcl commands are not built metal."),
+        })
+        fail = fail or blocking
+    elif census["status"] == "NOT_MEASURED":
+        findings.append({"severity": "ADVISORY", "rule": "PDN_DEF_STRAPS_NOT_MEASURED",
+                         "message": "floorplan DEF could not be read for strap census"})
 
     verdict = "FAIL" if fail else "PASS"
     _emit(args, project, verdict, findings, extra)

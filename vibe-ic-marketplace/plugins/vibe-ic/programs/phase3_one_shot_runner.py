@@ -95,6 +95,7 @@ from _ppa import power as _ppa_power                              # noqa: E402
 from _ppa import area as _ppa_area                                # noqa: E402
 from _ppa import timing as _ppa_timing                            # noqa: E402
 from _ppa import pdn_em_presweep as _ppa_presweep                # noqa: E402
+from _ppa import pdn_small_core as _pdn_small                     # noqa: E402
 from _ppa.power import pdn_ring_dimensions as _pdn_ring_dimensions
 import floorplan_contract as _fpc  # design-declared fixed floorplan + DRV limits
 from _rtl_include_hub import drop_include_hubs as _drop_include_hubs  # shared aggregator filter
@@ -9020,6 +9021,18 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
         # untouched grid keeps the tuned 40.0/8.0 byte-identical; a widened
         # one re-derives the offset with the auto plan's documented ratio.
         _o45 = 8.0 if _p45 == 40.0 else round(_p45 / _PDN_STRAP_OFFSET_DIV, 3)
+        _p4, _p5, _o4, _o5 = _p45, _p45, _o45, _o45
+        if strap_override:
+            for _layer, _target in (("met4", 4), ("met5", 5)):
+                _ov = next((v for k, v in strap_override.items()
+                            if str(k).lower() == _layer), None)
+                if _ov:
+                    if _target == 4:
+                        _w4, _p4, _o4 = (float(_ov[k]) for k in
+                                          ("width", "pitch", "offset"))
+                    else:
+                        _w5, _p5, _o5 = (float(_ov[k]) for k in
+                                          ("width", "pitch", "offset"))
         _em_note = ""
         if _f4 or _f5:
             _em_note = (
@@ -9038,8 +9051,8 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
             + _core_block_pin_layers_tcl(["met4", "met5"])
             + _CORE_GRID_DEFINE_TCL +
             "  add_pdn_stripe -grid grid -layer met1 -width 0.48 -pitch 5.44 -offset 0 -followpins\n"
-            f"  add_pdn_stripe -grid grid -layer met4 -width {_w4} -pitch {_p45} -offset {_o45} -extend_to_core_ring\n"
-            f"  add_pdn_stripe -grid grid -layer met5 -width {_w5} -pitch {_p45} -offset {_o45} -extend_to_core_ring\n"
+            f"  add_pdn_stripe -grid grid -layer met4 -width {_w4} -pitch {_p4} -offset {_o4} -extend_to_core_ring\n"
+            f"  add_pdn_stripe -grid grid -layer met5 -width {_w5} -pitch {_p5} -offset {_o5} -extend_to_core_ring\n"
             "  add_pdn_connect -grid grid -layers {met1 met4}\n"
             "  add_pdn_connect -grid grid -layers {met4 met5}\n"
             "  pdngen\n"
@@ -20857,7 +20870,8 @@ def _effective_die_um(die_um_flag: str,
 
 
 def _strap_plan_core_floor(pdk: "PdkConfig", container: str = "",
-                           detail: Optional[Dict[str, Any]] = None
+                           detail: Optional[Dict[str, Any]] = None,
+                           strap_override: Optional[Mapping[str, Mapping[str, Any]]] = None
                            ) -> Tuple[Optional[int], str]:
     """`(side_um, basis)`: the smallest SQUARE core on which the strap plan
     this run's PDN deck will emit can be built -- the CONSERVATIVE floor an
@@ -20880,7 +20894,8 @@ def _strap_plan_core_floor(pdk: "PdkConfig", container: str = "",
     info: Dict[str, Any] = detail if detail is not None else {}
     plan: Dict[str, Any] = {}
     try:
-        deck = _build_pdn_tcl(pdk, container or None, plan_out=plan)
+        kw = ({"strap_override": strap_override} if strap_override else {})
+        deck = _build_pdn_tcl(pdk, container or None, plan_out=plan, **kw)
     except Exception as exc:  # noqa: BLE001
         why = (f"the PDN deck could not be built to read its strap plan "
                f"({type(exc).__name__}: {exc})")
@@ -20928,6 +20943,7 @@ def _strap_plan_core_floor(pdk: "PdkConfig", container: str = "",
                 reason=(None if side else basis),
                 growth_floor_um=side, growth_floor_basis=basis,
                 plan_source=source, stripes=straps,
+                routing_budget=plan.get("routing_budget"),
                 directions={st["layer"]: directions.get(st["layer"])
                             for st in straps},
                 site_dims_um=list(dims) if dims else None,
@@ -37710,6 +37726,32 @@ def _prepnr_geometry(project: Path, top: str, pdk: PdkConfig,
     _strap_floor_detail: Dict[str, Any] = {}
     _strap_floor_um, _strap_floor_basis = _strap_plan_core_floor(
         pdk, container, detail=_strap_floor_detail)
+    _budget_override: Dict[str, Dict[str, float]] = {}
+    _budget_current, _budget_current_source, _ = _ppa_power._pdn_em_declared_current(
+        project, _pdk_nominal_voltage(pdk, container))
+    if _auto_die_requested and _budget_current is not None and _strap_floor_um:
+        _raw_auto_metrics: Dict[str, Any] = {}
+        _resolve_auto_die_um(
+            "auto", netlist, util, pdk, project, top=top, container=container,
+            metrics=_raw_auto_metrics, strap_core_floor=(None, ""))
+        _raw_core = _raw_auto_metrics.get("core_side_um")
+        if isinstance(_raw_core, (int, float)) and _raw_core > 0:
+            _budget = _pdn_small.plan_for_core(
+                project, _read_pdk_text(pdk.tech_lef, container),
+                float(_raw_core), _strap_floor_detail, _budget_current,
+                _budget_current_source, _pdk_nominal_voltage(pdk, container),
+                getattr(pdk, "ir_budget_pct", None))
+            _strap_floor_detail["budget_pitch"] = _budget
+            if _budget.get("mode") == "apply" and _budget.get("verdict") == "CANDIDATE":
+                _new_detail: Dict[str, Any] = {}
+                _new_floor, _new_basis = _strap_plan_core_floor(
+                    pdk, container, detail=_new_detail,
+                    strap_override=_budget["override"])
+                if _new_floor is not None:
+                    _strap_floor_um, _strap_floor_basis = _new_floor, _new_basis
+                    _strap_floor_detail.update(_new_detail)
+                    _strap_floor_detail["budget_pitch"] = _budget
+                    _budget_override = _budget["override"]
     if _strap_floor_um is None:
         # Named, printed and persisted (floorplan_rectangles.json): with no
         # floor neither the growth nor the pinned-core check runs, and a run
@@ -37961,6 +38003,24 @@ def _prepnr_geometry(project: Path, top: str, pdk: PdkConfig,
     _chk_w, _chk_h = core_w, core_h
     if fp_rect:
         _chk_w, _chk_h = fp_rect[2] - fp_rect[0], fp_rect[3] - fp_rect[1]
+    if (not _auto_die_requested and _budget_current is not None
+            and _strap_floor_um):
+        _budget = _pdn_small.plan_for_core(
+            project, _read_pdk_text(pdk.tech_lef, container),
+            float(min(_chk_w, _chk_h)), _strap_floor_detail, _budget_current,
+            _budget_current_source, _pdk_nominal_voltage(pdk, container),
+            getattr(pdk, "ir_budget_pct", None))
+        _strap_floor_detail["budget_pitch"] = _budget
+        if _budget.get("mode") == "apply" and _budget.get("verdict") == "CANDIDATE":
+            _new_detail = {}
+            _new_floor, _new_basis = _strap_plan_core_floor(
+                pdk, container, detail=_new_detail,
+                strap_override=_budget["override"])
+            if _new_floor is not None:
+                _strap_floor_um, _strap_floor_basis = _new_floor, _new_basis
+                _strap_floor_detail.update(_new_detail)
+                _strap_floor_detail["budget_pitch"] = _budget
+                _budget_override = _budget["override"]
     # EXACT, NOT PADDED (review wave 3): a pinned core is refused only when a
     # strap group cannot fit its SNAPPED extent on the stripe's own axis --
     # the check pdngen itself makes. The padded square floor above is for
@@ -38894,8 +38954,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     import copy as _copy
     _pdn_em_floor_in = _copy.deepcopy(_pdn_em_floor)
     _pdn_plan: Dict[str, Any] = {}
-    pdn_block = _build_pdn_tcl(pdk, container, em_floor=_pdn_em_floor,
-                               plan_out=_pdn_plan)
+    pdn_block = _build_pdn_tcl(
+        pdk, container, em_floor=_pdn_em_floor, plan_out=_pdn_plan,
+        **({"strap_override": _budget_override} if _budget_override else {}))
     # R-0915-111 — the deck records what it APPLIED into the floor dict; persist
     # it beside the arithmetic so the step that reports the resize reads the
     # remedy instead of restating the shortfall.
