@@ -1582,7 +1582,16 @@ def _empty_router_drc_receipt(report: Path) -> Optional[Path]:
     # tuple after resolution; a dangling or redirected alias cannot borrow a
     # receipt from the Step folder.
     try:
+        alias = report if report.is_symlink() else None
         report = report.resolve(strict=True)
+        if alias is not None:
+            steps_root = next((parent for parent in alias.parents
+                               if parent.name == "steps"), None)
+            if steps_root is None:
+                return None
+            project = steps_root.parent.resolve(strict=True)
+            if report != (project / "phase3/stage3/pnr/routed_router.drc.rpt"):
+                return None
     except (OSError, RuntimeError):
         return None
     receipt = report.parent / "routed_router.drc.receipt.json"
@@ -1831,11 +1840,22 @@ def _check_drc(project_dir: Path) -> AuditResult:
                                      "*DRC*.rpt", "*DRC*.log", "*DRC*.txt",
                                      "*DRC*.lyrdb"],
                       collapse_identical=True)
+    # OpenROAD may retain one report per intermediate DRT iteration beside
+    # routed_router.drc.rpt. Those are diagnostic checkpoints, not the final
+    # route's DRC answer; an empty iter0 file has no final-count receipt and
+    # must neither veto nor certify the completed route. An explicit scope
+    # containing ONLY iteration files still fails the report-exists check.
+    intermediate = [p for p in files if re.fullmatch(
+        r"routed_router\.drc\.iter[0-9]+\.rpt", p.name, re.I)]
+    files = [p for p in files if p not in intermediate]
+    ignored_intermediate = [str(p.relative_to(project_dir))
+                            for p in intermediate]
     if not files:
         result.findings.append(Finding(
             rule="DRC_REPORT_EXISTS", severity="ERROR",
             message="No DRC report found (searched *drc*.rpt/log/txt/lyrdb)"))
-        result.summary = {"files_found": 0, "categories_found": []}
+        result.summary = {"files_found": 0, "categories_found": [],
+                          "ignored_intermediate_reports": ignored_intermediate}
         return result
 
     categories_re = {
@@ -2244,6 +2264,7 @@ def _check_drc(project_dir: Path) -> AuditResult:
                      and not _uncorroborated_zero and not empty_uncorroborated)
     result.subject_files = [str(f) for f in files]
     result.summary = {"files_found": len(files), "categories_found": cats_found,
+                      "ignored_intermediate_reports": ignored_intermediate,
                       "design_binding": design_binding,
                       "has_count": has_count, "tool_authentic": authentic,
                       "determined_files": determined_files,
