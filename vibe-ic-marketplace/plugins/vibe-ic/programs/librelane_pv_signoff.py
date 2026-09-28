@@ -39,7 +39,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _path_layout as _pl  # noqa: E402
 from _atomic_artefact import write_json  # noqa: E402
-from librelane_contract import (Refusal, _load, digest, resolve_step_configs,  # noqa: E402
+from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, digest, resolve_step_configs,  # noqa: E402
                                 run_chain, state_from_direct)
 
 NOT_MEASURED = 'NOT_MEASURED'
@@ -234,7 +234,7 @@ def run_half(project: Path, image: str, pdk_root: Path, pdk: str, half: str, *,
                    {'def': routed_def, 'nl': netlist, 'sdc': sdc, 'gds': gds},
                    f'31-{half}-config')
     folders = run_chain(project, image, [(step, configs[step], state) for step in chain],
-                        mounts=[(pdk_root / pdk, f'/pdk/{pdk}')], lane=f'31-{half}')
+                        mounts=[(pdk_root / pdk, f'/pdk/{pdk}')], lane=f'31-{half}', pdk_root=PDK_GUEST_ROOT)
     required = tuple(step for step in chain if step in PRODUCED)
     return judge_pv(folders, required, project / RECORD_REL.format(half=half),
                     scope={'gds_sha256': digest(gds), 'def_sha256': digest(routed_def)})
@@ -262,7 +262,7 @@ def run_finishing_xor(project: Path, image: str, pdk_root: Path, pdk: str, *,
                               project / 'phase3/librelane' / f'{lane}-config' / 'bridge')
     folders = run_chain(project, image, [('Vibeic.FinishingXOR',
                                           configs['Vibeic.FinishingXOR'], state)],
-                        mounts=[(pdk_root / pdk, f'/pdk/{pdk}')], lane=lane)
+                        mounts=[(pdk_root / pdk, f'/pdk/{pdk}')], lane=lane, pdk_root=PDK_GUEST_ROOT)
     return judge_pv(folders, ('Vibeic.FinishingXOR',),
                     record or project / 'reports/phase3/librelane_finishing_xor.json',
                     scope={'pre_sha256': digest(pre), 'final_sha256': digest(final),
@@ -284,7 +284,7 @@ def run_database_unit(project: Path, image: str, pdk_root: Path, pdk: str, *,
     try:
         folders = run_chain(project, image, [('Vibeic.DatabaseUnit',
                                               configs['Vibeic.DatabaseUnit'], state)],
-                            mounts=[(pdk_root / pdk, f'/pdk/{pdk}')], lane=lane)
+                            mounts=[(pdk_root / pdk, f'/pdk/{pdk}')], lane=lane, pdk_root=PDK_GUEST_ROOT)
     except Refusal as exc:
         # The step refuses an undeclared unit (NOT_MEASURED); its folder has
         # no state_out, and the judge says so rather than the refusal text.

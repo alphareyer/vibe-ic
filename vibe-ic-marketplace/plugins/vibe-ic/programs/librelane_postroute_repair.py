@@ -262,7 +262,8 @@ def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
         project, ctx["image"],
         [(REPAIR_STEP, config, state)]
         + [(step, Path(ctx["configs"][step]), state) for step in MEASURE_STEPS],
-        mounts=[(Path(h), g) for h, g in ctx["mounts"]], lane=lane)
+        mounts=[(Path(h), g) for h, g in ctx["mounts"]],
+        lane=lane, pdk_root=_ll.PDK_GUEST_ROOT)
     import excluded_master_census_check as _emc
     excluded_census = _emc.write_audit(
         config, folders[0] / "state_out.json", REPAIR_STEP,

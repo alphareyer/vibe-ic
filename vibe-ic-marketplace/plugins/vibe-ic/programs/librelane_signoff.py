@@ -52,7 +52,7 @@ from typing import Any, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
-from librelane_contract import (Refusal, _load, digest, handoff_to_direct,  # noqa: E402
+from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, digest, handoff_to_direct,  # noqa: E402
                                 resolve_step_configs, run_chain, run_container,
                                 state_from_direct)
 
@@ -154,7 +154,7 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str, *,
                               project / 'phase3/librelane/22-config/bridge',
                               chain=[configs[s] for s in steps[1:]], mounts=mounts)
     folders = run_chain(project, image, [(s, configs[s], state) for s in steps],
-                        mounts=mounts, lane=lane)
+                        mounts=mounts, lane=lane, pdk_root=PDK_GUEST_ROOT)
     spefs = _load(folders[0] / 'state_out.json').get('spef') or {}
     if not isinstance(spefs, dict) or not spefs:
         raise Refusal('LL_RCX_NO_SPEF', str(folders[0] / 'state_out.json'))

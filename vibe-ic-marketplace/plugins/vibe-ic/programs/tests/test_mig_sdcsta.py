@@ -74,11 +74,11 @@ def test_edited_config_file_reruns_the_step(tmp_path, monkeypatch):
 
     monkeypatch.setattr(contract, "image_capability", lambda *a: None)
     monkeypatch.setattr(contract.subprocess, "run", tool)
-    contract.run_chain(p, "img", [("OpenROAD.STAPrePNR", cfg, state)])
-    contract.run_chain(p, "img", [("OpenROAD.STAPrePNR", cfg, state)])
+    contract.run_chain(p, "img", [("OpenROAD.STAPrePNR", cfg, state)], pdk_root='/pdk')
+    contract.run_chain(p, "img", [("OpenROAD.STAPrePNR", cfg, state)], pdk_root='/pdk')
     assert len(calls) == 1
     sdc.write_text("create_clock -period 5 [get_ports clk]\n")
-    contract.run_chain(p, "img", [("OpenROAD.STAPrePNR", cfg, state)])
+    contract.run_chain(p, "img", [("OpenROAD.STAPrePNR", cfg, state)], pdk_root='/pdk')
     assert len(calls) == 2
 
 

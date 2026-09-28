@@ -76,7 +76,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
 import _psm_source_model as _psm_sm  # noqa: E402
-from librelane_contract import (PLUGIN_ROOT, Refusal, _load, digest,  # noqa: E402
+from librelane_contract import (PDK_GUEST_ROOT, PLUGIN_ROOT, Refusal, _load, digest,  # noqa: E402
                                 resolve_step_configs, run_chain, state_from_direct,
                                 run_container, PROBE_DEADLINE_S)
 
@@ -568,7 +568,7 @@ def run_ir(project: Path, image: str, pdk_root: Path, pdk: str, *, routed_def: P
     checker_error = None
     try:
         folders = run_chain(project, image, steps, mounts=mounts, lane=lane,
-                            openroad_init=PSM_RESISTANCE_DEBUG)
+                            openroad_init=PSM_RESISTANCE_DEBUG, pdk_root=PDK_GUEST_ROOT)
     except Refusal as error:
         if not (chain_folder(project, lane, IR_STEPS, IR_STEPS[0]) / 'state_out.json').is_file():
             raise
@@ -588,7 +588,7 @@ def run_ir(project: Path, image: str, pdk_root: Path, pdk: str, *, routed_def: P
                 step_cfg['VSRC_LOC_FILES'] = cfg['VSRC_LOC_FILES']
                 write_json(configs[step], step_cfg)
             run_chain(project, image, steps, mounts=mounts, lane=lane,
-                      openroad_init=PSM_RESISTANCE_DEBUG)
+                      openroad_init=PSM_RESISTANCE_DEBUG, pdk_root=PDK_GUEST_ROOT)
     else:
         vsrc = {}
     probe_log = (state.parent / 'psm_source_probe.log').read_text(errors='replace')
@@ -707,7 +707,7 @@ def run_antenna_router(project: Path, image: str, pdk_root: Path, pdk: str, *,
                               {'def': routed_def, 'nl': netlist, 'sdc': sdc},
                               project / 'phase3/librelane/26-config/bridge', mounts=mounts)
     folder = run_chain(project, image, [(step, configs[step], state)],
-                       mounts=mounts, lane=lane)[0]
+                       mounts=mounts, lane=lane, pdk_root=PDK_GUEST_ROOT)[0]
     metrics = _metrics(folder)
     return {'model': 'router', 'step': step, 'state': str(folder / 'state_out.json'),
             'state_sha256': digest(folder / 'state_out.json'),
@@ -734,7 +734,7 @@ def run_antenna_gds(project: Path, image: str, pdk_root: Path, pdk: str, *,
     checker_error = None
     try:
         run_chain(project, image, [(s, configs[s], state) for s in ANTENNA_GDS_STEPS],
-                  mounts=mounts, lane=lane)
+                  mounts=mounts, lane=lane, pdk_root=PDK_GUEST_ROOT)
     except Refusal as error:
         if not str(error).startswith('LL_STEP_FAILED: Checker.KLayoutAntenna'):
             raise
@@ -844,7 +844,7 @@ def run_sealring(project: Path, image: str, pdk_root: Path, pdk: str, *,
     state = state_from_direct(project, image, config_path, {'gds': gds_in},
                               project / 'phase3/librelane/26.5ic-config/bridge', mounts=mounts)
     folder = run_chain(project, image, [('KLayout.SealRing', config_path, state)],
-                       mounts=mounts, lane=lane)[0]
+                       mounts=mounts, lane=lane, pdk_root=PDK_GUEST_ROOT)[0]
     out = _load(folder / 'state_out.json').get('gds')
     if not out or not Path(out).is_file() or Path(out).resolve() == Path(gds_in).resolve():
         raise Refusal('LL_SEALRING_NO_OUTPUT', f'{folder}: state gds {out!r}')
@@ -868,7 +868,7 @@ def xor_sealed(project: Path, image: str, pdk_root: Path, pdk: str, *,
                               {'mag_gds': direct_gds, 'klayout_gds': tool_gds},
                               project / 'phase3/librelane/26.5ic-config/bridge-xor', mounts=mounts)
     folder = run_chain(project, image, [('KLayout.XOR', configs['KLayout.XOR'], state)],
-                       mounts=mounts, lane=lane)[0]
+                       mounts=mounts, lane=lane, pdk_root=PDK_GUEST_ROOT)[0]
     count = _metrics(folder).get('design__xor_difference__count')
     verdict = ('NOT_MEASURED' if not isinstance(count, int) else
                'AGREE' if count == 0 else 'DISAGREE')

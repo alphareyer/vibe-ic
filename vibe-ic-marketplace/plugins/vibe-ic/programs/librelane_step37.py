@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
-from librelane_contract import (Refusal, declaration_config, digest, judge_step,
+from librelane_contract import (PDK_GUEST_ROOT, Refusal, declaration_config, digest, judge_step,
                                 resolve_step_configs, run_chain, select_arms,
                                 run_container, state_from_direct)
 
@@ -27,7 +27,7 @@ def _run(project: Path, image: str, pdk_root: Path, pdk: str,
          steps: list[str], state: Path, lane: str, configs: dict[str, Path]) -> list[Path]:
     mount = [(pdk_root / pdk, f"/pdk/{pdk}")]
     return run_chain(project, image, [(step, configs[step], state) for step in steps],
-                     mounts=mount, lane=lane)
+                     mounts=mount, lane=lane, pdk_root=PDK_GUEST_ROOT)
 
 
 def _routed_state(project: Path, image: str, pdk_root: Path, pdk: str,

@@ -463,7 +463,7 @@ def test_librelane_contract_argv_carries_the_ceiling(tmp_path, monkeypatch):
         (out / "state_out.json").write_text(json.dumps({"nl": str(netlist)}))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
     _drive("run_chain", _step, lambda: ll.run_chain(
-        project, image, [("OpenROAD.Floorplan", config, state)]))
+        project, image, [("OpenROAD.Floorplan", config, state)], pdk_root='/pdk'))
 
     sites = [site for site, _ in seen]
     assert sites == ["image_capability", "image_capability", "_openroad_convert",

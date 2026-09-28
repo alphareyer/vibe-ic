@@ -1203,6 +1203,13 @@ PDK_ROOT_MARKER = '.vibeic_pdk_root.json'
 PDK_ROOT_PROVENANCE_REL = 'phase3/librelane_pdk_root.provenance.json'
 #: A local metadata read; the bound is for a stalled docker daemon, not a slow host.
 IMAGE_INSPECT_DEADLINE_S = 60
+#: Where a step container sees the run's resolved PDK root: the host root
+#: `pdk_root_resolution` answers is bound here (each chain mounts
+#: `<root>/<pdk>` at `/pdk/<pdk>`), and step configs are resolved against it
+#: (`resolve_step_configs`: `Chip(..., pdk_root="/pdk")`). `run_chain`
+#: passes it to LibreLane's CLI as `--pdk-root`, never leaving the CLI to
+#: default to the image's own `PDK_ROOT` (W22).
+PDK_GUEST_ROOT = '/pdk'
 _PDK_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._+-]*$')
 
 
@@ -2239,7 +2246,24 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
 
     ``openroad_init``: extra Tcl lines for the OpenROAD init file every
     OpenROAD step reads (joins each step's fingerprint).
+
+    ``pdk_root``: the PDK root as the step container sees it (normally
+    `PDK_GUEST_ROOT`, bound from the run's resolved root). It is REQUIRED:
+    without it LibreLane's CLI takes `--pdk-root` from the image's own
+    `PDK_ROOT` at import, a value nothing in the run stated. Each step folder
+    records it, with the host mounts beneath it, in `pdk_root.json`.
     """
+    if not pdk_root or not str(pdk_root).startswith('/'):
+        raise Refusal('LL_PDK_ROOT_UNSTATED',
+                      f'{[s[0] for s in steps]}: pdk_root={pdk_root!r}; the run '
+                      f'must state the PDK root its step containers read, or '
+                      f'LibreLane defaults to the image\'s PDK_ROOT')
+    root = str(pdk_root).rstrip('/') or '/'
+    pdk_record = {'cli_pdk_root': str(pdk_root),
+                  'mounts_under_it': [[str(host.resolve()), guest]
+                                      for host, guest in mounts or []
+                                      if guest == root or guest.startswith(root + '/')],
+                  'stated_by': 'run_chain(pdk_root=...)'}
     capability = image_capability(image, docker)
     outputs = []
     previous: Path | None = None
@@ -2287,7 +2311,14 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         if openroad_init:
             fingerprint['openroad_init'] = list(openroad_init)
         receipt = folder / 'vibeic_receipt.json'
-        if receipt.exists() and _load(receipt).get('input') == fingerprint and (folder / 'state_out.json').exists():
+        # A folder is reused only if it was run under THIS stated root: one
+        # from before the root was recorded (the CLI then took the image's
+        # PDK_ROOT) or under another root/mount is archived and re-run. The
+        # fingerprint itself is unchanged, so no other step re-runs for it.
+        if (receipt.exists() and _load(receipt).get('input') == fingerprint
+                and (folder / 'state_out.json').exists()
+                and (folder / 'pdk_root.json').is_file()
+                and _load(folder / 'pdk_root.json') == pdk_record):
             _check_state(_load(folder / 'state_out.json'), outputs=True)
             previous = folder / 'state_out.json'
             outputs.append(folder)
@@ -2301,6 +2332,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             shutil.move(str(folder), str(archive / f'{name}-{number:04d}'))
         folder.mkdir(parents=True, exist_ok=True)
         write_json(folder / 'input_fingerprint.json', fingerprint)
+        write_json(folder / 'pdk_root.json', pdk_record)
         volume_args = ['-v', f'{project.resolve()}:{project.resolve()}']
         for host, guest in mounts or []:
             volume_args += ['-v', f'{host.resolve()}:{guest}:ro']
@@ -2310,9 +2342,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         cmd = [docker, 'run', *_dmem.docker_memory_flags(), '--rm', *volume_args,
                '--entrypoint', 'python3', image,
                '-m', 'librelane.steps', 'run', '--id', step_id, '-c', str(config),
-               '-i', str(state_path), '-o', str(folder)]
-        if pdk_root:
-            cmd.extend(['--pdk-root', pdk_root])
+               '-i', str(state_path), '-o', str(folder), '--pdk-root', str(pdk_root)]
         try:
             completed = run_container(cmd, supervised=True,
                                       log=folder / 'invocation.log')

@@ -540,10 +540,10 @@ def execute(
                                                      "route_seeds (PPA seed arm)")})
                 steps.append((sid, cfg))
             folders = _ll.run_chain(project, image, [(s, c, state0) for s, c in steps],
-                                    mounts=mounts, lane=lane)
+                                    mounts=mounts, lane=lane, pdk_root=_ll.PDK_GUEST_ROOT)
             final = folders[-1] / "state_out.json"
             mfolders = _ll.run_chain(project, image, [(s, c, final) for s, c in measure],
-                                     mounts=mounts, lane=f"{lane}-measure")
+                                     mounts=mounts, lane=f"{lane}-measure", pdk_root=_ll.PDK_GUEST_ROOT)
             return {"ids": arm_ids, "folders": folders, "final": final,
                     "drt": folders[drt_index], "nvr": folders[drt_index + 1],
                     "measured": mfolders[-1] / "state_out.json",
@@ -624,7 +624,7 @@ def execute(
                     chain=[c for _, c in measure[1:]])
                 mfolders = _ll.run_chain(project, image,
                                          [(s, c, mstate) for s, c in measure],
-                                         mounts=mounts, lane="21-route-direct-measure")
+                                         mounts=mounts, lane="21-route-direct-measure", pdk_root=_ll.PDK_GUEST_ROOT)
             except (_ll.Refusal, OSError) as exc:
                 return _refuse(getattr(exc, "code", "LL_ROUTE_CHAIN_FAILED"), str(exc), out)
             # The direct arm's transcript is a whole-session log; the judge

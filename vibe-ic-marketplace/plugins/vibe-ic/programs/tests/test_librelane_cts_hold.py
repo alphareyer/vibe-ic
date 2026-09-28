@@ -325,7 +325,7 @@ def test_only_a_vibeic_step_gets_the_plugin_on_its_path(tmp_path, monkeypatch):
     steps = []
     for step in ('OpenROAD.CTS', 'Vibeic.ClockPathDriveSizing'):
         steps.append((step, put(project / f'cfg/{step}.json', {'meta': {'step': step}}), state))
-    folders = contract.run_chain(project, 'img', steps)
+    folders = contract.run_chain(project, 'img', steps, pdk_root='/pdk')
     root = str(contract.PLUGIN_ROOT.resolve())
     programs = str(contract.PLUGIN_ROOT.parent.resolve())
     assert f'PYTHONPATH={root}' not in calls[0]

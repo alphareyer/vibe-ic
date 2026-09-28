@@ -122,7 +122,7 @@ def test_chain_runs_openroad_with_the_probed_aliases(tmp_path, monkeypatch):
     monkeypatch.setattr(contract, 'image_capability', lambda *a: {
         'openroad_aliases': {'utl::metric_int': 'utl::metric_integer'}})
     monkeypatch.setattr(contract.subprocess, 'run', _tool(calls))
-    folder = contract.run_chain(p, 'released', [('OpenROAD.STAMidPNR', cfg, state)])[0]
+    folder = contract.run_chain(p, 'released', [('OpenROAD.STAMidPNR', cfg, state)], pdk_root='/pdk')[0]
     home = p / 'phase3/librelane/.openroad_home'
     assert f'HOME={home.resolve()}' in calls[0]
     init = (home / '.openroad').read_text()
@@ -136,7 +136,7 @@ def test_chain_without_aliases_is_unchanged(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
     monkeypatch.setattr(contract.subprocess, 'run', _tool(calls))
-    folder = contract.run_chain(p, 'released', [('OpenROAD.STAMidPNR', cfg, state)])[0]
+    folder = contract.run_chain(p, 'released', [('OpenROAD.STAMidPNR', cfg, state)], pdk_root='/pdk')[0]
     assert not any(str(x).startswith('HOME=') for x in calls[0])
     assert 'openroad_aliases' not in json.loads((folder / 'input_fingerprint.json').read_text())
 
@@ -865,7 +865,7 @@ def test_a_declared_input_the_previous_step_did_not_write_refuses_before_the_too
     monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
     monkeypatch.setattr(contract.subprocess, 'run', _tool(calls))
     with pytest.raises(contract.Refusal, match=r"LL_STATE_MISSING: OpenROAD.STAPostPNR: \['spef'\]"):
-        contract.run_chain(p, 'released', [('OpenROAD.STAPostPNR', sta, state)])
+        contract.run_chain(p, 'released', [('OpenROAD.STAPostPNR', sta, state)], pdk_root='/pdk')
     assert calls == []
 
 

@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
-from librelane_contract import (Refusal, _load, _state_step_id, digest,  # noqa: E402
+from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, _state_step_id, digest,  # noqa: E402
                                 resolve_step_configs, run_chain)
 
 #: Where step 23 records the STAPostPNR run it signed off (T100).
@@ -100,7 +100,7 @@ def gate_level_sim(project: Path, top: str, image: str, pdk_root: Path, pdk: str
                                      path_map={v: k for k, v in host.items()})
     folder = run_chain(project, image, [(GLS_STEP, configs[GLS_STEP],
                                          sta_folder / 'state_out.json')],
-                       mounts=[(pdk_root / pdk, f'/pdk/{pdk}')], lane='29')[0]
+                       mounts=[(pdk_root / pdk, f'/pdk/{pdk}')], lane='29', pdk_root=PDK_GUEST_ROOT)[0]
     judged = sgs.judge_tool_arm(folder, manifest)
     judged.update({
         'step': '29', 'arm': 'librelane:OpenROAD.STAPostPNR SDF x Vibeic.GateLevelSim',

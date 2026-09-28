@@ -432,7 +432,7 @@ def execute(
             project / "phase3/librelane/19-config/bridge", mounts=mounts,
             chain=[c for _, c in chain[1:]])
         folders = _ll.run_chain(project, image, [(s, c, state0) for s, c in chain],
-                                mounts=mounts, lane="19-cts-hold")
+                                mounts=mounts, lane="19-cts-hold", pdk_root=_ll.PDK_GUEST_ROOT)
     except (_ll.Refusal, ValueError, OSError) as exc:
         return _refuse(getattr(exc, "code", "LL_CTS_HOLD_CHAIN_FAILED"), str(exc), out)
     cts_folder, sizing_folder, rsz_folder = folders[0], folders[1], folders[2]
@@ -491,7 +491,7 @@ def execute(
                 chain=[c for _, c in sta_steps[1:]])
             arm_folders = _ll.run_chain(project, image,
                                         [(s, c, arm_state) for s, c in sta_steps],
-                                        mounts=mounts, lane="19-cts-hold-direct-arm")
+                                        mounts=mounts, lane="19-cts-hold-direct-arm", pdk_root=_ll.PDK_GUEST_ROOT)
         except (_ll.Refusal, OSError) as exc:
             return _refuse(getattr(exc, "code", "LL_CTS_HOLD_CHAIN_FAILED"), str(exc), out)
         judge_arm(R, arm / "judge", arm_folders[-1] / "state_out.json",

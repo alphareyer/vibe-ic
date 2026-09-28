@@ -59,16 +59,16 @@ def test_the_custom_steps_code_is_part_of_its_fingerprint(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
     monkeypatch.setattr(contract.subprocess, 'run', bridge._tool(calls))
-    contract.run_chain(p, 'img', [('Vibeic.InsertSpareCells', cfg, state)])
+    contract.run_chain(p, 'img', [('Vibeic.InsertSpareCells', cfg, state)], pdk_root='/pdk')
     cmd = calls[0]
     assert f'PYTHONPATH={PLUGIN.parent.resolve()}' in cmd
     folder = p / 'phase3/librelane/01-vibeic-insertsparecells'
     fp = json.loads((folder / 'input_fingerprint.json').read_text())
     assert fp['plugin'] == contract._plugin_digests('Vibeic.InsertSpareCells')
-    contract.run_chain(p, 'img', [('Vibeic.InsertSpareCells', cfg, state)])
+    contract.run_chain(p, 'img', [('Vibeic.InsertSpareCells', cfg, state)], pdk_root='/pdk')
     assert len(calls) == 1                        # unchanged code: resumed
     monkeypatch.setattr(contract, '_plugin_digests', lambda step: {'_spare_plan.py': 'edited'})
-    contract.run_chain(p, 'img', [('Vibeic.InsertSpareCells', cfg, state)])
+    contract.run_chain(p, 'img', [('Vibeic.InsertSpareCells', cfg, state)], pdk_root='/pdk')
     assert len(calls) == 2                        # edited code: re-run
 
 
@@ -77,7 +77,7 @@ def test_a_tool_step_invocation_is_unchanged_by_the_plugin(tmp_path, monkeypatch
     calls = []
     monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
     monkeypatch.setattr(contract.subprocess, 'run', bridge._tool(calls))
-    contract.run_chain(p, 'img', [('OpenROAD.STAMidPNR', cfg, state)])
+    contract.run_chain(p, 'img', [('OpenROAD.STAMidPNR', cfg, state)], pdk_root='/pdk')
     assert not any('PYTHONPATH=' in str(a) for a in calls[0])
     fp = json.loads((p / 'phase3/librelane/01-openroad-stamidpnr/input_fingerprint.json').read_text())
     assert 'plugin' not in fp

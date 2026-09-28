@@ -36752,7 +36752,7 @@ def _select_placement_arm(project: Path, image: str, container: str,
         sta_state = arm_dir / "sta_state_in.json"
         _aa.write_text(sta_state, json.dumps(state, indent=2) + "\n")
         folder = _ll.run_chain(project, image, [("OpenROAD.STAMidPNR", sta_cfg, sta_state)],
-                               mounts=mounts, lane="17-dual-librelane")[-1]
+                               mounts=mounts, lane="17-dual-librelane", pdk_root=_ll.PDK_GUEST_ROOT)[-1]
         record = out_dir / "librelane_spare_cells.json"
         measured = (json.loads(record.read_text()).get("measured") or {}
                     if record.is_file() else {})
@@ -36776,7 +36776,7 @@ def _select_placement_arm(project: Path, image: str, container: str,
                 {"def": arm_dir / "placed.def", "nl": arm_dir / "placed.v", "sdc": sdc},
                 arm_dir / "bridge", mounts=mounts)
             folder = _ll.run_chain(project, image, [("OpenROAD.STAMidPNR", sta_cfg, state)],
-                                   mounts=mounts, lane="17-dual-openroad")[-1]
+                                   mounts=mounts, lane="17-dual-openroad", pdk_root=_ll.PDK_GUEST_ROOT)[-1]
         except _ll.Refusal as exc:
             doc = {"verdict": "NOT_MEASURED", "reason": str(exc), "metrics": {},
                    "scope": {}}
@@ -37047,11 +37047,11 @@ def _prepare_librelane_floorplan_for_route(
             k = steps.index("OpenROAD.TapEndcapInsertion") + 1
             lattice = _ll.run_chain(project, image,
                                     [(s, configs[s], state0) for s in steps[:k]],
-                                    mounts=mounts, lane="15-floorplan")[-1]
+                                    mounts=mounts, lane="15-floorplan", pdk_root=_ll.PDK_GUEST_ROOT)[-1]
             configs, unplaceable = _librelane_exclude_unplaceable(
                 project, configs, steps[k:], lattice, mounts, notes)
         folders = _ll.run_chain(project, image, [(s, configs[s], state0) for s in steps],
-                                mounts=mounts, lane="15-floorplan")
+                                mounts=mounts, lane="15-floorplan", pdk_root=_ll.PDK_GUEST_ROOT)
     except (_ll.Refusal, OSError, ValueError, KeyError) as exc:
         code = getattr(exc, "code", "LL_FLOORPLAN_CHAIN_FAILED")
         if code in _ll.TIME_REFUSALS:  # time, not a verdict: never a plain red

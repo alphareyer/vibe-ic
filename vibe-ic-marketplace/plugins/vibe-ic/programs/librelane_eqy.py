@@ -132,7 +132,7 @@ def judge_eqy(folder: Path, output: Path) -> dict:
 
 def run_eqy(project: Path, image: str, pdk: str, top: str, rtl: list[Path],
             netlist: Path, *, mounts: Optional[list[tuple[Path, str]]] = None,
-            pdk_root: Optional[str] = None, std_cell_library: Optional[str] = None,
+            pdk_root: str, std_cell_library: Optional[str] = None,
             namespace: str = "lec_eqy") -> Path:
     """Resolve the PDK config, write EQY_SCRIPT, run Yosys.EQY; return its folder.
 
