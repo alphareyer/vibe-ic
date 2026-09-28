@@ -995,6 +995,22 @@ _NOT_PROSE: Dict[str, str] = {
         "`phase3_one_shot_runner::_pdk_declared_routing_layers`. Falsifier: "
         "`test_issue2070_the_database_unit_is_a_technology_fact.py"
         "::test_the_not_prose_claim_for_the_tech_lef_reader_is_falsifiable`.",
+    "final_summary_rollup_consistency_check::_parse_retired_tally":
+        "ONE MACHINE LINE, NO SENTENCE. The tally `flow_compliance_check.py` "
+        "printed before R-0915-85 -- `PASS=35  FAIL=0  MISSING=0  "
+        "WAIVED-DEFERRED=3  SKIPPED=22  VACUOUS-PASS=3` -- quoted verbatim in "
+        "a rendered final_summary.md. It is the checker's own f-string: "
+        "nothing but `LABEL=N` tokens, and that grammar has no form that "
+        "DENIES a count; `MISSING=0` is how it says none. The function reads "
+        "ONLY a line that is entirely such tokens (`_TALLY_LINE_RE.fullmatch`) "
+        "and carries the full retired quartet, so a sentence -- the report's "
+        "own prose bullet, or any line with a word such as NOT in it -- is "
+        "refused by construction and never reaches the counts. An absent "
+        "tally is reported as absent, a FAIL naming it. The renderer's "
+        "five-word reader of the same line is "
+        "`final_report_generate::_parse_audit_tally`. Falsifier: "
+        "`test_issue428_final_summary_rollup_consistency.py"
+        "::test_the_not_prose_claim_for_the_retired_tally_reader_is_falsifiable`.",
     "sparse_fsm_detect::_sparse_enum_types":
         "SYSTEMVERILOG `typedef enum` DECLARATION grammar, read to learn the "
         "state constants a design declared so #2067 can tell a sparse "

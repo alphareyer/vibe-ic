@@ -109,6 +109,83 @@ _AUDIT_JSON_KEY_TO_BUCKET = {
 
 RECONCILIATION_FAILED_MARKER = "Roll-up reconciliation FAILED"
 
+# ─── a document written before R-0915-85 ─────────────────────────────────
+#
+# R-0915-85 retired the verdict words a summary rendered before it was written
+# in (`MISSING`, `SKIPPED`, `VACUOUS-PASS`, ...), and `verdict.py` keeps no
+# tolerant reader: the RENDERER's tally parser recognises only the five. So on
+# a summary rendered before that change -- the published cells are such
+# documents, and #428's own reproduction cell is one -- this gate read no tally
+# and said "the summary quotes no flow_compliance_check tally line", which is
+# false: it quotes one, in the words of its day. Its table parse kept 2 of the
+# 5 rows it prints and dropped the rest.
+#
+# This gate asks whether ONE DOCUMENT's two roll-ups agree, and that is a
+# question about the document in its own words. So a document whose tally line
+# is in the retired vocabulary is compared, table against tally, IN THAT
+# VOCABULARY, and the gate says so by name. Nothing is translated into the
+# five: no retired word becomes a verdict here, which is the line `verdict.py`
+# draws. The map below is the renderer's own, verbatim, as it stood before the
+# rename (final_report_generate.py at ee1c680d1^, identical to #428's
+# 3c32ba39a); it is a record of what those documents mean, not an alias list.
+RETIRED_VOCABULARY_RULING = "R-0915-85"
+RETIRED_TALLY_LABEL_TO_BUCKET = {
+    "PASS": "PASS",
+    "FAIL": "FAIL",
+    "MISSING": "MISSING",
+    "WAIVED-DEFERRED": "WAIVED-DEFERRED",
+    "DEFERRED-BY-UPSTREAM": "DEFERRED-BY-UPSTREAM",
+    "SKIPPED": "SKIPPED-CONDITION",
+    "SKIPPED-CONDITION": "SKIPPED-CONDITION",
+    "SKIPPED-SETUP-REQUIRED": "SKIPPED-SETUP-REQUIRED",
+    "VACUOUS-PASS": "VACUOUS-PASS",
+}
+#: The quartet the checker printed unconditionally before the rename; a line
+#: without all four was not its tally (the report's prose bullet is not).
+RETIRED_TALLY_MANDATORY_BUCKETS = frozenset(
+    {"PASS", "FAIL", "MISSING", "WAIVED-DEFERRED"})
+_LABEL_TOKEN_RE = re.compile(r"\b([A-Z][A-Z_-]*[A-Z])=(\d+)")
+#: The checker's tally line is nothing but `LABEL=N` tokens (its own f-string).
+#: A line carrying any other word -- a sentence, a denial -- is not it.
+_TALLY_LINE_RE = re.compile(r"(?:[A-Z][A-Z_-]*[A-Z]=\d+\s*)+")
+
+
+def _parse_retired_tally(summary_text: str) -> Optional[Dict[str, int]]:
+    """The checker's tally line in the retired vocabulary, or None."""
+    for ln in summary_text.splitlines():
+        if "PASS=" not in ln or not _TALLY_LINE_RE.fullmatch(ln.strip()):
+            continue
+        found: Dict[str, int] = {}
+        for m in _LABEL_TOKEN_RE.finditer(ln):
+            bucket = RETIRED_TALLY_LABEL_TO_BUCKET.get(m.group(1))
+            if bucket is not None:
+                found[bucket] = int(m.group(2))
+        if RETIRED_TALLY_MANDATORY_BUCKETS <= set(found):
+            return found
+    return None
+
+
+def document_vocabulary(summary_text: str
+                        ) -> Tuple[Optional[Dict[str, int]], Dict[str, str], str]:
+    """(quoted tally, the table's label map, which vocabulary) for ONE
+    rendered summary: the current five first; the retired vocabulary only when
+    the five find no tally and the retired quartet does. `vocabulary` is
+    "current" or the ruling that retired the words the document is in."""
+    tally = _frg._parse_audit_tally(summary_text)
+    if tally is not None:
+        return tally, _TABLE_LABEL_TO_BUCKET, "current"
+    retired = _parse_retired_tally(summary_text)
+    if retired is not None:
+        labels = dict(RETIRED_TALLY_LABEL_TO_BUCKET)
+        labels[_frg.NO_VERDICT] = _frg.NO_VERDICT
+        return retired, labels, RETIRED_VOCABULARY_RULING
+    return None, _TABLE_LABEL_TO_BUCKET, "current"
+
+
+def parse_quoted_tally(summary_text: str) -> Optional[Dict[str, int]]:
+    """The tally ONE rendered summary quotes, in that summary's own words."""
+    return document_vocabulary(summary_text)[0]
+
 
 # ─── repo mode: every declared step id must be readable ──────────────────
 
@@ -160,8 +237,14 @@ def check_repo(flow_path: Path) -> Tuple[bool, List[str]]:
 
 # ─── project mode: one document, one count ───────────────────────────────
 
-def parse_rollup_table(summary_text: str) -> Optional[Dict[str, int]]:
-    """Counts from the `### Verdict roll-up` table (excluding **Total**)."""
+def parse_rollup_table(summary_text: str,
+                       labels: Optional[Dict[str, str]] = None,
+                       ) -> Optional[Dict[str, int]]:
+    """Counts from the `### Verdict roll-up` table (excluding **Total**), read
+    in the document's own vocabulary (`document_vocabulary`) unless `labels`
+    names one."""
+    if labels is None:
+        labels = document_vocabulary(summary_text)[1]
     i = summary_text.find("### Verdict roll-up")
     if i < 0:
         return None
@@ -172,7 +255,7 @@ def parse_rollup_table(summary_text: str) -> Optional[Dict[str, int]]:
     out: Dict[str, int] = {}
     for m in re.finditer(r"^\|\s*(?:\S+\s+)?([A-Z][A-Z_-]*[A-Z])\s*\|\s*(\d+)\s*\|",
                          seg, re.M):
-        bucket = _TABLE_LABEL_TO_BUCKET.get(m.group(1))
+        bucket = labels.get(m.group(1))
         if bucket is not None:
             out[bucket] = int(m.group(2))
     return out or None
@@ -212,8 +295,14 @@ def check_project(project: Path, check_audit_json: bool = False,
             "FAILED. A document naming its inconsistency is still an "
             "inconsistent document.")
 
-    tally = _frg._parse_audit_tally(text)
-    table = parse_rollup_table(text)
+    tally, labels, vocabulary = document_vocabulary(text)
+    table = parse_rollup_table(text, labels)
+    if vocabulary != "current":
+        notes.append(
+            f"NOTE: this summary is written in the verdict vocabulary "
+            f"{vocabulary} retired ({', '.join(sorted(set(RETIRED_TALLY_LABEL_TO_BUCKET.values())))}"
+            f"); its table and its quoted tally are compared with each other "
+            f"in that vocabulary. No retired word is read as a verdict.")
     if tally is None:
         # Not a pass: an unverifiable report is not a verified one.
         notes.append(
