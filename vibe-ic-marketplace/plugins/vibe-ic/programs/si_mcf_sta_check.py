@@ -543,15 +543,14 @@ def audit(project_dir: Path,
         # Keep its refusal non-green while checking the evidence for a
         # substantive defect, which takes precedence in build_report.
 
+    # Only SPEF prerequisites may stop the independent floor recount here.
+    # Timing-window provenance is checked after that recount, so a stale
+    # window path cannot hide a defect in project-bound SPEFs.
     embedded = [("spef", report.get("spef")),
                 ("clk_source", report.get("clk_source"))]
     for scene in ("setup", "hold"):
         cinfo = (report.get("corners") or {}).get(scene) or {}
         embedded.append((f"{scene}.bounded_spef", cinfo.get("bounded_spef")))
-        embedded.append((f"{scene}.windows_json", cinfo.get("windows_json")))
-    embedded.append(("windows_json", report.get("windows_json")))
-    for scene, path in (report.get("windows_json_by_scene") or {}).items():
-        embedded.append((f"windows_json_by_scene.{scene}", path))
     resolved_paths = {}
     for field, path in embedded:
         if not path:
@@ -632,6 +631,96 @@ def audit(project_dir: Path,
             f"finds 0 — the SPEF is not the one the reported slacks were "
             f"derived from"))
 
+    # First adjudicate what the SPEFs alone prove. This pass is independent of
+    # every timing-window path, file, return code and driver-window population.
+    # Keep its results even when an exact-window pass follows.
+    guard = float(report.get("overlap_guard_ns", 0.0) or 0.0)
+    corners = report.get("corners", {})
+    bounded_texts = {}
+    stats["floor_recount"] = {}
+    for corner in ("setup", "hold"):
+        cinfo = corners.get(corner)
+        if not isinstance(cinfo, dict):
+            findings.append(Finding("ERROR", "NO_CORNER",
+                                    f"report missing corner '{corner}'"))
+            continue
+        bounded = cinfo.get("bounded_spef")
+        bounded_path = resolved_paths.get(f"{corner}.bounded_spef")
+        if not bounded_path or not bounded_path.exists():
+            findings.append(Finding("ERROR", "NO_BOUNDED_SPEF",
+                                    f"{corner}: bounded SPEF missing: {bounded}"))
+            continue
+        bounded_text = bounded_path.read_text(errors="replace")
+        bounded_texts[corner] = bounded_text
+        expected = M.floor_folded_caps(pairs, corner)
+        rc = M.independent_recount(orig_text, bounded_text, {}, corner, guard,
+                                   rel_tol=RECOUNT_REL_TOL,
+                                   abs_tol_pf=RECOUNT_ABS_TOL_PF,
+                                   expected=expected)
+        proved = sum(1 for net, exp in expected.items()
+                     if net in orig_grounded and _is_falsifiable(exp))
+        floor = {
+            "ok": rc["ok"], "nets_checked": rc["nets_checked"],
+            "folds_proved": proved,
+            "residual_coupling_caps": rc["residual_coupling_caps"],
+            "violations": rc["violations"][:20],
+            "mode": "window-independent-floor",
+        }
+        stats["floor_recount"][corner] = floor
+        stats["recount"][corner] = floor
+        stats["corners_checked"].append(corner)
+
+        # With no coupling source, any extra grounded charge is also a
+        # substantive SPEF mismatch, independent of switching windows.
+        if not pairs:
+            bounded_g = M.net_grounded_totals(bounded_text)
+            inflated = [net for net, before in orig_grounded.items()
+                        if bounded_g.get(net, before) - before >
+                        max(1e-9, 0.02 * abs(before))]
+            floor["fold_without_source_nets"] = len(inflated)
+            if inflated:
+                findings.append(Finding(
+                    "ERROR", "FOLD_WITHOUT_SOURCE",
+                    f"{corner}: the original SPEF carries no coupling caps, yet "
+                    f"{len(inflated)} net(s) gained grounded charge in the "
+                    f"bounded SPEF — the fold has no source in the file this "
+                    f"gate read; the two SPEFs are not a matched pair"))
+        if not rc["ok"]:
+            findings.append(Finding(
+                "ERROR", "FOLD_NOT_APPLIED",
+                f"{corner}: {len(rc['violations'])} net(s) fail the independent "
+                f"MCF recount (Cc*MCF under/over-applied or coupling not "
+                f"folded) — the bounded SPEF does not carry the re-derived bound"))
+
+        before = cinfo.get("worst_slack_before_ns")
+        after = cinfo.get("worst_slack_after_ns")
+        mono_ok = True
+        if isinstance(before, (int, float)) and isinstance(after, (int, float)):
+            if after > before + 5e-3:
+                mono_ok = False
+                findings.append(Finding(
+                    "ERROR", "SLACK_BETTER_THAN_BOUND",
+                    f"{corner}: reported SI-bounded slack {after} ns is BETTER "
+                    f"than the nominal grounded {before} ns — a conservative "
+                    f"MCF bound can only DEGRADE it; number is not honest"))
+        stats["monotonicity"][corner] = {
+            "before_ns": before, "after_ns": after, "ok": mono_ok}
+
+    # Validate every declared window path after recording the floor findings.
+    # Unused declarations remain provenance errors; none is read outside the
+    # project, and a clean floor alone cannot certify a missing window input.
+    window_fields = [("windows_json", report.get("windows_json"))]
+    for scene in ("setup", "hold"):
+        cinfo = (corners.get(scene) or {})
+        window_fields.append((f"{scene}.windows_json", cinfo.get("windows_json")))
+    for scene, value in (report.get("windows_json_by_scene") or {}).items():
+        window_fields.append((f"windows_json_by_scene.{scene}", value))
+    for field, value in window_fields:
+        if value and _input_path(project_dir, str(value)) is None:
+            why = f"{field} points outside project {project_dir.resolve()}: {value}"
+            stats.setdefault("input_refusal", ("PATH_OUTSIDE_PROJECT", why))
+            findings.append(Finding("ERROR", "PATH_OUTSIDE_PROJECT", why))
+
     scene_windows = {}
     for scene in ("setup", "hold"):
         cinfo = (report.get("corners") or {}).get(scene) or {}
@@ -701,44 +790,19 @@ def audit(project_dir: Path,
                 f"window conservatively assumes overlap — the corner slacks are "
                 f"an envelope over that assumption for those nets, not a "
                 f"measurement of their switching"))
-    guard = float(report.get("overlap_guard_ns", 0.0) or 0.0)
-
-    corners = report.get("corners", {})
-    nominal = report.get("nominal", {})
+    # Exact windows can strengthen the bound, never replace or erase the floor
+    # result already recorded above. A failed exact pass is a further finding.
     for corner in ("setup", "hold"):
         net_windows, exact = scene_windows[corner]
-        cinfo = corners.get(corner)
-        if not isinstance(cinfo, dict):
-            findings.append(Finding("ERROR", "NO_CORNER",
-                                    f"report missing corner '{corner}'"))
+        if not exact or corner not in bounded_texts:
             continue
-        bounded = cinfo.get("bounded_spef")
-        bounded_path = resolved_paths.get(f"{corner}.bounded_spef")
-        if not bounded_path or not bounded_path.exists():
-            findings.append(Finding("ERROR", "NO_BOUNDED_SPEF",
-                                    f"{corner}: bounded SPEF missing: {bounded}"))
-            continue
-        bounded_text = bounded_path.read_text(errors="replace")
-
-        # (1-3) independent cap-level recount (the false-clean-proof).
-        # `expected` is computed HERE for both modes — identical arithmetic to
-        # what `independent_recount` would do internally when handed None — so
-        # the gate can count how many of those comparisons were capable of
-        # failing without re-deriving the fold a second time or guessing.
-        if exact:
-            expected, _worst = M.victim_folded_caps(pairs, net_windows or {},
-                                                    corner, guard)
-        else:
-            expected = M.floor_folded_caps(pairs, corner)
-        rc = M.independent_recount(orig_text, bounded_text,
+        expected, _worst = M.victim_folded_caps(pairs, net_windows or {},
+                                                corner, guard)
+        rc = M.independent_recount(orig_text, bounded_texts[corner],
                                    net_windows or {}, corner, guard,
                                    rel_tol=RECOUNT_REL_TOL,
                                    abs_tol_pf=RECOUNT_ABS_TOL_PF,
                                    expected=expected)
-        # THE LOAD-BEARING HALF of `nets_checked`. `independent_recount` skips a
-        # net with no *D_NET block, so intersecting with `orig_grounded` matches
-        # its loop exactly; `_is_falsifiable` then keeps only the nets whose
-        # expectation a dropped fold could have violated.
         proved = sum(1 for net, exp in expected.items()
                      if net in orig_grounded and _is_falsifiable(exp))
         stats["recount"][corner] = {
@@ -746,60 +810,26 @@ def audit(project_dir: Path,
             "folds_proved": proved,
             "residual_coupling_caps": rc["residual_coupling_caps"],
             "violations": rc["violations"][:20],
-            "mode": "exact-window" if exact else "window-independent-floor",
+            "mode": "exact-window",
         }
-        stats["corners_checked"].append(corner)
-
-        # (3b) THE OVER-APPLICATION HALF OF RULE 3, AT ZERO PAIRS. The recount's
-        # ceiling is `MCF * sum(Cc)` per net, so with no coupling pairs the
-        # ceiling is 0 for every net and the loop that would enforce it never
-        # runs (`expected` is empty). Enforce it directly: nothing to fold means
-        # the bounded SPEF must not carry MORE grounded charge than the
-        # original. If it does, the emitter folded from a source that is not in
-        # the file this gate read — cause (b), decided.
-        if not pairs:
-            bounded_g = M.net_grounded_totals(bounded_text)
-            inflated: List[str] = []
-            for net, before in orig_grounded.items():
-                after = bounded_g.get(net, before)   # net absent => no delta
-                if after - before > max(1e-9, 0.02 * abs(before)):
-                    inflated.append(net)
-            stats["recount"][corner]["fold_without_source_nets"] = len(inflated)
-            if inflated:
-                findings.append(Finding(
-                    "ERROR", "FOLD_WITHOUT_SOURCE",
-                    f"{corner}: the original SPEF carries no coupling caps, yet "
-                    f"{len(inflated)} net(s) gained grounded charge in the "
-                    f"bounded SPEF — the fold has no source in the file this "
-                    f"gate read; the two SPEFs are not a matched pair"))
-
-        if not rc["ok"]:
-            n = len(rc["violations"])
+        if not rc["ok"] and stats["floor_recount"][corner]["ok"]:
             findings.append(Finding(
                 "ERROR", "FOLD_NOT_APPLIED",
-                f"{corner}: {n} net(s) fail the independent MCF recount "
-                f"(Cc*MCF under/over-applied or coupling not folded) — "
-                f"the bounded SPEF does not carry the re-derived bound"))
+                f"{corner}: {len(rc['violations'])} net(s) fail the independent "
+                f"MCF recount with timing windows (Cc*MCF under/over-applied "
+                f"or coupling not folded) — the bounded SPEF does not carry "
+                f"the re-derived bound"))
 
-        # (4) monotonicity vs the nominal grounded run
-        before = cinfo.get("worst_slack_before_ns")
-        after = cinfo.get("worst_slack_after_ns")
-        mono_ok = True
-        if isinstance(before, (int, float)) and isinstance(after, (int, float)):
-            # setup: MORE cap => after <= before; hold: LESS cap => after <= before.
-            # a tiny positive epsilon tolerates STA rounding at the reported digits.
-            if after > before + 5e-3:
-                mono_ok = False
-                findings.append(Finding(
-                    "ERROR", "SLACK_BETTER_THAN_BOUND",
-                    f"{corner}: reported SI-bounded slack {after} ns is BETTER "
-                    f"than the nominal grounded {before} ns — a conservative "
-                    f"MCF bound can only DEGRADE it; number is not honest"))
-        stats["monotonicity"][corner] = {
-            "before_ns": before, "after_ns": after, "ok": mono_ok}
-
-    _ = nominal  # (kept for future cross-checks; corner records carry before/after)
     return findings, stats
+
+
+def _recount_coverage(stats: dict, key: str) -> dict:
+    """Count each corner once, retaining any proof made by the floor pass."""
+    exact = stats.get("recount", {}) or {}
+    floor = stats.get("floor_recount", {}) or {}
+    return {corner: max(int((exact.get(corner) or {}).get(key, 0) or 0),
+                        int((floor.get(corner) or {}).get(key, 0) or 0))
+            for corner in exact.keys() | floor.keys()}
 
 
 def _vacuity(stats: dict) -> Tuple[str, str]:
@@ -827,8 +857,7 @@ def _vacuity(stats: dict) -> Tuple[str, str]:
     caps = int(stats.get("coupling_caps") or 0)
     nets = int(stats.get("spef_net_records") or 0)
     r_nets = int(stats.get("spef_r_net_records") or 0)
-    compared = sum(int((v or {}).get("nets_checked", 0) or 0)
-                   for v in recount.values())
+    compared = sum(_recount_coverage(stats, "nets_checked").values())
     if stats.get("input_refusal"):
         code, why = stats["input_refusal"]
     elif not stats.get("report_read"):
@@ -988,11 +1017,10 @@ def denominator(stats: dict,
     ``vacuity_publication`` chooses the FIELD from the same ``findings`` list
     the ``defect`` split above is read from, so the two cannot disagree about
     what the run was."""
-    recount = stats.get("recount", {}) or {}
-    examined = sum(int((v or {}).get("folds_proved", 0) or 0)
-                   for v in recount.values())
-    considered = sum(int((v or {}).get("nets_checked", 0) or 0)
-                     for v in recount.values())
+    examined_by_corner = _recount_coverage(stats, "folds_proved")
+    considered_by_corner = _recount_coverage(stats, "nets_checked")
+    examined = sum(examined_by_corner.values())
+    considered = sum(considered_by_corner.values())
     not_run, defect = error_categories(findings or [])
     code, prose = _vacuity(stats)
     vacuity_code = unwaivable_code = ""
@@ -1003,7 +1031,7 @@ def denominator(stats: dict,
     # another place to remember, and those conditions drifting apart is
     # precisely how the code would come to name a vacuity the prose says is not
     # one, or to name it in the field an acceptance can reach.
-    if examined and "NO_WINDOWS" in not_run and not defect:
+    if examined and ({"NO_WINDOWS", "PATH_OUTSIDE_PROJECT"} & set(not_run)) and not defect:
         # The floor recount can prove a lower-bound fold while the declared
         # switching windows remain unavailable. Keep the measured denominator,
         # but do not present that diagnostic comparison as window sign-off.
@@ -1062,10 +1090,8 @@ def denominator(stats: dict,
             "spef_parsed_nets": stats.get("spef_parsed_nets"),
             "spef_r_net_records": stats.get("spef_r_net_records"),
             "emitter_coupling_pairs": stats.get("emitter_coupling_pairs"),
-            "nets_compared_per_corner": {
-                c: (v or {}).get("nets_checked") for c, v in recount.items()},
-            "folds_proved_per_corner": {
-                c: (v or {}).get("folds_proved") for c, v in recount.items()},
+            "nets_compared_per_corner": considered_by_corner,
+            "folds_proved_per_corner": examined_by_corner,
         },
     )
 
@@ -1119,7 +1145,8 @@ def build_report(findings: List[Finding], stats: dict, project_dir: str) -> dict
     denom = denominator(stats, findings)
     not_run, defect = error_categories(findings)
     verdict = verdict_for(bool(defect), bool(not_run), denom.is_vacuous,
-                          windows_unavailable="NO_WINDOWS" in not_run)
+                          windows_unavailable=bool(
+                              {"NO_WINDOWS", "PATH_OUTSIDE_PROJECT"} & set(not_run)))
     # TYPED (#1978). `_flow_reason_taxonomy.infer_nonverdict_reason` is
     # deliberately fail-closed: an rc=2 that declares no class is booked
     # EXECUTION_ERROR, "the gate blew up". On a grounded-only extraction this
@@ -1186,6 +1213,7 @@ def build_report(findings: List[Finding], stats: dict, project_dir: str) -> dict
         "verdict": verdict,
         "summary": summary,
         "recount": stats.get("recount", {}),
+        "floor_recount": stats.get("floor_recount", {}),
         "monotonicity": stats.get("monotonicity", {}),
         "findings": [asdict(f) for f in findings],
     }
@@ -1234,7 +1262,8 @@ def _zero_fold_supersession(record: dict):
     not_run, defect = error_categories(rebuilt)
     # The gate's OWN precedence function, not a copy of it — see `verdict_for`.
     would = verdict_for(bool(defect), bool(not_run), vacuous=True,
-                        windows_unavailable="NO_WINDOWS" in not_run)
+                        windows_unavailable=bool(
+                            {"NO_WINDOWS", "PATH_OUTSIDE_PROJECT"} & set(not_run)))
     carried = record.get("verdict")
     if would == carried:
         return None

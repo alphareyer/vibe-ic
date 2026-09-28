@@ -590,7 +590,7 @@ def test_missing_window_cannot_hide_a_recounted_fold_failure(tmp_path):
 
 @pytest.mark.parametrize("window_failure", (
     "missing", "outside", "unreadable", "nonzero_rc", "zero_windows",
-    "scene_outside", "symlink_outside",
+    "scene_outside", "corner_outside", "symlink_outside",
 ))
 def test_each_unavailable_window_preserves_the_independent_fold_failure(
         tmp_path, window_failure):
@@ -598,7 +598,8 @@ def test_each_unavailable_window_preserves_the_independent_fold_failure(
     rp = proj / "reports/phase3/si_mcf_sta.json"
     producer = json.loads(rp.read_text())
     window = proj / "windows.json"
-    if window_failure in ("outside", "scene_outside", "symlink_outside"):
+    if window_failure in ("outside", "scene_outside", "corner_outside",
+                          "symlink_outside"):
         outside = tmp_path / f"{window_failure}-outside.json"
         outside.write_text("{}")
         if window_failure == "symlink_outside":
@@ -616,6 +617,8 @@ def test_each_unavailable_window_preserves_the_independent_fold_failure(
 
     if window_failure == "scene_outside":
         producer["windows_json_by_scene"] = {"setup": str(window)}
+    elif window_failure == "corner_outside":
+        producer["corners"]["setup"]["windows_json"] = str(window)
     else:
         producer["windows_json"] = str(window)
     rp.write_text(json.dumps(producer))
@@ -630,6 +633,59 @@ def test_each_unavailable_window_preserves_the_independent_fold_failure(
     assert doc["summary"]["corners_checked"] == ["setup", "hold"], doc
     assert doc["summary"]["denominator"]["examined"] > 0, doc
     assert doc["recount"]["setup"]["mode"] == "window-independent-floor", doc
+    assert doc["floor_recount"]["setup"]["ok"] is False, doc
+
+
+def test_checked_in_spef_floor_wins_over_external_window(tmp_path):
+    source = repo_path(
+        "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/"
+        "si_mcf_zero_coupling/coupled")
+    proj = tmp_path / "checked_in"
+    shutil.copytree(source, proj)
+    clean_rc, clean = _run(proj)
+    assert (clean_rc.returncode, clean["verdict"]) == (G.RC_PASS, "PASS")
+
+    rp = proj / "reports/phase3/si_mcf_sta.json"
+    producer = json.loads(rp.read_text())
+    outside = tmp_path / "foreign-windows.json"
+    outside.write_text("{}")
+    producer["windows_json"] = str(outside)
+    rp.write_text(json.dumps(producer))
+    unavailable_rc, unavailable = _run(proj)
+    assert (unavailable_rc.returncode, unavailable["verdict"]) == (
+        G.RC_NOT_MEASURED, "NOT_MEASURED")
+    assert "PATH_OUTSIDE_PROJECT" in _categories(unavailable)
+    assert "FOLD_NOT_APPLIED" not in _categories(unavailable)
+
+    original = (proj / "design.spef").read_text()
+    zero_fold = {net: 0.0 for net in M.floor_folded_caps(
+        M.coupling_pairs(original), "setup")}
+    dropped, _ = M.rewrite_spef_folded(original, zero_fold, "setup")
+    (proj / "design.mcf_setup.spef").write_text(dropped)
+    rejected_rc, rejected = _run(proj)
+    assert (rejected_rc.returncode, rejected["verdict"]) == (
+        G.RC_FAIL, "FAIL"), rejected
+    assert "PATH_OUTSIDE_PROJECT" in _categories(rejected)
+    assert "FOLD_NOT_APPLIED" in _categories(rejected)
+    assert rejected["summary"]["corners_checked"] == ["setup", "hold"]
+    assert rejected["floor_recount"]["setup"]["ok"] is False
+
+
+def test_exact_window_pass_does_not_replace_floor_failure(tmp_path):
+    proj = _b_fold_not_applied(tmp_path / "exact")
+    rp = proj / "reports/phase3/si_mcf_sta.json"
+    producer = json.loads(rp.read_text())
+    windows = proj / "windows.json"
+    windows.write_text(json.dumps({"pins": {
+        pin: {"arr_rise_min": 0, "arr_rise_max": 1}
+        for pin in ("ua:Z", "ub:Z")}}))
+    producer["windows_json"] = str(windows)
+    rp.write_text(json.dumps(producer))
+    result, doc = _run(proj)
+    assert (result.returncode, doc["verdict"]) == (G.RC_FAIL, "FAIL"), doc
+    assert "FOLD_NOT_APPLIED" in _categories(doc)
+    assert doc["floor_recount"]["setup"]["ok"] is False
+    assert doc["recount"]["setup"]["mode"] == "exact-window"
 
 
 def test_producer_relabel_preserves_step27_failure(tmp_path):
