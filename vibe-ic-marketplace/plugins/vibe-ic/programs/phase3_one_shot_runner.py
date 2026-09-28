@@ -73353,6 +73353,25 @@ def _direct_flow_window(project: Path, top: str, pdk: PdkConfig,
                             target.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(source, target)
                             outputs.append(str(target))
+        if site == "synth" and row.status == "PASS":
+            # Step 9 declares the generic pre-map arm. Backend step_synth also
+            # produces this mapped arm, which PnR consumes first. Publish it
+            # from the same isolated PASS run; a bounded synth that leaves it
+            # behind cannot unblock a later PnR window.
+            mapped = _pl.synth_dir(isolated) / f"{top}_synth.v"
+            mapped_before = _pl.synth_dir(project) / mapped.name
+            mapped_stamp = _synth_artifact_stamp(mapped)
+            if (mapped_stamp is None or mapped_stamp[0] == 0 or
+                    mapped_stamp == _synth_artifact_stamp(mapped_before)):
+                row = StepResult(
+                    "synth", "NOT_MEASURED", row.duration_s,
+                    f"backend synth reported PASS without a new mapped netlist {mapped}",
+                    outputs, reason_class=_V.ReasonClass.MISSING_ARTEFACT)
+            else:
+                target = _pl.synth_dir(project) / mapped.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(mapped, target)
+                outputs.append(str(target))
         if site == "gds":
             # A failed window keeps candidate bytes only in private scratch.
             source = _pl.pnr_dir(isolated) / f"{top}.gds"
