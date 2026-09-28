@@ -119,6 +119,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import heapq
 import hashlib
 import json
 import os
@@ -951,6 +952,152 @@ def core_rail_voltage(liberty_text: str, power_net: str
     return None, f"the Liberty maps no voltage for {power_net} and states no nom_voltage"
 
 
+def _resistor_reachable_ports(
+        subckts: Dict[str, Tuple[List[str], List[List[str]]]],
+        master: str, bond: str) -> List[str]:
+    """Ring ports reachable from a bond through PDK netlist resistors only.
+
+    Wrapper instances are expanded one level, preserving their port mapping.
+    Transistors, clamps and similarly named nets are never treated as shorts.
+    """
+    if master not in subckts:
+        return []
+    ports, body = subckts[master]
+    edges: Dict[str, set] = {}
+
+    def add(a: str, b: str) -> None:
+        if a != b:
+            edges.setdefault(a, set()).add(b)
+            edges.setdefault(b, set()).add(a)
+
+    for t in body:
+        if len(t) >= 3 and t[0][:1].upper() == "R":
+            add(t[1], t[2])
+        if not t or t[0][:1].upper() != "X":
+            continue
+        nodes = [x for x in t[1:] if "=" not in x]
+        if len(nodes) < 2 or nodes[-1] not in subckts:
+            continue
+        base_ports, base_body = subckts[nodes[-1]]
+        if len(base_ports) != len(nodes) - 1:
+            continue
+        mapping = dict(zip(base_ports, nodes[:-1]))
+        for inner in base_body:
+            if len(inner) >= 3 and inner[0][:1].upper() == "R":
+                add(mapping.get(inner[1], inner[1]),
+                    mapping.get(inner[2], inner[2]))
+    seen, pending = {bond}, [bond]
+    while pending:
+        for nxt in edges.get(pending.pop(), ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                pending.append(nxt)
+    return sorted(set(ports) & seen - {bond})
+
+
+def _pdk_connector_cells(
+        classes: Dict[str, str],
+        pin_roles: Dict[str, Dict[str, Tuple[str, str]]],
+        subckts: Dict[str, Tuple[List[str], List[List[str]]]],
+        verilog_texts: Sequence[str],
+        ) -> Dict[str, List[Tuple[str, str]]]:
+    """Read physical connector shorts from the IO PDK's Verilog and CDL.
+
+    A connector must be a PAD AREAIO or PAD SPACER macro. Its Verilog must
+    explicitly
+    assign one supply pin to another of the same LEF USE, and the CDL must
+    retain the source with no active subcircuit devices. Some PDK connector
+    slices omit the assigned pin from CDL; others retain both shorted pins.
+    A name alone or an undocumented equal voltage is never sufficient.
+    """
+    out: Dict[str, List[Tuple[str, str]]] = {}
+    for text in verilog_texts:
+        for match in re.finditer(r"\bmodule\s+([A-Za-z_]\w*)\s*\([^;]*\);"
+                                 r"(.*?)\bendmodule\b", text, re.S):
+            master, body = match.group(1), match.group(2)
+            if classes.get(master, "").upper() not in ("PAD AREAIO", "PAD SPACER"):
+                continue
+            if master not in subckts:
+                continue
+            cdl_ports, cdl_body = subckts[master]
+            if cdl_body:
+                continue
+            roles = pin_roles.get(master, {})
+            pairs = []
+            for target, source in re.findall(
+                    r"\bassign\s+([A-Za-z_]\w*)\s*=\s*"
+                    r"([A-Za-z_]\w*)\s*;", body):
+                use = roles.get(target, ("", ""))[1]
+                if (use in ("POWER", "GROUND")
+                        and roles.get(source, ("", ""))[1] == use
+                        and source in cdl_ports):
+                    pairs.append((target, source))
+            if pairs:
+                out[master] = sorted(set(pairs))
+    return out
+
+
+def _minimum_ring_sources(
+        required: set, initial: set,
+        pad_sources: Dict[str, set],
+        connectors: Dict[str, List[Tuple[str, str]]],
+        ) -> Tuple[List[str], List[str], set]:
+    """Fewest additional bond pads, then fewest PDK connector slices.
+
+    The state is the set of electrically sourced rails. A pad adds only the
+    rails proved by its resistor netlist; a connector adds both ends of each
+    PDK-declared short once either end is sourced. No rail name is privileged.
+    """
+    def closure(rails: set, pairs: List[Tuple[str, str]]) -> set:
+        rails = set(rails)
+        changed = True
+        while changed:
+            before = len(rails)
+            for a, b in pairs:
+                if a in rails or b in rails:
+                    rails.update((a, b))
+            changed = len(rails) != before
+        return rails
+
+    universe = sorted(required | initial)
+    bit = {rail: 1 << n for n, rail in enumerate(universe)}
+    mask = lambda rails: sum(bit[r] for r in rails if r in bit)
+    start = mask(initial)
+    target = mask(required)
+    queue = [(0, 0, (), (), start)]
+    best = {start: (0, 0, (), ())}
+    while queue:
+        pads_n, conn_n, pads, conns, state = heapq.heappop(queue)
+        if best.get(state) != (pads_n, conn_n, pads, conns):
+            continue
+        if state & target == target:
+            return list(pads), list(conns), {
+                rail for rail in universe if state & bit[rail]}
+        live = {rail for rail in universe if state & bit[rail]}
+        actions = []
+        for master, rails in sorted(pad_sources.items()):
+            if master not in pads:
+                actions.append((master, rails, True))
+        for master, pairs in sorted(connectors.items()):
+            if master not in conns:
+                actions.append((master, closure(live, pairs), False))
+        for master, adds, is_pad in actions:
+            nxt = state | mask(adds)
+            if nxt == state:
+                continue
+            npads = tuple(sorted((*pads, master))) if is_pad else pads
+            nconns = conns if is_pad else tuple(sorted((*conns, master)))
+            cost = (len(npads), len(nconns), npads, nconns)
+            if nxt not in best or cost < best[nxt]:
+                best[nxt] = cost
+                heapq.heappush(queue, (*cost, nxt))
+    partial = min(best, key=lambda state: (
+        -(state & target).bit_count(), *best[state]))
+    _, _, pads, conns = best[partial]
+    return list(pads), list(conns), {
+        rail for rail in universe if partial & bit[rail]}
+
+
 def _derive_multi_rail_supply_pair(
         classes: Dict[str, str],
         sizes: Dict[str, Tuple[float, float]],
@@ -961,6 +1108,7 @@ def _derive_multi_rail_supply_pair(
         lib_views: Sequence[Dict[str, object]],
         subckts: Dict[str, Tuple[List[str], List[List[str]]]],
         core_voltage: Optional[float],
+        verilog_texts: Sequence[str] = (),
         ) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
     """The supply pair for an IO library whose supply cells carry SEVERAL
     ring rails, so no pin is "the one non-core terminal".
@@ -975,10 +1123,11 @@ def _derive_multi_rail_supply_pair(
         voltage the active standard-cell Liberty states;
       * the CORE ground rail: the `related_ground_pin` the IO library pairs
         with that power rail.
-    Candidates are the PDK-declared supply masters when the PDK declares any,
-    else every PAD POWER master of the selected library. Zero or several
-    bridges for a polarity REFUSE with the candidates named: nothing is picked
-    by order. Ring rails other than the core pair stay ring rails."""
+    The core pair uses PDK-declared supply masters when present. Other source
+    pads may also be proved by Liberty `is_pad` and the resistor netlist.
+    Connector slices require explicit PDK Verilog shorts, matching LEF supply
+    pin roles and an empty CDL subcircuit. Ring rails stay distinct nets.
+    Zero or several core bridges REFUSE with candidates named."""
     why: List[str] = []
     pool = sorted(m for m, cls in classes.items()
                   if cls.upper() == "PAD POWER"
@@ -986,8 +1135,7 @@ def _derive_multi_rail_supply_pair(
     declared = [m for m in pool if m in terminals]
     basis = ("the PDK's PAD_PLACE_IO_TERMINALS" if declared
              else "every PAD POWER master of the selected library")
-    if declared:
-        pool = declared
+    core_pool = declared or pool
 
     def views_of(master: str) -> List[Dict[str, object]]:
         return [v for v in lib_views if master in v["cells"]]
@@ -1031,8 +1179,12 @@ def _derive_multi_rail_supply_pair(
             why.append(f"{m}: bond {bond} feeds {fed or 'no'} {use} rail "
                        f"({how})")
             continue
-        cells[m] = {"bond": bond, "use": use, "fed": fed[0], "how": how,
-                    "uses": uses}
+        fed_rail = fed[0]
+        reachable = {r for r in _resistor_reachable_ports(subckts, m, bond)
+                     if uses.get(r) == use}
+        cells[m] = {"bond": bond, "use": use, "fed": fed_rail,
+                    "how": how, "uses": uses,
+                    "reachable": reachable | {fed_rail}}
 
     def refuse(kind: str, detail: str) -> Refusal:
         return Refusal(
@@ -1045,7 +1197,8 @@ def _derive_multi_rail_supply_pair(
         raise refuse("power", "the core rail's voltage is not stated by the "
                      "active standard-cell Liberty, so no fed rail can be "
                      "matched to it")
-    power = sorted(m for m, c in cells.items() if c["use"] == "POWER"
+    power = sorted(m for m, c in cells.items() if m in core_pool
+                   and c["use"] == "POWER"
                    and core_voltage in volts(m, str(c["fed"])))
     if len(power) != 1:
         raise refuse("power", f"{len(power)} candidate(s) feed a rail "
@@ -1062,7 +1215,7 @@ def _derive_multi_rail_supply_pair(
         raise refuse("ground", f"the IO library pairs power rail {p_rail} "
                      f"with {grounds or 'no'} ground rail(s)")
     g_rail = grounds[0]
-    ground = sorted(m for m, c in cells.items()
+    ground = sorted(m for m, c in cells.items() if m in core_pool
                     if c["use"] == "GROUND" and c["fed"] == g_rail)
     if len(ground) != 1:
         raise refuse("ground", f"{len(ground)} candidate(s) feed the core "
@@ -1097,33 +1250,40 @@ def _derive_multi_rail_supply_pair(
                            "fed_rail_volts": volts(master, str(c["fed"])),
                            "candidates_from": basis},
         })
-    # A core bridge cell carries every ring rail, but only bonds the one its
-    # own pad terminal feeds. Resolve the other rails against ALL PDK-declared
-    # supply cells. A declared cell is a usable path only when its bond and
-    # fed rail are proved by the Liberty/netlist above; it must also be put in
-    # the wrapper below, since a catalogue cell alone is not a bond.
+    # Resolve all ring rails from the smallest complete set of PDK-proved
+    # bond pads and connector slices. The core pair is fixed by voltage and
+    # related-ground evidence above. Every added element must be instantiated.
     needed = sorted({r for rails in unbound.values() for r in rails})
     auxiliary: List[Dict[str, object]] = []
     bond_paths: Dict[str, Dict[str, str]] = {}
-    selected_uses: Dict[str, set] = {}
-    for master in (p_master, ground[0]):
-        for rail, (_direction, use) in pin_roles[master].items():
-            if use in ("POWER", "GROUND"):
-                selected_uses.setdefault(rail, set()).add(use)
+    core_masters = {p_master, ground[0]}
+    ring_use = {r: use for master in core_masters
+                for r, use in cells[master]["uses"].items()
+                if use in ("POWER", "GROUND")}
+    initial = set().union(*(cells[m]["reachable"] for m in core_masters))
+    initial &= set(ring_use)
+    candidate_pads: Dict[str, set] = {}
     for rail in needed:
-        if len(selected_uses.get(rail, set())) != 1:
-            continue
-        required_use = next(iter(selected_uses[rail]))
-        candidates = sorted(m for m, c in cells.items()
-                            if c["fed"] == rail and
-                            c["use"] == required_use
-                            and m not in (p_master, ground[0]))
-        if len(candidates) != 1:
-            continue
-        master = candidates[0]
+        candidates = [m for m, c in cells.items()
+                      if m not in core_masters and c["fed"] == rail
+                      and c["use"] == ring_use.get(rail)]
+        preferred = [m for m in candidates if m in terminals]
+        candidates = preferred or candidates
+        if len(candidates) == 1:
+            master = candidates[0]
+            candidate_pads[master] = set(cells[master]["reachable"]) & set(ring_use)
+    available_connectors = {
+        m: pairs for m, pairs in _pdk_connector_cells(
+            classes, pin_roles, subckts, verilog_texts).items()
+        if (not prefix or m.startswith(prefix))
+        and all(a in ring_use and b in ring_use and
+               ring_use[a] == ring_use[b] for a, b in pairs)
+    }
+    selected_pads, selected_connectors, reached = _minimum_ring_sources(
+        set(needed), initial, candidate_pads, available_connectors)
+    for master in selected_pads:
         c = cells[master]
-        bond_paths[rail] = {"master": master, "bond": str(c["bond"]),
-                            "basis": str(c["how"])}
+        rail = str(c["fed"])
         auxiliary.append({
             "kind": f"ring_{len(auxiliary)}", "port": rail,
             "master": master, "terminal": c["bond"],
@@ -1137,6 +1297,35 @@ def _derive_multi_rail_supply_pair(
                            "fed_rail_basis": c["how"],
                            "candidates_from": basis},
         })
+    connector_entries = []
+    for master in selected_connectors:
+        pairs = available_connectors[master]
+        connector_entries.append({
+            "kind": f"connector_{len(connector_entries)}",
+            "port": master, "master": master, "terminal": "",
+            "supply_connections": {}, "chosen_for_class": classes[master],
+            "direction": "inout", "class_fallback": False,
+            "selection_declines": [],
+            "source_lefs": [{"path": str(src), "sha256": _sha256(src)}
+                            for src in sorted(set(macro_sources.get(master, [])))],
+            "is_supply_pad": False, "is_ring_connector": True,
+            "derivation": {"shorts": pairs,
+                           "basis": "PDK Verilog assign, CDL omitted target, LEF supply pin roles"},
+        })
+    for rail in sorted(reached & set(needed)):
+        pad = next((m for m in [*core_masters, *selected_pads]
+                    if rail in cells[m]["reachable"]), None)
+        if pad is not None:
+            bond_paths[rail] = {"master": pad,
+                                "bond": str(cells[pad]["bond"]),
+                                "basis": "PDK netlist resistor path"}
+        else:
+            connector = next((m for m in selected_connectors
+                              if any(rail in pair for pair in
+                                     available_connectors[m])), None)
+            if connector is not None:
+                bond_paths[rail] = {"master": connector, "bond": "",
+                                    "basis": "PDK connector short"}
     return pair, {
         "domain_topology": "single_domain",
         "power_net": power_net,
@@ -1148,14 +1337,15 @@ def _derive_multi_rail_supply_pair(
         "core_rails_on_ring": {"power": p_rail, "ground": g_rail,
                                "core_voltage": core_voltage},
         "ring_rails_unbound": unbound,
-        "ring_rails_without_bond": sorted(set(needed) - set(bond_paths)),
+        "ring_rails_without_bond": sorted(set(needed) - reached),
         "ring_rail_bond_paths": bond_paths,
         "supplemental_supply_pads": auxiliary,
+        "ring_connector_cells": connector_entries,
         "selection_rule": (
-            "multi-rail IO library: the bond terminal's fed rail at the core "
-            "voltage (Liberty) is the power bridge; the ground rail the "
-            "library pairs with it is the ground bridge; other ring rails are "
-            "left to the ring"),
+            "multi-rail IO library: core power and ground from PDK bond, "
+            "Liberty voltage and related-ground evidence; remaining rails "
+            "from the fewest PDK netlist-proved bond pads, then explicit "
+            "PDK Verilog/CDL/LEF connector slices"),
     }
 
 
@@ -1170,6 +1360,7 @@ def resolve_supply_pad_pair(
         netlist_texts,
         core_liberty_text,
         core_liberty: str = "",
+        connector_verilog_texts=(),
         ) -> Tuple[List[Dict[str, object]], Dict[str, object],
                    Optional[Dict[str, object]]]:
     """`(pair, plan, core_voltage_record)` for the chip's supply pads.
@@ -1208,7 +1399,8 @@ def resolve_supply_pad_pair(
         try:
             pair, plan = _derive_multi_rail_supply_pair(
                 classes, sizes, pin_roles, prefix, power_net, ground_net,
-                macro_sources, terminals, views, subckts, core_v)
+                macro_sources, terminals, views, subckts, core_v,
+                _value(connector_verilog_texts))
         except Refusal as multi_rail:
             raise Refusal(
                 "SUPPLY_PAD_PAIR_UNRESOLVED",
@@ -1222,25 +1414,17 @@ def require_bonded_ring_rails(plan: Dict[str, object]) -> None:
     without a bond-reachable supply pad or declared connector.
 
     A multi-rail pad can prove the core pair while still carrying additional
-    rail pins.  Reporting that condition but writing the wrapper creates a
-    die with an electrically floating ring.  This producer has no input-side
-    freedom to choose a connector or short rails, so absence of a PDK-declared
-    bonded supply path is a named refusal, never a silently emitted topology.
+    rail pins. The producer may choose only PDK-proved bond pads and connector
+    slices. Absence of a complete path is a named refusal, never a silently
+    emitted floating topology.
     """
     raw = plan.get("ring_rails_unbound")
     if not isinstance(raw, dict):
         return
-    rails = sorted({str(rail) for values in raw.values()
-                    if isinstance(values, list) for rail in values})
-    paths = plan.get("ring_rail_bond_paths")
-    if isinstance(paths, dict):
-        scheduled = plan.get("supplemental_supply_pads")
-        scheduled_rails = {
-            str(item.get("port")) for item in scheduled
-            if isinstance(item, dict) and item.get("is_supply_pad")
-        } if isinstance(scheduled, list) else set()
-        rails = [rail for rail in rails
-                 if rail not in paths or rail not in scheduled_rails]
+    missing = plan.get("ring_rails_without_bond")
+    rails = (list(missing) if isinstance(missing, list) else
+             sorted({str(rail) for values in raw.values()
+                     if isinstance(values, list) for rail in values}))
     if rails:
         raise Refusal(
             "RING_RAIL_BOND_UNDECLARED",
@@ -1268,8 +1452,13 @@ def connect_bonded_ring_rails(
     for entry in supply_group:
         roles = pin_roles[str(entry["master"])]
         connections = dict(entry["supply_connections"])
+        connector_pins = ({pin for pair in
+                           (entry.get("derivation") or {}).get("shorts", [])
+                           for pin in pair} if entry.get("is_ring_connector")
+                          else None)
         for rail, net in net_for_rail.items():
-            if rail in roles:
+            if rail in roles and (connector_pins is None or
+                                  rail in connector_pins):
                 connections[rail] = net
         entry["supply_connections"] = dict(sorted(connections.items()))
 
@@ -1362,7 +1551,7 @@ def _emit_verilog(top: str, core: str,
                   tie_liberty: str = "",
                   bus_ports: Optional[Dict[str, Dict[str, Tuple[int, int]]]] = None,
                   ) -> str:
-    """The chip-top: core instance plus one pad instance per top-level port.
+    """The chip-top: core, signal/supply pads and PDK connector instances.
 
     Every connection is POSITIONAL-FREE and named from the IO library.  The
     bond terminal takes the chip port, the core-facing pin takes the internal
@@ -1398,6 +1587,14 @@ def _emit_verilog(top: str, core: str,
     lines.append(",\n".join(decl))
     lines.append(");")
     lines.append("")
+    declared = {str(p.get("name")) for p in ports} | set(supply_ports)
+    ring_wires = sorted({str(net) for rec in chosen.values()
+                         for net in (rec.get("supply_connections") or {}).values()
+                         if str(net) not in declared})
+    for net in ring_wires:
+        lines.append("    wire %s;" % net)
+    if ring_wires:
+        lines.append("")
 
     # A PORT WHOSE PAD FACES BOTH WAYS GETS TWO NETS. The port net terminates
     # on the pad's bond terminal and NOWHERE else; the core sits on the pad's
@@ -1762,6 +1959,9 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                                    PR.discover_io_liberty(pdk_root, pdk)],
             netlist_texts=lambda: [x.read_text(errors="replace") for x in
                                    PR.discover_io_netlists(pdk_root, pdk)],
+            connector_verilog_texts=lambda: [
+                x.read_text(errors="replace") for x in
+                PR.discover_io_verilog(pdk_root, pdk)],
             core_liberty_text=lambda: (
                 Path(str(tie_liberty)).read_text(errors="replace")
                 if tie_liberty and Path(str(tie_liberty)).is_file() else None),
@@ -1769,7 +1969,8 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         if _core_v is not None:
             rec["supply_core_voltage"] = _core_v
         require_bonded_ring_rails(plan)
-        supply_group = pair + list(plan.get("supplemental_supply_pads") or [])
+        supply_group = (pair + list(plan.get("supplemental_supply_pads") or [])
+                        + list(plan.get("ring_connector_cells") or []))
         connect_bonded_ring_rails(supply_group, plan, pin_roles,
                                   power_net, ground_net)
         # How far the PDN ring must stay from the pad edge for pdngen to strap
@@ -1925,7 +2126,8 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
             ordered[side] = [item for n, signal in enumerate(signals)
                              for item in [*buckets[n], signal]] + buckets[-1]
         supply_ports = [power_net, ground_net] + sorted(
-            str(entry["port"]) for entry in supply_group[2:])
+            str(entry["port"]) for entry in supply_group[2:]
+            if not entry.get("is_ring_connector"))
         source_file = (Path(pdk_root) / str(pdk) / "SOURCES"
                        if pdk_root and pdk else None)
         plan.update({
@@ -1960,7 +2162,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
     aux_defaulted: List[Dict[str, object]] = []
     aux_declared: List[Dict[str, object]] = []
     for inst, rc in chosen.items():
-        if rc.get("is_supply_pad"):
+        if rc.get("is_supply_pad") or rc.get("is_ring_connector"):
             continue
         master = str(rc["master"])
         if not lib_paths:

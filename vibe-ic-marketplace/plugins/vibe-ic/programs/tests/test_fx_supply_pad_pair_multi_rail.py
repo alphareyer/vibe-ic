@@ -203,7 +203,9 @@ def test_a_missing_declared_bridge_restores_the_named_rail_refusal():
                  if m != "lib__vddio_hvc_clamped_pad"}
     _pair, plan, _core = _resolve(
         _lef(SKY_MACROS), "lib__", "VPWR", "VGND", terminals,
-        [_sky_liberty()], [_sky_netlist()], SKY_CORE)
+        [_sky_liberty({m: v for m, v in SKY_FEEDS.items()
+                       if m != "lib__vddio_hvc_clamped_pad"})],
+        [_sky_netlist()], SKY_CORE)
     with pytest.raises(G.Refusal) as exc:
         G.require_bonded_ring_rails(plan)
     assert re.search(r"(?<!\w)VDDIO(?!\w)", exc.value.message)
