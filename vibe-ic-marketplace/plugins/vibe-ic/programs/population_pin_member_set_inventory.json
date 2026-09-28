@@ -40,10 +40,6 @@
     {
       "key": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_ppa_layer_producer_consumer.py",
       "reason": "Pre-existing count-only pin(s) on the tree this rule shipped with: 2 at line 205 (via glob); 2 at line 239 (via glob). Blind by arithmetic to one arrival landing with one departure. Closes by pinning the member identities beside the count and comparing them as a set in both directions, or by re-deriving the count from the accessor at assertion time. Not repaired here: each repair is a change to what that test asserts, and belongs to whoever owns the population it names."
-    },
-    {
-      "key": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_v1_7_74_issue507_enum_routing_and_l4_denominator.py",
-      "reason": "Pre-existing count-only pin(s) on the tree this rule shipped with: 25 at line 557 (via read_text). Blind by arithmetic to one arrival landing with one departure. Closes by pinning the member identities beside the count and comparing them as a set in both directions, or by re-deriving the count from the accessor at assertion time. Not repaired here: each repair is a change to what that test asserts, and belongs to whoever owns the population it names."
     }
   ]
 }
