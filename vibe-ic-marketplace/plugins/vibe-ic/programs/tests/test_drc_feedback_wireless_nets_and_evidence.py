@@ -186,3 +186,22 @@ def test_a_moved_wired_net_is_refused_whatever_the_wireless_count(tmp_path, monk
     assert result['status'] == 'REFUSED'
     assert all(t.get('refusal') == 'NON_TARGET_WIRE_CHANGED' for t in result['trials'])
     assert all('other' in t['non_target_changed'] for t in result['trials'])
+
+
+def _scoped_log(held, identical):
+    return ('[INFO DRT-0633] Scoped detailed routing: 2 net(s) named, '
+            f'{held} of {held} other net(s) held fixed (their existing wire is an '
+            'obstruction and is not rewritten).\n'
+            '[INFO DRT-0634] Scoped detailed routing touched 2 net(s) in the database '
+            f'and left {identical} net(s) byte-identical. Named: _0230_, _0422_.\n'
+            '[INFO DRT-0711] Scoped detailed routing: whole-design violations 0 on '
+            'entry, 0 on exit (delta +0).\n')
+
+
+def test_the_native_guard_counts_exactly_the_wireless_nets():
+    """cmpb's own counts: 1050 held, 1039 identical, 11 zero-connection nets.
+    One wired net fewer than that is a changed wire, not a wireless one."""
+    targets = {'_0230_', '_0422_'}
+    assert D._native_scoped_guard(_scoped_log(1050, 1039), targets, 11)
+    assert not D._native_scoped_guard(_scoped_log(1050, 1038), targets, 11)
+    assert not D._native_scoped_guard(_scoped_log(1050, 1039), targets, 10)
