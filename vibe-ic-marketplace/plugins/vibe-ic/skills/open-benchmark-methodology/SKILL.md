@@ -17,7 +17,9 @@ authoring path is:
 ```text
 benchmark_dispatch.py <bench> --solve
   -> benchmark_io_adapter.stage           (input translation only)
-  -> task_nature_route                     (prompt/context evidence only)
+  -> task_nature_route                     (input-only advisory proposal)
+  -> needs_ai_routing.jsonl                (AI judges task nature before runner)
+  -> benchmark_dispatch.py <bench> --resume (hash-bound AI route validation)
   -> vibe_ic_one_shot_runner --entry-step  (normal product runner)
   -> Program candidate or declared AI backup
   -> independent hash-bound AI review
@@ -69,21 +71,23 @@ solver or reviewer and must refuse ambiguous file/module mappings.
 
 This is a sequence, not two independent racing solvers:
 
-1. Program runs first through the normal runner.
-2. If Program emits a candidate, an independent AI reviews the exact frozen RTL
+1. AI confirms or overrides the input-only task routing before any design
+   runner executes. Routing does not author RTL or replace a Program gate.
+2. Program runs first for RTL through the normal runner.
+3. If Program emits a candidate, an independent AI reviews the exact frozen RTL
    hash against the visible prompt/context.
-3. If Program declares a supported WAIVE or route-level AI backup, AI may author
+4. If Program declares a supported WAIVE or route-level AI backup, AI may author
    the missing candidate into the runner-owned RTL directory; `--resume`
    re-enters the same product gates.
-4. If AI agrees with Program, record acceptance for that exact hash.
+5. If AI agrees with Program, record acceptance for that exact hash.
    When Program lacks PASS functional evidence, the AI's current challenge plus
    every active inherited challenge must cover every block-eligible structural
    item emitted in `program_review_obligations`; `spec_coverage_check.py`
    measures this, and an uncovered item blocks acceptance.
-5. If AI disagrees, it must identify the prompt requirement and provide a
+6. If AI disagrees, it must identify the prompt requirement and provide a
    prompt-derived executable test that fails on the frozen Program candidate.
    Prose disagreement alone cannot replace the candidate.
-6. A repair must pass that immutable challenge, the same runner gates, and a
+7. A repair must pass that immutable challenge, the same runner gates, and a
    fresh independent AI review. AI is the final semantic authority only after
    this evidence chain is complete.
 
@@ -133,7 +137,15 @@ plugin change is measured only in a new clean-room run.
 python3 programs/benchmark_dispatch.py <bench> \
   --solve --dataset <DATASET> --run <FRESH_RUN>
 
-# Complete only runner-declared AI backup/review/repair worklists, then:
+# Complete needs_ai_routing.jsonl from the visible input only. Then --resume
+# validates ALL issued route records and starts the normal Program runner.
+# If even one route is missing, invalid, or needs clarification, zero design
+# runners start; correct only that response and repeat --resume without
+# restaging inputs or re-authoring completed route responses:
+python3 programs/benchmark_dispatch.py <bench> \
+  --resume --dataset <DATASET> --run <FRESH_RUN>
+
+# Complete only the resulting runner-declared AI backup/review/repair worklists:
 python3 programs/benchmark_dispatch.py <bench> \
   --resume --dataset <DATASET> --run <FRESH_RUN>
 

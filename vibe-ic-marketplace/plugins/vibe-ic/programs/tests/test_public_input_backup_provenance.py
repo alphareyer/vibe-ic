@@ -45,7 +45,8 @@ def _backup(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=1)
 
     monkeypatch.setattr(bd.subprocess, "run", stage_only)
-    assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
+    assert fixture._solve_after_ai_route(
+        "verilogeval-human", str(dataset), str(run)) == 2
     item = fixture._read_jsonl(run / bd._BACKUP_WORKLIST)[0]
     calls = []
 

@@ -9,8 +9,13 @@ python3 ${CLAUDE_PLUGIN_ROOT}/programs/benchmark_dispatch.py <bench> \
 ```
 
 Per problem, the dispatcher performs the only permitted sequence:
-`benchmark_io_adapter.stage → task_nature_route → vibe_ic_one_shot_runner`.
+`benchmark_io_adapter.stage → task_nature_route` (advisory proposal) →
+`needs_ai_routing.jsonl` → hash-bound AI route confirmation/override →
+`--resume → vibe_ic_one_shot_runner`.
 There is no direct free-hand sample path and no per-benchmark authoring gate.
+Every routing actor reads only the task's visible input and response contract;
+until ALL issued routes have valid responses, no design runner starts. Correct
+only pending responses and repeat `--resume`; the staged inputs are preserved.
 
 ## Blind worklist rules
 
@@ -49,6 +54,9 @@ reaching for it to settle an ambiguity is the leak this rule exists to stop.
   prior run artefacts, or score output.
 - Never invoke a host scorer during authoring, review, or repair.
 - Backup RTL goes only to the runner-owned path named by the worklist.
+- Route responses go only to the coordinator-issued `response_path` in
+  `needs_ai_routing.jsonl` and select a general product nature, never a
+  benchmark-specific solver or arbitrary step.
 - Review every immutable candidate hash independently.
 - When functional confirmation is required, cover every block-eligible item in
   the task's Program-generated `program_review_obligations` across the current
@@ -68,7 +76,7 @@ than one agent — Shape C here and Shape B (`blind_instructions_shape_b.md`);
 Shape D is a single project with no fan-out and is exempt.
 
 1. **Batch granularity is REQUIRED for ≥100-problem datasets.** Spawn ONE
-   agent per contiguous SLICE of a worklist (`needs_ai_backup.jsonl`,
+   agent per contiguous SLICE of a worklist (`needs_ai_routing.jsonl`, `needs_ai_backup.jsonl`,
    `needs_ai_review.jsonl`, `needs_ai_repair.jsonl`) — NEVER one agent per
    problem. Hundreds of short-lived per-problem subagents lose their final
    structured return far too often; batch agents do sustained multi-problem

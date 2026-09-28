@@ -19,6 +19,7 @@ import sys as _rt_sys
 from pathlib import Path as _rt_path
 _rt_sys.path.insert(0, str(_rt_path(__file__).resolve().parent))
 import _runtime_pair_fixture as _rt_pair  # noqa: E402
+import _ai_route_fixture as _ai_route  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -135,6 +136,12 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line]
 
 
+def _solve_after_ai_route(bench: str, dataset, run, **kwargs) -> int:
+    assert bd.cmd_solve(bench, str(dataset), str(run), **kwargs) == 2
+    return _ai_route.complete_ai_routes(bd, bench, dataset, run,
+                                        jobs=kwargs.get("jobs", 1))
+
+
 def test_solve_covers_program_and_declared_route_rows_exactly(tmp_path,
                                                                monkeypatch):
     """Dropping the declared-route branch must lose one assigned ID and rc=2."""
@@ -146,7 +153,7 @@ def test_solve_covers_program_and_declared_route_rows_exactly(tmp_path,
     monkeypatch.setattr(
         bd.subprocess, "run", _fake_runner(program_ids={"generic_program"}))
 
-    assert bd.cmd_solve(
+    assert _solve_after_ai_route(
         "verilogeval-human", str(dataset), str(run)) == 2
 
     backup = _read_jsonl(run / bd._BACKUP_WORKLIST)
@@ -186,7 +193,7 @@ def test_rtl_gen_waive_remains_the_primary_backup_handoff(tmp_path,
         bd.subprocess, "run",
         _fake_runner(waived_ids={"generic_waive": "spec-to-rtl"}))
 
-    assert bd.cmd_solve(
+    assert _solve_after_ai_route(
         "verilogeval-human", str(dataset), str(run)) == 2
 
     backup = _read_jsonl(run / bd._BACKUP_WORKLIST)
@@ -205,7 +212,7 @@ def test_backup_destination_stays_runner_owned_across_cwd_changes(
     monkeypatch.setattr(bd.subprocess, "run", _fake_runner())
     monkeypatch.chdir(tmp_path)
 
-    assert bd.cmd_solve(
+    assert _solve_after_ai_route(
         "verilogeval-human", dataset.name, run.name) == 2
 
     task = _read_jsonl(run / bd._BACKUP_WORKLIST)[0]
@@ -225,9 +232,9 @@ def test_backup_destination_stays_runner_owned_across_cwd_changes(
     ({"ai_backup": [""]}, "INVALID"),
     ({"ai_backup": ["rtl-repair", 7]}, "INVALID"),
 ])
-def test_missing_empty_or_malformed_route_backup_blocks_without_ai_work(
+def test_ai_route_uses_canonical_backup_not_malformed_router_proposal(
         tmp_path, monkeypatch, plugin_entry, want_status):
-    """Weakening declaration validation must create unauthorised AI work."""
+    """A router proposal cannot smuggle an AI-backup declaration into execution."""
     dataset, run = tmp_path / "dataset", tmp_path / "run"
     _write_dataset(dataset, {"generic_blocked": _DEBUG_PROMPT})
     verdict = {
@@ -239,16 +246,17 @@ def test_missing_empty_or_malformed_route_backup_blocks_without_ai_work(
     monkeypatch.setattr(tnr, "classify_task_nature", lambda *_args: verdict)
     monkeypatch.setattr(bd.subprocess, "run", _fake_runner())
 
-    assert bd.cmd_solve(
-        "verilogeval-human", str(dataset), str(run)) == 1
-    assert _read_jsonl(run / bd._BACKUP_WORKLIST) == []
+    assert bd._declared_route_ai_backup(verdict)["status"] == want_status
+    assert _solve_after_ai_route(
+        "verilogeval-human", str(dataset), str(run)) == 2
+    assert [r["skill"] for r in _read_jsonl(run / bd._BACKUP_WORKLIST)] == ["rtl-repair"]
     assert _read_jsonl(run / bd._REVIEW_WORKLIST) == []
 
     result = json.loads((run / "solve_report.json").read_text())["results"][0]
-    assert result["candidate_origin"] == "NONE"
-    assert result["awaiting_ai_backup"] is False
-    assert result["awaiting_ai"] is False
-    assert result["route_ai_backup"]["status"] == want_status
+    assert result["candidate_origin"] == "AI_BACKUP_PENDING"
+    assert result["awaiting_ai_backup"] is True
+    assert result["route_ai_backup"] == {
+        "status": "DECLARED", "skills": ["rtl-repair"]}
 
 
 def test_backup_prompt_hash_change_blocks_before_regating(tmp_path,
@@ -257,7 +265,7 @@ def test_backup_prompt_hash_change_blocks_before_regating(tmp_path,
     dataset, run = tmp_path / "dataset", tmp_path / "run"
     _write_dataset(dataset, {"generic_prompt_bound": _DEBUG_PROMPT})
     monkeypatch.setattr(bd.subprocess, "run", _fake_runner())
-    assert bd.cmd_solve(
+    assert _solve_after_ai_route(
         "verilogeval-human", str(dataset), str(run)) == 2
 
     task = _read_jsonl(run / bd._BACKUP_WORKLIST)[0]
@@ -309,7 +317,7 @@ def test_blocked_frontdoor_row_keeps_the_declaration_it_classified(
     runner = _phase1_dead_runner()
     monkeypatch.setattr(bd.subprocess, "run", runner)
 
-    assert bd.cmd_solve(
+    assert _solve_after_ai_route(
         "verilogeval-human", str(dataset), str(run)) == 1
     assert len(runner.calls) == 1
     assert _is_d1_frontdoor(runner.calls[0])
@@ -321,16 +329,18 @@ def test_blocked_frontdoor_row_keeps_the_declaration_it_classified(
     assert result["candidate_origin"] == "NONE"
     assert result["awaiting_ai_backup"] is False
     assert result["awaiting_ai"] is False
-    assert result["route_ai_backup"]["status"] == want_status
-    assert result["route_ai_backup"]["skills"] == want_skills
+    assert bd._declared_route_ai_backup(verdict)["status"] == want_status
+    assert bd._declared_route_ai_backup(verdict)["skills"] == want_skills
+    assert result["route_ai_backup"] == {
+        "status": "DECLARED", "skills": ["rtl-repair"]}
     assert result["phase1_frontdoor"]["status"] == "BLOCKED"
     assert "emitted no hash-bound L-doc provenance" in (
         result["phase1_frontdoor"]["reason"])
 
 
-def test_a_row_that_dies_before_routing_stays_not_measured(tmp_path,
+def test_router_outage_still_requires_ai_route_before_runner(tmp_path,
                                                           monkeypatch):
-    """Carrying the declaration must not invent one nobody classified."""
+    """An advisory-router outage cannot launch a runner without AI routing."""
     dataset, run = tmp_path / "dataset", tmp_path / "run"
     _write_dataset(dataset, {"generic_unrouted": _DEBUG_PROMPT})
 
@@ -341,11 +351,14 @@ def test_a_row_that_dies_before_routing_stays_not_measured(tmp_path,
     runner = _phase1_dead_runner()
     monkeypatch.setattr(bd.subprocess, "run", runner)
 
-    assert bd.cmd_solve(
-        "verilogeval-human", str(dataset), str(run)) == 1
+    assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
     assert runner.calls == []
+    task = _read_jsonl(run / bd._ROUTE_WORKLIST)[0]
+    assert task["program_proposal"]["source"] == "router_error"
+    assert _ai_route.complete_ai_routes(
+        bd, "verilogeval-human", dataset, run) == 1
+    assert len(runner.calls) == 1
     result = json.loads((run / "solve_report.json").read_text())["results"][0]
     assert result["worker_status"] == "ERROR"
-    assert result["route_ai_backup"] == {
-        "status": "NOT_MEASURED", "skills": []}
-    assert result["phase1_frontdoor"] is None
+    assert result["routing_verdict"]["source"] == "ai_override"
+    assert result["phase1_frontdoor"]["status"] == "BLOCKED"
