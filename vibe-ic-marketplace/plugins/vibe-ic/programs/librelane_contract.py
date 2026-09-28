@@ -2081,7 +2081,7 @@ def tool_default_die(config_root: Path) -> dict[str, dict[str, Any]]:
     design = _load(config_root / 'design.json')
     found: dict[str, dict[str, Any]] = {}
     try:
-        requested = _load(config_root / 'steps.json')
+        requested = json.loads((config_root / 'steps.json').read_text())
     except (OSError, ValueError):
         return found
     if not isinstance(requested, list):
