@@ -509,10 +509,21 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             missing.append(f"declared {field} absent for waiver qualification")
 
     stage_rows = {s.get("name"): s for s in bundle.get("stages") or []}
+    postroute_repair_ran = bool(bundle.get("postroute_repair_ran"))
+    if project is not None:
+        repair_report = project / "reports/phase3/librelane_postroute_repair.json"
+        if repair_report.is_file():
+            try:
+                recorded_repair = json.loads(repair_report.read_text())
+                postroute_repair_ran = bool(recorded_repair.get("adopted"))
+            except (OSError, ValueError, TypeError, AttributeError):
+                missing.append("step 32 repair adoption receipt unreadable")
+            if postroute_repair_ran != bool(bundle.get("postroute_repair_ran")):
+                missing.append("step 32 repair adoption differs from DRV bundle")
     for name in _REQUIRED_STAGES:
         if name not in stage_rows:
             fails.append(f"{name}: required stage absent")
-    if bundle.get("postroute_repair_ran") and "postroute_repair" not in stage_rows:
+    if postroute_repair_ran and "postroute_repair" not in stage_rows:
         fails.append("postroute_repair: required applied constraints absent")
     broad_stage = False
     for name, stage in stage_rows.items():
