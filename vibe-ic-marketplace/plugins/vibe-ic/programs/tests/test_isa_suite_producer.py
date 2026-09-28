@@ -17,9 +17,12 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import multiprocessing
 import re
+import socket
 import sys
 import tarfile
+import time
 import urllib.request
 from pathlib import Path
 
@@ -238,9 +241,30 @@ def test_fetch_refuses_a_continuously_streaming_deadline(monkeypatch):
         read1 = read
 
     monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: Stream())
-    monkeypatch.setattr(I.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(I._bounded_fetch.time, "monotonic", lambda: clock[0])
     with pytest.raises(TimeoutError, match="overall fetch deadline"):
         I.default_fetch("https://example.invalid/suite.tar.gz")
+
+
+def test_fetch_deadline_includes_name_resolution(monkeypatch):
+    monkeypatch.setattr(I, "FETCH_DEADLINE_S", 0.1)
+    resolver_calls = multiprocessing.Value("i", 0)
+
+    def stalled_resolver(*_args, **_kwargs):
+        with resolver_calls.get_lock():
+            resolver_calls.value += 1
+        time.sleep(2)
+        raise OSError("resolver did not finish")
+
+    monkeypatch.setattr(socket, "getaddrinfo", stalled_resolver)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda url, *, timeout: opener.open(url, timeout=timeout))
+    start = time.monotonic()
+    with pytest.raises(TimeoutError, match="overall fetch deadline"):
+        I.default_fetch("http://unresolved.example.invalid/suite.tar.gz")
+    assert resolver_calls.value == 1
+    assert time.monotonic() - start < 1.5
 
 
 def test_no_network_makes_every_bound_case_not_measured(tmp_path):

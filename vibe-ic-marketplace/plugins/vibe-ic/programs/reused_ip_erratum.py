@@ -58,14 +58,13 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 import argparse
 import hashlib
 import json
-import multiprocessing
 import re
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import _atomic_artefact as _aa
+import _bounded_fetch
 
 SCHEMA = "vibeic.reused_ip_erratum.v1"
 RECORD_SCHEMA = "vibeic.reused_ip_errata_applied.v1"
@@ -196,79 +195,12 @@ def record_applies(record: Dict[str, Any],
                for repo, commit in upstreams)
 
 
-def _fetch_bytes(url: str) -> bytes:
-    """Read one bounded response inside the supervised fetch process."""
-    import urllib.request
-    deadline = time.monotonic() + FETCH_DEADLINE_S
-    chunks: List[bytes] = []
-    total = 0
-    with urllib.request.urlopen(  # noqa: S310 — hash-pinned upstream fix
-            url, timeout=min(FETCH_IO_TIMEOUT_S, FETCH_DEADLINE_S)) as r:
-        # read1 returns available bytes without waiting for a full chunk.
-        # A trickling peer must still cross the monotonic deadline.
-        read1 = r.read1
-        while True:
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
-            chunk = read1(min(FETCH_CHUNK_BYTES, FETCH_MAX_BYTES - total + 1))
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
-            if not chunk:
-                return b"".join(chunks)
-            total += len(chunk)
-            if total > FETCH_MAX_BYTES:
-                raise ValueError(f"RTL fix byte ceiling {FETCH_MAX_BYTES} exceeded")
-            chunks.append(chunk)
-
-
-def _fetch_worker(url: str, result: Path, error: Path) -> None:
-    """Publish either the bounded response or a named fetch failure."""
-    try:
-        result.write_bytes(_fetch_bytes(url))
-    except Exception as exc:  # noqa: BLE001 — transported to the caller
-        error.write_text(f"{type(exc).__name__}: {exc}")
-
-
 def default_fetch(url: str) -> bytes:
-    """Enforce one deadline over connection setup, headers, and body reads.
-
-    A socket timeout is per I/O call, so a stuck opener or trickling peer can
-    exceed it indefinitely. The worker is a child owned by this call; only its
-    recorded PID is killed when the overall deadline expires.
-    """
-    deadline = time.monotonic() + FETCH_DEADLINE_S
-    with tempfile.TemporaryDirectory(prefix="vibeic-erratum-fetch-") as scratch:
-        result = Path(scratch) / "response"
-        error = Path(scratch) / "error"
-        worker = multiprocessing.get_context("fork").Process(
-            target=_fetch_worker, args=(url, result, error))
-        try:
-            worker.start()
-            worker.join(max(0.0, deadline - time.monotonic()))
-            if worker.is_alive():
-                worker.kill()
-                worker.join()
-                raise TimeoutError(
-                    f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
-            if error.is_file():
-                raise OSError(error.read_text())
-            if worker.exitcode != 0 or not result.is_file():
-                raise OSError(f"fetch worker exited {worker.exitcode} without a response")
-            data = result.read_bytes()
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"overall fetch deadline {FETCH_DEADLINE_S}s exceeded")
-            return data
-        finally:
-            if worker.is_alive():
-                worker.kill()
-                worker.join()
-            worker.close()
+    """Fetch one hash-pinned source file inside the shared total deadline."""
+    return _bounded_fetch.fetch(
+        url, deadline_s=FETCH_DEADLINE_S, max_bytes=FETCH_MAX_BYTES,
+        chunk_bytes=FETCH_CHUNK_BYTES, io_timeout_s=FETCH_IO_TIMEOUT_S,
+        byte_label="RTL fix")
 
 
 def _input_original(project: Path, basename: str) -> Optional[Path]:
