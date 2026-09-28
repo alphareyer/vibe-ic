@@ -703,6 +703,35 @@ def test_emitted_wrapper_has_one_legal_named_connection_for_pad_bus():
            "_vibeic_aux_tie_0000})" in wrapper
 
 
+def test_emitted_pad_bus_wrapper_parses_in_pinned_yosys(tmp_path):
+    """The real parser accepts the grouped port and rejects a bit-select port."""
+    wrapper = PAD._emit_verilog(
+        "wrapper", "core", {"N": ["u_pad"]},
+        {"u_pad": {"master": "neutral_pad", "port": "signal",
+                   "terminal": "PAD", "core_pin": "Y",
+                   "ties": {"DM[0]": 0, "DM[1]": 0, "DM[2]": 0}}},
+        [{"name": "signal", "direction": "input", "width": 1}],
+        tie_cells={0: {"master": "TIELO", "pin": "Q"}},
+        bus_ports={"neutral_pad": {"DM": (2, 0)}},
+    )
+    stubs = ("module neutral_pad(input PAD, output Y, input [2:0] DM); "
+             "assign Y=PAD; endmodule\n"
+             "module TIELO(output Q); assign Q=1'b0; endmodule\n"
+             "module core(input signal); endmodule\n")
+    source = tmp_path / "chip.v"
+    source.write_text(stubs + wrapper)
+    cmd = ["docker", "run", "--rm", "--memory=1g", "-v",
+           f"{tmp_path}:/work:ro", "ghcr.io/vibeic/vibeic-eda:0.3.84",
+           "--skip", "/foss/tools/bin/yosys", "-Q", "-T", "-p",
+           "read_verilog /work/chip.v; hierarchy -check -top wrapper"]
+    positive = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    assert positive.returncode == 0, positive.stdout + positive.stderr
+    source.write_text(stubs + wrapper.replace(".DM({", ".DM[0]({"))
+    negative = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    assert negative.returncode != 0, negative.stdout + negative.stderr
+    assert "syntax error" in (negative.stdout + negative.stderr).lower()
+
+
 @pytest.mark.parametrize("pairs,buses,rule", [
     ([("DM[0]", "x"), ("DM[0]", "again")],
      {"neutral_pad": {"DM": (2, 0)}}, "PAD_BUS_BIT_CONNECTED_TWICE"),
