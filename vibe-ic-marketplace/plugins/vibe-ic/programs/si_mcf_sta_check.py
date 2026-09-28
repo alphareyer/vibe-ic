@@ -543,28 +543,18 @@ def audit(project_dir: Path,
         # Keep its refusal non-green while checking the evidence for a
         # substantive defect, which takes precedence in build_report.
 
-    # Only SPEF prerequisites may stop the independent floor recount here.
-    # Timing-window provenance is checked after that recount, so a stale
-    # window path cannot hide a defect in project-bound SPEFs.
-    embedded = [("spef", report.get("spef")),
-                ("clk_source", report.get("clk_source"))]
-    for scene in ("setup", "hold"):
-        cinfo = (report.get("corners") or {}).get(scene) or {}
-        embedded.append((f"{scene}.bounded_spef", cinfo.get("bounded_spef")))
-    resolved_paths = {}
-    for field, path in embedded:
-        if not path:
-            continue
-        resolved = _input_path(project_dir, str(path))
-        if resolved is None:
-            why = f"{field} points outside project {project_dir.resolve()}: {path}"
-            stats["input_refusal"] = ("PATH_OUTSIDE_PROJECT", why)
-            findings.append(Finding("ERROR", "PATH_OUTSIDE_PROJECT", why))
-            return findings, stats
-        resolved_paths[field] = resolved
-
+    # Resolve only the original SPEF before the floor recount: its bytes are
+    # needed by every corner. Other paths cannot veto a separate corner's
+    # recount and are checked when that corner or the exact-window pass uses
+    # them. Never read an external path, including through a symlink.
     orig_spef = report.get("spef")
-    orig_path = resolved_paths.get("spef")
+    orig_path = _input_path(project_dir, str(orig_spef)) if orig_spef else None
+    if orig_spef and orig_path is None:
+        why = (f"spef points outside project {project_dir.resolve()}: "
+               f"{orig_spef}")
+        stats["input_refusal"] = ("PATH_OUTSIDE_PROJECT", why)
+        findings.append(Finding("ERROR", "PATH_OUTSIDE_PROJECT", why))
+        return findings, stats
     if not orig_path or not orig_path.exists():
         findings.append(Finding("ERROR", "NO_SPEF",
                                 f"original coupling SPEF missing: {orig_spef}"))
@@ -645,7 +635,13 @@ def audit(project_dir: Path,
                                     f"report missing corner '{corner}'"))
             continue
         bounded = cinfo.get("bounded_spef")
-        bounded_path = resolved_paths.get(f"{corner}.bounded_spef")
+        bounded_path = _input_path(project_dir, str(bounded)) if bounded else None
+        if bounded and bounded_path is None:
+            why = (f"{corner}.bounded_spef points outside project "
+                   f"{project_dir.resolve()}: {bounded}")
+            stats.setdefault("input_refusal", ("PATH_OUTSIDE_PROJECT", why))
+            findings.append(Finding("ERROR", "PATH_OUTSIDE_PROJECT", why))
+            continue
         if not bounded_path or not bounded_path.exists():
             findings.append(Finding("ERROR", "NO_BOUNDED_SPEF",
                                     f"{corner}: bounded SPEF missing: {bounded}"))
@@ -706,10 +702,11 @@ def audit(project_dir: Path,
         stats["monotonicity"][corner] = {
             "before_ns": before, "after_ns": after, "ok": mono_ok}
 
-    # Validate every declared window path after recording the floor findings.
-    # Unused declarations remain provenance errors; none is read outside the
-    # project, and a clean floor alone cannot certify a missing window input.
-    window_fields = [("windows_json", report.get("windows_json"))]
+    # Validate all remaining path provenance after recording the floor
+    # findings. Unused declarations remain errors, but cannot erase a measured
+    # defect; none is read outside the project.
+    window_fields = [("clk_source", report.get("clk_source")),
+                     ("windows_json", report.get("windows_json"))]
     for scene in ("setup", "hold"):
         cinfo = (corners.get(scene) or {})
         window_fields.append((f"{scene}.windows_json", cinfo.get("windows_json")))
