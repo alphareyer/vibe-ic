@@ -506,6 +506,9 @@ def test_phase2_entry_refuses_archive_failure_before_dispatch(tmp_path,
 def test_front_door_halts_when_stale_docs_cannot_be_archived(tmp_path,
                                                               monkeypatch):
     plug, proj = _plugin(tmp_path), _project(tmp_path)
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     _phase1(proj, plug)
     (proj / ".vibeic-state").write_text("blocks archive directory")
     monkeypatch.setattr(ORCH, "_capture_container_image",

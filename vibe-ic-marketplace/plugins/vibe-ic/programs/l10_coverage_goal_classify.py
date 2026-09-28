@@ -55,8 +55,9 @@ from the input's own shape, never from prose interpretation:
 
   (1) the row DECLARES its kind (`kind`/`type` is a coverage token) — the
       citation is that field;
-  (2) with no declared kind, the row's expected half is an acceptance
-      PERCENTAGE — the citation is the expected text itself.
+  (2) the row's expected half is an acceptance PERCENTAGE — the citation is
+      the expected text itself, even if a prior emitter labelled the row
+      functional_vector.
 
 A row whose expected half is a literal value is a vector and stays one, even
 when its scope text happens to contain a number.

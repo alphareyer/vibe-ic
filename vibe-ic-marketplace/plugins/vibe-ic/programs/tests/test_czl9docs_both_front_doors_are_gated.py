@@ -53,6 +53,9 @@ def _stage(root: Path, mode: str, text: str) -> Path:
     else:
         (proj / "input").mkdir(parents=True)
         (proj / "input" / "phase1_prompt.md").write_text(text)
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     return proj
 
 

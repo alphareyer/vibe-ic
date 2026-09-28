@@ -258,6 +258,9 @@ def _drive_orchestrator(monkeypatch, project: Path, argv_extra):
     actual phase2 argv can be inspected without spawning EDA tools (same
     harness as test_v0_2_95_issue459_auto_skip_analog)."""
     captured: dict = {}
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(project, "ic")
 
     def fake_run_phase(label, runner, args, env=None):
         captured[runner.name] = list(args)

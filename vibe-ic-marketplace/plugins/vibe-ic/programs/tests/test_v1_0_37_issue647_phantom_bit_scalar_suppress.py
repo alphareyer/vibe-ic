@@ -92,6 +92,9 @@ def test_end_to_end_single_io_in_row_no_phantoms(tmp_path):
         "| Signal | Direction | Width | Description |\n|---|---|---|---|\n"
         "| `clk_i` | input | 1 | clock |\n"
         "| `io_in` | in | 38 | User GPIO inputs (`io_in[37:0]`) |\n")
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     runner = _PROGRAMS / "phase1_one_shot_runner.py"
     r = run_phase1_with_expert_answer(
         proj, [sys.executable, str(runner), str(proj)], _pr.run,

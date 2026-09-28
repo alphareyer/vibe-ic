@@ -8,6 +8,7 @@ import pytest
 
 import _submission_template as ST
 import _tapeout_declaration as TD
+import _delivery_route as DR
 import phase1_one_shot_runner as P1
 import vibe_ic_one_shot_runner as ALL
 
@@ -39,6 +40,26 @@ def _answer(project, value="DIE", *, owner=True):
             "answered_by": "owner", "citation": "Owner: this is the delivery route."}}
     path.write_text(json.dumps(doc))
     return path
+
+
+@pytest.mark.parametrize("deliverable,route", [("DIE", "IC"),
+                                                ("HARDMACRO", "IP")])
+def test_staged_owner_deliverable_derives_route_without_a_flag(
+        tmp_path, deliverable, route):
+    path = _answer(tmp_path, deliverable)
+    before = path.read_bytes()
+    assert DR.admit(tmp_path) is None
+    assert DR.report_label(tmp_path) == {
+        "delivery_route": route, "deliverable": deliverable}
+    assert path.read_bytes() == before
+
+
+def test_explicit_route_conflict_names_both_answers(tmp_path):
+    path = _answer(tmp_path, "DIE")
+    before = path.read_bytes()
+    reason = DR.admit(tmp_path, "ip")
+    assert "--route ip" in reason and "DIE" in reason
+    assert path.read_bytes() == before
 
 
 def test_expert_rule_is_first_and_names_both_routes():

@@ -27,6 +27,9 @@ def test_runner_produces_scoped_analog_audit_after_analog(tmp_path, monkeypatch)
     rtl = project / "phase2" / "stage1" / "rtl"
     rtl.mkdir(parents=True)
     (rtl / "chip_top.v").write_text("module chip_top(); endmodule\n")
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(project, "ic")
 
     calls: list[tuple[str, str, list[str]]] = []
 

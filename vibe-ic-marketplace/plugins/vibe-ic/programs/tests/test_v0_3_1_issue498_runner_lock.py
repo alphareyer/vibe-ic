@@ -203,6 +203,9 @@ def test_acceptance_dead_lock_cleaned_and_runner_starts(tmp_path):
     starts normally (proceeds past the lock; no CONCURRENT_RUN_REFUSED)."""
     project = tmp_path / "proj"
     project.mkdir()
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(project, "ic")
     dead = _dead_pid()
     _write_lock(project, dead, runner="crashed_runner")
 
@@ -224,6 +227,9 @@ def test_acceptance_clean_project_runs_and_releases(tmp_path):
     """A clean project (no prior lock) runs and releases its lock on exit."""
     project = tmp_path / "proj"
     project.mkdir()
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(project, "ic")
     cp = _run_runner(project)
     combined = cp.stdout + cp.stderr
     assert "CONCURRENT_RUN_REFUSED" not in combined

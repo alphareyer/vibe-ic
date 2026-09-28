@@ -388,6 +388,9 @@ def test_full_e2e_l3_table_to_l9_canonical_key_then_gate_pass(tmp_path):
     docs = proj / "input" / "docs"
     docs.mkdir(parents=True)
     (docs / "L3_external_interface.md").write_text(_L3_DOC)
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
 
     # 1) REAL promoter via the runner (gen_l9 path).
     r = run_phase1_with_expert_answer(proj,

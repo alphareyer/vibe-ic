@@ -152,6 +152,9 @@ def test_end_to_end_phase1_populates_l9_top_module_and_ports(tmp_path):
     proj = tmp_path / "proj"
     (proj / "input").mkdir(parents=True)
     (proj / "input" / "phase1_prompt.md").write_text(PRIORITY_ENCODER_PROMPT)
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     runner = _PROGRAMS / "phase1_one_shot_runner.py"
     r = run_phase1_with_expert_answer(
         proj, [sys.executable, str(runner), str(proj)], _pr.run,
