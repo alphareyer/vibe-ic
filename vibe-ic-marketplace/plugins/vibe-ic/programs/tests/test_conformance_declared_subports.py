@@ -57,17 +57,18 @@ SIBLING_SECTION = (
 )
 
 
-def _project(tmp_path, *, delegation=True, extra="o_sram_waddr"):
+def _project(tmp_path, *, delegation=True, extra="o_sram_waddr", declaration=None):
     project = tmp_path / "design"
     rtl_dir = project / "phase2/stage1/rtl"
     rtl_dir.mkdir(parents=True)
     (project / "input/docs").mkdir(parents=True)
     (project / "input/docs/L3_external_interface.md").write_text(DELEGATION)
     (project / "plugin_output").mkdir()
-    (project / "plugin_output/declaration.json").write_text(json.dumps({
-        "sram_interface": {"read_address": "o_sram_addr",
-                           "write_enable": "o_sram_we",
-                           "write_address": "o_sram_waddr"}}))
+    if declaration is None:
+        declaration = {"sram_interface": {
+            "read_address": "o_sram_addr", "write_enable": "o_sram_we",
+            "write_address": "o_sram_waddr"}}
+    (project / "plugin_output/declaration.json").write_text(json.dumps(declaration))
     gd = project / "phase1/generated_docs"
     gd.mkdir(parents=True)
     l9_ports = [
@@ -96,6 +97,13 @@ def _check(project, spec, rtl_dir):
 def _errors(findings):
     return {(row["rule"], row["symbol"]) for row in findings
             if row["severity"] == "ERROR"}
+
+
+FOREIGN_DECLARATION = {
+    "sram_interface": {"read_address": "o_sram_addr",
+                       "write_enable": "o_sram_we"},
+    "debug_interface": {"other": "o_sram_waddr"},
+}
 
 
 def test_declared_subport_is_accepted_only_with_structured_delegation(tmp_path):
@@ -140,8 +148,9 @@ def test_phase1_extracts_only_an_affirmative_delegation(tmp_path):
     emitted = json.loads((tmp_path / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").read_text())
     assert emitted["plugin_declared_port_groups"] == L9_GROUP
     denied = DELEGATION.replace("are declared", "are not declared")
+    # English polarity cannot decide ownership; the declaration entry does.
     assert groups.extract_delegated_groups(
-        {"L3_external_interface.md": denied}) == []
+        {"L3_external_interface.md": denied}) == L9_GROUP
 
 
 @pytest.mark.parametrize("statement", NO_DELEGATION)
@@ -149,7 +158,8 @@ def test_phase1_non_authority_keeps_extra_port_blocked(tmp_path, statement):
     sys.path.insert(0, str(PROGRAMS))
     import phase1_doc_one_shot_runner as phase1
 
-    project, spec, rtl = _project(tmp_path, delegation=False)
+    project, spec, rtl = _project(
+        tmp_path, delegation=False, declaration=FOREIGN_DECLARATION)
     document = DELEGATION.replace(
         "The concrete signal names for this port group are declared by the "
         "plugin in declaration.json.", statement)
@@ -167,7 +177,7 @@ def test_phase1_non_authority_keeps_extra_port_blocked(tmp_path, statement):
     result, findings = _check(project, spec, rtl)
     assert result.returncode == 1
     assert ("port-extra", "o_sram_waddr") in _errors(findings)
-    assert emitted["plugin_declared_port_groups"] == []
+    assert emitted["plugin_declared_port_groups"] == L9_GROUP
 
 
 @pytest.mark.parametrize("statement", OTHER_GROUP_SENTENCE)
@@ -175,7 +185,8 @@ def test_phase1_sibling_reference_never_delegates_current_group(tmp_path, statem
     sys.path.insert(0, str(PROGRAMS))
     import phase1_doc_one_shot_runner as phase1
 
-    project, spec, rtl = _project(tmp_path, delegation=False)
+    project, spec, rtl = _project(
+        tmp_path, delegation=False, declaration=FOREIGN_DECLARATION)
     document = DELEGATION.replace(
         "The concrete signal names for this port group are declared by the "
         "plugin in declaration.json.", statement) + SIBLING_SECTION
@@ -192,17 +203,13 @@ def test_phase1_sibling_reference_never_delegates_current_group(tmp_path, statem
     result, findings = _check(project, spec, rtl)
     assert result.returncode == 1
     assert ("port-extra", "o_sram_waddr") in _errors(findings)
-    assert not any(row["group"] == "sram" for row in
-                   emitted["plugin_declared_port_groups"])
+    assert emitted["plugin_declared_port_groups"] == L9_GROUP
 
 
 def test_sibling_declaration_map_cannot_authorize_group_port(tmp_path):
     project, spec, rtl = _project(tmp_path)
-    (project / "plugin_output/declaration.json").write_text(json.dumps({
-        "sram_interface": {"read_address": "o_sram_addr",
-                           "write_enable": "o_sram_we"},
-        "debug_interface": {"other": "o_sram_waddr"},
-    }))
+    (project / "plugin_output/declaration.json").write_text(
+        json.dumps(FOREIGN_DECLARATION))
     result, findings = _check(project, spec, rtl)
     assert result.returncode == 1
     assert ("port-extra", "o_sram_waddr") in _errors(findings)
@@ -260,7 +267,94 @@ def test_real_input_top_choice_is_not_port_name_delegation():
         "The concrete signal names for this port group are declared by the "
         "plugin in declaration.json.", line)
     assert groups.extract_delegated_groups(
-        {"L3_external_interface.md": document}) == []
+        {"L3_external_interface.md": document}) == L9_GROUP
+
+
+def test_bare_section_mention_accepts_only_own_declaration_names(tmp_path):
+    sys.path.insert(0, str(PROGRAMS))
+    import phase1_doc_one_shot_runner as phase1
+
+    project, spec, rtl = _project(tmp_path, delegation=False)
+    document = DELEGATION.replace(
+        "The concrete signal names for this port group are declared by the "
+        "plugin in declaration.json.",
+        "declaration.json records the choices.")
+    (project / "input/docs/L3_external_interface.md").write_text(document)
+    phase1.gen_l9_integration_spec(
+        project, {"L3_external_interface.md": document}, {})
+    emitted = json.loads(spec.read_text())
+    emitted["top_module"] = "dut"
+    emitted["ports"] = emitted["top_ports"] = [
+        {"name": "o_sram_addr", "direction": "output", "width": 10},
+        {"name": "o_sram_we", "direction": "output", "width": 1},
+    ]
+    spec.write_text(json.dumps(emitted))
+    result, findings = _check(project, spec, rtl)
+    assert result.returncode == 0, findings
+    assert ("port-extra", "o_sram_waddr") not in _errors(findings)
+    assert emitted["plugin_declared_port_groups"] == L9_GROUP
+
+
+def test_l9_row_without_own_section_mention_grants_nothing(tmp_path):
+    project, spec, rtl = _project(tmp_path)
+    (project / "input/docs/L3_external_interface.md").write_text(
+        DELEGATION.replace("declaration.json", "a separate file"))
+    result, findings = _check(project, spec, rtl)
+    assert result.returncode == 1
+    assert ("port-extra", "o_sram_waddr") in _errors(findings)
+
+
+def test_own_mention_and_entry_work_without_example_table(tmp_path):
+    sys.path.insert(0, str(PROGRAMS))
+    import phase1_doc_one_shot_runner as phase1
+
+    project, spec, rtl = _project(tmp_path, delegation=False)
+    document = "### SRAM port group\n\ndeclaration.json records this group.\n"
+    (project / "input/docs/L3_external_interface.md").write_text(document)
+    phase1.gen_l9_integration_spec(
+        project, {"L3_external_interface.md": document}, {})
+    emitted = json.loads(spec.read_text())
+    emitted["top_module"] = "dut"
+    emitted["ports"] = emitted["top_ports"] = [
+        {"name": "o_sram_addr", "direction": "output", "width": 10},
+        {"name": "o_sram_we", "direction": "output", "width": 1},
+    ]
+    spec.write_text(json.dumps(emitted))
+    result, findings = _check(project, spec, rtl)
+    assert result.returncode == 0, findings
+    assert emitted["plugin_declared_port_groups"] == [
+        {**L9_GROUP[0], "example_ports": []}]
+
+
+@pytest.mark.parametrize("statement", (
+    "The debug signal names are defined in declaration.json.",
+    "The debug sub-port names are defined in declaration.json.",
+    "The port names of the debug block live in declaration.json.",
+))
+def test_foreign_prose_and_foreign_entry_cannot_grant_sram_port(
+        tmp_path, statement):
+    sys.path.insert(0, str(PROGRAMS))
+    import phase1_doc_one_shot_runner as phase1
+
+    project, spec, rtl = _project(
+        tmp_path, delegation=False, declaration=FOREIGN_DECLARATION)
+    document = DELEGATION.replace(
+        "The concrete signal names for this port group are declared by the "
+        "plugin in declaration.json.", statement)
+    (project / "input/docs/L3_external_interface.md").write_text(document)
+    phase1.gen_l9_integration_spec(
+        project, {"L3_external_interface.md": document}, {})
+    emitted = json.loads(spec.read_text())
+    emitted["top_module"] = "dut"
+    emitted["ports"] = emitted["top_ports"] = [
+        {"name": "o_sram_addr", "direction": "output", "width": 10},
+        {"name": "o_sram_we", "direction": "output", "width": 1},
+    ]
+    spec.write_text(json.dumps(emitted))
+    result, findings = _check(project, spec, rtl)
+    assert emitted["plugin_declared_port_groups"] == L9_GROUP
+    assert result.returncode == 1
+    assert ("port-extra", "o_sram_waddr") in _errors(findings)
 
 
 def test_full_stack_tb_resolves_the_same_declared_interface(tmp_path):
