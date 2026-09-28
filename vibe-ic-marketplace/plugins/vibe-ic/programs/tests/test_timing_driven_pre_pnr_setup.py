@@ -4,12 +4,16 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import librelane_prelayout as prelayout
 from _hostpaths import require_repo
+from test_phase3_cache_producer_identity import _drive, _plan, _project
+import phase3_one_shot_runner as runner
 
 
 def _path(slack: float) -> str:
@@ -101,3 +105,43 @@ def test_report_must_bind_current_netlist_and_sdc(tmp_path):
     assert prelayout.pre_pnr_setup_gate(
         matrix, reports, output, netlist=netlist, sdc=sdc
     )["reason"] == "SS_REPORT_NETLIST_IDENTITY_STALE"
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_step10_black_box_blocks_both_pnr_paths(tmp_path, monkeypatch, cached):
+    """A positive, current SS path cannot override Step 10's failed link check."""
+    project = _project(tmp_path, stamp=cached)
+    called = _drive(monkeypatch, project)
+    netlist = runner._pl.synth_dir(project) / "chip_top_synth.v"
+    sdc = runner._pl.pnr_dir(project) / "constraint.sdc"
+    matrix = runner._pl.constraints_dir(project) / "pvt_matrix.json"
+    matrix.write_text(json.dumps({"corners": [
+        {"label": "SS", "name": "slow", "liberty": "slow.lib"}]}))
+    reports = runner._pl.sta_dir(project) / "per_corner"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "sta_SS.rpt").write_text(
+        _path(0.43)
+        + f"STA_BASIS_NETLIST_SHA256: sha256:{prelayout.digest(netlist)}\n"
+        + f"STA_BASIS_SDC_SHA256: sha256:{prelayout.digest(sdc)}\n")
+
+    # Replay a typed Step 10 producer row judged from a checked-in OpenSTA
+    # black-box log. The consumer under test is the real runner main().
+    from test_mig_sdcsta import sta_folder
+    folder, _ = sta_folder(tmp_path / "tool", log="sta_prepnr_black_box_positive.log")
+    step10 = prelayout.judge_slack(folder, tmp_path / "step10.json")
+    assert step10["verdict"] == "FAIL"
+    assert "LL_STA_BLACK_BOX" in " ".join(step10["findings"])
+    monkeypatch.setattr(runner, "step_prelayout_signoff", lambda *a, **k:
+        runner.StepResult("prelayout_signoff", "FAIL", 0.0,
+                          "step 10 gate FAIL: LL_STA_BLACK_BOX",
+                          [str(tmp_path / "step10.json")]))
+
+    runner.main()
+    plan = _plan(project)
+    assert plan["pre_pnr_setup"]["status"] == "PASS", plan["pre_pnr_setup"]
+    assert plan["prelayout_signoff"]["status"] == "FAIL"
+    assert plan["pnr"]["status"] == "NOT_MEASURED", plan["pnr"]
+    assert "LL_STA_BLACK_BOX" in plan["pnr"]["detail"]
+    assert "pnr" not in called, "a failed Step 10 must block a new route"
+    assert "skipped re-run" not in plan["pnr"]["detail"], (
+        "a failed Step 10 must also block cached route admission")
