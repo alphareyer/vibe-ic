@@ -134,7 +134,7 @@ def _def(components, n_through=6):
         f"- {i} {m} + FIXED ( {x} {y} ) {o} ;" for i, m, x, y, o in components)
     return ("UNITS DISTANCE MICRONS 1000 ;\n"
             f"COMPONENTS {len(components)} ;\n{comps}\nEND COMPONENTS\n"
-            "SPECIALNETS 1 ;\n" + "\n".join(rows) + "\nEND SPECIALNETS\n")
+            f"SPECIALNETS {len(rows)} ;\n" + "\n".join(rows) + "\nEND SPECIALNETS\n")
 
 
 def _project(tmp_path, crossed_lef_at, *, with_decoy=True,

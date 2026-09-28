@@ -69,7 +69,7 @@ def _def(n_through=28, n_clear=12, orient="N", short_first=False):
                     f"FOLLOWPIN ( 100000 {y} ) ( 400000 {y} ) ;")
     return ("UNITS DISTANCE MICRONS 1000 ;\nCOMPONENTS 1 ;\n"
             f"- u_ip big_ip + FIXED ( 200000 100000 ) {orient} ;\n"
-            "END COMPONENTS\nSPECIALNETS 2 ;\n" + "\n".join(rows)
+            f"END COMPONENTS\nSPECIALNETS {len(rows)} ;\n" + "\n".join(rows)
             + "\nEND SPECIALNETS\n")
 
 

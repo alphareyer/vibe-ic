@@ -198,6 +198,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import _routed_checker_progress as _routed_progress
 import _semantic_child_progress as _semantic_progress
 import _flow_reason_taxonomy as _reason_taxonomy  # noqa: E402  vibe-ic#1978
+import _structural_absence as _structural_absence
 
 
 PROGRESS_SCOPE = "routed-def:macro-obs-geometry-intersect"
@@ -526,6 +527,11 @@ _PATH_KEYWORDS = {
 }
 
 
+def _is_supply_specialnet(entry: str) -> bool:
+    """DEF USE, not the net's spelling, identifies PDN power/ground metal."""
+    return bool(re.search(r"\+\s*USE\s+(?:POWER|GROUND)\b", entry, re.I))
+
+
 def parse_via_layers(def_text: str) -> Dict[str, Tuple[str, str]]:
     """{viaName: (lowerRoutingLayer, upperRoutingLayer)} from the VIAS section.
 
@@ -693,6 +699,8 @@ def parse_routed_segments_with_gaps(
     for entry in re.split(r"\n\s*-\s+", sec.group(1)):
         nm = re.match(r"\s*(\S+)", entry)
         net = nm.group(1) if nm else "?"
+        if not _is_supply_specialnet(entry):
+            continue
         heads = list(_PATH_HEAD_RE.finditer(entry))
         for i, hm in enumerate(heads):
             end = heads[i + 1].start() if i + 1 < len(heads) else len(entry)
@@ -718,6 +726,40 @@ def parse_routed_segments(def_text: str) -> List[Dict[str, Any]]:
     takes only this is asserting it does not care how much was read, and no
     caller inside this program does that any more."""
     return parse_routed_segments_with_gaps(def_text)[0]
+
+
+def pdn_read_evidence(def_text: str, gaps: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Prove that the DEF special-net population was read before claiming absence.
+
+    A missing END, inconsistent declared count, or route grammar the segment
+    reader did not recognize cannot establish that any layer has zero supply
+    geometry. The check is confined to SPECIALNETS; signal routing and process
+    layers are separate subjects.
+    """
+    sec = re.search(r"^\s*SPECIALNETS\s+(\d+)\s*;(.*?)^\s*END\s+SPECIALNETS\b",
+                    def_text, re.S | re.M)
+    if sec is None:
+        return {"complete": False, "issue": "DEF SPECIALNETS section is missing or unterminated",
+                "declared_nets": None, "parsed_nets": 0}
+    declared = int(sec.group(1))
+    entries = re.findall(r"^\s*-\s+\S+[^;]*;", sec.group(2), re.S | re.M)
+    parsed = len(entries)
+    issue = ""
+    if declared != parsed:
+        issue = f"DEF SPECIALNETS declares {declared} net(s), parsed {parsed}"
+    elif gaps:
+        issue = f"{len(gaps)} special-net path(s) abandoned before their end"
+    else:
+        for entry in entries:
+            if not _is_supply_specialnet(entry):
+                continue
+            route_markers = len(re.findall(r"\+\s*(?:ROUTED|FIXED|COVER)\b|\bNEW\b",
+                                           entry, re.I))
+            if route_markers != len(_PATH_HEAD_RE.findall(entry)):
+                issue = "DEF SPECIALNETS contains route grammar not read as a path"
+                break
+    return {"complete": not issue, "issue": issue,
+            "declared_nets": declared, "parsed_nets": parsed}
 
 
 def spans(seg: Dict[str, Any], box: Tuple[float, float, float, float]) -> bool:
@@ -904,11 +946,39 @@ def audit(def_text: str, macro_lef_texts: Sequence[str],
                           for (layer, *_r) in with_obs[m["master"]]["obs"]})
     _seg_layers = {s["layer"].lower() for s in segs}
     _no_segment_layers = [ly for ly in _obs_layers if ly not in _seg_layers]
+    pdn = pdn_read_evidence(def_text, gaps)
 
     findings_by_layer: Dict[str, int] = {}
     for _f in findings:
         k = _f["layer"].lower()
         findings_by_layer[k] = findings_by_layer.get(k, 0) + 1
+
+    segment_counts: Dict[str, int] = {}
+    for s in segs:
+        layer = s["layer"].lower()
+        segment_counts[layer] = segment_counts.get(layer, 0) + 1
+    layer_applicability: Dict[str, Dict[str, Any]] = {}
+    for layer in _obs_layers:
+        count = segment_counts.get(layer, 0)
+        if findings_by_layer.get(layer, 0):
+            verdict = "FAIL"
+        elif not pdn["complete"]:
+            verdict = "NOT_MEASURED"
+        elif count:
+            verdict = "PASS"
+        else:
+            verdict = _structural_absence.NOT_APPLICABLE_BY_STRUCTURE
+        layer_applicability[layer] = {
+            "verdict": verdict,
+            "supply_segments_on_layer": count,
+            "proof": {
+                "source": "routed DEF SPECIALNETS",
+                "declared_nets": pdn["declared_nets"],
+                "parsed_nets": pdn["parsed_nets"],
+                "read_complete": pdn["complete"],
+                "supply_layers_read": sorted(_seg_layers),
+            },
+        }
 
     # #828 — the denominator this gate could not see. A master that is
     # PLACED but that no supplied LEF declares at all is a master whose OBS,
@@ -988,6 +1058,8 @@ def audit(def_text: str, macro_lef_texts: Sequence[str],
             f"{len(without_lef)} placed master(s) have no LEF declaration in "
             f"the set that was read, so their obstructions — if any — were "
             f"never compared")
+    if not pdn["complete"] and not gaps:
+        _floor_reasons.append(pdn["issue"])
     # NOT a floor reason on its own, and the distinction is the whole point. A
     # macro may declare an obstruction on a layer the design simply carries no
     # supply metal on; 0 findings there is then a TRUE clearance, and calling it
@@ -1027,6 +1099,12 @@ def audit(def_text: str, macro_lef_texts: Sequence[str],
         # `findings_by_layer` for such a layer is not a clean result.
         "obs_layers_compared": _obs_layers,
         "obs_layers_with_no_supply_segment_read": _no_segment_layers,
+        "obs_layer_applicability": layer_applicability,
+        "pdn_supply_layers_read": sorted(_seg_layers),
+        "pdn_read_complete": pdn["complete"],
+        "pdn_read_issue": pdn["issue"],
+        "pdn_specialnets_declared": pdn["declared_nets"],
+        "pdn_specialnets_parsed": pdn["parsed_nets"],
         "placed_masters": len(placed_masters),
         "masters_declared_by_lef": sorted(obs_by_master),
         "placed_masters_without_lef": without_lef,
@@ -1344,7 +1422,15 @@ def _main_parsed(a) -> int:
         return _typed_refusal(a.json_out, "macro_obs_geometry_intersect",
                               cls, reason)
 
-    rep = audit(_read_input_text(def_p), texts, labels)
+    try:
+        def_text = _read_input_text(def_p)
+    except OSError as exc:
+        reason = f"routed DEF could not be read: {exc}. NOT a pass."
+        print(f"[CANNOT DETERMINE] macro_obs_geometry_intersect: {reason}",
+              file=sys.stderr)
+        return _typed_refusal(a.json_out, "macro_obs_geometry_intersect",
+                              _reason_taxonomy.BLOCKED_BY_UPSTREAM, reason)
+    rep = audit(def_text, texts, labels)
     if a.json_out:
         a.json_out.parent.mkdir(parents=True, exist_ok=True)
         a.json_out.write_text(json.dumps(rep, indent=2) + "\n")
@@ -1549,6 +1635,30 @@ def _main_parsed(a) -> int:
             f"be read to the end (the layer after a via is unknown without "
             f"the tech LEF). NOT a pass.", rep)
 
+    if not rep["pdn_read_complete"]:
+        reason = (f"PDN layer population was not completely read from the "
+                  f"routed DEF: {rep['pdn_read_issue']}. No absent supply "
+                  f"layer is certified. NOT a pass.")
+        print(f"[CANNOT DETERMINE] macro_obs_geometry_intersect: {reason}",
+              file=sys.stderr)
+        return _typed_refusal(a.json_out, "macro_obs_geometry_intersect",
+                              _reason_taxonomy.BLOCKED_BY_UPSTREAM, reason, rep)
+
+    if (rep["obs_layers_compared"] and
+            all(rec["verdict"] == _structural_absence.NOT_APPLICABLE_BY_STRUCTURE
+                for rec in rep["obs_layer_applicability"].values())):
+        proof = _structural_absence.absence(
+            "routed DEF SPECIALNETS section", 1, 0,
+            detail=("complete special-net read; supply segment layers: "
+                    + (", ".join(rep["pdn_supply_layers_read"]) or "none")))
+        rep["structural_absence"] = proof
+        reason = ("no supply segment exists on any placed macro OBS layer "
+                  "in the completely read routed DEF")
+        print(_structural_absence.sentence(proof, "macro OBS/supply intersection"))
+        return _typed_refusal(
+            a.json_out, "macro_obs_geometry_intersect",
+            _reason_taxonomy.NOT_APPLICABLE_BY_STRUCTURE, reason, rep)
+
     # The completeness claim is computed from the property the verdict READS —
     # obstruction geometry that reached the comparison — and the weaker
     # precondition it used to be derived from ("resolved to a LEF") is printed
@@ -1560,6 +1670,13 @@ def _main_parsed(a) -> int:
           f"instance(s) of {len(consumed)} placed master(s) whose LEF declares an "
           f"OBS, {rep['special_segments']} supply segment(s), 0 path(s) abandoned "
           f"— none spans an obstruction.")
+    na_layers = [layer for layer, rec in rep["obs_layer_applicability"].items()
+                 if rec["verdict"] == _structural_absence.NOT_APPLICABLE_BY_STRUCTURE]
+    if na_layers:
+        print("  NOT_APPLICABLE_BY_STRUCTURE on OBS layer(s) "
+              + ", ".join(na_layers)
+              + ": complete routed DEF SPECIALNETS read contains no supply "
+                "segment on these layers.")
     # NO BARE UNIVERSAL QUANTIFIER over the precondition count. "All N placed
     # master(s) resolved to a LEF" is true and reads as the verdict's own
     # denominator; stating both ratios keeps the reader from having to know
