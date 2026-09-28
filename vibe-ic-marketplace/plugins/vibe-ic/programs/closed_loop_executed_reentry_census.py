@@ -449,8 +449,27 @@ def summarise(sites: Sequence[Dict]) -> Dict[str, Dict[str, int]]:
     return out
 
 
+def _direct_helper_calls(runners: Sequence[Path]) -> Dict[Tuple[str, str], Set[str]]:
+    """Derive same-file caller to helper edges from the current runner AST."""
+    edges: Dict[Tuple[str, str], Set[str]] = {}
+    for path in runners:
+        try:
+            tree = ast.parse(path.read_text(errors="replace"))
+        except (OSError, SyntaxError):
+            continue
+        functions = {n.name: n for n in tree.body
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for name, fn in functions.items():
+            calls = {_callee_name(n) for n in ast.walk(fn)
+                     if isinstance(n, ast.Call)}
+            edges[(path.name, name)] = {c for c in calls if c in functions}
+    return edges
+
+
 def regressions(now: Dict[str, Dict[str, int]],
-                base: Dict[str, Dict[str, int]]) -> List[str]:
+                base: Dict[str, Dict[str, int]],
+                helper_calls: Optional[Dict[Tuple[str, str], Set[str]]] = None
+                ) -> List[str]:
     """A recorded site that has LOST a signal.
 
     Counted per key and per tier, because that is the shape a real regression
@@ -458,17 +477,37 @@ def regressions(now: Dict[str, Dict[str, int]],
     key survives while one of its two sites falls a tier.
     """
     out: List[str] = []
+    helper_calls = helper_calls or {}
+    # A re-entry moved into a directly called helper keeps the same primitive
+    # and verdict. Credit only surplus sites absent from the old baseline;
+    # a lower-tier helper or an unrelated new call cannot hide a regression.
+    available = {k: dict(v) for k, v in now.items() if k not in base}
     for key, want in sorted(base.items()):
         have = now.get(key)
-        if have is None:
+        parts = key.split("::")
+        candidates = []
+        if len(parts) == 3:
+            file, fn, callee = parts
+            candidates = [f"{file}::{helper}::{callee}"
+                          for helper in helper_calls.get((file, fn), set())]
+        if have is None and not any(available.get(c) for c in candidates):
             out.append(f"{key}: recorded here and no longer present — the "
                        f"re-entry was deleted or renamed; re-record the "
                        f"baseline in the same change that removes it")
             continue
         for tier in (ACTUATING, SELF_CHECKED_ONLY):
-            if have.get(tier, 0) < want.get(tier, 0):
+            current = have.get(tier, 0) if have else 0
+            for candidate in sorted(candidates):
+                if current >= want.get(tier, 0):
+                    break
+                credit = min(want.get(tier, 0) - current,
+                             available.get(candidate, {}).get(tier, 0))
+                current += credit
+                if credit:
+                    available[candidate][tier] -= credit
+            if current < want.get(tier, 0):
                 out.append(
-                    f"{key}: {tier} {want[tier]} -> {have.get(tier, 0)}; a "
+                    f"{key}: {tier} {want[tier]} -> {current}; a "
                     f"re-entry site that used to be able to change or check "
                     f"itself no longer can")
     return out
@@ -609,7 +648,7 @@ def main(argv=None) -> int:
             base = json.loads(bpath.read_text(errors="replace"))
         except (OSError, ValueError):
             base = {}
-    regs = regressions(now, base)
+    regs = regressions(now, base, _direct_helper_calls(runners))
 
     rep = {
         "runners": [r.name for r in runners],
