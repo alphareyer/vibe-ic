@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -94,6 +95,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
+import _progress_run as _progress  # noqa: E402 — long EDA work is stall-supervised
 
 # The scorer's pinned toolchain (cvdp-sim image). Used ONLY to DISCLOSE a
 # host/scorer version skew — never to block. chip-AGNOSTIC (tool versions,
@@ -242,13 +244,20 @@ def resolve_top(code: str, top: Optional[str]) -> Tuple[Optional[str], str]:
                           f"using last-declared {declared[-1]!r} (advisory)")
 
 
-def _run(cmd: List[str], timeout: int = 120,
+def _run(cmd: List[str], timeout: Optional[int] = None,
          cwd: Optional[str] = None) -> Tuple[int, str, str]:
-    # FX-N1: on its `_eda_tool_route` route (the pinned image whenever a
-    # container route exists); a refused route is a FileNotFoundError -> 127.
+    # A timeout is reserved for short availability/version probes. Compile,
+    # lint and simulation work use a no-progress bound, not elapsed time.
     try:
-        cp = _tool_route.run(cmd, capture_output=True, text=True,
-                            timeout=timeout, cwd=cwd)
+        if timeout is not None:
+            cp = _tool_route.run(cmd, capture_output=True, text=True,
+                                 timeout=timeout, cwd=cwd)
+        else:
+            idle_s = 120.0
+            poll_s = min(30.0, max(0.25, idle_s / 4.0))
+            cp = _tool_route.supervised_run(
+                cmd, capture_output=True, text=True, cwd=cwd,
+                poll_s=poll_s, stall_looks=max(4, math.ceil(idle_s / poll_s)))
         return cp.returncode, cp.stdout, cp.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
@@ -262,7 +271,7 @@ def _tool_version(tool: str, flag: str = "-V") -> str:
         # the route's reason, not "absent": the version of a tool this run
         # cannot reach is unknown, and why is the part a reader can act on
         return f"unavailable ({_why_no_tool})"
-    rc, out, err = _run([tool, flag])
+    rc, out, err = _run([tool, flag], timeout=15)
     return ((out or err or "").splitlines() or ["unknown"])[0].strip()
 
 
@@ -286,8 +295,13 @@ def gate_a_standalone_compile(rtl_path: Path, top: str, workdir: Path,
                        "be enforced (disclosed, not silently passed)")
         return g
     out_vvp = workdir / "sim.vvp"
-    rc, out, err = _run(["iverilog", "-g2012", "-o", str(out_vvp),
-                         "-s", top, str(rtl_path)])
+    try:
+        rc, out, err = _run(["iverilog", "-g2012", "-o", str(out_vvp),
+                             "-s", top, str(rtl_path)])
+    except _progress.Stalled as exc:
+        g["verdict"] = "ERROR"
+        g["reason"] = f"standalone compile tool {exc}; {exc.stdout} {exc.stderr}"
+        return g
     blob = ((out or "") + "\n" + (err or "")).strip()
     if rc == 0:
         g["verdict"] = "PASS"
@@ -449,7 +463,12 @@ def gate_b_verilator_lint(rtl_path: Path, top: str, workdir: Path,
         cmd.append(f"-Wno-{w}")
     cmd += ["--Mdir", str(workdir / "obj_dir"),
             "--top-module", top, str(lint_src)]
-    rc, out, err = _run(cmd)
+    try:
+        rc, out, err = _run(cmd)
+    except _progress.Stalled as exc:
+        g["verdict"] = "ERROR"
+        g["reason"] = f"verilator lint tool {exc}; {exc.stdout} {exc.stderr}"
+        return g
     blob = ((out or "") + "\n" + (err or "")).strip()
     # Clean iff rc==0 AND no %Error / %Warning- token (rc-AND-token, version-
     # robust: some verilator builds report a lint warning without a nonzero
@@ -599,13 +618,23 @@ def gate_c_functional_tb(rtl_path: Path, tb_path: Optional[Path],
     if link_top:
         cmd += ["-s", link_top]
     cmd += [str(rtl_path), str(tb_path)]
-    rc, out, err = _run(cmd)
+    try:
+        rc, out, err = _run(cmd)
+    except _progress.Stalled as exc:
+        g["verdict"] = "ERROR"
+        g["reason"] = f"functional TB compile tool {exc}; {exc.stdout} {exc.stderr}"
+        return g
     if rc != 0:
         g["verdict"] = "BLOCK"
         g["reason"] = ("functional TB did not compile with the RTL: "
                        + "; ".join(((out or "") + (err or "")).splitlines()[:4]))
         return g
-    rc2, out2, err2 = _run(["vvp", str(binp)])
+    try:
+        rc2, out2, err2 = _run(["vvp", str(binp)])
+    except _progress.Stalled as exc:
+        g["verdict"] = "ERROR"
+        g["reason"] = f"functional TB simulation tool {exc}; {exc.stdout} {exc.stderr}"
+        return g
     sim_out = (out2 or "") + "\n" + (err2 or "")
     ok, why = _tb_verdict(sim_out)
     if ok is True:
