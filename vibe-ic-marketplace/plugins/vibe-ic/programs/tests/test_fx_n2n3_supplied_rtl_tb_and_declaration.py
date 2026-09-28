@@ -216,6 +216,16 @@ COMMENT_SHAPES = {
         "module core_top (input a, output y);\n"
         "  leaf_cell u (.a(a), .y(y));\n"
         "endmodule : core_top\n" + _LEAF.format(n="leaf_cell"))}, "core_top"),
+    # (d) an SV lifetime qualifier is not the module's name (review_wave7):
+    # the header mask made the keyword the sole root
+    "sv_lifetime_automatic": ({"top.sv": (
+        "module automatic top (input logic a, output logic y);\n"
+        "  leaf u_leaf (.a(a), .y(y));\n"
+        "endmodule\n" + _LEAF.format(n="leaf"))}, "top"),
+    "sv_lifetime_static": ({"top.sv": (
+        "module static top (input logic a, output logic y);\n"
+        "  leaf u_leaf (.a(a), .y(y));\n"
+        "endmodule\n" + _LEAF.format(n="leaf"))}, "top"),
 }
 
 
@@ -245,6 +255,59 @@ def test_staged_rtl_still_outranks_supplied_rtl(tmp_path):
     top, _note = VIBE._resolve_top_name(project, "product_name", "chip_top",
                                         False)
     assert top == "other_top"
+
+
+def test_an_explicit_top_is_kept_when_only_supplied_rtl_was_read(tmp_path):
+    """Unstaged input RTL is not the authoritative set the override needs:
+    phase 2 may still author a wrapper (consume's `chip_top`, catalog glue).
+    RED on the first landing: `wrap_top` was replaced by `core`, and the note
+    said it was checked against the staged RTL while rtl/ was empty."""
+    project = tmp_path / "exp"
+    vend = project / "input" / "vendor_rtl"
+    vend.mkdir(parents=True)
+    (vend / "core.v").write_text(
+        "module core (input a, output y); assign y = a; endmodule\n")
+    (project / "phase2" / "stage1" / "rtl").mkdir(parents=True)
+    top, note = VIBE._resolve_top_name(project, "product", "wrap_top",
+                                       explicit=True)
+    assert (top, note) == ("wrap_top", "")
+
+
+def test_a_top_the_supplied_scan_decides_names_its_evidence(tmp_path):
+    """The note says the top came from input RTL that is not yet staged, and
+    which files; before, a supplied derivation read like a staged one."""
+    project = _supplied_project(tmp_path)
+    top, note = VIBE._resolve_top_name(project, "product_name", "chip_top",
+                                       False)
+    assert top == "shift_top"
+    assert "derived from supplied input RTL (not yet staged): " \
+        "input/vendor_rtl/shift_top.v" in note, note
+
+
+def test_an_explicit_top_absent_from_staged_rtl_is_still_replaced(tmp_path):
+    """Control: the staged-RTL override is unchanged."""
+    rtl = tmp_path / "st" / "phase2" / "stage1" / "rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "core.v").write_text(
+        "module core (input a, output y); assign y = a; endmodule\n")
+    top, note = VIBE._resolve_top_name(tmp_path / "st", "product",
+                                       "wrap_top", explicit=True)
+    assert top == "core" and "not a module in the staged RTL" in note
+    assert "supplied" not in note
+
+
+def test_the_declaration_scan_register_names_only_live_offenders():
+    """A fixed scan's entry is deleted in the fixing commit; left behind it is
+    an open slot that would accept the raw scan back as recorded debt.
+    RED on the first landing: `_scan_rtl_modules` was fixed and still listed."""
+    import hdl_declaration_scan_strips_comments_check as G
+    root = _PROGRAMS.parent
+    now, problems = G.apply_exemptions(G.scan(root), root)
+    assert not problems
+    base = G._load(root / "programs" / G._BASELINE_NAME)
+    assert sorted(set(base) - set(now)) == []      # no stale slot
+    assert sorted(set(now) - set(base)) == []      # and no new raw scan
+    assert not any("::_scan_rtl_modules::" in k for k in base)
 
 
 # --------------------------------------------------------------------------
