@@ -354,6 +354,28 @@ def _healthy_body(stamp_line: str) -> str:
             "STA_BASIS_NOTE: pre-layout basis FORCED (Step 10)\n")
 
 
+def test_stale_input_identity_remeasures_and_recomposes(tmp_path, monkeypatch):
+    calls: list = []
+    body = _healthy_body("STA_BASIS: PRE_LAYOUT_ESTIMATE")
+    stale = body + ("STA_BASIS_NETLIST_SHA256: sha256:" + "0" * 64 + "\n"
+                    "STA_BASIS_SDC_SHA256: sha256:" + "0" * 64 + "\n")
+    proj = _rerun_project(
+        tmp_path,
+        per_corner_bodies={"sta_SS.rpt": stale, "sta_TT.rpt": stale},
+        pre_pnr_body=_PRE_LAYOUT_HEADER + stale)
+    _hermetic(monkeypatch, calls)
+    res = _run_step(proj)
+    sta = R._pl.sta_dir(proj)
+    expected = R._file_sha256(R._pl.synth_dir(proj) / f"{TOP}_synth.v")
+    assert calls == ["SS", "TT"]
+    assert (sta / "per_corner" / "sta_SS.rpt.stale_input").is_file()
+    assert f"STA_BASIS_NETLIST_SHA256: {expected}" in (
+        sta / "per_corner" / "sta_SS.rpt").read_text()
+    assert f"STA_BASIS_NETLIST_SHA256: {expected}" in (
+        sta / "pre_pnr_timing.rpt").read_text()
+    assert res.status == "PASS", (res.status, res.detail)
+
+
 def test_reverse_healthy_pre_layout_rerun_is_left_byte_identical(tmp_path,
                                                                  monkeypatch):
     """The over-correction this stops: quarantine/re-emit unconditionally.
