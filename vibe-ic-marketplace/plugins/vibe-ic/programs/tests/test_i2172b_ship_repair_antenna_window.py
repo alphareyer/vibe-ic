@@ -255,6 +255,26 @@ def test_receipt_bound_ll21_adoption_uses_the_pnr_tail(tmp_path):
     assert "antenna measured on: the PnR tail after LL21 step-32 adoption" in txt
 
 
+def test_missing_adopted_def_and_null_promotion_digest_refuse_pnr_count(tmp_path):
+    """A matching pair of absent digests cannot bind the adopted route."""
+    proj = _write_step32_evidence(_write_run(tmp_path, promoted=True,
+                                              ship_log=None))
+    (proj / "phase3" / "candidate.def").unlink()
+    record_path = proj / "reports" / "phase3" / "route_promotion.json"
+    record = json.loads(record_path.read_text())
+    record["promoted_def_sha256"] = None
+    record_path.write_text(json.dumps(record))
+
+    ok, rpt, _ = _emit(proj, tmp_path)
+    assert ok
+    txt = rpt.read_text()
+    result = json.loads((rpt.parent / "antenna.json").read_text())
+    assert "antenna clean: NO" in txt
+    assert "antenna measured on: NOTHING" in txt
+    assert result["shipped_route_measured"] is False
+    assert result["clean"] is False
+
+
 @pytest.mark.parametrize("case", ["direct_route", "receipt_mismatch",
                                   "nothing_adopted", "unmeasured_verdict"])
 def test_unbound_step32_cannot_borrow_pnr_antenna_count(tmp_path, case):
