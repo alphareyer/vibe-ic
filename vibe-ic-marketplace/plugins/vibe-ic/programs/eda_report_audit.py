@@ -1576,6 +1576,15 @@ def _empty_router_drc_receipt(report: Path) -> Optional[Path]:
     """
     if report.name != "routed_router.drc.rpt":
         return None
+    # Step snapshots publish this report as a symlink. The receipt belongs to
+    # the file that actually wrote the bytes, beside the canonical report and
+    # its log/DEF, not beside the snapshot link. Validate that whole producer
+    # tuple after resolution; a dangling or redirected alias cannot borrow a
+    # receipt from the Step folder.
+    try:
+        report = report.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
     receipt = report.parent / "routed_router.drc.receipt.json"
     log = report.parent / "openroad.log"
     try:
