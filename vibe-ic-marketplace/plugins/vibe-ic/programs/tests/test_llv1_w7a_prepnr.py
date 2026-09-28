@@ -211,11 +211,10 @@ def test_a_step7_record_that_does_not_hold_is_pending(staged, damage):
     assert res.status == "NOT_MEASURED" and "SDC_SEAM_PENDING" in res.detail
 
 
-@pytest.mark.parametrize("status,reason", [("FAIL", ""),
-                                           ("NOT_MEASURED", "tool_absent")])
-def test_a_chip_top_that_did_not_pass_stops_a_ring_path(staged, status, reason):
+def test_a_failed_chip_top_stops_a_ring_path(staged):
     """Review wave8 MAJOR: the producer's verdict is the step's when the chip
     path requests a ring, as step_pnr's pad-ring gate makes it."""
+    status, reason = "FAIL", ""
     staged.state.chip_top, staged.state.chip_top_reason = status, reason
     _step7_record(staged.project)
     res = _run(staged)
@@ -224,6 +223,55 @@ def test_a_chip_top_that_did_not_pass_stops_a_ring_path(staged, status, reason):
     staged.order.clear()
     staged.state.ring = False                  # no ring requested: not a gate
     assert _run(staged).status == "PASS"
+
+
+def test_a_nonmeasured_chip_top_keeps_later_failures_visible(staged):
+    """Wave9 MAJOR: only a plain producer FAIL may stop before floorplan.
+
+    The producer is unavailable, but the floorplan itself can still prove the
+    pinned die is too small. Replacing the `== FAIL` gate with `!= PASS`
+    makes this red by returning NOT_MEASURED before the floorplan dispatch.
+    """
+    staged.state.chip_top, staged.state.chip_top_reason = (
+        "NOT_MEASURED", "not_executed")
+    staged.state.fp_fail = True
+    _step7_record(staged.project)
+    res = _run(staged)
+    assert res.status == "FAIL" and "PDN_CORE_TOO_SMALL" in res.detail
+    assert staged.order == ["provenance_sink", "chip_top", "floorplan"]
+
+
+def test_a_nonmeasured_chip_top_cannot_turn_a_clean_ring_path_pass(staged):
+    staged.state.chip_top, staged.state.chip_top_reason = (
+        "NOT_MEASURED", "not_executed")
+    _step7_record(staged.project)
+    res = _run(staged)
+    assert (res.status, res.reason_class) == ("NOT_MEASURED", "not_executed")
+    assert staged.order == ["provenance_sink", "chip_top", "floorplan",
+                            "pad_assignment"]
+
+
+def test_the_seam_delegates_to_fxports_input_bound_reader(staged, monkeypatch):
+    """Wave9 MINOR: the FXPORT handover is executable, not a docstring.
+
+    This is red on the reviewed tip: it ignores the available reader, falls
+    through to its local record check, and reports the absent local record.
+    """
+    from _ppa import timing
+    sdc = staged.project / "from_fxport.sdc"
+    sdc.write_text("create_clock -period 8 [get_ports clk]\n")
+    calls = []
+
+    def reader(rt, project, top, pdk):
+        calls.append((rt, project, top, pdk.name))
+        return {"path": "from_fxport.sdc"}, ""
+
+    monkeypatch.setattr(timing, "read_step7_asic_sdc", reader,
+                        raising=False)
+    res = _run(staged)
+    assert res.status == "PASS"
+    assert res.extras["sdc"]["path"] == str(sdc)
+    assert calls and calls[0][1:] == (staged.project, "top", "gf180mcuD")
 
 
 def test_prepnr_refusals_stop_it(staged):

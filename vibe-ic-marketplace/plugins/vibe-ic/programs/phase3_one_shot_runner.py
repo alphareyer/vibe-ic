@@ -37794,7 +37794,7 @@ PREPNR_STEP7_SDC_SCHEMA = "vibe-ic/step7-asic-sdc/1"
 
 
 def _prepnr_constraint_file(project: Path, top: str,
-                            pdk_name: str) -> Tuple[Optional[Path], str]:
+                            pdk: Any) -> Tuple[Optional[Path], str]:
     """SEAM (llv1 W7a): the SDC the implementation segment reads.
 
     This step AUTHORS NO SDC, and it does not take a file's PRESENCE as step
@@ -37804,12 +37804,35 @@ def _prepnr_constraint_file(project: Path, top: str,
     one step 7's RECORD names (`constraints/asic_sdc.json`, written by lane
     fxport's step-7 producer): the record's path must exist, hash to the
     record's sha256, and have been authored for this top and PDK. When
-    fxport lands, its `read_step7_asic_sdc` (which also binds the deck to its
-    inputs) replaces this check. Without a record the answer is
+    fxport's `read_step7_asic_sdc` is available, this seam delegates to it;
+    that reader also binds the deck to the inputs Step 7 consumed. The deck
+    segment 2 receives here is the raw Step-7 design-intent deck. The
+    pad-ring supply-port DRV-scope derivation is PnR-time work, not silently
+    recreated by this read-only seam; W7b must carry it through a typed
+    segment contract before external implementation consumes it. Without a
+    record the answer is
     SDC_SEAM_PENDING -- the default flow is untouched: step_pnr still authors
     its own SDC exactly as main does.
     """
     import hashlib  # noqa: PLC0415
+    pdk_name = str(pdk.name)
+    # FXPORT owns the input-digest and recoverable-deck contract. Feature
+    # detection makes the handover automatic whichever branch lands second.
+    try:
+        from _ppa import timing as _ppa_timing  # noqa: PLC0415
+        _step7_reader = getattr(_ppa_timing, "read_step7_asic_sdc", None)
+    except ImportError:
+        _step7_reader = None
+    if callable(_step7_reader):
+        rec, why = _step7_reader(sys.modules[__name__], project, top, pdk)
+        if rec is None:
+            return None, f"SDC_SEAM_PENDING: fxport step-7 reader: {why}"
+        path = Path(project) / str(rec.get("path") or "")
+        if not path.is_file():
+            return None, ("SDC_SEAM_PENDING: fxport step-7 reader accepted "
+                          "no on-disk SDC path")
+        return path, ("step 7's input-bound design-intent SDC "
+                      f"({rec.get('path')})")
     rec_path = _pl.constraints_dir(project) / PREPNR_STEP7_SDC_RECORD
     pending = ("SDC_SEAM_PENDING: no step-7 SDC record "
                f"({rec_path.relative_to(project)}); the between-segments "
@@ -37867,12 +37890,12 @@ def step_prepnr(project: Path, top: str, pdk: PdkConfig, container: str,
         project, container, pdk,
         supply_plan=(em_floor_for_resize or {}).get("supply_entry_plan"))
     extras["chip_top"] = {"status": padring.status, "detail": padring.detail}
-    if ring and padring.status != _V.Verdict.PASS.value:
+    if ring and padring.status == _V.Verdict.FAIL.value:
         return StepResult("prepnr", padring.status, time.time() - t0,
                           f"chip-top producer: {padring.detail}",
                           extras=extras,
                           reason_class=getattr(padring, "reason_class", ""))
-    sdc, sdc_why = _prepnr_constraint_file(project, top, str(pdk.name))
+    sdc, sdc_why = _prepnr_constraint_file(project, top, pdk)
     extras["sdc"] = {"path": str(sdc) if sdc else None, "basis": sdc_why}
     fp = _prepnr_floorplan(project, top, pdk, container, die_um, util,
                            netlist, t0)
@@ -37888,15 +37911,22 @@ def step_prepnr(project: Path, top: str, pdk: PdkConfig, container: str,
             return StepResult("prepnr", assign.status, time.time() - t0,
                               f"pad assignment: {assign.detail}",
                               extras=extras, reason_class=assign.reason_class)
-    status = (_V.Verdict.PASS.value if sdc is not None
-              else _V.Verdict.NOT_MEASURED.value)
+    # A non-measured chip-top producer does not hide an independently
+    # measurable floorplan/assignment failure. If those steps ran clean, it
+    # still prevents a ring path from claiming PASS.
+    status = (_V.Verdict.NOT_MEASURED.value
+              if (ring and padring.status != _V.Verdict.PASS.value)
+              else (_V.Verdict.PASS.value if sdc is not None
+                    else _V.Verdict.NOT_MEASURED.value))
     return StepResult(
         "prepnr", status, time.time() - t0,
         (f"die {fp.die_w}x{fp.die_h} um, core pad {fp.core_pad} um; "
          f"chip top {padring.status}; {sdc_why}"),
         [str(project / FLOORPLAN_RECTANGLES_REL)], extras=extras,
-        reason_class=("" if sdc is not None
-                      else _V.ReasonClass.INPUT_ABSENT.value))
+        reason_class=(getattr(padring, "reason_class", "")
+                      if ring and padring.status != _V.Verdict.PASS.value
+                      else ("" if sdc is not None
+                            else _V.ReasonClass.INPUT_ABSENT.value)))
 
 
 def step_pnr(project: Path, top: str, pdk: PdkConfig,
