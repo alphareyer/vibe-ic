@@ -9,7 +9,7 @@ instead of a `docker exec` (~75 ms).
 
 THE FIX UNDER TEST: the image route starts ONE session container per process
 per image (same-path mounts by root, the memory ceiling, a label naming this
-host/pid/start time, `--pull never`, a `sleep` ceiling) and `docker exec`s every
+host/pid/start time, `--pull never`, and an owner-scoped lifetime) and `docker exec`s every
 call into it; a new mount root replaces it with the union; a container that
 died is recreated once, then refused; atexit removes it and a later process
 reaps an orphan whose owner is gone. The host PATH is never the fallback.
@@ -100,7 +100,7 @@ def test_concurrent_calls_in_one_process_share_one_session(docker_farm, tmp_path
 
 # ── what the session container is ───────────────────────────────────────────
 
-def test_the_session_carries_the_ceiling_the_owner_label_and_never_pulls(
+def test_the_session_carries_the_memory_ceiling_owner_label_and_never_pulls(
         docker_farm, tmp_path, monkeypatch):
     import _eda_tool_route as T
     monkeypatch.setenv("VIBEIC_DOCKER_MEMORY", "2g")
@@ -114,7 +114,7 @@ def test_the_session_carries_the_ceiling_the_owner_label_and_never_pulls(
     owner = run[run.index(f"{T.SESSION_LABEL}=1") + 2]
     assert owner.startswith(f"{T.SESSION_OWNER_LABEL}={socket.gethostname()}:{os.getpid()}:")
     assert run[run.index("--entrypoint") + 1] == "sleep"
-    assert run[img + 1] == str(T.SESSION_MAX_LIFETIME_S)
+    assert run[img + 1] == "infinity"
     assert f"{T._tmp_root()}:{T._tmp_root()}" in run      # the temp root, up front
 
 
@@ -131,6 +131,66 @@ def test_a_path_under_a_new_root_replaces_the_session_with_the_union_once(
     root = T.session_root(home)
     assert f"{root}:{root}" in runs[1] and f"{T._tmp_root()}:{T._tmp_root()}" in runs[1]
     assert len(T._RETIRED) == 1                          # retired, not killed
+
+
+def test_named_container_liveness_and_mounts_are_rechecked_between_calls(
+        docker_farm, tmp_path, monkeypatch):
+    """A container stopping after call one must route call two elsewhere."""
+    import _eda_tool_route as T
+    monkeypatch.setattr(T._pin, "container_attach_refusal", lambda *_a, **_k: "")
+    monkeypatch.setattr(T, "_container_image", lambda _name: docker_farm.image)
+    inspect = Path(f"{docker_farm.docker_log}.inspect")
+    inspect.write_text(f"true\n{tmp_path}|{tmp_path}\n")
+
+    first = T.run(["iverilog", "-V"], cwd=tmp_path, container="lane-eda",
+                  capture_output=True, text=True)
+    assert first.returncode == 0 and first.eda_route["route"] == T.ROUTE_CONTAINER
+    inspect.write_text("false\n")
+
+    second = T.run(["iverilog", "-V"], cwd=tmp_path, container="lane-eda",
+                   capture_output=True, text=True)
+    assert second.returncode == 0 and second.eda_route["route"] == T.ROUTE_IMAGE
+    inspect.write_text(f"true\n/other/path|/other/path\n")
+    third = T.run(["iverilog", "-V"], cwd=tmp_path, container="lane-eda",
+                  capture_output=True, text=True)
+    assert third.returncode == 0 and third.eda_route["route"] == T.ROUTE_IMAGE
+    calls = docker_farm.docker_calls()
+    assert len(_execs(docker_farm, "lane-eda")) == 1, calls
+    assert len(_session_runs(docker_farm)) == 1, calls
+
+
+def test_named_container_image_identity_is_rechecked_between_calls(monkeypatch):
+    import _eda_tool_route as T
+    digest = "a" * 64
+    other = "b" * 64
+    reads = []
+    values = iter([(digest, ""), (other, "")])
+    monkeypatch.setattr(T._pin, "reference_digest", lambda _ref: digest)
+    monkeypatch.setattr(T._pin, "local_repo_digests", lambda _ref: ([], ""))
+    monkeypatch.setattr(T._pin, "container_image_digest",
+                        lambda _name: reads.append(_name) or next(values))
+    image = f"repo/tool@sha256:{digest}"
+    assert T._container_runs_image("lane-eda", image) == (True, "")
+    same, why = T._container_runs_image("lane-eda", image)
+    assert same is False and "not the explicit image" in why
+    assert reads == ["lane-eda", "lane-eda"]
+
+
+def test_a_session_remains_usable_after_the_old_24_hour_boundary(
+        docker_farm, tmp_path, monkeypatch):
+    import _eda_tool_route as T
+    now = [100.0]
+    monkeypatch.setattr(T.time, "monotonic", lambda: now[0])
+    first = _iv(T, tmp_path)
+    assert first.returncode == 0
+    now[0] += 25 * 60 * 60
+    second = _iv(T, tmp_path)
+    assert second.returncode == 0
+    runs = _session_runs(docker_farm)
+    assert len(runs) == 1, docker_farm.docker_calls()
+    run = runs[0].split()
+    assert run[run.index(docker_farm.image) + 1] == "infinity"
+    assert len(_execs(docker_farm, " iverilog ")) == 2
 
 
 def test_the_replacement_keeps_every_earlier_root(docker_farm):

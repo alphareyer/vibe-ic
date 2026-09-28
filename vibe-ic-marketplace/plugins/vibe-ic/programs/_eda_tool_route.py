@@ -212,15 +212,12 @@ class Route:
 
 
 # --------------------------------------------------------------------------
-# per-process caches (a tool's banner and an image's contents do not change
-# under a running process; a container's state is re-read on every miss)
+# per-process caches (a tool's banner and a pinned image's contents do not
+# change under a running process; named-container state is checked each time)
 # --------------------------------------------------------------------------
 _LOCAL: Dict[str, dict] = {}
 _YOSYS_CMDS: Dict[str, Optional[frozenset]] = {}
 _IMAGE_TOOLS: Dict[str, Dict[str, bool]] = {}
-_CONTAINER_OK: Dict[str, Tuple[bool, str, List[Tuple[str, str]]]] = {}
-_CONTAINER_IMAGE: Dict[str, Optional[str]] = {}
-_EXPLICIT_MATCH: Dict[Tuple[str, str], Tuple[bool, str]] = {}
 _RECORDS: List[dict] = []
 _ANNOUNCED: set = set()
 
@@ -236,9 +233,6 @@ def reset_caches() -> None:
     _LOCAL.clear()
     _YOSYS_CMDS.clear()
     _IMAGE_TOOLS.clear()
-    _CONTAINER_OK.clear()
-    _CONTAINER_IMAGE.clear()
-    _EXPLICIT_MATCH.clear()
     _RECORDS.clear()
     _ANNOUNCED.clear()
 
@@ -525,9 +519,13 @@ def _named_container(container: Optional[str]) -> str:
 
 
 def _container_state(container: str) -> Tuple[bool, str, List[Tuple[str, str]]]:
-    """(usable, why_not, mounts) for a named container."""
-    if container in _CONTAINER_OK:
-        return _CONTAINER_OK[container]
+    """(usable, why_not, mounts), freshly inspected for a named container.
+
+    A named container can stop, be replaced, or lose a mount while this
+    process is alive. Caching a previous ``Running=true`` would turn the next
+    docker exec refusal into a tool's own nonzero exit, so liveness and mounts
+    are re-read for every route decision.
+    """
     try:
         cp = subprocess.run(
             ["docker", "inspect", container, "--format",
@@ -535,21 +533,17 @@ def _container_state(container: str) -> Tuple[bool, str, List[Tuple[str, str]]]:
             capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError) as exc:
         res = (False, f"docker inspect {container} failed: {exc}", [])
-        _CONTAINER_OK[container] = res
         return res
     if cp.returncode != 0:
         res = (False, f"no container named {container!r}", [])
-        _CONTAINER_OK[container] = res
         return res
     lines = cp.stdout.splitlines()
     if not lines or lines[0].strip() != "true":
         res = (False, f"container {container!r} is not running", [])
-        _CONTAINER_OK[container] = res
         return res
     why = _pin.container_attach_refusal(container)
     if why:
         res = (False, f"container {container!r} holds other bytes: {why}", [])
-        _CONTAINER_OK[container] = res
         return res
     mounts: List[Tuple[str, str]] = []
     for ln in lines[1:]:
@@ -559,7 +553,6 @@ def _container_state(container: str) -> Tuple[bool, str, List[Tuple[str, str]]]:
                 mounts.append((s.rstrip("/"), d.rstrip("/")))
     mounts.sort(key=lambda t: len(t[0]), reverse=True)
     res = (True, "", mounts)
-    _CONTAINER_OK[container] = res
     return res
 
 
@@ -622,8 +615,9 @@ def _image_ref(image: Optional[str]) -> Tuple[Optional[str], str]:
 #     still running in it finishes. Paths the image owns are never mounted.
 #   * LIFETIME: removed at interpreter exit (atexit); labelled with this
 #     host, pid and process start time, so a later process reaps a container
-#     whose owner is gone (SIGKILL skips atexit); and bounded by its own
-#     `sleep` ceiling.
+#     whose owner is gone (SIGKILL skips atexit). PID 1 has no wall-clock
+#     expiry: only owner cleanup/orphan reaping ends the session. Progressing
+#     tools are bounded by the per-call stall watchdog, not session age.
 #   * A CONTAINER THAT DIED (OOM, a daemon restart, removed underneath us) is
 #     recognised by docker's own daemon error on `exec`, confirmed with
 #     `docker inspect`, recreated ONCE, and the call re-run; a second death
@@ -634,8 +628,6 @@ def _image_ref(image: Optional[str]) -> Tuple[Optional[str], str]:
 
 SESSION_LABEL = "vibeic.eda_tool_route.session"
 SESSION_OWNER_LABEL = "vibeic.eda_tool_route.owner"
-#: Hard ceiling on a session container's own life, whatever its owner does.
-SESSION_MAX_LIFETIME_S = 24 * 3600
 SESSION_START_FAILED = "SESSION_START_FAILED"
 SESSION_DIED = "SESSION_CONTAINER_DIED"
 
@@ -740,8 +732,7 @@ def _start_session(image: str, roots: Iterable[str], tool: str) -> str:
             "--label", f"{SESSION_OWNER_LABEL}={_owner_tag()}"]
     for r in sorted(set(roots)):
         argv += ["-v", f"{r}:{r}"]
-    argv += ["--name", name, "--entrypoint", "sleep", image,
-             str(SESSION_MAX_LIFETIME_S)]
+    argv += ["--name", name, "--entrypoint", "sleep", image, "infinity"]
     try:
         cp = subprocess.run(argv, capture_output=True, text=True, timeout=180)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -885,17 +876,12 @@ def resolve(tool: str, argv: Optional[Sequence[str]] = None, *,
 
 
 def _container_image(name: str) -> Optional[str]:
-    """The portable reference of the bytes container `name` runs (cached)."""
-    if name not in _CONTAINER_IMAGE:
-        _CONTAINER_IMAGE[name], _ = _pin.container_image_reference(name)
-    return _CONTAINER_IMAGE[name]
+    """The portable reference of the bytes container `name` runs, freshly read."""
+    return _pin.container_image_reference(name)[0]
 
 
 def _container_runs_image(name: str, image: str) -> Tuple[bool, str]:
     """(same, why_not): does container `name` run the bytes `image` names?"""
-    key = (name, image)
-    if key in _EXPLICIT_MATCH:
-        return _EXPLICIT_MATCH[key]
     if _pin.is_bare_image_id(image):
         have, why = _pin.container_image_id(name)
         same = bool(have) and (have == image or have.startswith(image))
@@ -910,7 +896,6 @@ def _container_runs_image(name: str, image: str) -> Tuple[bool, str]:
         f"container {name!r} runs {have or 'an image that could not be read'}"
         f"{' (' + why + ')' if why and not have else ''}, not the explicit "
         f"image {image}"))
-    _EXPLICIT_MATCH[key] = res
     return res
 
 

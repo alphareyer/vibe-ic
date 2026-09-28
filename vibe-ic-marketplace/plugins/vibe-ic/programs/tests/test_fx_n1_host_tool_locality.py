@@ -87,7 +87,8 @@ def _fake_docker(bindir: Path, log: Path) -> Path:
         f"printf '%b' \"$rest\" > {log}.die; "
         "echo 'Error response from daemon: No such container: gone' >&2; exit 1; fi; exit 0;;\n"
         f"  ps) if [ -f {log}.ps ]; then while IFS= read -r l; do printf '%s\\n' \"$l\"; done < {log}.ps; fi; exit 0;;\n"
-        "  inspect|image) exit 1;;\n"
+        f"  inspect) if [ -f {log}.inspect ]; then while IFS= read -r l; do printf '%s\\n' \"$l\"; done < {log}.inspect; exit 0; fi; exit 1;;\n"
+        "  image) exit 1;;\n"
         "esac\n"
         "exit 0\n")
     d.chmod(0o755)
