@@ -194,6 +194,60 @@ def test_a_symlink_loop_falls_through_to_reader_unreadable_handling(project):
         assert rfb.design_input_denial(project, link) is None
 
 
+def test_a_readable_symlink_outside_input_is_denied(project):
+    outside = project / "golden" / "ports.md"
+    outside.parent.mkdir()
+    outside.write_text("input clock_in\n")
+    link = project / "input" / "docs" / "design.md"
+    link.symlink_to(outside)
+
+    assert link.is_file()
+    denial = rfb.design_input_denial(project, link)
+    observed = "DENIED" if denial else "ALLOWED"
+    assert observed == "DENIED"
+    assert denial == (
+        "§4.05: input file resolves outside input/")
+
+
+def test_the_phase1_port_reader_cannot_take_ports_through_an_escaping_link(
+        tmp_path):
+    from phase1_sufficiency_check import input_declares_ports
+
+    docs = tmp_path / "input" / "docs"
+    docs.mkdir(parents=True)
+    outside = tmp_path / "golden" / "ports.md"
+    outside.parent.mkdir()
+    outside.write_text("input clock_in\n")
+    (docs / "design.md").symlink_to(outside)
+
+    answer = input_declares_ports(tmp_path)
+    observed = "PORTS_CLAIMED" if answer is True else "NO_PORTS_CLAIMED"
+    assert observed == "NO_PORTS_CLAIMED"
+    assert answer is None
+
+
+def test_an_in_input_symlink_still_supplies_design_ports(tmp_path):
+    from phase1_sufficiency_check import input_declares_ports
+
+    docs = tmp_path / "input" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "ports.txt").write_text("input clock_in\n")
+    link = docs / "design.md"
+    link.symlink_to(docs / "ports.txt")
+
+    assert rfb.design_input_denial(tmp_path, link) is None
+    assert input_declares_ports(tmp_path) is True
+
+
+def test_a_dangling_link_outside_input_stays_unreadable(tmp_path):
+    docs = tmp_path / "input" / "docs"
+    docs.mkdir(parents=True)
+    link = docs / "design.md"
+    link.symlink_to(tmp_path / "golden" / "missing.md")
+
+    assert rfb.design_input_denial(tmp_path, link) is None
+
+
 def test_nested_reference_flow_oracle_directory_is_denied(project):
     path = project / "input/ip/reference_flow/golden/config.tcl"
     assert rfb.design_input_denial(project, path).startswith("§4.05")
