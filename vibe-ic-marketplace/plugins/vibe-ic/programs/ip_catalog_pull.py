@@ -22,6 +22,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -179,7 +180,8 @@ def _sha256_file(path: Path) -> str:
 def pull_catalog_ip(match: CatalogMatch,
                     project: Path,
                     dest_subdir: str = "phase2/stage1/rtl",
-                    *, official_only: bool = False) -> Dict[str, Any]:
+                    *, official_only: bool = False,
+                    cache_root: Optional[Path] = None) -> Dict[str, Any]:
     """Pull a single catalog IP's RTL files into project's canonical rtl/ dir.
 
     Returns audit dict with files_pulled, sha256 of each, license, etc.
@@ -218,7 +220,7 @@ def pull_catalog_ip(match: CatalogMatch,
     if src_dir is None:
         # Fallback: git clone canonical_url, checked out AT canonical_commit
         # and proven by sha -- never a silent fall-back to the branch tip.
-        src_dir, clone_pin = _git_clone_to_cache(match)
+        src_dir, clone_pin = _git_clone_to_cache(match, cache_root=cache_root)
         pull_method = "git_clone"
     if src_dir is None or not src_dir.is_dir():
         return {
@@ -566,7 +568,8 @@ def _pinned_head(repo: Path, pin: str) -> Dict[str, Any]:
             "canonical_commit_sha": want.stdout.strip() if want.returncode == 0 else None}
 
 
-def _git_clone_to_cache(match: CatalogMatch) -> tuple[Optional[Path], Dict[str, Any]]:
+def _git_clone_to_cache(match: CatalogMatch, *,
+                        cache_root: Optional[Path] = None) -> tuple[Optional[Path], Dict[str, Any]]:
     """Clone canonical_url and check out canonical_commit, PROVEN by sha.
 
     Returns ``(dir, record)``; ``dir`` is None unless git resolves HEAD and
@@ -584,7 +587,7 @@ def _git_clone_to_cache(match: CatalogMatch) -> tuple[Optional[Path], Dict[str, 
         record["reason"] = "manifest names no canonical_url/canonical_commit"
         return None, record
     safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in pin)
-    cache_dir = CACHE_ROOT / f"{match.ip_name}@{safe}"
+    cache_dir = (CACHE_ROOT if cache_root is None else cache_root) / f"{match.ip_name}@{safe}"
     if not cache_dir.is_dir():
         cache_dir.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache_dir.with_name(cache_dir.name + f".partial{time.time_ns()}")
@@ -616,11 +619,13 @@ def _git_clone_to_cache(match: CatalogMatch) -> tuple[Optional[Path], Dict[str, 
 
 def pull_all_catalog_matches(project: Path,
                               matches: List[CatalogMatch],
-                              *, official_only: bool = False) -> Dict[str, Any]:
+                              *, official_only: bool = False,
+                              cache_root: Optional[Path] = None) -> Dict[str, Any]:
     """Pull every matching IP, return aggregated audit + update declaration.json."""
     audits: List[Dict[str, Any]] = []
     for m in matches:
-        audit = (pull_catalog_ip(m, project, official_only=True)
+        audit = (pull_catalog_ip(m, project, official_only=True,
+                                 cache_root=cache_root)
                  if official_only else pull_catalog_ip(m, project))
         audits.append(audit)
 
@@ -700,6 +705,53 @@ def pull_all_catalog_matches(project: Path,
         manifest_path.write_text(json.dumps(mf, indent=2))
 
     return aggregated
+
+
+def verify_existing_official_pins(project: Path,
+                                  matches: List[CatalogMatch],
+                                  manifest: Dict[str, Any]) -> bool:
+    """Accept a prior official pull only after independently reproducing its bytes.
+
+    The project manifest and provenance are user-writable receipts, so matching
+    their hashes to the project's own RTL cannot establish upstream origin.
+    Re-run the pinned official pull in an isolated directory, then require its
+    complete pin records, pull events, and output bytes in the project.
+    """
+    if manifest.get("generated_by") != "ip_catalog_pull":
+        return False
+    pins = manifest.get("source_pins")
+    if not isinstance(pins, list) or len(pins) != len(matches):
+        return False
+    try:
+        events = [json.loads(line) for line in
+                  (project / "provenance.jsonl").read_text().splitlines()]
+    except (OSError, ValueError, TypeError):
+        return False
+    with tempfile.TemporaryDirectory(prefix="ip-pin-verify-") as scratch:
+        reference = Path(scratch)
+        audit = pull_all_catalog_matches(reference, matches, official_only=True,
+                                         cache_root=reference / ".cache")
+        if audit.get("n_ips_pulled") != len(matches) or audit.get("n_ips_failed"):
+            return False
+        ref_manifest = json.loads((reference / "phase2/stage1/rtl/SOURCE_MANIFEST.json").read_text())
+        if pins != ref_manifest.get("source_pins"):
+            return False
+        reference_events = [json.loads(line) for line in
+                            (reference / "provenance.jsonl").read_text().splitlines()]
+        for expected in reference_events:
+            if not any(isinstance(event, dict) and
+                       all(event.get(key) == expected.get(key) for key in (
+                           "event", "ip", "version", "license", "commit_pinned",
+                           "commit_checked_out", "errata_applied", "files_pulled",
+                           "outputs", "outputs_sha256"))
+                       for event in events):
+                return False
+            for rel, digest in expected["outputs"].items():
+                target = project / rel
+                if target.is_symlink() or not target.is_file() or \
+                        "sha256:" + _sha256_file(target) != digest:
+                    return False
+    return True
 
 
 # ---------------------------------------------------------------------------
