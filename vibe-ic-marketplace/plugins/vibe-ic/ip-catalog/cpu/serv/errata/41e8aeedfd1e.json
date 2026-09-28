@@ -1,0 +1,17 @@
+{
+  "schema": "vibeic.reused_ip_erratum.v1",
+  "ip": "serv",
+  "pinned_version": "1.4.0",
+  "upstream": "github.com/olofk/serv",
+  "pinned_commit": "7d9cde4e6ca4f4c84d7512a752a4c187537dd373",
+  "file": "servile/servile_rf_mem_if.v",
+  "sha256_before": "599cabd2bbdee988ead8531f317e0bd6c7a16e5a48562746e49e352b4aa446d2",
+  "fix_commit": "41e8aeedfd1e9ad5f95902c5b0dfc83d1c99e5d2",
+  "fix_parent": "838d16615e81786062fae84b9f7c044fb8f6bbe4",
+  "fix_title": "Fix zero register handling in servile_rf_mem_if module",
+  "fix_url": "https://raw.githubusercontent.com/olofk/serv/41e8aeedfd1e9ad5f95902c5b0dfc83d1c99e5d2/servile/servile_rf_mem_if.v",
+  "sha256_after": "6829a9a568b00df2c4905b35a916c14dd747538ad1091c3852ebf43cfded408d",
+  "erratum": "x0 zeroing",
+  "reason": "The pinned file zeroes the read of x31 instead of x0 (regzero <= &i_raddr[rf_depth-1:2]), so x0 reads whatever the SRAM word behind it holds. Found by the ISA suite producer: riscv-arch-test 3.9.1 I+Zifencei signatures against Spike match on 9 of 40 programs with the pinned file and on 40 of 40 with the upstream fix; on non-zero SRAM power-up (0xFF, 0xA5) the pinned file hangs even riscv-tests `simple`. The file at the fix commit's parent is byte-identical to the pinned one (sha256_before), so the fetched file is the pinned file plus exactly this fix.",
+  "owner_ruling": "isaprod_rulings 2026-09-28 ruling 2 (B): apply upstream 41e8aeedfd1e as a disclosed deviation; keep the unmodified-RTL result as evidence"
+}
