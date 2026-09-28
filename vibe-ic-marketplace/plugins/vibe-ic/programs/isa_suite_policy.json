@@ -1,0 +1,9 @@
+{
+  "schema": "vibeic.isa_suite_policy.v1",
+  "external_suite_fetch": "allowed",
+  "external_suite_fetch_ruling": "isaprod_rulings 2026-09-28 ruling 1: ALLOW — the flow may fetch the pinned public ISA suites itself (sha256-verified, never from a benchmark directory). Set to \"refused\" to make every ISA case NOT_MEASURED by name.",
+  "reused_ip_errata": "apply",
+  "reused_ip_errata_ruling": "isaprod_rulings 2026-09-28 ruling 2: B — apply a pinned upstream erratum to the STAGED RTL as a disclosed deviation; the unmodified-RTL result is kept as evidence. Set to \"report_supplied\" (ruling A) to stage the supplied RTL unchanged and judge it.",
+  "instruction_total": "derive_from_declaration",
+  "instruction_total_ruling": "isaprod_rulings 2026-09-28 ruling 3: the base-ISA denominator excludes the trap-dependent instructions (ECALL, EBREAK) exactly when the design declares no trap support; a trap-capable core is judged on all of them."
+}
