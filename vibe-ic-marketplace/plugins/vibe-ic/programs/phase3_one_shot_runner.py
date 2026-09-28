@@ -75538,6 +75538,7 @@ def _phase3_window_publication(project: Path, isolated: Path,
     inputs: Dict[str, str] = {}
     pending = list(sources)
     examined: Set[str] = set()
+    import _cited_artefacts as _ca
     try:
         while pending:
             source = pending.pop()
@@ -75555,51 +75556,53 @@ def _phase3_window_publication(project: Path, isolated: Path,
             except (OSError, ValueError):
                 continue
 
-            def visit(value: Any) -> None:
+            def cite(token: str) -> None:
+                """Resolve one citation against its owning project, then bind it."""
+                path = Path(token)
+                owner = root if path.is_absolute() else private
+                normalized = Path(os.path.normpath(
+                    path if path.is_absolute() else private / path))
+                resolved = normalized.resolve()
+                if (not normalized.is_relative_to(owner)
+                        or not resolved.is_relative_to(owner)):
+                    raise ValueError(f"window input outside project: {token}")
+                # A relative symlink would leave a dangling alias after the
+                # private tree is discarded; selected outputs must be files.
+                if not path.is_absolute() and resolved != normalized:
+                    raise ValueError(f"relative window input is symlink: {token}")
+                if not resolved.is_file():
+                    raise ValueError(f"window cited input absent: {token}")
+                name = str(resolved.relative_to(owner))
+                if path.is_absolute():
+                    inputs[name] = _sha256_file(resolved)
+                elif resolved != source.resolve():
+                    inputs[name] = _sha256_file(resolved)
+                    pending.append(resolved)
+
+            def visit(value: Any, *, path_field: bool = False) -> None:
                 if isinstance(value, dict):
-                    for item in value.values():
-                        visit(item)
+                    for key, item in value.items():
+                        visit(item, path_field=_ca._path_field(key))
                 elif isinstance(value, list):
                     for item in value:
-                        visit(item)
+                        visit(item, path_field=path_field)
                 elif isinstance(value, str):
-                    # Both a complete path field and one embedded in prose
-                    # are references. The latter is common in tool reports.
+                    # A declared file field is a citation even when absent.
+                    # Other strings retain the existing file/prose discovery.
                     if value.startswith(("http:", "https:")):
                         return
-                    path_value = Path(value)
-                    if path_value.is_absolute():
-                        paths = [value]
-                    else:
-                        candidate = private / path_value
-                        normalized = Path(os.path.normpath(candidate))
-                        if candidate.is_file():
-                            resolved = candidate.resolve()
-                            if (not normalized.is_relative_to(private)
-                                    or resolved != normalized):
-                                raise ValueError(
-                                    f"relative window input outside private tree or symlink: {value}")
-                            if resolved != source.resolve():
-                                name = str(resolved.relative_to(private))
-                                inputs[name] = _sha256_file(resolved)
-                                pending.append(resolved)
-                            return
-                        paths = re.findall(
-                            r"(?<![A-Za-z0-9:/.])/(?!/)[^\s,;\"'()\[\]{}]+", value)
-                    for token in paths:
-                        path = Path(token.rstrip("."))
-                        if not path.resolve().is_relative_to(root):
-                            raise ValueError(
-                                f"embedded absolute path outside project: {path}")
-                        if not path.is_file():
-                            raise ValueError(f"embedded project input absent: {path}")
-                        name = str(path.resolve().relative_to(root))
-                        inputs[name] = _sha256_file(path)
+                    candidate = private / value
+                    if (path_field or Path(value).is_absolute()
+                            or candidate.is_file() or candidate.is_symlink()):
+                        cite(value)
+                        return
+                    for token in re.findall(
+                            r"(?<![A-Za-z0-9:/.])/(?!/)[^\s,;\"'()\[\]{}]+", value):
+                        cite(token.rstrip("."))
 
             visit(doc)
         receipt = (root / "reports/audit/windows"
                    / window_run_id / "publication.json")
-        import _cited_artefacts as _ca
         try:
             run_record = json.loads((root / _ca.REPORT_REL).read_text())
             cited = run_record.get("cited_artefacts") or {}
