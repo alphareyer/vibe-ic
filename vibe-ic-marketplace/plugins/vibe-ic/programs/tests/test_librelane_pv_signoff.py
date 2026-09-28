@@ -559,6 +559,22 @@ def test_an_applied_remediation_is_the_tech_lef_every_geometry_step_reads(tmp_pa
     assert overlay["TECH_LEFS"][0] == {"*": str(tlef.resolve())}
 
 
+def test_copied_run_prefers_its_hash_matched_tech_lef_over_the_source_tree(tmp_path):
+    source = tmp_path / "source" / "active_via_legalized.tlef"
+    source.parent.mkdir()
+    source.write_text("VIA Via1 ;")
+    project = tmp_path / "copy"
+    local = _legalized(project, recorded=str(source))
+
+    path, _ = pv.route_tech_lef(project)
+
+    assert path == local.resolve()
+    assert pv.tech_lef_overlay(project)["TECH_LEFS"][0] == {"*": str(local.resolve())}
+    local.unlink()
+    with pytest.raises(contract.Refusal, match="LL_ROUTE_TECH_LEF_UNBOUND"):
+        pv.route_tech_lef(project)
+
+
 def test_an_applied_remediation_whose_bytes_changed_refuses(tmp_path):
     _legalized(tmp_path, sha="0" * 64)
     with pytest.raises(contract.Refusal, match="LL_ROUTE_TECH_LEF_UNBOUND"):
