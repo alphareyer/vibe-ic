@@ -142,6 +142,26 @@ def test_without_a_registry_the_default_is_named_not_invented(tmp_path):
     assert row['tool_default'] is None and 'registry not supplied' in row['source']
 
 
+def test_measured_none_default_differs_from_unmeasured_default(tmp_path):
+    registry = dict(MEASURED_REGISTRY_0383)
+    registry['CTS_SINK_CLUSTERING_SIZE'] = {
+        'default': None, 'default_measured': True}
+    registry['PL_TARGET_DENSITY_PCT'] = {
+        'default': None, 'default_measured': False,
+        'not_measured_reason': 'the flow computes it at run time',
+        'defaults_by_flow': {'classic': 'runtime'}}
+    variables = resolve(tmp_path, registry=registry)['record']['variables']
+    measured = variables['CTS_SINK_CLUSTERING_SIZE']
+    unmeasured = variables['PL_TARGET_DENSITY_PCT']
+    assert measured['tool_default'] is None
+    assert 'tool_default_measured' not in measured
+    assert 'tool_default' not in unmeasured
+    assert unmeasured['tool_default_measured'] is False
+    assert unmeasured['not_measured_reason'] == 'the flow computes it at run time'
+    assert unmeasured['defaults_by_flow'] == {'classic': 'runtime'}
+    assert measured != unmeasured
+
+
 # ── the §4.05 deny list ────────────────────────────────────────────────────
 
 def test_a_rules_file_is_denied_by_name_and_never_opened(tmp_path, monkeypatch):
@@ -322,6 +342,30 @@ def test_a_symlink_is_judged_by_its_resolved_target(tmp_path):
     assert set(result['overlay']) == {'CTS_SINK_CLUSTERING_MAX_DIAMETER'}
 
 
+def test_a_recipe_named_symlink_to_oracle_shaped_json_is_not_parsed(tmp_path, monkeypatch):
+    oracle = stage(tmp_path, 'baseline.json', json.dumps(RULES_SHAPE))
+    root = tmp_path / 'input' / 'reference_flow'
+    (root / 'flow.mk').symlink_to(oracle)
+    opened = []
+    real = Path.read_text
+
+    def spy(self, *args, **kwargs):
+        opened.append(self)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', spy)
+    result = resolve(tmp_path)
+    files = {Path(row['path']).name: row['disposition']
+             for row in result['record']['files']}
+    assert files['baseline.json'] == files['flow.mk'] == 'DENIED_ORACLE_SHAPE'
+    # The link path is never sent to the recipe parser; the target is read only
+    # by the content classifier that denies it.
+    assert not any(path.name == 'flow.mk' for path in opened), opened
+    assert all(not (row.get('file', '').endswith('flow.mk')
+                    or row.get('source', '').endswith('flow.mk:1'))
+               for row in result['record']['variables'].values())
+
+
 def test_only_a_value_make_itself_would_produce_is_emitted(tmp_path):
     stage(tmp_path, 'a.mk', '\n'.join([
         'export CORE_UTILIZATION = 50',
@@ -470,11 +514,15 @@ def test_a_directory_link_and_a_link_loop_are_recorded_not_dropped(tmp_path):
     root = tmp_path / 'input' / 'reference_flow'
     (root / 'platform').symlink_to(golden, target_is_directory=True)
     (root / 'alias_dir').symlink_to(root / 'real', target_is_directory=True)
+    (root / 'current').symlink_to('.', target_is_directory=True)
+    (root / 'sub').mkdir()
+    (root / 'sub' / 'back').symlink_to('..', target_is_directory=True)
     (root / 'loop.mk').symlink_to(root / 'loop.mk')
     result = resolve(tmp_path)
     files = {f['path'].split('reference_flow/', 1)[1]: f['disposition'] for f in result['record']['files']}
     assert files['platform'] == 'DENIED_OUTSIDE_STAGED_TREE'
     assert files['alias_dir'] == 'NOT_TRAVERSED'
+    assert files['current'] == files['sub/back'] == 'NOT_TRAVERSED'
     assert files['loop.mk'] == 'DENIED_UNRESOLVABLE_LINK'
     assert files['real/cts.mk'] == 'READ'
     assert 'FP_CORE_UTIL' not in result['overlay']
