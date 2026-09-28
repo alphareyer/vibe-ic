@@ -8353,7 +8353,7 @@ def _step_rtl_gen_bound(
                         extras={"ip_fetch": pull_audit,
                                 "ip_fetch_refusals": fetch_refusals})
             lessons_hint, hint_extras = _stage_author_knowledge_digests(project)
-            skill_hint, skill_extras = _stage_fallback_skill(
+            skill_hint, catalog_sk_extras = _stage_fallback_skill(
                 project, "catalog-glue-author")
             names = [m.ip_name for m in versioned_matches]
             return StepResult(
@@ -8362,7 +8362,7 @@ def _step_rtl_gen_bound(
                 "remains for catalog-glue-author to author from the design input."
                 + skill_hint + lessons_hint,
                 extras={"fallback_skill": "catalog-glue-author",
-                        **skill_extras, **hint_extras,
+                        **catalog_sk_extras, **hint_extras,
                         "ip_catalog_declared_reuse": names,
                         "ip_fetch": pull_audit,
                         "ip_fetch_refusals": fetch_refusals})
