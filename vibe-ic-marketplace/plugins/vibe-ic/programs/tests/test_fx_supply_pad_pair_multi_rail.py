@@ -23,6 +23,7 @@ through the module's own LEF / Liberty / netlist parsers.
 from __future__ import annotations
 
 import sys
+import re
 from pathlib import Path
 
 import pytest
@@ -190,8 +191,60 @@ def test_unbonded_ring_rails_are_a_named_refusal_not_an_emitted_die():
     with pytest.raises(G.Refusal) as exc:
         validate(plan)
     assert exc.value.rule == "RING_RAIL_BOND_UNDECLARED"
-    assert "VCCHIB" in exc.value.message
-    assert "VSWITCH" in exc.value.message
+    rail_words = "|".join(sorted(RING_P + RING_G, key=len, reverse=True))
+    named = set(re.findall(rf"(?<!\w)(?:{rail_words})(?!\w)",
+                           exc.value.message))
+    assert {"VCCHIB", "VSWITCH"} <= named
+    assert sorted(named & {"VDDIO", "VSSIO"}) == []
+
+
+def test_a_missing_declared_bridge_restores_the_named_rail_refusal():
+    terminals = {m: bond for m, bond in SKY_TERMINALS.items()
+                 if m != "lib__vddio_hvc_clamped_pad"}
+    _pair, plan, _core = _resolve(
+        _lef(SKY_MACROS), "lib__", "VPWR", "VGND", terminals,
+        [_sky_liberty()], [_sky_netlist()], SKY_CORE)
+    with pytest.raises(G.Refusal) as exc:
+        G.require_bonded_ring_rails(plan)
+    assert re.search(r"(?<!\w)VDDIO(?!\w)", exc.value.message)
+
+
+def test_every_bonded_rail_is_placed_and_connected_in_the_wrapper():
+    rails = {"PCORE": "POWER", "GCORE": "GROUND",
+             "PIO": "POWER", "GIO": "GROUND"}
+    macros = {f"lib__{rail.lower()}": dict(rails) for rail in rails}
+    cells = {master: {"pg_pins": {
+        rail: {"pg_type": "primary_power" if use == "POWER"
+               else "primary_ground", "voltage_name": rail,
+               **({"is_pad": "true"} if master == f"lib__{rail.lower()}"
+                  else {})}
+        for rail, use in rails.items()}}
+        for master in macros}
+    cells["lib__signal"] = {"pins": {"IN": {
+        "direction": "input", "related_power_pin": "PCORE",
+        "related_ground_pin": "GCORE"}}}
+    lib = _liberty({"PCORE": 1.8, "GCORE": 0, "PIO": 3.3, "GIO": 0},
+                   cells)
+    lef = _lef(macros)
+    pair, plan, _ = _resolve(lef, "lib__", "VPWR", "VGND", {}, [lib], [],
+                             "library (std) {\n  nom_voltage : 1.8;\n}\n")
+    G.require_bonded_ring_rails(plan)
+    group = pair + plan["supplemental_supply_pads"]
+    assert {entry["master"] for entry in group} == set(macros)
+    G.connect_bonded_ring_rails(group, plan, _inputs(lef)[2],
+                                "VPWR", "VGND")
+    chosen = {f"u_pad_supply_{entry['kind']}": entry for entry in group}
+    ordered = {side: list(chosen) if side == "S" else [] for side in G.SIDES}
+    wrapper = G._emit_verilog(
+        "chip_top", "core", ordered, chosen, [],
+        ["VPWR", "VGND", "PIO", "GIO"])
+    for master in macros:
+        assert master in wrapper
+    for rail in rails:
+        net = {"PCORE": "VPWR", "GCORE": "VGND"}.get(rail, rail)
+        assert all(entry["supply_connections"][rail] == net
+                   for entry in group)
+    assert ".PIO(PIO)" in wrapper and ".GIO(GIO)" in wrapper
 
 
 def test_ihp_shape_resolves_from_the_bonded_pg_pin():

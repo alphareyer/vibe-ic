@@ -291,6 +291,24 @@ def synth_dir(project: Path) -> Path:
     return project / "phase2/stage2/synth"
 
 
+def phase2_synth_input_identity(project: Path):
+    """Content identity of Phase 2's canonical netlist consumed by Phase 3.
+
+    A Phase 3 receipt can only describe the current design while this identity
+    matches. Returning None says Phase 2 has not supplied a netlist to bind.
+    """
+    import hashlib
+
+    path = synth_dir(project) / "netlist_yosys.v"
+    if not path.is_file():
+        return None
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    return {"path": str(path.relative_to(project)), "sha256": digest}
+
+
 def dft_dir(project: Path) -> Path:
     return project / "phase2/stage2/dft"
 
