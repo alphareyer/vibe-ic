@@ -4,6 +4,10 @@ ip_class: rv32i_bit_serial_cpu
 license: ISC
 canonical_url: https://github.com/olofk/serv
 canonical_commit: "1.4.0"
+errata:
+  - upstream_commit: "41e8aeedfd1e9ad5f95902c5b0dfc83d1c99e5d2"
+    file: servile/servile_rf_mem_if.v
+    disclosure: "Upstream zero-register correction after 1.4.0; applied to the reused core only."
 authors:
   - "Olof Kindgren <olof.kindgren@gmail.com>"
 description: >
