@@ -36218,6 +36218,31 @@ def _pad_ring_process_note(rc: int, out: str, err: str) -> str:
     return error if rc != 0 and error else (lines[0] if lines else "")
 
 
+#: Step 15.5ic's programs, and what each DOCUMENTS its non-zero exits to
+#: mean, as (verdict, reason class). rc 1 of the producers and the ring gate is
+#: a refusal or a finding, so FAIL; every rc 2 is that program's own
+#: could-not-measure tier. `pad_bterm_coincidence_check` says "1 a net could
+#: not be decided, 2 nothing to decide": neither is a finding about the ring.
+#: An exit no program documents is an execution error, never an exception.
+_PAD_RING_RC_OUTCOMES: Dict[str, Dict[int, Tuple[str, str]]] = {
+    "pad_assignment_gen.py": {
+        1: (_V.Verdict.FAIL.value, ""),  # REFUSE: answers still owed
+        2: (_V.Verdict.NOT_MEASURED.value,  # NOT_ASKED: nothing declared
+            _V.ReasonClass.INPUT_ABSENT.value)},
+    "pad_ring_gen.py": {
+        1: (_V.Verdict.FAIL.value, ""),
+        2: (_V.Verdict.NOT_MEASURED.value,  # SKIP: inputs absent, or a
+            _V.ReasonClass.INPUT_ABSENT.value)},  # rotation it cannot honour
+    "pad_ring_check.py": {
+        1: (_V.Verdict.FAIL.value, ""),  # a wrong or a silent report
+        2: (_V.Verdict.NOT_MEASURED.value,  # a disclosed absence
+            _V.ReasonClass.INPUT_ABSENT.value)},
+    "pad_bterm_coincidence_check.py": {
+        1: (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.INCONCLUSIVE.value),
+        2: (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.NO_POPULATION.value)},
+}
+
+
 def step_pad_ring_gen(project: Path, container: Optional[str] = None,
                       pdk: Optional[PdkConfig] = None) -> StepResult:
     """Canonical step 15.5ic producer + independent gate, before routing.
@@ -36287,12 +36312,9 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
         if rc == 0:
             status, reason = _V.Verdict.PASS.value, ""
             continue
-        status, reason = {
-            1: (_V.Verdict.FAIL.value, ""),
-            2: (_V.Verdict.NOT_MEASURED.value,
-                _V.ReasonClass.NOT_EXECUTED.value),
-        }.get(rc, (_V.Verdict.NOT_MEASURED.value,
-                   _V.ReasonClass.TOOL_ABSENT.value))
+        status, reason = _PAD_RING_RC_OUTCOMES[name].get(
+            rc, (_V.Verdict.NOT_MEASURED.value,
+                 _V.ReasonClass.EXECUTION_ERROR.value))
         break
 
     out_files = [
@@ -36310,7 +36332,7 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
     missing = sorted(str(p.relative_to(project)) for p in required
                      if not p.is_file())
     if status == "PASS" and missing:
-        status = "FAIL"
+        status, reason = "FAIL", ""
         notes.append("producer/gate returned rc=0 but required output(s) are "
                      f"absent: {missing}")
     # The reason class computed above travels with the row: a NOT_MEASURED
@@ -36811,12 +36833,28 @@ def _prepare_librelane_floorplan_for_route(
 
     def _fail(code: str, detail: str, status: str = "FAIL",
               reason_class: str = "") -> Tuple[StepResult, None]:
+        # A stopped tool did not produce a design verdict: keep that reason
+        # and mark the measurement as unavailable.
+        stopped = _ll.tool_stop_reason(code)
+        if stopped:
+            status = "NOT_MEASURED"
         return StepResult("pad_ring_gen", status, time.time() - t0,
                           detail if detail.startswith(code) else f"{code}: {detail}",
                           extras={"finding": code, "librelane_modes": modes},
-                          reason_class=(reason_class or (
+                          reason_class=(reason_class or stopped or (
                               _V.ReasonClass.INPUT_ABSENT.value
                               if status == "NOT_MEASURED" else ""))), None
+
+    def _code(exc: BaseException, default: str) -> str:
+        """Use the tool stop code if this is a time refusal, else default."""
+        code = getattr(exc, "code", None)
+        return code if _ll.tool_stop_reason(code) else default
+
+    def _code(exc: BaseException, default: str) -> str:
+        """The refusal's own code when it is a tool stop, else ``default``:
+        a handler that names its step keeps that name for real refusals."""
+        code = getattr(exc, "code", None)
+        return code if _ll.tool_stop_reason(code) else default
 
     if "dual" in modes.values():
         return _fail("LL_DUAL_FLOORPLAN_NOT_READY",
@@ -36832,7 +36870,7 @@ def _prepare_librelane_floorplan_for_route(
     try:
         pdk_root = _ll.pdk_root_resolution(project, pdk.name, image=image)["path"]
     except _ll.Refusal as exc:
-        return _fail("LL_PDK_ROOT_NOT_DECLARED", str(exc), "NOT_MEASURED")
+        return _fail(_code(exc, "LL_PDK_ROOT_NOT_DECLARED"), str(exc), "NOT_MEASURED")
     producer = (StepResult("io_pad_chip_top_gen", "PASS", 0.0, "already run")
                 if _padring_chip_top_record(project) is not None
                 else step_io_pad_chip_top_gen(project, container, pdk))
@@ -36861,7 +36899,7 @@ def _prepare_librelane_floorplan_for_route(
         pdk_root_c, pdk_tree = _padring_pdk_root_and_tree(pdk, container)
         pdk_args = ["--pdk-root", str(pdk_root_c), "--pdk", str(pdk_tree)]
     except ValueError as exc:
-        return _fail("LL_PDK_TREE_UNRESOLVED", str(exc))
+        return _fail(_code(exc, "LL_PDK_TREE_UNRESOLVED"), str(exc))
     # The PAD_* translation (librelane_config harvest) is the design's
     # declared input to the tool placer; the Python ring placer does not run.
     for name, extra in (("pad_assignment_gen.py", pdk_args),):
@@ -37066,14 +37104,14 @@ def _prepare_librelane_floorplan_for_route(
                     f'{{ $_stn setDoNotTouch true; puts "SPARE_TIE_NET_DONT_TOUCH: {n}" }}\n'
                     for n in _tie_nets))
     except (OSError, ValueError) as exc:
-        return _fail("LL_FLOORPLAN_NO_CONSUMER", str(exc))
+        return _fail(_code(exc, "LL_FLOORPLAN_NO_CONSUMER"), str(exc))
     if placement is not None and placement.get("mode") == "dual":
         try:
             selection = _select_placement_arm(
                 project, image, container, out_dir, configs,
                 folders[-1] / "state_out.json", direct_consumer, mounts)
         except (_ll.Refusal, OSError, ValueError, KeyError) as exc:
-            return _fail("LL_DUAL_PLACEMENT_FAILED", str(exc))
+            return _fail(_code(exc, "LL_DUAL_PLACEMENT_FAILED"), str(exc))
         notes.append(f"step 17 dual: selection={selection.get('selection')} "
                      f"({selection.get('reason') or 'dominates'}; "
                      "phase3/tool_arms/17/selection.json)")
