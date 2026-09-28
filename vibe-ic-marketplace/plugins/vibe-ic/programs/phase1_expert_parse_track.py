@@ -2738,6 +2738,27 @@ def ai_subtrack(project: Path, prompt: str, out_dir: Path,
         schema = authoring_schema(project)
         status["authoring_schema_status"] = schema["status"]
         status["authoring_schema_layer_count"] = len(schema.get("layers") or {})
+        # The old answer belongs to the old handoff's L-doc root. A producer
+        # re-run can write identical bytes, in which case it is still valid.
+        # Compare roots BEFORE assemble overwrites authoring_schema.json; if
+        # the bytes changed, retain the entire old pack outside the live read
+        # path so this pass emits a new handoff instead of consuming it.
+        answer = out_dir / "l_doc_expectations.json"
+        prior_schema = out_dir / "authoring_schema.json"
+        if answer.is_file() and prior_schema.is_file():
+            old = json.loads(prior_schema.read_text())
+            old_root = (old.get("phase1_root") or {}).get("digest")
+            new_root = (schema.get("phase1_root") or {}).get("digest")
+            if old_root and new_root and old_root != new_root:
+                import os
+                import uuid
+                archive = (project / ".vibeic-state" /
+                           "stale_expert_packs" / uuid.uuid4().hex)
+                archive.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(out_dir, archive)
+                status["stale_pack_archived_at"] = str(archive)
+                status["stale_pack_reason"] = (
+                    f"EXPERT_ROOT_CHANGED: {old_root} -> {new_root}")
         handoff = _pack.assemble(
             prompt=prompt, iface=None, target=None,
             expert_skills=[], verify_gates=[PROGRAM],
@@ -2809,7 +2830,11 @@ def ai_subtrack(project: Path, prompt: str, out_dir: Path,
         reason=(f"pack written to {out_dir}; invoke subagent "
                 f"{_pack.SUBAGENT_TYPE} on "
                 f"{out_dir / 'ic_expert_agent_handoff.json'} and re-run to "
-                f"consume its answer"))
+                f"consume its answer"
+                + (f"; old answer archived at "
+                   f"{status['stale_pack_archived_at']} because "
+                   f"{status['stale_pack_reason']}"
+                   if status.get("stale_pack_archived_at") else "")))
     return status
 
 

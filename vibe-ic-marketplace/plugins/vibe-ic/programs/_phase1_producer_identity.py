@@ -858,14 +858,6 @@ def supersede_docs(project: Path, why: str) -> Optional[Path]:
                 raise SupersedeError(f"archive target already exists: {target}")
             os.replace(d, target)
             moved.append((d, target))
-        # The expert answer was authored for the old L-doc root. Preserve its
-        # pack beside those bytes, but never let the new producer consume it.
-        pack = (project / "reports" / "audit" / "phase1"
-                / "expert_parse_track_pack")
-        if pack.is_dir():
-            target = dest / "expert_parse_track_pack"
-            os.replace(pack, target)
-            moved.append((pack, target))
         (dest / "WHY.txt").write_text(why + "\n")
     except OSError as exc:
         rollback_failed = []
