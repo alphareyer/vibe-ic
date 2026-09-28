@@ -82,6 +82,7 @@ import sys
 from pathlib import Path
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
 import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
+import _foundry_signoff_pdk as _fsp
 
 
 def _load_waivers(project):
@@ -105,6 +106,31 @@ def _step_waived(project, step_label):
 
 _GATE_NAME = 'foundry_handoff_package_check'
 _GATE_LABEL = 'foundry_handoff'
+
+
+def pdk_consistency_findings(project, signoff_pdk):
+    """Refuse kit members that name a process different from the sign-off flow."""
+    if signoff_pdk is None:
+        return []
+    findings = []
+    for rel in _REQUIRED_FILES[:3]:
+        path = project / rel
+        try:
+            member = json.loads(path.read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue  # existing member/substance checks own unreadable JSON
+        if not isinstance(member, dict) or "pdk" not in member:
+            continue
+        declared = member["pdk"]
+        if declared != signoff_pdk:
+            findings.append({
+                "severity": "ERROR",
+                "rule": "FOUNDRY_HANDOFF_PDK_MISMATCH",
+                "message": (f"{rel}: kit declares pdk={declared!r}, but the "
+                            f"sign-off flow used {signoff_pdk!r}; regenerate "
+                            f"the pack from the signed-off flow."),
+            })
+    return findings
 # Each entry is ONE required kit member. A tuple means "any ONE of these
 # spellings satisfies this member" — used only for the scribe-line frame,
 # which the flow cannot generate: foundry_handoff_pack_gen deliberately writes
@@ -1185,6 +1211,8 @@ def main(argv=None):
         })
 
     waiver = _step_waived(project, args.step_label)
+    substance_findings.extend(pdk_consistency_findings(
+        project, _fsp.pdk_from_signoff_flow(project)))
     if substance_findings and not waiver:
         verdict, rc = "FAIL", 1
         findings = substance_findings
