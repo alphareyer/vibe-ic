@@ -4924,6 +4924,14 @@ steps:
       # written are different facts, and this is the artefact that keeps them
       # apart where a reader can see them.
       - "reports/phase3/pad_assignment.json"
+      # THE CHIP-TOP RECORD, W2 by the same rule: `io_pad_chip_top_gen` (this
+      # step's first program) writes it on every outcome -- WROTE,
+      # NOT_AVAILABLE and REFUSE alike -- and this step's own gate
+      # (`pad_assignment_gen`) reads it. It was undeclared but UNATTRIBUTABLE
+      # while `gds_xor_check` (37.3) also read it to assemble a LEF set; that
+      # read is gone (37.3 re-streams from step 37's own input record), so the
+      # finding now has exactly one consuming step and is declared there.
+      - "reports/phase3/io_pad_chip_top.json"
     gate:
       all_of:
         # FIRST, because it is the one that can say WHY there is no ring.
@@ -7354,6 +7362,17 @@ steps:
       # what the flow actually requires: SOME transcript of what went into the
       # sign-off GDS, whichever tool streamed it.
       - "phase3/stage3/pnr/*stream_out.log"
+      # THE STREAM-OUT'S INPUT SET, declared by the same rule as the transcript
+      # above: this step writes it (`_record_stream_inputs`, both engines, beside
+      # the GDS it streamed) and step 37.3 CONSUMES it -- it is the only source
+      # `gds_xor_check` re-streams its pre-finishing reference from (engine,
+      # recipe, and every LEF / cell GDS / macro GDS / layer map / rcfile with its
+      # sha256). MEASURED on lane fxspm1's spm integration run: without it 37.3
+      # assembled the set from the IO-ring record, which a core design does not
+      # have, and answered NOT_MEASURED for a GDS the flow had just streamed.
+      # A glob keyed on the output's stem, like the transcript: one record per
+      # stream-out invocation, so the DRC re-stream's cannot overwrite it.
+      - "phase3/stage3/pnr/*.stream_inputs.json"
       # THE ROUTE ATTESTATION, declared for the same reason and by the same rule.
       # `step_pad_ring_final_evidence` writes it in this phase-3 pass and it is an
       # attestation ABOUT THIS STEP'S OWN GDS -- the shipped path, its sha256, its

@@ -208,8 +208,11 @@ def test_real_gds_step_with_container_write_keeps_other_stage_files(tmp_path, mo
         "reports/orchestrator/phase3_one_shot.json",
         "reports/phase3/gds_admission.json",
     }
+    # Step 37's own declared outputs: the stream, its transcript, and the
+    # record of what the stream read (which step 37.3 re-streams from).
     assert set(changed) <= allowed_reports | {
         "phase3/stage3/pnr/top.gds", "phase3/stage3/pnr/stream_out.log",
+        "phase3/stage3/pnr/top.stream_inputs.json",
         "phase3/stage4/gds/top.gds"}, sorted(changed)
     assert calls, "the real GDS step never reached the container"
     assert p3._ga.admitted_gds(project, pnr / "top.gds", basis)
