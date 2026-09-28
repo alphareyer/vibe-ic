@@ -72621,14 +72621,16 @@ def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
         shipped = "librelane" if tool else None
     result = direct_fill
     if shipped == "librelane" and tool:
-        filled = Path(tool["filler"]["filled_gds"])
-        def _copy_filled() -> Tuple[bool, str]:
-            shutil.copyfile(filled, gds_out)
-            return True, "LibreLane filler copied"
-        (chain.run if chain else _declared_transform_exec)(None, gds_out, "gds:librelane_filler", "klayout",
-            "KLayout.Filler (LibreLane) (phase3_one_shot_runner step_gds)",
-            _copy_filled)
-        result = (True, f"LibreLane KLayout.Filler ({tool['filler']['script']}); PDK "
+        filled = Path(tool["subject"])
+        if tool[_lf.DENSITY_METRIC] == 0:
+            def _copy_filled() -> Tuple[bool, str]:
+                shutil.copyfile(filled, gds_out)
+                return True, "LibreLane filler copied"
+            (chain.run if chain else _declared_transform_exec)(None, gds_out, "gds:librelane_filler", "klayout",
+                "KLayout.Filler and PDK-derived density fill (phase3_one_shot_runner step_gds)",
+                _copy_filled)
+        result = (tool[_lf.DENSITY_METRIC] == 0,
+                  f"LibreLane KLayout.Filler ({tool['filler']['script']}); PDK "
                         f"density deck: {tool[_lf.DENSITY_METRIC]} error(s) "
                         f"{tool.get('rules')}")
     elif ctx["mode"] == "librelane":
