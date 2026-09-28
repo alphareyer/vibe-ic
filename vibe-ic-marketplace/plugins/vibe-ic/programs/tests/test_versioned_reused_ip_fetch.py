@@ -100,6 +100,99 @@ def test_step1_fetches_exact_upstream_core_and_discloses_erratum(
                 if json.loads(row).get("event") == "ip_catalog_pull"]) == 1
 
 
+def test_existing_pin_cannot_attest_arbitrary_rtl_without_official_pull(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import design_one_shot_runner as runner
+    import ip_catalog_query as query
+    import ip_catalog_pull as pull
+
+    repo, erratum = _upstream(tmp_path)
+    match = _match(repo, erratum)
+    monkeypatch.setattr(query, "query_catalog", lambda *a, **k: [match])
+    monkeypatch.setattr(pull, "CACHE_ROOT", tmp_path / "cache")
+    project = _project(tmp_path, "Reuse leaf from vendor:reusable:leaf:2.3.4.")
+    rtl = project / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    arbitrary = b"module leaf; wire fixed = 1'bx; endmodule\n"
+    (rtl / "leaf.v").write_bytes(arbitrary)
+    (rtl / "SOURCE_MANIFEST.json").write_text(json.dumps({
+        "reused_ip": True,
+        "source_pins": [{
+            "ip_name": "leaf", "version": match.version,
+            "canonical_url": match.canonical_url,
+            "files_sha256": {"rtl/leaf.v": hashlib.sha256(arbitrary).hexdigest()},
+        }],
+    }))
+
+    result = runner.step_rtl_gen(project, "processor_cpu")
+    assert result.status == "FAIL"
+    assert "IP_REUSE_FETCH_PIN_MISMATCH" in result.detail
+    assert (rtl / "leaf.v").read_bytes() == arbitrary
+
+
+def test_complete_receipts_cannot_launder_changed_rtl(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import design_one_shot_runner as runner
+    import ip_catalog_query as query
+    import ip_catalog_pull as pull
+
+    repo, erratum = _upstream(tmp_path)
+    match = _match(repo, erratum)
+    monkeypatch.setattr(query, "query_catalog", lambda *a, **k: [match])
+    monkeypatch.setattr(pull, "CACHE_ROOT", tmp_path / "cache")
+    project = _project(tmp_path, "Reuse leaf from vendor:reusable:leaf:2.3.4.")
+    assert runner.step_rtl_gen(project, "processor_cpu").status == "PASS_WITH_WAIVERS"
+
+    rtl = project / "phase2/stage1/rtl"
+    arbitrary = b"module leaf; wire fixed = 1'bx; endmodule\n"
+    (rtl / "leaf.v").write_bytes(arbitrary)
+    digest = hashlib.sha256(arbitrary).hexdigest()
+    mf_path = rtl / "SOURCE_MANIFEST.json"
+    manifest = json.loads(mf_path.read_text())
+    manifest["source_pins"][0]["files_sha256"]["rtl/leaf.v"] = digest
+    mf_path.write_text(json.dumps(manifest))
+    prov_path = project / "provenance.jsonl"
+    events = [json.loads(line) for line in prov_path.read_text().splitlines()]
+    events[-1]["outputs"]["phase2/stage1/rtl/leaf.v"] = "sha256:" + digest
+    events[-1]["outputs_sha256"] = [digest]
+    prov_path.write_text("\n".join(json.dumps(event) for event in events) + "\n")
+
+    result = runner.step_rtl_gen(project, "processor_cpu")
+    assert result.status == "FAIL"
+    assert "IP_REUSE_FETCH_PIN_MISMATCH" in result.detail
+    assert (rtl / "leaf.v").read_bytes() == arbitrary
+
+
+@pytest.mark.parametrize("missing", ["event", "errata", "commit"])
+def test_existing_pin_requires_complete_official_receipt(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str) -> None:
+    import design_one_shot_runner as runner
+    import ip_catalog_query as query
+    import ip_catalog_pull as pull
+
+    repo, erratum = _upstream(tmp_path)
+    monkeypatch.setattr(query, "query_catalog",
+                        lambda *a, **k: [_match(repo, erratum)])
+    monkeypatch.setattr(pull, "CACHE_ROOT", tmp_path / "cache")
+    project = _project(tmp_path, "Reuse leaf from vendor:reusable:leaf:2.3.4.")
+    assert runner.step_rtl_gen(project, "processor_cpu").status == "PASS_WITH_WAIVERS"
+    manifest_path = project / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+    if missing == "event":
+        (project / "provenance.jsonl").unlink()
+    else:
+        manifest = json.loads(manifest_path.read_text())
+        pin = manifest["source_pins"][0]
+        if missing == "errata":
+            pin["errata_applied"] = []
+        else:
+            pin.pop("checked_out_sha")
+        manifest_path.write_text(json.dumps(manifest))
+
+    result = runner.step_rtl_gen(project, "processor_cpu")
+    assert result.status == "FAIL"
+    assert "IP_REUSE_FETCH_PIN_MISMATCH" in result.detail
+
+
 @pytest.mark.parametrize("text,reason", [
     ("A generic bit-serial CPU. vendor:reusable:core:2.3.4.",
      "IP_REUSE_NAME_UNDECLARED: leaf"),
