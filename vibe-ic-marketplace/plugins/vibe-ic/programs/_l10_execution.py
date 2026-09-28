@@ -96,11 +96,26 @@ def write_record(project: Path, l10_path: Path,
     """Atomically publish a completed execution record."""
     target = record_path(project)
     target.parent.mkdir(parents=True, exist_ok=True)
+    bound_rows = []
+    for row in rows:
+        bound = dict(row)
+        tb_file = bound.get("tb_file")
+        bound.pop("tb_sha256", None)
+        if bound.get(SIM_EXECUTED_KEY) is True and tb_file:
+            tb = Path(tb_file)
+            tb = tb if tb.is_absolute() else Path(project) / tb
+            try:
+                bound["tb_sha256"] = file_sha256(tb)
+            except OSError:
+                # An execution row may exist without a readable TB, but it
+                # cannot bind future coverage to that file's current bytes.
+                pass
+        bound_rows.append(bound)
     doc: Dict[str, Any] = {
         "schema": SCHEMA,
         "producer": producer,
         "l10_sha256": file_sha256(l10_path),
-        CASES_KEY: list(rows),
+        CASES_KEY: bound_rows,
     }
     if tb_dir is not None:
         doc["tb_dir"] = str(tb_dir)
@@ -188,6 +203,7 @@ def load_record(project: Path, l10_path: Optional[Path] = None) -> Dict[str, Any
             "raw": row.get("verdict"),
             "detail": str(row.get("detail") or ""),
             "tb_file": str(row.get("tb_file") or ""),
+            "tb_sha256": str(row.get("tb_sha256") or ""),
             # Execution is an observed boolean, not something inferred back
             # from the verdict word.  Missing, string-valued, or false keeps
             # the row at NOT_EXECUTED in ``case_state``.

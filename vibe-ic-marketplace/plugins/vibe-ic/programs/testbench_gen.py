@@ -1693,6 +1693,7 @@ def oracle_provenance(project: Path) -> dict:
             row = {"case": tb.stem,
                    "path": str(tb.relative_to(project))
                            if tb.is_relative_to(project) else str(tb)}
+            row["tb_sha256"] = _l10x.file_sha256(tb)
             _dlv = _DELIVERED_RE.search(text)
             if _dlv is not None:
                 row["source"] = ORACLE_SOURCE_DELIVERED
