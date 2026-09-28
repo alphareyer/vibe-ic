@@ -87,11 +87,6 @@
    "kind": "published",
    "rel": "benchmark-data/ic/spm/v1.14.88_gf180mcuD",
    "note": "registered 2026-09-02: the converged spm x gf180mcuD cell the published corpus carries (benchmark-data da762d4e, reports/audit/phase23_completion_audit.json verdict PASS_WITH_WAIVERS, 68 tracked steps/**/STEP_RECORD.json, reports/write_ledger.json captured 2026-08-31T18:09:41Z). The manifest was last curated against a467106 and never registered it, so eleven cells cited machine trees and read NOT_MEASURED on every host without a corpus pointer."
-  },
-  "benchmark-data/ic/spm/v1.21.6_gf180mcuD": {
-   "kind": "published",
-   "rel": "benchmark-data/ic/spm/v1.21.6_gf180mcuD",
-   "note": "registered 2026-09-28 from benchmark-data f06ccc0bfb37c2b74528c3807e86e79e98f82a8d: publication 61116c89 added this converged PASS_WITH_WAIVERS cell with reports/audit/phase23_completion_audit.json, a provenance ledger and tracked step records. Its required-output contributions are re-measured by the d3 consumer tests; no generated artefact was edited."
   }
  },
  "steps": {

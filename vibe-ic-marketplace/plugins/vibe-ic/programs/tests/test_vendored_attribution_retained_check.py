@@ -181,17 +181,18 @@ def test_an_empty_scope_discloses_that_it_checked_nothing(tmp_path, capsys):
 
 # ═══════════════ the shipped tree ═══════════════
 def test_the_shipped_corpus_is_covered():
-    """The anchor. Runs the gate against this repository, not a fixture.
+    """The anchor. Runs the gate against the published corpus, not a fixture.
 
     Measured on `947547716` before the fix: 525 licence-declaring files, ONE
     uncovered — 152,616 lines of `Copyright 2020 The SkyWater PDK Authors`
     under an IC root with no record at all. It is closed by
     `benchmark-data/ic/spm/SOURCE_MANIFEST.md` in the same commit as this gate.
     """
-    repo = PROGRAMS.parents[3]
-    if not (repo / ".git").exists() or not (repo / "benchmark-data").is_dir():
-        pytest.skip("not the source tree (flattened plugin cache)")
-    res = V.scan(repo, "benchmark-data")
+    from _published_corpus import corpus_tree, skip_reason
+    repo = corpus_tree()
+    if repo is None:
+        pytest.skip(skip_reason())
+    res = V.scan(repo, "ic")
     assert res["licensed"] > 0, (
         "the shipped corpus declares no licences at all — this anchor would "
         "pass vacuously and the gate would be unmeasured")
