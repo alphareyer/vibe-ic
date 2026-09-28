@@ -562,9 +562,18 @@ def audit(project: Path) -> AuditResult:
             file=LEC_JSON_REL))
         return res
 
+    # Older INCONCLUSIVE reports predate the SAT-search receipt. Keep their
+    # existing non-PASS diagnosis below; only a producer that declares the new
+    # residual contract may claim NOT_PROVEN. A NOT_PROVEN word without its
+    # receipt still enters this block and fails evidence validation.
+    legacy_inconclusive = (
+        str(lc.get("verdict") or "").upper() == "INCONCLUSIVE"
+        and not any(key in doc for key in (
+            "counterexample_search", "unproven_point_names", "miter_stateless")))
     # A residual may be undecided, but an already-decided FAIL and a stateless
     # residual without complete SAT disposition cannot become NOT_PROVEN.
-    if (unproven or 0) > 0 and (res.total_points or 0) > 0:
+    if ((unproven or 0) > 0 and (res.total_points or 0) > 0
+            and not legacy_inconclusive):
         search = res.counterexample_search
         outcome = str(search.get("result") or "NOT_RUN")
         if not search:
@@ -838,14 +847,10 @@ def audit(project: Path) -> AuditResult:
 
     # --- (d2) #208 — NON-CONVERGENCE INCONCLUSIVE: a COMPLETED miter left
     # points unproven, but equiv_induct did NOT converge (a flat wall) and NO
-    # counterexample was recorded (0 non-equivalent points). Non-convergence is
-    # NOT non-equivalence — a real difference produces a counterexample
-    # (non_equivalent_points > 0). lec_run is the authority that inspected the
-    # raw yosys log for a counterexample and only then marked the run
-    # INCONCLUSIVE; trust that verdict here ONLY while non_equiv == 0. A single
-    # non-equivalent point forces the substance FAIL below (§4.05 NO-LEAK — this
-    # can never launder a real mismatch into a pass). Non-blocking, but a visible
-    # non-PASS: it must be closed with sign-off LEC.
+    # counterexample was recorded (0 non-equivalent points). On the Yosys path,
+    # lec_run hardcodes that count to zero, so it does not distinguish a real
+    # difference from an unproven point. Keep this as a visible non-PASS; a
+    # separately recorded non-equivalent point still reaches the FAIL below.
     # --- (d1) #2050 — THE MITER ITSELF WAS INCONSISTENT ---------------------
     # `equiv_induct` prints `Circuit inherently diverges!` when its BASE CASE
     # goes UNSAT. Read yosys's `passes/equiv/equiv_induct.cc`: the base case is
