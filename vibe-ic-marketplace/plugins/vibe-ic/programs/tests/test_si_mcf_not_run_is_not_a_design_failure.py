@@ -18,8 +18,11 @@ means the verdict is a function of WHICH HOST reads the file.
 THE TWO GROUPS OF ERROR ARE NOT ONE KIND OF THING.
 
     NO_REPORT  BAD_JSON  NO_SPEF  NO_CORNER  NO_BOUNDED_SPEF
-    NO_WINDOWS  PATH_OUTSIDE_PROJECT  PRODUCER_NOT_MEASURED
+    NO_WINDOWS  PATH_OUTSIDE_PROJECT
         -> the gate never got to look                          (NOT_MEASURED)
+    PRODUCER_NOT_MEASURED
+        -> NOT_MEASURED when recount inputs are absent; otherwise the gate
+           recounts available SPEFs and any substantive defect is FAIL
     SPEF_NO_NET_RECORDS  COUPLING_LOST_SINCE_EMIT
     FOLD_WITHOUT_SOURCE  FOLD_NOT_APPLIED  SLACK_BETTER_THAN_BOUND
         -> the gate looked at a real artefact and it was wrong  (FAIL)
@@ -31,9 +34,9 @@ WHAT THIS FILE PINS, IN ORDER OF LOAD.
      sweep, so a future relaxation of the split cannot silently demote a real
      crosstalk finding into the skip tier. This is the half that guards the
      rule the gate was written for.
-  2. THE FOURTH STATE EXISTS. Every category in the first group publishes
-     NOT_MEASURED / EXECUTION_ERROR. The flow consumes that typed report and
-     keeps Step 27 NOT_MEASURED, never a skip or a design failure.
+  2. THE FOURTH STATE EXISTS. Every absent-input case publishes NOT_MEASURED /
+     EXECUTION_ERROR. The flow consumes that typed report and keeps Step 27
+     NOT_MEASURED. A producer refusal with SPEF/corner evidence is recounted.
   3. VERDICT AND VACUOUS NEVER CONTRADICT, checked as an invariant over the
      whole category table rather than restated per case: a FAIL is never
      `vacuous`, never carries the NOT-CHECKED disclaimer, and a NOT_MEASURED /
