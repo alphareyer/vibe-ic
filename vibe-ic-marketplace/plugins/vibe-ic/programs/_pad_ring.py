@@ -746,6 +746,146 @@ def parse_liberty_pad_cells(text: str
     return out
 
 
+# ── SUPPLY VIEW: what a pad library's Liberty says about its RAILS ────────
+# `parse_liberty_pad_cells` reads the SIGNAL faces. A supply pad is judged on
+# its rails instead: which terminal is bonded (`is_pad`, on a `pin` or on a
+# `pg_pin`), what voltage each rail is characterised at (`voltage_map` /
+# `nom_voltage`), and which ground the library pairs with a power rail
+# (`related_power_pin` / `related_ground_pin`). Standard Liberty attributes
+# only; no pin or cell name is interpreted.
+_LIB_ANY_PIN_RE = re.compile(
+    r'^\s*(pg_pin|pin)\s*\(\s*"?([A-Za-z0-9_$\[\]]+)"?\s*\)\s*\{', re.M)
+_LIB_SUPPLY_ATTR_RE = re.compile(
+    r'^\s*(pg_type|voltage_name|is_pad|related_power_pin|related_ground_pin'
+    r'|direction)\s*:\s*"?([^";]*)"?\s*;', re.M)
+_LIB_VOLTAGE_MAP_RE = re.compile(
+    r'^\s*voltage_map\s*\(\s*"?([A-Za-z0-9_$]+)"?\s*,\s*([-0-9.eE+]+)\s*\)',
+    re.M)
+_LIB_NOM_VOLTAGE_RE = re.compile(r'^\s*nom_voltage\s*:\s*([-0-9.eE+]+)\s*;',
+                                 re.M)
+
+
+def parse_liberty_supply_view(text: str) -> Dict[str, object]:
+    """`{voltage_map, nom_voltage, cells: {cell: {pg_pins, pins}}}`."""
+    vmap: Dict[str, float] = {}
+    for name, value in _LIB_VOLTAGE_MAP_RE.findall(text):
+        try:
+            vmap[name] = float(value)
+        except ValueError:
+            continue
+    nom = _LIB_NOM_VOLTAGE_RE.search(text)
+    cells: Dict[str, Dict[str, Dict[str, Dict[str, str]]]] = {}
+    heads = list(_LIB_CELL_RE.finditer(text))
+    for i, c in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+        body = text[c.end():end]
+        rec: Dict[str, Dict[str, Dict[str, str]]] = {"pg_pins": {}, "pins": {}}
+        hits = list(_LIB_ANY_PIN_RE.finditer(body))
+        for j, h in enumerate(hits):
+            pend = hits[j + 1].start() if j + 1 < len(hits) else len(body)
+            attrs = {k: v.strip() for k, v in
+                     _LIB_SUPPLY_ATTR_RE.findall(body[h.end():pend])}
+            rec["pg_pins" if h.group(1) == "pg_pin" else "pins"][h.group(2)] \
+                = attrs
+        cells[c.group(1)] = rec
+    return {"voltage_map": vmap,
+            "nom_voltage": float(nom.group(1)) if nom else None,
+            "cells": cells}
+
+
+def discover_io_netlists(pdk_root: Optional[str] = None,
+                         pdk: Optional[str] = None, reader=None) -> List[Path]:
+    """The IO library's transistor-level netlists (CDL / SPICE), siblings of
+    its `lef/` directory like `discover_io_liberty`'s `lib/`."""
+    out: Dict[str, Path] = {}
+    for lef in discover_io_lefs(pdk_root, pdk, reader=reader):
+        for sub in ("cdl", "spice"):
+            d = lef.parent.parent / sub
+            if not _ask(d, "is_dir", reader=reader):
+                continue
+            for pat in ("*.cdl", "*.spice", "*.sp", "*.cir"):
+                for q in _ask(d, "glob", pat, reader=reader):
+                    out.setdefault(str(q), Path(q))
+    return list(out.values())
+
+
+def parse_spice_subckts(text: str
+                        ) -> Dict[str, Tuple[List[str], List[List[str]]]]:
+    """`{subckt: (ports, element_token_lines)}` from a SPICE / CDL netlist."""
+    joined = re.sub(r"\n[ \t]*\+", " ", text)
+    out: Dict[str, Tuple[List[str], List[List[str]]]] = {}
+    cur: Optional[str] = None
+    ports: List[str] = []
+    body: List[List[str]] = []
+    for raw in joined.splitlines():
+        line = raw.split(";", 1)[0].strip()
+        if not line or line.startswith("*"):
+            continue
+        toks = [t for t in line.split() if t != "/"]
+        head = toks[0].lower()
+        if head == ".subckt" and len(toks) >= 2:
+            cur, body = toks[1], []
+            ports = [t for t in toks[2:] if "=" not in t]
+        elif head == ".ends":
+            if cur is not None:
+                out.setdefault(cur, (ports, body))
+            cur = None
+        elif cur is not None:
+            body.append(toks)
+    return out
+
+
+def _series_r_neighbours(body: List[List[str]], node: str) -> List[str]:
+    """Nodes joined to `node` by one two-terminal resistor element."""
+    out: List[str] = []
+    for t in body:
+        if len(t) >= 3 and t[0][:1] in ("R", "r"):
+            a, b = t[1], t[2]
+            if a == node and b != node:
+                out.append(b)
+            elif b == node and a != node:
+                out.append(a)
+    return out
+
+
+def bond_fed_rails(subckts: Dict[str, Tuple[List[str], List[List[str]]]],
+                   cell: str, bond: str) -> Tuple[List[str], str]:
+    """`(ports, why)`: the cell's OWN ports the bond terminal feeds.
+
+    Structural: a port joined to `bond` by one series resistor, in the cell
+    itself or one level down (a wrapper instantiating its base cell). The
+    netlist is the PDK's; no port name is interpreted."""
+    if cell not in subckts:
+        return [], f"no netlist subckt for {cell}"
+    ports, body = subckts[cell]
+    if bond not in ports:
+        return [], f"{bond} is not a port of the {cell} subckt"
+    fed = {n for n in _series_r_neighbours(body, bond)
+           if n in ports and n != bond}
+    for t in body:
+        if not t or t[0][:1] not in ("X", "x"):
+            continue
+        nodes = [x for x in t[1:] if "=" not in x]
+        if len(nodes) < 2 or nodes[-1] not in subckts:
+            continue
+        base_ports, base_body = subckts[nodes[-1]]
+        nets = nodes[:-1]
+        if len(base_ports) != len(nets):
+            continue
+        conn = dict(zip(base_ports, nets))
+        for bp, net in conn.items():
+            if net != bond:
+                continue
+            for other in _series_r_neighbours(base_body, bp):
+                mapped = conn.get(other)
+                if mapped and mapped in ports and mapped != bond:
+                    fed.add(mapped)
+    return sorted(fed), ("series resistor from the bond terminal in the "
+                         "PDK netlist" if fed else
+                         "the netlist joins the bond terminal to no cell port "
+                         "through a series resistor")
+
+
 _LITERAL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
 
 
