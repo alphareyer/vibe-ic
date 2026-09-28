@@ -396,8 +396,18 @@ def _harness_binds_reset(harness: str, port: str) -> bool:
 def _reset_guarded_properties(harness: str) -> List[str]:
     """Asserted properties whose body is guarded by the bound reset."""
     asserted = set(re.findall(r"\bassert\s+property\s*\(\s*(\w+)\s*\)", harness))
-    return sorted(n for n, body in _PROPERTY_RE.findall(harness)
-                  if n in asserted and re.search(r"\brst_active(?:_q)?\b", body))
+    covered = {n for n, body in _PROPERTY_RE.findall(harness)
+               if n in asserted and re.search(r"\brst_active(?:_q)?\b", body)}
+    # read_slang accepts the generator's labelled immediate form.  Match the
+    # reset guard in the SAME always/if statement as the assert, so a nearby
+    # reset wire cannot stand in for a guarded proof.
+    for m in re.finditer(
+            r"\balways\s*@\s*\(\s*posedge\s+\w+\s*\)"
+            r"\s*if\s*\(([^)]*)\)\s*(\w+)\s*:\s*assert\s*\(",
+            harness):
+        if re.search(r"\brst_active(?:_q)?\b", m.group(1)):
+            covered.add(m.group(2))
+    return sorted(covered)
 
 
 def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List[dict]:
