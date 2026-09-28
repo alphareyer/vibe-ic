@@ -431,7 +431,8 @@ def _scenario_impl(tmp_path, baseline, candidates):
     put(impl / prr.CURRENT, {'candidate': None, 'repair_input': str(input_state),
                             'repair_state': str(input_state),
                             'measurement': dict(prr.summarize(_sta_metrics(*baseline), CORNERS),
-                                                antenna_nets=0, sta_state=str(sta),
+                                                antenna_nets=0, antenna_pins=0,
+                                                sta_state=str(sta),
                                                 sta_state_sha256=contract.digest(sta))})
     scenario = {f'32-cand{i:02d}': c for i, c in enumerate(candidates, 1)}
     put(tmp_path / 'scenario.json', scenario)
@@ -765,6 +766,28 @@ def test_a_repair_that_creates_an_antenna_violation_is_never_adopted(tmp_path, m
     row = json.loads((arm / prr.LEDGER).read_text())['candidates'][0]
     assert row['decision'] == 'REFUSED' and row['reason'].startswith('antenna (OpenROAD.CheckAntennas)')
     assert row['antenna'] == {'before': 0, 'after': antenna}
+
+
+@pytest.mark.parametrize('missing', [None, 'baseline', 'candidate'])
+def test_pin_census_blocks_promotion_with_zero_violating_nets(
+        tmp_path, monkeypatch, missing):
+    candidate = _cand(1.0, 0.05)
+    candidate['antenna_metrics']['antenna__violating__pins'] = 1
+    if missing == 'candidate':
+        del candidate['antenna_metrics']['antenna__violating__pins']
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(1.0, -0.2), candidates=[candidate])
+    if missing == 'baseline':
+        current = json.loads((impl / prr.CURRENT).read_text())
+        del current['measurement']['antenna_pins']
+        put(impl / prr.CURRENT, current)
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_hold')
+    assert run.iterations[0].decision == 'ROLLED_BACK'
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+    row = json.loads((arm / prr.LEDGER).read_text())['candidates'][0]
+    assert row['decision'] == 'REFUSED'
+    assert 'pins' in row['reason']
 
 
 def test_antenna_is_measured_by_the_step_26_instrument_on_every_candidate():
@@ -1120,6 +1143,58 @@ def test_in_chain_adopted_repair_keeps_its_input_trigger_and_passes_audit(
     assert log['re_verified'] is True
     assert not (output / 'no_repair_needed.flag').exists()
     assert not [f for f in audit.audit(project)[0] if f.severity == 'ERROR']
+
+
+def test_dual_route_with_pin_violation_cannot_publish_clean_repair(
+        tmp_path, monkeypatch):
+    import postroute_timing_repair_audit as audit
+    scenario = {
+        '32-postdrt-base': _base(4.0, -0.3),
+        '32-pregrt-base': _base(4.2, 0.10),
+        '32-pregrt_postdrt-base': _base(4.1, 0.05),
+    }
+    for step in scenario.values():
+        step['antenna_metrics']['antenna__violating__pins'] = 1
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, scenario)
+    pre_state = put(project / 'phase3/librelane/21-route-pregrt/13-fill/state_out.json',
+                    {'odb': 'p.odb', 'def': 'p.def'})
+    report = prr.run_in_chain(
+        project, mode='dual', image='img', pdk='pdk', pdk_root=tmp_path,
+        sdc=sdc, derate=(0.95, 1.05), route_state=route, route_drc=0,
+        variant_arm=lambda lane, extra: {
+            'final': pre_state, 'route_drc': [{'run': 'drt-run-0', 'markers': 0}]},
+        programs_dir=shim)
+    assert report['selected_arm'] == 'pregrt'
+    assert report['selection']['feasible'] == []
+    output = project / prr.DECLARED_REPAIR_REL
+    decision = json.loads((output / 'postroute_timing_repair_decision.json').read_text())
+    log = json.loads((output / 'repair_log.json').read_text())
+    assert decision['repair_needed'] is True
+    assert log['final']['antenna_nets'] == 0
+    assert log['final']['antenna_pins'] == 1
+    assert log['re_verified'] is False
+    assert 'NOT_REVERIFIED' in [f.category for f in audit.audit(project)[0]
+                                if f.severity == 'ERROR']
+
+
+def test_missing_input_pin_census_refuses_declared_repair(
+        tmp_path, monkeypatch):
+    import postroute_timing_repair_audit as audit
+    baseline = _base(4.0, -0.3)
+    del baseline['antenna_metrics']['antenna__violating__pins']
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': baseline, '32-cand01': _cand(3.99995, 0.3)})
+    report = prr.run_in_chain(
+        project, mode='librelane', image='img', pdk='pdk', pdk_root=tmp_path,
+        sdc=sdc, derate=(0.95, 1.05), route_state=route, route_drc=0,
+        programs_dir=shim)
+    assert report['adopted'] is None
+    assert report['declared_repair_publication']['status'] == 'NOT_MEASURED'
+    assert 'antenna' in report['declared_repair_publication']['reason']
+    assert not (project / prr.DECLARED_REPAIR_REL /
+                'postroute_timing_repair_decision.json').exists()
+    assert 'NO_REPAIR_ARTIFACT' in [f.category for f in audit.audit(project)[0]
+                                    if f.severity == 'ERROR']
 
 
 def test_in_chain_tool_refusal_invalidates_the_prior_declared_decision(
