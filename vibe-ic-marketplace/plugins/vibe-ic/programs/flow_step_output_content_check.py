@@ -25,7 +25,7 @@ import p0_tool_frontend_check as _rtl_frontend
 
 #: Where the rtl mode keeps the front end's record and the tools' whole
 #: transcripts, so a refusal cites the tool's own words (path + sha256).
-RTL_RECORD = "phase2/lint/rtl_content_check.json"
+RTL_RECORD = "lint/rtl_content_check.json"
 
 
 def _rtl_errors(project: Path) -> tuple[list[str], dict | None]:
@@ -70,7 +70,11 @@ def _tool_disclosure(project: Path, frontend: dict | None) -> list[str]:
     """What a refused rtl check must say: each failing tool's exit code, its
     whole transcript (path + sha256) and its own first error lines."""
     lines: list[str] = []
+    if (frontend or {}).get("record_not_written"):
+        lines.append(f"  record NOT written: {frontend['record_not_written']}")
     for name, row in ((frontend or {}).get("tools") or {}).items():
+        # every row that produced a finding: a failing exit, or its own
+        # blocking diagnostics (a %Warning-SELRANGE exits 0)
         if not row.get("exit_code") and not row.get("errors"):
             continue
         log = row.get("log")
@@ -99,7 +103,11 @@ def check(project: Path, mode: str) -> list[str]:
                for row in data):
             return [f"{path}: invalid rom_init_lint finding"]
     elif mode == "rtl":
-        errors, _ = _rtl_errors(project)
+        errors, frontend = _rtl_errors(project)
+        if not errors and (frontend or {}).get("not_measured"):
+            # never an empty (passing) list for a run nothing measured
+            errors = [f"NOT_MEASURED: {tool}: {why}" for tool, why
+                      in frontend["not_measured"].items()]
     elif mode == "netlist":
         path = project / "phase2/stage2/synth/netlist.v"
         if not path.is_file():
@@ -152,15 +160,22 @@ def main() -> int:
     else:
         errors = check(args.project, args.mode)
         frontend = None
-    if frontend is not None and frontend.get("not_measured"):
-        print(f"NOT_MEASURED: {frontend['not_measured']}")
-        return 2
+    not_measured = (frontend or {}).get("not_measured") or {}
     for error in errors:
         print("FAIL:", error)
     if errors:
+        # a measured FAIL is reported as one, beside any other tool's stall
         for line in _tool_disclosure(args.project, frontend):
             print(line)
+        for tool, why in not_measured.items():
+            print(f"  NOT_MEASURED {tool}: {why}")
         return 1
+    if not_measured:
+        for tool, why in not_measured.items():
+            print(f"NOT_MEASURED: {tool}: {why}")
+        for line in _tool_disclosure(args.project, frontend):
+            print(line)
+        return 2
     print(f"PASS: {args.mode} output content")
     if frontend is not None:
         print("TOOL_EVIDENCE:", json.dumps({

@@ -97,47 +97,70 @@ def _route_image(tool: str, image: str | None) -> str | None:
     return image or default_image()
 
 
-#: Every tool run has a deadline (owner ruling). A lint or an elaboration of
-#: a whole design is minutes, not hours; past this the run measured nothing.
-TOOL_DEADLINE_S = 1800
-
-#: How many of a failing tool's own error lines a record carries inline. The
-#: whole transcript is written beside the record and cited by sha256.
+#: How many of a failing tool's own lines a record carries inline. The whole
+#: transcript is kept beside the record and cited by sha256.
 ERROR_EXCERPT_LINES = 20
 
 
-class ToolDeadline(RuntimeError):
-    """A tool ran past `TOOL_DEADLINE_S`: nothing was measured."""
+class ToolStalled(RuntimeError):
+    """The tool made no forward progress across the stall grace (#2051): it
+    was stopped, and nothing it would have said was measured. Elapsed time
+    alone never raises this."""
 
 
 def _invoke(tool: str, args: list[str], project: Path,
             image: str | None) -> subprocess.CompletedProcess[str]:
+    """Run `tool` to completion however long it legitimately takes; stop it
+    only on a progress STALL (#2051). On the docker path the container gets
+    a name that is this invocation's own, its CPU is read inside it, and a
+    stall reaps it BY THAT NAME (killing the client alone orphans the tool)."""
     if shutil.which(tool):
-        command = [tool, *args]
-    elif shutil.which("docker"):
-        # Phase 2 needs only the released EDA image's tool binaries. LibreLane
-        # CLI capability is neither requested nor assumed here.
-        image = image or default_image()
-        root = str(project.resolve())
-        command = ["docker", "run", "--rm", *_dmem.docker_memory_flags(),
-                   "--network", "none",
-                   "-v", f"{root}:{root}:ro", "--entrypoint", tool,
-                   image, *args]
-    else:
+        import _progress_run
+        try:
+            return _progress_run.run([tool, *args], cwd=project,
+                                     capture_output=True, text=True)
+        except _progress_run.Stalled as exc:
+            raise ToolStalled(f"{tool} stalled: {exc}") from exc
+    if not shutil.which("docker"):
         raise FileNotFoundError(f"{tool} and docker unavailable")
-    try:
-        return subprocess.run(command, cwd=project, capture_output=True,
-                              text=True, check=False, timeout=TOOL_DEADLINE_S)
-    except subprocess.TimeoutExpired as exc:
-        raise ToolDeadline(f"{tool} ran past its {TOOL_DEADLINE_S} s deadline") from exc
+    import _docker_watchdog as _dwd
+    import _watchdog as _wd
+    # Phase 2 needs only the released EDA image's tool binaries. LibreLane
+    # CLI capability is neither requested nor assumed here.
+    image = image or default_image()
+    root = str(project.resolve())
+    name = _dwd.ephemeral_container_name("vibeic_p0")
+    command = ["docker", "run", "--rm", "--name", name,
+               *_dmem.docker_memory_flags(), "--network", "none",
+               "-v", f"{root}:{root}:ro", "--entrypoint", tool,
+               image, *args]
+    res = _wd.run_host_supervised(
+        command, cwd=project,
+        kill=_dwd.ephemeral_container_reap(name),
+        cpu_probe=_dwd.ephemeral_container_cpu_probe(name))
+    if res.outcome == "launch_error":
+        raise FileNotFoundError(f"docker could not launch {tool}")
+    if res.outcome == "stalled":
+        raise ToolStalled(f"{tool} (container {name}) stalled: no forward "
+                          f"progress across the stall grace; reaped by name")
+    return subprocess.CompletedProcess(command, res.rc, res.out, res.err)
+
+
+#: slang's own diagnostic grammar, `path:line:col: error: ...` (Yosys's
+#: `ERROR:` line is only the summary trailer).
+_SLANG_ERROR = re.compile(r"^\S+:\d+:\d+: error:")
 
 
 def _error_lines(log: str) -> list[str]:
-    """The tool's OWN error lines, verbatim, first `ERROR_EXCERPT_LINES`:
-    Verilator's ``%Error`` and Yosys's ``ERROR:`` prefixes. A disclosure, not
-    a verdict: the verdict is the exit code and the calibrated codes."""
+    """The tool's OWN lines behind a refusal, verbatim, first
+    `ERROR_EXCERPT_LINES`: Verilator's ``%Error`` lines and the ``%Warning-``
+    lines of the codes P0 blocks on, slang's ``: error:`` diagnostics, and
+    Yosys's ``ERROR:`` trailer. A disclosure, not a verdict: the verdict is
+    the exit code and the calibrated codes."""
+    blocking = tuple(f"%Warning-{code}" for code in sorted(BLOCKING_CODES))
     return [line for line in log.splitlines()
-            if line.startswith(("%Error", "ERROR:"))][:ERROR_EXCERPT_LINES]
+            if line.startswith(("%Error", "ERROR:") + blocking)
+            or _SLANG_ERROR.match(line)][:ERROR_EXCERPT_LINES]
 
 
 def check(project: Path, image: str | None = None) -> dict:
@@ -174,53 +197,52 @@ def check(project: Path, image: str | None = None) -> dict:
               " " + " ".join(names) +
               "; hierarchy -check " + hierarchy + "; proc; write_json /dev/null")
     import _eda_pin
-    try:
-        yosys_image = _route_image("yosys", image)
-        yosys = _invoke("yosys", ["-Q", "-T", "-p", script], project, yosys_image)
-        verilator_args = ["--lint-only", "--Wall", "-Wno-fatal"]
-        if top:
-            verilator_args += ["--top-module", top]
-        verilator_image = _route_image("verilator", image)
-        verilator = _invoke("verilator", [*verilator_args,
-                                          *("-I" + directory for directory in include_dirs),
-                                          *names], project, verilator_image)
-    except _eda_pin.ImageNotResolvable as exc:
-        result["findings"].append(f"tool invocation refused: {exc}")
-        return result
-    except (FileNotFoundError, OSError) as exc:
-        result["findings"].append(f"tool invocation unavailable: {exc}")
-        return result
-    except ToolDeadline as exc:
-        result["not_measured"] = str(exc)
-        result["findings"].append(f"NOT_MEASURED: {exc}")
-        return result
-    yosys_log = yosys.stdout + yosys.stderr
-    result["tools"]["Yosys.JsonHeader"] = {"exit_code": yosys.returncode,
-                                               "execution": "host" if shutil.which("yosys") else yosys_image,
-                                               "errors": _error_lines(yosys_log),
-                                               "output": yosys_log[-8000:]}
-    result["_transcripts"] = {"Yosys.JsonHeader": yosys_log}
-    lint_log = verilator.stdout + verilator.stderr
-    try:
-        diagnostics = _diagnostic_codes(lint_log)
-    except _calibration.Uncalibrated as exc:
-        result["findings"].append(f"tool diagnostic reader uncalibrated: {exc}")
-        return result
-    result["tools"]["Verilator.Lint"] = {"exit_code": verilator.returncode,
-                                            "execution": "host" if shutil.which("verilator") else verilator_image,
-                                            "diagnostics": diagnostics,
-                                            "errors": _error_lines(lint_log),
-                                            "output": lint_log[-8000:]}
-    result["_transcripts"]["Verilator.Lint"] = lint_log
-    if yosys.returncode:
+    verilator_args = ["--lint-only", "--Wall", "-Wno-fatal"]
+    if top:
+        verilator_args += ["--top-module", top]
+    runs = (("Yosys.JsonHeader", "yosys", ["-Q", "-T", "-p", script]),
+            ("Verilator.Lint", "verilator",
+             [*verilator_args, *("-I" + d for d in include_dirs), *names]))
+    # Each tool runs and is recorded ON ITS OWN: a stall of one never
+    # discards what the other measured, and a measured FAIL stays a FAIL.
+    result["_transcripts"] = {}
+    for label, tool, args in runs:
+        try:
+            tool_image = _route_image(tool, image)
+            cp = _invoke(tool, args, project, tool_image)
+        except _eda_pin.ImageNotResolvable as exc:
+            result["findings"].append(f"tool invocation refused: {exc}")
+            return result
+        except (FileNotFoundError, OSError) as exc:
+            result["findings"].append(f"tool invocation unavailable: {exc}")
+            return result
+        except ToolStalled as exc:
+            result.setdefault("not_measured", {})[label] = str(exc)
+            continue
+        log = cp.stdout + cp.stderr
+        row = {"exit_code": cp.returncode,
+               "execution": "host" if shutil.which(tool) else tool_image,
+               "errors": _error_lines(log),
+               "output": log[-8000:]}
+        if label == "Verilator.Lint":
+            try:
+                row["diagnostics"] = _diagnostic_codes(log)
+            except _calibration.Uncalibrated as exc:
+                result["findings"].append(f"tool diagnostic reader uncalibrated: {exc}")
+                return result
+        result["tools"][label] = row
+        result["_transcripts"][label] = log
+    yosys_row = result["tools"].get("Yosys.JsonHeader")
+    lint_row = result["tools"].get("Verilator.Lint")
+    if yosys_row and yosys_row["exit_code"]:
         result["findings"].append("Yosys elaboration failed")
-    if verilator.returncode:
+    if lint_row and lint_row["exit_code"]:
         result["findings"].append("Verilator lint failed")
-    for diagnostic in diagnostics:
+    for diagnostic in (lint_row or {}).get("diagnostics", []):
         if diagnostic["code"] in BLOCKING_CODES:
             result["findings"].append(
                 f"Verilator {diagnostic['severity']}-{diagnostic['code']}")
-    result["passed"] = not result["findings"]
+    result["passed"] = not result["findings"] and not result.get("not_measured")
     return result
 
 
@@ -235,9 +257,9 @@ def main() -> int:
     result = check(args.project.resolve(), args.image)
     result.pop("_transcripts", None)
     print(json.dumps(result, sort_keys=True))
-    if result.get("not_measured"):
-        return 2
-    return 0 if result["passed"] else 1
+    if result["findings"]:
+        return 1            # a measured FAIL outranks another tool's stall
+    return 2 if result.get("not_measured") else 0
 
 
 if __name__ == "__main__":

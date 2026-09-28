@@ -987,6 +987,25 @@ def _pkg_symbol(path: Path) -> str:
     return m.group(1) if m else path.stem
 
 
+#: A design unit of any kind. A body file that declares none holds only
+#: compiler directives (`define / `timescale / `undef), like a header.
+_RE_DESIGN_UNIT = re.compile(
+    r"(?m)^\s*(?:(?:virtual\s+)?class|module|macromodule|package|interface|"
+    r"program|primitive|config|checker)\b")
+
+
+def _declares_design_unit(path: Path) -> bool:
+    """True when the file declares any design unit. A file that declares none
+    is read like a header: its macros may be used by the packages, and a
+    single-pass reader (Verilator, slang --single-unit) sees macros only in
+    read order."""
+    try:
+        return bool(_RE_DESIGN_UNIT.search(_strip_comments_and_strings(
+            path.read_text(errors="replace"))))
+    except OSError:
+        return True
+
+
 def _declares_package(path: Path) -> bool:
     """True when the file actually declares a ``package`` — read structurally.
 
@@ -1003,7 +1022,9 @@ def _declares_package(path: Path) -> bool:
 def topological_package_first(files: List[Path]) -> List[Path]:
     """Order `files` so every package precedes any package that imports it, and
     all packages/headers precede non-package RTL (single-unit elaboration needs
-    a package declared before use). Non-package order is preserved; import
+    a package declared before use). A body file that declares no design unit
+    (only `define/`timescale) is read with the headers, ahead of every package,
+    so a package using its macros sees them. Non-package order is preserved; import
     cycles degrade to stable alphabetical order. chip-AGNOSTIC import grammar.
 
     SCOPE, HONESTLY: the phase-2 runner consumes `ConeResult.cone_files` for its
@@ -1012,8 +1033,11 @@ def topological_package_first(files: List[Path]) -> List[Path]:
     (and tested) because it is the correct answer for any caller that does
     consume the order, and because emitting a knowingly wrong order would be a
     trap for the next one."""
-    hdrs = [f for f in files if f.suffix in _HDR_EXTS]
-    bodies = [f for f in files if f.suffix in _RTL_EXTS]
+    # Define-only body files (no design unit) travel with the headers: a
+    # package may use their macros, so they precede every package.
+    hdrs = [f for f in files if f.suffix in _HDR_EXTS
+            or (f.suffix in _RTL_EXTS and not _declares_design_unit(f))]
+    bodies = [f for f in files if f.suffix in _RTL_EXTS and f not in hdrs]
     is_pkg = {f: _declares_package(f) for f in bodies}
     pkgs = [f for f in bodies if is_pkg[f]]
     rest = [f for f in bodies if not is_pkg[f]]
