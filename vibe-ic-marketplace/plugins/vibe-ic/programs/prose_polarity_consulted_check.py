@@ -119,6 +119,15 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "analog_ngspice_stream::_read_raw":
+        "ONE NGSPICE BINARY RAWFILE GRAMMAR, NO SENTENCE. The parser accepts "
+        "anchored Flags: real and No. Variables: integer header fields, an "
+        "indexed Variables table, and fixed-width binary doubles after the "
+        "Binary: card. It rejects an absent table, nonfinite samples, a bad "
+        "point-count trailer, and a transient shorter than the deck asked "
+        "for. A Title sentence cannot provide any of those fields. Falsifier: "
+        "tests/test_a4_bounded_raw_stream.py::test_raw_pipe_ignores_a_title_"
+        "sentence_instead_of_inventing_a_variable_table.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "

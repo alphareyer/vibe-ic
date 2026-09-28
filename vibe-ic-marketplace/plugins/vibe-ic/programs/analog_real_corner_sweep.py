@@ -68,6 +68,7 @@ import _atomic_artefact as _aa  # noqa: E402  (vibe-ic#1082)
 import _designs_root as _dr  # noqa: E402  (host mount root, measured)
 import analog_resolution_stimulus as _ars  # noqa: E402  (vibe-ic#2188)
 import analog_corner_admission as _aca  # noqa: E402  (#2236 placement admission)
+import analog_ngspice_stream as _stream  # noqa: E402  (bounded A4 transient)
 import analog_converter_density_grade as _dens  # noqa: E402  (R-0915-45)
 import analog_adc_enob_corner_check as _enob_cc  # noqa: E402  (R-0915-45)
 
@@ -1101,14 +1102,31 @@ def _run_ngspice(container, sp_in_container, cwd=None, deck_text=None,
     # (A) Ask for the STRUCTURED per-.measure sidecar when this build supports
     # it (ngspice fork #29). Capability-probed, never assumed — a stock build
     # answers `unrecognized option` and would emit that on every corner.
+    # The delivered incremental measurement deck can be evaluated from a
+    # streaming raw pipe. Its complete transient is still simulated, while
+    # only the vectors named by its own cards pass through the pipe. The
+    # narrow planner refuses any control grammar it cannot reproduce.
+    stream_plan, _stream_refusal = _stream.plan(deck_text or "") if corner_job else (None, None)
+    if stream_plan is not None:
+        import shutil
+        stream_script = Path(sp_in_container).with_name(
+            Path(sp_in_container).stem + ".stream_runner.py")
+        shutil.copyfile(Path(_stream.__file__), stream_script)
+        raw_threads = os.environ.get("VIBEIC_ANALOG_NUM_THREADS", "").strip()
+        thread_env = (f"VIBEIC_ANALOG_NUM_THREADS={shlex.quote(raw_threads)} "
+                      if raw_threads else "")
+        command = (f"{prefix}{thread_env}python3 {shlex.quote(str(stream_script))} "
+                   f"{shlex.quote(sp_in_container)} --ngspice "
+                   f"{shlex.quote(ngspice_bin)} 2>&1")
     json_path = None
     json_flag = ""
-    if _supports_json_measure(container, ngspice_bin):
+    if stream_plan is None and _supports_json_measure(container, ngspice_bin):
         json_path = f"{sp_in_container}.measure.json"
         json_flag = f"--json-measure={shlex.quote(json_path)} "
     deadline = 0 if run_to_completion else sim_deadline_s(deck_text or "")
-    command = (f"{prefix}{shlex.quote(ngspice_bin)} -b {json_flag}"
-               f"{shlex.quote(sp_in_container)} 2>&1")
+    if stream_plan is None:
+        command = (f"{prefix}{shlex.quote(ngspice_bin)} -b {json_flag}"
+                   f"{shlex.quote(sp_in_container)} 2>&1")
     if corner_job is None:
         cp = _docker(container, command, timeout=deadline)
     else:
@@ -2377,7 +2395,12 @@ def _run_pvt_corners(project, container, host_root, sl_dir, btype, block, pdk,
         # estimator cannot read falls back to the declared reservation, and a
         # single unreadable deck makes the whole plan fall back, so a plan is
         # never half derived and half declared.
-        _sizes = [_ars.estimated_peak_rss_bytes(_deck)
+        # A raw pipe does not retain the transient's vectors in ngspice or
+        # persist the rawfile. Charge the declared container ceiling to the
+        # host ledger; the measured ceiling is selected by the caller after a
+        # bounded pilot. Non-streamed decks retain their duration estimate.
+        _sizes = [(reservation_bytes if _stream.plan(_deck)[0] is not None
+                   else _ars.estimated_peak_rss_bytes(_deck))
                   for _proc, _tlbl, _deck, _sp in pending]
         _derived = all(isinstance(b, int) and b > 0 for b in _sizes)
         plan = ledger.plan(
@@ -2436,7 +2459,8 @@ def _run_pvt_corners(project, container, host_root, sl_dir, btype, block, pdk,
                         break
             log_rel = str(log.relative_to(project))
             if ok and v is not None:
-                real_sims[(proc, tlbl)] = {"value": v, "ok": True, "log": log_rel}
+                real_sims[(proc, tlbl)] = {"value": v, "ok": True, "log": log_rel,
+                                          "sim_status": _ss}
             else:
                 nc = not_completed_record(raw, _ss, ok, v, log_rel)
                 if nc is not None:
@@ -3454,6 +3478,7 @@ def _run_block(project, block, container, pdk, topology_override):
         l5_overrides_not_applied = {}
 
     runs = []
+    precomputed_pvt = None
     # vibe-ic#2188 — one record per corner deck, applied or refused.
     resolution_records: list[dict] = []
     # #464 — accumulate per-block partial-measurement evidence across runs.
@@ -3485,10 +3510,42 @@ def _run_block(project, block, container, pdk, topology_override):
         # vibe-ic#2188 — the typ/27C corner IS a corner: `_run_pvt_corners`
         # reuses this run for it, so a deck stamped only in the loop below
         # would leave exactly one of the nine unable to yield a resolution.
+        base_resolution_records = []
         tb = stamp_resolution_stimulus(project, block, container, host_root,
-                                       tb, sp_host, resolution_records)
+                                       tb, sp_host, base_resolution_records)
         tb = deck_origin_header(origin) + subst_header + tb
         sp_host.write_text(tb)
+        stream_plan, _ = _stream.plan(tb) if design_deck else (None, None)
+        if stream_plan is not None and len(sweep_points) == 1:
+            # A delivered design has no sizing sweep: the nominal point is
+            # one of the PVT grid. Launch all nine independently in the same
+            # pool instead of waiting for a serial nominal run first.
+            keys = {m["name"] for m in stream_plan["measures"]}
+            keys.update(name for name, _expr in stream_plan["lets"])
+            metric = target["key"] if target["key"] in keys else sorted(keys)[0]
+            real_sims, corner_not_completed = _run_pvt_corners(
+                project, container, host_root, sl_dir, btype, block, pdk, pdk_lib,
+                knob, val, deck_overrides, subst_header, None,
+                process_corners=grid_corners, devices=devices,
+                typ_section=typ_section, device_terminals=device_terminals,
+                device_geometry_units=device_geometry_units,
+                deck_prelude=deck_prelude, origin=origin, render=_render,
+                metric_key=metric, resolution_records=resolution_records)
+            precomputed_pvt = (real_sims, corner_not_completed)
+            nominal = real_sims.get((typ_section, "27c"))
+            if nominal is not None:
+                ss = nominal.get("sim_status") or {}
+                runs.append({"knob": knob, "val": val, "ok": True,
+                             "ngspice_log": nominal["log"], metric: nominal["value"],
+                             "sim_warnings": ss.get("warnings", []),
+                             "partial_measurement": ss.get("partial", False),
+                             "failed_analyses": ss.get("failed_analyses", []),
+                             "nulled_metrics": ss.get("nulled_metrics", [])})
+                block_sim_warnings.extend(ss.get("warnings", []))
+                block_failed_analyses.update(ss.get("failed_analyses", []))
+                block_nulled_metrics.update(ss.get("nulled_metrics", []))
+            continue
+        resolution_records.extend(base_resolution_records)
         ok, meas, raw, sim_status = _run_ngspice(
             container, _container_path(container, host_root, sp_host),
             deck_text=tb, run_to_completion=True,
@@ -3594,16 +3651,19 @@ def _run_block(project, block, container, pdk, topology_override):
     # exists on disk.
     base_tt = ({"value": base, "ok": True, "log": base_log}
                if base is not None and base_log else None)
-    real_sims, corner_not_completed = _run_pvt_corners(
-        project, container, host_root, sl_dir, btype, block, pdk, pdk_lib,
-        best.get("knob", "__noop__"), best.get("val", 0),
-        deck_overrides, subst_header, base_tt,
-        process_corners=grid_corners, devices=devices, typ_section=typ_section,
-        device_terminals=device_terminals,
-        device_geometry_units=device_geometry_units,
-        deck_prelude=deck_prelude, origin=origin,
-        render=_render, metric_key=target["key"],
-        resolution_records=resolution_records)
+    if precomputed_pvt is not None:
+        real_sims, corner_not_completed = precomputed_pvt
+    else:
+        real_sims, corner_not_completed = _run_pvt_corners(
+            project, container, host_root, sl_dir, btype, block, pdk, pdk_lib,
+            best.get("knob", "__noop__"), best.get("val", 0),
+            deck_overrides, subst_header, base_tt,
+            process_corners=grid_corners, devices=devices, typ_section=typ_section,
+            device_terminals=device_terminals,
+            device_geometry_units=device_geometry_units,
+            deck_prelude=deck_prelude, origin=origin,
+            render=_render, metric_key=target["key"],
+            resolution_records=resolution_records)
     pvt_grid, corners_executed = build_pvt_grid(
         base, base_log, real_sims, target.get("tol"),
         process_corners=grid_corners, not_completed=corner_not_completed)
