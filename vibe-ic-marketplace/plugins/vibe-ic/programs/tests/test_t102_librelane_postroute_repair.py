@@ -560,7 +560,7 @@ def test_unmeasured_candidate_drv_is_still_refused(tmp_path, monkeypatch):
 
 def test_the_deck_repairs_drv_after_timing_and_antenna_cell_insertion():
     tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
-    calls = [m.start() for m in re.finditer(r'^log_cmd repair_design', tcl, re.M)]
+    calls = [m.start() for m in re.finditer(r'^\s*log_cmd repair_design', tcl, re.M)]
     assert len(calls) >= 3
     assert calls[0] < tcl.index('log_cmd repair_timing {*}$setup_args')
     assert tcl.index('log_cmd repair_timing {*}$hold_args') < calls[1]

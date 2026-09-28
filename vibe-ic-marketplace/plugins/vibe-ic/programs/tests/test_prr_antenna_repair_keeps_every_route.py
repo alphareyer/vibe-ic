@@ -49,7 +49,6 @@ proc mknet {name {sig SIGNAL} {terms 2} {abut 0}} {
 proc netcall {name sig terms abut method args} {
     switch -- $method {
         getName { return $name }
-        getMaster { return master }
         getSigType { return $sig }
         isSpecial { return [expr {$sig in {POWER GROUND}}] }
         getITerms { return [lrepeat $terms x] }
@@ -70,6 +69,7 @@ proc mkinst {name net} {
 proc instcall {name net method args} {
     switch -- $method {
         getName { return $name }
+        getMaster { return master }
         getPlacementStatus { return PLACED }
         setPlacementStatus { return }
         getITerms { return [list ::it_$name] }

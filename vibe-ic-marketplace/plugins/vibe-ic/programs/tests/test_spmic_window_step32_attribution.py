@@ -29,7 +29,7 @@ def test_window_publishes_fresh_step32_write_record_before_gate_audit(
         report = p3._pl.report_path(isolated, "phase3_one_shot.json")
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(json.dumps({"verdict": "FAIL"}) + "\n")
-        return SimpleNamespace(rc=1, stalled=False, err="residual fanout",
+        return SimpleNamespace(rc=1, stalled=False, out="", err="residual fanout",
                                elapsed_s=1.0, outcome="natural"), Path("eda.stderr")
 
     monkeypatch.setattr(p3, "_phase3_enclosing_supervised", eda_writes)
