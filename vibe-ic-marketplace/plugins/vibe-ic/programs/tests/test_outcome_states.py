@@ -144,8 +144,15 @@ def test_a_shell_command_not_found_names_the_tool(tmp_path):
     body = ("def test_x():\n"
             "    p = subprocess.run(['sh', '-c', 'iverilog -V'], capture_output=True, text=True)\n"
             "    assert p.returncode == 0, p.stderr\n")
-    sh_dir = os.path.dirname(os.path.realpath("/bin/sh"))
-    rc, out = _session(tmp_path, body, path=f"{_empty_bin(tmp_path)}:{sh_dir}")
+    # PATH holds `sh` and nothing else: a directory with one link to the real
+    # shell. `dirname(realpath('/bin/sh'))` is /usr/bin, and on a host with
+    # the Ubuntu `iverilog` package that directory holds the very tool this
+    # test needs absent (MEASURED: 8HD-8, stack39 census) -- the inner test
+    # then passes and nothing is classified.
+    sh_only = tmp_path / "sh-only"
+    sh_only.mkdir()
+    (sh_only / "sh").symlink_to(os.path.realpath("/bin/sh"))
+    rc, out = _session(tmp_path, body, path=f"{_empty_bin(tmp_path)}:{sh_only}")
     assert _counts(out)["NOT_VERIFIED"] == 1, out
     assert "`iverilog` is not on PATH" in _state_lines(out, "NOT_VERIFIED")[0]
 
