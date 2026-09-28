@@ -83,6 +83,7 @@ def _project(tmp_path: Path, executed=(R27_EXECUTED,), cases=R27_CASES,
         out.mkdir(parents=True)
         (out / "l10_execution.json").write_text(json.dumps({
             "schema": _l10x.SCHEMA,
+            "l10_sha256": _l10x.file_sha256(gd / "L10_TEST_CASES.json"),
             "cases": rows,
             "producer": "testbench_gen.run_unit_tbs",
             "tb_dir": str(proj / "phase2" / "stage1" / "sim" / "tb"),
@@ -243,7 +244,9 @@ def _aes_project(tmp_path: Path, kav_executed=8, hidden_functional=None) -> Path
     out = proj / "reports" / "phase2" / "sim"
     out.mkdir(parents=True)
     (out / "l10_execution.json").write_text(json.dumps({
-        "schema": _l10x.SCHEMA, "cases": rec,
+        "schema": _l10x.SCHEMA,
+        "l10_sha256": _l10x.file_sha256(gd / "L10_TEST_CASES.json"),
+        "cases": rec,
         "producer": "testbench_gen.run_unit_tbs",
         "tb_dir": str(proj / "phase2" / "stage1" / "sim" / "tb"),
         "source_junit": "results.xml"}))

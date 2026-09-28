@@ -10487,6 +10487,14 @@ def _known_answer_vector_census(tb_report: dict) -> str:
         return ""
     out = (f"; known-answer vectors: {len(bound)} bound, "
            f"{len(unbound)} unbound")
+    later: dict = {}
+    for b in bound:
+        if isinstance(b, dict) and b.get("driven_by"):
+            later[b["driven_by"]] = later.get(b["driven_by"], 0) + 1
+    if later:
+        out += (" (" + ", ".join(f"{n} driven by {rung} after the "
+                                 f"known-answer route refused"
+                                 for rung, n in sorted(later.items())) + ")")
     if unbound:
         first = unbound[0] if isinstance(unbound[0], dict) else {}
         name = first.get("case") or "?"
