@@ -353,6 +353,8 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
                       f'{routed}: no physical LEF views')
     guest_lefs = []
     extra_mounts = []
+    pdk_dir = (pdk_root / pdk).resolve()
+    project_dir = project.resolve()
     for value in dict.fromkeys(str(x) for x in lefs):
         host = _host_pdk_path(value, pdk_root, pdk)
         if not host.is_absolute():
@@ -360,11 +362,12 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
         if not host.is_file():
             raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
                           f'physical LEF unreadable: {host}')
-        guest = value if value.startswith(f'/pdk/{pdk}/') else str(host.resolve())
+        host = host.resolve()
+        guest = (str(Path('/pdk') / pdk / host.relative_to(pdk_dir))
+                 if host.is_relative_to(pdk_dir) else str(host))
         guest_lefs.append(guest)
-        if not (host.resolve().is_relative_to(project.resolve()) or
-                host.resolve().is_relative_to((pdk_root / pdk).resolve())):
-            extra_mounts.extend(['-v', f'{host.resolve()}:{guest}:ro'])
+        if not (host.is_relative_to(project_dir) or host.is_relative_to(pdk_dir)):
+            extra_mounts.extend(['-v', f'{host}:{guest}:ro'])
 
     def word(value: Path | str) -> str:
         return '{' + str(value).replace('\\', '\\\\').replace('}', '\\}') + '}'
