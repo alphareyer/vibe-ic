@@ -323,6 +323,21 @@ DOMAIN_VALUE = {
 }
 
 
+def measured_repair_trigger(measurement: Dict[str, Any]) -> Dict[str, Any]:
+    """Start a late repair only for a violation measured on its input route."""
+    needed = ("setup_ws_min", "hold_ws_min", "drv_count")
+    missing = [key for key in needed
+               if not isinstance(measurement.get(key), (int, float))
+               or isinstance(measurement.get(key), bool)]
+    violated = [key for key in needed if key not in missing and
+                (measurement[key] > 0 if key == "drv_count"
+                 else measurement[key] < 0)]
+    action = ("RUN" if violated else "NOT_MEASURED" if missing else "SKIP")
+    return {"action": action, "basis": "input route STAPostPNR per-corner metrics",
+            "violated": violated, "missing": missing,
+            "values": {key: measurement.get(key) for key in needed}}
+
+
 def measure(impl: Path, domain: str, json_out: Path) -> int:
     """The closure's measurement: one number about the ADOPTED candidate."""
     import librelane_contract as _ll
@@ -427,6 +442,17 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
     row.update(repair_state=str(repaired), measurement=measurement,
                repair_metrics={k: v for k, v in metrics.items()
                                if k.startswith("vibeic__prr__")})
+    # Existing published cells have not yet had the corpus sweep required to
+    # promote aggregate DRV to a candidate admission rule. Record its exact
+    # verdict; Step 23 still judges the final route.
+    drv_count = measurement.get("drv_count")
+    row["drv_advisory"] = {
+        "verdict": ("NOT_MEASURED" if not isinstance(drv_count, int)
+                    or isinstance(drv_count, bool) else
+                    "PASS" if drv_count == 0 else "FAIL"),
+        "severity": "ADVISORY", "count": drv_count,
+        "basis": "candidate STAPostPNR under sign-off SDC"}
+    # The existing routed fanout admission rule remains blocking.
     row["fanout"] = fanout_residue(measurement, ctx["corners"])
     if row["fanout"]["verdict"] != "PASS":
         row.update(decision="REFUSED", reason=(
@@ -732,8 +758,10 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
                                   k: v for k, v in (_load(folder0 / "state_out.json")
                                                     .get("metrics") or {}).items()
                                   if k.startswith("vibeic__prr__")}}
+    trigger = measured_repair_trigger(baseline)
+    report["repair_trigger"] = trigger
     runs = []
-    if controllers:
+    if controllers and trigger["action"] == "RUN":
         reg = _cl.load_registry(registry, programs_dir=programs_dir)
         controller = _cl.ClosureController(reg, impl, arm / "closure")
         for cid in controllers:

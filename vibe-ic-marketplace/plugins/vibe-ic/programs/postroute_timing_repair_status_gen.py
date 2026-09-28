@@ -41,6 +41,7 @@ def _parse_sta_for_violations(sta_text: str) -> dict:
     out = {
         "tns_zero": False,
         "wns_negative": False,
+        "timing_measurement": "NOT_MEASURED",
         "violation_paths": [],
         "raw_lines_inspected": 0,
     }
@@ -55,6 +56,12 @@ def _parse_sta_for_violations(sta_text: str) -> dict:
 
     upper = sta_text.upper()
     has_violated = "VIOLATED" in upper
+    if ((tns_m and float(tns_m.group(1)) < 0)
+            or (wns_m and float(wns_m.group(1)) < 0)
+            or re.search(r"\bslack\s*\(VIOLATED\)", sta_text, re.I)):
+        out["timing_measurement"] = "VIOLATED"
+    elif tns_m and out["tns_zero"] and not out["wns_negative"]:
+        out["timing_measurement"] = "CLEAN"
     # Per-path MET-only OpenROAD report_checks output
     if not tns_m and not wns_m:
         # Heuristic: if every reported "slack (...)" is MET, design is clean.
@@ -63,6 +70,7 @@ def _parse_sta_for_violations(sta_text: str) -> dict:
            and not has_violated:
             out["tns_zero"] = True
             out["wns_negative"] = False
+            out["timing_measurement"] = "CLEAN"
         elif has_violated:
             out["wns_negative"] = True
     return out
@@ -120,8 +128,9 @@ def main(argv=None) -> int:
     # says "if any sign-off step ... fails, repair applies"; before this the
     # decision read STA and nothing else, so a hard-failed IR-drop sign-off
     # still produced `no_repair_needed.flag` and a clean postroute_timing_repair_audit.
-    decision = _repair_dec.decide(stance_path, single_corner_clean,
-                               project=project)
+    decision = _repair_dec.decide(
+        stance_path, single_corner_clean, project=project,
+        single_corner_evidence=info["timing_measurement"])
     summary = {
         "program": "postroute_timing_repair_status_gen",
         "version": "1.1.0",

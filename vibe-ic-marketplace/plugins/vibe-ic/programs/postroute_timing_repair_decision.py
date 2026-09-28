@@ -314,6 +314,7 @@ def decide(stance: Union["Path", str, dict, None],
            single_corner_clean: bool,
            project: Union["Path", str, None] = None,
            signoff_reports: Optional[Dict[str, Any]] = None,
+           single_corner_evidence: Optional[str] = None,
            ) -> Dict[str, Any]:
     """Return the post-route timing-repair trigger decision.
 
@@ -368,6 +369,14 @@ def decide(stance: Union["Path", str, dict, None],
         "nontiming_not_determined": [],
         "reason": "",
     }
+    if single_corner_evidence not in (None, "CLEAN", "VIOLATED", "NOT_MEASURED"):
+        raise ValueError("single_corner_evidence must name a measured state")
+    if single_corner_evidence == "NOT_MEASURED":
+        # A missing/ambiguous STA is neither a violation that can trigger a
+        # netlist edit nor evidence that permits no_repair_needed.flag.
+        out["timing_repair_needed"] = False
+        out["repair_needed"] = True
+    out["timing_basis_status"] = single_corner_evidence or "LEGACY_BOOLEAN"
     s = _load_stance(stance)
     if s:
         # Authoritative ONLY when the multi-corner OCV sign-off genuinely ran
@@ -389,6 +398,7 @@ def decide(stance: Union["Path", str, dict, None],
                 "violated_corners": viol,
                 "setup_worst_slack_ns": s.get("setup_worst_slack_ns"),
                 "hold_worst_slack_ns": s.get("hold_worst_slack_ns"),
+                "timing_basis_status": "VIOLATED" if viol else "CLEAN",
             })
 
     declared_hold = _declared_hold_violations(project)
@@ -457,8 +467,11 @@ def decide(stance: Union["Path", str, dict, None],
             + " — Step 32 may not certify 'no repair needed' over a sign-off "
               "domain that failed or that never produced a verdict")
     else:
-        out["reason"] = (
-            f"no setup/hold violation at basis {out['basis']}"
-            + (" and no non-timing sign-off failure"
-               if (project is not None or signoff_reports is not None) else ""))
+        if out["timing_basis_status"] == "NOT_MEASURED":
+            out["reason"] = "timing NOT_MEASURED at single_corner_tt; no late repair fired"
+        else:
+            out["reason"] = (
+                f"no setup/hold violation at basis {out['basis']}"
+                + (" and no non-timing sign-off failure"
+                   if (project is not None or signoff_reports is not None) else ""))
     return out

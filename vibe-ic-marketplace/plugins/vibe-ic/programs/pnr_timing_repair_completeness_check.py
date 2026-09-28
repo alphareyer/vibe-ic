@@ -223,6 +223,33 @@ def _checkpoint_session_without_timing_work(text: str) -> bool:
             and not _TIMING_BEARING.search(active))
 
 
+def drv_sequence(text: str) -> Dict[str, Any]:
+    """Advisory ordering proof for the last cell-changing repair.
+
+    ``repair_design`` is the DRV repair operation.  A later timing or antenna
+    edit requires another repair or a tool DRV census.  A census proves that
+    the limits were *checked*, not that the reported count is zero; the
+    sign-off report remains the authority for that verdict.
+    """
+    active = _strip_commented(text)
+    events = sorted(
+        (m.start(), kind, m.group(0))
+        for kind, rx in (
+            ("edit", re.compile(r"\b(?:repair_timing|repair_antennas)\b")),
+            ("repair", re.compile(r"\brepair_design\b")),
+            ("census", re.compile(r"\b(?:report_check_types|vic_census)\b")),
+        ) for m in rx.finditer(active))
+    pending = None
+    for _, kind, token in events:
+        if kind == "edit":
+            pending = token
+        elif kind in ("repair", "census"):
+            pending = None
+    return {"verdict": "FAIL" if pending else "PASS",
+            "severity": "ADVISORY", "last_unchecked_edit": pending,
+            "event_count": len(events)}
+
+
 def _sha256(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -277,6 +304,7 @@ def audit(script_path: Path) -> Tuple[str, List[TokenFinding], Dict[str, Any]]:
         "hold_only_antipattern": hold_only_antipattern,
         "missing_required": missing_required,
         "missing_expected": missing_expected,
+        "drv_sequence": drv_sequence(raw),
     }
     return verdict, findings, summary
 

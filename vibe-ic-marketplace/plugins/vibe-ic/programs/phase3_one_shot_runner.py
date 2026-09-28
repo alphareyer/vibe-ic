@@ -27305,6 +27305,22 @@ def _post_buffered_repair_tcl(marker_prefix: str, marker_suffix: str = "",
     )
 
 
+def _drv_after_edit_probe_tcl(marker: str) -> str:
+    """Ask OpenROAD for the final DRV tables after a netlist or route edit.
+
+    This is advisory until the published corpus has been swept.  The later
+    sign-off STA, with its own SDC and extracted parasitics, owns the zero-count
+    verdict; a failed query is disclosed rather than treated as zero.
+    """
+    return (
+        f'puts "{marker}_DRV_CENSUS_BEGIN"\n'
+        'if {[catch {report_check_types -max_slew -max_capacitance -violators} '
+        f'_drv_sc]}} {{ puts "{marker}_DRV_CENSUS_UNMEASURED: $_drv_sc" }}\n'
+        'if {[catch {report_check_types -max_fanout -violators} '
+        f'_drv_fo]}} {{ puts "{marker}_FANOUT_CENSUS_UNMEASURED: $_drv_fo" }}\n'
+        f'puts "{marker}_DRV_CENSUS_END"\n')
+
+
 # ORGANIC (spm clean-run 2026-07-11) — BOUND the post-route repair reroute's detailed_route.
 # The base route (Step 21) runs an UNBOUNDED detailed_route that CONVERGES to 0
 # DRC because a routable design terminates when it hits 0. The post-route repair reroute is
@@ -27910,6 +27926,7 @@ def _build_postroute_timing_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: st
         "  puts \"POSTROUTE_TIMING_REPAIR_DETAILED_ROUTE_NONFATAL: $_dr_err\"\n"
         "}\n"
         + _refill
+        + _drv_after_edit_probe_tcl("POSTROUTE_TIMING_REPAIR")
         # R-0915-125 -- THE ARTEFACT IS WRITTEN BEFORE THE EXTRACTION, not
         # after. `extract_parasitics` is a DB-MUTATING step (OpenRCX's
         # `orderWires` re-encodes every net through `tmg_conn`), and this deck
@@ -33380,6 +33397,7 @@ if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_tr
   puts "POSTROUTE_MIN_AREA_PATCH_SKIPPED: SDR transaction rolled back"
   write_def {out_dir_c}/routed.def
 }}
+{_drv_after_edit_probe_tcl("PNR_FINAL")}
 write_def {out_dir_c}/{top}.def
 write_verilog {out_dir_c}/{top}_pnr.v
 report_checks -path_delay max > {out_dir_c}/sta.rpt
@@ -63055,7 +63073,13 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # IR-drop sign-off still wrote no_repair_needed.flag. The timing-repair TCL
     # stays gated on `timing_repair_needed`, so a non-timing failure withholds the
     # certificate WITHOUT firing a repair that does not address it.
-    _repair_decision = _repair_dec.decide(mc_ocv_stance, tns_zero, project=project)
+    _single_corner_evidence = (
+        "CLEAN" if tns_zero else
+        "VIOLATED" if _post_route_timing_violation_measured(_sta_for_repair)
+        else "NOT_MEASURED")
+    _repair_decision = _repair_dec.decide(
+        mc_ocv_stance, tns_zero, project=project,
+        single_corner_evidence=_single_corner_evidence)
     # This canonical decision supersedes the LibreLane pre-stream decision.
     # Its log described that earlier decision and must not certify a fallback
     # in which this pass applied no repair.
@@ -64785,6 +64809,17 @@ def _post_route_tns_zero(sta_rpt: Path) -> bool:
         return True
     # Conservative default: not proven to be zero.
     return False
+
+
+def _post_route_timing_violation_measured(sta_rpt: Path) -> bool:
+    """A negative timing number or violated path in the selected STA report."""
+    try:
+        text = sta_rpt.read_text(errors="replace")
+    except OSError:
+        return False
+    if re.search(r"\b(?:tns|wns)\s+-(?:\d+(?:\.\d*)?|\.\d+)\b", text, re.I):
+        return True
+    return bool(re.search(r"\bslack\s*\(VIOLATED\)", text, re.I))
 
 
 #: Slack is signed: MORE NEGATIVE is worse, so a negative delta is a
