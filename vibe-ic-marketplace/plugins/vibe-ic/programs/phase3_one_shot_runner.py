@@ -3178,12 +3178,19 @@ def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, obj
     return out
 
 
+from sdc_environment import (  # R8 constraints, outside the PPA runner ledger
+    _SDC_ENV_KEYS, _sdc_environment_values, _sdc_environment_prefix,
+    _sdc_environment_pdk_values, _sdc_environment_design_values,
+)
+
 def _drv_constraints_sdc_block(slew_ns: Optional[float],
                                cap_pf: Optional[float],
                                note: str = "",
                                max_fanout: Optional[int] = None,
                                fanout_note: str = "",
-                               supply_ports: Sequence[str] = ()) -> str:
+                               supply_ports: Sequence[str] = (),
+                               slew_source: str = "",
+                               cap_source: str = "") -> str:
     """Render the DRV (`set_max_transition` / `set_max_capacitance` /
     `set_max_fanout`) SDC block.
 
@@ -3254,16 +3261,24 @@ def _drv_constraints_sdc_block(slew_ns: Optional[float],
         # other two get [current_design], which every DRV command accepts.
         scope = "[get_pins -hierarchical *]"
     if slew_ns is not None:
+        if slew_source:
+            lines.append(f"# R8 source: {slew_source}")
         # NOT `scope`: set_max_transition REFUSES a Pin ("Error 100:
         # unsupported object type Pin"), so the hierarchical-pin scope that
         # set_max_capacitance takes would abort the SDC here.
         lines.append(f"set_max_transition {slew_ns} [current_design]")
         if supplies:
+            if slew_source:
+                lines.append(f"# R8 source: {slew_source}")
             lines.append(
                 f"set_max_transition {slew_ns} $_vibeic_drv_signal_ports")
     if cap_pf is not None:
+        if cap_source:
+            lines.append(f"# R8 source: {cap_source}")
         lines.append(f"set_max_capacitance {cap_pf} {scope}")
         if supplies:
+            if cap_source:
+                lines.append(f"# R8 source: {cap_source}")
             lines.append(
                 f"set_max_capacitance {cap_pf} $_vibeic_drv_signal_ports")
     if max_fanout is not None:
@@ -3699,7 +3714,9 @@ def _ensure_staged_sdc_drv(sdc_text: str, active_liberty: str,
         _fanout_note = (_fanout_note + "; " if _fanout_note else "") + _u
     return text + _drv_constraints_sdc_block(
         slew, cap, note, max_fanout=fanout, fanout_note=_fanout_note,
-        supply_ports=_producer_supply_ports_for_drv(project)), info
+        supply_ports=_producer_supply_ports_for_drv(project),
+        slew_source=str(drv.get("slew_source") or ""),
+        cap_source=str(drv.get("cap_source") or "")), info
 
 
 def _resolve_staged_silicon_sdc(project: Path) -> Optional[Path]:
@@ -4137,7 +4154,8 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
                             drv_note: str = "",
                             liberty_path: str = "",
                             pdk_name: str = "",
-                            staged_sdc_note: str = "") -> str:
+                            staged_sdc_note: str = "",
+                            container: str = "") -> str:
     """Build the minimal silicon-top auto-SDC text emitted by ``step_pnr`` when
     the project stages no ``constraints/*.sdc`` for silicon.
 
@@ -4336,10 +4354,19 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
             "# max_fanout UNRESOLVED and at least one tier could not be READ "
             "(unread is not empty): " + "; ".join(_fanout_unread) + "\n")
     sdc_text += _unread_fanout_comment
+    _env, _env_unread = _sdc_environment_values(
+        project, liberty_path, container, drv_slew_ns, drv_cap_pf,
+        _to_container_path)
+    sdc_text += _sdc_environment_prefix(_env, _env_unread)
+    _env_slew = _env.get("set_max_transition")
+    _env_cap = _env.get("set_max_capacitance")
     sdc_text += _drv_constraints_sdc_block(
-        drv_slew_ns, drv_cap_pf, drv_note,
+        float(_env_slew[0]) if _env_slew else None,
+        float(_env_cap[0]) if _env_cap else None, drv_note,
         max_fanout=_l9_fanout, fanout_note=_fanout_note,
-        supply_ports=_producer_supply_ports_for_drv(project))
+        supply_ports=_producer_supply_ports_for_drv(project),
+        slew_source=_env_slew[1] if _env_slew else "",
+        cap_source=_env_cap[1] if _env_cap else "")
     return sdc_text
 
 
@@ -37516,7 +37543,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             drv_cap_pf=_drv.get("max_capacitance_pf"),
             drv_note=str(_drv.get("note") or ""),
             liberty_path=str(pdk.liberty),
-            pdk_name=str(pdk.name)))
+            pdk_name=str(pdk.name), container=container))
         # WHAT THE BOUNDARY PATHS ARE TIMED AGAINST, as a record a gate can
         # read. The SDC says it in comments; a sign-off consumer should not
         # have to parse comments to learn whether an external delay came from
@@ -58608,7 +58635,7 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                 drv_cap_pf=_drv.get("max_capacitance_pf"),
                 drv_note=str(_drv.get("note") or ""),
                 liberty_path=str(pdk.liberty),
-                pdk_name=str(pdk.name)))
+                pdk_name=str(pdk.name), container=container))
             notes.append("SDC: design staged none — runner auto-SDC")
         written.append(str(runner_sdc))
 

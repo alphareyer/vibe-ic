@@ -128,6 +128,14 @@ _NOT_PROSE: Dict[str, str] = {
         "There is no prose denial form in these fields. Falsifier: "
         "test_capture_cr14_postroute_recipe.py::"
         "test_liberty_truth_table_and_area_discover_neutral_full_adder.",
+    "sdc_environment::_sdc_environment_design_values":
+        "ONE STRICT TABLE GRAMMAR, NO SENTENCE. Only adjacent L9 Markdown "
+        "key/value cells whose first cell is one of six exact SDC or flow "
+        "keys are read. Numeric fields must parse as the entire cell and "
+        "the driving cell must match a complete cell/pin identifier; a "
+        "negated value cannot satisfy either grammar and falls through to "
+        "the pinned PDK tier. Falsifier: tests/test_capture_cr8_sdc_environment.py"
+        "::test_negated_table_value_is_not_a_design_declaration.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "
