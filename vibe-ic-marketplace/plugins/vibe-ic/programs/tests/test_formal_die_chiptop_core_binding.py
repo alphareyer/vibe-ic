@@ -80,15 +80,15 @@ def _run(root, monkeypatch, status):
 
 def test_die_generated_top_binds_four_l8_claims_to_core_and_proves(tmp_path, monkeypatch):
     emitted, result, checked = _run(tmp_path, monkeypatch, "PASS")
-    assert emitted["flow_generated_core_binding"] is True
-    assert emitted["proves_declared_top"] is False
-    assert result["all_proved"] is True
     contract = json.loads((tmp_path / "phase2/stage1/formal/property_contract.json").read_text())
-    assert contract["chip_read_top"] == "core"
-    assert contract["flow_generated_core_binding"]["ports"] == {"clk": "clk", "rst": "rst", "d": "d"}
     rows = {r["id"]: r for r in contract["unresolved_obligations"]}
     assert L8_IDS | {NAME_ID} <= rows.keys()
     assert all("program_refused" not in rows[oid] for oid in L8_IDS | {NAME_ID})
+    assert emitted["flow_generated_core_binding"] is True
+    assert emitted["proves_declared_top"] is False
+    assert result["all_proved"] is True
+    assert contract["chip_read_top"] == "core"
+    assert contract["flow_generated_core_binding"]["ports"] == {"clk": "clk", "rst": "rst", "d": "d"}
     assert set(result.get("discharged_by_program") or []) >= L8_IDS
     assert NAME_ID in checked.get("discharged_by_binding", [])
 
@@ -109,6 +109,8 @@ def test_ambiguous_l9_mapping_stays_open(tmp_path, monkeypatch):
 
 def test_failed_proof_cannot_close_mapped_reset(tmp_path, monkeypatch):
     emitted, result, checked = _run(tmp_path, monkeypatch, "FAIL")
+    rows = {r["id"]: r for r in emitted["unresolved_obligations"]}
+    assert "program_refused" not in rows[NAME_ID]
     assert emitted["flow_generated_core_binding"] is True
     assert result["all_proved"] is False
     assert NAME_ID not in checked.get("discharged_by_binding", [])
