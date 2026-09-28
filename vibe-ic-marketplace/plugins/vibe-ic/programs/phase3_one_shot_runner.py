@@ -38503,6 +38503,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
              em_floor_for_resize: Optional[Dict[str, Any]] = None,
              density_from_tool_default: bool = False) -> StepResult:
     t0 = time.time()
+    # The pre-PnR geometry planner has its own local override.  This PnR
+    # invocation must start with no inherited strap override of its own.
+    _budget_override: Dict[str, Dict[str, float]] = {}
     out_dir = _pl.pnr_dir(project)
     # No old route receipt can certify this invocation, including a preflight
     # failure before the router or wrapper checks run.

@@ -69,6 +69,7 @@ import argparse
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -226,6 +227,45 @@ def summarize(metrics: Dict[str, Any], corners: Sequence[str]) -> Dict[str, Any]
     return out
 
 
+def drv_pin_census(sta_folder: Path, summary: Dict[str, Any],
+                   corners: Sequence[str]) -> Dict[str, Any]:
+    """Bind distinct violating (pin, check) pairs to STAPostPNR's own logs.
+
+    The State counters confirm that every table row was captured.  A missing
+    log, count, or row makes admission unmeasured; counts alone cannot tell if
+    the same pin moved between scenes or a new pin became a violator.
+    """
+    import sta_corner_record_completeness_check as _sta
+    import librelane_contract as _ll
+    pairs = set()
+    sources = {}
+    missing = [] if corners else ["no declared STA corners"]
+    for corner in corners:
+        log = sta_folder / corner / "sta.log"
+        if not log.is_file():
+            missing.append(f"{corner}: sta.log absent")
+            continue
+        body = log.read_text(errors="replace")
+        parsed = _sta.extract_drv(body)
+        sources[corner] = {"path": str(log), "sha256": _ll.digest(log)}
+        for kind, title in (("slew", "max_slew"), ("cap", "max_capacitance"),
+                            ("fanout", "max_fanout")):
+            expected = ((summary.get("drv") or {}).get(kind) or {}).get(corner)
+            pins = (parsed.get("pin_rows") or {}).get(title) or []
+            marker = re.search(rf"^max {kind} violation count (\d+)\s*$",
+                               body, re.M | re.I)
+            if (type(expected) is not int or expected < 0 or
+                    marker is None or int(marker.group(1)) != expected or
+                    len(pins) != expected or len(set(pins)) != expected):
+                missing.append(f"{corner}: {kind} row/counter mismatch")
+            else:
+                pairs.update((pin, kind) for pin in pins)
+    return {"drv_pin_checks_state": "NOT_MEASURED" if missing else "PASS",
+            "drv_pin_checks": None if missing else [list(pair) for pair in sorted(pairs)],
+            "drv_pin_checks_missing": missing,
+            "drv_pin_checks_sources": sources}
+
+
 def fanout_residue(measurement: Dict[str, Any], corners: Sequence[str]) -> Dict[str, Any]:
     """BLOCKING: judge routed fanout from STAPostPNR's separate corner runs.
 
@@ -233,6 +273,14 @@ def fanout_residue(measurement: Dict[str, Any], corners: Sequence[str]) -> Dict[
     inside CheckFanouts.  STAPostPNR owns a fresh, single-corner process for
     each declared corner.  A missing count is never interpreted as zero.
     """
+    if measurement.get("drv_pin_checks_state") == "NOT_MEASURED":
+        return {"verdict": "NOT_MEASURED", "violations": None,
+                "reason": "STAPostPNR fanout pin census absent or inconsistent"}
+    if measurement.get("drv_pin_checks_state") == "PASS":
+        pairs = measurement.get("drv_pin_checks") or []
+        count = sum(check == "fanout" for _, check in pairs)
+        return {"verdict": "FAIL" if count else "PASS", "violations": count,
+                "source": "distinct (pin, check) across STAPostPNR scenes"}
     values = (measurement.get("drv") or {}).get("fanout") or {}
     missing = [c for c in corners if not isinstance(values.get(c), int)
                or isinstance(values.get(c), bool) or values[c] < 0]
@@ -253,7 +301,21 @@ def _set_final_fanout_verdict(report: Dict[str, Any]) -> None:
                           else "LL_PRR_FANOUT_NOT_MEASURED")
         report["reason"] = (f"declared postroute max fanout has "
                             f"{fanout['violations']} residual violations"
-                            if fanout["verdict"] == "FAIL" else fanout["reason"])
+            if fanout["verdict"] == "FAIL" else fanout["reason"])
+
+
+def _set_final_drv_verdict(report: Dict[str, Any]) -> None:
+    count = (report.get("final") or {}).get("drv_count")
+    valid = type(count) is int and count >= 0
+    report["final_drv"] = {"verdict": ("NOT_MEASURED" if not valid else
+                                       "FAIL" if count else "PASS"),
+                           "violations": count if valid else None}
+    if not valid:
+        report.update(verdict="NOT_MEASURED", code="LL_PRR_DRV_NOT_MEASURED",
+                      reason="final routed DRV pin/check census is unmeasured")
+    elif count and report["verdict"] == "PASS":
+        report.update(verdict="FAIL", code="LL_PRR_DRV_VIOLATION",
+                      reason=f"declared postroute DRV has {count} residual pin/check violations")
 
 
 def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
@@ -274,6 +336,10 @@ def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
         folders[0] / "excluded_master_census.json")
     sta_state = folders[-1] / "state_out.json"
     summary = summarize(_load(sta_state).get("metrics") or {}, ctx["corners"])
+    pin_census = drv_pin_census(folders[-1], summary, ctx["corners"])
+    summary.update(pin_census)
+    summary["drv_count"] = (len(pin_census["drv_pin_checks"])
+                            if pin_census["drv_pin_checks_state"] == "PASS" else None)
     # LibreLane RCX uses -lef_res, while the direct signoff extracts the
     # same route with -corner_cnt 1 -max_res 50 -coupling_threshold 0.1.
     # The latter is the acceptance instrument.  Keep the LibreLane values
@@ -367,11 +433,9 @@ def _stamp_verdict(report: Dict[str, Any]) -> None:
         reason = (trigger_disclosure(trigger) + " -- the input route's census "
                   "did not measure every metric the trigger needs, so the "
                   "closure did not run and the input route was kept")
-        if report["verdict"] == "PASS":
-            report.update(verdict="NOT_MEASURED", code="LL_PRR_TRIGGER_NOT_MEASURED",
-                          reason=reason)
-        else:
-            report["reason"] = "; ".join(filter(None, (report.get("reason"), reason)))
+        prior = report.get("reason") if report["verdict"] != "PASS" else None
+        report.update(verdict="NOT_MEASURED", code="LL_PRR_TRIGGER_NOT_MEASURED",
+                      reason="; ".join(filter(None, (reason, prior))))
 
 
 def measure(impl: Path, domain: str, json_out: Path) -> int:
@@ -488,12 +552,58 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
                     "PASS" if drv_count == 0 else "FAIL"),
         "severity": "ADVISORY", "count": drv_count,
         "basis": "candidate STAPostPNR under sign-off SDC"}
-    # The existing routed fanout admission rule remains blocking.
+    # Residual fanout is a final Step-32 failure, not a reason to discard a
+    # measured improvement.  Admission rejects missing or regressing DRV.
     row["fanout"] = fanout_residue(measurement, ctx["corners"])
-    if row["fanout"]["verdict"] != "PASS":
+    before = cur.get("measurement") or {}
+    old_pin_state = before.get("drv_pin_checks_state")
+    new_pin_state = measurement.get("drv_pin_checks_state")
+    if "NOT_MEASURED" in (old_pin_state, new_pin_state) or (
+            "PASS" in (old_pin_state, new_pin_state) and
+            old_pin_state != new_pin_state):
+        row.update(decision="REFUSED", reason="routed DRV pin census unmeasured")
+        _ledger_append(impl, row)
+        return 0
+    if old_pin_state == new_pin_state == "PASS":
+        old_pairs = {tuple(pair) for pair in before["drv_pin_checks"]}
+        new_pairs = {tuple(pair) for pair in measurement["drv_pin_checks"]}
+        added = sorted(new_pairs - old_pairs)
+        row["drv_pin_comparison"] = {"added": added,
+                                      "removed": sorted(old_pairs - new_pairs)}
+        if added:
+            row.update(decision="REFUSED", reason=f"new routed DRV (pin, check): {added}")
+            _ledger_append(impl, row)
+            return 0
+    drv_regressions = []
+    drv_missing = []
+    for kind in ("slew", "cap", "fanout"):
+        for corner in ctx["corners"]:
+            old = ((before.get("drv") or {}).get(kind) or {}).get(corner)
+            new = ((measurement.get("drv") or {}).get(kind) or {}).get(corner)
+            if (type(old) is not int or old < 0 or
+                    type(new) is not int or new < 0):
+                drv_missing.append((kind, corner))
+            elif new > old:
+                drv_regressions.append((kind, corner, old, new))
+    row["drv_comparison"] = {"missing": drv_missing,
+                             "regressions": drv_regressions}
+    if drv_missing or drv_regressions:
         row.update(decision="REFUSED", reason=(
-            f"routed max fanout: {row['fanout']['violations']} violations"
-            if row["fanout"]["verdict"] == "FAIL" else row["fanout"]["reason"]))
+            f"routed DRV unmeasured: {drv_missing}" if drv_missing else
+            f"routed DRV regressed: {drv_regressions}"))
+        _ledger_append(impl, row)
+        print(f"candidate {lane} refused: {row['reason']}")
+        return 0
+    # A candidate with no measured improvement has no objective to promote;
+    # do not pass a pure slack loss to the controller as a proposed repair.
+    if (measurement.get("drv_count") == before.get("drv_count") and
+            measurement.get("setup_ws_min") is not None and
+            measurement.get("hold_ws_min") is not None and
+            before.get("setup_ws_min") is not None and
+            before.get("hold_ws_min") is not None and
+            measurement["setup_ws_min"] <= before["setup_ws_min"] and
+            measurement["hold_ws_min"] <= before["hold_ws_min"]):
+        row.update(decision="REFUSED", reason="no measured timing or DRV improvement")
         _ledger_append(impl, row)
         print(f"candidate {lane} refused: {row['reason']}")
         return 0
@@ -509,7 +619,6 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
     # Antenna, by the step-26 instrument, on the candidate and on what it was
     # built from: a candidate that creates an antenna violation (or cannot be
     # counted) never moves the pointer, whatever it did for timing or DRV.
-    before = cur.get("measurement") or {}
     row["antenna"] = {"before": before.get("antenna_nets"),
                       "after": measurement.get("antenna_nets"),
                       "before_pins": before.get("antenna_pins"),
@@ -835,6 +944,7 @@ def _set_census_verdict(report: Dict[str, Any], *measurements: Dict[str, Any]) -
     report["antenna_census"] = {"verdict": "PASS" if antenna_measured else "NOT_MEASURED"}
     report["sta_digest_census"] = {"verdict": "PASS" if sta_digest_measured else "NOT_MEASURED"}
     _set_final_fanout_verdict(report)
+    _set_final_drv_verdict(report)
     missing = []
     if not antenna_measured:
         missing.append("input or final antenna net/pin census is absent")
@@ -864,7 +974,15 @@ def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path
             "status": "NOT_MEASURED", "reason": reason}
         write_json(source, report)
 
-    if report.get("verdict") != "PASS":
+    # A measured fanout residue leaves Step 32 FAIL, while its declaration
+    # must still reach the pre-stream audit so the adopted route and residual
+    # are visible.  Other incomplete/failing reports cannot publish.
+    if (report.get("verdict") != "PASS" and
+            not (report.get("verdict") == "FAIL" and
+                 report.get("code") in ("LL_PRR_FANOUT_VIOLATION",
+                                        "LL_PRR_DRV_VIOLATION") and
+                 report.get("antenna_census", {}).get("verdict") == "PASS" and
+                 report.get("sta_digest_census", {}).get("verdict") == "PASS")):
         reason = ("the input/final OpenROAD.CheckAntennas net and pin census "
                   "is missing" if report.get("code") == "LL_PRR_ANTENNA_NOT_MEASURED"
                   else "the input/final STAPostPNR state digest is missing"

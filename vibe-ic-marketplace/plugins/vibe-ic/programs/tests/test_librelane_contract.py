@@ -173,7 +173,8 @@ def test_stapostpnr_receipt_binds_mounted_liberty_bytes(tmp_path, monkeypatch):
     monkeypatch.setattr(contract, 'run_container', tool_run)
     folder = contract.run_chain(project, 'candidate',
                                 [('OpenROAD.STAPostPNR', config, initial)],
-                                mounts=[(pdk, '/pdk/process')])[0]
+                                mounts=[(pdk, '/pdk/process')],
+                                pdk_root='/pdk/process')[0]
     receipt = json.loads((folder / 'vibeic_receipt.json').read_text())
     assert receipt['input']['liberty_files'] == {guest: contract.digest(liberty)}
     assert receipt['sha256']['nom_typ/sta.log'] == contract.digest(folder / 'nom_typ/sta.log')
@@ -187,7 +188,8 @@ def test_stapostpnr_receipt_binds_mounted_liberty_bytes(tmp_path, monkeypatch):
     with pytest.raises(contract.Refusal, match='LL_STA_LIBERTY_CHANGED_DURING_RUN'):
         contract.run_chain(project, 'candidate',
                            [('OpenROAD.STAPostPNR', config, initial)],
-                           mounts=[(pdk, '/pdk/process')], lane='drift')
+                           mounts=[(pdk, '/pdk/process')], lane='drift',
+                           pdk_root='/pdk/process')
 
 
 def test_stream_lane_and_synthesis_namespace_keep_separate_receipts(tmp_path, monkeypatch):

@@ -636,6 +636,9 @@ def extract_drv(text: str) -> Dict[str, object]:
     #: kind -> the INSTANCE each violating row belongs to, so a total can be
     #: attributed instead of only sized (vibe-ic#582).
     rows: Dict[str, List[str]] = {}
+    # Preserve the full pin as well as the instance.  Candidate promotion
+    # compares distinct (pin, check) identities across all STA scenes.
+    pin_rows: Dict[str, List[str]] = {}
     queried = False
     query_error: Optional[str] = None
     kinds_seen: List[str] = []
@@ -728,6 +731,7 @@ def extract_drv(text: str) -> Dict[str, object]:
         if _VIOLATED_RE.search(line):
             counts[kind] = counts.get(kind, 0) + 1
             rows.setdefault(kind, []).append(_row_instance(line))
+            pin_rows.setdefault(kind, []).append(line.split()[0])
             continue
         mneg = _TRAILING_NEG_RE.search(line)
         # Only a data row (a name followed by numbers) counts, never the title
@@ -735,6 +739,7 @@ def extract_drv(text: str) -> Dict[str, object]:
         if mneg and len(line.split()) >= 3:
             counts[kind] = counts.get(kind, 0) + 1
             rows.setdefault(kind, []).append(_row_instance(line))
+            pin_rows.setdefault(kind, []).append(line.split()[0])
 
     violations = {k: v for k, v in counts.items() if v > 0}
     _rows = {k: v for k, v in rows.items() if v}
@@ -794,6 +799,7 @@ def extract_drv(text: str) -> Dict[str, object]:
         # the total rather than only size it (vibe-ic#582). Kept out of the
         # count so no existing consumer changes.
         "rows": _rows,
+        "pin_rows": {k: v for k, v in pin_rows.items() if v},
     }
 
 

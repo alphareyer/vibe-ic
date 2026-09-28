@@ -321,7 +321,9 @@ def _run_native(project: Path, gds: Optional[str], router: Optional[str],
     res = {**base, "verdict": "PASS" if count == 0 else "FAIL",
            "violations": count, "worst_ratio": None,
            "reason": f"{count} PDK-native antenna violation(s)" if count else ""}
-    xtool = _kl.find_engine("gds_antenna", "xcheck_router.py")
+    # Native router reports may be KLayout RDBs.  The plugin's calibrated
+    # cross-check reader understands that dialect; an image copy can lag it.
+    xtool = Path(__file__).resolve().parent / "gds_antenna" / "xcheck_router.py"
     rpt = Path(router) if router else _first(project, _ROUTER_GLOBS)
     if rpt is not None and not rpt.is_absolute():
         rpt = project / rpt

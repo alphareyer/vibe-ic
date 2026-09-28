@@ -283,6 +283,39 @@ def test_a_corner_the_tool_did_not_report_leaves_the_summary_unmeasured():
     s = prr.summarize(m, CORNERS)
     assert s['setup_ws_min'] is None and s['hold_ws_min'] is None and s['drv_count'] is None
     assert s['unmeasured_corners'] == ['nom_ff_n40C_5v50']
+
+
+def test_drv_pin_census_counts_distinct_pairs_across_scenes(tmp_path):
+    corners = ('ss_a', 'ss_b')
+    metrics = _sta_metrics(1.0, 0.2, (0, 0, 1), corners=corners)
+    # Both scenes have one fanout violator.  The identity decides whether this
+    # is one residual check or two distinct checks across the scene union.
+    for corner, pin in zip(corners, ('u1/Y', 'u1/Y')):
+        log = tmp_path / corner / 'sta.log'
+        log.parent.mkdir(parents=True)
+        log.write_text(f'Max Slew\nmax slew violation count 0\n'
+                       f'Max Capacitance\nmax cap violation count 0\n'
+                       f'Max Fanout\n{pin} 1.0 2.0 -1.0 (VIOLATED)\n'
+                       'max fanout violation count 1\n')
+    summary = prr.summarize(metrics, corners)
+    census = prr.drv_pin_census(tmp_path, summary, corners)
+    assert census['drv_pin_checks_state'] == 'PASS'
+    assert census['drv_pin_checks'] == [['u1/Y', 'fanout']]
+    assert prr.fanout_residue({**summary, **census}, corners)['violations'] == 1
+    log = tmp_path / 'ss_b' / 'sta.log'
+    log.write_text(log.read_text().replace('u1/Y', 'u2/Y'))
+    assert prr.drv_pin_census(tmp_path, summary, corners)['drv_pin_checks'] == [
+        ['u1/Y', 'fanout'], ['u2/Y', 'fanout']]
+
+
+def test_final_non_fanout_drv_residue_keeps_step32_failed():
+    report = {'corners': ['tt'], 'final': {
+        'drv': {'fanout': {'tt': 0}}, 'drv_count': 1}}
+    prr._set_final_fanout_verdict(report)
+    prr._set_final_drv_verdict(report)
+    assert report['final_fanout']['verdict'] == 'PASS'
+    assert report['verdict'] == 'FAIL'
+    assert report['code'] == 'LL_PRR_DRV_VIOLATION'
     assert prr.summarize(_sta_metrics(0.7, 0.1), [])['setup_ws_min'] is None
 
 
@@ -393,6 +426,25 @@ SHIM = textwrap.dedent('''\
             else:
                 doc = {"metrics": spec["sta_metrics"] if step.endswith("STAPostPNR") else {}}
             (folder / "state_out.json").write_text(json.dumps(doc))
+            if step.endswith("STAPostPNR"):
+                corners = {key.split("__corner:", 1)[1]
+                           for key in spec["sta_metrics"] if "__corner:" in key}
+                for corner in corners:
+                    lines = []
+                    for kind, title in (("slew", "Max Slew"),
+                                        ("cap", "Max Capacitance"),
+                                        ("fanout", "Max Fanout")):
+                        count = spec["sta_metrics"].get(
+                            f"design__max_{kind}_violation__count__corner:{corner}")
+                        if count is None:
+                            continue
+                        lines.append(title)
+                        lines.extend(f"fixture/pin_{i} 1.0 2.0 -1.0 (VIOLATED)"
+                                     for i in range(count))
+                        lines.append(f"max {kind} violation count {count}")
+                    log = folder / corner / "sta.log"
+                    log.parent.mkdir(parents=True, exist_ok=True)
+                    log.write_text("\\n".join(lines) + "\\n")
             folders.append(folder)
         return folders
 
@@ -428,9 +480,16 @@ def _scenario_impl(tmp_path, baseline, candidates):
     sta = put(project / 'phase3/librelane/32-base/03-sta/state_out.json',
               {'metrics': _sta_metrics(*baseline)})
     input_state = put(project / 'phase3/librelane/32-config/bridge/state_in.json', {'def': 'x'})
+    base_summary = prr.summarize(_sta_metrics(*baseline), CORNERS)
+    base_pairs = [[f'fixture/pin_{i}', kind]
+                  for kind, n in zip(('slew', 'cap', 'fanout'),
+                                     baseline[2] if len(baseline) > 2 else (0, 0, 0))
+                  for i in range(n)]
     put(impl / prr.CURRENT, {'candidate': None, 'repair_input': str(input_state),
                             'repair_state': str(input_state),
-                            'measurement': dict(prr.summarize(_sta_metrics(*baseline), CORNERS),
+                            'measurement': dict(base_summary,
+                                                drv_pin_checks_state='PASS',
+                                                drv_pin_checks=base_pairs,
                                                 antenna_nets=0, antenna_pins=0,
                                                 sta_state=str(sta),
                                                 sta_state_sha256=contract.digest(sta))})
@@ -1276,7 +1335,8 @@ def test_in_chain_residual_drv_replaces_a_stale_clean_decision_before_stream(
     report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
                               pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
                               route_state=route, route_drc=0, programs_dir=shim)
-    assert report['verdict'] == 'PASS' and report['adopted'] == '32-cand01'
+    assert report['verdict'] == 'FAIL' and report['adopted'] == '32-cand01'
+    assert report['code'] == 'LL_PRR_FANOUT_VIOLATION'
     assert json.loads(decision.read_text())['repair_needed'] is True
     assert not (output / 'no_repair_needed.flag').exists()
     assert json.loads((output / 'repair_log.json').read_text())['final']['drv_count'] == 1

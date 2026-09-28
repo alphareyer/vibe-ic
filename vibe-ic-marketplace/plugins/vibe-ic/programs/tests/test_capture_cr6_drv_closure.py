@@ -131,6 +131,7 @@ def test_real_arm_skips_clean_input_but_runs_on_injected_violation(tmp_path,
         state.write_text("{}")
         return P.close_arm(project, "librelane", state, image="image", pdk="neutral",
                            configs={P.REPAIR_STEP: config}, corners=["tt"], mounts=[],
+                           derate=(0.95, 1.05),
                            controllers=("postroute.repair_drv",))
 
     clean = run("clean")
@@ -377,8 +378,13 @@ def test_unmeasured_repair_trigger_is_not_stamped_pass(tmp_path, monkeypatch):
     monkeypatch.setattr(P, "_prepare", lambda project, **kw: (configs, ["tt"], []))
     monkeypatch.setattr(P, "declared_timing_floor", lambda project, sdc: {})
     trigger = {}
+    measured = {"drv": {"fanout": {"tt": 0}}, "drv_count": 0, "antenna_nets": 0,
+                "antenna_pins": 0, "sta_state_sha256": "0" * 64}
     monkeypatch.setattr(P, "close_arm", lambda *a, **k: {
-        "repair_trigger": trigger, "closure": [], "adopted": None})
+        "repair_trigger": trigger, "closure": [], "adopted": None,
+        "corners": ["tt"],
+        "input_baseline": measured if trigger.get("action") == "SKIP" else {},
+        "final": measured if trigger.get("action") == "SKIP" else {}})
 
     def chain():
         return P.run_in_chain(tmp_path, mode="librelane", image="img", pdk="pdk",
