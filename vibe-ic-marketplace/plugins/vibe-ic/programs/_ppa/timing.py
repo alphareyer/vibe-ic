@@ -97,7 +97,29 @@ __all__ = [
     "SCHEMA", "RC_OK", "RC_UNDETERMINED", "RC_BAD_INVOCATION",
     "MEASURED", "NOT_MEASURED", "INVALID",
     "Row", "timing_rows", "rows_from_report", "row_digest", "main",
+    "step7_sdc_path",
 ]
+
+
+def step7_sdc_path(project: Path, constraints_dir: Path, raw: Any
+                   ) -> Tuple[Optional[Path], str]:
+    """Resolve only a canonical project-relative SDC inside Step 7 constraints."""
+    if not isinstance(raw, str) or not raw or "\\" in raw:
+        return None, "the step-7 SDC path is not a canonical relative path"
+    relative = Path(raw)
+    if (relative.is_absolute() or ".." in relative.parts
+            or str(relative) != raw):
+        return None, "the step-7 SDC path is not a canonical relative path"
+    try:
+        root = Path(project).resolve()
+        constraints = Path(constraints_dir).resolve()
+        path = (Path(project) / relative).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None, "the step-7 SDC path cannot be resolved"
+    if (not constraints.is_relative_to(root)
+            or not path.is_relative_to(constraints)):
+        return None, "the step-7 SDC path leaves the project constraints directory"
+    return path, ""
 
 SCHEMA = "vibeic.ppa.metric.v1"
 UNIT_NS = "ns"

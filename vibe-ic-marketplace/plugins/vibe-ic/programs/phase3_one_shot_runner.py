@@ -36374,6 +36374,59 @@ def _pad_ring_rc_outcome(name: str, rc: int) -> Tuple[str, str]:
         rc, (_V.Verdict.NOT_MEASURED.value,
              _V.ReasonClass.EXECUTION_ERROR.value))
 
+def step_pad_assignment(project: Path, container: Optional[str] = None,
+                        pdk: Optional[PdkConfig] = None) -> StepResult:
+    """The pad ASSIGNMENT alone (`pad_assignment_gen`), for the between-segments
+    step (llv1 W7a): an external flow places the ring itself from this order,
+    so it needs the assignment before its implementation segment, not the
+    ring vibe-ic would generate from a floorplan DEF.
+
+    Same program, same PDK arguments, same launch and the same rc reading as
+    the first program of `step_pad_ring_gen`, which the default flow keeps
+    running unchanged (llv1 W7a leaves that step byte-identical).
+    """
+    t0 = time.time()
+    try:
+        pdk_root, pdk_tree = (_padring_pdk_root_and_tree(pdk, container)
+                              if pdk else (None, None))
+    except ValueError as exc:
+        return StepResult("pad_assignment", "FAIL", time.time() - t0, str(exc))
+    pdk_args = (["--pdk-root", str(pdk_root), "--pdk", str(pdk_tree)]
+                if pdk_root and pdk_tree else [])
+    prog = PROGRAMS_DIR / "pad_assignment_gen.py"
+    # The launch is spelled out here, exactly as `step_pad_ring_gen` spells
+    # it, so the gate-enforcement audit can see this spawn and where its
+    # status goes (a launch hidden behind a helper reads as unproven wiring).
+    if container:
+        prog_c = _to_container_path(str(prog), container)
+        project_c = _to_container_path(str(project), container)
+        argv = ["python3", prog_c, project_c, *pdk_args]
+        cmd = " ".join(shlex.quote(str(x)) for x in argv)
+        rc, out, err = _docker_exec(container, cmd, marker=prog_c)
+    else:
+        cp = _pr.run(
+            [sys.executable, str(prog), str(project), *pdk_args],
+            capture_output=True, text=True, errors="replace")
+        rc, out, err = cp.returncode, cp.stdout, cp.stderr
+    note = f"pad_assignment_gen.py: rc={rc} {_pad_ring_process_note(rc, out, err)}".strip()
+    # The rc reading `step_pad_ring_gen` applies to every program it runs.
+    if rc == 0:
+        status, reason = _V.Verdict.PASS.value, ""
+    else:
+        status, reason = {
+            1: (_V.Verdict.FAIL.value, ""),
+            2: (_V.Verdict.NOT_MEASURED.value,
+                _V.ReasonClass.NOT_EXECUTED.value),
+        }.get(rc, (_V.Verdict.NOT_MEASURED.value,
+                   _V.ReasonClass.TOOL_ABSENT.value))
+    report = project / "reports/phase3/pad_assignment.json"
+    if status == _V.Verdict.PASS.value and not report.is_file():
+        status = _V.Verdict.FAIL.value
+        note += "; rc=0 but reports/phase3/pad_assignment.json is absent"
+    return StepResult("pad_assignment", status, time.time() - t0, note,
+                      [str(report)] if report.is_file() else [],
+                      reason_class=reason)
+
 
 def step_pad_ring_gen(project: Path, container: Optional[str] = None,
                       pdk: Optional[PdkConfig] = None) -> StepResult:
@@ -37445,278 +37498,56 @@ def _stage_via_legalized_tech_lef(project: Path, pdk: PdkConfig,
     return payload
 
 
-def step_pnr(project: Path, top: str, pdk: PdkConfig,
-             container: str, die_um: str, util: float,
-             spare_density=None, pad_ring_step=step_pad_ring_gen,
-             pad_ring_results: Optional[List[StepResult]] = None,
-             em_floor_for_resize: Optional[Dict[str, Any]] = None,
-             density_from_tool_default: bool = False) -> StepResult:
-    t0 = time.time()
-    out_dir = _pl.pnr_dir(project)
-    # No old route receipt can certify this invocation, including a preflight
-    # failure before the router or wrapper checks run.
-    (out_dir / ROUTER_DRC_RECEIPT_NAME).unlink(missing_ok=True)
-    (out_dir / _ppa_power.DIRECT_PDN_RECEIPT_NAME).unlink(missing_ok=True)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    import declared_knob_applied_parity_check as _knob_parity
-    _knob_parity.write_pending_pnr_report(project, out_dir / "pnr.tcl")
-    netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
-    print(f"[pnr] netlist: {_nl_note}", flush=True)
-    if not netlist.is_file():
-        return StepResult("pnr", "FAIL", time.time() - t0,
-                          f"synth netlist missing: {netlist}")
-    # v1.6.599 — for #406 P2. Wrapper-class pre-flight: emit a
-    # clear FAIL early instead of letting OpenLane stall for
-    # 30+ minutes on a wrapper-class IC without pin_order.cfg.
-    _v1_6_599_wrap_err = _v1_6_599_check_wrapper_pin_order_cfg(
-        project, top, netlist)
-    if _v1_6_599_wrap_err is not None:
-        return StepResult(
-            "pnr", "FAIL", time.time() - t0,
-            _v1_6_599_wrap_err,
-            extras={
-                "wrapper_class": True,
-                "missing": "pin_order.cfg",
-                "remediation": (
-                    "Add a wrapper-glue layer + author "
-                    "pin_order.cfg from the harness template"),
-            })
-    # The active tech LEF itself can contain a contradiction: a VIA landing
-    # smaller than the routing layer's own MINWIDTH/AREA.  Post-route RECT
-    # patching is too late (the router did not reserve the required spacing),
-    # and a GDS-only edit would be invisible to RCX/LVS.  Derive one legal LEF
-    # before any backend consumer resolves its path, then mutate the shared
-    # PdkConfig so every downstream consumer sees the same geometry.
-    _via_legalization = _stage_via_legalized_tech_lef(
-        project, pdk, container, out_dir)
-    if _via_legalization["status"] == "APPLIED":
-        print("[phase3] VIA-LANDING REMEDIATION APPLIED: "
-              f"{_via_legalization['changed_patch_records']} fixed/generated "
-              "routing patch record(s) grown from active tech-LEF rules; all "
-              f"consumers use {pdk.tech_lef}", file=sys.stderr)
-    elif _via_legalization["status"] not in ("NOT_NEEDED",):
-        print("[phase3] VIA-LANDING REMEDIATION NOT APPLIED: "
-              f"{_via_legalization.get('reason', 'unspecified')}; original "
-              "tech LEF retained and the run is not silently certified",
-              file=sys.stderr)
-    # #365 third ask — point per-invocation provenance at THIS project, so
-    # every supervised tool run below records a MEASURED duration instead of
-    # the flow ending with a handful of back-filled zero-duration entries.
-    set_invocation_provenance_sink(project)
+@dataclass
+class PrePnrDieCore:
+    """What the pre-PnR die/core resolution settled, as `step_pnr` reads it.
 
-    # #309 — PRE-ROUTE hard-macro supply gate. A LEF-typed POWER/GROUND macro
-    # pin driven by a signal net makes TritonRoute abort ALL detailed routing
-    # (3278 nets, 0 routed, GDS a placed-but-unrouted shell). Decide it HERE,
-    # before any router time is spent, so the failure names the macro and pin
-    # instead of surfacing as DRT-0307 five steps later. Shares its judgement
-    # with the Phase-1 warning via hardmacro_supply_intent, so what Phase 1
-    # validates is exactly what this enforces.
-    try:
-        _ms_nl: Optional[str] = netlist.read_text(encoding="utf-8",
-                                                  errors="ignore")
-    except OSError:
-        _ms_nl = None    # tie unprovable -> decision keeps the strict path
-    _ms = _macro_supply_preroute_decision(project, pdk, netlist_text=_ms_nl)
-    if _ms and _ms.get("bound"):
-        print(f"[phase3] HARD-MACRO SUPPLY: {len(_ms['bound'])} POWER/GROUND "
-              f"macro pin(s) accounted for by the design's power intent")
-    if _ms and _ms.get("env_blind"):
-        # #329 delta: environment blindness must be LOUD, never silent green.
-        print(f"[phase3] HARD-MACRO SUPPLY ENV-BLIND: {_ms['message']}")
-    for _g in (_ms or {}).get("gaps_reported") or []:
-        print(f"[phase3]   SUPPLY INTEGRATION GAP (named, non-blocking): "
-              f"{_g['master']}/{_g['pin']} ({_g.get('use','POWER')}) — "
-              f"{_g['detail']}")
-    if _ms and _ms.get("blocking"):
-        for _g in _ms["gaps"]:
-            print(f"[phase3]   BLOCKING SUPPLY-ON-POWER (integration gap): "
-                  f"{_g['master']}/{_g['pin']} ({_g.get('use','POWER')}) — "
-                  f"{_g['detail']}")
-        _ms_extras: Dict[str, Any] = {"macro_supply_gaps": _ms["gaps"],
-                                      "macro_supply_bound": _ms["bound"]}
-        # The one sentence that resolves the FAIL against the DEF. A reader who
-        # greps the DEF for the pin's rail finds `- <RAIL> ( * <RAIL> ) + USE
-        # POWER ;` and concludes the gate is wrong; that entry carries no
-        # conductor, so it does NOT count as an established rail, and the pin
-        # really is a gap. Published ONLY when non-empty: an empty list would
-        # assert that the built rails were examined and none was a bare name,
-        # which on a first run is false — every DEF this reads is written by
-        # THIS step's own TCL, further down. Absent therefore means "nothing to
-        # say", never "checked and clean".
-        if _ms.get("rails_named_not_built"):
-            _ms_extras["rails_named_not_built"] = _ms["rails_named_not_built"]
-        return StepResult("pnr", "FAIL", time.time() - t0, _ms["message"],
-                          extras=_ms_extras)
+    llv1 W7a: the resolution is a PURE MOVE out of `step_pnr` (same order,
+    same prints, same refusals); `step_pnr` unpacks these back into the
+    locals it has always used, and `step_prepnr` calls the same code between
+    the two external-flow segments.
+    """
+    die_um: str
+    die_w: int
+    die_h: int
+    core_pad: int
+    core_w: int
+    core_h: int
+    fp_rect: Any
+    util: float
+    auto_die_requested: Any
+    l9_die_note: Any
+    ring_floor_pad: Any
+    ring_inset: Any
+    ring_pinned_die: Any
+    seal_rec: Any
+    slot: Any
+    strap_floor_detail: Any
+    strap_floor_um: Any
+    ct03_pin_rect: Any
+    #: the auto-die metrics dict `step_pnr` still reads after the resolution
+    #: (the planned-PnR parity report reads its cell area); not in
+    #: `as_locals`, whose 18-tuple the between-segments step unpacks too.
+    auto_die_metrics: Dict[str, Any] = field(default_factory=dict)
 
-    # The chip-top producer must precede BOTH SDC construction and die
-    # resolution.  Its domain plan is the sole authority for excluding supply
-    # ports from signal-only DRV limits, while its die_required_um is an input
-    # to the floorplan.  The producer is idempotent and writes only its own
-    # wrapper/record; a design with no declared pad placement SKIPs.
-    _padring_producer = _padring_producer_dispatch(
-        project, container, pdk,
-        supply_plan=(em_floor_for_resize or {}).get("supply_entry_plan"))
-    if _padring_producer.status not in (_V.Verdict.PASS.value,
-                                          _V.Verdict.NOT_MEASURED.value):
-        print(f"[phase3] io_pad_chip_top_gen: {_padring_producer.status} — "
-              f"{_padring_producer.detail}", file=sys.stderr)
+    def as_locals(self) -> Tuple[Any, ...]:
+        return (self.die_um, self.die_w, self.die_h, self.core_pad, self.core_w, self.core_h, self.fp_rect, self.util, self.auto_die_requested, self.l9_die_note, self.ring_floor_pad, self.ring_inset, self.ring_pinned_die, self.seal_rec, self.slot, self.strap_floor_detail, self.strap_floor_um, self.ct03_pin_rect)
 
-    # SDC: silicon top != FPGA wrapper. Project's fpga/*.sdc references
-    # FPGA-only ports (CLOCK_50/KEY/GPIO_0) and may use Quartus-private
-    # commands (derive_pll_clocks). For silicon synth (top=chip_top), use
-    # a generic minimal SDC tied to chip_top's actual clk port.
-    sdc = out_dir / "constraint.sdc"
-    # spm x ihp-sg13g2, 2026-08-07: `set_max_fanout` in the loaded SDC does NOT
-    # make OpenROAD's `clock_tree_synthesis` respect it — CTS's own leaf-level
-    # sink clustering is governed ONLY by `-sink_clustering_size` passed to the
-    # command itself (see `_cts_cluster` below). MEASURED: with `set_max_fanout
-    # 8` correctly present in constraint.sdc (the `_ensure_staged_sdc_drv` /
-    # `_liberty_drv_limits` fallback below), a CTS run with no
-    # `-sink_clustering_size` still built a leaf buffer (`clkbuf_0`) fanning
-    # out to 16 sinks against the SAME liberty's own declared limit of 8 — the
-    # SDC constraint and CTS's own clustering are two independent mechanisms,
-    # and only `set_max_fanout` was closed above. `_cts_fanout_target` carries
-    # the SAME resolved value (design-declared, else liberty-derived) to the
-    # `cts_cluster_size=` kwarg near the bottom of this function, so CTS is
-    # told the identical number the SDC and sign-off already use — set in
-    # BOTH branches below (staged / auto SDC), never fabricated (§4.05: reused
-    # from the same DRV resolution, not invented here).
-    _cts_fanout_target: Optional[int] = None
-    project_sdc_silicon = _resolve_staged_silicon_sdc(project)
-    if project_sdc_silicon and project_sdc_silicon.is_file():
-        # benchmark-spm-asap7 — staged SDCs are ns/pF-authored; rescale
-        # numerics into the ACTIVE PDK liberty's declared units (ASAP7:
-        # ps/fF) instead of a verbatim copy that reads 1000× too tight.
-        # A9 (#169): the unit rescale fixes the UNITS but a staged SDC also
-        # carries the ORIGINATING PDK's DRV *values* (set_max_transition /
-        # set_max_capacitance). When this SDC's provenance stamp names a
-        # DIFFERENT PDK than the active one, re-derive those limits from the
-        # active liberty (or drop them). No stamp (hand-authored SDC) or a
-        # matching stamp → byte-identical, so sky130/nangate are unchanged.
-        _staged_sdc = _scale_sdc_to_liberty_units(
-            project_sdc_silicon.read_text(), str(pdk.liberty))
-        _staged_sdc = _reconcile_staged_sdc_drv(
-            _staged_sdc, pdk.name, str(pdk.liberty), container)
-        # A9 — reconcile a stale `set_driving_cell` cell NAME the same way the
-        # DRV LIMITS were reconciled above: a foreign-PDK reference-flow SDC
-        # (e.g. a Nangate `BUF_X2`) would otherwise abort read_sdc under the
-        # active PDK (STA-0453) and stop the entire backend before floorplan.
-        _staged_sdc = _reconcile_staged_sdc_driving_cell(
-            _staged_sdc, str(pdk.liberty), container)
-        # TAPEOUT-SIGNOFF (DRV) parity — a design-supplied SDC that declares NO
-        # set_max_transition / set_max_capacitance reached PnR with no DRV
-        # target at all, so repair_design never repaired the slews (the
-        # auto-SDC else-branch below has had this since TAPEOUT-SIGNOFF; the
-        # staged branch never did). Supply ONLY the absent limits, ONLY from
-        # the active liberty; a design-declared limit is never overridden.
-        _staged_sdc, _drv_parity = _ensure_staged_sdc_drv(
-            _staged_sdc, str(pdk.liberty), container, project,
-            pdk_name=str(pdk.name))
-        # Read the FINAL effective value back out of the SDC text (not just
-        # `added_max_fanout`, which is None when the design's OWN staged SDC
-        # already declared one — that value must reach CTS too, same as a
-        # liberty-derived fallback would).
-        _cts_fm = _SDC_MAX_FANOUT_RE.search(_staged_sdc)
-        if _cts_fm:
-            try:
-                _cts_fanout_target = int(float(_cts_fm.group(2)))
-            except ValueError:
-                pass
-        if _drv_parity.get("note"):
-            print(f"[phase3][sdc-drv] {_drv_parity['note']}", file=sys.stderr)
-        try:
-            (out_dir / "sdc_drv_parity.json").write_text(
-                json.dumps(_drv_parity, indent=2, default=str))
-        except Exception:
-            pass
-        # I/O-delay parity — the staged branch must not be LOOSER than the
-        # auto-SDC branch it now takes precedence over. A design SDC that
-        # declares only `create_clock` would otherwise leave every primary I/O
-        # untimed, and a real violation would vanish by subtraction rather than
-        # by repair. Supplies ONLY the absent delays, against the design's OWN
-        # clock name; a design-declared delay is never overridden.
-        _staged_sdc, _io_parity = _ensure_staged_sdc_io_delay(
-            _staged_sdc, project)
-        if _io_parity.get("note"):
-            print(f"[phase3][sdc-io] {_io_parity['note']}", file=sys.stderr)
-        try:
-            (out_dir / "sdc_io_delay_parity.json").write_text(
-                json.dumps(_io_parity, indent=2, default=str))
-        except Exception:
-            pass
-        sdc.write_text(_staged_sdc)
-    else:
-        # v1.6.560 sub-defect B: derive CLOCK_PERIOD from project sources
-        # (L9 markdown / config.json / baseline config) before falling back
-        # to the legacy 20 ns. Chip-AGNOSTIC — works for any IC whose L9
-        # mentions a clock period in the docs.
-        #
-        # v1.6.595 — for #403 P2 ORGANIC. Pass top name into the
-        # resolver so the RTL-header scan can prioritise the
-        # canonical top module file (e.g. `chip_top.v`) over other
-        # RTL files in the search root. Resolver also walks
-        # phase1/generated_docs/L8 + L9 JSON before falling back to
-        # legacy config.json or the literal `clk`. Any IC whose
-        # clock port follows Wishbone / AXI / Caravel naming
-        # conventions now produces a valid SDC.
-        #
-        # TAPEOUT-SIGNOFF (DRV): resolve set_max_transition / set_max_capacitance
-        # from THIS PDK's liberty so the resizer fixes slews (the single-corner-
-        # closure confounder). Chip/PDK-AGNOSTIC — the numbers come from the
-        # liberty, not a literal; a liberty declaring none yields an honest
-        # disclosure and NO fabricated limit (§4.05).
-        _drv = _liberty_drv_limits(str(pdk.liberty), container)
-        sdc.write_text(_build_auto_silicon_sdc(
-            project, top=top,
-            drv_slew_ns=_drv.get("max_transition_ns"),
-            drv_cap_pf=_drv.get("max_capacitance_pf"),
-            drv_note=str(_drv.get("note") or ""),
-            liberty_path=str(pdk.liberty),
-            pdk_name=str(pdk.name), container=container))
-        # WHAT THE BOUNDARY PATHS ARE TIMED AGAINST, as a record a gate can
-        # read. The SDC says it in comments; a sign-off consumer should not
-        # have to parse comments to learn whether an external delay came from
-        # the design, from this plugin, or was omitted entirely.
-        try:
-            _io_ns_rec, _ = _declared_io_delay_ns(
-                project, _resolve_clock_spec(project)[0])
-        except Exception:                                    # noqa: BLE001
-            _io_ns_rec = None
-        _aa.write_json(
-            project / "reports" / "phase3" / "io_delay_contract.json",
-            dict(io_delay_contract(_io_ns_rec, 2.0, io_delay_source()),
-                 **{"schema": "vibe-ic/io-delay-contract/1",
-                    "sdc": str(sdc)}))
-        # Same CTS-clustering target as the staged branch above; the
-        # auto-SDC path has no design SDC to declare a fanout cap in, so
-        # priority collapses to L9 / RTL-replication / liberty default —
-        # `_build_auto_silicon_sdc` does not emit `set_max_fanout` text (a
-        # separate, non-blocking gap; CTS reads this value directly, not by
-        # re-parsing the SDC).
-        try:
-            _cts_fanout_target = (
-                _l9_declared_max_fanout(project, str(pdk.name), str(pdk.liberty))
-                or _rtl_replication_fanout_bound(project)
-                or _drv.get("max_fanout"))
-        except Exception:
-            _cts_fanout_target = _drv.get("max_fanout")
-    _knob_parity.write_sdc_report(
-        project, sdc, pdk=str(pdk.name),
-        library=_active_std_cell_library(project, str(pdk.name)))
-    # Whichever branch ran, record what the DESIGN staged and what became of
-    # it. A machine-readable sibling of the deck's own comment block, so a
-    # later reader does not have to parse an SDC to learn that the design's
-    # constraints exist and were not used.
-    try:
-        (out_dir / "staged_sdc_survey.json").write_text(json.dumps({
-            "consumed": (str(project_sdc_silicon.relative_to(project))
-                         if project_sdc_silicon
-                         and project_sdc_silicon.is_file() else None),
-            "staged_under_input": _staged_sdc_survey(project),
-        }, indent=2, default=str))
-    except Exception:
-        pass
 
+def _prepnr_geometry(project: Path, top: str, pdk: PdkConfig,
+                     container: str, die_um: str, util: float,
+                     netlist: Path, t0: float,
+                     density_from_tool_default: bool = False
+                     ) -> "PrePnrDieCore | StepResult":
+    """Resolve the die and the core rectangle before any tool runs.
+
+    MOVED VERBATIM from `step_pnr` (llv1 W7a): `--die-um` / L9 / auto-die
+    (N4: core-sized from the netlist, one strap period), the pad ring's
+    floor, the seal-ring band, the ring-pinned core, the placement density,
+    the slot contract, the N4 pinned-core refusal and the CT-03 pin
+    rectangle. A refusal is returned as the same `pnr` StepResult (its
+    elapsed time from the caller's `t0`); otherwise the settled values.
+    """
     # ORGANIC E2E (GAP-E2E-4/10) — resolve `--die-um auto` to a design-sized
     # WxH from the synth netlist cell count + PDK site area + target util, so a
     # small design is not stranded at a route-plateauing ~4% util on a fixed
@@ -38085,6 +37916,28 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
               f"The pins stay on the die boundary and the antenna residual "
               f"that comes from that is REPORTED, not traded.",
               file=sys.stderr)
+    return PrePnrDieCore(die_um=die_um, die_w=die_w, die_h=die_h, core_pad=core_pad, core_w=core_w, core_h=core_h, fp_rect=fp_rect, util=util, auto_die_requested=_auto_die_requested, l9_die_note=_l9_die_note, ring_floor_pad=_ring_floor_pad, ring_inset=_ring_inset, ring_pinned_die=_ring_pinned_die, seal_rec=_seal_rec, slot=_slot, strap_floor_detail=_strap_floor_detail, strap_floor_um=_strap_floor_um, ct03_pin_rect=_ct03_pin_rect, auto_die_metrics=_auto_die_metrics)
+
+
+def _prepnr_floorplan(project: Path, top: str, pdk: PdkConfig,
+                      container: str, die_um: str, util: float,
+                      netlist: Path, t0: float,
+                      density_from_tool_default: bool = False
+                      ) -> "PrePnrDieCore | StepResult":
+    """`_prepnr_geometry`, then the floorplan-rectangles record it settles.
+
+    The record call is MOVED VERBATIM from `step_pnr` (llv1 W7a): one
+    record, written on every run that reaches it, naming both rectangles.
+    """
+    _prep_dc = _prepnr_geometry(project, top, pdk, container, die_um,
+                                util, netlist, t0,
+                                density_from_tool_default=density_from_tool_default)
+    if isinstance(_prep_dc, StepResult):
+        return _prep_dc
+    (die_um, die_w, die_h, core_pad, core_w, core_h,
+     fp_rect, util, _auto_die_requested, _l9_die_note, _ring_floor_pad,
+     _ring_inset, _ring_pinned_die, _seal_rec, _slot,
+     _strap_floor_detail, _strap_floor_um, _ct03_pin_rect) = _prep_dc.as_locals()
 
     # ONE RECORD, WRITTEN ON EVERY RUN, naming both rectangles and which of
     # them each downstream consumer must read. A producer that writes nothing
@@ -38102,6 +37955,466 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         ring_inset_um=_ring_inset,
         seal_ring=_seal_rec,
         pdn_core_floor=_strap_floor_detail)
+    return _prep_dc
+
+
+#: llv1 W7a -- the pre-PnR preparation's place in the phase-3 window plan.
+#: In the default flow it runs INSIDE the `pnr` dispatch site (canonical span
+#: 15..22), so a window entering at 15 runs it and nothing new is enterable;
+#: an external flow dispatches `step_prepnr` between its two segments.
+PREPNR_DISPATCH_SITE = "pnr"
+PREPNR_CANONICAL_HEAD = "15"
+
+
+#: Step 7's own record of the SDC it authored (lane fxport,
+#: `next/claude-fx-step7-asic-sdc`: `_ppa.timing.ASIC_SDC_RECORD`).
+PREPNR_STEP7_SDC_RECORD = "asic_sdc.json"
+PREPNR_STEP7_SDC_SCHEMA = "vibe-ic/step7-asic-sdc/1"
+
+
+def _prepnr_constraint_file(project: Path, top: str,
+                            pdk: Any) -> Tuple[Optional[Path], str]:
+    """SEAM (llv1 W7a): the SDC the implementation segment reads.
+
+    This step AUTHORS NO SDC, and it does not take a file's PRESENCE as step
+    7's SDC: on main, `constraints/<top>.sdc` is also the copy
+    `step_canonicalize_artefacts` makes of step_pnr's own `constraint.sdc`
+    after a run, never refreshed -- a previous run's deck. Step 7's SDC is the
+    one step 7's RECORD names (`constraints/asic_sdc.json`, written by lane
+    fxport's step-7 producer): the record's path must exist, hash to the
+    record's sha256, and have been authored for this top and PDK. The path
+    must stay inside Step 7's constraints directory. When
+    fxport's `read_step7_asic_sdc` is available, this seam delegates to it;
+    that reader also binds the deck to the inputs Step 7 consumed. The deck
+    segment 2 receives here is the raw Step-7 design-intent deck. The
+    pad-ring supply-port DRV-scope derivation is PnR-time work, not silently
+    recreated by this read-only seam; W7b must carry it through a typed
+    segment contract before external implementation consumes it. Without a
+    record the answer is
+    SDC_SEAM_PENDING -- the default flow is untouched: step_pnr still authors
+    its own SDC exactly as main does.
+    """
+    import hashlib  # noqa: PLC0415
+    from _ppa import timing as _ppa_timing  # noqa: PLC0415
+    pdk_name = str(pdk.name)
+    constraints_dir = _pl.constraints_dir(project)
+    rec_path = constraints_dir / PREPNR_STEP7_SDC_RECORD
+    # FXPORT's reader reads the recorded path itself. Check it before calling
+    # that reader so validation cannot read a file outside design input.
+    if rec_path.is_file():
+        try:
+            candidate = json.loads(rec_path.read_text(errors="replace"))
+        except (OSError, ValueError):
+            candidate = None
+        if isinstance(candidate, dict) and "path" in candidate:
+            _, invalid = _ppa_timing.step7_sdc_path(
+                project, constraints_dir, candidate["path"])
+            if invalid:
+                return None, f"SDC_SEAM_PENDING: {invalid}"
+    # FXPORT owns the input-digest and recoverable-deck contract. Feature
+    # detection makes the handover automatic whichever branch lands second.
+    _step7_reader = getattr(_ppa_timing, "read_step7_asic_sdc", None)
+    if callable(_step7_reader):
+        rec, why = _step7_reader(sys.modules[__name__], project, top, pdk)
+        if rec is None:
+            return None, f"SDC_SEAM_PENDING: fxport step-7 reader: {why}"
+        path, invalid = _ppa_timing.step7_sdc_path(
+            project, constraints_dir, rec.get("path"))
+        if invalid:
+            return None, f"SDC_SEAM_PENDING: fxport step-7 reader: {invalid}"
+        if not path.is_file():
+            return None, ("SDC_SEAM_PENDING: fxport step-7 reader accepted "
+                          "no on-disk SDC path")
+        return path, ("step 7's input-bound design-intent SDC "
+                      f"({rec.get('path')})")
+    pending = ("SDC_SEAM_PENDING: no step-7 SDC record "
+               f"({rec_path.relative_to(project)}); the between-segments "
+               "step reads the SDC step 7 records and authors none "
+               "(fxport: next/claude-fx-step7-asic-sdc)")
+    try:
+        rec = json.loads(rec_path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None, pending
+    if not isinstance(rec, dict) or rec.get("schema") != PREPNR_STEP7_SDC_SCHEMA:
+        return None, f"SDC_SEAM_PENDING: {rec_path.name} is not a step-7 record"
+    # An input digest is a claim that only FXPORT's reader can verify against
+    # the current Step 7 inputs. Never downgrade it to a file-hash check.
+    if "input_digest" in rec or "asic_sdc_input_digest" in rec:
+        return None, ("SDC_SEAM_PENDING: step-7 input digest cannot be "
+                      "verified without the fxport reader")
+    path, invalid = _ppa_timing.step7_sdc_path(
+        project, constraints_dir, rec.get("path"))
+    if invalid:
+        return None, f"SDC_SEAM_PENDING: {invalid}"
+    if not path.is_file():
+        return None, (f"SDC_SEAM_PENDING: the step-7 SDC {rec.get('path')!r} "
+                      "the record names is absent")
+    text = path.read_text(errors="replace")
+    if hashlib.sha256(text.encode("utf-8")).hexdigest() != rec.get("sha256"):
+        return None, (f"SDC_SEAM_PENDING: the step-7 SDC {rec.get('path')} "
+                      "changed after step 7 recorded it")
+    if rec.get("top") != top or rec.get("pdk") != pdk_name:
+        return None, (f"SDC_SEAM_PENDING: the step-7 SDC was authored for top "
+                      f"{rec.get('top')!r} / PDK {rec.get('pdk')!r}, not "
+                      f"{top!r} / {pdk_name!r}")
+    return path, f"step 7's recorded SDC ({rec.get('path')})"
+
+
+def step_prepnr(project: Path, top: str, pdk: PdkConfig, container: str,
+                die_um: str, util: float,
+                em_floor_for_resize: Optional[Dict[str, Any]] = None
+                ) -> StepResult:
+    """The pre-PnR preparation as ONE step, between two external-flow segments.
+
+    llv1 W7a: the chip-top producer (`_padring_producer_dispatch`, the same
+    dispatch `step_pnr` makes), the step-7 SDC it reads (a seam, see
+    `_prepnr_constraint_file`), the die/core floorplan with its record
+    (`_prepnr_floorplan`) and, when the chip path requests a ring, the pad
+    assignment (`step_pad_assignment`) -- in `step_pnr`'s order: the producer,
+    then the die and its record, then the pad-ring work (whose first program
+    is the assignment). Callable in the default mode too; the default flow
+    does not dispatch it (it runs the pieces in `step_pnr`).
+
+    A chip-top producer that did not PASS on a chip path requesting a ring
+    stops the step with its own verdict: step_pnr's pad-ring gate turns that
+    producer's FAIL red too, and nothing after this step would.
+    """
+    t0 = time.time()
+    set_invocation_provenance_sink(project)
+    netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
+    if not netlist.is_file():
+        return StepResult("prepnr", "FAIL", time.time() - t0,
+                          f"synth netlist missing: {netlist}")
+    extras: Dict[str, Any] = {"netlist": str(netlist)}
+    ring = _chip_path_requests_pad_ring(project)
+    padring = _padring_producer_dispatch(
+        project, container, pdk,
+        supply_plan=(em_floor_for_resize or {}).get("supply_entry_plan"))
+    extras["chip_top"] = {"status": padring.status, "detail": padring.detail}
+    if ring and padring.status == _V.Verdict.FAIL.value:
+        return StepResult("prepnr", padring.status, time.time() - t0,
+                          f"chip-top producer: {padring.detail}",
+                          extras=extras,
+                          reason_class=getattr(padring, "reason_class", ""))
+    sdc, sdc_why = _prepnr_constraint_file(project, top, pdk)
+    extras["sdc"] = {"path": str(sdc) if sdc else None, "basis": sdc_why}
+    fp = _prepnr_floorplan(project, top, pdk, container, die_um, util,
+                           netlist, t0)
+    if isinstance(fp, StepResult):
+        return StepResult("prepnr", fp.status, time.time() - t0, fp.detail,
+                          extras=extras, reason_class=fp.reason_class)
+    extras["floorplan"] = asdict(fp)
+    if ring:
+        assign = step_pad_assignment(project, container, pdk)
+        extras["pad_assignment"] = {"status": assign.status,
+                                    "detail": assign.detail}
+        if assign.status != _V.Verdict.PASS.value:
+            return StepResult("prepnr", assign.status, time.time() - t0,
+                              f"pad assignment: {assign.detail}",
+                              extras=extras, reason_class=assign.reason_class)
+    # A non-measured chip-top producer does not hide an independently
+    # measurable floorplan/assignment failure. If those steps ran clean, it
+    # still prevents a ring path from claiming PASS.
+    status = (_V.Verdict.NOT_MEASURED.value
+              if (ring and padring.status != _V.Verdict.PASS.value)
+              else (_V.Verdict.PASS.value if sdc is not None
+                    else _V.Verdict.NOT_MEASURED.value))
+    return StepResult(
+        "prepnr", status, time.time() - t0,
+        (f"die {fp.die_w}x{fp.die_h} um, core pad {fp.core_pad} um; "
+         f"chip top {padring.status}; {sdc_why}"),
+        [str(project / FLOORPLAN_RECTANGLES_REL)], extras=extras,
+        reason_class=(getattr(padring, "reason_class", "")
+                      if ring and padring.status != _V.Verdict.PASS.value
+                      else ("" if sdc is not None
+                            else _V.ReasonClass.INPUT_ABSENT.value)))
+
+
+def step_pnr(project: Path, top: str, pdk: PdkConfig,
+             container: str, die_um: str, util: float,
+             spare_density=None, pad_ring_step=step_pad_ring_gen,
+             pad_ring_results: Optional[List[StepResult]] = None,
+             em_floor_for_resize: Optional[Dict[str, Any]] = None,
+             density_from_tool_default: bool = False) -> StepResult:
+    t0 = time.time()
+    out_dir = _pl.pnr_dir(project)
+    # No old route receipt can certify this invocation, including a preflight
+    # failure before the router or wrapper checks run.
+    (out_dir / ROUTER_DRC_RECEIPT_NAME).unlink(missing_ok=True)
+    (out_dir / _ppa_power.DIRECT_PDN_RECEIPT_NAME).unlink(missing_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    import declared_knob_applied_parity_check as _knob_parity
+    _knob_parity.write_pending_pnr_report(project, out_dir / "pnr.tcl")
+    netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
+    print(f"[pnr] netlist: {_nl_note}", flush=True)
+    if not netlist.is_file():
+        return StepResult("pnr", "FAIL", time.time() - t0,
+                          f"synth netlist missing: {netlist}")
+    # v1.6.599 — for #406 P2. Wrapper-class pre-flight: emit a
+    # clear FAIL early instead of letting OpenLane stall for
+    # 30+ minutes on a wrapper-class IC without pin_order.cfg.
+    _v1_6_599_wrap_err = _v1_6_599_check_wrapper_pin_order_cfg(
+        project, top, netlist)
+    if _v1_6_599_wrap_err is not None:
+        return StepResult(
+            "pnr", "FAIL", time.time() - t0,
+            _v1_6_599_wrap_err,
+            extras={
+                "wrapper_class": True,
+                "missing": "pin_order.cfg",
+                "remediation": (
+                    "Add a wrapper-glue layer + author "
+                    "pin_order.cfg from the harness template"),
+            })
+    # The active tech LEF itself can contain a contradiction: a VIA landing
+    # smaller than the routing layer's own MINWIDTH/AREA.  Post-route RECT
+    # patching is too late (the router did not reserve the required spacing),
+    # and a GDS-only edit would be invisible to RCX/LVS.  Derive one legal LEF
+    # before any backend consumer resolves its path, then mutate the shared
+    # PdkConfig so every downstream consumer sees the same geometry.
+    _via_legalization = _stage_via_legalized_tech_lef(
+        project, pdk, container, out_dir)
+    if _via_legalization["status"] == "APPLIED":
+        print("[phase3] VIA-LANDING REMEDIATION APPLIED: "
+              f"{_via_legalization['changed_patch_records']} fixed/generated "
+              "routing patch record(s) grown from active tech-LEF rules; all "
+              f"consumers use {pdk.tech_lef}", file=sys.stderr)
+    elif _via_legalization["status"] not in ("NOT_NEEDED",):
+        print("[phase3] VIA-LANDING REMEDIATION NOT APPLIED: "
+              f"{_via_legalization.get('reason', 'unspecified')}; original "
+              "tech LEF retained and the run is not silently certified",
+              file=sys.stderr)
+    # #365 third ask — point per-invocation provenance at THIS project, so
+    # every supervised tool run below records a MEASURED duration instead of
+    # the flow ending with a handful of back-filled zero-duration entries.
+    set_invocation_provenance_sink(project)
+
+    # #309 — PRE-ROUTE hard-macro supply gate. A LEF-typed POWER/GROUND macro
+    # pin driven by a signal net makes TritonRoute abort ALL detailed routing
+    # (3278 nets, 0 routed, GDS a placed-but-unrouted shell). Decide it HERE,
+    # before any router time is spent, so the failure names the macro and pin
+    # instead of surfacing as DRT-0307 five steps later. Shares its judgement
+    # with the Phase-1 warning via hardmacro_supply_intent, so what Phase 1
+    # validates is exactly what this enforces.
+    try:
+        _ms_nl: Optional[str] = netlist.read_text(encoding="utf-8",
+                                                  errors="ignore")
+    except OSError:
+        _ms_nl = None    # tie unprovable -> decision keeps the strict path
+    _ms = _macro_supply_preroute_decision(project, pdk, netlist_text=_ms_nl)
+    if _ms and _ms.get("bound"):
+        print(f"[phase3] HARD-MACRO SUPPLY: {len(_ms['bound'])} POWER/GROUND "
+              f"macro pin(s) accounted for by the design's power intent")
+    if _ms and _ms.get("env_blind"):
+        # #329 delta: environment blindness must be LOUD, never silent green.
+        print(f"[phase3] HARD-MACRO SUPPLY ENV-BLIND: {_ms['message']}")
+    for _g in (_ms or {}).get("gaps_reported") or []:
+        print(f"[phase3]   SUPPLY INTEGRATION GAP (named, non-blocking): "
+              f"{_g['master']}/{_g['pin']} ({_g.get('use','POWER')}) — "
+              f"{_g['detail']}")
+    if _ms and _ms.get("blocking"):
+        for _g in _ms["gaps"]:
+            print(f"[phase3]   BLOCKING SUPPLY-ON-POWER (integration gap): "
+                  f"{_g['master']}/{_g['pin']} ({_g.get('use','POWER')}) — "
+                  f"{_g['detail']}")
+        _ms_extras: Dict[str, Any] = {"macro_supply_gaps": _ms["gaps"],
+                                      "macro_supply_bound": _ms["bound"]}
+        # The one sentence that resolves the FAIL against the DEF. A reader who
+        # greps the DEF for the pin's rail finds `- <RAIL> ( * <RAIL> ) + USE
+        # POWER ;` and concludes the gate is wrong; that entry carries no
+        # conductor, so it does NOT count as an established rail, and the pin
+        # really is a gap. Published ONLY when non-empty: an empty list would
+        # assert that the built rails were examined and none was a bare name,
+        # which on a first run is false — every DEF this reads is written by
+        # THIS step's own TCL, further down. Absent therefore means "nothing to
+        # say", never "checked and clean".
+        if _ms.get("rails_named_not_built"):
+            _ms_extras["rails_named_not_built"] = _ms["rails_named_not_built"]
+        return StepResult("pnr", "FAIL", time.time() - t0, _ms["message"],
+                          extras=_ms_extras)
+
+    # The chip-top producer must precede BOTH SDC construction and die
+    # resolution.  Its domain plan is the sole authority for excluding supply
+    # ports from signal-only DRV limits, while its die_required_um is an input
+    # to the floorplan.  The producer is idempotent and writes only its own
+    # wrapper/record; a design with no declared pad placement SKIPs.
+    _padring_producer = _padring_producer_dispatch(
+        project, container, pdk,
+        supply_plan=(em_floor_for_resize or {}).get("supply_entry_plan"))
+    if _padring_producer.status not in (_V.Verdict.PASS.value,
+                                          _V.Verdict.NOT_MEASURED.value):
+        print(f"[phase3] io_pad_chip_top_gen: {_padring_producer.status} — "
+              f"{_padring_producer.detail}", file=sys.stderr)
+
+    # SDC: silicon top != FPGA wrapper. Project's fpga/*.sdc references
+    # FPGA-only ports (CLOCK_50/KEY/GPIO_0) and may use Quartus-private
+    # commands (derive_pll_clocks). For silicon synth (top=chip_top), use
+    # a generic minimal SDC tied to chip_top's actual clk port.
+    sdc = out_dir / "constraint.sdc"
+    # spm x ihp-sg13g2, 2026-08-07: `set_max_fanout` in the loaded SDC does NOT
+    # make OpenROAD's `clock_tree_synthesis` respect it — CTS's own leaf-level
+    # sink clustering is governed ONLY by `-sink_clustering_size` passed to the
+    # command itself (see `_cts_cluster` below). MEASURED: with `set_max_fanout
+    # 8` correctly present in constraint.sdc (the `_ensure_staged_sdc_drv` /
+    # `_liberty_drv_limits` fallback below), a CTS run with no
+    # `-sink_clustering_size` still built a leaf buffer (`clkbuf_0`) fanning
+    # out to 16 sinks against the SAME liberty's own declared limit of 8 — the
+    # SDC constraint and CTS's own clustering are two independent mechanisms,
+    # and only `set_max_fanout` was closed above. `_cts_fanout_target` carries
+    # the SAME resolved value (design-declared, else liberty-derived) to the
+    # `cts_cluster_size=` kwarg near the bottom of this function, so CTS is
+    # told the identical number the SDC and sign-off already use — set in
+    # BOTH branches below (staged / auto SDC), never fabricated (§4.05: reused
+    # from the same DRV resolution, not invented here).
+    _cts_fanout_target: Optional[int] = None
+    project_sdc_silicon = _resolve_staged_silicon_sdc(project)
+    if project_sdc_silicon and project_sdc_silicon.is_file():
+        # benchmark-spm-asap7 — staged SDCs are ns/pF-authored; rescale
+        # numerics into the ACTIVE PDK liberty's declared units (ASAP7:
+        # ps/fF) instead of a verbatim copy that reads 1000× too tight.
+        # A9 (#169): the unit rescale fixes the UNITS but a staged SDC also
+        # carries the ORIGINATING PDK's DRV *values* (set_max_transition /
+        # set_max_capacitance). When this SDC's provenance stamp names a
+        # DIFFERENT PDK than the active one, re-derive those limits from the
+        # active liberty (or drop them). No stamp (hand-authored SDC) or a
+        # matching stamp → byte-identical, so sky130/nangate are unchanged.
+        _staged_sdc = _scale_sdc_to_liberty_units(
+            project_sdc_silicon.read_text(), str(pdk.liberty))
+        _staged_sdc = _reconcile_staged_sdc_drv(
+            _staged_sdc, pdk.name, str(pdk.liberty), container)
+        # A9 — reconcile a stale `set_driving_cell` cell NAME the same way the
+        # DRV LIMITS were reconciled above: a foreign-PDK reference-flow SDC
+        # (e.g. a Nangate `BUF_X2`) would otherwise abort read_sdc under the
+        # active PDK (STA-0453) and stop the entire backend before floorplan.
+        _staged_sdc = _reconcile_staged_sdc_driving_cell(
+            _staged_sdc, str(pdk.liberty), container)
+        # TAPEOUT-SIGNOFF (DRV) parity — a design-supplied SDC that declares NO
+        # set_max_transition / set_max_capacitance reached PnR with no DRV
+        # target at all, so repair_design never repaired the slews (the
+        # auto-SDC else-branch below has had this since TAPEOUT-SIGNOFF; the
+        # staged branch never did). Supply ONLY the absent limits, ONLY from
+        # the active liberty; a design-declared limit is never overridden.
+        _staged_sdc, _drv_parity = _ensure_staged_sdc_drv(
+            _staged_sdc, str(pdk.liberty), container, project,
+            pdk_name=str(pdk.name))
+        # Read the FINAL effective value back out of the SDC text (not just
+        # `added_max_fanout`, which is None when the design's OWN staged SDC
+        # already declared one — that value must reach CTS too, same as a
+        # liberty-derived fallback would).
+        _cts_fm = _SDC_MAX_FANOUT_RE.search(_staged_sdc)
+        if _cts_fm:
+            try:
+                _cts_fanout_target = int(float(_cts_fm.group(2)))
+            except ValueError:
+                pass
+        if _drv_parity.get("note"):
+            print(f"[phase3][sdc-drv] {_drv_parity['note']}", file=sys.stderr)
+        try:
+            (out_dir / "sdc_drv_parity.json").write_text(
+                json.dumps(_drv_parity, indent=2, default=str))
+        except Exception:
+            pass
+        # I/O-delay parity — the staged branch must not be LOOSER than the
+        # auto-SDC branch it now takes precedence over. A design SDC that
+        # declares only `create_clock` would otherwise leave every primary I/O
+        # untimed, and a real violation would vanish by subtraction rather than
+        # by repair. Supplies ONLY the absent delays, against the design's OWN
+        # clock name; a design-declared delay is never overridden.
+        _staged_sdc, _io_parity = _ensure_staged_sdc_io_delay(
+            _staged_sdc, project)
+        if _io_parity.get("note"):
+            print(f"[phase3][sdc-io] {_io_parity['note']}", file=sys.stderr)
+        try:
+            (out_dir / "sdc_io_delay_parity.json").write_text(
+                json.dumps(_io_parity, indent=2, default=str))
+        except Exception:
+            pass
+        sdc.write_text(_staged_sdc)
+    else:
+        # v1.6.560 sub-defect B: derive CLOCK_PERIOD from project sources
+        # (L9 markdown / config.json / baseline config) before falling back
+        # to the legacy 20 ns. Chip-AGNOSTIC — works for any IC whose L9
+        # mentions a clock period in the docs.
+        #
+        # v1.6.595 — for #403 P2 ORGANIC. Pass top name into the
+        # resolver so the RTL-header scan can prioritise the
+        # canonical top module file (e.g. `chip_top.v`) over other
+        # RTL files in the search root. Resolver also walks
+        # phase1/generated_docs/L8 + L9 JSON before falling back to
+        # legacy config.json or the literal `clk`. Any IC whose
+        # clock port follows Wishbone / AXI / Caravel naming
+        # conventions now produces a valid SDC.
+        #
+        # TAPEOUT-SIGNOFF (DRV): resolve set_max_transition / set_max_capacitance
+        # from THIS PDK's liberty so the resizer fixes slews (the single-corner-
+        # closure confounder). Chip/PDK-AGNOSTIC — the numbers come from the
+        # liberty, not a literal; a liberty declaring none yields an honest
+        # disclosure and NO fabricated limit (§4.05).
+        _drv = _liberty_drv_limits(str(pdk.liberty), container)
+        sdc.write_text(_build_auto_silicon_sdc(
+            project, top=top,
+            drv_slew_ns=_drv.get("max_transition_ns"),
+            drv_cap_pf=_drv.get("max_capacitance_pf"),
+            drv_note=str(_drv.get("note") or ""),
+            liberty_path=str(pdk.liberty),
+            pdk_name=str(pdk.name), container=container))
+        # WHAT THE BOUNDARY PATHS ARE TIMED AGAINST, as a record a gate can
+        # read. The SDC says it in comments; a sign-off consumer should not
+        # have to parse comments to learn whether an external delay came from
+        # the design, from this plugin, or was omitted entirely.
+        try:
+            _io_ns_rec, _ = _declared_io_delay_ns(
+                project, _resolve_clock_spec(project)[0])
+        except Exception:                                    # noqa: BLE001
+            _io_ns_rec = None
+        _aa.write_json(
+            project / "reports" / "phase3" / "io_delay_contract.json",
+            dict(io_delay_contract(_io_ns_rec, 2.0, io_delay_source()),
+                 **{"schema": "vibe-ic/io-delay-contract/1",
+                    "sdc": str(sdc)}))
+        # Same CTS-clustering target as the staged branch above; the
+        # auto-SDC path has no design SDC to declare a fanout cap in, so
+        # priority collapses to L9 / RTL-replication / liberty default —
+        # `_build_auto_silicon_sdc` does not emit `set_max_fanout` text (a
+        # separate, non-blocking gap; CTS reads this value directly, not by
+        # re-parsing the SDC).
+        try:
+            _cts_fanout_target = (
+                _l9_declared_max_fanout(project, str(pdk.name), str(pdk.liberty))
+                or _rtl_replication_fanout_bound(project)
+                or _drv.get("max_fanout"))
+        except Exception:
+            _cts_fanout_target = _drv.get("max_fanout")
+    _knob_parity.write_sdc_report(
+        project, sdc, pdk=str(pdk.name),
+        library=_active_std_cell_library(project, str(pdk.name)))
+    # Whichever branch ran, record what the DESIGN staged and what became of
+    # it. A machine-readable sibling of the deck's own comment block, so a
+    # later reader does not have to parse an SDC to learn that the design's
+    # constraints exist and were not used.
+    try:
+        (out_dir / "staged_sdc_survey.json").write_text(json.dumps({
+            "consumed": (str(project_sdc_silicon.relative_to(project))
+                         if project_sdc_silicon
+                         and project_sdc_silicon.is_file() else None),
+            "staged_under_input": _staged_sdc_survey(project),
+        }, indent=2, default=str))
+    except Exception:
+        pass
+
+    # llv1 W7a — the die/core resolution AND the floorplan record live in
+    # `_prepnr_floorplan`, which the between-segments step calls too;
+    # both moved verbatim.
+    _prep_dc = _prepnr_floorplan(project, top, pdk, container, die_um,
+                                 util, netlist, t0,
+                                 density_from_tool_default=density_from_tool_default)
+    if isinstance(_prep_dc, StepResult):
+        return _prep_dc
+    (die_um, die_w, die_h, core_pad, core_w, core_h,
+     fp_rect, util, _auto_die_requested, _l9_die_note, _ring_floor_pad,
+     _ring_inset, _ring_pinned_die, _seal_rec, _slot,
+     _strap_floor_detail, _strap_floor_um, _ct03_pin_rect) = _prep_dc.as_locals()
+    _auto_die_metrics = _prep_dc.auto_die_metrics
 
     # Pick clock buffer cells: PdkConfig-carried masters win (every registry
     # PDK carries clk_buf_cell/root); otherwise DISCOVER them from the PDK's own

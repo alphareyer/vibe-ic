@@ -254,8 +254,23 @@ def test_chip_top_producer_precedes_sdc_and_die_resolution():
     dispatch_line = "_padring_producer = _padring_producer_dispatch("
     producer = step.index(dispatch_line)
     sdc = step.index("# SDC: silicon top != FPGA wrapper")
-    die = step.index("die_um, _l9_die_note = _effective_die_um")
+    # llv1 W7a moved die resolution, verbatim, into `_prepnr_geometry`
+    # (shared with the between-segments step). The ORDER property is the
+    # same: step_pnr calls it after the SDC, and the die resolution is still
+    # the first thing that function does.
+    die = step.index("_prep_dc = _prepnr_floorplan(")
     assert producer < sdc < die
+    floorplan = source[source.index("def _prepnr_floorplan("):]
+    floorplan = floorplan[:floorplan.index("\ndef ", 1)]
+    assert "_prep_dc = _prepnr_geometry(" in floorplan
+    assert floorplan.index("_prepnr_geometry(") < floorplan.index(
+        "_floorplan_rectangles_record(")
+    geometry = source[source.index("def _prepnr_geometry("):]
+    geometry = geometry[:geometry.index("\ndef ", 1)]
+    body = geometry[geometry.index('"""', geometry.index('"""') + 3) + 3:]
+    first = next(l for l in body.splitlines()
+                 if l.strip() and not l.strip().startswith("#"))
+    assert first.strip().startswith("die_um, _l9_die_note = _effective_die_um")
     assert step.count(dispatch_line) == 1
     assert 'supply_plan=(em_floor_for_resize or {}).get("supply_entry_plan")' in step
     # and the dispatch is the ONLY road to the producer from step_pnr: the
