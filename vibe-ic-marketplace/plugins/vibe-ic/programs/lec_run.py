@@ -188,6 +188,40 @@ LEC_LADDER: Tuple[Tuple[str, str], ...] = (
 )
 LEC_CHECKPOINT_RUNGS: Tuple[str, ...] = tuple(n for n, _ in LEC_LADDER)
 
+# THE GATE'S OWN NET NAMES MUST BE CANONICAL, or the ladder forgets what it
+# proved (LEC_CONVERGE, 2026-09-28). The tag marks every wire of a Liberty cell
+# module; `flatten` copies it onto the wires it creates from a cell instance
+# (`<inst>.<pin>`, `<inst>.IQ`), and `rename -hide` then hides exactly those.
+#
+# WHY. `equiv_make` pairs gold and gate by NAME and rewires every consumer of a
+# paired bit to the `$equiv` output. It records the pair under the paired
+# wire's own bits but looks consumers up by their `assign_map` CANONICAL bit
+# (yosys passes/equiv/equiv_make.cc, `rd_signal_map.add(rdmap_gate, …)` against
+# `rd_signal_map(assign_map(conn))`). Flattening a Liberty cell gives its pins
+# public names too, and one of them, not the netlist's net name, can become
+# canonical: on subservient every flop's canonical bit was `\_NNNN_.IQ1`, while
+# the pair was made under the netlist's own name (`…bufreg2.dhi[0]`, an alias).
+# So no gate consumer was rewired. A gate register was then tied to its gold
+# twin only by the `$equiv` HYPOTHESIS, and a rung that proves a cell rewires
+# its B to its A, so every LATER rung has lost that hypothesis.
+#
+# MEASURED (subservient, serv 1.4.0, gf180mcuD, yosys 4d572059c): the ladder
+# stopped at 251/256. `equiv_induct -seq 4` proved the register pairs, and
+# `-seq 16`, run on that output, could no longer prove
+# `core.rf_mem_if.o_sram_wdata[0..4]`. Those five need 5–9 cycles, because
+# `opt_dff` set the X-initialised, constant-D shift chain `wdata1_r` to 0
+# (synth.log "Setting constant 0-bit at position 8 … 0"). `-seq 16`, `-seq 32`,
+# `-undef` and `equiv_simple -seq 12` on that checkpoint all stayed at 5.
+# With the pin names hidden, the UNCHANGED ladder proved 256/256, and
+# `equiv_simple -short` alone proved 213 points instead of 1. A generic
+# `$_`-cell gate has no cell pins to hide and is untouched (sha256: 4359
+# consumers rewired by `equiv_make` either way).
+#
+# SOUND: renaming a wire changes no logic. It changes only WHICH NAME is
+# canonical, so `equiv_make` connects the gate's consumers the way it already
+# does whenever the netlist's name happens to win.
+LIBERTY_PIN_ATTR = "vibeic_lec_liberty_pin"
+
 # Written by a `log` command placed AFTER each `write_rtlil`. yosys executes a
 # script strictly in order, so the sentinel's presence in the log is a positive
 # attestation that THAT backend pass finished — which is the only thing that
@@ -2454,6 +2488,11 @@ def parse_equiv_output(text: str, *,
     ml = _UNPROVEN_LIST_RE.search(text)
     if ml:
         unproven_cells = [t for t in re.split(r"[,\s]+", ml.group(1)) if t][:50]
+    elif unproven == 0:
+        # The closing `equiv_status` says nothing is unproven. The workset's
+        # "failed" lines then belong to an attempt a later extension closed
+        # (subservient's PASS listed the five cells `-seq 16` went on to prove).
+        unproven_cells = []
     else:
         # #2182 -- the run never reached `equiv_status`; the workset block is
         # the only place the names survive. Same 50-name cap as the primary.
@@ -3740,6 +3779,8 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
     broken one stays unproven → FAIL (sound negative)."""
     gold_read = " ".join(gold_files)
     bb = "".join(f"read_verilog -lib {q}\n" for q in (blackbox_v or []))
+    # Empty except on the Liberty-expanded gate (see LIBERTY_PIN_ATTR).
+    hide_cell_pins = ""
     if gate_is_generic:
         # Pre-techmap `$_`-primitive gate: -icells re-binds the escaped names so
         # `hierarchy -check` resolves them (no Liberty; already satgen-modelable).
@@ -3747,8 +3788,14 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
     elif liberty:
         # Expand Liberty cells to $_ primitives (functions + ff/latch groups),
         # skipping any cell with no function (stays blackbox → honest SAT gap).
+        # The gold is stashed at this point, so the design is EMPTY and every
+        # wire `w:*` selects belongs to a Liberty cell module; `flatten` copies
+        # the tag onto each wire it creates from one, and those wires are then
+        # hidden. See LIBERTY_PIN_ATTR for why.
         gate_read = (f"read_liberty -ignore_miss_func {liberty}\n"
+                     f"setattr -set {LIBERTY_PIN_ATTR} 1 w:*\n"
                      f"{bb}read_verilog {gate_netlist}\n")
+        hide_cell_pins = f"rename -hide a:{LIBERTY_PIN_ATTR}\n"
     else:
         gate_read = f"{bb}read_verilog -sv {gate_netlist}\n"
     # GOLD frontend: default is yosys's built-in `read_verilog -sv` (SV subset).
@@ -3931,6 +3978,7 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
         # netlist still carries a $mem*/$mem_v2 cell (no-op otherwise).
         f"memory_map\n"
         f"flatten\n"
+        f"{hide_cell_pins}"
         f"async2sync\n"   # async-FF legalization (see the gold side) — both sides
         f"opt_clean\n"
         f"{_restore_words}"
