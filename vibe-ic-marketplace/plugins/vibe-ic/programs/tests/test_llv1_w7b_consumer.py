@@ -10,6 +10,7 @@ pruned it and the phase that runs it. Without the flag nothing changes.
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -148,7 +149,8 @@ def test_refresh_only_under_the_flag_stays_honoured(monkeypatch, tmp_path):
     assert D.main() == 17
 
 
-def _consumer_stub(monkeypatch, tmp_path, *, prepnr_status="PASS"):
+def _consumer_stub(monkeypatch, tmp_path, *, prepnr_status="PASS",
+                   lec_verdict="PASS", lec_digest=None):
     import phase3_one_shot_runner as R
     import librelane_contract as LC
     import librelane_whole_flow as W
@@ -208,6 +210,14 @@ def _consumer_stub(monkeypatch, tmp_path, *, prepnr_status="PASS"):
         nl = subject / "runs/segment1/01-yosys/core.nl.v"
         nl.parent.mkdir(parents=True)
         nl.write_text("module top(input clk); endmodule\n")
+        proof_sha = lec_digest or hashlib.sha256(nl.read_bytes()).hexdigest()
+        lec = subject / "reports/lec.json"
+        lec.parent.mkdir(parents=True, exist_ok=True)
+        lec.write_text(json.dumps({
+            "verdict": lec_verdict,
+            "proof_identity": {"top": "top", "gate_netlist": {
+                "path": "phase2/stage2/synth/top_synth.v",
+                "sha256": f"sha256:{proof_sha}"}}}) + "\n")
         state = nl.parent / "state_out.json"
         state.write_text(json.dumps({"nl": str(nl)}))
         kw["between"](subject, state)
@@ -240,6 +250,34 @@ def test_nonmeasured_prepnr_cannot_start_segment2(monkeypatch, tmp_path):
     record = json.loads((project / "reports/orchestrator/phase3_one_shot.json").read_text())
     assert record["verdict"] == "NOT_MEASURED"
     assert record["steps"][-1]["name"] == "prepnr"
+
+
+def test_inconclusive_recorded_lec_cannot_start_segment2(monkeypatch, tmp_path):
+    R, project, pdk, args, trace = _consumer_stub(
+        monkeypatch, tmp_path, lec_verdict="INCONCLUSIVE")
+    assert R._run_librelane_consumer_phase3(project, "top", pdk, args) == 2
+    assert len(trace) == 3
+    assert trace == ["segment1", "11-12", "13"]
+    record = json.loads((project / "reports/orchestrator/phase3_one_shot.json").read_text())
+    row = record["steps"][-1]
+    assert (record["verdict"], row["name"], row["status"],
+            row["reason_class"]) == (
+                "NOT_MEASURED", "lec_proof_binding", "NOT_MEASURED",
+                "inconclusive")
+
+
+def test_stale_lec_binding_cannot_start_segment2(monkeypatch, tmp_path):
+    R, project, pdk, args, trace = _consumer_stub(
+        monkeypatch, tmp_path, lec_digest="0" * 64)
+    assert R._run_librelane_consumer_phase3(project, "top", pdk, args) == 2
+    assert len(trace) == 3
+    assert trace == ["segment1", "11-12", "13"]
+    record = json.loads((project / "reports/orchestrator/phase3_one_shot.json").read_text())
+    row = record["steps"][-1]
+    assert (record["verdict"], row["name"], row["status"],
+            row["reason_class"]) == (
+                "NOT_MEASURED", "lec_proof_binding", "NOT_MEASURED",
+                "not_executed")
 
 
 def test_chip_segment_uses_fxports_typed_pnr_sdc_derivation(monkeypatch,

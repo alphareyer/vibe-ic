@@ -74411,6 +74411,38 @@ def _run_librelane_consumer_phase3(project: Path, top: str, pdk: PdkConfig,
                 _append(row)
             for row in run_step13_lec_on_pnr_input(subject, top, args.container):
                 _append(row)
+            # The helper returns [] for a matching netlist digest even when
+            # the saved proof was inconclusive. The segment handoff needs a
+            # typed PASS on the exact netlist it is about to implement.
+            import lec_gate_netlist_select as _gns
+            lec_path = subject / "reports/lec.json"
+            try:
+                lec_doc = json.loads(lec_path.read_text())
+            except (OSError, ValueError):
+                lec_doc = {}
+            binding = _gns.proof_subject_binding(subject, lec_doc, top)
+            proof_verdict = lec_doc.get("verdict")
+            if binding.get("state") != _gns.BINDING_MATCH:
+                _append(StepResult(
+                    "lec_proof_binding", "NOT_MEASURED", 0.0,
+                    "step 13 has no current proof for segment 2's netlist: "
+                    f"{binding.get('state')}", [str(lec_path)],
+                    extras={"binding": binding, "proof_verdict": proof_verdict},
+                    reason_class=_V.ReasonClass.NOT_EXECUTED))
+            if proof_verdict != "PASS":
+                is_failure = proof_verdict == "FAIL"
+                _append(StepResult(
+                    "lec_proof_binding", "FAIL" if is_failure else "NOT_MEASURED",
+                    0.0, f"step 13's typed proof verdict is {proof_verdict!r}",
+                    [str(lec_path)], extras={"binding": binding},
+                    reason_class=("" if is_failure else
+                                  _V.ReasonClass.INCONCLUSIVE if proof_verdict
+                                  in ("INCONCLUSIVE", "UNPROVEN") else
+                                  _V.ReasonClass.NOT_EXECUTED)))
+            _append(StepResult(
+                "lec_proof_binding", "PASS", 0.0,
+                "step 13's typed PASS is bound to segment 2's netlist",
+                [str(lec_path)], extras={"binding": binding}))
             _append(StepResult(
                 "synth_handoff", "PASS", 0.0,
                 "canonical step 14: segment 1's native netlist checkers "
