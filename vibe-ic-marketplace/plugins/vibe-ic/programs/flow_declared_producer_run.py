@@ -390,6 +390,23 @@ def owed(project: Path, clauses: List[Dict[str, str]]
     return to_run, skipped
 
 
+def _audit_args(project: Path, command: str) -> List[str]:
+    """The arguments the AUDIT's own executor passes for this flow command.
+
+    Built by `flow_compliance_check`'s own tokeniser and glob expander
+    (nullglob, relative to the project), so this pass runs the command the
+    step gate will run and not a near relative of it. It used
+    `command.split()`: a flow command naming `phase2/stage1/rtl/*.sv` reached
+    the program as that literal string. MEASURED on lane llb's opentitan_aes
+    run: `rom_init_lint` exited 2 on "missing file: phase2/stage1/rtl/*.sv",
+    wrote nothing, the audit's own gate then wrote the report, and step 2 was
+    refused it as AUDIT-CREATED OUTPUT, FAIL(missing_artefact).
+    """
+    import shlex  # noqa: PLC0415
+    import flow_compliance_check as _fcc  # noqa: PLC0415
+    return _fcc._expand_globs(shlex.split(command)[1:], project)
+
+
 def _run_one(project: Path, row: Dict[str, str], timeout: int
              ) -> Dict[str, Any]:
     prog = PROGRAMS_DIR / f"{row['program']}.py"
@@ -398,7 +415,13 @@ def _run_one(project: Path, row: Dict[str, str], timeout: int
         out.update({"rc": None, "executed": False,
                     "note": f"{row['program']}.py is not in programs/"})
         return out
-    argv = [sys.executable, str(prog)] + row["command"].split()[1:]
+    try:
+        args = _audit_args(project, row["command"])
+    except Exception as exc:  # noqa: BLE001 — named in the row, never run raw
+        out.update({"rc": None, "executed": False,
+                    "note": f"could not build the audit's argv: {exc}"})
+        return out
+    argv = [sys.executable, str(prog)] + args
     t0 = time.time()
     try:
         cp = subprocess.run(  # nosec B603 — argv from the flow yaml

@@ -82,8 +82,12 @@ __all__ = [
     "TIMEOUT_MARKER",
     "GATE_RAN_PREFIXES",
     "ENV_UNAVAILABLE_MARKER",
+    "PROVENANCE_REFUSED_MARKERS",
+    "OUTPUTS_MISSING_PREFIX",
+    "AWAITING_PREFIX",
     "is_blocker",
     "predecessor_delivered_outputs",
+    "outputs_present_but_refused",
     "classify",
     "build_blockers",
     "class_counts",
@@ -138,6 +142,24 @@ _PASS_VOIDED_RE = re.compile(r"PASS voided: dependency \[([^\]]+)\]")
 _ABSENCE_PREFIXES = ("no required_outputs found",
                      "missing files (",
                      "condition not met")
+
+#: The producer's PROVENANCE refusals. The declared output IS on disk, and the
+#: step is refused credit for it because nothing ties it to the run: the
+#: audit's own gate wrote it, or only a project-wide glob found it. That is
+#: neither absence nor a gate verdict, and before these were named a step
+#: carrying one fell through every rule to `no-rule-matched`. MEASURED on
+#: lane llb's opentitan_aes run: step 2 FAIL(missing_artefact) on
+#: `AUDIT-CREATED OUTPUT REFUSED: [rom_init_lint.json]` booked that way.
+PROVENANCE_REFUSED_MARKERS: Tuple[str, ...] = (
+    "AUDIT-CREATED OUTPUT REFUSED:", "UNATTRIBUTED OUTPUT:")
+#: The producer's line for a declared output that is NOT on disk although the
+#: gate passed — absence, in the typed FAIL(missing_artefact) shape, and not
+#: one of `_ABSENCE_PREFIXES`.
+OUTPUTS_MISSING_PREFIX = "required_outputs missing:"
+#: The producer's line for a step whose gate waits on a named agent's pass.
+#: Its tail names the hand-off; a refusal laid over it must not lose that.
+AWAITING_PREFIX = "AWAITING an agent pass:"
+_HANDOFF_RE = re.compile(r"hand-off emitted by:\s*(.+?)\s*$")
 
 #: The producer's DISCLOSURE tiers, normalised. A step wearing one of these
 #: ran and told you its output was not design-bound. Named as a set here so a
@@ -347,6 +369,59 @@ def predecessor_delivered_outputs(
     return True
 
 
+def outputs_present_but_refused(step: Any) -> bool:
+    """True when this FAIL is a provenance refusal of outputs that ARE there.
+
+    Every clause reads a line the producer writes deliberately: a
+    `PROVENANCE_REFUSED_MARKERS` line, and none of the lines that say an
+    output is absent (`_ABSENCE_PREFIXES`, `OUTPUTS_MISSING_PREFIX`), no
+    crash or stall, and a non-empty resolved `evidence`. Anything short of
+    all of that answers False, which keeps rule 7 as conservative as before.
+    """
+    if step is None or _field(step, "status") != _T.Verdict.FAIL.value:
+        return False
+    reasons = _reasons(step)
+    if not any(_starts_with_any(r, PROVENANCE_REFUSED_MARKERS)
+               for r in reasons):
+        return False
+    if any(_starts_with_any(r, _ABSENCE_PREFIXES + (OUTPUTS_MISSING_PREFIX,))
+           for r in reasons):
+        return False
+    if _has_marker(step, CRASH_MARKER) or _has_marker(step, TIMEOUT_MARKER):
+        return False
+    return bool(_field(step, "evidence", []) or [])
+
+
+def _declared_input_owners(
+        flow_step: Optional[Mapping[str, Any]]) -> Optional[set]:
+    """The step ids this step's `required_inputs` say it reads FROM.
+
+    ``None`` — "the flow does not say" — when it declares no inputs or any
+    entry names no `from`: then nothing tells a data edge from a sequencing
+    edge, and the caller keeps every `blocks_on` edge.
+    """
+    entries = (flow_step or {}).get("required_inputs") or []
+    owners = set()
+    for e in entries:
+        if not isinstance(e, Mapping) or e.get("from") in (None, ""):
+            return None
+        owners.add(str(e["from"]))
+    return owners or None
+
+
+def _pending_handoff(reasons: Sequence[str]) -> str:
+    """The hand-off an AWAITING line names, as a clause, or ''."""
+    for r in reasons:
+        if not _starts_with_any(r, (AWAITING_PREFIX,)):
+            continue
+        m = _HANDOFF_RE.search(r)
+        tail = (m.group(1) if m
+                else r.lstrip()[len(AWAITING_PREFIX):].strip()[:200])
+        return (f". Beneath it the step was also awaiting an agent pass; "
+                f"the hand-off to answer: {tail}")
+    return ""
+
+
 # ── the classification itself ───────────────────────────────────────────────
 def classify(step: Any,
              *,
@@ -463,13 +538,18 @@ def classify(step: Any,
                 f"closed")
 
     # 8. A gate PROGRAM ran to completion against artefacts this project
-    #    produced, every step it depends on passed, and it returned non-zero.
-    #    That is a statement about this project's tree — the class whose
-    #    correct response is a named FAIL that is never greened.
+    #    produced, no step it depends on left it short of an input (rule 7
+    #    above), and it returned non-zero. That is a statement about this
+    #    project's tree — the class whose correct response is a named FAIL
+    #    that is never greened. It does NOT say every dependency PASSED:
+    #    since #2186 a dependency that is non-PASS but delivered leaves this
+    #    rule reachable, and the note said "passed" over the AES run's steps
+    #    4 and 5, whose dependency (step 2) is a FAIL.
     if any(_starts_with_any(r, GATE_RAN_PREFIXES) for r in reasons):
         return ("DESIGN_FACT", "gate-reached-verdict",
                 "a gate program ran to a verdict against this project's own "
-                "artefacts, with every declared dependency passed")
+                "artefacts, and no step it declares it depends on left it "
+                "without an input it reads")
 
     # 9. The P0-style umbrella. It has no `program failed:` line of its own;
     #    what it has is typed per-gate records. Its class is therefore
@@ -507,6 +587,31 @@ def classify(step: Any,
     if any(_starts_with_any(r, _ABSENCE_PREFIXES) for r in reasons):
         return ("UNCLASSIFIED", "declared-artefact-absent",
                 "a declared artefact is not present; absence records no cause")
+
+    # 10a. The same FAIL in its TYPED shapes, which rule 10's prose prefixes
+    #      do not cover: a provenance refusal (the output is present and the
+    #      run is not what wrote it), and FAIL(missing_artefact) on
+    #      `required_outputs missing`. Neither is `no-rule-matched` — the
+    #      producer said exactly what is wrong. Class stays UNCLASSIFIED for
+    #      rule 10's reason: the refusal records WHICH file and not WHY the
+    #      run did not write it (on the AES run it was a plugin defect in the
+    #      pre-audit producer; on another it is a step nobody ran). A step
+    #      that was awaiting an agent pass before the refusal keeps that
+    #      hand-off in the note, since answering it is still owed.
+    if status == _T.Verdict.FAIL.value:
+        if any(_starts_with_any(r, PROVENANCE_REFUSED_MARKERS)
+               for r in reasons):
+            return ("UNCLASSIFIED", "declared-artefact-refused",
+                    "a declared artefact is present but the step is refused "
+                    "credit for it: nothing ties it to this run (the audit's "
+                    "own gate wrote it, or only a project-wide glob found "
+                    "it); the refusal records which file, not why the run did "
+                    "not write it" + _pending_handoff(reasons))
+        if (_field(step, "reason_class")
+                == _T.ReasonClass.MISSING_ARTEFACT.value):
+            return ("UNCLASSIFIED", "declared-artefact-absent",
+                    "a declared artefact is not present; absence records no "
+                    "cause" + _pending_handoff(reasons))
 
     # 10b. AWAITING AN AGENT PASS — the one disclosure tier that DOES name a
     #      cause to act on, which is why it cannot be left to rule 11.
@@ -694,6 +799,7 @@ def build_blockers(results: Sequence[Any],
         undelivered: Optional[List[Any]] = None
         if flow_step:
             undelivered = []
+            reads_from = _declared_input_owners(flow_step)
             for dep in (flow_step.get("blocks_on") or []):
                 if dep in status_by_id and status_by_id[dep] != _T.FULL_PASS:
                     preds.append(dep)
@@ -701,9 +807,28 @@ def build_blockers(results: Sequence[Any],
                     # not DELIVER, and a predecessor whose own result we do not
                     # hold counts as undelivered (absence of evidence is not
                     # evidence of delivery).
-                    if not predecessor_delivered_outputs(
+                    if predecessor_delivered_outputs(
                             result_by_id.get(dep), by_id.get(dep)):
-                        undelivered.append(dep)
+                        continue
+                    # A SEQUENCING edge over outputs that ARE there. The
+                    # predecessor is FAIL(missing_artefact) only because its
+                    # present outputs were refused for provenance, and this
+                    # step's declared inputs come from other steps, so the
+                    # tree it measured is the tree it reads. MEASURED on the
+                    # AES run: steps 4 and 5 failed on their OWN programs
+                    # (LINE_UNION_DISAGREES, BINDING_OUTSTANDING) and were
+                    # booked derived-from-upstream on step 2's refused lint
+                    # report, which neither reads. An ABSENT output still
+                    # blocks whoever is downstream (step 29 reads step 22's
+                    # SDF without declaring it), and so does a refusal from a
+                    # step this one reads, or from any step when this one
+                    # declares no inputs.
+                    if (reads_from is not None
+                            and str(dep) not in reads_from
+                            and outputs_present_but_refused(
+                                result_by_id.get(dep))):
+                        continue
+                    undelivered.append(dep)
         cls, basis, note = classify(
             r, non_pass_predecessors=preds,
             predecessors_missing_outputs=undelivered,
