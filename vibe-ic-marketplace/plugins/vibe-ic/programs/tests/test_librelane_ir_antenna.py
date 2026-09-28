@@ -443,3 +443,21 @@ def test_a_chain_step_is_found_by_its_name_not_its_slot(tmp_path):
     (lane / "02-vibeic-transientir").mkdir()
     folder = la.chain_folder(tmp_path, "24", la.IR_STEPS, "Vibeic.TransientIR")
     assert folder.name == "02-vibeic-transientir"
+
+
+def test_standalone_ir_openroad_and_capability_probe_use_shared_supervisor(
+        tmp_path, monkeypatch):
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return type("CP", (), {"returncode": 0, "stdout": "True\n",
+                                "stderr": ""})()
+
+    monkeypatch.setattr(la, "run_container", run)
+    log = tmp_path / "ir" / "openroad.log"
+    log.parent.mkdir(parents=True)
+    assert la._run_openroad(tmp_path, "img", tmp_path / "x.tcl", log, []) == 0
+    assert la.sealring_spans_capable("img")
+    assert calls[0][1] == {"supervised": True, "log": log}
+    assert calls[1][1] == {"probe_deadline_s": ll.PROBE_DEADLINE_S}

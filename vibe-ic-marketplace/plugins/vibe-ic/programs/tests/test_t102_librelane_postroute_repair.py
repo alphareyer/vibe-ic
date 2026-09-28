@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import json
 import os
 import re
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -79,6 +80,50 @@ def test_the_fork_flag_is_told_from_a_bogus_flag_not_from_help_text():
     # An answer that is absent is unmeasured, never a capability.
     assert prr.flag_accepted_vs_control("VIBEIC_PRR_PROBE_REAL: x\n") is None
     assert prr.flag_accepted_vs_control("") is None
+
+
+def test_fork_capability_probe_uses_shared_supervisor_without_raw_stdin(
+        monkeypatch):
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=FORK_TRANSCRIPT, stderr="")
+
+    monkeypatch.setattr(contract, "run_container", run)
+    result = prr.fork_capability("img")
+    assert result["capable"] is True
+    assert calls[0][1] == {"probe_deadline_s": contract.PROBE_DEADLINE_S}
+    assert "-i" not in calls[0][0]
+    assert prr._PROBE_REAL in calls[0][0][-1]
+
+
+def test_fork_capability_deadline_is_unmeasured(monkeypatch):
+    def deadline(*_args, **_kwargs):
+        raise contract.Refusal("LL_TOOL_DEADLINE", "probe deadline elapsed")
+
+    monkeypatch.setattr(contract, "run_container", deadline)
+    result = prr.fork_capability("img")
+    assert result["capable"] is None
+    assert result["code"] == "LL_TOOL_DEADLINE"
+    assert "LL_TOOL_DEADLINE" in result["reason"]
+
+
+def test_probe_deadline_is_recorded_as_unmeasured_not_incapable(tmp_path,
+                                                                monkeypatch):
+    monkeypatch.setattr(prr, "fork_capability", lambda *_a, **_k: {
+        "capable": None, "image": "img", "code": "LL_TOOL_DEADLINE",
+        "reason": "LL_TOOL_DEADLINE: named probe container was reaped"})
+    monkeypatch.setattr(contract, "resolve_step_configs",
+                        lambda *_a, **_k: pytest.fail("no config may be resolved"))
+    report = prr.run(tmp_path, image="img", pdk="processA", pdk_root=tmp_path,
+                     views={}, sdc=tmp_path / "x.sdc", derate=(0.95, 1.05))
+    assert report["verdict"] == "NOT_MEASURED"
+    assert report["code"] == "LL_TOOL_DEADLINE"
+    assert report["reason_class"] == "execution_error"
+    assert "named probe container" in report["reason"]
+    assert json.loads((tmp_path / prr.REPORT_REL).read_text()) == report
 
 
 def test_an_incapable_image_refuses_before_any_state_is_built(tmp_path, monkeypatch):

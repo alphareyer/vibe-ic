@@ -45,7 +45,9 @@ import pytest
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 
-RATCHETED = ("librelane_contract.py", "librelane_signoff.py")
+RATCHETED = ("librelane_contract.py", "librelane_signoff.py",
+             "librelane_step37.py", "librelane_ir_antenna.py",
+             "librelane_postroute_repair.py", "analog_a6_librelane_drc.py")
 BOUNDED_RUNNER = "run_container"
 #: The functions that run a TOOL (a LibreLane step, an OpenROAD session, an
 #: STA run) rather than a probe. Each must be supervised, never on a clock.
@@ -55,9 +57,17 @@ BOUNDED_RUNNER = "run_container"
 #: run through subprocess.run) is named, not silently dropped from the count.
 PROBES = {"librelane_contract.py": {"image_capability", "resolve_step_configs", "emit_pdn_cfg",
                                     "flow_segment", "resolve_step_config"},
-          "librelane_signoff.py": set()}
+          "librelane_signoff.py": set(),
+          "librelane_step37.py": set(),
+          "librelane_ir_antenna.py": {"sealring_spans_capable"},
+          "librelane_postroute_repair.py": {"fork_capability"},
+          "analog_a6_librelane_drc.py": {"_image_run", "_capability_controls"}}
 TOOL_STEPS = {"librelane_contract.py": {"run_chain", "_openroad_convert"},
-              "librelane_signoff.py": {"agreement", "run_sta_script"}}
+              "librelane_signoff.py": {"agreement", "run_sta_script"},
+              "librelane_step37.py": {"_vibeic_gds_gates"},
+              "librelane_ir_antenna.py": {"_run_openroad"},
+              "librelane_postroute_repair.py": set(),
+              "analog_a6_librelane_drc.py": set()}
 
 
 def _is_docker_head(node: ast.AST) -> bool:

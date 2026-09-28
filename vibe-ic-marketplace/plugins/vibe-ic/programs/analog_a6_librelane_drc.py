@@ -122,11 +122,12 @@ def _image_run(image: str, entrypoint: str, args: List[str],
                docker: str = "docker") -> "subprocess.CompletedProcess":
     """One throw-away container of the pinned image: a PDK file lives there
     and nowhere on this host."""
-    import subprocess
     import _docker_memory as _dmem
-    return subprocess.run([docker, "run", "--rm", *_dmem.docker_memory_flags(),
-                           "--entrypoint", entrypoint, image, *args],
-                          capture_output=True, text=True)
+    from librelane_contract import PROBE_DEADLINE_S, run_container
+    return run_container(
+        [docker, "run", "--rm", *_dmem.docker_memory_flags(),
+         "--entrypoint", entrypoint, image, *args],
+        probe_deadline_s=PROBE_DEADLINE_S)
 
 
 def image_extra_runsets(image: str, main_runset: str) -> List[str]:
@@ -281,6 +282,9 @@ def run(project: Path, block: str, image: str,
     if main_runset:
         try:
             extras = image_extra_runsets(image, main_runset)
+        except lc.Refusal as exc:
+            record["engines"] = engines
+            return refused("extra runset listing", exc)
         except RuntimeError as exc:
             record.update({"engines": engines, "result": "NOT_MEASURED",
                            "rule": _auth.EXTRA_RUNSET_GRADED_NOTHING,
@@ -339,10 +343,17 @@ def run(project: Path, block: str, image: str,
     dis = _auth.disagreements(klayout, m["violations"])
     capability: Dict[str, dict] = {}
     if dis:
-        capability = _capability_controls(
-            arm, block, image, main_runset,
-            {main_runset: kcfg, **extra_cfgs} if main_runset else {},
-            sorted(dis))
+        try:
+            capability = _capability_controls(
+                arm, block, image, main_runset,
+                {main_runset: kcfg, **extra_cfgs} if main_runset else {},
+                sorted(dis))
+        except lc.Refusal as exc:
+            record.update({"engines": engines,
+                           "authoritative_runsets": [r for r in
+                                                     [main_runset, *extras] if r],
+                           "union": u})
+            return refused("capability controls", exc)
     roundtrip = None
     if dis:
         roundtrip = (roundtrip_runner or _default_roundtrip)(
@@ -409,17 +420,18 @@ def _capability_controls(arm: "_Arm", block: str, image: str,
             top = ((labels or {}).get(tc) or {}).get("top") or []
             dst = cap_root / "unit" / tc
             if not dst.is_file():
-                import subprocess
                 import _docker_memory as _dmem
-                cp = subprocess.run(["docker", "run", "--rm",
-                                     *_dmem.docker_memory_flags(),
-                                     "--entrypoint", "cat", image,
-                                     f"{unit_dir}/{tc}"],
-                                    capture_output=True)
+                from librelane_contract import PROBE_DEADLINE_S, run_container
+                import base64
+                cp = run_container(
+                    ["docker", "run", "--rm", *_dmem.docker_memory_flags(),
+                     "--entrypoint", "python3", image, "-c",
+                     "import base64,pathlib,sys;print(base64.b64encode(pathlib.Path(sys.argv[1]).read_bytes()).decode())",
+                     f"{unit_dir}/{tc}"], probe_deadline_s=PROBE_DEADLINE_S)
                 if cp.returncode or not cp.stdout:
                     results[tc] = None
                     continue
-                write_bytes(dst, cp.stdout)
+                write_bytes(dst, base64.b64decode(cp.stdout.strip(), validate=True))
             if len(top) != 1:
                 results[tc] = None
                 continue

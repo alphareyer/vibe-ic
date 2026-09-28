@@ -91,18 +91,76 @@ def test_each_finished_stream_runs_both_existing_gds_gates(tmp_path, monkeypatch
     calls = []
 
     def tool_writes(cmd, **kwargs):
-        calls.append(cmd)
+        calls.append((cmd, kwargs))
         report = Path(cmd[cmd.index("--json") + 1])
         substance = any(str(part).endswith("gds_substance_check.py") for part in cmd)
         _put(report, {"verdict": "PASS" if substance else "FINDINGS"})
         return SimpleNamespace(returncode=0 if substance else 1,
                                stdout="tool result", stderr="")
 
-    monkeypatch.setattr(step37.subprocess, "run", tool_writes)
+    monkeypatch.setattr(step37, "run_container", tool_writes)
     result = step37._vibeic_gds_gates(project, "candidate", pdk_root, "processA",
                                      gds, routed, "magic", config)
     assert result["substance"]["rc"] == 0
     assert result["port_labels"]["rc"] == 1
     assert all(row["sha256"] for row in result.values())
     assert len(calls) == 2
-    assert "--pdk-tech" in calls[1]
+    assert "--pdk-tech" in calls[1][0]
+    assert all(kw["supervised"] is True for _cmd, kw in calls)
+    assert {Path(kw["log"]).name for _cmd, kw in calls} == {
+        "37-magic-substance.log", "37-magic-port_labels.log"}
+
+
+@pytest.mark.parametrize("stage", ["stream", "dual_measurement"])
+@pytest.mark.parametrize("code,status,reason", [
+    ("LL_TOOL_STALLED", "NOT_MEASURED", "execution_error"),
+    ("LL_TOOL_DEADLINE", "NOT_MEASURED", "execution_error"),
+    ("LL_STEP_FAILED", "FAIL", ""),
+])
+def test_step37_books_supervisor_stop_without_a_design_failure(
+        tmp_path, monkeypatch, stage, code, status, reason):
+    runner = importlib.import_module("phase3_one_shot_runner")
+    feedback = importlib.import_module("drc_feedback_repair")
+    project = tmp_path / "project"
+    pnr = runner._pl.pnr_dir(project)
+    pnr.mkdir(parents=True)
+    routed = pnr / "routed.def"
+    routed.write_text("VERSION 5.8 ;\nDESIGN core ;\nEND DESIGN\n")
+    (pnr / "core.def").write_bytes(routed.read_bytes())
+    gds = pnr / "core.gds"
+    monkeypatch.setattr(contract, "selected_mode", lambda *_a: (
+        "dual" if stage == "dual_measurement" else "librelane"))
+    monkeypatch.setattr(contract, "resolve_image", lambda *_a: "candidate")
+    monkeypatch.setattr(contract, "resolve_pdk_root", lambda *_a, **_k: tmp_path)
+    monkeypatch.setattr(runner, "_layout_basis", lambda *_a: ("basis", None))
+    monkeypatch.setattr(runner._ga, "gate_passed", lambda *_a: True)
+    monkeypatch.setattr(runner, "_vacuous_on_unrouted", lambda *_a: None)
+    monkeypatch.setattr(feedback, "has_reviewed_rule", lambda *_a: False)
+    monkeypatch.setattr(runner, "_streamout_top", lambda *_a: ("core", ""))
+    monkeypatch.setattr(runner, "publish_database_unit_declaration",
+                        lambda *_a: None)
+    monkeypatch.setattr(runner, "publish_tapeout_declarations",
+                        lambda *_a: None)
+
+    def refused(*_a, **_k):
+        raise contract.Refusal(code, "the tool did not complete")
+
+    if stage == "stream":
+        monkeypatch.setattr(step37, "run", refused)
+    else:
+        def direct(*_a, **_k):
+            gds.write_bytes(b"direct stream")
+            return runner.StepResult("gds", "PASS", 0, "direct stream")
+
+        monkeypatch.setattr(runner, "_step_gds_direct", direct)
+        monkeypatch.setattr(step37, "run", lambda *_a: {
+            "gds": gds, "engine": "klayout", "state": project / "state.json"})
+        monkeypatch.setattr(runner, "_gds_substance_gate", lambda *_a: None)
+        monkeypatch.setattr(contract, "resolve_step_configs", lambda *_a, **_k: {})
+        monkeypatch.setattr(contract, "execute_dual", refused)
+    row = runner.step_gds(
+        project, "core", SimpleNamespace(name="processA", drc_deck=None),
+        "unused-container")
+    assert row.status == status
+    assert row.reason_class == reason
+    assert code in row.detail

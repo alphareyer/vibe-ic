@@ -161,17 +161,33 @@ def fork_capability(image: str, docker: str = "docker") -> Dict[str, Any]:
            f"if {{[catch {{estimate_parasitics {_CTRL_FLAG}}} e]}} "
            f"{{ puts \"{_PROBE_CTRL} $e\" }} else {{ puts \"{_PROBE_CTRL} <accepted>\" }}\n")
     cmd = [docker, "run", "--rm", "--network", "none", *_dmem.docker_memory_flags(),
-           "-i", image, "--skip", "bash", "-c",
-           "openroad -no_init -no_splash -exit /dev/stdin 2>&1"]
+           image, "--skip", "bash", "-c",
+           "set -o pipefail; printf '%s' \"$1\" | openroad -no_init "
+           "-no_splash -exit /dev/stdin 2>&1", "vibeic-probe", tcl]
     try:
-        done = subprocess.run(cmd, input=tcl, capture_output=True, text=True,
-                              timeout=300)
+        from librelane_contract import PROBE_DEADLINE_S
+        import librelane_contract as _ll
+        done = _ll.run_container(cmd, probe_deadline_s=PROBE_DEADLINE_S)
         transcript = (done.stdout or "") + "\n" + (done.stderr or "")
     except (OSError, subprocess.SubprocessError) as exc:
-        return {"capable": None, "image": image, "reason": f"probe could not run: {exc}"}
+        return {"capable": None, "image": image,
+                "code": "LL_PRR_PROBE_UNAVAILABLE",
+                "reason": f"probe could not run: {exc}"}
+    except RuntimeError as exc:
+        # run_container reports an expired probe deadline as Refusal, which
+        # inherits RuntimeError. Capability then remains unmeasured; a probe
+        # timeout cannot establish that the image lacks this fork feature.
+        if getattr(exc, "code", None) != "LL_TOOL_DEADLINE":
+            raise
+        return {"capable": None, "image": image,
+                "code": "LL_TOOL_DEADLINE", "reason": str(exc)}
     capable = flag_accepted_vs_control(transcript)
-    return {"capable": capable, "image": image,
-            "transcript_tail": transcript.strip()[-600:]}
+    result = {"capable": capable, "image": image,
+              "transcript_tail": transcript.strip()[-600:]}
+    if capable is None:
+        result.update(code="LL_PRR_CAPABILITY_INCONCLUSIVE",
+                      reason="fork capability probe transcript was inconclusive")
+    return result
 
 
 # --- measurement ---------------------------------------------------------------
@@ -468,6 +484,14 @@ def _refused_by_tool(report: Dict[str, Any], cap: Dict[str, Any], out: Path) -> 
     report["fork_capability"] = cap
     if cap.get("capable") is True:
         return False
+    if cap.get("capable") is None:
+        code = cap.get("code") or "LL_PRR_CAPABILITY_INCONCLUSIVE"
+        report.update(verdict="NOT_MEASURED", code=code,
+                      reason=cap.get("reason") or "fork capability probe did not answer",
+                      reason_class=("inconclusive" if code == "LL_PRR_CAPABILITY_INCONCLUSIVE"
+                                    else "execution_error"))
+        write_json(out, report)
+        return True
     report.update(verdict="NOT_MEASURED", code="LL_PRR_TOOL_INCAPABLE",
                   reason="the image's OpenROAD does not accept the fork's "
                          "estimate_parasitics -detailed_routing")

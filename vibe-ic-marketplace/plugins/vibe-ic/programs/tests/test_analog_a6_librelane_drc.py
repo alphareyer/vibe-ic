@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import os
+import base64
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -160,6 +162,51 @@ def test_a_runset_that_graded_nothing_is_not_clean(stub, monkeypatch):
     monkeypatch.setenv("STUB_KLAYOUT", _lyrdb([], []))
     monkeypatch.setenv("STUB_MAGIC", _lyrdb([], []))
     assert A6.run(_project(stub), "blk", IMAGE, None) == 1
+
+
+def test_a6_image_probe_uses_shared_container_supervisor(monkeypatch):
+    import librelane_contract as contract
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return type("CP", (), {"returncode": 0, "stdout": "probe",
+                                "stderr": ""})()
+
+    monkeypatch.setattr(contract, "run_container", run)
+    result = A6._image_run("img", "python3", ["-c", "print('probe')"])
+    assert result.returncode == 0
+    assert calls[0][1] == {"probe_deadline_s": contract.PROBE_DEADLINE_S}
+    assert calls[0][0][:3] == ["docker", "run", "--rm"]
+
+
+def test_capability_unit_copy_preserves_binary_data_under_shared_probe(tmp_path,
+                                                                       monkeypatch):
+    import librelane_contract as contract
+    unit_dir = "/deck/testing/testcases/unit"
+    cache = tmp_path / "phase3/librelane/analog/_capability/unit_labels.json"
+    cache.parent.mkdir(parents=True)
+    cache.write_text(json.dumps({"image": "img", "unit_dir": unit_dir,
+                                 "labels": {"unit.gds": {"top": ["cell"],
+                                                         "labels": ["M1.a"]}}}))
+    raw = bytes(range(256)) + b"\x00\xff"
+    calls = []
+
+    def copy_probe(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return SimpleNamespace(returncode=0,
+                               stdout=base64.b64encode(raw).decode() + "\n",
+                               stderr="")
+
+    monkeypatch.setattr(contract, "run_container", copy_probe)
+    arm = SimpleNamespace(project=tmp_path, lc=contract,
+                          run=lambda *_a, **_k: tmp_path / "empty_report")
+    A6._capability_controls(arm, "block", "img", "/deck/main.lydrc",
+                            {"/deck/main.lydrc": {}}, ["M1.a"])
+    assert (cache.parent / "unit/unit.gds").read_bytes() == raw
+    assert len(calls) == 1
+    assert calls[0][1] == {"probe_deadline_s": contract.PROBE_DEADLINE_S}
+    assert calls[0][0][-1] == f"{unit_dir}/unit.gds"
 
 
 def test_the_runner_runs_the_arm_only_when_selected_and_it_is_stricter(
