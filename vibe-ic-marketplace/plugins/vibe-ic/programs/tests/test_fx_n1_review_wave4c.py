@@ -76,7 +76,7 @@ def test_a_refused_pinned_image_route_is_recorded_not_run_and_the_host_is_never_
         raise T.ToolRouteRefused("iverilog", T.NO_IMAGE_ROUTE,
                                  "stated: no pinned image on this host",
                                  {"tool": "iverilog", "route": None})
-    monkeypatch.setattr(dosr._tool_route, "run", refuse)
+    monkeypatch.setattr(dosr._tool_route, "supervised_run", refuse)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     rc, _out, err = dosr._run_iverilog_stage(
@@ -106,7 +106,7 @@ def test_a_pinned_image_run_records_the_image_and_version_measured_on_that_route
     cp.eda_route = {"tool": "iverilog", "route": "image",
                     "image": "ghcr.io/stated/image@sha256:" + "a" * 64,
                     "container": "vibeic-route-1-abcd"}
-    monkeypatch.setattr(dosr._tool_route, "run", lambda argv, **_k: cp)
+    monkeypatch.setattr(dosr._tool_route, "supervised_run", lambda argv, **_k: cp)
     asked = []
 
     def identify(tool, **kw):
@@ -144,7 +144,7 @@ def test_a_pinned_image_that_is_not_the_declared_image_is_diverged(
     _launchers(monkeypatch, dosr)
     cp = subprocess.CompletedProcess(["iverilog"], 0, "", "")
     cp.eda_route = {"tool": "iverilog", "route": "image", "image": "other:ref"}
-    monkeypatch.setattr(dosr._tool_route, "run", lambda argv, **_k: cp)
+    monkeypatch.setattr(dosr._tool_route, "supervised_run", lambda argv, **_k: cp)
     monkeypatch.setattr(dosr._tool_route, "identify", lambda tool, **kw: {
         "tool": tool, "route": "image", "image": "other:ref", "container": "c",
         "image_digest": None, "image_id": "sha256:" + "e" * 64,
@@ -382,7 +382,7 @@ def test_synth_with_its_container_missing_is_not_measured_when_the_image_is_refu
 
     def refuse(argv, **kw):
         raise T.ToolRouteRefused("yosys", T.NO_IMAGE_ROUTE, "stated: no pinned image")
-    monkeypatch.setattr(R._tool_route, "run", refuse)
+    monkeypatch.setattr(R._tool_route, "supervised_run", refuse)
     res = R.step_yosys_synth(proj, "counter", container="gone-eda")
     assert res.status == "NOT_MEASURED", (res.status, res.detail)
     assert "no pinned image" in res.detail and "gone-eda" in res.detail
@@ -405,12 +405,87 @@ def test_synth_with_its_container_missing_runs_on_the_pinned_image(tmp_path, mon
         cp.eda_route = {"route": "image", "image": "stated:image",
                         "container": "vibeic-route-1-beef"}
         return cp
-    monkeypatch.setattr(R._tool_route, "run", routed)
+    monkeypatch.setattr(R._tool_route, "supervised_run", routed)
     res = R.step_yosys_synth(proj, "counter", container="gone-eda")
     assert asked and asked[0][0][:2] == ["yosys", "-p"] and asked[0][1] == "gone-eda"
     assert res.status == "PASS", (res.status, res.detail)
     log = (synth_dir / "yosys.log").read_text()
     assert "could not be used" in log and "vibeic-route-1-beef" in log, log
+
+
+def test_synth_image_route_keeps_a_progressing_job_past_its_idle_tolerance(
+        tmp_path, monkeypatch):
+    """A synthesis that still advances after the old deadline must finish."""
+    import design_one_shot_runner as R
+    _route.pin_container_route(monkeypatch)
+    proj = _synth_project(tmp_path)
+    synth_dir = R._pl.synth_dir(proj)
+    _container_gone(monkeypatch, R)
+    monkeypatch.setattr(R, "_phase2_synth_timeout_s", lambda: 1)
+    calls = []
+
+    def wall_run(argv, **kw):
+        calls.append(("wall", kw))
+        raise subprocess.TimeoutExpired(argv, kw["timeout"], output="working")
+
+    def progress_run(argv, **kw):
+        calls.append(("progress", kw))
+        (synth_dir / "netlist_yosys.v").write_text(_NETLIST)
+        cp = subprocess.CompletedProcess(argv, 0, "Number of cells: 12", "")
+        cp.eda_route = {"route": "image", "image": "stated:image",
+                        "container": "vibeic-route-progress"}
+        return cp
+
+    monkeypatch.setattr(R._tool_route, "run", wall_run)
+    monkeypatch.setattr(R._tool_route, "supervised_run", progress_run)
+    res = R.step_yosys_synth(proj, "counter", container="gone-eda")
+    assert res.status == "PASS", (res.status, res.detail, calls)
+    assert [kind for kind, _ in calls] == ["progress"]
+    assert calls[0][1]["stall_looks"] * calls[0][1]["poll_s"] == 1
+    assert "timeout" not in calls[0][1]
+
+
+def test_routed_sim_stage_uses_progress_supervision(tmp_path, monkeypatch):
+    """The common Icarus/Verilator route also treats its limit as idle time."""
+    import design_one_shot_runner as R
+    seen = []
+
+    def wall_run(argv, **kw):
+        seen.append(("wall", kw))
+        return subprocess.CompletedProcess(argv, 124, "working",
+                                           "TIMEOUT: still working")
+
+    def progress_run(argv, **kw):
+        seen.append(("progress", kw))
+        cp = subprocess.CompletedProcess(argv, 0, "finished", "")
+        cp.eda_route = {"route": "image", "image": "stated:image"}
+        return cp
+
+    monkeypatch.setattr(R._tool_route, "run", wall_run)
+    monkeypatch.setattr(R._tool_route, "supervised_run", progress_run)
+    rc, out, err, route = R._routed_tool_stage(
+        ["iverilog", "-V"], tmp_path, timeout=1)
+    assert (rc, out, err) == (0, "finished", "")
+    assert route["route"] == "image"
+    assert [kind for kind, _ in seen] == ["progress"]
+    assert seen[0][1]["stall_looks"] * seen[0][1]["poll_s"] == 1
+
+
+def test_routed_stage_reports_an_actual_stall(tmp_path, monkeypatch):
+    import design_one_shot_runner as R
+    import _progress_run as P
+
+    def stalled(argv, **_kw):
+        raise P.Stalled(argv, 4, 0.25, 1.0,
+                        {"output": True, "cpu": True}, out="tick")
+
+    monkeypatch.setattr(R._tool_route, "supervised_run", stalled)
+    monkeypatch.setattr(R._tool_route, "run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, 0, "done", ""))
+    rc, out, err, _route_record = R._routed_tool_stage(
+        ["iverilog", "-V"], tmp_path, timeout=1)
+    assert rc == 124 and out == "tick" and "STALLED" in err
+    assert "TIMEOUT" not in err
 
 
 # ── MINOR: tool names held in variables and constants ───────────────────────

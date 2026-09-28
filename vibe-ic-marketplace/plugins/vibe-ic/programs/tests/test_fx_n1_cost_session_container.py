@@ -338,6 +338,33 @@ def _no_grace(monkeypatch):
         sleep=lambda s: None, monotonic=_time.monotonic, time=_time.time))
 
 
+def test_routed_progress_supervision_allows_work_past_its_stall_window(
+        docker_farm, tmp_path):
+    """The real routed supervisor observes output while docker exec runs."""
+    import _eda_tool_route as T
+    from _hostpaths import require_repo
+    import time
+    rtl = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic",
+                       "programs", "tests", "fixtures", "sby_prove_arms",
+                       "pass", "ctr.v")
+    assert "module" in rtl.read_text()
+    d = docker_farm.bin / "docker"
+    d.write_text(d.read_text().replace(
+        "  exec) ",
+        '  exec) case " $* " in *" progressme "*) '
+        'echo tick1; /bin/sleep 0.5; echo tick2; /bin/sleep 0.5; '
+        'echo tick3; /bin/sleep 0.5; echo done; exit 0;; esac; '))
+    started = time.monotonic()
+    cp = T.supervised_run(["iverilog", "progressme", str(rtl)], cwd=tmp_path,
+                          stall_looks=4, poll_s=0.25)
+    assert time.monotonic() - started > 1.0
+    assert cp.returncode == 0 and "done" in cp.stdout
+    assert cp.eda_route["route"] == T.ROUTE_IMAGE
+    runs = _execs(docker_farm, "iverilog progressme")
+    assert len(runs) == 1 and " timeout " not in f" {runs[0]} "
+    assert str(rtl) in runs[0]
+
+
 def _assert_reaped_inside(F):
     import re
     calls = F.docker_calls()

@@ -103,6 +103,7 @@ import errno
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import secrets
@@ -1813,28 +1814,37 @@ def _run_sim_stage(argv: List[str], run_dir: Path, container: str,
                                _probe_tool=probe_tool)
 
 
+def _routed_progress_window(idle_s: float) -> Dict[str, Any]:
+    """Translate a caller's idle tolerance to progress looks, not a deadline."""
+    poll_s = min(30.0, max(0.25, float(idle_s) / 4.0))
+    return {"poll_s": poll_s,
+            "stall_looks": max(4, math.ceil(float(idle_s) / poll_s))}
+
+
 def _routed_tool_stage(argv: List[str], run_dir: Path, timeout: int,
                        as_tool: Optional[str] = None
                        ) -> Tuple[int, str, str, Dict[str, Any]]:
     """Run a tool argv on the route `_eda_tool_route` resolves (never the host
     while a container route exists). Returns (rc, out, err, route_record); a
     refused route is rc 127 with the refusal as stderr, the shape every
-    caller already reads as "the tool is not there"."""
+    caller already reads as "the tool is not there". `timeout` is the idle
+    tolerance; a working tool may run longer."""
     n_before = len(_tool_route.records())
     try:
-        cp = _tool_route.run([str(a) for a in argv], cwd=run_dir,
-                             timeout=timeout, capture_output=True, text=True,
-                             errors="replace", as_tool=as_tool)
+        cp = _tool_route.supervised_run(
+            [str(a) for a in argv], cwd=run_dir,
+            capture_output=True, text=True, errors="replace",
+            as_tool=as_tool, **_routed_progress_window(timeout))
     except _tool_route.ToolRouteRefused as exc:
         # NOTHING RAN. Said in the record itself, so a reader (the #902
         # sim-toolchain record) cannot mistake a refusal for a run elsewhere.
         return 127, "", str(exc), dict(exc.record, refused=exc.code,
                                        refusal=str(exc))
-    except subprocess.TimeoutExpired as exc:
-        out = exc.output if isinstance(exc.output, str) else ""
-        # The tool RAN (on its route) and overran: keep the route it ran on.
+    except _pr.Stalled as exc:
+        # The tool ran but stopped making progress. Keep its route in the
+        # record; do not describe a stall as an elapsed-time failure.
         taken = _tool_route.records()[n_before:]
-        return (124, out, "TIMEOUT: %s exceeded %ss" % (argv[0], timeout),
+        return (124, exc.stdout or "", str(exc),
                 dict(taken[-1]) if taken else {})
     return (cp.returncode, cp.stdout or "", cp.stderr or "",
             getattr(cp, "eda_route", {}) or {})
@@ -18257,10 +18267,16 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
                 # NOT_MEASURED with the reason. The SV fallback below then
                 # drives the same session container of the image.
                 try:
-                    _cp = _tool_route.run(
+                    # The synthesis tolerance is for NO PROGRESS. `run` would
+                    # turn it into both an in-container GNU timeout and a host
+                    # wall deadline, killing a healthy long synthesis. The
+                    # supervised route watches the tool inside the container
+                    # and reaps that process tree if it really stalls.
+                    _cp = _tool_route.supervised_run(
                         ["yosys", "-p", script], cwd=synth_dir,
-                        timeout=_synth_to, capture_output=True, text=True,
-                        errors="replace", container=container)
+                        capture_output=True, text=True, errors="replace",
+                        container=container,
+                        **_routed_progress_window(_synth_to))
                 except _tool_route.ToolRouteRefused as _refused:
                     log = synth_dir / "yosys.log"
                     log.write_text(f"container {container!r} could not be "
@@ -18273,10 +18289,11 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
                         reason_class=_V.ReasonClass.TOOL_ABSENT,
                         extras={"eda_route": _refused.record,
                                 "synth_top": synth_top})
-                except subprocess.TimeoutExpired as _te:
+                except _pr.Stalled as _stalled:
                     _cp = subprocess.CompletedProcess(
-                        [], 124, _te.output if isinstance(_te.output, str)
-                        else "", f"TIMEOUT: yosys exceeded {_synth_to}s")
+                        [], 124, _stalled.stdout or "", str(_stalled))
+                    _taken = _tool_route.records()
+                    _cp.eda_route = _taken[-1] if _taken else {}
                 rc, out, err = _cp.returncode, _cp.stdout or "", _cp.stderr or ""
                 _rr = getattr(_cp, "eda_route", {}) or {}
                 _route_note = (
