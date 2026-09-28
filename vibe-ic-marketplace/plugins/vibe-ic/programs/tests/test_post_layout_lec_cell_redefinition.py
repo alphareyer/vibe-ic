@@ -183,6 +183,36 @@ def _emit(project: Path, pdk, monkeypatch, out: Path):
     return verdict, json.loads(out.read_text()), notes
 
 
+def test_w23_phase3_producer_refuses_combinational_residual_without_sat(
+        tmp_path, stub_container, monkeypatch):
+    log = ("=== equiv ===\n"
+           "  1  $equiv\n"
+           "Executing EQUIV_STATUS pass\n"
+           "Found 1 $equiv cells in equiv:\n"
+           "  Of those cells 0 are proven and 1 are unproven.\n"
+           "Unproven $equiv cell: \\out_gold \\out_gate\n")
+
+    def fake_exec(_container, command, **_kwargs):
+        if "yosys -V" in command:
+            return 0, "Yosys 0.68", ""
+        if "yosys -s" in command and "libprobe" not in command:
+            return 0, log, ""
+        return 0, "", ""
+
+    monkeypatch.setattr(R, "_docker_exec", fake_exec)
+    monkeypatch.delattr(LEC, "classify_pin_permutation_points")
+    lib = tmp_path / "sc__tt.lib"
+    lib.write_text("library(t){ cell (\"AND2\") {} }\n")
+    project = _scan_project(tmp_path, with_chain=False)
+    verdict, doc, _notes = _emit(
+        project, _pdk(str(lib), str(tmp_path / "c.lef")),
+        monkeypatch, tmp_path / "out.json")
+    assert doc["counterexample_search"]["result"] == "NOT_RUN"
+    assert verdict == "RUN_ERROR"
+    assert doc["miter_stateless"] is True
+    assert LEC.evaluate_report(doc)["result"] == "FAIL"
+
+
 # ---------------------------------------------------------------------------
 # (b) GOLD — the reference has to be the netlist PnR actually routed
 #

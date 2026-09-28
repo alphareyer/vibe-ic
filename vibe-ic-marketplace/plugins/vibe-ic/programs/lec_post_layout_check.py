@@ -1489,15 +1489,30 @@ def evaluate_report(doc: dict) -> Dict[str, object]:
                 "findings": ["LEC_POST_SAT_DISPOSITION_UNBOUND: residual "
                              "was erased without a complete, named SAT result"]}
     if (unproven or 0) > 0 and (total or 0) > 0:
-        outcome = search.get("result") or "NOT_RUN"
-        if outcome == "COUNTEREXAMPLE" or (non_equiv or 0) > 0:
+        if not search:
+            search = lec_cex.not_run(
+                "producer supplied no counterexample search record", names)
+        outcome = search.get("result")
+        search_error = lec_cex.residual_search_evidence_error(search, names)
+        if (outcome == "COUNTEREXAMPLE" or (non_equiv or 0) > 0
+                or verdict_in in (V_NONEQUIV, "FAIL")):
             result = "FAIL"
-            finding = (f"LEC_POST_NONEQUIV: SAT miter counterexample for "
-                       f"{names}; trace: {search.get('trace', 'see producer report')}")
-        elif verdict_in in ("FAIL", V_NONEQUIV):
+            finding = (f"LEC_POST_NONEQUIV: producer already decided non-equivalence "
+                       f"or SAT miter found a counterexample for {names}; "
+                       f"trace: {search.get('trace', 'see producer report')}")
+        elif verdict_in == V_RUN_ERROR:
             result = "FAIL"
-            finding = ("LEC_POST_RECORDED_FAIL: the producer recorded a decided "
-                       "LEC failure; later counterexample search cannot erase it")
+            finding = "LEC_POST_RUN_ERROR: producer recorded a run error"
+        elif (lc.get("miter_stateless") is True
+              and not (len(names) == unproven
+                       and lec_cex.complete_resolution_valid(search, names))):
+            result = "FAIL"
+            finding = ("LEC_POST_COMBINATIONAL_SAT_UNDECIDED: combinational "
+                       "residual requires a complete SAT disposition")
+        elif search_error:
+            result = "FAIL"
+            finding = ("LEC_POST_NOT_RUN_EVIDENCE_INVALID: " if outcome == "NOT_RUN"
+                       else "LEC_POST_SEARCH_EVIDENCE_INVALID: ") + search_error
         elif (len(names) == unproven
               and lec_cex.complete_resolution_valid(search, names)):
             result = "PASS"
@@ -1505,24 +1520,21 @@ def evaluate_report(doc: dict) -> Dict[str, object]:
             proven = total
             unproven = 0
             equivalent = True
-        elif search_error := lec_cex.unresolved_search_error(search):
-            result = "FAIL"
-            finding = search_error
         else:
             result = V_NOT_PROVEN
-            search_text = (f"counterexample search NOT RUN: {search['reason']}"
-                           if outcome == "NOT_RUN" else
-                           f"{outcome}: {search.get('reason', 'bounded SAT result recorded')}")
+            search_detail = (
+                f"counterexample search NOT RUN: {search['reason']}"
+                if outcome == "NOT_RUN" else
+                f"{search['method']}, K={search['bound_cycles']} cycles: "
+                f"{outcome} ({search['reason']})")
             finding = (f"LEC NOT_PROVEN: {unproven} of {total} points unproven; "
-                       f"{search.get('method', 'counterexample search')}, "
-                       f"K={search.get('bound_cycles', 'unknown')} cycles: "
-                       f"{search_text}")
+                       f"{search_detail}")
         return {
             "gate": GATE, "result": result,
             "verdict": (V_PASS if result == "PASS" else
-                        V_RUN_ERROR if result == "FAIL" and
-                        finding.startswith(("LEC_NOT_RUN_EVIDENCE_INVALID", "LEC_SAT_")) else
-                        V_NONEQUIV if result == "FAIL" else V_NOT_PROVEN),
+                        V_NONEQUIV if result == "FAIL" and
+                        finding.startswith("LEC_POST_NONEQUIV") else
+                        V_RUN_ERROR if result == "FAIL" else V_NOT_PROVEN),
             "total_points": total, "proven_points": proven,
             "unproven_points": unproven,
             "unproven_point_names": names,

@@ -67799,7 +67799,9 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                 f"{len(pin_perm['rejected'])} rejected) — verdict stands")
     cex_search = None
     unproven_names = []
+    miter_stateless, miter_state_evidence = mod._lec_run.miter_is_stateless(log_text)
     if (parsed.get("unproven") or 0) > 0:
+        original_verdict = parsed.get("verdict")
         unproven_names = mod.parse_unproven_points(log_text)
         cex = mod.lec_cex
         search_id = str(time.time_ns())
@@ -67849,19 +67851,24 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
         if cex_search["result"] == "COUNTEREXAMPLE":
             parsed["verdict"] = "NON_EQUIVALENT"
             parsed["non_equivalent"] = len(unproven_names)
+        elif original_verdict in ("FAIL", "NON_EQUIVALENT", "RUN_ERROR"):
+            # A failed original comparison cannot be softened by a search
+            # that did not execute or finish.
+            pass
         elif (len(unproven_names) == parsed.get("unproven")
               and cex.complete_resolution_valid(cex_search, unproven_names)):
             parsed["verdict"] = "PROVEN_EQUIVALENT"
             parsed["proven"] = parsed.get("total")
             parsed["unproven"] = 0
             parsed["equivalent"] = True
-        elif parsed.get("verdict") in ("FAIL", "NON_EQUIVALENT"):
-            # The original comparison has already established failure.
-            pass
-        elif cex_error := cex.unresolved_search_error(cex_search):
+        elif miter_stateless:
             parsed["verdict"] = "RUN_ERROR"
             parsed["equivalent"] = False
-            parsed["counterexample_search_error"] = cex_error
+            parsed["reason"] = (
+                "combinational residual requires a complete SAT disposition; "
+                f"counterexample search {cex_search['result']}: "
+                f"{cex_search.get('reason', 'no deciding SAT result')}")
+            parsed["counterexample_search_error"] = parsed["reason"]
         else:
             parsed["verdict"] = "NOT_PROVEN"
             parsed["equivalent"] = False
@@ -67891,6 +67898,8 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
         "unproven_point_names": unproven_names,
         "counterexample_search": cex_search,
         "counterexample_search_error": parsed.get("counterexample_search_error"),
+        "miter_stateless": miter_stateless,
+        "miter_state_evidence": miter_state_evidence,
         "equivalent": parsed.get("equivalent"),
         "sat_unsupported_cells": parsed.get("sat_unsupported_cells", []),
         "verdict": parsed.get("verdict"),

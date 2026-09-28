@@ -6666,6 +6666,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     # remaining $equiv cells before naming the outcome. This is a new SAT run
     # under the same container-aware stall watchdog as the proof ladder.
     if (report.get("unproven_points") or 0) > 0:
+        _stateless, _stateless_evidence = miter_is_stateless(raw)
+        report["miter_stateless"] = _stateless
+        report["miter_state_evidence"] = _stateless_evidence
+        _original_verdict = report["verdict"]
         _last_status = raw.rfind("Executing EQUIV_STATUS pass")
         _names = (unproven_names(raw[_last_status:]) if _last_status >= 0
                   else [str(n) for n in report.get("unproven_cells") or []])
@@ -6704,6 +6708,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if _search["result"] == "COUNTEREXAMPLE":
             report["verdict"] = "NON_EQUIVALENT"
             report["non_equivalent_points"] = len(_names)
+        elif _original_verdict in ("FAIL", "NON_EQUIVALENT"):
+            # A failed original comparison is decided evidence. An unavailable
+            # second search cannot downgrade it to NOT_PROVEN.
+            pass
         elif (len(_names) == report["unproven_points"]
               and _lec_cex.complete_resolution_valid(_search, _names)):
             report["verdict"] = "PROVEN_EQUIVALENT"
@@ -6711,14 +6719,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             report["proven_points"] = report.get("miter_points")
             report["compared_points"] = report.get("miter_points")
             report["unproven_points"] = 0
-        elif report.get("verdict") in ("FAIL", "NON_EQUIVALENT"):
-            # A failed comparison already decided by the proof cannot be
-            # softened by a second SAT process that never decided anything.
-            pass
-        elif _search_error := _lec_cex.unresolved_search_error(_search):
+        elif _stateless:
             report["verdict"] = "RUN_ERROR"
             report["equivalent"] = False
-            report["counterexample_search_error"] = _search_error
+            report["verdict_explanation"] = (
+                "Combinational residual requires a complete SAT disposition; "
+                f"counterexample search {_search['result']}: "
+                f"{_search.get('reason', 'no deciding SAT result')}.")
+            report["counterexample_search_error"] = report["verdict_explanation"]
         else:
             report["verdict"] = "NOT_PROVEN"
             report["equivalent"] = False

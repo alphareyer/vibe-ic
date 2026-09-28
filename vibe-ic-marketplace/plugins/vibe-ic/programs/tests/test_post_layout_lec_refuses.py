@@ -109,7 +109,8 @@ def test_an_unproven_proof_refuses(tmp_path):
     _write(tmp_path, _proven(verdict="UNPROVEN", proven_points=1,
                              unproven_points=1))
     r = R._lec_post_layout_refusal(tmp_path)
-    assert r and "UNPROVEN" in r
+    assert r and "EVIDENCE_INVALID" in r
+    assert "RUN_ERROR" in r
 
 
 def test_a_vacuous_proof_refuses(tmp_path):
