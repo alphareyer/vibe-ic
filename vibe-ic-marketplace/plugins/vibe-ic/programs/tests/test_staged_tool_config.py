@@ -389,7 +389,7 @@ def test_an_overflowing_value_is_invalid_not_a_traceback(tmp_path, capsys):
 
 def test_a_routing_layer_statement_is_recorded_not_dropped(tmp_path):
     stage(tmp_path, 'fastroute.tcl',
-          'set_global_routing_layer_adjustment $::env(MIN_ROUTING_LAYER)-$::env(MAX_ROUTING_LAYER) 0.2\n')
+          'set_routing_layer_adjustment $::env(MIN_ROUTING_LAYER)-$::env(MAX_ROUTING_LAYER) 0.2\n')
     [note] = notes_by(resolve(tmp_path)['record'], 'ROUTING_STATEMENT_NOT_MAPPED')
     assert note['source'] == 'input/reference_flow/fastroute.tcl:1'
     assert note['statement'].endswith(' 0.2') and 'GRT_ADJUSTMENT' in note['reason']
