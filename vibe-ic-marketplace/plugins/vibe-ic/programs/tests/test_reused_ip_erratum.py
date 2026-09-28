@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import urllib.request
 from pathlib import Path
 
 PROGRAMS = Path(__file__).resolve().parents[1]
@@ -135,6 +136,99 @@ def test_no_network_leaves_the_supplied_file_and_says_so(tmp_path):
     assert doc["rows"][0]["status"] == E.NOT_APPLIED
     assert "network unreachable" in doc["rows"][0]["why"]
     assert _staged(p) == BEFORE and doc["disclosures"] == []
+
+
+def test_oversized_upstream_response_is_refused_before_hashing_or_staging(
+        tmp_path, monkeypatch):
+    root = _catalog(tmp_path)
+    p = _project(tmp_path)
+    monkeypatch.setattr(E, "FETCH_MAX_BYTES", len(AFTER), raising=False)
+    calls = []
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, size=-1):
+            calls.append(size)
+            return AFTER + b"x"
+
+        read1 = read
+
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *_args, **_kwargs: Stream())
+    doc = E.apply_errata(p, root=root, pol=APPLY)
+    row = doc["rows"][0]
+    assert row["status"] == E.NOT_APPLIED
+    assert "byte ceiling" in row["why"]
+    assert calls and all(0 < n <= E.FETCH_CHUNK_BYTES for n in calls)
+    assert _staged(p) == BEFORE and doc["disclosures"] == []
+
+
+def test_trickling_upstream_response_hits_the_overall_deadline(
+        tmp_path, monkeypatch):
+    root = _catalog(tmp_path)
+    p = _project(tmp_path)
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(E, "FETCH_DEADLINE_S", 2)
+    monkeypatch.setattr(E.time, "monotonic", lambda: clock[0])
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, size=-1):
+            calls.append(size)
+            clock[0] += 1
+            return b"x"
+
+        read1 = read
+
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *_args, **_kwargs: Stream())
+    doc = E.apply_errata(p, root=root, pol=APPLY)
+    row = doc["rows"][0]
+    assert row["status"] == E.NOT_APPLIED
+    assert "overall fetch deadline" in row["why"]
+    assert calls and all(n > 0 for n in calls)
+    assert _staged(p) == BEFORE and doc["disclosures"] == []
+
+
+def test_valid_upstream_response_is_assembled_and_applied(tmp_path, monkeypatch):
+    root = _catalog(tmp_path)
+    p = _project(tmp_path)
+    chunks = iter((AFTER[:11], AFTER[11:], b""))
+    timeouts = []
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read1(self, _size):
+            return next(chunks)
+
+        def read(self, _size=-1):
+            return AFTER
+
+    def open_stream(_url, *, timeout):
+        timeouts.append(timeout)
+        return Stream()
+
+    monkeypatch.setattr(urllib.request, "urlopen", open_stream)
+    doc = E.apply_errata(p, root=root, pol=APPLY)
+    assert doc["rows"][0]["status"] == E.APPLIED
+    assert _staged(p) == AFTER
+    assert timeouts and timeouts[0] <= 5
 
 
 def test_without_a_binding_record_the_supplied_rtl_is_staged_unchanged(tmp_path):
