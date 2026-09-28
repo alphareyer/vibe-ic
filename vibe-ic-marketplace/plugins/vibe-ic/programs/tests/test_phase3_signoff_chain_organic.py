@@ -1060,6 +1060,42 @@ _ERC_STDOUT = """=== ERC: floating nets ===
 
 
 class TestErcReport:
+    def test_missing_openroad_count_is_not_zero(self, tmp_path, monkeypatch):
+        project = _mk_project(tmp_path)
+        rpt3 = runner._pl.reports_phase3_dir(project)
+        rpt3.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(runner, "_to_container_path", lambda p, c: p)
+        monkeypatch.setattr(runner, "_docker_exec",
+                            lambda c, cmd, timeout=0, **_: (0, "=== ERC metrics ===\n", ""))
+
+        assert runner._emit_erc_report(
+            project, "chip_top", _fake_pdk(), "x", rpt3 / "erc.rpt", [])
+        result = json.loads((rpt3 / "erc.json").read_text())
+        assert result["floating_nets"] is None
+        assert result["clean"] is False
+        assert result["verdict"] == "NOT_DETERMINED"
+
+    def test_openroad_floating_pins_are_not_reported_clean(self, tmp_path, monkeypatch):
+        project = _mk_project(tmp_path)
+        rpt3 = runner._pl.reports_phase3_dir(project)
+        rpt3.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(runner, "_to_container_path", lambda p, c: p)
+        stdout = ("=== ERC: floating nets ===\n"
+                  "[WARNING RSZ-0095] found 2 floating pins.\n"
+                  " spare_dff_0/CLK\n"
+                  " spare_dff_1/CLK\n"
+                  "=== ERC metrics ===\n")
+        monkeypatch.setattr(runner, "_docker_exec",
+                            lambda c, cmd, timeout=0, **_: (0, stdout, ""))
+
+        assert runner._emit_erc_report(
+            project, "chip_top", _fake_pdk(), "x", rpt3 / "erc.rpt", [])
+        result = json.loads((rpt3 / "erc.json").read_text())
+        assert result["floating_nets"] == 2
+        assert result["floating_pin_count"] == 2
+        assert result["clean"] is False
+        assert result["verdict"] == "BENIGN-ERC"
+
     def test_erc_emitted_clean(self, tmp_path, monkeypatch):
         project = _mk_project(tmp_path)
         rpt3 = runner._pl.reports_phase3_dir(project)

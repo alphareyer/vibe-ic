@@ -72154,8 +72154,19 @@ exit
     erc_lines = [ln for ln in log.splitlines()
                  if re.search(r"floating|erc|unconnect|ERC-", ln, re.I)
                  or _name_re.match(ln)]
-    floating_m = re.search(r"(\d+)\s+floating net", log, re.I)
-    floating = int(floating_m.group(1)) if floating_m else 0
+    # OpenROAD can report floating *pins* without a "floating nets" line.
+    # Keep the historical floating_nets field as the combined finding count
+    # consumed by erc_density_check, and disclose each kind separately.
+    float_counts = {"net": 0, "pin": 0}
+    # These are complete OpenROAD diagnostic records, never a fragment of
+    # arbitrary prose. An absent or failed record is unmeasured, not zero.
+    count_lines = list(re.finditer(
+        r"(?im)^\s*(?:\[(?:INFO|WARNING|ERROR)(?: [A-Z0-9-]+)?\]\s*)?"
+        r"(?:found\s+)?(\d+)\s+floating\s+(nets?|pins?)\.?(?:\s*)$", log))
+    for match in count_lines:
+        kind = "net" if match.group(2).lower().startswith("net") else "pin"
+        float_counts[kind] = max(float_counts[kind], int(match.group(1)))
+    floating = sum(float_counts.values()) if count_lines and rc == 0 else None
     # v0.3.16 #514: classify the verbose floats by owner so the runner can
     # tell benign design-for-ECO spare-cell I/O from a real functional
     # float. Best-effort (the classifier lives in its own program).
@@ -72173,8 +72184,10 @@ exit
         "# electrical-rule screen (floating nets + ERC metrics) on the\n"
         "# routed DEF. Full PERC (latch-up / ESD topology) needs Calibre.\n"
         "#\n"
-        f"ERC floating nets: {floating}\n"
-        f"ERC clean: {'YES' if floating == 0 else 'NO (review floating nets)'}\n"
+        f"ERC floating nets: {floating if floating is not None else 'NOT_DETERMINED'}\n"
+        f"ERC floating net count: {float_counts['net'] if floating is not None else 'NOT_DETERMINED'}\n"
+        f"ERC floating pin count: {float_counts['pin'] if floating is not None else 'NOT_DETERMINED'}\n"
+        f"ERC clean: {'YES' if floating == 0 else 'NOT_DETERMINED' if floating is None else 'NO (review floating nets)'}\n"
         "\n# === report_floating_nets / report_erc_metrics stdout ===\n"
         + ("\n".join(erc_lines) or "(no ERC lines captured)") + "\n"
         "\n# === full ERC log (last 2 KB) ===\n" + log[-2000:] + "\n"
@@ -72184,12 +72197,15 @@ exit
     # (design-for-ECO spare-cell I/O) is waiver-eligible, not a raw REVIEW.
     _benign = bool(erc_classification
                    and erc_classification.get("classification") == "benign-ERC")
-    _erc_verdict = ("PASS" if floating == 0
+    _erc_verdict = ("NOT_DETERMINED" if floating is None else "PASS" if floating == 0
                     else "BENIGN-ERC" if _benign else "REVIEW")
     (erc_rpt.parent / "erc.json").write_text(json.dumps({
         "tool": "openroad",
         "mode": "erc_floating_nets_and_metrics",
         "floating_nets": floating,
+        "floating_net_count": float_counts["net"] if floating is not None else None,
+        "floating_pin_count": float_counts["pin"] if floating is not None else None,
+        "tool_returncode": rc,
         "clean": floating == 0,
         "source": str(erc_rpt.relative_to(project)),
         "verdict": _erc_verdict,
