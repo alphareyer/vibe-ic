@@ -1,12 +1,15 @@
 """Pre-PnR setup must stop a measured SS violation before placement."""
 import json
+import shutil
 import sys
 from pathlib import Path
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import librelane_prelayout as prelayout
+from _hostpaths import require_repo
 
 
 def _path(slack: float) -> str:
@@ -63,3 +66,16 @@ def test_existing_step10_judge_refuses_negative_slack(tmp_path):
     result = prelayout.judge_slack(step, tmp_path / "step10_gate.json")
     assert result["verdict"] == "FAIL"
     assert result["corners"]["slow"]["negative_setup_path_classes"] == ["in-to-out"]
+
+
+def test_checked_in_opensta_ss_report_blocks(tmp_path):
+    source = require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
+        "fixtures", "sta_mcorner_r27", "phase3", "stage3", "sta",
+        "per_corner", "sta_SS.rpt")
+    matrix, reports, output = _fixture(tmp_path, 0.43)
+    shutil.copyfile(source, reports / "sta_SS.rpt")
+    result = prelayout.pre_pnr_setup_gate(matrix, reports, output)
+    assert result["verdict"] == "FAIL"
+    assert result["setup_slack_ns"] == -6.10
+    assert result["path_classes"] == ["reg-to-reg"]
