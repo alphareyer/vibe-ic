@@ -204,6 +204,26 @@ def test_librelane_mode_lints_the_synthesis_file_set_and_blocks(tmp_path, monkey
     assert (project / 'reports/phase2/gates/spec_conformance_tool_ports.json').is_file()
 
 
+@pytest.mark.parametrize('code,status,reason', [
+    ('LL_TOOL_STALLED', 'NOT_MEASURED', 'execution_error'),
+    ('LL_TOOL_DEADLINE', 'NOT_MEASURED', 'execution_error'),
+    ('LL_STEP_FAILED', 'FAIL', ''),
+])
+def test_step2_books_the_shared_supervisor_refusal(tmp_path, monkeypatch,
+                                                    code, status, reason):
+    project, _, _, tool = _design(tmp_path, 'librelane', POS, 0, 0)
+    _, step = _runner(monkeypatch, tool)
+
+    def stopped(*_args, **_kwargs):
+        raise contract.Refusal(code, 'tool did not complete')
+
+    monkeypatch.setattr(contract, 'run_chain', stopped)
+    row = step(project)
+    assert row.status == status
+    assert row.reason_class == reason
+    assert code in row.detail
+
+
 def test_direct_mode_is_unchanged_and_adds_no_row(tmp_path, monkeypatch):
     project, _, calls, tool = _design(tmp_path, None, NEG, 0, 1)
     runner, step = _runner(monkeypatch, tool)

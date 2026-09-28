@@ -410,7 +410,6 @@ def _capability_controls(arm: "_Arm", block: str, image: str,
             top = ((labels or {}).get(tc) or {}).get("top") or []
             dst = cap_root / "unit" / tc
             if not dst.is_file():
-                import subprocess
                 import _docker_memory as _dmem
                 from librelane_contract import PROBE_DEADLINE_S, run_container
                 import base64

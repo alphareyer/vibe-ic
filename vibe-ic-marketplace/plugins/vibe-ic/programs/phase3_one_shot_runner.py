@@ -48751,13 +48751,20 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     """Opt-in tool stream-out; direct remains the production default."""
     if candidate:
         return _step_gds_direct(project, top, pdk, container, candidate=True)
-    from librelane_contract import (Refusal, resolve_image, resolve_pdk_root,
-                                    selected_mode)
+    from librelane_contract import (Refusal, TIME_REFUSALS, resolve_image,
+                                    resolve_pdk_root, selected_mode)
     mode = selected_mode(project, "37")
     if mode == "direct":
         return _step_gds_direct(project, top, pdk, container)
 
     t0 = time.time()
+
+    def _librelane_refused(exc: BaseException, context: str) -> StepResult:
+        stopped = isinstance(exc, Refusal) and exc.code in TIME_REFUSALS
+        return StepResult("gds", "NOT_MEASURED" if stopped else "FAIL",
+                          time.time() - t0, f"{context}: {exc}",
+                          reason_class=(_V.ReasonClass.EXECUTION_ERROR if stopped else ""))
+
     digest, refusal = _layout_basis(project, top, pdk, container)
     if refusal or not _ga.gate_passed(project, digest):
         return StepResult("gds", "NOT_MEASURED", time.time() - t0,
@@ -48814,7 +48821,7 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
                                 pnr_dir / "routed.def", pnr_dir / f"{top}_pnr.v",
                                 pnr_dir / "constraint.sdc", gds_out)
     except (Refusal, OSError, ValueError, KeyError) as exc:
-        return StepResult("gds", "FAIL", time.time() - t0, f"LibreLane step 37: {exc}")
+        return _librelane_refused(exc, "LibreLane step 37")
     substance = _gds_substance_gate(result["gds"], def_file)
     if substance:
         return StepResult("gds", "FAIL", time.time() - t0,
@@ -48851,8 +48858,7 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
             dual = execute_dual(project, "37", _arm(gds_out, "librelane"),
                                 _arm(direct_gds, "direct"), {"drc_total": "min"})
         except (Refusal, OSError, ValueError, KeyError) as exc:
-            return StepResult("gds", "FAIL", time.time() - t0,
-                              f"dual GDS measurement failed: {exc}")
+            return _librelane_refused(exc, "dual GDS measurement failed")
         if dual.get("selection") == "UNDETERMINED":
             return StepResult("gds", "NOT_MEASURED", time.time() - t0,
                               f"dual GDS selection undecided: {dual.get('reason')}",
