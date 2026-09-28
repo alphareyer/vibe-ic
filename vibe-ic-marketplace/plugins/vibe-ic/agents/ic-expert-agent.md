@@ -641,6 +641,27 @@ ones (a determinism gap). Count the data stages, match the enable stages. (Worke
 ### Skill: functional-TB golden authoring for a declared-function datapath (serial-parallel arithmetic)
 For an arithmetic-primitive datapath whose function is CLOSED-FORM (`p = a OP b mod 2^N`, OP in `+ - * & | ^ << >>`) the functional-TB golden is DERIVABLE, so author it as a real oracle. NEVER copy the L10 prose 'expected' text into a vector as if it were a value, and NEVER read the product back from the DUT to 'confirm' it (both fabricate coverage). COMPUTE the golden INDEPENDENTLY from the design's DECLARED function as a concrete N-bit constant, then compare the DUT output `===` it. For a fully-PARALLEL `c = a OP b` this is a combinational drive+compare. For a SERIAL-PARALLEL / bit-serial datapath (parallel operand, bit-serial operand + result — the serial-parallel multiplier shape) the output latency and bit-order are the implementer's FREE choice, so read the THREE framing facts the design DECLARES (declaration.json `bit_order` / `latency_cycles` / `integer_encoding`, or the RTL-header 'DECLARED CHOICES' block that L7 §7.0 mandates): drive the parallel operand held, stream the serial operand one bit/clock per `bit_order`, sample the serial result each clock, reassemble the product window `[latency, latency+N)` per `bit_order`, and `===`-compare the independently-computed golden. These framing facts tell the oracle HOW to place the golden, never WHAT it is — a wrong-product DUT fails at any declared framing, so the oracle stays falsifiable. When `bit_order`/`latency` are NOT declared the serial framing is not derivable: DEFER (leave the substance-floor TB) rather than guess — a fabricated golden is worse than an honest gap. This convention is a deterministic program (`programs/arith_oracle_tb_gen.py`, serial + parallel; wired per L10 functional_vector case by `programs/testbench_gen.py`), keyed on the interface SHAPE not any one design, so a fresh design of the same shape gets the same golden automatically. Corner operands to always drive: 0, 1, MAX/all-ones, MIN (signed), and -1.
 
+### Skill: registering a high-fanout serial input is a latency trade — declare it
+
+When one serial input drives many datapath loads, an input register can move
+that broadcast from an input-to-register path to a register-to-register path.
+Adding a stage normally costs one observable cycle. Read the design input's
+latency clause before choosing it: when latency is fixed, a retiming that moves
+an existing pipeline stage to the input is allowed if independent measurement
+keeps the required edge-to-output offset and the function and bit order still
+match the input. Do not add a stage that changes the fixed observable latency.
+When latency is explicitly free, the stage is an available timing choice;
+record it in the architecture and declare the resulting `latency_cycles`.
+For either case, the declared latency must match the measured latency. Use the
+CR-5 edge origin: the first
+serial bit is sampled at rising edge 0 and the corresponding first output bit
+is observed after rising edge L settles. Measure L with an independent
+testbench, compare it to the declaration, and reject an off-by-one or reversed
+bit order. Check the actual input-to-first-flop structure as well as the
+end-to-end output latency; an unobserved or optimized-away register is not a
+latency trade. If the input's latency freedom is unclear, report that Phase-1
+ambiguity before adding a stage.
+
 ### Skill: functional-TB golden authoring for a CPU-core reset-to-first-activity BOOT-LATENCY case
 A CPU-core (or any clocked-core) L10 case is sometimes NOT an instruction-execution oracle at all but a
 BOOT-LATENCY property: "N cycles after reset release, the design has performed its first bus access /
