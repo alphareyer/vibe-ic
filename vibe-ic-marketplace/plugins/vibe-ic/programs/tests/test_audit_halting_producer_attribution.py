@@ -20,7 +20,8 @@ def _case(tmp_path: Path, *, producer_ran: bool = False,
           halt_recorded: bool = True,
           terminal_record: bool = False,
           independent_gate_failure: bool = False,
-          independent_condition_failure: bool = False) -> tuple[Path, Path]:
+          independent_condition_failure: bool = False,
+          independent_output_failure: bool = False) -> tuple[Path, Path]:
     """Use the shipped declarations, with a tiny runner record and no EDA."""
     canonical = yaml.safe_load(FLOW.read_text())
     declared = {str(s["id"]): s for s in canonical["steps"]}
@@ -40,6 +41,10 @@ def _case(tmp_path: Path, *, producer_ran: bool = False,
                          "required_outputs": ["reports/phase2/owner_record.json"],
                          "condition_declarations": {"route": {"files_exist": [
                              "reports/phase2/owner_decl.flag"]}}})
+    if independent_output_failure:
+        steps[0]["required_outputs"] = list(steps[0]["required_outputs"]) + [
+            f"reports/phase2/gates/extra_{i}.flag" for i in range(14)] + [
+            "reports/phase2/gates/independent_output.flag"]
     steps.append({"id": 32, "name": declared["32"]["name"],
                   "stage": "stage3",
                   "required_outputs": ["reports/phase3/repair_gate.json"],
@@ -58,6 +63,10 @@ def _case(tmp_path: Path, *, producer_ran: bool = False,
     (project / "phase2/stage2/constraints/pvt_matrix.json").write_text("{}\n")
     (project / "reports/phase3").mkdir(parents=True)
     (project / "reports/phase3/repair_gate.json").write_text("{}\n")
+    if independent_output_failure:
+        (project / "reports/phase2/gates").mkdir(parents=True)
+        for i in range(14):
+            (project / f"reports/phase2/gates/extra_{i}.flag").write_text("ok\n")
     if independent_condition_failure:
         (project / "reports/phase2").mkdir(parents=True)
         (project / "reports/phase2/owner_record.json").write_text("{}\n")
@@ -171,4 +180,21 @@ def test_independent_condition_failure_survives_producer_halt(tmp_path):
                for reason in independent["reasons"]), independent
     assert independent["cascade_note"] == "blocked-by-upstream(6)"
     assert "producer_halt" not in (independent["output_binding"] or {})
+    assert rows["22"]["status"] == "NOT_MEASURED", rows["22"]
+
+
+def test_unreported_output_failure_survives_binding_display_cap(tmp_path):
+    project, flow = _case(tmp_path, independent_output_failure=True)
+    proc, audit = _audit(project, flow)
+    rows = _rows(audit)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    independent = rows["7"]
+    binding = independent["output_binding"]
+    assert binding["n_specs"] > len(binding["specs"])
+    assert independent["status"] == "FAIL", independent
+    assert independent["reason_class"] == "missing_artefact", independent
+    assert any("independent_output.flag" in reason
+               for reason in independent["reasons"]), independent
+    assert not independent["cascade_note"], independent
+    assert "producer_halt" not in binding
     assert rows["22"]["status"] == "NOT_MEASURED", rows["22"]

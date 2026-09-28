@@ -18386,7 +18386,13 @@ def _attribute_halted_canonical_outputs(
     blocked = cascade_info.setdefault("blocked_by_upstream", {})
     for row in results:
         binding = row.output_binding or {}
-        absent = [str(spec.get("spec")) for spec in binding.get("specs") or []
+        specs = binding.get("specs") or []
+        # `specs` is capped for display at 16 while `n_specs` counts the
+        # complete declaration.  An unseen entry may be an independent
+        # missing output, so a partial list cannot prove sole causation.
+        if binding.get("n_specs") != len(specs):
+            continue
+        absent = [str(spec.get("spec")) for spec in specs
                   if isinstance(spec, dict) and not spec.get("satisfied")]
         if not absent or row.status not in (
                 _T.Verdict.FAIL.value, _T.Verdict.NOT_MEASURED.value):
