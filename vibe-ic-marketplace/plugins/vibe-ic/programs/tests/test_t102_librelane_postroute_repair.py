@@ -518,6 +518,29 @@ def test_a_hard_repair_that_makes_setup_negative_is_rejected(tmp_path, monkeypat
     assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
 
 
+def test_a_fanout_reduction_with_one_remaining_violation_is_refused(
+        tmp_path, monkeypatch):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, 0.4, (0, 0, 4)),
+        candidates=[_cand(1.6, 0.4, (0, 0, 1))])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_drv')
+    assert run.iterations[0].decision == 'ROLLED_BACK'
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+    row = json.loads((arm / prr.LEDGER).read_text())['candidates'][0]
+    assert row['decision'] == 'REFUSED'
+    assert 'STAPostPNR count=1' in row['reason']
+
+
+def test_the_deck_repairs_drv_again_after_both_timing_passes():
+    tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    calls = [m.start() for m in re.finditer(r'^log_cmd repair_design', tcl, re.M)]
+    assert len(calls) == 2
+    assert calls[0] < tcl.index('log_cmd repair_timing {*}$setup_args')
+    assert tcl.index('log_cmd repair_timing {*}$hold_args') < calls[1]
+    assert calls[1] < tcl.index('vic_census after_timing_drv_recheck')
+
+
 def test_a_hard_repair_stops_at_the_declared_floor(tmp_path, monkeypatch):
     """T98's case (+3.33 -> +0.14) against a design that DECLARES 0.5 ns of
     setup margin: the floor is the declaration's, and 0.14 is below it."""

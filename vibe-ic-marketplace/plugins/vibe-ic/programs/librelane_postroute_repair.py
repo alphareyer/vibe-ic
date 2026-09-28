@@ -441,6 +441,17 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
         _ledger_append(impl, row)
         print(f"candidate {lane} refused: {row['reason']}")
         return 0
+    # The same STAPostPNR census the sign-off gate reads must show closure,
+    # not merely fewer rows than the input. Its limits come from the design's
+    # own SDC; a residual fanout, slew or capacitance row cannot ship.
+    drv = measurement.get("drv_count")
+    if type(drv) is not int or drv != 0:
+        row.update(decision="REFUSED",
+                   reason=("post-route DRV remains above the declared limits "
+                           f"(OpenROAD.STAPostPNR count={drv!r})"))
+        _ledger_append(impl, row)
+        print(f"candidate {lane} refused: {row['reason']}")
+        return 0
     write_json(impl / CURRENT, {
         "candidate": lane, "repair_input": str(repaired),
         "repair_state": str(repaired), "repair_folder": str(folder),

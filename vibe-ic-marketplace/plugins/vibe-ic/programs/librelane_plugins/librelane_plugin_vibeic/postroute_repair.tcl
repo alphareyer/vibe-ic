@@ -293,6 +293,7 @@ set ::vic_fo_repaired [vic_fanout_over]
 # after the last repair_timing call; the routed re-check below remains the
 # authority for whether the declared limit was actually met.
 log_cmd repair_design {*}$rd_args
+vic_census after_timing_drv_recheck
 
 # ---- 5. what changed -------------------------------------------------------
 set ::vic_created [list]
