@@ -223,21 +223,33 @@ def test_a_foreign_container_prefix_cannot_replace_the_verified_image(tmp_path):
     assert env["VIBEIC_EDA_IMAGE"] == verified_ref
 
 
-def test_a_foreign_repository_digest_does_not_replace_the_verified_tag(tmp_path):
-    """The image Id alone does not authorize a different repository name."""
+def test_verified_id_mirror_digest_survives_a_moved_tag(tmp_path):
+    """The verified Id identifies the bytes even when its only digest is a mirror.
+
+    A tag lookup is deliberately made to return different bytes. The child must
+    receive the digest found by the full verified Id, not that mutable tag.
+    """
     verified_id = "sha256:" + "ab" * 32
     tag = "ghcr.io/vibeic/vibeic-eda:0.2.58"
-    foreign_ref = "vexaai/meeting-api@sha256:" + "ae" * 32
+    mirror_ref = "mirror.example/eda@sha256:" + "ae" * 32
+    moved_ref = "ghcr.io/vibeic/vibeic-eda@sha256:" + "bd" * 32
+    looked_up = []
 
     def fake(*argv, timeout=None):
-        if argv[:2] == ("image", "inspect") and argv[-1] == verified_id:
-            return 0, json.dumps([foreign_ref]) + "\n", ""
+        if argv[:2] == ("image", "inspect"):
+            looked_up.append(argv[-1])
+            if argv[-1] == verified_id:
+                return 0, json.dumps([mirror_ref]) + "\n", ""
+            if argv[-1] == tag:
+                return 0, json.dumps([moved_ref]) + "\n", ""
         return 1, "", "not in the controlled daemon"
 
-    _, env = _capture(
+    rec, env = _capture(
         {}, {"verdict": "PASS", "image_ref": tag, "image_id": verified_id},
         tmp_path, docker_lookup=fake)
-    assert env["VIBEIC_EDA_IMAGE"] == tag
+    assert looked_up == [verified_id]
+    assert env["VIBEIC_EDA_IMAGE"] == mirror_ref
+    assert rec["propagated_to_child_docker_run"] == mirror_ref
 
 
 def test_the_tag_is_used_when_no_portable_digest_could_be_named(tmp_path):
