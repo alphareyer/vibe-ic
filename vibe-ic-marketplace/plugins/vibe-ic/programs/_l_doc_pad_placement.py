@@ -836,7 +836,7 @@ def read_project_placement(project: Path
             text = path.read_text(errors="replace")
         except OSError as exc:
             unreadable.append({"file": project_relative(path, project),
-                               "reason": str(exc)})
+                               "reason": pathless_os_error(exc)})
             continue
         rel = project_relative(path, project)
         scanned.append(rel)
@@ -866,6 +866,12 @@ def project_relative(path: Path, project: Path) -> str:
         return str(path.relative_to(project))
     except ValueError:
         return str(path)
+
+
+def pathless_os_error(exc: OSError) -> str:
+    """Keep the OS failure diagnostic without its mount-specific filename."""
+    kind = type(exc).__name__
+    return f"{kind} (errno {exc.errno})" if exc.errno is not None else kind
 
 
 # --------------------------------------------------------------------------- #

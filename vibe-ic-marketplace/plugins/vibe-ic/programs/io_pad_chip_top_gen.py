@@ -349,7 +349,10 @@ def _declared_test_access(project: Path, ports: Sequence[Dict[str, object]]):
 
     try:
         plan = json.loads(path.read_text())
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
+        refuse(f"cannot read {LPP.project_relative(path, project)}: "
+               f"{LPP.pathless_os_error(exc)}")
+    except ValueError as exc:
         refuse(f"cannot read {LPP.project_relative(path, project)}: {exc}")
     if not isinstance(plan, dict) or plan.get("schema") != "vibeic.dft-test-access.v1":
         refuse("test access needs schema vibeic.dft-test-access.v1")
