@@ -61,7 +61,9 @@ def _ll_chain(project: Path, counts=(None, 0, 0)) -> None:
     # Model the tool's own measured DEF and a later routed DEF with identical
     # supply geometry. The state must identify the bytes it measured.
     if "SPECIALNETS" not in routed.read_text():
-        routed.write_text(routed.read_text() + """SPECIALNETS 2 ;
+        routed.write_text(routed.read_text() + """COMPONENTS 0 ;
+END COMPONENTS
+SPECIALNETS 2 ;
     - vp ( PIN vp ) + USE POWER + ROUTED M1 100 + SHAPE STRIPE ( 20 30 ) ( 20 80 ) ;
     - vg ( PIN vg ) + USE GROUND + ROUTED M1 100 + SHAPE STRIPE ( 40 30 ) ( 40 80 ) ;
 END SPECIALNETS
@@ -226,6 +228,22 @@ def test_old_grid_measurement_cannot_be_stamped_on_a_new_grid(tmp_path):
     assert "supply geometry" in refreshed
 
 
+def test_old_grid_measurement_cannot_certify_a_new_component(tmp_path):
+    project = _canonicalize_project(tmp_path)
+    pnr = R._pl.pnr_dir(project)
+    (pnr / "openroad.log").write_text(_LL_ROUTE_LOG)
+    _ll_chain(project)
+    routed = pnr / f"{TOP}.def"
+    measured_hash = P._def_supply_subject_sha256(routed)
+    assert "# PDN status: CONNECTED" in _emit_pdn(project)
+    routed.write_text(routed.read_text().replace(
+        "COMPONENTS 0 ;\nEND COMPONENTS",
+        "COMPONENTS 1 ;\n- u_unpowered BUF + PLACED ( 0 0 ) N ;\nEND COMPONENTS"))
+    assert P._def_supply_subject_sha256(routed) != measured_hash
+    refreshed = _emit_pdn(project)
+    assert "# PDN status: NOT MEASURED" in refreshed, refreshed
+
+
 def test_changed_source_def_invalidates_the_metric_even_if_state_json_is_unchanged(tmp_path):
     project = _canonicalize_project(tmp_path)
     pnr = R._pl.pnr_dir(project)
@@ -282,8 +300,11 @@ def _empty_scope(tmp_path: Path, log: str | None) -> Path:
     pnr = tmp_path / "phase3/stage3/pnr"
     pnr.mkdir(parents=True)
     (pnr / "routed_router.drc.rpt").write_text("")
+    routed_def = pnr / "routed.def"
+    routed_def.write_text("VERSION 5.8 ;\nDESIGN widget ;\nEND DESIGN\n")
     if log is not None:
         (pnr / "openroad.log").write_text(log)
+        R._write_router_drc_receipt(pnr, routed_def, log)
     return tmp_path
 
 
@@ -299,7 +320,30 @@ def test_an_empty_report_with_the_routers_final_zero_is_a_measured_zero(tmp_path
     assert "DRC_CATEGORIES_EXIST" not in _rules(p, "ERROR")
     assert "DRC_EMPTY_ZERO_CORROBORATED" in _rules(p, "INFO")
     assert p["summary"]["empty_report_evidence"] == {
-        "phase3/stage3/pnr/routed_router.drc.rpt": ["phase3/stage3/pnr/openroad.log"]}
+        "phase3/stage3/pnr/routed_router.drc.rpt": [
+            "phase3/stage3/pnr/routed_router.drc.receipt.json"]}
+
+
+def test_changed_empty_report_subject_invalidates_router_receipt(tmp_path):
+    project = _empty_scope(tmp_path, _LL_ROUTE_LOG)
+    routed_def = R._pl.pnr_dir(project) / "routed.def"
+    routed_def.write_text(routed_def.read_text() + "# later route\n")
+    rc, payload = _drc_audit(project)
+    assert rc == 1 and payload["passed"] is False
+    assert "DRC_EMPTY_NOT_MEASURED" in _rules(payload, "ERROR")
+
+
+def test_old_log_cannot_mint_a_receipt_for_an_invocation_that_did_not_route(tmp_path):
+    project = _empty_scope(tmp_path, _LL_ROUTE_LOG)
+    pnr = R._pl.pnr_dir(project)
+    assert (pnr / R.ROUTER_DRC_RECEIPT_NAME).is_file()
+    receipt = R._write_router_drc_receipt(
+        pnr, pnr / "routed.def", "[INFO] canonicalize only; no route ran\n")
+    assert receipt is None
+    assert not (pnr / R.ROUTER_DRC_RECEIPT_NAME).exists()
+    rc, payload = _drc_audit(project)
+    assert rc == 1 and payload["passed"] is False
+    assert "DRC_EMPTY_NOT_MEASURED" in _rules(payload, "ERROR")
 
 
 def test_an_empty_report_with_no_completion_evidence_is_not_measured(tmp_path):
@@ -307,6 +351,15 @@ def test_an_empty_report_with_no_completion_evidence_is_not_measured(tmp_path):
     assert rc == 1 and p["passed"] is False
     assert "DRC_EMPTY_NOT_MEASURED" in _rules(p, "ERROR")
     assert "DRC_CATEGORIES_EXIST" not in _rules(p, "ERROR")
+
+
+def test_an_older_sibling_log_cannot_certify_an_empty_report(tmp_path):
+    project = _empty_scope(tmp_path, None)
+    pnr = R._pl.pnr_dir(project)
+    (pnr / "earlier.log").write_text(_LL_ROUTE_LOG)
+    rc, payload = _drc_audit(project)
+    assert rc == 1 and payload["passed"] is False, payload["findings"]
+    assert "DRC_EMPTY_NOT_MEASURED" in _rules(payload, "ERROR")
 
 
 def test_an_empty_report_beside_a_nonzero_final_count_is_not_a_zero(tmp_path):

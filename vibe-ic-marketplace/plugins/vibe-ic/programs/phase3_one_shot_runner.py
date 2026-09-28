@@ -24741,6 +24741,40 @@ def _macro_supply_preroute_decision(project: "Path", pdk: "PdkConfig",
 
 
 ROUTER_DRC_REPORT_NAME = "routed_router.drc.rpt"
+ROUTER_DRC_RECEIPT_NAME = "routed_router.drc.receipt.json"
+
+
+def _write_router_drc_receipt(out_dir: Path, routed_def: Path,
+                              invocation_output: str) -> Optional[Path]:
+    """Record one completed route's report, transcript and final DEF together.
+
+    Called from step_pnr after its route invocation returned and the final
+    count was read. A canonicalize pass cannot mint this receipt from a stale
+    log left beside an empty report.
+    """
+    receipt = out_dir / ROUTER_DRC_RECEIPT_NAME
+    receipt.unlink(missing_ok=True)
+    report = out_dir / ROUTER_DRC_REPORT_NAME
+    log = out_dir / "openroad.log"
+    if not (report.is_file() and log.is_file() and routed_def.is_file()):
+        return None
+    body = log.read_text(errors="replace")
+    count = _drt_final_violations(body)
+    if (count is None or not _detail_route_completed(body)
+            or not _detail_route_completed(invocation_output)
+            or _drt_final_violations(invocation_output) != count):
+        return None
+    _aa.write_json(receipt, {
+        "schema": "vibeic.router_drc_receipt.v1",
+        "producer": "phase3_one_shot_runner.step_pnr",
+        "report": report.name, "report_sha256": _sha256_file(report),
+        "log": log.name, "log_sha256": _sha256_file(log),
+        "routed_def": routed_def.name,
+        "routed_def_sha256": _sha256_file(routed_def),
+        "final_drt_count": count, "route_completed": True,
+        "current_invocation_count": count,
+    })
+    return receipt
 
 
 def _router_drc_report_block(pnr_out: Path, log_text: str) -> str:
@@ -37178,6 +37212,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             })
     out_dir = _pl.pnr_dir(project)
     out_dir.mkdir(parents=True, exist_ok=True)
+    # A previous route's zero receipt cannot answer for this invocation if it
+    # fails before reaching the route completion point below.
+    (out_dir / ROUTER_DRC_RECEIPT_NAME).unlink(missing_ok=True)
     # The active tech LEF itself can contain a contradiction: a VIA landing
     # smaller than the routing layer's own MINWIDTH/AREA.  Post-route RECT
     # patching is too late (the router did not reserve the required spacing),
@@ -39853,6 +39890,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         if _lp.is_file():
             _drt_final = _sdf.router_post_route_final_count(
                 _lp.read_text(errors="ignore"))
+    # The route just ran in this invocation. Bind its empty DRC output to the
+    # transcript and shipped geometry before later canonicalize/audit passes.
+    route_drc_receipt = _write_router_drc_receipt(out_dir, def_file, out + err)
     _drt_extras["sdr_transactions"] = _sdr_txn_records
     if _sdr_adopt_records:
         _drt_extras["sdr_adoptions"] = _sdr_adopt_records
@@ -40327,6 +40367,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                    f"final {die_w}x{die_h}µm")
     spare_json_path = out_dir / "spare_cells.json"
     pnr_outputs = [str(def_file), str(sta_file)]
+    if route_drc_receipt is not None:
+        pnr_outputs.append(str(route_drc_receipt))
     if spare_json_path.is_file():
         pnr_outputs.append(str(spare_json_path))
     # PG net ownership is sign-off evidence, so it is stated on the PASS path

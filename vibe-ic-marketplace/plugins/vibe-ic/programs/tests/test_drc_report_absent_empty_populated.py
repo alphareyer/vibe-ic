@@ -89,6 +89,19 @@ def _project(tmp_path: Path, router_report: str | None) -> Path:
     (pnr / "routed.drc.rpt").write_text(POPULATED_CLEAN)
     if router_report is not None:
         (pnr / "routed_router.drc.rpt").write_text(router_report)
+    if router_report == "":
+        # An empty router file is a measured zero only when the route that
+        # produced it completed and left a digest-bound receipt. Drive the
+        # shipped receipt producer rather than granting credit to a sibling.
+        sys.path.insert(0, str(PROG.parent))
+        import phase3_one_shot_runner as runner
+        log = ("[INFO DRT-0195] Start detail routing.\n"
+               "[INFO DRT-0199] Number of violations = 0.\n"
+               "[INFO DRT-0198] Complete detail routing.\n")
+        (pnr / "openroad.log").write_text(log)
+        routed_def = pnr / "routed.def"
+        routed_def.write_text("VERSION 5.8 ;\nDESIGN widget ;\nEND DESIGN\n")
+        assert runner._write_router_drc_receipt(pnr, routed_def, log)
     return tmp_path
 
 

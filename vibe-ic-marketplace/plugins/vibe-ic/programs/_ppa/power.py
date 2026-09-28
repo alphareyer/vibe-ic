@@ -2691,12 +2691,12 @@ def _rel(path: Path, project: Path) -> str:
 
 
 def _def_supply_subject_sha256(path: Path) -> Optional[str]:
-    """Hash the POWER/GROUND special nets a PDN measurement is about.
+    """Hash the cells and POWER/GROUND grid a PDN measurement is about.
 
     Route DEFs may reorder BTerm connections and signal special nets while
     retaining the same supply grid. Canonicalize those harmless differences,
-    but retain every supply connection and routed shape. An unparseable or
-    absent grid has no subject identity and cannot corroborate a zero count.
+    but retain every cell, placement, supply connection and routed shape.
+    An unparseable or absent population/grid cannot corroborate a zero count.
     """
     try:
         text = Path(path).read_text(errors="replace")
@@ -2704,10 +2704,18 @@ def _def_supply_subject_sha256(path: Path) -> Optional[str]:
         return None
     section = re.search(
         r"(?ms)^SPECIALNETS\s+(\d+)\s*;(.*?)^END SPECIALNETS\s*$", text)
-    if section is None:
+    components = re.search(
+        r"(?ms)^COMPONENTS\s+(\d+)\s*;(.*?)^END COMPONENTS\s*$", text)
+    if section is None or components is None:
         return None
     rows = list(re.finditer(r"(?ms)^\s*-\s+(\S+)\s+(.*?);", section.group(2)))
     if len(rows) != int(section.group(1)):
+        return None
+    cells = [
+        (m.group(1), m.group(2), re.sub(r"\s+", " ", m.group(3)).strip())
+        for m in re.finditer(
+            r"(?ms)^\s*-\s+(\S+)\s+(\S+)(.*?);", components.group(2))]
+    if len(cells) != int(components.group(1)):
         return None
     supplies = []
     for row in rows:
@@ -2723,7 +2731,9 @@ def _def_supply_subject_sha256(path: Path) -> Optional[str]:
                          re.sub(r"\s+", " ", tail).strip()))
     if not supplies:
         return None
-    canonical = json.dumps(sorted(supplies), separators=(",", ":"))
+    canonical = json.dumps({"components": sorted(cells),
+                            "supplies": sorted(supplies)},
+                           separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
