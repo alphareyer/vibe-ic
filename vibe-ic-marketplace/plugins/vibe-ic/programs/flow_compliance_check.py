@@ -4596,6 +4596,14 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
     # have a measured regression history in this file (v1.10.14 -> 1.10.16).
     gate_budget = _pl.gate_timeout_s()
     try:
+        if Path(argv[1]).name == "drv_signoff_judge.py" and "--json" in argv:
+            # The redirect may have pre-seeded an older producer receipt.  The
+            # judge only writes this path; remove the seed before invocation so
+            # a crash cannot turn an old WAIVED/PASS into this run's answer.
+            _drv_receipt = Path(argv[argv.index("--json") + 1])
+            if not _drv_receipt.is_absolute():
+                _drv_receipt = project / _drv_receipt
+            _drv_receipt.unlink(missing_ok=True)
         # `env=_child_env()` carries the scope stack DOWN to the gate program,
         # and is None when there is nothing to carry, which is the inherit-as-
         # before path. Passed explicitly rather than by mutating `os.environ`:
@@ -4622,6 +4630,16 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
                 if not _drv_receipt.is_absolute():
                     _drv_receipt = project / _drv_receipt
                 _drv_doc = json.loads(_drv_receipt.read_text())
+                if (_drv_doc.get("name") == "DRV(tran/cap/fanout)"
+                        and _drv_doc.get("verdict") == "NOT_MEASURED"
+                        and _drv_doc.get("not_measured")
+                        and not _drv_doc.get("failures")):
+                    return _outcome(
+                        True,
+                        f"INCOMPLETE: {cmd_str} — reason_class="
+                        f"{_drv_doc.get('reason_class', 'partial_population')}; "
+                        "DRV evidence was not measured",
+                        r.returncode)
                 if (_drv_doc.get("name") == "DRV(tran/cap/fanout)"
                         and _drv_doc.get("verdict") == "WAIVED"
                         and _drv_doc.get("waived")
@@ -22089,6 +22107,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 or (r.id == "P0" and p0_is_deferrable))]
         if (not non_blocked_failing
                 and not forced_fail_effective
+                and not any(r.status == "WAIVED" for r in results)
                 and (failing or missing or not_owed
                      or informational_only_failing
                      or oss_blocked_skipped)

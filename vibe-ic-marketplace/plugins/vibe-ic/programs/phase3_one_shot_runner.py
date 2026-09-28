@@ -54658,6 +54658,8 @@ def _run_illegal_overlap_gate(project: Path, out_json: Path
                    f"was never read.")
     try:
         out_json.parent.mkdir(parents=True, exist_ok=True)
+        if name == "drv_signoff":
+            out_json.unlink(missing_ok=True)
     except OSError as exc:
         return 2, f"NOT CHECKED — cannot create {out_json.parent}: {exc}"
     cmd = [sys.executable, str(prog), str(project), "--json", str(out_json)]
@@ -57772,6 +57774,11 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
                         _V.Verdict.NOT_MEASURED, _V.Verdict.WAIVED):
             return _signoff_not_checked(name, t0,
                                         f"DRV judge returned {tier.value}", outputs)
+        if (cp.returncode == 0) != (tier is _V.Verdict.PASS) or (
+                tier is not _V.Verdict.PASS and cp.returncode != 1):
+            return _signoff_not_checked(
+                name, t0, f"DRV judge rc {cp.returncode} disagrees with "
+                f"receipt {tier.value}", outputs)
         kwargs = {}
         if tier is _V.Verdict.NOT_MEASURED:
             kwargs["reason_class"] = _V.ReasonClass.PARTIAL_POPULATION.value
@@ -58091,14 +58098,19 @@ def declared_signoff_rollup(plan: List[StepResult]) -> Dict[str, Any]:
     declared = [n for n in DECLARED_SIGNOFF_STEP_NAMES if n in rows]
     passed = [n for n in declared if rows[n].status == "PASS"]
     failed = [n for n in declared if rows[n].status == "FAIL"]
-    not_checked = [n for n in declared if rows[n].status not in ("PASS", "FAIL")]
+    waived = [n for n in declared if rows[n].status == "WAIVED"]
+    not_checked = [n for n in declared
+                   if rows[n].status not in ("PASS", "FAIL", "WAIVED")]
     line = f"{len(passed)} of {len(declared)} declared sign-off gate(s) PASSED"
     if failed:
         line += f"; {len(failed)} FAILED: " + ", ".join(failed)
+    if waived:
+        line += f"; {len(waived)} WAIVED (below baseline quality): " + ", ".join(waived)
     if not_checked:
         line += (f"; {len(not_checked)} {_SIGNOFF_NOT_CHECKED}: "
                  + ", ".join(not_checked))
     return {"declared": len(declared), "passed": passed, "failed": failed,
+            "waived": waived,
             "not_checked": not_checked, "line": line}
 
 
@@ -77381,7 +77393,7 @@ def main() -> int:
                 _write_producer_identity(
                     _pl.pnr_dir(project), "pnr", project=project, pdk=pdk,
                     container=args.container, top=effective_top, args=args)
-            if _prestream.status != "PASS":
+            if _prestream.status not in ("PASS", "WAIVED"):
                 _ga.quarantine_visible_gds(
                     project, "current routed layout failed the pre-stream gate")
                 _ga.quarantine_handoff_package(

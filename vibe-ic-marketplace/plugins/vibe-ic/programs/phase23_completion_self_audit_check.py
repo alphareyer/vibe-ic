@@ -202,6 +202,11 @@ def main():
                 "justification, then re-run."
             ),
         ))
+    elif overall == "WAIVED":
+        findings.append(Finding(
+            severity="INFO", category="DRV_WAIVED",
+            message="DRV deviations are owner-approved and disclosed; below baseline quality.",
+            details="WAIVED is a measured residual, never a PASS claim."))
     elif overall == "PASS_WITH_WAIVERS":
         findings.append(Finding(
             severity="INFO",
@@ -286,6 +291,11 @@ def main():
             print()
             print("  ⛔ Phase 2+3 completion is NOT authorised, and this is NOT a FAIL:")
             print("     an unmeasured step said nothing about the design.")
+        elif overall == "WAIVED":
+            print("[WAIVED] phase23_completion_self_audit_check")
+            print("  Overall: WAIVED — owner-approved DRV deviations remain open.")
+            print("  Below the recorded baseline quality; WAIVED is never PASS.")
+            print(f"  executed PASS: {executed_pass}/{executed_total} (canonical 34)")
         elif overall == "PASS":
             print("[PASS] phase23_completion_self_audit_check")
             print(f"  Overall: PASS — every canonical step executed and verified.")
