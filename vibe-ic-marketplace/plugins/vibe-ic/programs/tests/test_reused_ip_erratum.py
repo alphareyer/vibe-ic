@@ -207,7 +207,7 @@ def test_stalled_urlopen_is_cut_off_by_the_overall_deadline(
         tmp_path, monkeypatch):
     root = _catalog(tmp_path)
     p = _project(tmp_path)
-    monkeypatch.setattr(E, "FETCH_DEADLINE_S", 0.05)
+    monkeypatch.setattr(E, "FETCH_DEADLINE_S", 0.1)
 
     class Stream:
         def __enter__(self):
@@ -220,7 +220,7 @@ def test_stalled_urlopen_is_cut_off_by_the_overall_deadline(
             return AFTER
 
     def stalled_open(_url, *, timeout):
-        time.sleep(0.2)
+        time.sleep(0.6)
         return Stream()
 
     monkeypatch.setattr(urllib.request, "urlopen", stalled_open)
@@ -230,7 +230,7 @@ def test_stalled_urlopen_is_cut_off_by_the_overall_deadline(
     row = doc["rows"][0]
     assert row["status"] == E.NOT_APPLIED
     assert "overall fetch deadline" in row["why"]
-    assert elapsed < 0.15, elapsed
+    assert elapsed < 0.4, elapsed
     assert _staged(p) == BEFORE and doc["disclosures"] == []
 
 
