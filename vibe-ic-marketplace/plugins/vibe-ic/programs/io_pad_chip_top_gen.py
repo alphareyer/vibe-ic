@@ -938,6 +938,321 @@ def _supply_pad_strap_reach(pair: Sequence[Dict[str, object]],
     }
 
 
+def core_rail_voltage(liberty_text: str, power_net: str
+                      ) -> Tuple[Optional[float], str]:
+    """The core power rail's voltage from the ACTIVE standard-cell Liberty:
+    its `voltage_map` entry for `power_net`, else the library `nom_voltage`."""
+    view = PR.parse_liberty_supply_view(liberty_text)
+    vmap = view["voltage_map"]
+    if power_net in vmap:
+        return vmap[power_net], f"voltage_map({power_net})"
+    if view["nom_voltage"] is not None:
+        return view["nom_voltage"], "nom_voltage"
+    return None, f"the Liberty maps no voltage for {power_net} and states no nom_voltage"
+
+
+def _derive_multi_rail_supply_pair(
+        classes: Dict[str, str],
+        sizes: Dict[str, Tuple[float, float]],
+        pin_roles: Dict[str, Dict[str, Tuple[str, str]]],
+        prefix: Optional[str], power_net: str, ground_net: str,
+        macro_sources: Dict[str, List[Path]],
+        terminals: Dict[str, str],
+        lib_views: Sequence[Dict[str, object]],
+        subckts: Dict[str, Tuple[List[str], List[List[str]]]],
+        core_voltage: Optional[float],
+        ) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
+    """The supply pair for an IO library whose supply cells carry SEVERAL
+    ring rails, so no pin is "the one non-core terminal".
+
+    Every fact is read from the PDK, never from a pin or cell name:
+      * the BOND terminal: the PDK's own PAD_PLACE_IO_TERMINALS entry, else
+        the Liberty pin or pg_pin marked `is_pad`;
+      * the rail it FEEDS: the bond itself when it is a `pg_pin` (a ring rail
+        bonded directly), else the cell port the PDK netlist joins to it
+        through one series resistor;
+      * the CORE power rail: a fed rail the Liberty characterises at the core
+        voltage the active standard-cell Liberty states;
+      * the CORE ground rail: the `related_ground_pin` the IO library pairs
+        with that power rail.
+    Candidates are the PDK-declared supply masters when the PDK declares any,
+    else every PAD POWER master of the selected library. Zero or several
+    bridges for a polarity REFUSE with the candidates named: nothing is picked
+    by order. Ring rails other than the core pair stay ring rails."""
+    why: List[str] = []
+    pool = sorted(m for m, cls in classes.items()
+                  if cls.upper() == "PAD POWER"
+                  and (not prefix or m.startswith(prefix)))
+    declared = [m for m in pool if m in terminals]
+    basis = ("the PDK's PAD_PLACE_IO_TERMINALS" if declared
+             else "every PAD POWER master of the selected library")
+    if declared:
+        pool = declared
+
+    def views_of(master: str) -> List[Dict[str, object]]:
+        return [v for v in lib_views if master in v["cells"]]
+
+    def volts(master: str, rail: str) -> List[float]:
+        out = set()
+        for v in views_of(master):
+            pg = v["cells"][master]["pg_pins"].get(rail) or {}
+            name = pg.get("voltage_name") or rail
+            if name in v["voltage_map"]:
+                out.add(v["voltage_map"][name])
+        return sorted(out)
+
+    cells: Dict[str, Dict[str, object]] = {}
+    for m in pool:
+        roles = pin_roles.get(m, {})
+        uses = {pin: u for pin, (_d, u) in roles.items()
+                if u in ("POWER", "GROUND")}
+        bond = terminals.get(m)
+        if not bond:
+            pads = sorted({p for v in views_of(m)
+                           for kind in ("pins", "pg_pins")
+                           for p, a in v["cells"][m][kind].items()
+                           if str(a.get("is_pad", "")).lower() == "true"})
+            if len(pads) != 1:
+                why.append(f"{m}: bond terminal not determined (is_pad on "
+                           f"{pads or 'no pin'})")
+                continue
+            bond = pads[0]
+        use = uses.get(bond)
+        if use is None:
+            why.append(f"{m}: bond {bond} is not a POWER/GROUND pin in the LEF")
+            continue
+        is_pg = any(bond in v["cells"][m]["pg_pins"] for v in views_of(m))
+        if is_pg:
+            fed, how = [bond], "the bond terminal is itself the ring rail (pg_pin)"
+        else:
+            fed, how = PR.bond_fed_rails(subckts, m, bond)
+            fed = [f for f in fed if uses.get(f) == use]
+        if len(fed) != 1:
+            why.append(f"{m}: bond {bond} feeds {fed or 'no'} {use} rail "
+                       f"({how})")
+            continue
+        cells[m] = {"bond": bond, "use": use, "fed": fed[0], "how": how,
+                    "uses": uses}
+
+    def refuse(kind: str, detail: str) -> Refusal:
+        return Refusal(
+            "SUPPLY_PAD_PAIR_UNRESOLVED",
+            f"the selected IO library proves no external {kind} bridge cell "
+            f"for rails {power_net}/{ground_net}: {detail}; candidates from "
+            f"{basis}; " + "; ".join(why[:8]))
+
+    if core_voltage is None:
+        raise refuse("power", "the core rail's voltage is not stated by the "
+                     "active standard-cell Liberty, so no fed rail can be "
+                     "matched to it")
+    power = sorted(m for m, c in cells.items() if c["use"] == "POWER"
+                   and core_voltage in volts(m, str(c["fed"])))
+    if len(power) != 1:
+        raise refuse("power", f"{len(power)} candidate(s) feed a rail "
+                     f"characterised at the core voltage {core_voltage:g} V: "
+                     f"{power or [(m, c['fed'], volts(m, str(c['fed']))) for m, c in cells.items() if c['use'] == 'POWER']}")
+    p_master = power[0]
+    p_rail = str(cells[p_master]["fed"])
+    grounds = sorted({str(a.get("related_ground_pin"))
+                      for v in lib_views for cell in v["cells"].values()
+                      for a in cell["pins"].values()
+                      if a.get("related_power_pin") == p_rail
+                      and a.get("related_ground_pin")})
+    if len(grounds) != 1:
+        raise refuse("ground", f"the IO library pairs power rail {p_rail} "
+                     f"with {grounds or 'no'} ground rail(s)")
+    g_rail = grounds[0]
+    ground = sorted(m for m, c in cells.items()
+                    if c["use"] == "GROUND" and c["fed"] == g_rail)
+    if len(ground) != 1:
+        raise refuse("ground", f"{len(ground)} candidate(s) feed the core "
+                     f"ground rail {g_rail}: {ground}")
+    pair: List[Dict[str, object]] = []
+    unbound: Dict[str, List[str]] = {}
+    for kind, master, net in (("power", p_master, power_net),
+                              ("ground", ground[0], ground_net)):
+        c = cells[master]
+        connections = {str(c["bond"]): net, str(c["fed"]): net}
+        uses = c["uses"]
+        if uses.get(p_rail) == "POWER":
+            connections[p_rail] = power_net
+        if uses.get(g_rail) == "GROUND":
+            connections[g_rail] = ground_net
+        unbound[master] = sorted(p for p in uses if p not in connections)
+        pair.append({
+            "kind": kind,
+            "port": net,
+            "master": master,
+            "terminal": c["bond"],
+            "supply_connections": dict(sorted(connections.items())),
+            "chosen_for_class": "PAD POWER",
+            "direction": "inout",
+            "class_fallback": False,
+            "selection_declines": list(why),
+            "source_lefs": [{"path": str(src), "sha256": _sha256(src)}
+                            for src in sorted(set(macro_sources.get(master, [])))],
+            "is_supply_pad": True,
+            "derivation": {"bond": c["bond"], "fed_rail": c["fed"],
+                           "fed_rail_basis": c["how"],
+                           "fed_rail_volts": volts(master, str(c["fed"])),
+                           "candidates_from": basis},
+        })
+    return pair, {
+        "domain_topology": "single_domain",
+        "power_net": power_net,
+        "ground_net": ground_net,
+        "minimum_pair_count": 1,
+        "capacity_from_lef": "NOT_DETERMINED",
+        "capacity_reason": (
+            "LEF proves pin roles and geometry but carries no current rating"),
+        "core_rails_on_ring": {"power": p_rail, "ground": g_rail,
+                               "core_voltage": core_voltage},
+        "ring_rails_unbound": unbound,
+        "selection_rule": (
+            "multi-rail IO library: the bond terminal's fed rail at the core "
+            "voltage (Liberty) is the power bridge; the ground rail the "
+            "library pairs with it is the ground bridge; other ring rails are "
+            "left to the ring"),
+    }
+
+
+def resolve_supply_pad_pair(
+        classes: Dict[str, str],
+        sizes: Dict[str, Tuple[float, float]],
+        pin_roles: Dict[str, Dict[str, Tuple[str, str]]],
+        prefix: Optional[str], power_net: str, ground_net: str,
+        macro_sources: Dict[str, List[Path]],
+        terminals: Dict[str, str],
+        liberty_texts,
+        netlist_texts,
+        core_liberty_text,
+        core_liberty: str = "",
+        ) -> Tuple[List[Dict[str, object]], Dict[str, object],
+                   Optional[Dict[str, object]]]:
+    """`(pair, plan, core_voltage_record)` for the chip's supply pads.
+
+    The same-domain rule first (one non-core terminal per supply cell). An IO
+    library whose supply cells carry several ring rails has no such terminal,
+    and is resolved from its own Liberty and netlist instead
+    (`_derive_multi_rail_supply_pair`). When neither rule proves a pair the
+    refusal carries both rules' reasons. The three PDK inputs may be given
+    as values or as zero-argument loaders; loaders run only when the
+    same-domain rule cannot decide."""
+    def _value(x):
+        return x() if callable(x) else x
+
+    try:
+        pair, plan = _derive_supply_pad_pair(
+            classes, sizes, pin_roles, prefix, power_net, ground_net,
+            macro_sources)
+        return pair, plan, None
+    except Refusal as same_domain:
+        if same_domain.rule != "SUPPLY_PAD_PAIR_UNRESOLVED":
+            raise
+        core_v, core_v_basis = (None, "no active standard-cell Liberty was "
+                                "supplied (--tie-liberty)")
+        core_text = _value(core_liberty_text)
+        if core_text:
+            core_v, core_v_basis = core_rail_voltage(core_text, power_net)
+        views = [PR.parse_liberty_supply_view(t)
+                 for t in _value(liberty_texts)]
+        subckts: Dict[str, Tuple[List[str], List[List[str]]]] = {}
+        for text in _value(netlist_texts):
+            for k, v in PR.parse_spice_subckts(text).items():
+                subckts.setdefault(k, v)
+        record = {"volts": core_v, "basis": core_v_basis,
+                  "liberty": core_liberty}
+        try:
+            pair, plan = _derive_multi_rail_supply_pair(
+                classes, sizes, pin_roles, prefix, power_net, ground_net,
+                macro_sources, terminals, views, subckts, core_v)
+        except Refusal as multi_rail:
+            raise Refusal(
+                "SUPPLY_PAD_PAIR_UNRESOLVED",
+                f"same-domain rule: {same_domain.message} || multi-rail "
+                f"rule: {multi_rail.message}") from multi_rail
+        return pair, plan, record
+
+
+_BIT_PIN_RE = re.compile(r"^([A-Za-z_]\w*)\[(-?\d+)\]$")
+
+
+def _named_connections(inst: str, master: str,
+                       pairs: Sequence[Tuple[str, str]],
+                       bus_ports: Optional[Dict[str, Dict[str, Tuple[int, int]]]]
+                       ) -> List[str]:
+    """`.pin(net)` for each pair; the bits of one BUS become ONE connection.
+
+    A named port connection cannot select a bit (`.DM[0](x)` is not Verilog).
+    Bits of the same pin are grouped and emitted as a concatenation ordered by
+    the range the IO library's own Verilog declares (`.DM({b2,b1,b0})` for
+    `[2:0]`). A bit whose bus the PDK Verilog does not declare, or a bus only
+    partly connected, is REFUSED by name: no order is assumed and no fill
+    value is invented (this producer reads no PDK-stated default)."""
+    items: List[Tuple[str, str, str]] = []
+    groups: Dict[str, Dict[int, str]] = {}
+    for pin, net in pairs:
+        m = _BIT_PIN_RE.match(str(pin))
+        if m is None:
+            items.append(("pin", str(pin), str(net)))
+            continue
+        base, idx = m.group(1), int(m.group(2))
+        if base not in groups:
+            items.append(("bus", base, ""))
+            groups[base] = {}
+        if idx in groups[base]:
+            raise Refusal("PAD_BUS_BIT_CONNECTED_TWICE",
+                          f"{inst} ({master}): bit {pin} is connected twice")
+        groups[base][idx] = str(net)
+    out: List[str] = []
+    for kind, name, net in items:
+        if kind == "pin":
+            out.append(".%s(%s)" % (name, net))
+            continue
+        decl = (bus_ports or {}).get(master, {}).get(name)
+        if decl is None:
+            raise Refusal(
+                "PAD_BUS_PIN_UNDECLARED",
+                f"{inst} ({master}): bits {sorted(groups[name])} of pin "
+                f"{name!r} are connected, but the IO library's Verilog "
+                f"declares no range for {master}.{name}, so neither the "
+                f"width nor the bit order of the concatenation is known")
+        msb, lsb = decl
+        step = -1 if msb >= lsb else 1
+        want = list(range(msb, lsb + step, step))
+        missing = [i for i in want if i not in groups[name]]
+        extra = sorted(set(groups[name]) - set(want))
+        if missing or extra:
+            raise Refusal(
+                "PAD_BUS_PARTIALLY_CONNECTED",
+                f"{inst} ({master}): pin {name}[{msb}:{lsb}] has bits "
+                f"{sorted(groups[name])} connected; missing {missing}, outside "
+                f"the declared range {extra}. No PDK-stated default fill is "
+                f"read by this producer, so none is invented")
+        out.append(".%s({%s})" % (name, ", ".join(groups[name][i]
+                                                   for i in want)))
+    return out
+
+
+def io_bus_ports(verilog_texts: Sequence[str]
+                 ) -> Dict[str, Dict[str, Tuple[int, int]]]:
+    """Merge every IO Verilog file's bus declarations; two files that
+    declare one port with different ranges are REFUSED, never resolved by
+    file order."""
+    merged: Dict[str, Dict[str, Tuple[int, int]]] = {}
+    for text in verilog_texts:
+        for module, buses in PR.parse_verilog_bus_ports(text).items():
+            for port, rng in buses.items():
+                have = merged.setdefault(module, {}).get(port)
+                if have is not None and have != rng:
+                    raise Refusal(
+                        "PAD_BUS_DECLARATION_CONFLICT",
+                        f"the IO library's Verilog declares {module}.{port} "
+                        f"as both [{have[0]}:{have[1]}] and [{rng[0]}:{rng[1]}]")
+                merged[module][port] = rng
+    return merged
+
+
 def _emit_verilog(top: str, core: str,
                   ordered: Dict[str, List[str]],
                   chosen: Dict[str, Dict[str, object]],
@@ -945,6 +1260,7 @@ def _emit_verilog(top: str, core: str,
                   supply_ports: Sequence[str] = (),
                   tie_cells: Optional[Dict[int, Dict[str, str]]] = None,
                   tie_liberty: str = "",
+                  bus_ports: Optional[Dict[str, Dict[str, Tuple[int, int]]]] = None,
                   ) -> str:
     """The chip-top: core instance plus one pad instance per top-level port.
 
@@ -1021,20 +1337,19 @@ def _emit_verilog(top: str, core: str,
             rec = chosen[inst]
             lines.append("    // %s edge -- %s" % (side, rec["port"]))
             if rec.get("supply_connections"):
-                conn = [".%s(%s)" % (pin, net) for pin, net in
-                        sorted(dict(rec["supply_connections"]).items())]
+                pairs = sorted(dict(rec["supply_connections"]).items())
             else:
-                conn = [".%s(%s)" % (rec["terminal"], rec["port"])]
+                pairs = [(rec["terminal"], rec["port"])]
             if rec.get("core_pin"):
-                conn.append(".%s(%s)" % (rec["core_pin"],
-                                         _core_bit(str(rec["port"]))))
+                pairs.append((rec["core_pin"], _core_bit(str(rec["port"]))))
             # Never use Verilog constants or direct POWER/GROUND nets for IO
             # control SIGNAL pins.  Constants once materialised unrouted
             # zero_/one_ nets; direct rails put these signal ITerms into
             # regular VDD/VSS NETS that neither PDN nor detailed routing
             # completed.  A PDK tie-cell output is an ordinary routed signal.
-            conn.extend(".%s(%s)" % (pin, net) for pin, net in
-                        sorted(auxiliary_signals.get(inst, {}).items()))
+            pairs.extend(sorted(auxiliary_signals.get(inst, {}).items()))
+            conn = _named_connections(inst, str(rec["master"]), pairs,
+                                      bus_ports)
             lines.append("    %s %s (%s);"
                          % (rec["master"], inst, ", ".join(conn)))
     lines.append("")
@@ -1607,9 +1922,23 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
 
     out_v = project / "phase3" / "stage3" / "pnr" / "chip_top_io.v"
     out_v.parent.mkdir(parents=True, exist_ok=True)
+    # A bussed pad pin is connected as one concatenation ordered by the IO
+    # library's own Verilog; read it only when some connection selects a bit.
+    _pins = [str(p) for r in chosen.values()
+             for p in (list((r.get("ties") or {}).keys())
+                       + list((r.get("supply_connections") or {}).keys())
+                       + [r.get("terminal") or "", r.get("core_pin") or ""])]
+    bus_ports = (io_bus_ports([x.read_text(errors="replace") for x in
+                               PR.discover_io_verilog(pdk_root, pdk)])
+                 if any(_BIT_PIN_RE.match(p) for p in _pins) else None)
+    if bus_ports is not None:
+        rec["io_bus_ports"] = {m: {p: list(r) for p, r in b.items()}
+                               for m, b in sorted(bus_ports.items())
+                               if m in {str(c.get("master")) for c in
+                                        chosen.values()}}
     out_v.write_text(_emit_verilog(top, core, ordered, chosen, ports,
                                    supply_ports, tie_cells,
-                                   str(tie_liberty or "")))
+                                   str(tie_liberty or ""), bus_ports))
 
     rec["verdict"] = "WROTE"
     rec["chip_top_module"] = top
