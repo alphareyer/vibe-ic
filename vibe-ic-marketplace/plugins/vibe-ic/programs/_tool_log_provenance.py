@@ -130,6 +130,13 @@ def _bare(value: Any) -> str:
 
 def underlying_tool(step_id: str) -> Optional[str]:
     """The tool a LibreLane step's subprocess is, or None for no tool."""
+    custom = {
+        "Vibeic.InsertSpareCells": "openroad",
+        "Vibeic.PostRouteRepair": "openroad",
+    }
+    base = str(step_id).split("-", 1)[0]
+    if base in custom:
+        return custom[base]
     return _STEP_PREFIX_TOOL.get(str(step_id).split(".", 1)[0])
 
 

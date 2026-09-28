@@ -74502,7 +74502,8 @@ def _run_librelane_consumer_phase3(project: Path, top: str, pdk: PdkConfig,
         summary = _whole.run_two_segments(
             project, image, pdk=str(pdk.name), pdk_root=pdk_root, scl=scl,
             segment1=segment1, between=_between,
-            segment2_kwargs={"pdn_cfg": pdn},
+            segment2_kwargs={"pdn_cfg": pdn,
+                             "spare_density": getattr(args, "spare_density", None)},
             first_step="Verilator.Lint", last_step=None,
             deadline_s=_whole.DEFAULT_DEADLINE_S)
         identity = summary.get("netlist_identity") or {}

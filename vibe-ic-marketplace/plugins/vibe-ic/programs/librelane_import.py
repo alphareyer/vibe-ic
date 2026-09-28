@@ -224,6 +224,58 @@ IMPORT_RULES: Tuple[Rule, ...] = (
         View("lef", lambda p, top, _: _pl.gds_dir(p).parent / "hardmacro" / f"{top}.lef"),)),
 )
 
+
+def _whole_flow_rules(indexes: List[List["Ran"]]) -> Tuple[Rule, ...]:
+    """Import the database the custom step handed onward, when it ran.
+
+    An ordinary LibreLane run retains W6's original destinations.  A whole
+    flow keeps the pre-intervention views as evidence and gives the canonical
+    placement/route view to the step that actually supplied the next step.
+    A census-only post-route step may hand back its input; in that case the
+    router remains the canonical route producer.
+    """
+    ran = {r.step: r for index in indexes for r in index if r.top_level}
+    spares = ran.get("Vibeic.InsertSpareCells")
+    repair = ran.get("Vibeic.PostRouteRepair")
+    repair_owns_route = False
+    if repair is not None and repair.completed:
+        state = _load(repair.folder / "state_out.json")
+        value = state.get("def")
+        repair_owns_route = (isinstance(value, str)
+                             and _recorded_root(value, f"{repair.run_dir.name}/{repair.rel}")
+                             is not None)
+    rules: List[Rule] = []
+    for rule in IMPORT_RULES:
+        if spares is not None and rule.step == "OpenROAD.DetailedPlacement":
+            rules.append(Rule(rule.flow_step, rule.step, (
+                View("def", lambda p, top, _: _pl.reports_phase3_dir(p)
+                     / "librelane/17/pre_spares.def"),
+                View("odb", lambda p, top, _: _pl.reports_phase3_dir(p)
+                     / "librelane/17/pre_spares.odb"))))
+            rules.append(Rule("18", "Vibeic.InsertSpareCells", (
+                View("def", lambda p, top, _: _pl.pnr_dir(p) / "placed.def"),
+                View("odb", lambda p, top, _: _pl.pnr_dir(p) / "librelane_placed.odb"),
+                Files("spare_cells.json", _ll_reports("18")))))
+        elif repair_owns_route and rule.step == "OpenROAD.DetailedRouting":
+            rules.append(Rule(rule.flow_step, rule.step, (
+                View("def", lambda p, top, _: _pl.reports_phase3_dir(p)
+                     / "librelane/21/pre_repair.def"),
+                View("odb", lambda p, top, _: _pl.reports_phase3_dir(p)
+                     / "librelane/21/pre_repair.odb"),
+                Files("*.drc", lambda p, top, _: _pl.pnr_dir(p)
+                      / "routed_router.drc.rpt"))))
+        else:
+            rules.append(rule)
+        if repair is not None and rule.step == "OpenROAD.DetailedRouting":
+            sources: Tuple[Any, ...] = (Files("state_out.json", _ll_reports("32")),)
+            if repair_owns_route:
+                sources = (
+                    View("def", lambda p, top, _: _pl.pnr_dir(p) / "routed.def"),
+                    View("odb", lambda p, top, _: _pl.pnr_dir(p)
+                         / "librelane_routed.odb"), *sources)
+            rules.append(Rule("32", "Vibeic.PostRouteRepair", sources))
+    return tuple(rules)
+
 _INSTANCE_SUFFIX = re.compile(r"-\d+$")
 _STARTING = "Starting…"
 _FLOW_COMPLETE = "Flow complete."
@@ -901,7 +953,8 @@ def import_segments(project: Path,
                           "project")
     receipts = project / RECEIPT_DIR_REL
     plans: List[_StepPlan] = []
-    for rule in IMPORT_RULES:
+    rules = _whole_flow_rules(indexes)
+    for rule in rules:
         chosen = []
         why: List[str] = []
         for index in indexes:
@@ -949,7 +1002,7 @@ def import_segments(project: Path,
                     if isinstance(r, dict) and r.get("canonical_path")}
                    - set(writes))
     for entry in manifest["not_performed"]:
-        rule = next(r for r in IMPORT_RULES if r.step == entry["tool_step"]
+        rule = next(r for r in rules if r.step == entry["tool_step"]
                     and r.flow_step == entry["flow_step"])
         left = [d for d in _fixed_dests(rule, project, top)
                 if (d.exists() or d.is_symlink()) and d not in stale

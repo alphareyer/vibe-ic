@@ -39,7 +39,9 @@ import librelane_whole_flow as W  # noqa: E402
 import librelane_contract as LC  # noqa: E402
 
 FLOW = ["Lint", W.JSON_HEADER_STEP, "Synthesis", W.SEGMENT1_LAST, W.SEGMENT2_FIRST,
-        "STAPrePNR", "Floorplan", "RepairAntennas", "StreamOut"]
+        "STAPrePNR", "Floorplan", "OpenROAD.DetailedPlacement",
+        "Vibeic.InsertSpareCells", "OpenROAD.CTS", "OpenROAD.DetailedRouting",
+        "Vibeic.PostRouteRepair", "RepairAntennas", "StreamOut"]
 SEG1 = FLOW[:4]
 SEG2 = FLOW[4:]
 
@@ -80,6 +82,7 @@ class FakeLibreLane:
             n += 1
             folder = run / f"{n:02d}-{step.lower()}"
             folder.mkdir()
+            (folder / "config.json").write_text(json.dumps({"meta": {"step": step}}))
             # The real log's paths are relative to the container's cwd.
             log.append(f"Running '{step}' at '../../x/y/runs/{tag}/{folder.name}'…")
             if step == "RepairAntennas":
@@ -422,6 +425,13 @@ def test_the_chip_path_runs_segment1_the_header_then_segment2(tmp_path, monkeypa
     assert names == ["segment1", "json_header", "segment2"]
     assert summary["segment1"]["steps"] == SEG1 and summary["segment2"]["steps"] == SEG2
     assert summary["netlist_identity"]["verdict"] == "PASS"
+    custom = summary["custom_steps"]
+    assert custom["status"] == "COMPLETED"
+    assert [row["id"] for row in custom["steps"]] == list(W.WHOLE_FLOW_STEPS.values())
+    assert custom == json.loads((W.whole_dir(p) / "custom_steps.json").read_text())
+    for row in custom["steps"]:
+        assert row["state_out_sha256"] == "sha256:" + LC.digest(
+            p / row["folder"] / "state_out.json")
     rec = summary["handoff"]
     assert rec["wrapper"] and "json_header/" in rec["json_header"]
     on_disk = json.loads((W.whole_dir(p) / "whole_flow.json").read_text())
@@ -472,6 +482,26 @@ def test_a_between_that_refuses_stops_the_run(tmp_path, monkeypatch):
                            segment2_kwargs={}, first_step=FLOW[0], last_step=FLOW[-1])
     names = [a[a.index("--run-tag") + 1] for a, _ in fake.calls if "--run-tag" in a]
     assert names == ["segment1"]
+
+
+def test_a_missing_custom_step_blocks_the_whole_flow_before_segment2(tmp_path,
+                                                                      monkeypatch):
+    p = _macro(tmp_path)
+    fake = FakeLibreLane(skip={"Vibeic.PostRouteRepair"})
+    monkeypatch.setattr(W.subprocess, "run", fake)
+    monkeypatch.setattr(W, "_run_segment_process", lambda argv, **kw: fake(argv))
+    with pytest.raises(LC.Refusal) as exc:
+        W.run_two_segments(
+            p, "img", pdk="processA", pdk_root=p, scl="libA",
+            segment1=put(p / "seg1.json", "{}"),
+            between=lambda project, state: {
+                "netlist": Path(json.loads(Path(state).read_text())["nl"]),
+                "top": "core", "wrapper": None, "sdc": None,
+                "sdc_source": "SDC_SEAM_PENDING"},
+            segment2_kwargs={}, first_step=FLOW[0], last_step=FLOW[-1],
+            importer=lambda project, segments: {"segments": len(segments)})
+    assert exc.value.code == "LL_CUSTOM_STEPS_NOT_PLANNED"
+    assert not (p / "runs/segment2").exists()
 
 
 def test_segment1_checker_findings_stop_before_the_between_step(tmp_path,

@@ -74,6 +74,28 @@ HANDOFF_RECORD = "handoff.json"
 CHIP_TOP_RECORD_REL = "reports/phase3/io_pad_chip_top.json"
 #: Default deadline of one segment (seconds); a caller may pass its own.
 DEFAULT_DEADLINE_S = 4 * 3600
+WHOLE_FLOW_STEPS = {
+    "+OpenROAD.DetailedPlacement": "Vibeic.InsertSpareCells",
+    "+OpenROAD.DetailedRouting": "Vibeic.PostRouteRepair",
+}
+
+
+def _flow_meta(config: Path, flow: str) -> bool:
+    """Whether this config selects the plugin-bearing whole flow.
+
+    LibreLane applies ``meta.substituting_steps`` before ``--flow``. Passing
+    ``--flow`` afterwards would silently replace the substituted class.
+    """
+    meta = json.loads(Path(config).read_text()).get("meta") or {}
+    if not meta.get("substituting_steps"):
+        return False
+    if meta["substituting_steps"] != WHOLE_FLOW_STEPS:
+        raise Refusal("LL_WHOLE_FLOW_STEPS_CONFLICT",
+                      f"{config}: custom steps differ from the LLV1 contract")
+    if meta.get("flow") != flow:
+        raise Refusal("LL_WHOLE_FLOW_META_CONFLICT",
+                      f"{config}: meta.flow={meta.get('flow')!r}, requested {flow!r}")
+    return True
 
 
 def whole_dir(project: Path) -> Path:
@@ -98,7 +120,12 @@ def librelane_argv(project: Path, image: str, config: Path, *, flow: str, tag: s
              "--pdk-root", "/pdk", "--pdk", pdk]
     if scl:
         argv += ["--scl", scl]
-    argv += ["--flow", flow, "--design-dir", str(project), "--run-tag", tag,
+    if _flow_meta(config, flow):
+        argv[argv.index("--entrypoint"):argv.index("--entrypoint")] = \
+            _ll._plugin_args(list(WHOLE_FLOW_STEPS.values()))
+    else:
+        argv += ["--flow", flow]
+    argv += ["--design-dir", str(project), "--run-tag", tag,
              *extra, str(Path(config).resolve())]
     return argv
 
@@ -270,8 +297,14 @@ _PLANNED_STEPS_SCRIPT = r"""
 import json, sys
 from librelane.flows import Flow
 from librelane.common import Filter
+from librelane.config import Config
 flow_name, config, pdk, scl, design_dir, first, last = sys.argv[1:]
 cls = Flow.factory.get(flow_name)
+meta = Config.get_meta(config)
+if meta.substituting_steps is not None:
+    if meta.flow != flow_name:
+        raise SystemExit("meta.flow differs from the requested flow")
+    cls = cls.Substitute(meta.substituting_steps)
 kwargs = dict(config=config, pdk=pdk, pdk_root="/pdk", design_dir=design_dir)
 if scl:
     kwargs["scl"] = scl
@@ -303,8 +336,11 @@ def planned_steps(project: Path, image: str, config: Path, *, flow: str, pdk: st
     sets false (exactly `SequentialFlow.run`'s rule). `{"run": [...],
     "gated_off": {step: [vars]}}`; an unresolvable plan refuses by name."""
     project = Path(project).resolve()
+    plugin_args = (_ll._plugin_args(list(WHOLE_FLOW_STEPS.values()))
+                   if _flow_meta(config, flow) else [])
     argv = [docker, "run", "--rm", *_dmem.docker_memory_flags(), "--network", "none",
             "-v", f"{project}:{project}", "-v", f"{Path(pdk_root).resolve()}:/pdk:ro",
+            *plugin_args,
             "--entrypoint", "python3", image, "-c", _PLANNED_STEPS_SCRIPT, flow,
             str(Path(config).resolve()), pdk, scl or "", str(project), first,
             last or "__FLOW_END__"]
@@ -448,7 +484,8 @@ def segment1_config(project: Path, pdk: str, out: Path, *, top: str,
 
 def segment2_config(project: Path, pdk: str, out: Path, *, layout_netlist: Path,
                     sdc: Optional[Path], sdc_source: str,
-                    pdn_cfg: Optional[Path] = None) -> Path:
+                    pdn_cfg: Optional[Path] = None,
+                    spare_density: Optional[float] = None) -> Path:
     """Segment 2 implements the LAYOUT top over the handed netlist.
 
     `emit_config` (declared inputs only), the die by flow
@@ -460,6 +497,12 @@ def segment2_config(project: Path, pdk: str, out: Path, *, layout_netlist: Path,
     flow = _ll.librelane_flow(project)[0]
     config = _ll.emit_config(project, pdk, out)
     sources = json.loads(out.with_suffix(".provenance.json").read_text())
+    config["meta"] = {"flow": flow, "substituting_steps": dict(WHOLE_FLOW_STEPS)}
+    sources["meta"] = ("LLV1 whole-flow producer: owner decision 12 keeps "
+                       "Vibeic.InsertSpareCells and Vibeic.PostRouteRepair")
+    if spare_density is not None:
+        _ll._set(config, sources, "VIBEIC_SPARE_DENSITY", spare_density,
+                 "phase3 runner --spare-density (declared operator input)")
     _ll.apply_flow_die(project, config, sources,
                        ["OpenROAD.Floorplan", "OpenROAD.PadRing"], flow)
     _ll._apply_layout_top(project, config, sources)
@@ -480,6 +523,45 @@ def segment2_config(project: Path, pdk: str, out: Path, *, layout_netlist: Path,
     if masters:
         _ll._set(config, sources, "IGNORE_DISCONNECTED_MODULES", masters, why)
     return _write_config(out, config, sources)
+
+
+def custom_step_record(project: Path, segment2: Dict[str, Any],
+                       config: Path) -> Dict[str, Any]:
+    """Bind completed plugin steps to the run's own folders and source logs.
+
+    This is a producer receipt. It does not judge placement, timing or physical
+    signoff; W6 imports the views and the unchanged vibe-ic gates judge them.
+    """
+    project = Path(project).resolve()
+    run = Path(segment2["run_dir"])
+    by_id = {step: folder for step, folder in segment2["steps"]}
+    required = list(WHOLE_FLOW_STEPS.values())
+    if any(step not in by_id for step in required):
+        raise Refusal("LL_CUSTOM_STEPS_NOT_RUN",
+                      f"segment 2 started {list(by_id)}, required {required}")
+    rows = []
+    for step in required:
+        folder = Path(by_id[step])
+        state, resolved = folder / "state_out.json", folder / "config.json"
+        if not state.is_file() or not resolved.is_file():
+            raise Refusal("LL_CUSTOM_STEP_INCOMPLETE",
+                          f"{step}: missing {state if not state.is_file() else resolved}")
+        logs = sorted(folder.rglob("*.log"))
+        rows.append({
+            "id": step, "folder": folder.relative_to(project).as_posix(),
+            "state_out_sha256": "sha256:" + digest(state),
+            "resolved_config_sha256": "sha256:" + digest(resolved),
+            "logs": [{"path": p.relative_to(project).as_posix(),
+                      "sha256": "sha256:" + digest(p)} for p in logs],
+        })
+    record = {"schema": "vibe-ic/librelane-whole-custom-steps/1",
+              "status": "COMPLETED", "run_dir": run.relative_to(project).as_posix(),
+              "source_config_sha256": "sha256:" + digest(config),
+              "flow_log_sha256": "sha256:" + digest(run / "flow.log"),
+              "steps": rows}
+    _atomic_artefact.write_json(whole_dir(project) / "custom_steps.json", record,
+                                indent=2)
+    return record
 
 
 # ── the two segments ───────────────────────────────────────────────────────
@@ -534,9 +616,14 @@ def run_two_segments(project: Path, image: str, *, pdk: str, pdk_root: Path,
                   top=handed["top"])
     plan2 = planned_steps(project, image, seg2, first=SEGMENT2_FIRST, last=last_step,
                           docker=docker, **common)
+    required = set(WHOLE_FLOW_STEPS.values())
+    if not required.issubset(plan2["run"]):
+        raise Refusal("LL_CUSTOM_STEPS_NOT_PLANNED",
+                      f"segment 2 plan omitted {sorted(required - set(plan2['run']))}")
     s2 = run_segment(project, image, seg2, name="segment2",
                      extra=["--from", SEGMENT2_FIRST, "--with-initial-state", rec["state_in"]],
                      expected=plan2["run"], deadline_s=deadline_s, docker=docker, **common)
+    custom = custom_step_record(project, s2, seg2)
     imported = import_completed_segments(project, s1["run_dir"], s2["run_dir"],
                                          importer=importer)
     summary = {"flow": flow, "image": image,
@@ -546,7 +633,7 @@ def run_two_segments(project: Path, image: str, *, pdk: str, pdk_root: Path,
                             "tool_verdict": s2["tool_verdict"],
                             "tool_findings": s2["tool_findings"],
                             "gated_off": plan2["gated_off"]},
-               "handoff": rec,
+               "handoff": rec, "custom_steps": custom,
                "import": imported,
                "netlist_identity": netlist_identity(project, Path(handed["netlist"]))}
     _atomic_artefact.write_json(base / "whole_flow.json", summary, indent=2)
