@@ -70,6 +70,31 @@ def test_a_field_outside_the_contract_is_written_with_its_provenance(tmp_path):
     assert "register_word_order" in cp.stdout      # said, not silent
 
 
+def test_authored_outside_provenance_survives_a_plain_runner_rerun(tmp_path):
+    p = _project(tmp_path)
+    first = _emit(p, "--set", "handshake_style=valid_ready",
+                  "--set", "register_word_order=high_first")
+    assert first.returncode == 0, first.stderr
+    original = _sidecar(p)["declared_outside_contract"]["register_word_order"]
+
+    second = _emit(p)  # the normal runner invocation supplies no --set
+    assert second.returncode == 0, second.stderr
+    assert _decl(p)["register_word_order"] == "high_first"
+    assert _sidecar(p)["declared_outside_contract"]["register_word_order"] == original
+    assert "register_word_order" not in _sidecar(p)["preserved_foreign_keys"]
+
+
+def test_optional_only_contract_gives_the_actual_no_write_reason(tmp_path):
+    p = _project(tmp_path)
+    doc = p / "input" / "docs" / "L7_verification_plan.md"
+    doc.write_text(CONTRACT.replace("| `handshake_style` | Yes |", "| `handshake_style` | optional |"))
+    cp = _emit(p, "--set", "register_word_order=high_first")
+    assert cp.returncode == 4
+    assert "NOT written: register_word_order" in cp.stderr
+    assert "no contract field was determined" in cp.stderr
+    assert "while a REQUIRED field is undetermined" not in cp.stderr
+
+
 def test_a_placeholder_outside_the_contract_is_refused_by_name(tmp_path):
     """`TBD` states no choice; it is named and not written."""
     p = _project(tmp_path)
