@@ -114,6 +114,43 @@ def not_run(reason: str, point_names: List[str], *, run_identity: str = "") -> D
             "initial_state_policy": INITIAL_STATE_POLICY}
 
 
+def unresolved_search_error(search: Dict[str, Any]) -> str:
+    """Name why an open miter cannot honestly be classified NOT_PROVEN.
+
+    A NOT_RUN record is an admission that SAT supplied no negative result. It
+    needs the producer's concrete reason and execution context. A combinational
+    residual additionally needs a complete SAT decision; an unknown miter shape
+    cannot be assumed sequential merely to soften the verdict.
+    """
+    outcome = search.get("result")
+    if outcome is None and not search:
+        return "LEC_NOT_RUN_EVIDENCE_INVALID: producer supplied no search record"
+    if outcome == "NOT_RUN":
+        reason = search.get("reason")
+        if (not isinstance(reason, str) or not reason.strip()
+                or reason.strip().lower() in
+                {"unknown", "not run", "no counterexample found"}):
+            return "LEC_NOT_RUN_EVIDENCE_INVALID: producer reason is missing or vague"
+        for field in ("method", "run_identity"):
+            value = search.get(field)
+            if not isinstance(value, str) or not value.strip():
+                return f"LEC_NOT_RUN_EVIDENCE_INVALID: {field} is missing"
+        bound = search.get("bound_cycles")
+        if not isinstance(bound, int) or isinstance(bound, bool) or bound <= 0:
+            return "LEC_NOT_RUN_EVIDENCE_INVALID: positive bound_cycles is missing"
+        if search.get("completeness") != "BOUNDED":
+            return ("LEC_SAT_UNAVAILABLE: complete combinational SAT was not "
+                    "established; counterexample search NOT RUN: " + reason.strip())
+    elif outcome == "NONE_FOUND":
+        if search.get("completeness") == "COMPLETE":
+            return "LEC_SAT_DISPOSITION_UNBOUND: complete SAT claim lacks valid provenance"
+        if search.get("completeness") != "BOUNDED":
+            return "LEC_SAT_DISPOSITION_UNBOUND: SAT completeness is unknown"
+    else:
+        return f"LEC_SAT_DISPOSITION_UNBOUND: unsupported search result {outcome!r}"
+    return ""
+
+
 def complete_resolution_valid(search: Dict[str, Any], point_names: List[str]) -> bool:
     """A residual can be upgraded to PASS only by a bound, named SAT result."""
     return bool(

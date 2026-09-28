@@ -6711,6 +6711,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             report["proven_points"] = report.get("miter_points")
             report["compared_points"] = report.get("miter_points")
             report["unproven_points"] = 0
+        elif report.get("verdict") in ("FAIL", "NON_EQUIVALENT"):
+            # A failed comparison already decided by the proof cannot be
+            # softened by a second SAT process that never decided anything.
+            pass
+        elif _search_error := _lec_cex.unresolved_search_error(_search):
+            report["verdict"] = "RUN_ERROR"
+            report["equivalent"] = False
+            report["counterexample_search_error"] = _search_error
         else:
             report["verdict"] = "NOT_PROVEN"
             report["equivalent"] = False
@@ -6932,9 +6940,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     # parse-abort (INCONCLUSIVE) nor a disclosed wall-budget skip
     # (SKIPPED-CONDITION) — both are truthful, visible-non-PASS verdicts, not
     # tool failures. An evidence-backed timeout FAIL keeps parse_error+FAIL → 1.
-    return 1 if (parsed["parse_error"]
+    return 1 if (report["verdict"] == "RUN_ERROR" or
+                 (parsed["parse_error"]
                  and parsed["verdict"] not in ("INCONCLUSIVE",
-                                               "SKIPPED-CONDITION")) else 0
+                                               "SKIPPED-CONDITION"))) else 0
 
 
 if __name__ == "__main__":

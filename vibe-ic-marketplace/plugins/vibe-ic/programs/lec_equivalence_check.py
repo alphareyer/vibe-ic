@@ -557,10 +557,6 @@ def audit(project: Path) -> AuditResult:
     if (unproven or 0) > 0 and (res.total_points or 0) > 0:
         search = res.counterexample_search
         outcome = str(search.get("result") or "NOT_RUN")
-        if not search:
-            search = {"result": "NOT_RUN",
-                      "reason": "producer supplied no counterexample search record"}
-            res.counterexample_search = search
         res.summary.update(total_points=res.total_points,
                            proven_points=res.proven_points,
                            unproven_point_names=res.unproven_point_names,
@@ -573,6 +569,12 @@ def audit(project: Path) -> AuditResult:
                          f"{search.get('trace', 'see producer report')}"),
                 file=LEC_JSON_REL))
             return res
+        if str(lc.get("verdict") or "").upper() in ("FAIL", "NON_EQUIVALENT"):
+            res.findings.append(Finding(
+                rule="LEC_RECORDED_FAIL", severity="ERROR",
+                message="The producer recorded a decided LEC failure; a later "
+                        "counterexample search cannot erase it.", file=LEC_JSON_REL))
+            return res
         if (len(res.unproven_point_names) == unproven
                 and lec_cex.complete_resolution_valid(
                     search, res.unproven_point_names)):
@@ -581,13 +583,23 @@ def audit(project: Path) -> AuditResult:
             res.proven_points = res.total_points
             res.unproven_points = 0
             return res
+        search_error = lec_cex.unresolved_search_error(search)
+        if search_error:
+            res.verdict = "RUN_ERROR"
+            res.findings.append(Finding(
+                rule=search_error.split(":", 1)[0], severity="ERROR",
+                message=search_error, file=LEC_JSON_REL))
+            return res
         res.verdict = "NOT_PROVEN"
+        search_text = (f"counterexample search NOT RUN: {search['reason']}"
+                       if outcome == "NOT_RUN" else
+                       f"{outcome}: {search.get('reason', 'bounded SAT result recorded')}")
         res.findings.append(Finding(
             rule="LEC_NOT_PROVEN", severity="WARNING",
             message=(f"LEC NOT_PROVEN: {unproven} of {res.total_points} points "
                      f"unproven; {search.get('method', 'counterexample search')} "
                      f"K={search.get('bound_cycles', 'unknown')} cycles: "
-                     f"{outcome} ({search.get('reason', 'no counterexample found')})."),
+                     f"{search_text}."),
             file=LEC_JSON_REL))
         return res
 

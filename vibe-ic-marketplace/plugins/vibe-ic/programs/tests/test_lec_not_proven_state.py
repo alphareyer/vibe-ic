@@ -51,7 +51,7 @@ def test_pre_layout_residual_is_not_proven(tmp_path):
     assert result.summary["unproven_points"] == 1
 
 
-def test_not_run_is_explicit_and_never_passes():
+def test_not_run_is_explicit_and_never_passes(tmp_path):
     doc = _residual()
     doc["counterexample_search"] = {
         "result": "NOT_RUN", "reason": "solver unavailable",
@@ -61,6 +61,15 @@ def test_not_run_is_explicit_and_never_passes():
     result = post.evaluate_report(doc)
     assert result["result"] == "NOT_PROVEN"
     assert result["counterexample_search"]["reason"] == "solver unavailable"
+    assert any("counterexample search NOT RUN: solver unavailable" in f
+               for f in result["findings"])
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "lec.json").write_text(json.dumps(doc))
+    pre_result = pre.audit(tmp_path)
+    assert pre_result.verdict == "NOT_PROVEN"
+    assert any("counterexample search NOT RUN: solver unavailable" in f.message
+               for f in pre_result.findings)
 
 
 def test_decided_failure_survives_not_run_at_both_gates(tmp_path):

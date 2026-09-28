@@ -67855,6 +67855,13 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
             parsed["proven"] = parsed.get("total")
             parsed["unproven"] = 0
             parsed["equivalent"] = True
+        elif parsed.get("verdict") in ("FAIL", "NON_EQUIVALENT"):
+            # The original comparison has already established failure.
+            pass
+        elif cex_error := cex.unresolved_search_error(cex_search):
+            parsed["verdict"] = "RUN_ERROR"
+            parsed["equivalent"] = False
+            parsed["counterexample_search_error"] = cex_error
         else:
             parsed["verdict"] = "NOT_PROVEN"
             parsed["equivalent"] = False
@@ -67883,6 +67890,7 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
         "non_equivalent_points": parsed.get("non_equivalent"),
         "unproven_point_names": unproven_names,
         "counterexample_search": cex_search,
+        "counterexample_search_error": parsed.get("counterexample_search_error"),
         "equivalent": parsed.get("equivalent"),
         "sat_unsupported_cells": parsed.get("sat_unsupported_cells", []),
         "verdict": parsed.get("verdict"),
