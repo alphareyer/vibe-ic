@@ -611,6 +611,15 @@ meet it, the fix is to DECLARE the coupled parameter — with the value this
 section's rows recommend for the declared target — never to weaken the check.
 
 
+## Guard every declared legal parameter range at elaboration
+
+Before authoring a parameterized module, read every explicit legal range in
+the design input. If it says `WIDTH >= 5`, emit an elaboration guard such as
+`generate if (WIDTH < 5) begin initial $fatal(1, "WIDTH too small"); end
+endgenerate`. Check the declared default lies inside the range. A parameter
+without a stated range needs no invented limit. The deterministic
+`spec_conformance_check.py` reports a missing guard at the Phase-2 handoff.
+
 ## The sign-off corner is the SLOW corner, and a chain of adds is what misses it (#2081)
 
 ### How this finding REACHES you (#2081, second half)

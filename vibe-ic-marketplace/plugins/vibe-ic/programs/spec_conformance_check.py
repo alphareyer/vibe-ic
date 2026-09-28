@@ -2899,6 +2899,24 @@ def main(argv: Optional[List[str]] = None) -> int:
                      renamed_groups=_renamed_groups, input_prose=input_prose,
                      alt_spellings=_alt_spellings, declared_spellings=_declared)
 
+    # CR-11: a legal parameter range is an elaboration contract.  The gate is
+    # already advisory in the flow until a corpus sweep permits promotion.
+    from parameter_range_contract import minimums, has_elaboration_guard
+    parameter_inputs = [spec_raw]
+    if spec_path.parent.name == "generated_docs":
+        sibling = spec_path.parent / "L3_DETAIL_SPEC.json"
+        if sibling.is_file() and sibling != spec_path:
+            parameter_inputs.append(sibling.read_text(errors="replace"))
+    legal_minimums = {}
+    for source in parameter_inputs:
+        for name, low in minimums(source).items():
+            legal_minimums[name] = max(low, legal_minimums.get(name, low))
+    for name, low in sorted(legal_minimums.items()):
+        if not has_elaboration_guard(rtl_body, name, low, top=top or rtl_name):
+            findings.append(Finding(chosen, 'ERROR', 'parameter-range-guard-missing',
+                                    name, f"parameter {name} >= {low} is declared; "
+                                    "RTL lacks an elaboration-time $fatal guard"))
+
     # Per the semantic-confirm rule: a finding resting on a prose-inferred field that an
     # LLM has NOT confirmed is a CANDIDATE, not truth — annotate it so the agent confirms.
     _rule_field = {'reset-mode-spec-mismatch': 'reset_mode',
