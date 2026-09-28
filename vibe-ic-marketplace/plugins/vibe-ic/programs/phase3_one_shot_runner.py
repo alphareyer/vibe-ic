@@ -57680,18 +57680,20 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
             name, t0, f"cannot create {out_json.parent}: {exc}")
     if name == "drv_signoff":
         plan_path = project / "reports/phase3/sta/drv_capture_plan.json"
-        if plan_path.is_file():
-            try:
-                import drv_signoff_capture as _drv_capture
-                from _atomic_artefact import write_text as _drv_write
-                plan = json.loads(plan_path.read_text())
-                bundle = _drv_capture.capture(
-                    plan, project / "reports/phase3/sta/drv_capture")
-                _drv_write(project / "reports/phase3/sta/drv_signoff_bundle.json",
-                           json.dumps(bundle, indent=2) + "\n")
-            except (OSError, ValueError, RuntimeError, KeyError) as exc:
-                return _signoff_not_checked(
-                    name, t0, f"fresh DRV capture did not complete: {exc}")
+        if not plan_path.is_file():
+            return _signoff_not_checked(
+                name, t0, "DRV capture plan absent; fresh measurement unavailable")
+        try:
+            import drv_signoff_capture as _drv_capture
+            from _atomic_artefact import write_text as _drv_write
+            plan = json.loads(plan_path.read_text())
+            bundle = _drv_capture.capture(
+                plan, project / "reports/phase3/sta/drv_capture")
+            _drv_write(project / "reports/phase3/sta/drv_signoff_bundle.json",
+                       json.dumps(bundle, indent=2) + "\n")
+        except (OSError, ValueError, RuntimeError, KeyError) as exc:
+            return _signoff_not_checked(
+                name, t0, f"fresh DRV capture did not complete: {exc}")
     cmd = [sys.executable, str(prog), str(project), *extra_argv,
            "--json", str(out_json)]
     # METRICS ARE BEST-EFFORT AND NEVER THE VERDICT (M2 r2). Attribution is
@@ -57706,6 +57708,8 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         _gate_env = None
     try:
+        if name == "drv_signoff":
+            out_json.unlink(missing_ok=True)
         # CZT2-16 — a 900 s PARAMETER DEFAULT (600 at one caller) on a
         # VERDICT-BEARING dispatch. This function invokes a flow-declared
         # sign-off gate and blocks on its verdict, so the clock decided whether
