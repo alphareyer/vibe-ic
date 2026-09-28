@@ -264,6 +264,30 @@ class TestDisclosureChangesNothing:
 # oracle is COMPLIANCE and must never be reported as a coverage gap.
 # ---------------------------------------------------------------------------
 class TestOracleBoundary:
+    def test_result_named_non_recipe_files_are_excluded_unopened(
+            self, tmp_path, monkeypatch):
+        rf = _stage(tmp_path, {
+            "expected_qor.txt": _ORACLE_RULES,
+            "oracle_receipt.txt": _ORACLE_RULES,
+            "rules.json": _ORACLE_RULES,
+            "settings.json": '{"A": 1}\n',
+        })
+        opened = []
+        original = Path.read_text
+
+        def traced_read(path, *args, **kwargs):
+            if path.parent == rf:
+                opened.append(path.name)
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", traced_read)
+        scan = mod._rf_pnr_scan(tmp_path)
+        assert sorted({"expected_qor.txt", "oracle_receipt.txt"} & set(opened)) == []
+        assert {"expected_qor.txt", "oracle_receipt.txt", "rules.json"} == {
+            Path(p).name for p in scan["excluded_oracle"]}
+        assert "rules.json" in opened  # Ambiguous name needs shape classification.
+        assert scan["unscanned"] == ["input/reference_flow/settings.json"]
+
     def test_qor_rules_artifact_is_classified_oracle(self, tmp_path):
         _stage(tmp_path, {"flow.mk": "CORE_UTILIZATION = 50\n",
                           "rules.json": _ORACLE_RULES})
