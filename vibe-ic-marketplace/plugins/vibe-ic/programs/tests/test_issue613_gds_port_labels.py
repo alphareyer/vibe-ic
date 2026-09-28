@@ -600,7 +600,8 @@ def _gds_real8(value):
 
 
 def _witness_input(tmp_path, status='FIXED', xy=(1000, 2000), label='a',
-                   orientation='N', units=2000, gds_unit=1e-9):
+                   orientation='N', units=2000, gds_unit=1e-9,
+                   extra_labels=()):
     # DEF anchor (2000,4000) DBU = (1,2) um. Offset rectangle forces
     # orientation semantics to matter instead of a symmetric box hiding them.
     dp = tmp_path / 'routed.def'
@@ -612,6 +613,8 @@ def _witness_input(tmp_path, status='FIXED', xy=(1000, 2000), label='a',
         'END PINS\nEND DESIGN\n')
     body = _boundary(81)
     if label: body += _text_element(81, 10, *xy, label)
+    for x, y, name in extra_labels:
+        body += _text_element(81, 10, x, y, name)
     gp = tmp_path / 'chip.gds'
     gp.write_bytes(_rec(0x0002, struct.pack('>h', 600)) + _rec(0x0102,b'\0'*24)
         + _rec(0x0206,_name('LIB')) + _rec(0x0305, _gds_real8(0.001)+_gds_real8(gds_unit))
@@ -633,6 +636,31 @@ def test_port_witness_shifted_same_name_refused(tmp_path,status):
     verdict,recs=CEN.audit(None,gp,dp)
     assert verdict=='FINDINGS',recs
     assert recs[0]['verdict']=='MISPLACED_LABELS'
+
+
+def test_power_port_accepts_an_extra_same_net_label_outside_its_port(tmp_path):
+    gp, dp = _witness_input(tmp_path, extra_labels=[(9000, 2000, 'a')])
+    dp.write_text(dp.read_text().replace('+ DIRECTION INPUT',
+                                         '+ DIRECTION INOUT + USE POWER'))
+    verdict, recs = CEN.audit(None, gp, dp)
+    assert verdict == 'PASS', recs
+    assert recs[0]['position_witness']['status'] == 'MATCHED'
+
+
+def test_signal_port_still_refuses_an_extra_same_name_label_outside(tmp_path):
+    gp, dp = _witness_input(tmp_path, extra_labels=[(9000, 2000, 'a')])
+    verdict, recs = CEN.audit(None, gp, dp)
+    assert verdict == 'FINDINGS', recs
+    assert recs[0]['verdict'] == 'MISPLACED_LABELS'
+
+
+def test_power_port_refuses_when_all_same_name_labels_are_outside(tmp_path):
+    gp, dp = _witness_input(tmp_path, xy=(9000, 2000))
+    dp.write_text(dp.read_text().replace('+ DIRECTION INPUT',
+                                         '+ DIRECTION INOUT + USE POWER'))
+    verdict, recs = CEN.audit(None, gp, dp)
+    assert verdict == 'FINDINGS', recs
+    assert recs[0]['verdict'] == 'MISPLACED_LABELS'
 
 
 @pytest.mark.parametrize('case', ['missing-label','unplaced','missing-layer','missing-units','invalid-gds-units','unknown-orientation'])

@@ -204,11 +204,14 @@ def label_layer_readability(cen, design, pdk_tech=None):
 
 def port_position_witness(data: bytes, design: str, def_text: str,
                           placed: List[str]) -> Dict:
-    """Name-matched top TEXT anchors must lie in their DEF PORT rectangles.
+    """Name-matched top TEXT anchors must name their DEF PORT rectangles.
 
     This is a coordinate witness, not extracted connectivity or layer-map
-    signoff. Missing units, unsupported geometry/orientation or missing XY
-    remains unmeasured. No DEF/GDS is rewritten by this reader.
+    signoff. POWER/GROUND nets may carry additional same-name labels on the
+    supply grid; one anchored label is enough to name their DEF port. Signal
+    labels remain required inside their port. Missing units, unsupported
+    geometry/orientation or missing XY remains unmeasured. No DEF/GDS is
+    rewritten by this reader.
     """
     units = def_units_per_micron(def_text)
     scale = None
@@ -251,12 +254,15 @@ def port_position_witness(data: bytes, design: str, def_text: str,
     section = re.search(r"(?ms)^\s*PINS\s+\d+\s*;(.*?)^\s*END PINS", def_text)
     rectangles = {}
     bad = set()
+    supplies = set()
     if section:
         for rec in section[1].split(";"):
             name = re.match(r"\s*-\s+(\S+)", rec)
             if not name:
                 continue
             name = name[1]
+            if re.search(r"\+\s*USE\s+(?:POWER|GROUND)\b", rec, re.I):
+                supplies.add(name)
             for port_index, port in enumerate(re.split(r"\+\s*PORT\b", rec)):
                 if not re.search(r"\+\s*LAYER\b", port):
                     if port_index or re.search(r"\+\s*(?:POLYGON|VIA)\b", port):
@@ -288,8 +294,10 @@ def port_position_witness(data: bytes, design: str, def_text: str,
         if name in bad or not boxes or not positions or any(p is None for p in positions):
             result["unverified"].append(name)
             continue
-        if any(not any(between(p[0]*scale,b[0],b[2]) and between(p[1]*scale,b[1],b[3])
-                       for b in boxes) for p in positions):
+        anchored = [any(between(p[0]*scale,b[0],b[2]) and
+                        between(p[1]*scale,b[1],b[3]) for b in boxes)
+                    for p in positions]
+        if (not any(anchored) if name in supplies else not all(anchored)):
             result["misplaced"].append(name)
     result["status"] = ("MISPLACED" if result["misplaced"] else "NOT_MEASURED"
                         if result["unverified"] else "MATCHED")
