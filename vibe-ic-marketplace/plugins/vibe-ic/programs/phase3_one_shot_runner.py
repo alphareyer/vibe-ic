@@ -45417,7 +45417,8 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
                                  route_state: Optional[Path],
                                  route_views: Dict[str, Path],
                                  route_drc: Optional[int],
-                                 variant_arm: Any) -> Optional[Dict[str, Any]]:
+                                 variant_arm: Any,
+                                 container: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Step 32 on LibreLane inside step 21's LibreLane chain (T102 r2), called
     by `librelane_route.execute` after its selection and before its handoff:
     LL21 -> Vibeic.PostRouteRepair -> tail. None when step 32 is `direct`, or
@@ -45436,6 +45437,8 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
     report = _llprr.run_in_chain(
         project, mode=selected, image=image, pdk=str(pdk.name), pdk_root=pdk_root,
         sdc=sdc, derate=(_FLAT_OCV_DERATE_EARLY, _FLAT_OCV_DERATE_LATE),
+        aocv_table=(_discover_aocv_table(project, pdk, container)
+                    if container is not None else None),
         route_state=route_state, route_drc=route_drc, variant_arm=variant_arm,
         pg_rules_tcl=pg_rules)
     path = project / _llprr.REPORT_REL
@@ -45599,6 +45602,7 @@ def step_postroute_repair_librelane(project: Path, top: str, pdk: "PdkConfig",
             project, image=image, pdk=str(pdk.name), pdk_root=pdk_root,
             views={"def": routed, "nl": netlist, "sdc": sdc}, sdc=sdc,
             derate=(_FLAT_OCV_DERATE_EARLY, _FLAT_OCV_DERATE_LATE),
+            aocv_table=_discover_aocv_table(project, pdk, container),
             pg_rules_tcl=pg_rules, refill_tcl=refill)
     except _ll.Refusal as exc:
         _drv_promotion_disclose(

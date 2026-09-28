@@ -530,7 +530,9 @@ def _prepare(project: Path, *, image: str, pdk: str, pdk_root: Path, sdc: Path,
 
 def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
               configs: Dict[str, Path], corners: List[str],
-              mounts: List[Tuple[Path, str]], controllers: Sequence[str] = CONTROLLERS,
+              mounts: List[Tuple[Path, str]], derate: Tuple[float, float],
+              aocv_table: Optional[str] = None,
+              controllers: Sequence[str] = CONTROLLERS,
               registry: Optional[Path] = None,
               programs_dir: Optional[Path] = None,
               floors: Optional[Dict[str, Tuple[float, str]]] = None) -> Dict[str, Any]:
@@ -549,6 +551,7 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
            "mounts": [(str(h.resolve()), g) for h, g in mounts],
            "configs": {k: str(v.resolve()) for k, v in configs.items()},
            "corners": corners, "lane": lane, "arm": name,
+           "derate": list(derate), "aocv_table": aocv_table,
            "floors": {k: list(v) for k, v in (floors or {}).items()}}
     write_json(impl / CONTEXT, ctx)
     ledger = _ledger_path(impl)
@@ -592,6 +595,7 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
 
 def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
         views: Dict[str, Path], sdc: Path, derate: Tuple[float, float],
+        aocv_table: Optional[str] = None,
         pg_rules_tcl: Optional[Path] = None, refill_tcl: Optional[Path] = None,
         registry: Optional[Path] = None, programs_dir: Optional[Path] = None,
         docker: str = "docker") -> Dict[str, Any]:
@@ -615,6 +619,7 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
                                    docker=docker)
     report.update(close_arm(project, "librelane", state0, image=image, pdk=pdk,
                             configs=configs, corners=corners, mounts=mounts,
+                            derate=derate, aocv_table=aocv_table,
                             registry=registry, programs_dir=programs_dir,
                             floors=declared_timing_floor(project, sdc)))
     report["verdict"] = "PASS"
@@ -688,6 +693,7 @@ def select_dual(project: Path, arms: Dict[str, Dict[str, Any]],
 def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Path,
                  sdc: Path, derate: Tuple[float, float], route_state: Path,
                  route_drc: Optional[int],
+                 aocv_table: Optional[str] = None,
                  variant_arm: Optional[Callable[[str, Dict[str, Tuple[Any, str]]],
                                                 Dict[str, Any]]] = None,
                  pg_rules_tcl: Optional[Path] = None,
@@ -712,6 +718,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
         project, image=image, pdk=pdk, pdk_root=pdk_root, sdc=sdc, derate=derate,
         pg_rules_tcl=pg_rules_tcl, refill_tcl=None, docker=docker)
     common = dict(image=image, pdk=pdk, configs=configs, corners=corners, mounts=mounts,
+                  derate=derate, aocv_table=aocv_table,
                   registry=registry, programs_dir=programs_dir,
                   floors=declared_timing_floor(project, sdc))
     if mode != "dual":
