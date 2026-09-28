@@ -345,7 +345,10 @@ def execute(
     def _refuse(code: str, detail: str, out: str = "") -> Tuple[int, str, str]:
         msg = f"{code}: {detail}"
         _log(f"PNR_CTS_HOLD_REFUSED {msg}")
-        return 1, out + f"\nPNR_CTS_HOLD_REFUSED {msg}\n", ""
+        # A tool the contract stopped answers with the session's own stop
+        # code, which step_pnr books NOT_MEASURED; every other refusal is 1.
+        return (_ll.tool_stop_session_rc(code) or 1,
+                out + f"\nPNR_CTS_HOLD_REFUSED {msg}\n", "")
 
     try:
         head = head_deck(

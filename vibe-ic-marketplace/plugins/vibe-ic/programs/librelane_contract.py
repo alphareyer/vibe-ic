@@ -41,6 +41,40 @@ def tool_stop_reason(code: str | None) -> str | None:
     return TOOL_STOP_REASONS.get(code) if code else None
 
 
+def _tool_stop_session_rcs() -> dict[str, int]:
+    """Each stop as the exit code a PnR session reports for the same event:
+    the watchdog's stall kill and 124 reserved for a child probe deadline.
+    The session watchdog itself never kills at its recorded ceiling. A chain that runs inside
+    step_pnr's session (steps 19/20, 21) answers with these, so step_pnr books
+    its own stall and a LibreLane stall by one rule."""
+    import _watchdog as _wd
+    return {'LL_TOOL_STALLED': _wd.RC_STALLED, 'LL_TOOL_DEADLINE': 124}
+
+
+def tool_stop_session_rc(code: str | None) -> int | None:
+    """The session exit code for a tool-stop refusal code, else None."""
+    return _tool_stop_session_rcs().get(code) if code else None
+
+
+def session_stop_reason(rc: int | None, evidence: str = "") -> str | None:
+    """Classify a stop only when this invocation names its source.
+
+    A tool may exit 124 or 199 naturally. The watchdog's own stall note or
+    the route/CTS refusal line is required; the recorded ceiling cannot
+    produce 124 since it is advisory.
+    """
+    import re
+    if rc == _tool_stop_session_rcs()['LL_TOOL_STALLED']:
+        if 'WATCHDOG_STALLED:' in evidence or re.search(
+                r'(?m)^PNR_(?:ROUTE|CTS_HOLD)_REFUSED LL_TOOL_STALLED:', evidence):
+            return TOOL_STOP_REASONS['LL_TOOL_STALLED']
+    if rc == _tool_stop_session_rcs()['LL_TOOL_DEADLINE']:
+        if re.search(r'(?m)^PNR_(?:ROUTE|CTS_HOLD)_REFUSED LL_TOOL_DEADLINE:',
+                     evidence):
+            return TOOL_STOP_REASONS['LL_TOOL_DEADLINE']
+    return None
+
+
 #: How every container this module (and librelane_signoff) starts is bounded.
 #: Two kinds, bounded two different ways:
 #:
