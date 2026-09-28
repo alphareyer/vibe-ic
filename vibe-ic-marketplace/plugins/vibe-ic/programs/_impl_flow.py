@@ -480,7 +480,9 @@ CLI_REASON_CLASSES = (IMPL_KNOB_UNSUPPORTED, IMPL_NOT_YET_WIRED)
 #: The parser destinations the flags themselves own (never knobs).
 FLAG_DESTS = frozenset({"librelane", "orfs"})
 
-#: Runners whose consumer mode has landed (W7b adds them one piece at a time).
+#: Runners whose consumer mode has landed.  The boundary is deliberately a
+#: runner property, not a switch-file convention: both runners must agree on
+#: who owns step 9 before either writes an artefact.
 #: phase 2 (`design_one_shot_runner`): steps 1-8 unchanged; 9-14 run in phase 3.
 WIRED_RUNNERS: frozenset = frozenset({"design_one_shot_runner"})
 
@@ -488,6 +490,33 @@ WIRED_RUNNERS: frozenset = frozenset({"design_one_shot_runner"})
 #: Synthesis (9) is LibreLane segment 1 and the DFT/LEC chain (11-13) needs
 #: its netlist, so both run in phase 3; phase 2 is the window "steps 1-8".
 CONSUMER_PHASE2_LAST_STEP = "8"
+
+#: llv1 W7b's explicit phase-boundary decision.  The values are deliberately
+#: machine-readable so the admission/window callers do not reconstruct them
+#: from report prose.  Step 9 is LibreLane segment 1; steps 11--13 stay
+#: vibe-ic checks on that mapped netlist; step 14 is LibreLane's native
+#: synthesis-handoff checker.  Steps 7/8/10 are advisory pre-layout evidence:
+#: a missing corner deck is NOT_MEASURED, never a fabricated PASS.
+CONSUMER_PHASE3_BOUNDARY = {
+    "phase2_last_step": CONSUMER_PHASE2_LAST_STEP,
+    "segment1": ("9",),
+    "between_segments": ("11", "12", "13", "14", "prepnr"),
+    "segment2": ("15", "16", "17", "18", "19", "20", "21", "22"),
+    "importer": "librelane_import.import_segments",
+    "stage2_advisory": ("7", "8", "10"),
+    "admission_digest_roots": ("phase2", "stage2", "synth"),
+}
+
+
+def consumer_phase3_boundary() -> Dict[str, object]:
+    """Return W7b's immutable consumer boundary contract.
+
+    A copy prevents a caller from silently changing the contract for the next
+    dispatch.  The importer is named, rather than reimplemented, because W6
+    owns the manifest and atomic import semantics.
+    """
+    return {key: tuple(value) if isinstance(value, tuple) else value
+            for key, value in CONSUMER_PHASE3_BOUNDARY.items()}
 
 _WINDOW = ("the external flow runs one span per segment; mapping a window "
            "onto it is W7b, until then a window is refused under the flag")

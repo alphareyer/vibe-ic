@@ -44,6 +44,17 @@ def test_the_design_runner_is_wired_and_the_mode_comes_from_the_flag():
     assert IF.consumer_mode(SimpleNamespace(librelane=False, orfs=False)) is None
 
 
+def test_phase3_boundary_names_one_owner_for_every_moved_step():
+    boundary = IF.consumer_phase3_boundary()
+    assert boundary["phase2_last_step"] == "8"
+    assert boundary["segment1"] == ("9",)
+    assert boundary["between_segments"] == ("11", "12", "13", "14", "prepnr")
+    assert boundary["segment2"] == ("15", "16", "17", "18", "19", "20", "21", "22")
+    assert boundary["importer"] == "librelane_import.import_segments"
+    assert boundary["stage2_advisory"] == ("7", "8", "10")
+    assert boundary["admission_digest_roots"] == ("phase2", "stage2", "synth")
+
+
 def test_the_sentinel_names_the_flag_and_the_phase():
     d = IF.consumer_sentinel_detail(IF.IMPL_LIBRELANE, "yosys_synth", ("9",))
     assert "--librelane" in d and "phase 3" in d and "9" in d
