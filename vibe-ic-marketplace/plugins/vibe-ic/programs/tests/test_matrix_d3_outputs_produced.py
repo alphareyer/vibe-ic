@@ -6280,6 +6280,9 @@ DECLARED_OUTSIDE_THE_PUBLISH_CONTRACT: Tuple[Tuple[str, str], ...] = (
     # by the same W2 rule as the transcript above -- and, like the transcript,
     # it sits under `phase3/stage3/pnr/`, a prefix the publisher does not stage.
     ("37", "phase3/stage3/pnr/*.stream_inputs.json"),
+    # The hashed stream recipe must publish with its input record so the
+    # fidelity step can re-run the exact stream in a bounded-window copy.
+    ("37", "phase3/stage3/pnr/magic_stream_out.tcl OR phase3/stage3/pnr/stream_out.py"),
     # THE ROUTE ATTESTATION, `reports/phase3/pad_ring_route_evidence.json`, was
     # added here in the same edit and DOES NOT BELONG: `benchmark_evidence_
     # publish._COPY_SUBTREES` carries `reports`, so a published cell can stage

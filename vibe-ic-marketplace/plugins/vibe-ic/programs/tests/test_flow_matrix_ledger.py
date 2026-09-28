@@ -813,6 +813,7 @@ PINNED_OUTPUT_MEMBERS = frozenset({
     ('35', 'reports/phase3/dfm_screen.json'),
     ('36', 'reports/audit/tapeout_checklist.json'),
     ('37', 'phase3/stage3/pnr/*.stream_inputs.json'),
+    ('37', 'phase3/stage3/pnr/magic_stream_out.tcl OR phase3/stage3/pnr/stream_out.py'),
     ('37', 'phase3/stage3/pnr/*stream_out.log'),
     ('37', 'phase3/stage4/gds/*.gds'),
     ('37', 'reports/phase3/gates/stage3_compliance.json'),
@@ -1379,19 +1380,20 @@ def test_output_entries_classify_into_the_four_kinds():
     #   4e36f3703 + ('22', 'reports/phase2/gates/spef_extraction.json') FILE
     # No removals or kind changes. The full member pin above catches a swap
     # even when the four kind counts happen to remain the same.
-    # 193 -> 195, re-derived by the same set diff against origin/main 402288df7
+    # 193 -> 196, re-derived by the same set diff against origin/main 402288df7
     # (next/claude-fx-gds-xor-lef-set, spm D-2). Two entries arrive, none leaves:
     #   + ('37', 'phase3/stage3/pnr/*.stream_inputs.json')        GLOB
+    #   + ('37', 'phase3/stage3/pnr/magic_stream_out.tcl OR phase3/stage3/pnr/stream_out.py') ANY_OF
     #   + ('15.5ic', 'reports/phase3/io_pad_chip_top.json')       FILE
-    # The first is step 37's record of its stream-out inputs, which 37.3 now
-    # re-streams from (W2: produced by 37, consumed by 37.3). The second became
-    # attributable when 37.3 stopped reading it: its only consumer is 15.5ic's
-    # own gate, and 15.5ic's first program writes it on every outcome.
+    # The first two bind step 37's stream inputs and exact recipe bytes for 37.3
+    # to re-stream. The third became attributable when 37.3 stopped reading
+    # it: its only consumer is 15.5ic's own gate, and 15.5ic's first program
+    # writes it on every outcome.
     assert members == PINNED_OUTPUT_MEMBERS, (
         'added', sorted(members - PINNED_OUTPUT_MEMBERS),
         'removed', sorted(PINNED_OUTPUT_MEMBERS - members), REDERIVE)
     assert sum(seen.values()) == len(PINNED_OUTPUT_MEMBERS), (seen, REDERIVE)
-    # 136 -> 138 FILE and 27 -> 28 GLOB, from the SAME set diff.
+    # 136 -> 138 FILE, 27 -> 29 GLOB, and 26 -> 27 ANY_OF, from the SAME set diff.
     #
     # AN EARLIER REVISION OF THIS PIN SAID FILE 139 / GLOB 27, and the arithmetic
     # was right for a spelling that was wrong. The transcript was first declared
@@ -1399,13 +1401,11 @@ def test_output_entries_classify_into_the_four_kinds():
     # written by the KLAYOUT stream-out only; Magic writes
     # `<top>.magic_stream_out.log`, so the single name demanded of every
     # Magic-streamed run a file its engine never writes. The declaration is now
-    # the engine-neutral glob, which is what the flow actually requires -- SOME
-    # transcript of what went into the sign-off GDS -- and it classifies as GLOB.
-    # One entry moved between two kinds; the total did not move, which is exactly
-    # why this test asserts the three kinds separately and not just their sum.
+    # an engine-neutral ANY_OF entry, which is what the flow actually requires --
+    # the exact recipe for whichever stream engine produced the sign-off GDS.
     assert seen[F.FILE] == 140, (seen, REDERIVE)
     assert seen[F.GLOB] == 29, (seen, REDERIVE)
-    assert seen[F.ANY_OF] == 26, (seen, REDERIVE)
+    assert seen[F.ANY_OF] == 27, (seen, REDERIVE)
     # Reported to the orchestrator: the PROGRAM_EXIT form described in the brief
     # does NOT exist in required_outputs. It lives only in `gate` clauses. The
     # classifier still returns it for forward-compat, but a sibling branching on

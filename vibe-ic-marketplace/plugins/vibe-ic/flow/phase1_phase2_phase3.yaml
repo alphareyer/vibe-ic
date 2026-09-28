@@ -7342,8 +7342,9 @@ steps:
       - "phase3/stage4/gds/*.gds"
       # THE STREAM-OUT TRANSCRIPT, declared because it is CONSUMED. This step
       # writes it ("the resolution prints are the only evidence of WHAT went
-      # into the sign-off GDS", at the write site), and step 37.3 reads it to
-      # recover the library set for a re-streamed fidelity reference. An
+      # into the sign-off GDS", at the write site), and step 37's own gate
+      # checks that it exists. The exact library set for the fidelity
+      # re-stream is in the separate stream-input record below. An
       # artefact the flow produces and a gate consumes, declared by no step, is
       # exactly W2 -- and the matrix named it on 37.3:
       # "W2:produced_consumed_undeclared phase3/stage3/pnr/stream_out.log --
@@ -7373,6 +7374,12 @@ steps:
       # A glob keyed on the output's stem, like the transcript: one record per
       # stream-out invocation, so the DRC re-stream's cannot overwrite it.
       - "phase3/stage3/pnr/*.stream_inputs.json"
+      # THE RECIPE BYTE STRING is bound by that record's sha256 and must cross
+      # the bounded-window publish boundary with it. Both stream engines write
+      # their recipe under this engine-neutral pattern; without publishing it,
+      # step 37.3 correctly refuses because the canonical tree cannot reproduce
+      # the stream that produced its GDS.
+      - "phase3/stage3/pnr/magic_stream_out.tcl OR phase3/stage3/pnr/stream_out.py"
       # THE ROUTE ATTESTATION, declared for the same reason and by the same rule.
       # `step_pad_ring_final_evidence` writes it in this phase-3 pass and it is an
       # attestation ABOUT THIS STEP'S OWN GDS -- the shipped path, its sha256, its
@@ -7436,6 +7443,11 @@ steps:
         # stream-out is reddened by it, and a cached-GDS run is satisfied by the
         # transcript the session that streamed it left in the same tree.
         - files_exist: ["phase3/stage3/pnr/*stream_out.log"]
+        # The fidelity re-stream consumes this exact input set. Require the
+        # producer's record here, so step 37 cannot pass after publishing a
+        # GDS whose stream inputs are unrecorded.
+        - files_exist: ["phase3/stage3/pnr/*.stream_inputs.json"]
+        - files_exist: ["phase3/stage3/pnr/magic_stream_out.tcl OR phase3/stage3/pnr/stream_out.py"]
         - program_exit_zero: "gds_size_check --gds-file phase3/stage4/gds/*.gds --json reports/phase3/gds_size.json"
         # Substance, not just size. gds_size_check compares against a
         # flow-wide 100 KB constant and demotes a bad GDSII header to a
