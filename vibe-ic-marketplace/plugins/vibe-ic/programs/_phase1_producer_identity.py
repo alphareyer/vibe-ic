@@ -77,6 +77,7 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -96,6 +97,10 @@ KNOBS_CHANGED = "KNOBS_CHANGED"
 GENERATED_DOC_REMOVED = "GENERATED_DOC_REMOVED"
 GENERATED_DOC_NOT_WRITTEN = "GENERATED_DOC_NOT_WRITTEN"
 GENERATED_DOC_EDITED = "GENERATED_DOC_EDITED"
+
+
+class SupersedeError(OSError):
+    """Archiving stale L docs failed; callers must refuse regeneration."""
 
 #: The plugin root: `programs/`, `tools/` (the phase-1 engine), `data/`
 #: (known-answer vectors), registries and schemas all live under it. The
@@ -364,6 +369,21 @@ class ProducerRecorder:
                 return None, f"{q} was used but could not be read"
             out[f"launched:{q.relative_to(self._root).as_posix()}"] = {
                 "__whole__": h}
+        # A glob of plugin data sees the directory membership before it opens
+        # the selected files. Hash the directories it actually enumerated, so
+        # adding a new file cannot keep the old L docs stamped CURRENT.
+        for listed in sorted(self._listed):
+            try:
+                q = Path(listed).resolve()
+                rel = q.relative_to(self._root)
+            except (OSError, ValueError):
+                continue
+            if not rel.parts or rel.parts[0] != "data" or not q.is_dir():
+                continue
+            members = _sr.directory_members_digest(q)
+            if members is None:
+                return None, f"listed plugin data directory {q} is unreadable"
+            out[f"listed:{rel.as_posix()}"] = {"__members__": members}
         out["__engine_env__"] = {name: _sr._engine_marker(name)
                                  for name in _sr.ENGINE_ENV}
         return out, ""
@@ -820,14 +840,44 @@ def supersede_docs(project: Path, why: str) -> Optional[Path]:
     docs = generated_docs(project)
     if not docs:
         return None
-    dest = (project / ".vibeic-state" / "superseded_generated_docs"
-            / time.strftime("%Y%m%dT%H%M%S"))
+    base = project / ".vibeic-state" / "superseded_generated_docs"
     try:
-        dest.mkdir(parents=True, exist_ok=True)
+        base.mkdir(parents=True, exist_ok=True)
+        # A second regeneration in the same second must not overwrite the
+        # first archive. mkdtemp creates a unique directory atomically.
+        dest = Path(tempfile.mkdtemp(
+            prefix=time.strftime("%Y%m%dT%H%M%S") + "-", dir=base))
+    except OSError as exc:
+        raise SupersedeError(f"cannot archive stale generated docs under "
+                             f"{base}: {exc}") from exc
+    moved: List[Tuple[Path, Path]] = []
+    try:
         for d in docs:
-            os.replace(d, dest / d.name)
+            target = dest / d.name
+            if target.exists():
+                raise SupersedeError(f"archive target already exists: {target}")
+            os.replace(d, target)
+            moved.append((d, target))
         (dest / "WHY.txt").write_text(why + "\n")
-    except OSError:
-        return None
+    except OSError as exc:
+        rollback_failed = []
+        for source, target in reversed(moved):
+            try:
+                if source.exists():
+                    raise OSError(f"live path was recreated: {source}")
+                os.replace(target, source)
+            except OSError as undo_exc:
+                rollback_failed.append(f"{target} -> {source}: {undo_exc}")
+        if rollback_failed:
+            try:
+                (dest / "INCOMPLETE.txt").write_text(
+                    "Archive failed and rollback is incomplete:\n"
+                    + "\n".join(rollback_failed) + "\n")
+            except OSError:
+                pass
+        raise SupersedeError(
+            f"cannot archive stale generated docs: {exc}; "
+            + ("rollback incomplete: " + "; ".join(rollback_failed)
+               if rollback_failed else "live docs restored")) from exc
     void(project)
     return dest

@@ -238,6 +238,30 @@ def test_a_plugin_data_file_edit_regenerates(tmp_path):
     assert _fresh(proj, plug)["reason"] == "PRODUCER_CHANGED"
 
 
+@pytest.mark.parametrize("change", ["add", "remove", "rename"])
+def test_a_listed_plugin_data_member_change_regenerates(tmp_path, change):
+    """The producer globs a data directory; membership is an input too."""
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    src = plug / "programs" / "fake_l_producer.py"
+    src.write_text(src.read_text().replace(
+        'table = json.loads((HERE.parent / "data" / "table.json").read_text())',
+        'table = {"v": sum(json.loads(f.read_text())["v"] for f in '
+        'sorted((HERE.parent / "data").glob("*.json")))}'))
+    extra = plug / "data" / "extra.json"
+    if change != "add":
+        extra.write_text('{"v": 2}')
+    _phase1(proj, plug)
+    if change == "add":
+        extra.write_text('{"v": 2}')
+    elif change == "remove":
+        extra.unlink()
+    else:
+        extra.rename(plug / "data" / "renamed.json")
+    fresh = _fresh(proj, plug)
+    assert fresh["state"] == "REGENERATE", fresh
+    assert fresh["reason"] == "PRODUCER_CHANGED"
+
+
 def test_a_different_pdk_knob_regenerates(tmp_path):
     plug, proj = _plugin(tmp_path), _project(tmp_path)
     _phase1(proj, plug)
@@ -432,6 +456,86 @@ def test_a_regeneration_moves_the_stale_docs_aside_not_away(tmp_path):
     assert SI.read_sidecar(proj / "phase1", "phase1") is None
 
 
+def test_archive_failure_refuses_and_keeps_live_docs(tmp_path):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    (proj / ".vibeic-state").write_text("blocks archive directory")
+    with pytest.raises(OSError, match="archive|supersede"):
+        PID.supersede_docs(proj, "PRODUCER_CHANGED: test")
+    assert (proj / "phase1/generated_docs/L1_DOC.json").is_file()
+
+
+def test_partial_archive_failure_restores_every_live_doc(tmp_path, monkeypatch):
+    proj = _project(tmp_path)
+    gd = proj / "phase1/generated_docs"
+    first, second = gd / "L1_DOC.json", gd / "L2_DOC.json"
+    first.write_text("first")
+    second.write_text("second")
+    replace = PID.os.replace
+    forward = 0
+
+    def fail_second_forward(src, dst):
+        nonlocal forward
+        if Path(src).parent == gd:
+            forward += 1
+            if forward == 2:
+                raise OSError("injected second move failure")
+        return replace(src, dst)
+
+    monkeypatch.setattr(PID.os, "replace", fail_second_forward)
+    with pytest.raises(OSError, match="injected second move failure"):
+        PID.supersede_docs(proj, "producer changed")
+    assert first.read_text() == "first"
+    assert second.read_text() == "second"
+
+
+def test_phase2_entry_refuses_archive_failure_before_dispatch(tmp_path,
+                                                               monkeypatch):
+    import design_one_shot_runner as DESIGN
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    (proj / ".vibeic-state").write_text("blocks archive directory")
+    monkeypatch.setattr(DESIGN, "_run", lambda *_a, **_k:
+                        pytest.fail("phase1 must not dispatch after archive failure"))
+    row = DESIGN.step_phase1(proj)
+    assert row.status == "NOT_MEASURED"
+    assert "SUPERSEDE_FAILED" in row.detail
+    assert (proj / "phase1/generated_docs/L1_DOC.json").is_file()
+
+
+def test_front_door_halts_when_stale_docs_cannot_be_archived(tmp_path,
+                                                              monkeypatch):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    (proj / ".vibeic-state").write_text("blocks archive directory")
+    monkeypatch.setattr(ORCH, "_capture_container_image",
+                        lambda *_a, **_k: {"verdict": "PASS"})
+    monkeypatch.setattr(ORCH, "_phase_runner", lambda *_a, **_k:
+                        pytest.fail("front door must not dispatch phase1"))
+    monkeypatch.setattr(sys, "argv", [
+        "vibe_ic_one_shot_runner.py", str(proj), "--no-dashboard",
+        "--entry-step", "D1", "--exit-step", "D1", "--skip-phase3"])
+    assert ORCH.main() == 1
+    report = json.loads((proj / "reports/orchestrator/vibe_ic_one_shot.json")
+                        .read_text())
+    assert report["halted_at"] == "phase1"
+    assert any("SUPERSEDE_FAILED" in note for note in report["advisories"])
+    assert (proj / "phase1/generated_docs/L1_DOC.json").is_file()
+
+
+def test_two_archives_in_one_second_never_overwrite(tmp_path, monkeypatch):
+    proj = _project(tmp_path)
+    doc = proj / "phase1/generated_docs/L1_DOC.json"
+    monkeypatch.setattr(PID.time, "strftime", lambda *_: "20260928T120000")
+    doc.write_text("first")
+    first = PID.supersede_docs(proj, "first")
+    doc.write_text("second")
+    second = PID.supersede_docs(proj, "second")
+    assert first != second
+    assert (first / doc.name).read_text() == "first"
+    assert (second / doc.name).read_text() == "second"
+
+
 def test_a_second_track_rewrite_keeps_the_producers_inputs(tmp_path):
     """review wave8 MINOR: the restamp re-hashed the inputs and every doc,
     laundering an input edit made meanwhile."""
@@ -534,4 +638,3 @@ def test_a_release_version_bump_is_not_a_producer_change(tmp_path):
     PID.stamp(proj, rec, input_before=before, knobs=KNOBS)
     man.write_text('{"version": "1.0.1"}')
     assert _fresh(proj, plug)["state"] == "REUSE"
-

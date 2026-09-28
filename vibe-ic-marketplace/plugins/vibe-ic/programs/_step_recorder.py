@@ -77,6 +77,20 @@ def _sha256_file(p: Path) -> Optional[str]:
         return None
 
 
+def directory_members_digest(path: Path) -> Optional[str]:
+    """Names and kinds in a directory a producer actually enumerated.
+
+    This is separate from file hashes: a glob's newly added member was not
+    among the files read by the previous run, but can change the next output.
+    """
+    try:
+        members = sorted(p.name + ("/" if p.is_dir() else "")
+                         for p in Path(path).iterdir())
+    except OSError:
+        return None
+    return _sha("\n".join(members).encode("utf-8"))
+
+
 #: Any token that names a Python script, wherever it appears — a bare argv
 #: element, inside a `bash -lc "…"` string, or after klayout's `-r` / `-rm`.
 _SCRIPT_RE = re.compile(r"[^\s\"\'=]+\.py\b")
@@ -574,6 +588,11 @@ def rederive(record: Dict[str, Dict[str, str]], root: Path
             q = root / rel[len("launched:"):]
             d = _sha256_file(q)
             out[rel] = {"__whole__": d if d is not None else "ABSENT"}
+            continue
+        if rel.startswith("listed:"):
+            q = root / rel[len("listed:"):]
+            d = directory_members_digest(q)
+            out[rel] = {"__members__": d if d is not None else "ABSENT"}
             continue
         quals = [k for k in entries if k != MODULE_BODY]
         digests, err = check_digests(root / rel, quals)

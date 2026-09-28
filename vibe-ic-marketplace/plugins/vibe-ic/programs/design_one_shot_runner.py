@@ -2056,7 +2056,12 @@ def step_phase1(project: Path) -> StepResult:
                               f"generated_docs holds {len(L_files)} L docs "
                               f"with no design input behind them: kept as "
                               f"input", disclosures=[_V.Disclosure.REUSED_RECORD])
-        _p1id_mod.supersede_docs(project, f"{_fr['reason']}: {_fr['why']}")
+        try:
+            _p1id_mod.supersede_docs(project, f"{_fr['reason']}: {_fr['why']}")
+        except _p1id_mod.SupersedeError as exc:
+            return StepResult("phase1", "NOT_MEASURED", time.time() - t0,
+                              f"phase1 REFUSED — SUPERSEDE_FAILED: {exc}",
+                              reason_class=_V.ReasonClass.EXECUTION_ERROR)
     runner = PROGRAMS_DIR / "phase1_one_shot_runner.py"
     if not runner.is_file():
         return StepResult("phase1", "FAIL",

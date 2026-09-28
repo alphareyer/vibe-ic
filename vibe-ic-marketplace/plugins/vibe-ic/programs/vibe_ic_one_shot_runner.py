@@ -1861,19 +1861,33 @@ def main() -> int:
     if _p1_regenerating:
         # Move the stale docs aside first, so a layer step that fails during
         # regeneration cannot leave an older producer's doc in place.
-        _moved = _p1id.supersede_docs(
-            project, f"{_p1_fresh['reason']}: {_p1_fresh['why']}")
-        advisories.append(
-            f"phase1 REGENERATED the generated L docs — "
-            f"{_p1_fresh['reason']}: {_p1_fresh['why']}"
-            + (f" (the previous docs are kept at {_moved})" if _moved else ""))
+        try:
+            _moved = _p1id.supersede_docs(
+                project, f"{_p1_fresh['reason']}: {_p1_fresh['why']}")
+        except _p1id.SupersedeError as exc:
+            # An old L doc left live must never be mixed with the new run.
+            # Route through the existing Phase-1 refusal before dispatch.
+            _p1_regenerating = False
+            run_phase1 = False
+            p1_mode = _P1_MODE_REFUSED
+            _p1_fresh = {"state": _p1id.REFUSE,
+                         "reason": "SUPERSEDE_FAILED", "why": str(exc)}
+        else:
+            advisories.append(
+                f"phase1 REGENERATED the generated L docs — "
+                f"{_p1_fresh['reason']}: {_p1_fresh['why']}"
+                + (f" (the previous docs are kept at {_moved})" if _moved else ""))
+    if _p1_fresh is not None and _p1_fresh.get("reason") == "SUPERSEDE_FAILED":
+        _p1_skipped_by = "the stale-doc archive failed"
+    elif args.skip_phase1:
+        _p1_skipped_by = "--skip-phase1"
+    elif p1_mode == _P1_MODE_EXPERT_SECOND_PASS:
+        _p1_skipped_by = "the expert second pass re-extracts nothing"
+    else:
+        _p1_skipped_by = "its entry step is past phase 1"
     _p1_stale_why = _stale_generated_docs_note(
         _p1_regenerating or (run_phase1 and p1_mode == "docs"),
-        _p1_fresh, _p1_design_input,
-        "--skip-phase1" if args.skip_phase1
-        else "the expert second pass re-extracts nothing"
-        if p1_mode == _P1_MODE_EXPERT_SECOND_PASS
-        else "its entry step is past phase 1")
+        _p1_fresh, _p1_design_input, _p1_skipped_by)
     if _p1_stale_why:
         advisories.append(_p1_stale_why)
     if p1_mode == _P1_MODE_REFUSED:
