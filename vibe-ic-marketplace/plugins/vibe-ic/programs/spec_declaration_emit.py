@@ -1634,6 +1634,8 @@ def verify_declaration(project: Path, contract: Dict[str, Any],
         "recovered_from_prose": [],
         "provenance_unverified": [],
         "provenance_sidecar_present": False,
+        "spec_example_disclosures": [],
+        "spec_example_conflicts": [],
     }
     if not out_path.is_file():
         result["verdict"] = "FAIL_ABSENT"
@@ -1691,6 +1693,36 @@ def verify_declaration(project: Path, contract: Dict[str, Any],
         if f["name"] in loaded and _placeholder_reason(loaded[f["name"]]) is None)
     result["declared_contract_fields"] = declared_contract_fields
 
+    # The design INPUT may label an allowed example as the one its own worked
+    # result uses. That label does not narrow the allowed values. It does give
+    # a reviewer a comparison the measured arithmetic result cannot provide
+    # (e.g. two encodings with identical modulo output). Never read a harness
+    # or an external reference here: only the contract's source table.
+    rationales = loaded.get("declaration_rationale", {})
+    if not isinstance(rationales, dict):
+        rationales = {}
+    for field in contract["fields"]:
+        name = field["name"]
+        if name not in loaded:
+            continue
+        annotations = field.get("value_annotations") or {}
+        examples = [value for value, note in annotations.items()
+                    if re.fullmatch(r"(?i)(?:golden|reference|worked[- ]example)",
+                                    str(note).strip())]
+        if len(set(examples)) > 1:
+            result["spec_example_conflicts"].append({
+                "field": name, "values": sorted(set(examples)),
+                "source": contract["source"]})
+            continue
+        if not examples or _same_declared_value(loaded[name], examples[0]):
+            continue
+        reason = rationales.get(name)
+        result["spec_example_disclosures"].append({
+            "field": name, "declared": loaded[name], "spec_example": examples[0],
+            "source": contract["source"],
+            "reason": reason.strip() if isinstance(reason, str) else None,
+            "reason_present": isinstance(reason, str) and bool(reason.strip())})
+
     if result["missing_required"] or result["placeholder_required"]:
         result["verdict"] = "FAIL"
         result["note"] = (
@@ -1715,6 +1747,13 @@ def verify_declaration(project: Path, contract: Dict[str, Any],
         result["verdict"] = "PASS"
         result["note"] = ("all %d spec-REQUIRED free choice(s) declared with a "
                           "real value" % len(required))
+    if result["verdict"].startswith("PASS"):
+        if result["spec_example_conflicts"]:
+            result["verdict"] = "OWNER_REVIEW"
+            result["note"] = "the design input labels conflicting examples"
+        elif any(not d["reason_present"] for d in result["spec_example_disclosures"]):
+            result["verdict"] = "DISCLOSE"
+            result["note"] = "a declared allowed choice differs from the spec's worked example without a reason"
     return result
 
 
@@ -1826,7 +1865,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         report_path = (project / "reports" / "phase2" / "gates"
                        / "spec_declaration_verify.json")
         _write_json(report_path, report)
-        ok = report["verdict"] in ("PASS", "PASS_INFORMATIONAL")
+        ok = report["verdict"] in ("PASS", "PASS_INFORMATIONAL",
+                                    "DISCLOSE", "OWNER_REVIEW")
         stream = sys.stdout if ok else sys.stderr
         print("spec_declaration_verify: %s — %s"
               % (report["verdict"], report["note"]), file=stream)
@@ -1842,6 +1882,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("  PROVENANCE UNVERIFIED (declared value with no matching "
                   "provenance record): %s"
                   % ", ".join(report["provenance_unverified"]), file=stream)
+        for item in report["spec_example_disclosures"]:
+            print("  SPEC EXAMPLE DIVERGENCE %s: declared=%r, example=%r, reason=%r"
+                  % (item["field"], item["declared"], item["spec_example"],
+                     item["reason"]), file=stream)
+        for item in report["spec_example_conflicts"]:
+            print("  OWNER REVIEW %s: conflicting examples %s"
+                  % (item["field"], item["values"]), file=stream)
         print("  Report: %s" % report_path, file=stream)
         return 0 if ok else 1
 

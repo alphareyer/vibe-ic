@@ -341,7 +341,8 @@ def _substance_of(run_dir: Path, artifact_path: str, resolved: Path):
             rep = _sde.verify_declaration(run_dir, contract, resolved)
         except Exception as exc:  # noqa: BLE001
             return None, "NOT_MEASURED: verify raised %s" % exc, "CONTRACT"
-        if rep.get("verdict") in ("PASS", "PASS_INFORMATIONAL"):
+        if rep.get("verdict") in ("PASS", "PASS_INFORMATIONAL",
+                                  "DISCLOSE", "OWNER_REVIEW"):
             return "PASS", rep.get("note", ""), "CONTRACT"
         bits = []
         for name in rep.get("missing_required", []):
