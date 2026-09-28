@@ -411,10 +411,10 @@ def test_missing_step_file_is_retained_in_citation_verdict(tmp_path):
         tmp_path, {"output_files": ["phase3/missing.def"]},
         extra_paths=(cited.AUDIT_REL,))
 
-    assert citations.get("phase3/missing.def") == "MISSING"
-    assert citations[cited.AUDIT_REL] == cited.digest(audit)
     verdict, rows = cited.check(tmp_path, {"cited_artefacts": citations})
     assert verdict == "NOT_MEASURED"
+    assert citations.get("phase3/missing.def") == "MISSING"
+    assert citations[cited.AUDIT_REL] == cited.digest(audit)
     assert any(row["path"] == "phase3/missing.def"
                and row["status"] == "NOT_MEASURED"
                and row["reason"] == "MISSING_CITATION" for row in rows)
