@@ -797,6 +797,77 @@ def test_capture_ignores_plan_population_and_excluded_pin_assertions(
     assert "clock_network_pins" not in row
 
 
+def test_capture_replaces_plan_pin_classes_with_opensta_and_liberty(tmp_path, monkeypatch):
+    import subprocess
+    import drv_signoff_capture as capture
+    plan = _bundle(tmp_path)
+    plan["top"] = "top"
+    plan["pins"]["u/Y"]["cell_class"] = "IO"
+    plan["scenes"][0]["clock_network_pins"] = ["u/Y"]
+    plan["scenes"][0]["excluded_pins"] = [{"pin": "invented", "reason": "ideal"}]
+    anchor = {"path": "/image/pdk/config.tcl", "sha256":
+              plan["current"]["sources"]["pdk_config"]["sha256"],
+              "pdk_commit": "installed-version"}
+    monkeypatch.setattr(capture, "image_pdk_anchor", lambda *a: anchor, raising=False)
+
+    def fresh(script, roots, *, image):
+        folder = script.parent
+        if script.name == "positive_control.tcl":
+            (folder / "positive_control.rpt").write_text(_report(
+                fanout=2, fanout_limit=1, cap_limit=.01,
+                slew_limit=.01, violators=True))
+            (folder / "positive_control_counters.log").write_text(
+                "".join(f"DRV_COUNTER {kind} 1\n" for kind in drv.KINDS))
+        else:
+            (folder / "pin_census.tsv").write_text(
+                "u/Y\tpin\toutput\t1\tu\tlogic\tY\tn\tinput\t0.02\t0.02\t0\tX\t0\n"
+                "u2/Y\tpin\toutput\t1\tu2\tlogic\tY\tn2\tinput\t0.03\t0.04\t0\t1\t0\n")
+            (folder / "net_census.rpt").write_text(
+                "Net n\n Total capacitance: 0.1\n Number of drivers: 1\n"
+                " Number of loads: 0\n Number of pins: 1\n\n"
+                "Net n2\n Total capacitance: 0.05\n Number of drivers: 1\n"
+                " Number of loads: 0\n Number of pins: 1\n")
+            (folder / "disabled_edges.rpt").write_text("")
+            (folder / "annotation.rpt").write_text("Found 0 unannotated drivers.\n")
+            (folder / "clocks.rpt").write_text("propagated\n")
+            (folder / "violators.rpt").write_text(_report(violators=True))
+            (folder / "all_limits.rpt").write_text(_report(fanout=2))
+            (folder / "counters.log").write_text(
+                "".join(f"DRV_COUNTER {kind} 0\n" for kind in drv.KINDS))
+        return "OpenSTA 3.1 aaaaaaaaaa\n"
+
+    monkeypatch.setattr(capture, "_run_fresh", fresh)
+    monkeypatch.setattr(capture.subprocess, "run", lambda *a, **k:
+                        subprocess.CompletedProcess(a, 0, json.dumps({
+                            "Id": "sha256:" + "a" * 64,
+                            "Config": {"Labels": {"org.opencontainers.image.version": "test"}}}), ""))
+    result = capture.capture(plan, tmp_path / "captured", image="synthetic:test")
+    scene = result["scenes"][0]
+    assert result["pins"]["u/Y"]["cell_class"] == "std"
+    assert scene["clock_network_pins"] == []
+    assert scene["driver_pin_census"] == ["u/Y", "u2/Y"]
+    assert scene["excluded_pins_recorded"] is True
+    assert scene["excluded_pins"] == [{"pin": "u2/Y", "reason": "constant",
+                                        "excluded_kinds": list(drv.KINDS),
+                                        "fanout": 0.0, "cap_pf": .05,
+                                        "slew_rise_ns": .03, "slew_fall_ns": .04}]
+    assert result["threshold_anchor"] == anchor
+    assert result["identity"]["pdk_commit"] == "installed-version"
+
+
+def test_project_judge_rejects_plan_anchor_even_when_bundle_is_self_consistent(
+        tmp_path, monkeypatch):
+    bundle = _bundle(tmp_path)
+    anchor = {"path": "/image/pdk/config.tcl", "sha256":
+              bundle["current"]["sources"]["pdk_config"]["sha256"],
+              "pdk_commit": "installed-version"}
+    bundle["threshold_anchor"] = dict(anchor, sha256="0" * 64)
+    monkeypatch.setattr(drv, "image_pdk_anchor", lambda *a: anchor, raising=False)
+    result = drv.judge(bundle, project=tmp_path)
+    assert any("frozen threshold anchor differs from installed image" in reason
+               for reason in result["not_measured"])
+
+
 def test_partially_unannotated_drivers_block_a_clean_verdict(tmp_path):
     bundle = _bundle(tmp_path)
     bundle["scenes"][0]["parasitic_annotation_report"] = _file(
