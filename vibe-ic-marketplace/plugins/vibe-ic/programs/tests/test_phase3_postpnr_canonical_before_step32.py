@@ -217,6 +217,28 @@ def test_same_route_changed_declared_rc_rules_reextracts(tmp_path, monkeypatch):
     assert basis["extraction_inputs"]["pdk_files"][str(rules)] == emitted[-1]
 
 
+def test_step22_mode_change_reextracts_same_route(tmp_path, monkeypatch):
+    project, _route = _routed_project(tmp_path)
+    pdk = _pdk(project)
+    mode = ["dual"]
+    monkeypatch.setattr(R, "_librelane_signoff_modes", lambda _p: (mode[0], "direct"))
+    calls = []
+
+    def extract(_project, _top, _pdk, _container, output, _notes):
+        calls.append(mode[0])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(SPEF + f"// mode {mode[0]}\n")
+        return True
+
+    monkeypatch.setattr(R, "_emit_spef", extract)
+    R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    mode[0] = "direct"
+    R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    assert calls == ["dual", "direct"]
+    basis = json.loads((project / "reports/phase3/postpnr_canonical_basis.json").read_text())
+    assert basis["extraction_inputs"]["mode"] == "direct"
+
+
 def test_unmeasured_pdn_and_failed_sdc_do_not_pass_receipt(tmp_path, monkeypatch):
     project, _route = _routed_project(tmp_path)
     monkeypatch.setattr(R, "_emit_spef", lambda _p, _t, _d, _c, out, _n:

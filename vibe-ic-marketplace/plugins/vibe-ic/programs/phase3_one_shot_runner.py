@@ -61138,11 +61138,15 @@ def _postpnr_extraction_inputs(project: Path, top: str, pdk: PdkConfig,
     its bridge, so its canonical SPEF is re-extracted on each publication until
     that tool supplies a complete input receipt of its own.
     """
-    if mode not in ("direct", "librelane"):
+    if mode not in ("direct", "dual", "librelane"):
         return None, f"step 22 extraction mode {mode!r} is not usable"
+    # The LibreLane bridge reads more of its PDK tree than this direct deck.
+    # Keep its mode in the receipt, but never reuse a SPEF from this key.
+    if mode == "librelane":
+        return {"mode": mode, "pdk_files": {}, "cacheable": False}, ""
     pnr = _pl.pnr_dir(project)
     paths = [str(pdk.tech_lef), str(pdk.cell_lef), str(pdk.liberty)]
-    if mode == "direct":
+    if mode in ("direct", "dual"):
         paths.extend(_def_reopen_extra_lefs_c(pnr / f"{top}.def", pdk,
                                               container))
         decl = _openrcx_ruleset_declaration(pdk, container)
@@ -61157,8 +61161,6 @@ def _postpnr_extraction_inputs(project: Path, top: str, pdk: PdkConfig,
         if any("pdk_registry.json:" in str(row.get("declared_by", ""))
                for row in (decl.get("corners") or {}).values()):
             paths.append(str(PROGRAMS_DIR / "pdk_registry.json"))
-    else:
-        decl = None
     paths = list(dict.fromkeys(paths))
     digests = _step_pdk_hasher(container, use_cache=False)(paths)
     absent = [p for p in paths if p not in digests]
@@ -61168,7 +61170,7 @@ def _postpnr_extraction_inputs(project: Path, top: str, pdk: PdkConfig,
             "metal_prefix": pdk.metal_prefix,
             "coupling": os.environ.get("VIBEIC_SPEF_COUPLING", "1"),
             "ruleset_declaration": decl,
-            "cacheable": mode == "direct"}, ""
+            "cacheable": True}, ""
 
 
 def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
