@@ -75550,15 +75550,29 @@ def _phase3_window_publication(project: Path, isolated: Path,
                 """Resolve one citation against its owning project, then bind it."""
                 path = Path(token)
                 owner = root if path.is_absolute() else private
-                normalized = Path(os.path.normpath(
-                    path if path.is_absolute() else private / path))
-                resolved = normalized.resolve()
-                if (not normalized.is_relative_to(owner)
-                        or not resolved.is_relative_to(owner)):
+                cited = path if path.is_absolute() else private / path
+                # Resolve the spelling as cited. Normalizing first erases a
+                # missing component or a symlink before a following "..".
+                try:
+                    resolved = cited.resolve(strict=True)
+                except (OSError, RuntimeError) as exc:
+                    # A missing absolute reference into the disposable copy
+                    # still names an outside-project input. This best-effort
+                    # resolution only classifies the refusal; it never admits
+                    # or hashes a path that strict resolution could not open.
+                    try:
+                        unresolved = cited.resolve(strict=False)
+                    except (OSError, RuntimeError):
+                        unresolved = None
+                    if unresolved is not None and not unresolved.is_relative_to(owner):
+                        raise ValueError(f"window input outside project: {token}") from exc
+                    raise ValueError(f"window cited input absent: {token}: {exc}") from exc
+                if not resolved.is_relative_to(owner):
                     raise ValueError(f"window input outside project: {token}")
                 # A relative symlink would leave a dangling alias after the
                 # private tree is discarded; selected outputs must be files.
-                if not path.is_absolute() and resolved != normalized:
+                if (not path.is_absolute()
+                        and resolved != Path(os.path.normpath(cited))):
                     raise ValueError(f"relative window input is symlink: {token}")
                 if not resolved.is_file():
                     raise ValueError(f"window cited input absent: {token}")
