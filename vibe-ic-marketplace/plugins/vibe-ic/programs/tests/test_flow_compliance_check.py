@@ -424,6 +424,46 @@ def test_missing_step_file_is_retained_in_citation_verdict(tmp_path):
     assert cited.check(tmp_path, {"cited_artefacts": citations})[0] == "NOT_MEASURED"
 
 
+def test_missing_output_file_spellings_cannot_pass_citation_check():
+    """StepResult.output_files names citations even when their names lack a suffix shape."""
+    sys.path.insert(0, str(PROG.parent))
+    import _cited_artefacts as cited
+    from _hostpaths import require_repo
+
+    source = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic",
+                          "flow", "phase1_phase2_phase3.yaml")
+    project = source.parent.parent
+    present = str(source.relative_to(project))
+    for missing in ("phase3/stage3/pnr/top routed.def", "routed.def"):
+        citations = cited.bind(project, {"steps": [{
+            "output_files": [missing, present],
+            "detail": "PASS with no file named plainword",
+        }]})
+        verdict, rows = cited.check(project, {"cited_artefacts": citations})
+        assert citations[present] == cited.digest(source)
+        assert citations.get(missing) == "MISSING"
+        assert verdict == "NOT_MEASURED"
+        assert any(row["path"] == missing and row["reason"] == "MISSING_CITATION"
+                   for row in rows)
+        assert "plainword" not in citations
+
+
+def test_present_root_output_file_is_hashed_alongside_missing_file(tmp_path):
+    sys.path.insert(0, str(PROG.parent))
+    import _cited_artefacts as cited
+
+    present = tmp_path / "top.def"
+    present.write_text("present route view\n")
+    missing = "phase3/stage3/pnr/top routed.def"
+    citations = cited.bind(tmp_path, {"steps": [{
+        "output_files": [str(present), missing],
+    }]})
+    verdict, _ = cited.check(tmp_path, {"cited_artefacts": citations})
+    assert citations["top.def"] == cited.digest(present)
+    assert citations.get(missing) == "MISSING"
+    assert verdict == "NOT_MEASURED"
+
+
 def test_recheck_preserves_the_run_cited_audit(tmp_path):
     audit_path = tmp_path / "reports/audit/phase23_completion_audit.json"
     audit_path.parent.mkdir(parents=True)
