@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_text  # noqa: E402
 import _eda_image  # noqa: E402
-from drv_signoff_judge import KINDS, _COMMAND, _sha  # noqa: E402
+from drv_signoff_judge import KINDS, _COMMAND, _sha, parse_check_types  # noqa: E402
 
 _COUNTER = re.compile(
     r"(?m)^DRV_COUNTER\s+(max_slew|max_capacitance|max_fanout)\s+(\d+)\s*$")
@@ -125,10 +125,9 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
             roots.add(Path(item["path"]).resolve().parent)
         scene_dir = out_dir / scene["name"]
         scene_dir.mkdir(parents=True, exist_ok=True)
-        population = scene["population"]
-        max_count = max(population.values())
-        if max_count < 1:
-            raise ValueError("empty all-limits population")
+        # The author of a capture plan cannot lower the OpenSTA report bound.
+        # Read the resulting census back from the fresh tool output instead.
+        max_count = 2_147_483_647
         for control in (False, True):
             script = scene_dir / ("positive_control.tcl" if control else "measure.tcl")
             write_text(script, _script(plan, scene, scene_dir,
@@ -149,6 +148,13 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
             r"Found\s+(\d+)\s+(?:partially\s+)?unannotated\s+(?:drivers|nets)",
             annotation)
         row = dict(scene)
+        row.pop("positive_control_expected", None)
+        all_rows = parse_check_types((scene_dir / "all_limits.rpt").read_text(),
+                                     scene=scene["name"],
+                                     mode=scene["mode"], violators_only=False)
+        population = {kind: len(all_rows[kind]) for kind in KINDS}
+        if any(value < 1 for value in population.values()):
+            raise ValueError("fresh OpenSTA all-limits population empty")
         # A plan is only a request for measurement. It cannot attest which
         # pins OpenSTA excluded from its own DRV checks.
         row.pop("excluded_pins", None)
@@ -157,6 +163,7 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
         row.update(fresh_process=True, postroute=True, propagated_clocks=True,
                    excluded_pins_recorded=False,
                    command=_COMMAND, all_limits_max_count=max_count,
+                   population=population,
                    positive_control_fresh_process=True,
                    counters=counts, positive_control_counters=control_counts,
                    unannotated_nets=(sum(map(int, unannotated))
