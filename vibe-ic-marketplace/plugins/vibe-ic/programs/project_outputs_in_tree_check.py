@@ -80,6 +80,31 @@ gate.
 
 Usage:
     python3 project_outputs_in_tree_check.py <project_dir>
+        [--json REPORT] [--auditor-record REL ...]
+
+    --json REPORT        also write every flagged reference, IN FULL, to REPORT
+                         (lane fxlvs, D1). The deciding stdout line is capped at
+                         200 characters (#2084) and a long volatile path does not
+                         fit it: MEASURED on the spm integration run, the P0 record
+                         kept `... exits 1 on: reports/audit/phase23_completion_
+                         audit.json:` and the path itself was lost. The P0
+                         umbrella passes a scratch REPORT and publishes its
+                         `flagged` list in the gate's record.
+    --auditor-record REL the run-relative document the INVOKING AUDITOR owns
+                         (the completion audit). Not judged here, and disclosed.
+                         The flow YAML gives that document to the AUDIT and to no
+                         step (P0's own entry: "declaring it here would make P0
+                         ... judge a file P0 does not produce"), and every version
+                         a P0 can see is superseded by the audit written after P0
+                         finishes. MEASURED (D1): a nested scoped pass the auditor
+                         runs as a step gate writes the canonical audit with its
+                         `command_argv` naming the auditor's private receipt
+                         scratch (`/tmp/gate_receipt_*/stageN_compliance.json`),
+                         live until the auditor exits; stage-1's P0 read that
+                         intermediate and FAILed the run on it, 14 passes in a row,
+                         while the final audit carries no volatile path at all.
+                         Run WITHOUT the flag (standalone, after the run), the
+                         document is judged like any other.
 
 Exit codes:
     0  PASS (>=1 declaration file was READ and none cites external storage,
@@ -637,15 +662,56 @@ def _inside_project(path_str: str, project: Path) -> bool:
     return p == project or project in p.parents
 
 
+def _parse_argv(argv: List[str]) -> Tuple[Optional[str], Optional[str],
+                                           List[str]]:
+    """(project, --json REPORT, [--auditor-record REL ...]) from `argv`."""
+    project: Optional[str] = None
+    report: Optional[str] = None
+    auditor: List[str] = []
+    it = iter(argv)
+    for arg in it:
+        if arg == "--json":
+            report = next(it, None)
+        elif arg == "--auditor-record":
+            rel = next(it, None)
+            if rel:
+                auditor.append(Path(rel).as_posix())
+        elif project is None:
+            project = arg
+    return project, report, auditor
+
+
+def _write_report(report: Optional[str], verdict: str, rc: int,
+                  flagged: List[dict], excluded: List[str]) -> None:
+    """The findings IN FULL, beside the capped stdout line (see --json)."""
+    if not report:
+        return
+    # Imported HERE, not at module load: `scratch_root_guard` loads this file BY
+    # PATH (with only its module-level siblings beside it) to read
+    # `_VOLATILE_PREFIXES`, and a report is written only when one was asked for.
+    import _atomic_artefact as _aa                                # noqa: E402
+    _aa.write_json(Path(report), {
+        "gate": "project_outputs_in_tree_check",
+        "verdict": verdict,
+        "exit_code": rc,
+        "reason_class": None,
+        "flagged": flagged,
+        "auditor_records_not_judged": excluded,
+    })
+
+
 def main() -> int:
-    if len(sys.argv) < 2:
-        print("usage: project_outputs_in_tree_check <project_dir>",
-              file=sys.stderr)
+    arg_project, report, auditor_records = _parse_argv(sys.argv[1:])
+    if arg_project is None:
+        print("usage: project_outputs_in_tree_check <project_dir> "
+              "[--json REPORT] [--auditor-record REL ...]", file=sys.stderr)
         return 2
-    project = Path(sys.argv[1]).resolve()
+    project = Path(arg_project).resolve()
     if not project.is_dir():
         print(f"ERROR: {project} not a directory", file=sys.stderr)
         return 2
+    # The invoking auditor's own record(s): not judged here (see --auditor-record).
+    auditor_excluded: List[str] = []
 
     # (file, path, exists_on_disk, from_log)
     findings: List[Tuple[str, str, bool, bool]] = []
@@ -687,6 +753,12 @@ def main() -> int:
         for f in project.glob(pat):
             if not f.is_file():
                 continue
+            if auditor_records:
+                _rel = f.relative_to(project).as_posix()
+                if _rel in auditor_records:
+                    if _rel not in auditor_excluded:
+                        auditor_excluded.append(_rel)
+                    continue
             scanned += 1
             try:
                 txt = f.read_text(encoding="utf-8", errors="ignore")
@@ -835,6 +907,7 @@ def main() -> int:
               f"whose declarations were themselves written outside the tree — "
               f"which is the very condition this gate exists to detect — so a "
               f"zero denominator may not be reported as a clean scan.")
+        _write_report(report, "NOT_CHECKED", 2, [], auditor_excluded)
         return 2
 
     # ORGANIC #622 — a /tmp reference found INSIDE A LOG FILE (*.log) is a
@@ -997,6 +1070,16 @@ def main() -> int:
             block.append(f"  ... +{len(ephemeral_derived)-5} more")
         notes.append("\n".join(block))
 
+    if auditor_excluded:
+        notes.append(
+            f"[INFO] project_outputs_in_tree_check: not judged, "
+            f"{len(auditor_excluded)} record(s) the INVOKING AUDITOR owns "
+            f"(--auditor-record): {', '.join(auditor_excluded)} — the flow gives "
+            f"that document to the audit and to no step, and every version "
+            f"visible while the audit runs is superseded by the one it writes "
+            f"after this gate; judged like any other file when this gate runs "
+            f"standalone")
+
     def _emit_notes() -> None:
         """The non-blocking disclosures, AFTER the verdict line that decides."""
         for note in notes:
@@ -1019,6 +1102,7 @@ def main() -> int:
               f"the run', derived from the run root, not a list of four "
               f"directories)")
         _emit_notes()
+        _write_report(report, "PASS", 0, [], auditor_excluded)
         return 0
 
     # Split: live (file exists at /tmp) vs. dangling (referenced but gone).
@@ -1028,6 +1112,10 @@ def main() -> int:
 
     waiver_n = _waiver_count(project)
     fail_count = len(live) + len(dangling) + len(derived)
+    flagged = ([{"file": f, "path": p, "class": "live"} for f, p in live]
+               + [{"file": f, "path": p, "class": "dangling"} for f, p in dangling]
+               + [{"file": f, "path": p, "class": "outside-root"}
+                  for f, p in derived])
 
     if waiver_n >= fail_count:
         print(f"[PASS_WITH_WAIVER] "
@@ -1035,6 +1123,7 @@ def main() -> int:
               f"{fail_count} external-path reference(s) but {waiver_n} "
               f"waiver(s) under '{WAIVER_KEY}'.")
         _emit_notes()
+        _write_report(report, "PASS_WITH_WAIVER", 0, flagged, auditor_excluded)
         return 0
 
     # THE DECIDING LINE (#2084). First, and tagged with the severity this
@@ -1152,6 +1241,7 @@ def main() -> int:
           f"update references. Then re-run audit. To accept volatile "
           f"storage (e.g. cache that's intentionally ephemeral), add "
           f"waiver '{WAIVER_KEY}' (one per path, >={WAIVER_MIN} chars).")
+    _write_report(report, "FAIL", 1, flagged, auditor_excluded)
     return 1
 
 
