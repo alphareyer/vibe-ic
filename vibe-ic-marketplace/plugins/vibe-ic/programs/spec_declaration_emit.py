@@ -1504,6 +1504,16 @@ def _outside_contract(overrides: Dict[str, Any], names: List[str],
     return keep, refused
 
 
+def _load_prior_outside(sidecar: Path) -> Dict[str, Any]:
+    """Authored outside-contract provenance from the previous emitter run."""
+    try:
+        data = json.loads(sidecar.read_text())
+        rows = data.get("declared_outside_contract", {})
+        return rows if isinstance(rows, dict) else {}
+    except Exception:
+        return {}
+
+
 def _report_outside(outside: Dict[str, Any], refused: Dict[str, str],
                     written: bool, stream, not_written_reason: str = "") -> None:
     for k, v in sorted(outside.items()):
@@ -1890,8 +1900,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     prior = _load_prior_provenance(sidecar)
     # A field the author declares that the spec's contract does not list is
     # retained with provenance, except a producer-owned declaration fact.
-    outside, outside_refused = _outside_contract(overrides, names, existing,
-                                                  prior)
+    outside, outside_refused = _outside_contract(
+        overrides, names, existing,
+        {"declared_outside_contract": _load_prior_outside(sidecar)})
 
     status = resolve(contract, overrides, rtl_declared, existing, prior)
 

@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
 EMITTER = PROGRAMS / "spec_declaration_emit.py"
 DECL = "plugin_output/declaration.json"
@@ -102,3 +104,20 @@ def test_contract_fields_are_unchanged_by_the_outside_route(tmp_path):
     cp = _emit(p, "--set", "handshake_style=valid_ready")
     assert cp.returncode == 0, cp.stderr
     assert _decl(p) == {"handshake_style": "valid_ready"}
+
+
+@pytest.mark.parametrize("key,value", [
+    ("ip_catalog_used", '[{"name":"sha256_core"}]'),
+    ("ai_authored_files", '["rtl/top.v"]'),
+    ("supplied_rtl", '{"files":[]}'),
+])
+def test_producer_owned_outside_keys_are_refused_not_rewritten(tmp_path, key, value):
+    p = _project(tmp_path)
+    before = {"handshake_style": "valid_ready", key: {"flow": True}}
+    path = p / DECL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(before))
+    cp = _emit(p, "--set", f"{key}={value}")
+    assert cp.returncode == 0
+    assert _decl(p)[key] == before[key]
+    assert key in (cp.stdout + cp.stderr) and "REFUSED" in (cp.stdout + cp.stderr)
