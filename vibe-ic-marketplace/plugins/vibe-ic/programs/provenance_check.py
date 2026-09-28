@@ -71,6 +71,7 @@ from typing import Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _mcp_measurement  # noqa: E402
+import _tool_log_provenance  # noqa: E402
 
 
 def _sha256_file(path: Path) -> str:
@@ -137,13 +138,33 @@ def _declares(entry: dict, out_rel: str, out_sha: str | None) -> bool:
 
 def _find_entry(entries: List[dict], out_rel: str,
                 allowed_tools: set,
-                out_sha: str | None = None) -> Tuple[dict | None, List[str]]:
-    """Return (matching_entry, reasons_if_none)."""
+                out_sha: str | None = None,
+                project: Path | None = None) -> Tuple[dict | None, List[str]]:
+    """Return (matching_entry, reasons_if_none).
+
+    An entry that CLAIMS a witness (a row imported from an external flow's own
+    step log, `_tool_log_provenance`, llv1 decision 4a) binds only when that
+    witness re-verifies against `project`: a cited log that is gone, rewritten
+    or not started by the flow is a fabricated witness, not a weaker one. A
+    plain logged run or a #365 back-fill claims none and is judged as before.
+    A witness whose reader-free evidence all holds but which the flow-log
+    reader may not judge (UNCALIBRATED) still binds; `main` then reports that
+    artefact NOT_MEASURED, never PASS, unless the run states it measured
+    nothing (a --require-measured hard miss, which FAILs first).
+    """
     reasons: List[str] = []
     matches = []
     for i, e in enumerate(entries):
         if not _declares(e, out_rel, out_sha):
             continue
+        if _tool_log_provenance.claims_witness(e):
+            ok, why = (_tool_log_provenance.verify_witness(e, project)
+                       if project is not None else
+                       (False, "no project to re-read the witness against"))
+            if ok is not True and ok != _tool_log_provenance.UNCALIBRATED:
+                reasons.append(f"entry {e.get('timestamp','?')} for {out_rel} "
+                               f"claims a witness that does not hold: {why}")
+                continue
         if e.get("exit_code", -1) != 0:
             reasons.append(f"entry {e.get('timestamp','?')} "
                            f"for {out_rel} has exit_code="
@@ -232,6 +253,9 @@ def main(argv: List[str] | None = None) -> int:
     #: Artefacts whose bound run states nothing about whether it measured. They
     #: do not fail the gate and they do not pass it either.
     unmeasured: List[str] = []
+    #: Artefacts whose claimed witness the flow-log reader may not judge
+    #: (instrument_calibration's contract: NOT_MEASURED, never a FAIL).
+    uncalibrated: List[str] = []
 
     for out_rel_pattern, tools_csv in zip(args.output, args.tool):
         allowed = {t.strip() for t in tools_csv.split(",") if t.strip()}
@@ -277,7 +301,8 @@ def main(argv: List[str] | None = None) -> int:
             disk_hash = _sha256_file(abs_out)
 
             # Find a matching entry
-            entry, reasons = _find_entry(entries, out_rel, allowed, disk_hash)
+            entry, reasons = _find_entry(entries, out_rel, allowed, disk_hash,
+                                          project)
             if entry is None:
                 check["reasons"].extend(reasons)
                 report["checks"].append(check)
@@ -309,6 +334,17 @@ def main(argv: List[str] | None = None) -> int:
                 overall_ok = False
                 continue
 
+            # A witness the flow-log reader may not judge. `_find_entry` bound
+            # it only after every check that needs no reader held, and it is
+            # reported NOT_MEASURED only AFTER the --require-measured hard
+            # miss below: a run that states it measured nothing is a FAIL
+            # whether or not its witness can be judged.
+            unjudged = None
+            if _tool_log_provenance.claims_witness(entry):
+                ok, why = _tool_log_provenance.verify_witness(entry, project)
+                if ok == _tool_log_provenance.UNCALIBRATED:
+                    unjudged = why
+
             # ── THE MEASUREMENT QUESTION, asked where the binding is
             # decided. By here the artefact IS bound to an exit-0 run by this
             # tool; the only thing still unasked is whether that run did any
@@ -331,6 +367,18 @@ def main(argv: List[str] | None = None) -> int:
                     report["checks"].append(check)
                     overall_ok = False
                     continue
+
+            if unjudged is not None:
+                check["status"] = "NOT_MEASURED"
+                check["reason_class"] = "uncalibrated"
+                check["reasons"].append(
+                    f"the witness of the run bound to this artefact could "
+                    f"not be judged: {unjudged}")
+                report["checks"].append(check)
+                uncalibrated.append(out_rel)
+                continue
+
+            if args.require_measured:
                 if meas.undeclared:
                     # NOT a failure and NOT a pass. See the module docstring.
                     check["status"] = "UNMEASURED"
@@ -354,6 +402,7 @@ def main(argv: List[str] | None = None) -> int:
 
     report["ok"] = overall_ok
     report["unmeasured"] = unmeasured
+    report["uncalibrated"] = uncalibrated
 
     # Print summary
     print(f"\n=== provenance_check ({project.name}) ===")
@@ -362,7 +411,8 @@ def main(argv: List[str] | None = None) -> int:
         # Three icons for three states. UNMEASURED wearing the failure mark
         # would put a thing nobody measured in the same column as a thing that
         # was measured and was wrong.
-        icon = {"PASS": "✓", "UNMEASURED": "…"}.get(c["status"], "✗")
+        icon = {"PASS": "✓", "UNMEASURED": "…",
+                "NOT_MEASURED": "…"}.get(c["status"], "✗")
         print(f"  {icon} [{c['status']:<10}] {c['output']}")
         if c["status"] == "PASS":
             print(f"         via {c.get('tool')} @ {c.get('timestamp')}")
@@ -379,7 +429,17 @@ def main(argv: List[str] | None = None) -> int:
     # `pass_count`, and never a failure. That tier is exactly what "the tool
     # never said whether it did the work" means, so this prints it rather than
     # inventing a fourth vocabulary for the same fact.
+    if overall_ok and uncalibrated and not unmeasured:
+        print(f"  witness not judged (uncalibrated reader): "
+              f"{', '.join(uncalibrated[:5])}"
+              + (f" (+{len(uncalibrated) - 5} more)" if len(uncalibrated) > 5 else ""))
+        print(f"INCOMPLETE: {len(uncalibrated)} of {len(report['checks'])} "
+              f"artefact(s) cite a witness the flow-log reader may not judge; "
+              f"NOT_MEASURED, reason_class uncalibrated.")
     if overall_ok and unmeasured:
+        if uncalibrated:
+            print(f"  witness not judged (uncalibrated reader): "
+                  f"{', '.join(uncalibrated[:5])}")
         # DETAIL FIRST, SENTINEL LAST, AND THE SENTINEL SHORT. The consumer
         # (`flow_compliance_check.output_snippet`) keeps only the LAST 300
         # characters of stdout and then requires the token to START A LINE, so

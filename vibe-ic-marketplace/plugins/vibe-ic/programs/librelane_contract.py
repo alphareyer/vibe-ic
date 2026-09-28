@@ -239,12 +239,18 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
     c = clocks[0]
     _set(result, sources, 'CLOCK_PERIOD', c.get('period_ns'), 'L8_TIMING_WAVEFORM.clock_domains[primary].period_ns')
     _set(result, sources, 'CLOCK_PORT', c.get('source_pin'), 'L8_TIMING_WAVEFORM.clock_domains[primary].source_pin')
-    rtl = project / 'phase2/stage1/rtl' / (str(l9.get('top_module', '')) + '.v')
+    # The design's whole build closure (cmp3 D8): the read phase-3 synthesis
+    # and the Step-5 proof take (`_chip_synth_read.chip_rtl_files`), not the
+    # one file named after the top -- a multi-file core (subservient) lost
+    # every submodule, and Yosys.JsonHeader stopped on the first of them.
+    import _chip_synth_read as CSR
+    rtl = CSR.chip_rtl_files(project / 'phase2/stage1/rtl')
     chip_top = project / 'phase3/stage3/pnr/chip_top_io.v'
-    if rtl.is_file() and chip_top.is_file():
-        _set(result, sources, 'VERILOG_FILES', ['dir::' + str(rtl.relative_to(project)),
-                                                'dir::' + str(chip_top.relative_to(project))],
-             'L9_INTEGRATION_SPEC.top_module + phase3/stage3/pnr/chip_top_io.v')
+    if rtl and chip_top.is_file():
+        _set(result, sources, 'VERILOG_FILES',
+             ['dir::' + str(path.relative_to(project)) for path in (*rtl, chip_top)],
+             '_chip_synth_read.chip_rtl_files(phase2/stage1/rtl) (the read phase-3 '
+             'synthesis and the Step-5 proof take) + phase3/stage3/pnr/chip_top_io.v')
     sdc = project / 'phase3/stage3/pnr/constraint.sdc'
     if sdc.is_file():
         for key in ('PNR_SDC_FILE', 'SIGNOFF_SDC_FILE'):
@@ -343,7 +349,7 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
     # spm chip path the PDK-default GeneratePDN measured 3,391,999
     # power-grid violations (every shape floating) until these were declared.
     plan = {}
-    chip_top_record = project / 'reports/phase3/io_pad_chip_top.json'
+    chip_top_record = project / CHIP_TOP_RECORD_REL
     if chip_top_record.is_file():
         plan = _load(chip_top_record).get('power_pad_plan') or {}
         if isinstance(plan, str):
@@ -640,6 +646,7 @@ def state_from_direct(project: Path, image: str, config_path: Path,
     state: dict[str, Any] = {}
     receipt: dict[str, Any] = {'step': step_id, 'image': image,
                                'config': str(config_path), 'config_sha256': digest(config_path),
+                               'design_name': config.get('DESIGN_NAME'),
                                'required': required, 'views': {}, 'derived': {}}
 
     def _file(view: str, value: Any) -> Path:
@@ -761,6 +768,10 @@ def handoff_to_direct(state_path: Path, targets: dict[str, Path], receipt: Path,
         rows[view] = {'source': str(source), 'source_sha256': digest(source),
                       'dest': str(dest), 'dest_sha256': digest(dest),
                       'replaced_sha256': replaced}
+        if source.suffix.lower() == '.def':
+            # The top a later step judges is the one this DEF states, whatever
+            # the view is called (`def`, `post_cts_def`, `post_hold_def`).
+            rows[view]['design'] = _def_design_name(source)
         if rows[view]['source_sha256'] != rows[view]['dest_sha256']:
             raise Refusal('LL_HANDOFF_COPY_MISMATCH', view)
     document = {'state': str(state_path), 'state_sha256': digest(state_path),
@@ -1591,6 +1602,122 @@ def _apply_runner_floorplan(project: Path, config: dict, sources: dict,
                       f'no declared answers.die_area_um and {why}')
 
 
+#: The chip-top producer's record (step 15.5ic, `io_pad_chip_top_gen`): the
+#: pad-carrying top it wrapped around the core, and which module is which.
+CHIP_TOP_RECORD_REL = 'reports/phase3/io_pad_chip_top.json'
+
+
+def layout_top(project: Path) -> tuple[str, str, str] | None:
+    """(chip_top, core, source) when this chip-path run built a pad-carrying top.
+
+    On the chip path step 15.5ic wraps the core in a top that instantiates the
+    IO cells, and every layout database from 15.5ic on is that top: the direct
+    deck links it (`_inject_padring_chip_top`) and LibreLane's PadRing places
+    the instances PAD_* name inside it. Read from the producer's record, never
+    from a name; None for a core-only or HARDMACRO design, or before the
+    producer wrote a top.
+    """
+    if design_class(project) != DESIGN_CLASS_CHIP_PAD_RING:
+        return None
+    path = project / CHIP_TOP_RECORD_REL
+    if not path.is_file():
+        return None
+    record = _load(path)
+    if record.get('verdict') != 'WROTE':
+        return None
+    # WROTE claims a wrapper: a record that cannot name it, or names one
+    # module twice, contradicts itself and is refused, never read as "no top".
+    chip_top, core = record.get('chip_top_module'), record.get('core_module')
+    problems = []
+    if not record.get('chip_top_verilog'):
+        problems.append('no chip_top_verilog')
+    if not isinstance(chip_top, str) or not chip_top:
+        problems.append(f'chip_top_module {chip_top!r}')
+    if not isinstance(core, str) or not core:
+        problems.append(f'core_module {core!r}')
+    if not problems and chip_top == core:
+        problems.append(f'chip_top_module and core_module are both {core!r}')
+    if problems:
+        raise Refusal('LL_CHIP_TOP_RECORD_CONTRADICTORY',
+                      f"{CHIP_TOP_RECORD_REL} verdict WROTE but "
+                      f"{'; '.join(problems)}")
+    return chip_top, core, f'{CHIP_TOP_RECORD_REL}.chip_top_module'
+
+
+def _apply_layout_top(project: Path, config: dict, sources: dict) -> None:
+    """A layout chain on the chip path links the chip top, not the core.
+
+    The declared `top_cell` may name the core (spm, subservient: the product
+    name); this run's own record says the layout's top is the wrapper around
+    it, which is the rule `general_precheck._recorded_physical_top` applies to
+    the streamed layout. A declared name that is neither refuses.
+    """
+    found = layout_top(project)
+    if found is None:
+        return
+    chip_top, core, source = found
+    declared = config.get('DESIGN_NAME')
+    if declared == chip_top:
+        return
+    if declared not in (None, core):
+        raise Refusal('LL_TOP_CELL_CONFLICT',
+                      f"{sources.get('DESIGN_NAME')} = {declared!r} names neither the "
+                      f"core {core!r} nor the chip top {chip_top!r} of {CHIP_TOP_RECORD_REL}")
+    _set(config, sources, 'DESIGN_NAME', chip_top,
+         f"{source} (the pad-carrying top around the core {core!r}; declared "
+         f"top_cell {declared!r} is that core)" if declared else
+         f"{source} (the pad-carrying top around the core {core!r})")
+
+
+def _check_synthesised_read(project: Path, config: dict, sources: dict) -> None:
+    """A layout chain reads the RTL the netlist was synthesised from, or refuses.
+
+    Phase-3 synthesis records the read it built (`chip_read_built.json`,
+    every file with its sha256 and the define decision) and binds it to the
+    netlist it produced. While that netlist stands, the chain's
+    VERILOG_FILES, minus the chip-top wrapper step 15.5ic wrote after
+    synthesis, must be that read exactly, and the chain carries synthesis's
+    define decision. A record that describes no netlist on disk is not
+    compared: the provenance says so, with the reason.
+    """
+    import _chip_synth_read as CSR
+    files = config.get('VERILOG_FILES')
+    if not files:
+        return
+    built, why = CSR.built_record_for_current_netlist(project)
+    if built is None:
+        sources['VERILOG_FILES'] += (
+            f'; synthesised-read comparison NOT_MEASURED: {why}; '
+            f'VERILOG_DEFINES not carried for the same reason')
+        return
+    wrapper = 'phase3/stage3/pnr/chip_top_io.v'
+    paths = [project / str(f).removeprefix('dir::') for f in files]
+    read = [p for p in paths if p.resolve() != (project / wrapper).resolve()]
+    # The top is synthesis's own; the file read is this chain's to match.
+    differences = CSR.chip_read_differences(
+        {'files': built.get('files') or []},
+        {'files': [{'name': p.name, 'sha256': digest(p)} for p in read]})
+    rel = CSR.built_record_path(project).relative_to(project)
+    if differences:
+        raise Refusal('LL_LAYOUT_RTL_NOT_THE_SYNTHESISED_READ',
+                      f"VERILOG_FILES vs {rel}: {'; '.join(differences)}")
+    sources['VERILOG_FILES'] += (f"; equals {rel} (file names and sha256, "
+                                 f"bound to {built['netlist']['path']})")
+    define = built.get('define')
+    if not isinstance(define, dict) or not isinstance(define.get('simulation'), bool):
+        raise Refusal('LL_SYNTHESIS_DEFINE_UNRECORDED',
+                      f'{rel}.define.simulation is {define!r}')
+    # The defines of the read that PRODUCED the netlist: the record is
+    # rewritten at binding when a retry frontend read other defines than the
+    # decision (`_chip_synth_read.bind_built_record_netlist`).
+    defines = (['SIMULATION'] if define['simulation'] else []) + \
+        (['SYNTHESIS'] if define.get('synthesis') is True else [])
+    _set(config, sources, 'VERILOG_DEFINES', defines,
+         f"{rel}.define.simulation/.synthesis (the defines of the read that built "
+         f"{built['netlist']['path']}: {define.get('verdict')}, frontend "
+         f"{built.get('frontend', 'unrecorded')})")
+
+
 def resolve_step_configs(project: Path, image: str, pdk: str,
                          step_ids: list[str], *, pdk_root: Path,
                          docker: str = 'docker',
@@ -1608,17 +1735,27 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     root.mkdir(parents=True, exist_ok=True)
     design = root / 'design.json'
     emitted = emit_config(project, pdk, design)
-    if _DIE_STEPS & set(step_ids) or overlay:
-        sources = _load(design.with_suffix('.provenance.json'))
-        _apply_runner_floorplan(project, emitted, sources, step_ids)
-        for key, (value, source) in (overlay or {}).items():
-            for older in _LEVER_SUPERSEDES.get(key, ()):
-                if older in emitted:
-                    emitted.pop(older)
-                    sources[older] = f'superseded by {key} ({source})'
-            _set(emitted, sources, key, value, source)
-        write_json(design, emitted)
-        write_json(design.with_suffix('.provenance.json'), sources)
+    sources = _load(design.with_suffix('.provenance.json'))
+    _check_synthesised_read(project, emitted, sources)
+    _apply_runner_floorplan(project, emitted, sources, step_ids)
+    _apply_layout_top(project, emitted, sources)
+    for key, (value, source) in (overlay or {}).items():
+        for older in _LEVER_SUPERSEDES.get(key, ()):
+            if older in emitted:
+                emitted.pop(older)
+                sources[older] = f'superseded by {key} ({source})'
+        _set(emitted, sources, key, value, source)
+    # The explicit overlay outranks every declared or derived rectangle, and
+    # the rules that judged those judged them BEFORE it; what the tool is
+    # handed is judged here, whoever supplied each half.
+    die, core = emitted.get('DIE_AREA'), emitted.get('CORE_AREA')
+    if die and core and not (core[0] >= die[0] and core[1] >= die[1] and
+                             core[2] <= die[2] and core[3] <= die[3]):
+        raise Refusal('LL_CONFIG_CORE_OUTSIDE_DIE',
+                      f"CORE_AREA {core} ({sources.get('CORE_AREA')}) vs "
+                      f"DIE_AREA {die} ({sources.get('DIE_AREA')})")
+    write_json(design, emitted)
+    write_json(design.with_suffix('.provenance.json'), sources)
     requested = root / 'steps.json'
     write_json(requested, step_ids)
     script = '''import json,sys
