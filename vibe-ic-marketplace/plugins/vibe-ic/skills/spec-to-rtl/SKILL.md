@@ -707,6 +707,11 @@ with a single full-width ripple carry as the dominant term of its worst path
    negative slack and slew violations got WORSE. Author the structure; do not
    expect a map to author it for you.
 
+For a high-fanout serial input, also apply `agents/ic-expert-agent.md`'s
+"registering a high-fanout serial input is a latency trade — declare it":
+an input register is allowed only when the input leaves latency free, and its
+measured edge-to-output offset must equal the declared `latency_cycles`.
+
 **The cycle count is the thing you must not quietly move.** All three rewrites
 above keep it exactly. Before considering any rewrite that does move it, read what the
 input actually constrains -- and read the whole document, because the layer that

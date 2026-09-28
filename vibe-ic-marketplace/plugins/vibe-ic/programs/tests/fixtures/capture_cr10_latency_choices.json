@@ -1,0 +1,40 @@
+[
+  {
+    "design": "filter_stream",
+    "input": "Serial input fans out to 40 loads. First output bit must appear on the same edge as first input bit.",
+    "latency_fixed": true,
+    "required_latency": 0,
+    "candidate_input_registered": false,
+    "measured_latency": 0,
+    "declared_latency": 0,
+    "accept": true
+  },
+  {
+    "design": "filter_stream",
+    "input": "Serial input fans out to 40 loads. First output bit must appear on the same edge as first input bit.",
+    "latency_fixed": true,
+    "required_latency": 0,
+    "candidate_input_registered": true,
+    "measured_latency": 1,
+    "declared_latency": 1,
+    "accept": false
+  },
+  {
+    "design": "packet_accumulator",
+    "input": "Serial input fans out to 48 loads. Latency is implementation-defined and must be declared.",
+    "latency_fixed": false,
+    "candidate_input_registered": true,
+    "measured_latency": 1,
+    "declared_latency": 1,
+    "accept": true
+  },
+  {
+    "design": "packet_accumulator",
+    "input": "Serial input fans out to 48 loads. Latency is implementation-defined and must be declared.",
+    "latency_fixed": false,
+    "candidate_input_registered": true,
+    "measured_latency": 1,
+    "declared_latency": 0,
+    "accept": false
+  }
+]
