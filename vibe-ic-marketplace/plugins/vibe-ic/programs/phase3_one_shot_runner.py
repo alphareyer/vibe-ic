@@ -67645,6 +67645,11 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
     rc, log_text = _run_lec(functional_lib=functional_lib,
                             gate_renames=_pre_renames or None)
     parsed = mod.parse_equiv_log(log_text)
+    # THE LOG `parsed` WAS READ FROM. A discarded re-proof below overwrites
+    # `log_text` with its own transcript while the first pass's `parsed` stands,
+    # so every name and state fact about the published residual is read from
+    # this, never from whichever run happened to execute last.
+    verdict_log_text = log_text
     # ROUND-3 (subservient x gf180mcuD, 2026-09-02) — PIN-PERMUTATION RE-PROOF.
     # The flattened functional recipe names every cell pin `<inst>.<pin>` and
     # `equiv_make` pairs those by name; a post-route repair that SWAPPED two
@@ -67738,6 +67743,7 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                     "verdict stands")
             else:
                 parsed = _p2
+                verdict_log_text = log_text
                 pin_perm.update({
                     "method": "pin_correspondence_rename",
                     "reproof_run": True,
@@ -67773,6 +67779,7 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                 functional_lib=functional_lib,
                 blacklist_c=_to_container_path(str(_bl), container))
             parsed = mod.parse_equiv_log(log_text)
+            verdict_log_text = log_text
             pin_perm.update({
                 "reproof_run": True,
                 "method": "blacklist",
@@ -67799,10 +67806,11 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                 f"{len(pin_perm['rejected'])} rejected) — verdict stands")
     cex_search = None
     unproven_names = []
-    miter_stateless, miter_state_evidence = mod._lec_run.miter_is_stateless(log_text)
+    miter_stateless, miter_state_evidence = mod._lec_run.miter_is_stateless(
+        verdict_log_text)
     if (parsed.get("unproven") or 0) > 0:
         original_verdict = parsed.get("verdict")
-        unproven_names = mod.parse_unproven_points(log_text)
+        unproven_names = mod.parse_unproven_points(verdict_log_text)
         cex = mod.lec_cex
         search_id = str(time.time_ns())
         try:
@@ -67848,30 +67856,31 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
         except (OSError, ValueError, KeyError, TypeError) as exc:
             cex_search = cex.not_run(str(exc), unproven_names,
                                      run_identity=search_id)
-        if cex_search["result"] == "COUNTEREXAMPLE":
-            parsed["verdict"] = "NON_EQUIVALENT"
-            parsed["non_equivalent"] = len(unproven_names)
-        elif original_verdict in ("FAIL", "NON_EQUIVALENT", "RUN_ERROR"):
-            # A failed original comparison cannot be softened by a search
-            # that did not execute or finish.
-            pass
-        elif (len(unproven_names) == parsed.get("unproven")
-              and cex.complete_resolution_valid(cex_search, unproven_names)):
-            parsed["verdict"] = "PROVEN_EQUIVALENT"
+        # ONE decision function for both producers (this one and lec_run's
+        # pre-layout LEC): only a model of a COMPLETE, stateless miter decides
+        # NON_EQUIVALENT; a stateful model is a candidate and stays NOT_PROVEN.
+        decision = cex.decide_residual(
+            original_verdict, cex_search, unproven_names,
+            int(parsed.get("unproven") or 0), bool(miter_stateless))
+        parsed["verdict"] = decision["verdict"]
+        parsed["verdict_explanation"] = (
+            decision["explanation"] or
+            f"{original_verdict}: the original comparison decided this record; "
+            f"counterexample search: {cex.search_summary(cex_search)}")
+        if decision["explanation"] is None:
+            pass  # the original decided verdict and its counts stand
+        elif decision["verdict"] == "NON_EQUIVALENT":
+            parsed["non_equivalent"] = decision["non_equivalent_points"]
+            parsed["equivalent"] = False
+        elif decision["verdict"] == "PROVEN_EQUIVALENT":
             parsed["proven"] = parsed.get("total")
             parsed["unproven"] = 0
             parsed["equivalent"] = True
-        elif miter_stateless:
-            parsed["verdict"] = "RUN_ERROR"
-            parsed["equivalent"] = False
-            parsed["reason"] = (
-                "combinational residual requires a complete SAT disposition; "
-                f"counterexample search {cex_search['result']}: "
-                f"{cex_search.get('reason', 'no deciding SAT result')}")
-            parsed["counterexample_search_error"] = parsed["reason"]
         else:
-            parsed["verdict"] = "NOT_PROVEN"
             parsed["equivalent"] = False
+            if decision["verdict"] == "RUN_ERROR":
+                parsed["reason"] = decision["explanation"]
+                parsed["counterexample_search_error"] = decision["explanation"]
     doc = {
         "tool": "yosys-equiv",
         "top": top,
@@ -67898,6 +67907,7 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
         "unproven_point_names": unproven_names,
         "counterexample_search": cex_search,
         "counterexample_search_error": parsed.get("counterexample_search_error"),
+        "verdict_explanation": parsed.get("verdict_explanation"),
         "miter_stateless": miter_stateless,
         "miter_state_evidence": miter_state_evidence,
         "equivalent": parsed.get("equivalent"),

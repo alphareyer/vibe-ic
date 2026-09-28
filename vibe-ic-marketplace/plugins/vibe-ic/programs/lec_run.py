@@ -3681,6 +3681,10 @@ def unproven_names(raw: str) -> List[str]:
     line per unproven point and nothing per PROVEN point, so this list is the
     only per-name evidence the tool gives — which is why the caller derives
     "proven" as "compared and NOT in this list".
+
+    A bit of a multi-bit wire prints as `\<x>_gold [<i>] \<x>_gate [<i>]`
+    (no `splitnets`, e.g. whenever an FSM encoding table is in use); that
+    point is named `<x>[<i>]`, the name `equiv_miter -cmp` gives its compare.
     """
     out: List[str] = []
     for line in (raw or "").splitlines():
@@ -3689,7 +3693,16 @@ def unproven_names(raw: str) -> List[str]:
         tok = line.split()
         if len(tok) >= 2 and tok[-2].endswith("_gold"):
             out.append(tok[-2].lstrip("\\")[: -len("_gold")])
+        elif (len(tok) >= 4 and tok[-4].endswith("_gold")
+              and tok[-2].endswith("_gate") and tok[-3] == tok[-1]
+              and _BIT_INDEX_RE.fullmatch(tok[-1])
+              and tok[-4][: -len("_gold")] == tok[-2][: -len("_gate")]):
+            out.append(tok[-4].lstrip("\\")[: -len("_gold")] + tok[-1])
     return sorted(set(out))
+
+
+#: The `[<bit>]` suffix yosys prints after a wire name for one bit of it.
+_BIT_INDEX_RE = re.compile(r"\[\d+\]")
 
 
 def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
@@ -6705,31 +6718,33 @@ def main(argv: Optional[List[str]] = None) -> int:
                                        run_identity=invocation_id)
         report["counterexample_search"] = _search
         report["unproven_point_names"] = _names
-        if _search["result"] == "COUNTEREXAMPLE":
-            report["verdict"] = "NON_EQUIVALENT"
-            report["non_equivalent_points"] = len(_names)
-        elif _original_verdict in ("FAIL", "NON_EQUIVALENT"):
-            # A failed original comparison is decided evidence. An unavailable
-            # second search cannot downgrade it to NOT_PROVEN.
-            pass
-        elif (len(_names) == report["unproven_points"]
-              and _lec_cex.complete_resolution_valid(_search, _names)):
-            report["verdict"] = "PROVEN_EQUIVALENT"
-            report["equivalent"] = True
-            report["proven_points"] = report.get("miter_points")
-            report["compared_points"] = report.get("miter_points")
-            report["unproven_points"] = 0
-        elif _stateless:
-            report["verdict"] = "RUN_ERROR"
-            report["equivalent"] = False
+        # ONE decision function for both producers (this one and phase 3's
+        # post-layout LEC): only a model of a COMPLETE, stateless miter decides
+        # NON_EQUIVALENT; a stateful model is a candidate and stays NOT_PROVEN.
+        _decision = _lec_cex.decide_residual(
+            _original_verdict, _search, _names,
+            int(report["unproven_points"]), bool(_stateless))
+        report["verdict"] = _decision["verdict"]
+        if _decision["explanation"] is None:
+            # The original decided verdict and its counts stand; say what the
+            # search saw without contradicting the explanation of that verdict.
             report["verdict_explanation"] = (
-                "Combinational residual requires a complete SAT disposition; "
-                f"counterexample search {_search['result']}: "
-                f"{_search.get('reason', 'no deciding SAT result')}.")
-            report["counterexample_search_error"] = report["verdict_explanation"]
+                f"{report.get('verdict_explanation') or ''} Counterexample "
+                f"search: {_lec_cex.search_summary(_search)}.").strip()
         else:
-            report["verdict"] = "NOT_PROVEN"
-            report["equivalent"] = False
+            report["verdict_explanation"] = _decision["explanation"]
+            if _decision["verdict"] == "NON_EQUIVALENT":
+                report["equivalent"] = False
+                report["non_equivalent_points"] = _decision["non_equivalent_points"]
+            elif _decision["verdict"] == "PROVEN_EQUIVALENT":
+                report["equivalent"] = True
+                report["proven_points"] = report.get("miter_points")
+                report["compared_points"] = report.get("miter_points")
+                report["unproven_points"] = 0
+            else:
+                report["equivalent"] = False
+                if _decision["verdict"] == "RUN_ERROR":
+                    report["counterexample_search_error"] = _decision["explanation"]
     # THE BOUND AND WHETHER IT WAS HIT. Without these a reader of lec.json
     # cannot tell a proof that DECIDED nothing from a proof that was never
     # given enough resources to decide anything -- the exact confusion that

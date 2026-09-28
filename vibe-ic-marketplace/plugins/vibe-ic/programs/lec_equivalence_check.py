@@ -492,8 +492,12 @@ def audit(project: Path) -> AuditResult:
     res.unproven_points = unproven
     res.total_points = _first_count(lc, ("total_points", "miter_points"))
     res.proven_points = _first_count(lc, ("proven_points", "proved_points"))
-    res.unproven_point_names = [str(x) for x in
-                                (doc.get("unproven_point_names") or [])]
+    # Validated before it is iterated: a malformed field is a named
+    # RUN_ERROR below, never a TypeError that leaves no verdict at all.
+    _names_raw = doc.get("unproven_point_names")
+    _names_error = lec_cex.point_names_error(_names_raw)
+    res.unproven_point_names = ([] if _names_error or not _names_raw
+                                else [str(x) for x in _names_raw])
     res.counterexample_search = (doc.get("counterexample_search")
                                  if isinstance(doc.get("counterexample_search"), dict)
                                  else {})
@@ -550,6 +554,14 @@ def audit(project: Path) -> AuditResult:
         res.inconclusive = False
         return res
 
+    if _names_error:
+        res.verdict = "RUN_ERROR"
+        res.findings.append(Finding(
+            rule="LEC_POINT_NAMES_INVALID", severity="ERROR",
+            message=f"LEC report cannot name its residual: {_names_error}.",
+            file=LEC_JSON_REL))
+        return res
+
     # A residual may be undecided, but an already-decided FAIL and a stateless
     # residual without complete SAT disposition cannot become NOT_PROVEN.
     if (unproven or 0) > 0 and (res.total_points or 0) > 0:
@@ -563,9 +575,14 @@ def audit(project: Path) -> AuditResult:
                            proven_points=res.proven_points,
                            unproven_point_names=res.unproven_point_names,
                            counterexample_search=search)
-        if (outcome == "COUNTEREXAMPLE" or (non_equiv or 0) > 0
-                or str(lc.get("verdict") or "").upper() in
-                ("FAIL", "NON_EQUIVALENT")):
+        _verdict_word = str(lc.get("verdict") or "").upper()
+        # Only a model of a COMPLETE miter decides by itself. A stateful model
+        # starts from a state no declared reset constrains; a NON_EQUIVALENT
+        # count or word resting on such a candidate is not a decided FAIL.
+        if (lec_cex.decides_non_equivalence(search) or _verdict_word == "FAIL"
+                or (not lec_cex.is_model_candidate(search)
+                    and ((non_equiv or 0) > 0
+                         or _verdict_word == "NON_EQUIVALENT"))):
             res.findings.append(Finding(
                 rule="LEC_NOT_EQUIVALENT", severity="ERROR",
                 message=(f"LEC producer already decided FAIL or the SAT miter "
@@ -577,7 +594,11 @@ def audit(project: Path) -> AuditResult:
             res.verdict = "RUN_ERROR"
             res.findings.append(Finding(
                 rule="LEC_RUN_ERROR", severity="ERROR",
-                message="LEC producer recorded a run error; the residual has no deciding proof.",
+                message=("LEC producer recorded a run error; the residual has no "
+                         "deciding proof: "
+                         + str(lc.get("counterexample_search_error")
+                               or lc.get("verdict_explanation")
+                               or "no reason recorded")),
                 file=LEC_JSON_REL))
             return res
         if doc.get("miter_stateless") is True and not (
@@ -610,11 +631,7 @@ def audit(project: Path) -> AuditResult:
             res.unproven_points = 0
             return res
         res.verdict = "NOT_PROVEN"
-        search_detail = (
-            f"counterexample search NOT RUN: {search['reason']}"
-            if outcome == "NOT_RUN" else
-            f"{search['method']} K={search['bound_cycles']} cycles: "
-            f"{outcome} ({search['reason']})")
+        search_detail = lec_cex.search_summary(search)
         res.findings.append(Finding(
             rule="LEC_NOT_PROVEN", severity="WARNING",
             message=(f"LEC NOT_PROVEN: {unproven} of {res.total_points} points "

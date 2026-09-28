@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 
@@ -20,6 +21,7 @@ import flow_dashboard_data as dashboard
 import vibe_ic_one_shot_runner as frontdoor
 import phase3_one_shot_runner as phase3
 import phase23_completion_self_audit_check as completion
+import lec_run
 
 
 def _residual():
@@ -342,3 +344,118 @@ def test_real_pinned_yosys_sequential_zero_init_is_bounded(tmp_path):
     assert record["result"] == "NONE_FOUND"
     assert record["completeness"] == "BOUNDED"
     assert "zero" in record["initial_state_policy"]
+
+
+# ---------------------------------------------------------------------------
+# Controls on the pinned image: designs EQUIVALENT FROM RESET whose miter still
+# holds a model from the unconstrained zero state. That model is a candidate
+# and must never become NON_EQUIVALENT (review of 7af91b7bd).
+# ---------------------------------------------------------------------------
+
+_UP_COUNTER = """module gold(input clk, input rst, output y);
+  reg [6:0] s;
+  always @(posedge clk) if (rst) s <= 7'd0; else s <= s + 7'd1;
+  assign y = (s == 7'd3);
+endmodule
+"""
+_DOWN_COUNTER = """module gate(input clk, input rst, output y);
+  reg [6:0] g;
+  always @(posedge clk) if (rst) g <= 7'd127; else g <= g - 7'd1;
+  assign y = (g == 7'd124);
+endmodule
+"""
+# The same three-state machine, binary in gold and one-hot in gate, the state
+# register paired by name with no encoding table.
+_BINARY_FSM = """module gold(input clk, input rst, input go, output y);
+  reg [2:0] state;
+  always @(posedge clk)
+    if (rst) state <= 3'd0;
+    else if (go) state <= (state == 3'd2) ? 3'd0 : state + 3'd1;
+  assign y = (state == 3'd2);
+endmodule
+"""
+_ONEHOT_FSM = """module gate(input clk, input rst, input go, output y);
+  reg [2:0] state;
+  always @(posedge clk)
+    if (rst) state <= 3'b001;
+    else if (go) state <= {state[1:0], state[2]};
+  assign y = state[2];
+endmodule
+"""
+
+
+def _real_residual_search(work, gold, gate, proof_tail, bound):
+    (work / "gold.v").write_text(gold)
+    (work / "gate.v").write_text(gate)
+    (work / "proof.ys").write_text(
+        "read_verilog /work/gold.v\nread_verilog /work/gate.v\nproc\n"
+        "opt_clean\nequiv_make gold gate equiv\nhierarchy -top equiv\n"
+        + proof_tail + "equiv_status\nwrite_rtlil /work/equiv.il\n")
+    proof_log = _yosys(work, "proof.ys")
+    names = lec_run.unproven_names(proof_log)
+    assert names == sorted(post.parse_unproven_points(proof_log))
+    total = int(re.search(r"Found (\d+) \$equiv cells in equiv", proof_log).group(1))
+    (work / "search.ys").write_text(cex.script(
+        "/work/equiv.il", "/work/flat.il", "/work/trace.json", bound, 60))
+    record = cex.interpret(
+        _yosys(work, "search.ys"), work / "flat.il", work / "trace.json",
+        bound=bound, bound_source="test declaration", point_names=names,
+        tool_version="pinned 0.3.84", run_identity="real-yosys")
+    return names, total, record
+
+
+@pytest.mark.parametrize("gold,gate", [(_UP_COUNTER, _DOWN_COUNTER),
+                                       (_BINARY_FSM, _ONEHOT_FSM)],
+                         ids=["up_vs_down_counter", "binary_vs_onehot_fsm"])
+def test_real_pinned_yosys_equivalent_from_reset_is_never_non_equivalent(
+        tmp_path, gold, gate):
+    names, total, record = _real_residual_search(
+        tmp_path, gold, gate, "equiv_simple -seq 5\nequiv_induct\n", 8)
+    assert names, "the proof must leave a residual for the search to examine"
+    assert record["result"] != "COUNTEREXAMPLE"
+    # yosys DOES find the model from the unreachable zero state; it is kept.
+    assert record["result"] == cex.CANDIDATE
+    assert record["completeness"] == "BOUNDED"
+    assert any(step["mismatched_points"] for step in record["trace"])
+    decision = cex.decide_residual("INCONCLUSIVE", record, names, len(names), False)
+    assert decision["verdict"] == "NOT_PROVEN"
+    doc = {"equivalent": False, "verdict": decision["verdict"],
+           "total_points": total, "proven_points": total - len(names),
+           "unproven_points": len(names), "non_equivalent_points": 0,
+           "unproven_point_names": names, "miter_stateless": False,
+           "counterexample_search": record}
+    assert post.evaluate_report(doc)["result"] == "NOT_PROVEN"
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "lec.json").write_text(json.dumps(doc))
+    assert pre.audit(tmp_path).verdict == "NOT_PROVEN"
+
+
+def test_real_pinned_yosys_finds_the_gold_zero_gate_one_mismatch(tmp_path):
+    """`equiv_miter -undef` makes an undefined gold bit a don't-care; without
+    SAT undef modelling the gold-0/gate-1 direction was masked (NONE_FOUND)."""
+    names, _total, record = _real_residual_search(
+        tmp_path, "module gold(input a, b, output y); assign y = a & b; endmodule\n",
+        "module gate(input a, b, output y); assign y = a | b; endmodule\n", "", 1)
+    assert names == ["y"]
+    assert record["result"] == "COUNTEREXAMPLE"
+    assert record["completeness"] == "COMPLETE"
+    step = record["trace"][0]
+    assert step["mismatched_points"] == ["y"]
+    assert step["inputs"]["a"] != step["inputs"]["b"]
+
+
+def test_real_pinned_yosys_trace_names_only_the_differing_output(tmp_path):
+    names, _total, record = _real_residual_search(
+        tmp_path,
+        "module gold(input a, b, output y1, y2); assign y1 = a | b; "
+        "assign y2 = a & b; endmodule\n",
+        "module gate(input a, b, output y1, y2); assign y1 = a ^ b; "
+        "assign y2 = a & b; endmodule\n", "", 3)
+    assert names == ["y1", "y2"]
+    assert record["result"] == "COUNTEREXAMPLE"
+    flagged = [step for step in record["trace"] if step["mismatched_points"]]
+    assert flagged
+    for step in flagged:
+        assert step["mismatched_points"] == ["y1"]
+        assert step["inputs"] == {"a": "1", "b": "1"}

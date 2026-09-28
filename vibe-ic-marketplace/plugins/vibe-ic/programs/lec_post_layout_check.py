@@ -814,22 +814,29 @@ def parse_equiv_log(text: str) -> Dict[str, object]:
 # re-proof does not run, and the original UNPROVEN verdict stands.
 # ---------------------------------------------------------------------------
 _UNPROVEN_POINT_RE = re.compile(
-    r"Unproven\s+\$equiv\s+\S+:\s+\\?(\S+?)_gold\s+\\?(\S+?)_gate", re.M)
+    r"Unproven\s+\$equiv\s+\S+:\s+\\?(\S+?)_gold(?:[ \t]+(\[\d+\]))?"
+    r"[ \t]+\\?(\S+?)_gate(?:[ \t]+(\[\d+\]))?[ \t]*$", re.M)
 
 
 def parse_unproven_points(text: str) -> List[str]:
     """Distinct names of the $equiv points the FINAL `equiv_status` listed as
     UNPROVEN, without the `\\` escape and the `_gold`/`_gate` suffixes, in log
     order. `equiv_make` pairs same-named wires, so a line whose two names differ
-    is not one of its points and is skipped."""
+    is not one of its points and is skipped. One bit of a multi-bit wire prints
+    as `\\<x>_gold [<i>] \\<x>_gate [<i>]` (the recipe skips `splitnets` when an
+    FSM encoding table is in use) and is named `<x>[<i>]`, the name
+    `equiv_miter -cmp` gives that bit's compare."""
     names: List[str] = []
     seen = set()
     for m in _UNPROVEN_POINT_RE.finditer(text or ""):
-        g, a = m.group(1), m.group(2)
-        if g != a or g in seen:
+        g, g_bit, a, a_bit = m.group(1), m.group(2), m.group(3), m.group(4)
+        if g != a or g_bit != a_bit:
             continue
-        seen.add(g)
-        names.append(g)
+        name = g + (g_bit or "")
+        if name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
     return names
 
 
@@ -1476,7 +1483,17 @@ def evaluate_report(doc: dict) -> Dict[str, object]:
     if non_equiv is None:
         non_equiv = _int_or_none(lc.get("non_equivalent"))
     equivalent = lc.get("equivalent")
-    names = [str(x) for x in (doc.get("unproven_point_names") or [])]
+    # Validated before it is iterated: a malformed field is a named
+    # RUN_ERROR, never a TypeError that leaves the CLI with no verdict JSON.
+    names_raw = doc.get("unproven_point_names")
+    names_error = lec_cex.point_names_error(names_raw)
+    if names_error:
+        return {"gate": GATE, "result": "FAIL", "verdict": V_RUN_ERROR,
+                "total_points": total, "proven_points": proven,
+                "unproven_points": unproven,
+                "non_equivalent_points": non_equiv, "equivalent": equivalent,
+                "findings": [f"LEC_POST_POINT_NAMES_INVALID: {names_error}"]}
+    names = [str(x) for x in (names_raw or [])]
     search = (doc.get("counterexample_search")
               if isinstance(doc.get("counterexample_search"), dict) else {})
     if names and unproven == 0 and not lec_cex.complete_resolution_valid(
@@ -1494,15 +1511,22 @@ def evaluate_report(doc: dict) -> Dict[str, object]:
                 "producer supplied no counterexample search record", names)
         outcome = search.get("result")
         search_error = lec_cex.residual_search_evidence_error(search, names)
-        if (outcome == "COUNTEREXAMPLE" or (non_equiv or 0) > 0
-                or verdict_in in (V_NONEQUIV, "FAIL")):
+        # Only a model of a COMPLETE miter decides by itself. A stateful model
+        # starts from a state no declared reset constrains; a NON_EQUIVALENT
+        # count or word resting on such a candidate is not a decided FAIL.
+        if (lec_cex.decides_non_equivalence(search) or verdict_in == "FAIL"
+                or (not lec_cex.is_model_candidate(search)
+                    and ((non_equiv or 0) > 0 or verdict_in == V_NONEQUIV))):
             result = "FAIL"
             finding = (f"LEC_POST_NONEQUIV: producer already decided non-equivalence "
                        f"or SAT miter found a counterexample for {names}; "
                        f"trace: {search.get('trace', 'see producer report')}")
         elif verdict_in == V_RUN_ERROR:
             result = "FAIL"
-            finding = "LEC_POST_RUN_ERROR: producer recorded a run error"
+            finding = ("LEC_POST_RUN_ERROR: producer recorded a run error: "
+                       + str(lc.get("counterexample_search_error")
+                             or lc.get("verdict_explanation")
+                             or "no reason recorded"))
         elif (lc.get("miter_stateless") is True
               and not (len(names) == unproven
                        and lec_cex.complete_resolution_valid(search, names))):
@@ -1522,11 +1546,7 @@ def evaluate_report(doc: dict) -> Dict[str, object]:
             equivalent = True
         else:
             result = V_NOT_PROVEN
-            search_detail = (
-                f"counterexample search NOT RUN: {search['reason']}"
-                if outcome == "NOT_RUN" else
-                f"{search['method']}, K={search['bound_cycles']} cycles: "
-                f"{outcome} ({search['reason']})")
+            search_detail = lec_cex.search_summary(search)
             finding = (f"LEC NOT_PROVEN: {unproven} of {total} points unproven; "
                        f"{search_detail}")
         return {

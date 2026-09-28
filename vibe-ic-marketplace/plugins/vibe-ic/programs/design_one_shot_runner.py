@@ -175,6 +175,7 @@ import _atomic_artefact as _aa  # noqa: E402  (vibe-ic#1082)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
+import lec_counterexample_search as _lec_cex  # noqa: E402 — LEC residual receipt
 
 # Path inside the iic-osic-tools container where the EDA tools live (yosys
 # + the slang plugin, sv2v, verilator). Mirrors phase3_one_shot_runner.
@@ -20175,14 +20176,54 @@ def lec_step_status_from_report(lec_json: Path) -> Tuple[str, str]:
     if verdict == "NON_EQUIVALENT":
         return _V.Verdict.FAIL.value, verdict
     if verdict == "NOT_PROVEN":
+        # NOT_PROVEN is the PRODUCER's word, and it carries a receipt: the
+        # named residual and the counterexample search that looked at it. The
+        # gate refuses a record whose receipt does not hold up (RUN_ERROR), so
+        # the step does not wear the word either: nothing valid was measured.
+        if lec_not_proven_receipt_error(doc):
+            return _V.Verdict.NOT_MEASURED.value, verdict
         return _V.Verdict.NOT_PROVEN.value, verdict
     if verdict == "INCONCLUSIVE":
-        if int(doc.get("unproven_points") or 0) > 0:
-            return _V.Verdict.NOT_PROVEN.value, verdict
+        # Unproven points alone are not NOT_PROVEN: without the producer's own
+        # word and receipt this is `lec_inconclusive_disposition`'s question,
+        # which also keeps a budget-stopped proof's reason class.
         return lec_inconclusive_disposition(doc)[0], verdict
     if verdict == "SKIPPED-CONDITION":
         return _V.Verdict.NOT_MEASURED.value, verdict
     return _V.Verdict.NOT_MEASURED.value, verdict
+
+
+def lec_not_proven_receipt_error(doc: dict) -> str:
+    """Why a producer-written NOT_PROVEN record is not a valid receipt, or "".
+
+    PURE. The same evidence rule the step-13 gate applies
+    (`lec_counterexample_search.residual_search_evidence_error`), so the step
+    and the gate cannot disagree about one record."""
+    if not isinstance(doc, dict):
+        return "record unreadable"
+    names = doc.get("unproven_point_names")
+    names_error = _lec_cex.point_names_error(names)
+    if names_error:
+        return names_error
+    search = doc.get("counterexample_search")
+    if not isinstance(search, dict) or not search:
+        return "NOT_PROVEN record carries no counterexample search receipt"
+    return _lec_cex.residual_search_evidence_error(search, list(names or []))
+
+
+def lec_not_proven_step_reason(doc: dict) -> str:
+    """The step-13 sentence for a valid NOT_PROVEN record. PURE.
+
+    The search's own sentence names its outcome, bound and REASON, so a search
+    that never ran cannot read like a real K-cycle search, and a proof the
+    budget stopped says so."""
+    search = doc.get("counterexample_search") or {}
+    total = doc.get("total_points") or doc.get("miter_points") or "unknown"
+    stopped = lec_exhausted_resource_note(doc)
+    return (f"LEC NOT_PROVEN: {doc.get('unproven_points')} of {total} points "
+            f"unproven; {_lec_cex.search_summary(search)}"
+            + (f"; the proof was stopped before it finished ({stopped})"
+               if stopped else ""))
 
 
 #: Fields in which `lec_run` records that the proof was STOPPED by something it
@@ -21911,16 +21952,14 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
                     _lec_doc = json.loads(lec_json.read_text(errors="replace"))
                 except (OSError, ValueError):
                     _lec_doc = {}
+                _receipt_error = (lec_not_proven_receipt_error(_lec_doc)
+                                  if str(_verdict).upper() == "NOT_PROVEN"
+                                  else "")
                 if _status == _V.Verdict.NOT_PROVEN.value:
-                    _search = (_lec_doc.get("counterexample_search") or {})
-                    _total = (_lec_doc.get("total_points")
-                              or _lec_doc.get("miter_points") or "unknown")
-                    _lec_reason = (
-                        f"LEC NOT_PROVEN: {_lec_doc.get('unproven_points')} "
-                        f"of {_total} points unproven; bounded counterexample "
-                        f"search ({_search.get('method', 'NOT_RUN')}, "
-                        f"K={_search.get('bound_cycles', 'unknown')} cycles) "
-                        f"{_search.get('result', 'NOT_RUN')}")
+                    _lec_reason = lec_not_proven_step_reason(_lec_doc)
+                elif _receipt_error:
+                    _lec_reason = (f"NOT_MEASURED: the producer wrote NOT_PROVEN "
+                                   f"but its receipt is invalid: {_receipt_error}")
                 else:
                     _lec_reason = (lec_inconclusive_disposition(_lec_doc)[1]
                                    if str(_verdict).upper() == "INCONCLUSIVE"
@@ -21939,7 +21978,9 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
                 # reached the step table with an empty `reason_class` — the bag
                 # the old vocabulary was. The reason is read off the same
                 # record by the same function; it needs no new table.
-                _lec_rc = (lec_inconclusive_reason_class(_lec_doc)
+                _lec_rc = ((_V.ReasonClass.EXECUTION_ERROR.value
+                            if _receipt_error else
+                            lec_inconclusive_reason_class(_lec_doc))
                            if _status == _V.Verdict.NOT_MEASURED.value else "")
                 results.append(StepResult("lec_equivalence", _status,
                                time.time() - t0,
