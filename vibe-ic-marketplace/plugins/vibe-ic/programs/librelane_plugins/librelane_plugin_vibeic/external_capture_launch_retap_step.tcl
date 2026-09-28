@@ -1,37 +1,23 @@
-# vibe-ic step Vibeic.ClockPathDriveSizing (see __init__.py).
+# Vibeic.ExternalCaptureLaunchRetap, after ClockPathDriveSizing and before
+# ResizerTimingPostCTS. The snapshot is the same CTS-input instance census
+# that ClockPathDriveSizing used; no master or net name selects a candidate.
 source $::env(SCRIPTS_DIR)/openroad/common/io.tcl
 source $::env(SCRIPTS_DIR)/openroad/common/resizer.tcl
-
 read_current_odb
-
 source $::env(SCRIPTS_DIR)/openroad/common/set_rc.tcl
 estimate_parasitics -placement
 
-# The pre-CTS snapshot, from the CTS step's input ODB.
 set _vic_prects_insts [dict create]
 set _vic_fh [open $::env(VIBEIC_CLKPATH_PRECTS_INSTANCES)]
 foreach _vic_pi [split [read $_vic_fh] "\n"] {
     if {$_vic_pi ne ""} { dict set _vic_prects_insts $_vic_pi 1 }
 }
 close $_vic_fh
-puts "CLKPATH_SIZE_SNAPSHOT: [dict size $_vic_prects_insts]"
 
-# The pass propagates the clock only inside itself and unpropagates it after;
-# the state this step read (OpenROAD.CTS's SDC propagates it) is restored.
-set _vic_was_propagated 0
-foreach _vic_clk [all_clocks] {
-    if {[get_property $_vic_clk is_propagated]} { set _vic_was_propagated 1 }
-}
+source [file join [file dirname [info script]] external_capture_launch_retap.tcl]
 
-source $::env(VIBEIC_CLKPATH_SIZING_TCL)
-
-if {$_vic_was_propagated} { set_propagated_clock [all_clocks] }
-
-# The clock tree's fanout, measured here because this is the one session
-# that knows which instances CTS created (not in the snapshot): the largest
-# number of loads on a net such an instance drives. `cts_quality_check`
-# compares it with the declared MAX_FANOUT_CONSTRAINT (review70 step 19:
-# keep a max-fanout-on-clock-nets gate on the tool's output).
+# Re-measure CTS fanout after retap, since a retained launch register is a
+# new load on its target net. This is the metric consumed by CTS quality.
 set _vic_cts_insts 0
 set _vic_cts_maxfo 0
 foreach _vic_inst [[ord::get_db_block] getInsts] {

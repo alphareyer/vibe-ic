@@ -319,6 +319,20 @@ proc vic_violation_neighbours {drc named} {
     return $found
 }
 
+# The scoped router can return success when its post-route verifier finds
+# violations that its routing loop did not see (DRT-0701/0711). Its exit code
+# alone is therefore not a clean-route verdict.
+proc vic_drc_count {drc} {
+    if {![file exists $drc]} { return -1 }
+    set fh [open $drc]
+    set count 0
+    foreach line [split [read $fh] "\n"] {
+        if {[string match "violation type:*" [string trim $line]]} { incr count }
+    }
+    close $fh
+    return $count
+}
+
 # The fork's scoped route (`detailed_route -nets`) refuses a result with more
 # whole-design violations than it was given (DRT-0712). A refusal names the
 # violations; the nets that share one with a routed net join the set and the
@@ -371,6 +385,15 @@ proc vic_eco_route {varname tag} {
                 vic_say "$tag scoped route left [dict size $lost] required net(s) without wire: [dict keys $lost]"
                 if {$attempt > $limit} { return 0 }
                 set dirty [dict merge $dirty $lost]
+                continue
+            }
+            set violations [vic_drc_count $drc]
+            if {$violations != 0} {
+                vic_say "$tag scoped route verified $violations DRC violation(s); expanding or refusing"
+                set more [vic_violation_neighbours $drc $dirty]
+                if {$attempt > $limit || [dict size $more] == 0} { return 0 }
+                vic_say "$tag expands by [dict size $more] DRC neighbour net(s): [dict keys $more]"
+                set dirty [dict merge $dirty $more]
                 continue
             }
             file copy -force $drc $::env(STEP_DIR)/eco_route.drc

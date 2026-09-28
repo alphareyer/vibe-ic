@@ -15,13 +15,19 @@ closure = importlib.import_module("_ppa.closure")
 prr = importlib.import_module("librelane_postroute_repair")
 
 
-def test_the_cts_step_runs_a_measured_external_capture_retap():
+def test_the_cts_chain_runs_a_measured_external_capture_retap_step():
     steps = PROGRAMS / "librelane_plugins/librelane_plugin_vibeic"
-    driver = (steps / "clock_path_drive_sizing.tcl").read_text()
+    driver = (steps / "external_capture_launch_retap_step.tcl").read_text()
     helper = steps / "external_capture_launch_retap.tcl"
-    assert helper.is_file(), "the CTS step has no external capture path repair"
+    assert helper.is_file(), "the retap step has no external capture path repair"
     assert "source [file join [file dirname [info script]] external_capture_launch_retap.tcl]" in driver
     assert driver.index("external_capture_launch_retap.tcl") < driver.index("write_views")
+    assert "VIBEIC_CLKPATH_PRECTS_INSTANCES" in driver
+    assert 'id = "Vibeic.ExternalCaptureLaunchRetap"' in (steps / "__init__.py").read_text()
+    chain = (PROGRAMS / "librelane_cts_hold.py").read_text()
+    assert chain.index('("Vibeic.ClockPathDriveSizing",') < chain.index(
+        '("Vibeic.ExternalCaptureLaunchRetap",') < chain.index(
+        '("OpenROAD.ResizerTimingPostCTS",')
     body = helper.read_text()
     assert "find_timing_paths" in body and "all_outputs" in body
     assert "_vic_prects_insts" in body and "is_buffer" in body
@@ -71,6 +77,7 @@ def test_setup_controller_reaches_size_only_after_two_tool_written_stagnations(
     assert plan[1]["setup_margin_ns"] == 0.05
     assert plan[2]["setup_margin_ns"] == 0.2
     assert plan[2]["setup_sequence"] == "sizeup,swap"
+    assert plan[4] == {"setup_margin_ns": 0.2, "setup_sequence": "sizeup"}
 
 
 def test_cts_considers_output_path_within_five_percent_of_clock_period():
