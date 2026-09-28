@@ -1152,7 +1152,9 @@ def _phase1_failure_is_coverage_only(project: Path) -> Tuple[bool, dict]:
 
 
 _TOP_NAME_DEFAULT = "chip_top"
-_MODULE_DECL_RE = re.compile(r"(?m)^\s*module\s+([A-Za-z_]\w*)")
+# An SV lifetime qualifier (`module automatic X`) is not the module's name.
+_MODULE_DECL_RE = re.compile(
+    r"(?m)^\s*module\s+(?:(?:automatic|static)\s+)?([A-Za-z_]\w*)")
 _VERILOG_KW = {
     "module", "endmodule", "begin", "end", "if", "else", "case", "endcase",
     "for", "while", "assign", "always", "initial", "wire", "reg", "logic",
@@ -1210,7 +1212,9 @@ def _scan_rtl_files(files: List[Path]) -> Tuple[set, set]:
         text_parts.append(code)
         decls.update(_MODULE_DECL_RE.findall(code))
     corpus = "\n".join(text_parts)
-    corpus = re.sub(r"\b(?:macro)?module\s+[A-Za-z_]\w*", ";", corpus)
+    corpus = re.sub(
+        r"\b(?:macro)?module\s+(?:(?:automatic|static)\s+)?[A-Za-z_]\w*",
+        ";", corpus)
     insts: set = set()
     for d in decls:
         inst_re = re.compile(
@@ -1219,6 +1223,13 @@ def _scan_rtl_files(files: List[Path]) -> Tuple[set, set]:
         if inst_re.search(corpus):
             insts.add(d)
     return decls, insts
+
+
+def _project_rel(project: Path, f: Path) -> str:
+    try:
+        return f.relative_to(project).as_posix()
+    except ValueError:
+        return str(f)
 
 
 def _supplied_build_rtl(project: Path) -> List[Path]:
@@ -1262,12 +1273,24 @@ def _resolve_top_name(project: Path, ic_name: str, top_name: str,
     nothing creates a new top module in between.) Returns (top, note)."""
     rtl_dir = project / "phase2" / "stage1" / "rtl"
     decls, insts = _scan_rtl_modules(rtl_dir)
+    supplied_note = ""
     if not decls:
         # A design that SUPPLIES its RTL has it under input/ until phase 2's
         # consume step stages it, and this runs BEFORE phase 2. Reading only
         # rtl/ saw nothing, kept the `chip_top` default, and handed every
         # phase-2 step a module that does not exist in the design.
-        decls, insts = _scan_rtl_files(_supplied_build_rtl(project))
+        supplied = _supplied_build_rtl(project)
+        decls, insts = _scan_rtl_files(supplied)
+        if explicit:
+            # Unstaged input RTL is not the authoritative set an override
+            # needs: phase 2 can still author a top (consume's `chip_top`
+            # wrapper, catalog glue). As with no RTL at all, the explicit
+            # name is kept.
+            return top_name, ""
+        if decls:
+            supplied_note = (
+                "derived from supplied input RTL (not yet staged): "
+                + ", ".join(_project_rel(project, f) for f in supplied))
     override_note = ""
     if explicit:
         if not decls or top_name in decls:
@@ -1283,12 +1306,13 @@ def _resolve_top_name(project: Path, ic_name: str, top_name: str,
         return top_name, ""  # nothing to derive from; keep the default
 
     def _note(msg: str) -> str:
+        msg = f"{msg}; {supplied_note}" if supplied_note else msg
         return f"{override_note}; {msg}" if override_note else msg
 
     if _TOP_NAME_DEFAULT in decls:
         # a genuine wrapper exists → honor it
         return _TOP_NAME_DEFAULT, (_note(f"top='{_TOP_NAME_DEFAULT}'")
-                                   if override_note else "")
+                                   if override_note or supplied_note else "")
     roots = sorted(m for m in decls if m not in insts)
     ic = _sanitize_module(ic_name)
     if ic and ic in decls:
