@@ -311,6 +311,19 @@ def _rows(*rows):
         dict(zip(("name", "status", "detail", "reason_class"), r)) for r in rows]}
 
 
+def test_reportless_host_shortfall_is_found_beyond_the_display_tail():
+    banner = p3._PHASE3_RUN_BANNER + "fixture"
+    marker = "No space left on device"
+    stderr = marker + "\n" + ("x" * 5000)
+    status, reason, detail = p3._enclosing_phase3_outcome(
+        1, banner, stderr, None, {"15"}, False)
+    assert status == "NOT_MEASURED"
+    assert reason == p3._V.ReasonClass.EXECUTION_ERROR
+    assert "stderr byte offset 0" in detail
+    assert p3._enclosing_phase3_outcome(
+        1, banner, "x" * 5000, None, {"15"}, False)[0] == "FAIL"
+
+
 def test_a_fail_in_the_windows_own_step_is_fail_and_names_it(project, monkeypatch):
     report = _rows(("pnr", "FAIL", "global route diverged", ""),
                    ("drc", "NOT_MEASURED", "upstream", "upstream_failed"))

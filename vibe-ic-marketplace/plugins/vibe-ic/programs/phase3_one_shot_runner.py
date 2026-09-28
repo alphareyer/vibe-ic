@@ -73802,7 +73802,7 @@ def _signal_of(rc: int) -> Optional[signal.Signals]:
         return None
 
 
-#: Host shortfalls visible in a reportless unit's stderr tail: the host, not
+#: Host shortfalls visible in a reportless unit's stderr: the host, not
 #: the design, stopped the run, so it is not red (outcome-state ruling).
 _HOST_SHORTFALL_MARKS = (
     ("No space left on device", "disk full (ENOSPC)"),
@@ -73845,12 +73845,16 @@ def _enclosing_phase3_outcome(rc: int, out: str, err: str,
         return ("NOT_MEASURED", _V.ReasonClass.INPUT_ABSENT,
                 f"the unit stopped before running a step (rc={rc}; its "
                 f"refusal is in the stderr tail)")
-    host = next((what for needle, what in _HOST_SHORTFALL_MARKS
-                 if needle in err[-4000:]), None)
-    if host is not None:
+    host_mark = next(((err.find(needle), what)
+                      for needle, what in _HOST_SHORTFALL_MARKS
+                      if needle in err), None)
+    if host_mark is not None:
+        char_offset, host = host_mark
+        byte_offset = len(err[:char_offset].encode("utf-8", errors="replace"))
         return ("NOT_MEASURED", _V.ReasonClass.EXECUTION_ERROR,
                 f"the unit ran and stopped on a host shortfall ({host}, "
-                f"rc={rc}); the host, not the design, stopped it")
+                f"rc={rc}; stderr byte offset {byte_offset}); the host, not "
+                "the design, stopped it")
     # A unit that ran and then crashed or exited non-zero on its own with no
     # report is a FAIL of the run -- this runner's rule, the precedent being
     # the front door's reportless rc!=0 row (R-0915-160). The repo-wide
