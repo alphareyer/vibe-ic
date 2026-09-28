@@ -176,7 +176,7 @@ def test_the_dedupe_keeps_the_provenance_chain_intact(tmp_path):
     row = R._dedupe_shipped_netlist_ports(tmp_path, "dut", "pnr")
     assert row["status"] == "DEDUPED"
     verdict, findings = C.audit(tmp_path)
-    assert verdict == "PASS", [(f.rule, f.message) for f in findings]
+    assert verdict == "PASS", [(f.rule, str(f)) for f in findings]
     assert R._record_reemitted_outputs(tmp_path) in (None, "", [])
     assert not (tmp_path / "reports/phase3/provenance_unexplained_rewrites.json").is_file()
     rows = [json.loads(ln) for ln in
@@ -199,7 +199,8 @@ def test_the_module_is_the_one_the_file_contains_not_the_file_name(tmp_path):
     (nl.parent / "routed.def").write_text(
         "VERSION 5.8 ;\nDESIGN chip_top ;\nUNITS DISTANCE MICRONS 1000 ;\nEND DESIGN\n")
     row = R._dedupe_shipped_netlist_ports(tmp_path, "dut", "prestream")
-    assert row["module"] == "chip_top" and row["status"] == "DEDUPED", row
+    assert row["status"] == "DEDUPED", row
+    assert row["module"] == "chip_top"
     assert N.problems(nl.read_text(), "chip_top") == ("PARSED", [])
 
 
