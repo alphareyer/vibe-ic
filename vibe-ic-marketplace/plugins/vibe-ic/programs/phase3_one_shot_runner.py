@@ -19414,13 +19414,9 @@ _AUTO_DIE_CORE_INSET_UM = 10
 # the area is now read from the netlist (`_resolve_auto_die_um`).
 _AUTO_DIE_FALLBACK_CELL_UM2 = 7.5    # avg std-cell area when the LEF site parse fails
 _AUTO_DIE_DEFAULT_UTIL = 0.40        # internal safety fallback when a util is unusable
-# GAP-E2E-4 FOLLOW-UP — the auto-die geometry target is a ROUTING-HEADROOM
-# utilization, DECOUPLED from the placement `--util`. A placement-dense target
-# (0.40) sizes a die so tight that detailed route PLATEAUS; the empirically-clean
-# campaign value is ~0.25 (sha256 clean at 900x900/0.25; aes converged ~15%).
-# This constant sizes ONLY the `--die-um auto` geometry — the placement `--util`
-# default (0.30, used by global_placement) is UNCHANGED. chip-AGNOSTIC.
-_AUTO_DIE_TARGET_UTIL = 0.25         # routing-headroom target for --die-um auto
+# Historical routing-recovery ladder seed and no-project helper compatibility.
+# Production auto-core sizing reads FP_CORE_UTIL from L9 or the pinned flow.
+_AUTO_DIE_TARGET_UTIL = 0.25
 
 
 def _parse_site_area_um2(cell_lef_text: str,
@@ -19604,113 +19600,10 @@ def _pin_layers_from_techlef(tech_lef_text: str,
     return hor, ver
 
 
-# ORGANIC (die-util fidelity follow-up) — a DESIGN-DECLARED auto-die target util.
-# The empirical v1.2.72 live runs showed the fixed 0.25 routing-headroom target
-# is right for a CONGESTION-bound design (aes converged dense) but a design may
-# legitimately want more timing/DRC headroom (a SPARSER die). Rather than guess
-# per-design (the ibex "regression" was confounded, and its residual DRC was
-# cell-driven pin-access that a sparser die does NOT fix — so a blind
-# "prefer-sparser" heuristic is unwarranted), HONOR the design's OWN declared
-# density target when its L9 states one — mirroring GAP-E2E-1's clock-period
-# inherit. A design that wants timing/DRC headroom declares a lower FP_CORE_UTIL /
-# PL_TARGET_DENSITY in L9; auto-die then sizes to THAT instead of the 0.25 default.
-# The L9 tables carry either a `PL_TARGET_DENSITY` fraction (0<x<=1) or an
-# `FP_CORE_UTIL` percentage (converted to a fraction). §4.05 TIGHT: match ONLY the
-# UNAMBIGUOUS `| <key> | <value> |` key-value-row form (the value in the cell
-# IMMEDIATELY after the key), e.g. `| `FP_CORE_UTIL` | **20** |`. A header-row /
-# data-row table (`| FP_CORE_UTIL | PL_TARGET_DENSITY |` … `| SKY130 | 45% | … |`)
-# whose value is NOT adjacent to the key token is DELIBERATELY NOT parsed → None →
-# the validated default is kept (missing a declaration is SAFE; mis-parsing a
-# number from the wrong cell would fabricate a wrong die — unsafe). A
-# "不指定 / 工具預設 / plugin decides" cell has no adjacent number → no match.
-_L9_PL_DENSITY_RE = re.compile(
-    r"PL_TARGET_DENSITY`?\s*\|\s*\*{0,2}\s*(0?\.\d+|\d+(?:\.\d+)?)\s*\*{0,2}\s*\|",
-    re.IGNORECASE)
-# A utilisation DECLARED AS A RANGE is still a declaration. L9 tables
-# routinely write `| FP_CORE_UTIL | 35-45%(…prose…) |` — the old pattern
-# required a single number immediately followed by the cell delimiter, so
-# a range (or any trailing prose in the same cell) matched NOTHING and the
-# design silently fell back to the generic routing-headroom default.
-# Measured on subservient x sky130A: L9 §9.2.1 declares 35-45%, the parser
-# returned None, and the die was auto-sized at util 0.25 — a bigger die,
-# longer wires and a worse slew/setup corner than the design asked for.
-# The LOW end of a declared range is taken: it is inside the band the
-# design authorised and is the routing-safest choice within it.
-def md_table_column_numbers(text: str, key: str, row_key: str = ""):
-    """Every numeric value under a markdown-table COLUMN whose header names
-    ``key``, in row order. PURE (unit-tested, no I/O).
-
-    A key can be declared two ways in the same document family:
-        row-oriented    | `FP_CORE_UTIL` | 35-45% |
-        column-oriented | PDK | `FP_CORE_UTIL` | PL_TARGET_DENSITY |
-                        | SKY130 | 35-45%(prose) | default |
-    The row form is what the `_L9_*_RE` patterns read. The column form matched
-    NOTHING, so a design that used it was treated as having declared nothing —
-    the same "read the line, not the clause" failure mode as the per-line port
-    direction bug. Measured on subservient x sky130A: L9 §9.2.1 declares
-    FP_CORE_UTIL in a COLUMN header, the row regex returned None, and the run
-    fell back to the generic utilisation default.
-
-    Tables are scoped as BLOCKS (contiguous runs of `|` lines) and the column
-    index is re-resolved per block — without that, a header match leaks into
-    every later table in the document (measured: FP_CORE_UTIL picked up the
-    `FP_PDN_VOFFSET | 7` row of the PDN table two sections later).
-
-    ``row_key`` (optional) keeps only rows whose FIRST cell contains it, so a
-    per-PDK table returns THIS PDK's row and not another PDK's. Without it a
-    sky130 run would have read gf180's 0.5 density — a wrong number is worse
-    than no number, so an unmatched row_key yields nothing and the caller keeps
-    its default.
-
-    A range like ``35-45%`` yields 35 — the low, routing-safest end of the
-    declared band. chip-AGNOSTIC.
-    """
-    import re as _re
-    out = []
-    lines = text.splitlines()
-    i, n = 0, len(lines)
-    while i < n:
-        if not lines[i].strip().startswith("|"):
-            i += 1
-            continue
-        block = []
-        while i < n and lines[i].strip().startswith("|"):
-            block.append([c.strip() for c in lines[i].strip().strip("|").split("|")])
-            i += 1
-        if len(block) < 2:
-            continue
-        header = block[0]
-        col = None
-        for j, c in enumerate(header):
-            if _re.search(r"\b" + _re.escape(key) + r"\b", c, _re.IGNORECASE):
-                col = j
-                break
-        if col is None:
-            continue
-        for cells in block[1:]:
-            if all(_re.fullmatch(r":?-{2,}:?", c or "") for c in cells if c):
-                continue                    # the |---|---| separator row
-            if row_key:
-                # A PDK id and a table's PDK label rarely match character for
-                # character ("sky130A" vs "SKY130", "gf180mcuD" vs "GF180MCU"),
-                # so compare on alphanumerics with a BIDIRECTIONAL prefix test:
-                # either may be the more specific spelling of the same PDK.
-                _rk = _re.sub(r"[^a-z0-9]", "", row_key.lower())
-                _rc = _re.sub(r"[^a-z0-9]", "", (cells[0] if cells else "").lower())
-                if not (_rk and _rc
-                        and (_rk.startswith(_rc) or _rc.startswith(_rk))):
-                    continue
-            if col < len(cells):
-                m = _re.search(r"(\d+(?:\.\d+)?)", cells[col])
-                if m:
-                    out.append(float(m.group(1)))
-    return out
-
-
-_L9_FP_CORE_UTIL_RE = re.compile(
-    r"FP_CORE_UTIL`?\s*\|\s*\*{0,2}\s*(\d+(?:\.\d+)?)\s*"
-    r"(?:[-–~]|\bto\b)?\s*(?:\d+(?:\.\d+)?)?\s*%?[^|\n]*\|",
-    re.IGNORECASE)
+from floorplan_knobs import (  # CR-3 source-specific derivation
+    md_table_column_numbers, _l9_declared_die_util,
+    _l9_declared_place_density, _flow_default_core_util,
+)
 # ORGANIC sha256×sky130A — L9's synthesis-constraints table declares the
 # reference `SYNTH_MAX_FANOUT` fanout cap in the SAME `| `KEY` | **VALUE** |`
 # key-value-row form (e.g. `| `SYNTH_MAX_FANOUT` | **8** | reference … |`). Only
@@ -19980,53 +19873,6 @@ def _flow_default_max_fanout(project: Path, pdk: str):
         return parse_flow_pdk_max_fanout(out.stdout, pdk)
     except Exception:                                        # noqa: BLE001
         return None, ""
-
-
-def _l9_declared_die_util(project: Path,
-                          pdk: str = "") -> Optional[float]:
-    """Return the design's L9-declared core-density target as a fraction (0..1),
-    or None when L9 declares none (or says 'plugin decides'). Prefers an explicit
-    `PL_TARGET_DENSITY` (already a fraction); else derives it from `FP_CORE_UTIL`
-    (a percentage → /100). Reads ONLY the L9 constraints/floorplan doc (input docs
-    or the generated L9) — a blind-legal design input. §4.05 / no-fabricate: only
-    a real numeric declaration counts; an out-of-range / absent value → None →
-    caller keeps the default. chip-AGNOSTIC: pure L9-token parse, no chip literal."""
-    roots = [project / "input" / "docs", _pl.generated_docs_dir(project)]
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for p in (sorted(root.glob("L9*")) + sorted(root.glob("*constraint*"))
-                  + sorted(root.glob("*floorplan*"))):
-            try:
-                txt = p.read_text(errors="ignore")
-            except OSError:
-                continue
-            # Prefer an explicit PL_TARGET_DENSITY fraction.
-            for m in _L9_PL_DENSITY_RE.finditer(txt):
-                try:
-                    v = float(m.group(1))
-                except ValueError:
-                    continue
-                if 0.0 < v <= 1.0:
-                    return v
-            # Else derive from FP_CORE_UTIL (a percentage).
-            for m in _L9_FP_CORE_UTIL_RE.finditer(txt):
-                try:
-                    pct = float(m.group(1))
-                except ValueError:
-                    continue
-                if 0.0 < pct <= 100.0:
-                    return pct / 100.0
-            # …and the same key declared as a TABLE COLUMN rather than a row.
-            _rk = (pdk or "").strip()
-            if _rk:
-                for v in md_table_column_numbers(txt, "PL_TARGET_DENSITY", _rk):
-                    if 0.0 < v <= 1.0:
-                        return v
-                for v in md_table_column_numbers(txt, "FP_CORE_UTIL", _rk):
-                    if 0.0 < v <= 100.0:
-                        return v / 100.0
-    return None
 
 
 _LAST_FANOUT_SOURCE: Dict[str, str] = {}
@@ -20843,12 +20689,10 @@ def _resolve_auto_die_um(die_um: str, netlist: Path, util: float,
     fixed die so the flow never breaks on a sizing error.
 
     GAP-E2E-4 FOLLOW-UP — the auto-die geometry targets a ROUTING/HEADROOM util
-    DECOUPLED from the placement `util` argument (a placement-dense 0.40 die
-    plateaus detailed route). die-util FIDELITY FOLLOW-UP — the target is the
-    design's OWN L9-declared core density (`_l9_declared_die_util`) when present
-    (a design wanting timing/DRC headroom declares a sparser FP_CORE_UTIL /
-    PL_TARGET_DENSITY), else the `_AUTO_DIE_TARGET_UTIL` default (~0.25). `util`
-    (the placement `--util`) is intentionally NOT the sizing target.
+    DECOUPLED from the placement `util` argument. The target is the design's
+    own `FP_CORE_UTIL` when declared; otherwise it is the runtime default read
+    from this run's pinned LibreLane floorplan tool. `PL_TARGET_DENSITY` and
+    placement `--util` never size the core.
 
     #158 — the die must ALSO seat the IO PINS. A PIN-LIMITED macro (few cells,
     many top IO bits) would otherwise get a die whose perimeter is too short and
@@ -20910,21 +20754,18 @@ def _resolve_auto_die_um(die_um: str, netlist: Path, util: float,
                          "be read, so the core is NOT sized from this design ("
                          + "; ".join(_area_why)
                          + "); verify the die/utilization")
-    # die-util FIDELITY: honor the design's own declared core density; else the
-    # routing-headroom default. `util` (placement) is deliberately unused here.
-    # Precedence: L9 generated constraint (design's own authored target) > the
-    # design's staged reference_flow CORE_UTILIZATION > routing-headroom default.
+    # CR-3: only FP_CORE_UTIL may size the core. PL_TARGET_DENSITY is consumed
+    # by global placement, never by this area calculation.
     _declared = (_l9_declared_die_util(project, str(getattr(pdk, 'name', '') or ''))
                  if project is not None else None)
     _util_src = "L9-declared"
     if _declared is None and project is not None:
-        _rf_declared = _reference_flow_declared_die_util(project)
-        if _rf_declared is not None:
-            _declared = _rf_declared
-            _util_src = "reference_flow-declared"
+        _declared, _util_src = _flow_default_core_util(project)
+        if _declared is None:
+            raise RuntimeError(f"FP_CORE_UTIL_DEFAULT_{_util_src}")
     util_frac = _declared if _declared is not None else _AUTO_DIE_TARGET_UTIL
     if _declared is None:
-        _util_src = "routing-headroom-default"
+        _util_src = "routing-headroom-default (legacy no-project caller)"
     # #158 — pin-perimeter floor. Count the top module's effective IO bits and
     # the pin-layer pitch from THIS PDK's tech LEF, then size the perimeter to
     # seat them. Best-effort: any parse failure yields a pin count of 0 / the
@@ -32475,6 +32316,7 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
                         fp_rect: Optional[Sequence[int]] = None,
                         site: str, out_dir_c: str, tapcell_block: str,
                         pdn_block: str, util: float,
+                        density_from_tool_default: bool = False,
                         spare_protection_tcl: str,
                         spare_postfix_tcl: str, clk_buf: str,
                         clk_buf_root: str, routing_constraint_tcl: str,
@@ -32721,6 +32563,7 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
     _named_viol_reroute_block = _named_violation_reroute_tcl(
         out_dir_c + "/" + ROUTER_DRC_REPORT_NAME,
         reserved_instance_names=reserved_instance_names)
+    _density_clause = "" if density_from_tool_default else f" -density {util}"
     return f"""
 {_thread_block}{_route_guide_discipline_tcl()}read_lef {tech_lef_c}
 read_lef {cell_lef_c}
@@ -32783,7 +32626,7 @@ write_def {out_dir_c}/floorplan.def
 # enabled) is an optional, version-correct extra congestion knob. Flag names
 # verified vs OpenROAD 26Q1 (`help global_placement`). chip-AGNOSTIC.
 puts "{_PNR_STAGE_MARKER} placement"
-{_placement_padding_block}global_placement{_routability_flag}{_timing_driven_flag} -density {util}
+{_placement_padding_block}global_placement{_routability_flag}{_timing_driven_flag}{_density_clause}
 {_initial_legalize}# === #684 sparse-die anti-flood tap prune (POST-placement, locality) ===
 # Runs here — after placement resolved the REAL logic geometry, BEFORE
 # placed.def is written — so placed.def carries the FINAL pruned tap set and
@@ -37309,7 +37152,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
              container: str, die_um: str, util: float,
              spare_density=None, pad_ring_step=step_pad_ring_gen,
              pad_ring_results: Optional[List[StepResult]] = None,
-             em_floor_for_resize: Optional[Dict[str, Any]] = None) -> StepResult:
+             em_floor_for_resize: Optional[Dict[str, Any]] = None,
+             density_from_tool_default: bool = False) -> StepResult:
     t0 = time.time()
     netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
     print(f"[pnr] netlist: {_nl_note}", flush=True)
@@ -37605,10 +37449,16 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
               f"-- the auto core is not grown to a strap floor and a pinned "
               f"core is not pre-checked; pdngen and the grid-built check "
               f"remain the only authority", file=sys.stderr)
-    die_um, _auto_die_note = _resolve_auto_die_um(
-        die_um, netlist, util, pdk, project, top=top, container=container,
-        metrics=_auto_die_metrics,
-        strap_core_floor=(_strap_floor_um, _strap_floor_basis))
+    try:
+        die_um, _auto_die_note = _resolve_auto_die_um(
+            die_um, netlist, util, pdk, project, top=top, container=container,
+            metrics=_auto_die_metrics,
+            strap_core_floor=(_strap_floor_um, _strap_floor_basis))
+    except RuntimeError as exc:
+        if str(exc).startswith("FP_CORE_UTIL_DEFAULT_NOT_READ"):
+            return StepResult("pnr", "NOT_MEASURED", time.time() - t0,
+                              str(exc), reason_class=_V.ReasonClass.TOOL_ABSENT.value)
+        raise
     if _auto_die_note:
         print(f"[phase3] {_auto_die_note}", file=sys.stderr)
     # THE PAD RING'S FLOOR. A die is a free parameter only until the design has
@@ -37791,7 +37641,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # untouched path is asserted by this change's own deck.
     _placement_core_is_auto = _auto_die_requested and not _ring_pinned_die
     _placement_density_note = ""
-    if not _placement_core_is_auto:
+    if not _placement_core_is_auto and not density_from_tool_default:
         _pd, _pd_basis = _ppa_area.real_core_placement_density(
             float(_auto_die_metrics.get("cell_area_um2") or 0.0),
             core_w, core_h, util)
@@ -38780,10 +38630,23 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _rf_pnr_notes = list(_rf_audit["notes"] or [])  # type: ignore[arg-type]
     _rf_place_density = _rf_map.get("place_density")
     if isinstance(_rf_place_density, float):
+        density_from_tool_default = False
         _rf_pnr_notes.append(
             f"global_placement -density override: {util:g} -> "
             f"{_rf_place_density:g} (design's staged reference_flow)")
         util = _rf_place_density
+    _l9_place_density = _l9_declared_place_density(
+        project, str(getattr(pdk, "name", "") or ""))
+    if _l9_place_density is not None:
+        density_from_tool_default = False
+        _rf_pnr_notes.append(
+            f"global_placement -density {util:g} -> {_l9_place_density:g} "
+            "(L9 PL_TARGET_DENSITY; independent of FP_CORE_UTIL)")
+        util = _l9_place_density
+    elif density_from_tool_default:
+        _rf_pnr_notes.append(
+            "global_placement -density omitted: pinned OpenROAD owns its "
+            "runtime default; effective value is measured by the tool")
     _rf_audit["place_density_override"] = (
         _rf_place_density if isinstance(_rf_place_density, float) else None)
     _rf_audit["notes"] = list(_rf_pnr_notes)
@@ -38877,6 +38740,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         fp_rect=fp_rect, site=pdk.site,
         out_dir_c=out_dir_c, tapcell_block=tapcell_block,
         pdn_block=pdn_block, util=util,
+        density_from_tool_default=density_from_tool_default,
         spare_protection_tcl=spare_protection_tcl,
         spare_postfix_tcl=spare_postfix_tcl, clk_buf=clk_buf,
         clk_buf_root=clk_buf_root,
@@ -74408,7 +74272,8 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
             pnr_row = step_pnr(isolated, top, pdk, args.container,
                                die_um=args.die_um, util=args.util,
                                spare_density=args.spare_density,
-                               pad_ring_step=step_pad_ring_gen)
+                               pad_ring_step=step_pad_ring_gen,
+                               density_from_tool_default=args.density_from_tool_default)
             unit_rc = 0 if pnr_row.status in ("PASS", "PASS_WITH_WAIVERS") else 1
             unit_verdict = pnr_row.status
             unit_reason = pnr_row.reason_class
@@ -74796,12 +74661,10 @@ def main() -> int:
                         "the die from the synth cell count + PDK site area + "
                         "target util (GAP-E2E-4/10)")
     p.add_argument("--util", type=float, default=0.30,
-                   help="Global placement density (--density passed to OpenROAD "
-                        "global_placement). v0.1.44 spm pilot Tier 1.5 finding: "
-                        "default 0.45 produced 1780 SKY130A DRC violations on "
-                        "spm 200x200 die (clustered li-min-spacing on adjacent "
-                        "std cell rows); 0.30 produces 0 violations same die. "
-                        "Conservative default; caller can override.")
+                   help="Explicit global-placement density. When omitted, "
+                        "the PnR deck omits -density and the pinned OpenROAD "
+                        "tool owns its runtime default; an L9 "
+                        "PL_TARGET_DENSITY declaration overrides it.")
     p.add_argument("--pdk", default="auto",
                    help="auto (default) | sky130A | nangate45 | <custom>")
     p.add_argument("--allow-oss-pdk-fallback", action="store_true",
@@ -74836,6 +74699,8 @@ def main() -> int:
     p.add_argument("--diagnostic-continue", action="store_true",
                    help="Retain diagnostic-only reports; a failed pre-stream gate never authorizes GDS or release")
     args = p.parse_args()
+    args.density_from_tool_default = not any(
+        arg == "--util" or arg.startswith("--util=") for arg in sys.argv[1:])
     if bool(args.entry_step) != bool(args.exit_step):
         p.error("--entry-step and --exit-step must be supplied together")
     if args.entry_step and args.force_step:
@@ -75388,7 +75253,8 @@ def main() -> int:
                     args.die_um, args.util,
                     spare_density=args.spare_density,
                     pad_ring_step=step_pad_ring_gen,
-                    pad_ring_results=_pad_ring_rows)
+                    pad_ring_results=_pad_ring_rows,
+                    density_from_tool_default=args.density_from_tool_default)
                 plan.extend(_pad_ring_rows)
                 plan.append(_pnr_dispatched)
                 if _pnr_dispatched.status == "PASS":

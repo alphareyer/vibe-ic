@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""ORGANIC (die-util fidelity follow-up) — auto-die inherits the design's OWN
-L9-declared core density (FP_CORE_UTIL / PL_TARGET_DENSITY) instead of a fixed
-0.25, mirroring GAP-E2E-1's clock-period inherit.
+"""L9 floorplan knobs: core utilization sizes the core; placement density
+controls global placement. The two declarations are independent.
 
 Empirical motivation (v1.2.72 live): the fixed 0.25 routing-headroom target won
 for the CONGESTION-bound aes (dense converged) but a design may want more
@@ -34,11 +33,12 @@ def _mk_l9(tmp_path, body: str) -> Path:
     return proj
 
 
-def test_inherits_pl_target_density_keyvalue(tmp_path):
+def test_core_util_does_not_inherit_placement_density(tmp_path):
     proj = _mk_l9(tmp_path,
                   "| `FP_CORE_UTIL` | **20** | ref |\n"
                   "| `PL_TARGET_DENSITY` | **0.25** | ref |\n")
-    assert P._l9_declared_die_util(proj) == 0.25   # explicit density wins
+    assert P._l9_declared_die_util(proj) == 0.20
+    assert P._l9_declared_place_density(proj) == 0.25
 
 
 def test_derives_from_fp_core_util_percentage(tmp_path):
@@ -74,8 +74,10 @@ def test_no_l9_returns_none(tmp_path):
 
 
 def test_resolve_uses_declared_util_over_default(tmp_path):
-    # end-to-end: a design declaring a sparse density sizes a LARGER die than the
-    # 0.25 default for the same cell count.
+    # Orchestrator ruling 2026-09-28: REPLACED the landed assertion that a
+    # density-only declaration resizes the core. It conflated FP_CORE_UTIL
+    # with PL_TARGET_DENSITY. A density-only declaration leaves core sizing at
+    # the pinned flow's own FP_CORE_UTIL default.
     proj = _mk_l9(tmp_path, "| `PL_TARGET_DENSITY` | **0.10** | ref |\n")
     nl = proj / "netlist.v"
     nl.write_text("\n".join(f"sky130_fd_sc_hd__inv_1 u{i} (.A(a{i}),.Y(y{i}));"
@@ -83,12 +85,15 @@ def test_resolve_uses_declared_util_over_default(tmp_path):
 
     class _Pdk:
         cell_lef = "/nonexistent.lef"   # forces the fallback avg-cell
-    die_default, _ = P._resolve_auto_die_um("auto", nl, 0.4, _Pdk(), None)
-    die_declared, note = P._resolve_auto_die_um("auto", nl, 0.4, _Pdk(), proj)
-    w_def = int(die_default.split("x")[0])
-    w_dec = int(die_declared.split("x")[0])
-    assert w_dec > w_def          # 0.10 target → larger (sparser) die than 0.25
-    assert "L9-declared" in (note or "")
+    from unittest.mock import patch
+    with patch.object(P, "_flow_default_core_util", create=True,
+                      return_value=(0.37, "pinned tool FP_CORE_UTIL")):
+        die_density, note = P._resolve_auto_die_um(
+            "auto", nl, 0.4, _Pdk(), proj)
+        proj2 = _mk_l9(tmp_path / "other", "| `PL_TARGET_DENSITY` | **0.65** | ref |\n")
+        die_other, _ = P._resolve_auto_die_um("auto", nl, 0.4, _Pdk(), proj2)
+    assert die_density == die_other
+    assert "pinned tool FP_CORE_UTIL" in (note or "")
 
 
 def test_resolve_without_project_backward_compatible(tmp_path):
