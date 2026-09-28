@@ -501,6 +501,19 @@ def _input_path(project_dir: Path, value: str) -> Optional[Path]:
     return resolved
 
 
+def _has_recount_evidence(report: dict) -> bool:
+    """Whether the producer named enough inputs to try an independent fold.
+
+    One bounded corner is sufficient: audit can reject its fold even if the
+    other corner was never produced. Timing windows are optional because the
+    recount has a window-independent floor.
+    """
+    corners = report.get("corners")
+    return (bool(report.get("spef")) and isinstance(corners, dict)
+            and any(isinstance(info, dict) and info.get("bounded_spef")
+                    for info in corners.values()))
+
+
 def audit(project_dir: Path,
           report_path: Optional[Path] = None) -> Tuple[List[Finding], dict]:
     findings: List[Finding] = []
@@ -522,9 +535,13 @@ def audit(project_dir: Path,
 
     if report.get("verdict") == "NOT_MEASURED":
         why = str(report.get("error") or "producer reported no measured scene")
-        stats["input_refusal"] = ("PRODUCER_NOT_MEASURED", why)
         findings.append(Finding("ERROR", "PRODUCER_NOT_MEASURED", why))
-        return findings, stats
+        if not _has_recount_evidence(report):
+            stats["input_refusal"] = ("PRODUCER_NOT_MEASURED", why)
+            return findings, stats
+        # The producer's verdict cannot erase an existing SPEF/corner pair.
+        # Keep its refusal non-green while checking the evidence for a
+        # substantive defect, which takes precedence in build_report.
 
     embedded = [("spef", report.get("spef")),
                 ("clk_source", report.get("clk_source"))]
