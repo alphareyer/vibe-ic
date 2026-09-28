@@ -44,7 +44,8 @@ import _watchdog as _wd  # noqa: E402
 import _docker_watchdog as _dwd  # noqa: E402
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 
-__all__ = ["KLayoutRunner", "HostRunner", "ContainerRunner", "find_runner"]
+__all__ = ["KLayoutRunner", "HostRunner", "ContainerRunner", "find_runner",
+           "find_container_runner"]
 
 #: `_eda_pin.default_container_name()` IS this expression, plus the part
 #: that was missing: the default half derives from the pinned digest
@@ -64,6 +65,23 @@ def _memory_bounded_argv(argv: Sequence[str], memory_limit_mb: int) -> str:
     if limit <= 0 or not argv:
         raise ValueError("a positive memory ceiling and nonempty argv are required")
     return f"ulimit -v {limit * 1024} || exit 125; exec {shlex.join([str(a) for a in argv])}"
+
+
+def host_read_bytes(path) -> Optional[bytes]:
+    """The bytes of a HOST file, or None when it cannot be read."""
+    try:
+        return Path(str(path)).read_bytes()
+    except OSError:
+        return None
+
+
+def host_list_files(directory, suffix: str) -> Optional[List[str]]:
+    """Regular HOST files directly inside `directory` ending in `suffix`."""
+    try:
+        return sorted(str(p) for p in Path(str(directory)).iterdir()
+                      if p.name.endswith(suffix) and p.is_file())
+    except OSError:
+        return None
 
 
 def _container_mounts(container: str) -> List[Tuple[str, str]]:
@@ -138,6 +156,18 @@ class KLayoutRunner:
     def exists(self, path) -> bool:
         """True when `path` is a readable file IN THIS RUNNER'S environment."""
         return Path(str(path)).is_file()
+
+    # A PDK deck the tool will execute is identified by the bytes THIS RUNNER'S
+    # KLayout reads, not by a same-named file on some other filesystem. These
+    # two readers answer from the runner's own environment and return None
+    # when that environment cannot answer, never a guess.
+    def read_bytes(self, path) -> Optional[bytes]:
+        """The bytes of `path` as this runner's KLayout would read them."""
+        return host_read_bytes(path)
+
+    def list_files(self, directory, suffix: str) -> Optional[List[str]]:
+        """Regular files directly inside `directory` ending in `suffix`."""
+        return host_list_files(directory, suffix)
 
     def klayout_bin(self) -> str:
         """The KLayout GUI-class binary, for callers that need its own CLI
@@ -286,6 +316,39 @@ class ContainerRunner(KLayoutRunner):
     def klayout_bin(self) -> str:
         return "klayout"
 
+    def _exec_bytes(self, *argv: str) -> Optional[bytes]:
+        """stdout of `argv` run DIRECTLY in the container, or None.
+
+        No shell, and above all no LOGIN shell: the image's profile prints
+        `[INFO] Final PATH variable: ...` banners on stdout. MEASURED on the
+        IC-die run (vibeic-eda 0.3.85): a positional parse of
+        `bash -lc "sha256sum <parent> <rule>"` read those banner words as the
+        two digests, so byte-identical PDK decks were reported as differing
+        and Step 26 was never measured.
+        """
+        try:
+            cp = subprocess.run(_ce.docker_exec_argv(self._c, *argv),
+                                capture_output=True, timeout=120)
+        except (OSError, subprocess.SubprocessError, _ce.ContainerImageMismatch):
+            return None
+        return cp.stdout if cp.returncode == 0 else None
+
+    def read_bytes(self, path):
+        return self._exec_bytes("cat", "--", str(path))
+
+    def list_files(self, directory, suffix):
+        out = self._exec_bytes("find", "-L", str(directory), "-mindepth", "1",
+                               "-maxdepth", "1", "-type", "f",
+                               "-name", f"*{suffix}", "-print0")
+        if out is None:
+            return None
+        return sorted(p.decode("utf-8", "surrogateescape")
+                      for p in out.split(b"\0") if p)
+
+    def image_id(self) -> Tuple[Optional[str], str]:
+        """`(image_id, why_not)` of the image this container is running."""
+        return _pin.container_image_id(self._c)
+
     def exists(self, path):
         try:
             cp = _pr.run_best_effort(
@@ -361,6 +424,20 @@ def find_runner(container: Optional[str] = None,
         found = shutil.which(cand)
         if found:
             return HostRunner(found, flags)
+    return find_container_runner(container, project=project)
+
+
+def find_container_runner(container: Optional[str] = None,
+                          project=None) -> Optional["ContainerRunner"]:
+    """The CONTAINER half of :func:`find_runner`, with no host fallback.
+
+    For a caller whose input lives INSIDE an image -- a PDK tree bound to the
+    image the run used -- a host KLayout is not a substitute: it could only
+    read some other copy of that tree. Same resolution order and the same
+    test hook as :func:`find_runner`.
+    """
+    if os.environ.get("VIBEIC_KLAYOUT_FORCE_ABSENT"):
+        return None
     if shutil.which("docker"):
         recorded = container_the_run_recorded(project) if project else None
         for name in (container, recorded, DEFAULT_CONTAINER):
