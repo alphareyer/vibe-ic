@@ -175,7 +175,7 @@ def _run_runner(project: Path, timeout: int = 60):
     <proj> --skip-phase1 --skip-analog --skip-phase3."""
     return _pr.run(
         [sys.executable, str(RUNNER), str(project),
-         "--skip-phase1", "--skip-analog", "--skip-phase3"],
+         "--route", "ic", "--skip-phase1", "--skip-analog", "--skip-phase3"],
         capture_output=True, text=True, cwd=str(PROGRAMS_DIR),
     )
 

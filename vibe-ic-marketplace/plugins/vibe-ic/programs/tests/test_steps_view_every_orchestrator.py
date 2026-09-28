@@ -277,7 +277,7 @@ def test_real_orchestrator_run_leaves_the_tree(tmp_path):
     project.mkdir()
     _stage_one_input(project)
     argv = [sys.executable, str(PROGRAMS / "phase1_one_shot_runner.py"),
-            str(project), "--mode", "prompt", "--ic-name", "TST"]
+            str(project), "--route", "ic", "--mode", "prompt", "--ic-name", "TST"]
     _supervised(argv)
     _sign_ai_fixture(project, "D1")
     cp = _supervised(argv)
@@ -363,7 +363,7 @@ def test_run_survives_a_view_that_cannot_be_built(tmp_path):
     (project / "steps").write_text("not a directory\n")
 
     argv = [sys.executable, str(PROGRAMS / "phase1_one_shot_runner.py"),
-            str(project), "--mode", "prompt", "--ic-name", "TST"]
+            str(project), "--route", "ic", "--mode", "prompt", "--ic-name", "TST"]
     _supervised(argv)
     _sign_ai_fixture(project, "D1")
     cp = _supervised(argv)

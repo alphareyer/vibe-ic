@@ -73,7 +73,8 @@ def _drive_main(monkeypatch, project: Path, argv_extra, need_analog: bool):
     monkeypatch.setattr(orch, "_read_report", fake_read_report)
     monkeypatch.setattr(orch, "_need_analog", fake_need_analog)
 
-    argv = ["vibe_ic_one_shot_runner.py", str(project)] + list(argv_extra)
+    argv = ["vibe_ic_one_shot_runner.py", str(project),
+            "--route", "ic"] + list(argv_extra)
     monkeypatch.setattr(sys, "argv", argv)
     orch.main()
     return captured
@@ -244,7 +245,8 @@ def _drive_main_verdicts(monkeypatch, project: Path, argv_extra,
     monkeypatch.setattr(orch, "_read_report", fake_read_report)
     monkeypatch.setattr(orch, "_need_analog", fake_need_analog)
     monkeypatch.setattr(sys, "argv",
-                        ["vibe_ic_one_shot_runner.py", str(project)]
+                        ["vibe_ic_one_shot_runner.py", str(project),
+                         "--route", "ic"]
                         + list(argv_extra))
     orch.main()
     return captured

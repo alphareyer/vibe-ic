@@ -516,7 +516,8 @@ def test_front_door_halts_when_stale_docs_cannot_be_archived(tmp_path,
     monkeypatch.setattr(ORCH, "_phase_runner", lambda *_a, **_k:
                         pytest.fail("front door must not dispatch phase1"))
     monkeypatch.setattr(sys, "argv", [
-        "vibe_ic_one_shot_runner.py", str(proj), "--no-dashboard",
+        "vibe_ic_one_shot_runner.py", str(proj), "--route", "ic",
+        "--no-dashboard",
         "--entry-step", "D1", "--exit-step", "D1", "--skip-phase3"])
     assert ORCH.main() == 1
     report = json.loads((proj / "reports/orchestrator/vibe_ic_one_shot.json")

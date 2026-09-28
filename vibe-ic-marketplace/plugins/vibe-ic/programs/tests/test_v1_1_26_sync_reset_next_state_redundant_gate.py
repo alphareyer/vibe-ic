@@ -306,6 +306,8 @@ def _stage(tmp_path, prompt_text, sample_body):
     wd.mkdir(parents=True, exist_ok=True)
     (wd / "spec.yaml").write_text("design:\n  name: TopModule\n")
     (wd / "sample.sv").write_text(sample_body)
+    from _delivery_route import admit
+    assert admit(wd / "phase1_proj", "ip") is None
     return ds, tmp_path / "run"
 
 

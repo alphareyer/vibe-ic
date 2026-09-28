@@ -6,6 +6,7 @@ from pathlib import Path
 import yaml
 
 import ai_signed_judgement
+import _delivery_route
 
 
 def sign(project: Path, step_id: str) -> None:
@@ -45,6 +46,7 @@ def run_atomic_gate_with_expert_answer(cmd: list[str], run,
         key = "L1"
     doc.setdefault(key, {})["description"] = source
     spec.write_text(yaml.safe_dump(doc, sort_keys=False))
+    assert _delivery_route.admit(project, "ip") is None
     first = run(cmd, **kwargs)
     l9 = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
     assert l9.is_file(), (first.stdout or "") + (first.stderr or "")
@@ -86,6 +88,7 @@ def run_phase1_with_expert_answer(project: Path, argv: list[str], run,
     the receipt therefore binds the input, generated docs, and expert answer.
     ``run`` is the calling test's supervised subprocess runner.
     """
+    assert _delivery_route.admit(project, "ic") is None
     first = run(argv, **kwargs)
     return consume_phase1_expert_answer(
         project, argv, run, expected_tokens=expected_tokens,

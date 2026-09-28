@@ -58,7 +58,7 @@ def _observe(tmp_path, step):
     stage_owner_route(tmp_path, "ic")
     res = subprocess.run(
         [sys.executable, str(RUNNER), str(tmp_path), '--entry-step', step,
-         '--no-dashboard', '--skip-hardware'],
+         '--route', 'ic', '--no-dashboard', '--skip-hardware'],
         capture_output=True, text=True)
     return 'cannot yet be entered at' not in res.stderr
 
@@ -115,7 +115,7 @@ def test_BEHAVIOUR_a_phase3_entry_requires_a_bounded_exit(tmp_path):
     stage_owner_route(tmp_path, "ic")
     res = subprocess.run(
         [sys.executable, str(RUNNER), str(tmp_path), '--entry-step', '15',
-         '--no-dashboard', '--skip-hardware'],
+         '--route', 'ic', '--no-dashboard', '--skip-hardware'],
         capture_output=True, text=True)
     assert res.returncode == 2, (res.stdout, res.stderr)
     assert 'needs --exit-step' in res.stderr
@@ -127,6 +127,6 @@ def test_CONTROL_a_phase1_entry_is_not_refused_by_this_guard(tmp_path):
     (tmp_path / 'input').mkdir()
     res = subprocess.run(
         [sys.executable, str(RUNNER), str(tmp_path), '--entry-step', 'D1',
-         '--no-dashboard', '--skip-hardware'],
+         '--route', 'ic', '--no-dashboard', '--skip-hardware'],
         capture_output=True, text=True)
     assert 'cannot yet be entered at' not in res.stderr, res.stderr

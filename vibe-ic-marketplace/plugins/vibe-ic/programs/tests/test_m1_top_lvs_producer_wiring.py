@@ -217,7 +217,7 @@ def test_orchestrator_dispatches_one_of_m1s_declared_producers(
     monkeypatch.setattr(ORCH, "_run_phase", _record)
     monkeypatch.setattr(sys, "argv",
                         ["vibe_ic_one_shot_runner", str(proj),
-                         "--skip-phase1", "--no-dashboard"])
+                         "--route", "ic", "--skip-phase1", "--no-dashboard"])
     ORCH.main()
 
     assert producers & set(dispatched), (
@@ -253,7 +253,7 @@ def test_mixed_signal_dispatch_cannot_drag_the_digital_verdict_down(
     monkeypatch.setattr(ORCH, "_run_phase", _record)
     monkeypatch.setattr(sys, "argv",
                         ["vibe_ic_one_shot_runner", str(proj),
-                         "--skip-phase1", "--no-dashboard"])
+                         "--route", "ic", "--skip-phase1", "--no-dashboard"])
     ORCH.main()
 
     rep = json.loads(
@@ -343,7 +343,7 @@ def test_digital_only_run_dispatches_no_mixed_signal_merge(tmp_path,
     monkeypatch.setattr(ORCH, "_run_phase", _record)
     monkeypatch.setattr(sys, "argv",
                         ["vibe_ic_one_shot_runner", str(proj),
-                         "--skip-phase1", "--no-dashboard"])
+                         "--route", "ic", "--skip-phase1", "--no-dashboard"])
     ORCH.main()
 
     assert "mixed_signal_top_lvs_run" not in dispatched

@@ -47,7 +47,8 @@ def test_runner_produces_scoped_analog_audit_after_analog(tmp_path, monkeypatch)
     monkeypatch.setattr(runner, "_capture_container_image", lambda *_: {})
     monkeypatch.setattr(runner, "_capture_pdk_revision", lambda *_: {})
     monkeypatch.setattr(sys, "argv", [
-        "vibe_ic_one_shot_runner", str(project), "--skip-phase1",
+        "vibe_ic_one_shot_runner", str(project), "--route", "ic",
+        "--skip-phase1",
         "--no-dashboard",
     ])
 
