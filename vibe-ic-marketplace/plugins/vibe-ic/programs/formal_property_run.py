@@ -223,7 +223,7 @@ _ENV_GAP_SIGNATURES = (
 # properties, and its verdict.
 _FRONTEND_ABORT_RE = re.compile(
     r"unexpected TOK_IMPORT|unexpected TOK_PACKAGE|unexpected TOK_TYPEDEF"
-    r"|Executing Verilog-2005 frontend")
+    r"|unexpected ':'|Executing Verilog-2005 frontend")
 
 
 def frontend_aborted_the_read(transcript: str) -> bool:
