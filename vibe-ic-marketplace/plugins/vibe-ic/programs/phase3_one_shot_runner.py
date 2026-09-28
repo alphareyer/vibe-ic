@@ -70744,14 +70744,19 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                                    if _state_def is not None
                                    and _state_def.is_file() else None)
             _promoted_def_sha256 = (_promotion or {}).get("promoted_def_sha256")
+            _own_measurement = _step32_own_measurement(_chain) if _chain else {}
+            _own_refusal = (_promotion_unmeasured(_own_measurement)
+                            if _chain else "")
             if (not _chain or not _chain.get("adopted")
                     or _chain.get("verdict") != "PASS"
                     or not _adopted_def_sha256
                     or not _promoted_def_sha256
                     or _adopted_def_sha256 != _promoted_def_sha256
+                    or _own_refusal
                     or (_promotion or {}).get("measurement") !=
-                    _step32_own_measurement(_chain)):
+                    _own_measurement):
                 _promotion_refusal = (_why if not _chain else
+                                      _own_refusal or
                                       "the receipt-bound step-32 report, adopted "
                                       "route and promotion measurement disagree")
                 _promoted = True
