@@ -736,13 +736,16 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                                     missing, name + " SPEF extraction receipt")
         try:
             extraction = json.loads(extraction_text)
+            extraction_command = extraction.get("extraction_command") or {}
+            _evidence(extraction_command, missing,
+                      f"{name} SPEF extraction command")
             if (extraction.get("routed_def_sha256") !=
                     (identity.get("artifacts") or {}).get("def", {}).get("sha256")
                     or extraction.get("spef_sha256") !=
                     (scene.get("spef") or {}).get("sha256") or
                     extraction.get("rc_corner") != scene.get("rc_corner") or
-                    not re.fullmatch(r"[0-9a-f]{64}", str(
-                        extraction.get("extraction_command_sha256") or ""))):
+                    extraction.get("extraction_command_sha256") !=
+                    extraction_command.get("sha256")):
                 missing.append(f"{name}: SPEF extraction input/output hashes differ")
         except (TypeError, ValueError):
             missing.append(f"{name}: SPEF extraction provenance unreadable")

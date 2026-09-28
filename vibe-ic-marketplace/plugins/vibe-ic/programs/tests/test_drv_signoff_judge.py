@@ -166,7 +166,9 @@ def _bundle(tmp_path: Path) -> dict:
             "routed_def_sha256": layout["sha256"],
             "spef_sha256": scene["spef"]["sha256"],
             "rc_corner": "nom",
-            "extraction_command_sha256": "a" * 64}))
+            "extraction_command": _file(tmp_path, "extract.tcl",
+                                        "extract rc=nom\n"),
+            "extraction_command_sha256": drv._sha(tmp_path / "extract.tcl")}))
     digest = netlist["sha256"]
     bundle = {"identity": {"run_id": "run-1", "tree_sha": "tree-a",
              "run_started_at": "2026-09-28T12:00:00+08:00",
@@ -314,6 +316,19 @@ def test_extraction_receipt_must_bind_same_def_and_spef(tmp_path):
     result = drv.judge(bundle)
     assert result["verdict"] == "NOT_MEASURED"
     assert any("extraction input/output" in n for n in result["not_measured"])
+
+
+def test_extraction_command_hash_must_bind_real_file(tmp_path):
+    bundle = _bundle(tmp_path)
+    receipt = bundle["scenes"][0]["spef_extraction_receipt"]
+    body = json.loads(Path(receipt["path"]).read_text())
+    body["extraction_command_sha256"] = "b" * 64
+    bundle["scenes"][0]["spef_extraction_receipt"] = _file(
+        tmp_path, "spef_extraction.json", json.dumps(body))
+    result = drv.judge(bundle)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert any("extraction input/output" in reason
+               for reason in result["not_measured"])
 
 
 def test_all_limits_report_cannot_hide_a_named_violator(tmp_path):
