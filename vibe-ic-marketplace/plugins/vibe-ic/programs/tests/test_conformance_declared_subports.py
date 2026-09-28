@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
 CHECKER = PROGRAMS / "spec_conformance_check.py"
 DELEGATION = (
@@ -18,6 +20,19 @@ DELEGATION = (
 L9_GROUP = [{"group": "sram", "authority": "plugin_output/declaration.json",
              "example_ports": ["o_sram_addr", "o_sram_we"],
              "source_document": "L3_external_interface.md"}]
+
+NO_DELEGATION = (
+    "The ports are fixed by this table; declaration.json records unrelated plugin metadata.",
+    "The table defines the port names. declaration.json records plugin settings.",
+    "declaration.json records plugin metadata about ports; this table fixes their names.",
+    "The table, not declaration.json, determines the signal names for this port group.",
+    "declaration.json does not define the signal names for this port group.",
+)
+AUTHORITY_SENTENCE = (
+    "declaration.json defines the concrete signal names for this port group.",
+    "The actual port names for this group come from declaration.json.",
+    "此 port group 的訊號名稱由 Plugin 在 declaration.json 宣告。",
+)
 
 
 def _project(tmp_path, *, delegation=True, extra="o_sram_waddr"):
@@ -105,6 +120,61 @@ def test_phase1_extracts_only_an_affirmative_delegation(tmp_path):
     denied = DELEGATION.replace("are declared", "are not declared")
     assert groups.extract_delegated_groups(
         {"L3_external_interface.md": denied}) == []
+
+
+@pytest.mark.parametrize("statement", NO_DELEGATION)
+def test_phase1_non_authority_keeps_extra_port_blocked(tmp_path, statement):
+    sys.path.insert(0, str(PROGRAMS))
+    import phase1_doc_one_shot_runner as phase1
+
+    project, spec, rtl = _project(tmp_path, delegation=False)
+    document = DELEGATION.replace(
+        "The concrete signal names for this port group are declared by the "
+        "plugin in declaration.json.", statement)
+    (project / "input/docs/L3_external_interface.md").write_text(document)
+    phase1.gen_l9_integration_spec(
+        project, {"L3_external_interface.md": document}, {})
+    emitted = json.loads(spec.read_text())
+    assert emitted["plugin_declared_port_groups"] == []
+    # Keep the ordinary table's two required ports as the checker contract.
+    emitted["top_module"] = "dut"
+    emitted["ports"] = emitted["top_ports"] = [
+        {"name": "o_sram_addr", "direction": "output", "width": 10},
+        {"name": "o_sram_we", "direction": "output", "width": 1},
+    ]
+    spec.write_text(json.dumps(emitted))
+    result, findings = _check(project, spec, rtl)
+    assert result.returncode == 1
+    assert ("port-extra", "o_sram_waddr") in _errors(findings)
+
+
+@pytest.mark.parametrize("statement", AUTHORITY_SENTENCE)
+def test_phase1_keeps_explicit_port_name_authority(statement):
+    sys.path.insert(0, str(PROGRAMS))
+    import _delegated_port_groups as groups
+
+    document = DELEGATION.replace(
+        "The concrete signal names for this port group are declared by the "
+        "plugin in declaration.json.", statement)
+    assert groups.extract_delegated_groups(
+        {"L3_external_interface.md": document}) == L9_GROUP
+
+
+def test_real_input_top_choice_is_not_port_name_delegation():
+    sys.path.insert(0, str(PROGRAMS))
+    import _delegated_port_groups as groups
+    from _hostpaths import require_repo
+
+    source = require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
+        "fixtures", "subservient_input_docs", "L8_submodule_integration.md")
+    line = next(row for row in source.read_text().splitlines()
+                if "declaration.json" in row and "Plugin" in row)
+    document = DELEGATION.replace(
+        "The concrete signal names for this port group are declared by the "
+        "plugin in declaration.json.", line)
+    assert groups.extract_delegated_groups(
+        {"L3_external_interface.md": document}) == []
 
 
 def test_full_stack_tb_resolves_the_same_declared_interface(tmp_path):
