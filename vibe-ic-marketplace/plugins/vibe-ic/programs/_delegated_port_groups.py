@@ -59,49 +59,66 @@ def extract_delegated_groups(extracted: dict[str, str]) -> list[dict]:
     return groups
 
 
-def _source_mentions_declaration(project: Path, source: str, group: str) -> bool:
-    """Recheck the input section named by L9 before honoring its locator."""
-    if not isinstance(source, str) or not source or not isinstance(group, str):
+_EXCLUDED_INPUT_PARTS = frozenset({
+    "oracle", "harness", "golden", "reference", "expected",
+    "phase1", "phase2", "phase3", "reports",
+})
+
+
+def _source_mentions_declaration(
+        project: Path, source: str, group: str,
+        source_documents: object) -> bool:
+    """Recheck only the exact Phase-1-inventoried input section.
+
+    L9's source locator cannot expand the input set. In particular, no docs
+    tree walk or root README fallback is safe at this Phase-2 boundary.
+    """
+    if (not isinstance(source, str) or not source
+            or not isinstance(group, str)
+            or not isinstance(source_documents, list)):
         return False
-    if source.startswith("__chip_root_docs__/"):
-        candidates = [project / source.removeprefix("__chip_root_docs__/")]
-    elif source.startswith("__chip_root__/"):
-        name = source.removeprefix("__chip_root__/")
-        candidates = [project / directory / name
-                      for directory in ("", "doc", "docs", "input")]
-    else:
-        docs = project / "input" / "docs"
-        candidates = []
-        if docs.is_dir():
-            for path in docs.rglob("*.md"):
-                relative = path.relative_to(docs)
-                encoded = ("__".join(relative.parts[:-1]) + "__" + path.name
-                           if len(relative.parts) > 1 else path.name)
-                if source in {relative.as_posix(), encoded}:
-                    candidates.append(path)
-    root = project.resolve()
-    for path in candidates:
-        try:
-            relative = path.resolve().relative_to(root)
-            parts = relative.parts
-            input_docs = parts[:2] == ("input", "docs")
-            docs_tree = parts[:1] in {
-                ("doc",), ("docs",), ("Documentation",),
-                ("documentation",)}
-            readme = (len(parts) <= 4 and path.name.lower().startswith("readme")
-                      and not set(parts).intersection({
-                          "phase1", "phase2", "phase3", "reports",
-                          "oracle", "golden", "harness"}))
-            if not (input_docs or docs_tree or readme):
-                continue
-            body = path.read_text()
-        except (OSError, UnicodeError, ValueError):
+    try:
+        root = project.resolve()
+        input_root = (project / "input" / "docs").resolve()
+        if input_root.relative_to(root).parts != ("input", "docs"):
+            return False
+    except (OSError, ValueError):
+        return False
+
+    candidates: set[Path] = set()
+    for recorded in source_documents:
+        if not isinstance(recorded, str) or "\\" in recorded:
             continue
-        if any(section_group == group and
+        parts = recorded.split("/")
+        if (len(parts) < 3 or parts[:2] != ["input", "docs"]
+                or any(part in ("", ".", "..") for part in parts)
+                or any(part.casefold() in _EXCLUDED_INPUT_PARTS
+                       for part in parts[2:])):
+            continue
+        rel = Path(*parts[2:])
+        encoded = "__".join(parts[2:-1] + [parts[-1]])
+        locators = {rel.as_posix(), encoded, recorded,
+                    f"__chip_root_docs__/{recorded}"}
+        if source in locators:
+            candidates.add(input_root / rel)
+    if len(candidates) != 1:
+        return False
+    path = candidates.pop()
+    try:
+        resolved = path.resolve()
+        if resolved != path:
+            return False
+        relative = resolved.relative_to(root)
+        if (relative.parts[:2] != ("input", "docs")
+                or any(part.casefold() in _EXCLUDED_INPUT_PARTS
+                       for part in relative.parts[2:])):
+            return False
+        body = path.read_text()
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return any(section_group == group and
                any(_DECLARATION.search(line) for line in section)
-               for _, section_group, section in _sections({source: body})):
-            return True
-    return False
+               for _, section_group, section in _sections({source: body}))
 
 
 def resolve_delegated_groups(project: Path | None, l9: dict) -> list[dict]:
@@ -116,8 +133,11 @@ def resolve_delegated_groups(project: Path | None, l9: dict) -> list[dict]:
     if not isinstance(rows, list) or not rows:
         return []
     try:
-        declaration = json.loads(
-            (project / "plugin_output" / "declaration.json").read_text())
+        declaration_path = project / "plugin_output" / "declaration.json"
+        if declaration_path.resolve() != (
+                project.resolve() / "plugin_output" / "declaration.json"):
+            return []
+        declaration = json.loads(declaration_path.read_text())
     except (OSError, ValueError):
         return []
     if not isinstance(declaration, dict):
@@ -131,7 +151,8 @@ def resolve_delegated_groups(project: Path | None, l9: dict) -> list[dict]:
         source = row.get("source_document")
         if not isinstance(group, str) or not re.fullmatch(r"[a-z][a-z_0-9]*", group):
             continue
-        if not _source_mentions_declaration(project, source, group):
+        if not _source_mentions_declaration(
+                project, source, group, l9.get("source_documents")):
             continue
         if not isinstance(examples, list) or not all(
                 isinstance(name, str) and name.isidentifier() for name in examples):
