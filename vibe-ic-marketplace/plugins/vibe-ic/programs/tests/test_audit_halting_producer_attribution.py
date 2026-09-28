@@ -18,7 +18,8 @@ FLOW = PLUGIN / "flow" / "phase1_phase2_phase3.yaml"
 
 def _case(tmp_path: Path, *, producer_ran: bool = False,
           halt_recorded: bool = True,
-          terminal_record: bool = False) -> tuple[Path, Path]:
+          terminal_record: bool = False,
+          independent_gate_failure: bool = False) -> tuple[Path, Path]:
     """Use the shipped declarations, with a tiny runner record and no EDA."""
     canonical = yaml.safe_load(FLOW.read_text())
     declared = {str(s["id"]): s for s in canonical["steps"]}
@@ -28,6 +29,9 @@ def _case(tmp_path: Path, *, producer_ran: bool = False,
         steps.append({"id": int(sid), "name": original["name"],
                       "stage": stage,
                       "required_outputs": original["required_outputs"]})
+    if independent_gate_failure:
+        steps[0]["gate"] = {"files_exist": [
+            "reports/phase2/gates/independent.flag"]}
     steps.append({"id": 32, "name": declared["32"]["name"],
                   "stage": "stage3",
                   "required_outputs": ["reports/phase3/repair_gate.json"],
@@ -123,3 +127,20 @@ def test_missing_output_without_a_skipped_producer_and_halt_stays_fail(
     assert audit["run_status"] == "FAIL"
     assert rows["7"]["status"] == "FAIL", rows["7"]
     assert rows["22"]["status"] == "FAIL", rows["22"]
+
+
+def test_independent_gate_failure_survives_producer_halt(tmp_path):
+    project, flow = _case(tmp_path, independent_gate_failure=True)
+    proc, audit = _audit(project, flow)
+    rows = _rows(audit)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert audit["run_status"] == "FAIL"
+    independent = rows["7"]
+    assert independent["status"] == "FAIL", independent
+    assert independent["reason_class"] == "", independent
+    assert any("reports/phase2/gates/independent.flag" in reason
+               for reason in independent["reasons"]), independent
+    assert not independent["cascade_note"], independent
+    assert "producer_halt" not in (independent["output_binding"] or {})
+    assert rows["22"]["status"] == "NOT_MEASURED", rows["22"]
+    assert rows["22"]["cascade_note"] == "blocked-by-upstream(32)"

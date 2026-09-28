@@ -18391,9 +18391,19 @@ def _attribute_halted_canonical_outputs(
         if not absent or row.status not in (
                 _T.Verdict.FAIL.value, _T.Verdict.NOT_MEASURED.value):
             continue
-        if row.status == _T.Verdict.FAIL.value and any(
-                str(reason).startswith(("program failed:", "optional program failed:"))
-                for reason in row.reasons or []):
+        # Only a missing-output FAIL can be explained by a producer that did
+        # not run.  check_step leaves reason_class empty when an independently
+        # evaluated gate fails (including files_exist and content predicates),
+        # even if a required output is also missing.  Looking for particular
+        # program-failure prose misses those predicates and erases their FAIL.
+        if (row.status == _T.Verdict.FAIL.value
+                and row.reason_class != _T.ReasonClass.MISSING_ARTEFACT.value):
+            continue
+        # A condition-owner refusal is another independent verdict.  It can
+        # carry missing_artefact while its owner is unresolved, so the class
+        # alone does not prove this row failed solely on canonical outputs.
+        if any(str(record.get("step")) == str(row.id)
+               for record in cascade_info.get("condition_owner_blocks") or []):
             continue
         if not all(canonical_spec(spec)
                    or spec in skipped_targets.get(str(row.id), set())
