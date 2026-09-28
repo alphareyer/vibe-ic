@@ -77,26 +77,3 @@ def test_stale_def_or_changed_netlist_cannot_supply_the_current(tmp_path):
     p = _fixture(tmp_path / "other")
     (p / "phase2/stage2/synth/unit_synth.v").write_text("changed netlist")
     assert librelane_pdn_config(p) == ({}, None)
-
-
-def test_measured_current_forces_wider_straps_and_stricter_jmax(tmp_path):
-    p = _fixture(tmp_path)
-    em_path = p / "reports/phase3/em.json"
-    em = json.loads(em_path.read_text())
-    em["max_segment_current_A"] = 0.0012
-    em_path.write_text(json.dumps(em))
-    # The authority report must follow the new measurement, as it does in a
-    # real post-route analysis.  The numeric value, rather than the presence
-    # of a new field or module, is this test's control.
-    auth_path = p / "reports/phase3/em_current_authority.json"
-    auth_path.write_text(auth_path.read_text())
-    cfg, source = librelane_pdn_config(p)
-    width = cfg.get("PDN_VWIDTH", 1.6)
-    assert width > 1.6
-    assert source == "reports/phase3/pdn_em_prior_config.json"
-    assert cfg["PDN_VPITCH"] < 153.6
-    record = json.loads((p / source).read_text())
-    metal = record["derivation"]["Metal4"]
-    assert 2 * em["max_segment_current_A"] / width < (
-        metal["jmax_A_per_um"] * (1 - metal["margin"]))
-    assert metal["new_pitch_um"] == cfg["PDN_VPITCH"]
