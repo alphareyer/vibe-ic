@@ -165,6 +165,11 @@ def test_a_supplied_submodule_replaces_only_that_generated_file(
     rec = res.extras["supplied_replaces_generated"]
     assert rec["replaced_by"] == {emitted: f"input/vendor_rtl/{emitted}.v"}
     assert rec["modules_now_owed"] == []
+    # MEMBERS, not a count (review_wave7): exactly the no-supply control's
+    # files, minus the dropped generated one, plus the staged supplied one
+    control = _control_rtl(tmp_path, mk, cls)
+    assert rec["dropped_generated_files"] == [f"{emitted}.sv"]
+    assert set(_rtl_files(p)) == (control - {f"{emitted}.sv"}) | {f"{emitted}.v"}
     # rtl_gen itself stages the supplied module (review_wave4c): one
     # definition, the supplied bytes, the rest of the design kept
     assert rec["staged_by_rtl_gen"] == [f"{emitted}.v"]
@@ -631,6 +636,8 @@ def test_a_repair_rerun_keeps_the_supplied_module_in_rtl(tmp_path,
     again = R.step_rtl_gen(p, "mixed_signal_otp")    # the repair loop's re-run
     assert again.status == "PASS", again.detail[:300]
     assert _defs(p, "otp_mem") == 1 and _defs(p, "chip_top") == 1
+    control = _control_rtl(tmp_path, _otp_project, "mixed_signal_otp")
+    assert set(_rtl_files(p)) == (control - {"otp_mem.sv"}) | {"otp_mem.v"}
     assert (p / "phase2/stage1/rtl/otp_mem.v").read_text().startswith(
         "// supplied")
     assert str(p / "phase2/stage1/rtl/otp_mem.v") in again.output_files
@@ -659,6 +666,8 @@ def test_a_context_file_overlapping_a_generated_module_is_a_hand_off(
     assert "complete or modify it in place" in res.detail
     assert "Do NOT author" not in res.detail
     assert _defs(p, "chip_top") == 1          # the rest of the design stays
+    control = _control_rtl(tmp_path, _otp_project, "mixed_signal_otp")
+    assert set(_rtl_files(p)) == (control - {"otp_mem.sv"}) | {"otp_mem.v"}
 
 
 def test_a_reused_ip_file_still_replaces_silently_with_its_role(tmp_path,
@@ -671,3 +680,78 @@ def test_a_reused_ip_file_still_replaces_silently_with_its_role(tmp_path,
     assert res.status == "PASS" and not res.extras.get("fallback_skill")
     assert res.extras["supplied_rtl_roles"] == {
         "starting_point": [], "reused_ip": ["input/vendor_rtl/otp_mem.v"]}
+
+
+
+# =========================================================================== #
+# review_wave7 (branch D10)
+# =========================================================================== #
+def _control_rtl(tmp_path, mk, cls):
+    """The generated file set with NOTHING supplied (the control)."""
+    c = mk(tmp_path / "control")
+    R._RTL_SESSION_OWNED = False
+    R.step_rtl_gen(c, cls)
+    R._RTL_SESSION_OWNED = False
+    return set(_rtl_files(c))
+
+
+def test_the_default_flow_still_returns_an_extras_dict(tmp_path, monkeypatch):
+    """MAJOR: with nothing supplied, the generator's PASS carried
+    `extras=None` (the partial-overlap record's default), so the phase-2
+    row read `extras: null` and a finalize cleanup warning raised TypeError
+    after rtl/ was published."""
+    monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
+    monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
+    real = R._phase1_finalize_accepted_transaction
+
+    def _warn(tx):
+        real(tx)
+        return "stage cleanup left a temp dir behind"
+    monkeypatch.setattr(R, "_phase1_finalize_accepted_transaction", _warn)
+    res = R.step_rtl_gen(_otp_project(tmp_path / "p"), "mixed_signal_otp")
+    assert res.status == "PASS", res.detail[:300]
+    assert isinstance(res.extras, dict)
+    assert res.extras["transaction_cleanup_warning"] == \
+        "stage cleanup left a temp dir behind"
+
+
+def test_only_the_needed_supplied_files_are_staged(tmp_path, monkeypatch):
+    """MINOR: the partial path staged EVERY supplied file. Now: the replaced
+    module's source plus what it instantiates; an orphan is disclosed."""
+    monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
+    monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
+    p = _otp_project(tmp_path / "p")
+    _vendor(p, {
+        "otp_mem.v": "// supplied\nmodule otp_mem(input clk, output q);\n"
+                     "  otp_cell u (.clk(clk), .q(q));\nendmodule\n",
+        "otp_cell.v": "module otp_cell(input clk, output q);\n"
+                      "  assign q = clk;\nendmodule\n",
+        "orphan.v": "module orphan(input a); endmodule\n"})
+    res = R.step_rtl_gen(p, "mixed_signal_otp")
+    assert res.status == "PASS", res.detail[:300]
+    rec = res.extras["supplied_replaces_generated"]
+    assert rec["staged_by_rtl_gen"] == ["otp_cell.v", "otp_mem.v"]
+    assert rec["supplied_not_staged"] == ["input/vendor_rtl/orphan.v"]
+    assert "orphan.v" not in _rtl_files(p)
+    assert "input/vendor_rtl/orphan.v" in res.detail
+    mf = json.loads((p / "phase2/stage1/rtl/SOURCE_MANIFEST.json").read_text())
+    assert set(mf["staged_from_input_sha256"]) == {
+        "input/vendor_rtl/otp_mem.v", "input/vendor_rtl/otp_cell.v"}
+
+
+def test_a_supplied_module_that_cannot_be_staged_is_refused_and_restored(
+        tmp_path, monkeypatch):
+    """The post-condition answers NO: the supplied `otp_mem` lives in a file
+    named like a generated one (`rx_phy.sv`), first-wins keeps the generated
+    file, so `otp_mem` would end up defined 0 times. The generated file is
+    restored and the step refuses by name, with the collision."""
+    monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
+    monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
+    p = _otp_project(tmp_path / "p")
+    _vendor(p, {"rx_phy.sv": _SUPPLIED_OTP})
+    res = R.step_rtl_gen(p, "mixed_signal_otp")
+    assert res.status == "FAIL", res.detail[:300]
+    assert res.extras["finding"] == "SUPPLIED_MODULE_NOT_STAGED"
+    assert res.extras["staged_name_collisions"] == {
+        "rx_phy.sv": ["input/vendor_rtl/rx_phy.sv"]}
+    assert "otp_mem is defined 0 time(s)" in res.detail
