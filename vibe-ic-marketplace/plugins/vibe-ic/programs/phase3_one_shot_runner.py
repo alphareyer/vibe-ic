@@ -74495,7 +74495,16 @@ def _run_librelane_consumer_phase3(project: Path, top: str, pdk: PdkConfig,
     except _Stopped:
         pass
     except _ll.Refusal as exc:
-        rows.append(StepResult("librelane_segment", "FAIL", 0.0, str(exc)))
+        unavailable = {
+            "LL_PDK_ROOT_MISSING": _V.ReasonClass.INPUT_ABSENT,
+            "LL_SYNTH_INPUT_MISSING": _V.ReasonClass.INPUT_ABSENT,
+            "SDC_SEAM_PENDING": _V.ReasonClass.INPUT_ABSENT,
+            "SDC_PNR_DERIVATION_PENDING": _V.ReasonClass.TOOL_ABSENT,
+        }
+        reason = unavailable.get(exc.code)
+        rows.append(StepResult(
+            "librelane_segment", "NOT_MEASURED" if reason else "FAIL",
+            0.0, str(exc), reason_class=reason or ""))
     except Exception as exc:
         rows.append(StepResult("librelane_dispatch", "FAIL", 0.0,
                                f"LL_DISPATCH_ERROR: {type(exc).__name__}: {exc}"))

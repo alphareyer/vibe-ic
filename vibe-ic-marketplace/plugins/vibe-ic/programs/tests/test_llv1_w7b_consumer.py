@@ -273,6 +273,29 @@ def test_chip_segment_uses_fxports_typed_pnr_sdc_derivation(monkeypatch,
     assert record["step7_sha256"] == "sha256:source"
 
 
+def test_missing_chip_sdc_derivation_is_unmeasured(monkeypatch, tmp_path):
+    R, project, pdk, args, trace = _consumer_stub(monkeypatch, tmp_path)
+    import _ppa.timing as timing
+    from _atomic_artefact import write_json
+    monkeypatch.setattr(R, "_chip_path_requests_pad_ring", lambda *a: True)
+    wrapper = project / "phase3/stage3/pnr/chip_top_io.v"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("module chip_top(input clk); top u(clk); endmodule\n")
+    write_json(project / "reports/phase3/io_pad_chip_top.json", {
+        "chip_top_module": "chip_top",
+        "chip_top_verilog": str(wrapper.relative_to(project))})
+    monkeypatch.delattr(timing, "asic_sdc_for_pnr", raising=False)
+    assert R._run_librelane_consumer_phase3(project, "top", pdk, args) == 2
+    assert trace == ["segment1", "11-12", "13", "7-8-10", "prepnr"]
+    record = json.loads((project / "reports/orchestrator/phase3_one_shot.json").read_text())
+    row = record["steps"][-1]
+    assert (record["verdict"], row["name"], row["status"],
+            row["reason_class"]) == (
+                "NOT_MEASURED", "librelane_segment", "NOT_MEASURED",
+                "tool_absent")
+    assert "SDC_PNR_DERIVATION_PENDING" in row["detail"]
+
+
 def test_phase3_main_dispatches_the_flag_before_the_direct_flow(monkeypatch,
                                                                  tmp_path):
     import phase3_one_shot_runner as R
