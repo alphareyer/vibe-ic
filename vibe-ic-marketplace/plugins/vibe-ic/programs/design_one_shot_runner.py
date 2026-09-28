@@ -25436,8 +25436,9 @@ def main() -> int:
             "It is derived from the design's own RTL and the oracle TB's measured "
             "framing, not from any step's state, and the manifests this run does "
             "owe read it.")
-    plan.append(_refuse_a_disagreeing_declaration(
-        step_arith_declaration_emit(project), _early_declaration, project))
+    plan.append(step_arith_declaration_emit(project))
+    plan[-1] = _refuse_a_disagreeing_declaration(
+        plan[-1], _early_declaration, project)
     # MEASURE coverage before the manifests/audit read it. Nothing used to run
     # the measurement at all — see step_verilator_coverage's docstring.
     if _after_exit("sim"):

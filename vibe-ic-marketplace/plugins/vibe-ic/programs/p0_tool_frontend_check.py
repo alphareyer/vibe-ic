@@ -312,12 +312,10 @@ def _all_in_supplied_ip(project: Path, log: str) -> tuple[bool, list[str]]:
 def _diagnostic_file(name: str, rtl: list[str]) -> str | None:
     """The RTL file (resolved) a slang diagnostic names, or None.
 
-    slang prints the path relative to ITS working directory, which is the
-    image's, not ours: MEASURED in vibeic-eda 0.3.83 on a project under
-    /home/reyerchu, `../../home/reyerchu/<project>/phase2/stage1/rtl/
-    serv_state.v:111:52: error: ...`. So a relative path is matched by path
-    SUFFIX (its leading `..` segments dropped) against the files slang was
-    handed, and only a UNIQUE match counts; an absolute path is resolved."""
+    slang prints paths relative to its own working directory. A diagnostic
+    can therefore start with parent components before the project's RTL
+    subtree. Match the remaining path as a SUFFIX against the files slang was
+    handed, and accept only a UNIQUE match; resolve absolute paths directly."""
     if Path(name).is_absolute():
         try:
             return str(Path(name).resolve())
