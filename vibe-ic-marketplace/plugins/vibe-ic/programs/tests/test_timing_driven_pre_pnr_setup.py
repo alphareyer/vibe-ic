@@ -145,3 +145,43 @@ def test_step10_black_box_blocks_both_pnr_paths(tmp_path, monkeypatch, cached):
     assert "pnr" not in called, "a failed Step 10 must block a new route"
     assert "skipped re-run" not in plan["pnr"]["detail"], (
         "a failed Step 10 must also block cached route admission")
+
+
+def test_unmeasured_step10_cannot_admit_cached_pnr(tmp_path, monkeypatch):
+    """A typed Step 10 gap blocks reuse even when the SS path itself is green."""
+    project = _project(tmp_path, stamp=True)
+    called = _drive(monkeypatch, project)
+    from test_mig_sdcsta import sta_folder
+    folder, _ = sta_folder(tmp_path / "unmeasured_tool", setup=None)
+    step10 = prelayout.judge_slack(folder, tmp_path / "step10_unmeasured.json")
+    assert step10["verdict"] == "NOT_MEASURED"
+    monkeypatch.setattr(runner, "step_prelayout_signoff", lambda *a, **k:
+        runner.StepResult("prelayout_signoff", "NOT_MEASURED", 0.0,
+                          "step 10 setup metric NOT_MEASURED",
+                          [str(tmp_path / "step10_unmeasured.json")],
+                          reason_class=runner._V.ReasonClass.INCONCLUSIVE))
+
+    runner.main()
+    plan = _plan(project)
+    assert plan["pre_pnr_setup"]["status"] == "PASS", plan["pre_pnr_setup"]
+    assert plan["prelayout_signoff"]["status"] == "NOT_MEASURED"
+    assert plan["pnr"]["status"] == "NOT_MEASURED", plan["pnr"]
+    assert "step 10 setup metric NOT_MEASURED" in plan["pnr"]["detail"]
+    assert "skipped re-run" not in plan["pnr"]["detail"]
+    assert "pnr" not in called
+
+
+def test_unreadable_setup_input_publishes_typed_block(tmp_path, monkeypatch):
+    """An absent matrix yields a plan row and never crashes StepResult validation."""
+    project = _project(tmp_path, stamp=True)
+    called = _drive(monkeypatch, project)
+    (runner._pl.constraints_dir(project) / "pvt_matrix.json").unlink()
+
+    runner.main()
+    plan = _plan(project)
+    assert plan["prelayout_signoff"]["status"] == "PASS"
+    assert plan["pre_pnr_setup"]["status"] == "NOT_MEASURED"
+    assert plan["pre_pnr_setup"]["reason_class"] == "execution_error"
+    assert "PRE_PNR_GATE_INPUT_UNREADABLE:FileNotFoundError" in plan["pnr"]["detail"]
+    assert plan["pnr"]["status"] == "NOT_MEASURED"
+    assert "pnr" not in called
