@@ -348,6 +348,28 @@ def test_clock_slew_is_hard_fail(tmp_path):
     assert result["findings"][0]["failed_tier"] == "T2_CLOCK_SLEW"
 
 
+def test_clock_label_without_tool_clock_network_proof_cannot_waive(tmp_path):
+    bundle = _bundle(tmp_path)
+    _violate(bundle, tmp_path, "max_fanout", value=5, limit=4,
+             net_class="clock")
+    bundle["scenes"][0].pop("clock_network_pins")
+    result = drv.judge(bundle)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert any("clock net classification" in reason
+               for reason in result["not_measured"])
+
+
+def test_std_cell_mislabeled_io_cannot_escape_cap_margin(tmp_path):
+    bundle = _bundle(tmp_path)
+    _violate(bundle, tmp_path, "max_capacitance", value=.3, limit=.2,
+             cell_class="IO")
+    result = drv.judge(bundle)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert not result["io_margin_disclosures"]
+    assert any("IO class lacks Liberty" in reason
+               for reason in result["not_measured"])
+
+
 @pytest.mark.parametrize("kind,value,limit", [
     ("max_slew", 4, 3), ("max_capacitance", .3, .2)])
 def test_data_margin_can_only_be_waived_by_exact_owner_record(
@@ -654,9 +676,13 @@ def test_step23_without_capture_plan_is_not_measured(tmp_path):
 
 def test_runner_cannot_reuse_stale_pass_receipt_after_judge_crash(tmp_path, monkeypatch):
     import subprocess
+    import drv_signoff_capture as capture
     import phase3_one_shot_runner as runner
+    bundle = _bundle(tmp_path)
+    _file(tmp_path, "reports/phase3/sta/drv_capture_plan.json", "{}")
+    monkeypatch.setattr(capture, "capture", lambda *a, **k: bundle)
     output = tmp_path / "reports/phase3/sta/drv_signoff.json"
-    output.parent.mkdir(parents=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps({"name": "DRV(tran/cap/fanout)",
                                   "verdict": "PASS"}))
     monkeypatch.setattr(runner._pr, "run", lambda *a, **k:
@@ -665,6 +691,17 @@ def test_runner_cannot_reuse_stale_pass_receipt_after_judge_crash(tmp_path, monk
         tmp_path, "drv_signoff", "drv_signoff_judge.py",
         "reports/phase3/sta/drv_signoff.json")
     assert row.status == "NOT_MEASURED"
+    assert not output.exists()
+
+
+def test_step32_adoption_requires_applied_drv_stage(tmp_path):
+    bundle = _bundle(tmp_path)
+    _file(tmp_path, "reports/phase3/librelane_postroute_repair.json",
+          json.dumps({"adopted": "repair_candidate"}))
+    result = drv.judge(bundle, project=tmp_path)
+    assert result["verdict"] == "FAIL"
+    assert any("postroute_repair: required applied constraints absent" in item
+               for item in result["failures"])
 
 
 def test_plan_override_flag_cannot_authorize_wider_slew(tmp_path):
