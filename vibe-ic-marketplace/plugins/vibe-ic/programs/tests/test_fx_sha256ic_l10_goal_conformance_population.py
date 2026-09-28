@@ -17,6 +17,7 @@ if str(PROG) not in sys.path:
     sys.path.insert(0, str(PROG))
 
 import _l10_execution as X  # noqa: E402
+import cpu_functional_oracle_waiver_check as W  # noqa: E402
 
 
 VECTOR = {"name": "known_case", "kind": "functional_vector",
@@ -24,10 +25,14 @@ VECTOR = {"name": "known_case", "kind": "functional_vector",
 GOAL = {"name": "boundary_pass_rate", "kind": "coverage_goal",
         "coverage_scope": "short and long transaction boundaries",
         "expected": "100% PASS", "covered_by": ["known_case"]}
+PERCENT_VECTOR = {"name": "percent_vector", "kind": "functional_vector",
+                  "stimulus": "3", "expected": "100% PASS",
+                  "coverage_scope": "line"}
 
 
 def _project(tmp_path: Path, *, extra_vector: bool = False,
-             literal_vector: bool = False) -> tuple[Path, Path, Path]:
+             literal_vector: bool = False,
+             percent_vector: bool = False) -> tuple[Path, Path, Path]:
     project = tmp_path / "ic"
     l10 = project / "phase1/generated_docs/L10_TEST_CASES.json"
     l10.parent.mkdir(parents=True)
@@ -38,6 +43,8 @@ def _project(tmp_path: Path, *, extra_vector: bool = False,
     if literal_vector:
         cases.append({"name": "literal_value", "kind": "functional_vector",
                       "stimulus": "2", "expected": "42"})
+    if percent_vector:
+        cases.append(PERCENT_VECTOR)
     l10.write_text(json.dumps({"schema_version": 2, "doc_class": "test_cases",
                                "test_cases": cases}) + "\n")
     tb_dir = project / "phase2/stage1/sim/tb"
@@ -96,3 +103,23 @@ def test_literal_expected_value_is_never_reclassified_as_a_goal(tmp_path):
     assert run.returncode == 1
     assert any(r["id"] == "literal_value" and
                r["status"] == X.NOT_EXECUTED for r in report["results"])
+
+
+def test_explicit_percentage_vector_still_owes_its_own_tb_execution(tmp_path):
+    project, l10, tb_dir = _project(tmp_path, percent_vector=True)
+    run, report = _gate(project, l10, tb_dir)
+    assert run.returncode == 1, run.stderr
+    assert any(r["id"] == PERCENT_VECTOR["name"] and
+               r["status"] == X.NOT_EXECUTED for r in report["results"])
+    assert report["coverage_goal_population"]["goals"] == [GOAL["name"]]
+
+
+def test_goal_instrument_cannot_credit_explicit_percentage_vector(tmp_path):
+    project, _l10, _tb_dir = _project(tmp_path, percent_vector=True)
+    coverage = project / "reports/phase2/coverage/coverage_verilator.json"
+    coverage.parent.mkdir(parents=True)
+    coverage.write_text(json.dumps({"totals": {"line": {"pct": 100.0}}}))
+    summary = W._coverage_goal_summary(project)
+    assert summary["declared_count"] == 1, summary
+    assert [(r["case"], r["verdict"]) for r in summary["rows"]] == [
+        (GOAL["name"], "PASS")]

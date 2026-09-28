@@ -44,9 +44,10 @@ import instruction_coverage_measure as M          # noqa: E402
 import cpu_functional_oracle_waiver_check as W    # noqa: E402
 import _l10_execution as X                        # noqa: E402
 
-#: The design's own row, transcribed from its L7 verification plan.
+#: An instruction-coverage goal derived from the L7 verification plan. Its
+#: declared kind must say goal: an explicit functional_vector is executable.
 GOAL_INSTRUCTION = {
-    "name": "rv32i_40", "kind": "functional_vector",
+    "name": "rv32i_40", "kind": "coverage_goal",
     "stimulus": "整套 RV32I 指令(40+ 條)單元測試",
     "expected": "100% PASS(可用 RISC-V Compliance suite 或 SERV 內附 testbench)",
 }

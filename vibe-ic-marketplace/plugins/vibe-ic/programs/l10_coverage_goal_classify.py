@@ -55,8 +55,8 @@ from the input's own shape, never from prose interpretation:
 
   (1) the row DECLARES its kind (`kind`/`type` is a coverage token) — the
       citation is that field;
-  (2) the row's expected half is an acceptance PERCENTAGE — the citation is
-      the expected text itself.
+  (2) with no declared kind, the row's expected half is an acceptance
+      PERCENTAGE — the citation is the expected text itself.
 
 A row whose expected half is a literal value is a vector and stays one, even
 when its scope text happens to contain a number.
@@ -175,18 +175,19 @@ def coverage_scope(case: dict) -> Tuple[Optional[str], str]:
 def classify(case: dict) -> Tuple[str, str]:
     """`(population, evidence)` for ONE declared L10 row.
 
-    STRUCTURAL and CITED. The row's own declared kind wins; failing that, an
-    acceptance percentage in the expected half makes it a goal. Everything
-    else is a vector — including a row whose scope text contains numbers."""
+    STRUCTURAL and CITED. The row's own declared kind wins; only an untyped
+    row can become a goal from an acceptance percentage in its expected half.
+    Everything else is a vector, including a typed functional vector whose
+    expected text contains a percentage."""
     kind, field = declared_kind(case)
     if kind in _GOAL_KIND_TOKENS:
         return COVERAGE_GOAL, f"the row declares {field}={kind!r}"
+    if kind:
+        return STATED_VECTOR, f"the row declares {field}={kind!r}"
     pct, why = stated_acceptance_percentage(case)
     if pct is not None:
         return COVERAGE_GOAL, (f"the row states an acceptance percentage "
                                f"({pct:g}%): {why}")
-    if kind:
-        return STATED_VECTOR, f"the row declares {field}={kind!r}; {why}"
     return STATED_VECTOR, why
 
 
