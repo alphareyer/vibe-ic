@@ -888,6 +888,18 @@ def test_step32_adoption_requires_applied_drv_stage(tmp_path):
                for item in result["failures"])
 
 
+def test_step32_in_chain_receipt_must_match_route_handoff(tmp_path):
+    bundle = _bundle(tmp_path)
+    _file(tmp_path, "reports/phase3/librelane_postroute_repair.json",
+          json.dumps({"site": "after_route", "adopted": "repair_candidate"}))
+    _file(tmp_path, "reports/phase3/librelane_route_handoff.json",
+          json.dumps({"postroute_repair": {"report_sha256": "0" * 64}}))
+    result = drv.judge(bundle, project=tmp_path)
+    assert result["verdict"] == "FAIL"
+    assert any("not bound to route handoff" in item
+               for item in result["not_measured"])
+
+
 def test_plan_override_flag_cannot_authorize_wider_slew(tmp_path):
     bundle = _bundle(tmp_path)
     bundle["frozen"]["values"]["slew_ns"] = 4
