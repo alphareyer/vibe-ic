@@ -542,6 +542,33 @@ def test_full_parameter_pass_does_not_publish_delivered_l10_pass(tmp_path):
     assert row["sim_executed"] is False
     assert "delivered" in row["detail"] and "4096" in row["detail"]
 
+    import testbench_gen as TB
+    import _l10_execution as X
+    tb = p / "phase2" / "stage1" / "sim" / "tb"
+    tb.mkdir(parents=True)
+    (tb / "base_isa.v").write_text(
+        f"// {TB.ORACLE_NONE_MARKER}\nmodule base_isa;\nendmodule\n")
+    report = {}
+    TB.run_unit_tbs(p, report=report,
+                    dispatch=lambda *_args: (0, "ok"),
+                    isa_producer=lambda _project: rec)
+    assert X.case_state("base_isa", X.load_record(p))[0] == X.NOT_EXECUTED
+
+
+def test_one_delivered_program_cannot_certify_a_two_program_case(tmp_path):
+    p = _project(tmp_path, units=("I",))
+    lock = _lock()
+    programs = lock["suites"]["s"]["programs"]
+    programs[1] = dict(programs[0], id="s-sub", instruction="sub")
+    rec = _produce(p, {"s-add": (WORDS, 0, HALT, WORDS),
+                       "s-sub": (WORDS, 0, HALT, WORDS, 0, 4096)},
+                   lock=lock)
+    case = rec["cases"]["base_isa"]
+    assert case["full_parameter"]["verdict"] == "PASS"
+    assert case["delivered"]["passed"] == 1
+    assert case["verdict"] == "NOT_MEASURED"
+    assert rec["rows"][0]["verdict"] == "NOT_EXECUTED"
+
 
 def test_completed_results_with_failed_executor_refuse_every_case(tmp_path):
     p = _project(tmp_path)
