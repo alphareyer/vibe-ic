@@ -12,6 +12,8 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 import gds_antenna_deck_check as gate  # noqa: E402
 import eda_report_audit as audit  # noqa: E402
+import _watchdog as watchdog  # noqa: E402
+import _klayout_launch as launch  # noqa: E402
 
 
 def test_real_native_rdb_calibration_pair():
@@ -56,6 +58,12 @@ class NativeRunner:
         target = Path(next(x.split("=", 1)[1] for x in argv if x.startswith("report=")))
         target.write_text(_rdb(self.violations))
         return 0, "2026-09-28: Executing rule ANT.1\n", ""
+
+    def run_argv_supervised(self, argv, env, *, stall_grace_s,
+                            memory_limit_mb, progress_paths):
+        rc, out, err = self.run_argv(argv, env, timeout=30)
+        return watchdog.SupervisedResult(rc, out, err, "natural", 0.1,
+                                         supervision={"watched": ["output"]})
 
 
 def _project(tmp_path, *, deck=True):
@@ -152,3 +160,107 @@ def test_declared_native_deck_execution_failure_is_not_clean(tmp_path, monkeypat
     result = gate.run(tmp_path, None, None, None, None)
     assert result["verdict"] == "FAIL"
     assert "failed rc=1" in result["reason"]
+    assert result["measurement"] == "NOT_MEASURED"
+
+
+def test_native_clean_rdb_with_unreadable_router_report_cannot_pass(tmp_path,
+                                                                    monkeypatch):
+    _project(tmp_path)
+    report = tmp_path / "reports/phase3/antenna.rpt"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("OpenROAD check_antennas: report truncated before tally\n")
+    monkeypatch.setattr(gate._kl, "find_runner", lambda **kw: NativeRunner())
+    result = gate.run(tmp_path, None, None, None, None)
+    assert result["cross_check"]["verdict"] == "ERROR", result
+    assert result["verdict"] == "NOT_MEASURED", result
+    assert gate.main([str(tmp_path)]) != 0
+
+
+def test_native_clean_rdb_with_cross_check_exception_cannot_pass(tmp_path,
+                                                                  monkeypatch):
+    _project(tmp_path)
+    report = tmp_path / "reports/phase3/antenna.rpt"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("Found 0 net violations.\nFound 0 pin violations.\n")
+    monkeypatch.setattr(gate._kl, "find_runner", lambda **kw: NativeRunner())
+    monkeypatch.setattr(gate, "_load_module", lambda *args: 1 / 0)
+    result = gate.run(tmp_path, None, None, None, None)
+    assert result["cross_check"]["verdict"] == "ERROR", result
+    assert result["verdict"] == "NOT_MEASURED", result
+
+
+def test_native_progress_continues_past_former_wall_clock(tmp_path, monkeypatch):
+    _project(tmp_path)
+
+    class ProgressRunner(NativeRunner):
+        def run_argv(self, argv, env, *, timeout):
+            return 124, "", "old 1800 second wall-clock timeout"
+
+        def run_argv_supervised(self, argv, env, *, stall_grace_s,
+                                memory_limit_mb, progress_paths):
+            self.argv = argv
+            assert stall_grace_s > 0 and memory_limit_mb > 0
+            assert progress_paths
+            target = Path(next(x.split("=", 1)[1] for x in argv
+                               if x.startswith("report=")))
+            target.write_text(_rdb(0))
+            return watchdog.SupervisedResult(
+                0, "Executing rule ANT.1\n", "", "natural", 1801.0,
+                supervision={"hard_ceiling_exceeded": True})
+
+    runner = ProgressRunner()
+    monkeypatch.setattr(gate._kl, "find_runner", lambda **kw: runner)
+    result = gate.run(tmp_path, None, None, None, None)
+    assert result["verdict"] == "PASS", result
+    assert result["execution"]["elapsed_s"] == 1801.0
+    assert runner.argv is not None
+
+
+def test_native_stall_is_incomplete_measurement_not_antenna_failure(tmp_path,
+                                                                   monkeypatch):
+    _project(tmp_path)
+
+    class StalledRunner(NativeRunner):
+        def run_argv(self, argv, env, *, timeout):
+            return 124, "", "old 1800 second wall-clock timeout"
+
+        def run_argv_supervised(self, argv, env, *, stall_grace_s,
+                                memory_limit_mb, progress_paths):
+            return watchdog.SupervisedResult(
+                watchdog.RC_STALLED, "partial deck output", "WATCHDOG_STALLED",
+                "stalled", 2000.0, supervision={"watched": ["output", "cpu"],
+                                                 "since_last_progress_s": 1800.0})
+
+    monkeypatch.setattr(gate._kl, "find_runner", lambda **kw: StalledRunner())
+    result = gate.run(tmp_path, None, None, None, None)
+    assert result["verdict"] == "NOT_MEASURED", result
+    assert result["execution"]["outcome"] == "stalled"
+    assert "stall" in result["reason"]
+
+
+def test_native_cross_check_reads_real_klayout_rdb_dialect(tmp_path, monkeypatch):
+    _project(tmp_path)
+    report = tmp_path / "reports/phase3/antenna.rpt"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_bytes((PROGRAMS / "calibration/native_antenna_clean.lyrdb").read_bytes())
+    monkeypatch.setattr(gate._kl, "find_runner", lambda **kw: NativeRunner())
+    result = gate.run(tmp_path, None, None, None, None)
+    assert result["verdict"] == "PASS", result
+    assert result["cross_check"]["verdict"] == "AGREE", result
+    assert result["cross_check"]["router_violations"] == 0
+
+
+def test_host_native_runner_enforces_memory_and_keeps_progressing():
+    runner = launch.HostRunner(sys.executable, ())
+    cmd = [sys.executable, "-c", (
+        "import resource,time\n"
+        "print(resource.getrlimit(resource.RLIMIT_AS)[0], flush=True)\n"
+        "end=time.monotonic()+0.8\n"
+        "while time.monotonic()<end: pass\n"
+    )]
+    result = runner.run_argv_supervised(
+        cmd, {}, stall_grace_s=0.3, memory_limit_mb=256)
+    assert result.outcome == "natural", result
+    assert result.rc == 0, result
+    assert result.elapsed_s > 0.3
+    assert result.out.strip() == str(256 * 1024 * 1024)

@@ -33,12 +33,15 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
 import _progress_run as _pr  # noqa: E402
+import _watchdog as _wd  # noqa: E402
+import _docker_watchdog as _dwd  # noqa: E402
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 
 __all__ = ["KLayoutRunner", "HostRunner", "ContainerRunner", "find_runner"]
@@ -53,6 +56,14 @@ __all__ = ["KLayoutRunner", "HostRunner", "ContainerRunner", "find_runner"]
 DEFAULT_CONTAINER = _pin.default_container_name()
 
 _MOUNT_CACHE: Dict[str, List[Tuple[str, str]]] = {}
+
+
+def _memory_bounded_argv(argv: Sequence[str], memory_limit_mb: int) -> str:
+    """Enforce the per-tool virtual-memory ceiling before starting the tool."""
+    limit = int(memory_limit_mb)
+    if limit <= 0 or not argv:
+        raise ValueError("a positive memory ceiling and nonempty argv are required")
+    return f"ulimit -v {limit * 1024} || exit 125; exec {shlex.join([str(a) for a in argv])}"
 
 
 def _container_mounts(container: str) -> List[Tuple[str, str]]:
@@ -118,6 +129,12 @@ class KLayoutRunner:
                  *, timeout: int = 1800) -> Tuple[int, str, str]:
         raise NotImplementedError
 
+    def run_argv_supervised(self, argv: Sequence[str], env: Dict[str, str], *,
+                            stall_grace_s: float, memory_limit_mb: int,
+                            progress_paths=()) -> _wd.SupervisedResult:
+        """Run a long tool with progress supervision and an address-space cap."""
+        raise NotImplementedError
+
     def exists(self, path) -> bool:
         """True when `path` is a readable file IN THIS RUNNER'S environment."""
         return Path(str(path)).is_file()
@@ -163,6 +180,16 @@ class HostRunner(KLayoutRunner):
         except OSError as exc:
             return 127, "", f"launch failed: {exc}"
         return cp.returncode, cp.stdout or "", cp.stderr or ""
+
+    def run_argv_supervised(self, argv, env, *, stall_grace_s,
+                            memory_limit_mb, progress_paths=()):
+        full = dict(os.environ)
+        full.setdefault("QT_QPA_PLATFORM", "offscreen")
+        full.update({k: str(v) for k, v in env.items()})
+        cmd = ["bash", "-c", _memory_bounded_argv(argv, memory_limit_mb)]
+        return _wd.run_host_supervised(cmd, env=full,
+                                        stall_grace_s=stall_grace_s,
+                                        progress_paths=progress_paths)
 
 
 class ContainerRunner(KLayoutRunner):
@@ -226,6 +253,34 @@ class ContainerRunner(KLayoutRunner):
         except OSError as exc:
             return 127, "", f"docker exec failed: {exc}"
         return cp.returncode, cp.stdout or "", cp.stderr or ""
+
+    def run_argv_supervised(self, argv, env, *, stall_grace_s,
+                            memory_limit_mb, progress_paths=()):
+        exports = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in env.items())
+        cmd = "export QT_QPA_PLATFORM=offscreen && "
+        if exports:
+            cmd += f"export {exports} && "
+        cmd += _memory_bounded_argv(argv, memory_limit_mb)
+
+        def raw_exec(container, probe, timeout=30):
+            try:
+                cp = subprocess.run(
+                    _ce.docker_exec_argv(container, "bash", "-lc", probe),
+                    capture_output=True, text=True, timeout=timeout)
+                return cp.returncode, cp.stdout or "", cp.stderr or ""
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return 124, "", f"docker watchdog probe failed: {exc}"
+
+        start = time.monotonic()
+        rc, out, err = _dwd.run_docker_supervised(
+            self._c, cmd, str(argv[0]), docker_exec_raw=raw_exec,
+            progress_paths=progress_paths, stall_grace_s=stall_grace_s)
+        outcome = "stalled" if rc == _wd.RC_STALLED else "natural"
+        return _wd.SupervisedResult(
+            rc, out, err, outcome, time.monotonic() - start,
+            supervision={"watchdog": "docker_identity_stamped",
+                         "stall_grace_s": stall_grace_s,
+                         "progress_paths": [str(p) for p in progress_paths]})
 
     def klayout_bin(self) -> str:
         return "klayout"

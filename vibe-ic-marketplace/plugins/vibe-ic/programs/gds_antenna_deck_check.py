@@ -71,6 +71,8 @@ except ImportError:                                          # standalone gate
 from _atomic_artefact import write_bytes as _atomic_write_bytes  # vibe-ic#1082
 
 PASS, FAIL, SKIP = 0, 1, 2
+_NATIVE_STALL_GRACE_S = 1800  # idle time, never a total-runtime deadline
+_NATIVE_MEMORY_LIMIT_MB = 32768
 
 # Where a streamed GDS lands, most-final first. Globs only — no design literal.
 _GDS_GLOBS = (
@@ -276,23 +278,40 @@ def _run_native(project: Path, gds: Optional[str], router: Optional[str],
             "-rd", f"report={runner.cpath(rdb)}", "-rd", "decks=antenna"]
     if cell:
         argv.extend(["-rd", f"topcell={cell}"])
-    rc, out, err = runner.run_argv(argv, {}, timeout=1800)
+    execution = runner.run_argv_supervised(
+        argv, {}, stall_grace_s=_NATIVE_STALL_GRACE_S,
+        memory_limit_mb=_NATIVE_MEMORY_LIMIT_MB, progress_paths=(rdb,))
+    rc, out, err = execution.rc, execution.out or "", execution.err or ""
     _atomic_write_bytes(transcript, (_BIND_PREFIX + before + "\n" + out + err).encode())
+    run_record = {"rc": rc, "outcome": execution.outcome,
+                  "elapsed_s": execution.elapsed_s,
+                  "stall_grace_s": _NATIVE_STALL_GRACE_S,
+                  "memory_limit_mb": _NATIVE_MEMORY_LIMIT_MB,
+                  "stdout_bytes": len(out.encode()), "stderr_bytes": len(err.encode()),
+                  "supervision": execution.supervision}
     if rc != 0:
-        return {"check": "gds_geometry_antenna_deck", "verdict": "FAIL",
-                "method": "pdk_native_klayout", "rc": rc,
+        incomplete = execution.outcome != "natural" or rc in (124, 125, 137, -9)
+        return {"check": "gds_geometry_antenna_deck",
+                "verdict": "NOT_MEASURED" if incomplete else "FAIL",
+                "measurement": "NOT_MEASURED", "failure_class": "DECK_EXECUTION",
+                "method": "pdk_native_klayout", "rc": rc, "execution": run_record,
                 "gds": str(gds_path), "gds_sha256": before,
                 "pdk_rule": str(native["rule"]),
                 "pdk_rule_sha256": _sha(native["rule"]),
                 "transcript": str(transcript),
                 "transcript_sha256": _sha(transcript),
-                "reason": f"declared native KLayout deck failed rc={rc}"}
+                "reason": (f"native antenna measurement incomplete after "
+                           f"{execution.outcome} rc={rc}"
+                           if incomplete else
+                           f"declared native KLayout deck failed rc={rc}; "
+                           "no antenna measurement")}
     count, why, hashes = _bound_native_count(gds_path, rdb, transcript, before)
     base = {"check": "gds_geometry_antenna_deck", "method": "pdk_native_klayout",
             "gds": str(gds_path), "gds_sha256": before,
             "pdk_rule": str(native["rule"]), "pdk_rule_sha256": _sha(native["rule"]),
             "pdk_parent": str(parent), "pdk_parent_sha256": _sha(parent),
             "rdb": str(rdb), "transcript": str(transcript), "rc": rc,
+            "execution": run_record,
             **hashes}
     if why:
         return {**base, "verdict": "DISCLOSED_SKIP", "reason": why}
@@ -309,11 +328,20 @@ def _run_native(project: Path, gds: Optional[str], router: Optional[str],
     if xtool is not None and rpt is not None and rpt.is_file():
         try:
             x = _load_module(xtool, "_vibeic_xcheck_router").cross_check(raw, rpt)
+            if not isinstance(x, dict) or x.get("verdict") not in (
+                    "AGREE", "DISAGREE", "ERROR"):
+                raise ValueError("cross-check returned no recognized verdict")
         except Exception as exc:  # noqa: BLE001
             x = {"verdict": "ERROR", "detail": f"cross-check failed: {exc}"}
         res["cross_check"] = {**x, "router_report": str(rpt)}
         if x.get("verdict") == "DISAGREE":
             res.update(verdict="FAIL", reason=f"router-vs-geometry antenna DISAGREEMENT: {x.get('detail')}")
+        elif x.get("verdict") == "ERROR":
+            reason = x.get("detail") or x.get("error") or "no usable cross-check result"
+            res.update(verdict="FAIL" if count else "NOT_MEASURED",
+                       measurement="NOT_MEASURED" if count == 0 else "FAIL",
+                       failure_class="ROUTER_CROSS_CHECK",
+                       reason=f"router-vs-geometry antenna cross-check ERROR: {reason}")
     else:
         res["cross_check"] = {"verdict": "NOT_RUN", "reason": "no router report or cross-check engine"}
     return res
@@ -563,7 +591,7 @@ def main(argv=None) -> int:
                   f"(0 geometry antenna violations, worst ratio "
                   f"{res.get('worst_ratio')})")
         return PASS
-    print(f"gds_antenna_deck_check: FAIL — {res.get('reason')}")
+    print(f"gds_antenna_deck_check: {verdict} — {res.get('reason')}")
     return FAIL
 
 
