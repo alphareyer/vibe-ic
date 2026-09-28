@@ -259,38 +259,80 @@ class TestDisclosureChangesNothing:
 
 
 # ---------------------------------------------------------------------------
-# §4.05 BOUNDARY — a staged reference flow is MIXED. Recipe is design input;
-# a QoR-rules artifact is the oracle and is off-limits. Declining to read the
-# oracle is COMPLIANCE and must never be reported as a coverage gap.
+# §4.05 BOUNDARY — a staged reference flow is MIXED. Known oracle paths are
+# excluded unopened. A neutral-named non-recipe file remains unexamined even
+# when the synthetic fixture knows it contains oracle bytes.
 # ---------------------------------------------------------------------------
 class TestOracleBoundary:
-    def test_qor_rules_artifact_is_classified_oracle(self, tmp_path):
+    def test_neutral_named_oracle_is_unexamined_without_being_opened(
+            self, tmp_path, monkeypatch):
+        rf = _stage(tmp_path, {"limits.json": _ORACLE_RULES})
+        opened = []
+        original = Path.read_text
+
+        def traced_read(path, *args, **kwargs):
+            if path == rf / "limits.json":
+                opened.append(path.name)
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", traced_read)
+        scan = mod._rf_pnr_scan(tmp_path)
+        assert opened == []
+        assert scan["unscanned"] == ["input/reference_flow/limits.json"]
+        assert scan["excluded_oracle"] == []
+
+    def test_result_named_non_recipe_files_are_excluded_unopened(
+            self, tmp_path, monkeypatch):
+        rf = _stage(tmp_path, {
+            "expected_qor.txt": _ORACLE_RULES,
+            "oracle_receipt.txt": _ORACLE_RULES,
+            "rules.json": _ORACLE_RULES,
+            "settings.json": '{"A": 1}\n',
+        })
+        opened = []
+        original = Path.read_text
+
+        def traced_read(path, *args, **kwargs):
+            if path.parent == rf:
+                opened.append(path.name)
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", traced_read)
+        scan = mod._rf_pnr_scan(tmp_path)
+        assert opened == []
+        assert {"expected_qor.txt", "oracle_receipt.txt"} == {
+            Path(p).name for p in scan["excluded_oracle"]}
+        assert scan["unscanned"] == ["input/reference_flow/rules.json",
+                                     "input/reference_flow/settings.json"]
+
+    def test_neutral_qor_rules_artifact_is_unexamined(self, tmp_path):
         _stage(tmp_path, {"flow.mk": "CORE_UTILIZATION = 50\n",
                           "rules.json": _ORACLE_RULES})
         a = mod._reference_flow_pnr_audit(tmp_path)
-        assert a["excluded_oracle"] == ["input/reference_flow/rules.json"]
-        assert a["unscanned"] == []
+        assert a["excluded_oracle"] == []
+        assert a["unscanned"] == ["input/reference_flow/rules.json"]
 
-    def test_oracle_exclusion_does_not_count_against_completeness(self, tmp_path):
-        # Reporting compliance as incompleteness would push the next reader
-        # toward closing the "gap" by parsing the known-good result.
+    def test_ambiguous_file_counts_against_completeness(self, tmp_path):
+        # Without reading it, the audit cannot certify it as a known oracle
+        # or a design setting. The denominator must disclose that uncertainty.
         _stage(tmp_path, {"flow.mk": "CORE_UTILIZATION = 50\n",
                           "rules.json": _ORACLE_RULES})
         a = mod._reference_flow_pnr_audit(tmp_path)
-        assert a["ingest_complete"] is True
+        assert a["ingest_complete"] is False
 
-    def test_report_states_oracle_exclusion_as_compliance_not_gap(self, tmp_path):
+    def test_report_states_ambiguous_file_as_unexamined(self, tmp_path):
         _stage(tmp_path, {"flow.mk": "CORE_UTILIZATION = 50\n",
                           "rules.json": _ORACLE_RULES})
         a = mod._reference_flow_pnr_audit(tmp_path)
         mod._write_reference_flow_pnr_report(tmp_path, a)
         txt = _pl.report_path(tmp_path, "reference_flow_knobs.md").read_text()
-        assert "OFF-LIMITS" in txt
-        assert "NOT a coverage gap" in txt
-        assert "NOT EXAMINED" not in txt
+        assert "NOT EXAMINED" in txt
+        assert "rules.json" in txt
+        assert "Ingest complete: **False**" in txt
+        assert "never opens them just to classify" in txt
 
     def test_no_oracle_value_reaches_the_flow(self, tmp_path):
-        # The classifier must never become an extractor.
+        # The unexamined bytes must never become an extracted value.
         _stage(tmp_path, {"flow.mk": "TNS_END_PERCENT = 100\n",
                           "rules.json": _ORACLE_RULES})
         a = mod._reference_flow_pnr_audit(tmp_path)
@@ -320,7 +362,7 @@ class TestOracleBoundary:
 
     def test_reference_flow_is_not_in_the_shared_oracle_vocabulary(self):
         # The tree is MIXED, so its name must not be a blanket oracle marker;
-        # the oracle subset is identified on content instead.
+        # known-oracle paths are excluded and neutral ones remain unexamined.
         assert "reference_flow" not in _rfb.ORACLE_TREE_SEGMENTS
         assert {"golden", "oracle", "ground_truth"} <= _rfb.ORACLE_TREE_SEGMENTS
 

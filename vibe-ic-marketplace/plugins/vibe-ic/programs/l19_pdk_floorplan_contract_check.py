@@ -241,7 +241,12 @@ def _design_fixed_die_mandates(project: Path) -> List[Tuple[str, str]]:
     mandates in its OWN machine-readable inputs."""
     out: List[Tuple[str, str]] = []
     seen: Set[Tuple[str, str]] = set()
-    for cfg in sorted(project.glob("input/**/config.json"))[:80]:
+    import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
+
+    def _design(paths: List[Path]) -> List[Path]:
+        return [p for p in paths if not _rfb.design_input_denial(project, p)]
+
+    for cfg in _design(sorted(project.glob("input/**/config.json")))[:80]:
         doc = _load(cfg)
         if doc is None:
             continue
@@ -252,7 +257,7 @@ def _design_fixed_die_mandates(project: Path) -> List[Tuple[str, str]]:
                 if key not in seen:
                     seen.add(key)
                     out.append(key)
-    for tcl in sorted(project.glob("input/**/*.tcl"))[:120]:
+    for tcl in _design(sorted(project.glob("input/**/*.tcl")))[:120]:
         try:
             text = tcl.read_text(encoding="utf-8", errors="ignore")
         except Exception:
@@ -268,6 +273,7 @@ def _design_fixed_die_mandates(project: Path) -> List[Tuple[str, str]]:
 
 
 def _design_input_corpus(project: Path) -> str:
+    import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
     chunks: List[str] = []
     seen: Set[Path] = set()
     count = 0
@@ -276,6 +282,11 @@ def _design_input_corpus(project: Path) -> str:
             if count >= _CORPUS_MAX_FILES:
                 break
             if not f.is_file() or f in seen:
+                continue
+            # The corpus is the EVIDENCE that a value traces to the design
+            # input; a token found only in an oracle file must not count
+            # (FX_405: `lib_b` from `expected_results.tcl` passed L19-2).
+            if _rfb.design_input_denial(project, f):
                 continue
             seen.add(f)
             count += 1

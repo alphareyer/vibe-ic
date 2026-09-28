@@ -153,11 +153,12 @@ def _sdc_period(paths: Sequence[Path]) -> Optional[Dict[str, object]]:
 
 
 def _staged_sdc(project: Path) -> Optional[Dict[str, object]]:
-    cands: List[Path] = sorted((project / "input" / "constraints").glob("*.sdc"))
-    rf = project / "input" / "reference_flow"
-    if rf.is_dir():
-        cands.extend(sorted(rf.rglob("*.sdc")))
-    return _sdc_period(cands)
+    # The flow's one staged-SDC collector, so this record and the SDC the flow
+    # signs off against are read from the same files. A private copy of the two
+    # globs read `input/constraints/golden_timing.sdc` here after the collector
+    # stopped (FX_405, §4.05): the provenance and L19 cited the golden clock.
+    import sdc_constraints as _sdc  # noqa: PLC0415
+    return _sdc_period(list(_sdc.collect_sdc_files(project)))
 
 
 def _phase2_sdc(project: Path) -> Optional[Dict[str, object]]:

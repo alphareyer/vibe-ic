@@ -25,12 +25,10 @@ design in the tracked corpus that has one:
   area and wirelength it is supposed to independently achieve, plus a
   fingerprint of the correct answer.
 
-So the directory NAME is not the discriminator; the CONTENT SHAPE is. A
-reference flow is MIXED, and the boundary runs between files inside it.
-
-CONSEQUENCE FOR REPORTING: declining to read the oracle artifact is COMPLIANCE,
-not a coverage gap. It must never be reported as an unexamined file, because
-that invites the next reader to "close the gap" by parsing the golden metrics.
+The directory is MIXED. Path and provenance identify files safe to read as
+design input. A neutral-named, non-recipe file remains UNEXAMINED: opening it
+to learn whether it is oracle would itself cross §4.05. Known oracle names
+and trees are excluded unopened; ambiguity remains an explicit coverage gap.
 
 chip-AGNOSTIC: pure directory-name vocabulary and pure structural shape. No
 design, vendor, or PDK-SKU literal appears here or is needed.
@@ -43,8 +41,7 @@ from typing import FrozenSet, Tuple
 
 # Directory-name vocabulary for trees that are oracle END TO END — a known-good
 # solution or expected output. NOTHING reads inside these, ever. `reference_flow`
-# is deliberately NOT here: it is mixed, and its oracle subset is identified by
-# `is_oracle_qor_rules` on content instead.
+# is deliberately NOT here: it is mixed, and ambiguous files are unexamined.
 ORACLE_TREE_SEGMENTS: FrozenSet[str] = frozenset({
     "golden", "oracle", "expected", "expected_output",
     "solution", "solutions", "answer", "answers", "ground_truth",
@@ -52,8 +49,8 @@ ORACLE_TREE_SEGMENTS: FrozenSet[str] = frozenset({
 
 # Directory-name vocabulary for the STAGED REFERENCE FLOW tree itself. This is
 # NOT a claim that the tree is oracle end to end — measured over the tracked
-# corpus it is MIXED (recipe config + one QoR-rules oracle artifact), which is
-# exactly why `is_oracle_qor_rules` exists. It is the vocabulary a program uses
+# corpus it is MIXED (recipe config + one QoR-rules oracle artifact). It is the
+# vocabulary a program uses
 # when it wants the STRICTER rule: skip the whole tree because it has an
 # independent source for what it needs, so reading in there buys nothing and
 # costs a §4.05 exposure.
@@ -76,6 +73,11 @@ OFF_LIMITS_TREE_SEGMENTS: FrozenSet[str] = frozenset(
 # File extensions that carry RECIPE (flow configuration) and are therefore
 # legitimate to parse for declared knobs.
 RECIPE_SUFFIXES: Tuple[str, ...] = (".mk", ".tcl")
+# A mixed reference-flow tree also stages constraints and HDL declarations.
+# These source forms have dedicated design-input readers; JSON has no such
+# provenance here and remains ambiguous for a value reader.
+DESIGN_SOURCE_SUFFIXES: Tuple[str, ...] = RECIPE_SUFFIXES + (
+    ".sdc", ".sv", ".v", ".svh", ".vh")
 
 # Words that, standing as a whole word of a FILE NAME (or of a directory name)
 # inside a staged reference flow, say the file records a RESULT the known-good
@@ -131,9 +133,8 @@ def is_oracle_qor_rules(text: str) -> bool:
     recorded known-good result, not of a configuration — a config states a
     setting, never a threshold the run must be measured against.
 
-    Used to LABEL a staged file as off-limits. The caller must discard the
-    parsed content immediately: this is a classifier, never an extractor, and
-    no value read here may reach the flow.
+    Pure predicate over text a caller already holds. It never authorizes
+    opening an ambiguous staged file to learn its classification.
 
     Structural and chip-AGNOSTIC — keys are never inspected for meaning, only
     the value shape is.
@@ -154,3 +155,122 @@ def is_oracle_qor_rules(text: str) -> bool:
     # shape to DOMINATE keeps a config that merely happens to nest a dict from
     # being misread as an oracle.
     return graded > 0 and graded * 2 >= len(obj)
+
+
+# ---------------------------------------------------------------------------
+# THE CHECK EVERY DESIGN-INPUT READER MAKES BEFORE IT OPENS A FILE (§4.05).
+# ---------------------------------------------------------------------------
+from pathlib import Path  # noqa: E402
+from typing import Optional, Union  # noqa: E402
+
+#: The trees under ``input/`` that hold a flow's RECIPE. Inside them the full
+#: `ORACLE_NAME_WORDS` rule applies to directory and file names (llv1 W21).
+RECIPE_ROOTS: FrozenSet[str] = frozenset({"reference_flow", "ref_flow"})
+#: The design's constraints tree. `rule(s)`, `metric(s)` and `metadata` are
+#: ordinary words there (`design_rules.sdc` is SDC's "design rule
+#: constraints"), so only the RESULT words deny a name.
+CONSTRAINT_ROOTS: FrozenSet[str] = frozenset({"constraints"})
+STAGED_CONFIG_ROOTS: FrozenSet[str] = RECIPE_ROOTS | CONSTRAINT_ROOTS
+#: Words that name the RESULT of a known-good run. Anywhere under ``input/``,
+#: a recipe / constraint / config FILE so named is the answer, not a setting
+#: (`input/flow/expected_results.tcl`); prose and directory names stay exempt.
+RESULT_NAME_WORDS: FrozenSet[str] = frozenset({"golden", "expected", "result", "results"})
+CONFIG_SUFFIXES: Tuple[str, ...] = (".sdc", ".tcl", ".mk", ".json", ".cfg", ".yaml", ".yml")
+
+
+def is_result_name(name: str) -> bool:
+    """True when ``name`` has a `RESULT_NAME_WORDS` word as a whole word
+    (words split as `name_words` splits them)."""
+    return has_name_word(name, RESULT_NAME_WORDS)
+
+
+def design_input_denial(project: Union[str, Path], path: Union[str, Path],
+                        *, file_name_words: bool = True) -> Optional[str]:
+    """Why ``path`` (a file under ``<project>/input``) must NOT be read as
+    design input, or None. This authorization check never opens the candidate.
+    A path that lexically belongs to input/ but resolves outside it is denied.
+
+    Layers, each an existing authority or vocabulary, unioned:
+      * everywhere under ``input/``: `step_input_scope.oracle_reason` -- the
+        repo's §4.05 authority (golden/, oracle/, expected/, solution(s)/,
+        ground_truth/, score/, canonical_samples/ trees, and the
+        `_test.` / `_ref.` / `verified_` / `testbench` file forms);
+      * inside a recipe tree (`RECIPE_ROOTS`): every `deny_segments()` /
+        `ORACLE_TREE_SEGMENTS` directory, and any directory or file NAME with
+        an `ORACLE_NAME_WORDS` word (golden.mk, expected_results.tcl, the W21
+        rule);
+      * inside the constraints tree: the same directories, and a directory or
+        file NAME with a `RESULT_NAME_WORDS` word (golden_timing.sdc; not
+        design_rules.sdc);
+      * anywhere else: a FILE whose name has a result word AND a
+        `CONFIG_SUFFIXES` suffix (input/flow/expected_results.tcl).
+    Prose suffixes and directory names outside the staged trees stay exempt:
+    measured on the tracked corpus, a word rule there would deny
+    `docs/L1_product_metadata.md` in five designs and 91 staged PDK
+    `rule_decks/` files, all genuine design input.
+
+    In the mixed reference-flow tree, a neutral-named non-recipe file is
+    ambiguous and denied for value readers without inspecting its contents.
+    An unreadable recipe or dangling link remains the reader's UNREADABLE
+    record, as the existing ingest contract requires.
+
+    A readable link inside input/ whose resolved file is outside input/ is
+    denied before a reader can open it. A dangling or looping link remains the
+    reader's unreadable input; resolving one does not make it design evidence.
+
+    ``file_name_words=False`` drops the word and suffix rules for the FILE
+    name only (directories keep them). The phase-3 audit uses it while
+    accounting for non-recipe files without opening them: clear oracle paths
+    are excluded, and neutral names are recorded as unexamined. A value reader
+    keeps the default.
+    """
+    project = Path(project)
+    root = (project / "input").absolute()
+    candidate = Path(path).absolute()
+    try:
+        lexical_rel = candidate.relative_to(root)
+    except ValueError:
+        return None  # This check governs only paths presented under input/.
+    try:
+        rel = candidate.resolve().relative_to(root.resolve())
+    except ValueError:
+        if candidate.exists():
+            return "§4.05: input file resolves outside input/"
+        rel = lexical_rel  # A dangling link cannot supply readable evidence.
+    except (OSError, RuntimeError):
+        rel = lexical_rel  # A loop cannot be opened; the reader records it.
+    parts = rel.parts
+    if not parts:
+        return None
+    import step_input_scope as _sis  # lazy: it imports this module
+    name = parts[-1]
+    staged_root = next((i for i, part in enumerate(parts[:-1])
+                        if part.lower() in STAGED_CONFIG_ROOTS), None)
+    if staged_root is not None:
+        root_name = parts[staged_root].lower()
+        segments = set(_sis.deny_segments()) | set(ORACLE_TREE_SEGMENTS)
+        for part in parts[:staged_root]:
+            if part.lower() in segments:
+                return f"§4.05: off-limits directory {part}/ under input/"
+        words = (is_oracle_name if root_name in RECIPE_ROOTS else
+                 lambda value: is_result_name(value) or
+                 has_name_word(value, ORACLE_TREE_SEGMENTS))
+        for part in parts[staged_root + 1:-1]:
+            if part.lower() in segments or words(part):
+                return f"§4.05: off-limits directory {part}/ inside input/{root_name}/"
+        if ((file_name_words and words(name))
+                or re.search(_sis.DENY_FILENAME_RE, name.lower())):
+            return f"§4.05: oracle-named file {name} inside input/{root_name}/"
+        if root_name in RECIPE_ROOTS:
+            # `oracle_reason(..., root)` would read the file to classify its
+            # contents. A value reader admits only known recipe suffixes here;
+            # the audit's file_name_words=False lane retains its separate
+            # not-examined accounting for other suffixes.
+            if (Path(name).suffix.lower() not in DESIGN_SOURCE_SUFFIXES
+                    and (file_name_words or has_name_word(name, {"qor"}))):
+                return f"§4.05: ambiguous file {name} inside input/{root_name}/"
+            return None
+    elif file_name_words and is_result_name(name) and name.lower().endswith(CONFIG_SUFFIXES):
+        return f"§4.05: result-named config file {name} under input/"
+    reason = _sis.oracle_reason(rel.as_posix(), root)
+    return f"§4.05: {reason}" if reason else None

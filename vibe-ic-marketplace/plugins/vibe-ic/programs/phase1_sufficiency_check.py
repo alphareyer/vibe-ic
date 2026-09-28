@@ -42,12 +42,22 @@ Usage:
 """
 from __future__ import annotations
 
+# `programs/` is a flat directory whose modules import each other by bare name
+# (vibe-ic#2104): restore the condition a by-path load does not provide.
+import os as _os
+import sys as _sys
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 import argparse
 import json
 import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import _reference_flow_boundary as _rfb  # noqa: E402  the §4.05 authority
 
 _CLOCK_RE = re.compile(r"\b(clk|clock|sclk|hclk|pclk|aclk)\b", re.I)
 _RESET_RE = re.compile(r"\b(rst|reset|resetn|rst_n|nreset|areset|sreset)\b",
@@ -371,6 +381,10 @@ def input_declares_ports(project: Path) -> Optional[bool]:
             continue
         for f in sorted(root.rglob("*")):
             if not f.is_file() or f.suffix.lower() not in _INPUT_TEXT_SUFFIXES:
+                continue
+            # FX_405: before this, the golden module's port list answered
+            # "does the DESIGN input declare a port" for a design that did not.
+            if _rfb.design_input_denial(project, f):
                 continue
             try:
                 text = f.read_text(errors="ignore")
