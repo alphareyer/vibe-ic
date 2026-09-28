@@ -12,6 +12,7 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 if str(PROGRAMS) not in sys.path:
     sys.path.insert(0, str(PROGRAMS))
 
+import floorplan_knobs as fp  # noqa: E402
 import phase3_one_shot_runner as p3  # noqa: E402
 
 
@@ -31,8 +32,10 @@ def test_knobs_are_independent_on_two_designs(tmp_path, name, core, density):
     project = _project(tmp_path, name,
                        f"| `FP_CORE_UTIL` | **{core}** |\n"
                        f"| `PL_TARGET_DENSITY` | **{density}** |\n")
-    assert p3._l9_declared_die_util(project) == pytest.approx(core / 100)
-    assert p3._l9_declared_place_density(project) == pytest.approx(density)
+    assert fp._l9_declared_die_util(project) == pytest.approx(core / 100)
+    assert fp._l9_declared_place_density(project) == pytest.approx(density)
+    assert p3._l9_declared_die_util is fp._l9_declared_die_util
+    assert p3._l9_declared_place_density is fp._l9_declared_place_density
     only_density = _project(tmp_path, name + "_density",
                             f"| `PL_TARGET_DENSITY` | **{density}** |\n")
     assert p3._l9_declared_die_util(only_density) is None
