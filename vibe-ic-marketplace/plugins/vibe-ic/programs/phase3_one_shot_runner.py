@@ -61165,10 +61165,16 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # The routed-design measurements above have no GDS input. Run them
         # before stream-out; leave fill, final PV and handoff to the frozen
         # post-stream phase. The caller checks every required verdict.
-        # FX_LL21_DECLARED_OUTPUTS: steps 15 and 21 declare outputs that read
-        # no GDS either; a run the pre-stream gate stops must still carry
-        # them (the post-stream pass below refreshes both).
+        # FX_LL21_DECLARED_OUTPUTS: steps 15, 16 and 21 declare outputs that
+        # read no GDS either; a run the pre-stream gate stops must still carry
+        # them (the post-stream pass below refreshes them).
         _emit_router_drc_report(project, pnr_out, rpt_phase3, written)
+        # step 16's plan is derived from the SDCs alone (digest-keyed and
+        # idempotent; the post-stream pass re-checks it)
+        _plan_pre = emit_clock_plan(project, cts_out / "clock_plan.json",
+                                    primary_def, pnr_out, notes)
+        if _plan_pre:
+            written.append(_plan_pre)
         return StepResult("prestream_evidence", "PASS", time.time() - t0,
                           "; ".join(notes), written)
 

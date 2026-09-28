@@ -101,12 +101,15 @@ def test_the_prestream_pass_writes_the_step15_and_step21_declared_outputs(
     a run the pre-stream gate stops has neither."""
     project = _canonicalize_project(tmp_path)
     (R._pl.pnr_dir(project) / "openroad.log").write_text(_LL_ROUTE_LOG)
+    (R._pl.pnr_dir(project) / "constraint.sdc").write_text(
+        "create_clock -name clk -period 24 [get_ports clk]\n")
     _ll_chain(project)
     res = _prestream(project, monkeypatch, tmp_path)
     assert res.name == "prestream_evidence", res
     pnr = R._pl.pnr_dir(project)
     for f in (pnr / "pdn.done", pnr / "routed.drc.rpt",
-              R._pl.reports_phase3_dir(project) / "drc_router.rpt"):
+              R._pl.reports_phase3_dir(project) / "drc_router.rpt",
+              R._pl.cts_dir(project) / "clock_plan.json"):
         assert f.is_file(), f"{f.name} not written by the pre-stream pass"
         assert str(f) in res.output_files
     drc = (pnr / "routed.drc.rpt").read_text()
@@ -182,7 +185,7 @@ def test_the_prestream_return_is_preceded_by_both_emitters():
     ret_line = next(s for s in ret[0].body if isinstance(s, ast.Return)).lineno
     calls = [(getattr(c.func, "id", None) or getattr(c.func, "attr", None), c.lineno)
              for c in ast.walk(fn) if isinstance(c, ast.Call)]
-    for name in ("pdn_done_text", "_emit_router_drc_report"):
+    for name in ("pdn_done_text", "_emit_router_drc_report", "emit_clock_plan"):
         assert any(n == name and ln < ret_line for n, ln in calls), name
 
 
