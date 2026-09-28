@@ -97,18 +97,12 @@ def _route_image(tool: str, image: str | None) -> str | None:
     return image or default_image()
 
 
-#: Every tool run here is SUPERVISED (owner rule: every run gets a deadline;
-#: #2051: a long EDA tool is stopped for making NO PROGRESS, never for taking
-#: long). `_watchdog.run_host_supervised` kills a run whose whole process tree
-#: shows no CPU / output progress for the stall grace; a wall clock remains
-#: only as the BACKSTOP (GNU `timeout` around the tool), for a tool that burns
-#: CPU forever. Both are seconds, overridable per host through the environment.
+#: The progress watchdog stops only a stalled tool. The wall budget is recorded
+#: and disclosed when crossed; it never stops a progressing EDA run (#2051).
+#: Keep the older environment variable spelling for existing operators.
 STALL_ENV = "VIBEIC_P0_FRONTEND_STALL_S"
 DEADLINE_ENV = "VIBEIC_P0_FRONTEND_BACKSTOP_S"
 DEFAULT_DEADLINE_S = 14_400
-#: GNU `timeout`'s exit code when the backstop fires.
-_BACKSTOP_RC = 124
-_KILL_GRACE_S = 30
 
 
 def _env_seconds(name: str, default: float) -> float:
@@ -120,7 +114,7 @@ def _env_seconds(name: str, default: float) -> float:
 
 
 def _deadline_s() -> float:
-    """The wall-clock BACKSTOP, in seconds."""
+    """The nonkilling wall budget, in seconds."""
     return _env_seconds(DEADLINE_ENV, DEFAULT_DEADLINE_S)
 
 
@@ -130,8 +124,7 @@ def _stall_s() -> float:
 
 
 class ToolNotMeasured(RuntimeError):
-    """The tool run measured nothing: it STALLED (no progress for the grace)
-    or hit the wall-clock BACKSTOP. An execution error, never a finding."""
+    """The tool run made no measurement because progress supervision stopped it."""
 
     def __init__(self, tool: str, how: str):
         super().__init__(f"{tool} {how}")
@@ -140,20 +133,19 @@ class ToolNotMeasured(RuntimeError):
 
 def _invoke(tool: str, args: list[str], project: Path,
             image: str | None) -> subprocess.CompletedProcess[str]:
-    """Run `tool` once under progress supervision, with a wall-clock backstop.
+    """Run `tool` once under progress supervision with a recorded wall budget.
 
     On the docker path the container is NAMED for this invocation, its CPU is
     read from inside it (`_docker_watchdog.ephemeral_container_cpu_probe`), and
     a stall reaps it by that name (`ephemeral_container_reap`) -- killing the
-    client alone would leave a `--rm` container holding its cores. A stall or
-    a fired backstop raises `ToolNotMeasured`."""
+    client alone would leave a `--rm` container holding its cores. Only a
+    measured stall raises `ToolNotMeasured`."""
     import _watchdog as _wd
     import _docker_watchdog as _dwd
-    backstop = ["timeout", "-k", str(_KILL_GRACE_S), f"{_deadline_s():g}"]
+    budget_s = _deadline_s()
     kw: dict = {}
     if shutil.which(tool):
-        command = ([*backstop, tool, *args] if shutil.which("timeout")
-                   else [tool, *args])
+        command = [tool, *args]
     elif shutil.which("docker"):
         # Phase 2 needs only the released EDA image's tool binaries. LibreLane
         # CLI capability is neither requested nor assumed here.
@@ -163,26 +155,32 @@ def _invoke(tool: str, args: list[str], project: Path,
         command = ["docker", "run", "--rm", "--name", container,
                    *_dmem.docker_memory_flags(),
                    "--network", "none",
-                   "-v", f"{root}:{root}:ro", "--entrypoint", "timeout",
-                   image, *backstop[1:], tool, *args]
+                   "-v", f"{root}:{root}:ro", "--entrypoint", tool,
+                   image, *args]
         kw = {"kill": _dwd.ephemeral_container_reap(container),
               "cpu_probe": _dwd.ephemeral_container_cpu_probe(container)}
     else:
         raise FileNotFoundError(f"{tool} and docker unavailable")
     res = _wd.run_host_supervised(command, cwd=str(project),
-                                  stall_grace_s=_stall_s(), **kw)
+                                  stall_grace_s=_stall_s(),
+                                  hard_ceiling_s=budget_s, **kw)
     if res.outcome == "launch_error":
         raise FileNotFoundError(f"{tool}: could not be launched")
     if res.outcome == "stalled" or res.rc == _wd.RC_STALLED:
         raise ToolNotMeasured(tool, f"made no progress for {_stall_s():g} s "
                                     f"({STALL_ENV}) and was stopped as STALLED")
-    wrapped = command[0] == "timeout" or (
-        "--entrypoint" in command
-        and command[command.index("--entrypoint") + 1] == "timeout")
-    if res.rc == _BACKSTOP_RC and wrapped:
-        raise ToolNotMeasured(tool, f"hit the {_deadline_s():g} s wall-clock "
-                                    f"backstop ({DEADLINE_ENV})")
-    return _wd.completed_process(command, res)
+    if res.outcome == "ceiling":
+        # The shared supervisor has no terminating ceiling since #2051. If a
+        # future implementation restores one, do not book its rc as a tool FAIL.
+        raise ToolNotMeasured(tool, "was stopped by a wall-clock ceiling")
+    completed = _wd.completed_process(command, res)
+    if (res.supervision.get("hard_ceiling_exceeded")
+            or res.elapsed_s > budget_s):
+        completed.stderr += (f"\nP0_FRONTEND_BUDGET_EXCEEDED: {tool} ran "
+                             f"{res.elapsed_s:.3f} s, exceeding the recorded "
+                             f"{budget_s:g} s wall budget ({DEADLINE_ENV}); "
+                             "the tool continued to completion\n")
+    return completed
 
 
 #: FX_P2 — slang's declaration-order opt-out, and the disclosure that names it.
@@ -424,9 +422,8 @@ def check(project: Path, image: str | None = None) -> dict:
         result["findings"].append(f"tool invocation refused: {exc}")
         return result
     except ToolNotMeasured as exc:
-        # NOT A FINDING. A front end that stalled or hit its backstop measured
-        # nothing, so it is NOT_MEASURED(EXECUTION_ERROR) -- never a FAIL, and
-        # never retried (a relaxed retry would not change that).
+        # NOT A FINDING. A stopped front end measured nothing, so it is
+        # NOT_MEASURED(EXECUTION_ERROR), never a FAIL or a relaxed retry.
         result["not_measured"] = {
             "reason_class": "EXECUTION_ERROR",
             "why": f"tool invocation {exc}: nothing was measured"}

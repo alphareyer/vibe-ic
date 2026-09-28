@@ -221,8 +221,8 @@ def _supervised(monkeypatch, *, rc=0, outcome="natural", docker=True):
     return seen
 
 
-def test_a_tool_run_is_supervised_by_progress_with_a_backstop(monkeypatch,
-                                                              tmp_path):
+def test_a_tool_run_is_supervised_by_progress_with_a_recorded_budget(monkeypatch,
+                                                                     tmp_path):
     seen = _supervised(monkeypatch)
     F._invoke("yosys", ["-p", "x"], tmp_path, "img@sha256:" + "0" * 64)
     assert "cmd" in seen, "the tool run did not go through the supervisor"
@@ -230,12 +230,13 @@ def test_a_tool_run_is_supervised_by_progress_with_a_backstop(monkeypatch,
     assert cmd[:3] == ["docker", "run", "--rm"]
     name = cmd[cmd.index("--name") + 1]
     assert name.startswith("vibeic_p0_yosys")
-    # the wall clock is only the BACKSTOP, around the tool, inside the container
-    assert cmd[cmd.index("--entrypoint") + 1] == "timeout"
-    assert "yosys" in cmd and "-k" in cmd
+    # The EDA tool is the entrypoint; no clock wrapper can stop a live run.
+    assert cmd[cmd.index("--entrypoint") + 1] == "yosys"
+    assert "timeout" not in cmd and "-k" not in cmd
     # the stall is judged from inside the container, and reaped by name
     assert callable(kw.get("kill")) and callable(kw.get("cpu_probe"))
     assert kw.get("stall_grace_s", 0) > 0
+    assert kw.get("hard_ceiling_s", 0) > 0
 
 
 def test_a_stall_is_not_measured_not_a_finding(monkeypatch, tmp_path):
@@ -245,10 +246,11 @@ def test_a_stall_is_not_measured_not_a_finding(monkeypatch, tmp_path):
         F._invoke("yosys", ["-p", "x"], tmp_path, "img@sha256:" + "0" * 64)
 
 
-def test_a_fired_backstop_is_not_measured_either(monkeypatch, tmp_path):
+def test_a_natural_124_is_not_invented_as_a_backstop(monkeypatch, tmp_path):
     _supervised(monkeypatch, rc=124)
-    with pytest.raises(_NM or subprocess.TimeoutExpired):
-        F._invoke("yosys", ["-p", "x"], tmp_path, "img@sha256:" + "0" * 64)
+    result = F._invoke("yosys", ["-p", "x"], tmp_path,
+                       "img@sha256:" + "0" * 64)
+    assert result.returncode == 124
 
 
 def test_a_strict_stall_is_an_execution_error_not_a_retry(monkeypatch,
