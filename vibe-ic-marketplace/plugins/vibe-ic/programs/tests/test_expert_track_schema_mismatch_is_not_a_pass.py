@@ -156,7 +156,7 @@ def _write_answer(project: Path, blob) -> Path:
     VERBATIM — the point of this file is what the consumer does with a shape it
     did not expect, so nothing here may normalise it first."""
     d = _pack_dir(project)
-    d.mkdir(parents=True, exist_ok=True)
+    assert T.ai_subtrack(project, T.input_text(project), d)["status"] == "HANDOFF_EMITTED"
     f = d / "l_doc_expectations.json"
     f.write_text(json.dumps(blob))
     return f
@@ -387,7 +387,7 @@ def test_an_answer_that_does_not_parse_is_still_an_error(tmp_path):
     The second arm of the control that must stay GREEN on the old code."""
     p = _project(tmp_path)
     d = _pack_dir(p)
-    d.mkdir(parents=True, exist_ok=True)
+    assert T.ai_subtrack(p, T.input_text(p), d)["status"] == "HANDOFF_EMITTED"
     (d / "l_doc_expectations.json").write_text("{not json")
     _run_track(p)
     rep = _report(p)

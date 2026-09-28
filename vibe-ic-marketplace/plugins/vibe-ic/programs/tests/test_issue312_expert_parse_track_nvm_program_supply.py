@@ -54,7 +54,7 @@ def _track_report(project: Path) -> Path:
 def _answer(project: Path, expected_tokens=("VDDC",)) -> None:
     """Leave a minimal schema-valid IC Expert reading for execution tests."""
     out = _track_report(project).parent / "expert_parse_track_pack"
-    out.mkdir(parents=True, exist_ok=True)
+    assert T.ai_subtrack(project, T.input_text(project), out)["status"] == "HANDOFF_EMITTED"
     (out / "l_doc_expectations.json").write_text(json.dumps({
         "expectations": [{
             "id": "supply_inventory::core_rail",
@@ -662,7 +662,7 @@ def test_ai_subtrack_consumes_a_prior_agent_answer(tmp_path, monkeypatch):
     _force_backend(monkeypatch, True)
     p = _project(tmp_path)
     out = tmp_path / "pack"
-    out.mkdir()
+    assert T.ai_subtrack(p, T.input_text(p), out)["status"] == "HANDOFF_EMITTED"
     (out / "l_doc_expectations.json").write_text(json.dumps({
         "expectations": [{"id": "ai::x", "layer": "L21_POWER_INTENT"}]}))
     st = T.ai_subtrack(p, T.input_text(p), out)
@@ -677,7 +677,7 @@ def test_ai_subtrack_treats_an_unreadable_answer_as_an_error(tmp_path,
     _force_backend(monkeypatch, True)
     p = _project(tmp_path)
     out = tmp_path / "pack"
-    out.mkdir()
+    assert T.ai_subtrack(p, T.input_text(p), out)["status"] == "HANDOFF_EMITTED"
     (out / "l_doc_expectations.json").write_text("{not json")
     st = T.ai_subtrack(p, T.input_text(p), out)
     assert st["status"] == "ERROR" and "does not parse" in st["reason"]

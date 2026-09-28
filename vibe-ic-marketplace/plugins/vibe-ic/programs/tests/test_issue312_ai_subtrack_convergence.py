@@ -84,7 +84,11 @@ def _pack_dir(project: Path) -> Path:
 
 def _answer(project: Path, expectations):
     d = _pack_dir(project)
-    d.mkdir(parents=True, exist_ok=True)
+    schema = d / "authoring_schema.json"
+    if not schema.is_file():
+        assert T.ai_subtrack(project, T.input_text(project), d)["status"] == "HANDOFF_EMITTED"
+    assert json.loads(schema.read_text())["phase1_root"]["digest"] == (
+        T.phase1_root_identity(project)["digest"])
     (d / "l_doc_expectations.json").write_text(
         json.dumps({"expectations": expectations}))
 
@@ -455,7 +459,7 @@ def test_an_unreadable_answer_is_still_an_error_not_an_empty_reading(tmp_path):
     report are already held to, preserved through the rewiring."""
     p = _project(tmp_path)
     d = _pack_dir(p)
-    d.mkdir(parents=True, exist_ok=True)
+    assert T.ai_subtrack(p, T.input_text(p), d)["status"] == "HANDOFF_EMITTED"
     (d / "l_doc_expectations.json").write_text("{not json")
     _run_track(p)
     rep = _report(p)
