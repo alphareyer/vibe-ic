@@ -74,6 +74,39 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+
+def applied_area_metrics_tcl() -> str:
+    """Measure logical standard-cell and core area on the shipped route DB.
+
+    The runner places this tail after final DEF writes, including a resumed
+    tail. Spacers, well taps and pads are excluded from the numerator. Missing
+    DB data leaves the advisory unmeasured without killing routing.
+    """
+    return r'''
+if {[catch {
+  set _vic_block [ord::get_db_block]
+  set _vic_rect [$_vic_block getCoreArea]
+  set _vic_dbu [$_vic_block getDbUnitsPerMicron]
+  if {$_vic_dbu <= 0} { error "invalid DB units" }
+  set _vic_cell_area 0.0
+  foreach _vic_inst [$_vic_block getInsts] {
+    set _vic_master [$_vic_inst getMaster]
+    if {[$_vic_master getType] in {CORE CORE_TIEHIGH CORE_TIELOW}} {
+      set _vic_cell_area [expr {$_vic_cell_area +
+          double([$_vic_master getWidth]) * [$_vic_master getHeight]}]
+    }
+  }
+  set _vic_core_area [expr {double([$_vic_rect xMax] - [$_vic_rect xMin]) *
+      ([$_vic_rect yMax] - [$_vic_rect yMin]) / ($_vic_dbu * $_vic_dbu)}]
+  set _vic_cell_area [expr {$_vic_cell_area / ($_vic_dbu * $_vic_dbu)}]
+  if {$_vic_core_area <= 0 || $_vic_cell_area <= 0} { error "empty area" }
+  utl::metric_float vibeic__pnr__applied__cell_area_um2 $_vic_cell_area
+  utl::metric_float vibeic__pnr__applied__core_area_um2 $_vic_core_area
+} _vic_area_error]} {
+  puts "PNR_APPLIED_AREA_NOT_MEASURED: $_vic_area_error"
+}
+'''
+
 if __package__ in (None, ""):  # executed as a script, not imported
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from _ppa import canonical_json as _cj  # type: ignore  # noqa: E402

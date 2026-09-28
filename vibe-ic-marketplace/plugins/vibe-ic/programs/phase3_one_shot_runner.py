@@ -33101,6 +33101,7 @@ write_def {out_dir_c}/{top}.def
 write_verilog {out_dir_c}/{top}_pnr.v
 report_checks -path_delay max > {out_dir_c}/sta.rpt
 {_pnr_sta_corner_binding_tcl(out_dir_c + "/sta.rpt", _corner_lib_stanza, macro_libs_tcl)}report_design_area > {out_dir_c}/area.rpt
+{_ppa_area.applied_area_metrics_tcl()}
 # === #147 — post-route real-SPEF setup-repair ESTIMATE (LAST — after every
 # shipped artifact + the authoritative clean sta.rpt, so it can only MEASURE the
 # recoverable setup, never modify routed.def/<top>.def/<top>_pnr.v). Empty on
@@ -37456,6 +37457,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # failure before the router or wrapper checks run.
     (out_dir / ROUTER_DRC_RECEIPT_NAME).unlink(missing_ok=True)
     (out_dir / _ppa_power.DIRECT_PDN_RECEIPT_NAME).unlink(missing_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    import declared_knob_applied_parity_check as _knob_parity
+    _knob_parity.write_pending_pnr_report(project, out_dir / "pnr.tcl")
     netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
     print(f"[pnr] netlist: {_nl_note}", flush=True)
     if not netlist.is_file():
@@ -37477,7 +37481,6 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                     "Add a wrapper-glue layer + author "
                     "pin_order.cfg from the harness template"),
             })
-    out_dir.mkdir(parents=True, exist_ok=True)
     # The active tech LEF itself can contain a contradiction: a VIA landing
     # smaller than the routing layer's own MINWIDTH/AREA.  Post-route RECT
     # patching is too late (the router did not reserve the required spacing),
@@ -37697,6 +37700,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                 or _drv.get("max_fanout"))
         except Exception:
             _cts_fanout_target = _drv.get("max_fanout")
+    _knob_parity.write_sdc_report(
+        project, sdc, pdk=str(pdk.name),
+        library=_active_std_cell_library(project, str(pdk.name)))
     # Whichever branch ran, record what the DESIGN staged and what became of
     # it. A machine-readable sibling of the deck's own comment block, so a
     # later reader does not have to parse an SDC to learn that the design's
@@ -39172,6 +39178,12 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _pad_install_failure = _install_route_deck()
     if _pad_install_failure is not None:
         return _pad_install_failure
+    _knob_parity.write_planned_pnr_report(
+        project, pnr_tcl,
+        cell_area_um2=_auto_die_metrics.get("cell_area_um2"),
+        core_area_um2=float(core_w * core_h) if core_w > 0 and core_h > 0 else None,
+        tech_lef_text=_read_pdk_text(getattr(pdk, "tech_lef", None), container) or "",
+        pdk=str(pdk.name), library=_active_std_cell_library(project, str(pdk.name)))
     _ll_cts_overlay: Dict[str, Tuple[Any, str]] = {}
     if set(_ll_cts_modes.values()) != {"direct"}:
         try:
@@ -39261,6 +39273,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         pnr_tcl.read_text(errors="replace") if pnr_tcl.is_file() else "")
     _pnr_outputs = [str(p) for p in _pnr_products]
     for _retry_i in _pnr_loop:
+        # A later retry must never consume metric values from an earlier rung.
+        (out_dir / _PNR_METRICS).unlink(missing_ok=True)
         _archive_antenna_iteration_reports(out_dir)
         # Spelled as the direct `_docker_exec` call (not the
         # `_declared_session_exec` wrapper) so the closed-loop re-entry census
@@ -40864,6 +40878,10 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                 "input_identity": _identity_after,
                 "def_sha256": _def_sha,
             }, sort_keys=True) + "\n")
+    _knob_parity.write_applied_pnr_report(
+        project, pnr_tcl, def_file, out_dir / _PNR_METRICS,
+        tech_lef_text=_read_pdk_text(getattr(pdk, "tech_lef", None), container) or "",
+        pdk=str(pdk.name), library=_active_std_cell_library(project, str(pdk.name)))
     # Feedback runs in pre-stream admission after every route writer.
     if resize_history:
         return StepResult("pnr", _status, time.time() - t0,
@@ -58783,6 +58801,10 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                 pdk_name=str(pdk.name), container=container))
             notes.append("SDC: design staged none — runner auto-SDC")
         written.append(str(runner_sdc))
+    import declared_knob_applied_parity_check as _knob_parity
+    _knob_parity.write_sdc_report(
+        project, runner_sdc, pdk=str(pdk.name),
+        library=_active_std_cell_library(project, str(pdk.name)))
 
     # --- Step 7b: canonical staged SDC copy (constraints/<top>.sdc) -------
     # ONLY when the SDC is genuinely DESIGN-staged. `canon_sdc` lands in

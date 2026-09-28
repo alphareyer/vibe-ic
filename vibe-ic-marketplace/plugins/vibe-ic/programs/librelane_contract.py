@@ -1647,6 +1647,27 @@ def derive_step_config(config: Path, output: Path, updates: dict[str, tuple[Any,
                 'keys': provenance})
     if views_path(config).is_file():
         write_json(views_path(output), _load(views_path(config)))
+    # CR-1 rollout: report declared/applied drift at the actual derived step
+    # boundary. Existing published runs may drift, so this remains advisory.
+    import declared_knob_applied_parity_check as _parity
+    aliases = {'MAX_FANOUT_CONSTRAINT': 'SYNTH_MAX_FANOUT',
+               'PDN_VOFFSET': 'FP_PDN_VOFFSET'}
+    knobs = {'SYNTH_MAX_FANOUT', 'FP_CORE_UTIL', 'PL_TARGET_DENSITY',
+             'FP_PDN_VOFFSET'}
+    observed = {}
+    for key, value in doc.items():
+        knob = aliases.get(key, key)
+        if knob in knobs:
+            observed[knob] = (value, provenance.get(key, str(output)))
+    project = next((parent for parent in output.parents
+                    if (parent / 'input/docs').is_dir() or
+                    (parent / 'phase1/generated_docs').is_dir()), None)
+    report = (_parity.compare(project, observed) if project else
+              {'mode': 'ADVISORY', 'rows': {key: {
+                  'status': 'NOT_MEASURED', 'reason': f'{key}: design input root unread',
+                  'applied': value[0], 'consumer': value[1]}
+                  for key, value in observed.items()}})
+    write_json(output.with_suffix('.parity.json'), report)
     return output
 
 
