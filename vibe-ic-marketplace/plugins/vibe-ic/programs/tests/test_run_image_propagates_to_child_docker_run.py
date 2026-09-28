@@ -223,6 +223,23 @@ def test_a_foreign_container_prefix_cannot_replace_the_verified_image(tmp_path):
     assert env["VIBEIC_EDA_IMAGE"] == verified_ref
 
 
+def test_a_foreign_repository_digest_does_not_replace_the_verified_tag(tmp_path):
+    """The image Id alone does not authorize a different repository name."""
+    verified_id = "sha256:" + "ab" * 32
+    tag = "ghcr.io/vibeic/vibeic-eda:0.2.58"
+    foreign_ref = "vexaai/meeting-api@sha256:" + "ae" * 32
+
+    def fake(*argv, timeout=None):
+        if argv[:2] == ("image", "inspect") and argv[-1] == verified_id:
+            return 0, json.dumps([foreign_ref]) + "\n", ""
+        return 1, "", "not in the controlled daemon"
+
+    _, env = _capture(
+        {}, {"verdict": "PASS", "image_ref": tag, "image_id": verified_id},
+        tmp_path, docker_lookup=fake)
+    assert env["VIBEIC_EDA_IMAGE"] == tag
+
+
 def test_the_tag_is_used_when_no_portable_digest_could_be_named(tmp_path):
     """A tag is mutable and is still a REFERENCE. When no registry digest can
     be recovered — a locally built image, or a container docker will not

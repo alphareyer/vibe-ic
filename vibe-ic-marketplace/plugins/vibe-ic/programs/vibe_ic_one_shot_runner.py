@@ -119,9 +119,8 @@ def _propagatable_image(container: str,
     if _pin.DIGEST_RE.match(image_id):
         digests, why = _pin.local_repo_digests(image_id)
         want = _pin.repository_of(ref)
-        ranked = sorted(digests, key=lambda d: _pin.repository_of(d) != want)
-        for entry in ranked:
-            if _pin.reference_digest(entry):
+        for entry in digests:
+            if _pin.reference_digest(entry) and (not want or _pin.repository_of(entry) == want):
                 return entry, ""
     if ref and not _pin.is_bare_image_id(ref):
         return ref, ""
