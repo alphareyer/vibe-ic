@@ -556,12 +556,23 @@ def test_full_parameter_pass_does_not_publish_delivered_l10_pass(tmp_path):
 
 
 def test_one_delivered_program_cannot_certify_a_two_program_case(tmp_path):
+    from _hostpaths import require_repo
+    shipped_lock = json.loads(require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+        "isa_suites.lock.json").read_text())
+    shipped = [item for suite in shipped_lock["suites"].values()
+               for item in suite["programs"]
+               if item["unit"] == "I" and item["role"] == "primary"][:2]
+    assert len(shipped) == 2 and shipped[0]["id"] != shipped[1]["id"]
     p = _project(tmp_path, units=("I",))
     lock = _lock()
     programs = lock["suites"]["s"]["programs"]
-    programs[1] = dict(programs[0], id="s-sub", instruction="sub")
-    rec = _produce(p, {"s-add": (WORDS, 0, HALT, WORDS),
-                       "s-sub": (WORDS, 0, HALT, WORDS, 0, 4096)},
+    programs[:] = [dict(programs[0], id=item["id"],
+                        instruction=item["instruction"]) for item in shipped]
+    lock["isa_units"]["I"]["instructions"] = [
+        item["instruction"] for item in shipped] + ["ecall", "ebreak"]
+    rec = _produce(p, {shipped[0]["id"]: (WORDS, 0, HALT, WORDS),
+                       shipped[1]["id"]: (WORDS, 0, HALT, WORDS, 0, 4096)},
                    lock=lock)
     case = rec["cases"]["base_isa"]
     assert case["full_parameter"]["verdict"] == "PASS"
