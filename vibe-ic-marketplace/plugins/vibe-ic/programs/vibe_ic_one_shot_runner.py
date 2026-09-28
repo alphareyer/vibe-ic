@@ -101,8 +101,10 @@ def _propagatable_image(container: str,
 
       1. `.Config.Image` when the container was already started from
          `<repo>@sha256:<digest>`, verbatim: same repository the operator named;
-      2. otherwise that same identity recovered from the image's own
-         RepoDigests (`_eda_pin.container_image_reference`);
+      2. otherwise that same identity recovered from RepoDigests by the FULL
+         image Id already measured in the provenance record. Prefer the named
+         repository when available, but a mirror digest still names the verified
+         bytes. Reopening a short container name can select a different container;
       3. otherwise the recorded `image_ref` IF it is a reference at all -- a tag
          is mutable, which is the weakness this whole capture exists to correct,
          but a tag resolves and an Id does not name a place at all;
@@ -113,9 +115,15 @@ def _propagatable_image(container: str,
     ref = str(rec.get("image_ref") or "").strip()
     if _pin.reference_digest(ref):
         return ref, ""
-    portable, why = _pin.container_image_reference(container)
-    if portable:
-        return portable, ""
+    image_id = str(rec.get("image_id") or "").strip()
+    why = ""
+    if _pin.DIGEST_RE.match(image_id):
+        digests, why = _pin.local_repo_digests(image_id)
+        want = _pin.repository_of(ref)
+        ranked = sorted(digests, key=lambda entry: 0 if _pin.repository_of(entry) == want else 1)
+        for entry in ranked:
+            if _pin.reference_digest(entry):
+                return entry, ""
     if ref and not _pin.is_bare_image_id(ref):
         return ref, ""
     if not ref and not rec.get("image_id"):
