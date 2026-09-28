@@ -25607,6 +25607,7 @@ def main() -> int:
     # default flow, so a default run's record is byte-for-byte unchanged.
     import _impl_outcomes as _io
     summary.update(_io.report_fields(project))
+    _io.demote_verdict(summary)    # a step the flow did not do: never PASS
     import ai_signed_judgement as _ai_judgement
     summary["ai_judgements"] = _ai_judgement.pending(project, ("1", "4", "5"))
     _ai_judgement.demote_runner_rows(summary["steps"], summary["ai_judgements"])

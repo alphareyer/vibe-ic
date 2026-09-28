@@ -30,14 +30,48 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "librelane_import" \
 RUN_REL = "phase3/librelane/runs/cmp3"
 
 
-@pytest.fixture
-def imported(tmp_path):
+def _declare(proj: Path, deliverable: str) -> None:
+    """The delivery the design declared, staged as step 0.5ic leaves it
+    (the #2277 fixture's shape): an owner-attested `deliverable`; a DIE on
+    its own tape-out route, a HARDMACRO beside the operator's catalogue with
+    no slot bought."""
+    import _owner_declared as OD
+    import _tapeout_declaration as TD
+    tmpl = proj / "input" / "submission_template"
+    (tmpl / "slots").mkdir(parents=True, exist_ok=True)
+    if deliverable == "DIE":
+        (tmpl / "SELF_TAPEOUT.txt").write_text("own tape-out\n")
+    else:
+        (tmpl / "slots" / "slot_1x1.yaml").write_text("slot: slot_1x1\n")
+    doc, _ = TD.merge_answers(TD.blank_declaration(),
+                              {"deliverable": deliverable, "top_cell": "spm"})
+    OD.attest(doc)
+    assert not TD.validate(doc)
+    (tmpl / "tapeout_declaration.json").write_text(json.dumps(doc))
+    (proj / "input" / "step_0_5ic_answers.json").write_text(json.dumps(
+        OD.attest({"schema": "vibe-ic/step_0_5ic_answers/1",
+                   "operator_template": {"path": None, "slot": None,
+                                         "absent_reason": "no operator"},
+                   "answers": {"deliverable": deliverable,
+                               "top_cell": "spm"}})))
+
+
+def _import_fixture(proj: Path) -> Path:
     import librelane_import as LI
-    proj = tmp_path / "proj"
     (proj / RUN_REL).parent.mkdir(parents=True)
     shutil.copytree(FIXTURE, proj / RUN_REL)
     LI.import_run(proj, proj / RUN_REL)
     return proj
+
+
+@pytest.fixture
+def imported(tmp_path):
+    """The CMP3 Classic run imported into a DIE design on its own tape-out
+    route: the design owes a pad ring (15.5ic), which Classic never runs."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    _declare(proj, "DIE")
+    return _import_fixture(proj)
 
 
 # ── the reason class ──────────────────────────────────────────────────────
@@ -117,8 +151,14 @@ def test_each_changed_step_names_its_producer(imported):
     assert route["tool_steps"] == ["OpenROAD.DetailedRouting"]
     assert route["provenance"] == {"witnessed": route["files"]}
     assert prod["31"]["state"] == IO.MEASURED_BY_VIBEIC
-    assert prod["18"]["state"] == IO.VIBEIC and \
-        "Vibeic.InsertSpareCells" in prod["18"]["disclosure"]
+    # CMP3 is plain LibreLane Classic: its flow.log starts no Vibeic.* step,
+    # so no plugin step is claimed (review W14 wave 7)
+    for sid, step in (("18", "Vibeic.InsertSpareCells"),
+                      ("32", "Vibeic.PostRouteRepair")):
+        assert prod[sid]["state"] == IO.NOT_PERFORMED, prod[sid]
+        assert "disclosure" not in prod[sid]
+        assert step in prod[sid]["reason"]
+        assert prod[sid]["reason_class"] == "flow_does_not_perform"
     assert prod["14"]["state"] == IO.NOT_ATTRIBUTED
     # steps the flag does not change are not listed: they are vibe-ic's
     assert "1" not in prod and "13" not in prod
@@ -137,9 +177,9 @@ def test_the_runner_rows_for_not_performed_steps(imported):
     prod = IO.report_fields(imported, IO.IMPL_LIBRELANE)["step_producers"]
     rows = IO.not_performed_verdicts(prod, {"15.5ic": "Pad Ring"})
     assert [(r.step_id, r.name, r.verdict, r.reason_class) for r in rows] == [
-        ("15.5ic", "Pad Ring", V.Verdict.NOT_MEASURED,
-         V.ReasonClass.FLOW_DOES_NOT_PERFORM)]
-    assert "remedy: run the default flow" in rows[0].reason
+        (sid, name, V.Verdict.NOT_MEASURED, V.ReasonClass.FLOW_DOES_NOT_PERFORM)
+        for sid, name in (("15.5ic", "Pad Ring"), ("18", ""), ("32", ""))]
+    assert all("remedy: run the default flow" in r.reason for r in rows)
 
 
 def test_an_unknown_flow_has_no_mapping():
@@ -232,6 +272,8 @@ def imported_in_segments(tmp_path):
     writes such a run; ONE import writes one segmented manifest."""
     import librelane_import as LI
     proj = tmp_path / "proj"
+    proj.mkdir()
+    _declare(proj, "DIE")
     for rel in (SEG1, SEG2):
         (proj / rel).parent.mkdir(parents=True)
         shutil.copytree(FIXTURE, proj / rel)
@@ -270,8 +312,8 @@ def test_a_segmented_import_is_read_per_segment(imported_in_segments):
     assert {r["step_id"] for s in doc["segments"] for r in s["rows"]} \
         - IO.LIBRELANE_STEPS == {"31"}
     # not_performed is the union over the segments
-    assert [s for s, p in prod.items() if p["state"] == IO.NOT_PERFORMED] \
-        == ["15.5ic"]
+    assert sorted(s for s, p in prod.items() if p["state"] == IO.NOT_PERFORMED) \
+        == ["15.5ic", "18", "32"]
 
 
 def test_a_one_run_import_reads_as_before(imported):
@@ -289,3 +331,176 @@ def test_an_import_manifest_that_does_not_validate_claims_nothing(imported):
     assert {p["state"] for p in flag.values()} == {IO.NOT_ATTRIBUTED}
     assert all("does not validate" in p["reason"] and "routed.def" in p["reason"]
                for p in flag.values())
+
+
+# ── review W14 wave 7 ─────────────────────────────────────────────────────
+
+def test_a_hardmacro_owes_no_pad_ring_so_classic_leaving_it_is_not_a_gap(tmp_path):
+    """HARDMACRO + Classic: the default flow stands 15.5ic down by the
+    design's own declaration, so it is N/A with that citation — never
+    FLOW_DOES_NOT_PERFORM with 'run the default flow'."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    _declare(proj, "HARDMACRO")
+    _import_fixture(proj)
+    prod = IO.report_fields(proj, IO.IMPL_LIBRELANE)["step_producers"]
+    pad = prod["15.5ic"]
+    assert pad["state"] == "NOT_APPLICABLE", pad
+    assert pad["verdict"] == "NOT_APPLICABLE"
+    assert pad["declared_by"] == ("input/submission_template/"
+                                  "tapeout_declaration.json#answers.deliverable")
+    assert "remedy" not in pad and "reason_class" not in pad
+    assert "15.5ic" not in [r.step_id for r in IO.not_performed_verdicts(prod)]
+
+
+def _without(doc, tool_step, flow_step):
+    """The same validated manifest, as if `tool_step` had not been run."""
+    import copy
+    import _external_flow_manifest as M
+    doc = copy.deepcopy(doc)
+    for seg in M.segments_of(doc):
+        seg["rows"][:] = [r for r in seg["rows"] if r["tool_step_id"] != tool_step]
+    doc["not_performed"].append({"flow_step": flow_step, "tool_step": tool_step,
+                                 "reason": f"never started {tool_step}",
+                                 "flow_complete": True})
+    return doc
+
+
+@pytest.mark.parametrize("deliverable,state", [("DIE", "NOT_APPLICABLE"),
+                                               ("HARDMACRO", IO.NOT_PERFORMED)])
+def test_a_die_owes_no_ip_kit_so_chip_leaving_the_lef_is_not_a_gap(
+        tmp_path, deliverable, state):
+    """Chip flow drops Magic.WriteLEF (37.5ip). A declared DIE owes no IP kit
+    (N/A, cited); a HARDMACRO does (FLOW_DOES_NOT_PERFORM)."""
+    import _external_flow_manifest as M
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    _declare(proj, deliverable)
+    _import_fixture(proj)
+    doc = _without(M.load_manifest(proj), "Magic.WriteLEF", "37.5ip")
+    prod = IO.step_producers(IO.IMPL_LIBRELANE, doc, None, proj)
+    assert prod["37.5ip"]["state"] == state, prod["37.5ip"]
+    if state == "NOT_APPLICABLE":
+        assert "tapeout_declaration.json" in prod["37.5ip"]["declared_by"]
+    else:
+        assert prod["37.5ip"]["reason_class"] == "flow_does_not_perform"
+
+
+def test_a_step_with_a_sibling_rule_not_performed_is_partial(imported):
+    """Step 37: KLayout.StreamOut imported, Magic.StreamOut (the canonical
+    GDS) not performed. The step is not done and says which tool step."""
+    import _external_flow_manifest as M
+    doc = _without(M.load_manifest(imported), "Magic.StreamOut", "37")
+    prod = IO.step_producers(IO.IMPL_LIBRELANE, doc, None, imported)
+    s37 = prod["37"]
+    assert s37["state"] == "PARTIALLY_PERFORMED", s37
+    assert s37["tool_steps"] == ["KLayout.StreamOut"]
+    assert s37["tool_steps_not_performed"] == ["Magic.StreamOut"]
+    assert s37["reason_class"] == "flow_does_not_perform"
+    assert "37" in [r.step_id for r in IO.not_performed_verdicts(prod)]
+    both = _without(doc, "KLayout.StreamOut", "37")
+    s37 = IO.step_producers(IO.IMPL_LIBRELANE, both, None, imported)["37"]
+    assert s37["state"] == IO.NOT_PERFORMED
+    assert s37["tool_steps_not_performed"] == ["Magic.StreamOut",
+                                               "KLayout.StreamOut"]
+
+
+def _add_plugin_step(proj: Path, run_rel: str = RUN_REL) -> None:
+    """A run whose flow ran Vibeic.InsertSpareCells after DetailedPlacement,
+    as the plugin's registration inserts it (decision 12)."""
+    run = proj / run_rel
+    lines = (run / "flow.log").read_text().splitlines(keepends=True)
+    i = next(k for k, l in enumerate(lines)
+             if l.startswith("Running 'OpenROAD.CTS'"))
+    folder = "34a-vibeic-insertsparecells"
+    lines.insert(i, f"Running 'Vibeic.InsertSpareCells' at 'runs/cmp3/{folder}'…\n")
+    (run / "flow.log").write_text("".join(lines))
+    d = run / folder
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps(
+        {"meta": {"step": "Vibeic.InsertSpareCells"}}))
+    (d / "state_out.json").write_text("{}\n")
+
+
+def test_a_plugin_step_is_claimed_only_from_the_runs_own_flow_log(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    _declare(proj, "DIE")
+    (proj / RUN_REL).parent.mkdir(parents=True)
+    shutil.copytree(FIXTURE, proj / RUN_REL)
+    _add_plugin_step(proj)
+    import librelane_import as LI
+    LI.import_run(proj, proj / RUN_REL)
+    prod = IO.report_fields(proj, IO.IMPL_LIBRELANE)["step_producers"]
+    assert prod["18"]["state"] == IO.VIBEIC
+    assert prod["18"]["evidence"] == [{"segment": None,
+                                       "step_dir": "34a-vibeic-insertsparecells",
+                                       "completed": True}]
+    assert prod["32"]["state"] == IO.NOT_PERFORMED       # not in this run
+    # the flow.log rewritten after the import: nothing is claimed from it
+    log = proj / RUN_REL / "flow.log"
+    log.write_text(log.read_text() + "Starting…\n")
+    prod = IO.report_fields(proj, IO.IMPL_LIBRELANE)["step_producers"]
+    assert prod["18"]["state"] == IO.NOT_ATTRIBUTED
+    assert "not the log the import recorded" in prod["18"]["reason"]
+
+
+def test_without_a_validated_import_nothing_is_claimed_in_any_state(
+        tmp_path, imported):
+    """No import, and an import that no longer validates: no step of any
+    state claims the tool's run or its output (review W14 wave 7)."""
+    empty = IO.step_producers(IO.IMPL_LIBRELANE, None, None, tmp_path)
+    (imported / "phase3/stage3/pnr/routed.def").write_text("edited\n")
+    broken = IO.report_fields(imported, IO.IMPL_LIBRELANE)["step_producers"]
+    for prod in (empty, broken):
+        assert {p["state"] for p in prod.values()} == \
+            {IO.NOT_ATTRIBUTED, IO.MEASURED_BY_VIBEIC}
+        for sid, p in prod.items():
+            assert "disclosure" not in p and "subject" not in p, (sid, p)
+            if p["state"] == IO.MEASURED_BY_VIBEIC:
+                assert p["role"].startswith("planned")
+
+
+def test_a_run_with_a_gap_is_never_pass(imported):
+    summary = {"verdict": "PASS", **IO.report_fields(imported, IO.IMPL_LIBRELANE)}
+    getattr(IO, "demote_verdict", lambda s: None)(summary)
+    assert summary["verdict"] == "NOT_MEASURED"
+    assert summary["reason_class"] == "flow_does_not_perform"
+    assert "15.5ic" in summary["verdict_note"]
+    for s in ({"verdict": "PASS"},                     # the default: no-op
+              {"verdict": "FAIL", **IO.report_fields(imported, IO.IMPL_LIBRELANE)}):
+        before = dict(s)
+        getattr(IO, "demote_verdict", lambda s: None)(s)
+        assert s == before
+
+
+@pytest.mark.parametrize("runner", ["phase3_one_shot_runner.py",
+                                    "design_one_shot_runner.py"])
+def test_each_runner_demotes_right_after_the_fields(runner):
+    src = (PROGRAMS / runner).read_text()
+    a = src.index("summary.update(_io.report_fields(project))")
+    assert src[a:].split("\n")[1].strip().startswith(
+        "_io.demote_verdict(summary)")
+
+
+def test_the_summary_echoes_this_runs_record_not_the_stale_phase2_one(imported):
+    """Runner order: the phase-2 record was written BEFORE the import; the
+    phase-3 runner writes its pre-summary record, then renders. The rendered
+    section must be the post-import truth, echoed from the phase-3 record."""
+    import final_report_generate as G
+    orch = imported / "reports" / "orchestrator"
+    orch.mkdir(parents=True, exist_ok=True)
+    stale = {"steps": [], "verdict": "PASS",
+             **IO.report_fields(imported.parent / "not_yet", IO.IMPL_LIBRELANE)}
+    (orch / "phase2_one_shot.json").write_text(json.dumps(stale))
+    # the pre-summary record exactly as phase3_one_shot_runner writes it
+    src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
+    pre = src[src.index('"record": "in-progress (steps only;'):]
+    pre = pre[:pre.index("indent=2")]
+    assert "**_io_pre.report_fields(project)" in pre
+    (orch / "phase3_one_shot.json").write_text(json.dumps(
+        {"record": "in-progress", "steps": [],
+         **IO.report_fields(imported, IO.IMPL_LIBRELANE)}))
+    md = G._render_impl_section(imported)
+    row = next(l for l in md if l.startswith("| 15.5ic |"))
+    assert "NOT_PERFORMED" in row and "NOT_ATTRIBUTED" not in row, row
