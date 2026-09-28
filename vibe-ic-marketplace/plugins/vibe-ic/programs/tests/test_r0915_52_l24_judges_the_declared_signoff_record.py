@@ -51,6 +51,7 @@ import pytest  # noqa: E402
 
 import l24_signoff_requirements_extract as X  # noqa: E402
 import l24_signoff_evidence_backed_check as L24  # noqa: E402
+from _hostpaths import repo_path  # noqa: E402
 import phase1_post_process as P  # noqa: E402
 
 GATE = PROGRAMS / "l24_signoff_evidence_backed_check.py"
@@ -225,6 +226,30 @@ def test_changed_staged_sdc_invalidates_the_phase3_receipt(tmp_path):
     rc, out = _run_gate(project)
     assert rc == 0, out
     assert "not yet measurable" in out
+
+
+def test_checked_in_constraint_change_invalidates_signoff(tmp_path):
+    source = repo_path(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
+        "fixtures", "ppa", "power", "activity_basis_pair", "constraint.sdc")
+    assert source.is_file(), source
+    project = _proj_requiring_sta(tmp_path)
+    staged = project / "input/constraints/timing.sdc"
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    original = source.read_bytes()
+    assert b"-period 24.0" in original
+    staged.write_bytes(original)
+    identity = getattr(L24._pl, "phase3_signoff_input_identity", lambda p: {
+        "phase2_synth": L24._pl.phase2_synth_input_identity(p)
+    })(project)
+    _report(project, "orchestrator/phase3_one_shot.json", {
+        "verdict": "PASS",
+        "phase2_synth": L24._pl.phase2_synth_input_identity(project),
+        "phase3_inputs": identity,
+    })
+    assert L24._phase3_has_run(project) is True
+    staged.write_bytes(original.replace(b"-period 24.0", b"-period 1.0"))
+    assert L24._phase3_has_run(project) is False
 
 
 def _signoff(proj, verdict):
