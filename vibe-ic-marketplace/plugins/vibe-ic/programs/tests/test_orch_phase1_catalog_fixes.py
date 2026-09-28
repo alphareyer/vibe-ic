@@ -89,6 +89,10 @@ def test_fix1_existing_l_docs_skip(tmp_path):
     gd.mkdir(parents=True, exist_ok=True)
     for i in range(1, 14):
         (gd / f"L{i}_DOC.json").write_text("{}")
+    # FX_STALE_LDOCS (orchestrator ruling 2026-09-28): "13 L docs present" now
+    # means 13 docs the CURRENT producer wrote -- the identity phase 1 stamps.
+    import _p1_identity_fixture
+    _p1_identity_fixture.stamp_current(proj)
     run, mode = orch._phase1_decision(proj, force_skip=False)
     assert run is False
     assert mode == ""
