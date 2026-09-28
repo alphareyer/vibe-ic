@@ -1,5 +1,6 @@
 """Owner's IC versus IP route ruling at step 0.5ic and both consumers."""
 import sys
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ import phase1_one_shot_runner as R  # noqa: E402
 import tapeout_declaration_check as CHECK  # noqa: E402
 import tapeout_declaration_gen as GEN  # noqa: E402
 import test_issue2277_hardmacro_owes_no_die_steps as BASE  # noqa: E402
+import librelane_contract as LL  # noqa: E402
 
 MESSAGE = ("deliverable HARDMACRO (IP path) contradicts a bought shuttle slot "
            "(IC path); declare one route in input/step_0_5ic_answers.json")
@@ -84,3 +86,32 @@ def test_direct_route_producer_and_gate_refuse_by_name(tmp_path, capsys):
     assert any(r["rule"] == "HARDMACRO_BOUGHT_SLOT_CONTRADICTION"
                and r["message"] == MESSAGE
                for r in rec["refusals"])
+
+
+def test_compliance_records_route_contradiction_on_condition_and_output(tmp_path):
+    project = _case(tmp_path, bought=True)
+    steps = BASE._steps()
+    for sid in ("15.5ic", "37"):
+        row = F.check_step(project, steps[sid], {})
+        assert row.status == "FAIL", sid
+        assert MESSAGE in " ".join(row.reasons), sid
+
+
+def test_stage3_compliance_writes_a_report_for_a_contradictory_route(tmp_path):
+    project = _case(tmp_path, bought=True)
+    report = tmp_path / "stage3.json"
+    rc = F.main([str(project), "--stage", "3", "--json", str(report)])
+    assert rc != 0
+    data = json.loads(report.read_text())
+    rows = {str(row["id"]): row for row in data["steps"]}
+    assert "15.5ic" in rows
+    assert rows["15.5ic"]["status"] == "FAIL"
+    assert MESSAGE in str(rows["15.5ic"])
+
+
+def test_unmarked_project_does_not_select_a_pad_ring(tmp_path):
+    project = _case(tmp_path, bought=True)
+    (project / TD.SLOTS_REL / "slot_1x1.yaml").unlink()
+    assert TD.requests_pad_ring(project) is False
+    assert LL.design_class(project) is None
+    assert LL.selected_mode(project, "15") in ("direct", "librelane", "dual")

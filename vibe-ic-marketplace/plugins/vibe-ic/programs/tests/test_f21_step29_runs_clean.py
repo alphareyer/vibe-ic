@@ -268,6 +268,22 @@ def test_an_interconnect_record_on_a_non_inout_endpoint_is_not_explained():
     assert got['by_class'] == {'IFNONE_EDGE_PATH_DROPPED': 2} and got['unexplained'] == 1
 
 
+def test_two_interconnect_records_on_one_line_cannot_borrow_inout_explanation():
+    bundle = _cal('negative')
+    records = ('(INTERCONNECT u_pad.PAD p (0.000:0.000:0.000)) '
+               '(INTERCONNECT u0.Z u_pad.A (0.004:0.004:0.004))')
+    bundle['sdf_text'] = bundle['sdf_text'].replace(
+        '(INTERCONNECT u_pad.PAD p (0.000:0.000:0.000))', records)
+    assert records in bundle['sdf_text'].splitlines()[24]
+    got = _classify(
+        bundle,
+        transcript='SDF ERROR: cal_sdf_class.sdf:25: Could not find intermodpath!\n',
+        compile_log='')
+    assert got['total'] == 1
+    assert got['by_class'] == {}
+    assert got['unexplained'] == 1
+
+
 def _tool_step(tmp_path, transcript, compile_log):
     """What `Vibeic.GateLevelSim` leaves: gls_runs.json and per-run logs."""
     step = tmp_path / 'step'

@@ -900,12 +900,11 @@ def requests_pad_ring(project: Path) -> bool:
     catalogue on disk, unless the delivery is a pure `HARDMACRO`. A bought
     slot with that declaration is refused before either route can be selected.
     """
-    owed = die_outputs_owed(project)
     slot_dir = project / SLOTS_REL
     if not ((project / SELF_TAPEOUT_REL).is_file()
             or (slot_dir.is_dir() and any(slot_dir.glob("*.yaml")))):
         return False
-    return owed
+    return die_outputs_owed(project)
 
 
 def applicable(q: Question, deliverable: Any) -> bool:

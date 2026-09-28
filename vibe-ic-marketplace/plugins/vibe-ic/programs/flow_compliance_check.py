@@ -105,6 +105,7 @@ from types import MappingProxyType
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor
 import _path_layout as _pl
+import _tapeout_declaration as _td_route
 import _gate_authorship as _ga
 import _auditor_write as _aw   # R-0915-168 (the one auditor writer)
 import _reused_ip_predicate as _reused_ip
@@ -16308,7 +16309,13 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             return result
 
     condition = step.get("condition")
-    if condition and not _check_condition(project, condition):
+    try:
+        condition_met = not condition or _check_condition(project, condition)
+    except _td_route.DeliveryRouteContradiction as exc:
+        result.reason_class = ""
+        result.reasons.append(f"HARDMACRO_BOUGHT_SLOT_CONTRADICTION: {exc}")
+        return result
+    if not condition_met:
         # v0.114 (BACKLOG-v10 P1.5): two-kind condition handling.
         #   condition_kind: design_dependent → silent skip (default;
         #     analog A1-A8 for digital-only IC, etc.). False-positive
@@ -16438,7 +16445,12 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     _n_glob = 0
     _not_owed: List[str] = []
     for pat in outputs:
-        _why_not_owed = _output_not_owed(project, step, pat)
+        try:
+            _why_not_owed = _output_not_owed(project, step, pat)
+        except _td_route.DeliveryRouteContradiction as exc:
+            result.reason_class = ""
+            result.reasons.append(f"HARDMACRO_BOUGHT_SLOT_CONTRADICTION: {exc}")
+            return result
         if _why_not_owed:
             _not_owed.append(pat)
             result.reasons.append(_why_not_owed)
