@@ -216,7 +216,7 @@ def test_step_lvs_waived_only_for_missing_inputs_not_unconditionally(
 # verdict_tier + missing_tool ticket.
 # ---------------------------------------------------------------------------
 
-def test_autogen_waivers_includes_env_unavailable_steps(
+def test_runner_does_not_autogen_waivers_for_env_unavailable_steps(
         tmp_path: Path) -> None:
     p = tmp_path / "proj"
     p.mkdir()
@@ -232,26 +232,7 @@ def test_autogen_waivers_includes_env_unavailable_steps(
     ]
     _autogen_waivers_json(p, plan)
     waivers_file = p / "waivers.json"
-    assert waivers_file.exists()
-    data = json.loads(waivers_file.read_text())
-    waivers = data["waivers"]
-    assert len(waivers) == 2
-    by_step = {w["step"]: w for w in waivers}
-    # R-0915-85 — `verdict_tier` is the BINDING key `flow_compliance_check`
-    # reads, not a step status, so it keeps its own two words. The step's own
-    # verdict travels beside it, and both are asserted so neither can drift.
-    assert by_step["drc"]["verdict_tier"] == "ENV_UNAVAILABLE"
-    assert by_step["drc"]["step_verdict"] == "NOT_MEASURED"
-    assert by_step["drc"]["step_reason_class"] == "tool_absent"
-    assert by_step["lvs"]["verdict_tier"] == "WAIVED"
-    assert by_step["lvs"]["step_verdict"] == "PASS_WITH_WAIVERS"
-    # ENV_UNAVAILABLE ticket cites the missing tool.
-    assert "CALIBRE" in by_step["drc"]["ticket"]
-    # ENV_UNAVAILABLE rationale flags ENV gap.
-    assert "ENV gap" in by_step["drc"]["rationale"]
-    # Reviewer action for ENV_UNAVAILABLE points at install + re-run.
-    assert "install" in by_step["drc"]["reviewer_action"].lower()
-    assert "re-run" in by_step["drc"]["reviewer_action"].lower()
+    assert not waivers_file.exists()
 
 
 def test_autogen_waivers_skipped_when_no_waiver_class_steps(

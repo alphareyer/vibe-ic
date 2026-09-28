@@ -122,9 +122,8 @@ def test_classification_reads_no_step_id():
 
 # ---------------------------------------------------------- end to end, through the emitter
 
-def test_the_emitter_redeclares_when_it_appends(tmp_path):
-    """The defect was in the WRITE path, not in the derivation: prove the
-    emitter itself leaves a covered document behind."""
+def test_the_retired_emitter_does_not_append_or_redeclare(tmp_path):
+    """A sign-off result cannot grow an old machine waiver document."""
     (tmp_path / "waivers.json").write_text(json.dumps({
         "waived_steps": [_env(39), _env(6)],
         "growth_rationale": "old",
@@ -139,9 +138,10 @@ def test_the_emitter_redeclares_when_it_appends(tmp_path):
     SA._emit_tapeout_waiver_entry(tmp_path, _R())
     d = json.loads((tmp_path / "waivers.json").read_text())
     ids = [e["id"] for e in d["waived_steps"]]
-    assert SA._TAPEOUT_STEP_ID in ids
+    assert ids == [39, 6]
+    assert d["growth_rationale_covers"] == [39, 6]
     assert set(d["growth_rationale_covers"]) == set(ids)
-    assert "SIGN-OFF TIER" in d["growth_rationale"]
+    assert d["growth_rationale"] == "old"
 
 
 def test_the_emitter_is_still_idempotent_and_still_yields_to_a_human(tmp_path):

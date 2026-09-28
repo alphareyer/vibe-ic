@@ -35,11 +35,11 @@ def _proj(tmp_path: Path, compile_detail=None, qsf_detail=QSF) -> Path:
     return tmp_path
 
 
-def _waivers(project: Path):
+def _cause(project: Path):
     out: dict = {}
     F._synthesise_fpga_skip_waivers(project, out)
-    assert out, "the disclosed skip must still synthesise its waivers"
-    return list(out.values())
+    assert out == {}, "a disclosed skip must not synthesize an approval"
+    return F._fpga_skip_cause(project)
 
 
 @pytest.mark.parametrize("detail,cause,says,never", [
@@ -50,23 +50,24 @@ def _waivers(project: Path):
 ])
 def test_the_recorded_condition_is_the_named_cause(tmp_path, detail, cause,
                                                    says, never):
-    for w in _waivers(_proj(tmp_path, detail)):
-        assert w["cause"] == cause
-        assert says in w["reason"] and never not in w["reason"]
-        assert "and/or" not in w["reason"]
-        assert "reports/orchestrator/phase2_one_shot.json" in w["evidence"]
+    key, reason, evidence = _cause(_proj(tmp_path, detail))
+    assert key == cause
+    assert says in reason and never not in reason
+    assert "and/or" not in reason
+    assert "reports/orchestrator/phase2_one_shot.json" in evidence
 
 
 def test_the_board_contract_cause_quotes_why_the_qsf_was_not_made(tmp_path):
-    w = _waivers(_proj(tmp_path, "fpga/<name>.qsf missing — caller must produce it"))[0]
-    assert "memory-bus/data core has no DE10 board-pin contract" in w["reason"]
+    _key, reason, _evidence = _cause(_proj(
+        tmp_path, "fpga/<name>.qsf missing — caller must produce it"))
+    assert "memory-bus/data core has no DE10 board-pin contract" in reason
 
 
 @pytest.mark.parametrize("detail", [None, "something else entirely"])
 def test_an_unrecorded_cause_is_said_not_guessed(tmp_path, detail):
-    for w in _waivers(_proj(tmp_path, detail)):
-        assert w["cause"] == "cause_not_recorded"
-        assert "NOT RECORDED" in w["reason"]
-        assert "and/or" not in w["reason"]
-        assert "board-pin contract was produced" not in w["reason"]
-        assert "Quartus is not available" not in w["reason"]
+    key, reason, _evidence = _cause(_proj(tmp_path, detail))
+    assert key == "cause_not_recorded"
+    assert "NOT RECORDED" in reason
+    assert "and/or" not in reason
+    assert "board-pin contract was produced" not in reason
+    assert "Quartus is not available" not in reason

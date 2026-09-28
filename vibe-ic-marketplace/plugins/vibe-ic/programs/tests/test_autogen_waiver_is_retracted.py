@@ -31,34 +31,30 @@ def _read(p):
     return json.loads((p / "waivers.json").read_text())
 
 
-def test_it_writes_a_waiver_for_a_waived_step(tmp_path):
+def test_it_never_writes_a_waiver_for_a_deferred_step(tmp_path):
     _autogen_waivers_json(
         tmp_path, [StepResult("drc", "NOT_MEASURED", 0.0, "no engine", [],
                               {"missing_tool": "someengine"}, reason_class="tool_absent")])
-    w = _read(tmp_path)["waivers"]
-    assert [x["step"] for x in w] == ["drc"]
-    assert w[0]["_autogen"] is True
+    assert not (tmp_path / "waivers.json").exists()
 
 
-def test_its_own_stale_waiver_is_regenerated_not_kept(tmp_path):
-    """Two steps waived, then only one — the file must follow the run."""
+def test_machine_deferrals_never_create_a_waiver_across_runs(tmp_path):
     _autogen_waivers_json(
         tmp_path, [StepResult("drc", "NOT_MEASURED", 0.0, "d", [],
                               {"missing_tool": "a"}, reason_class="tool_absent"),
                    StepResult("lvs", "PASS_WITH_WAIVERS", 0.0, "l", [], attribution="the fixture's owner")])
-    assert {x["step"] for x in _read(tmp_path)["waivers"]} == {"drc", "lvs"}
+    assert not (tmp_path / "waivers.json").exists()
     _autogen_waivers_json(
         tmp_path, [StepResult("drc", "PASS", 0.0, "ran clean", []),
                    StepResult("lvs", "PASS_WITH_WAIVERS", 0.0, "l", [], attribution="the fixture's owner")])
-    assert {x["step"] for x in _read(tmp_path)["waivers"]} == {"lvs"}, (
-        "the drc waiver must be gone: this run's drc step did not waive")
+    assert not (tmp_path / "waivers.json").exists()
 
 
-def test_a_run_that_waives_nothing_retracts_the_file(tmp_path):
+def test_a_run_that_waives_nothing_still_writes_no_file(tmp_path):
     _autogen_waivers_json(
         tmp_path, [StepResult("drc", "NOT_MEASURED", 0.0, "d", [],
                               {"missing_tool": "a"}, reason_class="tool_absent")])
-    assert (tmp_path / "waivers.json").is_file()
+    assert not (tmp_path / "waivers.json").exists()
     _autogen_waivers_json(tmp_path, [StepResult("drc", "FAIL", 0.0, "15", [])])
     assert not (tmp_path / "waivers.json").exists(), (
         "a run that waives nothing must not leave a waiver behind")
