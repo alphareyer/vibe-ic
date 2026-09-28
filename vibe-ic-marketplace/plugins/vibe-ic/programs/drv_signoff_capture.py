@@ -8,6 +8,7 @@ bundle for drv_signoff_judge, which remains the sole verdict authority.
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import re
 import shlex
@@ -29,6 +30,7 @@ _COUNTER = re.compile(
     r"(?m)^DRV_COUNTER\s+(max_slew|max_capacitance|max_fanout)\s+(\d+)\s*$")
 _MAX_TOOL_LOG_BYTES = 16 * 1024 * 1024
 _READ_LOG_BYTES = 64 * 1024
+_TOOL_ERROR = re.compile(r"^Error(?:\s|:)")
 
 
 def _ref(path: Path) -> dict:
@@ -42,6 +44,31 @@ def _tcl(path: Path) -> str:
     if any(c in value for c in "{}\\\n\r"):
         raise ValueError("unsafe Tcl path")
     return "{" + value + "}"
+
+
+def _has_tool_error(raw: Path) -> bool:
+    """Check every line start without holding a long OpenSTA line in memory."""
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    prefix = ""
+
+    def scan(text: str) -> bool:
+        nonlocal prefix
+        parts = text.split("\n")
+        for index, part in enumerate(parts):
+            prefix += part[:max(0, 6 - len(prefix))]
+            if _TOOL_ERROR.match(prefix):
+                return True
+            if index < len(parts) - 1:
+                if _TOOL_ERROR.match(prefix + "\n"):
+                    return True
+                prefix = ""
+        return False
+
+    with raw.open("rb") as stream:
+        while chunk := stream.read(_READ_LOG_BYTES):
+            if scan(decoder.decode(chunk)):
+                return True
+        return scan(decoder.decode(b"", final=True))
 
 
 def _run_fresh(script: Path, roots: set[Path], *, image: str) -> str:
@@ -69,8 +96,8 @@ def _run_fresh(script: Path, roots: set[Path], *, image: str) -> str:
 
     def output_limit():
         try:
-            if raw.stat().st_size > _MAX_TOOL_LOG_BYTES:
-                return f"OpenSTA raw log exceeded {_MAX_TOOL_LOG_BYTES} bytes"
+            if raw.stat().st_size >= _MAX_TOOL_LOG_BYTES:
+                return f"OpenSTA raw log reached {_MAX_TOOL_LOG_BYTES} bytes"
         except OSError:
             pass
         return None
@@ -81,18 +108,24 @@ def _run_fresh(script: Path, roots: set[Path], *, image: str) -> str:
         kill=_docker_watchdog.ephemeral_container_reap(name),
         popen_factory=launch, abort_probe=output_limit)
     try:
+        size = raw.stat().st_size
+        if size >= _MAX_TOOL_LOG_BYTES:
+            raise RuntimeError(
+                f"NOT_MEASURED: OpenSTA raw log reached byte ceiling "
+                f"{_MAX_TOOL_LOG_BYTES}; raw={raw}")
+        tool_error = _has_tool_error(raw)
         with raw.open("rb") as stream:
             head = stream.read(4096)
-            stream.seek(max(0, raw.stat().st_size - _READ_LOG_BYTES))
+            stream.seek(max(0, size - _READ_LOG_BYTES))
             tail = stream.read(_READ_LOG_BYTES)
         body = (head + b"\n" + tail).decode("utf-8", errors="replace")
-    except OSError:
-        body = ""
-    if result.outcome != "natural" or result.rc or re.search(
-            r"(?m)^Error(?:\s|:)", body):
+    except OSError as exc:
+        raise RuntimeError(
+            f"NOT_MEASURED: OpenSTA raw log unavailable; raw={raw}; {exc}") from exc
+    if result.outcome != "natural" or result.rc or tool_error:
         raise RuntimeError(
             f"NOT_MEASURED: fresh OpenSTA stopped/over-limit "
-            f"outcome={result.outcome} rc={result.rc}; raw={raw}; "
+            f"outcome={result.outcome} rc={result.rc} tool_error={tool_error}; raw={raw}; "
             f"watchdog={result.err[-500:]}; tool={body[-1000:]}")
     return body
 
