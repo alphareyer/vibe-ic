@@ -8593,6 +8593,20 @@ def _v672_synth_top_override(project: Path) -> Optional[str]:
     return None
 
 
+def _v661_instantiation_re(child: str) -> "re.Pattern":
+    """`<child> [#(...)] <inst>[<range>] (` -- one instantiation of `child`.
+
+    The optional `[<range>]` is an instance ARRAY (IEEE 1364 §12.1.2,
+    `adder u[N-1:0] (...)`). Without it a module instantiated only as an array
+    read as never instantiated, i.e. as a second graph root, and every root
+    search below refused as ambiguous. One definition for the three root
+    searches in this file, so they cannot disagree about what an instantiation
+    is."""
+    return re.compile(
+        rf"\b{re.escape(child)}\s+(?:#\s*\([^;]*?\)\s*)?"
+        rf"[A-Za-z_]\w*\s*(?:\[[^\]\[;]*\]\s*)?\(")
+
+
 def _v661_resolve_dut_module(project: Path,
                              top_name: str,
                              l9_top_module: Optional[str]) -> Optional[str]:
@@ -8657,9 +8671,7 @@ def _v661_resolve_dut_module(project: Path,
                 bodies.setdefault(m.group(1), m.group(2))
 
     def _instantiated(child: str) -> bool:
-        pat = re.compile(
-            rf"\b{re.escape(child)}\s+(?:#\s*\([^;]*?\)\s*)?"
-            rf"[A-Za-z_]\w*\s*\(")
+        pat = _v661_instantiation_re(child)
         return any(pat.search(b) for mod, b in bodies.items() if mod != child)
 
     roots = [m for m in defined
@@ -8717,9 +8729,7 @@ def _v701_tiny_root_warn(project: Path, chosen_dut: Optional[str]) -> str:
         return ""
 
     def _instantiated_super(child: str) -> bool:
-        pat = re.compile(
-            rf"\b{re.escape(child)}\s+(?:#\s*\([^;]*?\)\s*)?"
-            rf"[A-Za-z_]\w*\s*\(")
+        pat = _v661_instantiation_re(child)
         return any(pat.search(b) for mod, b in bodies.items() if mod != child)
 
     chosen_size = sizes[chosen_dut]
@@ -18980,9 +18990,7 @@ def _cdc_top_clock_ports(rtl_files: List[Path],
             top, how = l9[0], "L9.top_module"
     if top is None and bodies:
         def _instantiated(child: str) -> bool:
-            pat = re.compile(
-                rf"\b{re.escape(child)}\s+(?:#\s*\([^;]*?\)\s*)?"
-                rf"[A-Za-z_]\w*\s*\(")
+            pat = _v661_instantiation_re(child)
             return any(pat.search(b) for mod, b in bodies.items()
                        if mod != child)
         roots = [m for m in bodies
@@ -21648,9 +21656,26 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
 
     STILL NON-BLOCKING BY CONSTRUCTION: every path here returns PASS or SKIP,
     never FAIL, so no IC that passes today can newly fail.
+
+    A DESIGN THAT SUPPLIES ITS RTL. The contract emitter also records what the
+    flow knows about supplied RTL (the staged files, the top, its ports) under
+    its own key, and it needs the top to do so: `_v661_resolve_dut_module`
+    (synth-top override, then L9.top_module, then the unique graph root), never
+    a name absent from rtl/ -- so not the `--top-name` default `chip_top`.
+    That record declares no free choice, so the file can now exist while the
+    spec's required choices are still undeclared; the detail says which.
     """
     t0 = time.time()
     out_p = project / "plugin_output" / "declaration.json"
+    _top_args: List[str] = []
+    try:
+        _l9t = _rcvar_l9_top_ports(project)
+        _top = _v661_resolve_dut_module(project, "",
+                                        _l9t[0] if _l9t else None)
+        if _top:
+            _top_args = ["--supplied-top", _top]
+    except Exception:  # noqa: BLE001 — the record then says the top is unknown
+        _top_args = []
 
     def _fields_of(p: Path) -> str:
         try:
@@ -21658,12 +21683,15 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
         except Exception:
             return "(unreadable)"
 
-    def _run(prog_name: str) -> Optional[subprocess.CompletedProcess]:
+    def _run(prog_name: str,
+             extra: Optional[List[str]] = None
+             ) -> Optional[subprocess.CompletedProcess]:
         prog = PROGRAMS_DIR / prog_name
         if not prog.is_file():
             return None
         try:
-            return subprocess.run([sys.executable, str(prog), str(project)],
+            return subprocess.run([sys.executable, str(prog), str(project)]
+                                  + list(extra or []),
                                   capture_output=True, text=True, timeout=120)
         except Exception:
             return None
@@ -21672,7 +21700,7 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
     #    spec, so it is the only one that can satisfy a spec-declared contract.
     #    rc 3 = NO_CONTRACT and rc 4 = NOTHING_TO_DECLARE both mean "this spec
     #    declares no machine-readable contract", i.e. fall through.
-    spec_cp = _run("spec_declaration_emit.py")
+    spec_cp = _run("spec_declaration_emit.py", _top_args)
     if spec_cp is not None and spec_cp.returncode not in (3, 4):
         if spec_cp.returncode == 0 and out_p.is_file():
             return StepResult("arith_declaration_emit", "PASS",
@@ -21682,10 +21710,27 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
                               f"[{_fields_of(out_p)}]", [str(out_p)])
         reason = (spec_cp.stderr or spec_cp.stdout
                   or "").strip().replace("\n", " ")[:400]
+        # What THIS run of the emitter did, from its own marker line -- not
+        # from whether some file happens to be on disk (another writer, an
+        # earlier run), and at the path the contract named, not an assumed one.
+        _rec = None
+        for _ln in (spec_cp.stderr or "").splitlines():
+            if _ln.startswith(_decl.SUPPLIED_RECORD_MARKER):
+                _rec = Path(_ln[len(_decl.SUPPLIED_RECORD_MARKER):].strip())
+        if _rec is not None and _rec.is_file():
+            _wrote = (f"wrote only the supplied-RTL record to {_rec}, "
+                      f"no free choice")
+        elif out_p.is_file():
+            _wrote = ("no file written by this step (a pre-existing "
+                      "plugin_output/declaration.json was left untouched)")
+        else:
+            _wrote = "no file written"
         return StepResult("arith_declaration_emit", "NOT_MEASURED", time.time() - t0,
                           f"spec_declaration_emit fail-closed "
-                          f"(rc={spec_cp.returncode}); no file written — "
-                          f"{reason}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
+                          f"(rc={spec_cp.returncode}); {_wrote} — "
+                          f"{reason}",
+                          [str(_rec)] if _rec is not None and _rec.is_file() else [],
+                          reason_class=_V.ReasonClass.EXECUTION_ERROR)
 
     # 2. No spec-declared contract — the previous behaviour, byte for byte.
     prog = PROGRAMS_DIR / "arith_declaration_emit.py"

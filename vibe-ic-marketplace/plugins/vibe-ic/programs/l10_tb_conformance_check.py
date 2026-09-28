@@ -1129,6 +1129,13 @@ def conditional_feature_declared(project_root: Optional[str],
             continue
         if not isinstance(data, (dict, list)):
             continue
+        if isinstance(data, dict):
+            # The supplied-RTL record lists port and file names the flow READ
+            # from RTL the design supplied. A port called `m` is not a decision
+            # to implement the M extension, so the record is not searched.
+            import spec_declaration_emit as _sde  # noqa: PLC0415
+            data = {k: v for k, v in data.items()
+                    if k != _sde.SUPPLIED_RTL_KEY}
         blob = json.dumps(data)
         if pat.search(blob):
             return True

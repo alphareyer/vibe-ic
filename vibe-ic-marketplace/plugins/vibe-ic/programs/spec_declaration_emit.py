@@ -131,9 +131,24 @@ hand-written declaration, or a sidecar that was deleted) is reported with
 ``existing_without_recorded_provenance`` — it is not silently promoted to a
 clean declaration.
 
+A DESIGN THAT SUPPLIES ITS OWN RTL
+---------------------------------
+When the design's input supplied the RTL (the consume step's SOURCE_MANIFEST
+says ``build_rtl_provided`` and lists ``staged_from_input``), the flow KNOWS
+facts about the implementation no author has to choose: which input files were
+staged, with their hashes, the top (``--supplied-top``, resolved by the
+caller against the staged modules) and that top's ports.  Those are written
+under ``SUPPLIED_RTL_KEY`` with the source of each, on the emit path AND on
+the fail-closed path.  They are NOT contract fields and declare no free
+choice: on the fail-closed path the file then holds that record and nothing
+else, and ``verify_declaration`` still names every REQUIRED field as absent.
+So the required-artifact gate stays red for the reason that is true (the
+choices are undeclared) instead of "the file does not exist".
+
 Exit codes
   0  emitted (or --contract, always; or --verify passed)
-  1  one or more REQUIRED fields undetermined — nothing written
+  1  one or more REQUIRED fields undetermined — no contract field written
+     (only the supplied-RTL record, when the design supplied its RTL)
      (or, under --verify, the declaration on disk fails the contract)
   2  usage / I/O error
   3  NO_CONTRACT / NO_FIELDS — this project's spec declares no machine-readable
@@ -1318,6 +1333,134 @@ def _print_contract(contracts: List[Dict[str, Any]], out_path: Path,
     print("  Contract: %s" % out_path)
 
 
+#: The key the supplied-RTL record lives under.  One key, one object: readers
+#: of this file that treat top-level strings as declared spellings never see
+#: a port or file name from it.
+SUPPLIED_RTL_KEY = "supplied_rtl"
+#: Printed (stderr) with the path, only when THIS run wrote the record on the
+#: fail-closed path, so a caller reports what the emitter did rather than what
+#: happens to be on disk.
+SUPPLIED_RECORD_MARKER = "spec_declaration_emit: SUPPLIED_RTL_RECORD_WRITTEN "
+
+
+def _sha256(path: Path) -> Optional[str]:
+    import hashlib
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _pruned_out_of_cone(project: Path, rtl: Path) -> Tuple[set, Optional[str]]:
+    """(basenames the transitive-cone reduction moved out of `rtl`, where that
+    is recorded) -- empty when nothing was moved or it cannot be read."""
+    try:
+        import rtl_transitive_cone as _cone
+        man = (rtl.parent / (rtl.name + _cone.SIDECAR_SUFFIX)
+               / _cone.RESTORE_MANIFEST_NAME)
+        moved = json.loads(man.read_text()).get("moved") or []
+        return ({str(n) for n in moved},
+                str(man.relative_to(project)))
+    except Exception:  # noqa: BLE001
+        return set(), None
+
+
+def supplied_rtl_record(project: Path,
+                        top: Optional[str]) -> Optional[Dict[str, Any]]:
+    """What the flow knows about RTL the design SUPPLIED, or None.
+
+    None unless the consume step's SOURCE_MANIFEST records ``build_rtl_provided``
+    with a non-empty ``staged_from_input``: this records supplied RTL, it does
+    not decide that RTL was supplied.  Every value carries where it came from.
+    Nothing here is a free choice and nothing is inferred from behaviour: the
+    files and hashes are read, the top is the caller's resolution, and the
+    ports are the top's ANSI header as the shared parser reads it."""
+    try:
+        import _path_layout as _pl
+        import reused_ip_rtl_consume as _consume
+    except Exception:  # noqa: BLE001
+        return None
+    rtl = _pl.rtl_dir(project)
+    mf_path = rtl / _consume._MANIFEST_NAME
+    try:
+        mf = json.loads(mf_path.read_text())
+    except Exception:  # noqa: BLE001
+        return None
+    staged_from = mf.get("staged_from_input") if isinstance(mf, dict) else None
+    if not (isinstance(mf, dict) and mf.get("build_rtl_provided") is True
+            and isinstance(staged_from, list) and staged_from):
+        return None
+    mf_rel = str(mf_path.relative_to(project))
+    pruned, pruned_src = _pruned_out_of_cone(project, rtl)
+    files: List[Dict[str, Any]] = []
+    for rel in staged_from:
+        if not isinstance(rel, str):
+            continue
+        src = project / rel
+        dst = rtl / Path(rel).name
+        entry: Dict[str, Any] = {"input": rel, "input_sha256": _sha256(src),
+                                 "staged": str(dst.relative_to(project))}
+        # What is IN rtl/ now, not what consume once copied: a file the cone
+        # reduction moved out is not a modified file, and saying
+        # `byte_identical: false` about it would tell an auditor the flow
+        # changed supplied RTL.
+        if dst.is_file():
+            entry["status"] = "staged"
+            entry["staged_sha256"] = _sha256(dst)
+            entry["byte_identical"] = (
+                None if None in (entry["input_sha256"], entry["staged_sha256"])
+                else entry["input_sha256"] == entry["staged_sha256"])
+        elif dst.name in pruned:
+            entry.update(status="pruned_out_of_cone", staged_sha256=None,
+                         byte_identical=None, source=pruned_src)
+        else:
+            entry.update(status="absent_from_rtl", staged_sha256=None,
+                         byte_identical=None,
+                         reason=("no file of this name is in rtl/ (staging is "
+                                 "flat and first-wins on a name collision)"))
+        files.append(entry)
+    record: Dict[str, Any] = {
+        "note": ("facts about the RTL this design's input supplied, read by "
+                 "the flow; not a declaration of any free choice"),
+        "source": mf_rel,
+        "files": files,
+    }
+    ports: List[Dict[str, str]] = []
+    top_file: Optional[str] = None
+    if top:
+        try:
+            import reset_clock_variant_alias as _rcv
+        except Exception:  # noqa: BLE001
+            _rcv = None
+        for f in files:
+            dst = project / f["staged"]
+            try:
+                text = dst.read_text(errors="replace")
+            except OSError:
+                continue
+            got = _rcv.parse_module_ports(text, top) if _rcv else []
+            if got:
+                top_file = f["staged"]
+                ports = [{"direction": d, "width": w, "name": n}
+                         for d, w, n in got]
+                break
+    if top and top_file:
+        record["top"] = {"value": top, "source": ("--supplied-top, resolved "
+                                                  "by the caller against the "
+                                                  "staged modules"),
+                         "defined_in": top_file}
+        record["ports"] = {"value": ports,
+                           "source": "%s: the ANSI header of module %s, read by "
+                                     "reset_clock_variant_alias."
+                                     "parse_module_ports" % (top_file, top)}
+    else:
+        record["top"] = {"value": None, "status": "NOT_DETERMINED",
+                         "reason": ("no top was supplied" if not top else
+                                    "module %r has no parseable ANSI header "
+                                    "in the staged files" % top)}
+    return record
+
+
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
@@ -1522,6 +1665,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "(which free choices this spec requires), write it to "
                          "phase2/stage1/declaration_contract.json, exit 0. For "
                          "the RTL-authoring handoff, BEFORE any RTL exists.")
+    ap.add_argument("--supplied-top", metavar="MODULE", default=None,
+                    help="The top module of RTL the design supplied, as the "
+                         "caller resolved it. Used only for the supplied-RTL "
+                         "record (see SUPPLIED_RTL_KEY); declares nothing.")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="Declare one field. Value is JSON-decoded when it "
                          "parses as JSON, else kept as a string. Repeatable. "
@@ -1669,13 +1816,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                     if args.from_rtl_declaration else {})
 
     existing: Dict[str, Any] = {}
+    existing_unreadable = False
     if out_path.is_file():
         try:
             loaded = json.loads(out_path.read_text())
             if isinstance(loaded, dict):
                 existing = loaded
+            else:
+                existing_unreadable = True
         except Exception:
             existing = {}
+            existing_unreadable = True
     sidecar = out_path.with_name(out_path.stem + ".provenance.json")
     prior = _load_prior_provenance(sidecar)
 
@@ -1702,8 +1853,27 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("      (required-ness marker %r was not recognized; "
                       "treated as REQUIRED)" % e["required_marker"],
                       file=sys.stderr)
+        supplied = supplied_rtl_record(project, args.supplied_top)
+        if supplied is not None and existing_unreadable:
+            # The fail-closed path must not cost an author their file: one
+            # stray comma would otherwise be replaced by the record alone.
+            print("  The design supplied its RTL, but %s exists and is not a "
+                  "readable JSON object: the %r record was NOT written and the "
+                  "file was left untouched." % (out_path, SUPPLIED_RTL_KEY),
+                  file=sys.stderr)
+        elif supplied is not None:
+            # Only the record: `existing` is written back as it was, and not
+            # one contract field is added, so `verify_declaration` still names
+            # every REQUIRED field as absent.
+            kept = dict(existing)
+            kept[SUPPLIED_RTL_KEY] = supplied
+            _write_json(out_path, kept)
+            print("  The design supplied its RTL: wrote ONLY the %r record "
+                  "(staged files, top, ports) to %s. No free choice was "
+                  "written." % (SUPPLIED_RTL_KEY, out_path), file=sys.stderr)
+            print("%s%s" % (SUPPLIED_RECORD_MARKER, out_path), file=sys.stderr)
         print("  Declare each with --set <field>=<value> (or --from-json). "
-              "No declaration written — a default-filled declaration would "
+              "No contract field written — a default-filled declaration would "
               "turn the required-artifact gate green against a value nobody "
               "chose.", file=sys.stderr)
         for r in rtl_rejected:
@@ -1751,6 +1921,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             # — or by carrying a placeholder that states no choice, so nothing
             # a designer actually declared is dropped by accident.
             declaration.pop(n, None)
+    supplied = supplied_rtl_record(project, args.supplied_top)
+    if supplied is not None:
+        declaration[SUPPLIED_RTL_KEY] = supplied
     _write_json(out_path, declaration)
 
     unverified = sorted(n for n, e in status.items()
