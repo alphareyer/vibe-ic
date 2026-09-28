@@ -495,6 +495,7 @@ def test_librelane_views_reach_the_paths_the_direct_route_reads(tmp_path, monkey
     assert [json.loads(c.read_text())['PNR_CORNERS'] for c in run.seen['configs'][3:]] == \
         [[c] for c in CORNERS]
     sizing = json.loads(run.seen['configs'][1].read_text())
+    assert sizing['PNR_CORNERS'] == CORNERS
     assert Path(sizing['VIBEIC_CLKPATH_SIZING_TCL']).read_text() == \
         runner._clock_path_drive_sizing_tcl()
     log = (run.out_dir / 'openroad.log').read_text()

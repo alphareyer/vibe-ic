@@ -383,20 +383,22 @@ def execute(
                 str(scene_sdc.resolve()),
                 f"{sdc.name} + the sign-off STA's flat-OCV derate "
                 "(phase3_one_shot_runner._FLAT_OCV_DERATE_EARLY/LATE)")))
-        configs["Vibeic.ClockPathDriveSizing"] = _ll.derive_step_config(
-            configs["Vibeic.ClockPathDriveSizing"],
-            configs["Vibeic.ClockPathDriveSizing"],
-            {"VIBEIC_CLKPATH_PRECTS_INSTANCES": (
-                str(pre["insts"].resolve()),
-                "instance names of the ODB OpenROAD.CTS reads (pre-CTS snapshot)"),
-             "VIBEIC_CLKPATH_SIZING_TCL": (
-                 str(sizing_tcl.resolve()),
-                 "phase3_one_shot_runner._clock_path_drive_sizing_tcl")})
         sta_cfg = json.loads(configs["OpenROAD.STAMidPNR"].read_text())
         corners = list(sta_cfg.get("STA_CORNERS") or [])
         if not corners:
             return _refuse("LL_STA_CORNERS_UNDECLARED",
                            str(configs["OpenROAD.STAMidPNR"]), out)
+        configs["Vibeic.ClockPathDriveSizing"] = _ll.derive_step_config(
+            configs["Vibeic.ClockPathDriveSizing"],
+            configs["Vibeic.ClockPathDriveSizing"],
+            {"PNR_CORNERS": (
+                 corners, "resolved STA_CORNERS for external capture setup and hold"),
+             "VIBEIC_CLKPATH_PRECTS_INSTANCES": (
+                str(pre["insts"].resolve()),
+                "instance names of the ODB OpenROAD.CTS reads (pre-CTS snapshot)"),
+             "VIBEIC_CLKPATH_SIZING_TCL": (
+                 str(sizing_tcl.resolve()),
+                 "phase3_one_shot_runner._clock_path_drive_sizing_tcl")})
         sta_steps = []
         for corner in corners:
             path = configs["OpenROAD.STAMidPNR"].with_name(
