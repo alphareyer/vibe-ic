@@ -387,7 +387,10 @@ def scope_totals(cov: Dict[str, Any],
 # We support both. The 5.x branch was added after the B3 coverage gap
 # analysis (2026-04-24) found Verilator 5.020's coverage.dat parsed as
 # zero points by the prior 4.x-only regex.
-COVERAGE_LINE_RE = re.compile(r"^C\s+'([^']*)'\s+(\d+)\s*$")
+# Coverage point metadata can contain apostrophes in Verilog literals (for
+# example `32'h1`) inside the quoted payload. The record's closing quote is
+# the last one, immediately before the hit count.
+COVERAGE_LINE_RE = re.compile(r"^C\s+'(.*)'\s+(\d+)\s*$")
 
 _V5_PAGE_TO_CAT = {"v_line": "line", "v_toggle": "toggle", "v_branch": "branch"}
 
