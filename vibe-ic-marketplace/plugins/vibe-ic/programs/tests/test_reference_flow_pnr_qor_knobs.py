@@ -291,7 +291,7 @@ def _min_pdk():
 
 
 class TestAutoDiePrecedence:
-    def test_reference_flow_does_not_size_the_die(self, tmp_path):
+    def test_reference_flow_does_not_size_the_die(self, tmp_path, monkeypatch):
         """#541 — a staged reference flow must NOT shrink the auto die. This
         used to assert `reference_flow-declared` / `target_util=0.5`, i.e. the
         exact substitution measured to take ibex from a converged detailed
@@ -299,6 +299,8 @@ class TestAutoDiePrecedence:
         sizer produces must now be the same one it produces with no reference
         flow at all — measured as a DIE, not just as a label."""
         nl = _min_netlist(tmp_path)
+        monkeypatch.setattr(mod, "_flow_default_core_util",
+                            lambda _: (0.37, "pinned tool FP_CORE_UTIL"))
         bare = tmp_path / "bare"
         bare.mkdir()
         die_bare, note_bare = mod._resolve_auto_die_um(
@@ -311,7 +313,7 @@ class TestAutoDiePrecedence:
         assert die_rf == die_bare
         assert note_rf == note_bare
         assert "reference_flow-declared" not in note_rf
-        assert "routing-headroom-default" in note_rf
+        assert "pinned tool FP_CORE_UTIL" in note_rf
 
     def test_l9_wins_over_reference_flow(self, tmp_path):
         proj = tmp_path / "proj"
@@ -327,13 +329,15 @@ class TestAutoDiePrecedence:
         assert "L9-declared" in note
         assert "target_util=0.2" in note
 
-    def test_no_declaration_keeps_default(self, tmp_path):
+    def test_no_declaration_keeps_default(self, tmp_path, monkeypatch):
         proj = tmp_path / "proj"
         proj.mkdir()
         nl = _min_netlist(tmp_path)
+        monkeypatch.setattr(mod, "_flow_default_core_util",
+                            lambda _: (0.37, "pinned tool FP_CORE_UTIL"))
         _die, note = mod._resolve_auto_die_um(
             "auto", nl, 0.30, _min_pdk(), project=proj, top="top")
-        assert "routing-headroom-default" in note
+        assert "pinned tool FP_CORE_UTIL" in note
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +356,14 @@ _TCL_BASE = dict(
 
 
 class TestPnrTclEmission:
+    def test_density_is_placement_only_and_tool_default_is_delegated(self):
+        explicit = mod._build_pnr_tcl_text(**{**_TCL_BASE, "util": 0.51})
+        delegated = mod._build_pnr_tcl_text(
+            **_TCL_BASE, density_from_tool_default=True)
+        assert "global_placement -routability_driven -timing_driven -density 0.51" in explicit
+        assert "global_placement -routability_driven -timing_driven\n" in delegated
+        assert "global_placement -routability_driven -timing_driven -density" not in delegated
+
     def test_none_is_byte_identical_to_omitted(self):
         legacy = mod._build_pnr_tcl_text(**_TCL_BASE)
         with_none = mod._build_pnr_tcl_text(

@@ -341,6 +341,13 @@ def _sky130_pdk():
 
 def _build_project(tmp_path: Path, top: str, n_cells: int) -> Path:
     project = tmp_path / "proj"
+    docs = project / "input" / "docs"
+    docs.mkdir(parents=True)
+    # CR-3: the route fixture supplies both independent design inputs. The
+    # core target sizes the auto die; placement density remains the CLI knob.
+    (docs / "L9_floorplan.md").write_text(
+        "| `FP_CORE_UTIL` | **25** |\n"
+        "| `PL_TARGET_DENSITY` | **0.30** |\n")
     synth = mod._pl.synth_dir(project)
     synth.mkdir(parents=True, exist_ok=True)
     lines = [f"module {top}(input clk, input a, output y);"]

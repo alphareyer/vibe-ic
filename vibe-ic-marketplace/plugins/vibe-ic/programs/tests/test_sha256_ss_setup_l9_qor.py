@@ -11,14 +11,14 @@ and `PL_TARGET_DENSITY` / `FP_CORE_UTIL` — but Phase-3 ignored both:
 
   * `SYNTH_MAX_FANOUT` had NO effect anywhere (no `set_max_fanout` was emitted,
     so `repair_design` never split the high-fanout nets).
-  * `PL_TARGET_DENSITY` fed only the die sizer, never `global_placement
-    -density` (stuck at the dense generic default → congested nets → the routed
+  * `PL_TARGET_DENSITY` did not reach `global_placement -density` (stuck at the
+    dense generic default → congested nets → the routed
     parasitics that explode the ss slew, and no room for repair buffers).
 
 These tests pin the two chip-AGNOSTIC fixes: the auto-silicon SDC now emits
 `set_max_fanout` from an L9-declared cap, and the SDC/DRV block renders it. The
 density-override wiring is a runner-internal (`step_pnr`) path; it is asserted
-here at the unit level via `_l9_declared_die_util` (already covered) + the new
+here at the unit level via `_l9_declared_place_density` + the new
 `_l9_declared_max_fanout`. §4.05 no-fabricate: a design that declares NEITHER
 gets a byte-identical SDC (negative tests below)."""
 from __future__ import annotations
@@ -86,11 +86,11 @@ def test_l9_declared_max_fanout_no_docs_is_none(tmp_path):
     assert mod._l9_declared_max_fanout(tmp_path) is None
 
 
-def test_l9_density_still_read_for_reference_recipe(tmp_path):
-    # the density override reuses the existing L9 density reader; confirm it
-    # prefers the explicit PL_TARGET_DENSITY fraction the same design declares.
+def test_l9_floorplan_knobs_remain_distinct(tmp_path):
+    # CR-3: the source declares both knobs, so neither may take the other's job.
     proj = _stage(tmp_path, _L9_WITH_KNOBS)
-    assert mod._l9_declared_die_util(proj) == pytest.approx(0.25)
+    assert mod._l9_declared_die_util(proj) == pytest.approx(0.20)
+    assert mod._l9_declared_place_density(proj) == pytest.approx(0.25)
 
 
 # ── the DRV/SDC block renders set_max_fanout ───────────────────────────────

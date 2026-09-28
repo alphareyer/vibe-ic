@@ -86,6 +86,11 @@ def _pdk():
 
 def _build_project(tmp_path: Path, top: str, n_cells: int = 300) -> Path:
     project = tmp_path / "proj"
+    docs = project / "input" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "L9_floorplan.md").write_text(
+        "| `FP_CORE_UTIL` | **25** |\n"
+        "| `PL_TARGET_DENSITY` | **0.30** |\n")
     synth = mod._pl.synth_dir(project)
     synth.mkdir(parents=True, exist_ok=True)
     lines = [f"module {top}(input clk, input a, output y);"]
