@@ -1504,8 +1504,9 @@ def run_was_stopped(raw: str) -> bool:
 # genuinely differ" — a false non-equivalence that halted the whole flow).
 _CONTAINER_TIMEOUT_RCS = (124, 137)
 _PROGRESS_STALL_RCS = (_pr.RC_STALLED,)
-#: The supervisor's DELIBERATE stop: the caller's own predicate said the job is
-#: going nowhere (here: cannot finish in the step budget at its own rate).
+#: The supervisor's DELIBERATE stop: the caller's own predicate projected
+#: completion beyond the step budget at the measured rate. It is a policy stop,
+#: not a fact about the solver's future rate.
 #: Read from the supervisor itself, never spelled a second time.
 _RC_ABORTED = _pr._wd.RC_ABORTED
 
@@ -6157,8 +6158,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             # cause, so "which rung was killed and why" survives the split.
             _kill_cause: Dict = {}
             # The rung's OWN convergence predicate, reading only this leg's
-            # part of the live log (FX_AES_LEC_SCALE): the step budget ends a
-            # rung only on the proof's evidence that it cannot finish in it.
+            # part of the live log (FX_AES_LEC_SCALE): the rung stops when its
+            # measured rate projects beyond the remaining step budget. This
+            # projection is a policy decision, not a proved runtime bound.
             _leg_offset = (live_log_path.stat().st_size
                            if live_log_path is not None
                            and live_log_path.is_file() else 0)
