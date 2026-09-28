@@ -188,6 +188,67 @@ and #712 (wrapper-exposed output) are **dead code without this file**.
 > reaches is refused (PAD_GROUP_UNRESOLVED at 15.5ic, DOES_NOT_FIT at step 2,
 > even when no RTL bit is left without a pad).
 
+> **Pad sides for renamed ports — PROGRAM FIRST, then you, then the program
+> again (D9).** The manifest emitter runs `programs/renamed_interface_derive.py`.
+> It writes the side-granular pairs the design's own records decide (R1: a
+> read/write split of a document port's atoms; R2: the sole remaining group
+> side) under **`derived_pad_pairs`**, each carrying `derived_by`, `rule`
+> (`R1`/`R2`), `side` and `evidence`, and it keeps ONLY the pairs
+> `accept_renames` accepts (the D2 rule above). It **never writes
+> `renamed_interfaces`**. `derived_pad_pairs` is read by the pad side alone
+> (`_l_doc_pad_placement.declared_renames`, steps 2 and 15.5ic).
+> `spec_conformance_check` and `l9_rtl_pin_consistency_check` read
+> `renamed_interfaces` as a DECLARED RENAME, and an R2 pair is evidence of a
+> side, not of a rename. Do not copy a derived pair into `renamed_interfaces`
+> unless you are declaring that rename yourself. A copy you make is yours and
+> stays, fields and all. Only entries of the shape an earlier version wrote there
+> (stamped, with no top-level `rule`) are moved out, and the hand-off names them.
+> Acceptance runs per rtl port. A port the rule rejects is listed in
+> `renamed_interfaces_derivation.rejected` with its own reasons and stays
+> unresolved; its siblings keep their side. Ports it cannot decide, and ports the
+> document places only in part, are listed in
+> `renamed_interfaces_derivation.unresolved` with their candidate sides and the
+> reason. Every emit refreshes all three program keys. HARD RULES for this skill:
+> 1. For every port in `renamed_interfaces_derivation.unresolved`, do ONE of:
+>    - author a `renamed_interfaces` pair for it, when a document port really
+>      is its counterpart; or
+>    - report it as a finding, when it has none. That is the case whose reason
+>      reads "no document port shares an identifier atom with it", or when the
+>      document's placement simply does not place it. Report it as a document
+>      placement gap, and do NOT invent a pair to silence it: an authored pair
+>      also tells both phase-2 gates that the document port is delivered as
+>      this one.
+>    Returning with a listed port neither paired nor reported is a failed
+>    hand-off.
+> 2. One pair per placement GROUP: every `l9` name of a pair must fall in the
+>    same pad-placement group row by the exact-atom rule, and the pair must
+>    pass `accept_renames` (same direction; same width where both are literal).
+>    A port whose only candidate pair is rejected for a WIDTH the document and
+>    the RTL disagree on is not yours to pair around: report it, do not author a
+>    pair that hides the disagreement.
+> 3. Then run `python3 programs/renamed_interface_derive.py <project> --check`.
+>    It checks what the pad side will read: your pairs under every rename key
+>    (`renamed_interfaces`, `renamed_buses`, `interface_renames`) and the
+>    derived ones. Sides are counted per BIT NET, one pad per bit, as 15.5ic
+>    places them, so a bus the document splits across two sides is fine. rc 0
+>    means every implemented bit net ends on EXACTLY ONE side. rc 1 names:
+>    - each REFUSED pair (an `rtl` name the implemented top lacks, an `rtl`
+>      name the document already places on another side, an `l9` name L9 lacks,
+>      an `l9` name in no group row, names in two groups, or any
+>      `accept_renames` reason);
+>    - each net with no side (`nets_without_side`);
+>    - each net on two sides (`nets_on_two_sides`).
+>    rc 3 is NOT_MEASURED, with the reason: the check cannot know an extent.
+>    That is a design document that could not be read, a placement token whose
+>    bit range does not resolve from a declared parameter (`o_x[SW-1:2]`, SW
+>    undeclared), or a port whose width neither its RTL header nor L9 states.
+>    State the missing parameter or width in the design input to resolve rc 3.
+>    An RTL width the header cannot state (`[DW/8-1:0]`) is counted at L9's
+>    width, as 15.5ic does. A definite two-side placement remains rc 1 even
+>    when an extent is unknown; correct the placement in the design document.
+>    A port you reported under rule 1 keeps rc 1 until the document places it,
+>    so say so in the hand-off.
+
 > **`{l9, rtl}` schema (HARD doc-and-code contract, #775).** Every `{l9, rtl}`
 > dict above is parsed by `l9_rtl_pin_consistency_check._manifest_name_set()`:
 > for `flattened_buses` the `l9` value names the **L9 struct ROOT** the chip-top

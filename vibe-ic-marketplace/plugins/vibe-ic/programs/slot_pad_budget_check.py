@@ -522,6 +522,76 @@ def top_parameter_defaults(text: str, top: str) -> Dict[str, int]:
     return out
 
 
+_PARAM_EXPR_DEFAULT_RE = re.compile(
+    r"\bparameter\b(?:\s+(?:integer|int|signed|unsigned|logic|bit))?"
+    r"(?:\s*\[[^\]]*\])?\s+([A-Za-z_]\w*)\s*=\s*"
+    r"(\$clog2\s*\(\s*([A-Za-z_]\w*|\d+)\s*\)|[A-Za-z_]\w*)\s*(?=[,)])")
+
+
+def _clog2(n: int) -> int:
+    """IEEE 1800-2017 20.8.1 `$clog2`: ceil(log2(n)); 0 for n = 0 and 1."""
+    return 0 if n <= 1 else (n - 1).bit_length()
+
+
+def top_parameter_derived_defaults(text: str, top: str,
+                                   known: Dict[str, int]
+                                   ) -> Dict[str, Dict[str, Any]]:
+    """The TOP's expression defaults whose elaboration value is EXACT.
+
+    `top_parameter_defaults` reads integer literals only, and that stays its
+    contract. This is a separate, narrower reader for the two expression
+    shapes elaboration answers without any choice once the operand is known:
+    another parameter's NAME, and `$clog2(<name or literal>)`. ``known`` is
+    what elaboration would use for the operand (the header's literals, then the
+    declaration / `--param` values over them). Every value is returned with the
+    expression it came from, so the report shows the arithmetic.
+
+    MEASURED on subservient x gf180mcuD (D9, v1.25.64): `parameter memsize =
+    512, parameter aw = $clog2(memsize)` left `[aw-1:0] o_sram_waddr`
+    unresolved, and step 2 answered UNDECIDED (ZERO_DENOMINATOR) on a width the
+    synthesised netlist carries as 9 bits. Any other expression stays
+    unresolved, so the UNDECIDED path still owns every width not stated
+    exactly.
+    """
+    stripped = _strip_hdl_attributes(_strip_hdl_comments(text))
+    m = re.search(r"\bmodule\s+" + re.escape(top) + r"\b\s*(?:import[^;]*;\s*)*#\s*\(",
+                  stripped)
+    if not m:
+        return {}
+    depth, end = 1, None
+    for n, ch in enumerate(stripped[m.end():], m.end()):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                end = n
+                break
+    if end is None:
+        return {}
+    block = stripped[m.end():end] + ")"
+    exprs = [(name, expr, operand) for name, expr, operand
+             in _PARAM_EXPR_DEFAULT_RE.findall(block) if name not in known]
+    out: Dict[str, Dict[str, Any]] = {}
+    for _ in range(len(exprs)):
+        progressed = False
+        for name, expr, operand in exprs:
+            if name in out:
+                continue
+            env = {**known, **{k: v["value"] for k, v in out.items()}}
+            ref = operand or expr
+            val = int(ref) if ref.isdigit() else env.get(ref)
+            if val is None:
+                continue
+            out[name] = {"value": _clog2(val) if operand else val,
+                         "expression": re.sub(r"\s+", "", expr),
+                         "operand": {ref: val}}
+            progressed = True
+        if not progressed:
+            break
+    return out
+
+
 def parse_top_ports(text: str, top: str,
                     params: Optional[Dict[str, int]] = None
                     ) -> Optional[List[Dict[str, Any]]]:
@@ -1265,6 +1335,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     rtl_files = list(a.rtl) or _discover_rtl(a.project)
     ports: Optional[List[Dict[str, Any]]] = None
     defaults_used: Dict[str, int] = {}
+    derived_used: Dict[str, Dict[str, Any]] = {}
     _l9_core = _declared_core_module(str(a.project))
     _tops_to_try: List[str] = []
     for _cand in (a.top, _core_top, _l9_core):
@@ -1286,9 +1357,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                         _param_conflicts[_k] = {
                             "rtl_default": _rtl_defaults[_k],
                             "declared": _v}
+                _known = {**_rtl_defaults, **_params_from_declaration, **params}
+                derived_used = {
+                    k: v for k, v in top_parameter_derived_defaults(
+                        _text, _top_try, _known).items() if k not in params
+                    and k not in _params_from_declaration}
                 ports = parse_top_ports(
                     _text, _top_try,
-                    {**defaults_used, **_params_from_declaration, **params})
+                    {**defaults_used,
+                     **{k: v["value"] for k, v in derived_used.items()},
+                     **_params_from_declaration, **params})
             except OSError:
                 ports = None
             if ports:
@@ -1630,6 +1708,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         rc = int(rep["rc"])
     if defaults_used:
         rep["params_from_top_module_defaults"] = defaults_used
+    if derived_used:
+        rep["params_from_top_module_exact_expressions"] = derived_used
 
     if a.out_json:
         # WHERE A RELATIVE --json LANDS (#712). It used to land wherever the
