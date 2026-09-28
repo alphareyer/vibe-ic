@@ -645,11 +645,15 @@ For an arithmetic-primitive datapath whose function is CLOSED-FORM (`p = a OP b 
 
 When one serial input drives many datapath loads, an input register can move
 that broadcast from an input-to-register path to a register-to-register path.
-It costs one observable cycle. Read the design input's latency clause before
-choosing it: when latency is fixed, keep the stated edge-to-output offset and
-do not add an input stage that changes it. When latency is explicitly free,
-the stage is an available timing choice; record it in the architecture and
-declare the resulting `latency_cycles`. Use the CR-5 edge origin: the first
+Adding a stage normally costs one observable cycle. Read the design input's
+latency clause before choosing it: when latency is fixed, a retiming that moves
+an existing pipeline stage to the input is allowed if independent measurement
+keeps the required edge-to-output offset and the function and bit order still
+match the input. Do not add a stage that changes the fixed observable latency.
+When latency is explicitly free, the stage is an available timing choice;
+record it in the architecture and declare the resulting `latency_cycles`.
+For either case, the declared latency must match the measured latency. Use the
+CR-5 edge origin: the first
 serial bit is sampled at rising edge 0 and the corresponding first output bit
 is observed after rising edge L settles. Measure L with an independent
 testbench, compare it to the declaration, and reject an off-by-one or reversed
