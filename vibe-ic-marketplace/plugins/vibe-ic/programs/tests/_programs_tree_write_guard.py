@@ -15,7 +15,7 @@ every in-process event that can create or modify a path — `open` in a write
 mode or with write/create flags, `os.mkdir`, `os.rename`/`os.replace`,
 `os.symlink`, `os.link` — whose target resolves under `programs/`. Collection
 writes fail the session before tests run, including `--collect-only`. The autouse
-fixture names call-time writes and reports a call-phase FAIL.
+test protocol names setup, call and teardown writes in their own reports.
 `__pycache__` is not the test's doing and is ignored.
 
 WHAT IT CANNOT SEE: a write made by a SUBPROCESS (a gate run by `subprocess`,
@@ -38,6 +38,7 @@ _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
 
 #: Paths written under programs/ since the current test started.
 _CURRENT: Optional[List[str]] = None
+_REPORTED = 0
 _COLLECTION_ACTIVE = False
 _COLLECTION_HITS: List[str] = []
 
@@ -117,30 +118,34 @@ def pytest_collection_finish(session):
             f"{sorted(set(_COLLECTION_HITS))[:8]}", returncode=1)
 
 
-@pytest.fixture(autouse=True)
-def _no_write_into_the_programs_tree():
-    """Collect writes for the call-phase hook to report as a plain FAIL."""
-    global _CURRENT
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Keep audit hits alive through setup, call and the teardown report."""
+    global _CURRENT, _REPORTED
     _install()
     _CURRENT = []
+    _REPORTED = 0
     try:
         yield
     finally:
         _CURRENT = None
+        _REPORTED = 0
 
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
-    """Record transient writes as a call-phase FAIL, never a teardown ERROR."""
+    """Refuse writes from every phase, including transient teardown writes."""
+    global _REPORTED
     outcome = yield
     report = outcome.get_result()
-    if report.when != "call":
+    if report.when not in ("setup", "call", "teardown"):
         return
-    hits = _CURRENT or []
+    hits = (_CURRENT or [])[_REPORTED:]
+    _REPORTED += len(hits)
     if not hits:
         return
     message = (
-        f"{item.nodeid} wrote into the repository's programs/ tree "
+        f"{item.nodeid} wrote during {report.when} into the repository's programs/ tree "
         f"({len(hits)}): {sorted(set(hits))[:8]}. Nothing that reads this "
         f"tree may write to it, even briefly: a concurrent reader (another "
         f"xdist worker's write guard, a census) sees the path. Build it "
