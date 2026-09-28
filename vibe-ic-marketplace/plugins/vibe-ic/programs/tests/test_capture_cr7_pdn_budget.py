@@ -295,6 +295,20 @@ def test_no_budget_zero_stripes_on_declared_supply_pair_is_not_measured(tmp_path
     assert "PDN_DEF_STRAP_SHORTFALL" in {f["rule"] for f in report["findings"]}
 
 
+def test_no_budget_zero_stripes_on_one_declared_supply_is_not_clean(tmp_path):
+    project = _project(tmp_path, 0)
+    path = project / "phase3/stage3/pnr/floorplan.def"
+    path.write_text(path.read_text().replace("+ USE GROUND", "+ USE SIGNAL"))
+    (project / "reports/phase3/floorplan_rectangles.json").write_text("{}")
+    rc, report = _check(project)
+    census = report["def_stripe_census"]
+    assert census["status"] == "MEASURED"
+    assert census["count"] == 0
+    assert census["declared_roles"] == ["POWER"]
+    assert "PDN_DEF_STRAP_SHORTFALL" in {f["rule"] for f in report["findings"]}
+    assert rc == 2 and report["verdict"] == "NOT_MEASURED"
+
+
 def test_six_stripes_on_one_rail_do_not_count_as_three_groups(tmp_path):
     project = _project(tmp_path, 6)
     path = project / "phase3/stage3/pnr/floorplan.def"

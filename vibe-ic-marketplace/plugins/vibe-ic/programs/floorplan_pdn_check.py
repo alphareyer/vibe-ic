@@ -664,13 +664,14 @@ def main(argv=None) -> int:
     role_totals = {
         role: sum(census.get("by_role_layer", {}).get(role, {}).values())
         for role in ("POWER", "GROUND")}
-    # An advisory grid with no typed supply role but apparent STRIPE metal,
-    # or only one typed rail, cannot be certified as a built two-rail PDN.
+    # An advisory grid with a typed supply rail but no built metal cannot be
+    # certified, even when only one of the two roles was declared. A role-free
+    # legacy DEF with no PG shapes remains distinguishable from that evidence.
     role_undetermined = (census["status"] == "MEASURED"
                          and not apply_requested and not candidate_ready
                          and ((non_pg > 0 and census["count"] == 0)
                               or (census["count"] > 0 or
-                                  set(census["declared_roles"]) == {"POWER", "GROUND"})
+                                  bool(census["declared_roles"]))
                               and any(v == 0 for v in role_totals.values())))
     verdict = ("FAIL" if fail else "NOT_MEASURED"
                if role_undetermined or budget_unmeasured else "PASS")
