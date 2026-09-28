@@ -538,9 +538,14 @@ def test_full_parameter_pass_does_not_publish_delivered_l10_pass(tmp_path):
     assert case.get("full_parameter", {"verdict": case["verdict"]})["verdict"] == "PASS"
     assert case.get("delivered", {"verdict": case["verdict"]})["verdict"] == "NOT_MEASURED"
     assert case["verdict"] == "NOT_MEASURED"
+    assert case["full_parameter"]["coverage"]["covered"] == 1
+    assert case["coverage"]["covered"] == 0
     assert row["verdict"] == "NOT_EXECUTED"
     assert row["sim_executed"] is False
     assert "delivered" in row["detail"] and "4096" in row["detail"]
+    transcript = (p / I.TRANSCRIPT_REL.format(case="base_isa")).read_text()
+    assert "CORE ISA (parameter only) PASS" in transcript
+    assert I.coverage_line(0, 2) in transcript
 
     import testbench_gen as TB
     import _l10_execution as X
