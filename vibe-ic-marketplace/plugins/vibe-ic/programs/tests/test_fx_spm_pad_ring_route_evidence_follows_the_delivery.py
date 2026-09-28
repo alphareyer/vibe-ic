@@ -122,6 +122,44 @@ def test_the_requirement_asks_the_producers_own_question(tmp_path, kw):
     assert owed is bool(TD.requests_pad_ring(project))
 
 
+def test_bought_slot_hardmacro_refuses_in_producer_and_both_requirements(
+        tmp_path):
+    project = H._project(tmp_path, operator={"path": "t.yaml",
+                                             "slot": "slot_1x1"})
+    def outcome(call):
+        try:
+            return f"ACCEPTED: {call()!r}"
+        except ValueError as exc:
+            return f"REFUSED: {exc}"
+
+    observed = [
+        outcome(lambda: TD.requests_pad_ring(project)),
+        outcome(lambda: F._check_condition(
+            project, H._steps()["15.5ic"]["condition"])),
+        outcome(lambda: F._output_not_owed(project, _step37(), EVIDENCE)),
+    ]
+    expected = ("REFUSED: deliverable HARDMACRO (IP path) contradicts a "
+                "bought shuttle slot (IC path); declare one route in "
+                "input/step_0_5ic_answers.json")
+    assert observed == [expected] * 3
+
+
+def test_bought_slot_die_still_owes_the_route_attestation(tmp_path):
+    operator = {"path": "t.yaml", "slot": "slot_1x1"}
+    project = H._project(tmp_path / "producer", deliverable="DIE",
+                         operator=operator)
+    assert TD.requests_pad_ring(project) is True
+    assert F._check_condition(project,
+                              H._steps()["15.5ic"]["condition"]) is True
+    assert F._output_not_owed(project, _step37(), EVIDENCE) is None
+    missing = _run(tmp_path / "missing", deliverable="DIE", operator=operator)
+    assert missing.status == "FAIL"
+    assert missing.reason_class == "missing_artefact"
+    present = _run(tmp_path / "present", deliverable="DIE", operator=operator,
+                   with_evidence=True)
+    assert present.status != "FAIL", present.reasons
+
+
 @pytest.mark.parametrize("kw", [
     {"deliverable": "DIE"}, {"declaration": False},
 ], ids=["die-no-route", "unreadable-declaration-no-route"])
