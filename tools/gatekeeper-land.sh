@@ -1048,12 +1048,11 @@ fi
 # that imports and then cannot report produces the identical every-file-UNKNOWN
 # shape. It costs milliseconds against a tier that costs an hour and a half.
 #
-# The refusal text belongs to the program, not to this line: one owner for the
-# cause and the remedy, so they cannot drift apart. rc 2 = REFUSE, and it is
-# fatal here — a tier that cannot measure anything has nothing to say later.
+# The verdict text belongs to the program, not to this line: one owner for the
+# cause, so it cannot drift apart. Any nonzero rc stops landing before an arm.
 if ! python3 "$PROGRAMS/landing_pytest_runtime_preflight.py"; then
-  echo "=== REFUSED — the landing test arms cannot produce a record on this host;"
-  echo "    no arm was run and no stamp was written. See the cause and remedy above."
+  echo "=== STOPPED — the runtime preflight did not pass; its verdict is above."
+  echo "    no arm was run and no stamp was written."
   exit 2
 fi
 
