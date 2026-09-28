@@ -636,6 +636,37 @@ def test_each_unavailable_window_preserves_the_independent_fold_failure(
     assert doc["floor_recount"]["setup"]["ok"] is False, doc
 
 
+@pytest.mark.parametrize("outside_field,checked", (
+    ("clk_source", ["setup", "hold"]),
+    ("hold.bounded_spef", ["setup"]),
+    ("setup.bounded_spef", ["hold"]),
+))
+def test_an_external_non_window_path_cannot_hide_an_available_fold_failure(
+        tmp_path, outside_field, checked):
+    # Either available corner retains coupling and proves a fold defect. The
+    # external path must only withhold its own input.
+    proj = _project(tmp_path / outside_field.split(".")[0],
+                    setup_bounded=_SPEF_COUPLED,
+                    hold_bounded=_SPEF_COUPLED)
+    rp = proj / "reports/phase3/si_mcf_sta.json"
+    producer = json.loads(rp.read_text())
+    outside = tmp_path / "outside" / "evidence.spef"
+    if outside_field == "clk_source":
+        producer["clk_source"] = str(outside)
+    else:
+        scene, field = outside_field.split(".")
+        producer["corners"][scene][field] = str(outside)
+    rp.write_text(json.dumps(producer))
+
+    result, doc = _run(proj)
+    categories = _categories(doc)
+    assert (result.returncode, doc["verdict"]) == (G.RC_FAIL, "FAIL"), doc
+    assert "PATH_OUTSIDE_PROJECT" in categories, categories
+    assert "FOLD_NOT_APPLIED" in categories, categories
+    assert doc["summary"]["corners_checked"] == checked, doc
+    assert doc["summary"]["vacuous"] is False, doc
+
+
 def test_checked_in_spef_floor_wins_over_external_window(tmp_path):
     source = repo_path(
         "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/"
