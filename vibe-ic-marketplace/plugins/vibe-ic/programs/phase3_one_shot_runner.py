@@ -61170,7 +61170,8 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
         if not canonical_sdc.is_file() or canonical_sdc.read_text() != body:
             _aa.write_text(canonical_sdc, body)
             written.append(str(canonical_sdc))
-    sdc_sha = _sha256_file(canonical_sdc) if canonical_sdc.is_file() else None
+    sdc_sha = (_sha256_file(canonical_sdc) if source_sdc.is_file()
+               and canonical_sdc.is_file() else None)
     sdc_report = project / "reports/phase2/sdc_check.json"
     if sdc_sha and (not sdc_report.is_file()
                     or prior.get("sdc_sha256") != sdc_sha):
@@ -61210,7 +61211,8 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
     # before extraction, so an extraction refusal never leaves a stale pass.
     spef_current = (spef.is_file() and spef.stat().st_size > 0
                     and prior.get("routed_def_sha256") == route_sha
-                    and prior.get("spef_sha256") == _sha256_file(spef))
+                    and prior.get("spef_sha256") == _sha256_file(spef)
+                    and prior.get("spef_check_pass") is True)
     if not spef_current:
         spef.unlink(missing_ok=True)
         mode, _ = _librelane_signoff_modes(project)
@@ -61235,7 +61237,9 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
     extraction_report = project / "reports/phase2/gates/spef_extraction.json"
     if spef_sha and (not extraction_report.is_file()
                      or prior.get("routed_def_sha256") != route_sha
-                     or prior.get("spef_sha256") != spef_sha):
+                     or prior.get("spef_sha256") != spef_sha
+                     or (prior.get("spef_extraction_sha256") !=
+                         _sha256_file(extraction_report))):
         import spef_extraction_check as _sec
         findings, stats = _sec.audit(project)
         report = _sec.build_report(findings, stats, str(project))
@@ -61263,6 +61267,7 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
               "clock_plan_sha256": (_sha256_file(clock_path)
                                     if clock_path.is_file() else None),
               "spef_sha256": spef_sha,
+              "spef_check_pass": extraction_ok,
               "spef_extraction_sha256": (_sha256_file(extraction_report)
                                           if extraction_report.is_file() else None)}
     body = json.dumps(record, indent=2, ensure_ascii=False) + "\n"

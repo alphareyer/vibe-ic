@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import phase3_one_shot_runner as R
 from test_phase3_postpnr_disclosure_and_gds_guard import (
     TOP, OLD_DIE, OLD_UTIL, NEW_DIE, NEW_UTIL, _drive, _plan, _project,
-    _repair_producer,
+    _repair_producer, _pdk,
 )
 
 
@@ -82,3 +83,83 @@ def test_step32_failure_refreshes_old_constraint_value(tmp_path, monkeypatch):
     project = _step32_failed_project(tmp_path, monkeypatch, stale_sdc=True)
     sdc = R._pl.constraints_dir(project) / f"{TOP}.sdc"
     assert "-period 7" in sdc.read_text()
+
+
+def _routed_project(root: Path) -> tuple[Path, Path]:
+    pnr = R._pl.pnr_dir(root)
+    pnr.mkdir(parents=True, exist_ok=True)
+    route = pnr / "routed.def"
+    body = "VERSION 5.8 ;\nDESIGN chip_top ;\nDIEAREA ( 0 0 ) ( 1000 1000 ) ;\nEND DESIGN\n"
+    route.write_text(body)
+    (pnr / f"{TOP}.def").write_text(body)
+    (pnr / "constraint.sdc").write_text(
+        "create_clock -name core_clk -period 7 [get_ports clk]\n"
+        "set_input_delay 1 -clock core_clk [get_ports data]\n")
+    return root, route
+
+
+def test_same_route_is_byte_idempotent_and_changed_route_reextracts(
+        tmp_path, monkeypatch):
+    project, route = _routed_project(tmp_path)
+    emitted = []
+
+    def extract(_project, _top, _pdk, _container, output, _notes):
+        emitted.append(R._sha256_file(route))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(SPEF + f"// route {emitted[-1]}\n")
+        return True
+
+    monkeypatch.setattr(R, "_emit_spef", extract)
+    pdk = _pdk(project)
+    first = R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    assert first.status == "PASS", first.detail
+    products = [R._pl.constraints_dir(project) / f"{TOP}.sdc",
+                project / "reports/phase2/sdc_check.json",
+                R._pl.pnr_dir(project) / "pdn.done",
+                R._pl.cts_dir(project) / "clock_plan.json",
+                R._pl.extracted_dir(project) / f"{TOP}.spef",
+                project / "reports/phase2/gates/spef_extraction.json",
+                project / "reports/phase3/postpnr_canonical_basis.json"]
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in products}
+    again = R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    assert again.status == "PASS" and not again.output_files
+    assert emitted == [R._sha256_file(route)]
+    assert before == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in products}
+
+    old_times = (route.stat().st_atime_ns, route.stat().st_mtime_ns)
+    new_body = route.read_text().replace("1000 1000", "2000 2000")
+    route.write_text(new_body)
+    (R._pl.pnr_dir(project) / f"{TOP}.def").write_text(new_body)
+    os.utime(route, ns=old_times)
+    changed = R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    assert changed.status == "PASS", changed.detail
+    assert len(emitted) == 2 and emitted[0] != emitted[1]
+    assert products[4].read_bytes() != before[products[4]][0]
+    basis = json.loads(products[-1].read_text())
+    assert basis["routed_def_sha256"] == emitted[-1]
+    assert basis["spef_sha256"] == R._sha256_file(products[4])
+    assert "gds" not in " ".join(str(p) for p in changed.output_files)
+
+
+def test_missing_route_or_extraction_never_claims_spef(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    pnr = R._pl.pnr_dir(project)
+    pnr.mkdir(parents=True)
+    (pnr / "constraint.sdc").write_text(
+        "create_clock -name core_clk -period 7 [get_ports clk]\n")
+    pdk = _pdk(project)
+    missing = R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    assert missing.status == "NOT_MEASURED"
+    assert not (project / "reports/phase3/postpnr_canonical_basis.json").exists()
+    assert not (R._pl.constraints_dir(project) / f"{TOP}.sdc").exists()
+
+    _, route = _routed_project(project)
+    monkeypatch.setattr(R, "_emit_spef", lambda *a, **k: False)
+    failed = R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    assert failed.status == "NOT_MEASURED"
+    assert not (R._pl.extracted_dir(project) / f"{TOP}.spef").exists()
+    assert not (project / "reports/phase2/gates/spef_extraction.json").exists()
+    basis = json.loads((project / "reports/phase3/postpnr_canonical_basis.json").read_text())
+    assert basis["status"] == "NOT_MEASURED"
+    assert basis["routed_def_sha256"] == R._sha256_file(route)
+    assert basis["spef_sha256"] is None

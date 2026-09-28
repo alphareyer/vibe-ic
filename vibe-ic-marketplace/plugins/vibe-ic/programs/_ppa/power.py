@@ -2914,7 +2914,7 @@ def pdn_done_text(project: Path, pnr_out: Path, primary_def: Path,
             and f"# supply_subject_sha256: {supply_subject}\n" in prior):
         return None
     ev = def_evidence or {}
-    return (f"# PDN status: {status}\n"
+    body = (f"# PDN status: {status}\n"
             f"# marker: {marker}\n"
             f"# measured in {Path(primary_def).name} SPECIALNETS: "
             f"follow-pin rails={ev.get('followpin', '?')} "
@@ -2925,3 +2925,4 @@ def pdn_done_text(project: Path, pnr_out: Path, primary_def: Path,
             f"# source_identity_sha256: {source_sha or 'NOT_MEASURED'}\n"
             f"# source: {source}\n"
             f"# tool: {tool}\n")
+    return None if prior == body else body
