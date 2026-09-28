@@ -155,6 +155,14 @@ _NOT_PROSE: Dict[str, str] = {
         "decoded instruction and the actual built image remains independently "
         "size-guarded. The fixed syntax has no negation production, and the "
         "positive calibration includes a real CSR/system mnemonic as a control.",
+    "phase3_one_shot_runner::_emit_erc_report":
+        "ONE OPENROAD DIAGNOSTIC RECORD. The whole line is anchored to an "
+        "optional [INFO]/[WARNING]/[ERROR] code, optional 'found', a decimal "
+        "count, then 'floating nets' or 'floating pins'; arbitrary surrounding "
+        "words and negations cannot match. Missing or failed count records "
+        "produce NOT_DETERMINED, never a clean zero. Falsifier: "
+        "tests/test_phase3_signoff_chain_organic.py::TestErcReport::"
+        "test_missing_openroad_count_is_not_zero.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "
