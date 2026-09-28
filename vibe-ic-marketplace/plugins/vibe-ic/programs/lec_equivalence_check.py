@@ -550,30 +550,56 @@ def audit(project: Path) -> AuditResult:
         res.inconclusive = False
         return res
 
-    # An equiv_status residual is not evidence of non-equivalence: Yosys puts
-    # a real mismatch in that same bucket. Require the independent SAT miter
-    # result before assigning the third outcome. Missing legacy search records
-    # are named NOT_RUN, never read as a negative search result.
+    # A residual may be undecided, but an already-decided FAIL and a stateless
+    # residual without complete SAT disposition cannot become NOT_PROVEN.
     if (unproven or 0) > 0 and (res.total_points or 0) > 0:
         search = res.counterexample_search
         outcome = str(search.get("result") or "NOT_RUN")
+        if not search:
+            search = {"result": "NOT_RUN",
+                      "reason": "producer supplied no counterexample search record"}
+            res.counterexample_search = search
         res.summary.update(total_points=res.total_points,
                            proven_points=res.proven_points,
                            unproven_point_names=res.unproven_point_names,
                            counterexample_search=search)
-        if outcome == "COUNTEREXAMPLE" or (non_equiv or 0) > 0:
+        if (outcome == "COUNTEREXAMPLE" or (non_equiv or 0) > 0
+                or str(lc.get("verdict") or "").upper() in
+                ("FAIL", "NON_EQUIVALENT")):
             res.findings.append(Finding(
                 rule="LEC_NOT_EQUIVALENT", severity="ERROR",
-                message=(f"SAT miter found a counterexample for "
-                         f"{res.unproven_point_names}; trace: "
-                         f"{search.get('trace', 'see producer report')}"),
+                message=(f"LEC producer already decided FAIL or the SAT miter "
+                         f"found a counterexample for {res.unproven_point_names}; "
+                         f"trace: {search.get('trace', 'see producer report')}"),
                 file=LEC_JSON_REL))
             return res
-        if str(lc.get("verdict") or "").upper() in ("FAIL", "NON_EQUIVALENT"):
+        if str(lc.get("verdict") or "").upper() == "RUN_ERROR":
+            res.verdict = "RUN_ERROR"
             res.findings.append(Finding(
-                rule="LEC_RECORDED_FAIL", severity="ERROR",
-                message="The producer recorded a decided LEC failure; a later "
-                        "counterexample search cannot erase it.", file=LEC_JSON_REL))
+                rule="LEC_RUN_ERROR", severity="ERROR",
+                message="LEC producer recorded a run error; the residual has no deciding proof.",
+                file=LEC_JSON_REL))
+            return res
+        if doc.get("miter_stateless") is True and not (
+                len(res.unproven_point_names) == unproven
+                and lec_cex.complete_resolution_valid(
+                    search, res.unproven_point_names)):
+            res.verdict = "RUN_ERROR"
+            res.findings.append(Finding(
+                rule="LEC_COMBINATIONAL_SAT_UNDECIDED", severity="ERROR",
+                message="Combinational residual requires a complete SAT disposition; "
+                        "counterexample search did not decide it.",
+                file=LEC_JSON_REL))
+            return res
+        evidence_error = lec_cex.residual_search_evidence_error(
+            search, res.unproven_point_names)
+        if evidence_error:
+            res.verdict = "RUN_ERROR"
+            res.findings.append(Finding(
+                rule=("LEC_NOT_RUN_EVIDENCE_INVALID" if outcome == "NOT_RUN"
+                      else "LEC_SEARCH_EVIDENCE_INVALID"), severity="ERROR",
+                message=f"Counterexample search evidence invalid: {evidence_error}.",
+                file=LEC_JSON_REL))
             return res
         if (len(res.unproven_point_names) == unproven
                 and lec_cex.complete_resolution_valid(
@@ -583,23 +609,16 @@ def audit(project: Path) -> AuditResult:
             res.proven_points = res.total_points
             res.unproven_points = 0
             return res
-        search_error = lec_cex.unresolved_search_error(search)
-        if search_error:
-            res.verdict = "RUN_ERROR"
-            res.findings.append(Finding(
-                rule=search_error.split(":", 1)[0], severity="ERROR",
-                message=search_error, file=LEC_JSON_REL))
-            return res
         res.verdict = "NOT_PROVEN"
-        search_text = (f"counterexample search NOT RUN: {search['reason']}"
-                       if outcome == "NOT_RUN" else
-                       f"{outcome}: {search.get('reason', 'bounded SAT result recorded')}")
+        search_detail = (
+            f"counterexample search NOT RUN: {search['reason']}"
+            if outcome == "NOT_RUN" else
+            f"{search['method']} K={search['bound_cycles']} cycles: "
+            f"{outcome} ({search['reason']})")
         res.findings.append(Finding(
             rule="LEC_NOT_PROVEN", severity="WARNING",
             message=(f"LEC NOT_PROVEN: {unproven} of {res.total_points} points "
-                     f"unproven; {search.get('method', 'counterexample search')} "
-                     f"K={search.get('bound_cycles', 'unknown')} cycles: "
-                     f"{search_text}."),
+                     f"unproven; {search_detail}."),
             file=LEC_JSON_REL))
         return res
 

@@ -14,6 +14,7 @@ import lec_equivalence_check as pre
 import lec_post_layout_check as post
 import verdict
 import lec_counterexample_search as cex
+import _docker_memory as _dmem
 import flow_compliance_check as flow
 import flow_dashboard_data as dashboard
 import vibe_ic_one_shot_runner as frontdoor
@@ -28,6 +29,7 @@ def _residual():
         "non_equivalent_points": 0, "unproven_point_names": ["out"],
         "counterexample_search": {
             "result": "NONE_FOUND", "method": "Yosys equiv_miter SAT",
+            "reason": "no counterexample within 20 cycles under the recorded initial-state policy",
             "bound_cycles": 20, "bound_source": "flow/lec_counterexample_search.json",
             "completeness": "BOUNDED", "tool": "yosys", "tool_version": "0.3.84-test",
             "run_identity": "fixture-run", "point_names": ["out"],
@@ -55,33 +57,25 @@ def test_pre_layout_residual_is_not_proven(tmp_path):
 
 def test_not_run_is_explicit_and_never_passes(tmp_path):
     doc = _residual()
-    doc["counterexample_search"] = {
-        "result": "NOT_RUN", "reason": "solver unavailable",
-        "method": "Yosys equiv_miter SAT", "bound_cycles": 20,
-        "run_identity": "fixture-run", "completeness": "BOUNDED",
-    }
+    doc["counterexample_search"] = cex.not_run(
+        "solver unavailable", ["out"], run_identity="fixture-run")
     result = post.evaluate_report(doc)
     assert result["result"] == "NOT_PROVEN"
     assert result["counterexample_search"]["reason"] == "solver unavailable"
-    assert result["findings"][0].split("cycles: ", 1)[-1] == (
-        "counterexample search NOT RUN: solver unavailable")
+    assert "counterexample search NOT RUN: solver unavailable" in result["findings"][0]
     reports = tmp_path / "reports"
     reports.mkdir()
     (reports / "lec.json").write_text(json.dumps(doc))
     pre_result = pre.audit(tmp_path)
     assert pre_result.verdict == "NOT_PROVEN"
-    assert pre_result.findings[-1].message.split("cycles: ", 1)[-1] == (
-        "counterexample search NOT RUN: solver unavailable.")
+    assert "counterexample search NOT RUN: solver unavailable" in pre_result.findings[-1].message
 
 
 def test_decided_failure_survives_not_run_at_both_gates(tmp_path):
     doc = _residual()
     doc.update(verdict="NON_EQUIVALENT", non_equivalent_points=0)
-    doc["counterexample_search"] = {
-        "result": "NOT_RUN", "reason": "terminal IL unavailable",
-        "method": "Yosys equiv_miter SAT", "bound_cycles": 20,
-        "run_identity": "fixture-run", "completeness": "UNKNOWN",
-    }
+    doc["counterexample_search"] = cex.not_run(
+        "terminal IL unavailable", ["out"], run_identity="fixture-run")
     post_result = post.evaluate_report(doc)
     assert post_result["result"] == "FAIL"
     assert post_result["verdict"] == "NON_EQUIVALENT"
@@ -95,11 +89,9 @@ def test_decided_failure_survives_not_run_at_both_gates(tmp_path):
 
 def test_combinational_not_run_is_execution_error_at_both_gates(tmp_path):
     doc = _residual()
-    doc["counterexample_search"] = {
-        "result": "NOT_RUN", "reason": "unsupported SAT cell",
-        "method": "Yosys equiv_miter SAT", "bound_cycles": 20,
-        "run_identity": "fixture-run", "completeness": "COMPLETE",
-    }
+    doc["miter_stateless"] = True
+    doc["counterexample_search"] = cex.not_run(
+        "unsupported SAT cell", ["out"], run_identity="fixture-run")
     post_result = post.evaluate_report(doc)
     assert post_result["result"] == "FAIL"
     assert post_result["verdict"] == "RUN_ERROR"
@@ -128,14 +120,15 @@ def test_bare_not_run_is_invalid_evidence_at_both_gates(tmp_path):
     assert all("no counterexample found" not in f.message for f in pre_result.findings)
 
 
-@pytest.mark.parametrize("missing", ["reason", "method", "bound_cycles", "run_identity"])
+@pytest.mark.parametrize("missing", [
+    "reason", "method", "bound_cycles", "bound_source", "run_identity",
+    "point_names", "tool", "tool_version", "completeness",
+    "initial_state_policy",
+])
 def test_each_not_run_field_is_required_by_both_gates(tmp_path, missing):
     doc = _residual()
-    search = {
-        "result": "NOT_RUN", "reason": "SAT executable unavailable",
-        "method": "Yosys equiv_miter SAT", "bound_cycles": 20,
-        "run_identity": "fixture-run", "completeness": "BOUNDED",
-    }
+    search = cex.not_run("SAT executable unavailable", ["out"],
+                         run_identity="fixture-run")
     del search[missing]
     doc["counterexample_search"] = search
     post_result = post.evaluate_report(doc)
@@ -163,6 +156,21 @@ def test_complete_sat_disposition_requires_the_named_search(tmp_path):
     assert post.evaluate_report(doc)["result"] == "PASS"
     (reports / "lec.json").write_text(json.dumps(doc))
     assert pre.audit(tmp_path).passed is True
+    del doc["counterexample_search"]["reason"]
+    assert post.evaluate_report(doc)["result"] == "FAIL"
+    (reports / "lec.json").write_text(json.dumps(doc))
+    assert pre.audit(tmp_path).passed is False
+
+
+def test_decided_fail_survives_a_complete_sat_claim(tmp_path):
+    doc = _residual()
+    doc["verdict"] = "FAIL"
+    doc["counterexample_search"]["completeness"] = "COMPLETE"
+    assert post.evaluate_report(doc)["result"] == "FAIL"
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "lec.json").write_text(json.dumps(doc))
+    assert pre.audit(tmp_path).verdict == "FAIL"
 
 
 def test_counterexample_is_fail_with_trace():
@@ -241,7 +249,7 @@ def test_actual_flow_gate_keeps_the_residual_word(tmp_path):
 
 def _yosys(work, script_name):
     p = subprocess.run(
-        ["docker", "run", "--rm", "-v", f"{work}:/work",
+        ["docker", "run", *_dmem.docker_memory_flags(), "--rm", "-v", f"{work}:/work",
          "ghcr.io/vibeic/vibeic-eda:0.3.84", "--skip", "yosys",
          "-Q", "-T", "-s", f"/work/{script_name}"],
         capture_output=True, text=True, timeout=90)

@@ -429,18 +429,22 @@ def test_pass_report_is_accepted_by_the_real_gate(tmp_path):
     assert res.passed is True, [f.rule for f in res.findings]
 
 
-def test_skip_report_without_search_record_is_refused_by_gate(tmp_path):
+def test_skip_report_is_honest_waived_deferred_not_vacuous_pass(tmp_path):
     p = lec_run.parse_equiv_output(SAT_LIMITED_OUTPUT)
     r = lec_run.build_report(p, "chip_top", "chip_top_synth.v", None)
     (tmp_path / "reports").mkdir()
     (tmp_path / "reports" / "lec.json").write_text(json.dumps(r))
     (tmp_path / "reports" / "lec.rpt").write_text(SAT_LIMITED_OUTPUT)
     res = gate.audit(tmp_path)
-    # build_report alone is a legacy fixture path and has no SAT search
-    # receipt. The gate cannot infer NOT_PROVEN from an absent record.
+    # The pure report shaper has no search run identity or named residuals.
+    # A bare NOT_RUN would conceal that missing evidence, so the gate refuses
+    # classification. The real producer adds the search receipt when it runs.
+    # NO-LEAK: a genuine mismatch lands non_equivalent_points>0 (or verdict FAIL)
+    # and still hard-FAILs at the substance verdict — covered by
+    # test_skipped_condition_with_counterexample_still_hard_fails.
     assert res.passed is False
     assert res.verdict == "RUN_ERROR"
-    assert res.counterexample_search == {}
+    assert res.counterexample_search["result"] == "NOT_RUN"
     rules = {f.rule for f in res.findings}
     assert rules == {"LEC_NOT_RUN_EVIDENCE_INVALID"}, rules
 
@@ -1857,20 +1861,6 @@ def _drive_lec(monkeypatch, tmp_path, stub, timeout_s, spend_per_attempt=0.0,
     return rc, rep, calls
 
 
-def test_decided_miter_failure_survives_unavailable_sat_search(monkeypatch, tmp_path):
-    # The proof has a completed equiv_status residual and the parser decides
-    # FAIL. The stub never writes the terminal IL, so SAT is genuinely NOT_RUN.
-    assert lec_run.parse_equiv_output(MISMATCH_OUTPUT)["verdict"] == "FAIL"
-    rc, rep, calls = _drive_lec(
-        monkeypatch, tmp_path,
-        lambda n, fe: (True, MISMATCH_OUTPUT), timeout_s=10)
-    assert calls
-    assert rep["counterexample_search"]["result"] == "NOT_RUN"
-    assert rep["verdict"] == "FAIL"
-    assert rep["equivalent"] is False
-    assert rc == 0  # producer wrote a truthful verdict; gate rejects it
-
-
 def test_e2e_a_ground_out_proof_stops_instead_of_starting_over(monkeypatch,
                                                                tmp_path):
     """POLE A. The measured stall: attempt 1 grinds to the deadline. The step
@@ -2317,6 +2307,35 @@ def test_lec_cache_second_identical_invocation_launches_no_yosys(monkeypatch,
     assert att["revalidated_identity"] == first["proof_identity"]
     assert att["source_report_sha256"].startswith("sha256:")
     assert att["source_proof_timestamp"] == first["source_proof_timestamp"]
+
+
+def test_w23_step13_producer_keeps_original_fail_when_sat_cannot_run(
+        monkeypatch, tmp_path):
+    log = ("=== equiv ===\n"
+           "  1  $equiv\n"
+           "Executing EQUIV_STATUS pass\n"
+           "Found 1 $equiv cells in equiv:\n"
+           "  Of those cells 0 are proven and 1 are unproven.\n"
+           "Unproven $equiv cell: \\out_gold \\out_gate\n")
+    monkeypatch.setattr(lec_run, "run_yosys_equiv",
+                        lambda *_a, **_k: (True, log))
+    monkeypatch.setattr(lec_run, "_container_available", lambda _c: True)
+    monkeypatch.setattr(lec_run, "_container_file_exists", lambda *_a: False)
+    monkeypatch.setattr(lec_run, "_yosys_version", lambda _c: "Yosys 0.68")
+    monkeypatch.setattr(lec_run, "_container_image_digest",
+                        lambda _c: "sha256:image-id")
+    project = tmp_path / "project"
+    (project / "phase2/stage1/rtl").mkdir(parents=True)
+    (project / "phase2/stage2/synth").mkdir(parents=True)
+    (project / "phase2/stage1/rtl/m.v").write_text(_E2E_RTL)
+    (project / "phase2/stage2/synth/netlist.v").write_text(_E2E_GATE)
+    lec_run.main([str(project), "--top", "m", "--container", "fake",
+                  "--liberty", "/missing"])
+    report = json.loads((project / "reports/lec.json").read_text())
+    assert report["counterexample_search"]["result"] == "NOT_RUN"
+    assert "terminal equivalence IL" in report["counterexample_search"]["reason"]
+    assert report["verdict"] == "FAIL"
+    assert report["miter_stateless"] is True
 
 
 # ---------------------------------------------------------------------------

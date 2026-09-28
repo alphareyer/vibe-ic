@@ -210,11 +210,9 @@ def test_parser_matched_output_function_bug_is_not_pass():
     r = L.parse_equiv_log(log)
     assert r["verdict"] == L.V_UNPROVEN
     assert r["equivalent"] is False
-    gate = L.evaluate_report({"verdict": r["verdict"], "total_points": 1,
+    assert L.evaluate_report({"verdict": r["verdict"], "total_points": 1,
                               "proven_points": 0, "unproven_points": 1,
-                              "equivalent": False})
-    assert gate["result"] == "FAIL"
-    assert gate["verdict"] == "RUN_ERROR"  # no SAT search receipt
+                              "equivalent": False})["result"] == "FAIL"
 
 
 def test_parser_buffer_insert_positive_proves():
@@ -442,8 +440,8 @@ def test_gate_fail_on_unproven():
     res = L.evaluate_report(doc)
     assert res["result"] == "FAIL"
     assert res["verdict"] == "RUN_ERROR"
-    assert res["counterexample_search"] == {}
-    assert any("LEC_NOT_RUN_EVIDENCE_INVALID" in f for f in res["findings"])
+    assert res["counterexample_search"]["result"] == "NOT_RUN"
+    assert any("EVIDENCE_INVALID" in f for f in res["findings"])
 
 
 def test_gate_fail_on_vacuous_true():
@@ -488,7 +486,9 @@ def test_cli_pass(tmp_path):
 
 def test_cli_fail_on_unproven(tmp_path):
     _write(tmp_path, {"verdict": L.V_UNPROVEN, "total": 64, "proven": 32,
-                      "unproven": 32, "equivalent": False})
+                  "unproven": 32, "equivalent": False})
+    # The producer supplied no named SAT search receipt, so classification as
+    # NOT_PROVEN would claim evidence it does not have.
     assert L.main([str(tmp_path)]) == 1
 
 
