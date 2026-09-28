@@ -583,7 +583,10 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
             if (type(old) is not int or old < 0 or
                     type(new) is not int or new < 0):
                 drv_missing.append((kind, corner))
-            elif new > old:
+            elif new > old and old_pin_state != "PASS":
+                # When the producer supplied pin identities, the union of
+                # (pin, check) pairs above is the admission rule.  The same
+                # violator appearing in a second scene is not a new check.
                 drv_regressions.append((kind, corner, old, new))
     row["drv_comparison"] = {"missing": drv_missing,
                              "regressions": drv_regressions}
@@ -591,19 +594,6 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
         row.update(decision="REFUSED", reason=(
             f"routed DRV unmeasured: {drv_missing}" if drv_missing else
             f"routed DRV regressed: {drv_regressions}"))
-        _ledger_append(impl, row)
-        print(f"candidate {lane} refused: {row['reason']}")
-        return 0
-    # A candidate with no measured improvement has no objective to promote;
-    # do not pass a pure slack loss to the controller as a proposed repair.
-    if (measurement.get("drv_count") == before.get("drv_count") and
-            measurement.get("setup_ws_min") is not None and
-            measurement.get("hold_ws_min") is not None and
-            before.get("setup_ws_min") is not None and
-            before.get("hold_ws_min") is not None and
-            measurement["setup_ws_min"] <= before["setup_ws_min"] and
-            measurement["hold_ws_min"] <= before["hold_ws_min"]):
-        row.update(decision="REFUSED", reason="no measured timing or DRV improvement")
         _ledger_append(impl, row)
         print(f"candidate {lane} refused: {row['reason']}")
         return 0
@@ -632,6 +622,36 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
                            f"nets {row['antenna']['before']} -> {row['antenna']['after']}; "
                            f"pins {row['antenna']['before_pins']} -> "
                            f"{row['antenna']['after_pins']}"))
+        _ledger_append(impl, row)
+        print(f"candidate {lane} refused: {row['reason']}")
+        return 0
+    route_before = metrics.get("vibeic__prr__before__unrouted__count")
+    route_after = metrics.get("vibeic__prr__after__unrouted__count")
+    route_added = metrics.get("vibeic__prr__unrouted__added")
+    row["route_census"] = {"before": route_before, "after": route_after,
+                           "added": route_added,
+                           "source": str(repaired)}
+    if (any(type(v) is not int or v < 0 for v in
+            (route_before, route_after, route_added)) or
+            route_added != max(0, route_after - route_before)):
+        row.update(decision="REFUSED", reason="repair route census unmeasured or inconsistent")
+        _ledger_append(impl, row)
+        return 0
+    if route_added:
+        row.update(decision="REFUSED", reason=f"repair added {route_added} unrouted nets")
+        _ledger_append(impl, row)
+        return 0
+    # A candidate with no measured improvement has no objective to promote;
+    # do not pass a pure slack loss to the controller as a proposed repair.
+    if (measurement.get("drv_count") == before.get("drv_count") and
+            measurement.get("setup_ws_min") is not None and
+            measurement.get("hold_ws_min") is not None and
+            before.get("setup_ws_min") is not None and
+            before.get("hold_ws_min") is not None and
+            measurement["setup_ws_min"] <= before["setup_ws_min"] and
+            measurement["hold_ws_min"] <= before["hold_ws_min"] and
+            after_counts == before_counts and route_after == route_before):
+        row.update(decision="REFUSED", reason="no measured timing, DRV, antenna, or route improvement")
         _ledger_append(impl, row)
         print(f"candidate {lane} refused: {row['reason']}")
         return 0

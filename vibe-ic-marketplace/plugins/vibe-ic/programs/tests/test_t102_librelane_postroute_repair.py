@@ -419,7 +419,10 @@ SHIM = textwrap.dedent('''\
             if step == prr.REPAIR_STEP:
                 d = folder / "top.def"
                 d.write_text(spec["def"])
-                metrics = spec["repair_metrics"]
+                metrics = dict(spec["repair_metrics"])
+                metrics.setdefault("vibeic__prr__before__unrouted__count", 0)
+                metrics.setdefault("vibeic__prr__after__unrouted__count", 0)
+                metrics.setdefault("vibeic__prr__unrouted__added", 0)
                 doc = {"def": str(d), "metrics": metrics}
             elif step.endswith("CheckAntennas"):
                 doc = {"metrics": spec.get("antenna_metrics", {})}
