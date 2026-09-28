@@ -8199,14 +8199,25 @@ def _step_rtl_gen_bound(
         # pull pre-validated open-source RTL + author only the wrapper.
         catalog_hint = ""
         catalog_matches_summary: List[Dict[str, Any]] = []
+        versioned_matches: List[Any] = []
+        fetch_refusals: List[str] = []
         try:
             import sys as _sys
             _here = Path(__file__).resolve().parent
             if str(_here) not in _sys.path:
                 _sys.path.insert(0, str(_here))
-            from ip_catalog_query import query_catalog as _query_catalog
+            from ip_catalog_query import (query_catalog as _query_catalog,
+                                          load_project_facts as _catalog_facts,
+                                          versioned_reuse_evidence as _versioned_reuse)
             matches = _query_catalog(project, min_confidence=0.4)
             if matches:
+                facts = _catalog_facts(project)
+                for m in matches:
+                    allowed, reason = _versioned_reuse(facts, m)
+                    if allowed:
+                        versioned_matches.append(m)
+                    else:
+                        fetch_refusals.append(reason)
                 lines = []
                 for m in matches[:5]:
                     lines.append(
@@ -8238,6 +8249,59 @@ def _step_rtl_gen_bound(
         except Exception as _e:
             # Catalog query is best-effort — never blocks rtl_gen
             catalog_hint = f"\n(ip-catalog query skipped: {_e})"
+
+        if versioned_matches:
+            from ip_catalog_pull import pull_all_catalog_matches as _pull_versioned
+            source_manifest = (_pl.rtl_dir(project) / "SOURCE_MANIFEST.json")
+            existing = None
+            if source_manifest.is_file():
+                try:
+                    existing = json.loads(source_manifest.read_text())
+                except (OSError, ValueError):
+                    existing = None
+            if isinstance(existing, dict) and existing.get("source_pins"):
+                pins = {p.get("ip_name"): p for p in existing["source_pins"]
+                        if isinstance(p, dict)}
+                for m in versioned_matches:
+                    pin = pins.get(m.ip_name) or {}
+                    digests = pin.get("files_sha256") or {}
+                    if (pin.get("version") != m.version or
+                            pin.get("canonical_url") != m.canonical_url or
+                            not isinstance(digests, dict) or
+                            set(digests) != set(m.rtl_files) or
+                            any(not (_pl.rtl_dir(project) / Path(rel).name).is_file() or
+                                hashlib.sha256((_pl.rtl_dir(project) / Path(rel).name).read_bytes()).hexdigest()
+                                != digest for rel, digest in digests.items())):
+                        return StepResult(
+                            "rtl_gen", "FAIL", time.time() - t0,
+                            f"IP_REUSE_FETCH_PIN_MISMATCH: {m.ip_name}")
+                pull_audit = {"status": "ALREADY_FETCHED",
+                              "n_ips_pulled": len(versioned_matches),
+                              "source_manifest": str(source_manifest)}
+            else:
+                pull_audit = _pull_versioned(
+                    project, versioned_matches, official_only=True)
+                if pull_audit.get("n_ips_pulled") != len(versioned_matches):
+                    return StepResult(
+                        "rtl_gen", "FAIL", time.time() - t0,
+                        "IP_REUSE_FETCH_FAILED: " + json.dumps(
+                            pull_audit.get("ip_catalog_used", []), sort_keys=True),
+                        extras={"ip_fetch": pull_audit,
+                                "ip_fetch_refusals": fetch_refusals})
+            lessons_hint, hint_extras = _stage_author_knowledge_digests(project)
+            skill_hint, skill_extras = _stage_fallback_skill(
+                project, "catalog-glue-author")
+            names = [m.ip_name for m in versioned_matches]
+            return StepResult(
+                "rtl_gen", "PASS_WITH_WAIVERS", time.time() - t0,
+                f"Fetched declared versioned reused IP {names}; SoC glue "
+                "remains for catalog-glue-author to author from the design input."
+                + skill_hint + lessons_hint,
+                extras={"fallback_skill": "catalog-glue-author",
+                        **skill_extras, **hint_extras,
+                        "ip_catalog_declared_reuse": names,
+                        "ip_fetch": pull_audit,
+                        "ip_fetch_refusals": fetch_refusals})
 
         # v0.2.55 — pure-analog classes have NO RTL track at all. The
         # registry sets fallback_skill=null DELIBERATELY (analog
@@ -8329,6 +8393,7 @@ def _step_rtl_gen_bound(
                     # actually recommended. Empty ⇒ the registry's own
                     # fallback_skill stands.
                     "ip_catalog_declared_reuse": _declared_reuse,
+                    "ip_fetch_refusals": fetch_refusals,
                     **_hint_extras})
 
     gen = PROGRAMS_DIR / gen_name
