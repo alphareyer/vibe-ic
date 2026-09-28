@@ -282,6 +282,13 @@ def status(project: Path, phase: str, pid: Optional[int] = None,
     now = time.time() if now is None else now
     report = _read_report(project, phase)
     verdict_in_report = (report or {}).get("verdict")
+    # FX_P2: design_one_shot_runner publishes phase2_one_shot.json once BEFORE
+    # its final audit (`final_audit_pending: true`, verdict FAIL so a crash can
+    # never read as a pass) and again from its tail. The pending copy is not a
+    # verdict: while it stands the run is still RUNNING -- or STUCK -- and the
+    # liveness checks below must decide, not a premature DONE.
+    if (report or {}).get("final_audit_pending") is True:
+        verdict_in_report = None
     cur_step, n_done, plan_unreadable = _current_step(report)
     log = _newest_log(project, phase)
     # Heartbeat = the most recent of (live log mtime, newest artifact

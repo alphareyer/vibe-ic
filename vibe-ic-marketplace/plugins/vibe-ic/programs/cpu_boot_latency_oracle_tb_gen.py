@@ -69,6 +69,21 @@ _BUS_ACTIVITY_RES = [
     re.compile(rf"(?:^|_){tok}(?:_o)?$", re.IGNORECASE)
     for tok in _BUS_ACTIVITY_TOKENS
 ]
+#: A memory READ-ENABLE is a bus request too: a core whose top exposes only a
+#: memory port (no cyc/stb/req handshake) shows its first fetch as the read
+#: strobe on that port. MEASURED on a reused-IP CPU top whose outputs are an
+#: SRAM port (`*_ren`, `*_wen`, addresses, data): with no read-enable token the
+#: design's own "within N cycles of reset release" case could not be observed
+#: and fell to the substance floor, although it runs and passes (first read at
+#: cycle 1 of 10). Write-enables stay out: a write is not the first fetch.
+#: A FALLBACK ONLY (FX_P2 review): a top that exposes a handshake keeps
+#: observing it, so a design already resolved to cyc/stb/req/valid does not
+#: switch to a data-port read that port order happens to list first.
+_READ_ENABLE_TOKENS = ("ren", "rden", "rd_en", "read_en")
+_READ_ENABLE_RES = [
+    re.compile(rf"(?:^|_){tok}(?:_o)?$", re.IGNORECASE)
+    for tok in _READ_ENABLE_TOKENS
+]
 
 _CLOCK_RE = re.compile(r"(?:^|_)(?:clk|clock)(?:$|_)", re.IGNORECASE)
 _RESET_RE = re.compile(r"(?:^|_)(?:rst|reset|resetn|rstn)(?:$|_)", re.IGNORECASE)
@@ -107,11 +122,13 @@ def extract_cycle_bound(case: dict) -> Optional[int]:
 
 def _pick_bus_activity_output(outputs: List[Tuple[str, str]]) -> Optional[str]:
     """First DUT OUTPUT port name matching the generic bus-activity
-    vocabulary (structural suffix match). None when no such port exists —
-    the design's I/O surface gives this generator nothing to observe."""
-    for n, _w in outputs:
-        if any(p.search(n) for p in _BUS_ACTIVITY_RES):
-            return n
+    vocabulary (structural suffix match); a read-enable only when no output
+    is a handshake. None when no such port exists — the design's I/O surface
+    gives this generator nothing to observe."""
+    for vocabulary in (_BUS_ACTIVITY_RES, _READ_ENABLE_RES):
+        for n, _w in outputs:
+            if any(p.search(n) for p in vocabulary):
+                return n
     return None
 
 
