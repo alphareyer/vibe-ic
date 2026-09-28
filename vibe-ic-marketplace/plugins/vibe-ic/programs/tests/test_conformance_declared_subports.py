@@ -208,6 +208,21 @@ def test_sibling_declaration_map_cannot_authorize_group_port(tmp_path):
     assert ("port-extra", "o_sram_waddr") in _errors(findings)
 
 
+def test_sibling_sections_do_not_delegate_the_previous_heading():
+    sys.path.insert(0, str(PROGRAMS))
+    import _delegated_port_groups as groups
+
+    document = DELEGATION.replace(
+        "The concrete signal names for this port group are declared by the "
+        "plugin in declaration.json.", "The table lists the SRAM ports.")
+    document += SIBLING_SECTION.replace(
+        "| Sub-port | Direction |",
+        "The debug port names are in declaration.json.\n\n| Sub-port | Direction |")
+    assert not any(row["group"] == "sram" for row in
+                   groups.extract_delegated_groups(
+                       {"L3_external_interface.md": document}))
+
+
 @pytest.mark.parametrize("statement", AUTHORITY_SENTENCE)
 def test_phase1_keeps_explicit_port_name_authority(statement):
     sys.path.insert(0, str(PROGRAMS))
