@@ -5,6 +5,7 @@
 # Retap only through linked, pure non-inverting buffer cells that CTS created.
 # Each trial measures its own path and the design-wide setup/hold before it is
 # kept; a rejected trial restores the original net.
+source [file join [file dirname [info script]] external_capture_retap_policy.tcl]
 set _vic_ext_was_propagated 0
 foreach _vic_ext_clk [all_clocks] {
     if {[get_property $_vic_ext_clk is_propagated]} {
@@ -114,13 +115,14 @@ if {![string is double -strict $worst_out] || $margin eq "" || $worst_out > $mar
             catch {estimate_parasitics -placement}
             error "VIC_RETAP_MEASUREMENT_FAILED $name: $err"
         }
-        if {$s1 > $s0 + 0.0001 && $w1 >= $w0 - 0.0001 && $t1 >= $t0 - 0.01 * abs($t0) && ($h1 >= 0 || ($h0 < 0 && $h1 >= $h0))} {
+        lassign [vic_retap_decide $s0 $s1 $w0 $w1 $t0 $t1 $h0 $h1] decision reason
+        if {$decision eq "KEEP"} {
             puts "VIC_RETAP keep $name $pin_name [$oldnet getName] -> [$target getName] local=$s0->$s1 setup=$w0->$w1 tns=$t0->$t1 hold=$h0->$h1"
         } else {
             $it disconnect
             $it connect $oldnet
             estimate_parasitics -placement
-            puts "VIC_RETAP reject $name local=$s0->$s1 setup=$w0->$w1 tns=$t0->$t1 hold=$h0->$h1"
+            puts "VIC_RETAP reject $name reason=$reason local=$s0->$s1 setup=$w0->$w1 tns=$t0->$t1 hold=$h0->$h1"
         }
     }
 }

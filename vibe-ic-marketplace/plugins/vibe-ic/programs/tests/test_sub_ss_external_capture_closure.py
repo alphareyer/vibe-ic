@@ -105,3 +105,27 @@ source $::env(RETAP_HELPER)
             assert "VIC_RETAP margin=1.0 candidates=0" in run.stdout
         else:
             assert "VIC_RETAP none:" in run.stdout
+
+
+def test_retap_refuses_a_hold_violation_from_a_setup_improvement():
+    """Exercise the actual decision sourced by the OpenROAD retap step."""
+    steps = PROGRAMS / "librelane_plugins/librelane_plugin_vibeic"
+    helper = (steps / "external_capture_launch_retap.tcl").read_text()
+    assert "source [file join [file dirname [info script]] external_capture_retap_policy.tcl]" in helper
+    assert "vic_retap_decide $s0 $s1 $w0 $w1 $t0 $t1 $h0 $h1" in helper
+    policy = steps / "external_capture_retap_policy.tcl"
+    script = r'''
+source $::env(RETAP_POLICY)
+puts [join [vic_retap_decide -0.5 0.2 -0.5 0.1 -1.0 0.0 0.1 -0.02] |]
+puts [join [vic_retap_decide -0.5 0.2 -0.5 0.1 -1.0 0.0 0.1 0.03] |]
+puts [join [vic_retap_decide -0.5 -0.6 -0.5 0.1 -1.0 0.0 0.1 0.03] |]
+'''
+    run = subprocess.run(
+        ["tclsh"], input=script, text=True, capture_output=True,
+        env={**os.environ, "RETAP_POLICY": str(policy)}, check=False, timeout=10,
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.splitlines() == [
+        "REJECT|HOLD_REGRESSED", "KEEP|MEASURED_IMPROVEMENT",
+        "REJECT|LOCAL_SETUP_NOT_IMPROVED",
+    ]
