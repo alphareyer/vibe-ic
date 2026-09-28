@@ -274,7 +274,8 @@ class ContainerRunner(KLayoutRunner):
         start = time.monotonic()
         rc, out, err = _dwd.run_docker_supervised(
             self._c, cmd, str(argv[0]), docker_exec_raw=raw_exec,
-            progress_paths=progress_paths, stall_grace_s=stall_grace_s)
+            progress_paths=progress_paths, stall_grace_s=stall_grace_s,
+            poll_s=max(0.25, min(_wd.DEFAULT_POLL_S, stall_grace_s / 4)))
         outcome = "stalled" if rc == _wd.RC_STALLED else "natural"
         return _wd.SupervisedResult(
             rc, out, err, outcome, time.monotonic() - start,
