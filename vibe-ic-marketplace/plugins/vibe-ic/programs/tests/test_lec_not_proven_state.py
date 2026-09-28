@@ -53,10 +53,68 @@ def test_pre_layout_residual_is_not_proven(tmp_path):
 
 def test_not_run_is_explicit_and_never_passes():
     doc = _residual()
-    doc["counterexample_search"] = {"result": "NOT_RUN", "reason": "solver unavailable"}
+    doc["counterexample_search"] = {
+        "result": "NOT_RUN", "reason": "solver unavailable",
+        "method": "Yosys equiv_miter SAT", "bound_cycles": 20,
+        "run_identity": "fixture-run", "completeness": "BOUNDED",
+    }
     result = post.evaluate_report(doc)
     assert result["result"] == "NOT_PROVEN"
     assert result["counterexample_search"]["reason"] == "solver unavailable"
+
+
+def test_decided_failure_survives_not_run_at_both_gates(tmp_path):
+    doc = _residual()
+    doc.update(verdict="NON_EQUIVALENT", non_equivalent_points=0)
+    doc["counterexample_search"] = {
+        "result": "NOT_RUN", "reason": "terminal IL unavailable",
+        "method": "Yosys equiv_miter SAT", "bound_cycles": 20,
+        "run_identity": "fixture-run", "completeness": "UNKNOWN",
+    }
+    post_result = post.evaluate_report(doc)
+    assert post_result["result"] == "FAIL"
+    assert post_result["verdict"] == "NON_EQUIVALENT"
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "lec.json").write_text(json.dumps(doc))
+    pre_result = pre.audit(tmp_path)
+    assert pre_result.verdict != "NOT_PROVEN"
+    assert not pre_result.passed
+
+
+def test_combinational_not_run_is_execution_error_at_both_gates(tmp_path):
+    doc = _residual()
+    doc["counterexample_search"] = {
+        "result": "NOT_RUN", "reason": "unsupported SAT cell",
+        "method": "Yosys equiv_miter SAT", "bound_cycles": 20,
+        "run_identity": "fixture-run", "completeness": "COMPLETE",
+    }
+    post_result = post.evaluate_report(doc)
+    assert post_result["result"] == "FAIL"
+    assert post_result["verdict"] == "RUN_ERROR"
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "lec.json").write_text(json.dumps(doc))
+    pre_result = pre.audit(tmp_path)
+    assert pre_result.verdict != "NOT_PROVEN"
+    assert any("SAT" in f.rule for f in pre_result.findings)
+
+
+def test_bare_not_run_is_invalid_evidence_at_both_gates(tmp_path):
+    doc = _residual()
+    doc["counterexample_search"] = {"result": "NOT_RUN"}
+    post_result = post.evaluate_report(doc)
+    assert post_result["result"] == "FAIL"
+    assert post_result["verdict"] == "RUN_ERROR"
+    assert any("NOT_RUN" in f for f in post_result["findings"])
+    assert all("no counterexample found" not in f for f in post_result["findings"])
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "lec.json").write_text(json.dumps(doc))
+    pre_result = pre.audit(tmp_path)
+    assert pre_result.verdict != "NOT_PROVEN"
+    assert any("NOT_RUN" in f.message for f in pre_result.findings)
+    assert all("no counterexample found" not in f.message for f in pre_result.findings)
 
 
 def test_complete_sat_disposition_requires_the_named_search(tmp_path):
