@@ -26,6 +26,7 @@ of 6 ps of setup (SHIP_WNS_POSTROUTE -1.234340664617269 -> -1.2403163291940147).
 Every assertion here fails against the pre-fix runner.
 """
 import json
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -226,12 +227,21 @@ def _write_step32_evidence(proj, *, steps=None, site="after_route",
     receipt.parent.mkdir(parents=True, exist_ok=True)
     receipt.write_text(json.dumps({"postroute_repair": {
         "report": PRR.REPORT_REL,
-        "report_sha256": R._route_file_sha256(path) if bound else "0" * 64,
+        "report_sha256": hashlib.sha256(path.read_bytes()).hexdigest()
+        if bound else "0" * 64,
         "adopted": adopted, "mode": steps["32"]}}))
     if promotion:
-        R._route_promotion_write(
-            proj, "librelane_step32_in_chain", candidate,
-            R._step32_own_measurement(report))
+        record = {
+            "promoter": "librelane_step32_in_chain",
+            "promoted_def": str(candidate),
+            "promoted_def_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+            "measurement": {"antenna_nets": 0, "antenna_pins": 0,
+                            "antenna_source": "OpenROAD.CheckAntennas",
+                            "unrouted_added": 0,
+                            "unrouted_source": "Vibeic.PostRouteRepair "
+                                               "vibeic__prr__unrouted__added"},
+        }
+        (receipt.parent / "route_promotion.json").write_text(json.dumps(record))
     return proj
 
 
