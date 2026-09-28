@@ -151,6 +151,11 @@ def _project(tmp_path: Path, name: str, *, l_docs: int = 28,
     # for "phase 1 already ran", so they carry the identity phase 1 stamps.
     # Without it the front door would -- correctly -- regenerate them.
     _p1_identity_fixture.stamp_current(p)
+    if answer:
+        # A planted answer is valid only with the producer's prior rooted
+        # handoff. The actual track writes this schema before an agent answers.
+        (_answer_path(p).parent / "authoring_schema.json").write_text(
+            json.dumps(TRACK.authoring_schema(p)))
     return p
 
 
@@ -687,6 +692,8 @@ def test_actual_first_pass_failure_survives_consumption(tmp_path):
         (gd / f"L{i}_LAYER.json").write_text(json.dumps({"doc_id": f"L{i}"}))
     _answer_path(p).parent.mkdir(parents=True, exist_ok=True)
     _answer_path(p).write_text(json.dumps(_ANSWER))
+    (_answer_path(p).parent / "authoring_schema.json").write_text(
+        json.dumps(TRACK.authoring_schema(p)))
     before = {f.name: f.read_bytes() for f in gd.glob("L*.json")}
     second = _invoke_lifecycle(p, "02_consumed")
     assert second["track"]["ai_subtrack"]["status"] == TRACK.AI_CONSUMED
