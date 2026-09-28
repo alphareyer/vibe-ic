@@ -15421,17 +15421,12 @@ def _rf_pnr_scan(project: Path) -> Dict[str, object]:
     # parse. A dangling symlink is neither a directory nor a readable file, so
     # it is still counted as STAGED rather than vanishing from the walk.
     #
-    # §4.05: an ORACLE artifact in here is split out. It is classified by shape
-    # and the parsed content is discarded on the spot — a classifier, never an
-    # extractor; no value from it reaches the flow or the report.
-    #
-    # FX_405: an entry inside an off-limits DIRECTORY (golden/, score/,
-    # metrics/ ...) is excluded unopened by the repo's one authority. A file
-    # whose name unambiguously says result/oracle is also excluded before the
-    # authority's content classifier can open it. Ambiguous names such as
-    # `rules.json` still need shape classification: a non-QoR file is "not
-    # examined" under the existing coverage contract. A dangling link with
-    # an ordinary name cannot be read, so it keeps its bucket.
+    # §4.05: only path/provenance evidence may classify a non-recipe file.
+    # An off-limits directory or an unambiguous result/oracle name is excluded
+    # unopened. A neutral name such as `rules.json` or `limits.json` is
+    # UNEXAMINED regardless of its bytes; the audit cannot read an oracle to
+    # find out that it was one. A dangling link with an ordinary name keeps
+    # that same unexamined bucket.
     for entry in sorted(rdir.rglob("*")):
         if entry.is_dir() or entry.suffix in _RF_SCANNED_SUFFIXES:
             continue
@@ -15444,12 +15439,6 @@ def _rf_pnr_scan(project: Path) -> Dict[str, object]:
                 project, entry, file_name_words=False):
             excluded_oracle.append(rel_entry)
             continue
-        try:
-            if _rfb.is_oracle_qor_rules(entry.read_text(errors="ignore")):
-                excluded_oracle.append(rel_entry)
-                continue
-        except Exception:
-            pass
         unscanned.append(rel_entry)
 
     files = sorted(rdir.rglob("*.mk")) + sorted(rdir.rglob("*.tcl"))
@@ -16359,9 +16348,8 @@ def _render_reference_flow_pnr_report(audit: Dict[str, object]) -> str:
                 "with comparison operators, and hashes of the golden netlist "
                 "— rather than how to configure a run. Reading them would "
                 "hand this run the timing, area and wirelength it is supposed "
-                "to reach independently. They were classified by name or, "
-                "where the name does not decide, by shape, and "
-                "their contents discarded unread; NOTHING from them reached "
+                "to reach independently. Their path or name identified them "
+                "before any content read; NOTHING from them reached "
                 "the flow. Their exclusion is the rule working and is NOT a "
                 "coverage gap to be closed.", ""]
         out += [f"- `{f}`" for f in excluded_oracle] + [""]
@@ -16372,9 +16360,11 @@ def _render_reference_flow_pnr_report(audit: Dict[str, object]) -> str:
         out += ["## Staged but NOT EXAMINED", "",
                 "These files were staged under the reference flow but their "
                 "extension is outside the parsed set, so phase-3 never looked "
-                "inside them. Whatever they declare was neither adopted nor "
-                "rejected — it was never seen. Listed so that is visible "
-                "rather than silent.", ""]
+                "inside them. A neutral name can also hide an oracle, so "
+                "this audit never opens them just to classify their contents. "
+                "Whatever they declare was neither adopted nor rejected — "
+                "it was never seen. Their provenance must be established "
+                "before a reader may admit them as design input.", ""]
         out += [f"- `{f}`" for f in unscanned] + [""]
 
     adopted: List[Dict[str, str]] = audit["adopted"]  # type: ignore[assignment]
