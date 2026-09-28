@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 
 import _progress_run as _pr
+from not_verified_tier import skip_not_verified
 
 M = importlib.import_module("magic_port_extract_emit")
 
@@ -120,12 +121,23 @@ def _pdk_under_test():
 
 def _need_magic():
     if shutil.which("magic") is None:
-        pytest.skip("magic is not on PATH; run inside the pinned EDA image")
-    pya = pytest.importorskip("pya")
+        skip_not_verified(
+            "Magic is absent from this host, so its behavioural extraction test was not measured",
+            "Run this file inside the pinned vibeic-eda image",
+        )
+    try:
+        import pya
+    except ImportError:
+        skip_not_verified(
+            "KLayout's pya module is absent from this host, so the layout fixture was not measured",
+            "Run this file inside the pinned vibeic-eda image",
+        )
     found = _pdk_under_test()
     if found is None:
-        pytest.skip("the environment declares no PDK_ROOT/PDK/STD_CELL_LIBRARY "
-                    "with a Magic rcfile and a standard-cell GDS")
+        skip_not_verified(
+            "No declared PDK_ROOT/PDK/STD_CELL_LIBRARY resolves to a Magic rcfile and standard-cell GDS",
+            "Run this file inside the pinned vibeic-eda image with its PDK environment",
+        )
     return pya, found
 
 
