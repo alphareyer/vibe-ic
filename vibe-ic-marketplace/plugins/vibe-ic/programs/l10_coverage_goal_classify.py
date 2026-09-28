@@ -245,7 +245,111 @@ def achieved_percentage(totals: Any, dimension: str
     return None, f"the run's coverage totals carry no {dimension} figure"
 
 
-def measure_goal(case: dict, totals: Any) -> dict:
+#: The instrument kinds a goal can be measured by.
+COVERAGE_DIMENSION = "coverage_dimension"
+#: A PASS-RATE goal over SCENARIOS ("100% PASS" over a set of situations the
+#: scope names). Its instrument is not the coverage arm but the L10 cases bound
+#: to it that ran their own oracle.
+SCENARIO_PASS_RATE = "scenario_pass_rate"
+#: Where the L10 rows LINK a goal to the cases that cover it: on the goal, the
+#: cases it names; on a case, the goals it names.
+_GOAL_LINK_KEYS = ("covered_by", "bound_cases", "covering_cases")
+_CASE_LINK_KEYS = ("covers", "covers_goals", "covers_goal")
+_PASS_RATE_RE = re.compile(r"%\s*\(?\s*pass\b", re.I)
+
+
+def is_pass_rate_goal(case: dict) -> bool:
+    """True when the goal's expected half is a PASS-RATE (`N% PASS`)."""
+    text, _key = _first(case, _EXPECTED_KEYS)
+    return bool(text and _PASS_RATE_RE.search(text))
+
+
+def _names(value: Any) -> List[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value if isinstance(v, str) and v.strip()]
+    return []
+
+
+def bound_cases(goal: dict, rows: Sequence[dict],
+                ran: Sequence[str]) -> Tuple[List[str], str]:
+    """`(case names, how)` bound to a scenario goal, from what is DECLARED.
+
+    Three links, none inferred from prose: the goal names its cases; a case
+    names the goal; or the goal's own scenario oracle ran under the goal's
+    own L10 name. A case is never bound because its words resemble the
+    scope's."""
+    name = _text(goal.get("name") or goal.get("id"))
+    out: List[str] = []
+    how: List[str] = []
+    for k in _GOAL_LINK_KEYS:
+        for c in _names(goal.get(k)):
+            if c not in out:
+                out.append(c)
+                how.append(f"the goal's {k}")
+    for r in rows or []:
+        if not isinstance(r, dict) or r is goal:
+            continue
+        cname = _text(r.get("name") or r.get("id"))
+        for k in _CASE_LINK_KEYS:
+            if name in _names(r.get(k)) and cname and cname not in out:
+                out.append(cname)
+                how.append(f"{cname}'s {k}")
+    if not out and name and name in set(ran):
+        out.append(name)
+        how.append("the goal's own scenario oracle")
+    return out, "; ".join(sorted(set(how)))
+
+
+def measure_scenario_goal(case: dict, stated: float, rows: Sequence[dict],
+                          record: dict) -> dict:
+    """The SCENARIO_PASS_RATE instrument for ONE goal (verdict fields only)."""
+    try:
+        import _l10_execution as _l10x
+    except Exception as exc:                              # pragma: no cover
+        return {"verdict": NOT_MEASURED,
+                "why": f"the execution record cannot be read ({exc})"}
+    name = _text(case.get("name") or case.get("id"))
+    ran = list((record or {}).get("rows") or {})
+    bound, how = bound_cases(case, rows, ran)
+    out: Dict[str, Any] = {"instrument": SCENARIO_PASS_RATE,
+                           "bound_cases": bound, "bound_by": how}
+    if not bound:
+        out.update(verdict=NOT_MEASURED, why=(
+            f"case {name!r}: a pass-rate goal over scenarios, and no case is "
+            f"bound to it -- no L10 row links a case to it (goal "
+            f"{'/'.join(_GOAL_LINK_KEYS)} or case {'/'.join(_CASE_LINK_KEYS)})"
+            f" and no oracle for the goal itself ran"))
+        return out
+    passed, failed, not_run = [], [], []
+    for c in bound:
+        state, why = _l10x.case_state(c, record or {})
+        if state == _l10x.PASS:
+            passed.append(c)
+        elif state == _l10x.FAIL:
+            failed.append(c)
+        else:
+            not_run.append(f"{c} ({why})")
+    out.update(passed=passed, failed=failed)
+    if not_run:
+        out.update(verdict=NOT_MEASURED, why=(
+            f"case {name!r}: {len(not_run)} of {len(bound)} bound case(s) did "
+            f"not run their own oracle: {'; '.join(not_run[:4])}"))
+        return out
+    rate = 100.0 * len(passed) / len(bound)
+    out["achieved_pct"] = rate
+    out["achieved_source"] = (f"{len(passed)} of {len(bound)} bound case(s) "
+                              f"passed their own oracle ({how})")
+    out["verdict"] = PASS if rate >= stated else FAIL
+    out["why"] = (f"case {name!r}: {len(passed)}/{len(bound)} bound case(s) "
+                  f"passed ({rate:g}% vs the {stated:g}% stated)"
+                  + (f"; failed: {', '.join(failed)}" if failed else ""))
+    return out
+
+
+def measure_goal(case: dict, totals: Any, rows: Optional[Sequence[dict]] = None,
+                 record: Optional[dict] = None) -> dict:
     """The verdict row for ONE coverage goal — by the NUMBER, or by NAME.
 
     Never PASS without both halves: a stated percentage AND a measured one for
@@ -265,10 +369,16 @@ def measure_goal(case: dict, totals: Any) -> dict:
                       f"acceptance percentage ({stated_cite})")
         return out
     dim, why = bind_scope(scope)
+    if dim is None and record is not None and is_pass_rate_goal(case):
+        # The scope names scenarios, not a coverage dimension: the scenario
+        # pass-rate instrument measures it from the cases bound to it.
+        out.update(measure_scenario_goal(case, stated, rows or [], record))
+        return out
     if dim is None:
         out["verdict"] = NOT_MEASURED
         out["why"] = f"case {name!r}: {why}"
         return out
+    out["instrument"] = COVERAGE_DIMENSION
     out["dimension"] = dim
     achieved, src = achieved_percentage(totals, dim)
     if achieved is None:
@@ -283,9 +393,15 @@ def measure_goal(case: dict, totals: Any) -> dict:
     return out
 
 
-def measure_goals(cases: Sequence[dict], totals: Any) -> dict:
-    """The coverage-goal population and its OWN denominator."""
-    rows = [measure_goal(c, totals) for c in cases]
+def measure_goals(cases: Sequence[dict], totals: Any,
+                  all_rows: Optional[Sequence[dict]] = None,
+                  record: Optional[dict] = None) -> dict:
+    """The coverage-goal population and its OWN denominator.
+
+    `all_rows` (every declared L10 row) and `record` (the L10 execution
+    record) arm the scenario pass-rate instrument; without them a goal whose
+    scope names no coverage dimension is NOT_MEASURED, as before."""
+    rows = [measure_goal(c, totals, all_rows, record) for c in cases]
     passed = [r for r in rows if r["verdict"] == PASS]
     failed = [r for r in rows if r["verdict"] == FAIL]
     unmeasured = [r for r in rows if r["verdict"] == NOT_MEASURED]
