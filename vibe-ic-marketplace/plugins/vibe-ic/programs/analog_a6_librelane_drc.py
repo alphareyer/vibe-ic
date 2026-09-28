@@ -282,6 +282,9 @@ def run(project: Path, block: str, image: str,
     if main_runset:
         try:
             extras = image_extra_runsets(image, main_runset)
+        except lc.Refusal as exc:
+            record["engines"] = engines
+            return refused("extra runset listing", exc)
         except RuntimeError as exc:
             record.update({"engines": engines, "result": "NOT_MEASURED",
                            "rule": _auth.EXTRA_RUNSET_GRADED_NOTHING,
@@ -340,10 +343,17 @@ def run(project: Path, block: str, image: str,
     dis = _auth.disagreements(klayout, m["violations"])
     capability: Dict[str, dict] = {}
     if dis:
-        capability = _capability_controls(
-            arm, block, image, main_runset,
-            {main_runset: kcfg, **extra_cfgs} if main_runset else {},
-            sorted(dis))
+        try:
+            capability = _capability_controls(
+                arm, block, image, main_runset,
+                {main_runset: kcfg, **extra_cfgs} if main_runset else {},
+                sorted(dis))
+        except lc.Refusal as exc:
+            record.update({"engines": engines,
+                           "authoritative_runsets": [r for r in
+                                                     [main_runset, *extras] if r],
+                           "union": u})
+            return refused("capability controls", exc)
     roundtrip = None
     if dis:
         roundtrip = (roundtrip_runner or _default_roundtrip)(

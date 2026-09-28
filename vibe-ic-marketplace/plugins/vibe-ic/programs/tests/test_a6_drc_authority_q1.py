@@ -459,6 +459,41 @@ def test_the_ll_arm_refuses_an_extra_deck_that_graded_nothing(
     assert rec["rule"] == "A6_LL_SIGNOFF_GRADED_NOTHING"
 
 
+def test_extra_runset_probe_deadline_is_an_environment_refusal(
+        ll_stub, monkeypatch):
+    import librelane_contract as lc
+    project = _ll_project(ll_stub)
+
+    def deadline(*_args):
+        raise lc.Refusal("LL_TOOL_DEADLINE", "partial listing: one extra deck")
+
+    monkeypatch.setattr(LL, "image_extra_runsets", deadline)
+    assert LL.run(project, "blk", IMAGE, _ATT) == 69
+    rec = _rec(project)
+    assert rec["result"] == "NOT_MEASURED"
+    assert rec["rule"] == "LL_TOOL_DEADLINE"
+    assert "partial listing: one extra deck" in rec["detail"]
+    assert set(rec["engines"]) == {"KLayout.DRC", "Magic.DRC"}
+
+
+def test_capability_probe_deadline_writes_a_named_a6_record(
+        ll_stub, monkeypatch):
+    import librelane_contract as lc
+    project = _ll_project(ll_stub)
+
+    def deadline(*_args):
+        raise lc.Refusal("LL_TOOL_DEADLINE", "partial unit-label probe")
+
+    monkeypatch.setattr(LL, "_capability_controls", deadline)
+    assert LL.run(project, "blk", IMAGE, _ATT) == 69
+    rec = _rec(project)
+    assert rec["result"] == "NOT_MEASURED"
+    assert rec["rule"] == "LL_TOOL_DEADLINE"
+    assert "partial unit-label probe" in rec["detail"]
+    assert set(rec["engines"]) == {"KLayout.DRC", "Magic.DRC",
+                                   "KLayout.DRC extra tpdk_maximal.drc"}
+
+
 def test_the_attribution_program_names_the_engine_artefact_class():
     import analog_a6_drc_attribute as ATT
     assert "ENGINE_ARTEFACT" in ATT.CLASS_ACTION
