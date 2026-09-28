@@ -38262,7 +38262,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     (out_dir / ROUTER_DRC_RECEIPT_NAME).unlink(missing_ok=True)
     (out_dir / _ppa_power.DIRECT_PDN_RECEIPT_NAME).unlink(missing_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
-    import declared_knob_applied_parity_check as _knob_parity
+    import declared_knob_applied_parity as _knob_parity
     _knob_parity.write_pending_pnr_report(project, out_dir / "pnr.tcl")
     netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
     print(f"[pnr] netlist: {_nl_note}", flush=True)
@@ -59138,7 +59138,7 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     if not runner_sdc.is_file():
         runner_sdc.write_text(_step7["text"])
         written.append(str(runner_sdc))
-    import declared_knob_applied_parity_check as _knob_parity
+    import declared_knob_applied_parity as _knob_parity
     _knob_parity.write_sdc_report(
         project, runner_sdc, pdk=str(pdk.name),
         library=_active_std_cell_library(project, str(pdk.name)))

@@ -23,9 +23,9 @@ def _project(tmp_path):
 
 
 def _checker():
-    path = PROGRAMS / "declared_knob_applied_parity_check.py"
+    path = PROGRAMS / "declared_knob_applied_parity.py"
     assert path.is_file(), "CR-1 checker absent from the shipped programs"
-    return importlib.import_module("declared_knob_applied_parity_check")
+    return importlib.import_module("declared_knob_applied_parity")
 
 
 @pytest.mark.parametrize("knob,applied", [

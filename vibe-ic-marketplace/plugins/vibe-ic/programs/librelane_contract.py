@@ -1649,7 +1649,7 @@ def derive_step_config(config: Path, output: Path, updates: dict[str, tuple[Any,
         write_json(views_path(output), _load(views_path(config)))
     # CR-1 rollout: report declared/applied drift at the actual derived step
     # boundary. Existing published runs may drift, so this remains advisory.
-    import declared_knob_applied_parity_check as _parity
+    import declared_knob_applied_parity as _parity
     aliases = {'MAX_FANOUT_CONSTRAINT': 'SYNTH_MAX_FANOUT',
                'PDN_VOFFSET': 'FP_PDN_VOFFSET'}
     knobs = {'SYNTH_MAX_FANOUT', 'FP_CORE_UTIL', 'PL_TARGET_DENSITY',
