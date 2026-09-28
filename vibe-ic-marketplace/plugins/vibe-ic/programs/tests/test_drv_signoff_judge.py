@@ -868,6 +868,60 @@ def test_project_judge_rejects_plan_anchor_even_when_bundle_is_self_consistent(
                for reason in result["not_measured"])
 
 
+def test_net_census_rejects_negated_count(tmp_path):
+    from drv_signoff_census import _nets
+    report = tmp_path / "net.rpt"
+    report.write_text("Net n\n Total capacitance: 0.1\n"
+                      " Number of loads: NOT 0\n")
+    with pytest.raises(ValueError, match="malformed"):
+        _nets(report)
+
+
+def test_project_clean_opensta_census_can_reach_pass(tmp_path, monkeypatch):
+    from drv_signoff_census import derive
+    bundle = _bundle(tmp_path)
+    l7 = _file(tmp_path, "input/docs/L7.md", "verification plan\n")
+    bundle["current"]["sources"]["l7"] = l7
+    bundle["frozen"]["sources"]["l7"] = l7["sha256"]
+    root = tmp_path / "installed_pdks"
+    pdk = _file(root / "synthetic", "libs.tech/librelane/logic/config.tcl",
+                Path(bundle["current"]["sources"]["pdk_config"]["path"]).read_text())
+    bundle["current"]["sources"]["pdk_config"] = pdk
+    bundle["frozen"]["sources"]["pdk_config"] = pdk["sha256"]
+    anchor = {"path": "/image/synthetic/config.tcl", "sha256": pdk["sha256"],
+              "pdk_commit": "installed-version"}
+    bundle["threshold_anchor"] = anchor
+    bundle["identity"]["pdk_commit"] = anchor["pdk_commit"]
+    monkeypatch.setattr(drv, "image_pdk_anchor", lambda *a: anchor)
+    _file(tmp_path, "phase3/librelane_pdk_root.provenance.json", json.dumps({
+        "path": str(root),
+        "derivation": {"image_id": bundle["identity"]["tool_image_digest"]}}))
+    scene = bundle["scenes"][0]
+    folder = tmp_path / "census"
+    _file(folder, "pin_census.tsv",
+          "u/Y\tpin\toutput\t1\tu\tlogic\tY\tn\tinput\t0.1\t0.1\t0\tX\t0\n")
+    _file(folder, "net_census.rpt",
+          "Net n\n Total capacitance: 0.1\n Number of drivers: 1\n"
+          " Number of loads: 0\n Number of pins: 1\n")
+    _file(folder, "disabled_edges.rpt", "")
+    rows = drv.parse_check_types(Path(scene["all_limits_report"]["path"]).read_text(),
+                                 scene=scene["name"], mode=scene["mode"],
+                                 violators_only=False)
+    census = derive(folder, scene["linked_liberties"], rows)
+    bundle["pins"] = census["pins"]
+    scene.update(excluded_pins=census["excluded"],
+                 clock_network_pins=census["clock_network_pins"],
+                 driver_pin_census=census["driver_pins"],
+                 population=census["population"],
+                 pin_census_report=_file(folder, "pin_census.tsv",
+                                         (folder / "pin_census.tsv").read_text()),
+                 net_census_report=_file(folder, "net_census.rpt",
+                                         (folder / "net_census.rpt").read_text()),
+                 disabled_edges_report=_file(folder, "disabled_edges.rpt", ""))
+    result = drv.judge(bundle, project=tmp_path)
+    assert result["verdict"] == "PASS", result
+
+
 def test_partially_unannotated_drivers_block_a_clean_verdict(tmp_path):
     bundle = _bundle(tmp_path)
     bundle["scenes"][0]["parasitic_annotation_report"] = _file(

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from drv_signoff_judge import KINDS, _liberty_limits
 
 

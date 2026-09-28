@@ -128,6 +128,12 @@ _NOT_PROSE: Dict[str, str] = {
         "There is no prose denial form in these fields. Falsifier: "
         "test_capture_cr14_postroute_recipe.py::"
         "test_liberty_truth_table_and_area_discover_neutral_full_adder.",
+    "drv_signoff_census::_nets":
+        "ONE OPENSTA REPORT_NET GRAMMAR, NO SENTENCE. The reader accepts only "
+        "anchored 'Net', 'Total capacitance' and 'Number of loads' fields with "
+        "complete numeric values, then checks the named load count. A negated "
+        "or missing count is rejected instead of becoming an empty net. "
+        "Falsifier: tests/test_drv_signoff_judge.py::test_net_census_rejects_negated_count.",
     "drv_signoff_capture::capture":
         "ONE OPENSTA COUNTER GRAMMAR, NO SENTENCE. Capture accepts only "
         "an entire DRV_COUNTER line with an exact max_slew, "
