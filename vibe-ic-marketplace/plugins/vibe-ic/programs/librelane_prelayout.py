@@ -68,6 +68,68 @@ BASIS_NOTE = ("pre-layout basis (Step 10, LibreLane OpenROAD.STAPrePNR) — the 
               "PRE-LAYOUT ESTIMATE, NOT post-route sign-off: a corner shown as "
               "MET here may VIOLATE on the routed design")
 
+_SETUP_PATH = re.compile(
+    r"^Startpoint:\s*(\S+)([^\n]*)\n"
+    r"Endpoint:\s*(\S+)([^\n]*)[\s\S]*?"
+    r"^Path Type:\s*max\b[\s\S]*?"
+    r"^\s*(-?\d+(?:\.\d+)?)\s+slack\s+\((MET|VIOLATED)\)",
+    re.M | re.I)
+
+
+def pre_pnr_setup_gate(pvt_matrix: Path, reports: Path, output: Path) -> dict:
+    """BLOCKING before PnR: a measured negative setup path returns FAIL.
+
+    Only a PRE_LAYOUT report at the declared setup process corner may admit
+    PnR. A missing report is NOT_MEASURED, never a zero-slack pass. The path
+    class names the violating path actually printed by OpenSTA; it is not a
+    census of all possible endpoints.
+    """
+    matrix = json.loads(pvt_matrix.read_text())
+    corners = matrix.get("corners") or []
+    setup = next((c for c in corners if c.get("label") == "SS"), None)
+    if setup is None:
+        result = {"verdict": "NOT_MEASURED", "reason": "NO_DECLARED_SS_SETUP_CORNER",
+                  "path_classes": [], "setup_slack_ns": None}
+        write_json(output, result)
+        return result
+    report = reports / "sta_SS.rpt"
+    if not report.is_file():
+        result = {"verdict": "NOT_MEASURED", "reason": "SS_PRE_LAYOUT_REPORT_MISSING",
+                  "corner": setup, "path_classes": [], "setup_slack_ns": None}
+        write_json(output, result)
+        return result
+    body = report.read_text(errors="replace")
+    if not re.search(r"(?m)^STA_BASIS:\s*PRE_LAYOUT_ESTIMATE\s*$", body):
+        result = {"verdict": "NOT_MEASURED", "reason": "SS_REPORT_NOT_PRE_LAYOUT",
+                  "corner": setup, "path_classes": [], "setup_slack_ns": None}
+        write_json(output, result)
+        return result
+    paths = []
+    for match in _SETUP_PATH.finditer(body):
+        start, start_desc, end, end_desc, raw_slack, tag = match.groups()
+        slack = float(raw_slack)
+        if not math.isfinite(slack):
+            continue
+        source = "in" if "input port" in start_desc else "reg"
+        sink = "out" if "output port" in end_desc else "reg"
+        paths.append({"startpoint": start, "endpoint": end,
+                      "path_class": f"{source}-to-{sink}", "slack_ns": slack,
+                      "status": tag.upper()})
+    if not paths:
+        result = {"verdict": "NOT_MEASURED", "reason": "SS_SETUP_PATH_ABSENT",
+                  "corner": setup, "path_classes": [], "setup_slack_ns": None}
+    else:
+        worst = min(p["slack_ns"] for p in paths)
+        violating = [p for p in paths if p["slack_ns"] < 0]
+        result = {"verdict": "FAIL" if violating else "PASS",
+                  "reason": "NEGATIVE_PRE_PNR_SETUP_SLACK" if violating else "SETUP_NONNEGATIVE",
+                  "corner": setup, "setup_slack_ns": worst,
+                  "path_classes": sorted({p["path_class"] for p in violating}),
+                  "paths": paths, "source": str(report),
+                  "source_sha256": digest(report)}
+    write_json(output, result)
+    return result
+
 
 # ── instruments (each reads OpenSTA's own grammar) ─────────────────────────
 
@@ -322,11 +384,29 @@ def judge_slack(folder: Path, output: Path) -> dict:
             if value is None and verdict == "PASS":
                 verdict = "NOT_MEASURED"
                 findings.append(f"{corner.name}: {check} worst slack {raw!r} — NOT_MEASURED, not 0")
+            if check == "setup" and value is not None and value < 0:
+                verdict = "FAIL"
+                findings.append(f"{corner.name}: negative pre-PnR setup slack "
+                                f"{value:g} ns — return to synthesis before placement")
         if boxes:
             verdict = "FAIL"
             findings.append(f"LL_STA_BLACK_BOX: {corner.name} linked {len(boxes)} "
                             f"black box(es) ({boxes[0]['module']} for {boxes[0]['instance']}); "
                             "its slack omits that logic")
+        setup_value = row["setup_ws"].get("value")
+        if setup_value is not None and setup_value < 0:
+            max_report = corner / "max.rpt"
+            if max_report.is_file():
+                classes = set()
+                for match in _SETUP_PATH.finditer(max_report.read_text(errors="replace")):
+                    _, start_desc, _, end_desc, raw_slack, _ = match.groups()
+                    if float(raw_slack) < 0:
+                        classes.add(("in" if "input port" in start_desc else "reg")
+                                    + "-to-" + ("out" if "output port" in end_desc
+                                                 else "reg"))
+                row["negative_setup_path_classes"] = sorted(classes)
+                findings.append(f"{corner.name}: negative setup path classes "
+                                f"{sorted(classes) if classes else ['unclassified']}")
         rows[corner.name] = row
     report = {"step": "10", "program": "librelane_prelayout.judge_slack",
               "verdict": verdict, "basis": "PRE_LAYOUT_ESTIMATE", "corners": rows,
