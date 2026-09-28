@@ -540,6 +540,10 @@ def test_zero_lsb_same_shape_still_fires():
 def test_host_verify_routes_iverilog_through_progress_watchdog(
         monkeypatch, tmp_path):
     """The compile is BLOCKING work and cannot bypass process supervision."""
+    # FX-N1: the subject is the supervision seam, observed on the local route's
+    # argv; iverilog is stated present (the fake decides what it does).
+    import _container_route as _croute
+    _croute.pin_tool_route_local(monkeypatch, present=("iverilog",))
     calls = []
 
     def _absent(cmd, **kwargs):

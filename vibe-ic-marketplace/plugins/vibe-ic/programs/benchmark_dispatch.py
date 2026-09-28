@@ -47,6 +47,7 @@ from typing import Callable, Iterable, Optional, TypeVar
 from _atomic_artefact import write_json as _atomic_write_json
 from _atomic_artefact import write_text as _atomic_write_text
 import _runtime_pair_preflight as _runtime_pair
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 HARNESS = Path(__file__).resolve().parent.parent / "benchmark"
 REGISTRY = HARNESS / "BENCHMARK_REGISTRY.json"
@@ -2564,9 +2565,13 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
     if _challenge_forbidden_hit(source):
         return {"status": "INVALID",
                 "reasons": ["challenge is not self-contained"]}
-    iverilog, vvp = shutil.which("iverilog"), shutil.which("vvp")
-    if not iverilog or not vvp:
-        return {"status": "UNAVAILABLE", "reasons": ["iverilog/vvp unavailable"]}
+    # FX-N1: on this process's `_eda_tool_route` route (the pinned image
+    # whenever a container route exists), never the host PATH's binaries.
+    why = (_tool_route.why_unavailable("iverilog")
+           or _tool_route.why_unavailable("vvp"))
+    if why:
+        return {"status": "UNAVAILABLE",
+                "reasons": [f"iverilog/vvp unavailable: {why}"]}
     rtl_paths = [str(Path(p)) for p in candidate.get("rtl_paths") or []]
     # ARGUMENT ORDER IS NOT A VERDICT INPUT. `timescale is a compiler
     # directive that applies from its point of appearance FORWARD, across
@@ -2594,12 +2599,14 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
             prelude_path.write_text(f"`timescale {declared}\n")
             prelude = [str(prelude_path)]
         try:
-            comp = subprocess.run(
-                [iverilog, "-g2012", "-s", "vibeic_ai_challenge_tb",
+            comp = _tool_route.run(
+                ["iverilog", "-g2012", "-s", "vibeic_ai_challenge_tb",
                  "-o", str(out), *prelude, *rtl_paths, str(test_path)],
                 cwd=td, capture_output=True, text=True, timeout=30)
         except subprocess.TimeoutExpired:
             return {"status": "INVALID", "reasons": ["challenge compile timed out"]}
+        except _tool_route.ToolRouteRefused as exc:
+            return {"status": "UNAVAILABLE", "reasons": [str(exc)]}
         if comp.returncode != 0:
             errors = comp.stderr or comp.stdout or ""
             cites_candidate, cites_challenge = _joint_compile_attribution(
@@ -2663,12 +2670,14 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
                         errors[-1200:],
                     ]}
         try:
-            sim = subprocess.run(
-                [vvp, str(out)], cwd=td, capture_output=True, text=True,
+            sim = _tool_route.run(
+                ["vvp", str(out)], cwd=td, capture_output=True, text=True,
                 timeout=30)
         except subprocess.TimeoutExpired:
             return {"status": "INVALID", "returncode": None,
                     "reasons": ["challenge simulation timed out"]}
+        except _tool_route.ToolRouteRefused as exc:
+            return {"status": "UNAVAILABLE", "reasons": [str(exc)]}
     output = (sim.stdout or "") + (sim.stderr or "")
     # The challenge contract requires printing the FAIL marker, not exiting
     # non-zero: a test that collects its verdict in $finish still fails.
@@ -3577,7 +3586,7 @@ def _export_accepted_shape_c_task(task: dict, samples: Path,
     provenance = emit_attestation.phase1_provenance(project)
     if provenance.get("ran") is not True:
         reasons.append("Phase-1 L-doc provenance is absent")
-    if shutil.which("iverilog") is None:
+    if not _tool_route.available("iverilog"):
         reasons.append("standalone compile capability is unavailable")
     if reasons:
         return {"verdict": "BLOCKED", "id": pid, "reasons": reasons,

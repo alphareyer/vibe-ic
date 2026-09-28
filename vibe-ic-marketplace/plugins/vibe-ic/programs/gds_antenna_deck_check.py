@@ -219,9 +219,8 @@ def run(project: Path, gds: Optional[str], config: Optional[str],
 
     runner = _kl.find_runner()
     if runner is None:
-        return skip("no KLayout runner available (no strmrun/klayout on PATH "
-                    "and no KLayout in $VIBEIC_EDA_CONTAINER) — the antenna "
-                    "geometry deck did NOT run",
+        return skip(f"no KLayout runner available ({_kl.why_no_runner()}) "
+                    "— the antenna geometry deck did NOT run",
                     config_source=cfg_src, gds=str(gds_path))
 
     work = project / "reports" / "phase3"

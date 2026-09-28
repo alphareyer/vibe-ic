@@ -34,6 +34,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 MANIFEST = "activity.json"
 DUMP_TOP = "vibeic_vcd_dump"
@@ -71,7 +72,14 @@ def vcd_scopes(vcd: Path) -> List[str]:
 
 
 def _local(argv: Sequence[str], cwd: str) -> Tuple[int, str, str]:
-    r = subprocess.run(list(argv), cwd=cwd, capture_output=True, text=True)
+    """The default exec: the tool on its `_eda_tool_route` route (FX-N1 — the
+    pinned image whenever a container route exists, never the host PATH). A
+    refused route is rc 127 with the reason."""
+    try:
+        r = _tool_route.run([str(a) for a in argv], cwd=cwd,
+                            capture_output=True, text=True)
+    except _tool_route.ToolRouteRefused as exc:
+        return 127, "", str(exc)
     return r.returncode, r.stdout, r.stderr
 
 

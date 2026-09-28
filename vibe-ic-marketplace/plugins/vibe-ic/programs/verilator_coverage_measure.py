@@ -151,13 +151,23 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 
 # ----- measurement --------------------------------------------------
 
 
 def run(cmd: List[str], cwd: Optional[str] = None, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=cwd, check=check, capture_output=True, text=True)
+    """Run a Verilator command, or the simulator it built, on its route.
+
+    FX-N1: `_eda_tool_route` decides where (the pinned image whenever a
+    container route exists; this filesystem's checked tool otherwise), never
+    the host PATH. A program Verilator produced runs where Verilator ran. A
+    refused route raises FileNotFoundError, as an absent binary did."""
+    as_tool = None if _tool_route.is_eda_tool(cmd[0]) else "verilator"
+    return _tool_route.run([str(c) for c in cmd], cwd=cwd, check=check,
+                           capture_output=True, text=True, as_tool=as_tool)
 
 
 def verilate_and_run(rtl_dir: str, top: str, main_cpp: str, build_dir: str) -> str:
@@ -1679,14 +1689,25 @@ def _report_no_measurement(args: argparse.Namespace, kind: str,
       * present -> rc 1: the capability existed and the measurement was
                    simply never taken. That is a defect, not an exemption.
     """
-    tool = shutil.which(args.verilator_bin)
+    # FX-N1: the capability that would have taken the measurement is the one
+    # on this run's tool route (the pinned image whenever a container route
+    # exists), not whatever the host PATH holds.
+    if _tool_route.is_eda_tool(args.verilator_bin):
+        why_no = _tool_route.unavailable(os.path.basename(args.verilator_bin))
+        tool = None if why_no else args.verilator_bin
+        remedy = ("make the pinned image available to this run (or run inside "
+                  "it) and run")
+    else:                    # an operator-named binary outside the image's set
+        tool = shutil.which(args.verilator_bin)
+        why_no = f"{args.verilator_bin!r} is not on PATH"
+        remedy = "install that binary and run"
     if tool is None:
         print(f"[check] coverage NOT measured — {detail}")
-        print(f"[check] {args.verilator_bin!r} is not on PATH, so no "
-              f"line/toggle/branch coverage could have been produced on this "
-              f"host. Disclosing a named capability gap "
+        print(f"[check] verilator absent from this run's tool route "
+              f"({why_no}), so no line/toggle/branch coverage could have been "
+              f"produced here. Disclosing a named capability gap "
               f"({COVERAGE_CAPABILITY}) — NOT certifying the step. "
-              f"Remediation: install Verilator and run "
+              f"Remediation: {remedy} "
               f"`verilator_coverage_measure measure --out "
               f"{args.coverage_json}`.")
         print(f"{WAIVER_STDOUT_SENTINEL}: coverage deferred on "

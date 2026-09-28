@@ -184,7 +184,10 @@ def step2(env, monkeypatch):
 
 def step3(env, monkeypatch):
     import _cdc_netlist as cn
-    monkeypatch.setattr(cn.shutil, 'which', lambda _n: None)     # no host yosys
+    # no host yosys; a docker client, which is what makes the image route exist
+    # (FX-N1: with no client at all yosys would be asked for locally).
+    monkeypatch.setattr(cn.shutil, 'which',
+                        lambda n: '/usr/bin/docker' if n == 'docker' else None)
     seen = {}
 
     def run(argv, **_k):

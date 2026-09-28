@@ -119,6 +119,7 @@ if str(_HERE) not in sys.path:
 import _path_layout as _pl  # noqa: E402
 import _structural_absence as _sa  # noqa: E402  R-0915-119
 import _watchdog as _wd  # noqa: E402  progress-stall process supervision
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 try:  # sibling module; programs/ is on sys.path when run as a script
     import _docker_memory as _dmem
 except ImportError:  # pragma: no cover - packaged/flattened layouts
@@ -828,8 +829,9 @@ def _local_docker_image():
 
 
 def _host_iverilog() -> bool:
-    """True iff BOTH iverilog and vvp are on the host PATH."""
-    return bool(shutil.which("iverilog") and shutil.which("vvp"))
+    """True iff BOTH iverilog and vvp can run on this process's tool route
+    (asked only on the LOCAL route; `_eda_tool_route` records the versions)."""
+    return bool(_tool_route.available("iverilog") and _tool_route.available("vvp"))
 
 
 #: Backend tokens returned by :func:`resolve_injection_backend`.
@@ -870,12 +872,21 @@ def resolve_injection_backend(image: Optional[str] = None
         img, unresolved = None, f" ({exc})"
     if img:
         return BACKEND_DOCKER, img, f"container {img} usable without a pull"
-    if _host_iverilog():
-        return BACKEND_HOST, None, "host iverilog/vvp"
+    # FX-N1: this filesystem's iverilog only on the LOCAL route (no docker
+    # client, e.g. inside the image). With a container route and no image the
+    # host binary is NOT substituted for the pinned one.
+    if _tool_route.local_route():
+        if _host_iverilog():
+            return BACKEND_HOST, None, "local iverilog/vvp (no container route)"
+        return (BACKEND_NONE, None,
+                "no injection backend: no container route (no docker client) "
+                "and the LOCAL route refused: "
+                + _tool_route.unavailable("iverilog", "vvp") + unresolved)
     return (BACKEND_NONE, None,
-            "no injection backend: no vibeic-eda image is present locally "
-            "(set VIBEIC_EDA_IMAGE, or `docker pull`, to use a container) and "
-            "the host has no iverilog/vvp on PATH" + unresolved)
+            "no injection backend: a container route exists but no vibeic-eda "
+            "image is present locally (set VIBEIC_EDA_IMAGE, or `docker pull` "
+            "the pinned image); the host iverilog/vvp are not substituted for "
+            "it" + unresolved)
 
 
 def _run_injection_host(project: Path,
@@ -904,14 +915,21 @@ def _run_injection_host(project: Path,
     vvp_out.parent.mkdir(parents=True, exist_ok=True)
     srcs = [str(project / s) for s in rtl_rel_files + [tb_rel]]
     grace = float(timeout)
+    # The LOCAL route's binaries, as `_eda_tool_route` resolved and recorded
+    # them (version banner + presence), never a bare name on the host PATH.
+    try:
+        iverilog = _tool_route.resolve("iverilog", local=True).local_path
+        vvp = _tool_route.resolve("vvp", local=True).local_path
+    except _tool_route.ToolRouteRefused as exc:
+        return 127, "", str(exc)
     c = _wd.run_host_supervised(
-        ["iverilog", "-g2012", "-o", str(vvp_out), "-s", tb_top] + srcs,
+        [iverilog, "-g2012", "-o", str(vvp_out), "-s", tb_top] + srcs,
         cwd=str(project), stall_grace_s=grace)
     if c.outcome == "launch_error":
         return 127, "", "iverilog/vvp not found on the host PATH"
     if c.rc != 0:
         return c.rc, c.out, c.err
-    r = _wd.run_host_supervised(["vvp", str(vvp_out)], cwd=str(project),
+    r = _wd.run_host_supervised([vvp, str(vvp_out)], cwd=str(project),
                                 stall_grace_s=grace)
     if r.outcome == "launch_error":
         return 127, "", "iverilog/vvp not found on the host PATH"

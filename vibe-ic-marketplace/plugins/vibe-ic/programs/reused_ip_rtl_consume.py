@@ -42,6 +42,9 @@ import re
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 # Directory names whose contents are simulation / verification harnesses OR
 # synthesis OUTPUT — NEVER a design's build SOURCE. §4.05 oracle guard: a file
@@ -570,14 +573,16 @@ def consume_reused_ip_rtl(project: Path) -> Dict:
 
     # G-SV-INGEST honesty — never silently drop raw SystemVerilog.
     if sv_files:
-        has_sv2v = shutil.which("sv2v") is not None
+        has_sv2v = _tool_route.available("sv2v")
         result["sv2v_available"] = has_sv2v
         result["sv_ingest_note"] = (
             f"SV-ingest: {len(sv_files)} SystemVerilog file(s) staged "
             f"({', '.join(sorted(sv_files))}). The synth path's slang/sv2v "
             f"pre-pass (vibeic-eda container) lowers them to Verilog; if that "
             f"pre-pass is unavailable, install sv2v — raw SV was NOT silently "
-            f"dropped." + ("" if has_sv2v else " [host sv2v: NOT on PATH]"))
+            f"dropped." + ("" if has_sv2v else
+                           " [sv2v: not available on this run's tool route — "
+                           + _tool_route.why_unavailable("sv2v") + "]"))
 
     try:
         mf = emit_consume_manifest(project, staged_paths, provenance)

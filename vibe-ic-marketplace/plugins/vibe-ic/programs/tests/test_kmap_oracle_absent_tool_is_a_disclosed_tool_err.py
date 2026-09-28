@@ -24,6 +24,8 @@ Host-independent by construction: absence is injected by patching
 these run identically with and without a toolchain.
 """
 import sys
+
+import pytest
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent.parent.parent
@@ -73,6 +75,17 @@ def _absent(name):
 
 
 _REAL = ktt.subprocess.run
+
+
+@pytest.fixture(autouse=True)
+def _tools_are_this_process(monkeypatch):
+    """FX-N1: these tests fake the TOOL (an absent binary, a rejecting one) at
+    `subprocess.run`, keyed on argv[0]. That is the LOCAL route's argv; with a
+    docker client the resolver would hand the image `docker` as argv[0] and
+    the fake would never see the tool. So the route is declared, and iverilog
+    and vvp are STATED present (the fakes decide what they do)."""
+    import _container_route as _croute
+    _croute.pin_tool_route_local(monkeypatch, present=("iverilog", "vvp"))
 
 
 def _rtl(tmp_path):

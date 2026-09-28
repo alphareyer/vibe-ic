@@ -190,9 +190,17 @@ def test_exec_site_prefers_container_then_host(monkeypatch):
     monkeypatch.setattr(DOSR, "_local_cocotb_toolchain_present", lambda: True)
     assert DOSR._professional_tb_exec_site("eda") == "container"
     monkeypatch.setattr(DOSR, "_tool_in_container", lambda c, t: False)
+    # FX-N1 (CONTRACT CHANGE, owner rule 2026-09-28): while a container route
+    # exists a container that cannot run the suite is REPORTED; the host's
+    # cocotb/Icarus is not substituted for it. This used to answer "host".
+    assert DOSR._professional_tb_exec_site("eda") is None
+    # ... and the host is still the answer where it is legitimate: the LOCAL
+    # route (no docker client, e.g. the runner inside the image).
+    _route.pin_local_route(monkeypatch)
     assert DOSR._professional_tb_exec_site("eda") == "host"
     monkeypatch.setattr(DOSR, "_local_cocotb_toolchain_present", lambda: False)
     assert DOSR._professional_tb_exec_site("eda") is None
+    _route.pin_container_route(monkeypatch)
     # an empty container name never probes docker
     monkeypatch.setattr(DOSR, "_tool_in_container",
                         lambda c, t: (_ for _ in ()).throw(AssertionError("probed")))
@@ -200,6 +208,11 @@ def test_exec_site_prefers_container_then_host(monkeypatch):
 
 
 def test_step_runs_locally_when_container_is_unreachable(tmp_path, monkeypatch):
+    # The measured case this guards (2026-09-02) was the runner INSIDE the
+    # image: no docker client, the default container unreachable. FX-N1 makes
+    # that the only route on which the local toolchain is used, so it is
+    # declared rather than read off the machine.
+    _route.pin_local_route(monkeypatch)
     out = tmp_path / "phase2" / "stage1" / "sim_professional" / "dut"
     out.mkdir(parents=True)
     generated = {"status": "PASS", "dut_kind": "expert_reference",
@@ -244,6 +257,11 @@ def test_step_still_reports_unreachable_when_no_toolchain_anywhere(tmp_path, mon
     monkeypatch.setitem(sys.modules, "professional_tb_gen", fake_ptb)
     monkeypatch.setattr(DOSR, "_tool_in_container", lambda c, t: False)
     monkeypatch.setattr(DOSR, "_local_cocotb_toolchain_present", lambda: False)
+    # FX-N1 re-review: "nor on the local PATH" is true only where the local
+    # PATH IS the route (no docker client); that is the route this asserts.
+    # The container-route wording has its own test
+    # (test_fx_n1_review_wave4c::test_the_professional_tb_gap_on_a_container_route_...).
+    _route.pin_local_route(monkeypatch)
     res = DOSR.step_professional_tb_gen(tmp_path, "dut", "eda")
     assert res.status == "NOT_MEASURED"
     assert "nor on the local PATH" in res.detail

@@ -38,7 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _container_exec as _ce  # noqa: E402
 
-__all__ = ["pin_container_route", "pin_local_route"]
+__all__ = ["pin_container_route", "pin_local_route", "pin_tool_route_local"]
 
 _FAKE_DOCKER = "/usr/bin/docker"
 
@@ -76,3 +76,37 @@ def pin_container_route(monkeypatch) -> None:
 def pin_local_route(monkeypatch) -> None:
     """Declare: this test measures the LOCAL route. There is no client."""
     _pin(monkeypatch, has_docker=False)
+
+
+def pin_tool_route_local(monkeypatch, present=()) -> None:
+    """Declare: the EDA TOOLS this test drives run on THIS process's PATH.
+
+    Narrower than `pin_local_route`. It pins only `_eda_tool_route`'s answer
+    (its LOCAL route: the binary on PATH, version recorded and checked) and
+    leaves the process's docker client, and every other module's view of it,
+    as the machine has it. For tests that drive a REAL simulation with the
+    simulator this test process carries, and skip by name when it has none
+    (e.g. `_NEEDS_SIMULATOR`): their subject is what the code does with a
+    simulation's outcome, not where the simulator lives, and a stubbed image
+    identity (`_runtime_pair_fixture`) must not become the simulator.
+
+    ``present`` names tools the test STATES this process has (it fakes their
+    behaviour elsewhere); the resolver then records a fixture banner for them
+    instead of asking this host's PATH, so the test does not depend on which
+    binaries the machine happens to carry. Tools not named are resolved as the
+    machine answers.
+    """
+    import _eda_tool_route as _tr
+    monkeypatch.setattr(_tr, "local_route", lambda: True)
+    _tr.reset_caches()
+    if present:
+        real_probe = _tr._probe_local
+        stated = set(present)
+
+        def _probe(tool):
+            if tool in stated:
+                return {"path": f"/fixture/bin/{tool}",
+                        "banner": f"{tool} (stated by the test)",
+                        "version": None, "commands": None}
+            return real_probe(tool)
+        monkeypatch.setattr(_tr, "_probe_local", _probe)

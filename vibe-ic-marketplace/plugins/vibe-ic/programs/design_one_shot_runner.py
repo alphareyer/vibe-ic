@@ -170,6 +170,7 @@ import l20_dft_scan_topology_actionable_check as _l20_dft  # design-owned DFT co
 import l_doc_consumer_contract as _ldoc  # shared L-doc loader (L20 declaration)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 import _atomic_artefact as _aa  # noqa: E402  (vibe-ic#1082)
 
@@ -1063,7 +1064,9 @@ def _tool_in_container(container: str, tool: str) -> bool:
 def _local_cocotb_toolchain_present() -> bool:
     """True iff THIS process's PATH/python can run a cocotb+icarus Makefile."""
     import shutil as _shutil
-    if not (_shutil.which("iverilog") and _shutil.which("vvp")
+    # Asked only on the LOCAL route; `_eda_tool_route` records the versions.
+    if not (_tool_route.available("iverilog", local=True)
+            and _tool_route.available("vvp", local=True)
             and _shutil.which("make")):
         return False
     try:
@@ -1110,9 +1113,33 @@ def _professional_tb_exec_site(container: str) -> Optional[str]:
     if (container and not _local_exec_mode()
             and _tool_in_container(container, "iverilog")):
         return "container"
-    if _local_cocotb_toolchain_present():
+    # FX-N1: this filesystem's toolchain only on the LOCAL route. With a
+    # docker client on PATH a container that cannot run the suite is reported
+    # as such; a host cocotb/Icarus is not quietly substituted for it.
+    if (_local_exec_mode() or not container or container == "host") \
+            and _local_cocotb_toolchain_present():
         return "host"
     return None
+
+
+def _professional_tb_gap(container: str) -> str:
+    """Why `_professional_tb_exec_site` found no site, naming only the places
+    the ROUTE lets it look (review wave 4c: "nor on the local PATH" was said
+    on hosts where the local PATH was never the route, and sent an operator to
+    install a host toolchain that must not be used)."""
+    if _local_exec_mode() or not container or container == "host":
+        # The LOCAL route: here the local PATH really was the place asked.
+        import shutil as _shutil
+        why = _tool_route.unavailable("iverilog", "vvp", local=True)
+        if not why and not _shutil.which("make"):
+            why = "no `make` on this process's PATH"
+        return ("iverilog/cocotb not reachable in the configured container "
+                "nor on the local PATH (LOCAL route: "
+                + (why or "this interpreter cannot import cocotb") + ")")
+    return (f"iverilog/cocotb not reachable in the configured container "
+            f"{container!r} (it cannot be exec'd into, or has no iverilog); "
+            "while a container route exists the host toolchain is not "
+            "substituted for it, so the local PATH was not asked")
 
 
 def _iverilog_available(container: str) -> bool:
@@ -1122,10 +1149,13 @@ def _iverilog_available(container: str) -> bool:
     Prefers the container (the canonical containerised config), so a host that
     lacks iverilog no longer blocks a sim that would really run. Returns False
     iff BOTH are missing — the honest no-sim path then WAIVEs as before."""
-    import shutil as _shutil
     if container and _tool_in_container(container, "iverilog"):
         return True
-    return bool(_shutil.which("iverilog"))
+    # FX-N1: never the host PATH while a container route exists — the pinned
+    # image (or, with no docker client / no container named, this
+    # filesystem's checked tool).
+    return _tool_route.available("iverilog",
+                                 local=not container or container == "host")
 
 
 def _iverilog_sources_visible(argv: List[str], run_dir: Path,
@@ -1360,10 +1390,37 @@ def _declared_container_image(project: Optional[Path], container: str
     return rec
 
 
+def _routed_image_is_declared(rec: Dict[str, Any]) -> Optional[bool]:
+    """Is the image the stage MEASURABLY ran on the one the run declared?
+
+    Compared by content only: local image id against local image id, and
+    registry digest against the digest the declared reference names. True
+    when every comparable pair agrees, False when any disagrees, None when
+    nothing could be compared."""
+    pairs = []
+    if rec.get("declared_image_id") and rec.get("routed_image_id"):
+        pairs.append((rec["declared_image_id"], rec["routed_image_id"]))
+    declared_digest = _eda_pin_reference_digest(rec.get("declared_image_ref"))
+    if declared_digest and rec.get("routed_image_digest"):
+        pairs.append((declared_digest, rec["routed_image_digest"]))
+    if not pairs:
+        return None
+    return all(a == b for a, b in pairs)
+
+
+def _eda_pin_reference_digest(ref: Any) -> Optional[str]:
+    try:
+        import _eda_pin
+        return _eda_pin.reference_digest(ref)
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
 def _record_sim_toolchain(run_dir: Path, container: str, tool: str,
                           in_container: bool,
                           fallback_reason: Optional[str] = None,
                           locality: Optional[str] = None,
+                          route_record: Optional[Dict[str, Any]] = None,
                           ) -> Dict[str, Any]:
     """#902 — record WHICH simulator toolchain this sim actually executed, and
     whether it is the one the run pinned.
@@ -1378,6 +1435,16 @@ def _record_sim_toolchain(run_dir: Path, container: str, tool: str,
       UNPINNED     no container declared at all (true host mode); nothing to
                    match, and saying so is not the same as saying MATCH
       UNDECIDABLE  the probe could not resolve the image identity
+      NOT_RUN      the container route REFUSED the stage (FX-N1): nothing
+                   ran anywhere, so there is no toolchain to attribute and
+                   none is probed -- least of all the host's
+
+    `locality="pinned_image"` (FX-N1): the stage ran on the pinned image
+    through `_eda_tool_route` because the declared container could not run
+    it. Its identity is MEASURED on that route (`_eda_tool_route.identify`:
+    the path and `-V` banner inside the image, and the digest/id of the image
+    the container actually runs), and MATCH / DIVERGED / UNDECIDABLE compare
+    THAT with the declared image -- never the declared container's own probe.
 
     Never raises and never changes a sim verdict. chip/tool-AGNOSTIC."""
     # `locality` is supplied only by the mount-on-demand site, which runs the
@@ -1403,7 +1470,23 @@ def _record_sim_toolchain(run_dir: Path, container: str, tool: str,
     except Exception:                                        # noqa: BLE001
         rec["host"] = None
 
-    path, version = _probe_tool_identity(tool, container, in_container)
+    if locality == "refused":
+        path = version = None
+        rec["refusal"] = (route_record or {}).get("refusal") or fallback_reason
+        rec["tool_identity_source"] = ("not probed: the route was refused "
+                                       "and nothing ran")
+    elif locality == "pinned_image":
+        ident = _tool_route.identify(tool, image=(route_record or {}).get("image"))
+        path, version = ident.get("path"), ident.get("version")
+        rec["routed_image_ref"] = ident.get("image")
+        rec["routed_image_digest"] = ident.get("image_digest")
+        rec["routed_image_id"] = ident.get("image_id")
+        rec["routed_container"] = ident.get("container")
+        rec["tool_identity_source"] = (
+            "measured on the pinned-image route (_eda_tool_route.identify)"
+            + ("; " + ident["why"] if ident.get("why") else ""))
+    else:
+        path, version = _probe_tool_identity(tool, container, in_container)
     rec["tool_path"] = path
     rec["tool_version"] = version
 
@@ -1411,7 +1494,44 @@ def _record_sim_toolchain(run_dir: Path, container: str, tool: str,
     rec["project"] = str(project) if project else None
     rec.update(_declared_container_image(project, container))
 
-    if not container:
+    if locality == "refused":
+        rec["sim_toolchain_matches_declared_image"] = None
+        rec["verdict"] = "NOT_RUN"
+        rec["reason"] = (
+            "%s did NOT run: the container route refused it (%s). No host "
+            "fallback was taken and the host was not probed."
+            % (tool, rec["refusal"] or "reason not captured"))
+    elif locality == "pinned_image":
+        same = _routed_image_is_declared(rec)
+        measured = "%s at %s (image digest %s, id %s)" % (
+            version or "version unread", path or "path unread",
+            rec.get("routed_image_digest") or "unread",
+            rec.get("routed_image_id") or "unread")
+        rec["sim_toolchain_matches_declared_image"] = same
+        if same is True:
+            rec["verdict"] = "MATCH"
+            rec["reason"] = (
+                "%s ran on the pinned image %s through _eda_tool_route, "
+                "because container %r could not run it; measured there: %s "
+                "-- the declared image" % (tool, rec.get("routed_image_ref"),
+                                           container, measured))
+        elif same is False:
+            rec["verdict"] = "DIVERGED"
+            rec["reason"] = (
+                "%s ran on the pinned image %s through _eda_tool_route "
+                "(measured: %s), but the run declared image %s (id %s) "
+                "-- the run VERIFIED one toolchain and USED another"
+                % (tool, rec.get("routed_image_ref"), measured,
+                   rec.get("declared_image_ref"), rec.get("declared_image_id")))
+        else:
+            rec["verdict"] = "UNDECIDABLE"
+            rec["reason"] = (
+                "%s ran on the pinned image %s through _eda_tool_route "
+                "(measured: %s), but that image could not be compared with "
+                "the declared one (%s) -- attribution unavailable, not "
+                "assumed" % (tool, rec.get("routed_image_ref"), measured,
+                             rec.get("declared_image_ref") or "undeclared"))
+    elif not container:
         rec["sim_toolchain_matches_declared_image"] = None
         rec["verdict"] = "UNPINNED"
         rec["reason"] = ("no container declared for this run — the sim ran on "
@@ -1693,6 +1813,51 @@ def _run_sim_stage(argv: List[str], run_dir: Path, container: str,
                                _probe_tool=probe_tool)
 
 
+def _routed_tool_stage(argv: List[str], run_dir: Path, timeout: int,
+                       as_tool: Optional[str] = None
+                       ) -> Tuple[int, str, str, Dict[str, Any]]:
+    """Run a tool argv on the route `_eda_tool_route` resolves (never the host
+    while a container route exists). Returns (rc, out, err, route_record); a
+    refused route is rc 127 with the refusal as stderr, the shape every
+    caller already reads as "the tool is not there"."""
+    n_before = len(_tool_route.records())
+    try:
+        cp = _tool_route.run([str(a) for a in argv], cwd=run_dir,
+                             timeout=timeout, capture_output=True, text=True,
+                             errors="replace", as_tool=as_tool)
+    except _tool_route.ToolRouteRefused as exc:
+        # NOTHING RAN. Said in the record itself, so a reader (the #902
+        # sim-toolchain record) cannot mistake a refusal for a run elsewhere.
+        return 127, "", str(exc), dict(exc.record, refused=exc.code,
+                                       refusal=str(exc))
+    except subprocess.TimeoutExpired as exc:
+        out = exc.output if isinstance(exc.output, str) else ""
+        # The tool RAN (on its route) and overran: keep the route it ran on.
+        taken = _tool_route.records()[n_before:]
+        return (124, out, "TIMEOUT: %s exceeded %ss" % (argv[0], timeout),
+                dict(taken[-1]) if taken else {})
+    return (cp.returncode, cp.stdout or "", cp.stderr or "",
+            getattr(cp, "eda_route", {}) or {})
+
+
+def _local_tool_stage(argv: List[str], run_dir: Path,
+                      timeout: int) -> Tuple[int, str, str]:
+    """The LOCAL route: this filesystem's tool, after `_eda_tool_route` has
+    recorded its version and confirmed it exists. A refusal is rc 127. A
+    program a tool built (argv[0] not an EDA tool) runs as given."""
+    if not _tool_route.is_eda_tool(argv[0]):
+        return _run([str(a) for a in argv], cwd=run_dir, timeout=timeout)
+    try:
+        _tool_route.resolve(os.path.basename(str(argv[0])),
+                            [str(a) for a in argv], cwd=str(run_dir),
+                            local=True)
+    except _tool_route.ToolRouteRefused as exc:
+        return 127, "", str(exc)
+    # The argv is handed on unchanged: the binary the resolver just recorded
+    # and checked is the one this PATH resolves for it.
+    return _run(argv, cwd=run_dir, timeout=timeout)
+
+
 def _run_iverilog_stage(argv: List[str], run_dir: Path, container: str,
                         timeout: int = 120,
                         _probe_tool: str = "iverilog") -> Tuple[int, str, str]:
@@ -1731,28 +1896,64 @@ def _run_iverilog_stage(argv: List[str], run_dir: Path, container: str,
     # tree into a throwaway container of that SAME image. Only entered when
     # the host genuinely cannot do the job: a host that has the tool keeps
     # the host fallback, unchanged.
+    #
+    # FX-N1 — THE HOST IS NEVER THE FALLBACK WHILE A CONTAINER ROUTE EXISTS.
+    # This used to keep "the host fallback, unchanged" whenever the host had
+    # the tool (`_shutil_which(tool)`), so a container that could not SEE the
+    # tree handed the simulation to whatever Icarus the host carried — the
+    # same host-dependence #902 removed for the common case. Now, with a
+    # docker client on PATH: the declared container's own image (mounted on
+    # demand) when the container has the tool, else the pinned image through
+    # `_eda_tool_route`; the host PATH is not consulted. Only the LOCAL route
+    # (no docker client, i.e. inside the image) runs this filesystem's tool,
+    # and there its version is recorded and checked.
     mounted = None
-    if (container_has_tool and not _shutil_which(tool)):
-        mounted = _run_stage_in_mounted_image(argv, run_dir, container,
-                                              timeout=timeout)
+    routed = None
+    # No container ("" / "host") is the CALLER'S deliberate local choice, the
+    # convention `digital_hardmacro_gen._Env` documents; it takes the LOCAL
+    # route below exactly as a run with no docker client does.
+    deliberate_local = not container or container == "host"
+    if not in_container and not _local_exec_mode() and not deliberate_local:
+        if container_has_tool:
+            mounted = _run_stage_in_mounted_image(argv, run_dir, container,
+                                                  timeout=timeout)
         if mounted is not None:
             fallback_reason = (
                 "%s; dispatched into a throwaway container of that "
                 "container's own image instead of the host" % fallback_reason)
+        else:
+            routed = _routed_tool_stage(argv, run_dir, timeout)
+            if routed[3].get("refused"):
+                fallback_reason = ("%s; the container route refused it and "
+                                   "NOTHING RAN (the host is never the "
+                                   "fallback): %s"
+                                   % (fallback_reason or "no container",
+                                      routed[3].get("refusal")))
+            else:
+                fallback_reason = ("%s; ran on the pinned image through "
+                                   "_eda_tool_route (%s), not on the host"
+                                   % (fallback_reason or "no container",
+                                      routed[3].get("route")))
+    refused = routed is not None and bool(routed[3].get("refused"))
     try:
         _record_sim_toolchain(run_dir, container, tool,
-                              in_container or mounted is not None,
+                              in_container or mounted is not None
+                              or (routed is not None and not refused),
                               fallback_reason,
                               locality=("mounted_image" if mounted is not None
-                                        else None))
+                                        else "refused" if refused
+                                        else "pinned_image" if routed is not None
+                                        else None),
+                              route_record=routed[3] if routed is not None else None)
     except Exception:                                        # noqa: BLE001
         pass                    # attribution must never fail the simulation
     if mounted is not None:
         return mounted
+    if routed is not None:
+        return routed[0], routed[1], routed[2]
     if not in_container:
-        # host execution; a plain argv passes through _run's
-        # docker-exec-deadline rewriter untouched.
-        return _run(argv, cwd=run_dir, timeout=timeout)
+        # LOCAL route: this filesystem's tool, version recorded and present.
+        return _local_tool_stage(argv, run_dir, timeout)
     import shlex as _shlex
     c_dir = _to_container_path(str(run_dir), container)
     c_argv = " ".join(_shlex.quote(_to_container_path(tok, container))
@@ -6308,9 +6509,8 @@ def _rcvar_flat_compiles(flat_txt: str, tgt: str, rtl_dir: Path,
     If iverilog is unavailable or cannot be invoked, returns True (best-effort —
     the structural single-token guards in emit_variant_alias_flat already prevent
     a mis-edit; do not block a healthy transform on a missing tool)."""
-    import shutil as _sh
     import tempfile as _tf
-    if not _sh.which("iverilog"):
+    if not _tool_route.available("iverilog"):
         return True
     try:
         with _tf.TemporaryDirectory() as td:
@@ -6325,10 +6525,10 @@ def _rcvar_flat_compiles(flat_txt: str, tgt: str, rtl_dir: Path,
                 files.append(dest)
             if not files:
                 return True
-            rc, _out, _err = _run(
+            rc, _out, _err, _rec = _routed_tool_stage(
                 ["iverilog", "-g2012", "-t", "null", "-s", tgt,
-                 *[str(f) for f in files]], cwd=tdp, timeout=120)
-            return rc == 0
+                 *[str(f) for f in files]], tdp, 120)
+            return rc == 0 if rc != 127 else True
     except Exception:            # pragma: no cover — never block on the net itself
         return True
 
@@ -9700,8 +9900,7 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
                         "program_first": "professional_tb_gen"}, reason_class=_V.ReasonClass.PARTIAL_POPULATION)
         _exec_site = _professional_tb_exec_site(container)
         if _exec_site is None:
-            gap = ("iverilog/cocotb not reachable in the configured container "
-                   "nor on the local PATH")
+            gap = _professional_tb_gap(container)
             rec["run_refusal"] = _professional_tb_refuse(
                 out_dir, gap, dut_kind=str(dut_kind), exec_site="none")
             _write({**rec, "status": "INCOMPLETE", "reason": gap,
@@ -18000,9 +18199,38 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
     # what the `rc == 127` docker fallback below is keyed on, and what
     # `phase3_one_shot_runner` does for every long tool run in phase 3: record
     # the invocation AROUND the call (`_log_invocation`), never by rewriting it.
-    rc, out, err = _run(["yosys", "-p", script], cwd=synth_dir,
-                        timeout=_synth_to)
-    if rc == 127:
+    #
+    # WHERE YOSYS RUNS IS DECIDED BEFORE ANYTHING RUNS (`_eda_tool_route`).
+    # This used to run whatever `yosys` the HOST PATH held and reach the
+    # container only when that exec returned 127. MEASURED 2026-09-28 on 8HD-9
+    # (spm, `--require-image` satisfied): /usr/bin/yosys 0.9 ran first and
+    # died on `dffunmap`, a command it does not have; the container was reached
+    # only because the SV fallback happened to key on that error. The pin named
+    # one toolchain and the host chose another.
+    #   * a container route exists (docker client on PATH): the host PATH is
+    #     never asked; yosys runs in `container` (branch below);
+    #   * LOCAL route (no docker client; true inside the image): this PATH's
+    #     yosys, with its version recorded and every command the script runs
+    #     confirmed present, else NOT_MEASURED with the reason.
+    if _local_exec_mode():
+        try:
+            _yroute = _tool_route.resolve("yosys", ["yosys", "-p", script],
+                                          cwd=str(synth_dir))
+        except _tool_route.ToolRouteRefused as _refused:
+            log = synth_dir / "yosys.log"
+            log.write_text(f"{_refused}\n")
+            return StepResult(
+                "yosys_synth", "NOT_MEASURED", time.time() - t0,
+                f"yosys refused on the LOCAL route: {_refused.reason}",
+                [str(log)], reason_class=_V.ReasonClass.TOOL_ABSENT,
+                extras={"eda_route": _refused.record,
+                        "synth_top": synth_top})
+        rc, out, err = _run([_yroute.local_path or "yosys", "-p", script],
+                            cwd=synth_dir, timeout=_synth_to)
+    else:
+        rc, out, err = 127, "", ""
+    _route_note = ""
+    if not _local_exec_mode():
         # #118 — the docker fallback must not assume the host synth_dir is
         # bind-mounted inside the container at the same path. Mounted ->
         # unchanged in-place exec (zero behavior change); unmounted -> the
@@ -18020,10 +18248,43 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
             cont_wd, _needs = _phase2_container_workdir(
                 container, project, synth_dir)
             if cont_wd is None:
-                rc, out, err = 127, "", (
-                    "yosys docker fallback: no bind-mount covers "
-                    f"{synth_dir} and an in-container staging dir could "
-                    "not be created (container down?)")
+                # FX-N1 re-review: no staging dir means the container is not
+                # there (absent, stopped, or refused for holding other bytes).
+                # This used to FAIL the step with "container down?" -- a fact
+                # about the host, booked against the design. The step now runs
+                # on the PINNED IMAGE through `_eda_tool_route` (same-path
+                # mounts, the host PATH never asked); a refused route is
+                # NOT_MEASURED with the reason. The SV fallback below then
+                # drives the same session container of the image.
+                try:
+                    _cp = _tool_route.run(
+                        ["yosys", "-p", script], cwd=synth_dir,
+                        timeout=_synth_to, capture_output=True, text=True,
+                        errors="replace", container=container)
+                except _tool_route.ToolRouteRefused as _refused:
+                    log = synth_dir / "yosys.log"
+                    log.write_text(f"container {container!r} could not be "
+                                   f"used and {_refused}\n")
+                    return StepResult(
+                        "yosys_synth", "NOT_MEASURED", time.time() - t0,
+                        f"yosys not run: container {container!r} could not "
+                        f"be used and the pinned image was refused: "
+                        f"{_refused.reason}", [str(log)],
+                        reason_class=_V.ReasonClass.TOOL_ABSENT,
+                        extras={"eda_route": _refused.record,
+                                "synth_top": synth_top})
+                except subprocess.TimeoutExpired as _te:
+                    _cp = subprocess.CompletedProcess(
+                        [], 124, _te.output if isinstance(_te.output, str)
+                        else "", f"TIMEOUT: yosys exceeded {_synth_to}s")
+                rc, out, err = _cp.returncode, _cp.stdout or "", _cp.stderr or ""
+                _rr = getattr(_cp, "eda_route", {}) or {}
+                _route_note = (
+                    f"[eda_tool_route] container {container!r} could not be "
+                    f"used; yosys ran on the {_rr.get('route') or 'image'} "
+                    f"route ({_rr.get('image')}, container "
+                    f"{_rr.get('container')})\n")
+                container = _rr.get("container") or container
             else:
                 stage_map = {}
                 cp_err = ""
@@ -18106,7 +18367,7 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
                         _run(_exec_argv(container, f"rm -rf {cont_wd}",
                                         quiet=False), timeout=30)
     log = synth_dir / "yosys.log"
-    log.write_text(out + "\n" + err)
+    log.write_text(_route_note + out + "\n" + err)
 
 
     # v0.2.33 (ORGANIC-20260526-sv-synth-frontend) — SystemVerilog
@@ -21958,7 +22219,14 @@ def _verilator_stage_exec(container: str):
             ok, _why = _iverilog_sources_visible(argv, run_dir, container)
             in_container = ok
         if not in_container:
-            rc, out, err = _run(argv, cwd=run_dir, timeout=900)
+            # FX-N1: the pinned image while a container route exists; this
+            # filesystem's (checked) verilator only on the LOCAL route (no
+            # docker client, or no container named by the caller).
+            if _local_exec_mode() or not container or container == "host":
+                return _local_tool_stage(argv, run_dir, 900)
+            rc, out, err, _rec = _routed_tool_stage(
+                argv, run_dir, 900,
+                as_tool=None if _tool_route.is_eda_tool(argv[0]) else "verilator")
             return rc, out, err
         c_dir = _to_container_path(str(run_dir), container)
         c_argv = " ".join(_shlex.quote(_to_container_path(tok, container))
@@ -22122,13 +22390,18 @@ def step_verilator_coverage(project: Path, top_name: str = "",
                           "no testbench to instrument — coverage cannot be "
                           "measured without a stimulus that actually ran", [], reason_class=_V.ReasonClass.INPUT_ABSENT)
     tb = tbs[0]
-    have = bool(container and _tool_in_container(container, "verilator")) \
-        or bool(_shutil.which("verilator"))
+    have = bool(container and not _local_exec_mode()
+                and _tool_in_container(container, "verilator")) \
+        or _tool_route.available("verilator",
+                                 local=not container or container == "host")
     if not have:
+        _why_no_tool = _tool_route.unavailable(
+            "verilator", local=not container or container == "host")
         return StepResult("verilator_coverage", "NOT_MEASURED", time.time() - t0,
-                          "verilator not reachable (neither in container "
-                          f"{container!r} nor on host PATH) — no measurement "
-                          "taken, and none invented", [], reason_class=_V.ReasonClass.TOOL_ABSENT)
+                          f"verilator not reachable in container {container!r} "
+                          f"nor on this run's tool route ({_why_no_tool}) — "
+                          "no measurement taken, and none invented", [],
+                          reason_class=_V.ReasonClass.TOOL_ABSENT)
 
     out_path = _pl.report_path(project, _vcm.COVERAGE_MEASUREMENT_REL)
     # Build under the sim tree, not under reports/: reports/ is the signed
@@ -24137,6 +24410,12 @@ def main() -> int:
                         "one or more bounded runs. REFUSES together with a "
                         "window: a refresh of the whole flow has no window.")
     args = p.parse_args()
+    # Publish the run's container, as phase3_one_shot_runner.main does, so every
+    # in-process EDA tool call routed by `_eda_tool_route` (the oracle checks
+    # and gates this runner imports) enters THIS run's container instead of
+    # starting a fresh image per call, or asking a differently-named one.
+    if getattr(args, "container", None):
+        os.environ["EDA_CONTAINER"] = args.container
 
     global _FORCE_RTL_REGEN
     _FORCE_RTL_REGEN = bool(args.force_rtl_regen)

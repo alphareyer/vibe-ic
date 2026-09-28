@@ -350,6 +350,9 @@ def test_dut_cannot_spoof_verdict_token():
 @pytest.mark.skipif(not _HAS_IVERILOG, reason="iverilog unavailable")
 def test_sim_timeout_yields_skip_not_block(monkeypatch):
     # a vvp timeout must FAIL-SAFE to SKIP (rc 0 advisory), never raise / never BLOCK.
+    # FX-N1: the timeout is faked at `vvp`'s own argv, i.e. the local route's.
+    import _container_route as _croute
+    _croute.pin_tool_route_local(monkeypatch)
     real_run = g.subprocess.run
 
     def fake_run(cmd, *a, **k):

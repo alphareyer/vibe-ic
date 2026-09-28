@@ -61,6 +61,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 # Reuse the detector's construct taxonomy so detect↔remediate never drift.
 try:
@@ -297,14 +298,19 @@ def golden_still_passes(golden_src: Path, remediated_tb: Path,
     never a design literal."""
     import re as _re
     if run is None:
-        import shutil
         import tempfile
 
         def run(argv):
-            return (lambda cp: (cp.returncode, (cp.stdout or "") +
-                                (cp.stderr or "")))(
-                _pr.run(argv, capture_output=True, text=True))
-        if shutil.which("iverilog") is None or shutil.which("vvp") is None:
+            # FX-N1: on the route `_eda_tool_route` resolves (the pinned image
+            # whenever a container route exists), never the host PATH.
+            try:
+                cp = _tool_route.supervised_run(argv, capture_output=True,
+                                                text=True)
+            except _tool_route.ToolRouteRefused as exc:
+                return 127, str(exc)
+            return cp.returncode, (cp.stdout or "") + (cp.stderr or "")
+        if not (_tool_route.available("iverilog")
+                and _tool_route.available("vvp")):
             return False
         with tempfile.TemporaryDirectory() as td:
             vvp = str(Path(td) / "g.vvp")

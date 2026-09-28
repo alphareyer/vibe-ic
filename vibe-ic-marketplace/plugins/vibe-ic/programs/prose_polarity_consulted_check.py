@@ -119,6 +119,21 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "_eda_tool_route::_probe_local":
+        "ONE TOOL BANNER, NO SENTENCE. The local binary's own `-V`/`--version` "
+        "self-report (e.g. `Yosys 0.9 (git sha1 1979e0b)`, `Icarus Verilog "
+        "version 12.0`), read for its FIRST dotted number only and recorded "
+        "verbatim beside it. A banner cannot deny its version, and an unreadable "
+        "one is recorded as unread and REFUSES any declared minimum rather than "
+        "passing it. Falsifier: tests/test_fx_n1_host_tool_locality.py::"
+        "test_the_not_prose_claim_for_the_banner_and_help_readers_is_falsifiable.",
+    "_eda_tool_route::_yosys_commands_available":
+        "ONE YOSYS LISTING, NO SENTENCE. `yosys -Q -p help` prints every command "
+        "as four spaces, the name, then its description; only that indented name "
+        "column is read, so a word in a description never becomes a command, and "
+        "an empty or unreadable listing REFUSES the script instead of passing it. "
+        "Falsifier: tests/test_fx_n1_host_tool_locality.py::"
+        "test_the_not_prose_claim_for_the_banner_and_help_readers_is_falsifiable.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "

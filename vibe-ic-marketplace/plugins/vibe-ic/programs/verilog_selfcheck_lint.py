@@ -22,20 +22,27 @@ Usage:
 
     python3 verilog_selfcheck_lint.py rtl.sv --top iir_filter   # CLI, JSON out
 
-`VERILATOR` env (or --verilator) overrides the binary (point it at a container
-shim wrapper to run the same major as the official scorer).
+`VERILATOR` env (or --verilator) overrides the binary with an explicit PATH
+(point it at a container shim wrapper to run the same major as the official
+scorer); the caller chose that executable, so it is run as given. Without one,
+`verilator` runs on the route `_eda_tool_route` resolves (the pinned image
+whenever a container route exists), and an unavailable route is a SKIP that
+carries the route's own reason -- never "not on PATH" for a host tool nobody
+should install.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402  the ONE place a tool is placed
 
 # verilator diagnostic line, e.g.
 #   %Warning-UNUSEDSIGNAL: iir.sv:42:12: Bits of signal are not used: 'temp_y'[31:16]
@@ -44,9 +51,19 @@ _DIAG_RE = re.compile(
     r"(?:([^:\n]+):(\d+):(?:\d+:)?\s*)?(.*)")
 
 
-def _resolve_verilator(override: Optional[str]) -> Optional[str]:
-    cand = override or os.environ.get("VERILATOR") or "verilator"
-    return cand if (Path(cand).is_file() or shutil.which(cand)) else None
+def _explicit_verilator(override: Optional[str]) -> Optional[str]:
+    """The caller's explicit binary (`--verilator` / `VERILATOR`), or None
+    when none was named (then the route decides where `verilator` runs). A
+    bare name that is the tool's own is no override at all."""
+    cand = (override or os.environ.get("VERILATOR") or "").strip()
+    return cand if cand and cand != "verilator" else None
+
+
+def _route_label(rec: Dict[str, Any]) -> str:
+    """Which verilator ran, from its route record."""
+    if rec.get("route") == _tool_route.ROUTE_LOCAL:
+        return f"{rec.get('local_path')} ({rec.get('version') or 'version unread'})"
+    return f"verilator in {rec.get('image') or rec.get('container') or 'the image'}"
 
 
 def _looks_like_path(rtl: str) -> bool:
@@ -108,11 +125,18 @@ def selfcheck_lint(rtl: str, top: Optional[str] = None,
     FAIL  = verilator flagged ≥1 Warning/Error (the author must close these).
     SKIP  = no verilator reachable (never a fake PASS).
     """
-    binpath = _resolve_verilator(verilator)
-    if not binpath:
+    explicit = _explicit_verilator(verilator)
+    if explicit is not None:
+        why_not = ("" if Path(explicit).is_file() else
+                   f"the explicit verilator binary {explicit!r} "
+                   "(--verilator / VERILATOR) does not exist")
+    else:
+        why_not = _tool_route.why_unavailable("verilator")
+    binpath: Optional[str] = explicit
+    if why_not:
         return {"status": "SKIP", "returncode": None, "warnings": [],
-                "n_warnings": 0, "codes": [], "verilator": None, "raw": "",
-                "skip_reason": "no verilator binary on PATH/VERILATOR"}
+                "n_warnings": 0, "codes": [], "verilator": explicit, "raw": "",
+                "skip_reason": why_not}
 
     tmp: Optional[tempfile.TemporaryDirectory] = None
     files: List[str] = []
@@ -139,12 +163,24 @@ def selfcheck_lint(rtl: str, top: Optional[str] = None,
         # -Wno-EOFNEWLINE (a trailing-newline cosmetic) + -Wno-DECLFILENAME (a
         # temp-file-naming self-gate artifact) are suppressed; every real defect
         # class (-Wall) still fires, so parity with the scorer is preserved.
-        cmd = [binpath, "--lint-only", "-Wall", "-Wno-DECLFILENAME", "-Wno-EOFNEWLINE"]
+        args = ["--lint-only", "-Wall", "-Wno-DECLFILENAME", "-Wno-EOFNEWLINE"]
         if top:
-            cmd += ["--top-module", top]
-        cmd += (extra_args or [])
-        cmd += files
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            args += ["--top-module", top]
+        args += (extra_args or [])
+        args += files
+        if explicit is not None:
+            proc = subprocess.run([explicit, *args], capture_output=True,
+                                  text=True, timeout=120)
+        else:
+            try:
+                proc = _tool_route.run(["verilator", *args],
+                                       capture_output=True, text=True,
+                                       timeout=120)
+            except _tool_route.ToolRouteRefused as exc:
+                return {"status": "SKIP", "returncode": None, "warnings": [],
+                        "n_warnings": 0, "codes": [], "verilator": None,
+                        "raw": "", "skip_reason": str(exc)}
+            binpath = _route_label(getattr(proc, "eda_route", {}) or {})
         raw = (proc.stdout or "") + (proc.stderr or "")
         diags = _parse_diags(raw)
         codes = sorted({d["code"] for d in diags if d["code"]})

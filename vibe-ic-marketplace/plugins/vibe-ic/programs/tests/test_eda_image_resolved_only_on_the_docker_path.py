@@ -471,6 +471,11 @@ def test_an_unresolvable_image_leaves_the_host_injection_leg_open(monkeypatch):
     ImageNotResolvable and crash the program although host iverilog/vvp was
     there to run the injection."""
     import fmeda_fault_injection_coverage as fi
+    # The premise above, made an input rather than read off the machine: no
+    # docker client. (FX-N1: the host leg exists ONLY on that route; with a
+    # docker client and no image the host binary is not substituted.)
+    import _container_route as _route
+    _route.pin_local_route(monkeypatch)
 
     def _none():
         raise _eda_pin.ImageNotResolvable(["this host: docker unusable"])

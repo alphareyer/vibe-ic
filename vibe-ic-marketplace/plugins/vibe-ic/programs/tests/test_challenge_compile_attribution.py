@@ -362,6 +362,8 @@ def test_a_fail_marker_disqualifies_a_pass_marker(tmp_path):
 def test_no_simulator_beats_a_broken_candidate(tmp_path, monkeypatch):
     _, task = _task(tmp_path, _DUP_PORT_RTL)
     challenge = _challenge(task, _CHECKING_TB)
+    import _container_route as _croute   # FX-N1: "no simulator" = this process's
+    _croute.pin_tool_route_local(monkeypatch)
     import shutil                                       # noqa: PLC0415
     real = shutil.which
     monkeypatch.setattr(
@@ -378,6 +380,10 @@ def test_a_compile_timeout_is_never_CANDIDATE_BROKEN(tmp_path, monkeypatch):
     challenge = _challenge(task, _CHECKING_TB)
     monkeypatch.setattr(
         bd.shutil, "which", lambda name, *a, **k: f"/stub/bin/{name}")
+    # FX-N1: the timeout is faked at the TOOL's `subprocess.run`, so the tool
+    # runs on this process (the local route), stated present.
+    import _container_route as _croute
+    _croute.pin_tool_route_local(monkeypatch, present=("iverilog", "vvp"))
 
     def _times_out(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd="iverilog", timeout=30)

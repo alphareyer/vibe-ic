@@ -64,6 +64,8 @@ EXIT CODES
   2  iverilog/vvp absent AND --require-tools  (else SKIP, never a fabricated PASS)
 """
 import re, sys, subprocess, tempfile, os, shutil, argparse, shutil as _sh
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 
 def parse_table(text):
@@ -308,21 +310,24 @@ def main():
     tb = build_tb(env, cols, rows, out_col, in_cols, a.top, clk_name)
     if a.dump_tb:
         print(tb); return
-    if not (_sh.which('iverilog') and _sh.which('vvp')):
+    _why_no_tool = _tool_route.unavailable("iverilog", "vvp")
+    if _why_no_tool:
         if a.require_tools:
-            print("WTC_TOOLS_ABSENT: iverilog/vvp required but not found"); sys.exit(2)
-        print("WTC_SKIP_no_tools: iverilog/vvp absent -> SKIP (never a fabricated PASS)")
+            print("WTC_TOOLS_ABSENT: iverilog/vvp required but they cannot run "
+                  f"on this run's tool route: {_why_no_tool}"); sys.exit(2)
+        print("WTC_SKIP_no_tools: iverilog/vvp absent from this run's tool "
+              f"route ({_why_no_tool}) -> SKIP (never a fabricated PASS)")
         sys.exit(0)
     d = tempfile.mkdtemp()
     try:
         tbf = os.path.join(d, 'tb.sv'); open(tbf, 'w').write(tb)
         vvp = os.path.join(d, 's.vvp')
         # watchdog-exempt: bounded single-file iverilog compile (elaboration/sim build); fixed budget adequate — not an open-ended EDA generator
-        r = subprocess.run(['iverilog', '-g2012', '-o', vvp, a.rtl, tbf],
+        r = _tool_route.run(['iverilog', '-g2012', '-o', vvp, a.rtl, tbf],
                            capture_output=True, text=True)
         if r.returncode != 0:
             print("WTC_COMPILE_FAIL:\n" + r.stderr.strip()); sys.exit(1)
-        r2 = subprocess.run(['vvp', vvp], capture_output=True, text=True)
+        r2 = _tool_route.run(['vvp', vvp], capture_output=True, text=True)
         out = r2.stdout.strip()
         print(out)
         sys.exit(0 if 'WTC_PASS' in out else 1)

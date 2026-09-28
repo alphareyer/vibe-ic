@@ -74,6 +74,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 
 def _strip(src: str) -> str:
@@ -233,7 +235,7 @@ def _run_tb(tb: str, td: Path, phase: str, result_path: Path) -> dict:
     try:  # build hang / tool error → fail-safe SKIP, never BLOCK
         # watchdog-exempt: bounded single-file iverilog compile (elaboration/sim
         # build); fixed budget adequate — not an open-ended EDA generator
-        compiled = subprocess.run(
+        compiled = _tool_route.run(
             ["iverilog", "-g2012", "-o", str(sim_path),
              str(td / "dut.v"), str(tb_path)],
             capture_output=True, text=True, timeout=60)
@@ -247,7 +249,7 @@ def _run_tb(tb: str, td: Path, phase: str, result_path: Path) -> dict:
                       + (compiled.stdout + compiled.stderr).strip()[-200:],
         }
     try:  # sim hang/timeout → fail-safe SKIP per the contract, never BLOCK
-        ran = subprocess.run(
+        ran = _tool_route.run(
             ["vvp", str(sim_path)], capture_output=True, text=True, timeout=60)
     except Exception as exc:
         return {"verdict": "SKIP",
@@ -270,10 +272,9 @@ def _run_tb(tb: str, td: Path, phase: str, result_path: Path) -> dict:
 
 
 def _iverilog():
-    try:
-        return subprocess.run(["which", "iverilog"], capture_output=True).returncode == 0
-    except Exception:
-        return False
+    # FX-N1: the route's answer (the pinned image whenever a container
+    # route exists), not the host PATH's.
+    return _tool_route.available("iverilog") and _tool_route.available("vvp")
 
 
 def analyze(rtl: str, spec: str) -> dict:
@@ -323,7 +324,9 @@ def analyze(rtl: str, spec: str) -> dict:
                          f"the oracle drives only clk/reset/{inp})")
         return res
     if not _iverilog():
-        res["reason"] = "iverilog unavailable"; return res
+        res["reason"] = ("iverilog unavailable on this run's tool route: "
+                         + _tool_route.unavailable("iverilog", "vvp"))
+        return res
     clocked_output = _requires_clocked_output(spec, outp)
     res.update(applicable=True, inport=inp, outport=outp, in_bits=in_bits,
                out_bits=out_bits, clk=clk, rst=rst, pol=pol, module=modname,

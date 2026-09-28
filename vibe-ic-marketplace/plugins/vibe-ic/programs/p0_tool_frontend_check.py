@@ -11,7 +11,7 @@ import argparse
 import json
 import os
 import re
-import shutil
+import shutil  # noqa: F401 — tests pin the exec route through shutil.which (docker)
 import subprocess
 import sys
 from pathlib import Path
@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _specrtl_common import rtl_source_files  # noqa: E402
 import instrument_calibration as _calibration  # noqa: E402
-import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE a tool runs, decided once
 
 
 # The retired bit-range and port regex gates blocked range errors and
@@ -85,35 +85,44 @@ def _top(project: Path) -> str | None:
 
 
 def _route_image(tool: str, image: str | None) -> str | None:
-    """The image `tool` will run in, or None when no image runs.
+    """The image `tool` will run in, or None when it runs on the LOCAL route.
 
-    RESOLVED ONLY ON THE DOCKER PATH, at the moment it is needed. A tool on
-    PATH (natively, or inside the image itself) runs with nothing resolved; so
-    does the no-docker case, which `_invoke` refuses as unavailable. Otherwise
-    the declared `image` is used as is, else `default_image()` resolves it now
-    and raises `_eda_pin.ImageNotResolvable` rather than guess."""
-    if shutil.which(tool) or not shutil.which("docker"):
+    THE CONTAINER ROUTE WINS WHENEVER IT EXISTS. This used to return None as
+    soon as `shutil.which(tool)` found ANY binary, so a host yosys shadowed the
+    pinned image. MEASURED 2026-09-28 on 8HD-9: /usr/bin/yosys 0.9 answered
+    "ERROR: No such command: read_slang" and Step 1 FAILed "Yosys elaboration
+    failed" on a design the pinned image elaborates with rc 0.
+
+    The LOCAL route (None) is taken only when there is no container route at
+    all (`_eda_tool_route.local_route()`, true inside the image), and there
+    `_eda_tool_route` records the tool's version and refuses a yosys that lacks
+    a command the script runs. Otherwise the declared `image` is used as is,
+    else `default_image()` resolves it NOW, at use, and raises
+    `_eda_pin.ImageNotResolvable` rather than guess."""
+    if _tool_route.local_route():
         return None
     return image or default_image()
 
 
 def _invoke(tool: str, args: list[str], project: Path,
             image: str | None) -> subprocess.CompletedProcess[str]:
-    if shutil.which(tool):
-        command = [tool, *args]
-    elif shutil.which("docker"):
-        # Phase 2 needs only the released EDA image's tool binaries. LibreLane
-        # CLI capability is neither requested nor assumed here.
-        image = image or default_image()
-        root = str(project.resolve())
-        command = ["docker", "run", "--rm", *_dmem.docker_memory_flags(),
-                   "--network", "none",
-                   "-v", f"{root}:{root}:ro", "--entrypoint", tool,
-                   image, *args]
-    else:
-        raise FileNotFoundError(f"{tool} and docker unavailable")
-    return subprocess.run(command, cwd=project, capture_output=True,
-                          text=True, check=False)
+    """Run `tool` on its route: `image` None = the LOCAL route.
+
+    A refused route raises `_eda_tool_route.ToolRouteRefused`, a
+    FileNotFoundError, which `check` reports as "tool invocation unavailable"
+    with the reason. Phase 2 needs only the released EDA image's tool
+    binaries; LibreLane CLI capability is neither requested nor assumed."""
+    return _tool_route.run([tool, *args], cwd=project, image=image,
+                           capture_output=True, text=True, errors="replace")
+
+
+def _execution(image: str | None, completed) -> str:
+    """Where the tool ran, for the report: "host" (the LOCAL route: this
+    process's own PATH), the image reference, or `container:<name>`."""
+    route = getattr(completed, "eda_route", None) or {}
+    if route.get("route") == _tool_route.ROUTE_CONTAINER:
+        return f"container:{route.get('container')}"
+    return "host" if image is None else image
 
 
 def check(project: Path, image: str | None = None) -> dict:
@@ -158,7 +167,8 @@ def check(project: Path, image: str | None = None) -> dict:
         result["findings"].append(f"tool invocation unavailable: {exc}")
         return result
     result["tools"]["Yosys.JsonHeader"] = {"exit_code": yosys.returncode,
-                                               "execution": "host" if shutil.which("yosys") else yosys_image,
+                                               "execution": _execution(yosys_image, yosys),
+                                               "route": getattr(yosys, "eda_route", None),
                                                "output": (yosys.stdout + yosys.stderr)[-8000:]}
     lint_log = verilator.stdout + verilator.stderr
     try:
@@ -167,7 +177,8 @@ def check(project: Path, image: str | None = None) -> dict:
         result["findings"].append(f"tool diagnostic reader uncalibrated: {exc}")
         return result
     result["tools"]["Verilator.Lint"] = {"exit_code": verilator.returncode,
-                                            "execution": "host" if shutil.which("verilator") else verilator_image,
+                                            "execution": _execution(verilator_image, verilator),
+                                            "route": getattr(verilator, "eda_route", None),
                                             "diagnostics": diagnostics,
                                             "output": lint_log[-8000:]}
     if yosys.returncode:

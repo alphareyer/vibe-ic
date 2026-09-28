@@ -146,9 +146,16 @@ def _s3_prompt() -> str:
 
 
 @_no_iverilog
-def test_nextstate_host_verify_returns_TOOL_ERR_not_a_traceback():
+def test_nextstate_host_verify_returns_TOOL_ERR_not_a_traceback(monkeypatch):
     """`host_verify()` documents ("PASS"|"BLOCK"|"SKIP"|"TOOL_ERR", detail)."""
     import nextstate_misc_synth as M
+    # FX-N1: `host_verify` runs iverilog on its `_eda_tool_route` route. The
+    # absent-tool premise (`_no_iverilog`, read off this host's PATH) is the
+    # LOCAL route's; with a docker client the image would supply iverilog and
+    # the premise would not hold. Declared, not inherited from the machine.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import _container_route as _croute
+    _croute.pin_local_route(monkeypatch)
 
     prompt = _s3_prompt()
     assert M.synth(prompt) is not None, (

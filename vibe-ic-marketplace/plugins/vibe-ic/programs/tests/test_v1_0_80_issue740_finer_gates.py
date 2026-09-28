@@ -382,9 +382,16 @@ def test_g2_not_applicable_when_no_clause(tmp_path):
 def test_g2_iverilog_absent_degrades(monkeypatch, tmp_path):
     """When iverilog/vvp are absent the gate degrades to SKIP (rc 0), never a
     block (the binary-guard mandate)."""
+    # FX-N1: "absent" is this process's tools (the local route, declared).
+    # The real `which` is captured first: the lambda used to call the PATCHED
+    # `shutil.which` for any other name and recurse forever (latent until a
+    # caller asked it about `docker`).
+    import _container_route as _croute
+    _croute.pin_tool_route_local(monkeypatch)
+    _real_which = shutil.which
     monkeypatch.setattr(CS.shutil, "which",
-                        lambda x: None if x in ("iverilog", "vvp")
-                        else shutil.which(x))
+                        lambda x, *a, **k: None if x in ("iverilog", "vvp")
+                        else _real_which(x, *a, **k))
     rp = tmp_path / "r.sv"
     rp.write_text("module cmp(input [7:0] a, input [7:0] b, output y);"
                   " assign y=(a>b); endmodule\n")

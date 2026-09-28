@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import _hdl_code_text
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 SCHEMA = "vibeic.rtl_final_bundle_integrity.v1"
 
@@ -120,12 +121,15 @@ def compile_source_manifest(
     so rather than reporting a zero it never counted.
     """
     reasons: List[str] = []
-    compiler = shutil.which("iverilog")
-    if not compiler:
+    # FX-N1: iverilog on this process's `_eda_tool_route` route (the pinned
+    # image whenever a container route exists), never the host PATH's.
+    why = _tool_route.why_unavailable("iverilog")
+    if why:
         return ({
             "status": "NOT_MEASURED",
-            "reason": "iverilog is unavailable; final RTL bytes were not compiled",
+            "reason": f"iverilog is unavailable; final RTL bytes were not compiled ({why})",
         }, reasons)
+    compiler = "iverilog"
     with tempfile.TemporaryDirectory(prefix="vibeic_final_bundle_") as raw_root:
         root = Path(raw_root)
         compile_paths = []
@@ -151,7 +155,7 @@ def compile_source_manifest(
             command.extend(["-I", str(include_dir)])
         command.extend(str(path) for path in compile_paths)
         try:
-            proc = subprocess.run(
+            proc = _tool_route.run(
                 command, cwd=root, capture_output=True, text=True,
                 timeout=30, check=False)
         except subprocess.TimeoutExpired:
@@ -160,6 +164,9 @@ def compile_source_manifest(
                 "reason": "final RTL compile exceeded 30 seconds",
                 "tool": compiler,
             }, reasons)
+        except _tool_route.ToolRouteRefused as exc:
+            return ({"status": "NOT_MEASURED", "reason": str(exc),
+                     "tool": compiler}, reasons)
         diagnostics = (getattr(proc, "stderr", "")
                        or getattr(proc, "stdout", "") or "").strip()
         diagnostics = diagnostics.replace(str(root), "<final_bundle>")
@@ -167,6 +174,7 @@ def compile_source_manifest(
             "status": "PASS" if proc.returncode == 0 else "BLOCKED",
             "reason": "" if proc.returncode == 0 else diagnostics[:2000],
             "tool": compiler,
+            "tool_route": getattr(proc, "eda_route", None),
             "returncode": proc.returncode,
         }, reasons)
 

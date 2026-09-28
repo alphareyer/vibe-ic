@@ -112,6 +112,7 @@ import emit_attestation as _ea  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 # The runner's own inner-rename suffix (step_reset_clock_variant_aliases,
 # design_one_shot_runner.py). chip-AGNOSTIC structural token, not a chip name.
@@ -228,11 +229,9 @@ def resolve_tb_facing_file(rtl_dir: Path, leaf: str,
 
 
 def _iverilog_available() -> bool:
-    try:
-        return subprocess.run(["which", "iverilog"],
-                              capture_output=True).returncode == 0
-    except OSError:
-        return False
+    # FX-N1: the route's answer (the pinned image whenever a container route
+    # exists), not the host PATH's.
+    return _tool_route.available("iverilog")
 
 
 def guard_export(sample: Path, prompt_text: str = "") -> Tuple[bool, List[str]]:
@@ -366,7 +365,7 @@ def guard_export(sample: Path, prompt_text: str = "") -> Tuple[bool, List[str]]:
         with tempfile.TemporaryDirectory() as td:
             binp = Path(td) / "syn.bin"
             # watchdog-exempt: bounded single-file iverilog compile (elaboration/sim build); fixed budget adequate — not an open-ended EDA generator
-            r = _pr.run(
+            r = _tool_route.supervised_run(
                 ["iverilog", "-g2012", "-o", str(binp), str(sample)],
                 capture_output=True, text=True)
             if r.returncode != 0:
@@ -1144,7 +1143,7 @@ def _compiles_with_tb(sample: Path, tb: Path) -> Optional[bool]:
         with tempfile.TemporaryDirectory() as td:
             binp = Path(td) / "tb.bin"
             # watchdog-exempt: bounded single-file iverilog compile (elaboration/sim build); fixed budget adequate — not an open-ended EDA generator
-            r = subprocess.run(
+            r = _tool_route.run(
                 ["iverilog", "-g2012", "-o", str(binp), str(sample), str(tb)],
                 capture_output=True, text=True, timeout=120,
                 cwd=str(tb.resolve().parent))

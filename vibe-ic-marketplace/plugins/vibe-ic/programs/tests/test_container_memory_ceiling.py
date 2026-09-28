@@ -293,29 +293,52 @@ def test_pdk_image_reader_argv_carries_the_ceiling(monkeypatch):
 def test_cdc_netlist_image_argv_carries_the_ceiling(tmp_path, monkeypatch):
     """`_cdc_netlist.build` (T91 step 3) runs yosys in the image when the host
     has none. Driven, not grepped: the argv it hands `subprocess.run` carries
-    both flags, equal, before the image."""
+    both flags, equal, before the image.
+
+    FX-N1 cost: the image route now starts ONE session container of the image
+    per process and `docker exec`s each call into it, so the container that
+    carries the ceiling is that `docker run -d`, and the build is exec'd into
+    THAT container. The ceiling is asserted on it exactly as before."""
     import _cdc_netlist as cdc
+    import _eda_tool_route as _route
     monkeypatch.setenv("VIBEIC_DOCKER_MEMORY", "3g")
-    monkeypatch.setattr(cdc.shutil, "which", lambda _name: None)
+    # A docker client is what makes the image route exist (FX-N1: with no
+    # client there is no container route and yosys would run locally); the
+    # host has no yosys, and the build must STILL reach the image.
+    monkeypatch.setattr(cdc.shutil, "which",
+                        lambda name: "/usr/bin/docker" if name == "docker" else None)
+    for var in ("VIBEIC_EDA_CONTAINER", "EDA_CONTAINER"):
+        monkeypatch.delenv(var, raising=False)
+    # this test's own session state: no container left by another test is reused
+    monkeypatch.setattr(_route, "_SESSIONS", {})
+    monkeypatch.setattr(_route, "_RETIRED", [])
+    monkeypatch.setattr(_route, "_SESSION_STATE",
+                        {"reaped": True, "atexit": True, "starts": 0, "recreated": 0})
     seen = []
 
     class _CP:
-        returncode, stdout, stderr = 1, "", ""
+        def __init__(self, rc, out="", err=""):
+            self.returncode, self.stdout, self.stderr = rc, out, err
 
     def _fake(argv, **_kw):
         seen.append(list(argv))
-        return _CP()
+        if list(argv[:3]) == ["docker", "run", "-d"]:
+            return _CP(0, "fakecontainerid\n")        # the session starts
+        return _CP(1)          # the exec'd build fails; inspect reads nothing
     monkeypatch.setattr(cdc.subprocess, "run", _fake)
     rtl = tmp_path / "top.v"
     rtl.write_text("module top; endmodule\n")
     with pytest.raises(cdc.Refusal, match="CDC_NETLIST_BUILD_FAILED"):
         cdc.build(tmp_path, [rtl], "top", image="img:1")
-    assert len(seen) == 1, seen
-    argv = seen[0]
-    assert argv[:2] == ["docker", "run"], argv
+    runs = [a for a in seen if a[:2] == ["docker", "run"]]
+    assert len(runs) == 1, seen
+    argv = runs[0]
     assert argv[argv.index("--memory") + 1] == "3g", argv
     assert argv[argv.index("--memory-swap") + 1] == "3g", argv
     assert argv.index("--memory") < argv.index("img:1"), argv
+    name = argv[argv.index("--name") + 1]
+    builds = [a for a in seen if a[:2] == ["docker", "exec"] and "yosys" in a]
+    assert builds and all(name in a for a in builds), seen
 
 
 def test_technology_facts_argv_carries_the_ceiling(monkeypatch):

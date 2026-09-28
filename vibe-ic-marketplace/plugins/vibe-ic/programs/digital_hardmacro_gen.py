@@ -126,6 +126,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -830,7 +831,9 @@ class MagicSite:
     # ── probes ────────────────────────────────────────────────────────────
     def has_magic(self) -> bool:
         if not self.in_container:
-            return shutil.which("magic") is not None
+            # The caller chose this environment (no container / "host"); its
+            # magic is resolved and its version recorded by `_eda_tool_route`.
+            return _tool_route.available("magic", local=True)
         return self.sh("command -v magic >/dev/null 2>&1", timeout=60)[0] == 0
 
     def magic_version(self) -> str:
@@ -843,7 +846,16 @@ class MagicSite:
         if self.in_container:
             rc, out, err = self.sh("magic --version", timeout=60)
         else:
-            rc, out, err = _sh(["magic", "--version"], timeout=60)
+            # This environment is the caller's deliberate choice (or there is
+            # no docker client): the binary `_eda_tool_route` resolves and
+            # records for the LOCAL route, never a bare PATH lookup.
+            try:
+                cp = _tool_route.run(["magic", "--version"], local=True,
+                                     capture_output=True, text=True,
+                                     errors="replace", timeout=60)
+            except (OSError, subprocess.SubprocessError):
+                return ""
+            rc, out, err = cp.returncode, cp.stdout or "", cp.stderr or ""
         text = (out or err).strip()
         return text.splitlines()[-1] if rc == 0 and text else ""
 
@@ -969,19 +981,31 @@ class MagicSite:
 
 
 def find_magic_site(container: str = "") -> Optional[MagicSite]:
-    """Resolve WHERE magic is: this environment first, then the container.
+    """Resolve WHERE magic is, on the route every EDA tool takes (FX-N1).
 
-    None means the tool is genuinely absent from both, and the caller must
-    then state the capability gap. Never returns a site whose magic it has
-    not just seen answer.
+    THIS ENVIRONMENT is asked only when it is the route: there is no docker
+    client (`_eda_tool_route.local_route()`, e.g. inside the image), or the
+    caller chose it (`container` empty or "host", the `--container` help's
+    convention). A NAMED container with a docker client present is asked
+    first and alone: a magic on the host PATH is never preferred over it --
+    that was the host-first shape the re-review found here after every other
+    tool had been routed. An empty `container` still falls back to the
+    default container when this environment has none.
+
+    None means the tool is absent from every place the route allows, and the
+    caller must then state the capability gap. Never returns a site whose
+    magic it has not just seen answer.
     """
-    here = MagicSite("")
-    if here.has_magic():
-        return here
-    if shutil.which("docker") is None:
+    name = (container or "").strip()
+    no_client = _tool_route.local_route()
+    if no_client or name in ("", "host"):
+        here = MagicSite("")
+        if here.has_magic():
+            return here
+    if no_client or name == "host":
         return None
-    name = (container or DEFAULT_CONTAINER).strip()
-    if not name or name == "host":
+    name = name or DEFAULT_CONTAINER.strip()
+    if not name:
         return None
     there = MagicSite(name)
     return there if there.has_magic() else None
@@ -1008,16 +1032,28 @@ def magic_absent_reason(container: str = "") -> str:
     a digest that could not be READ is NOT_MEASURED and is not a mismatch, so
     an unreadable container still falls through to the ordinary sentence below.
     """
-    name = (container or DEFAULT_CONTAINER).strip() or DEFAULT_CONTAINER
-    if shutil.which("docker") is None:
+    asked = (container or "").strip()
+    if _tool_route.local_route():
         return ("magic is not on PATH in this environment and there is no "
                 "docker client here to reach an EDA container with")
+    if asked == "host":
+        return ("magic is not on PATH in this environment, the only place "
+                "the caller allowed (--container host)")
+    name = asked or DEFAULT_CONTAINER.strip() or DEFAULT_CONTAINER
+    # A PLACE WE DID NOT LOOK IS NOT A PLACE WE LOOKED EITHER (FX-N1): with a
+    # named container and a docker client, `find_magic_site` asks only the
+    # container, so this environment is not reported as searched.
+    here = ("magic is not on PATH in this environment" if not asked else
+            "this environment was not asked (a container route exists, and "
+            "magic runs there)")
     refusal = _pin.container_attach_refusal(name)
     if refusal:
-        return (f"magic is not on PATH in this environment, and nothing was "
+        return (f"{here}, and nothing was "
                 f"run in container {name!r} to find out whether it is there: "
                 f"{_container_exec.IMAGE_REFUSAL_MARK}{refusal}")
-    return (f"magic is not on PATH in this environment and not on PATH "
+    if asked:
+        return f"magic is not on PATH inside container {name!r}; {here}"
+    return (f"{here} and not on PATH "
             f"inside container {name!r} either")
 
 
@@ -1563,8 +1599,15 @@ def _write_lef_here(top: str, gds: Path, def_file: Path, out_lef: Path,
                                         full_lef, pinonly))
         env = dict(os.environ)
         env.update(magic_env_for(magicrc, pdk_root))
-        cmd = ["magic", "-noconsole", "-dnull", "-rcfile", magicrc,
-               str(script)]
+        # This is the LOCAL environment the caller chose (no container /
+        # "host"): the magic binary is the one `_eda_tool_route` resolved and
+        # recorded for it (FX-N1), not a bare name the PATH answers later.
+        try:
+            magic_bin = _tool_route.resolve("magic", local=True).local_path
+        except _tool_route.ToolRouteRefused as exc:
+            return False, f"magic did not complete: {exc}"
+        cmd = [magic_bin or "magic", "-noconsole", "-dnull", "-rcfile",
+               magicrc, str(script)]
         # BLOCKING PROCESS POLICY: magic is a potentially long EDA run, so it
         # goes through the plugin-wide progress watchdog rather than a bare
         # host launch with a wall-clock timeout. `timeout_s` is the STALL
@@ -1829,7 +1872,24 @@ def characterise_liberty(project: Path, design: str, container: str,
         f"write_timing_model -library_name {design} -cell_name {design} "
         f"{lib_out}", "")))
     cmd = f"export PATH=/foss/tools/bin:$PATH; sta -no_splash -exit {tcl}"
-    argv = (["bash", "-lc", cmd] if shutil.which("sta") or not container
+    # WHERE sta runs: the named container whenever there is one and a route to
+    # it. This used to take the host as soon as `shutil.which("sta")` found a
+    # binary, so a host OpenSTA characterised a macro the run had pinned to the
+    # image's (the host-first shape `_eda_tool_route` removes). No container
+    # (empty / "host", the caller's deliberate choice) or no docker client at
+    # all is the LOCAL route: its sta is recorded and must exist.
+    local = (not container or container == "host"
+             or _tool_route.local_route())
+    if local:
+        try:
+            rec["sta_route"] = _tool_route.resolve(
+                "sta", ["sta", "-no_splash", "-exit", str(tcl)],
+                local=True).record()
+        except _tool_route.ToolRouteRefused as exc:
+            rec.update(characterised=False, reason_class="EXECUTION_ERROR",
+                       why=f"write_timing_model not run: {exc}")
+            return None, rec
+    argv = (["bash", "-lc", cmd] if local
             else _ce.docker_exec_argv(container, "bash", "-lc", cmd))
     rc, out, err = _sh(argv)
     text = lib_out.read_text(errors="replace") if lib_out.is_file() else ""

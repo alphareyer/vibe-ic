@@ -89,6 +89,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 # Reuse the canonical Spec<->RTL port parser — STRUCTURAL, the same primitive
 # spec_example_smoke_tb / spec_coverage_check use. No hand-rolled port regex.
@@ -401,8 +402,10 @@ def build_clause_tb(top: str, ports: List["_SRC.Port"],
 # Orchestration
 # ---------------------------------------------------------------------------
 def _run(cmd: List[str], timeout: int = 120) -> Tuple[int, str, str]:
+    # FX-N1: on its `_eda_tool_route` route (the pinned image whenever a
+    # container route exists); a refused route is a FileNotFoundError -> 127.
     try:
-        cp = subprocess.run(cmd, capture_output=True, text=True,
+        cp = _tool_route.run(cmd, capture_output=True, text=True,
                             timeout=timeout)
         return cp.returncode, cp.stdout, cp.stderr
     except subprocess.TimeoutExpired as e:
@@ -447,10 +450,12 @@ def run_clause_smoke(rtl_path: Path, prompt: str, top: Optional[str],
                             "to smoke-test (NOT a failure)")
         return 0, report
 
-    if shutil.which("iverilog") is None or shutil.which("vvp") is None:
+    _why_no_tool = _tool_route.unavailable("iverilog", "vvp")
+    if _why_no_tool:
         report["verdict"] = "SKIP"
         report["tool_available"] = False
-        report["reason"] = ("iverilog/vvp absent — cannot RUN the derived "
+        report["reason"] = ("iverilog/vvp absent from this run's tool route "
+                            f"({_why_no_tool}) — cannot RUN the derived "
                             "smoke TB; degrading to SKIP (NOT a block)")
         return 0, report
     report["tool_available"] = True

@@ -78,6 +78,8 @@ if str(_HERE) not in sys.path:
 # port/clock/reset grammar is identical and a second copy would be a second
 # source of truth.
 import clock_divider_ratio_oracle_check as _C  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 CLKP = 10            # driven clock period, time units
 MAX_CYCLES = 4000    # sampling budget
@@ -252,13 +254,13 @@ def _simulate(rtl: str, module: str, outport: str, width: int, clk: str,
             # TB against one module's RTL — a fixed, small elaboration, not an
             # open-ended EDA run. The sibling oracle checks carry the same
             # marker for the same shape.
-            b = subprocess.run(
+            b = _tool_route.run(
                 ["iverilog", "-g2012", "-o", str(d / "a.out"),
                  str(d / "dut.v"), str(d / "tb.v")],
                 capture_output=True, text=True, timeout=120)
             if b.returncode != 0:
                 return None
-            subprocess.run(["vvp", str(d / "a.out")],
+            _tool_route.run(["vvp", str(d / "a.out")],
                            capture_output=True, text=True, timeout=180)
         except (OSError, subprocess.SubprocessError):
             return None

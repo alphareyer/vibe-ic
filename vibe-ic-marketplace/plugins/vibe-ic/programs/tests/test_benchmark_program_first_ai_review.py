@@ -22,6 +22,7 @@ import sys as _rt_sys
 from pathlib import Path as _rt_path
 _rt_sys.path.insert(0, str(_rt_path(__file__).resolve().parent))
 import _runtime_pair_fixture as _rt_pair  # noqa: E402
+import _container_route as _croute  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +36,9 @@ def _matching_runtime_pair(monkeypatch):
     not a weakening; the mismatch direction is measured against the pin and the
     PREVIOUS pin in `test_issue2120_runtime_pair_preflight.py`."""
     _rt_pair.assume_matching_runtime_pair(monkeypatch)
+    # The simulations these tests drive are this process's own (FX-N1): the
+    # stated image identity above is a precondition, not a simulator.
+    _croute.pin_tool_route_local(monkeypatch)
 
 
 

@@ -90,6 +90,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import port_parser  # noqa: E402  bullet form OR Verilog module header (v2/human twins)
 import _watchdog  # noqa: E402  plugin-wide progress-stall process supervision
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 
 # ===========================================================================
@@ -718,7 +720,9 @@ def host_verify(prompt_text: str, ref_sv: str, test_sv: str, top: str = "TopModu
         # BLOCKING PROCESS POLICY: iverilog is a potentially long EDA compile,
         # so it must use the plugin-wide progress watchdog. The primitive also
         # preserves #1437's declared absent-tool outcome as launch_error/rc127.
-        cp = _watchdog.run_supervised(
+        # FX-N1: on its `_eda_tool_route` route (never the host PATH while a
+        # container route exists); a refused route is launch_error/rc127.
+        cp = _tool_route.watchdog_run(
             ["iverilog", "-g2012", "-o", str(binp), str(dut),
              ref_sv, test_sv])
         if cp.outcome != "natural":
@@ -726,7 +730,7 @@ def host_verify(prompt_text: str, ref_sv: str, test_sv: str, top: str = "TopModu
         if cp.rc != 0:
             return ("TOOL_ERR", cp.err[-600:])
         try:
-            cp = subprocess.run(["vvp", str(binp)], capture_output=True, text=True)
+            cp = _tool_route.run(["vvp", str(binp)], capture_output=True, text=True)
         except FileNotFoundError as e:
             # #1437 — same shape one line later: the design COMPILED but the
             # simulator could not be RUN, which is still not a verdict about the

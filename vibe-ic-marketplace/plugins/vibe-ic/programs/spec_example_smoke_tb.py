@@ -114,6 +114,8 @@ import tempfile
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 # Reuse the canonical Spec<->RTL port parser (module name + port
 # direction + width). STRUCTURAL only — same primitive spec_coverage_check
@@ -876,9 +878,11 @@ def _run_indirection(prompt_text: str, rtl_text: str, top: str,
                       "cannot drive the directed sequence safely",
                       gold_json)
 
-    if shutil.which("iverilog") is None or shutil.which("vvp") is None:
+    _why_no_tool = _tool_route.unavailable("iverilog", "vvp")
+    if _why_no_tool:
         return Result("NOT_APPLICABLE",
-                      "iverilog/vvp not on PATH — cannot run the register-map "
+                      f"iverilog/vvp absent from this run's tool route "
+                      f"({_why_no_tool}) — cannot run the register-map "
                       "indirection smoke TB (a golden was extractable)",
                       gold_json)
 
@@ -900,13 +904,13 @@ def _run_indirection(prompt_text: str, rtl_text: str, top: str,
             tb_path.write_text(tb_text)
             rtl_copy.write_text(rtl_text)
             # watchdog-exempt: bounded single-file iverilog compile (elaboration/sim build); fixed budget adequate — not an open-ended EDA generator
-            comp = subprocess.run(
+            comp = _tool_route.run(
                 ["iverilog", "-g2012", "-o", str(out_vvp),
                  str(tb_path), str(rtl_copy)],
                 capture_output=True, text=True)
             if comp.returncode != 0:
                 return None, (comp.stdout + comp.stderr).strip(), ""
-            sim = subprocess.run(["vvp", str(out_vvp)],
+            sim = _tool_route.run(["vvp", str(out_vvp)],
                                  capture_output=True, text=True)
             log = (sim.stdout + sim.stderr).strip()
         return ("SPEC_EXAMPLE_SMOKE_RESULT=PASS" in log), "", log
@@ -994,9 +998,11 @@ def _run(prompt: Path, rtl: Path, top: Optional[str],
                       "nothing to execute",
                       rows_json)
 
-    if shutil.which("iverilog") is None or shutil.which("vvp") is None:
+    _why_no_tool = _tool_route.unavailable("iverilog", "vvp")
+    if _why_no_tool:
         return Result("NOT_APPLICABLE",
-                      "iverilog/vvp not on PATH — cannot run the example "
+                      f"iverilog/vvp absent from this run's tool route "
+                      f"({_why_no_tool}) — cannot run the example "
                       f"smoke TB ({len(rows)} row(s) were extractable)",
                       rows_json)
 
@@ -1010,7 +1016,7 @@ def _run(prompt: Path, rtl: Path, top: Optional[str],
         tb_path.write_text(tb_text)
         rtl_copy.write_text(rtl_text)
         # watchdog-exempt: bounded single-file iverilog compile (elaboration/sim build); fixed budget adequate — not an open-ended EDA generator
-        comp = subprocess.run(
+        comp = _tool_route.run(
             ["iverilog", "-g2012", "-o", str(out_vvp),
              str(tb_path), str(rtl_copy)],
             capture_output=True, text=True)
@@ -1024,7 +1030,7 @@ def _run(prompt: Path, rtl: Path, top: Optional[str],
                           "example smoke TB failed to compile against the RTL "
                           "(stated example ports do not connect) — see sim_log",
                           rows_json, sim_log=log)
-        sim = subprocess.run(["vvp", str(out_vvp)],
+        sim = _tool_route.run(["vvp", str(out_vvp)],
                              capture_output=True, text=True)
         log = (sim.stdout + sim.stderr).strip()
 

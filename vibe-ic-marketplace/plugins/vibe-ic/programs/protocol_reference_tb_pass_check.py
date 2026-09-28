@@ -85,6 +85,8 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 
 PLUGIN_TB_REL = "tools/protocol_tb/aid_class_reference_tb.v"
@@ -120,7 +122,7 @@ def find_plugin_tb() -> Optional[Path]:
 
 # --- iverilog discovery ------------------------------------------------
 def have_iverilog() -> bool:
-    return shutil.which("iverilog") is not None and shutil.which("vvp") is not None
+    return _tool_route.available("iverilog") and _tool_route.available("vvp")
 
 
 # --- project introspection ---------------------------------------------
@@ -406,13 +408,15 @@ def run_iverilog(rtl_files: list[Path], plugin_tb: Path,
         # watchdog-exempt: bounded single-file iverilog compile (reference-TB +
         # RTL build); fixed timeout_compile budget adequate — not an open-ended
         # EDA generator.
-        compile_proc = subprocess.run(
+        compile_proc = _tool_route.run(
             cmd,
             capture_output=True, text=True,
             timeout=timeout_compile,
         )
     except subprocess.TimeoutExpired:
         return ("", "iverilog timed out", 124, "", 0)
+    except _tool_route.ToolRouteRefused as exc:
+        return ("", str(exc), 127, "", 0)
 
     compile_stdout = compile_proc.stdout
     compile_stderr = compile_proc.stderr
@@ -422,7 +426,7 @@ def run_iverilog(rtl_files: list[Path], plugin_tb: Path,
         return (compile_stdout, compile_stderr, compile_rc, "", 0)
 
     try:
-        run_proc = subprocess.run(
+        run_proc = _tool_route.run(
             ["vvp", str(tb_bin)],
             cwd=str(work_dir),
             capture_output=True, text=True,
@@ -475,15 +479,18 @@ def check(project: Path, keep_tmp: bool = False) -> dict:
 
     if not have_iverilog():
         # WARN-only — return pass=True so we don't block the burn just
-        # because the build host lacks iverilog.  Caller can treat the
-        # warning as a hint to install.
+        # because this run's tool route has no iverilog. The message carries
+        # the ROUTE'S reason (FX-N1 re-review): "install iverilog" was the
+        # advice here, and a host iverilog is what the route must not use.
+        _why_no_tool = _tool_route.unavailable("iverilog", "vvp")
         out["pass"] = True
         out["warnings"].append({
             "rule": "IVERILOG_NOT_AVAILABLE",
-            "message": ("iverilog / vvp not on PATH — runtime "
-                        "functional verification SKIPPED.  Install "
-                        "iverilog (e.g. `apt install iverilog`) to "
-                        "enable Wave 28 reference-TB gate."),
+            "message": ("iverilog / vvp absent from this run's tool route "
+                        f"({_why_no_tool}) — runtime functional verification "
+                        "SKIPPED. Make the pinned EDA image available to this "
+                        "run (or run inside it) to enable the Wave 28 "
+                        "reference-TB gate."),
         })
         return out
 

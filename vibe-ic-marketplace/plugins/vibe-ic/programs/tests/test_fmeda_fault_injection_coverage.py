@@ -659,6 +659,11 @@ def test_the_backend_resolver_prefers_a_local_image_and_never_invents_one(
 
     monkeypatch.setattr(fi, "_local_docker_image", lambda: None)
     monkeypatch.setattr(fi, "_host_iverilog", lambda: True)
+    # FX-N1: the host leg exists only on the LOCAL route (no docker client);
+    # with one, a host binary is not substituted for the pinned image
+    # (`test_fx_n1_host_tool_locality::test_fmeda_host_leg_is_closed_...`).
+    import _container_route as _croute
+    _croute.pin_local_route(monkeypatch)
     assert fi.resolve_injection_backend()[0] == fi.BACKEND_HOST
 
     monkeypatch.setattr(fi, "_host_iverilog", lambda: False)

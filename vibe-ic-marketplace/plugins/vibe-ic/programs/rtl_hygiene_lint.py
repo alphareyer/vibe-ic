@@ -117,6 +117,7 @@ from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (he
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 
 @dataclass
@@ -7106,8 +7107,10 @@ def main():
         # otherwise revert everything and WARN. A pre-broken file is fixed
         # as usual (no revert — the fixer is not what broke it). Skipped
         # silently when iverilog is unavailable (the net needs a verifier).
-        import shutil as _sh
-        _iv = _sh.which("iverilog")
+        # FX-N1: the net's verifier runs on this process's `_eda_tool_route`
+        # route (the pinned image whenever a container route exists), not on
+        # whatever iverilog the host PATH holds.
+        _iv = _tool_route.available("iverilog")
 
         def _compiles(fp: Path) -> bool:
             # -i ignores missing submodules so the net also protects
@@ -7118,9 +7121,9 @@ def main():
             # generate-scoped reg) is an elaboration error -i does NOT
             # suppress, so the net still catches real bugs.
             try:
-                return _pr.run([_iv, "-g2012", "-i", "-t", "null", str(fp)],
-                               capture_output=True, text=False
-                               ).returncode == 0
+                return _tool_route.supervised_run(
+                    ["iverilog", "-g2012", "-i", "-t", "null", str(fp)],
+                    capture_output=True, text=False).returncode == 0
             except Exception:
                 return False
 

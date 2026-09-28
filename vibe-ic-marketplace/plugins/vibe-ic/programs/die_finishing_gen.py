@@ -1185,8 +1185,8 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
     runner = _kl.find_runner()
     if runner is None:
         return done(_skip(
-            "no KLayout runner available (no strmrun/klayout on PATH and no "
-            "KLayout in $VIBEIC_EDA_CONTAINER) — no seal ring was inserted",
+            f"no KLayout runner available ({_kl.why_no_runner()}) — "
+            "no seal ring was inserted",
             script=script, script_source=src))
 
     if not runner.exists(script):

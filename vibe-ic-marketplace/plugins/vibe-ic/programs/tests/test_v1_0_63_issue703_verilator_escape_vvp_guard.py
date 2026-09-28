@@ -67,6 +67,13 @@ def _patch_run(monkeypatch):
         return (0, "", "")
 
     monkeypatch.setattr(R, "_run", _fake_run)
+    # FX-N1: this file fakes the simulator at `R._run`, keyed on argv[0]. With
+    # no container these stages take the LOCAL route, which records and checks
+    # the tool before handing the argv to `_run`; the test STATES that this
+    # process has iverilog/vvp (it fakes them above), so no host PATH is read.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import _container_route as _croute
+    _croute.pin_tool_route_local(monkeypatch, present=("iverilog", "vvp"))
     return calls
 
 

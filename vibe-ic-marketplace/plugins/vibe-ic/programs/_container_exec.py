@@ -189,10 +189,47 @@ def docker_exec_argv(container: str, *rest: str,
     looks runnable and is not would be discovered inside the tool's own output,
     which is the class of confusion this change removes.
     """
+    if container not in _OWNED_VERIFIED:
+        why = _pin.container_attach_refusal(container)
+        if why:
+            raise ContainerImageMismatch(why)
+    return _unguarded_exec_argv(container, *rest, opts=opts)
+
+
+# ---------------------------------------------------------------------------
+# CONTAINERS THIS PROCESS CREATED, AND VERIFIED ONCE
+# ---------------------------------------------------------------------------
+#
+# The attach check above exists because `docker exec` addresses a container by
+# NAME, and a name is whatever process got there first. It costs a digest
+# inspect on EVERY exec. For a container THIS process created -- under a name
+# unique to this process, from the pinned reference, verified by that same
+# check once at creation -- the name cannot come to hold other bytes without
+# this process recreating it (which unregisters it first). Re-asking per exec
+# buys nothing and costs a docker round trip per tool call; that is what made
+# `_eda_tool_route`'s long-lived session container worth having at all.
+# The registry is per process and holds only names the caller created.
+_OWNED_VERIFIED: set = set()
+
+
+def register_owned_container(container: str) -> str:
+    """Verify `container` against the pin ONCE and remember it as owned.
+
+    Returns '' when registered; otherwise the refusal (a MEASURED mismatch),
+    and the container is NOT registered, so every later exec is still checked.
+    Only for a container the calling process itself created under a
+    process-unique name."""
     why = _pin.container_attach_refusal(container)
     if why:
-        raise ContainerImageMismatch(why)
-    return _unguarded_exec_argv(container, *rest, opts=opts)
+        _OWNED_VERIFIED.discard(container)
+        return why
+    _OWNED_VERIFIED.add(container)
+    return ""
+
+
+def unregister_owned_container(container: str) -> None:
+    """Forget an owned container (it was removed or is being recreated)."""
+    _OWNED_VERIFIED.discard(container)
 
 
 def _unguarded_exec_argv(container: str, *rest: str,

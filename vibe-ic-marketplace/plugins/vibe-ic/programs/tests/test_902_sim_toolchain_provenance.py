@@ -54,6 +54,8 @@ PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 
 import design_one_shot_runner as dosr  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _container_route as _route  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
@@ -173,11 +175,19 @@ def test_902_host_fallback_when_container_cannot_see_the_run_tree(
     cannot run the sim (`_to_container_path` would hand it an untranslated,
     non-existent path). The program must fall back to the host rather than
     dispatch into a container that cannot see the files."""
-    monkeypatch.setattr("shutil.which", lambda _t: None)
+    # The LOCAL route records and checks the tool it runs, so this filesystem
+    # must carry one; with none, the stage is refused (rc 127) instead of
+    # handing a bare name to a PATH that cannot resolve it.
+    monkeypatch.setattr("shutil.which", lambda _t: "/usr/bin/iverilog")
     monkeypatch.setattr(dosr, "_tool_in_container", lambda c, t: t == "iverilog")
     monkeypatch.setattr(dosr, "_path_in_container", lambda p, c: False)
     _stub_image_probe(monkeypatch)
     log = _capture_launchers(monkeypatch)
+    # FX-N1: with a container route (a docker client on PATH) a container that
+    # cannot run the stage now hands it to the pinned image, never the host
+    # (`test_fx_n1_host_tool_locality`); the host fallback this asserts exists
+    # only on the LOCAL route, so that is the route this test declares.
+    _route.pin_local_route(monkeypatch)
 
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -197,6 +207,11 @@ def test_902_host_fallback_is_recorded_as_diverged(monkeypatch, tmp_path):
     monkeypatch.setattr(dosr, "_tool_in_container", lambda c, t: False)
     monkeypatch.setattr(dosr, "_path_in_container", lambda p, c: True)
     _stub_image_probe(monkeypatch, declared_image_ref="declared:ref")
+    # FX-N1: with a container route (a docker client on PATH) a container that
+    # cannot run the stage now hands it to the pinned image, never the host
+    # (`test_fx_n1_host_tool_locality`); the host fallback this asserts exists
+    # only on the LOCAL route, so that is the route this test declares.
+    _route.pin_local_route(monkeypatch)
     _capture_launchers(
         monkeypatch,
         host_out="__VIBEIC_TOOL_PATH__/usr/bin/iverilog\n"
@@ -271,6 +286,11 @@ def test_902_compile_and_run_tools_are_both_recorded(monkeypatch, tmp_path):
     monkeypatch.setattr("shutil.which", lambda _t: "/usr/bin/iverilog")
     monkeypatch.setattr(dosr, "_tool_in_container", lambda c, t: False)
     _stub_image_probe(monkeypatch)
+    # FX-N1: with a container route (a docker client on PATH) a container that
+    # cannot run the stage now hands it to the pinned image, never the host
+    # (`test_fx_n1_host_tool_locality`); the host fallback this asserts exists
+    # only on the LOCAL route, so that is the route this test declares.
+    _route.pin_local_route(monkeypatch)
     _capture_launchers(monkeypatch)
 
     run_dir = tmp_path / "run"
@@ -295,6 +315,11 @@ def test_902_aggregate_lands_under_reports_of_the_owning_project(
     monkeypatch.setattr("shutil.which", lambda _t: "/usr/bin/iverilog")
     monkeypatch.setattr(dosr, "_tool_in_container", lambda c, t: False)
     _stub_image_probe(monkeypatch)
+    # FX-N1: with a container route (a docker client on PATH) a container that
+    # cannot run the stage now hands it to the pinned image, never the host
+    # (`test_fx_n1_host_tool_locality`); the host fallback this asserts exists
+    # only on the LOCAL route, so that is the route this test declares.
+    _route.pin_local_route(monkeypatch)
     _capture_launchers(monkeypatch)
 
     project = tmp_path / "proj"

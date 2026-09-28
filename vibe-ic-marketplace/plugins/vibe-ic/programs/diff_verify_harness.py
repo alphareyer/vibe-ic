@@ -86,6 +86,8 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 # ── RTL header parse (reuse the comment-stripped-view doctrine) ──────────────
 _LINE_COMMENT_RE = re.compile(r"//[^\n]*")
@@ -411,8 +413,10 @@ _CYC_RE = re.compile(r"^CYC\s+(\d+)\s+(\d+)\s*$", re.MULTILINE)
 
 def _run(cmd: List[str], timeout: int = 120,
          cwd: Optional[str] = None) -> Tuple[int, str, str]:
+    # FX-N1: on its `_eda_tool_route` route (the pinned image whenever a
+    # container route exists); a refused route is a FileNotFoundError -> 127.
     try:
-        cp = subprocess.run(cmd, capture_output=True, text=True,
+        cp = _tool_route.run(cmd, capture_output=True, text=True,
                             timeout=timeout, cwd=cwd)
         return cp.returncode, cp.stdout, cp.stderr
     except subprocess.TimeoutExpired as e:
@@ -518,10 +522,12 @@ def diff_verify(rtl_path: Path, ref_path: Path, top: Optional[str],
     report["n_sequences"] = len(seqs)
 
     # iverilog/vvp gate — refuse-don't-fake: ABSENT → SKIP, never a faked AGREE.
-    if shutil.which("iverilog") is None or shutil.which("vvp") is None:
+    _why_no_tool = _tool_route.unavailable("iverilog", "vvp")
+    if _why_no_tool:
         report["verdict"] = "SKIP"
         report["tool_available"] = False
-        report["reason"] = ("iverilog/vvp absent — the RTL side of the "
+        report["reason"] = ("iverilog/vvp absent from this run's tool route "
+                            f"({_why_no_tool}) — the RTL side of the "
                             "differential check cannot run; reporting SKIP with "
                             "disclosure, NOT a faked AGREE (refuse-don't-fake)")
         if require_tools:

@@ -81,6 +81,8 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 DWELL = 4  # cycles held per walk step; samples on the last negedge (settles 1-2 cycle registered decodes)
 
@@ -304,7 +306,7 @@ def simulate(rtl: Path, tb_text: str) -> Tuple[Optional[List[dict]], str]:
         binp = Path(td) / "sim"
         try:
             # watchdog-exempt: bounded single-file iverilog TB compile with a fixed 120s budget — not an open-ended EDA generator
-            c = subprocess.run(["iverilog", "-g2012", "-s", "__lhfo_tb",
+            c = _tool_route.run(["iverilog", "-g2012", "-s", "__lhfo_tb",
                                 "-o", str(binp), str(rtl), str(tb)],
                                capture_output=True, text=True, timeout=120)
         except FileNotFoundError:
@@ -315,10 +317,15 @@ def simulate(rtl: Path, tb_text: str) -> Tuple[Optional[List[dict]], str]:
             return None, "tb compile failed: " + (c.stdout + c.stderr)[-300:]
         try:
             # watchdog-exempt: bounded compiled-TB sim (fixed walk, ~40 cycles) with a fixed 120s budget
-            r = subprocess.run([str(binp)], capture_output=True, text=True,
-                               timeout=120, cwd=td)
+            # FX-N1: the compiled image is a vvp script whose interpreter is
+            # the vvp of the iverilog that built it, so it runs through `vvp`
+            # on the same route, never exec'd by the host directly.
+            r = _tool_route.run(["vvp", str(binp)], capture_output=True,
+                                text=True, timeout=120, cwd=td)
         except subprocess.TimeoutExpired:
             return None, "sim timeout"
+        except FileNotFoundError:
+            return None, "TOOL_ABSENT"
         samples = []
         for ln in (r.stdout + r.stderr).splitlines():
             if not ln.startswith("__S "):

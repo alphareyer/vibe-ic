@@ -417,9 +417,9 @@ def run(project: Path, gds: Optional[str], config: Optional[str],
 
     runner = _kl.find_runner()
     if runner is None:
-        return _skip("no KLayout runner available (no strmrun/klayout on PATH "
-                     "and no KLayout in $VIBEIC_EDA_CONTAINER) — no fill was "
-                     "inserted", config_source=cfg_src, gds=str(gds_path))
+        return _skip(f"no KLayout runner available ({_kl.why_no_runner()}) "
+                     "— no fill was inserted", config_source=cfg_src,
+                     gds=str(gds_path))
 
     rep = Path(report) if report else (project / _REPORT_REL)
     if not rep.is_absolute():

@@ -38,6 +38,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 import _progress_run as _pr  # noqa: E402
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 
@@ -126,7 +127,13 @@ class KLayoutRunner:
         """The KLayout GUI-class binary, for callers that need its own CLI
         (`-n <tech>`, `-rd k=v`). NOT `self._bin`: a host runner may have
         resolved `strmrun`, which is a script runner and accepts neither."""
-        return shutil.which("klayout") or "klayout"
+        if _ce.no_container_route():
+            try:
+                return _tool_route.resolve("klayout", local=True).local_path \
+                    or "klayout"
+            except _tool_route.ToolRouteRefused:
+                return "klayout"
+        return "klayout"
 
 
 class HostRunner(KLayoutRunner):
@@ -287,7 +294,16 @@ def container_the_run_recorded(project) -> Optional[str]:
 
 def find_runner(container: Optional[str] = None,
                 project=None) -> Optional[KLayoutRunner]:
-    """Resolve a KLayout batch runner, host first then container.
+    """Resolve a KLayout batch runner: the container whenever a container
+    route exists, this filesystem's KLayout only when there is none.
+
+    FX-N1: this used to be "host first then container", so a host KLayout build
+    ran the sign-off geometry decks of a run pinned to the image's KLayout, and
+    the same GDS got a verdict that depended on the machine. With a docker
+    client on PATH the run's container (argument, receipt, shared name) is the
+    only candidate; `strmrun`/`klayout` on PATH are used only on the LOCAL
+    route (no docker client, e.g. inside the image), where `_eda_tool_route`
+    records KLayout's version.
 
     Returns None when neither is available — the caller MUST then emit a named,
     disclosed skip. Never silently succeed on a missing checker.
@@ -301,16 +317,44 @@ def find_runner(container: Optional[str] = None,
         # Test hook: proves the honest-degrade path without uninstalling
         # KLayout. Only ever set by the gate's own regression tests.
         return None
-    for cand, flags in (("strmrun", ()), ("klayout", ("-zz", "-b", "-r"))):
-        found = shutil.which(cand)
-        if found:
-            return HostRunner(found, flags)
-    if shutil.which("docker"):
-        recorded = container_the_run_recorded(project) if project else None
-        for name in (container, recorded, DEFAULT_CONTAINER):
-            if name and _container_has_klayout(name):
-                return ContainerRunner(name)
+    if _ce.no_container_route():
+        for cand, flags in (("strmrun", ()), ("klayout", ("-zz", "-b", "-r"))):
+            found = shutil.which(cand)
+            if found:
+                try:
+                    _tool_route.resolve("klayout", local=True)   # version recorded
+                except _tool_route.ToolRouteRefused:
+                    pass            # strmrun without a klayout binary is still a runner
+                return HostRunner(found, flags)
+        return None
+    recorded = container_the_run_recorded(project) if project else None
+    for name in (container, recorded, DEFAULT_CONTAINER):
+        if name and _container_has_klayout(name):
+            return ContainerRunner(name)
     return None
+
+
+def why_no_runner(container: Optional[str] = None, project=None) -> str:
+    """Why :func:`find_runner` returned None, naming ONLY the places it looks.
+
+    Review wave 4c: every caller blamed the PATH and $VIBEIC_EDA_CONTAINER,
+    including on a host with a docker client, where the PATH is never asked
+    -- an operator following it would install a host KLayout, which is
+    exactly what must not be used."""
+    if os.environ.get("VIBEIC_KLAYOUT_FORCE_ABSENT"):
+        return "KLayout forced absent (VIBEIC_KLAYOUT_FORCE_ABSENT)"
+    if _ce.no_container_route():
+        return ("no container route (no docker client here), and neither "
+                "strmrun nor klayout is on this process's PATH")
+    recorded = container_the_run_recorded(project) if project else None
+    looked = []
+    for name in dict.fromkeys(n for n in (container, recorded, DEFAULT_CONTAINER) if n):
+        refusal = _pin.container_attach_refusal(name)
+        looked.append(f"{name!r}: {refusal}" if refusal else
+                      f"{name!r}: not running, or no klayout on its PATH")
+    return ("a container route exists (docker client on PATH), so KLayout runs "
+            "only in the run's container and the host PATH is not asked; "
+            "looked in " + ("; ".join(looked) or "no container"))
 
 
 #: (root, subdir, name) triples already reported as "the override carries no

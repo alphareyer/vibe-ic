@@ -1742,11 +1742,16 @@ def default_dispatch(argv: List[str], run_dir: Path,
     its own: `design_one_shot_runner._run_sim_stage` already does all three for
     the reference-TB chain, and a second executor with its own copy of that
     logic is the failure this indirection exists to avoid. Imported lazily so
-    `testbench_gen` stays importable on its own; with no container (or no
-    runner importable) the argv runs on the host, which is the same last
-    fallback that site takes."""
+    `testbench_gen` stays importable on its own.
+
+    With NO container named the argv runs on the route `_eda_tool_route`
+    resolves -- the pinned image whenever a container route exists, this
+    filesystem's tool (version recorded) only when there is none -- never a
+    bare host PATH lookup (review wave 4c: `SIMULATOR = "verilator"` reached
+    the host here). "host" is the caller's deliberate local choice. A program
+    the simulator BUILT runs where the simulator runs (`as_tool`)."""
     import subprocess
-    if container:
+    if container and container != "host":
         try:
             import sys as _sys
             _here = str(Path(__file__).resolve().parent)
@@ -1759,12 +1764,19 @@ def default_dispatch(argv: List[str], run_dir: Path,
             return rc, (err or "") + (out or "")
         except Exception as e:                               # noqa: BLE001
             return 127, f"dispatch unavailable: {e}"
+    import _eda_tool_route as _tool_route
+    argv = [str(a) for a in argv]
+    built = not _tool_route.is_eda_tool(_os.path.basename(argv[0])) if argv else False
     try:
-        pr = subprocess.run([str(a) for a in argv], cwd=str(run_dir),
-                            capture_output=True, text=True, timeout=timeout)
+        pr = _tool_route.run(argv, cwd=str(run_dir), capture_output=True,
+                             text=True, timeout=timeout,
+                             local=(container == "host"),
+                             as_tool=tool if built else None)
     except subprocess.TimeoutExpired:
         return 124, f"TIMEOUT after {timeout}s"
     except OSError as e:
+        # a ToolRouteRefused is an OSError (FileNotFoundError): its text is
+        # the route's reason (NO_IMAGE_ROUTE, TOOL_ABSENT...), kept verbatim
         return 127, f"could not dispatch: {e}"
     # stderr FIRST: the container prints an environment banner, and a
     # transcript tail that ends in the banner hides the verdict line.

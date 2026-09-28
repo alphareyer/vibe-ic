@@ -67,7 +67,6 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
-import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
 import instrument_calibration as _calibration  # noqa: E402
 
 PROGRAM = "catalog_synth_safe_params_check"
@@ -249,29 +248,24 @@ def reached_ips(netlist: dict, ips: list[dict[str, Any]]) -> list[str]:
 
 
 def _yosys(project: Path, image: str | None, script: str, out_dir: Path):
-    """Host yosys, else the EDA image with only ``out_dir`` writable.
+    """yosys on its route (`_eda_tool_route`): the EDA image whenever a
+    container route exists, else this PATH's yosys with every command the
+    script runs confirmed present.
 
-    ``image`` is the declared one (``--image`` / ``VIBEIC_EDA_IMAGE``); when
-    nothing is declared the pinned image is resolved here, at use, never
-    stored.
+    This used to prefer a host yosys whenever one was on PATH, so the verdict
+    depended on which machine ran the check (8HD-9 carries /usr/bin/yosys 0.9,
+    which has neither `read_slang` nor `dffunmap`). ``image`` is the declared
+    one (``--image`` / ``VIBEIC_EDA_IMAGE``); when nothing is declared the
+    pinned image is resolved here, at use, never stored, and only on the
+    container route. A refused route raises FileNotFoundError, as a missing
+    tool always did.
     """
-    import shutil
-    import subprocess
-    if shutil.which("yosys"):
-        command = ["yosys", "-q", "-p", script]
-    elif shutil.which("docker"):
+    import _eda_tool_route as _tool_route
+    if not _tool_route.local_route():
         import p0_tool_frontend_check as frontend
         image = image or frontend.default_image()
-        root, out = str(project.resolve()), str(out_dir.resolve())
-        command = ["docker", "run", *_dmem.docker_memory_flags(), "--rm",
-                   "--network", "none", "-u",
-                   f"{os.getuid()}:{os.getgid()}", "-v", f"{root}:{root}:ro",
-                   "-v", f"{out}:{out}", "--entrypoint", "yosys", image,
-                   "-q", "-p", script]
-    else:
-        raise FileNotFoundError("yosys and docker unavailable")
-    return subprocess.run(command, cwd=project, capture_output=True, text=True,
-                          check=False)
+    return _tool_route.run(["yosys", "-q", "-p", script], cwd=project,
+                           image=image, capture_output=True, text=True)
 
 
 def run(project: Path, image: str | None) -> tuple[int, dict[str, Any]]:
@@ -327,6 +321,7 @@ def run(project: Path, image: str | None) -> tuple[int, dict[str, Any]]:
         report.update(verdict="NOT_MEASURED", reason=str(exc))
         return 1, report
     report["yosys"] = {"exit_code": result.returncode,
+                       "route": getattr(result, "eda_route", None),
                        "log_tail": (result.stdout + result.stderr)[-2000:]}
     try:
         netlist = json.loads(out.read_text())

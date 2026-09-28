@@ -769,13 +769,20 @@ def run_yosys(rtl_files: List[Path], top: str, work_dir: Path,
     _aa.write_text(ys, script.replace("; ", "\n") + "\n")
     inner = (f"export PATH=/foss/tools/bin:/foss/tools/yosys/bin:$PATH; "
              f"cd {work_dir.resolve()} && yosys -q -s {ys.name}")
-    if container:
-        import _container_exec as _ce
-        argv = _ce.exec_argv(container, inner, tag="formal_structural_check")
-    else:
-        argv = ["bash", "-lc", inner]
     try:
-        p = subprocess.run(argv, capture_output=True, text=True)
+        if container:
+            import _container_exec as _ce
+            argv = _ce.exec_argv(container, inner, tag="formal_structural_check")
+            p = subprocess.run(argv, capture_output=True, text=True)
+        else:
+            # FX-N1: no container NAMED is not "run on the host". The route
+            # is `_eda_tool_route`'s: the pinned image whenever a container
+            # route exists; this filesystem's yosys (every command of the
+            # script confirmed present) only when there is none.
+            import _eda_tool_route as _tool_route
+            p = _tool_route.run(["yosys", "-q", "-s", str(ys.resolve())],
+                                cwd=work_dir.resolve(), capture_output=True,
+                                text=True)
         rc, log = p.returncode, (p.stdout or "") + (p.stderr or "")
     except FileNotFoundError as exc:
         rc, log = 127, f"[formal_structural_check] {exc}\n"

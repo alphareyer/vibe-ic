@@ -81,6 +81,7 @@ from typing import List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 # Defaults MIRROR the authoritative official RTLLM scorer
 # (benchmark-data/evaluation/rtllm/score_rtllm.py): PASS iff "Your Design Passed"
@@ -104,7 +105,7 @@ _DEFAULT_FAIL = ("Test failed", "Your Design Failed")
 
 
 def verilator_available() -> bool:
-    return shutil.which("verilator") is not None
+    return _tool_route.available("verilator")
 
 
 def _rename_top(golden_src: str, golden_top: str, dut_name: str) -> str:
@@ -127,8 +128,10 @@ def adjudicate(tb: Path, golden: Path, tb_top: str, dut_name: str,
                golden_top: str, data_dir: Path | None,
                pass_tokens: List[str], fail_tokens: List[str]) -> tuple[int, str]:
     if not verilator_available():
-        return 2, ("VERILATOR_ABSENT: verilator not on PATH — cannot adjudicate; "
-                   "the iverilog tool-gap (FLOOR-D) stands under our substitution.")
+        return 2, ("VERILATOR_ABSENT: verilator absent from this run's tool "
+                   f"route ({_tool_route.unavailable('verilator')}) — cannot "
+                   "adjudicate; the iverilog tool-gap (FLOOR-D) stands under "
+                   "our substitution.")
     if not tb.is_file() or not golden.is_file():
         return 2, f"IO: missing tb ({tb}) or golden ({golden})."
 
@@ -153,8 +156,12 @@ def adjudicate(tb: Path, golden: Path, tb_top: str, dut_name: str,
                       "-Wno-lint", "-Wno-PINNOTFOUND", "-Wno-WIDTH",
                       "--top-module", tb_top, "golden.v", "testbench.v",
                       "-o", "sim"]
-        _res = _wd.run_host_supervised(build_argv, stall_grace_s=_STALL_GRACE_S,
-                                       cwd=str(work))
+        # FX-N1: the build runs where `_eda_tool_route` resolves verilator
+        # (the pinned image's Verilator 5.x whenever a container route exists,
+        # which is the escalation this adjudicator exists for), never the
+        # host PATH's; the simulator it produces runs in the same place.
+        _res = _tool_route.watchdog_run(build_argv, cwd=work,
+                                        stall_grace_s=_STALL_GRACE_S)
         if _res.outcome in ("stalled", "ceiling"):
             # rc 2 is this file's "cannot adjudicate", and after the watchdog
             # that is a MEASURED statement rather than a shrug: the adjudicator
@@ -180,9 +187,9 @@ def adjudicate(tb: Path, golden: Path, tb_top: str, dut_name: str,
         # Same replacement as the build above. A TB that is SIMULATING is
         # progressing however many cycles it has left; only one that is wedged
         # has stopped, and only that is a fact worth acting on.
-        _res = _wd.run_host_supervised([str(simbin)],
-                                       stall_grace_s=_SIM_STALL_GRACE_S,
-                                       cwd=str(work))
+        _res = _tool_route.watchdog_run([str(simbin)], cwd=work,
+                                        stall_grace_s=_SIM_STALL_GRACE_S,
+                                        as_tool="verilator")
         if _res.outcome in ("stalled", "ceiling"):
             return 2, (f"VERILATOR_SIM_STALLED: the golden's TB made no forward "
                        f"progress under Verilator for {_SIM_STALL_GRACE_S}s and "

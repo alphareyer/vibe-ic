@@ -31,7 +31,11 @@ def test_exact_repartitioned_reviewed_modules_pass(tmp_path):
             "rtl/leaf.sv":
                 "module leaf(input x, output y); assign y=x; endmodule",
         }, declared_top="top")
-    expected = "PASS" if gate.shutil.which("iverilog") else "NOT_MEASURED"
+    # FX-N1: the gate compiles on its `_eda_tool_route` route (the pinned image
+    # whenever a container route exists), so the expectation asks THAT route,
+    # not this host's PATH -- which on a host with a docker client and no host
+    # iverilog predicted NOT_MEASURED for a compile the image ran and passed.
+    expected = "PASS" if gate._tool_route.available("iverilog") else "NOT_MEASURED"
     assert result["status"] == expected
     assert result["reviewed_modules"] == ["leaf", "top"]
     assert result["final_modules"] == ["leaf", "top"]
@@ -71,7 +75,7 @@ def test_only_prompt_derived_declared_top_is_enforced(tmp_path):
 
 
 def test_unresolved_dependency_fails_exact_final_compile(tmp_path):
-    if gate.shutil.which("iverilog") is None:
+    if not gate._tool_route.available("iverilog"):     # the gate's own route (FX-N1)
         pytest.skip("NOT_MEASURED: iverilog is unavailable")
     text = "module top; missing_dependency u(); endmodule\n"
     reviewed = _reviewed(tmp_path, text)

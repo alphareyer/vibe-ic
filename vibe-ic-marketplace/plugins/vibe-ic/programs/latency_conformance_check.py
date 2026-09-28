@@ -153,6 +153,7 @@ from reset_clock_variant_alias import (  # noqa: E402
     parse_module_params,
     _module_body,
 )
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 # The timing-conformance family. Only `latency` is fully implemented; the
 # others are reserved extensibility hooks (pulse-one-cycle-after,
@@ -1876,8 +1877,10 @@ def _width_token(pi: PortInfo, params: Optional[Dict[str, int]] = None) -> str:
 
 # ─── iverilog/vvp drive ──────────────────────────────────────────────────────
 def _run(cmd: List[str], timeout: int = 120) -> Tuple[int, str, str]:
+    # FX-N1: on its `_eda_tool_route` route (the pinned image whenever a
+    # container route exists); a refused route is a FileNotFoundError -> 127.
     try:
-        cp = subprocess.run(cmd, capture_output=True, text=True,
+        cp = _tool_route.run(cmd, capture_output=True, text=True,
                             timeout=timeout)
         return cp.returncode, cp.stdout, cp.stderr
     except subprocess.TimeoutExpired as e:
@@ -2238,10 +2241,12 @@ def run_latency_conformance(
     report["max_cycles"] = max_cycles
 
     # iverilog/vvp gate — refuse-don't-fake.
-    if shutil.which("iverilog") is None or shutil.which("vvp") is None:
+    _why_no_tool = _tool_route.unavailable("iverilog", "vvp")
+    if _why_no_tool:
         report["verdict"] = "SKIP"
         report["tool_available"] = False
-        report["reason"] = ("iverilog/vvp absent — cannot MEASURE the RTL's "
+        report["reason"] = ("iverilog/vvp absent from this run's tool route "
+                            f"({_why_no_tool}) — cannot MEASURE the RTL's "
                             "latency; reporting SKIP (NOT a fabricated "
                             "measurement or PASS)")
         return 0, report

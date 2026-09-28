@@ -165,9 +165,21 @@ def test_not_executed_is_classified_and_is_not_a_pass(capsys):
 # ---------------------------------------------------------------------------
 # THE EXECUTOR — the third dispatch site
 # ---------------------------------------------------------------------------
-def _pin_sites(monkeypatch, *, host_has_tool: bool, mounted):
+def _pin_sites(monkeypatch, *, host_has_tool: bool, mounted, local=False):
     """Container declines (it cannot see the tree); host presence and the
-    mounted-image result are the two variables."""
+    mounted-image result are the two variables. `local` declares the route:
+    FX-N1 makes the host a candidate ONLY on the LOCAL route (no docker
+    client); with a container route the host PATH is never asked. Host
+    presence is stated to `_eda_tool_route` (which records the local tool),
+    not read off this machine's PATH."""
+    import _container_route as _croute
+    import _eda_tool_route as _tr
+    (_croute.pin_local_route if local else _croute.pin_container_route)(monkeypatch)
+    _tr.reset_caches()
+    monkeypatch.setattr(_tr, "_probe_local", lambda tool: (
+        {"path": "/usr/bin/" + tool, "banner": tool + " (stated)",
+         "version": None, "commands": None} if host_has_tool else
+        {"path": None, "banner": None, "version": None, "commands": None}))
     monkeypatch.setattr(dosr, "_iverilog_exec_container",
                         lambda *a, **k: False)
     monkeypatch.setattr(dosr, "_tool_in_container", lambda *a, **k: True)
@@ -206,7 +218,8 @@ def test_a_host_that_has_the_simulator_still_uses_the_host(
     """TEETH. The new site is the fallback for an unreachable tree, not a
     replacement for a working host — a run in true host mode must be
     unchanged by this."""
-    calls = _pin_sites(monkeypatch, host_has_tool=True, mounted=(0, "", ""))
+    calls = _pin_sites(monkeypatch, host_has_tool=True, mounted=(0, "", ""),
+                       local=True)
     dosr._run_iverilog_stage(["iverilog", "-o", str(tmp_path / "a.vvp")],
                              tmp_path, "c")
     assert calls == {"mounted": 0, "host": 1}
@@ -214,14 +227,24 @@ def test_a_host_that_has_the_simulator_still_uses_the_host(
 
 def test_mounted_site_unavailable_falls_back_and_buys_nothing(
         tmp_path, monkeypatch):
-    """TEETH. No docker, no image id — the site returns None and the argv goes
-    to the host exactly as before, which is still rc=127. An unreachable
-    simulator must never be conjured into a verdict."""
+    """TEETH. No image id for the mounted site, and no pinned image either —
+    rc=127 with the refusal. An unreachable simulator must never be conjured
+    into a verdict.
+
+    FX-N1 (CONTRACT CHANGE, owner rule 2026-09-28): the argv used to go on to
+    the HOST here ("host": 1). With a container route the host PATH is never
+    the fallback: the pinned image is asked instead (`_routed_tool_stage`),
+    and when it is not there either the stage is refused."""
     calls = _pin_sites(monkeypatch, host_has_tool=False, mounted=None)
+
+    def _no_image(argv, run_dir, timeout, as_tool=None):
+        calls["image"] = calls.get("image", 0) + 1
+        return 127, "", "NO_IMAGE_ROUTE: iverilog: no usable container and no pinned image", {}
+    monkeypatch.setattr(dosr, "_routed_tool_stage", _no_image)
     rc, _out, err = dosr._run_iverilog_stage(
         ["iverilog", "-o", str(tmp_path / "a.vvp")], tmp_path, "c")
-    assert rc == 127 and "COMMAND_NOT_FOUND" in err
-    assert calls == {"mounted": 1, "host": 1}
+    assert rc == 127 and "NO_IMAGE_ROUTE" in err
+    assert calls == {"mounted": 1, "host": 0, "image": 1}
 
 
 def test_bind_dirs_cover_every_argv_path_and_fold_into_ancestors(tmp_path):

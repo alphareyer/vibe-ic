@@ -75,6 +75,8 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 # ── measurement constants (deterministic) ───────────────────────────────────
 CLKP = 10          # driven input-clock period, time units (posedge every CLKP)
@@ -335,10 +337,9 @@ def derive_contract(spec: str, ports: Dict[str, Tuple[str, Optional[int]]],
 
 # ── measurement (spec-derived self-TB) ──────────────────────────────────────
 def _iverilog() -> bool:
-    try:
-        return subprocess.run(["which", "iverilog"], capture_output=True).returncode == 0
-    except Exception:
-        return False
+    # FX-N1: the route's answer (the pinned image whenever a container
+    # route exists), not the host PATH's.
+    return _tool_route.available("iverilog") and _tool_route.available("vvp")
 
 
 def _build_tb(module: str, ports: Dict[str, Tuple[str, Optional[int]]],
@@ -398,7 +399,7 @@ def _measure(rtl: str, tb: str) -> Optional[dict]:
         (tdp / "sim.v").write_text(rtl + "\n\n" + tbtxt)
         try:
             # watchdog-exempt: bounded single-file iverilog compile (elaboration/sim build)
-            c = subprocess.run(["iverilog", "-g2012", "-o", str(tdp / "sim"),
+            c = _tool_route.run(["iverilog", "-g2012", "-o", str(tdp / "sim"),
                                 str(tdp / "sim.v")],
                                capture_output=True, text=True, timeout=60)
         except Exception:
@@ -406,7 +407,7 @@ def _measure(rtl: str, tb: str) -> Optional[dict]:
         if c.returncode != 0:
             return None
         try:
-            subprocess.run(["vvp", str(tdp / "sim")], capture_output=True,
+            _tool_route.run(["vvp", str(tdp / "sim")], capture_output=True,
                            text=True, timeout=60)
         except Exception:
             return None
@@ -507,7 +508,8 @@ def analyze(rtl: str, spec: str, top: Optional[str] = None) -> dict:
         res["reason"] = "divider contract but no clk input to divide"
         return res
     if not _iverilog():
-        res["reason"] = "iverilog unavailable"
+        res["reason"] = ("iverilog unavailable on this run's tool route: "
+                         + _tool_route.unavailable("iverilog", "vvp"))
         return res
 
     res.update(applicable=True, module=module, outport=outport, clk=clk, rst=rst,

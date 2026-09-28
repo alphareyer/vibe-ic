@@ -164,6 +164,10 @@ def test_reference_load_requires_callable_ref(tmp_path):
 # ── §4.05 NEGATIVE / NO-LEAK ─────────────────────────────────────────────────
 def test_iverilog_absent_SKIP_never_fakes_AGREE(tmp_path, monkeypatch):
     """iverilog ABSENT → SKIP with disclosure, NEVER a faked AGREE (rc 0)."""
+    # FX-N1: "absent" is a statement about THIS process's tools; with a docker
+    # client the pinned image would supply iverilog, so the route is declared.
+    import _container_route as _croute
+    _croute.pin_tool_route_local(monkeypatch)
     rtl = _write(tmp_path, "rtl.sv", _RTL_2CYC)
     ref = _write(tmp_path, "ref.py", _REF_2CYC)
     _orig = shutil.which
@@ -179,10 +183,12 @@ def test_iverilog_absent_SKIP_never_fakes_AGREE(tmp_path, monkeypatch):
            "refuse-don't-fake" in rep["reason"].lower()
 
 
-def test_iverilog_absent_cli_prints_SKIP_not_AGREE(tmp_path):
+def test_iverilog_absent_cli_prints_SKIP_not_AGREE(tmp_path, monkeypatch):
     """CLI-level: under a shadowed PATH the program prints `SKIP:` (rc 0), never
     `AGREE`. Done via the module API with a monkeypatched which to keep the
     Python interpreter reachable."""
+    import _container_route as _croute     # FX-N1: the local route, declared
+    _croute.pin_tool_route_local(monkeypatch)
     rtl = _write(tmp_path, "rtl.sv", _RTL_2CYC)
     ref = _write(tmp_path, "ref.py", _REF_2CYC)
     import io

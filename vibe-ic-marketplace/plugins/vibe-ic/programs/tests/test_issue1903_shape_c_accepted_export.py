@@ -441,6 +441,11 @@ def test_a_host_without_the_compiler_refuses_rather_than_exporting(
     guard cannot run, so the export must refuse and name why — never publish
     reviewed bytes it could not compile, and never leave a sample behind."""
     run, dataset, _ = _fixture(tmp_path)
+    # FX-N1: "no compiler" is a statement about THIS process's tools; with a
+    # docker client the pinned image would supply iverilog, so the route is
+    # declared rather than read off the machine.
+    import _container_route as _croute
+    _croute.pin_tool_route_local(monkeypatch)
     real_which = shutil.which
     monkeypatch.setattr(
         shutil, "which",

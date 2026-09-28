@@ -81,6 +81,8 @@ import tempfile
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 # Reuse the canonical Spec<->RTL port parser (module name + direction + width) —
 # the SAME structural primitive spec_example_smoke_tb / spec_coverage_check use.
@@ -942,13 +944,13 @@ def _compile_run(tb_text: str, rtl_text: str, rtl_suffix: str
         tb.write_text(tb_text)
         dut.write_text(rtl_text)
         # watchdog-exempt: bounded single-file iverilog compile (elaboration/sim build); fixed budget adequate — not an open-ended EDA generator
-        comp = subprocess.run(["iverilog", "-g2012", "-o", str(out),
+        comp = _tool_route.run(["iverilog", "-g2012", "-o", str(out),
                                str(tb), str(dut)],
                               capture_output=True, text=True)
         if comp.returncode != 0:
             return "nocompile", (comp.stdout + comp.stderr).strip()
         try:
-            sim = subprocess.run(["vvp", str(out)], capture_output=True,
+            sim = _tool_route.run(["vvp", str(out)], capture_output=True,
                                  text=True, timeout=60)
         except subprocess.TimeoutExpired:
             return "timeout", "vvp timed out"
@@ -1041,9 +1043,11 @@ def run_selftest(prompt_text: str, rtl_source: str,
 
     extracted = [v.label for v in vectors]
 
-    if shutil.which("iverilog") is None or shutil.which("vvp") is None:
+    _why_no_tool = _tool_route.unavailable("iverilog", "vvp")
+    if _why_no_tool:
         return SelfTestResult(
-            "SKIP", f"iverilog/vvp not on PATH ({len(vectors)} vector(s) were "
+            "SKIP", f"iverilog/vvp absent from this run's tool route "
+            f"({_why_no_tool}; {len(vectors)} vector(s) were "
             "extractable)", shape=shape, vectors=len(vectors),
             skips=skips, extracted=extracted)
 

@@ -92,6 +92,8 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 # The scorer's pinned toolchain (cvdp-sim image). Used ONLY to DISCLOSE a
 # host/scorer version skew — never to block. chip-AGNOSTIC (tool versions,
@@ -242,8 +244,10 @@ def resolve_top(code: str, top: Optional[str]) -> Tuple[Optional[str], str]:
 
 def _run(cmd: List[str], timeout: int = 120,
          cwd: Optional[str] = None) -> Tuple[int, str, str]:
+    # FX-N1: on its `_eda_tool_route` route (the pinned image whenever a
+    # container route exists); a refused route is a FileNotFoundError -> 127.
     try:
-        cp = subprocess.run(cmd, capture_output=True, text=True,
+        cp = _tool_route.run(cmd, capture_output=True, text=True,
                             timeout=timeout, cwd=cwd)
         return cp.returncode, cp.stdout, cp.stderr
     except subprocess.TimeoutExpired:
@@ -253,8 +257,11 @@ def _run(cmd: List[str], timeout: int = 120,
 
 
 def _tool_version(tool: str, flag: str = "-V") -> str:
-    if shutil.which(tool) is None:
-        return "absent"
+    _why_no_tool = _tool_route.unavailable(tool)
+    if _why_no_tool:
+        # the route's reason, not "absent": the version of a tool this run
+        # cannot reach is unknown, and why is the part a reader can act on
+        return f"unavailable ({_why_no_tool})"
     rc, out, err = _run([tool, flag])
     return ((out or err or "").splitlines() or ["unknown"])[0].strip()
 
@@ -271,9 +278,11 @@ def gate_a_standalone_compile(rtl_path: Path, top: str, workdir: Path,
     signal). Deterministic."""
     g: Dict = {"gate": "A_standalone_compile", "deterministic": True,
                "flags": f"iverilog -g2012 -o sim.vvp -s {top} <rtl>"}
-    if shutil.which("iverilog") is None:
+    _why_no_tool = _tool_route.unavailable("iverilog")
+    if _why_no_tool:
         g["verdict"] = "ERROR" if require_tools else "SKIP"
-        g["reason"] = ("iverilog absent — standalone codegen compile cannot "
+        g["reason"] = ("iverilog absent from this run's tool route "
+                       f"({_why_no_tool}) — standalone codegen compile cannot "
                        "be enforced (disclosed, not silently passed)")
         return g
     out_vvp = workdir / "sim.vvp"
@@ -422,9 +431,11 @@ def gate_b_verilator_lint(rtl_path: Path, top: str, workdir: Path,
                "flags": (f"verilator --lint-only -Wall "
                          f"-Wno-{{{','.join(_LINT_STYLE_SUPPRESS)}}} "
                          f"--top-module {top} <rtl>")}
-    if shutil.which("verilator") is None:
+    _why_no_tool = _tool_route.unavailable("verilator")
+    if _why_no_tool:
         g["verdict"] = "ERROR" if require_tools else "SKIP"
-        g["reason"] = ("verilator absent — lint gate cannot be enforced "
+        g["reason"] = ("verilator absent from this run's tool route "
+                       f"({_why_no_tool}) — lint gate cannot be enforced "
                        "(disclosed, not silently passed)")
         return g
     # Lint a copy NAMED `<top>.sv` so the verilator DECLFILENAME (-Wall) check
@@ -571,9 +582,11 @@ def gate_c_functional_tb(rtl_path: Path, tb_path: Optional[Path],
         g["verdict"] = "ERROR"
         g["reason"] = f"functional TB path not found: {tb_path}"
         return g
-    if shutil.which("iverilog") is None or shutil.which("vvp") is None:
+    _why_no_tool = _tool_route.unavailable("iverilog", "vvp")
+    if _why_no_tool:
         g["verdict"] = "ERROR" if require_tools else "SKIP"
-        g["reason"] = ("iverilog/vvp absent — functional TB cannot be run "
+        g["reason"] = ("iverilog/vvp absent from this run's tool route "
+                       f"({_why_no_tool}) — functional TB cannot be run "
                        "(disclosed, not silently passed)")
         return g
     binp = workdir / "tb_sim.vvp"

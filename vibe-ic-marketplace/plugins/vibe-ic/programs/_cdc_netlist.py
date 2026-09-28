@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
+import shutil  # noqa: F401 — tests pin the exec route through shutil.which (docker)
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -106,31 +106,30 @@ def build(project: Path, rtl_files: List[Path], top: Optional[str],
     tmp.unlink(missing_ok=True)
     files = [Path(f).resolve() for f in rtl_files]
     script = yosys_script(files, top, tmp)
-    if shutil.which("yosys"):
-        argv = ["yosys", "-q", "-p", script]
-    else:
-        # Only the docker path needs an image: the caller's, else the one the
-        # contract resolves (switch `image` > VIBEIC_LIBRELANE_IMAGE > this
-        # host's released image). A refusal names the resolver's cause.
-        if not image:
-            import librelane_contract as _ll
-            try:
-                image = _ll.resolve_image(project)
-            except _ll.Refusal as exc:
-                raise Refusal("CDC_NETLIST_TOOL_UNAVAILABLE",
-                              f"no yosys on PATH and no image: {exc}") from None
-        import os
-        import _docker_memory as _dmem
-        mounts = {project} | {f.parent for f in files
-                              if not f.parent.is_relative_to(project)}
-        vols: List[str] = []
-        for m in sorted(mounts):
-            vols += ["-v", f"{m}:{m}"]
-        argv = [docker, "run", *_dmem.docker_memory_flags(), "--rm", "--network", "none",
-                "-u", f"{os.getuid()}:{os.getgid()}", *vols,
-                "--entrypoint", "yosys", image, "-q", "-p", script]
-    done = subprocess.run(argv, capture_output=True, text=True)
-    log.write_text("$ " + " ".join(argv) + "\n" + done.stdout + done.stderr)
+    # WHERE yosys runs is `_eda_tool_route`'s decision, not the host PATH's:
+    # a host yosys used to win here whenever one existed, so the netlist this
+    # CDC check reads depended on which machine ran it (on 8HD-9 that is
+    # /usr/bin/yosys 0.9). With a container route the image runs it; the image
+    # is only resolved on that route (switch `image` > VIBEIC_LIBRELANE_IMAGE >
+    # this host's released image), and the LOCAL route (no docker client)
+    # checks that this PATH's yosys has every command the script runs.
+    import _eda_tool_route as _tool_route
+    if not image and not _tool_route.local_route():
+        import librelane_contract as _ll
+        try:
+            image = _ll.resolve_image(project)
+        except _ll.Refusal as exc:
+            raise Refusal("CDC_NETLIST_TOOL_UNAVAILABLE",
+                          f"a container route exists and no image: {exc}") from None
+    try:
+        done = _tool_route.run(["yosys", "-q", "-p", script],
+                               cwd=project, image=image,
+                               capture_output=True, text=True)
+    except _tool_route.ToolRouteRefused as exc:
+        raise Refusal("CDC_NETLIST_TOOL_UNAVAILABLE", str(exc)) from None
+    ran = getattr(done, "args", None)
+    argv = list(ran) if isinstance(ran, (list, tuple)) else ["yosys"]
+    log.write_text("$ " + " ".join(map(str, argv)) + "\n" + done.stdout + done.stderr)
     if done.returncode or not tmp.is_file():
         raise Refusal("CDC_NETLIST_BUILD_FAILED",
                       f"yosys rc={done.returncode}; {NETLIST_LOG_REL}")

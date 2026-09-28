@@ -139,6 +139,7 @@ try:
 except Exception:  # pragma: no cover - path fallback
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import fault_atpg_run as _far  # type: ignore
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 
 _PROGRAM = "transition_fault_atpg_run"
@@ -504,11 +505,14 @@ def _announce_local_tdf_route(project: Path) -> None:
     if _LOCAL_TDF_ROUTE_ANNOUNCED:
         return
     _LOCAL_TDF_ROUTE_ANNOUNCED = True
-    import shutil as _sh
+    try:
+        yosys = _tool_route.resolve("yosys", local=True).where()
+    except _tool_route.ToolRouteRefused as exc:
+        yosys = f"NOT USABLE ({exc.reason})"
     print("[dft] EXEC ROUTE = LOCAL: no docker client on PATH, so the "
           "at-speed ATPG engine runs on THIS filesystem (yosys=%s) instead of "
           "in a sibling container. The project is read at %s, not at %s."
-          % (_sh.which("yosys") or "NOT ON PATH", project, _far._WORK_MOUNT),
+          % (yosys, project, _far._WORK_MOUNT),
           file=sys.stderr)
 
 

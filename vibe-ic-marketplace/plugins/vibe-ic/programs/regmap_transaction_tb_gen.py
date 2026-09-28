@@ -105,6 +105,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _path_layout as _pl              # noqa: E402
 import reset_clock_variant_alias as _rcv  # noqa: E402
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 
 # ---------------------------------------------------------------------------
@@ -688,8 +689,10 @@ def generate(project: Path, top_module: str,
     }
     if not run:
         return info
-    if not (shutil.which("iverilog") and shutil.which("vvp")):
-        info["reason"] = "iverilog/vvp not on PATH — TB emitted, not simulated"
+    _why_no_tool = _tool_route.unavailable("iverilog", "vvp")
+    if _why_no_tool:
+        info["reason"] = ("iverilog/vvp absent from this run's tool route "
+                          f"({_why_no_tool}) — TB emitted, not simulated")
         return info
     srcs = sorted(str(p) for p in
                   list(rtl_dir.glob("**/*.v")) + list(rtl_dir.glob("**/*.sv")))
@@ -702,7 +705,9 @@ def generate(project: Path, top_module: str,
     # site (and only this one — `vvp` is not on the long-tool list) and it was
     # RED on main before this change.
     try:
-        comp = _watchdog.run_supervised(
+        # FX-N1: on its `_eda_tool_route` route (never the host PATH while a
+        # container route exists), still supervised by forward progress.
+        comp = _tool_route.watchdog_run(
             ["iverilog", "-g2012", "-o", str(vvp_out), str(tb_path), *srcs])
     except (OSError, subprocess.SubprocessError) as e:
         info["reason"] = f"iverilog invocation failed: {e}"
@@ -717,7 +722,7 @@ def generate(project: Path, top_module: str,
         info["compile_log"] = (comp.err or "")[-2000:]
         return info
     try:
-        sim = subprocess.run(["vvp", str(vvp_out)],
+        sim = _tool_route.run(["vvp", str(vvp_out)],
                              capture_output=True, text=True, timeout=600)
     except (OSError, subprocess.SubprocessError) as e:
         info["reason"] = f"vvp invocation failed: {e}"

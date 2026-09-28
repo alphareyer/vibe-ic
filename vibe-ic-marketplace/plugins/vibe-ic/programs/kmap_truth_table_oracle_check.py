@@ -59,6 +59,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 GRAY2 = ["00", "01", "11", "10"]  # standard 2-var Gray column/row order
 
@@ -379,7 +381,7 @@ def simulate(rtl_path: str, top: str, in_specs, out_name, table):
         # (PASS|SKIP|BLOCK|TOOL_ERR) is broken by a fifth, undeclared outcome.
         try:
             # watchdog-exempt: bounded single-file iverilog compile (elaboration/sim build); fixed budget adequate — not an open-ended EDA generator
-            cp = subprocess.run(
+            cp = _tool_route.run(
                 ["iverilog", "-g2012", "-o", str(binp), str(rtl_path), str(tbp)],
                 capture_output=True, text=True,
             )
@@ -390,7 +392,7 @@ def simulate(rtl_path: str, top: str, in_specs, out_name, table):
         if cp.returncode != 0:
             return ("TOOL_ERR", cp.stderr[-400:])
         try:
-            cp = subprocess.run(["vvp", str(binp)], capture_output=True, text=True)
+            cp = _tool_route.run(["vvp", str(binp)], capture_output=True, text=True)
         except FileNotFoundError as exc:
             return ("TOOL_ERR", f"vvp is not on PATH ({exc.strerror}); the oracle "
                                 f"compiled but could not be RUN — this is NOT a "

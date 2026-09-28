@@ -27,6 +27,8 @@ from __future__ import annotations
 import argparse, itertools, json, re, subprocess, sys, tempfile, os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _eda_tool_route as _tool_route  # noqa: E402 — WHERE an EDA tool runs, decided once (FX-N1)
 
 DONTCARE = {"d", "x", "-"}
 
@@ -173,11 +175,11 @@ endmodule
         binp = Path(td) / "g.out"
         try:
             # watchdog-exempt: bounded single-file iverilog compile (elaboration/sim build); fixed budget adequate — not an open-ended EDA generator
-            c = subprocess.run(["iverilog", "-g2012", "-o", str(binp), str(f)],
+            c = _tool_route.run(["iverilog", "-g2012", "-o", str(binp), str(f)],
                                capture_output=True, text=True, timeout=timeout)
             if c.returncode != 0:
                 return None
-            r = subprocess.run(["vvp", str(binp)], capture_output=True, text=True,
+            r = _tool_route.run(["vvp", str(binp)], capture_output=True, text=True,
                                timeout=timeout, cwd=td)
         except Exception:
             return None
@@ -356,11 +358,11 @@ endmodule
         binp = Path(td) / "m.out"
         try:
             # watchdog-exempt: bounded single-file iverilog compile (elaboration/sim build); fixed budget adequate — not an open-ended EDA generator
-            c = subprocess.run(["iverilog", "-g2012", "-o", str(binp), str(f)],
+            c = _tool_route.run(["iverilog", "-g2012", "-o", str(binp), str(f)],
                                capture_output=True, text=True, timeout=timeout)
             if c.returncode != 0:
                 return None
-            r = subprocess.run(["vvp", str(binp)], capture_output=True, text=True,
+            r = _tool_route.run(["vvp", str(binp)], capture_output=True, text=True,
                                timeout=timeout, cwd=td)
         except Exception:
             return None
