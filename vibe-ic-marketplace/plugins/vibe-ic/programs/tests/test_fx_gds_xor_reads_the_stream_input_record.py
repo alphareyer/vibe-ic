@@ -248,3 +248,45 @@ def test_a_copy_of_the_run_re_anchors_its_own_inputs(tmp_path, monkeypatch):
                                      copy / "o.gds", 60, stem="spm")
     assert rc == 0, se
     assert tool.calls[0][2]["LEFS"] == str(copy / PNR / "active_via_legalized.tlef")
+
+
+def test_a_copy_missing_its_recorded_project_input_refuses_the_old_run(
+        tmp_path, monkeypatch):
+    """A copy cannot attest the original project's LEF when its own is absent."""
+    import shutil
+    project, dfile, recipe, files, rcfile = _core_run(tmp_path, engine="magic")
+    _produce(monkeypatch, project, dfile, recipe, files, rcfile, "magic")
+    copy = tmp_path / "copy" / "spm"
+    shutil.copytree(project, copy)
+    missing = copy / PNR / "active_via_legalized.tlef"
+    missing.unlink()
+    assert (project / PNR / missing.name).is_file()
+
+    tool = _Tool()
+    rc, _so, se = G.stream_reference(tool, copy / "scratch",
+                                     copy / PNR / "spm.def", copy / "o.gds",
+                                     60, stem="spm")
+    assert rc == 127, se
+    assert f"{PNR}/{missing.name}" in se and "current project" in se, se
+    assert tool.calls == [], "an incomplete copy must not launch the stream tool"
+
+
+def test_a_copy_cannot_satisfy_project_input_through_an_outside_symlink(
+        tmp_path, monkeypatch):
+    """An in-copy alias to the old run is still the old run's input bytes."""
+    import shutil
+    project, dfile, recipe, files, rcfile = _core_run(tmp_path, engine="magic")
+    _produce(monkeypatch, project, dfile, recipe, files, rcfile, "magic")
+    copy = tmp_path / "copy" / "spm"
+    shutil.copytree(project, copy)
+    link = copy / PNR / "active_via_legalized.tlef"
+    link.unlink()
+    link.symlink_to(project / PNR / link.name)
+
+    tool = _Tool()
+    rc, _so, se = G.stream_reference(tool, copy / "scratch",
+                                     copy / PNR / "spm.def", copy / "o.gds",
+                                     60, stem="spm")
+    assert rc == 127, se
+    assert f"{PNR}/{link.name}" in se and "current project" in se, se
+    assert tool.calls == [], "an alias outside the copy must not launch the tool"

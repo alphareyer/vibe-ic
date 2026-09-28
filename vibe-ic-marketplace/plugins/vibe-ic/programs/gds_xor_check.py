@@ -715,16 +715,47 @@ def stream_reference(runner, scratch: Path, dfile: Path, out: Path, timeout: int
                          f"input(s) (first: {unhashed[0]}), so a re-stream cannot "
                          f"prove it reads what the stream-out read")
 
-    def resolve(entry: Dict[str, Any]) -> str:
-        """The tool-side path: a project input re-anchored to THIS project
-        (a copy of a run), anything else exactly as the stream-out saw it."""
+    # Resolve the whole recorded set before asking the tool to hash anything.
+    # A project input belongs to this copy of the run: falling back to the old
+    # absolute path would verify the original's bytes and call an incomplete
+    # copy reproducible. External inputs alone retain their absolute paths.
+    resolved: Dict[int, str] = {}
+    project_real = project.resolve()
+    entries = _sir.all_entries(rec)
+    for entry in entries:
         rel = entry.get("project_rel")
-        if rel and (project / rel).exists():
-            return str(runner.cpath(project / rel))
-        return str(entry["path"])
+        if rel is None:
+            path = entry.get("path")
+            if not isinstance(path, str) or not Path(path).is_absolute():
+                return 127, "", (f"recorded external input {path!r} has no "
+                                 "absolute tool path")
+            resolved[id(entry)] = path
+            continue
+        if (not isinstance(rel, str) or not rel
+                or Path(rel).is_absolute() or Path(rel).as_posix() != rel
+                or ".." in Path(rel).parts):
+            return 127, "", (f"recorded project-relative input {rel!r} is "
+                             "not a canonical path within the current project")
+        candidate = project / rel
+        try:
+            target = candidate.resolve(strict=True)
+        except OSError:
+            return 127, "", (f"recorded project-relative input {rel} is "
+                             "absent from the current project")
+        if not target.is_relative_to(project_real):
+            return 127, "", (f"recorded project-relative input {rel} resolves "
+                             "outside the current project")
+        if not target.is_file():
+            return 127, "", (f"recorded project-relative input {rel} is not "
+                             "a file in the current project")
+        resolved[id(entry)] = str(runner.cpath(candidate))
+
+    def resolve(entry: Dict[str, Any]) -> str:
+        """Use only the paths checked above for both hashing and stream-out."""
+        return resolved[id(entry)]
 
     ok, why = _inputs_hold_the_recorded_bytes(
-        runner, [(resolve(e), e["sha256"]) for e in _sir.all_entries(rec)],
+        runner, [(resolve(e), e["sha256"]) for e in entries],
         timeout)
     if not ok:
         return 127, "", f"{why}, so a re-stream would not read what the stream-out read"
