@@ -75558,6 +75558,29 @@ def main() -> int:
             plan.append(_pls)
             print(f"[prelayout] {_pls.status:5s} {_pls.name}: {_pls.detail}",
                   flush=True)
+            # A negative SS setup path is already unachievable on the
+            # synthesis netlist under the real SDC. Routing it spends hours
+            # without changing its logical depth. This gate reads Step 10's
+            # own pre-layout report, before either the cache or new PnR path.
+            import librelane_prelayout as _llp
+            _pre_gate_path = project / "reports/phase3/gates/pre_pnr_setup.json"
+            _pre_matrix = _pl.constraints_dir(project) / "pvt_matrix.json"
+            try:
+                _pre_gate = _llp.pre_pnr_setup_gate(
+                    _pre_matrix, _pl.sta_dir(project) / "per_corner",
+                    _pre_gate_path)
+            except (OSError, ValueError, TypeError) as exc:
+                _pre_gate = {"verdict": "NOT_MEASURED",
+                             "reason": f"PRE_PNR_GATE_INPUT_UNREADABLE:{type(exc).__name__}",
+                             "path_classes": [], "setup_slack_ns": None}
+                _llp.write_json(_pre_gate_path, _pre_gate)
+            _pre_pnr_gate_ok = _pre_gate["verdict"] != "FAIL"
+            plan.append(StepResult(
+                "pre_pnr_setup", _pre_gate["verdict"], 0.0,
+                f"{_pre_gate['reason']}; SS setup slack "
+                f"{_pre_gate.get('setup_slack_ns')} ns; "
+                f"path classes {_pre_gate.get('path_classes', [])}",
+                [str(_pre_gate_path)]))
             # ORGANIC #593 — geometry-aware cache: a DEF that exists may
             # only be reused when the requested --die-um/--util match the
             # cached run's geometry (pnr_args.json). A congestion-recovery
@@ -75577,7 +75600,15 @@ def main() -> int:
                 top=effective_top, die_um=args.die_um, util=args.util,
                 pdk=pdk, container=args.container, args=args)
             _cache_msg = _pnr_cache.reason
-            if _pnr_cache.accept:
+            if not _pre_pnr_gate_ok:
+                plan.append(StepResult(
+                    "pnr", "NOT_MEASURED", 0.0,
+                    "BLOCKED_BY_NEGATIVE_PRE_PNR_SETUP: return to synthesis "
+                    "or timing restructure before placement; "
+                    f"{_pre_gate.get('path_classes', [])} at "
+                    f"{_pre_gate.get('setup_slack_ns')} ns",
+                    [str(_pre_gate_path)]))
+            elif _pnr_cache.accept:
                 plan.append(StepResult(
                     "pnr", "PASS", 0.0,
                     f"DEF already present: {def_existing.name} (skipped "
