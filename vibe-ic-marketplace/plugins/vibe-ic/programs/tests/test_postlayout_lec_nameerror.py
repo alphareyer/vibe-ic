@@ -126,6 +126,28 @@ def test_emit_lec_post_layout_reaches_the_liberty_probe(tmp_path,
         f"got {doc.get('lec_recipe')!r}, notes={notes}")
 
 
+def test_postlayout_producer_retains_decided_failure_when_sat_cannot_run(
+        tmp_path, stub_container, monkeypatch):
+    """A later missing terminal IL cannot turn the first pass's failure into
+    NOT_PROVEN. Exercise the actual Phase 3 artefact writer and gate."""
+    lib = tmp_path / "corner_tt.lib"
+    lib.write_text("library(t){}\n")
+    project = _routed_project(tmp_path)
+    out_json = R._pl.reports_phase3_dir(project) / "lec_post_layout.json"
+    monkeypatch.setattr(LEC, "parse_equiv_log", lambda text: {
+        "verdict": "NON_EQUIVALENT", "proven": 2, "unproven": 1,
+        "total": 3, "non_equivalent": 1, "equivalent": False,
+        "sat_unsupported_cells": [],
+    })
+    verdict = R._emit_lec_post_layout(
+        project, TOP, _pdk(str(lib), str(lib)), "nocontainer",
+        out_json, out_json.with_suffix(".rpt"), [])
+    doc = json.loads(out_json.read_text())
+    assert doc["counterexample_search"]["result"] == "NOT_RUN"
+    assert doc["verdict"] == "NON_EQUIVALENT"
+    assert verdict == "NON_EQUIVALENT"
+
+
 def test_emit_lec_post_layout_does_not_raise_nameerror(tmp_path,
                                                        stub_container):
     """Explicit: no NameError escapes for ANY caller. (The caller's broad
