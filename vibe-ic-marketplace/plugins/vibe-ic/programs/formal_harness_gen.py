@@ -2337,8 +2337,8 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
         # HOW this module was reached. A property proven on a sub-module is a
         # weaker statement than one proven on the declared top, and a consumer
         # that cannot tell them apart is reading an adjacent measurement.
-        "selection": selection,
-        "proves_declared_top": selection == "declared_top",
+        "selection": "flow_generated_core" if _mapped_core else selection,
+        "proves_declared_top": _top_found,
         "flow_generated_core_binding": _mapped_core,
         "harness_module": f"formal_{dut_top}",
         "harness_path": str(out_path),
