@@ -641,25 +641,29 @@ def audit(project_dir: Path,
         if value:
             path = _input_path(project_dir, str(value))
             rc = cinfo.get("windows_rc", report.get("windows_rc", 0))
+            why = None
             if path is None or not path.is_file() or rc != 0:
                 why = f"{scene}: timing windows unavailable at {value} (rc={rc})"
-                stats["input_refusal"] = ("NO_WINDOWS", why)
+            else:
+                try:
+                    timing = json.loads(path.read_text())
+                    net_windows = M.net_windows_from_timing(
+                        timing, sp["net_driver_pins"])
+                except (OSError, ValueError, TypeError) as exc:
+                    why = f"{scene}: timing windows unreadable at {value}: {exc}"
+                else:
+                    if not any(v is not None for v in net_windows.values()):
+                        why = (f"{scene}: timing window file {value} resolved "
+                               "zero driver windows")
+            if why:
+                stats.setdefault("input_refusal", ("NO_WINDOWS", why))
                 findings.append(Finding("ERROR", "NO_WINDOWS", why))
-                return findings, stats
-            try:
-                timing = json.loads(path.read_text())
-                net_windows = M.net_windows_from_timing(timing, sp["net_driver_pins"])
-            except (OSError, ValueError, TypeError) as exc:
-                why = f"{scene}: timing windows unreadable at {value}: {exc}"
-                stats["input_refusal"] = ("NO_WINDOWS", why)
-                findings.append(Finding("ERROR", "NO_WINDOWS", why))
-                return findings, stats
-            if not any(v is not None for v in net_windows.values()):
-                why = f"{scene}: timing window file {value} resolved zero driver windows"
-                stats["input_refusal"] = ("NO_WINDOWS", why)
-                findings.append(Finding("ERROR", "NO_WINDOWS", why))
-                return findings, stats
-            scene_windows[scene] = (net_windows, True)
+                # The missing window still bars sign-off. Recount each SPEF
+                # against the conservative window-independent floor so an
+                # existing fold defect cannot be hidden by this refusal.
+                scene_windows[scene] = (None, False)
+            else:
+                scene_windows[scene] = (net_windows, True)
         else:
             scene_windows[scene] = (None, False)
     stats["windows_exact"] = all(exact for _, exact in scene_windows.values())
@@ -999,7 +1003,15 @@ def denominator(stats: dict,
     # another place to remember, and those conditions drifting apart is
     # precisely how the code would come to name a vacuity the prose says is not
     # one, or to name it in the field an acceptance can reach.
-    if examined:
+    if examined and "NO_WINDOWS" in not_run and not defect:
+        # The floor recount can prove a lower-bound fold while the declared
+        # switching windows remain unavailable. Keep the measured denominator,
+        # but do not present that diagnostic comparison as window sign-off.
+        reason = ("declared timing windows were unavailable; the available "
+                  "SPEFs were recounted against the conservative floor, but "
+                  "window-dependent SI could not be certified. Read this as "
+                  "NOT CHECKED.")
+    elif examined:
         # Something was proved. There is no zero to explain and no vacuity to
         # name in either field.
         reason = ""
@@ -1058,7 +1070,8 @@ def denominator(stats: dict,
     )
 
 
-def verdict_for(defect: bool, not_run: bool, vacuous: bool) -> str:
+def verdict_for(defect: bool, not_run: bool, vacuous: bool,
+                windows_unavailable: bool = False) -> str:
     """This gate's verdict precedence, in one place (#506, #510).
 
     FOUR STATES, FOUR TOKENS (#506). The old precedence was "any ERROR
@@ -1081,6 +1094,11 @@ def verdict_for(defect: bool, not_run: bool, vacuous: bool) -> str:
         # Examined a real artefact and found it wrong. UNCHANGED, deliberately:
         # this is the rule the gate was written for and #506 does not soften it.
         return "FAIL"
+    if windows_unavailable:
+        # The floor recount is diagnostic when a declared switching-window
+        # file is unavailable. Preserve the input refusal even if that recount
+        # checked some nets; a substantive defect above still takes priority.
+        return "NOT_MEASURED"
     if not_run and vacuous:
         # Could not obtain the input, and proved nothing. The fourth state.
         return "NOT_MEASURED"
@@ -1100,7 +1118,8 @@ def verdict_for(defect: bool, not_run: bool, vacuous: bool) -> str:
 def build_report(findings: List[Finding], stats: dict, project_dir: str) -> dict:
     denom = denominator(stats, findings)
     not_run, defect = error_categories(findings)
-    verdict = verdict_for(bool(defect), bool(not_run), denom.is_vacuous)
+    verdict = verdict_for(bool(defect), bool(not_run), denom.is_vacuous,
+                          windows_unavailable="NO_WINDOWS" in not_run)
     # TYPED (#1978). `_flow_reason_taxonomy.infer_nonverdict_reason` is
     # deliberately fail-closed: an rc=2 that declares no class is booked
     # EXECUTION_ERROR, "the gate blew up". On a grounded-only extraction this
@@ -1214,7 +1233,8 @@ def _zero_fold_supersession(record: dict):
                        message=str(f.get("message", ""))) for f in findings]
     not_run, defect = error_categories(rebuilt)
     # The gate's OWN precedence function, not a copy of it — see `verdict_for`.
-    would = verdict_for(bool(defect), bool(not_run), vacuous=True)
+    would = verdict_for(bool(defect), bool(not_run), vacuous=True,
+                        windows_unavailable="NO_WINDOWS" in not_run)
     carried = record.get("verdict")
     if would == carried:
         return None
