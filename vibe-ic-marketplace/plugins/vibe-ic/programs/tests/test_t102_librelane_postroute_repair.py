@@ -1191,7 +1191,7 @@ def test_missing_input_pin_census_refuses_declared_repair(
         programs_dir=shim)
     assert report['adopted'] is None
     assert report['declared_repair_publication']['status'] == 'NOT_MEASURED'
-    assert 'antenna' in report['declared_repair_publication']['reason']
+    assert 'CheckAntennas' in report['declared_repair_publication']['reason']
     assert not (project / prr.DECLARED_REPAIR_REL /
                 'postroute_timing_repair_decision.json').exists()
     assert 'NO_REPAIR_ARTIFACT' in [f.category for f in audit.audit(project)[0]
