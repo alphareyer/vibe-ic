@@ -94,6 +94,9 @@ _STUB = {
                 raw.update(_PDK_VALUES)
                 raw.update(declared)          # the design wins over defaults
                 raw.setdefault("DESIGN_NAME", "chip")
+                if not raw.get("VERILOG_FILES"):  # as LibreLane 3.1's resolver refuses
+                    raise SystemExit("InvalidConfig: Required variable "
+                                     "'VERILOG_FILES' did not get a specified value.")
                 self.config = _Config(raw)
         '''),
     "librelane/steps/__init__.py": textwrap.dedent('''\
@@ -213,6 +216,9 @@ def _project(tmp_path, *, gds: bytes | None = LABELLED.encode()):
     _put(docs / "L19_CONSTRAINTS_PDK.json", {"fields": {}})
     _put(project / "input/submission_template/tapeout_declaration.json",
          {"answers": {"top_cell": "chip"}})
+    rtl = project / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "chip.v").write_text("module chip(input clk); endmodule\n")
     pnr = project / "phase3/stage3/pnr"
     pnr.mkdir(parents=True)
     (pnr / "chip.def").write_text("DESIGN chip ;\nCOMPONENTS 0 ;\n")
@@ -341,3 +347,18 @@ def test_no_shipped_gds_is_blocked_never_a_pass(tmp_path, monkeypatch, runner):
     assert row.status == "NOT_MEASURED", (row.status, row.detail)
     assert verdict is not None and verdict["status"] == "BLOCKED", verdict
     assert verdict["finding"] == "LL_PV_VIEW_MISSING"
+
+
+# ── a core-only design (no chip top) resolves at all ─────────────────────
+def test_a_core_only_design_declares_its_rtl_to_the_resolver(tmp_path):
+    """LibreLane's resolver requires VERILOG_FILES of every flow config. The
+    contract emitted it only on the chip path (RTL + chip_top_io.v), so no step
+    config of a core-only design resolved -- the spm core-only run's step 31
+    on `librelane` died at LL_CONFIG_RESOLUTION_FAILED before comparing
+    anything. The design's own build closure is the declared value (cmp3 D8's
+    reader, as on the chip path, minus the chip top)."""
+    project, _pnr, _root = _project(tmp_path)
+    out = contract.emit_config(project, PDK, project / "cfg.json")
+    assert out["VERILOG_FILES"] == ["dir::phase2/stage1/rtl/chip.v"]
+    prov = json.loads((project / "cfg.provenance.json").read_text())
+    assert "core-only" in prov["VERILOG_FILES"], prov["VERILOG_FILES"]
