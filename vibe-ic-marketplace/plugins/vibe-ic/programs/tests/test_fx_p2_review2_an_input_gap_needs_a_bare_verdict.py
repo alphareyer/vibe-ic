@@ -163,3 +163,18 @@ def test_a_declaration_that_selects_it_still_demands_it(tmp_path):
     _declare(proj, ["I", "M"])
     rc, msg = GATE._evaluate(proj)
     assert rc == 1, (rc, msg)
+
+
+def test_a_delivered_program_is_never_a_gap_even_when_the_name_is_hidden(
+        tmp_path):
+    """The polarity-scoped image reader drops a name whose SENTENCE carries
+    an unrelated negation ("… do not reset …"), so the named-image test alone
+    would call a delivered program missing. `delivered_case_program`, the
+    flow's own delivery reader, finds it: never the input's gap."""
+    case = _vec("blinky", "load blinky.hex; do not reset the core first",
+                "PASS")
+    assert TBG.named_stimulus_images(case["stimulus"]) == []
+    proj = _project(tmp_path, [PASSING, case], {PASSING["name"]: "PASS"},
+                    input_files=["input/sim/programs/blinky.hex"])
+    assert TBG.delivered_case_program(proj, case["stimulus"]) is not None
+    assert TBG.case_input_gap(proj, case) is None
