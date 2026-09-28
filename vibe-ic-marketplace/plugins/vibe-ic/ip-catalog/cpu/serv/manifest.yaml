@@ -8,6 +8,9 @@ errata:
   - upstream_commit: "41e8aeedfd1e9ad5f95902c5b0dfc83d1c99e5d2"
     file: servile/servile_rf_mem_if.v
     disclosure: "Upstream zero-register correction after 1.4.0; applied to the reused core only."
+  - upstream_commit: "61ef8eaef9f795e2e5425f620e96c6f732a5609b"
+    file: rtl/serv_state.v
+    disclosure: "Upstream declaration-order correction after 1.4.0; needed for Icarus elaboration of the reused core."
 authors:
   - "Olof Kindgren <olof.kindgren@gmail.com>"
 description: >

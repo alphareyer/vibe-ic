@@ -149,4 +149,6 @@ def test_real_catalog_component_has_versioned_source_and_scoped_erratum(
                             ic_name="fabric")
     assert [(m.ip_name, m.self_match, m.version) for m in matches] == [
         ("serv", False, "1.4.0")]
-    assert matches[0].errata[0]["file"] in matches[0].rtl_files
+    assert {e["file"] for e in matches[0].errata} == {
+        "servile/servile_rf_mem_if.v", "rtl/serv_state.v"}
+    assert all(e["file"] in matches[0].rtl_files for e in matches[0].errata)
