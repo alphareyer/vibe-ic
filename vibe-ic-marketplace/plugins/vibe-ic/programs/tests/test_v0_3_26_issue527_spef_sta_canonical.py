@@ -149,7 +149,7 @@ def test_single_corner_fallback_clears_the_prior_librelane_repair_log(
     decision = json.loads((out / "postroute_timing_repair_decision.json").read_text())
     assert decision["repair_needed"] is True
     assert decision["action"] == "repair_required_single_corner_fallback"
-    assert not stale.exists()
+    assert stale.exists() is False
     errors = [f.category for f in audit.audit(p)[0] if f.severity == "ERROR"]
     assert "NO_REPAIR_ARTIFACT" in errors
 

@@ -571,6 +571,8 @@ def test_the_deck_repairs_drv_after_timing_and_antenna_cell_insertion():
 
 def test_post_antenna_drv_recheck_runs_even_without_a_fanout_row(tmp_path):
     tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    after_antenna = tcl[tcl.index('log_cmd repair_antennas'):]
+    assert len(re.findall(r'^\s*log_cmd repair_design', after_antenna, re.M)) == 1
     start = tcl.index('set ::vic_fo_rounds 0')
     end = tcl.index('# ---- 7. re-verify', start)
     section = tmp_path / 'post_antenna_drv.tcl'
@@ -1149,7 +1151,8 @@ def test_unmeasured_publication_names_its_missing_floor_in_step32_report(
                               route_state=route, route_drc=0, programs_dir=shim)
     record = json.loads((project / prr.REPORT_REL).read_text())
     publication = record.get('declared_repair_publication')
-    assert publication and publication.get('status') == 'NOT_MEASURED'
+    status = (publication or {}).get('status', 'MISSING')
+    assert status == 'NOT_MEASURED'
     assert 'timing floors' in publication.get('reason', '')
     assert report.get('declared_repair_publication') == publication
     assert not (project / prr.DECLARED_REPAIR_REL /
@@ -1248,7 +1251,7 @@ def test_dual_publishes_decision_from_step32_input_when_pregrt_route_wins(
                               route_state=route, route_drc=0, variant_arm=variant_arm,
                               programs_dir=shim)
     assert report['selected_arm'] == 'pregrt'
-    assert report.get('floors') == report['arms']['pregrt']['floors']
+    assert report.get('floors', {}) == report['arms']['pregrt']['floors']
     assert (report.get('input_baseline') or {}).get('hold_ws_min') == -0.3
     decision = json.loads((project / prr.DECLARED_REPAIR_REL /
                            'postroute_timing_repair_decision.json').read_text())
