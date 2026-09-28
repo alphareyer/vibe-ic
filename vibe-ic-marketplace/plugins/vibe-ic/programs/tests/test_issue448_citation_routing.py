@@ -115,34 +115,32 @@ def test_the_same_citation_is_not_recorded_twice(tmp_path):
 
 
 def test_the_three_converged_cells_are_measured_not_assumed():
-    """Real data, and the numbers that justify separating the two states."""
+    """Every f06ccc0 SPM publication pins the citation decision it actually carries."""
     import pytest
-    cells = ["spm/v1.5.58_ihp-sg13g2", "spm/v1.10.18_sky130A",
-             "spm/v1.9.96_gf180mcuD"]
-    seen, absent = 0, []
-    for c in cells:
-        d = _CORPUS / c
-        if not d.is_dir():
-            absent.append(c)
-            continue
-        seen += 1
+    from _published_corpus import corpus_root
+    root = corpus_root()
+    if root is None:
+        pytest.skip("published corpus not checked out")
+    expected = {
+        "spm/v1.10.18_sky130A": "OUT_OF_PUBLISHED_SCOPE",
+        "spm/v1.14.88_gf180mcuD": "RESOLVES",
+        "spm/v1.21.6_gf180mcuD": "RESOLVES",
+        "spm/v1.5.65_sky130A": "OUT_OF_PUBLISHED_SCOPE",
+    }
+    import subprocess
+    indexed = subprocess.check_output(
+        ["git", "-C", str(root), "ls-files", "--", "ic/spm/*/RESULT.md"],
+        text=True).splitlines()
+    members = {"/".join(Path(p).parts[1:3]) for p in indexed}
+    assert members == set(expected), (members - set(expected), set(expected) - members)
+    for c, decision in expected.items():
+        d = root / "ic" / c
         recs = B.collect_citation_records(d)
         kinds = {r["decision"] for r in recs}
         assert "RESOLVES" in kinds and "OUT_OF_PUBLISHED_SCOPE" in kinds, (c, kinds)
         mc = [r for r in recs if "mcorner" in r["doc"]]
         assert mc, c
-        assert mc[0]["decision"] == "OUT_OF_PUBLISHED_SCOPE", (c, mc)
-    if seen == 0:
-        pytest.skip("published corpus not checked out")
-    # DERIVED FROM THE ROSTER ABOVE, not typed beside it. The literal `3` was
-    # `len(cells)` written a second time, so editing the roster silently made
-    # the two disagree — and when a cell was withdrawn the message said "only 2
-    # of 3" without naming which. The claim is unchanged: this test names
-    # specific cells and a missing one is a real finding, not a smaller run.
-    assert seen == len(cells), (
-        f"{len(absent)} of the {len(cells)} cell(s) this test names are no "
-        f"longer published: {absent}. Either they were withdrawn — in which "
-        f"case pick their successors — or the roster is stale.")
+        assert mc[0]["decision"] == decision, (c, mc)
 
 
 # ── the PLAN-versus-CLAIM split ────────────────────────────────────────────

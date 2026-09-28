@@ -248,6 +248,14 @@ def test_the_denominator_is_recorded_too_not_just_the_numerator():
     runs carrying them were withdrawn". The swept/with-reports counts are what
     make the number readable, and they drifted 17->13 and 5->3 unnoticed."""
     rec, live = _recorded(), _live()
+    expected = rec.get("examined_runs")
+    assert isinstance(expected, list) and expected, (
+        "baseline names no examined run members; a count alone cannot pin its population")
+    assert len(expected) == len(set(expected)), expected
+    assert set(live["examined_runs"]) == set(expected), (
+        set(live["examined_runs"]) - set(expected),
+        set(expected) - set(live["examined_runs"]))
+    assert len(expected) == rec["runs_swept"] == rec["runs_with_reports"], rec
     assert (rec.get("runs_swept"), rec.get("runs_with_reports")) == \
            (live["runs_swept"], live["runs_with_reports"]), (
         f"recorded denominator {(rec.get('runs_swept'), rec.get('runs_with_reports'))} "

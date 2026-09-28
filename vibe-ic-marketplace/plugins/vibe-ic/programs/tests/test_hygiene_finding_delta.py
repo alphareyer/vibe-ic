@@ -166,7 +166,9 @@ def _transition_pair(*, replacement_state="PASS", benchmark_sha=_BENCHMARK_SHA):
                   "expansion": "EXPANDED"}],
         corpus_inputs={"benchmark_data_sha": benchmark_sha})
 
-    labels = [template.format(cell="demo/openpdkx")
+    identity = H.routed_cell_identity("demo", "v0.3.0_openpdkx")
+    assert identity is not None
+    labels = [template.format(cell=identity)
               for template in H.ROUTED_DEF_GATE_LABELS]
     rows = [_gate(label, replacement_state if i == 0 else "PASS",
                   H.ROUTED_DEF_CORPUS)

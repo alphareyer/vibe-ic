@@ -32,7 +32,7 @@ published tree is not thereby misconfigured -- is left standing.  BOTH states
 stay NOT CHECKED and BOTH stay blocking at the dispatcher; only the sentence
 each of them gets is different.
 
-A CELL'S IDENTITY IS (design, pdk), AND IT IS SPELLED ONCE (vibe-ic#2011).
+A CELL'S IDENTITY IS (design, version directory), SPELLED ONCE.
 A member of this population is ``ic/<design>/v<version>_<pdk>/phase3/stage3/
 pnr/routed.def``.  The gate labels the hygiene loop declares over it, and the
 gate identities this producer writes into the trusted manifest, used to carry
@@ -41,15 +41,13 @@ and on gf180mcuD) would have handed eight gates four labels, two owners per
 identity.  This producer refused that whole population rather than declare a
 duplicate owner, and the refusal named the repair: migrate the identity.
 
-The identity is now the ``<design>/<pdk>`` pair, derived by
+The identity is now the ``<design>/<version directory>`` pair, derived by
 ``hygiene_finding_delta.routed_cell_identity`` and by nothing else in Python;
 ``repo_hygiene_gates.sh::_routed_cell_id`` mirrors the same grammar in bash and
-a test pins the two spellings equal.  The version is NOT part of it: a
-republish of one design on one PDK is the same owner, so anything keyed by
-label keeps its meaning.  Two routed DEFs on the same (design, pdk) are still
-a refusal here -- naming the pair -- and so is a cell whose version directory
-states no PDK at all: a cell with no identity in this model is not given a
-made-up one.
+a test pins the two spellings equal.  The version is part of the identity, so
+anything keyed by label identifies one published run. Two versions on the
+same PDK are distinct members. A cell whose version directory states no PDK
+is refused.
 """
 from __future__ import annotations
 
@@ -93,7 +91,7 @@ def _index_paths(corpus: Path, identity_of,
     `identity_of` is ``hygiene_finding_delta.routed_cell_identity`` -- passed
     in rather than imported here because the callers resolve the plugin's
     program tree first and this function must not guess where it is.  Every
-    member's (design, pdk) identity must be formable and unique (vibe-ic#2011).
+    member's (design, version directory) identity must be formable and unique.
 
     `announce_empty` makes a MEASURED empty population say so and NAME the
     index it read (vibe-ic#1764).  Without it, "the index under X publishes no
@@ -188,7 +186,7 @@ def _index_paths(corpus: Path, identity_of,
                     "publishes a routed DEF but its version directory does "
                     "not state a PDK (expected v<version>_<pdk>). The "
                     "gate-owner identity of a published cell is (design, "
-                    "pdk); a cell with no PDK has no identity in that model "
+                    "version directory); a cell with no PDK has no identity "
                     "and is not given a made-up one (vibe-ic#2011).",
                     file=sys.stderr,
                 )
@@ -196,14 +194,10 @@ def _index_paths(corpus: Path, identity_of,
             prior = cells.get(cell)
             if prior is not None:
                 print(
-                    f"[routed-def corpus] UNDETERMINED: design {design!r} "
-                    f"publishes two routed-DEF cells on the same PDK "
-                    f"({prior!r}, {version!r}), and both would own the gates "
-                    f"labelled ({cell}). The corpus publishes one routed DEF "
-                    "per (design, pdk); retire one of the two, or extend the "
-                    "identity to (design, pdk, version) in "
-                    "hygiene_finding_delta.routed_cell_identity before this "
-                    "population can carry both (vibe-ic#2011).",
+                    f"[routed-def corpus] UNDETERMINED: routed-DEF members "
+                    f"{design}/{prior} and {design}/{version} both claim "
+                    f"gate-owner identity ({cell}); the producer cannot "
+                    "declare duplicate gate owners.",
                     file=sys.stderr,
                 )
                 return 2, []
@@ -298,7 +292,7 @@ def _manifest(repo: Path, checkout: Path, subject_repo: Path, sha: str,
             print("[routed-def corpus] UNDETERMINED: manifest item has an "
                   f"unexpected identity: {rel}", file=sys.stderr)
             return 2
-        # The label identity is (design, pdk) and comes from the same
+        # The label identity is (design, version directory) and comes from the same
         # function the landing judge re-derives it with (vibe-ic#2011).
         cell_id = identity.routed_cell_identity(parts[1], parts[2])
         if cell_id is None:

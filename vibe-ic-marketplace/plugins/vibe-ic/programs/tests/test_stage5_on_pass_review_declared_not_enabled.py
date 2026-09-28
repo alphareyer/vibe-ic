@@ -449,7 +449,7 @@ def test_removing_the_disarm_moves_a_label_and_not_the_rejection_set():
     assert on.get("REJECT") == off.get("REJECT"), (
         "removing the disarm changed the rejection set; the docstring says it "
         "does not, and one of the two is now wrong")
-    assert on.get("DISARMED") == off.get("NOT_MEASURED")
+    assert on.get("DISARMED") == off.get("NOT_CHECKED")
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -19,6 +19,7 @@ Cases covered (the load-bearing one is COMPUTE_DONE_DELIVERABLE_MISSING):
 """
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -582,25 +583,30 @@ def test_cli_self_declared_interim_exit_1(tmp_path, capsys):
 
 
 def test_selfdeclared_interim_corpus_sweep():
-    """ZERO FALSE POSITIVES on every published RESULT.md in this repo.
+    """ZERO FALSE POSITIVES on every indexed canonical RESULT.md.
 
     This is the calibration that keeps the two GATING signals narrow. If a new
     checked-in deliverable trips it, that is either a real unfinished report
     (fix the report) or the rule is too wide (narrow the rule) — never a reason
     to weaken the assertion.
     """
-    root = _repo_root()
-    bench = root / "benchmark-data"
-    if not bench.is_dir():
+    from _published_corpus import corpus_tree
+    bench = corpus_tree()
+    if bench is None:
         pytest.skip("benchmark-data not present in this checkout")
-    result_files = sorted(bench.rglob("RESULT.md"))
-    if not result_files:
-        pytest.skip("no RESULT.md files found")
+    indexed = subprocess.check_output(
+        ["git", "-C", str(bench), "ls-files", "--", "ic", "evaluation"],
+        text=True).splitlines()
+    # PUBLISHING.md gives engineering checkpoints their own namespace. Their
+    # explicit INTERIM reports are valid progress records, not canonical cells.
+    members = [Path(p) for p in indexed if p.endswith("/RESULT.md")]
+    assert members, "no indexed canonical RESULT.md; nothing was calibrated"
+    result_files = [bench / p for p in members]
     flagged = []
     for f in result_files:
         a = R.assess_self_declared_interim(f)
         if a["self_declared_interim"]:
-            flagged.append((str(f.relative_to(root)), a["banner"],
+            flagged.append((str(f.relative_to(bench)), a["banner"],
                             a["headline_placeholder"]))
     assert not flagged, (
         "published RESULT.md flagged as self-declared-INTERIM: " + repr(flagged))

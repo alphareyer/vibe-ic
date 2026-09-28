@@ -51,6 +51,7 @@ _H = "sha256:" + "0" * 64
 _FROZEN_CELLS = {
     "ic/spm/v1.10.18_sky130A",
     "ic/spm/v1.14.88_gf180mcuD",
+    "ic/spm/v1.21.6_gf180mcuD",
     "ic/spm/v1.5.65_sky130A",
     "protocol_parity/espi",
     "protocol_parity/interlaken",
@@ -247,7 +248,7 @@ def test_the_published_corpus_is_followable_today(tmp_path):
     assert cells == _FROZEN_CELLS, (
         sorted(cells - _FROZEN_CELLS), sorted(_FROZEN_CELLS - cells))
     assert (len(rep["cells"]), decl, pres, pruned, superseded) == (
-        9, 93, 53, 38, 2), (
+        len(_FROZEN_CELLS), 131, 78, 49, 4), (
             len(rep["cells"]), decl, pres, pruned, superseded)
 
 

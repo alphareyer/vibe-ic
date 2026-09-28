@@ -74,6 +74,7 @@ _GOOD_INRUNNER = {
 _FROZEN_LEDGER_PATHS = {
     "benchmark-data/ic/spm/v1.10.18_sky130A/provenance.jsonl",
     "benchmark-data/ic/spm/v1.14.88_gf180mcuD/provenance.jsonl",
+    "benchmark-data/ic/spm/v1.21.6_gf180mcuD/provenance.jsonl",
     "benchmark-data/ic/spm/v1.5.65_sky130A/provenance.jsonl",
     "benchmark-data/protocol_parity/espi/provenance.jsonl",
     "benchmark-data/protocol_parity/interlaken/provenance.jsonl",
@@ -223,7 +224,8 @@ def test_the_published_corpus_is_clean_today(tmp_path):
     assert ledgers == _FROZEN_LEDGER_PATHS, (
         sorted(ledgers - _FROZEN_LEDGER_PATHS),
         sorted(_FROZEN_LEDGER_PATHS - ledgers))
-    assert (rep["ledgers"], rep["noted_rows"]) == (9, 7), rep
+    assert (rep["ledgers"], rep["noted_rows"]) == (
+        len(_FROZEN_LEDGER_PATHS), 7), rep
 
 
 def test_PAIRED_the_row_counter_tracks_the_population_not_a_constant(tmp_path):

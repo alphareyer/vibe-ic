@@ -332,13 +332,13 @@ def test_real_tree_index_is_in_sync(tmp_path: Path):
 
 @needs_corpus
 def test_real_tree_still_holds_all_three_states(tmp_path: Path):
-    """The frozen 8c4b608 publication population is represented exactly.
+    """The f06ccc0 publication population is represented exactly.
 
     The old assertion required a non-empty RETAINED FAILURE bucket.  That
     became a demand to republish a failing cell after benchmark-data bcf2f94
     deliberately withdrew all four non-converged result cells.  Classification
     still has three-state mutation coverage above.  The real published-cell
-    population is now exactly the three named converged SPM specimens; design
+    population is now exactly the four named converged SPM specimens; design
     input directories are not published cells and must not be invented as
     UNAUDITED records merely to keep that bucket non-empty.
     """
@@ -349,17 +349,19 @@ def test_real_tree_still_holds_all_three_states(tmp_path: Path):
         line = [l for l in text.splitlines()
                 if l.startswith(f"| {section} |")][0]
         counts[section] = int(line.rsplit("|", 2)[1].strip())
+    expected_cells = [
+        "spm/v1.10.18_sky130A",
+        "spm/v1.14.88_gf180mcuD",
+        "spm/v1.21.6_gf180mcuD",
+        "spm/v1.5.65_sky130A",
+    ]
     assert counts == {
-        bei.CONVERGED: 3,
+        bei.CONVERGED: len(expected_cells),
         bei.RETAINED_FAILURE: 0,
         bei.UNAUDITED: 0,
     }, counts
     tracked = bei._published_tree.published_paths(_real_ic())
-    assert bei.discover_cells(_real_ic(), tracked) == [
-        "spm/v1.10.18_sky130A",
-        "spm/v1.14.88_gf180mcuD",
-        "spm/v1.5.65_sky130A",
-    ]
+    assert bei.discover_cells(_real_ic(), tracked) == expected_cells
 
 
 @needs_corpus

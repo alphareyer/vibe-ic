@@ -110,7 +110,7 @@ def test_a_glob_resolves_from_the_sby_dir_not_the_formal_root(cell):
     assert got is not None and got.name == "here.sv"
 
 
-def test_the_cell_that_motivated_417_now_reports_its_dangling_chain():
+def test_the_cell_that_motivated_417_now_reports_its_dangling_chain(tmp_path):
     """End-to-end. The dangling-chain finding that a permissive resolver
     silenced must appear, and it must appear on its OWN — this test's subject
     is the resolver, so the assertion has to be about the resolver's finding
@@ -135,10 +135,27 @@ def test_the_cell_that_motivated_417_now_reports_its_dangling_chain():
     replaces, because it can now tell the resolver's subject apart from the
     completion contract.
     """
-    c = (CG.corpus_root(_PROGRAMS) / "spm" / "v1.5.58_ihp-sg13g2")
-    if not (c / "phase2/stage1/formal/reset_safety").is_dir():
-        CG.require_corpus(c, "the cell that motivated #417")
-        pytest.skip("published cell present but not in its #417 shape")
+    # The original IHP publication was deliberately retired. Recreate its
+    # decisive file relation as a local fixture: the nested .sby names a bare
+    # source that exists only one directory above it. A separate, intact .sby
+    # keeps the proof chain live so the dangling finding remains independent.
+    c = tmp_path
+    formal = c / "phase2" / "stage1" / "formal"
+    nested = formal / "reset_safety"
+    nested.mkdir(parents=True)
+    (formal / "spm.v").write_text("module spm; endmodule\n")
+    (formal / "good.sby").write_text("[files]\nspm.v\n")
+    (nested / "spm_reset_safety.sby").write_text("[files]\nspm.v\n")
+    (formal / "run.sby.log").write_text("SBY [x] DONE (PASS, rc=0)\n")
+    (formal / "results.json").write_text(json.dumps({
+        "all_proved": True, "property_count": 2,
+        "unresolved_obligations": [],
+        "bounded_vs_unbounded_scope": ["unbounded prove"],
+        "sby": "phase2/stage1/formal/good.sby",
+        "elaborated_sby": "phase2/stage1/formal/good.sby",
+        "evidence": "phase2/stage1/formal/run.sby.log",
+        "proof_transcript": "phase2/stage1/formal/run.sby.log",
+    }))
     rep = F.audit(c)
     dang = [f for f in rep["findings"] if f.startswith("SBY_REFS_DANGLING")]
     assert dang and "spm_reset_safety.sby" in dang[0], rep["findings"]
@@ -153,9 +170,9 @@ def test_the_other_published_cells_keep_their_verdicts():
     """The corpus guard, and the place G15's decision is written down.
 
     A resolver change CAN move verdicts, unlike #417; measured 0 of 27 and
-    pinned here so a future loosening has to argue. That is still what this
-    test does — but the two cells it named are no longer PASS, and the reason
-    is not the resolver.
+    pinned here so a future loosening has to argue. The retired cells this
+    test formerly named are absent from the f06ccc0 publication. Its two
+    surviving pre-#1974 SPM members remain FAIL, and the newer member PASSes.
 
     #1974 (`2a9d21368d`) added the Step-5 COMPLETION contract and migrated the
     EMITTER in the same commit. It did not migrate, regenerate or grandfather
@@ -181,7 +198,7 @@ def test_the_other_published_cells_keep_their_verdicts():
     distinction it could not make when it pinned a bare verdict, and the reason
     the relabelling went two campaigns unnoticed.
 
-    #417's own corpus test refuses to assert a verdict at all, and its reason
+    #417's own historical corpus test refuses to assert a verdict at all, and its reason
     applies here: a published cell's verdict is partly a property of how
     COMPLETE the checkout is (`.gitignore:31 *.log` drops
     `sby_subservient.log`, so `EVIDENCE_MISSING` fires or not depending on
@@ -209,15 +226,18 @@ def test_the_other_published_cells_keep_their_verdicts():
     bad = {k: v for k, v in seen.items() if v not in
            ("PASS", "FAIL", "SKIPPED-CONDITION")}
     assert not bad, bad
-    ihp = str(root / "spm" / "v1.5.58_ihp-sg13g2")
-    sub = str(root / "subservient")
-    assert seen.get(ihp) == "FAIL", seen
-    assert seen.get(sub) == "FAIL", seen
-    # The denominator, and ONLY the denominator, for the cell whose manifest
-    # carries every other obligation under its pre-#1974 name.
-    assert contract.get(ihp) == ["PROPERTY_DENOMINATOR_MISSING"], contract
-    # subservient's manifest is an older shape again: it states no bounded /
-    # unbounded scope under EITHER name, so its scope finding is a genuinely
-    # absent fact and must survive the alias fix.
-    assert contract.get(sub) == ["PROOF_SCOPE_MISSING",
-                                 "PROPERTY_DENOMINATOR_MISSING"], contract
+    expected = {
+        "v1.10.18_sky130A": ("FAIL", ["PROPERTY_DENOMINATOR_MISSING"]),
+        "v1.14.88_gf180mcuD": ("FAIL", ["PROPERTY_DENOMINATOR_MISSING"]),
+        "v1.21.6_gf180mcuD": ("PASS", []),
+    }
+    import subprocess
+    indexed = subprocess.check_output(
+        ["git", "-C", str(root), "ls-files", "--",
+         "ic/spm/*/phase2/stage1/formal/results.json"], text=True).splitlines()
+    members = {Path(p).parts[2] for p in indexed}
+    assert members == set(expected), (members - set(expected), set(expected) - members)
+    for version, (verdict, findings) in expected.items():
+        member = str(root / "ic" / "spm" / version)
+        assert seen.get(member) == verdict, (member, seen)
+        assert contract.get(member) == findings, (member, contract)

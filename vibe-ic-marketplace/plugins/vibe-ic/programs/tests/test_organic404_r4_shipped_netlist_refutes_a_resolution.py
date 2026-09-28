@@ -289,38 +289,33 @@ def test_the_current_consumer_still_reports_UNRESOLVED_and_names_the_width(
 
 # ── real data ──────────────────────────────────────────────────────────────
 def test_the_three_spm_cells_carry_the_shipped_width_as_evidence():
-    """Real corpus. These are the cells `cross_layer_reference_check` has been
-    failing on since v1.6.90, and the number they ship is 32."""
-    if not _CORPUS.is_dir():
+    """The f06ccc0 publications retain width evidence and exact finding members."""
+    from _published_corpus import corpus_root
+    root = corpus_root()
+    if root is None:
         pytest.skip("published corpus not checked out")
-    cells = ("spm/v1.5.58_ihp-sg13g2", "spm/v1.10.18_sky130A",
-             "spm/v1.9.96_gf180mcuD")
-    seen, absent = 0, []
-    for name in cells:
-        d = _CORPUS / name
-        if not d.is_dir():
-            absent.append(name)
-            continue
-        seen += 1
+    expected = {
+        "spm/v1.10.18_sky130A": True,
+        "spm/v1.14.88_gf180mcuD": False,
+        "spm/v1.21.6_gf180mcuD": False,
+        "spm/v1.5.65_sky130A": True,
+    }
+    indexed = subprocess.check_output(
+        ["git", "-C", str(root), "ls-files", "--", "ic/spm/*/RESULT.md"],
+        text=True).splitlines()
+    members = {"/".join(Path(p).parts[1:3]) for p in indexed}
+    assert members == set(expected), (members - set(expected), set(expected) - members)
+    for name, unresolved in expected.items():
+        d = root / "ic" / name
         assert _GATE.shipped_netlist_port_widths(d).get("x") == 32, name
         findings, _ = _GATE.audit(d)
         rows = [f for f in findings
                 if f.category == "PORT_WIDTH_UNRESOLVED_BY_CONSUMER"]
-        assert rows, (name, [f.category for f in findings])
-        port = rows[0].evidence["ports"][0]
-        assert port["port"] == "x"
-        assert port["shipped_netlist_width"] == 32, (name, port)
-    if seen == 0:
-        pytest.skip("spm cells not checked out")
-    # DERIVED FROM THE ROSTER ABOVE, not typed beside it. The literal `3` was
-    # `len(cells)` written a second time, so editing the roster silently made
-    # the two disagree — and when a cell was withdrawn the message said "only 2
-    # of 3" without naming which. The claim is unchanged: this test names
-    # specific cells and a missing one is a real finding, not a smaller run.
-    assert seen == len(cells), (
-        f"{len(absent)} of the {len(cells)} cell(s) this test names are no "
-        f"longer published: {absent}. Either they were withdrawn — in which "
-        f"case pick their successors — or the roster is stale.")
+        assert bool(rows) is unresolved, (name, [f.category for f in findings])
+        if unresolved:
+            port = rows[0].evidence["ports"][0]
+            assert port["port"] == "x"
+            assert port["shipped_netlist_width"] == 32, (name, port)
 
 
 def test_ibex_is_refused_on_real_data():

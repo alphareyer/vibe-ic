@@ -151,7 +151,7 @@ def _transition_subject(root: Path, *, activate: bool) -> Path:
           local def="$1" cell design
           cell="${{def%/phase3/stage3/pnr/routed.def}}"
           verdir="$(basename "$cell")"
-          design="$(basename "$(dirname "$cell")")/${{verdir#*_}}"
+          design="$(basename "$(dirname "$cell")")/$verdir"
           uncheckable_until 2027-02-28 "fixture has no macro LEF"
           run_tolerating_uncheckable "macro OBS not crossed ($design)" \
             "$PLUGIN" python3 programs/macro_obs_geometry_intersect_check.py "$cell"
@@ -657,7 +657,7 @@ def test_a_producer_that_claims_absence_and_prints_items_is_a_failure(tmp_path):
     assert label in [g["label"] for g in doc["gates"]]
 
 
-# --- vibe-ic#2011: a cell's gate-owner identity is (design, pdk) -------------
+# A gate owner identifies one published version directory.
 #
 # The population used to be keyed by DESIGN. The first design published on two
 # PDKs (spm x sky130A + gf180mcuD, benchmark-data 5a92b920) made the producer
@@ -705,12 +705,12 @@ def test_one_design_on_two_pdks_is_two_cells_with_distinct_owners(tmp_path):
         "two cells of one design share a gate label -- duplicate owners, the "
         f"exact state the producer used to refuse the corpus over: {labels}")
     owners = {label[label.rindex("(") + 1:-1] for label in labels}
-    assert owners == {"logic/openpdkx", "logic/openpdky"}, owners
+    assert owners == {"logic/v1.2.3_openpdkx", "logic/v1.5.0_openpdky"}, owners
     assert not any(label.endswith("(logic)") for label in labels), (
         "the label still carries the design alone")
 
 
-def test_two_routed_cells_of_one_design_on_one_pdk_refuse_before_duplicate_owners(
+def test_two_routed_cells_of_one_design_on_one_pdk_have_distinct_owners(
         tmp_path):
     external = _external(tmp_path)
     _routed(external, "logic", "v1_openpdkx", tracked=True)
@@ -718,11 +718,13 @@ def test_two_routed_cells_of_one_design_on_one_pdk_refuse_before_duplicate_owner
 
     proc = _helper(str(external))
 
-    assert proc.returncode == 2, proc.stdout + proc.stderr
-    assert proc.stdout == ""
-    assert "two routed-DEF cells on the same PDK" in proc.stderr
-    assert "(logic/openpdkx)" in proc.stderr, "the refusal must name the pair"
-    assert "v1_openpdkx" in proc.stderr and "v2_openpdkx" in proc.stderr
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "UNDETERMINED" not in proc.stderr
+    labels = _shipped_list_labels(external)
+    assert len(labels) == 8, labels
+    assert len(set(labels)) == 8, labels
+    owners = {label[label.rindex("(") + 1:-1] for label in labels}
+    assert owners == {"logic/v1_openpdkx", "logic/v2_openpdkx"}, labels
 
 
 def test_a_cell_that_states_no_pdk_has_no_identity_and_is_refused(tmp_path):
@@ -772,9 +774,7 @@ def test_the_cell_identity_grammar_is_one_rule_in_two_languages():
     python = [H.routed_cell_identity("design", n) or "NONE" for n in cases]
     assert bash.stdout.splitlines() == python, list(
         zip(cases, bash.stdout.splitlines(), python))
-    assert python[:6] == ["design/gf180mcuD", "design/sky130A",
-                          "design/ihp-sg13g2", "design/a_b",
-                          "design/openpdkx", "design/x-y_z"]
+    assert python[:6] == [f"design/{name}" for name in cases[:6]]
     assert python[6:] == ["NONE"] * 6, (
         "a name with no PDK must be refused by BOTH spellings")
 

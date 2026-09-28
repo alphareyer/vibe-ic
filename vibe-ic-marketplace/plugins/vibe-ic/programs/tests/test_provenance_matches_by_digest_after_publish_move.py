@@ -136,35 +136,30 @@ def test_end_to_end_a_tampered_artefact_still_fails(tmp_path):
 
 # ── real data ──────────────────────────────────────────────────────────────
 def test_the_published_cells_that_moved_their_gds_resolve():
-    """The three cells that motivated this. Without the digest route they
-    report the GDS as undeclared — a FAIL for a publish-time move."""
-    cells = ["spm/v1.5.58_ihp-sg13g2", "spm/v1.10.18_sky130A",
-             "spm/v1.9.96_gf180mcuD"]
-    seen, absent = 0, []
-    for name in cells:
-        d = _CORPUS / name
-        if not (d / "provenance.jsonl").is_file():
-            absent.append(name)
-            continue
+    """Every f06ccc0 SPM publication retains its digest based GDS resolution."""
+    from _published_corpus import corpus_root
+    root = corpus_root()
+    if root is None:
+        pytest.skip("published corpus not checked out")
+    cells = {
+        "spm/v1.10.18_sky130A",
+        "spm/v1.14.88_gf180mcuD",
+        "spm/v1.21.6_gf180mcuD",
+        "spm/v1.5.65_sky130A",
+    }
+    indexed = subprocess.check_output(
+        ["git", "-C", str(root), "ls-files", "--", "ic/spm/*/RESULT.md"],
+        text=True).splitlines()
+    members = {"/".join(Path(p).parts[1:3]) for p in indexed}
+    assert members == cells, (members - cells, cells - members)
+    for name in sorted(cells):
+        d = root / "ic" / name
+        assert (d / "provenance.jsonl").is_file(), name
         gds = list((d / "phase3" / "stage4" / "gds").glob("*.gds"))
-        if not gds:
-            absent.append(f"{name} (no GDS)")
-            continue
-        seen += 1
+        assert gds, name
         r = subprocess.run(
             [sys.executable, str(_PROG), str(d),
              "--output=phase3/stage4/gds/*.gds",
              "--tool=klayout,magic,openroad"],
             capture_output=True, text=True)
         assert r.returncode == 0, (name, r.stdout + r.stderr)
-    if seen == 0:
-        pytest.skip("published corpus not checked out")
-    # DERIVED FROM THE ROSTER ABOVE, not typed beside it. The literal `3` was
-    # `len(cells)` written a second time, so editing the roster silently made
-    # the two disagree — and when a cell was withdrawn the message said "only 2
-    # of 3" without naming which. The claim is unchanged: this test names
-    # specific cells and a missing one is a real finding, not a smaller run.
-    assert seen == len(cells), (
-        f"{len(absent)} of the {len(cells)} cell(s) this test names are no "
-        f"longer published: {absent}. Either they were withdrawn — in which "
-        f"case pick their successors — or the roster is stale.")

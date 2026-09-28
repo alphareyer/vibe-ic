@@ -259,7 +259,25 @@ def test_corpus_waivers_dialect_carries_no_env_unavailable_entry():
     in the corpus takes the tier `continue`, so #216's mechanism protected none
     of them. A corpus edit that changes this picture must not pass unnoticed."""
     rows = _corpus_waiver_entries()
-    # `len(rows) == 8` and `tiers == {"PASS_WITH_WAIVERS": 7, "PASS_STRUCTURAL": 1}` were
+    root = _corpus_root_dir()
+    # f06ccc0 authority: pin each entry, including the two entries in one
+    # file. A tier count alone could pass after swapping one member for another.
+    expected = {
+        ("protocol_parity/espi/waivers.json", 0): ("TAPEOUT-AUTOGEN-LVS", "WAIVED"),
+        ("protocol_parity/interlaken/waivers.json", 0): ("TAPEOUT-AUTOGEN-LVS", "WAIVED"),
+        ("protocol_parity/lpc/waivers.json", 0): ("TAPEOUT-AUTOGEN-LVS", "WAIVED"),
+        ("protocol_parity/mdio/waivers.json", 0): ("TAPEOUT-AUTOGEN-LVS", "WAIVED"),
+        ("protocol_parity/sgmii/waivers.json", 0): ("TAPEOUT-LVS-DEVICELEVEL", "PASS_STRUCTURAL"),
+        ("protocol_parity/sgmii/waivers.json", 1): ("TAPEOUT-AUTOGEN-DRC-CELLLIB", "WAIVED"),
+        ("protocol_parity/usb_pd/waivers.json", 0): ("TAPEOUT-AUTOGEN-DRC", "WAIVED"),
+        ("protocol_parity/usb_pd/waivers.json", 1): ("TAPEOUT-AUTOGEN-LVS", "WAIVED"),
+    }
+    actual = {(wf.relative_to(root).as_posix(), idx):
+              (entry.get("ticket"), (entry.get("verdict_tier") or "").strip().upper())
+              for wf, idx, entry in rows}
+    assert actual == expected, (actual.keys() - expected.keys(),
+                                expected.keys() - actual.keys(), actual)
+    # `len(rows) == 8` and `tiers == {"WAIVED": 7, "PASS_STRUCTURAL": 1}` were
     # the corpus' size written down twice. The measurement the issue turns on
     # is not how many entries there are — it is that NOT ONE of them carries
     # ENV_UNAVAILABLE, so #216's mechanism protected none of them. That
@@ -272,10 +290,7 @@ def test_corpus_waivers_dialect_carries_no_env_unavailable_entry():
         tiers[tier] = tiers.get(tier, 0) + 1
     assert sum(tiers.values()) == len(rows), (tiers, len(rows))
     assert "ENV_UNAVAILABLE" not in tiers, tiers
-    # The tier vocabulary is closed: a NEW tier appearing in the corpus is a
-    # change to the picture this issue rests on and must not pass unnoticed.
-    assert set(tiers) <= {"PASS_WITH_WAIVERS", "PASS_STRUCTURAL"}, tiers
-    assert tiers.get("PASS_WITH_WAIVERS"), tiers
+    assert set(tiers) == {"WAIVED", "PASS_STRUCTURAL"}, tiers
 
 
 def test_every_corpus_entry_is_well_formed_so_none_is_a_rejection():
