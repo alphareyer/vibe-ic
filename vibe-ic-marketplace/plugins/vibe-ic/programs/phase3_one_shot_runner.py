@@ -19894,7 +19894,7 @@ def _synth_max_fanout(project: Path, pdk_name: str, liberty_path: str = "",
     """
     unread: List[str] = []
     try:
-        fo = (_l9_declared_max_fanout(project, pdk_name)
+        fo = (_l9_declared_max_fanout(project, pdk_name, liberty_path)
               or _rtl_replication_fanout_bound(project))
     except Exception as exc:  # noqa: BLE001
         fo = None
@@ -20020,7 +20020,7 @@ def _active_std_cell_library(project: Path, pdk: str = "") -> str:
 
 
 def _l9_declared_max_fanout(project: Path,
-                            pdk: str = "") -> Optional[int]:
+                            pdk: str = "", liberty_path: str = "") -> Optional[int]:
     """Return the design's L9-declared `SYNTH_MAX_FANOUT` cap as a positive int,
     or None when L9 declares none. Reads ONLY the L9 constraints/floorplan doc
     (input docs or the generated L9) — a blind-legal design input, same source +
@@ -20066,7 +20066,9 @@ def _l9_declared_max_fanout(project: Path,
     # rule the staged-flow-config tier below uses — a foreign library's row
     # never reaches this run, and a row with no number declares nothing.
     try:
-        _scl = _active_std_cell_library(project, pdk) or ""
+        import declared_clock_period as _dcp
+        _scl = (_dcp.library_name_from_liberty(liberty_path)
+                or _active_std_cell_library(project, pdk) or "")
     except Exception:                                        # noqa: BLE001
         _scl = ""
     for root in roots:
@@ -20101,8 +20103,7 @@ def _l9_declared_max_fanout(project: Path,
     # wrong run. §4.05: a declaration is READ, never fabricated — no config,
     # no matching scope, or a non-positive value all leave this None.
     try:
-        _drv = _fpc.declared_drv_limits(project, pdk or "",
-                                        _active_std_cell_library(project, pdk))
+        _drv = _fpc.declared_drv_limits(project, pdk or "", _scl)
         _fo_cfg = _drv.get("max_fanout")
         if isinstance(_fo_cfg, int) and _fo_cfg > 0:
             _LAST_FANOUT_SOURCE["note"] = (
@@ -20163,12 +20164,12 @@ def _l9_library_scoped_fanout(text: str, library: str,
     before a glob. A row with no positive integer declares nothing. No
     `library` and no `pdk` -> None: a per-library value is never applied to a
     run whose library is unknown."""
-    import fnmatch as _fnm
+    import declared_clock_period as _dcp
     actual = [a.lower() for a in (library, pdk) if a]
     if not actual:
         return None
     col = None
-    best = None
+    rows = []
     for line in text.splitlines():
         # Strip Markdown emphasis (`**x**`) and code ticks only: a single `*`
         # is the key's own glob (`gf180mcu_*`) and must survive.
@@ -20190,16 +20191,15 @@ def _l9_library_scoped_fanout(text: str, library: str,
         m = re.fullmatch(r"\*{0,2}\s*(\d+)\s*\*{0,2}", val)
         if not key or not m or int(m.group(1)) <= 0:
             continue
-        for a in actual:
-            if key == a:
-                rank = 0
-            elif _fnm.fnmatchcase(a, key):
-                rank = 1
-            else:
-                continue
-            if best is None or rank < best[0]:
-                best = (rank, int(m.group(1)), cells[0])
-    return (best[1], best[2]) if best else None
+        rows.append({"key": key, "cap": int(m.group(1)),
+                     "display_key": cells[0]})
+    matches = _dcp.match_rows(rows, actual)
+    if not matches:
+        return None
+    # Preserve the documented exact-row precedence while sharing the clock
+    # resolver's library-family matching rule (including separator collapse).
+    best = min(matches, key=lambda row: 0 if row["key"] in actual else 1)
+    return best["cap"], best["display_key"]
 
 
 def _rtl_replication_fanout_bound(project: Path) -> Optional[int]:
@@ -37539,7 +37539,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         # re-parsing the SDC).
         try:
             _cts_fanout_target = (
-                _l9_declared_max_fanout(project, str(pdk.name))
+                _l9_declared_max_fanout(project, str(pdk.name), str(pdk.liberty))
                 or _rtl_replication_fanout_bound(project)
                 or _drv.get("max_fanout"))
         except Exception:
