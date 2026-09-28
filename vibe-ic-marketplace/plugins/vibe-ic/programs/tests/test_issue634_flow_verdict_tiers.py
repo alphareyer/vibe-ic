@@ -54,8 +54,14 @@ def test_the_producer_vocabulary_includes_the_declared_attribution_tier():
     """
     assert T.PRODUCER_STATUSES == frozenset(
         {"PASS", "PASS_WITH_WAIVERS", D.TIER_PASS_WITH_ATTRIBUTION, "WAIVED",
-         "FAIL", "NOT_MEASURED", "NOT_APPLICABLE"})
+         "FAIL", "NOT_MEASURED", "NOT_APPLICABLE", "NOT_PROVEN"})
     assert T.SCHEMA_VERSION == 3
+
+
+def test_the_producer_vocabulary_includes_the_lec_residual():
+    assert T.PRODUCER_STATUSES == frozenset(
+        {"PASS", "PASS_WITH_WAIVERS", D.TIER_PASS_WITH_ATTRIBUTION, "WAIVED",
+         "FAIL", "NOT_MEASURED", "NOT_APPLICABLE", "NOT_PROVEN"})
 
 
 def test_a_word_registered_nowhere_is_refused_not_adjudicated():
@@ -88,6 +94,7 @@ def test_the_two_negative_sets_still_partition_the_vocabulary():
     (D.TIER_PASS_WITH_ATTRIBUTION, False, True, False, False),
     ("FAIL",              False, True,  False, False),
     ("NOT_MEASURED",      False, True,  False, False),
+    ("NOT_PROVEN",        False, True,  False, False),
     ("NOT_APPLICABLE",    True,  False, False, False),
     ("WAIVED",            False, True,  False, False),
 ])
@@ -122,7 +129,7 @@ def test_only_the_full_pass_satisfies_a_predecessor_outright():
 
 def test_only_a_declared_inapplicable_step_is_out_of_the_verdict_scope():
     assert not T.scoped_into_verdict({"status": "NOT_APPLICABLE"})
-    for w in ("PASS", "PASS_WITH_WAIVERS", "FAIL", "NOT_MEASURED"):
+    for w in ("PASS", "PASS_WITH_WAIVERS", "FAIL", "NOT_MEASURED", "NOT_PROVEN"):
         assert T.scoped_into_verdict({"status": w}), w
 
 

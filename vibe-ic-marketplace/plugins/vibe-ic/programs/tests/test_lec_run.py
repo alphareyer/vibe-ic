@@ -442,15 +442,15 @@ def test_skip_report_is_honest_waived_deferred_not_vacuous_pass(tmp_path):
     # it vacuously either — `passed` stays False. But it is NOT a hard
     # LEC_NOT_EQUIVALENT that cascade-marks every downstream physical step MISSING
     # off a netlist nothing proved non-equivalent; it is the non-blocking
-    # WAIVED-DEFERRED tier (inconclusive=True, its own honest LEC_SKIPPED_CONDITION
-    # finding), the SAME evidence class the #208 INCONCLUSIVE sibling is booked as.
+    # NOT_PROVEN tier with an explicit NOT_RUN counterexample search.
     # NO-LEAK: a genuine mismatch lands non_equivalent_points>0 (or verdict FAIL)
     # and still hard-FAILs at the substance verdict — covered by
     # test_skipped_condition_with_counterexample_still_hard_fails.
     assert res.passed is False
-    assert res.inconclusive is True
+    assert res.verdict == "NOT_PROVEN"
+    assert res.counterexample_search["result"] == "NOT_RUN"
     rules = {f.rule for f in res.findings}
-    assert rules == {"LEC_SKIPPED_CONDITION"}, rules
+    assert rules == {"LEC_NOT_PROVEN"}, rules
 
 
 # ---------------------------------------------------------------------------
@@ -2339,5 +2339,4 @@ def test_no_live_docker_exec_targets_the_bare_shared_container_name():
         f"line(s) {offenders} — pass `_live_container()` instead, so the name "
         f"carries the pin digest and cannot be squatted by another lane's "
         f"container (#2230)")
-
 

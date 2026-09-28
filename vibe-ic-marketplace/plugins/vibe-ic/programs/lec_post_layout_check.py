@@ -69,6 +69,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # post-layout step ran the pre-v1.18.0 strategy for 98 versions because
 # nothing tied the two paths together).
 import lec_run as _lec_run  # noqa: E402
+import lec_counterexample_search as lec_cex  # noqa: E402
 
 GATE = "lec_post_layout_check"
 
@@ -80,6 +81,7 @@ LEC_POST_RPT_REL = "reports/phase3/lec_post_layout.rpt"
 V_PASS = "PROVEN_EQUIVALENT"
 V_NONEQUIV = "NON_EQUIVALENT"
 V_UNPROVEN = "UNPROVEN"
+V_NOT_PROVEN = "NOT_PROVEN"
 V_VACUOUS = "VACUOUS"
 V_SKIP = "SKIP"
 V_RUN_ERROR = "RUN_ERROR"
@@ -1474,6 +1476,53 @@ def evaluate_report(doc: dict) -> Dict[str, object]:
     if non_equiv is None:
         non_equiv = _int_or_none(lc.get("non_equivalent"))
     equivalent = lc.get("equivalent")
+    names = [str(x) for x in (doc.get("unproven_point_names") or [])]
+    search = (doc.get("counterexample_search")
+              if isinstance(doc.get("counterexample_search"), dict) else {})
+    if names and unproven == 0 and not lec_cex.complete_resolution_valid(
+            search, names):
+        return {"gate": GATE, "result": "FAIL", "verdict": V_RUN_ERROR,
+                "total_points": total, "proven_points": proven,
+                "unproven_points": unproven,
+                "unproven_point_names": names,
+                "counterexample_search": search,
+                "findings": ["LEC_POST_SAT_DISPOSITION_UNBOUND: residual "
+                             "was erased without a complete, named SAT result"]}
+    if (unproven or 0) > 0 and (total or 0) > 0:
+        if not search:
+            search = lec_cex.not_run(
+                "producer supplied no counterexample search record", names)
+        outcome = search.get("result")
+        if outcome == "COUNTEREXAMPLE" or (non_equiv or 0) > 0:
+            result = "FAIL"
+            finding = (f"LEC_POST_NONEQUIV: SAT miter counterexample for "
+                       f"{names}; trace: {search.get('trace', 'see producer report')}")
+        elif (len(names) == unproven
+              and lec_cex.complete_resolution_valid(search, names)):
+            result = "PASS"
+            finding = ""
+            proven = total
+            unproven = 0
+            equivalent = True
+        else:
+            result = V_NOT_PROVEN
+            finding = (f"LEC NOT_PROVEN: {unproven} of {total} points unproven; "
+                       f"{search.get('method', 'counterexample search')}, "
+                       f"K={search.get('bound_cycles', 'unknown')} cycles: "
+                       f"{outcome or 'NOT_RUN'} "
+                       f"({search.get('reason', 'no counterexample found')})")
+        return {
+            "gate": GATE, "result": result,
+            "verdict": (V_PASS if result == "PASS" else
+                        V_NONEQUIV if result == "FAIL" else V_NOT_PROVEN),
+            "total_points": total, "proven_points": proven,
+            "unproven_points": unproven,
+            "unproven_point_names": names,
+            "non_equivalent_points": non_equiv,
+            "equivalent": equivalent,
+            "counterexample_search": search,
+            "findings": [finding] if finding else [],
+        }
 
     findings: List[str] = []
     result = "FAIL"
@@ -1565,6 +1614,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         Path(ns.json_out).write_text(out)
     print(out)
     # SKIP is an honest not-applicable -> exit 0 (does not block tape-out).
+    if res["result"] == V_NOT_PROVEN:
+        print(res["findings"][0])
+        return 5
     if res["result"] == "PASS" or res["result"] == "SKIP":
         return 0
     return 1

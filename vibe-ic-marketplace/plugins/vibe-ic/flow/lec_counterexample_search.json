@@ -1,0 +1,5 @@
+{
+  "bound_cycles": 20,
+  "sat_timeout_seconds": 300,
+  "source": "flow/lec_counterexample_search.json"
+}

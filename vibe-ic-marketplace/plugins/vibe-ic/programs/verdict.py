@@ -60,8 +60,8 @@ because neither defect exists in a fixture. They exist only when a real run
 reaches a later step CARRYING an earlier step's word. That is why the rule
 below is a function with tests in both directions, and not a convention.
 
-FIVE GENERIC VERDICTS, AND ONE DECLARED DRC ATTRIBUTION TIER
------------------------------------------------------------
+SIX GENERIC VERDICTS, AND ONE DECLARED DRC ATTRIBUTION TIER
+------------------------------------------------------------
 
     PASS                the step ran and what it examined was good
     PASS_WITH_WAIVERS   the same, with named rows somebody must close
@@ -70,6 +70,8 @@ FIVE GENERIC VERDICTS, AND ONE DECLARED DRC ATTRIBUTION TIER
                         die-level attribution producer
     FAIL                the step ran and what it examined was not good;
                         or a required artefact does not exist
+    NOT_PROVEN          LEC has residual points, with a bounded SAT search
+                        finding no counterexample or stating why it did not run
     NOT_MEASURED        nobody measured it — `reason_class` says why
     NOT_APPLICABLE      the input says there is nothing here to measure —
                         `declared_by` says which line of the input says so
@@ -168,6 +170,12 @@ class Verdict(str, enum.Enum):
     #: the run, not an absence of measurement — `reason_class` is
     #: `MISSING_ARTEFACT` and the rule is stated in `cascade_to_dependent`.
     FAIL = "FAIL"
+
+    #: LEC examined a nonzero point population but did not prove every point.
+    #: A bounded counterexample search found none, or records why it could not
+    #: run. This is a measured open proof obligation: it blocks a run PASS,
+    #: does not assert a design defect, and cannot become a waiver.
+    NOT_PROVEN = "NOT_PROVEN"
 
     #: Nobody measured it. `reason_class` says why; `reason` says it in
     #: sentences. Replaces `SKIP`, `SKIPPED`, `SKIPPED-SETUP-REQUIRED`,
@@ -377,7 +385,7 @@ class WaiverRow:
 class StepVerdict:
     """One step's result: the verdict, plus every distinction the old words carried.
 
-    Construct through the five classmethods below rather than by hand — they
+    Construct through the six classmethods below rather than by hand — they
     are what make the required field required.
     """
 
@@ -447,8 +455,10 @@ class StepVerdict:
                 f"on step {self.step_id or self.name!r} — a waived step with "
                 f"no row to close reaches no must-close list, which is the "
                 f"defect the bare word permitted.")
+        if self.verdict is Verdict.NOT_PROVEN and not self.reason:
+            raise ValueError("NOT_PROVEN requires the residual proof counts and search result")
 
-    # ── the five constructors ────────────────────────────────────────────
+    # ── the six constructors ─────────────────────────────────────────────
     @classmethod
     def pass_(cls, step_id: str = "", name: str = "", *,
               disclosures: Sequence[Disclosure] = (), **kw) -> "StepVerdict":
@@ -490,6 +500,11 @@ class StepVerdict:
                    reason_class=reason_class, reason=reason, **kw)
 
     @classmethod
+    def not_proven(cls, step_id: str = "", name: str = "", *,
+                   reason: str, **kw) -> "StepVerdict":
+        return cls(Verdict.NOT_PROVEN, step_id, name, reason=reason, **kw)
+
+    @classmethod
     def not_applicable(cls, step_id: str = "", name: str = "", *,
                        declared_by: str, reason: str = "",
                        **kw) -> "StepVerdict":
@@ -506,10 +521,11 @@ class StepVerdict:
     def blocks_run_pass(self) -> bool:
         """Does this step stop the RUN from being called a pass?
 
-        FAIL, NOT_MEASURED, and the declared attribution tier do;
+        FAIL, NOT_PROVEN, NOT_MEASURED, and the declared attribution tier do;
         NOT_APPLICABLE and disclosures do not. See `run_verdict`.
         """
-        return self.verdict in (Verdict.FAIL, Verdict.NOT_MEASURED,
+        return self.verdict in (Verdict.FAIL, Verdict.NOT_PROVEN,
+                                Verdict.NOT_MEASURED,
                                 Verdict.PASS_WITH_ATTRIBUTION,
                                 Verdict.WAIVED)
 
@@ -824,6 +840,7 @@ def review_gate_verdict(step_id: str, name: str, *, inputs_present: bool,
 #: a measured defect outranks a hole.
 RUN_PRECEDENCE: Sequence[Verdict] = (
     Verdict.FAIL,
+    Verdict.NOT_PROVEN,
     Verdict.NOT_MEASURED,
     Verdict.WAIVED,
     Verdict.PASS_WITH_ATTRIBUTION,
@@ -897,7 +914,8 @@ EXCUSED = frozenset({Verdict.NOT_APPLICABLE.value})
 
 #: The step is a defect or a hole — what keeps a run from being green.
 #: Replaces `NON_GREEN`.
-NON_GREEN = frozenset({Verdict.FAIL.value, Verdict.NOT_MEASURED.value,
+NON_GREEN = frozenset({Verdict.FAIL.value, Verdict.NOT_PROVEN.value,
+                       Verdict.NOT_MEASURED.value,
                        Verdict.PASS_WITH_ATTRIBUTION.value,
                        Verdict.WAIVED.value})
 
@@ -911,9 +929,10 @@ def is_excused(status: Any) -> bool:
 
 
 def is_non_green(status: Any) -> bool:
-    """Keeps the run off a pass: a defect, a hole, attribution, or a DRV
-    owner-waived residual."""
-    return parse(status) in (Verdict.FAIL, Verdict.NOT_MEASURED,
+    """Keeps the run off a pass: a defect, an unproven LEC residual, a hole,
+    attribution, or a DRV owner-waived residual."""
+    return parse(status) in (Verdict.FAIL, Verdict.NOT_PROVEN,
+                             Verdict.NOT_MEASURED,
                              Verdict.PASS_WITH_ATTRIBUTION, Verdict.WAIVED)
 
 
