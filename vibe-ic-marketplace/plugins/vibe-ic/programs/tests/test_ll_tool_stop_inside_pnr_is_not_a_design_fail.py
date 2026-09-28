@@ -9,10 +9,9 @@ FAIL. So a stalled step 19/21 (`LL_TOOL_STALLED`), or a probe past its deadline
 that never answered (the same class FX_STALL_AND_PADRING_RC fixed for phase 3's
 `_fail` and A6/A7).
 
-The chains now return the session's own stop codes for a stop (the watchdog's
-RC_STALLED, the ceiling's 124), and step_pnr books those NOT_MEASURED with the
-contract's reason (STALLED / BUDGET_EXHAUSTED). A tool that ran and failed
-stays rc 1 and FAIL.
+The chains return the session's stop codes for a stop (the watchdog's
+RC_STALLED, a probe deadline's 124), and step_pnr books those NOT_MEASURED
+only with the same session's stop evidence. A natural 124 remains FAIL.
 
 The analog runner booked every rc-69 (environment) row with the fixed class
 input_absent. The A6 LibreLane arm and A7 write the reason in their block
@@ -98,10 +97,28 @@ def test_cts_hold_keeps_a_tool_that_ran_and_failed_at_rc_1(tmp_path, monkeypatch
 @pytest.mark.parametrize('_code,rc,reason', STOPS)
 def test_pnr_books_a_stopped_session_not_measured(tmp_path, monkeypatch,
                                                   _code, rc, reason):
+    evidence = ("WATCHDOG_STALLED: configured forward-progress signals did not advance"
+                if _code == 'LL_TOOL_STALLED' else
+                "WATCHDOG_CEILING: a clock stopped this job")
     res, _calls, _p = TP._drive(tmp_path, monkeypatch, first_rc=rc,
-                                stage="detailed_route")
+                                stage="detailed_route", first_stderr=evidence)
     assert (res.status, res.reason_class) == ('NOT_MEASURED', reason)
     assert f'rc={rc}' in res.detail
+
+
+def test_pnr_keeps_a_natural_rc_124_red(tmp_path, monkeypatch):
+    res, _calls, _p = TP._drive(tmp_path, monkeypatch, first_rc=124,
+                                stage="detailed_route")
+    assert res.status == 'FAIL'
+    assert res.reason_class != _V.ReasonClass.BUDGET_EXHAUSTED.value
+
+
+def test_pnr_books_a_librelane_deadline_only_with_its_refusal(tmp_path, monkeypatch):
+    res, _calls, _p = TP._drive(
+        tmp_path, monkeypatch, first_rc=124, stage="detailed_route",
+        first_stdout_suffix="PNR_ROUTE_REFUSED LL_TOOL_DEADLINE: probe timed out")
+    assert (res.status, res.reason_class) == (
+        'NOT_MEASURED', _V.ReasonClass.BUDGET_EXHAUSTED.value)
 
 
 def test_pnr_keeps_a_tool_that_ran_and_failed_red(tmp_path, monkeypatch):

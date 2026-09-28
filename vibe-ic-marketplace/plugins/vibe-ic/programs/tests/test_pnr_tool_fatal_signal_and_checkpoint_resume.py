@@ -193,7 +193,8 @@ def _drive(tmp_path, monkeypatch, *, first_rc, stage,
            route_checkpoint="routed", resume_def_routed=True,
            preroute_routed=False, first_signoff=(),
            resume_def_classifiable=True, resume_stage=None,
-           resume_signoff=(), probe=True):
+           resume_signoff=(), probe=True, first_stderr="",
+           first_stdout_suffix=""):
     """Run step_pnr against a fake OpenROAD.
 
     The FIRST `openroad` invocation writes the route checkpoint and the log,
@@ -290,7 +291,7 @@ def _drive(tmp_path, monkeypatch, *, first_rc, stage,
                 if first_signoff:
                     log += _PG_OK
                 (out_dir / "openroad.log").write_text(log)
-                return (first_rc, log, "")
+                return (first_rc, log + first_stdout_suffix, first_stderr)
             # second and later invocations
             log = _ROUTE_OK + _PG_OK
             if resume_writes_def:

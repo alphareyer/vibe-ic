@@ -33,6 +33,7 @@ only probes and bounds them with its own deadline, name and reap.
 from __future__ import annotations
 
 import ast
+from collections import Counter
 import os
 import subprocess
 import sys
@@ -58,16 +59,33 @@ PROBES = {"librelane_contract.py": {"image_capability", "resolve_step_configs", 
           "librelane_signoff.py": set()}
 TOOL_STEPS = {"librelane_contract.py": {"run_chain", "_openroad_convert"},
               "librelane_signoff.py": {"agreement", "run_sta_script"}}
-# A respelled argv can evade every literal docker-run audit. Pin the owners of
-# all direct subprocess edges in these modules, including non-Docker metadata
-# queries, so a new call site requires an explicit review of its bound.
-SUBPROCESS_MEMBERS = {
-    "librelane_contract.py": {
-        "_reap", "_Client.__init__.work", "run_container",
-        "run_container.rebound", "run_container.cpu_probe", "image_pdk_root._inspect",
-        "_materialise_image_pdk", "_docker_lines",
-    },
-    "librelane_signoff.py": set(),
+# A respelled argv can evade every literal docker-run audit. Pin EACH call,
+# including its method, argv expression and deadline/forwarded supervision.
+# A set of owner names lost a second call inside an already pinned function.
+# Counter retains multiplicity if two calls have the same shape.
+SUBPROCESS_EDGES = {
+    "librelane_contract.py": Counter({
+        ("_reap", "run", "[binary, 'rm', '-f', name]", "_REAP_DEADLINE_S", False): 1,
+        ("_Client.__init__.work", "run", "cmd", "", True): 1,
+        ("run_container", "run", "named", "probe_deadline_s", True): 1,
+        ("run_container.rebound", "run",
+         "[binary, *cmd[1:]] if cmd and cmd[0] == 'docker' else cmd", "", True): 1,
+        ("run_container.cpu_probe", "run",
+         "[binary, 'inspect', '-f', '{{.State.Pid}}', name]", "_REAP_DEADLINE_S", False): 1,
+        ("image_pdk_root._inspect", "run",
+         "[docker, 'image', 'inspect', '--format', '{{json .Id}} {{json .Config.Env}}', ref]",
+         "IMAGE_INSPECT_DEADLINE_S", False): 1,
+        ("_materialise_image_pdk", "run",
+         "[docker, 'create', *_dmem.docker_memory_flags(), '--network', 'none', "
+         "'--entrypoint', 'true', found['image_id']]", "", False): 1,
+        ("_materialise_image_pdk", "run",
+         "[docker, 'cp', '-L', f'{created.stdout.strip()}:{guest}', str(scratch / pdk)]",
+         "", False): 1,
+        ("_materialise_image_pdk", "run",
+         "[docker, 'rm', '-f', created.stdout.strip()]", "", False): 1,
+        ("_docker_lines", "run", "[docker, *argv]", "DOCKER_METADATA_DEADLINE_S", False): 1,
+    }),
+    "librelane_signoff.py": Counter(),
 }
 
 
@@ -462,18 +480,20 @@ def member_audit(source: str, probes: set[str], tools: set[str]) -> list[str]:
                    if probes == PROBES[name] and tools == TOOL_STEPS[name]), None)
     if module is not None:
         actual = subprocess_edge_members(source)
-        expected = SUBPROCESS_MEMBERS[module]
-        problems += [f"{f}: subprocess edge is not pinned" for f in sorted(actual - expected)]
-        problems += [f"{f}: pinned subprocess edge disappeared" for f in sorted(expected - actual)]
+        expected = SUBPROCESS_EDGES[module]
+        problems += [f"{edge[0]}: subprocess edge is not pinned"
+                     for edge in sorted((actual - expected).elements())]
+        problems += [f"{edge[0]}: pinned subprocess edge disappeared"
+                     for edge in sorted((expected - actual).elements())]
     return problems
 
 
-def subprocess_edge_members(source: str) -> set[str]:
-    """Qualified functions containing direct run/Popen/check_output calls."""
+def subprocess_edge_members(source: str) -> Counter[tuple[str, str, str, str, bool]]:
+    """Count each direct subprocess edge by owner, call, argv and bound."""
     tree = ast.parse(source)
     parents = {child: node for node in ast.walk(tree)
                for child in ast.iter_child_nodes(node)}
-    members = set()
+    members: Counter[tuple[str, str, str, str, bool]] = Counter()
     for call in ast.walk(tree):
         if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
             continue
@@ -487,7 +507,12 @@ def subprocess_edge_members(source: str) -> set[str]:
             if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 names.append(owner.name)
             owner = parents[owner]
-        members.add(".".join(reversed(names)) if names else "<module>")
+        owner_name = ".".join(reversed(names)) if names else "<module>"
+        timeout = next((ast.unparse(kw.value) for kw in call.keywords
+                        if kw.arg == "timeout"), "")
+        forwarded = any(kw.arg is None for kw in call.keywords)
+        argv = ast.unparse(call.args[0]) if call.args else "<missing argv>"
+        members[(owner_name, call.func.attr, argv, timeout, forwarded)] += 1
     return members
 
 
@@ -537,3 +562,17 @@ def _unbounded_container(docker, image):
     assert bound_audit(mutant, TOOL_STEPS[name]) == []
     assert member_audit(mutant, PROBES[name], TOOL_STEPS[name]) == [
         "_unbounded_container: subprocess edge is not pinned"]
+
+
+def test_a_second_subprocess_edge_inside_a_pinned_function_is_detected():
+    name = "librelane_contract.py"
+    source = (PROGRAMS / name).read_text(encoding="utf-8")
+    original = "    try:\n        done = subprocess.run([docker, *argv], capture_output=True, text=True,"
+    assert source.count(original) == 1
+    mutant = source.replace(
+        original,
+        "    subprocess.run([docker, *['run'], 'image'], capture_output=True)\n" + original)
+    assert audit(mutant) == []
+    assert bound_audit(mutant, TOOL_STEPS[name]) == []
+    assert member_audit(mutant, PROBES[name], TOOL_STEPS[name]) == [
+        "_docker_lines: subprocess edge is not pinned"]

@@ -43,7 +43,7 @@ def tool_stop_reason(code: str | None) -> str | None:
 
 def _tool_stop_session_rcs() -> dict[str, int]:
     """Each stop as the exit code a PnR session reports for the same event:
-    the watchdog's stall kill and the ceiling's 124. A chain that runs inside
+    the watchdog's stall kill and a probe deadline's 124. A chain that runs inside
     step_pnr's session (steps 19/20, 21) answers with these, so step_pnr books
     its own stall and a LibreLane stall by one rule."""
     import _watchdog as _wd
@@ -55,11 +55,20 @@ def tool_stop_session_rc(code: str | None) -> int | None:
     return _tool_stop_session_rcs().get(code) if code else None
 
 
-def session_stop_reason(rc: int | None) -> str | None:
-    """The NOT_MEASURED reason class for a session exit code that means the
-    tool was stopped (see `_tool_stop_session_rcs`), else None."""
+def session_stop_reason(rc: int | None, *, out: str = '', err: str = '') -> str | None:
+    """Classify a session stop only when this execution records its cause.
+
+    Exit codes are shared with natural tool exits: in particular, the watchdog
+    no longer produces 124 on a clock, while a tool can return 124 itself.
+    The watchdog annotates stderr; LibreLane's session wrappers annotate their
+    own refusal in stdout. Neither a bare rc nor an earlier log is evidence.
+    """
     for code, stop_rc in _tool_stop_session_rcs().items():
-        if rc == stop_rc:
+        watchdog_note = ('WATCHDOG_STALLED:' if code == 'LL_TOOL_STALLED'
+                         else 'WATCHDOG_CEILING:')
+        refusal = any(f'PNR_{arm}_REFUSED {code}:' in out
+                      for arm in ('ROUTE', 'CTS_HOLD'))
+        if rc == stop_rc and (watchdog_note in err or refusal):
             return TOOL_STOP_REASONS[code]
     return None
 

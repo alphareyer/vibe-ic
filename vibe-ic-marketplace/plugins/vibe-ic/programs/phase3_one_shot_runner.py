@@ -39952,14 +39952,12 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                         "non_signoff_outputs": _iso,
                         "resize_history": resize_history,
                         "loosen_declines": loosen_declines})
-    # A SESSION THE RUNNER STOPPED IS NOT A FINDING. The watchdog's stall kill
-    # (no progress) and the ceiling's 124 end a session whose tool never
-    # answered; a LibreLane chain inside the session (steps 19/20, 21) reports
-    # a contract stop with the same codes (`librelane_contract.
-    # tool_stop_session_rc`). NOT_MEASURED with the contract's reason, never
-    # FAIL; a tool that ran and failed still reaches the gate below.
+    # A session stopped by the watchdog or a LibreLane refusal is not a design
+    # finding. Require the stop note from THIS session: a tool can naturally
+    # exit with the same code (especially 124), and then the failure gate below
+    # must remain red. The watchdog's clock ceiling is a record, not a kill.
     import librelane_contract as _ll_stop
-    _stop_reason = _ll_stop.session_stop_reason(rc)
+    _stop_reason = _ll_stop.session_stop_reason(rc, out=out, err=err)
     if _stop_reason is not None:
         return StepResult("pnr", _V.Verdict.NOT_MEASURED.value, time.time() - t0,
                           f"PNR_SESSION_STOPPED rc={rc}{spare_note}: the tool was "
