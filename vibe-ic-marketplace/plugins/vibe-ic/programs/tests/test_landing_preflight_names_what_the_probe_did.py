@@ -93,6 +93,61 @@ def test_a_probe_killed_from_outside_is_not_measured(tmp_path, lane):
     assert result["verdict"] == "NOT_MEASURED"
 
 
+def test_a_runtime_abort_refuses_and_prints_its_crash(tmp_path, lane):
+    fake = _fake_programs(
+        tmp_path,
+        "import faulthandler, os, resource\n"
+        "resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n"
+        "faulthandler.enable()\n"
+        "os.abort()\n",
+    )
+    result = program.preflight(programs=fake, python=sys.executable)
+    assert result["verdict"] == "REFUSE", result
+    assert result["probe_returncode"] == -6
+    assert "runtime crashed with signal 6" in result["reason"]
+    assert "Fatal Python error" in "\n".join(result["lines"])
+
+
+def test_a_stalled_import_probe_is_not_measured_and_keeps_its_tail(
+        tmp_path, monkeypatch, lane):
+    monkeypatch.setattr(_pr, "_outer_cache", 2.0)
+    fake = _fake_programs(tmp_path, "print('1 passed')\n")
+    shim = tmp_path / "python-stops-on-c"
+    shim.write_text("#!/bin/sh\n"
+                    "for arg in \"$@\"; do\n"
+                    "  if [ \"$arg\" = \"-c\" ]; then\n"
+                    "    echo IMPORT_PROBE_PARTIAL >&2\n"
+                    "    kill -STOP $$\n"
+                    "  fi\n"
+                    "done\n"
+                    f"exec {sys.executable} \"$@\"\n",
+                    encoding="utf-8")
+    shim.chmod(0o755)
+    result = program.preflight(programs=fake, python=str(shim))
+    assert result["verdict"] == "NOT_MEASURED", result
+    assert "isolated import" in result["reason"]
+    assert "IMPORT_PROBE_PARTIAL" in result["probe_tail"]["stderr"]
+    assert "IMPORT_PROBE_PARTIAL" in "\n".join(result["lines"])
+
+
+def test_a_stalled_entry_keeps_partial_output_and_names_the_hang(
+        tmp_path, monkeypatch, lane):
+    monkeypatch.setattr(_pr, "_outer_cache", 2.0)
+    fake = _fake_programs(tmp_path,
+                          "import os, signal, sys\n"
+                          "print('ENTRY_STDOUT_PARTIAL', flush=True)\n"
+                          "print('ENTRY_STDERR_PARTIAL', file=sys.stderr, flush=True)\n"
+                          "os.kill(os.getpid(), signal.SIGSTOP)\n")
+    result = program.preflight(programs=fake, python=sys.executable)
+    assert result["verdict"] == "NOT_MEASURED", result
+    assert "stopped moving" in result["reason"]
+    assert "ENTRY_STDOUT_PARTIAL" in result["probe_tail"]["stdout"]
+    assert "ENTRY_STDERR_PARTIAL" in result["probe_tail"]["stderr"]
+    assert "ENTRY_STDOUT_PARTIAL" in "\n".join(result["lines"])
+    assert "ENTRY_STDERR_PARTIAL" in "\n".join(result["lines"])
+    assert "give the probe the time" not in "\n".join(result["lines"])
+
+
 def test_the_cli_says_not_measured_with_its_own_exit_code(tmp_path):
     """rc 3 for a probe that could not finish looking; rc 2 stays the
     refusal's. Driven through the real CLI with a real stall."""
