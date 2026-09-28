@@ -1127,6 +1127,115 @@ def lec_proved_points_from_output(raw: str) -> Optional[Dict[str, int]]:
     return out or None
 
 
+_INDUCT_PASS_RE = re.compile(r"(?m)^\d+(?:\.\d+)*\. Executing EQUIV_INDUCT pass\.")
+_INDUCT_WORKSET_RE = re.compile(
+    r"(?m)^Found (\d+) unproven \$equiv cells in module \S+:$")
+_INDUCT_DECISION_RE = re.compile(
+    r"(?m)^\s+Trying to prove \$equiv for .+: (success!|failed\.)\s*$")
+
+
+def induct_decision_progress(raw: str) -> Optional[Dict[str, int]]:
+    """How far the LAST `equiv_induct` pass in `raw` has got deciding points.
+
+    `equiv_induct` first builds and solves its whole-design induction model,
+    printing nothing countable; when the whole-set step fails it decides the
+    points ONE AT A TIME, one line each (`Trying to prove $equiv for <p>:
+    success!` / `: failed.`). This reads that phase: the pass's workset (its
+    `Found N unproven $equiv cells` line) and the decisions printed so far.
+
+    Returns None before the pass has stated its workset -- no evidence yet, and
+    never a fabricated zero. `equiv_simple`'s `...:ezsat` lines are not
+    decisions of this pass and are not counted. Evidence only; the verdict is
+    `parse_equiv_output`'s. PURE."""
+    import instrument_calibration
+    instrument_calibration.assert_calibrated(
+        "lec_run::induct_decision_progress")
+    if not raw:
+        return None
+    # A Yosys error can echo HDL source into the live log.  This progress
+    # reader is evidence-only, but its result controls the projection probe;
+    # quoted comments must therefore not manufacture a workset or decisions.
+    scanned = strip_echoed_hdl_comments(raw)
+    starts = list(_INDUCT_PASS_RE.finditer(scanned))
+    if not starts:
+        return None
+    tail = scanned[starts[-1].end():]
+    ws = _INDUCT_WORKSET_RE.search(tail)
+    if not ws:
+        return None
+    decisions = _INDUCT_DECISION_RE.findall(tail[ws.end():])
+    proved = sum(1 for d in decisions if d == "success!")
+    return {"workset": int(ws.group(1)), "decided": len(decisions),
+            "proved": proved, "failed": len(decisions) - proved}
+
+
+#: The fewest per-point decisions a rate is measured over before a projection
+#: may speak. Below it the rate is noise, and the probe says nothing.
+PROJECTION_MIN_DECISIONS = 20
+
+
+def rung_projection_abort_probe(live_log_path: Path, offset: int,
+                                budget: "StepBudget", *,
+                                clock=time.monotonic):
+    """The `abort_probe` a LEC rung runs under (FX_AES_LEC_SCALE).
+
+    THE STEP BUDGET STILL STOPS NOTHING BY ITSELF (#2051, R-0915-48): a proof
+    whose rate would finish inside the budget, or one that has decided nothing
+    yet, is never touched, however long it runs. What stops a rung is the
+    PROOF'S OWN EVIDENCE that it cannot finish in the declared budget: once
+    `equiv_induct` is deciding points one at a time, the measured decision
+    rate projects the time the remaining workset needs, and when that exceeds
+    what is left of the step budget the rung is going nowhere within it. It is
+    aborted then -- not at the deadline -- with the numbers, and the ladder
+    reports INCONCLUSIVE at its last durable checkpoint.
+
+    MEASURED on opentitan_aes x sky130A (84,623 cells): `equiv_induct -seq 4`
+    decided 936 of 3,219 points in ~3,300 s (3.5 s each) after ~4,100 s of
+    model building; at that rate the rung needed ~11,000 s more, inside a
+    7,200 s declared step budget. The run's outer timeout killed it instead,
+    with no verdict and no counts."""
+    state: Dict[str, Any] = {"first": None}
+
+    def probe() -> Optional[str]:
+        try:
+            with open(live_log_path, "rb") as fh:
+                fh.seek(offset)
+                text = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            return None
+        try:
+            prog = induct_decision_progress(text)
+        except Exception:                      # noqa: BLE001 - no evidence
+            return None
+        if not prog or prog["decided"] <= 0:
+            return None
+        now = clock()
+        if state["first"] is None:
+            state["first"] = (now, prog["decided"])
+            return None
+        t0, d0 = state["first"]
+        done = prog["decided"] - d0
+        if done < PROJECTION_MIN_DECISIONS or now <= t0:
+            return None
+        rate = done / (now - t0)
+        remaining = prog["workset"] - prog["decided"]
+        need_s = remaining / rate
+        left_s = budget.remaining_s()
+        if need_s <= left_s:
+            return None
+        return (f"the step budget cannot be met at the proof's own measured "
+                f"rate: equiv_induct has decided {prog['decided']} of "
+                f"{prog['workset']} points ({prog['proved']} proven, "
+                f"{prog['failed']} failed) at {rate:.3f} points/s, so the "
+                f"remaining {remaining} need ~{need_s:.0f}s and "
+                f"{max(left_s, 0)}s of the {budget.total_s}s step budget is "
+                f"left. Those in-rung decisions are not durable (equiv_induct "
+                f"keeps them in memory); the proof state reported is the last "
+                f"checkpoint's")
+
+    return probe
+
+
 def attach_telemetry(report: Dict, sidecar: Path, project: Path) -> Dict:
     """Hash-bind the exact telemetry bytes into the final verdict report."""
     try:
@@ -1393,6 +1502,10 @@ def run_was_stopped(raw: str) -> bool:
 # genuinely differ" — a false non-equivalence that halted the whole flow).
 _CONTAINER_TIMEOUT_RCS = (124, 137)
 _PROGRESS_STALL_RCS = (_pr.RC_STALLED,)
+#: The supervisor's DELIBERATE stop: the caller's own predicate said the job is
+#: going nowhere (here: cannot finish in the step budget at its own rate).
+#: Read from the supervisor itself, never spelled a second time.
+_RC_ABORTED = _pr._wd.RC_ABORTED
 
 # EVIDENCE-BASED timeout split (merge of local FAIL vs origin #155
 # SKIPPED-CONDITION). A wall-budget kill (parse_error + _TIMEOUT_RE) is a pure
@@ -3073,7 +3186,8 @@ def _docker(container: str, cmd: str, timeout: int = 120,
             marker: Optional[str] = None, *,
             log_path: Optional[Path] = None,
             telemetry_path: Optional[Path] = None,
-            telemetry_context: Optional[Dict] = None):
+            telemetry_context: Optional[Dict] = None,
+            abort_probe=None):
     """Run `cmd` in the container under a bounded budget.
 
     The command carries its OWN container-side deadline a few seconds before
@@ -3111,6 +3225,9 @@ def _docker(container: str, cmd: str, timeout: int = 120,
             # was anywhere in the file. Evidence only; never a verdict input.
             telemetry_metric_probe=lec_proved_points_from_output,
             telemetry_context=telemetry_context,
+            # The caller's domain predicate (`rung_projection_abort_probe`):
+            # the proof's own evidence, never the clock, may end a rung.
+            abort_probe=abort_probe,
             # THE ATTEMPT BUDGET IS NOT A CEILING, and handing it to
             # `hard_ceiling_s` was a wall-clock deadline wearing the watchdog's
             # clothes. `_watchdog` says what that parameter is for in one line:
@@ -4547,8 +4664,14 @@ def run_yosys_equiv(container: str, ys_path_in_container: str,
                     live_log_path: Optional[Path] = None,
                     telemetry_path: Optional[Path] = None,
                     telemetry_context: Optional[Dict] = None,
-                    kill_cause: Optional[Dict] = None):
+                    kill_cause: Optional[Dict] = None,
+                    abort_probe=None):
     """Run `yosys -s <ys>` in the container. Returns (launched, raw_output).
+
+    `abort_probe` — the rung's own convergence predicate
+    (`rung_projection_abort_probe`), handed to the supervisor. An abort is
+    recorded on the step-budget stop path (`_TIMEOUT_MARKER`, read as a
+    disclosed no-verdict with the proof state reached), with its reason.
 
     `kill_cause` — an OUT parameter (#2182). When a dict is passed it is filled
     with what this attempt's ending was OBSERVED to be: the return code, and
@@ -4630,6 +4753,8 @@ def run_yosys_equiv(container: str, ys_path_in_container: str,
             _extra.update(log_path=live_log_path,
                           telemetry_path=telemetry_path,
                           telemetry_context=telemetry_context)
+        if abort_probe is not None:
+            _extra["abort_probe"] = abort_probe
         r = _docker(
             container, cmd, timeout=timeout,
             # Present in `yosys -s <path>` and therefore usable during the
@@ -4687,6 +4812,16 @@ def run_yosys_equiv(container: str, ys_path_in_container: str,
             f"No equivalence verdict was reached. The {timeout}s step budget "
             f"governs ATTEMPT ADMISSION, not runtime, so no wall-clock "
             f"duration is claimed here.")
+    elif launched and getattr(r, "returncode", 0) == _RC_ABORTED:
+        # THE RUNG'S OWN EVIDENCE ENDED IT (`rung_projection_abort_probe`): it
+        # was deciding points, at a rate that cannot finish inside the step
+        # budget. Recorded on the budget-stop path, never as a result.
+        _why = next((ln.split("WATCHDOG_ABORTED:", 1)[1].strip()
+                     for ln in (getattr(r, "stderr", "") or "").splitlines()
+                     if "WATCHDOG_ABORTED:" in ln),
+                    "the rung's convergence predicate stopped it")
+        out = out.rstrip("\n") + (
+            "\n" + _TIMEOUT_MARKER + f" (projected, not elapsed): {_why}")
     elif launched and getattr(r, "returncode", 0) in _PROGRESS_STALL_RCS:
         # SAY HOW FAR IT GOT. "It stopped making forward progress" is a claim a
         # reader cannot size without the proof's own count -- a job stopped at 0
@@ -6018,9 +6153,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             # PER LEG, not per invocation: each rung's process has its own kill
             # cause, so "which rung was killed and why" survives the split.
             _kill_cause: Dict = {}
+            # The rung's OWN convergence predicate, reading only this leg's
+            # part of the live log (FX_AES_LEC_SCALE): the step budget ends a
+            # rung only on the proof's evidence that it cannot finish in it.
+            _leg_offset = (live_log_path.stat().st_size
+                           if live_log_path is not None
+                           and live_log_path.is_file() else 0)
+            _leg_probe = (rung_projection_abort_probe(
+                              live_log_path, _leg_offset, budget)
+                          if live_log_path is not None else None)
             _leg_launched, _leg_raw = run_yosys_equiv(
                 container, ys_in_container,
                 kill_cause=_kill_cause,
+                abort_probe=_leg_probe,
                 timeout=_attempt_budget,
                 workdir=equiv_workdir,
                 live_log_path=live_log_path,

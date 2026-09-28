@@ -52,6 +52,15 @@ def test_opcode_cov_gate_failure_is_coverage_only():
     assert r["verdict"] == "FAIL" and r["coverage_only_failure"] is True
 
 
+def test_unmeasured_semantic_gate_cannot_be_downgraded_to_coverage_only():
+    r = P1D._v0_3_7_classify_phase1_exit(
+        cov_gate_failed=True, strict=False, pct=100.0, total_todo=0,
+        semantic_gate_failed=True)
+    assert r["verdict"] == "FAIL"
+    assert r["coverage_only_failure"] is False
+    assert r["semantic_gate_failed"] is True
+
+
 def test_todo_stubs_is_NOT_coverage_only():
     # TODO stubs are a real generated-doc incompleteness → keeps gating.
     r = P1D._v0_3_7_classify_phase1_exit(

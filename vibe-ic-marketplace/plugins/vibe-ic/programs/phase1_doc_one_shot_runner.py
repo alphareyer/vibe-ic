@@ -127,6 +127,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 import _path_layout as _pl
+import _atomic_artefact as _aa
 import phase1_protocol_spec_extract as _l15x
 import phase1_port_extract as _ppx
 import _input_corpus_scope as _ics
@@ -32620,6 +32621,136 @@ def _g19_backfill_register_offsets(registers: Any,
 
 
 
+#: The L4/L5/L6 semantic layer gates (layergate-2), in order, with the report
+#: stem each is cited under.
+LAYERGATE2_GATES = (
+    ("l4_regmap_phase2_emitter_contract_check",
+     "l4_regmap_emitter_contract"),
+    ("l4_regmap_enumerated_values_typed_check",
+     "l4_regmap_enumerated_values"),
+    # v1.7.74 — for #507. L4's denominator: how many register
+    # address bindings the input DECLARES against how many L4
+    # carries. Without it a shortfall of any size sits behind the
+    # enum-typing gate's PASS, which audits only the fields that
+    # are already present.
+    ("l4_regmap_declared_register_coverage_check",
+     "l4_regmap_declared_register_coverage"),
+    ("l5_analog_block_spec_actionable_check",
+     "l5_analog_block_spec_actionable"),
+    ("l6_fsm_scaffold_actionable_check",
+     "l6_fsm_scaffold_actionable"),
+)
+
+
+class _Layergate2Result(list):
+    """Blocking gate names, with unmeasured names kept distinct from FAILs."""
+
+    def __init__(self):
+        super().__init__()
+        self.failed: List[str] = []
+        self.not_measured: List[str] = []
+        self.not_applicable: List[str] = []
+
+
+def _run_layergate2(project: Path, gates=None, gate_dir=None) -> _Layergate2Result:
+    """BLOCKING: judge every selected final-layer gate and record its run.
+
+    FAIL and NOT_MEASURED both block Phase 1. An explicit gate SKIP is a
+    terminal NOT_APPLICABLE verdict with its reason captured in the receipt.
+    """
+    gate_dir = gate_dir or Path(__file__).resolve().parent
+    result = _Layergate2Result()
+    for _gate_name, _report_stem in (gates or LAYERGATE2_GATES):
+        _gate_path = Path(gate_dir) / f"{_gate_name}.py"
+        _gate_report = _pl.report_path(
+            project, f"phase1/{_report_stem}.json")
+        _run_report = _pl.report_path(
+            project, f"phase1/{_report_stem}.run.json")
+        _run_report.parent.mkdir(parents=True, exist_ok=True)
+        # A receipt from an earlier Phase-1 attempt cannot certify this run.
+        _gate_report.unlink(missing_ok=True)
+        _run_report.unlink(missing_ok=True)
+        _gate_cmd = [sys.executable, str(_gate_path), str(project)]
+        # Only the layergate-2 gates accept --json; the Wave-38 enum
+        # gate does not, so its verdict is captured from stdout, and the
+        # runner writes that capture to the report it cites (below).
+        _writes_json = _gate_name != "l4_regmap_enumerated_values_typed_check"
+        if _writes_json:
+            _gate_cmd += ["--json", str(_gate_report)]
+        _shown = (_gate_report.relative_to(project)
+                  if _gate_report.is_relative_to(project) else _gate_report)
+        _gate_cp = None
+        _reason = None
+        if not _gate_path.is_file():
+            _reason = "missing_script"
+        else:
+            # The progress supervisor aborts only after measured stall.
+            try:
+                _gate_cp = _pr.run(_gate_cmd, capture_output=True, text=True)
+            except _pr.Stalled as _exc:
+                _reason = "stalled"
+                _error = str(_exc)
+            except OSError as _exc:
+                _reason = "launch_error"
+                _error = str(_exc)
+        if _gate_cp is not None and not _writes_json:
+            try:
+                _aa.write_json(_gate_report, {
+                    "gate": _gate_name, "returncode": _gate_cp.returncode,
+                    "evidence": "the gate's own stdout/stderr (it writes no "
+                                "report of its own)",
+                    "stdout": _gate_cp.stdout, "stderr": _gate_cp.stderr})
+            except OSError as _exc:
+                _reason = "report_write_error"
+                _error = str(_exc)
+                _shown = f"its stdout (report not written: {_exc})"
+        if _gate_cp is not None and _gate_cp.stdout.strip():
+            print(f"      {_gate_name}: "
+                  f"{_gate_cp.stdout.strip().splitlines()[0]}")
+        _rc = _gate_cp.returncode if _gate_cp is not None else None
+        if _reason is None and _rc == 0:
+            _verdict = "PASS"
+        elif _reason is None and _rc == 1:
+            _verdict = "FAIL"
+        elif (_reason is None and _rc == 2 and _gate_cp is not None
+              and _gate_cp.stdout.lstrip().startswith("[SKIP]")):
+            _verdict = "NOT_APPLICABLE"
+            _reason = "gate_declared_skip"
+        else:
+            _verdict = "NOT_MEASURED"
+            _reason = _reason or "no_terminal_verdict"
+        _receipt = {"gate": _gate_name, "verdict": _verdict,
+                    "reason": _reason, "returncode": _rc,
+                    "stdout": _gate_cp.stdout if _gate_cp is not None else "",
+                    "stderr": _gate_cp.stderr if _gate_cp is not None else "",
+                    "gate_report": str(_shown) if _gate_report.is_file() else None}
+        if _reason in ("stalled", "launch_error", "report_write_error"):
+            _receipt["error"] = _error
+        try:
+            _aa.write_json(_run_report, _receipt)
+        except OSError as _exc:
+            _verdict = "NOT_MEASURED"
+            _reason = "receipt_write_error"
+            print(f"      {_gate_name}: NOT_MEASURED — cannot publish run "
+                  f"receipt ({_exc})")
+        if not _gate_report.is_file():
+            _shown = (_run_report.relative_to(project)
+                      if _run_report.is_relative_to(project) else _run_report)
+        if _verdict == "FAIL":
+            result.failed.append(_gate_name)
+            result.append(_gate_name)
+            print(f"      {_gate_name}: FAIL — blocks phase1 "
+                  f"(see {_shown})")
+        elif _verdict == "NOT_MEASURED":
+            result.not_measured.append(_gate_name)
+            result.append(_gate_name)
+            print(f"      {_gate_name}: NOT_MEASURED — {_reason}, the layer "
+                  f"is NOT judged (see {_run_report})")
+        elif _verdict == "NOT_APPLICABLE":
+            result.not_applicable.append(_gate_name)
+    return result
+
+
 def _g19_post_emit_backfill_register_offsets(project: Path) -> None:
     """G19 follow-on — fill L4 register offsets from the design's OWN summary
     table, after every pass that can add a register has run.
@@ -55721,6 +55852,44 @@ def _post_emit_spec_artifact_inventory(project: Path) -> None:
           f"{len(found)} type(s) of a {len(_cat.CATALOG)}-type catalog")
 
 
+def _multireg_element_of(family: Any, row: Dict[str, Any], addr: str) -> bool:
+    """Is ``row`` the register at ELEMENT ``i`` of the collapsed multireg row
+    ``family`` that already holds its address?
+
+    A collapsed family row (`_gap_e2e6_apply_family_offset`) carries
+    ``element_offsets`` and sits at its element-0 offset, so element 0 of the
+    array shares the family's address BY CONSTRUCTION. The register tables name
+    every element ``<FAMILY>_<i>``, element 0 included: elements 1..n land at
+    fresh addresses and are appended as their own rows, and the row at element
+    0's address is element 0's register, so it must carry element 0's declared
+    name (the phase-2 emitter emits one register per row, by its name).
+    True only when the row's name is exactly ``<family name>_<i>`` AND the
+    family's own ``element_offsets`` place index ``i`` at this address.
+    chip-AGNOSTIC: the multireg naming rule only."""
+    if not isinstance(family, dict) or not isinstance(row, dict):
+        return False
+    if family.get("multireg_family"):
+        return False                      # element 0 already named
+    base = str(family.get("name") or "").strip()
+    name = str(row.get("name") or "").strip()
+    if not base or not name.startswith(base + "_"):
+        return False
+    idx = name[len(base) + 1:]
+    if not idx.isdigit():
+        return False
+    for el in family.get("element_offsets") or []:
+        if not isinstance(el, dict):
+            continue
+        try:
+            same = (int(el.get("index")) == int(idx)
+                    and int(str(el.get("offset")), 16) == int(str(addr), 16))
+        except (TypeError, ValueError):
+            continue
+        if same:
+            return True
+    return False
+
+
 def _post_emit_pdf_regmap_table_rows(project: Path) -> None:
     """v1.6.106 (#36 Bug 1 P0) — PDF tabular regmap row scan.
 
@@ -55839,6 +56008,16 @@ def _post_emit_pdf_regmap_table_rows(project: Path) -> None:
                 # it; a dedupe that discards a whole record discards
                 # every fact on it, not just the duplicated one.
                 prior = existing_by_addr.get(ah.lower())
+                if _multireg_element_of(prior, row, ah):
+                    # FX_AES_L4_REGMAP — the collapsed family row IS element
+                    # 0's register (it sits at element 0's address). The
+                    # table names that register `<FAMILY>_0`, so the row
+                    # takes that name; the family stays recorded.
+                    prior["multireg_family"] = prior.get("name")
+                    prior["name"] = str(row.get("name")).strip()
+                    _v1_7_74_absorb_deduped_regmap_row(prior, row)
+                    absorbed += 1
+                    continue
                 if prior is not None and _v1_7_74_absorb_deduped_regmap_row(
                         prior, row):
                     absorbed += 1
@@ -63491,7 +63670,8 @@ def _drop_v0_3_7_exit_reason(project) -> None:
 
 
 def _v0_3_7_classify_phase1_exit(cov_gate_failed: bool, strict: bool,
-                                 pct: float, total_todo: int) -> dict:
+                                 pct: float, total_todo: int,
+                                 semantic_gate_failed: bool = False) -> dict:
     """v0.3.7 — ORGANIC #505. Classify the phase1 (doc-extraction) exit at
     the END of main(), where all L docs are already emitted (a hard
     ingest / protocol error sys.exit's earlier, never reaching here — so
@@ -63508,13 +63688,15 @@ def _v0_3_7_classify_phase1_exit(cov_gate_failed: bool, strict: bool,
     A TODO-stub failure is NOT coverage-only — TODO stubs are a real
     generated-doc incompleteness that keeps the FAIL. Chip-AGNOSTIC:
     pure arithmetic over the runner's own counters."""
-    will_fail = bool(cov_gate_failed) or (strict and (pct < 80.0 or total_todo > 0))
-    coverage_only = will_fail and total_todo == 0
+    will_fail = bool(cov_gate_failed or semantic_gate_failed) or (
+        strict and (pct < 80.0 or total_todo > 0))
+    coverage_only = will_fail and total_todo == 0 and not semantic_gate_failed
     return {
         "verdict": "FAIL" if will_fail else "PASS",
         "coverage_pct": round(float(pct), 1),
         "total_todo": int(total_todo),
         "cov_gate_failed": bool(cov_gate_failed),
+        "semantic_gate_failed": bool(semantic_gate_failed),
         "strict": bool(strict),
         "coverage_only_failure": bool(coverage_only),
     }
@@ -63711,63 +63893,9 @@ def main() -> int:
     _run_layer("[7/15]", "L6_CONTROL_LOGIC",
                lambda: gen_l6_control_logic(project, extracted))
 
-    # layergate-2 — run the L4/L5/L6 SEMANTIC layer gates INSIDE the
-    # convergence loop, not only from flow_compliance_check.
-    #
-    # These gates were previously reachable only via
-    # flow_compliance_check, i.e. long after phase 1 had self-reported
-    # PASS and downstream steps had already consumed the layer. Each
-    # asserts the layer carries what its CONSUMER needs in an actionable
-    # form; each failure mode degrades silently in the PASS direction
-    # (an empty FSM scaffold, an uncompilable register file, an analog
-    # block graded against a generic default). Same invocation shape as
-    # the l3_opcode_name_coverage gate above: subprocess, verdict routed
-    # to reports/phase1/, FAIL bubbles to the strict-mode exit via
-    # `cov_gate_failed`. Chip-AGNOSTIC — every gate reads only the
-    # project's own L docs and its consuming program.
-    for _gate_name, _report_stem in (
-        ("l4_regmap_phase2_emitter_contract_check",
-         "l4_regmap_emitter_contract"),
-        ("l4_regmap_enumerated_values_typed_check",
-         "l4_regmap_enumerated_values"),
-        # v1.7.74 — for #507. L4's denominator: how many register
-        # address bindings the input DECLARES against how many L4
-        # carries. Without it a shortfall of any size sits behind the
-        # enum-typing gate's PASS, which audits only the fields that
-        # are already present.
-        ("l4_regmap_declared_register_coverage_check",
-         "l4_regmap_declared_register_coverage"),
-        ("l5_analog_block_spec_actionable_check",
-         "l5_analog_block_spec_actionable"),
-        ("l6_fsm_scaffold_actionable_check",
-         "l6_fsm_scaffold_actionable"),
-    ):
-        _gate_path = (Path(__file__).resolve().parent
-                      / f"{_gate_name}.py")
-        if not _gate_path.is_file():
-            continue
-        _gate_report = _pl.report_path(
-            project, f"phase1/{_report_stem}.json")
-        _gate_report.parent.mkdir(parents=True, exist_ok=True)
-        _gate_cmd = [sys.executable, str(_gate_path), str(project)]
-        # Only the layergate-2 gates accept --json; the Wave-38 enum
-        # gate does not, so its verdict is captured from stdout only.
-        if _gate_name != "l4_regmap_enumerated_values_typed_check":
-            _gate_cmd += ["--json", str(_gate_report)]
-        try:
-            _gate_cp = subprocess.run(
-                _gate_cmd, capture_output=True, text=True, timeout=120)
-        except (OSError, subprocess.SubprocessError) as _exc:
-            print(f"      {_gate_name}: SKIP (not runnable: {_exc})")
-            continue
-        if _gate_cp.stdout:
-            print(f"      {_gate_name}: "
-                  f"{_gate_cp.stdout.strip().splitlines()[0]}")
-        # exit 1 == FAIL (blocks). exit 2 == SKIP / not applicable.
-        if _gate_cp.returncode == 1:
-            cov_gate_failed = True
-            print(f"      {_gate_name}: FAIL — blocks phase1 "
-                  f"(see reports/phase1/{_report_stem}.json)")
+    # layergate-2 (the L4/L5/L6 semantic layer gates) runs once every
+    # producer of those layers has run: see the block after the G19 offset
+    # backfill below, and `test_fx_aes_l4_regmap`.
     _run_layer("[8/15]", "L7_TEST_DEBUG",
                lambda: gen_l7_test_debug(project, extracted))
     _run_layer("[9/15]", "L8_RTL_CONSTANTS",
@@ -67649,6 +67777,32 @@ def main() -> int:
     # about to gain 23 more rows.
     _g19_post_emit_backfill_register_offsets(project)
 
+    # layergate-2 — run the L4/L5/L6 SEMANTIC layer gates INSIDE the
+    # convergence loop, not only from flow_compliance_check.
+    #
+    # HERE, after the last producer of L4/L5/L6, not right after
+    # `gen_l4_regmap`/`gen_l5`/`gen_l6`: the post-emit passes above rewrite
+    # all three (register-table rows, register promotion, the #516 claim
+    # reconcile, the G19 offset backfill). MEASURED on opentitan_aes: run
+    # after the emitters, the declared-register coverage gate judged a
+    # 12-register L4 and FAILed "7 of 35 covered", 17 s before the passes
+    # below grew the published L4 to its final rows.
+    #
+    # These gates were previously reachable only via
+    # flow_compliance_check, i.e. long after phase 1 had self-reported
+    # PASS and downstream steps had already consumed the layer. Each
+    # asserts the layer carries what its CONSUMER needs in an actionable
+    # form; each failure mode degrades silently in the PASS direction
+    # (an empty FSM scaffold, an uncompilable register file, an analog
+    # block graded against a generic default). Same invocation shape as
+    # the l3_opcode_name_coverage gate above: subprocess, verdict routed
+    # to reports/phase1/, FAIL bubbles to the strict-mode exit via
+    # `cov_gate_failed`. Chip-AGNOSTIC — every gate reads only the
+    # project's own L docs and its consuming program.
+    _layergate2_result = _run_layergate2(project)
+    if _layergate2_result:
+        cov_gate_failed = True
+
     print(f"[15/15] coverage report ...")
     pct, report = emit_coverage_report(project, extracted, results)
     print(f"      overall.pct = {pct:.1f}% "
@@ -67953,7 +68107,8 @@ def main() -> int:
     # FAIL to a non-gating COVERAGE-INCOMPLETE advisory. Advisory file:
     # never let it abort the run.
     _exit_reason = _v0_3_7_classify_phase1_exit(
-        cov_gate_failed, bool(args.strict), pct, total_todo)
+        cov_gate_failed, bool(args.strict), pct, total_todo,
+        semantic_gate_failed=bool(_layergate2_result))
     try:
         # THE PRODUCER READS THE SAME DECLARATION AS ITS READERS
         # (next/icslot-sidecarpath). This is the half that makes
@@ -68006,9 +68161,12 @@ def main() -> int:
         # coverage gate OR by any of the L4/L5/L6 semantic layer gates
         # run in the loop above, so the message no longer names a single
         # gate. Each failing gate has already printed its own verdict
-        # line and routed a report under reports/phase1/.
+        # line and routed a report to the phase-1 report directory
+        # (`_pl.report_path`, reports/audit/phase1/ today).
         print("FAIL: a phase1 layer gate FAILed — see the gate verdict "
-              "lines above and reports/phase1/*.json")
+              "lines above and "
+              f"{_pl.report_path(project, 'phase1/x.json').parent.relative_to(project)}"
+              "/*.json")
         return 1
     if layer_gate_failures:
         # BLOCKING, by design. Each of these means a layer is missing a
@@ -68016,7 +68174,8 @@ def main() -> int:
         # consumer would silently emit a wrong port list / a hole where a
         # timing constant belongs / a dispatcher missing a command.
         print(f"FAIL: semantic layer gate(s) FAILed: "
-              f"{', '.join(layer_gate_failures)} — see reports/phase1/")
+              f"{', '.join(layer_gate_failures)} — see "
+              f"{_pl.report_path(project, 'phase1/x.json').parent.relative_to(project)}/")
         _drop_v0_3_7_exit_reason(project)
         return 1
     if args.strict and (pct < 80.0 or total_todo > 0):
