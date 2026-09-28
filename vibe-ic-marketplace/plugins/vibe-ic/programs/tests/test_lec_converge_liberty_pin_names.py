@@ -189,8 +189,8 @@ def test_a_register_pair_proved_early_still_holds_for_the_later_rungs(site):
     assert rep["equivalent"] is True
     assert rep["unproven_points"] == 0
     assert rep["compared_points"] == rep["miter_points"] > 0
-    # A PASS names no unproven cell, although `-seq 16` printed `y: failed`
-    # on the way (it extended and closed it).
+    # A PASS names no unproven cell, although the `-seq 4` leg's workset
+    # printed `y: failed` (the `-seq 16` leg closed it).
     assert rep["unproven_cells"] == []
 
 
