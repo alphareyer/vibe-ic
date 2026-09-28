@@ -1866,6 +1866,7 @@ def _check_drc(project_dir: Path) -> AuditResult:
     # `unreadable` because they are different answers -- see the
     # three-state note in the read loop below.
     empty: List[str] = []
+    empty_paths: List[Path] = []
     # THE TOOL'S OWN FINAL WORD, alongside the summary that claims to report it.
     # Both are recorded per file and BOTH are disclosed, so a reader never has
     # to take the gate's word for which one the number came from.
@@ -1937,6 +1938,7 @@ def _check_drc(project_dir: Path) -> AuditResult:
         # PDK, layer or vendor literal.
         if n is None and not text.strip():
             empty.append(_rel(fp, project_dir))
+            empty_paths.append(fp)
             determined_files += 1
         elif n is None:
             unreadable.append(str(fp))
@@ -1997,7 +1999,15 @@ def _check_drc(project_dir: Path) -> AuditResult:
                 message=_category_absence_message(cat, regex, files,
                                                   project_dir),
                 file=best_file))
-    if not cats_found:
+    # FX_LL21_DECLARED_OUTPUTS -- ONE ANSWER FOR AN EMPTY REPORT. An EMPTY
+    # report has no category to name BY CONSTRUCTION, so "no categories" is
+    # not a finding about it; whether its zero is a measurement is decided
+    # below by the router's own completion evidence, and nowhere else.
+    # (MEASURED, spm x gf180mcuD full chip, 2026-09-28: a scope of two empty
+    # router reports read `DRC_REPORT_EMPTY ... read as ZERO` at INFO and
+    # `DRC_CATEGORIES_EXIST: No DRC violation categories` at ERROR.)
+    all_empty = bool(files) and len(empty_paths) == len(files)
+    if not cats_found and not all_empty:
         result.findings.append(Finding(
             rule="DRC_CATEGORIES_EXIST", severity="ERROR",
             message="No DRC violation categories found in report",
@@ -2038,7 +2048,9 @@ def _check_drc(project_dir: Path) -> AuditResult:
             rule="DRC_REPORT_EMPTY", severity="INFO",
             message=(f"{len(empty)} of {len(files)} discovered DRC report(s) "
                      f"are PRESENT and EMPTY -- the tool wrote its report and "
-                     f"had no violation to write, read as ZERO violations. "
+                     f"had no violation to write; each is a ZERO only with the "
+                     f"router's own final count beside it "
+                     f"(DRC_EMPTY_ZERO_CORROBORATED / DRC_EMPTY_NOT_MEASURED). "
                      f"This is NOT an absent report, which is not measured at "
                      f"all and still refuses: {_e_shown}{_e_more}"),
             file=empty[0]))
@@ -2052,6 +2064,59 @@ def _check_drc(project_dir: Path) -> AuditResult:
                      f"were NOT MEASURED — not zero, not clean: {_shown}"
                      f"{_more}"),
             file=unreadable[0].split(" (")[0]))
+
+    # AN EMPTY REPORT IS A ZERO ONLY WITH THE ROUTER'S OWN WORD BESIDE IT
+    # (FX_LL21_DECLARED_OUTPUTS). The file's emptiness says the tool wrote
+    # nothing; that it finished with nothing to write is said only by its own
+    # final iteration count -- in another report of this scope, or in a log in
+    # the empty report's own directory. With that evidence (a final count of
+    # 0 and none that disagrees) the empty report is a measured zero; without
+    # it the zero is NOT_MEASURED, never clean.
+    empty_evidence: Dict[str, List[str]] = {}
+    empty_uncorroborated: List[str] = []
+    for fp in empty_paths:
+        zero, nonzero = [], []
+        seen: set = set()
+        cands = [f for f in files if f not in empty_paths]
+        cands += sorted(fp.parent.glob("*.log"))
+        for ev in cands:
+            if ev in seen:
+                continue
+            seen.add(ev)
+            try:
+                _t = ev.read_text(errors="replace")
+            except OSError:
+                continue
+            _k = _drc_tool_final_violation_count(_t)
+            if _k == 0:
+                zero.append(_rel(ev, project_dir))
+            elif _k is not None:
+                nonzero.append(f"{_rel(ev, project_dir)} ({_k})")
+        rel = _rel(fp, project_dir)
+        if zero and not nonzero:
+            empty_evidence[rel] = zero
+        else:
+            empty_uncorroborated.append(
+                rel + (f" -- the tool's own final count beside it is not 0: "
+                       f"{', '.join(nonzero)}" if nonzero else
+                       " -- no report or log beside it carries the router's "
+                       "own final count"))
+    if empty_uncorroborated:
+        result.findings.append(Finding(
+            rule="DRC_EMPTY_NOT_MEASURED", severity="ERROR",
+            message=(f"{len(empty_uncorroborated)} PRESENT-and-EMPTY DRC "
+                     f"report(s) have no completion evidence from the tool "
+                     f"that wrote them, so their zero is NOT_MEASURED, not "
+                     f"clean: {'; '.join(empty_uncorroborated[:5])}"),
+            file=str(empty_paths[0])))
+    elif all_empty and empty_evidence:
+        result.findings.append(Finding(
+            rule="DRC_EMPTY_ZERO_CORROBORATED", severity="INFO",
+            message=("every discovered DRC report is PRESENT and EMPTY and the "
+                     "router's own final count beside each is 0: "
+                     + "; ".join(f"{k} <- {', '.join(v)}"
+                                 for k, v in sorted(empty_evidence.items()))),
+            file=str(empty_paths[0])))
 
     # THE GATING CHECK — the real count, not the vocabulary.
     if determined_files == 0:
@@ -2145,9 +2210,14 @@ def _check_drc(project_dir: Path) -> AuditResult:
                 f"not certify a design on a zero it did not establish. "
                 f"An EMPTY report is a legitimate zero and is not this."),
             file=best_file))
+    # An all-empty scope carries no bytes a signature check could read; the
+    # router's own final count beside every report (above) is what attests
+    # that the tool ran and finished.
+    if all_empty and empty_evidence and not empty_uncorroborated:
+        authentic = True
     result.passed = (own_design and determined_files > 0 and real_total == 0 and authentic
                      and not unreadable and not contradictions
-                     and not _uncorroborated_zero)
+                     and not _uncorroborated_zero and not empty_uncorroborated)
     result.subject_files = [str(f) for f in files]
     result.summary = {"files_found": len(files), "categories_found": cats_found,
                       "design_binding": design_binding,
@@ -2175,7 +2245,9 @@ def _check_drc(project_dir: Path) -> AuditResult:
                       # PRESENT-and-EMPTY, kept apart from both `unreadable`
                       # (present, unparseable) and absence (never discovered).
                       "empty_report_files": len(empty),
-                      "empty_reports": empty[:20]}
+                      "empty_reports": empty[:20],
+                      "empty_report_evidence": empty_evidence,
+                      "empty_reports_not_measured": empty_uncorroborated[:20]}
     return result
 
 
