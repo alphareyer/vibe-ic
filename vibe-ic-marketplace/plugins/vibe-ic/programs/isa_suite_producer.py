@@ -699,6 +699,9 @@ def judge_signature(ref: Optional[List[str]], ref_rc: Optional[int],
     """riscv-arch-test's criterion: DUT signature == reference, word for word."""
     if ref_rc == 124:
         return NOT_MEASURED, "noref: the reference model timed out (rc 124)"
+    if ref_rc != 0:
+        return NOT_MEASURED, ("the reference model itself does not pass this "
+                              f"program (rc {ref_rc})")
     if not ref:
         return NOT_MEASURED, (f"noref: the reference model wrote no signature "
                               f"(rc {ref_rc})")
@@ -1176,12 +1179,21 @@ def judge_all(progs: List[Dict[str, Any]], results: Dict[str, Any],
                 states = []
                 for iv in init_patterns:
                     s = sims.get(iv) or {}
+                    sim_rc = s.get("rc")
+                    if sim_rc != 0:
+                        states.append({
+                            "init": iv, "state": NOT_MEASURED,
+                            "why": ("DUT simulation exited nonzero "
+                                    f"(rc {sim_rc})"),
+                            "cycles": None, "rc": sim_rc,
+                        })
+                        continue
                     try:
                         dut = parse_tb_transcript(s.get("transcript") or "")
                     except Exception as exc:  # noqa: BLE001 — Uncalibrated
                         states.append({"init": iv, "state": NOT_MEASURED,
                                        "why": f"uncalibrated: {exc}",
-                                       "cycles": None})
+                                       "cycles": None, "rc": sim_rc})
                         continue
                     if p["judge"] == "signature":
                         words = None
@@ -1194,7 +1206,7 @@ def judge_all(progs: List[Dict[str, Any]], results: Dict[str, Any],
                     else:
                         st, why = judge_tohost(ref.get("rc"), dut)
                     states.append({"init": iv, "state": st, "why": why,
-                                   "cycles": dut.get("cycles")})
+                                   "cycles": dut.get("cycles"), "rc": sim_rc})
                 entry["arms"][key] = {"state": fold([x["state"] for x in states]),
                                       "by_init": states}
     return {"programs": per}
