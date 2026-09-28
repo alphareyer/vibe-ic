@@ -53,7 +53,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
 from librelane_contract import (Refusal, _load, digest, handoff_to_direct,  # noqa: E402
-                                resolve_step_configs, run_chain, state_from_direct)
+                                resolve_step_configs, run_chain, run_container,
+                                state_from_direct)
 
 STEPS = ('OpenROAD.RCX', 'OpenROAD.STAPostPNR')
 #: Where the extra corner Tcl lives in the project, and its provenance.
@@ -619,7 +620,7 @@ def agreement(project: Path, image: str, sta_folder: Path, mounts: list[tuple[Pa
         for key, value in env.items():
             cmd += ['-e', f'{key}={value}']
         cmd += ['--entrypoint', 'sta', image, '-no_init', '-no_splash', '-exit', str(arms / 'arm.tcl')]
-        completed = subprocess.run(cmd, capture_output=True, text=True)
+        completed = run_container(cmd, supervised=True, log=folder / 'sta.log')
         (folder / 'sta.log').write_text(completed.stdout + '\n' + completed.stderr)
         arm = _arm_values(completed.stdout)
         compared: dict[str, Any] = {}
@@ -733,10 +734,10 @@ def run_sta_script(project: Path, image: str, mounts: list[tuple[Path, str]],
     volumes = ['-v', f'{project.resolve()}:{project.resolve()}']
     for host, guest in mounts:
         volumes += ['-v', f'{host.resolve()}:{guest}:ro']
-    completed = subprocess.run([docker, 'run', '--rm', '--network', 'none',
-                                *_dmem.docker_memory_flags(), *volumes,
-                                '--entrypoint', 'sta', image, '-no_init', '-no_splash',
-                                '-exit', str(script)], capture_output=True, text=True)
+    completed = run_container([docker, 'run', '--rm', '--network', 'none',
+                               *_dmem.docker_memory_flags(), *volumes,
+                               '--entrypoint', 'sta', image, '-no_init', '-no_splash',
+                               '-exit', str(script)], supervised=True, log=log)
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text(completed.stdout + '\n' + completed.stderr)
     return completed
