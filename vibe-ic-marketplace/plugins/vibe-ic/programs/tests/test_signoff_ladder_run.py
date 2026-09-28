@@ -1,5 +1,6 @@
 """Unit tests for `signoff_ladder_run.py` (release-gate wired)."""
 import importlib
+import hashlib
 import json
 
 from _shipped_version import shipped_plugin_version  # noqa: E402  (#800)
@@ -81,11 +82,23 @@ endmodule
 
 _EM_JMAX = {"layers": {"met1": {"kind": "routing", "thickness_um": 0.35,
                                 "width_um": 0.14, "jmax_mA_per_um": 2.8}}}
-_EM_HEADER = "Node0 Layer,Node0 X,Node0 Y,Node1 Layer,Node1 X,Node1 Y,Current\n"
+_EM_HEADER = ("Node0 Layer,Node0 X location,Node0 Y location,"
+              "Node1 Layer,Node1 X location,Node1 Y location,Current,Net\n")
 
 
 def _em_csv(current_a):
-    return _EM_HEADER + f"met1,0,0,met1,1,0,{current_a}\n"
+    return _EM_HEADER + f"met1,0,0,met1,1,0,{current_a},VDD\n"
+
+
+def _stage_em_conductor(project):
+    """Same-net, same-span routed metal and producer-bound EM subject."""
+    routed = project / "phase3/stage3/pnr/routed.def"
+    if not routed.exists():
+        _write(routed, "VERSION 5.8 ;\nUNITS DISTANCE MICRONS 1000 ;\n"
+               "SPECIALNETS 1 ;\n- VDD + ROUTED met1 140 + SHAPE STRIPE "
+               "( 0 0 ) ( 1000 0 ) ;\nEND SPECIALNETS\nEND DESIGN\n")
+    _write_json(project / "reports/phase3/em.json", {
+        "subject_def_sha256": hashlib.sha256(routed.read_bytes()).hexdigest()})
 
 
 class TestPerTierChecks:
@@ -204,12 +217,22 @@ class TestEMDensityTier:
             "carries no reference of its own")
 
     def test_under_jmax_pass(self, tmp_path):
+        _stage_em_conductor(tmp_path)
         _write(tmp_path / "reports/phase3/em_segments.csv", _em_csv(1e-4))
         _write_json(tmp_path / "reports/phase3/em_jmax.json", _EM_JMAX)
         r = mod.check_tier_2_em(tmp_path)
         assert r.verdict == "PASS"
 
+    def test_stale_subject_cannot_supply_em_width(self, tmp_path):
+        _stage_em_conductor(tmp_path)
+        _write(tmp_path / "reports/phase3/em_segments.csv", _em_csv(1e-4))
+        _write_json(tmp_path / "reports/phase3/em_jmax.json", _EM_JMAX)
+        routed = tmp_path / "phase3/stage3/pnr/routed.def"
+        routed.write_text(routed.read_text().replace("met1 140", "met1 280"))
+        assert mod.check_tier_2_em(tmp_path).verdict == "NOT_RUN"
+
     def test_over_jmax_fail(self, tmp_path):
+        _stage_em_conductor(tmp_path)
         _write(tmp_path / "reports/phase3/em_segments.csv", _em_csv(5e-4))
         _write_json(tmp_path / "reports/phase3/em_jmax.json", _EM_JMAX)
         r = mod.check_tier_2_em(tmp_path)
@@ -970,6 +993,7 @@ class TestEMJmaxPDKFallback:
         monkeypatch.setenv("PDK_ROOT", str(root))
         monkeypatch.setenv("PDK", "sky130A")
         proj = tmp_path / "proj"
+        _stage_em_conductor(proj)
         # EM segment CSV present, but NO jmax/tech-lef inside the project.
         _write(proj / "reports/phase3/em_segments.csv", _em_csv(1e-4))
         j, t = mod._discover_jmax_ref(proj)
@@ -1033,7 +1057,7 @@ DESIGN top ;
 UNITS DISTANCE MICRONS 1000 ;
 DIEAREA ( 0 0 ) ( 1000000 1000000 ) ;
 SPECIALNETS 2 ;
-    - VDD ( a VPWR )
+    - VDD ( a VPWR ) + ROUTED met1 140 + SHAPE STRIPE ( 0 0 ) ( 1000 0 ) ;
     - VSS ( a VGND )
 END SPECIALNETS
 END DESIGN
@@ -1059,6 +1083,7 @@ def _build_fully_signed_off(root):
     _write(d / "reports/phase3/drc_signoff.rpt", _DRC_CLEAN_XML)          # T1
     _write_json(d / "reports/drc/geographic_heatmap.json", {"bins": []})  # T1.5
     _write(d / "phase3/stage3/pnr/routed.def", _DEF_SIGNED_OFF)      # T2_PDN
+    _stage_em_conductor(d)
     _write_json(d / "reports/phase3/ir_drop.json", _IR_REAL)         # T2_IR
     _write(d / "reports/phase3/em_segments.csv", _em_csv(1e-4))      # T2_EM
     _write_json(d / "reports/phase3/em_jmax.json", _EM_JMAX)
