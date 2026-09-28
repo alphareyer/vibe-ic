@@ -4632,8 +4632,20 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
             # bare PASS) so the WITH_WAIVERS distinction survives the rc-only
             # gate. Requires the stdout sentinel too, so a stray rc=3 from an
             # unrelated program is NOT silently waived.
+            # Keep the gate's measured tier and credit map on the step row.
+            # The hint alone cannot approve those credits as a flow waiver.
+            detail = ""
+            try:
+                start = r.stdout.index("{")
+                document, _ = json.JSONDecoder().raw_decode(r.stdout[start:])
+                summary = document.get("summary", {})
+                if isinstance(summary, dict):
+                    detail = (f"; gate tier={summary.get('verdict_tier')}; "
+                              f"credits={json.dumps(summary.get('evidence', {}), sort_keys=True)}")
+            except (ValueError, AttributeError, TypeError):
+                pass
             return _outcome(
-                True, f"{_WAIVER_HINT_PREFIX}{cmd_str}", r.returncode)
+                True, f"{_WAIVER_HINT_PREFIX}{cmd_str}{detail}", r.returncode)
         # The gate exited non-zero. Decide HERE, while the UNTRUNCATED output
         # is still in hand, whether that was a verdict or a crash — see
         # `_CRASH_HINT_PREFIX`. Deciding it downstream from `snippet` makes the
@@ -16147,6 +16159,15 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     result.program_output_records = _collect_program_output_records(
         project, step)
 
+    # check_step is also called directly by runners and tests. Validate the
+    # supplied record here, even when the CLI's _load_waivers was not used.
+    owner_record = waivers.get(sid)
+    owner_refusal = (_owner_waiver.refusal(owner_record)
+                     if owner_record is not None else "no owner-approved record")
+    if owner_record is not None and owner_refusal:
+        result.reasons.append(f"OWNER WAIVER REFUSED: {owner_refusal}")
+        waivers = {key: value for key, value in waivers.items() if key != sid}
+
     # Ownership, not resemblance: the flow's declared `stage`, not the first
     # letter of the id. Byte-identical on the shipped flow (A1..A9 all declare
     # `stage: stage_analog`); tightening only — a step that merely SPELLS like
@@ -16186,20 +16207,16 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 cause, _T.ReasonClass.NOT_EXECUTED.value),
             basis=f"{_fpga_cap.OWNER_EXCLUSION_RULING}; {detail}")
 
-    # A9 is the ANALOG bench-hardware step, and the allowlist entry that exempts
-    # its hw-correlation sub-gate calls it "the analog analogue of
-    # --skip-hardware" in as many words. That analogy was never implemented: the
-    # routing above is guarded by `isinstance(sid, int)`, and A9's id is the
-    # STRING "A9", so --skip-hardware silently did nothing for it. Step 6 landed
-    # in the report as WAIVED with review_required while A9 — the step that
-    # needs a lab bench — disclosed nothing at all. Same run mode, same absent
-    # hardware, two different stories. This states A9's, using the same tier.
-    if skip_hardware and str(sid) in _ANALOG_BENCH_STEP_IDS:
-        result.status = _T.Verdict.PASS_WITH_WAIVERS.value
+    # --skip-hardware discloses the missing analog bench measurement. Only an
+    # accepted owner record below may turn that absence into a waiver.
+    if (skip_hardware and str(sid) in _ANALOG_BENCH_STEP_IDS
+            and owner_refusal):
+        result.status = _T.Verdict.NOT_MEASURED.value
+        result.reason_class = _T.ReasonClass.INPUT_ABSENT.value
         result.reasons.append(
-            "analog bench-hardware step waived via --skip-hardware: no lab "
-            "measurement for a headless doc→GDS run (review_required before "
-            "silicon sign-off; cosim/SPICE, GDS/DRC/LVS unaffected)")
+            "analog bench measurement NOT_MEASURED via --skip-hardware: "
+            "no lab measurement was performed; owner approval is required "
+            "for a waiver")
         return result
 
     # v0.2.55 — pure-analog flow profile. For a pure-analog IC (no digital
@@ -16303,7 +16320,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # Quartus), the original PASS wins. Legacy waived_steps waivers
     # without `_env_unavailable` keep the historical short-circuit
     # behaviour (always WAIVED).
-    if sid in waivers:
+    if sid in waivers and not owner_refusal:
         # ORGANIC #572 — reject a waiver mis-filed to the wrong step id
         # (id+name disagree). The intended step then stays un-waived and
         # gates normally; the mis-filed step surfaces the mismatch.
@@ -17018,13 +17035,24 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # WAIVED -- both sit outside the executed-PASS numerator and inside
             # `total_required`, so no numerator moves and nothing turns green
             # that was not already passing.
-            result.status = _T.Verdict.PASS_WITH_WAIVERS.value
-            for h in waiver_hints:
-                result.reasons.append(
-                    f"WAIVED-DEFERRED: gate program signalled PASS_WITH_WAIVERS "
-                    f"(#651 — a slot credited via a waiver, NOT a bare PASS; "
-                    f"production tapeout review must close it): "
-                    f"{h[len(_WAIVER_HINT_PREFIX):]}")
+            if owner_refusal:
+                result.status = _T.Verdict.FAIL.value
+                result.reason_class = ""
+                for h in waiver_hints:
+                    result.reasons.append(
+                        "OWNER APPROVAL REQUIRED: gate signalled "
+                        "PASS_WITH_WAIVERS but no accepted owner waiver covers "
+                        f"this step ({owner_refusal}); measured sign-off "
+                        f"tier and credits remain disclosed: "
+                        f"{h[len(_WAIVER_HINT_PREFIX):]}")
+            else:
+                result.status = _T.Verdict.PASS_WITH_WAIVERS.value
+                for h in waiver_hints:
+                    result.reasons.append(
+                        f"WAIVED-DEFERRED: gate program signalled PASS_WITH_WAIVERS "
+                        f"(#651 — a slot credited via a waiver, NOT a bare PASS; "
+                        f"production tapeout review must close it): "
+                        f"{h[len(_WAIVER_HINT_PREFIX):]}")
         elif passed and skip_hints and not non_hint_reasons:
             # A CLAUSE'S N/A IS THAT CLAUSE'S, NOT THE STEP'S.
             #
