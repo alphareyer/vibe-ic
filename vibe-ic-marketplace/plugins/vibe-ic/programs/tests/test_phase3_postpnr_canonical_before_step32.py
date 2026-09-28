@@ -112,7 +112,7 @@ def test_same_route_is_byte_idempotent_and_changed_route_reextracts(
     monkeypatch.setattr(R, "_emit_spef", extract)
     pdk = _pdk(project)
     first = R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
-    assert first.status == "PASS", first.detail
+    assert first.status == "NOT_MEASURED", first.detail
     products = [R._pl.constraints_dir(project) / f"{TOP}.sdc",
                 project / "reports/phase2/sdc_check.json",
                 R._pl.pnr_dir(project) / "pdn.done",
@@ -122,7 +122,7 @@ def test_same_route_is_byte_idempotent_and_changed_route_reextracts(
                 project / "reports/phase3/postpnr_canonical_basis.json"]
     before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in products}
     again = R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
-    assert again.status == "PASS" and not again.output_files
+    assert again.status == "NOT_MEASURED" and not again.output_files
     assert emitted == [R._sha256_file(route)]
     assert before == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in products}
 
@@ -132,7 +132,7 @@ def test_same_route_is_byte_idempotent_and_changed_route_reextracts(
     (R._pl.pnr_dir(project) / f"{TOP}.def").write_text(new_body)
     os.utime(route, ns=old_times)
     changed = R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
-    assert changed.status == "PASS", changed.detail
+    assert changed.status == "NOT_MEASURED", changed.detail
     assert len(emitted) == 2 and emitted[0] != emitted[1]
     assert products[4].read_bytes() != before[products[4]][0]
     basis = json.loads(products[-1].read_text())
@@ -163,3 +163,76 @@ def test_missing_route_or_extraction_never_claims_spef(tmp_path, monkeypatch):
     assert basis["status"] == "NOT_MEASURED"
     assert basis["routed_def_sha256"] == R._sha256_file(route)
     assert basis["spef_sha256"] is None
+
+
+def test_same_route_changed_extraction_pdk_reextracts(tmp_path, monkeypatch):
+    project, _route = _routed_project(tmp_path)
+    pdk = _pdk(project)
+    tech = Path(pdk.tech_lef)
+    emitted = []
+
+    def extract(_project, _top, _pdk, _container, output, _notes):
+        emitted.append(R._sha256_file(tech))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(SPEF + f"// tech {emitted[-1]}\n")
+        return True
+
+    monkeypatch.setattr(R, "_emit_spef", extract)
+    R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    assert len(emitted) == 1
+
+    tech.write_text(tech.read_text() + "LAYER M1 TYPE ROUTING ; END M1\n")
+    R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    assert len(emitted) == 2
+    basis = json.loads((project / "reports/phase3/postpnr_canonical_basis.json").read_text())
+    assert basis["extraction_inputs"]["pdk_files"][str(tech)] == emitted[-1]
+    assert basis["spef_sha256"] == R._sha256_file(
+        R._pl.extracted_dir(project) / f"{TOP}.spef")
+
+
+def test_same_route_changed_declared_rc_rules_reextracts(tmp_path, monkeypatch):
+    project, _route = _routed_project(tmp_path)
+    pdk = _pdk(project)
+    rules = tmp_path / "nom.rules"
+    rules.write_text("model one\n")
+    monkeypatch.setattr(R, "_openrcx_ruleset_declaration", lambda *_: {
+        "status": "DECLARED", "declaration": [],
+        "corners": {"nom": {"path": str(rules), "pattern": "nom_*",
+                            "declared_by": "fixture config"}}, "detail": ""})
+    emitted = []
+
+    def extract(_project, _top, _pdk, _container, output, _notes):
+        emitted.append(R._sha256_file(rules))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(SPEF + f"// rules {emitted[-1]}\n")
+        return True
+
+    monkeypatch.setattr(R, "_emit_spef", extract)
+    R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    rules.write_text("model two\n")
+    R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    assert len(emitted) == 2 and emitted[0] != emitted[1]
+    basis = json.loads((project / "reports/phase3/postpnr_canonical_basis.json").read_text())
+    assert basis["extraction_inputs"]["pdk_files"][str(rules)] == emitted[-1]
+
+
+def test_unmeasured_pdn_and_failed_sdc_do_not_pass_receipt(tmp_path, monkeypatch):
+    project, _route = _routed_project(tmp_path)
+    monkeypatch.setattr(R, "_emit_spef", lambda _p, _t, _d, _c, out, _n:
+                        (out.parent.mkdir(parents=True, exist_ok=True),
+                         out.write_text(SPEF), True)[-1])
+    pdk = _pdk(project)
+    first = R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    basis_path = project / "reports/phase3/postpnr_canonical_basis.json"
+    basis = json.loads(basis_path.read_text())
+    assert first.status == basis["status"] == "NOT_MEASURED"
+    assert basis["outputs"]["pdn"]["status"] == "NOT_MEASURED"
+    assert basis["outputs"]["sdc_check"]["status"] == "PASS"
+
+    (R._pl.pnr_dir(project) / "constraint.sdc").write_text(
+        "create_clock -period banana [get_ports clk]\n")
+    second = R._canonicalize_postpnr_prerequisites(project, TOP, pdk, "")
+    basis = json.loads(basis_path.read_text())
+    assert second.status == basis["status"] == "FAIL"
+    assert basis["outputs"]["sdc_check"]["status"] == "FAIL"

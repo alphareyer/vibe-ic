@@ -19196,7 +19196,7 @@ def _producer_cache_valid_for(out_dir: Path, kind: str, *,
 _STEP_PDK_HASH_CACHE: Dict[Tuple[str, Tuple[str, ...]], Dict[str, str]] = {}
 
 
-def _step_pdk_hasher(container: str):
+def _step_pdk_hasher(container: str, *, use_cache: bool = True):
     """A callable `paths -> {path: sha256}` that reads the PDK where it IS.
 
     MEASURED, and the reason this exists at all: on the configuration this was
@@ -19215,7 +19215,7 @@ def _step_pdk_hasher(container: str):
     matching PDK."""
     def _hash(paths: Sequence[str]) -> Dict[str, str]:
         key = (container or "", tuple(paths))
-        hit = _STEP_PDK_HASH_CACHE.get(key)
+        hit = _STEP_PDK_HASH_CACHE.get(key) if use_cache else None
         if hit is not None:
             return hit
         out: Dict[str, str] = {}
@@ -19248,7 +19248,8 @@ def _step_pdk_hasher(container: str):
                         out[parts[1].strip()] = parts[0]
             except Exception:  # noqa: BLE001 — a failed probe is not a match
                 pass
-        _STEP_PDK_HASH_CACHE[key] = out
+        if use_cache:
+            _STEP_PDK_HASH_CACHE[key] = out
         return out
     return _hash
 
@@ -61128,14 +61129,55 @@ def _emit_router_drc_report(project: Path, pnr_out: Path, rpt_phase3: Path,
 
 
 
+def _postpnr_extraction_inputs(project: Path, top: str, pdk: PdkConfig,
+                               container: str, mode: str
+                               ) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Fresh byte identity for the inputs the nominal extractor actually reads.
+
+    A missing digest disables SPEF reuse. LibreLane reads a wider PDK tree via
+    its bridge, so its canonical SPEF is re-extracted on each publication until
+    that tool supplies a complete input receipt of its own.
+    """
+    if mode not in ("direct", "librelane"):
+        return None, f"step 22 extraction mode {mode!r} is not usable"
+    pnr = _pl.pnr_dir(project)
+    paths = [str(pdk.tech_lef), str(pdk.cell_lef), str(pdk.liberty)]
+    if mode == "direct":
+        paths.extend(_def_reopen_extra_lefs_c(pnr / f"{top}.def", pdk,
+                                              container))
+        decl = _openrcx_ruleset_declaration(pdk, container)
+        if decl["status"] == "UNREADABLE":
+            return None, f"OpenRCX ruleset declaration unreadable: {decl['detail']}"
+        paths.extend(str(p) for p in (decl.get("declaration") or []))
+        nominal = (decl.get("corners") or {}).get("nom")
+        if decl["status"] == "DECLARED":
+            if not nominal:
+                return None, "OpenRCX nominal ruleset was not declared"
+            paths.append(str(nominal["path"]))
+        if any("pdk_registry.json:" in str(row.get("declared_by", ""))
+               for row in (decl.get("corners") or {}).values()):
+            paths.append(str(PROGRAMS_DIR / "pdk_registry.json"))
+    else:
+        decl = None
+    paths = list(dict.fromkeys(paths))
+    digests = _step_pdk_hasher(container, use_cache=False)(paths)
+    absent = [p for p in paths if p not in digests]
+    if absent:
+        return None, "extraction PDK input unreadable: " + ", ".join(absent)
+    return {"mode": mode, "pdk_files": digests,
+            "metal_prefix": pdk.metal_prefix,
+            "coupling": os.environ.get("VIBEIC_SPEF_COUPLING", "1"),
+            "ruleset_declaration": decl,
+            "cacheable": mode == "direct"}, ""
+
+
 def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
                                         container: str) -> StepResult:
     """Publish Steps 7/8/15/16/22 from a retained route, before Step 32.
 
     These outputs read the route, constraints and extraction only. The receipt
-    binds their bytes to routed.def, so a copied tree or an equal-mtime route
-    change cannot make an old SPEF appear current. This is an advisory producer
-    row: the existing prestream gate still decides admission after repairs.
+    binds their bytes to routed.def and the active extraction PDK inputs. This
+    is an advisory producer row: the existing prestream gate decides admission.
     """
     t0 = time.time()
     pnr = _pl.pnr_dir(project)
@@ -61175,6 +61217,7 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
     sdc_report = project / "reports/phase2/sdc_check.json"
     if sdc_sha and (not sdc_report.is_file()
                     or prior.get("sdc_sha256") != sdc_sha):
+        sdc_report.unlink(missing_ok=True)
         try:
             check = subprocess.run(
                 [sys.executable, str(PROGRAMS_DIR / "sdc_syntax_check.py"),
@@ -61206,22 +61249,38 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
         written.append(plan_path)
 
     spef = _pl.extracted_dir(project) / f"{top}.spef"
+    try:
+        mode, _ = _librelane_signoff_modes(project)
+    except Exception as exc:
+        mode = "invalid"
+        notes.append(f"step 22 extraction mode NOT_MEASURED: {exc}")
+    extraction_inputs, input_note = _postpnr_extraction_inputs(
+        project, top, pdk, container, mode)
+    if input_note:
+        notes.append(input_note)
     # A receipt is required even for a pre-existing SPEF: mtime alone cannot
     # bind copied bytes to this DEF. A changed route invalidates the old file
     # before extraction, so an extraction refusal never leaves a stale pass.
-    spef_current = (spef.is_file() and spef.stat().st_size > 0
+    spef_current = (extraction_inputs is not None
+                    and extraction_inputs["cacheable"]
+                    and spef.is_file() and spef.stat().st_size > 0
                     and prior.get("routed_def_sha256") == route_sha
+                    and prior.get("extraction_inputs") == extraction_inputs
                     and prior.get("spef_sha256") == _sha256_file(spef)
                     and prior.get("spef_check_pass") is True)
     if not spef_current:
         spef.unlink(missing_ok=True)
-        mode, _ = _librelane_signoff_modes(project)
-        if mode == "librelane":
+        if extraction_inputs is None:
+            notes.append("step 22 NOT_MEASURED: extraction inputs unavailable")
+        elif mode == "librelane":
             try:
+                # A route-only in-process tool cache cannot prove a changed
+                # PDK tree equivalent. This publication needs a fresh RCX run.
                 _librelane_rcx_publish(
                     project, top, pdk, spef,
                     spef.parent / "spef_corners",
-                    _pl.reports_phase3_dir(project) / "librelane_rcx_handoff.json")
+                    _pl.reports_phase3_dir(project) / "librelane_rcx_handoff.json",
+                    refresh=True)
             except Exception as exc:
                 notes.append(f"step 22 LibreLane RCX NOT_MEASURED: {exc}")
         else:
@@ -61237,6 +61296,7 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
     extraction_report = project / "reports/phase2/gates/spef_extraction.json"
     if spef_sha and (not extraction_report.is_file()
                      or prior.get("routed_def_sha256") != route_sha
+                     or prior.get("extraction_inputs") != extraction_inputs
                      or prior.get("spef_sha256") != spef_sha
                      or (prior.get("spef_extraction_sha256") !=
                          _sha256_file(extraction_report))):
@@ -61257,11 +61317,45 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
                          and bool(extraction_summary["has_nets"]))
     except (OSError, ValueError, KeyError, TypeError):
         extraction_ok = False
-    status = ("PASS" if sdc_sha and sdc_report.is_file()
-              and pdn_path.is_file() and clock_path.is_file() and spef_sha
-              and extraction_ok else "NOT_MEASURED")
+    try:
+        sdc_doc = json.loads(sdc_report.read_text())
+        sdc_check_status = ("PASS" if sdc_doc.get("passed") is True else "FAIL")
+    except (OSError, ValueError, AttributeError):
+        sdc_check_status = "NOT_MEASURED"
+    try:
+        pdn_line = pdn_path.read_text(errors="replace").splitlines()[0]
+        pdn_status = ("PASS" if pdn_line == "# PDN status: CONNECTED" else
+                      "FAIL" if pdn_line == "# PDN status: NOT CONNECTED" else
+                      "NOT_MEASURED")
+    except (OSError, IndexError):
+        pdn_status = "NOT_MEASURED"
+    try:
+        clock_doc = json.loads(clock_path.read_text())
+        clock_ok = (isinstance(clock_doc, dict)
+                    and isinstance(clock_doc.get("clocks"), list)
+                    and bool(clock_doc["clocks"])
+                    and clock_doc.get("derived_from") ==
+                    _pl.clock_plan_sdc_digests(
+                        project, _pl.clock_plan_input_sdcs(project)))
+    except (OSError, ValueError, TypeError):
+        clock_ok = False
+    outputs = {"sdc": {"status": "PASS" if sdc_sha else "NOT_MEASURED"},
+               "sdc_check": {"status": sdc_check_status},
+               "pdn": {"status": pdn_status},
+               "clock_plan": {"status": "PASS" if clock_ok else "NOT_MEASURED"},
+               "spef": {"status": ("PASS" if spef_sha and extraction_ok
+                                    and extraction_inputs is not None else
+                                    "FAIL" if spef_sha and not extraction_ok else
+                                    "NOT_MEASURED")}}
+    states = [row["status"] for row in outputs.values()]
+    status = ("FAIL" if "FAIL" in states else "PASS" if all(
+        state == "PASS" for state in states) else "NOT_MEASURED")
+    nonpass = ", ".join(f"{name}={row['status']}" for name, row in outputs.items()
+                        if row["status"] != "PASS")
     record = {"schema": "vibeic.postpnr_canonical_basis.v1",
-              "status": status, "routed_def_sha256": route_sha,
+              "status": status, "outputs": outputs,
+              "routed_def_sha256": route_sha,
+              "extraction_inputs": extraction_inputs,
               "sdc_sha256": sdc_sha,
               "pdn_sha256": _sha256_file(pdn_path) if pdn_path.is_file() else None,
               "clock_plan_sha256": (_sha256_file(clock_path)
@@ -61275,9 +61369,10 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
         _aa.write_text(receipt, body)
         written.append(str(receipt))
     return StepResult("postpnr_canonical", status, time.time() - t0,
-                      "; ".join(notes) or "routed canonical producers checked",
-                      written, reason_class=("" if status == "PASS" else
-                                             _V.ReasonClass.INPUT_ABSENT))
+                      "; ".join(notes + ([f"outputs: {nonpass}"] if nonpass else []))
+                      or "routed canonical producers checked",
+                      written, reason_class=(_V.ReasonClass.INPUT_ABSENT
+                                             if status == "NOT_MEASURED" else ""))
 
 
 def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
@@ -66494,7 +66589,8 @@ _LL_SIGNOFF_RUNS: Dict[Tuple[str, str, bool, bool, str], dict] = {}
 
 def _librelane_signoff_run(project: Path, top: str, pdk: PdkConfig, *,
                            extract: bool, time: bool,
-                           direct_spefs: Optional[Dict[str, Path]] = None) -> dict:
+                           direct_spefs: Optional[Dict[str, Path]] = None,
+                           refresh: bool = False) -> dict:
     import librelane_contract as _ll
     import librelane_signoff as _ls
     pnr = _pl.pnr_dir(project)
@@ -66503,7 +66599,7 @@ def _librelane_signoff_run(project: Path, top: str, pdk: PdkConfig, *,
            extract, time, json.dumps({k: _sha256_file(Path(v)) for k, v in
                                       sorted((direct_spefs or {}).items())
                                       if Path(v).is_file()}))
-    if key in _LL_SIGNOFF_RUNS:
+    if not refresh and key in _LL_SIGNOFF_RUNS:
         return _LL_SIGNOFF_RUNS[key]
     try:
         root = _ll.pdk_root_resolution(project, pdk.name)["path"]
@@ -66524,11 +66620,13 @@ def _librelane_signoff_run(project: Path, top: str, pdk: PdkConfig, *,
 
 
 def _librelane_rcx_publish(project: Path, top: str, pdk: PdkConfig,
-                           spef_out: Path, corner_dir: Path, receipt: Path) -> None:
+                           spef_out: Path, corner_dir: Path, receipt: Path,
+                           *, refresh: bool = False) -> None:
     """Step 22 on the tool: RCX, then hand every corner SPEF (and the nominal
     one) to the paths the direct consumers read, bound by sha256."""
     import librelane_signoff as _ls
-    result = _librelane_signoff_run(project, top, pdk, extract=True, time=False)
+    result = _librelane_signoff_run(project, top, pdk, extract=True, time=False,
+                                   refresh=refresh)
     _ls.publish_spefs(result, top, spef_out, corner_dir, receipt)
 
 
