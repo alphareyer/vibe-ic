@@ -391,6 +391,11 @@ def run_verdict_of(root: Path) -> Dict[str, Any]:
         tried.append(f"{rel}: {reason or 'read'}")
         if not isinstance(doc, dict):
             continue
+        if doc.get("final_audit_pending") is True:
+            # FX_P2: the phase-2 copy published BEFORE its final audit is no
+            # verdict of phase 2 (the tail overwrites it). Read on.
+            tried[-1] = f"{rel}: pre-audit copy (final_audit_pending), not a verdict"
+            continue
         verdict = doc.get("verdict")
         phases = []
         for st in (doc.get("phases") or []):
