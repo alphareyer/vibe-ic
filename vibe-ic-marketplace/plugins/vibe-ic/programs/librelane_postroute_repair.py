@@ -785,7 +785,10 @@ def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path
         write_json(source, report)
 
     if report.get("verdict") != "PASS":
-        refuse(f"step 32 verdict {report.get('verdict')!r} is not PASS")
+        reason = ("the input/final OpenROAD.CheckAntennas net and pin census "
+                  "is missing" if report.get("code") == "LL_PRR_ANTENNA_NOT_MEASURED"
+                  else f"step 32 verdict {report.get('verdict')!r} is not PASS")
+        refuse(reason)
         return
     baseline = report.get("input_baseline") or report.get("baseline") or {}
     final = report.get("final") or {}
