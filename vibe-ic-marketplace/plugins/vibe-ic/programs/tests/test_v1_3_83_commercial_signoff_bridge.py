@@ -320,7 +320,12 @@ def test_same_net_heal_forces_klayout_streamout_not_magic(tmp_path, monkeypatch)
     monkeypatch.setattr(p3, "_magic_def_to_gds", _no_magic)
 
     def _fake_exec(container, cmd, marker=None, **_kw):
-        (pnr / "top.gds").write_bytes(b"\x00")     # KLayout streamout wrote GDS
+        # KLayout streamout wrote GDS -- at the path the runner told the
+        # invocation to produce (its declared `outputs`), which is the
+        # retained per-run stream the finishing chain copies from, not an
+        # assumed delivery path.
+        for out in _kw.get("outputs") or []:
+            Path(out).write_bytes(b"\x00")
         return 0, "", ""
     monkeypatch.setattr(p3, "_docker_exec", _fake_exec)
     monkeypatch.setattr(p3, "_gds_grid_snap", lambda *a, **k: (True, "snap"))
