@@ -1,0 +1,6 @@
+read_rtlil /work/state_equiv.il
+equiv_miter -trigger -cmp -undef lec_cex_miter
+hierarchy -top lec_cex_miter
+flatten
+write_rtlil /work/state_flat.il
+sat -seq 8 -timeout 30 -enable_undef -set-def-inputs -set-init-zero -prove trigger 0 -show-inputs -show-outputs -dump_json /work/state_trace.json

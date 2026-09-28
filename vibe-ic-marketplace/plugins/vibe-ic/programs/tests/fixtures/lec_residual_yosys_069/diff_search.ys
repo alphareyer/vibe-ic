@@ -1,0 +1,6 @@
+read_rtlil /work/diff_equiv.il
+equiv_miter -trigger -cmp -undef lec_cex_miter
+hierarchy -top lec_cex_miter
+flatten
+write_rtlil /work/diff_flat.il
+sat -seq 3 -timeout 30 -enable_undef -set-def-inputs -set-init-zero -prove trigger 0 -show-inputs -show-outputs -dump_json /work/diff_trace.json
