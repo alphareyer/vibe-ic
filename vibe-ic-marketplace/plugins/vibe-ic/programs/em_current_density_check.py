@@ -23,8 +23,8 @@ This program closes that gap with the physical sign-off computation:
     FAIL   iff  any segment reaches/exceeds the margined Jmax (offenders listed)
 
 The per-layer Jmax and thickness are read from the PDK.  Conductor width is
-proved per segment by same-net routed DEF special wires or placed LEF macro
-PG PORT rectangles emitted from OpenROAD ODB.  LEF default layer WIDTH and
+proved per segment by same-net routed DEF special wires or placed LEF PG PORT
+rectangles emitted from OpenROAD ODB.  LEF default layer WIDTH and
 the narrowest width elsewhere on the layer are never segment geometry.
 
   * a foundry / open-PDK **tech LEF** (sky130 / gf180 both carry, per LAYER:
@@ -101,7 +101,8 @@ _DEFAULT_MARGIN = 0.10
 _DEFAULT_BLACKS_N = 2.0
 
 #: OpenROAD Tcl that dumps the loaded ODB's supply-net routing-layer boxes
-#: (special wires, via metal, and placed pad/macro LEF PG PORT rectangles) as TSV
+#: (special wires, via metal, and placed standard-cell/macro/pad LEF PG PORT
+#: rectangles) as TSV
 #: `_odb_pg_geometry_rects` reads. DEF SPECIALNETS omit the layer metal inside
 #: generated via arrays, yet PSM reports current between nodes on those via
 #: enclosures; this gives those edges a real cross section. One instrument for
@@ -146,7 +147,15 @@ foreach _eg_n [[ord::get_db_block] getNets] {
   foreach _eg_t [$_eg_n getITerms] {
     if {[[$_eg_t getMTerm] getSigType] ni {POWER GROUND}} {continue}
     set _eg_m [[$_eg_t getInst] getMaster]
-    if {![$_eg_m isPad] && ![$_eg_m isBlock]} {continue}
+    if {[$_eg_m isPad]} {
+      set _eg_src pg_port
+    } elseif {[$_eg_m isBlock]} {
+      set _eg_src macro_pg_port
+    } elseif {[$_eg_m isCore]} {
+      set _eg_src stdcell_pg_port
+    } else {
+      set _eg_src other_pg_port
+    }
     if {[catch {set _eg_gs [$_eg_t getGeometries]}]} {continue}
     foreach _eg_g $_eg_gs {
       if {[catch {lassign $_eg_g _eg_l _eg_b}]} {continue}
@@ -155,7 +164,7 @@ foreach _eg_n [[ord::get_db_block] getNets] {
         [expr {double([$_eg_b xMin])/$_eg_dbu}] \
         [expr {double([$_eg_b yMin])/$_eg_dbu}] \
         [expr {double([$_eg_b xMax])/$_eg_dbu}] \
-        [expr {double([$_eg_b yMax])/$_eg_dbu}] pg_port] "\t"]
+        [expr {double([$_eg_b yMax])/$_eg_dbu}] $_eg_src] "\t"]
     }
   }
 }
@@ -493,7 +502,9 @@ def _odb_pg_geometry_rects(path: Path
                     source = str(row["source"])
                     # OBS marks routing exclusion, not net ownership.  A
                     # macro OBS alone cannot prove a current path or width.
-                    if source not in {"special_wire", "via_metal", "pg_port"}:
+                    if source not in {"special_wire", "via_metal", "pg_port",
+                                      "macro_pg_port", "stdcell_pg_port",
+                                      "other_pg_port"}:
                         continue
                     out.setdefault((net, layer), []).append(
                         (x0, y0, x1, y1, min(x1 - x0, y1 - y0), source))
@@ -508,28 +519,143 @@ _GEOMETRY_TILE_UM = 20.0  # spatial index only; never an EM or width limit
 
 
 def _geometry_index(rects: Dict[Tuple[str, str], List[Tuple[float, ...]]]
-                    ) -> Dict[Tuple[str, str, int], List[Tuple[float, ...]]]:
-    """Index real conductor boxes by the x tiles they intersect."""
-    out: Dict[Tuple[str, str, int], List[Tuple[float, ...]]] = {}
+                    ) -> Dict[Tuple[str, str, int, int], List[Tuple[float, ...]]]:
+    """Index real conductor boxes in 2-D, including dense standard-cell pins."""
+    out: Dict[Tuple[str, str, int, int], List[Tuple[float, ...]]] = {}
     for (net, layer), boxes in rects.items():
         for box in boxes:
-            lo = math.floor(box[0] / _GEOMETRY_TILE_UM)
-            hi = math.floor(box[2] / _GEOMETRY_TILE_UM)
-            for tile in range(lo, hi + 1):
-                out.setdefault((net, layer, tile), []).append(box)
+            for xtile in range(math.floor(box[0] / _GEOMETRY_TILE_UM),
+                               math.floor(box[2] / _GEOMETRY_TILE_UM) + 1):
+                for ytile in range(math.floor(box[1] / _GEOMETRY_TILE_UM),
+                                   math.floor(box[3] / _GEOMETRY_TILE_UM) + 1):
+                    out.setdefault((net, layer, xtile, ytile), []).append(box)
     return out
 
 
+def _point_metal_boxes(
+        key: Tuple[str, str], point: Tuple[float, float],
+        index: Dict[Tuple[str, str, int, int], List[Tuple[float, ...]]]
+        ) -> List[Tuple[float, ...]]:
+    """Find net-owned metal containing a PSM node, including tile boundaries."""
+    x, y = point
+    xtile = math.floor(x / _GEOMETRY_TILE_UM)
+    ytile = math.floor(y / _GEOMETRY_TILE_UM)
+    found: Dict[int, Tuple[float, ...]] = {}
+    for tx in (xtile - 1, xtile):
+        for ty in (ytile - 1, ytile):
+            for box in index.get((*key, tx, ty), []):
+                if box[0] <= x <= box[2] and box[1] <= y <= box[3]:
+                    found[id(box)] = box
+    return list(found.values())
+
+
+def _metal_contact_width(a: Tuple[float, ...], b: Tuple[float, ...]) -> float:
+    """Shared edge/area width, capped by each real conductor's minor width."""
+    x_overlap = min(a[2], b[2]) - max(a[0], b[0])
+    y_overlap = min(a[3], b[3]) - max(a[1], b[1])
+    if x_overlap > 0 and y_overlap >= 0:
+        span = min(x_overlap, y_overlap) if y_overlap > 0 else x_overlap
+    elif y_overlap > 0 and x_overlap == 0:
+        span = y_overlap
+    else:
+        return 0.0  # gap or point contact cannot carry a proven width
+    return min(span, a[4], b[4])
+
+
+def _contact_result(
+        contacts: List[Tuple[float, List[str]]]
+        ) -> Tuple[Optional[Tuple[float, List[str]]], bool]:
+    if not contacts:
+        return None, False
+    widths = [width for width, _ in contacts]
+    if max(widths) - min(widths) > 1e-6:
+        return None, True
+    return (min(widths), sorted({source for _, names in contacts
+                                 for source in names})), False
+
+
+def _direct_metal_contact(
+        first: List[Tuple[float, ...]], second: List[Tuple[float, ...]]
+        ) -> Tuple[Optional[Tuple[float, List[str]]], bool]:
+    """Prove contact between endpoint conductors; reject width ambiguity."""
+    contacts: List[Tuple[float, str, str]] = []
+    for a in first:
+        for b in second:
+            if a is b:
+                continue
+            width = _metal_contact_width(a, b)
+            if width > 0:
+                contacts.append((width, a[5], b[5]))
+    return _contact_result([(width, [sa, sb]) for width, sa, sb in contacts])
+
+
+def _bridged_metal_contact(
+        key: Tuple[str, str], first: List[Tuple[float, ...]],
+        second: List[Tuple[float, ...]],
+        points: Tuple[Tuple[float, float], Tuple[float, float]],
+        index: Dict[Tuple[str, str, int, int], List[Tuple[float, ...]]],
+        bridge_count: int = 1
+        ) -> Tuple[Optional[Tuple[float, List[str]]], bool]:
+    """Prove a short, unambiguous same-net contact chain between PSM nodes.
+
+    Search only rectangles intersecting the nodes' bounding tiles.  One or
+    two intermediate rectangles cover a follow-pin rail or abutting IO cells.
+    Longer paths have no bounded width proof here and remain NOT_MEASURED.
+    """
+    (x0, y0), (x1, y1) = points
+    bridges: Dict[int, Tuple[float, ...]] = {}
+    for xtile in range(math.floor(min(x0, x1) / _GEOMETRY_TILE_UM),
+                       math.floor(max(x0, x1) / _GEOMETRY_TILE_UM) + 1):
+        for ytile in range(math.floor(min(y0, y1) / _GEOMETRY_TILE_UM),
+                           math.floor(max(y0, y1) / _GEOMETRY_TILE_UM) + 1):
+            for box in index.get((*key, xtile, ytile), []):
+                bridges[id(box)] = box
+    contacts: List[Tuple[float, List[str]]] = []
+    endpoint_ids = {id(box) for box in first + second}
+    for bridge in bridges.values():
+        if id(bridge) in endpoint_ids:
+            continue
+        for a in first:
+            width_a = _metal_contact_width(a, bridge)
+            if width_a <= 0:
+                continue
+            if bridge_count == 1:
+                for b in second:
+                    width_b = _metal_contact_width(bridge, b)
+                    if width_b > 0:
+                        contacts.append((min(width_a, bridge[4], width_b),
+                                         [a[5], bridge[5], b[5]]))
+            elif bridge_count == 2:
+                for next_bridge in bridges.values():
+                    if (next_bridge is bridge or
+                            id(next_bridge) in endpoint_ids):
+                        continue
+                    width_mid = _metal_contact_width(bridge, next_bridge)
+                    if width_mid <= 0:
+                        continue
+                    for b in second:
+                        width_b = _metal_contact_width(next_bridge, b)
+                        if width_b > 0:
+                            contacts.append((min(width_a, bridge[4],
+                                                 width_mid, next_bridge[4],
+                                                 width_b),
+                                             [a[5], bridge[5],
+                                              next_bridge[5], b[5]]))
+    return _contact_result(contacts)
+
+
 def _segment_geometry_width(
-        seg: Dict[str, Any], index: Dict[Tuple[str, str, int], List[Tuple[float, ...]]]
+        seg: Dict[str, Any], index: Dict[Tuple[str, str, int, int], List[Tuple[float, ...]]]
         ) -> Optional[Tuple[float, List[str]]]:
-    """Minimum transverse metal width along an entire Manhattan PSM edge.
+    """Prove a same-net conductor width for one PSM metal edge.
 
     Same-net same-layer rectangles may abut at a placed macro boundary.  For
     every axial slab, find the metal component containing the edge centreline;
     adjacent slabs must overlap with positive transverse area.  The minimum
     component width is the actual bottleneck, including a narrow strap even
-    when it touches a broad ring.  An uncovered slab proves no width.
+    when it touches a broad ring.  Diagonal PSM edges use a containing metal
+    box or an unambiguous short contact chain because they are virtual edges.
+    An uncovered slab or ambiguous contact proves no width.
     """
     pts = seg.get("points_um")
     if not pts or any(v is None for point in pts for v in point):
@@ -537,25 +663,71 @@ def _segment_geometry_width(
     (x0, y0), (x1, y1) = pts
     horizontal = y0 == y1 and x0 != x1
     vertical = x0 == x1 and y0 != y1
-    if not (horizontal or vertical):
+    if x0 == x1 and y0 == y1:
         return None
+    key = (str(seg["net"]).lower(), str(seg["layer0"]).lower())
+    xtiles = range(math.floor(min(x0, x1) / _GEOMETRY_TILE_UM),
+                   math.floor(max(x0, x1) / _GEOMETRY_TILE_UM) + 1)
+    ytiles = range(math.floor(min(y0, y1) / _GEOMETRY_TILE_UM),
+                   math.floor(max(y0, y1) / _GEOMETRY_TILE_UM) + 1)
+    if not (horizontal or vertical):
+        # A diagonal PSM edge is virtual.  Its geometric line is not an
+        # observed route; do not infer a width from a grazing line across
+        # multiple boxes.  One box containing both nodes is a direct proof.
+        length = math.hypot(x1 - x0, y1 - y0)
+        nx, ny = -(y1 - y0) / length, (x1 - x0) / length
+
+        def chord(x: float, y: float, box: Tuple[float, ...]) -> float:
+            limits = []
+            for pos, direction, lo, hi in (
+                    (x, nx, box[0], box[2]), (y, ny, box[1], box[3])):
+                if abs(direction) < 1e-12:
+                    if not lo <= pos <= hi:
+                        return 0.0
+                else:
+                    a0, b0 = (lo - pos) / direction, (hi - pos) / direction
+                    limits.append((min(a0, b0), max(a0, b0)))
+            return max(0.0, min(v[1] for v in limits) -
+                       max(v[0] for v in limits)) if limits else 0.0
+
+        first = _point_metal_boxes(key, (x0, y0), index)
+        second = _point_metal_boxes(key, (x1, y1), index)
+        covering = [box for box in first if any(box is other for other in second)]
+        if covering:
+            widths = [min(box[4], chord(x0, y0, box), chord(x1, y1, box))
+                      for box in covering]
+            usable = [(width, box[5]) for width, box in zip(widths, covering)
+                      if width > 0]
+            if usable:
+                width, source = max(usable)
+                return width, [source]
+        contact, ambiguous = _direct_metal_contact(first, second)
+        if contact or ambiguous:
+            return contact
+        bridged, ambiguous = _bridged_metal_contact(
+            key, first, second, ((x0, y0), (x1, y1)), index)
+        if bridged or ambiguous:
+            return bridged
+        twice, _ = _bridged_metal_contact(
+            key, first, second, ((x0, y0), (x1, y1)), index, 2)
+        return twice
     a, b = sorted((x0, x1) if horizontal else (y0, y1))
     trans = y0 if horizontal else x0
-    key = (str(seg["net"]).lower(), str(seg["layer0"]).lower())
-    tiles = range(math.floor(min(x0, x1) / _GEOMETRY_TILE_UM),
-                  math.floor(max(x0, x1) / _GEOMETRY_TILE_UM) + 1)
     boxes = []
     seen: set[int] = set()
-    for tile in tiles:
-        for box in index.get((*key, tile), []):
-            if id(box) in seen:
-                continue
-            seen.add(id(box))
-            axial_lo, axial_hi = (box[0], box[2]) if horizontal else (box[1], box[3])
-            trans_lo, trans_hi = (box[1], box[3]) if horizontal else (box[0], box[2])
-            if axial_hi > a and axial_lo < b and trans_lo < trans < trans_hi:
-                boxes.append((max(a, axial_lo), min(b, axial_hi),
-                              trans_lo, trans_hi, box[5]))
+    for xtile in xtiles:
+        for ytile in ytiles:
+            for box in index.get((*key, xtile, ytile), []):
+                if id(box) in seen:
+                    continue
+                seen.add(id(box))
+                axial_lo, axial_hi = ((box[0], box[2]) if horizontal
+                                      else (box[1], box[3]))
+                trans_lo, trans_hi = ((box[1], box[3]) if horizontal
+                                      else (box[0], box[2]))
+                if axial_hi > a and axial_lo < b and trans_lo <= trans <= trans_hi:
+                    boxes.append((max(a, axial_lo), min(b, axial_hi),
+                                  trans_lo, trans_hi, box[5]))
     if not boxes:
         return None
     breaks = sorted({a, b, *(v for box in boxes for v in box[:2])})
@@ -572,12 +744,12 @@ def _segment_geometry_width(
             return None
         components = []
         for tl, th, src in spans:
-            if components and tl < components[-1][1]:
+            if components and tl <= components[-1][1]:
                 old = components[-1]
                 components[-1] = (old[0], max(old[1], th), old[2] | {src})
             else:
                 components.append((tl, th, {src}))
-        match = next((c for c in components if c[0] < trans < c[1]), None)
+        match = next((c for c in components if c[0] <= trans <= c[1]), None)
         if match is None or (prior is not None and
                              min(prior[1], match[1]) <= max(prior[0], match[0])):
             return None
@@ -585,6 +757,41 @@ def _segment_geometry_width(
         sources.update(match[2])
         prior = match
     return (minimum, sorted(sources)) if math.isfinite(minimum) else None
+
+
+def _geometry_gap_reason(
+        seg: Dict[str, Any], index: Dict[Tuple[str, str, int, int], List[Tuple[float, ...]]]
+        ) -> Tuple[str, str]:
+    """Name the PSM edge class for which no continuous conductor was proved."""
+    pts = seg.get("points_um")
+    if not pts or any(v is None for point in pts for v in point):
+        return "psm_segment_coordinates_missing", "unknown"
+    key = (str(seg["net"]).lower(), str(seg["layer0"]).lower())
+    ends = [_point_metal_boxes(key, point, index) for point in pts]
+    a, b = ends
+    family = ("same_shape" if {id(box) for box in a} & {id(box) for box in b} else
+              "two_shapes" if a and b else
+              "one_shape" if a or b else "no_shape")
+    (x0, y0), (x1, y1) = pts
+    diagonal = x0 != x1 and y0 != y1
+    if diagonal:
+        if family == "two_shapes":
+            _, ambiguous = _direct_metal_contact(a, b)
+            if not ambiguous:
+                _, ambiguous = _bridged_metal_contact(key, a, b, pts, index)
+            if not ambiguous:
+                _, ambiguous = _bridged_metal_contact(key, a, b, pts, index, 2)
+            if ambiguous:
+                return "psm_virtual_diagonal_ambiguous_contact_width", family
+        if family == "one_shape":
+            source = (a or b)[0][5]
+            return f"psm_virtual_diagonal_leaves_{source}", family
+        return f"psm_virtual_diagonal_{family}_path_unproven", family
+    if family == "one_shape":
+        return "psm_edge_partly_outside_same_net_metal", family
+    if family == "no_shape":
+        return "psm_edge_without_same_net_metal", family
+    return "psm_edge_has_no_continuous_cross_section", family
 
 
 def _def_pg_widths_of(def_path: Path) -> Dict[str, float]:
@@ -790,6 +997,8 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
     min_life: Optional[float] = None
     per_layer: Dict[str, Dict[str, Any]] = {}
     unscreened_reasons: Dict[str, int] = {}
+    unscreened_by_net_layer: Dict[str, int] = {}
+    unmeasured_shape_families: Dict[str, int] = {}
 
     local_rects = _geometry_index(_def_pg_local_rects(def_path)) if def_path else {}
     odb_rects = (_geometry_index(_odb_pg_geometry_rects(pg_geometry_path))
@@ -810,16 +1019,27 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
             measured = dict(seg, width_um=geometry[0] if geometry else None,
                             width_source=source)
             if geometry:
-                local_width_uses += 1
                 if source == "odb_pg_metal_geometry":
                     odb_width_uses += 1
+                else:
+                    local_width_uses += 1
                 measured["geometry_sources"] = geometry[1]
         r = _screen_segment(measured, table, margin, blacks_n, def_widths)
         if "geometry_sources" in measured and r["status"] != "unscreened":
             r["geometry_sources"] = measured["geometry_sources"]
         if r["status"] == "unscreened":
+            if r["reason"] == "segment_conductor_geometry_unproven":
+                reason, family = _geometry_gap_reason(
+                    seg, odb_rects if odb_rects else local_rects)
+                r["reason"] = reason
+                r["shape_family"] = family
+                unmeasured_shape_families[family] = (
+                    unmeasured_shape_families.get(family, 0) + 1)
             n_unscreened += 1
             unscreened_reasons[r["reason"]] = unscreened_reasons.get(r["reason"], 0) + 1
+            net_layer = f"{seg['net']}:{seg['layer0']}"
+            unscreened_by_net_layer[net_layer] = (
+                unscreened_by_net_layer.get(net_layer, 0) + 1)
             if len(not_measured_segments) < max(1, top_offenders):
                 not_measured_segments.append(dict(r, status="NOT_MEASURED",
                                                   points_um=seg.get("points_um")))
@@ -848,6 +1068,8 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
         "segments_screened": n_screened,
         "segments_unscreened": n_unscreened,
         "unscreened_reasons": unscreened_reasons,
+        "unscreened_by_net_layer": unscreened_by_net_layer,
+        "unmeasured_shape_families": unmeasured_shape_families,
         "worst_utilization": (round(worst_util, 6) if worst_util >= 0 else None),
         "worst_case_lifetime_ratio": (round(min_life, 4) if min_life is not None else None),
         "per_layer": {k: {"segments": v["segments"],
@@ -862,7 +1084,7 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
 
     # (3b) report present + Jmax present but nothing mapped → SKIPPED, never PASS
     if n_screened == 0:
-        geometry_missing = "segment_conductor_geometry_unproven" in unscreened_reasons
+        geometry_missing = any(k.startswith("psm_") for k in unscreened_reasons)
         empty_verdict = "NOT_MEASURED" if geometry_missing else "SKIPPED"
         rep["verdict"] = empty_verdict
         rep["pass"] = False
