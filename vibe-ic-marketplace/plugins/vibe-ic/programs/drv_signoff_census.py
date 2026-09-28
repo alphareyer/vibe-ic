@@ -7,7 +7,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from drv_signoff_judge import KINDS, _liberty_limits
+from drv_signoff_judge import KINDS, _NUM, _liberty_limits
+from drv_signoff_annotation import _lef_uses
 
 
 def _pins(path: Path) -> dict[str, dict]:
@@ -40,7 +41,7 @@ def _nets(path: Path) -> dict[str, dict]:
     nets = {}
     for block in re.split(r"(?m)^Net ", path.read_text())[1:]:
         name, _, rest = block.partition("\n")
-        cap = re.search(r"(?m)^ Total capacitance:\s*([0-9.eE+-]+)", rest)
+        cap = re.search(r"(?m)^ Total capacitance:\s*(\S+)", rest)
         loads = re.search(r"(?ms)^Load pins\n(.*?)(?:\n\n|\Z)", rest)
         count = re.search(r"(?m)^ Number of loads:\s*(\d+)", rest)
         if not cap or not count or name in nets or (loads is None and int(count.group(1))):
@@ -49,7 +50,13 @@ def _nets(path: Path) -> dict[str, dict]:
                        if line.strip()] if loads is not None else [])
         if len(load_names) != int(count.group(1)):
             raise ValueError("OpenSTA net load count differs from raw report")
-        cap_pf = float(cap.group(1))
+        # report_net prints a min-max capacitance range when the linked
+        # process has distinct rise/fall values.  Retain the larger endpoint
+        # for a conservative excluded-pin check.
+        cap_range = re.fullmatch(rf"({_NUM})(?:-({_NUM}))?", cap.group(1))
+        if cap_range is None:
+            raise ValueError("OpenSTA net capacitance grammar invalid")
+        cap_pf = max(float(value) for value in cap_range.groups() if value is not None)
         if not math.isfinite(cap_pf) or cap_pf < 0:
             raise ValueError("OpenSTA net capacitance census is not finite")
         nets[name] = {"cap_pf": cap_pf, "loads": load_names}
@@ -68,7 +75,9 @@ def _disabled(path: Path) -> dict[str, str]:
 
 
 def derive(scene_dir: Path, linked_liberties: list[dict],
-           all_rows: dict[str, list[dict]]) -> dict:
+           all_rows: dict[str, list[dict]],
+           linked_lefs: list[dict] | None = None, *,
+           allow_unproven: bool = False) -> dict:
     """Reconcile reported rows with pin and net identities from one STA run."""
     pins = _pins(scene_dir / "pin_census.tsv")
     nets = _nets(scene_dir / "net_census.rpt")
@@ -77,6 +86,10 @@ def derive(scene_dir: Path, linked_liberties: list[dict],
     for item in linked_liberties:
         limits = _liberty_limits(Path(item["path"]).read_text())
         libs.append((item["name"], limits))
+    lef_uses = _lef_uses(linked_lefs) if linked_lefs else {}
+    lib_pins = {(cell, cell_pin): props for _, limits in libs
+                for cell, pins_in_cell in limits["cells"].items()
+                for cell_pin, props in pins_in_cell.items()}
     metadata = {}
     for name, pin in pins.items():
         if pin["kind"] == "port":
@@ -96,7 +109,8 @@ def derive(scene_dir: Path, linked_liberties: list[dict],
         net_class = ("constant" if pin["logic"] in ("0", "1") else
                      "clock" if pin["clock"] else
                      "IO" if cell_class in ("IO", "port") else "data")
-        metadata[name] = {"net_class": net_class, "cell_class": cell_class,
+        metadata[name] = {"kind": pin["kind"],
+                          "net_class": net_class, "cell_class": cell_class,
                           "cell": pin["cell"] or None,
                           "cell_pin": pin["cell_pin"] or None,
                           "liberty": liberty,
@@ -108,15 +122,25 @@ def derive(scene_dir: Path, linked_liberties: list[dict],
     if any(not names.issubset(pins) for names in all_names.values()):
         raise ValueError("OpenSTA DRV report contains pin outside netlist census")
     excluded = []
+    unproven = []
     omitted = ((drivers - all_names["max_fanout"]) |
                (drivers - all_names["max_capacitance"]) |
                (set(pins) - all_names["max_slew"]))
     for name in sorted(omitted):
         pin = pins[name]
-        reason = ("constant" if pin["logic"] in ("0", "1") else
+        key = (pin["cell"], pin["cell_pin"])
+        pg_without_arc = (lef_uses.get(key) in ("POWER", "GROUND") and
+                          key in lib_pins and not lib_pins[key]["has_timing_arc"])
+        reason = ("lef_pg_no_liberty_arc" if pg_without_arc else
+                  "unconnected_no_net" if not pin["net"] else
+                  "constant" if pin["logic"] in ("0", "1") else
                   (disabled.get(name) or ("ideal" if pin["ideal"] else None)))
-        if reason not in ("constant", "disabled", "ideal"):
-            raise ValueError(f"OpenSTA omitted driver {name} without exclusion proof")
+        if reason not in ("constant", "disabled", "ideal", "lef_pg_no_liberty_arc",
+                          "unconnected_no_net"):
+            if not allow_unproven:
+                raise ValueError(f"OpenSTA omitted driver {name} without exclusion proof")
+            reason = "unproven"
+            unproven.append(name)
         net = nets.get(pin["net"])
         if pin["net"] and net is None:
             raise ValueError(f"OpenSTA net {pin['net']} absent for excluded pin")
@@ -157,6 +181,7 @@ def derive(scene_dir: Path, linked_liberties: list[dict],
     if all_names["max_slew"] != slew_pins:
         raise ValueError("OpenSTA pin census disagrees with all-limits slew rows")
     return {"pins": metadata, "excluded": excluded,
+            "unproven": unproven,
             "clock_network_pins": sorted(name for name, pin in pins.items() if pin["clock"]),
             "driver_pins": sorted(drivers),
             "population": {"max_slew": len(slew_pins),

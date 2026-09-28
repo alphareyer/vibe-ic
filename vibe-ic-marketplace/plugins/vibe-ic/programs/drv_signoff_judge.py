@@ -167,6 +167,11 @@ def _liberty_limits(body: str) -> dict:
                 kind: scaled(direct, kind)
                 for kind in KINDS}
             pins[pin.group(1).strip()]["fanout_load"] = _attribute(direct, "fanout_load")
+            pin_name = pin.group(1).strip()
+            related = re.findall(r'\brelated_pin\s*:\s*"?([^";]+)"?\s*;', cell_body)
+            pins[pin_name]["has_timing_arc"] = (
+                bool(re.search(r"\btiming\s*\(", pin_body)) or
+                any(pin_name in value.split() for value in related))
         cells[cell.group(1).strip()] = pins
     return {"defaults": defaults, "cells": cells, "pad_cells": pad_cells,
             "default_fanout_load": default_fanout_load}
@@ -570,8 +575,10 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         _evidence(item, missing, name)
         if name.endswith("netlist") and item.get("sha256") != identity.get(name):
             fails.append(f"{name}: recorded netlist sha256 disagrees with file")
-    if len({identity.get(name) for name in ("sta_netlist", "lvs_netlist",
-                                            "gds_netlist")}) != 1:
+    identified_netlists = [identity.get(name) for name in
+                           ("sta_netlist", "lvs_netlist", "gds_netlist")
+                           if identity.get(name)]
+    if len(set(identified_netlists)) > 1:
         fails.append("STA/LVS/GDS netlist identity mismatch")
     for name in ("openroad_commit", "opensta_commit", "pdk_commit"):
         if not identity.get(name):
@@ -810,6 +817,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     spef_by_pvt: dict[str, dict[str, str]] = {}
     for scene in bundle.get("scenes") or []:
         name, mode = scene.get("name"), scene.get("mode")
+        scene_pins = scene.get("pins") or pins
         if not name or name in scene_names or name not in required_scenes:
             missing.append(f"scene identity missing, repeated or unexpected: {name}")
             continue
@@ -822,8 +830,10 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                         name + " parasitic annotation")
         counts_ann = re.findall(
             r"Found\s+(\d+)\s+(?:partially\s+)?unannotated\s+(?:drivers|nets)", ann)
-        if not counts_ann or any(int(count) for count in counts_ann):
-            missing.append(f"{name}: unannotated parasitic census not zero")
+        if not counts_ann:
+            missing.append(f"{name}: unannotated parasitic census absent")
+        if any(int(count) for count in counts_ann) and not scene.get("annotation_census"):
+            missing.append(f"{name}: unannotated parasitic census lacks pin proof")
         if scene.get("propagated_clocks") is not True or not scene.get("clock_properties"):
             missing.append(f"{name}: propagated clock evidence absent")
         if not scene.get("excluded_pins_recorded"):
@@ -831,7 +841,9 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         excluded = scene.get("excluded_pins")
         if not isinstance(excluded, list) or any(
                 not isinstance(p, dict) or not p.get("pin") or
-                p.get("reason") not in ("constant", "disabled", "ideal") or
+                p.get("reason") not in ("constant", "disabled", "ideal",
+                                        "lef_pg_no_liberty_arc", "unconnected_no_net",
+                                        "unproven") or
                 ("excluded_kinds" in p and
                  (not isinstance(p["excluded_kinds"], list) or
                   any(kind not in KINDS for kind in p["excluded_kinds"]))) or
@@ -849,6 +861,11 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         for item in excluded or []:
             if not isinstance(item, dict) or not item.get("pin"):
                 continue
+            if item.get("reason") in ("lef_pg_no_liberty_arc", "unconnected_no_net"):
+                continue
+            if item.get("reason") == "unproven":
+                missing.append(f"{name}: omitted pin {item['pin']} has no exclusion proof")
+                continue
             for kind, axis, direction in (
                     ("max_fanout", "fanout", "none"),
                     ("max_capacitance", "cap_pf", "none"),
@@ -862,7 +879,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                 row = {"pin": item["pin"], "scene": name, "mode": mode,
                        "direction": direction, "measured": measured,
                        "excluded_reason": item.get("reason")}
-                if not _annotate_limits(row, kind, scene, libs, pins,
+                if not _annotate_limits(row, kind, scene, libs, scene_pins,
                                         declared, missing):
                     continue
                 row["limit"] = row["effective_limit"]
@@ -965,6 +982,27 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                              name + " all limits")
         all_rows = parse_check_types(all_text, scene=name, mode=mode,
                                      violators_only=False)
+        annotation_census = scene.get("annotation_census")
+        if annotation_census is not None:
+            raw_census = _evidence(scene.get("annotation_census_report") or {},
+                                   missing, name + " annotation census")
+            try:
+                if json.loads(raw_census) != annotation_census:
+                    missing.append(f"{name}: annotation census differs from recorded file")
+                from drv_signoff_annotation import derive as derive_annotation
+                scene_folder = Path(scene["parasitic_annotation_report"]["path"]).parent
+                lefs = scene.get("linked_lefs") or []
+                for item in lefs:
+                    _evidence(item, missing, name + " linked LEF")
+                derived = derive_annotation(
+                    scene_folder, scene_pins,
+                    scene.get("linked_liberties") or [], lefs,
+                    Path(identity["artifacts"]["def"]["path"]),
+                    Path(scene["spef"]["path"]))
+                if derived != annotation_census or len(derived["unresolved"]) != scene.get("unannotated_nets"):
+                    missing.append(f"{name}: independent annotation census differs")
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                missing.append(f"{name}: annotation proof incomplete: {exc}")
         if project is not None:
             census_refs = ("pin_census_report", "net_census_report",
                            "disabled_edges_report")
@@ -978,11 +1016,13 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                 try:
                     from drv_signoff_census import derive as derive_census
                     census = derive_census(census_paths[0].parent,
-                                           scene.get("linked_liberties") or [], all_rows)
-                    if (bundle.get("pins") != census["pins"] or
+                                           scene.get("linked_liberties") or [], all_rows,
+                                           scene.get("linked_lefs"), allow_unproven=True)
+                    if (scene_pins != census["pins"] or
                             scene.get("excluded_pins") != census["excluded"] or
                             scene.get("clock_network_pins") != census["clock_network_pins"] or
                             scene.get("driver_pin_census") != census["driver_pins"] or
+                            (scene.get("unproven_omitted_pins") or []) != census["unproven"] or
                             scene.get("population") != census["population"]):
                         missing.append(f"{name}: independent OpenSTA pin census differs from bundle")
                 except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -1046,7 +1086,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                     continue
                 if kind == "max_slew" and row["direction"] not in ("rise", "fall"):
                     missing.append(f"{name}: slew rise/fall absent for {row['pin']}")
-                if not _annotate_limits(row, kind, scene, libs, pins,
+                if not _annotate_limits(row, kind, scene, libs, scene_pins,
                                         declared, missing):
                     continue
                 effective = row["effective_limit"]

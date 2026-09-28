@@ -24,6 +24,7 @@ import _docker_watchdog  # noqa: E402
 import _watchdog  # noqa: E402
 from drv_signoff_anchor import image_pdk_anchor  # noqa: E402
 from drv_signoff_census import derive as derive_census  # noqa: E402
+from drv_signoff_annotation import derive as derive_annotation  # noqa: E402
 from drv_signoff_judge import KINDS, _COMMAND, _sha, parse_check_types  # noqa: E402
 
 _COUNTER = re.compile(
@@ -313,13 +314,26 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
         population = {kind: len(all_rows[kind]) for kind in KINDS}
         census = None
         try:
-            census = derive_census(scene_dir, scene["linked_liberties"], all_rows)
+            census = derive_census(scene_dir, scene["linked_liberties"], all_rows,
+                                   scene.get("linked_lefs"), allow_unproven=True)
             population = census["population"]
-            if bundle["pins"] and bundle["pins"] != census["pins"]:
-                raise ValueError("OpenSTA pin identity differs between scenes")
-            bundle["pins"] = census["pins"]
+            if bundle["pins"] and set(bundle["pins"]) != set(census["pins"]):
+                raise ValueError("OpenSTA pin names differ between scenes")
+            if not bundle["pins"]:
+                bundle["pins"] = census["pins"]
         except (OSError, ValueError, KeyError, TypeError) as exc:
             census_error = str(exc)
+        annotation_census = None
+        row_annotation_error = "pin census or linked LEF inventory absent"
+        if census is not None and scene.get("linked_lefs"):
+            try:
+                annotation_census = derive_annotation(
+                    scene_dir, census["pins"], scene["linked_liberties"],
+                    scene["linked_lefs"],
+                    Path(plan["identity"]["artifacts"]["def"]["path"]),
+                    Path(scene["spef"]["path"]))
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                row_annotation_error = str(exc)
         # A plan is only a request for measurement. It cannot attest which
         # pins OpenSTA excluded from its own DRV checks.
         row.pop("excluded_pins", None)
@@ -332,8 +346,9 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
                    population=population,
                    positive_control_fresh_process=True,
                    counters=counts, positive_control_counters=control_counts,
-                   unannotated_nets=(sum(map(int, unannotated))
-                                     if unannotated else None),
+                   unannotated_nets=(len(annotation_census["unresolved"])
+                                     if annotation_census is not None else
+                                     sum(map(int, unannotated)) if unannotated else None),
                    report=_ref(scene_dir / "violators.rpt"),
                    all_limits_report=_ref(scene_dir / "all_limits.rpt"),
                    counter_report=_ref(scene_dir / "counters.log"),
@@ -346,14 +361,24 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
             excluded_path = scene_dir / "excluded_pins.json"
             write_text(excluded_path, json.dumps(census["excluded"], sort_keys=True) + "\n")
             row.update(excluded_pins=census["excluded"],
+                       pins=census["pins"],
                        excluded_pins_report=_ref(excluded_path),
                        clock_network_pins=census["clock_network_pins"],
                        driver_pin_census=census["driver_pins"],
+                       unproven_omitted_pins=census["unproven"],
                        pin_census_report=_ref(scene_dir / "pin_census.tsv"),
                        net_census_report=_ref(scene_dir / "net_census.rpt"),
                        disabled_edges_report=_ref(scene_dir / "disabled_edges.rpt"))
         else:
             row["census_error"] = census_error
+        if annotation_census is not None:
+            annotation_path = scene_dir / "annotation_census.json"
+            write_text(annotation_path,
+                       json.dumps(annotation_census, sort_keys=True) + "\n")
+            row["annotation_census"] = annotation_census
+            row["annotation_census_report"] = _ref(annotation_path)
+        elif scene.get("linked_lefs"):
+            row["annotation_census_error"] = row_annotation_error
         bundle["scenes"].append(row)
     return bundle
 
