@@ -9421,6 +9421,26 @@ def step_step4_functional_evidence(project: Path,
     oracle_detail = (oracle_out or oracle_err).strip()
     outputs = [str(vacuous_report.relative_to(project)),
                str(oracle_report.relative_to(project))]
+    # FX_P2 — the gate's NOT_MEASURED (rc 2, and its REPORT says so with a
+    # reason class): declared cases the design input supplies no stimulus for.
+    # The report decides, not the bare rc — rc 2 is also the gate's VACUOUS.
+    _oracle_verdict, _oracle_reason = "", None
+    try:
+        _orep = json.loads(oracle_report.read_text(errors="replace"))
+        _oracle_verdict = str(_orep.get("verdict") or "")
+        _oracle_reason = _V.step_reason_for_gate_reason(
+            _orep.get("reason_class"))
+    except (OSError, ValueError, AttributeError):
+        pass
+    if (oracle_rc == 2 and _oracle_verdict == "NOT_MEASURED"
+            and _oracle_reason is not None):
+        return StepResult(
+            "step4_functional_evidence", "NOT_MEASURED", time.time() - t0,
+            f"cpu functional evidence: {oracle_detail} [{instr_detail}]",
+            outputs,
+            extras={"fallback_skill": "testbench-gen",
+                    "program_first": "professional_tb_gen"},
+            reason_class=_oracle_reason)
     if oracle_rc != 0:
         return StepResult(
             "step4_functional_evidence", "FAIL", time.time() - t0,
@@ -23320,6 +23340,58 @@ def run_is_bounded(entry_site, exit_pruned, site_order) -> bool:
     return False
 
 
+def _publish_record_before_audit(project: Path, plan: List["StepResult"],
+                                 ic_class: str, evidence: Any) -> Path:
+    """Publish THIS run's phase-2 record before the final audit reads the tree.
+
+    FX_P2 — the audit judges `reports/orchestrator/phase2_one_shot.json`, and
+    this runner used to write that record only AFTER the audit. So the audit
+    judged the PREVIOUS run's record. MEASURED on subservient (8HD-4,
+    2026-09-28, a fresh copy of an earlier run's tree): final_audit FAILed
+    `project_outputs_in_tree_check` on "2 dangling" `/tmp/vibeic-rtl-step-*/sub`
+    references -- both in the earlier run's record, written by code that cut a
+    stage path mid-token -- and phase 2 halted. This run's own record, written
+    25 s later, carried none, and the same gate passed on the finished tree.
+
+    Same shape as the tail's pre-audit `emit_final_summary`: written once before
+    the audit so the audit reads this run, and again after it by the tail, so
+    the record carries the audit's own row. The pre-audit copy says what it is
+    (`final_audit_pending`), and goes through the ONE write seam.
+
+    ITS VERDICT IS FAIL, NOT THE PRE-AUDIT AGGREGATE. Every reader of this
+    file takes a `verdict` written in this invocation as phase 2's account of
+    itself: the front door's `_row_verdict` reads it without looking at rc, and
+    `phase23_one_shot_runner` halts only on "FAIL". A green aggregate here would
+    survive a process that dies during the audit or the tail (an uncaught
+    exception, rc 1; the stall watchdog, rc 2; an OOM or deadline kill) as a
+    phase-2 PASS the audit never confirmed -- and without the tail's
+    ai_judgements demotion. Before this record existed, that death left no
+    fresh record and R-0915-160 turned the rc into FAIL. FAIL here keeps that:
+    the copy says why, the tail overwrites it with the real verdict, and a run
+    that never reaches the tail stays FAIL wherever it is read."""
+    out = _pl.report_path(project, "phase2_one_shot.json")
+    _write_phase2_report(out, {
+        "project": str(project),
+        "ic_class": ic_class,
+        "ic_class_evidence": evidence,
+        "steps": [asdict(s) for s in plan],
+        "verdict": "FAIL",
+        "verdict_reason": FINAL_AUDIT_PENDING_REASON,
+        "pre_audit_aggregate": _aggregate_verdict(plan),
+        "final_audit_pending": True,
+    }, project)
+    return out
+
+
+#: Why the pre-audit copy of the record is FAIL. Read by the front door
+#: (`vibe_ic_one_shot_runner._row_verdict`) when the record is still pending.
+FINAL_AUDIT_PENDING_REASON = (
+    "final audit pending: this copy was published before the phase-2 final "
+    "audit so the audit judges this run's record; the audit and the tail had "
+    "not completed when it was written, so it is no verdict of phase 2 -- the "
+    "tail overwrites it, and a run that never reaches the tail stays FAIL")
+
+
 def _audit_after_declared_producers(project: Path, skip_analog: bool) -> StepResult:
     """Run declared producers before the audit; their rc is a recorded fact.
 
@@ -24664,6 +24736,7 @@ def main() -> int:
                 "the gate reports every step's YAML checker re-emits"),
             declared_by=" ".join(_window_flags)))
     else:
+        _publish_record_before_audit(project, plan, ic_class, evidence)
         plan.append(_audit_after_declared_producers(project, args.skip_analog))
 
     # vibe-ic#2080 — the run's report card, asked by a gate that nothing ran.
