@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 
@@ -30,6 +32,73 @@ def _project(tmp_path):
     (project / "provenance.jsonl").write_text("")
     R.set_invocation_provenance_sink(project)
     return project
+
+
+def _immutable_chain(tmp_path):
+    """Use the shipped transform writer to build two retained links."""
+    project = _project(tmp_path)
+    pnr = project / "phase3/stage3/pnr"
+    source, middle, head = (pnr / name for name in
+                            ("raw.gds", "filled.gds", "final.gds"))
+    for path, data in ((source, b"stream"), (middle, b"stream + fill"),
+                       (head, b"stream + fill + finish")):
+        path.write_bytes(data)
+    (project / "provenance.jsonl").write_text(json.dumps({
+        "record": "invocation", "tool": "layout", "exit_code": 0,
+        "outputs": {source.relative_to(project).as_posix(): _sha(source.read_bytes())},
+    }) + "\n")
+    assert R._declare_immutable_transform(
+        project, source, middle, "fill", "layout", "fill")
+    assert R._declare_immutable_transform(
+        project, middle, head, "finish", "layout", "finish")
+    assert C.audit(project)[0] == "PASS"
+    return project, source, middle, head
+
+
+@pytest.mark.parametrize("damage", [
+    "missing_source", "wrong_input_hash", "reversed_order",
+    "undeclared_middle", "failed_source", "missing_inputs",
+    "redeclared_source_before_input", "changed_retained_source",
+    "missing_retained_middle", "failed_transform", "missing_transform_status",
+])
+def test_transform_input_requires_earlier_successful_retained_output(
+        tmp_path, damage):
+    project, source, middle, _head = _immutable_chain(tmp_path)
+    rows = _rows(project)
+    source_rel = source.relative_to(project).as_posix()
+    if damage == "missing_source":
+        rows.pop(0)
+    elif damage == "wrong_input_hash":
+        rows[1]["inputs"][source_rel] = _sha(b"different input")
+    elif damage == "reversed_order":
+        rows[0], rows[1] = rows[1], rows[0]
+    elif damage == "undeclared_middle":
+        rows.pop(1)
+    elif damage == "failed_source":
+        rows[0]["exit_code"] = 1
+    elif damage == "missing_inputs":
+        rows[1]["inputs"] = {}
+    elif damage == "redeclared_source_before_input":
+        newer = _sha(b"new stream")
+        source.write_bytes(b"new stream")
+        rows.insert(1, {"tool": "layout", "exit_code": 0,
+                        "outputs": {source_rel: newer}})
+    elif damage == "changed_retained_source":
+        source.write_bytes(b"new stream")
+        rows.append({"tool": "layout", "exit_code": 0,
+                     "outputs": {source_rel: _sha(source.read_bytes())}})
+    elif damage == "missing_retained_middle":
+        rows.pop(1)
+        middle.unlink()
+    elif damage == "failed_transform":
+        rows[2]["exit_code"] = 1
+    elif damage == "missing_transform_status":
+        rows[2].pop("exit_code")
+    (project / "provenance.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows))
+    verdict, findings = C.audit(project)
+    assert verdict == "FAIL", damage
+    assert "PROVENANCE_TRANSFORM_INPUT_INVALID" in {f.rule for f in findings}, damage
 
 
 def test_magic_fill_retains_stream_and_declares_finished_head(tmp_path, monkeypatch):
