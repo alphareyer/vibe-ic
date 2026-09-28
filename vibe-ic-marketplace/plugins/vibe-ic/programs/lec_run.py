@@ -1182,12 +1182,13 @@ def rung_projection_abort_probe(live_log_path: Path, offset: int,
     THE STEP BUDGET STILL STOPS NOTHING BY ITSELF (#2051, R-0915-48): a proof
     whose rate would finish inside the budget, or one that has decided nothing
     yet, is never touched, however long it runs. What stops a rung is the
-    PROOF'S OWN EVIDENCE that it cannot finish in the declared budget: once
+    PROOF'S OWN MEASURED RATE projecting beyond the declared budget: once
     `equiv_induct` is deciding points one at a time, the measured decision
     rate projects the time the remaining workset needs, and when that exceeds
-    what is left of the step budget the rung is going nowhere within it. It is
-    aborted then -- not at the deadline -- with the numbers, and the ladder
-    reports INCONCLUSIVE at its last durable checkpoint.
+    what is left of the step budget the rung is stopped as a resource policy.
+    Future points can have a different rate; this projection is not a proof
+    that the rung could never finish in time. The ladder reports INCONCLUSIVE
+    at its last durable checkpoint, with the measured numbers and projection.
 
     MEASURED on opentitan_aes x sky130A (84,623 cells): `equiv_induct -seq 4`
     decided 936 of 3,219 points in ~3,300 s (3.5 s each) after ~4,100 s of
@@ -1223,8 +1224,9 @@ def rung_projection_abort_probe(live_log_path: Path, offset: int,
         left_s = budget.remaining_s()
         if need_s <= left_s:
             return None
-        return (f"the step budget cannot be met at the proof's own measured "
-                f"rate: equiv_induct has decided {prog['decided']} of "
+        return (f"completion is projected beyond the step budget at the "
+                f"proof's measured rate (future rate may change): "
+                f"equiv_induct has decided {prog['decided']} of "
                 f"{prog['workset']} points ({prog['proved']} proven, "
                 f"{prog['failed']} failed) at {rate:.3f} points/s, so the "
                 f"remaining {remaining} need ~{need_s:.0f}s and "
@@ -4814,8 +4816,9 @@ def run_yosys_equiv(container: str, ys_path_in_container: str,
             f"duration is claimed here.")
     elif launched and getattr(r, "returncode", 0) == _RC_ABORTED:
         # THE RUNG'S OWN EVIDENCE ENDED IT (`rung_projection_abort_probe`): it
-        # was deciding points, at a rate that cannot finish inside the step
-        # budget. Recorded on the budget-stop path, never as a result.
+        # was deciding points, at a rate projected beyond the step budget.
+        # This is a resource policy, not a claim about future solver speed.
+        # Recorded on the budget-stop path, never as a result.
         _why = next((ln.split("WATCHDOG_ABORTED:", 1)[1].strip()
                      for ln in (getattr(r, "stderr", "") or "").splitlines()
                      if "WATCHDOG_ABORTED:" in ln),

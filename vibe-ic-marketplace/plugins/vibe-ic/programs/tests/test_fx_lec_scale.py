@@ -1,5 +1,5 @@
-"""FX_AES_LEC_SCALE: a LEC rung that cannot finish inside the step budget is
-stopped on the proof's OWN evidence, with its counts; it never eats the run.
+"""FX_AES_LEC_SCALE: a LEC rung projected beyond the step budget is stopped
+on the proof's OWN measured rate, with its counts; the stop is inconclusive.
 
 MEASURED on opentitan_aes x sky130A (84,623 cells): step 13's
 `equiv_induct -seq 4` over the 3,219 points `equiv_simple` left spent ~4,100 s
@@ -13,7 +13,8 @@ test_progress_supervision_over_wallclock / test_r0915_48 still hold): a rung
 that has decided nothing yet, or whose measured rate finishes in time, runs on.
 Only the rung's own projection -- remaining points / measured decision rate
 greater than what is left of the budget -- stops it, through the supervisor's
-`abort_probe`, and the stop is booked on the existing no-verdict path.
+`abort_probe`, and the stop is booked on the existing no-verdict path. Future
+point costs can differ, so that projection cannot certify the actual runtime.
 """
 from __future__ import annotations
 
@@ -114,7 +115,7 @@ def test_a_rung_that_finishes_in_budget_is_never_stopped(tmp_path):
     assert probe() is None
 
 
-def test_a_rung_that_cannot_finish_in_budget_is_stopped_with_its_counts(
+def test_a_rung_projected_beyond_budget_is_stopped_with_its_counts(
         tmp_path):
     log, clock, probe = _probe(tmp_path, 7200)
     log.write_text(_induct_log(3219, 10))
@@ -123,7 +124,8 @@ def test_a_rung_that_cannot_finish_in_budget_is_stopped_with_its_counts(
     log.write_text(_induct_log(3219, 110))
     clock.t = 5700 + 350                           # 100 in 350 s
     why = probe()
-    assert why and "cannot be met at the proof's own measured rate" in why
+    assert why and "projected beyond the step budget" in why
+    assert "future rate may change" in why
     assert "decided 110 of 3219 points" in why
     assert "not durable" in why
 
@@ -157,8 +159,9 @@ def test_an_abort_is_a_disclosed_no_verdict_never_pass_or_fail(monkeypatch):
         assert kw.get("abort_probe") is not None
         return subprocess.CompletedProcess(
             cmd, L._RC_ABORTED, raw,
-            "WATCHDOG_ABORTED: the step budget cannot be met at the proof's "
-            "own measured rate: equiv_induct has decided 110 of 3219 points\n")
+            "WATCHDOG_ABORTED: completion is projected beyond the step "
+            "budget at the proof's measured rate (future rate may change): "
+            "equiv_induct has decided 110 of 3219 points\n")
     monkeypatch.setattr(L, "_docker", fake_docker)
     monkeypatch.setattr(L, "probe_cgroup_memory",
                         lambda c, exec_raw=None: {"oom_kills": None,
@@ -193,7 +196,7 @@ def _job(tmp_path, workset, n, tick):
     (100000, 400, 5, True),       # ~0.05 s/point: 100k points need ~80 min
     (60, 60, 3600, False),        # finishes in ~3 s, well inside the budget
 ])
-def test_a_real_rung_is_stopped_only_when_it_cannot_finish(
+def test_a_real_rung_is_stopped_only_when_projected_beyond_budget(
         tmp_path, monkeypatch, workset, n, total_s, stopped):
     """The REAL supervisor (host mode), looking every 0.2 s instead of every
     30 s so the test is short; the probe and the stop are the product's."""
@@ -212,7 +215,7 @@ def test_a_real_rung_is_stopped_only_when_it_cannot_finish(
     if stopped:
         assert r.returncode == L._RC_ABORTED, (r.returncode, r.stderr[-300:])
         assert "DONE" not in r.stdout
-        assert "cannot be met at the proof's own measured rate" in r.stderr
+        assert "projected beyond the step budget" in r.stderr
     else:
         assert r.returncode == 0, r.stderr[-300:]
         assert "DONE" in r.stdout
