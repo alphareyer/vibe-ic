@@ -456,9 +456,11 @@ def _project(tmp_path: Path, *, stamp: bool) -> Path:
     # A cached route can only be considered after current pre-layout setup
     # and the typed Step 8/10 producer both pass. Supply a bound, positive SS
     # path before stamping the cache identities this fixture is about.
+    lib = tmp_path / "slow.lib"
+    lib.write_text("library(slow){}\n")
     matrix = R._pl.constraints_dir(tmp_path) / "pvt_matrix.json"
     matrix.write_text(json.dumps({"corners": [
-        {"label": "SS", "name": "slow", "liberty": "slow.lib"}]}))
+        {"label": "SS", "name": "slow", "liberty": str(lib)}]}))
     reports = R._pl.sta_dir(tmp_path) / "per_corner"
     reports.mkdir(parents=True, exist_ok=True)
     netlist = synth / f"{TOP}_synth.v"
@@ -470,7 +472,10 @@ def _project(tmp_path: Path, *, stamp: bool) -> Path:
         "          0.43   slack (MET)\n\n"
         "STA_BASIS: PRE_LAYOUT_ESTIMATE\n"
         f"STA_BASIS_NETLIST_SHA256: sha256:{_prelayout.digest(netlist)}\n"
-        f"STA_BASIS_SDC_SHA256: sha256:{_prelayout.digest(sdc)}\n")
+        f"STA_BASIS_SDC_SHA256: sha256:{_prelayout.digest(sdc)}\n"
+        "STA_BASIS_CORNER: SS\nSTA_BASIS_PVT_NAME: slow\n"
+        f"STA_BASIS_LIBERTY: {lib}\n"
+        f"STA_BASIS_LIBERTY_SHA256: sha256:{_prelayout.digest(lib)}\n")
     # Step 9's first declared input; it must exist before the identity that
     # hashes it is stamped. Declared again below, where the comment that
     # explains why it is here at all lives; declaring twice is idempotent.
