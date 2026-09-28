@@ -97,6 +97,56 @@ def test_top_up_uses_pdk_rules_and_only_promotes_measured_change(tmp_path, monke
     assert result['layers'][1]['density_after'] > .30
 
 
+def test_pad_ring_stays_outside_declared_core_during_top_up(tmp_path, monkeypatch):
+    project = tmp_path / 'project'
+    project.mkdir()
+    gds = project / 'pdk_filled.gds'
+    gds.write_bytes(b'PDK filler GDS')
+    root, config = _pdk(tmp_path)
+    cfg = json.loads(config.read_text())
+    (root / 'processA/tech/pad.lef').write_text(
+        '# MACRO NEGATED_PAD does not declare a pad\n'
+        'MACRO PAD_CELL\nEND PAD_CELL\n')
+    cfg['PAD_LEFS'] = ['/pdk/processA/tech/pad.lef']
+    _put(config, cfg)
+    (project / 'phase3/stage3/pnr').mkdir(parents=True)
+    (project / 'phase3/stage3/pnr/routed.def').write_text(
+        'COMPONENTS 1 ;\n- PAD_0 PAD_CELL + FIXED ( 0 0 ) N ;\n'
+        'END COMPONENTS\n')
+    monkeypatch.setattr(fill, 'declaration_config', lambda project: (
+        {'DIE_AREA': [0, 0, 100, 100], 'CORE_AREA': [10, 12, 88, 90]},
+        {'CORE_AREA': 'reviewed die declaration'}))
+
+    def eda_write(cmd, **kwargs):
+        Path(cmd[cmd.index('--out') + 1]).write_bytes(b'fill inside core only')
+        _put(Path(cmd[cmd.index('--report') + 1]),
+             {'verdict': 'PASS', 'layers': [{'name': 'metal2',
+                                            'density_before': .28,
+                                            'density_after': .34}]})
+        return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    monkeypatch.setattr(fill, 'run_container', eda_write)
+    result = fill.top_up_density(project, 'image', root, 'processA', gds,
+                                 config, '37-pad-safe')
+    derived = json.loads(Path(result['config']).read_text())
+    assert derived['keepout_edge_um'] == 12
+    assert derived['_derivation']['pad_ring_exclusion']['source'] == \
+        'reviewed die declaration'
+    assert derived['_derivation']['pad_ring_exclusion']['placed_pad_masters'] == \
+        ['PAD_CELL']
+    (project / 'phase3/stage3/pnr/routed.def').write_text(
+        'COMPONENTS 1 ;\n- OTHER NEGATED_PAD + FIXED ( 0 0 ) N ;\n'
+        'END COMPONENTS\n')
+    absent = fill.top_up_density(project, 'image', root, 'processA', gds,
+                                 config, '37-no-placed-pad')
+    assert 'keepout_edge_um' not in json.loads(Path(absent['config']).read_text())
+    cfg['MACROS'] = {'hardmacro': '/pdk/processA/hardmacro.lef'}
+    _put(config, cfg)
+    with pytest.raises(Refusal, match='LL_DENSITY_FILL_MACRO_OBS_UNRESOLVED'):
+        fill.top_up_density(project, 'image', root, 'processA', gds, config,
+                            '37-unresolved-obs')
+
+
 def test_density_ratios_require_every_deck_layer(tmp_path, monkeypatch):
     project = tmp_path / 'project'
     project.mkdir()
