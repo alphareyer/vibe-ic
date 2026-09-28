@@ -57,6 +57,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 _PROGRAMS = Path(__file__).resolve().parents[1]
 _PROG = _PROGRAMS / "si_mcf_sta_check.py"
 if str(_PROGRAMS) not in sys.path:
@@ -584,6 +586,50 @@ def test_missing_window_cannot_hide_a_recounted_fold_failure(tmp_path):
     assert doc["summary"]["vacuous"] is False, doc
     assert all(value["mode"] == "window-independent-floor"
                for value in doc["recount"].values()), doc
+
+
+@pytest.mark.parametrize("window_failure", (
+    "missing", "outside", "unreadable", "nonzero_rc", "zero_windows",
+    "scene_outside", "symlink_outside",
+))
+def test_each_unavailable_window_preserves_the_independent_fold_failure(
+        tmp_path, window_failure):
+    proj = _relabel_dropped_fold(tmp_path / window_failure)
+    rp = proj / "reports/phase3/si_mcf_sta.json"
+    producer = json.loads(rp.read_text())
+    window = proj / "windows.json"
+    if window_failure in ("outside", "scene_outside", "symlink_outside"):
+        outside = tmp_path / f"{window_failure}-outside.json"
+        outside.write_text("{}")
+        if window_failure == "symlink_outside":
+            window.symlink_to(outside)
+        else:
+            window = outside
+    elif window_failure == "unreadable":
+        window.write_text("{invalid JSON")
+    elif window_failure == "zero_windows":
+        window.write_text(json.dumps({"pins": {}}))
+    elif window_failure == "nonzero_rc":
+        window.write_text(json.dumps({"pins": {"ua:Z": {
+            "arr_rise_min": 0, "arr_rise_max": 1}}}))
+        producer["windows_rc"] = 1
+
+    if window_failure == "scene_outside":
+        producer["windows_json_by_scene"] = {"setup": str(window)}
+    else:
+        producer["windows_json"] = str(window)
+    rp.write_text(json.dumps(producer))
+
+    result, doc = _run(proj)
+    categories = _categories(doc)
+    assert (result.returncode, doc["verdict"]) == (G.RC_FAIL, "FAIL"), doc
+    assert "FOLD_NOT_APPLIED" in categories, categories
+    assert "PRODUCER_NOT_MEASURED" in categories, categories
+    assert ("PATH_OUTSIDE_PROJECT" if "outside" in window_failure
+            else "NO_WINDOWS") in categories, categories
+    assert doc["summary"]["corners_checked"] == ["setup", "hold"], doc
+    assert doc["summary"]["denominator"]["examined"] > 0, doc
+    assert doc["recount"]["setup"]["mode"] == "window-independent-floor", doc
 
 
 def test_producer_relabel_preserves_step27_failure(tmp_path):
