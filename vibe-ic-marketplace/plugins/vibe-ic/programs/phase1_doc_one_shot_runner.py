@@ -32733,6 +32733,9 @@ def _run_layergate2(project: Path, gates=None, gate_dir=None) -> _Layergate2Resu
             _reason = "receipt_write_error"
             print(f"      {_gate_name}: NOT_MEASURED — cannot publish run "
                   f"receipt ({_exc})")
+        if not _gate_report.is_file():
+            _shown = (_run_report.relative_to(project)
+                      if _run_report.is_relative_to(project) else _run_report)
         if _verdict == "FAIL":
             result.failed.append(_gate_name)
             result.append(_gate_name)
