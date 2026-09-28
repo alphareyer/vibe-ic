@@ -155,7 +155,7 @@ def test_gate_missing_report(tmp_path):
     (proj / "reports" / "phase3").mkdir(parents=True)
     findings, stats = G.audit(proj)
     rep = G.build_report(findings, stats, str(proj))
-    assert rep["verdict"] == "NOT_RUN"
+    assert rep["verdict"] == "NOT_MEASURED"
     assert rep["summary"]["vacuous"] is True
     assert rep["summary"]["pass"] is False
     assert any(f["category"] == "NO_REPORT" for f in rep["findings"])

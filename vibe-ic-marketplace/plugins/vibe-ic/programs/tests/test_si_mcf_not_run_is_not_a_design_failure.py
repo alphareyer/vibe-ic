@@ -228,6 +228,35 @@ def _b_no_bounded_spef(root: Path) -> Path:
     return proj
 
 
+def _b_no_windows(root: Path) -> Path:
+    proj = _project(root)
+    rp = proj / "reports/phase3/si_mcf_sta.json"
+    doc = json.loads(rp.read_text())
+    doc["windows_json"] = str(proj / "missing-windows.json")
+    rp.write_text(json.dumps(doc))
+    return proj
+
+
+def _b_path_outside_project(root: Path) -> Path:
+    proj = _project(root)
+    outside = root.parent / f"{root.name}-foreign.spef"
+    outside.write_text((proj / "design.spef").read_text())
+    rp = proj / "reports/phase3/si_mcf_sta.json"
+    doc = json.loads(rp.read_text())
+    doc["spef"] = str(outside)
+    rp.write_text(json.dumps(doc))
+    return proj
+
+
+def _b_producer_not_measured(root: Path) -> Path:
+    proj = _project(root)
+    rp = proj / "reports/phase3/si_mcf_sta.json"
+    doc = json.loads(rp.read_text())
+    doc.update(verdict="NOT_MEASURED", error="active Liberty has no nom_voltage")
+    rp.write_text(json.dumps(doc))
+    return proj
+
+
 def _b_spef_no_net_records(root: Path) -> Path:
     proj = _project(root)
     (proj / "design.spef").write_text(_HEAD)      # header only, no net record
@@ -286,6 +315,9 @@ NOT_RUN_CASES = {
     "NO_SPEF": _b_no_spef,
     "NO_CORNER": _b_no_corner,
     "NO_BOUNDED_SPEF": _b_no_bounded_spef,
+    "NO_WINDOWS": _b_no_windows,
+    "PATH_OUTSIDE_PROJECT": _b_path_outside_project,
+    "PRODUCER_NOT_MEASURED": _b_producer_not_measured,
 }
 
 #: category -> builder, for the categories that mean SOMETHING WAS EXAMINED
@@ -412,7 +444,7 @@ def test_every_could_not_run_category_reports_not_run_at_the_same_rc(tmp_path):
         proj = build(tmp_path / f"notrun_{cat.lower()}")
         r, doc = _run(proj)
         assert cat in _categories(doc), (cat, doc["findings"])
-        assert doc["verdict"] == "NOT_RUN", (cat, doc["verdict"])
+        assert doc["verdict"] == "NOT_MEASURED", (cat, doc["verdict"])
         assert r.returncode == G.RC_FAIL, (cat, r.returncode)
         assert doc["summary"]["pass"] is False, cat
 
@@ -424,7 +456,7 @@ def test_the_reproducer_from_the_issue_no_longer_says_two_things(tmp_path):
     proj = _b_no_spef(tmp_path / "issue506")
     r, doc = _run(proj)
     assert "NO_SPEF" in _categories(doc), doc["findings"]
-    assert doc["verdict"] == "NOT_RUN", doc["verdict"]
+    assert doc["verdict"] == "NOT_MEASURED", doc["verdict"]
     assert doc["summary"]["vacuous"] is True, doc["summary"]
     assert _NOT_CHECKED in _reason(doc), _reason(doc)
     assert r.returncode == G.RC_FAIL, r.returncode
@@ -441,7 +473,7 @@ def test_the_not_run_tier_is_announced_on_stderr_without_the_vacuous_token(
     line start and would promote the step to the pass tier."""
     proj = _b_no_spef(tmp_path / "stderr")
     r, _ = _run(proj)
-    assert any(ln.lstrip().startswith("NOT_RUN:")
+    assert any(ln.lstrip().startswith("NOT_MEASURED:")
                for ln in r.stderr.splitlines()), r.stderr
     assert not any(ln.lstrip().startswith("VACUOUS_PASS")
                    for ln in r.stderr.splitlines()), r.stderr
@@ -467,7 +499,7 @@ def test_verdict_and_vacuous_never_contradict_across_every_category(tmp_path):
         _, doc = _run(proj)
         verdict, vacuous, reason = (
             doc["verdict"], doc["summary"]["vacuous"], _reason(doc))
-        if verdict in ("NOT_RUN", "VACUOUS_PASS"):
+        if verdict in ("NOT_MEASURED", "VACUOUS_PASS"):
             assert vacuous is True, (name, verdict, vacuous)
             assert _NOT_CHECKED in reason, (name, reason)
         else:
@@ -632,7 +664,7 @@ def test_no_report_is_the_flows_own_n_a_and_not_this_gates_verdict(tmp_path):
                 if not r.startswith(F._NOT_APPLICABLE_HINT_PREFIX)], reasons
     # ... and invoked directly it is a NOT_RUN, not a design failure.
     r, doc = _run(proj)
-    assert (r.returncode, doc["verdict"]) == (G.RC_FAIL, "NOT_RUN")
+    assert (r.returncode, doc["verdict"]) == (G.RC_FAIL, "NOT_MEASURED")
 
 
 # ===========================================================================

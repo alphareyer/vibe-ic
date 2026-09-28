@@ -78,10 +78,10 @@ def test_run_errors_clearly_when_no_liberty_anywhere(tmp_path):
     p = tmp_path / "proj"
     (p / "phase3" / "stage3" / "pnr").mkdir(parents=True)
     rep = M.run(p, container="dummy_never_exec")
-    assert rep["verdict"] == "ERROR", rep
+    assert rep["verdict"] == "NOT_MEASURED", rep
     assert "liberty" in rep.get("error", "").lower(), rep
     j = json.loads((p / "reports" / "phase3" / "si_mcf_sta.json").read_text())
-    assert j["verdict"] == "ERROR"
+    assert j["verdict"] == "NOT_MEASURED"
     # The guard fires ONLY on an unresolvable liberty: with a flow read_liberty
     # present the fallback resolves it (proven by the resolution tests above),
     # so `if not liberty` is False and this ERROR path is bypassed.
