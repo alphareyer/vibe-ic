@@ -29,15 +29,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def declare_delivery(project: Path, deliverable: str = "DIE") -> None:
-    """Give `project` a delivery declaration the admission contract accepts."""
+    """Stage an owner-attested route and the matching operator marker."""
     import _owner_declared as OD
     import _submission_template as ST
     import _tapeout_declaration as TD
 
-    doc = OD.attest({"answers": {"deliverable": deliverable}})
-    for rel in (ST.DESIGN_ANSWERS_REL, TD.DECLARATION_REL):
+    answers = {"deliverable": deliverable, "top_cell": "top"}
+    declaration, _ = TD.merge_answers(TD.blank_declaration(), answers)
+    declaration = OD.attest(declaration)
+    assert not TD.validate(declaration)
+    raw = OD.attest({
+        "schema": "vibe-ic/step_0_5ic_answers/1",
+        "answers": answers,
+        "operator_template": {"path": None, "slot": None,
+                              "absent_reason": "no operator slot"},
+    })
+    for rel, doc in ((ST.DESIGN_ANSWERS_REL, raw),
+                     (TD.DECLARATION_REL, declaration)):
         path = Path(project) / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(doc))
-    (Path(project) / TD.SELF_TAPEOUT_REL).write_text(
-        TD.SELF_TAPEOUT_MARKER + "\n")
+    marker_rel, marker = (
+        (ST.NO_TEMPLATE_REL, ST.NO_TEMPLATE_MARKER)
+        if deliverable == TD.DELIVERABLE_HARDMACRO
+        else (TD.SELF_TAPEOUT_REL, TD.SELF_TAPEOUT_MARKER))
+    (Path(project) / marker_rel).write_text(marker + "\n")
