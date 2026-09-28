@@ -158,14 +158,14 @@ def _after_route(tmp_path, monkeypatch, *, measured, pregrt_census=None):
     monkeypatch.setattr(prr, 'run_in_chain', run_in_chain)
     out = R.postroute_repair_after_route(
         project=project, pdk=ring_fixture._pdk(tmp_path, ring=None), image='img',
-        pdk_root=tmp_path, sdc=base_def,
+        pdk_root=tmp_path, sdc=put(tmp_path / 'c.sdc', 'set_max_fanout 4 [current_design]\n'),
         deck='add_global_connection -net VDD -pin_pattern {^VDD$} -power\n',
         route_state=route_state, route_views={'odb': tmp_path / 'r.odb', 'def': base_def},
         route_drc=0, variant_arm=lambda *a: None)
     # D14: the runner hands step 32 its one dont_use rule
     assert seen['dont_use'] is R._STEP32_DONT_USE
     # D14 review: the fanout cap step 32 keeps is the one this SDC declares
-    assert seen['max_fanout'] == R._sdc_max_fanout_cap(base_def)
+    assert seen['max_fanout'][0] == 4 and 'c.sdc' in seen['max_fanout'][1]
     return project, out, cdef
 
 
@@ -259,3 +259,31 @@ def test_a_pregrt_arm_whose_own_route_has_an_unrouted_net_is_refused(tmp_path, m
     project, out, _ = _after_route(tmp_path, monkeypatch, measured=True, pregrt_census=3)
     assert out['views'] == {}
     assert 'leaves 3 signal net(s) unrouted' in out['record']['promotion_refused']
+
+
+def test_dual_selecting_pregrt_carries_its_census_into_the_report(tmp_path, monkeypatch):
+    """The real dual run_in_chain (t102's harness: real closure, docker runs
+    faked). pregrt wins; the report the promotion reads must carry the census
+    step's own unrouted metric, or the arm could never be promoted."""
+    import test_t102_librelane_postroute_repair as t102
+    pre_census = dict(t102._base(4.2, 0.40),
+                      repair_metrics={'vibeic__prr__changed': 0,
+                                      'vibeic__prr__before__unrouted__count': 0})
+    scenario = {'32-postdrt-base': t102._base(4.0, -0.3),
+                '32-postdrt-cand01': t102._cand(3.99995, -0.2),
+                '32-pregrt-base': pre_census,
+                '32-pregrt_postdrt-base': t102._base(4.2, 0.10)}
+    project, shim, sdc, route = t102._chain_setup(tmp_path, monkeypatch, scenario)
+    pre_state = put(project / 'phase3/librelane/21-route-pregrt/13-fill/state_out.json',
+                    {'odb': 'p.odb', 'def': 'p.def'})
+    report = prr.run_in_chain(project, mode='dual', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim,
+                              variant_arm=lambda lane, extra: {
+                                  'final': pre_state,
+                                  'route_drc': [{'run': 'drt-run-0', 'markers': 0}]})
+    assert report['selected_arm'] == 'pregrt', report.get('selection')
+    assert report['adopted'] is None
+    assert report['baseline_repair_metrics']['vibeic__prr__before__unrouted__count'] == 0
+    m = R._step32_own_measurement(report)
+    assert m['unrouted_added'] == 0 and R._promotion_unmeasured(m) == ''
