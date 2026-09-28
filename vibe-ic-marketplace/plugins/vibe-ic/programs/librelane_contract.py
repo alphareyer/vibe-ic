@@ -26,6 +26,195 @@ class Refusal(RuntimeError):
         super().__init__(f"{code}: {detail}")
 
 
+#: The refusals that say the TOOL was stopped, not what the design is, and the
+#: `verdict.ReasonClass` value a consumer books them NOT_MEASURED with.
+#: `run_container` raises both: a supervised tool step that made no progress
+#: (container CPU and output flat for the stall grace) and a probe that passed
+#: its deadline. The tool never answered, so neither is a FAIL; every other
+#: refusal keeps whatever its consumer already decides.
+TOOL_STOP_REASONS = {'LL_TOOL_STALLED': 'stalled',
+                     'LL_TOOL_DEADLINE': 'budget_exhausted'}
+
+
+def tool_stop_reason(code: str | None) -> str | None:
+    """The NOT_MEASURED reason class for a tool-stop refusal code, else None."""
+    return TOOL_STOP_REASONS.get(code) if code else None
+
+
+#: How every container this module (and librelane_signoff) starts is bounded.
+#: Two kinds, bounded two different ways:
+#:
+#: * a PROBE (an image probe, a config resolution, a script or flow read) is
+#:   seconds of work. It keeps a short hard client deadline, `PROBE_DEADLINE_S`
+#:   (llv1 W16a), and its container is removed by name when that passes;
+#: * a TOOL STEP (a LibreLane step, an OpenROAD session, an STA run) is never
+#:   stopped on a clock (owner ruling vibe-ic#2051/R4). It runs under the
+#:   repo's progress-stall watchdog (`_watchdog.run_host_supervised`), which
+#:   watches the container's own CPU and the tool's output and reaps, by name,
+#:   only a container in which neither moved for the stall grace
+#:   (`_watchdog.DEFAULT_STALL_GRACE_S` unless `TOOL_STALL_GRACE_S` is set).
+#:   `TOOL_BUDGET_S` is the recorded budget (`_watchdog.DEFAULT_HARD_CEILING_S`):
+#:   it is announced when crossed and kills nothing.
+PROBE_DEADLINE_S = 600
+TOOL_BUDGET_S = 86_400
+TOOL_STALL_GRACE_S: float | None = None
+_REAP_DEADLINE_S = 30
+_OUTPUT_TAIL = 2000
+
+
+def _as_text(stream: Any) -> str:
+    if stream is None:
+        return ''
+    return stream.decode(errors='replace') if isinstance(stream, bytes) else str(stream)
+
+
+def _salvage(out: Any, err: Any, log: Path | None) -> str:
+    """Keep what the tool printed before it was stopped: in `log` when the caller
+    names one (the log it would have written), else a tail in the refusal."""
+    text = _as_text(out) + '\n' + _as_text(err)
+    if log is not None:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(text)
+        return f'partial output in {log}'
+    tail = text.strip()[-_OUTPUT_TAIL:]
+    return f'partial output: {tail!r}' if tail else 'no output'
+
+
+def _reap(binary: str, name: str) -> str:
+    """Remove container `name` and SAY whether that worked."""
+    try:
+        done = subprocess.run([binary, 'rm', '-f', name], capture_output=True, text=True,
+                              timeout=_REAP_DEADLINE_S)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f'NOT removed ({type(exc).__name__}: {exc})'
+    if done.returncode == 0:
+        return 'removed'
+    if 'no such container' in (done.stderr or '').lower():
+        return 'already gone'
+    return f'NOT removed (rc={done.returncode}: {(done.stderr or "").strip()[:200]})'
+
+
+class _Client:
+    """A `docker run` client, launched through `subprocess.run` on a thread and
+    shaped like the Popen `_watchdog.run_supervised` drives.
+
+    `subprocess.run` stays this module's one subprocess edge (the edge its
+    tests substitute), and the watchdog supervises it from outside: the
+    client's stdout/stderr go straight into the watchdog's files, so output is
+    a live progress signal; the container's CPU is read by NAME; and the stop
+    is the reap by NAME, after which the client returns on its own. `kill` is
+    therefore a no-op here -- the client holds no work of its own."""
+
+    def __init__(self, cmd: list[str], *, stdout: Any = None, stderr: Any = None,
+                 env: Any = None, cwd: Any = None) -> None:
+        import threading
+        self.returncode: int | None = None
+        self.error: BaseException | None = None  # re-raised by run_container
+        self.pid = None
+        kw: dict[str, Any] = {'stdout': stdout, 'stderr': stderr}
+        if env is not None:
+            kw['env'] = env
+        if cwd is not None:
+            kw['cwd'] = cwd
+
+        def work() -> None:
+            try:
+                done = subprocess.run(cmd, **kw)
+                rc = done.returncode
+                for stream, sink in ((getattr(done, 'stdout', None), stdout),
+                                     (getattr(done, 'stderr', None), stderr)):
+                    if stream and hasattr(sink, 'write'):  # an edge that returned its streams
+                        sink.write(stream.encode() if isinstance(stream, str) else stream)
+                        sink.flush()
+            except BaseException as exc:  # noqa: BLE001 -- raised again in the caller's thread
+                self.error, rc = exc, 127
+            self.returncode = rc
+        self._thread = threading.Thread(target=work, name=f'vibeic-ll-{cmd[0]}', daemon=True)
+        self._thread.start()
+
+    def poll(self) -> int | None:
+        return None if self._thread.is_alive() else self.returncode
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        self._thread.join(timeout)
+        if self._thread.is_alive():
+            raise subprocess.TimeoutExpired('docker run', timeout)
+        return self.returncode
+
+    def kill(self) -> None:
+        pass
+
+
+def run_container(argv: list[str], *, probe_deadline_s: float | None = None,
+                  supervised: bool = False, log: Path | None = None,
+                  **kw: Any) -> subprocess.CompletedProcess:
+    """Run one `docker run` argv, named so it can be removed by that name.
+
+    Exactly one bound, stated by the caller:
+      * ``probe_deadline_s=`` -- a probe: `subprocess.run(..., timeout=)`; past
+        the deadline the container is removed by name and `LL_TOOL_DEADLINE` is
+        raised;
+      * ``supervised=True`` -- a tool step: `_watchdog.run_host_supervised`
+        with the ephemeral-container CPU probe and reap-by-name; a stall
+        raises `LL_TOOL_STALLED`, and nothing else stops the job.
+    Either refusal names the container's fate and keeps the tool's partial
+    output (in ``log`` when given). Callers read `.returncode` / `.stdout` /
+    `.stderr` as before.
+
+    The CPU probe attaches through `_container_exec.docker_exec_argv`, which
+    declines an image that provably is not the pinned runtime; on such an
+    image the reading is unavailable and the tool's output is the only
+    progress signal the watchdog has.
+    """
+    if (probe_deadline_s is None) == (not supervised):
+        raise ValueError('run_container: pass exactly one of probe_deadline_s= or supervised=True')
+    import _docker_watchdog as _dw  # the one naming rule for ephemeral containers
+    at = argv.index('run') + 1
+    binary = argv[0]
+    name = _dw.ephemeral_container_name('vibeic_ll')
+    named = [*argv[:at], '--name', name, *argv[at:]]
+    if probe_deadline_s is not None:
+        try:
+            return subprocess.run(named, capture_output=True, text=True, timeout=probe_deadline_s, **kw)
+        except subprocess.TimeoutExpired as exc:
+            fate = _reap(binary, name)
+            raise Refusal('LL_TOOL_DEADLINE', f'{binary} run passed its {probe_deadline_s:g} s probe '
+                          f'deadline; container {name} {fate}; '
+                          f'{_salvage(exc.stdout, exc.stderr, log)}') from exc
+    import _watchdog as _wd
+
+    def rebound(cmd: list[str], **k: Any) -> subprocess.CompletedProcess:
+        # The watchdog helpers spell the client `docker`; use the caller's.
+        return subprocess.run([binary, *cmd[1:]] if cmd and cmd[0] == 'docker' else cmd, **k)
+    grace = TOOL_STALL_GRACE_S if TOOL_STALL_GRACE_S is not None else _wd.DEFAULT_STALL_GRACE_S
+    import time
+    started, first_read_s = time.monotonic(), min(_wd.DEFAULT_POLL_S, grace / 4.0)
+    container_cpu = _dw.ephemeral_container_cpu_probe(name, runner=rebound)
+
+    def cpu_probe(proc: Any) -> float | None:
+        # The client is still creating the container in its first poll window,
+        # so there is nothing to read yet; a job that ends inside that window
+        # is never probed at all.
+        if time.monotonic() - started < first_read_s or proc.poll() is not None:
+            return None
+        return container_cpu(proc)
+    clients: list[_Client] = []
+
+    def launch(cmd: list[str], **k: Any) -> _Client:
+        clients.append(_Client(cmd, **k))
+        return clients[-1]
+    result = _wd.run_host_supervised(
+        named, popen_factory=launch, kill=_dw.ephemeral_container_reap(name, runner=rebound),
+        cpu_probe=cpu_probe, stall_grace_s=grace, hard_ceiling_s=TOOL_BUDGET_S, **kw)
+    if clients and clients[0].error is not None:
+        raise clients[0].error  # what `subprocess.run` raised (no docker client, ...)
+    if result.outcome == 'stalled':
+        fate = _reap(binary, name)
+        raise Refusal('LL_TOOL_STALLED', f'{binary} run made no progress (container CPU and output '
+                      f'flat) for {grace:g} s; container {name} {fate}; '
+                      f'{_salvage(result.out, result.err, log)}')
+    return subprocess.CompletedProcess(named, result.rc, result.out, result.err)
+
 def digest(path: Path) -> str:
     h = hashlib.sha256()
     with path.open('rb') as stream:
@@ -605,10 +794,10 @@ def _openroad_convert(project: Path, image: str, config: dict, tcl_body: list[st
     volumes = ['-v', f'{project.resolve()}:{project.resolve()}']
     for host, guest in mounts:
         volumes += ['-v', f'{host.resolve()}:{guest}:ro']
-    completed = subprocess.run([docker, 'run', *_dmem.docker_memory_flags(), '--rm',
-                                '--network', 'none', *volumes,
-                                image, '--skip', 'openroad', '-exit', str(tcl)],
-                               capture_output=True, text=True)
+    completed = run_container([docker, 'run', *_dmem.docker_memory_flags(), '--rm',
+                               '--network', 'none', *volumes,
+                               image, '--skip', 'openroad', '-exit', str(tcl)],
+                              supervised=True, log=folder / f'{name}.log')
     (folder / f'{name}.log').write_text(completed.stdout + '\n' + completed.stderr)
     if completed.returncode:
         raise Refusal('LL_BRIDGE_CONVERSION_FAILED', str(folder / f'{name}.log'))
@@ -1317,11 +1506,21 @@ def image_capability(image: str, docker: str = 'docker') -> dict:
     probe = [docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--entrypoint', 'sh', image, '-c',
              'python3 -m librelane.steps run --help >/dev/null && '
              'yosys -Q -T -y /dev/null -p help >/dev/null']
-    result = subprocess.run(probe, capture_output=True, text=True)
+    result = run_container(probe, probe_deadline_s=PROBE_DEADLINE_S)
     if result.returncode:
         raise Refusal('LL_IMAGE_INCAPABLE', f'{image}: LibreLane CLI or yosys CLI -y unavailable (rc={result.returncode})')
-    tcl = subprocess.run([docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network', 'none',
-                          '--entrypoint', 'bash', image, '-c', _TCL_PROBE], capture_output=True, text=True)
+    try:
+        tcl = run_container([docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network', 'none',
+                             '--entrypoint', 'bash', image, '-c', _TCL_PROBE],
+                            probe_deadline_s=PROBE_DEADLINE_S)
+    except Refusal as exc:
+        if exc.code != 'LL_TOOL_DEADLINE':
+            raise
+        # Best effort, like rc != 0 below: a probe that ran out of time
+        # measured nothing, and the capability verdict above still stands.
+        _CAPABILITY[key] = {'image': image, 'openroad_aliases': {},
+                            'tcl_probe': f'NOT_MEASURED: {str(exc)[:300]}'}
+        return _CAPABILITY[key]
     if tcl.returncode:
         # The CLI probe above is the capability verdict; this one only derives
         # aliases.  Unmeasured means none are added: a step that needs one
@@ -1798,7 +1997,7 @@ Path(output, "flow_gates.json").write_text(json.dumps({
            '-v', f'{pdk_root.resolve()}:/pdk:ro', *_plugin_args(step_ids),
            '--entrypoint', 'python3', image, '-c', script, str(design),
            str(requested), str(root), pdk, str(project.resolve())]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = run_container(cmd, probe_deadline_s=PROBE_DEADLINE_S, log=root / 'resolution.log')
     (root / 'resolution.log').write_text(result.stdout + '\n' + result.stderr)
     if result.returncode:
         raise Refusal('LL_CONFIG_RESOLUTION_FAILED', str(root / 'resolution.log'))
@@ -1847,9 +2046,9 @@ def emit_pdn_cfg(image: str, pdk: str, output: Path, *, docker: str = 'docker') 
         return None
     script = ('import os,librelane;print(open(os.path.join(os.path.dirname(librelane.__file__),'
               '"scripts","openroad","common","pdn_cfg.tcl")).read(),end="")')
-    result = subprocess.run([docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network',
-                             'none', '--entrypoint', 'python3', image, '-c', script],
-                            capture_output=True, text=True)
+    result = run_container([docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network',
+                            'none', '--entrypoint', 'python3', image, '-c', script],
+                           probe_deadline_s=PROBE_DEADLINE_S)
     if result.returncode or 'add_pdn_connect' not in result.stdout:
         raise Refusal('LL_PDN_CFG_UNREADABLE', (result.stderr or '')[-500:])
     lines = [result.stdout.rstrip('\n'), '',
@@ -1866,9 +2065,9 @@ def flow_segment(image: str, first: str, last: str, *, flow: str = 'Chip',
     script = ('import json,sys;from librelane.flows import Flow;'
               'f=Flow.factory.get(sys.argv[1]);'
               'print(json.dumps([s.id for s in f.Steps]))')
-    result = subprocess.run([docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network',
-                             'none', '--entrypoint', 'python3', image, '-c', script, flow],
-                            capture_output=True, text=True)
+    result = run_container([docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network',
+                            'none', '--entrypoint', 'python3', image, '-c', script, flow],
+                           probe_deadline_s=PROBE_DEADLINE_S)
     try:
         order = json.loads(result.stdout.strip().splitlines()[-1])
     except (IndexError, ValueError):
@@ -1897,9 +2096,9 @@ def resolve_step_config(project: Path, image: str, source: Path, output: Path,
     volumes = ['-v', f'{project.resolve()}:{project.resolve()}']
     for host, guest in mounts or []:
         volumes += ['-v', f'{host.resolve()}:{guest}:ro']
-    result = subprocess.run([docker, 'run', *_dmem.docker_memory_flags(), '--rm', *volumes,
-                             '--entrypoint', 'python3', image, '-c', script],
-                            capture_output=True, text=True)
+    result = run_container([docker, 'run', *_dmem.docker_memory_flags(), '--rm', *volumes,
+                            '--entrypoint', 'python3', image, '-c', script],
+                           probe_deadline_s=PROBE_DEADLINE_S)
     if result.returncode or not output.is_file():
         raise Refusal('LL_CONFIG_RESOLVE_FAILED',
                       (result.stderr or result.stdout)[-1000:])
@@ -1988,7 +2187,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                '-i', str(state_path), '-o', str(folder)]
         if pdk_root:
             cmd.extend(['--pdk-root', pdk_root])
-        completed = subprocess.run(cmd, capture_output=True, text=True)
+        completed = run_container(cmd, supervised=True, log=folder / 'invocation.log')
         (folder / 'invocation.log').write_text(completed.stdout + '\n' + completed.stderr)
         if completed.returncode or not (folder / 'state_out.json').exists():
             raise Refusal('LL_STEP_FAILED', f'{step_id}: rc={completed.returncode}; {folder / "invocation.log"}')
