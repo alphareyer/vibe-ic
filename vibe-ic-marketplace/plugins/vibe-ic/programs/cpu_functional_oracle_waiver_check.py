@@ -560,7 +560,10 @@ def _coverage_goal_summary(project: Path) -> dict:
         rows, design_selected_options(project))
     _vectors, goals = _cgc.partition(rows)
     totals, source = _coverage_totals(project)
-    summary = _cgc.measure_goals(goals, totals)
+    # The execution record arms the scenario pass-rate instrument (a goal
+    # measured by the L10 cases bound to it that ran their own oracle).
+    summary = _cgc.measure_goals(goals, totals, rows,
+                                 _l10x.load_record(project))
     summary["totals_source"] = source
     return summary
 
