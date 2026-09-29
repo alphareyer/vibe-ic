@@ -295,6 +295,27 @@ def _check_spice_correlation_json(project: Path) -> Optional[dict]:
     return None
 
 
+def path_coverage_gap(record: dict) -> Optional[str]:
+    """R-0929-SPICE-COVERAGE: why a path correlation covered LESS than its
+    whole combinational path, or None when every stage was simulated.
+
+    A record that states neither count cannot be shown complete, and a
+    partial one names k of n and the cells left out (``stages_dropped``)."""
+    if not isinstance(record, dict):
+        return "no correlation record"
+    k = record.get("stages_correlated")
+    n = record.get("stages_total_combinational")
+    if not (isinstance(k, int) and isinstance(n, int)) or n <= 0:
+        return (f"stage coverage unstated (stages_correlated={k!r}, "
+                f"stages_total_combinational={n!r})")
+    if k == n:
+        return None
+    dropped = record.get("stages_dropped") or []
+    return (f"{k} of {n} combinational stages correlated; dropped: "
+            + (", ".join(str(d) for d in dropped) if dropped
+               else "not named by the producer"))
+
+
 def check_critical_path_correlation(
     project: Path, findings: List[Finding]
 ) -> dict:
@@ -316,6 +337,15 @@ def check_critical_path_correlation(
         verdict = c.get("verdict")
         severity = "ERROR" if verdict in (
             "MISMATCH", "CRITICAL_MISMATCH") else "INFO"
+        gap = path_coverage_gap(c)
+        if gap is not None:
+            # A measured mismatch on the stages that WERE simulated still
+            # fails; a clean result over part of the path is NOT_MEASURED.
+            stats["coverage_incomplete"] = gap
+            findings.append(Finding(
+                rule="SPICE_PATH_COVERAGE_INCOMPLETE", severity="WARNING",
+                message=(f"critical-path correlation is NOT_MEASURED: {gap} "
+                         f"(R-0929-SPICE-COVERAGE)")))
         findings.append(Finding(
             rule="SPICE_STA_" + str(verdict or "UNKNOWN"),
             severity=severity,
@@ -1864,7 +1894,7 @@ def _find_pin_for_net(conns: dict, net: str) -> Optional[str]:
 
 def resolve_path_stages(sta_path: dict, inst_map: dict, spef_caps: dict,
                         subckt_names: set, liberty_text: str,
-                        max_stages: int = 12) -> Optional[dict]:
+                        max_stages: Optional[int] = None) -> Optional[dict]:
     """Resolve the STA path into an ordered list of stitchable combinational
     stages with the FAITHFUL toggling input pin, output net, and net parasitic
     load (pure). Returns {stages:[...], endpoint_load_pf, covered, total_comb}
@@ -1880,7 +1910,13 @@ def resolve_path_stages(sta_path: dict, inst_map: dict, spef_caps: dict,
     total_comb = len(comb_rows)
     if total_comb == 0:
         return None
-    comb_rows = comb_rows[:max_stages]
+    # R-0929-SPICE-COVERAGE: no fixed cap. A caller that still passes one gets
+    # the dropped stages NAMED on the result, and the gate reads that record
+    # as NOT_MEASURED coverage, never a PASS over part of the path.
+    dropped = ([f"{r['inst']} ({r['cell']})" for r in comb_rows[max_stages:]]
+               if max_stages is not None else [])
+    if max_stages is not None:
+        comb_rows = comb_rows[:max_stages]
 
     # startpoint net feeding the first stage's toggling input
     sp_tok = sta_path["startpoint"]
@@ -1966,6 +2002,7 @@ def resolve_path_stages(sta_path: dict, inst_map: dict, spef_caps: dict,
         "endpoint_load_pf": endpoint_load_pf,
         "covered": len(stages),
         "total_comb": total_comb,
+        "dropped": dropped,
         # MEMBERSHIP, not a count: a reader has to be able to see WHICH net
         # the deck modelled with no wire load at all.
         "nets_absent_from_spef": [s["out_net"] for s in stages
@@ -2704,7 +2741,7 @@ def run_commercial_pdk_path_correlation(
     container: str = _DEFAULT_CONTAINER,
     corner: str = "ttt_lv",
     slew_ns: float = 0.4,
-    max_stages: int = 12,
+    max_stages: Optional[int] = None,
 ) -> Optional[dict]:
     """Run REAL ngspice on the STITCHED STA critical path and correlate the
     end-to-end SPICE path delay against the STA-reported path delay. Writes
@@ -2834,6 +2871,7 @@ def run_commercial_pdk_path_correlation(
             "pct_error": round(pct, 3),
             "stages_correlated": resolved["covered"],
             "stages_total_combinational": resolved["total_comb"],
+            "stages_dropped": resolved.get("dropped", []),
             "tolerance_pct": 10.0,
             "verdict": verdict,
         },
@@ -2967,7 +3005,7 @@ def run_installed_pdk_path_correlation(
     project: Path,
     liberty_path: str,
     container: str = _DEFAULT_CONTAINER,
-    max_stages: int = 12,
+    max_stages: Optional[int] = None,
 ) -> dict:
     """Run the BLOCKING Step 30 check from the active installed PDK.
 
@@ -3247,6 +3285,7 @@ def run_installed_pdk_path_correlation(
             "tolerance_derivation": tolerance,
             "stages_correlated": resolved["covered"],
             "stages_total_combinational": resolved["total_comb"],
+            "stages_dropped": resolved.get("dropped", []),
             "measurement_basis": "per-stage, at the input slew and output "
                                  "load the STA report states for that stage "
                                  "-- the same operating points the tolerance "
@@ -3473,7 +3512,7 @@ def _run_opensta_in(container: str, cwd_dir: str, tcl_path: str,
 def _stitch_sim_correlate_path(
     sta_path: dict, inst_map: dict, spef_caps: dict, subckt_names: set,
     cells_text: str, lib_text: str, hdr: dict, shim: Path, container: str,
-    corner: str, slew_ns: float, max_stages: int, hspice_dir: Path,
+    corner: str, slew_ns: float, max_stages: Optional[int], hspice_dir: Path,
     out_dir: Path, tag: str,
 ) -> dict:
     """Stitch ONE STA path, run REAL ngspice, correlate the end-to-end SPICE
@@ -3530,6 +3569,7 @@ def _stitch_sim_correlate_path(
     common = {
         "stages_correlated": resolved["covered"],
         "stages_total_combinational": resolved["total_comb"],
+        "stages_dropped": resolved.get("dropped", []),
         "endpoint_load_ff": round(resolved["endpoint_load_pf"] * 1e3, 4),
         "stages": stage_view,
         "log": f"corr_path_{tag}.log",
@@ -3580,7 +3620,7 @@ def run_commercial_pdk_topN_path_correlation(
     container: str = _DEFAULT_CONTAINER,
     corner: str = "ttt_lv",
     slew_ns: float = 0.4,
-    max_stages: int = 12,
+    max_stages: Optional[int] = None,
     top_n: int = 5,
 ) -> Optional[dict]:
     """Run REAL ngspice on the TOP-N STA max-delay paths and correlate each
@@ -3822,10 +3862,17 @@ def run_audit(project: Path, run_spice: bool = True,
             ))
     else:
         path_report = _check_path_correlation_json(project)
+    path_coverage_gap_reason = None
     if path_report is not None:
         pc = path_report.get("correlation", {})
         sev = "ERROR" if pc.get("verdict") in (
             "MISMATCH", "CRITICAL_MISMATCH") else "INFO"
+        path_coverage_gap_reason = path_coverage_gap(pc)
+        if path_coverage_gap_reason is not None:
+            result.findings.append(Finding(
+                rule="SPICE_PATH_COVERAGE_INCOMPLETE", severity="WARNING",
+                message=(f"stitched path correlation is NOT_MEASURED: "
+                         f"{path_coverage_gap_reason} (R-0929-SPICE-COVERAGE)")))
         result.findings.append(Finding(
             rule=("SPICE_PATH_" + ("MISMATCH" if sev == "ERROR"
                                    else "CORRELATED")),
@@ -3942,6 +3989,12 @@ def run_audit(project: Path, run_spice: bool = True,
         "analog": analog_stats,
         "pass": result.passed,
     }
+    gaps = [g for g in (corr_stats.get("coverage_incomplete"),
+                        path_coverage_gap_reason) if g]
+    if result.passed and gaps:
+        # R-0929-SPICE-COVERAGE: part of the path is not a path correlation.
+        result.summary.update(verdict="NOT_MEASURED", not_measured=True,
+                              reason="; ".join(gaps))
     return result
 
 
@@ -3983,6 +4036,11 @@ def main(argv: list = None) -> int:
                 suffix = " (measured SPICE decks=0)" if f.rule == "NO_SPICE_VERIFICATION" else ""
                 print(f"  [{f.severity}] {f.rule}: {f.message}{suffix}")
 
+    if result.passed and result.summary.get("not_measured"):
+        # Last, short line: the flow keeps only the tail of stdout.
+        print("INCOMPLETE: critical-path SPICE correlation covered part of "
+              "the path (R-0929-SPICE-COVERAGE)")
+        return 2
     if result.passed and skipped:
         _vx.announce_vacuous(result.program, reason)
     return _vx.exit_code(result.passed, skipped)

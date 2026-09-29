@@ -142,3 +142,74 @@ def test_a_path_starting_at_a_pad_cell_is_stitchable(tmp_path):
     # representative-pin fallback would have taken A1 (a different input).
     assert got["stages"][0]["toggle_pin"] == "A2"
     assert got["stages"][1]["toggle_pin"] == "I"
+
+
+# ── Round 2 (review wave 58): R-0929-SPICE-COVERAGE ────────────────────────
+def _chain_report(n: int) -> str:
+    rows = "".join(f"   0.10    {6.5 + 0.1 * i:.2f} ^ u_core/b{i}/Z (stdlib__buf)\n"
+                   for i in range(n))
+    return ("Startpoint: rst (input port clocked by clk)\n"
+            "Endpoint: u_core/r0 (rising edge-triggered flip-flop clocked by clk)\n"
+            "Path Type: max\n\n  Delay    Time   Description\n"
+            "   0.00    4.80 ^ rst (in)\n"
+            "   1.63    6.43 ^ u_pad_rst/Y (padlib__in)\n" + rows +
+            "   0.00    9.00 ^ u_core/r0/D (stdlib__dff)\n")
+
+
+def _chain_netlist(n: int) -> str:
+    lines = ["module top(rst, clk);",
+             "  padlib__in u_pad_rst (.PAD(rst), .Y(n_m1));"]
+    for i in range(n):
+        src = "n_m1" if i == 0 else f"\\u_core/n{i - 1} "
+        lines.append(f"  stdlib__buf \\u_core/b{i}  (.I({src}), .Z(\\u_core/n{i} ));")
+    lines.append(f"  stdlib__dff \\u_core/r0  (.D(\\u_core/n{n - 1} ), .CLK(clk), .Q(q));")
+    return "\n".join(lines + ["endmodule", ""])
+
+
+def test_the_resolver_no_longer_truncates_a_long_path():
+    """spm's pad-rooted critical path has 20 combinational stages; the old
+    fixed max_stages=12 kept 12 and dropped the path's only logic cells."""
+    path = S.parse_sta_path(_chain_report(20))
+    inst_map = S.parse_verilog_instances(_chain_netlist(20))
+    std = {"stdlib__buf", "stdlib__dff"}
+    got = S.resolve_path_stages(path, inst_map, {}, std, "")
+    assert (got["covered"], got["total_comb"]) == (20, 20)
+    assert got["dropped"] == []
+    capped = S.resolve_path_stages(path, inst_map, {}, std, "", 12)
+    assert (capped["covered"], capped["total_comb"]) == (12, 20)
+    assert capped["dropped"][0] == "u_core/b12 (stdlib__buf)"
+    assert len(capped["dropped"]) == 8
+
+
+def _correlated_project(root: Path, k: int, n: int, dropped=None) -> Path:
+    (root / "phase3/stage3/extracted").mkdir(parents=True)
+    (root / "phase3/stage3/extracted/top.spef").write_text("*SPEF\n")
+    (root / "phase3/stage3/sta").mkdir(parents=True)
+    (root / "phase3/stage3/sta/post_route_timing.rpt").write_text("slack (MET) 1.0\n")
+    rec = {"verdict": "CORRELATED", "spice_path_delay_ns": 3.0,
+           "liberty_spef_cone_delay_ns": 3.05, "pct_error": 1.6,
+           "tolerance_pct": 5.0, "stages_correlated": k,
+           "stages_total_combinational": n}
+    if dropped is not None:
+        rec["stages_dropped"] = dropped
+    out = root / "reports/phase3/spice_correlation.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"program": "spice_correlation_check",
+                               "correlation": rec}))
+    return root
+
+
+def test_the_spm_12_of_20_shape_does_not_pass(tmp_path):
+    dropped = [f"u_core/_{i}_ (cell)" for i in range(8)]
+    proj = _correlated_project(tmp_path, 12, 20, dropped)
+    rc = S.main([str(proj), "--no-spice", "--json", str(tmp_path / "o.json")])
+    rep = json.loads((tmp_path / "o.json").read_text())
+    assert rc == 2, rep["summary"]
+    assert rep["summary"]["verdict"] == "NOT_MEASURED"
+    assert "12 of 20" in rep["summary"]["reason"]
+    assert "u_core/_0_ (cell)" in rep["summary"]["reason"]
+
+
+def test_control_a_fully_covered_correlation_passes(tmp_path):
+    proj = _correlated_project(tmp_path, 20, 20)
+    assert S.main([str(proj), "--no-spice", "--json", str(tmp_path / "o.json")]) == 0
