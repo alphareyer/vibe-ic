@@ -1046,6 +1046,26 @@ def test_missing_routed_def_downgrades_waived_to_not_measured(tmp_path, monkeypa
     assert json.loads(output.read_text())["verdict"] == "NOT_MEASURED"
 
 
+def test_dispatcher_drv_receipt_lookup_never_indexes_past_argv(tmp_path):
+    # Review wave 57: argv[1] was read before its length was checked, so a
+    # gate that resolved to one argv element became "program invocation
+    # error: list index out of range" and lost its awaiting/incomplete tier.
+    import flow_compliance_check as flow
+    judge = str(Path(flow.__file__).with_name("drv_signoff_judge.py"))
+    assert flow._drv_judge_receipt(tmp_path, ["python3"]) is None
+    assert flow._drv_judge_receipt(tmp_path, []) is None
+    assert flow._drv_judge_receipt(tmp_path, ["python3", judge, "."]) is None
+    assert flow._drv_judge_receipt(
+        tmp_path, ["python3", judge, ".", "--json"]) is None
+    assert flow._drv_judge_receipt(
+        tmp_path, ["python3", "other.py", ".", "--json", "x.json"]) is None
+    assert flow._drv_judge_receipt(
+        tmp_path, ["python3", judge, ".", "--json", "r/d.json"]) == tmp_path / "r/d.json"
+    absolute = tmp_path / "abs.json"
+    assert flow._drv_judge_receipt(
+        tmp_path, ["python3", judge, "--json", str(absolute)]) == absolute
+
+
 def test_step23_without_capture_plan_is_not_measured(tmp_path):
     import flow_compliance_check as flow
     step = {"id": 23, "name": "post-route STA", "stage": "phase3/stage3/sta",

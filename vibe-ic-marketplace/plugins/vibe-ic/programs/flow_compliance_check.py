@@ -4466,6 +4466,24 @@ def _receipt_off_a_produced_document(argv: List[str], project: Path
     ), _ReceiptRedirects(tmps, records)
 
 
+def _drv_judge_receipt(project: Path, argv: List[str]) -> Optional[Path]:
+    """The ``--json`` receipt path of a drv_signoff_judge.py invocation, else None.
+
+    Resolved argv may be a single element (a bare executable) or end at
+    ``--json`` with no value; neither is a DRV judge receipt, and neither may
+    raise here -- an IndexError in the dispatcher was reported as a
+    "program invocation error" for every such gate, so an awaiting or
+    incomplete tier was lost (review wave 57).
+    """
+    if len(argv) < 2 or Path(argv[1]).name != "drv_signoff_judge.py":
+        return None
+    try:
+        receipt = Path(argv[argv.index("--json") + 1])
+    except (ValueError, IndexError):
+        return None
+    return receipt if receipt.is_absolute() else project / receipt
+
+
 def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutcome:
     """Run program in project dir (with globs expanded relative to project),
     return (passed, output_snippet).
@@ -4596,13 +4614,11 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
     # have a measured regression history in this file (v1.10.14 -> 1.10.16).
     gate_budget = _pl.gate_timeout_s()
     try:
-        if Path(argv[1]).name == "drv_signoff_judge.py" and "--json" in argv:
+        _drv_receipt = _drv_judge_receipt(project, argv)
+        if _drv_receipt is not None:
             # The redirect may have pre-seeded an older producer receipt.  The
             # judge only writes this path; remove the seed before invocation so
             # a crash cannot turn an old WAIVED/PASS into this run's answer.
-            _drv_receipt = Path(argv[argv.index("--json") + 1])
-            if not _drv_receipt.is_absolute():
-                _drv_receipt = project / _drv_receipt
             _drv_receipt.unlink(missing_ok=True)
         # `env=_child_env()` carries the scope stack DOWN to the gate program,
         # and is None when there is nothing to carry, which is the inherit-as-
@@ -4620,15 +4636,11 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
             snippet = f"{snippet}\n{_receipt_note}" if snippet else _receipt_note
         if r.returncode == 0:
             return _outcome(True, snippet, r.returncode)
-        if (Path(argv[1]).name == "drv_signoff_judge.py"
-                and r.returncode == 1 and "--json" in argv):
+        if _drv_receipt is not None and r.returncode == 1:
             # DRV's owner-approved residual is an executed, non-green verdict.
             # Read the exact receipt path after redirecting producer documents;
             # stdout and the process rc cannot create this tier.
             try:
-                _drv_receipt = Path(argv[argv.index("--json") + 1])
-                if not _drv_receipt.is_absolute():
-                    _drv_receipt = project / _drv_receipt
                 _drv_doc = json.loads(_drv_receipt.read_text())
                 if (_drv_doc.get("name") == "DRV(tran/cap/fanout)"
                         and _drv_doc.get("verdict") == "NOT_MEASURED"
