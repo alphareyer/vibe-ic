@@ -14,7 +14,7 @@ set_dont_touch_objects
 source $::env(SCRIPTS_DIR)/openroad/common/set_rc.tcl
 estimate_parasitics -placement
 
-set_global_sizing_config -include_clock_network
+set_global_sizing_config -include_clock_network true
 report_global_sizing_config
 log_cmd repair_timing -verbose -setup \
     -setup_margin $::env(PL_RESIZER_SETUP_SLACK_MARGIN) -phases GLOBAL_SIZING
