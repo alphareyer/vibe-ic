@@ -2182,6 +2182,7 @@ from librelane.steps import Step
 design, requested, output, pdk, project = sys.argv[1:]
 flow = Chip(config=design, pdk=pdk, pdk_root="/pdk", design_dir=project)
 raw = flow.config.to_raw_dict()
+chip_steps = {s.id for s in Chip.Steps}
 for step_id in json.loads(Path(requested).read_text()):
     target = Step.factory.get(step_id)
     if target is None:
@@ -2194,6 +2195,17 @@ for step_id in json.loads(Path(requested).read_text()):
     if step_id.startswith("Vibeic."):
         declared = json.loads(Path(design).read_text())
         selected.update({key: value for key, value in declared.items()
+                         if key in names and key not in selected})
+    elif step_id not in chip_steps:
+        # A LibreLane step the Chip flow does not run (KLayout.LVS,
+        # OpenROAD.WriteCDL) declares PDK variables the flow's config never
+        # loads; the PDK's own value (KLAYOUT_LVS_SCRIPT) was dropped and the
+        # step skipped itself as "PDK declares none" (spm x gf180mcuD,
+        # 2026-09-29). Load the design and PDK under THIS step's variables.
+        from librelane.config import Config
+        own, _ = Config.load(design, target.get_all_config_variables(),
+                             design_dir=project, pdk=pdk, pdk_root="/pdk")
+        selected.update({key: value for key, value in own.to_raw_dict().items()
                          if key in names and key not in selected})
     selected["meta"] = {"librelane_version": __import__("librelane.__version__", fromlist=["__version__"]).__version__, "step": step_id}
     Path(output, step_id + ".json").write_text(json.dumps(selected, indent=2, default=str) + "\\n")

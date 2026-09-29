@@ -90,3 +90,16 @@ def test_a_skipped_klayout_runset_is_not_a_klayout_pass(tmp_path):
 def test_the_chip_path_defaults_step_31_to_the_tool(tmp_path):
     project = _chip(tmp_path)
     assert contract.selected_mode(project, "31") == "librelane"
+
+
+def test_a_step_outside_the_chip_flow_is_resolved_under_its_own_variables():
+    """KLayout.LVS is not a Chip-flow step, so the flow's config never loads
+    its PDK variables: KLAYOUT_LVS_SCRIPT came back None and the runset was
+    skipped ("PDK declares no KLAYOUT_LVS_SCRIPT") although gf180mcuD's
+    config.tcl declares it (measured on spm, 2026-09-29).  The resolver
+    loads such a step under its own variables (the container's LibreLane is
+    exercised in the lane report; here the resolution script is pinned)."""
+    import inspect
+    src = inspect.getsource(contract.resolve_step_configs)
+    assert "step_id not in chip_steps" in src
+    assert "Config.load(design, target.get_all_config_variables()" in src
