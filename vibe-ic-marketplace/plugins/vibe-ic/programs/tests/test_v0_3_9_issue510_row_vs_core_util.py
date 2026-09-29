@@ -23,6 +23,8 @@ import json
 import sys
 from pathlib import Path
 
+from _filled_gds_fixture import write_filled_gds
+
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 import phase3_one_shot_runner as R  # noqa: E402
@@ -76,6 +78,7 @@ def test_rows_full_zero_fillers_filled_eq_routed_passes(tmp_path):
         "row_utilization_pct": 99.998,
         "core_utilization_pct": 39.0,
     }, filled_eq_routed=True)
+    write_filled_gds(proj)  # U14: Step 34 now needs the filled GDS's bound per-layer density
     findings, _ = MFD.audit(proj)
     errs = [f for f in findings if f.severity == "ERROR"]
     assert errs == [], [f.category for f in errs]
@@ -118,5 +121,6 @@ def test_placed_fillers_passes(tmp_path):
         "row_utilization_pct": 99.4,
         "core_utilization_pct": 40.0,
     }, filled_eq_routed=False)
+    write_filled_gds(proj)  # U14: Step 34 now needs the filled GDS's bound per-layer density
     findings, _ = MFD.audit(proj)
     assert all(f.severity != "ERROR" for f in findings)

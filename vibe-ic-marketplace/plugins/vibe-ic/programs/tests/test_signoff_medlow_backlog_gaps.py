@@ -44,6 +44,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _filled_gds_fixture import write_filled_gds
+
 import pytest
 import yaml
 
@@ -603,6 +605,7 @@ def test_row_utilization_only_is_not_a_per_layer_density_verification(tmp_path):
     compared against the [20,80] window.
     """
     proj = _fill_project(tmp_path, _ROW_ONLY)
+    write_filled_gds(proj)  # U14: Step 34 now needs the filled GDS's bound per-layer density
     rc, rep = _fill_report(proj, tmp_path)
     summary = rep["summary"]
 
@@ -686,6 +689,7 @@ def test_in_window_per_layer_density_still_passes(tmp_path):
     """DIRECTION-1 guard: real in-window per-layer numbers are examined and
     still PASS, with both layers counted. Holds on both trees."""
     proj = _fill_project(tmp_path, _IN_WINDOW_LAYERS)
+    write_filled_gds(proj)  # U14: Step 34 now needs the filled GDS's bound per-layer density
     rc, rep = _fill_report(proj, tmp_path)
     assert rc == 0 and rep["summary"]["pass"] is True
     assert rep["summary"]["layers_ok"] == 2
