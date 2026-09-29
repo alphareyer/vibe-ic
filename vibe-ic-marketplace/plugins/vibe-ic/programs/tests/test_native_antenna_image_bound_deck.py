@@ -93,6 +93,13 @@ class ImageContainer:
         self.transcript = None      # override: (rule, script) -> stdout
         self.rdb = None             # override: (script) -> RDB text
         self.during_run = None      # hook executed while "KLayout" runs
+        self.rc = 0                 # KLayout's exit status
+        self.outcome = "natural"    # supervision outcome
+        # What `docker inspect` / `docker diff` would report for this
+        # container, and where the tree resolves (`readlink -f`).
+        self.mounts: list = []
+        self.changes: list = []
+        self.resolved: dict = {}
 
     def _in_image(self, path) -> Path:
         return self.fs / str(path).lstrip("/")
@@ -122,6 +129,23 @@ class ImageContainer:
         return sorted("/" + str(p.relative_to(self.fs)) for p in d.iterdir()
                       if p.name.endswith(suffix) and p.is_file())
 
+    def list_tree(self, directory):
+        d = self._in_image(directory)
+        if not d.is_dir():
+            return None
+        return sorted("/" + str(q.relative_to(self.fs)) for q in d.rglob("*")
+                      if q.is_file())
+
+    def image_tree_proof(self, tree):
+        """The real overlay rule over this fixture's mounts and diff."""
+        real = self.resolved.get(tree, tree)
+        record = {"guest_tree": tree, "guest_tree_resolved": real}
+        overlays = launch.image_tree_overlays([tree, real], self.mounts,
+                                              self.changes)
+        if overlays:
+            return False, "not the image's bytes: " + "; ".join(overlays), record
+        return True, "", record
+
     def run_argv(self, argv, env, *, timeout):
         out = LOGIN_BANNER if self.banner else ""
         if argv[0] != "sha256sum":
@@ -148,7 +172,7 @@ class ImageContainer:
         out = (LOGIN_BANNER if self.banner else "") + (
             self.transcript(rule, script) if self.transcript
             else _transcript(rule, self.violations))
-        return watchdog.SupervisedResult(0, out, "", "natural", 0.1,
+        return watchdog.SupervisedResult(self.rc, out, "", self.outcome, 0.1,
                                          supervision={"fixture": True})
 
 
@@ -291,9 +315,8 @@ def test_deck_missing_inside_the_image_stays_not_measured(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("tamper, needle", [
-    # The RDB holds a violation the deck's own completion tally does not.
-    ({"violations": 1, "transcript": lambda rule, script:
-      _transcript(rule, 0)}, "own tally"),
+    # (An RDB holding a violation its tally does not is FAIL, never a skip:
+    # see test_measured_violations_stay_red_when_the_binding_fails.)
     # The run never reached its completion tally.
     ({"transcript": lambda rule, script: _transcript(rule, 0).rsplit("x: DRC", 1)[0]},
      "completion tallies"),
@@ -388,3 +411,271 @@ def test_transcript_and_rdb_grammar_is_the_real_tools_own():
         assert set(gate._DECK_FROM_RE.findall(log)) == {rule}
         assert gate._TALLY_RE.findall(log) == [(status, str(count))]
         assert gate._GENERATOR_RE.search(rdb).group(1) == parent
+
+
+# --------------------------------------------------------------------------- #
+# review wave 57 (ANTDECK)
+# --------------------------------------------------------------------------- #
+DECK_DIR = f"{GUEST}/{DRC_REL}"
+
+
+def _image_file(fs: Path, rel: str) -> Path:
+    return fs / DECK_DIR.lstrip("/") / rel
+
+
+# (1) measured violations are never relabelled NOT_MEASURED ------------------ #
+def _mount_after_run(runner):
+    def hook():
+        runner.mounts.append("/foss/pdks")
+    return hook
+
+
+@pytest.mark.parametrize("tamper, needle", [
+    ({"transcript": lambda rule, script: _transcript(rule, 0)}, "own tally"),
+    ({"transcript": lambda rule, script:
+      _transcript(rule, 2).rsplit("x: DRC", 1)[0]}, "completion tallies"),
+    ({"transcript": lambda rule, script:
+      _transcript("/elsewhere/rule_decks/antenna.rb", 2)}, "not the hashed rule"),
+    ({"rdb": lambda script: _rdb(2, "/elsewhere/other.drc")}, "not the hashed parent"),
+    ({"during_run": lambda runner, fs: lambda: _image_file(
+        fs, "rule_framework.rb").write_bytes(b"# swapped\n")},
+     "changed or vanished during execution"),
+    ({"during_run": lambda runner, fs: _mount_after_run(runner)},
+     "after the run"),
+])
+def test_measured_violations_stay_red_when_the_binding_fails(
+        tmp_path, monkeypatch, tamper, needle):
+    project, fs = _project(tmp_path)
+    runner = ImageContainer(fs, banner=False, violations=2)
+    runner.transcript = tamper.get("transcript")
+    runner.rdb = tamper.get("rdb")
+    if "during_run" in tamper:
+        runner.during_run = tamper["during_run"](runner, fs)
+    _use(monkeypatch, runner)
+    result = gate.run(project, None, None, None, None)
+    assert result["verdict"] == "FAIL", result
+    assert result["measurement"] == "FAIL"
+    assert result["failure_class"] == "BINDING"
+    assert result["violations"] == 2
+    assert needle in result["reason"], result
+    runner.mounts = []          # the container as it was before the run
+    assert gate.main([str(project)]) == gate.FAIL
+
+
+@pytest.mark.parametrize("rc, outcome", [(137, "natural"), (124, "stalled"),
+                                         (1, "natural")])
+def test_violations_written_before_the_deck_stopped_are_fail(
+        tmp_path, monkeypatch, rc, outcome):
+    project, fs = _project(tmp_path)
+    runner = ImageContainer(fs, banner=False, violations=3)
+    runner.rc, runner.outcome = rc, outcome
+    _use(monkeypatch, runner)
+    result = gate.run(project, None, None, None, None)
+    assert (result["verdict"], result["measurement"]) == ("FAIL", "FAIL"), result
+    assert result["violations"] == 3
+
+
+def test_a_stopped_deck_with_a_clean_partial_rdb_is_not_measured(
+        tmp_path, monkeypatch):
+    project, fs = _project(tmp_path)
+    runner = ImageContainer(fs, banner=False, violations=0)
+    runner.rc, runner.outcome = 124, "stalled"
+    _use(monkeypatch, runner)
+    result = gate.run(project, None, None, None, None)
+    assert (result["verdict"], result["measurement"]) == (
+        "NOT_MEASURED", "NOT_MEASURED"), result
+
+
+# (2) the image id is not the bytes: mounts and the writable layer ----------- #
+@pytest.mark.parametrize("mounts, changes, resolved", [
+    (["/foss/pdks"], [], {}),                                  # above the tree
+    ([f"{DECK_DIR}/rule_decks"], [], {}),                      # below the tree
+    ([], [f"C {DECK_DIR}/rule_decks/antenna.rb"[2:]], {}),     # writable layer
+    (["/pdk_store/v1"], [], {GUEST: "/pdk_store/v1/fixture_pdk"}),  # link target
+    ([], ["/pdk_store/v1/fixture_pdk/libs.tech"], {GUEST: "/pdk_store/v1/fixture_pdk"}),
+])
+def test_bytes_not_from_the_image_are_not_measured(tmp_path, monkeypatch,
+                                                   mounts, changes, resolved):
+    project, fs = _project(tmp_path)
+    runner = ImageContainer(fs, banner=False)
+    runner.mounts, runner.changes, runner.resolved = mounts, changes, resolved
+    _use(monkeypatch, runner)
+    result = gate.run(project, None, None, None, None)
+    assert result["verdict"] == "DISCLOSED_SKIP", result
+    assert result["measurement"] == "NOT_MEASURED"
+    assert "not the image's bytes" in result["reason"]
+    assert runner.argv is None
+
+
+def test_unrelated_mounts_and_changes_leave_the_tree_proven(tmp_path,
+                                                            monkeypatch):
+    project, fs = _project(tmp_path)
+    runner = ImageContainer(fs, banner=False)
+    runner.mounts = ["/foss/designs", "/foss/pdks_other", "/tmp"]
+    runner.changes = ["/foss", "/foss/pdks", "/root/.cache/x",
+                      f"{GUEST}_old/libs.tech"]
+    _use(monkeypatch, runner)
+    result = gate.run(project, None, None, None, None)
+    assert result["verdict"] == "PASS", result
+    assert result["pdk_image_bytes"]["guest_tree"] == GUEST
+
+
+def _docker(monkeypatch, *, mounts, tmpfs=None, diff="", real=GUEST,
+            fail=()):
+    seen = []
+    monkeypatch.setattr(launch._ce, "docker_exec_argv",
+                        lambda c, *rest, opts=(): ["docker", "exec", c, *rest])
+
+    def fake_run(argv, **kw):
+        seen.append(list(argv))
+        verb = argv[1]
+        if verb in fail:
+            return subprocess.CompletedProcess(argv, 1, "" if kw.get("text")
+                                               else b"", "boom")
+        if verb == "exec":
+            assert argv[3:6] == ["readlink", "-f", "--"]
+            return subprocess.CompletedProcess(argv, 0, real.encode() + b"\n", b"")
+        if verb == "inspect":
+            body = (json.dumps([{"Type": "bind", "Source": "/h",
+                                 "Destination": d} for d in mounts])
+                    + "\t" + json.dumps(tmpfs))
+            return subprocess.CompletedProcess(argv, 0, body + "\n", "")
+        if verb == "diff":
+            return subprocess.CompletedProcess(argv, 0, diff, "")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(launch.subprocess, "run", fake_run)
+    return seen
+
+
+def test_container_image_tree_proof_reads_inspect_and_diff_without_a_shell(
+        monkeypatch):
+    seen = _docker(monkeypatch, mounts=["/foss/designs"],
+                   diff="C /foss\nC /foss/pdks\nA /root/.cache\n")
+    proven, why, record = launch.ContainerRunner("fx").image_tree_proof(GUEST)
+    assert (proven, why) == (True, ""), record
+    assert record["mounts_checked"] == 1
+    assert record["writable_layer_changes_checked"] == 3
+    assert all("bash" not in a and "-lc" not in a for a in seen)
+
+
+@pytest.mark.parametrize("kw, needle", [
+    ({"mounts": [], "tmpfs": {"/foss/pdks": ""}}, "mount /foss/pdks"),
+    ({"mounts": ["/foss"]}, "mount /foss overlays"),
+    ({"mounts": [], "diff": f"C /foss\nA {GUEST}/x.rb\n"}, "writable-layer change"),
+    ({"mounts": ["/ciel"], "real": "/ciel/v/fixture_pdk"}, "/ciel/v/fixture_pdk"),
+    ({"mounts": [], "fail": ("diff",)}, "failed"),
+    ({"mounts": [], "fail": ("inspect",)}, "failed"),
+    ({"mounts": [], "fail": ("exec",)}, "does not resolve"),
+])
+def test_container_image_tree_proof_refuses_overlays_and_silence(
+        monkeypatch, kw, needle):
+    _docker(monkeypatch, **kw)
+    proven, why, _ = launch.ContainerRunner("fx").image_tree_proof(GUEST)
+    assert proven is False and needle in why, why
+
+
+# (3) every file the parent executes is hashed and re-checked ---------------- #
+def test_every_deck_file_is_recorded(tmp_path, monkeypatch):
+    project, fs = _project(tmp_path)
+    _image_file(fs, "rule_framework.rb").write_bytes(b"# prints the tally\n")
+    _image_file(fs, "rule_decks/metal.rb").write_bytes(b"# another deck\n")
+    runner = ImageContainer(fs, banner=False)
+    _use(monkeypatch, runner)
+    result = gate.run(project, None, None, None, None)
+    assert result["verdict"] == "PASS", result
+    files = result["pdk_deck_files"]
+    want = {f"{DECK_DIR}/{rel}": _sha(_image_file(fs, rel).read_bytes())
+            for rel in (PARENT, "helper.rb", "rule_framework.rb",
+                        "rule_decks/antenna.rb", "rule_decks/metal.rb")}
+    assert files == want
+    assert result["pdk_deck_manifest_sha256"] == hashlib.sha256("".join(
+        f"{want[k]}  {k}\n" for k in sorted(want)).encode()).hexdigest()
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda fs: _image_file(fs, "helper.rb").write_bytes(b"# edited\n"),
+    lambda fs: _image_file(fs, "rule_decks/new.rb").write_bytes(b"# added\n"),
+    lambda fs: _image_file(fs, "helper.rb").unlink(),
+])
+def test_any_deck_file_changing_during_the_run_is_not_measured(
+        tmp_path, monkeypatch, mutate):
+    project, fs = _project(tmp_path)
+    runner = ImageContainer(fs, banner=False)
+    runner.during_run = lambda: mutate(fs)
+    _use(monkeypatch, runner)
+    result = gate.run(project, None, None, None, None)
+    assert result["verdict"] == "DISCLOSED_SKIP", result
+    assert "changed or vanished during execution" in result["reason"]
+
+
+# (4) exactly one tally, and its polarity ------------------------------------ #
+@pytest.mark.parametrize("transcript, needle", [
+    (lambda rule, script: _transcript(rule, 0) + "x: DRC RESULT: SUCCESS (0 violations)\n",
+     "2 completion tallies"),
+    (lambda rule, script: _transcript(rule, 0).replace(
+        "SUCCESS (0 violations)", "FAILURE (0 violation(s))"), "own tally says FAILURE"),
+])
+def test_tally_must_be_single_and_its_polarity_must_match(
+        tmp_path, monkeypatch, transcript, needle):
+    project, fs = _project(tmp_path)
+    runner = ImageContainer(fs, banner=False, violations=0)
+    runner.transcript = transcript
+    _use(monkeypatch, runner)
+    result = gate.run(project, None, None, None, None)
+    assert result["verdict"] == "DISCLOSED_SKIP", result
+    assert result["measurement"] == "NOT_MEASURED"
+    assert needle in result["reason"], result
+
+
+def test_success_polarity_with_violations_is_a_binding_fail(tmp_path,
+                                                            monkeypatch):
+    project, fs = _project(tmp_path)
+    runner = ImageContainer(fs, banner=False, violations=2)
+    runner.transcript = lambda rule, script: _transcript(rule, 2).replace(
+        "FAILURE (2 violation(s))", "SUCCESS (2 violations)")
+    _use(monkeypatch, runner)
+    result = gate.run(project, None, None, None, None)
+    assert (result["verdict"], result["failure_class"]) == ("FAIL", "BINDING")
+    assert "own tally says SUCCESS" in result["reason"], result
+
+
+# (5) the declared receipt the producer actually writes ---------------------- #
+def _declared_project(tmp_path, monkeypatch, *, pdk=PDK):
+    import librelane_contract as contract
+    project = tmp_path / "project"
+    gds_dir = project / "phase3/stage4/gds"
+    gds_dir.mkdir(parents=True)
+    (gds_dir / "layout.gds").write_bytes(b"routed stream geometry")
+    host_root = tmp_path / "declared_pdk_root"
+    _write_deck(host_root / PDK / DRC_REL)
+    (project / "phase3/librelane_switch.json").write_text(
+        json.dumps({"pdk_root_host": str(host_root)}))
+    monkeypatch.delenv("VIBEIC_LIBRELANE_PDK_ROOT", raising=False)
+    answer = contract.pdk_root_resolution(project, pdk)
+    return project, host_root, answer
+
+
+def test_a_declared_pdk_root_receipt_is_measured_on_the_host(tmp_path,
+                                                             monkeypatch):
+    project, host_root, answer = _declared_project(tmp_path, monkeypatch)
+    assert answer["source"] == "declared" and "derivation" not in answer
+    assert json.loads((project / gate._PDK_ROOT_RECEIPT).read_text()) == answer
+    host = HostKLayout()
+    _use(monkeypatch, None, host=host)
+    result = gate.run(project, None, None, None, None)
+    assert result["verdict"] == "PASS", result
+    assert result["pdk_tree_side"] == "host"
+    assert result["pdk_parent"] == str(host_root / PDK / DRC_REL / PARENT)
+    assert result["pdk_image_id"] is None
+
+
+def test_a_declared_receipt_naming_no_pdk_is_refused_by_name(tmp_path,
+                                                             monkeypatch):
+    project, _, answer = _declared_project(tmp_path, monkeypatch, pdk=None)
+    assert "pdk" not in answer
+    _use(monkeypatch, None, host=HostKLayout())
+    result = gate.run(project, None, None, None, None)
+    assert result["verdict"] == "DISCLOSED_SKIP", result
+    assert "declared PDK root" in result["reason"]
+    assert "names no PDK" in result["reason"]
