@@ -2,10 +2,26 @@
 
 The structural reader and the Step-5/gate consumers run normally.  Only the
 external SBY executor's transcript is substituted in the accept/refute arms.
+
+The structural reader ELABORATES the DUT with yosys (`formal_structural_check.
+run_yosys`, `container=None`: this filesystem, the in-image route). On a host
+with no yosys that elaboration returns rc 127 and the program honestly refuses
+every obligation ("the DUT does not elaborate") — a fact about the HOST, not
+about the binding under test. The two arms that need a proof therefore state
+that precondition first, in the grammar the suite's outcome-state tier reads
+(`_outcome_states`: a KNOWN_TOOLS name that is absent from the session PATH):
+such a host reports NOT_VERIFIED with its name and the remedy
+(`tools/ci/run_suite_in_eda_image.sh`), never a FAIL and never a pass. Where
+yosys resolves (a host that has it, or the pinned vibeic-eda image) every
+assertion below runs unchanged.
 """
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import formal_harness_gen as gen  # noqa: E402
@@ -58,7 +74,23 @@ def _project(root):
     return rtl
 
 
+#: The directories `formal_structural_check.run_yosys` puts in front of PATH
+#: for its elaboration — the tool is resolved exactly as the program resolves it.
+_PROGRAM_YOSYS_DIRS = ("/foss/tools/bin", "/foss/tools/yosys/bin")
+
+
+def _require_elaborator():
+    """The proof arms' precondition: the yosys the program will run exists."""
+    path = os.pathsep.join(_PROGRAM_YOSYS_DIRS + (os.environ.get("PATH", ""),))
+    if shutil.which("yosys", path=path) is None:
+        pytest.fail(
+            "yosys: command not found — the structural reader elaborates the "
+            "DUT with yosys (container=None) and this host has none, so the "
+            "L8 binding cannot be proved or refuted here")
+
+
 def _run(root, monkeypatch, status):
+    _require_elaborator()
     rtl = _project(root)
     emitted = gen.generate(project=root, top="chip_top", container=None)
     assert emitted["verdict"] == "EMITTED", emitted
