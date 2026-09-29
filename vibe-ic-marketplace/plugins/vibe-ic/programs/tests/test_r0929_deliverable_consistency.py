@@ -515,3 +515,71 @@ def test_the_producer_names_no_design():
     src = (_PROGRAMS / "area_budget_basis_gen.py").read_text("utf-8").lower()
     for token in ("sky130", "gf180", "spm", "subservient", "openmpw"):
         assert token not in src, token
+
+
+# --------------------------------------------------------------------------- #
+# 7. DELIVC final-check follow-ups (review_wave58/DELIVC_final.json 1 and 2)
+# --------------------------------------------------------------------------- #
+def test_the_producer_never_overwrites_an_owner_attested_area_answer(tmp_path):
+    """Finding 2: an owner-attested synthesis_area_budget is the owner's
+    field; the producer refuses and writes nothing."""
+    doc = _answers()
+    doc["answer_provenance"]["synthesis_area_budget"] = {
+        "answered_by": "owner", "citation": "owner ruling R-0000-X"}
+    proj = _project(tmp_path, answers=doc)
+    before = (proj / ANSWERS_REL).read_bytes()
+    assert _gen().main([str(proj)]) == 1
+    assert (proj / ANSWERS_REL).read_bytes() == before
+
+
+def test_an_owner_record_without_a_citation_is_still_not_overwritten(tmp_path):
+    doc = _answers()
+    doc["answer_provenance"]["synthesis_area_budget"] = {"answered_by": "owner"}
+    proj = _project(tmp_path, answers=doc)
+    before = (proj / ANSWERS_REL).read_bytes()
+    assert _gen().main([str(proj)]) == 1
+    assert (proj / ANSWERS_REL).read_bytes() == before
+
+
+def test_a_hand_forged_provenance_is_caught_by_re_derivation(tmp_path):
+    """Finding 1: the record is self-declared. A hand-written answer carrying
+    a copied, internally consistent record (current deliverable, real digest)
+    passes every structural check; re-running the producer does not."""
+    proj, doc = _regenerated(tmp_path)
+    doc["answers"]["synthesis_area_budget"]["rationale"] = (
+        "Hand-written: the deliverable is a hard macro, so no die applies.")
+    rec = doc["answer_provenance"]["synthesis_area_budget"]
+    assert rec["inputs_sha256"] == TD.derived_inputs_sha256(proj, rec["inputs"])
+    got = TD.derived_answer_refusals(doc, proj, source=ANSWERS_REL)
+    assert [r["rule"] for r in got] == [STALE_RULE], got
+    assert "re-running area_budget_basis_gen" in got[0]["message"]
+
+
+def test_a_forged_record_on_an_answer_the_producer_would_not_give(tmp_path):
+    proj, doc = _regenerated(tmp_path)
+    doc["answers"]["synthesis_area_budget"] = {
+        "status": "LIMIT", "max_die_dimensions_um": [10.0, 10.0]}
+    got = TD.derived_answer_refusals(doc, proj)
+    assert [r["rule"] for r in got] == [STALE_RULE], got
+
+
+def test_a_design_document_added_later_is_caught(tmp_path):
+    """Finding 1: a document added after derivation is not in the recorded
+    inputs, so the recorded digest still matches; re-derivation reads it."""
+    proj, doc = _regenerated(tmp_path)
+    (proj / "input" / "docs" / "L2_architecture.md").write_text(
+        "# L2\n\n### Die size\n- 不指定。由 Plugin 自選。\n", "utf-8")
+    rec = doc["answer_provenance"]["synthesis_area_budget"]
+    assert rec["inputs_sha256"] == TD.derived_inputs_sha256(proj, rec["inputs"])
+    got = TD.derived_answer_refusals(doc, proj)
+    assert [r["rule"] for r in got] == [STALE_RULE], got
+
+
+def test_re_derivation_passes_the_producers_own_output(tmp_path):
+    """Control: the producer's own current output is what re-derivation
+    reproduces, in the answers file and in the declaration."""
+    proj, doc = _regenerated(tmp_path)
+    assert TD.derived_answer_refusals(doc, proj) == []
+    _declare(proj)
+    decl = json.loads((proj / TD.DECLARATION_REL).read_text("utf-8"))
+    assert TD.derived_answer_refusals(decl, proj) == []
