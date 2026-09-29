@@ -31,7 +31,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import test_fullstacktb_functional_population as base  # noqa: E402
 
-RULE = "functional_record_case_set_mismatch"
+#: Rebased onto R-0929-STEP5-BAR (v1.26.45): the landed gate reports a record
+#: that omits a declared case as `functional_record_inconsistent`
+#: (test_r0929_step5_bar_datapath pins it); the exact-set check reports
+#: missing / extra / duplicated rows through that same rule.
+RULE = "functional_record_inconsistent"
 
 
 def _fsf():
@@ -151,10 +155,60 @@ def test_the_producers_complete_record_still_passes(tmp_path, arith_class,
     proj = base._mk_project(tmp_path, die=True, cases=cases)
     rec = _fsf().generate(proj, "ctr", dispatch=base._FakeSim(),
                           model_resolver=base._resolver)
-    assert rec["verdict"] == "PASS", rec["reason"]
     names = [c["name"] for c in rec["cases"]]
     assert "by_id_only" in names and "not an identifier" in names
     rc, res, out = base._run_gate(proj, tmp_path, capsys)
-    assert rc == 0 and res["verdict"] == "PASS", res
+    # the set check passes the producer's own record ...
+    assert res["missing_cases"] == [] and res["extra_cases"] == [], res
+    assert res["rule"] != RULE, res
     assert res["counts"]["executed"] == 3
-    assert "INCOMPLETE" not in out
+    # ... and the landed R-0929-STEP5-BAR, not the set check, then judges the
+    # two declared rows no oracle executed (they block Step 5 by name)
+    assert res["verdict"] == "NOT_MEASURED", res
+    assert "by_id_only" in res["rationale"]
+    assert "not an identifier" in res["rationale"]
+
+
+# ===========================================================================
+# Rebased onto R-0929-STEP5-BAR: the ISA-credited / data-path rows are bound
+# by the same exact-set rule (a credited row is one L10 case, never a stand-in)
+# ===========================================================================
+import test_r0929_step5_bar_datapath as s5dp  # noqa: E402
+from test_r0929_step5_bar_datapath import cpu_env  # noqa: E402,F401
+
+
+def _credited_pass(tmp_path):
+    proj = s5dp._cpu_project(tmp_path)
+    rec = s5dp._gen(proj)
+    by = {c["name"]: c for c in rec["cases"]}
+    assert by["rv32i_all"]["step5_disposition"]["disposition"] == \
+        "isa_credited" and rec["verdict"] == "PASS", rec["reason"]
+    return proj, rec
+
+
+def test_an_isa_credited_row_deleted_from_the_record_is_refused(
+        tmp_path, cpu_env, capsys):
+    proj, rec = _credited_pass(tmp_path)
+    rec["cases"] = [c for c in rec["cases"] if c["name"] != "rv32i_all"]
+    _fsf().record_path(proj).write_text(json.dumps(rec))
+    _assert_refused(proj, tmp_path, capsys, ["rv32i_all"], [])
+
+
+def test_a_credited_row_cannot_stand_in_for_an_executed_one(
+        tmp_path, cpu_env, capsys):
+    proj, rec = _credited_pass(tmp_path)
+    credited = next(c for c in rec["cases"] if c["name"] == "rv32i_all")
+    rec["cases"] = [c for c in rec["cases"] if c["name"] != "boot_fetch"] + [
+        dict(credited)]
+    _fsf().record_path(proj).write_text(json.dumps(rec))
+    _assert_refused(proj, tmp_path, capsys, ["boot_fetch"], ["rv32i_all"])
+
+
+def test_the_datapath_program_is_not_an_l10_case_row(tmp_path, cpu_env,
+                                                     capsys):
+    """The flow-built data-path program backs ISA credit; recorded as a CASE
+    row it is a case the L10 does not declare."""
+    proj, rec = _credited_pass(tmp_path)
+    rec["cases"].append(dict(rec["cpu_datapath"], name="cpu_datapath_program"))
+    _fsf().record_path(proj).write_text(json.dumps(rec))
+    _assert_refused(proj, tmp_path, capsys, [], ["cpu_datapath_program"])
