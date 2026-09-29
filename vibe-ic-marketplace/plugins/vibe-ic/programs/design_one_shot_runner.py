@@ -1759,7 +1759,37 @@ def _run_iverilog_stage(argv: List[str], run_dir: Path, container: str,
                       for tok in argv)
     cmd = (f"cd {_shlex.quote(c_dir)} && "
            f"export PATH={TOOLS_IN_CONTAINER}/bin:$PATH && {c_argv}")
-    return _docker_exec(container, cmd, timeout=timeout)
+    rc, out, err = _docker_exec(container, cmd, timeout=timeout)
+    return (rc, _container_text_to_host(out, container),
+            _container_text_to_host(err, container))
+
+
+def _container_text_to_host(text: str, container: str) -> str:
+    """`text` a tool printed INSIDE `container`, with every path under one of
+    the container's bind mounts spelled the way the HOST names it.
+
+    The argv above was translated host->container, so the tool reports the
+    files it read in the CONTAINER's spelling (`/foss/designs/<proj>/...`).
+    Quoted into a StepResult, that spelling names the project through a second
+    mount: `_refuse_relocated_copy_in_record` reads it as a relocated copy and
+    the whole phase-2 record is refused. MEASURED on a fresh subservient DIE
+    copy (8HD-3, 2026-09-29): Step 20's detail carried iverilog's
+    `/foss/designs/<proj>/phase2/stage1/sim_full_stack/tb_subservient_full.v:36:
+    error: ...` and phase 2 died with no report. This is the inverse of the
+    translation applied to the argv, from the container's own mount table;
+    a path no mount covers is left as printed. Identity mounts change
+    nothing."""
+    if not text:
+        return text
+    pairs = [(src, dst) for src, dst in _container_mounts(container)
+             if src and dst and src != dst]
+    if not pairs:
+        return text
+    pairs.sort(key=lambda t: len(t[1]), reverse=True)
+    by_dst = {dst: src for src, dst in pairs}
+    rx = re.compile("(" + "|".join(re.escape(dst) for _src, dst in pairs)
+                    + r")(?=/|$|[\s:'\"),;])")
+    return rx.sub(lambda m: by_dst[m.group(1)], text)
 
 
 # -------------------------------------------------------------------------
@@ -13858,6 +13888,52 @@ def _run_oracle_tb(project: Path, top_name: str, tb_path: Path,
                 "tb_frontend": tb_frontend})
 
 
+_FULL_STACK_DUT_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s+u_dut\s*\(", re.M)
+_VERILOG_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+
+
+def _full_stack_dut_not_in_rtl(project: Path, tb_path: Path,
+                               rtl_files: Sequence[Path]
+                               ) -> Optional[Dict[str, Any]]:
+    """The DUT the generic full-stack TB instantiates, when NO source in the
+    compile set defines it; else None.
+
+    `step_full_stack_tb_gen` writes `<top> u_dut (` from L9.top_ports, so the
+    TB's own instance line names the module it needs. When the design's top
+    is still owed -- rtl_gen fetched reused IP and handed the SoC glue to an
+    authoring skill -- the TB is compiled against leaves only and iverilog
+    answers "Unknown module type: <top>". That is not a structural defect in
+    the design; it is a design not written yet. Decided from the TB and the
+    sources, never from the compiler's words. None (compile as before) when
+    the TB carries no `u_dut` instance or any source defines the module."""
+    try:
+        m = _FULL_STACK_DUT_RE.search(
+            _VERILOG_COMMENT_RE.sub("", tb_path.read_text(errors="replace")))
+    except OSError:
+        return None
+    if not m:
+        return None
+    dut = m.group(1)
+    define = re.compile(r"\bmodule\s+" + re.escape(dut) + r"\b")
+    for f in rtl_files:
+        try:
+            if define.search(_VERILOG_COMMENT_RE.sub(
+                    "", Path(f).read_text(errors="replace"))):
+                return None
+        except OSError:
+            continue
+    out: Dict[str, Any] = {"dut": dut, "rtl_files": len(rtl_files)}
+    staged = _pl.phase2_stage1_dir(project) / FALLBACK_SKILL_STAGED_NAME
+    try:
+        fm = re.search(r"^name:\s*([\w.-]+)\s*$",
+                       staged.read_text(errors="replace"), re.M)
+        if fm:
+            out["fallback_skill"] = fm.group(1)
+    except OSError:
+        pass
+    return out
+
+
 def _reference_tb_generic_full_stack(project: Path, top_name: str,
                                      track_reason: str,
                                      t0: float,
@@ -13975,6 +14051,28 @@ def _reference_tb_generic_full_stack(project: Path, top_name: str,
         for _m in _staged_hardmacro_models(project, rtl_files):
             if _m["v"] is not None:
                 rtl_files.append(_m["v"])
+        _owed = _full_stack_dut_not_in_rtl(project, tb_path, rtl_files)
+        if _owed is not None:
+            return StepResult(
+                "reference_tb", "NOT_MEASURED", time.time() - t0,
+                (f"AID reference TB SKIPPED ({track_reason}); the generic "
+                 f"full-stack TB ({tb_path.name}) instantiates "
+                 f"`{_owed['dut']}`, which no file under rtl/ defines "
+                 f"({_owed['rtl_files']} file(s) searched) — the top is not "
+                 f"authored yet"
+                 + (f" (rtl_gen handed it to skill `{_owed['fallback_skill']}`)"
+                    if _owed.get("fallback_skill") else "")
+                 + ", so nothing was compiled and nothing about the design "
+                 "was judged. Author the top, then re-run."),
+                [str(tb_path)],
+                extras={"verification_track": "generic_full_stack",
+                        "aid_tb_skipped_reason": track_reason,
+                        "functional_verified": False,
+                        "sim_executed": False,
+                        "dut_not_in_rtl": _owed},
+                reason_class=(_V.ReasonClass.AWAITING_AGENT_PASS.value
+                              if _owed.get("fallback_skill")
+                              else _V.ReasonClass.INPUT_ABSENT.value))
         run_dir = sim_dir / "generic_full_stack_run"
         run_dir.mkdir(parents=True, exist_ok=True)
         vvp = run_dir / "full_stack.vvp"
