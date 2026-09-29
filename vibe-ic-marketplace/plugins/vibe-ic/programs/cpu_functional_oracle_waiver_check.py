@@ -286,26 +286,60 @@ _SELECTION_FIELDS = ("isa_extensions", "extensions", "selected_options",
                      "options")
 
 
-def design_selected_options(project: Path) -> "Optional[frozenset]":
+def design_selected_options(project: Path,
+                            selection_issue: "Optional[dict]" = None
+                            ) -> "Optional[frozenset]":
     """The options the DESIGN declares it has, lower-cased, or None.
 
-    None means "the design made no such statement" and is NOT an empty set:
-    an empty set would narrow every conditional row away on a project that
-    simply does not use this field.
+    None means no consistent, well-formed selection can be established. An
+    explicit [] is an empty selection; blank or non-string entries are not.
+    Every supported selector, including a wrapped `fields` declaration, must
+    agree after case/whitespace normalization. `selection_issue` receives the
+    named reason for an undecidable declaration, without inventing a selection.
     """
+    def undecided(reason_class: str, why: str) -> None:
+        if selection_issue is not None:
+            selection_issue.update(reason_class=reason_class, why=why)
+        return None
+
     try:
         obj = json.loads((Path(project) / _DECLARATION_REL).read_text(
             errors="replace"))
     except (OSError, ValueError):
-        return None
+        return undecided("SELECTION_UNAVAILABLE",
+                         f"no selection can be read from {_DECLARATION_REL}")
     if not isinstance(obj, dict):
-        return None
-    fields = obj.get("fields") if isinstance(obj.get("fields"), dict) else obj
-    for key in _SELECTION_FIELDS:
-        value = fields.get(key)
-        if isinstance(value, list):
-            return frozenset(str(v).strip().lower() for v in value if str(v).strip())
-    return None
+        return undecided("MALFORMED_SELECTION", "declaration is not an object")
+    scopes = [("", obj)]
+    if isinstance(obj.get("fields"), dict):
+        scopes.append(("fields.", obj["fields"]))
+    selections = []
+    for prefix, fields in scopes:
+        for key in _SELECTION_FIELDS:
+            if key not in fields:
+                continue
+            field = prefix + key
+            value = fields[key]
+            if not isinstance(value, list):
+                return undecided("MALFORMED_SELECTION",
+                                 f"{field} must be a list of nonblank strings")
+            for index, entry in enumerate(value):
+                if not isinstance(entry, str) or not entry.strip():
+                    return undecided(
+                        "MALFORMED_SELECTION",
+                        f"{field}[{index}] must be a nonblank string")
+            selections.append((field, frozenset(v.strip().lower() for v in value)))
+    if not selections:
+        return undecided("SELECTION_UNDECLARED",
+                         f"no supported selection field in {_DECLARATION_REL}")
+    first_field, selected = selections[0]
+    for field, other in selections[1:]:
+        if other != selected:
+            return undecided(
+                "CONFLICTING_SELECTION",
+                f"{first_field}={sorted(selected)} conflicts with "
+                f"{field}={sorted(other)}")
+    return selected
 
 
 #: The only option spellings the narrowing decides on: RISC-V base/extension
@@ -325,7 +359,8 @@ DECLARATION_PROVENANCE_REL = "plugin_output/declaration.provenance.json"
 
 def split_design_declared_na(rows: list,
                              selected: "Optional[frozenset]",
-                             not_narrowed: "Optional[list]" = None
+                             not_narrowed: "Optional[list]" = None,
+                             selection_issue: "Optional[dict]" = None
                              ) -> "tuple[list, list]":
     """(applicable, design_declared_na) over declared rows. FAIL-CLOSED.
 
@@ -336,6 +371,15 @@ def split_design_declared_na(rows: list,
     not be decided is appended to it with the reason (`row` = its index in
     `rows`)."""
     if selected is None:
+        if not_narrowed is not None and selection_issue:
+            for index, row in enumerate(rows):
+                aw = row.get("applies_when") if isinstance(row, dict) else None
+                opt = aw.get("option") if isinstance(aw, dict) else None
+                if opt:
+                    not_narrowed.append({
+                        "case": row.get("name") or row.get("id"), "row": index,
+                        "option": opt, **selection_issue,
+                        "why": selection_issue["why"] + " -- the case is DEMANDED"})
         return list(rows), []
     undecodable = sorted(o for o in selected if o not in NARROWING_VOCABULARY)
     applicable, na = [], []
@@ -367,22 +411,27 @@ def split_design_declared_na(rows: list,
 def selection_basis_provenance(project: Path) -> Dict[str, Any]:
     """The provenance record of the declaration field the narrowing read.
 
-    Same field lookup as `design_selected_options` (first of
-    `_SELECTION_FIELDS` holding a list); the record comes from the emitter's
-    own sidecar. Absent sidecar / field -> said, never assumed verified."""
+    The shared reader validates all selectors first. Only a consistent
+    selection has a basis; an undecidable declaration carries its named
+    reason. The provenance record comes from the emitter's own sidecar."""
     project = Path(project)
     field = None
+    issue: Dict[str, Any] = {}
+    selected = design_selected_options(project, issue)
     try:
         obj = json.loads((project / _DECLARATION_REL).read_text(
             errors="replace"))
         fields = obj.get("fields") if isinstance(obj.get("fields"), dict) else obj
-        field = next((k for k in _SELECTION_FIELDS
-                      if isinstance(fields.get(k), list)), None)
+        if selected is not None:
+            field = next((k for k in _SELECTION_FIELDS
+                          if isinstance(fields.get(k), list)), None)
     except (OSError, ValueError, AttributeError):
         pass
     out: Dict[str, Any] = {"field": field,
                            "sidecar": DECLARATION_PROVENANCE_REL,
                            "provenance": None, "provenance_verified": None}
+    if selected is None:
+        out["selection_issue"] = issue
     try:
         side = json.loads((project / DECLARATION_PROVENANCE_REL).read_text(
             errors="replace"))
@@ -404,16 +453,15 @@ def selection_basis_provenance(project: Path) -> Dict[str, Any]:
 
 def _design_declared_na_disclosure(project: Path) -> dict:
     """What was narrowed away, by name, and on what declared basis."""
-    selected = design_selected_options(project)
+    issue: Dict[str, Any] = {}
+    selected = design_selected_options(project, issue)
     rows, _p = _split_executable(_declared_rows(
         _pl.generated_docs_dir(project) / "L10_TEST_CASES.json",
         ("test_cases", "cases", "vectors")))
     _app, na = split_design_declared_na(rows, selected)
     if selected is None:
         return {"decided": False,
-                "why": (f"the design states no selection in "
-                        f"{_DECLARATION_REL} (fields tried: "
-                        f"{', '.join(_SELECTION_FIELDS)}) — nothing narrowed")}
+                **issue, "why": issue["why"] + " -- nothing narrowed"}
     return {
         "decided": True,
         "design_selected": sorted(selected),

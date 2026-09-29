@@ -287,10 +287,12 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
     # `applies_when` stays, and an option the design DID select is demanded.
     # A narrowed case is DISCLOSED by name with its basis, never dropped
     # silently, and a FAIL anywhere -- narrowed case or not -- is still a FAIL.
-    selected = _w.design_selected_options(project)
+    selection_issue: Dict[str, Any] = {}
+    selected = _w.design_selected_options(project, selection_issue)
     not_narrowed: List[Dict[str, Any]] = []
     _app_rows, _na_rows = _w.split_design_declared_na(
-        list(cases), selected, not_narrowed=not_narrowed)
+        list(cases), selected, not_narrowed=not_narrowed,
+        selection_issue=selection_issue)
     _na_ref = {id(row) for row in _na_rows}
     # ONE VOCABULARY, FAIL-CLOSED (review w3u4f4z66 #3), now decided INSIDE the
     # shared reader: an option or a selection entry outside the closed

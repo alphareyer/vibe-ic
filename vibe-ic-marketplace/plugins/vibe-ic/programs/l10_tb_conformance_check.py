@@ -1145,9 +1145,10 @@ def _not_narrowed_disclosure(project_root: Optional[str],
         return []
     import cpu_functional_oracle_waiver_check as _cfow  # noqa: PLC0415
     out: List[Dict[str, Any]] = []
+    issue: Dict[str, Any] = {}
+    selected = _cfow.design_selected_options(Path(project_root), issue)
     _cfow.split_design_declared_na(
-        list(cases), _cfow.design_selected_options(Path(project_root)),
-        not_narrowed=out)
+        list(cases), selected, not_narrowed=out, selection_issue=issue)
     for row in out:
         row.pop("row", None)
     return out

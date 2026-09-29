@@ -302,3 +302,103 @@ def test_the_real_subservient_declaration_gives_the_landed_na_set(tmp_path):
     step4_na = {c["case"] for c in step4gate._design_declared_na_disclosure(
         tmp_path).get("cases") or []}
     assert l10_na == step4_na == {c["name"] for c in CONDITIONAL}
+
+
+# Final-round U10-I1: malformed entries and conflicting supported selectors
+# cannot establish an explicitly unselected feature. These use the production
+# CLI and the existing consumer contracts, without running a simulator.
+@pytest.mark.parametrize("declaration,reason", [
+    ({"isa_extensions": ["", "  "]}, "MALFORMED_SELECTION"),
+    ({"isa_extensions": ["I", "Zifencei"], "selected_options": ["M"]},
+     "CONFLICTING_SELECTION"),
+    ({"isa_extensions": ["I", " "]}, "MALFORMED_SELECTION"),
+    ({"isa_extensions": [None]}, "MALFORMED_SELECTION"),
+    ({"isa_extensions": [1]}, "MALFORMED_SELECTION"),
+    ({"isa_extensions": [], "extensions": "M"}, "MALFORMED_SELECTION"),
+    ({"isa_extensions": [], "selected_options": None}, "MALFORMED_SELECTION"),
+    ({"fields": {"extensions": [], "options": ["M"]}},
+     "CONFLICTING_SELECTION"),
+    ({"isa_extensions": [], "fields": {"selected_options": ["M"]}},
+     "CONFLICTING_SELECTION"),
+], ids=["blank", "conflicting", "mixed-blank", "null-entry", "numeric-entry",
+        "string-selector", "null-selector", "wrapped-conflict", "scope-conflict"])
+def test_final_round_ambiguous_selection_is_owed_by_all_consumers(
+        tmp_path, monkeypatch, declaration, reason):
+    # Same case shape as the pinned independent proof; no free-text waiver.
+    case = {"name": "optional_feature_case", "kind": "functional_vector",
+            "stimulus": "input conditional operation", "expected": "PASS",
+            "applies_when": {"option": "M", "stated": "only if M selected",
+                             "source": "input/spec.md"}}
+    rc, data, rows = _run_l10(tmp_path / "l10", declaration, [ALWAYS, case])
+    assert rows[case["name"]]["status"] == execution.NOT_EXECUTED, rows
+    assert rc == 1 and rows[case["name"]]["pass"] is False
+    assert data["design_declared_na"] == []
+    refused = data["design_declared_na_not_narrowed"]
+    assert refused[0]["reason_class"] == reason and "DEMANDED" in refused[0]["why"]
+    disclosure = step4gate._design_declared_na_disclosure(tmp_path / "l10")
+    assert disclosure["decided"] is False and disclosure["reason_class"] == reason
+    assert step4gate._declared_l10_case_ids(tmp_path / "l10") == [
+        "zifencei", case["name"]]
+    s5 = _step5(tmp_path / "step5", declaration, case)
+    assert s5["blocking"] is True and s5["disposition"] != fsf.DISP_NOT_APPLICABLE
+    assert s5["selection_issue"]["reason_class"] == reason
+    import test_professional_tb_an_option_the_design_did_not_pick as pt
+    professional = pt._run(
+        tmp_path / "professional", monkeypatch, [{"name": "rv32i"}, case],
+        declaration, {"rv32i": pt.PASS, case["name"]: pt.UNRUN})
+    assert professional["verdict"] == "NOT_CHECKED", professional
+    assert professional["design_declared_na"]["cases"] == []
+    assert professional["design_declared_na"]["not_narrowed"][0][
+        "reason_class"] == reason
+
+
+@pytest.mark.parametrize("field", ["isa_extensions", "extensions", "selected_options",
+                                   "options"])
+@pytest.mark.parametrize("wrapped", [False, True], ids=["plain", "wrapped"])
+def test_each_supported_selector_validates_entries_before_narrowing(
+        tmp_path, field, wrapped):
+    declaration = {field: ["I", ""]}
+    if wrapped:
+        declaration = {"fields": declaration}
+    _run_l10(tmp_path, declaration)
+    assert step4gate.design_selected_options(tmp_path) is None
+
+
+@pytest.mark.parametrize("declaration", [
+    {"isa_extensions": []},
+    {"extensions": [], "selected_options": [], "options": []},
+    {"fields": {"isa_extensions": []}},
+    {"isa_extensions": [], "fields": {"selected_options": []}},
+])
+def test_explicit_empty_selection_remains_legitimate(tmp_path, declaration):
+    rc, data, rows = _run_l10(tmp_path, declaration)
+    assert step4gate.design_selected_options(tmp_path) == frozenset()
+    assert rc == 0 and data["ok"] == 1
+    for case in CONDITIONAL:
+        row = rows[case["name"]]
+        assert row["status"] == NA_ROW and row["pass"] is False
+        assert _step5(tmp_path / case["name"], declaration, case)[
+            "disposition"] == fsf.DISP_NOT_APPLICABLE
+
+
+@pytest.mark.parametrize("selection,owed", [(["I", "Zifencei"], False),
+                                          (["I", "M"], True)])
+def test_equivalent_selectors_agree_after_normalization(tmp_path, selection, owed):
+    declaration = {"isa_extensions": selection,
+                   "extensions": [s.lower() for s in reversed(selection)],
+                   "fields": {"selected_options": [f" {s} " for s in selection]}}
+    _rc, _data, rows = _run_l10(tmp_path, declaration)
+    assert step4gate.design_selected_options(tmp_path) == frozenset(
+        s.lower() for s in selection)
+    assert (rows[CONDITIONAL[0]["name"]]["status"] == execution.NOT_EXECUTED) == owed
+
+
+@pytest.mark.parametrize("verdict", ["FAIL", "PASS"])
+def test_invalid_selection_preserves_executed_verdict(tmp_path, verdict):
+    rc, _data, rows = _run_l10(tmp_path, {"isa_extensions": ["", " "]},
+                              executed={CONDITIONAL[0]["name"]: verdict})
+    row = rows[CONDITIONAL[0]["name"]]
+    assert row["status"] == verdict.lower(), row
+    assert row["pass"] is (verdict == "PASS")
+    if verdict == "FAIL":
+        assert rc == 1
