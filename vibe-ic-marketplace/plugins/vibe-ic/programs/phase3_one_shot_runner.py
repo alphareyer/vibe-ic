@@ -61297,7 +61297,7 @@ def _postpnr_extraction_inputs(project: Path, top: str, pdk: PdkConfig,
 
 def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
                                         container: str) -> StepResult:
-    """Publish Steps 7/8/15/16/22 from a retained route, before Step 32.
+    """Publish Steps 7/8/15/16/21/22 from a retained route, before Step 32.
 
     These outputs read the route, constraints and extraction only. The receipt
     binds their bytes to routed.def and the active extraction PDK inputs. This
@@ -61371,6 +61371,20 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
     plan_path = emit_clock_plan(project, clock_path, primary_def, pnr, notes)
     if plan_path:
         written.append(plan_path)
+
+    # U3 — Step 21's router-DRC projection (`routed.drc.rpt` and its
+    # `reports/phase3/drc_router.rpt` mirror) reads only the router transcript.
+    # Its other two writers are the pre- and post-stream canonicalize passes,
+    # which a Step-32 FAIL never reaches; the route had run, yet the audit then
+    # blamed Step 21 for outputs nobody was allowed to write. Published here,
+    # before Step 32, and named as written only when its bytes changed.
+    _drc_rpts = (pnr / "routed.drc.rpt",
+                 _pl.reports_phase3_dir(project) / "drc_router.rpt")
+    _drc_before = {p: (p.read_bytes() if p.is_file() else None)
+                   for p in _drc_rpts}
+    _emit_router_drc_report(project, pnr, _pl.reports_phase3_dir(project), [])
+    written.extend(str(p) for p in _drc_rpts
+                   if p.is_file() and p.read_bytes() != _drc_before[p])
 
     spef = _pl.extracted_dir(project) / f"{top}.spef"
     try:
