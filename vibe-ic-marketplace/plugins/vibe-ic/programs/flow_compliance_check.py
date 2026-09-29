@@ -17498,6 +17498,40 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                     f"examined nothing, and it is {len(all_vacuous_cmds)} of "
                     f"{len(ran_hints)} gate clause(s) that ran here: {c}"
                     + (f" — {_json_diag[c]}" if _json_diag.get(c) else ""))
+        elif (passed and executed_declared_na_hints
+                and not non_hint_reasons and not skip_hints
+                and not vacuous_hints and not json_vacuous_hints
+                and not waiver_hints and not structure_only_hints
+                and not substantive_hints
+                and not step.get("required_outputs")
+                and all(_reason_taxonomy.NOT_APPLICABLE_BY_STRUCTURE
+                        in h[len(_EXECUTED_DECLARED_NA_HINT_PREFIX):]
+                        for h in executed_declared_na_hints)
+                # counted by CLAUSE: the payload is `<cmd> — reason_class=
+                # ...; <message>`, and the message is not the clause
+                and len({h[len(_EXECUTED_DECLARED_NA_HINT_PREFIX):].split(
+                            " — reason_class=", 1)[0].strip()
+                         for h in executed_declared_na_hints})
+                >= len(ran_hints)):
+            # U20 (IC_BLOCKER_AUDIT §2) — EVERY CLAUSE WAS ANSWERED BY
+            # STRUCTURE, SO THE STEP WAS. MEASURED on spm v5, step FS1: both
+            # clauses dispatched, both ENUMERATED the RTL and found no safety
+            # mechanism, neither measured a diagnostic coverage — and the step
+            # fell through to the bare PASS below and was counted in the
+            # run's PASS tally. R-0915-119 gave each clause its decided word;
+            # this gives the STEP the matching one when no clause said
+            # anything else.
+            #
+            # NARROW BY CONSTRUCTION: only NOT_APPLICABLE_BY_STRUCTURE (an
+            # executed DESIGN_DECLARED_NA keeps its landed PASS — a typed
+            # declaration was examined, test_design_declared_na_execution_
+            # contract), only when every dispatched clause is one (`>=` so a
+            # clause that ran and said anything else withholds this tier),
+            # and only for a step that owes no output of its own (a step that
+            # produced a declared artefact is judged by it, as the skip
+            # branch above already rules).
+            result.status = _T.Verdict.NOT_APPLICABLE.value
+            result.reason_class = ""
         else:
             result.status = (_T.Verdict.PASS.value if passed
                              else _T.Verdict.FAIL.value)

@@ -199,11 +199,18 @@ def test_check_step_routes_a_structural_absence_to_its_own_named_tier(
     decided — and it is not VACUOUS_PASS either: a vacuous gate examined no
     subject, while this one enumerated its population and says how many
     members it walked. It must not borrow DESIGN-DECLARED-N/A's sentence
-    either, because no design declaration was read."""
+    either, because no design declaration was read.
+
+    MIGRATED (U20, IC_BLOCKER_AUDIT §2): the step's word was PASS, which put a
+    step that measured nothing into the executed-PASS tally (spm v5 FS1). A
+    step whose EVERY clause is a structural absence, and that owes no output
+    of its own, is NOT_APPLICABLE; everything else this test pins is
+    unchanged."""
     proj = _minimal_rtl_project(tmp_path)
     result = _flow.check_step(
         proj, _step("break_handler_safety_check ."), waivers={})
-    assert result.status == "PASS", (result.status, result.reasons)
+    assert result.status == "NOT_APPLICABLE", (result.status, result.reasons)
+    assert result.status != "PASS", "an answered absence is not a PASS"
     joined = " ".join(result.reasons)
     assert "NOT_APPLICABLE_BY_STRUCTURE" in joined, result.reasons
     assert "ENUMERATED its subject population" in joined, result.reasons
