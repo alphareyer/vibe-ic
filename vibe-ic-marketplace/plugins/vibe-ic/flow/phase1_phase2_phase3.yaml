@@ -5779,10 +5779,6 @@ steps:
       # checker now tags the recreated file audit_created, excludes it by
       # default, and reports the missing pre-audit producer as a wiring gap.
       - "reports/phase3/sta/sta_corner_record_completeness.json"
-      # The post-route DRV verdict is produced by the single content-addressed
-      # judge.  Missing scene/stage receipts remain NOT_MEASURED and block this
-      # step; an owner waiver remains WAIVED, never an executed PASS.
-      - "reports/phase3/sta/drv_signoff.json"
       # The post-route SIGN-OFF CORNER verdict — same shape as the entry above
       # and declared with it under #1215.
       #
@@ -5996,6 +5992,14 @@ steps:
         # A run that declares and records no corner at all self-reports
         # NOT_APPLICABLE (rc 0), so pre-phase3 and analog runs are unaffected.
         - program_exit_zero: "sta_corner_record_completeness_check . --json reports/phase3/sta/sta_corner_record_completeness.json"
+        # The post-route DRV verdict is produced by the single content-addressed
+        # judge.  Missing scene/stage receipts remain NOT_MEASURED and block this
+        # step; an owner waiver remains WAIVED, never an executed PASS.
+        # Its --json path is this clause's own RECEIPT and is deliberately NOT a
+        # required_output: declaring a gate's verdict target as the step's
+        # output makes the audit read its own answer as run evidence
+        # (test_a_declared_output_is_not_its_gates_verdict_target, a ratchet
+        # that may only shrink).
         - program_exit_zero: "drv_signoff_judge . --json reports/phase3/sta/drv_signoff.json"
         # vibe-ic#2081 — A SIGN-OFF VIOLATION THAT NO PHYSICAL REMEDY CAN
         # CLOSE IS A RE-AUTHORING REQUEST, AND IT MUST BE ROUTED AS ONE.
