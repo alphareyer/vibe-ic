@@ -138,6 +138,25 @@ def check_project(project: Path) -> dict:
     if not body:
         report["findings"].append("NETLIST_EMPTY: the handoff netlist is empty or "
                                   "comment-only; PnR would consume nothing")
+    # Harvest of yosys_script_template_check's `-flatten` token: "without
+    # -flatten the ATPG flow breaks on backslash-escaped hierarchical names".
+    # The direct recipe always flattens and the tool flattens when its
+    # SYNTH_HIERARCHY_MODE says so; either way PnR must receive ONE module.
+    import _design_module_set
+    modules = sorted(_design_module_set.module_names_in_text(
+        netlist.read_text(errors="replace")))
+    report["modules"] = modules
+    # LibreLane's default mode is `flatten`, and `deferred_flatten` flattens
+    # after synthesis; a declared keep-hierarchy list keeps modules on purpose.
+    tool_cfg = json.loads(resolved_path.read_text()) if resolved_path is not None else {}
+    flattens = (tool_cfg.get("SYNTH_HIERARCHY_MODE") or "flatten") in ("flatten", "deferred_flatten")
+    kept = any(tool_cfg.get(key) for key in (
+        "SYNTH_KEEP_HIERARCHY_INSTANCES", "SYNTH_KEEP_HIERARCHY_MODULES",
+        "SYNTH_KEEP_HIERARCHY_MIN_COST"))
+    if flattens and not kept and len(modules) > 1:
+        report["findings"].append(
+            f"HIERARCHY_NOT_FLAT: {len(modules)} modules in a netlist the "
+            f"recipe flattens ({modules[:5]})")
     rtl_doc = json.loads(sidecar.read_text()).get("rtl_sha256")
     import _path_layout
     rtl_dir = _path_layout.rtl_dir(project)

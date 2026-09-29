@@ -131,3 +131,13 @@ def test_step14_gates_on_the_handoff_netlist_not_on_recipe_text():
     for gone in ("yosys_hilomap_required_check", "yosys_script_template_check",
                  "yosys_tiecell_recipe_order_check"):
         assert gone not in text
+
+
+def test_a_hierarchical_netlist_is_refused_when_the_recipe_flattens(tmp_path):
+    """yosys_script_template_check's `-flatten` token, read off the netlist:
+    without flattening the ATPG flow breaks on hierarchical names."""
+    src = tmp_path / "hier.v"
+    src.write_text((CAL / "synth_const_tied_negative.v").read_text()
+                   + "\nmodule leftover(input a, output y);\n  assign y = a;\nendmodule\n")
+    report = H.check_project(_project(tmp_path, src, tool=True))
+    assert any(f.startswith("HIERARCHY_NOT_FLAT") for f in report["findings"])
