@@ -166,8 +166,8 @@ other gated steps already resolved at least one program.
 --------------------------------------------------------------------
 5. ``blocks_on``
 --------------------------------------------------------------------
-113<!--figure:blocks_on_edges--> edges, mixed types
-(89<!--figure:blocks_on_edges_int--> int, 24<!--figure:blocks_on_edges_str--> str),
+116<!--figure:blocks_on_edges--> edges, mixed types
+(92<!--figure:blocks_on_edges_int--> int, 24<!--figure:blocks_on_edges_str--> str),
 every target resolving to a declared step id — no dangling references at time of writing. Compare with
 :func:`normalize_id` on both sides; the real consumers stringify
 (``{str(id): [str(e) for e in blocks_on]}``).
