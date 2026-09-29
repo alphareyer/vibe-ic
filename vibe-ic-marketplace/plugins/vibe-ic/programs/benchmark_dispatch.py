@@ -39,6 +39,7 @@ import fcntl
 import re
 import signal
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -120,6 +121,105 @@ def _ordered_parallel_map(items: Iterable[T], worker: Callable[[T], R],
 class _ProcessOutcome:
     rc: int | None
     error: str | None = None
+    stdout: str | None = None
+    stderr: str | None = None
+    invocation_id: str | None = None
+    receipt_path: str | None = None
+    receipt_sha256: str | None = None
+
+
+_RUNNER_REPORT_NAMES = ("phase1_one_shot.json", "phase2_one_shot.json",
+                        "phase3_one_shot.json", "vibe_ic_one_shot.json")
+
+
+def _runner_report_snapshot(project: Path) -> dict:
+    """Bind canonical reports to their bytes and filesystem generation.
+
+    A rewritten byte-identical report is fresh; an unchanged scaffold is not.
+    No receipt in runner_invocations is itself a runner report.
+    """
+    reports = {}
+    for name in _RUNNER_REPORT_NAMES:
+        path = project / "reports" / "orchestrator" / name
+        try:
+            raw = path.read_bytes()
+            stat = path.stat()
+            valid = isinstance(json.loads(raw), dict)
+        except (OSError, ValueError):
+            continue
+        reports[name] = {
+            "sha256": hashlib.sha256(raw).hexdigest(), "valid": valid,
+            "mtime_ns": stat.st_mtime_ns, "ctime_ns": stat.st_ctime_ns,
+            "inode": stat.st_ino, "size": stat.st_size,
+        }
+    return reports
+
+
+def _runner_diagnostics(process: _ProcessOutcome, argv: list[str],
+                        project: Path, *, require_phase2: bool = True) -> dict | None:
+    """Disclose pre-gate refusals without interpreting rc as a gate verdict.
+
+    BLOCKING only for unbound/stale evidence or a named refusal before ANY
+    fresh canonical report. Nonzero exits with usable reports keep the ordinary
+    collection/gate contract. Logs alone never establish a successful gate.
+    """
+    project = Path(project).resolve()
+    diagnostic = {
+        "invocation_id": process.invocation_id,
+        "receipt_path": process.receipt_path, "receipt_sha256": process.receipt_sha256,
+        "project": str(project), "argv": list(argv), "rc": process.rc,
+    }
+    try:
+        raw = Path(process.receipt_path or "").read_bytes()
+        receipt = json.loads(raw)
+        latest = json.loads((project / "reports" / "runner_invocations"
+                             / "latest.json").read_bytes())
+        if not (hashlib.sha256(raw).hexdigest() == process.receipt_sha256
+                and receipt["invocation_id"] == process.invocation_id == latest["invocation_id"]
+                and receipt["argv"] == latest["argv"] == list(argv)
+                and receipt["project"] == latest["project"] == str(project)
+                and receipt["rc"] == process.rc and receipt["error"] == process.error
+                and receipt["stdout"] == process.stdout and receipt["stderr"] == process.stderr
+                and receipt["reports_after"] == _runner_report_snapshot(project)):
+            raise ValueError("runner binding changed")
+    except (OSError, ValueError, KeyError, TypeError):
+        return {**diagnostic, "status": "INVOCATION_MISMATCH",
+                "reason_class": "RUNNER_INVOCATION_UNBOUND",
+                "reason": "RUNNER_INVOCATION_UNBOUND: missing, changed or mismatched runner receipt/reports"}
+    fresh = [name for name, record in receipt["reports_after"].items()
+             if record["valid"] and record != receipt["reports_before"].get(name)]
+    diagnostic["fresh_reports"] = fresh
+    if not fresh:
+        for line in (process.stderr or "").splitlines() + (process.stdout or "").splitlines():
+            refusal = re.match(r"^REFUSED:\s*([A-Z][A-Z0-9_]*)\b", line)
+            if refusal:
+                return {**diagnostic, "status": "REFUSED_PRE_GATE",
+                        "reason_class": refusal[1], "reason": line}
+    phase2 = "phase2_one_shot.json"
+    if require_phase2 and phase2 in receipt["reports_after"] and phase2 not in fresh:
+        return {**diagnostic, "status": "STALE_RUNNER_REPORT",
+                "reason_class": "RUNNER_REPORT_NOT_FRESH",
+                "reason": "RUNNER_REPORT_NOT_FRESH: phase2 report predates this invocation"}
+    # Some alternate subprocess implementations do not supply captured streams.
+    # Their receipt still binds the invocation/reports, but cannot disclose a
+    # stdout/stderr diagnostic. Never invent empty logs for an unavailable capture.
+    if process.stdout is None or process.stderr is None:
+        return None
+    return {**diagnostic, "status": ("REPORTS_AVAILABLE" if fresh else "NO_FRESH_REPORTS")}
+
+
+def _collect_runner_result(process: _ProcessOutcome, argv: list[str],
+                           fmt: str, pid: str, project: Path, **kwargs) -> dict:
+    """One producer/consumer boundary shared by solve, resume and regate."""
+    import benchmark_io_adapter as bio
+    diagnostic = _runner_diagnostics(process, argv, project)
+    if diagnostic and diagnostic.get("reason"):
+        return {"id": pid, "ok": False, "reason": diagnostic["reason"],
+                "runner_diagnostics": diagnostic}
+    got = bio.collect(fmt, pid, project, **kwargs)
+    if diagnostic:
+        got = {**got, "runner_diagnostics": diagnostic}
+    return got
 
 
 def _own_child_pids() -> list[int]:
@@ -296,19 +396,58 @@ class _RunnerBudget:
             kwargs["env"] = self._env
         if self.timeout_s is not None:
             kwargs["timeout"] = self.timeout_s
+        argv = [str(arg) for arg in argv]
+        invocation_id = uuid.uuid4().hex
+        # Canonical runner argv is interpreter, script, project, then flags.
+        project = (Path(argv[2]).resolve() if len(argv) > 2 and not argv[1].startswith("-")
+                   and not argv[2].startswith("-") else None)
+        rc, error, stdout, stderr = None, None, None, None
+        before, after = {}, {}
+        started_ns = finished_ns = None
         try:
             with self._heavy:
+                before = _runner_report_snapshot(project) if project else {}
+                started_ns = time.time_ns()
+                if project:
+                    _atomic_write_json(project / "reports" / "runner_invocations" / "latest.json", {
+                        "invocation_id": invocation_id, "argv": argv,
+                        "project": str(project), "started_ns": started_ns,
+                    })
                 proc = subprocess.run(argv, **kwargs)
-        except subprocess.TimeoutExpired:
-            return _ProcessOutcome(
-                rc=None,
-                error=(f"TimeoutExpired: runner exceeded "
-                       f"VIBEIC_SOLVE_RUNNER_TIMEOUT_S={self.timeout_s:g}s "
-                       f"and was killed"))
+                rc = int(proc.returncode)
+                stdout = getattr(proc, "stdout", None)
+                stderr = getattr(proc, "stderr", None)
+        except subprocess.TimeoutExpired as exc:
+            stdout, stderr = exc.stdout, exc.stderr
+            error = (f"TimeoutExpired: runner exceeded "
+                     f"VIBEIC_SOLVE_RUNNER_TIMEOUT_S={self.timeout_s:g}s "
+                     f"and was killed")
         except Exception as exc:                         # noqa: BLE001
-            return _ProcessOutcome(
-                rc=None, error=f"{type(exc).__name__}: {exc}")
-        return _ProcessOutcome(rc=int(proc.returncode))
+            error = f"{type(exc).__name__}: {exc}"
+        finally:
+            finished_ns = time.time_ns()
+            after = _runner_report_snapshot(project) if project else {}
+        # TimeoutExpired may carry bytes even when text=True was requested.
+        stdout = stdout.decode(errors="replace") if isinstance(stdout, bytes) else stdout
+        stderr = stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr
+        receipt_path = receipt_sha256 = None
+        if project:
+            path = project / "reports" / "runner_invocations" / f"{invocation_id}.json"
+            receipt = {
+                "schema": "vibeic.runner_invocation.v1", "invocation_id": invocation_id,
+                "argv": argv, "project": str(project), "rc": rc, "error": error,
+                "stdout": stdout, "stderr": stderr,
+                "started_ns": started_ns, "finished_ns": finished_ns,
+                "reports_before": before, "reports_after": after,
+            }
+            try:
+                _atomic_write_json(path, receipt)
+                receipt_path = str(path)
+                receipt_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError as exc:
+                error = f"RUNNER_DIAGNOSTICS_WRITE_FAILED: {exc}; runner_error={error}"
+        return _ProcessOutcome(rc, error, stdout, stderr, invocation_id,
+                               receipt_path, receipt_sha256)
 
 
 @dataclass(frozen=True)
@@ -327,6 +466,7 @@ class _ResumeRunnerOutcome:
     rc: int | None
     collected_json: str | None
     error: str | None
+    diagnostics_json: str | None = None
 
 
 def _phase_error_attribution() -> dict:
@@ -4301,24 +4441,29 @@ def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget) -> dict
     argv = _solver_argv(runner, project, "D1", "D1")
     argv.append("--no-dashboard")
     process = runner_budget.run(argv)
+    diagnostic = _runner_diagnostics(process, argv, project, require_phase2=False)
+    diagnostics = {"runner_diagnostics": diagnostic} if diagnostic else {}
     if process.error is not None:
         return {"status": "BLOCKED", "runner_rc": process.rc,
-                "reason": process.error}
+                "reason": process.error, **diagnostics}
+    if diagnostic and diagnostic.get("reason"):
+        return {"status": "BLOCKED", "runner_rc": process.rc,
+                "reason": diagnostic["reason"], **diagnostics}
     try:
         prompt_after = _sha256_text(prompt.read_text(errors="replace"))
         rtl_after = _sha256_text(_candidate_text(_rtl_files(project)))
     except OSError as exc:
         return {"status": "BLOCKED", "runner_rc": process.rc,
-                "reason": f"front-door output is unreadable: {exc}"}
+                "reason": f"front-door output is unreadable: {exc}", **diagnostics}
     if prompt_before != prompt_after or rtl_before != rtl_after:
         return {"status": "BLOCKED", "runner_rc": process.rc,
-                "reason": "D1-only front door changed the prompt or supplied RTL"}
+                "reason": "D1-only front door changed the prompt or supplied RTL", **diagnostics}
     provenance = emit_attestation.phase1_provenance(project)
     if provenance.get("ran") is not True:
         return {"status": "BLOCKED", "runner_rc": process.rc,
-                "reason": "D1-only front door emitted no hash-bound L-doc provenance"}
+                "reason": "D1-only front door emitted no hash-bound L-doc provenance", **diagnostics}
     return {"status": "GENERATED", "runner_rc": process.rc,
-            "provenance": provenance}
+            "provenance": provenance, **diagnostics}
 
 
 def _declared_route_ai_backup(routing: dict) -> dict:
@@ -5015,6 +5160,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
         # when the worker died before routing: the one case nobody looked.
         route_backup: dict = {"status": "NOT_MEASURED", "skills": []}
         phase1_frontdoor = None
+        process = None
         try:
             route_task = task_by_route_id[pid]
             if proj.resolve() != Path(route_task["project"]):
@@ -5057,18 +5203,21 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                         "canonical Phase-1 front door failed before routed "
                         f"entry {entry}: {phase1_frontdoor.get('reason')}")
 
-            process = runner_budget.run(
-                _solver_argv(runner, proj, entry, exit_step))
+            argv = _solver_argv(runner, proj, entry, exit_step)
+            process = runner_budget.run(argv)
             if process.error is not None:
                 raise RuntimeError(process.error)
             rc = int(process.rc)
-            got = bio.collect(fmt, pid, proj,
-                              required_top=_required_scorer_top(_entry(bench)))
-            waive = _rtl_gen_waive(proj)
+            got = _collect_runner_result(
+                process, argv, fmt, pid, proj,
+                required_top=_required_scorer_top(_entry(bench)))
+            diagnostic = got.get("runner_diagnostics")
+            pre_gate_blocked = bool(diagnostic and diagnostic.get("reason"))
+            waive = None if pre_gate_blocked else _rtl_gen_waive(proj)
             backup_source = None
             backup_skills: list[str] = []
             backup_detail = ""
-            if not got.get("ok"):
+            if not got.get("ok") and not pre_gate_blocked:
                 if waive:
                     backup_source = "rtl_gen_waive"
                     backup_skills = [str(waive.get("fallback_skill"))]
@@ -5082,6 +5231,10 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 proj, routing=verdict, entry=entry, evidence=ev,
                 exit_step=exit_step, rtl_present=rtl_present,
                 artefact_collected=bool(got.get("ok")))
+            if pre_gate_blocked:
+                phases = _phase_error_attribution()
+                for phase in phases.values():
+                    phase["reason"] = diagnostic["reason_class"]
             result = {
                 "id": pid, "nature": nature,
                 "entry": entry, "evidence": ev, "exit": exit_step,
@@ -5103,6 +5256,8 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 "awaiting_ai_backup": awaiting_backup,
                 "awaiting_ai": bool(got.get("ok") or awaiting_backup),
             }
+            if diagnostic:
+                result["runner_diagnostics"] = diagnostic
             review_task = None
             backup_task = None
             if got.get("ok"):
@@ -5127,6 +5282,8 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                                  else "no-rtl")))
             log_line = (f"  {pid:44s} {nature:22s} entry={str(entry):3s} "
                         f"exit={str(exit_step):4s} rc={rc} {state}")
+            if pre_gate_blocked:
+                log_line += f" {diagnostic['reason']}"
             return _SolveWorkerOutcome(
                 index=index, problem_id=pid,
                 result_json=json.dumps(result),
@@ -5157,6 +5314,10 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 "awaiting_ai_review": False,
                 "awaiting_ai_backup": False, "awaiting_ai": False,
             }
+            if process is not None:
+                diagnostic = _runner_diagnostics(process, argv, proj)
+                if diagnostic:
+                    result["runner_diagnostics"] = diagnostic
             return _SolveWorkerOutcome(
                 index=index, problem_id=pid,
                 result_json=json.dumps(result),
@@ -5435,18 +5596,21 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         argv = _resume_solver_argv(
             runner, proj, supplied_rtl, entry, exit_step)
         process = runner_budget.run(argv)
+        diagnostic = _runner_diagnostics(process, argv, proj)
+        diagnostics_json = json.dumps(diagnostic) if diagnostic else None
         if process.error is not None:
             return _ResumeRunnerOutcome(
                 problem_id=pid, rc=None, collected_json=None,
-                error=process.error)
+                error=process.error, diagnostics_json=diagnostics_json)
         try:
-            got = bio.collect(fmt, pid, proj, supplied_rtl=supplied_rtl,
-                              required_top=_required_scorer_top(_entry(bench)))
+            got = _collect_runner_result(
+                process, argv, fmt, pid, proj, supplied_rtl=supplied_rtl,
+                required_top=_required_scorer_top(_entry(bench)))
             payload = json.dumps(got)
         except Exception as exc:                          # noqa: BLE001
             return _ResumeRunnerOutcome(
                 problem_id=pid, rc=process.rc, collected_json=None,
-                error=f"{type(exc).__name__}: {exc}")
+                error=f"{type(exc).__name__}: {exc}", diagnostics_json=diagnostics_json)
         return _ResumeRunnerOutcome(
             problem_id=pid, rc=process.rc, collected_json=payload, error=None)
 
@@ -5457,6 +5621,14 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             evidence=result.get("evidence"), exit_step=result.get("exit"),
             rtl_present=fpa.rtl_present_at_input(proj),
             artefact_collected=bool(got.get("ok")))
+        diagnostic = got.get("runner_diagnostics")
+        result.pop("runner_diagnostics", None)
+        if diagnostic:
+            result["runner_diagnostics"] = diagnostic
+            if diagnostic.get("reason"):
+                phases = _phase_error_attribution()
+                for phase in phases.values():
+                    phase["reason"] = diagnostic["reason_class"]
         result.update({
             "rc": rc,
             "ok": bool(got.get("ok")),
@@ -5507,6 +5679,9 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         result = plan["result"]
         proj = plan["project"]
         if outcome.error is not None:
+            result.pop("runner_diagnostics", None)
+            if outcome.diagnostics_json:
+                result["runner_diagnostics"] = json.loads(outcome.diagnostics_json)
             repairs.append({
                 "schema": "vibeic.benchmark.ai_repair_task.v2",
                 "id": pid, "project": str(proj),
@@ -5679,6 +5854,9 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             continue
         outcome = next(backup_outcomes)
         if outcome.error is not None:
+            result.pop("runner_diagnostics", None)
+            if outcome.diagnostics_json:
+                result["runner_diagnostics"] = json.loads(outcome.diagnostics_json)
             remaining_backup.append(item)
             repairs.append({
                 "schema": "vibeic.benchmark.ai_repair_task.v2",
@@ -5919,6 +6097,9 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         proj = plan["project"]
         outcome = next(repair_outcomes)
         if outcome.error is not None:
+            result.pop("runner_diagnostics", None)
+            if outcome.diagnostics_json:
+                result["runner_diagnostics"] = json.loads(outcome.diagnostics_json)
             repairs.append({
                 "schema": "vibeic.benchmark.ai_repair_task.v2",
                 "id": pid, "project": str(proj),
@@ -7008,11 +7189,13 @@ def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
         runner = Path(__file__).resolve().parent / "vibe_ic_one_shot_runner.py"
         argv = _resume_solver_argv(runner, staged, True, result.get("entry"), result["exit"])
         process = _RunnerBudget(1, 1, worker_threads).run(argv)
-        got = bio.collect(fmt, pid, staged, supplied_rtl=True)
+        got = _collect_runner_result(process, argv, fmt, pid, staged, supplied_rtl=True)
         _write_immutable_json(archive / "runner_result.json", {
-            "argv": argv, "rc": process.rc, "error": process.error, "collected": got})
+            "argv": argv, "rc": process.rc, "error": process.error,
+            "runner_diagnostics": got.get("runner_diagnostics"), "collected": got})
         if process.error or not got.get("ok"):
-            refuse("Program runner failed; original task/project retained")
+            refuse("Program runner failed; original task/project retained: "
+                   + str(process.error or got.get("reason")))
         _regate_project_tree(staged)
         if (ea.phase1_provenance(staged) != task["phase1_provenance"]
                 or _sha256_text((staged / "input" / "phase1_prompt.md").read_text()) != task["prompt_sha256"]):
@@ -7083,6 +7266,9 @@ def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
                        "awaiting_ai_review": True, "ai_repair_required": False,
                        "review_task": new_task["review_path"], "program_regate": action,
                        "phases": phases})
+        result.pop("runner_diagnostics", None)
+        if got.get("runner_diagnostics"):
+            result["runner_diagnostics"] = got["runner_diagnostics"]
         solve["four_phase_summary"] = _four_phase_rollup(fpa, results)
         _atomic_write_json(solve_path, solve)
         repairs = [t for t in _read_jsonl(run_p / _REPAIR_WORKLIST) if t.get("id") != pid]
