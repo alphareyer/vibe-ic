@@ -240,8 +240,10 @@ def test_step10_tool_path_publishes_and_blocks_on_a_black_box(tmp_path, monkeypa
     chosen["log"] = "clean"
     ok = runner.step_prelayout_signoff(p, "cal_chain", pdk, "")
     assert ok.status == "PASS", ok.detail
-    rpt = (p / "phase3/stage3/sta/per_corner/sta_TT.rpt").read_text()
+    rpt = (p / "phase3/stage3/sta/prelayout_per_corner/sta_TT.rpt").read_text()
     assert "STA_BASIS: PRE_LAYOUT_ESTIMATE" in rpt and "worst slack max 5.00" in rpt
+    # CUT_W1A: step 10 never writes step 23's post-route corner directory
+    assert not (p / "phase3/stage3/sta/per_corner").exists()
     pvt = json.loads((p / "phase2/stage2/constraints/pvt_matrix.json").read_text())
     assert pvt["corner_source"].startswith("LibreLane resolved STA_CORNERS")
     chosen["log"] = "bad"
