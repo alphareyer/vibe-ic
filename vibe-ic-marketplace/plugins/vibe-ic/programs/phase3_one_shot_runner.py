@@ -49762,6 +49762,19 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
                               "stream_tail": (out or "")[-600:]})
 
 
+def _publish_shipped_density(project: Path, result: Dict[str, Any],
+                             gds_out: Path, pdk_name: str) -> None:
+    """Step 37 (LibreLane/dual), once the shipped stream is decided: publish
+    the LibreLane winner's per-layer density at the canonical
+    `reports/phase3/metal_density.json` only when ``gds_out`` holds the bytes
+    it measured (`librelane_fill_dfm.publish_metal_density` removes a report
+    it declines, so no report stays bound to a stream that does not ship)."""
+    import librelane_fill_dfm as _lf
+    published = _lf.publish_metal_density(
+        project, result.get("density_ratios") or {}, gds_out, pdk_name)
+    result["metal_density"] = str(published) if published else None
+
+
 def step_gds(project: Path, top: str, pdk: PdkConfig,
              container: str, *, candidate: bool = False) -> StepResult:
     """Opt-in tool stream-out; direct remains the production default."""
@@ -49883,7 +49896,11 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
         if dual["selection"] == "openroad":
             shutil.copy2(direct_gds, gds_out)
             result["engine"] = direct_result.extras.get("streamout_engine", "direct")
-        else:
+        # After the selection, on the bytes that ship: the LibreLane winner's
+        # density is published only if those bytes are its measured subject;
+        # otherwise any report there is removed and the emitter measures gds_out.
+        _publish_shipped_density(project, result, gds_out, pdk.name)
+        if dual["selection"] != "openroad":
             _log_invocation(
                 "klayout LibreLane step37 selected-stream finishing",
                 0, int((time.time() - t0) * 1000),
@@ -49894,6 +49911,7 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
                           [str(gds_out), str(direct_gds)],
                           extras={"streamout_engine": result["engine"],
                                   "dual_selection": dual["selection"]})
+    _publish_shipped_density(project, result, gds_out, pdk.name)
     _log_invocation(
         "klayout LibreLane step37 selected-stream finishing",
         0, int((time.time() - t0) * 1000),
