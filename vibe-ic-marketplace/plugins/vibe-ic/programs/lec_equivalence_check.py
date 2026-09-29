@@ -418,7 +418,104 @@ def verdict_was_decided(lc: dict, equivalent: Optional[bool],
     return False
 
 
+#: Step 13's composed record (`design_one_shot_runner._lec_eqy_arm`): the EQY
+#: tool arm's verdict beside lec_run's, and what each proved (sha256).
+LEC_ARMS_REL = "reports/lec_arms.json"
+
+
 def audit(project: Path) -> AuditResult:
+    """Arm A (lec_run's reports/lec.json), then the EQY tool arm when step 13
+    ran dual (R-0929-TOOL-DEFAULT): the gate audits the tool's output too."""
+    return audit_tool_arm(project, _audit_arm_a(project))
+
+
+def _arm_a_proof_sha(project: Path) -> Optional[str]:
+    try:
+        doc = json.loads((project / LEC_JSON_REL).read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    ident = doc.get("proof_identity") if isinstance(doc, dict) else None
+    gate = ident.get("gate_netlist") if isinstance(ident, dict) else None
+    sha = gate.get("sha256") if isinstance(gate, dict) else None
+    return sha if isinstance(sha, str) and sha.startswith("sha256:") else None
+
+
+def audit_tool_arm(project: Path, res: AuditResult) -> AuditResult:
+    """Fold step 13's EQY tool arm into arm A's result.
+
+    Only a record bound to the proof arm A made counts: `subjects.lec_run` must
+    be the sha256 in lec.json's `proof_identity.gate_netlist`; any other record
+    is stale and is only described. Bound, it is judged by the combine rule the
+    runner used (`librelane_eqy.combine`):
+    * a counterexample in the composed record (either arm, or the handoff
+      netlist) FAILs the gate -- it is never outvoted, and before this reader
+      an EQY counterexample never reached the audit at all;
+    * an EQY PASS stands for an UNDECIDED arm A only when EQY proved the very
+      netlist arm A was asked about (same sha256), compared no gold-x
+      (`xbits`) partition, and arm A recorded no counterexample. EQY treats
+      gold x as don't-care, so its PASS is never evidence beyond that.
+    """
+    path = project / LEC_ARMS_REL
+    if not path.is_file():
+        return res
+    try:
+        arms = json.loads(path.read_text(errors="replace"))
+        if not isinstance(arms, dict):
+            raise ValueError("top level is not an object")
+    except (OSError, ValueError) as exc:
+        res.findings.append(Finding(
+            rule="LEC_TOOL_ARM_UNREADABLE", severity="ERROR",
+            message=f"{LEC_ARMS_REL} cannot be read ({exc}): step 13 ran its "
+                    "tool arm and its verdict is unknown.",
+            file=LEC_ARMS_REL))
+        res.passed = False
+        return res
+    subjects = arms.get("subjects") if isinstance(arms.get("subjects"), dict) else {}
+    proof_sha = _arm_a_proof_sha(project)
+    verdict = str(arms.get("verdict") or "").upper()
+    note = {"record": LEC_ARMS_REL, "verdict": verdict,
+            "arms": arms.get("arms"), "selected": arms.get("selected"),
+            "reason": arms.get("reason"), "arm_a_proof_sha256": proof_sha,
+            "subjects": subjects}
+    res.summary["tool_arm"] = note
+    if not proof_sha or subjects.get("lec_run") != proof_sha:
+        note["state"] = "STALE"
+        note["why"] = ("the record is not bound to arm A's current proof "
+                       f"(record {subjects.get('lec_run')!r} vs lec.json "
+                       f"{proof_sha!r}); it is not credited either way")
+        return res
+    if verdict == "FAIL":
+        note["state"] = "COUNTEREXAMPLE"
+        res.findings.append(Finding(
+            rule="LEC_TOOL_ARM_NOT_EQUIVALENT", severity="ERROR",
+            message=(f"step 13's composed LEC is FAIL ({arms.get('reason')}; "
+                     f"arms {arms.get('arms')}): a counterexample in either "
+                     "arm is never outvoted."),
+            file=LEC_ARMS_REL))
+        res.passed = False
+        res.inconclusive = False
+        res.not_measured = False
+        return res
+    arm_b = str((arms.get("arms") or {}).get("eqy") or "").upper()
+    credit = (verdict == "PASS" and arms.get("selected") == "eqy"
+              and arm_b == "PASS" and not res.passed
+              and subjects.get("eqy") == proof_sha
+              and not arms.get("eqy_xbits_partitions")
+              and res.non_equivalent_points in (None, 0))
+    if not credit:
+        note["state"] = "NOT_CREDITED" if arm_b == "PASS" else "UNDECIDED"
+        return res
+    note["state"] = "CREDITED"
+    note["arm_a_findings"] = [asdict(f) for f in res.findings]
+    res.findings = []
+    res.passed = True
+    res.inconclusive = False
+    res.not_measured = False
+    res.evidence_source = (res.evidence_source + "+eqy").lstrip("+")
+    return res
+
+
+def _audit_arm_a(project: Path) -> AuditResult:
     res = AuditResult()
     json_path = project / LEC_JSON_REL
     rpt_path = project / LEC_RPT_REL
