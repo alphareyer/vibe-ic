@@ -232,12 +232,20 @@ def declared_output_qualifiers(
     description: two versions that did produced false PASSes. The landed strict
     rules still bind: clock and reset never qualify, only a multi-bit output is
     qualified, and an unsigned or malformed field is ignored."""
+    return declared_output_qualifiers_and_refusals(project, outputs,
+                                                   inputs)[0]
+
+
+def declared_output_qualifiers_and_refusals(
+        project: Path, outputs: List[Tuple[str, str]],
+        inputs: List[Tuple[str, str]],
+) -> Tuple[Dict[str, List[Dict[str, str]]], Dict[str, str]]:
+    """`declared_output_qualifiers`, plus {output: why its field was ignored}
+    so the testbench's FAIL text can say it."""
     import _qualified_by as _qb
     excluded = tuple(n for n in (_pick_clock(inputs), _pick_reset(inputs)[0])
                      if n)
-    found, _ignored = _qb.trusted_qualifiers(project, outputs, inputs,
-                                             excluded=excluded)
-    return found
+    return _qb.trusted_qualifiers(project, outputs, inputs, excluded=excluded)
 
 
 def _text(case: dict) -> str:
@@ -306,6 +314,7 @@ def emit_case_oracle_from_ports(
     outputs: List[Tuple[str, str]],
     inouts: List[Tuple[str, str]],
     qualifiers: Optional[Dict[str, List[Dict[str, str]]]] = None,
+    refusals: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     """Core, project-I/O-free emitter. Returns TB text, or None (fail-closed).
 
@@ -316,6 +325,7 @@ def emit_case_oracle_from_ports(
     X/Z only on a cycle where EVERY qualifier is known and at its inactive
     level, and each such cycle is printed as an `X_EXEMPT` line."""
     qualifiers = qualifiers or {}
+    refusals = refusals or {}
     name = case.get("name", "")
     family = case_family(case)
     if family is None:
@@ -437,13 +447,20 @@ def emit_case_oracle_from_ports(
                     for r in rows)
                 shown = ", ".join(f"{r['qualifier']}=%b" for r in rows)
                 args = ", ".join(r["qualifier"] for r in rows)
-                L.append(f"        if ({inactive})")
-                basis = _vstr("; ".join(r.get("evidence", "")
+                L.append(f"        if ({inactive}) begin")
+                field = _vstr("; ".join(r.get("field") or r.get("evidence", "")
                                         for r in rows))
                 L.append(f'          $display("[TB {name}] X_EXEMPT: cycle %0d '
                          f'after release: output \'{n}\' is X/Z while its '
                          f'declared qualifier(s) are inactive and known: '
-                         f'{shown} -- basis: {basis}", _i, {args});')
+                         f'{shown} -- basis: {field}", _i, {args});')
+                # EVERY basis entry, one line each: a fixed-length cut once
+                # dropped the third and fourth quotations (review wave58).
+                for r in rows:
+                    for cite in r.get("cites") or []:
+                        L.append(f'          $display("[TB {name}]   basis '
+                                 f'{_vstr(cite)}");')
+                L.append("        end")
                 L.append("        else begin")
                 L.append("          errors = errors + 1;")
                 L.append(f'          $display("[TB {name}] FAIL: output '
@@ -453,10 +470,12 @@ def emit_case_oracle_from_ports(
                 L.append("        end")
             else:
                 L.append("        errors = errors + 1;")
+                why = (f"qualified_by ignored: {_vstr(refusals[n])}"
+                       if n in refusals else
+                       "no qualifier declared for it in the design input")
                 L.append(f'        $display("[TB {name}] FAIL: output \'{n}\' '
                          f'is X/Z at cycle %0d after the glitch was released '
-                         f'(no qualifier declared for it in the design input)",'
-                         f' _i);')
+                         f'({why})", _i);')
             L.append("      end")
         L.append("    end")
     L.append("    if (errors != 0) begin")

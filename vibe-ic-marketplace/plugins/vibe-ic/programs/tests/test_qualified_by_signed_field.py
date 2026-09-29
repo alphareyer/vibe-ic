@@ -111,7 +111,7 @@ def test_a_receipt_without_the_matching_expectation_means_ignored(tmp_path):
     ([], "non-empty"),
     ([{"file": INPUT_DOC, "line": 5, "quote": "write enable"}], "is not on"),
     ([{"file": INPUT_DOC, "line": 99, "quote": "write data"}], "is not on"),
-    ([{"file": "reports/golden.txt", "line": 1, "quote": "x"}],
+    ([{"file": "reports/golden.txt", "line": 1, "quote": "golden text"}],
      "not a design-input file"),
     ([{"file": INPUT_DOC, "line": "5", "quote": "write data"}], "integer line"),
 ])
@@ -124,10 +124,10 @@ def test_a_basis_must_quote_the_design_input_verbatim(tmp_path, basis, why):
 
 @pytest.mark.parametrize("output,port,level,width,why", [
     ("o_flag", "o_we", "high", 1, "not a multi-bit data output"),
-    ("o_data", "d", "high", 8, "not a 1-bit port"),
-    ("o_data", "rst_n", "high", 8, "not a 1-bit port"),
-    ("o_data", "clk", "high", 8, "not a 1-bit port"),
-    ("o_data", "o_data", "high", 8, "not a 1-bit port"),
+    ("o_data", "d", "high", 8, "not a 1-bit OUTPUT"),
+    ("o_data", "rst_n", "high", 8, "not a 1-bit OUTPUT"),
+    ("o_data", "clk", "high", 8, "not a 1-bit OUTPUT"),
+    ("o_data", "o_data", "high", 8, "not a 1-bit OUTPUT"),
     ("o_data", "o_we", "asserted", 8, "exactly 'high' or 'low'"),
 ])
 def test_the_strict_rules_still_bind_a_signed_field(tmp_path, output, port,
@@ -213,3 +213,128 @@ def test_a_signed_field_never_exempts_an_asserted_qualifier(tmp_path):
     state, out = _simulate(p, tmp_path, 0)
     assert state == "failed" and "X_EXEMPT" not in out
     assert "while a declared qualifier is asserted or unknown" in out
+
+
+# ── review wave58 XQ4 (integrity): the expectations file, §4.05, minors ────
+def test_a_design_input_file_named_like_the_expert_pack_cannot_speak_for_it(
+        tmp_path):
+    """MAJOR 1: the signed fact is read from the expert pack's exact path —
+    a design-input file of the same name does not stand in for it."""
+    p = _proj(tmp_path)
+    stage_field(p, "o_data", "o_we", "high")
+    write_expectation(p, "o_data", "o_we", "low")       # the expert: low
+    shadow = p / "input/docs/l_doc_expectations.json"
+    shadow.write_text(json.dumps({"expectations": [{
+        "id": "qualified_by:o_data", "layer": "L9_INTEGRATION_SPEC",
+        "qualified_by": {"output": "o_data", "port": "o_we",
+                         "active_level": "high"}}]}))
+    sign(p, "D1")
+    found, ignored = _trusted(p)
+    assert found == {} and "'active_level': 'low'" in ignored["o_data"]
+
+
+def test_the_expert_pack_must_be_in_the_signed_evidence(tmp_path):
+    p = _proj(tmp_path)
+    stage_field(p, "o_data", "o_we", "high")
+    (p / "input/docs/l_doc_expectations.json").write_text(json.dumps(
+        {"expectations": [{"id": "qualified_by:o_data",
+                           "layer": "L9_INTEGRATION_SPEC",
+                           "qualified_by": {"output": "o_data", "port": "o_we",
+                                            "active_level": "high"}}]}))
+    sign(p, "D1")                                     # no expert pack at all
+    found, ignored = _trusted(p)
+    assert found == {} and qb.EXPECTATIONS_REL in ignored["o_data"]
+
+
+@pytest.mark.parametrize("rel", [
+    "input/docs/golden/L3.md", "input/docs/oracle/L3.md",
+    "phase1/input_doc/score/L3.md", "input/docs/L3_ref.md",
+    "input/docs/verified_dut.md",
+])
+def test_a_basis_in_a_4_05_oracle_file_is_refused(tmp_path, rel):
+    """MAJOR 2: a file §4.05 puts out of scope is not design input, even
+    under input/docs or phase1/input_doc."""
+    p = _proj(tmp_path)
+    lines = ["| `o_data` | 8-bit | output | write data |",
+             "| `o_we` | 1-bit | output | write enable |"]
+    f = p / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("\n".join(lines) + "\n")
+    basis = [{"file": rel, "line": 1, "quote": lines[0]},
+             {"file": rel, "line": 2, "quote": lines[1]}]
+    sign_field(p, "o_data", "o_we", "high", basis=basis)
+    found, ignored = _trusted(p)
+    assert found == {} and "not a design-input file" in ignored["o_data"]
+
+
+def test_a_basis_through_a_symlink_out_of_the_input_is_refused(tmp_path):
+    p = _proj(tmp_path)
+    outside = tmp_path / "elsewhere.md"
+    lines = ["| `o_data` | 8-bit | output | write data |",
+             "| `o_we` | 1-bit | output | write enable |"]
+    outside.write_text("\n".join(lines) + "\n")
+    link = p / "input/docs/linked.md"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside)
+    basis = [{"file": "input/docs/linked.md", "line": 1, "quote": lines[0]},
+             {"file": "input/docs/linked.md", "line": 2, "quote": lines[1]}]
+    sign_field(p, "o_data", "o_we", "high", basis=basis)
+    found, ignored = _trusted(p)
+    assert found == {} and "not a design-input file" in ignored["o_data"]
+
+
+def test_the_quotes_must_name_both_ports_and_not_be_trivial(tmp_path):
+    p = _proj(tmp_path)
+    lines = ["| `o_data` | 8-bit | output | write data |",
+             "| `o_we` | 1-bit | output | write enable |"]
+    only_data = [{"file": INPUT_DOC, "line": 5, "quote": lines[0]}]
+    sign_field(p, "o_data", "o_we", "high", quote_lines=lines,
+               basis=only_data)
+    found, ignored = _trusted(p)
+    assert found == {} and "never name 'o_we'" in ignored["o_data"]
+    q = _proj(tmp_path / "b")
+    tiny = [{"file": INPUT_DOC, "line": 5, "quote": "o"}]
+    sign_field(q, "o_data", "o_we", "high", quote_lines=lines, basis=tiny)
+    found, ignored = _trusted(q)
+    assert found == {} and "shorter than" in ignored["o_data"]
+
+
+def test_zero_zero_is_one_bit_and_input_strobes_are_refused(tmp_path):
+    p = _proj(tmp_path)
+    outs = [("o_data", "[7:0]"), ("o_we", "[0:0]"), ("o_flag", "[0:0]")]
+    sign_field(p, "o_data", "o_we", "high")
+    assert qb.trusted_qualifiers(p, outs, _IN)[0]["o_data"][0][
+        "qualifier"] == "o_we"                         # [0:0] is 1-bit
+    q = _proj(tmp_path / "b")
+    sign_field(q, "o_flag", "o_we", "high", row_width=1)
+    assert "o_flag" in qb.trusted_qualifiers(q, outs, _IN)[1]   # [0:0] output
+    r = _proj(tmp_path / "c")
+    ins = _IN + [("i_stb", "")]
+    sign_field(r, "o_data", "i_stb", "high",
+               quote_lines=["| `o_data` | 8-bit | output | data |",
+                            "| `i_stb` | 1-bit | input | strobe |"])
+    found, ignored = qb.trusted_qualifiers(r, _OUT, ins)
+    assert found == {} and "an input is held by the testbench" in \
+        ignored["o_data"]
+
+
+def test_the_tb_fail_text_carries_the_refusal_and_every_basis_is_cited(
+        tmp_path):
+    p = _proj(tmp_path)
+    stage_field(p, "o_data", "o_we", "high")          # unsigned
+    ins, outs = _IN, _OUT
+    q, why = riv.declared_output_qualifiers_and_refusals(p, outs, ins)
+    tb = riv.emit_case_oracle_from_ports(_CASE, "dut", ins, outs, [],
+                                         qualifiers=q, refusals=why)
+    assert "qualified_by ignored: not signed by the D1" in tb
+    s = _proj(tmp_path / "s")
+    lines = ["| `o_data` | 8-bit | output | write data |",
+             "| `o_we` | 1-bit | output | write enable |",
+             "| `o_cyc` | 1-bit | output | cycle; o_data and o_we one port |",
+             "| `o_flag` | 1-bit | output | o_data o_we group heading |"]
+    sign_field(s, "o_data", "o_we", "high", quote_lines=lines)
+    q, why = riv.declared_output_qualifiers_and_refusals(s, outs, ins)
+    tb = riv.emit_case_oracle_from_ports(_CASE, "dut", ins, outs, [],
+                                         qualifiers=q, refusals=why)
+    for i in range(4):                                # all four, none cut
+        assert f"basis {INPUT_DOC}:{5 + i} " in tb
