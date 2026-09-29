@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1390
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1390)
+- **Total programs (excluding helpers / shims):** 1391
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1391)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1381 |
+| `any` | 1382 |
 
 ## Alphabetical listing
 
@@ -143,6 +143,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `asap7_finfet_lvs` | any | — | device-level LVS for the ASAP7 (predictive 7nm FinFET) PDK. |
 | `assertion_covers_l3_constraints_check` | any | Wave 39 | Spec to enforce (chip-AGNOSTIC): |
 | `assertion_property_check` | any | — | Deterministic compliance check for assertion-gen. |
+| `ate_pattern_gen` | any | — | ATE patterns from the Step-5 full-stack traces (Step 38). |
 | `atomic_artifact_write_check` | any | — | a gate report must appear whole or not at all (vibe-ic#1082). |
 | `atomic_write_pr_attribution` | any | — | Which OPEN PR owns each non-atomic declared-report write (vibe-ic#1468). |
 | `atpg_untestable_fault_classify` | any | — | which stuck-at faults NO test can detect. |
@@ -1462,7 +1463,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1381 programs)
+### `any` (1382 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1581,6 +1582,7 @@ _(no programs in this group)_
 - `asap7_finfet_lvs` — device-level LVS for the ASAP7 (predictive 7nm FinFET) PDK.
 - `assertion_covers_l3_constraints_check` — Spec to enforce (chip-AGNOSTIC):  _[Wave 39]_
 - `assertion_property_check` — Deterministic compliance check for assertion-gen.
+- `ate_pattern_gen` — ATE patterns from the Step-5 full-stack traces (Step 38).
 - `atomic_artifact_write_check` — a gate report must appear whole or not at all (vibe-ic#1082).
 - `atomic_write_pr_attribution` — Which OPEN PR owns each non-atomic declared-report write (vibe-ic#1468).
 - `atpg_untestable_fault_classify` — which stuck-at faults NO test can detect.
