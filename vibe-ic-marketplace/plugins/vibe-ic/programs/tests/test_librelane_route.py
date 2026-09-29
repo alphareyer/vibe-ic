@@ -504,6 +504,18 @@ def test_the_route_repairs_in_the_signoff_scene_and_the_checkers_only_record(
         assert ov[key][0] is False and ov[key][1]
 
 
+def test_the_route_declares_the_post_grt_design_repair_the_drv_standard_requires(
+        tmp_path, monkeypatch):
+    """R-0929-POSTGRT: LibreLane gates RepairDesignPostGRT off by default; the
+    step-21 overlay switches the design (DRV) repair on, with its source, and
+    leaves the post-GRT timing repair to the flow."""
+    run = _run(tmp_path, monkeypatch)
+    ov = run.seen['overlay']
+    assert ov['RUN_POST_GRT_DESIGN_REPAIR'][0] is True
+    assert 'R-0929-POSTGRT' in ov['RUN_POST_GRT_DESIGN_REPAIR'][1]
+    assert 'RUN_POST_GRT_RESIZER_TIMING' not in ov
+
+
 def test_a_missing_pdk_root_refuses_and_never_resumes(tmp_path, monkeypatch):
     project, out_dir, pnr_tcl = _route_project(tmp_path, {'steps': {'21': 'librelane'}})
     put(project / 'phase3/librelane_switch.json', {'steps': {'21': 'librelane'}})
