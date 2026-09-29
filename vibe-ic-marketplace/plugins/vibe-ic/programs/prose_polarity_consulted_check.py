@@ -437,6 +437,25 @@ _NOT_PROSE: Dict[str, str] = {
         "to REQUIRED_OR_UNKNOWN, changing the banner count refuses as "
         "inconsistent, and an absent DEF refuses by name -- so the zeros are "
         "about the grammar and not a fixture that could not move.",
+    "phase3_one_shot_runner::_spare_tieoff_measured_from_log":
+        "MARKERS THIS FLOW PRINTS ITSELF, in a closed field grammar. Both "
+        "spare-insertion paths -- the direct Tcl deck "
+        "(`_build_spare_postfix_tcl`) and the odbpy step "
+        "(`insert_spare_cells.py`) -- emit `SPARE_TIEOFF_CONNECTED <int> of "
+        "<int>` and `SPARE_INPUT_PIN <inst> <pin> <use> <net|->` from values "
+        "they read out of the database. The pin pattern takes EXACTLY four "
+        "whitespace-free fields and is anchored at line end, so there is no "
+        "free-text field in which a denial could be written: a line with a "
+        "fifth token does not parse, and the grammar's own spelling of `this "
+        "pin has no net` is the closed token `-`, which the reader maps to "
+        "net=None and refuses tied_off on. A pin that is not listed at all is "
+        "what `spare_cell_coverage_check.prove_inputs_tied` refuses (the "
+        "spare is not enumerated). FALSIFIER, measured in "
+        "test_spare_clock_input_tied_and_proven.py::"
+        "test_the_runner_reads_the_enumeration_not_just_the_count: the v5c "
+        "log shape with `SPARE_INPUT_PIN spare_dff_0 CLK CLOCK -` reads "
+        "tied_off=False naming spare_dff_0/CLK despite `12 of 12`, and the "
+        "same log with the net filled in reads tied_off=True.",
     "phase3_one_shot_runner::_spare_insertion_provenance":
         "VERILOG MODULE-ITEM GRAMMAR, read after the function has DELETED "
         "every string literal, line comment and block comment and has "
