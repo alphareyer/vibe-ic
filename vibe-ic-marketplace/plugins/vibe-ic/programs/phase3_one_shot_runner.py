@@ -49948,7 +49948,15 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
         if dual["selection"] == "openroad":
             shutil.copy2(direct_gds, gds_out)
             result["engine"] = direct_result.extras.get("streamout_engine", "direct")
-        else:
+        # After the selection, on the bytes that ship: the LibreLane winner's
+        # density is published only if those bytes are its measured subject;
+        # otherwise `publish_metal_density` removes any report there and the
+        # emitter measures gds_out. Never from step37.run, which runs before
+        # the selection.
+        import librelane_fill_dfm as _lf
+        _lf.publish_metal_density(project, result.get("density_ratios") or {},
+                                  gds_out, pdk.name)
+        if dual["selection"] != "openroad":
             _log_invocation(
                 "klayout LibreLane step37 selected-stream finishing",
                 0, int((time.time() - t0) * 1000),
@@ -49959,6 +49967,9 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
                           [str(gds_out), str(direct_gds)],
                           extras={"streamout_engine": result["engine"],
                                   "dual_selection": dual["selection"]})
+    import librelane_fill_dfm as _lf
+    _lf.publish_metal_density(project, result.get("density_ratios") or {},
+                              gds_out, pdk.name)
     _log_invocation(
         "klayout LibreLane step37 selected-stream finishing",
         0, int((time.time() - t0) * 1000),

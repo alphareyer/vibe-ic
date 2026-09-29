@@ -611,6 +611,74 @@ def measure_density_ratios(project: Path, image: str, pdk_root: Path, pdk: str,
             'layers': measured['layers']}
 
 
+#: The ONE place a per-layer metal density of the stream that ships lives:
+#: `reports/phase3/metal_density.json`. The runner's own KLayout emitter writes
+#: it on the direct path, the tape-out precheck delegate
+#: (`general_precheck` -> `metal_layer_density_check reports/phase3`), the
+#: sign-off ladder and the tape-out checklist all read it there. The LibreLane
+#: fill arms measured the shipped stream only into their tool lane
+#: (`phase3/librelane/<lane>/density_ratios.json`), so on those arms the
+#: precheck found no density report at all (measured on a subservient DIE
+#: tree: Checker.KLayoutDensity NOT_DETERMINED, "no density report at
+#: reports/phase3", beside a MEASURED `37-*-density-ratios` lane).
+METAL_DENSITY_REL = 'reports/phase3/metal_density.json'
+
+
+def publish_metal_density(project: Path, ratios: Dict[str, Any], gds: Path,
+                          pdk: str) -> Optional[Path]:
+    """Publish the shipped stream's per-layer density (``ratios`` from
+    `measure_density_ratios`) at `METAL_DENSITY_REL`, bound to ``gds`` by
+    sha256. Call it only once the shipped bytes are decided, with ``gds`` the
+    stream that ships. Only rows whose deck identifier names a metal layer are
+    carried (the reader's own layer grammar). A ratio measured on other bytes
+    than ``gds``, or two rules giving one layer two values, publishes nothing
+    AND removes any report already at `METAL_DENSITY_REL`: the precheck reader
+    does not compare `gds_sha256`, so a report left behind would be judged as
+    the shipped stream's. With no report there, the runner's own emitter
+    measures the shipped GDS, or the reader says it found none."""
+    import metal_layer_density_check as _mld
+    gds = Path(gds)
+    out = project / METAL_DENSITY_REL
+
+    def declined() -> None:
+        out.unlink(missing_ok=True)
+        return None
+
+    if not gds.is_file() or ratios.get('subject_sha256') != digest(gds):
+        return declined()
+    layers: Dict[str, float] = {}
+    rules: Dict[str, str] = {}
+    for rule, row in sorted((ratios.get('layers') or {}).items()):
+        name = str(row.get('identifier') or '')
+        value = row.get('ratio')
+        if (row.get('status') != 'MEASURED' or not _mld._METAL_RE.match(name)
+                or not isinstance(value, (int, float)) or isinstance(value, bool)):
+            continue
+        key = name.lower()
+        if key in layers and layers[key] != value:
+            return declined()
+        layers[key], rules[key] = value, rule
+    if not layers:
+        return declined()
+    report = Path(str(ratios.get('report') or ''))
+    try:
+        die_area = _load(report).get('die_area_um2') if report.is_file() else None
+    except (OSError, ValueError):
+        die_area = None
+    try:
+        gds_record = gds.resolve().relative_to(project.resolve()).as_posix()
+    except ValueError:
+        gds_record = str(gds)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_json(out, {
+        'tool': 'klayout', 'producer': 'librelane_fill_dfm.measure_density_ratios',
+        'measurement': 'per_rule_drawn_plus_dummy_area_over_die_extent',
+        'pdk': pdk, 'gds': gds_record, 'gds_sha256': digest(gds),
+        'die_area_um2': die_area, 'layers': layers, 'layer_rules': rules,
+        'source': {'report': str(report), 'report_sha256': ratios.get('report_sha256')}})
+    return out
+
+
 # --- row occupancy, from the DEF and the LEFs that define its masters -------
 
 _LEF_MACRO = re.compile(r'^\s*MACRO\s+(\S+)(.*?)^\s*END\s+\1\b', re.S | re.M)

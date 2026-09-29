@@ -1,0 +1,127 @@
+{
+ "provenance": "subservient DIE FILL proof lane phase3/librelane/37-proof-final-density-ratios/density_ratios.json (8hd-3, 2026-09-29), rows verbatim; gds path dropped",
+ "die_area_um2": 6185169.0,
+ "layers": {
+  "PL.8": {
+   "status": "MEASURED",
+   "identifier": "poly2_result",
+   "layers": [
+    [
+     30,
+     0
+    ],
+    [
+     30,
+     4
+    ]
+   ],
+   "ratio": 0.333083114
+  },
+  "M1.4": {
+   "status": "MEASURED",
+   "identifier": "metal1",
+   "layers": [
+    [
+     34,
+     0
+    ],
+    [
+     34,
+     4
+    ]
+   ],
+   "ratio": 0.470649599
+  },
+  "M2.4": {
+   "status": "MEASURED",
+   "identifier": "metal2",
+   "layers": [
+    [
+     36,
+     0
+    ],
+    [
+     36,
+     4
+    ]
+   ],
+   "ratio": 0.364777097
+  },
+  "M3.4": {
+   "status": "MEASURED",
+   "identifier": "metal3",
+   "layers": [
+    [
+     42,
+     0
+    ],
+    [
+     42,
+     4
+    ]
+   ],
+   "ratio": 0.566780627
+  },
+  "M4.4": {
+   "status": "MEASURED",
+   "identifier": "metal4",
+   "layers": [
+    [
+     46,
+     0
+    ],
+    [
+     46,
+     4
+    ]
+   ],
+   "ratio": 0.577266741
+  },
+  "M5.4": {
+   "status": "MEASURED",
+   "identifier": "metal5",
+   "layers": [
+    [
+     81,
+     0
+    ],
+    [
+     81,
+     4
+    ]
+   ],
+   "ratio": 0.51506195
+  },
+  "MT30.7": {
+   "status": "MEASURED",
+   "identifier": "top_metal",
+   "layers": [
+    [
+     81,
+     0
+    ],
+    [
+     81,
+     4
+    ]
+   ],
+   "ratio": 0.51506195
+  },
+  "MT.3": {
+   "status": "MEASURED",
+   "identifier": "top_metal",
+   "layers": [
+    [
+     81,
+     0
+    ],
+    [
+     81,
+     4
+    ]
+   ],
+   "ratio": 0.51506195
+  }
+ },
+ "status": "MEASURED"
+}
