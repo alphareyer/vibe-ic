@@ -16,6 +16,15 @@ The generated script differs from LibreLane's generic one in three measured ways
   the step skips itself.
 * `read_verilog -icells`, so a netlist that still carries Yosys internal cells
   (`$_DFF_P_`) reads.
+* The gate is flattened and its private names purged BEFORE EQY partitions.
+  A liberty flop reads as `IQ` state behind a buffer to `Q`, so EQY matched a
+  gold register (`pr`) to a gate alias the partition never cut at: on spm x
+  gf180mcuD (CUT_W4 proof, 2026-09-29) it drove the gate's `p` from that
+  flop's own zero-initialised state while the gold `p` read a free `pr`, and
+  returned `spm.p`/`spm.c` NOT_EQUIVALENT on an unreachable state beside
+  lec_run's 65/65 PASS. With no gate-internal cut point EQY proves from the
+  equal initial state, so a counterexample it reports is reachable (the same
+  gate with `p` inverted, one xor2->xnor2, one nand2->and2: each FAIL).
 
 EQY's top-level status folds "could not decide" into FAIL. The reader therefore
 reads every partition's strategy status files: a partition is PROVEN when a
@@ -53,7 +62,8 @@ def eqy_script(top: str, rtl: list[Path], netlist: Path, liberty: str) -> str:
     return "\n".join([
         "[gold]", f"read_verilog -formal -sv {gold}", "",
         "[gate]", f"read_liberty -ignore_miss_func {liberty}",
-        f"read_verilog -formal -sv -icells {netlist}", "",
+        f"read_verilog -formal -sv -icells {netlist}",
+        f"hierarchy -top {top}", "flatten", "opt_clean -purge", "",
         "[script]", f"hierarchy -top {top}", "proc", f"prep -top {top} -flatten",
         "memory -nomap", "async2sync", "setundef -init -zero", "",
         "[strategy sat]", "use sat", "depth 5", "",
