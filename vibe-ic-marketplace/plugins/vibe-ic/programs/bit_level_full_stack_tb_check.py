@@ -1000,36 +1000,27 @@ def functional_full_stack_verdict(project: Path):
             "EXECUTION_ERROR", "functional_population_underivable",
             f"the declared case populations could not be re-derived from the "
             f"design input: {exc!r}", **common)
-    # Every case of the hash-bound L10 is in the record, and nothing else --
-    # the rows the R-0929-STEP5-BAR dispositions credit (ISA-credited, data-path
-    # dependent, coverage figures) included: a credited row is still one L10
-    # case, and it cannot stand in for another.
-    missing, extra = _case_set_difference(_tbg.load_l10_cases(project) or [],
-                                          rec.get("cases") or [])
-    if missing or extra:
-        return _functional_nm(
-            "ZERO_DENOMINATOR", "functional_record_case_set_mismatch",
-            ("the functional record does not carry the case set its design "
-             "input declares"
-             + (f"; L10 case(s) absent from the record: {missing[:8]}"
-                if missing else "")
-             + (f"; record case(s) the L10 does not declare: {extra[:8]}"
-                if extra else "")
-             + " — a case cut from the record was not measured, and a case "
-               "the L10 does not declare is not part of its population"),
-            missing_cases=missing, extra_cases=extra, **common)
     # R-0929-STEP5-BAR: every DECLARED case is judged, so the declared list is
     # read from the design input (bytes re-checked above) and a case the
     # record omits is not measured -- a record cannot shrink its denominator.
     declared_rows = {str(k.get("name") or k.get("id") or ""): k
                      for k in (_tbg.load_l10_cases(project) or [])
                      if isinstance(k, dict)}
-    recorded = {str(c.get("name")) for c in rec.get("cases") or []
-                if isinstance(c, dict)}
-    omitted = sorted(set(declared_rows) - recorded)
-    if omitted:
-        problems.append(f"declared case(s) {omitted[:6]} are absent from the "
-                        f"record")
+    # ...and EXACTLY the L10 case set, compared as a multiset (CASESET): no
+    # case cut, none added, none duplicated to stand in for a cut one. The
+    # rows the STEP5-BAR dispositions credit (ISA-credited, data-path
+    # dependent, coverage figures) are included: a credited row is still one
+    # L10 case and cannot stand in for another.
+    missing, extra = _case_set_difference(_tbg.load_l10_cases(project) or [],
+                                          rec.get("cases") or [])
+    if missing or extra:
+        problems.append(
+            "the record does not carry the case set its design input declares"
+            + (f"; declared case(s) {missing[:6]} are absent from the record"
+               if missing else "")
+            + (f"; record case(s) {extra[:6]} are not declared (or are "
+               f"duplicated)" if extra else ""))
+    common.update(missing_cases=missing, extra_cases=extra)
     unexecuted: list = []
     for c in rec.get("cases") or []:
         if not isinstance(c, dict):
