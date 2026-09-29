@@ -100,7 +100,7 @@ class Classifier:
             self._libs[corner] = parsed
         self._ports: Dict[str, set] = {}
         self.connectivity_evidence = {"state": "UNAVAILABLE",
-                                      "reason": "no current OpenSTA connectivity bundle; ports counted"}
+                                      "reason": "no current OpenSTA connectivity bundle; port and IO rows counted"}
         if project is not None and sdc is not None:
             self._connectivity(Path(project), Path(netlist), Path(sdc), pad_libs)
 
@@ -109,7 +109,8 @@ class Classifier:
         """Reuse the existing capture's raw census, never its asserted classes.
 
         The current run, netlist, SDC, linked libraries and raw report hashes
-        must agree. A stale, absent or malformed witness leaves ports counted.
+        must agree. A stale, absent or malformed witness leaves port and IO
+        rows counted; replacement Liberty bytes cannot reinterpret old rows.
         A DRV FAIL is still useful connectivity evidence; no verdict is upgraded.
         """
         from drv_signoff_census import _pins, _nets, port_connectivity
@@ -195,7 +196,7 @@ class Classifier:
                                           "sha256": _sha(source), "scenes": evidence}
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             self.connectivity_evidence = {"state": "UNAVAILABLE", "bundle": str(source),
-                                          "reason": f"{exc}; ports counted"}
+                                          "reason": f"{exc}; port and IO rows counted"}
 
     def _io(self, corner: str) -> List[dict]:
         if corner not in self._libs:
@@ -228,6 +229,10 @@ class Classifier:
                  limit: Optional[float], value: Optional[float]) -> str:
         if "/" not in pin:
             return OFFCHIP_PORT if pin in self._ports.get(corner, set()) else COUNTED
+        # Both exemptions need the same current run/netlist/SDC/linked-library
+        # binding. _ports is populated atomically only after that check passes.
+        if corner not in self._ports:
+            return COUNTED
         inst, _, lib_pin = pin.rpartition("/")
         master = self._inst_master.get(inst)
         if self._pad(corner, master) is None:

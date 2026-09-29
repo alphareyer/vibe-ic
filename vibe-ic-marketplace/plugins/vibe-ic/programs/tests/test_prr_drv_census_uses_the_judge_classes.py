@@ -296,11 +296,17 @@ def test_incomplete_or_stale_connectivity_keeps_ports_counted(tmp_path, fault):
     assert census["drv_pin_checks_state"] == "PASS", census
     assert ("a", "cap") in _counted(census)
     assert ("a", "slew") in _counted(census)
-    # The owner-pending IO margin class is preserved independently of a
-    # port connectivity proof; all measured core and IO T1 rows still count.
+    # A bound IO margin survives an incomplete port connectivity proof, but
+    # unavailable source identity cannot authorize any measured-row exclusion.
     assert ("u_core/u1/Z", "cap") in _counted(census)
     assert ("u_pad_b/Y", "cap") in _counted(census)
-    assert any(r["class"] == "IO_STD_CELL_MARGIN_DISCLOSURE" for r in census["drv_pin_checks_excluded"])
+    if fault in ("partial", "unknown_pin", "unconnected_input"):
+        assert any(r["class"] == "IO_STD_CELL_MARGIN_DISCLOSURE"
+                   for r in census["drv_pin_checks_excluded"])
+    else:
+        assert ("u_pad_a/Y", "cap") in _counted(census)
+        assert not any(r["class"] == "IO_STD_CELL_MARGIN_DISCLOSURE"
+                       for r in census["drv_pin_checks_excluded"])
 
 
 @pytest.mark.parametrize("connection", ["alias", "concat"])

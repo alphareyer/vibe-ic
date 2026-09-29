@@ -125,6 +125,52 @@ def test_without_the_deck_every_row_counts_as_before(tmp_path):
     assert rc == 1 and "R5_DRV_VIOLATION" in res["rules_violated"]
 
 
+@pytest.mark.parametrize("population", ["drivers", "loads", "pins"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_inconsistent_native_population_keeps_port_counted(tmp_path, population, missing):
+    """A digest-bound truncated report cannot prove the port has only IO pins."""
+    from drv_signoff_judge import _sha
+    run = _stage(tmp_path, [_PORT])
+    source = run / "reports/phase3/sta/drv_signoff_bundle.json"
+    doc = json.loads(source.read_text())
+    ref = doc["scenes"][0]["net_census_report"]
+    path = Path(ref["path"])
+    count = 2 if population == "pins" else 1
+    line = f" Number of {population}: {count}\n"
+    path.write_text(path.read_text().replace(
+        line, "" if missing else f" Number of {population}: {count + 1}\n", 1))
+    ref["sha256"] = _sha(path)
+    source.write_text(json.dumps(doc))
+    rc, res = T._judge(run, tmp_path)
+    assert rc == 1 and "R5_DRV_VIOLATION" in res["rules_violated"], res
+    proc = next(a for a in res["axis_evidence"] if a["axis"] == "process")
+    assert proc["drv"]["classes"]["counted"] == {"max_capacitance": 1}
+    assert proc["drv"]["classes"]["connectivity"]["state"] == "UNAVAILABLE"
+
+
+@pytest.mark.parametrize("stale", [False, True], ids=["captured_limit", "replaced_library"])
+def test_io_t1_offender_cannot_use_replacement_liberty(tmp_path, stale):
+    """The measured IO exceeds its captured .21 limit even after replacement."""
+    from drv_signoff_judge import _sha
+    run = _stage(tmp_path, [_IO])
+    source = run / "reports/phase3/sta/drv_signoff_bundle.json"
+    doc = json.loads(source.read_text())
+    ref = doc["scenes"][0]["linked_liberties"][0]
+    lib = Path(ref["path"])
+    lib.write_text(lib.read_text().replace("default_max_capacitance : 999",
+                                          "default_max_capacitance : 0.21"))
+    ref["sha256"] = _sha(lib)
+    source.write_text(json.dumps(doc))
+    if stale:
+        lib.write_text(lib.read_text().replace("default_max_capacitance : 0.21",
+                                              "default_max_capacitance : 999"))
+    rc, res = T._judge(run, tmp_path)
+    assert rc == 1 and "R5_DRV_VIOLATION" in res["rules_violated"], res
+    proc = next(a for a in res["axis_evidence"] if a["axis"] == "process")
+    assert proc["drv"]["classes"]["counted"] == {"max_capacitance": 1}
+    assert proc["drv"]["classes"]["connectivity"]["state"] == ("UNAVAILABLE" if stale else "SOURCE_BOUND")
+
+
 @pytest.mark.parametrize("connection", ["direct", "alias", "concat"])
 @pytest.mark.parametrize("fresh", [False, True])
 def test_core_connectivity_keeps_the_port_violation(tmp_path, connection, fresh):

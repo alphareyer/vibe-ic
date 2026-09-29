@@ -50,13 +50,23 @@ def _nets(path: Path) -> dict[str, dict]:
         cap = re.search(r"(?m)^ Total capacitance:\s*(\S+)", rest)
         loads = re.search(r"(?ms)^Load pins\n(.*?)(?:\n\n|\Z)", rest)
         drivers = re.search(r"(?ms)^Driver pins\n(.*?)(?:\n\n|\Z)", rest)
-        count = re.search(r"(?m)^ Number of loads:\s*(\d+)", rest)
-        if not cap or not count or name in nets or (loads is None and int(count.group(1))):
+        counts = {kind: re.search(rf"(?m)^ Number of {kind}:[ \t]*(\d+)[ \t]*$", rest)
+                  for kind in ("drivers", "loads", "pins")}
+        if not cap or not all(counts.values()) or name in nets:
             raise ValueError("OpenSTA net census malformed")
+        populations = {kind: int(count.group(1)) for kind, count in counts.items()}
         load_names = ([line.strip().split()[0] for line in loads.group(1).splitlines()
                        if line.strip()] if loads is not None else [])
-        if len(load_names) != int(count.group(1)):
+        driver_names = ([line.strip().split()[0] for line in drivers.group(1).splitlines()
+                         if line.strip()] if drivers is not None else [])
+        if len(load_names) != populations["loads"]:
             raise ValueError("OpenSTA net load count differs from raw report")
+        if len(driver_names) != populations["drivers"]:
+            raise ValueError("OpenSTA net driver count differs from raw report")
+        if (len(set(load_names)) != len(load_names) or
+                len(set(driver_names)) != len(driver_names) or
+                len(set(driver_names + load_names)) != populations["pins"]):
+            raise ValueError("OpenSTA net pin count differs from raw report")
         # report_net prints a min-max capacitance range when the linked
         # process has distinct rise/fall values.  Retain the larger endpoint
         # for a conservative excluded-pin check.
@@ -66,8 +76,6 @@ def _nets(path: Path) -> dict[str, dict]:
         cap_pf = max(float(value) for value in cap_range.groups() if value is not None)
         if not math.isfinite(cap_pf) or cap_pf < 0:
             raise ValueError("OpenSTA net capacitance census is not finite")
-        driver_names = ([line.strip().split()[0] for line in drivers.group(1).splitlines()
-                         if line.strip()] if drivers is not None else [])
         nets[name] = {"cap_pf": cap_pf, "loads": load_names, "drivers": driver_names}
         raw_blocks[name] = block.strip()
     return nets

@@ -970,9 +970,9 @@ def test_capture_replaces_plan_pin_classes_with_opensta_and_liberty(tmp_path, mo
                 "u2/Y\tpin\toutput\t1\tu2\tlogic\tY\tn2\tinput\t0.03\t0.04\t0\t1\t0\n")
             (folder / "net_census.rpt").write_text(
                 "Net n\n Total capacitance: 0.1\n Number of drivers: 1\n"
-                " Number of loads: 0\n Number of pins: 1\n\n"
+                " Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u/Y output (logic)\n\n"
                 "Net n2\n Total capacitance: 0.05\n Number of drivers: 1\n"
-                " Number of loads: 0\n Number of pins: 1\n")
+                " Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u2/Y output (logic)\n\n")
             (folder / "disabled_edges.rpt").write_text("")
             (folder / "annotation.rpt").write_text("Found 0 unannotated drivers.\n")
             (folder / "clocks.rpt").write_text("propagated\n")
@@ -1108,7 +1108,7 @@ def test_project_clean_opensta_census_can_reach_pass(tmp_path, monkeypatch):
           "u/Y\tpin\toutput\t1\tu\tlogic\tY\tn\tinput\t0.1\t0.1\t0\tX\t0\n")
     _file(folder, "net_census.rpt",
           "Net n\n Total capacitance: 0.1\n Number of drivers: 1\n"
-          " Number of loads: 0\n Number of pins: 1\n")
+          " Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u/Y output (logic)\n\n")
     _file(folder, "disabled_edges.rpt", "")
     rows = drv.parse_check_types(Path(scene["all_limits_report"]["path"]).read_text(),
                                  scene=scene["name"], mode=scene["mode"],
@@ -1140,7 +1140,7 @@ def test_opensta_census_io_label_comes_from_linked_pad_cell(tmp_path):
           "u/Y\tpin\toutput\t1\tu\tpad\tY\tn\tinput\t0.1\t0.1\t0\tX\t0\n")
     _file(folder, "net_census.rpt",
           "Net n\n Total capacitance: 0.1\n Number of drivers: 1\n"
-          " Number of loads: 0\n Number of pins: 1\n")
+          " Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u/Y output (pad)\n\n")
     _file(folder, "disabled_edges.rpt", "")
     rows = drv.parse_check_types(_report(fanout=2), scene="typ_nom",
                                  mode="functional", violators_only=False)
@@ -1162,9 +1162,9 @@ def test_unreported_unexcluded_driver_blocks_census(tmp_path):
           "u2/Y\tpin\toutput\t1\tu2\tlogic\tY\tn2\tinput\t0.1\t0.1\t0\tX\t0\n")
     _file(folder, "net_census.rpt",
           "Net n\n Total capacitance: 0.1\n Number of drivers: 1\n"
-          " Number of loads: 0\n Number of pins: 1\n\n"
+          " Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u/Y output (logic)\n\n"
           "Net n2\n Total capacitance: 0.1\n Number of drivers: 1\n"
-          " Number of loads: 0\n Number of pins: 1\n")
+          " Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u2/Y output (logic)\n\n")
     _file(folder, "disabled_edges.rpt", "")
     lib = _file(tmp_path, "logic.lib", '''library (lib) {
  time_unit : "1ns"; capacitive_load_unit (1, pf);
