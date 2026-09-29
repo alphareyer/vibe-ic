@@ -26,7 +26,10 @@ sys.path.insert(0, str(PROGRAMS))
 
 import librelane_cts_hold as cts  # noqa: E402
 import librelane_contract as contract  # noqa: E402
-import retap_audit_check as RA  # noqa: E402
+try:        # absent before CUT_W4: every audit test then fails on its own line
+    import retap_audit_check as RA  # noqa: E402
+except ImportError:  # pragma: no cover - the RED arm
+    RA = None
 
 PLUGIN = PROGRAMS / "librelane_plugins/librelane_plugin_vibeic"
 CAL = PROGRAMS / "calibration"
@@ -58,15 +61,15 @@ def _project(tmp_path, log, nl_out, nl_in=NL_IN):
     project = tmp_path / "proj"
     folder = project / "phase3/librelane/19-cts-hold/03-vibeic-externalcapturelaunchretap"
     folder.mkdir(parents=True)
-    (folder / RA.LOG_NAME).write_text(log)
+    (folder / "vibeic-externalcapturelaunchretap.log").write_text(log)
     (folder / "in.nl.v").write_text(nl_in)
     (folder / "chip_top.nl.v").write_text(nl_out)
     (folder / "state_in.json").write_text(json.dumps({"nl": str(folder / "in.nl.v")}))
     (folder / "state_out.json").write_text(json.dumps({"nl": str(folder / "chip_top.nl.v")}))
-    receipt = project / RA.HANDOFF
+    receipt = project / "reports/phase3/librelane_cts_hold_handoff.json"
     receipt.parent.mkdir(parents=True)
     receipt.write_text(json.dumps({"chain": {
-        RA.STEP_ID: str(folder.relative_to(project))}}))
+        "Vibeic.ExternalCaptureLaunchRetap": str(folder.relative_to(project))}}))
     return project
 
 
@@ -158,7 +161,8 @@ def test_a_log_without_the_retap_grammar_is_not_measured(tmp_path):
 
 def test_a_receipt_without_the_retap_step_is_not_measured(tmp_path):
     project = _project(tmp_path, KEEP_LOG, NL_KEPT)
-    (project / RA.HANDOFF).write_text(json.dumps({"chain": {}}))
+    (project / "reports/phase3/librelane_cts_hold_handoff.json").write_text(
+        json.dumps({"chain": {}}))
     rc, doc = _run(project)
     assert rc == 2 and doc["verdict"] == "NOT_MEASURED"
 
@@ -183,4 +187,5 @@ def test_step_19_gates_on_the_retap_audit_when_the_chain_ran():
     assert "retap_audit_check" in step["programs"]
     clauses = [c.get("optional_program_exit_zero") for c in step["gate"]["all_of"]]
     audit = [c for c in clauses if c and c["command"].startswith("retap_audit_check ")]
-    assert audit and audit[0]["condition_files_exist"] == [RA.HANDOFF]
+    assert audit and audit[0]["condition_files_exist"] == [
+        "reports/phase3/librelane_cts_hold_handoff.json"]
