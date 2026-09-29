@@ -17097,6 +17097,28 @@ def _write_synth_log(project: Path, log: Path, content: str) -> None:
             tool="phase3_one_shot_runner")
 
 
+def _librelane_host_liberty(liberty: Path, pdk_name: str,
+                            pdk_root_host: Optional[str]) -> Path:
+    """The host bytes of the design's synthesis Liberty for the tool arm.
+
+    The design's `pdk.liberty` may name the EDA image's own PDK tree (e.g.
+    `<image PDK_ROOT>/.../<pdk>/libs.ref/...`), which does not exist on the
+    host that runs the gates. The contract materialises that same tree once
+    per image at `<pdk_root_host>/<pdk>` and mounts it at `/pdk` in every
+    LibreLane step, so the path below the design's `<pdk>` directory is the
+    same file there. MEASURED (CUT_W4 spm IC/DIE tool arm, vibeic-eda
+    0.3.86): the tool synthesised, then the host gate refused
+    LL_PDK_LIB_MISSING on the image path. A Liberty the host can already read
+    is kept; one with no counterpart in the copy is returned unchanged, so the
+    refusal still names it."""
+    if liberty.is_file() or not pdk_root_host or pdk_name not in liberty.parts:
+        return liberty
+    parts = liberty.parts
+    below = parts[len(parts) - parts[::-1].index(pdk_name):]
+    candidate = Path(pdk_root_host) / pdk_name / Path(*below) if below else None
+    return candidate if candidate is not None and candidate.is_file() else liberty
+
+
 def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
                          container: str) -> StepResult:
     """Run the mapped synthesis tool and retain its native evidence for step 9."""
@@ -17132,11 +17154,12 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
         std_cell_library = liberty_stem.split("__", 1)[0]
         if not liberty_stem or "__" not in liberty_stem:
             raise _ll.Refusal("LL_SCL_UNRESOLVED", str(getattr(pdk, "liberty", "")))
-        liberty_path = Path(str(pdk.liberty))
         # The host PDK root through the contract's resolver (declared >
         # resolved from the image > refused, naming its cause).
         pdk_root_host = _ll.pdk_root_resolution(project, str(pdk.name),
                                                 image=image)["path"]
+        liberty_path = _librelane_host_liberty(Path(str(pdk.liberty)),
+                                               str(pdk.name), pdk_root_host)
         if pdk_root_host and liberty_path.is_relative_to(Path(pdk_root_host)):
             liberty_guest = "/pdk/" + str(liberty_path.relative_to(Path(pdk_root_host)))
         else:
@@ -17216,8 +17239,7 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
                                 produced_by="LibreLane.Yosys.Synthesis",
                                 tool="yosys", exit_code=0)
         stats = _sas.emit_for_run(project, folder / "reports/stat.rpt", netlist,
-                                  liberty=getattr(pdk, "liberty", None),
-                                  container=None)
+                                  liberty=liberty_path, container=None)
         if stats is None:
             raise _ll.Refusal("LL_SYNTH_AREA_UNMEASURED", str(stat))
         _ll.verify_synthesis_stat(stat, state, Path(stats), top,
@@ -17238,12 +17260,13 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
             capture_output=True, text=True)
         if netlist_gate.returncode:
             raise _ll.Refusal("LL_SYNTH_NETLIST_GATE_FAILED", netlist_gate.stdout[-500:])
-        if not Path(str(pdk.liberty)).is_file():
+        if not liberty_path.is_file():
             raise _ll.Refusal("LL_PDK_LIB_MISSING",
-                              f"no liberty file at {pdk.liberty}")
+                              f"no liberty file at {liberty_path} "
+                              f"(the design's {pdk.liberty})")
         pdk_gate = subprocess.run(
             [sys.executable, str(PROGRAMS_DIR / "pdk_consistency_check.py"),
-             "--netlist", str(netlist), "--pdk-lib", str(pdk.liberty),
+             "--netlist", str(netlist), "--pdk-lib", str(liberty_path),
              "--json", str(folder / "pdk_consistency_gate.json")],
             capture_output=True, text=True)
         if pdk_gate.returncode != 0:

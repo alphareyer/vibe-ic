@@ -61,3 +61,25 @@ def test_a_project_may_name_step_9_direct(monkeypatch, tmp_path):
     (tmp_path / 'phase3/librelane_switch.json').write_text(
         json.dumps({'steps': {'9': 'direct'}}))
     assert contract.selected_mode(tmp_path, '9') == 'direct'
+
+
+def test_the_tool_arm_reads_the_image_liberty_through_the_host_pdk_copy(tmp_path):
+    """MEASURED on the spm IC/DIE tool arm (cut_9/tool, vibeic-eda 0.3.86):
+    LibreLane synthesised, then the host-side gate refused LL_PDK_LIB_MISSING
+    because the design's Liberty names the image's own PDK tree. The contract
+    materialises that tree at `<pdk_root_host>/<pdk>`; the same file is there."""
+    import phase3_one_shot_runner as R
+    pdk = "processA"
+    guest = Path("/image/pdks/vendor/versions/abc") / pdk / "libs.ref/scl/lib/scl__tt.lib"
+    root = tmp_path / "pdk_root"
+    host = root / pdk / "libs.ref/scl/lib/scl__tt.lib"
+    host.parent.mkdir(parents=True)
+    host.write_text("library (scl__tt) { }\n")
+    assert R._librelane_host_liberty(guest, pdk, str(root)) == host
+    # a Liberty the host can already read is kept as given
+    assert R._librelane_host_liberty(host, pdk, str(root)) == host
+    # no counterpart in the copy: unchanged, so the refusal still names it
+    missing = guest.with_name("scl__ss.lib")
+    assert R._librelane_host_liberty(missing, pdk, str(root)) == missing
+    # no resolved root: unchanged
+    assert R._librelane_host_liberty(guest, pdk, None) == guest
