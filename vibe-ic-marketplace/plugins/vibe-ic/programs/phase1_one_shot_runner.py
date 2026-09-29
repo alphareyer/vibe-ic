@@ -1538,6 +1538,8 @@ def run_second_pass_only(project: Path, ic_name: str,
         summary["verdict"] = "NOT_MEASURED"
         summary["reason_class"] = "awaiting_signed_judgement"
         rc_out = max(rc_out, 1)
+    from benchmark_dispatch import _bind_runner_report
+    summary = _bind_runner_report(summary, project, __file__, out.name)
     out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     print("\n=== phase1_one_shot_runner DONE (mode=expert_second_pass) ===")
     print(f"verdict: {summary['verdict']}")

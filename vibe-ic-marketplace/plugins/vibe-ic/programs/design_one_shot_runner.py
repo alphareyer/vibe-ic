@@ -316,10 +316,14 @@ def _refuse_relocated_copy_in_record(summary: Any, project: Path) -> None:
                "; ".join(sorted(found)[:6])))
 
 
-def _write_phase2_report(out: Path, summary: Any, project: Path) -> None:
+def _write_phase2_report(out: Path, summary: Any, project: Path, *,
+                         invocation_context: Optional[dict] = None) -> None:
     """The ONE seam every phase-2 report is written through, so the refusal
     above cannot be bypassed by a second `write_text` added later."""
     _refuse_relocated_copy_in_record(summary, project)
+    from benchmark_dispatch import _bind_runner_report
+    summary = _bind_runner_report(summary, project, __file__, out.name,
+                                  context=invocation_context)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
 
