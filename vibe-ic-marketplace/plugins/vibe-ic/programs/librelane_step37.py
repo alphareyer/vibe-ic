@@ -22,6 +22,21 @@ STEPS = ("Magic.StreamOut", "KLayout.StreamOut", "KLayout.XOR",
          "Magic.DRC", "KLayout.DRC", "KLayout.SealRing",
          "KLayout.Filler", "KLayout.Density")
 
+#: R-0929-TOOL-DEFAULT, audit 3.3 #10: the PDK fill script's own declared
+#: option, as LibreLane's gf180 reference run (t78) set it; without it the
+#: PDK fill leaves gf180 M2.4 one window short (T88 LL_NO_FEASIBLE_STREAM,
+#: T104).  A declared tool option, not our own fill.
+FILLER_OVERLAY = {
+    "KLAYOUT_FILLER_OPTIONS": ({"Metal2_ignore_active": True},
+                               "declared PDK filler option (fill_metal.rb "
+                               "$Metal2_ignore_active); t78 reference run; audit 3.3 #10"),
+}
+
+#: The stream kept when both arms measure the same DRC after XOR zero.
+#: KLayout until the Magic arm's supply labels are fixed (audit 3.3 #9: the
+#: Magic stream places the VDD/VSS labels wrongly).
+TIE_BREAK_ENGINE = "klayout"
+
 
 def _run(project: Path, image: str, pdk_root: Path, pdk: str,
          steps: list[str], state: Path, lane: str, configs: dict[str, Path]) -> list[Path]:
@@ -112,13 +127,12 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
     import librelane_fill_dfm as _fill
     # The stream renders the DEF's vias from the tech LEF the route read (a
     # derived via-legalized LEF when the flow staged one), never the PDK's.
+    overlay = dict(_pv.tech_lef_overlay(project) or {})
+    overlay.update(FILLER_OVERLAY)
     configs = resolve_step_configs(project, image, pdk, list(STEPS), pdk_root=pdk_root,
-                                   overlay=_pv.tech_lef_overlay(project))
-    die = json.loads(configs["KLayout.SealRing"].read_text()).get("DIE_AREA")
-    if die and [float(die[0]), float(die[1])] != [0.0, 0.0]:
-        # Upstream SealRing currently treats x1/y1 as width/height.  Until its
-        # fork fix is in the image, a nonzero-origin die cannot be signed off.
-        raise Refusal("LL_SEALRING_ORIGIN_UNSUPPORTED", str(die))
+                                   overlay=overlay)
+    # (The nonzero-origin seal-ring refusal is gone: the image's KLayout.SealRing
+    # spans x1-x0 / y1-y0 since vibeic/librelane #13, audit 3.3 #11.)
     declared, sources = declaration_config(project)
     core = declared.get("CORE_AREA")
     if not core:
@@ -229,8 +243,8 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
     if winner == "UNDETERMINED":
         if selection.get("reason") != "LL_PARETO_TIE" or counts["magic"]["total"] != counts["klayout"]["total"]:
             raise Refusal("LL_STREAM_SELECTION_UNDETERMINED", str(root / "37-selection.json"))
-        winner = "magic"  # XOR zero and equal measured DRC: stable primary.
-        selection["tie_break"] = "magic_primary_after_xor_zero_and_equal_drc"
+        winner = TIE_BREAK_ENGINE  # XOR zero and equal measured DRC
+        selection["tie_break"] = f"{winner}_primary_after_xor_zero_and_equal_drc"
     final_gds = final_paths[winner]
     # The runner's substance, label, DBU and strict provenance gates consume
     # these exact bytes.  Preserve the LibreLane source and SHA in the receipt.
