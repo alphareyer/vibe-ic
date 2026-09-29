@@ -77717,7 +77717,7 @@ def main() -> int:
 
     plan.append(_upstream_signoff_not_measured("tapeout_docs_gen",
                  _layout_refusal) if _layout_refusal else
-                step_tapeout_docs_gen(project, getattr(args, "ic_name", None)))
+                step_tapeout_docs_gen(project, args.ic_name))
 
     # And the PRODUCT documents beside the sign-off evidence. The generator
     # above writes what was CHECKED; this writes what the part IS — and refuses

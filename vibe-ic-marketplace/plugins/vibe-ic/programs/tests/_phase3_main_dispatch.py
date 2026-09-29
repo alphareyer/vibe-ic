@@ -34,7 +34,8 @@ def guarded_producer_line(name, row):
         "step_digital_hardmacro_gen": "step_digital_hardmacro_gen(project, pdk, args.container)",
         "step_ic_release_docs_gen": "step_ic_release_docs_gen(project)",
         "step_ip_release_docs_gen": "step_ip_release_docs_gen(project, args.ic_name or args.top_name, pdk.name)",
-        "step_tapeout_docs_gen": "step_tapeout_docs_gen(project)",
+        # U19: the operator's --ic-name names the 37.5ic documents.
+        "step_tapeout_docs_gen": "step_tapeout_docs_gen(project, args.ic_name)",
         "step_signoff_metrics_aggregate": "step_signoff_metrics_aggregate(project)",
     }[name]
     assert ast.unparse(call) == expected, f"{name} arguments changed"
