@@ -345,6 +345,9 @@ def _substance_of(run_dir: Path, artifact_path: str, resolved: Path,
         if detail_out is not None:
             detail_out["spec_example_disclosures"] = rep.get("spec_example_disclosures", [])
             detail_out["spec_example_conflicts"] = rep.get("spec_example_conflicts", [])
+            if rep.get("measurement_disagreements"):
+                detail_out["measurement_disagreements"] = rep[
+                    "measurement_disagreements"]
         if rep.get("verdict") == "OWNER_REVIEW":
             return "OWNER_REVIEW", rep.get("note", ""), "CONTRACT"
         if rep.get("verdict") == "DISCLOSE":
@@ -385,6 +388,23 @@ def _substance_of(run_dir: Path, artifact_path: str, resolved: Path,
                 "it is %d byte(s), and it declares nothing"
                 % (type(loaded).__name__, resolved.stat().st_size),
                 "JSON")
+    # A plugin declaration with no spec contract (the arithmetic emitter's
+    # path) is still a statement about the RTL; one the oracle TB measured
+    # otherwise is false, not substantive.
+    if isinstance(loaded, dict) and resolved.name == "declaration.json":
+        try:
+            import spec_declaration_emit as _sde  # noqa: PLC0415
+            diff = _sde.measurement_disagreements(run_dir, loaded)
+        except Exception as exc:  # noqa: BLE001
+            return (None, "NOT_MEASURED: measurement comparison raised %s"
+                    % exc, "JSON")
+        if diff:
+            if detail_out is not None:
+                detail_out["measurement_disagreements"] = diff
+            return ("FAIL_MEASUREMENT_DISAGREES", "; ".join(
+                "%s declared %r, measured %r (%s)"
+                % (d["field"], d["declared"], d["measured"], d["measured_at"])
+                for d in diff), "JSON")
     return "PASS", "parses as a non-empty JSON %s" % type(loaded).__name__, "JSON"
 
 
