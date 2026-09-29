@@ -138,12 +138,51 @@ def _quote(line: str, limit: int = 160) -> str:
     return q if len(q) <= limit else q[:limit - 3].rstrip() + "..."
 
 
+#: Where flow step D1 writes its plain-text copy of `input/docs/`
+#: (`phase1_doc_one_shot_runner.extract_text_pipeline`).
+_D1_COPY_ROOTS = ("phase1/input_doc/", "input_doc/")
+
+
+def _d1_copy_stems(project: Path) -> set:
+    """The names D1 gives its copies of `input/docs/*`: `<sub>__<stem>`,
+    lower-cased (`spec/foo.pdf` -> `spec__foo.txt`)."""
+    src = Path(project) / "input" / "docs"
+    if not src.is_dir():
+        return set()
+    return {"__".join(f.relative_to(src).with_suffix("").parts).lower()
+            for f in src.rglob("*") if f.is_file()}
+
+
+def _one_copy(project: Path, items, rel_of) -> list:
+    """Read each design document ONCE. D1 copies `input/docs/X.md` to
+    `phase1/input_doc/X.txt`; when the original exists its copy is skipped,
+    exactly as `l8_doc_clock_freq_synth._iter_docs` does. Otherwise the same
+    table is read twice (two std-cell rows, the copies among the inputs) and a
+    re-derivation after D1 disagrees with the answer derived before it
+    (DELIVC3 final check)."""
+    originals = _d1_copy_stems(project)
+    out = []
+    for item in items:
+        rel = rel_of(item)
+        if (rel.startswith(_D1_COPY_ROOTS)
+                and Path(rel).stem.lower() in originals):
+            continue
+        out.append(item)
+    return out
+
+
+def l7_docs(project: Path) -> List[Tuple[str, str]]:
+    """The L7 documents, each read once (see `_one_copy`)."""
+    return _one_copy(project, ASB.l7_docs_of(project), lambda it: it[0])
+
+
 def design_docs(project: Path) -> List[Tuple[str, Path, str]]:
     """The design's own prose documents, through the shared input walker
     (which already skips every oracle/reference tree). Operator material under
     the submission-template directories is not the design speaking."""
     out = []
-    for rel, path, text in FPC._iter_input_files(project):
+    for rel, path, text in _one_copy(project, FPC._iter_input_files(project),
+                                     lambda it: it[0]):
         if path.suffix.lower() not in _PROSE_SUFFIXES:
             continue
         if rel.startswith("input/submission_template"):
@@ -188,7 +227,7 @@ def die_size_statements(docs: Sequence[Tuple[str, Path, str]]
 def _table_rows(project: Path, metric) -> Dict[str, List[Dict[str, Any]]]:
     out: Dict[str, List[Dict[str, Any]]] = {"ceilings": [], "baselines": []}
     seen = set()
-    for rel, text in ASB.l7_docs_of(project):
+    for rel, text in l7_docs(project):
         got = ASB.parse_signoff_statements(text, metric, source=rel)
         for kind in ("ceilings", "baselines"):
             for row in got[kind]:
@@ -241,6 +280,18 @@ def _cites(recs: Sequence[Dict[str, Any]]) -> str:
 
 def derive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
     """{status: WRITE|REFUSED|NOT_DETERMINED, budget?, reason?, basis}."""
+    # THE OWNER'S FIELD IS NEVER OVERWRITTEN (DELIVC final check, finding 2).
+    # Any owner record, cited or not: an uncited one is a defect the owner
+    # fixes, never a licence for a program to replace the owner's answer.
+    # Decided by the repo's one reader, the same one the gate uses, so a
+    # record the gate reads as the owner's (e.g. " owner ") is never
+    # overwritten here (DELIVC3 final check).
+    if TD.attestation_of(doc, KEY)["answered_by"] == \
+            TD.ANSWERED_BY_OWNER_VALUE:
+        return {"status": "REFUSED", "rc": 1,
+                "reason": (f"`{TD.PROVENANCE_KEY}.{KEY}` says the owner "
+                           f"answered `{KEY}`; this program never overwrites "
+                           f"an owner field")}
     deliverable = TD.answer(doc, "deliverable")
     att = TD.attestation_of(doc, "deliverable")
     if deliverable not in TD.DELIVERABLES:
@@ -335,7 +386,7 @@ def derive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
     # decline or a gate added to any of them changes the answer, so each is
     # part of what the answer was derived from.
     inputs = sorted({rel for rel, _p, _t in docs}
-                    | {rel for rel, _t in ASB.l7_docs_of(project)})
+                    | {rel for rel, _t in l7_docs(project)})
     digest = TD.derived_inputs_sha256(project, inputs)
     if digest is None:                               # pragma: no cover
         return {"status": "REFUSED", "rc": 1, "basis": basis,
@@ -343,6 +394,26 @@ def derive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "WRITE", "rc": 0, "budget": budget,
             "inputs": inputs, "inputs_sha256": digest,
             "ref": ref, "attestation": att, "deliverable": deliverable}
+
+
+def provenance_record(got: Dict[str, Any]) -> Dict[str, Any]:
+    """The `answer_provenance.<KEY>` record for a WRITE result of `derive`."""
+    return {"answered_by": TD.ANSWERED_BY_PROGRAM_VALUE,
+            "producer": PROGRAM,
+            TD.DERIVED_FROM_ATTESTED: {"deliverable": got["deliverable"]},
+            TD.DERIVED_INPUTS: got["inputs"],
+            TD.DERIVED_INPUTS_SHA256: got["inputs_sha256"]}
+
+
+def rederive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
+    """What this producer would write NOW for `doc` in `project`, without
+    writing anything: {answer, provenance} on a WRITE, else {refused: reason}.
+    The step-0.5ic gate compares the recorded answer with this instead of
+    believing a self-declared provenance record (DELIVC final, finding 1)."""
+    got = derive(project, doc)
+    if got["status"] != "WRITE":
+        return {"refused": f"{got['status']}: {got.get('reason')}"}
+    return {"answer": got["budget"], "provenance": provenance_record(got)}
 
 
 def _sha(text: Any) -> Optional[str]:
@@ -362,11 +433,7 @@ def apply(doc: Dict[str, Any], got: Dict[str, Any],
     old_prov_map = doc.get(TD.PROVENANCE_KEY)
     old_prov = (old_prov_map.get(KEY) if isinstance(old_prov_map, dict)
                 else None)
-    prov_rec = {"answered_by": TD.ANSWERED_BY_PROGRAM_VALUE,
-                "producer": PROGRAM,
-                TD.DERIVED_FROM_ATTESTED: {"deliverable": deliverable},
-                TD.DERIVED_INPUTS: got["inputs"],
-                TD.DERIVED_INPUTS_SHA256: got["inputs_sha256"]}
+    prov_rec = provenance_record(got)
     if old == got["budget"] and old_prov == prov_rec:
         return new, {}
     # WHY it changed, from the recorded structure only (never its prose).
