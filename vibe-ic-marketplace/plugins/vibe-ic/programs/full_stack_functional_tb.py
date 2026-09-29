@@ -273,6 +273,34 @@ _TB_VERDICT_RE = re.compile(
 _ORACLE_DONE_RE = re.compile(r"(?m)^\s*ORACLE_TB_DONE\s+pass=(\d+)/(\d+)")
 _FAIL_LINE_RE = re.compile(r"(?m)^\s*(?:\[[^\]]*\]\s*)?FAIL\b")
 _MISMATCH_RE = re.compile(r"(?m)^\s*ORACLE_MISMATCH\b")
+#: R-0929-X-QUALIFIED — a cycle on which an output was X/Z and the oracle let
+#: it pass because every qualifier the design input declares for it was known
+#: and inactive. Carried into the record so the exemption is visible.
+_X_EXEMPT_RE = re.compile(r"(?m)^\s*\[TB\s+[A-Za-z_][A-Za-z0-9_$]*\]\s+"
+                          r"X_EXEMPT:\s*(.*)$")
+
+
+def x_exemptions(text: str) -> List[str]:
+    return [m.group(1).strip() for m in _X_EXEMPT_RE.finditer(text or "")]
+
+
+def population_shortfall(want: Optional[int], checks: Optional[dict]
+                         ) -> Optional[str]:
+    """Why an executed-and-matched case did NOT measure the population its own
+    text states, or None. A transcript that prints no golden count (a property
+    oracle's bare `[TB x] PASS`) measured ONE scenario, so a stated population
+    above one is short -- never assumed met."""
+    if not want or want <= 1:
+        return None
+    got = (checks or {}).get("total")
+    if not isinstance(got, int):
+        return (f"the transcript states no executed vector count (one "
+                f"scenario), but the case's own text states a population of "
+                f"{want}")
+    if got < want:
+        return (f"{got} vector(s) executed and passed, but the case's own text "
+                f"states a population of {want}")
+    return None
 
 
 def score_transcript(case: str, rc: Optional[int], text: str
@@ -286,6 +314,15 @@ def score_transcript(case: str, rc: Optional[int], text: str
     ERRORED anything else — including a clean exit that printed no verdict,
             which is a testbench that judged nothing and is never a pass."""
     text = text or ""
+    res = _score_transcript(case, rc, text)
+    ex = x_exemptions(text)
+    if ex:
+        res["x_exemptions"] = ex
+    return res
+
+
+def _score_transcript(case: str, rc: Optional[int], text: str
+                      ) -> Dict[str, Any]:
     done = list(_ORACLE_DONE_RE.finditer(text))
     words = [m.group(2) for m in _TB_VERDICT_RE.finditer(text)
              if m.group(1) == case]
@@ -650,13 +687,12 @@ def generate(project: Path, container: Optional[str] = None,
         score = score_transcript(name, rrc, rlog or "")
         entry.update(state=score["state"], checks=score["checks"],
                      reason=score["message"])
-        want = entry.get("declared_population")
-        got = (score["checks"] or {}).get("total")
-        if (score["state"] == PASSED and want and isinstance(got, int)
-                and got < want):
-            entry.update(state=SHORT, reason=(
-                f"{got} vector(s) executed and passed, but the case's own text "
-                f"states a population of {want}"))
+        if score.get("x_exemptions"):
+            entry["x_exemptions"] = score["x_exemptions"]
+        short = population_shortfall(entry.get("declared_population"),
+                                     score["checks"])
+        if score["state"] == PASSED and short:
+            entry.update(state=SHORT, reason=short)
     executed = sum(1 for c in rec["cases"] if c.get("state") in EXECUTED_STATES)
     failed = sum(1 for c in rec["cases"] if c.get("state") == FAILED)
     short = sum(1 for c in rec["cases"] if c.get("state") == SHORT)
@@ -669,6 +705,16 @@ def generate(project: Path, container: Optional[str] = None,
         return _finish(NOT_MEASURED, ZERO_DENOMINATOR, (
             f"{short} case(s) executed fewer vectors than their own text "
             f"states; that population was not measured"))
+    if errored and executed:
+        # A case with an oracle and a testbench that was built or run and gave
+        # no verdict (build failure, simulator crash, a timeout with no marker
+        # -- a reset scenario that never finishes is exactly that) is part of
+        # the population and was not measured. Dropping it from the
+        # denominator would let a design-caused hang read green.
+        return _finish(NOT_MEASURED, EXECUTION_ERROR, (
+            f"{errored} case(s) with an emitted testbench could not be built or "
+            f"gave no verdict; {executed} executed — the population was not "
+            f"fully measured"))
     if executed == 0:
         return _finish(NOT_MEASURED,
                        EXECUTION_ERROR if errored else ZERO_DENOMINATOR, (

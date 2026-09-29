@@ -958,14 +958,39 @@ def functional_full_stack_verdict(project: Path):
             **common)
     problems: list = []
     counts = {"executed": 0, "passed": 0, "failed": 0, "short": 0}
+    errored: list = []
     population = []
+    # The population each case's OWN text states, re-derived from the design
+    # input (whose bytes were just checked against the record) -- the record's
+    # `short_population` label is not what decides a shortfall.
+    try:
+        import testbench_gen as _tbg
+        import arith_oracle_tb_gen as _aog
+        declared = {str(k.get("name") or k.get("id") or ""):
+                    _aog.declared_vector_population(k)
+                    for k in (_tbg.load_l10_cases(project) or [])
+                    if isinstance(k, dict)}
+    except Exception as exc:  # noqa: BLE001
+        return _functional_nm(
+            "EXECUTION_ERROR", "functional_population_underivable",
+            f"the declared case populations could not be re-derived from the "
+            f"design input: {exc!r}", **common)
     for c in rec.get("cases") or []:
+        if not isinstance(c, dict):
+            problems.append(f"a case entry is not a record: {c!r:.60}")
+            continue
         st = c.get("state")
         row = {"case": c.get("name"), "state": st,
                "family": c.get("family"), "checks": c.get("checks"),
                "reason": c.get("reason")}
         population.append(row)
+        if st == _fsf.ERRORED:
+            errored.append(str(c.get("name")))
+            continue
         if st not in (_fsf.PASSED, _fsf.FAILED, _fsf.SHORT):
+            if c.get("run_log") or c.get("build_rc") is not None:
+                problems.append(f"{c.get('name')}: the record says {st} but "
+                                f"names a build/run of the case")
             continue
         tb = project / str(c.get("tb") or "")
         log = project / str(c.get("run_log") or "")
@@ -995,8 +1020,13 @@ def functional_full_stack_verdict(project: Path):
             problems.append(f"{c.get('name')}: the transcript scores "
                             f"{got['state']}, the record claims {st}")
             continue
-        if st == _fsf.SHORT:
+        if got.get("x_exemptions"):
+            row["x_exemptions"] = got["x_exemptions"]
+        short = _fsf.population_shortfall(declared.get(str(c.get("name"))),
+                                          got["checks"])
+        if st == _fsf.SHORT or (st == _fsf.PASSED and short):
             counts["short"] += 1
+            row["short"] = short or c.get("reason")
             continue
         counts["executed"] += 1
         counts["passed" if st == _fsf.PASSED else "failed"] += 1
@@ -1023,6 +1053,14 @@ def functional_full_stack_verdict(project: Path):
             "ZERO_DENOMINATOR", "functional_population_short",
             (f"{counts['short']} case(s) executed fewer vectors than their own "
              f"text states; that population was not measured"), **common)
+    if errored:
+        return _functional_nm(
+            "EXECUTION_ERROR", "functional_case_errored",
+            (f"{len(errored)} case(s) with an oracle and a testbench were "
+             f"built or run and gave no verdict (build failure, simulator "
+             f"crash or timeout); {counts['executed']} executed — the "
+             f"population was not fully measured"), errored_cases=errored,
+            **common)
     if not counts["executed"]:
         return _functional_nm(
             "ZERO_DENOMINATOR", "functional_full_stack_population_empty",
@@ -1281,7 +1319,16 @@ def main():
                 # judged from the record `full_stack_functional_tb` writes, and
                 # a connectivity-only population is REFUSED as functional
                 # evidence.
-                _rc, _res, _sentinel = functional_full_stack_verdict(proj)
+                try:
+                    _rc, _res, _sentinel = functional_full_stack_verdict(proj)
+                except Exception as _exc:  # noqa: BLE001
+                    # A crash in the functional judgement is NOT_MEASURED with
+                    # its cause -- never a fall-through to the legacy opcode
+                    # check, whose verdict-less rc 1 reads as informational.
+                    _rc, _res, _sentinel = _functional_nm(
+                        "EXECUTION_ERROR", "functional_verdict_crashed",
+                        f"the functional full-stack judgement raised "
+                        f"{_exc!r}")
                 if args.json:
                     Path(args.json).parent.mkdir(parents=True, exist_ok=True)
                     Path(args.json).write_text(json.dumps(_res, indent=2))
