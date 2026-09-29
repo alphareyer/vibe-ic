@@ -185,6 +185,9 @@ def _require_current_adoption(project: Path, handoff: Dict[str, Any],
     if handoff["chain"] != expected_chain or folders[2].resolve() != folder.resolve():
         raise ValueError("RETAP_HANDOFF_RUN_MISMATCH: chain identity")
     selected = handoff["selected"]
+    if handoff["modes"].get("19") == "dual" and ll._load(
+            project / "phase3/tool_arms/19/selection.json") != handoff["selection"]:
+        raise ValueError("RETAP_HANDOFF_RUN_MISMATCH: current dual selection")
     if selected == "librelane":
         previous = folder / "state_out.json"
         downstream = list(zip(steps[3:], folders[3:]))
@@ -195,9 +198,6 @@ def _require_current_adoption(project: Path, handoff: Dict[str, Any],
         # The emitter retains the candidate chain above, but selects the direct
         # arm's separate STA chain and native views when dual chooses OpenROAD.
         arm = project / "phase3/tool_arms/19/openroad"
-        selection = ll._load(project / "phase3/tool_arms/19/selection.json")
-        if selection != handoff["selection"]:
-            raise ValueError("RETAP_HANDOFF_RUN_MISMATCH: current dual selection")
         lane = project / "phase3/librelane/19-cts-hold-direct-arm"
         downstream = [("OpenROAD.STAMidPNR", lane / f"{i:02d}-openroad-stamidpnr")
                       for i in range(1, len(corners) + 1)]

@@ -394,6 +394,25 @@ def test_current_selected_direct_arm_remains_bound_without_claiming_retap_adopti
     assert doc["binding"]["selected"] == "openroad" and doc["binding"]["retap_adopted"] is False
 
 
+def test_dual_librelane_adoption_requires_the_current_selection_record(tmp_path):
+    project = _project(tmp_path, KEEP_LOG, NL_KEPT)
+    (project / "phase3/librelane_switch.json").write_text(json.dumps(
+        {"steps": {"19": "dual", "20": "dual"}}))
+    handoff_path = project / RA.HANDOFF
+    handoff = json.loads(handoff_path.read_text())
+    selection = {"selection": "librelane", "mode": "dual"}
+    handoff.update(modes=cts.modes(project), selection=selection)
+    handoff_path.write_text(json.dumps(handoff))
+    path = project / "phase3/tool_arms/19/selection.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(selection))
+    rc, doc = _run(project)
+    assert rc == 0 and doc["verdict"] == "PASS" and doc["binding"]["retap_adopted"] is True, doc
+    path.write_text(json.dumps(dict(selection, selection="openroad")))
+    rc, doc = _run(project)
+    assert rc == 2 and "current dual selection" in doc["reason"], doc
+
+
 def _repeat_chain(project, native):
     inputs = project / 'inputs'
     with patch.object(contract, 'image_capability', return_value={}), \
