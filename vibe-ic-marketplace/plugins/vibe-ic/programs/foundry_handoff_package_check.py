@@ -113,13 +113,25 @@ def pdk_consistency_findings(project, signoff_pdk):
     if signoff_pdk is None:
         return []
     findings = []
-    for rel in _REQUIRED_FILES[:3]:
+    json_members = [rel for rel in _REQUIRED_FILES
+                    if isinstance(rel, str) and rel.endswith(".json")]
+    for rel in json_members:
         path = project / rel
         try:
             member = json.loads(path.read_text(errors="replace"))
         except (OSError, ValueError):
             continue  # existing member/substance checks own unreadable JSON
-        if not isinstance(member, dict) or "pdk" not in member:
+        if not isinstance(member, dict):
+            continue
+        if "pdk" not in member:
+            # Dropping the key must not escape the rule it feeds.
+            findings.append({
+                "severity": "ERROR",
+                "rule": "FOUNDRY_HANDOFF_PDK_UNDECLARED",
+                "message": (f"{rel}: kit member names no pdk, but the "
+                            f"sign-off flow used {signoff_pdk!r}; a mask "
+                            f"deliverable must state its process."),
+            })
             continue
         declared = member["pdk"]
         if declared != signoff_pdk:
@@ -1211,12 +1223,29 @@ def main(argv=None):
         })
 
     waiver = _step_waived(project, args.step_label)
-    substance_findings.extend(pdk_consistency_findings(
-        project, _fsp.pdk_from_signoff_flow(project)))
+    signoff_pdk, pdk_candidates = _fsp.signoff_pdk_evidence(project)
+    substance_findings.extend(pdk_consistency_findings(project, signoff_pdk))
+    # A PASS where the kit/flow comparison ran must not look like one where
+    # it could not: every report states which it was, and why.
+    if signoff_pdk is not None:
+        pdk_consistency = "CHECKED"
+        pdk_notes = []
+    else:
+        pdk_consistency = ("NOT_DETERMINED:absent" if not pdk_candidates
+                           else f"NOT_DETERMINED:ambiguous{pdk_candidates}")
+        pdk_notes = [{
+            "severity": "INFO",
+            "rule": "FOUNDRY_HANDOFF_PDK_NOT_DETERMINED",
+            "message": (f"the kit's pdk was not compared with the sign-off "
+                        f"flow: {pdk_consistency} (/foss/pdks/<name>/ paths "
+                        f"in the published phase2/phase3 files)."),
+        }]
     if substance_findings and not waiver:
         verdict, rc = "FAIL", 1
-        findings = substance_findings
+        findings = substance_findings + pdk_notes
         report = {"program": _GATE_NAME, "verdict": verdict,
+                  "signoff_pdk": signoff_pdk,
+                  "pdk_consistency": pdk_consistency,
                   "findings": findings}
         # R-0915-152 -- the document states WHO INVOKED this writer, beside the
         # verdict it already composes. Unstated role == producer, so the run's
@@ -1251,10 +1280,14 @@ def main(argv=None):
     # absence is reported as MISSING by the step-level check independently of
     # this rc, and the members that are absent are named in the FAIL report
     # below as well.
-    if waiver and (missing or chip_gds_finding is not None):
+    # A waived substance finding is WAIVED, never PASS, and stays on the
+    # record beside the waiver that covered it.
+    if waiver and (missing or chip_gds_finding is not None
+                   or substance_findings):
         verdict, rc = "WAIVED", 0
         findings = [{"severity": "WAIVED", "rule": "STEP_WAIVED",
                       "message": f"waiver={waiver.get('ticket','?')}: {waiver.get('reason','?')}"}]
+        findings.extend(substance_findings)
     elif chip_gds_finding is not None:
         verdict, rc = "FAIL", 1
         findings = [chip_gds_finding]
@@ -1272,6 +1305,8 @@ def main(argv=None):
                   + (f" + chip GDS {chip_gds.name!r}" if chip_gds else ""))
         findings = [{"severity": "INFO", "rule": "FILES_PRESENT",
                       "message": ok_msg}]
+
+    findings.extend(pdk_notes)
 
     # #449 — PENDING_FOUNDRY_* open items: a NAMED INFO finding so the
     # tapeout checklist lists them; never an ERROR (foundry-supplied by
@@ -1298,6 +1333,8 @@ def main(argv=None):
         "physical_top_candidates": physical_tops,  # actual PnR top(s)
         "chip_gds": str(chip_gds) if chip_gds else None,
         "scribe_only": scribe_only,
+        "signoff_pdk": signoff_pdk,
+        "pdk_consistency": pdk_consistency,
         "waiver": waiver,
         "rationale_when_skipped": _WAIVER_RATIONALE,
         "pending_foundry_fields": pending_foundry_fields,  # #449 open items
