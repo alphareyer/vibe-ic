@@ -628,6 +628,12 @@ def _f_expert_answer_refused(p: Path) -> None:
     _w(p, "input/docs/spec.md", "The block accepts a clock input named clk.\n")
     _w(p, "phase1/generated_docs/L9_INTERFACE.json",
        {"doc_id": "L9", "top_ports": ["clk"]})
+    # An answer is read only inside a pack rooted by the producer's own
+    # hand-off (EXPERT_PRIOR_ROOT_UNVERIFIABLE otherwise); emit it first, as
+    # the expert-track fixtures do since 9bbb129f7. Setup only.
+    pack = p / "reports/audit/phase1/expert_parse_track_pack"
+    assert track.ai_subtrack(p, track.input_text(p), pack)["status"] == (
+        track.AI_HANDOFF_EMITTED)
     _w(p, "reports/audit/phase1/expert_parse_track_pack/"
           "l_doc_expectations.json",
        {"verdict": "gaps", "complete": False,
