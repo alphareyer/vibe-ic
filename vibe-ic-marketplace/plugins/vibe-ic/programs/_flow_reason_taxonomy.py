@@ -337,7 +337,20 @@ def structural_absence_line(text: Any) -> Optional[str]:
     return None
 
 
-def _guard_structural(cls: str, evidence: Any) -> str:
+def _line_states_structural_absence(message: Any) -> bool:
+    """R-0915-119's SECOND CHANNEL: the one sentence shape that carries its own
+    enumeration — the class token, a scanned count at or above the floor, and
+    `found 0`. `_sa.sentence()` is its one writer."""
+    m = _STRUCTURAL_LINE_RE.search(str(message or ""))
+    if not m:
+        return False
+    try:
+        return int(m.group("scanned")) >= _sa.MIN_SCANNED
+    except (TypeError, ValueError):          # pragma: no cover
+        return False
+
+
+def _guard_structural(cls: str, evidence: Any, message: Any = "") -> str:
     """R-0915-119 guards (i) and (ii), applied wherever the token arrives.
 
     A checker may STATE `NOT_APPLICABLE_BY_STRUCTURE`, and the token alone is
@@ -345,11 +358,33 @@ def _guard_structural(cls: str, evidence: Any) -> str:
     back to the fail-closed default, exactly as it did before the class
     existed — so a checker that crashes, cannot read its input, or found its
     subject and examined none of it cannot reach the decided state by writing
-    a word into its report."""
+    a word into its report.
+
+    U20 (IC_BLOCKER_AUDIT §2) — THE ENUMERATION HAS TWO TRANSPORTS, and this
+    guard honoured one. A record carries it as `evidence.structural_absence`;
+    a line carries it as the sentence `_sa.sentence()` writes, which
+    `infer_nonverdict_reason` already accepts on its own (below). The P0
+    umbrella classifies a gate's line ONCE with no explicit class — reaching
+    this class from the sentence — and `_p0_gate_record` then classifies AGAIN
+    with that class as `explicit=` and the umbrella's own evidence (exit code,
+    skip kind; no enumeration record). This guard refused the class it had
+    been handed one line earlier. MEASURED on subservient v4: four checkers
+    whose record message is the full sentence ("enumerated 24 RTL file(s)
+    staged for this design and found 0") published EXECUTION_ERROR, and P0
+    read NOT_MEASURED.
+
+    NARROW, AND NEVER AN OVERRIDE: the line is consulted only when NO
+    enumeration record is present. A record that is present and invalid (the
+    subject was FOUND, or nothing was scanned) still fails closed whatever
+    the sentence says."""
     if cls != NOT_APPLICABLE_BY_STRUCTURE:
         return cls
-    return (cls if _sa.is_valid((evidence or {}).get(_sa.EVIDENCE_KEY))
-            else EXECUTION_ERROR)
+    record = (evidence or {}).get(_sa.EVIDENCE_KEY)
+    if _sa.is_valid(record):
+        return cls
+    if record is None and _line_states_structural_absence(message):
+        return cls
+    return EXECUTION_ERROR
 
 
 def infer_nonverdict_reason(*, verdict: str = "", message: str = "",
@@ -363,11 +398,11 @@ def infer_nonverdict_reason(*, verdict: str = "", message: str = "",
     """
     cls = normalise(explicit)
     if cls:
-        return _guard_structural(cls, evidence)
+        return _guard_structural(cls, evidence, message)
     ev = dict(evidence or {})
     cls = normalise(ev.get("reason_class"))
     if cls:
-        return _guard_structural(cls, ev)
+        return _guard_structural(cls, ev, message)
     skip_kind = str(ev.get("skip_kind") or "").lower()
     if skip_kind == "class-not-applicable":
         return DESIGN_DECLARED_NA
@@ -397,13 +432,8 @@ def infer_nonverdict_reason(*, verdict: str = "", message: str = "",
     # attached, which is what guard (i) asks for — the prose is the
     # transport, never the basis. `_sa.sentence()` is the one writer of this
     # shape, so the claim and its reader cannot drift.
-    m = _STRUCTURAL_LINE_RE.search(str(message or ""))
-    if m:
-        try:
-            if int(m.group("scanned")) >= _sa.MIN_SCANNED:
-                return NOT_APPLICABLE_BY_STRUCTURE
-        except (TypeError, ValueError):      # pragma: no cover
-            pass
+    if _line_states_structural_absence(message):
+        return NOT_APPLICABLE_BY_STRUCTURE
     if _ZERO_RE.search(text):
         return ZERO_DENOMINATOR
     if _BLOCKED_RE.search(text):

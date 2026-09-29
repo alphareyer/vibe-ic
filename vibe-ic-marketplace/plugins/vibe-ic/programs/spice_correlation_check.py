@@ -3886,9 +3886,24 @@ def run_audit(project: Path, run_spice: bool = True,
             # re-derive which record exempted the design, which is the work
             # the disclosure exists to save. Token prefix stays stable for
             # consumers; the class rides after the colon.
+            # U20 — THE GATE STATES ITS CLASS, AND ITS BASIS. It keyed this
+            # answer off a DECLARATION (the class registry's
+            # `analog_applicable=false` for the design's registry-matched
+            # class), which is exactly what DESIGN_DECLARED_NA means and what
+            # the P0 umbrella already calls the same fact for its other analog
+            # gates. Left unstated, a reader had only the sentence to go on,
+            # and the sentence is rightly not a declaration: MEASURED on spm
+            # v5, P0 booked this skip EXECUTION_ERROR.
             result.summary = {
                 "skipped": True,
                 "reason": f"analog_not_applicable_for_class:{_na_class}",
+                "reason_class": "DESIGN_DECLARED_NA",
+                "declared_absence_basis": {
+                    "source": "ic_class_registry",
+                    "ic_class": _na_class,
+                    "registry_matched": True,
+                    "analog_applicable": False,
+                },
                 "ic_class": _na_class,
                 "spice_decks": 0, "spice_results": 0}
             return result

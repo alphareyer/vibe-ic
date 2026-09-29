@@ -10345,6 +10345,10 @@ _P0_GATE_DECLARES_REASON_CLASS: frozenset = frozenset({
     # layer phase 1 never emitted (ASKED_BEFORE_PRODUCER), and the inert /
     # N/A layer (DESIGN_DECLARED_NA).
     "l24_signoff_evidence_backed_check",
+    # U20 (spm v5, stage1 P0). States DESIGN_DECLARED_NA, with the class
+    # record it keyed on, when the design's registry-matched class declares
+    # `analog_applicable=false`; null on every measured verdict.
+    "spice_correlation_check",
 })
 
 

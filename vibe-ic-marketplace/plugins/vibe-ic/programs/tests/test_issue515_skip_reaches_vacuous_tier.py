@@ -113,23 +113,61 @@ def _minimal_rtl_project(tmp_path: Path) -> Path:
     return proj
 
 
+#: A gate that exits rc 2 having printed only a banner: it names no class and
+#: no enumeration, so it has established nothing.
+_BANNER_ONLY_GATE = "banner_only_probe_check"
+_BANNER_ONLY_SRC = (
+    "import sys\n"
+    "print('=== banner_only_probe_check (probe) ===')\n"
+    "print('  [skipped] nothing to look at here')\n"
+    "sys.exit(2)\n")
+
+
 def test_p0_umbrella_requires_a_declared_absence_basis(tmp_path, monkeypatch):
-    """#1978: a banner-only rc-2 is incomplete, not an unearned N/A."""
+    """#1978: a banner-only rc-2 is incomplete, not an unearned N/A.
+
+    MIGRATED (U20, IC_BLOCKER_AUDIT §2), not weakened. This test pinned the
+    #1978 invariant through two REAL gates that were banner-only when it was
+    written. R-0915-119 then taught both to state their decision WITH its
+    enumeration ("[NOT_APPLICABLE_BY_STRUCTURE] ...: enumerated 1 RTL source
+    file(s) ... and found 0") — they are named in `_structural_absence`'s own
+    docstring as two of the seven checkers it was written for — so they are
+    no longer banner-only, and the record's EXECUTION_ERROR was the U20 defect
+    (the class was re-guarded at the record boundary without the line that
+    established it; MEASURED on subservient v4, four checkers). The invariant
+    itself is kept, on a gate that is actually banner-only; the two real gates
+    now pin the other half: a basis that IS declared reaches the decided class.
+    Neither half counts as a PASS."""
     proj = _minimal_rtl_project(tmp_path)
-    monkeypatch.setattr(_flow, "_STRUCTURAL_RTL_GATES", _SKIPPING_GATES)
+    progs = tmp_path / "progs"
+    progs.mkdir()
+    for gate in _SKIPPING_GATES:
+        (progs / f"{gate}.py").symlink_to(_PROGRAMS / f"{gate}.py")
+    (progs / f"{_BANNER_ONLY_GATE}.py").write_text(_BANNER_ONLY_SRC)
+    monkeypatch.setattr(_flow, "PROGRAMS_DIR", progs)
+    monkeypatch.setattr(_flow, "_STRUCTURAL_RTL_GATES",
+                        _SKIPPING_GATES + (_BANNER_ONLY_GATE,))
     records: list = []
     passed, _fails, _skips, _waivers = _flow._run_structural_rtl_gates(
         proj, records_out=records)
     assert passed is True
     by_name = {r["name"]: r for r in records}
-    assert set(by_name) == set(_SKIPPING_GATES)
+    assert set(by_name) == set(_SKIPPING_GATES) | {_BANNER_ONLY_GATE}
+    # the #1978 invariant: no basis -> INCOMPLETE / EXECUTION_ERROR
+    rec = by_name[_BANNER_ONLY_GATE]
+    assert rec["verdict"] == "INCOMPLETE", rec
+    assert rec["reason_class"] == "EXECUTION_ERROR", rec
+    assert rec["evidence"]["exit_code"] == _vx.RC_VACUOUS, rec
+    assert rec["evidence"]["skip_kind"] == "input-missing", rec
+    # a declared basis (the checker's own enumeration) -> the decided class
     for gate in _SKIPPING_GATES:
         rec = by_name[gate]
-        assert rec["verdict"] == "INCOMPLETE", rec
-        assert rec["reason_class"] == "EXECUTION_ERROR", rec
+        assert rec["verdict"] == "SKIP", rec
+        assert rec["reason_class"] == "NOT_APPLICABLE_BY_STRUCTURE", rec
         assert rec["evidence"]["exit_code"] == _vx.RC_VACUOUS, rec
         assert rec["evidence"]["skip_kind"] == "input-missing", rec
-    # and the umbrella's passed-gate count no longer counts them
+        assert "enumerated" in rec["message"], rec
+    # and the umbrella's passed-gate count counts none of them
     assert _flow._p0_passed_count(records) == 0
 
 

@@ -74,14 +74,27 @@ _CLASS_ON_THE_EMPTY_FIXTURE = {
     "waiver_staleness_check": R.DESIGN_DECLARED_NA,
     "analog_flow_compliance_check": R.DESIGN_DECLARED_NA,
     "l24_signoff_evidence_backed_check": R.ASKED_BEFORE_PRODUCER,
+    # U20: states DESIGN_DECLARED_NA only when the design's registry-matched
+    # class declares `analog_applicable=false` (pinned positively in
+    # test_u20_p0_books_a_decided_absence_as_decided.py). This fixture has no
+    # SPEF, so the gate never reaches that question and states NOTHING — the
+    # asked-before-its-producer call is the umbrella's (R-0915-101), and a
+    # class stated here would override it.
+    "spice_correlation_check": None,
 }
+
+#: Gates that, on THIS fixture, correctly state no class at all.
+_STATES_NOTHING_ON_THE_EMPTY_FIXTURE = frozenset({"spice_correlation_check"})
 
 
 def test_every_declaring_gate_states_what_it_says_here():
     """No gate may join the registry without an expectation in this file."""
     assert set(_CLASS_ON_THE_EMPTY_FIXTURE) == set(DECLARING), (
         sorted(set(DECLARING) ^ set(_CLASS_ON_THE_EMPTY_FIXTURE)))
-    for cls in _CLASS_ON_THE_EMPTY_FIXTURE.values():
+    for gate, cls in _CLASS_ON_THE_EMPTY_FIXTURE.items():
+        if cls is None:
+            assert gate in _STATES_NOTHING_ON_THE_EMPTY_FIXTURE, gate
+            continue
         assert cls in R.REASON_CLASS_SET, cls
 
 
@@ -100,6 +113,9 @@ def test_a_declaring_gate_actually_writes_a_class(tmp_path, gate):
                                    scratch_dir=scratch)
     subprocess.run(argv, cwd=str(proj), capture_output=True,  # nosec B603
                    text=True, check=False)
+    # the gate RAN and wrote its report, whatever it stated in it — so an
+    # expected `None` is a gate that said nothing, not one that never wrote
+    assert F._p0_declared_report_path(gate, proj, scratch).is_file(), gate
     assert F._p0_declared_reason_class(gate, proj, scratch) == \
         _CLASS_ON_THE_EMPTY_FIXTURE[gate], gate
 
