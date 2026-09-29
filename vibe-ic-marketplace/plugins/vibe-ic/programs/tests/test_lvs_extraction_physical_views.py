@@ -12,7 +12,10 @@ Pinned here:
 * the bounded window restores the tech LEF, the LEFs PnR read and the pad
   library GDS views from the run's own records before anything reads the PDK
   (the GDS admission basis hashes it; step 31 extracts with it);
-* a record that does not verify (tech LEF sha) restores nothing;
+* a tech-LEF record that does not verify refuses the window (NOT_MEASURED,
+  named) and the unverified file never becomes a macro LEF;
+* a window that routes again (`pnr`, `enclosing_pnr`, `enclosing_phase3`)
+  restores nothing;
 * an extraction that read a placed master from a library path stops before
   netgen with NOT_MEASURED naming the master; a clean extraction reaches it.
 """
@@ -21,6 +24,8 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -105,27 +110,50 @@ def test_a_step31_window_reads_the_views_pnr_used(tmp_path, monkeypatch):
     assert _IO_GDS in view["macro_gds"]
 
 
-def test_a_tech_lef_record_that_does_not_verify_is_not_restored(tmp_path, monkeypatch):
-    view = _window(tmp_path, monkeypatch, sha_ok=False)["basis"]
-    assert not str(view["tech_lef"]).endswith("active_via_legalized.tlef")
-    assert _IO_LEF in view["macro_lefs"]          # the LEF record stands on its own
+def test_a_tech_lef_record_that_does_not_verify_refuses_the_window(tmp_path, monkeypatch):
+    """PnR routed with a tech LEF this tree cannot prove it still holds: the
+    window measures with neither LEF, and the unverified file never enters
+    the PDK as a macro LEF through the inventory."""
+    seen = _window(tmp_path, monkeypatch, sha_ok=False)
+    assert "basis" not in seen and "lvs" not in seen and "drc" not in seen
+    doc = json.loads(next((seen["project"] / "reports/orchestrator/windows")
+                          .glob("*/phase3_one_shot.json")).read_text())
+    row = doc["steps"][0]
+    assert row["status"] == "NOT_MEASURED"
+    assert "via-legalized tech LEF PnR used" in row["detail"]
+    project, pdk = _recorded_run(tmp_path / "direct", sha_ok=False)
+    monkeypatch.setattr(mod, "_discover_padring_io_views",
+                        lambda pdk, container: ([_IO_LEF], [_IO_GDS]))
+    done = mod._restore_recorded_physical_views(project, pdk, "c")
+    assert done["refused"]
+    assert not any(p.endswith("active_via_legalized.tlef") for p in pdk.macro_lefs)
+    assert not str(pdk.tech_lef).endswith("active_via_legalized.tlef")
 
 
-def test_a_window_that_routes_again_does_not_restore(tmp_path, monkeypatch):
-    """PnR re-derives the views itself; nothing is pre-loaded for it."""
+@pytest.mark.parametrize("entry,exit_", [("15", "22"), ("17", "20"), ("20", "22")])
+def test_a_window_that_routes_again_does_not_restore(tmp_path, monkeypatch, entry, exit_):
+    """PnR re-derives the views itself -- whether the window runs the `pnr`
+    site or an `enclosing_*` site that calls step_pnr in this process."""
     project, pdk = _recorded_run(tmp_path)
-    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "lvsfix15")
+    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", f"lvsfix{entry}{exit_}")
+    monkeypatch.setattr(mod, "_discover_padring_io_views",
+                        lambda pdk, container: ([_IO_LEF], [_IO_GDS]))
     seen = {}
 
-    def dispatch(project_, top, view, args, site, gate, run_id):
-        seen[site] = list(view.macro_lefs)
-        return mod.StepResult(site, "NOT_MEASURED", 0.0, "captured",
+    def dispatch(*args, **kwargs):
+        seen["macro_lefs"] = list(pdk.macro_lefs)
+        seen["tech_lef"] = pdk.tech_lef
+        return mod.StepResult("pnr", "NOT_MEASURED", 0.0, "captured",
                               reason_class="not_executed")
 
     monkeypatch.setattr(mod, "_direct_flow_window", dispatch)
-    args = SimpleNamespace(entry_step="15", exit_step="22", container="c")
-    mod._run_phase3_window(project, "spm", pdk, args, ["pnr"])
-    assert seen["pnr"] == []
+    monkeypatch.setattr(mod, "_phase3_window_enclosing", dispatch)
+    selected = mod._phase3_window_sites(entry, exit_)
+    assert set(selected) & {"pnr", "enclosing_pnr", "enclosing_phase3"}, selected
+    args = SimpleNamespace(entry_step=entry, exit_step=exit_, container="c")
+    mod._run_phase3_window(project, "spm", pdk, args, selected)
+    assert seen["macro_lefs"] == []
+    assert seen["tech_lef"] == "/pdk/techlef/cells__nom.tlef"
 
 
 # --- the extraction guard ----------------------------------------------------

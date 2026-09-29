@@ -36586,16 +36586,24 @@ def _restore_recorded_physical_views(project: Path, pdk: PdkConfig,
         doc = json.loads(legal.read_text()) if legal.is_file() else {}
     except (OSError, ValueError):
         doc = {}
+    derived: Optional[str] = None
     if doc.get("status") == "APPLIED" and doc.get("derived_tech_lef"):
         staged = _recorded_run_path(project, str(doc["derived_tech_lef"]))
+        derived = str(staged)
         if staged.is_file() and _sha256_file(staged) == doc.get("derived_sha256"):
             if str(pdk.tech_lef) != str(staged):
                 pdk.tech_lef_source = pdk.tech_lef_source or pdk.tech_lef
                 pdk.tech_lef = str(staged)
             done["tech_lef"] = str(staged)
         else:
-            done["notes"].append("via-legalized tech LEF record does not match "
-                                 "the staged file; distribution tech LEF kept")
+            # The layout was routed with a tech LEF this tree cannot prove it
+            # still holds. Neither LEF is the one PnR used, so the caller
+            # refuses instead of measuring with either.
+            done["refused"] = (
+                f"the via-legalized tech LEF PnR used ({staged}) is "
+                f"{'absent' if not staged.is_file() else 'not the recorded bytes'} "
+                f"(reports/pdk_via_patch_legalization.json sha256 "
+                f"{doc.get('derived_sha256')})")
     inventory = project / PHYSICAL_VIEW_INVENTORY_REL
     try:
         recorded = (json.loads(inventory.read_text()).get("read_lef_paths")
@@ -36606,7 +36614,9 @@ def _restore_recorded_physical_views(project: Path, pdk: PdkConfig,
             str(pdk.tech_lef_source or "")}
     for value in recorded:
         path = str(_recorded_run_path(project, str(value)))
-        if path in base or Path(path).name == Path(str(pdk.tech_lef)).name:
+        # The recorded tech LEF is never a macro LEF -- verified or not.
+        if (path in base or path == derived
+                or Path(path).name == Path(str(pdk.tech_lef)).name):
             continue
         if path not in pdk.macro_lefs:
             pdk.macro_lefs.append(path)
@@ -76808,8 +76818,13 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     site_before = before
     window_gate = _spf.gate
     window_ids = set(_phase3_window_steps(args.entry_step, args.exit_step))
-    if "pnr" not in selected:
-        # This process did not route the layout it now streams or checks: the
+    _views: Dict[str, Any] = {}
+    if not set(selected) & {"pnr", "enclosing_pnr", "enclosing_phase3"}:
+        # A window that routes again -- the `pnr` site, or a partial-PnR /
+        # whole-phase window dispatched as `enclosing_*`, which runs step_pnr
+        # in this process -- derives its views itself and must start from the
+        # distribution PDK. Otherwise this process did not route the layout it
+        # now streams or checks: the
         # PDK object PnR changed in memory (via-legalized tech LEF, pad-library
         # views) is rebuilt from the run's own records BEFORE anything reads
         # it -- the admission basis below hashes it, and step 31 extracts with
@@ -76823,6 +76838,12 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
               f"{len(_views['macro_gds'])} GDS"
               + (f"; {'; '.join(_views['notes'])}" if _views["notes"] else ""))
     for site in selected:
+        if _views.get("refused"):
+            rows.append(StepResult(
+                site, "NOT_MEASURED", 0.0,
+                f"window refused: {_views['refused']}",
+                reason_class=_V.ReasonClass.MISSING_ARTEFACT))
+            break
         # A narrower numeric window can omit a producer between two selected
         # sites (for example PnR 15..22 and PV 31, with GDS 37 omitted).
         # Never sign off the old GDS after this run changed the routed DEF.
