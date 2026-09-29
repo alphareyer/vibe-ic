@@ -10,7 +10,8 @@ DEF matched uniquely inside the run that routed it.
 
 Pinned here:
 * the bounded window restores the tech LEF, the LEFs PnR read and the pad
-  library GDS views from the run's own records before it dispatches the site;
+  library GDS views from the run's own records before anything reads the PDK
+  (the GDS admission basis hashes it; step 31 extracts with it);
 * a record that does not verify (tech LEF sha) restores nothing;
 * an extraction that read a placed master from a library path stops before
   netgen with NOT_MEASURED naming the master; a clean extraction reaches it.
@@ -62,38 +63,69 @@ def _recorded_run(tmp_path: Path, *, sha_ok: bool = True):
 
 
 def _window(tmp_path, monkeypatch, *, sha_ok=True):
+    """A real `--entry-step 31 --exit-step 31` window over the recorded run.
+    Faked: the pad-library resolver's container query, the PDK hasher's
+    container query and the site's EDA dispatch -- each captures the PDK
+    object it is handed."""
     project, pdk = _recorded_run(tmp_path, sha_ok=sha_ok)
+    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "lvsfix31")
     monkeypatch.setattr(mod, "_discover_padring_io_views",
                         lambda pdk, container: ([_IO_LEF], [_IO_GDS]))
     seen = {}
 
-    def window_gate(isolated, runner, site, refusal, fn, *args, **kwargs):
-        view = args[2]
-        seen.update(isolated=isolated, fn=fn, tech_lef=view.tech_lef,
-                    macro_lefs=list(view.macro_lefs),
-                    macro_gds=list(view.macro_gds))
+    def snapshot(view):
+        return {"tech_lef": view.tech_lef, "macro_lefs": list(view.macro_lefs),
+                "macro_gds": list(view.macro_gds)}
+
+    def basis(project_, top, view, container):
+        seen.setdefault("basis", snapshot(view))
+        return "", "stop at admission (captured)"
+
+    def dispatch(project_, top, view, args, site, gate, run_id):
+        seen[site] = snapshot(view)
         return mod.StepResult(site, "NOT_MEASURED", 0.0, "captured",
                               reason_class="not_executed")
 
-    mod._direct_flow_window(project, "spm", pdk, SimpleNamespace(container="c"),
-                            "lvs", window_gate, "run-1")
+    monkeypatch.setattr(mod, "_layout_basis", basis)
+    monkeypatch.setattr(mod, "_direct_flow_window", dispatch)
+    args = SimpleNamespace(entry_step="31", exit_step="31", container="c")
+    mod._run_phase3_window(project, "spm", pdk, args,
+                           mod._phase3_window_sites("31", "31"))
+    seen["project"] = project
     return seen
 
 
-def test_a_step31_window_extracts_with_the_views_pnr_used(tmp_path, monkeypatch):
+def test_a_step31_window_reads_the_views_pnr_used(tmp_path, monkeypatch):
     seen = _window(tmp_path, monkeypatch)
-    assert seen["fn"] is mod.step_lvs
-    assert seen["tech_lef"] == str(
-        seen["isolated"] / "phase3/stage3/pnr/active_via_legalized.tlef")
-    assert _IO_LEF in seen["macro_lefs"]
-    assert not any(p.endswith("active_via_legalized.tlef") for p in seen["macro_lefs"])
-    assert _IO_GDS in seen["macro_gds"]
+    view = seen["basis"]              # the FIRST reader: the admission basis
+    assert view["tech_lef"] == str(
+        seen["project"] / "phase3/stage3/pnr/active_via_legalized.tlef")
+    assert _IO_LEF in view["macro_lefs"]
+    assert not any(p.endswith("active_via_legalized.tlef") for p in view["macro_lefs"])
+    assert _IO_GDS in view["macro_gds"]
 
 
 def test_a_tech_lef_record_that_does_not_verify_is_not_restored(tmp_path, monkeypatch):
-    seen = _window(tmp_path, monkeypatch, sha_ok=False)
-    assert not str(seen["tech_lef"]).endswith("active_via_legalized.tlef")
-    assert _IO_LEF in seen["macro_lefs"]          # the LEF record stands on its own
+    view = _window(tmp_path, monkeypatch, sha_ok=False)["basis"]
+    assert not str(view["tech_lef"]).endswith("active_via_legalized.tlef")
+    assert _IO_LEF in view["macro_lefs"]          # the LEF record stands on its own
+
+
+def test_a_window_that_routes_again_does_not_restore(tmp_path, monkeypatch):
+    """PnR re-derives the views itself; nothing is pre-loaded for it."""
+    project, pdk = _recorded_run(tmp_path)
+    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "lvsfix15")
+    seen = {}
+
+    def dispatch(project_, top, view, args, site, gate, run_id):
+        seen[site] = list(view.macro_lefs)
+        return mod.StepResult(site, "NOT_MEASURED", 0.0, "captured",
+                              reason_class="not_executed")
+
+    monkeypatch.setattr(mod, "_direct_flow_window", dispatch)
+    args = SimpleNamespace(entry_step="15", exit_step="22", container="c")
+    mod._run_phase3_window(project, "spm", pdk, args, ["pnr"])
+    assert seen["pnr"] == []
 
 
 # --- the extraction guard ----------------------------------------------------

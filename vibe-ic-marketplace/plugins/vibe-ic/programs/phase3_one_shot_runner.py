@@ -36577,6 +36577,10 @@ def _restore_recorded_physical_views(project: Path, pdk: PdkConfig,
     Returns what it did, for the caller to disclose. Chip-agnostic."""
     done: Dict[str, Any] = {"tech_lef": None, "macro_lefs": [],
                             "macro_gds": [], "notes": []}
+    if not all(hasattr(pdk, a) for a in ("tech_lef", "cell_lef",
+                                         "macro_lefs", "macro_gds")):
+        done["notes"].append("no PDK physical views to restore")
+        return done
     legal = project / "reports/pdk_via_patch_legalization.json"
     try:
         doc = json.loads(legal.read_text()) if legal.is_file() else {}
@@ -76212,17 +76216,6 @@ def _direct_flow_window(project: Path, top: str, pdk: PdkConfig,
                                      dir=project.parent) as temp:
         isolated = Path(temp) / project.name
         _phase3_window_clone(project, isolated)
-        if site in ("gds", "drc", "lvs"):
-            # This process did not route the layout it now streams/checks:
-            # take the physical views PnR used from the run's own records
-            # (see `_restore_recorded_physical_views`).
-            _views = _restore_recorded_physical_views(
-                isolated, pdk, args.container)
-            print(f"[phase3] window {site}: physical views restored from the "
-                  f"run's records: tech_lef={_views['tech_lef']}, "
-                  f"{len(_views['macro_lefs'])} LEF, "
-                  f"{len(_views['macro_gds'])} GDS"
-                  + (f"; {'; '.join(_views['notes'])}" if _views["notes"] else ""))
         if site == "synth":
             row = window_gate(isolated, "phase3_one_shot_runner", site,
                               _preflight_refusal(site), step_synth,
@@ -76815,6 +76808,20 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     site_before = before
     window_gate = _spf.gate
     window_ids = set(_phase3_window_steps(args.entry_step, args.exit_step))
+    if "pnr" not in selected:
+        # This process did not route the layout it now streams or checks: the
+        # PDK object PnR changed in memory (via-legalized tech LEF, pad-library
+        # views) is rebuilt from the run's own records BEFORE anything reads
+        # it -- the admission basis below hashes it, and step 31 extracts with
+        # it. Without this every such window was refused ("unadmitted routed
+        # GDS"), and a direct step-31 call extracted the pads as full library
+        # layouts (see `_restore_recorded_physical_views`).
+        _views = _restore_recorded_physical_views(project, pdk, args.container)
+        print(f"[phase3] window: physical views restored from the run's "
+              f"records: tech_lef={_views['tech_lef']}, "
+              f"{len(_views['macro_lefs'])} LEF, "
+              f"{len(_views['macro_gds'])} GDS"
+              + (f"; {'; '.join(_views['notes'])}" if _views["notes"] else ""))
     for site in selected:
         # A narrower numeric window can omit a producer between two selected
         # sites (for example PnR 15..22 and PV 31, with GDS 37 omitted).
