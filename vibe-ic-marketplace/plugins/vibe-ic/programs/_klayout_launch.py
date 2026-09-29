@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import shlex
 import shutil
 import subprocess
@@ -82,6 +83,46 @@ def host_list_files(directory, suffix: str) -> Optional[List[str]]:
                       if p.name.endswith(suffix) and p.is_file())
     except OSError:
         return None
+
+
+def host_list_tree(directory) -> Optional[List[str]]:
+    """Every regular HOST file under `directory`, recursively (links followed)."""
+    root = Path(str(directory))
+    if not root.is_dir():
+        return None
+    out: List[str] = []
+    try:
+        for base, _dirs, files in os.walk(root, followlinks=True):
+            out.extend(str(Path(base) / f) for f in files
+                       if (Path(base) / f).is_file())
+    except OSError:
+        return None
+    return sorted(out)
+
+
+def image_tree_overlays(trees: Sequence[str], mount_destinations: Sequence[str],
+                        changed_paths: Sequence[str]) -> List[str]:
+    """Why the bytes under `trees` inside a container may NOT be its image's.
+
+    A container shows its image's bytes at a path only when no mount sits at,
+    above or below that path and its writable layer changed nothing at or below
+    it. `mount_destinations` are the container's bind/volume/tmpfs targets
+    (`docker inspect`), `changed_paths` the paths `docker diff` lists. Pass a
+    tree both as named and as resolved: a symlinked tree is read through its
+    target. Empty = nothing overlays the image bytes.
+    """
+    out: List[str] = []
+    for tree in dict.fromkeys(posixpath.normpath(t) for t in trees if t):
+        for dst in mount_destinations:
+            dst = posixpath.normpath(dst)
+            if (tree == dst or tree.startswith(dst.rstrip("/") + "/")
+                    or dst.startswith(tree + "/")):
+                out.append(f"mount {dst} overlays {tree}")
+        for changed in changed_paths:
+            changed = posixpath.normpath(changed)
+            if changed == tree or changed.startswith(tree + "/"):
+                out.append(f"writable-layer change {changed} under {tree}")
+    return out
 
 
 def _container_mounts(container: str) -> List[Tuple[str, str]]:
@@ -168,6 +209,10 @@ class KLayoutRunner:
     def list_files(self, directory, suffix: str) -> Optional[List[str]]:
         """Regular files directly inside `directory` ending in `suffix`."""
         return host_list_files(directory, suffix)
+
+    def list_tree(self, directory) -> Optional[List[str]]:
+        """Every regular file under `directory`, recursively."""
+        return host_list_tree(directory)
 
     def klayout_bin(self) -> str:
         """The KLayout GUI-class binary, for callers that need its own CLI
@@ -345,9 +390,67 @@ class ContainerRunner(KLayoutRunner):
         return sorted(p.decode("utf-8", "surrogateescape")
                       for p in out.split(b"\0") if p)
 
+    def list_tree(self, directory):
+        out = self._exec_bytes("find", "-L", str(directory), "-type", "f",
+                               "-print0")
+        if out is None:
+            return None
+        return sorted(p.decode("utf-8", "surrogateescape")
+                      for p in out.split(b"\0") if p)
+
     def image_id(self) -> Tuple[Optional[str], str]:
         """`(image_id, why_not)` of the image this container is running."""
         return _pin.container_image_id(self._c)
+
+    def image_tree_proof(self, tree) -> Tuple[bool, str, Dict[str, object]]:
+        """`(proven, why_not, record)`: are the bytes under `tree` the image's?
+
+        A matching image id names the image, not the bytes a process in the
+        container reads: a bind mount / volume / tmpfs at, above or below the
+        tree, or an edit in the container's writable layer, replaces them
+        while `.Image` stays the same. Proven only when `docker inspect`
+        (mounts, tmpfs) and `docker diff` both answer and nothing overlays the
+        tree as named or as resolved inside the container. Any unanswerable
+        probe is "not proven", never "proven".
+        """
+        record: Dict[str, object] = {"guest_tree": str(tree)}
+        real = self._exec_bytes("readlink", "-f", "--", str(tree))
+        real_path = real.decode("utf-8", "surrogateescape").strip() if real else ""
+        if not real_path.startswith("/"):
+            return False, f"{tree} does not resolve inside {self._c}", record
+        record["guest_tree_resolved"] = real_path
+        try:
+            ins = subprocess.run(
+                ["docker", "inspect", "--format",
+                 "{{json .Mounts}}\t{{json .HostConfig.Tmpfs}}", self._c],
+                capture_output=True, text=True, timeout=30)
+            dif = subprocess.run(["docker", "diff", self._c],
+                                 capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, f"container mounts/diff unanswerable: {exc}", record
+        if ins.returncode != 0 or dif.returncode != 0:
+            return False, (f"docker inspect/diff of {self._c} failed "
+                           f"(rc {ins.returncode}/{dif.returncode})"), record
+        try:
+            mounts_json, tmpfs_json = ins.stdout.strip().split("\t", 1)
+            mounts = json.loads(mounts_json) or []
+            tmpfs = json.loads(tmpfs_json) or {}
+            destinations = [str(m["Destination"]) for m in mounts]
+            destinations += [str(d) for d in tmpfs]
+        except (ValueError, KeyError, TypeError) as exc:
+            return False, f"docker inspect of {self._c} is unreadable: {exc}", record
+        # `docker diff` prints one "<A|C|D> <path>" per changed path.
+        changed = [ln[2:] for ln in dif.stdout.splitlines()
+                   if len(ln) > 2 and ln[0] in "ACD" and ln[1] == " "]
+        record.update(mounts_checked=len(destinations),
+                      writable_layer_changes_checked=len(changed))
+        overlays = image_tree_overlays([str(tree), real_path], destinations,
+                                       changed)
+        if overlays:
+            record["overlays"] = overlays
+            return False, ("the image-bound tree is not the image's bytes in "
+                           f"{self._c}: " + "; ".join(overlays)), record
+        return True, "", record
 
     def exists(self, path):
         try:

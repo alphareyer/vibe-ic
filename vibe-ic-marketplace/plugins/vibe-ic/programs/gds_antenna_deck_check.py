@@ -188,8 +188,21 @@ def _pdk_receipt(project: Path):
     try:
         doc = json.loads(receipt.read_text())
         root = Path(doc["path"])
-        derivation = doc["derivation"]
-        pdk = derivation["pdk"]
+        # librelane_contract.pdk_root_resolution writes two shapes: RESOLVED
+        # ({path, source, derivation: {pdk, image_id, guest_path, ...}}) and
+        # DECLARED ({path, source, declared_by, pdk}), whose root is a host
+        # tree the declaration names and which carries no derivation.
+        derivation = doc.get("derivation")
+        if doc.get("source") == "declared" and derivation is None:
+            if "pdk" not in doc:
+                raise ValueError(
+                    f"declared PDK root ({doc.get('declared_by') or 'undeclared'})"
+                    " names no PDK")
+            derivation = {"pdk": doc["pdk"]}
+        if not isinstance(derivation, dict):
+            raise ValueError("receipt names neither a resolved derivation nor "
+                             "a declared PDK root")
+        pdk = derivation.get("pdk")
         if not isinstance(pdk, str) or not pdk or "/" in pdk or pdk in (".", ".."):
             raise ValueError("invalid PDK identity")
         image_id = derivation.get("image_id")
@@ -208,7 +221,33 @@ def _pdk_receipt(project: Path):
             "guest_tree": posixpath.normpath(guest) if guest else None}, ""
 
 
-def _discover_deck(tree: str, read, list_files):
+def _deck_manifest(drc: str, read, list_tree):
+    """`({path: sha256}, why)` of EVERY file under the deck directory.
+
+    The runnable parent does not execute one rule file: it requires its
+    framework/options/helpers beside it and loads every rule deck under
+    ``rule_decks/`` by glob, so any of those files can change what the run
+    prints and writes. The deck directory is hashed whole -- a superset of
+    what executes -- and re-listed after the run, so an added file counts.
+    """
+    files = list_tree(drc)
+    if not files:
+        return None, f"native deck directory {drc} could not be listed"
+    manifest = {}
+    for path in files:
+        data = read(path)
+        if data is None:
+            return None, f"native deck file is unreadable: {path}"
+        manifest[path] = hashlib.sha256(data).hexdigest()
+    return manifest, ""
+
+
+def _manifest_sha(manifest: Dict[str, str]) -> str:
+    return hashlib.sha256("".join(
+        f"{manifest[k]}  {k}\n" for k in sorted(manifest)).encode()).hexdigest()
+
+
+def _discover_deck(tree: str, read, list_files, list_tree):
     """Discover a PDK's own antenna rule and its runnable parent deck.
 
     `read`/`list_files` answer from the environment KLayout will run in, so
@@ -237,11 +276,33 @@ def _discover_deck(tree: str, read, list_files):
     if len(parents) != 1:
         return None, (f"native antenna rule exists, but exactly one runnable "
                       f"parent with deck selection was required; found {len(parents)}")
-    return {"tree": tree, "rule": rule,
+    manifest, why = _deck_manifest(drc, read, list_tree)
+    if manifest is None:
+        return None, why
+    deck = {"tree": tree, "rule": rule,
             "rule_sha256": hashlib.sha256(rule_bytes).hexdigest(),
             "parent": parents[0][0],
             "parent_sha256": hashlib.sha256(parents[0][1]).hexdigest(),
-            "read": read}, ""
+            "deck_dir": drc, "files": manifest,
+            "read": read, "list_tree": list_tree}
+    for key in ("rule", "parent"):
+        if manifest.get(deck[key]) != deck[f"{key}_sha256"]:
+            return None, (f"native deck {key} {deck[key]} is not the file the "
+                          f"deck directory listing hashed")
+    return deck, ""
+
+
+def _deck_changed(deck: dict) -> str:
+    """Why the deck directory is no longer the one hashed before the run."""
+    after, why = _deck_manifest(deck["deck_dir"], deck["read"], deck["list_tree"])
+    if after is None:
+        return f"native deck vanished during execution: {why}"
+    if after != deck["files"]:
+        moved = sorted(k for k in set(after) | set(deck["files"])
+                       if after.get(k) != deck["files"].get(k))
+        return ("native deck bytes changed or vanished during execution: "
+                + ", ".join(moved[:8]) + (" ..." if len(moved) > 8 else ""))
+    return ""
 
 
 def _image_bound_deck(runner, receipt: dict):
@@ -253,10 +314,16 @@ def _image_bound_deck(runner, receipt: dict):
                       f"but KLayout container {runner.detail} runs "
                       f"{live or 'an unidentified image'}"
                       + (f" ({why})" if why else ""))
-    deck, why = _discover_deck(tree, runner.read_bytes, runner.list_files)
+    proven, why, record = runner.image_tree_proof(tree)
+    if not proven:
+        return None, why
+    deck, why = _discover_deck(tree, runner.read_bytes, runner.list_files,
+                               runner.list_tree)
     if deck is not None:
         deck["side"] = f"container:{runner.detail}"
         deck["image_id"] = want
+        deck["image_bytes"] = record
+        deck["reprove"] = lambda: runner.image_tree_proof(tree)
     return deck, why
 
 
@@ -322,6 +389,21 @@ def _bound_native_count(gds: Path, rdb: Path, transcript: Path, gds_sha: str,
                        "transcript_tally": tallied}
 
 
+def _rdb_red_count(rdb: Path) -> Optional[int]:
+    """ANT items in this run's RDB when there are any, else None.
+
+    Read with the same calibrated reader the bound count uses. Used only to
+    keep measured violations red when the binding fails; it never makes a
+    result green."""
+    try:
+        text = rdb.read_text(errors="replace")
+    except OSError:
+        return None
+    import eda_report_audit as _audit
+    count = _audit._antenna_klayout_count(text)
+    return count if count else None
+
+
 def _run_native(project: Path, gds: Optional[str], router: Optional[str],
                 cell: Optional[str], receipt: dict) -> Dict[str, Any]:
     def skip(reason: str, **extra) -> Dict[str, Any]:
@@ -334,7 +416,7 @@ def _run_native(project: Path, gds: Optional[str], router: Optional[str],
     if not image_bound:
         # A declared host tree is read on the host, where it lives.
         native, why = _discover_deck(receipt["host_tree"], _kl.host_read_bytes,
-                                     _kl.host_list_files)
+                                     _kl.host_list_files, _kl.host_list_tree)
         if native is None:
             return skip(why)
         native["side"] = "host"
@@ -376,9 +458,29 @@ def _run_native(project: Path, gds: Optional[str], router: Optional[str],
     before = _sha(gds_path)
     identity = {"pdk_tree": native["tree"], "pdk_tree_side": native["side"],
                 "pdk_image_id": native.get("image_id"),
+                "pdk_image_bytes": native.get("image_bytes"),
                 "pdk_rule": native["rule"], "pdk_rule_sha256": native["rule_sha256"],
                 "pdk_parent": native["parent"],
-                "pdk_parent_sha256": native["parent_sha256"]}
+                "pdk_parent_sha256": native["parent_sha256"],
+                "pdk_deck_dir": native["deck_dir"],
+                "pdk_deck_files": dict(native["files"]),
+                "pdk_deck_manifest_sha256": _manifest_sha(native["files"])}
+
+    def unbound(record: Dict[str, Any], why: str) -> Dict[str, Any]:
+        """A result the binding could not accept. Measured violations are
+        never relabelled: an RDB of THIS run holding ANT items keeps the step
+        red (FAIL, failure_class BINDING) whatever else failed; only a run
+        with no measured violation becomes NOT_MEASURED."""
+        red = _rdb_red_count(rdb)
+        if red:
+            return {**record, "verdict": "FAIL", "measurement": "FAIL",
+                    "failure_class": "BINDING", "violations": red,
+                    "reason": (f"native RDB holds {red} antenna violation(s); "
+                               f"the measurement is not bound ({why}), and "
+                               f"measured violations are never relabelled "
+                               f"NOT_MEASURED")}
+        return {**record, "verdict": "DISCLOSED_SKIP",
+                "measurement": "NOT_MEASURED", "reason": why}
     argv = [runner.klayout_bin(), "-b", "-r", native["parent"],
             "-rd", f"input={runner.cpath(gds_path)}",
             "-rd", f"report={runner.cpath(rdb)}", "-rd", "decks=antenna"]
@@ -397,6 +499,20 @@ def _run_native(project: Path, gds: Optional[str], router: Optional[str],
                   "supervision": execution.supervision}
     if rc != 0:
         incomplete = execution.outcome != "natural" or rc in (124, 125, 137, -9)
+        red = _rdb_red_count(rdb)
+        if red:
+            # The deck stopped, but what it already wrote is measured.
+            return {"check": "gds_geometry_antenna_deck", "verdict": "FAIL",
+                    "measurement": "FAIL", "failure_class": "DECK_EXECUTION",
+                    "method": "pdk_native_klayout", "rc": rc,
+                    "execution": run_record, "violations": red,
+                    "gds": str(gds_path), "gds_sha256": before, **identity,
+                    "rdb": str(rdb), "rdb_sha256": _sha(rdb),
+                    "transcript": str(transcript),
+                    "transcript_sha256": _sha(transcript),
+                    "reason": (f"native deck ended {execution.outcome} rc={rc} "
+                               f"after its RDB recorded {red} antenna "
+                               f"violation(s)")}
         return {"check": "gds_geometry_antenna_deck",
                 "verdict": "NOT_MEASURED" if incomplete else "FAIL",
                 "measurement": "NOT_MEASURED", "failure_class": "DECK_EXECUTION",
@@ -413,17 +529,19 @@ def _run_native(project: Path, gds: Optional[str], router: Optional[str],
             "gds": str(gds_path), "gds_sha256": before, **identity,
             "rdb": str(rdb), "transcript": str(transcript), "rc": rc,
             "execution": run_record}
-    after = {k: native["read"](native[k]) for k in ("rule", "parent")}
-    if any(data is None or hashlib.sha256(data).hexdigest() != native[f"{k}_sha256"]
-           for k, data in after.items()):
-        return {**base, "verdict": "DISCLOSED_SKIP", "measurement": "NOT_MEASURED",
-                "reason": "native deck bytes changed or vanished during execution"}
+    changed = _deck_changed(native)
+    if changed:
+        return unbound(base, changed)
+    if native.get("reprove") is not None:
+        proven, why, record = native["reprove"]()
+        base["pdk_image_bytes_after"] = record
+        if not proven:
+            return unbound(base, f"after the run: {why}")
     count, why, hashes = _bound_native_count(gds_path, rdb, transcript, before,
                                              deck=native)
     base.update(hashes)
     if why:
-        return {**base, "verdict": "DISCLOSED_SKIP", "measurement": "NOT_MEASURED",
-                "reason": why}
+        return unbound(base, why)
     raw = work / _RAW_REPORT_NAME
     _atomic_write_bytes(raw, json.dumps({"verdict": "PASS" if count == 0 else "FAIL",
                                          "violations": count}).encode())
