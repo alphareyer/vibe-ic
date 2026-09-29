@@ -933,9 +933,13 @@ def _declare_immutable_transform(project: Path, source: Path, output: Path,
         if in_rel and in_sha and declared and declared != in_sha:
             _record_unexplained_rewrite(project, in_rel, declared, in_sha, step)
         return False
+    # #365: the RUNNER writes this row after the finishing writer returned (or,
+    # for `finish`, with no invocation at all); nothing timed the tool, so the
+    # duration is `null` and the row says it was reconstructed, not observed.
     entry = {
         "record": "declared_transform", "tool": tool, "command": command,
         "producing_step": step, "exit_code": 0, "duration_ms": None,
+        "reconstructed": True,
         "timestamp": __import__("datetime").datetime.now(
             __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "inputs": {in_rel: in_sha}, "outputs": {out_rel: out_sha},
@@ -61334,8 +61338,17 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
     except Exception as exc:
         mode = "invalid"
         notes.append(f"step 22 extraction mode NOT_MEASURED: {exc}")
-    extraction_inputs, input_note = _postpnr_extraction_inputs(
-        project, top, pdk, container, mode)
+    # This producer row is advisory: a failure to read the extraction inputs is
+    # NOT_MEASURED for Step 22 (no identity, so no SPEF reuse), never an abort
+    # of the prestream gate that calls it -- the same contract the extractor
+    # call below already keeps.
+    try:
+        extraction_inputs, input_note = _postpnr_extraction_inputs(
+            project, top, pdk, container, mode)
+    except Exception as exc:  # noqa: BLE001 — disclosed, never a pass
+        extraction_inputs, input_note = None, (
+            f"step 22 extraction inputs NOT_MEASURED: "
+            f"{type(exc).__name__}: {exc}")
     if input_note:
         notes.append(input_note)
     # A receipt is required even for a pre-existing SPEF: mtime alone cannot
