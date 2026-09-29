@@ -23,6 +23,7 @@ from pathlib import Path
 
 import phase3_one_shot_runner as R
 from test_phase3_postpnr_disclosure_and_gds_guard import (
+    _restamp_ss_report_for_current_sdc,
     TOP, OLD_DIE, OLD_UTIL, NEW_DIE, NEW_UTIL, _drive, _plan, _project,
     _repair_producer, _pdk,
 )
@@ -41,6 +42,7 @@ def _step32_failed(tmp_path: Path, monkeypatch, producer: str) -> Path:
     pnr = R._pl.pnr_dir(project)
     (pnr / "constraint.sdc").write_text(
         "create_clock -name core_clk -period 7 [get_ports clk]\n")
+    _restamp_ss_report_for_current_sdc(project)
     for rpt in (pnr / "routed.drc.rpt",
                 R._pl.reports_phase3_dir(project) / "drc_router.rpt"):
         rpt.unlink(missing_ok=True)

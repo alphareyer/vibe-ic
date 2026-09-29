@@ -2917,13 +2917,16 @@ _register(Instrument(
 def _judge_pre_pnr_setup_report(body: str) -> Optional[str]:
     """Exercise the shipped gate on a real OpenSTA path table."""
     import librelane_prelayout as L
+    import _atomic_artefact as _aa
     with tempfile.TemporaryDirectory(prefix="cal_pre_pnr_setup_") as td:
         root = Path(td)
-        (root / "pvt_matrix.json").write_text(json.dumps({"corners": [
-            {"label": "SS", "name": "calibration_ss", "liberty": "calibration.lib"}]}))
+        # Same writer every declared-output name uses (#1082 ratchet), even
+        # in this private calibration scratch dir.
+        _aa.write_json(root / "pvt_matrix.json", {"corners": [
+            {"label": "SS", "name": "calibration_ss", "liberty": "calibration.lib"}]})
         reports = root / "per_corner"
         reports.mkdir()
-        (reports / "sta_SS.rpt").write_text(body)
+        _aa.write_text(reports / "sta_SS.rpt", body)
         result = L.pre_pnr_setup_gate(root / "pvt_matrix.json", reports,
                                       root / "gate.json")
     return None if result["verdict"] == "PASS" else result["reason"]

@@ -26,6 +26,7 @@ Scenario under test is the one #593 was filed for: unconverged at
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -405,6 +406,20 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
         "--die-um", die, "--util", str(util), "--container", "",
     ])
     return d
+
+
+def _restamp_ss_report_for_current_sdc(project: Path) -> None:
+    """Re-stamp Step 10's SS pre-layout report for the SDC now on disk.
+
+    Fixtures that write a new `constraint.sdc` after `_project` stamped the
+    report use this, which is what re-running Step 10 would write; U8's
+    pre-PnR gate binds the report to the current SDC bytes. Setup only."""
+    ss = R._pl.sta_dir(project) / "per_corner" / "sta_SS.rpt"
+    sdc = R._pl.pnr_dir(project) / "constraint.sdc"
+    if ss.is_file() and sdc.is_file():
+        ss.write_text(re.sub(r"(?m)^STA_BASIS_SDC_SHA256: .*$",
+                             f"STA_BASIS_SDC_SHA256: sha256:"
+                             f"{_prelayout.digest(sdc)}", ss.read_text()))
 
 
 def _plan(project: Path):

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import phase3_one_shot_runner as R
 from test_phase3_postpnr_disclosure_and_gds_guard import (
+    _restamp_ss_report_for_current_sdc,
     TOP, OLD_DIE, OLD_UTIL, NEW_DIE, NEW_UTIL, _drive, _plan, _project,
     _repair_producer, _pdk,
 )
@@ -29,6 +30,7 @@ def _step32_failed_project(tmp_path: Path, monkeypatch, *, stale_sdc=False) -> P
     (pnr / "constraint.sdc").write_text(
         "create_clock -name core_clk -period 7 [get_ports clk]\n"
         "set_input_delay 1 -clock core_clk [get_ports data]\n")
+    _restamp_ss_report_for_current_sdc(project)
     for path in (pnr / "pdn.done", R._pl.cts_dir(project) / "clock_plan.json",
                  R._pl.extracted_dir(project) / f"{TOP}.spef",
                  R._pl.extracted_dir(project) / "parasitic.spef",
@@ -95,6 +97,7 @@ def _routed_project(root: Path) -> tuple[Path, Path]:
     (pnr / "constraint.sdc").write_text(
         "create_clock -name core_clk -period 7 [get_ports clk]\n"
         "set_input_delay 1 -clock core_clk [get_ports data]\n")
+    _restamp_ss_report_for_current_sdc(root)
     return root, route
 
 
