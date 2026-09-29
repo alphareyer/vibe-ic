@@ -1,0 +1,13 @@
+# tapeout_declaration: self tape-out, no operator
+
+This design declares that it is a DIE and that it targets NO shuttle
+operator. It is on the CHIP path, so it runs step 37.5ic and gets that
+step's general tape-out precheck; the operator's own container is the
+arm it does not get, because there is no operator. It is not an IP
+hardmacro (37.5ip).
+
+declaration: input/submission_template/tapeout_declaration.json
+answered:    3 of 20 question(s); 15 still NOT_DETERMINED
+
+Every unanswered question is reported by the general precheck as
+NOT_DETERMINED, which is a non-pass. Nothing is defaulted.
