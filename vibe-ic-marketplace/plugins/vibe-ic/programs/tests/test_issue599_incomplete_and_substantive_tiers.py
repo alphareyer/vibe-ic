@@ -269,29 +269,6 @@ def test_it_is_a_disclosure_tier_not_a_failure():
 
 
 # ── the two gates actually emit the sentinels ───────────────────────────────
-def test_step14_discloses_only_on_the_verified_tiers():
-    """`_unconfirmed` means no inline command was echoed anywhere, so nothing
-    was read. Emitting the disclosure there would credit a step for work that
-    did not happen — the defect, inverted."""
-    src = (_PROGRAMS / "yosys_hilomap_required_check.py").read_text(
-        encoding="utf-8")
-    assert "SUBSTANTIVE_PASS:" in src
-    # COMMENTS STRIPPED. The comment beside the guard has to NAME the tier it
-    # excludes in order to explain the exclusion, so a scan that cannot tell
-    # documentation from code fails on its own rationale — which is what the
-    # first version of this assertion did, for the fifth time in this campaign.
-    code = "\n".join(ln for ln in src.splitlines()
-                     if not ln.lstrip().startswith("#"))
-    at = code.index('print(f"SUBSTANTIVE_PASS')
-    seg = code[at - 400:at]
-    assert "inline_yosys_p_mode_conformant" in seg
-    assert "inline_yosys_p_mode_confirmed" in seg
-    assert "unconfirmed" not in seg, (
-        "the disclosure fires on the tier where nothing was read")
-    assert "_unconfirmed" in src, (
-        "the comment explaining why that tier is excluded is gone")
-
-
 def test_d1_discloses_incomplete_only_when_the_ai_half_did_not_read():
     src = (_PROGRAMS / "phase1_expert_parse_track.py").read_text(
         encoding="utf-8")
@@ -303,13 +280,3 @@ def test_d1_discloses_incomplete_only_when_the_ai_half_did_not_read():
         "an unanswered expert handoff is still published as a pass tier")
 
 
-def test_the_yosys_gate_still_runs_and_says_something(tmp_path):
-    """End-to-end on an empty project: no `.ys`, no synth log — the
-    `_unconfirmed` tier, which must NOT carry the disclosure."""
-    r = _pr.run(
-        [sys.executable, str(_PROGRAMS / "yosys_hilomap_required_check.py"),
-         str(tmp_path)], capture_output=True, text=True)
-    out = r.stdout + r.stderr
-    assert "VACUOUS_PASS" in out, out
-    assert "SUBSTANTIVE_PASS" not in out, (
-        "nothing was read on this project and the gate claimed otherwise")

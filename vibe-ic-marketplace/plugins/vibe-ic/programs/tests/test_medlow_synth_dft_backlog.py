@@ -17,6 +17,11 @@ step 14 / dim 7  ``yosys_hilomap_required_check``'s module docstring and its
                  CHANGED HERE — the file's diff against v1.7.66 is docstring
                  and help-text only; the tests below pin the doc to the rc /
                  verdict / reason_class the shipped code really produces.
+                 CUT_W4: that program was removed with the direct recipe's
+                 script-text audits; step 14 judges the handoff netlist, and
+                 the behaviour these tests pinned (a real-PDK synthesis without
+                 hilomap is refused) is asserted on the netlist in
+                 test_cut9_step14_judges_the_handoff_netlist.py.
 step 11 / dim 5  three gate docstrings + the flow-yaml gate comments promised
                  "never a vacuous pass on absence" / "There is no SKIP path"
                  while the shipped code returns rc=2 SKIPPED-CONDITION on a
@@ -105,161 +110,6 @@ def _inline_project(tmp_path: Path, command: str | None) -> Path:
         log += "\n(no command echoed)\n"
     (synth / "synth.log").write_text(log)
     return tmp_path
-
-
-def test_step14_inline_command_missing_hilomap_fails(tmp_path):
-    """DISCRIMINATOR. A real-PDK inline synth that never ran hilomap ships a
-    netlist OpenROAD detailed_route crashes on (DRT-0305). The gate must exit
-    non-zero and say FAIL — not certify the step 'not applicable'."""
-    proj = _inline_project(tmp_path, _CMD_NO_HILOMAP)
-    out = tmp_path / "gate.json"
-    r = _run("yosys_hilomap_required_check.py", str(proj), "--json", str(out))
-    assert r.returncode == 1, r.stdout + r.stderr
-    report = json.loads(out.read_text())
-    assert report["verdict"] == "FAIL"
-    assert report["messages"], "a FAIL must name what is missing"
-    assert any("hilomap" in m for m in report["messages"])
-
-
-def test_step14_inline_command_with_hilomap_is_content_verified(tmp_path):
-    """DIRECTION-1 on v1.7.64's landed contract. The real spm x ihp-sg13g2
-    shape: hilomap ran, correctly, and the command is in the log. The gate must
-    record that it READ the command (reason_class + the named log), not merely
-    that some inline run happened.
-
-    verdict stays the literal string VACUOUS_PASS here, deliberately: "no .ys
-    script existed" is itself the gate's not-applicable condition, and #474's
-    own tests pin that tier. The strength of the evidence lives in
-    reason_class, which is why this test asserts on reason_class and
-    inline_evidence and does NOT demand a verdict upgrade. The tension —
-    verdict says "not applicable" while reason_class says "extracted and
-    verified conformant" — is recorded here for the flow owner; a side branch
-    must not settle it unilaterally."""
-    proj = _inline_project(tmp_path, _CMD_CONFORMANT)
-    out = tmp_path / "gate.json"
-    r = _run("yosys_hilomap_required_check.py", str(proj), "--json", str(out))
-    assert r.returncode == 0, r.stdout + r.stderr
-    report = json.loads(out.read_text())
-    assert report["verdict"] == "VACUOUS_PASS"
-    assert report["reason_class"] == "inline_yosys_p_mode_conformant"
-    assert any("synth.log" in e for e in report["inline_evidence"])
-
-
-def test_step14_simulation_only_inline_command_is_classified_not_real_pdk(
-        tmp_path):
-    """DIRECTION-1. A sim-only inline synth binds no Liberty, so hilomap does
-    not apply: the gate must stay rc=0 (it must not start blocking sim-only
-    flows), and the classifier that decides that must say `simulation_only`
-    for this command and `real_pdk` for one that DOES bind a Liberty — i.e.
-    the rc=0 is earned by the classification, not by the audit being skipped.
-
-    The classifier is driven directly because the CLI report cannot express
-    it: `resolve_no_ys_script` returns the same verdict/reason_class for a
-    conformant real-PDK command and for a sim-only one. (An earlier draft
-    asserted a counter field from a duplicate implementation that was never
-    landed, read with a `.get(..., 0)` default — no shipped code has ever
-    emitted it, so the assertion was vacuously true on every tree. Assert on
-    fields the program really produces, or drive the function.)"""
-    proj = _inline_project(tmp_path, _CMD_SIM_ONLY)
-    out = tmp_path / "gate.json"
-    r = _run("yosys_hilomap_required_check.py", str(proj), "--json", str(out))
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert json.loads(out.read_text())["verdict"].startswith("VACUOUS_PASS")
-
-    sys.path.insert(0, str(PROGRAMS))
-    import _yosys_inline_mode_detect as Y
-    passed, classification, reasons = \
-        Y.check_inline_command_conformance(_CMD_SIM_ONLY)
-    assert (passed, classification, reasons) == (True, "simulation_only", [])
-    # The same classifier must call the Liberty-binding command real_pdk, or
-    # "sim-only is waived" would be waiving everything.
-    assert Y.check_inline_command_conformance(_CMD_CONFORMANT)[1] == "real_pdk"
-    assert Y.check_inline_command_conformance(_CMD_NO_HILOMAP)[0] is False
-
-
-def test_step14_no_inline_command_still_vacuous_pass(tmp_path):
-    """DIRECTION-1. When nothing echoed a yosys command there is genuinely
-    nothing to audit; the pre-existing marker-file VACUOUS_PASS must survive."""
-    proj = _inline_project(tmp_path, None)
-    out = tmp_path / "gate.json"
-    r = _run("yosys_hilomap_required_check.py", str(proj), "--json", str(out))
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert json.loads(out.read_text())["verdict"].startswith("VACUOUS_PASS")
-
-
-def test_step14_ys_script_path_unchanged(tmp_path):
-    """DIRECTION-1. The .ys-script branch is untouched: correct ordering
-    passes, a script missing hilomap still fails."""
-    ok = tmp_path / "ok.ys"
-    ok.write_text("read_verilog a.v\nsynth -top t\ntechmap\n"
-                  f"abc -liberty {_LIB}\ntechmap\nhilomap -hicell A a\n"
-                  "write_verilog out.v\n")
-    bad = tmp_path / "bad.ys"
-    bad.write_text("read_verilog a.v\nsynth -top t\ntechmap\n"
-                   f"abc -liberty {_LIB}\nwrite_verilog out.v\n")
-    assert _run("yosys_hilomap_required_check.py",
-                "--ys-file", str(ok)).returncode == 0
-    assert _run("yosys_hilomap_required_check.py",
-                "--ys-file", str(bad)).returncode == 1
-
-
-def test_step14_hilomap_docstring_matches_the_no_ys_script_behaviour(tmp_path):
-    """DISCRIMINATOR (documentation-vs-code consistency, both directions) —
-    and the ONLY thing this change makes to this file.
-
-    Drive the project-dir branch on a project with NO `.ys` script, three
-    ways, and require the module docstring to describe the outcomes observed.
-    Before v1.7.66 that docstring documented the `--ys-file` gate only: it
-    listed `0 — all three conditions satisfied` / `1` / `2` and never named a
-    project dir, an inline command, or a VACUOUS_PASS. So on a tree whose code
-    can return rc=1 with no script at all, the file promised a narrower gate
-    than it ships. A tree that REMOVED the inline branch passes this test too,
-    by the else arms."""
-    doc = (PROGRAMS / "yosys_hilomap_required_check.py").read_text(
-        encoding="utf-8").split('"""')[1]
-
-    def _verdict(slug, cmd):
-        proj = _inline_project(tmp_path / slug, cmd)
-        out = proj / "gate.json"
-        r = _run("yosys_hilomap_required_check.py", str(proj),
-                 "--json", str(out))
-        return r.returncode, json.loads(out.read_text())
-
-    rc_bad, _rep_bad = _verdict("no_hilomap", _CMD_NO_HILOMAP)
-    rc_ok, rep_ok = _verdict("conformant", _CMD_CONFORMANT)
-    rc_none, rep_none = _verdict("no_command", None)
-
-    if rc_bad == 1:
-        assert "inline" in doc, (
-            "the no-.ys-script branch returns rc=1 on a non-conformant inline "
-            "command; the docstring must say the gate audits one")
-        assert "rc=1" in doc or "1 —" in doc
-    else:
-        assert "inline" not in doc, (
-            f"rc={rc_bad} with no script and a non-conformant inline command "
-            f"— the docstring must not promise an inline audit")
-
-    # Every rc=0 tier reports the *word* VACUOUS_PASS; the docstring must not
-    # claim that word is reserved for the "nothing was echoed" case, which is
-    # what distinguishes reason_class, not verdict.
-    for rc, rep in ((rc_ok, rep_ok), (rc_none, rep_none)):
-        assert rc == 0, rep
-        assert rep["verdict"].startswith("VACUOUS_PASS"), rep
-    assert rep_ok["reason_class"] != rep_none["reason_class"], (
-        "a verified inline command and no command at all must be "
-        "distinguishable")
-    for cls in (rep_ok["reason_class"], rep_none["reason_class"]):
-        assert cls in doc, f"docstring never names reason_class {cls!r}"
-
-
-def test_step14_sibling_template_gate_untouched(tmp_path):
-    """DIRECTION-1. Only the hilomap gate was changed. Its Step-14 sibling
-    must behave exactly as before on the same inline-only project."""
-    proj = _inline_project(tmp_path, _CMD_CONFORMANT)
-    out = tmp_path / "tmpl.json"
-    r = _run("yosys_script_template_check.py", str(proj), "--json", str(out))
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert json.loads(out.read_text())["verdict"].startswith("VACUOUS_PASS")
 
 
 # ===========================================================================

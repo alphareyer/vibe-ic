@@ -107,9 +107,6 @@
     "undeclared::threshold_range_contiguity_check",
     "undeclared::transition_coverage_check",
     "undeclared::verilator_coverage_measure",
-    "undeclared::wafer_sort_yield_check",
-    "undeclared::yosys_hilomap_required_check",
-    "undeclared::yosys_script_template_check",
-    "undeclared::yosys_tiecell_recipe_order_check"
+    "undeclared::wafer_sort_yield_check"
   ]
 }

@@ -387,7 +387,6 @@ endmodule
 """
 
 # A synth script missing `hilomap` (and `-flatten` / `-sv`) — CLAUDE.md rule 4.
-_BAD_YS = "read_verilog top.v\nsynth -top top\nwrite_verilog netlist.v\n"
 
 # `create_clock -period` with no value; a false path off a port that does not
 # exist.
@@ -693,8 +692,18 @@ def _f_signoff_unverifiable(p: Path) -> None:
 
 
 def _f_synth_bad(p: Path) -> None:
-    _w(p, "phase2/stage2/synth/synth.ys", _BAD_YS)
+    """Step 9 handed PnR a netlist synthesised WITHOUT hilomap (the real-Yosys
+    calibration sample of synth_handoff_netlist_check): its literal constants
+    are the DRT-0305 shape step 14 exists to refuse (CUT_W4)."""
+    import hashlib
     _w(p, "phase2/stage2/synth/netlist.v", "// empty netlist\n")
+    _w(p, "phase2/stage1/rtl/cal_const.v", "module cal_const; endmodule\n")
+    _w(p, "phase2/stage2/synth/cal_const_synth.v",
+       (_PROGRAMS / "calibration/synth_const_no_hilomap_positive.v").read_text())
+    _w(p, "phase2/stage2/synth/synth_inputs.json", {
+        "netlist": "cal_const_synth.v",
+        "rtl_sha256": {"cal_const.v": hashlib.sha256(
+            b"module cal_const; endmodule\n").hexdigest()}})
 
 
 def _f_sdc_bad(p: Path) -> None:
@@ -2876,10 +2885,8 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
         "ANALOG_P3",
     ("A9", "analog_a9_hw_verify_check . --json "
            "reports/phase2/gates/a9_hw_verify.json"): "ANALOG_P3",
-    ("14", "yosys_hilomap_required_check . --json "
-           "reports/phase2/gates/yosys_hilomap.json"): "SYNTH_BAD",
-    ("14", "yosys_script_template_check . --json "
-           "reports/phase2/gates/yosys_script_template.json"): "SYNTH_BAD",
+    ("14", "synth_handoff_netlist_check . --json "
+           "reports/phase2/gates/synth_handoff_netlist.json"): "SYNTH_BAD",
     # The command string is the KEY, so it moves with the flow declaration.
     # `--require-measured` (2026-08-27) makes this clause additionally ask
     # whether the run bound to the SPEF carried positive evidence it measured

@@ -1676,49 +1676,6 @@ _STRUCTURAL_RTL_GATES: tuple[str, ...] = (
     # "verilator_coverage_measure"        — needs verilator coverage
 )
 
-# Canonical synthesis-script search order. v0.70 Item 1 runs the two
-# v0.69-shipped Yosys auditors (yosys_hilomap_required_check,
-# yosys_script_template_check) against whichever path exists first.
-_YS_SEARCH_ORDER: tuple[str, ...] = (
-    "scripts/synth.ys",
-    "synth/synth.ys",
-    "synth.ys",
-    "scripts/yosys.ys",
-    "yosys.ys",
-    "rtl/synth.ys",
-    # Wildcard fallback: any .ys at project root or under scripts/ / synth/.
-    "*.ys",
-    "scripts/*.ys",
-    "synth/*.ys",
-)
-
-
-def _find_synth_ys(project: Path) -> Optional[Path]:
-    """Locate the Yosys synthesis script emitted by step 9 (Synthesis).
-
-    We search `_YS_SEARCH_ORDER` top-to-bottom; the first match wins. If
-    the wildcard tail matches multiple files we pick the one whose name
-    contains 'synth' (case-insensitive) — otherwise the first
-    lexicographic hit. Returns None when nothing is found (caller then
-    reports MISSING, not FAIL, because some flows ship no .ys at all —
-    e.g. pre-Yosys schematic-only drafts).
-    """
-    for pat in _YS_SEARCH_ORDER:
-        if "*" in pat or "?" in pat:
-            matches = sorted(project.glob(pat))
-            if matches:
-                # Prefer a file whose name suggests synthesis.
-                for m in matches:
-                    if "synth" in m.name.lower():
-                        return m
-                return matches[0]
-        else:
-            p = project / pat
-            if p.is_file():
-                return p
-    return None
-
-
 @dataclass
 class StepResult:
     id: Any  # int for main-track steps (1-40), str for analog ("A1"-"A9") / mixed-signal ("M1"-"M4") / preflight ("P0")
@@ -6129,136 +6086,45 @@ def _structure_only_note(snippet: str) -> str:
 
 
 def _run_yosys_gates(project: Path) -> tuple[bool, List[str]]:
-    """Run the v0.69-shipped Yosys script auditors against the project's
-    synthesis .ys file. v0.70 Item 1: both checks must pass BEFORE any
-    PnR step is allowed to evaluate, so a synth script that skipped
-    hilomap can't silently produce a netlist that detailed_route then
-    crashes on.
+    """The pre-PnR synthesis handoff gate (step 14), run in process so a PnR
+    step is never evaluated over a netlist that would crash detailed route.
 
-    Returns ``(passed, reasons)`` with one or more human-readable
-    remediation strings on failure. If the project ships no .ys script
-    at all, the gate is skipped (passed=True) — a pre-PnR flow without a
-    Yosys script typically means the project is using a different
-    synthesiser and the canonical check does not apply.
+    CUT_W4 (R-0929-TOOL-DEFAULT): this judges the NETLIST step 9 handed to
+    PnR (`synth_handoff_netlist_check <project>`), on either arm. It used to
+    audit the direct recipe's TEXT (a `.ys` script, or the inline `yosys -p`
+    recovered from logs, through yosys_hilomap_required_check and
+    yosys_script_template_check); on the chip path step 9 is LibreLane
+    Yosys.Synthesis and there is no such text. The lessons those programs
+    held are findings of the netlist gate (HARVEST in cut_9.section.md).
+
+    Returns ``(passed, reasons)``. No handoff netlist yet (no step-9
+    `synth_inputs.json`) returns ``(True, [])`` and inserts no row: step 9's
+    own gate and step 15's declared input refuse a PnR without one.
     """
-    ys_path = _find_synth_ys(project)
-    if ys_path is None:
-        # No .ys file — the project may still have synthesised via the
-        # runner's inline `yosys -p '<cmds>'` path (no .ys script). ORGANIC
-        # #649: returning an unconditional PASS here structurally BYPASSED
-        # the hilomap / -flatten conformance check for EVERY inline-yosys
-        # flow (the gate emitted VACUOUS_PASS and PnR could ship a netlist
-        # missing tie cells that detailed_route then crashes on, DRT-0305).
-        #
-        # Extract the ACTUAL inline command yosys echoed into
-        # phase{2,3}/stage2/synth/{yosys,synth}.log and verify hilomap /
-        # -flatten conformance against THAT command. A real-PDK inline synth
-        # (binds a Liberty library) that runs hilomap → PASS; one missing
-        # hilomap → FAIL (not VACUOUS_PASS). A simulation-only inline synth
-        # (no Liberty) legitimately waives hilomap. chip-AGNOSTIC.
-        if str(PROGRAMS_DIR) not in sys.path:
-            sys.path.insert(0, str(PROGRAMS_DIR))
-        try:
-            from _yosys_inline_mode_detect import audit_inline_yosys
-        except Exception:
-            # Detector unavailable (incomplete install): fall back to the
-            # pre-#649 behaviour rather than hard-erroring the whole flow.
-            return True, []
-        verdict, evidence_logs, inline_reasons = audit_inline_yosys(project)
-        if verdict == "FAIL":
-            reasons = [
-                "FAIL: inline `yosys -p` real-PDK synthesis command "
-                "(extracted from the runner's synth log) is non-conformant "
-                "— PnR will crash at detailed_route with DRT-0305 'zero_ "
-                "GROUND' on the unmapped tie net (CLAUDE.md rule 4)."
-            ]
-            reasons.extend(f"    {r}" for r in inline_reasons)
-            return False, reasons
-        # verdict in {"PASS", "NO_INLINE_COMMAND"}:
-        #   PASS              — inline command verified conformant (or only a
-        #                       sim-only inline synth ran); no .ys to audit.
-        #   NO_INLINE_COMMAND — no inline yosys command was echoed at all;
-        #                       flows without Yosys are legitimate (Cadence
-        #                       Genus / GF flows), and the wider
-        #                       flow_compliance_check still catches a missing
-        #                       netlist via step 9's required_outputs.
+    if not (project / "phase2/stage2/synth/synth_inputs.json").is_file():
         return True, []
-
-    reasons: List[str] = []
-    ys_rel = ys_path.relative_to(project) if ys_path.is_absolute() \
-        else ys_path
-
-    # --- yosys_hilomap_required_check: ordering constraint -----------------
-    hilomap_prog = PROGRAMS_DIR / "yosys_hilomap_required_check.py"
-    if hilomap_prog.exists():
-        _argv = [sys.executable, str(hilomap_prog), "--ys-file", str(ys_path)]
-        _res = _watchdog.run_host_supervised(_argv, stall_grace_s=_GATE_STALL_GRACE_S)
-        if _res.outcome in ("stalled", "ceiling"):
-            return False, [
-                f"FAIL: yosys_hilomap_required_check STALLED on {ys_rel} — no "
-                f"CPU, no I/O and no output for {_GATE_STALL_GRACE_S}s. It was "
-                f"not slow; it was doing nothing. The techmap→hilomap→"
-                f"write_verilog ordering is unverified, so PnR is unsafe. "
-                f"Re-run the check manually."
-            ]
-        r1 = _watchdog.completed_process(_argv, _res)
-        if r1.returncode != 0:
-            reasons.append(
-                f"FAIL: yosys_hilomap_required_check failed — PnR will "
-                f"crash at detailed_route with DRT-0305 zero_ GROUND on "
-                f"the unmapped tie net. Add "
-                f"`hilomap -hicell TIEHI Y -locell TIELO Y` to your "
-                f"{ys_rel} between `techmap` and `write_verilog` "
-                f"(see CLAUDE.md rule 4)."
-            )
-            # Include the auditor's own stderr excerpt so the operator can
-            # see the exact line number that tripped the check.
-            snippet = (r1.stdout.strip() + "\n" + r1.stderr.strip()).strip()
-            if snippet:
-                reasons.append(f"    auditor output: "
-                               f"{snippet.splitlines()[0][:200]}")
-    else:
-        reasons.append(
-            "FAIL: yosys_hilomap_required_check.py not found in "
-            "programs/ — plugin install may be incomplete."
-        )
-
-    # --- yosys_script_template_check: token presence ----------------------
-    tmpl_prog = PROGRAMS_DIR / "yosys_script_template_check.py"
-    if tmpl_prog.exists():
-        _argv2 = [sys.executable, str(tmpl_prog), "--ys-file", str(ys_path)]
-        _res2 = _watchdog.run_host_supervised(_argv2, stall_grace_s=_GATE_STALL_GRACE_S)
-        if _res2.outcome in ("stalled", "ceiling"):
-            reasons.append(
-                f"FAIL: yosys_script_template_check STALLED on {ys_rel} — no "
-                f"CPU, no I/O and no output for {_GATE_STALL_GRACE_S}s. It was "
-                f"not slow; it was doing nothing. -sv/-flatten/hilomap are "
-                f"unverified; treat as fail for strict gating."
-            )
-        else:
-            r2 = _watchdog.completed_process(_argv2, _res2)
-            if r2.returncode != 0:
-                reasons.append(
-                    f"FAIL: yosys_script_template_check failed — one of "
-                    f"-sv / -flatten / hilomap is missing from {ys_rel}. "
-                    f"Without `-flatten` the ATPG flow breaks on "
-                    f"backslash-escaped hierarchical names; without `-sv` "
-                    f"SystemVerilog RTL is rejected; without `hilomap` "
-                    f"OpenROAD trips DRT-0305. CLAUDE.md rule 4 requires "
-                    f"all three for real-PDK synthesis."
-                )
-                snippet = (r2.stdout.strip() + "\n"
-                           + r2.stderr.strip()).strip()
-                if snippet:
-                    reasons.append(f"    auditor output: "
-                                   f"{snippet.splitlines()[0][:200]}")
-    else:
-        reasons.append(
-            "FAIL: yosys_script_template_check.py not found in "
-            "programs/ — plugin install may be incomplete."
-        )
-
-    return (len(reasons) == 0), reasons
+    argv = [sys.executable, str(PROGRAMS_DIR / "synth_handoff_netlist_check.py"),
+            str(project)]
+    res = _watchdog.run_host_supervised(argv, stall_grace_s=_GATE_STALL_GRACE_S)
+    if res.outcome in ("stalled", "ceiling"):
+        return False, [
+            f"FAIL: synth_handoff_netlist_check STALLED — no CPU, no I/O and "
+            f"no output for {_GATE_STALL_GRACE_S}s; the handoff netlist is "
+            f"unjudged, so PnR is unsafe."]
+    done = _watchdog.completed_process(argv, res)
+    if done.returncode == 0:
+        return True, []
+    detail = (done.stdout.strip() + "\n" + done.stderr.strip()).strip()
+    reasons = [
+        ("FAIL: the synthesis handoff netlist is not safe for PnR — a literal "
+         "constant becomes an OpenROAD zero_/one_ net and detailed_route fails "
+         "with DRT-0305; an x constant, an empty or hierarchical netlist, or one "
+         "older than its RTL is refused too." if done.returncode == 1 else
+         "FAIL: synth_handoff_netlist_check could not judge the handoff netlist "
+         f"(rc={done.returncode})")]
+    if detail:
+        reasons.append(f"    gate output: {detail.splitlines()[0][:300]}")
+    return False, reasons
 
 
 # v1.6.97 (issue #29 Bugs 1+2) — thin-input waiver scaffold.
@@ -20227,11 +20093,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "--stage, which can only name stages 1-4."))
     p.add_argument(
         "--skip-yosys-gates", action="store_true",
-        help=("v0.70: disable the pre-PnR Yosys auditor gate "
-              "(yosys_hilomap_required_check + yosys_script_template_check). "
-              "Intended for sim-only flows that never reach PnR. Mirrors "
-              "yosys_script_template_check.py's --simulation-only escape "
-              "hatch."),
+        help=("v0.70: disable the pre-PnR synthesis handoff gate "
+              "(synth_handoff_netlist_check on the netlist step 9 handed to "
+              "PnR). Intended for sim-only flows that never reach PnR."),
     )
     p.add_argument(
         "--skip-analog", action="store_true",
@@ -20695,11 +20559,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     # ------------------------------------------------------------------
     # v0.70 Item 1 — Pre-PnR Yosys auditor gate.
     #
-    # Runs yosys_hilomap_required_check + yosys_script_template_check
-    # against the first .ys file found in the project. Both auditors
-    # were shipped in v0.69 as CLI-only helpers; v0.70 wires them into
-    # the canonical phase 2+3 flow so a PnR stage can't proceed when
-    # the synth script skipped hilomap.
+    # Runs synth_handoff_netlist_check on the netlist step 9 handed to PnR
+    # (CUT_W4; it replaced the v0.69 script-text auditors) so a PnR stage
+    # can't proceed over a netlist that would crash detailed route.
     #
     # The gate is skipped when:
     #   - --skip-yosys-gates was passed (explicit opt-out), OR

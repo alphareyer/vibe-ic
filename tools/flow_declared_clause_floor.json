@@ -182,18 +182,8 @@
     },
     {
       "step": "14",
-      "kind": "advisory_program_exit_zero",
-      "cmd": "yosys_tiecell_recipe_order_check . --json reports/phase2/gates/yosys_tiecell_recipe_order.json"
-    },
-    {
-      "step": "14",
       "kind": "optional_program_exit_zero",
-      "cmd": "yosys_hilomap_required_check . --json reports/phase2/gates/yosys_hilomap.json"
-    },
-    {
-      "step": "14",
-      "kind": "optional_program_exit_zero",
-      "cmd": "yosys_script_template_check . --json reports/phase2/gates/yosys_script_template.json"
+      "cmd": "synth_handoff_netlist_check . --json reports/phase2/gates/synth_handoff_netlist.json"
     },
     {
       "step": "15",

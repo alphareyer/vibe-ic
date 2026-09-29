@@ -283,53 +283,49 @@ def test_step9_provenance_requires_the_mapped_netlists_record(tmp_path):
 
 
 # ----------------------------------------------------------------- step 14 --
+# CUT_W4: step 14's clause is `synth_handoff_netlist_check`, which judges the
+# netlist the sidecar names (the one PnR routes) on either arm. The two
+# script-text programs these cases used to drive were removed with the direct
+# recipe's text audits; "a PnR netlist written without a library" is refused
+# at step 9 (`test_step9_fails_a_generic_only_netlist_handed_to_pnr`).
 
-@pytest.mark.parametrize("program", ["yosys_hilomap_required_check",
-                                     "yosys_script_template_check"])
-def test_step14_judges_the_command_that_wrote_the_pnr_netlist(tmp_path, program):
-    cmd = _clause("14", program)
-    ok = _project(tmp_path / "ok", mapped_text=_mapped())
+def _bound(proj: Path) -> Path:
+    """Give the fixture's sidecar the RTL fingerprint both arms write."""
+    rtl = proj / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True, exist_ok=True)
+    (rtl / "spm.v").write_text("module spm; endmodule\n")
+    (proj / SYNTH / "synth_inputs.json").write_text(json.dumps({
+        "netlist": "spm_synth.v",
+        "rtl_sha256": {"spm.v": hashlib.sha256((rtl / "spm.v").read_bytes()).hexdigest()}}))
+    return proj
+
+
+def test_step14_judges_the_netlist_pnr_routes(tmp_path):
+    cmd = _clause("14", "synth_handoff_netlist_check")
+    ok = _bound(_project(tmp_path / "ok", mapped_text=_mapped()))
     cp = _run_clause(ok, cmd)
     assert cp.returncode == 0, cp.stdout[-600:] + cp.stderr[-600:]
     rep = json.loads((ok / _json_arg(cmd)).read_text())
-    assert rep["inline_evidence"] == [f"{SYNTH}/synth.log"], rep
+    assert rep["netlist"].endswith(f"{SYNTH}/spm_synth.v"), rep
+    assert rep["producer"].startswith("direct recipe")
 
 
-@pytest.mark.parametrize("program", ["yosys_hilomap_required_check",
-                                     "yosys_script_template_check"])
-def test_step14_an_unechoed_pnr_recipe_is_not_measured_not_failed(tmp_path, program):
-    """Round 2 (review wave58): no phase log echoes the command that wrote the
-    netlist PnR routes -- the LibreLane step-9 arm's shape (its transcript is
-    under phase3/librelane/, provenance says LibreLane.Yosys.Synthesis). The
-    recipe was not read: NOT_MEASURED (rc 2) naming the producer, never a
-    FAIL by that fact alone, and never the PASS the sim-only command gave."""
-    cmd = _clause("14", program)
-    proj = _project(tmp_path, mapped_text=_mapped(), synth_log=False)
-    prov = proj / "provenance.jsonl"
-    rows = [json.loads(l) for l in prov.read_text().splitlines()]
-    rows[-1]["produced_by"] = "LibreLane.Yosys.Synthesis"
-    prov.write_text("".join(json.dumps(r) + "\n" for r in rows))
+def test_step14_measures_the_librelane_arm_instead_of_not_measuring_it(tmp_path):
+    """U11 round 2 recorded the LibreLane arm as NOT_MEASURED because no phase
+    log echoed a recipe for the script-text programs to read. The netlist is
+    what PnR routes, so it is judged, and credited to the tool only when the
+    tool's own step directory holds the same bytes."""
+    cmd = _clause("14", "synth_handoff_netlist_check")
+    proj = _bound(_project(tmp_path, mapped_text=_mapped(), synth_log=False))
+    step = proj / "phase3/librelane/02-yosys-synthesis"
+    step.mkdir(parents=True)
+    (step / "spm.nl.v").write_text(_mapped())
+    (step / "state_out.json").write_text(json.dumps({"nl": str(step / "spm.nl.v")}))
+    (step / "config.json").write_text(json.dumps({
+        "SYNTH_TIEHI_CELL": "gf180mcu_fd_sc_mcu7t5v0__tieh/Z",
+        "SYNTH_TIELO_CELL": "gf180mcu_fd_sc_mcu7t5v0__tiel/ZN"}))
     cp = _run_clause(proj, cmd)
-    assert cp.returncode == 2, cp.stdout[-600:] + cp.stderr[-600:]
+    assert cp.returncode == 0, cp.stdout[-600:] + cp.stderr[-600:]
     rep = json.loads((proj / _json_arg(cmd)).read_text())
-    assert rep["verdict"] == "NOT_MEASURED"
-    assert "LibreLane.Yosys.Synthesis" in rep["reason"]
-
-
-@pytest.mark.parametrize("program", ["yosys_hilomap_required_check",
-                                     "yosys_script_template_check"])
-def test_step14_refuses_a_pnr_netlist_written_without_a_library(tmp_path, program):
-    cmd = _clause("14", program)
-    no_lib = (f"read_verilog rtl/spm.v; synth -top spm -flatten; "
-              f"write_verilog -noattr /p/{SYNTH}/spm_synth.v")
-    proj = _project(tmp_path, mapped_text=_mapped(), map_cmd=no_lib)
-    assert _run_clause(proj, cmd).returncode == 1
-
-
-def test_step14_handoff_audit_names_the_pnr_netlist(tmp_path):
-    cmd = _clause("14", "yosys_script_template_check")
-    proj = _project(tmp_path, mapped_text=_mapped())
-    _run_clause(proj, cmd)
-    rep = json.loads((proj / _json_arg(cmd)).read_text())
-    assert rep["handoff_netlist_audit"]["handoff_netlist"] == f"{SYNTH}/spm_synth.v"
-    assert rep["handoff_netlist_audit"]["role"] == "pnr_consumed_mapped"
+    assert rep["producer"] == "LibreLane Yosys.Synthesis"
+    assert rep["tie_cells"]["gf180mcu_fd_sc_mcu7t5v0__tiel"] == 1

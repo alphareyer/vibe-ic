@@ -46,7 +46,6 @@ import _yosys_stat as ys                      # noqa: E402
 import dft_signoff_check as dft               # noqa: E402
 import flow_compliance_check as fcc           # noqa: E402
 import synth_netlist_check as snc             # noqa: E402
-import yosys_script_template_check as ystc    # noqa: E402
 
 FLOW_YAML = PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml"
 
@@ -354,93 +353,70 @@ def test_runner_writes_the_area_stats_before_it_gates_on_them():
 
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP 14 — the handoff netlist, and staleness only against a PRODUCER
+# STEP 14 — the handoff netlist, and staleness only against what produced it
 # ══════════════════════════════════════════════════════════════════════
-_SYNTH_YS = ("read_verilog -sv ../../stage1/rtl/top.v\n"
-             "synth -top top -flatten\n"
-             "hilomap -hicell TIEHI Y -locell TIELO Y\n"
-             "write_verilog -noattr netlist.v\n")
-# A post-synthesis equivalence script: it CONSUMES the handoff netlist and
-# never writes it, so it is not its producer.
-_LATER_YS = ("read_verilog -sv ../../phase2/stage2/synth/netlist.v\n"
-             "synth -top top -flatten\n"
-             "hilomap -hicell TIEHI Y -locell TIELO Y\n")
+# CUT_W4: step 14 judges the netlist step 9 handed to PnR
+# (synth_handoff_netlist_check) instead of a `.ys` script's text, so its
+# "producer" is the RTL fingerprint step 9 writes beside that netlist. Both
+# shapes this file requires are kept: the DEFECT (RTL edited after synthesis;
+# a stub netlist) goes red, the LEGITIMATE run (a later phase-3 script that
+# merely consumes the netlist) stays green.
+import hashlib  # noqa: E402
 
 
-def _ys_project(root: Path, *, later_script_newer: bool,
-                producer_newer: bool = False, stub: bool = False) -> Path:
+def _handoff_project(root: Path, *, stub: bool = False) -> Path:
     p = _project(root)
+    rtl = p / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True, exist_ok=True)
+    (rtl / "top.v").write_text("module top; endmodule\n")
     synth = p / "phase2/stage2/synth"
-    (synth / "synth.ys").write_text(_SYNTH_YS)
+    synth.mkdir(parents=True, exist_ok=True)
+    (synth / "top_synth.v").write_text(
+        "// nothing here\n" if stub else
+        "module top(a, y);\n  input a;\n  output y;\n"
+        "  cellA u0 (.A(a), .Y(y));\nendmodule\n")
+    (synth / "synth_inputs.json").write_text(json.dumps({
+        "netlist": "top_synth.v",
+        "rtl_sha256": {"top.v": hashlib.sha256((rtl / "top.v").read_bytes()).hexdigest()}}))
     later = p / "phase3/lec"
     later.mkdir(parents=True, exist_ok=True)
-    (later / "post.ys").write_text(_LATER_YS)
-    if stub:
-        (synth / "netlist.v").write_text("// nothing here\n")
-    old = time.time() - 4 * 3600
-    for f in (synth / "synth.ys", synth / "netlist.v", synth / "netlist_yosys.v"):
-        os.utime(f, (old, old))
-    os.utime(later / "post.ys",
-             (time.time(), time.time()) if later_script_newer
-             else (old - 60, old - 60))
-    if producer_newer:
-        os.utime(synth / "synth.ys", (time.time(), time.time()))
+    (later / "post.ys").write_text("read_verilog -sv ../../phase2/stage2/synth/top_synth.v\n")
     return p
 
 
-def _run_ys_check(project: Path):
+def _run_handoff_check(project: Path):
     r = subprocess.run(
-        [sys.executable, str(PROGRAMS / "yosys_script_template_check.py"),
-         str(project), "--json", str(project / "ys.json")],
+        [sys.executable, str(PROGRAMS / "synth_handoff_netlist_check.py"),
+         str(project), "--json", str(project / "h.json")],
         capture_output=True, text=True)
-    return r.returncode, json.loads((project / "ys.json").read_text())
+    return r.returncode, json.loads((project / "h.json").read_text())
 
 
-def test_step14_rejects_a_handoff_older_than_its_own_producer(tmp_path):
-    """THE DEFECT. The script that declares itself the writer of
-    phase2/stage2/synth/netlist.v has been edited since the netlist was
-    produced, so PnR would consume the product of a recipe nobody ran."""
-    p = _ys_project(tmp_path / "prod", later_script_newer=False,
-                    producer_newer=True)
-    rc, report = _run_ys_check(p)
+def test_step14_rejects_a_handoff_older_than_its_own_rtl(tmp_path):
+    """THE DEFECT. The RTL was edited since the netlist was synthesised, so PnR
+    would consume the product of a design nobody synthesised."""
+    p = _handoff_project(tmp_path / "prod")
+    (p / "phase2/stage1/rtl/top.v").write_text("module top(input a); endmodule\n")
+    rc, report = _run_handoff_check(p)
     assert rc == 1, report
-    assert report["handoff_netlist_audit"]["stale_vs_scripts"], report
+    assert any(f.startswith("HANDOFF_STALE") for f in report["findings"]), report
 
 
-def test_step14_ignores_a_script_that_does_not_write_the_handoff(tmp_path):
-    """NO FALSE ALARM. Phase 3 runs after phase 2 by construction, so a yosys
-    script under phase3/ is ALWAYS newer than the phase-2 handoff netlist. It
-    consumes that netlist; its clock says nothing about whether the netlist is
-    the product of the synthesis recipe."""
-    p = _ys_project(tmp_path / "later", later_script_newer=True)
-    rc, report = _run_ys_check(p)
+def test_step14_ignores_a_later_script_that_consumes_the_handoff(tmp_path):
+    """NO FALSE ALARM. A phase-3 script is newer than the handoff by
+    construction; it consumes the netlist and says nothing about whether the
+    netlist is the product of its RTL."""
+    p = _handoff_project(tmp_path / "later")
+    os.utime(p / "phase3/lec/post.ys", (time.time() + 60, time.time() + 60))
+    rc, report = _run_handoff_check(p)
     assert rc == 0, report
-    assert report["handoff_netlist_audit"]["stale_vs_scripts"] == []
-    assert [Path(s).name for s
-            in report["handoff_netlist_audit"]["producer_scripts"]] == ["synth.ys"]
-
-
-def test_step14_records_that_staleness_was_not_compared(tmp_path):
-    """Unmeasured is recorded as unmeasured. When no audited script claims to
-    write the handoff netlist there is nothing to compare, and the report must
-    say so rather than present a bare pass."""
-    p = _project(tmp_path / "nonproducer")
-    later = p / "phase3/lec"
-    later.mkdir(parents=True, exist_ok=True)
-    (later / "post.ys").write_text(_LATER_YS)
-    rc, report = _run_ys_check(p)
-    assert rc == 0, report
-    assert report["handoff_netlist_audit"]["producer_scripts"] == []
-    assert any("staleness not compared" in m
-               for m in report["handoff_netlist_messages"]), report
 
 
 def test_step14_still_rejects_a_stub_handoff_netlist(tmp_path):
-    """The substantive half of the gate, unchanged by the narrowing above."""
-    p = _ys_project(tmp_path / "stub", later_script_newer=False, stub=True)
-    rc, report = _run_ys_check(p)
+    p = _handoff_project(tmp_path / "stub", stub=True)
+    rc, report = _run_handoff_check(p)
     assert rc == 1, report
-    assert report["handoff_netlist_audit"]["has_module"] is False
+    assert any(f.startswith("NETLIST_EMPTY") for f in report["findings"]), report
 
 
 # ══════════════════════════════════════════════════════════════════════
