@@ -1738,22 +1738,26 @@ def test_port_pad_cover_wiring_is_not_a_zero_segment_proof(tmp_path):
 
 
 def _stage_receipts(project: Path, *, skip=(), placement_sdc_fanout=4) -> None:
-    """Receipts an instrumented flow records as each stage runs."""
+    """Receipts an instrumented flow records as each stage runs, bound to the
+    run instance that claimed the receipt directory."""
+    import drv_stage_receipts
+    run_id = drv_stage_receipts.claim(project)
     census = (drv._COMMAND + "\n" + "".join(
         f"{kind} violators=0\n" for kind in drv.KINDS))
     for name in (*drv._REQUIRED_STAGES, "postroute_repair"):
         if name in skip:
             continue
         folder = project / "phase3/stage_evidence" / name
-        behavior = _file(folder, "drv_behavior.rpt", census + (
-            "" if name == "synth" else "sta::max_fanout_check_limit 4\n"))
-        receipt = {"name": name, "ran": True, "behavior_report": behavior,
+        behavior = _file(folder, "drv_behavior.rpt", (
+            "clocks 1\nclock clk is_propagated=0\n" + census if name == "synth"
+            else census + "sta::max_fanout_check_limit 4\n"))
+        receipt = {"name": name, "run_id": run_id, "ran": True,
+                   "behavior_report": behavior,
                    # a stage's own prose claim is never the applied value
                    "applied": {"fanout": 99, "slew_ns": 99, "cap_pf": 99}}
         if name == "synth":
             receipt.update(abc_script=_file(folder, "abc.script",
-                                            "strash\nbuffer -N 4\n"),
-                           synth_abc_buffering=True, ideal_clock_excluded=True)
+                                            "strash\nbuffer -N 4\n"))
         else:
             fanout = placement_sdc_fanout if name == "placement_repair" else 4
             receipt["sdc_snapshot"] = _file(
@@ -1762,8 +1766,10 @@ def _stage_receipts(project: Path, *, skip=(), placement_sdc_fanout=4) -> None:
                 "set_max_transition 3 [current_design]\n"
                 "set_max_capacitance 0.2 [current_design]\n")
         if name == "cts":
-            receipt.update(cts_parameters={"sink_clustering_size": 4},
-                           clock_driver_fanout=[])
+            receipt.update(
+                command_args=_file(folder, "cts.args", "-sink_clustering_size 4\n"),
+                clock_fanout_report=_file(folder, "cts.clock_fanout",
+                                          "clock_driver_fanout\tclkbuf_0/Z\tclknet_0\t4\n"))
         _file(project, f"reports/phase3/drv_stages/{name}.json",
               json.dumps(receipt))
 

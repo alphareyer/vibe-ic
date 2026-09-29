@@ -123,37 +123,108 @@ def _one(values: list[float]) -> float | None:
     return values[0] if values and len(set(values)) == 1 else None
 
 
+def _cts_parameters(text: str) -> dict | None:
+    """`clock_tree_synthesis`'s own argument list (a Tcl list the probe wrote)."""
+    words = _tcl_words(text.strip())
+    if words is None:
+        return None
+    params: dict = {}
+    i = 0
+    while i < len(words):
+        key = words[i]
+        if not key.startswith("-"):
+            return None
+        if i + 1 < len(words) and not words[i + 1].startswith("-"):
+            params[key[1:]] = words[i + 1]
+            i += 2
+        else:
+            params[key[1:]] = True
+            i += 1
+    return params
+
+
+def _tcl_words(text: str) -> list[str] | None:
+    """Split one Tcl list of plain and {braced} words; None if malformed."""
+    words, i = [], 0
+    while i < len(text):
+        if text[i].isspace():
+            i += 1
+            continue
+        if text[i] == "{":
+            depth, j = 1, i + 1
+            while j < len(text) and depth:
+                depth += {"{": 1, "}": -1}.get(text[j], 0)
+                j += 1
+            if depth:
+                return None
+            words.append(text[i + 1:j - 1])
+            i = j
+        else:
+            j = i
+            while j < len(text) and not text[j].isspace():
+                j += 1
+            words.append(text[i:j])
+            i = j
+    return words
+
+
+def _clock_driver_fanout(text: str) -> list[dict] | None:
+    rows = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) != 4 or parts[0] != "clock_driver_fanout" or not parts[3].isdigit():
+            return None
+        rows.append({"driver": parts[1], "net": parts[2], "fanout": int(parts[3])})
+    return rows
+
+
+def _ideal_clock_excluded(behavior: str) -> bool:
+    """The post-synthesis census states its clocks' propagation before the
+    checks run; ideal clocks are what OpenSTA's checks exclude."""
+    count = re.search(r"(?m)^clocks\s+(\d+)\s*$", behavior)
+    states = re.findall(r"(?m)^clock\s+\S+\s+is_propagated=([01])\s*$", behavior)
+    return bool(count) and int(count.group(1)) == len(states) and all(
+        state == "0" for state in states)
+
+
 def _stages(project: Path, postroute_repair_ran: bool) -> tuple[list[dict], dict]:
-    """Derive each required stage row from the receipt the stage recorded."""
+    """Derive each required stage row from the receipt the stage recorded.
+
+    A receipt counts only when it belongs to the run instance that claimed
+    the receipt directory (`drv_stage_receipts.claim`).  Every value, and
+    every derived flag, is read from the hashed evidence files the receipt
+    names; the receipt's own fields are never a value.
+    """
+    import drv_stage_receipts
     names = [*_REQUIRED_STAGES, *(("postroute_repair",) if postroute_repair_ran else ())]
     rows: list[dict] = []
     inventory: dict[str, dict] = {}
+    run_id = drv_stage_receipts.current_run(project)
     for name in names:
         path = project / STAGE_RECEIPT_DIR / f"{name}.json"
-        entry = {"receipt": str(path)}
+        entry = {"receipt": str(path), "run_id": run_id}
         inventory[name] = entry
-        if not path.is_file():
-            entry["status"] = "absent"
+        doc, status = drv_stage_receipts.read_receipt(project, name)
+        entry["status"] = status
+        if doc is None:
             continue
-        try:
-            doc = json.loads(path.read_text())
-        except ValueError:
-            doc = None
-        if not isinstance(doc, dict) or doc.get("name") != name:
-            entry["status"] = "unreadable or names another stage"
-            continue
-        entry.update(status="recorded", sha256=_sha(path))
+        entry["sha256"] = _sha(path)
         row: dict = {"name": name, "ran": doc.get("ran") is True}
-        for field in ("behavior_report", "abc_script", "sdc_snapshot"):
+        for field in ("behavior_report", "abc_script", "sdc_snapshot",
+                      "command_args", "clock_fanout_report"):
             ref = _recorded_ref(project, doc.get(field))
             if ref is not None:
                 row[field] = ref
+        behavior = _recorded_text(row.get("behavior_report"))
         if name == "synth":
             script = _recorded_text(row.get("abc_script"))
-            row["applied"] = {"fanout": _one([float(v) for v in re.findall(
-                rf"\bbuffer\s+-N\s+({_NUM})\b", script)])}
-            row["synth_abc_buffering"] = doc.get("synth_abc_buffering") is True
-            row["ideal_clock_excluded"] = doc.get("ideal_clock_excluded") is True
+            buffers = [float(v) for v in re.findall(
+                rf"(?m)^\s*buffer\s+-N\s+({_NUM})\s*;?\s*$", script)]
+            row["applied"] = {"fanout": _one(buffers)}
+            row["synth_abc_buffering"] = bool(buffers)
+            row["ideal_clock_excluded"] = _ideal_clock_excluded(behavior)
         else:
             snapshot = _recorded_text(row.get("sdc_snapshot"))
             row["applied"] = {field: _one(_sdc_values(snapshot, command))
@@ -161,12 +232,14 @@ def _stages(project: Path, postroute_repair_ran: bool) -> tuple[list[dict], dict
                                   ("fanout", "set_max_fanout"),
                                   ("slew_ns", "set_max_transition"),
                                   ("cap_pf", "set_max_capacitance"))}
-            behavior = _recorded_text(row.get("behavior_report"))
             row["fanout_check_limit"] = _one([float(v) for v in re.findall(
                 rf"(?m)^\s*sta::max_fanout_check_limit\s+({_NUM})\s*$", behavior)])
             if name == "cts":
-                row["cts_parameters"] = doc.get("cts_parameters")
-                row["clock_driver_fanout"] = doc.get("clock_driver_fanout")
+                args = _recorded_text(row.get("command_args"))
+                row["cts_parameters"] = _cts_parameters(args) if args else None
+                fanout = _recorded_text(row.get("clock_fanout_report"))
+                row["clock_driver_fanout"] = (_clock_driver_fanout(fanout)
+                                              if fanout else None)
         rows.append(row)
     return rows, inventory
 

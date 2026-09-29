@@ -61,6 +61,7 @@ SEGMENT = ("OpenROAD.GlobalRouting", "OpenROAD.FillInsertion")
 #: arms are measured after the route by one instrument instead (`measure_arm`).
 MEASURE_ONLY = ("OpenROAD.STAMidPNR",)
 DRT = "OpenROAD.DetailedRouting"
+POST_GRT_REPAIR = "OpenROAD.RepairDesignPostGRT"
 DRT_SEEDED = "Vibeic.DetailedRoutingSeeded"
 NVR = "Vibeic.NamedViolationReroute"
 
@@ -544,6 +545,14 @@ def execute(
                 steps.append((sid, cfg))
             folders = _ll.run_chain(project, image, [(s, c, state0) for s, c in steps],
                                     mounts=mounts, lane=lane, pdk_root=_ll.PDK_GUEST_ROOT)
+            if POST_GRT_REPAIR not in arm_ids:
+                # DRV standard section 1: post-GRT repair is a required stage;
+                # a chain the flow gated it out of records that it did not run.
+                import drv_stage_receipts as _drv_stages
+                _drv_stages.record_not_run(
+                    project, "post_grt_repair",
+                    f"{POST_GRT_REPAIR} is not in step 21's chain ({lane}); "
+                    f"flow gates false: {gated_off.get(POST_GRT_REPAIR) or 'not requested'}")
             final = folders[-1] / "state_out.json"
             mfolders = _ll.run_chain(project, image, [(s, c, final) for s, c in measure],
                                      mounts=mounts, lane=f"{lane}-measure", pdk_root=_ll.PDK_GUEST_ROOT)
