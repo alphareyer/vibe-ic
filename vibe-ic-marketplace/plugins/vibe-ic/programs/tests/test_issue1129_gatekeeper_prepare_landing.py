@@ -352,13 +352,23 @@ def test_the_real_program_runs_against_this_repo_and_honours_its_boundary(
                      str(checkout)],
                     cwd=str(checkout), capture_output=True, text=True)
     except _pr.Stalled as exc:
-        # A stall window is a measurement of the host as much as of the
-        # program. MEASURED once on 8hd-3 (full census, -n16, load ~17/32):
-        # 12 still looks after 721s; the same file passed in every other run
-        # that contained it. Under -n>1 or load that is NOT_MEASURED (owner
-        # R-0927); in a quiet serial run a wedge is still raised as the FAIL
-        # it is. Every assertion below stays FAIL in every run.
-        states.skip_if_not_measurable(str(exc))
+        # `Stalled` is not a clock: it is `_progress_run` having LOOKED at the
+        # child's whole process tree N times running and seen every readable
+        # signal sit still. With CPU or I/O readable that is observed ZERO
+        # progress -- a loaded host makes a child slow, never motionless, and
+        # a slow child is never Stalled (it is waited for, however long). So
+        # it is PROGRESS_NONE and stays the FAIL it is at any load and any -n
+        # (R-0929-ENV-AT-RUNTIME). Reverse mutation M10 -- prepare() asleep
+        # for ever -- read NOT_MEASURED at -n 2 on a host at 0.32 load per
+        # core while this branch keyed on the worker count. Only a probe that
+        # could read neither CPU nor I/O leaves slow and stuck apart unseen,
+        # and only then may a MEASURABLY loaded host make it NOT_MEASURED.
+        at_stall = states.run_conditions()
+        seen = exc.signals.get("cpu") or exc.signals.get("io")
+        states.skip_if_not_measurable(
+            str(exc), conditions=at_stall,
+            progress=(states.PROGRESS_NONE if seen
+                      else states.PROGRESS_UNOBSERVABLE))
         raise
     assert r.returncode == 0, r.stderr[-2000:]
     import json

@@ -10,8 +10,9 @@ that paints every red grey, which is the one thing this tier must never do.
        the tool present, a real assert    -> FAIL
     2. ImageNotResolvable from _eda_pin   -> NOT_VERIFIED
        the same exception planted by test -> FAIL
-    3. a `measures` test under -n 16      -> NOT_MEASURED (with the numbers)
+    3. a `measures` test on a loaded host -> NOT_MEASURED (with the numbers)
        the same failure serial and quiet  -> FAIL
+       the same failure -n 16 but quiet   -> FAIL (workers are never a cause)
        an UNMARKED test under -n 16       -> FAIL
     4. a `bookkeeping` stale count        -> BOOKKEEPING (stated vs actual)
        a property assert in that test     -> FAIL
@@ -192,12 +193,26 @@ _UNMARKED = ("def test_linear():\n"
              "    assert 40.0 < 15.0, 'cost 40.0x for a 6x netlist'\n")
 
 
-def test_a_marked_measurement_under_many_workers_is_not_measured(tmp_path):
+def test_a_marked_measurement_under_many_workers_on_a_quiet_host_stays_fail(tmp_path):
+    """R-0929-ENV-AT-RUNTIME: the worker count is never a cause on its own.
+    This test used to assert the opposite (-n 16 at load 0 -> NOT_MEASURED);
+    that rule let two reverse mutations read non-red at -n 2 on a quiet host."""
     rc, out = _session(tmp_path, _MEASURES, load=0.0,
+                       env_extra={"PYTEST_XDIST_WORKER_COUNT": "16"})
+    assert _counts(out)["FAIL"] == 1 and _counts(out)["NOT_MEASURED"] == 0, out
+    assert "cost 40.0x for a 6x netlist" in out, out
+    assert rc == 1, out
+
+
+def test_a_marked_measurement_under_many_workers_and_load_is_not_measured(tmp_path):
+    load = 64.0 * (os.cpu_count() or 1)
+    rc, out = _session(tmp_path, _MEASURES, load=load,
                        env_extra={"PYTEST_XDIST_WORKER_COUNT": "16"})
     assert _counts(out)["NOT_MEASURED"] == 1 and _counts(out)["FAIL"] == 0, out
     [line] = _state_lines(out, "NOT_MEASURED")
-    assert "xdist workers=16 > 1" in line and "load1=0.00" in line, line
+    assert "1-min load per core 64.00 > 0.5" in line, line
+    assert "xdist workers=16" in line, line
+    assert "xdist workers=16 > 1" not in line, line
     assert "cost 40.0x for a 6x netlist" in line, line
     assert rc == 0, out
 
@@ -448,30 +463,83 @@ def test_require_tools_asks_the_search_path_the_site_names(tmp_path):
 
 _CEILING = ("import _outcome_states as S\n"
             "def test_x():\n"
-            "    S.skip_if_not_measurable('still running at the 55s ceiling')\n"
+            "    S.skip_if_not_measurable('still running at the 55s ceiling',\n"
+            "                             progress=S.{progress})\n"
             "    pytest.fail('still running at the 55s ceiling')\n")
+_LOADED = 64.0 * (os.cpu_count() or 1)
 
 
-def test_a_ceiling_branch_under_many_workers_is_not_measured(tmp_path):
-    rc, out = _session(tmp_path, _CEILING, load=0.0,
-                       env_extra={"PYTEST_XDIST_WORKER_COUNT": "16"})
-    assert _counts(out)["NOT_MEASURED"] == 1 and _counts(out)["FAIL"] == 0, out
+def test_a_ceiling_branch_under_many_workers_on_a_quiet_host_stays_fail(tmp_path):
+    """The M9b / M10 shape: -n 2 (here 16) on a quiet host is a FAIL. The worker
+    count alone used to make it NOT_MEASURED (review_wave58 ENVGUARDS)."""
+    rc, out = _session(tmp_path, _CEILING.format(progress="PROGRESS_UNOBSERVABLE"),
+                       load=0.0, env_extra={"PYTEST_XDIST_WORKER_COUNT": "16"})
+    assert _counts(out)["FAIL"] == 1 and _counts(out)["NOT_MEASURED"] == 0, out
+    assert rc == 1, out
+
+
+def test_a_ceiling_branch_under_load_is_not_measured(tmp_path):
+    rc, out = _session(tmp_path, _CEILING.format(progress="PROGRESS_UNOBSERVABLE"),
+                       load=_LOADED)
     [line] = _state_lines(out, "NOT_MEASURED")
-    assert "xdist workers=16 > 1" in line, line
+    assert "1-min load per core 64.00 > 0.5" in line, line
+    assert "slow and stuck cannot be told apart at this branch" in line, line
     assert "still running at the 55s ceiling" in line, line
     assert rc == 0, out
 
 
-def test_a_ceiling_branch_under_load_is_not_measured(tmp_path):
-    rc, out = _session(tmp_path, _CEILING, load=64.0 * (os.cpu_count() or 1))
+def test_a_ceiling_branch_that_saw_slow_progress_under_load_is_not_measured(tmp_path):
+    rc, out = _session(tmp_path, _CEILING.format(progress="PROGRESS_SLOW"),
+                       load=_LOADED)
     [line] = _state_lines(out, "NOT_MEASURED")
-    assert "1-min load per core 64.00 > 0.5" in line, line
+    assert "the subject was seen advancing, just not finishing" in line, line
+
+
+def test_a_ceiling_branch_that_saw_no_progress_stays_fail_under_any_load(tmp_path):
+    """A subject SEEN doing nothing is a hang: load slows work, it does not stop
+    it. Loaded host and many workers together still leave it a FAIL."""
+    rc, out = _session(tmp_path, _CEILING.format(progress="PROGRESS_NONE"),
+                       load=_LOADED, env_extra={"PYTEST_XDIST_WORKER_COUNT": "16"})
+    assert _counts(out)["FAIL"] == 1 and _counts(out)["NOT_MEASURED"] == 0, out
+    assert rc == 1, out
 
 
 def test_a_ceiling_branch_serial_and_quiet_stays_fail(tmp_path):
-    rc, out = _session(tmp_path, _CEILING, load=0.0)
+    rc, out = _session(tmp_path, _CEILING.format(progress="PROGRESS_UNOBSERVABLE"),
+                       load=0.0)
     assert _counts(out)["FAIL"] == 1 and _counts(out)["NOT_MEASURED"] == 0, out
     assert rc == 1, out
+
+
+def test_the_conditions_sampled_at_the_ceiling_are_the_ones_judged(tmp_path):
+    """A site samples the load AT its ceiling, before it kills anything; the
+    helper judges that sample, not whatever the host reads a moment later."""
+    one, two = tmp_path / "one", tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    body = ("import _outcome_states as S\n"
+            "def test_x():\n"
+            "    S.skip_if_not_measurable('ceiling', progress=S.PROGRESS_UNOBSERVABLE,\n"
+            "        conditions={{'workers': 1, 'load1': {l}, 'cores': 1,\n"
+            "                    'load_per_core': {l}}})\n"
+            "    pytest.fail('ceiling')\n")
+    rc, out = _session(one, body.format(l=9.0), load=0.0)
+    assert _counts(out)["NOT_MEASURED"] == 1, out
+    rc, out = _session(two, body.format(l=0.1), load=_LOADED)
+    assert _counts(out)["FAIL"] == 1 and _counts(out)["NOT_MEASURED"] == 0, out
+
+
+def test_a_site_must_say_what_progress_it_observed():
+    """No default: a site that forgets to state its evidence does not get the
+    permissive reading; a misspelt kind is refused rather than read as 'slow'."""
+    with pytest.raises(TypeError):
+        OS.skip_if_not_measurable("ceiling")  # type: ignore[call-arg]
+    cond = {"workers": 1, "load1": 64.0, "cores": 1, "load_per_core": 64.0}
+    with pytest.raises(ValueError):
+        OS.classify_not_measured(cond, "ceiling", progress="stuck")
+    assert OS.classify_not_measured(cond, "c", progress=OS.PROGRESS_NONE) is None
+    quiet = dict(cond, workers=16, load1=0.0, load_per_core=0.0)
+    assert OS.classify_not_measured(quiet, "c") is None
 
 
 def _calls(path, func, callee):
@@ -522,3 +590,37 @@ def test_the_named_sites_report_their_state_during_the_run():
     )
     missing = [s for s in sites if not _calls(*s)]
     assert missing == [], missing
+
+
+def _keywords_of(path, func, callee):
+    import ast
+    tree = ast.parse((Path(__file__).parent / path).read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == func:
+            return [sorted(k.arg for k in c.keywords) for c in ast.walk(node)
+                    if isinstance(c, ast.Call)
+                    and getattr(c.func, "attr", getattr(c.func, "id", "")) == callee]
+    raise AssertionError(f"{path}::{func} not found")
+
+
+def test_every_ceiling_site_states_its_progress_evidence_and_its_ceiling_sample():
+    """R-0929-ENV-AT-RUNTIME at the sites: each ceiling/stall call passes what
+    it observed (`progress=`) and the load it read AT the ceiling
+    (`conditions=`), and the evidence each one has is the evidence it uses:
+    issue1129's Stalled maps to PROGRESS_NONE, and the landing helper FAILs a
+    cleanup that STARTED before it can reach the ceiling helper."""
+    sites = (("test_landing_merge_verdict.py",
+              "_assert_interruption_cleans_every_parallel_arm", 2),
+             ("test_issue1129_gatekeeper_prepare_landing.py",
+              "test_the_real_program_runs_against_this_repo_and_honours_its_boundary", 1))
+    for path, func, n in sites:
+        kws = _keywords_of(path, func, "skip_if_not_measurable")
+        assert kws == [["conditions", "progress"]] * n, (path, kws)
+    src = (Path(__file__).parent / "test_issue1129_gatekeeper_prepare_landing.py").read_text()
+    assert "states.PROGRESS_NONE if seen" in src
+    land = (Path(__file__).parent / "test_landing_merge_verdict.py").read_text()
+    body = land[land.index("def _assert_interruption_cleans_every_parallel_arm"):]
+    body = body[:body.index("\ndef ")]
+    started_fail = body.index("if still_running and started:")
+    last_skip = body.rindex("states.skip_if_not_measurable(")
+    assert started_fail < last_skip, "a started cleanup must FAIL before the ceiling helper"

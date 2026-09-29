@@ -3362,6 +3362,9 @@ fi
         # nothing ever reaps it. Settle the process first, then report which of
         # the two distinguishable things actually happened.
         still_running = proc.poll() is None
+        # The host's load is read HERE, at the ceiling, before the kill below
+        # changes what the host is doing (R-0929-ENV-AT-RUNTIME).
+        at_ceiling = states.run_conditions()
         if still_running:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -3372,10 +3375,15 @@ fi
             why = (f"the verifier was still running after {_T}s and no "
                    f"verifier worktree ever appeared in the subject "
                    f"repository, so the {hung_arm} control arm never started")
-            # THIS branch is the suite ceiling, a wall clock: under -n>1 or a
-            # loaded host it is NOT_MEASURED (owner R-0927), in a quiet serial
-            # run it stays the FAIL below. The EXITED branch is never a clock.
-            states.skip_if_not_measurable(why)
+            # THIS branch is the suite ceiling, a wall clock, and nothing at it
+            # shows where the verifier is (no worktree, no event): slow and
+            # wedged look the same from here. So it is NOT_MEASURED only when
+            # the host was MEASURABLY loaded at the ceiling -- never for the
+            # xdist worker count alone -- and on a quiet host it is the FAIL
+            # below, serial or parallel. The EXITED branch is never a clock.
+            states.skip_if_not_measurable(
+                why, progress=states.PROGRESS_UNOBSERVABLE,
+                conditions=at_ceiling)
         else:
             why = (f"the verifier EXITED rc={proc.returncode} without ever "
                    f"running the {hung_arm} control arm: the injected hang was "
@@ -3399,15 +3407,30 @@ fi
             break
         time.sleep(0.05)
     if not cleanup_done.is_file():
-        # TWO different things end the wait above, and they used to share one
-        # message: the verifier EXITED without the event (a behaviour -- always
-        # FAIL), or it was STILL RUNNING at the `_T` ceiling (a wall clock).
-        # MEASURED on 8hd-3 (load ~17 on 32 cores, -n16, ngbt_land47): stdout
-        # stopped mid-verification, i.e. it was still working when killed, and
-        # the same file passed in ~20 other runs. So the ceiling branch alone
-        # is NOT_MEASURED under -n>1 or load (owner R-0927); in a quiet serial
-        # run it stays a FAIL, which is how a never-escalated arm is caught.
+        # THREE different things end the wait above, and they used to share one
+        # message:
+        #   * the verifier EXITED without the event -- a behaviour, always FAIL;
+        #   * it was still running at the `_T` ceiling AFTER `cleanup.started`
+        #     -- cleanup began and never reached `reaped`/`done`. That IS the
+        #     never-reaped arm this deadline exists to catch, and the events
+        #     are the progress evidence: cleanup was seen to start and then do
+        #     nothing observable. A hang, FAIL on any host at any load.
+        #     (Reverse mutation M9b -- cleanup() blocks right after
+        #     `cleanup_event started` -- read NOT_MEASURED at -n 2 on a host at
+        #     0.14 load per core while this branch keyed on the worker count.)
+        #   * it was still running at the ceiling and cleanup NEVER STARTED:
+        #     the interrupt was still deferred behind a foreground step (bash
+        #     runs a trapped signal only once that child returns). MEASURED on
+        #     8hd-3 (load ~17 on 32 cores, -n16, ngbt_land47): stdout stopped
+        #     mid-verification. Nothing here tells slow from wedged, so this
+        #     one branch is NOT_MEASURED when the host was MEASURABLY loaded at
+        #     the ceiling (R-0929-ENV-AT-RUNTIME), and a FAIL on a quiet host.
         still_running = proc.poll() is None
+        # Read at the ceiling, before the kill below changes the host or lets
+        # a late event land: the verdict is about what was true AT `_T`.
+        at_ceiling = states.run_conditions()
+        started = cleanup_started.is_file()
+        reaped = cleanup_reaped.is_file()
         # A failed cleanup test must clean up its own control process; leaving
         # the intentionally TERM-ignoring arm behind would contaminate every
         # later timing measurement in the same suite.
@@ -3416,10 +3439,22 @@ fi
         except ProcessLookupError:
             pass
         stdout, stderr = proc.communicate()
+        if still_running and started:
+            stuck = ("removing the worktrees never finished (cleanup.reaped "
+                     "present, cleanup.done absent)" if reaped else
+                     "an arm process group was never reaped (cleanup.started "
+                     "present, cleanup.reaped absent)")
+            pytest.fail(
+                f"cleanup STARTED and the verifier was still running at the "
+                f"suite safety ceiling ({_T}s): {stuck} -- a hang, not a slow "
+                f"host:\n{stdout}\n{stderr}")
         if still_running:
             why = (f"verifier still running at the suite safety ceiling "
-                   f"({_T}s) without the cleanup.done event")
-            states.skip_if_not_measurable(why)
+                   f"({_T}s) and cleanup never STARTED (no cleanup.started): "
+                   f"the interrupt was still deferred behind a foreground step")
+            states.skip_if_not_measurable(
+                why, progress=states.PROGRESS_UNOBSERVABLE,
+                conditions=at_ceiling)
             pytest.fail(f"{why}:\n{stdout}\n{stderr}")
         pytest.fail(
             f"verifier exited rc={proc.returncode} without the cleanup.done "
