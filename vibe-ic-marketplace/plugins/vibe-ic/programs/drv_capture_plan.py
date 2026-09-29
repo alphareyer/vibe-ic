@@ -254,13 +254,22 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
     root = Path(resolution["path"])
     netlist = _run_path(project, state["nl"])
     top = netlist.name.removesuffix(".nl.v")
-    routed = project / "phase3/stage3/pnr/routed.def"
+    state_def = _ref(_run_path(project, state["def"]))
+    if final_state is None:
+        # After handoff the canonical routed DEF must be the layout the final
+        # STA state measured.
+        layout = _ref(project / "phase3/stage3/pnr/routed.def")
+        if state_def["sha256"] != layout["sha256"]:
+            raise ValueError("final STA DEF differs from routed DEF")
+    else:
+        # Step 32 captures its candidate before handoff writes routed.def.
+        # Bind the candidate's own DEF; the pre-stream capture repeats the
+        # routed.def comparison once the handoff has happened.
+        layout = state_def
     artifacts = {"sta_netlist": _ref(netlist),
                  "lvs_netlist": {}, "gds_netlist": {},
                  "odb": _ref(_run_path(project, state["odb"])),
-                 "def": _ref(routed)}
-    if _sha(_run_path(project, state["def"])) != artifacts["def"]["sha256"]:
-        raise ValueError("final STA DEF differs from routed DEF")
+                 "def": layout}
     scene_root = state_path.parent
     profile = next((v for k, v in json.loads(_SCENE_PROFILES.read_text()).items()
                     if pdk.lower().startswith(k.lower())), None)
