@@ -17532,6 +17532,13 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # branch above already rules).
             result.status = _T.Verdict.NOT_APPLICABLE.value
             result.reason_class = ""
+            # N/A names the line that makes it (verdict.py: `declared_by` is
+            # REQUIRED on NOT_APPLICABLE). Here that line is each clause's own
+            # structural-absence statement: the clause plus its enumeration.
+            result.declared_by = "; ".join(
+                f"{_reason_taxonomy.NOT_APPLICABLE_BY_STRUCTURE}: "
+                + h[len(_EXECUTED_DECLARED_NA_HINT_PREFIX):].strip()
+                for h in executed_declared_na_hints)[:1000]
         else:
             result.status = (_T.Verdict.PASS.value if passed
                              else _T.Verdict.FAIL.value)

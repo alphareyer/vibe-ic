@@ -93,6 +93,12 @@ def test_fs1_answered_only_by_structure_reads_not_applicable(tmp_path):
                   for e in res.executed_declared_not_applicable) == [
         "fmeda_coverage_check", "fmeda_fault_injection_coverage"]
     assert sum(NABS in r for r in res.reasons) >= 2, res.reasons
+    # round 2 (review wave 58): the N/A row names its basis — each clause's
+    # own structural-absence statement, with its enumeration
+    for gate in ("fmeda_fault_injection_coverage", "fmeda_coverage_check"):
+        assert gate in res.declared_by, res.declared_by
+    assert NABS in res.declared_by and "enumerated" in res.declared_by, \
+        res.declared_by
 
 
 def test_a_design_with_a_safety_mechanism_is_not_not_applicable(tmp_path):

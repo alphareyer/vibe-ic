@@ -168,7 +168,13 @@ def test_step_2_clause_is_not_filed_incomplete(tmp_path):
                 "absent_condition_reason": "Scoped to a Phase-1 declaration "
                                            "that this probe always carries."}}]}}
     r = F.check_step(proj, step, {})
-    assert r.status == "PASS", (r.status, r.reason_class, r.reasons)
+    # MIGRATED (U20, review wave 58): this reduced step's ONLY clause is a
+    # structural absence and it declares no output, so the step is answered
+    # NOT_APPLICABLE (was PASS). The detection this test exists for — the
+    # clause is decided, not filed INCOMPLETE — is unchanged. The real step 2
+    # declares required_outputs, so it is not moved.
+    assert r.status == "NOT_APPLICABLE", (r.status, r.reason_class, r.reasons)
+    assert r.status != "NOT_MEASURED", r.reasons
     assert not any(str(x).startswith("INCOMPLETE") for x in r.reasons), r.reasons
 
 

@@ -159,7 +159,12 @@ def test_control_a_core_top_is_decided_not_applicable(tmp_path):
     assert (rc, doc["verdict"]) == (0, "NOT_APPLICABLE")
     assert doc["reason_class"] == "NOT_APPLICABLE_BY_STRUCTURE"
     assert doc["structural_absence"]["scanned"] == 2
-    assert FC.check_step(project, _step23_only(), {}).status == "PASS"
+    # MIGRATED (U20, review wave 58): the reduced Step 23 holds only this
+    # clause and no declared output, so an answered structural absence reads
+    # NOT_APPLICABLE (was PASS); it is still decided, never NOT_MEASURED, so
+    # an IP/core run is still not blocked. The real Step 23 declares outputs.
+    st = FC.check_step(project, _step23_only(), {}).status
+    assert st == "NOT_APPLICABLE" and st != "NOT_MEASURED", st
 
 
 def test_control_an_attested_hardmacro_is_decided_not_applicable(tmp_path):
@@ -179,7 +184,12 @@ def test_control_an_attested_hardmacro_is_decided_not_applicable(tmp_path):
     rc, doc = _run(project)
     assert (rc, doc["verdict"]) == (0, "NOT_APPLICABLE")
     assert doc["structural_absence"]["scanned_names"] == [TD.DECLARATION_REL]
-    assert FC.check_step(project, _step23_only(), {}).status == "PASS"
+    # MIGRATED (U20, review wave 58): the reduced Step 23 holds only this
+    # clause and no declared output, so an answered structural absence reads
+    # NOT_APPLICABLE (was PASS); it is still decided, never NOT_MEASURED, so
+    # an IP/core run is still not blocked. The real Step 23 declares outputs.
+    st = FC.check_step(project, _step23_only(), {}).status
+    assert st == "NOT_APPLICABLE" and st != "NOT_MEASURED", st
 
 
 def test_flow_compliance_grades_step23_on_the_clause(tmp_path):
