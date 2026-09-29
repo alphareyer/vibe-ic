@@ -544,6 +544,47 @@ def _waiver_support(waiver: dict, row: dict, bundle: dict,
     return not local_errors
 
 
+def _check_post_stream_derivation(identity: dict, fails: list[str],
+                                  missing: list[str]) -> None:
+    """R-0929-DRV-IDENTITY: the final capture proves the streamed GDS and the
+    LVS netlist derive from the judged DEF / netlist.  Every file is
+    re-hashed here; a record the flow did not write is NOT_MEASURED, a link
+    that names a different DEF or netlist is FAIL (the verdict would be about
+    another layout)."""
+    derivation = identity.get("derivation")
+    artifacts = identity.get("artifacts") or {}
+    judged_def = (artifacts.get("def") or {}).get("sha256")
+    if not isinstance(derivation, dict):
+        missing.append("post-stream derivation record absent")
+        return
+    gds = derivation.get("gds")
+    if not isinstance(gds, dict):
+        missing.append("post-stream GDS admission record absent")
+    else:
+        _evidence(gds, missing, "streamed GDS")
+        if not gds.get("streamed_from_def_sha256"):
+            missing.append("streamed GDS names no source DEF")
+        elif gds["streamed_from_def_sha256"] != judged_def:
+            fails.append("streamed GDS derives from a DEF other than the judged DEF")
+        _evidence(gds.get("record") or {}, missing, "GDS admission record")
+    lvs = derivation.get("lvs")
+    if not isinstance(lvs, dict):
+        missing.append("post-stream LVS record absent")
+        return
+    for record in lvs.get("records") or [{}]:
+        _evidence(record, missing, "LVS record")
+    _evidence(lvs.get("schematic_netlist") or {}, missing, "LVS schematic netlist")
+    if not lvs.get("layout_def_sha256"):
+        missing.append("LVS names no layout DEF")
+    elif lvs["layout_def_sha256"] != judged_def:
+        fails.append("LVS compared a layout DEF other than the judged DEF")
+    if (lvs.get("schematic_netlist") or {}).get("sha256") != identity.get("sta_netlist"):
+        fails.append("LVS compared a netlist other than the judged STA netlist")
+    if lvs.get("verdict") != "PASS" or lvs.get("compare_performed") is False:
+        missing.append(f"LVS did not prove the layout matches the netlist "
+                       f"(verdict {lvs.get('verdict')})")
+
+
 def judge(bundle: dict, *, project: Path | None = None) -> dict:
     """Judge measured rows independently of tool rc/checker summaries."""
     import instrument_calibration
@@ -588,6 +629,8 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         _evidence(item, missing, name)
         if name.endswith("netlist") and item.get("sha256") != identity.get(name):
             fails.append(f"{name}: recorded netlist sha256 disagrees with file")
+    if capture_point == "post_stream":
+        _check_post_stream_derivation(identity, fails, missing)
     identified_netlists = [identity.get(name) for name in
                            ("sta_netlist", "lvs_netlist", "gds_netlist")
                            if identity.get(name)]
