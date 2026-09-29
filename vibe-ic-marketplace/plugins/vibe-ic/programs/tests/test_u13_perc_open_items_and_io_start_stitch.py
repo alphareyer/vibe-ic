@@ -167,18 +167,64 @@ def _chain_netlist(n: int) -> str:
 
 
 def test_the_resolver_no_longer_truncates_a_long_path():
-    """spm's pad-rooted critical path has 20 combinational stages; the old
-    fixed max_stages=12 kept 12 and dropped the path's only logic cells."""
+    """spm's pad-rooted critical path: an input pad then 20 core stages. The
+    old fixed max_stages=12 kept 12 and dropped the path's only logic cells."""
     path = S.parse_sta_path(_chain_report(20))
     inst_map = S.parse_verilog_instances(_chain_netlist(20))
     std = {"stdlib__buf", "stdlib__dff"}
     got = S.resolve_path_stages(path, inst_map, {}, std, "")
-    assert (got["covered"], got["total_comb"]) == (20, 20)
-    assert got["dropped"] == []
+    assert got["covered"] == 20
     capped = S.resolve_path_stages(path, inst_map, {}, std, "", 12)
-    assert (capped["covered"], capped["total_comb"]) == (12, 20)
-    assert capped["dropped"][0] == "u_core/b12 (stdlib__buf)"
-    assert len(capped["dropped"]) == 8
+    assert capped["covered"] == 12
+    assert any(d.startswith("u_core/b12 (stdlib__buf)") for d in capped["dropped"])
+    assert sum("max_stages" in d for d in capped["dropped"]) == 8
+
+
+def test_the_pad_counts_as_a_stage_and_an_unmodelled_one_is_dropped():
+    """TAIL_A final F1: the input pad has no model in the std-cell SPICE set;
+    it must count (21 stages) and be named, never vanish from both counts."""
+    path = S.parse_sta_path(_chain_report(20))
+    inst_map = S.parse_verilog_instances(_chain_netlist(20))
+    got = S.resolve_path_stages(path, inst_map, {},
+                                {"stdlib__buf", "stdlib__dff"}, "")
+    assert (got["covered"], got["total_comb"]) == (20, 21)
+    assert got["dropped"] == [
+        "u_pad_rst (padlib__in): no SPICE model in the cell SPICE set"]
+    # chained through the unmodelled pad: stage 0 is driven by its Y net
+    assert got["stages"][0]["toggle_pin"] == "I"
+    # and the pad simulated too (its model loaded): 21 of 21, nothing dropped
+    full = S.resolve_path_stages(path, inst_map, {},
+                                 {"stdlib__buf", "stdlib__dff", "padlib__in"}, "")
+    assert (full["covered"], full["total_comb"], full["dropped"]) == (21, 21, [])
+
+
+def test_an_unmodelled_core_cell_is_counted_and_the_chain_continues():
+    report = _chain_report(20).replace("u_core/b7/Z (stdlib__buf)",
+                                       "u_core/b7/Z (stdlib__nor2)")
+    netlist = _chain_netlist(20).replace("stdlib__buf \\u_core/b7 ",
+                                         "stdlib__nor2 \\u_core/b7 ")
+    got = S.resolve_path_stages(S.parse_sta_path(report),
+                                S.parse_verilog_instances(netlist), {},
+                                {"stdlib__buf", "stdlib__dff", "padlib__in"}, "")
+    assert (got["covered"], got["total_comb"]) == (20, 21)
+    assert got["dropped"][0].startswith("u_core/b7 (stdlib__nor2)")
+    b8 = next(st for st in got["stages"] if st["inst"] == "u_core/b8")
+    assert b8["toggle_pin"] == "I"          # found by net through b7
+
+
+def test_the_reviewer_reproduction_pad_plus_20_does_not_pass(tmp_path):
+    """The resolver's own counts, carried into a CORRELATED record, must read
+    NOT_MEASURED (20 of 21), never 20/20 PASS."""
+    got = S.resolve_path_stages(S.parse_sta_path(_chain_report(20)),
+                                S.parse_verilog_instances(_chain_netlist(20)),
+                                {}, {"stdlib__buf", "stdlib__dff"}, "")
+    proj = _correlated_project(tmp_path, got["covered"], got["total_comb"],
+                               got["dropped"])
+    rc = S.main([str(proj), "--no-spice", "--json", str(tmp_path / "o.json")])
+    rep = json.loads((tmp_path / "o.json").read_text())
+    assert rc == 2, rep["summary"]
+    assert "20 of 21" in rep["summary"]["reason"]
+    assert "u_pad_rst (padlib__in)" in rep["summary"]["reason"]
 
 
 def _correlated_project(root: Path, k: int, n: int, dropped=None) -> Path:

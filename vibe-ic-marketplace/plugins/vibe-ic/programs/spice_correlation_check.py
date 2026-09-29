@@ -1903,20 +1903,26 @@ def resolve_path_stages(sta_path: dict, inst_map: dict, spef_caps: dict,
     Each stage: {inst, cell, toggle_pin, out_pin, out_net, wire_cap_pf}.
     The toggling pin of stage 0 is the first cell's pin on the startpoint net;
     of stage i>0 the pin on stage-(i-1)'s output net (real fanin chaining)."""
-    comb_rows = [r for r in sta_path["rows"]
-                 if r["cell"] in subckt_names
-                 and not is_sequential_cell(r["cell"])
+    # R-0929-SPICE-COVERAGE ADDENDUM: the path's combinational stages are
+    # EVERY non-sequential cell row, pads included. A cell the SPICE set does
+    # not model is not simulated, and it is NAMED in `dropped` so the coverage
+    # reads partial (NOT_MEASURED) — it never leaves both counts silently.
+    path_rows = [r for r in sta_path["rows"]
+                 if not is_sequential_cell(r["cell"])
                  and r["cell"].lower() not in ("in", "out")]
-    total_comb = len(comb_rows)
-    if total_comb == 0:
+    total_comb = len(path_rows)
+    comb_rows = [r for r in path_rows if r["cell"] in subckt_names]
+    if not comb_rows:
         return None
-    # R-0929-SPICE-COVERAGE: no fixed cap. A caller that still passes one gets
-    # the dropped stages NAMED on the result, and the gate reads that record
-    # as NOT_MEASURED coverage, never a PASS over part of the path.
-    dropped = ([f"{r['inst']} ({r['cell']})" for r in comb_rows[max_stages:]]
-               if max_stages is not None else [])
+    dropped = [f"{r['inst']} ({r['cell']}): no SPICE model in the cell SPICE set"
+               for r in path_rows if r["cell"] not in subckt_names]
+    # No fixed cap. A caller that still passes one gets the stages it left
+    # out NAMED on the result, never a PASS over part of the path.
     if max_stages is not None:
+        dropped += [f"{r['inst']} ({r['cell']}): beyond the caller's "
+                    f"max_stages={max_stages}" for r in comb_rows[max_stages:]]
         comb_rows = comb_rows[:max_stages]
+    modelled = {id(r) for r in comb_rows}
 
     # startpoint net feeding the first stage's toggling input
     sp_tok = sta_path["startpoint"]
@@ -1938,7 +1944,17 @@ def resolve_path_stages(sta_path: dict, inst_map: dict, spef_caps: dict,
                 prev_net = net
 
     stages = []
-    for r in comb_rows:
+    for r in path_rows[path_rows.index(comb_rows[0]):]:
+        if id(r) not in modelled:
+            # An unmodelled stage in mid-path: not simulated (named above),
+            # but the chain passes through its output net so the next
+            # modelled stage's toggling pin is still found by net.
+            entry = inst_map.get(r["inst"])
+            if entry and "/" in r["pin"]:
+                net = entry["conns"].get(r["pin"].rsplit("/", 1)[1])
+                if net:
+                    prev_net = net
+            continue
         inst = r["inst"]
         entry = inst_map.get(inst)
         if not entry:
