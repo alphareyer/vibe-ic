@@ -176,7 +176,12 @@ def test_the_in_chain_handoff_follows_adoption_not_the_verdict(tmp_path, monkeyp
 
     def fake_run_in_chain(project, **kw):
         _file(project, llprr.REPORT_REL, "{}")
-        return {"verdict": "FAIL", "adopted": "32-cand01", "adopted_state": cand["path"],
+        # a MEASURED residual (R-0929-STEP32-ADOPT; review wave 58: an
+        # adopted candidate that is not fully measured is refused)
+        return {"verdict": "FAIL", "code": "LL_PRR_FANOUT_VIOLATION",
+                "antenna_census": {"verdict": "PASS"},
+                "sta_digest_census": {"verdict": "PASS"},
+                "adopted": "32-cand01", "adopted_state": cand["path"],
                 "drv_signoff_verdict": "NOT_MEASURED",
                 "final": {"antenna_nets": 0, "antenna_pins": 0},
                 "candidates": [{"candidate": "32-cand01", "repair_metrics": {

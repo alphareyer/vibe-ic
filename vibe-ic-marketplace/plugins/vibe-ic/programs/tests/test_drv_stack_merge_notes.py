@@ -144,3 +144,79 @@ def test_an_io_pin_over_its_tool_limit_still_is(tmp_path):
     assert result["verdict"] == "PASS"
     assert [r["failed_tier"] for r in result["io_margin_disclosures"]] == [
         "IO_STD_CELL_MARGIN_DISCLOSURE"]
+
+
+# --- review wave 58 MINORs --------------------------------------------------------
+
+def test_the_step23_audit_clause_judges_only_the_final_capture(tmp_path):
+    """The flow's own step-23 clause, run as written against an in-flow bundle
+    left on disk (it binds no GDS / LVS): never a PASS, and named."""
+    import re
+    import shlex
+    flow = (HERE.parent.parent / "flow/phase1_phase2_phase3.yaml").read_text()
+    clause = re.search(r'program_exit_zero: "(drv_signoff_judge [^"]*)"', flow).group(1)
+    argv = shlex.split(clause)[1:]
+    project = tmp_path / "p"
+    bundle = _bundle(tmp_path)
+    bundle["identity"]["capture_point"] = "in_flow"
+    _file(project, "reports/phase3/sta/drv_signoff_bundle.json", json.dumps(bundle))
+    argv = [str(project) if a == "." else
+            str(project / a) if a.startswith("reports/") else a for a in argv]
+    assert drv.main(argv) == 1
+    doc = json.loads((project / "reports/phase3/sta/drv_signoff.json").read_text())
+    assert "gate judges the post_stream capture but the bundle is in_flow" in \
+        doc["not_measured"], doc["not_measured"]
+
+
+def test_step32_lets_an_owner_waived_row_reach_stream_out():
+    import ast
+    import phase3_one_shot_runner as R
+    assert R._step32_lets_the_chain_continue("PASS")
+    assert R._step32_lets_the_chain_continue("WAIVED")
+    for word in ("FAIL", "NOT_MEASURED", "NOT_CHECKED", "PASS_WITH_WAIVERS"):
+        assert not R._step32_lets_the_chain_continue(word), word
+    # ...and it is what main() asks of step 32's row
+    tree = ast.parse(Path(R.__file__).read_text())
+    uses = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "_chain_ok" for t in n.targets)
+            and isinstance(n.value, ast.Call)
+            and getattr(n.value.func, "id", "") == "_step32_lets_the_chain_continue"
+            and ast.unparse(n.value.args[0]) == "_prr.status"]
+    assert len(uses) == 1
+
+
+def test_build_takes_the_io_class_from_the_scenes_pad_libs(tmp_path, monkeypatch):
+    """Review wave 58 (MINOR): the PAD_LIBS wiring inside build() was tested
+    only through its helpers, so dropping it (M1: _pad_cells without the IO
+    library paths; M2: no _pad_lib_paths extend) left every test green. An IO
+    fill cell carries the IO library's default fanout 1 but no pad_cell
+    attribute: only PAD_LIBS makes it IO, and the core limit stays 4."""
+    import drv_capture_plan as plan
+    from test_drv_signoff_judge import _librelane_final_sta, _stage_receipts
+    project, adopted = _librelane_final_sta(tmp_path, monkeypatch)
+    (project / "phase3/stage3/pnr/routed.def").write_bytes(
+        Path(json.loads(adopted.read_text())["def"]).read_bytes())
+    root = tmp_path / "installed"
+    _file(root, "synthetic/libs.ref/io/lib/io_typ.lib",
+          'library (io) { time_unit : "1ns"; capacitive_load_unit (1,pf); '
+          'default_max_fanout : 1; cell (iofill) { pin (Y) { direction : output; } } }')
+    env = next((project / "phase3/librelane/32-cand01/04-openroad-stapostpnr/nom_typ")
+               .glob("_env_*.tcl"))
+    env.write_text(env.read_text() + 'set ::env(PAD_LIBS) '
+                   '"/pdk/synthetic/libs.ref/io/lib/io_typ.lib"\n')
+    _stage_receipts(project)
+    for name in ("placement_repair", "cts", "post_grt_repair"):
+        receipt = project / f"reports/phase3/drv_stages/{name}.json"
+        doc = json.loads(receipt.read_text())
+        Path(doc["fanout_limit_report"]["path"]).write_text(
+            "max fanout\n\nPin u/Y\nmax fanout 4\nfanout 1\n-----------\nSlack 3 (MET)\n\n"
+            "Pin f/Y\nmax fanout 1\nfanout 1\n-----------\nSlack 0 (MET)\n")
+        Path(doc["pin_cell_report"]["path"]).write_text(
+            "pin_cell\tu/Y\tlogic\npin_cell\tf/Y\tiofill\n")
+        for field in ("fanout_limit_report", "pin_cell_report"):
+            doc[field]["sha256"] = drv._sha(Path(doc[field]["path"]))
+        receipt.write_text(json.dumps(doc))
+    rows = {row["name"]: row for row in plan.build(project)["stages"]}
+    for name in ("placement_repair", "cts", "post_grt_repair"):
+        assert (rows[name]["fanout_check_limit"], rows[name]["io_fanout_limit"]) == \
+            (4.0, 1.0), rows[name]
