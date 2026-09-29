@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "owner_approval": {
-    "citation": "/home/reyerchu/codex_tasks/DRV_SIGNOFF_STANDARD.md section 0, owner approval 2026-09-28",
+    "citation": "~/codex_tasks/DRV_SIGNOFF_STANDARD.md (on the fleet lane hosts) section 0, owner approval 2026-09-28",
     "quote": "扇出標準那 4 個決定-> go"
   },
   "defaults": [
@@ -34,7 +34,7 @@
       "pdk": "gf180mcuD",
       "library": "gf180mcu_fd_sc_mcu7t5v0",
       "issued_at": "2026-09-28T18:00:32+00:00",
-      "owner_approval_citation": "/home/reyerchu/codex_tasks/DRV_SIGNOFF_STANDARD.md section 0 and owner approval 2026-09-28; spm input L9 section 9.1B",
+      "owner_approval_citation": "~/codex_tasks/DRV_SIGNOFF_STANDARD.md (on the fleet lane hosts) section 0 and owner approval 2026-09-28; spm input L9 section 9.1B",
       "sources": [
         {
           "l7": "465dfa3d935d577d040e42e41af3abf17d233cd813ec7b71ad5e885f244265c2",
