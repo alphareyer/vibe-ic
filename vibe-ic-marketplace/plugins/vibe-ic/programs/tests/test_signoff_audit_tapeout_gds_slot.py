@@ -81,6 +81,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import signoff_audit as sa  # noqa: E402
 import _gdsii  # noqa: E402
 import _si_signoff_fixture  # noqa: E402
+import _tapeout_timing_fixture  # noqa: E402
 
 _DECLARED = "phase3/stage4/gds/top.gds"
 
@@ -122,6 +123,8 @@ def _other_four_slots(proj: Path) -> Path:
     # SI verdict — without one every case here would collapse onto the
     # SI refusal and stop discriminating what it exists to pin.
     _si_signoff_fixture.write_proved_si_report(proj)
+    # U17: the timing slot credits Step 23/32 PASS verdicts, not a report.
+    _tapeout_timing_fixture.write_timing_signoff_pass(proj)
     return proj
 
 

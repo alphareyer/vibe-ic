@@ -66,6 +66,7 @@ import signoff_audit as sa  # noqa: E402
 import si_mcf_sta_check as sic  # noqa: E402
 import _gate_denominator as _gd  # noqa: E402
 import _gdsii  # noqa: E402
+import _tapeout_timing_fixture  # noqa: E402
 # One real-report control below reads PUBLISHED cells, which now live in
 # vibeic/benchmark-data. `_published_corpus` owns the single "is a published
 # cell readable here?" answer and the single skip reason.
@@ -120,6 +121,8 @@ def _five_pillars(proj: Path) -> Path:
            "slack (MET) 0.10\n")
     _write(proj / "drc_signoff.rpt", "Total violations: 0\n")
     _write(proj / "reports" / "phase3" / "lvs.rpt", _LVS_MATCH)
+    # U17: the timing slot credits Step 23/32 PASS verdicts, not a report.
+    _tapeout_timing_fixture.write_timing_signoff_pass(proj)
     return proj
 
 

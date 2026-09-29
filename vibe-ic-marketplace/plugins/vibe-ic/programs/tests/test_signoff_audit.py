@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import signoff_audit as sa  # noqa: E402
 import _gdsii  # noqa: E402
 import _si_signoff_fixture  # noqa: E402
+import _tapeout_timing_fixture  # noqa: E402
 
 # 2026-07-27 (review follow-up): the tape-out GDS slot is credited ONLY by the
 # flow's declared stream-out artefact (`phase3/stage4/gds/*.gds`) carrying real
@@ -50,6 +51,8 @@ def _lvs_signoff(proj):
 def _si_proved(proj):
     """Write the SI verdict a genuinely-checked run produces."""
     _si_signoff_fixture.write_proved_si_report(proj)
+    # U17: the timing slot credits Step 23/32 PASS verdicts, not a report.
+    _tapeout_timing_fixture.write_timing_signoff_pass(proj)
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +81,8 @@ def test_tapeout_3_of_4_strict_fails(tmp_path):
     _gdsii.write_declared_streamout(tmp_path, "chip.gds")
     (tmp_path / "synth_netlist.v").write_text("module top(); endmodule")
     (tmp_path / "sta_report.rpt").write_text("timing report")
+    # U17: the timing slot counts only with Step 23/32 PASS verdicts.
+    _tapeout_timing_fixture.write_timing_signoff_pass(tmp_path)
     # No DRC report, no LVS report — 3 evidence slots
 
     # Ensure strict mode (_LENIENT off) — this is the default
@@ -94,6 +99,8 @@ def test_tapeout_3_of_4_strict_fail(tmp_path):
     _gdsii.write_declared_streamout(tmp_path, "chip.gds")
     (tmp_path / "synth_netlist.v").write_text("module top(); endmodule")
     (tmp_path / "sta_report.rpt").write_text("timing report")
+    # U17: the timing slot counts only with Step 23/32 PASS verdicts.
+    _tapeout_timing_fixture.write_timing_signoff_pass(tmp_path)
 
     result = sa._check_tapeout(tmp_path)
     assert result.passed is False
@@ -107,6 +114,8 @@ def test_tapeout_4_of_5_without_lvs_fails(tmp_path):
     _gdsii.write_declared_streamout(tmp_path, "chip.gds")
     (tmp_path / "netlist_mapped.v").write_text("module top(); endmodule")
     (tmp_path / "timing_final.rpt").write_text("timing report")
+    # U17: the timing slot counts only with Step 23/32 PASS verdicts.
+    _tapeout_timing_fixture.write_timing_signoff_pass(tmp_path)
     (tmp_path / "drc_clean.rpt").write_text("Total violations: 0\n")
 
     result = sa._check_tapeout(tmp_path)
