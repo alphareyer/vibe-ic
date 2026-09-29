@@ -11,6 +11,7 @@
 """
 import json
 import sys
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -168,21 +169,57 @@ def test_the_step23_audit_clause_judges_only_the_final_capture(tmp_path):
         doc["not_measured"], doc["not_measured"]
 
 
-def test_step32_lets_an_owner_waived_row_reach_stream_out():
-    import ast
+@pytest.mark.parametrize("status", ["PASS", "WAIVED", "FAIL"])
+def test_step32_lets_an_owner_waived_row_reach_stream_out(tmp_path, monkeypatch, status):
+    """R-0930-TAIL-TEST-MIGRATION: judge usable inputs, retain upstream status.
+
+    The old AST assertion required a removed status-only chain stop. Drive
+    main() instead: waived and failed rows both permit measurement, and neither
+    can admit a release. Adjacent missing-route controls retain the stop rule.
+    """
     import phase3_one_shot_runner as R
-    assert R._step32_lets_the_chain_continue("PASS")
-    assert R._step32_lets_the_chain_continue("WAIVED")
-    for word in ("FAIL", "NOT_MEASURED", "NOT_CHECKED", "PASS_WITH_WAIVERS"):
-        assert not R._step32_lets_the_chain_continue(word), word
-    # ...and it is what main() asks of step 32's row
-    tree = ast.parse(Path(R.__file__).read_text())
-    uses = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
-            and any(isinstance(t, ast.Name) and t.id == "_chain_ok" for t in n.targets)
-            and isinstance(n.value, ast.Call)
-            and getattr(n.value.func, "id", "") == "_step32_lets_the_chain_continue"
-            and ast.unparse(n.value.args[0]) == "_prr.status"]
-    assert len(uses) == 1
+    import test_r0929_tail_continues as tail
+    project = tail._project(tmp_path, cached_die=tail.OLD_DIE, cached_util=tail.OLD_UTIL)
+    driven = tail._drive(monkeypatch, project, die=tail.NEW_DIE, util=tail.NEW_UTIL)
+    tail._stage_fill(monkeypatch, project, driven)
+    row = tail._repair_producer(monkeypatch, project, "librelane", status,
+                                "current measured Step-32 row")
+    # Current typed rows require an explicit owner record, even in a
+    # synthetic fixture. This is a control input, not a real run waiver.
+    repair_row = R.StepResult(row, status, 0.0, "current measured Step-32 row",
+                             waiver_rows=([R._V.WaiverRow(
+                                 id="synthetic-step32", owner="reyerchu",
+                                 reason="synthetic owner deviation control, approved 2026-09-30"
+                             ).to_dict()] if status == "WAIVED" else []))
+    monkeypatch.setattr(R, "step_postroute_repair_librelane",
+                        lambda *args, **kwargs: repair_row)
+    rc = R.main()
+    rows = tail._plan(project)
+    assert rows[row]["status"] == status
+    for step in ("gds", "drc", "lvs"):
+        assert step in driven.called, rows.get(step)
+        assert "sign-off skipped" not in rows[step]["detail"]
+    gds = R._pl.pnr_dir(project) / f"{tail.TOP}.gds"
+    assert gds.is_file() and rows["gds"]["status"] == "PASS"
+    # Isolate the actual aggregate consumer from unrelated synthetic fixture
+    # rows: a measured tail PASS cannot erase its Step-32 FAIL or owner waiver.
+    verdict = R._aggregate_verdict([repair_row, R.StepResult("gds", "PASS", 0.0, "measured")])
+    if status == "PASS":
+        assert R._ga.admitted_gds(project, gds)
+        assert verdict == "PASS"
+    else:
+        assert not R._ga.admitted_gds(project, gds)
+        assert R._ga.measurement_stream_current(project)
+        receipt = json.loads((project / "reports/phase3/layout_receipts.json").read_text())
+        assert receipt["release_scope"] == "MEASUREMENT_ONLY"
+        assert receipt["release_verdict"] == "NOT_ELIGIBLE_FOR_RELEASE"
+        assert f"step 32 ({row} {status})" in receipt["upstream_failed_gate"]
+        assert not list(R._pl.foundry_handoff_dir(project).glob("*.gds"))
+    if status == "FAIL":
+        assert rc != 0, "measured FAIL must keep the overall run failing"
+        assert verdict == "FAIL"
+    elif status == "WAIVED":
+        assert verdict != "PASS"
 
 
 def test_build_takes_the_io_class_from_the_scenes_pad_libs(tmp_path, monkeypatch):

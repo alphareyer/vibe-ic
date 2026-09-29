@@ -20030,6 +20030,7 @@ def _cdc_top_clock_ports(rtl_files: List[Path],
             bodies.setdefault(m.group(1), m.group(2))
 
     def _clock_inputs(body: str) -> set:
+        body = _hdl_code_text.strip_hdl_comments_and_strings(body)
         out = set()
         for pm in input_port_re.finditer(body):
             nm = pm.group(1)
@@ -23157,8 +23158,8 @@ def step_emit_phase2_manifests(project: Path,
         w("reports/phase2/cdc/crossing.json", _cdc_payload)
         w("reports/phase2/cdc/async_input.json", _cdc_payload)
         w("reports/phase2/cdc/reset_dep.json", _cdc_payload)
-    # T91 (mig-rtlver) — step-3 front end. `direct` (the default) is the
-    # regex scan above, unchanged. `librelane` / `dual` also write the Yosys
+    # T91 (mig-rtlver) — step-3 front end. Explicit `direct` selects the
+    # regex scan above. `librelane` (the default) / `dual` write the Yosys
     # JSON netlist the step-3 gates read (the passes LibreLane's
     # Yosys.JsonHeader runs), and the domain count comes from the flops' CLK
     # pins. A multi-clock design stays SKIPPED-CONDITION on the crossing
@@ -23178,6 +23179,9 @@ def step_emit_phase2_manifests(project: Path,
             _nl_path = _cdc_netlist.build(project, _cdc_src,
                                           _m_top.group(1) if _m_top else None)
             _nl = _cdc_netlist.load(_nl_path)
+            # Preserve the native producer's input/output binding in the
+            # existing manifest; domain facts alone cannot authorize reuse.
+            _nl_rec.update(_cdc_netlist.require_binding(project, _nl_path, _nl))
             _nl_domains = _cdc_netlist.clock_domains(_nl)
             _nl_rec.update({"verdict": "PASS", "top": _nl.top,
                             "flops": len(_nl.flops),

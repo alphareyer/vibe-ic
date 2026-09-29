@@ -23,10 +23,35 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 PROG = Path(__file__).resolve().parents[1]
 FIX = PROG / "tests" / "fixtures" / "cdc_netlist"
 CAL = PROG / "calibration"
+sys.path.insert(0, str(PROG))
+
+
+def _captured_tool(netlist):
+    """Only the native tool execution is substituted, with its captured JSON.
+
+    The production build still enumerates/hashes inputs, validates native
+    output and publishes the real binding. This is source-contract evidence,
+    not a claim that Yosys ran in this pytest session.
+    """
+    def run(argv, **kwargs):
+        assert argv[0] == "yosys", "only the native Yosys seam is substituted"
+        target = Path(argv[-1].rsplit("json -o ", 1)[1])
+        target.write_bytes(Path(netlist).read_bytes())
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    return run
+
+
+def _produce(project, netlist):
+    import _cdc_netlist as cn
+    from _specrtl_common import rtl_source_files
+    with patch.object(cn.shutil, "which", return_value="/captured/yosys"), \
+            patch.object(cn.subprocess, "run", side_effect=_captured_tool(netlist)):
+        return cn.build(project, rtl_source_files(project), cn.load(netlist).top)
 
 
 def _run(gate: str, *args: str) -> tuple[int, dict]:
@@ -47,9 +72,7 @@ def _project(tmp: Path, name: str, rtl: Path, mode: str | None,
         (pj / "phase3/librelane_switch.json").write_text(
             json.dumps({"steps": {"3": mode}}))
     if netlist is not None:
-        dest = pj / "reports/phase2/cdc/netlist.json"
-        dest.parent.mkdir(parents=True)
-        shutil.copy(netlist, dest)
+        _produce(pj, netlist)
     return pj
 
 
@@ -65,10 +88,11 @@ def test_the_netlist_sees_a_crossing_the_regex_arm_misses(tmp_path):
     inside); the flattened netlist can, and the capture is one flop deep.
     """
     pj = _project(tmp_path, "via_sub", FIX / "cdc_via_submodule.v", None, None)
-    rc, doc = _run("clock_domain_reg_crossing_check", str(pj))
+    rc, doc = _run("clock_domain_reg_crossing_check", str(pj),
+                   "--front-end", "regex")
     assert (rc, _rules(doc)) == (0, [])      # the regex arm's known blind spot
     rc, doc = _run("clock_domain_reg_crossing_check", str(pj),
-                   "--netlist", str(FIX / "cdc_via_submodule.json"))
+                   "--netlist", str(_produce(pj, FIX / "cdc_via_submodule.json")))
     assert (rc, _rules(doc)) == (1, ["CDC_REG_NO_SYNC"])
     assert doc["summary"]["netlist_clock_domains"] == ["clk_a", "clk_b"]
 
@@ -123,11 +147,12 @@ def test_a_real_async_port_named_raw_still_needs_a_synchroniser(tmp_path):
 
 
 def test_reset_cycle_on_the_netlist(tmp_path):
-    for js, want in (("cdc_netlist_reset_positive.json", (1, ["CIRCULAR_RESET_DEPENDENCY"])),
-                     ("cdc_netlist_reset_negative.json", (0, []))):
-        pj = tmp_path / js
-        pj.mkdir()
-        rc, doc = _run("reset_dependency_check", str(pj), "--netlist", str(CAL / js))
+    for js, src, want in (("cdc_netlist_reset_positive.json", "cdc_netlist_reset_circular.v",
+                          (1, ["CIRCULAR_RESET_DEPENDENCY"])),
+                         ("cdc_netlist_reset_negative.json", "cdc_netlist_reset_sync_ok.v", (0, []))):
+        pj = _project(tmp_path, js, CAL / src, None, CAL / js)
+        rc, doc = _run("reset_dependency_check", str(pj), "--netlist",
+                       str(pj / "reports/phase2/cdc/netlist.json"))
         assert (rc, _rules(doc)) == want
 
 
@@ -140,8 +165,20 @@ def test_a_selected_netlist_front_end_never_falls_back_to_regex(tmp_path):
         assert (rc, _rules(doc)) == (1, ["NETLIST_MISSING"]), gate
 
 
-def test_no_switch_keeps_the_regex_default(tmp_path):
+def test_no_switch_takes_the_netlist_default(tmp_path):
+    """R-0929-TOOL-DEFAULT (owner, 2026-09-29): the tool is the default. This
+    was `test_no_switch_keeps_the_regex_default` -- with no switch the regex
+    arm decided and passed the submodule crossing it cannot see (0, []). The
+    netlist front end is now the production default for step 3
+    (librelane_contract.PRODUCTION_DEFAULTS), so the same project with its
+    netlist and no switch finds the crossing; naming step 3 `direct` still
+    selects the regex arm, which is kept (HARVEST-then-delete amendment)."""
     pj = _project(tmp_path, "plain", FIX / "cdc_via_submodule.v", None,
+                  FIX / "cdc_via_submodule.json")
+    rc, doc = _run("clock_domain_reg_crossing_check", str(pj))
+    assert (rc, _rules(doc)) == (1, ["CDC_REG_NO_SYNC"])
+    assert doc["summary"]["front_end"] == "netlist"
+    pj = _project(tmp_path, "direct", FIX / "cdc_via_submodule.v", "direct",
                   FIX / "cdc_via_submodule.json")
     rc, doc = _run("clock_domain_reg_crossing_check", str(pj))
     assert (rc, _rules(doc)) == (0, [])
@@ -163,20 +200,15 @@ def test_the_front_end_runs_the_json_header_passes():
 def test_the_runner_writes_the_netlist_manifest_for_a_multi_clock_design(tmp_path, monkeypatch):
     """Step-3 call site: librelane mode reads domains from CLK pins.
 
-    Only the EDA tool's file write is faked: `build` copies the real yosys
-    JSON where yosys would have written it.
+    Only the native subprocess is substituted: it writes captured Yosys JSON
+    where Yosys would write it; the production build and binding run.
     """
     sys.path.insert(0, str(PROG))
     import design_one_shot_runner as runner
     import _cdc_netlist as cn
 
-    def fake_build(project, rtl_files, top, image=None, docker="docker"):
-        out = Path(project) / cn.NETLIST_REL
-        out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(FIX / "multi_clock_sync.json", out)
-        return out
-
-    monkeypatch.setattr(cn, "build", fake_build)
+    monkeypatch.setattr(cn.shutil, "which", lambda _tool: "/captured/yosys")
+    monkeypatch.setattr(cn.subprocess, "run", _captured_tool(FIX / "multi_clock_sync.json"))
     pj = _project(tmp_path, "mc", FIX / "multi_clock_sync.v", "librelane", None)
     runner.step_emit_phase2_manifests(pj, [], "multi_clock_sync")
     rec = json.loads((pj / "reports/phase2/cdc/netlist_front_end.json").read_text())

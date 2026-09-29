@@ -29395,77 +29395,6 @@ def _openroad_supports_postroute_spef_repair(container: str) -> bool:
     return capable
 
 
-def _est0104_recovery_tcl(spef_c: str, err_var: str, retry_cmd: str,
-                          tag: str, indent: str = "",
-                          after_spef: str = "") -> str:
-    """Emit the EST-0104 recovery for one guarded repair call.
-
-    OpenROAD refuses `repair_design` / `repair_timing` with
-    `[ERROR EST-0104] inconsistent parasitics state` whenever the estimator's
-    `parasitics_invalid_` set is non-empty when the incremental-parasitics guard
-    opens (src/est/src/EstimateParasitics.cpp, IncrementalParasiticsGuard ctor).
-    NETLIST edits fill that set (src/est/src/OdbCallBack.cpp: inDbInstCreate /
-    inDbNetCreate / inDbNetDestroy / inDbITermPostConnect /
-    inDbITermPostDisconnect / inDbInstSwapMasterAfter) and it is cleared in
-    exactly two places: `updateParasitics()` (incremental mode only) and
-    `estimateWireParasitics()` — i.e. `estimate_parasitics -placement`.
-    Measured on a real routed design with real global routes present, so every
-    flag below was a legal call:
-        no recovery                           -> EST-0104
-        estimate_parasitics -global_routing   -> EST-0104  (command SUCCEEDS)
-        estimate_parasitics -detailed_routing -> EST-0104  (command SUCCEEDS)
-        estimate_parasitics -placement        -> repair OK
-
-    `err_var` is the caller's `catch` result variable, `retry_cmd` the exact
-    command to re-attempt, `spef_c` the SPEF to re-annotate with (skipped when
-    absent, e.g. a PDK with no extraction deck), `tag` the log prefix. Sets
-    `_<tag>_est_rec` to 1 iff the retry succeeded; the caller MUST branch on it.
-
-    The re-annotation is LOAD-BEARING, not tidiness: the `-placement` reseed
-    calls `sta_->deleteParasitics()` and re-estimates every net from the tech-LEF
-    wire model, so it DESTROYS the sign-off SPEF annotation. Counting the tool's
-    own `(VIOLATED)` lines on one design at three instants gave 3 (on SPEF) -> 0
-    (after the reseed) -> 3 (after re-reading the SPEF). Retrying between those
-    two points would optimise the optimistic tech-LEF model instead of the
-    sign-off deck.
-
-    `after_spef` is an optional command run between the re-annotation and the
-    retry — for a caller whose proven recipe marks the parasitics source itself
-    (the #147 fork block's `estimate_parasitics -detailed_routing`), which the
-    `-placement` reseed necessarily overwrote. It only sets the source enum, so
-    it cannot re-dirty what the reseed just cleared.
-
-    chip/PDK-AGNOSTIC: no design, layer, cell or PDK literal.
-    """
-    v = f"_{tag.lower()}_est_rec"
-    e = f"_{tag.lower()}_est_e"
-    i = indent
-    _after = f"{retry_cmd}" if not after_spef else f"{after_spef}; {retry_cmd}"
-    return (
-        f"{i}# --- EST-0104 recovery (see _est0104_recovery_tcl) ---\n"
-        f"{i}set {v} 0\n"
-        f"{i}if {{[string first \"EST-0104\" ${err_var}] >= 0}} {{\n"
-        f"{i}  puts \"{tag}_EST0104_DETECTED\"\n"
-        # -placement is the ONLY estimate_parasitics flag that clears the
-        # estimator's parasitics-invalid set (measured; see the docstring).
-        f"{i}  if {{[catch {{estimate_parasitics -placement}} {e}]}} {{\n"
-        f"{i}    puts \"{tag}_EST0104_RESEED_NONFATAL: ${e}\"\n"
-        # The reseed wiped the sign-off annotation. Put it back BEFORE the
-        # retry or the repair optimises the optimistic tech-LEF model.
-        f"{i}  }} elseif {{![file exists {spef_c}]}} {{\n"
-        f"{i}    puts \"{tag}_EST0104_NOSPEF: {spef_c}\"\n"
-        f"{i}  }} elseif {{[catch {{read_spef {spef_c}}} {e}]}} {{\n"
-        f"{i}    puts \"{tag}_EST0104_SPEFR_NONFATAL: ${e}\"\n"
-        f"{i}  }} elseif {{[catch {{{_after}}} {e}]}} {{\n"
-        f"{i}    puts \"{tag}_EST0104_RETRY_NONFATAL: ${e}\"\n"
-        f"{i}  }} else {{\n"
-        f"{i}    set {v} 1\n"
-        f"{i}    puts \"{tag}_EST0104_RECOVERED\"\n"
-        f"{i}  }}\n"
-        f"{i}}}\n"
-    )
-
-
 def _postroute_repair_estimate_tcl(out_dir_c: str,
                                    fork_repair_capable: bool) -> str:
     """#147 — the fork real-SPEF post-detailed-route setup repair, emitted as an
@@ -38918,11 +38847,12 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # DRV standard section 1: the synth stage receipt (the script ABC ran,
     # kept by step_synth, and the post-synthesis census under this SDC).
     import drv_stage_receipts as _drv_stages
-    _drv_stages.synth_stage(
+    _drv_stages.synth_stage_supervised(
         project, netlist=_pl.synth_dir(project) / f"{top}_synth.v", top=top,
         liberties=[str(pdk.liberty)], sdc=sdc,
-        to_container=lambda p: _to_container_path(str(p), container),
-        execute=lambda cmd: _docker_exec(container, cmd, timeout=1800))
+        to_container=lambda path: _to_container_path(str(path), container),
+        execute=lambda cmd, marker, log_path: _docker_exec(
+            container, cmd, marker=marker, log_path=log_path))
     # Whichever branch ran, record what the DESIGN staged and what became of
     # it. A machine-readable sibling of the deck's own comment block, so a
     # later reader does not have to parse an SDC to learn that the design's
@@ -59688,6 +59618,10 @@ def _repair_residual_note(project: "Path", residual: bool,
         "and the worst-path slew profile before recording one.")
 
 
+#: Step 10's pre-layout corner-report directory, under the STA dir (CUT_W1A).
+STEP10_CORNER_DIR = "prelayout_per_corner"
+
+
 def _prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
                          runner_sdc: Path, design_staged: bool,
                          modes: Dict[str, str], notes: List[str]) -> Dict[str, Any]:
@@ -59987,7 +59921,13 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     # holds a routed netlist + SPEF from a prior round — else the shared
     # file-existence precedence would emit a POST_ROUTE report here and label it
     # pre-layout (the contradiction sta_report_check flags).
-    per_corner = sta_out / "per_corner"
+    # CUT_W1A: step 10's corner reports live in their OWN directory. Step 23
+    # writes post-route corner reports to `per_corner/` and
+    # `_emit_multi_corner_sta` reuses what it finds there, so one shared
+    # directory let a pre-layout report stand as post-route evidence
+    # (TOOL_DUPLICATION_AUDIT §3.14). The audit counts both directories by
+    # each report's own STA_BASIS stamp, exactly as it counted the one.
+    per_corner = sta_out / STEP10_CORNER_DIR
     pre_pnr = sta_out / "pre_pnr_timing.rpt"
     if _ll and _ll_modes["10"] == "librelane":
         # The tool timed the synthesis netlist in its own step directory; its

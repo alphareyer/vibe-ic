@@ -3900,7 +3900,11 @@ def _check_sta(project_dir: Path) -> AuditResult:
     # judged on those files alone: the per_corner/ sweep is our own deck's.
     corner_dirs = sorted({Path(p) for pat in
                           ("phase*/stage*/sta/per_corner",
-                           "reports/phase*/sta/per_corner")
+                           "reports/phase*/sta/per_corner",
+                           # step 10's own directory (CUT_W1A split); the
+                           # basis split below keeps the two apart
+                           "phase*/stage*/sta/prelayout_per_corner",
+                           "reports/phase*/sta/prelayout_per_corner")
                           for p in glob.glob(str(project_dir / pat))
                           if Path(p).is_dir()}) if _SUBJECTS is None else []
     for cd in corner_dirs:

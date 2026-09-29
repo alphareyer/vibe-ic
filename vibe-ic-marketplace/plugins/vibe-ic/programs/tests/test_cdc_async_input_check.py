@@ -7,6 +7,13 @@ empty directories.
 import sys
 from pathlib import Path
 
+# R-0929-TOOL-DEFAULT (owner, 2026-09-29): the step-3 default front end is the
+# Yosys JSON netlist. These tests pin the REGEX front end's behaviour, which is
+# kept and selectable (HARVEST-then-delete amendment), so each call names it
+# (`front_end="regex"`); the assertions are unchanged. The netlist-arm lessons
+# are pinned in test_t91_step3_cdc_netlist_front_end.py.
+
+
 import pytest
 
 SCRIPT = Path(__file__).parent.parent / 'cdc_async_input_check.py'
@@ -45,7 +52,7 @@ endmodule
 """
     (tmp_path / "synced.v").write_text(verilog)
 
-    result = cdc.audit(str(tmp_path))
+    result = cdc.audit(str(tmp_path), front_end="regex")
     assert result.passed is True
     assert result.summary["violations"] == 0
 
@@ -71,7 +78,7 @@ endmodule
 """
     (tmp_path / "bad.v").write_text(verilog)
 
-    result = cdc.audit(str(tmp_path))
+    result = cdc.audit(str(tmp_path), front_end="regex")
     assert result.passed is False
     errors = [f for f in result.findings if f.rule == "ASYNC_INPUT_NO_SYNC"]
     assert any("bus_pad" in f.message for f in errors)
@@ -97,7 +104,7 @@ endmodule
 """
     (tmp_path / "clk_rst_only.v").write_text(verilog)
 
-    result = cdc.audit(str(tmp_path))
+    result = cdc.audit(str(tmp_path), front_end="regex")
     assert result.passed is True
     # No findings should mention clk/rst/rstn
     for f in result.findings:
@@ -126,7 +133,7 @@ endmodule
 """
     (tmp_path / "pad_user.v").write_text(verilog)
 
-    result = cdc.audit(str(tmp_path))
+    result = cdc.audit(str(tmp_path), front_end="regex")
     assert result.passed is False
     errors = [f for f in result.findings if f.rule == "ASYNC_INPUT_NO_SYNC"]
     assert any("foo_pad" in f.message for f in errors)
@@ -136,7 +143,7 @@ endmodule
 # Test 5: Empty directory → PASS (no violations)
 # ---------------------------------------------------------------------------
 def test_empty_dir_passes(tmp_path):
-    result = cdc.audit(str(tmp_path))
+    result = cdc.audit(str(tmp_path), front_end="regex")
     assert result.passed is True
     assert result.summary["files_scanned"] == 0
     assert result.summary["violations"] == 0

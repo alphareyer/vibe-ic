@@ -970,9 +970,9 @@ def test_capture_replaces_plan_pin_classes_with_opensta_and_liberty(tmp_path, mo
                 "u2/Y\tpin\toutput\t1\tu2\tlogic\tY\tn2\tinput\t0.03\t0.04\t0\t1\t0\n")
             (folder / "net_census.rpt").write_text(
                 "Net n\n Total capacitance: 0.1\n Number of drivers: 1\n"
-                " Number of loads: 0\n Number of pins: 1\n\n"
+                " Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u/Y output (logic)\n\n"
                 "Net n2\n Total capacitance: 0.05\n Number of drivers: 1\n"
-                " Number of loads: 0\n Number of pins: 1\n")
+                " Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u2/Y output (logic)\n\n")
             (folder / "disabled_edges.rpt").write_text("")
             (folder / "annotation.rpt").write_text("Found 0 unannotated drivers.\n")
             (folder / "clocks.rpt").write_text("propagated\n")
@@ -1020,6 +1020,20 @@ def test_net_census_rejects_negated_count(tmp_path):
     report.write_text("Net n\n Total capacitance: 0.1\n"
                       " Number of loads: NOT 0\n")
     with pytest.raises(ValueError, match="malformed"):
+        _nets(report)
+
+
+def test_net_census_accepts_identical_native_alias_reports(tmp_path):
+    """get_nets may enumerate aliases whose report_net uses one canonical name."""
+    from drv_signoff_census import _nets
+    block = ("Net a\n Total capacitance: 2.91\n Number of drivers: 1\n"
+             " Number of loads: 2\n Number of pins: 3\n\nDriver pins\n a input port\n\n"
+             "Load pins\n u/A input (core) 0.01\n pad/PAD input (io) 2.9\n\n")
+    report = tmp_path / "net.rpt"
+    report.write_text(block + block)
+    assert _nets(report)["a"]["loads"] == ["u/A", "pad/PAD"]
+    report.write_text(block + block.replace("2.91", "2.92"))
+    with pytest.raises(ValueError, match="duplicated|malformed"):
         _nets(report)
 
 
@@ -1094,7 +1108,7 @@ def test_project_clean_opensta_census_can_reach_pass(tmp_path, monkeypatch):
           "u/Y\tpin\toutput\t1\tu\tlogic\tY\tn\tinput\t0.1\t0.1\t0\tX\t0\n")
     _file(folder, "net_census.rpt",
           "Net n\n Total capacitance: 0.1\n Number of drivers: 1\n"
-          " Number of loads: 0\n Number of pins: 1\n")
+          " Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u/Y output (logic)\n\n")
     _file(folder, "disabled_edges.rpt", "")
     rows = drv.parse_check_types(Path(scene["all_limits_report"]["path"]).read_text(),
                                  scene=scene["name"], mode=scene["mode"],
@@ -1126,7 +1140,7 @@ def test_opensta_census_io_label_comes_from_linked_pad_cell(tmp_path):
           "u/Y\tpin\toutput\t1\tu\tpad\tY\tn\tinput\t0.1\t0.1\t0\tX\t0\n")
     _file(folder, "net_census.rpt",
           "Net n\n Total capacitance: 0.1\n Number of drivers: 1\n"
-          " Number of loads: 0\n Number of pins: 1\n")
+          " Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u/Y output (pad)\n\n")
     _file(folder, "disabled_edges.rpt", "")
     rows = drv.parse_check_types(_report(fanout=2), scene="typ_nom",
                                  mode="functional", violators_only=False)
@@ -1148,9 +1162,9 @@ def test_unreported_unexcluded_driver_blocks_census(tmp_path):
           "u2/Y\tpin\toutput\t1\tu2\tlogic\tY\tn2\tinput\t0.1\t0.1\t0\tX\t0\n")
     _file(folder, "net_census.rpt",
           "Net n\n Total capacitance: 0.1\n Number of drivers: 1\n"
-          " Number of loads: 0\n Number of pins: 1\n\n"
+          " Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u/Y output (logic)\n\n"
           "Net n2\n Total capacitance: 0.1\n Number of drivers: 1\n"
-          " Number of loads: 0\n Number of pins: 1\n")
+          " Number of loads: 0\n Number of pins: 1\n\nDriver pins\n u2/Y output (logic)\n\n")
     _file(folder, "disabled_edges.rpt", "")
     lib = _file(tmp_path, "logic.lib", '''library (lib) {
  time_unit : "1ns"; capacitive_load_unit (1, pf);
@@ -1953,3 +1967,84 @@ def test_step32_captures_adopted_candidate_before_handoff(tmp_path, monkeypatch)
     assert after["identity"]["artifacts"]["def"]["path"] == str(
         (project / "phase3/stage3/pnr/routed.def").resolve())
     assert after["identity"]["artifacts"]["def"]["sha256"] == layout["sha256"]
+
+
+# ── R-0928-DRV-IC / root audit U1: the port-to-PAD net is off-chip ──────────
+# MEASURED on the routed spm DIE (lane drvrcpt, 9 scenes): 35 bond-pad input
+# ports read 2.9-3.1 pF (the pad's own PAD-pin capacitance) against the
+# std-cell 0.2 pF margin, and the judge booked 315 T3_MARGIN cap rows plus
+# 306 T3 / 9 T2 port slew rows. The pad pin's own row (IO Liberty T1) carries
+# the same slew and stays a finding.
+
+def _port_row(bundle, *, port_to_pad):
+    bundle["pins"]["u/Y"] = {"net_class": "IO", "cell_class": "port",
+                             "cell": None, "cell_pin": None, "liberty": None,
+                             "driver_pin": "u/Y", "driver_cell": None,
+                             "port_to_pad": port_to_pad,
+                             "loads": {"logical": 1, "antenna_diode": 0,
+                                       "cts_buffer": 0}}
+
+
+@pytest.mark.parametrize("kind,value,limit", [
+    ("max_capacitance", 2.989206, .2), ("max_slew", 49.2, 3)])
+def test_a_proven_port_to_pad_row_is_listed_never_a_margin_finding(tmp_path, kind,
+                                                                    value, limit):
+    bundle = _bundle(tmp_path)
+    _violate(bundle, tmp_path, kind, value=value, limit=limit,
+             net_class="IO", cell_class="port")
+    _port_row(bundle, port_to_pad=True)
+    result = drv.judge(bundle)
+    assert result["findings"] == [], result["findings"]
+    assert [r["failed_tier"] for r in result["offchip_port_rows"]] == [
+        "OFFCHIP_PORT_TO_PAD_NET"], result
+    assert result["verdict"] == "PASS", result["failures"]
+
+
+def test_a_port_without_the_pad_proof_keeps_the_margin_finding(tmp_path):
+    """Control: a port whose net reaches a std cell is std-cell driven."""
+    bundle = _bundle(tmp_path)
+    _violate(bundle, tmp_path, "max_capacitance", value=2.989206, limit=.2,
+             net_class="IO", cell_class="port")
+    _port_row(bundle, port_to_pad=False)
+    result = drv.judge(bundle)
+    assert result["verdict"] == "FAIL"
+    assert [r["failed_tier"] for r in result["findings"]] == ["T3_MARGIN"]
+
+
+def _census_rows(text):
+    return drv.parse_check_types(text, scene="typ_nom", mode="functional",
+                                 violators_only=False)
+
+
+def test_opensta_census_proves_the_port_to_pad_net(tmp_path):
+    from drv_signoff_census import derive
+    folder = tmp_path / "tool"
+    _file(folder, "pin_census.tsv", "".join((
+        "a\tport\tinput\t1\t\t\t\ta\tinput\t0.1\t0.1\t0\tX\t0\n",
+        "b\tport\tinput\t1\t\t\t\tb\tinput\t0.1\t0.1\t0\tX\t0\n",
+        "u/PAD\tpin\tinput\t0\tu\tpad\tPAD\ta\tinput\t0.1\t0.1\t0\tX\t0\n",
+        "v/A\tpin\tinput\t0\tv\tlogic\tA\tb\tinput\t0.1\t0.1\t0\tX\t0\n")))
+    _file(folder, "net_census.rpt",
+          "Net a\n Total capacitance: 2.9\n Number of drivers: 1\n"
+          " Number of loads: 1\n Number of pins: 2\n\nDriver pins\n a input port\n\n"
+          "Load pins\n u/PAD input (pad) 2.9\n\n"
+          "Net b\n Total capacitance: 0.1\n Number of drivers: 1\n"
+          " Number of loads: 1\n Number of pins: 2\n\nDriver pins\n b input port\n\n"
+          "Load pins\n v/A input (logic) 0.1\n\n")
+    _file(folder, "disabled_edges.rpt", "")
+    report = "".join(
+        f"{title}\n" + "".join(
+            f"Pin {pin} {mark}\n{title} 9.000000\n{meas} 0.100000\nSlack 8.9 (MET)\n"
+            for pin in pins) + "\n"
+        for title, meas, mark, pins in (
+            ("max slew", "slew", "^", ("a", "b", "u/PAD", "v/A")),
+            ("max fanout", "fanout", "", ("a", "b")),
+            ("max capacitance", "capacitance", "^", ("a", "b"))))
+    lib = _file(tmp_path, "pad.lib", '''library (lib) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ cell (pad) { pad_cell : true; pin (PAD) { direction : input; } }
+ cell (logic) { pin (A) { direction : input; } }
+}''')
+    pins = derive(folder, [{"name": "io", **lib}], _census_rows(report))["pins"]
+    assert pins["a"]["port_to_pad"] is True
+    assert pins["b"]["port_to_pad"] is False

@@ -79,6 +79,7 @@ import ast
 import json
 import re
 import sys
+import symtable
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -177,15 +178,72 @@ _NOT_HDL_DECLARATION: Dict[str, str] = {
 }
 
 
-def compiled_patterns(tree: ast.Module) -> Dict[str, str]:
-    """`NAME -> pattern source` for EVERY module-level `re.compile(...)`.
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_SCOPES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+           ast.Lambda) + _COMPREHENSIONS
+
+
+def _definition_expressions(node: ast.AST, eager_annotations: bool):
+    """Expressions evaluated before entering a function or class body."""
+    yield from getattr(node, "decorator_list", ())
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        yield from node.args.defaults
+        yield from (value for value in node.args.kw_defaults if value is not None)
+        if eager_annotations:
+            args = (node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+                    + [arg for arg in (node.args.vararg, node.args.kwarg) if arg])
+            yield from (arg.annotation for arg in args if arg.annotation is not None)
+            if getattr(node, "returns", None) is not None:
+                yield node.returns
+    elif isinstance(node, ast.ClassDef):
+        yield from node.bases
+        yield from (keyword.value for keyword in node.keywords)
+
+
+def _scope_nodes(scope: ast.AST, eager_annotations: bool = True):
+    """Walk this scope, leaving nested scopes to their own binding context."""
+    yield scope
+    if isinstance(scope, _COMPREHENSIONS):
+        # Python evaluates the first iterable in the enclosing scope. Targets,
+        # filters, later iterables and the result live inside the comprehension.
+        for field in ("elt", "key", "value"):
+            if hasattr(scope, field):
+                yield from _scope_nodes(getattr(scope, field), eager_annotations)
+        for i, generator in enumerate(scope.generators):
+            yield generator
+            yield from _scope_nodes(generator.target, eager_annotations)
+            if i:
+                yield from _scope_nodes(generator.iter, eager_annotations)
+            for condition in generator.ifs:
+                yield from _scope_nodes(condition, eager_annotations)
+        return
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        children = scope.body
+    elif isinstance(scope, ast.Lambda):
+        children = [scope.body]
+    else:
+        children = ast.iter_child_nodes(scope)
+    for child in children:
+        if isinstance(child, _SCOPES):
+            yield child
+            if isinstance(child, _COMPREHENSIONS):
+                yield from _scope_nodes(child.generators[0].iter, eager_annotations)
+            else:
+                for expression in _definition_expressions(child, eager_annotations):
+                    yield from _scope_nodes(expression, eager_annotations)
+        else:
+            yield from _scope_nodes(child, eager_annotations)
+
+
+def compiled_patterns(tree: ast.AST, eager_annotations: bool = True) -> Dict[str, str]:
+    """`NAME -> pattern source` for `re.compile(...)` in ONE lexical scope.
 
     Wider than `declaration_regexes`, and deliberately: a stripper's pattern is
     a COMMENT pattern, never a declaration one, so the map that recognises a
     strip cannot be the map that recognises a scan.
     """
     out: Dict[str, str] = {}
-    for n in ast.walk(tree):
+    for n in _scope_nodes(tree, eager_annotations):
         if isinstance(n, ast.Assign) and len(n.targets) == 1 \
                 and isinstance(n.targets[0], ast.Name):
             p = _pattern_of(n.value)
@@ -252,19 +310,214 @@ def _pattern_of(node: ast.AST) -> Optional[str]:
     return "".join(parts) if parts else None
 
 
-def declaration_regexes(tree: ast.Module) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for n in ast.walk(tree):
-        if isinstance(n, ast.Assign) and len(n.targets) == 1 \
-                and isinstance(n.targets[0], ast.Name):
-            p = _pattern_of(n.value)
-            if p and declares_hdl(p):
-                out[n.targets[0].id] = p
-    return out
+def declaration_regexes(tree: ast.AST) -> Dict[str, str]:
+    return {name: pattern for name, pattern in compiled_patterns(tree).items()
+            if declares_hdl(pattern)}
+
+
+class _LexicalBindings:
+    """Use Python's symbol table to resolve locals, globals and free names.
+
+    Pattern extraction and the existing stripper rule remain shallow. This
+    supplies lexical ownership and compiled-pattern arguments at source-bound
+    named calls, not execution-order or arbitrary interprocedural analysis.
+    """
+
+    def __init__(self, tree: ast.Module, src: str):
+        self.module = symtable.symtable(src, "<declaration-scan>", "exec")
+        self.eager_annotations = not any(
+            isinstance(node, ast.ImportFrom) and node.module == "__future__"
+            and any(alias.name == "annotations" for alias in node.names)
+            for node in tree.body)
+        self.parents = {self.module: None}
+        index = {}
+
+        def collect(table):
+            for child in table.get_children():
+                key = (child.get_type(), child.get_name(), child.get_lineno())
+                index.setdefault(key, []).append(child)
+                self.parents[child] = table
+                collect(child)
+
+        collect(self.module)
+        self.nodes = {self.module: tree}
+        self.owners = {self.module: None}
+        anonymous = {ast.Lambda: "lambda", ast.ListComp: "listcomp",
+                     ast.SetComp: "setcomp", ast.DictComp: "dictcomp",
+                     ast.GeneratorExp: "genexpr"}
+
+        def attach(node, owner=None):
+            definitions = isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda))
+            if definitions:
+                for expression in _definition_expressions(node, self.eager_annotations):
+                    attach(expression, owner)
+            elif isinstance(node, _COMPREHENSIONS):
+                attach(node.generators[0].iter, owner)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                owner = node.name
+            if isinstance(node, _SCOPES) and node is not tree:
+                kind = "class" if isinstance(node, ast.ClassDef) else "function"
+                name = getattr(node, "name", anonymous.get(type(node)))
+                table = index[(kind, name, node.lineno)].pop(0)
+                self.nodes[table] = node
+                self.owners[table] = owner
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                children = node.body
+            elif isinstance(node, ast.Lambda):
+                children = [node.body]
+            elif isinstance(node, _COMPREHENSIONS):
+                children = list(ast.iter_child_nodes(node))
+                for child in children:
+                    if isinstance(child, ast.comprehension) and child is node.generators[0]:
+                        for sub in [child.target] + child.ifs:
+                            attach(sub, owner)
+                    else:
+                        attach(child, owner)
+                return
+            else:
+                children = ast.iter_child_nodes(node)
+            for child in children:
+                attach(child, owner)
+
+        attach(tree)
+        self.patterns = {table: compiled_patterns(node, self.eager_annotations)
+                         for table, node in self.nodes.items()}
+        self.supplied_patterns = {}
+        self._resolve_supplied_patterns()
+        self.safe = {}
+
+    def binding(self, table, name):
+        """The defining scope; an unknown local still shadows outer regexes."""
+        if table is self.module:
+            return table
+        try:
+            symbol = table.lookup(name)
+        except KeyError:
+            symbol = None
+        if symbol is not None:
+            if symbol.is_global():
+                return self.module
+            if symbol.is_local() or symbol.is_parameter():
+                return table
+        parent = self.parents[table]
+        # Class attributes are not lexical bindings available to a method.
+        while parent is not self.module and parent.get_type() == "class":
+            parent = self.parents[parent]
+        return self.binding(parent, name)
+
+    def pattern_candidates(self, table, name):
+        owner = self.binding(table, name)
+        pattern = self.patterns[table].get(name, self.patterns[owner].get(name))
+        if pattern is not None:
+            return {pattern}
+        return self.supplied_patterns.get((owner, name), set())
+
+    def _resolve_supplied_patterns(self):
+        """Follow only compiled actuals to parameters of resolved named functions."""
+        functions = {}
+        for table, node in self.nodes.items():
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                owner = self.binding(self.parents[table], node.name)
+                functions[(owner, node.name)] = table
+        names = {name for _owner, name in functions}
+        calls = []
+        for caller, node in self.nodes.items():
+            for call in _scope_nodes(node, self.eager_annotations):
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                        and call.func.id in names):
+                    continue
+                target = functions.get((self.binding(caller, call.func.id), call.func.id))
+                if target is None:
+                    continue
+                args = self.nodes[target].args
+                pairs = []
+                if not any(isinstance(arg, ast.Starred) for arg in call.args):
+                    pairs += list(zip(args.posonlyargs + args.args, call.args))
+                keyword_params = {arg.arg: arg for arg in args.args + args.kwonlyargs}
+                pairs += [(keyword_params[keyword.arg], keyword.value)
+                          for keyword in call.keywords if keyword.arg in keyword_params]
+                calls += [(caller, target, formal.arg, actual) for formal, actual in pairs]
+        grew = True
+        while grew:
+            grew = False
+            for caller, target, name, actual in calls:
+                pattern = _pattern_of(actual)
+                patterns = ({pattern} if pattern is not None else
+                            self.pattern_candidates(caller, actual.id)
+                            if isinstance(actual, ast.Name) else set())
+                slot = self.supplied_patterns.setdefault((target, name), set())
+                added = patterns - slot
+                if added:
+                    slot.update(added)
+                    grew = True
+
+    def visible_patterns(self, table):
+        out = {}
+        for symbol in table.get_symbols():
+            name = symbol.get_name()
+            patterns = self.pattern_candidates(table, name)
+            # A mixed set of actuals cannot establish that a sub strips comments.
+            if len(patterns) == 1 or (patterns and all(
+                    _COMMENT_PAT.search(pattern.replace("\\", "")) for pattern in patterns)):
+                out[name] = "\n".join(sorted(patterns))
+        return out
+
+    def declaration_names(self, table):
+        return {symbol.get_name() for symbol in table.get_symbols()
+                if any(declares_hdl(pattern) for pattern in
+                       self.pattern_candidates(table, symbol.get_name()))}
+
+    def stripped(self, table):
+        if table not in self.safe:
+            inherited = set()
+            for symbol in table.get_symbols():
+                name = symbol.get_name()
+                owner = self.binding(table, name)
+                if owner is not table and name in self.stripped(owner):
+                    inherited.add(name)
+            node = self.nodes[table]
+            if isinstance(node, _COMPREHENSIONS):
+                first = node.generators[0]
+                parent = self.parents[table]
+                if _from_stripper(first.iter, self.visible_patterns(parent),
+                                  self.stripped(parent), self.eager_annotations):
+                    inherited.update(n.id for n in ast.walk(first.target)
+                                     if isinstance(n, ast.Name))
+            self.safe[table] = stripped_locals(
+                node, self.visible_patterns(table), inherited, self.eager_annotations)
+        return self.safe[table]
+
+
+def _from_stripper(value: ast.AST, compiled: Optional[Dict[str, str]],
+                   safe: Set[str], eager_annotations: bool = True) -> bool:
+    """The existing value-flow rule, evaluated in the value's lexical scope."""
+    if isinstance(value, _COMPREHENSIONS):
+        if _from_stripper(value.generators[0].iter, compiled, safe, eager_annotations):
+            return True
+        bound = {n.id for generator in value.generators
+                 for n in ast.walk(generator.target) if isinstance(n, ast.Name)}
+        safe = safe - bound
+        compiled = {name: pattern for name, pattern in (compiled or {}).items()
+                    if name not in bound}
+    for sub in _scope_nodes(value, eager_annotations):
+        if isinstance(sub, ast.Call):
+            try:
+                fname = ast.unparse(sub.func)
+            except Exception:
+                fname = ""
+            if (_STRIPPER.search(fname)
+                    or _strips_comments_inline(sub, compiled)):
+                return True
+        if isinstance(sub, ast.Name) and sub.id in safe:
+            return True
+    return False
 
 
 def stripped_locals(fn: ast.AST,
-                    compiled: Optional[Dict[str, str]] = None) -> Set[str]:
+                    compiled: Optional[Dict[str, str]] = None,
+                    inherited: Optional[Set[str]] = None,
+                    eager_annotations: bool = True) -> Set[str]:
     """Locals whose value passed through a stripper, transitively.
 
     Per-NAME, which is the point: a sibling variable being stripped does not
@@ -276,22 +529,7 @@ def stripped_locals(fn: ast.AST,
     because the loop variable never inherited the iterable's status -- a false
     positive on correct code, and the common shape for a line-by-line scan.
     """
-    ok: Set[str] = set()
-
-    def _from_stripper(value: ast.AST) -> bool:
-        """Does this expression derive from a stripper, or from a safe name?"""
-        for sub in ast.walk(value):
-            if isinstance(sub, ast.Call):
-                try:
-                    fname = ast.unparse(sub.func)
-                except Exception:
-                    fname = ""
-                if (_STRIPPER.search(fname)
-                        or _strips_comments_inline(sub, compiled)):
-                    return True
-            if isinstance(sub, ast.Name) and sub.id in ok:
-                return True
-        return False
+    ok: Set[str] = set(inherited or ())
 
     def _bindings(n: ast.AST):
         """(names bound, expression bound from) for every binding form."""
@@ -309,13 +547,13 @@ def stripped_locals(fn: ast.AST,
     grew = True
     while grew:
         grew = False
-        for n in ast.walk(fn):
+        for n in _scope_nodes(fn, eager_annotations):
             names, value = _bindings(n)
             if not names or value is None:
                 continue
             if all(t in ok for t in names):
                 continue
-            if _from_stripper(value):
+            if _from_stripper(value, compiled, ok, eager_annotations):
                 ok.update(names)
                 grew = True
     return ok
@@ -325,17 +563,19 @@ def scan_source(src: str, label: str) -> List[str]:
     """`label::function::REGEX(arg)` for every unstripped declaration scan."""
     try:
         tree = ast.parse(src)
+        bindings = _LexicalBindings(tree, src)
     except SyntaxError:
         return []
-    regs = declaration_regexes(tree)
-    if not regs:
-        return []
-    compiled = compiled_patterns(tree)
     out: List[str] = []
-    for fn in [x for x in ast.walk(tree)
-               if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-        safe = stripped_locals(fn, compiled)
-        for n in ast.walk(fn):
+    for table, scope in bindings.nodes.items():
+        owner = bindings.owners[table]
+        if owner is None or isinstance(scope, ast.ClassDef):
+            continue
+        regs = bindings.declaration_names(table)
+        if not regs:
+            continue
+        safe = bindings.stripped(table)
+        for n in _scope_nodes(scope, bindings.eager_annotations):
             if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                     and n.func.attr in _SCAN
                     and isinstance(n.func.value, ast.Name)):
@@ -344,7 +584,7 @@ def scan_source(src: str, label: str) -> List[str]:
                 continue
             arg = n.args[-1] if n.func.attr in ("sub", "split") else n.args[0]
             if isinstance(arg, ast.Name) and arg.id not in safe:
-                out.append(f"{label}::{fn.name}::{n.func.value.id}({arg.id})")
+                out.append(f"{label}::{owner}::{n.func.value.id}({arg.id})")
     return sorted(set(out))
 
 
