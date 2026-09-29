@@ -97,7 +97,12 @@ def claim(project: Path) -> str:
     root = project / RECEIPT_DIR
     if root.exists():
         shutil.rmtree(root)
-    run_id = uuid.uuid4().hex
+    # One run, one id: reuse the id `drv_run_identity.record` took at run
+    # start (R-0929-DRV-IDENTITY), which the capture plan also binds.
+    import drv_run_identity
+    run_id = drv_run_identity.load(project).get("run_id")
+    if not (isinstance(run_id, str) and re.fullmatch(r"[0-9a-f]{32}", run_id)):
+        run_id = uuid.uuid4().hex
     write_text(root / CLAIM, json.dumps({
         "run_id": run_id,
         "claimed_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),

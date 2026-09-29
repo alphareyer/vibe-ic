@@ -216,13 +216,18 @@ def _stages(project: Path, postroute_repair_ran: bool) -> tuple[list[dict], dict
         if doc is None:
             continue
         entry["sha256"] = _sha(path)
-        row: dict = {"name": name, "ran": doc.get("ran") is True}
+        row: dict = {"name": name}
         for field in ("behavior_report", "abc_script", "sdc_snapshot",
                       "command_args", "clock_fanout_report"):
             ref = _recorded_ref(project, doc.get(field))
             if ref is not None:
                 row[field] = ref
         behavior = _recorded_text(row.get("behavior_report"))
+        # "Ran" is what the tool's own hashed files show, never the receipt's
+        # word: the stage command's census (and, for synthesis, the script
+        # ABC executed) must be there, unchanged since the stage wrote it.
+        row["ran"] = bool(behavior) and (
+            name != "synth" or bool(_recorded_text(row.get("abc_script"))))
         if name == "synth":
             script = _recorded_text(row.get("abc_script"))
             buffers = [float(v) for v in re.findall(
