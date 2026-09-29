@@ -1720,7 +1720,12 @@ CLASS_PRODUCTION_DEFAULTS: dict[str, dict[str, str]] = {
                                  # T99 + T102 r4 (owner ruling, CUT-OVER rule):
                                  # routing and the post-route repair, as one
                                  # chain (LL21 -> Vibeic.PostRouteRepair -> tail)
-                                 '21': 'librelane', '32': 'librelane'},
+                                 '21': 'librelane', '32': 'librelane',
+                                 # R-0929-TOOL-DEFAULT (owner), audit 3.11 /
+                                 # wave 3 item 2: metal fill by the tool --
+                                 # OpenROAD.FillInsertion on the ODB,
+                                 # KLayout.Filler + KLayout.Density on the GDS.
+                                 '34': 'librelane'},
 }
 
 #: A class default runs only inside the chain it continues. The producers are

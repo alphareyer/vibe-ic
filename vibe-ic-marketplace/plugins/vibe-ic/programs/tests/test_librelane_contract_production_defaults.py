@@ -58,6 +58,8 @@ _CHAIN_R4 = _CHAIN + ("21", "32")
 #: route (21, T99) and the post-route repair (32) as one chain.
 _T96_MEMBERS = {"15", "15.5ic", "17", "18", "19", "20"}
 _T102_MEMBERS = {"21", "32"}
+#: R-0929-TOOL-DEFAULT (owner), wave 3 item 2: step 34 metal fill by the tool.
+_CUT34_MEMBERS = {"34"}
 
 
 def _chip(tmp_path, deliverable="DIE", *, marker="SELF_TAPEOUT.txt"):
@@ -81,7 +83,7 @@ def test_the_chip_path_runs_15_to_21_and_32_on_librelane_with_no_switch(tmp_path
     project = _chip(tmp_path)
     assert LC.design_class(project) == LC.DESIGN_CLASS_CHIP_PAD_RING
     assert set(LC.CLASS_PRODUCTION_DEFAULTS[LC.DESIGN_CLASS_CHIP_PAD_RING]) \
-        == _T96_MEMBERS | _T102_MEMBERS
+        == _T96_MEMBERS | _T102_MEMBERS | _CUT34_MEMBERS
     assert {s: LC.selected_mode(project, s) for s in _CHAIN_R4} == dict.fromkeys(_CHAIN_R4, "librelane")
     # outside the cut-over, nothing moves
     for step in ("9", "16", "22", "23", "26", "37"):
@@ -171,8 +173,20 @@ def test_the_class_default_is_part_of_the_admission_identity(tmp_path):
     assert R._librelane_admission_facts(tmp_path) == {}
     project = _chip(tmp_path / "chip")
     facts = R._librelane_admission_facts(project)
-    assert facts["librelane_class_defaults"] == dict.fromkeys(_CHAIN_R4, "librelane")
+    assert facts["librelane_class_defaults"] == dict.fromkeys(
+        _CHAIN_R4 + tuple(sorted(_CUT34_MEMBERS)), "librelane")
     assert facts["librelane_contract_sha256"] == LC.digest(Path(LC.__file__))
     _switch(project, dict.fromkeys(_CHAIN_R4, "direct"))
     facts = R._librelane_admission_facts(project)
+    # step 34 (metal fill by the tool) continues no chain: it stays the class
+    # default until the project names it too
+    assert facts["librelane_class_defaults"] == {"34": "librelane"}
+    _switch(project, dict.fromkeys(_CHAIN_R4 + ("34",), "direct"))
+    facts = R._librelane_admission_facts(project)
     assert "librelane_class_defaults" not in facts and "librelane_switch" in facts
+
+
+def test_the_chip_path_defaults_step_34_to_the_tool(tmp_path):
+    """R-0929-TOOL-DEFAULT, wave 3 item 2 (audit 3.11): metal fill on the chip
+    path is OpenROAD.FillInsertion + KLayout.Filler/Density by default."""
+    assert LC.selected_mode(_chip(tmp_path), "34") == "librelane"
