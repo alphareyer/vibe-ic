@@ -62578,23 +62578,15 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     ir_rpt = rpt_phase3 / "ir_drop.rpt"
     em_rpt = rpt_phase3 / "em.rpt"
     from librelane_contract import Refusal as _LLRefusal, selected_mode as _ll_selected_mode
-    _em_dual_due = False
     _em_switch_mode = _ll_selected_mode(project, "25")
     if _em_switch_mode == "librelane":
         raise _LLRefusal("LL_EM_STEP_UNAVAILABLE",
                          "LibreLane has no EM step; use dual for the OpenROAD audit")
-    if primary_def.is_file() and _em_switch_mode == "dual":
-        try:
-            _em_tool_doc = json.loads((rpt_phase3 / "em_openroad_density.json").read_text())
-            _em_dual_due = (_em_tool_doc.get("mode") != "dual" or
-                            _em_tool_doc.get("schema") != "openroad_em/2" or
-                            _em_tool_doc.get("def_sha256") !=
-                            hashlib.sha256(primary_def.read_bytes()).hexdigest())
-        except (OSError, ValueError):
-            _em_dual_due = True
+    from _em_tool_report import native_report_due as _em_native_report_due
+    _em_native_due = _em_native_report_due(project, primary_def)
     if primary_def.is_file() and (_signoff_regen(ir_rpt, primary_def)
                                   or _signoff_regen(em_rpt, primary_def)
-                                  or _em_dual_due):
+                                  or _em_native_due):
         ir_ok, em_ok = _emit_ir_em_reports(
             project, top, pdk, container, ir_rpt, em_rpt, notes)
         if ir_ok:
@@ -70724,7 +70716,8 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     if _em_mode == "librelane":
         raise _LLRefusal("LL_EM_STEP_UNAVAILABLE",
                          "LibreLane has no EM step; use dual for the OpenROAD audit")
-    _audit_tool = _em_mode == "dual"
+    import _em_tool_report as _em_tool
+    _audit_tool = _em_tool.requires_native_authority(project)
     # The OpenROAD fork's check_current_density consumes areal A/um^2 limits.
     # LEF routing DCCURRENTDENSITY is mA/um: divide by declared THICKNESS.
     # Apply the same margin as the retained vibe-ic gate for a meaningful A/B.
@@ -70732,7 +70725,6 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     _tlef = _read_pdk_text(str(pdk.tech_lef), container) or ""
     _jmax = _emcd.parse_lef_jmax(_tlef)
     _em_limits = out_dir / "em_openroad_limits.txt"
-    import _em_tool_report as _em_tool
     _limit_rows, _limit_provenance = _em_tool.limits(
         getattr(pdk, "name", ""), _tlef, _jmax, _emcd._DEFAULT_MARGIN)
     if _audit_tool and not _limit_rows:

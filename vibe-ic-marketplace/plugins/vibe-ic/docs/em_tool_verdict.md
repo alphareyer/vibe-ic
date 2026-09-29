@@ -1,10 +1,13 @@
 # Step 25: OpenROAD power-grid EM verdict
 
-On the DIE path, step 25 defaults to dual. LibreLane has no EM step, so
+On the DIE path, step 25's direct engine is OpenROAD. LibreLane has no EM step, so
 OpenROAD `check_current_density` supplies the power-grid verdict and the
 existing blocking authority gate audits its native evidence. The retained
 Python density screen is disclosed for comparison while HARVEST completes.
 No retained density calculation or geometry extraction is deleted here.
+The existing direct routing/admission label stays intact. One shared native
+authority predicate drives DIE report regeneration, production and consumption;
+an explicit dual selection enables the same audit outside the DIE path.
 
 The auditor reads each net's native `Verdict` and CSV `Status`, `Cuts`, and
 `Basis`. Every solved resistor must have a report row. `NO_AREA`, `NO_LIMIT`,
@@ -25,6 +28,9 @@ margin. Per-cut limits come from the PDK registry overlay, never a fallback
 literal in the runner. The GF180MCU entry cites DRM section 14.2, Table 14.4:
 0.18 mA per 0.26 um via at 125 C, unidirectional current. The source revision,
 source-file SHA, temperature and lifetime basis travel with each limit.
+Document commit/file hashes are typed as `git:` and `sha256:` identities;
+they cannot masquerade as the revision of the installed PDK. Original raw-hex
+receipts of those exact document hashes remain auditable without rewriting them.
 The auditor rederives authority from the hashed technology LEF and trusted
 registry; a self-consistent but inflated report limit cannot pass.
 

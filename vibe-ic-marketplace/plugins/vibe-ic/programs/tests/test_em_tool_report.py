@@ -216,3 +216,64 @@ def test_partial_native_disclosure_retains_full_solved_denominator(tmp_path):
     native = {"scope": "power-grid wires and vias", "nets": {
         "one_rail": {"checked": 3, "psm_segments": 4}}}
     assert A._segments_screened(tmp_path, native) == (3, 10)
+
+
+def _declare_die(project):
+    import _owner_declared as owner
+    folder = project / "input/submission_template"
+    folder.mkdir(parents=True)
+    (folder / "SELF_TAPEOUT.txt").write_text("# self tape-out\n")
+    (folder / "tapeout_declaration.json").write_text(json.dumps(owner.attest({
+        "schema": "vibe-ic/tapeout_declaration/1", "answers": {"deliverable": "DIE"}})))
+
+
+@pytest.mark.parametrize("native_report,want", [(False, "INCOMPLETE"), (True, "PASS")])
+def test_die_direct_engine_requires_native_authority(tmp_path, monkeypatch, native_report, want):
+    if native_report:
+        evidence(tmp_path)
+    _declare_die(tmp_path)
+    import librelane_contract as contract
+    assert contract.selected_mode(tmp_path, "25") == "direct"
+    monkeypatch.setattr(A, "jmax_tier", lambda *args: {"verdict": "PASS"})
+    monkeypatch.setattr(A, "read_peaks", lambda *args: [])
+    monkeypatch.setattr(A, "read_supply_authority", lambda *args: [])
+    verdict, report = A.evaluate(tmp_path, None, None, 0.1)
+    assert verdict == want
+    assert report["verdict_source"] == "OpenROAD.check_current_density"
+
+
+def test_die_direct_refreshes_legacy_identity_and_keeps_same_native_receipt(tmp_path):
+    folder, record, subject = evidence(tmp_path)
+    _declare_die(tmp_path)
+    assert E.native_report_due(tmp_path, subject) is False
+    record["mode"] = "dual"
+    (folder / "em_openroad_density.json").write_text(json.dumps(record))
+    assert E.native_report_due(tmp_path, subject) is False
+    record["schema"] = "openroad_em/1"
+    (folder / "em_openroad_density.json").write_text(json.dumps(record))
+    assert E.native_report_due(tmp_path, subject) is True
+    record["schema"] = E.SCHEMA
+    (folder / "em_openroad_density.json").write_text(json.dumps(record))
+    subject.write_text(subject.read_text() + "# changed input\n")
+    assert E.native_report_due(tmp_path, subject) is True
+
+
+def test_original_document_hash_receipt_remains_exactly_auditable(tmp_path):
+    folder, record, subject = evidence(tmp_path)
+    for prov in record["limits"].values():
+        prov["source_revision"] = prov["source_revision"].removeprefix("git:")
+        prov["source_sha256"] = prov["source_sha256"].removeprefix("sha256:")
+    assert E.audit(folder, record, subject)["verdict"] == "PASS"
+    for prov in record["limits"].values():
+        prov["source_sha256"] = "sha256:" + "0" * 64
+    assert E.audit(folder, record, subject)["verdict"] == "NOT_MEASURED"
+
+
+@pytest.mark.parametrize("denied", ["not PASS", "no PASS", "never PASS", "PASS not measured"])
+def test_denied_native_verdict_is_not_a_measurement(tmp_path, denied):
+    folder, record, subject = evidence(tmp_path)
+    assert E.audit(folder, record, subject)["verdict"] == "PASS"
+    log = folder / "ir_em.log"
+    log.write_text(log.read_text().replace("Verdict : PASS", "Verdict : " + denied))
+    record["invocation"]["outputs"][log.name] = E.digest(log)
+    assert E.audit(folder, record, subject)["verdict"] == "NOT_MEASURED"

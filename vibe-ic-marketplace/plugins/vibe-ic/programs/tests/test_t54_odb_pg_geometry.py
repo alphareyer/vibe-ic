@@ -66,11 +66,18 @@ def test_psm_producer_writes_odb_via_geometry_for_the_measured_def(
         measured_def.read_bytes()).hexdigest()
 
 
+@pytest.mark.parametrize("die_direct", [False, True])
 def test_psm_keeps_both_rails_and_audits_tool_density_on_the_same_def(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, die_direct):
     project = _mk_project(tmp_path)
-    (project / "phase3" / "librelane_switch.json").write_text(
-        json.dumps({"steps": {"25": "dual"}}))
+    if die_direct:
+        from test_em_tool_report import _declare_die
+        _declare_die(project)
+        import librelane_contract as contract
+        assert contract.selected_mode(project, "25") == "direct"
+    else:
+        (project / "phase3" / "librelane_switch.json").write_text(
+            json.dumps({"steps": {"25": "dual"}}))
     rpt = R._pl.reports_phase3_dir(project)
     rpt.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(R, "_to_container_path", lambda p, c: p)
@@ -127,6 +134,7 @@ def test_psm_keeps_both_rails_and_audits_tool_density_on_the_same_def(
     assert "VGND,M3,0,0,M3,1,0,2e-6" in merged
     tool = json.loads((rpt / "em_openroad_density.json").read_text())
     assert tool["verdict"] == "PASS"
+    assert tool["mode"] == ("direct" if die_direct else "dual")
     assert set(tool["nets"]) == {"VPWR", "VGND"}
     assert all(row["psm_segments"] == 1 for row in tool["nets"].values())
     assert tool["scope"] == "power-grid wires and vias"

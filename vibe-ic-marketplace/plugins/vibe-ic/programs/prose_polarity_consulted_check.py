@@ -119,6 +119,16 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "_em_tool_report::audit":
+        "NATIVE REPORT AND DEF GRAMMARS, NO SENTENCE. The bound OpenROAD "
+        "session supplies anchored Net/Verdict/counter records and typed CSV "
+        "Status/Cuts/Basis fields. DEF supply names come only from SPECIALNETS "
+        "+ USE POWER/GROUND syntax. Arbitrary negation cannot spell a native "
+        "verdict or numeric counter; denied or duplicate records fail the "
+        "grammar and leave the measurement unmeasured. Falsifier: "
+        "test_em_tool_report.py::test_denied_native_verdict_is_not_a_measurement "
+        "preserves complete hashed evidence and replaces only the verdict "
+        "record with denied wording; the unmodified positive control passes.",
     "synth_full_adder_map::discover":
         "ONE MACHINE GRAMMAR, NO SENTENCE. The input is the active PDK Liberty "
         "file: cell/pin blocks, area numbers, directions and quoted Boolean "

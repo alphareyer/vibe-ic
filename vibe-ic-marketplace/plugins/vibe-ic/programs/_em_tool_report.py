@@ -16,6 +16,46 @@ from pathlib import Path
 SCHEMA = "openroad_em/2"
 
 
+def requires_native_authority(project):
+    """The DIE direct engine is OpenROAD; explicit dual also enables its audit.
+
+    Preserve the public routing/admission contract. The retained density arm
+    remains a HARVEST comparison, rather than the DIE signoff authority.
+    """
+    from librelane_contract import (selected_mode, design_class,
+                                   DESIGN_CLASS_CHIP_PAD_RING)
+    return (selected_mode(project, "25") == "dual"
+            or design_class(project) == DESIGN_CLASS_CHIP_PAD_RING)
+
+
+def native_report_due(project, subject_def):
+    """Refresh a legacy or different-DEF receipt when native authority applies.
+
+    The routing enum is not measurement identity: a dual receipt remains valid
+    for the same DIE when its direct engine now consumes the native result.
+    """
+    if not Path(subject_def).is_file() or not requires_native_authority(project):
+        return False
+    try:
+        record = json.loads((Path(project) / "reports/phase3/em_openroad_density.json").read_text())
+        return record.get("schema") != SCHEMA or record.get("def_sha256") != digest(subject_def)
+    except (OSError, ValueError):
+        return True
+
+
+def _limit_identity(provenance):
+    """Exact document identities, distinct from the installed PDK revision.
+
+    Accept the original receipt's unqualified hex spelling and the explicitly
+    typed spelling of the same document hash. All other provenance stays exact.
+    """
+    result = dict(provenance)
+    for key, prefix in (("source_revision", "git:"), ("source_sha256", "sha256:")):
+        if isinstance(result.get(key), str):
+            result[key] = result[key].removeprefix(prefix)
+    return result
+
+
 def digest(path):
     h = hashlib.sha256()
     with Path(path).open("rb") as f:
@@ -217,7 +257,7 @@ def audit(folder, record, subject_def):
                     prov = record["limits"].get(layer, {})
                     if (applied.get(layer, (None,))[0] != basis or prov.get("basis") != basis
                             or not prov.get("source") or not prov.get("source_sha256")
-                            or prov != trusted.get(layer)):
+                            or _limit_identity(prov) != _limit_identity(trusted.get(layer, {}))):
                         raise ValueError(f"EM_TOOL_LIMIT_PROVENANCE_MISSING: {layer}")
                     value = float(row["Jlimit(A/um^2)"])
                     if (not math.isfinite(value) or value <= 0
