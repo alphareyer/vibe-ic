@@ -2937,7 +2937,7 @@ _register(Instrument(
             "REAL step log, subservient x gf180mcuD IC run on 8hd-3 "
             "(subtail tree, 19-cts-hold/03-vibeic-externalcapturelaunchretap): "
             "2 candidates, u_core/_1753_ kept, u_core/_1683_ rejected "
-            "HOLD_REGRESSED. Home path written as a placeholder."),
+            "HOLD_REGRESSED. Home directory written as a <home> placeholder."),
         artefact=_read("retap_keep_positive.log")),
     expect="RETAP_KEPT 1",
     negative=Sample(
