@@ -26,12 +26,17 @@ After the run completes, the AI must:
 2. If `<project>/phase2/stage1/formal/formal_authoring_request.json` exists,
    **invoke `formal-verify` now** on that artifact. This is a required fallback,
    not a suggestion in a manifest: read every unresolved L3/L6/L8 obligation ID,
-   author only sound properties bound to visible RTL/declarations, update
+   author only sound properties bound to visible RTL/declarations in
+   `phase2/stage1/formal/formal_expert_properties.svh` (the fragment the
+   generated harness includes; author `formal_<top>.sv` only when no harness
+   was generated), update
    `property_contract.json`, write `formal_expert_review.json` with
    `invocation_status: INVOKED` and a `dispositions` list containing one row
    per obligation (`id`, `status`, and the exact `property` name for every
    `AUTHORED` row), then run
-   `formal_property_run.py` and `formal_proof_evidence_check.py`. If no sound
+   `formal_property_run.py` and `formal_proof_evidence_check.py`, and sign
+   `reports/audit/ai_judgements/5.json` over the resulting evidence (it binds
+   the fragment and the harness). If no sound
    property can be authored, keep the request `verdict: INCOMPLETE` and name the
    missing declaration/property; never replace it with a skip.
 3. For every FAIL step:
