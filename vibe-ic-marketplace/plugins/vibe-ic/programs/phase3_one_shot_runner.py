@@ -60056,7 +60056,7 @@ def _canonical_step_condition(project: Path, step_id: str
 _DRC_ATTRIBUTION_JOBS_BASE = (
     ("drc_report_check", "reports/phase3/drc_router.json",
      "reports/phase3/drc_router.rpt",
-     ("--mode", "drc", "--under", "phase3/stage3/pnr/routed_router.drc.rpt",
+     ("--mode", "drc", "--under", "phase3/stage3/pnr",
       "--under", "reports/phase3/drc_router.rpt")),
     ("drc_report_check", "reports/phase3/drc_signoff.json",
      "reports/phase3/drc_signoff.rpt",
