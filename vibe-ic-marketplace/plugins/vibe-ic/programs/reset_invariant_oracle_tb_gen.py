@@ -220,36 +220,18 @@ def declared_output_qualifiers(
         project: Path, outputs: List[Tuple[str, str]],
         inputs: List[Tuple[str, str]],
 ) -> Dict[str, List[Dict[str, str]]]:
-    """The qualifiers L9 (port table + interface prose) declares. §4.05: reads
-    the design input only; an unreadable L9 declares nothing (fail-closed)."""
-    import _path_layout as _pl
-    f = _pl.generated_docs_dir(Path(project)) / "L9_INTEGRATION_SPEC.json"
-    try:
-        doc = json.loads(f.read_text(errors="replace"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(doc, dict):
-        return {}
-    statements: List[Tuple[Optional[str], str]] = []
-    for key in ("ports", "top_ports", "top_module_pins"):
-        for row in doc.get(key) or []:
-            if isinstance(row, dict) and isinstance(row.get("description"),
-                                                    str):
-                statements.append((str(row.get("name") or "") or None,
-                                   row["description"]))
-    notes = doc.get("notes")
-    for n in (notes if isinstance(notes, list) else [notes]):
-        if isinstance(n, str):
-            statements.append((None, n))
+    """The qualifiers this oracle may honour: ONLY the D1-signed structured
+    `qualified_by` field of the L9 port table (R-0929-X-QUALIFIED-4, via
+    `_qualified_by.trusted_qualifiers`). This oracle never reads a port
+    description: two versions that did produced false PASSes. The landed strict
+    rules still bind: clock and reset never qualify, only a multi-bit output is
+    qualified, and an unsigned or malformed field is ignored."""
+    import _qualified_by as _qb
     excluded = tuple(n for n in (_pick_clock(inputs), _pick_reset(inputs)[0])
                      if n)
-    # Only a DATA output is qualified. Without a declared role reader the
-    # data outputs are the multi-bit ones (fail-closed: a 1-bit output is a
-    # control/strobe output and must be known after release).
-    data_outputs = [n for n, w in outputs if w]
-    return qualifiers_from_statements(statements, outputs, inputs,
-                                      excluded=excluded,
-                                      data_outputs=data_outputs)
+    found, _ignored = _qb.trusted_qualifiers(project, outputs, inputs,
+                                             excluded=excluded)
+    return found
 
 
 def _text(case: dict) -> str:
@@ -303,6 +285,12 @@ def _pick_reset(inputs: List[Tuple[str, str]]) -> Tuple[Optional[str], bool]:
         if not w and _RESET_RE.search(n):
             return n, bool(_ACTIVE_LOW_RE.search(n))
     return None, False
+
+
+def _vstr(text: str) -> str:
+    """`text` safe inside a Verilog string literal passed to $display."""
+    return (str(text).replace("\\", "/").replace('"', "'")
+            .replace("%", " pct").replace("\n", " "))[:400]
 
 
 def emit_case_oracle_from_ports(
@@ -444,10 +432,12 @@ def emit_case_oracle_from_ports(
                 shown = ", ".join(f"{r['qualifier']}=%b" for r in rows)
                 args = ", ".join(r["qualifier"] for r in rows)
                 L.append(f"        if ({inactive})")
+                basis = _vstr("; ".join(r.get("evidence", "")
+                                        for r in rows))
                 L.append(f'          $display("[TB {name}] X_EXEMPT: cycle %0d '
                          f'after release: output \'{n}\' is X/Z while its '
                          f'declared qualifier(s) are inactive and known: '
-                         f'{shown}", _i, {args});')
+                         f'{shown} -- basis: {basis}", _i, {args});')
                 L.append("        else begin")
                 L.append("          errors = errors + 1;")
                 L.append(f'          $display("[TB {name}] FAIL: output '
