@@ -57922,6 +57922,13 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
         # checker may not translate a DRV result into a different verdict.
         try:
             doc = json.loads(out_json.read_text())
+            if isinstance(doc, dict) and doc.get("verdict") == "REFUSED":
+                # F15: the judge refused before judging (the tool arm it must
+                # bind cannot be read).  A refusal record, not a verdict word:
+                # named as such, never as an unreadable receipt.
+                return _signoff_not_checked(
+                    name, t0, f"DRV judge REFUSED ({doc.get('refusal')}): "
+                    f"{doc.get('reason')}", outputs)
             tier = _V.parse(doc["verdict"])
         except (OSError, ValueError, KeyError, _V.UnknownVerdictWord) as exc:
             return _signoff_not_checked(name, t0,

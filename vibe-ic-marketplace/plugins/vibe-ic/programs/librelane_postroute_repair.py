@@ -353,13 +353,11 @@ def _step32_drv_signoff(project: Path, report: Dict[str, Any]) -> None:
         result = _drv.judge(bundle, project=project)
         state_path = report.get("adopted_state")
         state = _load(Path(state_path)) if state_path else {}
-        final_def = Path(str(state.get("def") or ""))
-        recorded = ((bundle.get("identity") or {}).get("artifacts") or {}).get(
-            "def", {}).get("sha256")
-        if not final_def.is_file() or _drv._sha(final_def) != recorded:
+        final = _drv.def_identity(
+            bundle, Path(str(state["def"])) if state.get("def") else None)
+        if final is not None:
             result.setdefault("not_measured", []).append(
-                "step 32 final routed DEF differs from DRV bundle identity"
-                if final_def.is_file() else "step 32 final routed DEF absent")
+                f"step 32 final routed DEF {'absent' if final == 'absent' else 'differs from judged layout identity'}")
             result["verdict"] = ("FAIL" if result.get("failures") else
                                  "NOT_MEASURED")
     except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
