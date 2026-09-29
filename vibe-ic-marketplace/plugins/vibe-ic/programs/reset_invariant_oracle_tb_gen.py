@@ -180,8 +180,8 @@ def qualifiers_from_statements(
 
     FULLSTACKTB final review (a false PASS): the clause must state VALIDITY
     (`_QUAL_VALIDITY_RE`), the qualified output must be a DATA output
-    (`data_outputs`: the caller names them; default and `declared_output_qualifiers`:
-    default multi-bit), and the ports the testbench drives as CLOCK and RESET
+    (`data_outputs`; by default, and always from `declared_output_qualifiers`,
+    the multi-bit outputs), and the ports the testbench drives as CLOCK and RESET
     (`excluded`) are never a qualifier -- a reset-value sentence ("o_q cleared
     to 0 when rst_n is low") is the very invariant the X check tests, and read
     as a qualifier it exempted an UNRESET output after release.
