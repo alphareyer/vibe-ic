@@ -252,3 +252,152 @@ def test_screen_emitted_before_step34_gate_still_carries_its_verdict(tmp_path):
     assert ref["filled_gds_density"] == "NOT_MEASURED"
     assert not (p / "reports/phase2/gates/metal_fill_density.json").exists(), \
         "reading step 34 in process must not write its receipt"
+
+
+# ── round 2 (review wave58 TBU14) ───────────────────────────────────────────
+
+def _load_runner():
+    import importlib.util as iu
+    spec = iu.spec_from_file_location("_p3_u14r2", PROGRAMS / "phase3_one_shot_runner.py")
+    R = iu.module_from_spec(spec)
+    sys.modules["_p3_u14r2"] = R
+    spec.loader.exec_module(R)
+    return R
+
+
+def _stale_tree(tmp_path, monkeypatch, R, *, stale_bound_to=None):
+    """A stream on disk and a PREVIOUS round's report: unbound (the real
+    cx_spmic2_run report) or bound to earlier bytes."""
+    proj = tmp_path / "proj"
+    gds = proj / GDS_REL
+    gds.parent.mkdir(parents=True)
+    gds.write_bytes(b"GDSII-this-round")
+    out = proj / "reports/phase3/metal_density.json"
+    out.parent.mkdir(parents=True)
+    old = dict(_REAL_UNBOUND_DENSITY)
+    if stale_bound_to is not None:
+        old["gds_sha256"] = hashlib.sha256(stale_bound_to).hexdigest()
+    out.write_text(json.dumps(old))
+    monkeypatch.setattr(R, "_to_container_path", lambda p, c: p)
+    monkeypatch.setattr(R, "declared_die_rect", lambda _p: (None, "test"))
+    return proj, out
+
+
+@pytest.mark.parametrize("stale_bound_to", [None, b"GDSII-previous-round"],
+                         ids=["unbound_stale", "bound_to_previous_bytes"])
+def test_tool_that_writes_nothing_never_rebinds_a_stale_report(
+        tmp_path, monkeypatch, stale_bound_to):
+    """Finding 1 (MAJOR): KLayout exits without writing (container gone). The
+    stale numbers must not be stamped with this round's sha — Step 34 reads
+    NOT_MEASURED, never PASS."""
+    R = _load_runner()
+    proj, out = _stale_tree(tmp_path, monkeypatch, R, stale_bound_to=stale_bound_to)
+    monkeypatch.setattr(R, "_docker_exec",
+                        lambda c, cmd, **_: (1, "", "Error: No such container"))
+    notes = []
+    assert R._emit_metal_density_report(proj, "top", _Pdk(), "gone", out, notes) is False
+    assert not out.exists(), "the stale report must not survive a re-emit"
+    st = MFD.filled_gds_density(proj)[1]
+    assert st["state"] == "NOT_MEASURED", st
+
+
+def test_tool_nonzero_exit_is_not_bound_even_if_it_wrote(tmp_path, monkeypatch):
+    """rc != 0 means the measurement is not trusted: written, but unbound."""
+    R = _load_runner()
+    proj, out = _stale_tree(tmp_path, monkeypatch, R)
+
+    def fake_exec(container, cmd, **_):
+        out.write_text(json.dumps(_REAL_UNBOUND_DENSITY))
+        return 1, "", "recipe crashed after writing"
+    monkeypatch.setattr(R, "_docker_exec", fake_exec)
+    R._emit_metal_density_report(proj, "top", _Pdk(), "c", out, [])
+    doc = json.loads(out.read_text())
+    assert "gds_sha256" not in doc and "rc=1" in doc["gds_sha256_refused"]
+    assert MFD.filled_gds_density(proj)[1]["state"] == "NOT_MEASURED"
+
+
+def _p1_shape(tmp_path, layers, absent, pdk="gf180mcuD", gds_map=None):
+    """Probe P1 (integrity review): byte-copy filled.def, NO row fill at PnR
+    (row util 60 %, 0 fillers), a bound measurement listing empty layers in
+    `layers_absent_in_gds` as the real recipe does."""
+    pnr = tmp_path / "phase3" / "stage3" / "pnr"
+    pnr.mkdir(parents=True)
+    d = "VERSION 5.8 ;\nDESIGN top ;\nCOMPONENTS 1 ;\n- u1 lib__nand2_1 + PLACED ( 0 0 ) N ;\nEND COMPONENTS\nEND DESIGN\n"
+    (pnr / "routed.def").write_text(d)
+    (pnr / "filled.def").write_text(d)
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports/density.json").write_text(json.dumps(
+        {"filler_instances": 0, "row_utilization_pct": 60.0}))
+    rpt = write_filled_gds(tmp_path, layers=layers, pdk=pdk)
+    doc = json.loads(rpt.read_text())
+    doc["layers_absent_in_gds"] = absent
+    if gds_map is not None:
+        doc["layer_gds_map"] = gds_map
+    rpt.write_text(json.dumps(doc))
+    return tmp_path
+
+
+def test_p1_regulated_layer_absent_from_the_stream_fails(tmp_path):
+    """Finding 2 (MAJOR), probe P1: gf180mcuD, metal5 has no shapes. The PDK's
+    own M5.4 rule (whole-die metal5 >= 30 %) fails at 0 %; the branch at r1 read
+    PASS and excused the byte copy with it."""
+    p = _p1_shape(tmp_path, {f"metal{i}": 0.35 for i in range(1, 5)}, ["metal5"])
+    rc, rep = _gate(p)
+    assert rc == 1 and rep["summary"]["pass"] is False
+    assert rep["summary"]["filled_gds_density"] == "FAIL"
+    assert "metal5" in json.dumps(rep["findings"])
+    assert "FILLED_DEF_IS_BYTE_COPY" not in _cats(rep)
+
+
+def test_p1b_only_one_layer_measured_fails(tmp_path):
+    p = _p1_shape(tmp_path, {"metal1": 0.44},
+                  ["metal2", "metal3", "metal4", "metal5"])
+    rc, rep = _gate(p)
+    assert rc == 1 and rep["summary"]["filled_gds_density"] == "FAIL"
+
+
+def test_regulated_layer_mapped_but_unreported_is_not_a_pass(tmp_path):
+    """A PDK-windowed layer the measurement mapped but reported nowhere was
+    never judged — NOT_MEASURED, never PASS."""
+    p = _p1_shape(tmp_path, {f"metal{i}": 0.35 for i in range(1, 5)}, [],
+                  gds_map={f"metal{i}": [0, 0] for i in range(1, 6)})
+    rc, rep = _gate(p)
+    assert rc == 1 and rep["summary"]["filled_gds_density"] == "NOT_MEASURED"
+
+
+_ALL5 = {f"metal{i}": 0.36 for i in range(1, 6)}
+
+
+@pytest.mark.parametrize("case,expect_pass", [
+    ("bound_shipped_all_regulated_in_window", True),
+    ("regulated_layer_absent", False),
+    ("regulated_layer_below_window", False),
+    ("bound_to_another_stream", False),
+    ("unbound", False),
+])
+def test_p9_byte_copy_is_excused_only_by_a_complete_bound_shipped_measurement(
+        tmp_path, case, expect_pass):
+    """P9 decision pinned: a byte-copy filled.def (and no PnR row fill) passes
+    Step 34 ONLY when an in-window measurement bound to the SHIPPED bytes
+    covers EVERY regulated layer."""
+    layers, absent = dict(_ALL5), []
+    if case == "regulated_layer_absent":
+        layers.pop("metal5"); absent = ["metal5"]
+    if case == "regulated_layer_below_window":
+        layers["metal3"] = 0.12
+    p = _p1_shape(tmp_path, layers, absent,
+                  gds_map={f"metal{i}": [0, 0] for i in range(1, 6)})
+    rpt = p / "reports/phase3/metal_density.json"
+    doc = json.loads(rpt.read_text())
+    if case == "bound_to_another_stream":
+        other = p / "phase3/stage3/pnr/top.gds"
+        other.write_bytes(b"GDSII-not-shipped")
+        doc["gds"] = "phase3/stage3/pnr/top.gds"
+        doc["gds_sha256"] = hashlib.sha256(b"GDSII-not-shipped").hexdigest()
+    if case == "unbound":
+        doc.pop("gds_sha256")
+    rpt.write_text(json.dumps(doc))
+    rc, rep = _gate(p)
+    assert (rc == 0) is expect_pass, (case, rep["findings"])
+    assert rep["summary"]["pass"] is expect_pass
+    assert ("FILLED_DEF_IS_BYTE_COPY" in _cats(rep)) is expect_pass

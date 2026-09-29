@@ -73594,6 +73594,20 @@ def _emit_metal_density_report(project: Path, top: str, pdk: PdkConfig,
         f"-rd pdk={pdk.name} -rd out={out_c} 2>&1 | tee "
         f"{_to_container_path(str(script.parent / 'metal_density.log'), container)}"
     )
+    # U14 r2 — the previous report goes BEFORE the tool runs. It is being
+    # re-emitted because it is stale or unbound; left in place, a KLayout run
+    # that writes nothing (container gone, recipe crash, stall kill) would leave
+    # it to be read back below and stamped with THIS round's sha — a Step-34
+    # PASS on numbers never measured on these bytes. Removed, not renamed: a
+    # renamed copy would still match the `metal_density*.json` report globs.
+    try:
+        out_json.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        notes.append(f"metal density: cannot remove the previous report "
+                     f"({exc}); nothing is re-emitted over it")
+        return False
     rc, out, err = _docker_exec(container, cmd, marker=script_c, outputs=[out_json])
     if not out_json.is_file() or out_json.stat().st_size == 0:
         notes.append(f"metal density: KLayout produced no report (rc={rc})")
@@ -73609,12 +73623,13 @@ def _emit_metal_density_report(project: Path, top: str, pdk: PdkConfig,
     # and Step 34 then reads the measurement as NOT_MEASURED.
     if isinstance(doc, dict):
         _after = _md_gds_sha256(gds)
-        if gds_sha is not None and _after == gds_sha:
+        if rc == 0 and gds_sha is not None and _after == gds_sha:
             doc["gds_sha256"] = gds_sha
             doc.pop("gds_sha256_refused", None)
         else:
             doc.pop("gds_sha256", None)
             doc["gds_sha256_refused"] = (
+                f"the measuring tool exited rc={rc}" if rc != 0 else
                 "the GDS could not be read or changed while it was measured")
         try:
             _aa.write_json(out_json, doc)
