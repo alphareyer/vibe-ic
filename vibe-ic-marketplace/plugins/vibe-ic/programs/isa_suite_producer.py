@@ -97,7 +97,10 @@ LOCK_PATH = HERE / "isa_suites.lock.json"
 POLICY_PATH = HERE / "isa_suite_policy.json"
 
 RECEIPT_REL = "reports/phase2/isa_suites/isa_suite_receipt.json"
-TRANSCRIPT_REL = "phase2/stage1/sim_professional/l10_unit_tb/{case}/run.log"
+#: A SIBLING of the scaffold testbench's own `run.log` in the same case
+#: directory: the scaffold TB's transcript is its evidence and stays in the
+#: JUnit when the ISA row does not replace it (review wave 58).
+TRANSCRIPT_REL = "phase2/stage1/sim_professional/l10_unit_tb/{case}/isa_suite.log"
 PRODUCER = "isa_suite_producer"
 
 PASS = "PASS"
@@ -123,6 +126,18 @@ HALT_SETTLE_CYCLES = 64
 INIT_PATTERNS = ("ff", "a5")
 #: The stall grace of the one supervised container job (no forward progress).
 STALL_GRACE_S = 1800
+#: THE FETCH BUDGET, AND THE FLEET CACHE SEED THAT STANDS IN FOR IT. 300 s and
+#: a 1 s read timeout need ~133 KB/s sustained for the ~40 MB riscv-arch-test
+#: tarball; MEASURED on 8HD-9 (2026-09-29) GitHub delivered ~74 KB/s, so an
+#: in-flow fetch there refuses and every ISA case reads NOT_MEASURED (fail
+#: closed, never a pass). On such a host, seed the cache once -- the producer
+#: re-verifies every cached byte against the lock before use, so a seed can
+#: never change what is judged:
+#:     d=${VIBEIC_ISA_SUITE_CACHE:-${TMPDIR:-/tmp}/vibeic_isa_suites}; mkdir -p $d
+#:     for each suite in isa_suites.lock.json:
+#:         curl -sSL --max-time 1800 -o $d/<commit>.part <tarball_url>
+#:         echo "<tarball_sha256>  $d/<commit>.part" | sha256sum -c - \
+#:             && mv $d/<commit>.part $d/<commit>.tar.gz
 FETCH_DEADLINE_S = 300
 FETCH_MAX_BYTES = 64 * 1024 * 1024
 FETCH_CHUNK_BYTES = 64 * 1024
@@ -309,16 +324,39 @@ def declared_units(decl: Dict[str, Any]) -> List[str]:
     return [str(x).strip() for x in (raw or []) if str(x).strip()]
 
 
-def trap_support(decl: Dict[str, Any]) -> Tuple[bool, str]:
-    """Does the design declare a trap target? An explicit boolean wins;
-    otherwise Zicsr (the extension that provides mtvec) decides."""
-    for key in ("trap_support", "with_csr", "WITH_CSR"):
-        if isinstance(decl.get(key), bool):
-            return decl[key], f"declaration {key}={decl[key]}"
-        if decl.get(key) in (0, 1):
-            return bool(decl[key]), f"declaration {key}={decl[key]}"
-    units = {u.lower() for u in declared_units(decl)}
-    if "zicsr" in units:
+def _explicit_trap_flag(decl: Dict[str, Any]) -> Optional[Tuple[bool, str]]:
+    """An explicit trap/CSR switch, top level first, then `core_parameters`
+    (where a reused core's configuration parameters are declared)."""
+    core = decl.get("core_parameters")
+    for where, src in (("declaration", decl),
+                       ("declaration core_parameters",
+                        core if isinstance(core, dict) else {})):
+        for key in ("trap_support", "with_csr", "WITH_CSR"):
+            v = src.get(key)
+            if isinstance(v, bool):
+                return v, f"{where} {key}={v}"
+            if isinstance(v, int) and v in (0, 1):
+                return bool(v), f"{where} {key}={v}"
+            if isinstance(v, str) and v.strip() in ("0", "1"):
+                return v.strip() == "1", f"{where} {key}={v.strip()}"
+    return None
+
+
+def trap_support(decl: Dict[str, Any]) -> Tuple[Optional[bool], str]:
+    """Does the design declare a trap target? An explicit switch (top level or
+    `core_parameters`, review wave 58) and the Zicsr extension (which provides
+    mtvec) must AGREE; when both are stated and disagree the answer is None
+    with the contradiction named -- the denominator is not guessed."""
+    zicsr = "zicsr" in {u.lower() for u in declared_units(decl)}
+    explicit = _explicit_trap_flag(decl)
+    if explicit is not None:
+        flag, why = explicit
+        if "isa_extensions" in decl and flag != zicsr:
+            return None, (f"{why} contradicts isa_extensions "
+                          f"({'with' if zicsr else 'without'} Zicsr): the "
+                          f"trap-dependent denominator cannot be decided")
+        return flag, why
+    if zicsr:
         return True, "declaration isa_extensions includes Zicsr (a trap target exists)"
     return False, ("declaration isa_extensions has no Zicsr: no mtvec, so no "
                    "trap target (the WITH_CSR=0 shape)")
@@ -501,6 +539,8 @@ def design_facts(project: Path, rtl_dir: Optional[Path] = None
                       f"suite cannot be run at a larger memsize by parameter")
     units = declared_units(decl)
     traps, traps_why = trap_support(decl)
+    if traps is None:
+        return None, traps_why
     rf_bytes = 0
     if str(decl.get("rf_storage") or "").lower() == "shared_sram":
         rf_bytes = 32 * 4        # 32 x-registers of XLEN=32 at the top of SRAM
@@ -1089,23 +1129,62 @@ def _arms(project: Path, rtl_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]
     return arms, [n for n in notes if n]
 
 
-def produce(project: Path, *, executor: Optional[Callable[[Path, Path],
-                                                          Tuple[int, str]]] = None,
-            fetch: Optional[Callable[[str], bytes]] = None,
-            lock: Optional[Dict[str, Any]] = None,
-            pol: Optional[Dict[str, Any]] = None,
-            extra_arms: Optional[List[Dict[str, Any]]] = None,
-            init_patterns: Tuple[str, ...] = INIT_PATTERNS,
-            work_root: Optional[Path] = None, keep_work: bool = False,
-            write: bool = True) -> Dict[str, Any]:
+def produce(project: Path, *, write: bool = True, **kw: Any) -> Dict[str, Any]:
     """Produce the ISA-suite evidence for every declared case that asks for
-    one. Returns the receipt (also written to `RECEIPT_REL`)."""
+    one. Returns the receipt (also written to `RECEIPT_REL`).
+
+    A RERUN NEVER INHERITS AN EARLIER RECEIPT (review wave 58). The previous
+    receipt is removed before anything else happens, every return path writes
+    this run's receipt (a refusal when nothing was measured), and an exception
+    anywhere in the body becomes a refusal receipt, never a leftover. Each
+    receipt carries a fresh `run_id` and the producer's identity; the Step-4
+    execution record binds that exact receipt (`_l10_execution.write_record`)."""
+    project = Path(project)
+    if write:
+        (project / RECEIPT_REL).unlink(missing_ok=True)
+    run_id = uuid.uuid4().hex
+    try:
+        return _produce(project, write=write, run_id=run_id, **kw)
+    except Exception as exc:  # noqa: BLE001 — a crash is a named refusal
+        receipt = {"schema": "vibeic.isa_suite_receipt.v1",
+                   "producer": PRODUCER, "run_id": run_id,
+                   "producer_identity": producer_identity(),
+                   "cases": {}, "rows": [], "bound_cases": {},
+                   "refusal": f"the ISA-suite producer raised {exc!r}"}
+        if write:
+            _aa.write_json(project / RECEIPT_REL, receipt)
+        return receipt
+
+
+def producer_identity(lock: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """What produced a receipt: this program's bytes and the lock it judged by."""
+    ident: Dict[str, Any] = {}
+    try:
+        ident["program_sha256"] = sha256_bytes(Path(__file__).read_bytes())
+    except OSError:
+        ident["program_sha256"] = None
+    ident["lock_sha256"] = (sha256_bytes(json.dumps(
+        lock, sort_keys=True).encode()) if lock is not None else None)
+    return ident
+
+
+def _produce(project: Path, *, executor: Optional[Callable[[Path, Path],
+                                                           Tuple[int, str]]] = None,
+             fetch: Optional[Callable[[str], bytes]] = None,
+             lock: Optional[Dict[str, Any]] = None,
+             pol: Optional[Dict[str, Any]] = None,
+             extra_arms: Optional[List[Dict[str, Any]]] = None,
+             init_patterns: Tuple[str, ...] = INIT_PATTERNS,
+             work_root: Optional[Path] = None, keep_work: bool = False,
+             write: bool = True, run_id: str = "") -> Dict[str, Any]:
+    """The body of `produce` (which owns clearing and crash handling)."""
     project = Path(project)
     lock = load_lock() if lock is None else lock
     pol = load_policy() if pol is None else pol
     receipt: Dict[str, Any] = {"schema": "vibeic.isa_suite_receipt.v1",
-                               "producer": PRODUCER, "cases": {},
-                               "rows": [], "refusal": None}
+                               "producer": PRODUCER, "run_id": run_id,
+                               "producer_identity": producer_identity(lock),
+                               "cases": {}, "rows": [], "refusal": None}
     decl = _declaration(project)
     # A declared unit binds a case only when the lock carries programs for it:
     # a unit with no suite is not this producer's to judge (it stays with
@@ -1116,6 +1195,8 @@ def produce(project: Path, *, executor: Optional[Callable[[Path, Path],
     cases = bound_cases(project, units) if units else {}
     receipt["bound_cases"] = cases
     if not cases:
+        # A design with no ISA case is left alone: no receipt of this run, and
+        # `produce` already removed any earlier one, so nothing can credit.
         receipt["refusal"] = ("no declared L10 case names a declared ISA unit "
                               "— nothing to produce")
         return receipt

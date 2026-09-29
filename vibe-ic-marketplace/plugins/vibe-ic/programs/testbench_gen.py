@@ -2230,6 +2230,10 @@ def run_unit_tbs(project: Path, container: "str | None" = None,
     # Clear every prior execution record BEFORE any refusal path.  Otherwise
     # a rerun with no simulator (or no TB) can leave yesterday's PASS in place.
     _l10x.clear_record(project)
+    # ... and the SECOND per-case execution record, the ISA-suite receipt with
+    # its transcripts: a rerun whose producer crashes, binds nothing or is
+    # never reached must not leave yesterday's credit behind (review wave 58).
+    _clear_isa_suite_evidence(project)
     disp = dispatch or default_dispatch
     tb_dir = _pl.sim_dir(project) / "tb"
     tbs = [p for p in sorted(tb_dir.glob("*.v")) + sorted(tb_dir.glob("*.sv"))
@@ -2399,9 +2403,22 @@ def run_unit_tbs(project: Path, container: "str | None" = None,
     execution_record = _l10x.write_record(
         project, l10_path, rows,
         producer="testbench_gen.run_unit_tbs",
-        tb_dir=tb_dir, source_junit=results)
+        tb_dir=tb_dir, source_junit=results,
+        # Binds the receipt THIS run's producer wrote (it was cleared above).
+        isa_receipt=Path(project) / _l10x.ISA_RECEIPT_REL)
     report["execution_record"] = str(execution_record)
     return executed
+
+
+def _clear_isa_suite_evidence(project: Path) -> None:
+    """Remove the ISA-suite receipt and the producer's per-case transcripts."""
+    (Path(project) / _l10x.ISA_RECEIPT_REL).unlink(missing_ok=True)
+    try:
+        import isa_suite_producer as _isa
+    except Exception:  # noqa: BLE001 — no producer, no transcripts of its own
+        return
+    for log in Path(project).glob(_isa.TRANSCRIPT_REL.format(case="*")):
+        log.unlink(missing_ok=True)
 
 
 def _isa_suite_rows(project: Path, report: dict, producer=None) -> list:
@@ -2416,6 +2433,8 @@ def _isa_suite_rows(project: Path, report: dict, producer=None) -> list:
         rec = (producer or _isa.produce)(project)
     except Exception as exc:  # noqa: BLE001 — the executor never crashes
         report["isa_suite"] = {"error": f"ISA suite producer failed: {exc!r}"}
+        # Whatever the failed call left is not this run's evidence.
+        _clear_isa_suite_evidence(project)
         return []
     report["isa_suite"] = {"refusal": rec.get("refusal"),
                            "cases": rec.get("cases"),
