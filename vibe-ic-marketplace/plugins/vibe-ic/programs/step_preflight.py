@@ -1049,6 +1049,21 @@ def _scoped_dispatch(project: Path, site: str, flow_def: Any,
     return result
 
 
+def dispatch(steps: Any, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Dispatch a producer with its canonical step identity at the call site.
+
+    Unlike ``gate``, this adds no pre-flight or verdict: the producer's existing
+    branches, result and exception remain authoritative. Direct dispatches used
+    to lose their step identity, so source coverage could only guess from a
+    function name. The literal step/span and the actual callable now travel
+    together. Coverage also checks the declared output contract; this identity
+    alone is not evidence that a run completed or produced any files.
+    """
+    if not steps:
+        raise ValueError("a producer dispatch requires a canonical step identity")
+    return fn(*args, **kwargs)
+
+
 def gate(project: Path, runner: str, site: str,
          refusal_factory: Callable[[str, Dict[str, Any]], Any],
          fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:

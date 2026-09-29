@@ -77633,7 +77633,7 @@ def main() -> int:
             # though nothing they need is post-layout. Located-by-name like the
             # rows above, so it cannot shift any downstream plan[-1] decision.
             # No-op (SKIP) unless the design stages >=2 corner libs.
-            _pls = step_prelayout_signoff(
+            _pls = _spf.dispatch("10", step_prelayout_signoff,
                 project, effective_top, pdk, args.container)
             plan.append(_pls)
             print(f"[prelayout] {_pls.status:5s} {_pls.name}: {_pls.detail}",
@@ -77911,7 +77911,7 @@ def main() -> int:
                         container=args.container, top=effective_top,
                         args=args)
             if _gds_dispatched.status == "PASS":
-                _prefill = step_canonicalize_artefacts(
+                _prefill = _spf.dispatch("34", step_canonicalize_artefacts,
                     project, effective_top, pdk, args.container, prepv=True)
                 plan.append(_prefill)
                 _fill = _pl.pnr_dir(project) / "filled.def"
@@ -78005,7 +78005,7 @@ def main() -> int:
     # Closes the runner-vs-flow drift waivers from the v10634 benchmark.
     plan.append(_upstream_signoff_not_measured("canonicalize_artefacts",
                  _layout_refusal) if _layout_refusal else
-                step_canonicalize_artefacts(
+                _spf.dispatch(("23", "29", "30", "34"), step_canonicalize_artefacts,
                     project, effective_top, pdk, args.container))
     if _frozen_digest and not _layout_refusal:
         _after_canon, _after_error = _shipped_layout_digest(

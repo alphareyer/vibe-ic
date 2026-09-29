@@ -8,12 +8,12 @@ produce its `required_outputs`. A step that is DEFINED + AUDITED but has no runn
 producing its outputs is structurally orphaned — it can only ever be MISSING, and
 that is the root cause of "middle steps silently skipped".
 
-Detection (static, deterministic): for each step, derive SIGNALS from its
-`required_outputs` (a distinctive path fragment) and its declared `mcp_tools`
-(the executor that does the work). Search the runner sources for those signals.
+Detection (static, deterministic): output/program signals remain the existing
+coverage arms. Executor entries require a reachable dispatcher associating the
+canonical step/span, its actual callable and the declared output obligation.
 A step is:
-  - WIRED           : some runner references the step's output path, its
-                      mcp_tool, or a program it declares in `programs:` → an
+  - WIRED           : a bound producer dispatch, the step's output path, or
+                      a program it declares in `programs:` identifies an
                       executor produces it. The `programs:` signal is a
                       REFERENCE test, never a declaration test: a step that
                       lists a program no runner invokes is still ORPHANED.
@@ -37,6 +37,8 @@ Usage:
              printing the gap list)
 """
 import argparse
+import ast
+import hashlib
 import json
 import re
 import sys
@@ -177,34 +179,324 @@ _LIBRELANE_EXECUTOR = re.compile(r"^librelane:(?P<cls>[A-Za-z][A-Za-z0-9_]*\.[A-
 _AST_CACHE: dict = {}
 
 
+def _executed_nodes(node):
+    """Walk a potentially executed body, excluding uncalled nested bodies.
+
+    Unknown conditions remain conditional wiring; literal dead branches and
+    statements after return are not execution paths. Lambdas are walked only
+    when a dispatcher actually invokes their parameter.
+    """
+    if isinstance(node, list):
+        for child in node:
+            yield from _executed_nodes(child)
+            if isinstance(child, (ast.Return, ast.Raise)):
+                break
+        return
+    if not isinstance(node, ast.AST):
+        return  # Dict unpacking has a None key; primitive fields have no body.
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                         ast.Lambda)):
+        return
+    yield node
+    if isinstance(node, ast.If) and isinstance(node.test, ast.Constant):
+        yield from _executed_nodes(node.body if node.test.value else node.orelse)
+        return
+    if isinstance(node, ast.IfExp) and isinstance(node.test, ast.Constant):
+        yield from _executed_nodes(node.body if node.test.value else node.orelse)
+        return
+    for _field, value in ast.iter_fields(node):
+        if isinstance(value, list):
+            yield from _executed_nodes(value)
+        elif isinstance(value, ast.AST):
+            yield from _executed_nodes(value)
+
+
+def _literal(node):
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, TypeError):
+        return None
+
+
+class _RunnerSource:
+    """Closed source call graph plus actual canonical producer dispatches."""
+
+    def __init__(self, module, text):
+        self.module = module
+        self.tree = ast.parse(text)
+        self.functions = {}
+        self.bindings = {}
+        self.reachable = set()
+        self._import_cache = {}
+        self._resolve_cache = {}
+        self._local_cache = {}
+        self._index(self.tree.body, ())
+        self._visit_function(("main",))
+
+    def _index(self, body, scope):
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                key = scope + (node.name,)
+                self.functions[key] = node
+                self._index(node.body, key)
+            elif not isinstance(node, ast.ClassDef):
+                for _field, value in ast.iter_fields(node):
+                    if isinstance(value, list):
+                        self._index([n for n in value if isinstance(n, ast.stmt)], scope)
+
+    def _resolve(self, name, scope):
+        cache_key = (name, scope)
+        if cache_key not in self._resolve_cache:
+            self._resolve_cache[cache_key] = self._resolve_uncached(name, scope)
+        return self._resolve_cache[cache_key]
+
+    def _resolve_uncached(self, name, scope):
+        # A parameter/local value with the same spelling is not the global
+        # producer. Explicit local function definitions still resolve.
+        for size in range(len(scope), -1, -1):
+            key = scope[:size] + (name,)
+            if key in self.functions:
+                return key
+            fn = self.functions.get(scope[:size])
+            if fn:
+                parent = scope[:size]
+                if parent not in self._local_cache:
+                    self._local_cache[parent] = {
+                        a.arg for a in fn.args.args + fn.args.kwonlyargs}
+                    self._local_cache[parent].update(
+                        n.id for n in _executed_nodes(fn.body)
+                        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+                if name in self._local_cache[parent]:
+                    return None
+        return None
+
+    def _imports(self, scope):
+        if scope in self._import_cache:
+            return self._import_cache[scope]
+        imports = dict(self._imports(scope[:-1])) if scope else {}
+        body = self.functions[scope].body if scope else self.tree.body
+        nodes = list(_executed_nodes(body))
+        for node in nodes:
+            if isinstance(node, ast.Import):
+                imports.update({a.asname or a.name: a.name for a in node.names})
+            elif isinstance(node, ast.ImportFrom):
+                imports.update({a.asname or a.name:
+                                f"{node.module}.{a.name}" for a in node.names})
+        for node in nodes:
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                imports.pop(node.id, None)
+        self._import_cache[scope] = imports
+        return imports
+
+    def _module_call(self, call, scope, module, function):
+        f = call.func
+        imports = self._imports(scope)
+        if isinstance(f, ast.Name):
+            return imports.get(f.id) == f"{module}.{function}"
+        return (isinstance(f, ast.Attribute) and f.attr == function
+                and isinstance(f.value, ast.Name)
+                and imports.get(f.value.id) == module)
+
+    def _invoked_parameters(self, fn, returned_wrapper=False):
+        params = {a.arg for a in fn.args.args}
+        nodes = list(_executed_nodes(fn.body))
+        if returned_wrapper:
+            returned = {n.value.id for n in nodes if isinstance(n, ast.Return)
+                        and isinstance(n.value, ast.Name)}
+            for child in fn.body:
+                if isinstance(child, ast.FunctionDef) and child.name in returned:
+                    nodes.extend(_executed_nodes(child.body))
+        return {n.func.id for n in nodes if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name) and n.func.id in params}
+
+    def _producer(self, expr, scope):
+        if isinstance(expr, ast.Name):
+            return self._resolve(expr.id, scope)
+        # The native recorder returns a wrapper which calls its fn parameter;
+        # an arbitrary function receiving a callable does not establish this.
+        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name):
+            key = self._resolve(expr.func.id, scope)
+            if key:
+                fn = self.functions[key]
+                invoked = self._invoked_parameters(fn, returned_wrapper=True)
+                for param, arg in zip(fn.args.args, expr.args):
+                    if param.arg in invoked:
+                        return self._producer(arg, scope)
+        return None
+
+    def _visit_function(self, key):
+        if key not in self.functions or key in self.reachable:
+            return
+        self.reachable.add(key)
+        self._visit_body(self.functions[key].body, key)
+
+    def _visit_body(self, body, scope):
+        for node in _executed_nodes(body):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Name):
+                key = self._resolve(node.func.id, scope)
+                if key:
+                    self._visit_function(key)
+                    # A real local dispatcher invokes these callback parameters.
+                    fn = self.functions[key]
+                    invoked = self._invoked_parameters(fn)
+                    supplied = dict(zip((a.arg for a in fn.args.args), node.args))
+                    supplied.update({k.arg: k.value for k in node.keywords if k.arg})
+                    for param in invoked:
+                        value = supplied.get(param)
+                        if isinstance(value, ast.Lambda):
+                            self._visit_body([value.body], scope)
+                        elif isinstance(value, ast.Name):
+                            target = self._resolve(value.id, scope)
+                            if target:
+                                self._visit_function(target)
+            self._dispatch(node, scope)
+
+    def _dispatch(self, call, scope):
+        # ThreadPoolExecutor.submit(gate, ...) invokes gate with these args.
+        if (isinstance(call.func, ast.Attribute) and call.func.attr == "submit"
+                and isinstance(call.func.value, ast.Name) and call.args):
+            pool = call.func.value.id
+            fn = self.functions[scope]
+            pools = {item.optional_vars.id
+                     for n in _executed_nodes(fn.body) if isinstance(n, ast.With)
+                     for item in n.items
+                     if isinstance(item.optional_vars, ast.Name)
+                     and isinstance(item.context_expr, ast.Call)
+                     and self._module_call(item.context_expr, scope,
+                                           "concurrent.futures", "ThreadPoolExecutor")}
+            if pool in pools:
+                call = ast.Call(func=call.args[0], args=call.args[1:],
+                                keywords=call.keywords, lineno=call.lineno)
+        if self._module_call(call, scope, "step_preflight", "gate"):
+            if not _dispatcher_calls_producer("gate"):
+                return
+            if len(call.args) < 5 or _literal(call.args[1]) != self.module:
+                return
+            site = _literal(call.args[2])
+            from step_preflight import RUNNER_PLANS
+            plan = RUNNER_PLANS.get(self.module)
+            span = dict(plan.sites).get(site, ()) if plan else ()
+            expr, args = call.args[4], call.args[5:]
+        elif self._module_call(call, scope, "step_preflight", "dispatch"):
+            if not _dispatcher_calls_producer("dispatch"):
+                return
+            if len(call.args) < 2:
+                return
+            span = _literal(call.args[0])
+            span = (span,) if isinstance(span, str) else span
+            if not isinstance(span, (list, tuple)) or not all(
+                    isinstance(s, str) for s in span):
+                return
+            expr, args = call.args[1], call.args[2:]
+        else:
+            return
+        key = self._producer(expr, scope)
+        if not key or len(key) != 1:
+            return
+        # A generic analog callable selects a different producer by step_name.
+        # The selected branch must agree with the dispatch site's A-step.
+        params = [a.arg for a in self.functions[key].args.args]
+        if "step_name" in params:
+            index = params.index("step_name")
+            selector = (_literal(args[index]) if len(args) > index else
+                        next((_literal(k.value) for k in call.keywords
+                              if k.arg == "step_name"), None))
+            span = [s for s in span if isinstance(selector, str)
+                    and selector.startswith(s + "_")]
+        for sid in span:
+            self.bindings.setdefault(key[0], {}).setdefault(sid, []).append(call.lineno)
+        self._visit_function(key)
+
+    def closure(self, function):
+        """Local helpers actually called by this producer, never main's siblings."""
+        seen, pending = set(), [(function,)]
+        while pending:
+            key = pending.pop()
+            if key in seen or key not in self.functions:
+                continue
+            seen.add(key)
+            for n in _executed_nodes(self.functions[key].body):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                    target = self._resolve(n.func.id, key)
+                    if target:
+                        pending.append(target)
+        return seen
+
+
+def _dispatcher_calls_producer(name):
+    """The imported dispatcher really invokes fn with the forwarded arguments."""
+    path = _HERE / "step_preflight.py"
+    if not path.is_file():
+        return False
+    text = path.read_text(encoding="utf-8")
+    key = (str(path), hashlib.sha256(text.encode()).hexdigest(), name)
+    if key not in _AST_CACHE:
+        functions = {n.name: n for n in ast.parse(text).body
+                     if isinstance(n, ast.FunctionDef)}
+        pending, seen, proven = [(name, {"fn": "fn", "args": "args", "kwargs": "kwargs"})], set(), False
+        while pending and not proven:
+            current, bound = pending.pop()
+            identity = (current, tuple(sorted(bound.items())))
+            if current not in functions or identity in seen:
+                continue
+            seen.add(identity)
+            for n in _executed_nodes(functions[current].body):
+                if not isinstance(n, ast.Call) or not isinstance(n.func, ast.Name):
+                    continue
+                if (bound.get(n.func.id) == "fn"
+                        and any(isinstance(a, ast.Starred) and isinstance(a.value, ast.Name)
+                                and bound.get(a.value.id) == "args" for a in n.args)
+                        and any(k.arg is None and isinstance(k.value, ast.Name)
+                                and bound.get(k.value.id) == "kwargs" for k in n.keywords)):
+                    proven = True
+                    break
+                helper = functions.get(n.func.id)
+                if helper:
+                    supplied = dict(zip((a.arg for a in helper.args.args), n.args))
+                    supplied.update({k.arg: k.value for k in n.keywords if k.arg})
+                    forwarded = {param: bound[value.id] for param, value in supplied.items()
+                                 if isinstance(value, ast.Name) and value.id in bound}
+                    if set(forwarded.values()) == {"fn", "args", "kwargs"}:
+                        pending.append((helper.name, forwarded))
+        _AST_CACHE[key] = proven
+    return _AST_CACHE[key]
+
+
 def _runner_ast(module: str):
-    """(defined function names, called names, string constants) of a runner."""
-    if module in _AST_CACHE:
-        return _AST_CACHE[module]
-    import ast
     path = _HERE / f"{module}.py"
-    out = None
-    if f"{module}.py" in _RUNNER_FILES and path.is_file():
-        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
-        defined = {n.name for n in ast.walk(tree)
-                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-        called = set()
-        consts = set()
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Call):
-                f = n.func
-                name = getattr(f, "id", None) or getattr(f, "attr", None)
-                if name:
-                    called.add(name)
-                # a function handed to a dispatcher is called by it
-                for a in list(n.args) + [k.value for k in n.keywords]:
-                    if isinstance(a, ast.Name):
-                        called.add(a.id)
-            elif isinstance(n, ast.Constant) and isinstance(n.value, str):
-                consts.add(n.value)
-        out = (defined, called, consts)
-    _AST_CACHE[module] = out
-    return out
+    if f"{module}.py" not in _RUNNER_FILES or not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    dispatcher = _HERE / "step_preflight.py"
+    key = (str(path), hashlib.sha256(text.encode()).hexdigest(),
+           hashlib.sha256(dispatcher.read_bytes()).hexdigest() if dispatcher.is_file() else None)
+    if key not in _AST_CACHE:
+        _AST_CACHE[key] = _RunnerSource(module, text)
+    return _AST_CACHE[key]
+
+
+def _canonical_step(step_id):
+    import yaml
+    text = _DEFAULT_FLOW.read_text(encoding="utf-8")
+    key = ("canonical", str(_DEFAULT_FLOW), hashlib.sha256(text.encode()).hexdigest())
+    if key not in _AST_CACHE:
+        _AST_CACHE[key] = {str(s["id"]): s for s in _iter_steps(yaml.safe_load(text))}
+    return _AST_CACHE[key].get(step_id)
+
+
+def _obligation_matches(step, required_outputs):
+    """Bind the requested obligation, allowing existing relative-path shorthand."""
+    native = [p.strip() for ro in step.get("required_outputs", [])
+              for p in str(ro).split(" OR ")]
+    if required_outputs is None:
+        return bool(native)
+    requested = [p.strip() for ro in required_outputs for p in str(ro).split(" OR ")]
+    return bool(requested) and all(
+        len(p.split("/")) >= 2 and ".." not in p.split("/")
+        and any(n == p or n.endswith("/" + p) for n in native)
+        for p in requested)
 
 
 def _librelane_classes_for(step_id: str) -> set:
@@ -217,38 +509,66 @@ def _librelane_classes_for(step_id: str) -> set:
     return {r.step for r in _li.IMPORT_RULES if str(r.flow_step) == step_id}
 
 
-def verify_executor(entry: str, step_id: str):
+def verify_executor(entry: str, step_id: str, required_outputs=None):
     """`(True, why)` when `entry` is PROVEN, by parse, to execute `step_id`.
 
-    `<runner>.<function>`: `<runner>` is one of `_RUNNER_FILES`, its AST
-    DEFINES `<function>` and CALLS it (directly, or by handing it to a
-    dispatcher). `librelane:<Class>`: the LibreLane import maps `<Class>` to
-    this step (`librelane_import.IMPORT_RULES`), or a runner passes the class
-    id as a literal (a plugin step class such as `Vibeic.InsertSpareCells`).
-    Any other string -- an mcp-eda tool name included -- proves nothing."""
+    A producer must be reachable from main and handed to an actual dispatcher
+    for this step/span. The requested outputs must belong to that canonical
+    obligation. Definitions, arbitrary callback arguments and source/manifest
+    name occurrences cannot establish this association. LibreLane additionally
+    requires a live tool-chain dispatch in the bound producer's call closure.
+    This is structural wiring, never proof that a particular run completed.
+    """
+    step_id = str(step_id)
     m = _RUNNER_EXECUTOR.match(entry)
     if m:
         facts = _runner_ast(m.group("module"))
         if facts is None:
             return False, f"{m.group('module')} is not a flow runner"
-        defined, called, _consts = facts
-        if m.group("func") not in defined:
+        func = m.group("func")
+        if (func,) not in facts.functions:
             return False, f"{m.group('module')} defines no {m.group('func')}"
-        if m.group("func") not in called:
-            return False, (f"{m.group('module')}.{m.group('func')} is defined "
-                           f"but never called")
-        return True, "runner entry defined and called"
+        sites = facts.bindings.get(func, {}).get(step_id)
+        if not sites:
+            return False, f"no reachable dispatcher binds {entry} to step {step_id}"
+        step = _canonical_step(step_id)
+        if not step or not _obligation_matches(step, required_outputs):
+            return False, f"outputs do not belong to the canonical step {step_id} obligation"
+        return True, f"step {step_id} producer dispatched at {m.group('module')}.py:{sites[0]}"
     m = _LIBRELANE_EXECUTOR.match(entry)
     if m:
         cls = m.group("cls")
-        if cls in _librelane_classes_for(step_id):
-            return True, "LibreLane import maps this class to the step"
+        mapped = cls in _librelane_classes_for(step_id)
+        step = _canonical_step(step_id)
+        if not step or not _obligation_matches(step, required_outputs):
+            return False, f"outputs do not belong to the canonical step {step_id} obligation"
+        if not mapped and entry not in step.get("mcp_tools", []):
+            return False, f"no LibreLane import rule maps {cls} to step {step_id}"
         for f in _RUNNER_FILES:
             facts = _runner_ast(f[:-3])
-            if facts and cls in facts[2]:
-                return True, f"{f} passes the class id to LibreLane"
+            if not facts:
+                continue
+            for producer, spans in facts.bindings.items():
+                if step_id not in spans:
+                    continue
+                for key in facts.closure(producer):
+                    body = list(_executed_nodes(facts.functions[key].body))
+                    chains = [n for n in body if isinstance(n, ast.Call)
+                              and facts._module_call(n, key, "librelane_contract", "run_chain")]
+                    if mapped and chains:
+                        return True, f"{f}.{producer} dispatches step {step_id}'s LibreLane chain"
+                    # Plugin classes must flow into the executed steps list;
+                    # a producer/report string literal elsewhere proves nothing.
+                    lists = {n.func.value.id for n in body if isinstance(n, ast.Call)
+                             and isinstance(n.func, ast.Attribute) and n.func.attr == "append"
+                             and isinstance(n.func.value, ast.Name)
+                             and n.args and _literal(n.args[0]) == cls}
+                    for chain in chains:
+                        if len(chain.args) >= 3 and lists.intersection(
+                                n.id for n in ast.walk(chain.args[2]) if isinstance(n, ast.Name)):
+                            return True, f"{f}.{producer} passes {cls} in step {step_id}'s executed chain"
         return False, (f"no LibreLane import rule maps {cls} to step "
-                       f"{step_id} and no runner passes it")
+                       f"{step_id} with a bound live tool-chain dispatch")
     return False, ("not an executor form (<runner>.<function> or "
                    "librelane:<StepClass>); a tool NAME wires nothing")
 
@@ -287,10 +607,12 @@ def classify(doc, runner_text: str):
         # counts only when `verify_executor` proves it: a `<runner>.<function>`
         # the runner module DEFINES and CALLS, or a `librelane:<StepClass>` the
         # LibreLane import maps to this very step. Anything else is reported
-        # (`unverified_executors`) and wires nothing.
+        # (`unverified_executors`) and wires nothing. Definitions/calls alone
+        # are insufficient: the actual dispatch must bind THIS step/span and
+        # its declared output obligation, including wrapped callbacks.
         verified, unverified = [], []
         for t in mcp:
-            ok, why = verify_executor(str(t), sid)
+            ok, why = verify_executor(str(t), sid, ro)
             (verified if ok else unverified).append(
                 str(t) if ok else f"{t}: {why}")
         if not wired_by and verified:

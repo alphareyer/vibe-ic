@@ -25209,7 +25209,8 @@ def main() -> int:
         # what it wrote. This executes those TBs and writes the JUnit the
         # Step-4 bridge reads. Fail-closed: no simulator / nothing to run
         # writes NOTHING and does not report a pass.
-        plan.append(step_l10_unit_tb_run(project, args.container))
+        plan.append(_spf.dispatch("4", step_l10_unit_tb_run,
+                                  project, args.container))
         # FULLSTACKTB — the FUNCTIONAL full-stack population. The skeleton
         # `step_full_stack_tb_gen` emitted above is connectivity-only; Step 5's
         # `bit_level_full_stack_tb_check` now refuses it as functional evidence
@@ -25232,8 +25233,8 @@ def main() -> int:
         # AFTER the TB producers (RTL/L9 stable) and, when the container has
         # cocotb+iverilog, actually RUNS the TB so the functional verdict is REAL.
         # Was declared in flow step-4 but never invoked by any runner until now.
-        plan.append(step_professional_tb_gen(project, args.top_name,
-                                             args.container))
+        plan.append(_spf.dispatch("4", step_professional_tb_gen,
+                                  project, args.top_name, args.container))
 
     # v1.6.170 (#60 P0-2) — deterministic RTL-repair-inert hint extractor.
     # When the RTL repair/retry loop detects byte-identical RTL retry it now
@@ -25567,7 +25568,8 @@ def main() -> int:
             plan.append(StepResult("fpga_burn", "NOT_MEASURED", 0.0,
                                    "skipped: no SOF (fpga_compile skipped)", reason_class=_V.ReasonClass.INPUT_ABSENT))
         else:
-            plan.append(step_fpga_compile(project, args.top_name, args.container))
+            plan.append(_spf.dispatch("6", step_fpga_compile,
+                                      project, args.top_name, args.container))
             # Regenerate final_summary.md so the attestation table reflects
             # the SHA256 of the SOF just produced; otherwise the pre-burn
             # `agent_report_sha256_attestation_check` gate compares the
@@ -25650,7 +25652,7 @@ def main() -> int:
                             plan.append(step_reference_tb(
                                 project, args.top_name, ic_class,
                                 args.container))
-                            plan.append(step_fpga_compile(
+                            plan.append(_spf.dispatch("6", step_fpga_compile,
                                 project, args.top_name, args.container))
                             _emit_final_summary_or_disclose()
                             plan.append(step_fpga_burn(
@@ -25677,7 +25679,8 @@ def main() -> int:
             # FULL_STACK_SIM_STALE on the next pre-burn audit.
             plan.append(step_reference_tb(project, args.top_name, ic_class,
                                           args.container))
-            plan.append(step_fpga_compile(project, args.top_name, args.container))
+            plan.append(_spf.dispatch("6", step_fpga_compile,
+                                      project, args.top_name, args.container))
             # Same reason as above — regenerate attestation before burn.
             _emit_final_summary_or_disclose()
             plan.append(step_fpga_burn(project, args.top_name))
@@ -25748,16 +25751,16 @@ def main() -> int:
     if _after_exit("sim"):
         plan.append(_exit_sentinel("verilator_coverage"))
     else:
-        plan.append(step_verilator_coverage(project, args.top_name,
-                                            args.container))
+        plan.append(_spf.dispatch("4", step_verilator_coverage,
+                                  project, args.top_name, args.container))
     if _bounded:
         _disclose_runs_anyway(
             "emit_phase2_manifests",
             "the declared outputs of steps 2, 3 and 6",
             "The manifest emitter has always written those three steps' documents "
             "whatever the window; the review confirmed it as a pre-existing shape.")
-    plan.append(step_emit_phase2_manifests(project, plan, args.top_name,
-                                           args.container))
+    plan.append(_spf.dispatch("5", step_emit_phase2_manifests,
+                              project, plan, args.top_name, args.container))
     # v0.1.58 capture: regenerate final_summary.md BEFORE the audit so the
     # attestation table reflects the SHA256 of every artefact emitted
     # earlier in this phase2 run (e.g. phase2/stage2/synth/netlist.v from
