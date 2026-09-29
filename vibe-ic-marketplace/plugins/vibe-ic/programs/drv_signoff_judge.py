@@ -567,10 +567,23 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             missing.append("project identity differs from judged project directory")
     if not run_id or not tree_sha or not identity.get("spec_version"):
         missing.append("run ID, tree SHA or specification version absent")
+    # R-0929-DRV-IDENTITY: an in-flow capture (step 23, step 32, pre-stream)
+    # cannot bind GDS / LVS-netlist identity, which exists only after
+    # stream-out; it names them as bound at the final post-stream capture.
+    # Any other capture (the default) must bind them.  The in-flow verdict is
+    # never the final one: the post-stream verdict counts toward IC PASS.
+    capture_point = "in_flow" if identity.get("capture_point") == "in_flow" else "post_stream"
+    bound_at = identity.get("bound_at") if capture_point == "in_flow" else {}
+    deferred = {name: str((bound_at or {}).get(name)) for name in ("lvs_netlist", "gds_netlist")
+                if isinstance(bound_at, dict) and (bound_at or {}).get(name)}
     for name in ("sta_netlist", "lvs_netlist", "gds_netlist"):
+        if name in deferred:
+            continue
         if not re.fullmatch(r"[0-9a-f]{64}", str(identity.get(name) or "")):
             missing.append(f"{name} sha256 absent")
     for name in ("sta_netlist", "lvs_netlist", "gds_netlist", "odb", "def"):
+        if name in deferred:
+            continue
         item = (identity.get("artifacts") or {}).get(name) or {}
         _evidence(item, missing, name)
         if name.endswith("netlist") and item.get("sha256") != identity.get(name):
@@ -1222,6 +1235,9 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                            "scenes": required_scenes},
             "threshold_freeze": freeze_evidence,
             "stage_constraints": bundle.get("stages") or [],
+            "capture_point": capture_point,
+            "final_signoff_capture": capture_point == "post_stream",
+            "identity_bound_later": deferred,
             "io_margin_disclosures": io_margin_disclosures,
             "flow_defects": flow_defects,
             "failures": fails, "not_measured": missing,

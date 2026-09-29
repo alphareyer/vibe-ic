@@ -186,8 +186,13 @@ def derive(scene_dir: Path, pins: dict, liberties: list[dict], lefs: list[dict],
         else:
             net = pin["net"]
             members = by_net.get(net, [])
+            # R-0928-DRV-IC's port-to-PAD net: the top-level port and IO-cell
+            # pins only.  A net that also reaches a core pin is not one; its
+            # missing RC understates that pin's load (review wave 57).
             port_pad = (any(pins[m]["kind"] == "port" for m in members) and
-                        any(pins[m]["cell_class"] == "IO" for m in members))
+                        any(pins[m]["cell_class"] == "IO" for m in members) and
+                        all(pins[m]["kind"] == "port" or pins[m]["cell_class"] == "IO"
+                            for m in members))
             # The SPEF must carry this net's connectivity at the pin level:
             # the reported driver, its PAD endpoint and every other census pin
             # on the net.  A *D_NET header without those *CONN rows is not RC
