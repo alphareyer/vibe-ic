@@ -54,7 +54,18 @@ ACTUATOR_SRC = textwrap.dedent('''
     ap.add_argument("--collateral-target", default=None)
     ap.add_argument("--collateral-add", type=int, default=0)
     ap.add_argument("--refuse", action="store_true")
+    ap.add_argument("--busy-s", type=float, default=0.0)
+    ap.add_argument("--hang-pid-file", default=None)
     a = ap.parse_args()
+    if a.hang_pid_file:
+        import os, time
+        pathlib.Path(a.hang_pid_file).write_text(str(os.getpid()))
+        time.sleep(600)
+    if a.busy_s:
+        import time
+        end = time.monotonic() + a.busy_s
+        while time.monotonic() < end:
+            pass
     if a.refuse:
         print("fixture actuator refuses this parameter set", file=sys.stderr)
         sys.exit(1)
@@ -406,10 +417,92 @@ def test_the_trigger_may_simply_not_fire(bench):
 
 
 # --------------------------------------------------------------------------
+# The actuator is bounded by NO-PROGRESS, never by a clock (vibe-ic#2051).
+# --------------------------------------------------------------------------
+
+def _timed_actuator(extra_params, extra_argv, wall_seconds):
+    params = {"reduce_by": {"type": "integer", "unit": "count",
+                            "minimum": 0, "maximum": 10},
+              "target": {"type": "path"}}
+    params.update(extra_params)
+    return {"parameters": params,
+            "resource_ceilings": {"wall_seconds": wall_seconds,
+                                  "max_invocations_per_run": 8},
+            "wrapper": {"program": "fixture_actuator",
+                        "argv_template": ["--reduce-by", "{reduce_by}",
+                                          "--target", "{target}", *extra_argv]}}
+
+
+def test_a_working_actuator_past_its_budget_is_not_killed(bench):
+    """U7 wave 57 (minor): `wall_seconds` is a recorded budget. An actuator
+    still burning CPU past it (a late hold_first retry) finishes and is judged;
+    the old raw `subprocess.run(timeout=)` killed it and orphaned its tool."""
+    reg, ctl = bench([_p(reduce_by=3, busy_s=3)], start=3,
+                     extra_actuator=_timed_actuator(
+                         {"busy_s": {"type": "number", "unit": "s",
+                                     "minimum": 0, "maximum": 10}},
+                         ["--busy-s", "{busy_s}"], wall_seconds=1))
+    run = ctl.run_edge("20")
+    assert run.iterations[0].actuator_rc == 0
+    assert run.iterations[0].decision == "PROMOTED"
+    assert run.outcome is closure.Outcome.CONVERGED
+
+
+def test_a_stalled_actuator_is_stopped_and_its_containers_removed(
+        bench, tmp_path, monkeypatch):
+    """A silent, idle actuator is stopped by the stall watchdog (rc
+    RC_STALLED, ACTUATOR_FAILED, never a measured result), and every container
+    it started -- named `<prefix>_<its pid>_<hex>` -- is removed by name."""
+    import _watchdog as _wd
+    pid_file = bench.impl / "actuator.pid"
+    calls = tmp_path / "docker_calls.txt"
+    minted = tmp_path / "minted.txt"
+    fake = tmp_path / "fake_docker"
+    fake.write_text(textwrap.dedent(f"""\
+        #!/bin/sh
+        echo "$@" >> {calls}
+        if [ "$1" = ps ]; then
+          [ -s {pid_file} ] && echo "vibeic_ll_$(cat {pid_file})_1a2b" | tee {minted}
+          echo "vibeic_ll_1_ffff"
+        fi
+        exit 0
+        """))
+    fake.chmod(0o755)
+    monkeypatch.setattr(closure, "_DOCKER", str(fake))
+    monkeypatch.setattr(closure, "ACTUATOR_STALL_GRACE_S", 2.0)
+    reg, ctl = bench([_p(reduce_by=1, hang_pid_file="actuator.pid")], start=3,
+                     extra_actuator=_timed_actuator(
+                         {"hang_pid_file": {"type": "path"}},
+                         ["--hang-pid-file", "{hang_pid_file}"],
+                         wall_seconds=14400))
+    run = ctl.run_edge("20")
+    it = run.iterations[0]
+    assert it.actuator_rc == _wd.RC_STALLED
+    assert it.decision == "ACTUATOR_FAILED"
+    assert run.outcome is closure.Outcome.NOT_MEASURED
+    assert "stall watchdog" in it.actuator_note
+    # (the rollback restores the implementation root, pid file included, so
+    # the actuator's own container name is read from what `ps` reported)
+    own = minted.read_text().strip()
+    assert own.startswith("vibeic_ll_") and own != "vibeic_ll_1_ffff"
+    removed = [line for line in calls.read_text().splitlines()
+               if line.startswith("rm -f")]
+    assert removed == [f"rm -f {own}"], (
+        "only the stalled actuator's own container is removed")
+
+
+def test_owned_containers_match_the_minting_pid_only():
+    names = ["vibeic_ll_1234_ab", "vibeic_ll_51234_cd", "x_1234_",
+             "vibeic_ll_1234_ab_extra", "other_77_0f"]
+    assert closure.owned_containers({1234, 77}, names) == [
+        "vibeic_ll_1234_ab", "other_77_0f"]
+
+
+# --------------------------------------------------------------------------
 # HANDOFF: the controller says it cannot, instead of pretending it did.
 # --------------------------------------------------------------------------
 
-def test_an_actuator_that_refuses_produces_a_handoff_not_a_repair(bench):
+def test_an_actuator_nonzero_is_unmeasured_not_a_design_handoff(bench):
     reg, ctl = bench([_p(reduce_by=1, refuse=True)], start=3,
                      extra_actuator={"parameters": {
                          "reduce_by": {"type": "integer", "unit": "count",
@@ -421,12 +514,13 @@ def test_an_actuator_that_refuses_produces_a_handoff_not_a_repair(bench):
                                                       "--target", "{target}",
                                                       "--refuse"]}})
     run = ctl.run_edge("20")
-    assert run.outcome is closure.Outcome.HANDOFF_REQUIRED
-    assert run.exit_code() == 1
+    assert run.outcome is closure.Outcome.NOT_MEASURED
+    assert run.exit_code() == 2
     assert not run.is_closed_loop_success()
-    assert run.outcome.marker() == "[HANDOFF REQUIRED]"
     it = run.iterations[0]
     assert it.actuator_rc == 1
+    assert it.decision == "ACTUATOR_FAILED" and it.measurements == {}
+    assert run.rolled_back == 0 and run.promoted == 0
     assert it.digest_restored == it.digest_before, (
         "whatever a refusing actuator left behind is rolled back, so the next "
         "reader sees the baseline and not a half-applied action")

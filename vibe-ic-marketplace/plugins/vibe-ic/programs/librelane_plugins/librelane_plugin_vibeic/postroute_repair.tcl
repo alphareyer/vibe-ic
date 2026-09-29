@@ -279,15 +279,26 @@ if {$::env(VIBEIC_PRR_SETUP_SEQUENCE) ne "default"} {
     lappend setup_args -sequence $::env(VIBEIC_PRR_SETUP_SEQUENCE)
 }
 append_if_exists_argument setup_args VIBEIC_PRR_SETUP_REPAIR_TNS_PCT -repair_tns
-log_cmd repair_timing {*}$setup_args
-
 # Hold after setup (review70 step 32: T60 moved spm SS hold -0.39 -> +0.039
 # only once hold ran after setup), and never at setup's expense.
 set hold_args [list -hold -verbose -skip_buffer_removal]
 lappend hold_args -setup_margin $::env(VIBEIC_PRR_SETUP_MARGIN)
 lappend hold_args -hold_margin $::env(VIBEIC_PRR_HOLD_MARGIN)
 lappend hold_args -max_buffer_percent $::env(VIBEIC_PRR_HOLD_MAX_BUFFER_PCT)
-log_cmd repair_timing {*}$hold_args
+# The normal order keeps hold after setup. A failed native attempt gets one
+# alternate order on the same input route; the sign-off measurements still
+# decide whether its result is admissible.
+if {![info exists ::env(VIBEIC_PRR_MOVE_SEQUENCE)] ||
+    $::env(VIBEIC_PRR_MOVE_SEQUENCE) eq "standard"} {
+    log_cmd repair_timing {*}$setup_args
+    log_cmd repair_timing {*}$hold_args
+} elseif {$::env(VIBEIC_PRR_MOVE_SEQUENCE) eq "hold_first"} {
+    vic_say "alternate move sequence: hold before setup"
+    log_cmd repair_timing {*}$hold_args
+    log_cmd repair_timing {*}$setup_args
+} else {
+    error "unsupported VIBEIC_PRR_MOVE_SEQUENCE"
+}
 # What repair_design left: every later edit in this step must keep it.
 set ::vic_fo_repaired [vic_fanout_over]
 
@@ -350,7 +361,12 @@ source $::env(SCRIPTS_DIR)/openroad/common/dpl_cell_pad.tcl
 log_cmd detailed_placement \
     -max_displacement [subst { $::env(PL_MAX_DISPLACEMENT_X) $::env(PL_MAX_DISPLACEMENT_Y) }]
 foreach pair $::vic_locked { [lindex $pair 0] setPlacementStatus [lindex $pair 1] }
-check_placement -verbose
+# An illegal placement ends the step, named like its other candidate
+# refusals: the controller books this candidate refused, not crashed.
+if {[catch {check_placement -verbose} err]} {
+    puts stderr "VIBEIC_PRR_PLACEMENT_REFUSED: check_placement: $err; the candidate is not written"
+    exit 1
+}
 # A cell the legalizer moved anyway: its wires move too.
 set ::vic_moved [list]
 foreach inst [$::block getInsts] {
@@ -567,7 +583,12 @@ if {$::vic_ant_eco > $::vic_ant_before && [info exists ::env(DIODE_CELL)]
         log_cmd detailed_placement \
             -max_displacement [subst { $::env(PL_MAX_DISPLACEMENT_X) $::env(PL_MAX_DISPLACEMENT_Y) }]
         foreach pair $locked { [lindex $pair 0] setPlacementStatus [lindex $pair 1] }
-        check_placement -verbose
+        # An illegal placement ends the step, named like its other candidate
+        # refusals: the controller books this candidate refused, not crashed.
+        if {[catch {check_placement -verbose} err]} {
+            puts stderr "VIBEIC_PRR_PLACEMENT_REFUSED: check_placement: $err; the candidate is not written"
+            exit 1
+        }
         global_connect
     }
     set ::vic_ant_dirty [dict create]
@@ -665,7 +686,12 @@ while {($::vic_fo_rounds == 0 && ($::vic_fo_declared || $::vic_post_ant_drv_need
     log_cmd detailed_placement \
         -max_displacement [subst { $::env(PL_MAX_DISPLACEMENT_X) $::env(PL_MAX_DISPLACEMENT_Y) }]
     foreach pair $locked { [lindex $pair 0] setPlacementStatus [lindex $pair 1] }
-    check_placement -verbose
+    # An illegal placement ends the step, named like its other candidate
+    # refusals: the controller books this candidate refused, not crashed.
+    if {[catch {check_placement -verbose} err]} {
+        puts stderr "VIBEIC_PRR_PLACEMENT_REFUSED: check_placement: $err; the candidate is not written"
+        exit 1
+    }
     global_connect
     set ::vic_fo_dirty [dict create]
     dict for {name inst} $mine {
@@ -807,7 +833,12 @@ proc vic_close_data_fanout {} {
     log_cmd detailed_placement \
         -max_displacement [subst { $::env(PL_MAX_DISPLACEMENT_X) $::env(PL_MAX_DISPLACEMENT_Y) }]
     foreach pair $locked { [lindex $pair 0] setPlacementStatus [lindex $pair 1] }
-    check_placement -verbose
+    # An illegal placement ends the step, named like its other candidate
+    # refusals: the controller books this candidate refused, not crashed.
+    if {[catch {check_placement -verbose} err]} {
+        puts stderr "VIBEIC_PRR_PLACEMENT_REFUSED: check_placement: $err; the candidate is not written"
+        exit 1
+    }
     global_connect
     if {![vic_eco_route ::vic_fanout_dirty fanout_route]} {
         puts stderr "PRR_FANOUT_ROUTE_REFUSED: scoped reroute failed"
