@@ -2781,6 +2781,76 @@ _register(Instrument(
 ))
 
 
+# Registered HERE, above THE RULE, not at the end of the module: `_REGISTERED`
+# below snapshots the registry once, and an instrument registered after it
+# is never "the registered instrument", so its calibrations were measured
+# and never cached (test_calibration_is_never_cached_from_fakes).
+def _drv_signoff_verbose_count(body: str) -> Optional[str]:
+    from drv_signoff_judge import parse_check_types
+    rows = parse_check_types(body, scene="calibration", mode="functional",
+                             violators_only=True)
+    counts = tuple(len(rows[k]) for k in
+                   ("max_slew", "max_capacitance", "max_fanout"))
+    return str(counts) if any(counts) else None
+
+
+_register(Instrument(
+    name="drv_signoff_judge::parse_check_types",
+    reads="OpenSTA report_check_types -violators -verbose pin blocks",
+    ruling="DRV_SIGNOFF_STANDARD_2026_09_28", owner="drvstd",
+    why=("Both samples were captured with the pinned vibeic-eda 0.3.84 image / OpenSTA "
+         "3.1.0 cdd8ae4d66 from calibration/cal_chain.v and its extracted "
+         "cal_chain.spef. The positive sets fanout 0.5, cap 0.004 pF and "
+         "slew 0.03 ns; the negative sets looser SDC limits. The measured "
+         "Pin blocks, including negative slack, are retained verbatim."),
+    judge=_drv_signoff_verbose_count,
+    positive=Sample(
+        provenance="Real 0.3.84 OpenSTA verbose three-axis violator output",
+        artefact=lambda: (FIXTURES / "drv_signoff_0384_violators.rpt").read_text()),
+    expect="(2, 2, 2)",
+    negative=Sample(
+        provenance="Same netlist/SPEF and tool; no violating pin blocks",
+        artefact=lambda: (FIXTURES / "drv_signoff_0384_clean.rpt").read_text()),
+    # WHY THE ASSERTION SITS IN `judge`, NOT IN THE PARSER. MEASURED: one
+    # `judge()` over test_drv_signoff_judge's one-scene bundle calls
+    # `parse_check_types` 5 times (violator, all-limits and control reports);
+    # every call site in the judge is below its entry, so asserting once there
+    # refuses the whole verdict before any row of any scene is read. The
+    # calibration's own judge (above) calls the parser directly.
+    calls_at="drv_signoff_judge::judge",
+))
+
+
+def _drv_signoff_counter_count(body: str) -> Optional[str]:
+    from drv_signoff_capture import _COUNTER
+    found = dict((kind, int(value)) for kind, value in _COUNTER.findall(body))
+    if set(found) != {"max_slew", "max_capacitance", "max_fanout"}:
+        return None
+    counts = tuple(found[k] for k in
+                   ("max_slew", "max_capacitance", "max_fanout"))
+    return str(counts) if any(counts) else None
+
+
+_register(Instrument(
+    name="drv_signoff_capture::capture",
+    reads="three fixed DRV_COUNTER marker rows from a fresh OpenSTA process",
+    ruling="DRV_SIGNOFF_STANDARD_2026_09_28", owner="drvstd",
+    why=("MEASURED: pinned vibeic-eda 0.3.84 / OpenSTA 3.1.0 cdd8ae4d66 emitted both "
+         "counter files from the same cal_chain.v/SPEF/Liberty inputs. The "
+         "positive SDC makes all three axes violate; the clean SDC makes "
+         "all three zero. An absent or negated marker cannot be a count."),
+    judge=_drv_signoff_counter_count,
+    positive=Sample(
+        provenance="Real pinned OpenSTA raw counter marker output, three axes",
+        artefact=lambda: (FIXTURES / "drv_signoff_0384_counters_positive.log").read_text()),
+    expect="(2, 2, 2)",
+    negative=Sample(
+        provenance="Same PVT/RC inputs, loosened SDC; raw zero counters",
+        artefact=lambda: (FIXTURES / "drv_signoff_0384_counters_clean.log").read_text()),
+    calls_at="drv_signoff_capture::capture",
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════
@@ -3614,66 +3684,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     print(f"\n[OK] {len(cals)} instrument(s) CALIBRATED.")
     return 0
-
-
-def _drv_signoff_verbose_count(body: str) -> Optional[str]:
-    from drv_signoff_judge import parse_check_types
-    rows = parse_check_types(body, scene="calibration", mode="functional",
-                             violators_only=True)
-    counts = tuple(len(rows[k]) for k in
-                   ("max_slew", "max_capacitance", "max_fanout"))
-    return str(counts) if any(counts) else None
-
-
-_register(Instrument(
-    name="drv_signoff_judge::parse_check_types",
-    reads="OpenSTA report_check_types -violators -verbose pin blocks",
-    ruling="DRV_SIGNOFF_STANDARD_2026_09_28", owner="drvstd",
-    why=("Both samples were emitted by pinned vibeic-eda 0.3.84 / OpenSTA "
-         "3.1.0 cdd8ae4d66 from calibration/cal_chain.v and its extracted "
-         "cal_chain.spef. The positive sets fanout 0.5, cap 0.004 pF and "
-         "slew 0.03 ns; the negative sets looser SDC limits. The measured "
-         "Pin blocks, including negative slack, are retained verbatim."),
-    judge=_drv_signoff_verbose_count,
-    positive=Sample(
-        provenance="Real 0.3.84 OpenSTA verbose three-axis violator output",
-        artefact=lambda: (FIXTURES / "drv_signoff_0384_violators.rpt").read_text()),
-    expect="(2, 2, 2)",
-    negative=Sample(
-        provenance="Same netlist/SPEF and tool; no violating pin blocks",
-        artefact=lambda: (FIXTURES / "drv_signoff_0384_clean.rpt").read_text()),
-    calls_at="drv_signoff_judge::judge",
-))
-
-
-def _drv_signoff_counter_count(body: str) -> Optional[str]:
-    from drv_signoff_capture import _COUNTER
-    found = dict((kind, int(value)) for kind, value in _COUNTER.findall(body))
-    if set(found) != {"max_slew", "max_capacitance", "max_fanout"}:
-        return None
-    counts = tuple(found[k] for k in
-                   ("max_slew", "max_capacitance", "max_fanout"))
-    return str(counts) if any(counts) else None
-
-
-_register(Instrument(
-    name="drv_signoff_capture::capture",
-    reads="three fixed DRV_COUNTER marker rows from a fresh OpenSTA process",
-    ruling="DRV_SIGNOFF_STANDARD_2026_09_28", owner="drvstd",
-    why=("MEASURED: pinned vibeic-eda 0.3.84 / OpenSTA 3.1.0 cdd8ae4d66 emitted both "
-         "counter files from the same cal_chain.v/SPEF/Liberty inputs. The "
-         "positive SDC makes all three axes violate; the clean SDC makes "
-         "all three zero. An absent or negated marker cannot be a count."),
-    judge=_drv_signoff_counter_count,
-    positive=Sample(
-        provenance="Real pinned OpenSTA raw counter marker output, three axes",
-        artefact=lambda: (FIXTURES / "drv_signoff_0384_counters_positive.log").read_text()),
-    expect="(2, 2, 2)",
-    negative=Sample(
-        provenance="Same PVT/RC inputs, loosened SDC; raw zero counters",
-        artefact=lambda: (FIXTURES / "drv_signoff_0384_counters_clean.log").read_text()),
-    calls_at="drv_signoff_capture::capture",
-))
 
 
 #: This module's own globals as imported — FIXTURES, the judges, the readers.
