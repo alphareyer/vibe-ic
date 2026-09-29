@@ -42,8 +42,10 @@ CAPTURE DESIGN, AND WHY
    lets this module say "dangling_symlink" instead of either "missing" or,
    worse, "produced".
 
-3. NOTHING here is `produced=True` unless it is a regular file with size > 0.
-   A 0-byte file is `kind="empty_file", produced=False, reason="zero_byte"`.
+3. A regular file with size > 0 is produced. The sole zero-byte exception is
+   the router's empty DRC report when its completed-route receipt binds the
+   report, log and routed DEF and confirms a final count of 0. Other 0-byte
+   files remain `kind="empty_file", produced=False, reason="zero_byte"`.
    A broken link is `kind="dangling_symlink", produced=False`. A resolvable
    symlink is `kind="symlink", produced=False, reason="symlink_alias"` — an
    alias is not a write of content. All three are RECORDED (they are evidence
@@ -158,6 +160,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import eda_report_audit as _era  # shared completed-route zero receipt validator
 
 SCHEMA = "vibe-ic/write-ledger/1"
 
@@ -249,6 +252,9 @@ def snapshot(project: Path, skip_dirs: Iterable[str] = ()) -> Dict[str, Any]:
             kind, produced, reason, target = _classify(full, st)
             if kind == "dir":
                 continue
+            if (kind == "empty_file"
+                    and _era._empty_router_drc_receipt(Path(full)) is not None):
+                kind, produced, reason = "receipted_empty_zero", True, ""
             rel = os.path.relpath(full, str(project))
             entries[rel] = {
                 "rel": rel,
@@ -522,7 +528,8 @@ def attribute(entry: Dict[str, Any], prov: Dict[str, Any]) -> None:
         # ZERO BYTES or DANGLING is self-contradictory, and it is decidable
         # from lstat alone — no hashing. This is the shape where the ledger
         # and the log disagree, and the log is the one making a claim.
-        if entry["kind"] == "empty_file" and real[0]["digest"] != _EMPTY_SHA:
+        if entry["kind"] in ("empty_file", "receipted_empty_zero") \
+                and real[0]["digest"] != _EMPTY_SHA:
             entry["provenance_contradiction"] = (
                 f"provenance claims {real[0]['digest'][:23]}... for a file that "
                 f"is now 0 bytes")
