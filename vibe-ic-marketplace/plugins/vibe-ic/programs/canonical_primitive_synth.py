@@ -2924,6 +2924,15 @@ def _read_project_desc(project_dir: Path) -> Tuple[str, str]:
 
 
 # ======================================================================== CLI
+def declared_watchdog(project: Path) -> Optional[Dict]:
+    """Explicit source-bound mapping only; never infer watchdog policy from prose.
+
+    A bad present declaration is BLOCKING, not permission to guess a template.
+    """
+    from in_order_watchdog_synth import load_declared
+    return load_declared(project)
+
+
 def _emit_and_write(shape: str, out_path: Path, desc_text: str = "") -> str:
     rtl = emit_rtl(shape, desc_text)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2963,6 +2972,23 @@ def main(argv=None) -> int:
     if not a.project:
         ap.error("either <project_dir> or --from-desc is required")
     proj = Path(a.project).resolve()
+    try:
+        watchdog = declared_watchdog(proj)
+        if watchdog is not None:
+            written = None
+            if a.emit:
+                out = proj / "phase2" / "stage1" / "rtl" / (watchdog["module"] + ".v")
+                out.parent.mkdir(parents=True, exist_ok=True)
+                with out.open("x") as stream:
+                    stream.write(watchdog["rtl"])
+                written = str(out)
+            print(json.dumps({"verdict": "EMIT", "written": written,
+                              **{k: v for k, v in watchdog.items() if k != "rtl"}}))
+            return 0
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(json.dumps({"verdict": "REFUSED", "shape": "in_order_watchdog",
+                          "reason": "WATCHDOG_CONTRACT_REFUSED: " + str(exc)}))
+        return 2
     desc, _src = _read_project_desc(proj)
     shape = detect_shape(desc)
     if shape is None:
