@@ -145,7 +145,13 @@ def test_an_adopted_candidate_is_handed_off_and_step32_carries_the_drv_fail(tmp_
                                                handed=True, top="top")
     assert handed, "the adopted candidate must be handed off"
     assert row.status == "FAIL" and "step-32 DRV FAIL" in row.detail
-    # A clean actuator with a clean DRV judgement stays PASS.
+    # A clean actuator does not hide the step-32 DRV FAIL...
+    handed.clear()
+    report.update(verdict="PASS")
+    row = R._postroute_repair_librelane_result(project, pnr, report, 0.0,
+                                               handed=True, top="top")
+    assert row.status == "FAIL" and handed
+    # ...and a clean actuator with a clean DRV judgement stays PASS.
     handed.clear()
     report.update(verdict="PASS", drv_signoff_verdict="PASS", drv_signoff={})
     assert R._postroute_repair_librelane_result(project, pnr, report, 0.0,
