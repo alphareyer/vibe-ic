@@ -33,13 +33,15 @@ from an unset field.
                                 told WHY the question is suddenly unanswered,
                                 and stops. See that module's header for the
                                 eleven days.
-    CONTRADICTED -> FAIL here.  A DERIVED text (in the declaration or in the
-                                design's own answers file) asserting another
-                                value for an owner-attested answer, e.g. an
-                                area rationale saying deliverable=HARDMACRO
-                                beside the owner's DIE. Named by file, field
-                                and sentence; the remedy is the field's
-                                producer (R-0929-DELIVERABLE-CONSISTENCY).
+    STALE       -> FAIL here.   A DERIVED answer (in the declaration or in
+                                the design's own answers file) with no
+                                producer provenance, or whose recorded
+                                `derived_from_attested` value differs from the
+                                owner's current answer, or whose recorded
+                                inputs changed. Decided from structure, never
+                                by reading its prose; owner-attested fields are
+                                never gated here. The remedy is the field's
+                                producer (R-0929-DELIVERABLE-CONSISTENCY-2).
     MALFORMED   -> FAIL here.   A question absent altogether; a rectangle that
                                 is not four numbers; an enum outside its
                                 choices; a database unit that is zero or
@@ -159,19 +161,20 @@ def evaluate(project: Path,
             # difference is that this one looks perfectly readable, which is
             # why it passed here on 2026-09-06 and cost eleven days.
             refusals.extend(TD.owner_attestation_refusals(doc))
-            # DERIVED TEXT FOLLOWS THE OWNER (R-0929-DELIVERABLE-CONSISTENCY).
-            refusals.extend(TD.derived_text_contradictions(
-                doc, source=TD.DECLARATION_REL))
+            # DERIVED ANSWERS FOLLOW THE OWNER, by their recorded provenance
+            # (R-0929-DELIVERABLE-CONSISTENCY-2).
+            refusals.extend(TD.derived_answer_refusals(
+                doc, project, source=TD.DECLARATION_REL))
 
-    # The design's own answers file is where the derived text is AUTHORED; the
-    # declaration only carries it. Both are read, so a stale sentence is named
-    # at its source and not only at its copy.
+    # The design's own answers file is where the derived answer is WRITTEN;
+    # the declaration only carries it. Both are read, so a stale answer is
+    # named at its source and not only at its copy.
     own_answers = project / ST.DESIGN_ANSWERS_REL
     if own_answers.is_file():
         own, own_err = TD.load(own_answers)
         if own_err is None and isinstance(own, dict):
-            refusals.extend(TD.derived_text_contradictions(
-                own, source=ST.DESIGN_ANSWERS_REL))
+            refusals.extend(TD.derived_answer_refusals(
+                own, project, source=ST.DESIGN_ANSWERS_REL))
 
     routers = _routers_present(project)
     present = [name for name, ok in routers.items() if ok]
