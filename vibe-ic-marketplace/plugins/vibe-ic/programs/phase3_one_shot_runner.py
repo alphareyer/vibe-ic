@@ -35809,9 +35809,13 @@ def _padring_producer_dispatch(project: Path,
     """
     if _chip_path_requests_pad_ring(project):
         if supply_plan is not None:
-            return step_io_pad_chip_top_gen(project, container, pdk,
-                                            supply_plan=supply_plan)
-        return step_io_pad_chip_top_gen(project, container, pdk)
+            res = step_io_pad_chip_top_gen(project, container, pdk,
+                                           supply_plan=supply_plan)
+        else:
+            res = step_io_pad_chip_top_gen(project, container, pdk)
+        if res.status == _V.Verdict.PASS.value:
+            _full_stack_functional_after_padring(project, container, res)
+        return res
     declared, why = _declaration_deliverable_answer(project)
     return StepResult(
         "io_pad_chip_top_gen", "NOT_APPLICABLE", 0.0,
@@ -35819,6 +35823,38 @@ def _padring_producer_dispatch(project: Path,
         f"{declared or 'UNDECLARED'}; {why}), so step 15.5ic's IO pad "
         f"chip-top producer is not dispatched. Dispatching it would write a "
         f"die_required_um that pins the floorplan to a ring nothing places.", declared_by=f"deliverable={declared or 'UNDECLARED'}; {why}")
+
+
+def _full_stack_functional_after_padring(project: Path,
+                                         container: Optional[str],
+                                         res: StepResult) -> None:
+    """FULLSTACKTB — run the Step-5 functional full-stack population through the
+    pad-ring chip top the moment `io_pad_chip_top_gen` has written it.
+
+    On a DIE route that chip top IS the full-stack top, and it does not exist
+    in Phase 2: the Phase-2 producer records NOT_MEASURED (blocked on this
+    producer) and the terminal Step-5 gate reads whatever record is on disk.
+    Re-running the producer here is what gives that gate a population measured
+    through the delivered top rather than none. It never changes this step's
+    word -- the pad-ring producer's verdict is about the ring -- and a failure
+    to run is recorded beside it, not raised. chip-AGNOSTIC."""
+    try:
+        _here = str(Path(__file__).resolve().parent)
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
+        import full_stack_functional_tb as _fsf               # noqa: PLC0415
+        rec = _fsf.generate(project, container)
+        res.extras["full_stack_functional"] = {
+            "verdict": rec.get("verdict"),
+            "reason_class": rec.get("reason_class"),
+            "counts": rec.get("counts"),
+            "record": str(_fsf.record_path(project)),
+        }
+        print(f"[phase3] full_stack_functional_tb: {rec.get('verdict')} — "
+              f"{rec.get('reason')}", file=sys.stderr)
+    except Exception as exc:                                  # noqa: BLE001
+        res.extras["full_stack_functional"] = {
+            "verdict": "NOT_MEASURED", "error": repr(exc)}
 
 
 def _declaration_deliverable_answer(project: Path) -> Tuple[Optional[str], str]:
