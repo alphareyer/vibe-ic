@@ -1,0 +1,5 @@
+ISA_TB HALT tohost=00000001 cycles=154515
+- /tmp/isaprod/e2e/w1/env/isa_tb.v:51: Verilog $finish
+- S i m u l a t i o n   R e p o r t: Verilator 5.053 devel
+- Verilator: $finish at 2ms; walltime 0.072 s; speed 21.567 ms/s
+- Verilator: cpu 0.072 s on 1 threads; allocated 6 MB
