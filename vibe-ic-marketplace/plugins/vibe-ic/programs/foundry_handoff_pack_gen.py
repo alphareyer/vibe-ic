@@ -78,6 +78,7 @@ import foundry_handoff_package_check as _fhpc  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _atomic_artefact as _aa  # noqa: E402  (vibe-ic#1082)
 import _gds_admission as _ga  # noqa: E402
+import ate_pattern_gen as _ate  # noqa: E402  (U18: our own open item)
 
 
 def _read_text(p: Path) -> str:
@@ -615,6 +616,8 @@ _OPERATOR_OWNED_ON_SHUTTLE = (
 
 STATUS_OPEN = "OPEN"
 STATUS_NA = "NOT_APPLICABLE_IN_MODE"
+#: An item this flow owned and closed, with the evidence that closed it.
+STATUS_CLOSED = "CLOSED"
 
 
 def _open_item(field: str, mode_info: dict) -> dict:
@@ -1093,6 +1096,13 @@ def main(argv=None) -> int:
     # pattern list is chip-specific (full vectors are converted from
     # sim traces downstream); TODOs only for foundry/ATE-supplied data.
     l10_ids = _l10_test_pattern_ids(project)
+    # U18 — the test patterns are OURS (`OWNER_US`): convert the Step-5 traces
+    # of every seed now. The item closes only when every seed Step 5 counted
+    # as a functional case has a pattern; otherwise it stays OPEN, naming the
+    # seeds and why, and the Step-38 gate refuses the kit.
+    ate = _ate.emit(project, handoff_dir / _ate.PATTERN_SUBDIR, l10_ids)
+    patterns_closed = bool(l10_ids) and bool(ate["patterns"]) \
+        and not ate["not_converted"]
     corner_kit = {
         "schema_version": "1.0",
         "generated_by": _pmd.emitted_by("foundry_handoff_pack_gen"),
@@ -1124,6 +1134,10 @@ def main(argv=None) -> int:
             "liberty_names_without_operating_point":
                 corners["liberty_unparsed"],
         },
+        "ate_patterns": ate["patterns"],
+        "ate_patterns_not_converted": ate["not_converted"],
+        "ate_patterns_excluded": ate["excluded"],
+        "ate_patterns_step5_record": ate["step5_record"],
         "PENDING_FOUNDRY_test_patterns": (
             "Author: convert each L10 seed above into an ATE pattern "
             "(input vector + expected output + corner constraints) from "
@@ -1138,6 +1152,16 @@ def main(argv=None) -> int:
             ("PENDING_FOUNDRY_test_patterns",
              "PENDING_FOUNDRY_loadboard_id"), mode_info),
     }
+    if patterns_closed:
+        # Closed against its evidence: the pending key goes, the item stays on
+        # the record as CLOSED with the files (and hashes) that closed it, and
+        # the gate re-hashes every one of them.
+        corner_kit.pop("PENDING_FOUNDRY_test_patterns")
+        for it in corner_kit["open_items"]:
+            if it["field"] == "PENDING_FOUNDRY_test_patterns":
+                it["status"] = STATUS_CLOSED
+                it["evidence"] = [{"path": p["path"], "sha256": p["sha256"]}
+                                  for p in ate["patterns"]]
     _aa.write_text(handoff_dir / "corner_test_vectors.json",
         json.dumps(corner_kit, indent=2, ensure_ascii=False) + "\n")
 

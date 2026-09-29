@@ -1,0 +1,79 @@
+{
+  "schema_version": "1.0",
+  "generated_by": "foundry_handoff_pack_gen v1.26.26",
+  "design_identity": {
+    "design": "spm",
+    "top": "spm",
+    "pdk": "sky130"
+  },
+  "design_top": "spm",
+  "pdk": "sky130",
+  "test_pattern_seeds_from_l10": [
+    "random_multiplication_functional_equivalence",
+    "corner_operand",
+    "case_3",
+    "reset",
+    "toggle_branch_coverage"
+  ],
+  "test_pattern_seed_count": 5,
+  "corner_source": "signoff_liberty",
+  "voltage_corners_v": [
+    4.5,
+    5.0,
+    5.5
+  ],
+  "temperature_corners_celsius": [
+    -40,
+    25,
+    125
+  ],
+  "signoff_liberty_files": [
+    "gf180mcu_fd_io__ff_n40C_5v50.lib",
+    "gf180mcu_fd_io__ss_125C_4v50.lib",
+    "gf180mcu_fd_io__tt_025C_5v00.lib",
+    "gf180mcu_fd_sc_mcu7t5v0__ff_n40C_5v50.lib",
+    "gf180mcu_fd_sc_mcu7t5v0__ss_125C_4v50.lib",
+    "gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00.lib"
+  ],
+  "corner_search": {
+    "liberty_paths_seen": 6,
+    "liberty_names_without_operating_point": []
+  },
+  "PENDING_FOUNDRY_test_patterns": "Author: convert each L10 seed above into an ATE pattern (input vector + expected output + corner constraints) from cocotb/Verilator simulation traces — see vibe-ic:tapeout-checklist skill for guidance.",
+  "PENDING_FOUNDRY_loadboard_id": "Author: ATE loadboard part number + revision.",
+  "handoff_mode": {
+    "mode": "undeclared",
+    "basis": "reports/phase3/shuttle_precheck.json is present but records verdict_is_the_operators=false (verdict='NOT_APPLICABLE', shuttle=None): step 37.5ic ran and found no operator to ask for this PDK, so no operator acceptance is part of this hand-off.",
+    "operator": null,
+    "operator_status": null,
+    "precheck_verdict": "NOT_APPLICABLE",
+    "precheck_report": "reports/phase3/shuttle_precheck.json",
+    "precheck_report_sha256": "sha256:ca79497710da3239c81b63c818394acebaf83d2fa2367042028722233453b9e5"
+  },
+  "open_items": [
+    {
+      "field": "PENDING_FOUNDRY_test_patterns",
+      "owner": "this_flow",
+      "owner_name": null,
+      "closed_by": "conversion of the L10 seeds already listed in this member into ATE patterns from the cocotb / Verilator traces this flow produced",
+      "applies_in_mode": [
+        "shuttle",
+        "dedicated",
+        "undeclared"
+      ],
+      "status": "OPEN"
+    },
+    {
+      "field": "PENDING_FOUNDRY_loadboard_id",
+      "owner": "test_house",
+      "owner_name": null,
+      "closed_by": "the ATE loadboard part number and revision from the test house",
+      "applies_in_mode": [
+        "shuttle",
+        "dedicated",
+        "undeclared"
+      ],
+      "status": "OPEN"
+    }
+  ]
+}

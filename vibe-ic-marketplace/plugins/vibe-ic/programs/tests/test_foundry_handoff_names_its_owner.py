@@ -54,6 +54,9 @@ sys.path.insert(0, str(PROGRAMS))
 
 import foundry_handoff_pack_gen as FH  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _step5_trace_fixture as _S5  # noqa: E402
+
 # field (foundry-handoff hollow chip GDS) — the chip GDS in this fixture must
 # carry GEOMETRY. A four-byte GDSII BOUNDARY record header (length 4, record
 # type 0x08) is the smallest thing that makes
@@ -173,9 +176,14 @@ def test_the_scribe_note_names_the_owner_and_cites_the_search(tmp_path):
 # ── the gate: each new rule fires on the break it defends, and only then ────
 
 def test_clean_kit_with_an_accepting_operator_passes(tmp_path):
-    """The green control. Without it, every red below proves nothing."""
+    """The green control. Without it, every red below proves nothing.
+
+    U18: a complete kit carries the one item THIS flow owns closed — the ATE
+    patterns converted from the Step-5 trace — so the fixture carries the
+    Step-5 record and trace a real run writes (`_step5_trace_fixture`)."""
     proj = _project(tmp_path, with_chip_gds=True)
     _precheck(proj, verdict="PASS")
+    _S5.plant(proj)
     FH.main([str(proj)])
     rc, rules = _gate(proj)
     assert rc == 0, rules
