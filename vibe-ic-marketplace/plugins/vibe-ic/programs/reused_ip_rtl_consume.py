@@ -454,16 +454,20 @@ def consume_reused_ip_rtl(project: Path) -> Dict:
     result = _consume_reused_ip_rtl(project)
     rtl_dir = project / "phase2" / "stage1" / "rtl"
     if rtl_dir.is_dir():
+        disclosures: List[str] = []
         try:
             import reused_ip_erratum as _erratum
             errata = _erratum.apply_errata(project, rtl_dir)
+            # By the STAGED BYTES, not by which path staged them: a fix a
+            # catalog pull already staged is disclosed too (owner ruling 2B).
+            disclosures = _erratum.deviation_disclosures(project, rtl_dir)
         except Exception as exc:  # noqa: BLE001 — staging never crashes
             errata = {"error": f"erratum step unavailable: {exc!r}",
                       "rows": [], "disclosures": []}
         if errata.get("rows") or errata.get("error"):
             result["errata"] = errata
-            result["deviation_disclosures"] = list(
-                errata.get("disclosures") or [])
+        if disclosures or errata.get("rows") or errata.get("error"):
+            result["deviation_disclosures"] = list(disclosures)
     return result
 
 
