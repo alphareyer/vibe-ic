@@ -162,6 +162,117 @@ def netlist_delta(before: str, after: str) -> Dict[str, Any]:
     return {"moved": moved, "other": other, "instances": len(b)}
 
 
+def _require_current_adoption(project: Path, handoff: Dict[str, Any],
+                              folder: Path, binding: Dict[str, Any]) -> None:
+    """Follow the emitter's selected final state through existing run receipts.
+
+    Self-consistent handoff hashes do not establish adoption. The measured
+    state must be the selected chain's final STA output, with the same resolved
+    timing scene as the retap and views from that chain's actual producers.
+    """
+    import librelane_contract as ll
+    cfg = ll._load(Path(binding["execution"]["config"]))
+    corners = cfg["PNR_CORNERS"]
+    if not isinstance(corners, list) or not corners or handoff.get("corners") != corners:
+        raise ValueError("RETAP_HANDOFF_SCENE_MISMATCH: timed corners")
+    steps = ["OpenROAD.CTS", handoff["clock_path_sizing"]["step"], STEP_ID,
+             "OpenROAD.ResizerTimingPostCTS"] + ["OpenROAD.STAMidPNR"] * len(corners)
+    if handoff.get("steps") != steps:
+        raise ValueError("RETAP_HANDOFF_RUN_MISMATCH: chain steps")
+    folders = [folder.parent / f'{i:02d}-{step.lower().replace(".", "-")}'
+               for i, step in enumerate(steps, 1)]
+    expected_chain = {step: str(path.relative_to(project)) for step, path in zip(steps, folders)}
+    if handoff["chain"] != expected_chain or folders[2].resolve() != folder.resolve():
+        raise ValueError("RETAP_HANDOFF_RUN_MISMATCH: chain identity")
+    selected = handoff["selected"]
+    if selected == "librelane":
+        previous = folder / "state_out.json"
+        downstream = list(zip(steps[3:], folders[3:]))
+        sources = {"post_cts_def": ll._load(previous)["def"],
+                   "post_hold_def": ll._load(folders[3] / "state_out.json")["def"],
+                   "post_hold_odb": ll._load(folders[3] / "state_out.json")["odb"]}
+    else:
+        # The emitter retains the candidate chain above, but selects the direct
+        # arm's separate STA chain and native views when dual chooses OpenROAD.
+        arm = project / "phase3/tool_arms/19/openroad"
+        selection = ll._load(project / "phase3/tool_arms/19/selection.json")
+        if selection != handoff["selection"]:
+            raise ValueError("RETAP_HANDOFF_RUN_MISMATCH: current dual selection")
+        lane = project / "phase3/librelane/19-cts-hold-direct-arm"
+        downstream = [("OpenROAD.STAMidPNR", lane / f"{i:02d}-openroad-stamidpnr")
+                      for i in range(1, len(corners) + 1)]
+        previous = arm / "bridge/state_in.json"
+        sources = {"post_cts_def": str(arm / "post_cts.def"),
+                   "post_hold_def": str(arm / "post_hold.def"),
+                   "post_hold_odb": str(arm / "post_hold.odb")}
+    measured = project / handoff["measured_state"]
+    if measured.resolve() != (downstream[-1][1] / "state_out.json").resolve():
+        raise ValueError("RETAP_HANDOFF_RUN_MISMATCH: selected final state")
+    mounts = [(Path(host), guest) for host, guest in binding["execution"]["mounts"]]
+    timed = []
+    for step, path in downstream:
+        record = ll._load(path / "vibeic_receipt.json")
+        inputs = record["input"]
+        execution = record["execution"]
+        old = ll._load(previous)
+        state_files = {str(p): ll.digest(p) for p in ll._walk_paths(
+            {k: v for k, v in old.items() if k != "metrics"})}
+        if (inputs.get("step") != step or inputs.get("image") != binding["input"]["image"]
+                or inputs.get("state") != ll.digest(previous)
+                or inputs.get("state_files") != state_files
+                or type(execution.get("rc")) is not int or execution["rc"] != 0
+                or Path(execution["state"]).resolve() != previous.resolve()
+                or execution.get("mounts") != binding["execution"]["mounts"]
+                or ll._load(path / "input_fingerprint.json") != inputs
+                or ll._load(path / "pdk_root.json") != ll._load(folder / "pdk_root.json")):
+            raise ValueError(f"RETAP_HANDOFF_RUN_MISMATCH: {step} input identity")
+        hashes = record["sha256"]
+        if not {"state_out.json", "config.json", "input_fingerprint.json", "pdk_root.json"} <= hashes.keys():
+            raise ValueError(f"RETAP_HANDOFF_UNBOUND: {step} receipt")
+        for name, expected in hashes.items():
+            artifact = path / name
+            if (not artifact.resolve().is_relative_to(path.resolve())
+                    or not artifact.is_file() or ll.digest(artifact) != expected):
+                raise ValueError(f"RETAP_HANDOFF_STALE: {step}/{name}")
+        config = Path(execution["config"])
+        if not config.resolve().is_relative_to(project.resolve()) or not config.is_file():
+            raise ValueError(f"RETAP_HANDOFF_UNBOUND: {step} config")
+        scene = ll._load(config)
+        config_files = {str(p): ll.digest(p) for p in ll._walk_paths(scene) if p.is_file()}
+        if (ll.digest(config) != inputs.get("config") or config_files != inputs.get("config_files")
+                or scene.get("meta", {}).get("step") != step
+                or scene.get("PNR_SDC_FILE") != cfg["PNR_SDC_FILE"]):
+            raise ValueError(f"RETAP_HANDOFF_SCENE_MISMATCH: {step} config/SDC")
+        tail = ["-m", "librelane.steps", "run", "--id", step, "-c", str(config),
+                "-i", str(previous), "-o", str(path), "--pdk-root",
+                ll._load(path / "pdk_root.json")["cli_pdk_root"]]
+        argv = execution["argv"]
+        if (argv[-len(tail):] != tail
+                or ["--entrypoint", "python3", inputs["image"]] not in
+                [argv[i:i + 3] for i in range(len(argv) - 2)]):
+            raise ValueError(f"RETAP_HANDOFF_RUN_MISMATCH: {step} invocation")
+        for name, expected in execution["init_files"].items():
+            if not Path(name).is_file() or ll.digest(Path(name)) != expected:
+                raise ValueError(f"RETAP_HANDOFF_STALE: {step} init")
+        if step == "OpenROAD.STAMidPNR":
+            if (scene.get("PNR_CORNERS") != [corners[len(timed)]]
+                    or ll._sta_liberty_input_hashes(scene, project, mounts) != binding["input"]["liberty_files"]
+                    or any(scene.get(key) != cfg.get(key) for key in ("CELL_LIBS", "PAD_LIBS", "EXTRA_LIBS"))):
+                raise ValueError("RETAP_HANDOFF_SCENE_MISMATCH: final STA corners/Liberty")
+            timed.extend(scene["PNR_CORNERS"])
+        previous = path / "state_out.json"
+        output = ll._load(previous)
+        ll._check_state(output, outputs=True)
+        output_files = {str(p): ll.digest(p) for p in ll._walk_paths(
+            {k: v for k, v in output.items() if k != "metrics"})}
+        if (output_files != record["output_files"]
+                or inputs.get("liberty_files") != ll._sta_liberty_input_hashes(scene, project, mounts)):
+            raise ValueError(f"RETAP_HANDOFF_STALE: {step} output/Liberty")
+    for name, source in sources.items():
+        if Path(handoff["views"][name]["source"]).resolve() != Path(source).resolve():
+            raise ValueError(f"RETAP_HANDOFF_RUN_MISMATCH: adopted {name} source")
+
+
 def audit(project: Path) -> Tuple[str, Dict[str, Any]]:
     doc: Dict[str, Any] = {"program": PROGRAM, "step": STEP_ID, "findings": []}
     handoff = project / HANDOFF
@@ -216,6 +327,7 @@ def audit(project: Path) -> Tuple[str, Dict[str, Any]]:
         if selected == "librelane" and Path(views["post_cts_def"]["source"]).resolve() != Path(
                 ll._load(folder / "state_out.json")["def"]).resolve():
             raise ValueError("RETAP_HANDOFF_RUN_MISMATCH: adopted CTS source")
+        _require_current_adoption(project, handoff_record, folder, binding)
         doc["binding"] = {"input": binding["input"], "selected": selected,
                           "retap_adopted": selected == "librelane"}
     except (ll.Refusal, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:

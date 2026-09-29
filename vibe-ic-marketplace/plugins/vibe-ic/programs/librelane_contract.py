@@ -2502,6 +2502,8 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
     home = openroad_home(base / '.openroad_home', capability, openroad_init,
                          drv_probe=drv_probe)
     for index, (step_id, config, initial_state) in enumerate(steps, 1):
+        adoption_step = (lane in ('19-cts-hold', '19-cts-hold-direct-arm')
+                         and step_id in ('OpenROAD.ResizerTimingPostCTS', 'OpenROAD.STAMidPNR'))
         name = f'{index:02d}-{step_id.lower().replace(".", "-")}'
         folder = base / name
         state_path = previous or initial_state
@@ -2525,7 +2527,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                        'config_files': {str(path): digest(path) for path in _walk_paths(
                            _load(config)) if path.is_file()},
                        'step': step_id}
-        if step_id in ('OpenROAD.STAPostPNR', _RETAP_STEP):
+        if step_id in ('OpenROAD.STAPostPNR', _RETAP_STEP) or adoption_step:
             fingerprint['liberty_files'] = _sta_liberty_input_hashes(
                 _load(config), project, mounts or [])
         if home:
@@ -2542,6 +2544,9 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         # PDK_ROOT) or under another root/mount is archived and re-run. The
         # fingerprint itself is unchanged, so no other step re-runs for it.
         retap_current = True
+        if adoption_step and receipt.is_file():
+            saved = _load(receipt)
+            retap_current = bool(saved.get('execution') and saved.get('output_files'))
         if step_id == _RETAP_STEP and receipt.is_file():
             try:
                 require_retap_binding(project, folder)
@@ -2598,7 +2603,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             raise Refusal('LL_STEP_FAILED', f'{step_id}: rc={completed.returncode}; {folder / "invocation.log"}')
         out_state = _load(folder / 'state_out.json')
         _check_state(out_state, outputs=True)
-        if step_id in ('OpenROAD.STAPostPNR', _RETAP_STEP) and fingerprint['liberty_files'] != \
+        if (step_id in ('OpenROAD.STAPostPNR', _RETAP_STEP) or adoption_step) and fingerprint['liberty_files'] != \
                 _sta_liberty_input_hashes(_load(config), project, mounts or []):
             raise Refusal('LL_STA_LIBERTY_CHANGED_DURING_RUN', str(folder))
         hashes = {'state_out.json': digest(folder / 'state_out.json')}
@@ -2609,10 +2614,10 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             if path.is_file() and path.name.endswith(('.json', '.rpt')) and path.name not in ('vibeic_receipt.json',):
                 hashes[str(path.relative_to(folder))] = digest(path)
             if ((step_id == 'OpenROAD.STAPostPNR' and path.name == 'sta.log')
-                    or (step_id == _RETAP_STEP and path.suffix == '.log')) and path.is_file():
+                    or ((step_id == _RETAP_STEP or adoption_step) and path.suffix == '.log')) and path.is_file():
                 hashes[str(path.relative_to(folder))] = digest(path)
         record = {'input': fingerprint, 'sha256': hashes}
-        if step_id == _RETAP_STEP:
+        if step_id == _RETAP_STEP or adoption_step:
             # Publish native execution and all views at this existing receipt
             # boundary; no clock/data or retap policy decision changes here.
             record['execution'] = {'argv': cmd, 'rc': completed.returncode,

@@ -60,7 +60,7 @@ NL_KEPT = NL_IN.replace(
     "\\u_core/_1753_  (.CLK(clknet_0_i_clk__core)")
 
 
-def _project(tmp_path, log, nl_out, nl_in=NL_IN):
+def _project(tmp_path, log, nl_out, nl_in=NL_IN, corners=("nom",)):
     project = tmp_path / "proj"
     folder = project / "phase3/librelane/19-cts-hold/03-vibeic-externalcapturelaunchretap"
     inputs = project / "inputs"
@@ -77,8 +77,8 @@ def _project(tmp_path, log, nl_out, nl_in=NL_IN):
     initial.write_text(json.dumps(state))
     config = inputs / "config.json"
     config.write_text(json.dumps({"meta": {"step": RA.STEP_ID},
-                                 "PNR_SDC_FILE": state["sdc"], "PNR_CORNERS": ["nom"],
-                                 "CELL_LIBS": {"nom": [str(inputs / "cells.lib")]}}))
+                                 "PNR_SDC_FILE": state["sdc"], "PNR_CORNERS": list(corners),
+                                 "CELL_LIBS": {c: [str(inputs / "cells.lib")] for c in corners}}))
     (project / "phase3").mkdir()
     (project / "phase3/librelane_switch.json").write_text(json.dumps(
         {"steps": {"19": "librelane", "20": "librelane"}}))
@@ -106,18 +106,33 @@ def _project(tmp_path, log, nl_out, nl_in=NL_IN):
     passthrough.write_text(json.dumps({"meta": {"step": "OpenROAD.CTS"}}))
     sizing = inputs / "sizing.json"
     sizing.write_text(json.dumps({"meta": {"step": cts.CLOCK_PATH_SIZING_ARMS["tool"]}}))
+    downstream = []
+    for index, (step, scene_corners) in enumerate(
+            [("OpenROAD.ResizerTimingPostCTS", list(corners))]
+            + [("OpenROAD.STAMidPNR", [c]) for c in corners]):
+        path = inputs / (step + ("@" + scene_corners[0] if index > 1 else "") + ".json")
+        cfg = json.loads(config.read_text())
+        cfg["meta"]["step"] = step
+        cfg["PNR_CORNERS"] = scene_corners
+        path.write_text(json.dumps(cfg))
+        downstream.append((step, path, initial))
     def native(cmd, **kwargs):
         if cmd[cmd.index('--id') + 1] == RA.STEP_ID:
             return captured_native(cmd, **kwargs)
         target = Path(cmd[cmd.index('-o') + 1])
-        (target / "state_out.json").write_text(initial.read_text())
+        current = Path(cmd[cmd.index('-i') + 1]).read_text()
+        (target / "state_in.json").write_text(current)
+        (target / "state_out.json").write_text(current)
+        shutil.copyfile(Path(cmd[cmd.index('-c') + 1]), target / "config.json")
         return subprocess.CompletedProcess(cmd, 0, "captured preceding step\n", "")
+    steps = [("OpenROAD.CTS", passthrough, initial),
+             (cts.CLOCK_PATH_SIZING_ARMS["tool"], sizing, initial),
+             (RA.STEP_ID, config, initial)] + downstream
     with patch.object(contract, "image_capability", return_value={}), \
             patch.object(contract, "run_container", side_effect=native):
-        produced = contract.run_chain(project, "captured-image", [
-            ("OpenROAD.CTS", passthrough, initial),
-            (cts.CLOCK_PATH_SIZING_ARMS["tool"], sizing, initial),
-            (RA.STEP_ID, config, initial)], lane="19-cts-hold", pdk_root="/pdk")
+        produced = contract.run_chain(project, "captured-image", steps,
+                                      lane="19-cts-hold", pdk_root="/pdk")
+    chain_folders, produced = produced, produced[:3]
     assert produced[-1] == folder
     # Preserve the original proof's input pathname; it aliases the actual input.
     (folder / "in.nl.v").symlink_to(inputs / "input.nl")
@@ -133,12 +148,14 @@ def _project(tmp_path, log, nl_out, nl_in=NL_IN):
         shutil.copyfile(source, dest)
         views[name] = {"source": str(source), "source_sha256": contract.digest(source),
                        "dest": str(dest.relative_to(project)), "dest_sha256": contract.digest(dest)}
-    receipt.write_text(json.dumps({"chain": {RA.STEP_ID: str(folder.relative_to(project))},
+    receipt.write_text(json.dumps({"chain": {step: str(path.relative_to(project))
+                                           for (step, _, _), path in zip(steps, chain_folders)},
+        "steps": [step for step, _, _ in steps], "corners": list(corners),
         "image": "captured-image", "modes": cts.modes(project),
         "selected": "librelane", "selection": {"selection": "librelane"},
         "clock_path_sizing": {"arm": "tool", "step": cts.CLOCK_PATH_SIZING_ARMS["tool"]},
-        "measured_state": str((folder / "state_out.json").relative_to(project)),
-        "measured_state_sha256": contract.digest(folder / "state_out.json"), "views": views}))
+        "measured_state": str((chain_folders[-1] / "state_out.json").relative_to(project)),
+        "measured_state_sha256": contract.digest(chain_folders[-1] / "state_out.json"), "views": views}))
     return project
 
 
@@ -281,6 +298,102 @@ def test_fresh_rejected_trials_with_no_netlist_change_pass(tmp_path):
     assert doc['keeps'] == [] and doc['netlist']['moved_connections'] == 0
 
 
+@pytest.mark.parametrize("decision", ["keep", "reject"])
+@pytest.mark.parametrize("changed", ["scene", "subject", "hold-source", "sta-input", "sta-library"])
+def test_current_adopted_chain_is_required_for_keeps_and_rejects(tmp_path, decision, changed):
+    project = _project(tmp_path, KEEP_LOG if decision == "keep" else REJECT_LOG,
+                       NL_KEPT if decision == "keep" else NL_IN)
+    handoff_path = project / RA.HANDOFF
+    handoff = json.loads(handoff_path.read_text())
+    if changed == "scene":
+        handoff["corners"] = ["other_scene"]
+    elif changed == "subject":
+        unrelated = project / "unadopted/state_out.json"
+        unrelated.parent.mkdir()
+        unrelated.write_text((project / handoff["measured_state"]).read_text())
+        handoff["measured_state"] = str(unrelated.relative_to(project))
+        handoff["measured_state_sha256"] = contract.digest(unrelated)
+    elif changed == "hold-source":
+        view = handoff["views"]["post_hold_def"]
+        unrelated = project / "unadopted.def"
+        unrelated.write_text("neutral unadopted DEF\n")
+        shutil.copyfile(unrelated, project / view["dest"])
+        view.update(source=str(unrelated), source_sha256=contract.digest(unrelated),
+                    dest_sha256=contract.digest(project / view["dest"]))
+    else:
+        path = project / handoff["chain"]["OpenROAD.STAMidPNR"] / "vibeic_receipt.json"
+        record = json.loads(path.read_text())
+        if changed == "sta-input":
+            record["execution"]["state"] = str(project / "inputs/state.json")
+        else:
+            record["input"]["liberty_files"] = {"/unrelated/cells.lib": "unrelated"}
+            (path.parent / "input_fingerprint.json").write_text(json.dumps(record["input"]))
+            record["sha256"]["input_fingerprint.json"] = contract.digest(path.parent / "input_fingerprint.json")
+        path.write_text(json.dumps(record))
+    handoff_path.write_text(json.dumps(handoff))
+    verdict, doc = RA.audit(project)
+    (tmp_path / "adoption_observed.json").write_text(json.dumps({
+        "decision": decision, "changed": changed, "verdict": verdict, "doc": doc}))
+    assert verdict == "NOT_MEASURED" and "RETAP_TIMING_EVIDENCE_UNBOUND" in doc["reason"], doc
+    assert _run(project)[0] == 2
+
+
+@pytest.mark.parametrize("decision", ["keep", "reject"])
+def test_all_current_sta_corners_remain_bound_to_the_selected_chain(tmp_path, decision):
+    project = _project(tmp_path, KEEP_LOG if decision == "keep" else REJECT_LOG,
+                       NL_KEPT if decision == "keep" else NL_IN, corners=("scene_a", "scene_b"))
+    rc, doc = _run(project)
+    assert rc == 0 and doc["verdict"] == "PASS", doc
+    assert doc["netlist"]["moved_connections"] == (1 if decision == "keep" else 0)
+
+
+@pytest.mark.parametrize("decision", ["keep", "reject"])
+def test_current_selected_direct_arm_remains_bound_without_claiming_retap_adoption(tmp_path, decision):
+    project = _project(tmp_path, KEEP_LOG if decision == "keep" else REJECT_LOG,
+                       NL_KEPT if decision == "keep" else NL_IN)
+    arm = project / "phase3/tool_arms/19/openroad"
+    bridge = arm / "bridge/state_in.json"
+    bridge.parent.mkdir(parents=True)
+    state = json.loads((project / "inputs/state.json").read_text())
+    for key in ("def", "odb"):
+        path = arm / ("post_hold." + key)
+        path.write_text("neutral direct-arm " + key + "\n")
+        state[key] = str(path)
+    (arm / "post_cts.def").write_text("neutral direct-arm CTS DEF\n")
+    bridge.write_text(json.dumps(state))
+    def native(cmd, **kwargs):
+        target = Path(cmd[cmd.index('-o') + 1])
+        (target / "state_out.json").write_text(Path(cmd[cmd.index('-i') + 1]).read_text())
+        shutil.copyfile(Path(cmd[cmd.index('-c') + 1]), target / "config.json")
+        return subprocess.CompletedProcess(cmd, 0, "neutral direct STA edge; no EDA\n", "")
+    with patch.object(contract, "image_capability", return_value={}), \
+            patch.object(contract, "run_container", side_effect=native):
+        produced = contract.run_chain(project, "captured-image", [
+            ("OpenROAD.STAMidPNR", project / "inputs/OpenROAD.STAMidPNR.json", bridge)],
+            lane="19-cts-hold-direct-arm", pdk_root="/pdk")
+    (project / "phase3/librelane_switch.json").write_text(json.dumps(
+        {"steps": {"19": "dual", "20": "dual"}}))
+    selection = {"selection": "openroad", "mode": "dual"}
+    (arm.parent / "selection.json").write_text(json.dumps(selection))
+    handoff_path = project / RA.HANDOFF
+    handoff = json.loads(handoff_path.read_text())
+    measured = produced[-1] / "state_out.json"
+    handoff.update(modes=cts.modes(project), selected="openroad", selection=selection,
+                   measured_state=str(measured.relative_to(project)),
+                   measured_state_sha256=contract.digest(measured))
+    for name, filename in (("post_cts_def", "post_cts.def"), ("post_hold_def", "post_hold.def"),
+                           ("post_hold_odb", "post_hold.odb")):
+        source = arm / filename
+        view = handoff["views"][name]
+        shutil.copyfile(source, project / view["dest"])
+        view.update(source=str(source), source_sha256=contract.digest(source),
+                    dest_sha256=contract.digest(project / view["dest"]))
+    handoff_path.write_text(json.dumps(handoff))
+    rc, doc = _run(project)
+    assert rc == 0 and doc["verdict"] == "PASS", doc
+    assert doc["binding"]["selected"] == "openroad" and doc["binding"]["retap_adopted"] is False
+
+
 def _repeat_chain(project, native):
     inputs = project / 'inputs'
     with patch.object(contract, 'image_capability', return_value={}), \
@@ -288,7 +401,9 @@ def _repeat_chain(project, native):
         return contract.run_chain(project, 'captured-image', [
             ('OpenROAD.CTS', inputs / 'passthrough.json', inputs / 'state.json'),
             (cts.CLOCK_PATH_SIZING_ARMS['tool'], inputs / 'sizing.json', inputs / 'state.json'),
-            (RA.STEP_ID, inputs / 'config.json', inputs / 'state.json')],
+            (RA.STEP_ID, inputs / 'config.json', inputs / 'state.json'),
+            ('OpenROAD.ResizerTimingPostCTS', inputs / 'OpenROAD.ResizerTimingPostCTS.json', inputs / 'state.json'),
+            ('OpenROAD.STAMidPNR', inputs / 'OpenROAD.STAMidPNR.json', inputs / 'state.json')],
             lane='19-cts-hold', pdk_root='/pdk')
 
 
