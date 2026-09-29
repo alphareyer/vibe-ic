@@ -96,6 +96,33 @@ proc ::vibeic_drv::synth_census {path} {
     ::vibeic_drv::census $path
 }
 
+# R-0929-DRV-FANOUT-LIMIT: the zero-argument sta::max_fanout_check_limit is
+# the limit of OpenSTA's worst-slack fanout pin (an IO pad's library default
+# on a padded die).  Record every pin's enforced fanout limit, and each pin's
+# master cell, so the reader can take the design-level limit on core drivers
+# and the IO cells' limit apart.
+proc ::vibeic_drv::fanout_limits {tag} {
+    set path $tag.fanout_limits.rpt
+    sta::redirect_file_begin $path
+    set code [catch {::vibeic_drv::rct -max_fanout -verbose -max_count 1000000000} msg]
+    sta::redirect_file_end
+    if {$code} { error $msg }
+    set f [open $path r]
+    set body [read $f]
+    close $f
+    set out [open $tag.pin_cells w]
+    foreach line [split $body "\n"] {
+        if {![regexp {^\s*Pin\s+(\S+)} $line -> name]} { continue }
+        set pin [get_pins -quiet $name]
+        if {[llength $pin]} {
+            puts $out "pin_cell\t$name\t[get_property [get_cells -of_objects $pin] ref_name]"
+        } else {
+            puts $out "pin_cell\t$name\t<port>"
+        }
+    }
+    close $out
+}
+
 proc ::vibeic_drv::pre {command argv} {
     variable seq
     set d [::vibeic_drv::dir]
@@ -113,6 +140,7 @@ proc ::vibeic_drv::pre {command argv} {
             puts $f "sta::max_fanout_check_limit $limit"
         }
         close $f
+        ::vibeic_drv::fanout_limits $tag
     } msg]} {
         ::vibeic_drv::append_line $tag.error "pre: $msg"
     }
