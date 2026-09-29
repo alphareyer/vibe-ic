@@ -57975,8 +57975,9 @@ def step_declared_signoff_gates(project: Path,
             extra_argv = tuple(extra_argv) + ("--pdk-container", container)
         out.append(_run_declared_signoff_gate(
             project, name, program, out_rel, extra_argv))
-    return _reconcile_sta_verdict(_ppa_timing.pad_drive_sta_verdict(
-        sys.modules[__name__], project, out))
+    # R-0929-PAD-INPUT-DRIVE: no STA PASS on a NOT_MEASURED pad drive.
+    out = _ppa_timing.pad_drive_sta_verdict(sys.modules[__name__], project, out)
+    return _reconcile_sta_verdict(out)
 
 
 # ---------------------------------------------------------------------------
