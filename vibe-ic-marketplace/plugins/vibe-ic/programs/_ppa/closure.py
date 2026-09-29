@@ -1334,34 +1334,73 @@ def _docker_names() -> List[str]:
     return done.stdout.split() if done.returncode == 0 else []
 
 
+def _container_pid(name: str) -> int:
+    """The host pid of container `name`'s init process; 0 when there is none
+    to read (not started yet, already gone, or `docker inspect` failed)."""
+    try:
+        done = subprocess.run([_DOCKER, "inspect", "-f", "{{.State.Pid}}", name],
+                              capture_output=True, text=True, timeout=30)
+        return int(done.stdout.strip() or 0)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return 0
+
+
+class ActuatorProgress:
+    """The actuator's forward-progress reading: its host process tree plus
+    every container it started, NON-DECREASING across container turnover.
+
+    WHY EVERY PART IS CARRIED. `ProgressMeter` counts CPU only above the
+    highest total it has seen. A LibreLane actuator runs one container per
+    step, and a container's processes leave the host's /proc the moment it
+    exits, together with the `docker run` client in the actuator's own tree.
+    Summing only what is running NOW, the total FELL at every step boundary:
+    after the big repair step exited, the smaller measuring steps after it
+    never climbed back over its peak, and on a design whose later steps
+    outlast the stall grace a HEALTHY actuator was killed as stalled
+    (RC_STALLED -> ACTUATOR_FAILED; U7 final review follow-up). So each
+    container keeps the last reading it gave once it is gone, and the host
+    tree is carried at its own peak: the total moves only when some part of
+    the job goes beyond anything that part had already shown.
+
+    WHAT IT STILL CATCHES. Nothing here invents progress: an exited
+    container's reading is frozen, an idle one does not move, and a reading
+    that is unavailable on one look (pid 0, unreadable /proc) carries its
+    last value, so an actuator whose every part has stopped reads flat and
+    is stopped after the grace exactly as before.
+    """
+
+    def __init__(self) -> None:
+        self._host = 0.0
+        self._containers: Dict[str, float] = {}
+
+    def __call__(self, proc: Any) -> Optional[float]:
+        import _watchdog as _wd
+        host = _wd.host_tree_progress(proc.pid)
+        if host is None:
+            return None  # the actuator's tree is gone: no reading, never zero
+        self._host = max(self._host, host)
+        for name in owned_containers(_tree_pids(proc.pid), _docker_names()):
+            inner_pid = _container_pid(name)
+            # pid 0 (not started, gone, unreadable) is no reading: its "tree"
+            # is the whole host, which always moves.
+            inner = _wd.host_tree_progress(inner_pid) if inner_pid > 0 else None
+            if inner is not None:
+                self._containers[name] = max(self._containers.get(name, 0.0), inner)
+        return self._host + sum(self._containers.values())
+
+
 def run_actuator(argv: Sequence[str], *, cwd: Path,
                  budget_s: float) -> Tuple[int, str]:
     """Run one actuator invocation; return (rc, the tail of what it said).
 
     Progress is the actuator's host process tree AND the containers it
     started (a LibreLane actuator spends its time inside `docker run`, whose
-    processes are not the actuator's descendants). A stall kills the tree and
+    processes are not the actuator's descendants), read by `ActuatorProgress`
+    so a container that exits keeps what it did. A stall kills the tree and
     removes those containers by name, so nothing the actuator started keeps
     running while the next candidate launches; the rc is `RC_STALLED`.
     """
     import _watchdog as _wd
-
-    def progress(proc: Any) -> Optional[float]:
-        total = _wd.host_tree_progress(proc.pid)
-        if total is None:
-            return None
-        for name in owned_containers(_tree_pids(proc.pid), _docker_names()):
-            try:
-                done = subprocess.run([_DOCKER, "inspect", "-f", "{{.State.Pid}}", name],
-                                      capture_output=True, text=True, timeout=30)
-                inner_pid = int(done.stdout.strip() or 0)
-            except (OSError, subprocess.SubprocessError, ValueError):
-                inner_pid = 0
-            # pid 0 (not started, gone, unreadable) is no reading: its "tree"
-            # is the whole host, which always moves.
-            inner = _wd.host_tree_progress(inner_pid) if inner_pid > 0 else None
-            total += inner or 0.0
-        return total
 
     def reap(proc: Any, reason: str) -> None:
         names = owned_containers(_tree_pids(proc.pid), _docker_names())
@@ -1375,7 +1414,8 @@ def run_actuator(argv: Sequence[str], *, cwd: Path,
 
     grace = (ACTUATOR_STALL_GRACE_S if ACTUATOR_STALL_GRACE_S is not None
              else _wd.DEFAULT_STALL_GRACE_S)
-    res = _wd.run_host_supervised(list(argv), cwd=str(cwd), cpu_probe=progress,
+    res = _wd.run_host_supervised(list(argv), cwd=str(cwd),
+                                  cpu_probe=ActuatorProgress(),
                                   kill=reap, stall_grace_s=grace,
                                   hard_ceiling_s=budget_s)
     if res.outcome == "launch_error":
