@@ -75551,6 +75551,16 @@ def _phase3_window_publication(project: Path, isolated: Path,
                 path = Path(token)
                 owner = root if path.is_absolute() else private
                 cited = path if path.is_absolute() else private / path
+                # An absolute spelling that walks through the disposable copy
+                # dangles once the copy is removed, even when a carried link
+                # or a ".." leads it back into the project. Judge every
+                # spelled prefix, not only the resolved target.
+                if path.is_absolute():
+                    for depth in range(1, len(path.parts) + 1):
+                        prefix = os.path.realpath(Path(*path.parts[:depth]))
+                        if Path(prefix).is_relative_to(private):
+                            raise ValueError(
+                                f"window input outside project: {token}")
                 # Resolve the spelling as cited. Normalizing first erases a
                 # missing component or a symlink before a following "..".
                 try:
