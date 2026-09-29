@@ -77,6 +77,43 @@ TRIGGER_DECISION_DECLARED = "phase3/stage3/postroute_timing_repair/postroute_tim
 #: Basename of the above, derived rather than restated so the two cannot drift.
 TRIGGER_DECISION_FILENAME = TRIGGER_DECISION_DECLARED.rsplit("/", 1)[-1]
 
+#: The canonical Step-32 decision (phase3_one_shot_runner canonicalize),
+#: written on every run. When a bound LibreLane producer receipt holds the
+#: declared record, this file is where the canonical demands live, and they
+#: must still reach this audit (review wave 58, R-0929-STEP32-RECORD).
+CANONICAL_DECISION_DECLARED = (
+    "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json")
+
+
+def load_canonical_decision(
+        project_dir: Path) -> Tuple[Optional[Dict[str, Any]], Optional[Finding]]:
+    """``(canonical decision, finding)``: absent -> ``(None, None)``; an
+    unreadable one is an ERROR, never "no demand"."""
+    src = Path(project_dir) / CANONICAL_DECISION_DECLARED
+    if not src.exists():
+        return None, None
+    try:
+        data = json.loads(src.read_text(errors="replace"))
+    except (json.JSONDecodeError, OSError) as exc:
+        data, exc_text = None, str(exc)
+    else:
+        exc_text = f"not a JSON object ({type(data).__name__})"
+    if not isinstance(data, dict):
+        return None, Finding(
+            "ERROR", "BAD_CANONICAL_DECISION",
+            f"cannot read {CANONICAL_DECISION_DECLARED}: {exc_text} -- the "
+            "canonical Step-32 demands behind a producer receipt are unknown")
+    return data, None
+
+
+def _canonical_behind_receipt(decision: Optional[Dict[str, Any]],
+                              canonical: Optional[Dict[str, Any]]) -> bool:
+    """True when the declared record is a PRODUCER receipt (not written by the
+    canonical recorder) and the canonical decision sits beside it."""
+    import postroute_timing_repair_decision as _repair_dec
+    return (isinstance(canonical, dict) and isinstance(decision, dict)
+            and decision.get("recorded_by") != _repair_dec.CANONICAL_RECORDER)
+
 
 @dataclass
 class Finding:
@@ -328,6 +365,28 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
             flag_present=no_repair.exists(),
             log_present=repair_log.exists()))
 
+    # Behind a bound producer receipt the canonical decision is a separate
+    # record; its demands are ORed in here (they can only add a finding).
+    canonical, canonical_problem = load_canonical_decision(project_dir)
+    if canonical_problem is not None:
+        findings.append(canonical_problem)
+    behind_receipt = _canonical_behind_receipt(decision, canonical)
+    stats["canonical_behind_receipt"] = behind_receipt
+    if behind_receipt:
+        findings.extend(f for f in _decision_findings(
+            canonical, flag_present=no_repair.exists(), log_present=False)
+            if f.severity == "ERROR")
+        if canonical.get("timing_repair_needed") is True \
+                and canonical.get("action") != "timing_repair_ran":
+            findings.append(Finding(
+                "ERROR", "TIMING_REPAIR_REQUIRED_UNAPPLIED",
+                "the canonical Step-32 decision measured a timing violation "
+                f"({canonical.get('reason')!r}) and no timing repair ran on it; "
+                "the producer's repair record describes an earlier route and "
+                "cannot answer this demand",
+                f"canonical action: {canonical.get('action')!r}; producer "
+                f"action: {(decision or {}).get('action')!r}"))
+
     named = _not_measured_finding(
         postroute_timing_repair_dir / MEASUREMENT_NOT_AVAILABLE, decision)
     if named is not None:
@@ -398,6 +457,9 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
     # silence a real EMPTY_CHANGES/NOT_REVERIFIED by omission or by a missing
     # field.
     _blocking = _nontiming_block_domains(data, decision)
+    if behind_receipt:
+        _blocking += [d for d in _nontiming_block_domains({}, canonical)
+                      if d not in _blocking]
     stats["nontiming_block_domains"] = _blocking
 
     _residual = (decision or {}).get("residual") if isinstance(decision, dict) else None

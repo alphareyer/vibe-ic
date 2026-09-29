@@ -37,6 +37,7 @@ REPAIR = "phase3/stage3/postroute_timing_repair"
 DECISION = f"{REPAIR}/postroute_timing_repair_decision.json"
 FLAG = f"{REPAIR}/no_repair_needed.flag"
 LOG = f"{REPAIR}/repair_log.json"
+CANONICAL = f"{REPAIR}/postroute_timing_repair_decision.canonical.json"
 STATUS_GEN = "postroute_timing_repair_status_gen.py"
 
 PATH_MET = """\
@@ -285,6 +286,7 @@ def test_a_residual_drv_after_adoption_stays_a_failure(tmp_path, monkeypatch):
     assert [r["domain"] for r in record["nontiming_failures"]] == ["drv"]
     log = json.loads((p / LOG).read_text())
     assert log["residual_violation"] is True
+    assert log["re_verified"] is False
     assert log["re_verification"]["no_further_repair_needed"] is False
     assert not (p / FLAG).exists()
     assert _status_gen(p).returncode == 0 and not (p / FLAG).exists()
@@ -387,3 +389,69 @@ def test_a_generator_refusal_is_in_the_run_record(tmp_path, monkeypatch):
     steps = R._derived_generator_refusals(outcomes)
     assert [s.status for s in steps] == ["NOT_MEASURED"]
     assert STATUS_GEN in steps[0].name and "No candidate post-route STA report" in steps[0].detail
+
+
+# ---------------------------------------------------------------------------
+# Review wave 58 (STEP32FLAG final): behind a bound producer receipt the
+# canonical decision's demands must still reach the Step-32 audit.
+# ---------------------------------------------------------------------------
+
+def _adopted_producer_receipt(p: Path) -> None:
+    """The real spm path: LibreLane Step 32 adopted 32-cand01 (DRV 9 -> 0)
+    and published its bound receipt and a re-verified repair_log."""
+    report, state = _ll_report(p, adopted="32-cand01", before_drv=9, after_drv=0)
+    (p / REPAIR).mkdir(parents=True, exist_ok=True)
+    (p / DECISION).write_text(json.dumps({
+        "repair_needed": True, "action": "candidate_adopted",
+        "baseline": {"drv_count": 9}, "final": {"drv_count": 0},
+        "residual": {"drv_count": 0},
+        "source_report": LL_REPORT,
+        "source_report_sha256": hashlib.sha256(report.read_bytes()).hexdigest()}))
+    (p / LOG).write_text(json.dumps({
+        "changes": [{"candidate": "32-cand01"}], "re_verified": True,
+        "affected_steps": []}))
+
+
+def test_a_nontiming_failure_behind_a_producer_receipt_reaches_the_audit(
+        tmp_path, monkeypatch):
+    """Wave 58 (a): adopted candidate, IR-drop sign-off FAIL, timing met. The
+    canonical record names ir_drop; the audit must refuse, as main does."""
+    p = _proj(tmp_path)
+    _adopted_producer_receipt(p)
+    ir = p / "reports/phase3/ir_drop.json"
+    ir.write_text(json.dumps({"verdict": "FAIL"}))
+    before = (p / DECISION).read_bytes(), (p / LOG).read_bytes()
+    _canonicalize(p, monkeypatch, SPEF_MET)
+    assert (p / DECISION).read_bytes() == before[0]
+    assert (p / LOG).read_bytes() == before[1]
+    canonical = json.loads((p / CANONICAL).read_text())
+    assert [r["domain"] for r in canonical["nontiming_failures"]] == ["ir_drop"]
+    _status_gen(p)
+    audit = _audit(p)
+    assert audit.returncode != 0, audit.stdout
+    assert "REPAIR_BLOCKED_ON_NONTIMING_SIGNOFF" in audit.stdout
+
+
+def test_a_timing_violation_behind_a_producer_receipt_reaches_the_audit(
+        tmp_path, monkeypatch):
+    """Wave 58 (b): the same receipt, single-corner SPEF VIOLATED -12.27 ns,
+    no multi-corner OCV, so no actuator fires. The producer's re-verified log
+    does not describe this violation; the audit must refuse."""
+    p = _proj(tmp_path)
+    _adopted_producer_receipt(p)
+    _canonicalize(p, monkeypatch, SPEF_VIOLATED)
+    canonical = json.loads((p / CANONICAL).read_text())
+    assert canonical["timing_repair_needed"] is True
+    assert not (p / FLAG).exists()
+    _status_gen(p)
+    audit = _audit(p)
+    assert audit.returncode != 0, audit.stdout
+    assert "TIMING_REPAIR_REQUIRED_UNAPPLIED" in audit.stdout
+
+
+def test_the_canonical_record_is_written_on_every_run(tmp_path, monkeypatch):
+    """`.canonical.json` is a declared Step-32 output, so it exists with and
+    without a producer receipt."""
+    p = _proj(tmp_path)
+    _canonicalize(p, monkeypatch, SPEF_MET)
+    assert json.loads((p / CANONICAL).read_text()) == json.loads((p / DECISION).read_text())
