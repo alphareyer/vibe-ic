@@ -303,3 +303,140 @@ def test_real_expert_database_no_longer_overrides_sticky_multi_outstanding_input
     assert _lesson_digest.render_ic_expert_db_digest(stage,"AXI interconnect timeout watchdog transaction outstanding") > 0
     consumed = (stage / "ic_expert_db.md").read_text()
     assert "per-transaction" in consumed and "prompt-sticky" in consumed
+
+
+def _competing_vector(project, module="neutral_monitor"):
+    spec = {"module": module, "op": "reverse", "chunk": 1,
+            "inputs": [{"name": "bit_i", "width": 1}],
+            "outputs": [{"name": "bit_o", "width": 1}]}
+    (project / "input/rtl_spec.json").write_text(json.dumps(spec))
+
+
+@pytest.mark.parametrize("bad", ["reorder", "source_free", "malformed"])
+def test_normal_dispatch_validates_watchdog_before_competing_vector(tmp_path, bad):
+    import design_one_shot_runner as runner
+    c = _project(tmp_path)
+    path = tmp_path / "input/in_order_watchdog.json"
+    if bad == "malformed":
+        path.write_text('{"schema":')
+    else:
+        if bad == "reorder":
+            c["response_order"] = "out_of_order"
+        else:
+            c["mapping"] = {}
+        path.write_text(json.dumps(c))
+    _competing_vector(tmp_path)
+    result = runner.step_rtl_gen(tmp_path, "unknown")
+    assert result.status == "FAIL", result
+    assert "WATCHDOG_CONTRACT_REFUSED" in result.detail
+    assert not list((tmp_path / "phase2").rglob("*.v"))
+    assert not list((tmp_path / "phase2").rglob("*.sv"))
+
+
+def test_normal_dispatch_elects_valid_watchdog_and_preserves_unrelated_vector(tmp_path):
+    import design_one_shot_runner as runner
+    declared = tmp_path / "declared"
+    _project(declared)
+    _competing_vector(declared)
+    result = runner.step_rtl_gen(declared, "unknown")
+    assert (result.status, result.extras.get("shape")) == ("PASS", "in_order_watchdog")
+    assert not list(declared.rglob("*.sv"))
+    unrelated = tmp_path / "unrelated"
+    (unrelated / "input").mkdir(parents=True)
+    _competing_vector(unrelated, "ordinary_reverse")
+    result = runner.step_rtl_gen(unrelated, "unknown")
+    assert (result.status, result.extras.get("deterministic_generator")) == ("PASS", "vector-op")
+    assert len(list(unrelated.rglob("*.sv"))) == 1
+
+
+@pytest.mark.parametrize("keyword", ["event", "endcase", "integer", "int", "unique0", "soft"])
+@pytest.mark.parametrize("role", ["module", *ROLES])
+def test_language_keyword_refuses_both_consumers_before_write(tmp_path, keyword, role):
+    import design_one_shot_runner as runner
+    changes = {"module": keyword} if role == "module" else {
+        "ports": dict(zip(ROLES, ["tick", "clear", "offer", "take", "finish", "limit", "alarm", "fault"]))}
+    if role != "module":
+        changes["ports"][role] = keyword
+    cli = tmp_path / "cli"
+    normal = tmp_path / "normal"
+    _project(cli, **changes)
+    _project(normal, **changes)
+    rc, out = _frontdoor(cli)
+    assert (rc, out["verdict"]) == (2, "REFUSED")
+    assert "WATCHDOG_IDENTIFIER_INVALID" in out["reason"]
+    result = runner.step_rtl_gen(normal, "unknown")
+    assert result.status == "FAIL"
+    assert "WATCHDOG_IDENTIFIER_INVALID" in result.detail
+    for project in (cli, normal):
+        assert not list(project.rglob("*.v"))
+        assert not list(project.rglob("*.sv"))
+
+
+@pytest.mark.parametrize("keyword", ["event", "endcase", "integer", "int", "unique0", "soft"])
+def test_native_keyword_discriminates_from_ordinary_renamed_identifiers(tmp_path, keyword):
+    if not shutil.which("iverilog"):
+        pytest.skip("NOT_MEASURED: host RTL compiler unavailable")
+    c = _project(tmp_path, module="Event", ports=dict(zip(ROLES, [
+        "wd_count", "reset_z", "incoming", "accepted", "returned", "deadline", "sticky_event", "broken_contract"])))
+    rtl = _emit(tmp_path)
+    positive = subprocess.run(["iverilog", "-g2012", "-s", c["module"],
+                               "-o", str(tmp_path / "good.out"), str(rtl)],
+                              capture_output=True, text=True)
+    assert positive.returncode == 0, positive.stderr
+    for label, body in (("module", rtl.read_text().replace("module Event (", "module " + keyword + " (", 1)),
+                        ("port", rtl.read_text().replace("incoming", keyword)),
+                        ("local", rtl.read_text().replace("wd__count", keyword))):
+        invalid = tmp_path / (label + ".v")
+        assert body != rtl.read_text()
+        invalid.write_text(body)
+        native = subprocess.run(["iverilog", "-g2012", "-o", str(tmp_path / (label + ".out")), str(invalid)],
+                                capture_output=True, text=True)
+        assert native.returncode != 0, (keyword, label, native.stdout, native.stderr)
+
+
+@pytest.mark.parametrize("ancestor", ["phase2", "phase2/stage1", "phase2/stage1/rtl"])
+def test_cli_refuses_symlink_output_ancestors_without_external_writes(tmp_path, ancestor):
+    project = tmp_path / "project"
+    external = tmp_path / "external"
+    external.mkdir()
+    sentinel = external / "owner.txt"
+    sentinel.write_bytes(b"Owner bytes stay unchanged.\n")
+    _project(project)
+    link = project / ancestor
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(external, target_is_directory=True)
+    rc, out = _frontdoor(project)
+    assert (rc, out["verdict"]) == (2, "REFUSED")
+    assert list(external.iterdir()) == [sentinel]
+    assert sentinel.read_bytes() == b"Owner bytes stay unchanged.\n"
+
+
+@pytest.mark.parametrize("mutation", ["ancestor", "source", "population"])
+def test_cli_held_snapshot_rejects_live_mutation_before_commit(tmp_path, monkeypatch, capsys, mutation):
+    import canonical_primitive_synth as canonical
+    project = tmp_path / "project"
+    external = tmp_path / "external"
+    external.mkdir()
+    _project(project)
+    (project / "phase2").mkdir()
+    original = canonical.declared_watchdog
+    reached = []
+    def mutate_after_validation(staged):
+        result = original(staged)
+        reached.append(result["source_sha256"])
+        if mutation == "ancestor":
+            (project / "phase2").rename(project / "owner_phase2")
+            (project / "phase2").symlink_to(external, target_is_directory=True)
+        elif mutation == "source":
+            (project / "input/design.md").write_text("Authorized late input content change.\n")
+        else:
+            (project / "input/new.md").write_text("Authorized late population addition.\n")
+        return result
+    monkeypatch.setattr(canonical, "declared_watchdog", mutate_after_validation)
+    rc = canonical.main([str(project), "--emit"])
+    out = json.loads(capsys.readouterr().out)
+    assert len(reached) == 1
+    assert (rc, out["verdict"]) == (2, "REFUSED")
+    assert not list(external.iterdir())
+    assert not list(project.rglob("*.v"))
+    assert not list(project.rglob("*.sv"))

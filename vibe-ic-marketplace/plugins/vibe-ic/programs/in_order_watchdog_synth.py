@@ -12,7 +12,7 @@ import json
 import re
 from pathlib import Path
 
-from rtl_hygiene_lint import VERILOG_KEYWORDS
+from phase2_scaffold_gen import VERILOG_RESERVED
 
 CONTRACT_REL = Path("input/in_order_watchdog.json")
 SCHEMA = "vibeic.in_order_watchdog.v1"
@@ -21,8 +21,17 @@ ROLES = {"clock", "reset", "request_valid", "request_ready", "response_done",
 POLICIES = {"counter_bits", "max_accepted", "start", "response_order",
             "timeout_compare", "initial_age", "saturation", "reset", "flag",
             "zero_latency", "violation_policy", "request_protocol"}
-_RESERVED = VERILOG_KEYWORDS | {"interface", "endinterface", "class", "endclass",
-                              "program", "endprogram", "package", "endpackage"}
+# The consumer compiles with Icarus -g2012. Reuse the existing Verilog-2005
+# and SV-2005 contract, completed with the 1800-2009/2012 keyword masks from
+# Icarus lexor_keyword.gperf (https://github.com/steveicarus/iverilog).
+# Match exact spelling: HDL identifiers and keywords are case-sensitive.
+_RESERVED = VERILOG_RESERVED | {
+    "accept_on", "checker", "endchecker", "eventually", "global", "implements",
+    "implies", "int", "interconnect", "let", "nettype", "nexttime", "reject_on",
+    "restrict", "s_always", "s_eventually", "s_nexttime", "s_until",
+    "s_until_with", "soft", "strong", "sync_accept_on", "sync_reject_on",
+    "unique0", "until", "until_with", "untyped", "weak", "wone",
+}
 
 
 def _identifier(value):
@@ -116,7 +125,8 @@ def emit(c: dict) -> str:
     while any(n.startswith(prefix) for n in p.values()):
         prefix += "_"
     # Internal identifiers cannot shadow any declared port.
-    n = lambda s: prefix + s
+    n = lambda s: _identifier(prefix + s)
+    _identifier("age")  # function-local argument also follows the dialect
     reset_test = p["reset"] if c["reset"]["polarity"] == "high" else "!" + p["reset"]
     edges = "posedge " + p["clock"]
     if c["reset"]["synchrony"] == "async":

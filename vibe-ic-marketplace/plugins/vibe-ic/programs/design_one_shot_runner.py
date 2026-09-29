@@ -8195,6 +8195,17 @@ def _step_rtl_gen_bound(
     _SUPPLY_BLOCKED.clear()
     _reclaim_stale_generated_rtl(project)
     project_binding.require_current()
+    # An explicit watchdog declaration elects its source-bound route before
+    # competing automatic emitters can publish (including input/rtl_spec.json).
+    # Canonical intake retains the authored/supplied guards; absent declarations
+    # leave the existing unrelated deterministic dispatch order unchanged.
+    _watchdog_path = project / "input" / "in_order_watchdog.json"
+    if _watchdog_path.exists() or _watchdog_path.is_symlink():
+        _watchdog = _try_canonical_primitive_rtl(
+            project, t0, phase1_plain_text=_phase1_plain.text)
+        project_binding.require_current()
+        if _watchdog is not None:
+            return _watchdog
     _det = _try_deterministic_rtl_dispatch(project, t0)
     project_binding.require_current()
     if _det is not None:
