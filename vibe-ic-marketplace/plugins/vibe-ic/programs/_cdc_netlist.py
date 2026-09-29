@@ -25,7 +25,7 @@ a `$mux` whose other arm is the flop's own Q, and an async reset is the `ARST`
 pin of `$adff`.
 
 The step switch (`librelane_contract.selected_mode(project, "3")`):
-  direct    — regex front ends only (the default; unchanged)
+  direct    — regex front ends only (explicit opt-out)
   librelane — the netlist rules decide; a missing netlist refuses (no fallback)
   dual      — both run; findings are the union and every disagreement between
               the two front ends is reported by name.
@@ -36,6 +36,7 @@ names consulted are yosys's own internal cell types.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -49,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 #: Where the runner writes the netlist and where the gates read it.
 NETLIST_REL = "reports/phase2/cdc/netlist.json"
 NETLIST_LOG_REL = "reports/phase2/cdc/netlist.yosys.log"
+NETLIST_MANIFEST_REL = "reports/phase2/cdc/netlist_front_end.json"
 
 #: `librelane/scripts/pyosys/json_header.py` after reading the sources.
 JSON_HEADER_PASSES = (
@@ -93,14 +95,115 @@ def yosys_script(files: List[Path], top: Optional[str], out: Path,
     return "; ".join(reads + passes + [f"json -o {out}"])
 
 
+def source_binding(project: Path, top: Optional[str],
+                   rtl_files: Optional[List[Path]] = None) -> dict:
+    """Current native frontend inputs, using the existing source/hash contracts.
+
+    Headers and structured top/switch declarations are dependencies too. A
+    partial read cannot establish a verdict over the current source population.
+    No HDL is parsed here; the Yosys frontend remains the producer.
+    """
+    import _specrtl_common as sources
+    from _chip_synth_read import NON_SILICON_SUBSTRS
+    from _step_identity import resolved_inputs_digest
+    import librelane_contract as ll
+    from p0_tool_frontend_check import _top
+    project = Path(project).resolve()
+    files = [p.resolve() for p in sources.rtl_source_files(project)
+             if not any(t in p.name.lower() for t in NON_SILICON_SUBSTRS)]
+    if not files:
+        raise Refusal("CDC_NETLIST_NO_RTL", "no current RTL source population")
+    if rtl_files is not None and set(map(Path.resolve, rtl_files)) != set(files):
+        raise Refusal("CDC_NETLIST_PARTIAL_SOURCES",
+                      "native read must cover the current RTL source population")
+    declared = _top(project)
+    if declared and top and declared != top:
+        raise Refusal("CDC_NETLIST_TOP_MISMATCH",
+                      f"declared top {declared!r}, native requested top {top!r}")
+    deps = set(files)
+    deps.update(p.resolve() for p in sources.rtl_source_files(
+        project, exts=("*.vh", "*.svh")))
+    for rel in ("phase1/generated_docs/L9_INTEGRATION_SPEC.json",
+                "phase1/generated_docs/L9_INTEGRATION.json",
+                "phase3/librelane_switch.json"):
+        if (project / rel).is_file():
+            deps.add(project / rel)
+    options = {"sv": True, "passes": list(JSON_HEADER_PASSES),
+               "requested_top": top, "declared_top": declared}
+    inputs = [("source", p, "raw") for p in sorted(deps)]
+    fingerprint, why = resolved_inputs_digest(
+        project, inputs, {"frontend_options": json.dumps(options, sort_keys=True)})
+    if fingerprint is None:
+        raise Refusal("CDC_NETLIST_SOURCE_UNREADABLE", "; ".join(why))
+    return {"fingerprint": fingerprint, "options": options,
+            "rtl_files": [os.path.relpath(p, project) for p in sorted(files)],
+            "files": [{"path": os.path.relpath(p, project), "sha256": ll.digest(p)}
+                      for p in sorted(deps)]}
+
+
+def require_binding(project: Path, path: Path, nl: "Netlist") -> dict:
+    """Require the existing producer manifest to bind this JSON to current inputs."""
+    import librelane_contract as ll
+    manifest = path.parent / Path(NETLIST_MANIFEST_REL).name
+    try:
+        rec = ll._load(manifest)
+        inputs = rec.get("input")
+        producer = rec.get("producer")
+        if not isinstance(inputs, dict) or not isinstance(producer, dict):
+            raise ValueError("missing native input/producer binding")
+        top = inputs["options"]["requested_top"]
+        if top is not None and (not isinstance(top, str) or top != nl.top):
+            raise Refusal("CDC_NETLIST_TOP_MISMATCH", "native top differs from JSON top")
+        current = source_binding(project, top)
+        declared = current["options"]["declared_top"]
+        if declared and declared != nl.top:
+            raise Refusal("CDC_NETLIST_TOP_MISMATCH", "current declared top differs from JSON top")
+        if current != inputs:
+            raise Refusal("CDC_NETLIST_STALE", "source population, contents, top or options changed")
+        if (producer.get("step") != "Yosys.JsonHeader"
+                or type(producer.get("exit_code")) is not int
+                or producer["exit_code"] != 0
+                or not isinstance(producer.get("argv"), list) or not producer["argv"]
+                or rec.get("top") != nl.top):
+            raise ValueError("missing successful native producer run/top")
+        root = Path(producer["source_root"])
+        order = producer["read_order"]
+        if not root.is_absolute() or not isinstance(order, list) or sorted(order) != current["rtl_files"]:
+            raise ValueError("native command read a partial/different source population")
+        script = yosys_script([Path(os.path.normpath(root / rel)) for rel in order], top,
+                              root / Path(NETLIST_REL).with_suffix(".json.tmp"))
+        argv = producer["argv"]
+        if argv[-3:] != ["-q", "-p", script] or not (
+                argv[0] == "yosys" or
+                any(argv[i:i + 2] == ["--entrypoint", "yosys"]
+                    for i in range(len(argv) - 1))):
+            raise ValueError("native invocation does not match frontend sources/top/options")
+        hashes = rec.get("sha256") or {}
+        log = path.parent / Path(NETLIST_LOG_REL).name
+        if (hashes.get("netlist.json") != ll.digest(path)
+                or hashes.get("netlist.yosys.log") != ll.digest(log)):
+            raise Refusal("CDC_NETLIST_STALE", "native output or invocation log hash changed")
+        if not log.read_text().startswith("$ " + " ".join(argv) + "\n"):
+            raise ValueError("invocation transcript does not record this native command")
+    except Refusal:
+        raise
+    except (OSError, ValueError, KeyError, TypeError, ll.Refusal) as exc:
+        raise Refusal("CDC_NETLIST_UNBOUND",
+                      f"no complete current native producer binding: {exc}") from None
+    return rec
+
+
 def build(project: Path, rtl_files: List[Path], top: Optional[str],
           image: Optional[str] = None, docker: str = "docker") -> Path:
     """Write NETLIST_REL for `rtl_files` with the Yosys.JsonHeader passes."""
     project = Path(project).resolve()
-    if not rtl_files:
-        raise Refusal("CDC_NETLIST_NO_RTL", "no RTL files to read")
     out = project / NETLIST_REL
     log = project / NETLIST_LOG_REL
+    manifest = project / NETLIST_MANIFEST_REL
+    # No failed, partial or interrupted producer can leave a prior admission.
+    manifest.unlink(missing_ok=True)
+    out.unlink(missing_ok=True)
+    binding = source_binding(project, top, rtl_files)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(".json.tmp")
     tmp.unlink(missing_ok=True)
@@ -119,7 +222,6 @@ def build(project: Path, rtl_files: List[Path], top: Optional[str],
             except _ll.Refusal as exc:
                 raise Refusal("CDC_NETLIST_TOOL_UNAVAILABLE",
                               f"no yosys on PATH and no image: {exc}") from None
-        import os
         import _docker_memory as _dmem
         mounts = {project} | {f.parent for f in files
                               if not f.parent.is_relative_to(project)}
@@ -134,7 +236,21 @@ def build(project: Path, rtl_files: List[Path], top: Optional[str],
     if done.returncode or not tmp.is_file():
         raise Refusal("CDC_NETLIST_BUILD_FAILED",
                       f"yosys rc={done.returncode}; {NETLIST_LOG_REL}")
+    if source_binding(project, top, rtl_files) != binding:
+        raise Refusal("CDC_NETLIST_STALE", "sources changed during native producer run")
+    nl = load(tmp)
+    if ((top and nl.top != top)
+            or binding["options"]["declared_top"] not in (None, nl.top)):
+        raise Refusal("CDC_NETLIST_TOP_MISMATCH", "native JSON top differs from requested/declared top")
     tmp.replace(out)
+    import librelane_contract as ll
+    ll.write_json(manifest, {
+        "input": binding, "top": nl.top,
+        "producer": {"step": "Yosys.JsonHeader", "argv": argv,
+                     "exit_code": done.returncode, "image": image,
+                     "source_root": str(project),
+                     "read_order": [os.path.relpath(f, project) for f in files]},
+        "sha256": {"netlist.json": ll.digest(out), "netlist.yosys.log": ll.digest(log)}})
     return out
 
 
@@ -598,6 +714,7 @@ def apply_front_end(project: Path, mode: str, netlist_arg: Optional[str],
     import instrument_calibration
     try:
         nl = load(path)
+        binding = require_binding(project, path, nl)
         rows = judge(nl, rule, is_candidate)
     except (Refusal, instrument_calibration.Uncalibrated) as exc:
         code = getattr(exc, "code", "NETLIST_RULE_UNCALIBRATED")
@@ -608,7 +725,8 @@ def apply_front_end(project: Path, mode: str, netlist_arg: Optional[str],
         "netlist": str(path), "netlist_read": True,
         "netlist_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "netlist_top": nl.top, "netlist_flops": len(nl.flops),
-        "netlist_clock_domains": clock_domains(nl)}
+        "netlist_clock_domains": clock_domains(nl),
+        "netlist_input_fingerprint": binding["input"]["fingerprint"]}
     if mode == "librelane":
         extra["front_end"] = "netlist"
         return rows, extra
