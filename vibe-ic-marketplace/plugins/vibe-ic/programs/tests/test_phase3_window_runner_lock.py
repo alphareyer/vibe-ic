@@ -465,7 +465,8 @@ def test_enclosing_window_stops_before_publishing_missing_citation(
             "publication.json").exists()
 
 
-@pytest.mark.parametrize("case", ["missing_component", "symlink_parent"])
+@pytest.mark.parametrize("case", ["missing_component", "file_component",
+                                  "symlink_parent"])
 def test_enclosing_window_resolves_citation_components_before_publication(
         project, tmp_path, monkeypatch, case):
     decoy = project / "payload.def"
@@ -473,6 +474,13 @@ def test_enclosing_window_resolves_citation_components_before_publication(
     if case == "missing_component":
         citation = "absent/../payload.def"
         assert not (project / "absent").exists()
+    elif case == "file_component":
+        # A regular file before ".." cannot be walked through: the literal
+        # spelling does not open, whatever a lexical ".." would reach.
+        (project / "x.def").write_text("not a directory")
+        citation = "x.def/../payload.def"
+        with pytest.raises(NotADirectoryError):
+            (project / citation).open()
     else:
         outside = tmp_path / "outside"
         child = outside / "child"
@@ -499,11 +507,132 @@ def test_enclosing_window_resolves_citation_components_before_publication(
 
     assert row.status == "NOT_MEASURED", row.detail
     assert row.reason_class == p3._V.ReasonClass.MISSING_ARTEFACT
-    assert ("window cited input absent" if case == "missing_component"
-            else "window input outside project") in row.detail
+    assert ("window input outside project" if case == "symlink_parent"
+            else "window cited input absent") in row.detail
     assert decoy.read_text() == "decoy bytes"
     assert not (project / output).exists()
     assert not (project / f"reports/audit/windows/{case}/publication.json").exists()
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_window_citation_through_a_file_component_is_absent(
+        project, tmp_path, absolute):
+    """`x.def/../payload.def` with x.def a regular file: the literal path
+    raises ENOTDIR, so nothing may be bound to the lexical target."""
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    owner = project if absolute else isolated
+    (owner / "x.def").write_text("a file, not a directory")
+    (owner / "payload.def").write_text("payload")
+    citation = (str(owner / "x.def/../payload.def") if absolute
+                else "x.def/../payload.def")
+    result = isolated / "result.json"
+    result.write_text(json.dumps({"output_files": [citation]}))
+
+    published, error = p3._phase3_window_publication(
+        project, isolated, [result], "file-component")
+
+    assert published == []
+    assert "window cited input absent" in error, error
+    assert not (project / "result.json").exists()
+    assert not (project / "reports/audit/windows/file-component/"
+                "publication.json").exists()
+
+
+@pytest.mark.parametrize("spelling", ["carried_link", "root_link", "dotdot"])
+def test_window_absolute_citation_spelled_into_the_copy_is_refused(
+        project, tmp_path, spelling):
+    """A path spelled through the disposable copy dangles once the copy is
+    removed, even when it resolves back into the project (bf9318cc8)."""
+    (project / "phase3").mkdir()
+    (project / "phase3/real.def").write_text("project bytes")
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    if spelling == "carried_link":
+        # `cp -a` keeps a legacy absolute intra-project link verbatim.
+        (isolated / "steps").mkdir()
+        (isolated / "steps/alias").symlink_to(project / "phase3",
+                                              target_is_directory=True)
+        citation = str(isolated / "steps/alias/real.def")
+    elif spelling == "root_link":
+        (isolated / "rootlink").symlink_to(project, target_is_directory=True)
+        citation = str(isolated / "rootlink/phase3/real.def")
+    else:
+        citation = f"{isolated}/../{project.name}/phase3/real.def"
+    assert Path(citation).resolve(strict=True) == project / "phase3/real.def"
+    result = isolated / "result.json"
+    result.write_text(json.dumps({"input_def": citation}))
+
+    published, error = p3._phase3_window_publication(
+        project, isolated, [result], "spelled-into-copy")
+
+    assert published == []
+    assert "window input outside project" in error, error
+    assert not (project / "result.json").exists()
+    assert not (project / "reports/audit/windows/spelled-into-copy/"
+                "publication.json").exists()
+
+
+@pytest.mark.parametrize("spelling", ["outside_prefix_link", "in_project_link"])
+def test_window_absolute_citation_spelling_the_project_by_a_link_publishes(
+        project, tmp_path, spelling):
+    """Control: an absolute spelling of the project itself, through a link
+    that never enters the copy, is still bound by SHA."""
+    (project / "phase3").mkdir()
+    (project / "phase3/real.def").write_text("project bytes")
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    if spelling == "outside_prefix_link":
+        (tmp_path / "plink").symlink_to(project, target_is_directory=True)
+        citation = str(tmp_path / "plink/phase3/real.def")
+    else:
+        (project / "steps").mkdir()
+        (project / "steps/alias").symlink_to(project / "phase3",
+                                             target_is_directory=True)
+        citation = str(project / "steps/alias/real.def")
+    result = isolated / "result.json"
+    result.write_text(json.dumps({"input_def": citation}))
+
+    published, error = p3._phase3_window_publication(
+        project, isolated, [result], "project-by-link")
+
+    assert error == "", error
+    assert published == [str(project / "result.json")]
+    receipt = json.loads((project / "reports/audit/windows/project-by-link/"
+                          "publication.json").read_text())
+    assert receipt["status"] == "PUBLISHED"
+    assert "phase3/real.def" in receipt["inputs"]
+
+
+def test_enclosing_window_refuses_citation_through_a_carried_absolute_link(
+        project, monkeypatch):
+    """The integrity probe: a legacy absolute intra-project link under steps/
+    rides into the copy; citing the copy's spelling must not publish."""
+    (project / "phase3").mkdir()
+    (project / "phase3/input.def").write_text("source DEF")
+    (project / "steps/23").mkdir(parents=True)
+    (project / "steps/23/input.def").symlink_to(project / "phase3/input.def")
+    report = _rows(("sta_signoff", "PASS", "", ""))
+    report["verdict"] = "PASS"
+    output = "reports/phase3/sta/post_route_summary.json"
+    code = ("import json, pathlib, sys\n"
+            "iso = pathlib.Path(sys.argv[1])\n"
+            f"out = iso / {output!r}\n"
+            "out.parent.mkdir(parents=True, exist_ok=True)\n"
+            "out.write_text(json.dumps({'input_def': str(iso / 'steps/23/input.def')}))\n"
+            "record = iso / 'reports/orchestrator/phase3_one_shot.json'\n"
+            "record.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"record.write_text(json.dumps({report!r}))\n"
+            f"print({BANNER!r})\n")
+
+    row = _enclose_with(project, monkeypatch, code, "carried-link",
+                        steps=("23",))
+
+    assert row.status == "NOT_MEASURED", row.detail
+    assert "window input outside project" in row.detail
+    assert not (project / output).exists()
+    assert not (project / "reports/audit/windows/carried-link/"
+                "publication.json").exists()
 
 
 def test_window_publishes_dot_relative_file_reference(project, tmp_path):
