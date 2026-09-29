@@ -1,0 +1,11 @@
+VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN cal_views ;
+UNITS DISTANCE MICRONS 2000 ;
+DIEAREA ( 0 0 ) ( 40000 400000 ) ;
+COMPONENTS 2 ;
+    - u_inv gf180mcu_fd_sc_mcu7t5v0__inv_1 + PLACED ( 20000 20000 ) N ;
+    - u_fill gf180mcu_fd_io__fill1 + FIXED ( 0 0 ) N ;
+END COMPONENTS
+END DESIGN

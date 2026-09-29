@@ -36610,6 +36610,106 @@ def _record_physical_view_inventory(project: Path, pnr_tcl: str) -> Path:
     return out
 
 
+def _recorded_run_path(project: Path, value: str) -> Path:
+    """A path a record wrote, re-rooted at `project` when the run tree moved.
+
+    Records carry absolute paths of the tree they were written in. A copied
+    or relocated run keeps its `phase3/` / `reports/` component, so a path
+    through one of those folders is re-rooted there; any other path (a PDK
+    file) is returned as it was written."""
+    path = Path(value)
+    if not path.is_absolute() or path.is_relative_to(project):
+        return path if path.is_absolute() else project / path
+    parts = path.parts
+    for i, part in enumerate(parts):
+        if part in ("phase3", "reports"):
+            return project.joinpath(*parts[i:])
+    return path
+
+
+def _restore_recorded_physical_views(project: Path, pdk: PdkConfig,
+                                     container: str) -> Dict[str, Any]:
+    """Give a process that did NOT run place-and-route the physical views
+    the routed layout was built with, from the run's own records.
+
+    Place-and-route changes the PDK object IN MEMORY: the via-legalized tech
+    LEF replaces the distribution one (`_stage_via_legalized_tech_lef`) and
+    the pad library's LEF/GDS views are appended on the chip path
+    (`_prepare_padring_for_route`). A later process that starts from
+    `_detect_pdk` -- a bounded `--entry-step 31` window, a re-run of one
+    sign-off step -- has none of that. MEASURED on spm x gf180mcuD
+    (2026-09-29): step 31 in such a process read no IO LEF, Magic loaded all
+    44 pad masters as their full library layouts, the power-aware compares
+    mismatched and the plain compare crashed netgen (rc 139); the same DEF
+    matched uniquely inside the run that routed it.
+
+    Restores only what a record states, verified:
+      * the tech LEF, when `reports/pdk_via_patch_legalization.json` says
+        APPLIED and the staged file's sha256 is the recorded one;
+      * every LEF PnR read (`physical_view_inventory.json`) that is not the
+        tech LEF or the standard-cell LEF, as a macro LEF;
+      * the pad library's GDS views, through the same resolver PnR used,
+        when the run placed a pad ring.
+    Returns what it did, for the caller to disclose. Chip-agnostic."""
+    done: Dict[str, Any] = {"tech_lef": None, "macro_lefs": [],
+                            "macro_gds": [], "notes": []}
+    if not all(hasattr(pdk, a) for a in ("tech_lef", "cell_lef",
+                                         "macro_lefs", "macro_gds")):
+        done["notes"].append("no PDK physical views to restore")
+        return done
+    legal = project / "reports/pdk_via_patch_legalization.json"
+    try:
+        doc = json.loads(legal.read_text()) if legal.is_file() else {}
+    except (OSError, ValueError):
+        doc = {}
+    derived: Optional[str] = None
+    if doc.get("status") == "APPLIED" and doc.get("derived_tech_lef"):
+        staged = _recorded_run_path(project, str(doc["derived_tech_lef"]))
+        derived = str(staged)
+        if staged.is_file() and _sha256_file(staged) == doc.get("derived_sha256"):
+            if str(pdk.tech_lef) != str(staged):
+                pdk.tech_lef_source = pdk.tech_lef_source or pdk.tech_lef
+                pdk.tech_lef = str(staged)
+            done["tech_lef"] = str(staged)
+        else:
+            # The layout was routed with a tech LEF this tree cannot prove it
+            # still holds. Neither LEF is the one PnR used, so the caller
+            # refuses instead of measuring with either.
+            done["refused"] = (
+                f"the via-legalized tech LEF PnR used ({staged}) is "
+                f"{'absent' if not staged.is_file() else 'not the recorded bytes'} "
+                f"(reports/pdk_via_patch_legalization.json sha256 "
+                f"{doc.get('derived_sha256')})")
+    inventory = project / PHYSICAL_VIEW_INVENTORY_REL
+    try:
+        recorded = (json.loads(inventory.read_text()).get("read_lef_paths")
+                    if inventory.is_file() else None) or []
+    except (OSError, ValueError, AttributeError):
+        recorded = []
+    base = {str(pdk.tech_lef), str(pdk.cell_lef),
+            str(pdk.tech_lef_source or "")}
+    for value in recorded:
+        path = str(_recorded_run_path(project, str(value)))
+        # The recorded tech LEF is never a macro LEF -- verified or not.
+        if (path in base or path == derived
+                or Path(path).name == Path(str(pdk.tech_lef)).name):
+            continue
+        if path not in pdk.macro_lefs:
+            pdk.macro_lefs.append(path)
+            done["macro_lefs"].append(path)
+    if _padring_chip_top_record(project) is not None and container:
+        try:
+            _lefs, io_gds = _discover_padring_io_views(pdk, container)
+        except (RuntimeError, ValueError, OSError) as exc:
+            done["notes"].append(f"pad library GDS views not resolved: {exc}")
+            io_gds = []
+        for view in io_gds:
+            if view not in pdk.macro_gds:
+                pdk.macro_gds.append(view)
+                done["macro_gds"].append(view)
+    return done
+
+
 def _inject_padring_chip_top(full_pnr_tcl: str, chip_top_v_c: str,
                              chip_top: str, core: str) -> str:
     """Elaborate the PAD-CARRYING chip top instead of the bare core.
@@ -55235,6 +55335,48 @@ def _run_extraction_lvs(project: Path, top: str, pdk: PdkConfig,
     ext_log = ext_dir / "ext2spice.log"
     ext_log_txt = ext_log.read_text(errors="replace") if ext_log.is_file() \
         else (out or "")
+    # THE EXTRACTION MUST HAVE READ EVERY PLACED MASTER AS THE ABSTRACT THE
+    # FLOW SUPPLIED. A master no LEF defined is loaded by Magic from its cell
+    # path as the library's FULL layout (`Cell <m> read from path <dir>`), and
+    # the netlist it writes describes a transistor-level cell the compare was
+    # never meant to see. MEASURED on spm x gf180mcuD (2026-09-29): 44 pad
+    # masters extracted that way, two power-aware mismatches, then netgen rc
+    # 139 on the plain compare. Not a verdict about the design -- the input
+    # of the compare was wrong -- so NOT_MEASURED, naming the masters, and
+    # netgen does not run. See lvs_layout_view_census.
+    import lvs_layout_view_census as _lvc
+    import instrument_calibration as _ic
+    try:
+        _lib_views = _lvc.masters_read_from_library(
+            ext_log_txt, _lvc.def_component_masters(
+                extract_def.read_text(errors="replace")))
+    except _ic.Uncalibrated as exc:
+        _lib_views = None
+        _lib_view_why = f"library-view census uncalibrated: {exc}"
+    except OSError as exc:
+        _lib_views = None
+        _lib_view_why = f"extraction DEF unreadable: {exc}"
+    if _lib_views is None or _lib_views:
+        if _lib_views:
+            _names = sorted(_lib_views)
+            _lib_view_why = (
+                f"{len(_names)} placed master(s) were extracted from their "
+                f"library layouts, not from the LEF abstracts the flow "
+                f"supplies (no LEF defining them was read): "
+                f"{', '.join(_names[:8])}{' …' if len(_names) > 8 else ''}")
+        verdict = _write_lvs_verdict(
+            project, "INCOMPLETE", "LVS_EXTRACTION_VIEW_NOT_ABSTRACT",
+            f"{_lib_view_why}. netgen was NOT run -- the extracted netlist is "
+            f"not the layout the compare is defined over.",
+            extras={"library_layout_masters": _lib_views or {},
+                    "ext2spice_log": "phase3/stage3/extracted/ext2spice.log"})
+        return StepResult(
+            "lvs", "NOT_MEASURED", time.time() - t0,
+            f"LVS not measured: {_lib_view_why}",
+            extras={"finding": "LVS_EXTRACTION_VIEW_NOT_ABSTRACT",
+                    "library_layout_masters": _lib_views or {},
+                    "lvs_verdict": verdict},
+            reason_class=_V.ReasonClass.INPUT_ABSENT)
     ext_err_count = _parse_ext2spice_error_count(ext_log_txt)
     ext_warning: Optional[str] = None
     # v1.4.x — never let the collapse guard go silently blind. If the log talks
@@ -76945,7 +77087,32 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     site_before = before
     window_gate = _spf.gate
     window_ids = set(_phase3_window_steps(args.entry_step, args.exit_step))
+    _views: Dict[str, Any] = {}
+    if not set(selected) & {"pnr", "enclosing_pnr", "enclosing_phase3"}:
+        # A window that routes again -- the `pnr` site, or a partial-PnR /
+        # whole-phase window dispatched as `enclosing_*`, which runs step_pnr
+        # in this process -- derives its views itself and must start from the
+        # distribution PDK. Otherwise this process did not route the layout it
+        # now streams or checks: the
+        # PDK object PnR changed in memory (via-legalized tech LEF, pad-library
+        # views) is rebuilt from the run's own records BEFORE anything reads
+        # it -- the admission basis below hashes it, and step 31 extracts with
+        # it. Without this every such window was refused ("unadmitted routed
+        # GDS"), and a direct step-31 call extracted the pads as full library
+        # layouts (see `_restore_recorded_physical_views`).
+        _views = _restore_recorded_physical_views(project, pdk, args.container)
+        print(f"[phase3] window: physical views restored from the run's "
+              f"records: tech_lef={_views['tech_lef']}, "
+              f"{len(_views['macro_lefs'])} LEF, "
+              f"{len(_views['macro_gds'])} GDS"
+              + (f"; {'; '.join(_views['notes'])}" if _views["notes"] else ""))
     for site in selected:
+        if _views.get("refused"):
+            rows.append(StepResult(
+                site, "NOT_MEASURED", 0.0,
+                f"window refused: {_views['refused']}",
+                reason_class=_V.ReasonClass.MISSING_ARTEFACT))
+            break
         # A narrower numeric window can omit a producer between two selected
         # sites (for example PnR 15..22 and PV 31, with GDS 37 omitted).
         # Never sign off the old GDS after this run changed the routed DEF.
