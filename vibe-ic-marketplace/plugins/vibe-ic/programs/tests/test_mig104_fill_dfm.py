@@ -469,6 +469,7 @@ def _gds_stage(tmp_path, monkeypatch, mode, counts):
             filled = tmp_path / "tool.gds"
             filled.write_bytes(Path(gds).read_bytes() + b"+pdkfill")
             out["filler"] = {"filled_gds": str(filled), "script": "fill.rb"}
+            out["subject"] = str(filled)
         return out
     monkeypatch.setattr(LF, "run_density", _density)
     return project, gds, calls
@@ -498,6 +499,37 @@ def test_dual_measures_both_fills_with_one_deck(tmp_path, monkeypatch, tool, dir
     rec = json.loads((project / LF.RECORD_REL).read_text())["gds"]
     assert rec["shipped"] == shipped
     assert LF.tool_density(project)["errors"] == min(tool, direct) if shipped else True
+
+
+@pytest.mark.parametrize("mode,counts,shipped,gds_bytes", [
+    ("librelane", {"34-fill": 2}, None, b"sealed"),
+    ("dual", {"34-fill": 1, "34-direct-density": 2}, "direct", b"sealed+directfill"),
+], ids=["librelane", "dual"])
+def test_a_tool_fill_that_was_not_copied_is_not_recorded_as_shipped(
+        tmp_path, monkeypatch, mode, counts, shipped, gds_bytes):
+    """Review wave 57: the copy into gds_out runs only at 0 density errors,
+    but the record still said shipped='librelane' with the digest of bytes
+    that arm never produced, and step 35 then read the tool arm's count as
+    the density of the shipped stream."""
+    project, gds, calls = _gds_stage(tmp_path, monkeypatch, mode, counts)
+    ctx = R._step34_gds_tool_arm(project, SimpleNamespace(name="p"), gds)
+    if mode == "dual":
+        gds.write_bytes(b"sealed+directfill")      # the caller's direct passes
+    ok, _ = R._step34_gds_ship(project, gds, ctx, (True, "direct"))
+    assert not ok
+    assert gds.read_bytes() == gds_bytes
+    rec = json.loads((project / LF.RECORD_REL).read_text())["gds"]
+    assert rec["shipped"] == shipped
+    assert "librelane arm not shipped" in rec["ship_refusal"]
+    if shipped is None:
+        assert rec["shipped_sha256"] is None
+        assert LF.tool_density(project) is None
+        refused = [f for f in MFD.tool_arm_findings(project)[0]
+                   if f.category == "LL_FILL_GDS_REFUSED"]
+        assert refused and "librelane arm not shipped" in refused[0].message
+    else:
+        assert rec["shipped_sha256"] == LLC.digest(gds)
+        assert LF.tool_density(project)["arm"] == "direct"
 
 
 # ── step 34's gate and step 35's screen read the tool ──────────────────────

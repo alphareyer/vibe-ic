@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import math
 import re
 import shutil
 import sys
@@ -44,9 +45,14 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
+import _docker_memory as _dmem
+from metal_fill_config_gen import (build_metal_fill_config,
+                                   density_rule_layer_identifiers)
+import die_level_deck_rule_attribution as _dla
 from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, digest,  # noqa: E402
-                                resolve_step_configs, run_chain, select_arms,
-                                state_from_direct)
+                                DECLARATION_REL, declaration_config, resolve_step_configs,
+                                run_chain, select_arms,
+                                state_from_direct, run_container)
 
 ODB_FILL_STEP = 'OpenROAD.FillInsertion'
 GDS_FILL_STEPS = ('KLayout.Filler', 'KLayout.Density', 'Checker.KLayoutDensity')
@@ -189,6 +195,19 @@ def run_density(project: Path, image: str, pdk_root: Path, pdk: str, *,
                          'gds_in': str(gds), 'gds_in_sha256': digest(Path(gds)),
                          'filled_gds': str(filled), 'filled_sha256': digest(Path(filled))}
         out['subject'], out['subject_sha256'] = str(filled), digest(Path(filled))
+        if count:
+            topup = top_up_density(project, image, pdk_root, pdk, Path(filled),
+                                   configs['KLayout.Density'], f'{lane}-topup')
+            again = run_density(project, image, pdk_root, pdk,
+                                gds=Path(topup['gds']), lane=f'{lane}-topped',
+                                configs=configs, steps=DENSITY_STEPS)
+            again['filler'] = out['filler']
+            again['density_topup'] = topup
+            again['pdk_density_before_topup'] = count
+            return again
+    out['ratios'] = measure_density_ratios(
+        project, image, pdk_root, pdk, Path(out['subject']),
+        configs['KLayout.Density'], f'{lane}-ratios')
     return out
 
 
@@ -210,6 +229,386 @@ def density_rules(report: Path) -> Optional[Dict[str, int]]:
                     out[name] = out.get(name, 0) + (_count(row.get('count')) or 1)
             return out
     return None
+
+
+def _host_pdk_path(value: str, pdk_root: Path, pdk: str) -> Path:
+    """Translate a resolved LibreLane /pdk path to its mounted host source."""
+    path = Path(value)
+    prefix = Path('/pdk') / pdk
+    if path == prefix or prefix in path.parents:
+        return pdk_root / pdk / path.relative_to(prefix)
+    return path
+
+
+def _density_source(pdk_root: Path, pdk: str,
+                    density_config: Path) -> tuple[dict, str, str, str]:
+    cfg = _load(density_config)
+    layer_map = cfg.get('KLAYOUT_DEF_LAYER_MAP')
+    tech_lefs = cfg.get('TECH_LEFS') or {}
+    deck = cfg.get('KLAYOUT_DENSITY_RUNSET')
+    if not (layer_map and tech_lefs and deck):
+        raise Refusal('LL_DENSITY_FILL_PDK_INPUT_MISSING', str(density_config))
+    map_path = _host_pdk_path(str(layer_map), pdk_root, pdk)
+    lef_paths = [_host_pdk_path(str(p), pdk_root, pdk)
+                 for p in tech_lefs.values()]
+    deck_path = _host_pdk_path(str(deck), pdk_root, pdk)
+    try:
+        map_text = map_path.read_text()
+        lef_text = '\n'.join(p.read_text() for p in lef_paths)
+        # The master deck loads rule_decks/*.rb and generic_layers.rb.  Include
+        # these declarations so the fill engine sees the same dummy datatypes,
+        # spacing, density floor and exclusion markers as the foundry checker.
+        deck_files = [deck_path, *sorted(deck_path.parent.rglob('*.rb'))]
+        deck_text = '\n'.join(p.read_text() for p in deck_files)
+    except OSError as exc:
+        raise Refusal('LL_DENSITY_FILL_PDK_UNREADABLE', str(exc)) from exc
+    return cfg, map_text, lef_text, deck_text
+
+
+def _density_ratio_specs(deck_text: str, fill_cfg: dict) -> dict:
+    """Resolve die-density identifiers to the PDK's drawn+dummy GDS pairs.
+
+    Unknown aliases remain absent and are reported as NOT_MEASURED.  The
+    foundry deck is still the only authority for the rule verdict.
+    """
+    # Ruby comments and quoted diagnostic messages are prose.  Read only the
+    # deck's executable grammar; the rule-id parser uses the same filter.
+    code = _dla.deck_code_only(deck_text)
+    layers = {row['name']: row for row in fill_cfg['layers']}
+    extracted = {name: [int(number), int(datatype)]
+                 for name, number, datatype in re.findall(
+                     r'extract_single_layer_from_design\.call\(:([A-Za-z]\w*),\s*(\d+),\s*(\d+)\)',
+                     code)}
+    unions = {name: (left, right) for name, left, right in re.findall(
+        r'name:\s*:([A-Za-z]\w*),\s*calc:\s*->\(ctx\)\s*\{\s*ctx\[:([A-Za-z]\w*)\]\s*\+\s*ctx\[:([A-Za-z]\w*)\]',
+        code)}
+    top_aliases = {int(level): name for level, name in re.findall(
+        r'(\d+)\s*=>\s*\{[^\n]*top_metal:\s*:([A-Za-z]\w*)', code)}
+    highest = max((int(re.search(r'\d+$', name).group()) for name in layers
+                   if re.search(r'\d+$', name)), default=None)
+    out = {}
+    for rule, identifiers in density_rule_layer_identifiers(deck_text).items():
+        pairs = None
+        for symbol in identifiers:
+            resolved = symbol
+            if symbol == 'top_metal' and highest in top_aliases:
+                resolved = top_aliases[highest]
+            if resolved in layers:
+                row = layers[resolved]
+                pairs = [row['layer'],
+                         [row['layer'][0], row.get('fill_datatype', row['layer'][1])]]
+            elif resolved in extracted:
+                pairs = [extracted[resolved]]
+            elif resolved in unions:
+                pair_names = unions[resolved]
+                if all(name in extracted for name in pair_names):
+                    pairs = [extracted[name] for name in pair_names]
+            if pairs:
+                break
+        out[rule] = {'status': 'MEASURED' if pairs else 'NOT_MEASURED',
+                     'identifier': symbol if pairs else identifiers,
+                     'layers': pairs}
+    return out
+
+
+def _core_edge_keepout(die: list, core: list) -> float:
+    """Inset a whole-die fill region until it lies entirely inside the core."""
+    if not (len(die) == len(core) == 4):
+        raise Refusal('LL_DENSITY_FILL_CORE_UNDECLARED', repr(core))
+    dx1, dy1, dx2, dy2 = map(float, die)
+    cx1, cy1, cx2, cy2 = map(float, core)
+    gaps = (cx1 - dx1, cy1 - dy1, dx2 - cx2, dy2 - cy2)
+    if min(gaps) < 0 or not (dx1 < dx2 and dy1 < dy2 and cx1 < cx2 and cy1 < cy2):
+        raise Refusal('LL_DENSITY_FILL_CORE_OUTSIDE_DIE', f'{core} vs {die}')
+    return max(gaps)
+
+
+def _run_logged(cmd: list, log: Path):
+    """`run_container` writes `log` only when it salvages a stalled job; a
+    refusal that names `log` must find the tool's own words there, so keep
+    what it printed on every exit."""
+    result = run_container(cmd, supervised=True, log=log)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(f'{result.stdout or ""}\n{result.stderr or ""}')
+    return result
+
+
+def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
+                          cfg: dict, folder: Path) -> dict:
+    """Read every placed PAD/BLOCK footprint from OpenDB, never DEF text.
+
+    The routed DEF and all physical LEFs are required even when the resulting
+    protected-instance set is empty.  An unreadable source must not turn into
+    an empty mask and permit GDS promotion.
+    """
+    routed = project / 'phase3/stage3/pnr/routed.def'
+    if not routed.is_file() or not routed.stat().st_size:
+        raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE', str(routed))
+    tech = cfg.get('TECH_LEFS') or {}
+    tech_lef = (tech.get('nom_*') or next(iter(tech.values()), None)
+                if isinstance(tech, dict) else next(iter(tech), None))
+    lefs = [tech_lef] if tech_lef else []
+
+    def lef_paths(value, *, strict=True):
+        if isinstance(value, (str, Path)):
+            yield str(value)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                yield from lef_paths(nested, strict=strict)
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                yield from lef_paths(nested, strict=strict)
+        elif value is not None and strict:
+            raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
+                          f'invalid physical LEF path: {value!r}')
+
+    # A master is protected by its LEF CLASS (PAD / BLOCK) or, whatever its
+    # class says, by the view that declared it: every master a PAD_LEFS file
+    # defines is a pad-ring member (corner ENDCAPs, a classless pad) and every
+    # master of a macro view is a macro (RING, COVER, no CLASS).
+    ring_role: Dict[str, str] = {}
+    for key in ('CELL_LEFS', 'PAD_LEFS', 'MACRO_LEFS', 'EXTRA_LEFS'):
+        paths = list(lef_paths(cfg.get(key) or []))
+        lefs.extend(paths)
+        if key in ('PAD_LEFS', 'MACRO_LEFS'):
+            for path in paths:
+                ring_role.setdefault(str(path),
+                                     'PAD' if key == 'PAD_LEFS' else 'BLOCK')
+    for path in lef_paths(cfg.get('MACROS') or {}, strict=False):
+        if path.lower().endswith(('.lef', '.lef.gz')):
+            lefs.append(path)
+            ring_role.setdefault(str(path), 'BLOCK')
+    if not lefs:
+        raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
+                      f'{routed}: no physical LEF views')
+    guest_lefs = []
+    guest_roles: Dict[str, str] = {}
+    extra_mounts = []
+    pdk_dir = (pdk_root / pdk).resolve()
+    project_dir = project.resolve()
+    for value in dict.fromkeys(str(x) for x in lefs):
+        host = _host_pdk_path(value, pdk_root, pdk)
+        if not host.is_absolute():
+            host = project / host
+        if not host.is_file():
+            raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
+                          f'physical LEF unreadable: {host}')
+        host = host.resolve()
+        guest = (str(Path('/pdk') / pdk / host.relative_to(pdk_dir))
+                 if host.is_relative_to(pdk_dir) else str(host))
+        guest_lefs.append(guest)
+        if value in ring_role:
+            guest_roles[guest] = ring_role[value]
+        if not (host.is_relative_to(project_dir) or host.is_relative_to(pdk_dir)):
+            extra_mounts.extend(['-v', f'{host}:{guest}:ro'])
+
+    def word(value: Path | str) -> str:
+        return '{' + str(value).replace('\\', '\\\\').replace('}', '\\}') + '}'
+
+    folder.mkdir(parents=True, exist_ok=True)
+    output = folder / 'placed_keepouts.txt'
+    partial = folder / 'placed_keepouts.part'
+    output.unlink(missing_ok=True)
+    partial.unlink(missing_ok=True)
+    script = folder / 'placed_keepouts.tcl'
+    reads = ['set _role [dict create]']
+    for path in guest_lefs:
+        if path not in guest_roles:
+            reads.append(f'read_lef {word(path)}')
+            continue
+        reads += [
+            'set _nlib [llength [[ord::get_db] getLibs]]',
+            f'read_lef {word(path)}',
+            'foreach _lib [lrange [[ord::get_db] getLibs] $_nlib end] {',
+            '  foreach _m [$_lib getMasters] { dict set _role [$_m getName] '
+            f'{guest_roles[path]} }}',
+            '}']
+    script.write_text('\n'.join([
+        *reads,
+        f'read_def {word(routed.resolve())}',
+        'set _block [[[ord::get_db] getChip] getBlock]',
+        'if {$_block eq "NULL"} { error "placed design has no OpenDB block" }',
+        'set _dbu [$_block getDbUnitsPerMicron]',
+        'if {$_dbu <= 0} { error "placed design has invalid DBU" }',
+        f'set _out [open {word(partial.resolve())} w]',
+        'puts $_out "DBU $_dbu"',
+        'puts $_out "TOTAL [llength [$_block getInsts]]"',
+        'set _protected 0',
+        'foreach _inst [$_block getInsts] {',
+        '  set _master [$_inst getMaster]',
+        '  if {[$_master isPad]} { set _kind PAD } elseif {[$_master isBlock]} { set _kind BLOCK } '
+        'elseif {[dict exists $_role [$_master getName]]} { set _kind [dict get $_role [$_master getName]] } '
+        'else { continue }',
+        '  if {![$_inst isPlaced]} { error "unplaced protected instance: [$_inst getName]" }',
+        '  set _box [$_inst getBBox]',
+        '  if {[$_box xMin] >= [$_box xMax] || [$_box yMin] >= [$_box yMax]} { error "empty protected bbox: [$_inst getName]" }',
+        '  puts $_out "BOX $_kind [$_master getName] [$_box xMin] [$_box yMin] [$_box xMax] [$_box yMax]"',
+        '  incr _protected',
+        '}',
+        'puts $_out "END $_protected"',
+        'close $_out',
+        f'file rename -force {word(partial.resolve())} {word(output.resolve())}',
+    ]) + '\n')
+    cmd = ['docker', 'run', '--rm', '--network', 'none',
+           *_dmem.docker_memory_flags(),
+           '-v', f'{project.resolve()}:{project.resolve()}',
+           '-v', f'{(pdk_root / pdk).resolve()}:/pdk/{pdk}:ro',
+           *extra_mounts, image, '--skip', 'openroad', '-exit', str(script)]
+    result = _run_logged(cmd, folder / 'placed_keepouts.log')
+    if result.returncode != 0 or not output.is_file():
+        raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
+                      f'{routed}: OpenDB rc={result.returncode}; '
+                      f'{folder / "placed_keepouts.log"}')
+    try:
+        lines = output.read_text().splitlines()
+        if len(lines) < 3 or lines[0].split()[0] != 'DBU':
+            raise ValueError('missing DBU header')
+        dbu = int(lines[0].split()[1])
+        total = int(lines[1].split()[1]) if lines[1].startswith('TOTAL ') else -1
+        protected = int(lines[-1].split()[1]) if lines[-1].startswith('END ') else -1
+        if dbu <= 0 or total < 0 or protected < 0 or protected > total:
+            raise ValueError('invalid OpenDB census')
+        boxes = []
+        for line in lines[2:-1]:
+            fields = line.split()
+            if len(fields) != 7 or fields[0] != 'BOX' or fields[1] not in ('PAD', 'BLOCK'):
+                raise ValueError(f'invalid OpenDB box: {line}')
+            coords = tuple(int(x) for x in fields[3:])
+            if coords[0] >= coords[2] or coords[1] >= coords[3]:
+                raise ValueError(f'empty OpenDB box: {line}')
+            boxes.append((fields[1], fields[2], coords))
+        if len(boxes) != protected:
+            raise ValueError('truncated OpenDB protected-instance census')
+    except (OSError, ValueError, IndexError) as exc:
+        raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
+                      f'{output}: {exc}') from exc
+    return {'dbu': dbu, 'total': total, 'boxes': boxes, 'source': str(routed)}
+
+
+def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
+                   gds: Path, density_config: Path, lane: str) -> Dict[str, Any]:
+    """Use the PDK-derived dummy-metal engine after the PDK's own filler."""
+    cfg, map_text, lef_text, deck_text = _density_source(pdk_root, pdk,
+                                                         density_config)
+    fill_cfg = build_metal_fill_config(map_text, lef_text, deck_text)
+    if not fill_cfg or not fill_cfg.get('layers'):
+        raise Refusal('LL_DENSITY_FILL_NO_DERIVED_LAYERS', str(density_config))
+    root = project / 'phase3/librelane' / lane
+    placed = _placed_keepout_boxes(project, image, pdk_root, pdk, cfg, root)
+    try:
+        spacing = max(float(row['space_to_metal']) for row in fill_cfg['layers'])
+        if not math.isfinite(spacing) or spacing <= 0:
+            raise ValueError('nonpositive PDK spacing')
+    except (KeyError, TypeError, ValueError) as exc:
+        raise Refusal('LL_DENSITY_FILL_SPACING_UNREADABLE', str(exc)) from exc
+    fill_cfg['keepout_boxes_um'] = sorted([
+        [(box[0] / placed['dbu']) - spacing,
+         (box[1] / placed['dbu']) - spacing,
+         (box[2] / placed['dbu']) + spacing,
+         (box[3] / placed['dbu']) + spacing]
+        for _, _, box in placed['boxes']])
+    fill_cfg['_derivation']['placed_instance_keepout'] = {
+        'source': placed['source'], 'source_sha256': digest(Path(placed['source'])),
+        'basis': 'OpenDB placed PAD/BLOCK instance getBBox',
+        'instances_read': placed['total'],
+        'protected_count': len(placed['boxes']), 'spacing_um': spacing}
+    placed_pads = sorted({master for kind, master, _ in placed['boxes']
+                          if kind == 'PAD'})
+    if placed_pads:
+        # CORE_AREA comes from the tape-out declaration, so a refusal names
+        # that file and the reader's own reason; a declaration Refusal keeps
+        # its own code.
+        declaration = project / DECLARATION_REL
+        try:
+            declared, sources = declaration_config(project)
+        except (OSError, ValueError) as exc:
+            raise Refusal('LL_DENSITY_FILL_CORE_UNDECLARED',
+                          f'{declaration}: {type(exc).__name__}: {exc}') from exc
+        core = declared.get('CORE_AREA')
+        if core:
+            edge = _core_edge_keepout(cfg.get('DIE_AREA') or [], core)
+            fill_cfg['keepout_edge_um'] = max(
+                float(fill_cfg.get('keepout_edge_um') or 0), edge)
+            fill_cfg['_derivation']['pad_ring_exclusion'] = {
+                'region': 'outside declared core', 'edge_um': edge,
+                'core': core, 'source': sources.get('CORE_AREA'),
+                'placed_pad_masters': placed_pads}
+        else:
+            raise Refusal('LL_DENSITY_FILL_CORE_UNDECLARED',
+                          f'{declaration}: no core_area_um answer for the '
+                          f'placed pads {placed_pads}')
+    root.mkdir(parents=True, exist_ok=True)
+    config_path = root / 'pdk_fill_config.json'
+    out = root / (gds.stem + '.topped.gds')
+    report = root / 'fill_report.json'
+    write_json(config_path, fill_cfg)
+    programs = Path(__file__).resolve().parent
+    cmd = ['docker', 'run', '--rm', *_dmem.docker_memory_flags(),
+           '-v', f'{project.resolve()}:{project.resolve()}',
+           '-v', f'{programs.resolve()}:{programs.resolve()}:ro',
+           image, '--skip', 'python3', str(programs / 'metal_fill_emit.py'),
+           str(project), '--gds', str(gds), '--config', str(config_path),
+           '--out', str(out), '--report', str(report),
+           '--cell', str(cfg.get('DESIGN_NAME') or '')]
+    result = _run_logged(cmd, root / 'fill.log')
+    if result.returncode != 0 or not out.is_file() or not report.is_file():
+        raise Refusal('LL_DENSITY_FILL_FAILED',
+                      f'{root}: rc={result.returncode}; {root / "fill.log"}')
+    measured = _load(report)
+    if not (measured.get('verdict') == 'PASS' or
+            (measured.get('verdict') == 'PARTIAL' and
+             measured.get('promoted_on_foundry_floor'))) or not measured.get('layers'):
+        raise Refusal('LL_DENSITY_FILL_NOT_MEASURED', str(report))
+    if digest(out) == digest(gds):
+        raise Refusal('LL_DENSITY_FILL_NO_CHANGE', str(report))
+    return {'gds': str(out), 'gds_sha256': digest(out),
+            'input_sha256': digest(gds), 'report': str(report),
+            'report_sha256': digest(report), 'config': str(config_path),
+            'config_sha256': digest(config_path),
+            'layers': measured['layers']}
+
+
+def measure_density_ratios(project: Path, image: str, pdk_root: Path, pdk: str,
+                           gds: Path, density_config: Path, lane: str) -> Dict[str, Any]:
+    """Emit drawn+dummy coverage for every resolvable PDK die-density rule."""
+    cfg, map_text, lef_text, deck_text = _density_source(pdk_root, pdk,
+                                                         density_config)
+    fill_cfg = build_metal_fill_config(map_text, lef_text, deck_text)
+    if not fill_cfg:
+        raise Refusal('LL_DENSITY_RATIOS_UNRESOLVED', str(density_config))
+    specs = _density_ratio_specs(deck_text, fill_cfg)
+    die = cfg.get('DIE_AREA')
+    if not specs or not isinstance(die, list) or len(die) != 4:
+        raise Refusal('LL_DENSITY_RATIOS_UNRESOLVED', str(density_config))
+    root = project / 'phase3/librelane' / lane
+    root.mkdir(parents=True, exist_ok=True)
+    specs_path = root / 'density_specs.json'
+    report = root / 'density_ratios.json'
+    write_json(specs_path, specs)
+    programs = Path(__file__).resolve().parent
+    before = digest(gds)
+    cmd = ['docker', 'run', '--rm', *_dmem.docker_memory_flags(),
+           '-v', f'{project.resolve()}:{project.resolve()}',
+           '-v', f'{programs.resolve()}:{programs.resolve()}:ro',
+           image, '--skip', 'python3', str(programs / 'die_density_ratio_emit.py'),
+           '--gds', str(gds), '--specs', str(specs_path),
+           '--die', json.dumps(die), '--out', str(report)]
+    result = _run_logged(cmd, root / 'density_ratios.log')
+    if not report.is_file():
+        raise Refusal('LL_DENSITY_RATIOS_NOT_MEASURED',
+                      f'{root}: rc={result.returncode}; '
+                      f'{root / "density_ratios.log"}')
+    measured = _load(report)
+    if (result.returncode != 0 or measured.get('status') != 'MEASURED' or
+            digest(gds) != before or
+            set(measured.get('layers') or {}) != set(specs) or
+            any(not isinstance(row.get('ratio'), (int, float)) or
+                isinstance(row.get('ratio'), bool) or
+                not 0 <= row['ratio'] <= 1 for row in measured['layers'].values())):
+        raise Refusal('LL_DENSITY_RATIOS_NOT_MEASURED', str(report))
+    return {'report': str(report), 'report_sha256': digest(report),
+            'subject': str(gds), 'subject_sha256': before,
+            'layers': measured['layers']}
 
 
 # --- row occupancy, from the DEF and the LEFs that define its masters -------

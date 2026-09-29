@@ -109,6 +109,7 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
         canonical_gds: Path) -> dict:
     """Run two streams, require XOR zero, measure both, then finish the winner."""
     import librelane_pv_signoff as _pv
+    import librelane_fill_dfm as _fill
     # The stream renders the DEF's vias from the tech LEF the route read (a
     # derived via-legalized LEF when the flow staged one), never the PDK's.
     configs = resolve_step_configs(project, image, pdk, list(STEPS), pdk_root=pdk_root,
@@ -147,6 +148,9 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
     density_errors = {}
     gates = {}
     finishing = {}
+    density_fill = {}
+    density_ratios = {}
+    final_states = {}
     for arm, path in paths.items():
         state_path = _gds_state(compare[-1] / "state_out.json", path,
                                 root / f"37-{arm}-finish-state.json")
@@ -154,6 +158,24 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
                       ["KLayout.SealRing", "KLayout.Filler", "KLayout.Density"],
                       state_path, f"37-{arm}-finish", configs)
         finished = finish[-1]
+        initial = judge_step(finished, ["klayout__density_error__count"],
+                             root / f"37-{arm}-pdk-density.json")
+        initial_value = initial["metrics"]["klayout__density_error__count"].get("value")
+        if not isinstance(initial_value, int) or isinstance(initial_value, bool) or initial_value < 0:
+            raise Refusal("LL_DENSITY_NOT_MEASURED", str(root / f"37-{arm}-pdk-density.json"))
+        if initial_value:
+            pdk_filled = Path(json.loads((finish[1] / "state_out.json").read_text())["gds"])
+            density_fill[arm] = _fill.top_up_density(
+                project, image, pdk_root, pdk, pdk_filled,
+                configs["KLayout.Density"], f"37-{arm}-density-fill")
+            topped_state = _gds_state(
+                finished / "state_out.json", Path(density_fill[arm]["gds"]),
+                root / f"37-{arm}-density-fill-state.json")
+            finished = _run(project, image, pdk_root, pdk,
+                            ["KLayout.Density"], topped_state,
+                            f"37-{arm}-density-filled", configs)[-1]
+        else:
+            density_fill[arm] = None
         density_report = root / f"37-{arm}-density.json"
         density = judge_step(finished, ["klayout__density_error__count"],
                              density_report,
@@ -163,10 +185,14 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise Refusal("LL_DENSITY_NOT_MEASURED", str(density_report))
         density_errors[arm] = value
+        final_states[arm] = finished / "state_out.json"
         finished_state = json.loads((finished / "state_out.json").read_text())
         final_paths[arm] = Path(finished_state["gds"])
         if not final_paths[arm].is_file():
             raise Refusal("LL_FINAL_GDS_MISSING", str(final_paths[arm]))
+        density_ratios[arm] = _fill.measure_density_ratios(
+            project, image, pdk_root, pdk, final_paths[arm],
+            configs["KLayout.Density"], f"37-{arm}-density-ratios")
         # Step 37.3 (mig105): finishing never removes, covers or touches the
         # design geometry of the stream it started from.
         sealed = Path(json.loads((finish[0] / "state_out.json").read_text())["gds"])
@@ -192,6 +218,7 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
                     for row in gates[arm].values())}
     if not feasible:
         write_json(root / "37-feasibility.json", {"density_errors": density_errors,
+                                                   "density_ratios": density_ratios,
                                                    "finishing_xor": {
                                                        arm: row["verdict"] for arm, row
                                                        in finishing.items()},
@@ -212,9 +239,11 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
                "selection_detail": selection, "streams": {k: str(v) for k, v in paths.items()},
                "finished": {k: str(v) for k, v in final_paths.items()},
                "drc": counts, "xor": 0, "density": density_errors, "gates": gates,
+               "density_fill": density_fill,
+               "density_ratios": density_ratios,
                "finishing_xor": {arm: row["verdict"] for arm, row in finishing.items()},
                "source": str(final_gds), "source_sha256": digest(final_gds),
                "canonical": str(canonical_gds), "canonical_sha256": digest(canonical_gds)})
     return {"engine": winner, "gds": canonical_gds, "drc": counts,
-            "state": root / f"37-{winner}-finish/03-klayout-density/state_out.json",
+            "state": final_states[winner],
             "promotion": root / "37-promotion.json"}

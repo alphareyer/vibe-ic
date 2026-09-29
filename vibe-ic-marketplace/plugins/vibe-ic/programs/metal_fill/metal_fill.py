@@ -720,6 +720,11 @@ def run(gds, cfg, out_gds, cell_name=None):
     #       Subtract a band of this width inside the measurement bbox — the
     #       `fill_all.rb` form, for a PDK that ships no marker.
     #
+    #   keepout_boxes_um: [[x1, y1, x2, y2], ...]
+    #       Placed pad/macro instance footprints, already grown by the PDK's
+    #       dummy-to-circuit spacing.  OpenDB supplies these boxes; they are
+    #       not reconstructed from DEF text or inferred from a die-edge band.
+    #
     # The measurement bbox is NOT changed by either. The foundry's density rule
     # measures over the whole die, so shrinking the denominator to make the
     # numbers look better would be exactly the kind of dishonesty this file's
@@ -752,6 +757,21 @@ def run(gds, cfg, out_gds, cell_name=None):
             keepout_note.append(f"edge:{edge}um")
         else:
             keepout_note.append(f"edge:{edge}um:DEGENERATE")
+    boxes = cfg.get("keepout_boxes_um") or []
+    if not isinstance(boxes, list):
+        raise ValueError("keepout_boxes_um must be a list")
+    for box in boxes:
+        if (not isinstance(box, list) or len(box) != 4 or
+                any(not isinstance(v, (int, float)) or isinstance(v, bool) or
+                    not math.isfinite(v) for v in box) or
+                box[0] >= box[2] or box[1] >= box[3]):
+            raise ValueError(f"invalid protected-instance keepout box: {box!r}")
+        # Round OUTWARD so the GDS grid cannot shave off the declared spacing.
+        x1, y1 = (math.floor(box[i] / ly.dbu) for i in (0, 1))
+        x2, y2 = (math.ceil(box[i] / ly.dbu) for i in (2, 3))
+        keepout += pya.Region(pya.Box(x1, y1, x2, y2))
+    if boxes:
+        keepout_note.append(f"placed-instance-boxes:{len(boxes)}")
     keepout = keepout.merged()
 
     # The FOUNDRY floor the config was derived from (`metal_fill_config_gen`
@@ -854,7 +874,7 @@ def run(gds, cfg, out_gds, cell_name=None):
             # the same claim as "the geometry was there and was subtracted" —
             # so an EMPTY declared keep-out layer says so by name.
             "keepout": {"declared": bool(cfg.get("keepout_layers")
-                                         or cfg.get("keepout_edge_um")),
+                                         or cfg.get("keepout_edge_um") or boxes),
                         "sources": keepout_note,
                         "area_um2": round(keepout.area() * ly.dbu * ly.dbu, 3),
                         "measurement_bbox_um": [

@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1379
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1379)
+- **Total programs (excluding helpers / shims):** 1380
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1380)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1370 |
+| `any` | 1371 |
 
 ## Alphabetical listing
 
@@ -344,6 +344,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `dft_test_coverage` | any | — | raw FAULT coverage vs sign-off TEST coverage (#603). |
 | `dice_roller_synth` | any | — | DETERMINISTIC solver for the CVDP digital dice-roller. |
 | `die_density_fill_gen` | any | — | DIE-WIDE dummy fill, by the PDK's OWN generator. |
+| `die_density_ratio_emit` | any | — | Measure PDK-resolved die-density layers in a streamed GDS with KLayout. |
 | `die_finishing_check` | any | — | the Step 26.5ic gate. |
 | `die_finishing_gen` | any | — | Step 26.5ic producer: the PDK's own seal ring, and the die-identification half's honest state. |
 | `die_level_deck_rule_attribution` | any | — | vibe-ic#2112. |
@@ -1451,7 +1452,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1370 programs)
+### `any` (1371 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1768,6 +1769,7 @@ _(no programs in this group)_
 - `dft_test_coverage` — raw FAULT coverage vs sign-off TEST coverage (#603).
 - `dice_roller_synth` — DETERMINISTIC solver for the CVDP digital dice-roller.
 - `die_density_fill_gen` — DIE-WIDE dummy fill, by the PDK's OWN generator.
+- `die_density_ratio_emit` — Measure PDK-resolved die-density layers in a streamed GDS with KLayout.
 - `die_finishing_check` — the Step 26.5ic gate.
 - `die_finishing_gen` — Step 26.5ic producer: the PDK's own seal ring, and the die-identification half's honest state.
 - `die_level_deck_rule_attribution` — vibe-ic#2112.
