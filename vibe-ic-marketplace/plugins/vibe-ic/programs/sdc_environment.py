@@ -542,6 +542,19 @@ def staged_sdc_pad_input_drive(project: Path, text: str, staged_rel: str,
 SDC_UNITS_LINE = "set_cmd_units -time ns -capacitance pF"
 
 
+def limits_in_deck_units(drv: Dict[str, object], liberty_path: str) -> Dict[str, object]:
+    """A Liberty-read DRV record (`max_transition_ns` / `max_capacitance_pf`
+    as the Liberty states them, in its own units) restated in the deck's ns /
+    pF. The deck text is never rescaled afterwards; the tool converts."""
+    out = dict(drv or {})
+    time_per_ns, cap_per_pf = liberty_units(liberty_path)
+    if out.get("max_transition_ns") is not None:
+        out["max_transition_ns"] = float(out["max_transition_ns"]) / time_per_ns
+    if out.get("max_capacitance_pf") is not None:
+        out["max_capacitance_pf"] = float(out["max_capacitance_pf"]) / cap_per_pf
+    return out
+
+
 def with_sdc_units(text: str) -> str:
     """A design-staged deck, opened with ``SDC_UNITS_LINE``.
 

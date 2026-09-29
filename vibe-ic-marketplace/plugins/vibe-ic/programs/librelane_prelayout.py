@@ -242,6 +242,24 @@ PDK_VIEW_STEP = "OpenROAD.STAPrePNR"
 _PDK_VIEWS: dict[tuple[str, str, str], dict] = {}
 
 
+RUN_IMAGE_RECORD = "reports/container_image.json"
+
+
+def run_image(project: Path) -> str:
+    """The image reference this run's EDA container was verified to run."""
+    path = Path(project) / RUN_IMAGE_RECORD
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise Refusal("LL_RUN_IMAGE_UNRECORDED",
+                      f"{path}: {type(exc).__name__}") from None
+    image = ((doc.get("image_ref") or doc.get("require_image"))
+             if isinstance(doc, dict) else None)
+    if not isinstance(image, str) or not image:
+        raise Refusal("LL_RUN_IMAGE_UNRECORDED", f"{path}: no image_ref")
+    return image
+
+
 def resolve_pdk_view(project: Path, pdk: str) -> dict:
     """The PDK configuration as the installed LibreLane resolves it.
 
@@ -253,12 +271,16 @@ def resolve_pdk_view(project: Path, pdk: str) -> dict:
     over Tcl text, one variable grammar at a time.  Refuses by name
     (`Refusal`); the caller discloses that as NOT_READ, never a value.
 
+    The image is the one THIS RUN executes in, from its durable record
+    (`reports/container_image.json` image_ref): PDK values come from the
+    image the run's tools use, never from whichever image is newest on the
+    host. No record => `LL_RUN_IMAGE_UNRECORDED`.
+
     Returns ``{"config", "path", "design_provenance", "image"}``; cached per
     (project, PDK, image) because steps 7 and PnR ask the same question.
     """
-    from librelane_contract import (pdk_root_resolution, resolve_image,
-                                    resolve_step_configs)
-    image = resolve_image(project)
+    from librelane_contract import pdk_root_resolution, resolve_step_configs
+    image = run_image(project)
     key = (str(Path(project).resolve()), str(pdk), image)
     if key in _PDK_VIEWS:
         return _PDK_VIEWS[key]
