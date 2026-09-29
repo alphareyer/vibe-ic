@@ -3285,6 +3285,7 @@ def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, obj
 
 
 from sdc_environment import (  # R-0929-PAD-INPUT-DRIVE
+    SDC_UNITS_LINE as _SDC_UNITS_LINE, liberty_units as _sdc_liberty_units,
     _pad_input_drive as _sdc_pad_input_drive,
     write_pad_input_drive_record as _sdc_write_pad_input_drive,
     pad_drive_sdc_lines as _sdc_pad_drive_sdc_lines,
@@ -3441,60 +3442,20 @@ def _producer_supply_ports_for_drv(project: Optional[Path]) -> Tuple[str, ...]:
     return str(power), str(ground)
 
 
-def _scale_sdc_to_liberty_units(sdc_text: str, liberty_path: str) -> str:
-    """benchmark-spm-asap7 — rescale a STAGED (ns/pF-authored) SDC's numeric
-    timing/cap directives into the ACTIVE PDK liberty's declared units.
+def _liberty_drv_limits_ns_pf(liberty_path: str, container: str = "") -> Dict[str, object]:
+    """`_liberty_drv_limits` with its slew/cap stated in ns / pF.
 
-    OpenSTA interprets SDC numbers in the library's ``time_unit`` /
-    ``capacitive_load_unit``. A staged SDC written in ns / pF is wrong by
-    1000× when the liberty declares ``"1ps"`` / ``(1,ff)`` (ASAP7) — the
-    sign-off clock becomes 1000× too tight. Scales the numeric operand of
-    ``create_clock -period``, ``set_input_delay``, ``set_output_delay``,
-    ``set_max_transition`` (time scale) and ``set_max_capacitance`` (cap
-    scale) and prepends a disclosure comment. Missing/unreadable units
-    ⇒ ×1 (byte-identical, legacy behavior). Chip/PDK-AGNOSTIC.
-    """
-    time_scale, cap_scale = 1.0, 1.0
-    try:
-        import re as _re_u
-        head = Path(liberty_path).read_text(errors="ignore")[:200000]
-        m = _re_u.search(r'time_unit\s*:\s*"(\d+(?:\.\d+)?)\s*([pnum]?s)"',
-                         head)
-        if m:
-            time_scale = 1.0 / (float(m.group(1)) *
-                                {"ps": 1e-3, "ns": 1.0, "us": 1e3,
-                                 "ms": 1e6}[m.group(2)])
-        mc = _re_u.search(r'capacitive_load_unit\s*\(\s*(\d+(?:\.\d+)?)\s*,\s*'
-                          r'([fpnum]+)\s*\)', head)
-        if mc:
-            cap_scale = 1.0 / (float(mc.group(1)) *
-                               {"ff": 1e-3, "pf": 1.0, "nf": 1e3,
-                                "uf": 1e6}[mc.group(2)])
-    except Exception:
-        return sdc_text
-    if time_scale == 1.0 and cap_scale == 1.0:
-        return sdc_text
-
-    def _scale_line(line: str) -> str:
-        import re as _re_l
-        stripped = line.lstrip()
-        for cmd, scale in (("create_clock", time_scale),
-                           ("set_input_delay", time_scale),
-                           ("set_output_delay", time_scale),
-                           ("set_max_transition", time_scale),
-                           ("set_max_capacitance", cap_scale)):
-            if stripped.startswith(cmd):
-                return _re_l.sub(
-                    r"(\d+(?:\.\d+)?)",
-                    lambda mm: f"{float(mm.group(1)) * scale:g}",
-                    line, count=1)
-        return line
-
-    out = "\n".join(_scale_line(l) for l in sdc_text.split("\n"))
-    note = (f"# unit-rescale: staged SDC numerics scaled into the PDK "
-            f"liberty's units (time ×{time_scale:g}, cap ×{cap_scale:g}) —\n"
-            f"# staged file was ns/pF-authored; see _scale_sdc_to_liberty_units\n")
-    return note + out
+    A vibe-ic deck opens with `set_cmd_units -time ns -capacitance pF`
+    (`sdc_environment.SDC_UNITS_LINE`), so a Liberty default read in that
+    Liberty's own units is stated once in the deck's units here; the deck text
+    is never rescaled afterwards."""
+    drv = dict(_liberty_drv_limits(liberty_path, container))
+    time_per_ns, cap_per_pf = _sdc_liberty_units(liberty_path)
+    if drv.get("max_transition_ns") is not None:
+        drv["max_transition_ns"] = float(drv["max_transition_ns"]) / time_per_ns
+    if drv.get("max_capacitance_pf") is not None:
+        drv["max_capacitance_pf"] = float(drv["max_capacitance_pf"]) / cap_per_pf
+    return drv
 
 
 # A9 (#169) — a STAGED silicon SDC (one a PRIOR phase3 run wrote, then
@@ -3502,8 +3463,8 @@ def _scale_sdc_to_liberty_units(sdc_text: str, liberty_path: str) -> str:
 # carries the ORIGINATING PDK's design-rule (DRV) limits: `set_max_transition` /
 # `set_max_capacitance`, derived from THAT PDK's liberty. Re-used verbatim under
 # a DIFFERENT active PDK, those VALUES are wrong (sky130's 1.5 ns slew / 5 pF cap
-# are not ASAP7's). `_scale_sdc_to_liberty_units` fixes the UNITS (ns→ps) but
-# keeps the stale VALUE. The fix: stamp every phase3-staged SDC with a provenance
+# are not ASAP7's). The deck's own `set_cmd_units` fixes the UNITS but keeps
+# the stale VALUE. The fix: stamp every phase3-staged SDC with a provenance
 # PDK id; when a later run's active PDK differs, RE-DERIVE the DRV limits from the
 # ACTIVE liberty (or DROP the DRV line when the active liberty declares none).
 _SDC_PROVENANCE_RE = re.compile(r"VIBEIC_SDC_PDK_PROVENANCE:\s*(\S+)")
@@ -3538,8 +3499,8 @@ def _reconcile_staged_sdc_drv(sdc_text: str, active_pdk_name: str,
 
     Otherwise (stamp names a DIFFERENT PDK) the `set_max_transition` /
     `set_max_capacitance` operands are RE-DERIVED from the active liberty via
-    :func:`_liberty_drv_limits` (already in the active liberty's own units, so no
-    further unit scaling), or the DRV line is DROPPED when the active liberty
+    :func:`_liberty_drv_limits_ns_pf` (stated in the deck's ns / pF; the deck's
+    own `set_cmd_units` makes the tool convert), or the DRV line is DROPPED when the active liberty
     declares no such limit. The stamp is updated to the active PDK. §4.05: only a
     real active-liberty value is ever substituted — never a fabricated one.
     chip/PDK-AGNOSTIC."""
@@ -3554,7 +3515,7 @@ def _reconcile_staged_sdc_drv(sdc_text: str, active_pdk_name: str,
         # Provenance differs but there is no PDK-derived DRV to fix — just
         # re-stamp so a further run sees the current provenance.
         return _stamp_sdc_provenance(sdc_text, active_pdk_name)
-    drv = _liberty_drv_limits(str(active_liberty or ""), container)
+    drv = _liberty_drv_limits_ns_pf(str(active_liberty or ""), container)
     slew = drv.get("max_transition_ns")
     cap = drv.get("max_capacitance_pf")
     out_lines: List[str] = []
@@ -3762,7 +3723,7 @@ def _ensure_staged_sdc_drv(sdc_text: str, active_liberty: str,
                         "overridden)")
         return text, info
 
-    drv = _liberty_drv_limits(str(active_liberty or ""), container)
+    drv = _liberty_drv_limits_ns_pf(str(active_liberty or ""), container)
     slew = None if have_slew else drv.get("max_transition_ns")
     cap = None if have_cap else drv.get("max_capacitance_pf")
     fanout = None
@@ -4338,38 +4299,9 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
     # wns 0.00 from a deck that constrained no clock at all.
     clk_port_name, _clk_port_note = _clock_port_against_the_design(
         project, top, str(clk_port_name))
-    # benchmark-spm-asap7 — SDC numeric values are interpreted by OpenSTA in
-    # the LIBRARY's own ``time_unit``. The resolved clock period / I/O delays
-    # are in ns; when the PDK liberty declares ``time_unit : "1ps"`` (e.g.
-    # ASAP7) the raw ns value would give a 1000×-too-tight sign-off clock
-    # (10 → 10 ps) and every path reports VIOLATED. Scale to the liberty's
-    # time unit (chip/PDK-AGNOSTIC: read from the liberty header; missing or
-    # unreadable ⇒ ×1 — legacy, byte-identical behavior on ns-unit PDKs).
-    _tu_scale = 1.0
-    if liberty_path:
-        try:
-            import re as _re_tu
-            _lib_head = Path(liberty_path).read_text(errors="ignore")[:200000]
-            # Liberty comments are not declarations. A commented ps unit
-            # before the live ns unit must never tighten every SDC path 1000x.
-            _lib_head = _re_tu.sub(
-                r"/\*.*?\*/|//[^\n]*",
-                lambda m: _re_tu.sub(r"[^\n]", " ", m.group()),
-                _lib_head, flags=_re_tu.S)
-            _m_tu = _re_tu.search(
-                r'\btime_unit\s*:\s*"(\d+(?:\.\d+)?)\s*([pnum]?s)"',
-                _lib_head)
-            if _m_tu:
-                _tu_scale = (float(_m_tu.group(1)) *
-                             {"ps": 1e-3, "ns": 1.0,
-                              "us": 1e3, "ms": 1e6}[_m_tu.group(2)])
-                _tu_scale = 1.0 / _tu_scale  # → lib units per ns
-        except Exception:
-            _tu_scale = 1.0
-    # Regression-safe formatting: on an ns-unit PDK (_tu_scale == 1.0) emit the
-    # period / I/O delays BYTE-IDENTICALLY to the pre-A4 SDC (`10.0`, `2`) so
-    # sky130 / nangate output is unchanged; only the non-ns (e.g. ASAP7 ps)
-    # case reformats via `:g` to carry the scaled value without a trailing `.0`.
+    # Every number is ns / pF: the deck opens with `set_cmd_units -time ns
+    # -capacitance pF` (_SDC_UNITS_LINE), so OpenSTA converts to whatever
+    # units the Liberty declares. The deck is never rescaled.
     _io_ns, _io_note = _declared_io_delay_ns(project, clk_period_ns)
     # No declaration ⇒ the historical literal 2, byte-identical.
     _io_val = 2.0 if _io_ns is None else float(_io_ns)
@@ -4381,15 +4313,8 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
                        "emitted, so NOTHING here constrains a boundary path. "
                        "A gate that reports those paths must report them as "
                        "NOT_MEASURED.\n")
-    if _tu_scale == 1.0:
-        _period_str = f"{clk_period_ns}"
-        _io_str = "2" if _io_ns is None else f"{_io_val:g}"
-    else:
-        _period_str = f"{clk_period_ns * _tu_scale:g}"
-        _io_str = f"{_io_val * _tu_scale:g}"
-    _tu_note = (f"# time-unit scaling: liberty declares a non-ns time_unit; "
-                f"period {clk_period_ns:g} ns emitted as {_period_str} "
-                f"lib-time-units\n" if _tu_scale != 1.0 else "")
+    _period_str = f"{clk_period_ns}"
+    _io_str = "2" if _io_ns is None else f"{_io_val:g}"
     # #742 follow-through: "no constraints/*.sdc supplied" is a claim about
     # the DESIGN, and it was printed on the strength of one glob returning
     # nothing. When the design DID stage SDCs the resolver does not read, say
@@ -4407,7 +4332,7 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
         + _declared_note
         + _clk_port_note
         + _io_note
-        + _tu_note +
+        + _SDC_UNITS_LINE + "\n" +
         f"create_clock -name clk -period {_period_str} "
         f"[get_ports {clk_port_name}]\n"
         # `[all_inputs]` INCLUDES the clock port, and OpenSTA REFUSES the whole
@@ -4509,30 +4434,26 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
     sdc_text += _unread_fanout_comment
     _env, _env_unread = _sdc_environment_values(
         project, liberty_path, container, drv_slew_ns, drv_cap_pf,
-        _to_container_path)
+        _to_container_path, pdk_name=pdk_name)
     # R-0929-PAD-INPUT-DRIVE: a DIE top's bond-pad inputs are never driven by
     # the core synthesis driving cell; the resolved drive is recorded for the
     # Step-23 STA verdict, which cannot PASS on a NOT_MEASURED drive.
     _env, _pad_drive = _sdc_pad_input_drive(project, _env, container,
                                             _to_container_path)
-    _pad_drive["sdc_lines"] = _sdc_pad_drive_sdc_lines(_pad_drive, _tu_scale)
+    _pad_drive["sdc_lines"] = _sdc_pad_drive_sdc_lines(_pad_drive)
     try:
         _sdc_write_pad_input_drive(project, _pad_drive)
     except OSError:
         # No record on a DIE top reads NOT_MEASURED downstream (fail closed).
         pass
-    sdc_text += _sdc_environment_prefix(_env, _env_unread, time_scale=_tu_scale,
-                                        pad_drive=_pad_drive)
+    sdc_text += _sdc_environment_prefix(_env, _env_unread, pad_drive=_pad_drive)
     _env_slew = _env.get("set_max_transition")
     _env_cap = _env.get("set_max_capacitance")
-    # Design and LibreLane config time values are ns. A default read directly
-    # from Liberty is already expressed in that Liberty's own time_unit.
-    _env_slew_scale = (1.0 if _env_slew and
-                       _env_slew[1].startswith("liberty default ") else _tu_scale)
+    # Every tier is stated in ns / pF (`_sdc_environment_values`).
     # FX_STEP7_ASIC_SDC: record the DRV block's arguments exactly as rendered
     # (the environment-resolved values and their sources), so the PnR-time
     # scope derivation re-renders the SAME block and finds it in the deck.
-    _blk_slew = float(_env_slew[0]) * _env_slew_scale if _env_slew else None
+    _blk_slew = float(_env_slew[0]) if _env_slew else None
     _blk_cap = float(_env_cap[0]) if _env_cap else None
     _blk_slew_src = _env_slew[1] if _env_slew else ""
     _blk_cap_src = _env_cap[1] if _env_cap else ""
@@ -55586,6 +55507,53 @@ def stamp_pvt_corner_coverage(pvt: dict, corners: list) -> dict:
     return pvt
 
 
+def _write_pvt_matrix(project: Path, pdk: "PdkConfig", pvt_path: Path, *,
+                      resolved: Optional[dict] = None,
+                      folder: Optional[Path] = None) -> dict:
+    """THE writer of step 7's `pvt_matrix.json` (both call sites use it).
+
+    The corner set is the TOOL's: the STA_CORNERS / CELL_LIBS / DEFAULT_CORNER
+    the installed LibreLane resolves for this design and PDK
+    (`librelane_prelayout.resolve_pdk_view`), or the resolved config of a
+    STAPrePNR run that already happened (`resolved` / `folder`). A design that
+    stages its own Liberty corners under `input/pdk/liberty` declares them;
+    they are listed as declared. Nothing is discovered by globbing a PDK tree
+    or picked by a corner-name preference.
+
+    #442 stays: a refused resolution writes `corners: []` with the refusal as
+    `corner_source`, and `stamp_pvt_corner_coverage` discloses it; the matrix
+    never names a corner nobody resolved.
+    """
+    import librelane_prelayout as _llp
+    staged_dir = project / "input" / "pdk" / "liberty"
+    staged = sorted(staged_dir.glob("*.lib")) if staged_dir.is_dir() else []
+    if staged:
+        pvt: Dict[str, Any] = dict(_PVT_MATRIX_TEMPLATE)
+        pvt["corners"] = [{"name": lib.stem,
+                           "label": _classify_corner_from_name(lib.name),
+                           "liberty": str(lib.relative_to(project))}
+                          for lib in staged]
+        pvt["primary_corner"] = "TT"
+        pvt["corner_source"] = ("design-staged input/pdk/liberty (the design "
+                                "declares its own Liberty corners)")
+    else:
+        try:
+            if resolved is None:
+                resolved = _llp.resolve_pdk_view(project, str(pdk.name))["config"]
+            pvt = _llp.pvt_matrix_from_sta_corners(resolved, folder,
+                                                   _classify_corner_from_name)
+        except Exception as exc:  # noqa: BLE001 - Refusal / OSError / ValueError
+            pvt = dict(_PVT_MATRIX_TEMPLATE)
+            pvt["corners"] = []
+            pvt["primary_corner"] = None
+            pvt["corner_source"] = ("NOT_READ: LibreLane resolved STA_CORNERS: "
+                                    + " ".join(str(exc).split())[:300])
+    stamp_pvt_corner_coverage(pvt, pvt["corners"])
+    pvt_path.parent.mkdir(parents=True, exist_ok=True)
+    _aa.write_json(pvt_path, pvt)
+    return pvt
+
+
 
 def _classify_corner_from_name(name: str) -> str:
     """Return canonical corner label (SS/TT/FF/best/worst/typ) from filename.
@@ -59538,7 +59506,7 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
 
     SDC SOURCE (fixed): the design SDC comes from
     :func:`_resolve_staged_silicon_sdc` — the shared ground truth, which reads
-    ``input/constraints`` — and goes through the SAME unit-rescale + DRV + I/O
+    ``input/constraints`` — and goes through the SAME units line + DRV + I/O
     parity chain ``step_pnr`` applies, so the deck the pre-layout STA reads is
     the deck PnR will read. The canonical ``constraints/<top>.sdc`` copy is
     written ONLY when the SDC is genuinely design-staged; see Steps 7a/7b.
@@ -59647,7 +59615,7 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
         project, runner_sdc, pdk=str(pdk.name),
         library=_active_std_cell_library(project, str(pdk.name)))
     notes.append(
-        (f"SDC: design-staged {_step7['staged_sdc']} — unit-rescaled + "
+        (f"SDC: design-staged {_step7['staged_sdc']} — opened with set_cmd_units (tool converts units) + "
          f"DRV/IO parity (step 7's producer, the chain step_pnr loads). "
          + " ".join(str((_step7.get(k) or {}).get("note") or "")
                     for k in ("drv_parity", "io_parity")).strip())
@@ -59672,38 +59640,13 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                               f"LibreLane pre-layout path ({_ll_modes}): {exc}",
                               written, reason_class=stopped or "")
 
-    # --- Step 7c: pvt_matrix.json (design-staged Liberty corners) --------
+    # --- Step 7c: pvt_matrix.json — the tool's resolved corner set ------
     pvt_path = constraints_out / "pvt_matrix.json"
-    if _ll and _ll_modes["7"] != "direct":
-        # One corner set: the tool's resolved STA_CORNERS.
-        import librelane_prelayout as _llp
-        _pvt_ll = _llp.pvt_matrix_from_sta_corners(
-            _ll["resolved"], _ll["folder"], _classify_corner_from_name)
-        stamp_pvt_corner_coverage(_pvt_ll, _pvt_ll["corners"])
-        pvt_path.write_text(json.dumps(_pvt_ll, indent=2) + "\n")
-        written.append(str(pvt_path))
-    if not pvt_path.is_file():
-        corners = []
-        for lib in staged_libs:
-            try:
-                _lib_ref = str(lib.relative_to(project))
-            except ValueError:
-                # Container built-in PDK corner: absolute container path, not
-                # under the project. Record it verbatim so the matrix names
-                # the file actually read rather than a path that does not
-                # resolve from either side.
-                _lib_ref = str(lib)
-            corners.append({
-                "name": lib.stem,
-                "label": _classify_corner_from_name(lib.name),
-                "liberty": _lib_ref,
-            })
-        pvt = dict(_PVT_MATRIX_TEMPLATE)
-        pvt["corners"] = corners
-        pvt["primary_corner"] = "TT"
-        stamp_pvt_corner_coverage(pvt, corners)
-        pvt_path.write_text(json.dumps(pvt, indent=2) + "\n")
-        written.append(str(pvt_path))
+    _tool_ran = bool(_ll) and _ll_modes["7"] != "direct"
+    _write_pvt_matrix(project, pdk, pvt_path,
+                      resolved=_ll["resolved"] if _tool_ran else None,
+                      folder=_ll["folder"] if _tool_ran else None)
+    written.append(str(pvt_path))
 
     # --- Step 10: GENUINE pre-layout multi-corner STA --------------------
     # force_prelayout=True: this step is Step 10 (PRE-LAYOUT) by definition, so
@@ -61709,53 +61652,10 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         written.append(str(canon_sdc))
     pvt_path = constraints_out / "pvt_matrix.json"
     if not pvt_path.is_file():
-        # Discover Liberty corners. Project-staged libs take priority; when
-        # absent (ORGANIC #565 — most benchmark projects use the container's
-        # built-in PDK and never stage libs under input/pdk/liberty), fall
-        # back to globbing the corner libs in the same directory as the
-        # resolved PdkConfig.liberty (e.g. the container's
-        # libs.ref/<lib>/lib/*.lib holding all 13 sky130A corners).
-        lib_dir = project / "input" / "pdk" / "liberty"
-        corners = []
-        if lib_dir.is_dir() and any(lib_dir.glob("*.lib")):
-            for lib in sorted(lib_dir.glob("*.lib")):
-                corners.append({
-                    "name": lib.stem,
-                    "label": _classify_corner_from_name(lib.name),
-                    "liberty": str(lib.relative_to(project)),
-                })
-        else:
-            pdk_lib = Path(getattr(pdk, "liberty", "") or "")
-            pdk_lib_dir = pdk_lib.parent
-            if pdk_lib_dir and pdk_lib_dir.is_dir():
-                for lib in sorted(pdk_lib_dir.glob("*.lib")):
-                    corners.append({
-                        "name": lib.stem,
-                        "label": _classify_corner_from_name(lib.name),
-                        # absolute container/host path — outside the project
-                        # tree, so kept as-is (not project-relative).
-                        "liberty": str(lib),
-                    })
-            # ORGANIC (GAP-E2E-2) — the host-side glob above finds NOTHING when
-            # the active PDK is the container's built-in one (pdk.liberty =
-            # /foss/pdks/… lives in the CONTAINER fs, invisible to the host) →
-            # a false single_corner_stance on every sky130A run. When the host
-            # glob is empty, enumerate the corner libs from INSIDE the container
-            # and select canonical ss/tt/ff representatives so multi-corner
-            # sign-off is actually substantiated.
-            if not corners and pdk_lib_dir:
-                _clibs = _discover_container_corner_libs(
-                    container, str(pdk_lib_dir))
-                corners = _select_signoff_corners(
-                    _clibs, container, str(pdk_lib_dir))
-        pvt = dict(_PVT_MATRIX_TEMPLATE)
-        pvt["corners"] = corners
-        pvt["primary_corner"] = "TT"
-        # ORGANIC-20260606 #442: corners=[] (or a single corner) is NOT a
-        # PVT matrix — say so in the artifact instead of letting an empty
-        # list wear the pvt_matrix name. ≥2 labelled corners = multi.
-        stamp_pvt_corner_coverage(pvt, corners)
-        pvt_path.write_text(json.dumps(pvt, indent=2) + "\n")
+        # Step 7's own writer (`_write_pvt_matrix`), never a second one: the
+        # two used to disagree on the corner set and on the #442 disclosure.
+        pvt = _write_pvt_matrix(project, pdk, pvt_path)
+        corners = pvt["corners"]
         written.append(str(pvt_path))
         # --- ORGANIC #694: durable single-corner stance attestation -------
         # When <2 Liberty corners are available (the common case on a

@@ -65,69 +65,70 @@ def _sdc_environment_design_values(project: Path) -> Tuple[Dict[str, Tuple[str, 
     return values, unread
 
 
-def _sdc_environment_pdk_values(liberty_path: str, container: str,
-                                to_container_path: Optional[Callable[[str, str], str]] = None
+def _sdc_environment_pdk_values(project: Path, pdk_name: Optional[str]
                                 ) -> Tuple[Dict[str, Tuple[str, str]], List[str]]:
-    """Read the active PDK and cell-library LibreLane configs in the pinned image."""
+    """The PDK tier, as the installed LibreLane resolves it for this design.
+
+    The same resolver answers step 7's corner set
+    (`librelane_prelayout.resolve_pdk_view`), in the image every LibreLane
+    step of the run uses. A refusal is disclosed as NOT_READ naming it; no
+    value is guessed in its place.
+    """
     values: Dict[str, Tuple[str, str]] = {}
-    unread: List[str] = []
-    path = str(liberty_path or "")
-    match = re.search(r"^(.*)/libs\.ref/([^/]+)/lib/", path)
-    if not match or not container:
-        return values, ["NOT_READ: pinned PDK SDC config path or container identity"]
-    pdk_root, library = match.groups()
-    root = f"{pdk_root}/libs.tech/librelane"
-    for config in (f"{root}/config.tcl", f"{root}/{library}/config.tcl"):
-        config_c = (to_container_path(config, container)
-                    if to_container_path is not None else config)
-        try:
-            run = subprocess.run(_cex.docker_exec_argv(container, "cat", config_c),
-                                 capture_output=True, text=True, timeout=60)
-        except (OSError, subprocess.TimeoutExpired,
-                _cex.ContainerImageMismatch):
-            unread.append(f"NOT_READ: pinned PDK config {config_c}")
+    if not pdk_name:
+        return values, ["NOT_READ: LibreLane resolved PDK config (no design PDK name)"]
+    try:
+        import librelane_prelayout as _llp
+        view = _llp.resolve_pdk_view(Path(project), str(pdk_name))
+    except Exception as exc:  # noqa: BLE001 - Refusal / OSError / ValueError alike
+        return values, [f"NOT_READ: LibreLane resolved PDK config for {pdk_name}: "
+                        f"{' '.join(str(exc).split())[:300]}"]
+    config = view.get("config") or {}
+    declared = view.get("design_provenance") or {}
+    for name, key in _SDC_ENV_KEYS.items():
+        raw = config.get(key)
+        if raw is None or isinstance(raw, (list, dict)):
             continue
-        if run.returncode != 0:
-            unread.append(f"NOT_READ: pinned PDK config {config_c}")
+        raw = str(raw).strip()
+        if name in _SDC_ENV_NUMERIC:
+            try:
+                number = float(raw)
+            except ValueError:
+                continue
+            if not math.isfinite(number) or number <= 0:
+                continue
+            raw = f"{number:g}"
+        elif not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.$]*/[A-Za-z_][A-Za-z0-9_]*", raw):
             continue
-        for line in run.stdout.splitlines():
-            found = re.match(r"\s*set\s+::env\(([A-Z_]+)\)\s+(\"[^\"]*\"|\S+)", line)
-            if not found:
-                continue
-            key, raw = found.groups()
-            name = next((name for name, var in _SDC_ENV_KEYS.items() if var == key), None)
-            if name is None:
-                continue
-            raw = raw.strip('"').replace("$::env(STD_CELL_LIBRARY)", library)
-            if name in _SDC_ENV_NUMERIC:
-                try:
-                    number = float(raw)
-                except ValueError:
-                    continue
-                if not math.isfinite(number) or number <= 0:
-                    continue
-                raw = f"{number:g}"
-            elif not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.$]*/[A-Za-z_][A-Za-z0-9_]*", raw):
-                continue
-            values[name] = (raw, f"pinned PDK default {config_c}:{key}")
-    return values, unread
+        origin = (f"declared design config: {declared[key]}" if key in declared
+                  else f"PDK config {pdk_name}")
+        values[name] = (raw, f"LibreLane resolved {view.get('path')}:{key} "
+                             f"({origin}; image {view.get('image')})")
+    return values, []
 
 
 def _sdc_environment_values(project: Path, liberty_path: str, container: str,
                             liberty_slew: Optional[float],
                             liberty_cap: Optional[float],
-                            to_container_path: Optional[Callable[[str, str], str]] = None
+                            to_container_path: Optional[Callable[[str, str], str]] = None,
+                            pdk_name: Optional[str] = None,
                             ) -> Tuple[Dict[str, Tuple[str, str]], List[str]]:
-    """Resolve each R8 command: design > pinned PDK > Liberty default."""
+    """Resolve each R8 command: design > resolved PDK config > Liberty default.
+
+    Every value is returned in the deck's units (ns / pF; OUTPUT_CAP_LOAD in
+    fF as LibreLane declares it). The deck opens with ``SDC_UNITS_LINE``, so the
+    TOOL converts to the Liberty's units. A Liberty default is read in that
+    Liberty's own units and stated here once in ns / pF.
+    """
     design, unread_design = _sdc_environment_design_values(project)
-    pdk, unread_pdk = _sdc_environment_pdk_values(
-        liberty_path, container, to_container_path)
+    pdk, unread_pdk = _sdc_environment_pdk_values(project, pdk_name)
     liberty: Dict[str, Tuple[str, str]] = {}
+    time_per_ns, cap_per_pf = liberty_units(liberty_path)
     if liberty_slew is not None:
-        liberty["set_max_transition"] = (f"{liberty_slew:g}",
+        liberty["set_max_transition"] = (f"{liberty_slew / time_per_ns:g}",
                                          f"liberty default {liberty_path}:default_max_transition")
     if liberty_cap is not None:
-        liberty["set_max_capacitance"] = (f"{liberty_cap:g}",
+        liberty["set_max_capacitance"] = (f"{liberty_cap / cap_per_pf:g}",
                                           f"liberty default {liberty_path}:default_max_capacitance")
     return {name: next((tier[name] for tier in (design, pdk, liberty) if name in tier))
             for name in _SDC_ENV_KEYS if any(name in tier for tier in (design, pdk, liberty))}, \
@@ -443,8 +444,7 @@ def _resolve_undeclared_drive(project: Path, record: Dict[str, object],
     return record
 
 
-def render_pad_input_drive(record: Optional[Dict[str, object]],
-                           time_scale: float = 1.0) -> List[str]:
+def render_pad_input_drive(record: Optional[Dict[str, object]]) -> List[str]:
     """The SDC lines of a resolved DIE drive (comments included). The command
     lines are also stored in the record (``sdc_lines``) so a gate can prove the
     sign-off deck carries them."""
@@ -467,11 +467,11 @@ def render_pad_input_drive(record: Optional[Dict[str, object]],
                   f"set_driving_cell -lib_cell {cell} -pin {pin} [all_inputs]"]
     elif verdict == "DECLARED":
         lines += [f"# R8 source: {source}",
-                  f"set_input_transition {float(record['value']) * time_scale:g} [all_inputs]"]
+                  f"set_input_transition {float(record['value']):g} [all_inputs]"]
     elif verdict == "PDK_IO_TIER":
         b = record["bracket"]
-        views = " ".join("{%s %g %g}" % (v["library"], float(v["max_ns"]) * time_scale,
-                                         float(v["min_ns"]) * time_scale)
+        views = " ".join("{%s %g %g}" % (v["library"], float(v["max_ns"]),
+                                         float(v["min_ns"]))
                          for v in b["views"])
         lines.append(f"# R8 source: {source} (R-0929-IO-INPUT-TRANSITION: "
                      "-max = slowest, -min = fastest characterised bond-pad edge "
@@ -484,8 +484,8 @@ def render_pad_input_drive(record: Optional[Dict[str, object]],
             "set _vibeic_pad_linked {}",
             "foreach _vibeic_pad_v $_vibeic_pad_views { if {[llength [get_libs -quiet "
             "[lindex $_vibeic_pad_v 0]]]} { lappend _vibeic_pad_linked $_vibeic_pad_v } }",
-            f"set _vibeic_pad_max {float(b['common_max_ns']) * time_scale:g}",
-            f"set _vibeic_pad_min {float(b['common_min_ns']) * time_scale:g}",
+            f"set _vibeic_pad_max {float(b['common_max_ns']):g}",
+            f"set _vibeic_pad_min {float(b['common_min_ns']):g}",
             "if {[llength $_vibeic_pad_linked]} { set _vibeic_pad_max [lindex [lsort -real "
             "[lmap _vibeic_pad_v $_vibeic_pad_linked {lindex $_vibeic_pad_v 1}]] 0]; "
             "set _vibeic_pad_min [lindex [lsort -real -decreasing [lmap _vibeic_pad_v "
@@ -499,17 +499,15 @@ def render_pad_input_drive(record: Optional[Dict[str, object]],
     return lines
 
 
-def pad_drive_sdc_lines(record: Optional[Dict[str, object]],
-                        time_scale: float = 1.0) -> List[str]:
+def pad_drive_sdc_lines(record: Optional[Dict[str, object]]) -> List[str]:
     """The command (non-comment) lines the sign-off deck must carry."""
-    return [ln for ln in render_pad_input_drive(record, time_scale)
+    return [ln for ln in render_pad_input_drive(record)
             if ln and not ln.startswith("#")]
 
 
 def staged_sdc_pad_input_drive(project: Path, text: str, staged_rel: str,
                                container: str = "",
                                to_container_path: Optional[Callable[[str, str], str]] = None,
-                               time_scale: float = 1.0
                                ) -> Tuple[str, Dict[str, object]]:
     """The same ladder for a design-staged SDC on a DIE top.
 
@@ -529,26 +527,55 @@ def staged_sdc_pad_input_drive(project: Path, text: str, staged_rel: str,
                   "verdict": "DECLARED", "model": "design-staged SDC",
                   "source": f"design-staged SDC {staged_rel}", "sdc_lines": own}
         return text, record
-    lines = render_pad_input_drive(record, time_scale)
-    record["sdc_lines"] = pad_drive_sdc_lines(record, time_scale)
+    lines = render_pad_input_drive(record)
+    record["sdc_lines"] = pad_drive_sdc_lines(record)
     if lines:
         text = text.rstrip("\n") + "\n# R-0929-PAD-INPUT-DRIVE (design-staged SDC "\
             "declares no input drive)\n" + "\n".join(lines) + "\n"
     return text, record
 
 
-def liberty_time_scale(liberty_path: str) -> float:
-    """Liberty time units per ns (the SDC's numbers are read in them)."""
+#: The command that makes OpenSTA read every number of a vibe-ic deck in ns and
+#: pF, whatever units the Liberty declares (OpenSTA converts; measured in
+#: vibeic-eda 0.3.86 on a 1ps/1fF Liberty: `-period 10` reads as 10000 ps and
+#: `set_load 0.005` as 5 fF). Every deck vibe-ic authors opens with it.
+SDC_UNITS_LINE = "set_cmd_units -time ns -capacitance pF"
+
+
+def with_sdc_units(text: str) -> str:
+    """A design-staged deck, opened with ``SDC_UNITS_LINE``.
+
+    A staged deck is authored in ns / pF (the flow's own contract); the tool
+    converts. A deck that already sets its own command units is left as is.
+    """
+    if re.search(r"^\s*set_cmd_units\b", text or "", re.M):
+        return text
+    return (f"# the tool reads this deck in ns / pF (converted to the Liberty's units)\n"
+            f"{SDC_UNITS_LINE}\n" + (text or ""))
+
+
+def liberty_units(liberty_path: str) -> Tuple[float, float]:
+    """(Liberty time units per ns, Liberty capacitance units per pF).
+
+    Used only to state a value READ from a Liberty (its default_max_*) in the
+    deck's ns / pF; the deck is never rescaled. Unreadable => (1, 1).
+    """
     try:
         head = Path(liberty_path).read_text(errors="ignore")[:200000]
     except OSError:
-        return 1.0
+        return 1.0, 1.0
     head = re.sub(r"/\*.*?\*/|//[^\n]*", " ", head, flags=re.S)
+    time_per_ns = cap_per_pf = 1.0
     m = re.search(r'\btime_unit\s*:\s*"(\d+(?:\.\d+)?)\s*([pnum]?s)"', head)
-    if not m:
-        return 1.0
-    return 1.0 / (float(m.group(1)) * {"ps": 1e-3, "ns": 1.0, "us": 1e3,
-                                       "ms": 1e6}[m.group(2)])
+    if m:
+        time_per_ns = 1.0 / (float(m.group(1)) * {"ps": 1e-3, "ns": 1.0, "us": 1e3,
+                                                  "ms": 1e6}[m.group(2)])
+    m = re.search(r'\bcapacitive_load_unit\s*\(\s*(\d+(?:\.\d+)?)\s*,\s*([fpnu]f)\s*\)',
+                  head, re.I)
+    if m:
+        cap_per_pf = 1.0 / (float(m.group(1)) * {"ff": 1e-3, "pf": 1.0, "nf": 1e3,
+                                                 "uf": 1e6}[m.group(2).lower()])
+    return time_per_ns, cap_per_pf
 
 
 def write_pad_input_drive_record(project: Path, record: Dict[str, object]) -> Path:
@@ -580,25 +607,26 @@ def pad_input_drive_not_measured(project: Path) -> Optional[str]:
 
 
 def _sdc_environment_prefix(values: Dict[str, Tuple[str, str]],
-                            unread: Sequence[str], time_scale: float = 1.0,
+                            unread: Sequence[str],
                             pad_drive: Optional[Dict[str, object]] = None) -> str:
     """Emit sourced commands and name every command that could not be emitted.
 
-    Time-valued declarations are in ns; OpenSTA reads the active Liberty unit.
+    Every value is in ns / pF: the deck opens with ``SDC_UNITS_LINE``, so the
+    tool converts to the active Liberty's units.
     ``NOT_READ`` names an inaccessible tier; ``NOT_MEASURED`` names each
     command it leaves unresolved. Readable tiers with no declaration use
     ``UNDECLARED`` instead.
     """
     lines = [f"# {item}" for item in unread]
     pad = pad_drive if isinstance(pad_drive, dict) and pad_drive.get("applies") else None
-    lines += render_pad_input_drive(pad, time_scale)
+    lines += render_pad_input_drive(pad)
     for name in _SDC_ENV_KEYS:
         if pad is not None and name == "set_driving_cell":
             continue
         if name not in values:
             status = "NOT_MEASURED" if unread else "UNDECLARED"
             reason = ("at least one source tier NOT_READ" if unread else
-                      "no value in design, pinned PDK, or Liberty")
+                      "no value in design, resolved PDK config, or Liberty")
             lines.append(f"# {status}: {_SDC_ENV_KEYS[name]}; {reason}")
     for name in ("set_clock_uncertainty", "set_clock_transition",
                  "set_driving_cell", "set_load"):
@@ -606,7 +634,7 @@ def _sdc_environment_prefix(values: Dict[str, Tuple[str, str]],
             continue
         raw, source = values[name]
         if name.startswith("set_clock_"):
-            command = f"{name} {float(raw) * time_scale:g} [all_clocks]"
+            command = f"{name} {float(raw):g} [all_clocks]"
         elif name == "set_driving_cell":
             cell, pin = raw.split("/", 1)
             command = f"set_driving_cell -lib_cell {cell} -pin {pin} [all_inputs]"

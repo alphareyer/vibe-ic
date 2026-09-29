@@ -236,6 +236,42 @@ def pvt_matrix_from_sta_corners(resolved: dict, folder: Optional[Path],
                       "pre-layout times prelayout_timed_corners.")}
 
 
+#: The LibreLane step whose resolved config is the PDK view step 7 reads: it
+#: declares the STA corner set and every variable base.sdc renders.
+PDK_VIEW_STEP = "OpenROAD.STAPrePNR"
+_PDK_VIEWS: dict[tuple[str, str, str], dict] = {}
+
+
+def resolve_pdk_view(project: Path, pdk: str) -> dict:
+    """The PDK configuration as the installed LibreLane resolves it.
+
+    One resolver (`librelane_contract.resolve_step_configs`) answers "which
+    corners" (STA_CORNERS/CELL_LIBS) and "which environment values"
+    (CLOCK_*_CONSTRAINT, SYNTH_DRIVING_CELL, OUTPUT_CAP_LOAD, MAX_*) for the
+    design and its PDK, in the image the run uses.  A private reader of
+    `libs.tech/librelane/config.tcl` answered the same questions from regex
+    over Tcl text, one variable grammar at a time.  Refuses by name
+    (`Refusal`); the caller discloses that as NOT_READ, never a value.
+
+    Returns ``{"config", "path", "design_provenance", "image"}``; cached per
+    (project, PDK, image) because steps 7 and PnR ask the same question.
+    """
+    from librelane_contract import (pdk_root_resolution, resolve_image,
+                                    resolve_step_configs)
+    image = resolve_image(project)
+    key = (str(Path(project).resolve()), str(pdk), image)
+    if key in _PDK_VIEWS:
+        return _PDK_VIEWS[key]
+    root = Path(pdk_root_resolution(project, str(pdk), image=image)["path"])
+    path = resolve_step_configs(project, image, str(pdk), [PDK_VIEW_STEP],
+                                pdk_root=root, folder="7-pdk-view")[PDK_VIEW_STEP]
+    design = path.parent / "design.provenance.json"
+    view = {"config": _load(path), "path": str(path), "image": image,
+            "design_provenance": _load(design) if design.is_file() else {}}
+    _PDK_VIEWS[key] = view
+    return view
+
+
 # ── step 8: OpenSTA's verdict on the SDC ───────────────────────────────────
 
 def judge_sdc(folder: Path, resolved: dict, declared_sdc: Optional[Path],

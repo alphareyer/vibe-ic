@@ -1312,7 +1312,8 @@ def author_asic_sdc(rt: Any, project: Path, top: str, pdk: Any,
             out["staged_sdc"] = str(staged.relative_to(project))
         except ValueError:
             out["staged_sdc"] = str(staged)
-        txt = rt._scale_sdc_to_liberty_units(staged.read_text(), str(pdk.liberty))
+        import sdc_environment as _sdc_env
+        txt = _sdc_env.with_sdc_units(staged.read_text())
         txt = rt._reconcile_staged_sdc_drv(txt, pdk.name, str(pdk.liberty),
                                         container)
         txt = rt._reconcile_staged_sdc_driving_cell(txt, str(pdk.liberty),
@@ -1329,11 +1330,9 @@ def author_asic_sdc(rt: Any, project: Path, top: str, pdk: Any,
         txt, out["io_parity"] = rt._ensure_staged_sdc_io_delay(txt, project)
         # R-0929-PAD-INPUT-DRIVE on a design-staged deck: the same ladder, and
         # the record is always rewritten (a stale one can never stand for it).
-        import sdc_environment as _sdc_env
         txt, pad_rec = _sdc_env.staged_sdc_pad_input_drive(
             project, txt, out["staged_sdc"], container,
-            getattr(rt, "_to_container_path", None),
-            _sdc_env.liberty_time_scale(str(pdk.liberty)))
+            getattr(rt, "_to_container_path", None))
         try:
             _sdc_env.write_pad_input_drive_record(project, pad_rec)
         except OSError:
