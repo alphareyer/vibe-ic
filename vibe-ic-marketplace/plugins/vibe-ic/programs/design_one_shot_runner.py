@@ -13889,56 +13889,88 @@ def _run_oracle_tb(project: Path, top_name: str, tb_path: Path,
 
 
 _FULL_STACK_DUT_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s+u_dut\s*\(", re.M)
+#: A module header whose name is a macro: its name cannot be read without the
+#: preprocessor, so the owed-top decision declines (compiles as before).
+_MACRO_NAMED_MODULE_RE = re.compile(r"(?<![\w$])(?:macro)?module\s+(?:(?:automatic|static)\s+)?`")
+
+
+def _module_definition_re(name: str) -> "re.Pattern[str]":
+    """`module|macromodule [automatic|static] <name>`, the name plain or as an
+    escaped identifier (`\\<name> `) -- the header forms iverilog accepts."""
+    return re.compile(r"(?<![\w$])(?:macro)?module\s+(?:(?:automatic|static)\s+)?"
+                      r"\\?" + re.escape(name) + r"(?![\w$])")
+
+
+def _rtl_gen_handoff(plan: Sequence["StepResult"]) -> Optional[str]:
+    """The skill the CURRENT rtl_gen result handed the RTL to, or None.
+
+    The latest `rtl_gen` row of THIS run's plan, when it waived authoring to a
+    skill it staged (PASS_WITH_WAIVERS / WAIVED with `fallback_skill` and
+    `fallback_skill_staged` true). Read from the run's own result, never from
+    `phase2/stage1/fallback_skill.md`, which is written by a hand-off and never
+    removed, so it outlives the agent pass that answered it."""
+    for row in reversed(list(plan or ())):
+        if getattr(row, "name", None) != "rtl_gen":
+            continue
+        ex = getattr(row, "extras", None) or {}
+        if (row.status in ("PASS_WITH_WAIVERS", "WAIVED", "WAIVED-DEFERRED")
+                and ex.get("fallback_skill")
+                and ex.get("fallback_skill_staged") is True):
+            return str(ex["fallback_skill"])
+        return None
+    return None
 
 
 def _full_stack_dut_not_in_rtl(project: Path, tb_path: Path,
-                               rtl_files: Sequence[Path]
+                               rtl_handoff: Optional[str]
                                ) -> Optional[Dict[str, Any]]:
-    """The DUT the generic full-stack TB instantiates, when NO source in the
-    compile set defines it; else None.
+    """The DUT the generic full-stack TB instantiates, when it is POSITIVELY
+    owed in this run; else None (compile as before).
 
-    `step_full_stack_tb_gen` writes `<top> u_dut (` from L9.top_ports, so the
-    TB's own instance line names the module it needs. When the design's top
-    is still owed -- rtl_gen fetched reused IP and handed the SoC glue to an
-    authoring skill -- the TB is compiled against leaves only and iverilog
-    answers "Unknown module type: <top>". That is not a structural defect in
-    the design; it is a design not written yet. Decided from the TB and the
-    sources, never from the compiler's words. None (compile as before) when
-    the TB carries no `u_dut` instance or any source defines the module."""
+    Owed means BOTH: (1) this run's rtl_gen handed authoring to a skill it
+    staged (`rtl_handoff`, from `_rtl_gen_handoff`, passed in by the caller),
+    and (2) no file anywhere under rtl/ (recursively, not the filtered compile
+    set) nor the TB itself defines a module of that name, read as Verilog
+    after `_hdl_code_text.strip_hdl_comments_and_strings`. Absence alone is
+    never enough: a top authored under the wrong name, or dropped from the
+    compile set, is compiled and its Unknown-module error FAILs. A TB with no
+    `u_dut` instance, or any macro-named module header, declines."""
+    if not rtl_handoff:
+        return None
     try:
-        m = _FULL_STACK_DUT_RE.search(
-            _hdl_code_text.strip_hdl_comments_and_strings(
-                tb_path.read_text(errors="replace")))
+        tb_text = _hdl_code_text.strip_hdl_comments_and_strings(
+            tb_path.read_text(errors="replace"))
     except OSError:
         return None
+    m = _FULL_STACK_DUT_RE.search(tb_text)
     if not m:
         return None
     dut = m.group(1)
-    define = re.compile(r"\bmodule\s+" + re.escape(dut) + r"\b")
-    for f in rtl_files:
+    define = _module_definition_re(dut)
+    rtl_dir = _pl.rtl_dir(project)
+    sources = [tb_path]
+    if rtl_dir.is_dir():
+        sources += sorted(f for f in rtl_dir.rglob("*")
+                          if f.is_file() and f.suffix in
+                          (".v", ".sv", ".vh", ".svh", ".vp", ".sva"))
+    for f in sources:
         try:
-            if define.search(_hdl_code_text.strip_hdl_comments_and_strings(
-                    Path(f).read_text(errors="replace"))):
-                return None
+            body = _hdl_code_text.strip_hdl_comments_and_strings(
+                Path(f).read_text(errors="replace"))
         except OSError:
             continue
-    out: Dict[str, Any] = {"dut": dut, "rtl_files": len(rtl_files)}
-    staged = _pl.phase2_stage1_dir(project) / FALLBACK_SKILL_STAGED_NAME
-    try:
-        fm = re.search(r"^name:\s*([\w.-]+)\s*$",
-                       staged.read_text(errors="replace"), re.M)
-        if fm:
-            out["fallback_skill"] = fm.group(1)
-    except OSError:
-        pass
-    return out
+        if define.search(body) or _MACRO_NAMED_MODULE_RE.search(body):
+            return None
+    return {"dut": dut, "files_searched": len(sources),
+            "fallback_skill": rtl_handoff}
 
 
 def _reference_tb_generic_full_stack(project: Path, top_name: str,
                                      track_reason: str,
                                      t0: float,
                                      container: str = _pin.default_container_name(),
-                                     ic_class: Optional[str] = None
+                                     ic_class: Optional[str] = None,
+                                     rtl_handoff: Optional[str] = None
                                      ) -> StepResult:
     """v1.6.523 — functional gate for generic_full_stack classes.
 
@@ -14051,28 +14083,25 @@ def _reference_tb_generic_full_stack(project: Path, top_name: str,
         for _m in _staged_hardmacro_models(project, rtl_files):
             if _m["v"] is not None:
                 rtl_files.append(_m["v"])
-        _owed = _full_stack_dut_not_in_rtl(project, tb_path, rtl_files)
+        _owed = _full_stack_dut_not_in_rtl(project, tb_path, rtl_handoff)
         if _owed is not None:
             return StepResult(
                 "reference_tb", "NOT_MEASURED", time.time() - t0,
                 (f"AID reference TB SKIPPED ({track_reason}); the generic "
                  f"full-stack TB ({tb_path.name}) instantiates "
-                 f"`{_owed['dut']}`, which no file under rtl/ defines "
-                 f"({_owed['rtl_files']} file(s) searched) — the top is not "
-                 f"authored yet"
-                 + (f" (rtl_gen handed it to skill `{_owed['fallback_skill']}`)"
-                    if _owed.get("fallback_skill") else "")
-                 + ", so nothing was compiled and nothing about the design "
-                 "was judged. Author the top, then re-run."),
+                 f"`{_owed['dut']}`, which this run's rtl_gen handed to skill "
+                 f"`{_owed['fallback_skill']}` and which no file under rtl/ "
+                 f"defines ({_owed['files_searched']} file(s) searched, "
+                 f"recursively) — the top is owed by that pass, so nothing "
+                 f"was compiled and nothing about the design was judged. "
+                 f"Author the top, then re-run."),
                 [str(tb_path)],
                 extras={"verification_track": "generic_full_stack",
                         "aid_tb_skipped_reason": track_reason,
                         "functional_verified": False,
                         "sim_executed": False,
                         "dut_not_in_rtl": _owed},
-                reason_class=(_V.ReasonClass.AWAITING_AGENT_PASS.value
-                              if _owed.get("fallback_skill")
-                              else _V.ReasonClass.INPUT_ABSENT.value))
+                reason_class=_V.ReasonClass.AWAITING_AGENT_PASS.value)
         run_dir = sim_dir / "generic_full_stack_run"
         run_dir.mkdir(parents=True, exist_ok=True)
         vvp = run_dir / "full_stack.vvp"
@@ -15021,7 +15050,8 @@ def _rtl_absent_refusal_detail(project: Path,
 
 def step_reference_tb(project: Path, top_name: str = "chip_top",
                       ic_class: Optional[str] = None,
-                      container: str = _pin.default_container_name()) -> StepResult:
+                      container: str = _pin.default_container_name(),
+                      rtl_handoff: Optional[str] = None) -> StepResult:
     t0 = time.time()
     rtl_dir = _pl.rtl_dir(project)
     if not rtl_dir.is_dir():
@@ -15069,7 +15099,8 @@ def step_reference_tb(project: Path, top_name: str = "chip_top",
     if not uses_aid_tb:
         return _reference_tb_generic_full_stack(project, top_name,
                                                 track_reason, t0,
-                                                container, ic_class)
+                                                container, ic_class,
+                                                rtl_handoff=rtl_handoff)
 
     if not PROTOCOL_TB.is_file():
         return StepResult("reference_tb", "FAIL",
@@ -25457,7 +25488,8 @@ def main() -> int:
         if _after_exit("sim"):
             break
         sr = step_reference_tb(project, args.top_name, ic_class,
-                               args.container)
+                               args.container,
+                               rtl_handoff=_rtl_gen_handoff(plan))
         plan.append(sr)
         # ORGANIC #543 / vibe-ic#1975 — WAIVED or INCOMPLETE means the
         # reference-TB oracle path has no RTL-repairable mismatch (for
@@ -25710,7 +25742,8 @@ def main() -> int:
                             last_rtl_hash = rehashed
                             plan.append(step_reference_tb(
                                 project, args.top_name, ic_class,
-                                args.container))
+                                args.container,
+                                rtl_handoff=_rtl_gen_handoff(plan)))
                             plan.append(step_fpga_compile(
                                 project, args.top_name, args.container))
                             _emit_final_summary_or_disclose()
@@ -25737,7 +25770,8 @@ def main() -> int:
             # otherwise protocol_ip_simulation_required_check will FAIL with
             # FULL_STACK_SIM_STALE on the next pre-burn audit.
             plan.append(step_reference_tb(project, args.top_name, ic_class,
-                                          args.container))
+                                          args.container,
+                                          rtl_handoff=_rtl_gen_handoff(plan)))
             plan.append(step_fpga_compile(project, args.top_name, args.container))
             # Same reason as above — regenerate attestation before burn.
             _emit_final_summary_or_disclose()
