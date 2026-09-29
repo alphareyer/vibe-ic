@@ -578,6 +578,16 @@ def apply_front_end(project: Path, mode: str, netlist_arg: Optional[str],
     if mode == "direct":
         return regex_findings, {"front_end": "regex"}
     path = netlist_for_gate(project, netlist_arg)
+    if path is None and not netlist_arg and not regex_scanned:
+        # ORGANIC #887, HARVESTED onto the netlist front end (R-0929-TOOL-DEFAULT
+        # amendment): a project with no RTL has nothing to elaborate, so there
+        # is no netlist to expect. That is INPUT MISSING -- the gate examines
+        # zero sources and discloses it (the shared vacuous rc) -- never a
+        # plain PASS and never a netlist FAIL. RTL present without its netlist
+        # still refuses below.
+        return ([], {"front_end": "netlist" if mode == "librelane" else "dual",
+                     "netlist": NETLIST_REL, "netlist_read": False,
+                     "netlist_absent_reason": "no RTL source to elaborate"})
     if path is None:
         return ([_finding("NETLIST_MISSING", "ERROR",
                           f"step-3 mode '{mode}' needs the Yosys JSON netlist "

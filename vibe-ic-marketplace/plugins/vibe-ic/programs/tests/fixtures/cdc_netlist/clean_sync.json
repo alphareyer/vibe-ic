@@ -1,0 +1,51 @@
+{
+  "creator": "Yosys 0.69+ (git sha1 143146510, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]",
+  "modules": {
+    "top": {
+      "attributes": {
+        "hdlname": "top",
+        "top": "00000000000000000000000000000001",
+        "src": "clean_sync.v:1.1-7.10"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "rst_n": {
+          "direction": "input",
+          "bits": [ 3 ]
+        },
+        "data_pad": {
+          "direction": "input",
+          "bits": [ 4 ]
+        }
+      },
+      "cells": {
+      },
+      "netnames": {
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {
+            "src": "clean_sync.v:1.18-1.21"
+          }
+        },
+        "data_pad": {
+          "hide_name": 0,
+          "bits": [ 4 ],
+          "attributes": {
+            "src": "clean_sync.v:1.42-1.50"
+          }
+        },
+        "rst_n": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {
+            "src": "clean_sync.v:1.29-1.34"
+          }
+        }
+      }
+    }
+  }
+}

@@ -9,7 +9,11 @@ PROG = Path(__file__).resolve().parent.parent / "cdc_async_input_check.py"
 
 def _run(tmp_path: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, str(PROG), str(tmp_path), "--json", str(tmp_path / "report.json")],
+        # the REGEX arm (kept, selectable) -- the netlist became the step-3
+        # default (R-0929-TOOL-DEFAULT); the netlist arm is pinned in
+        # test_t91_step3_cdc_netlist_front_end.py. Assertions unchanged.
+        [sys.executable, str(PROG), str(tmp_path), "--front-end", "regex",
+         "--json", str(tmp_path / "report.json")],
         capture_output=True, text=True,
     )
 
