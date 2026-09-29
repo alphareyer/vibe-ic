@@ -32,10 +32,12 @@ import verdict as V  # noqa: E402
 def test_five_generic_verdicts_and_the_declared_attribution_tier():
     """Only the producer-declared density tier extends the generic vocabulary --
     and the DRV sign-off standard's WAIVED (owner-approved 2026-09-28, schema 3),
-    a measured residual under an owner waiver that cannot be mapped to PASS."""
+    a measured residual under an owner waiver that cannot be mapped to PASS,
+    and the LEC residual NOT_PROVEN (owner's 2026-09-28 LEC NOT_PROVEN rule,
+    see R-0929-LEC-TEST)."""
     assert [v.value for v in V.Verdict] == [
         "PASS", "PASS_WITH_WAIVERS", D.TIER_PASS_WITH_ATTRIBUTION, "WAIVED",
-        "FAIL", "NOT_MEASURED", "NOT_APPLICABLE"]
+        "FAIL", "NOT_PROVEN", "NOT_MEASURED", "NOT_APPLICABLE"]
 
 
 @pytest.mark.parametrize("word", [v.value for v in V.Verdict])
