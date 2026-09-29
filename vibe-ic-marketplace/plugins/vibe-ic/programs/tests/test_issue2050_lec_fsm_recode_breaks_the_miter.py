@@ -393,16 +393,17 @@ def test_gate_still_calls_a_real_depth_wall_a_depth_wall(tmp_path):
 
 def test_gate_no_longer_claims_a_real_difference_would_show_a_counterexample(
         tmp_path):
-    """lec_run.py hardcodes `non_equivalent_points` to 0 for the yosys path —
+    """lec_run.py never measures `non_equivalent_points` on the yosys path (it
+    records null since CUT_W4; it used to hardcode 0) —
     its own comment says 'a genuine difference surfaces as `unproven`'.  A
     verdict that told the reader 0 counterexamples meant 'probably equivalent'
     was reasoning from a field that can never be anything else."""
     res, rep = _gate_on(tmp_path, _DEPTH_WALL)
-    assert rep["non_equivalent_points"] == 0
+    assert rep["non_equivalent_points"] is None
     msg = [f.message for f in res.findings
            if f.rule == "LEC_INCONCLUSIVE_NONCONVERGENCE"][0]
     assert "a real difference produces a counterexample" not in msg
-    assert "hardcodes that field to 0" in msg
+    assert "records that field as null (not measured)" in msg
 
 
 def test_a_producer_that_never_recorded_the_kind_keeps_the_old_verdict(
