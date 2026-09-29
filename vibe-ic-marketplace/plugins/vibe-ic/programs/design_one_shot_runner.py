@@ -8325,7 +8325,9 @@ def _step_rtl_gen_bound(
 
         if versioned_matches:
             from ip_catalog_pull import (pull_all_catalog_matches as _pull_versioned,
-                                         verify_existing_official_pins as _verify_pins)
+                                         verify_existing_official_pins_outcome as _verify_pins,
+                                         PIN_VERIFIED as _PIN_OK,
+                                         PIN_UNAVAILABLE as _PIN_UNAVAILABLE)
             source_manifest = (_pl.rtl_dir(project) / "SOURCE_MANIFEST.json")
             existing = None
             if source_manifest.is_file():
@@ -8334,11 +8336,25 @@ def _step_rtl_gen_bound(
                 except (OSError, ValueError):
                     existing = None
             if isinstance(existing, dict) and existing.get("source_pins"):
-                if not _verify_pins(project, versioned_matches, existing):
+                _pin_state, _pin_why = _verify_pins(
+                    project, versioned_matches, existing)
+                if _pin_state == _PIN_UNAVAILABLE:
+                    # Nothing was compared: the independent reference pull
+                    # could not be made. Still refused, never accepted on the
+                    # project's own receipts, but not reported as bytes that
+                    # differ.
+                    return StepResult(
+                        "rtl_gen", "NOT_MEASURED", time.time() - t0,
+                        "IP_REUSE_PIN_VERIFY_UNAVAILABLE: the independent "
+                        "reference pull that must reproduce the pinned "
+                        f"source could not be made ({_pin_why}); the prior "
+                        "pull is not accepted",
+                        reason_class=_V.ReasonClass.EXECUTION_ERROR.value)
+                if _pin_state != _PIN_OK:
                     return StepResult(
                         "rtl_gen", "FAIL", time.time() - t0,
                         "IP_REUSE_FETCH_PIN_MISMATCH: official source, "
-                        "errata, receipt or output bytes differ")
+                        f"errata, receipt or output bytes differ ({_pin_why})")
                 pull_audit = {"status": "ALREADY_FETCHED",
                               "n_ips_pulled": len(versioned_matches),
                               "source_manifest": str(source_manifest)}

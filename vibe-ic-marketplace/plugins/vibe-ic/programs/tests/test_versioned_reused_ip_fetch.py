@@ -245,3 +245,31 @@ def test_real_catalog_component_has_versioned_source_and_scoped_erratum(
     assert {e["file"] for e in matches[0].errata} == {
         "servile/servile_rf_mem_if.v", "rtl/serv_state.v"}
     assert all(e["file"] in matches[0].rtl_files for e in matches[0].errata)
+
+
+def test_an_unreachable_reference_pull_is_not_measured_not_a_mismatch(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """MEASURED on a subservient DIE front door (2026-09-29): the independent
+    re-pull of the pinned core timed out (`git clone` 153 s against a 120 s
+    budget) and Step 1 reported IP_REUSE_FETCH_PIN_MISMATCH, "bytes differ",
+    about bytes nobody compared. Unverifiable pins are still refused, but as
+    NOT_MEASURED with the fetch reason; a real mismatch stays FAIL (the tests
+    above)."""
+    import design_one_shot_runner as runner
+    import ip_catalog_query as query
+    import ip_catalog_pull as pull
+
+    repo, erratum = _upstream(tmp_path)
+    match = _match(repo, erratum)
+    monkeypatch.setattr(query, "query_catalog", lambda *a, **k: [match])
+    monkeypatch.setattr(pull, "CACHE_ROOT", tmp_path / "cache")
+    project = _project(tmp_path, "Reuse leaf from vendor:reusable:leaf:2.3.4.")
+    first = runner.step_rtl_gen(project, "processor_cpu")
+    assert first.status == "PASS_WITH_WAIVERS"
+    repo.rename(tmp_path / "unreachable")        # the upstream stops answering
+
+    result = runner.step_rtl_gen(project, "processor_cpu")
+    assert result.status == "NOT_MEASURED", result.detail
+    assert "IP_REUSE_PIN_VERIFY_UNAVAILABLE" in result.detail
+    assert "IP_REUSE_FETCH_PIN_MISMATCH" not in result.detail
+    assert str(repo) in result.detail            # the fetch reason is named

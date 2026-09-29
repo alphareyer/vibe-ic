@@ -26,7 +26,7 @@ import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Tuple, Any, Dict, List, Optional
 
 # Import sibling module
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -707,9 +707,27 @@ def pull_all_catalog_matches(project: Path,
     return aggregated
 
 
+#: `verify_existing_official_pins_outcome` states WHY a prior pull was not
+#: accepted. UNAVAILABLE means the independent reference pull could not be
+#: made (network, missing mirror): nothing was compared, so it is not a
+#: mismatch. MISMATCH is a comparison that disagreed.
+PIN_VERIFIED = "VERIFIED"
+PIN_MISMATCH = "MISMATCH"
+PIN_UNAVAILABLE = "UNAVAILABLE"
+
+
 def verify_existing_official_pins(project: Path,
                                   matches: List[CatalogMatch],
                                   manifest: Dict[str, Any]) -> bool:
+    """True only when every pin was independently reproduced (see below)."""
+    return verify_existing_official_pins_outcome(
+        project, matches, manifest)[0] == PIN_VERIFIED
+
+
+def verify_existing_official_pins_outcome(project: Path,
+                                          matches: List[CatalogMatch],
+                                          manifest: Dict[str, Any]
+                                          ) -> Tuple[str, str]:
     """Accept a prior official pull only after independently reproducing its bytes.
 
     The project manifest and provenance are user-writable receipts, so matching
@@ -718,24 +736,29 @@ def verify_existing_official_pins(project: Path,
     complete pin records, pull events, and output bytes in the project.
     """
     if manifest.get("generated_by") != "ip_catalog_pull":
-        return False
+        return PIN_MISMATCH, "manifest was not written by ip_catalog_pull"
     pins = manifest.get("source_pins")
     if not isinstance(pins, list) or len(pins) != len(matches):
-        return False
+        return PIN_MISMATCH, "source_pins do not cover the declared matches"
     try:
         events = [json.loads(line) for line in
                   (project / "provenance.jsonl").read_text().splitlines()]
     except (OSError, ValueError, TypeError):
-        return False
+        return PIN_MISMATCH, "project provenance.jsonl unreadable"
     with tempfile.TemporaryDirectory(prefix="ip-pin-verify-") as scratch:
         reference = Path(scratch)
         audit = pull_all_catalog_matches(reference, matches, official_only=True,
                                          cache_root=reference / ".cache")
         if audit.get("n_ips_pulled") != len(matches) or audit.get("n_ips_failed"):
-            return False
+            why = "; ".join(
+                f"{u.get('ip_name')}: {u.get('reason')}"
+                for u in audit.get("ip_catalog_used") or []
+                if isinstance(u, dict) and u.get("status") != "PASS")
+            return PIN_UNAVAILABLE, (why or "the independent reference pull "
+                                     "did not complete")
         ref_manifest = json.loads((reference / "phase2/stage1/rtl/SOURCE_MANIFEST.json").read_text())
         if pins != ref_manifest.get("source_pins"):
-            return False
+            return PIN_MISMATCH, "source_pins differ from the reference pull"
         reference_events = [json.loads(line) for line in
                             (reference / "provenance.jsonl").read_text().splitlines()]
         for expected in reference_events:
@@ -745,13 +768,14 @@ def verify_existing_official_pins(project: Path,
                            "commit_checked_out", "errata_applied", "files_pulled",
                            "outputs", "outputs_sha256"))
                        for event in events):
-                return False
+                return PIN_MISMATCH, (f"no project pull event matches the "
+                                      f"reference for {expected.get('ip')}")
             for rel, digest in expected["outputs"].items():
                 target = project / rel
                 if target.is_symlink() or not target.is_file() or \
                         "sha256:" + _sha256_file(target) != digest:
-                    return False
-    return True
+                    return PIN_MISMATCH, f"output bytes differ: {rel}"
+    return PIN_VERIFIED, "every pin reproduced by an independent pull"
 
 
 # ---------------------------------------------------------------------------
