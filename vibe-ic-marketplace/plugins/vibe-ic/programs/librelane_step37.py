@@ -235,12 +235,18 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
     # The runner's substance, label, DBU and strict provenance gates consume
     # these exact bytes.  Preserve the LibreLane source and SHA in the receipt.
     shutil.copy2(final_gds, canonical_gds)
+    # The winner's per-layer density goes where every reader looks for the
+    # shipped stream's density (`librelane_fill_dfm.METAL_DENSITY_REL`), not
+    # only into its tool lane.
+    published = _fill.publish_metal_density(project, density_ratios[winner],
+                                            canonical_gds, pdk)
     write_json(root / "37-promotion.json", {"selection": winner,
                "selection_detail": selection, "streams": {k: str(v) for k, v in paths.items()},
                "finished": {k: str(v) for k, v in final_paths.items()},
                "drc": counts, "xor": 0, "density": density_errors, "gates": gates,
                "density_fill": density_fill,
                "density_ratios": density_ratios,
+               "metal_density": str(published) if published else None,
                "finishing_xor": {arm: row["verdict"] for arm, row in finishing.items()},
                "source": str(final_gds), "source_sha256": digest(final_gds),
                "canonical": str(canonical_gds), "canonical_sha256": digest(canonical_gds)})
