@@ -101,10 +101,30 @@ def test_the_validity_qualifier_still_works(tmp_path):
          "description": "write data, valid when o_we = 1"},
         {"name": "o_q", "direction": "output", "width": 1,
          "description": "serial data, sampled when o_cyc = 1"}])
+    # R-0929-X-QUALIFIED-4 (migrated): a sentence is not a declaration the
+    # oracle reads; the D1-signed structured field is
+    assert riv.declared_output_qualifiers(proj, _OUT, _IN) == {}
+    import sys as _s
+    _s.path.insert(0, str(Path(__file__).resolve().parent))
+    from _qualified_by_fixture import (INPUT_DOC, stage_field,
+                                       write_expectation, sign)
+    lines = ["| `o_data` | 8-bit | output | write data |",
+             "| `o_we` | 1-bit | output | write enable |",
+             "| `o_q` | 1-bit | output | serial data |",
+             "| `o_cyc` | 1-bit | output | cycle |"]
+    basis = lambda i, j: [{"file": INPUT_DOC, "line": 5 + i, "quote": lines[i]},
+                          {"file": INPUT_DOC, "line": 5 + j, "quote": lines[j]}]
+    stage_field(proj, "o_data", "o_we", "high", quote_lines=lines,
+                basis=basis(0, 1))
+    # a signed field on a 1-bit output is still ignored: control/strobe
+    # outputs must be known after release
+    stage_field(proj, "o_q", "o_cyc", "high", quote_lines=lines,
+                basis=basis(2, 3), row_width=1)
+    write_expectation(proj, "o_data", "o_we", "high")
+    write_expectation(proj, "o_q", "o_cyc", "high")
+    sign(proj, "D1")
     q = riv.declared_output_qualifiers(proj, _OUT, _IN)
     assert [r["qualifier"] for r in q["o_data"]] == ["o_we"]
-    # strict: with no declared-role reader a 1-bit output is control/strobe
-    # and must be known after release, whatever its sentence says
     assert "o_q" not in q
 
 
