@@ -1063,7 +1063,10 @@ _TALLY_LABEL_TO_BUCKET = _build_tally_label_map()
 #: tally, and that is what stops the report's own prose bullet matching and
 #: producing agreement by construction.
 TALLY_MANDATORY_BUCKETS = frozenset(
-    {"PASS", "FAIL", "PASS_WITH_WAIVERS", "NOT_PROVEN", "NOT_MEASURED", "NOT_APPLICABLE"})
+    {"PASS", "FAIL", "PASS_WITH_WAIVERS", "NOT_MEASURED", "NOT_APPLICABLE"})
+# NOT_PROVEN (LECNP) is read whenever the tally prints it, but is not
+# mandatory: a tally line from a checker without that bucket still is the
+# measurement, and requiring it would refuse every such line as "no tally".
 
 
 def _parse_audit_tally(audit_text: str) -> Optional[Dict[str, int]]:

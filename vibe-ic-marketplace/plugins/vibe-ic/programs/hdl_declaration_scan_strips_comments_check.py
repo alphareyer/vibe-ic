@@ -174,6 +174,18 @@ _NOT_HDL_DECLARATION: Dict[str, str] = {
         "design N/A. It never extracts an HDL declaration; treating that prose "
         "word as one would require comment-stripping diagnostic text that is "
         "not HDL and may legitimately contain slash characters.",
+    "lec_counterexample_search::_trace::_INPUT(flat_text)":
+        "The regexes read `wire ... input|output N \\name` lines of the RTLIL that "
+        "yosys itself wrote (`write_rtlil`, then flattened) for the bounded SAT "
+        "counterexample search. That is yosys's machine IR, not Verilog source: "
+        "it has no `//` or `/* */` comments to strip, and each match is a port "
+        "yosys declared, so no comment can mint one.",
+    "lec_counterexample_search::_trace::_OUTPUT(flat_text)":
+        "The regexes read `wire ... input|output N \\name` lines of the RTLIL that "
+        "yosys itself wrote (`write_rtlil`, then flattened) for the bounded SAT "
+        "counterexample search. That is yosys's machine IR, not Verilog source: "
+        "it has no `//` or `/* */` comments to strip, and each match is a port "
+        "yosys declared, so no comment can mint one.",
 }
 
 

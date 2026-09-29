@@ -104,6 +104,8 @@ def test_the_nine_original_mappings_are_unchanged():
         "FAIL": "FAIL",
         "NOT_MEASURED": "NOT_MEASURED",
         "NOT_APPLICABLE": "NOT_APPLICABLE",
+        # LECNP's declared word (owner's 2026-09-28 LEC NOT_PROVEN rule).
+        "NOT_PROVEN": "NOT_PROVEN",
         "WAIVED-DEFERRED": "PASS_WITH_WAIVERS",
         # DRV sign-off standard (owner-approved 2026-09-28) adds the sixth word
         # (verdict schema 3): an owner-waived measured residual, counted in its
