@@ -13,6 +13,7 @@ Only the EDA tool's file writes are faked: `run_eqy` returns a Yosys.EQY
 directory holding a REAL EQY run's status files (programs/calibration).
 """
 import importlib
+import hashlib
 import json
 import tarfile
 from pathlib import Path
@@ -25,7 +26,7 @@ import librelane_contract as LC
 
 PROGRAMS = Path(LC.__file__).resolve().parent
 CAL = PROGRAMS / "calibration"
-SHA = "sha256:" + "a" * 64
+SHA = "sha256:" + hashlib.sha256((CAL / "cal_eqy_gate.v").read_bytes()).hexdigest()
 
 
 def put(path, obj):
@@ -157,14 +158,26 @@ def test_phase3_hands_its_resolved_pdk_to_step13(tmp_path, monkeypatch):
 
 # ── the gate audits the tool arm ────────────────────────────────────────────
 def _gate_tree(root, arms, *, lec=None):
+    put(root / GATE_REL, (CAL / "cal_eqy_gate.v").read_text())
+    rtl = put(root / "phase2/stage1/rtl/cal_chain.v", (CAL / "cal_chain_rtl.v").read_text())
+    script = put(root / "phase3/librelane/lec_eqy/cal_chain.eqy", "[script]\nprep -top cal_chain\n")
+    def fingerprint(path):
+        return {"path": str(path.relative_to(root)),
+                "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()}
+    identity = {"top": "cal_chain", "gate_netlist": fingerprint(root / GATE_REL),
+                "gold_rtl": [fingerprint(rtl)], "equivalence_script": fingerprint(script)}
     put(root / "reports/lec.json", lec or {
         "verdict": "INCONCLUSIVE", "equivalent": False, "inconclusive": True,
         "compared_points": 60, "unproven_points": 5, "miter_points": 65,
         "non_equivalent_points": None, "non_convergence": True,
-        "proof_identity": {"gate_netlist": {"path": GATE_REL, "sha256": SHA}}})
+        "proof_identity": identity})
     put(root / "reports/lec.rpt", "Found 65 $equiv cells\n")
     if arms is not None:
+        arms = dict(arms, subjects=dict(arms["subjects"], eqy_path=str(root / GATE_REL)))
         put(root / "reports/lec_arms.json", arms)
+        put(root / "reports/lec_eqy.json", {"verdict": arms["arms"]["eqy"],
+            "proof_identity": identity, "compared_points": 2, "proven_points": 2,
+            "xbits_partitions": list(arms.get("eqy_xbits_partitions") or [])})
     return root
 
 
@@ -190,6 +203,88 @@ def test_an_eqy_counterexample_fails_the_gate(tmp_path, capsys):
 
 def test_a_bound_eqy_proof_closes_an_undecided_arm_a(tmp_path):
     assert _gate(_gate_tree(tmp_path, _arms("PASS", "eqy", "PASS"))) == 0
+
+
+@pytest.mark.parametrize("changed", ["netlist", "rtl", "script", "missing_identity",
+                                    "added_rtl", "removed_rtl"])
+def test_tool_credit_requires_current_proof_inputs(tmp_path, changed):
+    """The same captured proof cannot stand for inputs changed after step 13."""
+    import lec_equivalence_check as G
+    root = _gate_tree(tmp_path, _arms("PASS", "eqy", "PASS"))
+    paths = {"netlist": GATE_REL, "rtl": "phase2/stage1/rtl/cal_chain.v",
+             "script": "phase3/librelane/lec_eqy/cal_chain.eqy"}
+    if changed == "added_rtl":
+        put(root / "phase2/stage1/rtl/extra.v", (CAL / "cal_chain_rtl.v").read_text())
+    elif changed == "removed_rtl":
+        (root / paths["rtl"]).unlink()
+    elif changed == "missing_identity":
+        doc = json.loads((root / "reports/lec_eqy.json").read_text())
+        del doc["proof_identity"]
+        put(root / "reports/lec_eqy.json", doc)
+    else:
+        path = root / paths[changed]
+        path.write_text(path.read_text() + "\n// changed after proof\n")
+    res = G.audit(root)
+    assert (res.passed, _gate(root)) == (False, 1 if changed == "netlist" else 3)
+    if changed == "netlist":
+        assert [f.rule for f in res.findings] == ["LEC_STALE_PROOF"]
+
+
+def test_tool_credit_cannot_erase_a_scan_mode_refusal(tmp_path, monkeypatch):
+    import lec_equivalence_check as G
+    import lec_gate_netlist_select as S
+    root = _gate_tree(tmp_path, _arms("PASS", "eqy", "PASS"))
+    binding = S.proof_subject_binding(root, json.loads((root / "reports/lec.json").read_text()))
+    monkeypatch.setattr(G, "_proof_subject_binding", lambda *a: dict(
+        binding, state=S.BINDING_SCAN_UNCONSTRAINED, consumer_scan_inserted=True))
+    res = G.audit(root)
+    assert (res.passed, _gate(root)) == (False, 1)
+    assert [f.rule for f in res.findings] == ["LEC_SCAN_MODE_UNCONSTRAINED"]
+
+
+def test_tool_credit_cannot_erase_an_unbound_subject(tmp_path):
+    import lec_equivalence_check as G
+    root = _gate_tree(tmp_path, _arms("PASS", "eqy", "PASS"))
+    doc = json.loads((root / "reports/lec.json").read_text())
+    del doc["proof_identity"]["gate_netlist"]["sha256"]
+    put(root / "reports/lec.json", doc)
+    res = G.audit(root)
+    assert (res.passed, _gate(root)) == (False, 1)
+    assert [f.rule for f in res.findings] == ["LEC_SUBJECT_UNBOUND"]
+
+
+@pytest.mark.parametrize("mutate_during_run", [False, True])
+def test_eqy_proof_identity_is_captured_before_the_tool_runs(tmp_path, monkeypatch,
+                                                          mutate_during_run):
+    """Replay real status receipts through run_eqy, judge and the step-13 audit."""
+    import librelane_eqy as E
+    import lec_equivalence_check as G
+    root = _gate_tree(tmp_path, _arms("PASS", "eqy", "PASS"))
+    gate = root / GATE_REL
+    rtl = root / "phase2/stage1/rtl/cal_chain.v"
+    def resolve(project, image, raw, output, **kw):
+        put(output, {"CELL_LIBS": {"*": ["/pdk/cells.lib"]}, "DEFAULT_CORNER": "tt"})
+        return output
+    def run(project, image, steps, **kw):
+        folder = _eqy_folder(project / "phase3/librelane" / kw["namespace"],
+                             "eqy_defined_init_negative")
+        if mutate_during_run:
+            gate.write_text(gate.read_text() + "\n// changed while EQY was running\n")
+        return [folder]
+    monkeypatch.setattr(E, "resolve_step_config", resolve)
+    monkeypatch.setattr(E, "run_chain", run)
+    folder = E.run_eqy(root, "img:1", "pdkA", "cal_chain", [rtl], gate, pdk_root="/pdk")
+    E.judge_eqy(folder, root / "reports/lec_eqy.json")
+    # Reproduce the existing caller's AFTER-run digest, and a current arm-A
+    # identity. Only EQY's own before-run snapshot can detect this difference.
+    sha = "sha256:" + hashlib.sha256(gate.read_bytes()).hexdigest()
+    lec = json.loads((root / "reports/lec.json").read_text())
+    lec["proof_identity"]["gate_netlist"]["sha256"] = sha
+    put(root / "reports/lec.json", lec)
+    put(root / "reports/lec_arms.json", dict(_arms("PASS", "eqy", "PASS", eqy_sha=sha,
+        lec_sha=sha), subjects={"lec_run": sha, "eqy": sha, "eqy_path": str(gate)}))
+    res = G.audit(root)
+    assert (res.passed, _gate(root)) == ((False, 3) if mutate_during_run else (True, 0))
 
 
 @pytest.mark.parametrize("arms", [
@@ -244,7 +339,8 @@ def test_two_bound_proofs_are_recorded_as_corroborated(tmp_path):
                                      arms={"lec_run": "PASS", "eqy": "PASS"}),
                       lec={"verdict": "PASS", "equivalent": True, "compared_points": 65,
                            "unproven_points": 0, "non_equivalent_points": None,
-                           "proof_identity": {"gate_netlist": {"path": GATE_REL,
+                           "proof_identity": {"top": "cal_chain", "gate_netlist": {"path": GATE_REL,
                                                                "sha256": SHA}}})
     res = G.audit(root)
     assert res.passed and res.summary["tool_arm"]["state"] == "CORROBORATED"
+    assert res.summary["subject_binding"]["state"] == "MATCH"

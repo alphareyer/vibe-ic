@@ -70,15 +70,37 @@ def eqy_script(top: str, rtl: list[Path], netlist: Path, liberty: str) -> str:
         "[strategy pdr]", "use sby", "engine abc pdr -rfi", ""])
 
 
+def _partition_population(scratch: Path) -> Optional[dict[str, bool]]:
+    """Declared partition names and gold-x tags; unknown population is None."""
+    try:
+        lines = (scratch / "partition.list").read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    found: dict[str, bool] = {}
+    for line in lines:
+        if not line.strip():
+            continue
+        head, separator, _ = line.partition(":")
+        words = head.split()
+        if not separator or len(words) < 2 or words[1] in found:
+            return None
+        found[words[1]] = "xbits" in words[2:]
+    return found
+
+
 def partition_status(scratch: Path) -> Optional[dict[str, dict[str, str]]]:
-    """{partition: {strategy: status}} from EQY's status files; None if absent."""
+    """Every declared partition, including those whose strategies never finished."""
     instrument_calibration.assert_calibrated("librelane_eqy::partition_status")
     root = scratch / "strategies"
-    if not root.is_dir():
+    declared = _partition_population(scratch)
+    if not root.is_dir() and declared is None:
         return None
-    found: dict[str, dict[str, str]] = {}
+    found: dict[str, dict[str, str]] = {name: {} for name in declared or {}}
     for status in sorted(root.glob("*/*/status")):
-        words = status.read_text(errors="replace").split()
+        try:
+            words = status.read_text(errors="replace").split()
+        except OSError:
+            words = []
         word = words[0] if words else ""
         found.setdefault(status.parent.parent.name, {})[status.parent.name] = (
             word if word in _EQY_STATUSES else "UNREADABLE")
@@ -93,35 +115,35 @@ def xbit_partitions(scratch: Path) -> Optional[list[str]]:
     in place of an inv behind a resetless flop is `DONE (PASS)`).
     """
     instrument_calibration.assert_calibrated("librelane_eqy::xbit_partitions")
-    listing = scratch / "partition.list"
-    if not listing.is_file():
+    declared = _partition_population(scratch)
+    if declared is None:
         return None
-    found = []
-    for line in listing.read_text(errors="replace").splitlines():
-        head, _, _ = line.partition(":")
-        words = head.split()
-        if len(words) >= 2 and "xbits" in words[2:]:
-            found.append(words[1])
-    return found
+    return [name for name, xbits in declared.items() if xbits]
 
 
 def judge_eqy(folder: Path, output: Path) -> dict:
     scratch = folder / "scratch"
+    declared = _partition_population(scratch)
     parts = partition_status(scratch)
+    unexpected = sorted(set(parts or {}) - set(declared or {}))
     xbits = xbit_partitions(scratch) or []
     proven, failed, unknown = [], [], []
     for name, strategies in (parts or {}).items():
         words = set(strategies.values())
-        if "PASS" in words:
-            proven.append(name)
-        elif "FAIL" in words:
+        if "FAIL" in words:
             failed.append(name)
+        elif "PASS" in words:
+            proven.append(name)
         else:
             unknown.append(name)
-    if not parts:
-        verdict, why = "NOT_MEASURED", "EQY wrote no partition status (read/partition stage failed)"
-    elif failed:
+    if failed:
         verdict, why = "FAIL", f"{len(failed)} partition(s) not equivalent: {', '.join(failed[:5])}"
+    elif not parts:
+        verdict, why = "NOT_MEASURED", "EQY wrote no partition status (read/partition stage failed)"
+    elif not declared or unexpected:
+        verdict, why = "INCONCLUSIVE", ("EQY_PARTITION_POPULATION_UNBOUND: missing, empty or "
+                                        "unreadable partition.list, or undeclared status "
+                                        f"partitions: {unexpected}")
     elif unknown:
         verdict, why = "INCONCLUSIVE", f"{len(unknown)} partition(s) undecided: {', '.join(unknown[:5])}"
     elif xbits:
@@ -131,9 +153,17 @@ def judge_eqy(folder: Path, output: Path) -> dict:
         verdict, why = "PASS", f"all {len(proven)} partition(s) proven"
     report = {"program": "librelane_eqy", "engine": "eqy (LibreLane Yosys.EQY)",
               "verdict": verdict, "explanation": why,
-              "compared_points": len(parts or {}), "proven_points": len(proven),
+              "compared_points": len(declared or {}), "proven_points": len(proven),
               "non_equivalent_points": failed, "unproven_points": unknown,
+              "declared_partitions": list(declared) if declared is not None else None,
+              "unexpected_partitions": unexpected,
               "xbits_partitions": xbits, "partitions": parts, "source": str(folder)}
+    identity_path = folder / "proof_identity.json"
+    if identity_path.is_file():
+        try:
+            report["proof_identity"] = _load(identity_path)
+        except (OSError, ValueError):
+            report["proof_identity"] = None
     if (folder / "config.json").is_file():
         report["config_sha256"] = digest(folder / "config.json")
     write_json(output, report)
@@ -170,7 +200,7 @@ def run_eqy(project: Path, image: str, pdk: str, top: str, rtl: list[Path],
              for lib in (group if isinstance(group, list) else [group])]
     if len(match) != 1:
         raise Refusal("LL_EQY_LIBERTY_UNRESOLVED", f"{corner}: {match}")
-    script = root / f"{top}.eqy"
+    script = root / f"{namespace}-{top}.eqy"
     script.write_text(eqy_script(top, rtl, netlist.resolve(), str(match[0])))
     config["EQY_SCRIPT"] = str(script)
     write_json(raw, config)
@@ -183,6 +213,13 @@ def run_eqy(project: Path, image: str, pdk: str, top: str, rtl: list[Path],
                                       mounts=mounts, pdk_root=pdk_root)
     state = root / "state_in.json"
     write_json(state, {"nl": str(netlist.resolve())})
+    # Snapshot BEFORE the tool starts: a caller's digest after EQY finishes
+    # cannot identify the bytes EQY read if an input changed during the run.
+    def fingerprint(path: Path) -> dict:
+        return {"path": str(path.resolve()), "sha256": "sha256:" + digest(path)}
+    identity = {"top": top, "gate_netlist": fingerprint(netlist),
+                "gold_rtl": [fingerprint(path) for path in rtl],
+                "equivalence_script": fingerprint(script)}
     folder = project / "phase3/librelane" / namespace / "01-yosys-eqy"
     try:
         run_chain(project, image, [(STEP, step_config, state)], mounts=mounts,
@@ -190,6 +227,7 @@ def run_eqy(project: Path, image: str, pdk: str, top: str, rtl: list[Path],
     except Refusal as exc:
         if exc.code != "LL_STEP_FAILED" or not (folder / "scratch").is_dir():
             raise
+    write_json(folder / "proof_identity.json", identity)
     return folder
 
 
