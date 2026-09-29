@@ -222,9 +222,38 @@ def filled_gds_density(project_dir: Path) -> Tuple[List[Finding], dict]:
         return _not_measured(f"metal_layer_density_check unavailable: {exc}")
     pdk = doc.get("pdk") if isinstance(doc.get("pdk"), str) else None
     windows, prov = (_mld.pdk_windows_for(pdk) if pdk else ({}, None))
-    res = _mld.check(rpt, windows, _mld._DEFAULT_MIN, _mld._DEFAULT_MAX, prov)
-    stats["per_layer"] = res.get("per_layer")
+    # U14 r2 — COVERAGE. The recipe lists a metal layer with no shapes in
+    # `layers_absent_in_gds` instead of `layers` ("listed, not fabricated"), so
+    # judging `layers` alone made a regulated layer at 0 % coverage invisible.
+    # Such a layer IS measured: its drawn area is zero. Every absent entry that
+    # is a metal layer or carries a window is judged at density 0.0.
+    measured = doc.get("layers") if isinstance(doc.get("layers"), dict) else {}
+    dens = {str(k).lower(): v for k, v in measured.items()}
+    absent = [str(a).lower() for a in (doc.get("layers_absent_in_gds") or [])
+              if isinstance(a, str)]
+    for a in absent:
+        if a not in dens and (_mld._METAL_RE.match(a) or a in windows):
+            dens[a] = 0.0
+    # Every PDK-regulated layer this measurement could see (its own
+    # `layer_gds_map`, or anything it reported) must have been judged; a
+    # regulated layer left out of the report is not a pass.
+    seen = {str(k).lower() for k in (doc.get("layer_gds_map") or {})} \
+        | set(dens) | set(absent)
+    unjudged = sorted(l for l in windows if l in seen and l not in dens)
+    stats["absent_judged_at_zero"] = sorted(a for a in absent if a in dens
+                                            and a not in measured)
     stats["pdk"] = pdk
+    if unjudged:
+        return _not_measured(
+            f"PDK-regulated layer(s) {unjudged} are mapped for this stream but "
+            f"carry no density in {rpt.name}")
+    import tempfile  # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as _td:
+        judged = Path(_td) / "metal_density.json"
+        judged.write_text(json.dumps(dict(doc, layers=dens)))
+        res = _mld.check(judged, windows, _mld._DEFAULT_MIN,
+                         _mld._DEFAULT_MAX, prov)
+    stats["per_layer"] = res.get("per_layer")
     verdict = res.get("verdict")
     if verdict == "PASS":
         stats["state"] = "PASS"
