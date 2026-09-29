@@ -304,10 +304,20 @@ def test_every_declared_gate_that_reports_vacuity_reaches_the_step_tier():
             # #1978 splits structured non-verdicts by reason class. A safe
             # typed absence reaches a skip/vacuity hint; an unsafe or untyped
             # one reaches INCOMPLETE. Either proves the consumer read it.
+            # R-0915-119 added a THIRD tier the consumer reaches only after
+            # reading the report AND validating its enumeration: an executed
+            # NOT_APPLICABLE_BY_STRUCTURE (measured: pad_input_drive_check on
+            # an empty project, ef1b46bc6). It proves the consumer read the
+            # report exactly as the other two do. Only that class is admitted
+            # here; an executed-N/A hint without it is not proof of reading.
             seen_by_tier = any(
                 r.startswith(F._VACUOUS_HINT_PREFIX)
                 or r.startswith(F._JSON_VACUOUS_HINT_PREFIX)
                 or r.startswith(F._INCOMPLETE_HINT_PREFIX)
+                or (r.startswith(F._EXECUTED_DECLARED_NA_HINT_PREFIX)
+                    and ("reason_class="
+                         + F._reason_taxonomy.NOT_APPLICABLE_BY_STRUCTURE)
+                    in r)
                 for r in reasons)
             (classified if seen_by_tier else undisclosed).append(cmd)
 
