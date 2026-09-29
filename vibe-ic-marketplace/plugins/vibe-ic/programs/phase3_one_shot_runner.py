@@ -38796,6 +38796,14 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _knob_parity.write_sdc_report(
         project, sdc, pdk=str(pdk.name),
         library=_active_std_cell_library(project, str(pdk.name)))
+    # DRV standard section 1: the synth stage receipt (the script ABC ran,
+    # kept by step_synth, and the post-synthesis census under this SDC).
+    import drv_stage_receipts as _drv_stages
+    _drv_stages.synth_stage(
+        project, netlist=_pl.synth_dir(project) / f"{top}_synth.v", top=top,
+        liberties=[str(pdk.liberty)], sdc=sdc,
+        to_container=lambda p: _to_container_path(str(p), container),
+        execute=lambda cmd: _docker_exec(container, cmd, timeout=1800))
     # Whichever branch ran, record what the DESIGN staged and what became of
     # it. A machine-readable sibling of the deck's own comment block, so a
     # later reader does not have to parse an SDC to learn that the design's

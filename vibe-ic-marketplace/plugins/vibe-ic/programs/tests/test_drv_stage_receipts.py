@@ -440,3 +440,38 @@ def test_a_copied_run_rebases_report_evidence_with_its_reports_folder(tmp_path):
     assert plan._run_path(copy, step) == copy / "phase3/librelane/32-base/04-openroad-stapostpnr/state_out.json"
     inside = copy / "reports/phase3/x.json"
     assert plan._run_path(copy, str(inside)) == inside
+
+
+def test_synth_stage_runs_the_census_deck_and_binds_the_receipt(tmp_path):
+    project = tmp_path / "proj"
+    receipts.claim(project)
+    synth = project / "phase2/stage2/synth"
+    synth.mkdir(parents=True)
+    (synth / "_tmp_yosys-abc-A1/").mkdir()
+    (synth / "_tmp_yosys-abc-A1/abc.script").write_text("buffer -N 4;\n")
+    receipts.keep_abc_script(project, synth,
+                             "Running ABC script: _tmp_yosys-abc-A1/abc.script\n")
+    netlist = synth / "top_synth.v"
+    netlist.write_text("module top; endmodule\n")
+    sdc = project / "c.sdc"
+    sdc.write_text("create_clock -period 24 [get_ports clk]\nset_max_fanout 4 [current_design]\n")
+    decks = []
+
+    def execute(cmd):              # stands in for OpenSTA: writes what it writes
+        deck = Path(cmd.split()[-1])
+        decks.append(deck.read_text())
+        out = Path(deck.read_text().split("synth_census {")[1].split("}")[0])
+        out.write_text("clocks 1\nclock clk is_propagated=0\n" + drv._COMMAND + "\n"
+                       + "".join(f"{k} violators=0\n" for k in drv.KINDS))
+        return 0, "", ""
+
+    receipts.synth_stage(project, netlist=netlist, top="top", liberties=["/l.lib"],
+                         sdc=sdc, to_container=str, execute=execute)
+    assert "read_sdc {" + str(sdc) + "}" in decks[0] and "link_design {top}" in decks[0]
+    row = plan._stages(project, False)[0][0]
+    assert row["ran"] and row["applied"] == {"fanout": 4.0}
+    assert row["ideal_clock_excluded"] is True
+    # A census the tool did not finish is no behaviour evidence.
+    receipts.synth_stage(project, netlist=netlist, top="top", liberties=["/l.lib"],
+                         sdc=sdc, to_container=str, execute=lambda cmd: (1, "", "err"))
+    assert "behavior_report" not in plan._stages(project, False)[0][0]

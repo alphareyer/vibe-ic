@@ -128,6 +128,13 @@ _NOT_PROSE: Dict[str, str] = {
         "There is no prose denial form in these fields. Falsifier: "
         "test_capture_cr14_postroute_recipe.py::"
         "test_liberty_truth_table_and_area_discover_neutral_full_adder.",
+    "drv_capture_plan::_stages":
+        "TOOL-FILE GRAMMARS, NO SENTENCE. The stage values come from the ABC "
+        "script's own `buffer -N <n>` command line, OpenROAD write_sdc's "
+        "`set_max_* <n>` commands and the probe's `sta::max_fanout_check_limit "
+        "<n>` / `clock <c> is_propagated=<0|1>` lines, all hashed tool output; "
+        "a comment or prose line cannot negate a command. test_drv_stage_receipts"
+        "::test_synth_flags_come_from_evidence_not_the_receipt falsifies it.",
     "drv_capture_plan::_env":
         "LIBRELANE TCL ASSIGNMENT GRAMMAR, NO SENTENCE. Only a line beginning "
         "with the exact set ::env(NAME) form is an environment assignment; a "
