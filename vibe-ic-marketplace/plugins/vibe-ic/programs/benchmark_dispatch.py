@@ -4411,7 +4411,9 @@ def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
             "ai_nature": "one allowed_natures member for CONFIRM or OVERRIDE",
             "author": {"kind": "AI", "model": "<named model>"},
             "blind": {"oracle_accessed": False},
-            "prompt_evidence": "excerpt/supports records from visible input only",
+            "prompt_evidence": ("excerpt/supports records from visible input "
+                                "only; OVERRIDE needs >=1 exact excerpt whose "
+                                "supports claim names ai_nature"),
             "rationale": "<at least 24 characters>",
         },
     }
@@ -4419,6 +4421,13 @@ def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
     _write_immutable_json(run_p / "ai_route_tasks" /
                           f"{task['task_sha256']}.json", task)
     return task
+
+
+def _claim_names_nature(claim: str, nature: str) -> bool:
+    """True when an evidence claim cites `nature` (``_`` and space alike)."""
+    def norm(text: str) -> str:
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+    return f" {norm(nature)} " in f" {norm(claim)} "
 
 
 def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]:
@@ -4493,7 +4502,25 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
                 reasons.append("AI_ROUTE_INVALID: CONFIRM differs from proposal")
             evidence = _verified_prompt_evidence(
                 response.get("prompt_evidence"), prompt_text)
-            if not evidence and len(str(response.get("rationale") or "").strip()) < 160:
+            if disposition == "OVERRIDE":
+                # A route CHANGE departs from the Program's input-derived
+                # proposal, so it must be grounded in the visible input
+                # itself: at least one exact excerpt whose claim is cited for
+                # the nature selected.  Rationale length is never a
+                # substitute (review wave 52: 160 characters of filler routed
+                # a generation prompt to debug with zero excerpts).
+                if not evidence:
+                    reasons.append(
+                        "AI_ROUTE_INVALID: OVERRIDE requires verified prompt "
+                        "evidence (exact visible-input excerpt + claim); "
+                        "rationale length is not evidence")
+                elif (nature in tnr.NATURE_ENTRY
+                        and not any(_claim_names_nature(item["supports"], nature)
+                                    for item in evidence)):
+                    reasons.append(
+                        "AI_ROUTE_INVALID: no verified evidence claim names "
+                        f"the selected ai_nature {nature!r}")
+            elif not evidence and len(str(response.get("rationale") or "").strip()) < 160:
                 reasons.append("AI_ROUTE_INVALID: prompt evidence or detailed rationale required")
         if reasons:
             return None, reasons

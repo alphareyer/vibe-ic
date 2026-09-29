@@ -167,6 +167,12 @@ def test_ai_override_selects_derived_midflow_entry(tmp_path, monkeypatch):
         "The visible prompt supplies a complete module and asks to fix its "
         "incorrect inversion. Debugging that supplied RTL is the correct "
         "existing-design route, not generation from an absent design. " * 2)
+    # The OVERRIDE is grounded in THIS prompt (the generic helper's excerpt
+    # is from PROMPT, which this dataset replaced); length alone never was.
+    answer["prompt_evidence"] = [{
+        "excerpt": "Fix the incorrect output inversion in this supplied module",
+        "supports": "Repairing the supplied module is the debug route.",
+    }]
     _write_answer(task, answer)
     assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
     assert frontdoors == [1]
@@ -270,3 +276,96 @@ def test_checked_in_prompt_reaches_runner_only_after_ai_route(tmp_path,
     report = json.loads((run / "solve_report.json").read_text())
     assert report["routing_phase"] == "COMPLETE"
     assert report["results"][0]["routing_verdict"]["source"] == "ai_confirmed"
+
+
+_FIX_PROMPT = ("Fix the incorrect output inversion in this supplied module: "
+               "module top_module(input wire a, output wire y); "
+               "assign y = ~a; endmodule")
+_LONG_GENERIC = ("The route was selected after careful consideration of the "
+                 "visible input and the general product flow table. " * 4)
+
+
+def _override_run(tmp_path, monkeypatch, prompt: str):
+    dataset, run = _dataset(tmp_path), tmp_path / "run"
+    (dataset / "generic_pulse_prompt.txt").write_text(prompt)
+    calls = []
+    monkeypatch.setattr(bd, "_ensure_phase1_frontdoor",
+                        lambda *_a: {"status": "GENERATED",
+                                     "provenance": {"ran": True}})
+    monkeypatch.setattr(
+        bd._RunnerBudget, "run",
+        lambda _budget, argv: calls.append(argv) or bd._ProcessOutcome(rc=1))
+    assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
+    return dataset, run, calls, _task(run)
+
+
+@pytest.mark.parametrize("evidence", [
+    pytest.param([], id="no_evidence"),
+    pytest.param([{"excerpt": "Fix the supplied module's broken output",
+                   "supports": "The user asks to debug an existing module."}],
+                 id="excerpt_not_in_prompt"),
+    pytest.param([{"excerpt": "pulse_in",
+                   "supports": "x"}], id="claim_too_short"),
+])
+def test_override_without_verified_evidence_stays_pending(
+        tmp_path, monkeypatch, evidence):
+    # Review wave 52 (both lenses, MAJOR): a 160-character generic rationale
+    # was accepted in place of any checked prompt excerpt, and a generation
+    # prompt was routed to debug (entry 4).  Length is not grounding.
+    dataset, run, calls, task = _override_run(tmp_path, monkeypatch, PROMPT)
+    answer = _answer(task, "debug", "OVERRIDE")
+    answer["prompt_evidence"] = evidence
+    answer["rationale"] = _LONG_GENERIC
+    assert len(answer["rationale"]) >= 160
+    _write_answer(task, answer)
+    decision, reasons = bd._validate_ai_route(task, run)
+    assert decision is None
+    assert any("OVERRIDE requires verified prompt evidence" in r
+               for r in reasons), reasons
+    assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
+    assert calls == []
+    assert json.loads((run / "solve_report.json").read_text())[
+        "routing_phase"] == "PENDING"
+
+
+def test_override_evidence_must_be_cited_for_the_selected_nature(
+        tmp_path, monkeypatch):
+    # A real excerpt whose claim argues for some other route does not ground
+    # the nature the response selects.
+    dataset, run, calls, task = _override_run(tmp_path, monkeypatch, PROMPT)
+    answer = _answer(task, "debug", "OVERRIDE")
+    answer["prompt_evidence"] = [{
+        "excerpt": "Design a pulse stretcher named top_module",
+        "supports": "The user requests a brand-new module from prose.",
+    }]
+    answer["rationale"] = _LONG_GENERIC
+    _write_answer(task, answer)
+    decision, reasons = bd._validate_ai_route(task, run)
+    assert decision is None
+    assert any("no verified evidence claim names the selected ai_nature 'debug'" in r
+               for r in reasons), reasons
+    assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
+    assert calls == []
+
+
+def test_grounded_override_with_short_rationale_is_accepted(tmp_path,
+                                                             monkeypatch):
+    # Sibling arm: evidence, not length, is what grounds an OVERRIDE.
+    original = tnr.classify_task_nature
+    monkeypatch.setattr(tnr, "classify_task_nature", lambda *_a: {
+        **original(PROMPT, False, "spec_generation"),
+        "source": "synthetic_misroute_control"})
+    dataset, run, calls, task = _override_run(tmp_path, monkeypatch,
+                                              _FIX_PROMPT)
+    answer = _answer(task, "debug", "OVERRIDE")
+    answer["rationale"] = "Supplied RTL must be repaired."
+    answer["prompt_evidence"] = [{
+        "excerpt": "Fix the incorrect output inversion in this supplied module",
+        "supports": "Repairing supplied RTL is the debug route.",
+    }]
+    _write_answer(task, answer)
+    decision, reasons = bd._validate_ai_route(task, run)
+    assert reasons == [] and decision["source"] == "ai_override"
+    assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
+    assert len(calls) == 1
+    assert calls[0][calls[0].index("--entry-step") + 1] == "4"
