@@ -16434,13 +16434,20 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # unavailable record that is not an owner approval is still a FACT about
     # the host, never a waiver. Kept aside so the natural MISSING it explains
     # reads NOT_MEASURED with its reason below.
+    # A board-skip claim (`_fpga_skip`) is not a generic environment fact: it
+    # is meaningful only on the declared board steps, which have their own
+    # owner-ruled NOT_MEASURED path, and a forged one must not soften a FAIL.
     env_record = (owner_record if (owner_record is not None and owner_refusal
                                    and isinstance(owner_record, dict)
                                    and owner_record.get("_env_unavailable")
-                                   is True) else None)
+                                   is True
+                                   and not owner_record.get("_fpga_skip"))
+                  else None)
     if owner_record is not None and owner_refusal:
         result.reasons.append(f"OWNER WAIVER REFUSED: {owner_refusal}")
         waivers = {key: value for key, value in waivers.items() if key != sid}
+    _refusal_lines = [r for r in result.reasons
+                      if r.startswith("OWNER WAIVER REFUSED")]
 
     # Ownership, not resemblance: the flow's declared `stage`, not the first
     # letter of the id. Byte-identical on the shipped flow (A1..A9 all declare
@@ -16797,7 +16804,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 f"{env_record.get('reason', '(no reason)')} "
                 f"(recorded by: {env_record.get('approver', '?')})",
                 f"  ↳ natural: {natural_reason}",
-            ]
+            ] + _refusal_lines
         else:
             # ORGANIC #675 (extension) — the `files_exist` gate path already
             # honors an honest co-located `*_not_run.json` / `*_skipped.json`
@@ -18100,6 +18107,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         ]
         for r in original_reasons[:3]:
             result.reasons.append(f"  ↳ natural: {r}")
+        result.reasons += [r for r in _refusal_lines
+                           if r not in result.reasons]
 
     # v0.2.64 (#433/#434) — evidence-integrity scan on the natural PASS,
     # then v0.2.63 (#430) capability-gap conversion (the early
