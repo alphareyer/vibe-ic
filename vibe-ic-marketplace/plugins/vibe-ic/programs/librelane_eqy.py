@@ -45,6 +45,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any, Optional
+import fnmatch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
@@ -121,7 +122,85 @@ def xbit_partitions(scratch: Path) -> Optional[list[str]]:
     return [name for name, xbits in declared.items() if xbits]
 
 
-def judge_eqy(folder: Path, output: Path) -> dict:
+def _fingerprint(path: Path) -> dict:
+    return {"path": str(path.resolve()), "sha256": "sha256:" + digest(path)}
+
+
+def _selected_liberty(config: dict) -> str:
+    libs = config.get("CELL_LIBS") or config.get("LIB") or {}
+    corner = config.get("DEFAULT_CORNER") or ""
+    match = [lib for pattern, group in libs.items() if fnmatch.fnmatch(corner, pattern)
+             for lib in (group if isinstance(group, list) else [group])]
+    if len(match) != 1 or not isinstance(match[0], str):
+        raise Refusal("LL_EQY_LIBERTY_UNRESOLVED", f"{corner}: {match}")
+    return match[0]
+
+
+def _liberty_binding(project: Path, config: dict, mounts: list) -> dict:
+    """Resolve the library EQY reads through the same mounts as run_chain."""
+    guest = Path(_selected_liberty(config))
+    if not guest.is_absolute():
+        raise Refusal("LL_EQY_LIBERTY_UNBOUND", str(guest))
+    roots = [(project.resolve(), project.resolve()),
+             *((Path(host).resolve(), Path(target)) for host, target in mounts)]
+    # A more specific mount wins; the last explicit mount wins a duplicate.
+    roots = sorted(enumerate(roots), key=lambda row: (len(row[1][1].parts), row[0]),
+                   reverse=True)
+    for _, (host_root, guest_root) in roots:
+        if guest.is_relative_to(guest_root):
+            host = host_root / guest.relative_to(guest_root)
+            if host.is_file():
+                return dict(_fingerprint(host), guest_path=str(guest))
+            break
+    raise Refusal("LL_EQY_LIBERTY_UNBOUND", f"no readable mounted bytes for {guest}")
+
+
+def _native_snapshot(folder: Path) -> dict:
+    """Bind the native run records and the entire declared/status population."""
+    names = ["config.json", "input_fingerprint.json", "vibeic_receipt.json",
+             "pdk_root.json", "state_out.json", "invocation.log", "scratch/partition.list"]
+    names += [str(path.relative_to(folder)) for path in
+              sorted((folder / "scratch/strategies").glob("*/*/status"))]
+    return {name: "sha256:" + digest(folder / name) for name in names}
+
+
+def proof_binding_current(folder: Path, identity: dict) -> bool:
+    """A cached native proof keeps its producing inputs, not a new request's."""
+    try:
+        project = Path(identity["project"])
+        config = _load(Path(identity["resolved_config"]["path"]))
+        native_config = _load(folder / "config.json")
+        native_input = _load(folder / "input_fingerprint.json")
+        receipt = _load(folder / "vibeic_receipt.json")
+        if (identity["native_run"]["sha256"] != _native_snapshot(folder)
+                or identity["native_run"]["input"] != native_input
+                or receipt["input"] != native_input
+                or config["meta"]["step"] != STEP
+                or native_input["step"] != STEP
+                or native_config["meta"]["step"] != STEP
+                or native_input["image"] != identity["image"]
+                or native_input["config"] != identity["resolved_config"]["sha256"].removeprefix("sha256:")
+                or native_input["state"] != identity["initial_state"]["sha256"].removeprefix("sha256:")
+                or native_config["DESIGN_NAME"] != identity["top"]
+                or Path(native_config["EQY_SCRIPT"]).resolve() != Path(identity["equivalence_script"]["path"])
+                or _selected_liberty(native_config) != identity["liberty"]["guest_path"]
+                or _liberty_binding(project, config, identity["mounts"]) != identity["liberty"]):
+            return False
+        pdk = _load(folder / "pdk_root.json")
+        root = identity["pdk_root"].rstrip("/") or "/"
+        if (pdk["cli_pdk_root"] != identity["pdk_root"] or pdk["mounts_under_it"] !=
+                [[host, guest] for host, guest in identity["mounts"]
+                 if guest == root or guest.startswith(root + "/")]):
+            return False
+        files = [identity[key] for key in ("gate_netlist", "equivalence_script",
+                                         "resolved_config", "initial_state", "producer_source")]
+        return all(_fingerprint(Path(item["path"])) == item
+                   for item in files + identity["gold_rtl"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, Refusal):
+        return False
+
+
+def read_eqy(folder: Path) -> dict:
     scratch = folder / "scratch"
     declared = _partition_population(scratch)
     parts = partition_status(scratch)
@@ -162,10 +241,24 @@ def judge_eqy(folder: Path, output: Path) -> dict:
     if identity_path.is_file():
         try:
             report["proof_identity"] = _load(identity_path)
-        except (OSError, ValueError):
+        except (OSError, ValueError, Refusal):
             report["proof_identity"] = None
+        report["proof_binding_current"] = proof_binding_current(
+            folder, report.get("proof_identity") or {})
+        if verdict == "PASS" and not report["proof_binding_current"]:
+            report.update(verdict="INCONCLUSIVE", explanation="EQY_NATIVE_PROOF_BINDING_STALE")
+    refusal = folder / "proof_cache_refusal.json"
+    if refusal.is_file():
+        report["cache_refusal"] = _load(refusal)
+        if report["verdict"] == "PASS":
+            report.update(verdict="INCONCLUSIVE", explanation="EQY_CACHE_REUSE_REFUSED")
     if (folder / "config.json").is_file():
         report["config_sha256"] = digest(folder / "config.json")
+    return report
+
+
+def judge_eqy(folder: Path, output: Path) -> dict:
+    report = read_eqy(folder)
     write_json(output, report)
     return report
 
@@ -181,7 +274,11 @@ def run_eqy(project: Path, image: str, pdk: str, top: str, rtl: list[Path],
     """
     if not netlist.is_file() or not rtl or any(not p.is_file() for p in rtl):
         raise Refusal("LL_EQY_INPUT_MISSING", f"{netlist} / {rtl}")
-    root = project / "phase3/librelane/lec-eqy-config"
+    if Path(namespace).is_absolute() or ".." in Path(namespace).parts:
+        raise Refusal("LL_INVALID_NAMESPACE", namespace)
+    # The producing config/state snapshots must not be overwritten by a
+    # second EQY arm (for example, the post-DFT handoff namespace).
+    root = project / "phase3/librelane/lec-eqy-config" / namespace
     root.mkdir(parents=True, exist_ok=True)
     config: dict[str, Any] = {"DESIGN_NAME": top, "PDK": pdk,
                               "VERILOG_FILES": [str(p.resolve()) for p in rtl],
@@ -193,15 +290,10 @@ def run_eqy(project: Path, image: str, pdk: str, top: str, rtl: list[Path],
     probe = resolve_step_config(project, image, raw, root / "eqy.probe.json",
                                 mounts=mounts, pdk_root=pdk_root)
     resolved = _load(probe)
-    libs = resolved.get("CELL_LIBS") or resolved.get("LIB") or {}
     corner = resolved.get("DEFAULT_CORNER") or ""
-    import fnmatch
-    match = [lib for pattern, group in libs.items() if fnmatch.fnmatch(corner, pattern)
-             for lib in (group if isinstance(group, list) else [group])]
-    if len(match) != 1:
-        raise Refusal("LL_EQY_LIBERTY_UNRESOLVED", f"{corner}: {match}")
+    liberty = _selected_liberty(resolved)
     script = root / f"{namespace}-{top}.eqy"
-    script.write_text(eqy_script(top, rtl, netlist.resolve(), str(match[0])))
+    script.write_text(eqy_script(top, rtl, netlist.resolve(), liberty))
     config["EQY_SCRIPT"] = str(script)
     write_json(raw, config)
     write_json(root / "eqy.provenance.json", {
@@ -215,18 +307,52 @@ def run_eqy(project: Path, image: str, pdk: str, top: str, rtl: list[Path],
     write_json(state, {"nl": str(netlist.resolve())})
     # Snapshot BEFORE the tool starts: a caller's digest after EQY finishes
     # cannot identify the bytes EQY read if an input changed during the run.
-    def fingerprint(path: Path) -> dict:
-        return {"path": str(path.resolve()), "sha256": "sha256:" + digest(path)}
-    identity = {"top": top, "gate_netlist": fingerprint(netlist),
-                "gold_rtl": [fingerprint(path) for path in rtl],
-                "equivalence_script": fingerprint(script)}
+    effective = _load(step_config)
+    if (effective["meta"]["step"] != STEP or effective["DESIGN_NAME"] != top
+            or _selected_liberty(effective) != liberty
+            or Path(effective["EQY_SCRIPT"]).resolve() != script.resolve()):
+        raise Refusal("LL_EQY_EFFECTIVE_CONFIG_CHANGED", str(step_config))
+    identity = {"top": top, "project": str(project.resolve()), "image": image,
+                "mounts": [[str(host.resolve()), guest] for host, guest in mounts or []],
+                "pdk_root": pdk_root, "gate_netlist": _fingerprint(netlist),
+                "gold_rtl": [_fingerprint(path) for path in rtl],
+                "equivalence_script": _fingerprint(script),
+                "resolved_config": _fingerprint(step_config), "initial_state": _fingerprint(state),
+                "liberty": _liberty_binding(project, effective, mounts or []),
+                "producer_source": _fingerprint(Path(__file__))}
     folder = project / "phase3/librelane" / namespace / "01-yosys-eqy"
+    old = _load(folder / "proof_identity.json") if (folder / "proof_identity.json").is_file() else {}
+    def refuse_cache(reason: str) -> Path:
+        write_json(folder / "proof_cache_refusal.json", {
+            "verdict": "NOT_MEASURED", "reason": reason,
+            "native_source": str(folder), "producing_liberty": old.get("liberty"),
+            "requested_liberty": identity["liberty"]})
+        return folder
+    previous_receipt = folder / "vibeic_receipt.json"
+    previous_hash = digest(previous_receipt) if previous_receipt.is_file() else None
+    if previous_hash:
+        if not old.get("native_run") or old.get("liberty") != identity["liberty"]:
+            return refuse_cache("LL_EQY_CACHE_LIBERTY_UNBOUND_OR_CHANGED")
+        if {key: value for key, value in old.items() if key != "native_run"} == identity:
+            if not proof_binding_current(folder, old):
+                return refuse_cache("LL_EQY_CACHE_NATIVE_CAPTURE_CHANGED")
+            (folder / "proof_cache_refusal.json").unlink(missing_ok=True)
+            return folder
     try:
         run_chain(project, image, [(STEP, step_config, state)], mounts=mounts,
                   pdk_root=pdk_root, namespace=namespace)
     except Refusal as exc:
         if exc.code != "LL_STEP_FAILED" or not (folder / "scratch").is_dir():
             raise
+    if previous_hash and previous_receipt.is_file() and digest(previous_receipt) == previous_hash:
+        return refuse_cache("LL_EQY_CACHE_CANNOT_REBIND_OLD_RUN")
+    try:
+        identity["native_run"] = {"input": _load(folder / "input_fingerprint.json"),
+                                  "sha256": _native_snapshot(folder)}
+    except (OSError, ValueError, Refusal):
+        # An actual tool FAIL can have no successful step receipt. Its native
+        # counterexample remains FAIL; missing binding can never earn PASS.
+        identity["native_run"] = None
     write_json(folder / "proof_identity.json", identity)
     return folder
 

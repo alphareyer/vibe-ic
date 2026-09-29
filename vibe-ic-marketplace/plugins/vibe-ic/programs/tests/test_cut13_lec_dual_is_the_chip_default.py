@@ -16,7 +16,10 @@ import importlib
 import hashlib
 import json
 import tarfile
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -92,6 +95,50 @@ def _arm_a(runner, verdict="INCONCLUSIVE"):
 GATE_REL = "phase2/stage2/synth/cal_chain_synth.v"
 
 
+def _native_eqy(root, *, namespace="lec_eqy", mutate_during_run=False):
+    """Replay native captures through the production cache and producer."""
+    import librelane_eqy as E
+    gate = root / GATE_REL
+    rtl = root / "phase2/stage1/rtl/cal_chain.v"
+    library = root / "pdk/cells.lib"
+    if not library.is_file():
+        put(library, '''library(neutral) {
+  cell(gf180mcu_fd_sc_mcu7t5v0__inv_1) {
+    pin(I) { direction : input; }
+    pin(ZN) { direction : output; function : "!I"; }
+  }
+  cell(gf180mcu_fd_sc_mcu7t5v0__dffq_1) {
+    ff(IQ,IQN) { clocked_on : "CLK"; next_state : "D"; }
+    pin(CLK) { direction : input; clock : true; }
+    pin(D) { direction : input; }
+    pin(Q) { direction : output; function : "IQ"; }
+  }
+}
+''')
+    def resolve(project, image, raw, output, **kw):
+        config = json.loads(raw.read_text())
+        config.update(CELL_LIBS={"*": ["/pdk/cells.lib"]}, DEFAULT_CORNER="tt")
+        return put(output, config)
+    def container(cmd, **kw):
+        folder = Path(cmd[cmd.index("-o") + 1])
+        scratch = folder / "scratch"
+        scratch.mkdir()
+        with tarfile.open(CAL / "eqy_defined_init_negative.tar") as archive:
+            archive.extractall(scratch)
+        shutil.copyfile(cmd[cmd.index("-c") + 1], folder / "config.json")
+        if mutate_during_run:
+            gate.write_text(gate.read_text() + "\n// changed while EQY was running\n")
+        put(folder / "state_out.json", {"nl": str(gate.resolve()), "metrics": {}})
+        return SimpleNamespace(returncode=0, stdout="native capture replay\n", stderr="")
+    with patch.object(E, "resolve_step_config", resolve), \
+            patch.object(LC, "image_capability", return_value={}), \
+            patch.object(LC, "run_container", container):
+        folder = E.run_eqy(root, "img:1", "pdkA", "cal_chain", [rtl], gate,
+                           pdk_root="/pdk", mounts=[(library.parent, "/pdk")],
+                           namespace=namespace)
+    return folder, E.judge_eqy(folder, root / "reports/lec_eqy.json")
+
+
 # ── the default ─────────────────────────────────────────────────────────────
 def test_the_chip_path_runs_step13_dual_with_no_switch(tmp_path):
     project = _chip(tmp_path)
@@ -159,13 +206,9 @@ def test_phase3_hands_its_resolved_pdk_to_step13(tmp_path, monkeypatch):
 # ── the gate audits the tool arm ────────────────────────────────────────────
 def _gate_tree(root, arms, *, lec=None):
     put(root / GATE_REL, (CAL / "cal_eqy_gate.v").read_text())
-    rtl = put(root / "phase2/stage1/rtl/cal_chain.v", (CAL / "cal_chain_rtl.v").read_text())
-    script = put(root / "phase3/librelane/lec_eqy/cal_chain.eqy", "[script]\nprep -top cal_chain\n")
-    def fingerprint(path):
-        return {"path": str(path.relative_to(root)),
-                "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()}
-    identity = {"top": "cal_chain", "gate_netlist": fingerprint(root / GATE_REL),
-                "gold_rtl": [fingerprint(rtl)], "equivalence_script": fingerprint(script)}
+    put(root / "phase2/stage1/rtl/cal_chain.v", (CAL / "cal_chain_rtl.v").read_text())
+    _, report = _native_eqy(root)
+    identity = report["proof_identity"]
     put(root / "reports/lec.json", lec or {
         "verdict": "INCONCLUSIVE", "equivalent": False, "inconclusive": True,
         "compared_points": 60, "unproven_points": 5, "miter_points": 65,
@@ -175,9 +218,8 @@ def _gate_tree(root, arms, *, lec=None):
     if arms is not None:
         arms = dict(arms, subjects=dict(arms["subjects"], eqy_path=str(root / GATE_REL)))
         put(root / "reports/lec_arms.json", arms)
-        put(root / "reports/lec_eqy.json", {"verdict": arms["arms"]["eqy"],
-            "proof_identity": identity, "compared_points": 2, "proven_points": 2,
-            "xbits_partitions": list(arms.get("eqy_xbits_partitions") or [])})
+        put(root / "reports/lec_eqy.json", dict(report, verdict=arms["arms"]["eqy"],
+            xbits_partitions=list(arms.get("eqy_xbits_partitions") or [])))
     return root
 
 
@@ -212,7 +254,7 @@ def test_tool_credit_requires_current_proof_inputs(tmp_path, changed):
     import lec_equivalence_check as G
     root = _gate_tree(tmp_path, _arms("PASS", "eqy", "PASS"))
     paths = {"netlist": GATE_REL, "rtl": "phase2/stage1/rtl/cal_chain.v",
-             "script": "phase3/librelane/lec_eqy/cal_chain.eqy"}
+             "script": "phase3/librelane/lec-eqy-config/lec_eqy/lec_eqy-cal_chain.eqy"}
     if changed == "added_rtl":
         put(root / "phase2/stage1/rtl/extra.v", (CAL / "cal_chain_rtl.v").read_text())
     elif changed == "removed_rtl":
@@ -257,24 +299,10 @@ def test_tool_credit_cannot_erase_an_unbound_subject(tmp_path):
 def test_eqy_proof_identity_is_captured_before_the_tool_runs(tmp_path, monkeypatch,
                                                           mutate_during_run):
     """Replay real status receipts through run_eqy, judge and the step-13 audit."""
-    import librelane_eqy as E
     import lec_equivalence_check as G
     root = _gate_tree(tmp_path, _arms("PASS", "eqy", "PASS"))
     gate = root / GATE_REL
-    rtl = root / "phase2/stage1/rtl/cal_chain.v"
-    def resolve(project, image, raw, output, **kw):
-        put(output, {"CELL_LIBS": {"*": ["/pdk/cells.lib"]}, "DEFAULT_CORNER": "tt"})
-        return output
-    def run(project, image, steps, **kw):
-        folder = _eqy_folder(project / "phase3/librelane" / kw["namespace"],
-                             "eqy_defined_init_negative")
-        if mutate_during_run:
-            gate.write_text(gate.read_text() + "\n// changed while EQY was running\n")
-        return [folder]
-    monkeypatch.setattr(E, "resolve_step_config", resolve)
-    monkeypatch.setattr(E, "run_chain", run)
-    folder = E.run_eqy(root, "img:1", "pdkA", "cal_chain", [rtl], gate, pdk_root="/pdk")
-    E.judge_eqy(folder, root / "reports/lec_eqy.json")
+    _native_eqy(root, namespace="identity_test", mutate_during_run=mutate_during_run)
     # Reproduce the existing caller's AFTER-run digest, and a current arm-A
     # identity. Only EQY's own before-run snapshot can detect this difference.
     sha = "sha256:" + hashlib.sha256(gate.read_bytes()).hexdigest()
@@ -285,6 +313,35 @@ def test_eqy_proof_identity_is_captured_before_the_tool_runs(tmp_path, monkeypat
         lec_sha=sha), subjects={"lec_run": sha, "eqy": sha, "eqy_path": str(gate)}))
     res = G.audit(root)
     assert (res.passed, _gate(root)) == ((False, 3) if mutate_during_run else (True, 0))
+
+
+def test_saved_pass_cannot_credit_a_partial_current_native_capture(tmp_path):
+    import librelane_eqy as E
+    root = _gate_tree(tmp_path, _arms("PASS", "eqy", "PASS"))
+    folder = Path(json.loads((root / "reports/lec_eqy.json").read_text())["source"])
+    for status in (folder / "scratch/strategies/cal_chain.y").glob("*/status"):
+        status.unlink()
+    current = E.judge_eqy(folder, root / "current-native.json")
+    assert current["verdict"] == "INCONCLUSIVE"
+    assert current["unproven_points"] == ["cal_chain.y"]
+    assert _gate(root) != 0, "stale PASS summary credited over partial native proof"
+
+
+def test_changed_liberty_cannot_resume_and_credit_the_old_native_proof(tmp_path):
+    import librelane_eqy as E
+    root = _gate_tree(tmp_path, _arms("PASS", "eqy", "PASS"))
+    library = root / "pdk/cells.lib"
+    previous = LC.digest(library)
+    library.write_text(library.read_text().replace('function : "!I"', 'function : "I"'))
+    assert LC.digest(library) != previous
+    _, report = _native_eqy(root)
+    lec = json.loads((root / "reports/lec.json").read_text())
+    arms = E.combine(lec, report)
+    arms.update(mode="dual", subjects={"lec_run": SHA, "eqy": SHA,
+                                       "eqy_path": str(root / GATE_REL)},
+                eqy_xbits_partitions=report["xbits_partitions"])
+    put(root / "reports/lec_arms.json", arms)
+    assert _gate(root) != 0, "old EQY capture is credited after its mapped cell function changed"
 
 
 @pytest.mark.parametrize("arms", [

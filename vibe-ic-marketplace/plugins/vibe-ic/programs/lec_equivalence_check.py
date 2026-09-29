@@ -445,9 +445,17 @@ def _eqy_proof_is_current(project: Path, binding: dict, subjects: dict) -> bool:
     """EQY's pre-run input snapshot, not a post-run subject label, binds credit."""
     if binding.get("state") != _B_MATCH:
         return False
+    from librelane_eqy import Refusal, read_eqy
     try:
         doc = json.loads((project / "reports/lec_eqy.json").read_text())
         identity = doc["proof_identity"]
+        # The producing native run, its complete current population/statuses
+        # and effective mounted Liberty must still be this report's proof.
+        folder = project / doc["source"]
+        native = read_eqy(folder)
+        if (native["verdict"] != "PASS" or not native.get("proof_binding_current")
+                or native.get("proof_identity") != identity):
+            return False
         gold = identity["gold_rtl"]
         gate = identity["gate_netlist"]
         rtl_dir = project / "phase2/stage1/rtl"
@@ -468,7 +476,7 @@ def _eqy_proof_is_current(project: Path, binding: dict, subjects: dict) -> bool:
         # The composed record must identify that same gate file, not another
         # path that happened to receive its sha256 after the proof completed.
         return (project / subjects["eqy_path"]).resolve() == (project / gate["path"]).resolve()
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, Refusal):
         return False
 
 
