@@ -24,6 +24,129 @@ import benchmark_io_adapter as adapter  # noqa: E402
 import score_cvdp_open as cvdp_score  # noqa: E402
 import task_nature_route as general_route  # noqa: E402
 import rtl_final_bundle_integrity as bundle_gate  # noqa: E402
+from _hostpaths import require_repo  # noqa: E402
+
+
+@pytest.mark.parametrize("entry,exit_step", [
+    ("D1", "D1"), ("D1", "4"), ("2", "2"), ("11", "13"), ("15", "31"),
+])
+@pytest.mark.parametrize("supplied_rtl", [False, True])
+def test_open_runner_declares_ip_without_changing_the_task_window(
+        tmp_path, entry, exit_step, supplied_rtl):
+    argv = dispatch._resume_solver_argv(
+        PROGRAMS / "vibe_ic_one_shot_runner.py", tmp_path,
+        supplied_rtl, entry, exit_step)
+    assert argv[argv.index("--route") + 1] == "ip", argv
+    assert argv[argv.index("--exit-step") + 1] == exit_step
+    effective_entry = "2" if supplied_rtl else entry
+    if effective_entry == "D1":
+        assert "--entry-step" not in argv
+    else:
+        assert argv[argv.index("--entry-step") + 1] == effective_entry
+    assert ("--skip-phase3" in argv) == (entry != "15")
+
+
+def _run_admission(argv):
+    # A demanded, unavailable image stops immediately after delivery admission.
+    # This runs the real runner/guard without dispatching Phase 1 or EDA tools.
+    return subprocess.run(
+        argv + ["--no-dashboard", "--container", "neutral-admission-fixture",
+                "--require-image", "sha256:" + "0" * 64],
+        capture_output=True, text=True, timeout=30)
+
+
+@pytest.mark.parametrize("entry,exit_step", [("D1", "D1"), ("2", "2")])
+def test_open_argv_passes_the_actual_delivery_guard(tmp_path, entry, exit_step):
+    argv = dispatch._solver_argv(
+        PROGRAMS / "vibe_ic_one_shot_runner.py", tmp_path, entry, exit_step)
+    result = _run_admission(argv)
+    assert result.returncode == 2
+    # Compare the observed refusal class, not a field the candidate introduces.
+    assert result.stderr.split(":", 1)[0] == "ERROR", result.stderr
+    assert "--require-image" in result.stderr
+    from _delivery_route import report_label
+    assert report_label(tmp_path) == {
+        "delivery_route": "IP", "deliverable": "HARDMACRO"}
+
+
+def test_undeclared_ordinary_runner_still_blocks_before_image_capture(tmp_path):
+    result = _run_admission([
+        sys.executable, str(PROGRAMS / "vibe_ic_one_shot_runner.py"),
+        str(tmp_path), "--exit-step", "D1"])
+    assert result.returncode == 2
+    assert result.stderr.split(":", 1)[0] == "REFUSED", result.stderr
+    assert "DELIVERY_ROUTE_UNDECLARED" in result.stderr
+    assert not (tmp_path / "reports" / "container_image.json").exists()
+
+
+def test_open_delivery_cannot_overwrite_the_existing_owner_die_choice(tmp_path):
+    from _delivery_route import admit
+    from _submission_template import DESIGN_ANSWERS_REL
+    assert admit(tmp_path, "ic") is None
+    declaration = tmp_path / DESIGN_ANSWERS_REL
+    before = declaration.read_bytes()
+    argv = dispatch._solver_argv(
+        PROGRAMS / "vibe_ic_one_shot_runner.py", tmp_path, "2", "2")
+    result = _run_admission(argv)
+    assert result.returncode == 2
+    assert result.stderr.split(":", 1)[0] == "REFUSED", result.stderr
+    assert "contradicts the existing owner-provenance answer DIE" in result.stderr
+    assert declaration.read_bytes() == before
+
+
+def test_existing_owner_ip_choice_is_preserved(tmp_path):
+    from _delivery_route import admit
+    from _submission_template import DESIGN_ANSWERS_REL
+    assert admit(tmp_path, "ip") is None
+    declaration = tmp_path / DESIGN_ANSWERS_REL
+    before = declaration.read_bytes()
+    result = _run_admission(dispatch._solver_argv(
+        PROGRAMS / "vibe_ic_one_shot_runner.py", tmp_path, "2", "2"))
+    assert result.returncode == 2
+    assert result.stderr.split(":", 1)[0] == "ERROR", result.stderr
+    assert declaration.read_bytes() == before
+
+
+def test_phase1_provenance_frontdoor_supplies_the_same_delivery_route(tmp_path):
+    from _delivery_route import admit
+    prompt = tmp_path / "input" / "phase1_prompt.md"
+    prompt.parent.mkdir()
+    prompt.write_text("Design a combinational module with one input and output.")
+    calls = []
+
+    def run(argv):
+        calls.append(argv)
+        route = argv[argv.index("--route") + 1] if "--route" in argv else None
+        refusal = admit(tmp_path, route)
+        if refusal:
+            return SimpleNamespace(rc=2, error=refusal)
+        docs = tmp_path / "phase1" / "generated_docs"
+        docs.mkdir(parents=True)
+        (docs / "L1_DATASHEET.json").write_text('{"schema": 1}\n')
+        return SimpleNamespace(rc=0, error=None)
+
+    result = dispatch._ensure_phase1_frontdoor(
+        PROGRAMS / "vibe_ic_one_shot_runner.py", tmp_path,
+        SimpleNamespace(run=run))
+    assert result["status"] == "GENERATED", result
+    assert result["runner_rc"] == 0
+    assert calls[0][calls[0].index("--exit-step") + 1] == "D1"
+    assert "--entry-step" not in calls[0]
+
+
+def test_shipped_open_registry_all_uses_the_explicit_ip_entry(tmp_path):
+    registry_path = require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "benchmark",
+        "BENCHMARK_REGISTRY.json")
+    registry = json.loads(registry_path.read_text())
+    for bench in dispatch._BENCH_FORMAT:
+        row = registry["benchmarks"][bench]
+        assert set(row["shape"].split("/")) & {"B", "C"}
+        runner = row["solve_entry"]["runner"].split()[0]
+        assert runner == "programs/vibe_ic_one_shot_runner.py"
+        argv = dispatch._solver_argv(
+            PLUGIN / runner, tmp_path, "D1", "4")
+        assert argv[argv.index("--route") + 1] == "ip", (bench, argv)
 
 
 def test_repository_has_no_benchmark_specific_entry_surface():
