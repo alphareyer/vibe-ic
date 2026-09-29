@@ -681,6 +681,17 @@ def emit_synthesis_config(project: Path, pdk: str, output: Path,
          'sparse_fsm_detect over selected design RTL')
     _set(result, sources, 'SYNTH_FSM_ENCFILE', True,
          'step 13 LEC requires the synthesis FSM recoding table')
+    # Harvest of the direct recipe's `_ABC_FANOUT_SCRIPT` (CUT_W4, step 9):
+    # synthesis bounds every net at the fanout cap (`buffer -N
+    # <MAX_FANOUT_CONSTRAINT>`, the DRV standard's "synth buffer -N carries
+    # the declared max_fanout") WITHOUT ABC's upsize/dnsize, the synth-time
+    # sizing a post-route A/B measured as a regression. The cap is a required
+    # PDK variable a declaration overrides, so `-N` always resolves. Measured
+    # on the spm tool arm without this key: MAX_FANOUT_CONSTRAINT=4 resolved,
+    # no `buffer` in the ABC script.
+    _set(result, sources, 'SYNTH_ABC_BUFFER_ONLY', True,
+         'harvest: phase3_one_shot_runner._ABC_FANOUT_SCRIPT (buffer -N cap, '
+         'no upsize/dnsize); DRV_SIGNOFF_STANDARD synth buffer -N')
     # A catalogued IP that is itself the top: SYNTH_PARAMETERS reaches it
     # (`chparam ... <top>`). Below the top, the glue pins it (step-1 gate).
     pinned = catalog_synth_safe_params_check.top_synth_parameters(project, top) if top else None
