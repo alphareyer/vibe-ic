@@ -23404,6 +23404,7 @@ def _build_spare_postfix_tcl(plan: Dict[str, Any],
         _spare_xy = [(i.get("name"), i.get("llx", 0), i.get("lly", 0))
                      for i in instances if i.get("cell") and i.get("name")]
         _xy_tcl = " ".join("{%s %s %s}" % (n, x, y) for n, x, y in _spare_xy)
+        _names_tcl = " ".join(n for n, _x, _y in _spare_xy)
         lines += [
             "# === ORGANIC #563 r2 / r4: tie off floating spare inputs ===",
             "# ONE driver per spare, placed AT that spare. `_spare_tie_nets`",
@@ -23502,8 +23503,10 @@ def _build_spare_postfix_tcl(plan: Dict[str, Any],
             # ("-" when none). The count above says how many pins this loop
             # tied; only this list says WHICH pins exist, so a reader can prove
             # none was outside the set (U6: a CLOCK-use pin was, on spm v5c).
-            f"  foreach _sp [list {_xy_tcl}] {{",
-            "    set _si [$_blk findInst [lindex $_sp 0]]",
+            # NAMES only: the coordinate list is emitted once, in the tie-off
+            # loop above (r4: one driver per spare at its own location).
+            f"  foreach _sn [list {_names_tcl}] {{",
+            "    set _si [$_blk findInst $_sn]",
             "    if {$_si eq \"NULL\" || $_si eq \"\"} { continue }",
             "    foreach _it [$_si getITerms] {",
             "      set _mt [$_it getMTerm]",
@@ -23806,6 +23809,8 @@ _STEP18_INSERTION_MARKERS = (
     "SPARE_TIEOFF_DONE",
     "SPARE_TIEOFF_DRIVERS",
     "SPARE_TIEOFF_ITERM_NONFATAL",
+    # per-pin enumeration of every spare input, printed after the tie-off (U6)
+    "SPARE_INPUT_PIN",
     "SPARE_TIEOFF_LEGALIZED",
     "SPARE_TIEOFF_LEGALIZE_NONFATAL",
     "SPARE_TIE_NET_DONT_TOUCH",
