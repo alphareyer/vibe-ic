@@ -258,6 +258,15 @@ def deck_sdc(R, deck: str, *, container: str, project: Path, out_dir: Path) -> P
             if match else out_dir / "constraint.sdc")
 
 
+#: R-0929-POSTGRT: the DRV standard's required post-GRT repair stage runs.
+#: LibreLane gates `OpenROAD.RepairDesignPostGRT` off by default, which left
+#: the stage absent (section 1 FAIL) on every run.  Only the design (DRV)
+#: repair is switched on; the post-GRT timing repair stays the flow's choice.
+POST_GRT_DESIGN_REPAIR: Dict[str, Tuple[Any, str]] = {
+    "RUN_POST_GRT_DESIGN_REPAIR": (
+        True, "R-0929-POSTGRT: the DRV standard's required post_grt_repair stage")}
+
+
 def overlay(R, project: Path, sdc: Path, scratch: Path) -> Dict[str, Tuple[Any, str]]:
     """Declared step-21 config for LibreLane, each value with its source.
 
@@ -265,6 +274,7 @@ def overlay(R, project: Path, sdc: Path, scratch: Path) -> Dict[str, Tuple[Any, 
       (`librelane_cts_hold.signoff_scene_sdc`): the post-GRT timing repair
       works in the scene the sign-off judges, as steps 19/20 do (T98).
     * the route checkers record only (`CHECKER_RECORD_ONLY`).
+    * the post-GRT design repair runs (`POST_GRT_DESIGN_REPAIR`).
     * a PPA candidate's `route_knobs` (`PPA_KNOBS`) win over the above.
     """
     import librelane_cts_hold as _cts
@@ -274,6 +284,7 @@ def overlay(R, project: Path, sdc: Path, scratch: Path) -> Dict[str, Tuple[Any, 
                          f"{sdc.name} + the sign-off STA's flat-OCV derate "
                          "(phase3_one_shot_runner._FLAT_OCV_DERATE_EARLY/LATE)")}
     out.update(CHECKER_RECORD_ONLY)
+    out.update(POST_GRT_DESIGN_REPAIR)
     out.update(switch_knobs(project))
     return out
 
