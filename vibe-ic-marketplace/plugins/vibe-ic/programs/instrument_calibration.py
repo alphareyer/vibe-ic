@@ -2914,6 +2914,40 @@ _register(Instrument(
         artefact=_read("isa_tb_halt_negative.log")),
 ))
 
+# ---- step 19's retap audit (CUT_W4, lane tailb, 2026-09-29) ---------------
+
+def _judge_retap_log(text: str) -> Optional[str]:
+    import retap_audit_check as RA
+    kept = [k for k in RA.parse_retap_log(text)["keeps"] if "unparsed" not in k]
+    return f"RETAP_KEPT {len(kept)}" if kept else None
+
+
+_register(Instrument(
+    name="retap_audit_check::audit_retap_log",
+    reads="the `VIC_RETAP` rows of Vibeic.ExternalCaptureLaunchRetap's step log",
+    ruling="R-0929-TOOL-DEFAULT (audit §2 row 19: retap 要有稽核)",
+    owner="tailb",
+    why=("The audit re-decides every retained retap and matches it to the "
+         "netlist change; a reader that counted a REJECT row as a keep, or "
+         "missed a keep, would audit the wrong set. The pair is two real "
+         "step logs: one trial kept, and one trial rejected with none kept."),
+    judge=_judge_retap_log,
+    positive=Sample(
+        provenance=(
+            "REAL step log, subservient x gf180mcuD IC run on 8hd-3 "
+            "(subtail tree, 19-cts-hold/03-vibeic-externalcapturelaunchretap): "
+            "2 candidates, u_core/_1753_ kept, u_core/_1683_ rejected "
+            "HOLD_REGRESSED. Home path written as a placeholder."),
+        artefact=_read("retap_keep_positive.log")),
+    expect="RETAP_KEPT 1",
+    negative=Sample(
+        provenance=(
+            "REAL step log, spm x gf180mcuD run_v5c CTS state re-run on "
+            "vibeic-eda 0.3.86 (8HD-4, lane tailb cut_19) at a 15 ns probe "
+            "period: 1 candidate, rejected HOLD_REGRESSED, none kept."),
+        artefact=_read("retap_reject_negative.log")),
+))
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════
