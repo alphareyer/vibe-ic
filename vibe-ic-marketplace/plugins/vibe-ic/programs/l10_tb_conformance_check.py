@@ -1690,6 +1690,24 @@ def evaluate(
     # The ic_class `input_absent_exclusion` is asked with, resolved once and
     # only when a row reaches it (the Step-4 gate asks with the same reader).
     _gap_ic_class: List[Any] = [_UNSET]
+    # The run's OWN fused coverage totals, read once and only when a credit
+    # reaches a row, through the reader the Step-4 goal population is
+    # measured with -- so a goal this run measured is judged by that number
+    # here too (`_l10x.isa_goal_judgment`). None when the reader cannot be
+    # loaded: then no goal is credited (`_run_totals_why` says why).
+    _run_totals: List[Any] = [_UNSET]
+    _run_totals_why: List[str] = [""]
+
+    def _goal_run_totals() -> Optional[Dict[str, Any]]:
+        if _run_totals[0] is _UNSET:
+            try:
+                import cpu_functional_oracle_waiver_check as _w  # noqa: E402
+                _run_totals[0] = _w._coverage_totals(Path(project_root))[0]
+            except Exception as exc:                 # noqa: BLE001
+                _run_totals[0] = None
+                _run_totals_why[0] = (f" (the Step-4 coverage reader did not "
+                                      f"load: {type(exc).__name__}: {exc})")
+        return _run_totals[0]
 
     def _scaffold_scope(case: Dict[str, Any]) -> Optional[str]:
         """ORGANIC #761 — "in" / "out" of the TB producer's scaffold scope, or
@@ -1790,11 +1808,14 @@ def evaluate(
             # A coverage GOAL is judged by the credit's NUMBER against its own
             # stated percentage -- the same judgment the Step-4 goal
             # population applies (`_l10x.isa_goal_verdict`): short of it is a
-            # FAIL, not a pass; no number for it is no credit.
-            _goal = (_l10x.isa_goal_judgment(c, _credit)
+            # FAIL, not a pass; no number for it is no credit. A goal the RUN
+            # measured is judged by the run's number instead -- Step 4 credits
+            # only a goal the run left without one, and a measured result wins
+            # over a credit (`_goal[3]`).
+            _goal = (_l10x.isa_goal_judgment(c, _credit, _goal_run_totals())
                      if _credit is not None else None)
             if _goal is not None and _goal[0] is None:
-                _credit, _refused = None, _goal[2]
+                _credit, _refused = None, _goal[2] + _run_totals_why[0]
                 _goal = None
             _excl = None
             if _credit is None and _tbg is not None and hasattr(
@@ -1816,6 +1837,17 @@ def evaluate(
                     "capability_gap": None,
                 }
                 if _credit is not None and _goal is not None \
+                        and _goal[3] and _goal[0] != _l10x.PASS:
+                    # The run MEASURED this goal and it fell short: that FAIL
+                    # wins, and the credit is not published as its evidence.
+                    _row.update(
+                        evidence=[f"COVERAGE GOAL FAIL — {_goal[2]}"],
+                        status="fail", achieved_pct=_goal[1],
+                        isa_conformance_refused=(
+                            f"not credited: {_goal[2]}"))
+                    _row["pass"] = False
+                    fail_count += 1
+                elif _credit is not None and _goal is not None \
                         and _goal[0] != _l10x.PASS:
                     _row.update(
                         evidence=[f"COVERAGE GOAL FAIL — {_goal[2]}, by "
