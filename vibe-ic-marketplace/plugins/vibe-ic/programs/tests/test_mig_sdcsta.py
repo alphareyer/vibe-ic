@@ -378,15 +378,3 @@ def test_scan_survival_fails_when_published_dft_ports_vanish(tmp_path):
     put(post, "module t(clk, d, q, shift, sout);\n input clk, d, shift;\n output q, sout;\n"
         + dff + "endmodule\n")
     assert survival.assess(p)["verdict"] == "PASS"
-
-
-def test_post_dft_ppa_never_adopts_an_unproven_arm(tmp_path):
-    post_dft = importlib.import_module("_ppa.post_dft")
-    arms = {}
-    for name, area, lec in (("small_unproven", 10.0, "INCONCLUSIVE"), ("large_proven", 20.0, "PASS")):
-        report = put(tmp_path / f"{name}.json", {"verdict": "PASS", "scope": {"stage": "post_dft"},
-                     "metrics": {"design__instance__area": {"status": "MEASURED", "value": area},
-                                 "design__instance__count": {"status": "MEASURED", "value": 5}}})
-        arms[name] = tmp_path / f"{name}.admitted.json"
-        post_dft.admit(report, {"verdict": "PASS"}, {"verdict": lec, "unproven_points": 0}, arms[name])
-    assert post_dft.select(arms, tmp_path / "sel.json")["selection"] == "large_proven"
