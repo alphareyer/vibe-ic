@@ -132,6 +132,14 @@ _MULTICORNER_VIOLATED = (
 def runner(monkeypatch):
     import phase3_one_shot_runner as R  # noqa: WPS433
     _supervise_signoff_launcher(monkeypatch)
+    original = R._run_declared_signoff_gate
+    def _with_verified_drv(project, name, program, out_rel, *args, **kwargs):
+        # #544 isolates missing STA/EM gate binaries. DRV's fresh EDA capture
+        # has its own controls; represent that independent gate as verified.
+        if name == "drv_signoff":
+            return R.StepResult(name, "PASS", detail="fixture verified DRV")
+        return original(project, name, program, out_rel, *args, **kwargs)
+    monkeypatch.setattr(R, "_run_declared_signoff_gate", _with_verified_drv)
     return R
 
 
@@ -647,6 +655,10 @@ def test_absence_is_not_offered_as_an_inapplicability_opt_out():
 #: and the one exception is enumerated WITH its justification rather than
 #: silently absorbed by relaxing the assertion.
 _MAY_DISPATCH_AN_ENGINE = {
+    "drv_signoff_judge.py":
+        "it verifies an SSH owner signature and checks the pinned OpenSTA "
+        "image digest; absent inputs or engine access yield NOT_MEASURED, "
+        "never a waiver or PASS.",
     "tapeout_precheck.py":
         "it runs the SHUTTLE OPERATOR's own precheck container — the arm whose "
         "entire value is that we did not write it and cannot edit it to agree. "

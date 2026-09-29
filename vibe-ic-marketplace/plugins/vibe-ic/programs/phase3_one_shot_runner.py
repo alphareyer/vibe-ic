@@ -56526,6 +56526,8 @@ _DECLARED_SIGNOFF_GATES = (
      "reports/phase3/sta/post_route_signoff_corner.json", ()),
     ("sta_record", "sta_corner_record_completeness_check.py",
      "reports/phase3/sta/sta_corner_record_completeness.json", ()),
+    ("drv_signoff", "drv_signoff_judge.py",
+     "reports/phase3/sta/drv_signoff.json", ()),
     # Step 23 declares this report, but the inline executor must produce and
     # consume it too. Its real subprocess verdict reaches the same release
     # fold as the other sign-off gates; missing inputs remain BLOCKED.
@@ -57008,6 +57010,8 @@ _PRESTREAM_GATES = (
      "reports/phase3/sta/post_route_signoff_corner.json", ()),
     ("sta_record", "sta_corner_record_completeness_check.py",
      "reports/phase3/sta/sta_corner_record_completeness.json", ()),
+    ("drv_signoff", "drv_signoff_judge.py",
+     "reports/phase3/sta/drv_signoff.json", ()),
     ("ir_drop", "ir_drop_report_check.py",
      "reports/phase3/ir_drop_signoff.json", ("--mode", "ir_drop")),
     ("em_signoff", "em_report_check.py",
@@ -57296,6 +57300,17 @@ def _netlist_port_decls_row(nports: Dict[str, Any]) -> Optional[StepResult]:
         reason_class=_V.ReasonClass.INCONCLUSIVE)
 
 
+def _prestream_status(rows: List[StepResult]) -> Tuple[str, list, list, list]:
+    """Keep a missing measurement distinct from a measured pre-stream failure."""
+    failed = [r for r in rows if r.status == "FAIL"]
+    unmeasured = [r for r in rows
+                  if r.status not in ("PASS", "WAIVED", "FAIL")]
+    waived = [r for r in rows if r.status == "WAIVED"]
+    verdict = ("FAIL" if failed else "NOT_MEASURED" if unmeasured
+               else "WAIVED" if waived else "PASS")
+    return verdict, failed, unmeasured, waived
+
+
 def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
                         container: str, *, _si_retry: bool = False,
                         _feedback_retry: bool = False) -> StepResult:
@@ -57508,21 +57523,33 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
             "layout_basis", "layout changed during pre-stream verification"))
     for row in rows:
         row.extras["layout_digest"] = digest
-    failed = [r for r in rows if r.status != "PASS"]
+    prestream_verdict, failed, unmeasured, drv_waived = _prestream_status(rows)
     receipt = {"layout_digest": digest, "basis": "DEF/netlist/SDC/PDK",
-               "verdict": "FAIL" if failed else "PASS",
+               "verdict": prestream_verdict,
+               "reason_class": (_V.ReasonClass.PARTIAL_POPULATION.value
+                                if prestream_verdict == "NOT_MEASURED" else None),
                "failed_gates": [r.name for r in failed],
+               "unmeasured_gates": [r.name for r in unmeasured],
                "gates": [asdict(r) for r in rows],
                "evidence": asdict(evidence)}
     out = _pl.reports_phase3_dir(project) / "prestream_gate.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     _aa.write_text(out, json.dumps(receipt, indent=2) + "\n")
-    return StepResult("prestream_gate", "FAIL" if failed else "PASS",
+    return StepResult("prestream_gate", prestream_verdict,
                       time.time() - t0,
                       f"layout_digest={digest}; failed gates: "
-                      + (", ".join(r.name for r in failed) if failed else "none"),
+                      + (", ".join(r.name for r in failed) if failed else "none")
+                      + "; unmeasured gates: "
+                      + (", ".join(r.name for r in unmeasured)
+                         if unmeasured else "none"),
                       [str(out)], extras={"layout_digest": digest,
-                                          "failed_gates": receipt["failed_gates"]})
+                                          "failed_gates": receipt["failed_gates"],
+                                          "unmeasured_gates": receipt["unmeasured_gates"]},
+                      reason_class=(
+                          _V.ReasonClass.PARTIAL_POPULATION.value
+                          if prestream_verdict == "NOT_MEASURED" else ""),
+                      waiver_rows=[w for r in drv_waived
+                                   for w in r.waiver_rows])
 
 
 #: PRE-AUDIT PRODUCERS: run so the document EXISTS, never folded into the
@@ -57703,6 +57730,22 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
     except OSError as exc:
         return _signoff_not_checked(
             name, t0, f"cannot create {out_json.parent}: {exc}")
+    if name == "drv_signoff":
+        plan_path = project / "reports/phase3/sta/drv_capture_plan.json"
+        if not plan_path.is_file():
+            return _signoff_not_checked(
+                name, t0, "DRV capture plan absent; fresh measurement unavailable")
+        try:
+            import drv_signoff_capture as _drv_capture
+            from _atomic_artefact import write_text as _drv_write
+            plan = json.loads(plan_path.read_text())
+            bundle = _drv_capture.capture(
+                plan, project / "reports/phase3/sta/drv_capture")
+            _drv_write(project / "reports/phase3/sta/drv_signoff_bundle.json",
+                       json.dumps(bundle, indent=2) + "\n")
+        except (OSError, ValueError, RuntimeError, KeyError) as exc:
+            return _signoff_not_checked(
+                name, t0, f"fresh DRV capture did not complete: {exc}")
     cmd = [sys.executable, str(prog), str(project), *extra_argv,
            "--json", str(out_json)]
     # METRICS ARE BEST-EFFORT AND NEVER THE VERDICT (M2 r2). Attribution is
@@ -57717,6 +57760,8 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         _gate_env = None
     try:
+        if name == "drv_signoff":
+            out_json.unlink(missing_ok=True)
         # CZT2-16 — a 900 s PARAMETER DEFAULT (600 at one caller) on a
         # VERDICT-BEARING dispatch. This function invokes a flow-declared
         # sign-off gate and blocks on its verdict, so the clock decided whether
@@ -57735,6 +57780,35 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
         return _signoff_not_checked(name, t0, f"gate could not run: {exc}")
     detail = _gate_detail(out_json, cp.stdout or "", cp.stderr or "")
     outputs = [str(out_json)] if out_json.is_file() else []
+    if name == "drv_signoff":
+        # The judge's JSON is the authority.  Tool rc and an older STA
+        # checker may not translate a DRV result into a different verdict.
+        try:
+            doc = json.loads(out_json.read_text())
+            tier = _V.parse(doc["verdict"])
+        except (OSError, ValueError, KeyError, _V.UnknownVerdictWord) as exc:
+            return _signoff_not_checked(name, t0,
+                                        f"DRV judge receipt unreadable: {exc}",
+                                        outputs)
+        if tier not in (_V.Verdict.PASS, _V.Verdict.FAIL,
+                        _V.Verdict.NOT_MEASURED, _V.Verdict.WAIVED):
+            return _signoff_not_checked(name, t0,
+                                        f"DRV judge returned {tier.value}", outputs)
+        if (cp.returncode == 0) != (tier is _V.Verdict.PASS) or (
+                tier is not _V.Verdict.PASS and cp.returncode != 1):
+            return _signoff_not_checked(
+                name, t0, f"DRV judge rc {cp.returncode} disagrees with "
+                f"receipt {tier.value}", outputs)
+        kwargs = {}
+        if tier is _V.Verdict.NOT_MEASURED:
+            kwargs["reason_class"] = _V.ReasonClass.PARTIAL_POPULATION.value
+        if tier is _V.Verdict.WAIVED:
+            kwargs["waiver_rows"] = [
+                {"id": str(w.get("key", {}).get("driver_pin", "<pin>")),
+                 "reason": "owner DRV deviation; below baseline quality",
+                 "owner": "reyerchu"} for w in doc.get("waived") or []]
+        return StepResult(name, tier.value, time.time() - t0, detail,
+                          outputs, **kwargs)
     if cp.returncode == 0:
         return StepResult(name, "PASS", time.time() - t0, detail, outputs)
     if cp.returncode == 1:
@@ -58044,14 +58118,19 @@ def declared_signoff_rollup(plan: List[StepResult]) -> Dict[str, Any]:
     declared = [n for n in DECLARED_SIGNOFF_STEP_NAMES if n in rows]
     passed = [n for n in declared if rows[n].status == "PASS"]
     failed = [n for n in declared if rows[n].status == "FAIL"]
-    not_checked = [n for n in declared if rows[n].status not in ("PASS", "FAIL")]
+    waived = [n for n in declared if rows[n].status == "WAIVED"]
+    not_checked = [n for n in declared
+                   if rows[n].status not in ("PASS", "FAIL", "WAIVED")]
     line = f"{len(passed)} of {len(declared)} declared sign-off gate(s) PASSED"
     if failed:
         line += f"; {len(failed)} FAILED: " + ", ".join(failed)
+    if waived:
+        line += f"; {len(waived)} WAIVED (below baseline quality): " + ", ".join(waived)
     if not_checked:
         line += (f"; {len(not_checked)} {_SIGNOFF_NOT_CHECKED}: "
                  + ", ".join(not_checked))
     return {"declared": len(declared), "passed": passed, "failed": failed,
+            "waived": waived,
             "not_checked": not_checked, "line": line}
 
 
@@ -77334,7 +77413,7 @@ def main() -> int:
                 _write_producer_identity(
                     _pl.pnr_dir(project), "pnr", project=project, pdk=pdk,
                     container=args.container, top=effective_top, args=args)
-            if _prestream.status != "PASS":
+            if _prestream.status not in ("PASS", "WAIVED"):
                 _ga.quarantine_visible_gds(
                     project, "current routed layout failed the pre-stream gate")
                 _ga.quarantine_handoff_package(

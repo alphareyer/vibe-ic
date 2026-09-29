@@ -1,0 +1,71 @@
+max slew
+
+Pin u1/Y ^
+max slew    1.497817
+slew        0.032394
+--------------------
+Slack       1.465423 (MET)
+Pin u2/A ^
+max slew    1.500000
+slew        0.032395
+--------------------
+Slack       1.467605 (MET)
+Pin u2/Y ^
+max slew    1.497817
+slew        0.017236
+--------------------
+Slack       1.480582 (MET)
+Pin u1/A ^
+max slew    1.500000
+slew        0.000246
+--------------------
+Slack       1.499754 (MET)
+Pin Y ^
+max slew    3.000000
+slew        0.017236
+--------------------
+Slack       2.982764 (MET)
+Pin A ^
+max slew    3.000000
+slew        0.000000
+--------------------
+Slack       3.000000 (MET)
+
+max fanout
+
+Pin A  
+max fanout     10
+fanout          1
+-----------------
+Slack           9 (MET)
+Pin u1/Y  
+max fanout     10
+fanout          1
+-----------------
+Slack           9 (MET)
+Pin u2/Y  
+max fanout     10
+fanout          0
+-----------------
+Slack          10 (MET)
+
+max capacitance
+
+Pin u1/Y ^
+max capacitance    0.331431
+capacitance        0.005707
+---------------------------
+Slack              0.325724 (MET)
+
+Pin u2/Y ^
+max capacitance    0.331431
+capacitance        0.002184
+---------------------------
+Slack              0.329247 (MET)
+
+Pin A ^
+max capacitance   10.000000
+capacitance        0.008176
+---------------------------
+Slack              9.991823 (MET)
+

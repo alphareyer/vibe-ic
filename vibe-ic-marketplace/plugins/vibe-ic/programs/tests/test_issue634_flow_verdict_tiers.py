@@ -45,9 +45,17 @@ import verdict as T  # noqa: E402
 # ── the vocabulary is closed, and that is now a fact not a convention ────
 
 def test_the_producer_vocabulary_includes_the_declared_attribution_tier():
+    """An EXACT, closed set.
+
+    The DRV sign-off standard (owner-approved 2026-09-28, verdict rule 7:
+    "只剩有效 waiver，就是 WAIVED ... 永遠不算 PASS") adds one word, WAIVED,
+    as a schema change (verdict.SCHEMA_VERSION 2 -> 3). It is NON-GREEN, so
+    the #634 partition below is unchanged.
+    """
     assert T.PRODUCER_STATUSES == frozenset(
-        {"PASS", "PASS_WITH_WAIVERS", D.TIER_PASS_WITH_ATTRIBUTION,
+        {"PASS", "PASS_WITH_WAIVERS", D.TIER_PASS_WITH_ATTRIBUTION, "WAIVED",
          "FAIL", "NOT_MEASURED", "NOT_APPLICABLE"})
+    assert T.SCHEMA_VERSION == 3
 
 
 def test_a_word_registered_nowhere_is_refused_not_adjudicated():
@@ -81,6 +89,7 @@ def test_the_two_negative_sets_still_partition_the_vocabulary():
     ("FAIL",              False, True,  False, False),
     ("NOT_MEASURED",      False, True,  False, False),
     ("NOT_APPLICABLE",    True,  False, False, False),
+    ("WAIVED",            False, True,  False, False),
 ])
 def test_each_word_is_classified_one_way(word, excused, non_green, done, full):
     assert T.is_excused(word) is excused

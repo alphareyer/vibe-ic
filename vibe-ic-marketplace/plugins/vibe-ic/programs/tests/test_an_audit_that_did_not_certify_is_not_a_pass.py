@@ -202,9 +202,17 @@ def test_the_clean_and_qualified_answers_are_unchanged():
     including both legacy spellings this aggregator carries for compatibility."""
     ok = {"verdict": "PASS"}
     assert P23._aggregate_verdict(ok, ok, True, True) == "PASS"
-    for legacy in ("WAIVED", "PASS_WITH_OPEN_SOURCE_CONSTRAINTS"):
+    for legacy in ("PASS_WITH_OPEN_SOURCE_CONSTRAINTS",):
         assert P23._aggregate_verdict({"verdict": legacy}, ok,
                                       True, True) == "PASS_WITH_WAIVERS", legacy
+    # `WAIVED` was the second legacy spelling and rolled into PASS_WITH_WAIVERS. The DRV
+    # sign-off standard (owner-approved 2026-09-28) made it a vocabulary word -- a
+    # measured residual under an owner waiver, "counted separately, never PASS", which
+    # no flow or orchestrator may downgrade -- so the chained run now keeps it, and it
+    # is not a done-claim (main() exits non-zero on it).
+    waived = P23._aggregate_verdict({"verdict": "WAIVED"}, ok, True, True)
+    assert waived == "WAIVED", waived
+    assert not _V.is_done_claim(waived)
     assert P23._aggregate_verdict({"verdict": "FAIL"}, ok, True, True) == "FAIL"
 
 

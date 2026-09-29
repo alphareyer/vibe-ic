@@ -128,6 +128,28 @@ _NOT_PROSE: Dict[str, str] = {
         "There is no prose denial form in these fields. Falsifier: "
         "test_capture_cr14_postroute_recipe.py::"
         "test_liberty_truth_table_and_area_discover_neutral_full_adder.",
+    "drv_signoff_census::_nets":
+        "ONE OPENSTA REPORT_NET GRAMMAR, NO SENTENCE. The reader accepts only "
+        "anchored 'Net', 'Total capacitance' and 'Number of loads' fields with "
+        "complete numeric values, then checks the named load count. A negated "
+        "or missing count is rejected instead of becoming an empty net. "
+        "Falsifier: tests/test_drv_signoff_judge.py::test_net_census_rejects_negated_count.",
+    "drv_signoff_capture::capture":
+        "ONE OPENSTA COUNTER GRAMMAR, NO SENTENCE. Capture accepts only "
+        "an entire DRV_COUNTER line with an exact max_slew, "
+        "max_capacitance or max_fanout key and an unsigned integer. A line "
+        "saying NOT DRV_COUNTER cannot match; absent or duplicate counters "
+        "refuse capture rather than becoming zero. Falsifier: "
+        "tests/test_drv_signoff_judge.py::test_negated_counter_marker_is_not_a_measurement.",
+    "drv_signoff_judge::parse_check_types":
+        "ONE OPENSTA FIXED TABLE GRAMMAR, NO SENTENCE. The parser opens "
+        "only exact max slew/capacitance/fanout title lines, then a Pin line "
+        "and numerical limit, measured value and Slack fields. A denial "
+        "such as 'not max slew' cannot open a table, while an absent row or "
+        "limit blocks sign-off rather than implying zero. Real 0.3.84 "
+        "OpenSTA positive/negative Pin blocks calibrate this reader; "
+        "tests/test_drv_signoff_judge.py::test_negated_table_title_cannot_be_a_measurement "
+        "is its falsifier.",
     "sdc_environment::_sdc_environment_design_values":
         "ONE STRICT TABLE GRAMMAR, NO SENTENCE. Only adjacent L9 Markdown "
         "key/value cells whose first cell is one of six exact SDC or flow "

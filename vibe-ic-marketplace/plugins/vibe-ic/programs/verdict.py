@@ -115,7 +115,7 @@ import die_level_deck_rule_attribution as _dla
 #: Bumped by every report schema that carries a step status. A report written
 #: with `step_status_schema_version < 2` uses the deleted vocabulary and is
 #: refused by `parse`, not translated.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class UnknownVerdictWord(ValueError):
@@ -129,7 +129,8 @@ class UnknownVerdictWord(ValueError):
 
 
 class Verdict(str, enum.Enum):
-    """The five generic words plus the producer-declared DRC attribution tier.
+    """The five generic words, the producer-declared DRC attribution tier,
+    and the DRV sign-off standard's WAIVED.
 
     `str`-valued so a record serialises to JSON as the bare word and so
     `record["status"] == Verdict.PASS` is true from either side — but the
@@ -154,6 +155,11 @@ class Verdict(str, enum.Enum):
     #: This declared tier is neither a pass nor a waiver; the DRC producer
     #: retains the handoff and any unattributed violation remains FAIL.
     PASS_WITH_ATTRIBUTION = _dla.TIER_PASS_WITH_ATTRIBUTION
+    #: Post-route DRV has a measured, owner-approved residual deviation.  It
+    #: is carried separately from PASS and from the older deferred-work tier.
+    #: A WAIVED DRV is below the recorded clean baseline quality and does not
+    #: release sign-off on its own.
+    WAIVED = "WAIVED"
 
     #: The step ran and what it examined was NOT good, or a required artefact
     #: does not exist. Replaces `FAIL`, `MISSING`, `FAIL_RTL_REPAIR_INERT` and
@@ -432,6 +438,8 @@ class StepVerdict:
                 f"sha256 run16 pass 2 should have said.")
         if self.verdict is Verdict.PASS_WITH_ATTRIBUTION and self.waiver_rows:
             raise ValueError("PASS_WITH_ATTRIBUTION cannot carry waiver_rows")
+        if self.verdict is Verdict.WAIVED and not self.waiver_rows:
+            raise ValueError("WAIVED without owner waiver_rows")
         if self.verdict is Verdict.PASS_WITH_WAIVERS and not (
                 self.waiver_rows or self.attribution):
             raise ValueError(
@@ -453,6 +461,12 @@ class StepVerdict:
                           attribution: str = "", **kw) -> "StepVerdict":
         return cls(Verdict.PASS_WITH_WAIVERS, step_id, name,
                    waiver_rows=list(waiver_rows), attribution=attribution, **kw)
+
+    @classmethod
+    def waived(cls, step_id: str = "", name: str = "", *,
+               waiver_rows: Sequence[WaiverRow], **kw) -> "StepVerdict":
+        return cls(Verdict.WAIVED, step_id, name,
+                   waiver_rows=list(waiver_rows), **kw)
 
     @classmethod
     def fail(cls, step_id: str = "", name: str = "", *, reason: str = "",
@@ -496,7 +510,8 @@ class StepVerdict:
         NOT_APPLICABLE and disclosures do not. See `run_verdict`.
         """
         return self.verdict in (Verdict.FAIL, Verdict.NOT_MEASURED,
-                                Verdict.PASS_WITH_ATTRIBUTION)
+                                Verdict.PASS_WITH_ATTRIBUTION,
+                                Verdict.WAIVED)
 
     @property
     def cascades(self) -> bool:
@@ -614,6 +629,8 @@ def validate_step_row(row: Any) -> None:
             f"honest word is NOT_MEASURED with a reason_class.")
     if status is Verdict.PASS_WITH_ATTRIBUTION and getattr(row, "waiver_rows", None):
         raise ValueError(f"{name}: PASS_WITH_ATTRIBUTION cannot carry waiver_rows")
+    if status is Verdict.WAIVED and not getattr(row, "waiver_rows", None):
+        raise ValueError(f"{name}: WAIVED without owner waiver_rows")
     if status is Verdict.PASS_WITH_WAIVERS and not (
             getattr(row, "waiver_rows", None)
             or getattr(row, "attribution", "")):
@@ -808,6 +825,7 @@ def review_gate_verdict(step_id: str, name: str, *, inputs_present: bool,
 RUN_PRECEDENCE: Sequence[Verdict] = (
     Verdict.FAIL,
     Verdict.NOT_MEASURED,
+    Verdict.WAIVED,
     Verdict.PASS_WITH_ATTRIBUTION,
     Verdict.PASS_WITH_WAIVERS,
     Verdict.PASS,
@@ -880,7 +898,8 @@ EXCUSED = frozenset({Verdict.NOT_APPLICABLE.value})
 #: The step is a defect or a hole — what keeps a run from being green.
 #: Replaces `NON_GREEN`.
 NON_GREEN = frozenset({Verdict.FAIL.value, Verdict.NOT_MEASURED.value,
-                       Verdict.PASS_WITH_ATTRIBUTION.value})
+                       Verdict.PASS_WITH_ATTRIBUTION.value,
+                       Verdict.WAIVED.value})
 
 #: The one word that satisfies a predecessor outright.
 FULL_PASS = Verdict.PASS.value
@@ -892,9 +911,10 @@ def is_excused(status: Any) -> bool:
 
 
 def is_non_green(status: Any) -> bool:
-    """Keeps the run off a pass: a defect, a hole, or attribution."""
+    """Keeps the run off a pass: a defect, a hole, attribution, or a DRV
+    owner-waived residual."""
     return parse(status) in (Verdict.FAIL, Verdict.NOT_MEASURED,
-                             Verdict.PASS_WITH_ATTRIBUTION)
+                             Verdict.PASS_WITH_ATTRIBUTION, Verdict.WAIVED)
 
 
 def is_full_pass(status: Any) -> bool:

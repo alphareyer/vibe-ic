@@ -1,0 +1,3 @@
+DRV_COUNTER max_slew 2
+DRV_COUNTER max_capacitance 2
+DRV_COUNTER max_fanout 2

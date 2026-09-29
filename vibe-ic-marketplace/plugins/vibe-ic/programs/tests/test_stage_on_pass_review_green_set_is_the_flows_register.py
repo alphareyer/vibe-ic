@@ -64,9 +64,17 @@ def test_the_deferral_has_exactly_one_spelling_and_it_is_green():
     are not "unregistered" — they are refused at the producer.
     """
     assert S._norm_status("PASS_WITH_WAIVERS") in S._STAGE_GREEN
-    for gone in ("WAIVED", "WAIVED-DEFERRED", "WAIVED_DEFERRED"):
+    for gone in ("WAIVED-DEFERRED", "WAIVED_DEFERRED"):
         with pytest.raises(T.UnknownVerdictWord):
             T.parse(gone)
+    # `WAIVED` is a vocabulary word again, but NOT as a deferral spelling: the
+    # DRV sign-off standard (owner-approved 2026-09-28, verdict schema 3) made
+    # it a measured residual under an owner waiver, "counted separately, never
+    # PASS". So it parses, and it must not answer green here -- the pair this
+    # file was written against (one tier, two answers) cannot come back.
+    assert T.parse("WAIVED") is T.Verdict.WAIVED
+    assert "WAIVED" in T.NON_GREEN
+    assert S._norm_status("WAIVED") not in S._STAGE_GREEN
 
 
 def test_a_full_pass_is_green_and_an_unmeasured_row_is_not():

@@ -3812,6 +3812,8 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
                    f"{detail}")
     elif out.startswith(_WAIVER_HINT_PREFIX):
         verdict, rc = "PASS_WITH_WAIVERS", _WAIVER_EXIT_CODE
+    elif out.startswith(_DRV_WAIVED_HINT_PREFIX):
+        verdict, rc = "WAIVED", 1
     elif out.startswith("program not found:"):
         verdict, rc = "NOT_FOUND", None
         reason_class = _reason_taxonomy.EXECUTION_ERROR
@@ -4464,6 +4466,24 @@ def _receipt_off_a_produced_document(argv: List[str], project: Path
     ), _ReceiptRedirects(tmps, records)
 
 
+def _drv_judge_receipt(project: Path, argv: List[str]) -> Optional[Path]:
+    """The ``--json`` receipt path of a drv_signoff_judge.py invocation, else None.
+
+    Resolved argv may be a single element (a bare executable) or end at
+    ``--json`` with no value; neither is a DRV judge receipt, and neither may
+    raise here -- an IndexError in the dispatcher was reported as a
+    "program invocation error" for every such gate, so an awaiting or
+    incomplete tier was lost (review wave 57).
+    """
+    if len(argv) < 2 or Path(argv[1]).name != "drv_signoff_judge.py":
+        return None
+    try:
+        receipt = Path(argv[argv.index("--json") + 1])
+    except (ValueError, IndexError):
+        return None
+    return receipt if receipt.is_absolute() else project / receipt
+
+
 def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutcome:
     """Run program in project dir (with globs expanded relative to project),
     return (passed, output_snippet).
@@ -4594,6 +4614,12 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
     # have a measured regression history in this file (v1.10.14 -> 1.10.16).
     gate_budget = _pl.gate_timeout_s()
     try:
+        _drv_receipt = _drv_judge_receipt(project, argv)
+        if _drv_receipt is not None:
+            # The redirect may have pre-seeded an older producer receipt.  The
+            # judge only writes this path; remove the seed before invocation so
+            # a crash cannot turn an old WAIVED/PASS into this run's answer.
+            _drv_receipt.unlink(missing_ok=True)
         # `env=_child_env()` carries the scope stack DOWN to the gate program,
         # and is None when there is nothing to carry, which is the inherit-as-
         # before path. Passed explicitly rather than by mutating `os.environ`:
@@ -4610,6 +4636,31 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
             snippet = f"{snippet}\n{_receipt_note}" if snippet else _receipt_note
         if r.returncode == 0:
             return _outcome(True, snippet, r.returncode)
+        if _drv_receipt is not None and r.returncode == 1:
+            # DRV's owner-approved residual is an executed, non-green verdict.
+            # Read the exact receipt path after redirecting producer documents;
+            # stdout and the process rc cannot create this tier.
+            try:
+                _drv_doc = json.loads(_drv_receipt.read_text())
+                if (_drv_doc.get("name") == "DRV(tran/cap/fanout)"
+                        and _drv_doc.get("verdict") == "NOT_MEASURED"
+                        and _drv_doc.get("not_measured")
+                        and not _drv_doc.get("failures")):
+                    return _outcome(
+                        True,
+                        f"INCOMPLETE: {cmd_str} — reason_class="
+                        f"{_drv_doc.get('reason_class', 'partial_population')}; "
+                        "DRV evidence was not measured",
+                        r.returncode)
+                if (_drv_doc.get("name") == "DRV(tran/cap/fanout)"
+                        and _drv_doc.get("verdict") == "WAIVED"
+                        and _drv_doc.get("waived")
+                        and not _drv_doc.get("failures")
+                        and not _drv_doc.get("not_measured")):
+                    return _outcome(True,
+                        f"{_DRV_WAIVED_HINT_PREFIX}{cmd_str}", r.returncode)
+            except (OSError, ValueError, IndexError, TypeError):
+                pass
         if r.returncode == 2:
             # Treat as vacuous pass — surface the program command so
             # reviewers know which gate vacuously passed.
@@ -5070,6 +5121,7 @@ _SELF_SKIP_VERDICTS = frozenset({
 # (CLAUDE.md rule 11). Requiring BOTH the rc AND the sentinel keeps an
 # unrelated rc-3 program from being mis-promoted into a waiver.
 _WAIVER_HINT_PREFIX = "__WAIVER_HINT__: "
+_DRV_WAIVED_HINT_PREFIX = "__DRV_WAIVED_HINT__: "
 _WAIVER_EXIT_CODE = 3
 _WAIVER_STDOUT_SENTINEL = "PASS_WITH_WAIVERS"
 
@@ -12691,6 +12743,8 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
                 reasons.append(_measured)
         elif out.startswith(_EXECUTED_DECLARED_NA_HINT_PREFIX):
             reasons.append(out)
+        elif out.startswith(_DRV_WAIVED_HINT_PREFIX):
+            reasons.append(out)
         elif out.startswith(_VACUOUS_HINT_PREFIX):
             # Wave 93 — bubble the rc=2 vacuous signal up so check_step
             # promotes the step's status to VACUOUS_PASS instead of PASS.
@@ -13102,6 +13156,7 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
                                 _RAN_HINT_PREFIX,
                                 _SKIP_HINT_PREFIX,
                                 _WAIVER_HINT_PREFIX,
+                                _DRV_WAIVED_HINT_PREFIX,
                                 _INCOMPLETE_HINT_PREFIX,
                                 _EXECUTED_DECLARED_NA_HINT_PREFIX,
                             )))
@@ -13123,6 +13178,8 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
                 elif hint.startswith(_WAIVER_HINT_PREFIX):
                     # #651 — a PASS_WITH_WAIVERS sub-gate makes the whole
                     # all_of step WAIVED-DEFERRED (carried via the hint).
+                    reasons.append(hint)
+                elif hint.startswith(_DRV_WAIVED_HINT_PREFIX):
                     reasons.append(hint)
                 elif hint.startswith(_SKIP_HINT_PREFIX):
                     # ORGANIC #675 — an honest sibling-self-skip sub-gate makes
@@ -17001,6 +17058,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # Overall verdict resolves to PASS_WITH_WAIVERS, never a bare PASS.
         waiver_hints = [r for r in reasons
                         if r.startswith(_WAIVER_HINT_PREFIX)]
+        drv_waived_hints = [r for r in reasons
+                            if r.startswith(_DRV_WAIVED_HINT_PREFIX)]
         # Human prose for a structured nonblocking warning. Refusals are plain
         # failure reasons and therefore never reach this held-out bucket.
         advisory_hints = [r for r in reasons
@@ -17085,6 +17144,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                             and not r.startswith(_VACUOUS_HINT_PREFIX)
                             and not r.startswith(_SKIP_HINT_PREFIX)
                             and not r.startswith(_WAIVER_HINT_PREFIX)
+                            and not r.startswith(_DRV_WAIVED_HINT_PREFIX)
                             and not r.startswith(_STRUCTURE_ONLY_HINT_PREFIX)
                             and not r.startswith(_ADVISORY_HINT_PREFIX)
                             and not r.startswith(_ADVISORY_RECORD_HINT_PREFIX)
@@ -17125,6 +17185,11 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                     f"INCOMPLETE: the gate reports its input was applicable "
                     f"and was NOT examined: "
                     f"{h[len(_INCOMPLETE_HINT_PREFIX):]}")
+        elif passed and drv_waived_hints and not non_hint_reasons:
+            result.status = _T.Verdict.WAIVED.value
+            result.reasons.extend(
+                f"DRV owner waiver: {h[len(_DRV_WAIVED_HINT_PREFIX):]}"
+                for h in drv_waived_hints)
         elif (passed and waiver_hints and not non_hint_reasons
                 and not skip_hints):
             # WAIVED here means "DEFERRED via waiver": it leaves the required
@@ -21515,6 +21580,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # PASS_WITH_WAIVERS. Both are printed so a reader sees the verdict and
         # a parser keeps its contract.
         f"PASS_WITH_WAIVERS={counts['PASS_WITH_WAIVERS']}  "
+        f"WAIVED={counts['WAIVED']}  "
         f"WAIVED-DEFERRED={counts['PASS_WITH_WAIVERS']}  "
         f"{fail_str}  "
         f"NOT_MEASURED={counts['NOT_MEASURED']}  "
@@ -21901,6 +21967,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         # one vacuous step-level row turned a structurally clean phase-2 run
         # non-green, which is the exact complaint Wave 21 was written for.
         overall = _T.Verdict.NOT_MEASURED.value
+    elif any(r.status == _T.Verdict.WAIVED.value for r in scoped):
+        overall = _T.Verdict.WAIVED.value
     elif counts[_T.Verdict.PASS_WITH_WAIVERS.value] > 0 or p0_subgate_waivers > 0:
         # vibe-ic#924 — the second disjunct is what the removed addend was
         # actually for (v1.6.97 / issue #29: "so Overall verdict resolves to
@@ -22051,6 +22119,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 or (r.id == "P0" and p0_is_deferrable))]
         if (not non_blocked_failing
                 and not forced_fail_effective
+                and not any(r.status == "WAIVED" for r in results)
                 and (failing or missing or not_owed
                      or informational_only_failing
                      or oss_blocked_skipped)
