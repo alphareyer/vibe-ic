@@ -180,3 +180,24 @@ def test_the_same_gate_without_a_waiver_keeps_its_own_answer(tmp_path):
     project = _self_waiving_project(tmp_path, gate_waiver=False)
     row = F.check_step(project, _step(), {})
     assert not any("says WAIVED" in r for r in row.reasons), row.reasons
+
+
+# ── (3b) the stage review's per-gate green set ──────────────────────────────
+
+import stage_on_pass_review as S                              # noqa: E402
+
+
+def _declined_row(other_gate_verdict):
+    return {"status": "NOT_MEASURED", "advisory_gate_records": [
+        {"gate": "stage_on_pass_review", "verdict": "NOT_CHECKED",
+         "reason_class": "blocked_by_upstream"},
+        {"gate": "some_gate", "verdict": other_gate_verdict,
+         "reason_class": ""}]}
+
+
+def test_a_waived_gate_record_does_not_exempt_a_row():
+    # Control: a PASS sibling leaves the declined review as the only cause.
+    assert S.blocked_only_by_a_declined_review(_declined_row("PASS"))
+    # A WAIVED sibling is not green, so the row is NOT only-declined.
+    assert not S.blocked_only_by_a_declined_review(_declined_row("WAIVED"))
+    assert "WAIVED" not in S._GATE_VERDICT_GREEN

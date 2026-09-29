@@ -747,8 +747,14 @@ _SELF_GATE = "stage_on_pass_review"
 #: Per-GATE verdict words (a different vocabulary from the per-STEP status
 #: words above: these come from `advisory_gate_records[].verdict`) that do not
 #: make the step they belong to non-green.
+#:
+#: `WAIVED` IS NOT HERE, on purpose. A gate record saying WAIVED is either a
+#: gate that skipped its check under its own step-waiver lookup (examined
+#: nothing) or the DRV judge's owner-waived residual; the owner's rule for both
+#: is "WAIVED is never PASS" (DRV sign-off standard 2026-09-28), so neither may
+#: exempt the row it sits in.
 _GATE_VERDICT_GREEN = frozenset({
-    "PASS", "VACUOUS_PASS", "PARTIALLY_VACUOUS", "SKIP", "WAIVED",
+    "PASS", "VACUOUS_PASS", "PARTIALLY_VACUOUS", "SKIP",
     # R-0915-85: a GATE PROGRAM's own verdict word is a different vocabulary
     # from the STEP's — these are `advisory_gate_records[].verdict`, written by
     # ~450 independent gate programs, and the ruling's subject is the step. The
