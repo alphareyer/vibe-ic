@@ -76407,8 +76407,14 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     those are separate whole-flow producers and may rewrite unrelated steps.
     """
     window_run_id = _phase3_window_run_id()
-    window_root = project / "reports/orchestrator/windows" / window_run_id
-    audit_root = project / "reports/audit/windows" / window_run_id
+    # Spelled as one f-string so a path reader (the d7 artefact graph) sees
+    # the whole directory, `reports/audit/windows/*/`: this bounded record is
+    # NOT the whole-flow `reports/audit/phase23_completion_audit.json`, which
+    # belongs to the audit (flow yaml, step P0) and that steps 36/37 read.
+    # Joined as `... / window_run_id` it resolved to its basename alone and
+    # was charged as that audit's producer.
+    window_root = project / f"reports/orchestrator/windows/{window_run_id}"
+    audit_root = project / f"reports/audit/windows/{window_run_id}"
     if window_root.exists() or audit_root.exists():
         print(f"[phase3] window run id already published: {window_run_id}; "
               "refusing to overwrite its receipts", file=sys.stderr)
