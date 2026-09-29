@@ -342,19 +342,19 @@ def _explicit_trap_flag(decl: Dict[str, Any]) -> Optional[Tuple[bool, str]]:
     return None
 
 
-def trap_support(decl: Dict[str, Any]) -> Tuple[Optional[bool], str]:
-    """Does the design declare a trap target? An explicit switch (top level or
-    `core_parameters`, review wave 58) and the Zicsr extension (which provides
-    mtvec) must AGREE; when both are stated and disagree the answer is None
-    with the contradiction named -- the denominator is not guessed."""
+def trap_support(decl: Dict[str, Any]) -> Tuple[bool, str]:
+    """Does the design declare a trap target? An explicit switch wins -- at the
+    top level or under `core_parameters`, where a reused core's configuration
+    is declared (review wave 58) -- otherwise Zicsr (which provides mtvec)
+    decides. An explicit switch that disagrees with isa_extensions is still
+    the answer, and the reason names the disagreement."""
     zicsr = "zicsr" in {u.lower() for u in declared_units(decl)}
     explicit = _explicit_trap_flag(decl)
     if explicit is not None:
         flag, why = explicit
         if "isa_extensions" in decl and flag != zicsr:
-            return None, (f"{why} contradicts isa_extensions "
-                          f"({'with' if zicsr else 'without'} Zicsr): the "
-                          f"trap-dependent denominator cannot be decided")
+            why += (f" (isa_extensions {'lists' if zicsr else 'has no'} "
+                    f"Zicsr; the explicit switch decides)")
         return flag, why
     if zicsr:
         return True, "declaration isa_extensions includes Zicsr (a trap target exists)"
@@ -539,8 +539,6 @@ def design_facts(project: Path, rtl_dir: Optional[Path] = None
                       f"suite cannot be run at a larger memsize by parameter")
     units = declared_units(decl)
     traps, traps_why = trap_support(decl)
-    if traps is None:
-        return None, traps_why
     rf_bytes = 0
     if str(decl.get("rf_storage") or "").lower() == "shared_sram":
         rf_bytes = 32 * 4        # 32 x-registers of XLEN=32 at the top of SRAM
@@ -1143,14 +1141,20 @@ def produce(project: Path, *, write: bool = True, **kw: Any) -> Dict[str, Any]:
     if write:
         (project / RECEIPT_REL).unlink(missing_ok=True)
     run_id = uuid.uuid4().hex
+    seen: Dict[str, Any] = {}
     try:
-        return _produce(project, write=write, run_id=run_id, **kw)
+        return _produce(project, write=write, run_id=run_id, _seen=seen, **kw)
     except Exception as exc:  # noqa: BLE001 — a crash is a named refusal
+        why = f"the ISA-suite producer raised {exc!r}"
+        cases = seen.get("bound_cases") or {}
         receipt = {"schema": "vibeic.isa_suite_receipt.v1",
                    "producer": PRODUCER, "run_id": run_id,
                    "producer_identity": producer_identity(),
-                   "cases": {}, "rows": [], "bound_cases": {},
-                   "refusal": f"the ISA-suite producer raised {exc!r}"}
+                   "cases": {}, "bound_cases": cases, "refusal": why,
+                   "rows": [{"id": c, "verdict": "NOT_EXECUTED",
+                             "sim_executed": False,
+                             "detail": f"ISA suite NOT_MEASURED: {why}"}
+                            for c in cases]}
         if write:
             _aa.write_json(project / RECEIPT_REL, receipt)
         return receipt
@@ -1176,7 +1180,8 @@ def _produce(project: Path, *, executor: Optional[Callable[[Path, Path],
              extra_arms: Optional[List[Dict[str, Any]]] = None,
              init_patterns: Tuple[str, ...] = INIT_PATTERNS,
              work_root: Optional[Path] = None, keep_work: bool = False,
-             write: bool = True, run_id: str = "") -> Dict[str, Any]:
+             write: bool = True, run_id: str = "",
+             _seen: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The body of `produce` (which owns clearing and crash handling)."""
     project = Path(project)
     lock = load_lock() if lock is None else lock
@@ -1194,6 +1199,8 @@ def _produce(project: Path, *, executor: Optional[Callable[[Path, Path],
     units = [u for u in declared_units(decl) if u in suite_units]
     cases = bound_cases(project, units) if units else {}
     receipt["bound_cases"] = cases
+    if _seen is not None:
+        _seen["bound_cases"] = cases
     if not cases:
         # A design with no ISA case is left alone: no receipt of this run, and
         # `produce` already removed any earlier one, so nothing can credit.
