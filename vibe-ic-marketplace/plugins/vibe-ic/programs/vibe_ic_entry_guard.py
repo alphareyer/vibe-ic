@@ -139,7 +139,13 @@ _CANONICAL_LAYER_FILES = {
 #: NOT_MEASURED is a front-door verdict as of R-0915-145: a phase that was not
 #: measured can no longer roll up to PASS, so the runner publishes it and this
 #: guard must recognise it or discard genuine reports as forged.
-_ORCHESTRATOR_VERDICTS = {"PASS", "PASS_WITH_WAIVERS", "FAIL", "NOT_MEASURED"}
+_ORCHESTRATOR_VERDICTS = {"PASS", "PASS_WITH_WAIVERS", "FAIL", "NOT_MEASURED",
+                          # The DRV sign-off standard's word (owner-approved
+                          # 2026-09-28): the front door now publishes a phase's
+                          # WAIVED as the run's WAIVED instead of downgrading
+                          # it to PASS_WITH_WAIVERS, so a genuine report can
+                          # carry it and must not be discarded as forged.
+                          "WAIVED"}
 _PHASE_VERDICTS = _ORCHESTRATOR_VERDICTS | {
     "WAIVED", "SKIP", "SKIPPED", "COVERAGE-INCOMPLETE"
 }
@@ -290,7 +296,11 @@ def _phase1_steps_verdict(steps: list) -> str:
     statuses = {row["status"] for row in steps}
     if statuses & {"FAIL", "BLOCKED"}:
         return "FAIL"
-    if statuses & {"WAIVED", "SKIP"}:
+    # WAIVED is never PASS: the producer rolls its rows up through
+    # `verdict.run_verdict`, where WAIVED outranks the waiver-tier pass.
+    if "WAIVED" in statuses:
+        return "WAIVED"
+    if "SKIP" in statuses:
         return "PASS_WITH_WAIVERS"
     return "PASS"
 

@@ -201,3 +201,37 @@ def test_a_waived_gate_record_does_not_exempt_a_row():
     # A WAIVED sibling is not green, so the row is NOT only-declined.
     assert not S.blocked_only_by_a_declined_review(_declined_row("WAIVED"))
     assert "WAIVED" not in S._GATE_VERDICT_GREEN
+
+
+# ── (3c) the entry guard replays the front door's roll-up ───────────────────
+
+import vibe_ic_entry_guard as G                               # noqa: E402
+
+
+def _front_door_report(tmp_path, verdict):
+    project = tmp_path / "proj"
+    project.mkdir(exist_ok=True)
+    phases = [{"name": "phase1", "verdict": "PASS", "rc": 0},
+              {"name": "phase2", "verdict": "PASS", "rc": 0},
+              {"name": "analog", "verdict": "SKIPPED", "rc": 0},
+              {"name": "phase3", "verdict": "WAIVED", "rc": 1},
+              {"name": "mixed_signal", "verdict": "SKIPPED", "rc": 0}]
+    path = tmp_path / "vibe_ic_one_shot.json"
+    path.write_text(json.dumps({
+        "phase": "vibe-ic", "project": str(project), "verdict": verdict,
+        "phases": phases, "completion_audit_axis": {"state": "PASS"},
+        "completion_audit_verdicts": ["PASS"]}))
+    return path, project
+
+
+def test_the_guard_accepts_waived_and_refuses_the_downgrade(tmp_path):
+    good, project = _front_door_report(tmp_path, "WAIVED")
+    assert G._is_orchestrator_report(good, project)
+    forged, project = _front_door_report(tmp_path, "PASS_WITH_WAIVERS")
+    assert not G._is_orchestrator_report(forged, project)
+
+
+def test_a_waived_phase1_step_is_not_a_waiver_pass():
+    rows = [{"status": "PASS"}, {"status": "WAIVED"}]
+    assert G._phase1_steps_verdict(rows) == "WAIVED"
+    assert G._phase1_steps_verdict([{"status": "SKIP"}]) == "PASS_WITH_WAIVERS"
