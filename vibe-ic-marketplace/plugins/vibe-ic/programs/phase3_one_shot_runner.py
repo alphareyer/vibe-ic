@@ -63377,19 +63377,20 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     _repair_decision = _repair_dec.decide(
         mc_ocv_stance, tns_zero, project=project,
         single_corner_evidence=_single_corner_evidence)
-    # This canonical decision supersedes the LibreLane pre-stream decision.
-    # Its log described that earlier decision and must not certify a fallback
-    # in which this pass applied no repair.
-    _prior_repair_log = postroute_timing_repair_out / "repair_log.json"
-    if _prior_repair_log.is_file():
-        _prior_repair_log.unlink()
-        notes.append("superseded pre-stream repair_log.json before the canonical decision")
     _no_repair_flag = postroute_timing_repair_out / "no_repair_needed.flag"
     # R-0929-STEP32-RECORD — a bound Step-32 PRODUCER receipt (the LibreLane
     # producer's decision record: bound to its source bytes, not written by
     # this site) is never overwritten, and its repair_needed=true is carried
     # forward: this decision can add a repair demand, never remove one.
     _producer_receipt = _step32_producer_receipt(project, postroute_timing_repair_out)
+    # This canonical decision supersedes a pre-stream log that nothing bound
+    # vouches for: it must not certify a fallback in which this pass applied
+    # no repair. A log beside a current bound producer receipt is that
+    # producer's record of its repair, and is kept (never dropped).
+    _prior_repair_log = postroute_timing_repair_out / "repair_log.json"
+    if _prior_repair_log.is_file() and _producer_receipt is None:
+        _prior_repair_log.unlink()
+        notes.append("superseded pre-stream repair_log.json before the canonical decision")
     if _producer_receipt is not None and _producer_receipt["repair_needed"] \
             and not _repair_decision["repair_needed"]:
         _repair_decision["repair_needed"] = True
