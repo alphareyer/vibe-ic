@@ -18110,6 +18110,21 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         result.reasons += [r for r in _refusal_lines
                            if r not in result.reasons]
 
+    # R-0929-U14-OWNER-WAIVER: an honest PDK-substitution disclosure is
+    # EVIDENCE, not an approval. It no longer defers the step (U14 removed the
+    # machine waiver), but the FAIL must still say what was disclosed -- the
+    # declared target, the substitute actually simulated, and the deck -- so a
+    # reader can take it to the owner. Status is untouched.
+    if (result.status == _T.Verdict.FAIL.value
+            and str(sid) in _PDK_SUBSTITUTION_AFFECTED_A_STEPS):
+        _disc = _pdk_substitution_disclosed(project)
+        if _disc:
+            result.reasons.append(
+                f"PDK SUBSTITUTION DISCLOSED (evidence, not a waiver; only an "
+                f"owner-approved record may defer it): declared target "
+                f"{_disc['target']}, decks simulated with {_disc['substitute']} "
+                f"({_disc['deck']}); ticket {_PDK_SUBSTITUTION_TICKET}")
+
     # v0.2.64 (#433/#434) — evidence-integrity scan on the natural PASS,
     # then v0.2.63 (#430) capability-gap conversion (the early
     # required_outputs exit applies the same helpers).

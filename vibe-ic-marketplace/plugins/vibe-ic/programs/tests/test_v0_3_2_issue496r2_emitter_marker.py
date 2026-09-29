@@ -219,6 +219,10 @@ def test_acceptance_prose_artifact_a3_waived_deferred(tmp_path):
     # the machine waiver the owner rule removed; U14's sibling migration drops
     # those lines the same way.)
     assert "[PASS             ]" not in a3, a3
+    # The FAIL still names what was disclosed: the declared target PDK (and
+    # the substitution's ticket), so the owner can decide on it.
+    assert _TARGET_PDK in a3.lower(), a3
+    assert "pdk substitution disclosed" in a3.lower(), a3
 
     # ── strip the disclosure entirely → A3 hard-FAILs ─────────────────────
     for rel in ("phase2/analog/delta_sigma/delta_sigma.sp",

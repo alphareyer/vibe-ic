@@ -151,7 +151,10 @@ def test_scoped_approved_step_waiver_prevents_the_refusal_from_running(
         _step({"advisory_program_exit_zero": "live_refusal"}),
         {1980: {
             "reason": "Approved issue-1980 fixture waiver for this step only",
-            "approver": "independent-reviewer",
+            # U14 (R-0929-U14-OWNER-WAIVER): only a dated owner approval
+            # waives; setup only, assertions unchanged.
+            "approver": "reyerchu", "approved_at": "2026-09-29",
+            "owner_statement": "Owner-approved fixture waiver for #1980.",
         }},
     )
 
