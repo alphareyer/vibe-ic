@@ -323,8 +323,13 @@ STEP_IDS_AS_MEASURED: Tuple[str, ...] = (
     'D1', '0.5ic', '1', '2', '3', '4', '5', '6', '7', '8', '9',
     '10', '11', 'FS1', 'DT1', '12', '13', 'A1', 'A2', 'A3', 'A4', 'A5',
     'A6', 'A7', 'A8', 'A9', '14', '15', '15.5ic', '16', '17', '18',
-    '19', '20', '21', '22', 'DT2', 'DT3', '23', '24', '25', '26',
-    '26.5ic', '27', '28', '29', '30', '32', '33', '34', '35',
+    '19', '20', '21', '22', 'DT2', 'DT3', '32', '23', '24', '25', '26',
+    '26.5ic', '27', '28', '29', '30', '33', '34', '35',
+    # RE-MEASURED 2026-09-29 (R-0929-TAIL-CONTINUES). Population unchanged
+    # (same 70 ids), so GRID_AS_MEASURED stays. Only 32 moved: it now sits
+    # before 23, because the runner repairs the route (32) BEFORE the sign-off
+    # steps 23-30 are measured on it, and those now `blocks_on` 32 (D5
+    # FORWARD-EDGE: no id is declared before one it `blocks_on`).
     # 2026-09-23: '37.3' JOINS, in declaration order, between 37 and 37.4 --
     # canonical GDS stream-out / finishing fidelity (R-0915-129 metric 2). The
     # list is what distinguishes "a step arrived" from "a step was renamed", so

@@ -255,9 +255,16 @@ def test_the_ancestor_rule_was_rejected_for_a_reason(tmp_path):
             forward.append((sid, fb))
             assert M.closes_a_loop(sid, fb, by), (
                 f"{sid}->{fb} neither returns nor is waited on")
-    assert forward, (
-        "no forward hand-off edge remains in the flow; the ancestor rule would "
-        "now be safe to assert and CL-NOT-A-LOOP could be tightened")
+    # MIGRATED by R-0929-TAIL-CONTINUES (root, IC expert, 2026-09-29). The
+    # two forward hand-offs this test pinned were 23->32 and 31->32; they were
+    # forward only because 32 declared the inverted `blocks_on [23..30]`. The
+    # ruling put 32 where the runner runs it (before sign-off), so both now
+    # fall back to an ANCESTOR. Any forward edge that reappears must still close
+    # a loop (asserted above); tightening CL-NOT-A-LOOP is a separate change.
+    for sid in ("23", "31"):
+        fb = str(by[sid]["closed_loop"]["fallback_to"])
+        assert fb == "32" and fb in M.ancestors(sid, by), (sid, fb)
+    assert not forward, f"unexpected forward hand-off edge(s): {forward}"
 
 
 def test_the_program_names_no_process_or_vendor_token():

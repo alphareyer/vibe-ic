@@ -922,10 +922,17 @@ def judge_tool(arm: dict) -> Tuple[str, int, dict]:
                          row["files"][_ls.CORNER_REPORT]["text"])["hold_wns_ns"],
                      "report": row["files"][_ls.CORNER_REPORT]["path"]})
     fast = [r for r in rows if r["class"] == "FF"]
-    unanalysed = [r["corner"] for r in fast if r["hold_worst_slack_ns"] is None]
+    # CUT_W2 (1): hold is signed off in EVERY scene the tool declared, not only
+    # at FF -- an SS hold residual (spm: -0.040..-0.370 ns) is invisible to a
+    # FF-only check. A scene that timed no hold path verified nothing there.
+    unanalysed = [r["corner"] for r in rows if r["hold_worst_slack_ns"] is None]
+    violated = sorted((r["corner"], r["hold_worst_slack_ns"]) for r in rows
+                      if r["hold_worst_slack_ns"] is not None
+                      and r["hold_worst_slack_ns"] < 0)
     report = {"tool": _TOOL, "mode": "librelane_stapostpnr",
               "artefact": arm["record"], "tool_corners": rows,
-              "judged_corners": [r["corner"] for r in fast],
+              "judged_corners": [r["corner"] for r in rows],
+              "fast_corners": [r["corner"] for r in fast],
               "corner_basis": "the corner's config-bound cell liberty "
                               "(_ppa parse_liberty_pvt)",
               "basis": _ls.tool_arm_basis(arm)}
@@ -937,12 +944,19 @@ def judge_tool(arm: dict) -> Tuple[str, int, dict]:
         return "FAIL", 1, report
     if unanalysed:
         report.update(verdict="FAIL", reason="NO_HOLD_ANALYSIS", message=(
-            f"fast corner(s) {unanalysed} timed no hold path (no finite "
-            f"`worst slack min`) — nothing was verified there"))
+            f"scene(s) {unanalysed} timed no hold path (no finite "
+            f"`worst slack min`) — nothing was verified there; hold is signed "
+            f"off in every declared scene"))
         return "FAIL", 1, report
-    report.update(verdict="PASS", reason="HOLD_AT_FF", message=(
-        f"hold signed off by STAPostPNR at fast corner(s) "
-        f"{[r['corner'] for r in fast]}"))
+    if violated:
+        report.update(verdict="FAIL", reason="HOLD_VIOLATED", hold_violations=[
+            {"corner": c, "hold_worst_slack_ns": v} for c, v in violated],
+            message=(f"hold violated in {len(violated)} scene(s): "
+                     + ", ".join(f"{c} {v} ns" for c, v in violated)))
+        return "FAIL", 1, report
+    report.update(verdict="PASS", reason="HOLD_EVERY_SCENE", message=(
+        f"hold signed off by STAPostPNR in all {len(rows)} declared scene(s), "
+        f"fast corner(s) {[r['corner'] for r in fast]} included"))
     return "PASS", 0, report
 
 

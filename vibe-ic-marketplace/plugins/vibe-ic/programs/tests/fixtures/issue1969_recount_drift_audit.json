@@ -403,6 +403,16 @@
       "disclosures": []
     },
     {
+      "id": "32",
+      "name": "synthetic step 49",
+      "stage": "stage1",
+      "status": "NOT_MEASURED",
+      "reason_class": "upstream_failed",
+      "declared_by": "",
+      "attribution": "",
+      "disclosures": []
+    },
+    {
       "id": "23",
       "name": "synthetic step 39",
       "stage": "stage1",
@@ -485,16 +495,6 @@
     {
       "id": "30",
       "name": "synthetic step 47",
-      "stage": "stage1",
-      "status": "NOT_MEASURED",
-      "reason_class": "upstream_failed",
-      "declared_by": "",
-      "attribution": "",
-      "disclosures": []
-    },
-    {
-      "id": "32",
-      "name": "synthetic step 49",
       "stage": "stage1",
       "status": "NOT_MEASURED",
       "reason_class": "upstream_failed",
