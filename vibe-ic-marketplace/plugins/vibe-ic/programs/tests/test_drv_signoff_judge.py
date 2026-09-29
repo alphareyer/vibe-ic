@@ -187,6 +187,23 @@ def _bundle(tmp_path: Path) -> dict:
                 "driver_cell": "logic", "loads": {"logical": 1,
                                                  "antenna_diode": 0, "cts_buffer": 0}}},
             "waiver_ledger": []}
+    # A complete bundle is the FINAL (post-stream) capture: the flow's own
+    # records show the GDS was streamed from, and LVS compared, this very DEF
+    # and netlist (R-0929-DRV-IDENTITY).
+    gds = _file(tmp_path, "stream/top.gds", "GDSII STREAM\n")
+    admission = _file(tmp_path, "reports/phase3/gds_admission.json", json.dumps({
+        "gds_relpath": "stream/top.gds", "gds_sha256": gds["sha256"],
+        "basis_inputs": {"phase3/stage3/pnr/routed.def": artifacts["def"]["sha256"]}}))
+    lvs_inputs = _file(tmp_path, "reports/phase3/lvs_inputs.json", json.dumps({
+        "layout_def": artifacts["def"], "schematic_netlist": netlist}))
+    lvs_verdict = _file(tmp_path, "reports/phase3/lvs_verdict.json", json.dumps({
+        "status": "PASS", "compare_performed": True}))
+    bundle["identity"]["derivation"] = {
+        "gds": {**gds, "streamed_from_def_sha256": artifacts["def"]["sha256"],
+                "record": admission},
+        "lvs": {"layout_def_sha256": artifacts["def"]["sha256"],
+                "schematic_netlist": netlist, "verdict": "PASS",
+                "compare_performed": True, "records": [lvs_inputs, lvs_verdict]}}
     _refresh_scripts(bundle, tmp_path)
     return bundle
 
