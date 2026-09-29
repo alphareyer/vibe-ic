@@ -163,6 +163,7 @@ import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch si
 # rather than carrying a divergent copy.
 import synth_frontend as _sf
 import lec_gate_netlist_select as _lec_gns  # ATPG-cut predicate (diagnosis only)
+import lec_equivalence_check as _lec_gate  # step 13's gate: not-run record + bound proof
 import _yosys_stat as _ystat  # shared yosys `stat` parser (step 9 stats.json)
 import quartus_map_audit as _qma  # step 6 .map.rpt silent-failure scanner
 import _hardmacro_stage as _hms  # staged SRAM/IP macro discovery + blackbox
@@ -21976,7 +21977,7 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
                 f"({gate_netlist or 'unresolved'}: {_lec_subject_note}); "
                 f"step 13 proves only that netlist and proves nothing "
                 f"in its place")
-        _dft_disclose_skip(reports_dir / "lec_not_run.json", _why)
+        _dft_disclose_skip(project / _lec_gate.LEC_NOT_RUN_REL, _why)
         results.append(StepResult("lec_equivalence", "NOT_MEASURED",
                        time.time() - t0, _why,
                        reason_class=_V.ReasonClass.INPUT_ABSENT))
@@ -22073,6 +22074,13 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
                 # record by the same function; it needs no new table.
                 _lec_rc = (lec_inconclusive_reason_class(_lec_doc)
                            if _status == _V.Verdict.NOT_MEASURED.value else "")
+                # P2LECIN follow-up — a not-run record this step wrote earlier
+                # (phase 2, before the netlist step 15 routes existed) is
+                # false once this proof binds that netlist; the directory-level
+                # self-skip scans would still read it as the LEC state. Retired
+                # only on the gate's own bound-proof answer, and said here.
+                _lec_retired = (_lec_gate.retire_superseded_not_run(project)
+                                if _status == _V.Verdict.PASS.value else None)
                 results.append(StepResult("lec_equivalence", _status,
                                time.time() - t0,
                                f"yosys equiv: verdict={_verdict or 'UNKNOWN'} "
@@ -22086,14 +22094,15 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
                                # Only annotate when step 12's artifact is
                                # unusable.
                                + (f"; step-12 WARNING: {_lec_netlist_note}"
-                                  if _lec_gate_is_cut else ""),
+                                  if _lec_gate_is_cut else "")
+                               + (f"; {_lec_retired}" if _lec_retired else ""),
                                output_files=["reports/lec.json", "reports/lec.rpt"],
                                reason_class=_lec_rc,
                                disclosures=([_V.Disclosure.REUSED_RECORD.value]
                                             if _lec_reuse else [])))
             else:
                 tail = (r.stderr or r.stdout or "")[-300:]
-                _dft_disclose_skip(reports_dir / "lec_not_run.json",
+                _dft_disclose_skip(project / _lec_gate.LEC_NOT_RUN_REL,
                                    f"lec_run produced no reports/lec.json "
                                    f"(rc={r.returncode}): {tail}")
                 results.append(StepResult("lec_equivalence", "NOT_MEASURED",
@@ -22101,12 +22110,12 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
                                f"LEC produced no report (rc={r.returncode}) → "
                                f"disclosed-skip", reason_class=_V.ReasonClass.EXECUTION_ERROR))
         except Exception as exc:
-            _dft_disclose_skip(reports_dir / "lec_not_run.json",
+            _dft_disclose_skip(project / _lec_gate.LEC_NOT_RUN_REL,
                                f"lec_run execution error: {exc}")
             results.append(StepResult("lec_equivalence", "NOT_MEASURED", time.time() - t0,
                            f"LEC errored ({exc}) → disclosed-skip", reason_class=_V.ReasonClass.EXECUTION_ERROR))
     else:
-        _dft_disclose_skip(reports_dir / "lec_not_run.json",
+        _dft_disclose_skip(project / _lec_gate.LEC_NOT_RUN_REL,
                            "lec_run.py not present in plugin — LEC producer "
                            "unavailable")
         results.append(StepResult("lec_equivalence", "NOT_MEASURED", time.time() - t0,

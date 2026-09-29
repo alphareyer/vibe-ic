@@ -2728,6 +2728,8 @@ def _sibling_self_skip_for_missing(project: Path,
                     continue
                 vd = str(data.get("verdict", "")).upper().replace("_", "-")
                 if vd in _SELF_SKIP_VERDICTS:
+                    if _not_run_superseded_by_bound_proof(project, sib):
+                        continue
                     try:
                         sib_rel = str(sib.relative_to(project))
                     except ValueError:
@@ -2736,6 +2738,25 @@ def _sibling_self_skip_for_missing(project: Path,
                     return (f"{sib_rel}: sibling self-reports verdict={vd}"
                             + (f" ({reason})" if reason else ""))
     return None
+
+
+def _not_run_superseded_by_bound_proof(project: Path,
+                                       sibling: Path) -> Optional[str]:
+    """Why `sibling` is a not-run record a bound proof has superseded, or None.
+
+    P2LECIN follow-up: phase 2 writes `reports/lec_not_run.json` (step 13
+    NOT_MEASURED, input_absent) before the netlist step 15 routes exists, and
+    phase 3's proof of that netlist then settles step 13. A tree written before
+    step 13 retired the record on its own PASS still carries it, and this
+    directory-level scan read it as a disclosure for any miss in `reports/`.
+    The bound proof outranks it. The question is the step-13 gate's own
+    (`lec_equivalence_check.lec_not_run_superseded`); an unanswerable one
+    supersedes nothing, so the record keeps its old effect."""
+    try:
+        import lec_equivalence_check as _lec_gate  # noqa: PLC0415
+        return _lec_gate.lec_not_run_superseded(project, sibling)
+    except Exception:  # noqa: BLE001 — fail closed: the record stands
+        return None
 
 
 def _sibling_authoring_incomplete_for_missing(
