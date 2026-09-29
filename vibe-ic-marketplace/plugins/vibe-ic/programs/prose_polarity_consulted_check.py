@@ -1450,17 +1450,16 @@ _NOT_PROSE: Dict[str, str] = {
         "runner-owned testbench skeleton. The matched `.name(` token is an HDL "
         "grammar production and Verilog has no prose form that denies it.",
     "design_one_shot_runner::_full_stack_dut_not_in_rtl":
-        "TWO FORMAL GRAMMARS, NO SENTENCE. (1) Verilog: the runner-owned "
-        "full-stack TB's `<module> u_dut (` instance line (written by "
-        "`step_full_stack_tb_gen`) and `module <name>` definitions in the "
-        "compile set, both matched only after "
+        "ONE FORMAL GRAMMAR, NO SENTENCE: Verilog. The runner-owned full-stack "
+        "TB's `<module> u_dut (` instance line (written by "
+        "`step_full_stack_tb_gen`) and `[macro]module [automatic|static] "
+        "<name>` headers in every HDL file under rtl/, all matched only after "
         "`_hdl_code_text.strip_hdl_comments_and_strings` blanks comments and "
-        "string literals; Verilog has no form that denies an instantiation or "
-        "a definition -- a module is defined or it is not. (2) The `name:` key "
-        "of the staged skill's YAML front matter, a machine key/value record "
-        "the runner copied from the tree (`_stage_fallback_skill`). Neither "
-        "result is written as a design declaration: it only decides that "
-        "nothing is compiled and the step is NOT_MEASURED, never a pass. "
+        "string literals. Verilog has no form that denies an instantiation or "
+        "a definition -- a module is defined or it is not. The hand-off it "
+        "also requires is the caller's own rtl_gen StepResult, not text. The "
+        "result is never a design declaration and never a pass: it only "
+        "decides that nothing is compiled and the step is NOT_MEASURED. "
         "Falsifier: test_full_stack_tb_owed_top_and_container_spelling.py::"
         "test_a_top_defined_only_inside_a_string_or_comment_is_still_owed.",
     "clock_plan_check::_sdc_primary_clock_sources":
