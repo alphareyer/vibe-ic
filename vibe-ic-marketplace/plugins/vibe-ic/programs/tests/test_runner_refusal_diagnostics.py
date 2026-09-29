@@ -39,10 +39,16 @@ def test_real_canonical_refusal_survives_the_producer(tmp_path):
     assert receipt["rc"] == 2
 
 
-def test_frontdoor_names_the_actual_refusal_instead_of_missing_provenance(tmp_path):
+def test_frontdoor_names_the_actual_refusal_instead_of_missing_provenance(tmp_path, monkeypatch):
     prompt = tmp_path / "input" / "phase1_prompt.md"
     prompt.parent.mkdir()
     prompt.write_text("Describe a neutral digital block.\n")
+    # Explicitly exercise a refused invocation independently of the separately
+    # maintained default route policy (_solver_argv, PR #2846).
+    argv = _argv(tmp_path)
+    argv[argv.index("--entry-step") + 1] = "D1"
+    argv[argv.index("--exit-step") + 1] = "D1"
+    monkeypatch.setattr(bd, "_solver_argv", lambda *a: list(argv))
     result = bd._ensure_phase1_frontdoor(Path(_argv(tmp_path)[1]), tmp_path,
                                         bd._RunnerBudget(1, None, 0))
     assert result["status"] == "BLOCKED"
@@ -63,6 +69,7 @@ def test_solve_exposes_the_current_refusal_with_stale_scaffolds(tmp_path, monkey
     real_run = subprocess.run
     fx._install_solve_fakes(monkeypatch, {})
     monkeypatch.setattr(bd.subprocess, "run", real_run)
+    monkeypatch.setattr(bd, "_solver_argv", lambda runner, project, *a: _argv(project))
     original_stage = bio.stage
 
     def stage(fmt, problem, project):
