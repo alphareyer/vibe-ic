@@ -306,6 +306,79 @@ def _port_cli(tmp_path, source, ref="def ref(seq): return [0]+list(seq[:-1])\n",
     return rc, out, err, json.loads(report.read_text())
 
 
+def _native_port_bits(tmp_path, source, names):
+    """Observe the exact original declaration with Icarus, without a behavior claim."""
+    import re
+    tmp_path.mkdir(exist_ok=True)
+    rtl = _write(tmp_path, "original.sv", source)
+    built = _pr.run(["iverilog", "-g2012", "-s", "vector_register", "-o",
+                     str(tmp_path / "original.vvp"), str(rtl)], capture_output=True, text=True)
+    assert built.returncode == 0, built.stderr
+    body = ["module native_bits; vector_register dut(); initial begin"]
+    for name in names:
+        body.append(f'$display("PORT_BITS {name} %0d", $bits(dut.{name}));')
+    body.append("$finish; end endmodule\n")
+    probe = _write(tmp_path, "native_bits.sv", "\n".join(body))
+    compiled = _pr.run(["iverilog", "-g2012", "-s", "native_bits", "-o",
+                        str(tmp_path / "bits.vvp"), str(rtl), str(probe)],
+                       capture_output=True, text=True)
+    assert compiled.returncode == 0, compiled.stderr
+    observed = _pr.run(["vvp", str(tmp_path / "bits.vvp")], capture_output=True, text=True)
+    assert observed.returncode == 0, observed.stderr
+    bits = {name: int(width) for name, width in
+            re.findall(r"^PORT_BITS (\w+) (\d+)$", observed.stdout, re.MULTILINE)}
+    assert set(bits) == set(names), observed.stdout
+    return bits
+
+
+def _assert_original_bound_context(context, source, ports):
+    """The consumer must elaborate the supplied defaults in its recorded native context."""
+    import hashlib
+    assert context["source_sha256"] == hashlib.sha256(source.encode()).hexdigest()
+    assert context["selected_top"] == "vector_register"
+    assert context["ports"] == [dict(name=n, direction=d, width=w) for n, d, w in ports]
+    assert context["preprocessing_rc"] == 0
+    assert context["defines"] == [] and context["include_dirs"] == []
+    assert context["parameter_overrides"] == []
+    assert context["parameter_policy"] == "declared defaults only; no override API"
+    assert context["working_directory"] == str(Path.cwd().resolve())
+
+
+def _assert_agreement_and_bit_mutation(tmp_path, source, width, mutation=None, has_reset=False):
+    """Require full-width native agreement and a substantive same-port bit/order fault."""
+    positive = tmp_path / "positive"
+    positive.mkdir()
+    rc, out, err, report = _port_cli(positive, source)
+    assert (rc, report["verdict"], out.strip()) == (0, "AGREE", "AGREE"), (err, report)
+    assert report["driven_input"] == {"name": "data_in", "width": width}
+    assert report["sampled_output"] == {"name": "data_out", "width": width}
+    assert report["n_sequences"] == 22
+    declared = [("clk","input",1)] + ([("rst_n","input",1)] if has_reset else [])
+    declared += [("data_in","input",width),("data_out","output",width)]
+    _assert_original_bound_context(report["compilation_context"], source,
+                                   declared)
+    high_bit = 1 << (width - 1)
+    wrong_value = mutation or f"(data_in & {width}'d{high_bit-1})"
+    mutant = source.replace("data_out <= data_in;", f"data_out <= {wrong_value};")
+    assert mutant != source
+    negative = tmp_path / "bit_mutant"
+    negative.mkdir()
+    rc, out, err, report = _port_cli(negative, mutant)
+    mismatch = report["first_mismatch"]
+    expected = (f"MISMATCH cycle={mismatch['cycle']} signal=data_out "
+                f"rtl={mismatch['rtl']} ref={mismatch['ref']} (sequence {mismatch['sequence']})")
+    assert (rc, report["verdict"], out.strip()) == (1, "MISMATCH", expected), (err, report)
+    assert report["driven_input"] == {"name": "data_in", "width": width}
+    assert report["sampled_output"] == {"name": "data_out", "width": width}
+    _assert_original_bound_context(report["compilation_context"], mutant, declared)
+    assert mismatch["signal"] == "data_out" and mismatch["rtl"] != mismatch["ref"]
+    if mutation is None:
+        assert mismatch["ref"] & high_bit
+        assert mismatch["rtl"] == mismatch["ref"] & (high_bit - 1)
+    else:
+        assert (mismatch["rtl"], mismatch["ref"]) == (16384, 1)
+
+
 @pytest.mark.parametrize("params,bounds,nonansi,renamed,body_params", [
     ("parameter integer WIDTH = 8", "WIDTH-1:0", False, False, ""),
     ("parameter integer WIDTH = 8", "WIDTH-1:0", False, True, ""),
@@ -359,13 +432,44 @@ def test_actual_parameterized_register_matches_literal_control(
 ])
 def test_actual_unresolved_or_unsupported_range_blocks_before_reference(
         tmp_path,bounds,params,reason):
-    source,_ = _vector_register(params,bounds)
-    rc,out,err,report = _port_cli(tmp_path,source,
-                                "raise RuntimeError('reference must not load')\n")
-    assert report["reason"].split(": ")[1].split(":")[0] == reason, report
-    assert (rc,report["verdict"],out) == (2,"ERROR","")
-    assert "reference load failed" not in report["reason"]
-    assert "driven_input" not in report and "sampled_output" not in report
+    source,names = _vector_register(params,bounds)
+    if bounds == "MISSING-1:0" or "unknown_call" in params:
+        rc,out,err,report = _port_cli(tmp_path,source,
+                                    "raise RuntimeError('reference must not load')\n")
+        assert report["reason"].startswith("port parse failed: DIFF_PORT_ELABORATION_FAILED:"), report
+        assert ("MISSING" if bounds == "MISSING-1:0" else "unknown_call") in report["reason"]
+        assert (rc,report["verdict"],out) == (2,"ERROR","")
+        assert "reference load failed" not in report["reason"]
+        assert "driven_input" not in report and "sampled_output" not in report
+        assert "n_sequences" not in report
+        return
+    # Actual native measurements established these defaults, including the
+    # sized values that truncate to zero and declare an ascending [-1:0].
+    narrowed = params in ("parameter WIDTH = 8'd256", "parameter [3:0] WIDTH = 16")
+    width = 2 if narrowed else 8
+    bits = _native_port_bits(tmp_path / "original_native", source, names)
+    assert bits[names[0]] == bits[names[1]] == 1
+    assert bits[names[2]] == bits[names[3]]
+    assert bits[names[2]] in ({0, 2} if narrowed else {8})
+    if bits[names[2]] != width:
+        # Some Icarus versions report $bits([-1:0])=0 while Slang reports2.
+        # Keep the real refusal before comparison, rather than a reference-load
+        # exception or an invented agreement on a guessed scalar.
+        project = tmp_path / "native_context_refusal"
+        project.mkdir()
+        rc,out,err,report = _port_cli(project,source)
+        assert (rc,report["verdict"],out) == (2,"ERROR","")
+        assert report["reason"] == ("sequence 0: DIFF_PORT_CONTEXT_MISMATCH: "
+                                    "native Icarus port sizing differs from Slang")
+        assert "first_mismatch" not in report
+        assert report["n_sequences"] == 22
+        assert report["driven_input"] == {"name":names[2],"width":width}
+        assert report["sampled_output"] == {"name":names[3],"width":width}
+        _assert_original_bound_context(report["compilation_context"], source,
+                                       [(names[0],"input",1),(names[1],"input",1),
+                                        (names[2],"input",width),(names[3],"output",width)])
+        return
+    _assert_agreement_and_bit_mutation(tmp_path, source, width, has_reset=True)
 
 
 @pytest.mark.parametrize("declaration", [
@@ -375,18 +479,62 @@ def test_actual_unresolved_or_unsupported_range_blocks_before_reference(
 ])
 def test_actual_incomplete_or_nonvector_declaration_is_not_guessed(tmp_path,declaration):
     source = f"module vector_register(input clk, {declaration}, output [7:0] data_out); endmodule"
-    rc,out,err,report = _port_cli(tmp_path,source,"raise RuntimeError('must not load')\n")
-    assert report["reason"].startswith("port parse failed: PORT_"), report
-    assert (rc,report["verdict"],out) == (2,"ERROR","")
-    assert "reference load failed" not in report["reason"]
+    supported = {"input wire [7:0][1:0] data_in":16, "input integer data_in":32,
+                 "input wire [7:0] data_in = 0":8}
+    if declaration not in supported:
+        rc,out,err,report = _port_cli(tmp_path,source,"raise RuntimeError('must not load')\n")
+        diagnostic = ("DIFF_PORT_UNSUPPORTED" if declaration == "input wire [7:0] data_in [0:1]"
+                      else "DIFF_PORT_ELABORATION_FAILED")
+        assert report["reason"].startswith(f"port parse failed: {diagnostic}:"), report
+        detail = {"input wire [7:0] data_in [0:1]":"'data_in'",
+                  "input custom_t data_in":"'custom_t'",
+                  "input pkg::word_t data_in":"'pkg'", "input wire":"expected identifier"}
+        assert detail[declaration] in report["reason"]
+        assert (rc,report["verdict"],out) == (2,"ERROR","")
+        assert "reference load failed" not in report["reason"]
+        assert "driven_input" not in report and "sampled_output" not in report
+        assert "n_sequences" not in report
+        return
+    width = supported[declaration]
+    original = tmp_path / "original_declaration_only"
+    assert _native_port_bits(original, source, ["clk","data_in","data_out"]) == {
+        "clk":1,"data_in":width,"data_out":8}
+    rtl = original / "original.sv"
+    bound = original / "bound"
+    bound.mkdir()
+    name,ports,unit,context,error = dvh._bind_rtl_unit(rtl, "vector_register", bound)
+    assert name == "vector_register" and error == "", error
+    assert unit is not None
+    _assert_original_bound_context(context, source,
+                                   [("clk","input",1),("data_in","input",width),
+                                    ("data_out","output",8)])
+    # The exact original has no functional body and an undriven8-bit output;
+    # its elaboration is not AGREE. This separate neutral companion retains
+    # the exact input declaration and adds a disclosed full-width register.
+    companion = (f"module vector_register(input clk, {declaration}, output reg [{width-1}:0] data_out);\n"
+                 "always @(posedge clk) data_out <= data_in;\nendmodule\n")
+    assert _native_port_bits(tmp_path / "companion_native", companion,
+                             ["clk","data_in","data_out"]) == {
+        "clk":1,"data_in":width,"data_out":width}
+    mutation = ("{data_in[0], data_in[1], data_in[2], data_in[3], data_in[4], "
+                "data_in[5], data_in[6], data_in[7]}" if width == 16 else None)
+    _assert_agreement_and_bit_mutation(tmp_path, companion, width, mutation)
 
 
-def test_selected_module_does_not_borrow_other_module_defaults():
+def test_selected_module_does_not_borrow_other_module_defaults(tmp_path):
     source,_ = _vector_register("","MISSING-1:0")
     source = "module unrelated #(parameter MISSING=8) (input a); endmodule\n"+source
     name,ports,error = dvh.parse_ports(source,"vector_register")
-    assert error.startswith("PORT_WIDTH_UNRESOLVED: data_in"), error
+    assert error.startswith("DIFF_PORT_ELABORATION_FAILED:") and "MISSING" in error, error
     assert name is None and ports == []
+    rc,out,err,report = _port_cli(tmp_path,source,
+                                "raise RuntimeError('reference must not load')\n")
+    assert report["reason"].startswith("port parse failed: DIFF_PORT_ELABORATION_FAILED:"), report
+    assert "MISSING" in report["reason"]
+    assert (rc,report["verdict"],out) == (2,"ERROR","")
+    assert "reference load failed" not in report["reason"]
+    assert "driven_input" not in report and "sampled_output" not in report
+    assert "n_sequences" not in report
 
 
 @pytest.mark.skipif(not _HAVE_IVERILOG,reason="NOT_MEASURED: native Icarus/vvp unavailable")
