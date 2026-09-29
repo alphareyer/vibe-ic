@@ -142,13 +142,35 @@ def evidence_of(report: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def raw_record(report: Any) -> Any:
+    """The enumeration record a report CARRIES, valid or not.
+
+    `evidence_of` answers "is there a VALID claim here" and returns None for an
+    invalid record — which, handed to a guard, made a record that says the
+    subject was FOUND indistinguishable from no record at all, and let the
+    line-level channel outrank the structure (U20 review, wave 58). A reader
+    that must tell "absent" from "present and wrong" takes this instead: None
+    only when neither the report nor its summary carries the key."""
+    if not isinstance(report, Mapping):
+        return None
+    for holder in (report, report.get("summary")):
+        if isinstance(holder, Mapping) and EVIDENCE_KEY in holder:
+            return holder.get(EVIDENCE_KEY)
+    return None
+
+
 def sentence(evidence: Mapping[str, Any], subject: str) -> str:
     """The one line a checker prints, so every one of them says it the same
-    way and a reader can tell it from an error at a glance."""
+    way and a reader can tell it from an error at a glance.
+
+    The count it prints is the record's own `found`, never a literal: a line
+    that said `found 0` over a record that found something would be the prose
+    the line-level reader accepts, contradicting the structure it came from."""
     ev = dict(evidence)
     tail = f" — {ev['detail']}" if ev.get("detail") else ""
     return (f"[{NOT_APPLICABLE_BY_STRUCTURE}] {subject}: enumerated "
-            f"{ev['scanned']} {ev['population']} and found 0 — this design "
+            f"{ev['scanned']} {ev['population']} and found "
+            f"{ev.get('found', 0)} — this design "
             f"has no such subject, so the question is ANSWERED, not "
             f"unmeasured{tail}")
 

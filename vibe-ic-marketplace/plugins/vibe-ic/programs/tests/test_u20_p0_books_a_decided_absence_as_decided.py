@@ -200,3 +200,67 @@ def test_the_v5_line_alone_is_still_not_a_declaration():
         verdict="SKIP", message=V5_SPICE_LINE,
         evidence={"exit_code": 2, "skip_kind": "input-missing"}) == \
         T.EXECUTION_ERROR
+
+
+# ── 3. round 2 (review wave 58): structure outranks prose at EVERY site ───
+#: The reviewer's probe: a report whose own record says the subject was FOUND
+#: (scanned 5, found 2), carrying a sentence that claims `found 0`.
+_LYING_GATE = '''import json, sys
+from pathlib import Path
+argv = sys.argv[1:]
+line = ("[NOT_APPLICABLE_BY_STRUCTURE] probe: enumerated 5 RTL module(s) and "
+        "found 0 — this design has no such subject, so the question is "
+        "ANSWERED, not unmeasured")
+if "--json" in argv:
+    p = Path(argv[argv.index("--json") + 1])
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "verdict": "VACUOUS_PASS",
+        "reason_class": "NOT_APPLICABLE_BY_STRUCTURE", "reason": line,
+        "summary": {"structural_absence": {"population": "RTL module(s)",
+                                           "scanned": 5, "found": 2}}}))
+print(line)
+sys.exit(RC)
+'''
+
+
+@pytest.mark.parametrize("rc", [2, 0])
+def test_a_present_record_that_found_the_subject_is_never_decided(tmp_path, rc):
+    """The sentence fallback fires ONLY when no record exists at all. A record
+    that is present and says found=2 keeps the clause non-green whatever the
+    line claims — on both the rc-2 and the rc-0 step-level sites."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    gate = tmp_path / "gates" / "probe_structural_check.py"
+    gate.parent.mkdir()
+    gate.write_text(_LYING_GATE.replace("RC", str(rc)))
+    step = {"id": "T-u20r2", "name": "probe", "stage": "stage1",
+            "gate": {"program_exit_zero": f"{gate} . --json reports/p.json"}}
+    res = F.check_step(proj, step, waivers={})
+    assert res.status not in ("PASS", "NOT_APPLICABLE"), (res.status,
+                                                          res.reasons)
+    assert not res.executed_declared_not_applicable, res.reasons
+    row = [r for r in F._GATE_LEDGER if r.get("cmd", "").startswith(str(gate))]
+    assert row and row[-1]["reason_class"] != NABS, row
+
+
+def test_the_raw_record_is_what_the_guard_sees():
+    rep = {"summary": {SA.EVIDENCE_KEY: {"population": "m", "scanned": 5,
+                                         "found": 2}}}
+    assert SA.evidence_of(rep) is None           # not a valid claim ...
+    assert SA.raw_record(rep) is not None        # ... but a PRESENT record
+    assert SA.raw_record({"summary": {}}) is None
+    assert T.infer_nonverdict_reason(
+        message=V4_LINE, explicit=NABS,
+        evidence={SA.EVIDENCE_KEY: SA.raw_record(rep)}) == T.EXECUTION_ERROR
+
+
+def test_the_sentence_prints_the_records_own_count():
+    """`sentence` never hardcodes `found 0`: a record that found something
+    produces a line the line-level reader does not accept."""
+    line = SA.sentence({"population": "modules", "scanned": 5, "found": 2},
+                       "probe")
+    assert "found 2" in line and "found 0" not in line, line
+    assert T.infer_nonverdict_reason(message=line) != NABS
+    ok = SA.sentence(SA.absence("modules", 5), "probe")
+    assert T.infer_nonverdict_reason(message=ok) == NABS

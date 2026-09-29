@@ -3350,7 +3350,8 @@ def gate_stdout_disclosures(output: str) -> List[str]:
 
 def _record_gate_execution(cmd: str, rc: Optional[int], verdict: str,
                            reason_class: Optional[str] = None,
-                           evidence: Optional[Mapping[str, Any]] = None
+                           evidence: Optional[Mapping[str, Any]] = None,
+                           message: str = ""
                            ) -> Dict[str, Any]:
     """One row per gate INVOCATION. `rc=None` means the program could not be
     launched at all — itself a distinct fact from any exit code.
@@ -3362,8 +3363,11 @@ def _record_gate_execution(cmd: str, rc: Optional[int], verdict: str,
     NOT_APPLICABLE — one gate, two answers, in the same record."""
     if verdict not in ("PASS", "FAIL", "PASS_WITH_WAIVERS",
                        _SUPERSEDED_VERDICT):
+        # U20 r2 — the SAME message the caller classified, so the row cannot
+        # re-guard a line-established class without the line.
         reason_class = _reason_taxonomy.infer_nonverdict_reason(
-            verdict=verdict, explicit=reason_class, evidence=evidence)
+            verdict=verdict, explicit=reason_class, evidence=evidence,
+            message=message)
     else:
         reason_class = _reason_taxonomy.normalise(reason_class)
     row = {"gate": _gate_name(cmd), "cmd": cmd,
@@ -3765,7 +3769,8 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
             reason_class = _reason_taxonomy.infer_nonverdict_reason(
                 verdict="VACUOUS_PASS",
                 message=report_message or legacy_message,
-                evidence={_sa.EVIDENCE_KEY: _sa.evidence_of(report)},
+                # U20 r2 — the RAW record: an invalid one must stay present
+                evidence={_sa.EVIDENCE_KEY: _sa.raw_record(report)},
                 explicit=report_cls)
         if substantive_alternate:
             pass
@@ -3948,7 +3953,8 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
             # so the two exit codes cannot drift apart again.
             reason_class = _reason_taxonomy.infer_nonverdict_reason(
                 verdict="VACUOUS_PASS", message=report_message,
-                evidence={_sa.EVIDENCE_KEY: _sa.evidence_of(report)},
+                # U20 r2 — the RAW record: an invalid one must stay present
+                evidence={_sa.EVIDENCE_KEY: _sa.raw_record(report)},
                 explicit=report_cls)
             # vibe-ic#901 — the ledger row is the GATE-granular verdict, and a
             # gate that wrote `{"verdict": "NOT_APPLICABLE"}` into the report
@@ -3986,7 +3992,8 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
                        f"{detail}")
     _ledger_row = _record_gate_execution(
         cmd_str, rc, verdict, reason_class,
-        evidence={_sa.EVIDENCE_KEY: _sa.evidence_of(report)})
+        evidence={_sa.EVIDENCE_KEY: _sa.raw_record(report)},
+        message=report_message)
     # Keep the legacy ``rc`` and ``verdict`` fields stable for existing ledger
     # consumers, and add the lossless #1980 facts without flattening #1978's
     # non-verdict classification into a generic skip.
@@ -5940,6 +5947,7 @@ def _json_report_signals_vacuous(project: Path, cmd: str) -> bool:
         return False
     reason_class = _reason_taxonomy.infer_nonverdict_reason(
         verdict="VACUOUS_PASS", message=_report_reason_text(report),
+        evidence={_sa.EVIDENCE_KEY: _sa.raw_record(report)},
         explicit=_reason_taxonomy.report_reason_class(report))
     return reason_class in _reason_taxonomy.SKIP_ELIGIBLE
 
