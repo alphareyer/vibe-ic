@@ -628,14 +628,24 @@ def publish_metal_density(project: Path, ratios: Dict[str, Any], gds: Path,
                           pdk: str) -> Optional[Path]:
     """Publish the shipped stream's per-layer density (``ratios`` from
     `measure_density_ratios`) at `METAL_DENSITY_REL`, bound to ``gds`` by
-    sha256. Only rows whose deck identifier names a metal layer are carried
-    (the reader's own layer grammar); a ratio measured on other bytes than
-    ``gds``, or two rules giving one layer two values, publishes nothing --
-    the reader then says it found no report, never a borrowed number."""
+    sha256. Call it only once the shipped bytes are decided, with ``gds`` the
+    stream that ships. Only rows whose deck identifier names a metal layer are
+    carried (the reader's own layer grammar). A ratio measured on other bytes
+    than ``gds``, or two rules giving one layer two values, publishes nothing
+    AND removes any report already at `METAL_DENSITY_REL`: the precheck reader
+    does not compare `gds_sha256`, so a report left behind would be judged as
+    the shipped stream's. With no report there, the runner's own emitter
+    measures the shipped GDS, or the reader says it found none."""
     import metal_layer_density_check as _mld
     gds = Path(gds)
-    if not gds.is_file() or ratios.get('subject_sha256') != digest(gds):
+    out = project / METAL_DENSITY_REL
+
+    def declined() -> None:
+        out.unlink(missing_ok=True)
         return None
+
+    if not gds.is_file() or ratios.get('subject_sha256') != digest(gds):
+        return declined()
     layers: Dict[str, float] = {}
     rules: Dict[str, str] = {}
     for rule, row in sorted((ratios.get('layers') or {}).items()):
@@ -646,10 +656,10 @@ def publish_metal_density(project: Path, ratios: Dict[str, Any], gds: Path,
             continue
         key = name.lower()
         if key in layers and layers[key] != value:
-            return None
+            return declined()
         layers[key], rules[key] = value, rule
     if not layers:
-        return None
+        return declined()
     report = Path(str(ratios.get('report') or ''))
     try:
         die_area = _load(report).get('die_area_um2') if report.is_file() else None
@@ -659,7 +669,6 @@ def publish_metal_density(project: Path, ratios: Dict[str, Any], gds: Path,
         gds_record = gds.resolve().relative_to(project.resolve()).as_posix()
     except ValueError:
         gds_record = str(gds)
-    out = project / METAL_DENSITY_REL
     out.parent.mkdir(parents=True, exist_ok=True)
     write_json(out, {
         'tool': 'klayout', 'producer': 'librelane_fill_dfm.measure_density_ratios',

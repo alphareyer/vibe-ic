@@ -16,6 +16,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
@@ -33,14 +34,25 @@ def _sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def _promote(tmp_path, monkeypatch, ratios_for=None):
-    """Drive the real `librelane_step37.run`; only the EDA tools' writes are
-    faked (each LibreLane step's state_out.json and the density-ratio lane
-    report with the measured subservient rows)."""
+def _promote(tmp_path, monkeypatch, ratios_for=None, mode="librelane",
+             direct_drc=None, stale=None):
+    """Drive the real `phase3_one_shot_runner.step_gds` (step 37 on LibreLane,
+    or `dual`) and through it the real `librelane_step37.run` and, in dual,
+    the real `execute_dual` selection. Only the EDA tools' writes are faked:
+    each LibreLane step's state_out.json, the per-arm DRC counts, the direct
+    stream's bytes and the density-ratio lane report (the measured subservient
+    rows). ``stale`` seeds an earlier round's report at the canonical path."""
+    import librelane_contract as contract
     import librelane_pv_signoff as pv
+    import drc_feedback_repair as feedback
+    import phase3_one_shot_runner as runner
 
     project = tmp_path / "project"
-    project.mkdir()
+    pnr = runner._pl.pnr_dir(project)
+    pnr.mkdir(parents=True)
+    routed = pnr / "routed.def"
+    routed.write_text("VERSION 5.8 ;\nDESIGN chip_top ;\nEND DESIGN\n")
+    (pnr / "chip_top.def").write_bytes(routed.read_bytes())
     root, cfg = _pdk(tmp_path)
     configs = {step: cfg for step in step37.STEPS}
     source = project / "source.gds"
@@ -50,16 +62,41 @@ def _promote(tmp_path, monkeypatch, ratios_for=None):
     filled = project / "filled.gds"
     filled.write_bytes(b"sealed plus pdk fill")
     state = _put(project / "state.json", {"gds": str(source)})
-    routed = project / "routed.def"
-    routed.write_text("DEF")
+    if stale is not None:
+        _put(project / fill.METAL_DENSITY_REL, stale)
+    monkeypatch.setattr(contract, "selected_mode", lambda *_a: mode)
+    monkeypatch.setattr(contract, "resolve_image", lambda *_a: "image")
+    monkeypatch.setattr(contract, "resolve_pdk_root", lambda *_a, **_k: root)
+    monkeypatch.setattr(runner, "_layout_basis", lambda *_a: ("basis", None))
+    monkeypatch.setattr(runner._ga, "gate_passed", lambda *_a: True)
+    monkeypatch.setattr(runner, "_vacuous_on_unrouted", lambda *_a: None)
+    monkeypatch.setattr(feedback, "has_reviewed_rule", lambda *_a: False)
+    monkeypatch.setattr(runner, "_streamout_top", lambda *_a: ("chip_top", ""))
+    monkeypatch.setattr(runner, "publish_database_unit_declaration", lambda *_a: None)
+    monkeypatch.setattr(runner, "publish_tapeout_declarations", lambda *_a: None)
+    monkeypatch.setattr(runner, "_gds_substance_gate", lambda *_a: None)
+    monkeypatch.setattr(runner, "_log_invocation", lambda *_a, **_k: None)
+
+    def direct(*_a, **_k):
+        (pnr / "chip_top.gds").write_bytes(b"direct stream, direct fill")
+        return runner.StepResult("gds", "PASS", 0, "direct stream",
+                                 extras={"streamout_engine": "magic"})
+
+    monkeypatch.setattr(runner, "_step_gds_direct", direct)
+    monkeypatch.setattr(contract, "resolve_step_configs", lambda *a, **k: configs)
     monkeypatch.setattr(step37, "resolve_step_configs", lambda *a, **k: configs)
     monkeypatch.setattr(step37, "declaration_config", lambda *a: (
         {"CORE_AREA": [10, 10, 90, 90]}, {"CORE_AREA": "test declaration"}))
     monkeypatch.setattr(step37, "_routed_state", lambda *a: state)
     monkeypatch.setattr(step37, "_vibeic_gds_gates", lambda *a: {
         "substance": {"rc": 0, "sha256": "x"}, "port_labels": {"rc": 0, "sha256": "x"}})
-    monkeypatch.setattr(step37, "_measured_drc", lambda *a: {
-        "magic": 0, "klayout": 0, "total": 0})
+
+    def drc(project, image, pdk_root, pdk, state, lane, configs):
+        total = (direct_drc if lane == "37-dual-direct" and direct_drc is not None
+                 else 3 if lane == "37-dual-librelane" else 0)
+        return {"magic": total, "klayout": 0, "total": total}
+
+    monkeypatch.setattr(step37, "_measured_drc", drc)
     monkeypatch.setattr(pv, "tech_lef_overlay", lambda *a: None)
     monkeypatch.setattr(pv, "run_finishing_xor", lambda *a, **k: {"verdict": "PASS"})
 
@@ -96,11 +133,10 @@ def _promote(tmp_path, monkeypatch, ratios_for=None):
         return folders
 
     monkeypatch.setattr(step37, "_run", eda_run)
-    canonical = project / "phase3/stage4/gds/chip_top.gds"
-    canonical.parent.mkdir(parents=True)
-    result = step37.run(project, "image", root, "processA", routed,
-                        project / "routed.v", project / "routed.sdc", canonical)
-    return project, canonical, result
+    row = runner.step_gds(project, "chip_top",
+                          SimpleNamespace(name="gf180mcuD", drc_deck=None), "unused")
+    assert row.status == "PASS", row.detail
+    return project, pnr / "chip_top.gds", row
 
 
 def _precheck_density(project):
@@ -113,7 +149,7 @@ def _precheck_density(project):
 
 def test_precheck_reads_the_density_fill_measured_on_the_shipped_stream(
         tmp_path, monkeypatch):
-    project, canonical, result = _promote(tmp_path, monkeypatch)
+    project, shipped, row = _promote(tmp_path, monkeypatch)
     # The lane report exists either way; the question is whether the reader's
     # one place carries it.
     assert list((project / "phase3/librelane").glob("37-*-density-ratios/density_ratios.json"))
@@ -121,21 +157,47 @@ def test_precheck_reads_the_density_fill_measured_on_the_shipped_stream(
     assert "no density report" not in ev.evidence, ev.evidence
     assert ev.verdict in (GP.PASS, GP.FAIL), (ev.verdict, ev.evidence)
     published = json.loads((project / fill.METAL_DENSITY_REL).read_text())
-    assert published["gds_sha256"] == _sha(canonical)
+    assert published["gds_sha256"] == _sha(shipped)
     rows = MEASURED["layers"]
     assert published["layers"] == {rows[r]["identifier"]: rows[r]["ratio"]
                                    for r in ("M1.4", "M2.4", "M3.4", "M4.4", "M5.4")}
-    promo = json.loads(Path(result["promotion"]).read_text())
-    assert promo["metal_density"] == str(project / fill.METAL_DENSITY_REL)
     # The delegate judged exactly those layers.
     judged = json.loads((project / "reports/phase3/general_precheck/"
                          "precheck_density.json").read_text())
     assert set(judged.get("per_layer") or {}) == set(published["layers"]), judged
 
 
-def test_a_ratio_measured_on_other_bytes_is_not_published(tmp_path, monkeypatch):
-    project, _canonical, _result = _promote(
-        tmp_path, monkeypatch, ratios_for=lambda g: "0" * 64)
+STALE = {"gds": "phase3/stage3/pnr/chip_top.gds", "gds_sha256": "f" * 64,
+         "layers": {f"metal{i}": 0.5 for i in range(1, 6)}}
+
+
+def test_dual_shipping_the_direct_stream_leaves_no_librelane_bound_report(
+        tmp_path, monkeypatch):
+    """dual, direct arm measures fewer DRC errors -> `openroad` ships. The
+    LibreLane winner's density must not stand for the direct bytes, and an
+    earlier round's report there must not either."""
+    project, shipped, row = _promote(tmp_path, monkeypatch, mode="dual",
+                                     direct_drc=0, stale=STALE)
+    assert row.extras["dual_selection"] == "openroad"
+    assert shipped.read_bytes() == b"direct stream, direct fill"
+    report = project / fill.METAL_DENSITY_REL
+    assert not report.exists() or (
+        json.loads(report.read_text()).get("gds_sha256") == _sha(shipped)), \
+        report.read_text()
+    assert GP.PASS != _precheck_density(project).verdict
+
+
+def test_dual_shipping_the_librelane_stream_publishes_it(tmp_path, monkeypatch):
+    project, shipped, row = _promote(tmp_path, monkeypatch, mode="dual",
+                                     direct_drc=9, stale=STALE)
+    assert row.extras["dual_selection"] == "librelane"
+    published = json.loads((project / fill.METAL_DENSITY_REL).read_text())
+    assert published["gds_sha256"] == _sha(shipped)
+
+
+def test_a_declined_publish_removes_a_stale_report(tmp_path, monkeypatch):
+    project, _shipped, _row = _promote(
+        tmp_path, monkeypatch, ratios_for=lambda g: "0" * 64, stale=STALE)
     assert not (project / fill.METAL_DENSITY_REL).exists()
     ev = _precheck_density(project)
     assert ev.verdict not in (GP.PASS,), ev.evidence
@@ -144,6 +206,7 @@ def test_a_ratio_measured_on_other_bytes_is_not_published(tmp_path, monkeypatch)
 def test_two_values_for_one_layer_publish_nothing(tmp_path):
     gds = tmp_path / "chip.gds"
     gds.write_bytes(b"x")
+    _put(tmp_path / fill.METAL_DENSITY_REL, STALE)
     ratios = {"subject_sha256": _sha(gds), "layers": {
         "M1.4": {"status": "MEASURED", "identifier": "metal1", "ratio": 0.4},
         "M1.9": {"status": "MEASURED", "identifier": "metal1", "ratio": 0.5}}}
