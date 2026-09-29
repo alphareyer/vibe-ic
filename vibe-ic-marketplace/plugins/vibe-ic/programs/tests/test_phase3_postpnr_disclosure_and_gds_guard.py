@@ -216,6 +216,8 @@ def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
     reports = R._pl.sta_dir(tmp_path) / "per_corner"
     reports.mkdir(parents=True, exist_ok=True)
     netlist = synth / f"{TOP}_synth.v"
+    slow_lib = tmp_path / "slow.lib"
+    slow_lib.write_text("library (slow) { }\n")
     (reports / "sta_SS.rpt").write_text(
         "Startpoint: in_a (input port clocked by clk)\n"
         "Endpoint: out_z (output port clocked by clk)\n"
@@ -223,7 +225,15 @@ def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
         "          0.43   slack (MET)\n\n"
         "STA_BASIS: PRE_LAYOUT_ESTIMATE\n"
         f"STA_BASIS_NETLIST_SHA256: sha256:{_prelayout.digest(netlist)}\n"
-        f"STA_BASIS_SDC_SHA256: sha256:{_prelayout.digest(sdc)}\n")
+        f"STA_BASIS_SDC_SHA256: sha256:{_prelayout.digest(sdc)}\n"
+        # U8 binds the SS report to the matrix's PVT row and the Liberty's
+        # bytes; stamp them exactly as Step 10's producer does
+        # (librelane_prelayout STA_BASIS_* summary lines).
+        f"STA_BASIS_LIBERTY: {slow_lib}\n"
+        f"STA_BASIS_LIBERTY_SHA256: "
+        f"{R._prelayout_liberty_identity(slow_lib, '')[1]}\n"
+        "STA_BASIS_CORNER: SS\n"
+        "STA_BASIS_PVT_NAME: slow\n")
     _ctx = dict(project=tmp_path, pdk=_pdk(tmp_path), container="",
                 top=TOP, args=_IdentityArgs())
     _seed_recording("synth")
