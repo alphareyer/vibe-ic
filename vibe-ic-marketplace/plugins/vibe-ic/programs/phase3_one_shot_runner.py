@@ -59118,6 +59118,12 @@ def run_step13_lec_on_pnr_input(project: Path, top: str,
     `reports/lec.json:proof_identity.gate_netlist` differs from step 15's
     input (or no proof exists), so a current proof — including one the
     step-11 self-heal just made — is left alone and costs nothing.
+
+    A current proof still retires the not-run record it supersedes (P2LECIN
+    follow-up): phase 2's `reports/lec_not_run.json` is false once the proof
+    binds step 15's input, and a tree written before step 13 retired it on
+    its own PASS row still carries one; the removal is printed to the run
+    log. A re-proof retires it on its own PASS row.
     """
     t0 = time.time()
     import sys as _sys
@@ -59131,6 +59137,12 @@ def run_step13_lec_on_pnr_input(project: Path, top: str,
     binding = _gns.proof_subject_binding(project, doc, top)
     state = binding.get("state")
     if state == _gns.BINDING_MATCH:
+        import lec_equivalence_check as _lec_gate
+        _retired = _lec_gate.retire_superseded_not_run(project)
+        if _retired:
+            # No row: the step is unchanged (the proof stands). The removal
+            # itself goes in the run log rather than happening silently.
+            print(f"[lec] {_retired}", flush=True)
         return []
     if state == _gns.BINDING_NO_CONSUMER:
         return [StepResult(

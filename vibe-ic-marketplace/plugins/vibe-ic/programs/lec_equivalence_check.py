@@ -112,6 +112,7 @@ from lec_gate_netlist_select import (  # noqa: E402 — F1 subject binding
     BINDING_STALE as _B_STALE,
     BINDING_UNBOUND as _B_UNBOUND,
     BINDING_SCAN_UNCONSTRAINED as _B_SCAN_UNCONSTRAINED,
+    BINDING_MATCH as _B_MATCH,
 )
 
 GATE = "lec_equivalence_check"
@@ -119,6 +120,10 @@ GATE = "lec_equivalence_check"
 # Relative artefact locations (per flow step13-lec required_outputs).
 LEC_JSON_REL = "reports/lec.json"
 LEC_RPT_REL = "reports/lec.rpt"
+#: Step 13's own disclosure that it did not prove anything this time
+#: (`design_one_shot_runner.step_lec_equivalence` writes it; verdict
+#: SKIPPED-CONDITION). See `retire_superseded_not_run`.
+LEC_NOT_RUN_REL = "reports/lec_not_run.json"
 
 # ---- field-name alias panels (lower-cased exact-key match) ----------------
 _EQUIV_BOOL_KEYS = (
@@ -927,6 +932,82 @@ def audit(project: Path) -> AuditResult:
     # added no findings. That path is already covered: findings is empty and
     # rule (e) did not fire because rpt_success_line is True.
     return res
+
+
+# ---------------------------------------------------------------------------
+# The not-run record a bound proof supersedes
+# ---------------------------------------------------------------------------
+# P2LECIN follow-up. On a from-documents run phase 2 reaches step 13 before
+# phase 3's synthesis half has written the netlist step 15 routes, so step 13
+# records NOT_MEASURED (input_absent) and writes `LEC_NOT_RUN_REL`
+# (verdict SKIPPED-CONDITION). Phase 3 then proves that netlist and
+# `reports/lec.json` binds it. The record stayed on disk: nothing reads it by
+# name, but the directory-level self-skip scans read every `*.json` in
+# `reports/` (flow_compliance_check `_sibling_self_skip_for_missing`,
+# flow_dashboard_data `_disclosed_skip`) and would publish the phase-2
+# "not measured" beside a proof that settled it.
+#
+# "Superseded" is THIS gate's answer, not a second rule: `audit` passes the
+# proof (equivalent, points proven, none unproven or non-equivalent) AND its
+# sha256 binds the netlist step 15 routes (MATCH). A stale proof, a
+# non-equivalent result, an inconclusive one or no proof at all supersedes
+# nothing, so a real not-run still reports NOT_MEASURED.
+
+
+def bound_proof(project: Path) -> Optional[dict]:
+    """The subject binding of the Step-13 proof on disk when that proof
+    settles step 13 -- `audit(...).passed` and binding state MATCH -- else
+    None. Never raises: an unanswerable question supersedes nothing."""
+    project = Path(project)
+    if not (project / LEC_JSON_REL).is_file():
+        return None
+    try:
+        res = audit(project)
+    except Exception:  # noqa: BLE001 — fail closed: the not-run stands
+        return None
+    binding = res.summary.get("subject_binding") or {}
+    if res.passed and binding.get("state") == _B_MATCH:
+        return binding
+    return None
+
+
+def lec_not_run_superseded(project: Path, record: Path) -> Optional[str]:
+    """Reader side: why `record` no longer speaks for step 13, or None.
+
+    Non-None only when `record` IS step 13's not-run record and a bound proof
+    exists; every other file -- another step's skip record in the same
+    directory included -- is not this proof's to excuse."""
+    project = Path(project)
+    try:
+        if Path(record).resolve() != (project / LEC_NOT_RUN_REL).resolve():
+            return None
+    except OSError:
+        return None
+    binding = bound_proof(project)
+    if binding is None:
+        return None
+    return (f"{LEC_NOT_RUN_REL} is superseded by {LEC_JSON_REL}, a passing "
+            f"proof bound to {binding.get('consumer_path')} "
+            f"({binding.get('consumer_sha256')}), the netlist step 15 routes")
+
+
+def retire_superseded_not_run(project: Path) -> Optional[str]:
+    """Writer side: remove step 13's not-run record once a bound proof
+    supersedes it, and say so. Returns the note, or None when nothing was
+    retired (no record, or no bound proof -- a real not-run is kept). Never
+    raises: hygiene must not break a successful step."""
+    project = Path(project)
+    record = project / LEC_NOT_RUN_REL
+    if not record.is_file():
+        return None
+    note = lec_not_run_superseded(project, record)
+    if note is None:
+        return None
+    try:
+        record.unlink()
+    except OSError:
+        return None
+    return f"retired {note}"
 
 
 # ---------------------------------------------------------------------------
