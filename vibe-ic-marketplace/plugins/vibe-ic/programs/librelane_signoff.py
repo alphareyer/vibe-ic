@@ -434,10 +434,17 @@ def _liberty_host_path(project: Path, liberty: str,
     provenance = project / 'phase3/librelane_pdk_root.provenance.json'
     try:
         doc = _load(provenance)
-        if expected_image and doc.get('derivation', {}).get('image') != expected_image:
+        derivation = doc.get('derivation') or {}
+        # A DECLARED root (switch `pdk_root_host` / VIBEIC_LIBRELANE_PDK_ROOT)
+        # carries no image; its bytes are still bound, because every caller
+        # compares the mapped file's sha256 with the one the run recorded.
+        # An image-DERIVED root must be the image this run used.
+        if (expected_image and doc.get('source') != 'declared'
+                and derivation.get('image') != expected_image):
             return None
         root = Path(doc['path'])
-        pdk = doc.get('derivation', {}).get('pdk')
+        pdk = derivation.get('pdk') or (doc.get('pdk') if doc.get('source') == 'declared'
+                                        else None)
         guest = f'/pdk/{pdk}' if pdk else None
         if guest and (liberty == guest or liberty.startswith(guest + '/')):
             mapped = root / pdk / liberty[len(guest):].lstrip('/')

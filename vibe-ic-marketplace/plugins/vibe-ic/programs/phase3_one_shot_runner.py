@@ -36610,6 +36610,106 @@ def _record_physical_view_inventory(project: Path, pnr_tcl: str) -> Path:
     return out
 
 
+def _recorded_run_path(project: Path, value: str) -> Path:
+    """A path a record wrote, re-rooted at `project` when the run tree moved.
+
+    Records carry absolute paths of the tree they were written in. A copied
+    or relocated run keeps its `phase3/` / `reports/` component, so a path
+    through one of those folders is re-rooted there; any other path (a PDK
+    file) is returned as it was written."""
+    path = Path(value)
+    if not path.is_absolute() or path.is_relative_to(project):
+        return path if path.is_absolute() else project / path
+    parts = path.parts
+    for i, part in enumerate(parts):
+        if part in ("phase3", "reports"):
+            return project.joinpath(*parts[i:])
+    return path
+
+
+def _restore_recorded_physical_views(project: Path, pdk: PdkConfig,
+                                     container: str) -> Dict[str, Any]:
+    """Give a process that did NOT run place-and-route the physical views
+    the routed layout was built with, from the run's own records.
+
+    Place-and-route changes the PDK object IN MEMORY: the via-legalized tech
+    LEF replaces the distribution one (`_stage_via_legalized_tech_lef`) and
+    the pad library's LEF/GDS views are appended on the chip path
+    (`_prepare_padring_for_route`). A later process that starts from
+    `_detect_pdk` -- a bounded `--entry-step 31` window, a re-run of one
+    sign-off step -- has none of that. MEASURED on spm x gf180mcuD
+    (2026-09-29): step 31 in such a process read no IO LEF, Magic loaded all
+    44 pad masters as their full library layouts, the power-aware compares
+    mismatched and the plain compare crashed netgen (rc 139); the same DEF
+    matched uniquely inside the run that routed it.
+
+    Restores only what a record states, verified:
+      * the tech LEF, when `reports/pdk_via_patch_legalization.json` says
+        APPLIED and the staged file's sha256 is the recorded one;
+      * every LEF PnR read (`physical_view_inventory.json`) that is not the
+        tech LEF or the standard-cell LEF, as a macro LEF;
+      * the pad library's GDS views, through the same resolver PnR used,
+        when the run placed a pad ring.
+    Returns what it did, for the caller to disclose. Chip-agnostic."""
+    done: Dict[str, Any] = {"tech_lef": None, "macro_lefs": [],
+                            "macro_gds": [], "notes": []}
+    if not all(hasattr(pdk, a) for a in ("tech_lef", "cell_lef",
+                                         "macro_lefs", "macro_gds")):
+        done["notes"].append("no PDK physical views to restore")
+        return done
+    legal = project / "reports/pdk_via_patch_legalization.json"
+    try:
+        doc = json.loads(legal.read_text()) if legal.is_file() else {}
+    except (OSError, ValueError):
+        doc = {}
+    derived: Optional[str] = None
+    if doc.get("status") == "APPLIED" and doc.get("derived_tech_lef"):
+        staged = _recorded_run_path(project, str(doc["derived_tech_lef"]))
+        derived = str(staged)
+        if staged.is_file() and _sha256_file(staged) == doc.get("derived_sha256"):
+            if str(pdk.tech_lef) != str(staged):
+                pdk.tech_lef_source = pdk.tech_lef_source or pdk.tech_lef
+                pdk.tech_lef = str(staged)
+            done["tech_lef"] = str(staged)
+        else:
+            # The layout was routed with a tech LEF this tree cannot prove it
+            # still holds. Neither LEF is the one PnR used, so the caller
+            # refuses instead of measuring with either.
+            done["refused"] = (
+                f"the via-legalized tech LEF PnR used ({staged}) is "
+                f"{'absent' if not staged.is_file() else 'not the recorded bytes'} "
+                f"(reports/pdk_via_patch_legalization.json sha256 "
+                f"{doc.get('derived_sha256')})")
+    inventory = project / PHYSICAL_VIEW_INVENTORY_REL
+    try:
+        recorded = (json.loads(inventory.read_text()).get("read_lef_paths")
+                    if inventory.is_file() else None) or []
+    except (OSError, ValueError, AttributeError):
+        recorded = []
+    base = {str(pdk.tech_lef), str(pdk.cell_lef),
+            str(pdk.tech_lef_source or "")}
+    for value in recorded:
+        path = str(_recorded_run_path(project, str(value)))
+        # The recorded tech LEF is never a macro LEF -- verified or not.
+        if (path in base or path == derived
+                or Path(path).name == Path(str(pdk.tech_lef)).name):
+            continue
+        if path not in pdk.macro_lefs:
+            pdk.macro_lefs.append(path)
+            done["macro_lefs"].append(path)
+    if _padring_chip_top_record(project) is not None and container:
+        try:
+            _lefs, io_gds = _discover_padring_io_views(pdk, container)
+        except (RuntimeError, ValueError, OSError) as exc:
+            done["notes"].append(f"pad library GDS views not resolved: {exc}")
+            io_gds = []
+        for view in io_gds:
+            if view not in pdk.macro_gds:
+                pdk.macro_gds.append(view)
+                done["macro_gds"].append(view)
+    return done
+
+
 def _inject_padring_chip_top(full_pnr_tcl: str, chip_top_v_c: str,
                              chip_top: str, core: str) -> str:
     """Elaborate the PAD-CARRYING chip top instead of the bare core.
@@ -48330,6 +48430,37 @@ def _pad_ring_route_cache_valid(project: Path, top: str) -> bool:
         return False
 
 
+#: The plan rows the Step-32 producers append (LibreLane, the SPEF repair,
+#: the DRV wire-length escalation).
+_STEP32_ROW_NAMES = frozenset({"postroute_repair_librelane",
+                               "signoff_spef_repair",
+                               "signoff_drv_wire_length_repair"})
+
+
+def _step32_stream_refusal(project: Path, top: str,
+                           row: Optional["StepResult"]) -> str:
+    """Why Step 32's outcome stops stream-out -- "" when the tail continues.
+
+    R-0929-TAIL-CONTINUES (IC_BLOCKER_AUDIT 2026-09-29, spm #2): `_chain_ok`
+    used to be `row.status == "PASS"` for every Step-32 producer, so a MEASURED
+    Step-32 FAIL (residual DRV the repair could not close) stopped stream-out
+    and no run ever measured Steps 23-38 on the route it would ship. The row's
+    FAIL is kept in the plan and keeps the run FAIL; only a missing or empty
+    routed input -- nothing to stream -- stops the tail, and then the refusal
+    names Step 32 as the upstream."""
+    if row is None or row.status == "PASS":
+        return ""
+    pnr = _pl.pnr_dir(project)
+    views = (pnr / "routed.def", pnr / f"{top}.def",
+             pnr_input_netlist(project, top)[0])
+    missing = [p.name for p in views
+               if not p.is_file() or not p.stat().st_size]
+    if not missing:
+        return ""
+    return (f"step 32 ({row.name} {row.status}) left no usable routed "
+            f"input: {', '.join(missing)} absent")
+
+
 def _pnr_chain_continues(pnr_row: Optional["StepResult"]) -> bool:
     """Did PnR leave the downstream physical chain its inputs?
 
@@ -49343,9 +49474,13 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
                               reason_class=_V.ReasonClass.NOT_EXECUTED.value)
     else:
         digest, refusal = _layout_basis(project, top, pdk, container)
-        if refusal or not _ga.gate_passed(project, digest):
+        # R-0929-TAIL-CONTINUES: a measured pre-stream FAIL streams (never
+        # admitted); only an absent/unidentified route is refused here.
+        refusal = refusal or _ga.stream_refusal(project, digest)
+        if refusal:
             return StepResult("gds", "NOT_MEASURED", 0.0,
-                              f"pre-stream gate refused this layout: {refusal or digest}",
+                              f"pre-stream gate refused this layout: {refusal}; "
+                              f"layout_digest={digest}",
                               reason_class=_V.ReasonClass.UPSTREAM_FAILED)
     _vac = _vacuous_on_unrouted(project, "gds", t0)
     if _vac is not None:
@@ -49894,9 +50029,11 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
                           reason_class=(stopped or ""))
 
     digest, refusal = _layout_basis(project, top, pdk, container)
-    if refusal or not _ga.gate_passed(project, digest):
+    refusal = refusal or _ga.stream_refusal(project, digest)
+    if refusal:
         return StepResult("gds", "NOT_MEASURED", time.time() - t0,
-                          f"pre-stream gate refused this layout: {refusal or digest}",
+                          f"pre-stream gate refused this layout: {refusal}; "
+                          f"layout_digest={digest}",
                           reason_class=_V.ReasonClass.UPSTREAM_FAILED)
     vacuous = _vacuous_on_unrouted(project, "gds", t0)
     if vacuous is not None:
@@ -55235,6 +55372,48 @@ def _run_extraction_lvs(project: Path, top: str, pdk: PdkConfig,
     ext_log = ext_dir / "ext2spice.log"
     ext_log_txt = ext_log.read_text(errors="replace") if ext_log.is_file() \
         else (out or "")
+    # THE EXTRACTION MUST HAVE READ EVERY PLACED MASTER AS THE ABSTRACT THE
+    # FLOW SUPPLIED. A master no LEF defined is loaded by Magic from its cell
+    # path as the library's FULL layout (`Cell <m> read from path <dir>`), and
+    # the netlist it writes describes a transistor-level cell the compare was
+    # never meant to see. MEASURED on spm x gf180mcuD (2026-09-29): 44 pad
+    # masters extracted that way, two power-aware mismatches, then netgen rc
+    # 139 on the plain compare. Not a verdict about the design -- the input
+    # of the compare was wrong -- so NOT_MEASURED, naming the masters, and
+    # netgen does not run. See lvs_layout_view_census.
+    import lvs_layout_view_census as _lvc
+    import instrument_calibration as _ic
+    try:
+        _lib_views = _lvc.masters_read_from_library(
+            ext_log_txt, _lvc.def_component_masters(
+                extract_def.read_text(errors="replace")))
+    except _ic.Uncalibrated as exc:
+        _lib_views = None
+        _lib_view_why = f"library-view census uncalibrated: {exc}"
+    except OSError as exc:
+        _lib_views = None
+        _lib_view_why = f"extraction DEF unreadable: {exc}"
+    if _lib_views is None or _lib_views:
+        if _lib_views:
+            _names = sorted(_lib_views)
+            _lib_view_why = (
+                f"{len(_names)} placed master(s) were extracted from their "
+                f"library layouts, not from the LEF abstracts the flow "
+                f"supplies (no LEF defining them was read): "
+                f"{', '.join(_names[:8])}{' …' if len(_names) > 8 else ''}")
+        verdict = _write_lvs_verdict(
+            project, "INCOMPLETE", "LVS_EXTRACTION_VIEW_NOT_ABSTRACT",
+            f"{_lib_view_why}. netgen was NOT run -- the extracted netlist is "
+            f"not the layout the compare is defined over.",
+            extras={"library_layout_masters": _lib_views or {},
+                    "ext2spice_log": "phase3/stage3/extracted/ext2spice.log"})
+        return StepResult(
+            "lvs", "NOT_MEASURED", time.time() - t0,
+            f"LVS not measured: {_lib_view_why}",
+            extras={"finding": "LVS_EXTRACTION_VIEW_NOT_ABSTRACT",
+                    "library_layout_masters": _lib_views or {},
+                    "lvs_verdict": verdict},
+            reason_class=_V.ReasonClass.INPUT_ABSENT)
     ext_err_count = _parse_ext2spice_error_count(ext_log_txt)
     ext_warning: Optional[str] = None
     # v1.4.x — never let the collapse guard go silently blind. If the log talks
@@ -57817,12 +57996,19 @@ def run_pre_audit_producers(project: Path, container: str = "", *,
             sources = _handoff_check.layout_member_sources(project)
             if ((_ga.visible_gds(project) or _ga.gate_record(project))
                     and not _ga.admitted_package_sources(project, sources)):
-                _ga.quarantine_visible_gds(
-                    project, "foundry handoff: current layout admission absent")
+                # A measurement-only stream (R-0929-TAIL-CONTINUES) is never
+                # packaged, but it is the GDS the tail steps just measured and
+                # stays where they read it; any older kit is still set aside.
+                if not _ga.measurement_stream_current(project):
+                    _ga.quarantine_visible_gds(
+                        project, "foundry handoff: current layout admission absent")
                 _ga.quarantine_handoff_package(
                     project, "foundry handoff: current layout admission absent")
                 rows.append(_upstream_signoff_not_measured(
-                    name, "current digest-bound GDS admission absent"))
+                    name, "current digest-bound GDS admission absent"
+                    + ("; the stream is measurement-only (a non-PASS Step 32 "
+                       "or pre-stream gate)" if _ga.measurement_stream_current(project)
+                       else "")))
                 continue
         argv = tuple(extra_argv)
         if container and name in _PDK_AWARE_SIGNOFF_GATES:
@@ -63985,8 +64171,14 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                     # (32 -> 34 -> 37) and consume the repair by construction.
                     # Physical verification is therefore no longer stale after
                     # a repair; it is downstream of it (T109c).
-                    "affected_steps": [21, 22, "DT2", "DT3", 23, 24, 25, 26,
-                                       "26.5ic", 27, 28, 29, 30, 33],
+                    # R-0929-TAIL-CONTINUES moved 23-30 (and so 26.5ic, 28, 33)
+                    # the same way: the runner measures them in the pre-stream
+                    # pass on the route Step 32 hands on, so the flow now says
+                    # they `blocks_on` 32 and 32 `blocks_on [22]` (it reads the
+                    # post-PnR extraction). What the repair leaves stale is the
+                    # route and extraction it started from, and the DFT steps
+                    # that read that extraction.
+                    "affected_steps": [21, 22, "DT2", "DT3"],
                     "repair_before": _repair_decision["repair_before"],
                     "repair_after": _repair_after,
                     "residual_violation": _repair_residual,
@@ -75899,8 +76091,11 @@ def _run_derived_artefact_generators(project: Path, effective_top: Optional[str]
             sources = _handoff_check.layout_member_sources(project)
             if ((_ga.visible_gds(project) or _ga.gate_record(project))
                     and not _ga.admitted_package_sources(project, sources)):
-                _ga.quarantine_visible_gds(
-                    project, "foundry handoff: current layout admission absent")
+                # R-0929-TAIL-CONTINUES: a measurement-only stream stays
+                # where the tail read it; it is never packaged.
+                if not _ga.measurement_stream_current(project):
+                    _ga.quarantine_visible_gds(
+                        project, "foundry handoff: current layout admission absent")
                 _ga.quarantine_handoff_package(
                     project, "foundry handoff: current layout admission absent")
                 print("[WARN] foundry handoff skipped: current digest-bound "
@@ -76945,7 +77140,32 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     site_before = before
     window_gate = _spf.gate
     window_ids = set(_phase3_window_steps(args.entry_step, args.exit_step))
+    _views: Dict[str, Any] = {}
+    if not set(selected) & {"pnr", "enclosing_pnr", "enclosing_phase3"}:
+        # A window that routes again -- the `pnr` site, or a partial-PnR /
+        # whole-phase window dispatched as `enclosing_*`, which runs step_pnr
+        # in this process -- derives its views itself and must start from the
+        # distribution PDK. Otherwise this process did not route the layout it
+        # now streams or checks: the
+        # PDK object PnR changed in memory (via-legalized tech LEF, pad-library
+        # views) is rebuilt from the run's own records BEFORE anything reads
+        # it -- the admission basis below hashes it, and step 31 extracts with
+        # it. Without this every such window was refused ("unadmitted routed
+        # GDS"), and a direct step-31 call extracted the pads as full library
+        # layouts (see `_restore_recorded_physical_views`).
+        _views = _restore_recorded_physical_views(project, pdk, args.container)
+        print(f"[phase3] window: physical views restored from the run's "
+              f"records: tech_lef={_views['tech_lef']}, "
+              f"{len(_views['macro_lefs'])} LEF, "
+              f"{len(_views['macro_gds'])} GDS"
+              + (f"; {'; '.join(_views['notes'])}" if _views["notes"] else ""))
     for site in selected:
+        if _views.get("refused"):
+            rows.append(StepResult(
+                site, "NOT_MEASURED", 0.0,
+                f"window refused: {_views['refused']}",
+                reason_class=_V.ReasonClass.MISSING_ARTEFACT))
+            break
         # A narrower numeric window can omit a producer between two selected
         # sites (for example PnR 15..22 and PV 31, with GDS 37 omitted).
         # Never sign off the old GDS after this run changed the routed DEF.
@@ -77543,6 +77763,7 @@ def main() -> int:
     is_pure_analog, pa_reason = _is_pure_analog_no_rtl_track(project)
     _layout_refusal = ""
     _prestream_refusal = ""
+    _measurement_only = ""
     _frozen_digest = ""
     if _mount_preflight_failed:
         msg = (f"container mount-coverage preflight FAILED: project path "
@@ -77879,12 +78100,16 @@ def main() -> int:
         # T102 -- step 32 on LibreLane (`phase3/librelane_switch.json` "32")
         # replaces the two direct repair producers below.
         _prr_on_librelane = _librelane_postroute_repair_mode(project) != "direct"
+        # R-0929-TAIL-CONTINUES: a Step-32 row that is not PASS is recorded and
+        # keeps the run FAIL; it stops the tail only when it left no route.
+        _step32_refusal = ""
         if _chain_ok and _prr_on_librelane:
             _prr = _recorded(("pnr", "gds"), step_postroute_repair_librelane)(
                 project, effective_top, pdk, args.container)
             if _prr is not None:
                 plan.append(_prr)
-                _chain_ok = _step32_lets_the_chain_continue(_prr.status)
+                _step32_refusal = _step32_stream_refusal(
+                    project, effective_top, _prr)
         if _chain_ok and not _prr_on_librelane:
             # #527 estimate-vs-SPEF — SHIPPED post-route real-SPEF setup repair at
             # the slow sign-off corner, BEFORE gds/drc/lvs so the shipped design is
@@ -77895,7 +78120,8 @@ def main() -> int:
                                            args.container)
             if _sr is not None:
                 plan.append(_sr)
-                _chain_ok = (_sr.status == "PASS")
+                _step32_refusal = _step32_stream_refusal(
+                    project, effective_top, _sr)
         if _chain_ok and not _prr_on_librelane:
             # Caravel-class DRV closure — a SEPARATE, independently-gated
             # escalation for max_slew/max_capacitance violators that survive
@@ -77912,12 +78138,17 @@ def main() -> int:
             # Runs BEFORE gds/drc/lvs, so the shipped GDS and the LVS/DRC
             # sign-off see whatever this promotes; if nothing improves on the
             # downstream number the incumbent route is restored byte-for-byte.
-            _esc = _recorded(("pnr", "gds"),
-                             step_signoff_drv_wire_length_repair)(
-                project, effective_top, pdk, args.container)
+            # R-0929-TAIL-CONTINUES: a FAILED SPEF repair that left the route
+            # in place no longer ends the chain, so the escalation gets its
+            # own attempt on it; one that left NO route has nothing to repair.
+            _esc = None
+            if not _step32_refusal:
+                _esc = _recorded(("pnr", "gds"), step_signoff_drv_wire_length_repair)(
+                    project, effective_top, pdk, args.container)
             if _esc is not None:
                 plan.append(_esc)
-                _chain_ok = (_esc.status == "PASS")
+                _step32_refusal = _step32_stream_refusal(
+                    project, effective_top, _esc)
         # RE-STAMP PnR AFTER ITS LAST WRITER. r5 review finding 1: the stamp
         # was taken when `step_pnr` returned, and the two repair/escalation
         # steps above then copied a repaired DEF over `routed.def` and
@@ -77932,6 +78163,22 @@ def main() -> int:
                 container=args.container, top=effective_top, args=args,
                 cache_hit=not _pnr_reran)
         _prestream_refusal = ""
+        if _step32_refusal:
+            _prestream_refusal = _step32_refusal
+            _chain_ok = False
+            plan.append(_upstream_signoff_not_measured("gds", _step32_refusal))
+        # A stream after any non-PASS Step-32 row or a non-PASS pre-stream
+        # gate is MEASUREMENT-ONLY: recorded, never admitted, never packaged.
+        _measurement_only = ""
+        _step32_nonpass = [r for r in plan if r.name in _STEP32_ROW_NAMES
+                           and r.status != "PASS"]
+        if _chain_ok and _step32_nonpass:
+            # R-0929-TAIL-CONTINUES (review wave 58): the route Step 32 left
+            # is measured, but a run whose Step 32 did not PASS has no release
+            # credit -- even when the pre-stream gate then PASSes.
+            _measurement_only = "; ".join(
+                f"step 32 ({r.name} {r.status}): {r.detail[:200]}"
+                for r in _step32_nonpass)
         if _chain_ok:
             _prestream = step_prestream_gate(
                 project, effective_top, pdk, args.container)
@@ -77941,17 +78188,46 @@ def main() -> int:
                 _write_producer_identity(
                     _pl.pnr_dir(project), "pnr", project=project, pdk=pdk,
                     container=args.container, top=effective_top, args=args)
-            if _prestream.status not in ("PASS", "WAIVED"):
+            if _prestream.status != "PASS":
+                # WAIVED included (review wave 58): an owner-waived gate is
+                # never PASS, so its stream is measured, never admitted.
                 _ga.quarantine_visible_gds(
                     project, "current routed layout failed the pre-stream gate")
                 _ga.quarantine_handoff_package(
                     project, "current routed layout failed the pre-stream gate")
-                _prestream_refusal = (
-                    f"pre-stream gate failed ({', '.join(_prestream.extras.get('failed_gates', [])) or _prestream.detail}); "
+                _prestream_failure = (
+                    f"pre-stream gate {'WAIVED' if _prestream.status == 'WAIVED' else 'failed'} "
+                    f"({', '.join(_prestream.extras.get('failed_gates', [])) or _prestream.detail}); "
                     f"layout_digest={_prestream.extras.get('layout_digest', 'UNAVAILABLE')}")
-                _chain_ok = False
-                plan.append(_upstream_signoff_not_measured(
-                    "gds", _prestream_refusal))
+                # R-0929-TAIL-CONTINUES: the gate's FAIL row stays in the plan
+                # and keeps the run FAIL. The route is still streamed and every
+                # tail step measured on it, unless the route itself is absent
+                # or unidentified. That stream is never admitted for delivery.
+                _stream_block = _ga.stream_refusal(
+                    project, _prestream.extras.get("layout_digest", ""))
+                if _stream_block:
+                    _prestream_refusal = f"{_prestream_failure}; {_stream_block}"
+                    _chain_ok = False
+                    plan.append(_upstream_signoff_not_measured(
+                        "gds", _prestream_refusal))
+                else:
+                    _measurement_only = "; ".join(
+                        x for x in (_measurement_only, _prestream_failure) if x)
+                    print(f"[prestream] {_prestream.status}: streaming for "
+                          f"measurement only, never admitted "
+                          f"(R-0929-TAIL-CONTINUES): {_prestream_failure}",
+                          flush=True)
+            elif _measurement_only:
+                # A Step-32 non-PASS: an admission a previous run left must not
+                # let this stream be reused or packaged as admitted.
+                _ga.admission_path(project).unlink(missing_ok=True)
+                _ga.quarantine_visible_gds(
+                    project, "step 32 did not PASS; the stream is measurement-only")
+                _ga.quarantine_handoff_package(
+                    project, "step 32 did not PASS; the stream is measurement-only")
+                print(f"[prestream] PASS, but streaming for measurement only, "
+                      f"never admitted (R-0929-TAIL-CONTINUES): "
+                      f"{_measurement_only}", flush=True)
             elif not _ga.admitted_gds(
                     project, gds_existing,
                     _prestream.extras.get("layout_digest", "")):
@@ -78005,7 +78281,11 @@ def main() -> int:
                     _recorded("gds", step_gds), project,
                     effective_top, pdk, args.container)
                 plan.append(_gds_dispatched)
-                if _gds_dispatched.status == "PASS":
+                if _gds_dispatched.status == "PASS" and _measurement_only:
+                    _ga.record_measurement_stream(
+                        project, gds_existing,
+                        _prestream.extras.get("layout_digest", ""))
+                elif _gds_dispatched.status == "PASS":
                     _ga.admit_gds(
                         project, gds_existing,
                         _prestream.extras.get("layout_digest", ""),
@@ -78455,13 +78735,18 @@ def main() -> int:
     _layout_stale = bool(_frozen_digest and
                          (_final_error or _final_digest != _frozen_digest))
     _diagnostic_only = bool(_prestream_refusal and args.diagnostic_continue)
-    _release_refusal = (_prestream_refusal or
-                        (f"routed DEF/netlist/SDC/PDK basis changed: "
-                         f"{_prestream_basis} -> {_current_basis or _basis_error}"
-                         if _basis_stale else "") or
-                        (f"frozen layout changed: {_frozen_digest} -> "
-                         f"{_final_digest or _final_error}" if _layout_stale else "") or
-                        ("no frozen layout identity" if not _frozen_digest else ""))
+    # The identity guards: a receipt that no longer binds the layout on disk
+    # voids its PASS in EVERY mode, measurement-only included (review wave 58).
+    _stale_refusal = ((f"routed DEF/netlist/SDC/PDK basis changed: "
+                       f"{_prestream_basis} -> {_current_basis or _basis_error}"
+                       if _basis_stale else "") or
+                      (f"frozen layout changed: {_frozen_digest} -> "
+                       f"{_final_digest or _final_error}" if _layout_stale else "") or
+                      ("no frozen layout identity" if not _frozen_digest else ""))
+    # R-0929-TAIL-CONTINUES: rows measured on a CURRENT measurement-only stream
+    # keep their measured status; the stream is never a release candidate.
+    _void_refusal = _prestream_refusal or _stale_refusal
+    _release_refusal = _void_refusal or _measurement_only
     _layout_rows = {"gds", "prefill_evidence", "layout_freeze",
                     "pad_ring_route_evidence", "drc", "lvs",
                     "canonicalize_artefacts",
@@ -78475,10 +78760,14 @@ def main() -> int:
         if _row.name not in _layout_rows:
             continue
         _row.extras["layout_digest"] = _frozen_digest or "UNAVAILABLE"
-        if _release_refusal and _row.status == "PASS":
+        if _void_refusal and _row.status == "PASS":
             _row.status = "NOT_MEASURED"
             _row.reason_class = _V.ReasonClass.UPSTREAM_FAILED.value
-            _row.detail += "; receipt invalidated: " + _release_refusal
+            _row.detail += "; receipt invalidated: " + _void_refusal
+        if _measurement_only and not _prestream_refusal:
+            _row.extras["release_scope"] = "MEASUREMENT_ONLY"
+            _row.extras["release_verdict"] = "NOT_ELIGIBLE_FOR_RELEASE"
+            _row.extras["upstream_failed_gate"] = _measurement_only
         if _diagnostic_only:
             _row.extras["release_scope"] = "DIAGNOSTIC_ONLY"
             _row.extras["release_verdict"] = "NOT_MEASURED_FOR_RELEASE"
@@ -78505,10 +78794,14 @@ def main() -> int:
         "def_sha256": (_sha256_file(_pl.pnr_dir(project) / "routed.def")
                        if (_pl.pnr_dir(project) / "routed.def").is_file()
                        else None),
-        "upstream_failed_gate": _prestream_refusal or None,
+        "upstream_failed_gate": _prestream_refusal or _measurement_only or None,
         "release_scope": ("DIAGNOSTIC_ONLY" if _diagnostic_only
+                          else "MEASUREMENT_ONLY" if (_measurement_only
+                                                      and not _prestream_refusal)
                           else "RELEASE_CANDIDATE"),
-        "release_verdict": ("NOT_MEASURED_FOR_RELEASE" if _release_refusal
+        "release_verdict": ("NOT_ELIGIBLE_FOR_RELEASE" if (_measurement_only
+                                                          and not _prestream_refusal)
+                            else "NOT_MEASURED_FOR_RELEASE" if _release_refusal
                             else "ELIGIBLE_FOR_AUDIT"),
         "receipts": ([asdict(r) for r in plan if r.name in _layout_rows]
                      + [asdict(r) for r in _pre_audit_rows]),

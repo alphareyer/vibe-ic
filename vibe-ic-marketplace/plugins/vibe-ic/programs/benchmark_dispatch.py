@@ -4235,6 +4235,10 @@ def _rtl_gen_waive(project: Path) -> dict | None:
 def _solver_argv(runner: Path, proj: Path, entry, exit_step) -> list:
     """One problem's runner argv, assembled from the routing verdict.
 
+    Open RTL evaluations deliver IP/module evidence, so explicitly choose the
+    IP delivery path at the normal front door. This is independent of task
+    nature and leaves conflicting owner declarations for the runner to refuse.
+
     The exit decides what must NOT run. An RTL-evidence task never needs
     physical design because no RTL consumer reads a netlist or GDS; a run
     whose exit lies before step 15 therefore skips Phase 3 outright.
@@ -4242,7 +4246,7 @@ def _solver_argv(runner: Path, proj: Path, entry, exit_step) -> list:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import task_nature_route as tnr                       # noqa: PLC0415
     argv = [sys.executable, str(runner), str(proj),
-            "--skip-analog", "--skip-hardware"]
+            "--route", "ip", "--skip-analog", "--skip-hardware"]
     if exit_step and exit_step in tnr.flow_step_ids():
         order = {s: i for i, s in enumerate(tnr.flow_step_ids())}
         if order.get(exit_step, 99) < order.get("15", 99):
