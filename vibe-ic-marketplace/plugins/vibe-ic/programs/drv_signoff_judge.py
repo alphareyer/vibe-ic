@@ -667,7 +667,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                 fails.append(f"{field}: design override lacks signed prior owner "
                              f"rationale ({owner_status})")
     try:
-        from declared_knob_applied_parity_check import collect_declared, _source_files
+        from declared_knob_applied_parity import collect_declared, _source_files
         declaration_project = project or Path(str(identity.get("project") or ""))
         if project is not None:
             l9_path = Path(str((current.get("sources") or {}).get("l9", {}).get("path") or ""))
