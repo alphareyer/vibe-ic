@@ -844,9 +844,11 @@ def _emit_case_reset_invariant_oracle(project: Path, case: dict,
     try:
         # R-0929-X-QUALIFIED — which outputs the DESIGN INPUT qualifies, and
         # by what; every other output must be known after reset release.
-        quals = _riv.declared_output_qualifiers(project, outputs, inputs)
+        quals, refused = _riv.declared_output_qualifiers_and_refusals(
+            project, outputs, inputs)
         text = _riv.emit_case_oracle_from_ports(
-            case, dut_module, inputs, outputs, inouts, qualifiers=quals)
+            case, dut_module, inputs, outputs, inouts, qualifiers=quals,
+            refusals=refused)
     except Exception as e:  # pragma: no cover — never break the loop
         if report is not None:
             report.setdefault("oracle_errors", []).append(

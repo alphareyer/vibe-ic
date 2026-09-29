@@ -312,6 +312,11 @@ def test_declared_output_qualifiers_reads_l9(tmp_path):
          "description": "write data, valid when o_we = 1"},
         {"name": "o_we", "direction": "output", "width": 1,
          "description": "write enable"}])
+    # R-0929-X-QUALIFIED-4 (migrated): the oracle reads no description — a
+    # sentence in L9 declares nothing until it is a D1-SIGNED structured field
+    assert riv.declared_output_qualifiers(proj, _OUT, _IN) == {}
+    from _qualified_by_fixture import sign_field
+    sign_field(proj, "o_data", "o_we", "high")
     q = riv.declared_output_qualifiers(proj, _OUT, _IN)
     assert [r["qualifier"] for r in q["o_data"]] == ["o_we"]
     assert riv.declared_output_qualifiers(tmp_path / "nowhere", _OUT, _IN) \
@@ -391,5 +396,13 @@ def test_the_producer_wires_the_design_input_qualifiers(tmp_path,
     rec = _fsf().generate(proj, None, dispatch=base._FakeSim(),
                           model_resolver=base._resolver)
     tb = (proj / rec["cases"][0]["tb"]).read_text()
+    # R-0929-X-QUALIFIED-4 (migrated): the description alone wires nothing
+    assert "X_EXEMPT" not in tb
+    from _qualified_by_fixture import sign_field
+    sign_field(proj, "o_data", "o_we", "high")
+    rec = _fsf().generate(proj, None, dispatch=base._FakeSim(),
+                          model_resolver=base._resolver)
+    tb = (proj / rec["cases"][0]["tb"]).read_text()
     assert "if ((o_we === 1'b0))" in tb
     assert "qualified by 'o_we' active=1" in tb
+    assert "D1-signed" in tb

@@ -170,6 +170,12 @@ def qualifiers_from_statements(
 ) -> Dict[str, List[Dict[str, str]]]:
     """{output: [{qualifier, active, evidence}]} from the design's own text.
 
+    NOT CONSULTED BY THIS ORACLE (R-0929-X-QUALIFIED-4): `declared_output_
+    qualifiers` reads only the D1-signed structured `qualified_by` field
+    (`_qualified_by`). This text reader is kept as a pure function for
+    callers that PROPOSE a field for review; its answer is never trusted
+    as a declaration by itself.
+
     `statements` are (subject, text): a port-table row's description has its
     port as the implicit subject; a prose sentence has none and must name the
     qualified output itself. A qualifier is declared only when ONE statement
@@ -220,36 +226,26 @@ def declared_output_qualifiers(
         project: Path, outputs: List[Tuple[str, str]],
         inputs: List[Tuple[str, str]],
 ) -> Dict[str, List[Dict[str, str]]]:
-    """The qualifiers L9 (port table + interface prose) declares. §4.05: reads
-    the design input only; an unreadable L9 declares nothing (fail-closed)."""
-    import _path_layout as _pl
-    f = _pl.generated_docs_dir(Path(project)) / "L9_INTEGRATION_SPEC.json"
-    try:
-        doc = json.loads(f.read_text(errors="replace"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(doc, dict):
-        return {}
-    statements: List[Tuple[Optional[str], str]] = []
-    for key in ("ports", "top_ports", "top_module_pins"):
-        for row in doc.get(key) or []:
-            if isinstance(row, dict) and isinstance(row.get("description"),
-                                                    str):
-                statements.append((str(row.get("name") or "") or None,
-                                   row["description"]))
-    notes = doc.get("notes")
-    for n in (notes if isinstance(notes, list) else [notes]):
-        if isinstance(n, str):
-            statements.append((None, n))
+    """The qualifiers this oracle may honour: ONLY the D1-signed structured
+    `qualified_by` field of the L9 port table (R-0929-X-QUALIFIED-4, via
+    `_qualified_by.trusted_qualifiers`). This oracle never reads a port
+    description: two versions that did produced false PASSes. The landed strict
+    rules still bind: clock and reset never qualify, only a multi-bit output is
+    qualified, and an unsigned or malformed field is ignored."""
+    return declared_output_qualifiers_and_refusals(project, outputs,
+                                                   inputs)[0]
+
+
+def declared_output_qualifiers_and_refusals(
+        project: Path, outputs: List[Tuple[str, str]],
+        inputs: List[Tuple[str, str]],
+) -> Tuple[Dict[str, List[Dict[str, str]]], Dict[str, str]]:
+    """`declared_output_qualifiers`, plus {output: why its field was ignored}
+    so the testbench's FAIL text can say it."""
+    import _qualified_by as _qb
     excluded = tuple(n for n in (_pick_clock(inputs), _pick_reset(inputs)[0])
                      if n)
-    # Only a DATA output is qualified. Without a declared role reader the
-    # data outputs are the multi-bit ones (fail-closed: a 1-bit output is a
-    # control/strobe output and must be known after release).
-    data_outputs = [n for n, w in outputs if w]
-    return qualifiers_from_statements(statements, outputs, inputs,
-                                      excluded=excluded,
-                                      data_outputs=data_outputs)
+    return _qb.trusted_qualifiers(project, outputs, inputs, excluded=excluded)
 
 
 def _text(case: dict) -> str:
@@ -305,6 +301,12 @@ def _pick_reset(inputs: List[Tuple[str, str]]) -> Tuple[Optional[str], bool]:
     return None, False
 
 
+def _vstr(text: str) -> str:
+    """`text` safe inside a Verilog string literal passed to $display."""
+    return (str(text).replace("\\", "/").replace('"', "'")
+            .replace("%", " pct").replace("\n", " "))[:400]
+
+
 def emit_case_oracle_from_ports(
     case: dict,
     dut: str,
@@ -312,6 +314,7 @@ def emit_case_oracle_from_ports(
     outputs: List[Tuple[str, str]],
     inouts: List[Tuple[str, str]],
     qualifiers: Optional[Dict[str, List[Dict[str, str]]]] = None,
+    refusals: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     """Core, project-I/O-free emitter. Returns TB text, or None (fail-closed).
 
@@ -322,6 +325,7 @@ def emit_case_oracle_from_ports(
     X/Z only on a cycle where EVERY qualifier is known and at its inactive
     level, and each such cycle is printed as an `X_EXEMPT` line."""
     qualifiers = qualifiers or {}
+    refusals = refusals or {}
     name = case.get("name", "")
     family = case_family(case)
     if family is None:
@@ -443,11 +447,20 @@ def emit_case_oracle_from_ports(
                     for r in rows)
                 shown = ", ".join(f"{r['qualifier']}=%b" for r in rows)
                 args = ", ".join(r["qualifier"] for r in rows)
-                L.append(f"        if ({inactive})")
+                L.append(f"        if ({inactive}) begin")
+                field = _vstr("; ".join(r.get("field") or r.get("evidence", "")
+                                        for r in rows))
                 L.append(f'          $display("[TB {name}] X_EXEMPT: cycle %0d '
                          f'after release: output \'{n}\' is X/Z while its '
                          f'declared qualifier(s) are inactive and known: '
-                         f'{shown}", _i, {args});')
+                         f'{shown} -- basis: {field}", _i, {args});')
+                # EVERY basis entry, one line each: a fixed-length cut once
+                # dropped the third and fourth quotations (review wave58).
+                for r in rows:
+                    for cite in r.get("cites") or []:
+                        L.append(f'          $display("[TB {name}]   basis '
+                                 f'{_vstr(cite)}");')
+                L.append("        end")
                 L.append("        else begin")
                 L.append("          errors = errors + 1;")
                 L.append(f'          $display("[TB {name}] FAIL: output '
@@ -457,10 +470,12 @@ def emit_case_oracle_from_ports(
                 L.append("        end")
             else:
                 L.append("        errors = errors + 1;")
+                why = (f"qualified_by ignored: {_vstr(refusals[n])}"
+                       if n in refusals else
+                       "no qualifier declared for it in the design input")
                 L.append(f'        $display("[TB {name}] FAIL: output \'{n}\' '
                          f'is X/Z at cycle %0d after the glitch was released '
-                         f'(no qualifier declared for it in the design input)",'
-                         f' _i);')
+                         f'({why})", _i);')
             L.append("      end")
         L.append("    end")
     L.append("    if (errors != 0) begin")
