@@ -309,6 +309,25 @@ def test_every_declared_gate_that_reports_vacuity_reaches_the_step_tier():
                 or r.startswith(F._JSON_VACUOUS_HINT_PREFIX)
                 or r.startswith(F._INCOMPLETE_HINT_PREFIX)
                 for r in reasons)
+            # R-0915-119's channel: a report whose typed reason class is
+            # DECIDED (NOT_APPLICABLE_BY_STRUCTURE with its enumeration, or an
+            # executed design-declared N/A) reaches the tier as an EXECUTED
+            # N/A. The prefix alone is not accepted as proof here: the STEP
+            # must publish the clause in `executed_declared_not_applicable`
+            # with the reason naming its class. First exercised by a blocking
+            # rc-0 gate in #2811 (pad_input_drive_check, a non-DIE top).
+            if not seen_by_tier and any(
+                    r.startswith(F._EXECUTED_DECLARED_NA_HINT_PREFIX)
+                    for r in reasons):
+                res = F.check_step(project, {
+                    "id": "i901", "name": "i901 probe", "required_outputs": [],
+                    "gate": {"all_of": [{"program_exit_zero": cmd}]}}, {})
+                seen_by_tier = (
+                    any(str(e).split(" — ", 1)[0].strip() == cmd
+                        for e in res.executed_declared_not_applicable)
+                    and any(("NOT_APPLICABLE_BY_STRUCTURE" in r
+                             or "DESIGN-DECLARED-N/A" in r) and cmd in r
+                            for r in res.reasons))
             (classified if seen_by_tier else undisclosed).append(cmd)
 
     assert not undisclosed, (
