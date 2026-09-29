@@ -3285,7 +3285,8 @@ def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, obj
 
 
 from sdc_environment import (  # R-0929-PAD-INPUT-DRIVE
-    SDC_UNITS_LINE as _SDC_UNITS_LINE, liberty_units as _sdc_liberty_units,
+    SDC_UNITS_LINE as _SDC_UNITS_LINE,
+    limits_in_deck_units as _sdc_limits_in_deck_units,
     _pad_input_drive as _sdc_pad_input_drive,
     write_pad_input_drive_record as _sdc_write_pad_input_drive,
     pad_drive_sdc_lines as _sdc_pad_drive_sdc_lines,
@@ -3442,22 +3443,6 @@ def _producer_supply_ports_for_drv(project: Optional[Path]) -> Tuple[str, ...]:
     return str(power), str(ground)
 
 
-def _liberty_drv_limits_ns_pf(liberty_path: str, container: str = "") -> Dict[str, object]:
-    """`_liberty_drv_limits` with its slew/cap stated in ns / pF.
-
-    A vibe-ic deck opens with `set_cmd_units -time ns -capacitance pF`
-    (`sdc_environment.SDC_UNITS_LINE`), so a Liberty default read in that
-    Liberty's own units is stated once in the deck's units here; the deck text
-    is never rescaled afterwards."""
-    drv = dict(_liberty_drv_limits(liberty_path, container))
-    time_per_ns, cap_per_pf = _sdc_liberty_units(liberty_path)
-    if drv.get("max_transition_ns") is not None:
-        drv["max_transition_ns"] = float(drv["max_transition_ns"]) / time_per_ns
-    if drv.get("max_capacitance_pf") is not None:
-        drv["max_capacitance_pf"] = float(drv["max_capacitance_pf"]) / cap_per_pf
-    return drv
-
-
 # A9 (#169) — a STAGED silicon SDC (one a PRIOR phase3 run wrote, then
 # `step_canonicalize_artefacts` copied to phase2/stage2/constraints/<top>.sdc)
 # carries the ORIGINATING PDK's design-rule (DRV) limits: `set_max_transition` /
@@ -3499,8 +3484,9 @@ def _reconcile_staged_sdc_drv(sdc_text: str, active_pdk_name: str,
 
     Otherwise (stamp names a DIFFERENT PDK) the `set_max_transition` /
     `set_max_capacitance` operands are RE-DERIVED from the active liberty via
-    :func:`_liberty_drv_limits_ns_pf` (stated in the deck's ns / pF; the deck's
-    own `set_cmd_units` makes the tool convert), or the DRV line is DROPPED when the active liberty
+    :func:`_liberty_drv_limits`, stated in the deck's ns / pF
+    (`sdc_environment.limits_in_deck_units`; the deck's own `set_cmd_units`
+    makes the tool convert), or the DRV line is DROPPED when the active liberty
     declares no such limit. The stamp is updated to the active PDK. §4.05: only a
     real active-liberty value is ever substituted — never a fabricated one.
     chip/PDK-AGNOSTIC."""
@@ -3515,7 +3501,9 @@ def _reconcile_staged_sdc_drv(sdc_text: str, active_pdk_name: str,
         # Provenance differs but there is no PDK-derived DRV to fix — just
         # re-stamp so a further run sees the current provenance.
         return _stamp_sdc_provenance(sdc_text, active_pdk_name)
-    drv = _liberty_drv_limits_ns_pf(str(active_liberty or ""), container)
+    drv = _sdc_limits_in_deck_units(
+        _liberty_drv_limits(str(active_liberty or ""), container),
+        str(active_liberty or ""))
     slew = drv.get("max_transition_ns")
     cap = drv.get("max_capacitance_pf")
     out_lines: List[str] = []
@@ -3723,7 +3711,9 @@ def _ensure_staged_sdc_drv(sdc_text: str, active_liberty: str,
                         "overridden)")
         return text, info
 
-    drv = _liberty_drv_limits_ns_pf(str(active_liberty or ""), container)
+    drv = _sdc_limits_in_deck_units(
+        _liberty_drv_limits(str(active_liberty or ""), container),
+        str(active_liberty or ""))
     slew = None if have_slew else drv.get("max_transition_ns")
     cap = None if have_cap else drv.get("max_capacitance_pf")
     fanout = None
@@ -4434,7 +4424,7 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
     sdc_text += _unread_fanout_comment
     _env, _env_unread = _sdc_environment_values(
         project, liberty_path, container, drv_slew_ns, drv_cap_pf,
-        _to_container_path, pdk_name=pdk_name)
+        _to_container_path, pdk_name)
     # R-0929-PAD-INPUT-DRIVE: a DIE top's bond-pad inputs are never driven by
     # the core synthesis driving cell; the resolved drive is recorded for the
     # Step-23 STA verdict, which cannot PASS on a NOT_MEASURED drive.
@@ -55587,7 +55577,8 @@ def _write_pvt_matrix(project: Path, pdk: "PdkConfig", pvt_path: Path, *,
     (`librelane_prelayout.resolve_pdk_view`), or the resolved config of a
     STAPrePNR run that already happened (`resolved` / `folder`). A design that
     stages its own Liberty corners under `input/pdk/liberty` declares them;
-    they are listed as declared. Nothing is discovered by globbing a PDK tree
+    they are listed as declared, unless the tool already timed its own set
+    (`resolved`), which is then the set. Nothing is discovered by globbing a PDK tree
     or picked by a corner-name preference.
 
     #442 stays: a refused resolution writes `corners: []` with the refusal as
@@ -55597,7 +55588,7 @@ def _write_pvt_matrix(project: Path, pdk: "PdkConfig", pvt_path: Path, *,
     import librelane_prelayout as _llp
     staged_dir = project / "input" / "pdk" / "liberty"
     staged = sorted(staged_dir.glob("*.lib")) if staged_dir.is_dir() else []
-    if staged:
+    if staged and resolved is None:
         pvt: Dict[str, Any] = dict(_PVT_MATRIX_TEMPLATE)
         pvt["corners"] = [{"name": lib.stem,
                            "label": _classify_corner_from_name(lib.name),
@@ -55616,7 +55607,7 @@ def _write_pvt_matrix(project: Path, pdk: "PdkConfig", pvt_path: Path, *,
             pvt = dict(_PVT_MATRIX_TEMPLATE)
             pvt["corners"] = []
             pvt["primary_corner"] = None
-            pvt["corner_source"] = ("NOT_READ: LibreLane resolved STA_CORNERS: "
+            pvt["corner_source"] = ("NOT_READ: the LibreLane-resolved corner set: "
                                     + " ".join(str(exc).split())[:300])
     stamp_pvt_corner_coverage(pvt, pvt["corners"])
     pvt_path.parent.mkdir(parents=True, exist_ok=True)
