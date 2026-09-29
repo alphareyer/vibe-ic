@@ -93,6 +93,7 @@ def test_a_not_measured_drive_is_rc2_never_pass(tmp_path):
     rc, doc = _run(project)
     assert (rc, doc["verdict"]) == (2, "NOT_MEASURED")
     assert doc["reason_class"] == "BLOCKED_BY_UPSTREAM"
+    assert doc["reason"].startswith("off-chip input drive NOT_MEASURED:")
 
 
 def test_an_absent_record_on_a_die_is_rc2(tmp_path):

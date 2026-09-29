@@ -521,3 +521,26 @@ def test_step_declared_signoff_gates_folds_the_pad_drive(tmp_path, monkeypatch):
     assert p3._STA_VERDICT_GATE in seen
     assert by[p3._STA_VERDICT_GATE].status == "NOT_MEASURED"
     assert "OFFCHIP_INPUT_DRIVE" in by[p3._STA_VERDICT_GATE].detail
+
+
+def test_step7_with_a_staged_sdc_on_a_die_resolves_and_rewrites_the_record(tmp_path, monkeypatch):
+    """Through author_asic_sdc's design-staged branch (step 7): the staged
+    deck sets no drive, so it gets the IO bracket, and a stale record from an
+    earlier auto-SDC run is replaced."""
+    S7 = _step7_fixtures()
+    proj = S7._project(tmp_path)
+    marker = proj / TD.SELF_TAPEOUT_REL
+    marker.parent.mkdir(parents=True)
+    marker.write_text(TD.SELF_TAPEOUT_MARKER + "\n")
+    (proj / "input/constraints").mkdir(parents=True)
+    (proj / "input/constraints/clock.sdc").write_text(
+        "create_clock -name core -period 10 [get_ports clk]\n")
+    _io_record(proj, [_io_lib(tmp_path, "ss")])
+    stale = proj / _REPORT
+    stale.write_text(json.dumps({"verdict": "DECLARED", "sdc_lines": ["x"]}))
+    S7._step7(proj, S7._pdk(monkeypatch))
+    rec = _record(proj)
+    assert rec["verdict"] == "PDK_IO_TIER"
+    deck = (proj / S7._record(proj)["path"]).read_text().splitlines()
+    assert all(ln in deck for ln in rec["sdc_lines"])
+    assert S7._record(proj)["pad_input_drive"] == "PDK_IO_TIER"
