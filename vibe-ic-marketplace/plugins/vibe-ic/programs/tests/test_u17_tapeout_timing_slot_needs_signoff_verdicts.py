@@ -67,6 +67,7 @@ def _project(tmp_path: Path, slack: float) -> Path:
     _write(proj / "reports/phase3/lvs.rpt", _LVS_MATCH)
     _si_signoff_fixture.write_proved_si_report(proj)
     TT.write_step32_no_repair(proj)
+    TT.write_step23_other_clauses(proj)
     _write(proj / _STA_REL, _path_group(slack) * 20)
     return proj
 
@@ -136,7 +137,7 @@ def test_a_step32_contradiction_blocks_the_slot(tmp_path):
 def test_a_tool_arm_step32_fail_blocks_the_slot(tmp_path):
     proj = _project(tmp_path, 0.85)
     _run_step23(proj)
-    _write(proj / sa._STEP32_LIBRELANE_REL, json.dumps(
+    _write(proj / "reports/phase3/librelane_postroute_repair.json", json.dumps(
         {"step": "32", "verdict": "FAIL", "code": "LL_PRR_DRV_VIOLATION",
          "reason": "declared postroute DRV has 3 residual pin/check violations"}))
     r = sa._check_tapeout(proj)
@@ -152,3 +153,117 @@ def test_absent_step32_outcome_is_not_measured(tmp_path):
     r = sa._check_tapeout(proj)
     assert r.summary["evidence"]["timing"] is False
     assert "TAPEOUT_TIMING_STEP32_NOT_MEASURED" in _rules(r)
+
+
+# ── Round 2 (review wave 58) ───────────────────────────────────────────────
+_MULTICORNER = """\
+# Multi-corner SPEF STA
+# SETUP corner: max-RC   HOLD corner: min-RC
+# corners_available: max,min
+=== SETUP (max-RC corner, SPEF=max, liberty=corner.lib) ===
+STA_BASIS: POST_ROUTE_SPEF
+STA_BASIS_CORNER: max
+worst slack max -55.85
+=== HOLD (min-RC corner, SPEF=min, liberty=corner.lib) ===
+STA_BASIS: POST_ROUTE_SPEF
+STA_BASIS_CORNER: min
+worst slack min 0.30
+"""
+
+
+def test_a_slow_corner_violation_behind_a_met_nominal_is_not_tapeout_timing(
+        tmp_path):
+    """The nominal (tt) alias is MET and its summary passes; Step 23's
+    slow-corner clause, run for real, FAILs at -55.85 ns. Step 23 is FAIL."""
+    proj = _project(tmp_path, 0.85)
+    assert _run_step23(proj)["passed"] is True
+    _write(proj / "phase3/stage3/sta/sta_spef_multicorner.rpt", _MULTICORNER)
+    r = _pr.run([sys.executable, str(_PROGRAMS / "post_route_signoff_corner_check.py"),
+                 str(proj), "--json",
+                 str(proj / "reports/phase3/sta/post_route_signoff_corner.json")],
+                capture_output=True, text=True)
+    assert r.returncode == 1, r.stdout[-400:]
+    rep = sa._check_tapeout(proj)
+    assert rep.summary["evidence"]["timing"] is False, _rules(rep)
+    assert "TAPEOUT_TIMING_STEP23_FAIL" in _rules(rep)
+    assert rep.passed is False
+
+
+def test_every_step23_clause_record_is_required(tmp_path):
+    """A clause record the flow declares for Step 23 and the run did not
+    publish holds the slot (the nominal summary alone is not Step 23)."""
+    proj = _project(tmp_path, 0.85)
+    _run_step23(proj)
+    (proj / "reports/phase3/sta/sta_corner_record_completeness.json").unlink()
+    rep = sa._check_tapeout(proj)
+    assert rep.summary["evidence"]["timing"] is False
+    assert "TAPEOUT_TIMING_STEP23_NOT_MEASURED" in _rules(rep)
+
+
+def test_a_stale_step23_summary_is_not_measured(tmp_path):
+    """The summary passed a +0.85 ns report; the report on disk now says
+    -55.85 ns. The recorded subject digest no longer matches."""
+    proj = _project(tmp_path, 0.85)
+    assert _run_step23(proj)["passed"] is True
+    _write(proj / _STA_REL, _path_group(-55.85) * 20)
+    rep = sa._check_tapeout(proj)
+    assert rep.summary["evidence"]["timing"] is False, _rules(rep)
+    assert "TAPEOUT_TIMING_STEP23_NOT_MEASURED" in _rules(rep)
+    assert "stale" in rep.summary["timing_signoff_verdicts"]["23"]["reason"]
+
+
+def test_a_bare_passed_true_is_not_a_step23_verdict(tmp_path):
+    proj = _project(tmp_path, -55.85)
+    _write(proj / TT.STEP23_SUMMARY, json.dumps({"passed": True}))
+    rep = sa._check_tapeout(proj)
+    assert rep.summary["evidence"]["timing"] is False
+    assert "TAPEOUT_TIMING_STEP23_NOT_MEASURED" in _rules(rep)
+
+
+def test_a_foreign_producer_summary_is_not_a_step23_verdict(tmp_path):
+    proj = _project(tmp_path, 0.85)
+    doc = _run_step23(proj)
+    doc["program"] = "hand_written"
+    _write(proj / TT.STEP23_SUMMARY, json.dumps(doc))
+    rep = sa._check_tapeout(proj)
+    assert "TAPEOUT_TIMING_STEP23_NOT_MEASURED" in _rules(rep)
+
+
+def test_an_unreadable_step32_record_is_not_measured_not_a_crash(tmp_path):
+    proj = _project(tmp_path, 0.85)
+    _run_step23(proj)
+    d = proj / TT.STEP32_DIR
+    (d / "no_repair_needed.flag").unlink()
+    (d / "postroute_timing_repair_decision.json").write_text(json.dumps(
+        {"repair_needed": True, "action": "repair_timing"}))
+    (d / "repair_log.json").write_text("[]")
+    rep = sa._check_tapeout(proj)            # must not raise
+    assert rep.summary["evidence"]["timing"] is False
+    assert "TAPEOUT_TIMING_STEP32_NOT_MEASURED" in _rules(rep)
+    assert rep.summary["evidence"]["gds"] is True   # the other slots still judged
+
+
+def test_an_absent_step32_decision_record_is_not_measured(tmp_path):
+    proj = _project(tmp_path, 0.85)
+    _run_step23(proj)
+    (proj / TT.STEP32_DIR / "postroute_timing_repair_decision.json").unlink()
+    rep = sa._check_tapeout(proj)
+    assert rep.summary["evidence"]["timing"] is False
+    assert "TAPEOUT_TIMING_STEP32_NOT_MEASURED" in _rules(rep)
+
+
+def test_step32_labels_fail_outranks_unmeasured_and_waived_is_named(tmp_path):
+    proj = _project(tmp_path, 0.85)
+    _run_step23(proj)
+    (proj / TT.STEP32_DIR / "postroute_timing_repair_decision.json").write_text(
+        json.dumps({"repair_needed": True, "action": "timing_not_measured",
+                    "timing_basis_status": "NOT_MEASURED"}))
+    rep = sa._check_tapeout(proj)
+    assert "TAPEOUT_TIMING_STEP32_FAIL" in _rules(rep), _rules(rep)
+
+    proj2 = _project(tmp_path / "w", 0.85)
+    _run_step23(proj2)
+    _write(proj2 / "reports/phase3/librelane_postroute_repair.json",
+           json.dumps({"step": "32", "verdict": "WAIVED"}))
+    rep2 = sa._check_tapeout(proj2)
+    assert "TAPEOUT_TIMING_STEP32_WAIVED" in _rules(rep2), _rules(rep2)
