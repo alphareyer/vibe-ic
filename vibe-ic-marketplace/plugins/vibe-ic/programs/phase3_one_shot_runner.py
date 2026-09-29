@@ -56543,6 +56543,11 @@ _DECLARED_SIGNOFF_GATES = (
      "reports/phase3/sta/post_route_signoff_corner.json", ()),
     ("sta_record", "sta_corner_record_completeness_check.py",
      "reports/phase3/sta/sta_corner_record_completeness.json", ()),
+    # R-0929-IO-INPUT-TRANSITION-2: the DIE's off-chip input drive reached the
+    # sign-off deck (rc 2 = unresolved/stale, rc 1 = deck lacks it or uses the
+    # refused core cell, NOT_APPLICABLE_BY_STRUCTURE off a DIE top).
+    ("pad_input_drive", "pad_input_drive_check.py",
+     "reports/phase3/sta/pad_input_drive_check.json", ()),
     ("drv_signoff", "drv_signoff_judge.py",
      "reports/phase3/sta/drv_signoff.json", ()),
     # Step 23 declares this report, but the inline executor must produce and

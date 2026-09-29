@@ -279,6 +279,10 @@ def test_runner_exposes_every_declared_signoff_gate():
         # DRV needs a fresh capture plan and all PVT/RC receipts. This fixture
         # only supplies STA/EM report files, so its row stays NOT_MEASURED.
         "drv_signoff_judge.py",
+        # R-0929-IO-INPUT-TRANSITION-2. Step 23's pad-input-drive clause: an
+        # unresolved or uncarried off-chip input drive on a DIE top must reach
+        # the run's verdict, not only the final audit.
+        "pad_input_drive_check.py",
     }, wired
 
 
