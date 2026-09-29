@@ -77665,7 +77665,7 @@ def main() -> int:
                 plan.append(_prr)
                 _step32_refusal = _step32_stream_refusal(
                     project, effective_top, _prr)
-        if _chain_ok and not _step32_refusal and not _prr_on_librelane:
+        if _chain_ok and not _prr_on_librelane:
             # #527 estimate-vs-SPEF — SHIPPED post-route real-SPEF setup repair at
             # the slow sign-off corner, BEFORE gds/drc/lvs so the shipped design is
             # the repaired one. No-op (base route kept) unless it reaches setup>=0
@@ -77677,7 +77677,7 @@ def main() -> int:
                 plan.append(_sr)
                 _step32_refusal = _step32_stream_refusal(
                     project, effective_top, _sr)
-        if _chain_ok and not _step32_refusal and not _prr_on_librelane:
+        if _chain_ok and not _prr_on_librelane:
             # Caravel-class DRV closure — a SEPARATE, independently-gated
             # escalation for max_slew/max_capacitance violators that survive
             # the bounded loop above (measured: caravel_user_project x
@@ -77693,9 +77693,13 @@ def main() -> int:
             # Runs BEFORE gds/drc/lvs, so the shipped GDS and the LVS/DRC
             # sign-off see whatever this promotes; if nothing improves on the
             # downstream number the incumbent route is restored byte-for-byte.
-            _esc = _recorded(("pnr", "gds"),
-                             step_signoff_drv_wire_length_repair)(
+            # R-0929-TAIL-CONTINUES: a FAILED SPEF repair that left the route
+            # in place no longer ends the chain, so the escalation gets its
+            # own attempt on it; one that left NO route has nothing to repair.
+            _esc = (_recorded(("pnr", "gds"),
+                              step_signoff_drv_wire_length_repair)(
                 project, effective_top, pdk, args.container)
+                if not _step32_refusal else None)
             if _esc is not None:
                 plan.append(_esc)
                 _step32_refusal = _step32_stream_refusal(

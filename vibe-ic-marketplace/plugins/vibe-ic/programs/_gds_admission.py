@@ -48,12 +48,12 @@ def stream_refusal(project: Path, digest: str | None) -> str:
     own FAIL keeps the run FAIL. Refused: a receipt that does not bind this
     layout, a receipt with no measured gate rows (nothing was measured), and a
     receipt whose route itself was absent or unidentified."""
+    if digest and gate_passed(project, digest):
+        return ""                      # the one PASS decision, `gate_passed`
     record = gate_record(project)
     if not digest or record.get("layout_digest") != digest:
         return "pre-stream receipt does not bind this routed layout"
     verdict = record.get("verdict")
-    if verdict == "PASS":
-        return ""
     if verdict not in ("FAIL", "NOT_MEASURED"):
         return f"pre-stream verdict {verdict!r} is not a measured verdict"
     if not isinstance(record.get("gates"), list) or not record["gates"]:
