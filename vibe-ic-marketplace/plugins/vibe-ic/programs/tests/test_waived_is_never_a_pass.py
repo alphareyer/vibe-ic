@@ -277,3 +277,43 @@ def test_a_gate_self_waiver_over_measured_defects_fails_the_step(tmp_path):
     assert row.status == "FAIL", (row.status, row.reasons)
     blob = "\n".join(row.reasons)
     assert "MEASURED" in blob and "A6_PV_DRC_VIOLATIONS" in blob, blob
+
+
+# ── (3e) the analog runner reads A6 by rc ───────────────────────────────────
+
+import analog_one_shot_runner as AOSR                         # noqa: E402
+
+
+def _a6_project(tmp_path, waived):
+    proj = tmp_path / "proj"
+    d = proj / "phase3" / "analog" / "ldo"
+    d.mkdir(parents=True)
+    (proj / "phase3" / "analog" / "analog_block_list.json").write_text(
+        json.dumps({"blocks": ["ldo"]}))
+    (d / "drc_clean.flag").write_text("violations: 3\n")
+    (d / "lvs_match.flag").write_text("lvs: mismatch\n")
+    if waived:
+        (proj / "phase3" / "analog" / "waivers.json").write_text(json.dumps({
+            "waived_steps": [{"id": "analog_block_pv", "ticket": "ECO-123",
+                              "reason": "PV deferred to top-level signoff"}]}))
+    return proj
+
+
+def test_the_analog_runner_does_not_pass_a_self_waived_a6(tmp_path, monkeypatch):
+    monkeypatch.setattr(AOSR, "_try_native_a6_pv", lambda *a, **k: {"ran": False})
+    row = AOSR.step_for_block(_a6_project(tmp_path, True), {"name": "ldo"},
+                              "A6_block_pv", None)
+    assert row.status == "FAIL", (row.status, row.detail)
+    assert "A6_SELF_WAIVER_REFUSED" in row.detail, row.detail
+    # Control: the same measured defects without a waiver are the gate's FAIL.
+    other = tmp_path / "o"
+    other.mkdir()
+    row = AOSR.step_for_block(_a6_project(other, False), {"name": "ldo"},
+                              "A6_block_pv", None)
+    assert row.status == "FAIL" and "A6_SELF_WAIVER_REFUSED" not in row.detail
+
+
+def test_the_self_waiver_reader_is_the_gates_verdict_line():
+    assert AOSR._gate_self_waived("=== g ===\n  verdict: WAIVED (0/1 block(s))\n")
+    assert not AOSR._gate_self_waived("  verdict: PASS (1/1)\n  waiver:  T\n")
+    assert not AOSR._gate_self_waived("note: the verdict: WAIVED rule\n")

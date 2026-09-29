@@ -1179,6 +1179,17 @@ _CONTENT_SOURCES: Dict[str, tuple] = {
 _CONTENT_DISCLOSED = _acc.DESIGN_CONTENT_DISCLOSED
 
 
+def _gate_self_waived(stdout: str) -> bool:
+    """Did an analog gate report its own step-waiver verdict?
+
+    The gates print a fixed `  verdict: <WORD> ...` line (e.g.
+    analog_a6_block_pv_check's summary); WAIVED there is the gate's own
+    waiver lookup, not a measurement.
+    """
+    return any(line.strip().split()[:2] == ["verdict:", "WAIVED"]
+               for line in (stdout or "").splitlines())
+
+
 def _structure_only_disclosure(cp) -> Optional[str]:
     """The gate's structure-only line, or None. Reads stdout AND stderr for
     the same reason the flow auditor concatenates them: which stream a gate
@@ -1685,6 +1696,21 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
             # observed at v1.6.128 on BENCH-A). Chip-AGNOSTIC: relies
             # only on the existing literal sentinel, no chip names.
             stdout_tail = cp.stdout.splitlines()[-1] if cp.stdout else "ran"
+            if step_name == "A6_block_pv" and _gate_self_waived(cp.stdout):
+                # A6 exits 0 with `verdict: WAIVED` when a `waived_steps` entry
+                # matching its own label covers MEASURED DRC/LVS defects (a
+                # waiver over an absent measurement is already its FAIL). That
+                # lookup checks no approver, and a waiver is never a PASS
+                # (owner rule, DRV sign-off standard 2026-09-28;
+                # R-0929-U14-OWNER-WAIVER: only the owner may waive). The
+                # defects were measured, so the step fails and says why.
+                return StepResult(
+                    step_name, bname, "FAIL", time.time() - t0,
+                    "A6_SELF_WAIVER_REFUSED: the block-PV gate waived measured "
+                    "DRC/LVS defects under its own step-waiver lookup; only an "
+                    "owner-approved waiver may accept a measured defect — "
+                    + stdout_tail,
+                    output_files=_step_outputs(project, bname, step_name))
             if "VACUOUS_PASS" in cp.stdout:
                 return StepResult(step_name, bname, "NOT_MEASURED",
                                   time.time() - t0, stdout_tail,
