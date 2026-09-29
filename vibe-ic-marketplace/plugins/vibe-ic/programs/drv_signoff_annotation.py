@@ -60,22 +60,71 @@ def _unannotated(body: str) -> list[str]:
     return sorted(found)
 
 
-def _spef_nets(path: Path) -> set[str]:
-    names = {}
-    result = set()
-    in_map = False
+def _unescape(name: str) -> str:
+    """Compare SPEF and OpenSTA names without their escape characters."""
+    return re.sub(r"\\(.)", r"\1", name)
+
+
+def _spef_connections(path: Path) -> dict[str, set[str]]:
+    """Map every SPEF *D_NET to the pin endpoints its *CONN section names.
+
+    A net name alone is not parasitic evidence for a pin (R-0928-DRV-IC): only
+    a *P port or *I instance pin inside that net's *CONN section is.
+    """
+    divider, delimiter = "/", ":"
+    names: dict[str, str] = {}
+    nets: dict[str, set[str]] = {}
+    section = None
+    current = None
+    reduced = False
     for line in path.read_text(errors="replace").splitlines():
         words = line.split()
         if not words:
             continue
-        if words[0] == "*NAME_MAP":
-            in_map = True
-        elif in_map and words[0].startswith("*") and words[0][1:].isdigit() and len(words) >= 2:
-            names[words[0]] = words[1]
-        elif words[0] == "*D_NET" and len(words) >= 3:
-            in_map = False
-            result.add(names.get(words[1], words[1]))
-    return result
+        head = words[0]
+        if reduced and head != "*END":
+            continue  # a *R_NET reduced model names no distributed pin RC
+        if head in ("*P", "*I"):
+            if section != "*CONN" or current is None:
+                raise ValueError(f"SPEF {head} outside a *D_NET *CONN section")
+            if len(words) < 3:
+                raise ValueError(f"SPEF {head} connection grammar invalid")
+            if head == "*P":
+                endpoint = _unescape(names.get(words[1], words[1]))
+            else:
+                instance, found, pin = words[1].rpartition(delimiter)
+                if not found or not instance or not pin:
+                    raise ValueError("SPEF *I instance pin grammar invalid")
+                instance = names.get(instance, instance)
+                if divider != "/":
+                    instance = instance.replace(divider, "/")
+                endpoint = _unescape(instance) + "/" + _unescape(pin)
+            nets[current].add(endpoint)
+        elif head == "*N":
+            continue  # an internal RC node is not a pin endpoint
+        elif head in ("*DIVIDER", "*DELIMITER") and len(words) == 2:
+            if head == "*DIVIDER":
+                divider = words[1]
+            else:
+                delimiter = words[1]
+        elif head == "*D_NET":
+            if len(words) < 3:
+                raise ValueError("SPEF *D_NET grammar invalid")
+            current = _unescape(names.get(words[1], words[1]))
+            if current in nets:
+                raise ValueError(f"SPEF net repeated: {current}")
+            nets[current] = set()
+            section = head
+        elif head == "*R_NET":
+            current, section, reduced = None, head, True
+        elif head == "*END":
+            current, section, reduced = None, None, False
+        elif head.startswith("*") and head[1:].isdigit():
+            if section == "*NAME_MAP" and len(words) >= 2:
+                names[head] = words[1]
+        elif head.startswith("*") and head[1:].replace("_", "").isalpha():
+            section = head
+    return nets
 
 
 def _def_segments(path: Path) -> dict[str, int]:
@@ -88,7 +137,9 @@ def _def_segments(path: Path) -> dict[str, int]:
         name, record = item.groups()
         if name in result:
             raise ValueError("routed DEF net repeated")
-        result[name] = len(re.findall(r"\+\s*(?:ROUTED|NEW|FIXED)\b", record))
+        # Every DEF regular-wiring status opens routed geometry; a net with
+        # any of them is not a zero-segment net.
+        result[name] = len(re.findall(r"\b(?:ROUTED|FIXED|COVER|NOSHIELD)\b", record))
     return result
 
 
@@ -120,7 +171,7 @@ def derive(scene_dir: Path, pins: dict, liberties: list[dict], lefs: list[dict],
     for name, pin in pins.items():
         if pin["net"]:
             by_net.setdefault(pin["net"], []).append(name)
-    spef_nets = _spef_nets(spef)
+    spef_connections = _spef_connections(spef)
     segments = _def_segments(routed_def)
     resolved = []
     unresolved = []
@@ -137,9 +188,16 @@ def derive(scene_dir: Path, pins: dict, liberties: list[dict], lefs: list[dict],
             members = by_net.get(net, [])
             port_pad = (any(pins[m]["kind"] == "port" for m in members) and
                         any(pins[m]["cell_class"] == "IO" for m in members))
-            if port_pad and net in spef_nets:
+            # The SPEF must carry this net's connectivity at the pin level:
+            # the reported driver, its PAD endpoint and every other census pin
+            # on the net.  A *D_NET header without those *CONN rows is not RC
+            # evidence for any of them.
+            endpoints = spef_connections.get(_unescape(net))
+            wanted = {_unescape(m) for m in members} | {_unescape(name)}
+            if port_pad and endpoints is not None and wanted <= endpoints:
                 resolved.append({"pin": name, "net": net,
-                                 "reason": "port_pad_spef"})
+                                 "reason": "port_pad_spef_conn",
+                                 "spef_endpoints": sorted(wanted)})
             elif port_pad and segments.get(net) == 0:
                 resolved.append({"pin": name, "net": net,
                                  "reason": "port_pad_zero_routed_segments"})
