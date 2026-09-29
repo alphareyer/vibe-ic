@@ -283,17 +283,19 @@ def _stale_tree(tmp_path, monkeypatch, R, *, stale_bound_to=None):
     return proj, out
 
 
+@pytest.mark.parametrize("rc", [1, 0], ids=["rc1", "rc0_via_tee"])
 @pytest.mark.parametrize("stale_bound_to", [None, b"GDSII-previous-round"],
                          ids=["unbound_stale", "bound_to_previous_bytes"])
 def test_tool_that_writes_nothing_never_rebinds_a_stale_report(
-        tmp_path, monkeypatch, stale_bound_to):
+        tmp_path, monkeypatch, stale_bound_to, rc):
     """Finding 1 (MAJOR): KLayout exits without writing (container gone). The
     stale numbers must not be stamped with this round's sha — Step 34 reads
-    NOT_MEASURED, never PASS."""
+    NOT_MEASURED, never PASS. rc 0 too: the recipe runs piped through `tee`,
+    so a KLayout that died writing nothing can still hand back rc 0."""
     R = _load_runner()
     proj, out = _stale_tree(tmp_path, monkeypatch, R, stale_bound_to=stale_bound_to)
     monkeypatch.setattr(R, "_docker_exec",
-                        lambda c, cmd, **_: (1, "", "Error: No such container"))
+                        lambda c, cmd, **_: (rc, "", "klayout: no output"))
     notes = []
     assert R._emit_metal_density_report(proj, "top", _Pdk(), "gone", out, notes) is False
     assert not out.exists(), "the stale report must not survive a re-emit"
