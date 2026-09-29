@@ -166,18 +166,154 @@ def _design_input_transition(project: Path) -> Optional[Tuple[str, str]]:
     return None
 
 
-def _pdk_io_input_transition(project: Path) -> Optional[Tuple[str, str]]:
-    """The PDK IO-tier off-chip input transition, with its source.
-
-    No PDK this plugin supports documents one today: the IO Liberty carries
-    only table axes (`input_transition_time` index values, which are a
-    characterisation range, not a board driver) and the pinned LibreLane
-    config's only driving cells are the CORE library's synthesis cells. A PDK
-    that documents an IO-tier value is read here, with its file and key."""
-    return None
+#: The pad-ring producer's record; it names every IO Liberty it linked.
+IO_PAD_RECORD = "reports/phase3/io_pad_chip_top.json"
+_LIB_TIME_UNIT_NS = {"1ps": 1e-3, "10ps": 1e-2, "100ps": 1e-1, "1ns": 1.0,
+                     "10ns": 10.0, "100ns": 100.0, "1us": 1e3}
 
 
-def _pad_input_drive(project: Path, values: Dict[str, Tuple[str, str]]
+def _liberty_blocks(text: str, kind: str) -> List[Tuple[str, str]]:
+    """Every ``kind ("name") { ... }`` group directly inside ``text``, with its
+    body, found by brace matching (Liberty groups nest; a regex cannot)."""
+    out: List[Tuple[str, str]] = []
+    for m in re.finditer(r"\b%s\s*\(\s*\"?([^\"()]*?)\"?\s*\)\s*\{" % kind, text):
+        depth, i = 1, m.end()
+        while depth and i < len(text):
+            depth += {"{": 1, "}": -1}.get(text[i], 0)
+            i += 1
+        out.append((m.group(1).strip(), text[m.end():i - 1]))
+    return out
+
+
+def _own_attrs(body: str) -> str:
+    """A group's own simple attributes: its body with every nested group cut."""
+    out, depth = [], 0
+    for ch in body:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif depth == 0:
+            out.append(ch)
+    return "".join(out)
+
+
+def _io_pad_pin_transitions(text: str) -> Tuple[List[Tuple[str, float]], int]:
+    """(cell/pin, max_transition in ns) for every bond-pad pin that receives
+    an off-chip signal (``is_pad : true``, direction input or inout), and the
+    number of such pins that document no bound at all (pin nor library)."""
+    unit = re.search(r"\btime_unit\s*:\s*\"?\s*([0-9]+\s*[pnu]s)\"?", text)
+    scale = _LIB_TIME_UNIT_NS.get((unit.group(1) if unit else "1ns").replace(" ", ""))
+    if scale is None:
+        return [], 0
+    lib_default = re.search(r"\bdefault_max_transition\s*:\s*([0-9.eE+-]+)",
+                            text)
+    found: List[Tuple[str, float]] = []
+    undocumented = 0
+    for cell, cell_body in _liberty_blocks(text, "cell"):
+        for pin, pin_body in _liberty_blocks(cell_body, "pin"):
+            own = _own_attrs(pin_body)
+            if not re.search(r"\bis_pad\s*:\s*true\b", own):
+                continue
+            direction = re.search(r"\bdirection\s*:\s*\"?(\w+)", own)
+            if not direction or direction.group(1) not in ("input", "inout"):
+                continue
+            bound = (re.search(r"\bmax_transition\s*:\s*([0-9.eE+-]+)", own)
+                     or lib_default)
+            try:
+                value = float(bound.group(1)) * scale if bound else None
+            except ValueError:
+                value = None
+            if value is None or not math.isfinite(value) or value <= 0:
+                undocumented += 1
+                continue
+            found.append((f"{cell}/{pin}", value))
+    return found, undocumented
+
+
+def _read_pdk_file(path: str, container: str,
+                   to_container_path: Optional[Callable[[str, str], str]]
+                   ) -> Optional[str]:
+    """A pinned-PDK file's text: from the container when one is named (the
+    record's paths are container paths), else from this host."""
+    if container:
+        path_c = (to_container_path(path, container)
+                  if to_container_path is not None else path)
+        try:
+            run = subprocess.run(_cex.docker_exec_argv(container, "cat", path_c),
+                                 capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired, _cex.ContainerImageMismatch):
+            return None
+        return run.stdout if run.returncode == 0 else None
+    try:
+        return Path(path).read_text(errors="replace")
+    except OSError:
+        return None
+
+
+def _pdk_io_input_transition(project: Path, container: str = "",
+                             to_container_path: Optional[Callable[[str, str], str]] = None
+                             ) -> Tuple[Optional[Tuple[str, str]], Dict[str, object]]:
+    """The PDK IO-tier off-chip input transition (ns), with its source.
+
+    The IO library documents, on every bond-pad pin that receives an off-chip
+    signal (``is_pad : true``, direction input/inout), the ``max_transition``
+    it is characterised to accept (its PAD->core delay tables end there). That
+    is the slowest edge the pad may legally see, so applying it to the pads is
+    the conservative PDK IO-tier model: never the ideal edge, never an
+    extrapolation past the IO tables. The IO libraries are the ones the
+    pad-ring producer linked (its record, ``io_library_liberty``); the value is
+    the maximum over every such pin of every linked view, bound by sha256.
+    Returns (None, why) when no linked IO view documents one.
+    """
+    import hashlib
+    import json
+    basis: Dict[str, object] = {"record": IO_PAD_RECORD}
+    try:
+        libs = json.loads((Path(project) / IO_PAD_RECORD).read_text()
+                          ).get("io_library_liberty")
+    except (OSError, ValueError, AttributeError):
+        libs = None
+    if not isinstance(libs, list) or not any(isinstance(x, str) for x in libs):
+        basis["why"] = (f"no IO Liberty recorded by the pad-ring producer "
+                        f"({IO_PAD_RECORD} absent or without io_library_liberty)")
+        return None, basis
+    views: List[Dict[str, object]] = []
+    unread: List[str] = []
+    best: Optional[Tuple[float, str, str]] = None
+    for lib in sorted(str(x) for x in libs if isinstance(x, str)):
+        text = _read_pdk_file(lib, container, to_container_path)
+        if text is None:
+            unread.append(lib)
+            continue
+        pins, undocumented = _io_pad_pin_transitions(text)
+        views.append({"liberty": lib,
+                      "sha256": hashlib.sha256(text.encode()).hexdigest(),
+                      "pad_input_pins": len(pins),
+                      "pad_input_pins_without_bound": undocumented,
+                      "max_transition_ns": max((v for _, v in pins), default=None)})
+        for pin, value in pins:
+            if best is None or value > best[0]:
+                best = (value, lib, pin)
+    basis.update(views=views, unread=unread)
+    if unread:
+        # A view that could not be read may document a slower edge; a partial
+        # maximum is not the conservative bound.
+        basis["why"] = f"IO Liberty NOT_READ: {', '.join(unread)}"
+        return None, basis
+    if best is None:
+        basis["why"] = ("no linked IO Liberty documents a max_transition on a "
+                        "bond-pad input pin")
+        return None, basis
+    value, lib, pin = best
+    sha = next(v["sha256"] for v in views if v["liberty"] == lib)
+    return (f"{value:g}", f"PDK IO tier {lib}:{pin}:max_transition "
+                          f"(sha256 {sha})"), basis
+
+
+def _pad_input_drive(project: Path, values: Dict[str, Tuple[str, str]],
+                     container: str = "",
+                     to_container_path: Optional[Callable[[str, str], str]] = None
                      ) -> Tuple[Dict[str, Tuple[str, str]], Dict[str, object]]:
     """R-0929-PAD-INPUT-DRIVE: resolve the off-chip drive of a DIE's inputs.
 
@@ -215,18 +351,29 @@ def _pad_input_drive(project: Path, values: Dict[str, Tuple[str, str]]
         record["refused_core_driving_cell"] = {"value": cell[0],
                                                "source": cell[1]}
         out.pop("set_driving_cell")
-    for tier, found in (("DECLARED", _design_input_transition(project)),
-                        ("PDK_IO_TIER", _pdk_io_input_transition(project))):
-        if found:
-            out["set_input_transition"] = found
-            record.update(verdict=tier, model="set_input_transition",
-                          value=found[0], source=found[1])
-            return out, record
+    found = _design_input_transition(project)
+    if found:
+        out["set_input_transition"] = found
+        record.update(verdict="DECLARED", model="set_input_transition",
+                      value=found[0], source=found[1])
+        return out, record
+    found, io_basis = _pdk_io_input_transition(project, container,
+                                               to_container_path)
+    record["pdk_io_tier"] = io_basis
+    if found:
+        out["set_input_transition"] = found
+        record.update(verdict="PDK_IO_TIER", model="set_input_transition",
+                      value=found[0], source=found[1],
+                      basis=("the slowest edge the linked IO library is "
+                             "characterised to accept on a bond-pad input "
+                             "pin (conservative bound, not a board "
+                             "measurement)"))
+        return out, record
     record.update(verdict="NOT_MEASURED", reason=(
         "no design-declared off-chip input driver/transition and no PDK "
-        "IO-tier value; the core synthesis driving cell never drives a bond "
-        "pad (R-0929-PAD-INPUT-DRIVE), so input-launched and clock-latency "
-        "timing is NOT_MEASURED"))
+        f"IO-tier value ({io_basis.get('why')}); the core synthesis driving "
+        "cell never drives a bond pad (R-0929-PAD-INPUT-DRIVE), so "
+        "input-launched and clock-latency timing is NOT_MEASURED"))
     return out, record
 
 
