@@ -608,7 +608,8 @@ def test_every_ceiling_site_states_its_progress_evidence_and_its_ceiling_sample(
     it observed (`progress=`) and the load it read AT the ceiling
     (`conditions=`), and the evidence each one has is the evidence it uses:
     issue1129's Stalled maps to PROGRESS_NONE, and the landing helper FAILs a
-    cleanup that STARTED before it can reach the ceiling helper."""
+    cleanup that STARTED, and a verifier that created worktrees after the
+    signal, before it can reach the ceiling helper."""
     sites = (("test_landing_merge_verdict.py",
               "_assert_interruption_cleans_every_parallel_arm", 2),
              ("test_issue1129_gatekeeper_prepare_landing.py",
@@ -621,6 +622,9 @@ def test_every_ceiling_site_states_its_progress_evidence_and_its_ceiling_sample(
     land = (Path(__file__).parent / "test_landing_merge_verdict.py").read_text()
     body = land[land.index("def _assert_interruption_cleans_every_parallel_arm"):]
     body = body[:body.index("\ndef ")]
-    started_fail = body.index("if still_running and started:")
     last_skip = body.rindex("states.skip_if_not_measurable(")
-    assert started_fail < last_skip, "a started cleanup must FAIL before the ceiling helper"
+    # A cleanup that STARTED and a verifier that went on AFTER the signal
+    # (later worktrees) are observed behaviour: both FAIL before the helper.
+    for evidence in ("if still_running and started:",
+                     "if still_running and len(after_signal) >= 2:"):
+        assert body.index(evidence) < last_skip, evidence
