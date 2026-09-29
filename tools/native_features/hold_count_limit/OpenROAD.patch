@@ -1,0 +1,216 @@
+--- a/src/rsz/include/rsz/Resizer.hh
++++ b/src/rsz/include/rsz/Resizer.hh
+@@ -379,7 +379,8 @@
+                   int max_passes,
+                   int max_iterations,
+                   bool match_cell_footprint,
+-                  bool verbose);
++                  bool verbose,
++                  int absolute_max_buffer_count = -1);
+   void repairHold(const sta::Pin* end_pin,
+                   double setup_margin,
+                   double hold_margin,
+--- a/src/rsz/src/RepairHold.cc
++++ b/src/rsz/src/RepairHold.cc
+@@ -58,6 +58,8 @@
+   db_network_ = resizer_->db_network_;
+   estimate_parasitics_ = resizer_->estimate_parasitics_;
+   initial_design_area_ = resizer_->computeDesignArea();
++  absolute_count_limit_ = false;
++  absolute_max_buffer_count_ = 0;
+ }
+ 
+ bool RepairHold::repairHold(
+@@ -68,7 +70,8 @@
+     const float max_buffer_percent,
+     const int max_passes,
+     const int max_iterations,
+-    const bool verbose)
++    const bool verbose,
++    const int absolute_max_buffer_count)
+ {
+   bool repaired = false;
+   init();
+@@ -87,6 +90,20 @@
+   int max_buffer_count = max_buffer_percent * network_->instanceCount();
+   // Prevent it from being too small on trivial designs
+   max_buffer_count = std::max(max_buffer_count, 100);
++  absolute_count_limit_ = absolute_max_buffer_count >= 0;
++  absolute_max_buffer_count_ = absolute_max_buffer_count;
++  if (absolute_count_limit_) {
++    // Absolute ceiling includes zero and never depends on setup instance growth.
++    max_buffer_count = std::min(max_buffer_count, absolute_max_buffer_count);
++  }
++  logger_->metric("vibeic__hold__count_limit__abi", 1);
++  logger_->metric("vibeic__hold__count_limit__absolute", absolute_count_limit_ ? 1 : 0);
++  logger_->metric("vibeic__hold__count_limit", absolute_max_buffer_count);
++  logger_->metric("vibeic__hold__count_limit__effective", max_buffer_count);
++
++  if (absolute_count_limit_) {
++    absolute_max_buffer_count_ = max_buffer_count;
++  }
+ 
+   {
+     est::IncrementalParasiticsGuard guard(estimate_parasitics_);
+@@ -402,7 +419,9 @@
+     printProgress(0, true, false);
+     int pass = 1;
+     while (worst_slack < hold_margin && progress && !resizer_->overMaxArea()
+-           && inserted_buffer_count_ <= max_buffer_count && pass <= max_passes
++           && (absolute_count_limit_ ? inserted_buffer_count_ < max_buffer_count
++                                     : inserted_buffer_count_ <= max_buffer_count)
++           && pass <= max_passes
+            && (max_iterations < 0 || pass <= max_iterations)) {
+       if (verbose || pass == 1) {
+         printProgress(pass, false, false);
+@@ -505,6 +524,9 @@
+     return sta_->slack(end1, min_) < sta_->slack(end2, min_);
+   });
+   for (sta::Vertex* end_vertex : hold_failures) {
++    if (absolute_count_limit_ && inserted_buffer_count_ >= absolute_max_buffer_count_) {
++      break;
++    }
+     if (verbose) {
+       printProgress(pass, false, false);
+     }
+@@ -563,6 +585,9 @@
+       }
+       // Stop one short of the end so we can get the load.
+       for (int i = 0; i < path_vertices.size() - 1; i++) {
++        if (absolute_count_limit_ && inserted_buffer_count_ >= absolute_max_buffer_count_) {
++          return;
++        }
+         sta::Vertex* path_vertex = path_vertices[i];
+         sta::Pin* path_pin = path_vertex->pin();
+ 
+@@ -673,7 +698,9 @@
+               float slew_factor
+                   = (slew_before > 0) ? slew_after / slew_before : 1.0;
+ 
+-              if (slew_factor > 1.20
++              if ((absolute_count_limit_
++                   && move.buffers > absolute_max_buffer_count_ - inserted_buffer_count_)
++                  || slew_factor > 1.20
+                   || (!allow_setup_violations
+                       && sta::fuzzyLess(setup_slack_after, setup_slack_before)
+                       && setup_slack_after < setup_margin)) {
+--- a/src/rsz/src/RepairHold.hh
++++ b/src/rsz/src/RepairHold.hh
+@@ -38,7 +38,8 @@
+                   float max_buffer_percent,
+                   int max_passes,
+                   int max_iterations,
+-                  bool verbose);
++                  bool verbose,
++                  int absolute_max_buffer_count = -1);
+   void repairHold(const sta::Pin* end_pin,
+                   double setup_margin,
+                   double hold_margin,
+@@ -113,6 +114,8 @@
+   Resizer* resizer_;
+   est::EstimateParasitics* estimate_parasitics_;
+ 
++  bool absolute_count_limit_ = false;
++  int absolute_max_buffer_count_ = 0;
+   int resize_count_ = 0;
+   int inserted_buffer_count_ = 0;
+   int cloned_gate_count_ = 0;
+--- a/src/rsz/src/Resizer.cc
++++ b/src/rsz/src/Resizer.cc
+@@ -5419,7 +5419,8 @@
+     int max_passes,
+     int max_iterations,
+     bool match_cell_footprint,
+-    bool verbose)
++    bool verbose,
++    int absolute_max_buffer_count)
+ {
+   utl::Timer timer;
+   utl::SetAndRestore set_match_footprint(match_cell_footprint_,
+@@ -5446,7 +5447,8 @@
+                                          max_buffer_percent,
+                                          max_passes,
+                                          max_iterations,
+-                                         verbose);
++                                         verbose,
++                                         absolute_max_buffer_count);
+   logger_->info(RSZ, 506, "Runtime: {:.2f}s", timer.elapsed());
+   return result;
+ }
+--- a/src/rsz/src/Resizer.i
++++ b/src/rsz/src/Resizer.i
+@@ -404,6 +404,12 @@
+   resizer->reportSwappablePins();
+ }
+ 
++int
++hold_buffer_count_limit_abi()
++{
++  return 1;
++}
++
+ bool
+ repair_hold(double setup_margin,
+             double hold_margin,
+@@ -412,7 +418,8 @@
+             int max_passes,
+             int max_iterations,
+             bool match_cell_footprint,
+-            bool verbose)
++            bool verbose,
++            int absolute_max_buffer_count = -1)
+ {
+   ensureLinked();
+   Resizer *resizer = getResizer();
+@@ -420,7 +427,7 @@
+                       allow_setup_violations,
+                       max_buffer_percent, max_passes,
+                       max_iterations, match_cell_footprint,
+-                      verbose);
++                      verbose, absolute_max_buffer_count);
+ }
+ 
+ void
+--- a/src/rsz/src/Resizer.tcl
++++ b/src/rsz/src/Resizer.tcl
+@@ -258,6 +258,7 @@
+                                         [-max_passes passes]\
+                                         [-max_iterations iterations]\
+                                         [-max_buffer_percent buffer_percent]\
++                                        [-max_buffer_count buffer_count]\
+                                         [-max_utilization util] \
+                                         [-match_cell_footprint] \
+                                         [-max_repairs_per_pass max_repairs_per_pass]\
+@@ -269,7 +270,7 @@
+   # same phase sequence; only one of the three may be supplied per call.
+   sta::parse_key_args "repair_timing" args \
+     keys {-setup_margin -hold_margin -slack_margin \
+-            -libraries -max_utilization -max_buffer_percent -sequence \
++            -libraries -max_utilization -max_buffer_percent -max_buffer_count -sequence \
+             -phases -policy -policies \
+             -recover_power -repair_tns -max_passes -max_iterations -max_repairs_per_pass} \
+     flags {-setup -hold -allow_setup_violations -skip_pin_swap -skip_gate_cloning \
+@@ -339,6 +340,14 @@
+     sta::check_percent "-max_buffer_percent" $max_buffer_percent
+   }
+   set max_buffer_percent [expr $max_buffer_percent / 100.0]
++  set absolute_max_buffer_count -1
++  if { [info exists keys(-max_buffer_count)] } {
++    set absolute_max_buffer_count $keys(-max_buffer_count)
++    if { !$hold || ![string is integer -strict $absolute_max_buffer_count]
++         || $absolute_max_buffer_count < 0 || $absolute_max_buffer_count > 2147483647 } {
++      error "-max_buffer_count requires -hold and a non-negative int32"
++    }
++  }
+ 
+   set repair_tns_end_percent 1.0
+   if { [info exists keys(-repair_tns)] } {
+@@ -415,7 +424,7 @@
+         }
+         set repaired_hold [rsz::repair_hold $setup_margin $hold_margin \
+           $allow_setup_violations $max_buffer_percent $max_passes \
+-          $max_iterations $match_cell_footprint $verbose]
++          $max_iterations $match_cell_footprint $verbose $absolute_max_buffer_count]
+       }
+     } finally {
+       if { [sta::crpr_enabled] != $entry_crpr_enabled } {

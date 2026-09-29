@@ -1,0 +1,40 @@
+--- a/librelane/scripts/openroad/rsz_timing_postcts.tcl
++++ b/librelane/scripts/openroad/rsz_timing_postcts.tcl
+@@ -13,6 +13,14 @@
+ # limitations under the License.
+ source $::env(SCRIPTS_DIR)/openroad/common/io.tcl
+ source $::env(SCRIPTS_DIR)/openroad/common/resizer.tcl
++
++# Refuse before any setup/hold work on an unimplemented native ABI.
++if { [info exists ::env(PL_RESIZER_HOLD_MAX_BUFFER_COUNT)] } {
++    if { [llength [info commands rsz::hold_buffer_count_limit_abi]] != 1
++         || [rsz::hold_buffer_count_limit_abi] != 1 } {
++        error "LL_HOLD_ABSOLUTE_CAP_UNSUPPORTED: requires vibeic-hold-count-limit-v1"
++    }
++}
+ 
+ read_current_odb
+ 
+@@ -45,6 +53,7 @@
+ lappend hold_args -setup_margin $::env(PL_RESIZER_SETUP_SLACK_MARGIN)
+ lappend hold_args -hold_margin $::env(PL_RESIZER_HOLD_SLACK_MARGIN)
+ lappend hold_args -max_buffer_percent $::env(PL_RESIZER_HOLD_MAX_BUFFER_PCT)
++append_if_exists_argument hold_args PL_RESIZER_HOLD_MAX_BUFFER_COUNT -max_buffer_count
+ append_if_flag hold_args PL_RESIZER_ALLOW_SETUP_VIOS -allow_setup_violations
+ append_if_exists_argument hold_args PL_RESIZER_HOLD_REPAIR_TNS_PCT -repair_tns
+ append_if_exists_argument hold_args PL_RESIZER_HOLD_MAX_UTIL_PCT -max_utilization
+--- a/librelane/steps/openroad.py
++++ b/librelane/steps/openroad.py
+@@ -2758,6 +2758,12 @@
+             units="ns",
+         ),
+         Variable(
++            "PL_RESIZER_HOLD_MAX_BUFFER_COUNT",
++            Optional[int],
++            "Absolute post-CTS hold insertion ceiling, including zero. Requires "
++            "OpenROAD vibeic-hold-count-limit-v1; does not grow during setup.",
++        ),
++        Variable(
+             "PL_RESIZER_HOLD_MAX_BUFFER_PCT",
+             Decimal,
+             "Specifies a max number of buffers to insert to fix hold violations. This number is calculated as a percentage of the number of instances in the design.",

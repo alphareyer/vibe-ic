@@ -1,0 +1,11 @@
+--- a/src/rsz/src/RepairHold.cc
++++ b/src/rsz/src/RepairHold.cc
+@@ -94,7 +94,7 @@
+   absolute_max_buffer_count_ = absolute_max_buffer_count;
+   if (absolute_count_limit_) {
+     // Absolute ceiling includes zero and never depends on setup instance growth.
+-    max_buffer_count = std::min(max_buffer_count, absolute_max_buffer_count);
++    max_buffer_count = static_cast<int>(max_buffer_percent * network_->instanceCount());
+   }
+   logger_->metric("vibeic__hold__count_limit__abi", 1);
+   logger_->metric("vibeic__hold__count_limit__absolute", absolute_count_limit_ ? 1 : 0);

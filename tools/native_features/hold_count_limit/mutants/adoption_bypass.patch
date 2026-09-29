@@ -1,0 +1,10 @@
+--- a/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml
++++ b/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml
+@@ -5254,7 +5254,6 @@
+         # CUT20 supplies a bound State-pair producer. Its unchanged 5% total
+         # stdcell numeric judgment is blocking, including setup+hold delta.
+         # Missing current evidence reports INCOMPLETE, not a vacuous PASS.
+-        - program_exit_zero: "hold_area_budget_check . --json reports/phase3/pnr/hold_area_budget.json"
+         # File-presence precondition (kept, consistent with sibling Steps 21/23).
+         - files_exist: ["phase3/stage3/pnr/post_hold.def"]
+         # Substance: prove the Step-20 hold-FIXING step did real work — either a

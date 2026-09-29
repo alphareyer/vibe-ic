@@ -184,14 +184,17 @@ def hold_buffer_pct(R, state_out: Path, rsz_config: Path, pdk_root: Path,
     gate agree. Anything unmeasured raises `librelane_contract.Refusal`: the step refuses
     rather than hand the tool a number in the wrong unit."""
     import fnmatch
+    import math
     import librelane_contract as _ll
     import _area_unit as _au
     import hold_area_budget_check as _hab
     metrics = json.loads(Path(state_out).read_text()).get("metrics") or {}
     count = metrics.get("design__instance__count")
     area = metrics.get("design__instance__area__stdcell")
-    if not (isinstance(count, (int, float)) and count > 0
-            and isinstance(area, (int, float)) and area > 0):
+    if not (isinstance(count, (int, float)) and not isinstance(count, bool)
+            and math.isfinite(count) and count > 0
+            and isinstance(area, (int, float)) and not isinstance(area, bool)
+            and math.isfinite(area) and area > 0):
         raise _ll.Refusal("LL_HOLD_BUDGET_UNMEASURED", f"{state_out} carries no positive "
             f"design__instance__count ({count!r}) / "
             f"design__instance__area__stdcell ({area!r})")
@@ -232,6 +235,8 @@ def hold_buffer_pct(R, state_out: Path, rsz_config: Path, pdk_root: Path,
             f"is left in the pool of {rsz_config}")
     a_max_cell = max(sorted(pool), key=lambda b: pool[b])
     a_max = pool[a_max_cell]
+    if not math.isfinite(a_max) or a_max <= 0:
+        raise _ll.Refusal("LL_HOLD_BUDGET_UNMEASURED", "largest LEF footprint is not positive finite")
     budget_area = _hab.AREA_BUDGET_PCT / 100.0 * float(area)
     max_buffers = int(budget_area // a_max)
     pct = round(100.0 * max_buffers / float(count), 6)
@@ -241,7 +246,11 @@ def hold_buffer_pct(R, state_out: Path, rsz_config: Path, pdk_root: Path,
         "design__instance__count": count, "budget_area_um2": budget_area,
         "largest_buffer": a_max_cell, "largest_buffer_um2": a_max,
         "buffers_in_pool": len(pool), "max_buffers": max_buffers,
-        "PL_RESIZER_HOLD_MAX_BUFFER_PCT": pct, "measured_on": str(state_out)}
+        "PL_RESIZER_HOLD_MAX_BUFFER_PCT": pct, "measured_on": str(state_out),
+        "basis_state_sha256": _ll.digest(state_out),
+        "resolved_config_sha256": _ll.digest(rsz_config),
+        "liberty_sha256": {v: _ll.digest(_host(v)) for v in libs},
+        "lef_sha256": {v: _ll.digest(_host(v)) for v in lefs}}
 
 
 #: The step-19/20 LibreLane knobs a PPA candidate may set, through
@@ -540,28 +549,67 @@ def execute(
                                 mounts=mounts, lane="19-cts-hold", pdk_root=_ll.PDK_GUEST_ROOT)
         hold_in = folders[-1] / "state_out.json"
         rsz_cfg = configs["OpenROAD.ResizerTimingPostCTS"]
+        pct, hold_budget = hold_buffer_pct(R, hold_in, rsz_cfg, Path(pdk_root),
+                                           str(pdk.name))
+        if hold_budget["max_buffers"] > 2147483647:
+            return _refuse("LL_HOLD_ABSOLUTE_CAP_UNREPRESENTABLE",
+                          "native absolute ceiling exceeds the int32 ABI", out)
+        # A percentage alone has a native minimum of 100 and is recomputed
+        # after setup. Never send a proposed key to an old LibreLane schema.
+        # tools/native_features/hold_count_limit contains the NOT_BUILT patch.
+        if "PL_RESIZER_HOLD_MAX_BUFFER_COUNT" not in json.loads(rsz_cfg.read_text()):
+            return _refuse("LL_HOLD_ABSOLUTE_CAP_UNSUPPORTED",
+                "NOT_MEASURED: resolved LibreLane schema lacks "
+                "PL_RESIZER_HOLD_MAX_BUFFER_COUNT; requires native "
+                "vibeic-hold-count-limit-v1 (including zero); percentage "
+                "conversion is not enforceable numerical closure", out)
         if "PL_RESIZER_HOLD_MAX_BUFFER_PCT" in overlay:
-            hold_budget = {"PL_RESIZER_HOLD_MAX_BUFFER_PCT":
-                           overlay["PL_RESIZER_HOLD_MAX_BUFFER_PCT"][0],
-                           "source": overlay["PL_RESIZER_HOLD_MAX_BUFFER_PCT"][1]}
-        else:
-            pct, hold_budget = hold_buffer_pct(R, hold_in, rsz_cfg, Path(pdk_root),
-                                               str(pdk.name))
-            configs["OpenROAD.ResizerTimingPostCTS"] = rsz_cfg = _ll.derive_step_config(
-                rsz_cfg, rsz_cfg.with_name(rsz_cfg.stem + ".hold-budget.json"),
-                {"PL_RESIZER_HOLD_MAX_BUFFER_PCT": (
-                    pct, f"{HOLD_BUFFER_BUDGET_SOURCE}, converted to a count "
-                         f"percentage by librelane_cts_hold.hold_buffer_pct: "
-                         f"{hold_budget['max_buffers']} x {hold_budget['largest_buffer']} "
-                         f"({hold_budget['largest_buffer_um2']} um2) in "
-                         f"{hold_budget['design__instance__count']} instances")})
-            chain[3] = ("OpenROAD.ResizerTimingPostCTS", rsz_cfg)
+            hold_budget["converted_count_percent"] = pct
+            pct = overlay["PL_RESIZER_HOLD_MAX_BUFFER_PCT"][0]
+            hold_budget["PL_RESIZER_HOLD_MAX_BUFFER_PCT"] = pct
+            hold_budget["percent_source"] = overlay["PL_RESIZER_HOLD_MAX_BUFFER_PCT"][1]
+        configs["OpenROAD.ResizerTimingPostCTS"] = rsz_cfg = _ll.derive_step_config(
+            rsz_cfg, rsz_cfg.with_name(rsz_cfg.stem + ".hold-budget.json"),
+            {"PL_RESIZER_HOLD_MAX_BUFFER_PCT": (pct, HOLD_BUFFER_BUDGET_SOURCE),
+             "PL_RESIZER_HOLD_MAX_BUFFER_COUNT": (
+                 hold_budget["max_buffers"], HOLD_BUFFER_BUDGET_SOURCE +
+                 "; absolute retap allowance, cannot inflate during setup")})
+        chain[3] = ("OpenROAD.ResizerTimingPostCTS", rsz_cfg)
+        hold_budget["native_feature"] = "vibeic-hold-count-limit-v1"
+        hold_budget["absolute_count"] = hold_budget["max_buffers"]
+        hold_budget["tool_config_sha256"] = _ll.digest(rsz_cfg)
         folders += _ll.run_chain(project, image, [(s, c, hold_in) for s, c in chain[3:]],
                                  mounts=mounts, lane="19-cts-hold", pdk_root=_ll.PDK_GUEST_ROOT,
                                  first_index=len(head_steps) + 1)
     except (_ll.Refusal, ValueError, OSError) as exc:
         return _refuse(getattr(exc, "code", "LL_CTS_HOLD_CHAIN_FAILED"), str(exc), out)
     cts_folder, sizing_folder, retap_folder, rsz_folder = folders[:4]
+    import hold_area_budget_check as _hab
+    # Judge actual current setup+hold area BEFORE copying views or routing.
+    # A measured violation wins even when another native receipt is missing.
+    try:
+        area_doc, area_result, area_rc = _hab.check_state_pair(
+            project, retap_folder / "state_out.json", rsz_folder / "state_out.json")
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        return _refuse("LL_HOLD_AREA_UNMEASURED",
+                      f"NOT_MEASURED: current State pair unavailable: {exc}", out)
+    if area_rc:
+        return _refuse(area_result["reason"], area_result["message"], out)
+    rsz_metrics = json.loads((rsz_folder / "state_out.json").read_text()).get("metrics", {})
+    if (type(rsz_metrics.get("vibeic__hold__count_limit__abi")) is not int or
+            rsz_metrics.get("vibeic__hold__count_limit__abi") != 1 or
+            rsz_metrics.get("vibeic__hold__count_limit__absolute") != 1 or
+            rsz_metrics.get("vibeic__hold__count_limit") != hold_budget["max_buffers"]):
+        return _refuse("LL_HOLD_ABSOLUTE_CAP_UNSUPPORTED",
+                      "NOT_MEASURED: current native State does not attest "
+                      "vibeic-hold-count-limit-v1 and the requested absolute cap", out)
+    inserted = rsz_metrics.get("design__instance__count__hold_buffer")
+    if type(inserted) is not int or inserted < 0:
+        return _refuse("LL_HOLD_BUFFER_COUNT_UNMEASURED",
+                      "NOT_MEASURED: native hold insertion count missing", out)
+    if inserted > hold_budget["max_buffers"]:
+        return _refuse("LL_HOLD_ABSOLUTE_CAP_EXCEEDED",
+                      f"native count {inserted} exceeds {hold_budget['max_buffers']}", out)
     import excluded_master_census_check as _emc
     excluded_census = {
         step: _emc.write_audit(config, folder / "state_out.json", step,
@@ -647,11 +695,11 @@ def execute(
                            json.dumps(selection, sort_keys=True), out)
         selected = selection["selection"]
         if selected == "openroad":
-            measured_state = arm_folders[-1] / "state_out.json"
-            views = {"post_cts_def": arm / "post_cts.def",
-                     "post_hold_def": arm / "post_hold.def",
-                     "post_hold_odb": arm / "post_hold.odb",
-                     "cts_rpt": None}
+            # The direct comparison arm has no current bound before/after
+            # area pair. It cannot borrow the LibreLane arm's measurement.
+            return _refuse("LL_HOLD_AREA_SELECTED_ARM_UNMEASURED",
+                          "NOT_MEASURED: direct selected arm lacks its own "
+                          "bound hold-area producer; no views adopted", out)
     elif ll_gate.get("verdict") == "NOT_MEASURED":
         return _refuse("LL_CTS_HOLD_NOT_MEASURED",
                        f"{arms_root / 'librelane/gate.json'}", out)
@@ -672,6 +720,7 @@ def execute(
         "selection": selection, "views": {}}
     receipt["excluded_master_census"] = excluded_census
     receipt["hold_budget"] = hold_budget
+    receipt["hold_area_sources_sha256"] = area_doc["sources_sha256"]
     # Written in this order so every report is newer than the DEF it
     # describes (the #519 emitter keys on that).
     for name in ("post_cts_def", "post_hold_def", "post_hold_odb", "cts_rpt"):
@@ -688,36 +737,6 @@ def execute(
     handoff = project / "reports/phase3/librelane_cts_hold_handoff.json"
     handoff.parent.mkdir(parents=True, exist_ok=True)
     R._aa.write_text(handoff, json.dumps(receipt, indent=2) + "\n")
-    if selected == "librelane":
-        # hold_area_budget_check's producer (#1980): the resizer step's own
-        # standard-cell area metric before and after it ran.  The step repairs setup
-        # AND hold, so the delta is an upper bound on the hold-buffer area.
-        def _area(folder: Path) -> Any:
-            return json.loads((folder / "state_out.json").read_text()).get(
-                "metrics", {}).get("design__instance__area__stdcell")
-        rsz_metrics = json.loads((rsz_folder / "state_out.json").read_text()
-                                 ).get("metrics", {})
-        area_doc = {
-            "program": "phase3_one_shot_runner.execute",
-            "before_total_area": _area(retap_folder),
-            "after_total_area": _area(rsz_folder),
-            "hold_buffer_count": rsz_metrics.get(
-                "design__instance__count__hold_buffer"),
-            "setup_buffer_count": rsz_metrics.get(
-                "design__instance__count__setup_buffer"),
-            "numerator_basis": (
-                "OpenROAD.ResizerTimingPostCTS design__instance__area__stdcell "
-                "after - before (pad cells excluded: on spm x gf180mcuD they "
-                "are 3.36 of 4.05 mm2 of instance area and would dilute the "
-                "guardrail 6x); the step repairs setup and hold, so this "
-                "bounds the hold-buffer area from above"),
-            "sources": {"before": str((retap_folder / "state_out.json")
-                                      .relative_to(project)),
-                        "after": str((rsz_folder / "state_out.json")
-                                     .relative_to(project))}}
-        area_path = project / "reports/phase3/pnr/hold_area.json"
-        area_path.parent.mkdir(parents=True, exist_ok=True)
-        R._aa.write_text(area_path, json.dumps(area_doc, indent=2) + "\n")
     # The tools' own transcripts go into the session log, bracketed, so every
     # log reader downstream (stage attribution, CTS-0018, the #519 emitter)
     # reads what TritonCTS and the resizer printed, not a relabelled summary.

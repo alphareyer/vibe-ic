@@ -16037,6 +16037,17 @@ def _json_path_values(value: Any, dotted_path: str) -> List[Any]:
 def _collect_program_output_records(project: Path,
                                     step: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Read declared producer/classifier outputs without executing a gate."""
+    def gate_commands(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "program_exit_zero" and isinstance(value, str):
+                    yield value
+                else:
+                    yield from gate_commands(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from gate_commands(value)
+    commands = list(gate_commands(step.get("gate", {})))
     records: List[Dict[str, Any]] = []
     for spec in step.get("program_outputs", []) or []:
         if not isinstance(spec, dict):
@@ -16086,6 +16097,16 @@ def _collect_program_output_records(project: Path,
             "role": "PRODUCER_OUTPUT",
             "enforcement": "NOT_A_GATE",
         }
+        for command in commands:
+            import shlex
+            try:
+                args = shlex.split(command)
+            except ValueError:
+                continue
+            if (args and Path(args[0]).stem == program and "--json" in args
+                    and args.index("--json") + 1 < len(args)
+                    and args[args.index("--json") + 1] == rel):
+                record.update(role="GATE_OUTPUT", enforcement="GATE")
         finding_values: List[Any] = []
         for finding_path in spec.get("finding_fields", []) or []:
             finding_values.extend(_json_path_values(data, str(finding_path)))

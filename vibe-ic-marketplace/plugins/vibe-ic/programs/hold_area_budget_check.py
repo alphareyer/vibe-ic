@@ -33,37 +33,13 @@ Input forms (JSON or CLI flags):
   {"hold_buffer_area": 1234.5, "total_cell_area": 100000.0}
   {"before_total_area": 98765.5, "after_total_area": 100000.0}   # delta derived
 
-PROJECT-DIRECTORY MODE, and the NO-PRODUCER disclosure it exists to make
-------------------------------------------------------------------------
-THE GUARDRAIL IS ENFORCED AT NEITHER END TODAY. Measured over the published
-corpus and over `phase3_one_shot_runner` itself:
-
-  * 0 files anywhere under `benchmark-data/` carry `hold_buffer_area`,
-    `total_cell_area` or a `before/after_total_area` pair, and 0 carry an
-    `area*.rpt`. Nothing in the plugin writes this gate's input.
-  * The flow's only area emission is a single `report_design_area` at the END
-    of `pnr.tcl` — one post-P&R total, with no before/after bracket around the
-    hold-repair step, so the numerator cannot even be derived.
-  * The EX-ANTE half is missing too: `openroad_hold_repair_tcl_gen` emits
-    `-max_buffer_percent <= 5`, and the count of `max_buffer_percent` in
-    `phase3_one_shot_runner.py` and in every published `pnr*.tcl` is 0. The
-    template emits a bare `repair_timing -hold`.
-
-So the SKILL's 5% hold-buffer area guardrail is documentation at both ends.
-Wiring this gate on a raw path would have FAILed 100% of runs for
-`TOTAL_AREA_MISSING_OR_ZERO` — a total outage for the wrong reason.
-
-A positional argument that is a DIRECTORY is therefore treated as a PROJECT
-ROOT: the known producer paths are probed, and when none exists the gate
-returns rc=2 NOT CHECKED with reason `NO_AREA_PRODUCER`, printing what is
-missing. That is a DISCLOSURE, not permission — and it is a disclosure that is
-regenerated on every run instead of typed once into a list that can rot. The
-moment a producer lands, the same wiring judges it with no further change.
-
-WHAT WOULD MAKE THIS GATE BLOCKING: `phase3_one_shot_runner` bracketing the
-hold-repair block with `report_design_area` and emitting
-`reports/phase3/pnr/hold_area.json` with `before_total_area` / `after_total_area`
-(and, when the tool reports it, `hold_buffer_area` directly).
+PROJECT-DIRECTORY MODE
+----------------------
+The LibreLane CTS/hold adapter supplies the resizer's current before/after
+standard-cell State metrics. The delta remains an upper bound including setup
+and hold. Its source hashes and values are checked again in project mode.
+Missing evidence is NOT_MEASURED (rc=4), never a vacuous partial PASS beside
+the hold gate. Explicit JSON/flags retain the unchanged numeric evaluator.
 
 chip-AGNOSTIC: the only constant is the SKILL's universal 5% guardrail; no
 PDK / cell / design literal is hard-coded.
@@ -79,11 +55,12 @@ Exit codes
 ----------
     0 — PASS (within budget)
     1 — FAIL (budget exceeded, or an input that exists but cannot be certified)
-    2 — NOT CHECKED: project-directory mode found no producer for the input.
+    4 — NOT_MEASURED: project mode lacks current bound evidence.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import sys
@@ -96,7 +73,8 @@ AREA_BUDGET_PCT = 5.0   # SKILL guardrail: hold buffers <= 5% of total cell area
 
 
 def _finite_positive(x) -> bool:
-    return isinstance(x, (int, float)) and math.isfinite(x) and x > 0
+    return (isinstance(x, (int, float)) and not isinstance(x, bool)
+            and math.isfinite(x) and x > 0)
 
 
 def evaluate(hold_buffer_area: Optional[float],
@@ -209,6 +187,110 @@ _AREA_KEYS = ("hold_buffer_area", "total_cell_area",
               "before_total_area", "after_total_area")
 
 
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def state_pair_document(project: Path, before: Path, after: Path) -> dict:
+    """The actual resizer State pair; no hold-only reinterpretation of delta."""
+    states = {k: json.loads(p.read_text()) for k, p in
+              (("before", before), ("after", after))}
+    metrics = {k: s.get("metrics", {}) for k, s in states.items()}
+    return {
+        "program": "librelane_cts_hold.execute", "schema": "hold-area-state-pair-v1",
+        "before_total_area": metrics["before"].get("design__instance__area__stdcell"),
+        "after_total_area": metrics["after"].get("design__instance__area__stdcell"),
+        "before_instance_count": metrics["before"].get("design__instance__count"),
+        "after_instance_count": metrics["after"].get("design__instance__count"),
+        "hold_buffer_count": metrics["after"].get("design__instance__count__hold_buffer"),
+        "setup_buffer_count": metrics["after"].get("design__instance__count__setup_buffer"),
+        "numerator_basis": "ResizerTimingPostCTS total stdcell after - before; "
+                           "setup-plus-hold delta is an upper bound on hold area",
+        "sources": {k: str(p.relative_to(project)) for k, p in
+                    (("before", before), ("after", after))},
+        "sources_sha256": {k: _sha(p) for k, p in
+                           (("before", before), ("after", after))},
+    }
+
+
+def project_area_result(project: Path, path: Path) -> Tuple[str, int, dict]:
+    """Validate current numeric inputs instead of trusting an old verdict."""
+    numeric = None
+    try:
+        doc = json.loads(path.read_text())
+        if doc.get("schema") != "hold-area-state-pair-v1":
+            raise ValueError("no bound current State pair")
+        sources = {}
+        for key in ("before", "after"):
+            rel = Path(doc["sources"][key])
+            source = (project / rel).resolve()
+            if rel.is_absolute() or not source.is_relative_to(project.resolve()):
+                raise ValueError("State source escapes project")
+            if _sha(source) != doc["sources_sha256"][key]:
+                raise ValueError(f"{key} State bytes changed")
+            sources[key] = source
+        actual = state_pair_document(project.resolve(), sources["before"], sources["after"])
+        for field in ("before_total_area", "after_total_area"):
+            # JSON booleans are not numeric measurements, even when equal to 1.
+            value = doc.get(field)
+            if isinstance(value, bool) or value != actual[field]:
+                raise ValueError(f"{field} differs from current State")
+            if not _finite_positive(value):
+                raise ValueError(f"{field} is unmeasured")
+        numeric = evaluate(None, None, doc["before_total_area"], doc["after_total_area"],
+                           allow_zero=_tool_counted_zero(str(path)))
+        numeric[2].update(input_source=str(path.relative_to(project)),
+                          input_sha256=_sha(path), sources=doc["sources"],
+                          sources_sha256=doc["sources_sha256"],
+                          numerator_basis=doc["numerator_basis"])
+        for field in ("before_instance_count", "after_instance_count", "hold_buffer_count",
+                      "setup_buffer_count"):
+            value = doc.get(field)
+            if (isinstance(value, bool) or value != actual[field]
+                    or not isinstance(value, (int, float)) or not math.isfinite(value)
+                    or value < 0):
+                raise ValueError(f"{field} is missing or differs from current State")
+        # The selected lane owns these two sources. A foreign valid pair must
+        # not replace a current failure through a copied producer document.
+        import _librelane_cts_hold_evidence as ev
+        if set(ev.modes(project).values()) != {"direct"}:
+            receipt = json.loads((project / ev.RECEIPT_REL).read_text())
+            if receipt.get("selected") != "librelane":
+                raise ValueError("selected arm has no matching area State pair")
+            chain = receipt["chain"]
+            expected = {"before": chain["Vibeic.ExternalCaptureLaunchRetap"] + "/state_out.json",
+                        "after": chain["OpenROAD.ResizerTimingPostCTS"] + "/state_out.json"}
+            if doc["sources"] != expected:
+                raise ValueError("State pair differs from selected lane")
+            if receipt.get("hold_area_sources_sha256") != doc["sources_sha256"]:
+                raise ValueError("area hashes differ from current handoff")
+        return numeric
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        if numeric is not None and numeric[0] == "FAIL":
+            numeric[2]["binding_problem"] = str(exc)
+            return numeric
+        return "NOT_MEASURED", 4, {
+            "tool": _TOOL, "verdict": "NOT_MEASURED", "budget_pct": AREA_BUDGET_PCT,
+            "reason": "HOLD_AREA_CURRENT_EVIDENCE_MISSING", "reason_class": "input_absent",
+            "message": str(exc)}
+
+
+def check_state_pair(project: Path, before: Path, after: Path) -> Tuple[dict, dict, int]:
+    """Owning adoption gate, before any shipped view is copied."""
+    doc = state_pair_document(project, before, after)
+    path = project / _PRODUCER_CANDIDATES[0]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, indent=2) + "\n")
+    verdict, rc, report = evaluate(None, None, doc["before_total_area"],
+                                  doc["after_total_area"],
+                                  allow_zero=_tool_counted_zero(str(path)))
+    report.update(input_source=str(path.relative_to(project)), input_sha256=_sha(path),
+                  sources=doc["sources"], sources_sha256=doc["sources_sha256"],
+                  numerator_basis=doc["numerator_basis"])
+    (path.parent / "hold_area_budget.json").write_text(json.dumps(report, indent=2) + "\n")
+    return doc, report, rc
+
+
 def find_producer(project: Path) -> Optional[Path]:
     """First existing producer artefact under a project root, else None."""
     for rel in _PRODUCER_CANDIDATES:
@@ -255,32 +337,23 @@ def main(argv=None) -> int:
         project = Path(args.input_json)
         found = find_producer(project)
         if found is None:
-            report = {
+            verdict, rc, report = "NOT_MEASURED", 4, {
                 "tool": _TOOL, "budget_pct": AREA_BUDGET_PCT,
-                "mode": "project", "project": str(project),
-                "verdict": "NOT CHECKED", "reason": "NO_AREA_PRODUCER",
-                "probed": list(_PRODUCER_CANDIDATES),
-                "message": (
-                    "the 5% hold-buffer area guardrail was NOT CHECKED: no "
-                    "producer wrote this gate's input. Probed "
-                    + ", ".join(_PRODUCER_CANDIDATES) + ". Nothing in the "
-                    "plugin emits hold_buffer_area / total_cell_area or a "
-                    "before/after total-area pair around the hold-repair "
-                    "step; the flow's only area emission is a single "
-                    "post-P&R report_design_area with no bracket. The "
-                    "ex-ante half (-max_buffer_percent in the emitted "
-                    "repair_timing -hold) is absent too, so the guardrail is "
-                    "enforced at NEITHER end."),
-            }
-            if args.json:
-                outp = Path(args.json)
-                outp.parent.mkdir(parents=True, exist_ok=True)
-                outp.write_text(json.dumps(report, indent=2) + "\n")
-            print(f"=== {_TOOL} === verdict: NOT CHECKED")
-            print(f"VACUOUS_PASS: {_TOOL} — NOT CHECKED "
-                  f"[NO_AREA_PRODUCER]: {report['message']}")
-            return 2
-        args.input_json = str(found)
+                "verdict": "NOT_MEASURED", "reason": "NO_AREA_PRODUCER",
+                "reason_class": "input_absent", "probed": list(_PRODUCER_CANDIDATES),
+                "message": "no current before/after area producer"}
+        else:
+            verdict, rc, report = project_area_result(project, found)
+        if args.json:
+            outp = Path(args.json)
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            outp.write_text(json.dumps(report, indent=2) + "\n")
+        print(f"=== {_TOOL} === verdict: {verdict}")
+        if verdict == "NOT_MEASURED":
+            print(f"INCOMPLETE: {_TOOL} — {report['reason']}: {report['message']}")
+        elif verdict == "FAIL":
+            print(f"FAIL [{report['reason']}]: {report['message']}")
+        return rc
 
     hba, tca, bta, ata = _load_input(args)
     # A producer that also records the TOOL's own hold-buffer count (T98: the

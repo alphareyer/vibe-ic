@@ -1,0 +1,119 @@
+{
+  "status": "PROPOSAL_NOT_BUILT_NOT_NATIVE_MEASURED",
+  "abi": "vibeic-hold-count-limit-v1",
+  "base_sources": [
+    {
+      "repo": "vibeic/vibeic-eda",
+      "ref": "v0.3.87",
+      "path": "Dockerfile",
+      "blob": "a6bdd8380921d57745025575f22f9d5c643db4f4",
+      "sha256": "341a61d5b6c4db9e76053c5bcbca40049fdd6ef71cac5d662153da4ad763dd65"
+    },
+    {
+      "repo": "vibeic/OpenROAD",
+      "ref": "7c05ab8a1c2b93deb9dd092fe8c126bce1f278fc",
+      "path": "src/rsz/src/RepairHold.cc",
+      "blob": "e8ed8d5c4c4f5a21ee32398f9c45bb5c17810069",
+      "sha256": "57be9517bd58e2c628a1dc565744549c089b95f4fce3ffe03a4de7e61c962705"
+    },
+    {
+      "repo": "vibeic/OpenROAD",
+      "ref": "7c05ab8a1c2b93deb9dd092fe8c126bce1f278fc",
+      "path": "src/rsz/src/RepairHold.hh",
+      "blob": "ea7f16b6f7f496789c998ee44ea698e2c7f798a1",
+      "sha256": "b6f0d61e6d1122cdecdba7dbb70c7703bfe25974b31e152d1d8d11cfb05ba09b"
+    },
+    {
+      "repo": "vibeic/OpenROAD",
+      "ref": "7c05ab8a1c2b93deb9dd092fe8c126bce1f278fc",
+      "path": "src/rsz/src/Resizer.tcl",
+      "blob": "4695a8f04a86e57b1ff187c0065179c2405d65bf",
+      "sha256": "8f72ff3a40bf361df9eee1d4a6ecf163285ebabca3d49c0f8eb958810f65a590"
+    },
+    {
+      "repo": "vibeic/OpenROAD",
+      "ref": "7c05ab8a1c2b93deb9dd092fe8c126bce1f278fc",
+      "path": "src/rsz/src/Resizer.i",
+      "blob": "926cfb07fa7c642d5e489be35205b0b9307ed603",
+      "sha256": "9eb0b31d969dfe4dda67e03e1684af8d397878f3a16621064df7717888078740"
+    },
+    {
+      "repo": "vibeic/OpenROAD",
+      "ref": "7c05ab8a1c2b93deb9dd092fe8c126bce1f278fc",
+      "path": "src/rsz/src/Resizer.cc",
+      "blob": "bdafb68824c7258b154b63a293757b2fc0c75be5",
+      "sha256": "07abe089769705434772507d2f94eeefa38a87060a7d38dccb061bfadf2ba4b7"
+    },
+    {
+      "repo": "vibeic/OpenROAD",
+      "ref": "7c05ab8a1c2b93deb9dd092fe8c126bce1f278fc",
+      "path": "src/rsz/include/rsz/Resizer.hh",
+      "blob": "3a1877b80c70a10524529fa32f79b7baa60d8889",
+      "sha256": "be89462dfb7496302b9c2d5351be2ef51a19415d6d1165e3b400af60c7e1c425"
+    },
+    {
+      "repo": "vibeic/librelane",
+      "ref": "f199e900aedbed9edcbc99fd0a4cf13cbd3e8161",
+      "path": "librelane/steps/openroad.py",
+      "blob": "bf2ae29adfb53d8d9f60e41ee92e92a95dd1235a",
+      "sha256": "25d24155a63ac7a56ac777929fe45d333e4b083e89af11207eec4f3382ca0289"
+    },
+    {
+      "repo": "vibeic/librelane",
+      "ref": "f199e900aedbed9edcbc99fd0a4cf13cbd3e8161",
+      "path": "librelane/scripts/openroad/rsz_timing_postcts.tcl",
+      "blob": "58970fdeaabff09123654551778efbf0cb1741fb",
+      "sha256": "ced0c9fff47b7f778aefec4083d4a49465ea2f91758f27463d00c7ed7e6dc0d1"
+    }
+  ],
+  "changed_sources": [
+    {
+      "repo": "OpenROAD",
+      "path": "src/rsz/include/rsz/Resizer.hh",
+      "old_sha256": "be89462dfb7496302b9c2d5351be2ef51a19415d6d1165e3b400af60c7e1c425",
+      "proposed_sha256": "ff85adce8b2fbcc94c5394056c8bc9c6b95cefa31b672b2e1685e2e557369f1d"
+    },
+    {
+      "repo": "OpenROAD",
+      "path": "src/rsz/src/RepairHold.cc",
+      "old_sha256": "57be9517bd58e2c628a1dc565744549c089b95f4fce3ffe03a4de7e61c962705",
+      "proposed_sha256": "1b5471d05b18fe02e8fd2be3a44d95e6af31bb668c23515216ee3231298d27b4"
+    },
+    {
+      "repo": "OpenROAD",
+      "path": "src/rsz/src/RepairHold.hh",
+      "old_sha256": "b6f0d61e6d1122cdecdba7dbb70c7703bfe25974b31e152d1d8d11cfb05ba09b",
+      "proposed_sha256": "2158a7531cc54fd2544d15ac2c5505c4539618e75e81d98a274962bacb2326aa"
+    },
+    {
+      "repo": "OpenROAD",
+      "path": "src/rsz/src/Resizer.cc",
+      "old_sha256": "07abe089769705434772507d2f94eeefa38a87060a7d38dccb061bfadf2ba4b7",
+      "proposed_sha256": "4936f88b73147d6a1b5ddbe3e0cdf9b625da5c3f5a2ad025c7f538448c43cb70"
+    },
+    {
+      "repo": "OpenROAD",
+      "path": "src/rsz/src/Resizer.i",
+      "old_sha256": "9eb0b31d969dfe4dda67e03e1684af8d397878f3a16621064df7717888078740",
+      "proposed_sha256": "cab437df28425e9828e1646b5e7c53289f773a448a4af48328765d409f7525dd"
+    },
+    {
+      "repo": "OpenROAD",
+      "path": "src/rsz/src/Resizer.tcl",
+      "old_sha256": "8f72ff3a40bf361df9eee1d4a6ecf163285ebabca3d49c0f8eb958810f65a590",
+      "proposed_sha256": "46e157bb7d5e76857020cf57d362dd73b885a5e5a01a75d2b625e2fd42a0af17"
+    },
+    {
+      "repo": "librelane",
+      "path": "librelane/scripts/openroad/rsz_timing_postcts.tcl",
+      "old_sha256": "ced0c9fff47b7f778aefec4083d4a49465ea2f91758f27463d00c7ed7e6dc0d1",
+      "proposed_sha256": "da8314e7370ed374d0090c69ea11f3328a534cc828aa5521ea8fdb71a9c4b6bf"
+    },
+    {
+      "repo": "librelane",
+      "path": "librelane/steps/openroad.py",
+      "old_sha256": "25d24155a63ac7a56ac777929fe45d333e4b083e89af11207eec4f3382ca0289",
+      "proposed_sha256": "edbc57cd3e6fb224c20cb07bb54724a9721fdcc3a3b22bfbfce3bb6ba24ecd2f"
+    }
+  ]
+}
