@@ -10,7 +10,9 @@ Otherwise one PnR approach is split at the deck's step-19/20 region
 (`_PNR_CTS_HOLD_BEGIN`..`_PNR_CTS_HOLD_END`, emitted by the runner's deck
 builder): the direct deck runs up to the region and checkpoints; the
 checkpoint is bridged into LibreLane `OpenROAD.CTS` ->
-`Vibeic.ClockPathDriveSizing` (#2160, a plugin step, `librelane_plugins/`) ->
+the clock-path sizing arm (`CLOCK_PATH_SIZING_ARMS`: by default
+`Vibeic.ClockNetworkGlobalSizing`, OpenROAD GLOBAL_SIZING with the clock
+network; `Vibeic.ClockPathDriveSizing`, #2160, selectable) ->
 `OpenROAD.ResizerTimingPostCTS`, then `OpenROAD.STAMidPNR` once per STA corner;
 the selected views are handed to the paths the direct route reads, and the
 deck resumes from the handed-over ODB after the region.
@@ -55,6 +57,39 @@ def refusal(modes: Dict[str, str]) -> Optional[str]:
         return ("LL_CTS_HOLD_SPLIT_UNSUPPORTED: steps 19 and 20 share one deck "
                 f"region and one LibreLane chain; select both the same ({modes})")
     return None
+
+
+#: Step 19's clock-path sizing sub-step (R-0929-TOOL-DEFAULT, CUT_W4). The
+#: TOOL arm is the default: OpenROAD `repair_timing -phases GLOBAL_SIZING`
+#: with the clock network included (`Vibeic.ClockNetworkGlobalSizing`). The
+#: OWN arm is vibe-ic's #2160 swapMaster search (`Vibeic.ClockPathDriveSizing`
+#: + `phase3_one_shot_runner._clock_path_drive_sizing_tcl`); it stays
+#: selectable, and is not deleted, until every row of its HARVEST table has a
+#: landed destination (owner amendment "harvest, then delete", 2026-09-29).
+CLOCK_PATH_SIZING_ARMS: Dict[str, str] = {
+    "tool": "Vibeic.ClockNetworkGlobalSizing",
+    "own": "Vibeic.ClockPathDriveSizing",
+}
+CLOCK_PATH_SIZING_DEFAULT = "tool"
+#: The switch-file key that selects the arm: `phase3/librelane_switch.json`
+#: `{"arms": {"19.clock_path_sizing": "tool"|"own"}}`.
+CLOCK_PATH_SIZING_KEY = "19.clock_path_sizing"
+
+
+def clock_path_sizing_arm(project: Path) -> str:
+    """`tool` or `own`: the project's switch when it names the arm, else the
+    default (`tool`). Any other value is refused, never guessed."""
+    import librelane_contract as _ll
+    path = Path(project) / "phase3/librelane_switch.json"
+    arms = _ll._load(path).get("arms", {}) if path.is_file() else {}
+    if not isinstance(arms, dict):
+        raise _ll.Refusal("LL_INVALID_SWITCH", f"{path}: 'arms' is not an object")
+    arm = arms.get(CLOCK_PATH_SIZING_KEY, CLOCK_PATH_SIZING_DEFAULT)
+    if arm not in CLOCK_PATH_SIZING_ARMS:
+        raise _ll.Refusal("LL_INVALID_SWITCH",
+                          f"{CLOCK_PATH_SIZING_KEY}: {arm!r} (one of "
+                          f"{sorted(CLOCK_PATH_SIZING_ARMS)})")
+    return arm
 
 
 def tcl_brace_depth(lines: Sequence[str]) -> int:
@@ -313,7 +348,7 @@ def execute(
 
     1. the direct deck runs up to `R._PNR_CTS_HOLD_BEGIN` and checkpoints;
     2. the checkpoint is bridged (`state_from_direct`) into LibreLane
-       `OpenROAD.CTS` -> `Vibeic.ClockPathDriveSizing` (#2160) ->
+       `OpenROAD.CTS` -> the clock-path sizing arm (`clock_path_sizing_arm`) ->
        `Vibeic.ExternalCaptureLaunchRetap` ->
        `OpenROAD.ResizerTimingPostCTS`, then `OpenROAD.STAMidPNR` once per STA
        corner (the step measures one corner per run);
@@ -383,9 +418,15 @@ def execute(
     except _ll.Refusal as exc:
         return _refuse("LL_PDK_ROOT_NOT_DECLARED", str(exc), out)
     mounts = [(Path(pdk_root) / str(pdk.name), f"/pdk/{pdk.name}")]
+    try:
+        sizing_arm = clock_path_sizing_arm(project)
+    except _ll.Refusal as exc:
+        return _refuse(exc.code, str(exc), out)
+    sizing_id = CLOCK_PATH_SIZING_ARMS[sizing_arm]
     sizing_tcl = work / "clock_path_drive_sizing.body.tcl"
-    R._aa.write_text(sizing_tcl, R._clock_path_drive_sizing_tcl())
-    ids = ["OpenROAD.CTS", "Vibeic.ClockPathDriveSizing",
+    if sizing_arm == "own":
+        R._aa.write_text(sizing_tcl, R._clock_path_drive_sizing_tcl())
+    ids = ["OpenROAD.CTS", sizing_id,
            "Vibeic.ExternalCaptureLaunchRetap",
            "OpenROAD.ResizerTimingPostCTS", "OpenROAD.STAMidPNR"]
     # The SDC the deck itself reads, mapped back to the host.
@@ -402,23 +443,25 @@ def execute(
                 "(phase3_one_shot_runner._FLAT_OCV_DERATE_EARLY/LATE)")))
         configs, policy_steps = R._resolved_cell_policy(
             configs, Path(pdk_root), str(pdk.name),
-            required=("OpenROAD.CTS", "OpenROAD.ResizerTimingPostCTS"))
+            required=("OpenROAD.CTS", "OpenROAD.ResizerTimingPostCTS")
+            + ((sizing_id,) if sizing_arm == "tool" else ()))
         sta_cfg = json.loads(configs["OpenROAD.STAMidPNR"].read_text())
         corners = list(sta_cfg.get("STA_CORNERS") or [])
         if not corners:
             return _refuse("LL_STA_CORNERS_UNDECLARED",
                            str(configs["OpenROAD.STAMidPNR"]), out)
-        configs["Vibeic.ClockPathDriveSizing"] = _ll.derive_step_config(
-            configs["Vibeic.ClockPathDriveSizing"],
-            configs["Vibeic.ClockPathDriveSizing"],
-            {"PNR_CORNERS": (
-                 corners, "resolved STA_CORNERS for external capture setup and hold"),
-             "VIBEIC_CLKPATH_PRECTS_INSTANCES": (
+        sizing_overlay = {
+            "PNR_CORNERS": (
+                corners, "resolved STA_CORNERS for external capture setup and hold"),
+            "VIBEIC_CLKPATH_PRECTS_INSTANCES": (
                 str(pre["insts"].resolve()),
-                "instance names of the ODB OpenROAD.CTS reads (pre-CTS snapshot)"),
-             "VIBEIC_CLKPATH_SIZING_TCL": (
-                 str(sizing_tcl.resolve()),
-                 "phase3_one_shot_runner._clock_path_drive_sizing_tcl")})
+                "instance names of the ODB OpenROAD.CTS reads (pre-CTS snapshot)")}
+        if sizing_arm == "own":
+            sizing_overlay["VIBEIC_CLKPATH_SIZING_TCL"] = (
+                str(sizing_tcl.resolve()),
+                "phase3_one_shot_runner._clock_path_drive_sizing_tcl")
+        configs[sizing_id] = _ll.derive_step_config(
+            configs[sizing_id], configs[sizing_id], sizing_overlay)
         configs["Vibeic.ExternalCaptureLaunchRetap"] = _ll.derive_step_config(
             configs["Vibeic.ExternalCaptureLaunchRetap"],
             configs["Vibeic.ExternalCaptureLaunchRetap"],
@@ -437,8 +480,7 @@ def execute(
                                            "run (STAMidPNR reports one corner)")})
             sta_steps.append(("OpenROAD.STAMidPNR", path))
         chain = [("OpenROAD.CTS", configs["OpenROAD.CTS"]),
-                 ("Vibeic.ClockPathDriveSizing",
-                  configs["Vibeic.ClockPathDriveSizing"]),
+                 (sizing_id, configs[sizing_id]),
                  ("Vibeic.ExternalCaptureLaunchRetap",
                   configs["Vibeic.ExternalCaptureLaunchRetap"]),
                  ("OpenROAD.ResizerTimingPostCTS",
@@ -560,7 +602,8 @@ def execute(
         "gate": str((arms_root / "librelane/gate.json").relative_to(project)),
         "measured_state": str(measured_state.relative_to(project)),
         "measured_state_sha256": _ll.digest(measured_state),
-        "selection": selection, "views": {}}
+        "selection": selection, "views": {},
+        "clock_path_sizing": {"arm": sizing_arm, "step": sizing_id}}
     receipt["excluded_master_census"] = excluded_census
     # Written in this order so every report is newer than the DEF it
     # describes (the #519 emitter keys on that).
@@ -613,7 +656,7 @@ def execute(
     # reads what TritonCTS and the resizer printed, not a relabelled summary.
     _log(f"{R._PNR_STAGE_MARKER} cts")
     for label, folder in (("OpenROAD.CTS", cts_folder),
-                          ("Vibeic.ClockPathDriveSizing", sizing_folder),
+                          (sizing_id, sizing_folder),
                           ("Vibeic.ExternalCaptureLaunchRetap", retap_folder),
                           ("OpenROAD.ResizerTimingPostCTS", rsz_folder)):
         if label == "OpenROAD.ResizerTimingPostCTS":
