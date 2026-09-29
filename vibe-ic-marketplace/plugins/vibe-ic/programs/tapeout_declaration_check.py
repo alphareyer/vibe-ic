@@ -33,6 +33,13 @@ from an unset field.
                                 told WHY the question is suddenly unanswered,
                                 and stops. See that module's header for the
                                 eleven days.
+    CONTRADICTED -> FAIL here.  A DERIVED text (in the declaration or in the
+                                design's own answers file) asserting another
+                                value for an owner-attested answer, e.g. an
+                                area rationale saying deliverable=HARDMACRO
+                                beside the owner's DIE. Named by file, field
+                                and sentence; the remedy is the field's
+                                producer (R-0929-DELIVERABLE-CONSISTENCY).
     MALFORMED   -> FAIL here.   A question absent altogether; a rectangle that
                                 is not four numbers; an enum outside its
                                 choices; a database unit that is zero or
@@ -152,6 +159,19 @@ def evaluate(project: Path,
             # difference is that this one looks perfectly readable, which is
             # why it passed here on 2026-09-06 and cost eleven days.
             refusals.extend(TD.owner_attestation_refusals(doc))
+            # DERIVED TEXT FOLLOWS THE OWNER (R-0929-DELIVERABLE-CONSISTENCY).
+            refusals.extend(TD.derived_text_contradictions(
+                doc, source=TD.DECLARATION_REL))
+
+    # The design's own answers file is where the derived text is AUTHORED; the
+    # declaration only carries it. Both are read, so a stale sentence is named
+    # at its source and not only at its copy.
+    own_answers = project / ST.DESIGN_ANSWERS_REL
+    if own_answers.is_file():
+        own, own_err = TD.load(own_answers)
+        if own_err is None and isinstance(own, dict):
+            refusals.extend(TD.derived_text_contradictions(
+                own, source=ST.DESIGN_ANSWERS_REL))
 
     routers = _routers_present(project)
     present = [name for name, ok in routers.items() if ok]
