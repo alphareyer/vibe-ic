@@ -220,3 +220,107 @@ def test_split_in_out_order_does_not_judge_bit_order(tmp_path):
                     declaration={"bit_order": "MSB_first", "latency_cycles": 2})
     gcp, report = _gate(proj)
     assert gcp.returncode == 0, report
+
+
+# 3. Round 2 (review wave58) ----------------------------------------------------
+
+DESIGNATED = """# L7
+
+The Plugin MUST declare `plugin_output/declaration.json` before authoring:
+
+| Field | Required | Example |
+|---|---|---|
+| `bit_order` | Yes | `"LSB_first"` / `"MSB_first"` |
+| `latency_cycles` | Yes | `1`(primary)/ `2`(secondary) |
+"""
+
+
+def test_a_spec_designated_latency_is_judged_not_overwritten(tmp_path):
+    """Integrity MAJOR (A): the spec designates 1, the RTL does 2, and a
+    generator-written file carries 1. The measurement must not launder the
+    file to 2 and PASS: the design does not meet its spec."""
+    proj = _project(tmp_path, contract=DESIGNATED,
+                    declaration={"bit_order": "LSB_first", "latency_cycles": 1})
+    assert _emit(proj).returncode == 0
+    assert _decl(proj)["latency_cycles"] == 1
+    gcp, report = _gate(proj)
+    assert gcp.returncode == 1, report
+    assert report["results"][0]["status"] == "FAIL_MEASUREMENT_DISAGREES"
+
+
+def test_a_spec_designation_the_file_does_not_carry_still_fails(tmp_path):
+    """Integrity MAJOR (C): the file agrees with the measurement, the spec's
+    single designation does not -- verify compares the designation too."""
+    proj = _project(tmp_path, contract=DESIGNATED,
+                    declaration={"bit_order": "LSB_first", "latency_cycles": 2})
+    gcp, report = _gate(proj)
+    assert gcp.returncode == 1, report
+    diff = report["results"][0]["measurement_disagreements"]
+    assert diff and diff[0]["declared_by"].startswith("spec designation")
+
+
+def test_an_rtl_declared_latency_is_judged_not_overwritten(tmp_path):
+    proj = _project(tmp_path, declaration={"bit_order": "LSB_first",
+                                           "latency_cycles": 1})
+    rtl = proj / "phase2" / "stage1" / "rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "top.v").write_text(
+        "// DECLARED CHOICES\n// latency_cycles = 1\nmodule top; endmodule\n")
+    assert _emit(proj, "--from-rtl-declaration").returncode == 0
+    assert _decl(proj)["latency_cycles"] == 1
+    assert _gate(proj)[0].returncode == 1
+
+
+def test_a_carried_author_declaration_survives_a_runner_rerun(tmp_path):
+    """Guard M6: the runner re-runs the emitter WITHOUT --set; the author's
+    carried (verified) 1 must stay 1 and keep failing the gate."""
+    proj = _project(tmp_path)
+    assert _emit(proj, "--set", "bit_order=LSB_first",
+                 "--set", "latency_cycles=1").returncode == 0
+    assert _emit(proj).returncode == 0
+    assert _decl(proj)["latency_cycles"] == 1
+    assert _sidecar(proj)["fields"]["latency_cycles"]["provenance"] == \
+        "author_declared"
+    gcp, report = _gate(proj)
+    assert gcp.returncode == 1
+    assert report["results"][0]["status"] == "FAIL_MEASUREMENT_DISAGREES"
+
+
+def test_a_declared_bit_order_the_oracle_measured_otherwise_fails(tmp_path):
+    """Guard M8: in/out orders agree (LSB), the file declares MSB."""
+    proj = _project(tmp_path, declaration={"bit_order": "MSB_first",
+                                           "latency_cycles": 2})
+    gcp, report = _gate(proj)
+    assert gcp.returncode == 1
+    assert [d["field"] for d in
+            report["results"][0]["measurement_disagreements"]] == ["bit_order"]
+
+
+def test_spellings_the_oracle_accepts_are_the_same_framing(tmp_path):
+    """`arith_oracle_tb_gen.read_declared_conventions` reads these as the
+    measured LSB / 2; the gate must too (no false FAIL)."""
+    for i, decl in enumerate(({"bit_order": "LSB-first", "latency_cycles": 2},
+                              {"bit_order": "lsb_first", "latency_cycles": 2},
+                              {"bit_order": "LSB_first", "latency_cycles": "2"})):
+        proj = _project(tmp_path / str(i), declaration=decl)
+        gcp, report = _gate(proj)
+        assert gcp.returncode == 0, (decl, report["results"][0])
+
+
+def test_the_generator_declares_the_latency_its_rtl_has():
+    """R-0929-SPM-LATENCY: counted on the emitted structure, not restated."""
+    sys.path.insert(0, str(PROGRAMS_DIR))
+    import serial_parallel_mul_synth as spm
+    spec = dict(topology="serial_parallel", operator="*", top="t", clk="clk",
+                rst="rst", rst_active_low=False, reset_mode="synchronous",
+                parallel="x", serial_in="y", serial_out="p",
+                size_param="size", size_default=8, size_min=None)
+    rtl = spm.emit_rtl(spec)
+    assert spm.serial_path_latency(rtl, "y", "p") == 2
+    assert spm.plugin_declaration(spec)["latency_cycles"] == 2
+    # one more register on the output path is one more cycle
+    deeper = rtl.replace("assign p = pr;",
+                         "reg q2;\n    always @(posedge clk) q2 <= pr;\n"
+                         "    assign p = q2;")
+    assert deeper != rtl
+    assert spm.serial_path_latency(deeper, "y", "p") == 3
