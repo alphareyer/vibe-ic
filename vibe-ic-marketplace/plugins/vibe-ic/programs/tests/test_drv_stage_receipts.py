@@ -475,3 +475,19 @@ def test_synth_stage_runs_the_census_deck_and_binds_the_receipt(tmp_path):
     receipts.synth_stage(project, netlist=netlist, top="top", liberties=["/l.lib"],
                          sdc=sdc, to_container=str, execute=lambda cmd: (1, "", "err"))
     assert "behavior_report" not in plan._stages(project, False)[0][0]
+
+
+def test_ran_is_the_evidence_not_the_receipts_word(tmp_path):
+    project = tmp_path / "proj"
+    run_id = receipts.claim(project)
+    (project / receipts.RECEIPT_DIR / "cts.json").write_text(json.dumps({
+        "name": "cts", "run_id": run_id, "ran": True}))      # no evidence at all
+    row = {r["name"]: r for r in plan._stages(project, False)[0]}["cts"]
+    assert row["ran"] is False
+
+
+def test_the_receipt_run_id_is_the_run_identity_recorded_at_start(tmp_path):
+    import drv_run_identity
+    project = tmp_path / "proj"
+    recorded = drv_run_identity.record(project)["run_id"]
+    assert receipts.claim(project) == recorded
