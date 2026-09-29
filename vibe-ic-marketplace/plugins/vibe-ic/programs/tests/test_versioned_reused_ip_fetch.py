@@ -273,3 +273,36 @@ def test_an_unreachable_reference_pull_is_not_measured_not_a_mismatch(
     assert "IP_REUSE_PIN_VERIFY_UNAVAILABLE" in result.detail
     assert "IP_REUSE_FETCH_PIN_MISMATCH" not in result.detail
     assert str(repo) in result.detail            # the fetch reason is named
+
+
+def test_a_timed_out_reference_clone_names_no_scratch_path(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run's own failure: `git clone` timed out, and git's message carries
+    the verifier's throw-away clone path. Quoted into Step 1's detail it
+    became a dangling external reference that failed
+    project_outputs_in_tree_check. Only the network boundary (`_git clone`)
+    is replaced, with the exception subprocess raises on a timeout."""
+    import design_one_shot_runner as runner
+    import ip_catalog_query as query
+    import ip_catalog_pull as pull
+
+    repo, erratum = _upstream(tmp_path)
+    match = _match(repo, erratum)
+    monkeypatch.setattr(query, "query_catalog", lambda *a, **k: [match])
+    monkeypatch.setattr(pull, "CACHE_ROOT", tmp_path / "cache")
+    project = _project(tmp_path, "Reuse leaf from vendor:reusable:leaf:2.3.4.")
+    assert runner.step_rtl_gen(project, "processor_cpu").status == \
+        "PASS_WITH_WAIVERS"
+    real_git = pull._git
+
+    def slow_network(args, timeout=120):
+        if args and args[0] == "clone":
+            raise subprocess.TimeoutExpired(["git", *args], timeout)
+        return real_git(args, timeout=timeout)
+
+    monkeypatch.setattr(pull, "_git", slow_network)
+    result = runner.step_rtl_gen(project, "processor_cpu")
+    assert result.status == "NOT_MEASURED", result.detail
+    assert "timed out" in result.detail
+    assert "ip-pin-verify-" not in result.detail, result.detail
+    assert "<independent-pull scratch>" in result.detail

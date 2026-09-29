@@ -754,6 +754,10 @@ def verify_existing_official_pins_outcome(project: Path,
                 f"{u.get('ip_name')}: {u.get('reason')}"
                 for u in audit.get("ip_catalog_used") or []
                 if isinstance(u, dict) and u.get("status") != "PASS")
+            # The reference pull runs in a throw-away directory; its path in
+            # a tool message would become a dangling external reference in
+            # every report that quotes this reason.
+            why = why.replace(str(reference), "<independent-pull scratch>")
             return PIN_UNAVAILABLE, (why or "the independent reference pull "
                                      "did not complete")
         ref_manifest = json.loads((reference / "phase2/stage1/rtl/SOURCE_MANIFEST.json").read_text())
