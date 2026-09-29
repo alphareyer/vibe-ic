@@ -1639,3 +1639,34 @@ def asic_sdc_for_pnr(rt: Any, project: Path, top: str, pdk: Any,
 
 if __name__ == "__main__":                                   # pragma: no cover
     raise SystemExit(main())
+
+
+def pad_drive_sta_verdict(rt: Any, project: Path, rows: List[Any]) -> List[Any]:
+    """R-0929-PAD-INPUT-DRIVE: no sign-off STA PASS on an unmodelled pad drive.
+
+    When the DIE top's bond-pad input drive is NOT_MEASURED (neither declared
+    nor PDK IO-tier; ``sdc_environment`` records it), the deck carries no
+    driver and its input edges are ideal, which is optimistic. A PASS measured
+    that way is not a sign-off verdict, so each STA verdict row (the runner's
+    ``sta_signoff`` and multi-corner gates) that PASSed becomes NOT_MEASURED
+    with the reason. A FAIL stays a FAIL: a violation under an optimistic edge
+    is still a violation. ``rt`` is the runner module (its row type and gate
+    names), as for ``author_asic_sdc``.
+    """
+    import sdc_environment as _sdc_env
+    why = _sdc_env.pad_input_drive_not_measured(project)
+    if not why:
+        return rows
+    names = {rt._STA_VERDICT_GATE, *rt._STA_MULTICORNER_GATES}
+    out: List[Any] = []
+    for r in rows:
+        if r.name in names and r.status == "PASS":
+            r = rt.StepResult(
+                r.name, "NOT_MEASURED", r.duration_s,
+                f"{rt._SIGNOFF_NOT_CHECKED}: OFFCHIP_INPUT_DRIVE — {why}. The "
+                f"gate's own finding (ideal input edges) was: "
+                f"{rt._rsum.summary_detail(r.detail, width=200)}",
+                list(r.output_files), dict(r.extras),
+                reason_class=rt._V.ReasonClass.INPUT_ABSENT)
+        out.append(r)
+    return out
