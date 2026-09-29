@@ -105,6 +105,10 @@ def test_the_nine_original_mappings_are_unchanged():
         "NOT_MEASURED": "NOT_MEASURED",
         "NOT_APPLICABLE": "NOT_APPLICABLE",
         "WAIVED-DEFERRED": "PASS_WITH_WAIVERS",
+        # DRV sign-off standard (owner-approved 2026-09-28) adds the sixth word
+        # (verdict schema 3): an owner-waived measured residual, counted in its
+        # OWN bucket and never folded into PASS_WITH_WAIVERS.
+        "WAIVED": "WAIVED",
     }
     assert set(frg._TALLY_LABEL_TO_BUCKET) == set(expected), \
         sorted(frg._TALLY_LABEL_TO_BUCKET)

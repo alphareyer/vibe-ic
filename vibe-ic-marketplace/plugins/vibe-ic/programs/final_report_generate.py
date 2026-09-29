@@ -231,6 +231,12 @@ ROLLUP_ORDER = (
     "PASS_WITH_ATTRIBUTION",
     "PASS_WITH_WAIVERS",
     "NOT_APPLICABLE",
+    # DRV sign-off standard (owner-approved 2026-09-28): WAIVED is a measured
+    # residual carried by an owner waiver. It is NON-GREEN (verdict.NON_GREEN)
+    # and is "counted separately, never PASS", so it prints in the non-green
+    # run of the ladder, ahead of the two words that say "not good" and
+    # "not measured".
+    "WAIVED",
     "NOT_MEASURED",
     "FAIL",
     NO_VERDICT,

@@ -1122,11 +1122,23 @@ def _disclosure_prefixes() -> Tuple[str, ...]:
 #:                           skip/vacuity disclosure L1b may accept. Keeping it
 #:                           excluded is conservative: a producer that emits it
 #:                           on an actually empty project is still charged.
+#:   _DRV_WAIVED_HINT_PREFIX  says the DRV judge MEASURED a residual deviation
+#:                           that a valid owner waiver covers (DRV sign-off
+#:                           standard, owner-approved 2026-09-28: "WAIVED ...
+#:                           never PASS"). The consumer emits it only after
+#:                           reading the judge's own receipt with a non-empty
+#:                           `waived` list and no failures/not_measured, and it
+#:                           moves the step to the non-green WAIVED tier. It is
+#:                           evidence that the gate examined something, not a
+#:                           skip or vacuity disclosure, so accepting it would
+#:                           let a gate on an EMPTY tree excuse itself by
+#:                           claiming a waiver. Excluding it keeps L1b charging.
 _EXCLUDED_TIER_HINTS: Tuple[str, ...] = (
     "_RAN_HINT_PREFIX", "_ADVISORY_HINT_PREFIX",
     "_ADVISORY_RECORD_HINT_PREFIX", "_STRUCTURE_ONLY_HINT_PREFIX",
     "_NOT_APPLICABLE_HINT_PREFIX", "_SUBSTANTIVE_HINT_PREFIX",
-    "_EXECUTED_DECLARED_NA_HINT_PREFIX", "_AWAITING_HINT_PREFIX")
+    "_EXECUTED_DECLARED_NA_HINT_PREFIX", "_AWAITING_HINT_PREFIX",
+    "_DRV_WAIVED_HINT_PREFIX")
 
 
 def test_d6_executed_declared_na_cannot_excuse_a_pass_on_nothing():

@@ -84,14 +84,21 @@ def _phase_verdict_tiers() -> "dict[str, tuple[str, ...]]":
     drift this closes.
     """
     tiers: "dict[str, tuple[str, ...]]" = {v.value: (v.value,) for v in _V.RUN_PRECEDENCE}
-    # THE TWO LEGACY SPELLINGS, and they are qualified, not clean. They are stated here
-    # rather than derived because `verdict.parse` does not know them: they are this
-    # aggregator's own compatibility surface, not part of the vocabulary.
-    #   WAIVED — a phase-2 spelling kept from the original list.
+    # THE LEGACY SPELLING, and it is qualified, not clean. It is stated here rather than
+    # derived because `verdict.parse` does not know it: it is this aggregator's own
+    # compatibility surface, not part of the vocabulary.
     #   PASS_WITH_OPEN_SOURCE_CONSTRAINTS — `phase3_one_shot_runner._VERDICT_RANK` and
     #   `flow_compliance_check` both rank it QUALIFIED, so it is qualified here too.
+    #
+    # `WAIVED` USED TO BE THE SECOND LEGACY SPELLING HERE, rolled into PASS_WITH_WAIVERS.
+    # It is now a vocabulary word (`verdict.Verdict.WAIVED`, schema 3): the DRV sign-off
+    # standard (owner-approved 2026-09-28) makes it a measured residual under an owner
+    # waiver that is "counted separately, never PASS", and forbids a flow or orchestrator
+    # from downgrading it. `run_verdict` hands it up from a phase, so it takes its own
+    # tier from RUN_PRECEDENCE above; keeping the alias would list one word in two tiers
+    # and let this aggregator turn a phase's WAIVED into a zero-exit done-claim.
     tiers[_V.Verdict.PASS_WITH_WAIVERS.value] += (
-        "WAIVED", "PASS_WITH_OPEN_SOURCE_CONSTRAINTS")
+        "PASS_WITH_OPEN_SOURCE_CONSTRAINTS",)
     return tiers
 
 
