@@ -61,6 +61,12 @@ import sys as _rt_sys
 from pathlib import Path as _rt_path
 _rt_sys.path.insert(0, str(_rt_path(__file__).resolve().parent))
 import _runtime_pair_fixture as _rt_pair  # noqa: E402
+import _ai_route_fixture as _ai_route  # noqa: E402
+
+
+def _solve_after_ai_route(bench, dataset, run, *, jobs=1):
+    assert bd.cmd_solve(bench, str(dataset), str(run), jobs=jobs) == 2
+    return _ai_route.complete_ai_routes(bd, bench, dataset, run, jobs=jobs)
 
 
 @pytest.fixture(autouse=True)
@@ -310,9 +316,10 @@ def _install_solve_fakes(monkeypatch, argv_seen: dict, exit_step: str):
     monkeypatch.setattr(
         tnr, "classify_task_nature",
         lambda *_a, **_k: {"nature": "fixture", "entry_nature": "fixture",
-                           "plugin_entry": {}})
+                           "route": "plugin_loop", "plugin_entry": {}})
     monkeypatch.setattr(tnr, "NATURE_ENTRY", {
-        "fixture": {"entry_step": "D1", "default_evidence": "FIXTURE_EV"}})
+        "fixture": {"entry_step": "D1", "default_evidence": "FIXTURE_EV",
+                    "route": "plugin_loop", "plugin_entry": {}}})
     monkeypatch.setattr(tnr, "EVIDENCE_EXIT", {
         "FIXTURE_EV": {"exit_step": exit_step}})
     monkeypatch.setattr(tnr, "flow_step_ids", lambda: ["D1", "2", "8", "15"])
@@ -320,6 +327,10 @@ def _install_solve_fakes(monkeypatch, argv_seen: dict, exit_step: str):
     def prepare(_bench, _dataset, run, _fmt, _limit):
         for child in ("projects", "responses", "reports", "transcripts"):
             (run / child).mkdir(parents=True, exist_ok=True)
+        bd._atomic_write_json(run / ".bench_config.json", {
+            "bench": _bench, "dataset": str(Path(_dataset).resolve()),
+            "format": _fmt, "diagnostic_limit": int(_limit or 0),
+        })
 
     monkeypatch.setattr(bd, "_prepare_general_solve_run", prepare)
     monkeypatch.setattr(bio, "problems",
@@ -330,7 +341,9 @@ def _install_solve_fakes(monkeypatch, argv_seen: dict, exit_step: str):
         prompt.parent.mkdir(parents=True, exist_ok=True)
         text = f"Design {problem['id']} with an input and an output.\n"
         prompt.write_text(text)
-        return {"prompt_chars": len(text)}
+        return {"prompt_chars": len(text),
+                "public_original_input": bio._stage_public_original(
+                    problem["id"], text, {}, project)}
 
     monkeypatch.setattr(bio, "stage", stage)
     monkeypatch.setattr(
@@ -355,7 +368,7 @@ def test_solve_passes_exit_step_alongside_skip_phase3(tmp_path, monkeypatch):
     _install_solve_fakes(monkeypatch, argv_seen, exit_step="8")
     dataset = tmp_path / "dataset"
     dataset.mkdir()
-    bd.cmd_solve("rtllm", str(dataset), str(tmp_path / "run"), jobs=1)
+    _solve_after_ai_route("rtllm", dataset, tmp_path / "run", jobs=1)
     argv = argv_seen["argv"]
     assert "--skip-phase3" in argv, argv
     assert argv[argv.index("--exit-step") + 1] == "8", argv
@@ -369,7 +382,7 @@ def test_solve_never_passes_an_exit_outside_the_flow(tmp_path, monkeypatch):
     _install_solve_fakes(monkeypatch, argv_seen, exit_step="99")
     dataset = tmp_path / "dataset"
     dataset.mkdir()
-    bd.cmd_solve("rtllm", str(dataset), str(tmp_path / "run"), jobs=1)
+    _solve_after_ai_route("rtllm", dataset, tmp_path / "run", jobs=1)
     argv = argv_seen["argv"]
     assert "--exit-step" not in argv, argv
     assert "--skip-phase3" not in argv, argv
@@ -381,7 +394,8 @@ def test_solve_midflow_entry_runs_phase1_frontdoor_before_owning_loop(
     latest: dict = {}
     _install_solve_fakes(monkeypatch, latest, exit_step="4")
     monkeypatch.setattr(tnr, "NATURE_ENTRY", {
-        "fixture": {"entry_step": "4", "default_evidence": "FIXTURE_EV"}})
+        "fixture": {"entry_step": "4", "default_evidence": "FIXTURE_EV",
+                    "route": "plugin_loop", "plugin_entry": {}}})
     monkeypatch.setattr(tnr, "flow_step_ids",
                         lambda: ["D1", "2", "4", "8", "15"])
 
@@ -397,7 +411,7 @@ def test_solve_midflow_entry_runs_phase1_frontdoor_before_owning_loop(
     monkeypatch.setattr(bd._RunnerBudget, "run", fake_budget_run)
     dataset = tmp_path / "dataset"
     dataset.mkdir()
-    bd.cmd_solve("rtllm", str(dataset), str(tmp_path / "run"), jobs=1)
+    _solve_after_ai_route("rtllm", dataset, tmp_path / "run", jobs=1)
 
     assert len(argv_seen) == 2
     assert argv_seen[0][argv_seen[0].index("--exit-step") + 1] == "D1"
@@ -412,7 +426,8 @@ def test_solve_midflow_frontdoor_failure_blocks_owning_loop(
     latest: dict = {}
     _install_solve_fakes(monkeypatch, latest, exit_step="4")
     monkeypatch.setattr(tnr, "NATURE_ENTRY", {
-        "fixture": {"entry_step": "4", "default_evidence": "FIXTURE_EV"}})
+        "fixture": {"entry_step": "4", "default_evidence": "FIXTURE_EV",
+                    "route": "plugin_loop", "plugin_entry": {}}})
     monkeypatch.setattr(tnr, "flow_step_ids",
                         lambda: ["D1", "2", "4", "8", "15"])
 
@@ -425,7 +440,7 @@ def test_solve_midflow_frontdoor_failure_blocks_owning_loop(
     dataset.mkdir()
     run = tmp_path / "run"
 
-    assert bd.cmd_solve("rtllm", str(dataset), str(run), jobs=1) == 1
+    assert _solve_after_ai_route("rtllm", dataset, run, jobs=1) == 1
     assert len(argv_seen) == 1
     assert argv_seen[0][argv_seen[0].index("--exit-step") + 1] == "D1"
     assert "--entry-step" not in argv_seen[0]

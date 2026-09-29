@@ -5,7 +5,9 @@ through:
 
 ```text
 benchmark_io_adapter.stage
-  → task_nature_route
+  → task_nature_route (advisory proposal)
+  → hash-bound AI route confirmation/override from visible input
+  → benchmark_dispatch.py --resume
   → vibe_ic_one_shot_runner --entry-step <decision>
   → Program gates
   → blind AI backup/review/repair worklists
@@ -26,7 +28,14 @@ python3 ${CLAUDE_PLUGIN_ROOT}/programs/benchmark_dispatch.py cvdp-open \
   --resume --dataset <dataset.jsonl> --run <fresh-run-dir>
 ```
 
-`--solve` writes three runner-owned queues:
+`--solve` first writes `needs_ai_routing.jsonl`; it does not launch a design
+runner. Each routing actor reads only the issued task's visible input and
+response contract, selects a general product nature, and writes a hash-bound
+response to `response_path`. An invalid or absent response runs zero design
+workers for the entire batch. Repeat `--resume` after correcting only the
+pending response; staged inputs and completed route responses are preserved.
+Once all routes validate, `--resume` runs the normal Program path and writes the
+runner-owned solve queues:
 
 - `needs_ai_backup.jsonl`: Program could not emit RTL and the general route
   declared an AI skill. Author only into each task's `write_rtl_to` directory.
@@ -46,8 +55,10 @@ scorer response or a `samples/` file yourself.
 - If `<run>/lessons.md` exists, you MUST read it BEFORE authoring and apply only
   lessons whose general preconditions match this task.
 - **Transcript export is the DEFAULT:** save every author/reviewer/repair
-  transcript under `<run>/transcripts/`. If none is available, RESULT must say
-  `blindness audit unavailable`.
+  and routing transcript under `<run>/transcripts/`. If none is available,
+  RESULT must say `blindness audit unavailable`.
+- **Routing is not acceptance:** the later independent hash-bound candidate
+  review and Program gates still apply to the exact RTL candidate.
 
 For one task, read only the paths explicitly named by that task:
 
