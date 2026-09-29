@@ -37755,6 +37755,13 @@ def _prepare_librelane_floorplan_for_route(
         notes.append(f"step 17 dual: selection={selection.get('selection')} "
                      f"({selection.get('reason') or 'dominates'}; "
                      "phase3/tool_arms/17/selection.json)")
+        # The shipped placement-repair receipt is the SELECTED arm's; the
+        # direct arm carries no DRV stage probe (DRV standard section 1).
+        import drv_stage_receipts as _drv_stages
+        _drv_stages.rebind_lane(
+            project, list(zip(steps, folders))
+            if _placement_arm_to_route(selection) == "librelane" else None,
+            ("placement_repair",), str(_placement_arm_to_route(selection)))
         if _placement_arm_to_route(selection) != "librelane":
             # the direct arm won, or the comparison was not measured on one
             # scope: the incumbent direct placement runs in the routing
