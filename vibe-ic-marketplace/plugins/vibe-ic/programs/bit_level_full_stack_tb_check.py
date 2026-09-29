@@ -69,6 +69,14 @@ Rules applied
 (8) `results.json` mtime is newer than the latest RTL file (otherwise
     the result is stale).
 
+An IC with NO command protocol (L3 declares no opcodes) and no register-map
+protocol does not reach rules (4)-(7): they are about a command byte stream it
+does not have. Its FUNCTION still exists, so it is judged on the functional
+full-stack population `full_stack_functional_tb` records (FULLSTACKTB,
+2026-09-29) — see `functional_full_stack_verdict`. The connectivity skeleton is
+refused as functional evidence (NOT_MEASURED, rc 2 + `INCOMPLETE:`), where it
+used to be read as VACUOUS_PASS.
+
 Optional: `--run` invokes `sim_full_stack/run.sh` first to regenerate.
 
 Usage
@@ -88,8 +96,12 @@ Exit codes
 ----------
 
     0 — bit-level full-stack tb present + result fresh + meets thresholds
-    1 — one or more rules failed
-    2 — input error (project / rtl dir missing)
+        (non-protocol IC: >= 1 functional case executed through the required
+        top and every one matched)
+    1 — one or more rules failed (non-protocol IC: a functional case failed)
+    2 — input error (project / rtl dir missing); for a non-protocol IC with no
+        functional population (or a stale one) the NOT_MEASURED report plus a
+        closing `INCOMPLETE:` line
 """
 from __future__ import annotations
 
@@ -846,6 +858,229 @@ def check(project: Path, rtl_dir: Path, sim_dir: Path, top: str | None,
     }
 
 
+# ---------------------------------------------------------------------------
+# FULLSTACKTB — the FUNCTIONAL full-stack population, judged from its record
+# ---------------------------------------------------------------------------
+def _functional_nm(reason_class: str, rule: str, why: str, **extra):
+    """rc 2 + the INCOMPLETE sentinel: NOT_MEASURED, never a vacuous pass."""
+    res = {"pass": False, "vacuous_pass": False, "functional_verified": False,
+           "rule": rule, "verdict": "NOT_MEASURED",
+           "reason_class": reason_class, "rationale": why, **extra}
+    return 2, res, f"INCOMPLETE: [{reason_class}] {why}"
+
+
+def functional_full_stack_verdict(project: Path):
+    """(rc, report, stdout sentinel or None) for a non-protocol IC.
+
+    The gate re-derives everything it credits; the record's own verdict word is
+    never read. A case counts only when its testbench is on disk with the bytes
+    the record hashed, instantiates the REQUIRED top (the pad-ring chip top on
+    a pad-ring route -- hashed now against `io_pad_chip_top_gen`'s file -- and
+    the core otherwise), and its transcript, re-scored here by the producer's
+    own `score_transcript`, gives the state the record claims. The design input
+    and every compiled source must still be the bytes the record measured.
+
+      PASS          >= 1 case executed and every executed case matched (rc 0)
+      FAIL          an executed case disagreed with its oracle (rc 1)
+      NOT_MEASURED  no functional population (connectivity-only), the chip top
+                    is not built yet, a stale or self-inconsistent record, or a
+                    case short of the population its own text states (rc 2)
+    """
+    import full_stack_functional_tb as _fsf
+    try:
+        required = _fsf.required_full_stack_top(project)
+    except ValueError as exc:
+        return _functional_nm("EXECUTION_ERROR", "functional_full_stack_route",
+                              str(exc))
+    common = {"required_top": {k: required.get(k) for k in
+                               ("pad_ring", "module", "source",
+                                "source_sha256", "core_module", "route_basis")}}
+    if required.get("refusal") and required.get("pad_ring") \
+            and required.get("refusal_class") == "BLOCKED_BY_UPSTREAM":
+        # The DIE's full-stack top does not exist yet: nothing can have been
+        # measured through it, whatever record is on disk.
+        return _functional_nm("BLOCKED_BY_UPSTREAM",
+                              "functional_full_stack_top_absent",
+                              required["refusal"], **common)
+    rpath = _fsf.record_path(project)
+    try:
+        rec = json.loads(rpath.read_text(errors="replace"))
+    except (OSError, ValueError):
+        rec = None
+    if not isinstance(rec, dict):
+        return _functional_nm(
+            "ZERO_DENOMINATOR", "functional_full_stack_population_absent",
+            ("no functional full-stack population: the only full-stack "
+             "testbench is the connectivity skeleton (it drives no functional "
+             "stimulus and golden-compares nothing), and it is not functional "
+             f"evidence. The functional record {rpath} is absent."
+             + (f" (The required top does not resolve either: "
+                f"{required['refusal']}.)" if required.get("refusal") else "")),
+            **common)
+    if required.get("refusal"):
+        return _functional_nm(
+            required.get("refusal_class") or "EXECUTION_ERROR",
+            "functional_full_stack_top_unresolved", required["refusal"],
+            **common)
+    if rec.get("schema") != _fsf.SCHEMA:
+        return _functional_nm("EXECUTION_ERROR", "functional_record_schema",
+                              f"{rpath} is not a {_fsf.SCHEMA} record", **common)
+    # The producer's own sentence, carried for the reader. It decides nothing:
+    # every verdict below is re-derived from the evidence the record names.
+    common["producer_reason"] = rec.get("reason")
+    rtop = rec.get("full_stack_top") or {}
+    if (rtop.get("module") != required["module"]
+            or bool(rtop.get("pad_ring")) != bool(required["pad_ring"])
+            or (required["pad_ring"]
+                and rtop.get("source_sha256") != required["source_sha256"])):
+        return _functional_nm(
+            "ZERO_DENOMINATOR", "functional_record_wrong_top",
+            (f"the functional record was measured through "
+             f"`{rtop.get('module')}` (pad_ring={rtop.get('pad_ring')}, "
+             f"sha256={rtop.get('source_sha256')}); the required full-stack "
+             f"top is `{required['module']}` (pad_ring={required['pad_ring']}, "
+             f"sha256={required.get('source_sha256')}) — no population "
+             f"measured through the required top"), **common)
+    stale = []
+    for src in rec.get("sources") or []:
+        f = project / str(src.get("path") or "")
+        if not f.is_file() or _fsf.sha256_file(f) != src.get("sha256"):
+            stale.append(str(src.get("path")))
+    now = _fsf._design_input_digest(project)
+    for name, digest in (rec.get("design_input") or {}).items():
+        if now.get(name) != digest:
+            stale.append(f"design input {name}")
+    if stale:
+        return _functional_nm(
+            "ZERO_DENOMINATOR", "functional_record_stale",
+            (f"the functional record measured bytes that have changed since: "
+             f"{stale[:6]} — it is not a measurement of this design"),
+            **common)
+    problems: list = []
+    counts = {"executed": 0, "passed": 0, "failed": 0, "short": 0}
+    errored: list = []
+    population = []
+    # The population each case's OWN text states, re-derived from the design
+    # input (whose bytes were just checked against the record) -- the record's
+    # `short_population` label is not what decides a shortfall.
+    try:
+        import testbench_gen as _tbg
+        import arith_oracle_tb_gen as _aog
+        declared = {str(k.get("name") or k.get("id") or ""):
+                    _aog.declared_vector_population(k)
+                    for k in (_tbg.load_l10_cases(project) or [])
+                    if isinstance(k, dict)}
+    except Exception as exc:  # noqa: BLE001
+        return _functional_nm(
+            "EXECUTION_ERROR", "functional_population_underivable",
+            f"the declared case populations could not be re-derived from the "
+            f"design input: {exc!r}", **common)
+    for c in rec.get("cases") or []:
+        if not isinstance(c, dict):
+            problems.append(f"a case entry is not a record: {c!r:.60}")
+            continue
+        st = c.get("state")
+        row = {"case": c.get("name"), "state": st,
+               "family": c.get("family"), "checks": c.get("checks"),
+               "reason": c.get("reason")}
+        population.append(row)
+        if st == _fsf.ERRORED:
+            errored.append(str(c.get("name")))
+            continue
+        if st not in (_fsf.PASSED, _fsf.FAILED, _fsf.SHORT):
+            if c.get("run_log") or c.get("build_rc") is not None:
+                problems.append(f"{c.get('name')}: the record says {st} but "
+                                f"names a build/run of the case")
+            continue
+        tb = project / str(c.get("tb") or "")
+        log = project / str(c.get("run_log") or "")
+        if not tb.is_file() or _fsf.sha256_file(tb) != c.get("tb_sha256"):
+            problems.append(f"{c.get('name')}: testbench bytes differ from "
+                            f"the record")
+            continue
+        text = tb.read_text(errors="replace")
+        if _fsf.instance_count(text, required["module"]) != 1:
+            problems.append(f"{c.get('name')}: testbench does not instantiate "
+                            f"the required top `{required['module']}` once")
+            continue
+        if (required["pad_ring"] and required.get("core_module")
+                and _fsf.instance_count(text, required["core_module"])):
+            problems.append(f"{c.get('name')}: testbench drives the core "
+                            f"`{required['core_module']}` directly, bypassing "
+                            f"the pad ring")
+            continue
+        if not log.is_file() or _fsf.sha256_file(log) != c.get("run_log_sha256"):
+            problems.append(f"{c.get('name')}: transcript bytes differ from "
+                            f"the record")
+            continue
+        got = _fsf.score_transcript(str(c.get("name")), c.get("run_rc"),
+                                    log.read_text(errors="replace"))
+        claimed = _fsf.PASSED if st == _fsf.SHORT else st
+        if got["state"] != claimed:
+            problems.append(f"{c.get('name')}: the transcript scores "
+                            f"{got['state']}, the record claims {st}")
+            continue
+        if got.get("x_exemptions"):
+            row["x_exemptions"] = got["x_exemptions"]
+        short = _fsf.population_shortfall(declared.get(str(c.get("name"))),
+                                          got["checks"])
+        if st == _fsf.SHORT or (st == _fsf.PASSED and short):
+            counts["short"] += 1
+            row["short"] = short or c.get("reason")
+            continue
+        counts["executed"] += 1
+        counts["passed" if st == _fsf.PASSED else "failed"] += 1
+        row["checks"] = got["checks"]
+    common.update(population=population, counts=counts,
+                  functional_record=str(rpath))
+    if problems:
+        return _functional_nm(
+            "EXECUTION_ERROR", "functional_record_inconsistent",
+            ("the functional record does not match its own evidence: "
+             + "; ".join(problems[:6])), **common)
+    if counts["failed"]:
+        return 1, {"pass": False, "vacuous_pass": False,
+                   "functional_verified": False,
+                   "rule": "functional_full_stack_mismatch",
+                   "verdict": "FAIL",
+                   "rationale": (
+                       f"FAIL: {counts['failed']} of {counts['executed']} "
+                       f"functional case(s) executed through "
+                       f"`{required['module']}` disagreed with the oracle "
+                       f"their design input states"), **common}, None
+    if counts["short"]:
+        return _functional_nm(
+            "ZERO_DENOMINATOR", "functional_population_short",
+            (f"{counts['short']} case(s) executed fewer vectors than their own "
+             f"text states; that population was not measured"), **common)
+    if errored:
+        return _functional_nm(
+            "EXECUTION_ERROR", "functional_case_errored",
+            (f"{len(errored)} case(s) with an oracle and a testbench were "
+             f"built or run and gave no verdict (build failure, simulator "
+             f"crash or timeout); {counts['executed']} executed — the "
+             f"population was not fully measured"), errored_cases=errored,
+            **common)
+    if not counts["executed"]:
+        return _functional_nm(
+            "ZERO_DENOMINATOR", "functional_full_stack_population_empty",
+            (f"the functional record executed no case through "
+             f"`{required['module']}` — a connectivity-only population is not "
+             f"functional evidence"), **common)
+    not_run = [r for r in population
+               if r["state"] not in (_fsf.PASSED, _fsf.FAILED)]
+    return 0, {"pass": True, "vacuous_pass": False, "functional_verified": True,
+               "rule": "functional_full_stack_pass", "verdict": "PASS",
+               "scored_cases": counts["executed"],
+               "rationale": (
+                   f"PASS: {counts['executed']} functional case(s) executed "
+                   f"through `{required['module']}` and every one matched the "
+                   f"oracle its design input states"
+                   + (f"; {len(not_run)} declared case(s) did not execute and "
+                      f"are listed in `population`, never counted as passed"
+                      if not_run else "")), **common}, None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("project_dir")
@@ -1071,27 +1306,39 @@ def main():
                         Path(args.json).write_text(json.dumps(_res, indent=2))
                     print(json.dumps(_res, indent=2))
                     return 1
-                _msg = ("VACUOUS_PASS: IC has no command protocol / opcodes "
-                        "(L3_CMD_PROTOCOL.no_opcodes_in_input) and no L4/L5 "
-                        "register-map protocol — opcode-driven "
-                        "bit-level full-stack TB is N/A for this non-protocol "
-                        "IC (mirrors runner full_stack_tb_gen/reference_tb "
-                        "SKIP).")
-                # v1.15.45 (sha256 capture) — say WHICH non-verdict this is.
-                # `flow_compliance_check` reads `reason_class` off the report;
-                # without it a green vacuous_pass was classified as an input
-                # "applicable and NOT examined" (INCOMPLETE) on every
-                # non-protocol IC, and Step 5 never reached PASS.
-                _res = {"pass": True, "vacuous_pass": True, "rule": "N/A",
-                        "verdict": "VACUOUS_PASS",
-                        "reason_class": "DESIGN_DECLARED_NA",
-                        "skip_kind": "class-not-applicable",
-                        "rationale": _msg}
+                # FULLSTACKTB (2026-09-29) — NO OPCODES IS NOT NO FUNCTION.
+                # This line used to be a VACUOUS_PASS (`DESIGN_DECLARED_NA`,
+                # "opcode-driven bit-level full-stack TB is N/A") for every IC
+                # without a command protocol, whatever the full-stack TB did.
+                # Measured on both DIE benchmark runs (spm, subservient): the
+                # only full-stack TB was the connectivity skeleton — no
+                # stimulus, zero golden compares — and Step 5 carried it as a
+                # partially-vacuous PASS clause. The absence of OPCODES made
+                # the command-byte oracle N/A; it never made the design's
+                # FUNCTION N/A. The functional full-stack population is now
+                # judged from the record `full_stack_functional_tb` writes, and
+                # a connectivity-only population is REFUSED as functional
+                # evidence.
+                try:
+                    _rc, _res, _sentinel = functional_full_stack_verdict(proj)
+                except Exception as _exc:  # noqa: BLE001
+                    # A crash in the functional judgement is NOT_MEASURED with
+                    # its cause -- never a fall-through to the legacy opcode
+                    # check, whose verdict-less rc 1 reads as informational.
+                    _rc, _res, _sentinel = _functional_nm(
+                        "EXECUTION_ERROR", "functional_verdict_crashed",
+                        f"the functional full-stack judgement raised "
+                        f"{_exc!r}")
                 if args.json:
                     Path(args.json).parent.mkdir(parents=True, exist_ok=True)
                     Path(args.json).write_text(json.dumps(_res, indent=2))
                 print(json.dumps(_res, indent=2))
-                return 2
+                if _sentinel:
+                    # LAST, at column 0: `flow_compliance_check` raises the
+                    # INCOMPLETE tier from this token, so a refused population
+                    # reads NOT_MEASURED and never a partially-vacuous PASS.
+                    print(_sentinel)
+                return _rc
     except Exception:
         pass  # fall through to the strict check on any parse trouble
 

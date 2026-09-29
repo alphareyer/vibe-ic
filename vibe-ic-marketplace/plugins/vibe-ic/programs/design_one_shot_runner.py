@@ -11959,6 +11959,62 @@ def step_l10_unit_tb_run(project: Path, container: "str | None") -> StepResult:
                               "sim_executed": bool(rep["executed"])})
 
 
+def step_full_stack_functional_tb(project: Path,
+                                  container: "str | None") -> StepResult:
+    """FULLSTACKTB — the FUNCTIONAL full-stack population Step 5 reads.
+
+    `step_full_stack_tb_gen` above emits the connectivity skeleton; it drives no
+    functional stimulus and is not functional evidence. This runs the design's
+    own L10 cases, each with the oracle its input states, through the
+    full-stack top (`full_stack_functional_tb`): the core off a pad-ring route,
+    the pad-ring chip top on one. On a DIE route in Phase 2 that chip top does
+    not exist yet, so the step is NOT_MEASURED with that reason and the phase-3
+    runner re-runs the producer the moment `io_pad_chip_top_gen` writes it.
+
+    The step's word is the record's word: PASS only when at least one case
+    executed and every executed case matched; FAIL when one disagreed;
+    NOT_MEASURED otherwise, with the record's class. chip-AGNOSTIC."""
+    t0 = time.time()
+    try:
+        import sys as _sys
+        if str(PROGRAMS_DIR) not in _sys.path:
+            _sys.path.insert(0, str(PROGRAMS_DIR))
+        import full_stack_functional_tb as _fsf
+    except Exception as e:  # pragma: no cover — defensive import guard
+        return StepResult("full_stack_functional_tb", NOT_EXECUTED_STATUS,
+                          time.time() - t0, f"producer unavailable: {e}",
+                          reason_class=NOT_EXECUTED_REASON)
+    try:
+        rec = _fsf.generate(project, container)
+    except Exception as e:
+        return StepResult("full_stack_functional_tb", NOT_EXECUTED_STATUS,
+                          time.time() - t0, f"producer raised: {e!r}",
+                          reason_class=NOT_EXECUTED_REASON)
+    counts = rec.get("counts") or {}
+    verdict = rec.get("verdict")
+    status = verdict if verdict in ("PASS", "FAIL") else "NOT_MEASURED"
+    reason_class = {
+        "ZERO_DENOMINATOR": _V.ReasonClass.NO_POPULATION.value,
+        "BLOCKED_BY_UPSTREAM": _V.ReasonClass.INPUT_ABSENT.value,
+        "EXECUTION_ERROR": NOT_EXECUTED_REASON,
+    }.get(rec.get("reason_class") or "", NOT_EXECUTED_REASON) \
+        if status == "NOT_MEASURED" else ""
+    top = (rec.get("full_stack_top") or {}).get("module") or "?"
+    detail = (f"{rec.get('reason')} — top `{top}`: "
+              f"{counts.get('executed', 0)} executed, "
+              f"{counts.get('passed', 0)} passed, "
+              f"{counts.get('failed', 0)} failed, "
+              f"{counts.get('errored', 0)} errored, "
+              f"{counts.get('no_oracle', 0)} without an oracle, "
+              f"{counts.get('excluded', 0)} excluded "
+              f"(record {_fsf.record_path(project)})")
+    return StepResult("full_stack_functional_tb", status, time.time() - t0,
+                      detail, output_files=[str(_fsf.record_path(project))],
+                      extras={"counts": counts,
+                              "full_stack_top": rec.get("full_stack_top")},
+                      reason_class=reason_class)
+
+
 def _verilator_sim_escape(
         rtl_files: List[Path], tb_path: Path, run_dir: Path,
         container: str, top_name: str, reason: str,
@@ -25129,6 +25185,14 @@ def main() -> int:
         # Step-4 bridge reads. Fail-closed: no simulator / nothing to run
         # writes NOTHING and does not report a pass.
         plan.append(step_l10_unit_tb_run(project, args.container))
+        # FULLSTACKTB — the FUNCTIONAL full-stack population. The skeleton
+        # `step_full_stack_tb_gen` emitted above is connectivity-only; Step 5's
+        # `bit_level_full_stack_tb_check` now refuses it as functional evidence
+        # and reads THIS record instead. After the unit-TB pair on purpose: the
+        # same oracle ladder answers each case here, retargeted to the
+        # full-stack top (on a DIE route that top is built in Phase 3, and the
+        # phase-3 runner re-runs this producer when it is).
+        plan.append(step_full_stack_functional_tb(project, args.container))
         # ORGANIC #2064 — the ANALOG-ACCEPTANCE producer and its executor, in
         # the same order and for the same reason as the pair above: the L10
         # `verification_intent` rows of an analog block had NO producer, so

@@ -864,27 +864,210 @@ def _lcg_random_pairs(n: int, count: int, seed: int = 0x2545F491,
     return out
 
 
+# ── what the CASE'S OWN TEXT states about its population ─────────────────────
+# FULLSTACKTB (2026-09-29). An L10 row can state HOW MANY vectors it is about
+# ("隨機 ≥ 10000 組 (x, y)"), WHICH operand corners it names ("x = MIN_NEG"),
+# and that reset is asserted WHILE a computation is in progress. The per-case
+# oracle used to ignore all three: it drove a fixed 28-pair sample and a corner
+# set that, for an unsigned reading, never contains the MIN_NEG pattern the row
+# names. A case executed that way is not the case the design stated. These
+# readers are grammar over the case's own stimulus text -- no design literal --
+# and each returns "nothing stated" rather than a guess.
+
+#: A stated population is a count next to a population noun, or a count behind
+#: a lower-bound word. A percentage is an ACCEPTANCE figure, never a population,
+#: so a number followed by `%` is refused by construction.
+_POPULATION_NOUN = (r"(?:組|组|筆|笔|個|个|pairs?|vectors?|sets?|samples?|"
+                    r"operand\s+pairs?|input\s+pairs?|trials?|iterations?)")
+_POPULATION_RES = (
+    re.compile(r"(?:≥|>=|>|至少|at\s+least|no\s+fewer\s+than|minimum(?:\s+of)?)"
+               r"\s*([0-9][0-9,_]*)(?![0-9.,_]*\s*%)", re.IGNORECASE),
+    re.compile(r"(?<![0-9.])([0-9][0-9,_]*)\s*" + _POPULATION_NOUN,
+               re.IGNORECASE),
+)
+#: The most vectors one generated case module carries. A stated population
+#: above it is NOT silently truncated to look satisfied: the caller compares
+#: the executed count against the STATED one and reports the shortfall.
+MAX_CASE_VECTORS = 20000
+
+
+def declared_vector_population(case: dict) -> Optional[int]:
+    """The vector population the case's OWN stimulus text states, or None.
+
+    Read from `stimulus` and `coverage_scope` only -- `expected` carries the
+    acceptance figure ("100% PASS", "≥ 95%"), and a percentage is never a
+    population. Returns the LARGEST stated count (a row naming "≥ 10000 組"
+    asks for at least that many)."""
+    text = " ".join(str(case.get(k) or "") for k in ("stimulus",
+                                                      "coverage_scope"))
+    found: List[int] = []
+    for rx in _POPULATION_RES:
+        for m in rx.finditer(text):
+            digits = re.sub(r"[,_]", "", m.group(1))
+            if digits.isdigit() and int(digits) > 1:
+                found.append(int(digits))
+    return max(found) if found else None
+
+
+_CORNER_NAMES = {
+    # name -> function(width) giving the WIDTH-BIT PATTERN the name denotes
+    "max_pos": lambda w: (1 << (w - 1)) - 1,
+    "max_positive": lambda w: (1 << (w - 1)) - 1,
+    "int_max": lambda w: (1 << (w - 1)) - 1,
+    "min_neg": lambda w: 1 << (w - 1),
+    "min_negative": lambda w: 1 << (w - 1),
+    "int_min": lambda w: 1 << (w - 1),
+    "all_ones": lambda w: (1 << w) - 1,
+    "max_unsigned": lambda w: (1 << w) - 1,
+    "umax": lambda w: (1 << w) - 1,
+}
+#: `<operand> = <value>` inside a corner enumeration. The value is a signed
+#: decimal or one of the names above; anything else is not a corner the row
+#: named and is ignored rather than guessed at.
+_CORNER_ASSIGN_RE = re.compile(r"=\s*(-?\d+|[A-Za-z_][A-Za-z0-9_]*)")
+
+
+def named_corner_values(case: dict, width: int) -> List[int]:
+    """The operand corners the case's OWN text names, as width-bit patterns.
+
+    `x = MIN_NEG` names the pattern 1<<(N-1); `y = -1` names all-ones. Two's
+    complement is bit-identical mod 2^N for + - * & | ^, so a corner the row
+    states in signed terms is the same drive pattern whatever signedness the
+    oracle reads. Returns [] when the row names none."""
+    if width < 1:
+        return []
+    text = " ".join(str(case.get(k) or "") for k in ("stimulus",
+                                                      "coverage_scope"))
+    mask = (1 << width) - 1
+    out: List[int] = []
+    for m in _CORNER_ASSIGN_RE.finditer(text):
+        tok = m.group(1)
+        if re.fullmatch(r"-?\d+", tok):
+            val = int(tok) & mask
+        else:
+            fn = _CORNER_NAMES.get(tok.lower())
+            if fn is None:
+                continue
+            val = fn(width) & mask
+        if val not in out:
+            out.append(val)
+    return out
+
+
+#: "reset asserted while a computation is in progress" -- the abort-and-restart
+#: scenario. Grammar over the case's own text, either word order.
+_RESET_MID_RE = re.compile(
+    r"(?:reset|rst)[^/、,;。]{0,24}?(?:計算進行中|运算进行中|運算進行中|進行中|"
+    r"during\s+(?:a\s+|the\s+)?(?:computation|operation|calculation|transfer)|"
+    r"mid[- ]?(?:computation|operation|stream)|in[- ]progress|while\s+busy)"
+    r"|(?:計算進行中|進行中|during\s+(?:a\s+|the\s+)?(?:computation|operation))"
+    r"[^/、,;。]{0,24}?(?:reset|rst)\s*(?:assert|asserted)",
+    re.IGNORECASE)
+
+
+def reset_mid_computation_case(case: dict) -> bool:
+    """True iff the case's own text asks for reset asserted mid-computation."""
+    text = " ".join(str(case.get(k) or "") for k in ("stimulus", "expected",
+                                                      "coverage_scope"))
+    return bool(_RESET_MID_RE.search(text))
+
+
+def _distinct_population_pairs(n: int, count: int, operator: str,
+                               exclude: set) -> List[Tuple[int, int]]:
+    """Up to `count` DISTINCT operand pairs not in `exclude`, deterministic.
+
+    Not `_lcg_random_pairs`: that takes `state % 2**n`, the LOW bits of a
+    power-of-two-modulus LCG, and bit k of such a generator has period 2**(k+1)
+    -- MEASURED for n = 8: 500 draws gave 132 distinct pairs, so a stated
+    population of 500 would have been "met" by repeating 132 vectors. This
+    draws whole 64-bit SplitMix64 words (every bit full-period) and keeps only
+    unseen pairs; it stops at the operand space's capacity rather than repeat,
+    and the caller compares the result with the stated population."""
+    mask = (1 << n) - 1
+    words = max(1, (n + 63) // 64)
+    state = 0x9E3779B97F4A7C15 ^ n
+
+    def _next() -> int:
+        nonlocal state
+        state = (state + 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
+        z = state
+        z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & 0xFFFFFFFFFFFFFFFF
+        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & 0xFFFFFFFFFFFFFFFF
+        return z ^ (z >> 31)
+
+    def _operand() -> int:
+        v = 0
+        for _ in range(words):
+            v = (v << 64) | _next()
+        return v & mask
+
+    capacity = (1 << (2 * n)) if operator not in ("<<", ">>") \
+        else (1 << n) * max(1, n)
+    out: List[Tuple[int, int]] = []
+    seen = set(exclude)
+    budget = count * 8 + 1024
+    while len(out) < count and len(seen) < capacity and budget > 0:
+        budget -= 1
+        a, b = _operand(), _operand()
+        if operator in ("<<", ">>"):
+            b = b % n if n > 0 else 0
+        if (a, b) in seen:
+            continue
+        seen.add((a, b))
+        out.append((a, b))
+    return out
+
+
 def select_operand_pairs(spec: dict, profile: str = "mixed",
-                         cap: int = 28) -> List[Tuple[int, int]]:
+                         cap: int = 28,
+                         min_vectors: "int | None" = None,
+                         extra_corners: "List[int] | Tuple[int, ...]" = ()
+                         ) -> List[Tuple[int, int]]:
     """Deterministic operand pairs for a serial-parallel oracle, tuned to an
     L10 case PROFILE (chip-AGNOSTIC): 'corners' (the enumerated corner cross-
     product — for a corner-operand case), 'random' (a wide deterministic
     pseudo-random sample — for a random-equivalence / coverage case), or
     'mixed' (corners + a healthy random sample, the default). The random sample
     is deliberately generous so a data-dependent product defect is unlikely to
-    escape (the L7 plan asks for a large random equivalence run)."""
+    escape (the L7 plan asks for a large random equivalence run).
+
+    `extra_corners` (width-bit patterns the case's own text names) are crossed
+    with each other FIRST, so every corner pair the row states is driven.
+    `min_vectors` (the population the row states) grows the random tail until
+    the sample holds at least that many distinct pairs, up to
+    `MAX_CASE_VECTORS`; the caller compares the result with the stated count.
+    With neither argument the output is exactly the historical sample."""
     n = spec["width"]
     op = spec["operator"]
     corners = enumerate_operand_pairs(n, spec.get("signed", True), op)
     # drop enumerate's small built-in random tail so we control the sample size
     corners = corners[:-6] if len(corners) > 6 else corners
+    named: List[Tuple[int, int]] = []
+    if extra_corners:
+        vals = list(dict.fromkeys(int(v) for v in extra_corners))
+        for a in vals:
+            for b in vals:
+                if op in ("<<", ">>"):
+                    b = b % n if n > 0 else 0
+                named.append((a, b))
+    want = None
+    if min_vectors:
+        want = min(int(min_vectors), MAX_CASE_VECTORS)
     randoms = _lcg_random_pairs(n, 20, operator=op)
+    if want is not None:
+        # The historical 20 stay first; the population beyond them comes from
+        # a stream whose every bit is usable (see `_distinct_population_pairs`).
+        randoms = randoms + _distinct_population_pairs(
+            n, want + len(named) + len(corners), op, set(randoms))
     if profile == "corners":
-        sel = corners + randoms[:4]
+        sel = named + corners + randoms[:4]
     elif profile == "random":
-        sel = randoms + corners[:4]
+        sel = named + randoms + corners[:4]
     else:
-        sel = corners + randoms
+        sel = named + corners + randoms
+    if want is not None and profile == "corners":
+        # A stated population outranks the corner profile's short tail.
+        sel = sel + randoms[4:]
     # de-dup preserving order
     seen: set = set()
     uniq: List[Tuple[int, int]] = []
@@ -892,11 +1075,16 @@ def select_operand_pairs(spec: dict, profile: str = "mixed",
         if p not in seen:
             seen.add(p)
             uniq.append(p)
+    if want is not None:
+        return uniq[:max(want, len(named))]
+    if named:
+        return uniq[:max(cap, len(named))] if cap else uniq
     return uniq[:cap] if cap else uniq
 
 
 def emit_serial_oracle_module(module_name: str, spec: dict,
-                              pairs: "List[Tuple[int, int]] | None" = None
+                              pairs: "List[Tuple[int, int]] | None" = None,
+                              abort_before_each: bool = False
                               ) -> str:
     """Emit ONE self-checking SERIAL-PARALLEL oracle Verilog module.
 
@@ -917,7 +1105,24 @@ def emit_serial_oracle_module(module_name: str, spec: dict,
     DUT that computes the WRONG product matches NO consistent framing → it
     fails; a DUT that computes a·b under ANY self-consistent framing passes.
     The vector set carries several non-trivial, distinct goldens so a spurious
-    framing cannot match all of them (no aliasing false-pass)."""
+    framing cannot match all of them (no aliasing false-pass).
+
+    `abort_before_each` (FULLSTACKTB) is the case whose own text asks for reset
+    asserted WHILE a computation is in progress: before each vector a DIFFERENT
+    operation (both operands inverted) is streamed for N/2 cycles and reset is
+    then asserted in the middle of it. The vector that follows must still
+    reassemble to its own golden, so a datapath that keeps state across a reset
+    fails. It needs a reset port; without one the flag is refused (ValueError).
+
+    A population larger than `_CAL_VECTORS` calibrates the framing on the first
+    `_CAL_VECTORS` vectors (a single framing must reassemble EVERY one of them)
+    and then scores EVERY vector at that framing. Same soundness -- one framing,
+    all vectors -- without an O(framings x vectors) search: measured through a
+    pad-ring chip top, the full search over 10 000 vectors took 2 min 27 s of
+    vvp time. Populations at or below it emit exactly the historical module."""
+    if abort_before_each and not spec.get("rst"):
+        raise ValueError("abort_before_each needs a reset port to assert "
+                         "mid-computation; this spec has none")
     top = spec["top"]
     op = spec["operator"]
     n = spec["width"]
@@ -987,6 +1192,14 @@ def emit_serial_oracle_module(module_name: str, spec: dict,
     L.append("    for (_vi = 0; _vi < NV; _vi = _vi + 1) begin")
     for nm in spec.get("other_inputs", []):
         L.append(f"      {nm} = 0;")
+    if abort_before_each:
+        # RESET MID-COMPUTATION, as the case's own text states it: a different
+        # operation is in flight when reset asserts on the next line.
+        L.append(f"      {rst} = 1'b{deassert_v}; {par} = ~_av[_vi];")
+        L.append("      for (_k = 0; _k < N/2; _k = _k + 1) begin")
+        L.append(f"        {sin} = ~((_bv[_vi] >> _k) & 1'b1);")
+        L.append(f"        @(negedge {clk});")
+        L.append("      end")
     if rst:
         L.append(f"      {rst} = 1'b{assert_v}; {sin} = 1'b0; "
                  f"{par} = _av[_vi];")
@@ -1020,6 +1233,12 @@ def emit_serial_oracle_module(module_name: str, spec: dict,
                  f"_gv[{i}] = {n}'d{golden};  // {par}={a} {op} {sin}={b}")
     L.append("    _drive_capture(0);   // serial input LSB-first")
     L.append("    _drive_capture(1);   // serial input MSB-first")
+    if len(pairs) > _CAL_VECTORS:
+        _emit_calibrated_framing_scoring(L, len(pairs))
+        L.append("    $finish;")
+        L.append("  end")
+        L.append("endmodule")
+        return "\n".join(L) + "\n"
     # search (in_order, out_order, offset) for the framing matching ALL vectors
     L.append("    _best = 0; _bio = -1; _boo = -1; _boff = -1;")
     L.append("    for (_io = 0; _io < 2; _io = _io + 1)")
@@ -1056,8 +1275,76 @@ def emit_serial_oracle_module(module_name: str, spec: dict,
     return "\n".join(L) + "\n"
 
 
+#: The framing-calibration subset for a large population (see
+#: `emit_serial_oracle_module`). Equal to the historical default sample size, so
+#: every module emitted for a population that small is byte-identical to before.
+_CAL_VECTORS = 28
+
+
+def _emit_calibrated_framing_scoring(L: List[str], nv: int) -> None:
+    """Framing search over the first `_CAL_VECTORS` vectors, then EVERY vector
+    scored at the one framing found. Appends to `L` in place."""
+    L.append(f"    // {nv} vectors: framing calibrated on the first "
+             f"{_CAL_VECTORS}, then every vector scored at that one framing.")
+    L.append("    _best = 0; _bio = -1; _boo = -1; _boff = -1;")
+    L.append("    for (_io = 0; _io < 2; _io = _io + 1)")
+    L.append("     for (_oo = 0; _oo < 2; _oo = _oo + 1)")
+    L.append("      for (_off = 0; _off <= MAXOFF; _off = _off + 1) begin")
+    L.append("        _m = 0;")
+    L.append(f"        for (_vi = 0; _vi < {_CAL_VECTORS}; _vi = _vi + 1) begin")
+    L.append("          _word = (_io == 0) ? _capL[_vi] : _capM[_vi];")
+    L.append("          _got = 0;")
+    L.append("          for (_bi = 0; _bi < N; _bi = _bi + 1) begin")
+    L.append("            _b = _word[_off + _bi];")
+    L.append("            if (_oo == 0) _got[_bi] = _b; else _got[N-1-_bi] = _b;")
+    L.append("          end")
+    L.append("          if (_got === _gv[_vi]) _m = _m + 1;")
+    L.append("        end")
+    L.append("        if (_m > _best) begin")
+    L.append("          _best = _m; _bio = _io; _boo = _oo; _boff = _off;")
+    L.append("        end")
+    L.append("      end")
+    L.append("    _m = 0;")
+    L.append("    if (_bio >= 0) begin")
+    L.append("      for (_vi = 0; _vi < NV; _vi = _vi + 1) begin")
+    L.append("        _word = (_bio == 0) ? _capL[_vi] : _capM[_vi];")
+    L.append("        _got = 0;")
+    L.append("        for (_bi = 0; _bi < N; _bi = _bi + 1) begin")
+    L.append("          _b = _word[_boff + _bi];")
+    L.append("          if (_boo == 0) _got[_bi] = _b; else _got[N-1-_bi] = _b;")
+    L.append("        end")
+    L.append("        if (_got === _gv[_vi]) _m = _m + 1;")
+    L.append("      end")
+    L.append("    end")
+    L.append('    $display("ORACLE_TB_DONE pass=%0d/%0d", _m, NV);')
+    L.append(f"    if (_best == {_CAL_VECTORS} && _m == NV) $display("
+             "\"ORACLE_TB_FRAMING in_order=%0d out_order=%0d "
+             "latency_cycles=%0d\", _bio, _boo, _boff);")
+    L.append(f"    if (_best != {_CAL_VECTORS} || _m != NV) $display("
+             "\"ORACLE_MISMATCH: no single serial framing reassembles the DUT "
+             "stream to the golden for all vectors (possible functional "
+             "defect)\");")
+
+
+def case_oracle_options(spec: dict, case: "dict | None") -> Dict[str, Any]:
+    """What the case's OWN text asks of its oracle: the pairs to drive and
+    whether reset is asserted mid-computation. `{}` for no case (the historical
+    sample)."""
+    if not case:
+        return {}
+    width = int(spec.get("operand_a_width") or spec["width"])
+    return {
+        "min_vectors": declared_vector_population(case),
+        "extra_corners": named_corner_values(case, width),
+        "abort_before_each": (spec.get("topology") == "serial_parallel"
+                              and bool(spec.get("rst"))
+                              and reset_mid_computation_case(case)),
+    }
+
+
 def emit_case_oracle(project: Path, ic_class: Optional[str],
-                     module_name: str, profile: str = "mixed") -> Optional[str]:
+                     module_name: str, profile: str = "mixed",
+                     case: "dict | None" = None) -> Optional[str]:
     """Emit ONE self-checking arithmetic oracle MODULE (serial-parallel or
     closed-form parallel) named `module_name`, or None when no closed-form
     oracle is derivable (fail-closed). The L10 per-case unit-TB producer
@@ -1067,15 +1354,29 @@ def emit_case_oracle(project: Path, ic_class: Optional[str],
     declared-function convention, keyed on interface shape."""
     sspec, _sr = extract_serial_arith_spec(project, ic_class)
     if sspec is not None:
+        opts = case_oracle_options(sspec, case)
         return emit_serial_oracle_module(
-            module_name, sspec, select_operand_pairs(sspec, profile))
+            module_name, sspec,
+            select_operand_pairs(sspec, profile,
+                                 min_vectors=opts.get("min_vectors"),
+                                 extra_corners=opts.get("extra_corners") or ()),
+            abort_before_each=bool(opts.get("abort_before_each")))
     pspec, _pr = extract_arith_spec(project, ic_class)
     if pspec is not None:
-        return _emit_tb(pspec, module_name=module_name)
+        opts = case_oracle_options(pspec, case)
+        pairs = None
+        if opts.get("min_vectors") or opts.get("extra_corners"):
+            pairs = select_operand_pairs(
+                dict(pspec, width=int(pspec.get("operand_a_width")
+                                      or pspec["width"])),
+                profile, min_vectors=opts.get("min_vectors"),
+                extra_corners=opts.get("extra_corners") or ())
+        return _emit_tb(pspec, module_name=module_name, pairs=pairs)
     return None
 
 
-def _emit_tb(spec: dict, module_name: "str | None" = None) -> str:
+def _emit_tb(spec: dict, module_name: "str | None" = None,
+             pairs: "List[Tuple[int, int]] | None" = None) -> str:
     top = spec["top"]
     operator = spec["operator"]
     width = spec["width"]
@@ -1097,7 +1398,8 @@ def _emit_tb(spec: dict, module_name: "str | None" = None) -> str:
 
     # Enumerate operand pairs over operand_a's width (the corner space); each
     # operand is two's-complement-truncated to ITS OWN port width when driven.
-    pairs = enumerate_operand_pairs(a_w, signed, operator)
+    if pairs is None:
+        pairs = enumerate_operand_pairs(a_w, signed, operator)
     role_w = {a_name: a_w, b_name: b_w, r_name: r_w}
 
     def _rng(w):
