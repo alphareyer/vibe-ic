@@ -366,6 +366,39 @@ def acceptance_is_coverage_figure(case: dict) -> bool:
     return bool(_COVERAGE_FIGURE_RE.match(str(case.get("expected") or "")))
 
 
+#: The row's OWN text naming a coverage measure. A bare percentage alone is
+#: not enough: "100%" is also how a functional pass rate is written.
+_COVERAGE_WORD_RE = re.compile(r"coverage|覆蓋", re.IGNORECASE)
+DISP_COVERAGE_FIGURE = "coverage_figure_not_a_case"
+
+
+def coverage_figure_exemption(case: dict) -> Optional[Dict[str, Any]]:
+    """The Step-5 disposition of a coverage-FIGURE row, or None.
+
+    Review wave 58 (S5DP, MAJOR): the shape reader alone exempted any row
+    whose acceptance is a bare percentage, so an ISA-suite row written "100%"
+    that never ran and was never credited left Step 5 PASS -- a fourth
+    exemption R-0929-STEP5-BAR does not name. A row leaves the functional
+    population only when its acceptance is a bare percentage AND its own text
+    (name, stimulus or acceptance) names coverage; it is then LISTED with that
+    basis. Every other row stays a case and meets (a)-(c) or is NOT_MEASURED."""
+    if not acceptance_is_coverage_figure(case):
+        return None
+    for field in ("name", "stimulus", "expected"):
+        text = str(case.get(field) or "")
+        m = _COVERAGE_WORD_RE.search(text)
+        if m:
+            return {"case": str(case.get("name") or case.get("id") or ""),
+                    "disposition": DISP_COVERAGE_FIGURE, "blocking": False,
+                    "basis": {"acceptance": case.get("expected"),
+                              "names_coverage_in": field,
+                              "text": text[:160]},
+                    "note": ("a coverage figure measured over a run, not a "
+                             "verdict a case oracle returns; not counted as "
+                             "passed")}
+    return None
+
+
 # ---------------------------------------------------------------------------
 # MODELS FOR THE PAD-RING TOP
 # ---------------------------------------------------------------------------
@@ -715,15 +748,17 @@ def generate(project: Path, container: Optional[str] = None,
             entry.update(state=NO_ORACLE,
                          reason=f"case name {name!r} is not a legal identifier")
             continue
-        if acceptance_is_coverage_figure(case):
+        cov = coverage_figure_exemption(case)
+        if cov:
             # The ladder may have grounded it; a testbench for a case that is
             # not counted must not sit beside the ones that are.
             (fdir / f"{name}.v").unlink(missing_ok=True)
-            entry.update(state=EXCLUDED, reason=(
+            entry.update(state=EXCLUDED, step5_disposition=cov, reason=(
                 f"the case's acceptance `{case.get('expected')}` is a coverage "
-                f"FIGURE measured over a run, not a verdict a case oracle "
-                f"returns; it is not a functional full-stack case and is not "
-                f"counted as one"))
+                f"FIGURE its own text names ({cov['basis']['names_coverage_in']}"
+                f"), measured over a run, not a verdict a case oracle returns; "
+                f"it is not a functional full-stack case and is not counted "
+                f"as one"))
             continue
         path = fdir / f"{name}.v"
         if not path.is_file():
@@ -787,6 +822,9 @@ def generate(project: Path, container: Optional[str] = None,
     dp_passed = dp.get("state") == PASSED
     bar = {"datapath": dp.get("state"), "dispositions": []}
     for case, entry in zip(cases, rec["cases"]):
+        if entry.get("state") == EXCLUDED and entry.get("step5_disposition"):
+            bar["dispositions"].append(entry["step5_disposition"])
+            continue
         if entry.get("state") != NO_ORACLE:
             continue
         d = unexecuted_disposition(project, case, ic_class, dp_passed,
@@ -834,7 +872,8 @@ def generate(project: Path, container: Optional[str] = None,
             f"nor excluded by a named ruling, nor credited; {executed} "
             f"executed and passed"))
     kinds = {k: sum(1 for d in bar["dispositions"] if d["disposition"] == k)
-             for k in (DISP_EXCLUDED, DISP_NOT_APPLICABLE, DISP_ISA_CREDITED)}
+             for k in (DISP_EXCLUDED, DISP_NOT_APPLICABLE, DISP_ISA_CREDITED,
+                       DISP_COVERAGE_FIGURE)}
     return _finish(PASS, None, (
         f"{executed} functional case(s) executed through `{top['module']}` and "
         f"every one matched the oracle its design input states"
@@ -885,7 +924,10 @@ def _datapath_case(project: Path, core_mod: str, core_ports: list,
             f"a declared L10 case is already named `{name}`"))
         return entry
     try:
-        built, why = _cdp.build(project, core_mod, core_ports, name)
+        top_text = ((project / top["source"]).read_text(errors="replace")
+                    if top["pad_ring"] and top.get("source") else None)
+        built, why = _cdp.build(project, core_mod, core_ports, name,
+                                top_text=top_text)
     except Exception as exc:  # noqa: BLE001 — a builder crash is not a pass
         built, why = None, f"the data-path builder raised {exc!r}"
     if built is None:

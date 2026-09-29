@@ -1051,7 +1051,8 @@ def functional_full_stack_verdict(project: Path):
         counts["executed"] += 1
         counts["passed" if st == _fsf.PASSED else "failed"] += 1
         row["checks"] = got["checks"]
-    datapath = _verify_datapath(project, rec, required, problems)
+    datapath = _verify_datapath(project, rec, required, problems,
+                                set(declared_rows))
     dispositions: list = []
     try:
         ic_class = _tbg._detect_ic_class(project)
@@ -1061,8 +1062,10 @@ def functional_full_stack_verdict(project: Path):
                 problems.append(f"{row['case']}: recorded but not a declared "
                                 f"case")
                 continue
-            if _fsf.acceptance_is_coverage_figure(case):
-                row["step5_disposition"] = "coverage_figure_not_a_case"
+            cov = _fsf.coverage_figure_exemption(case)
+            if cov:
+                row["step5_disposition"] = cov["disposition"]
+                dispositions.append(cov)
                 continue
             d = _fsf.unexecuted_disposition(
                 project, case, ic_class, datapath["state"] == _fsf.PASSED,
@@ -1147,7 +1150,7 @@ def functional_full_stack_verdict(project: Path):
 
 
 def _verify_datapath(project: Path, rec: dict, required: dict,
-                     problems: list) -> dict:
+                     problems: list, declared_names: set = frozenset()) -> dict:
     """Re-derive the CPU data-path case from the design input and re-score it.
 
     Its state counts only when the program image and the testbench on disk are
@@ -1165,14 +1168,55 @@ def _verify_datapath(project: Path, rec: dict, required: dict,
     st = dp.get("state")
     out.update(state=st if st in (_fsf.PASSED, _fsf.FAILED, _fsf.ERRORED)
                else _fsf.NO_ORACLE, reason=dp.get("reason"))
-    if st not in (_fsf.PASSED, _fsf.FAILED):
-        return out
-    name = str(dp.get("name") or "")
+    name = str(dp.get("name") or _cdp.CASE_NAME)
     core = required.get("core_module") or required.get("module")
+    top_text = None
+    if required.get("pad_ring") and required.get("source"):
+        try:
+            top_text = (project / str(required["source"])).read_text(
+                errors="replace")
+        except OSError:
+            top_text = None
     mod, ports, why = _tbg.resolve_dut(project, str(core))
     built = None
     if mod is not None:
-        built, why = _cdp.build(project, mod, ports, name)
+        built, why = _cdp.build(project, mod, ports, name, top_text=top_text)
+    if st not in (_fsf.PASSED, _fsf.FAILED):
+        # Review wave 58 (S5DP): a record could relabel a FAILED data-path
+        # errored / no_oracle and the gate took the label. The same rule as
+        # the L10-case loop, and the label is re-derived, never read.
+        log = project / str(dp.get("run_log") or "")
+        if st == _fsf.ERRORED:
+            if dp.get("run_log"):
+                if not log.is_file() or \
+                        _fsf.sha256_file(log) != dp.get("run_log_sha256"):
+                    problems.append(f"{name}: transcript bytes differ from "
+                                    f"the record")
+                elif _fsf.score_transcript(
+                        name, dp.get("run_rc"),
+                        log.read_text(errors="replace"))["state"] \
+                        != _fsf.ERRORED:
+                    problems.append(f"{name}: the record says errored, but "
+                                    f"its transcript carries a verdict")
+            elif dp.get("build_rc") in (None, 0):
+                problems.append(f"{name}: the record says errored, but names "
+                                f"neither a failed build nor a run")
+            return out
+        if dp.get("run_log") or dp.get("build_rc") is not None \
+                or dp.get("tb") or dp.get("hex"):
+            problems.append(f"{name}: the record says {st} but names a "
+                            f"build/run of the data-path program")
+            return out
+        if built is not None and name not in declared_names:
+            want = built["tb_text"]
+            if required.get("pad_ring"):
+                want, _r = _fsf.retarget_instance(want, mod,
+                                                  required["module"])
+            if want is not None:
+                problems.append(f"{name}: the record says no data-path "
+                                f"program exists, but one builds from the "
+                                f"design input now")
+        return out
     if built is None:
         problems.append(f"{name}: the record claims {st}, but no data-path "
                         f"program builds from the design input now ({why})")
