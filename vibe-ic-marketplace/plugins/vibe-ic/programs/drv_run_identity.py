@@ -71,6 +71,19 @@ def record(project: Path, *, plugin_root: Path = PLUGIN_ROOT) -> dict:
     return doc
 
 
+def start(project: Path) -> dict:
+    """The run start of every Phase-3 run, full or --window (review wave 58):
+    record this run's identity, then (DRV standard section 1) claim the stage
+    receipt directory for it -- every earlier receipt is dropped and the run id
+    just recorded binds the ones the stages write, the plan reader refusing a
+    receipt from any other run.  A window's captures bind ITS code, and a stage
+    it did not re-run is not credited from an earlier run."""
+    doc = record(project)
+    import drv_stage_receipts
+    drv_stage_receipts.claim(project)
+    return doc
+
+
 def load(project: Path) -> dict:
     try:
         doc = json.loads((project / RECORD).read_text())
