@@ -338,3 +338,28 @@ def test_the_tb_fail_text_carries_the_refusal_and_every_basis_is_cited(
                                          qualifiers=q, refusals=why)
     for i in range(4):                                # all four, none cut
         assert f"basis {INPUT_DOC}:{5 + i} " in tb
+
+
+@pytest.mark.parametrize("link,target_rel", [
+    ("input/docs/link.md", "golden/expected_trace.txt"),
+    ("phase1/input_doc/x.md", "../../input/docs/golden/expected_trace.txt"),
+])
+def test_a_symlink_inside_the_input_to_an_oracle_is_refused(tmp_path, link,
+                                                            target_rel):
+    """review wave58 XQ4 final: the link's own path is in scope, its TARGET
+    is a §4.05 oracle inside the same roots — the target decides."""
+    p = _proj(tmp_path)
+    lines = ["| `o_data` | 8-bit | output | write data |",
+             "| `o_we` | 1-bit | output | write enable |"]
+    oracle = p / "input/docs/golden/expected_trace.txt"
+    oracle.parent.mkdir(parents=True, exist_ok=True)
+    oracle.write_text("\n".join(lines) + "\n")
+    lp = p / link
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    lp.symlink_to(target_rel)
+    assert lp.resolve() == oracle.resolve()
+    basis = [{"file": link, "line": 1, "quote": lines[0]},
+             {"file": link, "line": 2, "quote": lines[1]}]
+    sign_field(p, "o_data", "o_we", "high", basis=basis)
+    found, ignored = _trusted(p)
+    assert found == {} and "not a design-input file" in ignored["o_data"]

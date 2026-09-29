@@ -130,6 +130,14 @@ def _design_input_files(project: Path) -> Dict[str, Path]:
                 continue
             if not _inside_design_input(project, p):
                 continue
+            # A link INSIDE the roots may still point at an oracle inside
+            # them (input/docs/x.md -> golden/…): ask §4.05 about the target.
+            try:
+                target = p.resolve().relative_to(project.resolve()).as_posix()
+            except ValueError:
+                continue
+            if _sis.oracle_reason(target, project) is not None:
+                continue
             files[rel] = p
     return files
 
