@@ -63385,6 +63385,17 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         _prior_repair_log.unlink()
         notes.append("superseded pre-stream repair_log.json before the canonical decision")
     _no_repair_flag = postroute_timing_repair_out / "no_repair_needed.flag"
+    # R-0929-STEP32-RECORD — a bound Step-32 PRODUCER receipt (the LibreLane
+    # producer's decision record: bound to its source bytes, not written by
+    # this site) is never overwritten, and its repair_needed=true is carried
+    # forward: this decision can add a repair demand, never remove one.
+    _producer_receipt = _step32_producer_receipt(project, postroute_timing_repair_out)
+    if _producer_receipt is not None and _producer_receipt["repair_needed"] \
+            and not _repair_decision["repair_needed"]:
+        _repair_decision["repair_needed"] = True
+        _repair_decision["reason"] += (
+            "; the bound Step-32 producer receipt records repair_needed=true "
+            f"(action={_producer_receipt.get('action')!r})")
     if not _repair_decision["repair_needed"]:
         # No violation at the authoritative basis → no post-route repair needed.
         if not _no_repair_flag.is_file():
@@ -63416,10 +63427,30 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         _rerun_sta = (f"Re-run post-route STA ({_sta_rel}) and confirm it "
                       "reports measured timing slack or TNS/WNS before "
                       "deciding whether repair is needed.")
+        if _repair_decision["repair_applied"] \
+                and not _repair_decision["timing_repair_needed"]:
+            # R-0929-STEP32-RECORD — Step 32 ADOPTED a repair candidate. That
+            # is a repair, recorded as one: repair_log.json names the
+            # candidate, the before/after DRV and timing, and the re-verified
+            # measurement of the adopted route bound by sha256. No flag. A
+            # residual DRV stays in `nontiming_failures`, so Step 32 stays
+            # FAIL on it (never a waiver) while the improving candidate ships.
+            _repair_decision["action"] = "candidate_adopted"
+            _log = postroute_timing_repair_out / "repair_log.json"
+            if _producer_receipt is not None and _log.is_file():
+                notes.append("Step 32 adopted a repair candidate; the producer's "
+                             "own repair_log.json is kept as written")
+            else:
+                _aa.write_text(_log, json.dumps(_step32_adopted_repair_log(
+                    project, _repair_decision["step32"]), indent=2) + "\n")
+                written.append(str(_log))
+                notes.append(f"Step 32 adopted repair candidate "
+                             f"{_repair_decision['repair_applied']}: repair_log.json "
+                             "records it (no_repair_needed.flag not written)")
         # Subscript reads (decide() always sets the key), never `.get()`: the
         # closed-loop prover treats a method call on the decision as a possible
         # mutation and stops following the path to the repair actuator below.
-        if (not _repair_decision["timing_repair_needed"]
+        elif (not _repair_decision["timing_repair_needed"]
                 and _repair_decision["timing_basis_status"] == "NOT_MEASURED"
                 and not _repair_decision["nontiming_failures"]):
             # The selected STA carries no setup/hold number at all (absent,
@@ -63678,14 +63709,19 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                          "OCV unavailable) — honest fallback, not auto-run.")
     # Durable disclosure of the trigger decision (§4.05 audit trail), bound to
     # the report it was decided from (`_step32_decision_record`).
+    # A bound producer receipt keeps its bytes; the canonical decision is then
+    # recorded beside it, not over it.
+    _decision_name = ("postroute_timing_repair_decision.canonical.json"
+                      if _producer_receipt is not None
+                      else "postroute_timing_repair_decision.json")
     try:
-        _aa.write_text(postroute_timing_repair_out / "postroute_timing_repair_decision.json",
+        _aa.write_text(postroute_timing_repair_out / _decision_name,
             json.dumps(_step32_decision_record(project, _repair_decision,
                                                mc_ocv_stance, _sta_for_repair),
                        indent=2) + "\n")
-        written.append(str(postroute_timing_repair_out / "postroute_timing_repair_decision.json"))
-    except Exception:  # pragma: no cover — defensive
-        pass
+        written.append(str(postroute_timing_repair_out / _decision_name))
+    except Exception as _decision_exc:  # pragma: no cover — defensive
+        notes.append(f"Step-32 decision record emit failed: {_decision_exc}")
 
     # --- Step 33: power.rpt (OpenSTA report_power best-effort) ---------
     # `basis="post_pnr"`: this is the SIGN-OFF power number, so the session
@@ -65176,9 +65212,87 @@ def _step32_decision_record(project: Path, decision: Dict[str, Any],
         rel = str(basis.relative_to(project)) if basis.is_file() else None
     except ValueError:
         rel = None
+    # Every other file the same `decide` call read (the report the stance
+    # summarises, the tt report, the declared-hold inputs, the non-timing
+    # sign-off verdicts, the Step-32 producer report), each bound by sha256:
+    # a record whose inputs changed no longer verifies.
+    inputs = _repair_dec.bind_inputs(project, _repair_dec.decision_inputs(
+        project, stance, single_corner_sta))
     return {**decision,
+            "recorded_by": _repair_dec.CANONICAL_RECORDER,
             "source_report": rel,
-            "source_report_sha256": _sha256_file(basis) if rel else None}
+            "source_report_sha256": _sha256_file(basis) if rel else None,
+            "inputs": inputs}
+
+
+def _step32_producer_receipt(project: Path, out_dir: Path
+                             ) -> Optional[Dict[str, Any]]:
+    """The Step-32 producer's bound decision receipt, or None.
+
+    A record this runner wrote (`recorded_by` = the canonical recorder) is not
+    a producer receipt, nor is one that does not verify against its bytes
+    (`postroute_timing_repair_decision.verify_receipt`): only a current,
+    bound producer record is protected from the canonical rewrite.
+    """
+    path = out_dir / "postroute_timing_repair_decision.json"
+    try:
+        record = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or \
+            record.get("recorded_by") == _repair_dec.CANONICAL_RECORDER:
+        return None
+    try:
+        return _repair_dec.verify_receipt(project, record)
+    except (ValueError, TypeError):
+        return None
+
+
+def _step32_adopted_repair_log(project: Path, step32: Dict[str, Any]
+                               ) -> Dict[str, Any]:
+    """repair_log.json for a repair candidate Step 32 ADOPTED
+    (R-0929-STEP32-RECORD): the candidate, before/after DRV and timing from
+    the producer's own report (bound by sha256), and the re-verification: the
+    adopted route's STAPostPNR state, re-hashed now against the digest the
+    producer recorded. `re_verified` is true only when that state still has
+    those bytes and every figure was measured."""
+    before, after = step32.get("baseline") or {}, step32.get("final") or {}
+    state = after.get("sta_state")
+    state_ok = False
+    if isinstance(state, str) and isinstance(after.get("sta_state_sha256"), str):
+        try:
+            state_ok = _sha256_file(Path(state)) == after["sta_state_sha256"]
+        except OSError:
+            state_ok = False
+    figures = ("drv_count", "setup_ws_min", "hold_ws_min")
+    measured = all(isinstance(after.get(k), (int, float))
+                   and not isinstance(after.get(k), bool) for k in figures)
+    residual = measured and (after["drv_count"] > 0 or after["setup_ws_min"] < 0
+                             or after["hold_ws_min"] < 0)
+    return {
+        "program": "phase3_one_shot_runner.step32_adopted_repair",
+        "verdict": "REPAIR_APPLIED",
+        "candidate": step32.get("adopted"),
+        "source_report": step32.get("source_report"),
+        "source_report_sha256": step32.get("source_report_sha256"),
+        "changes": [{"type": "librelane_postroute_repair_candidate",
+                     "candidate": step32.get("adopted")}],
+        "before": {k: before.get(k) for k in figures},
+        "after": {k: after.get(k) for k in figures},
+        "re_verification": {
+            "sta_state": state, "sta_state_sha256": after.get("sta_state_sha256"),
+            "sta_state_sha256_verified": state_ok,
+            **{k: after.get(k) for k in figures},
+            # The line R-0929-STEP32-RECORD puts HERE instead of a flag.
+            "no_further_repair_needed": bool(state_ok and measured and not residual),
+        },
+        "re_verified": bool(state_ok and measured),
+        "residual_violation": bool(residual) if measured else None,
+        # The adopted route is the one Step 32 hands on, so every later step
+        # already consumes it: nothing downstream describes the pre-repair
+        # route.
+        "affected_steps": [],
+    }
 
 
 #: Slack is signed: MORE NEGATIVE is worse, so a negative delta is a
@@ -75436,7 +75550,33 @@ def _run_derived_artefact_generators(project: Path, effective_top: Optional[str]
                   f"{message}", file=sys.stderr)
         outcomes.append({"program": gen, "rc": cp.returncode,
                          "message": message})
+    # The durable record: every outcome, in the run's own report directory,
+    # so a refusal is readable after the terminal is gone.
+    try:
+        record = _pl.reports_phase3_dir(project) / DERIVED_GENERATORS_RECORD
+        record.parent.mkdir(parents=True, exist_ok=True)
+        _aa.write_text(record, json.dumps(
+            {"program": "phase3_one_shot_runner._run_derived_artefact_generators",
+             "outcomes": outcomes}, indent=2) + "\n")
+    except OSError as exc:
+        print(f"[WARN] derived-generator record not written: {exc}", file=sys.stderr)
     return outcomes
+
+
+#: `reports/phase3/<this>`: every derived generator's exit and message.
+DERIVED_GENERATORS_RECORD = "derived_artefact_generators.json"
+
+
+def _derived_generator_refusals(outcomes: List[Dict[str, Any]]) -> List[StepResult]:
+    """One NOT_MEASURED step per generator that REFUSED (rc 2, the repo's
+    could-not-determine exit): the artefact it owns was withdrawn or never
+    written, and the run record says so. rc 1 is the generator's own FAIL,
+    judged by that artefact's gate, and is recorded in the JSON only."""
+    return [StepResult(f"derived_generator:{o['program']}", "NOT_MEASURED", 0.0,
+                       f"{o['program']} refused (rc=2): {o.get('message') or ''}"[:500],
+                       extras={"program": o["program"], "rc": 2},
+                       reason_class=_V.ReasonClass.INCONCLUSIVE)
+            for o in outcomes if o.get("rc") == 2]
 
 # ORGANIC #655 — POST-HOC audits of the finished run: read what the tools
 # actually did, and record it. Distinct from the pre-flight guards above main(),
@@ -77735,7 +77875,8 @@ def main() -> int:
     # ORGANIC #621 — order is the module constant: foundry_handoff_pack_gen
     # runs BEFORE tapeout_checklist_gen so the checklist grades artefacts that
     # already exist (not a snapshot written moments too early).
-    _run_derived_artefact_generators(project, effective_top)
+    plan.extend(_derived_generator_refusals(
+        _run_derived_artefact_generators(project, effective_top)))
 
     # ORGANIC #655 — the post-hoc audits, on the run that just finished.
     for prog, rel_json, kind in _POST_RUN_AUDITS:
