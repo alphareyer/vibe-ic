@@ -1287,6 +1287,10 @@ def main(argv=None):
         verdict, rc = "WAIVED", 0
         findings = [{"severity": "WAIVED", "rule": "STEP_WAIVED",
                       "message": f"waiver={waiver.get('ticket','?')}: {waiver.get('reason','?')}"}]
+        # The measured chip-GDS defect stays on the record beside the waiver
+        # too, so no reader can take this waiver for "examined nothing".
+        if chip_gds_finding is not None:
+            findings.append(chip_gds_finding)
         findings.extend(substance_findings)
     elif chip_gds_finding is not None:
         verdict, rc = "FAIL", 1

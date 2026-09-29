@@ -371,3 +371,24 @@ def test_the_native_pv_rerun_does_not_pass_a_self_waived_a6(tmp_path, monkeypatc
     row = AOSR.step_for_block(proj, {"name": "ldo"}, "A6_block_pv", None)
     assert row.status == "FAIL", (row.status, row.detail)
     assert "A6_SELF_WAIVER_REFUSED" in row.detail, row.detail
+
+
+def test_a_self_waived_handoff_keeps_its_measured_chip_gds_defect(tmp_path):
+    # Review wave 58 MINOR: foundry_handoff_package_check dropped its measured
+    # chip-GDS finding from the waived report, so the flow read the waiver as
+    # "examined nothing" (NOT_MEASURED) instead of a waived defect (FAIL).
+    import test_signoff_medlow_backlog_gaps as H
+    proj = H._anti_scribe_kit(tmp_path, chip_gds="scribe")
+    (proj / "waivers.json").write_text(json.dumps({"waived_steps": [
+        {"id": "foundry_handoff", "ticket": "TKT-1",
+         "reason": "kit assembler not shipped"}]}) + "\n")
+    report = "reports/phase3/foundry_handoff_selfwaiver.json"
+    step = {"id": 96, "name": "handoff", "stage": "stage3",
+            "required_outputs": [],
+            "gate": {"all_of": [{"program_exit_zero":
+                f"foundry_handoff_package_check . --json {report}"}]}}
+    row = F.check_step(proj, step, {})
+    rep = json.loads((proj / report).read_text())
+    assert rep["verdict"] == "WAIVED"
+    assert "FOUNDRY_HANDOFF_SCRIBE_ONLY" in {f.get("rule") for f in rep["findings"]}
+    assert row.status == "FAIL", (row.status, row.reasons)
