@@ -351,3 +351,202 @@ def test_checked_in_public_doc_supplies_real_correction_evidence(tmp_path, monke
     assert new["verification_challenges"][0]["prompt_evidence"] == evidence
     # This is a real-input transaction test, not a correctness claim for RTL
     # implementing the document; no acceptance validator is bypassed in product.
+
+
+def _clarification_case(tmp_path, supplemental=False, public_doc=None):
+    prompt = public_doc or (
+        "Design module dut with input a and output y. assign y = a.\n"
+        "Acknowledge after the prescribed delay.\n")
+    excerpt = ("The output is registered with one\nclock cycle latency."
+               if public_doc else "Acknowledge after the prescribed delay.")
+    run, task = fixtures._task_with(tmp_path, prompt,
+        "module dut(input wire a, output wire y); assign y = a; endmodule\n")
+    # A source question is not a functional claim and need not author a test.
+    shape = dict(task)
+    shape["program_verification"] = {"functional_confirmation_required": False}
+    review = fixtures._valid_review(shape)
+    review["semantic_review"].update({
+        "verdict": "NEEDS_CLARIFICATION", "findings": [],
+        "rationale": "The public timing obligation needs a reference event before an expected result can be derived.",
+    })
+    review["spec_clarification"] = {
+        "schema": "vibeic.spec_clarification.v1",
+        "source_sha256": [task["prompt_sha256"]],
+        "requests": [{
+            "source_sha256": task["prompt_sha256"], "excerpt": excerpt,
+            "missing_information": "The event starting the timing interval is unspecified.",
+            "question": "Which event starts the stated interval, including after reset?",
+        }],
+    }
+    if supplemental:
+        test = fixtures._write_direct_assignment_challenge(task)
+        review["measured_defined_subset"] = {"path": test["path"], "sha256": test["sha256"]}
+    fixtures._write_review(task, review)
+    fixtures._solve_report(run, task)
+    request = {
+        "schema": bd._REVIEW_CORRECTION_SCHEMA, "id": task["id"],
+        "task_sha256": bd._review_task_digest(task),
+        "prompt_sha256": task["prompt_sha256"], "rtl_sha256": task["rtl_sha256"],
+        "review_sha256": _digest(task["review_path"]),
+        "challenge_sha256": _digest(task["challenge_path"]) if supplemental else None,
+        "author": {"kind": "AI", "model": "independent-test-reviewer"},
+        "blind": {"oracle_accessed": False},
+        "rationale": ("A fresh independent reviewer will reconsider the source-bound question on unchanged candidate bytes. "
+                      "Archive the prior question and any uncontracted diagnostic without creating a repair or acceptance permit."),
+        "prompt_evidence": [{"excerpt": excerpt,
+                             "supports": "The questioned interval is stated in the unchanged public source."}],
+    }
+    path = run / "correction_request.json"
+    path.write_text(json.dumps(request))
+    return run, task, path, request, review
+
+
+def _optional_protected(task):
+    return {str(path): Path(path).read_bytes() if Path(path).is_file() else None
+            for path in [task["prompt_path"], task["review_path"], task["challenge_path"],
+                         *task["rtl_paths"], *task["working_rtl_paths"]]}
+
+
+@pytest.mark.parametrize("supplemental", [False, True])
+def test_real_resume_corrects_valid_question_without_inventing_a_test(tmp_path, supplemental):
+    run, old, path, _, _ = _clarification_case(tmp_path, supplemental)
+    before = _optional_protected(old)
+    assert bd._validate_ai_review(old)["status"] == "SPEC_CLARIFICATION_REQUIRED"
+    assert _resume(run, path) == 2
+    new = bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0]
+    # Pre-fix this reads the unchanged occupied question path: an observed
+    # refusal of a valid correction, not a missing function/import control.
+    assert new["review_path"] != old["review_path"]
+    assert new["candidate_snapshot"] == old["candidate_snapshot"]
+    assert new["verification_challenges"] == old["verification_challenges"]
+    assert not Path(new["review_path"]).exists()
+    assert not Path(new["challenge_path"]).exists()
+    assert _optional_protected(old) == before
+    assert bd._read_jsonl(run / bd._REPAIR_WORKLIST) == []
+    assert not Path(old["response_path"]).exists()
+    outcome = json.loads((run / bd._ACCEPTANCE_REPORT).read_text())["review_outcomes"][0]
+    assert outcome["status"] == "PENDING", outcome
+    record = new["review_correction"]
+    expected = ("PRESERVED_UNCONTRACTED_SUPPLEMENTAL_NOT_PROMOTED"
+                if supplemental else "ABSENT_NO_VERIFICATION_OBLIGATION")
+    assert record["prior_challenge_status"] == expected
+    archive = Path(record["archive_path"])
+    assert (archive / "prior_review.json").read_bytes() == Path(old["review_path"]).read_bytes()
+    if supplemental:
+        assert (archive / "prior_challenge_tb.sv").read_bytes() == Path(old["challenge_path"]).read_bytes()
+    else:
+        assert not (archive / "prior_challenge_tb.sv").exists()
+    status = json.loads((archive / "prior_challenge_status.json").read_text())
+    assert status["status"] == expected
+    assert record["repair_authorized"] is False
+
+
+@pytest.mark.parametrize("supplemental", [False, True])
+def test_question_correction_replay_preserves_archive_and_fresh_test(tmp_path, supplemental):
+    run, old, request, _, _ = _clarification_case(tmp_path, supplemental)
+    assert _resume(run, request) == 2
+    new = bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0]
+    assert new["review_path"] != old["review_path"]
+    fixtures._write_direct_assignment_challenge(new)
+    before = _digest(new["challenge_path"])
+    assert _resume(run, request) == 2
+    assert bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0] == new
+    assert _digest(new["challenge_path"]) == before
+
+
+def test_question_correction_keeps_every_active_inherited_obligation(tmp_path):
+    run, old, path, request, _ = _clarification_case(tmp_path)
+    inherited = fixtures._write_invalid_inherited_challenge(old)
+    old["verification_challenges"] = [inherited]
+    fixtures._solve_report(run, old)
+    request["task_sha256"] = bd._review_task_digest(old)
+    path.write_text(json.dumps(request))
+    assert _resume(run, path) == 2
+    new = bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0]
+    assert new["review_path"] != old["review_path"]
+    assert new["verification_challenges"] == [inherited]
+    review = fixtures._valid_review(new)
+    fixtures._write_review(new, review)
+    outcome = bd._validate_ai_review(new)
+    assert outcome["status"] == "REJECTED", outcome
+    assert outcome["inherited_challenge_results"][0]["status"] == "INVALID"
+    assert not Path(old["response_path"]).exists()
+
+
+@pytest.mark.parametrize("damage", ["question", "review_schema", "missing_hash", "stale_hash",
+                                    "changed_file", "new_file", "non_question", "malformed_test"])
+def test_question_correction_refuses_invalid_or_drifted_material(tmp_path, monkeypatch, capsys, damage):
+    supplemental = damage not in {"new_file", "missing_hash"}
+    run, old, path, request, review = _clarification_case(tmp_path, supplemental)
+    if damage == "question":
+        review["spec_clarification"]["requests"][0]["excerpt"] = "An invented public obligation."
+    elif damage == "review_schema":
+        review["schema"] = "wrong"
+    elif damage == "non_question":
+        review["semantic_review"]["verdict"] = "FAIL"
+        review.pop("spec_clarification")
+    elif damage == "malformed_test":
+        review["verification_test"] = "not an object"
+    elif damage == "missing_hash":
+        request.pop("challenge_sha256")
+    elif damage == "stale_hash":
+        request["challenge_sha256"] = "0" * 64
+    elif damage == "changed_file":
+        target = Path(old["challenge_path"])
+        target.write_text(target.read_text() + "\n// changed after request\n")
+    elif damage == "new_file":
+        fixtures._write_direct_assignment_challenge(old)
+    if damage in {"question", "review_schema", "non_question", "malformed_test"}:
+        fixtures._write_review(old, review)
+        request["review_sha256"] = _digest(old["review_path"])
+    path.write_text(json.dumps(request))
+    before = (run / bd._REVIEW_WORKLIST).read_bytes()
+    monkeypatch.setattr(bd, "_cmd_resume_locked", lambda *a, **k: pytest.fail("refused correction reached resume"))
+    assert _resume(run, path) == 2
+    assert "REVIEW_CORRECTION_REFUSED" in capsys.readouterr().err
+    assert (run / bd._REVIEW_WORKLIST).read_bytes() == before
+
+
+def test_question_correction_rechecks_absent_supplemental_before_commit(tmp_path, monkeypatch, capsys):
+    run, old, path, _, _ = _clarification_case(tmp_path)
+    writer = bd._atomic_write_text
+    def change_after_prepare(target, text):
+        writer(target, text)
+        if Path(target).name == "transition.json":
+            fixtures._write_direct_assignment_challenge(old)
+    monkeypatch.setattr(bd, "_atomic_write_text", change_after_prepare)
+    before = (run / bd._REVIEW_WORKLIST).read_bytes()
+    assert _resume(run, path) == 2
+    assert "REVIEW_CORRECTION_REFUSED" in capsys.readouterr().err
+    assert (run / bd._REVIEW_WORKLIST).read_bytes() == before
+
+
+def test_checked_in_public_doc_backs_question_correction(tmp_path):
+    artifact = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+                            "tests", "fixtures", "real_benchmark", "datasheet_pin_table_interface.md")
+    run, old, path, _, _ = _clarification_case(tmp_path, supplemental=True, public_doc=artifact.read_text())
+    assert bd._validate_ai_review(old)["status"] == "SPEC_CLARIFICATION_REQUIRED"
+    assert _resume(run, path) == 2
+    new = bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0]
+    assert new["review_path"] != old["review_path"]
+    assert new["verification_challenges"] == old["verification_challenges"]
+
+
+def test_question_supplemental_drift_between_snapshot_and_hash_is_refused(tmp_path, monkeypatch, capsys):
+    run, old, path, _, _ = _clarification_case(tmp_path, supplemental=True)
+    target = Path(old["challenge_path"])
+    read = Path.read_bytes
+    changed = False
+    def drift_after_first_read(source):
+        nonlocal changed
+        data = read(source)
+        if source == target and not changed:
+            changed = True
+            source.write_bytes(data + b"\n// concurrent change\n")
+        return data
+    monkeypatch.setattr(Path, "read_bytes", drift_after_first_read)
+    before = (run / bd._REVIEW_WORKLIST).read_bytes()
+    assert _resume(run, path) == 2
+    assert changed
+    assert "REVIEW_CORRECTION_REFUSED" in capsys.readouterr().err
+    assert (run / bd._REVIEW_WORKLIST).read_bytes() == before

@@ -6457,17 +6457,46 @@ def _apply_review_correction(run_p: Path, request_path: Path) -> None:
         raise ValueError("REVIEW_CORRECTION_REFUSED: malformed prior AI review")
     if request.get("review_sha256") != _sha256_text(review_raw):
         raise ValueError("REVIEW_CORRECTION_REFUSED: prior review hash drift")
-    challenge_path = _correction_path(task.get("challenge_path") or "", run_p)
+    challenge_path = _correction_path(task.get("challenge_path") or "", run_p,
+                                      exists=False)
     raw_test = review.get("verification_test")
-    if not isinstance(raw_test, dict):
-        raise ValueError("REVIEW_CORRECTION_REFUSED: prior challenge missing")
-    _correction_path(raw_test.get("path") or "", run_p)
-    challenge, reasons = _challenge_from_review(task, review, prompt_text)
-    if reasons or not challenge:
-        raise ValueError("REVIEW_CORRECTION_REFUSED: " + "; ".join(reasons))
-    if request.get("challenge_sha256") != challenge["sha256"]:
+    challenge = None
+    prior_challenge_status = None
+    if (raw_test is None and (review.get("semantic_review") or {}).get(
+            "verdict") == "NEEDS_CLARIFICATION"):
+        # A valid source question need not make a functional claim or author
+        # a test. Verify that boundary through its owning validator; malformed
+        # questions must not gain a correction path by omitting proof fields.
+        outcome = _validate_ai_review(task)
+        if outcome.get("status") != "SPEC_CLARIFICATION_REQUIRED":
+            raise ValueError("REVIEW_CORRECTION_REFUSED: invalid prior spec "
+                             "clarification: " + "; ".join(outcome.get("reasons") or []))
+        if "challenge_sha256" not in request:
+            raise ValueError("REVIEW_CORRECTION_REFUSED: explicit prior "
+                             "challenge hash or null required")
+        if challenge_path.exists():
+            _correction_path(challenge_path, run_p)
+            prior_challenge_status = "PRESERVED_UNCONTRACTED_SUPPLEMENTAL_NOT_PROMOTED"
+        else:
+            prior_challenge_status = "ABSENT_NO_VERIFICATION_OBLIGATION"
+    else:
+        if not isinstance(raw_test, dict):
+            raise ValueError("REVIEW_CORRECTION_REFUSED: prior challenge missing")
+        _correction_path(raw_test.get("path") or "", run_p)
+        challenge, reasons = _challenge_from_review(task, review, prompt_text)
+        if reasons or not challenge:
+            raise ValueError("REVIEW_CORRECTION_REFUSED: " + "; ".join(reasons))
+    prior_challenge_bytes = (challenge_path.read_bytes()
+                             if challenge_path.is_file() else None)
+    prior_challenge_sha256 = (
+        challenge["sha256"] if challenge is not None else
+        hashlib.sha256(prior_challenge_bytes).hexdigest()
+        if prior_challenge_bytes is not None else None)
+    if request.get("challenge_sha256") != prior_challenge_sha256:
         raise ValueError("REVIEW_CORRECTION_REFUSED: current challenge hash drift")
-    material_paths.extend([review_path, challenge_path])
+    material_paths.append(review_path)
+    if prior_challenge_bytes is not None:
+        material_paths.append(challenge_path)
     inherited = task.get("verification_challenges")
     if not isinstance(inherited, list) or not all(isinstance(c, dict) for c in inherited):
         raise ValueError("REVIEW_CORRECTION_REFUSED: malformed inherited challenges")
@@ -6478,6 +6507,10 @@ def _apply_review_correction(run_p: Path, request_path: Path) -> None:
         material_paths.append(path)
     hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
               for p in material_paths}
+    if (prior_challenge_bytes is not None and hashes[str(challenge_path)] !=
+            hashlib.sha256(prior_challenge_bytes).hexdigest()):
+        raise ValueError("REVIEW_CORRECTION_REFUSED: prior challenge changed "
+                         "during preparation")
     key = f"review-correction-{request_sha}"
     new_review = _correction_path(
         run_p / "ai_reviews" / _safe_problem_id(pid) / f"{key}.json",
@@ -6499,7 +6532,8 @@ def _apply_review_correction(run_p: Path, request_path: Path) -> None:
 
     new_task = replace_paths(task)
     new_task["verification_challenges"] = list(inherited)
-    if not any(c.get("sha256") == challenge["sha256"] for c in inherited):
+    if challenge is not None and not any(
+            c.get("sha256") == challenge["sha256"] for c in inherited):
         new_task["verification_challenges"].append(challenge)
     new_task["review_correction"] = {
         "schema": _REVIEW_CORRECTION_SCHEMA,
@@ -6507,10 +6541,12 @@ def _apply_review_correction(run_p: Path, request_path: Path) -> None:
         "archive_path": str(archive),
         "prior_review_path": str(review_path),
         "prior_review_sha256": request["review_sha256"],
-        "prior_challenge_sha256": challenge["sha256"],
+        "prior_challenge_sha256": prior_challenge_sha256,
         "status": "FRESH_REVIEW_REQUIRED",
         "repair_authorized": False,
     }
+    if prior_challenge_status is not None:
+        new_task["review_correction"]["prior_challenge_status"] = prior_challenge_status
     expected_transition = {"schema": _REVIEW_CORRECTION_SCHEMA,
                            "prior_task": task, "new_task": new_task,
                            "material_sha256": hashes,
@@ -6537,11 +6573,19 @@ def _apply_review_correction(run_p: Path, request_path: Path) -> None:
         if response.exists() or new_review.exists() or new_challenge.exists():
             raise ValueError("REVIEW_CORRECTION_REFUSED: published response or occupied new path")
     archives = {"prior_task.json": json.dumps(task, ensure_ascii=False, sort_keys=True) + "\n",
-                "prior_review.json": review_raw,
-                "prior_challenge_tb.sv": challenge_path.read_bytes().decode("utf-8"),
-                "request.json": request_raw,
-                "transition.json": json.dumps(expected_transition, ensure_ascii=False,
-                                              sort_keys=True) + "\n"}
+                "prior_review.json": review_raw}
+    if prior_challenge_bytes is not None:
+        archives["prior_challenge_tb.sv"] = prior_challenge_bytes.decode("utf-8")
+    if prior_challenge_status is not None:
+        archives["prior_challenge_status.json"] = json.dumps({
+            "status": prior_challenge_status, "sha256": prior_challenge_sha256,
+            "path": str(challenge_path), "verification_obligation_promoted": False,
+        }, sort_keys=True) + "\n"
+    # The transition is the prepared-archive marker; keep it last so an
+    # interrupted archive write can be completed by the ordinary replay path.
+    archives["request.json"] = request_raw
+    archives["transition.json"] = json.dumps(expected_transition, ensure_ascii=False,
+                                              sort_keys=True) + "\n"
     for name, raw in archives.items():
         path = _correction_path(archive / name, run_p, exists=False)
         if path.exists():
@@ -6552,6 +6596,9 @@ def _apply_review_correction(run_p: Path, request_path: Path) -> None:
                 raise ValueError("REVIEW_CORRECTION_REFUSED: immutable archive missing")
             _atomic_write_text(path, raw)
     # Recheck all source material before the one authoritative commit.
+    if challenge_path.exists() != (prior_challenge_bytes is not None):
+        raise ValueError("REVIEW_CORRECTION_REFUSED: prior challenge presence "
+                         "changed during preparation")
     for path, digest in hashes.items():
         source = _correction_path(path, run_p)
         if hashlib.sha256(source.read_bytes()).hexdigest() != digest:

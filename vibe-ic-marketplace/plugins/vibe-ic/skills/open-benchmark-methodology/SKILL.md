@@ -95,6 +95,28 @@ Every candidate therefore has two required checks: deterministic product gates
 and semantic AI review. `program_first_ai_acceptance.json` must be `COMPLETE`
 before scoring.
 
+### Correcting an immutable review question
+
+An incorrect source-bound review question must not be overwritten, and correct
+RTL must not be changed just to obtain a new review key. The normal coordinator
+may apply `--resume --review-correction <REQUEST>` to an unaccepted, unpublished
+task. Its `vibeic.benchmark.ai_review_correction.v1` request binds the current
+task digest, prompt, candidate, review and challenge hashes, an attributed blind
+AI author, and a rationale of at least 80 characters. This is a fresh-review
+operation, not an acceptance, repair permit or challenge supersession.
+
+A `NEEDS_CLARIFICATION` review without `verification_test` is eligible only if
+the ordinary review validator confirms a valid source question. The request must
+include `challenge_sha256` explicitly: the exact supplemental file hash when the
+task's challenge path exists, or `null` when absent. The archive records existing
+uncontracted diagnostics as `PRESERVED_UNCONTRACTED_SUPPLEMENTAL_NOT_PROMOTED`,
+and absence as `ABSENT_NO_VERIFICATION_OBLIGATION`. Neither invents an executable
+contract the prior question did not claim. Every already-active inherited
+challenge remains unchanged and binding; an existing `verification_test` keeps
+its ordinary validation and inheritance rules. Stale material, invalid questions
+and file-presence changes are refused. Original evidence remains immutable and
+the new review/test paths must receive fresh independent evidence.
+
 ## Blind clean-room evaluation
 
 A canonical run is a fresh full-dataset run. Do not read or inherit:
