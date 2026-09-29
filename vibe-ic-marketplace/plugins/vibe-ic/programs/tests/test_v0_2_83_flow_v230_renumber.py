@@ -361,8 +361,11 @@ def test_perc_incomplete_and_manual_are_named_open_items(tmp_path):
         {"category": "ESD clamp sizing", "status": "MANUAL_REVIEW"},
         {"category": "Antenna", "status": "AUTOMATED", "result": "PASS"}])
     rep = PERC.audit(tmp_path)
-    assert rep["rc"] == 0
-    assert rep["verdict"] == "PASS_WITH_OPEN_ITEMS"
+    # U13 (2026-09-29): open items are categories the flow did NOT measure, so
+    # the verdict is NOT_MEASURED (rc 2), never a PASS_WITH_OPEN_ITEMS rc 0.
+    # Both items are still named.
+    assert rep["rc"] == 2
+    assert rep["verdict"] == "NOT_MEASURED"
     assert len(rep["open_items"]) == 2
 
 

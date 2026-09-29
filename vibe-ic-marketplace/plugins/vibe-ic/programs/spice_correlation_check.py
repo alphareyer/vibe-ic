@@ -1709,7 +1709,13 @@ def parse_sta_path(text: str) -> Optional[dict]:
             cap = slew = None
         else:
             continue
-        inst = pin.split("/")[0] if "/" in pin else pin
+        # The instance is the pin path minus its LAST component: a
+        # hierarchical pin `u_core/fanout48/Z` belongs to `u_core/fanout48`,
+        # not `u_core`. A die top (pad ring + core) puts every core cell one
+        # level down, so taking the first component made every path that
+        # starts at an IO cell unstitchable (U13). A port row keeps its name.
+        inst = (pin if cell.lower() in ("in", "out") or "/" not in pin
+                else pin.rsplit("/", 1)[0])
         rows.append({
             "incr": float(incr), "time": float(time_), "tr": tr,
             "pin": pin, "inst": inst, "cell": cell,
@@ -1884,6 +1890,16 @@ def resolve_path_stages(sta_path: dict, inst_map: dict, spef_caps: dict,
         prev_net = outs[0] if outs else None
     else:
         prev_net = sp_tok  # primary input port net (e.g. x[31])
+    # A launch through cells the deck does not model (an input pad cell
+    # between the bond pad and the core): the first modelled stage is driven by
+    # the LAST such cell's output net, not by the port. Chain through it so the
+    # toggling pin is found by net, never guessed (U13).
+    for r in sta_path["rows"][:sta_path["rows"].index(comb_rows[0])]:
+        entry = inst_map.get(r["inst"])
+        if entry and "/" in r["pin"]:
+            net = entry["conns"].get(r["pin"].rsplit("/", 1)[1])
+            if net:
+                prev_net = net
 
     stages = []
     for r in comb_rows:

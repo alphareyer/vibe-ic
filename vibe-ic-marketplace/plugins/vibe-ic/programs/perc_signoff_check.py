@@ -14,12 +14,15 @@ ENFORCED:
     reliability defect — ESD ring/topology gap, well-tap gap,
     unprotected cross-domain crossing, antenna/IR over budget …)
   * AUTOMATED INCOMPLETE and MANUAL_REVIEW categories are NAMED open
-    items (exit 0, verdict PASS_WITH_OPEN_ITEMS) — capability-tier
-    measurements (e.g. EM MEASURED) and foundry device-physics sizing
-    are review work, not fabricate-a-FAIL material;
+    items — capability-tier measurements (e.g. EM MEASURED) and foundry
+    device-physics sizing are review work, not fabricate-a-FAIL material,
+    and they are not a PASS either: verdict NOT_MEASURED, exit 2, with an
+    `INCOMPLETE:` last line so the step reads NOT_MEASURED (U13, 2026-09-29).
+    Until then they exited 0 as PASS_WITH_OPEN_ITEMS, and step 28 read PASS
+    on a die whose ESD presence and latch-up were never measured;
   * everything conclusive PASS → exit 0 PASS.
 
-Exit codes: 0 PASS / PASS_WITH_OPEN_ITEMS, 1 FAIL, 2 no
+Exit codes: 0 PASS, 1 FAIL, 2 NOT_MEASURED (named open items) or no
 perc_equivalent.json yet (vacuous — run phase3 sign-off first).
 chip-AGNOSTIC: consumes only the aggregate's structural fields.
 
@@ -233,9 +236,14 @@ def audit(project: Path) -> dict:
             why += "; " + "; ".join(proj_disclosures)
         rep.update(verdict="VACUOUS_PASS", rc=2, reason=why)
     elif open_items:
-        rep.update(verdict="PASS_WITH_OPEN_ITEMS", rc=0, reason=(
-            f"no conclusive reliability defect; {len(open_items)} named "
-            f"open item(s) pending review before tapeout"))
+        # U13: an open item is a reliability category this flow did NOT
+        # measure (a MANUAL_REVIEW category, or an AUTOMATED one that came
+        # back INCOMPLETE). No conclusive defect is not a PASS: the step is
+        # NOT_MEASURED until each named item is closed.
+        rep.update(verdict="NOT_MEASURED", rc=2, reason=(
+            f"no conclusive reliability defect, but {len(open_items)} "
+            f"reliability categor(ies) were NOT measured: "
+            + "; ".join(open_items)))
     else:
         # The disclosures are named HERE too. They were computed, stored in the
         # report and never surfaced in the sentence that decides how a reader
@@ -274,6 +282,10 @@ def main(argv=None) -> int:
         # line start. The JSON above carries the same fact and no consumer
         # reads it.
         print(f"VACUOUS_PASS: {rep.get('reason')}")
+    elif rep.get("verdict") == "NOT_MEASURED":
+        # Last, short line: the consumer keeps only the tail of stdout.
+        print(f"INCOMPLETE: {len(rep.get('open_items') or [])} PERC "
+              f"categor(ies) not measured")
     return rc
 
 
