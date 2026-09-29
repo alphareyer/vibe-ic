@@ -79,6 +79,7 @@ import ast
 import json
 import re
 import sys
+import symtable
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -177,15 +178,46 @@ _NOT_HDL_DECLARATION: Dict[str, str] = {
 }
 
 
-def compiled_patterns(tree: ast.Module) -> Dict[str, str]:
-    """`NAME -> pattern source` for EVERY module-level `re.compile(...)`.
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_SCOPES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+           ast.Lambda) + _COMPREHENSIONS
+
+
+def _scope_nodes(scope: ast.AST):
+    """Walk this scope, leaving nested scopes to their own binding context."""
+    yield scope
+    if isinstance(scope, _COMPREHENSIONS):
+        # Python evaluates the first iterable in the enclosing scope. Targets,
+        # filters, later iterables and the result live inside the comprehension.
+        for field in ("elt", "key", "value"):
+            if hasattr(scope, field):
+                yield from _scope_nodes(getattr(scope, field))
+        for i, generator in enumerate(scope.generators):
+            yield generator
+            yield from _scope_nodes(generator.target)
+            if i:
+                yield from _scope_nodes(generator.iter)
+            for condition in generator.ifs:
+                yield from _scope_nodes(condition)
+        return
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, _SCOPES):
+            yield child
+            if isinstance(child, _COMPREHENSIONS):
+                yield from _scope_nodes(child.generators[0].iter)
+        else:
+            yield from _scope_nodes(child)
+
+
+def compiled_patterns(tree: ast.AST) -> Dict[str, str]:
+    """`NAME -> pattern source` for `re.compile(...)` in ONE lexical scope.
 
     Wider than `declaration_regexes`, and deliberately: a stripper's pattern is
     a COMMENT pattern, never a declaration one, so the map that recognises a
     strip cannot be the map that recognises a scan.
     """
     out: Dict[str, str] = {}
-    for n in ast.walk(tree):
+    for n in _scope_nodes(tree):
         if isinstance(n, ast.Assign) and len(n.targets) == 1 \
                 and isinstance(n.targets[0], ast.Name):
             p = _pattern_of(n.value)
@@ -252,19 +284,129 @@ def _pattern_of(node: ast.AST) -> Optional[str]:
     return "".join(parts) if parts else None
 
 
-def declaration_regexes(tree: ast.Module) -> Dict[str, str]:
-    out: Dict[str, str] = {}
-    for n in ast.walk(tree):
-        if isinstance(n, ast.Assign) and len(n.targets) == 1 \
-                and isinstance(n.targets[0], ast.Name):
-            p = _pattern_of(n.value)
-            if p and declares_hdl(p):
-                out[n.targets[0].id] = p
-    return out
+def declaration_regexes(tree: ast.AST) -> Dict[str, str]:
+    return {name: pattern for name, pattern in compiled_patterns(tree).items()
+            if declares_hdl(pattern)}
+
+
+class _LexicalBindings:
+    """Use Python's symbol table to resolve locals, globals and free names.
+
+    Pattern extraction and the existing stripper rule remain shallow. This
+    supplies lexical ownership, not execution-order or interprocedural analysis.
+    """
+
+    def __init__(self, tree: ast.Module, src: str):
+        self.module = symtable.symtable(src, "<declaration-scan>", "exec")
+        self.parents = {self.module: None}
+        index = {}
+
+        def collect(table):
+            for child in table.get_children():
+                key = (child.get_type(), child.get_name(), child.get_lineno())
+                index.setdefault(key, []).append(child)
+                self.parents[child] = table
+                collect(child)
+
+        collect(self.module)
+        self.nodes = {self.module: tree}
+        self.owners = {self.module: None}
+        anonymous = {ast.Lambda: "lambda", ast.ListComp: "listcomp",
+                     ast.SetComp: "setcomp", ast.DictComp: "dictcomp",
+                     ast.GeneratorExp: "genexpr"}
+
+        def attach(node, owner=None):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                owner = node.name
+            if isinstance(node, _SCOPES) and node is not tree:
+                kind = "class" if isinstance(node, ast.ClassDef) else "function"
+                name = getattr(node, "name", anonymous.get(type(node)))
+                table = index[(kind, name, node.lineno)].pop(0)
+                self.nodes[table] = node
+                self.owners[table] = owner
+            for child in ast.iter_child_nodes(node):
+                attach(child, owner)
+
+        attach(tree)
+        self.patterns = {table: compiled_patterns(node)
+                         for table, node in self.nodes.items()}
+        self.safe = {}
+
+    def binding(self, table, name):
+        """The defining scope; an unknown local still shadows outer regexes."""
+        if table is self.module:
+            return table
+        try:
+            symbol = table.lookup(name)
+        except KeyError:
+            symbol = None
+        if symbol is not None:
+            if symbol.is_global():
+                return self.module
+            if symbol.is_local() or symbol.is_parameter():
+                return table
+        parent = self.parents[table]
+        # Class attributes are not lexical bindings available to a method.
+        while parent is not self.module and parent.get_type() == "class":
+            parent = self.parents[parent]
+        return self.binding(parent, name)
+
+    def visible_patterns(self, table):
+        return {symbol.get_name(): pattern
+                for symbol in table.get_symbols()
+                if (pattern := self.patterns[table].get(
+                    symbol.get_name(), self.patterns[self.binding(
+                        table, symbol.get_name())].get(symbol.get_name()))) is not None}
+
+    def stripped(self, table):
+        if table not in self.safe:
+            inherited = set()
+            for symbol in table.get_symbols():
+                name = symbol.get_name()
+                owner = self.binding(table, name)
+                if owner is not table and name in self.stripped(owner):
+                    inherited.add(name)
+            node = self.nodes[table]
+            if isinstance(node, _COMPREHENSIONS):
+                first = node.generators[0]
+                parent = self.parents[table]
+                if _from_stripper(first.iter, self.visible_patterns(parent),
+                                  self.stripped(parent)):
+                    inherited.update(n.id for n in ast.walk(first.target)
+                                     if isinstance(n, ast.Name))
+            self.safe[table] = stripped_locals(
+                node, self.visible_patterns(table), inherited)
+        return self.safe[table]
+
+
+def _from_stripper(value: ast.AST, compiled: Optional[Dict[str, str]],
+                   safe: Set[str]) -> bool:
+    """The existing value-flow rule, evaluated in the value's lexical scope."""
+    if isinstance(value, _COMPREHENSIONS):
+        if _from_stripper(value.generators[0].iter, compiled, safe):
+            return True
+        bound = {n.id for generator in value.generators
+                 for n in ast.walk(generator.target) if isinstance(n, ast.Name)}
+        safe = safe - bound
+        compiled = {name: pattern for name, pattern in (compiled or {}).items()
+                    if name not in bound}
+    for sub in _scope_nodes(value):
+        if isinstance(sub, ast.Call):
+            try:
+                fname = ast.unparse(sub.func)
+            except Exception:
+                fname = ""
+            if (_STRIPPER.search(fname)
+                    or _strips_comments_inline(sub, compiled)):
+                return True
+        if isinstance(sub, ast.Name) and sub.id in safe:
+            return True
+    return False
 
 
 def stripped_locals(fn: ast.AST,
-                    compiled: Optional[Dict[str, str]] = None) -> Set[str]:
+                    compiled: Optional[Dict[str, str]] = None,
+                    inherited: Optional[Set[str]] = None) -> Set[str]:
     """Locals whose value passed through a stripper, transitively.
 
     Per-NAME, which is the point: a sibling variable being stripped does not
@@ -276,22 +418,7 @@ def stripped_locals(fn: ast.AST,
     because the loop variable never inherited the iterable's status -- a false
     positive on correct code, and the common shape for a line-by-line scan.
     """
-    ok: Set[str] = set()
-
-    def _from_stripper(value: ast.AST) -> bool:
-        """Does this expression derive from a stripper, or from a safe name?"""
-        for sub in ast.walk(value):
-            if isinstance(sub, ast.Call):
-                try:
-                    fname = ast.unparse(sub.func)
-                except Exception:
-                    fname = ""
-                if (_STRIPPER.search(fname)
-                        or _strips_comments_inline(sub, compiled)):
-                    return True
-            if isinstance(sub, ast.Name) and sub.id in ok:
-                return True
-        return False
+    ok: Set[str] = set(inherited or ())
 
     def _bindings(n: ast.AST):
         """(names bound, expression bound from) for every binding form."""
@@ -309,13 +436,13 @@ def stripped_locals(fn: ast.AST,
     grew = True
     while grew:
         grew = False
-        for n in ast.walk(fn):
+        for n in _scope_nodes(fn):
             names, value = _bindings(n)
             if not names or value is None:
                 continue
             if all(t in ok for t in names):
                 continue
-            if _from_stripper(value):
+            if _from_stripper(value, compiled, ok):
                 ok.update(names)
                 grew = True
     return ok
@@ -325,17 +452,20 @@ def scan_source(src: str, label: str) -> List[str]:
     """`label::function::REGEX(arg)` for every unstripped declaration scan."""
     try:
         tree = ast.parse(src)
+        bindings = _LexicalBindings(tree, src)
     except SyntaxError:
         return []
-    regs = declaration_regexes(tree)
-    if not regs:
-        return []
-    compiled = compiled_patterns(tree)
     out: List[str] = []
-    for fn in [x for x in ast.walk(tree)
-               if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-        safe = stripped_locals(fn, compiled)
-        for n in ast.walk(fn):
+    for table, scope in bindings.nodes.items():
+        owner = bindings.owners[table]
+        if owner is None or isinstance(scope, ast.ClassDef):
+            continue
+        regs = {name for name, pattern in bindings.visible_patterns(table).items()
+                if declares_hdl(pattern)}
+        if not regs:
+            continue
+        safe = bindings.stripped(table)
+        for n in _scope_nodes(scope):
             if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                     and n.func.attr in _SCAN
                     and isinstance(n.func.value, ast.Name)):
@@ -344,7 +474,7 @@ def scan_source(src: str, label: str) -> List[str]:
                 continue
             arg = n.args[-1] if n.func.attr in ("sub", "split") else n.args[0]
             if isinstance(arg, ast.Name) and arg.id not in safe:
-                out.append(f"{label}::{fn.name}::{n.func.value.id}({arg.id})")
+                out.append(f"{label}::{owner}::{n.func.value.id}({arg.id})")
     return sorted(set(out))
 
 
