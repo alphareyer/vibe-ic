@@ -313,8 +313,37 @@ def _set_final_fanout_verdict(report: Dict[str, Any]) -> None:
             if fanout["verdict"] == "FAIL" else fanout["reason"])
 
 
-def _set_final_drv_verdict(report: Dict[str, Any]) -> None:
-    count = (report.get("final") or {}).get("drv_count")
+def offdie_port_cap_pairs(project: Optional[Path],
+                          pairs: Sequence[Sequence[str]]) -> List[List[str]]:
+    """The (port, "cap") rows of a pad-ring (DIE) top's own signal ports.
+
+    DRV standard section 4: the integrator's std-cell capacitance margin
+    applies only to nets a std-cell drives.  On a DIE every top-level signal
+    port is a bond pad (R-0929-PAD-INPUT-DRIVE), driven or loaded off-die, so
+    a port-scoped margin row is disclosed beside the census and is neither a
+    gate nor clean evidence.  Instance pins (``inst/pin``) are never in it,
+    and a run whose route is not a pad ring keeps every row.
+    """
+    if project is None:
+        return []
+    try:
+        import _tapeout_declaration as _td
+        if not _td.requests_pad_ring(Path(project)):
+            return []
+    except Exception:  # noqa: BLE001 -- an unreadable route keeps every row
+        return []
+    return [list(pair) for pair in pairs
+            if len(pair) == 2 and pair[1] == "cap" and "/" not in str(pair[0])]
+
+
+def _set_final_drv_verdict(report: Dict[str, Any],
+                           project: Optional[Path] = None) -> None:
+    final = report.get("final") or {}
+    count = final.get("drv_count")
+    offdie = offdie_port_cap_pairs(project, final.get("drv_pin_checks") or [])
+    if offdie and type(count) is int and count >= len(offdie):
+        report["offdie_port_cap_disclosures"] = offdie
+        count -= len(offdie)
     valid = type(count) is int and count >= 0
     report["final_drv"] = {"verdict": ("NOT_MEASURED" if not valid else
                                        "FAIL" if count else "PASS"),
@@ -476,12 +505,13 @@ def trigger_disclosure(trigger: Dict[str, Any]) -> str:
             "values " + ", ".join(f"{k}={values.get(k)!r}" for k in sorted(values)))
 
 
-def _stamp_verdict(report: Dict[str, Any]) -> None:
+def _stamp_verdict(report: Dict[str, Any], project: Optional[Path] = None) -> None:
     """PASS only when the trigger measured its input. A NOT_MEASURED trigger
     ran no closure because it could not tell a clean route from a violated
     one, and that is reported as such -- not as a repair step that passed."""
     baseline = report.get("input_baseline") or report.get("baseline") or {}
-    _set_census_verdict(report, baseline, report.get("final") or {})
+    _set_census_verdict(report, baseline, report.get("final") or {},
+                        project=project)
     trigger = report.get("repair_trigger") or {}
     if trigger.get("action") == "NOT_MEASURED":
         reason = (trigger_disclosure(trigger) + " -- the input route's census "
@@ -1126,13 +1156,14 @@ def _clear_declared_repair(project: Path) -> None:
         (out / name).unlink(missing_ok=True)
 
 
-def _set_census_verdict(report: Dict[str, Any], *measurements: Dict[str, Any]) -> None:
+def _set_census_verdict(report: Dict[str, Any], *measurements: Dict[str, Any],
+                        project: Optional[Path] = None) -> None:
     antenna_measured = all(_antenna_counts(m) is not None for m in measurements)
     sta_digest_measured = all(_has_sta_digest(m) for m in measurements)
     report["antenna_census"] = {"verdict": "PASS" if antenna_measured else "NOT_MEASURED"}
     report["sta_digest_census"] = {"verdict": "PASS" if sta_digest_measured else "NOT_MEASURED"}
     _set_final_fanout_verdict(report)
-    _set_final_drv_verdict(report)
+    _set_final_drv_verdict(report, project)
     missing = []
     if not antenna_measured:
         missing.append("input or final antenna net/pin census is absent")
@@ -1305,7 +1336,7 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
                             derate=derate, aocv_table=aocv_table,
                             registry=registry, programs_dir=programs_dir,
                             floors=declared_timing_floor(project, sdc)))
-    _stamp_verdict(report)
+    _stamp_verdict(report, project)
     _step32_drv_signoff(project, report)
     write_json(out, report)
     _publish_declared_repair(project, report, out)
@@ -1414,7 +1445,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
                   floors=declared_timing_floor(project, sdc))
     if mode != "dual":
         report.update(close_arm(project, "librelane", route_state, **common))
-        _stamp_verdict(report)
+        _stamp_verdict(report, project)
         _step32_drv_signoff(project, report)
         write_json(out, report)
         _publish_declared_repair(project, report, out)
@@ -1454,7 +1485,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     report["input_baseline"] = arms["postdrt"]["baseline"]
     report["repair_trigger"] = chosen.get("repair_trigger")
     report["selected_arm"] = sel["selection"]
-    _stamp_verdict(report)
+    _stamp_verdict(report, project)
     _step32_drv_signoff(project, report)
     write_json(out, report)
     _publish_declared_repair(project, report, out)

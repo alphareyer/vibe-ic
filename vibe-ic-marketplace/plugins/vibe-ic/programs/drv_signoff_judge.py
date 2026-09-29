@@ -539,6 +539,17 @@ def _waiver_support(waiver: dict, row: dict, bundle: dict,
     return not local_errors
 
 
+def _pad_ring_top(project: Path | None) -> bool:
+    """Is the judged project a pad-ring (DIE) top?  Unknown is not a DIE."""
+    if project is None:
+        return False
+    try:
+        import _tapeout_declaration as _td
+        return bool(_td.requests_pad_ring(Path(project)))
+    except Exception:  # noqa: BLE001 -- an unreadable route keeps every row gated
+        return False
+
+
 def judge(bundle: dict, *, project: Path | None = None) -> dict:
     """Judge measured rows independently of tool rc/checker summaries."""
     import instrument_calibration
@@ -1093,6 +1104,9 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         if key not in dedup or row.get("limit", float("inf")) < dedup[key].get("limit", float("inf")):
             dedup[key] = row
     rows_by_kind["max_fanout"] = list(dedup.values())
+    offdie_ports = _pad_ring_top(
+        project if project is not None else
+        Path(str(identity["project"])) if identity.get("project") else None)
     for kind, rows in rows_by_kind.items():
         for row in rows:
             pin_limit = row["liberty_limit"]
@@ -1102,6 +1116,16 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                     explicit is None and _positive_number(pin_limit) and
                     row["measured"] <= pin_limit):
                 row["failed_tier"] = "IO_STD_CELL_MARGIN_DISCLOSURE"
+                io_margin_disclosures.append(row)
+                continue
+            # Standard section 4: the std-cell margin applies only to nets a
+            # std-cell drives.  A DIE's own signal port is a bond pad, driven
+            # or loaded off-die; with no Liberty limit of its own, its only
+            # limit is that margin, so the row is disclosed, not gated.
+            if (kind == "max_capacitance" and offdie_ports and
+                    row.get("cell_class") == "port" and pin_limit is None and
+                    explicit is not None and explicit == declared.get("cap_pf")):
+                row["failed_tier"] = "OFFDIE_PORT_STD_CELL_MARGIN_DISCLOSURE"
                 io_margin_disclosures.append(row)
                 continue
             # OpenSTA's displayed precision can differ by one last digit;
