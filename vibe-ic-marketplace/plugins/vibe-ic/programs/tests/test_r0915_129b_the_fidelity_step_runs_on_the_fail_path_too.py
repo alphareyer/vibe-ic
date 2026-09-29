@@ -310,6 +310,12 @@ _S_ARM_RECEIPT = {
     "design__xor_difference__count": 0,
     "reason": "the shipped GDS matches the restreamed pre-finishing reference on "
               "every design layer (0 differences across 46 layer(s) compared)",
+    # U15 (2026-09-29): a PASS also carries the shipped bytes' connectivity
+    # measurement bound to their sha256; without it the judge reads
+    # NOT_MEASURED (test_u15_gds_connectivity_is_measured_on_the_shipped_bytes).
+    "shipped_sha256_live": "a" * 64,
+    "gds_connectivity": {"verdict": "PASS", "subject_sha256": "a" * 64,
+                         "basis": "magic_vs_klayout_stream_xor"},
 }
 
 

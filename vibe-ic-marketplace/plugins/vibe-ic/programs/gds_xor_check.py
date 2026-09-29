@@ -796,6 +796,106 @@ _JUDGE_ASKED_BEFORE_PRODUCER = "ASKED_BEFORE_PRODUCER"
 LIBRELANE_PROMOTION_REL = "phase3/librelane/37-promotion.json"
 
 
+#: U15 (IC_BLOCKER_AUDIT 2026-09-29) — the two measurements that can say the
+#: SHIPPED GDS carries the routed layout's connectivity. Magic's and KLayout's
+#: streams of the same routed DEF XOR'd against each other (step 37's LibreLane
+#: chain, `37-xor.json`), or an LVS whose layout was EXTRACTED FROM the shipped
+#: GDS bytes (`lvs_verdict.json` -> `layout_source`, kind "gds").
+LIBRELANE_STREAM_XOR_REL = "phase3/librelane/37-xor.json"
+LVS_VERDICT_REL = "reports/phase3/lvs_verdict.json"
+CONNECTIVITY_BASES = ("magic_vs_klayout_stream_xor",
+                      "lvs_extracted_from_shipped_gds")
+#: Not skip-eligible (`_flow_reason_taxonomy`): the flow was handed this
+#: question and did not perform the measurement that answers it.
+_CONNECTIVITY_UNMEASURED_CLASS = "FLOW_DOES_NOT_PERFORM"
+
+
+def gds_connectivity(project: Path, live_sha256: str) -> Dict[str, Any]:
+    """Is the SHIPPED GDS (these bytes) shown to carry the routed connectivity?
+
+    WHAT DOES NOT COUNT, measured on the spm IC-path tail (cx_spmic2_run,
+    2026-09-28). Step 37.3 XOR'd the shipped GDS against
+    `chip_top.prefinish.gds` -- the SAME KLayout stream-out, kept before fill
+    and seal ring. Zero design-layer differences there proves finishing did not
+    touch the design layers; it cannot see a stream-out that dropped a via or a
+    net, because both sides carry the same stream. And step 31's LVS read the
+    routed DEF (`_run_extraction_lvs` is DEF-direct), so no measurement in the
+    run ever read the connectivity of the bytes that ship.
+
+    Two independent measurements can, and each is bound to `live_sha256`:
+      * step 37's LibreLane chain promoted THESE bytes (`canonical_sha256`) and
+        its `KLayout.XOR` of the Magic and KLayout streams of the one routed
+        DEF measured `design__xor_difference__count` (0 -> PASS, >0 -> FAIL);
+      * `lvs_verdict.json` records a layout extracted from a GDS whose sha256
+        is THESE bytes (PASS/FAIL from its own status).
+    Anything else is NOT_MEASURED with the reason, never PASS. A measured FAIL
+    from either outranks a PASS from the other.
+    """
+    found: List[Dict[str, Any]] = []
+    looked: List[str] = []
+    promo = _json(project / LIBRELANE_PROMOTION_REL)
+    if not isinstance(promo, dict):
+        looked.append(f"{LIBRELANE_PROMOTION_REL} absent (no Magic-vs-KLayout "
+                      f"stream XOR was run by step 37)")
+    elif promo.get("canonical_sha256") != live_sha256:
+        looked.append(f"{LIBRELANE_PROMOTION_REL} promoted different bytes "
+                      f"({str(promo.get('canonical_sha256'))[:16]}...)")
+    else:
+        rec = _json(project / LIBRELANE_STREAM_XOR_REL)
+        row = ((rec or {}).get("metrics") or {}).get(
+            "design__xor_difference__count") or {}
+        value = row.get("value")
+        measured = (isinstance(value, int) and not isinstance(value, bool)
+                    and row.get("status") in ("MEASURED", "FAIL")
+                    and (rec or {}).get("verdict") in ("PASS", "FAIL"))
+        if not measured:
+            looked.append(f"{LIBRELANE_STREAM_XOR_REL} carries no measured "
+                          f"design__xor_difference__count")
+        else:
+            found.append({
+                "basis": CONNECTIVITY_BASES[0],
+                "verdict": "PASS" if value == 0 else "FAIL",
+                "evidence": LIBRELANE_STREAM_XOR_REL,
+                "evidence_sha256": _sha256(project / LIBRELANE_STREAM_XOR_REL),
+                "xor_difference_count": value})
+    lvs = _json(project / LVS_VERDICT_REL)
+    src = (lvs or {}).get("layout_source") if isinstance(lvs, dict) else None
+    if not isinstance(lvs, dict):
+        looked.append(f"{LVS_VERDICT_REL} absent")
+    elif not isinstance(src, dict) or src.get("kind") != "gds":
+        looked.append(
+            f"{LVS_VERDICT_REL} records no layout extracted from a GDS "
+            f"(layout_source={src.get('kind') if isinstance(src, dict) else None!r}"
+            f"; an LVS extracted from the routed DEF says nothing about the "
+            f"streamed bytes)")
+    elif src.get("sha256") != live_sha256:
+        looked.append(f"{LVS_VERDICT_REL} extracted a different GDS "
+                      f"({str(src.get('sha256'))[:16]}..., shipped "
+                      f"{live_sha256[:16]}...)")
+    elif lvs.get("status") not in ("PASS", "FAIL"):
+        looked.append(f"{LVS_VERDICT_REL} on the shipped GDS has status "
+                      f"{lvs.get('status')!r}, not a measured compare")
+    else:
+        found.append({
+            "basis": CONNECTIVITY_BASES[1], "verdict": lvs["status"],
+            "evidence": LVS_VERDICT_REL,
+            "evidence_sha256": _sha256(project / LVS_VERDICT_REL),
+            "finding": lvs.get("finding")})
+    out: Dict[str, Any] = {"subject_sha256": live_sha256, "measurements": found,
+                           "not_measured_by": looked}
+    fails = [m for m in found if m["verdict"] == "FAIL"]
+    if fails:
+        out.update(verdict="FAIL", basis=fails[0]["basis"])
+    elif found:
+        out.update(verdict="PASS", basis=found[0]["basis"])
+    else:
+        out.update(verdict="NOT_MEASURED",
+                   reason_class=_CONNECTIVITY_UNMEASURED_CLASS,
+                   reason=("the shipped GDS's connectivity was not measured: "
+                           + "; ".join(looked)))
+    return out
+
+
 def librelane_finishing_receipt(project: Path, live_sha256: str
                                 ) -> Optional[Dict[str, Any]]:
     """The 37.3 receipt for a GDS step 37's LibreLane chain promoted, or None.
@@ -933,9 +1033,39 @@ def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
             f"FAIL: the run's own receipt {rel} records {len(diffs)} DESIGN "
             f"layer(s) differing between the shipped GDS and this run's "
             f"pre-finishing reference ({count} differing polygon(s): {named})"), doc
+    # U15: 0 design-layer differences against a pre-finishing reference is a
+    # FINISHING statement. PASS also needs the shipped bytes' connectivity
+    # measured, bound to the sha256 the receipt compared.
+    conn = doc.get("gds_connectivity")
+    live = doc.get("shipped_sha256_live")
+    ref = doc.get("reference") if isinstance(doc.get("reference"), dict) else {}
+    if not isinstance(conn, dict) or conn.get("verdict") not in ("PASS", "FAIL"):
+        why = (conn.get("reason") if isinstance(conn, dict) and conn.get("reason")
+               else f"the receipt carries no gds_connectivity measurement; its "
+                    f"reference is the {ref.get('kind') or 'unstated'} "
+                    f"pre-finishing stream, which proves finishing left the "
+                    f"design layers alone and cannot see a stream-out that "
+                    f"lost connectivity")
+        return 2, (
+            f"NOT_MEASURED [{_CONNECTIVITY_UNMEASURED_CLASS}]: {rel} records 0 "
+            f"design-layer difference(s) across {layers} layer(s) against the "
+            f"pre-finishing reference, but {why}"), doc
+    if (not isinstance(live, str) or not live
+            or conn.get("subject_sha256") != live
+            or conn.get("basis") not in CONNECTIVITY_BASES):
+        return 2, (
+            f"NOT_MEASURED [{_CONNECTIVITY_UNMEASURED_CLASS}]: {rel}'s "
+            f"gds_connectivity is not bound to the shipped GDS it compared "
+            f"(subject {str(conn.get('subject_sha256'))[:16]}..., shipped "
+            f"{str(live)[:16]}..., basis {conn.get('basis')!r})"), doc
+    if conn["verdict"] == "FAIL":
+        return 1, (
+            f"FAIL: {rel} records the shipped GDS's connectivity FAILED under "
+            f"{conn.get('basis')}"), doc
     return 0, (
         f"PASS: the run's own receipt {rel} records 0 design-layer difference(s) "
-        f"across {layers} layer(s) compared — {reason}"), doc
+        f"across {layers} layer(s) compared and the shipped GDS's connectivity "
+        f"measured by {conn.get('basis')} — {reason}"), doc
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -1014,7 +1144,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     fill_pairs, seal_pairs, prov = declared_finishing_layers(project)
     report["declared_finishing_layers"] = prov
 
-    def finish(verdict: str, rc: int, reason: str) -> int:
+    def finish(verdict: str, rc: int, reason: str,
+               reason_class: str = _JUDGE_CAPABILITY_ABSENT) -> int:
         report.update(verdict=verdict, rc=rc, reason=reason)
         # THE CLASS, STATED BY THE GATE THAT KNOWS IT. `_flow_reason_taxonomy
         # .report_reason_class` reads this field and `_p0_declared_reason_class`
@@ -1023,7 +1154,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # sentence, which is how "the tool was unreachable" and "this design has
         # no such thing" come to share a class.
         if verdict == "NOT_DETERMINED":
-            report["reason_class"] = _JUDGE_CAPABILITY_ABSENT
+            report["reason_class"] = reason_class
         else:
             report.pop("reason_class", None)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1061,6 +1192,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                       f"({ROUTE_EVIDENCE_REL} records {recorded[:16]}..., on disk "
                       f"{live[:16]}...), so this run's own pairing no longer holds")
 
+    def finish_connectivity(finishing_reason: str) -> int:
+        """The finishing comparison measured 0 design-layer differences. That
+        is a statement about FINISHING; PASS additionally needs the shipped
+        bytes' connectivity measured (U15, `gds_connectivity`)."""
+        conn = gds_connectivity(project, live)
+        report["gds_connectivity"] = conn
+        if conn["verdict"] == "PASS":
+            return finish("PASS", 0, f"{finishing_reason}; connectivity of the "
+                                     f"shipped GDS measured by {conn['basis']}")
+        if conn["verdict"] == "FAIL":
+            return finish("FAIL", 1, f"{finishing_reason}; but the shipped GDS's "
+                                     f"connectivity FAILED under {conn['basis']}")
+        return finish("NOT_DETERMINED", 2,
+                      f"{finishing_reason} -- finishing fidelity only; "
+                      f"{conn['reason']}", conn["reason_class"])
+
     # STEP 37 ON LIBRELANE (lane mig105). When the shipped bytes are exactly
     # the stream LibreLane's step-37 chain promoted, the finishing comparison
     # was already MEASURED inside that chain, by `Vibeic.FinishingXOR` on the
@@ -1071,7 +1218,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ll = librelane_finishing_receipt(project, live)
     if ll is not None:
         report.update(ll["report"])
-        return finish(ll["verdict"], ll["rc"], ll["reason"])
+        if ll["verdict"] != "PASS":
+            return finish(ll["verdict"], ll["rc"], ll["reason"])
+        return finish_connectivity(ll["reason"])
 
     try:
         import _klayout_launch as _kl
@@ -1144,12 +1293,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                       f"({total} differing polygon(s): {named}) — finishing may add "
                       f"geometry on the layers it declares, and these are not "
                       f"those")
-    return finish("PASS", 0,
-                  f"the shipped GDS matches the {kind} pre-finishing reference "
-                  f"on every design layer (0 differences across "
-                  f"{len(counts)} layer(s) compared); "
-                  f"{len(finishing)} finishing-declared layer(s) differ as "
-                  f"expected and are listed separately")
+    return finish_connectivity(
+        f"the shipped GDS matches the {kind} pre-finishing reference "
+        f"on every design layer (0 differences across "
+        f"{len(counts)} layer(s) compared); "
+        f"{len(finishing)} finishing-declared layer(s) differ as "
+        f"expected and are listed separately")
 
 
 if __name__ == "__main__":

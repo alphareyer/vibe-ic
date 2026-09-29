@@ -54190,6 +54190,10 @@ def _run_klayout_lvs(project: Path, top: str, pdk: PdkConfig,
                           f"KLayout LVS: sign-off GDS {gds_path.name} missing",
                           extras={"finding": "LVS_NO_SIGNOFF_GDS",
                                   "lvs_verdict": verdict})
+    # U15: the bytes whose connectivity this LVS reads are the MASK GDS's. A
+    # private `.lvs.gds` copy is admitted below only when its receipt binds it
+    # to the mask GDS's sha256, so the recorded source stays the mask GDS.
+    _mask_gds, _mask_sha = gds_path, _sha256_file(gds_path)
     _lvs_copy = gds_path.with_suffix(".lvs.gds")
     if _lvs_copy.is_file():
         try:
@@ -54375,6 +54379,11 @@ def _run_klayout_lvs(project: Path, top: str, pdk: PdkConfig,
         ps_note += (f" (net {_l0.get('net')} bridges VDD@{_l0.get('vdd_at')}um "
                     f"<-> VSS@{_l0.get('vss_at')}um)")
     common = {"lvs_report": "reports/phase3/lvs.rpt", "lvs_engine": "klayout",
+              # U15: what gds_xor_check binds step 37.3's connectivity to.
+              "layout_source": {"kind": "gds",
+                                "path": str(_mask_gds.relative_to(project)),
+                                "sha256": _mask_sha,
+                                "extracted": str(gds_path.relative_to(project))},
               "power_shorts": power_shorts,
               "power_short_locations": power_short_locs,
               "extracted_netlist": str(layout_sp.relative_to(project)),
