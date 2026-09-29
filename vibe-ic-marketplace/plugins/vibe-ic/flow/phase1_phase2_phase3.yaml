@@ -4531,9 +4531,8 @@ steps:
   # contains the required tokens (-sv, -flatten, hilomap) and that the
   # synth output has no zero_ ghost-net residue — failures here indicate
   # the Yosys flow needs to be re-run with proper flags before PnR
-  # consumes the netlist. Implementation: aggregated by
-  # `flow_compliance_check.py:_run_yosys_gates` (combines
-  # yosys_hilomap_required_check + yosys_script_template_check).
+  # consumes the netlist. Since CUT_W4 the step judges the handoff NETLIST
+  # (synth_handoff_netlist_check), not the recipe text.
   # v2.3 — Step 14 belongs to Stage 2: it is the synthesis→PnR
   # handoff QA (synth-script + netlist audit), i.e. the synthesis
   # stage's closing gate, NOT a physical-design step. Open-source-flow
@@ -4549,11 +4548,16 @@ steps:
         path: "phase2/stage2/synth/netlist.v"
     closed_loop:
       fallback_to: 9
-      trigger: "Yosys phase2/stage2/synth script missing -sv/-flatten/hilomap or unresolved zero_ nets"
+      trigger: "Handoff netlist carries literal/x constants (unresolved zero_ nets), is empty, or is older than its RTL"
     programs:
-      - yosys_hilomap_required_check
-      - yosys_script_template_check
-      - yosys_tiecell_recipe_order_check
+      # CUT_W4 (R-0929-TOOL-DEFAULT): the netlist gate replaced the three
+      # programs that audited the direct recipe's TEXT (hilomap presence and
+      # order, -sv/-flatten tokens, setundef/opt_clean order, and the inline
+      # `yosys -p` recovery behind them). Step 9 is LibreLane Yosys.Synthesis
+      # on the chip path, whose recipe is the tool's fixed code; what those
+      # programs protected is a property of the handoff NETLIST, judged below
+      # for either arm. HARVEST: cut_9.section.md.
+      - synth_handoff_netlist_check
       # PRODUCER DECLARED (lane icspm3, 2026-09-15) — AND THIS ONE BIT.
       # Named in the first pass of this work and deliberately LEFT, because
       # `flow_compliance_check`'s own `--json` document carries none of
@@ -4608,52 +4612,22 @@ steps:
         - advisory_program_exit_zero:
               command: "stage_on_pass_review . --stage stage_analog --json reports/analog/stage_analog_on_pass_review.json --compliance reports/analog/stage_analog_compliance.json"
               advisory_reason: "DEMOTED, not designed advisory: wired blocking until da6fcd7fe (2026-08-30), moved here in the change that made the declared command actually execute; that push used --no-verify because the full tier did not stamp. Restore blocking once the six on-pass stage commands run green. Re-pointed at the per-stage compliance report in v1.13.78; notch re-measured rc 0 on that invocation, unchanged in class."
+        # The handoff netlist step 9 gave PnR (named by step 9's own
+        # synth_inputs.json, on both arms): no literal constant at a pin or a
+        # port (missing hilomap -> DRT-0305 zero_ nets, v068), no x/z constant
+        # (setundef not before hilomap, HDLC v0.1.98), a tool netlist bound to
+        # the tool's native bytes and its resolved tie cells, not empty, and
+        # not older than the RTL it records (vibe-ic#1253).
         - optional_program_exit_zero:
-            command: "yosys_hilomap_required_check . --json reports/phase2/gates/yosys_hilomap.json"
-            condition_files_exist: ["phase2/stage2/synth"]
+            command: "synth_handoff_netlist_check . --json reports/phase2/gates/synth_handoff_netlist.json"
+            condition_files_exist: ["phase2/stage2/synth/synth_inputs.json"]
             absent_condition_reason: >-
-              Scoped to the presence of a synthesis directory. Step 14
-              declares phase2/stage2/synth/netlist.v as its SOLE
-              required_outputs pattern, so a run with no synth tree resolves
-              the step MISSING before this clause could hide anything -- the
-              absence is loud one level up, not swallowed here.
-        - optional_program_exit_zero:
-            command: "yosys_script_template_check . --json reports/phase2/gates/yosys_script_template.json"
-            condition_files_exist: ["phase2/stage2/synth"]
-            absent_condition_reason: >-
-              Scoped to the presence of a synthesis directory. Step 14
-              declares phase2/stage2/synth/netlist.v as its SOLE
-              required_outputs pattern, so a run with no synth tree resolves
-              the step MISSING before this clause could hide anything -- the
-              absence is loud one level up, not swallowed here.
-        # v1.9.62+ — the third tie-cell ordering rule pair, ADVISORY.
-        # The two gates above assert hilomap PRESENCE and token presence.
-        # Neither checks `setundef -zero` BEFORE hilomap, nor `opt_clean` /
-        # `clean -purge` AFTER it, which is why the canonical Phase-3 runner's
-        # own recipe drifted from the one `skills/synth-doctor/SKILL.md`
-        # documents without anything noticing.
-        #
-        # ADVISORY, not optional_program_exit_zero, and the reason is measured:
-        # `phase3_one_shot_runner` never emits `setundef -zero`, so a BLOCKING
-        # wiring would redden EVERY future real-PDK run it produces, plus the
-        # one published run that is judgeable today
-        # (`benchmark-data/ic/caravel_user_project`). Fixing the producer
-        # changes how don't-care chip-top OUTPUT / OUTPUT-ENABLE bits resolve
-        # and needs a functional re-verification, so it is not bundled here.
-        # `advisory_program_exit_zero` RUNS the gate and RECORDS the verdict
-        # without failing the step — the slot that exists precisely so a gate
-        # that declares itself advisory can be wired at all.
-        - advisory_program_exit_zero:
-            command: "yosys_tiecell_recipe_order_check . --json reports/phase2/gates/yosys_tiecell_recipe_order.json"
-            advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
-            condition_files_exist: ["phase2/stage2/synth"]
-            absent_condition_reason: >-
-              Scoped to the presence of a synthesis directory: the rule is
-              about the ORDER of setundef/hilomap/opt_clean inside a yosys
-              script, and with no synth tree there is no script to order. Step
-              14 declares phase2/stage2/synth/netlist.v as its SOLE
-              required_outputs pattern, so a run with no synth tree resolves
-              the step MISSING one level up.
+              Scoped to a run whose phase-3 step 9 has handed a mapped netlist
+              to PnR: synth_inputs.json is written by step 9 beside that
+              netlist, on both arms. A stage-2 audit taken before phase 3
+              has no handoff netlist to judge; a run that reached PnR without
+              one is refused by step 9's own gate and by step 15's declared
+              input, so the absence is loud one level up.
     blocks_on: [9, 13]
 
   - id: 15
