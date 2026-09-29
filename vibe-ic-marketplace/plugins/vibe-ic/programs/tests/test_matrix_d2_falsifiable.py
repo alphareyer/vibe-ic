@@ -193,7 +193,7 @@ RUN
 ``PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`` is mandatory in this tree (a stray
 ``pytest_ethereum`` plugin otherwise breaks collection).
 
-LIVE, not remembered: 206<!--figure:blocking_clauses--> blocking clauses over
+LIVE, not remembered: 207<!--figure:blocking_clauses--> blocking clauses over
 70<!--figure:gated_steps--> gated steps. This is the denominator a reader
 wants, and it moves with the yaml: the digits are written by
 ``tools/gen_flow_matrix_census.py`` and the ``<!--figure:...-->`` anchors name
@@ -707,6 +707,30 @@ def _f_pnr_bad(p: Path) -> None:
               "routed.def", "filled.def"):
         _w(p, f"phase3/stage3/pnr/{n}", "VERSION 5.8 ;\nEND DESIGN\n")
     _w(p, "phase3/stage3/extracted/top.spef", "*SPEF\n")
+
+
+def _f_pad_drive_uncarried(p: Path) -> None:
+    """A DIE whose off-chip input drive was resolved but never reached the deck.
+
+    `pad_input_drive_check` (step 23, R-0929-IO-INPUT-TRANSITION-2). EMPTY is
+    not a DIE top, so it answers NOT_APPLICABLE_BY_STRUCTURE. The shape that
+    matters is a self-tape-out die whose drive record names the declared
+    `set_input_transition` while the sign-off deck PnR loaded carries none of
+    it and still drives the bond pads with the refused core-library cell (the
+    measured -55.9 ns shape). The gate must FAIL on that content.
+    """
+    _w(p, "input/submission_template/SELF_TAPEOUT.txt",
+       "# tapeout_declaration: self tape-out, no operator\n")
+    _w(p, "reports/phase3/pad_input_drive.json", {
+        "schema": "vibeic.pad_input_drive.v1", "applies": True,
+        "verdict": "DECLARED", "model": "set_input_transition",
+        "value": "0.5", "source": "design doc input/docs/L9.md:3",
+        "refused_core_driving_cell": {"value": "core_sc__inv_1/ZN",
+                                      "source": "pinned PDK default"},
+        "sdc_lines": ["set_input_transition 0.5 [all_inputs]"]})
+    _w(p, "phase3/stage3/pnr/constraint.sdc",
+       "create_clock -name clk -period 10 [get_ports clk]\n"
+       "set_driving_cell -lib_cell core_sc__inv_1 -pin ZN [all_inputs]\n")
 
 
 def _f_pnr_tcl_hold_only(p: Path) -> None:
@@ -2448,6 +2472,7 @@ FIXTURES: Dict[str, Callable[[Path], None]] = {
     "DIE_UNFINISHED": _f_die_unfinished,
     "HARDMACRO_KIT_INCOMPLETE": _f_hardmacro_kit_incomplete,
     "IP_RELEASE_PIN_COUNT_LIE": _f_ip_release_docs_pin_count_lie,
+    "PAD_DRIVE_UNCARRIED": _f_pad_drive_uncarried,
     "IC_RELEASE_PIN_COUNT_LIE": _f_ic_release_docs_pin_count_lie,
     "REENTRY_LOOP_INERT": _f_reentry_loop_inert,
     "EXTRACT_ILLEGAL_OVERLAP": _f_extract_illegal_overlap,
@@ -2763,6 +2788,11 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
     # the declared fanout with an SDC value of 10, so the gate must reach FAIL.
     ("23", "drv_signoff_judge . --json reports/phase3/sta/drv_signoff.json"):
         "DRV_SIGNOFF_BAD_SDC",
+    # R-0929-IO-INPUT-TRANSITION-2. EMPTY is not a DIE top (a decided
+    # NOT_APPLICABLE_BY_STRUCTURE); the fixture is a die whose resolved drive
+    # never reached the sign-off deck, which still applies the core cell.
+    ("23", "pad_input_drive_check . --json "
+           "reports/phase3/sta/pad_input_drive_check.json"): "PAD_DRIVE_UNCARRIED",
     # ── 2026-08-06: the three steps whose ONLY red was an empty directory ──
     # Each of these programs was in UNREDDENED, so each step's cell rested
     # entirely on its `files_exist` sibling answering "nothing is there". The

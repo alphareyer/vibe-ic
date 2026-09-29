@@ -3284,6 +3284,11 @@ def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, obj
     return out
 
 
+from sdc_environment import (  # R-0929-PAD-INPUT-DRIVE
+    _pad_input_drive as _sdc_pad_input_drive,
+    write_pad_input_drive_record as _sdc_write_pad_input_drive,
+    pad_drive_sdc_lines as _sdc_pad_drive_sdc_lines,
+)
 from sdc_environment import (  # R8 constraints, outside the PPA runner ledger
     _SDC_ENV_KEYS, _sdc_environment_values, _sdc_environment_prefix,
     _sdc_environment_pdk_values, _sdc_environment_design_values,
@@ -4501,7 +4506,19 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
     _env, _env_unread = _sdc_environment_values(
         project, liberty_path, container, drv_slew_ns, drv_cap_pf,
         _to_container_path)
-    sdc_text += _sdc_environment_prefix(_env, _env_unread, time_scale=_tu_scale)
+    # R-0929-PAD-INPUT-DRIVE: a DIE top's bond-pad inputs are never driven by
+    # the core synthesis driving cell; the resolved drive is recorded for the
+    # Step-23 STA verdict, which cannot PASS on a NOT_MEASURED drive.
+    _env, _pad_drive = _sdc_pad_input_drive(project, _env, container,
+                                            _to_container_path)
+    _pad_drive["sdc_lines"] = _sdc_pad_drive_sdc_lines(_pad_drive, _tu_scale)
+    try:
+        _sdc_write_pad_input_drive(project, _pad_drive)
+    except OSError:
+        # No record on a DIE top reads NOT_MEASURED downstream (fail closed).
+        pass
+    sdc_text += _sdc_environment_prefix(_env, _env_unread, time_scale=_tu_scale,
+                                        pad_drive=_pad_drive)
     _env_slew = _env.get("set_max_transition")
     _env_cap = _env.get("set_max_capacitance")
     # Design and LibreLane config time values are ns. A default read directly
@@ -56526,6 +56543,11 @@ _DECLARED_SIGNOFF_GATES = (
      "reports/phase3/sta/post_route_signoff_corner.json", ()),
     ("sta_record", "sta_corner_record_completeness_check.py",
      "reports/phase3/sta/sta_corner_record_completeness.json", ()),
+    # R-0929-IO-INPUT-TRANSITION-2: the DIE's off-chip input drive reached the
+    # sign-off deck (rc 2 = unresolved/stale, rc 1 = deck lacks it or uses the
+    # refused core cell, NOT_APPLICABLE_BY_STRUCTURE off a DIE top).
+    ("pad_input_drive", "pad_input_drive_check.py",
+     "reports/phase3/sta/pad_input_drive_check.json", ()),
     ("drv_signoff", "drv_signoff_judge.py",
      "reports/phase3/sta/drv_signoff.json", ()),
     # Step 23 declares this report, but the inline executor must produce and
@@ -57961,6 +57983,8 @@ def step_declared_signoff_gates(project: Path,
             extra_argv = tuple(extra_argv) + ("--pdk-container", container)
         out.append(_run_declared_signoff_gate(
             project, name, program, out_rel, extra_argv))
+    # R-0929-PAD-INPUT-DRIVE: no STA PASS on a NOT_MEASURED pad drive.
+    out = _ppa_timing.pad_drive_sta_verdict(sys.modules[__name__], project, out)
     return _reconcile_sta_verdict(out)
 
 

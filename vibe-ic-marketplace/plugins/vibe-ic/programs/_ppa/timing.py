@@ -1327,6 +1327,18 @@ def author_asic_sdc(rt: Any, project: Path, top: str, pdk: Any,
             except ValueError:
                 pass
         txt, out["io_parity"] = rt._ensure_staged_sdc_io_delay(txt, project)
+        # R-0929-PAD-INPUT-DRIVE on a design-staged deck: the same ladder, and
+        # the record is always rewritten (a stale one can never stand for it).
+        import sdc_environment as _sdc_env
+        txt, pad_rec = _sdc_env.staged_sdc_pad_input_drive(
+            project, txt, out["staged_sdc"], container,
+            getattr(rt, "_to_container_path", None),
+            _sdc_env.liberty_time_scale(str(pdk.liberty)))
+        try:
+            _sdc_env.write_pad_input_drive_record(project, pad_rec)
+        except OSError:
+            pass    # no record on a DIE top reads NOT_MEASURED downstream
+        out["pad_input_drive"] = pad_rec.get("verdict")
     else:
         drv = rt._liberty_drv_limits(str(pdk.liberty), container)
         txt = rt._build_auto_silicon_sdc(
@@ -1417,7 +1429,27 @@ def asic_sdc_input_digest(rt: Any, project: Path, top: str, pdk: Any
     except OSError:
         items["@liberty_sha256"] = "UNREADABLE"
     items["@io_delay_source"] = str(rt.io_delay_source())
-    for code in (Path(__file__), Path(rt.__file__)):
+    # R-0929-IO-INPUT-TRANSITION-2: a DIE's pad input drive is resolved from
+    # the pad-ring producer's record, which step_pnr writes AFTER step 7. Bind
+    # it (and the IO views it names) so the step-7 deck is regenerated once
+    # the ring exists instead of reused with ideal pad edges. The IO views
+    # live in the pinned image (bound above via reports/container_image.json)
+    # under PDK-versioned paths; a view readable from this host is bound by
+    # its bytes as well.
+    io_rec = project / "reports" / "phase3" / "io_pad_chip_top.json"
+    _add(io_rec)
+    try:
+        io_libs = json.loads(io_rec.read_text()).get("io_library_liberty") or []
+    except (OSError, ValueError, AttributeError):
+        io_libs = []
+    for lib in sorted(str(x) for x in io_libs if isinstance(x, str)):
+        try:
+            items["@io_liberty:" + lib] = hashlib.sha256(
+                Path(lib).read_bytes()).hexdigest()
+        except OSError:
+            items["@io_liberty:" + lib] = "IN_PINNED_IMAGE"
+    import sdc_environment as _sdc_env
+    for code in (Path(__file__), Path(rt.__file__), Path(_sdc_env.__file__)):
         try:
             items["@code:" + code.name] = hashlib.sha256(
                 code.read_bytes()).hexdigest()
@@ -1639,3 +1671,34 @@ def asic_sdc_for_pnr(rt: Any, project: Path, top: str, pdk: Any,
 
 if __name__ == "__main__":                                   # pragma: no cover
     raise SystemExit(main())
+
+
+def pad_drive_sta_verdict(rt: Any, project: Path, rows: List[Any]) -> List[Any]:
+    """R-0929-PAD-INPUT-DRIVE: no sign-off STA PASS on an unmodelled pad drive.
+
+    When the DIE top's bond-pad input drive is NOT_MEASURED (neither declared
+    nor PDK IO-tier; ``sdc_environment`` records it), the deck carries no
+    driver and its input edges are ideal, which is optimistic. A PASS measured
+    that way is not a sign-off verdict, so each STA verdict row (the runner's
+    ``sta_signoff`` and multi-corner gates) that PASSed becomes NOT_MEASURED
+    with the reason. A FAIL stays a FAIL: a violation under an optimistic edge
+    is still a violation. ``rt`` is the runner module (its row type and gate
+    names), as for ``author_asic_sdc``.
+    """
+    import sdc_environment as _sdc_env
+    why = _sdc_env.pad_input_drive_not_measured(project)
+    if not why:
+        return rows
+    names = {rt._STA_VERDICT_GATE, *rt._STA_MULTICORNER_GATES}
+    out: List[Any] = []
+    for r in rows:
+        if r.name in names and r.status == "PASS":
+            r = rt.StepResult(
+                r.name, "NOT_MEASURED", r.duration_s,
+                f"{rt._SIGNOFF_NOT_CHECKED}: OFFCHIP_INPUT_DRIVE — {why}. The "
+                f"gate's own finding (ideal input edges) was: "
+                f"{rt._rsum.summary_detail(r.detail, width=200)}",
+                list(r.output_files), dict(r.extras),
+                reason_class=rt._V.ReasonClass.INPUT_ABSENT)
+        out.append(r)
+    return out

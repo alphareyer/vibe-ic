@@ -5992,6 +5992,19 @@ steps:
         # A run that declares and records no corner at all self-reports
         # NOT_APPLICABLE (rc 0), so pre-phase3 and analog runs are unaffected.
         - program_exit_zero: "sta_corner_record_completeness_check . --json reports/phase3/sta/sta_corner_record_completeness.json"
+        # R-0929-PAD-INPUT-DRIVE / R-0929-IO-INPUT-TRANSITION-2 — the off-chip
+        # input drive of a DIE top. Every STA clause above measures whatever
+        # the deck says; on a pad-ring top a deck with no input drive is an
+        # IDEAL bond-pad edge (optimistic), and one with the core library's
+        # synthesis driving cell is not a model at all (measured on a routed
+        # gf180 die: -55.9 ns setup from a 49 ns pad slew). This clause reads
+        # the drive record sdc_environment wrote and the deck PnR and sign-off
+        # loaded: a NOT_MEASURED/absent/stale drive is rc 2 (Step 23 never
+        # PASSes on ideal pad edges), a deck that lacks the resolved drive or
+        # applies the refused core cell is rc 1, a non-DIE top is
+        # NOT_APPLICABLE rc 0. Its --json is this clause's own receipt, not a
+        # required_output.
+        - program_exit_zero: "pad_input_drive_check . --json reports/phase3/sta/pad_input_drive_check.json"
         # The post-route DRV verdict is produced by the single content-addressed
         # judge.  Missing scene/stage receipts remain NOT_MEASURED and block this
         # step; an owner waiver remains WAIVED, never an executed PASS.
