@@ -7036,6 +7036,11 @@ steps:
       # best-effort pre-stage inside try/except) — both are branch-conditional,
       # so declaring them would manufacture a MISSING on a legitimate run.
       - "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json"
+      # The canonical decision, written on every canonicalize pass. When a
+      # bound LibreLane Step-32 producer receipt holds the record above, that
+      # receipt keeps its bytes (R-0929-STEP32-RECORD) and the canonical
+      # demands live only here; `postroute_timing_repair_audit` ORs them in.
+      - "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json"
     gate:
       all_of:
         - program_exit_zero: "flow_step_output_content_check . --mode repair"

@@ -48,6 +48,7 @@ v1.7.64 (Step 32 / d5) — NON-TIMING SIGN-OFF FAIL-CLOSE.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -333,6 +334,126 @@ def _collect(project: Union["Path", str, None],
     return out
 
 
+#: The Step-32 LibreLane producer's own report (`librelane_postroute_repair.
+#: REPORT_REL`): the census of the input route, the adopted candidate (if any)
+#: and the adopted route's STAPostPNR measurement, DRV included.
+STEP32_REPORT_REL = "reports/phase3/librelane_postroute_repair.json"
+#: Who wrote a decision record. A bound record WITHOUT this marker is a
+#: producer's receipt (the LibreLane Step-32 producer) and is never rewritten
+#: by the canonical decision.
+CANONICAL_RECORDER = "phase3_one_shot_runner.step_canonicalize_artefacts"
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def step32_measured(project: Union["Path", str, None]) -> Optional[Dict[str, Any]]:
+    """What the Step-32 LibreLane producer measured, or None when it did not
+    run (no report, or a report with no `final` measurement).
+
+    R-0929-STEP32-RECORD: an adopted candidate is a repair that was APPLIED,
+    so it can never be read as "no repair needed". The DRV the producer
+    measured on the route it kept is a sign-off fact this decision reads
+    (a residual stays a failure: DRV standard, data-net residue is never
+    waivable), and a report that carries no DRV count is not a zero.
+    """
+    if project is None:
+        return None
+    root = Path(project)
+    path = root / STEP32_REPORT_REL
+    try:
+        doc = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get("final"), dict):
+        return None
+
+    def figures(m: Any) -> Dict[str, Any]:
+        m = m if isinstance(m, dict) else {}
+        return {k: m.get(k) for k in ("drv_count", "setup_ws_min", "hold_ws_min",
+                                       "sta_state", "sta_state_sha256")}
+    final = figures(doc["final"])
+    drv = final["drv_count"]
+    return {"source_report": STEP32_REPORT_REL, "source_report_sha256": _sha256(path),
+            "adopted": doc.get("adopted"), "baseline": figures(doc.get("baseline")),
+            "final": final,
+            "drv_count": drv if type(drv) is int else None}
+
+
+def decision_inputs(project: Union["Path", str, None],
+                    stance: Union["Path", str, dict, None],
+                    single_corner: Union["Path", str, None]) -> List[Path]:
+    """Every file `decide()` reads for this project, in a stable order: the
+    stance summary AND the report it names, the single-corner STA report, the
+    declared-hold inputs, every non-timing sign-off artefact, and the Step-32
+    producer report. Present files only; the record binds each by sha256."""
+    root = Path(project) if project is not None else None
+    paths: List[Path] = []
+    if stance is not None and not isinstance(stance, dict):
+        paths.append(Path(stance))
+        named = (_load_stance(stance) or {}).get("report")
+        if isinstance(named, str) and root is not None:
+            paths.append(root / named)
+    if single_corner is not None:
+        paths.append(Path(single_corner))
+    if root is not None:
+        paths += [root / "phase3/stage3/sta/post_route_timing.rpt",
+                  root / "phase3/stage3/pnr/routed.def"]
+        paths += [root / rel for _, rel in _NON_TIMING_SIGNOFF_ARTEFACTS]
+        paths.append(root / STEP32_REPORT_REL)
+    seen, out = set(), []
+    for path in paths:
+        if path.is_file() and path.resolve() not in seen:
+            seen.add(path.resolve())
+            out.append(path)
+    return out
+
+
+def bind_inputs(project: Path, paths: List[Path]) -> List[Dict[str, str]]:
+    """`[{path, sha256}]`, project-relative; a file outside the project is
+    not bindable and is left out (the reader then cannot verify it)."""
+    out = []
+    for path in paths:
+        try:
+            rel = str(path.resolve().relative_to(Path(project).resolve()))
+        except ValueError:
+            continue
+        out.append({"path": rel, "sha256": _sha256(path)})
+    return out
+
+
+def verify_receipt(project: Union["Path", str], record: Any) -> Dict[str, Any]:
+    """Accept a Step-32 decision receipt only when it is bound to bytes.
+
+    `source_report` + `source_report_sha256` must resolve inside the project
+    to a file with that digest, and so must every `inputs` entry the record
+    binds. Raises ValueError naming what is wrong: an unbound or stale receipt
+    certifies nothing, in either direction.
+    """
+    root = Path(project).resolve()
+    if not isinstance(record, dict) or not isinstance(record.get("repair_needed"), bool):
+        raise ValueError("repair_needed is not a boolean")
+    bound = [{"path": record.get("source_report"),
+              "sha256": record.get("source_report_sha256")}]
+    extra = record.get("inputs")
+    if extra is not None:
+        if not isinstance(extra, list):
+            raise ValueError("inputs is not a list")
+        bound += extra
+    for row in bound:
+        rel = row.get("path") if isinstance(row, dict) else None
+        digest = row.get("sha256") if isinstance(row, dict) else None
+        if not isinstance(rel, str) or not isinstance(digest, str):
+            raise ValueError("measured source or sha256 absent")
+        source = (root / rel).resolve()
+        if not source.is_relative_to(root) or not source.is_file():
+            raise ValueError(f"measured source {rel} is absent or outside project")
+        if _sha256(source) != digest:
+            raise ValueError(f"measured source {rel} sha256 changed")
+    return record
+
+
 def decide(stance: Union["Path", str, dict, None],
            single_corner_clean: bool,
            project: Union["Path", str, None] = None,
@@ -397,6 +518,8 @@ def decide(stance: Union["Path", str, dict, None],
         "hold_worst_slack_ns": None,
         "nontiming_failures": [],
         "nontiming_not_determined": [],
+        # R-0929-STEP32-RECORD: the Step-32 candidate adopted, or None.
+        "repair_applied": None,
         "reason": "",
     }
     if single_corner_evidence not in (None, "CLEAN", "VIOLATED", "NOT_MEASURED"):
@@ -468,6 +591,23 @@ def decide(stance: Union["Path", str, dict, None],
         # move `repair_needed` False -> True.
         out["nontiming_not_determined"] = collect_non_timing_not_determined(
             project, signoff_reports)
+    # R-0929-STEP32-RECORD — the Step-32 producer's own measurement. A
+    # residual DRV on the route it kept is a failed sign-off domain; a report
+    # with no DRV count never completed that domain; an adopted candidate is
+    # a repair that was applied. Each can only move `repair_needed` to True.
+    step32 = step32_measured(project)
+    out["step32"] = step32
+    if step32 is not None:
+        drv_row = {"domain": "drv", "path": STEP32_REPORT_REL}
+        if step32["drv_count"] is None:
+            out["nontiming_not_determined"].append(
+                dict(drv_row, signal="drv_count not measured on the kept route"))
+        elif step32["drv_count"] > 0:
+            out["nontiming_failures"].append(
+                dict(drv_row, signal=f"drv_count={step32['drv_count']}"))
+        if step32["adopted"]:
+            out["repair_applied"] = step32["adopted"]
+            out["repair_needed"] = True
     if out["nontiming_failures"] or out["nontiming_not_determined"]:
         out["repair_needed"] = True
 
@@ -511,6 +651,10 @@ def decide(stance: Union["Path", str, dict, None],
             lead + "; ".join(parts)
             + " — Step 32 may not certify 'no repair needed' over a sign-off "
               "domain that failed or that never produced a verdict")
+    elif out.get("repair_applied"):
+        out["reason"] = (
+            f"Step 32 adopted repair candidate {out['repair_applied']} "
+            f"(no timing violation at basis {out['basis']} after it)")
     else:
         if out["timing_basis_status"] == "NOT_MEASURED":
             out["reason"] = "timing NOT_MEASURED at single_corner_tt; no late repair fired"
