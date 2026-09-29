@@ -255,6 +255,42 @@ INFORMATIONAL_GATES: frozenset[str] = frozenset({
 })
 
 
+#: FULLSTACKTB-FX (2026-09-29) — the reason line that takes a step OUT of the
+#: informational exclusion. INFORMATIONAL_GATES is keyed on the gate NAME, and
+#: that was right while every FAIL such a gate could print was a coverage gap
+#: (`bit_level_full_stack_tb_check`'s opcode-skeleton rules). It stopped being
+#: right when the same gate learned to MEASURE: a functional case run through
+#: the chip top that disagrees with its oracle exits rc 1 with a typed
+#: `verdict: FAIL`, and the name-keyed exclusion dropped exactly that step from
+#: `failing` — while the same design with no functional population stayed
+#: NOT_MEASURED and blocked. A failure became the cheapest way past Step 5.
+#: The exclusion now yields to the gate's own typed verdict: a report that says
+#: `verdict: FAIL` is a measured disagreement, never a coverage gap.
+_INFORMATIONAL_MEASURED_FAIL_PREFIX = "measured FAIL (not informational): "
+
+
+def _informational_gate_measured_fail(project: Path,
+                                      cmd: str) -> Optional[str]:
+    """The blocking reason line for an informational gate's measured FAIL.
+
+    Read from the `--json` report the clause named (the #901 channel), never
+    from stdout. Only a typed `verdict == "FAIL"` qualifies; a report with no
+    verdict field (the legacy skeleton check), a coverage-gap verdict, an
+    unreadable report, or a gate outside INFORMATIONAL_GATES yields None and
+    leaves the name-keyed behaviour unchanged."""
+    toks = (cmd or "").split()
+    if not any(Path(t).stem in INFORMATIONAL_GATES for t in toks[:3]):
+        return None
+    report = _command_json_report(project, cmd)
+    if not isinstance(report, dict):
+        return None
+    verdict = report.get("verdict")
+    if not (isinstance(verdict, str) and verdict.strip().upper() == "FAIL"):
+        return None
+    return (f"{_INFORMATIONAL_MEASURED_FAIL_PREFIX}{cmd} — "
+            f"rule={report.get('rule')}")
+
+
 def _step_failure_is_informational_only(result: "StepResult") -> bool:
     """Return True iff every FAIL reason in `result` cites a gate in
     INFORMATIONAL_GATES (and at least one such reason exists). Used by
@@ -295,6 +331,11 @@ def _step_failure_is_informational_only(result: "StepResult") -> bool:
             # informational-only.
             return False
         return all(g in INFORMATIONAL_GATES for g in p0_failing)
+    if any(r.startswith(_INFORMATIONAL_MEASURED_FAIL_PREFIX)
+           for r in result.reasons):
+        # The informational gate MEASURED a failure (typed verdict FAIL in its
+        # own report) — that is not a coverage gap, whatever its name.
+        return False
     for reason in result.reasons:
         # Skip output: lines and other diagnostic context lines —
         # only "program failed: ..." carries the gate-name signal.
@@ -12634,6 +12675,9 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         if not passed:
             reasons.append(f"program failed: {_cmd}")
             reasons.append(f"output: {out[:200]}")
+            _measured = _informational_gate_measured_fail(project, _cmd)
+            if _measured is not None:
+                reasons.append(_measured)
         elif out.startswith(_EXECUTED_DECLARED_NA_HINT_PREFIX):
             reasons.append(out)
         elif out.startswith(_VACUOUS_HINT_PREFIX):
