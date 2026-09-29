@@ -345,13 +345,17 @@ def unclaimed_rows(case_ids: Iterable[str], record: Dict[str, Any]) -> List[str]
 #                top in the delivered RTL, and its default there is the
 #                receipt's delivered value (and equals the declaration's
 #                core_parameters entry when the declaration states one);
-#   * BOUND      the case's OWN current L10 text names every unit the receipt
-#                binds to it (the producer's `bind_case` rule, re-applied
-#                here: `RV<xlen>I` for the base, the extension's own
-#                multi-letter token otherwise) -- a stale or foreign receipt
-#                cannot credit a case that asks for something else; and the
-#                case names no program image (a firmware row is rule (2)'s,
-#                and the ISA suite never ran that program);
+#   * BOUND      the units the case's OWN current L10 text names, over every
+#                unit known (`_known_isa_units`: the receipt's bindings, its
+#                program rows and design facts, and the project's own
+#                declaration), EQUAL the units the receipt binds to it (the
+#                producer's `bind_case` rule, re-applied here: `RV<xlen>I`
+#                for the base, the extension's own multi-letter token
+#                otherwise) -- a stale or foreign receipt cannot credit a
+#                case that asks for something else, nor credit a row that
+#                asks for two units on the one it ran; and the case names no
+#                program image (a firmware row is rule (2)'s, and the ISA
+#                suite never ran that program);
 #   * PASSING    every PRIMARY program of every unit the case binds PASSed on
 #                that arm at the test value, under every init pattern it ran,
 #                and no program of those units FAILed there (any role) -- nor
@@ -478,6 +482,40 @@ def isa_units_named(case: Dict[str, Any], units: Iterable[str],
     return out
 
 
+def _known_isa_units(receipt: Dict[str, Any],
+                     decl: Dict[str, Any]) -> List[str]:
+    """Every ISA unit the credit's binding check compares a case against.
+
+    The receipt's own vocabulary -- the units it binds to any case, the units
+    of its program rows, the `isa_units` of its design facts -- AND the
+    project's own declaration (`isa_extensions`). The declaration is read
+    here because a stale receipt knows only the units it happened to run: one
+    that ran only Zifencei would otherwise see a row naming RV32I and Zifencei
+    name nothing but Zifencei."""
+    raw: List[Any] = []
+    bound = receipt.get("bound_cases")
+    for us in (bound.values() if isinstance(bound, dict) else ()):
+        raw.extend(us if isinstance(us, list) else ())
+    programs = receipt.get("programs")
+    raw.extend(e.get("unit") for e in (
+        programs.values() if isinstance(programs, dict) else ())
+        if isinstance(e, dict))
+    facts = receipt.get("design_facts")
+    fu = facts.get("isa_units") if isinstance(facts, dict) else None
+    raw.extend(fu if isinstance(fu, list) else ())
+    fields = decl.get("fields") if isinstance(decl.get("fields"), dict) \
+        else decl
+    du = fields.get("isa_extensions")
+    raw.extend(re.split(r"[\s,+]+", du) if isinstance(du, str)
+               else du if isinstance(du, list) else ())
+    out: List[str] = []
+    for u in raw:
+        u = u.strip() if isinstance(u, str) else ""
+        if u and u.lower() not in {o.lower() for o in out}:
+            out.append(u)          # first spelling wins: the receipt's own
+    return out
+
+
 def isa_goal_verdict(stated_pct: Any, dimension: Optional[str],
                      credit: Dict[str, Any]
                      ) -> Tuple[Optional[str], Optional[float], str]:
@@ -506,18 +544,46 @@ def isa_goal_verdict(stated_pct: Any, dimension: Optional[str],
         f"vs the {stated_pct:g}% the design states")
 
 
-def isa_goal_judgment(case: Dict[str, Any], credit: Dict[str, Any]
-                      ) -> Optional[Tuple[Optional[str], Optional[float], str]]:
-    """`isa_goal_verdict` for a declared L10 row, or None when the row is not a
-    coverage GOAL (a stated vector is satisfied by the credit itself). The
-    goal's stated percentage and dimension are read with the SAME classifier
-    the Step-4 goal population is measured by."""
+def isa_goal_judgment(case: Dict[str, Any], credit: Dict[str, Any],
+                      run_totals: Optional[Dict[str, Any]]
+                      ) -> Optional[Tuple[Optional[str], Optional[float], str,
+                                          bool]]:
+    """`(verdict, achieved_pct, why, measured_by_run)` for a declared L10 row,
+    or None when the row is not a coverage GOAL (a stated vector is satisfied
+    by the credit itself). The goal's stated percentage and dimension are read
+    with the SAME classifier the Step-4 goal population is measured by.
+
+    A MEASURED RESULT WINS OVER A CREDIT (review wave 58, SUBACCEPT follow-up
+    (b)). `run_totals` is the run's OWN fused coverage totals -- what Step 4
+    measures its goal population against
+    (`cpu_functional_oracle_waiver_check._coverage_totals`). When they carry
+    a figure for the goal's instruction dimension, the goal is judged by THAT
+    number, exactly as Step 4's `measure_goal` judged it, and the credit's
+    number is not used (`measured_by_run` True): Step 4's `_credit_isa_goals`
+    fills only a goal the run left without a number, so judging a measured
+    goal by the suite PASSed in this table a row Step 4 FAILed. `run_totals`
+    None -- the caller could not read them -- is no credit: a number the run
+    may hold is never replaced by one it does not know it lacks."""
     import l10_coverage_goal_classify as _cgc       # noqa: E402 (lazy sibling)
     if _cgc.classify(case)[0] != _cgc.COVERAGE_GOAL:
         return None
     stated, _cite = _cgc.stated_acceptance_percentage(case)
     dim, _why = _cgc.bind_scope(_cgc.coverage_scope(case)[0])
-    return isa_goal_verdict(stated, dim, credit)
+    if dim == "instruction":
+        if run_totals is None:
+            return None, None, ("the run's own coverage totals could not be "
+                                "read, so whether this run measured the "
+                                "goal is unknown and the conformance suite's "
+                                "number cannot stand in for it"), False
+        measured = _cgc.measure_goal(case, run_totals)
+        if measured.get("achieved_pct") is not None \
+                and measured.get("verdict") in (_cgc.PASS, _cgc.FAIL):
+            return (PASS if measured["verdict"] == _cgc.PASS else FAIL,
+                    measured["achieved_pct"],
+                    (f"measured by this run: {measured['why']} "
+                     f"({measured['achieved_source']}); a measured result "
+                     f"wins over the conformance suite's number"), True)
+    return (*isa_goal_verdict(stated, dim, credit), False)
 
 
 def isa_conformance_credit(project: Path, case_id: str,
@@ -563,7 +629,8 @@ def isa_conformance_credit(project: Path, case_id: str,
                       f"the project's L10 declaration, so the binding cannot "
                       f"be re-derived from the case's own text")
     xlen = _int_literal(facts.get("xlen")) or 32
-    named = isa_units_named(case, units, xlen)
+    decl = _json_object(project / _DECLARATION_REL) or {}
+    named = isa_units_named(case, _known_isa_units(doc, decl), xlen)
     unnamed = [u for u in units if u not in named]
     if unnamed:
         return None, (f"the receipt binds {case_id!r} to {units}, but the "
@@ -571,8 +638,30 @@ def isa_conformance_credit(project: Path, case_id: str,
                       f"{named if named else 'no ISA unit'} (not "
                       f"{', '.join(unnamed)}): a stale or foreign binding "
                       f"credits nothing")
-    import testbench_gen as _tbg                    # noqa: E402 (lazy sibling)
-    images = _tbg.named_stimulus_images(str(case.get("stimulus") or ""))
+    # EQUALITY, not containment (review wave 58, SUBACCEPT follow-up (a)): a
+    # row whose text names the base AND an extension, bound to the extension
+    # alone, was credited on that one program -- the row's other half never
+    # ran for it. A credit is for everything the row asks, or it is nothing.
+    unbound = [u for u in named
+               if u.lower() not in {b.lower() for b in units}]
+    if unbound:
+        return None, (f"the case's own L10 text names {named}, but the "
+                      f"receipt binds {case_id!r} only to {units} (not "
+                      f"{', '.join(unbound)}): a credit on part of what the "
+                      f"row asks for credits nothing")
+    # Named refusal, never a crash (review wave 58, SUBACCEPT follow-up (c)):
+    # without the owner of `named_stimulus_images` a firmware row cannot be
+    # told from an ISA row, so nothing is credited.
+    try:
+        import testbench_gen as _tbg                # noqa: E402 (lazy sibling)
+        named_images = _tbg.named_stimulus_images
+    except Exception as exc:                        # noqa: BLE001
+        return None, (f"the firmware-row check could not run: testbench_gen "
+                      f"did not provide named_stimulus_images "
+                      f"({type(exc).__name__}: {exc}), so a firmware row "
+                      f"cannot be told from an ISA row and nothing is "
+                      f"credited")
+    images = named_images(str(case.get("stimulus") or ""))
     if images:
         return None, (f"a firmware row: its stimulus names "
                       f"{', '.join(images)}, a program the ISA suite did not "
@@ -586,7 +675,6 @@ def isa_conformance_credit(project: Path, case_id: str,
         return None, ("the receipt does not name its top, its memory-size "
                       "parameter, the delivered value and the test value")
 
-    decl = _json_object(project / _DECLARATION_REL) or {}
     decl_top = decl.get("top_module")
     if decl_top != top:
         return None, (f"a different top: the suite instantiated {top!r}, the "

@@ -654,3 +654,153 @@ def test_a_firmware_row_naming_rv32i_is_excluded_not_credited(tmp_path):
     row = {r["id"]: r for r in rep["results"]}[FW_RV32I["name"]]
     assert row["status"] == "NOT_MEASURED" and row["pass"] is False, row
     assert row.get("excluded_from_verdict"), row
+
+
+# ---------------------------------------------------------------------------
+# review wave 58 (SUBACCEPT) follow-ups — (a) binding equality, (b) a measured
+# goal result wins over a credit, (c) a named refusal instead of a crash
+# ---------------------------------------------------------------------------
+BASE_AND_FENCE = {"name": "base_and_fence", "kind": "functional_vector",
+                  "stimulus": "RV32I base and Zifencei programs",
+                  "expected": "PASS"}
+
+
+def test_a_row_naming_two_units_is_not_credited_on_one(tmp_path):
+    """(a) The reader checked only receipt units ⊆ units the case names: a row
+    naming RV32I AND Zifencei, bound to [Zifencei] alone, was CREDITED and
+    Step 4 read rc 0 PASS on the one Zifencei program."""
+    proj = _project(tmp_path, [BOOT, BASE_AND_FENCE], {BOOT["name"]: "PASS"},
+                    receipt=_receipt({BASE_AND_FENCE["name"]: ["Zifencei"]}))
+    credit, why = L10X.isa_conformance_credit(proj, BASE_AND_FENCE["name"])
+    assert credit is None, credit
+    assert "a credit on part of what the row asks for" in why, why
+    assert "binds 'base_and_fence' only to ['Zifencei']" in why, why
+    rc, msg = GATE._evaluate(proj)
+    assert rc != 0 and "CREDITED" not in msg, (rc, msg)
+    rc, rep = _l10c(tmp_path, proj)
+    row = {r["id"]: r for r in rep["results"]}[BASE_AND_FENCE["name"]]
+    assert row["status"] != "pass" and row["pass"] is False, row
+    assert "a credit on part of" in row["isa_conformance_refused"], row
+
+
+def test_a_stale_receipt_that_knows_one_unit_still_cannot_credit_two(tmp_path):
+    """(a) The units compared against include the project's OWN declaration: a
+    stale receipt that ran (and so knows) only Zifencei must not see a row
+    naming RV32I and Zifencei as naming Zifencei alone."""
+    rec = _receipt({BASE_AND_FENCE["name"]: ["Zifencei"]})
+    rec["programs"] = {pid: e for pid, e in rec["programs"].items()
+                       if e["unit"] == "Zifencei"}
+    proj = _project(tmp_path, [BOOT, BASE_AND_FENCE], {BOOT["name"]: "PASS"},
+                    receipt=rec)
+    credit, why = L10X.isa_conformance_credit(proj, BASE_AND_FENCE["name"])
+    assert credit is None and "a credit on part of" in (why or ""), why
+
+
+def test_a_row_the_binding_covers_exactly_is_still_credited(tmp_path):
+    """(a) control: the same two-unit row bound to BOTH units it names is
+    credited, and a row naming only Zifencei, bound to it, still is."""
+    rec = _receipt({BASE_AND_FENCE["name"]: ["I", "Zifencei"],
+                    FENCE["name"]: ["Zifencei"]})
+    # I + Zifencei primaries: 3 + 1. The row states no instruction goal, so
+    # the summary carries no instruction coverage for it.
+    rec["cases"][BASE_AND_FENCE["name"]]["full_parameter"].update(
+        passed=4, primary_programs=4, coverage=None)
+    rec["cases"][BASE_AND_FENCE["name"]]["delivered"].update(
+        primary_programs=4)
+    proj = _project(tmp_path, [BOOT, BASE_AND_FENCE, FENCE],
+                    {BOOT["name"]: "PASS"}, receipt=rec)
+    credit, why = L10X.isa_conformance_credit(proj, BASE_AND_FENCE["name"])
+    assert why is None and credit["programs_passed"] == 4, why
+    credit, why = L10X.isa_conformance_credit(proj, FENCE["name"])
+    assert why is None and credit["programs_passed"] == 1, why
+
+
+def _run_measured(proj: Path, covered: int, total: int) -> None:
+    """The run's own instruction instrument, in the shape
+    `instruction_coverage_measure.measure` writes when it found a tally."""
+    pct = round(100.0 * covered / total, 2)
+    rel = proj / "reports" / "phase2" / "coverage" / "instruction_coverage.json"
+    rel.parent.mkdir(parents=True, exist_ok=True)
+    rel.write_text(json.dumps({
+        "schema": "vibeic.instruction_coverage.v1",
+        "program": "instruction_coverage_measure", "project": str(proj),
+        "dimension": "instruction",
+        "asked_through": "l10_coverage_goal_classify.bind_scope",
+        "goals": [GOAL["name"]], "goal_count": 1, "applicable": True,
+        "contributions": [{"case": BOOT["name"], "covered": covered,
+                           "total": total}],
+        "refusals": [],
+        "totals": {"instruction": {"covered": covered, "total": total,
+                                   "pct": pct}},
+        "reason": f"{covered}/{total} = {pct:g}% from 1 contributing "
+                  f"transcript(s)"}))
+
+
+def test_a_goal_the_run_measured_short_is_a_fail_not_a_credit(tmp_path):
+    """(b) The L10 table judged a NOT_EXECUTED goal row by the suite's number
+    (3/3 = 100%) even though the run's own instruction coverage MEASURED it at
+    30/41 = 73.17% against a stated 100%: Step 4 FAILed the goal, the table
+    PASSed it, and ok == total fed `_v1_6_609_l10_conformance_ok`."""
+    proj = _project(tmp_path, [BOOT, GOAL], {BOOT["name"]: "PASS"},
+                    receipt=_receipt({GOAL["name"]: ["I"]}))
+    _run_measured(proj, 30, 41)
+    rc_gate, rep_gate = _gate_json(tmp_path, proj)
+    grow = rep_gate["coverage_goals"]["rows"][0]
+    assert grow["verdict"] == "FAIL" and grow["achieved_pct"] == 73.17, grow
+    assert rc_gate == 1, rc_gate
+    rc, rep = _l10c(tmp_path, proj)
+    row = {r["id"]: r for r in rep["results"]}[GOAL["name"]]
+    assert row["status"] == "fail" and row["pass"] is False, row
+    assert row["achieved_pct"] == 73.17, row
+    assert "measured by this run" in row["evidence"][0], row
+    assert "wins over" in row["isa_conformance_refused"], row
+    assert "credited_by" not in row and "isa_conformance_credit" not in row
+    assert rc == 1 and rep["ok"] != rep["total"], rep
+    assert GOAL["name"] not in {c["case"] for c in
+                                rep["isa_conformance_credited"]}
+
+
+def test_a_goal_the_run_measured_met_is_judged_by_that_number(tmp_path):
+    """(b) Both directions: the suite falls short (3/4 = 75%) but the run
+    measured the goal at 41/41 -- the table now reads it as Step 4 does."""
+    proj = _project(tmp_path, [BOOT, GOAL], {BOOT["name"]: "PASS"},
+                    receipt=_short_goal_receipt())
+    _run_measured(proj, 41, 41)
+    rc_gate, rep_gate = _gate_json(tmp_path, proj)
+    grow = rep_gate["coverage_goals"]["rows"][0]
+    assert grow["verdict"] == "PASS" and grow["achieved_pct"] == 100.0, grow
+    rc, rep = _l10c(tmp_path, proj)
+    row = {r["id"]: r for r in rep["results"]}[GOAL["name"]]
+    assert row["status"] == "pass" and row["achieved_pct"] == 100.0, row
+    assert "measured by this run" in row["evidence"][0], row
+
+
+def test_a_goal_the_run_left_unmeasured_is_still_judged_by_the_suite(tmp_path):
+    """(b) control: an instrument receipt with no tally is no measurement, so
+    the credit still fills the absence (and still FAILs a short suite)."""
+    proj = _project(tmp_path, [BOOT, GOAL], {BOOT["name"]: "PASS"},
+                    receipt=_short_goal_receipt())
+    rel = proj / "reports" / "phase2" / "coverage" / "instruction_coverage.json"
+    rel.parent.mkdir(parents=True, exist_ok=True)
+    rel.write_text(json.dumps({"dimension": "instruction", "applicable": True,
+                               "contributions": [], "refusals": [],
+                               "totals": {}}))
+    rc, rep = _l10c(tmp_path, proj)
+    row = {r["id"]: r for r in rep["results"]}[GOAL["name"]]
+    assert row["status"] == "fail" and row["achieved_pct"] == 75.0, row
+    assert "measured by this run" not in row["evidence"][0], row
+
+
+def test_an_unloadable_testbench_gen_is_a_named_refusal(tmp_path, monkeypatch):
+    """(c) The reader imported testbench_gen lazily and unguarded: if that
+    import failed, the L10 gate crashed whenever a receipt bound a case."""
+    proj = _project(tmp_path, [BOOT, FENCE], {BOOT["name"]: "PASS"},
+                    receipt=_receipt({FENCE["name"]: ["Zifencei"]}))
+    monkeypatch.setitem(sys.modules, "testbench_gen", None)
+    credit, why = L10X.isa_conformance_credit(proj, FENCE["name"])
+    assert credit is None, credit
+    assert "testbench_gen" in why and "nothing is credited" in why, why
+    rc, rep = _l10c(tmp_path, proj)
+    row = {r["id"]: r for r in rep["results"]}[FENCE["name"]]
+    assert row["status"] != "pass" and row["pass"] is False, row
+    assert "testbench_gen" in row["isa_conformance_refused"], row
