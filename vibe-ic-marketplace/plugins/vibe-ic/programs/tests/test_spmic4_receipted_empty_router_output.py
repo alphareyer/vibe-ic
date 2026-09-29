@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest
 
 import flow_compliance_check as flow
 import eda_report_audit as audit
@@ -73,20 +76,25 @@ def test_step_snapshot_symlink_uses_the_canonical_zero_receipt(tmp_path):
             "categories: spacing width density antenna via enclosure\n")
     body += "    Completing 100% with 0 violations.\n" * 70
     sibling.write_text(body)
+    receipt = report.with_name("routed_router.drc.receipt.json")
+    # The alias route itself, independent of any walk order.
+    assert audit._empty_router_drc_receipt(alias) == receipt
     out = tmp_path / "router_audit.json"
+    # NAME the alias as the subject. A walk would merge it with the canonical
+    # report by inode and keep whichever rglob reaches first -- a filesystem
+    # name-hash accident (review wave 57: red 3/3 on a host that lists
+    # `phase3` before `steps`), which left the alias unexercised there.
     cmd = [sys.executable, str(Path(audit.__file__)), str(tmp_path),
-           "--mode", "drc", "--under", REPORT,
-           "--under", "reports/phase3/drc_router.rpt",
+           "--mode", "drc", "--subject", str(alias.relative_to(tmp_path)),
+           "--subject", "reports/phase3/drc_router.rpt",
            "--json", str(out)]
     run = subprocess.run(cmd, capture_output=True, text=True)
     result = json.loads(out.read_text())
     assert run.returncode == 0, result
     assert result["passed"] is True
     evidence = result["summary"]["empty_report_evidence"]
-    assert str(alias.relative_to(tmp_path)) in evidence
-    assert evidence[str(alias.relative_to(tmp_path))] == [
-        "phase3/stage3/pnr/routed_router.drc.receipt.json"]
-    receipt = report.with_name("routed_router.drc.receipt.json")
+    assert evidence == {str(alias.relative_to(tmp_path)): [
+        "phase3/stage3/pnr/routed_router.drc.receipt.json"]}
     record = json.loads(receipt.read_text())
     record["current_invocation_count"] = 1
     receipt.write_text(json.dumps(record))
@@ -130,3 +138,25 @@ def test_step_alias_cannot_borrow_another_projects_receipt(tmp_path):
     alias.symlink_to(os.path.relpath(foreign, alias.parent))
     assert audit._empty_router_drc_receipt(alias) is None
     assert flow._live_artefact_state(alias)[0] is False
+
+
+@pytest.mark.parametrize("order", ["sorted", "reverse"])
+def test_walk_order_cannot_change_which_receipt_certifies_the_route(
+        tmp_path, monkeypatch, order):
+    """Both walk orders: the alias and the canonical report are one physical
+    file, and whichever path survives discovery is certified by the same
+    canonical receipt."""
+    report = _route(tmp_path)
+    alias = (tmp_path / "steps/phase3/stage3/21_routing_global_detailed"
+             / "routed_router.drc.rpt")
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(os.path.relpath(report, alias.parent))
+    walk = pathlib.Path.rglob
+    monkeypatch.setattr(pathlib.Path, "rglob", lambda self, pat: iter(sorted(
+        walk(self, pat), key=str, reverse=order == "reverse")))
+    result = audit._check_drc(tmp_path)
+    evidence = result.summary["empty_report_evidence"]
+    assert len(evidence) == 1, evidence
+    (key, receipts), = evidence.items()
+    assert key in (REPORT, str(alias.relative_to(tmp_path)))
+    assert receipts == ["phase3/stage3/pnr/routed_router.drc.receipt.json"]
