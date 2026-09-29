@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1380
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1380)
+- **Total programs (excluding helpers / shims):** 1381
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1381)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1371 |
+| `any` | 1372 |
 
 ## Alphabetical listing
 
@@ -494,6 +494,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `fsm_transition_completeness_check` | any | v0.3.21 | v0.3.21 (ORGANIC #522). |
 | `fsm_vector_rtl_emit` | any | — | supplemental DETERMINISTIC Tier-1 emitters for the VerilogEval-HUMAN (code-complete, ICCAD-2023) tier pipeline. |
 | `full_moore_fsm_synth` | any | — | deterministic SOLVER for a full Moore FSM. |
+| `full_stack_functional_tb` | any | — | the FUNCTIONAL full-stack population (Step 5). |
 | `full_suite_run_check` | any | — | is the invocation the FULL suite, or a subset? |
 | `function_void_with_output_check` | any | Wave 29 | Wave 29 (v0.119.61) gate. |
 | `functional_state_transition_coverage_check` | any | — | Verify TBs exercise the state-changing side-effects of every cmd opcode, not just byte-stream correctness. |
@@ -1452,7 +1453,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1371 programs)
+### `any` (1372 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1918,6 +1919,7 @@ _(no programs in this group)_
 - `fsm_transition_completeness_check` — v0.3.21 (ORGANIC #522).  _[v0.3.21]_
 - `fsm_vector_rtl_emit` — supplemental DETERMINISTIC Tier-1 emitters for the VerilogEval-HUMAN (code-complete, ICCAD-2023) tier pipeline.
 - `full_moore_fsm_synth` — deterministic SOLVER for a full Moore FSM.
+- `full_stack_functional_tb` — the FUNCTIONAL full-stack population (Step 5).
 - `full_suite_run_check` — is the invocation the FULL suite, or a subset?
 - `function_void_with_output_check` — Wave 29 (v0.119.61) gate.  _[Wave 29]_
 - `functional_state_transition_coverage_check` — Verify TBs exercise the state-changing side-effects of every cmd opcode, not just byte-stream correctness.
