@@ -320,29 +320,19 @@ def test_flow_compliance_accepts_a_complete_handoff_and_refuses_nothing_else(
     assert F.hardmacro_handoff_refusal(tmp_path / "absent") is None
 
 
-def test_the_new_tier_is_enumerated_by_the_runners_aggregator():
-    """`_aggregate_verdict` ends in a catch-all `return "PASS"`, so a status it
-    does not enumerate turns the whole run green. PASS_WITH_ATTRIBUTION must be
-    a QUALIFIED verdict, never a plain pass."""
+def test_the_declared_tier_is_preserved_by_the_runners_aggregator():
+    """Integrator density obligations remain distinct and keep the run off PASS."""
     import phase3_one_shot_runner as P
-    # R-0915-85 — `PASS_WITH_ATTRIBUTION` IS `PASS_WITH_WAIVERS` carrying an
-    # `attribution`: an item this run attributes to somebody else rather than
-    # measuring is a row somebody owns, which is what a waiver row is. The
-    # catch-all this test was written about is gone — `parse` refuses a sixth
-    # word at the row — so the property is asserted where it now lives: the
-    # attributed row is a QUALIFIED verdict, never a plain pass, and it must
-    # NAME its owner.
-    _attributed = P.StepResult(
-        "drc", "PASS_WITH_WAIVERS",
-        attribution=D.TIER_PASS_WITH_ATTRIBUTION)
-    assert _attributed.attribution, "an attributed row must name its owner"
-    plan = [_attributed, P.StepResult("lvs", "PASS")]
-    assert P._aggregate_verdict(plan) == "PASS_WITH_WAIVERS"
-    # …and a row that attributes NOTHING and waives NOTHING cannot wear the
-    # word: `verdict.StepVerdict` refuses it at the roll-up, which is where
-    # every consumer of this runner meets the row.
     import pytest as _pytest
     import verdict as _V
+
+    attributed = P.StepResult("drc", D.TIER_PASS_WITH_ATTRIBUTION)
+    assert attributed.waiver_rows == []
+    plan = [attributed, P.StepResult("lvs", "PASS")]
+    assert P._aggregate_verdict(plan) == D.TIER_PASS_WITH_ATTRIBUTION
+    with _pytest.raises(ValueError, match="waiver_rows"):
+        P.StepResult("drc", D.TIER_PASS_WITH_ATTRIBUTION,
+                     waiver_rows=[{"id": "forbidden"}])
     with _pytest.raises(ValueError):
         _V.StepVerdict(verdict=_V.Verdict.PASS_WITH_WAIVERS,
                        step_id="drc", name="drc")

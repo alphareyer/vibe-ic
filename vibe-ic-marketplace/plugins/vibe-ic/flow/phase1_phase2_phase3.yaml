@@ -6418,28 +6418,25 @@ steps:
         # output and files_found went 1 -> 2.
         - program_exit_zero: "antenna_report_check . --mode antenna --under reports/phase3/antenna.rpt --json reports/phase3/antenna_signoff.json"
         # INDEPENDENT GDS-geometry antenna sign-off (the authoritative second
-        # opinion the flow never had). Reconstructs the as-fabricated
-        # connectivity from the streamed GDS and computes per-net
-        # metal_area/gate_area with STAGED connectivity — at the layer-k etch
-        # stage only layers 1..k exist, so an upper-metal jumper cannot relieve
-        # a lower-stage antenna, a relief the router's final-netlist model DOES
-        # credit. It also runs cumulative-antenna-area (CAA) charge sharing,
-        # which a per-layer check structurally cannot see, and CROSS-CHECKS its
-        # count against reports/phase3/antenna.rpt: a clean/dirty DISAGREEMENT
-        # is a hard FAIL so a router-vs-geometry inconsistency is surfaced
-        # rather than averaged away.
+        # opinion the flow never had). A PDK-native KLayout deck measures its
+        # own ANT rules on the streamed GDS. A PDK-declared JSON geometry deck
+        # uses the vendored staged-connectivity and CAA engine instead. Both
+        # CROSS-CHECK against reports/phase3/antenna.rpt: a clean/dirty
+        # DISAGREEMENT is a hard FAIL. Do not ascribe the JSON engine's staged
+        # or CAA rule coverage to a native PDK deck unless that deck declares it.
         #
-        # OPT-IN by PDK: the layer stack and per-metal ratio bounds are foundry
-        # data, so the gate runs only where the PDK integrator has placed a deck
-        # config. Without one there is nothing to measure geometry against and
-        # Step 26 keeps exactly its previous verdict. WITH one, the gate always
+        # OPT-IN by PDK: a bridge geometry config OR the image-bound PDK-root
+        # receipt selects the PDK's native KLayout antenna deck. The latter
+        # discovers the rule within the selected tree and records deck/GDS/
+        # RDB/transcript SHA-256. Without either there is no geometry target
+        # to measure and Step 26 keeps exactly its previous verdict. WITH one, the gate always
         # reports: if KLayout or the deck engine is unavailable it exits 2 with
         # a NAMED disclosure -> VACUOUS-PASS, never a bare PASS earned by a
         # checker that did not run. (`gds_antenna_deck_check --strict` turns
         # that disclosure into a hard FAIL for a production tapeout.)
         - optional_program_exit_zero:
             command: "gds_antenna_deck_check . --json reports/phase2/gates/gate_oxide_geom_deck.json"
-            condition_files_exist: ["signoff/gate_oxide_deck.json", "input/pdk/bridge/gate_oxide_deck.json"]
+            condition_files_exist: ["signoff/gate_oxide_deck.json", "input/pdk/bridge/gate_oxide_deck.json", "phase3/librelane_pdk_root.provenance.json"]
             absent_condition_reason: >-
               Both triggers are PDK-PROVIDED sign-off decks -- inputs to this
               step, not results of it. Without a gate-oxide deck there is no
@@ -7393,6 +7390,26 @@ steps:
       - "reports/phase3/pad_ring_route_evidence.json"
       - "reports/phase3/gates/stage3_compliance.json"
       - "reports/phase3/layout_receipts.json"
+    # THE ROUTE ATTESTATION IS OWED ONLY BY A DELIVERY WITH A PAD RING
+    # (FX_SPM_GATES_2). Its only producer, `step_pad_ring_final_evidence`,
+    # runs under `_chip_path_requests_pad_ring` -- the condition step 15.5ic
+    # declares. MEASURED on the same-RTL spm x gf180mcuD run (deliverable
+    # HARDMACRO, core-only): this step FAILED `required_outputs missing:
+    # [...pad_ring_route_evidence.json]` (missing_artefact) for a file that is
+    # correctly never written. `flow_compliance_check._output_not_owed` makes
+    # the ENTRY (not the step) NOT_APPLICABLE under the producer's full 15.5ic
+    # condition: an owner-declared hardmacro without a bound slot, or no live
+    # slot/SELF_TAPEOUT marker. A DIE with a live route stays held to it.
+    output_conditions:
+      "reports/phase3/pad_ring_route_evidence.json":
+        any_of: true
+        files_exist:
+          - "input/submission_template/slots/*.yaml"
+          - "input/submission_template/SELF_TAPEOUT.txt"
+        delivery_declares:
+          declaration: "input/submission_template/tapeout_declaration.json"
+          field: "answers.deliverable"
+          absent_when: ["HARDMACRO"]
     gate:
       all_of:
         - program_exit_zero: "layout_receipt_identity_check . --json reports/phase3/layout_receipt_identity.json"

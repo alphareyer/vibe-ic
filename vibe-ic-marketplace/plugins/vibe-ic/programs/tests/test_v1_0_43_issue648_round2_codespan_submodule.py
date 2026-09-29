@@ -89,6 +89,9 @@ def test_end_to_end_exact_submodules_no_prose_leak(tmp_path):
     (proj / "input" / "docs").mkdir(parents=True)
     (proj / "input" / "docs" / "L2_architecture.md").write_text(_L2)
     (proj / "input" / "docs" / "L8_submodule_integration.md").write_text(_L8)
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     runner = _PROGRAMS / "phase1_one_shot_runner.py"
     r = run_phase1_with_expert_answer(
         proj, [sys.executable, str(runner), str(proj)], _pr.run,

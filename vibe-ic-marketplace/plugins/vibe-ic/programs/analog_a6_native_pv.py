@@ -44,6 +44,7 @@ import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 import _a6_drc_authority as _auth  # noqa: E402 — q1: whose word stands
+import _atomic_artefact as _aa  # noqa: E402 — publish complete reports
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
 _SVRFDRC_BIN = "svrfdrc"
@@ -65,6 +66,15 @@ def _find_gds(bdir: Path, block: str) -> Optional[Path]:
         if hits:
             return hits[0]
     return None
+
+
+def _layout_identity(bdir: Path, netlist: Path) -> Tuple[str, str]:
+    """A5's layout vs the netlist LVS would compare (see
+    `_analog_producer_common.layout_netlist_identity`)."""
+    import _analog_producer_common as _pc  # noqa: PLC0415
+    if not (bdir / "layout_provenance.json").is_file():
+        return ("UNVERIFIED", "no layout_provenance.json")
+    return _pc.layout_identity_of_block(bdir, netlist)
 
 
 def _find_source_netlist(bdir: Path, block: str) -> Optional[Path]:
@@ -786,6 +796,8 @@ def _write_lvs_report(bdir: Path, block: str, verdict: str,
            else {}),
         **({"extracted_netlist": meta["extracted_netlist"]}
            if meta.get("extracted_netlist") else {}),
+        **({"layout_netlist_identity": meta["layout_netlist_identity"]}
+           if meta.get("layout_netlist_identity") else {}),
         "note": ("device-level LVS (bulk-normalize + pin-fix); numbers only — "
                  "NDA hygiene, no netlist content"),
     }, indent=2) + "\n")
@@ -1277,6 +1289,21 @@ def run_block_pv(project: Path, block: str, res: Dict[str, Any],
         reasons.append("no block GDS for LVS")
     elif netlist is None:
         reasons.append("no block source netlist for LVS")
+    elif _layout_identity(bdir, netlist)[0] == "STALE":
+        # A layout of an EARLIER netlist: comparing it says nothing about
+        # this one (FX_A7_RCX_INVENTORY). The refusal is written where the
+        # gate reads the verdict, so no older `comp.json` is left standing.
+        _ident, _why = _layout_identity(bdir, netlist)
+        _aa.write_json(bdir / "comp.json", {
+            "block": block, "result": "refused",
+            "rule": "A6_LAYOUT_NOT_OF_THIS_NETLIST",
+            "layout_netlist_identity": {"state": _ident, "detail": _why},
+            "note": "LVS not run: the layout is not of this netlist"},
+            indent=2, ensure_ascii=True)
+        reasons.append(f"A6_LAYOUT_NOT_OF_THIS_NETLIST: {_why}")
+        lvs_result = {"executed": False, "verdict": "refused",
+                      "rule": "A6_LAYOUT_NOT_OF_THIS_NETLIST", "detail": _why,
+                      "report": str((bdir / "comp.json").relative_to(project))}
     else:
         _kind = lvs_deck_kind(str(lvs_deck))
         _work = project / "phase3" / "extracted" / "analog" / block
@@ -1289,6 +1316,9 @@ def run_block_pv(project: Path, block: str, res: Dict[str, Any],
                 lambda g, nl, blk, ctn: _default_lvs_runner(
                     g, nl, blk, ctn, _work, layermap))
         verdict, meta = runner(str(gds), str(netlist), block, container)
+        _ident, _why = _layout_identity(bdir, netlist)
+        meta = dict(meta or {}, layout_netlist_identity={"state": _ident,
+                                                          "detail": _why})
         if verdict is None:
             reasons.append(f"LVS engine unavailable: {meta.get('reason', '?')}")
         else:

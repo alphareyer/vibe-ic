@@ -1,8 +1,10 @@
 ---
 name: vibe-ic-all
 description: Run the complete Vibe-IC flow (Phase 1 → Phase 2 → Analog → Phase 3) via vibe_ic_one_shot_runner. Auto-detects Path A vs B. AI-monitored + close-loop.
-argument-hint: <project-dir> [--top-name chip_top] [--skip-hardware] [--skip-analog] [--skip-phase3] [--ic-name <name>] [--die-um WxH] [--util 0.4] [--pdk auto|sky130A|<custom>]
+argument-hint: <project-dir> [--route ic|ip] [--top-name chip_top] [--skip-hardware] [--skip-analog] [--skip-phase3] [--ic-name <name>] [--die-um WxH] [--util 0.4] [--pdk auto|sky130A|<custom>]
 ---
+**First: IC path or IP path?** Read [IC Expert § 0.0](../agents/ic-expert-agent.md) before Phase 1. Use the prompt's route or ask the operator if unclear; record the owner answer in `input/step_0_5ic_answers.json`. Pass `--route ic` or `--route ip` when stating it on this command.
+
 > **Missing arg?** When `$ARGUMENTS` is empty, prompt the user first:
 > `/vibe-ic-all <project-dir>` (e.g. `/vibe-ic-all 1st_benchmark_example/phase2_v0119.48-vendor`).
 > The AI must NOT guess the path; a concrete project path is required before continuing.

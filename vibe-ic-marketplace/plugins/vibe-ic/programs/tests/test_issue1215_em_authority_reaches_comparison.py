@@ -29,6 +29,7 @@ NEVER-RELABEL GUARANTEE, tested here in both directions:
 chip-AGNOSTIC: fixtures use LEF/CSV grammar only; no PDK, layer set, or
 design literal is load-bearing (layer names below are arbitrary tokens).
 """
+import hashlib
 import json
 import sys
 import tempfile
@@ -45,8 +46,7 @@ import phase3_one_shot_runner as R  # noqa: E402
 
 
 def _mk_project(peak_current_a: float) -> Path:
-    """A minimal project carrying the two artefacts the authority gate reads:
-    an em.rpt (peak + declared supply authority) and an em_segments.csv."""
+    """A minimal project with measured current and its same-DEF conductor."""
     proj = Path(tempfile.mkdtemp(prefix="i1215_"))
     rpt3 = proj / "reports" / "phase3"
     rpt3.mkdir(parents=True)
@@ -62,6 +62,19 @@ def _mk_project(peak_current_a: float) -> Path:
         "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
         "MetalA,1.0,1.0,MetalA,2.0,1.0,%.4e\n"
         "MetalA,1.0,2.0,MetalA,2.0,2.0,1.0000e-12\n" % peak_current_a)
+    routed = proj / "phase3" / "stage3" / "pnr" / "routed.def"
+    routed.parent.mkdir(parents=True)
+    routed.write_text(
+        "UNITS DISTANCE MICRONS 1000 ;\nSPECIALNETS 1 ;\n"
+        "- VDD + USE POWER + ROUTED MetalA 230 + SHAPE STRIPE "
+        "( 1000 1000 ) ( 2000 1000 )\n"
+        " NEW MetalA 230 + SHAPE STRIPE ( 1000 2000 ) ( 2000 2000 ) ;\n"
+        "END SPECIALNETS\n")
+    (rpt3 / "em.json").write_text(json.dumps({
+        "power_nets": ["VDD"],
+        "subject_def": "phase3/stage3/pnr/routed.def",
+        "subject_def_sha256": hashlib.sha256(routed.read_bytes()).hexdigest(),
+    }))
     return proj
 
 

@@ -55,14 +55,14 @@ def test_post_resize_screen_uses_same_net_local_def_width(tmp_path):
     assert result["jmax_screen"]["summary"]["local_def_width_uses"] == 1
 
 
-def test_real_narrow_wire_and_stale_def_still_fail(tmp_path):
+def test_real_narrow_wire_fails_stale_or_wrong_net_stays_unmeasured(tmp_path):
     narrow, jmax = _project(tmp_path / "narrow", wide=False)
     assert authority.jmax_tier(narrow, jmax, None, 0.1)["verdict"] == "FAIL"
     stale, jmax = _project(tmp_path / "stale", matching_digest=False)
-    assert authority.jmax_tier(stale, jmax, None, 0.1)["verdict"] == "FAIL"
+    assert authority.jmax_tier(stale, jmax, None, 0.1)["verdict"] == "NOT_MEASURED"
     wrong_net, jmax = _project(tmp_path / "wrong_net")
     summary = wrong_net / "reports/phase3/em.json"
     doc = json.loads(summary.read_text())
     doc["power_nets"] = ["GND"]
     summary.write_text(json.dumps(doc))
-    assert authority.jmax_tier(wrong_net, jmax, None, 0.1)["verdict"] == "FAIL"
+    assert authority.jmax_tier(wrong_net, jmax, None, 0.1)["verdict"] == "NOT_MEASURED"

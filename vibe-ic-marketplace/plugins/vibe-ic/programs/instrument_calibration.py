@@ -710,6 +710,35 @@ def _register(inst: Instrument) -> None:
     INSTRUMENTS[inst.name] = inst
 
 
+def _judge_native_antenna_rdb(report: str) -> Optional[str]:
+    import eda_report_audit as audit
+    count = audit._antenna_klayout_count(report)
+    return f"ANTENNA_VIOLATIONS={count}" if count else None
+
+
+_register(Instrument(
+    name="eda_report_audit::_antenna_klayout_count",
+    reads="the PDK-native KLayout antenna report database",
+    ruling="U5 geometry antenna native-deck acceptance",
+    owner="u5",
+    why=("A native KLayout report has an empty top-level description and "
+         "<name>ANT.*</name> categories. The old classifier missed the XML "
+         "name elements and called a measured clean run unmeasured."),
+    judge=_judge_native_antenna_rdb,
+    positive=Sample(
+        provenance=("Real KLayout 0.30.9 PDK-native `decks=antenna` RDB from "
+                    "a synthetic poly gate with a long conductor, generated "
+                    "on 8HD-6 in vibeic-eda 0.3.84; ANT.1 fires once. "
+                    "Rule SHA-256 f82e2aed8c5c7b9d92146b135affe78c1d2779511e8be0062d0d4e52b499567f."),
+        artefact=_read("native_antenna_violation.lyrdb")),
+    expect="ANTENNA_VIOLATIONS=1",
+    negative=Sample(
+        provenance=("Same real tool, PDK and synthetic gate, with the poly "
+                    "conductor shortened; 24 ANT categories and zero items."),
+        artefact=_read("native_antenna_clean.lyrdb")),
+))
+
+
 _register(Instrument(
     name="phase3_one_shot_runner::antenna_routing_incomplete",
     reads="the PnR log (`phase3/stage3/pnr/openroad.log`)",
@@ -1624,6 +1653,36 @@ _register(Instrument(
 ))
 
 
+def _judge_step32_timing_basis(rpt: str) -> Optional[str]:
+    import postroute_timing_repair_status_gen as S
+    state = S._parse_sta_for_violations(rpt)["timing_measurement"]
+    return "TIMING_VIOLATED" if state == "VIOLATED" else None
+
+
+_register(Instrument(
+    name="postroute_timing_repair_status_gen::_parse_sta_for_violations",
+    reads="OpenSTA report_checks and report_tns/wns/worst_slack stdout",
+    ruling="fx26cr Step 32", owner="fx26cr",
+    why=("Step 32 must distinguish an actual violated timing path from a "
+         "measured clean path; zero DRV counts or a report header alone cannot "
+         "supply timing evidence. The pair differs only in clock period."),
+    judge=_judge_step32_timing_basis,
+    positive=Sample(
+        provenance=("Real OpenSTA 3.1.0 cdd8ae4d66 in released vibeic-eda "
+                    "0.3.84 on 8HD-6, 2026-09-28. Synthetic cal_chain_gf180.v "
+                    "and tt_025C_5v00 Liberty, period 0.1 ns; unedited stdout "
+                    "from calibration/sta_step32_calibrate.tcl. "
+                    "sha256 dcd461e2e2cd5c53d470e27767e2aafcbf755c701709c01669a2890a3f23ac8f."),
+        artefact=_read("sta_step32_violated_positive.rpt")),
+    expect="TIMING_VIOLATED",
+    negative=Sample(
+        provenance=("Same OpenSTA image, chain, Liberty and script, period "
+                    "10 ns; unedited stdout. sha256 "
+                    "18297210112924cc317035849865a407efffb378cd8a370455c0d616fd5be00e."),
+        artefact=_read("sta_step32_clean_negative.rpt")),
+))
+
+
 def _eqy_scratch(name: str) -> Callable[[], Path]:
     """Unpack an EQY sample (its unedited status files and partition.list,
     stored as one tar so every fixture stays a flat file) into a temp dir."""
@@ -2161,6 +2220,51 @@ def _judge_tap_row_coverage(pair: Tuple[str, str]) -> Optional[str]:
     return "TAP_ROW_COVERAGE_GAP" if rec["uncovered"] else None
 
 
+def _judge_excluded_master_census(sample: Tuple[str, bool]) -> Optional[str]:
+    """Run the shipped census over a real OpenROAD DEF and a declared policy."""
+    import json as _json
+    import tempfile as _tempfile
+    import excluded_master_census_check as C
+    import tap_row_coverage_check as T
+    body, exclude_present_master = sample
+    components = T.read_def(body)["components"]
+    if not components:
+        raise ValueError("calibration DEF has no placed master")
+    policy = [components[0][1]] if exclude_present_master else [
+        "__calibration_master_absent_from_this_def__"]
+    with _tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        layout, config, state = (root / "out.def", root / "config.json",
+                                  root / "state.json")
+        layout.write_text(body)
+        config.write_text(_json.dumps({"EXTRA_EXCLUDED_CELLS": policy}))
+        state.write_text(_json.dumps({"def": str(layout)}))
+        result = C.audit(config, state, "OpenROAD.Calibration")
+    return result.get("finding") if result["verdict"] == "FAIL" else None
+
+
+_register(Instrument(
+    name="excluded_master_census_check::audit",
+    reads="a real OpenROAD DEF COMPONENTS population and the resolved master policy",
+    ruling="CAPTURE_C CR-4 (one cell-exclusion policy at every inserting step)",
+    owner="capcx",
+    why=("The census must distinguish an excluded master in the tool DEF from "
+         "a nonexcluded master; an empty or missing DEF cannot count as clean."),
+    judge=_judge_excluded_master_census,
+    positive=Sample(
+        provenance=("Unedited OpenROAD write_def output from the tap-row "
+                    "calibration structure; a policy names a master present "
+                    "in calibration/tap_coverage_gap_positive.def."),
+        artefact=lambda: (_read("tap_coverage_gap_positive.def")(), True)),
+    expect="EXCLUDED_MASTER_INSERTED",
+    negative=Sample(
+        provenance=("Unedited OpenROAD write_def output from the same "
+                    "calibration structure; the policy names no master in "
+                    "calibration/tap_coverage_covered_negative.def."),
+        artefact=lambda: (_read("tap_coverage_covered_negative.def")(), False)),
+))
+
+
 _TAP_COVERAGE_CAL_PROV = (
     "Real OpenROAD 26Q3-2963-gc73a322d30 (the pinned vibeic-eda 0.3.79, 8HD-8, "
     "2026-09-27), unedited `write_def` output: gf180mcu_fd_sc_mcu7t5v0 nom tech "
@@ -2467,6 +2571,43 @@ _register(Instrument(
                                  "44-openroad-detailedrouting")),
 ))
 
+def _judge_native_meas_rows(transcript: str) -> Optional[str]:
+    import analog_real_corner_sweep as ARS
+    rows = ARS.native_meas_rows(transcript)
+    got = sorted(k for k in ("cal_avg", "cal_max", "cal_at") if k in rows)
+    return f"NATIVE MEAS ROWS: {', '.join(got)}" if got else None
+
+
+_register(Instrument(
+    name="analog_real_corner_sweep::native_meas_rows",
+    reads="an ngspice batch transcript (A4 corners, A7 pre/post, A9)",
+    ruling="T131 (A7 must compare the rails)",
+    owner="rfa7",
+    why=("The row pattern demanded end-of-line right after the value, so every "
+         "windowed (`from= to=`) and extremum (`at=`) result ngspice prints was "
+         "read as ABSENT -- on the delta_sigma A3 deck 243 of 245 results -- and "
+         "A7's 10 % rule compared no rail at all. The pair is three measures that "
+         "succeed (one windowed, one extremum, one `find ... at=`) against the "
+         "same three failing, whose card text ngspice echoes back with `failed!`."),
+    judge=_judge_native_meas_rows,
+    positive=Sample(
+        provenance=(
+            "REAL ngspice-47 transcript (vibeic-eda 0.3.83, 8hd-3, 2026-09-28): "
+            "`calibration/ngspice47_cal_meas_rows.sp`, an RC low-pass under a "
+            "pulse, run as `ngspice -b` -- `cal_avg ... from= to=`, `cal_max ... "
+            "at=`, `cal_at` all measured. Unedited."),
+        artefact=_read("ngspice47_cal_meas_rows.log")),
+    expect="NATIVE MEAS ROWS: cal_at, cal_avg, cal_max",
+    negative=Sample(
+        provenance=(
+            "The SAME circuit and run, `calibration/ngspice47_cal_meas_rows_"
+            "failed.sp`: the three measures made to fail (a vector that does not "
+            "exist, a `when` never met, a `find` past the stop). ngspice prints "
+            "`Error: measure ...` and echoes each card with `failed!`, and no "
+            "result row. Unedited."),
+        artefact=_read("ngspice47_cal_meas_rows_failed.log")),
+))
+
 
 # ---- LibreLane flow.log: did the run finish? (llv1 W6 review) ----
 
@@ -2596,6 +2737,47 @@ _register(Instrument(
                     "reference, rc 0). calibration/"
                     "librelane_flow_log_gated_negative.log"),
         artefact=_read("librelane_flow_log_gated_negative.log")),
+))
+
+
+# ---- lec_run: equiv_induct's per-point decisions (FX_AES_LEC_SCALE) --------
+
+_LEC_INDUCT_PROV = (
+    "Real Yosys 0.69+ (git 4d572059c, released vibeic-eda 0.3.83, run by "
+    "digest on 8HD-8, 2026-09-28): `equiv_make` of calibration/"
+    "cal_lec_pair_gold.v against calibration/cal_lec_pair_gate.v (two "
+    "flops; the gate feeds y from x, so y matches only from reachable "
+    "states), then `equiv_induct -seq 1`. The whole-set induction step fails "
+    "and the pass decides each point: `\\y: failed.`, `\\x: success!`. "
+    "Only the working directory is replaced by <cal>. ")
+
+
+def _judge_induct_decisions(log: str) -> Optional[str]:
+    import lec_run as L
+    prog = L.induct_decision_progress(log)
+    return "DECIDING" if prog and prog["decided"] > 0 else None
+
+
+_register(Instrument(
+    name="lec_run::induct_decision_progress",
+    reads="the Yosys `equiv_induct` log (workset line + per-point decisions)",
+    ruling="FX_AES_LEC_SCALE", owner="llb",
+    why=("The rung's budget predicate may stop a rung only on the proof's own "
+         "decision rate. It must count the pass's per-point decisions and stay "
+         "silent while the pass is still building its model. The pair is the "
+         "same real log, whole and cut at the workset line."),
+    judge=_judge_induct_decisions,
+    positive=Sample(
+        provenance=(_LEC_INDUCT_PROV + "Whole. calibration/"
+                    "lec_induct_decisions_positive.log"),
+        artefact=_read("lec_induct_decisions_positive.log")),
+    expect="DECIDING",
+    negative=Sample(
+        provenance=(_LEC_INDUCT_PROV + "Its real prefix through the pass's "
+                    "`Found 2 unproven $equiv cells` line, the shape the log "
+                    "has while the model is built. calibration/"
+                    "lec_induct_workset_only_negative.log"),
+        artefact=_read("lec_induct_workset_only_negative.log")),
 ))
 
 

@@ -4178,6 +4178,8 @@ def _antenna_klayout_count(text: str) -> Optional[int]:
     a run that measured nothing as a passing antenna sign-off, which is the
     exact direction this audit exists to refuse.
     """
+    import instrument_calibration as _cal
+    _cal.assert_calibrated("eda_report_audit::_antenna_klayout_count")
     head = text[:4096]
     # --- the per-rule JSON tally ---
     s = text.lstrip()
@@ -4208,8 +4210,14 @@ def _antenna_klayout_count(text: str) -> Optional[int]:
         # audit reads as "no count" and not as "zero violations". The scan is
         # linear and only ever widens the classification, so the bound bought
         # nothing it was worth losing that for.
+        # PDK-native KLayout runs may leave <description/> empty. Their real
+        # RDB names each executed rule as <name>ANT.*</name>; the older
+        # line-start matcher does not match that XML element. A clean native
+        # run was therefore misread as NOT_MEASURED despite 25 ANT categories.
         looks_antenna = ("report for antenna" in head.lower()
-                         or bool(_KLAYOUT_ANT_RULE_RE.search(text)))
+                         or bool(_KLAYOUT_ANT_RULE_RE.search(text))
+                         or bool(re.search(r"<name>\s*ANT[._-]\w+\s*</name>",
+                                           text, re.I)))
         if not looks_antenna:
             return None
         counted = _count_rdb_items_streaming(text)

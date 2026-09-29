@@ -93,6 +93,9 @@ def _run_phase1(tmp_path: Path, docs: dict) -> dict:
     d.mkdir(parents=True, exist_ok=True)
     for name, body in docs.items():
         (d / name).write_text(body, encoding="utf-8")
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(tmp_path, "ic")
     # Measured at ~3s for this input; the 60s bound is the harness ceiling
     # (`ci_harness_timeout_ceiling_check`), i.e. ~20x headroom, so THIS call
     # fails the test on a hang rather than the harness killing the session.

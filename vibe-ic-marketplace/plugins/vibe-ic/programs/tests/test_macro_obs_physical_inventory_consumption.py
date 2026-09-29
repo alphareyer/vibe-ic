@@ -12,7 +12,10 @@ def _project(tmp_path, *, missing=False):
     (pnr / "routed.def").write_text(
         "VERSION 5.8 ;\nDESIGN chip ;\nCOMPONENTS 1 ;\n"
         "- u_macro fixture_macro + PLACED ( 0 0 ) N ;\n"
-        "END COMPONENTS\nEND DESIGN\n")
+        "END COMPONENTS\nSPECIALNETS 1 ;\n"
+        "- supply ( * pin ) + USE POWER + ROUTED M1 100 "
+        "( -1000 5000 ) ( 11000 5000 ) ;\n"
+        "END SPECIALNETS\nEND DESIGN\n")
     views = tmp_path / "run_views"
     views.mkdir()
     macro = views / "selected_macro.lef"

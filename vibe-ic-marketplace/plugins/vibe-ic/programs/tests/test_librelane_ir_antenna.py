@@ -360,7 +360,7 @@ def test_a_step24_plugin_step_carries_its_code_and_init_lines(tmp_path, monkeypa
     project, state, config = _chain_inputs(tmp_path)
     run = lambda: ll.run_chain(project, "img", [("Vibeic.IRDropChecker", config, state)],
                                docker=str(docker), lane="l",
-                               openroad_init=["set_debug_level PSM resistance 2"])
+                               openroad_init=["set_debug_level PSM resistance 2"], pdk_root='/pdk')
     folder = run()[0]
     argv = json.loads(log.read_text().splitlines()[-1])
     assert f"PYTHONPATH={ll.PLUGIN_ROOT.resolve()}" in argv
@@ -379,7 +379,7 @@ def test_a_chain_without_init_lines_keeps_its_fingerprint(tmp_path, monkeypatch)
     project, state, config = _chain_inputs(tmp_path)
     config.write_text(json.dumps({"meta": {"step": "OpenROAD.CheckAntennas"}}))
     folder = ll.run_chain(project, "img", [("OpenROAD.CheckAntennas", config, state)],
-                          docker=str(docker), lane="l")[0]
+                          docker=str(docker), lane="l", pdk_root='/pdk')[0]
     fingerprint = json.loads((folder / "input_fingerprint.json").read_text())
     assert "plugin" not in fingerprint and "openroad_init" not in fingerprint
     argv = json.loads(log.read_text().splitlines()[-1])

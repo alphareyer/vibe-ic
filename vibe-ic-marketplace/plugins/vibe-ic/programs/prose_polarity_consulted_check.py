@@ -119,6 +119,30 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "synth_full_adder_map::discover":
+        "ONE MACHINE GRAMMAR, NO SENTENCE. The input is the active PDK Liberty "
+        "file: cell/pin blocks, area numbers, directions and quoted Boolean "
+        "functions. A candidate is accepted only when all eight evaluated "
+        "input combinations equal XOR3 and majority3; an unsupported token, "
+        "missing function, nonpositive area or ambiguous minimum refuses it. "
+        "There is no prose denial form in these fields. Falsifier: "
+        "test_capture_cr14_postroute_recipe.py::"
+        "test_liberty_truth_table_and_area_discover_neutral_full_adder.",
+    "sdc_environment::_sdc_environment_design_values":
+        "ONE STRICT TABLE GRAMMAR, NO SENTENCE. Only adjacent L9 Markdown "
+        "key/value cells whose first cell is one of six exact SDC or flow "
+        "keys are read. Numeric fields must parse as the entire cell and "
+        "the driving cell must match a complete cell/pin identifier; a "
+        "negated value cannot satisfy either grammar and falls through to "
+        "the pinned PDK tier. Falsifier: tests/test_capture_cr8_sdc_environment.py"
+        "::test_negated_table_value_is_not_a_design_declaration.",
+    "librelane_signoff::_liberty_header_pvt":
+        "ONE MACHINE GRAMMAR, NO SENTENCE. Liberty header nom_process, "
+        "nom_voltage and nom_temperature are numeric attributes anchored at "
+        "line start and terminated by semicolons. A missing or duplicate field "
+        "returns no PVT, and the scene becomes NOT_MEASURED. A denial cannot "
+        "be encoded in this grammar. Falsifier: "
+        "tests/test_sta9_scene_binding.py::test_wrong_liberty_header_is_not_measured.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "
@@ -136,6 +160,23 @@ _NOT_PROSE: Dict[str, str] = {
         "The field is a number, so no denial can be spelled in it, and a corner "
         "with no such line is not read as no-slack: it REFUSES "
         "(LL_STA_CORNER_SLACK_MISSING).",
+    "_native_postroute_timing::measure":
+        "ONE OPENSTA MACHINE RECORD PER CHECK. `report_worst_slack -max/-min "
+        "-digits 6` writes `worst slack max|min <number>` at the start and end "
+        "of a line. The only payload is a numeric slack; a denial cannot be "
+        "spelled in that grammar. Both checks must be present for every "
+        "declared corner or NATIVE_POSTROUTE_SLACK_MISSING refuses the scene. "
+        "Falsifier: test_sub_ss_external_capture_closure.py::"
+        "test_native_slack_requires_both_numeric_tool_records.",
+    "_native_postroute_timing::_measurement_sdc":
+        "ONE TCL COMMAND GRAMMAR, NO SENTENCE. Only whole lines beginning "
+        "`set_timing_derate -early|-late <number>` are parsed from OpenROAD "
+        "write_sdc output; the remainder is an optional Tcl comment. A "
+        "different value, duplicate command, incomplete pair, or unsupported "
+        "command shape REFUSES rather than becoming an OCV measurement. "
+        "No negated declaration exists in this command grammar. Falsifier: "
+        "test_t102_librelane_postroute_repair.py::"
+        "test_native_sdc_derate_parser_refuses_nonformal_commands.",
     "post_route_signoff_corner_check::evaluate_tool":
         "ONE OPENSTA RECORD. `worst slack max|min <v>` is report_worst_slack's "
         "fixed output in each STAPostPNR corner report, one line per analysis, "
@@ -916,7 +957,7 @@ _NOT_PROSE: Dict[str, str] = {
         "position of every card kind and requires the output to be the "
         "neutral-name output with the name substituted, while the same "
         "strings read as prose are denied. Owner: lane mig109.",
-    "analog_a7_post_layout_emit::measurement_span":
+    "analog_real_corner_sweep::measurement_span":
         "NGSPICE TRANSIENT CARDS of the A3 testbench -- `tran <step> <stop>`, "
         "`meas tran <name> ...` with its `from=`/`to=`/`at=`/`td=` keywords "
         "and `trig`/`targ`/`when` clauses, and the `fourier`/`wrdata` command "
@@ -934,6 +975,17 @@ _NOT_PROSE: Dict[str, str] = {
         "position of every card kind and requires the span to be the "
         "neutral-name span with the name substituted, while the same strings "
         "read as prose are denied. Owner: lane rfa7 (T130).",
+    "analog_a7_post_layout_emit::measurement_span":
+        "NGSPICE TRANSIENT CARD GRAMMAR, NO SENTENCE. The deck supplies "
+        "`tran <step> <stop>` and `meas tran <name>` cards with fixed "
+        "`from=`/`to=`/`at=`/`td=` fields. Comment lines are skipped; a "
+        "card names a measurement or it does not, with no denial form. "
+        "Only parsed time fields determine the stop and unresolved fields "
+        "hold the declared stop. Falsifier: test_t130_a7_budget.py::"
+        "test_the_not_prose_claim_for_the_span_reader_is_falsifiable; it "
+        "puts every identifier-shaped denial word into every card name "
+        "position and compares the result with a neutral-name deck while "
+        "proving those words do deny actual prose.",
     "analog_a7_post_layout_emit::_echo_without":
         "An ngspice `echo \"MEAS k1=\" $&v1 \" k2=\" $&v2` CARD, rebuilt "
         "without the `key= $&var` pairs whose variable `remap_probes` took "
@@ -1319,13 +1371,16 @@ _NOT_PROSE: Dict[str, str] = {
         "SDC is a Tcl command grammar: a clock is created by the command or it "
         "is not, and no neighbouring text can deny it -- a disabled clock is a "
         "deleted or commented command, which the strip removes before matching.",
-    "phase3_one_shot_runner::_prepare_librelane_floorplan_for_route":
-        "Liberty `cell ( <name> )` group headers (`_V1_6_596_RE_CELL_DECL`), "
-        "read to list the library's cell NAMES for the step-17 "
-        "EXTRA_EXCLUDED_CELLS derivation. Liberty is a formal group grammar: a "
-        "cell group is declared or it is not; there is no prose form that denies "
-        "a declared cell, and the name filter that follows is the same family "
-        "regex set the direct deck applies with `get_lib_cells`.",
+    "phase3_one_shot_runner::_build_auto_silicon_sdc":
+        "The builder's direct text match reads only Liberty's fixed-format "
+        "`time_unit : <number><unit>` attribute. C-style and line comments "
+        "are blanked before matching, so a disabled unit cannot replace "
+        "the active one. Design-doc claims and SDC inputs are read by "
+        "delegated resolvers that consult their own contracts; this builder "
+        "records their already resolved DRV arguments. Falsifier: "
+        "test_step7_asic_sdc_is_authored_once_at_step7.py::"
+        "test_commented_liberty_time_unit_cannot_scale_the_auto_sdc, which "
+        "compares commented ps claims with the active ns attribute.",
     "phase3_one_shot_runner::_select_placement_arm":
         "The runner's OWN marker line `DIRECT_ARM_CHECK_PLACEMENT_VIOLATIONS <n>`, "
         "printed by `_build_check_placement_verdict_tcl` in the arm deck this "
@@ -1568,6 +1623,35 @@ _NOT_PROSE: Dict[str, str] = {
         "was spelled. Consulting `_prose_polarity` on a directory entry would "
         "add a branch that can never fire, and a call that can never fire is "
         "a green light rather than a check.",
+    "_pad_ring::parse_liberty_supply_view":
+        "LIBERTY GROUP/ATTRIBUTE GRAMMAR, NO SENTENCE. The matched text is "
+        "`voltage_map ( <name> , <number> )`, `nom_voltage : <number> ;`, "
+        "the `cell ( <name> )`, `pin ( <name> )` and `pg_pin ( <name> )` "
+        "group heads, and the simple attributes pg_type / voltage_name / "
+        "is_pad / related_power_pin / related_ground_pin / direction, each "
+        "`<attr> : <value> ;` -- productions of the Liberty format the PDK's "
+        "IO library ships, whose values are a number, a keyword or a pin "
+        "name, so no denial can be spelled: Liberty has no way to write 'this "
+        "pin is NOT the pad'. Comments are blanked before anything is read, "
+        "so a sentence (or a commented-out attribute) cannot lend a value. "
+        "An attribute that is absent stays absent and its consumer refuses. "
+        "Falsifier: tests/test_fx_supply_pad_pair_multi_rail.py::test_the_"
+        "not_prose_claim_for_the_liberty_supply_view_is_falsifiable.",
+    "_pad_ring::parse_verilog_bus_ports":
+        "Verilog ANSI port-declaration grammar only: `module <id> ... "
+        "endmodule` and `input|output|inout [<integer>:<integer>] <id>`. "
+        "A range in this grammar has no negation production; an absent or "
+        "non-literal range is omitted and the chip-top producer refuses the "
+        "corresponding bit connection. Falsifier: "
+        "tests/test_io_pad_chip_top_gen.py::test_bussed_pad_connection_is_"
+        "one_ordered_verilog_connection.",
+    "io_pad_chip_top_gen::run":
+        "The only newly read text is the selected PDK IO Verilog model, passed "
+        "to `_pad_ring.parse_verilog_bus_ports`, whose formal ANSI declaration "
+        "grammar has no denial production. The reader runs only when a PDK LEF "
+        "pin has an explicit bit subscript; otherwise no Verilog is read. "
+        "Falsifier: tests/test_io_pad_chip_top_gen.py::test_emitted_bussed_pad_"
+        "verilog_parses_in_the_pinned_eda_image.",
     "_pad_ring::parse_def":
         "LEF/DEF 5.8 UNITS / DIEAREA / COMPONENTS records. The matched text is "
         "`UNITS DISTANCE MICRONS <n> ;`, `DIEAREA ( x y ) ( x y ) ;` and the "

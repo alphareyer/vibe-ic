@@ -835,6 +835,58 @@ def declared_route_on_disk(project: Path, has_slots: bool
 SLOTS_REL = "input/submission_template/slots"
 
 
+BOUGHT_SLOT_HARDMACRO_MESSAGE = (
+    "deliverable HARDMACRO (IP path) contradicts a bought shuttle slot "
+    "(IC path); declare one route in input/step_0_5ic_answers.json"
+)
+
+
+class DeliveryRouteContradiction(ValueError):
+    """BLOCKING: the design declared the IP and IC routes together."""
+
+
+def bought_slot_hardmacro(project: Path) -> bool:
+    """Read the owner's staged route answer, not the operator's catalogue."""
+    import _submission_template as ST
+    own, err = load(project / ST.DESIGN_ANSWERS_REL)
+    if err is not None or not isinstance(own, dict):
+        return False
+    if answer(own, "deliverable") != DELIVERABLE_HARDMACRO:
+        return False
+    operator = own.get("operator_template")
+    return isinstance(operator, dict) and any(
+        isinstance(operator.get(key), str) and bool(operator[key].strip())
+        for key in ("path", "slot")
+    )
+
+
+def die_outputs_owed(project: Path) -> bool:
+    """One IC/IP predicate for pad production and die-output admission.
+
+    A contradictory route raises by name. Missing or uncertain deliverable
+    authority retains the die obligation; an attested pure HARDMACRO has none.
+    """
+    if bought_slot_hardmacro(project):
+        raise DeliveryRouteContradiction(BOUGHT_SLOT_HARDMACRO_MESSAGE)
+    path = project / DECLARATION_REL
+    doc, err = load(path)
+    if err is not None or not isinstance(doc, dict):
+        return True
+    if answer(doc, "deliverable") != DELIVERABLE_HARDMACRO:
+        return True
+    # A generated, owner-attested declaration can be the only available input
+    # in a direct Phase-3 consumer or a legacy run. With no staged slot answer,
+    # a catalogue alone is still only information, never a purchase.
+    import _submission_template as ST
+    if not (project / ST.DESIGN_ANSWERS_REL).exists():
+        return False
+    from submission_template_check import slot_rules_are_owed
+    slot_owed, _why = slot_rules_are_owed(project, None)
+    if not slot_owed:
+        return False
+    return True
+
+
 def requests_pad_ring(project: Path) -> bool:
     """Step 15.5ic's design-dependent condition: does this die carry a pad ring?
 
@@ -845,26 +897,14 @@ def requests_pad_ring(project: Path) -> bool:
     step's producer through the contract must see the producer the runner ran.
 
     A ring is requested by a self-tape-out (`SELF_TAPEOUT.txt`) or a slot
-    catalogue on disk, unless the delivery DECLARES itself a `HARDMACRO`: a
-    hardmacro is placed inside somebody else's die, which owns the pads
-    (a6a45babe). The deliverable is read through `answer()`, so an owner-only
-    answer nobody attested is no answer; an absent, unreadable or unanswered
-    declaration leaves the catalogue's request standing.
+    catalogue on disk, unless the delivery is a pure `HARDMACRO`. A bought
+    slot with that declaration is refused before either route can be selected.
     """
     slot_dir = project / SLOTS_REL
     if not ((project / SELF_TAPEOUT_REL).is_file()
             or (slot_dir.is_dir() and any(slot_dir.glob("*.yaml")))):
         return False
-    path = project / DECLARATION_REL
-    if not path.is_file():
-        return True
-    doc, err = load(path)
-    if err is not None or not isinstance(doc, dict):
-        return True
-    got = answer(doc, "deliverable")
-    if not is_answered(got):
-        return True
-    return str(got).strip().upper() != DELIVERABLE_HARDMACRO
+    return die_outputs_owed(project)
 
 
 def applicable(q: Question, deliverable: Any) -> bool:
@@ -1283,3 +1323,19 @@ def answer(doc: Dict[str, Any], key: str) -> Any:
     if key in OWNER_ANSWERED and not attestation_of(doc, key)["declares"]:
         return NOT_DETERMINED
     return v
+
+
+def read_owner_delivery(project: Path, rel: str) -> Tuple[Dict[str, Any], str]:
+    """Read the owner-attested route used by Phase 3 and both front doors.
+
+    An unattested value is NOT_DETERMINED through ``answer``. Keep this one
+    predicate for raw design answers and the generated declaration.
+    """
+    doc, err = load(project / rel)
+    if (err or not isinstance(doc, dict)
+            or not isinstance(doc.get("answers"), dict)):
+        raise ValueError(f"{rel}: {err or 'invalid answer mapping'}")
+    delivery = str(answer(doc, "deliverable")).strip().upper()
+    if delivery not in DELIVERABLES:
+        raise ValueError(f"{rel}: no owner-attested DIE or HARDMACRO answer")
+    return doc, delivery

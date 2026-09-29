@@ -84,7 +84,7 @@ from typing import (Any, Callable, Dict, FrozenSet, Iterable, List, Mapping,
 import _audit_scope
 import _path_layout as _pl
 import _gds_admission as _ga
-import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
+import verdict as _V  # declared step verdicts + the one cascade rule
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _prose_polarity as _pp
 import _runner_measurement as _rmeas
@@ -93,7 +93,9 @@ import _reference_flow_boundary as _rfb
 import _source_record_merge as _srm  # per-source merge: silence cannot erase
 from _ppa import power as _ppa_power                              # noqa: E402
 from _ppa import area as _ppa_area                                # noqa: E402
+from _ppa import timing as _ppa_timing                            # noqa: E402
 from _ppa import pdn_em_presweep as _ppa_presweep                # noqa: E402
+from _ppa import pdn_small_core as _pdn_small                     # noqa: E402
 from _ppa.power import pdn_ring_dimensions as _pdn_ring_dimensions
 import floorplan_contract as _fpc  # design-declared fixed floorplan + DRV limits
 from _rtl_include_hub import drop_include_hubs as _drop_include_hubs  # shared aggregator filter
@@ -115,6 +117,9 @@ import metal_layer_density_check as _mld  # metal-layer NAME authority (producer
 import _signoff_drc_format as _sdf  # sign-off DRC producer classification (ONE answer)
 import step_metrics as _sm  # vibe-ic#1080 — the ONE per-step metrics mechanism
 import synth_area_stats_emit as _sas  # #457 — synth area figure -> declared artefact
+import synth_recipe_postroute as _srp  # post-route PDK recipe election
+import synth_full_adder_map as _sfam  # Liberty-proven multi-output actuator
+import excluded_master_census_check as _emc  # advisory cell-policy census
 import _gate_invocation  # #492/#544 — tell a gate's verdict from a bad invocation
 import _sta_basis  # the ONE reader of the `STA_BASIS:` stamp (no second copy)
 import emitted_script_portability_check as _esp  # the ONE host-path predicate
@@ -606,8 +611,8 @@ class StepResult:
     output_files: List[str] = field(default_factory=list)
     extras: Dict[str, Any] = field(default_factory=dict)
     # ── the structured fields R-0915-85 put beside the verdict ──────────
-    # `status` above is now one of the FIVE words in `programs/verdict.py`, and
-    # every distinction the deleted vocabulary carried lives here. The module's
+    # `status` is a declared word in `programs/verdict.py`, including the
+    # distinct DRC attribution tier. Other distinctions live here. The module's
     # DESIGN section says why; `_V.StepVerdict` is where the same rules are
     # enforced for readers. Validated in `__post_init__` below, so a site that
     # says NOT_MEASURED without a reason — or NOT_APPLICABLE without naming the
@@ -637,7 +642,7 @@ class StepResult:
 # the tool IS present and the input IS present, but the input cannot support
 # the operation, so NOTHING is known about the design. Never green — see
 # `_aggregate_verdict`.
-# R-0915-85 — THE DECLARED VOCABULARY IS THE FIVE, AND IT IS DERIVED.
+# R-0915-85 — THE DECLARED VOCABULARY IS DERIVED FROM verdict.Verdict.
 #
 # The six words above are what this module used to declare, and the comments
 # that precede them are the argument for the collapse rather than against it:
@@ -908,6 +913,105 @@ def _declared_transform_exec(project: Optional[Path], path: Path, step: str,
     except Exception:  # noqa: BLE001 — bookkeeping never breaks the run
         pass
     return result
+
+
+def _declare_immutable_transform(project: Path, source: Path, output: Path,
+                                 step: str, tool: str, command: str) -> bool:
+    """Declare a finished output only when its preserved input is ledgered.
+
+    The tool's original bytes remain at ``source``.  The finishing writer may
+    work on ``output`` until it is complete; this one record then binds the
+    two *different* paths and their actual digests.  A missing or stale input
+    declaration cannot be repaired by claiming the current output digest.
+    """
+    source, output = Path(source), Path(output)
+    in_rel, out_rel = _project_rel(project, source), _project_rel(project, output)
+    in_sha, out_sha = _file_sha256(source), _file_sha256(output)
+    declared = _newest_declared_sha(project, in_rel) if in_rel else None
+    if (not in_rel or not out_rel or in_rel == out_rel or not in_sha or
+            not out_sha or declared != in_sha):
+        if in_rel and in_sha and declared and declared != in_sha:
+            _record_unexplained_rewrite(project, in_rel, declared, in_sha, step)
+        return False
+    # #365: the RUNNER writes this row after the finishing writer returned (or,
+    # for `finish`, with no invocation at all); nothing timed the tool, so the
+    # duration is `null` and the row says it was reconstructed, not observed.
+    entry = {
+        "record": "declared_transform", "tool": tool, "command": command,
+        "producing_step": step, "exit_code": 0, "duration_ms": None,
+        "reconstructed": True,
+        "timestamp": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "inputs": {in_rel: in_sha}, "outputs": {out_rel: out_sha},
+    }
+    _rmeas.attach(project, entry)
+    with (Path(project) / "provenance.jsonl").open("a") as stream:
+        stream.write(json.dumps(entry) + "\n")
+    return True
+
+
+class _GdsTransformChain:
+    """Keep every successful finishing state while the delivery path is built.
+
+    Existing GDS writers work in place.  Their working path is deliberately
+    unledgered until publication; after each changed pass, a separate snapshot
+    is declared from the preceding immutable head.  The pre-pass comparison
+    catches an edit to the working file between two finishing writers.
+    """
+
+    def __init__(self, project: Path, source: Path, working: Path,
+                 *, declare: bool = True):
+        self.project, self.head, self.working = project, source, working
+        self.declare = declare and (project / "provenance.jsonl").is_file()
+        self.failed: Optional[str] = None
+        self.count = 0
+
+    def run(self, _unused: Optional[Path], path: Path, step: str,
+            tool: str, command: str, run: Callable[[], Any]) -> Any:
+        if Path(path) != self.working:
+            self.failed = f"{step}: unexpected GDS working path"
+        if self.failed:
+            return run()
+        before = _file_sha256(self.working)
+        head_sha = _file_sha256(self.head)
+        if before != head_sha:
+            self.failed = f"{step}: GDS changed between declared transforms"
+            return run()
+        if self.declare and _newest_declared_sha(
+                self.project, _project_rel(self.project, self.head) or "") != head_sha:
+            self.failed = f"{step}: GDS input does not match its declaration"
+            return run()
+        result = run()
+        after = _file_sha256(self.working)
+        if after is None:
+            self.failed = f"{step}: GDS writer removed its output"
+            return result
+        if after == before:
+            return result
+        # A failed tool can leave a partial in-place GDS.  The byte change
+        # proves only that it wrote, not that its native operation completed.
+        # Every changed finishing writer must report explicit success before
+        # its bytes can become a declared transform or the final delivery.
+        if not (isinstance(result, tuple) and result and result[0] is True):
+            note = result[1] if isinstance(result, tuple) and len(result) > 1 else result
+            self.failed = f"{step}: GDS writer did not complete: {note}"
+            return result
+        self.count += 1
+        snapshot = self.head.parent / f"{self.working.stem}.{self.count}.{time.time_ns()}.gds"
+        shutil.copyfile(self.working, snapshot)
+        if self.declare and not _declare_immutable_transform(
+                self.project, self.head, snapshot, step, tool, command):
+            self.failed = f"{step}: GDS transform input was not declared"
+            return result
+        self.head = snapshot
+        return result
+
+    def finish(self, command: str) -> bool:
+        if self.failed or _file_sha256(self.working) != _file_sha256(self.head):
+            return False
+        return (not self.declare or _declare_immutable_transform(
+            self.project, self.head, self.working, "gds:finishing", "klayout",
+            command))
 
 
 def set_invocation_provenance_sink(project: Optional[Path]) -> None:
@@ -2537,6 +2641,8 @@ def _phase2_emitted_period_ns(project: Path, top: str = "") -> Optional[float]:
     fpga_dir = _pl.fpga_early_dir(project)
     stage2_dir = _pl.constraints_dir(project)
     self_copy = (stage2_dir / f"{top}.sdc") if top else None
+    # Step 7's own runner-authored deck is a product of THIS resolution too.
+    self_step7 = (stage2_dir / f"{top}.asic.sdc") if top else None
     _p2_roots = (str(fpga_dir), str(stage2_dir))
     periods: List[float] = []
     for c in _sdc.collect_create_clocks(project, extra_dirs=[fpga_dir, stage2_dir]):
@@ -2549,6 +2655,8 @@ def _phase2_emitted_period_ns(project: Path, top: str = "") -> Optional[float]:
             continue
         if self_copy is not None and src == str(self_copy):
             continue  # never inherit from our own prior-run canon copy
+        if self_step7 is not None and src == str(self_step7):
+            continue  # nor from step 7's own runner-authored deck
         p = c.get("period_ns")
         if isinstance(p, (int, float)) and p > 0:
             periods.append(float(p))
@@ -3176,12 +3284,19 @@ def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, obj
     return out
 
 
+from sdc_environment import (  # R8 constraints, outside the PPA runner ledger
+    _SDC_ENV_KEYS, _sdc_environment_values, _sdc_environment_prefix,
+    _sdc_environment_pdk_values, _sdc_environment_design_values,
+)
+
 def _drv_constraints_sdc_block(slew_ns: Optional[float],
                                cap_pf: Optional[float],
                                note: str = "",
                                max_fanout: Optional[int] = None,
                                fanout_note: str = "",
-                               supply_ports: Sequence[str] = ()) -> str:
+                               supply_ports: Sequence[str] = (),
+                               slew_source: str = "",
+                               cap_source: str = "") -> str:
     """Render the DRV (`set_max_transition` / `set_max_capacitance` /
     `set_max_fanout`) SDC block.
 
@@ -3252,16 +3367,24 @@ def _drv_constraints_sdc_block(slew_ns: Optional[float],
         # other two get [current_design], which every DRV command accepts.
         scope = "[get_pins -hierarchical *]"
     if slew_ns is not None:
+        if slew_source:
+            lines.append(f"# R8 source: {slew_source}")
         # NOT `scope`: set_max_transition REFUSES a Pin ("Error 100:
         # unsupported object type Pin"), so the hierarchical-pin scope that
         # set_max_capacitance takes would abort the SDC here.
         lines.append(f"set_max_transition {slew_ns} [current_design]")
         if supplies:
+            if slew_source:
+                lines.append(f"# R8 source: {slew_source}")
             lines.append(
                 f"set_max_transition {slew_ns} $_vibeic_drv_signal_ports")
     if cap_pf is not None:
+        if cap_source:
+            lines.append(f"# R8 source: {cap_source}")
         lines.append(f"set_max_capacitance {cap_pf} {scope}")
         if supplies:
+            if cap_source:
+                lines.append(f"# R8 source: {cap_source}")
             lines.append(
                 f"set_max_capacitance {cap_pf} $_vibeic_drv_signal_ports")
     if max_fanout is not None:
@@ -3600,7 +3723,10 @@ def _reconcile_staged_sdc_driving_cell(sdc_text: str, active_liberty: str,
 def _ensure_staged_sdc_drv(sdc_text: str, active_liberty: str,
                            container: str = "",
                            project: Optional[Path] = None,
-                           pdk_name: str = "") -> Tuple[str, Dict[str, object]]:
+                           pdk_name: str = "",
+                           supply_ports: Optional[Sequence[str]] = None,
+                           drv_block_out: Optional[Dict[str, Any]] = None,
+                           ) -> Tuple[str, Dict[str, object]]:
     """Append the ACTIVE PDK's DRV limits to a staged/design-supplied SDC that
     declares none, so `repair_design` has a slew/cap target.
 
@@ -3695,9 +3821,17 @@ def _ensure_staged_sdc_drv(sdc_text: str, active_liberty: str,
             + " (not fabricated).")
     for _u in _fanout_unread:                 # UNREAD IS NOT EMPTY
         _fanout_note = (_fanout_note + "; " if _fanout_note else "") + _u
+    if drv_block_out is not None:
+        drv_block_out.update(slew_ns=slew, cap_pf=cap, note=note,
+                             max_fanout=fanout, fanout_note=_fanout_note,
+                             slew_source=str(drv.get("slew_source") or ""),
+                             cap_source=str(drv.get("cap_source") or ""))
     return text + _drv_constraints_sdc_block(
         slew, cap, note, max_fanout=fanout, fanout_note=_fanout_note,
-        supply_ports=_producer_supply_ports_for_drv(project)), info
+        supply_ports=(_producer_supply_ports_for_drv(project)
+                      if supply_ports is None else tuple(supply_ports)),
+        slew_source=str(drv.get("slew_source") or ""),
+        cap_source=str(drv.get("cap_source") or "")), info
 
 
 def _resolve_staged_silicon_sdc(project: Path) -> Optional[Path]:
@@ -3782,10 +3916,29 @@ def _resolve_staged_silicon_sdc(project: Path) -> Optional[Path]:
         flow_owned = (
             _sdc.generated_top_entity(head) is not None
             or "# Auto-generated minimal SDC for silicon top " in _lead_text
+            # The step-7 producer reserves this filename. Its contents can be
+            # a transformed design deck and therefore need not carry an auto
+            # banner or still match the latest record.
+            or (candidate.parent == _pl.constraints_dir(project)
+                and candidate.name.endswith(".asic.sdc"))
+            or _is_step7_output(project, candidate)
         )
         if not flow_owned:
             return candidate
     return None
+
+
+def _is_step7_output(project: Path, candidate: Path) -> bool:
+    """Is ``candidate`` a hash-verified Step-7 copy from any prior run?
+
+    A copy derived from a design SDC has no auto banner. The current record
+    path alone loses ownership when Step 7 switches to an automatic deck.
+    """
+    try:
+        rel = str(candidate.relative_to(project))
+    except ValueError:
+        return False
+    return rel in _ppa_timing.owned_step7_outputs(sys.modules[__name__], project)
 
 
 # A flow-templated SDC parameterises the whole deck on ``::env(...)``
@@ -4135,7 +4288,11 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
                             drv_note: str = "",
                             liberty_path: str = "",
                             pdk_name: str = "",
-                            staged_sdc_note: str = "") -> str:
+                            staged_sdc_note: str = "",
+                            container: str = "",
+                            supply_ports: Optional[Sequence[str]] = None,
+                            drv_block_out: Optional[Dict[str, Any]] = None,
+                            ) -> str:
     """Build the minimal silicon-top auto-SDC text emitted by ``step_pnr`` when
     the project stages no ``constraints/*.sdc`` for silicon.
 
@@ -4184,8 +4341,15 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
         try:
             import re as _re_tu
             _lib_head = Path(liberty_path).read_text(errors="ignore")[:200000]
+            # Liberty comments are not declarations. A commented ps unit
+            # before the live ns unit must never tighten every SDC path 1000x.
+            _lib_head = _re_tu.sub(
+                r"/\*.*?\*/|//[^\n]*",
+                lambda m: _re_tu.sub(r"[^\n]", " ", m.group()),
+                _lib_head, flags=_re_tu.S)
             _m_tu = _re_tu.search(
-                r'time_unit\s*:\s*"(\d+(?:\.\d+)?)\s*([pnum]?s)"', _lib_head)
+                r'\btime_unit\s*:\s*"(\d+(?:\.\d+)?)\s*([pnum]?s)"',
+                _lib_head)
             if _m_tu:
                 _tu_scale = (float(_m_tu.group(1)) *
                              {"ps": 1e-3, "ns": 1.0,
@@ -4334,11 +4498,70 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
             "# max_fanout UNRESOLVED and at least one tier could not be READ "
             "(unread is not empty): " + "; ".join(_fanout_unread) + "\n")
     sdc_text += _unread_fanout_comment
+    _env, _env_unread = _sdc_environment_values(
+        project, liberty_path, container, drv_slew_ns, drv_cap_pf,
+        _to_container_path)
+    sdc_text += _sdc_environment_prefix(_env, _env_unread, time_scale=_tu_scale)
+    _env_slew = _env.get("set_max_transition")
+    _env_cap = _env.get("set_max_capacitance")
+    # Design and LibreLane config time values are ns. A default read directly
+    # from Liberty is already expressed in that Liberty's own time_unit.
+    _env_slew_scale = (1.0 if _env_slew and
+                       _env_slew[1].startswith("liberty default ") else _tu_scale)
+    # FX_STEP7_ASIC_SDC: record the DRV block's arguments exactly as rendered
+    # (the environment-resolved values and their sources), so the PnR-time
+    # scope derivation re-renders the SAME block and finds it in the deck.
+    _blk_slew = float(_env_slew[0]) * _env_slew_scale if _env_slew else None
+    _blk_cap = float(_env_cap[0]) if _env_cap else None
+    _blk_slew_src = _env_slew[1] if _env_slew else ""
+    _blk_cap_src = _env_cap[1] if _env_cap else ""
+    if drv_block_out is not None:
+        drv_block_out.update(slew_ns=_blk_slew, cap_pf=_blk_cap,
+                             note=drv_note, max_fanout=_l9_fanout,
+                             fanout_note=_fanout_note,
+                             slew_source=_blk_slew_src, cap_source=_blk_cap_src)
     sdc_text += _drv_constraints_sdc_block(
-        drv_slew_ns, drv_cap_pf, drv_note,
+        _blk_slew, _blk_cap, drv_note,
         max_fanout=_l9_fanout, fanout_note=_fanout_note,
-        supply_ports=_producer_supply_ports_for_drv(project))
+        supply_ports=(_producer_supply_ports_for_drv(project)
+                      if supply_ports is None else tuple(supply_ports)),
+        slew_source=_blk_slew_src, cap_source=_blk_cap_src)
     return sdc_text
+
+
+# ---------------------------------------------------------------------------
+# STEP 7 — THE ASIC SDC, AUTHORED ONCE (FX_STEP7_ASIC_SDC)
+# ---------------------------------------------------------------------------
+# MEASURED (lane lls W23: spm x gf180mcuD, HARDMACRO, main 76a277544): step 7
+# FAILed on its own because its declared output `phase2/stage2/constraints/
+# *.sdc` was never produced. The ASIC SDC was authored INSIDE `step_pnr` (and a
+# second copy of the same four-call chain inside `step_prelayout_signoff`),
+# and step 7's canonical file was written only when the design staged an SDC.
+#
+# Now ONE author (`_ppa.timing.author_asic_sdc`, the code `step_pnr` ran
+# inline) and ONE step-7 producer (`_ppa.timing.emit_step7_asic_sdc`) writing
+# the declared path plus a sha-bound record. `step_pnr` READS that file
+# (`_ppa.timing.asic_sdc_for_pnr`); it
+# regenerates it through the same producer only when it is absent, stale or
+# made for another PDK, and says so.
+#
+# THE HONEST SPLIT. Everything the SDC states is design intent known at step
+# 7: the clock (L8/L9/L1 or the staged SDC), I/O delays, the design's own
+# exceptions, the synthesis fanout ladder, and liberty-derived units / DRV
+# limits / driving cell (PDK facts, not placement). ONE input is PnR-time: the
+# supply ports the pad-ring producer (step 15.5ic, `io_pad_chip_top.json`)
+# proves, which are excluded from the signal-only DRV scope. Step 7 authors
+# with NO supply ports; `step_pnr` applies that exclusion as a NAMED
+# derivation (`pad_ring_supply_port_drv_scope`), recorded with both shas, and
+# only when the producer names supply ports (a DIE with a generated pad ring).
+# The code is `_ppa.timing` (the runner's PPA ledger routes SDC logic there);
+# the runner passes itself as ``rt`` so the SDC builders above are composed,
+# never duplicated.
+ASIC_SDC_RECORD = _ppa_timing.ASIC_SDC_RECORD
+
+
+def _runner_module():
+    return sys.modules[__name__]
 
 
 # ---------------------------------------------------------------------------
@@ -8897,11 +9120,34 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
         # untouched grid keeps the tuned 40.0/8.0 byte-identical; a widened
         # one re-derives the offset with the auto plan's documented ratio.
         _o45 = 8.0 if _p45 == 40.0 else round(_p45 / _PDN_STRAP_OFFSET_DIV, 3)
+        _p4, _p5, _o4, _o5 = _p45, _p45, _o45, _o45
+        if strap_override:
+            # CR-7 — an override only TIGHTENS the EM remedy drawn above
+            # (`_pdn_small.merge_override`); verbatim when no EM floor hit.
+            _sky_tlef = None
+            for _layer, _target in (("met4", 4), ("met5", 5)):
+                _ov = next((v for k, v in strap_override.items()
+                            if str(k).lower() == _layer), None)
+                if not _ov:
+                    continue
+                if _sky_tlef is None:
+                    _sky_tlef = _read_pdk_text(
+                        getattr(pdk, "tech_lef", None), container) or ""
+                _cur = (_w4, _p4, _o4) if _target == 4 else (_w5, _p5, _o5)
+                _drawn = _pdn_small.merge_override(
+                    _layer, _ov, _cur if (_f4 or _f5) else None,
+                    spacing_um=_techlef_layer_spacing(_sky_tlef, _layer))
+                if _target == 4:
+                    _w4, _p4, _o4 = _drawn["width"], _drawn["pitch"], _drawn["offset"]
+                else:
+                    _w5, _p5, _o5 = _drawn["width"], _drawn["pitch"], _drawn["offset"]
         _em_note = ""
         if _f4 or _f5:
             _em_note = (
                 f"# EM-derived strap floor applied (pdn_em_sizing.json): "
-                f"met4 {_w4} met5 {_w5} pitch {_p45}\n")
+                f"met4 {_w4} met5 {_w5} pitch "
+                + (f"{_p4}" if _p4 == _p5 else f"met4 {_p4} met5 {_p5}")
+                + "\n")
         return (
             "# === v0.1.47 PDN: global connections + grid + ring ===\n"
             + _em_note +
@@ -8915,8 +9161,8 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
             + _core_block_pin_layers_tcl(["met4", "met5"])
             + _CORE_GRID_DEFINE_TCL +
             "  add_pdn_stripe -grid grid -layer met1 -width 0.48 -pitch 5.44 -offset 0 -followpins\n"
-            f"  add_pdn_stripe -grid grid -layer met4 -width {_w4} -pitch {_p45} -offset {_o45} -extend_to_core_ring\n"
-            f"  add_pdn_stripe -grid grid -layer met5 -width {_w5} -pitch {_p45} -offset {_o45} -extend_to_core_ring\n"
+            f"  add_pdn_stripe -grid grid -layer met4 -width {_w4} -pitch {_p4} -offset {_o4} -extend_to_core_ring\n"
+            f"  add_pdn_stripe -grid grid -layer met5 -width {_w5} -pitch {_p5} -offset {_o5} -extend_to_core_ring\n"
             "  add_pdn_connect -grid grid -layers {met1 met4}\n"
             "  add_pdn_connect -grid grid -layers {met4 met5}\n"
             "  pdngen\n"
@@ -9011,6 +9257,10 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
         # project's own measurement demands it. Pitch is re-derived with the
         # auto plan's documented spacing ratio when the wider strap needs it.
         _em_widened: List[str] = []
+        # The geometry before the EM floor, so a later budget override can
+        # tell which layers carry an EM remedy it must never loosen.
+        _pre_em_geom = [(st.get("width"), st.get("pitch"), st.get("offset"))
+                        for st in _stripes]
         if _emfl and _stripes:
             _stripes = [dict(st) for st in _stripes]
             for st in _stripes:
@@ -9176,11 +9426,39 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                     _em_widened.append(
                         f"{st['layer']} rail span pitch {_old_pitch}->{_new_pitch}um")
         if strap_override and _stripes:
+            # CR-7 — the budget override only TIGHTENS an EM remedy (pitch =
+            # min, width = max; `_pdn_small.merge_override`), and the record
+            # the deck already wrote into em_floor["applied"] is rewritten to
+            # the geometry actually drawn, keeping both inputs beside it.
             _stripes = [dict(st) for st in _stripes]
-            for st in _stripes:
+            for st, _pre in zip(_stripes, _pre_em_geom):
                 _ov = strap_override.get(str(st.get("layer")))
-                if _ov:
-                    st.update({k: _ov[k] for k in ("width", "pitch", "offset")})
+                if not _ov:
+                    continue
+                _lk = str(st.get("layer")).lower()
+                _em_geom = (None if (st.get("width"), st.get("pitch"),
+                                     st.get("offset")) == _pre
+                            else (st.get("width"), st.get("pitch"),
+                                  st.get("offset") or 0.0))
+                _drawn = _pdn_small.merge_override(
+                    str(st.get("layer")), _ov, _em_geom,
+                    spacing_um=_techlef_layer_spacing(_tlef_txt or "",
+                                                      str(st.get("layer"))),
+                    routing_fraction_max=float((straps or {}).get(
+                        "max_routing_fraction", 0.5)))
+                st.update({k: _drawn[k] for k in ("width", "pitch", "offset")})
+                if _em_geom is not None and isinstance(em_floor, dict):
+                    for _row in em_floor.get("applied", []):
+                        if str(_row.get("layer", "")).lower() != _lk:
+                            continue
+                        _row.update({
+                            "pitch_um": st["pitch"], "width_um": st["width"],
+                            "width_kept": (_pre[0] is not None and
+                                           float(st["width"]) == float(_pre[0])),
+                            "offset_um": st["offset"],
+                            "pitch_source": _drawn["pitch_source"],
+                            "em_remedy": _drawn["em_remedy"],
+                            "budget_override": _drawn["budget_override"]})
         if isinstance(plan_out, dict):
             plan_out.update({
                 "power_net": pwr, "ground_net": gnd,
@@ -16973,7 +17251,10 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
                           "LibreLane netlist checkers ran",
                           [str(netlist), str(stat), str(stats), str(folder / "state_out.json")])
     except (_ll.Refusal, OSError, ValueError) as exc:
-        return StepResult("synth", "FAIL", time.time() - t0, str(exc))
+        stopped = (_ll.tool_stop_reason(exc.code)
+                   if isinstance(exc, _ll.Refusal) else None)
+        return StepResult("synth", "NOT_MEASURED" if stopped else "FAIL",
+                          time.time() - t0, str(exc), reason_class=stopped or "")
 
 
 def step_synth(project: Path, top: str, pdk: PdkConfig,
@@ -17338,12 +17619,41 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # fail, correctly.
     _fo_notes: List[str] = []
     _abc_fanout = ""
+    _recipe_rows, _recipe_load_error = _srp.load(
+        PROGRAMS_DIR / "synth_recipe_postroute.json")
+    # The ledger's A/B identities must also match the bytes and tool image
+    # used by THIS invocation. Resolve lazily: an empty ledger has no recipe
+    # to elect and does not need a container probe.
+    _recipe_liberty_sha256 = (
+        _current_synth_liberty_sha256(liberty_c, container)
+        if _recipe_rows else None)
+    _recipe_image_digest = _step_image_digest(container) if _recipe_rows else None
+    if _recipe_image_digest in ("LOCAL_EXEC", "NO_CONTAINER"):
+        _recipe_image_digest = None
+    _recipe_choice = _select_postroute_synth_recipe(
+        str(getattr(pdk, "name", "") or ""), _recipe_rows,
+        fanout_cap=int(_fo_cap or 0),
+        liberty_sha256=_recipe_liberty_sha256,
+        image_digest=_recipe_image_digest)
+    if _recipe_load_error:
+        _recipe_choice = dict(_recipe_choice, verdict="NOT_MEASURED",
+                              reason=_recipe_load_error)
     if _fo_cap:
-        _abc_fanout = _ABC_FANOUT_SCRIPT.format(cap=int(_fo_cap))
-        _fo_notes.append(
-            f"max_fanout {_fo_cap} -> abc `buffer -N {_fo_cap}` after the "
-            f"stock mapping (no upsize/dnsize pass); cap from {_fo_why}")
+        _active_recipe = (_recipe_choice["recipe"]
+                          if _recipe_choice["verdict"] == "PASS"
+                          else "fanout_buffer")
+        if _active_recipe in ("abc_no_buffer", "fa_map_no_buffer"):
+            _abc_fanout = ""
+        else:
+            _recipe_template = (_ABC_ALT_FANOUT_SCRIPT
+                                if _active_recipe in ("abc_alt_buffer",
+                                                      "fa_map_alt_buffer")
+                                else _ABC_FANOUT_SCRIPT)
+            _abc_fanout = _recipe_template.format(cap=int(_fo_cap))
+        _fo_notes.append(f"max_fanout {_fo_cap}; ABC recipe {_active_recipe}; "
+                         f"cap from {_fo_why}")
     else:
+        _active_recipe = "fanout_buffer"
         _fo_notes.append(
             "max_fanout UNRESOLVED -> abc recipe UNCHANGED (no fabricated "
             "cap)")
@@ -17361,6 +17671,26 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # (techmap), applied after hierarchy/proc (so $add cells exist) and before
     # the generic `synth` mapping. Empty when neither knob is present.
     _arith_pre_clause = _swap_arith_clause + _adder_map_clause
+    _fa_clause = ""
+    if _active_recipe.startswith("fa_map_"):
+        _liberty_text, _liberty_why = read_text_or_container_cat(
+            str(pdk.liberty), container)
+        _fa_spec = _sfam.discover(_liberty_text or "")
+        if _fa_spec is None:
+            return StepResult("synth", "FAIL", time.time() - t0,
+                              "FA_MAP_CELL_UNAVAILABLE: " +
+                              (_liberty_why or "no unique truth-table-proven cell"))
+        try:
+            (out_dir / "_measured_fa_map.v").write_text(
+                _sfam.verilog_map(_fa_spec))
+        except OSError as _exc:
+            return StepResult("synth", "FAIL", time.time() - t0,
+                              f"FA_MAP_STAGE_FAILED: {type(_exc).__name__}")
+        _fa_clause = (f"read_liberty -lib -ignore_miss_dir {liberty_c}; "
+                      "extract_fa -fa; opt_clean; "
+                      f"techmap -map {out_dir_c}/_measured_fa_map.v; "
+                      "opt_clean; ")
+        _fo_notes.append(f"full-adder map cell {_fa_spec[0]} from active Liberty")
     yosys_cmd = (
         f"{setup}cd {out_dir_c} && "
         f"export PATH={TOOLS_IN_CONTAINER}/yosys/bin:"
@@ -17369,6 +17699,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         f"{pre_synth}"
         f"{_arith_pre_clause}"
         f"{_fsm_synth_clause}"
+        f"{_fa_clause}"
         f"dfflibmap{_du_flags} -liberty {liberty_c}; "
         f"{dlatch_clause}"
         f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
@@ -17477,6 +17808,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
             f"hierarchy -top {top}; proc; flatten; tribuf -logic; "
             f"{_arith_pre_clause}"
             f"{_fsm_synth_clause}"
+            f"{_fa_clause}"
             f"dfflibmap{_du_flags} -liberty {liberty_c}; "
             f"{dlatch_clause}"
             f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
@@ -17509,6 +17841,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 f"hierarchy -check -top {top}; proc; flatten; tribuf -logic; "
                 f"{_arith_pre_clause}"
                 f"{_fsm_synth_clause}"
+                f"{_fa_clause}"
                 f"dfflibmap{_du_flags} -liberty {liberty_c}; "
                 f"{dlatch_clause}"
                 f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
@@ -17563,6 +17896,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 f"hierarchy -top {top}; proc; flatten; tribuf -logic; "
                 f"{_arith_pre_clause}"
                 f"{_fsm_synth_clause}"
+                f"{_fa_clause}"
                 f"dfflibmap{_du_flags} -liberty {liberty_c}; "
                 f"{dlatch_clause}"
                 f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
@@ -17596,6 +17930,23 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                           extras={"synth_frontend": "none",
                                   "synth_frontend_reason": fe_reason,
                                   "macro_define_decision": _macro_def})
+    if _active_recipe.startswith("fa_map_"):
+        _fa_extracted = len(re.findall(r"Created \$fa cell\b", out + "\n" + err))
+        try:
+            _fa_netlist = netlist.read_text(encoding="utf-8", errors="ignore")
+        except OSError as _exc:
+            return StepResult("synth", "FAIL", time.time() - t0,
+                              f"FA_MAP_CENSUS_UNREADABLE: {type(_exc).__name__}",
+                              [str(log)])
+        _fa_mapped = len(re.findall(
+            rf"^\s*{re.escape(_fa_spec[0])}\s+\S+\s*\(", _fa_netlist, re.M))
+        if _fa_extracted and _fa_mapped < _fa_extracted:
+            return StepResult("synth", "FAIL", time.time() - t0,
+                              f"FA_MAP_LOST: extracted={_fa_extracted} "
+                              f"mapped={_fa_mapped}", [str(netlist), str(log)])
+        _recipe_choice = dict(
+            _recipe_choice, fa_cell=_fa_spec[0], mapped_fa_count=_fa_mapped,
+            actuator=("APPLIED" if _fa_mapped else "NO_EXTRACTABLE_FA"))
     # v1.6.596 — for #404 P3 ORGANIC. Defence-in-depth post-synth
     # net-rename pass. Even with hilomap applied, some Yosys versions
     # emit intermediate named tie nets that survive into the final
@@ -17937,6 +18288,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                               "chip_read_record": _chip_read_bound,
                               "reference_flow_qor_knobs": _rf_notes,
                               "synth_max_fanout": _fo_notes,
+                              "synth_recipe_evidence": _recipe_choice,
                               "macro_define_decision": _macro_def,
                               "area_stats": (str(_area_stats)
                                              if _area_stats else None)})
@@ -18848,7 +19200,7 @@ def _producer_cache_valid_for(out_dir: Path, kind: str, *,
 _STEP_PDK_HASH_CACHE: Dict[Tuple[str, Tuple[str, ...]], Dict[str, str]] = {}
 
 
-def _step_pdk_hasher(container: str):
+def _step_pdk_hasher(container: str, *, use_cache: bool = True):
     """A callable `paths -> {path: sha256}` that reads the PDK where it IS.
 
     MEASURED, and the reason this exists at all: on the configuration this was
@@ -18867,7 +19219,7 @@ def _step_pdk_hasher(container: str):
     matching PDK."""
     def _hash(paths: Sequence[str]) -> Dict[str, str]:
         key = (container or "", tuple(paths))
-        hit = _STEP_PDK_HASH_CACHE.get(key)
+        hit = _STEP_PDK_HASH_CACHE.get(key) if use_cache else None
         if hit is not None:
             return hit
         out: Dict[str, str] = {}
@@ -18900,7 +19252,8 @@ def _step_pdk_hasher(container: str):
                         out[parts[1].strip()] = parts[0]
             except Exception:  # noqa: BLE001 — a failed probe is not a match
                 pass
-        _STEP_PDK_HASH_CACHE[key] = out
+        if use_cache:
+            _STEP_PDK_HASH_CACHE[key] = out
         return out
     return _hash
 
@@ -19141,6 +19494,15 @@ def _step_inputs(project: Path, kind: str, top: str, args: Any,
         # follows the resolver; where it came from is DISCLOSED instead.
         _add("sdc", _sdc)
         knobs["sdc_staged"] = "yes" if _sdc else "no"
+        # Step 7 is outside step_pnr's recorder. Bind its authored deck by
+        # value, so a builder-only change invalidates the routed outputs.
+        # Absent records remain cacheable under their existing policy.
+        try:
+            _r = json.loads((_pl.constraints_dir(project)
+                             / _ppa_timing.ASIC_SDC_RECORD).read_text())
+            knobs["step7_deck_sha256"] = str(_r.get("deck_sha256") or "")
+        except (OSError, ValueError, AttributeError):
+            knobs["step7_deck_sha256"] = ""
         if _sdc is not None:
             try:
                 _in_design = Path(_sdc).resolve().is_relative_to(
@@ -19710,6 +20072,42 @@ _ABC_FANOUT_SCRIPT = (
     " -script +strash;&get,-n;&fraig,-x;&put;scorr;dc2;dretime;strash;"
     "&get,-n;&dch,-f;&nf,{{D}};&put;buffer,-N,{cap}")
 
+# An alternative ABC mapping is reachable ONLY through matched post-route
+# evidence.  It retains the fanout bound and changes only the dch option.
+_ABC_ALT_FANOUT_SCRIPT = (
+    " -script +strash;&get,-n;&fraig,-x;&put;scorr;dc2;dretime;strash;"
+    "&get,-n;&dch;&nf,{{D}};&put;buffer,-N,{cap}")
+
+
+def _current_synth_liberty_sha256(liberty_path: str, container: str) -> Optional[str]:
+    """Hash the exact Liberty path Yosys reads in the current execution route."""
+    try:
+        if _cex.no_container_route():
+            return hashlib.sha256(Path(liberty_path).read_bytes()).hexdigest()
+        if not container:
+            return None
+        cp = _cex.run_in_container_supervised(
+            container, f"sha256sum {shlex.quote(liberty_path)}", ceiling_s=120)
+        if cp.returncode == 0:
+            line = (cp.stdout or "").splitlines()
+            if len(line) == 1:
+                match = re.fullmatch(r"([0-9a-fA-F]{64})\s+\*?.+", line[0])
+                if match:
+                    return match.group(1).lower()
+    except Exception:  # noqa: BLE001 — an unavailable probe cannot elect a recipe
+        pass
+    return None
+
+
+def _select_postroute_synth_recipe(pdk_name: str, rows: Sequence[Mapping[str, Any]],
+                                   *, fanout_cap: int = 0,
+                                   liberty_sha256: Optional[str] = None,
+                                   image_digest: Optional[str] = None) -> Dict[str, Any]:
+    """Select a PDK recipe only with matched post-route A/B on two designs."""
+    return _srp.select(pdk_name, rows, fanout_cap=fanout_cap,
+                       liberty_sha256=liberty_sha256,
+                       image_digest=image_digest)
+
 
 def _flow_default_max_fanout_read(project: Path, pdk: str):
     """``(cap|None, evidence, unread_reason)`` — like
@@ -19785,7 +20183,7 @@ def _synth_max_fanout(project: Path, pdk_name: str, liberty_path: str = "",
     """
     unread: List[str] = []
     try:
-        fo = (_l9_declared_max_fanout(project, pdk_name)
+        fo = (_l9_declared_max_fanout(project, pdk_name, liberty_path)
               or _rtl_replication_fanout_bound(project))
     except Exception as exc:  # noqa: BLE001
         fo = None
@@ -19881,7 +20279,8 @@ _LAST_FANOUT_SOURCE: Dict[str, str] = {}
 _RE_LIBS_REF_STDCELL = re.compile(r"libs\.ref/([A-Za-z0-9_]+)/(?:lib|techlef|lef)/")
 
 
-def _active_std_cell_library(project: Path, pdk: str = "") -> str:
+def _active_std_cell_library(project: Path, pdk: str = "",
+                             liberty_path: str = "") -> str:
     """Best-effort name of the standard-cell library THIS run builds against
     (e.g. the `<name>` in `<pdk>/libs.ref/<name>/lib/...`), or "" when it
     cannot be resolved yet.
@@ -19894,6 +20293,23 @@ def _active_std_cell_library(project: Path, pdk: str = "") -> str:
     chip-AGNOSTIC: reads the PDK path SHAPE out of this run's own artefacts;
     no library, PDK or chip name is written here."""
     del pdk  # the library is read from the resolved paths, not guessed from the PDK
+    # THE RESOLVED PDK LIBERTY FIRST (FX_STEP7_ASIC_SDC). It IS the library this
+    # run builds against, and it is known before any artefact below exists.
+    # MEASURED (spm x gf180mcuD DIE, 986343fef): with no liberty given, synth
+    # and step 7 resolved nothing (L9's per-library fanout row missed -> the
+    # PDK default 10), while at PnR time the glob below hit the pad-ring
+    # record's IO-library paths and returned `gf180mcu_fd_io` -- an IO library,
+    # not a standard-cell one -- which happened to match the `gf180mcu_*` row.
+    # The liberty path is read by the SAME resolver `_l9_declared_max_fanout`
+    # uses (`declared_clock_period.library_name_from_liberty`), so the two
+    # never name different libraries for one liberty.
+    try:
+        import declared_clock_period as _dcp
+        _lib = _dcp.library_name_from_liberty(str(liberty_path or ""))
+    except Exception:                                        # noqa: BLE001
+        _lib = ""
+    if _lib:
+        return _lib
     try:
         for rel in ("phase3/stage3/pnr/pnr.tcl",
                     "phase3/stage3/extracted/extract_" "*.tcl",
@@ -19911,7 +20327,7 @@ def _active_std_cell_library(project: Path, pdk: str = "") -> str:
 
 
 def _l9_declared_max_fanout(project: Path,
-                            pdk: str = "") -> Optional[int]:
+                            pdk: str = "", liberty_path: str = "") -> Optional[int]:
     """Return the design's L9-declared `SYNTH_MAX_FANOUT` cap as a positive int,
     or None when L9 declares none. Reads ONLY the L9 constraints/floorplan doc
     (input docs or the generated L9) — a blind-legal design input, same source +
@@ -19957,7 +20373,9 @@ def _l9_declared_max_fanout(project: Path,
     # rule the staged-flow-config tier below uses — a foreign library's row
     # never reaches this run, and a row with no number declares nothing.
     try:
-        _scl = _active_std_cell_library(project, pdk) or ""
+        import declared_clock_period as _dcp
+        _scl = (_dcp.library_name_from_liberty(liberty_path)
+                or _active_std_cell_library(project, pdk) or "")
     except Exception:                                        # noqa: BLE001
         _scl = ""
     for root in roots:
@@ -19992,8 +20410,7 @@ def _l9_declared_max_fanout(project: Path,
     # wrong run. §4.05: a declaration is READ, never fabricated — no config,
     # no matching scope, or a non-positive value all leave this None.
     try:
-        _drv = _fpc.declared_drv_limits(project, pdk or "",
-                                        _active_std_cell_library(project, pdk))
+        _drv = _fpc.declared_drv_limits(project, pdk or "", _scl)
         _fo_cfg = _drv.get("max_fanout")
         if isinstance(_fo_cfg, int) and _fo_cfg > 0:
             _LAST_FANOUT_SOURCE["note"] = (
@@ -20054,12 +20471,12 @@ def _l9_library_scoped_fanout(text: str, library: str,
     before a glob. A row with no positive integer declares nothing. No
     `library` and no `pdk` -> None: a per-library value is never applied to a
     run whose library is unknown."""
-    import fnmatch as _fnm
+    import declared_clock_period as _dcp
     actual = [a.lower() for a in (library, pdk) if a]
     if not actual:
         return None
     col = None
-    best = None
+    rows = []
     for line in text.splitlines():
         # Strip Markdown emphasis (`**x**`) and code ticks only: a single `*`
         # is the key's own glob (`gf180mcu_*`) and must survive.
@@ -20081,16 +20498,15 @@ def _l9_library_scoped_fanout(text: str, library: str,
         m = re.fullmatch(r"\*{0,2}\s*(\d+)\s*\*{0,2}", val)
         if not key or not m or int(m.group(1)) <= 0:
             continue
-        for a in actual:
-            if key == a:
-                rank = 0
-            elif _fnm.fnmatchcase(a, key):
-                rank = 1
-            else:
-                continue
-            if best is None or rank < best[0]:
-                best = (rank, int(m.group(1)), cells[0])
-    return (best[1], best[2]) if best else None
+        rows.append({"key": key, "cap": int(m.group(1)),
+                     "display_key": cells[0]})
+    matches = _dcp.match_rows(rows, actual)
+    if not matches:
+        return None
+    # Preserve the documented exact-row precedence while sharing the clock
+    # resolver's library-family matching rule (including separator collapse).
+    best = min(matches, key=lambda row: 0 if row["key"] in actual else 1)
+    return best["cap"], best["display_key"]
 
 
 def _rtl_replication_fanout_bound(project: Path) -> Optional[int]:
@@ -20597,7 +21013,8 @@ def _effective_die_um(die_um_flag: str,
 
 
 def _strap_plan_core_floor(pdk: "PdkConfig", container: str = "",
-                           detail: Optional[Dict[str, Any]] = None
+                           detail: Optional[Dict[str, Any]] = None,
+                           strap_override: Optional[Mapping[str, Mapping[str, Any]]] = None
                            ) -> Tuple[Optional[int], str]:
     """`(side_um, basis)`: the smallest SQUARE core on which the strap plan
     this run's PDN deck will emit can be built -- the CONSERVATIVE floor an
@@ -20620,7 +21037,8 @@ def _strap_plan_core_floor(pdk: "PdkConfig", container: str = "",
     info: Dict[str, Any] = detail if detail is not None else {}
     plan: Dict[str, Any] = {}
     try:
-        deck = _build_pdn_tcl(pdk, container or None, plan_out=plan)
+        kw = ({"strap_override": strap_override} if strap_override else {})
+        deck = _build_pdn_tcl(pdk, container or None, plan_out=plan, **kw)
     except Exception as exc:  # noqa: BLE001
         why = (f"the PDN deck could not be built to read its strap plan "
                f"({type(exc).__name__}: {exc})")
@@ -20668,6 +21086,7 @@ def _strap_plan_core_floor(pdk: "PdkConfig", container: str = "",
                 reason=(None if side else basis),
                 growth_floor_um=side, growth_floor_basis=basis,
                 plan_source=source, stripes=straps,
+                routing_budget=plan.get("routing_budget"),
                 directions={st["layer"]: directions.get(st["layer"])
                             for st in straps},
                 site_dims_um=list(dims) if dims else None,
@@ -23525,7 +23944,6 @@ def _emit_step18_spare_record(project: Path, out_dir: Path, log_path: Path,
 _DONT_USE_FAMILY_PATTERNS = (".*probe_.*", ".*probec_.*", ".*lpflow.*",
                              ".*clkdly.*", ".*dly.*", ".*delay.*")
 
-
 def _dont_use_family_cells(cell_names: Sequence[str]) -> List[str]:
     """The library cells `_DONT_USE_FAMILY_PATTERNS` exclude, by whole name."""
     rx = [re.compile(p, re.I) for p in _DONT_USE_FAMILY_PATTERNS]
@@ -23539,6 +23957,64 @@ _STEP32_DONT_USE = (
     lambda text: _dont_use_family_cells(_V1_6_596_RE_CELL_DECL.findall(text)),
     "phase3_one_shot_runner._DONT_USE_FAMILY_PATTERNS (the direct deck's "
     "resizer dont_use families) over the step's resolved CELL_LIBS")
+
+
+def _resolved_cell_policy(configs: Dict[str, Path], pdk_root: Path,
+                          pdk_name: str, *, required: Sequence[str] = (
+                          )) -> Tuple[Dict[str, Path], List[str]]:
+    """Derive exclusions from every active Liberty in each resolved step.
+
+    The resolver, not ``pdk.liberty``, chooses CELL_LIBS. A partial read is a
+    refusal because an omitted corner could still insert an excluded master.
+    """
+    import librelane_contract as _ll
+    out = dict(configs)
+    covered: List[str] = []
+    guest = f"/pdk/{pdk_name}/"
+    for step, config in configs.items():
+        doc = json.loads(config.read_text())
+        if "EXTRA_EXCLUDED_CELLS" not in doc:
+            continue
+        inherited = doc["EXTRA_EXCLUDED_CELLS"] or []
+        if not isinstance(inherited, list) or any(
+                not isinstance(name, str) for name in inherited):
+            raise _ll.Refusal("LL_CELL_POLICY_INVALID", f"{step}: {config}")
+        libs = doc.get("CELL_LIBS")
+        groups = libs.values() if isinstance(libs, dict) else [libs]
+        paths: set[str] = set()
+        for group in groups:
+            members = group if isinstance(group, list) else [group]
+            if any(not isinstance(path, str) or not path for path in members):
+                raise _ll.Refusal("LL_CELL_POLICY_LIBERTY_UNDECLARED",
+                                  f"{step}: {config}")
+            paths.update(members)
+        if not paths:
+            raise _ll.Refusal("LL_CELL_POLICY_LIBERTY_UNDECLARED",
+                              f"{step}: {config}")
+        excluded = set(inherited)
+        for value in sorted(paths):
+            host = (Path(pdk_root) / pdk_name / value[len(guest):]
+                    if value.startswith(guest) else Path(value))
+            try:
+                text = host.read_text(errors="replace")
+            except OSError as exc:
+                raise _ll.Refusal("LL_CELL_POLICY_LIBERTY_UNREADABLE",
+                                  f"{step}: {value} ({host}): {exc}") from exc
+            excluded.update(_dont_use_family_cells(
+                _V1_6_596_RE_CELL_DECL.findall(text)))
+        out[step] = _ll.derive_step_config(
+            config, config.with_name(config.stem + ".cell-policy.json"),
+            {"EXTRA_EXCLUDED_CELLS": (
+                sorted(excluded),
+                "phase3_one_shot_runner._DONT_USE_FAMILY_PATTERNS over "
+                f"{step} resolved CELL_LIBS ({len(paths)} active Liberty files); "
+                "union with declared/PDK exclusions")})
+        covered.append(step)
+    missing = sorted(set(required) - set(covered))
+    if missing or not covered:
+        raise _ll.Refusal("LL_CELL_POLICY_NO_CONSUMER",
+                          f"missing exclusion-bearing resolved configs: {missing or list(configs)}")
+    return out, covered
 
 
 def _dont_use_family_fallback_tcl() -> str:
@@ -24777,6 +25253,15 @@ def _write_router_drc_receipt(out_dir: Path, routed_def: Path,
     return receipt
 
 
+def _empty_router_report_status(pnr_out: Path) -> Tuple[bool, Optional[Path]]:
+    """Use the audit's one digest-bound decision for the router's empty report."""
+    report = pnr_out / ROUTER_DRC_REPORT_NAME
+    if not report.is_file() or report.stat().st_size != 0:
+        return False, None
+    from eda_report_audit import _empty_router_drc_receipt  # noqa: PLC0415
+    return True, _empty_router_drc_receipt(report)
+
+
 def _router_drc_report_block(pnr_out: Path, log_text: str) -> str:
     """The router's OWN DRC report for this route, as a block for
     `routed.drc.rpt` -- or a named statement of why there is none.
@@ -24805,9 +25290,13 @@ def _router_drc_report_block(pnr_out: Path, log_text: str) -> str:
         body = rpt.read_text(errors="ignore").strip()
         head = (f"# source: detailed_route -output_drc "
                 f"{ROUTER_DRC_REPORT_NAME} ({len(body)} B)\n")
-        return head + (body if body else
-                       "# (the router wrote an EMPTY report -- it found no "
-                       "residual violations)")
+        if body:
+            return head + body
+        _, receipt = _empty_router_report_status(pnr_out)
+        return head + ("# DRC_EMPTY_ZERO_CORROBORATED: current digest-bound "
+                       "route receipt proves final count zero"
+                       if receipt else "# DRC_EMPTY_NOT_MEASURED: EMPTY report; "
+                       "no current digest-bound route receipt proves final count zero")
     if "ROUTE_DRC_REPORT_UNSUPPORTED" in log_text:
         return ("# UNAVAILABLE: this OpenROAD build's detailed_route does not\n"
                 "# accept -output_drc (the run logged "
@@ -26821,6 +27310,22 @@ def _post_buffered_repair_tcl(marker_prefix: str, marker_suffix: str = "",
     )
 
 
+def _drv_after_edit_probe_tcl(marker: str) -> str:
+    """Ask OpenROAD for the final DRV tables after a netlist or route edit.
+
+    This is advisory until the published corpus has been swept.  The later
+    sign-off STA, with its own SDC and extracted parasitics, owns the zero-count
+    verdict; a failed query is disclosed rather than treated as zero.
+    """
+    return (
+        f'puts "{marker}_DRV_CENSUS_BEGIN"\n'
+        'if {[catch {report_check_types -max_slew -max_capacitance -violators} '
+        f'_drv_sc]}} {{ puts "{marker}_DRV_CENSUS_UNMEASURED: $_drv_sc" }}\n'
+        'if {[catch {report_check_types -max_fanout -violators} '
+        f'_drv_fo]}} {{ puts "{marker}_FANOUT_CENSUS_UNMEASURED: $_drv_fo" }}\n'
+        f'puts "{marker}_DRV_CENSUS_END"\n')
+
+
 # ORGANIC (spm clean-run 2026-07-11) — BOUND the post-route repair reroute's detailed_route.
 # The base route (Step 21) runs an UNBOUNDED detailed_route that CONVERGES to 0
 # DRC because a routable design terminates when it hits 0. The post-route repair reroute is
@@ -27426,6 +27931,7 @@ def _build_postroute_timing_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: st
         "  puts \"POSTROUTE_TIMING_REPAIR_DETAILED_ROUTE_NONFATAL: $_dr_err\"\n"
         "}\n"
         + _refill
+        + _drv_after_edit_probe_tcl("POSTROUTE_TIMING_REPAIR")
         # R-0915-125 -- THE ARTEFACT IS WRITTEN BEFORE THE EXTRACTION, not
         # after. `extract_parasitics` is a DB-MUTATING step (OpenRCX's
         # `orderWires` re-encodes every net through `tmg_conn`), and this deck
@@ -32896,10 +33402,12 @@ if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_tr
   puts "POSTROUTE_MIN_AREA_PATCH_SKIPPED: SDR transaction rolled back"
   write_def {out_dir_c}/routed.def
 }}
+{_drv_after_edit_probe_tcl("PNR_FINAL")}
 write_def {out_dir_c}/{top}.def
 write_verilog {out_dir_c}/{top}_pnr.v
 report_checks -path_delay max > {out_dir_c}/sta.rpt
 {_pnr_sta_corner_binding_tcl(out_dir_c + "/sta.rpt", _corner_lib_stanza, macro_libs_tcl)}report_design_area > {out_dir_c}/area.rpt
+{_ppa_area.applied_area_metrics_tcl()}
 # === #147 — post-route real-SPEF setup-repair ESTIMATE (LAST — after every
 # shipped artifact + the authoritative clean sta.rpt, so it can only MEASURE the
 # recoverable setup, never modify routed.def/<top>.def/<top>_pnr.v). Empty on
@@ -36132,6 +36640,100 @@ def _pad_ring_process_note(rc: int, out: str, err: str) -> str:
     return error if rc != 0 and error else (lines[0] if lines else "")
 
 
+#: Step 15.5ic's programs, and what each DOCUMENTS its non-zero exits to
+#: mean, as (verdict, reason class). rc 1 of the producers and the ring gate is
+#: a refusal or a finding, so FAIL; every rc 2 is that program's own
+#: could-not-measure tier. `pad_bterm_coincidence_check` says "1 a net could
+#: not be decided, 2 nothing to decide": neither is a finding about the ring.
+#: An exit no program documents is an execution error, never an exception.
+_PAD_RING_RC_OUTCOMES: Dict[str, Dict[int, Tuple[str, str]]] = {
+    "pad_assignment_gen.py": {
+        1: (_V.Verdict.FAIL.value, ""),  # REFUSE: answers still owed
+        2: (_V.Verdict.NOT_MEASURED.value,  # NOT_ASKED: nothing declared
+            _V.ReasonClass.NOT_EXECUTED.value)},
+    "pad_ring_gen.py": {
+        1: (_V.Verdict.FAIL.value, ""),
+        2: (_V.Verdict.NOT_MEASURED.value,  # SKIP: inputs absent, or a
+            _V.ReasonClass.INPUT_ABSENT.value)},  # rotation it cannot honour
+    "pad_ring_check.py": {
+        1: (_V.Verdict.FAIL.value, ""),  # a wrong or a silent report
+        2: (_V.Verdict.NOT_MEASURED.value,  # a disclosed absence
+            _V.ReasonClass.INPUT_ABSENT.value)},
+    "pad_bterm_coincidence_check.py": {
+        1: (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.INCONCLUSIVE.value),
+        2: (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.NO_POPULATION.value)},
+}
+
+
+def _pad_ring_rc_outcome(name: str, rc: int) -> Tuple[str, str]:
+    """Book a supervised stop before a producer's documented exit codes."""
+    if rc == _RC_STALLED:
+        return _V.Verdict.NOT_MEASURED.value, _V.ReasonClass.STALLED.value
+    if rc == 124:
+        return _V.Verdict.NOT_MEASURED.value, _V.ReasonClass.BUDGET_EXHAUSTED.value
+    # The fixed-base pad-ring contract books these unknown tool exits as
+    # tool_absent. Preserve it while classifying the remaining undocumented
+    # exits as execution errors.
+    if rc in (7, 127):
+        return _V.Verdict.NOT_MEASURED.value, _V.ReasonClass.TOOL_ABSENT.value
+    return _PAD_RING_RC_OUTCOMES[name].get(
+        rc, (_V.Verdict.NOT_MEASURED.value,
+             _V.ReasonClass.EXECUTION_ERROR.value))
+
+def step_pad_assignment(project: Path, container: Optional[str] = None,
+                        pdk: Optional[PdkConfig] = None) -> StepResult:
+    """The pad ASSIGNMENT alone (`pad_assignment_gen`), for the between-segments
+    step (llv1 W7a): an external flow places the ring itself from this order,
+    so it needs the assignment before its implementation segment, not the
+    ring vibe-ic would generate from a floorplan DEF.
+
+    Same program, same PDK arguments, same launch and the same rc reading as
+    the first program of `step_pad_ring_gen`, which the default flow keeps
+    running unchanged (llv1 W7a leaves that step byte-identical).
+    """
+    t0 = time.time()
+    try:
+        pdk_root, pdk_tree = (_padring_pdk_root_and_tree(pdk, container)
+                              if pdk else (None, None))
+    except ValueError as exc:
+        return StepResult("pad_assignment", "FAIL", time.time() - t0, str(exc))
+    pdk_args = (["--pdk-root", str(pdk_root), "--pdk", str(pdk_tree)]
+                if pdk_root and pdk_tree else [])
+    prog = PROGRAMS_DIR / "pad_assignment_gen.py"
+    # The launch is spelled out here, exactly as `step_pad_ring_gen` spells
+    # it, so the gate-enforcement audit can see this spawn and where its
+    # status goes (a launch hidden behind a helper reads as unproven wiring).
+    if container:
+        prog_c = _to_container_path(str(prog), container)
+        project_c = _to_container_path(str(project), container)
+        argv = ["python3", prog_c, project_c, *pdk_args]
+        cmd = " ".join(shlex.quote(str(x)) for x in argv)
+        rc, out, err = _docker_exec(container, cmd, marker=prog_c)
+    else:
+        cp = _pr.run(
+            [sys.executable, str(prog), str(project), *pdk_args],
+            capture_output=True, text=True, errors="replace")
+        rc, out, err = cp.returncode, cp.stdout, cp.stderr
+    note = f"pad_assignment_gen.py: rc={rc} {_pad_ring_process_note(rc, out, err)}".strip()
+    # The rc reading `step_pad_ring_gen` applies to every program it runs.
+    if rc == 0:
+        status, reason = _V.Verdict.PASS.value, ""
+    else:
+        status, reason = {
+            1: (_V.Verdict.FAIL.value, ""),
+            2: (_V.Verdict.NOT_MEASURED.value,
+                _V.ReasonClass.NOT_EXECUTED.value),
+        }.get(rc, (_V.Verdict.NOT_MEASURED.value,
+                   _V.ReasonClass.TOOL_ABSENT.value))
+    report = project / "reports/phase3/pad_assignment.json"
+    if status == _V.Verdict.PASS.value and not report.is_file():
+        status = _V.Verdict.FAIL.value
+        note += "; rc=0 but reports/phase3/pad_assignment.json is absent"
+    return StepResult("pad_assignment", status, time.time() - t0, note,
+                      [str(report)] if report.is_file() else [],
+                      reason_class=reason)
+
+
 def step_pad_ring_gen(project: Path, container: Optional[str] = None,
                       pdk: Optional[PdkConfig] = None) -> StepResult:
     """Canonical step 15.5ic producer + independent gate, before routing.
@@ -36201,12 +36803,7 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
         if rc == 0:
             status, reason = _V.Verdict.PASS.value, ""
             continue
-        status, reason = {
-            1: (_V.Verdict.FAIL.value, ""),
-            2: (_V.Verdict.NOT_MEASURED.value,
-                _V.ReasonClass.NOT_EXECUTED.value),
-        }.get(rc, (_V.Verdict.NOT_MEASURED.value,
-                   _V.ReasonClass.TOOL_ABSENT.value))
+        status, reason = _pad_ring_rc_outcome(name, rc)
         break
 
     out_files = [
@@ -36224,7 +36821,7 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
     missing = sorted(str(p.relative_to(project)) for p in required
                      if not p.is_file())
     if status == "PASS" and missing:
-        status = "FAIL"
+        status, reason = "FAIL", ""
         notes.append("producer/gate returned rc=0 but required output(s) are "
                      f"absent: {missing}")
     # The reason class computed above travels with the row: a NOT_MEASURED
@@ -36554,7 +37151,7 @@ def _select_placement_arm(project: Path, image: str, container: str,
         sta_state = arm_dir / "sta_state_in.json"
         _aa.write_text(sta_state, json.dumps(state, indent=2) + "\n")
         folder = _ll.run_chain(project, image, [("OpenROAD.STAMidPNR", sta_cfg, sta_state)],
-                               mounts=mounts, lane="17-dual-librelane")[-1]
+                               mounts=mounts, lane="17-dual-librelane", pdk_root=_ll.PDK_GUEST_ROOT)[-1]
         record = out_dir / "librelane_spare_cells.json"
         measured = (json.loads(record.read_text()).get("measured") or {}
                     if record.is_file() else {})
@@ -36578,7 +37175,7 @@ def _select_placement_arm(project: Path, image: str, container: str,
                 {"def": arm_dir / "placed.def", "nl": arm_dir / "placed.v", "sdc": sdc},
                 arm_dir / "bridge", mounts=mounts)
             folder = _ll.run_chain(project, image, [("OpenROAD.STAMidPNR", sta_cfg, state)],
-                                   mounts=mounts, lane="17-dual-openroad")[-1]
+                                   mounts=mounts, lane="17-dual-openroad", pdk_root=_ll.PDK_GUEST_ROOT)[-1]
         except _ll.Refusal as exc:
             doc = {"verdict": "NOT_MEASURED", "reason": str(exc), "metrics": {},
                    "scope": {}}
@@ -36711,6 +37308,7 @@ def _prepare_librelane_floorplan_for_route(
         generic_pnr_tcl: str, modes: Dict[str, str],
         io_view_discover=_discover_padring_io_views,
         placement: Optional[Dict[str, Any]] = None,
+        strap_override: Optional[Mapping[str, Mapping[str, Any]]] = None,
         ) -> Tuple[StepResult, Optional[str]]:
     """Steps 15/15.5ic through LibreLane, handed to the direct routing deck.
 
@@ -36729,18 +37327,33 @@ def _prepare_librelane_floorplan_for_route(
     tie-low cell. The final ODB/DEF are handed to `librelane_placed.odb` /
     `placed.def`, and the deck is `librelane_contract.placement_consumer_tcl`:
     `read_db` of that ODB, then the direct deck from CTS on.
+
+    ``strap_override`` is the applied CR-7 budget pitch. With step 15 on
+    LibreLane nothing would draw it -- the grid comes from the image's
+    PDN_CFG (`emit_pdn_cfg`) and the direct deck's PDN block is elided -- while
+    the core was already floored on it, so it is refused by name
+    (`PDN_BUDGET_OVERRIDE_NOT_WIRED`) before any tool runs.
     """
     import librelane_contract as _ll
     t0 = time.time()
 
     def _fail(code: str, detail: str, status: str = "FAIL",
               reason_class: str = "") -> Tuple[StepResult, None]:
+        stopped = _ll.tool_stop_reason(code)
+        if stopped:
+            status = "NOT_MEASURED"
         return StepResult("pad_ring_gen", status, time.time() - t0,
                           detail if detail.startswith(code) else f"{code}: {detail}",
                           extras={"finding": code, "librelane_modes": modes},
-                          reason_class=(reason_class or (
+                          reason_class=(stopped or reason_class or (
                               _V.ReasonClass.INPUT_ABSENT.value
                               if status == "NOT_MEASURED" else ""))), None
+
+    def _code(exc: BaseException, default: str) -> str:
+        """The refusal's own code when it is a tool stop, else ``default``:
+        a handler that names its step keeps that name for real refusals."""
+        code = getattr(exc, "code", None)
+        return code if _ll.tool_stop_reason(code) else default
 
     if "dual" in modes.values():
         return _fail("LL_DUAL_FLOORPLAN_NOT_READY",
@@ -36749,6 +37362,16 @@ def _prepare_librelane_floorplan_for_route(
         return _fail("LL_FLOORPLAN_PADRING_SPLIT_UNSUPPORTED",
                      "LibreLane PadRing runs between Floorplan and TapEndcap; "
                      "select 15.5ic=librelane with 15=librelane")
+    if modes["15"] == "librelane" and strap_override:
+        return _fail("PDN_BUDGET_OVERRIDE_NOT_WIRED",
+                     "input/pdn_budget_pitch_policy.json mode=apply sized the "
+                     "core on the budget strap pitch ("
+                     + ", ".join(f"{k}: pitch {v.get('pitch')}"
+                                 for k, v in sorted(strap_override.items()))
+                     + "), but step 15 on LibreLane draws the image's own "
+                     "PDN_CFG grid and elides the direct PDN block, so that "
+                     "pitch would never be built; select 15=direct or remove "
+                     "mode=apply")
     try:
         image = _ll.resolve_image(project)
     except _ll.Refusal as exc:
@@ -36756,7 +37379,7 @@ def _prepare_librelane_floorplan_for_route(
     try:
         pdk_root = _ll.pdk_root_resolution(project, pdk.name, image=image)["path"]
     except _ll.Refusal as exc:
-        return _fail("LL_PDK_ROOT_NOT_DECLARED", str(exc), "NOT_MEASURED")
+        return _fail(_code(exc, "LL_PDK_ROOT_NOT_DECLARED"), str(exc), "NOT_MEASURED")
     producer = (StepResult("io_pad_chip_top_gen", "PASS", 0.0, "already run")
                 if _padring_chip_top_record(project) is not None
                 else step_io_pad_chip_top_gen(project, container, pdk))
@@ -36785,7 +37408,7 @@ def _prepare_librelane_floorplan_for_route(
         pdk_root_c, pdk_tree = _padring_pdk_root_and_tree(pdk, container)
         pdk_args = ["--pdk-root", str(pdk_root_c), "--pdk", str(pdk_tree)]
     except ValueError as exc:
-        return _fail("LL_PDK_TREE_UNRESOLVED", str(exc))
+        return _fail(_code(exc, "LL_PDK_TREE_UNRESOLVED"), str(exc))
     # The PAD_* translation (librelane_config harvest) is the design's
     # declared input to the tool placer; the Python ring placer does not run.
     for name, extra in (("pad_assignment_gen.py", pdk_args),):
@@ -36795,7 +37418,9 @@ def _prepare_librelane_floorplan_for_route(
         rc, out, err = _docker_exec(container, cmd, marker=prog_c)
         notes.append(f"{name}: rc={rc}")
         if rc != 0:
-            return _fail("LL_PAD_ASSIGNMENT_FAILED", f"{name} rc={rc}: {(out + err)[-800:]}")
+            status, reason = _pad_ring_rc_outcome(name, rc)
+            return _fail("LL_PAD_ASSIGNMENT_FAILED",
+                         f"{name} rc={rc}: {(out + err)[-800:]}", status, reason)
     unplaceable: List[str] = []
     last = ("OpenROAD.DetailedPlacement" if placement is not None
             else "Odb.RemovePDNObstructions" if modes["15"] == "librelane"
@@ -36806,12 +37431,19 @@ def _prepare_librelane_floorplan_for_route(
         # that `Odb.SetPowerConnections` declares; it reads the declared RTL.
         steps = ["Yosys.JsonHeader"] + _ll.flow_segment(
             image, "OpenROAD.Floorplan", last)
+        if placement is not None:
+            repair_index = steps.index("OpenROAD.RepairDesignPostGPL")
+            steps.insert(repair_index + 1, "Vibeic.PostGPLFanoutClosure")
         pdn_cfg = _ll.emit_pdn_cfg(image, str(pdk.name),
                                    project / "phase3/librelane/15-config/pdn_cfg.tcl")
         overlay = ({"PDN_CFG": (str(pdn_cfg.resolve()),
                                 "image librelane/scripts/openroad/common/pdn_cfg.tcl + "
                                 f"pdk_registry.json pdks[name={pdk.name}].pdn_ring.connects")}
                    if pdn_cfg and modes["15"] == "librelane" else None)
+        # One run-wide master policy covers floorplan, placement, CTS/hold and
+        # post-route repair. A floorplan without the spare-placement arm still
+        # contains cell-inserting steps, so this is outside that arm's guard.
+        overlay = dict(overlay or {})
         if placement is not None:
             steps.append("Vibeic.InsertSpareCells")
             overlay = dict(overlay or {})
@@ -36822,13 +37454,6 @@ def _prepare_librelane_floorplan_for_route(
             overlay["VIBEIC_SPARE_PLAN"] = (
                 str(plan_path.resolve()),
                 "phase3_one_shot_runner step-18 plan (_spare_plan, --spare-density)")
-            _lib_text = _v1_6_604_read_text_or_container_cat(pdk.liberty, container) or ""
-            _excluded = _dont_use_family_cells(_V1_6_596_RE_CELL_DECL.findall(_lib_text))
-            if _excluded:
-                overlay["EXTRA_EXCLUDED_CELLS"] = (
-                    _excluded,
-                    "phase3_one_shot_runner._DONT_USE_FAMILY_PATTERNS (the direct "
-                    "deck's resizer dont_use families) over the PDK liberty")
             if placement.get("tie_lo"):
                 overlay["VIBEIC_SPARE_TIELO_CELL"] = (
                     placement["tie_lo"],
@@ -36836,6 +37461,8 @@ def _prepare_librelane_floorplan_for_route(
         configs = _ll.resolve_step_configs(project, image, str(pdk.name), steps,
                                            pdk_root=Path(pdk_root), folder="15-config",
                                            overlay=overlay)
+        configs, _policy_steps = _resolved_cell_policy(
+            configs, Path(pdk_root), str(pdk.name))
         state0 = _ll.state_from_direct(
             project, image, configs[steps[0]],
             {"nl": [netlist, wrapper]},
@@ -36850,18 +37477,25 @@ def _prepare_librelane_floorplan_for_route(
             k = steps.index("OpenROAD.TapEndcapInsertion") + 1
             lattice = _ll.run_chain(project, image,
                                     [(s, configs[s], state0) for s in steps[:k]],
-                                    mounts=mounts, lane="15-floorplan")[-1]
+                                    mounts=mounts, lane="15-floorplan", pdk_root=_ll.PDK_GUEST_ROOT)[-1]
             configs, unplaceable = _librelane_exclude_unplaceable(
                 project, configs, steps[k:], lattice, mounts, notes)
         folders = _ll.run_chain(project, image, [(s, configs[s], state0) for s in steps],
-                                mounts=mounts, lane="15-floorplan")
+                                mounts=mounts, lane="15-floorplan", pdk_root=_ll.PDK_GUEST_ROOT)
     except (_ll.Refusal, OSError, ValueError, KeyError) as exc:
         code = getattr(exc, "code", "LL_FLOORPLAN_CHAIN_FAILED")
-        if code in _ll.TIME_REFUSALS:  # time, not a verdict: never a plain red
-            return _fail(code, str(exc), "NOT_MEASURED",
-                         _V.ReasonClass.EXECUTION_ERROR.value)
+        if _ll.tool_stop_reason(code):
+            return _fail(code, str(exc))
         return _fail(code, str(exc))
     by_step = dict(zip(steps, folders))
+    for step_id, folder in by_step.items():
+        census = _emc.write_audit(
+            configs[step_id], folder / "state_out.json", step_id,
+            folder / "excluded_master_census.json",
+            policy_complete=step_id in _policy_steps)
+        if census["verdict"] != "PASS":
+            notes.append(f"excluded-master census {step_id}: "
+                         f"{census['verdict']} {census.get('reason') or census.get('excluded_instances')}")
     ring_state = by_step["OpenROAD.PadRing"] / "state_out.json"
     final_state = (by_step["Odb.RemovePDNObstructions"] / "state_out.json"
                    if placement is not None else folders[-1] / "state_out.json")
@@ -36922,7 +37556,10 @@ def _prepare_librelane_floorplan_for_route(
                    capture_output=True, text=True, errors="replace")
     notes.append(f"pad_ring_check --librelane-state: rc={gate.returncode}")
     if gate.returncode != 0:
-        return _fail("PADRING_TOOL_GATE_FAILED", (gate.stdout + gate.stderr)[-800:])
+        status, reason = _pad_ring_rc_outcome("pad_ring_check.py", gate.returncode)
+        return _fail("PADRING_TOOL_GATE_FAILED",
+                     f"pad_ring_check.py rc={gate.returncode}: {(gate.stdout + gate.stderr)[-800:]}",
+                     status, reason)
     # F30: the step's PRODUCER record. The gate above writes only its own
     # verdict document to `reports/phase3/padring.json`, and the audit rightly
     # refuses a declared output only the step's gate authored (audit_created):
@@ -36940,7 +37577,9 @@ def _prepare_librelane_floorplan_for_route(
                      capture_output=True, text=True, errors="replace")
         notes.append(f"{name} {' '.join(extra[:1])}: rc={cp.returncode}".replace(" :", ":"))
         if cp.returncode != 0:
-            return _fail(code, (cp.stdout + cp.stderr)[-800:])
+            status, reason = _pad_ring_rc_outcome(name, cp.returncode)
+            return _fail(code, f"{name} rc={cp.returncode}: {(cp.stdout + cp.stderr)[-800:]}",
+                         status, reason)
     if getattr(pdk, "tech_lef", None):
         prog_c = _to_container_path(str(PROGRAMS_DIR / "pad_bterm_coincidence_check.py"),
                                     container)
@@ -36950,7 +37589,10 @@ def _prepare_librelane_floorplan_for_route(
         rc, out, err = _docker_exec(container, cmd, marker=prog_c)
         notes.append(f"pad_bterm_coincidence_check.py: rc={rc}")
         if rc != 0:
-            return _fail("PADRING_BTERM_GATE_FAILED", (out + err)[-800:])
+            status, reason = _pad_ring_rc_outcome("pad_bterm_coincidence_check.py", rc)
+            return _fail("PADRING_BTERM_GATE_FAILED",
+                         f"pad_bterm_coincidence_check.py rc={rc}: {(out + err)[-800:]}",
+                         status, reason)
     consumed = out_dir / ("floorplan.def" if modes["15"] == "librelane" else "padring.def")
     try:
         io_lefs, io_gds = io_view_discover(pdk, container)
@@ -36990,14 +37632,14 @@ def _prepare_librelane_floorplan_for_route(
                     f'{{ $_stn setDoNotTouch true; puts "SPARE_TIE_NET_DONT_TOUCH: {n}" }}\n'
                     for n in _tie_nets))
     except (OSError, ValueError) as exc:
-        return _fail("LL_FLOORPLAN_NO_CONSUMER", str(exc))
+        return _fail(_code(exc, "LL_FLOORPLAN_NO_CONSUMER"), str(exc))
     if placement is not None and placement.get("mode") == "dual":
         try:
             selection = _select_placement_arm(
                 project, image, container, out_dir, configs,
                 folders[-1] / "state_out.json", direct_consumer, mounts)
         except (_ll.Refusal, OSError, ValueError, KeyError) as exc:
-            return _fail("LL_DUAL_PLACEMENT_FAILED", str(exc))
+            return _fail(_code(exc, "LL_DUAL_PLACEMENT_FAILED"), str(exc))
         notes.append(f"step 17 dual: selection={selection.get('selection')} "
                      f"({selection.get('reason') or 'dominates'}; "
                      "phase3/tool_arms/17/selection.json)")
@@ -37182,273 +37824,56 @@ def _stage_via_legalized_tech_lef(project: Path, pdk: PdkConfig,
     return payload
 
 
-def step_pnr(project: Path, top: str, pdk: PdkConfig,
-             container: str, die_um: str, util: float,
-             spare_density=None, pad_ring_step=step_pad_ring_gen,
-             pad_ring_results: Optional[List[StepResult]] = None,
-             em_floor_for_resize: Optional[Dict[str, Any]] = None,
-             density_from_tool_default: bool = False) -> StepResult:
-    t0 = time.time()
-    out_dir = _pl.pnr_dir(project)
-    # No old route receipt can certify this invocation, including a preflight
-    # failure before the router or wrapper checks run.
-    (out_dir / ROUTER_DRC_RECEIPT_NAME).unlink(missing_ok=True)
-    (out_dir / _ppa_power.DIRECT_PDN_RECEIPT_NAME).unlink(missing_ok=True)
-    netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
-    print(f"[pnr] netlist: {_nl_note}", flush=True)
-    if not netlist.is_file():
-        return StepResult("pnr", "FAIL", time.time() - t0,
-                          f"synth netlist missing: {netlist}")
-    # v1.6.599 — for #406 P2. Wrapper-class pre-flight: emit a
-    # clear FAIL early instead of letting OpenLane stall for
-    # 30+ minutes on a wrapper-class IC without pin_order.cfg.
-    _v1_6_599_wrap_err = _v1_6_599_check_wrapper_pin_order_cfg(
-        project, top, netlist)
-    if _v1_6_599_wrap_err is not None:
-        return StepResult(
-            "pnr", "FAIL", time.time() - t0,
-            _v1_6_599_wrap_err,
-            extras={
-                "wrapper_class": True,
-                "missing": "pin_order.cfg",
-                "remediation": (
-                    "Add a wrapper-glue layer + author "
-                    "pin_order.cfg from the harness template"),
-            })
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # The active tech LEF itself can contain a contradiction: a VIA landing
-    # smaller than the routing layer's own MINWIDTH/AREA.  Post-route RECT
-    # patching is too late (the router did not reserve the required spacing),
-    # and a GDS-only edit would be invisible to RCX/LVS.  Derive one legal LEF
-    # before any backend consumer resolves its path, then mutate the shared
-    # PdkConfig so every downstream consumer sees the same geometry.
-    _via_legalization = _stage_via_legalized_tech_lef(
-        project, pdk, container, out_dir)
-    if _via_legalization["status"] == "APPLIED":
-        print("[phase3] VIA-LANDING REMEDIATION APPLIED: "
-              f"{_via_legalization['changed_patch_records']} fixed/generated "
-              "routing patch record(s) grown from active tech-LEF rules; all "
-              f"consumers use {pdk.tech_lef}", file=sys.stderr)
-    elif _via_legalization["status"] not in ("NOT_NEEDED",):
-        print("[phase3] VIA-LANDING REMEDIATION NOT APPLIED: "
-              f"{_via_legalization.get('reason', 'unspecified')}; original "
-              "tech LEF retained and the run is not silently certified",
-              file=sys.stderr)
-    # #365 third ask — point per-invocation provenance at THIS project, so
-    # every supervised tool run below records a MEASURED duration instead of
-    # the flow ending with a handful of back-filled zero-duration entries.
-    set_invocation_provenance_sink(project)
+@dataclass
+class PrePnrDieCore:
+    """What the pre-PnR die/core resolution settled, as `step_pnr` reads it.
 
-    # #309 — PRE-ROUTE hard-macro supply gate. A LEF-typed POWER/GROUND macro
-    # pin driven by a signal net makes TritonRoute abort ALL detailed routing
-    # (3278 nets, 0 routed, GDS a placed-but-unrouted shell). Decide it HERE,
-    # before any router time is spent, so the failure names the macro and pin
-    # instead of surfacing as DRT-0307 five steps later. Shares its judgement
-    # with the Phase-1 warning via hardmacro_supply_intent, so what Phase 1
-    # validates is exactly what this enforces.
-    try:
-        _ms_nl: Optional[str] = netlist.read_text(encoding="utf-8",
-                                                  errors="ignore")
-    except OSError:
-        _ms_nl = None    # tie unprovable -> decision keeps the strict path
-    _ms = _macro_supply_preroute_decision(project, pdk, netlist_text=_ms_nl)
-    if _ms and _ms.get("bound"):
-        print(f"[phase3] HARD-MACRO SUPPLY: {len(_ms['bound'])} POWER/GROUND "
-              f"macro pin(s) accounted for by the design's power intent")
-    if _ms and _ms.get("env_blind"):
-        # #329 delta: environment blindness must be LOUD, never silent green.
-        print(f"[phase3] HARD-MACRO SUPPLY ENV-BLIND: {_ms['message']}")
-    for _g in (_ms or {}).get("gaps_reported") or []:
-        print(f"[phase3]   SUPPLY INTEGRATION GAP (named, non-blocking): "
-              f"{_g['master']}/{_g['pin']} ({_g.get('use','POWER')}) — "
-              f"{_g['detail']}")
-    if _ms and _ms.get("blocking"):
-        for _g in _ms["gaps"]:
-            print(f"[phase3]   BLOCKING SUPPLY-ON-POWER (integration gap): "
-                  f"{_g['master']}/{_g['pin']} ({_g.get('use','POWER')}) — "
-                  f"{_g['detail']}")
-        _ms_extras: Dict[str, Any] = {"macro_supply_gaps": _ms["gaps"],
-                                      "macro_supply_bound": _ms["bound"]}
-        # The one sentence that resolves the FAIL against the DEF. A reader who
-        # greps the DEF for the pin's rail finds `- <RAIL> ( * <RAIL> ) + USE
-        # POWER ;` and concludes the gate is wrong; that entry carries no
-        # conductor, so it does NOT count as an established rail, and the pin
-        # really is a gap. Published ONLY when non-empty: an empty list would
-        # assert that the built rails were examined and none was a bare name,
-        # which on a first run is false — every DEF this reads is written by
-        # THIS step's own TCL, further down. Absent therefore means "nothing to
-        # say", never "checked and clean".
-        if _ms.get("rails_named_not_built"):
-            _ms_extras["rails_named_not_built"] = _ms["rails_named_not_built"]
-        return StepResult("pnr", "FAIL", time.time() - t0, _ms["message"],
-                          extras=_ms_extras)
+    llv1 W7a: the resolution is a PURE MOVE out of `step_pnr` (same order,
+    same prints, same refusals); `step_pnr` unpacks these back into the
+    locals it has always used, and `step_prepnr` calls the same code between
+    the two external-flow segments.
+    """
+    die_um: str
+    die_w: int
+    die_h: int
+    core_pad: int
+    core_w: int
+    core_h: int
+    fp_rect: Any
+    util: float
+    auto_die_requested: Any
+    l9_die_note: Any
+    ring_floor_pad: Any
+    ring_inset: Any
+    ring_pinned_die: Any
+    seal_rec: Any
+    slot: Any
+    strap_floor_detail: Any
+    strap_floor_um: Any
+    ct03_pin_rect: Any
+    #: the auto-die metrics dict `step_pnr` still reads after the resolution
+    #: (the planned-PnR parity report reads its cell area); not in
+    #: `as_locals`, whose 18-tuple the between-segments step unpacks too.
+    auto_die_metrics: Dict[str, Any] = field(default_factory=dict)
 
-    # The chip-top producer must precede BOTH SDC construction and die
-    # resolution.  Its domain plan is the sole authority for excluding supply
-    # ports from signal-only DRV limits, while its die_required_um is an input
-    # to the floorplan.  The producer is idempotent and writes only its own
-    # wrapper/record; a design with no declared pad placement SKIPs.
-    _padring_producer = _padring_producer_dispatch(
-        project, container, pdk,
-        supply_plan=(em_floor_for_resize or {}).get("supply_entry_plan"))
-    if _padring_producer.status not in (_V.Verdict.PASS.value,
-                                          _V.Verdict.NOT_MEASURED.value):
-        print(f"[phase3] io_pad_chip_top_gen: {_padring_producer.status} — "
-              f"{_padring_producer.detail}", file=sys.stderr)
+    def as_locals(self) -> Tuple[Any, ...]:
+        return (self.die_um, self.die_w, self.die_h, self.core_pad, self.core_w, self.core_h, self.fp_rect, self.util, self.auto_die_requested, self.l9_die_note, self.ring_floor_pad, self.ring_inset, self.ring_pinned_die, self.seal_rec, self.slot, self.strap_floor_detail, self.strap_floor_um, self.ct03_pin_rect)
 
-    # SDC: silicon top != FPGA wrapper. Project's fpga/*.sdc references
-    # FPGA-only ports (CLOCK_50/KEY/GPIO_0) and may use Quartus-private
-    # commands (derive_pll_clocks). For silicon synth (top=chip_top), use
-    # a generic minimal SDC tied to chip_top's actual clk port.
-    sdc = out_dir / "constraint.sdc"
-    # spm x ihp-sg13g2, 2026-08-07: `set_max_fanout` in the loaded SDC does NOT
-    # make OpenROAD's `clock_tree_synthesis` respect it — CTS's own leaf-level
-    # sink clustering is governed ONLY by `-sink_clustering_size` passed to the
-    # command itself (see `_cts_cluster` below). MEASURED: with `set_max_fanout
-    # 8` correctly present in constraint.sdc (the `_ensure_staged_sdc_drv` /
-    # `_liberty_drv_limits` fallback below), a CTS run with no
-    # `-sink_clustering_size` still built a leaf buffer (`clkbuf_0`) fanning
-    # out to 16 sinks against the SAME liberty's own declared limit of 8 — the
-    # SDC constraint and CTS's own clustering are two independent mechanisms,
-    # and only `set_max_fanout` was closed above. `_cts_fanout_target` carries
-    # the SAME resolved value (design-declared, else liberty-derived) to the
-    # `cts_cluster_size=` kwarg near the bottom of this function, so CTS is
-    # told the identical number the SDC and sign-off already use — set in
-    # BOTH branches below (staged / auto SDC), never fabricated (§4.05: reused
-    # from the same DRV resolution, not invented here).
-    _cts_fanout_target: Optional[int] = None
-    project_sdc_silicon = _resolve_staged_silicon_sdc(project)
-    if project_sdc_silicon and project_sdc_silicon.is_file():
-        # benchmark-spm-asap7 — staged SDCs are ns/pF-authored; rescale
-        # numerics into the ACTIVE PDK liberty's declared units (ASAP7:
-        # ps/fF) instead of a verbatim copy that reads 1000× too tight.
-        # A9 (#169): the unit rescale fixes the UNITS but a staged SDC also
-        # carries the ORIGINATING PDK's DRV *values* (set_max_transition /
-        # set_max_capacitance). When this SDC's provenance stamp names a
-        # DIFFERENT PDK than the active one, re-derive those limits from the
-        # active liberty (or drop them). No stamp (hand-authored SDC) or a
-        # matching stamp → byte-identical, so sky130/nangate are unchanged.
-        _staged_sdc = _scale_sdc_to_liberty_units(
-            project_sdc_silicon.read_text(), str(pdk.liberty))
-        _staged_sdc = _reconcile_staged_sdc_drv(
-            _staged_sdc, pdk.name, str(pdk.liberty), container)
-        # A9 — reconcile a stale `set_driving_cell` cell NAME the same way the
-        # DRV LIMITS were reconciled above: a foreign-PDK reference-flow SDC
-        # (e.g. a Nangate `BUF_X2`) would otherwise abort read_sdc under the
-        # active PDK (STA-0453) and stop the entire backend before floorplan.
-        _staged_sdc = _reconcile_staged_sdc_driving_cell(
-            _staged_sdc, str(pdk.liberty), container)
-        # TAPEOUT-SIGNOFF (DRV) parity — a design-supplied SDC that declares NO
-        # set_max_transition / set_max_capacitance reached PnR with no DRV
-        # target at all, so repair_design never repaired the slews (the
-        # auto-SDC else-branch below has had this since TAPEOUT-SIGNOFF; the
-        # staged branch never did). Supply ONLY the absent limits, ONLY from
-        # the active liberty; a design-declared limit is never overridden.
-        _staged_sdc, _drv_parity = _ensure_staged_sdc_drv(
-            _staged_sdc, str(pdk.liberty), container, project,
-            pdk_name=str(pdk.name))
-        # Read the FINAL effective value back out of the SDC text (not just
-        # `added_max_fanout`, which is None when the design's OWN staged SDC
-        # already declared one — that value must reach CTS too, same as a
-        # liberty-derived fallback would).
-        _cts_fm = _SDC_MAX_FANOUT_RE.search(_staged_sdc)
-        if _cts_fm:
-            try:
-                _cts_fanout_target = int(float(_cts_fm.group(2)))
-            except ValueError:
-                pass
-        if _drv_parity.get("note"):
-            print(f"[phase3][sdc-drv] {_drv_parity['note']}", file=sys.stderr)
-        try:
-            (out_dir / "sdc_drv_parity.json").write_text(
-                json.dumps(_drv_parity, indent=2, default=str))
-        except Exception:
-            pass
-        # I/O-delay parity — the staged branch must not be LOOSER than the
-        # auto-SDC branch it now takes precedence over. A design SDC that
-        # declares only `create_clock` would otherwise leave every primary I/O
-        # untimed, and a real violation would vanish by subtraction rather than
-        # by repair. Supplies ONLY the absent delays, against the design's OWN
-        # clock name; a design-declared delay is never overridden.
-        _staged_sdc, _io_parity = _ensure_staged_sdc_io_delay(
-            _staged_sdc, project)
-        if _io_parity.get("note"):
-            print(f"[phase3][sdc-io] {_io_parity['note']}", file=sys.stderr)
-        try:
-            (out_dir / "sdc_io_delay_parity.json").write_text(
-                json.dumps(_io_parity, indent=2, default=str))
-        except Exception:
-            pass
-        sdc.write_text(_staged_sdc)
-    else:
-        # v1.6.560 sub-defect B: derive CLOCK_PERIOD from project sources
-        # (L9 markdown / config.json / baseline config) before falling back
-        # to the legacy 20 ns. Chip-AGNOSTIC — works for any IC whose L9
-        # mentions a clock period in the docs.
-        #
-        # v1.6.595 — for #403 P2 ORGANIC. Pass top name into the
-        # resolver so the RTL-header scan can prioritise the
-        # canonical top module file (e.g. `chip_top.v`) over other
-        # RTL files in the search root. Resolver also walks
-        # phase1/generated_docs/L8 + L9 JSON before falling back to
-        # legacy config.json or the literal `clk`. Any IC whose
-        # clock port follows Wishbone / AXI / Caravel naming
-        # conventions now produces a valid SDC.
-        #
-        # TAPEOUT-SIGNOFF (DRV): resolve set_max_transition / set_max_capacitance
-        # from THIS PDK's liberty so the resizer fixes slews (the single-corner-
-        # closure confounder). Chip/PDK-AGNOSTIC — the numbers come from the
-        # liberty, not a literal; a liberty declaring none yields an honest
-        # disclosure and NO fabricated limit (§4.05).
-        _drv = _liberty_drv_limits(str(pdk.liberty), container)
-        sdc.write_text(_build_auto_silicon_sdc(
-            project, top=top,
-            drv_slew_ns=_drv.get("max_transition_ns"),
-            drv_cap_pf=_drv.get("max_capacitance_pf"),
-            drv_note=str(_drv.get("note") or ""),
-            liberty_path=str(pdk.liberty),
-            pdk_name=str(pdk.name)))
-        # WHAT THE BOUNDARY PATHS ARE TIMED AGAINST, as a record a gate can
-        # read. The SDC says it in comments; a sign-off consumer should not
-        # have to parse comments to learn whether an external delay came from
-        # the design, from this plugin, or was omitted entirely.
-        try:
-            _io_ns_rec, _ = _declared_io_delay_ns(
-                project, _resolve_clock_spec(project)[0])
-        except Exception:                                    # noqa: BLE001
-            _io_ns_rec = None
-        _aa.write_json(
-            project / "reports" / "phase3" / "io_delay_contract.json",
-            dict(io_delay_contract(_io_ns_rec, 2.0, io_delay_source()),
-                 **{"schema": "vibe-ic/io-delay-contract/1",
-                    "sdc": str(sdc)}))
-        # Same CTS-clustering target as the staged branch above; the
-        # auto-SDC path has no design SDC to declare a fanout cap in, so
-        # priority collapses to L9 / RTL-replication / liberty default —
-        # `_build_auto_silicon_sdc` does not emit `set_max_fanout` text (a
-        # separate, non-blocking gap; CTS reads this value directly, not by
-        # re-parsing the SDC).
-        try:
-            _cts_fanout_target = (
-                _l9_declared_max_fanout(project, str(pdk.name))
-                or _rtl_replication_fanout_bound(project)
-                or _drv.get("max_fanout"))
-        except Exception:
-            _cts_fanout_target = _drv.get("max_fanout")
-    # Whichever branch ran, record what the DESIGN staged and what became of
-    # it. A machine-readable sibling of the deck's own comment block, so a
-    # later reader does not have to parse an SDC to learn that the design's
-    # constraints exist and were not used.
-    try:
-        (out_dir / "staged_sdc_survey.json").write_text(json.dumps({
-            "consumed": (str(project_sdc_silicon.relative_to(project))
-                         if project_sdc_silicon
-                         and project_sdc_silicon.is_file() else None),
-            "staged_under_input": _staged_sdc_survey(project),
-        }, indent=2, default=str))
-    except Exception:
-        pass
 
+def _prepnr_geometry(project: Path, top: str, pdk: PdkConfig,
+                     container: str, die_um: str, util: float,
+                     netlist: Path, t0: float,
+                     density_from_tool_default: bool = False
+                     ) -> "PrePnrDieCore | StepResult":
+    """Resolve the die and the core rectangle before any tool runs.
+
+    MOVED VERBATIM from `step_pnr` (llv1 W7a): `--die-um` / L9 / auto-die
+    (N4: core-sized from the netlist, one strap period), the pad ring's
+    floor, the seal-ring band, the ring-pinned core, the placement density,
+    the slot contract, the N4 pinned-core refusal and the CT-03 pin
+    rectangle. A refusal is returned as the same `pnr` StepResult (its
+    elapsed time from the caller's `t0`); otherwise the settled values.
+    """
     # ORGANIC E2E (GAP-E2E-4/10) — resolve `--die-um auto` to a design-sized
     # WxH from the synth netlist cell count + PDK site area + target util, so a
     # small design is not stranded at a route-plateauing ~4% util on a fixed
@@ -37479,6 +37904,32 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _strap_floor_detail: Dict[str, Any] = {}
     _strap_floor_um, _strap_floor_basis = _strap_plan_core_floor(
         pdk, container, detail=_strap_floor_detail)
+    _budget_override: Dict[str, Dict[str, float]] = {}
+    _budget_current, _budget_current_source, _ = _ppa_power._pdn_em_declared_current(
+        project, _pdk_nominal_voltage(pdk, container))
+    if _auto_die_requested and _budget_current is not None and _strap_floor_um:
+        _raw_auto_metrics: Dict[str, Any] = {}
+        _resolve_auto_die_um(
+            "auto", netlist, util, pdk, project, top=top, container=container,
+            metrics=_raw_auto_metrics, strap_core_floor=(None, ""))
+        _raw_core = _raw_auto_metrics.get("core_side_um")
+        if isinstance(_raw_core, (int, float)) and _raw_core > 0:
+            _budget = _pdn_small.plan_for_core(
+                project, _read_pdk_text(pdk.tech_lef, container),
+                float(_raw_core), _strap_floor_detail, _budget_current,
+                _budget_current_source, _pdk_nominal_voltage(pdk, container),
+                getattr(pdk, "ir_budget_pct", None))
+            _strap_floor_detail["budget_pitch"] = _budget
+            if _budget.get("mode") == "apply" and _budget.get("verdict") == "CANDIDATE":
+                _new_detail: Dict[str, Any] = {}
+                _new_floor, _new_basis = _strap_plan_core_floor(
+                    pdk, container, detail=_new_detail,
+                    strap_override=_budget["override"])
+                if _new_floor is not None:
+                    _strap_floor_um, _strap_floor_basis = _new_floor, _new_basis
+                    _strap_floor_detail.update(_new_detail)
+                    _strap_floor_detail["budget_pitch"] = _budget
+                    _budget_override = _budget["override"]
     if _strap_floor_um is None:
         # Named, printed and persisted (floorplan_rectangles.json): with no
         # floor neither the growth nor the pinned-core check runs, and a run
@@ -37730,6 +38181,24 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _chk_w, _chk_h = core_w, core_h
     if fp_rect:
         _chk_w, _chk_h = fp_rect[2] - fp_rect[0], fp_rect[3] - fp_rect[1]
+    if (not _auto_die_requested and _budget_current is not None
+            and _strap_floor_um):
+        _budget = _pdn_small.plan_for_core(
+            project, _read_pdk_text(pdk.tech_lef, container),
+            float(min(_chk_w, _chk_h)), _strap_floor_detail, _budget_current,
+            _budget_current_source, _pdk_nominal_voltage(pdk, container),
+            getattr(pdk, "ir_budget_pct", None))
+        _strap_floor_detail["budget_pitch"] = _budget
+        if _budget.get("mode") == "apply" and _budget.get("verdict") == "CANDIDATE":
+            _new_detail = {}
+            _new_floor, _new_basis = _strap_plan_core_floor(
+                pdk, container, detail=_new_detail,
+                strap_override=_budget["override"])
+            if _new_floor is not None:
+                _strap_floor_um, _strap_floor_basis = _new_floor, _new_basis
+                _strap_floor_detail.update(_new_detail)
+                _strap_floor_detail["budget_pitch"] = _budget
+                _budget_override = _budget["override"]
     # EXACT, NOT PADDED (review wave 3): a pinned core is refused only when a
     # strap group cannot fit its SNAPPED extent on the stripe's own axis --
     # the check pdngen itself makes. The padded square floor above is for
@@ -37817,6 +38286,28 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
               f"The pins stay on the die boundary and the antenna residual "
               f"that comes from that is REPORTED, not traded.",
               file=sys.stderr)
+    return PrePnrDieCore(die_um=die_um, die_w=die_w, die_h=die_h, core_pad=core_pad, core_w=core_w, core_h=core_h, fp_rect=fp_rect, util=util, auto_die_requested=_auto_die_requested, l9_die_note=_l9_die_note, ring_floor_pad=_ring_floor_pad, ring_inset=_ring_inset, ring_pinned_die=_ring_pinned_die, seal_rec=_seal_rec, slot=_slot, strap_floor_detail=_strap_floor_detail, strap_floor_um=_strap_floor_um, ct03_pin_rect=_ct03_pin_rect, auto_die_metrics=_auto_die_metrics)
+
+
+def _prepnr_floorplan(project: Path, top: str, pdk: PdkConfig,
+                      container: str, die_um: str, util: float,
+                      netlist: Path, t0: float,
+                      density_from_tool_default: bool = False
+                      ) -> "PrePnrDieCore | StepResult":
+    """`_prepnr_geometry`, then the floorplan-rectangles record it settles.
+
+    The record call is MOVED VERBATIM from `step_pnr` (llv1 W7a): one
+    record, written on every run that reaches it, naming both rectangles.
+    """
+    _prep_dc = _prepnr_geometry(project, top, pdk, container, die_um,
+                                util, netlist, t0,
+                                density_from_tool_default=density_from_tool_default)
+    if isinstance(_prep_dc, StepResult):
+        return _prep_dc
+    (die_um, die_w, die_h, core_pad, core_w, core_h,
+     fp_rect, util, _auto_die_requested, _l9_die_note, _ring_floor_pad,
+     _ring_inset, _ring_pinned_die, _seal_rec, _slot,
+     _strap_floor_detail, _strap_floor_um, _ct03_pin_rect) = _prep_dc.as_locals()
 
     # ONE RECORD, WRITTEN ON EVERY RUN, naming both rectangles and which of
     # them each downstream consumer must read. A producer that writes nothing
@@ -37834,6 +38325,392 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         ring_inset_um=_ring_inset,
         seal_ring=_seal_rec,
         pdn_core_floor=_strap_floor_detail)
+    return _prep_dc
+
+
+#: llv1 W7a -- the pre-PnR preparation's place in the phase-3 window plan.
+#: In the default flow it runs INSIDE the `pnr` dispatch site (canonical span
+#: 15..22), so a window entering at 15 runs it and nothing new is enterable;
+#: an external flow dispatches `step_prepnr` between its two segments.
+PREPNR_DISPATCH_SITE = "pnr"
+PREPNR_CANONICAL_HEAD = "15"
+
+
+#: Step 7's own record of the SDC it authored (lane fxport,
+#: `next/claude-fx-step7-asic-sdc`: `_ppa.timing.ASIC_SDC_RECORD`).
+PREPNR_STEP7_SDC_RECORD = "asic_sdc.json"
+PREPNR_STEP7_SDC_SCHEMA = "vibe-ic/step7-asic-sdc/1"
+
+
+def _prepnr_constraint_file(project: Path, top: str,
+                            pdk: Any) -> Tuple[Optional[Path], str]:
+    """SEAM (llv1 W7a): the SDC the implementation segment reads.
+
+    This step AUTHORS NO SDC, and it does not take a file's PRESENCE as step
+    7's SDC: on main, `constraints/<top>.sdc` is also the copy
+    `step_canonicalize_artefacts` makes of step_pnr's own `constraint.sdc`
+    after a run, never refreshed -- a previous run's deck. Step 7's SDC is the
+    one step 7's RECORD names (`constraints/asic_sdc.json`, written by lane
+    fxport's step-7 producer): the record's path must exist, hash to the
+    record's sha256, and have been authored for this top and PDK. The path
+    must stay inside Step 7's constraints directory. When
+    fxport's `read_step7_asic_sdc` is available, this seam delegates to it;
+    that reader also binds the deck to the inputs Step 7 consumed. The deck
+    segment 2 receives here is the raw Step-7 design-intent deck. The
+    pad-ring supply-port DRV-scope derivation is PnR-time work, not silently
+    recreated by this read-only seam; W7b must carry it through a typed
+    segment contract before external implementation consumes it. Without a
+    record the answer is
+    SDC_SEAM_PENDING -- the default flow is untouched: step_pnr still authors
+    its own SDC exactly as main does.
+    """
+    import hashlib  # noqa: PLC0415
+    from _ppa import timing as _ppa_timing  # noqa: PLC0415
+    pdk_name = str(pdk.name)
+    constraints_dir = _pl.constraints_dir(project)
+    rec_path = constraints_dir / PREPNR_STEP7_SDC_RECORD
+    # FXPORT's reader reads the recorded path itself. Check it before calling
+    # that reader so validation cannot read a file outside design input.
+    if rec_path.is_file():
+        try:
+            candidate = json.loads(rec_path.read_text(errors="replace"))
+        except (OSError, ValueError):
+            candidate = None
+        if isinstance(candidate, dict) and "path" in candidate:
+            _, invalid = _ppa_timing.step7_sdc_path(
+                project, constraints_dir, candidate["path"])
+            if invalid:
+                return None, f"SDC_SEAM_PENDING: {invalid}"
+    # FXPORT owns the input-digest and recoverable-deck contract. Feature
+    # detection makes the handover automatic whichever branch lands second.
+    _step7_reader = getattr(_ppa_timing, "read_step7_asic_sdc", None)
+    if callable(_step7_reader):
+        rec, why = _step7_reader(sys.modules[__name__], project, top, pdk)
+        if rec is None:
+            return None, f"SDC_SEAM_PENDING: fxport step-7 reader: {why}"
+        path, invalid = _ppa_timing.step7_sdc_path(
+            project, constraints_dir, rec.get("path"))
+        if invalid:
+            return None, f"SDC_SEAM_PENDING: fxport step-7 reader: {invalid}"
+        if not path.is_file():
+            return None, ("SDC_SEAM_PENDING: fxport step-7 reader accepted "
+                          "no on-disk SDC path")
+        return path, ("step 7's input-bound design-intent SDC "
+                      f"({rec.get('path')})")
+    pending = ("SDC_SEAM_PENDING: no step-7 SDC record "
+               f"({rec_path.relative_to(project)}); the between-segments "
+               "step reads the SDC step 7 records and authors none "
+               "(fxport: next/claude-fx-step7-asic-sdc)")
+    try:
+        rec = json.loads(rec_path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None, pending
+    if not isinstance(rec, dict) or rec.get("schema") != PREPNR_STEP7_SDC_SCHEMA:
+        return None, f"SDC_SEAM_PENDING: {rec_path.name} is not a step-7 record"
+    # An input digest is a claim that only FXPORT's reader can verify against
+    # the current Step 7 inputs. Never downgrade it to a file-hash check.
+    if "input_digest" in rec or "asic_sdc_input_digest" in rec:
+        return None, ("SDC_SEAM_PENDING: step-7 input digest cannot be "
+                      "verified without the fxport reader")
+    path, invalid = _ppa_timing.step7_sdc_path(
+        project, constraints_dir, rec.get("path"))
+    if invalid:
+        return None, f"SDC_SEAM_PENDING: {invalid}"
+    if not path.is_file():
+        return None, (f"SDC_SEAM_PENDING: the step-7 SDC {rec.get('path')!r} "
+                      "the record names is absent")
+    text = path.read_text(errors="replace")
+    if hashlib.sha256(text.encode("utf-8")).hexdigest() != rec.get("sha256"):
+        return None, (f"SDC_SEAM_PENDING: the step-7 SDC {rec.get('path')} "
+                      "changed after step 7 recorded it")
+    if rec.get("top") != top or rec.get("pdk") != pdk_name:
+        return None, (f"SDC_SEAM_PENDING: the step-7 SDC was authored for top "
+                      f"{rec.get('top')!r} / PDK {rec.get('pdk')!r}, not "
+                      f"{top!r} / {pdk_name!r}")
+    return path, f"step 7's recorded SDC ({rec.get('path')})"
+
+
+def step_prepnr(project: Path, top: str, pdk: PdkConfig, container: str,
+                die_um: str, util: float,
+                em_floor_for_resize: Optional[Dict[str, Any]] = None
+                ) -> StepResult:
+    """The pre-PnR preparation as ONE step, between two external-flow segments.
+
+    llv1 W7a: the chip-top producer (`_padring_producer_dispatch`, the same
+    dispatch `step_pnr` makes), the step-7 SDC it reads (a seam, see
+    `_prepnr_constraint_file`), the die/core floorplan with its record
+    (`_prepnr_floorplan`) and, when the chip path requests a ring, the pad
+    assignment (`step_pad_assignment`) -- in `step_pnr`'s order: the producer,
+    then the die and its record, then the pad-ring work (whose first program
+    is the assignment). Callable in the default mode too; the default flow
+    does not dispatch it (it runs the pieces in `step_pnr`).
+
+    A chip-top producer that did not PASS on a chip path requesting a ring
+    stops the step with its own verdict: step_pnr's pad-ring gate turns that
+    producer's FAIL red too, and nothing after this step would.
+    """
+    t0 = time.time()
+    set_invocation_provenance_sink(project)
+    netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
+    if not netlist.is_file():
+        return StepResult("prepnr", "FAIL", time.time() - t0,
+                          f"synth netlist missing: {netlist}")
+    extras: Dict[str, Any] = {"netlist": str(netlist)}
+    ring = _chip_path_requests_pad_ring(project)
+    padring = _padring_producer_dispatch(
+        project, container, pdk,
+        supply_plan=(em_floor_for_resize or {}).get("supply_entry_plan"))
+    extras["chip_top"] = {"status": padring.status, "detail": padring.detail}
+    if ring and padring.status == _V.Verdict.FAIL.value:
+        return StepResult("prepnr", padring.status, time.time() - t0,
+                          f"chip-top producer: {padring.detail}",
+                          extras=extras,
+                          reason_class=getattr(padring, "reason_class", ""))
+    sdc, sdc_why = _prepnr_constraint_file(project, top, pdk)
+    extras["sdc"] = {"path": str(sdc) if sdc else None, "basis": sdc_why}
+    fp = _prepnr_floorplan(project, top, pdk, container, die_um, util,
+                           netlist, t0)
+    if isinstance(fp, StepResult):
+        return StepResult("prepnr", fp.status, time.time() - t0, fp.detail,
+                          extras=extras, reason_class=fp.reason_class)
+    extras["floorplan"] = asdict(fp)
+    if ring:
+        assign = step_pad_assignment(project, container, pdk)
+        extras["pad_assignment"] = {"status": assign.status,
+                                    "detail": assign.detail}
+        if assign.status != _V.Verdict.PASS.value:
+            return StepResult("prepnr", assign.status, time.time() - t0,
+                              f"pad assignment: {assign.detail}",
+                              extras=extras, reason_class=assign.reason_class)
+    # A non-measured chip-top producer does not hide an independently
+    # measurable floorplan/assignment failure. If those steps ran clean, it
+    # still prevents a ring path from claiming PASS.
+    status = (_V.Verdict.NOT_MEASURED.value
+              if (ring and padring.status != _V.Verdict.PASS.value)
+              else (_V.Verdict.PASS.value if sdc is not None
+                    else _V.Verdict.NOT_MEASURED.value))
+    return StepResult(
+        "prepnr", status, time.time() - t0,
+        (f"die {fp.die_w}x{fp.die_h} um, core pad {fp.core_pad} um; "
+         f"chip top {padring.status}; {sdc_why}"),
+        [str(project / FLOORPLAN_RECTANGLES_REL)], extras=extras,
+        reason_class=(getattr(padring, "reason_class", "")
+                      if ring and padring.status != _V.Verdict.PASS.value
+                      else ("" if sdc is not None
+                            else _V.ReasonClass.INPUT_ABSENT.value)))
+
+
+def step_pnr(project: Path, top: str, pdk: PdkConfig,
+             container: str, die_um: str, util: float,
+             spare_density=None, pad_ring_step=step_pad_ring_gen,
+             pad_ring_results: Optional[List[StepResult]] = None,
+             em_floor_for_resize: Optional[Dict[str, Any]] = None,
+             density_from_tool_default: bool = False) -> StepResult:
+    t0 = time.time()
+    # The pre-PnR geometry planner has its own local override.  This PnR
+    # invocation must start with no inherited strap override of its own.
+    _budget_override: Dict[str, Dict[str, float]] = {}
+    out_dir = _pl.pnr_dir(project)
+    # No old route receipt can certify this invocation, including a preflight
+    # failure before the router or wrapper checks run.
+    (out_dir / ROUTER_DRC_RECEIPT_NAME).unlink(missing_ok=True)
+    (out_dir / _ppa_power.DIRECT_PDN_RECEIPT_NAME).unlink(missing_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    import declared_knob_applied_parity as _knob_parity
+    _knob_parity.write_pending_pnr_report(project, out_dir / "pnr.tcl")
+    netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
+    print(f"[pnr] netlist: {_nl_note}", flush=True)
+    if not netlist.is_file():
+        return StepResult("pnr", "FAIL", time.time() - t0,
+                          f"synth netlist missing: {netlist}")
+    # v1.6.599 — for #406 P2. Wrapper-class pre-flight: emit a
+    # clear FAIL early instead of letting OpenLane stall for
+    # 30+ minutes on a wrapper-class IC without pin_order.cfg.
+    _v1_6_599_wrap_err = _v1_6_599_check_wrapper_pin_order_cfg(
+        project, top, netlist)
+    if _v1_6_599_wrap_err is not None:
+        return StepResult(
+            "pnr", "FAIL", time.time() - t0,
+            _v1_6_599_wrap_err,
+            extras={
+                "wrapper_class": True,
+                "missing": "pin_order.cfg",
+                "remediation": (
+                    "Add a wrapper-glue layer + author "
+                    "pin_order.cfg from the harness template"),
+            })
+    # The active tech LEF itself can contain a contradiction: a VIA landing
+    # smaller than the routing layer's own MINWIDTH/AREA.  Post-route RECT
+    # patching is too late (the router did not reserve the required spacing),
+    # and a GDS-only edit would be invisible to RCX/LVS.  Derive one legal LEF
+    # before any backend consumer resolves its path, then mutate the shared
+    # PdkConfig so every downstream consumer sees the same geometry.
+    _via_legalization = _stage_via_legalized_tech_lef(
+        project, pdk, container, out_dir)
+    if _via_legalization["status"] == "APPLIED":
+        print("[phase3] VIA-LANDING REMEDIATION APPLIED: "
+              f"{_via_legalization['changed_patch_records']} fixed/generated "
+              "routing patch record(s) grown from active tech-LEF rules; all "
+              f"consumers use {pdk.tech_lef}", file=sys.stderr)
+    elif _via_legalization["status"] not in ("NOT_NEEDED",):
+        print("[phase3] VIA-LANDING REMEDIATION NOT APPLIED: "
+              f"{_via_legalization.get('reason', 'unspecified')}; original "
+              "tech LEF retained and the run is not silently certified",
+              file=sys.stderr)
+    # #365 third ask — point per-invocation provenance at THIS project, so
+    # every supervised tool run below records a MEASURED duration instead of
+    # the flow ending with a handful of back-filled zero-duration entries.
+    set_invocation_provenance_sink(project)
+
+    # #309 — PRE-ROUTE hard-macro supply gate. A LEF-typed POWER/GROUND macro
+    # pin driven by a signal net makes TritonRoute abort ALL detailed routing
+    # (3278 nets, 0 routed, GDS a placed-but-unrouted shell). Decide it HERE,
+    # before any router time is spent, so the failure names the macro and pin
+    # instead of surfacing as DRT-0307 five steps later. Shares its judgement
+    # with the Phase-1 warning via hardmacro_supply_intent, so what Phase 1
+    # validates is exactly what this enforces.
+    try:
+        _ms_nl: Optional[str] = netlist.read_text(encoding="utf-8",
+                                                  errors="ignore")
+    except OSError:
+        _ms_nl = None    # tie unprovable -> decision keeps the strict path
+    _ms = _macro_supply_preroute_decision(project, pdk, netlist_text=_ms_nl)
+    if _ms and _ms.get("bound"):
+        print(f"[phase3] HARD-MACRO SUPPLY: {len(_ms['bound'])} POWER/GROUND "
+              f"macro pin(s) accounted for by the design's power intent")
+    if _ms and _ms.get("env_blind"):
+        # #329 delta: environment blindness must be LOUD, never silent green.
+        print(f"[phase3] HARD-MACRO SUPPLY ENV-BLIND: {_ms['message']}")
+    for _g in (_ms or {}).get("gaps_reported") or []:
+        print(f"[phase3]   SUPPLY INTEGRATION GAP (named, non-blocking): "
+              f"{_g['master']}/{_g['pin']} ({_g.get('use','POWER')}) — "
+              f"{_g['detail']}")
+    if _ms and _ms.get("blocking"):
+        for _g in _ms["gaps"]:
+            print(f"[phase3]   BLOCKING SUPPLY-ON-POWER (integration gap): "
+                  f"{_g['master']}/{_g['pin']} ({_g.get('use','POWER')}) — "
+                  f"{_g['detail']}")
+        _ms_extras: Dict[str, Any] = {"macro_supply_gaps": _ms["gaps"],
+                                      "macro_supply_bound": _ms["bound"]}
+        # The one sentence that resolves the FAIL against the DEF. A reader who
+        # greps the DEF for the pin's rail finds `- <RAIL> ( * <RAIL> ) + USE
+        # POWER ;` and concludes the gate is wrong; that entry carries no
+        # conductor, so it does NOT count as an established rail, and the pin
+        # really is a gap. Published ONLY when non-empty: an empty list would
+        # assert that the built rails were examined and none was a bare name,
+        # which on a first run is false — every DEF this reads is written by
+        # THIS step's own TCL, further down. Absent therefore means "nothing to
+        # say", never "checked and clean".
+        if _ms.get("rails_named_not_built"):
+            _ms_extras["rails_named_not_built"] = _ms["rails_named_not_built"]
+        return StepResult("pnr", "FAIL", time.time() - t0, _ms["message"],
+                          extras=_ms_extras)
+
+    # The chip-top producer must precede BOTH SDC construction and die
+    # resolution.  Its domain plan is the sole authority for excluding supply
+    # ports from signal-only DRV limits, while its die_required_um is an input
+    # to the floorplan.  The producer is idempotent and writes only its own
+    # wrapper/record; a design with no declared pad placement SKIPs.
+    _padring_producer = _padring_producer_dispatch(
+        project, container, pdk,
+        supply_plan=(em_floor_for_resize or {}).get("supply_entry_plan"))
+    if _padring_producer.status not in (_V.Verdict.PASS.value,
+                                          _V.Verdict.NOT_MEASURED.value):
+        print(f"[phase3] io_pad_chip_top_gen: {_padring_producer.status} — "
+              f"{_padring_producer.detail}", file=sys.stderr)
+
+    # SDC: silicon top != FPGA wrapper. Project's fpga/*.sdc references
+    # FPGA-only ports (CLOCK_50/KEY/GPIO_0) and may use Quartus-private
+    # commands (derive_pll_clocks). For silicon synth (top=chip_top), use
+    # a generic minimal SDC tied to chip_top's actual clk port.
+    sdc = out_dir / "constraint.sdc"
+    # spm x ihp-sg13g2, 2026-08-07: `set_max_fanout` in the loaded SDC does NOT
+    # make OpenROAD's `clock_tree_synthesis` respect it — CTS's own leaf-level
+    # sink clustering is governed ONLY by `-sink_clustering_size` passed to the
+    # command itself (see `_cts_cluster` below). MEASURED: with `set_max_fanout
+    # 8` correctly present in constraint.sdc (the `_ensure_staged_sdc_drv` /
+    # `_liberty_drv_limits` fallback below), a CTS run with no
+    # `-sink_clustering_size` still built a leaf buffer (`clkbuf_0`) fanning
+    # out to 16 sinks against the SAME liberty's own declared limit of 8 — the
+    # SDC constraint and CTS's own clustering are two independent mechanisms,
+    # and only `set_max_fanout` was closed above. `_cts_fanout_target` carries
+    # the SAME resolved value (design-declared, else liberty-derived) to the
+    # `cts_cluster_size=` kwarg near the bottom of this function, so CTS is
+    # told the identical number the SDC and sign-off already use — set in
+    # BOTH branches below (staged / auto SDC), never fabricated (§4.05: reused
+    # from the same DRV resolution, not invented here).
+    # STEP 7 AUTHORS, STEP 15 READS (FX_STEP7_ASIC_SDC). The deck below is
+    # step 7's file (`asic_sdc_for_pnr`), sha-bound in
+    # `constraint_sdc_provenance.json`; it is regenerated through step 7's own
+    # producer only when absent/stale (an --entry-step window on an old
+    # project), and the one PnR-time addition -- excluding the pad-ring
+    # producer's proven supply ports from the DRV scope -- is the named
+    # derivation recorded beside it. The records the inline author wrote
+    # (DRV/I-O parity, the I/O-delay contract, the CTS fanout target) are
+    # written from the same authored result, so every consumer is unchanged.
+    project_sdc_silicon = _resolve_staged_silicon_sdc(project)
+    _asic = _ppa_timing.asic_sdc_for_pnr(
+        _runner_module(), project, top, pdk, container)
+    _cts_fanout_target: Optional[int] = _asic.get("cts_fanout_target")
+    for _key, _name in (("drv_parity", "sdc_drv_parity.json"),
+                        ("io_parity", "sdc_io_delay_parity.json")):
+        if _asic.get(_key) is not None:
+            if (_asic[_key] or {}).get("note"):
+                print(f"[phase3][sdc-{_key.split('_')[0]}] "
+                      f"{_asic[_key]['note']}", file=sys.stderr)
+            try:
+                (out_dir / _name).write_text(
+                    json.dumps(_asic[_key], indent=2, default=str))
+            except Exception:
+                pass
+    if _asic.get("io_delay_contract") is not None:
+        _aa.write_json(
+            project / "reports" / "phase3" / "io_delay_contract.json",
+            dict(_asic["io_delay_contract"], sdc=str(sdc)))
+    sdc.write_text(_asic["text"])
+    _aa.write_json(out_dir / "constraint_sdc_provenance.json", {
+        "schema": "vibe-ic/pnr-sdc-provenance/1",
+        "step7_sdc": _asic["path"],
+        "step7_sha256": _asic["step7_sha256"],
+        "step7_deck_sha256": _asic["deck_sha256"],
+        "deck_sha256": hashlib.sha256(
+            _asic["text"].encode("utf-8")).hexdigest(),
+        "regenerated_by_step7_producer": _asic["regenerated"],
+        "pnr_time_derivation": _asic["derivation"]})
+    if _asic["regenerated"]:
+        print(f"[phase3] step 7's ASIC SDC regenerated by its own producer "
+              f"before PnR: {_asic['regenerated']}", file=sys.stderr)
+    # CR1: the declared-vs-applied SDC knob report reads the deck PnR loads.
+    _knob_parity.write_sdc_report(
+        project, sdc, pdk=str(pdk.name),
+        library=_active_std_cell_library(project, str(pdk.name)))
+    # Whichever branch ran, record what the DESIGN staged and what became of
+    # it. A machine-readable sibling of the deck's own comment block, so a
+    # later reader does not have to parse an SDC to learn that the design's
+    # constraints exist and were not used.
+    try:
+        (out_dir / "staged_sdc_survey.json").write_text(json.dumps({
+            "consumed": (str(project_sdc_silicon.relative_to(project))
+                         if project_sdc_silicon
+                         and project_sdc_silicon.is_file() else None),
+            "staged_under_input": _staged_sdc_survey(project),
+        }, indent=2, default=str))
+    except Exception:
+        pass
+
+    # llv1 W7a — the die/core resolution AND the floorplan record live in
+    # `_prepnr_floorplan`, which the between-segments step calls too;
+    # both moved verbatim.
+    _prep_dc = _prepnr_floorplan(project, top, pdk, container, die_um,
+                                 util, netlist, t0,
+                                 density_from_tool_default=density_from_tool_default)
+    if isinstance(_prep_dc, StepResult):
+        return _prep_dc
+    (die_um, die_w, die_h, core_pad, core_w, core_h,
+     fp_rect, util, _auto_die_requested, _l9_die_note, _ring_floor_pad,
+     _ring_inset, _ring_pinned_die, _seal_rec, _slot,
+     _strap_floor_detail, _strap_floor_um, _ct03_pin_rect) = _prep_dc.as_locals()
+    _auto_die_metrics = _prep_dc.auto_die_metrics
 
     # Pick clock buffer cells: PdkConfig-carried masters win (every registry
     # PDK carries clk_buf_cell/root); otherwise DISCOVER them from the PDK's own
@@ -38258,8 +39135,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     import copy as _copy
     _pdn_em_floor_in = _copy.deepcopy(_pdn_em_floor)
     _pdn_plan: Dict[str, Any] = {}
-    pdn_block = _build_pdn_tcl(pdk, container, em_floor=_pdn_em_floor,
-                               plan_out=_pdn_plan)
+    pdn_block = _build_pdn_tcl(
+        pdk, container, em_floor=_pdn_em_floor, plan_out=_pdn_plan,
+        **({"strap_override": _budget_override} if _budget_override else {}))
     # R-0915-111 — the deck records what it APPLIED into the floor dict; persist
     # it beside the arithmetic so the step that reports the resize reads the
     # remedy instead of restating the shortfall.
@@ -38879,7 +39757,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                 placement=({"spare_plan": spare_plan, "mode": _ll_pl_modes["17"],
                             "tie_lo": (f"{_tie_lo_cell}/{_tie_lo_pin}"
                                        if _tie_lo_cell else None)}
-                           if _ll_pl_modes["17"] != "direct" else None))
+                           if _ll_pl_modes["17"] != "direct" else None),
+                strap_override=_budget_override or None)
             if (pad_result.status == "PASS" and _ll_pl_modes["17"] != "direct"
                     and "LIBRELANE_PLACEMENT_CONSUMED" in (consumer_tcl or "")):
                 _merge_librelane_spare_record(
@@ -38891,12 +39770,15 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         if pad_ring_results is not None:
             pad_ring_results[:] = [pad_result]
         if pad_result.status != "PASS" or consumer_tcl is None:
+            upstream_refused = pad_result.status == "NOT_MEASURED"
             return StepResult(
-                "pnr", "FAIL", time.time() - t0,
+                "pnr", "NOT_MEASURED" if upstream_refused else "FAIL", time.time() - t0,
                 "routing refused because the chip-path pad ring was not a "
                 f"verified routing input: {pad_result.detail}",
                 pad_result.output_files,
-                extras={"finding": "PADRING_PREROUTE_BLOCKED"})
+                extras={"finding": "PADRING_PREROUTE_BLOCKED"},
+                reason_class=(_V.ReasonClass.UPSTREAM_REFUSED.value
+                              if upstream_refused else ""))
         pnr_tcl.write_text(consumer_tcl)
         _sdr_child_deck_failures.clear()
         _sdr_child_deck_failures.update(
@@ -38907,6 +39789,12 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _pad_install_failure = _install_route_deck()
     if _pad_install_failure is not None:
         return _pad_install_failure
+    _knob_parity.write_planned_pnr_report(
+        project, pnr_tcl,
+        cell_area_um2=_auto_die_metrics.get("cell_area_um2"),
+        core_area_um2=float(core_w * core_h) if core_w > 0 and core_h > 0 else None,
+        tech_lef_text=_read_pdk_text(getattr(pdk, "tech_lef", None), container) or "",
+        pdk=str(pdk.name), library=_active_std_cell_library(project, str(pdk.name)))
     _ll_cts_overlay: Dict[str, Tuple[Any, str]] = {}
     if set(_ll_cts_modes.values()) != {"direct"}:
         try:
@@ -38915,7 +39803,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                 "phase3_one_shot_runner._cts_fanout_target (the SDC / sign-off "
                 "set_max_fanout: L9, RTL replication bound or liberty "
                 "default_max_fanout)",
-                project / "phase3/librelane/19-config")
+                project / "phase3/librelane/19-config",
+                excluded_cells=None)
         except (ValueError, OSError) as exc:
             return StepResult("pnr", "FAIL", time.time() - t0,
                               f"LL_CTS_HOLD_CONFIG_REFUSED: {exc}",
@@ -38995,6 +39884,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         pnr_tcl.read_text(errors="replace") if pnr_tcl.is_file() else "")
     _pnr_outputs = [str(p) for p in _pnr_products]
     for _retry_i in _pnr_loop:
+        # A later retry must never consume metric values from an earlier rung.
+        (out_dir / _PNR_METRICS).unlink(missing_ok=True)
         _archive_antenna_iteration_reports(out_dir)
         # Spelled as the direct `_docker_exec` call (not the
         # `_declared_session_exec` wrapper) so the closed-loop re-entry census
@@ -39812,6 +40703,25 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                         "non_signoff_outputs": _iso,
                         "resize_history": resize_history,
                         "loosen_declines": loosen_declines})
+    # A SESSION THE RUNNER STOPPED IS NOT A FINDING. The watchdog's stall kill
+    # (no progress) and a LibreLane chain's probe-deadline 124 can end a
+    # session whose tool never answered. The recorded ceiling does not kill.
+    # Require this invocation's own stop note before using the transport rc
+    # (`librelane_contract.tool_stop_session_rc`). NOT_MEASURED, never
+    # FAIL; a tool that ran and failed still reaches the gate below.
+    import librelane_contract as _ll_stop
+    _stop_reason = _ll_stop.session_stop_reason(rc, (out or '') + '\n' + (err or ''))
+    if _stop_reason is not None:
+        return StepResult("pnr", _V.Verdict.NOT_MEASURED.value, time.time() - t0,
+                          f"PNR_SESSION_STOPPED rc={rc}{spare_note}: the tool was "
+                          f"stopped, not answered ({_stop_reason}); "
+                          f"log_tail={(out+err)[-2000:]}",
+                          [str(out_dir / "openroad.log")],
+                          extras={"finding": "PNR_SESSION_STOPPED",
+                                  "resize_history": resize_history,
+                                  "spare_record_written": _spare_record_written,
+                                  "loosen_declines": loosen_declines},
+                          reason_class=_stop_reason)
     if rc != 0 or not def_file.is_file():
         # `spare_note` rides along: this is the gate a run that died BEFORE
         # the Step-18 block actually reaches (no insertion => no route), so
@@ -40579,6 +41489,10 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                 "input_identity": _identity_after,
                 "def_sha256": _def_sha,
             }, sort_keys=True) + "\n")
+    _knob_parity.write_applied_pnr_report(
+        project, pnr_tcl, def_file, out_dir / _PNR_METRICS,
+        tech_lef_text=_read_pdk_text(getattr(pdk, "tech_lef", None), container) or "",
+        pdk=str(pdk.name), library=_active_std_cell_library(project, str(pdk.name)))
     # Feedback runs in pre-stream admission after every route writer.
     if resize_history:
         return StepResult("pnr", _status, time.time() - t0,
@@ -43335,8 +44249,8 @@ def _density_metal_fill(project: Path, top: str, pdk: PdkConfig,
         # rc 2 is the program's NAMED disclosed-skip; rc 1 is PARTIAL/FAIL with
         # the achieved density in its report. Both are reported, never hidden.
         tail = ((cp.stdout or "") + (cp.stderr or "")).strip().splitlines()
-        return False, ("density fill did NOT complete: "
-                       + (tail[0][:200] if tail else f"rc={cp.returncode}"))
+        return False, (f"density fill did NOT complete: rc={cp.returncode}"
+                       + (f"; {tail[0][:200]}" if tail else ""))
     return True, ("per-layer density fill reached target on every layer"
                   + (" (config derived chip-AGNOSTIC from PDK files)" if derived else ""))
 
@@ -45538,7 +46452,8 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
                                  route_state: Optional[Path],
                                  route_views: Dict[str, Path],
                                  route_drc: Optional[int],
-                                 variant_arm: Any) -> Optional[Dict[str, Any]]:
+                                 variant_arm: Any,
+                                 container: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Step 32 on LibreLane inside step 21's LibreLane chain (T102 r2), called
     by `librelane_route.execute` after its selection and before its handoff:
     LL21 -> Vibeic.PostRouteRepair -> tail. None when step 32 is `direct`, or
@@ -45557,6 +46472,8 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
     report = _llprr.run_in_chain(
         project, mode=selected, image=image, pdk=str(pdk.name), pdk_root=pdk_root,
         sdc=sdc, derate=(_FLAT_OCV_DERATE_EARLY, _FLAT_OCV_DERATE_LATE),
+        aocv_table=(_discover_aocv_table(project, pdk, container)
+                    if container is not None else None),
         route_state=route_state, route_drc=route_drc, variant_arm=variant_arm,
         pg_rules_tcl=pg_rules, dont_use=_STEP32_DONT_USE,
         max_fanout=__import__("_ppa.timing", fromlist=["timing"]).sdc_max_fanout_cap(sdc))
@@ -45602,13 +46519,30 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
     direct paths (after a direct route); inside the LL21 chain the tail
     already wrote them."""
     import librelane_postroute_repair as _llprr  # noqa: PLC0415
-    if report.get("verdict") != "PASS":
-        _drv_promotion_disclose(pnr_out, "tool_unsupported",
-                                str(report.get("reason") or report.get("code")))
+    _trigger = report.get("repair_trigger")
+    _trigger = _trigger if isinstance(_trigger, dict) else None
+    if (_trigger is not None and _trigger.get("action") == "NOT_MEASURED"
+            and not report.get("adopted")):
+        # The input route's census did not measure every metric the trigger
+        # needs, so the closure never judged whether a repair was needed. That
+        # is not a repair step that passed, and not an unsupported tool.
+        _why = _llprr.trigger_disclosure(_trigger)
+        _drv_promotion_disclose(
+            pnr_out, "repair_trigger_not_measured",
+            "the input route's census left the repair trigger NOT_MEASURED, so "
+            "the closure did not run and the input route was kept: " + _why)
         return StepResult("postroute_repair_librelane", "NOT_MEASURED",
+                          time.time() - t0, f"LL_PRR_TRIGGER_NOT_MEASURED: {_why}",
+                          reason_class=_V.ReasonClass.INCONCLUSIVE)
+    if report.get("verdict") != "PASS":
+        _drv_promotion_disclose(pnr_out, "postroute_repair_refused",
+                                str(report.get("reason") or report.get("code")))
+        return StepResult("postroute_repair_librelane",
+                          "FAIL" if report.get("verdict") == "FAIL" else "NOT_MEASURED",
                           time.time() - t0,
                           f"{report.get('code')}: {report.get('reason')}",
-                          reason_class=_V.ReasonClass.EXECUTION_ERROR)
+                          reason_class=(_V.ReasonClass.EXECUTION_ERROR
+                                        if report.get("verdict") != "FAIL" else ""))
     base, final = report.get("baseline") or {}, report.get("final") or {}
     summary = (f"setup {base.get('setup_ws_min')} -> {final.get('setup_ws_min')} ns, "
                f"hold {base.get('hold_ws_min')} -> {final.get('hold_ws_min')} ns, "
@@ -45628,13 +46562,21 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
                           "was not established by step 32",
                           reason_class=_V.ReasonClass.INCONCLUSIVE)
     if not report.get("adopted"):
-        _drv_promotion_disclose(
-            pnr_out, "librelane_closure_kept_input",
-            "the closure adopted no candidate, so the input route was kept: "
-            + "; ".join(f"{r.get('controller')}: {r.get('outcome')}"
-                        for r in report.get("closure") or []))
+        if _trigger is not None and _trigger.get("action") != "RUN":
+            # Measured clean input: the closure was deliberately not run.
+            _why = ("the input route measured no violation, so the closure did "
+                    "not run and the input route was kept: "
+                    + _llprr.trigger_disclosure(_trigger))
+        else:
+            _why = ("the closure adopted no candidate, so the input route was "
+                    "kept: "
+                    + ("; ".join(f"{r.get('controller')}: {r.get('outcome')}"
+                                 for r in report.get("closure") or [])
+                       or "no controller outcome was recorded"))
+        _drv_promotion_disclose(pnr_out, "librelane_closure_kept_input", _why)
         return StepResult("postroute_repair_librelane", "PASS", time.time() - t0,
-                          f"no candidate adopted (input route kept): {summary}")
+                          f"no candidate adopted (input route kept): {summary}; "
+                          + _why)
     routed = pnr_out / "routed.def"
     netlist = pnr_out / f"{top}_pnr.v"
     if handed:
@@ -45753,6 +46695,7 @@ def step_postroute_repair_librelane(project: Path, top: str, pdk: "PdkConfig",
             project, image=image, pdk=str(pdk.name), pdk_root=pdk_root,
             views={"def": routed, "nl": netlist, "sdc": sdc}, sdc=sdc,
             derate=(_FLAT_OCV_DERATE_EARLY, _FLAT_OCV_DERATE_LATE),
+            aocv_table=_discover_aocv_table(project, pdk, container),
             pg_rules_tcl=pg_rules, refill_tcl=refill, dont_use=_STEP32_DONT_USE,
             max_fanout=__import__("_ppa.timing", fromlist=["timing"]).sdc_max_fanout_cap(sdc))
     except _ll.Refusal as exc:
@@ -47827,20 +48770,10 @@ def _delivery_admission_refusal(project: Path) -> Optional[str]:
     import _submission_template as _st                         # noqa: PLC0415
     import _tapeout_declaration as _td                          # noqa: PLC0415
 
-    def read_delivery(rel: str) -> Tuple[Dict[str, Any], str]:
-        doc, err = _td.load(project / rel)
-        if (err or not isinstance(doc, dict)
-                or not isinstance(doc.get("answers"), dict)):
-            raise ValueError(f"{rel}: {err or 'invalid answer mapping'}")
-        answer = str(_td.answer(doc, "deliverable")).strip().upper()
-        if answer not in _td.DELIVERABLES:
-            raise ValueError(f"{rel}: no owner-attested DIE or HARDMACRO answer")
-        return doc, answer
-
     try:
-        declaration, delivery = read_delivery(_td.DECLARATION_REL)
+        declaration, delivery = _td.read_owner_delivery(project, _td.DECLARATION_REL)
         if (project / _st.DESIGN_ANSWERS_REL).exists():
-            raw, current = read_delivery(_st.DESIGN_ANSWERS_REL)
+            raw, current = _td.read_owner_delivery(project, _st.DESIGN_ANSWERS_REL)
             if (current != delivery or
                     _td.attestation_of(raw, "deliverable") !=
                     _td.attestation_of(declaration, "deliverable")):
@@ -48272,6 +49205,10 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     pnr_dir = _pl.pnr_dir(project)
     def_file = pnr_dir / f"{top}.def"
     gds_out = pnr_dir / f"{top}.gds"
+    # Each tool invocation gets its own retained stream.  Finishing works on
+    # the canonical delivery path, whose digest is declared only at the end.
+    stream_gds = pnr_dir / "streamout" / f"{top}.{time.time_ns()}.gds"
+    stream_gds.parent.mkdir(parents=True, exist_ok=True)
     for _old_lvs in (gds_out.with_suffix(".lvs.gds"),
                      gds_out.with_suffix(".lvs.gds.receipt.json")):
         _old_lvs.unlink(missing_ok=True)
@@ -48353,7 +49290,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
             "port-label restore)")
     else:
         magic_ok, magic_transcript = _magic_def_to_gds(
-            project, top, pdk, container, gds_out)
+            project, top, pdk, container, stream_gds)
     # sha256×sky130A / #SS-SETUP — FORCE klayout streamout (A/B probe). Magic's
     # native geometry merge fuses the met2 landings of a STACKED via1+via2 into a
     # shape the KLayout deck reads as enclosure-deficient (m2.4/m2.5) even though
@@ -48364,17 +49301,32 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         magic_ok, magic_transcript = False, (
             "magic streamout forced-skip (VIBEIC_FORCE_KLAYOUT_STREAMOUT=1): "
             "avoid the stacked-via met2-enclosure merge artefact")
-    if magic_ok and gds_out.is_file():
+    if magic_ok and stream_gds.is_file():
+        shutil.copyfile(stream_gds, gds_out)
+        chain = _GdsTransformChain(project, stream_gds, gds_out, declare=not candidate)
         # ORGANIC #600 — manufacturing-grid snap before signoff DRC.
-        snap_ok, snap_note = _declared_transform_exec(project, gds_out, "gds:grid_snap", "klayout",
+        snap_ok, snap_note = chain.run(None, gds_out, "gds:grid_snap", "klayout",
         "grid_snap (in place) (phase3_one_shot_runner step_gds)",
         lambda: _gds_grid_snap(project, top, pdk, container,
                                             gds_out))
+        # The XOR reference is the actual pre-finishing layout from this run.
+        # Retain it after grid snap and bind it to the routed DEF, as on the
+        # KLayout arm, so a re-stream is unnecessary and cannot drift.
+        prefinish_gds = pnr_dir / f"{top}.prefinish.gds"
+        shutil.copyfile(gds_out, prefinish_gds)
+        prefinish_gds.with_suffix(".gds.receipt.json").write_text(json.dumps({
+            "program": "phase3_one_shot_runner", "artefact": prefinish_gds.name,
+            "sha256": _sha256_file(prefinish_gds),
+            "size": prefinish_gds.stat().st_size,
+            "mtime_ns": prefinish_gds.stat().st_mtime_ns,
+            "top": str(top), "streamed_from_def": def_file.name,
+            "def_sha256": _sha256_file(def_file), "engine": "magic",
+        }, indent=2) + "\n")
         # Step 26.5ic — die finishing (the PDK's OWN seal ring), BEFORE the
         # fill and before the sign-off DRC/LVS read this GDS, so the ring is
         # verified with the rest of the die instead of appearing after its
         # evidence.
-        seal_ok, seal_note = _declared_transform_exec(project, gds_out, "gds:die_finishing", "klayout",
+        seal_ok, seal_note = chain.run(None, gds_out, "gds:die_finishing", "klayout",
         "die_finishing (in place) (phase3_one_shot_runner step_gds)",
         lambda: _die_finishing(project, top, pdk, gds_out,
                                             container))
@@ -48385,7 +49337,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         if _t34 is None or _t34["mode"] == "dual":
             # Per-layer density fill BEFORE the density checks / sign-off DRC read
             # this GDS. Config-gated + NONFATAL; the note always discloses.
-            dfill_ok, dfill_note = _declared_transform_exec(project, gds_out, "gds:density_metal_fill", "klayout",
+            dfill_ok, dfill_note = chain.run(None, gds_out, "gds:density_metal_fill", "klayout",
             "density_metal_fill (in place) (phase3_one_shot_runner step_gds)",
             lambda: _density_metal_fill(project, top, pdk, gds_out, container))
             # DIE-WIDE fill by the PDK's own generator, LAST of the fill passes
@@ -48393,7 +49345,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
             # The pass above measures and fills the streamed geometry's BOUNDING
             # BOX; a foundry minimum-density rule is written over the entire DIE,
             # and on a slot submission those are different rectangles. NONFATAL.
-            ddfill_ok, ddfill_note = _declared_transform_exec(project, gds_out, "gds:die_density_fill", "klayout",
+            ddfill_ok, ddfill_note = chain.run(None, gds_out, "gds:die_density_fill", "klayout",
             "die_density_fill (in place) (phase3_one_shot_runner step_gds)",
             lambda: _die_density_fill(project, top, pdk, gds_out,
                                                        container))
@@ -48401,45 +49353,15 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
             dfill_ok, dfill_note = ddfill_ok, ddfill_note = (False, _t34["not_run"])
         if _t34 is not None:
             dfill_ok, dfill_note = _step34_gds_ship(project, gds_out, _t34,
-                                                    (dfill_ok, dfill_note))
+                                                    (dfill_ok, dfill_note), chain=chain)
         # vibe-ic#613 — the port-label restore is a POST-streamout pass over the
         # finished GDS, so it belongs on BOTH engines. Gating it on the KLayout
         # path alone would have made "which streamout ran" decide whether a
         # sign-off GDS can be pin-matched. Last, so labels land on final geometry.
-        label_ok, label_note = _declared_transform_exec(project, gds_out, "gds:port_labels", "klayout",
+        label_ok, label_note = chain.run(None, gds_out, "gds:port_labels", "klayout",
         "port_labels (in place) (phase3_one_shot_runner step_gds)",
         lambda: _restore_port_labels_if_missing(
             project, top, pdk, container, gds_out, def_file))
-        # R-0915-148 — THIS BRANCH RETAINS NO FINISHING BOUNDARY, SO IT MUST NOT
-        # LEAVE SOMEBODY ELSE'S LYING AROUND.
-        #
-        # Only the KLayout branch writes `{top}.prefinish.gds`. Magic retains
-        # nothing and, until now, deleted nothing -- and nothing anywhere in the
-        # plugin ever unlinked one. So an earlier KLayout invocation (or one forced
-        # with VIBEIC_FORCE_KLAYOUT_STREAMOUT=1) left a boundary in the project, a
-        # later Magic invocation in the same directory left it there STALE, and
-        # `gds_xor_check` would compare this run's GDS against the previous run's
-        # layout under the banner "design-layer differences expected to be exactly
-        # 0" -- reporting any routing change between the two runs as a design FAIL
-        # about a layout nobody asked about.
-        #
-        # An absent boundary is a KNOWN, handled state: the consumer re-streams.
-        # A stale one is not. So this branch removes what it did not produce, and
-        # says so.
-        for _stale in sorted(pnr_dir.glob("*.prefinish.gds")):
-            try:
-                _stale_rec = _stale.with_suffix(".gds.receipt.json")
-                _stale.unlink()
-                if _stale_rec.is_file():
-                    _stale_rec.unlink()
-                print(f"[gds] removed a finishing boundary this run did not "
-                      f"produce ({_stale.name}): the magic stream-out retains "
-                      f"none, and a stale one would be compared as if it were "
-                      f"this run's")
-            except OSError as _stale_exc:                  # pragma: no cover
-                print(f"[gds] could NOT remove the stale finishing boundary "
-                      f"{_stale.name} ({type(_stale_exc).__name__}: "
-                      f"{_stale_exc}); gds_xor_check must refuse it by receipt")
 
         # #306 — BOTH stream-out engines get the substance gate. A stub GDS
         # out of Magic is the same defect as a stub GDS out of KLayout, and
@@ -48453,6 +49375,9 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
                 # failure is losing it when a reader most needs it: "which
                 # streamout produced this bad GDS" is the first question.
                 extras={"streamout_engine": "magic"})
+        if not chain.finish("finish the retained Magic stream for sign-off"):
+            return StepResult("gds", "FAIL", time.time() - t0,
+                              chain.failed or "GDS finishing input has no matching tool declaration")
         return StepResult(
             "gds", "PASS", time.time() - t0,
             f"gds={gds_out.name} size={gds_out.stat().st_size} "
@@ -48481,7 +49406,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # container and host paths are not visible there.
     script_c = _to_container_path(str(script), container)
     def_c = _to_container_path(str(def_file), container)
-    gds_out_c = _to_container_path(str(gds_out), container)
+    gds_out_c = _to_container_path(str(stream_gds), container)
     # Include macro LEFs + macro PA-GDS so hard-macro outlines flatten
     # into the merged GDS. chip-AGNOSTIC.
     lef_list = [pdk.tech_lef, pdk.cell_lef] + list(pdk.macro_lefs)
@@ -48552,8 +49477,8 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         f"STDCELL_MARKER_LAYER=\"{marker_arg}\" && "
         f"klayout -zz -b -r {script_c}"
     )
-    rc, out, err = _docker_exec(container, cmd, marker=script_c, outputs=[gds_out])
-    _record_stream_inputs(project, container, gds_out, "klayout", script,
+    rc, out, err = _docker_exec(container, cmd, marker=script_c, outputs=[stream_gds])
+    _record_stream_inputs(project, container, stream_gds, "klayout", script,
                           def_file, top,
                           {"LEFS": lefs, "CELL_GDS": cell_gds_c,
                            "MACRO_GDS": macro_gds_arg,
@@ -48568,11 +49493,13 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         stream_log.write_text((out or "") + ("\n" + err if err else ""))
     except Exception:
         pass
-    if rc != 0 or not gds_out.is_file():
+    if rc != 0 or not stream_gds.is_file():
         return StepResult("gds", "FAIL", time.time() - t0,
                           f"rc={rc} log_tail={(out+err)[-1500:]}")
+    shutil.copyfile(stream_gds, gds_out)
+    chain = _GdsTransformChain(project, stream_gds, gds_out, declare=not candidate)
     # ORGANIC #600 — manufacturing-grid snap before signoff DRC.
-    snap_ok, snap_note = _declared_transform_exec(project, gds_out, "gds:grid_snap", "klayout",
+    snap_ok, snap_note = chain.run(None, gds_out, "gds:grid_snap", "klayout",
         "grid_snap (in place) (phase3_one_shot_runner step_gds)",
         lambda: _gds_grid_snap(project, top, pdk, container, gds_out))
     # ORGANIC #601 — KLayout streamout does NOT merge abutting same-layer
@@ -48580,7 +49507,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # DRC removes boundary edge-pair false m1.2. Magic-merge cannot be
     # assumed (it core-dumps on the very DEFs that force this fallback), so
     # the merge is KLayout-native. Never ship an un-merged KLayout GDS.
-    merge_ok, merge_note = _declared_transform_exec(project, gds_out, "gds:layer_merge", "klayout",
+    merge_ok, merge_note = chain.run(None, gds_out, "gds:layer_merge", "klayout",
         "layer_merge (in place) (phase3_one_shot_runner step_gds)",
         lambda: _klayout_merge_layers(project, top, pdk, container,
                                                  gds_out))
@@ -48588,7 +49515,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # router's same-net metal shapes left in the (0, min-space) no-man's land
     # (config-gated; each max_bridge_um < the layer min-space so it can only
     # merge same-net shapes, never short or mask a different-net violation).
-    heal_ok, heal_note = ((_declared_transform_exec(project, gds_out, "gds:same_net_heal", "klayout",
+    heal_ok, heal_note = ((chain.run(None, gds_out, "gds:same_net_heal", "klayout",
         "same_net_heal (in place) (phase3_one_shot_runner step_gds)",
         lambda: _klayout_same_net_heal(project, top, pdk, container,
                                                   gds_out)))
@@ -48657,7 +49584,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # GDS. That is LibreLane's chip-flow order, SealRing -> Filler -> Density;
     # adding the ring later would put metal on the die after Step 31 signed it
     # off — the artefact changing after the evidence.
-    seal_ok, seal_note = _declared_transform_exec(project, gds_out, "gds:die_finishing", "klayout",
+    seal_ok, seal_note = chain.run(None, gds_out, "gds:die_finishing", "klayout",
         "die_finishing (in place) (phase3_one_shot_runner step_gds)",
         lambda: _die_finishing(project, top, pdk, gds_out, container))
     # Step 34 on LibreLane (mig104): the tool arm fills a snapshot of the
@@ -48668,7 +49595,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # v1.3.83 — config-driven dummy-METAL fill AFTER merge, BEFORE the
     # sign-off DRC consumes this GDS (the deck's own density + spacing +
     # wide-metal rules then verify the fill honestly — no rule is waived).
-    fill_ok, fill_note = ((_declared_transform_exec(project, gds_out, "gds:dummy_fill", "klayout",
+    fill_ok, fill_note = ((chain.run(None, gds_out, "gds:dummy_fill", "klayout",
         "dummy_fill (in place) (phase3_one_shot_runner step_gds)",
         lambda: _klayout_dummy_fill(project, top, pdk, container,
                                                gds_out)))
@@ -48679,7 +49606,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # window and tops it up to the foundry target, after the fixed dummy-fill
     # PATTERN above and before the density checks / sign-off DRC consume this
     # GDS. Config-gated + NONFATAL; the note always discloses the outcome.
-    dfill_ok, dfill_note = (_declared_transform_exec(project, gds_out, "gds:density_metal_fill", "klayout",
+    dfill_ok, dfill_note = (chain.run(None, gds_out, "gds:density_metal_fill", "klayout",
         "density_metal_fill (in place) (phase3_one_shot_runner step_gds)",
         lambda: _density_metal_fill(project, top, pdk, gds_out, container))
         if _t34_direct else (False, _t34["not_run"]))
@@ -48688,19 +49615,19 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # above measures and fills the streamed geometry's BOUNDING BOX; a foundry
     # minimum-density rule is written over the entire DIE, and on a slot
     # submission those are different rectangles. NONFATAL, always disclosed.
-    ddfill_ok, ddfill_note = (_declared_transform_exec(project, gds_out, "gds:die_density_fill", "klayout",
+    ddfill_ok, ddfill_note = (chain.run(None, gds_out, "gds:die_density_fill", "klayout",
         "die_density_fill (in place) (phase3_one_shot_runner step_gds)",
         lambda: _die_density_fill(project, top, pdk, gds_out,
                                                container))
         if _t34_direct else (False, _t34["not_run"]))
     if _t34 is not None:
         dfill_ok, dfill_note = _step34_gds_ship(project, gds_out, _t34,
-                                                (dfill_ok, dfill_note))
+                                                (dfill_ok, dfill_note), chain=chain)
     # v1.3.91 — restore top PORT text labels + VDD/VSS rail markers LAST (after
     # merge/heal/fill so the labels/markers land on the final geometry): makes
     # the KLayout-streamed GDS LVS-able by the geometric extractor. Config-gated
     # (no-op for OSS PDKs).
-    label_ok, label_note = _declared_transform_exec(project, gds_out, "gds:port_labels", "klayout",
+    label_ok, label_note = chain.run(None, gds_out, "gds:port_labels", "klayout",
         "port_labels (in place) (phase3_one_shot_runner step_gds)",
         lambda: _restore_port_labels_if_missing(
         project, top, pdk, container, gds_out, def_file))
@@ -48760,6 +49687,9 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
             # failure is losing it when a reader most needs it: "which
             # streamout produced this bad GDS" is the first question.
             extras={"streamout_engine": "klayout"})
+    if not chain.finish("finish the retained KLayout stream for sign-off"):
+        return StepResult("gds", "FAIL", time.time() - t0,
+                          chain.failed or "GDS finishing input has no matching tool declaration")
     return StepResult("gds", "PASS", time.time() - t0,
                       f"gds={gds_out.name} size={gds_out.stat().st_size} "
                       f"{'[' + _top_note + '] ' if _top_note else ''}"
@@ -48801,7 +49731,7 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     """Opt-in tool stream-out; direct remains the production default."""
     if candidate:
         return _step_gds_direct(project, top, pdk, container, candidate=True)
-    from librelane_contract import (Refusal, TIME_REFUSALS, resolve_image,
+    from librelane_contract import (Refusal, tool_stop_reason, resolve_image,
                                     resolve_pdk_root, selected_mode)
     mode = selected_mode(project, "37")
     if mode == "direct":
@@ -48810,10 +49740,10 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     t0 = time.time()
 
     def _librelane_refused(exc: BaseException, context: str) -> StepResult:
-        stopped = isinstance(exc, Refusal) and exc.code in TIME_REFUSALS
+        stopped = tool_stop_reason(exc.code) if isinstance(exc, Refusal) else None
         return StepResult("gds", "NOT_MEASURED" if stopped else "FAIL",
                           time.time() - t0, f"{context}: {exc}",
-                          reason_class=(_V.ReasonClass.EXECUTION_ERROR if stopped else ""))
+                          reason_class=(stopped or ""))
 
     digest, refusal = _layout_basis(project, top, pdk, container)
     if refusal or not _ga.gate_passed(project, digest):
@@ -50736,7 +51666,7 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
     """
     t0 = time.time()
     import librelane_pv_signoff as _pv
-    from librelane_contract import Refusal, TIME_REFUSALS, resolve_image, resolve_pdk_root
+    from librelane_contract import Refusal, tool_stop_reason, resolve_image, resolve_pdk_root
     pnr = _pl.pnr_dir(project)
     try:
         image = resolve_image(project)
@@ -50757,10 +51687,10 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
         if exc.code in ("LL_PV_VIEW_MISSING", "LL_BRIDGE_VIEW_MISSING"):
             return StepResult(half, "NOT_MEASURED", time.time() - t0, str(exc),
                               reason_class=_V.ReasonClass.INPUT_ABSENT)
-        if exc.code in TIME_REFUSALS:  # time, not a verdict: never a plain red
+        if stopped := tool_stop_reason(exc.code):
             return StepResult(half, "NOT_MEASURED", time.time() - t0,
                               f"LibreLane step 31: {exc}",
-                              reason_class=_V.ReasonClass.EXECUTION_ERROR)
+                              reason_class=stopped)
         return StepResult(half, "FAIL", time.time() - t0, f"LibreLane step 31: {exc}")
     record_path = project / _pv.RECORD_REL.format(half=half)
     extras: Dict[str, Any] = {"librelane_pv": str(record_path),
@@ -51189,6 +52119,8 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
         cell_internal_rules=(_geo_rules | _sem_rules))
     user_vios = sum(user_per_rule.values())
     cell_vios = sum(cell_per_rule.values())
+    waiver_rows: List[Dict[str, str]] = []
+    attribution = ""
     if vios == 0:
         status = "PASS"
         detail = f"violations=0 report={rpt.name}"
@@ -51198,7 +52130,7 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
         # Re-tier to WAIVED: production OpenMPW sign-off routinely
         # waives these via per-cell foundry confidence. The verdict
         # propagates to PASS_WITH_WAIVERS at the runner level.
-        status = "WAIVED"
+        status = _V.Verdict.PASS_WITH_WAIVERS.value
         top_rules = sorted(cell_per_rule.items(),
                            key=lambda kv: -kv[1])[:5]
         rules_brief = ", ".join(f"{name}={cnt}"
@@ -51234,6 +52166,10 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
             "review_required": True,
             "ticket": "TAPEOUT-AUTOGEN-DRC-CELLLIB",
         }
+        waiver_rows = [_V.WaiverRow(
+            id=extras["ticket"],
+            reason=extras["waiver_reason"],
+            owner="foundry sign-off reviewer").to_dict()]
     else:
         # User-routing violations present — FAIL (NOT WAIVED).
         # These are sign-off-blocking spacing / antenna defects on
@@ -51459,7 +52395,10 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
     except Exception:  # nosec — canonical mirror is best-effort provenance
         pass
     return StepResult("drc", status, time.time() - t0,
-                      detail, [str(rpt)], extras=extras)
+                      detail, [str(rpt)], extras=extras,
+                      waiver_rows=(waiver_rows if status ==
+                                   _V.Verdict.PASS_WITH_WAIVERS.value else []),
+                      attribution=attribution)
 
 
 # ---------------------------------------------------------------------------
@@ -52329,6 +53268,8 @@ def _write_lvs_verdict(project: Path, status: str, finding: str,
     }
     if extras:
         payload.update(extras)
+    payload["phase2_synth"] = _pl.phase2_synth_input_identity(project)
+    payload["phase3_inputs"] = _pl.phase3_signoff_input_identity(project)
     path.write_text(json.dumps(payload, indent=2) + "\n")
     try:
         return str(path.relative_to(project))
@@ -55037,7 +55978,8 @@ def _v1_6_620_append_pv_signoff_provenance(project: Path, top: str) -> List[str]
             # the measured run produced"). Overwriting it with a reconstructed
             # entry carrying the CURRENT digest would turn that FAIL into a
             # PASS, which is the same class of defect this change closes.
-            if _prev.get("measured") or _prev.get("record") == "invocation":
+            if (_prev.get("measured") or _prev.get("record") in
+                    ("invocation", "declared_transform")):
                 continue
             _prev_sha = str((_prev.get("outputs") or {}).get(rel, ""))
             if _prev_sha == _sha(fp) and str(_prev.get("tool")) == tool:
@@ -56340,6 +57282,10 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
     if refusal:
         return StepResult("prestream_gate", "NOT_MEASURED", 0.0,
                           refusal, reason_class=_V.ReasonClass.INPUT_ABSENT)
+    # Step 32 or a later route promotion may have changed routed.def since
+    # the post-PnR publication. Refresh the five route-only outputs by digest
+    # before the broader prestream pass; equal bytes leave them untouched.
+    _canonicalize_postpnr_prerequisites(project, top, pdk, container)
     evidence = step_canonicalize_artefacts(
         project, top, pdk, container, prestream=True)
     mcf_producer_error = ""
@@ -58455,66 +59401,37 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     # sign-off green by SUBTRACTION. Same four calls, same order, same
     # arguments as `step_pnr`, so the SDC the pre-layout STA reads is the SDC
     # PnR will read.
+    # STEP 7's PRODUCER (FX_STEP7_ASIC_SDC): the ONE author step_pnr also
+    # loads from, writing the declared `phase2/stage2/constraints/*.sdc` in
+    # BOTH cases -- a design-staged deck as `<top>.sdc` (the canonical copy it
+    # always was), the runner's own as `<top>.asic.sdc`, which its banner keeps
+    # out of `_resolve_staged_silicon_sdc` (no laundering). The pre-layout STA
+    # reads the same deck PnR will, from the same bytes.
     runner_sdc = pnr_out / "constraint.sdc"
-    staged_sdc = _resolve_staged_silicon_sdc(project)
-    design_staged = bool(staged_sdc and staged_sdc.is_file())
+    _step7 = _ppa_timing.emit_step7_asic_sdc(
+        _runner_module(), project, top, pdk, container)
+    design_staged = bool(_step7["design_staged"])
+    written.append(str(project / _step7["path"]))
+    # THE PnR DECK IS NOT STEP 7's TO CLOBBER (review_wave7). Written only
+    # when absent, as before: a deck already there is the PnR-consistent one
+    # (it may carry the pad-ring derivation), and this step runs BEFORE the
+    # PnR cache decision, so a cache hit would never write it back.
     if not runner_sdc.is_file():
-        if design_staged:
-            _txt = _scale_sdc_to_liberty_units(
-                staged_sdc.read_text(), str(pdk.liberty))
-            _txt = _reconcile_staged_sdc_drv(
-                _txt, str(pdk.name), str(pdk.liberty), container)
-            _txt = _reconcile_staged_sdc_driving_cell(
-                _txt, str(pdk.liberty), container)
-            _txt, _drv_parity = _ensure_staged_sdc_drv(
-                _txt, str(pdk.liberty), container, project,
-                pdk_name=str(pdk.name))
-            _txt, _io_parity = _ensure_staged_sdc_io_delay(_txt, project)
-            runner_sdc.write_text(_txt)
-            # Carry the parity DISCLOSURES, not just the fact of the chain:
-            # "supplied set_output_delay against the design's own clock" is
-            # the sentence that makes a later reader able to tell a
-            # design-declared limit from one this step added.
-            notes.append(
-                f"SDC: design-staged {staged_sdc} — unit-rescaled + DRV/IO "
-                f"parity (same chain as step_pnr). "
-                + " ".join(str(p.get("note") or "")
-                           for p in (_drv_parity, _io_parity)).strip())
-        else:
-            _drv = _liberty_drv_limits(str(pdk.liberty), container)
-            runner_sdc.write_text(_build_auto_silicon_sdc(
-                project, top=top,
-                drv_slew_ns=_drv.get("max_transition_ns"),
-                drv_cap_pf=_drv.get("max_capacitance_pf"),
-                drv_note=str(_drv.get("note") or ""),
-                liberty_path=str(pdk.liberty),
-                pdk_name=str(pdk.name)))
-            notes.append("SDC: design staged none — runner auto-SDC")
+        runner_sdc.write_text(_step7["text"])
         written.append(str(runner_sdc))
-
-    # --- Step 7b: canonical staged SDC copy (constraints/<top>.sdc) -------
-    # ONLY when the SDC is genuinely DESIGN-staged. `canon_sdc` lands in
-    # `phase2/stage2/constraints`, which is the LAST fallback
-    # `_resolve_staged_silicon_sdc` searches — so copying the runner's OWN
-    # auto-SDC there hands step_pnr, later in this same run, a file it will
-    # resolve as "design-staged" and put through the staged branch. MEASURED
-    # on a liberty declaring `time_unit : "1ps"` and a project staging no SDC:
-    # `_build_auto_silicon_sdc` already scales into lib units and emits
-    # `-period 20000`; re-resolved as staged, `_scale_sdc_to_liberty_units`
-    # scales it a SECOND time to `-period 2e+07` — 1000x too LOOSE, i.e. every
-    # path passes. `staged_sdc_survey.json` would also record `consumed:
-    # phase2/stage2/constraints/<top>.sdc`, asserting the design staged an SDC
-    # when it staged none. A design-staged SDC cannot be laundered this way:
-    # `input/constraints` outranks `phase2/stage2/constraints` in the shared
-    # resolver, so the design's own file still wins. When the runner
-    # fabricated the deck, authoring the canonical copy is left to
-    # `step_canonicalize_artefacts` — the step that owns it — which runs after
-    # step_pnr has settled what the SDC actually is.
-    canon_sdc = constraints_out / f"{top}.sdc"
-    if design_staged and runner_sdc.is_file() and not canon_sdc.is_file():
-        canon_sdc.write_text(
-            _stamp_sdc_provenance(runner_sdc.read_text(), pdk.name))
-        written.append(str(canon_sdc))
+    import declared_knob_applied_parity as _knob_parity
+    _knob_parity.write_sdc_report(
+        project, runner_sdc, pdk=str(pdk.name),
+        library=_active_std_cell_library(project, str(pdk.name)))
+    notes.append(
+        (f"SDC: design-staged {_step7['staged_sdc']} — unit-rescaled + "
+         f"DRV/IO parity (step 7's producer, the chain step_pnr loads). "
+         + " ".join(str((_step7.get(k) or {}).get("note") or "")
+                    for k in ("drv_parity", "io_parity")).strip())
+        if design_staged else
+        f"SDC: design staged none — runner auto-SDC, step 7's producer "
+        f"({_step7['path']}, sha256 {_step7['sha256'][:12]})")
+    canon_sdc = project / _step7["path"]
 
     # --- Steps 7/8/10 opt-in tool path (phase3/librelane_switch.json) ----
     import librelane_contract as _llc
@@ -58525,9 +59442,12 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
             _ll = _prelayout_librelane(project, top, pdk, runner_sdc,
                                        design_staged, _ll_modes, notes)
         except (_llc.Refusal, OSError, ValueError) as exc:
-            return StepResult("prelayout_signoff", "FAIL", time.time() - t0,
+            stopped = (_llc.tool_stop_reason(exc.code)
+                       if isinstance(exc, _llc.Refusal) else None)
+            return StepResult("prelayout_signoff", "NOT_MEASURED" if stopped else "FAIL",
+                              time.time() - t0,
                               f"LibreLane pre-layout path ({_ll_modes}): {exc}",
-                              written)
+                              written, reason_class=stopped or "")
 
     # --- Step 7c: pvt_matrix.json (design-staged Liberty corners) --------
     pvt_path = constraints_out / "pvt_matrix.json"
@@ -58706,13 +59626,10 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                     "undeclared report is not evidence of either basis; left "
                     "in place, reported, NOT counted as clean")
 
-    # `canon_sdc` is deliberately NOT part of this predicate when the design
-    # staged no SDC (see Step 7b): the artefact this step owns pre-layout is
-    # the deck the pre-layout STA actually read plus the PVT matrix. Asserting
-    # on `canon_sdc` would make the honest "left to the owning step" path
-    # report WARN.
+    # Step 7's declared SDC is now written in BOTH cases (FX_STEP7_ASIC_SDC),
+    # so it is part of the predicate unconditionally.
     ok = runner_sdc.is_file() and pvt_path.is_file() and (
-        canon_sdc.is_file() or not design_staged) and _pre_pnr_ok
+        canon_sdc.is_file()) and _pre_pnr_ok
     detail = (f"pre-layout stage-2 sign-off emitted BEFORE PnR: "
               f"{len(written)} artefact(s)"
               + ("; " + "; ".join(notes[-2:]) if notes else ""))
@@ -60116,6 +61033,21 @@ def _emit_router_drc_report(project: Path, pnr_out: Path, rpt_phase3: Path,
     routed_drc = pnr_out / "routed.drc.rpt"
     log_path = pnr_out / "openroad.log"
     if log_path.is_file():
+        is_empty, zero_receipt = _empty_router_report_status(pnr_out)
+        if is_empty and zero_receipt is None:
+            # A transcript alone cannot identify which invocation wrote the
+            # zero-byte report. Keep both declared outputs, but give neither
+            # a parseable zero that another DRC consumer could credit.
+            body = ("# OpenROAD router DRC: DRC_EMPTY_NOT_MEASURED\n"
+                    "# The final report is empty without a current "
+                    "digest-bound route receipt.\n")
+            _aa.write_text(routed_drc, body)
+            rpt_phase3.mkdir(parents=True, exist_ok=True)
+            _aa.write_text(rpt_phase3 / "drc_router.rpt", body)
+            for path in (routed_drc, rpt_phase3 / "drc_router.rpt"):
+                if str(path) not in written:
+                    written.append(str(path))
+            return
         log_text = log_path.read_text(errors="ignore")
         # Keep the raw "violation"/DRT log lines for the reviewer-context block.
         router_drc_block = _router_drc_report_block(pnr_out, log_text)
@@ -60193,7 +61125,7 @@ def _emit_router_drc_report(project: Path, pnr_out: Path, rpt_phase3: Path,
             f"{full_log_tail}\n"
             f"# end of routed.drc.rpt\n"
         )
-        routed_drc.write_text(body)
+        _aa.write_text(routed_drc, body)
         if str(routed_drc) not in written:
             written.append(str(routed_drc))
         # Mirror to reports/phase3/ where the gate's --json output lands
@@ -60202,6 +61134,263 @@ def _emit_router_drc_report(project: Path, pnr_out: Path, rpt_phase3: Path,
         if str(rpt_phase3 / "drc_router.rpt") not in written:
             written.append(str(rpt_phase3 / "drc_router.rpt"))
 
+
+
+def _postpnr_extraction_inputs(project: Path, top: str, pdk: PdkConfig,
+                               container: str, mode: str
+                               ) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Fresh byte identity for the inputs the nominal extractor actually reads.
+
+    A missing digest disables SPEF reuse. LibreLane reads a wider PDK tree via
+    its bridge, so its canonical SPEF is re-extracted on each publication until
+    that tool supplies a complete input receipt of its own.
+    """
+    if mode not in ("direct", "dual", "librelane"):
+        return None, f"step 22 extraction mode {mode!r} is not usable"
+    # The LibreLane bridge reads more of its PDK tree than this direct deck.
+    # Keep its mode in the receipt, but never reuse a SPEF from this key.
+    if mode == "librelane":
+        return {"mode": mode, "pdk_files": {}, "cacheable": False}, ""
+    pnr = _pl.pnr_dir(project)
+    paths = [str(pdk.tech_lef), str(pdk.cell_lef), str(pdk.liberty)]
+    if mode in ("direct", "dual"):
+        paths.extend(_def_reopen_extra_lefs_c(pnr / f"{top}.def", pdk,
+                                              container))
+        decl = _openrcx_ruleset_declaration(pdk, container)
+        if decl["status"] == "UNREADABLE":
+            return None, f"OpenRCX ruleset declaration unreadable: {decl['detail']}"
+        paths.extend(str(p) for p in (decl.get("declaration") or []))
+        nominal = (decl.get("corners") or {}).get("nom")
+        if decl["status"] == "DECLARED":
+            if not nominal:
+                return None, "OpenRCX nominal ruleset was not declared"
+            paths.append(str(nominal["path"]))
+        if any("pdk_registry.json:" in str(row.get("declared_by", ""))
+               for row in (decl.get("corners") or {}).values()):
+            paths.append(str(PROGRAMS_DIR / "pdk_registry.json"))
+    paths = list(dict.fromkeys(paths))
+    digests = _step_pdk_hasher(container, use_cache=False)(paths)
+    absent = [p for p in paths if p not in digests]
+    if absent:
+        return None, "extraction PDK input unreadable: " + ", ".join(absent)
+    return {"mode": mode, "pdk_files": digests,
+            "metal_prefix": pdk.metal_prefix,
+            "coupling": os.environ.get("VIBEIC_SPEF_COUPLING", "1"),
+            "ruleset_declaration": decl,
+            "cacheable": True}, ""
+
+
+def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
+                                        container: str) -> StepResult:
+    """Publish Steps 7/8/15/16/22 from a retained route, before Step 32.
+
+    These outputs read the route, constraints and extraction only. The receipt
+    binds their bytes to routed.def and the active extraction PDK inputs. This
+    is an advisory producer row: the existing prestream gate decides admission.
+    """
+    t0 = time.time()
+    pnr = _pl.pnr_dir(project)
+    primary_def = pnr / f"{top}.def"
+    routed_def = pnr / "routed.def"
+    receipt = _pl.reports_phase3_dir(project) / "postpnr_canonical_basis.json"
+    if not (primary_def.is_file() and routed_def.is_file()
+            and primary_def.stat().st_size and routed_def.stat().st_size):
+        return StepResult("postpnr_canonical", "NOT_MEASURED", time.time() - t0,
+                          "routed DEF or extraction input absent; Steps 7/8/15/16/22 "
+                          "were not canonicalized", reason_class=_V.ReasonClass.INPUT_ABSENT)
+    route_sha = _sha256_file(routed_def)
+    if _sha256_file(primary_def) != route_sha:
+        return StepResult("postpnr_canonical", "NOT_MEASURED", time.time() - t0,
+                          "top DEF differs from routed DEF; extraction basis is "
+                          "ambiguous", reason_class=_V.ReasonClass.INPUT_ABSENT)
+
+    try:
+        prior = json.loads(receipt.read_text())
+    except (OSError, ValueError):
+        prior = {}
+    prior = prior if isinstance(prior, dict) else {}
+    written: List[str] = []
+    notes: List[str] = []
+
+    # The sign-off SDC is a stamped copy of the one PnR actually read. Its
+    # content, rather than existence or mtime, determines whether it changes.
+    source_sdc = pnr / "constraint.sdc"
+    canonical_sdc = _pl.constraints_dir(project) / f"{top}.sdc"
+    if source_sdc.is_file():
+        body = _stamp_sdc_provenance(source_sdc.read_text(), pdk.name)
+        if not canonical_sdc.is_file() or canonical_sdc.read_text() != body:
+            _aa.write_text(canonical_sdc, body)
+            written.append(str(canonical_sdc))
+    sdc_sha = (_sha256_file(canonical_sdc) if source_sdc.is_file()
+               and canonical_sdc.is_file() else None)
+    sdc_report = project / "reports/phase2/sdc_check.json"
+    if sdc_sha and (not sdc_report.is_file()
+                    or prior.get("sdc_sha256") != sdc_sha):
+        sdc_report.unlink(missing_ok=True)
+        try:
+            check = subprocess.run(
+                [sys.executable, str(PROGRAMS_DIR / "sdc_syntax_check.py"),
+                 str(project), "--json", str(sdc_report)],
+                capture_output=True, text=True, timeout=60)
+            if sdc_report.is_file():
+                written.append(str(sdc_report))
+            if check.returncode:
+                notes.append(f"sdc_syntax_check rc={check.returncode}; "
+                             "its report retains the findings")
+        except Exception as exc:
+            notes.append(f"sdc_syntax_check NOT_MEASURED: {exc}")
+
+    pdn_path = pnr / "pdn.done"
+    pdn_ok, pdn_marker = _pnr_pdn_status(project)
+    try:
+        pdn_evidence = _def_pdn_evidence(primary_def.read_text(errors="replace"))
+    except OSError:
+        pdn_evidence = {}
+    pdn_text = _ppa_power.pdn_done_text(
+        project, pnr, primary_def, pdn_ok, pdn_marker, pdn_evidence)
+    if pdn_text is not None:
+        _aa.write_text(pdn_path, pdn_text)
+        written.append(str(pdn_path))
+
+    clock_path = _pl.cts_dir(project) / "clock_plan.json"
+    plan_path = emit_clock_plan(project, clock_path, primary_def, pnr, notes)
+    if plan_path:
+        written.append(plan_path)
+
+    spef = _pl.extracted_dir(project) / f"{top}.spef"
+    try:
+        mode, _ = _librelane_signoff_modes(project)
+    except Exception as exc:
+        mode = "invalid"
+        notes.append(f"step 22 extraction mode NOT_MEASURED: {exc}")
+    # This producer row is advisory: a failure to read the extraction inputs is
+    # NOT_MEASURED for Step 22 (no identity, so no SPEF reuse), never an abort
+    # of the prestream gate that calls it -- the same contract the extractor
+    # call below already keeps.
+    try:
+        extraction_inputs, input_note = _postpnr_extraction_inputs(
+            project, top, pdk, container, mode)
+    except Exception as exc:  # noqa: BLE001 — disclosed, never a pass
+        extraction_inputs, input_note = None, (
+            f"step 22 extraction inputs NOT_MEASURED: "
+            f"{type(exc).__name__}: {exc}")
+    if input_note:
+        notes.append(input_note)
+    # A receipt is required even for a pre-existing SPEF: mtime alone cannot
+    # bind copied bytes to this DEF. A changed route invalidates the old file
+    # before extraction, so an extraction refusal never leaves a stale pass.
+    spef_current = (extraction_inputs is not None
+                    and extraction_inputs["cacheable"]
+                    and spef.is_file() and spef.stat().st_size > 0
+                    and prior.get("routed_def_sha256") == route_sha
+                    and prior.get("extraction_inputs") == extraction_inputs
+                    and prior.get("spef_sha256") == _sha256_file(spef)
+                    and prior.get("spef_check_pass") is True)
+    if not spef_current:
+        spef.unlink(missing_ok=True)
+        if extraction_inputs is None:
+            notes.append("step 22 NOT_MEASURED: extraction inputs unavailable")
+        elif mode == "librelane":
+            try:
+                # A route-only in-process tool cache cannot prove a changed
+                # PDK tree equivalent. This publication needs a fresh RCX run.
+                _librelane_rcx_publish(
+                    project, top, pdk, spef,
+                    spef.parent / "spef_corners",
+                    _pl.reports_phase3_dir(project) / "librelane_rcx_handoff.json",
+                    refresh=True)
+            except Exception as exc:
+                notes.append(f"step 22 LibreLane RCX NOT_MEASURED: {exc}")
+        else:
+            try:
+                _emit_spef(project, top, pdk, container, spef, notes)
+            except Exception as exc:
+                notes.append(f"step 22 extraction NOT_MEASURED: {exc}")
+        if spef.is_file() and spef.stat().st_size > 0:
+            written.append(str(spef))
+
+    spef_sha = (_sha256_file(spef) if spef.is_file()
+                and spef.stat().st_size > 0 else None)
+    extraction_report = project / "reports/phase2/gates/spef_extraction.json"
+    if spef_sha and (not extraction_report.is_file()
+                     or prior.get("routed_def_sha256") != route_sha
+                     or prior.get("extraction_inputs") != extraction_inputs
+                     or prior.get("spef_sha256") != spef_sha
+                     or (prior.get("spef_extraction_sha256") !=
+                         _sha256_file(extraction_report))):
+        import spef_extraction_check as _sec
+        findings, stats = _sec.audit(project)
+        report = _sec.build_report(findings, stats, str(project))
+        report["routed_def_sha256"] = route_sha
+        report["spef_sha256"] = spef_sha
+        _aa.write_json(extraction_report, report)
+        written.append(str(extraction_report))
+    if not spef_sha:
+        extraction_report.unlink(missing_ok=True)
+        notes.append("step 22 NOT_MEASURED: no extracted SPEF")
+
+    try:
+        extraction_summary = json.loads(extraction_report.read_text())["summary"]
+        extraction_ok = (bool(extraction_summary["pass"])
+                         and bool(extraction_summary["has_nets"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        extraction_ok = False
+    try:
+        sdc_doc = json.loads(sdc_report.read_text())
+        sdc_check_status = ("PASS" if sdc_doc.get("passed") is True else "FAIL")
+    except (OSError, ValueError, AttributeError):
+        sdc_check_status = "NOT_MEASURED"
+    try:
+        pdn_line = pdn_path.read_text(errors="replace").splitlines()[0]
+        pdn_status = ("PASS" if pdn_line == "# PDN status: CONNECTED" else
+                      "FAIL" if pdn_line == "# PDN status: NOT CONNECTED" else
+                      "NOT_MEASURED")
+    except (OSError, IndexError):
+        pdn_status = "NOT_MEASURED"
+    try:
+        clock_doc = json.loads(clock_path.read_text())
+        clock_ok = (isinstance(clock_doc, dict)
+                    and isinstance(clock_doc.get("clocks"), list)
+                    and bool(clock_doc["clocks"])
+                    and clock_doc.get("derived_from") ==
+                    _pl.clock_plan_sdc_digests(
+                        project, _pl.clock_plan_input_sdcs(project)))
+    except (OSError, ValueError, TypeError):
+        clock_ok = False
+    outputs = {"sdc": {"status": "PASS" if sdc_sha else "NOT_MEASURED"},
+               "sdc_check": {"status": sdc_check_status},
+               "pdn": {"status": pdn_status},
+               "clock_plan": {"status": "PASS" if clock_ok else "NOT_MEASURED"},
+               "spef": {"status": ("PASS" if spef_sha and extraction_ok
+                                    and extraction_inputs is not None else
+                                    "FAIL" if spef_sha and not extraction_ok else
+                                    "NOT_MEASURED")}}
+    states = [row["status"] for row in outputs.values()]
+    status = ("FAIL" if "FAIL" in states else "PASS" if all(
+        state == "PASS" for state in states) else "NOT_MEASURED")
+    nonpass = ", ".join(f"{name}={row['status']}" for name, row in outputs.items()
+                        if row["status"] != "PASS")
+    record = {"schema": "vibeic.postpnr_canonical_basis.v1",
+              "status": status, "outputs": outputs,
+              "routed_def_sha256": route_sha,
+              "extraction_inputs": extraction_inputs,
+              "sdc_sha256": sdc_sha,
+              "pdn_sha256": _sha256_file(pdn_path) if pdn_path.is_file() else None,
+              "clock_plan_sha256": (_sha256_file(clock_path)
+                                    if clock_path.is_file() else None),
+              "spef_sha256": spef_sha,
+              "spef_check_pass": extraction_ok,
+              "spef_extraction_sha256": (_sha256_file(extraction_report)
+                                          if extraction_report.is_file() else None)}
+    body = json.dumps(record, indent=2, ensure_ascii=False) + "\n"
+    if not receipt.is_file() or receipt.read_text() != body:
+        _aa.write_text(receipt, body)
+        written.append(str(receipt))
+    return StepResult("postpnr_canonical", status, time.time() - t0,
+                      "; ".join(notes + ([f"outputs: {nonpass}"] if nonpass else []))
+                      or "routed canonical producers checked",
+                      written, reason_class=(_V.ReasonClass.INPUT_ABSENT
+                                             if status == "NOT_MEASURED" else ""))
 
 
 def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
@@ -60268,7 +61457,11 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # --- Step 7: SDC + pvt_matrix.json ----------------------------------
     runner_sdc = pnr_out / "constraint.sdc"
     canon_sdc = constraints_out / f"{top}.sdc"
-    if runner_sdc.is_file() and not canon_sdc.is_file():
+    # Step 7 has its own producer now (`emit_step7_asic_sdc`); when its record
+    # is here, the declared file exists and a second copy would only disagree
+    # with it (the PnR deck may carry the named pad-ring derivation).
+    if (runner_sdc.is_file() and not canon_sdc.is_file()
+            and not (constraints_out / ASIC_SDC_RECORD).is_file()):
         # A9 (#169) — stamp the staged copy with the active PDK's provenance so
         # a LATER run under a DIFFERENT PDK detects that this SDC's DRV limits
         # are stale (`_reconcile_staged_sdc_drv`). The stamp is an SDC comment,
@@ -61637,7 +62830,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # OpenROAD/Magic extraction the runner just invoked. chip-AGNOSTIC:
         # keyed on the canonical extracted-SPEF path, not any chip name.
         spef_rel = f"phase3/stage3/extracted/{top}.spef"
-        if spef_out.is_file() and spef_rel not in existing:
+        if (spef_out.is_file() and spef_rel not in existing
+                and _newest_declared_sha(project, spef_rel) is None):
             spef_entry = {
                 "tool": "openroad",
                 "command": ("openroad -no_init -exit (RC extraction → SPEF) "
@@ -62171,7 +63365,25 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # IR-drop sign-off still wrote no_repair_needed.flag. The timing-repair TCL
     # stays gated on `timing_repair_needed`, so a non-timing failure withholds the
     # certificate WITHOUT firing a repair that does not address it.
-    _repair_decision = _repair_dec.decide(mc_ocv_stance, tns_zero, project=project)
+    # Parse the selected STA's complete setup/hold result. The same parser is
+    # used by the independent Step-32 status generator; TNS=0 alone is not a
+    # clean certificate when another path reports slack (VIOLATED).
+    try:
+        from postroute_timing_repair_status_gen import _parse_sta_for_violations
+        _single_corner_evidence = _parse_sta_for_violations(
+            _sta_for_repair.read_text(errors="replace"))["timing_measurement"]
+    except OSError:
+        _single_corner_evidence = "NOT_MEASURED"
+    _repair_decision = _repair_dec.decide(
+        mc_ocv_stance, tns_zero, project=project,
+        single_corner_evidence=_single_corner_evidence)
+    # This canonical decision supersedes the LibreLane pre-stream decision.
+    # Its log described that earlier decision and must not certify a fallback
+    # in which this pass applied no repair.
+    _prior_repair_log = postroute_timing_repair_out / "repair_log.json"
+    if _prior_repair_log.is_file():
+        _prior_repair_log.unlink()
+        notes.append("superseded pre-stream repair_log.json before the canonical decision")
     _no_repair_flag = postroute_timing_repair_out / "no_repair_needed.flag"
     if not _repair_decision["repair_needed"]:
         # No violation at the authoritative basis → no post-route repair needed.
@@ -62200,7 +63412,30 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             "setup_worst_slack_ns": _repair_decision["setup_worst_slack_ns"],
             "hold_worst_slack_ns": _repair_decision["hold_worst_slack_ns"],
         }
-        if not _repair_decision["timing_repair_needed"]:
+        _sta_rel = str(_sta_for_repair.relative_to(project))
+        _rerun_sta = (f"Re-run post-route STA ({_sta_rel}) and confirm it "
+                      "reports measured timing slack or TNS/WNS before "
+                      "deciding whether repair is needed.")
+        # Subscript reads (decide() always sets the key), never `.get()`: the
+        # closed-loop prover treats a method call on the decision as a possible
+        # mutation and stops following the path to the repair actuator below.
+        if (not _repair_decision["timing_repair_needed"]
+                and _repair_decision["timing_basis_status"] == "NOT_MEASURED"
+                and not _repair_decision["nontiming_failures"]):
+            # The selected STA carries no setup/hold number at all (absent,
+            # unreadable or header-only). That is neither a violation the
+            # timing deck could repair nor a failed non-timing domain, and
+            # sending the agent to non-timing triage would diagnose a domain
+            # nothing measured. Its own action, source and remediation.
+            _repair_decision["action"] = "timing_not_measured"
+            _repair_decision["sta_source"] = _sta_rel
+            _repair_decision["remediation"] = _rerun_sta
+            notes.append(
+                "post-route timing NOT_MEASURED: " + _repair_decision["reason"]
+                + f" — {_sta_rel} reports no setup/hold slack or TNS/WNS; "
+                "no_repair_needed.flag deliberately NOT written and no repair "
+                "fired. " + _rerun_sta)
+        elif not _repair_decision["timing_repair_needed"]:
             # v1.7.64 — a NON-TIMING sign-off domain failed while timing is
             # clean. postroute_timing_repair.tcl repairs timing and would not touch
             # the failing domain, so firing it here would be theatre; writing
@@ -62209,11 +63444,18 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             # gate then reports NO_REPAIR_ARTIFACT / FAIL, which is the honest
             # outcome, and hands off to domain-specific triage.
             _repair_decision["action"] = "repair_required_non_timing"
+            _timing_unmeasured = (
+                _repair_decision["timing_basis_status"] == "NOT_MEASURED")
+            if _timing_unmeasured:
+                _repair_decision["sta_source"] = _sta_rel
+                _repair_decision["remediation"] = _rerun_sta
             notes.append(
                 "post-route repair REQUIRED (non-timing): " + _repair_decision["reason"]
                 + " — no_repair_needed.flag deliberately NOT written; the "
                 "timing-repair pass does not apply; triage the named "
-                "sign-off domain(s).")
+                "sign-off domain(s)."
+                + (" Timing is also NOT_MEASURED: " + _rerun_sta
+                   if _timing_unmeasured else ""))
         elif _repair_decision["mc_ocv_available"] and repair_tcl_path.is_file():
             # AUTO-TRIGGER FIRES: run the multi-corner-aware post-route repair.
             notes.append(
@@ -64815,7 +66057,9 @@ def _emit_spef(project: Path, top: str, pdk: PdkConfig, container: str,
     tech_lef_c = _to_container_path(str(pdk.tech_lef), container)
     cell_lef_c = _to_container_path(str(pdk.cell_lef), container)
     liberty_c = _to_container_path(str(pdk.liberty), container)
-    spef_c = _to_container_path(str(spef_out), container)
+    raw_spef = spef_out.parent / "raw" / f"{spef_out.stem}.{time.time_ns()}.spef"
+    raw_spef.parent.mkdir(parents=True, exist_ok=True)
+    spef_c = _to_container_path(str(raw_spef), container)
     # A routed chip DEF names IO masters as well as standard cells. Reuse
     # the same DEF-driven library resolver as the other reopening consumers.
     macro_lefs_tcl = _extra_lef_read_block(
@@ -64926,9 +66170,10 @@ exit
     # A SPEF left by an earlier extraction (another ruleset, another route)
     # must not survive a failed re-extraction as if this one produced it: the
     # declaration recorded beside it would then vouch for bytes it never made.
+    # A failed re-extraction cannot leave an older canonical SPEF looking new.
     spef_out.unlink(missing_ok=True)
-    rc, out, err = _docker_exec(container, cmd, marker=tcl_c, outputs=[spef_out])
-    if not spef_out.is_file() or spef_out.stat().st_size == 0:
+    rc, out, err = _docker_exec(container, cmd, marker=tcl_c, outputs=[raw_spef])
+    if not raw_spef.is_file() or raw_spef.stat().st_size == 0:
         notes.append(
             f"SPEF extraction did not produce {spef_out.name} "
             f"(rc={rc}). Tool: openroad. "
@@ -64949,7 +66194,16 @@ exit
     # GATED: only runs when the SPEF is grounded-ONLY (no captable coupling to
     # double-count) and the geometry actually yields coupling; NONFATAL — any
     # error leaves the valid grounded SPEF intact.  Disable: VIBEIC_SPEF_COUPLING=0.
+    shutil.copyfile(raw_spef, spef_out)
     _emit_spef_coupling_augment(def_file, pdk.tech_lef, spef_out, notes)
+    if ((project / "provenance.jsonl").is_file()
+            and not _declare_immutable_transform(
+                project, raw_spef, spef_out, "spef:extraction_finishing",
+                "openroad", "publish and augment retained OpenRCX SPEF")):
+        spef_out.unlink(missing_ok=True)
+        notes.append("SPEF transform refused: OpenRCX input has no matching "
+                     "tool declaration")
+        return False
     return True
 
 
@@ -65353,7 +66607,8 @@ _LL_SIGNOFF_RUNS: Dict[Tuple[str, str, bool, bool, str], dict] = {}
 
 def _librelane_signoff_run(project: Path, top: str, pdk: PdkConfig, *,
                            extract: bool, time: bool,
-                           direct_spefs: Optional[Dict[str, Path]] = None) -> dict:
+                           direct_spefs: Optional[Dict[str, Path]] = None,
+                           refresh: bool = False) -> dict:
     import librelane_contract as _ll
     import librelane_signoff as _ls
     pnr = _pl.pnr_dir(project)
@@ -65362,12 +66617,13 @@ def _librelane_signoff_run(project: Path, top: str, pdk: PdkConfig, *,
            extract, time, json.dumps({k: _sha256_file(Path(v)) for k, v in
                                       sorted((direct_spefs or {}).items())
                                       if Path(v).is_file()}))
-    if key in _LL_SIGNOFF_RUNS:
+    if not refresh and key in _LL_SIGNOFF_RUNS:
         return _LL_SIGNOFF_RUNS[key]
     try:
         root = _ll.pdk_root_resolution(project, pdk.name)["path"]
     except _ll.Refusal as exc:
-        raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
+        raise _ll.Refusal(exc.code if _ll.tool_stop_reason(exc.code)
+                          else "LL_PDK_ROOT_NOT_DECLARED",
                           f"steps 22/23 on LibreLane: {exc}") from None
     image = _ll.resolve_image(project)
     result = _ls.run(project, image, Path(root), pdk.name,
@@ -65382,11 +66638,13 @@ def _librelane_signoff_run(project: Path, top: str, pdk: PdkConfig, *,
 
 
 def _librelane_rcx_publish(project: Path, top: str, pdk: PdkConfig,
-                           spef_out: Path, corner_dir: Path, receipt: Path) -> None:
+                           spef_out: Path, corner_dir: Path, receipt: Path,
+                           *, refresh: bool = False) -> None:
     """Step 22 on the tool: RCX, then hand every corner SPEF (and the nominal
     one) to the paths the direct consumers read, bound by sha256."""
     import librelane_signoff as _ls
-    result = _librelane_signoff_run(project, top, pdk, extract=True, time=False)
+    result = _librelane_signoff_run(project, top, pdk, extract=True, time=False,
+                                   refresh=refresh)
     _ls.publish_spefs(result, top, spef_out, corner_dir, receipt)
 
 
@@ -65580,7 +66838,8 @@ def _librelane_step_ctx(project: Path, steps: str, pdk: str) -> Tuple[str, Path]
     try:
         root = _ll.pdk_root_resolution(project, pdk, image=image)["path"]
     except _ll.Refusal as exc:
-        raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
+        raise _ll.Refusal(exc.code if _ll.tool_stop_reason(exc.code)
+                          else "LL_PDK_ROOT_NOT_DECLARED",
                           f"step(s) {steps} on LibreLane: {exc}") from None
     return image, Path(root)
 
@@ -68002,7 +69261,8 @@ def _step30_tool_arm(project: Path, pdk: PdkConfig, written: List[str],
         try:
             root = _ll.pdk_root_resolution(project, pdk.name, image=image)["path"]
         except _ll.Refusal as exc:
-            raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
+            raise _ll.Refusal(exc.code if _ll.tool_stop_reason(exc.code)
+                              else "LL_PDK_ROOT_NOT_DECLARED",
                               f"step 30 on LibreLane: {exc}") from None
         doc = _pst.run_step30(project, image, Path(root), pdk.name)
         written.append(str(project / "reports/phase3/spice_path_tool.json"))
@@ -68028,7 +69288,8 @@ def _step29_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
         try:
             root = _ll.pdk_root_resolution(project, pdk.name, image=image)["path"]
         except _ll.Refusal as exc:
-            raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
+            raise _ll.Refusal(exc.code if _ll.tool_stop_reason(exc.code)
+                              else "LL_PDK_ROOT_NOT_DECLARED",
                               f"step 29 on LibreLane: {exc}") from None
         # The direct arm writes ONE SDF (`_emit_sdf`, the PDK's default liberty).
         judged = _lp.gate_level_sim(project, top, image,
@@ -69906,6 +71167,8 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
     _promotion = _route_promotion_read(project)
     _promoter = (_promotion or {}).get("promoter")
     _promoted_own: Optional[Dict[str, Any]] = None
+    _promotion_refusal = ""
+    _ll21_handed = False
     if _promotion is not None:
         _psha = _promotion.get("promoted_def_sha256")
         if _psha and _psha == _route_file_sha256(def_file):
@@ -69923,8 +71186,85 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
             # never credited with the PnR session's count.
             _promoted = True
             _promoted_own = {}
+    # A LibreLane step 32 and signoff_spef_repair cannot run in the same
+    # invocation. A signoff log beside this route belongs to an older run.
+    # The in-chain handoff is accepted only through its receipt's report hash;
+    # a bare marker or an unbound route-promotion record cannot certify it.
+    if _librelane_postroute_repair_mode(project) != "direct":
+        if _promoter == "librelane_step32_in_chain":
+            _chain, _why = _postroute_repair_in_chain(project)
+            _state = (_chain or {}).get("adopted_state")
+            _state_def = None
+            if _state:
+                try:
+                    _state_def = Path(json.loads(Path(_state).read_text())["def"])
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+            _adopted_def_sha256 = (_route_file_sha256(_state_def)
+                                   if _state_def is not None
+                                   and _state_def.is_file() else None)
+            _promoted_def_sha256 = (_promotion or {}).get("promoted_def_sha256")
+            _own_measurement = _step32_own_measurement(_chain) if _chain else {}
+            _own_refusal = (_promotion_unmeasured(_own_measurement)
+                            if _chain else "")
+            if (not _chain or not _chain.get("adopted")
+                    or _chain.get("verdict") != "PASS"
+                    or not _adopted_def_sha256
+                    or not _promoted_def_sha256
+                    or _adopted_def_sha256 != _promoted_def_sha256
+                    or _own_refusal
+                    or (_promotion or {}).get("measurement") !=
+                    _own_measurement):
+                _promotion_refusal = (_why if not _chain else
+                                      _own_refusal or
+                                      "the receipt-bound step-32 report, adopted "
+                                      "route and promotion measurement disagree")
+                _promoted = True
+                _promoted_own = {}
+            else:
+                _promoted = False
+                _promoted_own = None
+                _ll21_handed = True
+        elif _promoter == "librelane_step32_after_route":
+            import librelane_postroute_repair as _llprr  # noqa: PLC0415
+            try:
+                _after = json.loads((project / _llprr.REPORT_REL).read_text())
+                _state_def = Path(json.loads(Path(_after["adopted_state"]).read_text())["def"])
+            except (OSError, ValueError, KeyError, TypeError):
+                _after, _state_def = {}, None
+            _adopted_def_sha256 = (_route_file_sha256(_state_def)
+                                   if _state_def is not None else None)
+            _shipped_def_sha256 = _route_file_sha256(def_file)
+            _promoted_def_sha256 = (_promotion or {}).get("promoted_def_sha256")
+            _own_measurement = _step32_own_measurement(_after)
+            _own_refusal = _promotion_unmeasured(_own_measurement)
+            if (_after.get("site") != "after_direct_route"
+                    or not _after.get("adopted") or _after.get("verdict") != "PASS"
+                    or not _adopted_def_sha256
+                    or not _shipped_def_sha256
+                    or not _promoted_def_sha256
+                    or _adopted_def_sha256 != _shipped_def_sha256
+                    or _promoted_def_sha256 != _shipped_def_sha256
+                    or _own_refusal
+                    or (_promotion or {}).get("measurement") !=
+                    _own_measurement):
+                _promotion_refusal = (_own_refusal or
+                                      "the after-direct-route step-32 report "
+                                      "is not bound to the shipped DEF and "
+                                      "its own antenna and route measurement")
+                _promoted = True
+                _promoted_own = {}
+            else:
+                _promoted = True
+                _promoted_own = (_promotion or {}).get("measurement") or {}
+        elif _promoted:
+            _promotion_refusal = ("no route-promotion record binds this "
+                                  "LibreLane step-32 route to its report")
+            _promoter = "postroute_repair_librelane"
+            _promoted_own = {}
     _ship_txt = (_ship_log.read_text(errors="ignore")
-                 if (_promoted and _promoted_own is None
+                 if (_librelane_postroute_repair_mode(project) == "direct"
+                     and _promoted and _promoted_own is None
                      and _ship_log.is_file()) else "")
     _ship_measured = "SHIP_ANT_END" in _ship_txt
     pnr_log = pnr_out / "openroad.log"
@@ -69980,7 +71320,8 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     net_viol = -1  # could not measure (ANT-0008 after failed route)
                     pin_viol = -1
                 # G-SHIP-ANTENNA — override with the SHIPPING session's counts.
-                _measured_on = "the PnR route"
+                _measured_on = ("the PnR tail after LL21 step-32 adoption"
+                                if _ll21_handed else "the PnR route")
                 _shipped_unmeasured = False
                 _own_n = (_promoted_own or {}).get("antenna_nets")
                 _own_p = (_promoted_own or {}).get("antenna_pins")
@@ -70021,7 +71362,9 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     _measured_on = (f"NOTHING — {_promoter or 'signoff_spef_repair'} "
                                     "PROMOTED a "
                                     "re-routed design over the shipped DEF and "
-                                    "no antenna check ran on it")
+                                    "no antenna check bound to this run ran on it"
+                                    + (f" ({_promotion_refusal})"
+                                       if _promotion_refusal else ""))
                 if routing_incomplete:
                     clean = False
                     verdict = "FAIL"
@@ -70081,6 +71424,11 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     "# last change to the route. The extraction gate (step 31) is\n"
                     "# what measures what that change did.\n"
                     if (_unverified_after and not routing_incomplete) else "")
+                _stale_ship_note = (
+                    "\n# STALE signoff_spef_repair.log NOT READ: step 32 ran on "
+                    "LibreLane in this invocation.\n"
+                    if (_librelane_postroute_repair_mode(project) != "direct"
+                        and _ship_log.is_file()) else "")
                 _subject = _measured_subject(project, top, [def_file],
                                              tool_log=pnr_log)
                 antenna_rpt.write_text(
@@ -70144,13 +71492,18 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                        f"can continue, so it is NOT visible as a routing "
                        f"failure)\n" if pins_unaccessed else "")
                     + _incomplete_note + _cosmetic_note
-                    + _unverified_note)
+                    + _unverified_note + _stale_ship_note)
                 _aa.write_text(antenna_rpt.parent / "antenna.json", json.dumps({
                     "tool": "openroad",
                     "mode": "antenna_check_in_session_post_repair",
                     "net_violations": net_viol if have_counts else None,
                     "pin_violations": pin_viol if have_counts else None,
                     "clean": clean,
+                    "promoted_by": _promoter,
+                    "promotion_binding_refusal": _promotion_refusal or None,
+                    "stale_signoff_spef_repair_log": (
+                        _rel_to_project(_ship_log, project)
+                        if _stale_ship_note else None),
                     # G-SHIP-ANTENNA — WHICH state of the design the numbers
                     # above describe. A count and the route it was taken on are
                     # two facts; publishing only the first is how a clean PnR
@@ -71244,7 +72597,8 @@ def _step34_gds_tool_arm(project: Path, pdk: PdkConfig,
 
 
 def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
-                     direct_fill: Tuple[bool, str]) -> Tuple[bool, str]:
+                     direct_fill: Tuple[bool, str],
+                     chain: Optional[_GdsTransformChain] = None) -> Tuple[bool, str]:
     """Decide which step-34 GDS fill ships, record both arms, and return the
     (ok, note) the stream-out discloses for its density-fill slot. `dual`
     measures the direct fill already in `gds_out` with the same deck."""
@@ -71268,9 +72622,12 @@ def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
     result = direct_fill
     if shipped == "librelane" and tool:
         filled = Path(tool["filler"]["filled_gds"])
-        _declared_transform_exec(project, gds_out, "gds:librelane_filler", "klayout",
+        def _copy_filled() -> Tuple[bool, str]:
+            shutil.copyfile(filled, gds_out)
+            return True, "LibreLane filler copied"
+        (chain.run if chain else _declared_transform_exec)(None, gds_out, "gds:librelane_filler", "klayout",
             "KLayout.Filler (LibreLane) (phase3_one_shot_runner step_gds)",
-            lambda: shutil.copyfile(filled, gds_out))
+            _copy_filled)
         result = (True, f"LibreLane KLayout.Filler ({tool['filler']['script']}); PDK "
                         f"density deck: {tool[_lf.DENSITY_METRIC]} error(s) "
                         f"{tool.get('rules')}")
@@ -74836,6 +76193,8 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                                    "reason": f"upstream step {changed_step} changed output"})
     report = {
         "program": "phase3_one_shot_runner", "bounded": True,
+        "phase2_synth": _pl.phase2_synth_input_identity(project),
+        "phase3_inputs": _pl.phase3_signoff_input_identity(project),
         "window_run_id": os.environ.get("VIBEIC_PHASE3_WINDOW_RUN_ID"),
         "declared_window": {"entry_step": args.entry_step,
                             "exit_step": args.exit_step,
@@ -74879,6 +76238,14 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
         "dispatched_sites": selected,
         "stale_downstream": stale}, indent=2) + "\n")
     audit_doc = json.loads(audit.read_text())
+    # The enclosing unit published the selected producer outputs. Refresh
+    # those steps' own write records before check_step consumes attribution;
+    # the collector's only_steps path carries every unselected row unchanged.
+    # Building this view in a disposable clone left the project's old
+    # written.json in place and gave the gate a false resolver disagreement.
+    report["steps_view"] = _pl.emit_steps_view(
+        project, PROGRAMS_DIR, runner="phase3_one_shot_runner",
+        only_steps=window_ids)
     gate_results = _phase3_window_full_gate_audit(project, window_ids)
     audit_doc["audit_kind"] = "bounded_full_declared_gates"
     audit_doc["declared_gate_checks"] = gate_results
@@ -74899,23 +76266,6 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
         "refresh": "flow_compliance_check.check_step", "kind": "executed",
         "why": "all gate clauses of selected canonical steps ran on an isolated copy"}
     audit.write_text(json.dumps(audit_doc, indent=2) + "\n")
-    # The steps-view emitter refreshes every steps/* write record. Isolate it
-    # and publish only its bounded report, preserving every unselected record.
-    import tempfile
-    with tempfile.TemporaryDirectory(prefix="phase3-steps-view-",
-                                     dir=project.parent) as temp:
-        isolated = Path(temp) / project.name
-        _phase3_window_clone(project, isolated)
-        report["steps_view"] = _pl.emit_steps_view(
-            isolated, PROGRAMS_DIR, runner="phase3_one_shot_runner",
-            only_steps=window_ids)
-        source_view = _pl.report_path(isolated, "steps_view.json")
-        if source_view.is_file():
-            target_view = _pl.report_path(project, "steps_view.json")
-            target_view.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_view, target_view)
-            report["steps_view"]["steps_root"] = str(project / "steps")
-            report["steps_view"]["record_path"] = str(target_view)
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(f"[phase3] bounded sites={selected}; changed={len(changed)}; "
           f"stale={list(stale)}")
@@ -75637,6 +76987,15 @@ def main() -> int:
         _pnr_reran = (_pnr_row is not None
                       and "skipped" not in _pnr_row.detail)
         _chain_ok = _pnr_step_passed
+
+        if _pnr_step_passed:
+            # Steps 7/8/15/16/22 consume only the routed design. Publish
+            # them before the independently blocking Step 32 repair. Their
+            # typed receipt reports absence honestly and does not grant
+            # stream-out admission.
+            _postpnr = _canonicalize_postpnr_prerequisites(
+                project, effective_top, pdk, args.container)
+            print(f"[postpnr] {_postpnr.status}: {_postpnr.detail}")
 
         # FIX capture/pad-side-constraint-and-postlayout-lec (Defect 1a):
         # Run the pad-side gate RIGHT AFTER PnR so the violation is always
@@ -76404,6 +77763,8 @@ def main() -> int:
     signoff_rollup = declared_signoff_rollup(plan)
     summary = {
         "project": str(project),
+        "phase2_synth": _pl.phase2_synth_input_identity(project),
+        "phase3_inputs": _pl.phase3_signoff_input_identity(project),
         "pdk": pdk.name,
         "top": args.top_name,
         # WHICH BUILD produced this record. Reading a published report, there
@@ -76611,7 +77972,7 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
     vocabulary now, so there is one roll-up, and the tier table is gone rather
     than migrated.
 
-    The refusal survives, and is now `verdict.parse`'s: a word outside the five
+    The refusal survives, and is now `verdict.parse`'s: an undeclared word
     raises `UnknownVerdictWord` at the row that carries it, which is earlier
     and louder than a headline string nobody greps for.
     """

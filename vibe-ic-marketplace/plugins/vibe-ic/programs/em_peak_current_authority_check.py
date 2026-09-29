@@ -291,7 +291,7 @@ def jmax_tier(project: Path, jmax: Optional[Path], tech_lef: Optional[Path],
     """Delegate the REAL EM screen to ``em_current_density_check``.
 
     This call is the wiring the program never had. Its verdict vocabulary is
-    passed through untouched — PASS / FAIL / SKIPPED — because reinterpreting
+    passed through untouched — PASS / FAIL / SKIPPED / NOT_MEASURED — because reinterpreting
     another gate's honest SKIP is how an absence becomes a green.
     """
     import em_current_density_check as emc
@@ -307,15 +307,11 @@ def jmax_tier(project: Path, jmax: Optional[Path], tech_lef: Optional[Path],
             jpath, tlef = _discover_jmax_ref(project)
         except Exception:  # pragma: no cover - defensive
             jpath, tlef = None, None
-    # #1215-PDN: hand the density screen the routed DEF's own per-layer PG
-    # width lower bound, so a width-less CSV segment is judged against the
-    # wire the router actually drew instead of the LEF minimum. Lower bound
-    # -> J overstated -> conservative direction preserved (a PASS through it
-    # is trustworthy; a FAIL is strictly less pessimistic than before).
+    # The measured DEF identity authorizes its local special-wire geometry;
+    # the matching ODB dump also carries placed macro PG PORT rectangles.
     local_def = None
     net_hint = None
-    # The EM producer records exactly which DEF PSM read. Local wire widths
-    # may supersede the layer minimum only when that identity still matches.
+    # The EM producer records exactly which DEF PSM read.
     try:
         em_doc = json.loads((project / "reports/phase3/em.json").read_text())
         nets = em_doc.get("power_nets")
@@ -330,8 +326,6 @@ def jmax_tier(project: Path, jmax: Optional[Path], tech_lef: Optional[Path],
             local_def = candidate
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    defw = (emc._def_pg_widths_of(local_def) if local_def else
-            emc.discover_def_pg_min_widths(project))
     geometry_path = None
     if local_def:
         try:
@@ -350,13 +344,13 @@ def jmax_tier(project: Path, jmax: Optional[Path], tech_lef: Optional[Path],
             pass
     verdict, rep = emc.evaluate(em_path, jpath, tlef, margin,
                                 emc._DEFAULT_BLACKS_N, net_hint, 20,
-                                def_widths=defw or None,
                                 def_path=local_def,
                                 pg_geometry_path=geometry_path)
     return {"verdict": verdict, "skip_reason": rep.get("skip_reason"),
-            "def_pg_min_widths_um": defw or None,
             "jmax_source": rep.get("jmax_source"),
             "summary": rep.get("summary"),
+            "worst_segments": rep.get("worst_segments", []),
+            "not_measured_segments": rep.get("not_measured_segments", []),
             "offender_count": rep.get("offender_count", 0),
             "findings": rep.get("findings", []),
             "em_report": str(em_path)}
@@ -420,7 +414,7 @@ def evaluate(project: Path, jmax: Optional[Path], tech_lef: Optional[Path],
         return "PASS", rep
     rep["verdict"] = "INCOMPLETE"
     rep["missing_authority"] = (
-        "per-layer Jmax (PDK tech LEF DCCURRENTDENSITY, or a --jmax JSON)")
+        "same-DEF conductor geometry and per-layer Jmax for every PSM segment")
     rep["missing_authority_reason"] = jt.get("skip_reason")
     if not supply_screen["screened"]:
         rep["missing_authority"] += (

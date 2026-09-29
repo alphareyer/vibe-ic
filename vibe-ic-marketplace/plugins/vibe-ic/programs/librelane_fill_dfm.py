@@ -44,7 +44,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
-from librelane_contract import (Refusal, _load, digest,  # noqa: E402
+from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, digest,  # noqa: E402
                                 resolve_step_configs, run_chain, select_arms,
                                 state_from_direct)
 
@@ -156,7 +156,7 @@ def run_density(project: Path, image: str, pdk_root: Path, pdk: str, *,
     checker_error = None
     try:
         run_chain(project, image, [(s, configs[s], state) for s in steps],
-                  mounts=mounts, lane=lane)
+                  mounts=mounts, lane=lane, pdk_root=PDK_GUEST_ROOT)
     except Refusal as error:
         if not str(error).startswith('LL_STEP_FAILED: Checker.KLayoutDensity'):
             raise
@@ -318,7 +318,7 @@ def run_fill_insertion(project: Path, image: str, pdk_root: Path, pdk: str, *,
                               project / 'phase3/librelane' / CONFIG_FOLDER / 'bridge',
                               mounts=mounts)
     folder = run_chain(project, image, [(ODB_FILL_STEP, configs[ODB_FILL_STEP], state)],
-                       mounts=mounts, lane=lane)[0]
+                       mounts=mounts, lane=lane, pdk_root=PDK_GUEST_ROOT)[0]
     out_state = _load(folder / 'state_out.json')
     filled = Path(str(out_state.get('def') or ''))
     if not filled.is_file():

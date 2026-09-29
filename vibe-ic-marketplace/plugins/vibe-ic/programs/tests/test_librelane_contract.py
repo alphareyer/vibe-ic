@@ -142,9 +142,54 @@ def test_synthesis_chain_accepts_pre_netlist_state_and_keeps_tool_output(tmp_pat
 
     monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
     monkeypatch.setattr(contract.subprocess, 'run', tool_run)
-    folder = contract.run_chain(p, 'candidate', [('Yosys.Synthesis', config, initial)])[0]
+    folder = contract.run_chain(p, 'candidate', [('Yosys.Synthesis', config, initial)], pdk_root='/pdk')[0]
     assert (folder / 'block.nl.v').is_file()
     assert json.loads((folder / 'state_out.json').read_text())['nl'].endswith('block.nl.v')
+
+
+def test_stapostpnr_receipt_binds_mounted_liberty_bytes(tmp_path, monkeypatch):
+    project = tmp_path / 'design'
+    pdk = tmp_path / 'pdk'
+    liberty = pdk / 'cells/a.lib'
+    liberty.parent.mkdir(parents=True)
+    liberty.write_text('library (a) { nom_voltage : 5.0; }\n')
+    guest = '/pdk/process/cells/a.lib'
+    views = {key: str(put(project / f'{key}.json', {}))
+             for key in ('odb', 'def', 'nl', 'sdc')}
+    initial = put(project / 'initial.json', views)
+    config = put(project / 'config.json', {
+        'meta': {'step': 'OpenROAD.STAPostPNR'},
+        'STA_CORNERS': ['nom_typ'], 'CELL_LIBS': {'*': [guest]}})
+
+    def tool_run(cmd, **_):
+        folder = Path(cmd[cmd.index('-o') + 1])
+        put(folder / 'state_out.json', views)
+        log = folder / 'nom_typ/sta.log'
+        log.parent.mkdir(parents=True)
+        log.write_text(f"Reading cell library for the 'nom_typ' corner at '{guest}'\n")
+        return SimpleNamespace(returncode=0, stdout='ok', stderr='')
+
+    monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
+    monkeypatch.setattr(contract, 'run_container', tool_run)
+    folder = contract.run_chain(project, 'candidate',
+                                [('OpenROAD.STAPostPNR', config, initial)],
+                                mounts=[(pdk, '/pdk/process')],
+                                pdk_root='/pdk/process')[0]
+    receipt = json.loads((folder / 'vibeic_receipt.json').read_text())
+    assert receipt['input']['liberty_files'] == {guest: contract.digest(liberty)}
+    assert receipt['sha256']['nom_typ/sta.log'] == contract.digest(folder / 'nom_typ/sta.log')
+
+    def drifting_tool_run(cmd, **kwargs):
+        result = tool_run(cmd, **kwargs)
+        liberty.write_text(liberty.read_text() + 'cell (changed) {}\n')
+        return result
+
+    monkeypatch.setattr(contract, 'run_container', drifting_tool_run)
+    with pytest.raises(contract.Refusal, match='LL_STA_LIBERTY_CHANGED_DURING_RUN'):
+        contract.run_chain(project, 'candidate',
+                           [('OpenROAD.STAPostPNR', config, initial)],
+                           mounts=[(pdk, '/pdk/process')], lane='drift',
+                           pdk_root='/pdk/process')
 
 
 def test_stream_lane_and_synthesis_namespace_keep_separate_receipts(tmp_path, monkeypatch):
@@ -162,16 +207,16 @@ def test_stream_lane_and_synthesis_namespace_keep_separate_receipts(tmp_path, mo
     monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
     monkeypatch.setattr(contract.subprocess, 'run', tool_run)
     steps = [('OpenROAD.Floorplan', config, initial)]
-    stream = contract.run_chain(p, 'candidate', steps, lane='stream37')[0]
+    stream = contract.run_chain(p, 'candidate', steps, lane='stream37', pdk_root='/pdk')[0]
     synth = contract.run_chain(p, 'candidate', steps,
-                               namespace='ppa_synthesis/arm0')[0]
+                               namespace='ppa_synthesis/arm0', pdk_root='/pdk')[0]
     assert stream == p / 'phase3/librelane/stream37/01-openroad-floorplan'
     assert synth == p / 'phase3/librelane/ppa_synthesis/arm0/01-openroad-floorplan'
     assert stream.joinpath('vibeic_receipt.json').is_file()
     assert synth.joinpath('vibeic_receipt.json').is_file()
     with pytest.raises(contract.Refusal, match='LL_LANE_NAMESPACE_CONFLICT'):
         contract.run_chain(p, 'candidate', steps, lane='stream37',
-                           namespace='ppa_synthesis/arm0')
+                           namespace='ppa_synthesis/arm0', pdk_root='/pdk')
 
 
 def test_switch_defaults_to_direct_and_rejects_bad_value(tmp_path):
@@ -220,13 +265,13 @@ def test_chain_resumes_success_and_reruns_failed_step(tmp_path, monkeypatch):
     monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
     monkeypatch.setattr(contract.subprocess, 'run', fake_run)
     steps = [('OpenROAD.PadRing', cfg, state)]
-    folder = contract.run_chain(p, 'candidate', steps)[0]
+    folder = contract.run_chain(p, 'candidate', steps, pdk_root='/pdk')[0]
     assert len(calls) == 1
     assert 'state_out.json' in json.loads((folder / 'vibeic_receipt.json').read_text())['sha256']
-    contract.run_chain(p, 'candidate', steps)
+    contract.run_chain(p, 'candidate', steps, pdk_root='/pdk')
     assert len(calls) == 1
     (folder / 'state_out.json').unlink()
-    contract.run_chain(p, 'candidate', steps)
+    contract.run_chain(p, 'candidate', steps, pdk_root='/pdk')
     assert len(calls) == 2
 
 
@@ -264,7 +309,8 @@ def test_chain_stall_is_reaped_by_its_name_and_recorded_unmeasured(tmp_path, mon
     monkeypatch.setattr(_watchdog, 'host_tree_progress', lambda pid: None)
 
     with pytest.raises(contract.Refusal, match='LL_TOOL_STALLED'):
-        contract.run_chain(p, 'candidate', [('OpenROAD.Floorplan', config, initial)])
+        contract.run_chain(p, 'candidate', [('OpenROAD.Floorplan', config, initial)],
+                           pdk_root='/pdk')
     folder = p / 'phase3/librelane/01-openroad-floorplan'
     record = json.loads((folder / 'vibeic_stalled.json').read_text())
     assert record['verdict'] == 'NOT_MEASURED'
@@ -308,7 +354,8 @@ def test_chain_progressing_past_stall_grace_is_not_killed(tmp_path, monkeypatch)
     monkeypatch.setattr(_watchdog, 'host_tree_progress', lambda pid: next(readings))
 
     folder = contract.run_chain(
-        p, 'candidate', [('OpenROAD.Floorplan', config, initial)])[0]
+        p, 'candidate', [('OpenROAD.Floorplan', config, initial)],
+        pdk_root='/pdk')[0]
     assert (folder / 'state_out.json').is_file()
     assert not (folder / 'vibeic_stalled.json').exists()
     assert not reaped
@@ -328,7 +375,7 @@ def test_step31_reports_chain_stall_as_unmeasured(tmp_path, monkeypatch):
     result = runner._step31_librelane(
         tmp_path, 'block', SimpleNamespace(name='processA'), 'lvs', publish=False)
     assert result.status == 'NOT_MEASURED'
-    assert result.reason_class == runner._V.ReasonClass.EXECUTION_ERROR
+    assert result.reason_class == runner._V.ReasonClass.STALLED
     assert 'LL_TOOL_STALLED' in result.detail
 
 
@@ -351,7 +398,7 @@ def test_floorplan_accepts_netlist_only_before_it_creates_geometry(tmp_path, mon
 
     monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
     monkeypatch.setattr(contract.subprocess, 'run', fake_floorplan)
-    assert contract.run_chain(p, 'candidate', [('OpenROAD.Floorplan', cfg, state)])[0].joinpath('state_out.json').is_file()
+    assert contract.run_chain(p, 'candidate', [('OpenROAD.Floorplan', cfg, state)], pdk_root='/pdk')[0].joinpath('state_out.json').is_file()
 
 
 def test_tap_step_refuses_missing_geometry_input(tmp_path, monkeypatch):
@@ -362,7 +409,7 @@ def test_tap_step_refuses_missing_geometry_input(tmp_path, monkeypatch):
     cfg = put(p / 'config.json', {'meta': {'step': 'OpenROAD.TapEndcapInsertion'}})
     monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
     with pytest.raises(contract.Refusal, match='LL_STATE_MISSING'):
-        contract.run_chain(p, 'candidate', [('OpenROAD.TapEndcapInsertion', cfg, state)])
+        contract.run_chain(p, 'candidate', [('OpenROAD.TapEndcapInsertion', cfg, state)], pdk_root='/pdk')
 
 
 def test_missing_metric_stays_unmeasured_and_cannot_win(tmp_path):

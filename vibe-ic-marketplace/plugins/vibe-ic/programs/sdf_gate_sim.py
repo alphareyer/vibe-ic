@@ -2104,6 +2104,15 @@ def bind_bench_clock(tb_text: str, dut_instance: str, declared: Dict[str, object
 #    find intermodpath!`). A delay on a bidirectional net is a feature Icarus
 #    does not have: vibeic/iverilog draft PR with the reproducer (INOUT_FORK below).
 #
+#  ZERO_DELAY_TOP_PORT_INTERCONNECT: `(INTERCONNECT _416_/Q p (0.000:0.000:
+#    0.000))` on spm x gf180mcuD (lane cmpb, N5 run): the sink is the TOP
+#    module's own output port, driven through `assign p = pr;`. Icarus cannot
+#    insert an intermodpath there (`Could not find intermodpath!`, 1 per case).
+#    A separate Icarus probe reproduces this for an assign-aliased scalar port
+#    and a vector bit, even when the bit is directly cell-connected; a directly
+#    cell-connected scalar port annotates. Every delay in this class is zero,
+#    so simulation drops no delay. A NON-zero delay remains unexplained.
+#
 # A record is EXPLAINED only when this run's own artefacts prove the cause: the
 # compile log's `sorry` names the model line of that cell's `ifnone` path; the
 # SDF line names an endpoint the model/netlist declares `inout`. Anything else
@@ -2121,6 +2130,13 @@ SDF_ERROR_CLASSES = {
     "INOUT_PORT_INTERCONNECT": {
         "owner": "tool:iverilog", "fork": INOUT_FORK,
         "why": "-ginterconnect cannot put a delay on an inout port's net"},
+    "ZERO_DELAY_TOP_PORT_INTERCONNECT": {
+        "owner": "sdf:legal", "fork": None,
+        "why": "Icarus reports no intermodpath for this top-port sink: "
+               "measured cases include an assign alias to a scalar output "
+               "and a vector bit (even with a direct cell connection); a "
+               "direct scalar connection annotates. Every delay on this "
+               "record is 0, so simulation drops no delay"},
 }
 _SDF_ERROR_LINE_RE = re.compile(r"^SDF ERROR: (.+?):(\d+): (.*)$", re.M)
 _MODPATH_MSG_RE = re.compile(
@@ -2133,10 +2149,42 @@ _IFNONE_EDGE_PATH_RE = re.compile(
     r"\s*[+-]?\s*[=*]>\s*\(\s*([A-Za-z_][\w$]*)\s*[+-]?\s*:")
 _SDF_CELLTYPE_RE = re.compile(r"\(\s*CELLTYPE\s+\"([^\"]+)\"\s*\)")
 _SDF_DIVIDER_RE = re.compile(r"\(\s*DIVIDER\s+(\S)\s*\)")
-_SDF_INTERCONNECT_RE = re.compile(r"\(\s*INTERCONNECT\s+(\S+)\s+(\S+)")
+#: A simulator error supplies only an SDF line number. Classify it only when
+#: that entire line is one complete INTERCONNECT record, so endpoints and
+#: delays cannot come from different records on an ambiguous line.
+_SDF_INTERCONNECT_RECORD_RE = re.compile(
+    r"\s*\(\s*INTERCONNECT\s+(\S+)\s+(\S+)((?:\s*\([^()]*\))+)\s*\)\s*")
+_SDF_TRIPLE_RE = re.compile(r"\(([^()]*)\)")
+
+
+def _all_delays_zero(sdf_line: str) -> bool:
+    """True iff the line is ONE complete INTERCONNECT record whose every
+    delay value is a number equal to 0 (an empty triple `()` is not a zero)."""
+    rec = _SDF_INTERCONNECT_RECORD_RE.fullmatch(sdf_line or "")
+    if not rec:
+        return False
+    triples = _SDF_TRIPLE_RE.findall(rec.group(3))
+    if not triples:
+        return False
+    for triple in triples:
+        values = [v.strip() for v in triple.split(":")]
+        if not values or any(not v for v in values):
+            return False
+        for v in values:
+            try:
+                if float(v) != 0.0:
+                    return False
+            except ValueError:
+                return False
+    return True
 _PORT_DECL_RE = re.compile(
     r"\b(input|output|inout)\b\s*(?:wire\b|reg\b|tri\b)?\s*(?:\[[^\]]*\]\s*)?"
     r"([A-Za-z_][\w$]*(?:\s*,\s*[A-Za-z_][\w$]*)*)")
+_VECTOR_PORT_DECL_RE = re.compile(
+    r"\b(?:input|output|inout)\b\s*(?:wire\b|reg\b|tri\b)?\s*"
+    r"\[[^\]]+\]\s*"
+    r"([A-Za-z_][\w$]*(?:\s*,\s*[A-Za-z_][\w$]*)*)")
+_TOP_PORT_BIT_RE = re.compile(r"([A-Za-z_][\w$]*)\s*\[\s*\d+\s*\]$")
 
 
 class SdfErrorExplainer:
@@ -2146,9 +2194,15 @@ class SdfErrorExplainer:
         self.masters = {name: master for name, (master, _)
                         in _instances(netlist_text).items()}
         top = _netlist_top(netlist_text)
-        self.top_dirs = (self._dirs(re.search(
+        top_match = (re.search(
             r"(?ms)^\s*module\s+" + re.escape(top[0]) + r"\b(.*?)\bendmodule\b",
-            netlist_text).group(0)) if top else {})
+            netlist_text) if top else None)
+        top_text = top_match.group(0) if top_match else ""
+        self.top_dirs = self._dirs(top_text)
+        self.top_vectors = {
+            name.strip()
+            for m in _VECTOR_PORT_DECL_RE.finditer(strip_comments(top_text))
+            for name in m.group(1).split(",")}
         self.modules: Dict[str, Tuple[str, str, int]] = {}
         for path, text in models.items():
             for m in re.finditer(r"(?m)^\s*module\s+([A-Za-z_][\w$]*)\b", text):
@@ -2178,10 +2232,25 @@ class SdfErrorExplainer:
                 (fname, first + text.count("\n", 0, m.start())))
         return out
 
+    def is_top_port(self, name: str, divider: str) -> bool:
+        """The endpoint is a port of the netlist's top module itself."""
+        if re.split(r"(?<!\\)" + re.escape(divider), name)[1:]:
+            return False
+        return self._top_port_base(name) is not None
+
+    def _top_port_base(self, name: str) -> Optional[str]:
+        clean = name.replace("\\", "").strip()
+        bit = _TOP_PORT_BIT_RE.fullmatch(clean)
+        if bit:
+            base = bit.group(1)
+            return base if base in self.top_vectors and base in self.top_dirs else None
+        return clean if clean in self.top_dirs else None
+
     def endpoint_dir(self, name: str, divider: str) -> Optional[str]:
         parts = re.split(r"(?<!\\)" + re.escape(divider), name)
         if len(parts) == 1:
-            return self.top_dirs.get(name.replace("\\", ""))
+            base = self._top_port_base(name)
+            return self.top_dirs.get(base) if base else None
         inst = divider.join(parts[:-1]).replace("\\", "")
         master = self.masters.get(inst)
         if master not in self.modules:
@@ -2217,10 +2286,13 @@ def classify_sdf_errors(transcript: str, *, compile_log: str, sdf_text: str,
             if any(site in sorry for site in dropped):
                 cls = "IFNONE_EDGE_PATH_DROPPED"
         elif msg.startswith("Could not find intermodpath") and 0 < lineno <= len(lines):
-            ic = _SDF_INTERCONNECT_RE.search(lines[lineno - 1])
+            ic = _SDF_INTERCONNECT_RECORD_RE.fullmatch(lines[lineno - 1])
             if ic and "inout" in (explainer.endpoint_dir(ic.group(1), divider.group(1)),
                                   explainer.endpoint_dir(ic.group(2), divider.group(1))):
                 cls = "INOUT_PORT_INTERCONNECT"
+            elif (ic and explainer.is_top_port(ic.group(2), divider.group(1))
+                  and _all_delays_zero(lines[lineno - 1])):
+                cls = "ZERO_DELAY_TOP_PORT_INTERCONNECT"
         if cls:
             by_class[cls] = by_class.get(cls, 0) + 1
         else:
@@ -2478,7 +2550,7 @@ def _explainer_for(netlist: Path, model_files: List[str]) -> "SdfErrorExplainer"
 
 def _sdf_error_class_line(row: Dict[str, object]) -> str:
     parts = [f"{cls} {n} (owner {SDF_ERROR_CLASSES[cls]['owner']}, "
-             f"{SDF_ERROR_CLASSES[cls]['fork']})"
+             f"{SDF_ERROR_CLASSES[cls]['fork'] or 'legal SDF, no fix owed'})"
              for cls, n in sorted((row.get("sdf_errors_by_class") or {}).items())]
     return (f"sdf errors by class: {', '.join(parts) or 'none'}; "
             f"unexplained {row.get('sdf_errors_unexplained') or 0}")

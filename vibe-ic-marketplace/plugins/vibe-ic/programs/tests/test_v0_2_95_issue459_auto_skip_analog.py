@@ -45,6 +45,9 @@ def _drive_main(monkeypatch, project: Path, argv_extra, need_analog: bool):
     runner was invoked with, plus the captured "analog ran?" flag.
     """
     captured = {"phase_args": {}, "analog_ran": False, "events": []}
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(project, "ic")
 
     def fake_run_phase(label, runner, args, env=None):
         # #588 — _run_phase gained an env= kwarg (re-entrancy token);
@@ -70,7 +73,8 @@ def _drive_main(monkeypatch, project: Path, argv_extra, need_analog: bool):
     monkeypatch.setattr(orch, "_read_report", fake_read_report)
     monkeypatch.setattr(orch, "_need_analog", fake_need_analog)
 
-    argv = ["vibe_ic_one_shot_runner.py", str(project)] + list(argv_extra)
+    argv = ["vibe_ic_one_shot_runner.py", str(project),
+            "--route", "ic"] + list(argv_extra)
     monkeypatch.setattr(sys, "argv", argv)
     orch.main()
     return captured
@@ -213,6 +217,9 @@ def _drive_main_verdicts(monkeypatch, project: Path, argv_extra,
     defaulting to PASS — so a test can make phase2 FAIL and observe the analog
     dispatch decision."""
     captured = {"phase_args": {}, "analog_ran": False, "order": []}
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(project, "ic")
 
     def fake_run_phase(label, runner, args, env=None):
         captured["phase_args"][runner.name] = list(args)
@@ -238,7 +245,8 @@ def _drive_main_verdicts(monkeypatch, project: Path, argv_extra,
     monkeypatch.setattr(orch, "_read_report", fake_read_report)
     monkeypatch.setattr(orch, "_need_analog", fake_need_analog)
     monkeypatch.setattr(sys, "argv",
-                        ["vibe_ic_one_shot_runner.py", str(project)]
+                        ["vibe_ic_one_shot_runner.py", str(project),
+                         "--route", "ic"]
                         + list(argv_extra))
     orch.main()
     return captured

@@ -510,19 +510,44 @@ class Engine:
         del deadline_s
         return _ce.run_in_container_supervised(self.container, cmd)
 
+    #: T131: what the last `ngspice` call spent, when it spent its budget;
+    #: None otherwise. Read by `run()` so a stopped run is NOT_MEASURED
+    #: (budget_exhausted), never graded as if its record were complete.
+    last_budget_exhausted: Optional[dict] = None
+
     def ngspice(self, deck: Path) -> Tuple[bool, Dict[str, float], str]:
-        """The A4 sweep's own ngspice path: login shell, fork binary, meas."""
+        """The A4 sweep's own ngspice path: login shell, fork binary, meas.
+
+        EVERY RUN CARRIES A DEADLINE (T131). A9 writes its own decks and sizes
+        their span from the declared cycle count, and the structural arm reads
+        the observer's windows over the whole run -- so the stop is NOT cut
+        here; the deck gets a budget only (`simulation_budget`, per clock)."""
+        import analog_real_corner_sweep as _ars
+        text = deck.read_text(errors="replace") if deck.is_file() else ""
+        stop_ns = _ars.tran_stop_ns(text)
+        budget, src = _ars.simulation_budget(
+            {}, text, stop_ns * 1e-9 if stop_ns is not None else None)
+        self.last_budget_exhausted = None
         if not self.container:
-            cp = self.run(f"cd {shlex.quote(str(deck.parent))} && "
-                          f"ngspice -b {shlex.quote(deck.name)} 2>&1")
+            cp = self.run(f"cd {shlex.quote(str(deck.parent))} && ngspice -b "
+                          f"{shlex.quote(deck.name)} 2>&1")
+            if cp.returncode == 124:
+                self.last_budget_exhausted = _ars.budget_exhausted_facts({
+                    "deadline_s": int(-(-budget // 1)),
+                    "budget_source": src["source"],
+                    "simulated_time_reached_s":
+                        _ars.simulated_time_reached_s(cp.stdout),
+                    "simulated_time_requested_s":
+                        stop_ns * 1e-9 if stop_ns is not None else None})
             meas = {m.group(1): float(m.group(2)) for m in re.finditer(
                 r"^\s*(a9_\w+)\s*=\s*([-+0-9.eE]+)", cp.stdout or "",
                 re.MULTILINE)}
             return cp.returncode == 0, meas, cp.stdout or ""
-        import analog_real_corner_sweep as _ars
-        ok, meas, txt, _status = _ars._run_ngspice(
+        ok, meas, txt, status = _ars._run_ngspice(
             self.container, str(deck), cwd=str(deck.parent),
-            run_to_completion=True)
+            deck_text=text, run_to_completion=True)
+        if (status or {}).get("stopped"):
+            self.last_budget_exhausted = _ars.budget_exhausted_facts(status)
         return ok, {k: v for k, v in (meas or {}).items()
                     if k.startswith("a9_") and v is not None}, txt or ""
 
@@ -603,6 +628,12 @@ def run(project: Path, *, engine: Engine, libvvp: str, cycles: int = 16,
             ok, meas, log = engine.ngspice(rdir / "deck.sp")
             write_text(rdir / "ngspice.log", log)
             rec["log"] = _rel(project, rdir / "ngspice.log")
+            spent = getattr(engine, "last_budget_exhausted", None)
+            if spent:
+                rec.update(verdict=NOT_MEASURED, reason_class="budget_exhausted",
+                           budget_exhausted=spent)
+                results.append(rec)
+                continue
             graded = grade_bounds(row, probes, meas)
             rec["criteria"] = graded
             rec["verdict"] = row_verdict(row, graded)
@@ -684,10 +715,19 @@ def run(project: Path, *, engine: Engine, libvvp: str, cycles: int = 16,
             results.append(rec)
             continue
         runs = []
+        spent = None
         for label, path in decks:
             ok, _meas, log = engine.ngspice(path)
             write_text(path.with_suffix(".log"), log)
             runs.append((label, observer_windows(log)))
+            spent = spent or getattr(engine, "last_budget_exhausted", None)
+        if spent:
+            # A truncated record's windows are not the structure's windows:
+            # grading them could read a stopped run as non-monotonic (FAIL).
+            rec.update(verdict=NOT_MEASURED, reason_class="budget_exhausted",
+                       budget_exhausted=spent)
+            results.append(rec)
+            continue
         rec["windows"] = {label: w for label, w in runs}
         for c in graded:
             if "verdict" in c:

@@ -28,6 +28,7 @@ import pytest
 
 import _plugin_tree  # noqa: F401 — puts programs/ on sys.path
 import _eda_pin as PIN
+import _analog_producer_common as PC
 import analog_a7_post_layout_emit as A7
 from _stated_eda_image import state_the_image, stated_image  # noqa: E402
 
@@ -155,9 +156,11 @@ def _project(tmp_path: Path, tb: str = TB, net: str = A3_NET) -> Path:
     (tech_dir / "t.tech").write_text(TECH)
     (tech_dir / "t-extract.tech").write_text(TECH_EXTRACT)
     (b / "blk.gds").write_bytes(b"\x00\x06\x00\x02\x02\x58")
-    (b / "layout_provenance.json").write_text(json.dumps(
-        {"pdk_sources": {"magic_tech": str(tech_dir / "t.tech")}}))
     (b / "blk.sp").write_text(net)
+    (b / "layout_provenance.json").write_text(json.dumps({
+        "producer": "analog_a5_layout_emit", "result": "OK",
+        "pdk_sources": {"magic_tech": str(tech_dir / "t.tech")},
+        "netlist_content_sha256": PC.content_digest(net)}))
     (b / "tb_blk.sp").write_text(tb)
     return project
 

@@ -288,15 +288,26 @@ def test_auto_sdc_branch_still_carries_drv(tmp_path):
 
 def test_step_pnr_wires_the_parity_pass_on_the_staged_branch():
     """The defect was a MISSING CALL, not a bad function — guard the wiring so a
-    refactor cannot silently drop it back onto the unconstrained path."""
-    src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
-    staged = src.split("project_sdc_silicon and project_sdc_silicon.is_file()")[1]
-    staged_branch = staged.split("_auto_die_requested")[0]
+    refactor cannot silently drop it back onto the unconstrained path.
+
+    FX_STEP7_ASIC_SDC moved the SDC author out of `step_pnr` into step 7's
+    producer (`_ppa.timing.author_asic_sdc`), which `step_pnr` now loads via
+    `asic_sdc_for_pnr`. The SAME property is asserted where the code lives:
+    the author's design-supplied-SDC branch applies the parity pass, and
+    `step_pnr` still writes the pass's record."""
+    author_src = (PROGRAMS / "_ppa" / "timing.py").read_text()
+    author = author_src.split("def author_asic_sdc(", 1)[1].split("\ndef ", 1)[0]
+    staged_branch = author.split('if out["design_staged"]:', 1)[1].split(
+        "\n    else:", 1)[0]
     assert "_ensure_staged_sdc_drv(" in staged_branch, (
-        "step_pnr's design-supplied-SDC branch no longer applies the DRV "
+        "step 7's design-supplied-SDC branch no longer applies the DRV "
         "parity pass — a design shipping its own SDC would reach PnR with no "
         "slew/cap target and repair_design would leave the slews unrepaired")
-    assert "sdc_drv_parity.json" in staged_branch
+    src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
+    step_pnr_src = src.split("def step_pnr(", 1)[1].split(
+        "\ndef _decap_route_short_guard(", 1)[0]
+    assert "asic_sdc_for_pnr(" in step_pnr_src
+    assert '("drv_parity", "sdc_drv_parity.json")' in step_pnr_src
 
 
 def test_step_pnr_wires_the_fanout_cap_into_cts_clustering():
@@ -319,15 +330,22 @@ def test_step_pnr_wires_the_fanout_cap_into_cts_clustering():
         "cts_cluster_size — a design/liberty fanout cap would stop reaching "
         "clock_tree_synthesis's -sink_clustering_size")
 
-    staged = step_pnr_src.split(
-        "project_sdc_silicon and project_sdc_silicon.is_file()")[1]
-    staged_branch = staged.split("_auto_die_requested")[0]
-    assert "_cts_fanout_target" in staged_branch, (
+    # FX_STEP7_ASIC_SDC: the author now lives in step 7's producer
+    # (`_ppa.timing.author_asic_sdc`); `step_pnr` takes `_cts_fanout_target`
+    # from what that author resolved. Same property, asserted where it lives.
+    assert ('_cts_fanout_target: Optional[int] = _asic.get("cts_fanout_target")'
+            in step_pnr_src), (
+        "step_pnr no longer takes _cts_fanout_target from step 7's authored SDC")
+    author_src = (PROGRAMS / "_ppa" / "timing.py").read_text()
+    author = author_src.split("def author_asic_sdc(", 1)[1].split("\ndef ", 1)[0]
+    staged_branch = author.split('if out["design_staged"]:', 1)[1].split(
+        "\n    else:", 1)[0]
+    assert 'out["cts_fanout_target"]' in staged_branch, (
         "the staged-SDC branch no longer sets _cts_fanout_target")
 
-    assert "_build_auto_silicon_sdc(" in step_pnr_src
-    auto_region = step_pnr_src.split("_build_auto_silicon_sdc(", 1)[1][:2000]
-    assert "_cts_fanout_target" in auto_region, (
+    assert "_build_auto_silicon_sdc(" in author
+    auto_region = author.split("_build_auto_silicon_sdc(", 1)[1][:2000]
+    assert 'out["cts_fanout_target"]' in auto_region, (
         "the auto-SDC branch no longer sets _cts_fanout_target — a design "
         "with no staged constraints/*.sdc would get a liberty-derived slew/"
         "cap DRV but silently lose the equivalent fanout cap for CTS")

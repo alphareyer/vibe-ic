@@ -53,6 +53,26 @@ def _emit(tmp_path, blocks, *a3args):
     return p, run_prog(A3, p, *a3args)
 
 
+def test_a3_refuses_a_capacitor_that_spec_binding_grows_past_the_pdk_limit():
+    """A final A3 override, not the library unit, decides drawable geometry."""
+    import pdk_analog_layout_minima as limits
+
+    family = "ihp-sg13g2"
+    _name, entry = limits.resolve_family(family)
+    roles = ((entry.get("analog_device_layout_maxima") or {}).get("roles")
+             or {})
+    lmax = limits.max_length_um(roles, "cap")
+    assert lmax is not None
+    ir = {"devices": [{"name": "c_bound_u0", "role": "cap",
+                       "w": 10.0, "l": float(lmax) * 0.75}]}
+    violations = A3_PRODUCER.bound_geometry_limit_violations(
+        ir, {"registry_family": family},
+        {"c_bound_u0": {"l": float(lmax) * 1.25}})
+    assert len(violations) == 1
+    assert "c_bound_u0" in violations[0]
+    assert "lmax=" in violations[0]
+
+
 # ═══ THE CONTROL ═══════════════════════════════════════════════════════════
 def test_a_block_with_no_extractable_spec_yields_no_netlist(tmp_path):
     p, cp = _emit(tmp_path, [

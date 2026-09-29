@@ -113,8 +113,8 @@ def test_each_finished_stream_runs_both_existing_gds_gates(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("stage", ["stream", "dual_measurement"])
 @pytest.mark.parametrize("code,status,reason", [
-    ("LL_TOOL_STALLED", "NOT_MEASURED", "execution_error"),
-    ("LL_TOOL_DEADLINE", "NOT_MEASURED", "execution_error"),
+    ("LL_TOOL_STALLED", "NOT_MEASURED", "stalled"),
+    ("LL_TOOL_DEADLINE", "NOT_MEASURED", "budget_exhausted"),
     ("LL_STEP_FAILED", "FAIL", ""),
 ])
 def test_step37_books_supervisor_stop_without_a_design_failure(

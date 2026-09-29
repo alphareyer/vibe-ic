@@ -265,6 +265,8 @@ def test_an_unknown_route_knob_refuses_before_any_session(tmp_path, monkeypatch)
 
 ROUTER_LOG = ('OpenROAD v2.0-26Q3\n[INFO DRT-0195] Start detail routing.\n'
               '[INFO DRT-0199]   Number of violations = {v}.\n'
+              '[INFO DRT-0198] Complete detail routing.\n'
+              '[INFO DRT-0702] Post-route verification: {v} violation(s).\n'
               'Total wire length = {wl} um.\nTotal number of vias = {vias}.\n')
 
 
@@ -291,6 +293,7 @@ def _fake_tools(project, *, route_ll=None, seed_ll=None, fail_step=None):
                      for k in ('odb', 'def', 'nl')}
             if step in (route.DRT, route.DRT_SEEDED):
                 write(folder / 'openroad-detailedrouting.log', ROUTER_LOG.format(**arm))
+                metrics['route__drc_errors'] = arm['v']
                 write(folder / 'drt-run-0/chip_top.drc', 'violation type: Short\n' * 4)
                 write(folder / 'drt-run-1/chip_top.drc', 'violation type: Short\n' * arm['v'])
                 write(folder / 'chip_top.drc', 'violation type: Short\n' * arm['v'])
@@ -452,6 +455,29 @@ def test_librelane_route_reaches_the_paths_the_post_route_tail_reads(tmp_path, m
     assert 'PNR_STAGE: global_route' in log and 'PNR_STAGE: detailed_route' in log
     assert 'GRT-0273' in log and 'DRT-0199' in log
     assert 'PNR_ROUTE_HANDOFF: selected=librelane' in log
+
+
+def test_librelane_handoff_mints_receipt_from_selected_drt(tmp_path, monkeypatch):
+    """The selected tool step supplies the invocation evidence to step_pnr.
+
+    On the original branch, the on-disk log contains DRT-0702 but execute's
+    return contains only head/tail text, so the writer refuses the receipt.
+    """
+    run = _run(tmp_path, monkeypatch, route_ll=GOOD)
+    assert run.rc == 0
+    drt = run.project / 'phase3/librelane/21-route/05-openroad-detailedrouting'
+    state = json.loads((drt / 'state_out.json').read_text())
+    assert state['metrics']['route__drc_errors'] == 0
+    assert 'DRT-0702] Post-route verification: 0 violation(s).' in run.out
+    assert (run.out_dir / runner.ROUTER_DRC_REPORT_NAME).stat().st_size == 0
+    routed_def = write(run.out_dir / 'routed.def', 'VERSION 5.8 ;\nDESIGN widget ;\nEND DESIGN\n')
+    receipt = runner._write_router_drc_receipt(run.out_dir, routed_def, run.out)
+    assert receipt is not None and receipt.is_file()
+    doc = json.loads(receipt.read_text())
+    assert doc['schema'] == 'vibeic.router_drc_receipt.v1'
+    assert doc['final_drt_count'] == doc['current_invocation_count'] == 0
+    from eda_report_audit import _empty_router_drc_receipt
+    assert _empty_router_drc_receipt(run.out_dir / runner.ROUTER_DRC_REPORT_NAME) == receipt
 
 
 def test_the_reroute_step_gets_the_runners_one_reroute_pass_and_the_routers_report(

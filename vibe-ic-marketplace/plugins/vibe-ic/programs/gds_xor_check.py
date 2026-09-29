@@ -614,13 +614,9 @@ def resolve_reference(project: Path, top: str,
     # My first cut resolved the exact `{top}` spelling and then GLOBBED
     # `*.prefinish.gds`. The glob fixed the name mismatch and opened a worse hole,
     # which a pre-landing review caught: nothing tied the single match to THIS run.
-    # Only the KLayout stream-out branch retains a boundary; the Magic branch
-    # retained nothing and deleted nothing, and nothing in the plugin ever unlinked
-    # one. So a boundary left by an earlier KLayout invocation would be picked up by
-    # a later Magic run and compared under "design-layer differences expected to be
-    # exactly 0" -- turning any routing change between the two runs into a design
-    # FAIL about the wrong layout. Before my commit the stem lookup simply MISSED and
-    # the checker re-streamed, so the stale comparison would have been NEW.
+    # Both stream-out branches now retain a boundary with a receipt.  An older
+    # KLayout boundary must never be mistaken for a later Magic run's layout:
+    # the receipt binds its bytes and routed DEF to the run being compared.
     #
     # Two things close it. The name is DERIVED, not guessed: the runner names the
     # file after the DEF's own DESIGN statement, so this reads that statement. And
@@ -654,8 +650,8 @@ def resolve_reference(project: Path, top: str,
     if kept is not None and kept.is_file():
         return kept, "retained", {
             "kind": "retained", "path": rel, "sha256": _sha256(kept),
-            "note": ("the stream-out the gds step kept BEFORE fill, seal ring and "
-                     "snap; design-layer differences are expected to be exactly 0"),
+            "note": ("the stream-out the gds step kept BEFORE fill and seal ring, "
+                     "after grid snap; design-layer differences are expected to be exactly 0"),
         }
     return None, "restreamed", {
         "kind": "restreamed",

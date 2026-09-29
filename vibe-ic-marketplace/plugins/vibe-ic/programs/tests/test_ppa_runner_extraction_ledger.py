@@ -99,6 +99,10 @@ def ppa_functions_in(path: Path):
 # v1.11.18. It may SHRINK freely. Growing it is a decision, not a diff.
 # ======================================================================
 _LEDGER = frozenset({
+    # CR-6: the runner emits a late OpenROAD query after edits. It derives no
+    # timing or DRV metric; the tool's final report remains the measurement.
+    # As with _report_wns_tcl below, a Tcl producer belongs in the runner.
+    "_drv_after_edit_probe_tcl",
     # RECORDED by R-0915-111 (2026-09-21), and recorded together because they
     # answer one question: "can pdngen build a grid that carries this design's
     # own measured current". Both are TCL/deck surface of the PnR step, not

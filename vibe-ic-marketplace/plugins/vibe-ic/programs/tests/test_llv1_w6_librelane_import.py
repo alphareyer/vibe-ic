@@ -200,7 +200,7 @@ def test_each_step_is_one_witnessed_row_the_flow_allow_lists_accept(tmp_path):
     _import(proj)
     rows = _rows(proj)
     steps = [r for r in rows if r.get("reconstructed") is False]
-    assert len(steps) == 17
+    _assert_witnessed_population(rows)
     assert all(T.is_witnessed(r, proj) for r in steps)
     assert all(r["attributed_to"] == "librelane" for r in steps)
     for out, tools in (("phase3/stage3/pnr/routed.def", "openroad"),
@@ -211,6 +211,36 @@ def test_each_step_is_one_witnessed_row_the_flow_allow_lists_accept(tmp_path):
                             out, "--tool", tools], capture_output=True,
                            text=True, timeout=120)
         assert r.returncode == 0, (out, r.stdout, r.stderr)
+
+
+def _assert_witnessed_population(rows):
+    steps = [r for r in rows if r.get("reconstructed") is False]
+    assert sorted(r["step"] for r in steps) == sorted([
+        "Yosys.Synthesis", "OpenROAD.STAPrePNR", "OpenROAD.GeneratePDN",
+        "OpenROAD.DetailedPlacement", "OpenROAD.CTS",
+        "OpenROAD.ResizerTimingPostCTS", "OpenROAD.DetailedRouting",
+        "OpenROAD.RCX", "OpenROAD.STAPostPNR",
+        "OpenROAD.CheckAntennas-1", "Magic.DRC", "KLayout.DRC",
+        "Netgen.LVS", "OpenROAD.FillInsertion", "Magic.StreamOut",
+        "KLayout.StreamOut", "Magic.WriteLEF",
+    ])
+    assert [sorted(r["outputs"]) for r in rows
+            if r.get("reconstructed") is True] == [
+                ["phase3/stage3/pnr/openroad.log"]]
+
+
+def test_witnessed_population_pin_rejects_a_same_count_member_swap(tmp_path):
+    proj = _project(tmp_path)
+    _import(proj)
+    rows = _rows(proj)
+    _assert_witnessed_population(rows)
+    swapped = [dict(r) for r in rows if r.get("step") != "Magic.DRC"]
+    replacement = dict(next(r for r in rows if r.get("step") == "Magic.DRC"),
+                       step="OpenROAD.UnrelatedReport")
+    swapped.append(replacement)
+    assert sum(r.get("reconstructed") is False for r in swapped) == 17
+    with pytest.raises(AssertionError):
+        _assert_witnessed_population(swapped)
 
 
 def test_a_log_edited_after_the_import_unbinds_its_outputs(tmp_path):
@@ -411,6 +441,20 @@ def test_the_flow_status_reader_is_calibrated():
                           .read_text())["complete"] is True
 
 
+def test_segment_loop_slots_match_the_real_cut_and_full_flow_logs():
+    """Both tool logs have 83 top-level loop iterations; nested runs and
+    gating notices are not extra slots, while gated skips still are slots."""
+    import librelane_import as LI
+    cal = PROGRAMS / "calibration"
+    cut = LI.run_cuts((cal / "librelane_flow_log_cut_to_positive.log").read_text())
+    full = LI.run_cuts((cal / "librelane_flow_log_gated_negative.log").read_text())
+    assert len(cut["slots"]) == len(full["slots"]) == 83
+    assert cut["slots"][:4] == full["slots"][:4]
+    assert all(kind == "skipped" for kind, _ in cut["slots"][-73:])
+    assert all(kind == "running" for kind, _ in full["slots"][-5:])
+    assert len(cut["gated"]) == len(full["gated"]) == 4
+
+
 # ── segments (review W6: the two-segment plan is one call) ────────────────
 
 SEG1, SEG2 = "phase3/librelane/seg1/runs/cmp3", "phase3/librelane/seg2/runs/cmp3"
@@ -494,6 +538,29 @@ def test_a_step_two_segments_both_ran_is_refused(tmp_path):
     with pytest.raises(C.Refusal) as exc:
         LI.import_segments(proj, [(proj / SEG1, SEG1_END), (proj / SEG2, None)])
     assert exc.value.code == "LL_IMPORT_SEGMENT_OVERLAP"
+    _nothing_written(proj)
+
+
+def test_a_gap_between_segments_is_refused_before_import(tmp_path):
+    """The second segment starts at Floorplan, skipping pre-PnR STA."""
+    import librelane_contract as C
+    import librelane_import as LI
+    proj = _segment_project(tmp_path)
+    lines = _flow_lines(proj, SEG2)
+    first = _at(lines, "'OpenROAD.Floorplan'")
+    before = []
+    for line in lines[1:first]:
+        if line.startswith("Skipping step '"):
+            before.append(line)
+        elif line.startswith("Running '") and "/" not in \
+                line.split(" at ")[1].strip("'…\n").split("runs/cmp3/", 1)[1]:
+            before.append(f"Skipping step '{line.split(chr(39))[1]}'…\n")
+    (proj / SEG2 / "flow.log").write_text(
+        "Starting…\n" + "".join(before + lines[first:]))
+    with pytest.raises(C.Refusal) as exc:
+        LI.import_segments(proj, [(proj / SEG1, SEG1_END), (proj / SEG2, None)])
+    assert exc.value.code == "LL_IMPORT_SEGMENT_GAP"
+    assert "OpenROAD.STAPrePNR" in str(exc.value)
     _nothing_written(proj)
 
 
@@ -604,24 +671,19 @@ def test_an_import_over_another_runs_import_is_refused(tmp_path):
 
 
 def test_a_reimport_removes_what_the_same_runs_no_longer_perform(tmp_path):
-    """A canonical file the earlier import of these runs wrote, for a rule
-    this import does not perform, is removed and the removal recorded."""
+    """An earlier top's actual imported output is removed after a top change."""
     proj = _project(tmp_path)
-    _import(proj)
-    man = proj / MANIFEST
-    doc = json.loads(man.read_text())
-    stale = proj / "phase3/stage3/pnr/padring.def"
-    # a VALID row the earlier import could have written (W0's validator
-    # reads the previous manifest before any of its paths is trusted)
-    row = dict(next(r for r in doc["rows"]
-                    if r["canonical_path"] == "phase3/stage3/pnr/floorplan.def"),
-               canonical_path="phase3/stage3/pnr/padring.def")
-    shutil.copyfile(proj / "phase3/stage3/pnr/floorplan.def", stale)
-    doc["rows"].append(row)
-    man.write_text(json.dumps(doc))
+    before = _import(proj)
+    stale = proj / "phase3/stage4/gds/spm.gds"
+    assert stale.is_file()
+    (proj / RUN_REL / "resolved.json").write_text('{"DESIGN_NAME": "renamed"}\n')
     doc = _import(proj)
     assert not stale.exists()
-    assert doc["removed"] == ["phase3/stage3/pnr/padring.def"]
+    old_paths = {r["canonical_path"] for r in before["rows"]}
+    new_paths = {r["canonical_path"] for r in doc["rows"]}
+    assert set(doc["removed"]) == old_paths - new_paths
+    assert stale.relative_to(proj).as_posix() in doc["removed"]
+    assert (proj / "phase3/stage4/gds/renamed.gds").is_file()
 
 
 def test_a_canonical_file_for_a_step_not_performed_is_refused(tmp_path):
@@ -845,3 +907,127 @@ def test_a_previous_manifest_that_does_not_validate_deletes_nothing(tmp_path):
         _import(proj)
     assert exc.value.code == "LL_IMPORT_MANIFEST_UNREADABLE"
     assert precious.read_text() == "keep\n"
+
+
+def test_a_previous_manifest_cannot_claim_the_importers_provenance(tmp_path):
+    import librelane_contract as C
+    proj = _project(tmp_path)
+    _import(proj)
+    provenance = proj / "provenance.jsonl"
+    before = provenance.read_bytes()
+    man = proj / MANIFEST
+    doc = json.loads(man.read_text())
+    doc["rows"].append(dict(doc["rows"][0], canonical_path="provenance.jsonl"))
+    man.write_text(json.dumps(doc))
+    with pytest.raises(C.Refusal) as exc:
+        _import(proj)
+    assert exc.value.code == "LL_IMPORT_MANIFEST_UNREADABLE"
+    assert provenance.read_bytes() == before
+
+
+def test_a_previous_manifest_cannot_claim_another_segments_run_tree(tmp_path):
+    import librelane_contract as C
+    import librelane_import as LI
+    proj = _segment_project(tmp_path)
+    LI.import_segments(proj, [(proj / SEG1, SEG1_END), (proj / SEG2, None)])
+    resolved = proj / SEG2 / "resolved.json"
+    before = resolved.read_bytes()
+    man = proj / MANIFEST
+    doc = json.loads(man.read_text())
+    doc["segments"][0]["rows"].append(dict(
+        doc["segments"][0]["rows"][0],
+        canonical_path=resolved.relative_to(proj).as_posix()))
+    man.write_text(json.dumps(doc))
+    with pytest.raises(C.Refusal) as exc:
+        LI.import_segments(proj, [(proj / SEG1, SEG1_END), (proj / SEG2, None)])
+    assert exc.value.code == "LL_IMPORT_MANIFEST_UNREADABLE"
+    assert resolved.read_bytes() == before
+
+
+def test_a_stale_canonical_changed_since_import_is_not_deleted(tmp_path):
+    import librelane_contract as C
+    proj = _project(tmp_path)
+    _import(proj)
+    stale = proj / "phase3/stage4/gds/spm.gds"
+    stale.write_text("written by someone else\n")
+    (proj / RUN_REL / "resolved.json").write_text('{"DESIGN_NAME": "renamed"}\n')
+    with pytest.raises(C.Refusal) as exc:
+        _import(proj)
+    assert exc.value.code == "LL_IMPORT_STALE_CANONICAL"
+    assert stale.read_text() == "written by someone else\n"
+
+
+def test_a_previous_manifest_cannot_claim_matching_hash_design_input(tmp_path):
+    import _external_flow_manifest as M
+    import librelane_contract as C
+    proj = _project(tmp_path)
+    _import(proj)
+    input_file = proj / "input/phase1_prompt.md"
+    input_file.parent.mkdir(parents=True)
+    input_file.write_text("owner supplied design input\n")
+    original = input_file.read_bytes()
+    man = proj / MANIFEST
+    doc = json.loads(man.read_text())
+    doc["rows"].append(dict(
+        doc["rows"][0], canonical_path=input_file.relative_to(proj).as_posix(),
+        canonical_sha256="sha256:" + _sha(input_file),
+        tool_run_sha256="sha256:" + _sha(input_file)))
+    man.write_text(json.dumps(doc))
+    assert M.validate_manifest(doc, proj, verify_disk=False) == []
+    try:
+        _import(proj)
+    except C.Refusal as exc:
+        assert exc.code == "LL_IMPORT_MANIFEST_UNREADABLE"
+    else:
+        assert input_file.is_file(), "a design input was deleted by re-import"
+    assert input_file.read_bytes() == original
+
+
+def test_a_previous_row_cannot_claim_another_rules_destination(tmp_path):
+    import librelane_contract as C
+    proj = _project(tmp_path)
+    _import(proj)
+    stale = proj / "phase3/stage3/pnr/padring.def"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(proj / "phase3/stage3/pnr/floorplan.def", stale)
+    original = stale.read_bytes()
+    man = proj / MANIFEST
+    doc = json.loads(man.read_text())
+    floorplan = next(r for r in doc["rows"]
+                     if r["canonical_path"] == "phase3/stage3/pnr/floorplan.def")
+    doc["rows"].append(dict(floorplan,
+                            canonical_path=stale.relative_to(proj).as_posix()))
+    man.write_text(json.dumps(doc))
+    with pytest.raises(C.Refusal) as exc:
+        _import(proj)
+    assert exc.value.code == "LL_IMPORT_MANIFEST_UNREADABLE"
+    assert stale.read_bytes() == original
+
+
+def test_a_missing_old_canonical_is_not_reported_as_removed(tmp_path):
+    proj = _project(tmp_path)
+    _import(proj)
+    stale = proj / "phase3/stage4/gds/spm.gds"
+    stale.unlink()
+    (proj / RUN_REL / "resolved.json").write_text('{"DESIGN_NAME": "renamed"}\n')
+    doc = _import(proj)
+    assert stale.relative_to(proj).as_posix() not in doc["removed"]
+    assert (proj / "phase3/stage4/gds/renamed.gds").is_file()
+
+
+def test_a_previous_manifest_must_bind_the_tool_run_source(tmp_path):
+    import librelane_contract as C
+    proj = _project(tmp_path)
+    _import(proj)
+    man = proj / MANIFEST
+    doc = json.loads(man.read_text())
+    row = doc["rows"][0]
+    row["canonical_sha256"] = row["tool_run_sha256"] = "sha256:" + "0" * 64
+    man.write_text(json.dumps(doc))
+    tampered = man.read_bytes()
+    try:
+        _import(proj)
+    except C.Refusal as exc:
+        assert exc.code == "LL_IMPORT_MANIFEST_UNREADABLE"
+    else:
+        assert man.read_bytes() == tampered, "re-import accepted the forged hash"

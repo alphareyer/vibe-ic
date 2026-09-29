@@ -53,6 +53,12 @@ CSV_HEADER = ("Node0 Layer,Node0 X location,Node0 Y location,"
 
 def _run(*args) -> subprocess.CompletedProcess:
     cmd = [sys.executable, str(PROG), *[str(a) for a in args]]
+    # The synthetic producer supplies placed conductor geometry separately,
+    # as the real Step-25 OpenROAD producer does.
+    if args and Path(args[0]).name == "em_segments.csv":
+        geom = Path(args[0]).with_name("em_pg_geometry.tsv")
+        if geom.is_file():
+            cmd.extend(("--pg-geometry", str(geom)))
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
@@ -69,6 +75,11 @@ def _jmax(tmp_path) -> Path:
 def _csv(tmp_path, rows) -> Path:
     body = CSV_HEADER + "".join(
         f"{l},0,0,{l},1,0,{c}\n" for (l, c) in rows)
+    geom = ("net\tlayer\tx0_um\ty0_um\tx1_um\ty1_um\tsource\n" +
+            "".join(f"{net}\t{layer}\t0\t-0.07\t1\t0.07\tpg_port\n"
+                    for net in ("unknown", "VPWR")
+                    for layer in ("met1", "met2")))
+    _write(tmp_path / "em_pg_geometry.tsv", geom)
     return _write(tmp_path / "em_segments.csv", body)
 
 

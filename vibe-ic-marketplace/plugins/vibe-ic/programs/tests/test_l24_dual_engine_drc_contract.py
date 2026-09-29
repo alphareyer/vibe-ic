@@ -7,6 +7,7 @@ from pathlib import Path
 
 from l24_signoff_evidence_backed_check import main as gate_main
 from l24_signoff_requirements_extract import extract_signoff_requirements
+import _path_layout as PL
 
 
 _INPUT = (
@@ -54,9 +55,16 @@ def _project(tmp_path: Path, *, klayout: bool, controls: dict | None = None) -> 
     (project / "phase1" / "generated_docs" / "L24_SIGNOFF.json").write_text(
         json.dumps({"doc_id": "L24_SIGNOFF", "fields": payload})
     )
-    (project / "reports" / "orchestrator_phase3.json").write_text(
-        '{"program":"phase3_one_shot","passed":true}'
-    )
+    netlist = project / "phase2/stage2/synth/netlist_yosys.v"
+    netlist.parent.mkdir(parents=True)
+    netlist.write_text("module chip; endmodule\n")
+    receipt = project / "reports/orchestrator/phase3_one_shot.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(json.dumps({
+        "verdict": "PASS",
+        "phase2_synth": PL.phase2_synth_input_identity(project),
+        "phase3_inputs": PL.phase3_signoff_input_identity(project),
+    }))
     _write_audit(project, "magic", **(controls or {}))
     if klayout:
         _write_audit(project, "klayout")

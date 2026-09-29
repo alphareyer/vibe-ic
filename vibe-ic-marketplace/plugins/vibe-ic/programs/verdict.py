@@ -60,11 +60,14 @@ because neither defect exists in a fixture. They exist only when a real run
 reaches a later step CARRYING an earlier step's word. That is why the rule
 below is a function with tests in both directions, and not a convention.
 
-THE FIVE VERDICTS, and nothing else
------------------------------------
+FIVE GENERIC VERDICTS, AND ONE DECLARED DRC ATTRIBUTION TIER
+-----------------------------------------------------------
 
     PASS                the step ran and what it examined was good
     PASS_WITH_WAIVERS   the same, with named rows somebody must close
+    PASS_WITH_ATTRIBUTION  a declared hardmacro die-density obligation;
+                        neither a pass nor a waiver, sourced from the
+                        die-level attribution producer
     FAIL                the step ran and what it examined was not good;
                         or a required artefact does not exist
     NOT_MEASURED        nobody measured it — `reason_class` says why
@@ -79,7 +82,7 @@ THE RULE FOR THE NEXT PERSON
 ----------------------------
 
 **A new status word is a schema change, not a string.** If you are about to
-write a sixth word, you are about to do what the 2026-09-16 runs above did.
+write an unregistered word, you are about to do what the 2026-09-16 runs above did.
 What you actually have is one of:
 
   * a new REASON why something was not measured  -> add a `ReasonClass`
@@ -88,17 +91,26 @@ What you actually have is one of:
     change `Verdict`, bump every report's `schema_version`, migrate every
     producer, and write here WHY, as this text does.
 
-There is deliberately no alias map, no `_LEGACY_STATUS_MAP`, no tolerant
-reader. `parse` REFUSES an unknown word by raising `UnknownVerdictWord`. A
-reader that meets `SKIP` in a report is reading a report written by a producer
-that has not been migrated, and that must be loud where it happens rather than
+The attribution tier is imported from its producer, not copied as a literal;
+it is a distinct outcome under the 2026-09-28 orchestrator ruling. There is
+no alias map, no `_LEGACY_STATUS_MAP`, and no tolerant reader. `parse`
+REFUSES an unknown word by raising `UnknownVerdictWord`. A reader that meets
+`SKIP` in a report is reading a report written by a producer that has not been migrated, and that must be loud where it happens rather than
 quietly meaning something.
 """
 from __future__ import annotations
 
 import enum
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+# The runner and the load-by-path audit both import this module directly.
+_PROGRAMS_DIR = str(Path(__file__).resolve().parent)
+if _PROGRAMS_DIR not in sys.path:
+    sys.path.insert(0, _PROGRAMS_DIR)
+import die_level_deck_rule_attribution as _dla
 
 #: Bumped by every report schema that carries a step status. A report written
 #: with `step_status_schema_version < 2` uses the deleted vocabulary and is
@@ -107,7 +119,7 @@ SCHEMA_VERSION = 2
 
 
 class UnknownVerdictWord(ValueError):
-    """A status word outside the five. Raised, never absorbed.
+    """A status word outside the declared vocabulary. Raised, never absorbed.
 
     This is the schema refusal the DESIGN note promises. It exists so that the
     r26 chain cannot happen again by accident: a producer that still writes
@@ -117,7 +129,7 @@ class UnknownVerdictWord(ValueError):
 
 
 class Verdict(str, enum.Enum):
-    """The only five words a step may wear.
+    """The five generic words plus the producer-declared DRC attribution tier.
 
     `str`-valued so a record serialises to JSON as the bare word and so
     `record["status"] == Verdict.PASS` is true from either side — but the
@@ -133,12 +145,15 @@ class Verdict(str, enum.Enum):
     PASS = "PASS"
 
     #: The step ran and passed, and named rows remain open that somebody must
-    #: close. Replaces `PASS_WITH_WAIVERS`, `WAIVED`, `WAIVED-DEFERRED`,
-    #: `DEFERRED` and `PASS_WITH_ATTRIBUTION`. The rows themselves live in
-    #: `waiver_rows`; an integrator-attributed item lives in `attribution`.
-    #: The old words differed only in WHICH list the row belonged to, which is
-    #: a field, not an outcome.
+    #: close. Replaces `WAIVED` and `WAIVED-DEFERRED`. The rows live in
+    #: `waiver_rows`. The distinct integrator attribution tier below is never
+    #: translated into this waiver verdict.
     PASS_WITH_WAIVERS = "PASS_WITH_WAIVERS"
+
+    #: A hardmacro's die-level density obligation belongs to its integrator.
+    #: This declared tier is neither a pass nor a waiver; the DRC producer
+    #: retains the handoff and any unattributed violation remains FAIL.
+    PASS_WITH_ATTRIBUTION = _dla.TIER_PASS_WITH_ATTRIBUTION
 
     #: The step ran and what it examined was NOT good, or a required artefact
     #: does not exist. Replaces `FAIL`, `MISSING`, `FAIL_RTL_REPAIR_INERT` and
@@ -360,7 +375,7 @@ class StepVerdict:
     are what make the required field required.
     """
 
-    #: One of the five. Never a string outside `Verdict`.
+    #: One of the declared words. Never a string outside `Verdict`.
     verdict: Verdict
 
     #: The step this is about, for the report and for `cascade_to_dependent`'s
@@ -386,10 +401,8 @@ class StepVerdict:
     #: the defect the word used to permit.
     waiver_rows: List[WaiverRow] = field(default_factory=list)
 
-    #: An item this run attributes to the integrator rather than measuring
-    #: itself (e.g. a DRC deck the foundry owns). Replaces
-    #: `PASS_WITH_ATTRIBUTION`. Carried WITH `PASS_WITH_WAIVERS`: an attributed
-    #: item is a row somebody owns, which is what a waiver row is.
+    #: Descriptive attribution where a producer supplies it. The declared
+    #: DRC attribution tier stands on its own, without a waiver row.
     attribution: str = ""
 
     #: Informational, arithmetic-free. See `Disclosure`.
@@ -417,6 +430,8 @@ class StepVerdict:
                 f"INPUT and must name the line that makes it. Without one it "
                 f"is NOT_MEASURED(reason_class=not_executed), which is what "
                 f"sha256 run16 pass 2 should have said.")
+        if self.verdict is Verdict.PASS_WITH_ATTRIBUTION and self.waiver_rows:
+            raise ValueError("PASS_WITH_ATTRIBUTION cannot carry waiver_rows")
         if self.verdict is Verdict.PASS_WITH_WAIVERS and not (
                 self.waiver_rows or self.attribution):
             raise ValueError(
@@ -477,10 +492,11 @@ class StepVerdict:
     def blocks_run_pass(self) -> bool:
         """Does this step stop the RUN from being called a pass?
 
-        FAIL and NOT_MEASURED do; NOT_APPLICABLE does not, and neither does a
-        disclosure. See `run_verdict`.
+        FAIL, NOT_MEASURED, and the declared attribution tier do;
+        NOT_APPLICABLE and disclosures do not. See `run_verdict`.
         """
-        return self.verdict in (Verdict.FAIL, Verdict.NOT_MEASURED)
+        return self.verdict in (Verdict.FAIL, Verdict.NOT_MEASURED,
+                                Verdict.PASS_WITH_ATTRIBUTION)
 
     @property
     def cascades(self) -> bool:
@@ -538,7 +554,7 @@ def parse(word: Any) -> Verdict:
     that upper-cased and swapped `_` for `-` because the producer wrote
     `VACUOUS_PASS` and the reports said `VACUOUS-PASS` — two spellings of one
     word, and a classifier that saw two answered differently about one step.
-    With five words and one producer vocabulary there is nothing to
+    With one declared producer vocabulary there is nothing to
     normalise, and tolerating a second spelling is how a third arrives.
     """
     if isinstance(word, Verdict):
@@ -547,7 +563,7 @@ def parse(word: Any) -> Verdict:
         return Verdict(word)
     except (ValueError, KeyError):
         raise UnknownVerdictWord(
-            f"{word!r} is not one of the five step verdicts "
+            f"{word!r} is not a declared step verdict "
             f"{[v.value for v in Verdict]}. It is either a word from the "
             f"vocabulary R-0915-85 deleted — in which case the producer that "
             f"wrote it has not been migrated, and translating it here is the "
@@ -559,7 +575,7 @@ def parse(word: Any) -> Verdict:
 
 
 def validate_step_row(row: Any) -> None:
-    """Enforce the five-word contract on a RUNNER's own `StepResult` row.
+    """Enforce the declared vocabulary on a RUNNER's own `StepResult` row.
 
     The runners keep their own lightweight dataclass (it carries durations,
     output files and per-step extras this module has no business knowing
@@ -568,7 +584,7 @@ def validate_step_row(row: Any) -> None:
 
     THREE REFUSALS, each naming the defect it prevents, and ONE derivation:
 
-      * a word outside the five             -> `UnknownVerdictWord`
+      * a word outside the declaration      -> `UnknownVerdictWord`
       * NOT_MEASURED with no `reason_class` -> the undifferentiated bag
       * NOT_APPLICABLE with no `declared_by`-> the run16 laundering
 
@@ -596,6 +612,8 @@ def validate_step_row(row: Any) -> None:
             f"{name}: NOT_APPLICABLE without declared_by. N/A is a claim about "
             f"the INPUT and must name the line that makes it; without one the "
             f"honest word is NOT_MEASURED with a reason_class.")
+    if status is Verdict.PASS_WITH_ATTRIBUTION and getattr(row, "waiver_rows", None):
+        raise ValueError(f"{name}: PASS_WITH_ATTRIBUTION cannot carry waiver_rows")
     if status is Verdict.PASS_WITH_WAIVERS and not (
             getattr(row, "waiver_rows", None)
             or getattr(row, "attribution", "")):
@@ -686,7 +704,7 @@ def as_verdict_or_none(word: Any) -> Optional[Verdict]:
     card — `ic_run_status_derive.disagreements` asks whether a sentence claims
     a pass the machine record does not support. Prose is not a status, so
     `parse` raising on it would be wrong; returning `None` says "that text is
-    not one of the five", which is exactly the question being asked.
+    not a declared verdict", which is exactly the question being asked.
 
     It is NOT a fallback reader for reports. A step record's `status` goes
     through `parse` and an old word stops the reader — see the module DESIGN.
@@ -790,6 +808,7 @@ def review_gate_verdict(step_id: str, name: str, *, inputs_present: bool,
 RUN_PRECEDENCE: Sequence[Verdict] = (
     Verdict.FAIL,
     Verdict.NOT_MEASURED,
+    Verdict.PASS_WITH_ATTRIBUTION,
     Verdict.PASS_WITH_WAIVERS,
     Verdict.PASS,
 )
@@ -845,8 +864,8 @@ def run_verdict_record(steps: Sequence[StepVerdict]) -> Dict[str, Any]:
 # tomorrow would be adjudicated without anyone remembering to register it.
 #
 # That was the right answer to a vocabulary that could grow. This one cannot:
-# `parse` refuses a sixth word. So the derivation goes too, and each predicate
-# below is a one-line statement over the five. The MODULE is gone, not moved —
+# `parse` refuses an unregistered word. So the derivation goes too, and each
+# predicate below is a one-line statement over the declared vocabulary. The MODULE is gone, not moved —
 # a second classifier beside this one is the 疊床架屋 the ruling forbids.
 
 #: The whole vocabulary, for a consumer that wants to assert against it.
@@ -860,7 +879,8 @@ EXCUSED = frozenset({Verdict.NOT_APPLICABLE.value})
 
 #: The step is a defect or a hole — what keeps a run from being green.
 #: Replaces `NON_GREEN`.
-NON_GREEN = frozenset({Verdict.FAIL.value, Verdict.NOT_MEASURED.value})
+NON_GREEN = frozenset({Verdict.FAIL.value, Verdict.NOT_MEASURED.value,
+                       Verdict.PASS_WITH_ATTRIBUTION.value})
 
 #: The one word that satisfies a predecessor outright.
 FULL_PASS = Verdict.PASS.value
@@ -872,8 +892,9 @@ def is_excused(status: Any) -> bool:
 
 
 def is_non_green(status: Any) -> bool:
-    """Keeps the run off a pass: a measured defect, or a hole."""
-    return parse(status) in (Verdict.FAIL, Verdict.NOT_MEASURED)
+    """Keeps the run off a pass: a defect, a hole, or attribution."""
+    return parse(status) in (Verdict.FAIL, Verdict.NOT_MEASURED,
+                             Verdict.PASS_WITH_ATTRIBUTION)
 
 
 def is_full_pass(status: Any) -> bool:

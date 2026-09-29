@@ -178,6 +178,18 @@ def test_a_deleted_re_entry_is_a_regression_not_a_pass():
     assert regs and "no longer present" in regs[0]
 
 
+def test_a_direct_helper_move_keeps_the_same_actuating_population():
+    main = "r.py::main::run"
+    helper = "r.py::_run_layergate2::run"
+    base = {main: {C.ACTUATING: 3}}
+    now = {main: {C.ACTUATING: 2}, helper: {C.ACTUATING: 1}}
+    edge = {("r.py", "main"): {"_run_layergate2"}}
+    assert C.regressions(now, base, edge) == []
+    assert C.regressions(now, base)  # an uncalled helper is not a relocation
+    now[helper] = {C.SELF_CHECKED_ONLY: 1}
+    assert C.regressions(now, base, edge)  # losing actuation stays red
+
+
 # ── the rc contract ─────────────────────────────────────────────────────────
 
 def _tree(root: Path, runner_src: str) -> Path:

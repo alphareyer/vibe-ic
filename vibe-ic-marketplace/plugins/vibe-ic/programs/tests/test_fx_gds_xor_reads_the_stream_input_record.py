@@ -124,9 +124,10 @@ def test_the_stream_out_records_every_input_with_its_digest(tmp_path, monkeypatc
 def test_both_engines_record_right_after_their_stream():
     """Structural, host-runnable: each engine's stream-out calls the recorder
     with its own engine name, after its tool exec."""
-    for fn, engine in ((R._magic_def_to_gds, "magic"), (R._step_gds_direct, "klayout")):
+    for fn, engine, output in ((R._magic_def_to_gds, "magic", "gds_out"),
+                               (R._step_gds_direct, "klayout", "stream_gds")):
         src = inspect.getsource(fn)
-        call = src.find(f'_record_stream_inputs(project, container, gds_out, "{engine}"')
+        call = src.find(f'_record_stream_inputs(project, container, {output}, "{engine}"')
         assert call > 0, f"{fn.__name__} records no stream-out input set"
         assert src.rfind("_docker_exec(container, cmd", 0, call) > 0, fn.__name__
 

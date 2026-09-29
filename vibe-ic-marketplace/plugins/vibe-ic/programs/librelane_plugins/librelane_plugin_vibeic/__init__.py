@@ -63,7 +63,8 @@ from librelane.steps.odb import OdbpyStep
 from librelane.steps.openroad import OpenROADStep
 from librelane.steps.step import MetricsUpdate, Step, StepError, ViewsUpdate
 
-__all__ = ["InsertSpareCells", "GateLevelSim", "ClockPathDriveSizing"]
+__all__ = ["InsertSpareCells", "GateLevelSim", "ClockPathDriveSizing",
+           "ExternalCaptureLaunchRetap"]
 
 
 @Step.factory.register()
@@ -169,6 +170,12 @@ from .postroute_repair import PostRouteRepair  # noqa: E402,F401
 
 __all__ += ["PostRouteRepair"]
 
+# Step 17: close the fanout of buffers created by RepairDesignPostGPL before
+# DetailedPlacement and all later physical stages consume the placed state.
+from .postgpl_fanout_closure import PostGPLFanoutClosure  # noqa: E402,F401
+
+__all__ += ["PostGPLFanoutClosure"]
+
 
 @Step.factory.register()
 class GateLevelSim(Step):
@@ -273,3 +280,28 @@ class ClockPathDriveSizing(OpenROADStep):
 
     def get_script_path(self) -> str:
         return os.path.join(os.path.dirname(__file__), "clock_path_drive_sizing.tcl")
+
+
+@Step.factory.register()
+class ExternalCaptureLaunchRetap(OpenROADStep):
+    """Try measured CTS root retaps for externally captured outputs.
+
+    Runs on ClockPathDriveSizing's state, before PostCTS timing repair. The
+    pre-CTS snapshot identifies CTS-created buffers without cell-name rules.
+    Each register trial is retained only after setup and hold measurement.
+    """
+
+    id = "Vibeic.ExternalCaptureLaunchRetap"
+    name = "External capture launch retap"
+
+    config_vars = OpenROADStep.config_vars + [
+        Variable(
+            "VIBEIC_CLKPATH_PRECTS_INSTANCES",
+            Path,
+            "Instance names of the ODB that OpenROAD.CTS read, one per line.",
+        ),
+    ]
+
+    def get_script_path(self) -> str:
+        return os.path.join(os.path.dirname(__file__),
+                            "external_capture_launch_retap_step.tcl")

@@ -186,7 +186,7 @@ def run_prelayout(project: Path, image: str, pdk: str, top: str, netlist: Path,
                   sdc: Optional[Path], rtl: list[Path], *, arm: str = "design_sdc",
                   std_cell_library: Optional[str] = None,
                   mounts: Optional[list[tuple[Path, str]]] = None,
-                  pdk_root: Optional[str] = None) -> Path:
+                  pdk_root: str) -> Path:
     """Run CheckSDCFiles -> STAPrePNR on `netlist`; return the STAPrePNR folder."""
     if not netlist.is_file():
         raise Refusal("LL_PRELAYOUT_NETLIST_MISSING", f"no netlist file at {netlist}")

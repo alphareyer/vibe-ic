@@ -68,6 +68,7 @@ import _path_layout as _pl
 import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _runner_lock  # ORGANIC #588 — single-driver lock (all 4 runners)
+import _delivery_route
 import _watchdog as _wd  # progress supervision — never a runtime bound
 import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch site
 # THE L-document write chokepoint — records the producing release on the
@@ -1125,6 +1126,14 @@ def _run_step_0_5ic(project: Path, pdk: str = "") -> int:
               f"no answer, and must not be recorded as one", file=sys.stderr)
         return 1
 
+    # BLOCKING route admission, before fetch, ingest, declaration or Phase-1
+    # extraction. The owner declared HARDMACRO and a shuttle purchase to be
+    # mutually exclusive; neither downstream consumer may choose a side.
+    if _TD.bought_slot_hardmacro(project):
+        print(f"      REFUSED: {_TD.BOUGHT_SLOT_HARDMACRO_MESSAGE}",
+              file=sys.stderr)
+        return 1
+
     template, slot, reason = None, None, None
     if answers:
         operator = answers.get("operator_template")
@@ -1377,7 +1386,8 @@ def _name_the_sidecar_this_pass_wrote(project: Path, summary: Dict[str, Any],
             f"{_pl.COVERAGE_ONLY_SIDECAR_REL} could not be read to name it")
 
 
-def run_second_pass_only(project: Path, ic_name: str) -> int:
+def run_second_pass_only(project: Path, ic_name: str,
+                         route: Optional[str]) -> int:
     """PASS 2 of the Phase-1 expert hand-off, and NOTHING else (#2204).
 
     `phase1_expert_parse_track` ends its first pass by telling the operator to
@@ -1397,6 +1407,10 @@ def run_second_pass_only(project: Path, ic_name: str) -> int:
     own report in order to close a hand-off. The prior summary is carried
     forward and only the fields THIS pass re-measured are rewritten.
     """
+    route_refusal = _delivery_route.admit(project, route)
+    if route_refusal:
+        print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
+        return 2
     print("[phase1] EXPERT SECOND PASS — consuming the delivered IC-Expert "
           "answer; the doc-extraction track is NOT re-run")
     reports = project / "reports"
@@ -1469,6 +1483,7 @@ def run_second_pass_only(project: Path, ic_name: str) -> int:
             f"UNREADABLE — the pass-1 record could not be carried forward "
             f"({exc}); this file now describes the second pass ONLY")
         carried = False
+    summary.update(_delivery_route.report_label(project))
     # Freeze the extraction/route outcome independently of replaceable expert
     # retries. Old second-pass FAIL summaries cannot tell which pass failed;
     # retain that uncertainty instead of manufacturing a successful extraction.
@@ -1681,6 +1696,9 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("project", type=Path)
     p.add_argument("--ic-name", default="UNNAMED_CHIP")
+    p.add_argument("--route", choices=("ic", "ip"),
+                   help="Owner-stated delivery route: ic=DIE, ip=HARDMACRO. "
+                        "Required unless already owner-declared in this project.")
     p.add_argument("--mode",
                    choices=REQUESTABLE_MODES,
                    default="auto",
@@ -1718,13 +1736,18 @@ def main() -> int:
     _lock = _runner_lock.acquire_or_reenter(project, "phase1_one_shot_runner")
     if _lock is None:
         return 3
+    route_refusal = _delivery_route.admit(project, args.route)
+    if route_refusal:
+        print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
+        _lock.release()
+        return 2
 
     # #2204 — the expert second pass short-circuits EVERYTHING below. Step
     # 0.5ic and D1 both already ran in the pass that emitted the hand-off;
     # this entry exists to read one delivered answer and record what it made
     # of it, so it runs the second track alone and re-runs nothing.
     if args.second_track_only:
-        return run_second_pass_only(project, args.ic_name)
+        return run_second_pass_only(project, args.ic_name, args.route)
     # PASS 1 BEGINS HERE, so this is where an EARLIER pass's coverage-only sidecar stops being
     # this project's answer. R-0915-160. Below the second-pass short-circuit on purpose: the
     # second pass carries pass 1's sidecar and must not erase it. See
@@ -1796,6 +1819,7 @@ def main() -> int:
             "phase": 1,
             "mode": "docs",
             "project": str(project),
+            **_delivery_route.report_label(project),
             "ic_name": args.ic_name,
             "delegated_to": "phase1_doc_one_shot_runner",
             "delegated_rc": rc_extract,
@@ -1904,6 +1928,7 @@ def main() -> int:
     summary = {
         "phase": 1,
         "mode": mode,
+        **_delivery_route.report_label(project),
         "mode_requested": args.mode,
         "mode_detected": detected,
         "mode_redirect": mode_redirect,

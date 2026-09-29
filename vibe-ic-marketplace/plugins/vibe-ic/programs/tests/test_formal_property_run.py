@@ -240,6 +240,58 @@ def test_emit_sby_shape():
         assert f in files_sec
 
 
+def test_emit_sby_uses_wrapping_harness_as_yosys_top():
+    # The output/report remains named for the DUT, but Yosys must elaborate
+    # the wrapper that contains it (and owns observer paths).
+    s = FPR.emit_sby(["leaf.sv"], "formal_leaf.sv", "leaf",
+                     observers=[("observed_state", "dut.state_q")],
+                     harness_top="formal_leaf")
+    assert "hierarchy -top formal_leaf" in s
+    assert "select -assert-any formal_leaf/w:dut.state_q" in s
+    assert "prep -top formal_leaf" in s
+    assert "prep -top leaf\n" not in s
+
+
+def test_emit_sby_without_wrapper_override_keeps_dut_as_top():
+    s = FPR.emit_sby(["a.v"], "formal_top.sv", "formal_top")
+    assert "prep -top formal_top" in s
+
+
+def test_direct_hierarchical_immediate_assert_uses_slang_frontend(tmp_path):
+    # The shipped read_slang frontend resolves a direct hierarchy path while
+    # read_verilog makes it an undriven wire. Drive the real emit-only path;
+    # an assertion referring to the DUT register must select read_slang before
+    # any proof can be credited. No engine is needed for this routing test.
+    project = tmp_path / "design"
+    rtl_dir = project / "phase2/stage1/rtl"
+    rtl_dir.mkdir(parents=True)
+    leaf = rtl_dir / "leaf.sv"
+    leaf.write_text(
+        "module leaf(input logic clk); logic state_q; "
+        "always_ff @(posedge clk) state_q <= ~state_q; endmodule\n")
+    harness = tmp_path / "formal_leaf.sv"
+    harness.write_text(
+        "module formal_leaf(input logic clk); leaf dut(.clk(clk));\n"
+        "wire observed_state = dut.state_q;\n"
+        "always @(posedge clk) p_toggles: assert (observed_state == "
+        "~$past(observed_state)); endmodule\n")
+    result = FPR.run(project, harness=harness, rtl=[leaf], top="leaf",
+                     emit_only=True)
+    assert result["verdict"] == "EMIT_ONLY"
+    sby = (project / result["sby"]).read_text()
+    assert "read_slang --single-unit" in sby
+    assert "read_verilog" not in sby
+
+
+def test_read_verilog_assignment_pattern_parse_abort_tries_slang():
+    transcript = (
+        "base: pkg.sv:19: ERROR: syntax error, unexpected ':'\n"
+        "summary: engine_0 (abc pdr) did not return a status\n")
+    assert FPR.frontend_aborted_the_read(transcript)
+    assert not FPR.frontend_aborted_the_read(
+        transcript.replace("did not return a status", "returned PASS"))
+
+
 def test_emit_reset_safety_harness_general():
     h = FPR.emit_reset_safety_harness("mymod", clk="clk", rst="rst_n",
                                       out_port="q", out_known="1'b0",

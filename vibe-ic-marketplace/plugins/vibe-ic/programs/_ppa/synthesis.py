@@ -33,7 +33,7 @@ def strategy_config(base: dict, strategy: str, clock_gate_width: int | None = No
 
 def run_exploration(project: Path, image: str, base_config: dict,
                     header_state: Path, *, mounts: list[tuple[Path, str]] | None = None,
-                    pdk_root: str | None = None,
+                    pdk_root: str,
                     clock_gate_width: int | None = None,
                     strategies: tuple[str, ...] = STRATEGIES) -> dict[str, Path]:
     """Run LibreLane's nine strategy arms through STAPrePNR; retain all arms."""

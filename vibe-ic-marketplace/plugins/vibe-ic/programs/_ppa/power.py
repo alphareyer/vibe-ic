@@ -2872,7 +2872,9 @@ def pdn_done_text(project: Path, pnr_out: Path, primary_def: Path,
     flag = pnr_out / "pdn.done"
     def_sha = _sha256_of(primary_def)
     supply_subject = _def_supply_subject_sha256(primary_def)
-    ll = (None if pdn_ok or pdn_marker != "no PDN insertion marker"
+    missing_marker = pdn_marker in ("no PDN insertion marker",
+                                    "openroad.log unreadable")
+    ll = (None if pdn_ok or not missing_marker
           else librelane_pdn_evidence(project))
     log_path = pnr_out / "openroad.log"
     source_sha = (ll["chain_sha256"] if ll is not None else
@@ -2894,7 +2896,7 @@ def pdn_done_text(project: Path, pnr_out: Path, primary_def: Path,
         tool = f"openroad, run by LibreLane (chain of {ll['step']})"
     else:
         status = ("CONNECTED" if pdn_ok else
-                  "NOT MEASURED" if pdn_marker == "no PDN insertion marker"
+                  "NOT MEASURED" if missing_marker
                   else "NOT CONNECTED")
         marker = pdn_marker
         source = _rel(log_path, project)
@@ -2912,7 +2914,7 @@ def pdn_done_text(project: Path, pnr_out: Path, primary_def: Path,
             and f"# supply_subject_sha256: {supply_subject}\n" in prior):
         return None
     ev = def_evidence or {}
-    return (f"# PDN status: {status}\n"
+    body = (f"# PDN status: {status}\n"
             f"# marker: {marker}\n"
             f"# measured in {Path(primary_def).name} SPECIALNETS: "
             f"follow-pin rails={ev.get('followpin', '?')} "
@@ -2923,3 +2925,4 @@ def pdn_done_text(project: Path, pnr_out: Path, primary_def: Path,
             f"# source_identity_sha256: {source_sha or 'NOT_MEASURED'}\n"
             f"# source: {source}\n"
             f"# tool: {tool}\n")
+    return None if prior == body else body

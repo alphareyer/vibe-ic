@@ -105,6 +105,7 @@ from types import MappingProxyType
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor
 import _path_layout as _pl
+import _tapeout_declaration as _td_route
 import _gate_authorship as _ga
 import _auditor_write as _aw   # R-0915-168 (the one auditor writer)
 import _reused_ip_predicate as _reused_ip
@@ -10534,7 +10535,6 @@ def _p0_gate_record(name: str,
     }
 
 
-@functools.lru_cache(maxsize=1)
 def _two_source_advisory_gates() -> frozenset:
     """Structural gates that BOTH their own module AND the flow call advisory.
 
@@ -10560,6 +10560,9 @@ def _two_source_advisory_gates() -> frozenset:
     time), which is precisely why it is advisory; enforcing it here failed a
     design whose input documents legitimately delegate microarchitecture.
     """
+    # The registry can be scoped by a caller.  Caching this zero-argument
+    # result would keep that caller's population after the registry is restored.
+    # The per-gate declaration lookup below has its own name-keyed cache.
     return frozenset(g for g in _STRUCTURAL_RTL_GATES
                      if _gate_is_two_source_advisory(g))
 
@@ -14053,17 +14056,16 @@ def _delivery_declares_absence(project: Path, spec: Any
     hardmacro exposes pins, gets no pad ring and no die ring.
 
     THE CONDITION MUST READ THE DECLARATION, NOT THE ROUTER'S LEFTOVERS, and it
-    reads it through the one function the flow already has for the question --
-    `submission_template_check.slot_rules_are_owed` -- so the run and the audit
-    cannot hold two opinions about one design's route.
+    reads it through `_tapeout_declaration.die_outputs_owed`, the same
+    predicate the pad-ring producer uses.
 
     CONSERVATIVE IN THE SAME DIRECTION AS `_l_doc_declares_absence`. Absence of
     a declaration is not a declaration of absence: a missing or unparseable
     declaration, a `deliverable` that is not the declared-absent word,
-    NOT_DETERMINED, DIE, a SELF_TAPEOUT route, or ANY affirmative
-    `operator_template.path`/`.slot` binding all return ``None`` and the step
-    RUNS and is held to its outputs. Only a design that positively declared a
-    die-less delivery AND bought no slot stands these steps down.
+    NOT_DETERMINED, DIE or a SELF_TAPEOUT route return ``None`` and the step
+    RUNS and is held to its outputs. An affirmative operator binding beside
+    HARDMACRO raises the named route contradiction; it cannot pick an output
+    obligation. Only a declared pure HARDMACRO stands these steps down.
     """
     if not isinstance(spec, dict):
         return None
@@ -14110,9 +14112,11 @@ def _delivery_declares_absence(project: Path, spec: Any
     corroboration = str(spec.get("corroborated_by")
                         or "no_operator_slot").strip().lower()
     if corroboration == "no_operator_slot":
+        import _tapeout_declaration as _td_mod  # noqa: PLC0415
         try:
-            import submission_template_check as _stc  # noqa: PLC0415
-            owed, _why = _stc.slot_rules_are_owed(project, None)
+            owed = _td_mod.die_outputs_owed(project)
+        except _td_mod.DeliveryRouteContradiction:
+            raise
         except Exception:  # noqa: BLE001 — cannot read the route: run the step
             return None
         if owed:
@@ -16168,6 +16172,45 @@ def _with_signed_judgement(fn):
     return _judge
 
 
+def _output_not_owed(project: Path, step: Dict[str, Any], spec: Any
+                     ) -> Optional[str]:
+    """The reason ONE declared output is not owed by this delivery, or None.
+
+    FX_SPM_GATES_2. A step may declare `output_conditions`, mapping one of
+    its own `required_outputs` entries to the producer's full step condition:
+    `delivery_declares` and the slot/SELF_TAPEOUT route markers for 15.5ic.
+    MEASURED
+    on the same-RTL spm x gf180mcuD run (deliverable HARDMACRO, core-only):
+    step 37 FAILED `required_outputs missing: [...pad_ring_route_evidence.json]`
+    for an artefact its only producer (`step_pad_ring_final_evidence`, under
+    `_chip_path_requests_pad_ring`) correctly never writes for a hardmacro.
+
+    NOT APPLICABLE only when the producer's condition is false. One reason
+    cites an owner-declared die-less delivery with no bound slot. The other
+    cites absence of both route markers, where even a DIE or unreadable
+    declaration has no producer. A DIE with a live route remains owed."""
+    conds = step.get("output_conditions")
+    if not isinstance(conds, dict):
+        return None
+    cond = conds.get(str(spec))
+    if not isinstance(cond, dict) or not cond.get("delivery_declares"):
+        return None
+    if _check_condition(project, cond):
+        return None
+    cited = _delivery_declares_absence(project, cond.get("delivery_declares"))
+    if cited is not None:
+        rel, detail = cited[0], cited[1]
+        return (f"declared output {spec!r} NOT_APPLICABLE for this delivery: "
+                f"{rel} records {detail}, so its producer owes it nothing")
+    files = cond.get("files_exist")
+    if files and not _check_condition(project, {
+            "files_exist": files, "any_of": cond.get("any_of", False)}):
+        return (f"declared output {spec!r} NOT_APPLICABLE for this delivery: "
+                f"no route marker satisfies {files!r}, so its producer "
+                "does not run")
+    return None
+
+
 @_with_child_gate_step
 @_with_signed_judgement
 def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
@@ -16266,7 +16309,13 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             return result
 
     condition = step.get("condition")
-    if condition and not _check_condition(project, condition):
+    try:
+        condition_met = not condition or _check_condition(project, condition)
+    except _td_route.DeliveryRouteContradiction as exc:
+        result.reason_class = ""
+        result.reasons.append(f"HARDMACRO_BOUGHT_SLOT_CONTRADICTION: {exc}")
+        return result
+    if not condition_met:
         # v0.114 (BACKLOG-v10 P1.5): two-kind condition handling.
         #   condition_kind: design_dependent → silent skip (default;
         #     analog A1-A8 for digital-only IC, etc.). False-positive
@@ -16394,7 +16443,18 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     _bind_specs: List[Dict[str, Any]] = []
     _n_attr = 0
     _n_glob = 0
+    _not_owed: List[str] = []
     for pat in outputs:
+        try:
+            _why_not_owed = _output_not_owed(project, step, pat)
+        except _td_route.DeliveryRouteContradiction as exc:
+            result.reason_class = ""
+            result.reasons.append(f"HARDMACRO_BOUGHT_SLOT_CONTRADICTION: {exc}")
+            return result
+        if _why_not_owed:
+            _not_owed.append(pat)
+            result.reasons.append(_why_not_owed)
+            continue
         _sat, _ev, _mode, _note, _detail = _resolve_required_output(
             project, sid, pat, _binding or {})
         _bind_modes[pat] = _mode
@@ -16427,7 +16487,9 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         result.output_binding = {
             "mode": ("step_attributed" if _n_glob == 0 else
                      "project_glob" if _n_attr == 0 else "mixed"),
-            "n_specs": len(outputs), "n_step_attributed": _n_attr,
+            "n_specs": len(outputs) - len(_not_owed),
+            "not_owed": _not_owed,
+            "n_step_attributed": _n_attr,
             # SATISFACTION, WHICH IS A DIFFERENT QUESTION FROM MODE.
             # `_resolve_required_output` returns mode `step_attributed` with
             # satisfied=False for wildcard_unbound, recorded_but_absent and
@@ -17699,9 +17761,12 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                       if _bind_modes.get(p) == "step_attributed"]
         result.reasons.append(
             f"required_outputs missing: {missing_entries} "
-            f"(satisfied: {len(outputs) - len(missing_entries)}/{len(outputs)}"
-            f" — the gate passed, but every declared output must be produced, "
-            f"not just one)"
+            f"(satisfied: {len(outputs) - len(_not_owed) - len(missing_entries)}"
+            f"/{len(outputs) - len(_not_owed)}"
+            + (f", {len(_not_owed)} not owed by this delivery" if _not_owed
+               else "")
+            + " — the gate passed, but every declared output must be produced, "
+            "not just one)"
             + (f" — {len(_by_record)} of them on this step's OWN write record: "
                f"{_by_record}" if _by_record else ""))
 
@@ -18202,6 +18267,181 @@ def not_owed_root(row: Any) -> Optional[str]:
     m = re.fullmatch(r"blocked-by-upstream\((.+)\)",
                      str(getattr(row, "cascade_note", "") or ""))
     return m.group(1) if m else None
+
+
+def _attribute_halted_canonical_outputs(
+        project: Path, results: Sequence["StepResult"],
+        cascade_info: Dict[str, Any]) -> None:
+    """Charge an uninvoked canonical-output producer to its recorded halt.
+
+    The Phase-3 runner emits its step plan before the completion audit.  The
+    plan's ``canonicalize_artefacts`` row is the invocation witness; its
+    NOT_MEASURED/upstream_failed word says the canonicalizer never ran.  The
+    SDC alias and extracted SPEF are outputs of that producer (see
+    ``step_canonicalize_artefacts``), even though their canonical flow rows
+    precede the post-route repair site.  A ``blocks_on`` walk cannot express
+    that backwards execution dependency.  A declared gate document dependent
+    on the SPEF is witnessed separately by the producer-run report.
+
+    This is attribution only.  It runs after the ordinary cascade, touches
+    only absent outputs, and requires a typed failed step id corroborated by
+    the failed runner row.  A producer row that ran, an unbound halt, or a
+    step with an independent program failure retains its original verdict.
+    """
+    orch_path = project / "reports/orchestrator/phase3_one_shot.json"
+    try:
+        orch = json.loads(orch_path.read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(orch, dict):
+        return
+    # The pre-summary steps-only record says ``program``.  The terminal
+    # runner record replaces that with a producer identity and
+    # ``steps_verdict``; both are emitted by this same runner.
+    if not (orch.get("program") == "phase3_one_shot_runner"
+            or (isinstance(orch.get("producer"), dict)
+                and orch["producer"].get("recipe_sha256")
+                and orch.get("steps_verdict"))):
+        return
+    if orch.get("project") and Path(str(orch["project"])).resolve() != project.resolve():
+        return
+    if orch.get("bounded") or orch.get("verdict") in (
+            _T.Verdict.PASS.value, _T.Verdict.PASS_WITH_WAIVERS.value):
+        return
+    plan = orch.get("steps")
+    if not isinstance(plan, list):
+        return
+    producer_positions = [i for i, row in enumerate(plan)
+                          if isinstance(row, dict)
+                          and row.get("name") == "canonicalize_artefacts"
+                          and row.get("status") == _T.Verdict.NOT_MEASURED.value
+                          and row.get("reason_class")
+                          == _T.ReasonClass.UPSTREAM_FAILED.value]
+    if len(producer_positions) != 1:
+        return
+    producer_pos = producer_positions[0]
+    row_of = {str(r.id): r for r in results}
+
+    # The failed runner row is an execution record, but older rows have no
+    # canonical flow id.  Prefer an explicit typed id when present; otherwise
+    # bind its code to a producer-owned failed report carrying ``step``.  A
+    # name/order guess is never enough to move a FAIL row.
+    failed_rows = [row for row in plan[:producer_pos]
+                   if isinstance(row, dict)
+                   and row.get("status") == _T.Verdict.FAIL.value]
+    candidates: List[Tuple[str, str]] = []
+    for row in failed_rows:
+        explicit = (row.get("extras") or {}).get("flow_step")
+        if explicit is not None and str(explicit) in row_of:
+            candidates.append((str(explicit), str(row.get("name"))))
+            continue
+        for report_path in (project / "reports/phase3").glob("*.json"):
+            try:
+                report = json.loads(report_path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(report, dict) or report.get("verdict") != "FAIL":
+                continue
+            step_id = str(report.get("step") or "")
+            code = str(report.get("code") or "")
+            if (step_id in row_of and code
+                    and str(row.get("detail") or "").startswith(code + ":")):
+                candidates.append((step_id, str(row.get("name"))))
+    if len(set(candidates)) != 1:
+        return
+    halt_id, halt_name = candidates[0]
+    if row_of[halt_id].status != _T.Verdict.FAIL.value:
+        return
+
+    # These are the two canonical-output families at issue.  The paths are
+    # flow artefact contracts, not design/PDK names.  A gate document is also
+    # eligible only when the producer-run record explicitly says it skipped
+    # that target because its canonical-output sibling was absent.
+    canonical_outputs = ("phase2/stage2/constraints/*.sdc",
+                         "phase3/stage3/extracted/*.spef")
+
+    def canonical_spec(spec: str) -> bool:
+        return any(_flow_paths_meet(atom, pattern)
+                   for atom in _flow_path_atoms(spec)
+                   for pattern in canonical_outputs)
+
+    skipped_targets: Dict[str, set] = {}
+    try:
+        producer_run = json.loads((project / "reports/audit/flow_declared_producer_run.json").read_text())
+    except (OSError, ValueError):
+        producer_run = None
+    if (isinstance(producer_run, dict)
+            and producer_run.get("program") == "flow_declared_producer_run"):
+        for skipped in producer_run.get("skipped") or []:
+            if not isinstance(skipped, dict):
+                continue
+            target = str(skipped.get("target") or "")
+            siblings = skipped.get("siblings") or []
+            if (target and isinstance(siblings, list) and siblings
+                    and any(canonical_spec(str(s)) for s in siblings)
+                    and not any(_glob_first(project, str(s)) for s in siblings)
+                    and not _glob_first(project, target)):
+                skipped_targets.setdefault(str(skipped.get("step")), set()).add(target)
+
+    blocked = cascade_info.setdefault("blocked_by_upstream", {})
+    for row in results:
+        binding = row.output_binding or {}
+        specs = binding.get("specs") or []
+        # `specs` is capped for display at 16 while `n_specs` counts the
+        # complete declaration.  An unseen entry may be an independent
+        # missing output, so a partial list cannot prove sole causation.
+        if binding.get("n_specs") != len(specs):
+            continue
+        absent = [str(spec.get("spec")) for spec in specs
+                  if isinstance(spec, dict) and not spec.get("satisfied")]
+        if not absent or row.status not in (
+                _T.Verdict.FAIL.value, _T.Verdict.NOT_MEASURED.value):
+            continue
+        # Only a missing-output FAIL can be explained by a producer that did
+        # not run.  check_step leaves reason_class empty when an independently
+        # evaluated gate fails (including files_exist and content predicates),
+        # even if a required output is also missing.  Looking for particular
+        # program-failure prose misses those predicates and erases their FAIL.
+        if (row.status == _T.Verdict.FAIL.value
+                and row.reason_class != _T.ReasonClass.MISSING_ARTEFACT.value):
+            continue
+        # A condition-owner refusal is another independent verdict.  It can
+        # carry missing_artefact while its owner is unresolved, so the class
+        # alone does not prove this row failed solely on canonical outputs.
+        if any(str(record.get("step")) == str(row.id)
+               for record in cascade_info.get("condition_owner_blocks") or []):
+            continue
+        if not all(canonical_spec(spec)
+                   or spec in skipped_targets.get(str(row.id), set())
+                   for spec in absent):
+            continue
+        prior_root = not_owed_root(row)
+        if prior_root == halt_id:
+            continue
+        if prior_root is not None:
+            prior_key = next((key for key in blocked if str(key) == prior_root), None)
+            if prior_key is not None:
+                blocked[prior_key] -= 1
+                if not blocked[prior_key]:
+                    del blocked[prior_key]
+        row.status = _T.Verdict.NOT_MEASURED.value
+        row.reason_class = _T.ReasonClass.UPSTREAM_FAILED.value
+        row.cascade_note = f"blocked-by-upstream({halt_id})"
+        row.reasons = [reason for reason in row.reasons or []
+                       if not str(reason).startswith("blocked-by-upstream(step ")]
+        row.reasons.append(
+            f"blocked-by-upstream(step {halt_id}): runner row {halt_name} "
+            f"FAILED and canonicalize_artefacts was never invoked; the "
+            f"declared output producer did not run, so these absent outputs "
+            f"are consequences of that halt; fix step {halt_id} first")
+        binding["producer_halt"] = {
+            "orchestrator": "reports/orchestrator/phase3_one_shot.json",
+            "producer_row": "canonicalize_artefacts",
+            "halt_row": halt_name, "halt_step": halt_id,
+            "absent_specs": absent,
+        }
+        row.output_binding = binding
+        blocked[halt_id] = blocked.get(halt_id, 0) + 1
 
 
 def _attribute_cascade_verdicts(
@@ -20531,6 +20771,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         _existing[_owner] = _existing.get(_owner, 0) + _count
     cascade_info["condition_owner_blocks"] = (
         _condition_owner_info.get("records") or [])
+    _attribute_halted_canonical_outputs(project, results, cascade_info)
 
     # v0.100 H2: advisory — warn if post-route STA passed single-corner only
     advisories: List[str] = []

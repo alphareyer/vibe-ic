@@ -74,6 +74,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -82,6 +83,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import _analog_producer_common as _pc
+from _analog_producer_common import layout_netlist_identity  # noqa: E402,F401
 from _atomic_artefact import write_json, write_text
 import _watchdog as wd
 
@@ -270,7 +272,9 @@ def post_layout_testbench(tb_text: str, block: str, post_name: Optional[str],
 
 def compare(pre: Dict[str, Optional[float]], post: Dict[str, Optional[float]],
             style: str, not_compared: Optional[Dict[str, str]] = None,
-            missing: Optional[List[str]] = None) -> List[dict]:
+            missing: Optional[List[str]] = None,
+            rail_supply_v: Optional[float] = None,
+            rail_margin_fraction: Optional[float] = None) -> List[dict]:
     """One row per measurement both runs produced. NOTHING IS DROPPED
     SILENTLY: a measurement with no pre-layout value, or taken out of the post
     deck because its net is absent after extraction (`not_compared` on the
@@ -294,10 +298,54 @@ def compare(pre: Dict[str, Optional[float]], post: Dict[str, Optional[float]],
             continue
         row = {"name": f"{name}@{style}", "metric": name, "extraction_style": style,
                "pre_value": a, "post_value": b}
-        if a != 0:
+        if re.match(r"^railx_(?:min|max)_", name, re.I) and \
+                rail_supply_v and rail_margin_fraction:
+            # A rail extremum near ground has no useful relative denominator.
+            # Measure its absolute voltage movement against the supply and
+            # the same declared rail margin used by A3's transient check.
+            margin_v = rail_supply_v * rail_margin_fraction
+            row["delta_pct"] = 100.0 * (b - a) / margin_v
+            row["comparison_basis"] = "absolute_voltage_over_supply_margin"
+            row["rail_supply_v"] = rail_supply_v
+            row["rail_margin_v"] = margin_v
+            row["rail_reference_v"] = margin_v
+            row["rail_delta_v"] = b - a
+        elif a == 0 and b == 0:
+            row["delta_pct"] = 0.0
+        elif a != 0:
             row["delta_pct"] = 100.0 * (b - a) / abs(a)
         rows.append(row)
     return rows
+
+
+def rail_reference_voltage(tb_text: str) -> Optional[float]:
+    """Read the positive supply A3 actually drives, including its PWL ramp."""
+    for line in _joined_lines(tb_text):
+        fields = line.strip().split(None, 3)
+        if len(fields) != 4 or fields[0].lower() != "v_vdd" \
+                or fields[2] != "0":
+            continue
+        source = fields[3].strip()
+        if source.lower().startswith("pwl(") and source.endswith(")"):
+            values = source[4:-1].replace(",", " ").split()
+            volts = [spice_number(values[i]) for i in range(1, len(values), 2)]
+            positive = [v for v in volts if v is not None and v > 0]
+            return max(positive) if positive else None
+        value = spice_number(source)
+        return value if value is not None and value > 0 else None
+    return None
+
+
+def _declared_rail_reference(tb_text: str) -> tuple[Optional[float], Optional[float]]:
+    """Pair A3's driven supply with its declared transient rail margin."""
+    supply_v = rail_reference_voltage(tb_text)
+    if supply_v is None:
+        return None, None
+    import analog_a3_netlist_emit as a3
+    fraction = float(a3.TRAN_RAIL_MARGIN_FRACTION)
+    if not math.isfinite(fraction) or fraction <= 0:
+        return None, None
+    return supply_v, fraction
 
 
 #: SPICE magnitude suffixes, longest first (`meg` before `m`).
@@ -369,16 +417,23 @@ def summed_device_models(tech_text: str) -> set:
     return out
 
 
-def _close(a: Optional[float], b: Optional[float], rel: float = 1e-3) -> bool:
+def _close(a: Optional[float], b: Optional[float], rel: float = 1e-3,
+           abs_tol: float = 0.0) -> bool:
     if a is None or b is None:
         return a is None and b is None
-    return abs(a - b) <= rel * max(abs(a), abs(b), 1e-30)
+    return abs(a - b) <= max(rel * max(abs(a), abs(b), 1e-30), abs_tol)
 
 
-def device_inventory(a3: List[dict], rcx: List[dict], summed: set) -> dict:
+def device_inventory(a3: List[dict], rcx: List[dict], summed: set,
+                     *, layout_grid_m: float = 0.0) -> dict:
     """Compare two device inventories (see the module docstring). Values are
     matched with a 1e-3 relative tolerance: Magic writes 5 significant
-    digits (`115.384u` comes back `0.11538m`)."""
+    digits (`115.384u` comes back `0.11538m`). For non-summed devices, A5's
+    attested Magic layout grid also permits at most half a grid of drawing
+    snap. No grid is inferred when A5 did not attest one."""
+    if not math.isfinite(layout_grid_m) or layout_grid_m < 0:
+        raise ValueError("layout_grid_m must be a finite nonnegative length")
+    snap_tol = layout_grid_m / 2 + (1e-15 if layout_grid_m else 0.0)
     diffs: List[str] = []
     models = sorted({d["model"] for d in a3} | {d["model"] for d in rcx})
     for model in models:
@@ -407,14 +462,19 @@ def device_inventory(a3: List[dict], rcx: List[dict], summed: set) -> dict:
                               for d in devs for _ in range(int(round(d["m"]))))
             x, y = expand(mine), expand(theirs)
             if len(x) != len(y) or not all(
-                    _close(p[0], q[0]) and _close(p[1], q[1])
+                    _close(p[0], q[0], abs_tol=snap_tol)
+                    and _close(p[1], q[1], abs_tol=snap_tol)
                     for p, q in zip(x, y)):
                 diffs.append(f"{model}: (w, l) multiset A3={len(x)} "
                              f"extracted={len(y)} device(s) differ")
-    return {"result": "MISMATCH" if diffs else "MATCH",
-            "a3_devices": len(a3), "extracted_devices": len(rcx),
-            "summed_models": sorted(summed & set(models)),
-            "differences": diffs}
+    out = {"result": "MISMATCH" if diffs else "MATCH",
+           "a3_devices": len(a3), "extracted_devices": len(rcx),
+           "summed_models": sorted(summed & set(models)),
+           "differences": diffs}
+    if layout_grid_m:
+        out["layout_grid_um"] = layout_grid_m * 1e6
+        out["maximum_grid_snap_um"] = snap_tol * 1e6
+    return out
 
 
 def rcx_nets(rcx_text: str, block: str) -> Tuple[set, set]:
@@ -940,8 +1000,34 @@ def _not_measured(record: dict, out: Path, deck: Path, sim: dict,
     return EX_BUDGET_EXHAUSTED
 
 
-def _refuse(record: dict, out: Path, rule: str, detail: str, rc: int) -> int:
-    record.update({"result": "REFUSED" if rc == 1 else "NOT_PRODUCED",
+def declared_measurements(tb_text: str) -> List[str]:
+    """The names of the `meas` cards the deck declares (comments skipped),
+    lower-cased as ngspice prints them."""
+    out = []
+    for line in _joined_lines(tb_text or ""):
+        if line.lstrip().startswith("*"):
+            continue
+        m = _MEAS_NAME_RE.match(line)
+        if m and m.group(1).lower() not in out:
+            out.append(m.group(1).lower())
+    return out
+
+
+def _unmeasured(record: dict, out: Path, rule: str, reason_class: str,
+                detail: str, **facts) -> int:
+    """NOT_MEASURED for a reason other than a spent budget (T131): the step ran
+    and a row it declared is genuinely absent, so it may not PASS on the rest
+    -- and nothing about the circuit was learned, so it is not a FAIL."""
+    record.update({"result": "NOT_MEASURED", "reason_class": reason_class,
+                   "rule": rule, "detail": detail, **facts})
+    write_json(out, record)
+    print(f"{NOT_MEASURED_TOKEN} {PRODUCER} {rule}: {detail}", file=sys.stderr)
+    return EX_BUDGET_EXHAUSTED
+
+
+def _refuse(record: dict, out: Path, rule: str, detail: str, rc: int,
+            result: Optional[str] = None) -> int:
+    record.update({"result": result or ("REFUSED" if rc == 1 else "NOT_PRODUCED"),
                    "rule": rule, "detail": detail})
     write_json(out, record)
     token = _pc.HONEST_GAP_TOKEN if rc == 2 else (
@@ -972,6 +1058,41 @@ def run(project: Path, block: str, container: str, image: str,
         if not need.is_file():
             return _refuse(record, record_path, "A7_INPUT_ABSENT",
                            f"{need.relative_to(project)} (owed by {owner})", 2)
+    # THE PAIR MUST BE ONE DESIGN before anything is extracted or simulated:
+    # a layout of an earlier netlist extracts faithfully and then disagrees
+    # with the current one, which reads as a layout that lost devices.
+    try:
+        lay_doc = json.loads(lay.read_text())
+    except (OSError, ValueError):
+        lay_doc = {}
+    ident, ident_detail = layout_netlist_identity(
+        lay_doc if isinstance(lay_doc, dict) else {},
+        netlist.read_text(errors="replace"))
+    # A legacy path names mutable bytes. If A3 rewrites that path in place,
+    # reading it now can appear to MATCH even though A5 drew an older deck.
+    # Only A5's successful, content-bound draw record proves this pairing.
+    if ident == "MATCH" and not (
+            isinstance(lay_doc, dict)
+            and lay_doc.get("producer") == "analog_a5_layout_emit"
+            and lay_doc.get("result") == "OK"
+            and isinstance(lay_doc.get("netlist_content_sha256"), str)
+            and lay_doc["netlist_content_sha256"]):
+        ident = "UNVERIFIED"
+        ident_detail = ("a mutable legacy netlist path or incomplete A5 "
+                        "record cannot prove which netlist this layout drew")
+    record["layout_netlist_identity"] = {"state": ident, "detail": ident_detail}
+    if ident == "STALE":
+        return _refuse(record, record_path, "A7_LAYOUT_NOT_OF_THIS_NETLIST",
+                       f"{gds.relative_to(project)} was drawn from a different "
+                       f"netlist than {netlist.relative_to(project)} ("
+                       f"{ident_detail}); re-run A5 on the current A3 netlist",
+                       2)
+    if ident != "MATCH":
+        return _refuse(record, record_path, "A7_LAYOUT_IDENTITY_UNVERIFIED",
+                       f"{gds.relative_to(project)} cannot be proved to be "
+                       f"a layout of {netlist.relative_to(project)} ("
+                       f"{ident_detail}); re-run A5 to record the current "
+                       "netlist identity", 2)
     try:
         tech = layout_tech(bdir)
     except ValueError as exc:
@@ -1022,6 +1143,14 @@ def run(project: Path, block: str, container: str, image: str,
     budget_s, budget_src = simulation_budget(
         spec if isinstance(spec, dict) else {}, tb_text, span.get("stop_s"),
         declared_budget(project, block))
+    rail_supply_v, rail_margin_fraction = _declared_rail_reference(tb_text)
+    if rail_supply_v is not None and rail_margin_fraction is not None:
+        record["rail_reference"] = {
+            "supply_v": rail_supply_v,
+            "margin_fraction": rail_margin_fraction,
+            "comparison_scale_v": rail_supply_v * rail_margin_fraction,
+            "source": "A3 testbench v_vdd and A3 transient rail margin",
+        }
     record["transient_span"] = span
     record["budget"] = {"seconds": round(budget_s, 1), **budget_src,
                         "applies_to": "each simulation (pre and every post)",
@@ -1066,6 +1195,15 @@ def run(project: Path, block: str, container: str, image: str,
     record["pre"] = {"testbench": str(pre_tb.relative_to(project)),
                      "relocated_from": str(tb.relative_to(project)),
                      "measurements": pre["meas"], "log": pre["log"]}
+    # T131: EVERY declared row is read, or the step says it was not. A `meas`
+    # card that produced no pre-layout value leaves a hole the 10 % rule would
+    # pass over silently.
+    got = {k.lower() for k, v in (pre["meas"] or {}).items() if v is not None}
+    absent = [n for n in declared_measurements(tb_text) if n not in got]
+    if absent:
+        # Keep the hole visible, but continue the post runs. A measured
+        # degradation on another row is a FAIL and must outrank this gap.
+        record["absent_measurements"] = absent
 
     specs: List[dict] = []
     corners: List[dict] = []
@@ -1095,9 +1233,16 @@ def run(project: Path, block: str, container: str, image: str,
                                    namespace=f"analog/{block}/a7_{slug}",
                                    pdk_root=pdk_root)
         except lc.Refusal as exc:
+            # A tool the contract STOPPED (no progress, or a probe past its
+            # deadline) never answered: the environment tier with that
+            # reason, never the `FAIL:` an extraction finding earns.
+            stopped = lc.tool_stop_reason(exc.code)
+            if stopped:
+                record.update({"reason_class": stopped})
+                return _refuse(record, record_path, exc.code, str(exc),
+                               _pc.EX_ENV_REFUSED, result="NOT_MEASURED")
             rc = _pc.EX_ENV_REFUSED if exc.code in (
-                "LL_IMAGE_INCAPABLE", "LL_CONFIG_RESOLVE_FAILED",
-                *lc.TIME_REFUSALS) else 1
+                "LL_IMAGE_INCAPABLE", "LL_CONFIG_RESOLVE_FAILED") else 1
             return _refuse(record, record_path, exc.code, str(exc), rc)
         folder = folders[-1]
         state = json.loads((folder / "state_out.json").read_text())
@@ -1120,14 +1265,25 @@ def run(project: Path, block: str, container: str, image: str,
             return _refuse(record, record_path, "A7_RCX_PARASITIC_FREE",
                            f"{rcx.name}: depth {audit.depth} — a re-simulation "
                            f"of it is the pre-layout circuit again", 1)
-        inventory = device_inventory(a3_devices,
-                                     device_instances(rcx_text, block), summed)
+        try:
+            lambda_per_um = float(lay_doc.get("lambda_per_um") or 0)
+        except (TypeError, ValueError):
+            lambda_per_um = 0.0
+        layout_grid_m = (1e-6 / lambda_per_um
+                         if math.isfinite(lambda_per_um) and lambda_per_um > 0
+                         else 0.0)
+        inventory = device_inventory(
+            a3_devices, device_instances(rcx_text, block), summed,
+            layout_grid_m=layout_grid_m)
         corner["device_inventory"] = inventory
         if inventory["result"] != "MATCH":
             record["corners"] = corners
             return _refuse(record, record_path,
                            "A7_RCX_DEVICE_INVENTORY_MISMATCH",
-                           f"{rcx.name}: {'; '.join(inventory['differences'])}",
+                           f"{rcx.name}: {'; '.join(inventory['differences'])}"
+                           + ("" if ident == "MATCH" else
+                              f" [layout/netlist identity {ident}: "
+                              f"{ident_detail}]"),
                            1)
         try:
             post_text, mapping = post_layout_netlist(
@@ -1175,7 +1331,8 @@ def run(project: Path, block: str, container: str, image: str,
                            f"{post_tb.name} did not simulate ({post['log']})", 1)
         skipped: Dict[str, str] = dict(dropped)
         lost: List[str] = []
-        measured_rows = compare(pre["meas"], post["meas"], style, skipped, lost)
+        measured_rows = compare(pre["meas"], post["meas"], style, skipped, lost,
+                                rail_supply_v, rail_margin_fraction)
         for row in measured_rows:
             row["extracted_netlist"] = corner["extracted_netlist"]
             row["post_layout_netlist"] = corner["post_layout_netlist"]
@@ -1190,13 +1347,42 @@ def run(project: Path, block: str, container: str, image: str,
                            f"{lost} and the post-layout run did not, on nets "
                            f"the extraction kept ({post['log']})", 1)
     record["corners"] = corners
+    record["compared_specs_count"] = len(specs)
     if exhausted and not specs:
         _style, post_tb, post = exhausted[0]
         record["stopped_styles"] = [e[0] for e in exhausted]
         return _not_measured(record, record_path, post_tb, post, project)
     if not specs:
+        if absent:
+            return _unmeasured(
+                record, record_path, "A7_PRE_MEASUREMENT_ABSENT",
+                "partial_population",
+                f"{pre_tb.name}: no comparable post-layout row and "
+                f"{len(absent)} declared pre-layout measurement(s) absent "
+                f"({', '.join(absent[:8])})",
+                absent_measurements=absent)
         return _refuse(record, record_path, "A7_NOTHING_COMPARED",
                        "pre and post runs share no numeric measurement", 1)
+    if absent and not exhausted:
+        import analog_a7_post_layout_resim_check as _gate
+        deltas, _pairs = _gate._check_specs(specs)
+        worst = max(deltas) if deltas else 0.0
+        if worst > _gate.DEFAULT_MAX_DELTA_PCT:
+            bad = sorted(s["name"] for s in specs
+                         if any(d > _gate.DEFAULT_MAX_DELTA_PCT
+                                for d in _gate._check_specs([s])[0]))
+            return _refuse(
+                record, record_path, "A7_POSTSIM_DELTA_TOO_BIG",
+                f"measured post-layout degradation {bad[:8]} exceeds "
+                f"{_gate.DEFAULT_MAX_DELTA_PCT}% (max {worst:.2f}%); "
+                f"pre-layout rows absent: {absent[:8]}", 1)
+        return _unmeasured(
+            record, record_path, "A7_PRE_MEASUREMENT_ABSENT",
+            "partial_population",
+            f"{pre_tb.name}: {len(absent)} declared measurement(s) produced "
+            f"no pre-layout value ({', '.join(absent[:8])}"
+            f"{', ...' if len(absent) > 8 else ''}; {pre['log']})",
+            absent_measurements=absent)
     measured_styles = {row["extraction_style"] for row in specs}
     typical = next(c for c in corners
                    if c.get("extraction_style") in measured_styles)

@@ -71,6 +71,9 @@ def _phase1(tmp_path, text):
     proj = tmp_path / "proj"
     (proj / "input" / "docs").mkdir(parents=True)
     (proj / "input" / "docs" / "design_description.md").write_text(text)
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     r = subprocess.run([sys.executable, str(PROGRAMS / "phase1_one_shot_runner.py"),
                         str(proj)], capture_output=True, text=True, timeout=600)
     l9 = proj / "phase1" / "generated_docs" / "L9_INTEGRATION_SPEC.json"

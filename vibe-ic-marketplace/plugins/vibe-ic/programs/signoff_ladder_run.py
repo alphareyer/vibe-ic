@@ -610,10 +610,14 @@ def check_tier_2_em(project_dir: Path,
     tech = tech_lef
     if jmax_path is None and tech is None:
         jmax_path, tech = _discover_jmax_ref(project_dir)
-    verdict_str, rep = emc.evaluate(
-        em_path, jmax_path, tech, margin, emc._DEFAULT_BLACKS_N, None, 20)
+    # Reuse the producer-bound DEF/ODB geometry resolver used by the Phase-3
+    # EM authority gate. A matching subject digest is required for width.
+    from em_peak_current_authority_check import jmax_tier
+    rep = jmax_tier(project_dir, jmax_path, tech, margin)
+    verdict_str = rep["verdict"]
     ladder_verdict = {"PASS": "PASS", "FAIL": "FAIL",
-                      "SKIPPED": "NOT_RUN"}.get(verdict_str, "FAIL")
+                      "SKIPPED": "NOT_RUN", "NOT_MEASURED": "NOT_RUN"}.get(
+                          verdict_str, "FAIL")
     notes = ""
     if verdict_str == "SKIPPED":
         notes = (f"EM density not judgeable ({rep.get('skip_reason')}); "

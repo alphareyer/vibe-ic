@@ -21,8 +21,8 @@ plan it does not understand.
 
 WHY THIS FILE IS REWRITTEN AND NOT DELETED. R-0915-85 removes the thing #2153
 guarded: there is no tier table and no catch-all, because
-`verdict.run_verdict` is total over five words and `verdict.parse` refuses a
-sixth AT THE ROW THAT CARRIES IT. That is #2153's refusal moved EARLIER — from
+`verdict.run_verdict` is total over the declared words and `verdict.parse`
+refuses an unregistered word AT THE ROW THAT CARRIES IT. That is #2153's refusal moved EARLIER — from
 the roll-up at the end of a run to the construction of the row — and it is
 strictly stronger, because a run can no longer reach its aggregator carrying an
 unclassifiable word at all.
@@ -41,6 +41,7 @@ from _plugin_tree import plugin_path
 
 sys.path.insert(0, str(plugin_path() / "programs"))
 
+import die_level_deck_rule_attribution as D  # noqa: E402
 import verdict as V  # noqa: E402
 
 RUNNER = plugin_path() / "programs" / "phase3_one_shot_runner.py"
@@ -62,11 +63,10 @@ def test_an_unclassifiable_word_is_refused_at_the_row_not_at_the_rollup(agg):
 
 
 @pytest.mark.parametrize("word", ["WARN", "PASS_W_WARN", "BLOCKED",
-                                  "VACUOUS_PASS", "PASS_WITH_ATTRIBUTION",
-                                  "ENV_UNAVAILABLE", "SKIP", "NOT_EXECUTED"])
-def test_every_word_2153_had_to_enumerate_is_now_refused(word):
-    """The five hand-patches and the two #2153 measured, in one list. Each was
-    a string somebody added; none of them can be a status again."""
+                                  "VACUOUS_PASS", "ENV_UNAVAILABLE",
+                                  "SKIP", "NOT_EXECUTED"])
+def test_genuinely_retired_words_are_refused(word):
+    """A typo or retired producer word still fails at the row."""
     with pytest.raises(V.UnknownVerdictWord):
         V.parse(word)
 

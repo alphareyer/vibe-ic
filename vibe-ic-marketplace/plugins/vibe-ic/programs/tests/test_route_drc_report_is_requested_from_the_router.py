@@ -253,7 +253,8 @@ def test_an_empty_router_report_is_not_reported_as_silence():
         (out / R.ROUTER_DRC_REPORT_NAME).write_text("")
         block = R._router_drc_report_block(out, "")
     assert "EMPTY report" in block
-    assert "no residual violations" in block
+    assert "DRC_EMPTY_NOT_MEASURED" in block
+    assert "no residual violations" not in block
 
 
 def test_the_projection_says_so_when_the_build_cannot_produce_one():

@@ -59,8 +59,19 @@ def _two_runs(tmp_path: Path) -> Path:
     lines = (proj / SEG1 / "flow.log").read_text().splitlines(keepends=True)
     cut = _running(lines, "'OpenROAD.CheckSDCFiles'")
     end = [l for l in lines if l.startswith(("Saving views", "Flow complete."))]
-    (proj / SEG1 / "flow.log").write_text("".join(lines[:cut] + end))
-    (proj / SEG2 / "flow.log").write_text("Starting…\n" + "".join(lines[cut:]))
+
+    def skipped(part):
+        # LibreLane's --to/--from loop prints a skip for every top-level step
+        # outside the selected range. Keep those lines so the segment joint
+        # can be checked while the manifest assertions below stay identical.
+        return [f"Skipping step '{l.split(chr(39))[1]}'…\n" for l in part
+                if l.startswith("Running '") and "/" not in
+                l.split(" at ")[1].strip("'…\n").split("runs/cmp3/", 1)[1]]
+
+    (proj / SEG1 / "flow.log").write_text(
+        "".join(lines[:cut] + skipped(lines[cut:]) + end))
+    (proj / SEG2 / "flow.log").write_text(
+        "Starting…\n" + "".join(skipped(lines[1:cut]) + lines[cut:]))
     # the trim kept state_out.json only where a rule imports; LibreLane
     # writes one for every step that returns, the declared end included
     (proj / SEG1 / "09-checker-netlistassignstatements/state_out.json") \

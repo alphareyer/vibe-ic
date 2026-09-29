@@ -22,6 +22,7 @@ if str(PROGRAMS) not in sys.path:
     sys.path.insert(0, str(PROGRAMS))
 
 import testbench_gen as T           # noqa: E402
+import _l10_execution as X          # noqa: E402
 import _sim_results_bridge as SRB   # noqa: E402
 import cpu_functional_oracle_waiver_check as W   # noqa: E402
 
@@ -196,6 +197,22 @@ def test_a_passing_run_is_the_step4_functional_denominator(tmp_path):
     assert got["suite_names"] == [T.UNIT_TB_RESULT_DIR], (
         "the message that credits this result must be able to name the "
         "producer that actually wrote it")
+
+
+def test_executor_binds_the_testbench_it_actually_dispatched(tmp_path):
+    tb = _tb(tmp_path, "scenario")
+    l10 = tmp_path / "phase1/generated_docs/L10_TEST_CASES.json"
+    l10.parent.mkdir(parents=True)
+    l10.write_text('{"test_cases":[{"name":"scenario"}]}')
+    assert T.run_unit_tbs(tmp_path, None, {},
+                          dispatch=_fake_sim(0, 0, "[TB scenario] PASS")) == 1
+    record = X.load_record(tmp_path, l10)
+    row = record["rows"]["scenario"]
+    assert row["tb_sha256"] == X.file_sha256(tb)
+    assert row["tb_provenance"] == X.TB_AUTHORED
+    assert X.scenario_case_state("scenario", record)[0] == X.PASS
+    tb.write_text(tb.read_text() + "// changed after execution\n")
+    assert X.scenario_case_state("scenario", record)[0] == X.NOT_EXECUTED
 
 
 # --- the gate sentence: 'nobody ran them' != 'they ran and failed' ----------

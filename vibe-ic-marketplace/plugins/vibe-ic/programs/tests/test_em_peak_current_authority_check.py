@@ -24,6 +24,7 @@ net name, round numbers, and a Jmax table whose layer names are generic.
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -74,12 +75,22 @@ def _project(tmp_path: Path, peak: str, power: str = "1.34e-03",
     (proj / "reports" / "phase3").mkdir(parents=True, exist_ok=True)
     (proj / "reports" / "phase3" / "em.rpt").write_text(
         RPT.format(peak=peak, power=power, volt=volt))
-    (proj / "reports" / "phase3" / "em.json").write_text(json.dumps(
-        {"tool": "psm", "segments_analysed": 4,
-         "max_segment_current_A": float(peak), "verdict": "MEASURED"}))
+    em = {"tool": "psm", "segments_analysed": 4,
+          "max_segment_current_A": float(peak), "verdict": "MEASURED"}
     if with_csv:
         (proj / "reports" / "phase3" / "em_segments.csv").write_text(
             CSV.format(peak=peak))
+        # The two PSM edges sit on one real, same-net DEF special wire.
+        # This is the width authority; the Jmax table's default is not.
+        dp = proj / "phase3" / "stage3" / "pnr" / "routed.def"
+        dp.parent.mkdir(parents=True, exist_ok=True)
+        dp.write_text("UNITS DISTANCE MICRONS 1000 ;\nSPECIALNETS 1 ;\n"
+                      "- PWRNET + USE POWER + ROUTED mA 140 + SHAPE STRIPE "
+                      "( 0 0 ) ( 2000 0 ) ;\nEND SPECIALNETS\n")
+        em.update({"power_nets": ["PWRNET"],
+                   "subject_def": "phase3/stage3/pnr/routed.def",
+                   "subject_def_sha256": hashlib.sha256(dp.read_bytes()).hexdigest()})
+    (proj / "reports" / "phase3" / "em.json").write_text(json.dumps(em))
     if with_jmax:
         (proj / "reports" / "phase3" / "em_jmax.json").write_text(
             json.dumps(JMAX))

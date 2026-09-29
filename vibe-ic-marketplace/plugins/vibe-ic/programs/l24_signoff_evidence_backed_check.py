@@ -481,8 +481,20 @@ def _phase3_has_run(project: Path) -> bool:
     not the same as saying it was missed.
     """
     records = []
+    current = _pl.phase3_signoff_input_identity(project)
     top = project / "reports" / "orchestrator" / "phase3_one_shot.json"
     if top.is_file():
+        # A published summary is current only for the inputs it names. Keep
+        # FX_P2's other producer records and netlist dating below intact.
+        if current is not None:
+            try:
+                receipt = json.loads(top.read_text(errors="replace"))
+            except (OSError, ValueError):
+                return False
+            if (not isinstance(receipt, dict)
+                    or receipt.get("phase2_synth") != current["phase2_synth"]
+                    or receipt.get("phase3_inputs") != current):
+                return False
         records.append(top)
     d = project / "reports" / "phase3"
     if d.is_dir():
@@ -495,7 +507,8 @@ def _phase3_has_run(project: Path) -> bool:
         # search's `reports/audit` exclusion, keyed on the record's own
         # `program` because the path does not say it.
         records.extend(r for r in d.rglob("*.json")
-                       if not _is_audit_publication(r))
+                       if not _is_audit_publication(r)
+                       and _phase3_record_matches_inputs(r, current))
     if not records:
         return False
     # FX_P2 — PHASE 3 OF WHICH DESIGN? A phase-3 record older than this run's
@@ -512,6 +525,28 @@ def _phase3_has_run(project: Path) -> bool:
     newest_netlist = _newest_phase2_netlist_mtime(project)
     if newest_netlist is not None and newest_record < newest_netlist:
         return False
+    return True
+
+
+def _phase3_record_matches_inputs(path: Path, current: Optional[dict]) -> bool:
+    """Keep legacy dated reports, but reject a producer's stale input receipt.
+
+    FX_P2's mtime fallback remains for records without a content identity.
+    A producer that did bind its report to the netlist or staged constraints
+    cannot silently regain currency when those inputs change in place.
+    """
+    if current is None:
+        return True  # FX_P2's no-netlist behavior
+    try:
+        payload = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return True  # legacy record; the existing mtime rule still applies
+    if not isinstance(payload, dict):
+        return True
+    if payload.get("phase3_inputs") is not None:
+        return payload["phase3_inputs"] == current
+    if payload.get("phase2_synth") is not None:
+        return payload["phase2_synth"] == current["phase2_synth"]
     return True
 
 
@@ -639,7 +674,7 @@ def _per_corner_analysis(project: Path, native: Any,
 
 def _required_sta_corners(project: Path, required: Any,
                           declared_paths: Tuple[str, ...]) -> Dict[str, Any]:
-    """Bind explicit L24 process obligations to the declared audit's native bytes.
+    """Bind L24 STA obligations to each measured process x RC scene.
 
     Aggregate PASS/counts and unrelated discovered reports cannot supply a
     missing corner. This checks native setup/hold readings, not library or
@@ -656,6 +691,48 @@ def _required_sta_corners(project: Path, required: Any,
             or any(not isinstance(c, str) or c not in {"SS", "TT", "FF", "SF", "FS"}
                    for c in required)):
         issues.append("required process corners are malformed or unknown")
+        return out
+    import librelane_contract as ll_contract
+    try:
+        mode = ll_contract.selected_mode(project, '23')
+        if mode != 'direct':
+            arm = native.read_tool_arm(project)
+            judged = native.evaluate_tool(project, arm)
+            table = judged['corners']
+            out['scene_table'] = []
+            for process in required:
+                for rc in ('min', 'nom', 'max'):
+                    matches = [r for r in table if r.get('rc_corner') == rc
+                               and str(r.get('process') or '').upper() == process]
+                    if len(matches) != 1:
+                        row = {'process': process, 'rc_corner': rc,
+                               'measurement_status': 'NOT_MEASURED',
+                               'reason': f'{len(matches)} matching scene reports'}
+                    else:
+                        scene = matches[0]
+                        row = {k: scene.get(k) for k in
+                               ('corner', 'process', 'rc_corner', 'liberties', 'spef',
+                                'spef_sha256', 'source', 'source_sha256',
+                                'setup_wns_ns', 'hold_wns_ns', 'measurement_status',
+                                'scope_gaps')}
+                        if row['measurement_status'] == 'MEASURED' and any(
+                                not isinstance(row[k], (int, float)) or
+                                not math.isfinite(row[k]) or row[k] < 0
+                                for k in ('setup_wns_ns', 'hold_wns_ns')):
+                            row['measurement_status'] = 'FAIL'
+                    out['scene_table'].append(row)
+                    if row['measurement_status'] != 'MEASURED':
+                        issues.append(f"({process}, {rc}) scene {row['measurement_status']}: "
+                                      f"{row.get('reason') or row.get('scope_gaps')}")
+            out['covered'] = [process for process in required
+                              if all(r['measurement_status'] == 'MEASURED'
+                                     for r in out['scene_table']
+                                     if str(r['process']).upper() == process)]
+            out['missing'] = sorted(set(required) - set(out['covered']))
+            out['scene_source'] = judged['declaration_sources']['tool_record']
+            return out
+    except (ll_contract.Refusal, OSError, ValueError, KeyError, TypeError) as exc:
+        issues.append(f'STAPostPNR scene evidence NOT_MEASURED: {exc}')
         return out
     roles: Dict[str, set] = {c: set() for c in required}
     # Other flow-declared STA gates publish their own schemas (corner record,
@@ -824,19 +901,26 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
                  "why": "older than this run's phase-2 netlist"}
                 for p, v in stale]
         rows_out.append(record)
+        failed = [(p, v) for p, v in measured if v in _FAILING_VERDICTS]
+        if not phase3 and not failed:
+            # A report from an earlier Phase 3 run may still be on disk after
+            # synthesis or staged constraints change. Its verdict describes
+            # that earlier input identity, even when the value is PASS.
+            record["outcome"] = "NOT_YET_MEASURABLE"
+            record["evidence_scope"] = "HISTORICAL" if found else "NONE"
+            if found:
+                record["historical_records"] = record["records_read"]
+            msgs.append(
+                f"{rel}: {check} "
+                f"{requirement or '(prose)'} required at {where} — "
+                "recorded; this run has not reached phase 3 for its current "
+                "inputs, so it is not yet measurable"
+                + ("; existing sign-off reports are historical evidence"
+                   if found else ""))
+            continue
+        record["evidence_scope"] = "CURRENT"
         if not measured:
             looked = ", ".join(p for p, _ in found[:4]) or "no report"
-            if not phase3:
-                # NOT YET MEASURABLE, not missed. The requirement is recorded
-                # and named so it is visible, but this run has not reached the
-                # phase that measures it and the gate does not block on it.
-                record["outcome"] = "NOT_YET_MEASURABLE"
-                msgs.append(
-                    f"{rel}: {check} "
-                    f"{requirement or '(prose)'} required at {where} — "
-                    f"recorded; this run has not reached phase 3, so it is "
-                    f"not yet measurable")
-                continue
             record["outcome"] = "UNMET_NO_READING"
             failures.append(
                 f"{rel}: the input REQUIRES {check} "
@@ -844,7 +928,6 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
                 f"and this run has no report measuring it "
                 f"({where_looked}; found: {looked})")
             continue
-        failed = [(p, v) for p, v in measured if v in _FAILING_VERDICTS]
         if failed:
             record["outcome"] = "UNMET_MEASURED_FAILING"
             failures.append(

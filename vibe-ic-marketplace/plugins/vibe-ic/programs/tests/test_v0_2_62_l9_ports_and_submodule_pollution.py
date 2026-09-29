@@ -111,6 +111,9 @@ def test_path_b_project_five_ports_zero_phantom_submodules(tmp_path):
     docs.mkdir(parents=True)
     (docs / "L3_external_interface.md").write_text(_L3_DOC)
     (docs / "L7_verification_plan.md").write_text(_L7_DOC)
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     r = run_phase1_with_expert_answer(proj,
         [sys.executable, str(PROGRAMS / "phase1_one_shot_runner.py"),
          str(proj), "--ic-name", "mul32"],

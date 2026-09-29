@@ -94,6 +94,9 @@ def test_runner_prompt_mode_emits_flat_and_precheck_passes(tmp_path):
     proj = tmp_path / "proj"
     (proj / "input").mkdir(parents=True)
     (proj / "input" / "phase1_prompt.md").write_text(_PROMPT)
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     r = run_phase1_with_expert_answer(proj,
         [sys.executable, str(PROGRAMS / "phase1_one_shot_runner.py"),
          str(proj), "--ic-name", "pulse_div"],

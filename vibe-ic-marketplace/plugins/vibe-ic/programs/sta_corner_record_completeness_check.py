@@ -122,6 +122,14 @@ R6 REQUIRED PVT POST-ROUTE COVERAGE — every PVT corner that the design's
    indexes them separately from its nominal-RC view. Missing coverage exits
    nonzero and never produces PASS.
 
+R7 TOOL SCENE MATRIX — on STAPostPNR, each required process corner is measured
+   with min, nom and max RC. Each scene binds the tool's own setup and hold
+   readings to the configured and logged Liberty files (sha256 and header PVT)
+   and SPEF (sha256 and RC label). A missing or mismatched scene is
+   NOT_MEASURED, never a passing sign-off row. Historical tool runs without
+   the extra corner Tcl use receipt-bound native ws.max/ws.min reports; their
+   DRV query remains governed by R5.
+
 How sign-off corners are learned (READ from the flow, never hardcoded)
 ----------------------------------------------------------------------
 This was determined by reading `phase3_one_shot_runner.py`, not assumed. The
@@ -628,6 +636,9 @@ def extract_drv(text: str) -> Dict[str, object]:
     #: kind -> the INSTANCE each violating row belongs to, so a total can be
     #: attributed instead of only sized (vibe-ic#582).
     rows: Dict[str, List[str]] = {}
+    # Preserve the full pin as well as the instance.  Candidate promotion
+    # compares distinct (pin, check) identities across all STA scenes.
+    pin_rows: Dict[str, List[str]] = {}
     queried = False
     query_error: Optional[str] = None
     kinds_seen: List[str] = []
@@ -720,6 +731,7 @@ def extract_drv(text: str) -> Dict[str, object]:
         if _VIOLATED_RE.search(line):
             counts[kind] = counts.get(kind, 0) + 1
             rows.setdefault(kind, []).append(_row_instance(line))
+            pin_rows.setdefault(kind, []).append(line.split()[0])
             continue
         mneg = _TRAILING_NEG_RE.search(line)
         # Only a data row (a name followed by numbers) counts, never the title
@@ -727,6 +739,7 @@ def extract_drv(text: str) -> Dict[str, object]:
         if mneg and len(line.split()) >= 3:
             counts[kind] = counts.get(kind, 0) + 1
             rows.setdefault(kind, []).append(_row_instance(line))
+            pin_rows.setdefault(kind, []).append(line.split()[0])
 
     violations = {k: v for k, v in counts.items() if v > 0}
     _rows = {k: v for k, v in rows.items() if v}
@@ -786,6 +799,7 @@ def extract_drv(text: str) -> Dict[str, object]:
         # the total rather than only size it (vibe-ic#582). Kept out of the
         # count so no existing consumer changes.
         "rows": _rows,
+        "pin_rows": {k: v for k, v in pin_rows.items() if v},
     }
 
 
@@ -1289,6 +1303,30 @@ def read_axis_evidence(project: Path,
 #: A STAPostPNR corner is one point of the RC x process matrix, not a point
 #: on either axis alone.
 AXIS_TOOL = "rc_x_process"
+_NATIVE_SCENE_REPORTS = ('ws.max.rpt', 'ws.min.rpt',
+                         'tns.max.rpt', 'tns.min.rpt')
+
+
+def read_tool_arm(project: Path) -> Optional[Dict[str, object]]:
+    """Read each custom scene; use native WS only for a proven native-only run.
+
+    Historical STAPostPNR steps predate the custom extra Tcl but already
+    measured setup and hold per scene. Missing custom output only permits the
+    native, receipt-bound reports; a stale or altered custom report never does.
+    """
+    import librelane_signoff as _ls
+    return _ls.step23_tool_arm(project, native_reports=_NATIVE_SCENE_REPORTS)
+
+
+def _native_scene_value(item: Dict[str, str], corner: str) -> Optional[float]:
+    import math
+    hits = re.findall(r'(?m)^' + re.escape(corner) +
+                      r':\s*([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*$',
+                      item['text'])
+    if len(hits) != 1:
+        return None
+    value = float(hits[0])
+    return value if math.isfinite(value) else None
 
 
 def _pvt_required_liberties(project: Path, required: List[str]) -> Dict[str, Optional[str]]:
@@ -1328,31 +1366,50 @@ def evaluate_tool(project: Path, arm: Dict[str, object],
     findings: List[str] = []
     rules: List[str] = []
     for name, row in arm["corners"].items():                  # type: ignore[union-attr]
-        report = row["files"][_ls.CORNER_REPORT]
-        text = report["text"]
-        vals = extract_slacks(text)
+        native = 'ws.max.rpt' in row['files']
+        if native:
+            reports = row['files']
+            report = reports['ws.max.rpt']
+            vals = {'setup_wns_ns': _native_scene_value(reports['ws.max.rpt'], name),
+                    'hold_wns_ns': _native_scene_value(reports['ws.min.rpt'], name),
+                    'tns_ns': _native_scene_value(reports['tns.max.rpt'], name)}
+            text = ''
+        elif _ls.CORNER_REPORT in row['files']:
+            report = row["files"][_ls.CORNER_REPORT]
+            text = report["text"]
+            vals = extract_slacks(text)
+        else:
+            report = {'path': str(Path(arm['folder']) / name / _ls.CORNER_REPORT),
+                      'sha256': None}
+            text = ''
+            vals = {'setup_wns_ns': None, 'hold_wns_ns': None, 'tns_ns': None}
         table.append({
             "corner": name, "axis": AXIS_TOOL,
             "rc_corner": row["rc_corner"], "process": row["process"],
             "voltage_v": row["voltage_v"], "temperature_c": row["temperature_c"],
             "liberty": row["liberty"], "scope_gaps": row["scope_gaps"],
+            "liberties": row["liberties"], "spef": row["spef"],
+            "spef_sha256": row["spef_sha256"],
+            "sta_log": row["sta_log"], "sta_log_sha256": row["sta_log_sha256"],
             "label": None, "liberty_aliases": [],
             "roles": ["setup", "hold"], "role_class": "signoff",
-            "declared": True, "reported": True,
+            "declared": True, "reported": bool(row['files']),
             # The tool's report states its own basis; unstamped is not post-route.
-            "basis_used": {f: (BASIS_SIGNOFF if _sta_basis.declared_basis(text) == "POST_ROUTE"
+            "basis_used": {f: (BASIS_SIGNOFF if native or
+                               _sta_basis.declared_basis(text) == "POST_ROUTE"
                                else BASIS_PRE_LAYOUT)
                            for f in ("setup_wns_ns", "hold_wns_ns") if vals.get(f) is not None},
             "pre_layout_superseded_ns": None,
             "setup_wns_ns": vals["setup_wns_ns"], "hold_wns_ns": vals["hold_wns_ns"],
             "tns_ns": vals["tns_ns"], "source": report["path"],
+            "hold_source": (row['files']['ws.min.rpt']['path'] if native else report['path']),
             "source_sha256": report["sha256"]})
         drv = _drv_with_attribution(project, text)
         axes.append({"axis": AXIS_TOOL, "corner": name, "report": report["path"],
                      "drv": drv, "liberty_by_corner": {name: row["liberty"]}})
     for r in table:
-        gaps = {k: v for k, v in (r["scope_gaps"] or {}).items()
-                if k in ("rc_corner", "process")}
+        gaps = dict(r["scope_gaps"] or {})
+        r["measurement_status"] = "NOT_MEASURED" if gaps else "MEASURED"
         if gaps:
             rules.append("R1_INCOMPLETE_CORNER_RECORD")
             findings.append(f"R1 tool corner '{r['corner']}' has no intact scope "
@@ -1360,14 +1417,18 @@ def evaluate_tool(project: Path, arm: Dict[str, object],
                             f"RC x process matrix (source: {r['source']})")
         for field, role in (("setup_wns_ns", "setup"), ("hold_wns_ns", "hold")):
             if r[field] is None:
+                r["measurement_status"] = "NOT_MEASURED"
                 rules.append("R2_DECLARED_BUT_UNREPORTED")
                 findings.append(f"R2 tool corner '{r['corner']}' reports no worst "
                                 f"{role} slack (source: {r['source']})")
             elif (r["basis_used"] or {}).get(field) != BASIS_SIGNOFF:
+                r["measurement_status"] = "NOT_MEASURED"
                 rules.append("R2_DECLARED_BUT_UNREPORTED")
                 findings.append(f"R2 tool corner '{r['corner']}' {role} slack is not "
                                 f"stamped post-route (source: {r['source']})")
             elif float(r[field]) < -slack_tol:                 # type: ignore[arg-type]
+                if r["measurement_status"] == "MEASURED":
+                    r["measurement_status"] = "FAIL"
                 rules.append("R3_SIGNOFF_CORNER_VIOLATION")
                 findings.append(f"R3 SIGN-OFF corner '{r['corner']}' (rc "
                                 f"{r['rc_corner']}, process {r['process']}) is VIOLATED: "
@@ -1391,6 +1452,35 @@ def evaluate_tool(project: Path, arm: Dict[str, object],
     required = sorted({c for row in obligations.get("signoff_requirements", [])
                        if row.get("check") == "STA" and row.get("stated")
                        for c in row.get("corners", [])})
+    if not required:
+        pvt = _load_json(_first_existing(project, _PVT_CANDIDATES)) or {}
+        required = sorted({str(c.get("label") or c.get("name") or "").upper()
+                           for c in pvt.get("corners") or [] if isinstance(c, dict)
+                           and (c.get("label") or c.get("name"))})
+    if not required:
+        required = sorted({str(r["process"]).upper() for r in table if r["process"]})
+    for process in required:
+        lib = _pvt_required_liberties(project, [process])[process]
+        for rc in ("min", "nom", "max"):
+            matching = [r for r in table if r["rc_corner"] == rc
+                        and str(r["process"] or "").upper() == process]
+            if len(matching) != 1 or (lib and Path(str(matching[0]["liberty"])).name != lib):
+                rules.append("R7_SCENE_NOT_MEASURED")
+                findings.append(f"R7 ({process}, {rc}) scene is NOT_MEASURED: "
+                                f"{len(matching)} matching tool report(s), required Liberty {lib}")
+                if not matching:
+                    table.append({"corner": f"{rc}_{process}", "axis": AXIS_TOOL,
+                                  "rc_corner": rc, "process": process.lower(),
+                                  "measurement_status": "NOT_MEASURED", "declared": True,
+                                  "reported": False, "role_class": "signoff",
+                                  "roles": ["setup", "hold"], "setup_wns_ns": None,
+                                  "hold_wns_ns": None, "tns_ns": None,
+                                  "source": None, "liberty": None, "basis_used": {},
+                                  "scope_gaps": {"scene": "absent"}})
+            elif matching[0]["measurement_status"] == "NOT_MEASURED":
+                rules.append("R7_SCENE_NOT_MEASURED")
+                findings.append(f"R7 ({process}, {rc}) scene is NOT_MEASURED: "
+                                f"{matching[0]['scope_gaps']}")
     for name, lib in _pvt_required_liberties(project, required).items():
         covering = [r for r in table
                     if (lib and Path(str(r["liberty"] or "")).name == lib)
@@ -1405,10 +1495,15 @@ def evaluate_tool(project: Path, arm: Dict[str, object],
     ordered = [r for r in ("R1_INCOMPLETE_CORNER_RECORD", "R2_DECLARED_BUT_UNREPORTED",
                            "R3_SIGNOFF_CORNER_VIOLATION",
                            "R4_MULTI_CORNER_CLAIM_UNSUPPORTED", "R5_DRV_UNQUERIED",
-                           "R5_DRV_VIOLATION", "R6_REQUIRED_PVT_NOT_MEASURED")
+                           "R5_DRV_VIOLATION", "R6_REQUIRED_PVT_NOT_MEASURED",
+                           "R7_SCENE_NOT_MEASURED")
                if r in rules]
-    if "R6_REQUIRED_PVT_NOT_MEASURED" in ordered and set(ordered) <= {
-            "R2_DECLARED_BUT_UNREPORTED", "R6_REQUIRED_PVT_NOT_MEASURED"}:
+    if any(r in ordered for r in ("R1_INCOMPLETE_CORNER_RECORD",
+                                  "R2_DECLARED_BUT_UNREPORTED",
+                                  "R6_REQUIRED_PVT_NOT_MEASURED", "R7_SCENE_NOT_MEASURED")) \
+            and set(ordered) <= {"R1_INCOMPLETE_CORNER_RECORD",
+                                 "R2_DECLARED_BUT_UNREPORTED",
+                                 "R6_REQUIRED_PVT_NOT_MEASURED", "R7_SCENE_NOT_MEASURED"}:
         verdict = "NOT_MEASURED"
     else:
         verdict = "FAIL" if ordered else "PASS"
@@ -1423,7 +1518,8 @@ def evaluate_tool(project: Path, arm: Dict[str, object],
         "declaration_sources": {"tool_record": arm["record"],
                                 "required_pvt_corners": required},
         "axis_evidence": axes, "single_corner_only": False,
-        "corner_rows": len(table), "signoff_corner_rows": len(table),
+        "corner_rows": len(table),
+        "signoff_corner_rows": sum(bool(r.get("reported")) for r in table),
         "slack_tol_ns": slack_tol, "rules_violated": ordered,
         "basis": _ls.tool_arm_basis(arm),                     # type: ignore[arg-type]
     }
@@ -1439,7 +1535,7 @@ def evaluate(project: Path,
     import librelane_signoff as _ls
     from librelane_contract import Refusal
     try:
-        arm = _ls.step23_tool_arm(project)
+        arm = read_tool_arm(project)
     except Refusal as exc:
         return {"verdict": "REFUSED", "status": "REFUSED", "refusal": exc.code,
                 "reasons": [f"step 23 runs on the tool and its sign-off cannot be "

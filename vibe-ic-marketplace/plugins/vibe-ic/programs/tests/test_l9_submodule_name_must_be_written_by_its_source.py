@@ -110,6 +110,9 @@ def _run_phase1(tmp_path: Path, docs: dict) -> dict:
     d.mkdir(parents=True, exist_ok=True)
     for name, body in docs.items():
         (d / name).write_text(body, encoding="utf-8")
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(tmp_path, "ic")
     # ~3s measured; 60s is the harness ceiling, so this call's own timeout
     # fires and fails the test rather than the harness killing the session.
     proc = _pr.run([sys.executable, str(_RUNNER), str(tmp_path)],

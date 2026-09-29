@@ -950,7 +950,9 @@ def run_technology(project: Path) -> Dict[str, object]:
         for nm in (lib, pdk):
             if nm and nm not in names:
                 names.append(nm)
-        src = src or f"{_RUN_LIBERTY_FIELD} ({liberty})"
+        # The stats field is the citation. A host-installed Liberty path is
+        # machine-local and must not be copied into an emitted L document.
+        src = src or _RUN_LIBERTY_FIELD
     if names:
         return _cluster(out, names, src)
     l19 = project / "phase1" / "generated_docs" / "L19_CONSTRAINTS_PDK.json"
@@ -963,13 +965,14 @@ def run_technology(project: Path) -> Dict[str, object]:
             v = fields.get(key)
             if isinstance(v, str) and v.strip():
                 names.append(v.strip())
-                src = src or f"{l19}::fields.{key}"
+                src = src or f"{l19.relative_to(project)}::fields.{key}"
         alts = fields.get("pdk_target_alternates")
         if isinstance(alts, list):
             for v in alts:
                 if isinstance(v, str) and v.strip():
                     names.append(v.strip())
-                    src = src or f"{l19}::fields.pdk_target_alternates"
+                    src = src or (f"{l19.relative_to(project)}::"
+                                  "fields.pdk_target_alternates")
     if not names:
         cfg = project / "config.json"
         try:
@@ -981,7 +984,7 @@ def run_technology(project: Path) -> Dict[str, object]:
                 v = data.get(key)
                 if isinstance(v, str) and v.strip():
                     names.append(v.strip())
-                    src = src or f"{cfg}::{key}"
+                    src = src or f"{cfg.relative_to(project)}::{key}"
     if not names:
         for key in ("STD_CELL_LIBRARY", "PDK"):
             v = os.environ.get(key, "")

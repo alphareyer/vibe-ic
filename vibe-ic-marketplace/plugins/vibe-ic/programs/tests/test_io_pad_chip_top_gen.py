@@ -32,6 +32,7 @@ corner term, then the edge-spacing term — against the exact expression
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +41,7 @@ import pytest
 
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
+import io_pad_chip_top_gen as PAD  # noqa: E402
 
 GEN = PROGRAMS / "io_pad_chip_top_gen.py"
 ASSIGN = PROGRAMS / "pad_assignment_gen.py"
@@ -654,3 +656,67 @@ def test_invalid_or_missing_scan_plan_still_refuses(tmp_path, defect):
     rec = _record(proj)
     assert rec["rule"] == ("DFT_CONTROL_UNCONNECTED" if defect == "missing" else "DFT_TEST_ACCESS_INVALID")
     assert not (proj / "phase3/stage3/pnr/chip_top_io.v").exists()
+
+
+def test_bussed_pad_connection_is_one_ordered_verilog_connection():
+    """A PDK-declared `[2:0]` port is emitted MSB to LSB, never as an
+    illegal named bit-select. The emitted fragment is parsed separately by
+    the pinned-image acceptance run."""
+    ports = PAD.io_bus_ports([
+        "module neutral_pad(input [2:0] DM); endmodule\n"
+    ])
+    got = PAD._named_connections(
+        "u_pad", "neutral_pad",
+        [("DM[0]", "x"), ("DM[1]", "y"), ("DM[2]", "z")], ports)
+    assert got == [".DM({z, y, x})"]
+    assert all("[" not in item.split("(", 1)[0] for item in got)
+    reverse = PAD._named_connections(
+        "u_pad", "reverse_pad",
+        [("DM[0]", "x"), ("DM[1]", "y"), ("DM[2]", "z")],
+        {"reverse_pad": {"DM": (0, 2)}})
+    assert reverse == [".DM({x, y, z})"]
+
+
+def test_emitted_bussed_pad_verilog_parses_in_the_pinned_eda_image(tmp_path):
+    """The real parser is the pinned EDA image, not a string-only proxy."""
+    wrapper = PAD._emit_verilog(
+        "chip", "core", {"S": ["u_pad"], "E": [], "N": [], "W": []},
+        {"u_pad": {"port": "rail", "master": "neutral_pad",
+                    "terminal": "DM[0]",
+                    "supply_connections": {"DM[0]": "x", "DM[1]": "y",
+                                           "DM[2]": "z"}}}, [],
+        bus_ports={"neutral_pad": {"DM": (2, 0)}})
+    source = ("module neutral_pad(input [2:0] DM); endmodule\n"
+              "module core(); endmodule\n" + wrapper)
+    dut = tmp_path / "chip.v"
+    dut.write_text(source)
+    image = os.environ.get("VIBEIC_EDA_IMAGE", "ghcr.io/vibeic/vibeic-eda:0.3.84")
+    run = subprocess.run(
+        ["docker", "run", "--rm", "--memory=1g", "-v",
+         f"{tmp_path}:/work:ro", image, "--skip", "/foss/tools/bin/iverilog", "-g2012",
+         "-s", "chip", "/work/chip.v"], capture_output=True, text=True,
+        timeout=120)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+@pytest.mark.parametrize("pairs,buses,rule", [
+    ([("DM[0]", "x"), ("DM[0]", "again")],
+     {"neutral_pad": {"DM": (2, 0)}}, "PAD_BUS_BIT_CONNECTED_TWICE"),
+    ([("DM[0]", "x")], {}, "PAD_BUS_PIN_UNDECLARED"),
+    ([("DM[0]", "x"), ("DM[2]", "z")],
+     {"neutral_pad": {"DM": (2, 0)}}, "PAD_BUS_PARTIALLY_CONNECTED"),
+])
+def test_bussed_pad_connection_refuses_when_the_pdk_cannot_prove_it(
+        pairs, buses, rule):
+    with pytest.raises(PAD.Refusal) as exc:
+        PAD._named_connections("u_pad", "neutral_pad", pairs, buses)
+    assert exc.value.rule == rule
+
+
+def test_conflicting_pdk_bus_declarations_refuse_instead_of_taking_file_order():
+    with pytest.raises(PAD.Refusal) as exc:
+        PAD.io_bus_ports([
+            "module neutral_pad(input [2:0] DM); endmodule\n",
+            "module neutral_pad(input [0:2] DM); endmodule\n",
+        ])
+    assert exc.value.rule == "PAD_BUS_DECLARATION_CONFLICT"

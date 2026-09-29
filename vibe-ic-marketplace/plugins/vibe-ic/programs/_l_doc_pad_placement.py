@@ -720,6 +720,83 @@ def accepted_renames(project: Path, implemented: Any
                           read_l9_top_ports(project), implemented)
 
 
+def accepted_exposed_output_splits(
+        project: Path, implemented: Any
+        ) -> Tuple[List[Tuple[set, set]], List[Dict[str, Any]]]:
+    """Validate extra output pads the reused-IP author declared by L9 root.
+
+    A ``flattened_outputs`` entry can carry an additional physical subport
+    only when its L9 carrier and every new port are real output ports of the
+    selected core, their literal widths agree, and the author states why the
+    split exists. An arbitrary manifest name never creates a pad.
+    """
+    from l9_rtl_pin_consistency_check import load_source_manifest
+    manifest = load_source_manifest(Path(project)) or {}
+    entries = manifest.get("flattened_outputs") or []
+    if not isinstance(entries, list):
+        return [], [{"reasons": ["flattened_outputs is not a list"]}]
+    l9 = {str(p["name"]): p for p in read_l9_top_ports(project)
+          if isinstance(p.get("name"), str)}
+    impl = ({str(p["name"]): p for p in implemented
+             if isinstance(p, dict) and isinstance(p.get("name"), str)}
+            if implemented is not None else None)
+    accepted: List[Tuple[set, set]] = []
+    rejected: List[Dict[str, Any]] = []
+    claimed: set = set()
+    for entry in entries:
+        reasons: List[str] = []
+        if not isinstance(entry, dict):
+            rejected.append({"entry": entry, "reasons": ["entry is not a mapping"]})
+            continue
+        carrier = entry.get("l9")
+        targets = entry.get("rtl")
+        if isinstance(carrier, list) and len(carrier) == 1:
+            carrier = carrier[0]
+        if isinstance(targets, str):
+            targets = [targets]
+        if not isinstance(carrier, str) or not carrier.strip():
+            reasons.append("one nonempty l9 carrier is required")
+        if not isinstance(targets, list) or not targets or not all(
+                isinstance(t, str) and t.strip() for t in targets):
+            reasons.append("nonempty rtl output names are required")
+            targets = []
+        elif len(set(targets)) != len(targets):
+            reasons.append("rtl output names repeat within the entry")
+        if not isinstance(entry.get("rationale"), str) or not entry["rationale"].strip():
+            reasons.append("a rationale for the physical split is required")
+        if impl is None:
+            reasons.append("selected core interface could not be read")
+        if not reasons:
+            source = l9.get(carrier)
+            core_source = impl.get(carrier)
+            if source is None or core_source is None:
+                reasons.append("l9 carrier is absent from L9 or selected core")
+            elif (_port_direction(source) != "output"
+                  or _port_direction(core_source) != "output"):
+                reasons.append("l9 carrier is not an output in both interfaces")
+            elif (_port_width(source) is None or _port_width(core_source) is None
+                  or _port_width(source) != _port_width(core_source)):
+                reasons.append("l9 carrier width is unresolved or differs from core")
+            for target in targets:
+                port = impl.get(target)
+                if target in claimed or target in l9 or target == carrier:
+                    reasons.append(f"rtl {target!r} is duplicate or already in L9")
+                elif port is None:
+                    reasons.append(f"rtl {target!r} is absent from selected core")
+                elif _port_direction(port) != "output":
+                    reasons.append(f"rtl {target!r} is not an output")
+                elif source is not None and (_port_width(port) is None
+                      or _port_width(port) != _port_width(source)):
+                    reasons.append(f"rtl {target!r} width differs from l9 carrier")
+        if reasons:
+            rejected.append({"l9": carrier, "rtl": targets,
+                             "reasons": reasons})
+        else:
+            claimed.update(targets)
+            accepted.append(({carrier}, set(targets)))
+    return accepted, rejected
+
+
 # --------------------------------------------------------------------------- #
 # the project's documents
 # --------------------------------------------------------------------------- #
@@ -758,9 +835,10 @@ def read_project_placement(project: Path
         try:
             text = path.read_text(errors="replace")
         except OSError as exc:
-            unreadable.append({"file": _rel(path, project), "reason": str(exc)})
+            unreadable.append({"file": project_relative(path, project),
+                               "reason": pathless_os_error(exc)})
             continue
-        rel = _rel(path, project)
+        rel = project_relative(path, project)
         scanned.append(rel)
         try:
             for name, value in parse_parameter_defaults(text).items():
@@ -778,11 +856,22 @@ def read_project_placement(project: Path
     return placement, params, unreadable, scanned
 
 
-def _rel(path: Path, project: Path) -> str:
+def project_relative(path: Path, project: Path) -> str:
+    """Record paths in the run relative to its root across bind mounts.
+
+    Preserve absolute spelling for paths outside the run so consumers can
+    identify and judge external references.
+    """
     try:
         return str(path.relative_to(project))
     except ValueError:
         return str(path)
+
+
+def pathless_os_error(exc: OSError) -> str:
+    """Keep the OS failure diagnostic without its mount-specific filename."""
+    kind = type(exc).__name__
+    return f"{kind} (errno {exc.errno})" if exc.errno is not None else kind
 
 
 # --------------------------------------------------------------------------- #
@@ -820,6 +909,7 @@ def derive_own_ring(project: Path, ports: Any) -> Dict[str, Any]:
         "by_side": {}, "unresolved_tokens": [], "groups": [],
         "groups_unresolved": [], "parameter_defaults": {},
         "renamed_interfaces": [], "renamed_interfaces_rejected": [],
+        "exposed_output_splits": [], "exposed_output_splits_rejected": [],
         "nets_on_two_sides": [],
     }
     placement, params, unreadable, scanned = read_project_placement(project)
@@ -833,11 +923,15 @@ def derive_own_ring(project: Path, ports: Any) -> Dict[str, Any]:
     exact, unresolved = expand_side_ports(placement, params)
     out["unresolved_tokens"] = list(unresolved)
     renames, rejected = accepted_renames(project, ports or [])
+    splits, split_rejected = accepted_exposed_output_splits(project, ports or [])
     out["renamed_interfaces"] = [{"l9": sorted(l9), "rtl": sorted(rtl)}
                                  for l9, rtl in renames]
     out["renamed_interfaces_rejected"] = rejected
+    out["exposed_output_splits"] = [
+        {"l9": sorted(l9), "rtl": sorted(rtl)} for l9, rtl in splits]
+    out["exposed_output_splits_rejected"] = split_rejected
     grouped, records = resolve_declared_pad_groups(placement, ports or [],
-                                                   renames=renames)
+                                                   renames=renames + splits)
     out["groups"] = records
     out["groups_unresolved"] = [r["side"] for r in records
                                 if not r["resolved_nets"]]

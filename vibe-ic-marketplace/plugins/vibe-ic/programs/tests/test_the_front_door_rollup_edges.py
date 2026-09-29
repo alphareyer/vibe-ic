@@ -49,6 +49,7 @@ import _path_layout as _pl                                   # noqa: E402
 import vibe_ic_entry_guard as GUARD                          # noqa: E402
 import vibe_ic_one_shot_runner as V
 import _audit_scope                          # noqa: E402
+from _route_fixture import stage_owner_route  # noqa: E402
 
 
 @pytest.fixture()
@@ -58,6 +59,8 @@ def project(tmp_path_factory):
     rtl = p / "phase2/stage1/rtl"
     rtl.mkdir(parents=True)
     (rtl / "d.v").write_text("module d(); endmodule\n")
+    # owner route rule 2026-09-28 (ICROUTE)
+    stage_owner_route(p, "ic")
     return p
 
 
@@ -1081,7 +1084,7 @@ def _drive_second_pass(project: Path, monkeypatch, *, extra_argv=()) -> tuple:
 
     def fake_run_phase(label, runner, args, env=None):
         if "phase1" in runner.name:
-            return P1.run_second_pass_only(project, "zzdie")
+            return P1.run_second_pass_only(project, "zzdie", route="ic")
         if "phase2" in runner.name:
             _report(project, "phase2_one_shot.json", {"verdict": "PASS"})
             return 0

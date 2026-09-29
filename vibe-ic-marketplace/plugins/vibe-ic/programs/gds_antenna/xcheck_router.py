@@ -26,6 +26,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import eda_report_audit as _audit  # noqa: E402 — calibrated KLayout RDB count
+
 # OpenROAD check_antennas idiom (same regex family as eda_report_audit._check_antenna).
 _FOUND_RE = re.compile(r"Found\s+(\d+)\s+(?:net|pin|antenna)\s+violation", re.I)
 _PAIR_RE = re.compile(r"(\d+)\s+net\s+violations?,?\s+(\d+)\s+pin\s+violations?", re.I)
@@ -47,7 +50,12 @@ def router_count(report: Path):
     for mm in _PAIR_RE.finditer(text):
         total += int(mm.group(1)) + int(mm.group(2))
         seen = True
-    return (total if seen else None), clean
+    if seen:
+        return total, clean
+    # A routed sign-off may itself write a KLayout RDB/tally. The audit already
+    # calibrates that grammar on real clean and dirty tool output; share its
+    # parser so an available second opinion is not silently discarded.
+    return _audit._antenna_klayout_count(text), clean
 
 
 def deck_count(deck_json: Path):

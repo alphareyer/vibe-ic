@@ -2,9 +2,9 @@
 
 The closure, the registry, the measurement and actuator CLIs, the supply
 ownership gate and the runner's deck builder run for real. Only an EDA tool's
-file writes are substituted: `librelane_contract.run_chain` (the `docker run`
-of a LibreLane step) is replaced by a writer of the step folders a real run
-leaves (`state_out.json` with the tool's metric names, the repair step's DEF).
+file writes are substituted: `librelane_contract.run_chain` and the native
+OpenROAD timing measurement are replaced by writers of the step folders and
+scene metrics a real run leaves.
 """
 import importlib
 from types import SimpleNamespace
@@ -25,10 +25,20 @@ sys.path.insert(0, str(PROGRAMS / 'tests'))
 prr = importlib.import_module('librelane_postroute_repair')
 closure = importlib.import_module('_ppa.closure')
 contract = importlib.import_module('librelane_contract')
+native = importlib.import_module('_native_postroute_timing')
+REAL_NATIVE_MEASURE = native.measure
 
 from _stated_eda_image import state_the_image  # noqa: E402
 
 STEP_DIR = PROGRAMS / 'librelane_plugins' / 'librelane_plugin_vibeic'
+
+
+def _tool_written_native_scene(ctx, repair_state, out_dir):
+    sta = repair_state.parent.parent / '04-openroad-stapostpnr/state_out.json'
+    metrics = json.loads(sta.read_text())['metrics']
+    summary = prr.summarize(metrics, ctx['corners'])
+    return {k: summary[k] for k in ('setup_ws', 'hold_ws',
+                                   'setup_ws_min', 'hold_ws_min')}
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +47,7 @@ def _stated_image(monkeypatch):
     state_the_image(monkeypatch)
     for name in ('VIBEIC_LIBRELANE_IMAGE', 'VIBEIC_LIBRELANE_PDK_ROOT'):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(native, 'measure', _tool_written_native_scene)
 REGISTRY = PLUGIN / 'config' / 'ppa_actuator_registry.yaml'
 CORNERS = ['nom_tt_025C_5v00', 'nom_ss_125C_4v50', 'nom_ff_n40C_5v50']
 
@@ -140,6 +151,116 @@ def test_an_incapable_image_refuses_before_any_state_is_built(tmp_path, monkeypa
 
 # ------------------------------------------------------------- measurement ---
 
+def test_native_sta_applies_and_attests_signoff_ocv_before_slack(tmp_path, monkeypatch):
+    """An undrated positive candidate must be red under signoff's OCV recipe.
+
+    Only OpenROAD's file writes are substituted; the real native measurement
+    builds its Tcl and the real controller consumes the returned worst slack.
+    """
+    runner = importlib.import_module('phase3_one_shot_runner')
+    early = runner._FLAT_OCV_DERATE_EARLY
+    late = runner._FLAT_OCV_DERATE_LATE
+    odb = write(tmp_path / 'route.odb', 'routed database')
+    sdc = write(tmp_path / 'route.sdc', 'create_clock -period 20 [get_ports clk]\n')
+    lib = write(tmp_path / 'cells.lib', 'liberty view')
+    rules = write(tmp_path / 'rules.rcx', 'extraction rules')
+    state = put(tmp_path / 'state.json', {'odb': str(odb), 'sdc': str(sdc)})
+    cfg = put(tmp_path / 'rcx.json', {
+        'RCX_RULESETS': {'*': str(rules)},
+        'CELL_LIBS': {'*': [str(lib)]},
+        'DEFAULT_CORNER': 'nom_ss_125C_4v50',
+    })
+    ctx = {'project': str(tmp_path), 'image': 'tool image', 'mounts': [],
+           'configs': {'OpenROAD.RCX': str(cfg)},
+           'corners': ['nom_ss_125C_4v50'], 'derate': [early, late]}
+    seen = []
+
+    def tool_writes(_ctx, script, output):
+        text = script.read_text()
+        if script.name.startswith('extract_'):
+            output.write_text('*SPEF "IEEE 1481-1998"\n')
+            return
+        seen.append(text)
+        early_cmd = f'set_timing_derate -early {early}'
+        late_cmd = f'set_timing_derate -late {late}'
+        derated = (early_cmd in text and late_cmd in text
+                   and text.index(late_cmd) < text.index('report_worst_slack -max'))
+        output.write_text(('OCV_BASIS flat_ocv\n' if derated else '')
+                          + f'worst slack max {"-0.040000" if derated else "0.010000"}\n'
+                          + 'worst slack min 0.200000\n')
+
+    monkeypatch.setattr(native, '_run', tool_writes)
+    result = REAL_NATIVE_MEASURE(ctx, state, tmp_path / 'native')
+    assert seen and result['setup_ws_min'] == -0.04
+    assert result['ocv_applied'] == {'mode': 'flat_ocv', 'early': early, 'late': late}
+    assert result['measurement_basis'].endswith('+flat_ocv')
+
+
+def test_native_sta_removes_embedded_flat_derate_before_explicit_recipe(tmp_path, monkeypatch):
+    """A LibreLane write_sdc can already contain OCV; normalize it once."""
+    runner = importlib.import_module('phase3_one_shot_runner')
+    early = runner._FLAT_OCV_DERATE_EARLY
+    late = runner._FLAT_OCV_DERATE_LATE
+    odb = write(tmp_path / 'route.odb', 'routed database')
+    sdc = write(tmp_path / 'route.sdc',
+                f'create_clock -period 20 [get_ports clk]\n'
+                f'set_timing_derate -early {early:.4f}\n'
+                f'set_timing_derate -late {late:.4f}\n')
+    lib = write(tmp_path / 'cells.lib', 'liberty view')
+    rules = write(tmp_path / 'rules.rcx', 'extraction rules')
+    state = put(tmp_path / 'state.json', {'odb': str(odb), 'sdc': str(sdc)})
+    cfg = put(tmp_path / 'rcx.json', {
+        'RCX_RULESETS': {'*': str(rules)}, 'CELL_LIBS': {'*': [str(lib)]},
+        'DEFAULT_CORNER': 'nom_ss_125C_4v50'})
+    ctx = {'project': str(tmp_path), 'image': 'tool image', 'mounts': [],
+           'configs': {'OpenROAD.RCX': str(cfg)},
+           'corners': ['nom_ss_125C_4v50'], 'derate': [early, late]}
+
+    def tool_writes(_ctx, script, output):
+        if script.name.startswith('extract_'):
+            output.write_text('*SPEF "IEEE 1481-1998"\n')
+            return
+        text = script.read_text()
+        match = re.search(r'^read_sdc \{([^}]+)\}$', text, re.M)
+        assert match is not None
+        measured_sdc = Path(match.group(1)).read_text()
+        assert 'set_timing_derate' not in measured_sdc
+        assert text.count('set_timing_derate -early') == 1
+        assert text.count('set_timing_derate -late') == 1
+        output.write_text('OCV_BASIS flat_ocv\nworst slack max -0.040000\n'
+                          'worst slack min 0.200000\n')
+
+    monkeypatch.setattr(native, '_run', tool_writes)
+    result = REAL_NATIVE_MEASURE(ctx, state, tmp_path / 'native')
+    assert result['setup_ws_min'] == -0.04
+    assert result['native_sdc_sha256'] == contract.digest(sdc)
+
+
+def test_native_sdc_derate_parser_refuses_nonformal_commands(tmp_path):
+    """The SDC reader recognizes executable Tcl, never prose or a near-match."""
+    runner = importlib.import_module('phase3_one_shot_runner')
+    early = runner._FLAT_OCV_DERATE_EARLY
+    late = runner._FLAT_OCV_DERATE_LATE
+    ctx = {'derate': [early, late]}
+    out = tmp_path / 'native'
+    out.mkdir()
+    valid = write(tmp_path / 'valid.sdc',
+                  f'# no derate claim in this comment\n'
+                  f'set_timing_derate -early {early:.4f}\n'
+                  f'set_timing_derate -late {late:.4f}\n')
+    measured, _, _ = native._measurement_sdc(ctx, valid, out)
+    assert measured.read_text() == '# no derate claim in this comment\n'
+    wrong = write(tmp_path / 'wrong.sdc',
+                  f'set_timing_derate -early {early:.4f}\n'
+                  'set_timing_derate -late 1.10\n')
+    with pytest.raises(contract.Refusal, match='NATIVE_POSTROUTE_OCV_MISMATCH'):
+        native._measurement_sdc(ctx, wrong, out)
+    malformed = write(tmp_path / 'malformed.sdc',
+                      f'set_timing_derate -early {early:.4f}\n'
+                      f'set_timing_derate -late {late:.4f} -cell_delay\n')
+    with pytest.raises(contract.Refusal, match='NATIVE_POSTROUTE_OCV_AMBIGUOUS'):
+        native._measurement_sdc(ctx, malformed, out)
+
 def _sta_metrics(setup, hold, drv=(0, 0, 0), corners=CORNERS):
     metrics = {}
     for c in corners:
@@ -162,6 +283,39 @@ def test_a_corner_the_tool_did_not_report_leaves_the_summary_unmeasured():
     s = prr.summarize(m, CORNERS)
     assert s['setup_ws_min'] is None and s['hold_ws_min'] is None and s['drv_count'] is None
     assert s['unmeasured_corners'] == ['nom_ff_n40C_5v50']
+
+
+def test_drv_pin_census_counts_distinct_pairs_across_scenes(tmp_path):
+    corners = ('ss_a', 'ss_b')
+    metrics = _sta_metrics(1.0, 0.2, (0, 0, 1), corners=corners)
+    # Both scenes have one fanout violator.  The identity decides whether this
+    # is one residual check or two distinct checks across the scene union.
+    for corner, pin in zip(corners, ('u1/Y', 'u1/Y')):
+        log = tmp_path / corner / 'sta.log'
+        log.parent.mkdir(parents=True)
+        log.write_text(f'Max Slew\nmax slew violation count 0\n'
+                       f'Max Capacitance\nmax cap violation count 0\n'
+                       f'Max Fanout\n{pin} 1.0 2.0 -1.0 (VIOLATED)\n'
+                       'max fanout violation count 1\n')
+    summary = prr.summarize(metrics, corners)
+    census = prr.drv_pin_census(tmp_path, summary, corners)
+    assert census['drv_pin_checks_state'] == 'PASS'
+    assert census['drv_pin_checks'] == [['u1/Y', 'fanout']]
+    assert prr.fanout_residue({**summary, **census}, corners)['violations'] == 1
+    log = tmp_path / 'ss_b' / 'sta.log'
+    log.write_text(log.read_text().replace('u1/Y', 'u2/Y'))
+    assert prr.drv_pin_census(tmp_path, summary, corners)['drv_pin_checks'] == [
+        ['u1/Y', 'fanout'], ['u2/Y', 'fanout']]
+
+
+def test_final_non_fanout_drv_residue_keeps_step32_failed():
+    report = {'corners': ['tt'], 'final': {
+        'drv': {'fanout': {'tt': 0}}, 'drv_count': 1}}
+    prr._set_final_fanout_verdict(report)
+    prr._set_final_drv_verdict(report)
+    assert report['final_fanout']['verdict'] == 'PASS'
+    assert report['verdict'] == 'FAIL'
+    assert report['code'] == 'LL_PRR_DRV_VIOLATION'
     assert prr.summarize(_sta_metrics(0.7, 0.1), [])['setup_ws_min'] is None
 
 
@@ -252,6 +406,7 @@ SHIM = textwrap.dedent('''\
     sys.path.insert(0, os.environ["PRR_REAL_PROGRAMS"])
     import librelane_contract as ll
     import librelane_postroute_repair as prr
+    import _native_postroute_timing as native
     SCENARIO = json.loads(Path(os.environ["PRR_SCENARIO"]).read_text())
 
     def run_chain(project, image, steps, *, mounts=None, lane=None, **kw):
@@ -264,17 +419,50 @@ SHIM = textwrap.dedent('''\
             if step == prr.REPAIR_STEP:
                 d = folder / "top.def"
                 d.write_text(spec["def"])
-                metrics = spec["repair_metrics"]
+                metrics = dict(spec["repair_metrics"])
+                metrics.setdefault("vibeic__prr__before__unrouted__count", 0)
+                metrics.setdefault("vibeic__prr__after__unrouted__count", 0)
+                metrics.setdefault("vibeic__prr__unrouted__added", 0)
                 doc = {"def": str(d), "metrics": metrics}
             elif step.endswith("CheckAntennas"):
                 doc = {"metrics": spec.get("antenna_metrics", {})}
             else:
                 doc = {"metrics": spec["sta_metrics"] if step.endswith("STAPostPNR") else {}}
             (folder / "state_out.json").write_text(json.dumps(doc))
+            if step.endswith("STAPostPNR"):
+                corners = {key.split("__corner:", 1)[1]
+                           for key in spec["sta_metrics"] if "__corner:" in key}
+                for corner in corners:
+                    lines = []
+                    for kind, title in (("slew", "Max Slew"),
+                                        ("cap", "Max Capacitance"),
+                                        ("fanout", "Max Fanout")):
+                        count = spec["sta_metrics"].get(
+                            f"design__max_{kind}_violation__count__corner:{corner}")
+                        if count is None:
+                            continue
+                        lines.append(title)
+                        lines.extend(f"fixture/pin_{i} 1.0 2.0 -1.0 (VIOLATED)"
+                                     for i in range(count))
+                        lines.append(f"max {kind} violation count {count}")
+                    log = folder / corner / "sta.log"
+                    log.parent.mkdir(parents=True, exist_ok=True)
+                    log.write_text("\\n".join(lines) + "\\n")
             folders.append(folder)
         return folders
 
     ll.run_chain = run_chain
+    def native_scene(ctx, repair_state, out_dir):
+        lane = repair_state.parent.parent.name
+        spec = SCENARIO[lane]
+        summary = prr.summarize(spec["sta_metrics"], ctx["corners"])
+        result = {k: summary[k] for k in ("setup_ws", "hold_ws",
+                                         "setup_ws_min", "hold_ws_min")}
+        if "native_setup" in spec:
+            result["setup_ws_min"] = spec["native_setup"]
+            result["setup_ws"] = {c: spec["native_setup"] for c in ctx["corners"]}
+        return result
+    native.measure = native_scene
     sys.exit(prr.main())
     ''')
 
@@ -295,10 +483,18 @@ def _scenario_impl(tmp_path, baseline, candidates):
     sta = put(project / 'phase3/librelane/32-base/03-sta/state_out.json',
               {'metrics': _sta_metrics(*baseline)})
     input_state = put(project / 'phase3/librelane/32-config/bridge/state_in.json', {'def': 'x'})
+    base_summary = prr.summarize(_sta_metrics(*baseline), CORNERS)
+    base_pairs = [[f'fixture/pin_{i}', kind]
+                  for kind, n in zip(('slew', 'cap', 'fanout'),
+                                     baseline[2] if len(baseline) > 2 else (0, 0, 0))
+                  for i in range(n)]
     put(impl / prr.CURRENT, {'candidate': None, 'repair_input': str(input_state),
                             'repair_state': str(input_state),
-                            'measurement': dict(prr.summarize(_sta_metrics(*baseline), CORNERS),
-                                                antenna_nets=0, sta_state=str(sta),
+                            'measurement': dict(base_summary,
+                                                drv_pin_checks_state='PASS',
+                                                drv_pin_checks=base_pairs,
+                                                antenna_nets=0, antenna_pins=0,
+                                                sta_state=str(sta),
                                                 sta_state_sha256=contract.digest(sta))})
     scenario = {f'32-cand{i:02d}': c for i, c in enumerate(candidates, 1)}
     put(tmp_path / 'scenario.json', scenario)
@@ -348,6 +544,32 @@ def test_the_ll21_max_fanout_repair_is_adopted_with_setup_still_met(tmp_path, mo
     assert json.loads((impl / prr.CURRENT).read_text())['candidate'] == '32-cand01'
 
 
+@pytest.mark.parametrize('changed', [0, 1])
+def test_residual_fanout_refuses_even_a_noop_candidate(tmp_path, monkeypatch, changed):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, 0.2, (0, 0, 3)),
+        candidates=[_cand(4.0, 0.2, (0, 0, 3), changed=changed)])
+    _controller(impl, arm, shim, monkeypatch, tmp_path).run_controller(
+        'postroute.repair_drv')
+    rows = json.loads((arm / prr.LEDGER).read_text())['candidates']
+    assert rows[0]['decision'] == 'REFUSED'
+    assert rows[0]['fanout']['verdict'] == 'FAIL'
+    assert rows[0]['fanout']['violations'] == 3
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+
+
+def test_routed_fanout_failure_blocks_the_phase3_step(tmp_path):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    result = runner._postroute_repair_librelane_result(
+        tmp_path, tmp_path / 'pnr',
+        {'verdict': 'FAIL', 'code': 'LL_PRR_FANOUT_VIOLATION',
+         'reason': 'declared postroute max fanout has 3 residual violations'},
+        0.0, handed=False)
+    assert result.status == 'FAIL'
+    assert 'LL_PRR_FANOUT_VIOLATION' in result.detail
+    assert result.reason_class == ''
+
+
 def test_a_hard_repair_that_makes_setup_negative_is_rejected(tmp_path, monkeypatch):
     project, arm, impl, shim = _scenario_impl(
         tmp_path, baseline=(0.8, 0.391, (0, 0, 3)),
@@ -357,6 +579,96 @@ def test_a_hard_repair_that_makes_setup_negative_is_rejected(tmp_path, monkeypat
     assert run.iterations[0].decision == 'ROLLED_BACK'
     assert 'below its floor 0.0' in run.iterations[0].decision_reason
     assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+
+
+def test_a_fanout_reduction_with_one_remaining_violation_is_adopted_but_not_signed_off(
+        tmp_path, monkeypatch):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, 0.4, (0, 0, 4)),
+        candidates=[_cand(1.6, 0.4, (0, 0, 1))])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_drv')
+    assert run.iterations[0].decision == 'PROMOTED'
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] == '32-cand01'
+    row = json.loads((arm / prr.LEDGER).read_text())['candidates'][0]
+    assert row['measurement']['drv_count'] == 1
+    assert row['decision'] != 'REFUSED'
+
+
+def test_hold_closure_can_adopt_with_unchanged_measured_drv_residue(
+        tmp_path, monkeypatch):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, -0.335, (0, 0, 1)),
+        candidates=[_cand(4.999, 0.326, (0, 0, 1))])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_hold')
+    assert run.iterations[0].decision == 'PROMOTED'
+    final = json.loads((impl / prr.CURRENT).read_text())
+    assert final['measurement']['hold_ws_min'] == 0.326
+    assert final['measurement']['drv_count'] == 1
+
+
+def test_unmeasured_candidate_drv_is_still_refused(tmp_path, monkeypatch):
+    candidate = _cand(4.999, 0.326, (0, 0, 0))
+    key = next(k for k in candidate['sta_metrics'] if 'max_fanout_violation' in k)
+    del candidate['sta_metrics'][key]
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, -0.335, (0, 0, 1)),
+        candidates=[candidate])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_hold')
+    assert run.iterations[0].decision == 'ROLLED_BACK'
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+
+
+def test_the_deck_repairs_drv_after_timing_and_antenna_cell_insertion():
+    tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    calls = [m.start() for m in re.finditer(r'^\s*log_cmd repair_design', tcl, re.M)]
+    assert len(calls) >= 3
+    assert calls[0] < tcl.index('log_cmd repair_timing {*}$setup_args')
+    assert tcl.index('log_cmd repair_timing {*}$hold_args') < calls[1]
+    assert calls[1] < tcl.index('vic_census after_timing_drv_recheck')
+    assert tcl.index('log_cmd repair_antennas {*}$ant_args') < calls[-1]
+    assert calls[-1] < tcl.index('# ---- 7. re-verify')
+
+
+def test_post_antenna_drv_recheck_runs_even_without_a_fanout_row(tmp_path):
+    tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    after_antenna = tcl[tcl.index('log_cmd repair_antennas'):]
+    assert len(re.findall(r'^\s*log_cmd repair_design', after_antenna, re.M)) == 1
+    start = tcl.index('set ::vic_fo_rounds 0')
+    end = tcl.index('# ---- 7. re-verify', start)
+    section = tmp_path / 'post_antenna_drv.tcl'
+    section.write_text(tcl[start:end])
+    harness = textwrap.dedent(r"""
+        namespace eval utl { proc metric_integer {args} {} }
+        set ::env(VIBEIC_PRR_MAX_FANOUT) 4
+        set ::vic_fo_repaired [dict create]
+        set ::calls 0
+        set rd_args [list]
+        set ::block block
+        proc block {method args} {if {$method eq "getInsts"} {return {}}}
+        proc vic_fanout_over {} {return [dict create]}
+        proc vic_fanout_added {before now} {return [dict create]}
+        proc vic_say {line} {puts $line}
+        proc log_cmd {name args} {
+            if {$name eq "repair_design"} {incr ::calls}
+        }
+        source __SECTION__
+        puts "DRV_RECHECK_CALLS $::calls"
+    """).replace('__SECTION__', str(section))
+    run = subprocess.run(['tclsh'], input=harness, text=True,
+                         capture_output=True, check=False)
+    assert run.returncode == 0, run.stderr
+    assert 'DRV_RECHECK_CALLS 1' in run.stdout, run.stdout
+
+
+def test_timing_cannot_remove_the_buffers_that_closed_declared_fanout():
+    tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    assert re.search(r'^set setup_args \[list -setup -verbose -skip_buffer_removal\]$',
+                     tcl, re.M)
+    assert re.search(r'^set hold_args \[list -hold -verbose -skip_buffer_removal\]$',
+                     tcl, re.M)
 
 
 def test_a_hard_repair_stops_at_the_declared_floor(tmp_path, monkeypatch):
@@ -416,6 +728,23 @@ def test_hardness_and_floor_are_declared_in_the_registry(tmp_path):
     with pytest.raises(closure.RegistryError, match='HARD domain has no floor'):
         closure.load_registry(bad)
 
+
+def test_native_signoff_slack_controls_setup_stop_when_librelane_is_optimistic(tmp_path, monkeypatch):
+    """A positive LibreLane WNS cannot end closure while direct RCX is red."""
+    first = _cand(0.012, 0.2)
+    first['native_setup'] = -0.02
+    second = _cand(0.037, 0.2)
+    second['native_setup'] = 0.01
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(-0.2, 0.2), candidates=[first, second])
+    run = _controller(impl, arm, shim, monkeypatch, tmp_path).run_controller(
+        'postroute.repair_setup')
+    assert [it.decision for it in run.iterations] == ['PROMOTED', 'PROMOTED']
+    assert run.outcome is closure.Outcome.CONVERGED
+    final = json.loads((impl / prr.CURRENT).read_text())
+    assert final['candidate'] == '32-cand02'
+    assert final['measurement']['setup_ws_min'] == 0.01
+    assert final['measurement']['librelane_setup_ws']['nom_ss_125C_4v50'] == 0.037
 
 def test_a_setup_violation_is_repaired_and_the_improving_candidate_adopted(tmp_path, monkeypatch):
     project, arm, impl, shim = _scenario_impl(
@@ -498,7 +827,30 @@ def test_a_repair_that_creates_an_antenna_violation_is_never_adopted(tmp_path, m
     assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
     row = json.loads((arm / prr.LEDGER).read_text())['candidates'][0]
     assert row['decision'] == 'REFUSED' and row['reason'].startswith('antenna (OpenROAD.CheckAntennas)')
-    assert row['antenna'] == {'before': 0, 'after': antenna}
+    assert row['antenna'] == {'before': 0, 'after': antenna,
+                              'before_pins': 0, 'after_pins': antenna}
+
+
+@pytest.mark.parametrize('missing', [None, 'baseline', 'candidate'])
+def test_pin_census_blocks_promotion_with_zero_violating_nets(
+        tmp_path, monkeypatch, missing):
+    candidate = _cand(1.0, 0.05)
+    candidate['antenna_metrics']['antenna__violating__pins'] = 1
+    if missing == 'candidate':
+        del candidate['antenna_metrics']['antenna__violating__pins']
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(1.0, -0.2), candidates=[candidate])
+    if missing == 'baseline':
+        current = json.loads((impl / prr.CURRENT).read_text())
+        del current['measurement']['antenna_pins']
+        put(impl / prr.CURRENT, current)
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_hold')
+    assert run.iterations[0].decision == 'ROLLED_BACK'
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+    row = json.loads((arm / prr.LEDGER).read_text())['candidates'][0]
+    assert row['decision'] == 'REFUSED'
+    assert 'pins' in row['reason']
 
 
 def test_antenna_is_measured_by_the_step_26_instrument_on_every_candidate():
@@ -809,9 +1161,213 @@ def test_in_the_chain_the_route_state_is_repaired_without_a_bridge(tmp_path, mon
     assert report['site'] == 'after_route' and report['adopted'] == '32-cand01'
     assert report['baseline']['hold_ws_min'] == -0.335
     ctx = json.loads((project / prr.ARM_REL / prr.IMPL_DIR / prr.CONTEXT).read_text())
+    assert ctx['derate'] == [0.95, 1.05]
+    assert ctx['aocv_table'] is None
     assert 'VIBEIC_PRR_REFILL_TCL' not in json.loads(
         Path(ctx['configs'][prr.REPAIR_STEP]).read_text()), \
         "the LL21 route's fillers are LibreLane's; the refill is too"
+
+
+def test_in_chain_clean_census_replaces_a_stale_repair_decision_before_stream(
+        tmp_path, monkeypatch):
+    import flow_step_output_content_check as content
+    import postroute_timing_repair_audit as audit
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': _base(4.0, 0.2)})
+    decision = put(project / 'phase3/stage3/postroute_timing_repair' /
+                   'postroute_timing_repair_decision.json', {'repair_needed': True})
+    write(decision.parent / 'repair_log.json', '{}\n')
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    assert report['verdict'] == 'PASS' and report['adopted'] is None
+    assert json.loads(decision.read_text())['repair_needed'] is False
+    assert not (decision.parent / 'repair_log.json').exists()
+    assert content.check(project, 'repair') == []
+    assert not [f for f in audit.audit(project)[0] if f.severity == 'ERROR']
+
+
+def test_in_chain_adopted_repair_keeps_its_input_trigger_and_passes_audit(
+        tmp_path, monkeypatch):
+    import postroute_timing_repair_audit as audit
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': _base(4.026052, -0.335),
+        '32-cand01': _cand(4.025948, 0.326)})
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    output = project / 'phase3/stage3/postroute_timing_repair'
+    decision = json.loads((output / 'postroute_timing_repair_decision.json').read_text())
+    log = json.loads((output / 'repair_log.json').read_text())
+    assert report['adopted'] == '32-cand01'
+    assert decision['repair_needed'] is True
+    assert decision['baseline']['hold_ws_min'] < 0 < decision['final']['hold_ws_min']
+    assert log['changes'][0]['candidate'] == report['adopted']
+    assert log['re_verified'] is True
+    assert not (output / 'no_repair_needed.flag').exists()
+    assert not [f for f in audit.audit(project)[0] if f.severity == 'ERROR']
+
+
+def test_dual_route_with_pin_violation_cannot_publish_clean_repair(
+        tmp_path, monkeypatch):
+    import postroute_timing_repair_audit as audit
+    scenario = {
+        '32-postdrt-base': _base(4.0, -0.3),
+        '32-pregrt-base': _base(4.2, 0.10),
+        '32-pregrt_postdrt-base': _base(4.1, 0.05),
+    }
+    for step in scenario.values():
+        step['antenna_metrics']['antenna__violating__pins'] = 1
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, scenario)
+    pre_state = put(project / 'phase3/librelane/21-route-pregrt/13-fill/state_out.json',
+                    {'odb': 'p.odb', 'def': 'p.def'})
+    report = prr.run_in_chain(
+        project, mode='dual', image='img', pdk='pdk', pdk_root=tmp_path,
+        sdc=sdc, derate=(0.95, 1.05), route_state=route, route_drc=0,
+        variant_arm=lambda lane, extra: {
+            'final': pre_state, 'route_drc': [{'run': 'drt-run-0', 'markers': 0}]},
+        programs_dir=shim)
+    assert report['selected_arm'] == 'pregrt'
+    assert report['selection']['feasible'] == []
+    output = project / prr.DECLARED_REPAIR_REL
+    decision = json.loads((output / 'postroute_timing_repair_decision.json').read_text())
+    log = json.loads((output / 'repair_log.json').read_text())
+    assert decision['repair_needed'] is True
+    assert log['final']['antenna_nets'] == 0
+    assert log['final']['antenna_pins'] == 1
+    assert log['re_verified'] is False
+    assert 'NOT_REVERIFIED' in [f.category for f in audit.audit(project)[0]
+                                if f.severity == 'ERROR']
+
+
+def test_missing_input_pin_census_refuses_declared_repair(
+        tmp_path, monkeypatch):
+    import postroute_timing_repair_audit as audit
+    baseline = _base(4.0, -0.3)
+    del baseline['antenna_metrics']['antenna__violating__pins']
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': baseline, '32-cand01': _cand(3.99995, 0.3)})
+    report = prr.run_in_chain(
+        project, mode='librelane', image='img', pdk='pdk', pdk_root=tmp_path,
+        sdc=sdc, derate=(0.95, 1.05), route_state=route, route_drc=0,
+        programs_dir=shim)
+    assert report['adopted'] is None
+    assert report['declared_repair_publication']['status'] == 'NOT_MEASURED'
+    assert 'CheckAntennas' in report['declared_repair_publication']['reason']
+    assert not (project / prr.DECLARED_REPAIR_REL /
+                'postroute_timing_repair_decision.json').exists()
+    assert 'NO_REPAIR_ARTIFACT' in [f.category for f in audit.audit(project)[0]
+                                    if f.severity == 'ERROR']
+
+
+@pytest.mark.parametrize('which', ['baseline', 'final'])
+def test_missing_sta_digest_cannot_publish_a_measured_repair(
+        tmp_path, monkeypatch, which):
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': _base(4.0, -0.3),
+        '32-cand01': _cand(3.99995, 0.3)})
+    report = prr.run_in_chain(
+        project, mode='librelane', image='img', pdk='pdk', pdk_root=tmp_path,
+        sdc=sdc, derate=(0.95, 1.05), route_state=route, route_drc=0,
+        programs_dir=shim)
+    assert report['adopted'] == '32-cand01'
+    # A producer that loses either digest must invalidate its earlier receipt.
+    report[which].pop('sta_state_sha256')
+    prr._clear_declared_repair(project)
+    prr._set_census_verdict(report, report['baseline'], report['final'])
+    source = project / prr.REPORT_REL
+    prr.write_json(source, report)
+    prr._publish_declared_repair(project, report, source)
+    assert report['verdict'] == 'NOT_MEASURED'
+    assert report['declared_repair_publication']['status'] == 'NOT_MEASURED'
+    assert 'digest' in report['declared_repair_publication']['reason']
+    assert not (project / prr.DECLARED_REPAIR_REL /
+                'postroute_timing_repair_decision.json').exists()
+
+
+def test_in_chain_tool_refusal_invalidates_the_prior_declared_decision(
+        tmp_path, monkeypatch):
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {})
+    output = project / 'phase3/stage3/postroute_timing_repair'
+    decision = put(output / 'postroute_timing_repair_decision.json',
+                   {'repair_needed': False})
+    write(output / 'no_repair_needed.flag', 'stale\n')
+    write(output / 'repair_log.json', '{}\n')
+    monkeypatch.setattr(prr, 'fork_capability',
+                        lambda image, docker='docker': {'capable': False, 'image': image})
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    assert report['verdict'] != 'PASS'
+    assert not decision.exists()
+    assert not (output / 'no_repair_needed.flag').exists()
+    assert not (output / 'repair_log.json').exists()
+
+
+def test_unmeasured_publication_names_its_missing_floor_in_step32_report(
+        tmp_path, monkeypatch):
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': _base(4.0, 0.2)})
+    monkeypatch.setattr(prr, 'declared_timing_floor', lambda project, sdc: {})
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    record = json.loads((project / prr.REPORT_REL).read_text())
+    publication = record.get('declared_repair_publication')
+    status = (publication or {}).get('status', 'MISSING')
+    assert status == 'NOT_MEASURED'
+    assert 'timing floors' in publication.get('reason', '')
+    assert report.get('declared_repair_publication') == publication
+    assert not (project / prr.DECLARED_REPAIR_REL /
+                'postroute_timing_repair_decision.json').exists()
+
+
+def test_in_chain_residual_drv_replaces_a_stale_clean_decision_before_stream(
+        tmp_path, monkeypatch):
+    import flow_step_output_content_check as content
+    import postroute_timing_repair_audit as audit
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': {'def': _def(True), 'sta_metrics': _sta_metrics(5.0, 0.4, (0, 0, 4)),
+                    'antenna_metrics': _ant(0),
+                    'repair_metrics': {'vibeic__prr__changed': 0}},
+        '32-cand01': _cand(1.6, 0.4, (0, 0, 1))})
+    output = project / 'phase3/stage3/postroute_timing_repair'
+    decision = put(output / 'postroute_timing_repair_decision.json',
+                   {'repair_needed': False})
+    write(output / 'no_repair_needed.flag', 'stale estimate\n')
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    assert report['verdict'] == 'FAIL' and report['adopted'] == '32-cand01'
+    assert report['code'] == 'LL_PRR_FANOUT_VIOLATION'
+    assert json.loads(decision.read_text())['repair_needed'] is True
+    assert not (output / 'no_repair_needed.flag').exists()
+    assert json.loads((output / 'repair_log.json').read_text())['final']['drv_count'] == 1
+    assert content.check(project, 'repair') == []
+    errors = [f.category for f in audit.audit(project)[0] if f.severity == 'ERROR']
+    assert 'NOT_REVERIFIED' in errors
+
+
+def test_refused_candidate_names_the_residual_drv_in_the_audit(tmp_path, monkeypatch):
+    import postroute_timing_repair_audit as audit
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': {'def': _def(True), 'sta_metrics': _sta_metrics(0.8, 0.4, (0, 0, 4)),
+                    'antenna_metrics': _ant(0),
+                    'repair_metrics': {'vibeic__prr__changed': 0}},
+        '32-cand01': _cand(-0.05, 0.4, (0, 0, 1))})
+    # The baseline has measured DRV residue; no candidate may trade setup
+    # below its floor to clear it.
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    assert report['adopted'] is None
+    decision_path = project / prr.DECLARED_REPAIR_REL / 'postroute_timing_repair_decision.json'
+    decision = json.loads(decision_path.read_text())
+    assert decision['action'] == 'input_route_kept'
+    assert (decision.get('residual') or {}).get('drv_count', 0) > 0
+    errors = [f.category for f in audit.audit(project)[0] if f.severity == 'ERROR']
+    assert 'REPAIR_REFUSED_RESIDUAL_DRV' in errors
+    assert 'EMPTY_CHANGES' not in errors and 'NOT_REVERIFIED' not in errors
 
 
 def test_dual_runs_three_arms_and_selects_by_hold_then_setup(tmp_path, monkeypatch):
@@ -840,6 +1396,34 @@ def test_dual_runs_three_arms_and_selects_by_hold_then_setup(tmp_path, monkeypat
     assert report['arms']['pregrt']['closure'] == [], 'arm A is the route alone'
     assert report['selected_arm'] == 'postdrt', report['selection']
     assert report['adopted'] == '32-postdrt-cand01'
+
+
+def test_dual_publishes_decision_from_step32_input_when_pregrt_route_wins(
+        tmp_path, monkeypatch):
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-postdrt-base': _base(4.0, -0.3),
+        '32-pregrt-base': _base(4.2, 0.10),
+        '32-pregrt_postdrt-base': _base(4.1, 0.05)})
+    pre_state = put(project / 'phase3/librelane/21-route-pregrt/13-fill/state_out.json',
+                    {'odb': 'p.odb', 'def': 'p.def'})
+
+    def variant_arm(lane, extra):
+        return {'final': pre_state, 'route_drc': [{'run': 'drt-run-0', 'markers': 0}]}
+
+    report = prr.run_in_chain(project, mode='dual', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, variant_arm=variant_arm,
+                              programs_dir=shim)
+    assert report['selected_arm'] == 'pregrt'
+    assert report.get('floors', {}) == report['arms']['pregrt']['floors']
+    assert (report.get('input_baseline') or {}).get('hold_ws_min') == -0.3
+    decision = json.loads((project / prr.DECLARED_REPAIR_REL /
+                           'postroute_timing_repair_decision.json').read_text())
+    assert decision['repair_needed'] is True
+    assert decision['action'] == 'alternate_route_selected'
+    assert decision['baseline']['hold_ws_min'] == -0.3
+    assert decision['final']['hold_ws_min'] == 0.10
+    assert not (project / prr.DECLARED_REPAIR_REL / 'no_repair_needed.flag').exists()
 
 
 def test_dual_never_selects_an_arm_with_a_route_or_antenna_violation(tmp_path, monkeypatch):
@@ -924,13 +1508,16 @@ def test_the_route_hook_hands_on_the_adopted_database_and_keeps_the_base(tmp_pat
                                                        'vibeic__prr__unrouted__added': 0}}]}) and \
             json.loads((project_ / prr.REPORT_REL).read_text())
     monkeypatch.setattr(prr, 'run_in_chain', run_in_chain)
+    monkeypatch.setattr(runner, '_discover_aocv_table',
+                        lambda project_, pdk_, container_: '/declared/table.aocv')
     pdk = ring_fixture._pdk(tmp_path, ring=None)
     out = runner.postroute_repair_after_route(
         project=project, pdk=pdk, image='img', pdk_root=tmp_path, sdc=base_def,
         deck='add_global_connection -net VDD -pin_pattern {^VDD$} -power\n',
         route_state=route_state, route_views={'odb': tmp_path / 'r.odb', 'def': base_def},
-        route_drc=0, variant_arm=lambda *a: None)
+        route_drc=0, variant_arm=lambda *a: None, container='eda')
     assert calls['mode'] == 'dual' and calls['route_state'] == route_state
+    assert calls['aocv_table'] == '/declared/table.aocv'
     assert out['views'] == {'odb': tmp_path / 'c.odb', 'def': tmp_path / 'c.def'}
     assert out['record']['report_sha256'] == contract.digest(project / prr.REPORT_REL)
     assert (runner._pl.pnr_dir(project) / 'routed_base_prerepair.def').read_text() == base_def.read_text()

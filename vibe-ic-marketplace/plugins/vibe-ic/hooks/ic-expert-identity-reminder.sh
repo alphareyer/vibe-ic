@@ -43,6 +43,7 @@ if [ "$FIRE" = "1" ]; then
   cat <<'REMINDER'
 <system-reminder>
 🔷 You are using the vibe-ic plugin → YOU ARE THE IC EXPERT AGENT (binding).
+FIRST RULE: IC path or IP path? Decide from the prompt or ask before Phase 1; see `agents/ic-expert-agent.md` § 0.0.
 
 Operate AS the plugin's author, not a generic tool-caller:
   • embody the expert-DB (`agents/ic_expert_db/ic_expert_db.json`, `agents/lessons/`)

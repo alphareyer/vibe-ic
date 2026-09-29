@@ -37,10 +37,22 @@ substance:
        (a) ``pnr.tcl`` containing ``add_pdn_stripe`` / ``add_pdn_ring`` /
            ``pdngen`` / ``define_pdn_grid``, OR
        (b) a DEF (floorplan or any later stage in pnr/) carrying a
-           ``SPECIALNETS`` section with a power/ground net
-           (VDD/VSS/VPWR/VGND/vccd*/vssd* …).
+           ``SPECIALNETS`` section declaring ``+ USE POWER`` or
+           ``+ USE GROUND``. The DEF role, not the net name, is authoritative.
        A bare ``pdn.done`` marker with NO strap evidence anywhere does
        NOT satisfy this — "no PG straps" is a real FAIL.
+  6. Built stripe census — only ``SHAPE STRIPE`` WIRES (a positive width and
+       two routing points) on explicitly POWER/GROUND special nets count; a
+       stripe-crossing via (``NEW Metal4 0 + SHAPE STRIPE ( x y ) via4_5``)
+       is not a strap. The census reads the DEF that carries the grid pdngen
+       built: the first DEF pnr.tcl writes after its ``pdngen`` (the direct
+       deck writes floorplan.def BEFORE the PDN, so that file never holds the
+       stripes), or floorplan.def when the deck runs no pdngen (the grid was
+       handed over, e.g. LibreLane state). A budget in apply mode blocks when
+       either role is short and is NOT_MEASURED when no such DEF can be read;
+       in advisory mode a declared supply role with no built stripe is
+       reported as NOT_MEASURED instead of a clean built grid, with or
+       without a budget.
 
 Verdicts
 --------
@@ -53,6 +65,10 @@ Verdicts
                  The step blocks_on synth+LEC, so an absent floorplan at
                  this gate is a real failure, never a vacuous pass.
 * WAIVED (rc=0) — waivers.json declares the step waived (ticket + reason).
+* NOT_MEASURED (rc=2) — apparent DEF stripe metal lacks a complete typed
+                        POWER/GROUND pair; no built PDN is certified. Also
+                        an apply-mode budget whose built-grid DEF could not
+                        be read.
 * SKIP  (rc=2) — project dir not found (operational, not a chip failure).
 
 chip-AGNOSTIC. No vendor / IC / tool-specific number is hard-coded; the
@@ -100,16 +116,6 @@ import _declared_die as _dd                                    # noqa: E402
 
 _GATE_NAME = "floorplan_pdn_check"
 _GATE_LABEL = "floorplan_pdn"
-
-# Power / ground net-name tokens used to recognise a PG SPECIALNET. These
-# are the universal industry / sky130 / generic-PDK conventions, not a
-# chip-specific literal: VDD/VSS (generic), VPWR/VGND + VPB/VNB (sky130
-# std-cell), vccd*/vssd* (Caravel user/power domains). Matched case-
-# insensitively as whole tokens.
-_PG_NET_TOKENS = (
-    "vdd", "vss", "vpwr", "vgnd", "vccd", "vssd", "vdda", "vssa",
-    "vccpst", "vsspst", "vpb", "vnb", "power", "ground",
-)
 
 # pnr.tcl PDN command tokens (OpenROAD pdngen flow).
 _PDN_TCL_TOKENS = (
@@ -180,7 +186,6 @@ def _parse_floorplan_def(path: Path):
     }
 
     in_components = False
-    in_specialnets = False
     for raw in text.splitlines():
         s = raw.strip()
         if not s:
@@ -218,21 +223,23 @@ def _parse_floorplan_def(path: Path):
             out["n_component_lines"] += 1
             continue
 
-        if s.startswith("SPECIALNETS"):
-            in_specialnets = True
-            continue
-        if s.startswith("END SPECIALNETS"):
-            in_specialnets = False
-            continue
-        if in_specialnets and s.startswith("-"):
-            # "- VDD ( ... )" → first token after the dash is the net name.
-            parts = s.split()
-            if len(parts) >= 2:
-                net = parts[1].strip().lower()
-                if any(tok in net for tok in _PG_NET_TOKENS):
-                    out["has_specialnets_pg"] = True
-
+    # Net names do not confer a supply role; the SPECIALNET's + USE does.
+    out["has_specialnets_pg"] = any(
+        _specialnet_role(net) in ("POWER", "GROUND")
+        for net in _specialnet_records(text))
     return out
+
+
+def _specialnet_records(text: str) -> list[str]:
+    section = re.search(r"\bSPECIALNETS\s+\d+\s*;(.*?)\bEND\s+SPECIALNETS\b",
+                        re.sub(r"(?m)#.*$", "", text), re.S | re.I)
+    return (re.split(r"(?m)^\s*-\s+", section.group(1))[1:]
+            if section else [])
+
+
+def _specialnet_role(net: str) -> str | None:
+    match = re.search(r"\+\s+USE\s+([A-Za-z_]+)\b", net, re.I)
+    return match.group(1).upper() if match else None
 
 
 def _any_def_has_pg_specialnets(pnr: Path):
@@ -243,21 +250,9 @@ def _any_def_has_pg_specialnets(pnr: Path):
             text = defp.read_text(errors="replace")
         except OSError:
             continue
-        in_sn = False
-        for raw in text.splitlines():
-            s = raw.strip()
-            if s.startswith("SPECIALNETS"):
-                in_sn = True
-                continue
-            if s.startswith("END SPECIALNETS"):
-                in_sn = False
-                continue
-            if in_sn and s.startswith("-"):
-                parts = s.split()
-                if len(parts) >= 2:
-                    net = parts[1].strip().lower()
-                    if any(tok in net for tok in _PG_NET_TOKENS):
-                        return True, defp.name
+        if any(_specialnet_role(net) in ("POWER", "GROUND")
+               for net in _specialnet_records(text)):
+            return True, defp.name
     return False, None
 
 
@@ -284,6 +279,137 @@ def _pdn_tcl_evidence(pnr: Path):
         if matched:
             return True, tcl.name, matched
     return False, None, []
+
+
+#: A line-start `pdngen` or `write_def <path>` command in the deck that ran.
+_RE_DECK_GRID_OR_DEF = re.compile(
+    r"(?m)^[ \t]*(?:(pdngen)\b|write_def[ \t]+(\S+))")
+
+
+def _census_source_def(pnr: Path) -> tuple[Path | None, str]:
+    """`(def_path | None, basis)`: the DEF that carries the grid pdngen built.
+
+    The direct deck writes ``floorplan.def`` right after the floorplan, BEFORE
+    tapcell and ``pdngen`` -- MEASURED on a gf180 direct run: floorplan.def
+    held 0 STRIPE wires while the DEF written after pdngen held every strap.
+    So the order is read from pnr.tcl itself, the deck that ran, not assumed:
+
+      * pnr.tcl runs ``pdngen``: the first DEF it writes after that command.
+        When it writes none after, but did write floorplan.def before, the
+        only DEF on record predates the grid -> None (not measurable).
+      * pnr.tcl runs no ``pdngen``: the grid was not drawn by this deck; it
+        arrived in the handed-over floorplan.def (e.g. a LibreLane State).
+      * no pnr.tcl: floorplan.def, the step's own record.
+    Comment lines are removed first, so a Tcl remark cannot move the source.
+    """
+    floorplan = pnr / "floorplan.def"
+    try:
+        deck = (pnr / "pnr.tcl").read_text(errors="replace")
+    except OSError:
+        return floorplan, ("no pnr.tcl orders the stage DEFs; floorplan.def is "
+                           "the step's record")
+    written_before = []
+    after_pdngen = False
+    for step in _RE_DECK_GRID_OR_DEF.finditer(
+            re.sub(r"(?m)^[ \t]*#.*$", "", deck)):
+        if step.group(1):
+            after_pdngen = True
+            continue
+        name = step.group(2).strip("\"{}").rsplit("/", 1)[-1]
+        if not name.lower().endswith(".def"):
+            continue
+        if after_pdngen:
+            return pnr / name, f"pnr.tcl writes {name} first after pdngen"
+        written_before.append(name)
+    if not after_pdngen:
+        return floorplan, ("pnr.tcl runs no pdngen; the grid is the one handed "
+                           "over in floorplan.def")
+    if "floorplan.def" in written_before:
+        return None, ("pnr.tcl writes floorplan.def before pdngen and no DEF "
+                      "after it, so no DEF on record carries the built grid")
+    return floorplan, ("pnr.tcl runs pdngen but writes no DEF; floorplan.def "
+                       "is the only DEF on record")
+
+
+def _def_stripe_census(pnr: Path) -> dict:
+    """Count tool-written PG STRIPE wires by supply role and layer.
+
+    Only a WIRE is a strap: a path with a positive width and at least two
+    routing points, not ending in a via. OpenROAD writes every stripe
+    crossing as its own path on the lower layer --
+    ``NEW Metal4 0 + SHAPE STRIPE ( x y ) via4_5_...`` (width 0, one point,
+    a via name). MEASURED on a real post-placement DEF: a rail with 5 Metal4
+    wires and 25 such vias was credited as 30 Metal4 stripes.
+    """
+    path, basis = _census_source_def(pnr)
+    if path is None:
+        return {"status": "NOT_MEASURED", "count": None, "source": None,
+                "source_basis": basis}
+    try:
+        body = path.read_text(errors="replace")
+    except OSError:
+        return {"status": "NOT_MEASURED", "count": None, "source": str(path),
+                "source_basis": basis}
+    count = 0
+    non_pg_stripes = 0
+    stripe_vias = 0
+    by_role_layer = {"POWER": {}, "GROUND": {}}
+    declared_roles = set()
+    for net in _specialnet_records(body):
+        role = _specialnet_role(net)
+        if role in by_role_layer:
+            declared_roles.add(role)
+        # Each ROUTED/NEW token begins one special-wire path. Keep its layer
+        # attached to that path until the next path (or net terminator), so
+        # a SHAPE on the next path cannot be credited to the previous layer.
+        paths = list(re.finditer(r"\b(?:ROUTED|NEW)\s+(\S+)", net, re.I))
+        shapes = []
+        for index, match in enumerate(paths):
+            end = paths[index + 1].start() if index + 1 < len(paths) else len(net)
+            segment = net[match.end():end].split(";", 1)[0]
+            if not re.search(r"\bSHAPE\s+STRIPE\b", segment, re.I):
+                continue
+            width = re.match(r"\s*(\d+(?:\.\d+)?)(?!\S)", segment)
+            points = list(re.finditer(r"\([^()]*\)", segment))
+            tail = segment[points[-1].end():].split() if points else []
+            if (width and float(width.group(1)) > 0 and len(points) >= 2
+                    and (not tail or tail[0].startswith("+"))):
+                shapes.append(match.group(1))
+            else:
+                stripe_vias += 1
+        if role in by_role_layer:
+            count += len(shapes)
+            for layer in shapes:
+                key = layer.lower()
+                rows = by_role_layer[role]
+                rows[key] = rows.get(key, 0) + 1
+        else:
+            non_pg_stripes += len(shapes)
+    return {"status": "MEASURED", "count": count,
+            "by_role_layer": by_role_layer,
+            "declared_roles": sorted(declared_roles),
+            "non_pg_stripes": non_pg_stripes,
+            "stripe_vias_not_counted": stripe_vias,
+            "source": str(path), "source_basis": basis}
+
+
+def _complete_budget_rows(budget: dict) -> list[dict] | None:
+    """A candidate needs one positive, layer-bound group count per row."""
+    rows = budget.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return None
+    layers = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        layer = row.get("layer")
+        groups = row.get("required_groups")
+        if (not isinstance(layer, str) or not layer.strip()
+                or layer.lower() in layers
+                or type(groups) is not int or groups <= 0):
+            return None
+        layers.add(layer.lower())
+    return rows
 
 
 def _measured_utilization(pnr: Path):
@@ -543,9 +669,107 @@ def main(argv=None) -> int:
         })
         fail = True
 
-    verdict = "FAIL" if fail else "PASS"
+    # CR-7: a Tcl command is intent, not the grid pdngen wrote. Existing
+    # published cells are advisory until the owner resolves the N4 corpus
+    # sweep; an explicit input/pdn_budget_pitch_policy.json mode=apply makes
+    # this new design's requirement blocking.
+    plan_path = project / "reports/phase3/floorplan_rectangles.json"
+    try:
+        floor = json.loads(plan_path.read_text()).get("pdn_core_floor") or {}
+        budget = floor.get("budget_pitch") or {}
+    except (OSError, ValueError, AttributeError):
+        budget = {}
+    if not isinstance(budget, dict):
+        budget = {}
+    policy_path = project / "input/pdn_budget_pitch_policy.json"
+    try:
+        policy_mode = json.loads(policy_path.read_text()).get("mode")
+    except (OSError, ValueError, AttributeError):
+        policy_mode = None
+    apply_requested = policy_mode == "apply" or budget.get("mode") == "apply"
+    rows = _complete_budget_rows(budget) if budget.get("verdict") == "CANDIDATE" else None
+    candidate_ready = (rows is not None and
+                       (not apply_requested or budget.get("mode") == "apply"))
+    budget_unmeasured = False
+    if apply_requested and not candidate_ready:
+        state = str(budget.get("verdict") or "MISSING")
+        reason = str(budget.get("reason") or "candidate rows or apply mode missing")
+        infeasible = state == "INFEASIBLE"
+        findings.append({
+            "severity": "FAIL" if infeasible else "NOT_MEASURED",
+            "rule": "PDN_BUDGET_PITCH_UNRESOLVED",
+            "message": f"apply policy requires a complete CANDIDATE budget_pitch; "
+                       f"planner verdict={state}: {reason}",
+        })
+        fail = fail or infeasible
+        budget_unmeasured = not infeasible
+    census = _def_stripe_census(pnr)
+    extra["def_stripe_census"] = census
+    non_pg = census.get("non_pg_stripes", 0)
+    if non_pg:
+        findings.append({
+            "severity": "ADVISORY", "rule": "PDN_DEF_STRAP_ROLE_NOT_PG",
+            "message": f"ignored {non_pg} DEF STRIPE shape(s) whose net is not "
+                       "declared + USE POWER or GROUND; they cannot prove a PDN grid",
+        })
+    required = 2 * sum(row["required_groups"] for row in rows) if rows else 2
+    shortfalls = []
+    if candidate_ready:
+        for row in rows:
+            layer = str(row.get("layer") or "").lower()
+            groups = row["required_groups"]
+            for role in ("POWER", "GROUND"):
+                found = census.get("by_role_layer", {}).get(role, {}).get(layer, 0)
+                if found < groups:
+                    shortfalls.append(f"{role}/{layer}: {found} < {groups}")
+    elif census["status"] == "MEASURED":
+        # Without a pitch budget, a total of two can still be two stripes on
+        # one rail. Require at least one built stripe for each DEF supply role.
+        for role in ("POWER", "GROUND"):
+            found = sum(census.get("by_role_layer", {}).get(role, {}).values())
+            if found < 1:
+                shortfalls.append(f"{role}: {found} < 1")
+    if census["status"] == "MEASURED" and shortfalls:
+        blocking = apply_requested
+        findings.append({
+            "severity": "FAIL" if blocking else "ADVISORY",
+            "rule": "PDN_DEF_STRAP_SHORTFALL",
+            "message": (f"{Path(census['source']).name} has {census['count']} "
+                        "PG STRIPE wire(s); "
+                        f"the {budget.get('mode', 'advisory')} plan needs "
+                        f"at least {required}: {', '.join(shortfalls)}. "
+                        "Tcl commands are not built metal."),
+        })
+        fail = fail or blocking
+    elif census["status"] == "NOT_MEASURED":
+        # An apply-mode requirement on BUILT metal cannot pass on a DEF that
+        # was never read: that is not measured, never a clean pass.
+        findings.append({
+            "severity": "NOT_MEASURED" if apply_requested else "ADVISORY",
+            "rule": "PDN_DEF_STRAPS_NOT_MEASURED",
+            "message": ("no DEF carrying the built grid could be read for the "
+                        f"strap census: {census.get('source_basis')}")})
+        budget_unmeasured = budget_unmeasured or apply_requested
+
+    role_totals = {
+        role: sum(census.get("by_role_layer", {}).get(role, {}).values())
+        for role in ("POWER", "GROUND")}
+    # An advisory grid with a typed supply rail but no built metal cannot be
+    # certified, even when only one of the two roles was declared, and whether
+    # or not a budget candidate exists: a budget's per-layer shortfalls stay
+    # advisory, but a budget never turns a declared rail with zero metal into
+    # a clean grid. A role-free legacy DEF with no PG shapes remains
+    # distinguishable from that evidence.
+    role_undetermined = (census["status"] == "MEASURED"
+                         and not apply_requested
+                         and ((non_pg > 0 and census["count"] == 0)
+                              or (census["count"] > 0 or
+                                  bool(census["declared_roles"]))
+                              and any(v == 0 for v in role_totals.values())))
+    verdict = ("FAIL" if fail else "NOT_MEASURED"
+               if role_undetermined or budget_unmeasured else "PASS")
     _emit(args, project, verdict, findings, extra)
-    return 1 if fail else 0
+    return 1 if fail else 2 if role_undetermined or budget_unmeasured else 0
 
 
 if __name__ == "__main__":

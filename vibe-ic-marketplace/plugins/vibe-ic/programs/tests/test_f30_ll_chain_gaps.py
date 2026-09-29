@@ -217,7 +217,7 @@ def _drive_branch(tmp_path, monkeypatch, rc_by_program):
     monkeypatch.setattr(runner, "_docker_exec", lambda *a, **k: (0, "ok", ""))
     monkeypatch.setattr(contract, "flow_segment", lambda image, first, last, **k: [first, last])
     monkeypatch.setattr(contract, "resolve_step_configs", lambda p, i, pdk, ids, **k: {
-        s: BR._declared(tmp_path, s) for s in ids})
+        s: BR._declared(tmp_path, s, tmp_path) for s in ids})
     monkeypatch.setattr(contract, "emit_pdn_cfg", lambda *a, **k: None)
 
     def chain(project, image, triples, **k):

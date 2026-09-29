@@ -4,6 +4,8 @@ description: Run any known open IC-design benchmark (VerilogEval-v2/Human, RTLLM
 argument-hint: <bench> [--solve|--resume|--score --dataset <path> --run <path>] [--list]
 ---
 
+**First: IC path or IP path?** Read [IC Expert § 0.0](../agents/ic-expert-agent.md) before Phase 1. Use the visible prompt's delivery request or ask the operator if unclear; record the owner answer in `input/step_0_5ic_answers.json`. Each IC or IP run has one stated delivery route. This delivery choice precedes the benchmark task-nature decision below.
+
 # /vibe-ic-benchmark — turnkey benchmark runner
 
 This command is the **front door** for every open IC-design benchmark. It enforces

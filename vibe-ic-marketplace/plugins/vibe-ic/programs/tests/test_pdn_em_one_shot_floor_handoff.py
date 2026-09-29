@@ -68,8 +68,13 @@ def test_measured_floor_is_drawn_and_clears_the_same_jmax_rule(tmp_path,
     assert drawn["met4"] >= floor["per_layer"]["met4"]["w_em_um"]
     assert json.loads((rpt / "pdn_em_sizing.json").read_text())["sizing_basis"] == \
         "measured_max_segment"
+    segment = {"layer0": "met4", "layer1": "met4", "net": "VDD",
+               "current_A": current, "points_um": ((1.0, 1.0), (1.0, 9.0))}
+    geometry = EMC._segment_geometry_width(
+        segment, EMC._geometry_index(EMC._def_pg_local_rects(
+            pnr / "widget.def")))
+    assert geometry is not None and geometry[0] == drawn["met4"]
     screened = EMC._screen_segment(
-        {"layer0": "met4", "layer1": "met4", "net": "VDD",
-         "current_A": current, "width_um": None},
+        dict(segment, width_um=geometry[0]),
         EMC.parse_lef_jmax(tech.read_text()), 0.1, 2.0, drawn)
     assert screened["status"] == "ok", screened

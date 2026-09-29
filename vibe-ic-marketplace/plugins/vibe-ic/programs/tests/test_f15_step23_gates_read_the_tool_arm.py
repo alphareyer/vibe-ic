@@ -26,7 +26,8 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 signoff = importlib.import_module('librelane_signoff')
 
-CORNERS = ('nom_tt_025C_5v00', 'max_ss_125C_4v50', 'min_ff_n40C_5v50')
+CORNERS = tuple(f'{rc}_{pvt}' for rc in ('nom', 'min', 'max')
+                for pvt in ('tt_025C_5v00', 'ss_125C_4v50', 'ff_n40C_5v50'))
 CELL_LIBS = {f'*_{c}': [f'/pdk/p/libs.ref/cells/lib/cells__{c}.lib']
              for c in ('tt_025C_5v00', 'ss_125C_4v50', 'ff_n40C_5v50')}
 STA = 'phase3/librelane/23/01-openroad-stapostpnr'
@@ -197,6 +198,17 @@ def tool_project(root: Path, *, mode='librelane', setup=None, hold=None,
     spef = {f'{rc}_*': _write(project / f'phase3/stage3/extracted/spef_corners/top.{rc}.spef',
                               f'*SPEF "IEEE 1481-1998"\n*DESIGN "top"\n*C_UNIT 1 PF\n// {rc}\n')
             for rc in ('nom', 'min', 'max')}
+    pdk_root = root / 'pdk_root'
+    for pattern, libs in CELL_LIBS.items():
+        stem = pattern[2:]
+        temp = -40 if '_n40C_' in stem else 125 if '_125C_' in stem else 25
+        voltage = 4.5 if stem.endswith('4v50') else 5.5 if stem.endswith('5v50') else 5.0
+        for lib in libs:
+            _write(pdk_root / lib.lstrip('/').removeprefix('pdk/'),
+                   f'library (cells) {{\n nom_process : 1 ;\n'
+                   f' nom_voltage : {voltage} ;\n nom_temperature : {temp} ;\n}}\n')
+    _write(project / 'phase3/librelane_pdk_root.provenance.json', json.dumps({
+        'path': str(pdk_root), 'derivation': {'pdk': 'p'}}))
     folder = project / STA
     metrics = {}
     for corner in CORNERS:
@@ -211,7 +223,9 @@ def tool_project(root: Path, *, mode='librelane', setup=None, hold=None,
         _write(folder / corner / 'unpropagated.rpt', '')
         _write(folder / corner / 'sta.log', ''.join(
             f"Reading cell library for the '{corner}' corner at '{lib}'…\n"
-            for p, libs in CELL_LIBS.items() if corner.endswith(p[1:]) for lib in libs))
+            for p, libs in CELL_LIBS.items() if corner.endswith(p[1:]) for lib in libs)
+            + f"Reading top-level design parasitics for the '{corner}' corner at "
+              f"'{spef[corner.split('_', 1)[0] + '_*']}'…\n")
         metrics.update({f'timing__setup__ws__corner:{corner}': s,
                         f'timing__hold__ws__corner:{corner}': h if h is not None else 1e30})
     _write(folder / 'config.json', json.dumps({
@@ -222,10 +236,13 @@ def tool_project(root: Path, *, mode='librelane', setup=None, hold=None,
         'spef': {k: str(v) for k, v in spef.items()}, 'metrics': metrics}))
     timed = [*views.values(), *spef.values()]
     bound = {str(p.relative_to(folder)): _sha(p) for p in folder.rglob('*')
-             if p.is_file() and p.name.endswith(('.json', '.rpt'))}
+             if p.is_file() and (p.name.endswith(('.json', '.rpt')) or p.name == 'sta.log')}
+    liberty_files = {lib: _sha(pdk_root / lib.lstrip('/').removeprefix('pdk/'))
+                     for libs in CELL_LIBS.values() for lib in libs}
     _write(folder / 'vibeic_receipt.json', json.dumps({
         'input': {'step': 'OpenROAD.STAPostPNR',
-                  'state_files': {str(p): _sha(p) for p in timed}},
+                  'state_files': {str(p): _sha(p) for p in timed},
+                  'liberty_files': liberty_files},
         'sha256': bound}))
     _write(project / signoff.SIGNOFF_RECORD, json.dumps({
         'step': '23', 'mode': mode, 'sta_state': str(folder / 'state_out.json'),
@@ -241,7 +258,7 @@ def rebind(project: Path) -> None:
     folder = project / STA
     receipt = json.loads((folder / 'vibeic_receipt.json').read_text())
     receipt['sha256'] = {str(p.relative_to(folder)): _sha(p) for p in folder.rglob('*')
-                         if p.is_file() and p.name.endswith(('.json', '.rpt'))
+                         if p.is_file() and (p.name.endswith(('.json', '.rpt')) or p.name == 'sta.log')
                          and p.name != 'vibeic_receipt.json'}
     (folder / 'vibeic_receipt.json').write_text(json.dumps(receipt))
     record = json.loads((project / signoff.SIGNOFF_RECORD).read_text())
@@ -373,6 +390,13 @@ def test_each_gate_refuses_a_missing_corner_artefact(tmp_path, name):
     (project / STA / 'max_ss_125C_4v50' / signoff.CORNER_REPORT).unlink()
     rc, doc = run_gate(name, project, tmp_path)
     assert rc == 1, (name, rc, doc)
+    if name == 'sta_corner_record_completeness_check':
+        missing = next(r for r in doc['corners'] if r['corner'] == 'max_ss_125C_4v50')
+        assert missing['measurement_status'] == 'NOT_MEASURED', doc
+        assert missing['scope_gaps']['custom_report']
+        assert all(r['measurement_status'] == 'MEASURED' for r in doc['corners']
+                   if r['corner'] != 'max_ss_125C_4v50')
+        return
     assert verdict(doc) == 'REFUSED', (name, doc)
 
 
@@ -472,8 +496,7 @@ def test_the_completeness_rows_carry_the_tools_corner_scope(tmp_path):
     project = gate_inputs(tool_project(tmp_path))
     _rc, doc = run_gate('sta_corner_record_completeness_check', project, tmp_path)
     rows = {r['corner']: (r['rc_corner'], r['process']) for r in doc['corners']}
-    assert rows == {'nom_tt_025C_5v00': ('nom', 'tt'), 'max_ss_125C_4v50': ('max', 'ss'),
-                    'min_ff_n40C_5v50': ('min', 'ff')}
+    assert rows == {c: (c.split('_', 1)[0], c.split('_', 2)[1]) for c in CORNERS}
 
 
 def test_a_corner_whose_liberty_names_no_process_is_an_incomplete_record(tmp_path):
@@ -486,7 +509,7 @@ def test_a_corner_whose_liberty_names_no_process_is_an_incomplete_record(tmp_pat
     rebind(project)
     gate_inputs(project)
     rc, out = run_gate('sta_corner_record_completeness_check', project, tmp_path)
-    assert (rc, out['verdict']) == (1, 'FAIL')
+    assert (rc, out['verdict']) == (1, 'NOT_MEASURED')
     assert 'R1_INCOMPLETE_CORNER_RECORD' in out['rules_violated']
     rc, out = run_gate('hold_corner_coverage_check', project, tmp_path)
     assert (rc, out['verdict']) == (1, 'REFUSED')

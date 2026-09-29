@@ -277,6 +277,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ERROR: project directory not found: {project}", file=sys.stderr)
         return 2
 
+    # The direct producer entry point must enforce the same 0.5ic route
+    # decision as the runner, before it writes either router file.
+    if TD.bought_slot_hardmacro(project):
+        print(f"REFUSED: {TD.BOUGHT_SLOT_HARDMACRO_MESSAGE}", file=sys.stderr)
+        return 1
+
     rec = build(project, args.answers)
     try:
         rec["written"] = write_artefacts(project, rec)

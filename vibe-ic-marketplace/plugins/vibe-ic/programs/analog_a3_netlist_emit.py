@@ -144,6 +144,7 @@ import pdk_family_identity as _ident  # noqa: E402 — the ONE family matcher
 import analog_netlist_connectivity_check as _conncheck  # noqa: E402
 # The A1 spec-row reading rule, owned by A2 — see `spec_values`.
 import analog_a2_topology_emit as _a2  # noqa: E402
+import pdk_analog_layout_minima as _limits  # noqa: E402
 import analog_poweron_sequence as _poweron  # noqa: E402  (lane icadc)
 import analog_deck_vector_retention as _retain  # noqa: E402  (lane icadc)
 import pdk_analog_device_params as _pdp  # noqa: E402
@@ -976,6 +977,46 @@ def _resolve_params(ir: Dict[str, Any], sv: Dict[str, float]
     # artefact lists WHICH parameters a bound value reached, so a parameter
     # named twice says nothing a reader can use and reads as two devices.
     return overrides, sorted(set(spec_bound)), sorted(nominal), env
+
+
+def bound_geometry_limit_violations(
+        ir: Dict[str, Any], pdkctx: Dict[str, Any],
+        overrides: Dict[str, Dict[str, float]]) -> List[str]:
+    """Name final, spec-bound capacitor geometry the selected PDK cannot draw.
+
+    A2 may divide a library-sized capacitor before A3 has the complete bound
+    spec environment. A3 is where final values are resolved and the last point
+    at which the netlist can be declined before A5 calls a gencell.
+    """
+    family = pdkctx.get("registry_family") or pdkctx.get("family")
+    if not isinstance(family, str) or not family:
+        return []
+    try:
+        _canonical, ent = _limits.resolve_family(family)
+    except (KeyError, TypeError, ValueError):
+        return []
+    roles = ((ent.get("analog_device_layout_maxima") or {})
+             .get("roles") or {})
+    lmax = _limits.max_length_um(roles, _a2.CAP_ROLE)
+    wmax = _limits.max_width_um(roles, _a2.CAP_ROLE)
+    if lmax is None and wmax is None:
+        return []
+    out: List[str] = []
+    for device in ir.get("devices") or []:
+        if device.get("role") != _a2.CAP_ROLE:
+            continue
+        name = str(device.get("name") or "<unnamed>")
+        values = overrides.get(name, {})
+        for param, maximum in (("l", lmax), ("w", wmax)):
+            value = values.get(param, device.get(param))
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                continue
+            if maximum is not None and float(value) > float(maximum):
+                out.append(
+                    f"{name} ({_a2.CAP_ROLE}): bound {param}="
+                    f"{float(value):.6g}u exceeds this PDK's {param}max="
+                    f"{float(maximum):.6g}u")
+    return out
 
 
 def _validate_ir(ir: Dict[str, Any], pdkctx: Dict[str, Any],
@@ -2622,6 +2663,25 @@ def _emit_for_block(project: Path, entry: Dict[str, Any], pdk: str,
         return rec
 
     overrides, spec_bound, nominal, env = _resolve_params(ir, sv)
+    # A3 owns final geometry: these values include bindings A2 could not yet
+    # see. Refuse before emitting a deck that A5 could only clamp or reject.
+    bound_limit_violations = bound_geometry_limit_violations(ir, pdkctx,
+                                                               overrides)
+    if bound_limit_violations:
+        _drop_stale(bdir, name)
+        status = "A3_BOUND_DEVICE_EXCEEDS_PDK_MAXIMUM"
+        reason = ("A3 resolved spec-bound geometry above the selected PDK's "
+                  "drawable limit; it refuses to emit a netlist A5 could not "
+                  "draw without changing its capacitance: "
+                  + "; ".join(bound_limit_violations))
+        gap = write_gap(bdir, project, name, btype, status, reason,
+                        bound_geometry_violations=bound_limit_violations,
+                        pdk_family=(pdkctx.get("registry_family")
+                                    or pdkctx.get("family")))
+        rec.update(action="gap", emitted=False, status=status,
+                   gap_path=str(gap.relative_to(project)),
+                   bound_geometry_violations=bound_limit_violations)
+        return rec
     # ONE word a reader does not have to reconstruct from two lists. The
     # structure always follows from the block's circuit class; whether any
     # bound spec value reached the DEVICES is the question that separates a

@@ -27,6 +27,7 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 
 import _path_layout as _pl                   # noqa: E402
+from _route_fixture import stage_owner_route  # noqa: E402
 
 ROUTED = "reports/orchestrator/phase1_one_shot.json"
 LEGACY = "reports/phase1_one_shot.json"
@@ -136,6 +137,8 @@ def _project_whose_pass_one_is_at_the_flat_path(tmp_path: Path) -> Path:
     p = tmp_path / "proj"
     (p / "input").mkdir(parents=True)
     (p / "input" / "spec.md").write_text("# a counter\n")
+    # owner route rule 2026-09-28 (ICROUTE)
+    stage_owner_route(p, "ic")
 
     flat = p / LEGACY
     flat.parent.mkdir(parents=True, exist_ok=True)
@@ -165,7 +168,7 @@ def test_the_second_pass_carries_a_pass_one_written_at_the_flat_path(tmp_path,
     monkeypatch.setattr(P1, "_consume_expert_answer",
                         lambda *a, **k: (0, {"consumed": True}), raising=False)
 
-    rc = P1.run_second_pass_only(project, "zzdie")
+    rc = P1.run_second_pass_only(project, "zzdie", route="ic")
 
     published = project / ROUTED
     assert published.is_file(), (
@@ -192,6 +195,8 @@ def test_a_second_pass_over_a_routed_project_says_nothing_about_legacy(tmp_path,
     project = tmp_path / "proj"
     (project / "input").mkdir(parents=True)
     (project / "input" / "spec.md").write_text("# a counter\n")
+    # owner route rule 2026-09-28 (ICROUTE)
+    stage_owner_route(project, "ic")
     routed = project / ROUTED
     routed.parent.mkdir(parents=True, exist_ok=True)
     routed.write_text(json.dumps({"phase": 1, "verdict": "PASS",
@@ -201,7 +206,7 @@ def test_a_second_pass_over_a_routed_project_says_nothing_about_legacy(tmp_path,
                         raising=False)
     monkeypatch.setattr(P1, "_consume_expert_answer",
                         lambda *a, **k: (0, {"consumed": True}), raising=False)
-    P1.run_second_pass_only(project, "zzdie")
+    P1.run_second_pass_only(project, "zzdie", route="ic")
 
     doc = json.loads(routed.read_text())
     assert doc.get("pass1_marker") == "routed"
@@ -234,6 +239,8 @@ def _pass_one_as_it_really_leaves_a_project(
     p = tmp_path / "proj"
     (p / "input").mkdir(parents=True)
     (p / "input" / "spec.md").write_text("# a counter\n")
+    # owner route rule 2026-09-28 (ICROUTE)
+    stage_owner_route(p, "ic")
 
     # 1. D1 writes the sidecar, in-process, before anything else is published.
     side = p / SIDECAR_REL
@@ -342,7 +349,7 @@ def test_the_second_pass_carries_the_name_pass_one_gave_it(tmp_path, monkeypatch
                         raising=False)
     monkeypatch.setattr(P1, "_consume_expert_answer",
                         lambda *a, **k: (0, {"consumed": True}), raising=False)
-    P1.run_second_pass_only(project, "zzdie")
+    P1.run_second_pass_only(project, "zzdie", route="ic")
 
     doc = json.loads(_pl.report_path(project, NAME).read_text())
     named = doc.get("pass1_coverage_sidecar")
@@ -366,7 +373,7 @@ def test_a_sidecar_the_carried_record_does_not_name_stays_refused(tmp_path, monk
                         raising=False)
     monkeypatch.setattr(P1, "_consume_expert_answer",
                         lambda *a, **k: (0, {"consumed": True}), raising=False)
-    P1.run_second_pass_only(project, "zzdie")
+    P1.run_second_pass_only(project, "zzdie", route="ic")
 
     doc = json.loads(_pl.report_path(project, NAME).read_text())
     assert "pass1_coverage_sidecar" not in doc, doc.get("pass1_coverage_sidecar")
@@ -438,6 +445,8 @@ def test_the_real_pass_one_main_forgets_then_names(tmp_path, monkeypatch):
     project = tmp_path / "proj"
     (project / "input" / "docs").mkdir(parents=True)
     (project / "input" / "docs" / "spec.md").write_text("# a counter\n")
+    # owner route rule 2026-09-28 (ICROUTE)
+    stage_owner_route(project, "ic")
 
     side = _pl.coverage_only_sidecar_path(project)
     side.parent.mkdir(parents=True, exist_ok=True)

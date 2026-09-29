@@ -52,7 +52,7 @@ PROG = Path(__file__).resolve().parent.parent / \
 #: could see that one of the ten really takes 111.9-211.3 s.
 def _run(args: list, timeout: int = 60) -> subprocess.CompletedProcess:
     return _pr.run(
-        [sys.executable, str(PROG)] + args,
+        [sys.executable, str(PROG)] + args + ["--route", "ic"],
         capture_output=True, text=True)
 
 
@@ -99,6 +99,7 @@ def test_integration_aggregate_report_shape(tmp_path):
     for k in ("phase", "project", "phases", "verdict"):
         assert k in body
     assert body["phase"] == "vibe-ic"
+    assert (body["delivery_route"], body["deliverable"]) == ("IC", "DIE")
     assert isinstance(body["phases"], list)
     # Each phase entry shape.
     for p in body["phases"]:
@@ -155,7 +156,7 @@ def test_need_phase1_auto_detects_prompt_input(tmp_path):
     # Measured: this test's own call takes 18.3 s.
     cp = _pr.run(
         [sys.executable, str(PROG), str(project), "--skip-phase3",
-         "--skip-analog", "--ic-name", "TST_CHIP"],
+         "--skip-analog", "--ic-name", "TST_CHIP", "--route", "ic"],
         capture_output=True, text=True)
     body = json.loads(
         (project / "reports" / "orchestrator" / "vibe_ic_one_shot.json").read_text())
@@ -225,7 +226,7 @@ def _docker_shim(tmp_path, container_image: str, container_id: str,
 #: worst single call 2.414 s, so 60 s is ~25x the worst case.
 #: Invisible to `ci_harness_timeout_ceiling_check` until vibe-ic#1277.
 def _run_env(args: list, env: dict, timeout: int = 60):
-    return _pr.run([sys.executable, str(PROG)] + args,
+    return _pr.run([sys.executable, str(PROG)] + args + ["--route", "ic"],
                           capture_output=True, text=True, env=env)
 
 

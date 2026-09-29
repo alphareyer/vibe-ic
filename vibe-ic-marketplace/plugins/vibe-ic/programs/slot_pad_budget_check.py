@@ -374,7 +374,14 @@ def _token_value(tok: str, params: Optional[Dict[str, int]]) -> Optional[int]:
         return base - int(mm.group(3)) if mm.group(2) == "-" else base + int(mm.group(3))
     if params and tok in params:
         return params[tok]
-    return None
+    # Use the shared bounded Verilog integer evaluator for compound bounds such
+    # as $clog2(memsize)-1. Unknown names still produce None, never a width.
+    try:
+        from register_bus_driver_gen import _int_expr
+        value = _int_expr(re.sub(r"`(?=[A-Za-z_])", "", tok), dict(params or {}))
+    except (ImportError, ValueError, TypeError):
+        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 #: A port INITIALISER -- `output reg rvfi_valid = 1'b0`. Legal, and it sits
@@ -1105,6 +1112,15 @@ def _design_declared_params(project: str) -> Dict[str, int]:
             out[name] = value
             if name.endswith("_param"):
                 out[name[: -len("_param")]] = value
+    # A core's elaboration choices are recorded under core_parameters in the
+    # same declaration. Keep the actual RTL parameter names; memsize_bytes is
+    # a different field and must not be guessed to mean memsize.
+    core = doc.get("core_parameters")
+    if isinstance(core, dict):
+        for key, value in core.items():
+            if (re.fullmatch(r"[A-Za-z_]\w*", str(key))
+                    and isinstance(value, int) and not isinstance(value, bool)):
+                out[str(key)] = value
     return out
 
 
@@ -1575,8 +1591,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             _groups_unresolved = list(_ring.get("groups_unresolved") or [])
             _renames_rejected = list(
                 _ring.get("renamed_interfaces_rejected") or [])
+            _splits_rejected = list(
+                _ring.get("exposed_output_splits_rejected") or [])
             _fits = (_inv["unbonded_count"] == 0 and not _two_sides
-                     and not _groups_unresolved)
+                     and not _groups_unresolved and not _splits_rejected)
             # THE ARITHMETIC, STATED (R-0915-101): pads owed, pads the ring
             # places, and the supply pair the ring must also carry. The supply
             # COUNT is an obligation this gate states and does NOT decide on:
@@ -1644,6 +1662,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     ("source", "heading", "by_side", "groups",
                      "groups_unresolved", "renamed_interfaces",
                      "renamed_interfaces_rejected",
+                     "exposed_output_splits", "exposed_output_splits_rejected",
                      "nets_on_two_sides", "documents_scanned",
                      "documents_unreadable", "parameter_defaults")
                     if k in _derived}
@@ -1676,6 +1695,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                                + ", ".join(r["reasons"])
                                for r in _renames_rejected[:4])
                            if _renames_rejected else ""))
+                if _splits_rejected:
+                    _why.append(
+                        f"{len(_splits_rejected)} declared exposed output "
+                        "split(s) were rejected by the selected-core and L9 "
+                        "interface check (EXPOSED_OUTPUT_SPLIT_INVALID at step "
+                        f"{OWN_RING_STEP}): "
+                        + "; ".join(str(row.get("reasons"))
+                                    for row in _splits_rejected[:4]))
                 rep["reason"] = "; ".join(_why)
             rc = rep["rc"]
 

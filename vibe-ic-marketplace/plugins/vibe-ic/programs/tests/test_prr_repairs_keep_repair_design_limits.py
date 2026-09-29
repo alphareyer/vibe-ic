@@ -45,6 +45,7 @@ proc netcall {name method args} {
         getName { return $name }
         getSigType { return $::SIG($name) }
         isSpecial { return [expr {$::SIG($name) in {POWER GROUND}}] }
+        isDoNotTouch { return 0 }
         getITerms {
             set out [list]
             foreach k [lsort [array names ::PIN]] {
@@ -74,6 +75,7 @@ proc instcall {name method args} {
         getName { return $name }
         getMaster { return ::master_$name }
         getPlacementStatus { return PLACED }
+        isDoNotTouch { return 0 }
         setPlacementStatus { return }
         getITerms {
             set out [list]
@@ -87,11 +89,44 @@ proc mastercall {name method args} { return $::MASTER($name) }
 proc itcall {key method args} {
     switch -- $method {
         getNet { return ::net_[lindex $::PIN($key) 0] }
+        getInst { return ::inst_[lindex [split $key /] 0] }
+        getIoType { return [lindex $::PIN($key) 1] }
         getMTerm { return ::mt_[string map {/ __} $key] }
         default { error "iterm $key: $method" }
     }
 }
 proc mtcall {key method args} { return [lindex $::PIN($key) 1] }
+proc get_pins {args} { return [lindex $args end] }
+proc get_nets {args} {
+    set pin [lindex $args end]
+    return ::net_[lindex $::PIN($pin) 0]
+}
+proc get_name {net} { return [string range $net 6 end] }
+proc report_check_types {args} {
+    set path [lindex $args end]
+    set fh [open $path w]
+    if {[info exists ::SLEW_OVER] && $::SLEW_OVER &&
+        [lsearch -exact $args -max_slew] >= 0} {
+        puts $fh "drv/Z 1.0 2.0 (VIOLATED)"
+    }
+    if {[info exists ::env(VIBEIC_PRR_MAX_FANOUT)]} {
+        set cap $::env(VIBEIC_PRR_MAX_FANOUT)
+        foreach net $::netnames {
+            if {$::SIG($net) ne "SIGNAL"} { continue }
+            set loads 0
+            set driver ""
+            foreach key [array names ::PIN] {
+                if {[lindex $::PIN($key) 0] ne $net} { continue }
+                if {[lindex $::PIN($key) 1] eq "OUTPUT"} { set driver $key }
+                if {[lindex $::PIN($key) 1] in {INPUT INOUT}} { incr loads }
+            }
+            if {$driver ne "" && $loads > $cap} {
+                puts $fh "$driver $cap $loads (VIOLATED)"
+            }
+        }
+    }
+    close $fh
+}
 proc blk {method args} {
     switch -- $method {
         getNets { return [lmap n $::netnames {set _ ::net_$n}] }
@@ -163,6 +198,7 @@ set ::vic_ant_before 0
 set ::vic_created [list]
 set ::vic_unrouted_before [dict create]
 set ::vic_fillers 0
+set ::vic_changed 0
 set ::rd_args [list -verbose]
 '''
 
@@ -172,7 +208,7 @@ def _region(text, start, end):
     return '' if i < 0 else text[i:text.index(end, i)]
 
 
-def run(tmp_path, *, cap='4', fix=True, baseline_over=False):
+def run(tmp_path, *, cap='4', fix=True, baseline_over=False, slew_over=False):
     text = TCL.read_text()
     procs = (_region(text, '# ---- the fanout limit', '# ---- 4. repair')
              # D11's census procs, when the script carries them
@@ -182,7 +218,8 @@ def run(tmp_path, *, cap='4', fix=True, baseline_over=False):
     # SDC says; the cap the step must keep is the SDC's (VIBEIC_PRR_MAX_FANOUT).
     env = 'set ::env(MAX_FANOUT_CONSTRAINT) 10\n' + (
         '' if cap is None else f'set ::env(VIBEIC_PRR_MAX_FANOUT) {cap}\n')
-    script = (HARNESS + env + f'set ::FIX {int(fix)}\n' + procs
+    script = (HARNESS + env + f'set ::FIX {int(fix)}\n'
+              + f'set ::SLEW_OVER {int(slew_over)}\n' + procs
               + ('mkinst l5 and2 {A hot INPUT}\n' if baseline_over else '')
               + ('set ::vic_fo_repaired [vic_fanout_over]\n'
                  if baseline_over else 'set ::vic_fo_repaired [dict create]\n')
@@ -231,6 +268,14 @@ def test_without_a_declared_cap_nothing_is_claimed_kept(tmp_path):
     assert 'the SDC declares no set_max_fanout; not measured' in out.stdout
 
 
+def test_without_a_fanout_cap_a_measured_slew_violator_gets_a_repair_round(tmp_path):
+    out = run(tmp_path, cap=None, slew_over=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert 'RD_CALLS 1' in out.stdout
+    assert 'measured post-antenna slew/capacitance repair' in out.stdout
+    assert 'METRIC vibeic__prr__fanout__added -1' in out.stdout
+
+
 def test_a_load_is_what_sta_counts(tmp_path):
     """The driver is not a load, a supply pin is not a load, a diode is."""
     text = TCL.read_text()
@@ -243,7 +288,8 @@ def test_a_load_is_what_sta_counts(tmp_path):
               + 'puts "ADDED [vic_fanout_added [dict create] [vic_fanout_over]]"\n')
     path = tmp_path / 'count.tcl'
     path.write_text(script)
-    out = subprocess.run(['tclsh', str(path)], capture_output=True, text=True, timeout=60)
+    out = subprocess.run(['tclsh', str(path)], capture_output=True, text=True,
+                         cwd=tmp_path, timeout=60)
     assert out.stdout.splitlines()[0].strip() == 'BEFORE', out.stdout + out.stderr
     assert 'AFTER hot 5' in out.stdout, out.stdout + out.stderr
     assert 'ADDED hot 5' in out.stdout

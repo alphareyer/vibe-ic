@@ -89,8 +89,8 @@ _EXTENT_PRIMITIVE = "extent"
 DENSITY_ATTRIBUTED = "DIE_LEVEL_DENSITY_ATTRIBUTED_TO_INTEGRATOR"
 #: The DRC tier such a delivery earns. NOT "PASS": a reader who greps for PASS
 #: must not find this, and a consumer that does not know the word must not
-#: silently treat it as green (see `_aggregate_verdict` in the phase-3 runner,
-#: whose catch-all returns PASS for any status it does not enumerate).
+#: silently treat it as green (the shared verdict parser declares this tier,
+#: and the run roll-up keeps it off a pass).
 TIER_PASS_WITH_ATTRIBUTION = "PASS_WITH_ATTRIBUTION"
 #: Where the macro's delivery carries what the integrator must close.
 HANDOFF_NAME = "integrator_requirements.json"

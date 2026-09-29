@@ -108,6 +108,10 @@ this that IS recorded: a non-zero exit code.
 9. PROVENANCE_REMOVAL_FILE_STILL_PRESENT (v0.2.102) — a removal event
    claims to have removed a path that still exists on disk. The removal
    did not actually happen.
+10. PROVENANCE_TRANSFORM_INPUT_INVALID — a declared transform has no
+    retained, hash-matching input produced by an earlier successful row.
+    This is a blocking error: a correct final output digest cannot prove
+    an unlinked finishing chain.
 
 7. ATTEST_TIMING_SUSPICIOUS (WARNING, not FAIL) — entry timestamps
    exhibit synthetic patterns. v1.6.32 widened the heuristic beyond
@@ -617,6 +621,96 @@ def _is_inside_project(project: Path, candidate: Path) -> bool:
         return False
 
 
+def _transform_input_findings(project: Path, entries: List[dict],
+                              shipped) -> List[ProvenanceFinding]:
+    """Verify each declared transform against the ledger state it consumed.
+
+    Output verification checks the newest bytes at each path. A transform
+    also claims an EDGE: its input was already produced, still retained,
+    and contained the stated bytes. Walk in ledger order so a later row,
+    failed invocation, or removal cannot invent that earlier producer.
+    Invalid transform rows cannot provide input authority to later links.
+    """
+    findings: List[ProvenanceFinding] = []
+    produced: Dict[str, Tuple[int, str]] = {}
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        removed = _removal_list(entry)
+        if removed is not None:
+            for ref in removed:
+                rel = ref.get("path") if isinstance(ref, dict) else ref
+                if isinstance(rel, str):
+                    produced.pop(rel, None)
+
+        is_transform = entry.get("record") == "declared_transform"
+        valid = True
+        tool = entry.get("tool", "?")
+        if is_transform:
+            inputs = entry.get("inputs")
+            if not isinstance(inputs, dict) or not inputs:
+                findings.append(ProvenanceFinding(
+                    i, tool, "PROVENANCE_TRANSFORM_INPUT_INVALID",
+                    "declared transform has no non-empty inputs map"))
+                valid = False
+            else:
+                for rel, claimed in inputs.items():
+                    reason = None
+                    if not isinstance(rel, str) or not rel:
+                        reason = "input path is not a non-empty string"
+                    elif not isinstance(claimed, str) or not _RE_SHA256.fullmatch(claimed):
+                        reason = f"input '{rel}' has no valid sha256 digest"
+                    else:
+                        source = project / rel
+                        prior = produced.get(rel)
+                        if not _is_inside_project(project, source):
+                            reason = f"input '{rel}' resolves outside the project"
+                        elif prior is None:
+                            reason = f"input '{rel}' has no earlier successful output declaration"
+                        elif prior[1].lower() != claimed.lower():
+                            reason = (f"input '{rel}' claims {claimed}, but its newest "
+                                      f"earlier successful output entry#{prior[0]} "
+                                      f"declares {prior[1]}")
+                        elif not shipped(rel) or not source.is_file():
+                            reason = f"input '{rel}' is not retained as a readable file"
+                        else:
+                            try:
+                                actual = "sha256:" + _file_sha256(source)
+                            except OSError:
+                                actual = None
+                            if actual is None or actual.lower() != claimed.lower():
+                                reason = (f"input '{rel}' retained bytes are {actual or 'unreadable'}, "
+                                          f"not {claimed}")
+                    if reason:
+                        findings.append(ProvenanceFinding(
+                            i, tool, "PROVENANCE_TRANSFORM_INPUT_INVALID", reason))
+                        valid = False
+
+        # A source without an explicit exit code is a legacy production row;
+        # an explicit nonzero or unreadable code supplies no success claim.
+        code = entry.get("exit_code", 0)
+        try:
+            successful = int(code) == 0
+        except (TypeError, ValueError):
+            successful = False
+        if is_transform and ("exit_code" not in entry or
+                             type(code) is not int or code != 0):
+            findings.append(ProvenanceFinding(
+                i, tool, "PROVENANCE_TRANSFORM_INPUT_INVALID",
+                "declared transform has no explicit successful exit_code"))
+            valid = False
+        if not successful or not valid:
+            continue
+        outputs = entry.get("outputs")
+        if not isinstance(outputs, dict):
+            continue
+        for rel, digest in outputs.items():
+            if (isinstance(rel, str) and rel and isinstance(digest, str)
+                    and _RE_SHA256.fullmatch(digest)):
+                produced[rel] = (i, digest)
+    return findings
+
+
 def _load_provenance(project: Path) -> Tuple[Optional[List[dict]], Optional[str]]:
     """Returns (entries, error_or_None). entries=None when file missing."""
     p = project / "provenance.jsonl"
@@ -710,6 +804,7 @@ def audit_counted(project: Path, strict_timing: bool = False,
     verified_present = 0
     verified_relocated = 0
     to_check = entries[:max_entries] if max_entries else entries
+    findings.extend(_transform_input_findings(project, to_check, _shipped))
     # Newest record per output path. An append-only ledger records a
     # SEQUENCE of production events; only the newest record of a path
     # is a claim about the bytes on disk now. Computed over exactly the

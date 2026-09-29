@@ -33,6 +33,9 @@ def _run_dispatcher(tmp_path: Path, *cli) -> Path:
     proj = tmp_path / "proj"
     (proj / "input" / "docs").mkdir(parents=True)
     (proj / "input" / "docs" / "datasheet.md").write_text(_DOC)
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     argv = [sys.executable, str(PROG / "phase1_one_shot_runner.py"),
             str(proj), "--mode", "docs", *cli]
     first = _pr.run(argv, capture_output=True, text=True)

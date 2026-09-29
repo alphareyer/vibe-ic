@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _specrtl_common import _detect_reset
+from parameter_range_contract import minimums
 
 _CLK_NAMES = {"clk", "clock", "clk_i", "i_clk", "sysclk", "clk_in"}
 _RST_NAMES = {"rst", "reset", "rst_n", "reset_n", "rstn", "i_rst",
@@ -228,6 +229,16 @@ def extract_serial_parallel_mul_spec(
     if reset_style is None:
         return None, reset_reason
     reset_mode, active_low = reset_style
+    # CR-11: a declared legal minimum of the size parameter is an elaboration
+    # contract -- a default below it is refused, and emit_rtl guards it.
+    bounds = {}
+    for stem in ("L1_DATASHEET.json", "L2_FRS.json", "L3_DETAIL_SPEC.json",
+                 "L9_INTEGRATION_SPEC.json"):
+        for name, low in minimums(json.dumps(_find_doc(gd, stem), ensure_ascii=False)).items():
+            bounds[name] = max(low, bounds.get(name, low))
+    size_min = bounds.get(size_name.lower())
+    if size_min is not None and size_def < size_min:
+        return None, f"default {size_name}={size_def} violates declared minimum {size_min}"
     spec = {
         "topology": "serial_parallel",
         "operator": "*",
@@ -241,6 +252,7 @@ def extract_serial_parallel_mul_spec(
         "serial_out": ser_out,
         "size_param": size_name,
         "size_default": size_def,
+        "size_min": size_min,
     }
     return spec, "serial-parallel multiplier shape matched"
 
@@ -259,6 +271,10 @@ def emit_rtl(spec: Dict[str, Any]) -> str:
     sensitivity = f"posedge {clk}"
     if reset_mode == "asynchronous":
         sensitivity += f" or {'negedge' if spec['rst_active_low'] else 'posedge'} {rst}"
+    size_min = spec.get("size_min")
+    guard = (f'    generate if ({sz} < {size_min}) begin : g_illegal_width\n'
+             f'        initial $fatal(1, "{sz} must be >= {size_min}");\n'
+             f'    end endgenerate\n\n') if size_min is not None else ''
     return f"""`default_nettype none
 //============================================================================
 // {top} — serial-parallel (carry-save) integer multiplier
@@ -287,6 +303,8 @@ module {top} #(
     reg  [{sz}-1:0] c;    // carry-save carry column
     reg             yr;   // registered serial multiplier bit
     reg             pr;   // registered serial product bit
+
+{guard}
 
     wire [{sz}-1:0] m  = {x} & {{{sz}{{yr}}}};               // gated partial product
     wire [{sz}-1:0] so = m ^ s ^ c;                    // carry-save sum

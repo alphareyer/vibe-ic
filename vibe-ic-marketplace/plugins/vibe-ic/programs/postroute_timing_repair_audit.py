@@ -249,6 +249,63 @@ def _nontiming_block_domains(log: dict, decision: Optional[dict]) -> List[str]:
     return []
 
 
+#: Step 32's third outcome: `postroute_timing_repair_status_gen` found no
+#: timing measurement (or a non-timing domain that never completed) and wrote
+#: this record INSTEAD of a flag or a repair log, with a non-zero exit.
+MEASUREMENT_NOT_AVAILABLE = "measurement_not_available.json"
+
+
+def _not_measured_finding(record_path: Path,
+                          decision: Optional[Dict[str, Any]]) -> Optional[Finding]:
+    """A named ERROR for a Step-32 run whose basis was never measured.
+
+    Read from the generator's own record, else from the runner's decision
+    record when it states ``action == "timing_not_measured"``. None when
+    neither says so, which leaves the generic NO_REPAIR_ARTIFACT in place.
+    It stays an ERROR: an unmeasured basis certifies nothing.
+    """
+    rec: Optional[Dict[str, Any]] = None
+    src = ""
+    if record_path.is_file():
+        try:
+            data = json.loads(record_path.read_text(errors="replace"))
+        except (json.JSONDecodeError, OSError):
+            data = None
+        if isinstance(data, dict):
+            rec, src = data, f"postroute_timing_repair/{MEASUREMENT_NOT_AVAILABLE}"
+    if rec is None and isinstance(decision, dict) \
+            and decision.get("action") == "timing_not_measured":
+        rec, src = decision, TRIGGER_DECISION_DECLARED
+    if rec is None:
+        return None
+    status = rec.get("timing_basis_status")
+    pending = rec.get("nontiming_not_determined") or []
+    domains = ", ".join(str(r.get("domain")) for r in pending
+                        if isinstance(r, dict) and r.get("domain"))
+    if rec.get("reason_class") == "missing_sta_report":
+        category = "STA_REPORT_MISSING"
+        candidates = rec.get("sta_candidates") or []
+        what = ("no post-route STA report exists at the checked paths: "
+                + ", ".join(str(path) for path in candidates))
+    elif status == "NOT_MEASURED":
+        category = "TIMING_BASIS_NOT_MEASURED"
+        what = (f"the post-route timing basis {rec.get('sta_source')!r} carries "
+                "no setup/hold slack or TNS/WNS")
+    else:
+        category = "SIGNOFF_DOMAIN_NOT_DETERMINED"
+        what = ("a non-timing sign-off domain never completed"
+                + (f" ({domains})" if domains else ""))
+    return Finding(
+        "ERROR", category,
+        f"Step 32 was NOT_MEASURED: {what}, so neither "
+        "no_repair_needed.flag nor repair_log.json can be written. "
+        f"Remediation: {rec.get('remediation') or 'none recorded'}",
+        f"record: {src}; sta_source: {rec.get('sta_source')!r}; "
+        f"timing_basis_status: {status!r}"
+        + (f"; decision action: {decision.get('action')!r}"
+           if isinstance(decision, dict) else ""))
+
+
 def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
     findings: List[Finding] = []
     postroute_timing_repair_dir = _pl.postroute_timing_repair_dir(project_dir)
@@ -271,11 +328,24 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
             flag_present=no_repair.exists(),
             log_present=repair_log.exists()))
 
+    named = _not_measured_finding(
+        postroute_timing_repair_dir / MEASUREMENT_NOT_AVAILABLE, decision)
+    if named is not None:
+        stats["not_measured"] = True
+        findings.append(named)
+        if no_repair.exists():
+            findings.append(Finding(
+                "ERROR", "STALE_CLEAN_CERTIFICATE",
+                "no_repair_needed.flag coexists with a NOT_MEASURED Step 32 "
+                "record; the clean certificate cannot be accepted"))
+        return findings, stats
+
     if no_repair.exists():
         stats["repair_needed"] = False
         return findings, stats
 
     if not repair_log.exists():
+        stats["not_measured"] = False
         findings.append(Finding(
             "ERROR", "NO_REPAIR_ARTIFACT",
             "Neither postroute_timing_repair/repair_log.json nor "
@@ -330,17 +400,47 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
     _blocking = _nontiming_block_domains(data, decision)
     stats["nontiming_block_domains"] = _blocking
 
+    _residual = (decision or {}).get("residual") if isinstance(decision, dict) else None
+    _residual = _residual if isinstance(_residual, dict) else {}
+    _kept_with_drv = ((decision or {}).get("action") == "input_route_kept"
+                      and type(_residual.get("drv_count")) is int
+                      and _residual["drv_count"] > 0)
+    _kept_with_timing = ((decision or {}).get("action") == "input_route_kept"
+                         and (_residual.get("setup_below_floor") is True
+                              or _residual.get("hold_below_floor") is True))
     if _blocking:
+        # The same record can also say timing was never measured. Then the
+        # domain triage is necessary but not sufficient, and saying only
+        # "STA will not clear this" would hide the second missing input.
+        _unmeasured = next((r for r in (decision, data) if isinstance(r, dict)
+                            and r.get("timing_basis_status") == "NOT_MEASURED"),
+                           None)
         findings.append(Finding(
             "ERROR", "REPAIR_BLOCKED_ON_NONTIMING_SIGNOFF",
             "no post-route timing repair was applied, and none should have been: the post-route repair was "
             "required by a NON-TIMING sign-off failure ("
             + ", ".join(_blocking) + "), which a timing-repair pass cannot fix. "
             "Re-running sign-off STA will not clear this step — triage and "
-            "re-run the named sign-off domain(s), then re-run the flow",
+            "re-run the named sign-off domain(s), then re-run the flow"
+            + (". Timing is ALSO NOT_MEASURED at "
+               f"{_unmeasured.get('sta_source')!r}: re-run post-route STA too, "
+               "since no setup/hold result exists to judge"
+               if _unmeasured is not None else ""),
             f"decision action: {(decision or {}).get('action')!r}; "
             f"timing_repair_needed: "
             f"{(decision or {}).get('timing_repair_needed', data.get('timing_repair_needed'))!r}"))
+    elif _kept_with_drv:
+        findings.append(Finding(
+            "ERROR", "REPAIR_REFUSED_RESIDUAL_DRV",
+            f"the input route was kept with {_residual['drv_count']} measured "
+            "post-route DRV violation(s); re-running sign-off cannot repair it",
+            "; ".join(str(x) for x in _residual.get("refused_candidates") or [])[:500]))
+    elif _kept_with_timing:
+        findings.append(Finding(
+            "ERROR", "REPAIR_REFUSED_RESIDUAL_TIMING",
+            "the input route was kept below its declared timing floor; "
+            "the closure needs a new candidate",
+            "; ".join(str(x) for x in _residual.get("refused_candidates") or [])[:500]))
     else:
         if not isinstance(changes, list) or len(changes) == 0:
             findings.append(Finding(

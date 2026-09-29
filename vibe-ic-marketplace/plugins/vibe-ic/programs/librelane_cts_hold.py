@@ -187,7 +187,8 @@ def _switch_knobs(project: Path) -> Dict[str, Tuple[Any, str]]:
 
 def overlay(R, project: Path, pdk_name: str, knobs: Dict[str, Any],
             fanout_target: Optional[int], fanout_source: str,
-            scratch: Path) -> Dict[str, Tuple[Any, str]]:
+            scratch: Path, excluded_cells: Optional[Sequence[str]] = ()
+            ) -> Dict[str, Tuple[Any, str]]:
     """Declared step-19/20 config for LibreLane, each value with its source.
 
     * `CTS_SINK_CLUSTERING_SIZE`: a reference-flow `CTS_CLUSTER_SIZE` (the
@@ -207,6 +208,17 @@ def overlay(R, project: Path, pdk_name: str, knobs: Dict[str, Any],
     scratch.mkdir(parents=True, exist_ok=True)
     emitted = _ll.emit_config(project, pdk_name, scratch / "emitted_probe.json")
     overlay: Dict[str, Tuple[Any, str]] = {}
+    # Step 19's hold resizer inserts ordinary cells. Apply the SAME run policy
+    # as direct PnR and the placement arm, including delay-family masters.
+    # Keep exclusions the PDK/design already supplied to LibreLane.
+    inherited = emitted.get("EXTRA_EXCLUDED_CELLS") or []
+    if not isinstance(inherited, list):
+        raise ValueError("LL_CTS_EXCLUSION_POLICY_INVALID: EXTRA_EXCLUDED_CELLS")
+    if excluded_cells is not None:
+        overlay["EXTRA_EXCLUDED_CELLS"] = (
+            sorted(set(inherited) | set(excluded_cells)),
+            "resolved EXTRA_EXCLUDED_CELLS plus "
+            "phase3_one_shot_runner._DONT_USE_FAMILY_PATTERNS over the run liberty")
     declared_cap = emitted.get("MAX_FANOUT_CONSTRAINT")
     candidate = _switch_knobs(project)
     if "CTS_SINK_CLUSTERING_SIZE" in candidate:
@@ -302,6 +314,7 @@ def execute(
     1. the direct deck runs up to `R._PNR_CTS_HOLD_BEGIN` and checkpoints;
     2. the checkpoint is bridged (`state_from_direct`) into LibreLane
        `OpenROAD.CTS` -> `Vibeic.ClockPathDriveSizing` (#2160) ->
+       `Vibeic.ExternalCaptureLaunchRetap` ->
        `OpenROAD.ResizerTimingPostCTS`, then `OpenROAD.STAMidPNR` once per STA
        corner (the step measures one corner per run);
     3. with `dual`, the deck's own region runs on the same checkpoint and both
@@ -333,7 +346,10 @@ def execute(
     def _refuse(code: str, detail: str, out: str = "") -> Tuple[int, str, str]:
         msg = f"{code}: {detail}"
         _log(f"PNR_CTS_HOLD_REFUSED {msg}")
-        return 1, out + f"\nPNR_CTS_HOLD_REFUSED {msg}\n", ""
+        # A tool the contract stopped answers with the session's own stop
+        # code, which step_pnr books NOT_MEASURED; every other refusal is 1.
+        return (_ll.tool_stop_session_rc(code) or 1,
+                out + f"\nPNR_CTS_HOLD_REFUSED {msg}\n", "")
 
     try:
         head = head_deck(
@@ -370,6 +386,7 @@ def execute(
     sizing_tcl = work / "clock_path_drive_sizing.body.tcl"
     R._aa.write_text(sizing_tcl, R._clock_path_drive_sizing_tcl())
     ids = ["OpenROAD.CTS", "Vibeic.ClockPathDriveSizing",
+           "Vibeic.ExternalCaptureLaunchRetap",
            "OpenROAD.ResizerTimingPostCTS", "OpenROAD.STAMidPNR"]
     # The SDC the deck itself reads, mapped back to the host.
     _sdc_m = re.search(r"(?m)^read_sdc\s+(\S+)", deck)
@@ -383,20 +400,33 @@ def execute(
                 str(scene_sdc.resolve()),
                 f"{sdc.name} + the sign-off STA's flat-OCV derate "
                 "(phase3_one_shot_runner._FLAT_OCV_DERATE_EARLY/LATE)")))
-        configs["Vibeic.ClockPathDriveSizing"] = _ll.derive_step_config(
-            configs["Vibeic.ClockPathDriveSizing"],
-            configs["Vibeic.ClockPathDriveSizing"],
-            {"VIBEIC_CLKPATH_PRECTS_INSTANCES": (
-                str(pre["insts"].resolve()),
-                "instance names of the ODB OpenROAD.CTS reads (pre-CTS snapshot)"),
-             "VIBEIC_CLKPATH_SIZING_TCL": (
-                 str(sizing_tcl.resolve()),
-                 "phase3_one_shot_runner._clock_path_drive_sizing_tcl")})
+        configs, policy_steps = R._resolved_cell_policy(
+            configs, Path(pdk_root), str(pdk.name),
+            required=("OpenROAD.CTS", "OpenROAD.ResizerTimingPostCTS"))
         sta_cfg = json.loads(configs["OpenROAD.STAMidPNR"].read_text())
         corners = list(sta_cfg.get("STA_CORNERS") or [])
         if not corners:
             return _refuse("LL_STA_CORNERS_UNDECLARED",
                            str(configs["OpenROAD.STAMidPNR"]), out)
+        configs["Vibeic.ClockPathDriveSizing"] = _ll.derive_step_config(
+            configs["Vibeic.ClockPathDriveSizing"],
+            configs["Vibeic.ClockPathDriveSizing"],
+            {"PNR_CORNERS": (
+                 corners, "resolved STA_CORNERS for external capture setup and hold"),
+             "VIBEIC_CLKPATH_PRECTS_INSTANCES": (
+                str(pre["insts"].resolve()),
+                "instance names of the ODB OpenROAD.CTS reads (pre-CTS snapshot)"),
+             "VIBEIC_CLKPATH_SIZING_TCL": (
+                 str(sizing_tcl.resolve()),
+                 "phase3_one_shot_runner._clock_path_drive_sizing_tcl")})
+        configs["Vibeic.ExternalCaptureLaunchRetap"] = _ll.derive_step_config(
+            configs["Vibeic.ExternalCaptureLaunchRetap"],
+            configs["Vibeic.ExternalCaptureLaunchRetap"],
+            {"PNR_CORNERS": (
+                 corners, "resolved STA_CORNERS for measured retap setup and hold"),
+             "VIBEIC_CLKPATH_PRECTS_INSTANCES": (
+                 str(pre["insts"].resolve()),
+                 "instance names of the ODB OpenROAD.CTS reads (pre-CTS snapshot)")})
         sta_steps = []
         for corner in corners:
             path = configs["OpenROAD.STAMidPNR"].with_name(
@@ -409,6 +439,8 @@ def execute(
         chain = [("OpenROAD.CTS", configs["OpenROAD.CTS"]),
                  ("Vibeic.ClockPathDriveSizing",
                   configs["Vibeic.ClockPathDriveSizing"]),
+                 ("Vibeic.ExternalCaptureLaunchRetap",
+                  configs["Vibeic.ExternalCaptureLaunchRetap"]),
                  ("OpenROAD.ResizerTimingPostCTS",
                   configs["OpenROAD.ResizerTimingPostCTS"])] + sta_steps
         state0 = _ll.state_from_direct(
@@ -417,10 +449,17 @@ def execute(
             project / "phase3/librelane/19-config/bridge", mounts=mounts,
             chain=[c for _, c in chain[1:]])
         folders = _ll.run_chain(project, image, [(s, c, state0) for s, c in chain],
-                                mounts=mounts, lane="19-cts-hold")
+                                mounts=mounts, lane="19-cts-hold", pdk_root=_ll.PDK_GUEST_ROOT)
     except (_ll.Refusal, ValueError, OSError) as exc:
         return _refuse(getattr(exc, "code", "LL_CTS_HOLD_CHAIN_FAILED"), str(exc), out)
-    cts_folder, sizing_folder, rsz_folder = folders[0], folders[1], folders[2]
+    cts_folder, sizing_folder, retap_folder, rsz_folder = folders[:4]
+    import excluded_master_census_check as _emc
+    excluded_census = {
+        step: _emc.write_audit(config, folder / "state_out.json", step,
+                               folder / "excluded_master_census.json",
+                               policy_complete=step in policy_steps)
+        for (step, config), folder in zip(chain, folders)
+        if step in ("OpenROAD.CTS", "OpenROAD.ResizerTimingPostCTS")}
     arms_root = project / "phase3/tool_arms/19"
     scope = {"steps": "19,20", "design": _ll._def_design_name(pre["def"]) or "",
              "corners": ",".join(corners), "measured_by": "OpenROAD.STAMidPNR",
@@ -430,7 +469,7 @@ def execute(
     selected = "librelane"
     selection: Dict[str, Any] = {"selection": "librelane", "mode": modes["19"]}
     measured_state = folders[-1] / "state_out.json"
-    views = {"post_cts_def": Path(json.loads((sizing_folder / "state_out.json")
+    views = {"post_cts_def": Path(json.loads((retap_folder / "state_out.json")
                                              .read_text())["def"]),
              "post_hold_def": Path(json.loads((rsz_folder / "state_out.json")
                                               .read_text())["def"]),
@@ -469,7 +508,7 @@ def execute(
                 chain=[c for _, c in sta_steps[1:]])
             arm_folders = _ll.run_chain(project, image,
                                         [(s, c, arm_state) for s, c in sta_steps],
-                                        mounts=mounts, lane="19-cts-hold-direct-arm")
+                                        mounts=mounts, lane="19-cts-hold-direct-arm", pdk_root=_ll.PDK_GUEST_ROOT)
         except (_ll.Refusal, OSError) as exc:
             return _refuse(getattr(exc, "code", "LL_CTS_HOLD_CHAIN_FAILED"), str(exc), out)
         judge_arm(R, arm / "judge", arm_folders[-1] / "state_out.json",
@@ -522,6 +561,7 @@ def execute(
         "measured_state": str(measured_state.relative_to(project)),
         "measured_state_sha256": _ll.digest(measured_state),
         "selection": selection, "views": {}}
+    receipt["excluded_master_census"] = excluded_census
     # Written in this order so every report is newer than the DEF it
     # describes (the #519 emitter keys on that).
     for name in ("post_cts_def", "post_hold_def", "post_hold_odb", "cts_rpt"):
@@ -549,7 +589,7 @@ def execute(
                                  ).get("metrics", {})
         area_doc = {
             "program": "phase3_one_shot_runner.execute",
-            "before_total_area": _area(sizing_folder),
+            "before_total_area": _area(retap_folder),
             "after_total_area": _area(rsz_folder),
             "hold_buffer_count": rsz_metrics.get(
                 "design__instance__count__hold_buffer"),
@@ -561,7 +601,7 @@ def execute(
                 "are 3.36 of 4.05 mm2 of instance area and would dilute the "
                 "guardrail 6x); the step repairs setup and hold, so this "
                 "bounds the hold-buffer area from above"),
-            "sources": {"before": str((sizing_folder / "state_out.json")
+            "sources": {"before": str((retap_folder / "state_out.json")
                                       .relative_to(project)),
                         "after": str((rsz_folder / "state_out.json")
                                      .relative_to(project))}}
@@ -574,6 +614,7 @@ def execute(
     _log(f"{R._PNR_STAGE_MARKER} cts")
     for label, folder in (("OpenROAD.CTS", cts_folder),
                           ("Vibeic.ClockPathDriveSizing", sizing_folder),
+                          ("Vibeic.ExternalCaptureLaunchRetap", retap_folder),
                           ("OpenROAD.ResizerTimingPostCTS", rsz_folder)):
         if label == "OpenROAD.ResizerTimingPostCTS":
             _log(f"{R._PNR_STAGE_MARKER} hold_repair")

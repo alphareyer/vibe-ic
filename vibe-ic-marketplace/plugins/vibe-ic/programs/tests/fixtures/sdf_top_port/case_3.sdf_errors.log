@@ -1,0 +1,3 @@
+SDF INFO: phase3/stage3/sim_postlayout/spm.sdf:290: INTERCONNECT with port1 = _416_.Q index = 0, port2 = p index = 0
+SDF ERROR: phase3/stage3/sim_postlayout/spm.sdf:290: Could not find intermodpath!
+SDF INFO: phase3/stage3/sim_postlayout/spm.sdf:291: INTERCONNECT with port1 = _417_.Q index = 0, port2 = _360_.B2 index = 0

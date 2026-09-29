@@ -200,6 +200,7 @@ from flow_matrix import waivers as W
 # and so the live capability-gap tables below are read from the module rather
 # than copied into this file.
 import flow_compliance_check as FCC
+import _tapeout_declaration as TD
 from _declared_design_inputs import consumes_declaration, declare_no_reuse
 
 DIM = 8
@@ -569,6 +570,14 @@ def _materialize(project: Path, step: Dict[str, Any],
 
     for pat in _condition_patterns(step):
         _write(project, concretize(pat), _COND_BODY)
+
+    # Step 37's route attestation is owed only on a live pad-ring route.
+    # Model that producer condition with the marker its owner writes, so
+    # removing the attestation still tests the missing-output catcher.
+    if any(TD.SELF_TAPEOUT_REL in (cond.get("files_exist") or [])
+           for cond in (step.get("output_conditions") or {}).values()):
+        _write(project, TD.SELF_TAPEOUT_REL,
+               TD.SELF_TAPEOUT_MARKER + "\n")
 
     # ── ENTRIES MAY SHARE AN ALTERNATIVE, AND A DROP HAS TO REACH ALL OF THEM
     # `" OR "` inside one entry is any-of and the entry list is all-of, so

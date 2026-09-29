@@ -341,6 +341,28 @@ def test_l7_refuses_when_the_project_names_two_technology_families(tmp_path):
     assert block["run_technology"]["ambiguous"] is True
 
 
+def test_l7_technology_citation_is_project_relative(tmp_path):
+    """A generated L document must not freeze the machine's project root."""
+    proj = _project(tmp_path, {"pdk_target": "sky130",
+                               "pdk_target_alternates": ["gf180mcu"]})
+    block = asb.for_l7(proj, _docs())
+    assert block is not None
+    source = block["run_technology"]["source"]
+    assert source == "phase1/generated_docs/L19_CONSTRAINTS_PDK.json::fields.pdk_target"
+    assert str(proj) not in json.dumps(block)
+
+
+def test_l7_run_liberty_citation_does_not_embed_a_host_path(tmp_path):
+    proj = _project(tmp_path, {"pdk_target": "sky130"})
+    stats = proj / "phase2" / "stage2" / "synth" / "stats.json"
+    stats.parent.mkdir(parents=True)
+    liberty = "/opt/pdks/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/tt.lib"
+    stats.write_text(json.dumps({"chip_area_unit_evidence": {"liberty": liberty}}))
+    tech = asb.run_technology(proj)
+    assert tech["source"] == "stats.json::chip_area_unit_evidence.liberty"
+    assert liberty not in json.dumps(tech)
+
+
 def test_l7_adds_no_key_when_the_design_declares_no_area_signoff(tmp_path):
     """MEMBERSHIP: an L7 document of a design that states no standard-cell area
     sign-off is byte-identical to what it was before this change."""

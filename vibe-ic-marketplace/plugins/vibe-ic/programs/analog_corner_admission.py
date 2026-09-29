@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import sys
+import math
 
 # Sibling import, resolvable HOWEVER this file is loaded. A caller that loads
 # the program by path (`spec_from_file_location`, which is how
@@ -26,6 +27,7 @@ import sys
 if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _docker_memory as _dmem  # noqa: E402 -- the ONE place a `docker run` gets its ceiling
+import _watchdog as _wd  # noqa: E402 -- progress, never a raw clock kill
 import time
 import uuid
 from contextlib import contextmanager
@@ -37,6 +39,8 @@ _SIZE = re.compile(r"^([1-9][0-9]*)([kKmMgGtT])(?:i?[bB])?$")
 _BYTES = re.compile(r"^[1-9][0-9]*$")
 HOST_STATE_ENV = "VIBEIC_ANALOG_CORNER_ADMISSION_STATE_DIR"
 HOST_STATE_DEFAULT = Path("/var/tmp/vibeic-analog-corner-admission")
+CORNER_POLL_S = 30.0
+CORNER_STALL_GRACE_S = 1800.0
 
 
 class AdmissionRefused(RuntimeError):
@@ -372,19 +376,125 @@ def docker_run_argv(*, image: str, reservation: str, project: Path,
     return argv
 
 
+def _docker_query(argv: list[str]):
+    return subprocess.run(argv, capture_output=True, text=True, check=False,
+                          timeout=15)
+
+
+def _container_id(name: str) -> str | None:
+    """Bind a freshly launched corner to its exact Docker container ID."""
+    cp = _docker_query(["docker", "inspect", "-f", "{{.Id}}", name])
+    if cp.returncode:
+        if any(s in (cp.stderr or "").lower()
+               for s in ("no such object", "no such container")):
+            return None
+        raise AdmissionRefused(f"cannot identify corner container {name}: "
+                               f"{(cp.stderr or cp.stdout).strip()}")
+    cid = (cp.stdout or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", cid):
+        raise AdmissionRefused("corner container ID is malformed")
+    return cid
+
+
+def _container_terminal(name: str, cid: str | None) -> bool:
+    cid = cid or _container_id(name)
+    if not cid:
+        return True
+    cp = _docker_query(["docker", "ps", "-q", "--no-trunc", "--filter",
+                        f"id={cid}"])
+    if cp.returncode:
+        raise AdmissionRefused("cannot confirm corner container termination")
+    return not (cp.stdout or "").strip()
+
+
+def _run_corner_supervised(argv: list[str], name: str,
+                           recorded_budget_s: float | None):
+    """Watch simulator output and CPU of this exact fresh Docker container.
+
+    Host docker-client CPU is not a liveness signal: it can wait idle while
+    ngspice works. Docker stats samples the container without executing a
+    probe inside it. A positive sample renews the progress lease; the
+    recorded budget never kills a progressing simulation.
+    """
+    bound: list[str | None] = [None]
+    activity = [0.0]
+
+    def bind() -> str | None:
+        if bound[0] is None:
+            bound[0] = _container_id(name)
+        return bound[0]
+
+    def cpu_progress(_proc) -> float | None:
+        try:
+            cid = bind()
+        except (AdmissionRefused, OSError, subprocess.TimeoutExpired):
+            # Observation failure is not a simulator failure. The stall lease
+            # will still expire unless output or another CPU sample advances.
+            return None
+        if not cid:
+            return None
+        try:
+            cp = _docker_query(["docker", "stats", "--no-stream", "--format",
+                                "{{.CPUPerc}}", cid])
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if cp.returncode:
+            return None
+        try:
+            percent = float((cp.stdout or "").strip().rstrip("%"))
+        except ValueError:
+            return None
+        if math.isfinite(percent) and percent > 0.5:
+            activity[0] += 1.0
+        return activity[0]
+
+    def reap(proc, reason: str) -> None:
+        try:
+            cid = bind()
+            if cid:
+                _docker_query(["docker", "rm", "-f", cid])
+        finally:
+            # The Docker client is our own process-group leader. Reap it as
+            # well; never signal a name pattern or an unrelated container.
+            _wd._default_kill(proc, reason)
+
+    result = _wd.run_supervised(
+        argv, cpu_probe=cpu_progress, kill=reap,
+        poll_s=CORNER_POLL_S, stall_grace_s=CORNER_STALL_GRACE_S,
+        hard_ceiling_s=(recorded_budget_s or _wd.DEFAULT_HARD_CEILING_S))
+    return subprocess.CompletedProcess(argv, result.rc, result.out,
+                                       result.err), bound[0]
+
+
 def launch(ledger: AdmissionLedger, *, job_id: str, reservation: str,
            image: str, project: Path, workdir: Path, simulation_args: list[str],
-           runner=subprocess.run):
-    """Reserve first, then and only then invoke the independently-running Docker corner."""
+           recorded_budget_s: float | None = None, runner=None):
+    """Reserve first; release only after the exact corner container is terminal."""
     amount = parse_bytes(reservation)
     token = ledger.reserve(job_id, amount)
     argv = docker_run_argv(image=image, reservation=reservation, project=project,
                            workdir=workdir, simulation_args=simulation_args,
                            name=f"vibeic-corner-{token[:12]}", token=token)
+    name = f"vibeic-corner-{token[:12]}"
+    cid = None
     try:
-        cp = runner(argv, capture_output=True, text=True, check=False)
+        if runner is None:
+            cp, cid = _run_corner_supervised(argv, name, recorded_budget_s)
+            if not _container_terminal(name, cid):
+                raise AdmissionRefused(
+                    f"corner {cid or name} remains live after its launcher returned")
+        else:
+            # Explicit test/transport injection retains the old runner seam.
+            cp = runner(argv, capture_output=True, text=True, check=False)
         ledger.release(token, outcome=f"docker_rc_{cp.returncode}")
         return cp
     except BaseException:
-        ledger.release(token, outcome="launcher_exception")
+        # Preserve the launch/supervision error if Docker itself is unavailable.
+        # In that case terminal state is unknown, so keep the reservation.
+        try:
+            terminal = runner is not None or _container_terminal(name, cid)
+        except (AdmissionRefused, OSError, subprocess.TimeoutExpired):
+            terminal = False
+        if terminal:
+            ledger.release(token, outcome="launcher_exception")
         raise

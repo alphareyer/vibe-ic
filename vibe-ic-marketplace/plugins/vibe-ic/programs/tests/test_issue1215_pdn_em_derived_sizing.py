@@ -7,14 +7,10 @@ independently against the width the router actually drew. No width is ever
 tried-until-green, the Jmax rule/margin/gate are untouched, and a first pass
 with no measurement keeps the PDN byte-identical.
 
-(A) `em_current_density_check.discover_def_pg_min_widths` — the PSM CSV has
-    no width column, so the screen divided strap currents by the LEF minimum
-    width (measured spm x gf180mcuD: assumed 0.28 um vs the 1.6 um the DEF
-    states — J overstated ~5.7x). The routed DEF's SPECIALNETS state every
-    PG wire width; the per-layer MIN positive width is a true LOWER bound on
-    any PG wire there (the analysed net's wires are a subset), so dividing
-    by it still OVERSTATES J — it can only add offenders vs the truth, never
-    hide one, while being strictly less pessimistic than the LEF default.
+(A) `em_current_density_check.discover_def_pg_min_widths` retains a DEF
+    layer-width inventory for planning. The Jmax gate now requires local
+    same-net conductor geometry for each PSM edge; neither that inventory
+    nor the LEF layer default proves an individual edge width.
 
 (B) `phase3_one_shot_runner._pdn_em_width_floor` — the conservation bound:
     no PDN segment can carry more than the injected I_total = P/V, so
@@ -99,30 +95,22 @@ def _screen(cur_a, def_widths):
 
 
 def test_def_width_bound_judges_the_wire_the_router_drew():
-    """2.0 mA on MetalA: at the LEF default 0.28 um J=1.32e-2 >> Jmax
-    1.24e-3 (a false offender ~10.7x); at the DEF-stated 1.6 um
-    J=2.31e-3 — still an offender (~1.87x, the spm shape) but judged on
-    real geometry. At 0.5 mA the LEF basis still cries offender (2.7x)
-    while the DEF basis rightly clears it (0.47x)."""
+    """Layer-level widths cannot claim an edge's actual cross section."""
     r_lef = _screen(2.0e-3, None)
-    assert r_lef["status"] == "offender"
-    assert r_lef["width_source"] == "lef_default_width"
+    assert r_lef["status"] == "unscreened"
+    assert r_lef["reason"] == "segment_conductor_geometry_unproven"
     r_def = _screen(2.0e-3, {"metala": 1.6})
-    assert r_def["status"] == "offender"      # genuinely over even when real
-    assert r_def["width_source"] == "def_specialnets_min"
-    assert r_def["width_um"] == 1.6
-    ok = _screen(0.5e-3, {"metala": 1.6})
-    assert ok["status"] == "ok"
-    assert _screen(0.5e-3, None)["status"] == "offender", \
-        "control: the pre-fix LEF basis mislabels this segment"
+    assert r_def["status"] == "unscreened"
+    assert r_def["reason"] == "segment_conductor_geometry_unproven"
 
 
-def test_csv_width_still_wins_over_def_bound():
+def test_measured_segment_width_still_controls_numeric_screen():
     table = EMC.parse_lef_jmax(_TLEF)
     seg = {"layer0": "MetalA", "layer1": "MetalA", "net": "VDD",
-           "current_A": 2.0e-3, "width_um": 0.30}
+           "current_A": 2.0e-3, "width_um": 0.30,
+           "width_source": "same_net_geometry"}
     r = EMC._screen_segment(seg, table, 0.10, 2.0, {"metala": 1.6})
-    assert r["width_source"] == "csv" and r["width_um"] == 0.30
+    assert r["width_source"] == "same_net_geometry" and r["width_um"] == 0.30
 
 
 # ---------------------------------------------------------------- (B) ----

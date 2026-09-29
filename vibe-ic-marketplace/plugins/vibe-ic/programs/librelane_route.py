@@ -416,7 +416,10 @@ def execute(
     def _refuse(code: str, detail: str, out: str = "") -> Tuple[int, str, str]:
         msg = f"{code}: {detail}"
         _log(f"PNR_ROUTE_REFUSED {msg}")
-        return 1, out + f"\nPNR_ROUTE_REFUSED {msg}\n", ""
+        # A tool the contract stopped answers with the session's own stop
+        # code, which step_pnr books NOT_MEASURED; every other refusal is 1.
+        return (_ll.tool_stop_session_rc(code) or 1,
+                out + f"\nPNR_ROUTE_REFUSED {msg}\n", "")
 
     def _session(tcl_text: str, name: str, append: bool,
                  extra_outputs: Sequence[Path]) -> Tuple[int, str, str]:
@@ -540,10 +543,10 @@ def execute(
                                                      "route_seeds (PPA seed arm)")})
                 steps.append((sid, cfg))
             folders = _ll.run_chain(project, image, [(s, c, state0) for s, c in steps],
-                                    mounts=mounts, lane=lane)
+                                    mounts=mounts, lane=lane, pdk_root=_ll.PDK_GUEST_ROOT)
             final = folders[-1] / "state_out.json"
             mfolders = _ll.run_chain(project, image, [(s, c, final) for s, c in measure],
-                                     mounts=mounts, lane=f"{lane}-measure")
+                                     mounts=mounts, lane=f"{lane}-measure", pdk_root=_ll.PDK_GUEST_ROOT)
             return {"ids": arm_ids, "folders": folders, "final": final,
                     "drt": folders[drt_index], "nvr": folders[drt_index + 1],
                     "measured": mfolders[-1] / "state_out.json",
@@ -624,7 +627,7 @@ def execute(
                     chain=[c for _, c in measure[1:]])
                 mfolders = _ll.run_chain(project, image,
                                          [(s, c, mstate) for s, c in measure],
-                                         mounts=mounts, lane="21-route-direct-measure")
+                                         mounts=mounts, lane="21-route-direct-measure", pdk_root=_ll.PDK_GUEST_ROOT)
             except (_ll.Refusal, OSError) as exc:
                 return _refuse(getattr(exc, "code", "LL_ROUTE_CHAIN_FAILED"), str(exc), out)
             # The direct arm's transcript is a whole-session log; the judge
@@ -667,6 +670,7 @@ def execute(
             try:
                 post32 = step32(project=project, pdk=pdk, image=image,
                                 pdk_root=Path(pdk_root), sdc=sdc, deck=deck,
+                                container=container,
                                 route_state=(arms[selected]["final"]
                                              if selected in arms else None),
                                 route_views={k: views[k] for k in ("odb", "def")},
@@ -733,7 +737,17 @@ def execute(
         trc, tout, terr = _session(tail, "pnr_route_tail.tcl", True, [])
         summary = (f"\nPNR_ROUTE_HANDOFF: selected={selected} "
                    f"receipt={handoff.relative_to(project)}\n")
-        return trc, (out or "") + summary + (tout or ""), (err or "") + (terr or "")
+        # step_pnr's receipt writer checks THIS invocation's returned output,
+        # not merely the on-disk log (which could belong to an older route).
+        # Return only the selected arm's own route transcript, in the same
+        # order in which it was spliced into openroad.log above.
+        if selected == "openroad":
+            selected_route = (arm / "openroad.log").read_text(errors="replace")
+        else:
+            selected_route = (arms_root / selected / "route.log").read_text(
+                errors="replace")
+        return (trc, (out or "") + "\n" + selected_route + summary + (tout or ""),
+                (err or "") + (terr or ""))
 
     if cts_hold is not None:
         # Steps 19/20 on LibreLane: their split runs the head and the CTS/hold

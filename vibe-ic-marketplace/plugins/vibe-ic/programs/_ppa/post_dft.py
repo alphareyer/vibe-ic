@@ -28,7 +28,7 @@ def run_resynthesis_arms(project: Path, image: str, base_config: dict,
                          scan_netlist: Path, *,
                          strategies: tuple[str, ...] = STRATEGIES,
                          mounts: list[tuple[Path, str]] | None = None,
-                         pdk_root: str | None = None) -> dict[str, Path]:
+                         pdk_root: str) -> dict[str, Path]:
     """Run Yosys.Resynthesis per strategy on the scan netlist; keep every arm."""
     if not scan_netlist.is_file():
         raise ll.Refusal('LL_SCAN_NETLIST_MISSING',

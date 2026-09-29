@@ -26,6 +26,55 @@ class Refusal(RuntimeError):
         super().__init__(f"{code}: {detail}")
 
 
+#: The refusals that say the TOOL was stopped, not what the design is, and the
+#: `verdict.ReasonClass` value a consumer books them NOT_MEASURED with.
+#: `run_container` raises both: a supervised tool step that made no progress
+#: (container CPU and output flat for the stall grace) and a probe that passed
+#: its deadline. The tool never answered, so neither is a FAIL; every other
+#: refusal keeps whatever its consumer already decides.
+TOOL_STOP_REASONS = {'LL_TOOL_STALLED': 'stalled',
+                     'LL_TOOL_DEADLINE': 'budget_exhausted'}
+
+
+def tool_stop_reason(code: str | None) -> str | None:
+    """The NOT_MEASURED reason class for a tool-stop refusal code, else None."""
+    return TOOL_STOP_REASONS.get(code) if code else None
+
+
+def _tool_stop_session_rcs() -> dict[str, int]:
+    """Each stop as the exit code a PnR session reports for the same event:
+    the watchdog's stall kill and 124 reserved for a child probe deadline.
+    The session watchdog itself never kills at its recorded ceiling. A chain that runs inside
+    step_pnr's session (steps 19/20, 21) answers with these, so step_pnr books
+    its own stall and a LibreLane stall by one rule."""
+    import _watchdog as _wd
+    return {'LL_TOOL_STALLED': _wd.RC_STALLED, 'LL_TOOL_DEADLINE': 124}
+
+
+def tool_stop_session_rc(code: str | None) -> int | None:
+    """The session exit code for a tool-stop refusal code, else None."""
+    return _tool_stop_session_rcs().get(code) if code else None
+
+
+def session_stop_reason(rc: int | None, evidence: str = "") -> str | None:
+    """Classify a stop only when this invocation names its source.
+
+    A tool may exit 124 or 199 naturally. The watchdog's own stall note or
+    the route/CTS refusal line is required; the recorded ceiling cannot
+    produce 124 since it is advisory.
+    """
+    import re
+    if rc == _tool_stop_session_rcs()['LL_TOOL_STALLED']:
+        if 'WATCHDOG_STALLED:' in evidence or re.search(
+                r'(?m)^PNR_(?:ROUTE|CTS_HOLD)_REFUSED LL_TOOL_STALLED:', evidence):
+            return TOOL_STOP_REASONS['LL_TOOL_STALLED']
+    if rc == _tool_stop_session_rcs()['LL_TOOL_DEADLINE']:
+        if re.search(r'(?m)^PNR_(?:ROUTE|CTS_HOLD)_REFUSED LL_TOOL_DEADLINE:',
+                     evidence):
+            return TOOL_STOP_REASONS['LL_TOOL_DEADLINE']
+    return None
+
+
 #: How every container this module (and librelane_signoff) starts is bounded.
 #: Two kinds, bounded two different ways:
 #:
@@ -46,7 +95,7 @@ TOOL_BUDGET_S = 86_400
 #: The refusals caused by TIME, not by the design or by a tool verdict: a probe
 #: past its deadline, a tool the watchdog reaped as stalled. Only a plain FAIL
 #: is red, so a consumer books these NOT_MEASURED with the refusal as reason.
-TIME_REFUSALS = frozenset({'LL_TOOL_DEADLINE', 'LL_TOOL_STALLED'})
+TIME_REFUSALS = frozenset(TOOL_STOP_REASONS)
 TOOL_STALL_GRACE_S: float | None = None
 _REAP_DEADLINE_S = 30
 _OUTPUT_TAIL = 2000
@@ -1203,6 +1252,13 @@ PDK_ROOT_MARKER = '.vibeic_pdk_root.json'
 PDK_ROOT_PROVENANCE_REL = 'phase3/librelane_pdk_root.provenance.json'
 #: A local metadata read; the bound is for a stalled docker daemon, not a slow host.
 IMAGE_INSPECT_DEADLINE_S = 60
+#: Where a step container sees the run's resolved PDK root: the host root
+#: `pdk_root_resolution` answers is bound here (each chain mounts
+#: `<root>/<pdk>` at `/pdk/<pdk>`), and step configs are resolved against it
+#: (`resolve_step_configs`: `Chip(..., pdk_root="/pdk")`). `run_chain`
+#: passes it to LibreLane's CLI as `--pdk-root`, never leaving the CLI to
+#: default to the image's own `PDK_ROOT` (W22).
+PDK_GUEST_ROOT = '/pdk'
 _PDK_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._+-]*$')
 
 
@@ -1591,6 +1647,27 @@ def derive_step_config(config: Path, output: Path, updates: dict[str, tuple[Any,
                 'keys': provenance})
     if views_path(config).is_file():
         write_json(views_path(output), _load(views_path(config)))
+    # CR-1 rollout: report declared/applied drift at the actual derived step
+    # boundary. Existing published runs may drift, so this remains advisory.
+    import declared_knob_applied_parity as _parity
+    aliases = {'MAX_FANOUT_CONSTRAINT': 'SYNTH_MAX_FANOUT',
+               'PDN_VOFFSET': 'FP_PDN_VOFFSET'}
+    knobs = {'SYNTH_MAX_FANOUT', 'FP_CORE_UTIL', 'PL_TARGET_DENSITY',
+             'FP_PDN_VOFFSET'}
+    observed = {}
+    for key, value in doc.items():
+        knob = aliases.get(key, key)
+        if knob in knobs:
+            observed[knob] = (value, provenance.get(key, str(output)))
+    project = next((parent for parent in output.parents
+                    if (parent / 'input/docs').is_dir() or
+                    (parent / 'phase1/generated_docs').is_dir()), None)
+    report = (_parity.compare(project, observed) if project else
+              {'mode': 'ADVISORY', 'rows': {key: {
+                  'status': 'NOT_MEASURED', 'reason': f'{key}: design input root unread',
+                  'applied': value[0], 'consumer': value[1]}
+                  for key, value in observed.items()}})
+    write_json(output.with_suffix('.parity.json'), report)
     return output
 
 
@@ -2055,6 +2132,16 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     _apply_runner_floorplan(project, emitted, sources, step_ids)
     _apply_layout_top(project, emitted, sources)
     for key, (value, source) in (overlay or {}).items():
+        if key == 'EXTRA_EXCLUDED_CELLS':
+            # This knob is a set of forbidden masters, not a replacement
+            # value: the run-wide policy must retain PDK/design exclusions.
+            inherited = emitted.get(key) or []
+            if (not isinstance(inherited, list) or not isinstance(value, list)
+                    or any(not isinstance(x, str) for x in inherited + value)):
+                raise Refusal('LL_EXCLUSION_POLICY_INVALID', key)
+            value = sorted(set(inherited) | set(value))
+            source = (source + '; union with declared/PDK ' +
+                      str(sources.get(key, 'none')))
         for older in _LEVER_SUPERSEDES.get(key, ()):
             if older in emitted:
                 emitted.pop(older)
@@ -2220,6 +2307,39 @@ def resolve_step_config(project: Path, image: str, source: Path, output: Path,
                       (result.stderr or result.stdout)[-1000:])
     return output
 
+def _sta_liberty_input_hashes(config: dict, project: Path,
+                              mounts: list[tuple[Path, str]]) -> dict[str, str | None]:
+    """Hash the host bytes mounted at each STAPostPNR Liberty guest path.
+
+    The scene log later establishes which of these declared inputs was read.
+    Unknown paths stay unbound; a consumer cannot sign off from a filename.
+    """
+    libraries: set[str] = set()
+    for field in ('CELL_LIBS', 'PAD_LIBS', 'EXTRA_LIBS'):
+        value = config.get(field) or {}
+        groups = value.values() if isinstance(value, dict) else [value]
+        for group in groups:
+            if isinstance(group, str):
+                libraries.add(group)
+            elif isinstance(group, (list, tuple)):
+                libraries.update(v for v in group if isinstance(v, str))
+    roots = [(project.resolve(), project.resolve()),
+             *((Path(host).resolve(), Path(guest)) for host, guest in mounts)]
+    roots.sort(key=lambda item: len(str(item[1])), reverse=True)
+    result: dict[str, str | None] = {}
+    for library in sorted(libraries):
+        guest_path = Path(library)
+        host_path = None
+        for host_root, guest_root in roots:
+            try:
+                host_path = host_root / guest_path.relative_to(guest_root)
+                break
+            except ValueError:
+                continue
+        result[library] = digest(host_path) if host_path and host_path.is_file() else None
+    return result
+
+
 def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
               *, docker: str = 'docker', mounts: list[tuple[Path, str]] | None = None,
               lane: str | None = None, pdk_root: str | None = None,
@@ -2229,7 +2349,24 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
 
     ``openroad_init``: extra Tcl lines for the OpenROAD init file every
     OpenROAD step reads (joins each step's fingerprint).
+
+    ``pdk_root``: the PDK root as the step container sees it (normally
+    `PDK_GUEST_ROOT`, bound from the run's resolved root). It is REQUIRED:
+    without it LibreLane's CLI takes `--pdk-root` from the image's own
+    `PDK_ROOT` at import, a value nothing in the run stated. Each step folder
+    records it, with the host mounts beneath it, in `pdk_root.json`.
     """
+    if not pdk_root or not str(pdk_root).startswith('/'):
+        raise Refusal('LL_PDK_ROOT_UNSTATED',
+                      f'{[s[0] for s in steps]}: pdk_root={pdk_root!r}; the run '
+                      f'must state the PDK root its step containers read, or '
+                      f'LibreLane defaults to the image\'s PDK_ROOT')
+    root = str(pdk_root).rstrip('/') or '/'
+    pdk_record = {'cli_pdk_root': str(pdk_root),
+                  'mounts_under_it': [[str(host.resolve()), guest]
+                                      for host, guest in mounts or []
+                                      if guest == root or guest.startswith(root + '/')],
+                  'stated_by': 'run_chain(pdk_root=...)'}
     capability = image_capability(image, docker)
     outputs = []
     previous: Path | None = None
@@ -2270,6 +2407,9 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                        'config_files': {str(path): digest(path) for path in _walk_paths(
                            _load(config)) if path.is_file()},
                        'step': step_id}
+        if step_id == 'OpenROAD.STAPostPNR':
+            fingerprint['liberty_files'] = _sta_liberty_input_hashes(
+                _load(config), project, mounts or [])
         if home:
             fingerprint['openroad_aliases'] = capability['openroad_aliases']
         if step_id.startswith(PLUGIN_STEP_PREFIX):
@@ -2277,7 +2417,14 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         if openroad_init:
             fingerprint['openroad_init'] = list(openroad_init)
         receipt = folder / 'vibeic_receipt.json'
-        if receipt.exists() and _load(receipt).get('input') == fingerprint and (folder / 'state_out.json').exists():
+        # A folder is reused only if it was run under THIS stated root: one
+        # from before the root was recorded (the CLI then took the image's
+        # PDK_ROOT) or under another root/mount is archived and re-run. The
+        # fingerprint itself is unchanged, so no other step re-runs for it.
+        if (receipt.exists() and _load(receipt).get('input') == fingerprint
+                and (folder / 'state_out.json').exists()
+                and (folder / 'pdk_root.json').is_file()
+                and _load(folder / 'pdk_root.json') == pdk_record):
             _check_state(_load(folder / 'state_out.json'), outputs=True)
             previous = folder / 'state_out.json'
             outputs.append(folder)
@@ -2291,6 +2438,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             shutil.move(str(folder), str(archive / f'{name}-{number:04d}'))
         folder.mkdir(parents=True, exist_ok=True)
         write_json(folder / 'input_fingerprint.json', fingerprint)
+        write_json(folder / 'pdk_root.json', pdk_record)
         volume_args = ['-v', f'{project.resolve()}:{project.resolve()}']
         for host, guest in mounts or []:
             volume_args += ['-v', f'{host.resolve()}:{guest}:ro']
@@ -2300,9 +2448,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         cmd = [docker, 'run', *_dmem.docker_memory_flags(), '--rm', *volume_args,
                '--entrypoint', 'python3', image,
                '-m', 'librelane.steps', 'run', '--id', step_id, '-c', str(config),
-               '-i', str(state_path), '-o', str(folder)]
-        if pdk_root:
-            cmd.extend(['--pdk-root', pdk_root])
+               '-i', str(state_path), '-o', str(folder), '--pdk-root', str(pdk_root)]
         try:
             completed = run_container(cmd, supervised=True,
                                       log=folder / 'invocation.log')
@@ -2325,12 +2471,17 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             raise Refusal('LL_STEP_FAILED', f'{step_id}: rc={completed.returncode}; {folder / "invocation.log"}')
         out_state = _load(folder / 'state_out.json')
         _check_state(out_state, outputs=True)
+        if step_id == 'OpenROAD.STAPostPNR' and fingerprint['liberty_files'] != \
+                _sta_liberty_input_hashes(_load(config), project, mounts or []):
+            raise Refusal('LL_STA_LIBERTY_CHANGED_DURING_RUN', str(folder))
         hashes = {'state_out.json': digest(folder / 'state_out.json')}
         for path in _walk_paths({k: v for k, v in out_state.items() if k != 'metrics'}):
             if path.is_relative_to(folder):
                 hashes[str(path.relative_to(folder))] = digest(path)
         for path in folder.rglob('*'):
             if path.is_file() and path.name.endswith(('.json', '.rpt')) and path.name not in ('vibeic_receipt.json',):
+                hashes[str(path.relative_to(folder))] = digest(path)
+            if step_id == 'OpenROAD.STAPostPNR' and path.is_file() and path.name == 'sta.log':
                 hashes[str(path.relative_to(folder))] = digest(path)
         write_json(receipt, {'input': fingerprint, 'sha256': hashes})
         previous = folder / 'state_out.json'

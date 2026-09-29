@@ -135,6 +135,9 @@ def test_end_to_end_final_l9_emits_two_legal_rails(tmp_path):
     proj = tmp_path / "proj"
     (proj / "input" / "docs").mkdir(parents=True)
     (proj / "input" / "docs" / "L3_external_interface.md").write_text(_TINY_L3)
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     runner = _PROGRAMS / "phase1_one_shot_runner.py"
     # The first pass emits the L docs and the expert handoff. Deliver an answer
     # against those docs, sign the exact D1 evidence, then run the real second

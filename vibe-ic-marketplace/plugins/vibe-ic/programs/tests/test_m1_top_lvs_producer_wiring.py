@@ -204,6 +204,9 @@ def test_orchestrator_dispatches_one_of_m1s_declared_producers(
     (proj / "phase2/stage1/rtl").mkdir(parents=True)
     (proj / "phase2/stage1/rtl/chip_top.v").write_text(
         "module chip_top(); endmodule\n")
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
 
     dispatched: list[str] = []
 
@@ -214,7 +217,7 @@ def test_orchestrator_dispatches_one_of_m1s_declared_producers(
     monkeypatch.setattr(ORCH, "_run_phase", _record)
     monkeypatch.setattr(sys, "argv",
                         ["vibe_ic_one_shot_runner", str(proj),
-                         "--skip-phase1", "--no-dashboard"])
+                         "--route", "ic", "--skip-phase1", "--no-dashboard"])
     ORCH.main()
 
     assert producers & set(dispatched), (
@@ -238,6 +241,9 @@ def test_mixed_signal_dispatch_cannot_drag_the_digital_verdict_down(
     (proj / "phase2/stage1/rtl").mkdir(parents=True)
     (proj / "phase2/stage1/rtl/chip_top.v").write_text(
         "module chip_top(); endmodule\n")
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
 
     producers = _declared_producers_of_top_lvs(tmp_path, monkeypatch)
 
@@ -247,7 +253,7 @@ def test_mixed_signal_dispatch_cannot_drag_the_digital_verdict_down(
     monkeypatch.setattr(ORCH, "_run_phase", _record)
     monkeypatch.setattr(sys, "argv",
                         ["vibe_ic_one_shot_runner", str(proj),
-                         "--skip-phase1", "--no-dashboard"])
+                         "--route", "ic", "--skip-phase1", "--no-dashboard"])
     ORCH.main()
 
     rep = json.loads(
@@ -324,6 +330,9 @@ def test_digital_only_run_dispatches_no_mixed_signal_merge(tmp_path,
     (proj / "phase2/stage1/rtl").mkdir(parents=True)
     (proj / "phase2/stage1/rtl/chip_top.v").write_text(
         "module chip_top(); endmodule\n")
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
 
     dispatched: list[str] = []
 
@@ -334,7 +343,7 @@ def test_digital_only_run_dispatches_no_mixed_signal_merge(tmp_path,
     monkeypatch.setattr(ORCH, "_run_phase", _record)
     monkeypatch.setattr(sys, "argv",
                         ["vibe_ic_one_shot_runner", str(proj),
-                         "--skip-phase1", "--no-dashboard"])
+                         "--route", "ic", "--skip-phase1", "--no-dashboard"])
     ORCH.main()
 
     assert "mixed_signal_top_lvs_run" not in dispatched

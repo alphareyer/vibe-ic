@@ -188,6 +188,9 @@ def test_install_smoke_bare_cache_layout(tmp_path):
         "Build a module named pulse_div: input clk, input rst_n, output "
         "tick. Divide the clock by 10; tick asserts one cycle in ten. "
         "Reset is asynchronous active low.\n")
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     env = dict(os.environ)
     env.pop("CLAUDE_PLUGIN_ROOT", None)
     r = run_phase1_with_expert_answer(proj,

@@ -338,6 +338,7 @@ def test_dual_selecting_pregrt_carries_its_census_into_the_report(tmp_path, monk
     faked). pregrt wins; the report the promotion reads must carry the census
     step's own unrouted metric, or the arm could never be promoted."""
     import test_t102_librelane_postroute_repair as t102
+    monkeypatch.setattr(t102.native, 'measure', t102._tool_written_native_scene)
     pre_census = dict(t102._base(4.2, 0.40),
                       repair_metrics={'vibeic__prr__changed': 0,
                                       'vibeic__prr__before__unrouted__count': 0})

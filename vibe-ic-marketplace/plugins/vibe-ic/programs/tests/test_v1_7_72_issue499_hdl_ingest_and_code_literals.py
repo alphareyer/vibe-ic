@@ -371,6 +371,9 @@ def _project_with_unreadable_document(tmp_path: Path) -> Path:
         "# Widget\n\nA widget with a status register.\n", encoding="utf-8")
     (docs / "commands.qqq").write_text(
         "CMD_READ = 8'h01\nCMD_WRITE = 8'h02\n", encoding="utf-8")
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     return proj
 
 
@@ -423,6 +426,9 @@ def test_vacuous_pass_survives_when_the_input_was_fully_read(
     docs.mkdir(parents=True)
     (docs / "spec.md").write_text(
         "# Widget\n\nA widget with a status register.\n", encoding="utf-8")
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     _run("phase1_one_shot_runner.py", str(proj), "--ic-name", "widget")
     assert II.input_fully_read(proj) is True
 
@@ -535,6 +541,9 @@ def test_unstaged_hdl_citation_is_still_a_leak(tmp_path: Path) -> None:
 # ═══════════════════════════════════════════════════════════════════════
 
 def _phase1(proj: Path) -> None:
+    # owner route rule 2026-09-28 (ICROUTE)
+    from _route_fixture import stage_owner_route
+    stage_owner_route(proj, "ic")
     _run("phase1_one_shot_runner.py", str(proj), "--ic-name", "widget")
 
 
