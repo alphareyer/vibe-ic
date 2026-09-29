@@ -624,6 +624,19 @@ _DRV_CENSUS_RE = re.compile(
     r"^SIGNOFF_DRV_CENSUS\s+(\S+)\s+violators=(\d+)\s*$", re.M)
 
 
+def _row_values(line: str) -> Dict[str, object]:
+    """`{pin, limit, value}` of one violator row (`pin limit value slack ...`);
+    a column that is not a number is None, never a guessed zero."""
+    parts = line.split()
+
+    def num(i: int) -> Optional[float]:
+        try:
+            return float(parts[i])
+        except (IndexError, ValueError):
+            return None
+    return {"pin": parts[0], "limit": num(1), "value": num(2)}
+
+
 def extract_drv(text: str) -> Dict[str, object]:
     """DRV evidence from one STA report body: was OpenSTA ASKED for max_slew /
     max_capacitance / max_fanout, and what did it answer?
@@ -639,6 +652,10 @@ def extract_drv(text: str) -> Dict[str, object]:
     # Preserve the full pin as well as the instance.  Candidate promotion
     # compares distinct (pin, check) identities across all STA scenes.
     pin_rows: Dict[str, List[str]] = {}
+    # The violator's own Limit and measured columns, so a consumer can class a
+    # row (a bond-pad port, an IO-cell pin under the std-cell margin) without
+    # reading the report a second time.
+    pin_values: Dict[str, List[Dict[str, object]]] = {}
     queried = False
     query_error: Optional[str] = None
     kinds_seen: List[str] = []
@@ -732,6 +749,7 @@ def extract_drv(text: str) -> Dict[str, object]:
             counts[kind] = counts.get(kind, 0) + 1
             rows.setdefault(kind, []).append(_row_instance(line))
             pin_rows.setdefault(kind, []).append(line.split()[0])
+            pin_values.setdefault(kind, []).append(_row_values(line))
             continue
         mneg = _TRAILING_NEG_RE.search(line)
         # Only a data row (a name followed by numbers) counts, never the title
@@ -800,6 +818,7 @@ def extract_drv(text: str) -> Dict[str, object]:
         # count so no existing consumer changes.
         "rows": _rows,
         "pin_rows": {k: v for k, v in pin_rows.items() if v},
+        "pin_values": {k: v for k, v in pin_values.items() if v},
     }
 
 
