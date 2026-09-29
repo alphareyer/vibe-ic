@@ -89,3 +89,42 @@ def test_census_negation_and_identification_arms():
     assert both["esd_presence"] == "PRESENT" and both["esd_cells"] == 1
     assert both["structural"] == 1
     assert S.pad_ring_census([("a", "core_cell")], classes) == {"source": None}
+
+
+def _drop_macros(p: Path, masters) -> None:
+    """Remove the named MACRO blocks from every staged LEF (their CLASS unknown)."""
+    import re
+    for lef in (p / "phase3/stage3/extracted").glob("*.lef"):
+        t = lef.read_text()
+        for m in masters:
+            t = re.sub(rf"^MACRO {re.escape(m)}\n.*?^END {re.escape(m)}\n", "", t,
+                       flags=re.M | re.S)
+        lef.write_text(t)
+
+
+def test_ring_with_corners_but_no_classified_pad_is_not_determined(tmp_path):
+    """Round-2 MAJOR: classified corners/spacers with no bond-pad LEF CLASS is a pad ring
+    whose pads are unclassified -- NOT_DETERMINED naming them, never N/A (which also
+    skipped the ESD topology check)."""
+    p = _copy(tmp_path)
+    pads = ["gf180mcu_fd_io__in_c", "gf180mcu_fd_io__bi_24t",
+            "gf180mcu_fd_io__dvdd", "gf180mcu_fd_io__dvss"]
+    _drop_macros(p, pads)
+    r = _row(p)
+    e = r["esd_presence"]
+    assert e["source"] == "lef_class"
+    assert e["status"] == "MANUAL_REVIEW" and e["esd_presence"] == "NOT_DETERMINED"
+    assert e["pads"] == 0 and e["structural"] == 28
+    assert sorted(e["unclassified_masters"]) == sorted(pads)
+    assert "esd_topology" in r
+
+
+def test_bare_pad_of_class_block_beside_a_corner_is_not_na():
+    """The sky130-shape case: a bare (no-ESD) pad shipped as CLASS BLOCK next to a
+    classified corner and spacer."""
+    classes = {"lib_io__bare_pad": "BLOCK", "lib_io__corner_pad": "ENDCAP TOPRIGHT",
+               "lib_io__com_bus_slice": "PAD SPACER"}
+    got = S.pad_ring_census([("p0", "lib_io__bare_pad"), ("c0", "lib_io__corner_pad"),
+                             ("s0", "lib_io__com_bus_slice")], classes)
+    assert got["esd_presence"] == "NOT_DETERMINED" and got["status"] == "MANUAL_REVIEW"
+    assert got["unclassified_masters"] == ["lib_io__bare_pad"]
