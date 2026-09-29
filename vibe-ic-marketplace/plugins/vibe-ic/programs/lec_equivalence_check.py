@@ -503,7 +503,9 @@ def audit_tool_arm(project: Path, res: AuditResult) -> AuditResult:
               and not arms.get("eqy_xbits_partitions")
               and res.non_equivalent_points in (None, 0))
     if not credit:
-        note["state"] = "NOT_CREDITED" if arm_b == "PASS" else "UNDECIDED"
+        same = subjects.get("eqy") == proof_sha
+        note["state"] = ("CORROBORATED" if res.passed and arm_b == "PASS" and same
+                         else "NOT_CREDITED" if arm_b == "PASS" else "UNDECIDED")
         return res
     note["state"] = "CREDITED"
     note["arm_a_findings"] = [asdict(f) for f in res.findings]
