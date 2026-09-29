@@ -31,6 +31,77 @@ def gate_passed(project: Path, digest: str | None = None) -> bool:
             (digest is None or record["layout_digest"] == digest))
 
 
+#: Pre-stream rows whose NOT_MEASURED says the ROUTE itself is absent or not
+#: identifiable -- the only pre-stream states that may stop stream-out
+#: (R-0929-TAIL-CONTINUES: "only a missing/unusable input may stop a
+#: downstream step"). Every other non-PASS row is a measured sign-off verdict.
+STREAM_BLOCKING_GATES = ("layout_basis", "route_evidence", "route_completion")
+
+
+def stream_refusal(project: Path, digest: str | None) -> str:
+    """Why the current routed layout may NOT be streamed -- "" when it may.
+
+    R-0929-TAIL-CONTINUES. A PASS gate streams and is admitted. A measured
+    FAIL / NOT_MEASURED gate still streams, so GDS, DRC, LVS, fill and the rest
+    of the tail are measured on the shipped route; that stream is NEVER admitted
+    (`admit_gds` keeps requiring PASS), so it is never delivered, and the gate's
+    own FAIL keeps the run FAIL. Refused: a receipt that does not bind this
+    layout, a receipt with no measured gate rows (nothing was measured), and a
+    receipt whose route itself was absent or unidentified."""
+    record = gate_record(project)
+    if not digest or record.get("layout_digest") != digest:
+        return "pre-stream receipt does not bind this routed layout"
+    verdict = record.get("verdict")
+    if verdict == "PASS":
+        return ""
+    if verdict not in ("FAIL", "NOT_MEASURED"):
+        return f"pre-stream verdict {verdict!r} is not a measured verdict"
+    if not isinstance(record.get("gates"), list) or not record["gates"]:
+        return "pre-stream receipt carries no measured gate rows"
+    blocking = [g for g in (record.get("unmeasured_gates") or [])
+                if g in STREAM_BLOCKING_GATES]
+    if blocking:
+        return "the routed layout itself is not usable: " + ", ".join(blocking)
+    return ""
+
+
+def measurement_path(project: Path) -> Path:
+    return _pl.reports_phase3_dir(project) / "gds_measurement_stream.json"
+
+
+def record_measurement_stream(project: Path, gds: Path, digest: str) -> None:
+    """The receipt of a stream made for measurement only (never admitted)."""
+    gate = gate_record(project)
+    _aa.write_text(measurement_path(project), json.dumps({
+        "schema": "vibeic.gds_measurement_stream.v1",
+        "admitted": False,
+        "basis": "R-0929-TAIL-CONTINUES: a measured pre-stream FAIL does not "
+                 "stop stream-out; the stream is measured, never delivered",
+        "layout_digest": digest,
+        "prestream_verdict": gate.get("verdict"),
+        "failed_gates": gate.get("failed_gates") or [],
+        "unmeasured_gates": gate.get("unmeasured_gates") or [],
+        "gds_relpath": str(gds.relative_to(project)),
+        "gds_sha256": _sha256(gds),
+    }, indent=2) + "\n")
+
+
+def measurement_stream_current(project: Path) -> bool:
+    """Is the visible stream this run's measurement-only stream of the
+    current, non-PASS pre-stream receipt?"""
+    try:
+        record = json.loads(measurement_path(project).read_text())
+        gate = gate_record(project)
+        gds = project / record["gds_relpath"]
+        return (record.get("admitted") is False
+                and gate.get("verdict") != "PASS"
+                and bool(record.get("layout_digest"))
+                and record["layout_digest"] == gate.get("layout_digest")
+                and gds.is_file() and _sha256(gds) == record.get("gds_sha256"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def admission_path(project: Path) -> Path:
     return _pl.reports_phase3_dir(project) / "gds_admission.json"
 

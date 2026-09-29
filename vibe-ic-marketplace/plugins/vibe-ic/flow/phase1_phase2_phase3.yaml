@@ -6170,7 +6170,7 @@ steps:
               - "phase3/stage3/pnr/drv_promotion_not_run.json"
               - "pnr/drv_promotion_not_run.json"
             absent_condition_reason: "no route promotion happened this run, so no promoted route exists whose claimed improvement the sign-off report could corroborate; the gate's own verdict table makes this its normal outcome and the marker is measured at 0 of 15 published run-roots"
-    blocks_on: [22]
+    blocks_on: [32]
 
   - id: 24
     name: "🔁 IR Drop (static + dynamic)"
@@ -6259,7 +6259,7 @@ steps:
         # blocks the pure-digital majority). Full di/dt transient stays a
         # documented commercial gap (ADVANCED_NODE_EXTENSION.md).
         - program_exit_zero: "dynamic_ir_drop_check reports/phase3/dynamic_ir.json --budget-pct 10"
-    blocks_on: [22]
+    blocks_on: [32]
 
   - id: 25
     name: "🔁 EM check (electromigration lifetime)"
@@ -6389,7 +6389,7 @@ steps:
         # measured and rejected — no published run carries a tech LEF, so its
         # honest rc 3 SKIP would have failed the step on all of them.
         - program_exit_zero: "em_peak_current_authority_check . --json reports/phase3/em_current_authority.json"
-    blocks_on: [22, 24]
+    blocks_on: [32, 24]
 
   - id: 26
     name: "🔁 Antenna check (gate-oxide protection)"
@@ -6462,7 +6462,7 @@ steps:
               deck the gate always reports: an unavailable KLayout or deck
               engine exits 2 with a NAMED disclosure (VACUOUS-PASS), never a
               bare PASS earned by a checker that did not run.
-    blocks_on: [21]
+    blocks_on: [32]
 
   # ── Step 27: Signal Integrity ────────────────────────────
   # Industry standard ⑭/⑮: Crosstalk, noise, and glitch analysis
@@ -6782,7 +6782,7 @@ steps:
               is conditioned on. As a GATE the MCF axis is a documented
               ADVISORY: it is a conservative BOUND, so it validates the
               emitted report rather than hard-failing a negative bound.
-    blocks_on: [22]
+    blocks_on: [32]
 
   # ── Step 28: PERC / Reliability Sign-off ─────────────────
   # Industry standard: Calibre-PERC-class reliability verification is
@@ -6848,7 +6848,7 @@ steps:
       all_of:
         - files_exist: ["reports/phase3/perc_equivalent.json"]
         - program_exit_zero: "perc_signoff_check . --json reports/phase2/gates/perc_signoff.json"
-    blocks_on: [21, 24, 25, 26, 27]
+    blocks_on: [32, 24, 25, 26, 27]
 
   # ── Step 29: Post-Layout Gate-Level Simulation ───────────
   # Industry standard ⑮: Gate-level netlist + SDF back-annotation
@@ -6907,7 +6907,7 @@ steps:
         - advisory_program_exit_zero:
               command: "synth_wrapper_check ."
               advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 1 on a real spm run (2026-08-31): it REFUSES TODAY on real input; the advisory slot is currently swallowing a live finding. Promote to blocking once this run is clean. It reported: FAIL — {'wrappers_checked': 2, 'valid_wrappers': 0, 'errors': 2}"
-    blocks_on: [22]
+    blocks_on: [32]
 
   # ── Step 30: Post-Layout SPICE Verification ──────────────────
   # Industry standard: transistor-level SPICE simulation is the only
@@ -6937,7 +6937,7 @@ steps:
         - files_exist: ["phase3/stage3/spice/*.sp", "phase3/stage3/spice/*.spice", "sim_spice/*.sp"]
           any_of: true
         - program_exit_zero: "spice_correlation_check . --json reports/phase2/gates/spice_correlation.json"
-    blocks_on: [22, 23]
+    blocks_on: [32, 23]
 
   # ── Step 32: Post-route timing repair pass ───────────────────
   # RENAMED (owner call). This step was called "ECO (Engineering Change Order)"
@@ -7084,7 +7084,12 @@ steps:
               loudly. The condition's false branch therefore coincides with an
               honestly declared no-repair run, not with a silent loss of a repair
               that happened.
-    blocks_on: [23, 24, 25, 26, 27, 29, 30]
+    # R-0929-TAIL-CONTINUES: this was `[23, 24, 25, 26, 27, 29, 30]`, the
+    # reverse of what the runner does. Step 32 repairs the routed database
+    # (21) using the post-PnR extraction (22) BEFORE any sign-off is measured;
+    # 23-30 are then measured in the pre-stream pass on the route 32 hands on,
+    # so they `blocks_on` 32 and the audit attributes a Step-32 FAIL to 32.
+    blocks_on: [22]
 
   - id: 33
     name: "Power analysis (pre/post-layout)"
