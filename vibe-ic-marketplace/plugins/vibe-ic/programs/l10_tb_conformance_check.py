@@ -1124,11 +1124,33 @@ def design_declared_unselected(project_root: Optional[str],
     _applicable, na = _cfow.split_design_declared_na([case], selected)
     if not na:
         return None
+    prov = _cfow.selection_basis_provenance(Path(project_root))
     return {"option": str(option).strip(),
             "stated": aw.get("stated"),
             "source": aw.get("source"),
             "design_selected": sorted(selected or ()),
-            "declaration": _cfow._DECLARATION_REL}
+            "declaration": _cfow._DECLARATION_REL,
+            "field": prov.get("field"),
+            "provenance": prov.get("provenance"),
+            "provenance_verified": prov.get("provenance_verified"),
+            **({"provenance_why": prov["why"]} if prov.get("why") else {})}
+
+
+def _not_narrowed_disclosure(project_root: Optional[str],
+                             cases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Cases conditional on an option the design did not list, which the
+    shared fail-closed reader could NOT decide (a spelling outside its closed
+    vocabulary): they stay demanded, and this says why."""
+    if not project_root:
+        return []
+    import cpu_functional_oracle_waiver_check as _cfow  # noqa: PLC0415
+    out: List[Dict[str, Any]] = []
+    _cfow.split_design_declared_na(
+        list(cases), _cfow.design_selected_options(Path(project_root)),
+        not_narrowed=out)
+    for row in out:
+        row.pop("row", None)
+    return out
 
 
 def is_conditional_optional_case(case: Dict[str, Any]) -> Optional[str]:
@@ -1751,6 +1773,7 @@ def evaluate(
             return None
         return "in" if case_kind(case) in producer_scaffold_kinds else "out"
 
+    _contradicted: Dict[str, Dict[str, Any]] = {}
     for c in cases:
         case_id = str(c.get("id", c.get("name", "")))
         category = c.get("category", c.get("type", c.get("kind", "")))
@@ -1817,14 +1840,21 @@ def evaluate(
                 checklist_gap_count += 1
             continue
 
+        # The verdict source is the executor's per-case record.  `tb_blob`
+        # remains available only to the separate vacuity/substance check; a
+        # case id or opcode in source text is never evidence that the case ran.
+        exec_state, exec_reason = _l10x.case_state(case_id, execution_record)
+        executed_fail = exec_state == _l10x.FAIL
+        ok = exec_state == _l10x.PASS
         # R-0929-UNSELECTED-FEATURES — a case whose declared option the design
-        # declares it did NOT select is design-declared NOT_APPLICABLE: not
-        # owed, not waived, not a pass. Decided by the SAME reader the Step-4
-        # gate narrows with (`design_declared_unselected`), so the L10 table
-        # and Step 4 cannot disagree about a row. A selected option, or a
-        # design that states no selection, falls through unchanged.
+        # EXPLICITLY declares it did not select (the shared, fail-closed
+        # reader: `design_declared_unselected`) is design-declared
+        # NOT_APPLICABLE -- not owed, not waived, not a pass -- but ONLY when
+        # it was not executed. An executed FAIL stays a FAIL; an executed PASS
+        # stays as measured and is FLAGGED as contradicting the declaration
+        # (`contradicts_declaration`), never erased.
         _na = design_declared_unselected(project_root, c)
-        if _na is not None:
+        if _na is not None and exec_state == _l10x.NOT_EXECUTED:
             results.append({
                 "id": case_id,
                 "category": category,
@@ -1843,19 +1873,14 @@ def evaluate(
                 "pass": False,
                 "status": STATUS_DESIGN_DECLARED_NA,
                 "reason_class": "DESIGN_DECLARED_NA",
-                "design_declared_na": _na,
+                "design_declared_na": {**_na, "record_state": exec_state},
                 "waived": False,
                 "review_required": False,
                 "capability_gap": None,
             })
             continue
-
-        # The verdict source is the executor's per-case record.  `tb_blob`
-        # remains available only to the separate vacuity/substance check; a
-        # case id or opcode in source text is never evidence that the case ran.
-        exec_state, exec_reason = _l10x.case_state(case_id, execution_record)
-        executed_fail = exec_state == _l10x.FAIL
-        ok = exec_state == _l10x.PASS
+        if _na is not None:
+            _contradicted[case_id] = {**_na, "record_state": exec_state}
         # R-0929-OWNER-SUB-ACCEPT — the two owner rules, asked of a case this
         # record left NOT_EXECUTED only (a FAIL is never asked), through the
         # SAME readers the Step-4 functional gate asks, so the two consumers of
@@ -2145,6 +2170,19 @@ def evaluate(
             pass
         else:
             fail_count += 1
+    # R-0929-UNSELECTED-FEATURES — an executed case of an option the design
+    # declares unselected keeps its measured status; the disagreement between
+    # the run and the declaration is FLAGGED on the row for review.
+    for r in results:
+        basis = _contradicted.get(r.get("id"))
+        if basis is not None:
+            r["contradicts_declaration"] = basis
+            r["review_required"] = True
+            r.setdefault("evidence", []).append(
+                f"CONTRADICTS DECLARATION: executed ({basis['record_state']}) "
+                f"although {basis['declaration']} selects "
+                f"{basis['design_selected']} and the case applies only when "
+                f"'{basis['option']}' is selected — status kept as measured")
     return results, ok_count, fail_count
 
 
@@ -2441,6 +2479,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         "design_declared_na": [
             {"case": r["id"], **r["design_declared_na"]}
             for r in declared_na_rows],
+        "contradicts_declaration": [
+            {"case": r["id"], "status": r.get("status"),
+             **r["contradicts_declaration"]}
+            for r in results if r.get("contradicts_declaration")],
+        "design_declared_na_not_narrowed": _not_narrowed_disclosure(
+            project_root, cases),
         "isa_conformance_credited": [
             r["isa_conformance_credit"] for r in credited_rows],
         "capability_gap": waiver_caps[0] if len(waiver_caps) == 1 else (waiver_caps or None),

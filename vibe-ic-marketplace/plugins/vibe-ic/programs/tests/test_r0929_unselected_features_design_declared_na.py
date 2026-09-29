@@ -71,7 +71,8 @@ V5_DECLARATION = {"top_module": "subservient",
                   "isa_extensions": ["I", "Zifencei"]}
 
 
-def _l10_project(tmp_path, declaration, cases=None):
+def _l10_project(tmp_path, declaration, cases=None, executed=None,
+                 sidecar=None):
     cases = [ALWAYS, *CONDITIONAL] if cases is None else cases
     gd = tmp_path / "phase1" / "generated_docs"
     gd.mkdir(parents=True)
@@ -87,14 +88,19 @@ def _l10_project(tmp_path, declaration, cases=None):
         po = tmp_path / "plugin_output"
         po.mkdir(parents=True)
         (po / "declaration.json").write_text(json.dumps(declaration))
+    if sidecar is not None:
+        (tmp_path / "plugin_output" / "declaration.provenance.json").write_text(
+            json.dumps(sidecar))
     execution.write_record(tmp_path, l10, [
-        {"id": "zifencei", "verdict": "PASS", "sim_executed": True}],
+        {"id": cid, "verdict": v, "sim_executed": True}
+        for cid, v in {"zifencei": "PASS", **(executed or {})}.items()],
         producer="test")
     return l10, tb, work / "summary.txt"
 
 
-def _run_l10(tmp_path, declaration, cases=None):
-    l10, tb, summary = _l10_project(tmp_path, declaration, cases)
+def _run_l10(tmp_path, declaration, cases=None, executed=None, sidecar=None):
+    l10, tb, summary = _l10_project(tmp_path, declaration, cases, executed,
+                                    sidecar)
     out = tmp_path / "l10.json"
     rc = l10gate.main(["--l10", str(l10), "--tb-dir", str(tb),
                        "--summary", str(summary), "--out", str(out),
@@ -201,3 +207,98 @@ def test_step5_design_declared_na_is_non_blocking_and_cites_the_basis(tmp_path):
     assert d["blocking"] is False
     assert d["basis"]["option"] == "M"
     assert d["basis"]["design_selected"] == ["i", "zifencei"]
+
+
+# ---------------------------------------------------------------------------
+# review wave58 U10 round 2
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("selection", [
+    ["RV32IMC"],                 # combined ISA string: M IS selected
+    ["G"],                       # G = IMAFD(+Zicsr,Zifencei)
+    ["rv32im_zicsr"],            # combined, underscore form
+    ["I", "M (mul/div)"],        # free-text entry
+])
+def test_a_selection_outside_the_closed_vocabulary_never_narrows(
+        tmp_path, selection):
+    """R-0929-UNSELECTED-FEATURES needs an EXPLICIT unselected declaration:
+    exact-token absence of `m` in a spelling the reader cannot parse decides
+    nothing, so the M case stays OWED (never NOT_APPLICABLE)."""
+    _rc, data, rows = _run_l10(tmp_path, {"isa_extensions": selection})
+    assert rows["plugin_m_mul_div"]["status"] != NA_ROW, rows["plugin_m_mul_div"]
+    assert data.get("design_declared_na", []) == []
+    nn = {r["case"]: r for r in data.get("design_declared_na_not_narrowed", [])}
+    assert "plugin_m_mul_div" in nn and "DEMANDED" in nn["plugin_m_mul_div"]["why"]
+
+
+def test_an_unrelated_generic_options_list_never_narrows(tmp_path):
+    _rc, data, rows = _run_l10(tmp_path, {"options": ["fast_boot", "debug_uart"]})
+    assert rows["plugin_m_mul_div"]["status"] != NA_ROW
+    assert data.get("design_declared_na", []) == []
+
+
+def test_an_option_token_outside_the_vocabulary_never_narrows(tmp_path):
+    rv32m = dict(CONDITIONAL[0], applies_when={
+        "option": "RV32M", "stated": "(若 Plugin 選 RV32M)", "source": _SRC})
+    _rc, data, rows = _run_l10(tmp_path, V5_DECLARATION, [ALWAYS, rv32m])
+    assert rows["plugin_m_mul_div"]["status"] != NA_ROW
+
+
+def test_all_consumers_make_one_decision_on_every_spelling(tmp_path):
+    import professional_tb_check as ptc
+    assert ptc._NARROWING_VOCABULARY is step4gate.NARROWING_VOCABULARY
+    for k, sel in enumerate([["RV32IMC"], ["G"], ["I", "Zifencei"],
+                             ["I", "Zifencei", "M"]]):
+        _rc, data, _rows = _run_l10(tmp_path / str(k), {"isa_extensions": sel})
+        l10_na = {r["case"] for r in data.get("design_declared_na", [])}
+        step4_na = {c["case"] for c in step4gate._design_declared_na_disclosure(
+            tmp_path / str(k)).get("cases") or []}
+        step5_na = {c["name"] for c in CONDITIONAL
+                    if _step5(tmp_path / f"s5_{k}" / c["name"],
+                              {"isa_extensions": sel}, c)["disposition"]
+                    == fsf.DISP_NOT_APPLICABLE}
+        assert l10_na == step4_na == step5_na, (sel, l10_na, step4_na, step5_na)
+
+
+def test_an_executed_fail_of_an_unselected_option_stays_fail(tmp_path):
+    rc, data, rows = _run_l10(tmp_path, V5_DECLARATION,
+                              executed={"plugin_m_mul_div": "FAIL"})
+    row = rows["plugin_m_mul_div"]
+    assert row["status"] == "fail", row
+    assert row["contradicts_declaration"]["record_state"] == execution.FAIL
+    assert rc == 1
+
+
+def test_an_executed_pass_contradicting_the_declaration_is_flagged(tmp_path):
+    _rc, data, rows = _run_l10(tmp_path, V5_DECLARATION,
+                               executed={"plugin_m_mul_div": "PASS"})
+    row = rows["plugin_m_mul_div"]
+    assert row["status"] == "pass", row
+    assert row["review_required"] is True
+    assert row["contradicts_declaration"]["option"] == "M"
+    assert [r["case"] for r in data["contradicts_declaration"]] == \
+        ["plugin_m_mul_div"]
+    assert "plugin_m_mul_div" not in {
+        r["case"] for r in data.get("design_declared_na", [])}
+
+
+def test_na_rows_carry_record_state_and_the_sidecar_basis(tmp_path):
+    side = {"fields": {"isa_extensions": {
+        "provenance": "existing_declaration", "provenance_verified": False}}}
+    _rc, data, rows = _run_l10(tmp_path, V5_DECLARATION, sidecar=side)
+    basis = rows["plugin_m_mul_div"]["design_declared_na"]
+    assert basis["record_state"] == execution.NOT_EXECUTED
+    assert basis["field"] == "isa_extensions"
+    assert basis["provenance"] == "existing_declaration"
+    assert basis["provenance_verified"] is False
+    assert "UNVERIFIED" in basis["provenance_why"]
+
+
+def test_the_real_subservient_declaration_gives_the_landed_na_set(tmp_path):
+    """subic3 v5: declaration [I, Zifencei] + its real sidecar record."""
+    side = {"fields": {"isa_extensions": {
+        "provenance": "existing_declaration", "provenance_verified": False}}}
+    _rc, data, _rows = _run_l10(tmp_path, V5_DECLARATION, sidecar=side)
+    l10_na = {r["case"] for r in data["design_declared_na"]}
+    step4_na = {c["case"] for c in step4gate._design_declared_na_disclosure(
+        tmp_path).get("cases") or []}
+    assert l10_na == step4_na == {c["name"] for c in CONDITIONAL}

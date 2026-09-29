@@ -156,51 +156,12 @@ _L10_UNIT_JUNIT_REL = Path(
     "phase2/stage1/sim_professional/l10_unit_tb/results.xml")
 
 
-#: The only option spellings this gate narrows on: RISC-V base/extension
-#: names that no other name in the set overlaps. A token outside it (a
-#: subset/superset extension such as Zmmul or Zca, a combined string such as
-#: RV32IMC or G, or free text) is never decided by string equality.
-_NARROWING_VOCABULARY = frozenset(
-    {"i", "e", "m", "a", "f", "d", "q", "c", "v", "h", "zicsr", "zifencei"})
-
-_DECLARATION_PROVENANCE_REL = "plugin_output/declaration.provenance.json"
-
-
-def _selection_basis_provenance(project: Path) -> Dict[str, Any]:
-    """The provenance record of the declaration field the narrowing read.
-
-    Same field lookup as the sibling's `design_selected_options` (first of
-    `_SELECTION_FIELDS` holding a list); the record comes from the emitter's
-    own sidecar. Absent sidecar / field -> said, never assumed verified."""
-    field = None
-    try:
-        obj = json.loads((project / _w._DECLARATION_REL).read_text(
-            errors="replace"))
-        fields = obj.get("fields") if isinstance(obj.get("fields"), dict) else obj
-        field = next((k for k in _w._SELECTION_FIELDS
-                      if isinstance(fields.get(k), list)), None)
-    except (OSError, ValueError, AttributeError):
-        pass
-    out: Dict[str, Any] = {"field": field,
-                           "sidecar": _DECLARATION_PROVENANCE_REL,
-                           "provenance": None, "provenance_verified": None}
-    try:
-        side = json.loads((project / _DECLARATION_PROVENANCE_REL).read_text(
-            errors="replace"))
-        rec = (side.get("fields") or {}).get(field) if field else None
-    except (OSError, ValueError, AttributeError):
-        out["why"] = "no readable provenance sidecar -- the basis is UNVERIFIED"
-        return out
-    if not isinstance(rec, dict):
-        out["why"] = (f"the sidecar carries no record for {field!r} -- the "
-                      f"basis is UNVERIFIED")
-        return out
-    out["provenance"] = rec.get("provenance")
-    out["provenance_verified"] = rec.get("provenance_verified") is True
-    if not out["provenance_verified"]:
-        out["why"] = ("the sidecar does not verify who chose this selection "
-                      "-- the basis is UNVERIFIED")
-    return out
+#: ONE vocabulary and ONE provenance reader, owned by the shared narrowing
+#: (`cpu_functional_oracle_waiver_check`), so this gate, the Step-4 gate, the
+#: L10 table and Step 5 make the same decision.
+_NARROWING_VOCABULARY = _w.NARROWING_VOCABULARY
+_DECLARATION_PROVENANCE_REL = _w.DECLARATION_PROVENANCE_REL
+_selection_basis_provenance = _w.selection_basis_provenance
 
 
 def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
@@ -327,37 +288,18 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
     # A narrowed case is DISCLOSED by name with its basis, never dropped
     # silently, and a FAIL anywhere -- narrowed case or not -- is still a FAIL.
     selected = _w.design_selected_options(project)
-    _app_rows, _na_rows = _w.split_design_declared_na(list(cases), selected)
+    not_narrowed: List[Dict[str, Any]] = []
+    _app_rows, _na_rows = _w.split_design_declared_na(
+        list(cases), selected, not_narrowed=not_narrowed)
     _na_ref = {id(row) for row in _na_rows}
-    # ONE VOCABULARY, FAIL-CLOSED (review w3u4f4z66 #3). The sibling compares
-    # the option token with the declaration list as exact strings; this gate
-    # narrows only when BOTH are spelled in a closed vocabulary. An option such
-    # as `RV32M`, `Zmmul` (a SUBSET of M -- declaring M does not make a Zmmul
-    # case absent, and declaring Zmmul does not make an M case absent) or
-    # `M (optional)`, or a declaration entry such as `RV32IMC` or `G`, cannot
-    # be decided by string equality, so the case stays DEMANDED and the reason
-    # is recorded. The sibling's own policy is not changed here.
-    not_narrowed = []
-    _undecodable = sorted(o for o in (selected or ())
-                          if o not in _NARROWING_VOCABULARY)
-    na_cases = []
-    for cid, case in zip(ids, cases):
-        if id(case) not in _na_ref:
-            continue
-        opt = str((case.get("applies_when") or {}).get("option") or "")
-        why = None
-        if _undecodable:
-            why = (f"the declaration's selection is not parseable in the "
-                   f"vocabulary {sorted(_NARROWING_VOCABULARY)}: "
-                   f"{_undecodable}")
-        elif opt.strip().lower() not in _NARROWING_VOCABULARY:
-            why = (f"option token {opt!r} is not in the vocabulary "
-                   f"{sorted(_NARROWING_VOCABULARY)}")
-        if why:
-            not_narrowed.append({"case": cid, "option": opt,
-                                 "why": why + " -- the case is DEMANDED"})
-        else:
-            na_cases.append((cid, case))
+    # ONE VOCABULARY, FAIL-CLOSED (review w3u4f4z66 #3), now decided INSIDE the
+    # shared reader: an option or a selection entry outside the closed
+    # vocabulary (`RV32M`, `Zmmul`, `RV32IMC`, `G`, free text) is never decided
+    # by string equality; the case stays DEMANDED and `not_narrowed` says why.
+    na_cases = [(cid, case) for cid, case in zip(ids, cases)
+                if id(case) in _na_ref]
+    for row in not_narrowed:
+        row["case"] = ids[row.pop("row")]
     na_ids = {cid for cid, _case in na_cases}
     applicable = [cid for cid in ids if cid not in na_ids]
     design_declared_na = {
