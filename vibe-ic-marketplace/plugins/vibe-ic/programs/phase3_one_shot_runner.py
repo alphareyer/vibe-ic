@@ -56623,8 +56623,12 @@ _DECLARED_SIGNOFF_GATES = (
     # refused core cell, NOT_APPLICABLE_BY_STRUCTURE off a DIE top).
     ("pad_input_drive", "pad_input_drive_check.py",
      "reports/phase3/sta/pad_input_drive_check.json", ()),
+    # R-0929-DRV-IDENTITY: these gates run after stream-out and LVS, so this
+    # DRV capture is the FINAL one (it binds the GDS and the LVS netlist); the
+    # judge refuses a bundle that is not.  Only this verdict counts toward IC
+    # PASS; the pre-stream row (`_PRESTREAM_GATES`) is the in-flow capture.
     ("drv_signoff", "drv_signoff_judge.py",
-     "reports/phase3/sta/drv_signoff.json", ()),
+     "reports/phase3/sta/drv_signoff.json", ("--capture-point", "post_stream")),
     # Step 23 declares this report, but the inline executor must produce and
     # consume it too. Its real subprocess verdict reaches the same release
     # fold as the other sign-off gates; missing inputs remain BLOCKED.
@@ -57796,8 +57800,7 @@ _ADVISORY_TIER_SIGNOFF_GATES = {"dfm_screen": "PASS_WITH_ADVISORIES"}
 
 def _run_declared_signoff_gate(project: Path, name: str, program: str,
                                out_rel: str,
-                               extra_argv: tuple = (),
-                               drv_capture_point: str = "in_flow") -> StepResult:
+                               extra_argv: tuple = ()) -> StepResult:
     """Invoke one flow-declared sign-off gate inline, blocking on its verdict.
 
     Exactly two exit codes are verdicts about the design — 0 (PASS) and 1
@@ -57833,7 +57836,11 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
         out_json.unlink(missing_ok=True)
         try:
             import drv_capture_plan as _drv_plan
-            _drv_plan.capture_and_publish(project, capture_point=drv_capture_point)
+            # The row's own declaration says which capture it judges.
+            _argv = list(extra_argv)
+            _point = (_argv[_argv.index("--capture-point") + 1]
+                      if "--capture-point" in _argv[:-1] else "in_flow")
+            _drv_plan.capture_and_publish(project, capture_point=_point)
         except (OSError, ValueError, RuntimeError, KeyError) as exc:
             return _signoff_not_checked(
                 name, t0, f"fresh DRV capture did not complete: {exc}")
@@ -58050,13 +58057,8 @@ def step_declared_signoff_gates(project: Path,
         # Forwarded to the same named set, for the same reason `--pdk` is.
         if container and name in _PDK_AWARE_SIGNOFF_GATES:
             extra_argv = tuple(extra_argv) + ("--pdk-container", container)
-        # R-0929-DRV-IDENTITY: these gates run after stream-out and LVS, so
-        # the DRV capture here is the FINAL one: it binds the GDS and the LVS
-        # netlist and proves they derive from the judged DEF / netlist.  Only
-        # this verdict counts toward IC PASS; the pre-stream one is in-flow.
         out.append(_run_declared_signoff_gate(
-            project, name, program, out_rel, extra_argv,
-            drv_capture_point="post_stream"))
+            project, name, program, out_rel, extra_argv))
     # R-0929-PAD-INPUT-DRIVE: no STA PASS on a NOT_MEASURED pad drive.
     out = _ppa_timing.pad_drive_sta_verdict(sys.modules[__name__], project, out)
     return _reconcile_sta_verdict(out)

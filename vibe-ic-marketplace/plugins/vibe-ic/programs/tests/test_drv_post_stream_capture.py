@@ -37,6 +37,9 @@ def _streamed(tmp_path, *, lvs_status="PASS", gds_def=None, lvs_def=None,
     for name in ("lvs_netlist", "gds_netlist"):     # nothing bound yet
         identity[name] = None
         identity["artifacts"].pop(name, None)
+    for rel in ("reports/phase3/gds_admission.json", "reports/phase3/lvs_inputs.json",
+                "reports/phase3/lvs_verdict.json"):
+        (project / rel).unlink(missing_ok=True)      # this test writes its own
     if records:
         gds = _file(project, "phase3/stage3/pnr/top.gds", "GDSII STREAM\n")
         _file(project, "reports/phase3/gds_admission.json", json.dumps({
@@ -108,25 +111,39 @@ def test_a_changed_gds_after_admission_is_not_evidence(tmp_path):
 
 # --- the flow -------------------------------------------------------------------
 
-def test_the_post_gds_signoff_gates_take_the_final_capture(tmp_path, monkeypatch):
+def test_the_post_gds_drv_row_declares_the_final_capture():
+    import phase3_one_shot_runner as R
+    post = [g for g in R._DECLARED_SIGNOFF_GATES if g[0] == "drv_signoff"]
+    pre = [g for g in R._PRESTREAM_GATES if g[0] == "drv_signoff"]
+    assert [tuple(g[3]) for g in post] == [("--capture-point", "post_stream")]
+    assert [tuple(g[3]) for g in pre] == [()]            # in-flow
+
+
+def test_the_drv_gate_takes_the_capture_its_row_declares(tmp_path, monkeypatch):
     import phase3_one_shot_runner as R
     seen = []
-    monkeypatch.setattr(R, "_run_declared_signoff_gate",
-                        lambda project, name, program, out_rel, extra_argv=(),
-                        drv_capture_point="in_flow": seen.append((name, drv_capture_point))
-                        or R.StepResult(name, "PASS", 0.0, "stub"))
-    monkeypatch.setattr(R, "_reconcile_sta_verdict", lambda rows: rows)
-    R.step_declared_signoff_gates(tmp_path, "synthetic", "")
-    # the DRV gate's capture is the final one (the point only matters to it)
-    assert [point for name, point in seen if name == "drv_signoff"] == ["post_stream"]
+
+    def capture(project, *, final_state=None, capture_point="in_flow"):
+        seen.append(capture_point)
+        raise ValueError("stop after the capture request")
+
+    monkeypatch.setattr(capture_plan, "capture_and_publish", capture)
+    for argv in (("--capture-point", "post_stream"), ()):
+        row = R._run_declared_signoff_gate(
+            tmp_path, "drv_signoff", "drv_signoff_judge.py",
+            "reports/phase3/sta/drv_signoff.json", argv)
+        assert row.status != "PASS"
+    assert seen == ["post_stream", "in_flow"]
 
 
-def test_the_prestream_drv_gate_stays_in_flow():
-    import phase3_one_shot_runner as R
-    assert any(spec[0] == "drv_signoff" for spec in R._PRESTREAM_GATES)
-    src = (_PROGRAMS / "phase3_one_shot_runner.py").read_text()
-    body = src[src.index("def step_prestream_gate("):src.index("def run_pre_audit_producers(")]
-    assert "drv_capture_point" not in body   # the in-flow default
+def test_the_final_gate_refuses_an_in_flow_bundle(tmp_path):
+    _, bundle = _streamed(tmp_path)
+    source = tmp_path / "bundle.json"
+    out = tmp_path / "out.json"
+    source.write_text(json.dumps(bundle))
+    drv.main([str(source), "--json", str(out), "--capture-point", "in_flow"])
+    assert any("gate judges the in_flow capture but the bundle is post_stream" in n
+               for n in json.loads(out.read_text())["not_measured"])
 
 
 def test_step_lvs_records_the_layout_and_netlist_it_compares(tmp_path, monkeypatch):
@@ -144,23 +161,6 @@ def test_step_lvs_records_the_layout_and_netlist_it_compares(tmp_path, monkeypat
     assert doc["layout_def"] == {"path": str(layout.resolve()), "sha256": drv._sha(layout)}
     assert Path(doc["schematic_netlist"]["path"]).is_file()
     assert doc["schematic_netlist"]["sha256"] == drv._sha(Path(doc["schematic_netlist"]["path"]))
-
-
-def test_the_drv_gate_hands_its_capture_point_to_the_capture(tmp_path, monkeypatch):
-    import phase3_one_shot_runner as R
-    seen = []
-
-    def capture(project, *, final_state=None, capture_point="in_flow"):
-        seen.append(capture_point)
-        raise ValueError("stop after the capture request")
-
-    monkeypatch.setattr(capture_plan, "capture_and_publish", capture)
-    for point in ("post_stream", "in_flow"):
-        row = R._run_declared_signoff_gate(
-            tmp_path, "drv_signoff", "drv_signoff_judge.py",
-            "reports/phase3/sta/drv_signoff.json", (), drv_capture_point=point)
-        assert row.status != "PASS"
-    assert seen == ["post_stream", "in_flow"]
 
 
 def test_an_lvs_that_stops_early_leaves_no_earlier_record(tmp_path, monkeypatch):
