@@ -128,3 +128,59 @@ def test_a_program_only_closure_needs_no_signature(tmp_path):
            json.dumps({"invocation_status": "INVOKED_BY_PROGRAM"}))
     row = _judge(tmp_path)
     assert row.status == "PASS", row.reasons
+
+
+HARNESS = f"{FORMAL}/formal_top.sv"
+
+
+def test_the_signature_binds_the_harness(tmp_path):
+    """Review wave 58 MAJOR: formal-verify authors the WHOLE harness when the
+    generator cannot emit one (formal_property_run hands it formal_<top>.sv),
+    so a same-named property weakened in the harness must void the receipt."""
+    _stage_expert_answer(tmp_path)
+    (tmp_path / FRAGMENT).unlink()
+    _write(tmp_path, HARNESS,
+           "module formal_top(input wire clk);\n"
+           "property p_x_sync; @(posedge clk) dut_q == 1'b0; endproperty\n"
+           "a_x_sync: assert property (p_x_sync);\nendmodule\n")
+    _ai_judgement_fixture.sign(tmp_path, "5")
+    assert _judge(tmp_path).status == "PASS"
+    _write(tmp_path, HARNESS,
+           "module formal_top(input wire clk);\n"
+           "property p_x_sync; @(posedge clk) 1'b1; endproperty\n"
+           "a_x_sync: assert property (p_x_sync);\nendmodule\n")
+    stale = _judge(tmp_path)
+    assert stale.status == "NOT_MEASURED", stale.reasons
+    assert stale.reason_class == "awaiting_signed_judgement", stale.reasons
+
+
+def test_a_review_only_closure_still_needs_the_signature(tmp_path):
+    """Review wave 58 MINOR 3: the expert's answer is a receipt alone (its
+    properties are in the harness), and the producer then closes the request."""
+    _stage_expert_answer(tmp_path)
+    (tmp_path / FRAGMENT).unlink()
+    _write(tmp_path, HARNESS,
+           "module formal_top(input wire clk);\n"
+           "property p_x_sync; @(posedge clk) dut_q == 1'b0; endproperty\n"
+           "a_x_sync: assert property (p_x_sync);\nendmodule\n")
+    _close_request_like_the_producer(tmp_path)
+    assert not (tmp_path / REQUEST).exists()
+    unsigned = _judge(tmp_path)
+    assert unsigned.status == "NOT_MEASURED", unsigned.reasons
+    assert unsigned.reason_class == "awaiting_signed_judgement", unsigned.reasons
+    _ai_judgement_fixture.sign(tmp_path, "5")
+    assert _judge(tmp_path).status == "PASS"
+
+
+def test_sby_scratch_copies_are_not_signed_evidence(tmp_path):
+    """Review wave 58 MINOR 2: sby copies sources into <task>/src/. A scratch
+    copy is not the reviewed file; rewriting it must neither void a valid
+    receipt nor be part of what the receipt binds."""
+    _stage_expert_answer(tmp_path)
+    _ai_judgement_fixture.sign(tmp_path, "5")
+    _write(tmp_path, f"{FORMAL}/formal_top_formal_safety/src/formal_expert_properties.svh",
+           "// scratch copy of an older fragment\n")
+    _write(tmp_path, f"{FORMAL}/formal_top_formal_safety/src/formal_top.sv",
+           "// scratch copy of the harness\n")
+    row = _judge(tmp_path)
+    assert row.status == "PASS", row.reasons
