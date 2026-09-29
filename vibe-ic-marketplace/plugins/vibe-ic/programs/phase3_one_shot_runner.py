@@ -46584,7 +46584,9 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
               "selected_arm": report.get("selected_arm")}
     views: Dict[str, Path] = {}
     state = report.get("adopted_state")
-    if report.get("verdict") == "PASS" and state and Path(state) != Path(route_state):
+    # R-0929-STEP32-ADOPT: an adopted candidate is handed off; neither its
+    # residual DRV nor the step-32 DRV verdict keeps the pre-repair route.
+    if report.get("adopted") and state and Path(state) != Path(route_state):
         # cmp3 D15: a route is promoted only with its promoter's own antenna
         # and unrouted measurement of it; without one the input route stays.
         own = _step32_own_measurement(report)
@@ -46635,7 +46637,7 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
         return StepResult("postroute_repair_librelane", "NOT_MEASURED",
                           time.time() - t0, f"LL_PRR_TRIGGER_NOT_MEASURED: {_why}",
                           reason_class=_V.ReasonClass.INCONCLUSIVE)
-    if report.get("verdict") != "PASS":
+    if report.get("verdict") != "PASS" and not report.get("adopted"):
         _drv_promotion_disclose(pnr_out, "postroute_repair_refused",
                                 str(report.get("reason") or report.get("code")))
         return StepResult("postroute_repair_librelane",
@@ -46662,6 +46664,20 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
                           f"promoted ({refused}); input route kept; its closure "
                           "was not established by step 32",
                           reason_class=_V.ReasonClass.INCONCLUSIVE)
+    # Step 32's own verdict: the actuator's and the step-32 DRV judgement's,
+    # the worse of the two (R-0929-DRV-IDENTITY: residual DRV keeps the step
+    # FAIL).  It is reported, and never decides the handoff below.
+    _rank = {"PASS": 0, "WAIVED": 1, "NOT_MEASURED": 2, "FAIL": 3}
+    _drv_v = report.get("drv_signoff_verdict")
+    step_status = max((str(report.get("verdict") or "NOT_MEASURED"),
+                       str(_drv_v or "PASS")),
+                      key=lambda v: _rank.get(v, 2))
+    if step_status not in _rank:
+        step_status = "NOT_MEASURED"
+    drv_note = (f"; step-32 DRV {_drv_v}: "
+                + "; ".join(((report.get("drv_signoff") or {}).get("failures") or [])[:3]
+                            + ((report.get("drv_signoff") or {}).get("not_measured") or [])[:3])
+                if _drv_v and _drv_v != "PASS" else "")
     if not report.get("adopted"):
         if _trigger is not None and _trigger.get("action") != "RUN":
             # Measured clean input: the closure was deliberately not run.
@@ -46675,9 +46691,9 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
                                  for r in report.get("closure") or [])
                        or "no controller outcome was recorded"))
         _drv_promotion_disclose(pnr_out, "librelane_closure_kept_input", _why)
-        return StepResult("postroute_repair_librelane", "PASS", time.time() - t0,
+        return StepResult("postroute_repair_librelane", step_status, time.time() - t0,
                           f"no candidate adopted (input route kept): {summary}; "
-                          + _why)
+                          + _why + drv_note)
     routed = pnr_out / "routed.def"
     netlist = pnr_out / f"{top}_pnr.v"
     if handed:
@@ -46707,12 +46723,12 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
     _gds = pnr_out / f"{top}.gds"
     if top and _gds.is_file():
         _gds.unlink()   # step_gds re-derives from the promoted route
-    return StepResult("postroute_repair_librelane", "PASS", time.time() - t0,
+    return StepResult("postroute_repair_librelane", step_status, time.time() - t0,
                       f"ADOPTED {report.get('adopted')}"
                       + (f" (dual arm {report['selected_arm']})"
                          if report.get("selected_arm") else "")
                       + (" in the step-21 LibreLane chain" if not handed else "")
-                      + f": {summary}",
+                      + f": {summary}{drv_note}",
                       [str(routed), str(netlist)],
                       extras={"pg_supply_ownership":
                               (report.get("final_supply_ownership") or {}).get("verdict")})
@@ -77332,6 +77348,10 @@ def main() -> int:
         return _run_phase3_window(project, effective_top, pdk, args,
                                   _window_sites)
     plan: List[StepResult] = []
+    # R-0929-DRV-IDENTITY: the run's id and code identity, recorded when the
+    # run starts, are what every in-flow DRV capture of this run binds.
+    import drv_run_identity as _drv_run_identity
+    _drv_run_identity.record(project)
 
     # v0.2.55 — pure-analog flow gate. A pure-analog IC has NO digital
     # RTL track: its physical implementation (GDS) is produced by the

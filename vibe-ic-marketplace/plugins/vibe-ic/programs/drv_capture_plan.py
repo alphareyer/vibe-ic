@@ -6,8 +6,11 @@ raise an error.  Implementation-stage evidence is read from the receipts each
 stage recorded when it ran (`STAGE_RECEIPT_DIR`); a stage without one stays
 absent, which the judge reports as FAIL (DRV standard section 1: a stage whose
 applied value cannot be extracted is FAIL, never N/A or NOT_MEASURED).  Identity
-the run genuinely cannot hold yet is named in ``identity["unavailable"]`` and
-left for the judge to report NOT_MEASURED.  The final STAPostPNR state is the
+the run cannot hold before stream-out (GDS / LVS netlist) is named in
+``identity["bound_at"]`` as bound at the final post-stream capture
+(R-0929-DRV-IDENTITY); run and specification identity come from the record
+taken at run start (`drv_run_identity`) and stay None, i.e. NOT_MEASURED,
+when absent.  The final STAPostPNR state is the
 source of scene identity.
 """
 from __future__ import annotations
@@ -35,14 +38,29 @@ from drv_signoff_judge import (_NUM, _REQUIRED_STAGES, _SCENE_PROFILES,
 #: derived here from those hashed bytes, never taken from the receipt's prose.
 STAGE_RECEIPT_DIR = Path("reports/phase3/drv_stages")
 
-#: Identity fields no run record holds before the named later step.  They stay
-#: absent so the judge reports NOT_MEASURED; they are never invented.
-_UNAVAILABLE_IDENTITY = {
-    "tree_sha": "the run records no source tree SHA",
-    "spec_version": "the run records no specification version",
-    "lvs_netlist": "no LVS netlist identity exists before stream-out and LVS",
-    "gds_netlist": "no GDS netlist identity exists before stream-out",
+#: Identity an in-flow capture cannot bind (R-0929-DRV-IDENTITY): it exists
+#: only after stream-out, so it is "bound at" the final post-stream capture --
+#: neither missing evidence nor NOT_MEASURED here.
+_BOUND_AT_POST_STREAM = {
+    "lvs_netlist": "the final post-stream DRV sign-off capture (after LVS)",
+    "gds_netlist": "the final post-stream DRV sign-off capture (after stream-out)",
 }
+
+
+def _run_identity(project: Path) -> dict:
+    """The run and specification identity an in-flow capture binds: the run
+    id and code identity recorded at run start (`drv_run_identity.record`)
+    and the Phase-1 document digest.  An absent record stays None, which the
+    judge reports NOT_MEASURED; nothing is invented."""
+    import drv_run_identity
+    record = drv_run_identity.load(project)
+    return {"run_id": record.get("run_id"),
+            "tree_sha": record.get("plugin_tree_sha256"),
+            "code_identity": {k: record.get(k) for k in (
+                "plugin_source_commit", "plugin_tree_sha256", "recorded_at")},
+            "spec_version": drv_run_identity.spec_version(project),
+            "capture_point": "in_flow",
+            "bound_at": dict(_BOUND_AT_POST_STREAM)}
 
 
 def _ref(path: Path) -> dict:
@@ -320,13 +338,11 @@ def _build_direct(project: Path) -> dict:
     current = {"sources": sources, "liberties": list(linked_all.values()),
                "values": values, "scope": frozen["scope"], "scenes": expected,
                "scene_liberties": scene_libs}
-    identity = {"project": str(project), "run_id": project.name,
-                "tree_sha": None, "spec_version": None, "pdk": pdk,
+    identity = {"project": str(project), **_run_identity(project), "pdk": pdk,
                 "library": library, "artifacts": artifacts,
                 "source_tool_image": image,
                 "sta_netlist": artifacts["sta_netlist"]["sha256"],
-                "lvs_netlist": None, "gds_netlist": None,
-                "unavailable": dict(_UNAVAILABLE_IDENTITY)}
+                "lvs_netlist": None, "gds_netlist": None}
     stages, stage_receipts = _stages(project, False)
     return {"top": decks[0]["top"], "identity": identity,
             "frozen": frozen, "current": current, "stages": stages,
@@ -453,15 +469,13 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
                "values": values, "scope": frozen["scope"],
                "scenes": frozen["scenes"], "scene_liberties": scene_libs,
                "applied_sdc": observed}
-    identity = {"project": str(project), "run_id": project.name,
-                "tree_sha": None, "spec_version": None,
+    identity = {"project": str(project), **_run_identity(project),
                 "pdk": pdk, "library": env["STD_CELL_LIBRARY"],
                 "source_tool_image": image,
                 "source_tool_image_id": provenance["derivation"]["image_id"],
                 "artifacts": artifacts,
                 **{key: artifacts[key].get("sha256") for key in
-                   ("sta_netlist", "lvs_netlist", "gds_netlist")},
-                "unavailable": dict(_UNAVAILABLE_IDENTITY)}
+                   ("sta_netlist", "lvs_netlist", "gds_netlist")}}
     # The judge requires post-route repair constraints exactly when step 32
     # adopted a candidate; use the same adoption record.
     if final_state is not None:
