@@ -2074,6 +2074,19 @@ _NOT_PROSE: Dict[str, str] = {
         "a net whose block is missing is ERROR_NO_PSM_IR, never a pass. "
         "Falsifier: tests/test_f20_dynamic_ir_decap_unit_label_and_basis.py"
         "::test_each_net_is_first_solved_quasi_static_as_the_reference.",
+    "cpu_datapath_program::design_facts":
+        "HDL PORT GRAMMAR, NO SENTENCE. The two patterns read (a) a port's "
+        "packed range `[<msb>:<lsb>]`, the width string `testbench_gen."
+        "resolve_dut` returns from the RTL's own port list, and (b) the "
+        "identifier of an RTL input port to find the reset among the inputs "
+        "the declaration did not already bind. Verilog cannot spell a denial "
+        "in a range or an identifier; a port is declared or absent, and "
+        "absent/ambiguous is already a named refusal (`the reset input ... is "
+        "not unique`, `width ... does not resolve`). Every design VALUE the "
+        "builder uses -- ISA base, memsize, roles, latency, reset vector -- "
+        "comes from typed JSON fields, not from prose. Falsifier: tests/"
+        "test_r0929_step5_bar_datapath.py::test_the_builder_refuses_what_the_"
+        "input_does_not_state.",
 }
 
 def _aliases(tree: ast.Module) -> Set[str]:
