@@ -319,7 +319,7 @@ def _build_direct(project: Path) -> dict:
                                                    "max_slew": 1e-6,
                                                    "max_capacitance": 1e-6}})
     pdk_text = config.read_text()
-    from declared_knob_applied_parity_check import collect_declared
+    from declared_knob_applied_parity import collect_declared
     declared = collect_declared(project, pdk=pdk, library=library)
     fanout = _integrator_value(pdk_text, "MAX_FANOUT_CONSTRAINT", "SYNTH_MAX_FANOUT")
     sdc_text = sdc.read_text()
@@ -442,7 +442,7 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
         sources[layer.lower()] = _ref(paths[0])
     sdc_text = signoff_sdc.read_text()
     pdk_text = pdk_config.read_text()
-    from declared_knob_applied_parity_check import collect_declared
+    from declared_knob_applied_parity import collect_declared
     declared = collect_declared(project, pdk=pdk, library=env["STD_CELL_LIBRARY"])
     integrator_fanout = _integrator_value(pdk_text, "MAX_FANOUT_CONSTRAINT", "SYNTH_MAX_FANOUT")
     period, io_delay = _clock_io_values(sdc_text)
