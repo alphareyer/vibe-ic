@@ -102,4 +102,5 @@ def test_a_step_outside_the_chip_flow_is_resolved_under_its_own_variables():
     import inspect
     src = inspect.getsource(contract.resolve_step_configs)
     assert "step_id not in chip_steps" in src
+    assert "names - set(selected)" in src
     assert "Config.load(design, target.get_all_config_variables()" in src
