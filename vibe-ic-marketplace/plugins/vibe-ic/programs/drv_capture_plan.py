@@ -491,19 +491,90 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
             "postroute_repair_ran": postroute_repair_ran}
 
 
-def publish(project: Path, *, final_state: dict | None = None) -> Path:
+#: What step 31 records about the layout and netlist it compared, and what
+#: the GDS admission records about the stream (both written by the flow).
+LVS_INPUTS = Path("reports/phase3/lvs_inputs.json")
+LVS_VERDICT = Path("reports/phase3/lvs_verdict.json")
+GDS_ADMISSION = Path("reports/phase3/gds_admission.json")
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def post_stream_identity(project: Path, plan: dict) -> dict:
+    """R-0929-DRV-IDENTITY: the FINAL capture binds the streamed GDS and the
+    LVS netlist and records how they derive from the judged DEF / netlist.
+
+    * GDS: `gds_admission.json` names the admitted GDS, its sha256 and the
+      routed DEF it was streamed from (`basis_inputs`).
+    * LVS: `lvs_inputs.json` names the DEF step 31 extracted the layout from
+      and the gate netlist it compared against; `lvs_verdict.json` says
+      whether the compare matched.
+    The judge re-hashes every file and checks each link; this only gathers
+    the records.  A missing record leaves its identity absent (NOT_MEASURED).
+    """
+    identity = dict(plan["identity"])
+    artifacts = dict(identity.get("artifacts") or {})
+    identity.pop("bound_at", None)
+    identity["capture_point"] = "post_stream"
+    derivation: dict = {}
+    admission = _read_json(project / GDS_ADMISSION)
+    gds_rel = admission.get("gds_relpath")
+    if gds_rel and (project / gds_rel).is_file():
+        basis = admission.get("basis_inputs") or {}
+        derivation["gds"] = {
+            "path": str((project / gds_rel).resolve()),
+            "sha256": admission.get("gds_sha256"),
+            "streamed_from_def_sha256": basis.get("phase3/stage3/pnr/routed.def"),
+            "record": _ref(project / GDS_ADMISSION)}
+    lvs = _read_json(project / LVS_INPUTS)
+    verdict = _read_json(project / LVS_VERDICT)
+    schematic = (lvs.get("schematic_netlist") or {}).get("path")
+    if schematic and Path(schematic).is_file() and (project / LVS_VERDICT).is_file():
+        derivation["lvs"] = {
+            "layout_def_sha256": (lvs.get("layout_def") or {}).get("sha256"),
+            "schematic_netlist": _ref(Path(schematic)),
+            "verdict": verdict.get("status"),
+            "compare_performed": verdict.get("compare_performed"),
+            "records": [_ref(project / LVS_INPUTS), _ref(project / LVS_VERDICT)]}
+        artifacts["lvs_netlist"] = derivation["lvs"]["schematic_netlist"]
+        identity["lvs_netlist"] = artifacts["lvs_netlist"]["sha256"]
+    if "gds" in derivation:
+        # The netlist a streamed layout carries is the netlist of the DEF it
+        # was streamed from; the judge accepts it only when that DEF is the
+        # judged DEF (the plan binds DEF and STA netlist from one state).
+        artifacts["gds_netlist"] = dict(artifacts["sta_netlist"])
+        identity["gds_netlist"] = artifacts["gds_netlist"]["sha256"]
+    identity["artifacts"] = artifacts
+    identity["derivation"] = derivation
+    return {**plan, "identity": identity}
+
+
+def publish(project: Path, *, final_state: dict | None = None,
+            capture_point: str = "in_flow") -> Path:
     output = project / "reports/phase3/sta/drv_capture_plan.json"
     plan = build(project, final_state=final_state)
+    if capture_point == "post_stream":
+        plan = post_stream_identity(project, plan)
     write_text(output, json.dumps(plan, indent=2) + "\n")
     return output
 
 
-def capture_and_publish(project: Path, *, final_state: dict | None = None) -> Path:
-    """Measure the current routed state and publish the judge's only input."""
+def capture_and_publish(project: Path, *, final_state: dict | None = None,
+                        capture_point: str = "in_flow") -> Path:
+    """Measure the current routed state and publish the judge's only input.
+
+    `capture_point="post_stream"` is the FINAL capture (after stream-out and
+    LVS); only its verdict counts toward IC PASS (R-0929-DRV-IDENTITY)."""
     import drv_signoff_capture
     output = project / "reports/phase3/sta/drv_signoff_bundle.json"
     output.unlink(missing_ok=True)
-    plan_path = publish(project, final_state=final_state)
+    plan_path = publish(project, final_state=final_state, capture_point=capture_point)
     plan = json.loads(plan_path.read_text())
     bundle = drv_signoff_capture.capture(
         plan, project / "reports/phase3/sta/drv_capture",
