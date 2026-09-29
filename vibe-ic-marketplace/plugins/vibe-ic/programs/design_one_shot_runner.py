@@ -19833,9 +19833,10 @@ def step_phase3(project: Path, top_name: str,
         return StepResult("phase3", "FAIL",
                           time.time() - t0,
                           f"phase3 runner missing: {runner}")
-    rc, out, err = _run(["python3", str(runner), str(project),
+    import execution_policy as _execution
+    rc, out, err = _run(["python3", str(runner), *_execution.child_arguments([str(project),
                          "--top-name", top_name,
-                         "--container", container],
+                         "--container", container])],
                         timeout=7200)
     summary_json = _pl.report_path(project, "phase3_one_shot.json")
     detail_obj: Dict[str, Any] = {}
@@ -24776,7 +24777,10 @@ def main() -> int:
                         "For the operator who wants the roll-ups rebuilt after "
                         "one or more bounded runs. REFUSES together with a "
                         "window: a refresh of the whole flow has no window.")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution.configure(args)
 
     global _FORCE_RTL_REGEN
     _FORCE_RTL_REGEN = bool(args.force_rtl_regen)

@@ -130,6 +130,7 @@ def build_identity(project: Path, span: str, *, container_image: str,
     """
     project = Path(project).resolve()
     receipt = emit_attestation.phase1_provenance(project)
+    import execution_policy as _execution
     phase1_receipt = receipt.get("digest") if receipt.get("ran") else "NO_PHASE1_RECEIPT"
     identity = {
         "schema": SCHEMA,
@@ -150,7 +151,7 @@ def build_identity(project: Path, span: str, *, container_image: str,
                                 if span == "phase3" else None),
         "program_source_sha256": _program_digest(program_paths),
         "container_image": container_image or "IMAGE_UNAVAILABLE",
-        "dispatch_config": config,
+        "dispatch_config": {**config, "execution_request": _execution.request()},
     }
     return identity
 
@@ -170,6 +171,10 @@ def canonical_program_paths(programs_dir: Path) -> tuple[Path, ...]:
     return (
         programs_dir / "design_one_shot_runner.py",
         programs_dir / "phase3_one_shot_runner.py",
+        programs_dir / "execution_policy.py",
+        programs_dir / "execution_production.py",
+        programs_dir / "execution_native_worker.py",
+        programs_dir / "execution_resource_lease.py",
         programs_dir.parent / "flow" / "phase1_phase2_phase3.yaml",
     )
 

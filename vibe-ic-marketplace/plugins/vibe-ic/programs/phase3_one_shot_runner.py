@@ -17279,6 +17279,18 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
 
 
 def step_synth(project: Path, top: str, pdk: PdkConfig,
+               container: str, period_relax: float = 1.0) -> StepResult:
+    """Production mode dispatch; mandatory native/primary gates own eligibility."""
+    import librelane_contract as _ll
+    if _ll.selected_mode(project, "9") == "dual":
+        # A migration obligation remains a disclosed native exception. This
+        # branch already refuses absent same-scope target proof; do not erase it.
+        return _step_synth_before_execution_modes(project, top, pdk, container, period_relax)
+    from execution_production import dispatch_synthesis
+    return dispatch_synthesis(project, top, pdk, container, period_relax)
+
+
+def _step_synth_before_execution_modes(project: Path, top: str, pdk: PdkConfig,
                container: str,
                period_relax: float = 1.0) -> StepResult:
     """Synthesise, and compare the result against the die the design declares.
@@ -77449,7 +77461,10 @@ def main() -> int:
     p.add_argument("--exit-step", help="Last canonical Phase-3 step")
     p.add_argument("--diagnostic-continue", action="store_true",
                    help="Retain diagnostic-only reports; a failed pre-stream gate never authorizes GDS or release")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution.configure(args)
     args.density_from_tool_default = not any(
         arg == "--util" or arg.startswith("--util=") for arg in sys.argv[1:])
     if bool(args.entry_step) != bool(args.exit_step):

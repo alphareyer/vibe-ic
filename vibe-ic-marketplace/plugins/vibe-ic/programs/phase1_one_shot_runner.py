@@ -1719,7 +1719,10 @@ def main() -> int:
                         "`vibe_ic_one_shot_runner` when a delivered answer is "
                         "on disk and the track's own record says nobody has "
                         "read it.")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args, extras = p.parse_known_args()
+    _execution.configure(args)
     project = args.project.resolve()
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)

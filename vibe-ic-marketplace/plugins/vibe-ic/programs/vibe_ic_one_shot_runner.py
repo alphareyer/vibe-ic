@@ -631,6 +631,8 @@ def _run_phase(label: str, runner: Path, args: List[str],
     # ORGANIC #588 — pass the re-entrancy env so the spawned standalone
     # phase runner re-enters THIS orchestrator's project lock instead of
     # being refused by it.
+    import execution_policy as _execution
+    args = _execution.child_arguments(args)
     cp = subprocess.run([sys.executable, str(runner), *args], env=env)
     return cp.returncode
 
@@ -1565,7 +1567,10 @@ def main() -> int:
                         "runs the flow_compliance gate matrix for true "
                         "PASS/SKIP/WAIVED verdicts; TTL-cached ~15s). Slower "
                         "than the default fast file-stat view.")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution.configure(args)
 
     # Was --top-name given on the command line, or is it the historical default?
     # (argparse cannot tell a default from an explicit same-value pass; inspect
