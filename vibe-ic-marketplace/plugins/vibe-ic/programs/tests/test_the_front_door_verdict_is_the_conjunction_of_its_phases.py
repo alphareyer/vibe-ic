@@ -95,8 +95,13 @@ def test_the_passing_sets_are_the_only_way_to_pass():
     that is the point of asserting them."""
     assert V._PHASE_PASS == frozenset({"PASS"}), V._PHASE_PASS
     assert V._PHASE_PASS_WITH_NOTE == frozenset(
-        {"PASS_WITH_WAIVERS", "WAIVED", "COVERAGE-INCOMPLETE"}
+        {"PASS_WITH_WAIVERS", "COVERAGE-INCOMPLETE"}
     ), V._PHASE_PASS_WITH_NOTE
+    # WAIVED LEFT THIS SET ON PURPOSE: the DRV sign-off standard (owner-approved
+    # 2026-09-28) makes it an owner-waived measured residual that is "never
+    # PASS" and that no orchestrator may downgrade. It has its own tier.
+    assert V._PHASE_WAIVED == frozenset({"WAIVED"}), V._PHASE_WAIVED
+    assert not (V._PHASE_WAIVED & (V._PHASE_PASS | V._PHASE_PASS_WITH_NOTE))
 
 
 def test_a_clean_run_still_passes_and_says_nothing():

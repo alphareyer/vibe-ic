@@ -703,8 +703,17 @@ _PHASE_PASS = frozenset({"PASS"})
 #: failure in the standalone-design shape. It does NOT fail the run but DOES
 #: surface as PASS_WITH_WAIVERS so the overall verdict never hides the
 #: documented doc-extraction gap.
-_PHASE_PASS_WITH_NOTE = frozenset({"PASS_WITH_WAIVERS", "WAIVED",
+_PHASE_PASS_WITH_NOTE = frozenset({"PASS_WITH_WAIVERS",
                                    "COVERAGE-INCOMPLETE"})
+
+#: NOT passing, and not a hole either: a phase that MEASURED a residual deviation
+#: an owner waiver covers. The DRV sign-off standard (owner-approved 2026-09-28)
+#: makes this word `verdict.Verdict.WAIVED` -- "counted separately, never PASS" --
+#: and forbids a flow or orchestrator from downgrading it. It used to sit in
+#: `_PHASE_PASS_WITH_NOTE`, which turned a phase's WAIVED into this runner's
+#: PASS_WITH_WAIVERS at exit 0. It now keeps its own tier, below NOT_MEASURED and
+#: above the pass tiers (`verdict.RUN_PRECEDENCE`), and the run exits non-zero.
+_PHASE_WAIVED = frozenset({"WAIVED"})
 
 #: The ONE reason a pass-tier row may carry a non-zero rc. R-0915-145.
 #:
@@ -812,6 +821,7 @@ def _roll_up(rows: List[Tuple[str, str, int]],
     fails: List[str] = []
     unmeasured: List[str] = []
     notes: List[str] = []
+    waived: List[str] = []
     #: Things a reader must be told that do NOT move the tier. A disclosure is not
     #: a waiver, and a run with nothing to disclose is a clean PASS.
     disclosed: List[str] = []
@@ -823,6 +833,11 @@ def _roll_up(rows: List[Tuple[str, str, int]],
             rc_i = 0
         if v == "FAIL":
             fails.append(f"{name} FAIL (rc={rc_i})")
+        elif v in _PHASE_WAIVED:
+            # Its rc is not consulted: a phase runner exits non-zero on WAIVED,
+            # and a WAIVED that exited 0 is still not a pass.
+            waived.append(f"{name} WAIVED (rc={rc_i}) — an owner-waived measured "
+                          f"residual; counted separately, never a pass")
         elif v in _PHASE_PASS or v in _PHASE_PASS_WITH_NOTE:
             _dem = (demoted or {}).get(name) or {}
             _demoted_here = (str(_dem.get("token") or "")
@@ -875,6 +890,9 @@ def _roll_up(rows: List[Tuple[str, str, int]],
     if _axis_state == "FAIL":
         fails.append(f"the phase2/3 completion audit says FAIL — {_axis_why}"
                      if _axis_why else "the phase2/3 completion audit says FAIL")
+    elif _axis_state == "WAIVED":
+        waived.append(f"the phase2/3 completion audit is WAIVED, never a pass"
+                      + (f" — {_axis_why}" if _axis_why else ""))
     elif _axis_state == "PASS_WITH_WAIVERS":
         notes.append(f"the phase2/3 completion audit passed with waivers"
                      + (f" — {_axis_why}" if _axis_why else ""))
@@ -896,6 +914,8 @@ def _roll_up(rows: List[Tuple[str, str, int]],
         return "FAIL", fails + unmeasured + disclosed
     if unmeasured:
         return "NOT_MEASURED", unmeasured + disclosed
+    if waived:
+        return "WAIVED", waived + notes + disclosed
     if notes:
         return "PASS_WITH_WAIVERS", notes + disclosed
     return "PASS", disclosed
@@ -904,14 +924,16 @@ def _roll_up(rows: List[Tuple[str, str, int]],
 #: The tokens a completion audit can publish that SATISFY the axis, and nothing
 #: else does. R-0915-145: a token this does not know is NOT_MEASURED, never a pass.
 _AUDIT_AXIS_PASS = frozenset({"PASS"})
-_AUDIT_AXIS_WAIVERS = frozenset({"PASS_WITH_WAIVERS", "WAIVED"})
+_AUDIT_AXIS_WAIVERS = frozenset({"PASS_WITH_WAIVERS"})
+#: The audit's own WAIVED is the DRV standard's word, not a waiver-tier pass.
+_AUDIT_AXIS_WAIVED = frozenset({"WAIVED"})
 
 
 def _audit_axis_from_verdicts(verdicts: Optional[List[str]]) -> Dict[str, Any]:
     """Collapse raw audit verdict tokens into one axis state, fail-closed.
 
-    FAIL wins, then an unknown/absent token (NOT_MEASURED), then waivers, then
-    PASS. `None` and `[]` are NOT a pass: an axis nobody could read is unmeasured.
+    FAIL wins, then an unknown/absent token (NOT_MEASURED), then the DRV
+    standard's WAIVED (never a pass), then waivers, then PASS. `None` and `[]` are NOT a pass: an axis nobody could read is unmeasured.
     """
     toks = [str(v or "").strip().upper() for v in (verdicts or []) if str(v or "").strip()]
     if not toks:
@@ -920,10 +942,13 @@ def _audit_axis_from_verdicts(verdicts: Optional[List[str]]) -> Dict[str, Any]:
     if any(t == "FAIL" for t in toks):
         return {"state": "FAIL", "reason": f"verdict(s) {sorted(set(toks))}"}
     unknown = [t for t in toks
-               if t not in _AUDIT_AXIS_PASS and t not in _AUDIT_AXIS_WAIVERS]
+               if t not in _AUDIT_AXIS_PASS and t not in _AUDIT_AXIS_WAIVERS
+               and t not in _AUDIT_AXIS_WAIVED]
     if unknown:
         return {"state": "NOT_MEASURED",
                 "reason": f"verdict(s) {sorted(set(unknown))} are not a pass"}
+    if any(t in _AUDIT_AXIS_WAIVED for t in toks):
+        return {"state": "WAIVED", "reason": f"verdict(s) {sorted(set(toks))}"}
     if any(t in _AUDIT_AXIS_WAIVERS for t in toks):
         return {"state": "PASS_WITH_WAIVERS", "reason": f"verdict(s) {sorted(set(toks))}"}
     return {"state": "PASS", "reason": ""}
