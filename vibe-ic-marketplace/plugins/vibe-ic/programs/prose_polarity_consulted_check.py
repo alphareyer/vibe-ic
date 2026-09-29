@@ -119,6 +119,14 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "retap_audit_check::netlist_cells":
+        "ONE STRUCTURAL-VERILOG GRAMMAR, NO SENTENCE. The input is the flat "
+        "netlist OpenROAD write_verilog wrote for the retap step's input and "
+        "output views: `<master> <instance> (.PIN(net), ...);` statements. It "
+        "records masters and pin-to-net connections only, to compare the two "
+        "views; there is no prose and no denial form in an instantiation. "
+        "Falsifier: tests/test_cut19_clock_path_sizing_tool_arm_and_retap_audit.py"
+        "::test_a_remastered_or_added_cell_is_not_a_retap.",
     "synth_full_adder_map::discover":
         "ONE MACHINE GRAMMAR, NO SENTENCE. The input is the active PDK Liberty "
         "file: cell/pin blocks, area numbers, directions and quoted Boolean "
