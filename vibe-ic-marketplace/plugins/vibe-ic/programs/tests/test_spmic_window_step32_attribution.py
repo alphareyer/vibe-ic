@@ -43,5 +43,7 @@ def test_window_publishes_fresh_step32_write_record_before_gate_audit(
                for row in written["produced"])
     # The failed physical decision remains failed; attribution cannot turn
     # residual fanout into a passing design verdict.
-    audit = json.loads((project / "reports/audit/phase23_completion_audit.json").read_text())
+    # The window's audit is its own record, beside the whole-flow one.
+    audit = json.loads(next((project / "reports/audit/windows").glob(
+        "*/phase23_completion_audit.json")).read_text())
     assert audit["declared_gate_checks"]["32"]["status"] == "FAIL"
