@@ -224,16 +224,27 @@ def _split_ports(text: str) -> List[str]:
 # ---------------------------------------------------------------------------
 # Instance parser
 # ---------------------------------------------------------------------------
-def parse_instances(body: str, parent_module: str) -> List[InstanceInfo]:
-    """Find module instantiations in a module body."""
+def parse_instances(body: str, parent_module: str, *,
+                    include_unresolved: bool = False) -> List[InstanceInfo]:
+    """Find module instantiations in a module body.
+
+    Applicability consumers need the candidates this named-port auditor cannot
+    resolve, too. With ``include_unresolved``, retain those with empty
+    connections instead of turning unavailable extraction into absent hierarchy.
+    The audit's existing default extraction and verdict are unchanged.
+    """
     instances = []
     # Pattern: module_type [#(...)] inst_name ( .port(sig), ... );
     # We match the instance and then extract port connections
+    parameter_pattern = (r'(?:#\s*\([^;]*?\)\s*)?' if include_unresolved
+                         else r'(?:#\s*\([^)]*\)\s+)?')
+    array_pattern = r'(?P<array>(?:\[[^\]]*\]\s*)*)' if include_unresolved else ''
     inst_pattern = re.compile(
         r'\b(\w+)\s+'                # module type
-        r'(?:#\s*\([^)]*\)\s+)?'     # optional parameter override
-        r'(\w+)\s*\('               # instance name
-        r'([^;]*?)'                 # connection list
+        + parameter_pattern          # optional parameter override
+        + r'(\w+)\s*'               # instance name
+        + array_pattern              # unresolved instance arrays
+        + r'\((?P<connections>[^;]*?)'  # connection list
         r'\)\s*;',
         re.DOTALL
     )
@@ -252,15 +263,12 @@ def parse_instances(body: str, parent_module: str) -> List[InstanceInfo]:
     for m in inst_pattern.finditer(body):
         mod_type = m.group(1)
         inst_name = m.group(2)
-        conn_text = m.group(3)
+        conn_text = m.group('connections')
 
         if mod_type in non_instance:
             continue
-        # Must have named port connections (.port(sig) pattern)
-        if '.' not in conn_text:
-            continue
-
         connections = {}
+        unresolved = bool(include_unresolved and m.group('array'))
         for cm in re.finditer(r'\.(\w+)\s*\(\s*([^)]*?)\s*\)', conn_text):
             port = cm.group(1)
             sig = cm.group(2).strip()
@@ -271,8 +279,15 @@ def parse_instances(body: str, parent_module: str) -> List[InstanceInfo]:
             elif sig == '':
                 # Unconnected port
                 connections[port] = ''
+            if include_unresolved and sig and not re.fullmatch(
+                    r'\w+(?:\s*\[[^\]]+\])*', sig):
+                unresolved = True
 
-        if connections:
+        if include_unresolved:
+            remainder = re.sub(r'\.\w+\s*\([^()]*\)', '', conn_text)
+            if remainder.strip(' \t\r\n,') or unresolved:
+                connections = {}
+        if connections or include_unresolved:
             instances.append(InstanceInfo(
                 inst_name=inst_name,
                 module_type=mod_type,

@@ -161,6 +161,9 @@ counter auditors to derive whether each named audit has a subject. An absent
 subject is disclosed as `NOT_APPLICABLE`, with its source digest and reasoning;
 this is never an audit PASS and requires no invented signal or receipt.
 Missing source binding, changed files, unresolved hierarchy and unsupported
-source extraction remain `NOT_MEASURED` and block. Report prose cannot waive a
-detected subject. A present receipt still needs its own producer identity,
+source extraction, positional hierarchy and unavailable implementations remain
+`NOT_MEASURED` and block. Report prose cannot waive a
+detected subject. A valid measured failure retains `FAIL` and its receipt trace
+even when applicability is unresolved; that unresolved population is disclosed
+alongside the failure. A present receipt still needs its own producer identity,
 substantive evidence, source digest and verdict; failed or stale evidence blocks.

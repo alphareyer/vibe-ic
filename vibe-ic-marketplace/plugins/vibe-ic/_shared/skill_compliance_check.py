@@ -939,11 +939,24 @@ def _reviewed_rtl_subject(auditor: str, ctx: CheckContext
                     raw.count('/*') != raw.count('*/') or
                     re.search(r'`|\\|\b(?:interface|package|class|bind|generate)\b', source)):
                 return STATE_NOT_MEASURED, trace + ' — unsupported source extraction.', current
+            if re.search(r'\(\*.*?\b(?:blackbox|whitebox|lib_whitebox|'
+                         r'syn_black_box|syn_blackbox|black_box)\b.*?\*\)',
+                         source, re.DOTALL | re.IGNORECASE):
+                return STATE_NOT_MEASURED, trace + ' — declared unavailable implementation.', current
             for module in parsed:
                 if module.name in modules:
                     return STATE_NOT_MEASURED, trace + ' — duplicate module declarations.', current
                 modules[module.name] = module
-                instances.extend(encoding.parse_instances(module.body, module.name))
+                implementation = re.sub(r'\(\*.*?\*\)', '', module.body, flags=re.DOTALL)
+                implementation = re.sub(
+                    r'\b(?:input|output|inout|wire|reg|logic|integer|real|time)\b[^;=]*;',
+                    '', implementation)
+                implementation = re.sub(r'\b(?:parameter|localparam)\b[^;]*;',
+                                        '', implementation)
+                if not implementation.strip():
+                    return STATE_NOT_MEASURED, trace + ' — empty module implementation.', current
+                instances.extend(encoding.parse_instances(
+                    module.body, module.name, include_unresolved=True))
             sources.append(source)
         if any(i.module_type not in modules or not i.connections for i in instances):
             return STATE_NOT_MEASURED, trace + ' — unresolved or positional module boundary.', current
@@ -960,6 +973,10 @@ def _reviewed_rtl_subject(auditor: str, ctx: CheckContext
         if auditor == 'interface_encoding_audit':
             interfaces = encoding.build_interface_map(modules, instances)
             if interfaces:
+                tops = sorted(set(modules) - {i.module_type for i in instances})
+                if len(tops) != 1:
+                    return STATE_NOT_MEASURED, trace + f' — unresolved hierarchy top: {tops}.', current
+                current['audit_subject'] = {'top_module': tops[0]}
                 return derived('APPLICABLE', f'{len(interfaces)} module boundary connection(s).')
             if instances:
                 return STATE_NOT_MEASURED, trace + ' — module connections could not be resolved.', current
@@ -1098,6 +1115,7 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
         looked_for = f'{_what} (matched by content, not by name)'
 
     applicability = spec.get('applicability')
+    subject_state = None
     source_subject = None
     subject_detail = ''
     if applicability is not None:
@@ -1108,12 +1126,12 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
         # Existing receipt validation remains authoritative when no review
         # binding was supplied. An absent receipt then remains owed as before.
         if ctx.review_json is not None:
-            state, subject_detail, source_subject = _reviewed_rtl_subject(auditor, ctx)
-            if state == STATE_NOT_MEASURED:
+            subject_state, subject_detail, source_subject = _reviewed_rtl_subject(auditor, ctx)
+            if found is None and subject_state == STATE_NOT_MEASURED:
                 return [Finding(cid, 'FAIL',
                                 f'NOT_MEASURED: `{auditor}` subject is unresolved.',
                                 subject_detail, state=STATE_NOT_MEASURED)]
-            if found is None and state == STATE_NOT_APPLICABLE:
+            if found is None and subject_state == STATE_NOT_APPLICABLE:
                 return [Finding(cid, 'INFO',
                                 f'NOT_APPLICABLE: `{auditor}` subject is absent from reviewed source.',
                                 subject_detail, state=STATE_NOT_APPLICABLE)]
@@ -1139,7 +1157,9 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
             state=STATE_NOT_MEASURED)]
 
     digest = _receipt_digest(found)
-    trace = f'receipt={found} sha256={digest[:16]}'
+    trace = f'receipt={found} sha256={digest}'
+    if subject_state == STATE_NOT_MEASURED:
+        trace += f' applicability=NOT_MEASURED ({subject_detail})'
 
     if not isinstance(payload, dict):
         return [Finding(
@@ -1206,6 +1226,11 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
 
     v = rs.verdict(payload)
     if v == STATE_PASS:
+        if subject_state == STATE_NOT_MEASURED:
+            return [Finding(cid, 'FAIL',
+                            f'NOT_MEASURED: `{auditor}` subject is unresolved; '
+                            'the present PASS receipt cannot resolve applicability.',
+                            f'{trace} subject={actual_subject}', state=STATE_NOT_MEASURED)]
         return [Finding(
             cid, 'INFO',
             f'PASS: `{auditor}` receipt verdict PASS over {examined} '

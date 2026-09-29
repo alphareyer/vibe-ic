@@ -27,9 +27,9 @@ one receipt must go non-PASS for a named reason. `test_mutation_*` is the
 control on the controls — it re-introduces the header-reading behaviour and
 asserts the suite notices, because a check that cannot fail is not a check.
 
-Every receipt written here is SYNTHETIC, is labelled as such inside its own
-payload, and is built by `_receipt_set()` below; none is a copy of a real
-audit's output.
+Legacy receipt fixtures are SYNTHETIC and labelled inside their payloads.
+The applicability controls also run native static producers and their actual
+consumer; those receipts are left as emitted, with invocation evidence.
 """
 from __future__ import annotations
 
@@ -895,3 +895,156 @@ def test_issue2847_unclassified_datapath_role_does_not_prove_absence(tmp_path, s
     ctx, _ = _reviewed_context(tmp_path, source)
     f = _reviewed_findings(ctx)[cid]
     assert (f.severity, f.state) == ('FAIL', 'NOT_MEASURED'), f
+
+
+# Independent integrity counterexamples for the rejected #2847 source.
+_LEAF_RTL = 'module leaf(input a, output y);\nassign y = a;\nendmodule\n'
+_ASSEMBLY = ('module assembly(input a, output y);\nwire link;\n'
+             '{instances}\nendmodule\n')
+
+
+def _native_repair_case(tmp_path, source, *, auditor=None, audit_args=()):
+    """Actual static producer outputs; no authored or edited audit receipts."""
+    rtl = tmp_path / 'rtl'
+    rtl.mkdir()
+    file = rtl / 'design.v'
+    file.write_text(source)
+    review = tmp_path / 'native_review.json'
+    runs = {}
+
+    def run(name, argv):
+        proc = subprocess.run([sys.executable, *map(str, argv)], cwd=_PLUGIN,
+                              capture_output=True, text=True, timeout=30)
+        runs[name] = {'argv': proc.args, 'rc': proc.returncode,
+                      'stdout': proc.stdout, 'stderr': proc.stderr}
+        (tmp_path / 'native_runs.json').write_text(json.dumps(runs, indent=2))
+        return proc
+
+    proc = run('review_producer', [
+        _PLUGIN / 'programs/rtl_review_aggregate.py', '--rtl-dir', rtl,
+        '--tmp-dir', tmp_path / 'producer-tmp', '--out-json', review,
+        '--out-md', tmp_path / 'native_review.md'])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    if auditor:
+        inputs = ['--rtl-dir', rtl] if auditor == 'interface_encoding_audit' else [
+            '--rtl-files', file]
+        run('audit_producer', [_PLUGIN / 'programs' / (auditor + '.py'),
+                              *inputs, *audit_args, '--out-dir', tmp_path])
+    document = tmp_path / 'fixture.md'
+    document.write_text(_REVIEW)
+
+    def consume(tag='consumer'):
+        out = tmp_path / (tag + '.json')
+        proc = run(tag, [_CHECKER, '--requirements', _RTL_REVIEW_YML,
+                         '--review-json', review, '--json', out, document])
+        payload = json.loads(out.read_text())
+        findings = {f['id']: f for f in payload['findings'] if f['id'] in _NAMED}
+        assert set(findings) == set(_NAMED), payload
+        return proc.returncode, findings
+
+    return file, consume, runs
+
+
+@pytest.mark.parametrize('instances,reason', [
+    ('leaf u_first(a, link);\nleaf u_second(link, y);', 'positional'),
+    ('leaf u_first(.a(a), .y(link));\nleaf u_second(.a(link), .y(y));', 'named'),
+    ('leaf #(.WIDTH(1)) u_first(a, link);\nleaf u_second(link, y);', 'parameterized'),
+    ('leaf u_first[1:0](.a(a), .y(link));\nleaf u_second(.a(link), .y(y));', 'array'),
+    ('leaf u_first(a, link), u_second(link, y);', 'multiple'),
+    ('leaf u_first(.a(a | link), .y(y));', 'expression'),
+], ids=['positional', 'named', 'parameterized-positional', 'instance-array',
+        'multiple-instances', 'unsupported-connection'])
+def test_issue2847_repair_native_hierarchy_never_waives_boundary(tmp_path, instances, reason):
+    leaf = (_LEAF_RTL.replace('module leaf(', 'module leaf #(parameter WIDTH = 1)(')
+            if reason == 'parameterized' else _LEAF_RTL)
+    source = leaf + _ASSEMBLY.format(instances=instances)
+    _, consume, _ = _native_repair_case(tmp_path, source)
+    rc, findings = consume()
+    f = findings[_NAMED[0]]
+    assert (rc, f['severity'], f['state']) == (1, 'FAIL', 'NOT_MEASURED'), (reason, f)
+    assert 'sha256=' in f['detail']
+    assert not (tmp_path / 'encoding_audit_report.json').exists()
+
+
+@pytest.mark.parametrize('source', [
+    '(* blackbox *) module external_logic(input a, output y); endmodule\n',
+    '(* whitebox *) module external_logic(input a, output y); endmodule\n',
+    '(* syn_black_box = 1 *) module external_logic(input a, output y); endmodule\n',
+    'module external_logic(input a, output y); endmodule\n',
+    'module external_logic(a, y); input a; output y; endmodule\n',
+    _ASSEMBLY.format(instances='unavailable u(a, y);'),
+], ids=['blackbox', 'whitebox', 'synthesis-blackbox', 'empty-implementation',
+        'declaration-only-implementation', 'missing-positional-implementation'])
+def test_issue2847_repair_native_unavailable_implementation_stays_owed(tmp_path, source):
+    _, consume, _ = _native_repair_case(tmp_path, source)
+    rc, findings = consume()
+    assert rc == 1
+    assert {cid: (f['severity'], f['state']) for cid, f in findings.items()} == {
+        cid: ('FAIL', 'NOT_MEASURED') for cid in _NAMED}
+
+
+@pytest.mark.parametrize('failed', [True, False], ids=['measured-warn', 'measured-pass'])
+def test_issue2847_repair_native_receipt_precedes_unresolved_population(tmp_path, failed):
+    source = (_CRC_RTL.replace('<= crc_result', '<= ~crc_result') if failed else _CRC_RTL)
+    source += 'module unsupported; endmodule\n'
+    _, consume, runs = _native_repair_case(
+        tmp_path, source, auditor='crc_bitorder_check', audit_args=['--crc-signal', 'crc_result'])
+    assert runs['audit_producer']['rc'] == (1 if failed else 0)
+    receipt = tmp_path / 'crc_bitorder_report.json'
+    original_bytes = receipt.read_bytes()
+    native = json.loads(original_bytes)
+    assert native['summary_status'] == ('WARN' if failed else 'PASS')
+    review = json.loads((tmp_path / 'native_review.json').read_text())
+    assert native['source_subject']['sha256'] == review['source_subject']['sha256']
+    rc, findings = consume()
+    f = findings[_NAMED[1]]
+    assert (rc, f['severity'], f['state']) == (
+        1, 'FAIL', 'FAIL' if failed else 'NOT_MEASURED'), f
+    from hashlib import sha256
+    assert str(receipt) in f['detail']
+    assert sha256(original_bytes).hexdigest() in f['detail']
+    assert 'applicability=NOT_MEASURED' in f['detail']
+    assert 'unsupported source extraction' in f['detail']
+    assert findings[_NAMED[0]]['state'] == 'NOT_MEASURED'
+    assert findings[_NAMED[2]]['state'] == 'NOT_MEASURED'
+    assert receipt.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize('source', [
+    _PLAIN_RTL,
+    '(* keep = 1 *) ' + _PLAIN_RTL + '// (* blackbox *) is only a comment.\n',
+    'module pass_through(a, y); input a; output y; wire y = a; endmodule\n',
+], ids=['plain', 'ordinary-attribute-and-comment', 'net-declaration-assignment'])
+def test_issue2847_repair_native_absence_content_and_population_binding(tmp_path, source):
+    file, consume, _ = _native_repair_case(tmp_path, source)
+    rc, findings = consume()
+    assert rc == 0
+    assert {cid: f['state'] for cid, f in findings.items()} == {
+        cid: 'NOT_APPLICABLE' for cid in _NAMED}
+    original = file.read_text()
+    file.write_text(original + '// source content changed\n')
+    rc, findings = consume('content_changed')
+    assert rc == 1
+    assert {f['state'] for f in findings.values()} == {'NOT_MEASURED'}
+    assert all('stale' in f['detail'] for f in findings.values())
+    file.write_text(original)
+    (file.parent / 'added.v').write_text(_CRC_RTL)
+    rc, findings = consume('population_changed')
+    assert rc == 1
+    assert {f['state'] for f in findings.values()} == {'NOT_MEASURED'}
+    assert all('stale' in f['detail'] for f in findings.values())
+
+
+@pytest.mark.parametrize('top', ['assembly', 'leaf'], ids=['current-top', 'wrong-top'])
+def test_issue2847_repair_native_encoding_receipt_binds_top(tmp_path, top):
+    source = _LEAF_RTL + _ASSEMBLY.format(
+        instances='leaf u_first(.a(a), .y(link));\nleaf u_second(.a(link), .y(y));')
+    _, consume, runs = _native_repair_case(
+        tmp_path, source, auditor='interface_encoding_audit', audit_args=['--top-module', top])
+    assert runs['audit_producer']['rc'] == 0
+    rc, findings = consume()
+    f = findings[_NAMED[0]]
+    assert (rc, f['severity'], f['state']) == (
+        (0, 'INFO', 'PASS') if top == 'assembly' else (1, 'FAIL', 'FAIL')), f
+    if top != 'assembly':
+        assert "top_module: declared 'assembly', receipt has 'leaf'" in f['detail']
