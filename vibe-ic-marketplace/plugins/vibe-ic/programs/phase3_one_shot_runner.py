@@ -75912,6 +75912,48 @@ def _phase3_window_run_id() -> str:
     return safe if safe not in ("", ".", "..") else f"window-{os.getpid()}"
 
 
+#: The window's record of the PDK files it may cite, written at its start.
+_WINDOW_PDK_RECORD = "pdk_inputs.json"
+
+
+def _window_pdk_record(project: Path, pdk: Any, container: str,
+                       window_run_id: str) -> Dict[str, Any]:
+    """Record, at the window's start, the PDK files a published record may cite.
+
+    A sign-off record names the PDK file it ran (`drc_signoff.json` names the
+    DRC deck), and the PDK lives outside the project -- on the measured
+    configuration inside the EDA container only. The publication used to
+    refuse every such citation ("window input outside project"), so a step-31
+    window that measured DRC 0 could never publish it (spm x gf180mcuD,
+    2026-09-29).
+
+    Admitted are ONLY the file fields of the PDK record this window runs with
+    (the object the run's admission basis hashes, so for a sign-off window its
+    bytes are the run's), and only those under that PDK's root. Each is hashed
+    where it lives (`_step_pdk_hasher`) and its sha256 recorded here; the
+    publication re-hashes and refuses a mismatch. Any other outside path --
+    including another file under the same PDK root -- still refuses."""
+    import _step_identity as _si
+    root = _pdk_root_c(pdk) if pdk is not None else ""
+    files: Dict[str, str] = {}
+    notes: List[str] = []
+    if root:
+        paths = [p for p in _si._paths_in(_si.pdk_field_values(pdk))
+                 if p.startswith(root.rstrip("/") + "/")]
+        try:
+            got = _step_pdk_hasher(container, use_cache=False)(paths) if paths else {}
+        except Exception as exc:                              # noqa: BLE001
+            got = {}
+            notes.append(f"PDK hasher failed: {type(exc).__name__}: {exc}")
+        files = {p: str(got[p]) for p in paths if got.get(p)}
+        notes += [f"{p}: unreadable" for p in paths if not got.get(p)]
+    record = {"pdk": str(getattr(pdk, "name", "") or ""), "root": root,
+              "container": container or "", "files": files, "notes": notes}
+    _aa.write_json(project / f"reports/audit/windows/{window_run_id}"
+                   / _WINDOW_PDK_RECORD, record)
+    return record
+
+
 def _phase3_window_publication(project: Path, isolated: Path,
                                sources: List[Path],
                                window_run_id: str) -> Tuple[List[str], str]:
@@ -75929,6 +75971,13 @@ def _phase3_window_publication(project: Path, isolated: Path,
     pending = list(sources)
     examined: Set[str] = set()
     import _cited_artefacts as _ca
+    try:
+        _pdk_rec = json.loads((root / f"reports/audit/windows/{window_run_id}"
+                               / _WINDOW_PDK_RECORD).read_text())
+    except (OSError, ValueError):
+        _pdk_rec = {}
+    pdk_files = dict((_pdk_rec or {}).get("files") or {})
+    pdk_bound: Dict[str, str] = {}
     try:
         while pending:
             source = pending.pop()
@@ -75949,6 +75998,18 @@ def _phase3_window_publication(project: Path, isolated: Path,
             def cite(token: str) -> None:
                 """Resolve one citation against its owning project, then bind it."""
                 path = Path(token)
+                # A file of the window's own PDK record (see
+                # `_window_pdk_record`): admitted only with the bytes recorded
+                # at the window's start, hashed again where it lives.
+                if path.is_absolute() and token in pdk_files:
+                    now = _step_pdk_hasher(str(_pdk_rec.get("container") or ""),
+                                           use_cache=False)([token]).get(token)
+                    if now != pdk_files[token]:
+                        raise ValueError(
+                            f"window PDK input differs from the window's PDK "
+                            f"record: {token}")
+                    pdk_bound[token] = now
+                    return
                 owner = root if path.is_absolute() else private
                 cited = path if path.is_absolute() else private / path
                 # An absolute spelling that walks through the disposable copy
@@ -76047,8 +76108,11 @@ def _phase3_window_publication(project: Path, isolated: Path,
         inputs = {**(existing.get("inputs") or {}), **inputs}
         for rel, source in to_copy.items():
             outputs[rel] = _sha256_file(source)
+        pdk_inputs = {**(existing.get("pdk_inputs") or {}), **pdk_bound}
         publication = {"window_run_id": window_run_id,
                        "outputs": outputs, "inputs": inputs}
+        if pdk_inputs:
+            publication["pdk_inputs"] = pdk_inputs
         _aa.write_json(receipt, {**publication, "status": "PREPARING"})
         copied = []
         for rel, source in to_copy.items():
@@ -76700,6 +76764,8 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     site_before = before
     window_gate = _spf.gate
     window_ids = set(_phase3_window_steps(args.entry_step, args.exit_step))
+    _window_pdk_record(project, pdk, getattr(args, "container", "") or "",
+                       window_run_id)
     for site in selected:
         # A narrower numeric window can omit a producer between two selected
         # sites (for example PnR 15..22 and PV 31, with GDS 37 omitted).
