@@ -1707,7 +1707,25 @@ CLASS_PRODUCTION_DEFAULTS: dict[str, dict[str, str]] = {
                                  # T99 + T102 r4 (owner ruling, CUT-OVER rule):
                                  # routing and the post-route repair, as one
                                  # chain (LL21 -> Vibeic.PostRouteRepair -> tail)
-                                 '21': 'librelane', '32': 'librelane'},
+                                 '21': 'librelane', '32': 'librelane',
+                                 # R-0929-TOOL-DEFAULT (owner 2026-09-29) Wave 1
+                                 # (TOOL_DUPLICATION_AUDIT §6), each measured:
+                                 # 8  dual: OpenSTA read_sdc/check_setup on
+                                 #    STAPrePNR AND the regex arm (T92); the
+                                 #    regex retires once dual shows no
+                                 #    regex-only finding.
+                                 # 10 librelane: STAPrePNR (T92 parity SS/TT/FF
+                                 #    15.59/17.76/18.29 ns = direct); its gate
+                                 #    judge_slack refuses black boxes and
+                                 #    non-finite slack.
+                                 # 26 librelane: CheckAntennas on the shipped
+                                 #    route + KLayout.Antenna on the shipped GDS
+                                 #    (T101 (a)(b); F14 PDK root).
+                                 # 26.5ic librelane: KLayout.SealRing with the
+                                 #    fork's verify_ring + seal-ring metric;
+                                 #    die_finishing_gen verifies the tool's GDS.
+                                 '8': 'dual', '10': 'librelane',
+                                 '26': 'librelane', '26.5ic': 'librelane'},
 }
 
 #: A class default runs only inside the chain it continues. The producers are
