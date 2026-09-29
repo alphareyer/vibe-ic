@@ -216,3 +216,33 @@ def test_step32_plan_carries_the_postroute_repair_row_when_adopted(tmp_path, mon
                                                     "adopted": None})
     assert kept["postroute_repair_ran"] is False
     assert "postroute_repair" not in [row["name"] for row in kept["stages"]]
+
+
+# --- review wave 58: a window run records its own identity ---------------------
+
+def test_a_window_run_records_its_own_identity_and_claims_the_receipts(tmp_path, monkeypatch):
+    """A --window re-run with other code must not bind the previous full
+    run's run_id / plugin tree, nor accept that run's stage receipts."""
+    import types
+    import phase3_one_shot_runner as p3
+    import drv_run_identity
+    import drv_stage_receipts
+    project = tmp_path / "proj"
+    project.mkdir()
+    old = drv_run_identity.record(project)
+    drv_stage_receipts.claim(project)
+    drv_stage_receipts.record_not_run(project, "cts", "earlier full run")
+    seen = {}
+
+    def site(*a, **k):
+        seen["identity"] = drv_run_identity.load(project)
+        seen["receipt"] = drv_stage_receipts.read_receipt(project, "cts")[1]
+        raise SystemExit("stop inside the window")
+    monkeypatch.setattr(p3, "_phase3_file_manifest", site)
+    args = types.SimpleNamespace(entry_step="32", exit_step="32", container="")
+    try:
+        p3._run_phase3_window(project, "top", object(), args, ["pnr"])
+    except SystemExit:
+        pass
+    assert seen["identity"]["run_id"] != old["run_id"]
+    assert seen["receipt"] == "absent"

@@ -76898,6 +76898,20 @@ def _phase3_window_output_audit(project: Path, step_ids: Set[str]
     return checks
 
 
+def _drv_run_start(project: Path) -> None:
+    """R-0929-DRV-IDENTITY: the run's id and code identity, recorded when the
+    run starts, are what every in-flow DRV capture of this run binds; and
+    (DRV standard section 1) this run owns the stage receipts from here on:
+    every earlier receipt is dropped and the run id just recorded binds the
+    ones the stages write, the plan reader refusing a receipt from any other
+    run.  A window run is a run: its captures bind ITS code, and a stage it
+    did not re-run is not credited from an earlier run (review wave 58)."""
+    import drv_run_identity as _drv_run_identity
+    _drv_run_identity.record(project)
+    import drv_stage_receipts as _drv_stages
+    _drv_stages.claim(project)
+
+
 def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                        args, selected: List[str]) -> int:
     """Dispatch only selected sites and publish a bounded audit of this run.
@@ -76918,6 +76932,7 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
         print(f"[phase3] window run id already published: {window_run_id}; "
               "refusing to overwrite its receipts", file=sys.stderr)
         return 2
+    _drv_run_start(project)
     before = _phase3_file_manifest(project)
     rows: List[StepResult] = []
     changed_sites: List[str] = []
@@ -77493,16 +77508,7 @@ def main() -> int:
         return _run_phase3_window(project, effective_top, pdk, args,
                                   _window_sites)
     plan: List[StepResult] = []
-    # R-0929-DRV-IDENTITY: the run's id and code identity, recorded when the
-    # run starts, are what every in-flow DRV capture of this run binds.
-    import drv_run_identity as _drv_run_identity
-    _drv_run_identity.record(project)
-    # DRV standard section 1: this run owns the stage receipts from here on.
-    # Every earlier receipt is dropped and the run id just recorded binds the
-    # ones the stages write; the plan reader refuses a receipt from any other
-    # run.
-    import drv_stage_receipts as _drv_stages
-    _drv_stages.claim(project)
+    _drv_run_start(project)
 
     # v0.2.55 — pure-analog flow gate. A pure-analog IC has NO digital
     # RTL track: its physical implementation (GDS) is produced by the
