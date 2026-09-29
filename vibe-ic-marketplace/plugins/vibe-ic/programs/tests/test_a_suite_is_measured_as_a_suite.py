@@ -198,10 +198,12 @@ def test_an_inert_first_member_does_not_shrink_the_suite(tmp_path):
     assert "zzz_real.v" in names
 
 
-def test_a_project_with_no_driving_stimulus_still_yields_a_candidate(tmp_path):
+def test_a_project_with_no_driving_stimulus_has_no_coverage_suite(tmp_path):
     p = _project(tmp_path, unit_tb=False, cases=("only",), inert=("only",))
     _rtl, tbs = _suite(p)
-    assert [Path(t).name for t in tbs] == ["only.v"]
+    assert tbs == []
+    _rtl, legacy = V.discover_measure_inputs(p)
+    assert Path(legacy).name == "only.v"
 
 
 # ── the command ───────────────────────────────────────────────────────────
