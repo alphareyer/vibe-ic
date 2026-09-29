@@ -397,7 +397,7 @@ def test_build_report_schema_keys():
         assert k in r, f"missing schema key: {k}"
     assert r["equivalent"] is True
     assert r["compared_points"] == 71
-    assert r["non_equivalent_points"] == 0
+    assert r["non_equivalent_points"] is None  # the engine never measures it
     assert r["unproven_points"] == 0
     assert r["gold"] == "chip_top (RTL)"
     assert r["gate"] == "netlist.v (synth)"

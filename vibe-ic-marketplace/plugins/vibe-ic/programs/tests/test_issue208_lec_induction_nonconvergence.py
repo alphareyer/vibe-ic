@@ -114,7 +114,7 @@ def test_report_marks_non_convergence_and_inconclusive():
     assert r["verdict"] == "INCONCLUSIVE"
     assert r["inconclusive"] is True
     assert r["non_convergence"] is True
-    assert r["non_equivalent_points"] == 0     # zero counterexamples
+    assert r["non_equivalent_points"] is None  # no counterexample count (never measured)
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +226,7 @@ def test_ladder_exhausted_report_marks_non_convergence():
     assert r["verdict"] == "INCONCLUSIVE"
     assert r["inconclusive"] is True
     assert r["non_convergence"] is True
-    assert r["non_equivalent_points"] == 0     # zero counterexamples
+    assert r["non_equivalent_points"] is None  # no counterexample count (never measured)
 
 
 def test_ladder_exhausted_gate_is_non_blocking(tmp_path):
