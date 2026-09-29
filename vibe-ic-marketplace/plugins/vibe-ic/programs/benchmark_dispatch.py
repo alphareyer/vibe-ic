@@ -165,12 +165,13 @@ def _runner_diagnostics(process: _ProcessOutcome, argv: list[str],
     """
     project = Path(project).resolve()
     diagnostic = {
-        "invocation_id": process.invocation_id,
-        "receipt_path": process.receipt_path, "receipt_sha256": process.receipt_sha256,
+        "invocation_id": getattr(process, "invocation_id", None),
+        "receipt_path": getattr(process, "receipt_path", None),
+        "receipt_sha256": getattr(process, "receipt_sha256", None),
         "project": str(project), "argv": list(argv), "rc": process.rc,
     }
     try:
-        raw = Path(process.receipt_path or "").read_bytes()
+        raw = Path(diagnostic["receipt_path"] or "").read_bytes()
         receipt = json.loads(raw)
         latest = json.loads((project / "reports" / "orchestrator" / "runner_invocations"
                              / "latest.json").read_bytes())
@@ -398,8 +399,10 @@ class _RunnerBudget:
             kwargs["timeout"] = self.timeout_s
         argv = [str(arg) for arg in argv]
         invocation_id = uuid.uuid4().hex
-        # Canonical runner argv is interpreter, script, project, then flags.
-        project = (Path(argv[2]).resolve() if len(argv) > 2 and not argv[1].startswith("-")
+        # Only the canonical runner owns this positional project protocol.
+        # Other budget commands may use argv[2] as a file (e.g. a pidfile).
+        project = (Path(argv[2]).resolve() if len(argv) > 2
+                   and Path(argv[1]).name == "vibe_ic_one_shot_runner.py"
                    and not argv[2].startswith("-") else None)
         rc, error, stdout, stderr = None, None, None, None
         before, after = {}, {}

@@ -220,6 +220,15 @@ def test_timeout_retains_partial_streams_and_the_failed_invocation(tmp_path, mon
     assert receipt["error"] == process.error
 
 
+def test_generic_budget_command_does_not_treat_its_argument_as_a_project(tmp_path):
+    script = tmp_path / "writer.py"
+    script.write_text("import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('complete')\n")
+    output = tmp_path / "receipt.txt"
+    process = bd._RunnerBudget(1, None, 0).run([sys.executable, str(script), str(output)])
+    assert process.rc == 0, process.stderr
+    assert output.read_text() == "complete"
+
+
 def test_d1_nonzero_handoff_uses_fresh_phase1_evidence_with_an_old_phase2_report(
         tmp_path, monkeypatch):
     import emit_attestation as ea
