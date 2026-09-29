@@ -12721,6 +12721,59 @@ def _declared_gate_summary(gate: Any) -> str:
     return ", ".join(parts)
 
 
+def _advisory_population_reasons(reasons: List[str]) -> List[str]:
+    """Resolve advisory policy before any step tier or population is derived.
+
+    An advisory refusal cannot witness a measured blocking population. An
+    advisory incomplete may step aside only for a blocking clause that passed
+    without a non-verdict or library-default disclosure. Keep every receipt.
+    """
+    records = []
+    for hint in reasons:
+        if hint.startswith(_ADVISORY_RECORD_HINT_PREFIX):
+            try:
+                rec = json.loads(hint[len(_ADVISORY_RECORD_HINT_PREFIX):])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(rec, dict):
+                records.append(rec)
+    advisory_cmds = {r.get("command") for r in records}
+    ran = {_reason_names_command(h) for h in reasons
+           if h.startswith(_RAN_HINT_PREFIX)}
+    nonverdict_prefixes = (
+        _VACUOUS_HINT_PREFIX, _JSON_VACUOUS_HINT_PREFIX, _SKIP_HINT_PREFIX,
+        _INCOMPLETE_HINT_PREFIX, _AWAITING_HINT_PREFIX, _WAIVER_HINT_PREFIX,
+        _DRV_WAIVED_HINT_PREFIX, _EXECUTED_DECLARED_NA_HINT_PREFIX,
+        _STRUCTURE_ONLY_HINT_PREFIX)
+    unmeasured = {_reason_names_command(h) for h in reasons
+                  if h.startswith(nonverdict_prefixes)}
+    measured_blocking = ran - advisory_cmds - unmeasured
+    eligible = {r["command"]: r for r in records
+                if r.get("nonblocking_by_two_sources")}
+    result = []
+    for hint in reasons:
+        cmd = _reason_names_command(hint)
+        rec = eligible.get(cmd)
+        if rec and rec["enforcement"] == "BLOCKING":
+            if hint.startswith(_RAN_HINT_PREFIX):
+                # This is a disclosed advisory FAIL, not the blocking
+                # examination that can take #901 out of unanimity.
+                continue
+        if (rec and rec["enforcement"] == "DISCLOSED_INCOMPLETE"
+                and hint.startswith(_INCOMPLETE_HINT_PREFIX)):
+            # The structured vacuity channel cannot pre-empt STRUCTURE_ONLY.
+            # It preserves partial-vacuity disclosure beside a real measured
+            # blocking pass without inventing one when there is none.
+            result.append(f"{_JSON_VACUOUS_HINT_PREFIX}{cmd}\n"
+                          f"advisory NOT_MEASURED: "
+                          f"reason_class={rec['reason_class']}")
+            if not measured_blocking:
+                result.append(hint)
+        else:
+            result.append(hint)
+    return result
+
+
 def _evaluate_gate(project: Path, gate: Dict[str, Any],
                    skip_analog: bool = False) -> tuple[bool, List[str]]:
     """Evaluate a gate spec, return (passed, reasons).
@@ -12845,7 +12898,8 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         # was satisfied.
         if _stdout_signals_structure_only(out):
             reasons.append(f"{_STRUCTURE_ONLY_HINT_PREFIX}"
-                           f"{_structure_only_note(out) or _cmd}")
+                           f"{_cmd} [verdict=STRUCTURE_ONLY; "
+                           f"{_structure_only_note(out)}]")
         if not passed:
             reasons.append(f"program failed: {_cmd}")
             reasons.append(f"output: {out[:200]}")
@@ -13005,7 +13059,8 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
             reasons.append(_json_vacuous_hint(project, cmd))
         if _stdout_signals_structure_only(out):
             reasons.append(f"{_STRUCTURE_ONLY_HINT_PREFIX}"
-                           f"{_structure_only_note(out) or cmd}")
+                           f"{cmd} [verdict=STRUCTURE_ONLY; "
+                           f"{_structure_only_note(out)}]")
         if not passed:
             reasons.append(f"optional program failed: {cmd}")
             reasons.append(f"output: {out[:200]}")
@@ -13148,6 +13203,11 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         record = _advisory_execution_record(
             cmd, _ledger_start, ok, out, project, _execution,
             nested_awaiting=bool(_awaiting))
+        record["nonblocking_by_two_sources"] = (
+            record["enforcement"] in {"BLOCKING", "DISCLOSED_INCOMPLETE"}
+            and _gate_is_two_source_advisory(_gate_name(cmd))
+            and not _output_declares_non_waiverable(out)
+            and not (_awaiting and record.get("reason_class") is None))
         reasons.append(f"{_RAN_HINT_PREFIX}{cmd}")
         reasons.append(
             f"{_ADVISORY_RECORD_HINT_PREFIX}"
@@ -13205,6 +13265,39 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
                 reasons.append(_vacuous_hint_with_diagnostic(out, _execution))
             else:
                 reasons.append(f"{_VACUOUS_HINT_PREFIX}{cmd}")
+        elif (enforcement == "DISCLOSED_INCOMPLETE"
+                and record["nonblocking_by_two_sources"]):
+            # U20 (IC_BLOCKER_AUDIT §2) — AN ADVISORY NOT_MEASURED IS TREATED
+            # LIKE AN ADVISORY FAIL. Two branches up, a refusal from a gate
+            # that BOTH its module and the flow declare advisory is reported
+            # and does not set the step's tier. The same gate answering
+            # NOT_MEASURED emitted the INCOMPLETE hint unconditionally and
+            # did. MEASURED on spm v5, step 7's `stage1_compliance` clause:
+            # FAIL in the whole-flow audit -> step PASS; NOT_MEASURED in the
+            # stage-2 audit -> step NOT_MEASURED. The less severe answer set
+            # the stricter tier. One policy, now applied to both answers.
+            #
+            # On the HELD-OUT advisory channel, not as a plain reason: a plain
+            # reason would sit in `non_hint_reasons` and stop an incomplete
+            # SIBLING clause from setting the step NOT_MEASURED. The record is
+            # untouched (DISCLOSED_INCOMPLETE, lossless), and a gate advisory
+            # by only one source keeps the INCOMPLETE hint below, exactly as
+            # its refusal keeps BLOCKING.
+            #
+            # Keep INCOMPLETE until the upstream population classifier can
+            # establish a genuinely measured blocking sibling. A legacy
+            # VACUOUS hint here pre-empted STRUCTURE_ONLY and granted a false
+            # PASS on A4's library-default sweep with unmeasured ENOB.
+            reasons.append(
+                f"{_ADVISORY_HINT_PREFIX}NOT_MEASURED from a two-source "
+                f"advisory gate (non-blocking, as its refusal is): "
+                f"verdict={record['verdict']} rc={record['exit_code']} "
+                f"reason_class={record['reason_class']}: {cmd}"
+                + (f" :: {out[:200]}" if out else ""))
+            reasons.append(
+                f"{_INCOMPLETE_HINT_PREFIX}{cmd} "
+                f"[verdict={record['verdict']}, "
+                f"reason_class={record['reason_class']}]")
         elif enforcement == "DISCLOSED_INCOMPLETE":
             # R-0915-169 — see `_nested_audit_awaiting_rows`.
             if _awaiting and record.get("reason_class") is None:
@@ -17172,6 +17265,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # built above it -- harmless with the current reason shapes, and
         # exactly the kind of ordering that let a clause leak three rounds
         # running.
+        reasons = _advisory_population_reasons(reasons)
         vacuous_hints = [r for r in reasons
                          if r.startswith(_VACUOUS_HINT_PREFIX)]
         skip_hints = [r for r in reasons
@@ -17300,6 +17394,12 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 else _T.ReasonClass.FLOW_DOES_NOT_PERFORM.value
                 if _hints_declare_flow_does_not_perform(incomplete_hints)
                 else _T.ReasonClass.PARTIAL_POPULATION.value)
+            if all_vacuous_cmds and len(all_vacuous_cmds) >= len(ran_hints):
+                # Every clause is still unmeasured. Retaining INCOMPLETE for
+                # an advisory cannot make that population partially measured.
+                result.disclosures = [_T.Disclosure.VACUITY.value]
+                if result.reason_class == _T.ReasonClass.PARTIAL_POPULATION.value:
+                    result.reason_class = _T.ReasonClass.NO_POPULATION.value
             for h in awaiting_hints:
                 result.reasons.append(
                     f"AWAITING an agent pass: the gate completed pass one of a "
@@ -17398,6 +17498,11 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 result.reasons.append(
                     f"SKIPPED-CONDITION: gate evidence self-reports a skip "
                     f"(#608/#675): {h[len(_SKIP_HINT_PREFIX):]}")
+        elif passed and structure_only_hints and not non_hint_reasons:
+            # A legacy vacuity or substantive hint cannot certify a
+            # library-default artefact as design-bound.
+            result.status = _T.Verdict.PASS_WITH_WAIVERS.value
+            result.disclosures = [_T.Disclosure.STRUCTURE_ONLY.value]
         elif (passed and vacuous_hints and substantive_hints
                 and not non_hint_reasons and not skip_hints):
             # #599 step 14. The gate printed `VACUOUS_PASS:` because the
@@ -17558,11 +17663,6 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                         f"examined nothing, and it is {len(all_vacuous_cmds)} "
                         f"of {len(ran_hints)} gate clause(s) that ran here: {c}"
                         + (f" — {_json_diag[c]}" if _json_diag.get(c) else ""))
-        elif passed and structure_only_hints and not non_hint_reasons:
-            # The step ran and produced its declared artefact — from a library
-            # default. PASS would say the artefact is design-bound; it is not.
-            result.status = _T.Verdict.PASS_WITH_WAIVERS.value
-            result.disclosures = [_T.Disclosure.STRUCTURE_ONLY.value]
         elif (passed and json_vacuous_hints and not non_hint_reasons
                 and not skip_hints
                 and len(all_vacuous_cmds) >= len(ran_hints)):
