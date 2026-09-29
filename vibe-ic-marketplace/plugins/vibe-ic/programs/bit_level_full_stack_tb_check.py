@@ -880,8 +880,13 @@ def functional_full_stack_verdict(project: Path):
     own `score_transcript`, gives the state the record claims. The design input
     and every compiled source must still be the bytes the record measured.
 
-      PASS          >= 1 case executed and every executed case matched (rc 0)
-      FAIL          an executed case disagreed with its oracle (rc 1)
+      PASS          >= 1 case executed, every executed case matched, and every
+                    declared case that did not execute is excluded by a named
+                    ruling, declared not applicable, or ISA-credited with the
+                    CPU data-path program passed through the same top
+                    (R-0929-STEP5-BAR, re-derived here) (rc 0)
+      FAIL          an executed case, or the CPU data-path program, disagreed
+                    with its oracle (rc 1)
       NOT_MEASURED  no functional population (connectivity-only), the chip top
                     is not built yet, a stale or self-inconsistent record, or a
                     case short of the population its own text states (rc 2)

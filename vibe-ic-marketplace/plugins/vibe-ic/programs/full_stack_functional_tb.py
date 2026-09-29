@@ -53,8 +53,18 @@ is scored by `score_transcript`: PASS needs the case's own verdict marker, a
 golden-count marker whose numerator equals its non-zero denominator, no FAIL
 line and rc 0. A run that prints no marker is NOT_EXECUTED, never a pass.
 
+THE STEP-5 BAR (R-0929-STEP5-BAR)
+    PASS needs every declared case executed-and-passed through that top, or
+    excluded by a named ruling, or declared not applicable by the design, or
+    ISA-credited -- and ISA credit counts only when the CPU data-path program
+    `cpu_datapath_program` builds from the design input (fetch, execute,
+    store, load back over the DELIVERED memory) passed through the same top.
+    See `unexecuted_disposition`.
+
 OUTPUTS
     phase2/stage1/sim_full_stack/functional/<case>.v        the case testbench
+    phase2/stage1/sim_full_stack/functional/run/cpu_datapath_program/
+        cpu_datapath_program.hex                          the flow-built image
     phase2/stage1/sim_full_stack/functional/run/<case>/     build.log, run.log
     phase2/stage1/sim_full_stack/functional/models/         staged PDK models
     phase2/stage1/sim_full_stack/functional/functional_cases.json   the record
