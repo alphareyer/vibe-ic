@@ -20029,6 +20029,7 @@ def _cdc_top_clock_ports(rtl_files: List[Path],
             bodies.setdefault(m.group(1), m.group(2))
 
     def _clock_inputs(body: str) -> set:
+        body = _hdl_code_text.strip_hdl_comments_and_strings(body)
         out = set()
         for pm in input_port_re.finditer(body):
             nm = pm.group(1)
