@@ -200,9 +200,12 @@ setundef -zero; hilomap -hicell <TIE_CELL> <HI_PIN> -locell <TIE_CELL> <LO_PIN>;
 
 **Recipe refinement (v0.1.98, learned on the HDLC pilot — the v0.1.95 recipe was
 INSUFFICIENT on a complex design):** two extra ordering rules are load-bearing, not optional.
-Both are **enforced deterministically by `programs/yosys_tiecell_recipe_order_check.py`**
-(run it on any `.ys` synth script before yosys runs; `--json` for machine output; SKIP on
-non-synth scripts, exit 1 on violation, exit 2 on missing file):
+Their CONSEQUENCE is **enforced deterministically on the netlist by
+`programs/synth_handoff_netlist_check.py`** (step 14; `synth_handoff_netlist_check <project>`
+judges the netlist step 9 handed to PnR, on either synthesis arm: a literal or `x` constant,
+an empty or hierarchical netlist, or one older than its RTL is refused; exit 2 when there is
+no handoff to judge). LibreLane Yosys.Synthesis — the chip-path default for step 9 since
+CUT_W4 — applies both rules in its fixed recipe (`SYNTH_TIE_UNDEFINED=low`):
 1. **`setundef -zero` BEFORE `hilomap`.** A function with don't-care output bits (yosys emits
    `1'hx` for unreachable/dead bits — common in framing/CRC logic) survives `hilomap` as a
    bare `zero_`/`x` net that TritonRoute still rejects with DRT-0305. `setundef -zero` resolves
@@ -214,10 +217,9 @@ non-synth scripts, exit 1 on violation, exit 2 on missing file):
    `conb_1` cells and PnR ran clean. (This also satisfies the ECO spare-cell rule above —
    never `opt_clean` away inserted cells.)
 
-> The complementary **presence + techmap→hilomap→write_verilog ordering** is enforced by
-> `programs/yosys_hilomap_required_check.py`. Run both before synth: the hilomap-required
-> check asserts the tie-cell pass exists in the right place; the tiecell-recipe-order check
-> asserts the two v0.1.98 refinements above. Do not re-derive either by hand.
+> A missing or misplaced `hilomap` shows up the same way — literal constants in the handoff
+> netlist — so the same netlist gate catches it. (The script-text auditors that used to check
+> the recipe itself were removed in CUT_W4: the tool path has no script text to audit.)
 
 **Path note (the recurring trap):** `phase3_one_shot_runner.py` ALREADY does a tie-cell pass
 automatically (it discovers the tie cell from the liberty and inserts hilomap). But the

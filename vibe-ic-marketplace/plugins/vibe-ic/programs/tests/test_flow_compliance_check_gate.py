@@ -927,7 +927,7 @@ def test_strict_structural_step_level_info_block(tmp_path,
 def test_issue1980_step14_nested_nonverdict_is_classed_not_skipped(tmp_path):
     """The nested missing report is classed, never flattened to a skip.
 
-    The fixture has a synth netlist but no ``.ys`` recipe, so the two Yosys
+    The fixture has a synth netlist but no ``.ys`` recipe, so the Yosys
     classifiers report NOT_CHECKED, and it has no analog track, so the
     nested stage-analog on-pass review finds nothing to review. #1978
     classifies those non-verdicts as EXECUTION_ERROR; #1980 preserves their
@@ -982,9 +982,12 @@ def test_issue1980_step14_nested_nonverdict_is_classed_not_skipped(tmp_path):
     assert ("GATE EVIDENCE: stage_on_pass_review rc=2 verdict=INCOMPLETE "
             "reason_class=EXECUTION_ERROR enforcement=DISCLOSED_INCOMPLETE"
             ) in r.stdout, r.stdout
-    assert ("GATE EVIDENCE: yosys_tiecell_recipe_order_check rc=2 "
-            "verdict=NOT_CHECKED reason_class=EXECUTION_ERROR "
-            "enforcement=DISCLOSED_INCOMPLETE") in r.stdout, r.stdout
+    # CUT_W4: the second nested non-verdict this pinned was
+    # yosys_tiecell_recipe_order_check over a fixture with no recipe; that
+    # program was removed with the direct recipe's script-text audits (step 14
+    # now judges the handoff netlist, which this fixture has not produced, so
+    # its clause's condition is absent). stage_on_pass_review above still
+    # carries the property.
     assert not re.search(r"\[VACUOUS-PASS\s*\] Step\s+14:", r.stdout)
 
 

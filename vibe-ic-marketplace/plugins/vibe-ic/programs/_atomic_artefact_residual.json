@@ -510,8 +510,6 @@
     "waveform_truth_table_synth.py",
     "worked_example_sequence_oracle_check.py",
     "xlsx_extract.py",
-    "yield_fix_cost_rank.py",
-    "yosys_hilomap_required_check.py",
-    "yosys_script_template_check.py"
+    "yield_fix_cost_rank.py"
   ]
 }

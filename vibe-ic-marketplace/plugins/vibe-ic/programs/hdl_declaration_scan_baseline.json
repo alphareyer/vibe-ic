@@ -151,7 +151,6 @@
     "vacuous_testbench_check::is_testbench::_PORTLESS_MODULE(code)",
     "waveform_truth_table_synth::_synth_sequential_1ff::_FF_OBSERVABLE(prompt)",
     "waveform_truth_table_synth::parse_ports::_PORT_BULLET(prompt)",
-    "waveform_truth_table_synth::parse_ports::_PORT_DECL(prompt)",
-    "yosys_script_template_check::audit_handoff_netlist::_MODULE_DECL_RE(text)"
+    "waveform_truth_table_synth::parse_ports::_PORT_DECL(prompt)"
   ]
 }

@@ -1,5 +1,12 @@
 """The synth producer emits `setundef -zero` before `hilomap` — RULE 1.
 
+CUT_W4: the checker-driven half of this file (RULE 1 / RULE 2 read off the
+recipe TEXT by yosys_tiecell_recipe_order_check) moved to the netlist gate,
+test_cut9_step14_judges_the_handoff_netlist.py (UNDEFINED_CONSTANT,
+CONSTANT_NOT_TIED): the consequence is judged on the netlist either arm hands
+to PnR. The producer assertions below stay: the direct recipe still runs for
+designs outside the chip path.
+
 `yosys_tiecell_recipe_order_check.py` has enforced RULE 1 (`setundef -zero`
 MUST precede `hilomap`) since v0.1.98, and has been wired ADVISORY for exactly
 one reason, quoted from its own docstring:
@@ -69,31 +76,8 @@ def _load(name: str):
 
 
 R = _load("phase3_one_shot_runner")
-CHK = _load("yosys_tiecell_recipe_order_check")
 
 _SRC = (_PROGRAMS / "phase3_one_shot_runner.py").read_text(encoding="utf-8")
-
-# The clause the producer builds, in both states. The producer's own
-# expression is `f"setundef -zero; {hilomap_directive}; "` when tie cells were
-# discovered and `""` when they were not; `_DIRECTIVE` is what
-# `_v1_6_596_build_hilomap_directive` returns for a dual-output tie cell
-# (sky130 conb_1) — reproduced here so the test does not need a PDK.
-_DIRECTIVE = "hilomap -hicell TIEHILO_1 HI -locell TIEHILO_1 LO"
-_CLAUSE_POST = f"setundef -zero; {_DIRECTIVE}; "
-_CLAUSE_PRE = f"{_DIRECTIVE}; "          # what the producer emitted before
-
-
-def _recipe(clause: str) -> str:
-    """The producer's inline yosys command with `clause` spliced in, reduced
-    to the commands the RULE 1 / RULE 2 audit reads."""
-    return (
-        "yosys -p 'read_verilog -sv top.v; hierarchy -check -top top; "
-        "proc; flatten; tribuf -logic; synth -top top -flatten; "
-        "dfflibmap -liberty lib.lib; abc -liberty lib.lib; "
-        f"{clause}"
-        "clean; stat -liberty lib.lib; write_verilog -noattr out.v'"
-    )
-
 
 # ── the producer ──────────────────────────────────────────────────────────
 def test_the_producer_emits_setundef_zero_in_the_hilomap_clause():
@@ -115,33 +99,6 @@ def test_no_tie_cells_means_no_setundef_either():
 
 
 # ── the rules, driven through the REAL checker ────────────────────────────
-def test_NEGATIVE_CONTROL_the_pre_fix_recipe_still_violates_RULE_1():
-    """LOAD-BEARING. A test that cannot fail against the pre-fix code proves
-    nothing. This drives the SAME checker over the SAME recipe with only the
-    clause swapped, and asserts it still reports the violation."""
-    rep = CHK.diagnose_inline_command(_recipe(_CLAUSE_PRE))
-    rules = [v["rule"] for v in rep["violations"]]
-    assert "RULE1_setundef_zero_before_hilomap" in rules, rep
-
-
-def test_the_post_fix_recipe_is_clean_under_BOTH_rules():
-    rep = CHK.diagnose_inline_command(_recipe(_CLAUSE_POST))
-    assert rep["violations"] == [], rep
-
-
-def test_RULE_2_is_not_traded_away_for_RULE_1():
-    """RULE 2 — no `opt_clean` / `clean -purge` after `hilomap`, because they
-    delete the just-inserted tie cells and re-create the bare constant nets.
-    The producer emits plain `clean`, which is fine; assert the fix did not
-    quietly introduce an aggressive cleaner, and that the checker would catch
-    it if it did."""
-    assert CHK.diagnose_inline_command(_recipe(_CLAUSE_POST))["violations"] == []
-    bad = _recipe(_CLAUSE_POST).replace("clean; stat", "opt_clean; stat")
-    rules = [v["rule"]
-             for v in CHK.diagnose_inline_command(bad)["violations"]]
-    assert any("RULE2" in r for r in rules)
-
-
 def test_setundef_zero_precedes_EVERY_hilomap_call_site():
     """The clause is interpolated at four sites. Order-by-construction means
     none of them can regress independently — but only if they all use the

@@ -4620,14 +4620,13 @@ steps:
         # not older than the RTL it records (vibe-ic#1253).
         - optional_program_exit_zero:
             command: "synth_handoff_netlist_check . --json reports/phase2/gates/synth_handoff_netlist.json"
-            condition_files_exist: ["phase2/stage2/synth/synth_inputs.json"]
+            condition_files_exist: ["phase3/stage3/pnr/floorplan.def"]
             absent_condition_reason: >-
-              Scoped to a run whose phase-3 step 9 has handed a mapped netlist
-              to PnR: synth_inputs.json is written by step 9 beside that
-              netlist, on both arms. A stage-2 audit taken before phase 3
-              has no handoff netlist to judge; a run that reached PnR without
-              one is refused by step 9's own gate and by step 15's declared
-              input, so the absence is loud one level up.
+              Scoped to a run that has handed a netlist to PnR: the floorplan
+              is step 15's declared required output, so its absence FAILs step
+              15 loudly (T3), and a stage-2 audit taken before phase 3 has no
+              handoff netlist to judge. Once PnR has started, a missing step-9
+              handoff record makes this gate NOT_MEASURED, never a pass.
     blocks_on: [9, 13]
 
   - id: 15

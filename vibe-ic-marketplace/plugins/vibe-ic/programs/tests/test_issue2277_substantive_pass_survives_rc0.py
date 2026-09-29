@@ -28,8 +28,9 @@ sys.path.insert(0, str(PROGRAMS))
 
 import flow_compliance_check as F                        # noqa: E402
 
-_SRC_TEMPLATE = (PROGRAMS / "yosys_script_template_check.py").read_text()
-_SRC_HILOMAP = (PROGRAMS / "yosys_hilomap_required_check.py").read_text()
+# CUT_W4: the two step-14 gates this was measured on were removed with the
+# direct recipe's script-text audits; the rc-0 exemption itself is generic and
+# is driven below through a stand-in gate.
 
 _REPORT = {
     "verdict": "VACUOUS_PASS",
@@ -80,13 +81,6 @@ def test_the_token_keeps_the_rc0_gate_out_of_the_INCOMPLETE_tier(tmp_path):
     assert "EXECUTION_ERROR" not in out
     assert F._stdout_signals_token(out, F._SUBSTANTIVE_STDOUT_TOKEN), (
         "the snippet must still carry the token the step reader looks for")
-
-
-def test_the_template_gate_prints_the_token_its_sibling_prints(tmp_path):
-    """Both gates on step 14 reach the same tier by the same route, and one of
-    them was silent about it."""
-    assert "SUBSTANTIVE_PASS: no `.ys` script existed" in _SRC_HILOMAP
-    assert "SUBSTANTIVE_PASS: no `.ys` script existed" in _SRC_TEMPLATE
 
 
 # --------------------------------------------------------------------------- #

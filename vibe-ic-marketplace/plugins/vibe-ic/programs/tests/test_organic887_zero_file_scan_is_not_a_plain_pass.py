@@ -369,97 +369,37 @@ def test_a_real_finding_still_fails(gate, json_rel, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 4. THE THIRD SILENT GATE — same invariant, opposite cause.
+# 4. THE THIRD SILENT GATE — step 14.
+#
+# It was `yosys_script_template_check`, which printed its recognised token
+# FIRST and then ~194 characters of note, so the consumer's 300-char tail kept
+# the note and dropped the token at every path length. CUT_W4 removed that
+# program with the direct recipe's script-text audits: step 14 now runs
+# `synth_handoff_netlist_check` on the netlist step 9 handed to PnR. The
+# invariant is re-pinned on it: over a tree that holds no handoff record it
+# must never exit 0, at any checkout depth — its verdict is its exit code,
+# which no tail cut can remove.
 # ---------------------------------------------------------------------------
-def _yosys_project(tmp_path: Path, path_len: int | None = None) -> Path:
-    """A tree in step 14's own reachable shape: `phase2/stage2/synth` EXISTS
-    (so the optional clause's `condition_files_exist` fires and the gate runs)
-    but holds no `.ys` script and no handoff netlist."""
+def _handoff_project(tmp_path: Path, path_len: int | None = None) -> Path:
+    """Step 14's reachable shape: a synthesis directory, no handoff record."""
     proj = (_dir_of_exact_length(tmp_path, path_len)
             if path_len is not None else tmp_path)
     (proj / "phase2" / "stage2" / "synth").mkdir(parents=True)
     return proj
 
 
-def _run_yosys(proj: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, str(PROGRAMS / "yosys_script_template_check.py"), ".",
-         "--json", "reports/phase2/gates/yosys_script_template.json"],
-        cwd=proj, capture_output=True, text=True)
-
-
 @pytest.mark.parametrize("path_len", [None] + FLIP_POINT_LENGTHS)
-def test_yosys_script_template_disclosure_reaches_the_consumer(
+def test_the_step14_handoff_gate_is_never_a_plain_pass_on_nothing(
         path_len, tmp_path):
-    """It ALWAYS emitted a recognised token; the consumer never saw it, because
-    ~194 characters of trailing note evicted the ~249-char sentinel line from
-    the 300-char tail. Path-length INDEPENDENT, so `None` — an ordinary short
-    `tmp_path` — is itself a failing case on the unfixed program."""
-    proj = _yosys_project(tmp_path, path_len)
-    proc = _run_yosys(proj)
-
-    assert proc.returncode == 0
-    full = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    assert F._stdout_signals_vacuous(full), (
-        "precondition broken: the gate no longer emits any recognised "
-        f"disclosure at all\n{full}")
-    assert _consumer_sees_disclosure(proc), (
-        "yosys_script_template_check emitted a recognised disclosure that the "
-        f"{F._OUTPUT_SNIPPET_CHARS}-char consumer window did not keep, so the "
-        f"step is credited a plain PASS.\n"
-        f"--- stdout ({len(proc.stdout)} chars) ---\n{proc.stdout}\n"
-        f"--- stderr ({len(proc.stderr)} chars) ---\n{proc.stderr}")
-
-
-def test_yosys_disclosure_carrier_is_bounded(tmp_path):
-    """Same structural property as the step-3 gates: the token's stream carries
-    nothing that grows. Here the growth that hid it was the gate's OWN prose,
-    not the caller's path — so the assertion is on the carrier's width, which
-    is what makes the tail cut a no-op either way."""
-    proj = _yosys_project(
-        tmp_path, len(str(tmp_path)) + 4 * F._OUTPUT_SNIPPET_CHARS)
-    proc = _run_yosys(proj)
-    assert "VACUOUS_PASS" in proc.stderr, (
-        "the disclosure is not on the bounded stream; it is back on stdout "
-        f"behind the gate's report:\n{proc.stdout}")
-    assert len(proc.stderr) <= F._OUTPUT_SNIPPET_CHARS, (
-        f"carrier stream is {len(proc.stderr)} chars against a "
-        f"{F._OUTPUT_SNIPPET_CHARS}-char window:\n{proc.stderr}")
-
-
-def test_yosys_step14_optional_clause_promotes_the_step(tmp_path):
-    """End to end through the real evaluator, with step 14's own clause spec."""
-    proj = _yosys_project(tmp_path)
-    passed, reasons = F._evaluate_gate(proj, {
-        "optional_program_exit_zero": {
-            "command": ("yosys_script_template_check . --json "
-                        "reports/phase2/gates/yosys_script_template.json"),
-            "condition_files_exist": ["phase2/stage2/synth"],
-        }})
-    assert passed is True
-    assert any(F._stdout_signals_vacuous(r) or
-               r.startswith(F._VACUOUS_HINT_PREFIX) for r in reasons), (
-        f"step 14's optional clause carried no disclosure to check_step, so "
-        f"the step stays in the executed-PASS numerator. reasons={reasons}")
-
-
-def test_yosys_does_not_disclose_when_it_audited_a_real_script(tmp_path):
-    """Over-fire control. A project with a genuine synthesis recipe is examined,
-    not skipped, and must stay a plain PASS."""
-    synth = tmp_path / "phase2" / "stage2" / "synth"
-    synth.mkdir(parents=True)
-    (synth / "synth.ys").write_text(
-        "read_verilog -sv top.v\n"
-        "synth -top top -flatten\n"
-        "dfflibmap -liberty lib.lib\n"
-        "hilomap -hicell TIEHI Y -locell TIELO Y\n"
-        "write_verilog netlist.v\n")
-    (synth / "netlist.v").write_text("module top(); endmodule\n")
-    proc = _run_yosys(tmp_path)
-    assert proc.returncode == 0
-    assert not _consumer_sees_disclosure(proc), (
-        "the gate disclosed VACUOUS_PASS on a project whose synthesis recipe "
-        f"it actually audited:\n{proc.stdout}\n{proc.stderr}")
+    proj = _handoff_project(tmp_path, path_len)
+    proc = subprocess.run(
+        [sys.executable, str(PROGRAMS / "synth_handoff_netlist_check.py"), ".",
+         "--json", "reports/phase2/gates/synth_handoff_netlist.json"],
+        cwd=proj, capture_output=True, text=True)
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    report = json.loads((proj / "reports/phase2/gates/synth_handoff_netlist.json")
+                        .read_text())
+    assert report["verdict"] == "NOT_MEASURED"
 
 
 # ---------------------------------------------------------------------------

@@ -197,96 +197,68 @@ def test_optional_predicate_missing_condition_fails(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# v0.70 Item 1: Pre-PnR Yosys auditor gate.
+# v0.70 Item 1: Pre-PnR synthesis handoff gate (step 14, in process).
+# CUT_W4: it judges the NETLIST step 9 handed to PnR (synth_handoff_netlist_check)
+# instead of a `.ys` script's text; the fixtures are the calibrated real-Yosys
+# pair (with / without hilomap) of synth_handoff_netlist_check.
 # ---------------------------------------------------------------------------
-_GOOD_YS = """\
-read_verilog -sv rtl/top.sv
-hierarchy -check -top top
-proc; opt; fsm; opt
-memory; opt
-techmap
-hilomap -hicell TIEHI Y -locell TIELO Y
-synth -flatten
-write_verilog synth/netlist.v
-"""
-
-_BAD_YS_NO_HILOMAP = """\
-read_verilog -sv rtl/top.sv
-hierarchy -check -top top
-techmap
-synth -flatten
-write_verilog synth/netlist.v
-"""
-
-_BAD_YS_WRONG_ORDER = """\
-read_verilog -sv rtl/top.sv
-hilomap -hicell TIEHI Y -locell TIELO Y
-techmap
-synth -flatten
-write_verilog synth/netlist.v
-"""
+_CAL = PROG.parent / "calibration"
 
 
-def test_find_synth_ys_prefers_scripts_over_root(tmp_path):
-    """`scripts/synth.ys` wins over a root-level `.ys` file."""
-    (tmp_path / "scripts").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "scripts" / "synth.ys").write_text("# scripts version\n")
-    (tmp_path / "synth.ys").write_text("# root version\n")
-    found = _flow._find_synth_ys(tmp_path)
-    assert found is not None
-    assert found.name == "synth.ys"
-    assert "scripts" in str(found)
+def _handoff(proj: Path, netlist_name: str) -> Path:
+    import hashlib
+    rtl = proj / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True, exist_ok=True)
+    (rtl / "cal_const.v").write_text("module cal_const; endmodule\n")
+    synth = proj / "phase2/stage2/synth"
+    synth.mkdir(parents=True, exist_ok=True)
+    (synth / "cal_const_synth.v").write_text((_CAL / netlist_name).read_text())
+    (synth / "synth_inputs.json").write_text(json.dumps({
+        "netlist": "cal_const_synth.v",
+        "rtl_sha256": {"cal_const.v": hashlib.sha256(
+            (rtl / "cal_const.v").read_bytes()).hexdigest()}}))
+    return proj
 
 
-def test_find_synth_ys_returns_none_when_absent(tmp_path):
-    assert _flow._find_synth_ys(tmp_path) is None
-
-
-def test_yosys_gate_pass_when_ys_is_well_formed(tmp_path):
-    (tmp_path / "scripts").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "scripts" / "synth.ys").write_text(_GOOD_YS)
+def test_yosys_gate_pass_on_a_tied_handoff_netlist(tmp_path):
+    _handoff(tmp_path, "synth_const_tied_negative.v")
     passed, reasons = _flow._run_yosys_gates(tmp_path)
     assert passed is True
     assert reasons == []
 
 
-def test_yosys_gate_skipped_when_no_ys_file(tmp_path):
-    """A project with no .ys at all is not a FAIL — some flows don't use
-    Yosys. Returned reasons list is empty so the synthetic result isn't
-    injected."""
+def test_yosys_gate_skipped_before_step9_handed_off(tmp_path):
+    """No step-9 handoff netlist yet is not a FAIL here: step 9's own gate
+    and step 15's declared input refuse a PnR without one. The returned
+    reasons list is empty so the synthetic result isn't injected."""
     passed, reasons = _flow._run_yosys_gates(tmp_path)
     assert passed is True
     assert reasons == []
 
 
 def test_yosys_gate_fail_on_missing_hilomap(tmp_path):
-    (tmp_path / "scripts").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "scripts" / "synth.ys").write_text(_BAD_YS_NO_HILOMAP)
+    _handoff(tmp_path, "synth_const_no_hilomap_positive.v")
     passed, reasons = _flow._run_yosys_gates(tmp_path)
     assert passed is False
-    # Remediation must mention hilomap + DRT-0305 + the tie-cell rationale.
+    # Remediation must name the constant, DRT-0305 and the tie-cell rationale.
     joined = "\n".join(reasons)
-    assert "hilomap" in joined
     assert "DRT-0305" in joined
-    assert "scripts/synth.ys" in joined
+    assert "CONSTANT_NOT_TIED" in joined
 
 
-def test_yosys_gate_fail_on_wrong_order(tmp_path):
-    (tmp_path / "scripts").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "scripts" / "synth.ys").write_text(_BAD_YS_WRONG_ORDER)
+def test_yosys_gate_fail_on_a_netlist_older_than_its_rtl(tmp_path):
+    _handoff(tmp_path, "synth_const_tied_negative.v")
+    (tmp_path / "phase2/stage1/rtl/cal_const.v").write_text("module cal_const(input a); endmodule\n")
     passed, reasons = _flow._run_yosys_gates(tmp_path)
     assert passed is False
-    # Auditor output should propagate line numbers / ordering complaints.
-    joined = "\n".join(reasons)
-    assert "hilomap" in joined.lower() or "techmap" in joined.lower()
+    assert "HANDOFF_STALE" in "\n".join(reasons)
 
 
 def test_flow_compliance_skip_yosys_gates_flag(tmp_path):
     """`--skip-yosys-gates` suppresses the synthetic step even when the
-    .ys would otherwise fail. The rest of the flow still runs (and will
-    fail on missing artefacts)."""
-    (tmp_path / "scripts").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "scripts" / "synth.ys").write_text(_BAD_YS_NO_HILOMAP)
+    handoff netlist would otherwise fail. The rest of the flow still runs (and
+    will fail on missing artefacts)."""
+    _handoff(tmp_path, "synth_const_no_hilomap_positive.v")
     # With the flag: the synthetic "Pre-PnR Yosys auditor gate" row must
     # NOT appear in the output.
     code_skip, out_skip, _ = _run(tmp_path, ("--strict",
@@ -301,21 +273,18 @@ def test_flow_compliance_skip_yosys_gates_flag(tmp_path):
 
 
 def test_flow_compliance_skip_yosys_gates_on_stage1(tmp_path):
-    """--stage 1 never reaches PnR, so the Yosys gate must be auto-off
-    even when a broken .ys is present. This prevents legitimate Phase-1
-    drafts from being blocked by a missing hilomap."""
-    (tmp_path / "scripts").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "scripts" / "synth.ys").write_text(_BAD_YS_NO_HILOMAP)
+    """--stage 1 never reaches PnR, so the gate must be auto-off even when a
+    failing handoff netlist is present."""
+    _handoff(tmp_path, "synth_const_no_hilomap_positive.v")
     code, out, _ = _run(tmp_path, ("--strict", "--stage", "1"))
     assert "Pre-PnR Yosys auditor gate" not in out
 
 
 def test_flow_compliance_yosys_gate_injects_fail_row(tmp_path):
-    """End-to-end: a project with a broken .ys must cause
-    flow_compliance_check itself to return FAIL at the synthetic row,
-    carrying the specific hilomap remediation text."""
-    (tmp_path / "scripts").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "scripts" / "synth.ys").write_text(_BAD_YS_NO_HILOMAP)
+    """End-to-end: a project whose handoff netlist carries literal constants
+    must cause flow_compliance_check itself to return FAIL at the synthetic
+    row, carrying the DRT-0305 remediation text."""
+    _handoff(tmp_path, "synth_const_no_hilomap_positive.v")
     code, out, err = _run(tmp_path, ("--strict",))
     assert code != 0
     combined = out + err
@@ -324,7 +293,7 @@ def test_flow_compliance_yosys_gate_injects_fail_row(tmp_path):
 
 
 def test_flow_compliance_yosys_gate_help_lists_flag():
-    """--help must document the new escape hatch."""
+    """--help must document the escape hatch."""
     r = subprocess.run([sys.executable, str(PROG), "--help"],
                        capture_output=True, text=True)
     assert r.returncode == 0

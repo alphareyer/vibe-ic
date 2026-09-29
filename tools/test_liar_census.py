@@ -2055,7 +2055,7 @@ def test_the_mapping_spelling_is_swept_as_well_as_the_string(tmp_path):
     and fell through `isinstance(val, str)` — one of them BLOCKING."""
     progs = {c.program for c in lc.discover_clauses(lc.FLOW_YAML)}
     assert "clock_plan_check" in progs                    # program_exit_zero, mapping
-    assert "yosys_tiecell_recipe_order_check" in progs    # advisory, mapping
+    assert "stage_on_pass_review" in progs                # advisory, mapping
     assert "l10_tb_conformance_check" in progs            # optional, mapping
 
 
@@ -2978,6 +2978,23 @@ _REHOMED = {
     # go away, its command string changed.
     "phase1_expert_parse_track .":
     "phase1_expert_parse_track . --check-report",
+    # CUT_W4 (R-0929-TOOL-DEFAULT, owner 2026-09-29): step 9 on the chip path
+    # is LibreLane Yosys.Synthesis, whose recipe is the tool's fixed code, so
+    # the three clauses that audited the direct recipe's TEXT (hilomap presence
+    # and order, -sv/-flatten tokens, setundef/opt_clean order, recovered from
+    # an inline `yosys -p` the tool never writes) had nothing to read. Their
+    # lessons are findings of ONE successor that judges the handoff NETLIST on
+    # either arm: literal and x constants (DRT-0305), an empty or hierarchical
+    # netlist, one older than its RTL. Same step. Not weaker: the tie-cell
+    # order clause was ADVISORY and its successor is a blocking optional clause
+    # that reads the netlist PnR routes rather than the recipe that wrote it.
+    # HARVEST table: CUT_W4.last.md, step 9.
+    "yosys_hilomap_required_check . --json reports/phase2/gates/yosys_hilomap.json":
+    "synth_handoff_netlist_check . --json reports/phase2/gates/synth_handoff_netlist.json",
+    "yosys_script_template_check . --json reports/phase2/gates/yosys_script_template.json":
+    "synth_handoff_netlist_check . --json reports/phase2/gates/synth_handoff_netlist.json",
+    "yosys_tiecell_recipe_order_check . --json reports/phase2/gates/yosys_tiecell_recipe_order.json":
+    "synth_handoff_netlist_check . --json reports/phase2/gates/synth_handoff_netlist.json",
     # v1.24.73 (#2635) made the pre-stream runner the PRODUCER of the step-17
     # and step-22 receipts (`program_outputs`, declared in `required_outputs`)
     # and moved each step gate's own re-measurement to a `*_verdict.json`

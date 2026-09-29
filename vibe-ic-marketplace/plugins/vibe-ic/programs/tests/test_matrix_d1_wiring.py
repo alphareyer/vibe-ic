@@ -1889,7 +1889,7 @@ def test_probe_direct_dispatch_programs_really_dispatch():
     Excluding them without measuring them anywhere would move two programs from
     'proved dispatched' to 'assumed dispatched', which is silent absence. So
     they are proved HERE, by driving `_run_yosys_gates` for real against a
-    project carrying the .ys script its own finder looks for.
+    project carrying the step-9 handoff record it looks for.
     """
     names = umbrella_registries().get(DIRECT_DISPATCH_KEY, ())
     assert names, (
@@ -1908,9 +1908,11 @@ def test_probe_direct_dispatch_programs_really_dispatch():
     real_popen = subprocess.Popen
     try:
         project = tmp / "proj"
-        ys = project / "scripts" / "synth.ys"
+        # CUT_W4: the dispatcher's subject is now step 9's handoff record
+        # (the netlist it gave PnR), not a `.ys` script's text.
+        ys = project / "phase2" / "stage2" / "synth" / "synth_inputs.json"
         ys.parent.mkdir(parents=True)
-        ys.write_text("read_verilog top.v\nsynth -top top\n", encoding="utf-8")
+        ys.write_text('{"netlist": "top_synth.v"}', encoding="utf-8")
         # `_run_yosys_gates` still launches through a DIRECT `subprocess.run`
         # while the P0 umbrella above launches through `_watchdog`. Both are
         # observed by the same anchor and neither probe knows which seam its
