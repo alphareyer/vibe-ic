@@ -731,6 +731,12 @@ def _promoted(tmp_path, verdict="PASS", defect=0, pairs=None, bytes_=b"finished 
             "value": defect, "folder": str(folder)}}})
     _put(project / xor.LIBRELANE_PROMOTION_REL,
          {"selection": "klayout", "canonical_sha256": contract.digest(gds)})
+    # librelane_step37.run writes its Magic-vs-KLayout stream XOR before it can
+    # promote anything (LL_XOR_NOT_ZERO refuses otherwise); U15 binds 37.3's
+    # connectivity to it, so the promoted fixture carries it as the run does.
+    _put(project / xor.LIBRELANE_STREAM_XOR_REL, {
+        "verdict": "PASS", "metrics": {"design__xor_difference__count": {
+            "status": "MEASURED", "value": 0}}})
     return xor, project, gds
 
 
