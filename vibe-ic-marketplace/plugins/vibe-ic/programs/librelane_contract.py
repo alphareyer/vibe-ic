@@ -1701,7 +1701,14 @@ DESIGN_CLASS_CHIP_PAD_RING = 'chip_pad_ring'
 #: or HARDMACRO design has no Chip-flow segment (LL_FLOORPLAN_CORE_ONLY_UNSUPPORTED),
 #: so it keeps `direct`. A step-wide `PRODUCTION_DEFAULTS` entry outranks these.
 CLASS_PRODUCTION_DEFAULTS: dict[str, dict[str, str]] = {
-    DESIGN_CLASS_CHIP_PAD_RING: {'15': 'librelane', '15.5ic': 'librelane',
+    # CUT_W4 (R-0929-TOOL-DEFAULT): synthesis is LibreLane Yosys.Synthesis.
+    # Measured chain: LL 9 -> LL 15..21 on spm x gf180mcuD plus LEC arm A on
+    # the tool's netlist (docs/librelane_contract.md, "Cut-over of 9"). The
+    # null SYNTH_LATCH_MAP the gf180 pdk_compat produces is not a defect:
+    # the image's `dfflibmap` maps every latch kind from the Liberty and
+    # Checker.YosysUnmappedCells refuses any that is left generic.
+    DESIGN_CLASS_CHIP_PAD_RING: {'9': 'librelane',
+                                 '15': 'librelane', '15.5ic': 'librelane',
                                  '17': 'librelane', '18': 'librelane',
                                  '19': 'librelane', '20': 'librelane',
                                  # T99 + T102 r4 (owner ruling, CUT-OVER rule):
