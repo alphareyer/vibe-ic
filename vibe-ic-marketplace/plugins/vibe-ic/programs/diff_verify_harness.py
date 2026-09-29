@@ -48,15 +48,15 @@ designer-vs-reference mismatch with the cycle and signal. The PROGRAM does NOT
 author the reference (that is the AI judgment recorded in the issue's
 why_not_bucket_a) — it only DRIVES the differential comparison.
 
-It reads ONLY the RTL header (to parse clk + input/output ports), the reference
+It elaborates ONLY the supplied RTL (to resolve input/output ports), the reference
 model, and the vectors. It has NO access to any oracle, hidden TB, or dataset:
 a misread cannot leak in through the comparison, because BOTH sides come from
 the spec-reader, not from the scorer.
 
 Tool availability
 =================
-The live RTL side is iverilog/vvp. A live call is gated on `shutil.which`. When
-iverilog/vvp is ABSENT the run is reported `SKIP (tool unavailable)` with a
+Port elaboration uses pyslang; the live RTL side uses iverilog/vvp. A missing
+pyslang import or absent iverilog/vvp yields `SKIP (tool unavailable)` with
 disclosure and rc 0 — NEVER a faked AGREE (mirrors the refuse-don't-fake
 doctrine of harness_exact_selfverify #688 / cvdp_gate #604). The reference-side
 logic (`ref(seq)` + the per-cycle compare) is exercised independently of
@@ -65,11 +65,11 @@ iverilog so CI always covers the comparator.
 Exit codes
 ==========
     0  AGREE — every cycle of every vector matched the reference
-       (OR a disclosed SKIP because iverilog/vvp was absent — never a fake AGREE)
+       (OR a disclosed SKIP because a tool was absent — never a fake AGREE)
     1  MISMATCH — the first diverging cycle/signal is printed
     2  bad input (RTL/ref/port parse failure, bad --vectors, etc.)
 
-chip-AGNOSTIC: pure structure — module/port header parse, vector generation,
+chip-AGNOSTIC: pure structure — Slang port elaboration, vector generation,
 iverilog/vvp drive, per-cycle integer compare. No chip / vendor / SKU literal,
 no dataset access.
 """
@@ -87,7 +87,7 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# ── RTL header parse (reuse the comment-stripped-view doctrine) ──────────────
+# ── RTL port elaboration; comment-stripped module discovery ──────────────────
 _LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _STRING_LIT_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
@@ -98,27 +98,6 @@ def _strip_comments(text: str) -> str:
     t = _LINE_COMMENT_RE.sub(" ", t)
     return _STRING_LIT_RE.sub('""', t)
 
-
-_MODULE_HDR_RE = re.compile(
-    r"\bmodule\s+([A-Za-z_]\w*)\s*"
-    r"(?:#\s*\((?:[^()]|\([^()]*\))*\)\s*)?"   # optional #(params)
-    r"(?:\((?P<ports>(?:[^()]|\([^()]*\))*)\))?\s*;",
-    re.DOTALL)
-
-# ANSI port: `input wire [7:0] foo`, `output reg bar`, `inout baz`. Captures
-# direction, optional [msb:lsb] range, and the name.
-_ANSI_PORT_RE = re.compile(
-    r"\b(input|output|inout)\b"
-    r"(?:\s+(?:wire|reg|logic|bit|signed|unsigned))*"
-    r"(?:\s*\[\s*(\d+)\s*:\s*(\d+)\s*\])?\s*"
-    r"([A-Za-z_]\w*)")
-
-# non-ANSI body decl: `input [7:0] foo, bar;` / `output reg q;`
-_NONANSI_PORT_RE = re.compile(
-    r"\b(input|output|inout)\b"
-    r"(?:\s+(?:wire|reg|logic|bit|signed|unsigned))*"
-    r"(?:\s*\[\s*(\d+)\s*:\s*(\d+)\s*\])?\s*"
-    r"((?:[A-Za-z_]\w*\s*,\s*)*[A-Za-z_]\w*)\s*;")
 
 _MODULE_NAME_RE = re.compile(r"\bmodule\s+([A-Za-z_]\w*)", re.MULTILINE)
 
@@ -149,68 +128,66 @@ def module_names(code: str) -> List[str]:
     return list(seen.keys())
 
 
-def _width(msb: Optional[str], lsb: Optional[str]) -> int:
-    if msb is None or lsb is None:
-        return 1
-    return abs(int(msb) - int(lsb)) + 1
-
-
 def parse_ports(code: str, top: Optional[str]) -> Tuple[Optional[str],
                                                         List[Port], str]:
-    """Parse the named module's (or sole module's) port list into Port objects
-    with direction + bit-width. Handles ANSI (header) and non-ANSI (body)."""
-    src = _strip_comments(code)
-    # Locate the requested module header (default: first/sole module).
-    chosen = None
-    for m in _MODULE_HDR_RE.finditer(src):
-        if top is None or m.group(1) == top:
-            chosen = m
-            break
-    if chosen is None:
-        names = module_names(code)
-        if top and top not in names:
-            return None, [], (f"requested --top {top!r} not declared "
-                              f"(declared: {names or 'none'})")
+    """Use Slang's elaborated ports and declared parameter defaults.
+
+    Slang supplies names, directions, packed bit widths and declaration order;
+    this adapter never evaluates HDL range arithmetic. No synthesis is required.
+    Unsupported port types or unresolved ranges refuse before generating a TB.
+    The existing first-module default and widest-port tie order are preserved.
+    """
+    try:
+        import pyslang as slang
+    except ImportError as exc:
+        return None, [], f"DIFF_PORT_TOOL_UNAVAILABLE: pyslang absent: {exc}"
+
+    names = module_names(code)
+    if top and top not in names:
+        return None, [], (f"requested --top {top!r} not declared "
+                          f"(declared: {names or 'none'})")
+    if not names:
         return None, [], "no module declaration found in RTL"
-    name = chosen.group(1)
-    ports_blob = chosen.group("ports") or ""
-    ports: Dict[str, Port] = {}
-    order: List[str] = []
-    # ANSI directions in the header.
-    for pm in _ANSI_PORT_RE.finditer(ports_blob):
-        nm = pm.group(4)
-        if nm not in ports:
-            ports[nm] = Port(nm, pm.group(1).lower(),
-                             _width(pm.group(2), pm.group(3)))
-            order.append(nm)
-    # bare header names (non-ANSI — directions live in the body).
-    header_bare: List[str] = []
-    if ports_blob.strip():
-        for nm in re.findall(r"[A-Za-z_]\w*", ports_blob):
-            if nm in ("input", "output", "inout", "wire", "reg", "logic",
-                      "bit", "signed", "unsigned"):
-                continue
-            if nm not in ports and nm not in header_bare:
-                header_bare.append(nm)
-    # non-ANSI body declarations.
-    body = src[chosen.end():]
-    em = re.search(r"\bendmodule\b", body)
-    if em:
-        body = body[:em.start()]
-    for pm in _NONANSI_PORT_RE.finditer(body):
-        direction = pm.group(1).lower()
-        w = _width(pm.group(2), pm.group(3))
-        for nm in re.split(r"\s*,\s*", pm.group(4).strip()):
-            nm = nm.strip()
-            if nm and nm not in ports:
-                ports[nm] = Port(nm, direction, w)
-                if nm not in order:
-                    order.append(nm)
-    for nm in header_bare:
-        if nm not in ports:
-            ports[nm] = Port(nm, "unknown", 1)
-            order.append(nm)
-    return name, [ports[n] for n in order], ""
+    name = top or names[0]
+    try:
+        options = slang.ast.CompilationOptions()
+        options.topModules = {name}
+        bag = slang.Bag()
+        bag.compilationOptions = options
+        compilation = slang.ast.Compilation(bag)
+        compilation.addSyntaxTree(slang.syntax.SyntaxTree.fromText(code))
+        instances = compilation.getRoot().topInstances
+        diagnostics = compilation.getAllDiagnostics()
+        if any(d.isError() for d in diagnostics):
+            detail = slang.DiagnosticEngine.reportAll(
+                compilation.sourceManager, diagnostics).strip()
+            return None, [], f"DIFF_PORT_ELABORATION_FAILED: {detail}"
+        selected = [i for i in instances if i.name == name]
+        if len(selected) != 1:
+            return None, [], f"DIFF_PORT_TOP_UNRESOLVED: {name!r}"
+        directions = {slang.ast.ArgumentDirection.In: "input",
+                      slang.ast.ArgumentDirection.Out: "output",
+                      slang.ast.ArgumentDirection.InOut: "inout"}
+        ports = []
+        for port in selected[0].body.portList:
+            if not isinstance(port, slang.ast.PortSymbol):
+                return None, [], (f"DIFF_PORT_UNSUPPORTED: {port.name!r} "
+                                  "is not a plain integral port")
+            # The emitted TB uses ordinary identifiers and packed bit vectors.
+            # Escaped names and unpacked/interface/ref ports need another TB
+            # shape, so refuse them instead of inventing a scalar connection.
+            token = getattr(port.syntax, "name", None)
+            if (not re.fullmatch(r"[A-Za-z_]\w*", port.name)
+                    or token is None or token.rawText.startswith("\\")
+                    or port.direction not in directions
+                    or not port.type.isIntegral or port.type.bitWidth <= 0):
+                return None, [], (f"DIFF_PORT_UNSUPPORTED: {port.name!r} "
+                                  f"has unsupported name, direction or type {port.type}")
+            ports.append(Port(port.name, directions[port.direction],
+                              port.type.bitWidth))
+        return name, ports, ""
+    except Exception as exc:  # tool/API failure must never mint guessed ports
+        return None, [], f"DIFF_PORT_ELABORATION_FAILED: {type(exc).__name__}: {exc}"
 
 
 def _classify_ports(ports: List[Port]) -> Tuple[Optional[Port], List[Port],
@@ -469,7 +446,7 @@ def diff_verify(rtl_path: Path, ref_path: Path, top: Optional[str],
                            "(FLOOR per #697)"),
         "complement_to": ["#697 spec_coverage_check (deterministic dimension "
                           "coverage)", "#699 timing/encoding reading disciplines"],
-        "reads_only": "RTL header + independent reference + generated vectors "
+        "reads_only": "supplied RTL + independent reference + generated vectors "
                       "(no oracle / hidden TB / dataset)",
         "vectors": vectors,
     }
@@ -478,6 +455,10 @@ def diff_verify(rtl_path: Path, ref_path: Path, top: Optional[str],
     if name is None:
         report["verdict"] = "ERROR"
         report["reason"] = "port parse failed: " + perr
+        if perr.startswith("DIFF_PORT_TOOL_UNAVAILABLE:"):
+            report["tool_available"] = False
+            report["verdict"] = "ERROR" if require_tools else "SKIP"
+            report["reason"] += " — NOT_VERIFIED: the RTL ports were not elaborated"
         return report
     report["resolved_top"] = name
     clk, resets, din, dout = _classify_ports(ports)
@@ -587,7 +568,7 @@ def main(argv=None) -> int:
                     help="PRNG seed for the random vectors (deterministic)")
     ap.add_argument("--json", default=None, help="optional JSON report path")
     ap.add_argument("--require-tools", action="store_true",
-                    help="treat an absent iverilog/vvp as a hard error (exit 2) "
+                    help="treat an absent pyslang/iverilog/vvp as a hard error (exit 2) "
                          "for a CI/container run that MUST enforce")
     args = ap.parse_args(argv)
 
