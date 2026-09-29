@@ -54622,8 +54622,6 @@ def _run_illegal_overlap_gate(project: Path, out_json: Path
                    f"was never read.")
     try:
         out_json.parent.mkdir(parents=True, exist_ok=True)
-        if name == "drv_signoff":
-            out_json.unlink(missing_ok=True)
     except OSError as exc:
         return 2, f"NOT CHECKED — cannot create {out_json.parent}: {exc}"
     cmd = [sys.executable, str(prog), str(project), "--json", str(out_json)]
