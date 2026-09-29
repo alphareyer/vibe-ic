@@ -28,7 +28,9 @@ def test_the_cts_chain_runs_a_measured_external_capture_retap_step():
     assert "VIBEIC_CLKPATH_PRECTS_INSTANCES" in driver
     assert 'id = "Vibeic.ExternalCaptureLaunchRetap"' in (steps / "__init__.py").read_text()
     chain = (PROGRAMS / "librelane_cts_hold.py").read_text()
-    assert chain.index('("Vibeic.ClockPathDriveSizing",') < chain.index(
+    # step 19's clock-path sizing arm (CUT_W4: the tool's by default) runs
+    # before the retap, which runs before PostCTS timing repair
+    assert chain.index('(sizing_id, configs[sizing_id])') < chain.index(
         '("Vibeic.ExternalCaptureLaunchRetap",') < chain.index(
         '("OpenROAD.ResizerTimingPostCTS",')
     body = helper.read_text()

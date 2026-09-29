@@ -398,7 +398,10 @@ def _fake_tool_run(project, corners, *, hold, cts_buffers=7, fail_step=None):
         for step in step_ids:
             doc = {'meta': {'step': step}, 'STA_CORNERS': corners,
                    'PNR_CORNERS': None}
-            if step in ('OpenROAD.CTS', 'OpenROAD.ResizerTimingPostCTS'):
+            # every resizer step carries the cell policy, as LibreLane's own
+            # resolution does (the step-19 tool sizing arm is a resizer step)
+            if step in ('OpenROAD.CTS', 'OpenROAD.ResizerTimingPostCTS',
+                        'Vibeic.ClockNetworkGlobalSizing'):
                 doc.update(CELL_LIBS={'nom': [f'/pdk/{pdk}/{lib.name}']},
                            EXTRA_EXCLUDED_CELLS=[])
             out[step] = put(root / f'{step}.json', doc)
@@ -479,7 +482,8 @@ def _run_split(tmp_path, monkeypatch, *, switch=None, hold=None, arm_hold=None, 
 def test_librelane_views_reach_the_paths_the_direct_route_reads(tmp_path, monkeypatch):
     run = _run_split(tmp_path, monkeypatch)
     assert run.rc == 0
-    assert run.seen['steps'] == ['OpenROAD.CTS', 'Vibeic.ClockPathDriveSizing',
+    # the step-19 clock-path sizing is the TOOL's by default (CUT_W4)
+    assert run.seen['steps'] == ['OpenROAD.CTS', 'Vibeic.ClockNetworkGlobalSizing',
                                  'Vibeic.ExternalCaptureLaunchRetap',
                                  'OpenROAD.ResizerTimingPostCTS'] + ['OpenROAD.STAMidPNR'] * 3
     assert run.seen['kwargs']['lane'] == '19-cts-hold'
@@ -506,8 +510,12 @@ def test_librelane_views_reach_the_paths_the_direct_route_reads(tmp_path, monkey
     retap = json.loads(run.seen['configs'][2].read_text())
     assert retap['PNR_CORNERS'] == CORNERS
     assert Path(retap['VIBEIC_CLKPATH_PRECTS_INSTANCES']).is_file()
-    assert Path(sizing['VIBEIC_CLKPATH_SIZING_TCL']).read_text() == \
-        runner._clock_path_drive_sizing_tcl()
+    # the tool arm reads the pre-CTS snapshot (it holds the CTS-built buffers)
+    # and carries no copy of the runner's own sizing algorithm
+    assert Path(sizing['VIBEIC_CLKPATH_PRECTS_INSTANCES']).is_file()
+    assert 'VIBEIC_CLKPATH_SIZING_TCL' not in sizing
+    assert receipt['clock_path_sizing'] == {
+        'arm': 'tool', 'step': 'Vibeic.ClockNetworkGlobalSizing'}
     log = (run.out_dir / 'openroad.log').read_text()
     assert 'PNR_STAGE: cts' in log and 'PNR_STAGE: hold_repair' in log
     assert 'CTS-0010' in log and 'RSZ-0032' in log
@@ -521,6 +529,32 @@ def test_librelane_views_reach_the_paths_the_direct_route_reads(tmp_path, monkey
     area = json.loads((run.project / 'reports/phase3/pnr/hold_area.json').read_text())
     assert (area['before_total_area'], area['after_total_area'], area['hold_buffer_count']) \
         == (1000.0, 1010.0, 2)
+
+
+def test_the_own_clock_path_sizing_arm_stays_selectable(tmp_path, monkeypatch):
+    """Harvest-then-delete (owner amendment 2026-09-29): until every row of
+    its harvest table has a landed destination, the #2160 swapMaster search
+    runs when the switch names it, exactly as it did before CUT_W4."""
+    run = _run_split(tmp_path, monkeypatch, switch={
+        'steps': {'19': 'librelane', '20': 'librelane'},
+        'arms': {'19.clock_path_sizing': 'own'}})
+    assert run.rc == 0
+    assert run.seen['steps'][:3] == ['OpenROAD.CTS', 'Vibeic.ClockPathDriveSizing',
+                                     'Vibeic.ExternalCaptureLaunchRetap']
+    sizing = json.loads(run.seen['configs'][1].read_text())
+    assert Path(sizing['VIBEIC_CLKPATH_SIZING_TCL']).read_text() == \
+        runner._clock_path_drive_sizing_tcl()
+    receipt = json.loads((run.project / llev.RECEIPT_REL).read_text())
+    assert receipt['clock_path_sizing'] == {
+        'arm': 'own', 'step': 'Vibeic.ClockPathDriveSizing'}
+
+
+def test_an_unknown_clock_path_sizing_arm_is_refused(tmp_path, monkeypatch):
+    run = _run_split(tmp_path, monkeypatch, switch={
+        'steps': {'19': 'librelane', '20': 'librelane'},
+        'arms': {'19.clock_path_sizing': 'both'}})
+    assert run.rc != 0 and 'LL_INVALID_SWITCH' in run.out
+    assert 'steps' not in run.seen            # nothing ran in its place
 
 
 def test_a_missing_pdk_root_refuses_and_never_resumes_the_route(tmp_path, monkeypatch):
