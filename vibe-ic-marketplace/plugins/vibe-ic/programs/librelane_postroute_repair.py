@@ -235,7 +235,8 @@ def summarize(metrics: Dict[str, Any], corners: Sequence[str]) -> Dict[str, Any]
 
 
 def drv_pin_census(sta_folder: Path, summary: Dict[str, Any],
-                   corners: Sequence[str]) -> Dict[str, Any]:
+                   corners: Sequence[str],
+                   classifier: Optional[Callable[..., str]] = None) -> Dict[str, Any]:
     """Bind distinct violating (pin, check) pairs to STAPostPNR's own logs.
 
     The State counters confirm that every table row was captured.  A missing
@@ -247,6 +248,7 @@ def drv_pin_census(sta_folder: Path, summary: Dict[str, Any],
     pairs = set()
     sources = {}
     missing = [] if corners else ["no declared STA corners"]
+    excluded: List[Dict[str, Any]] = []
     for corner in corners:
         log = sta_folder / corner / "sta.log"
         if not log.is_file():
@@ -265,11 +267,35 @@ def drv_pin_census(sta_folder: Path, summary: Dict[str, Any],
                     marker is None or int(marker.group(1)) != expected or
                     len(pins) != expected or len(set(pins)) != expected):
                 missing.append(f"{corner}: {kind} row/counter mismatch")
-            else:
+            elif classifier is None:
                 pairs.update((pin, kind) for pin in pins)
+            else:
+                # The DRV standard's classes (R-0928-DRV-IC): a bond-pad port
+                # and an IO-cell pin under the std-cell margin are listed, not
+                # counted; everything else counts. Proof comes from the run's
+                # complete source-bound OpenSTA census and IO Liberty.
+                values = (parsed.get("pin_values") or {}).get(title) or []
+                if [v.get("pin") for v in values] != pins:
+                    missing.append(f"{corner}: {kind} row values unreadable")
+                    continue
+                for row in values:
+                    try:
+                        cls = classifier(corner, title, row["pin"],
+                                         row.get("limit"), row.get("value"))
+                    except Exception as exc:  # noqa: BLE001 — never a silent exclusion
+                        missing.append(f"{corner}: {kind} row class unmeasured: {exc}")
+                        continue
+                    if cls == "DRV":
+                        pairs.add((row["pin"], kind))
+                    else:
+                        excluded.append({"corner": corner, "check": kind,
+                                         "class": cls, **row})
     return {"drv_pin_checks_state": "NOT_MEASURED" if missing else "PASS",
             "drv_pin_checks": None if missing else [list(pair) for pair in sorted(pairs)],
             "drv_pin_checks_missing": missing,
+            "drv_pin_checks_excluded": excluded,
+            "drv_pin_checks_connectivity": (getattr(getattr(classifier, "__self__", None),
+                                                   "connectivity_evidence", None)),
             "drv_pin_checks_sources": sources}
 
 
@@ -375,6 +401,37 @@ def _step32_drv_signoff(project: Path, report: Dict[str, Any]) -> None:
     write_json(output, result)
 
 
+def _drv_classifier(ctx: Dict[str, Any], sta_folder: Path) -> Optional[Callable[..., str]]:
+    """The DRV standard's row classes for a run whose STA links IO Liberty
+    (PAD_LIBS): None for a padless run, where every row is a std-cell row.
+    An unreadable netlist or IO Liberty yields a classifier that raises, so
+    the census is NOT_MEASURED rather than silently counting or excluding."""
+    import _drv_row_class as _cls
+    try:
+        cfg = _load(sta_folder / "config.json")
+    except (OSError, ValueError):
+        return None
+    pad_libs = cfg.get("PAD_LIBS")
+    if not pad_libs:
+        return None
+    try:
+        netlist = _host_path(ctx, str(_load(sta_folder / "state_in.json")["nl"]))
+        libs = {c: [_host_path(ctx, p) for p in paths] for c, paths in
+                _cls.pad_libs_by_corner(pad_libs, ctx["corners"]).items()}
+        sdc = cfg.get("SIGNOFF_SDC_FILE")
+        margin = (_cls.sdc_cap_margin(_host_path(ctx, str(sdc)).read_text())
+                  if sdc else None)
+        return _cls.Classifier(netlist, libs, margin,
+                               project=Path(ctx["project"]) if ctx.get("project") else None,
+                               sdc=_host_path(ctx, str(sdc)) if sdc else None).classify
+    except (OSError, ValueError, KeyError, TypeError, _cls.Unavailable) as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+
+        def unavailable(*_args: Any) -> str:
+            raise _cls.Unavailable(reason)
+        return unavailable
+
+
 def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
                lane: str) -> Tuple[Path, Dict[str, Any]]:
     """The repair step (a candidate, or the census) then RCX + STAPostPNR:
@@ -393,7 +450,8 @@ def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
         folders[0] / "excluded_master_census.json")
     sta_state = folders[-1] / "state_out.json"
     summary = summarize(_load(sta_state).get("metrics") or {}, ctx["corners"])
-    pin_census = drv_pin_census(folders[-1], summary, ctx["corners"])
+    pin_census = drv_pin_census(folders[-1], summary, ctx["corners"],
+                                classifier=_drv_classifier(ctx, folders[-1]))
     summary.update(pin_census)
     summary["drv_count"] = (len(pin_census["drv_pin_checks"])
                             if pin_census["drv_pin_checks_state"] == "PASS" else None)

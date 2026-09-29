@@ -12,6 +12,7 @@ Both are driven here against the real git objects, not a fixture.
 """
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -333,3 +334,168 @@ def test_a_whitespace_class_is_not_a_path_separator():
     assert G.declares_hdl(r"module[ \t]+(\w+)") is True
     assert G.declares_hdl(r"module[\s_-]?list") is True
     assert G.declares_hdl(r"module[\\/]+x") is False
+
+
+# --- lexical bindings: the same spelling is not the same regex -------------
+
+_LOCAL_HDL = r'''
+def read_hdl(text):
+    rx = re.compile(r"\bmodule\s+(\w+)")
+    return rx.findall(text)
+'''
+
+_LOCAL_PATH = r'''
+def translate_path(text):
+    rx = re.compile(r"/container(?=/|$)")
+    return rx.sub("/host", text)
+'''
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_scope_sibling_regex_names_do_not_contaminate_each_other(reverse):
+    parts = [_LOCAL_HDL, _LOCAL_PATH]
+    if reverse:
+        parts.reverse()
+    hits = G.scan_source("import re\n" + "\n".join(parts), "m")
+    assert hits == ["m::read_hdl::rx(text)"], hits
+
+
+def test_scope_raw_declaration_scan_remains_flagged():
+    assert G.scan_source("import re\n" + _LOCAL_HDL, "m") == [
+        "m::read_hdl::rx(text)"]
+
+
+def test_scope_real_mount_path_translator_is_clear():
+    """Read the actual producer; a local declaration regex must not taint it."""
+    from _hostpaths import repo_path
+
+    runner = repo_path("vibe-ic-marketplace", "plugins", "vibe-ic",
+                       "programs", "design_one_shot_runner.py")
+    src = runner.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    translator = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                      and n.name == "_container_text_to_host")
+    src = ast.get_source_segment(src, translator) + "\n" + _LOCAL_HDL
+    hits = G.scan_source(src, "runner")
+    assert hits == ["runner::read_hdl::rx(text)"], hits
+
+
+@pytest.mark.parametrize("global_hdl", [False, True])
+def test_scope_global_compile_and_local_shadow_resolve_separately(global_hdl):
+    hdl = r'"\bmodule\s+(\w+)"'
+    path = r'"/container(?=/|$)"'
+    global_pattern, local_pattern = (hdl, path) if global_hdl else (path, hdl)
+    src = f'''
+import re
+rx = re.compile(r{global_pattern})
+def global_read(text):
+    global rx
+    return rx.findall(text)
+def local_read(text):
+    rx = re.compile(r{local_pattern})
+    return rx.findall(text)
+'''
+    owner = "global_read" if global_hdl else "local_read"
+    assert G.scan_source(src, "m") == [f"m::{owner}::rx(text)"]
+
+
+def test_scope_captured_compile_is_reported_in_its_own_function():
+    src = r'''
+import re
+def build():
+    rx = re.compile(r"\bmodule\s+(\w+)")
+    def read(text):
+        nonlocal rx
+        return rx.findall(text)
+    return read
+'''
+    assert G.scan_source(src, "m") == ["m::read::rx(text)"]
+
+
+def test_scope_compiled_comment_stripper_before_search_is_clean():
+    src = r'''
+import re
+def read(text):
+    rx = re.compile(r"\bmodule\s+(\w+)")
+    comments = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+    code = comments.sub(" ", text)
+    return rx.findall(code)
+def unrelated(text):
+    comments = re.compile(r"\s+")
+    return comments.sub(" ", text)
+'''
+    assert G.scan_source(src, "m") == []
+    raw = src.replace('comments.sub(" ", text)', 'text', 1)
+    assert G.scan_source(raw, "m") == ["m::read::rx(code)"]
+
+
+def test_scope_nested_capture_propagates_stripping_without_outer_duplicates():
+    src = r'''
+import re
+def build(text):
+    rx = re.compile(r"\bmodule\s+(\w+)")
+    code = _strip_hdl_comments(text)
+    def middle():
+        def read():
+            body = code.strip()
+            return rx.findall(body)
+        return read
+    return middle
+'''
+    assert G.scan_source(src, "m") == []
+    raw = src.replace("_strip_hdl_comments(text)", "text")
+    assert G.scan_source(raw, "m") == ["m::read::rx(body)"]
+
+
+def test_scope_nested_local_stripping_does_not_clean_the_outer_value():
+    src = r'''
+import re
+rx = re.compile(r"\bmodule\s+(\w+)")
+def read(text):
+    code = text
+    def inner(text):
+        code = _strip_hdl_comments(text)
+        return rx.findall(code)
+    return rx.findall(code)
+'''
+    assert G.scan_source(src, "m") == ["m::read::rx(code)"]
+
+
+def test_scope_parameter_shadow_does_not_inherit_global_pattern():
+    src = r'''
+import re
+rx = re.compile(r"\bmodule\s+(\w+)")
+def read(rx, text):
+    return rx.findall(text)
+'''
+    assert G.scan_source(src, "m") == []
+
+
+def test_scope_comprehension_result_carries_its_stripped_iterable():
+    src = r'''
+import re
+rx = re.compile(r"\bmodule\s+(\w+)")
+def read(text):
+    code = _strip_hdl_comments(text)
+    chunks = [chunk.strip() for chunk in code.splitlines()]
+    return [rx.findall(chunk) for chunk in chunks]
+'''
+    assert G.scan_source(src, "m") == []
+    raw = src.replace("_strip_hdl_comments(text)", "text")
+    assert G.scan_source(raw, "m") == ["m::read::rx(chunk)"]
+
+
+@pytest.mark.parametrize("binding", ["global", "nonlocal"])
+def test_scope_explicit_compile_of_a_shared_binding_is_still_flagged(binding):
+    src = r'''
+import re
+rx = None
+def build():
+    rx = None
+    def read(text):
+        BINDING rx
+        rx = re.compile(r"\bmodule\s+(\w+)")
+        return rx.findall(text)
+    return read
+'''.replace("BINDING", binding)
+    assert G.scan_source(src, "m") == ["m::read::rx(text)"]

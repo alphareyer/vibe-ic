@@ -114,11 +114,9 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
     # derived via-legalized LEF when the flow staged one), never the PDK's.
     configs = resolve_step_configs(project, image, pdk, list(STEPS), pdk_root=pdk_root,
                                    overlay=_pv.tech_lef_overlay(project))
-    die = json.loads(configs["KLayout.SealRing"].read_text()).get("DIE_AREA")
-    if die and [float(die[0]), float(die[1])] != [0.0, 0.0]:
-        # Upstream SealRing currently treats x1/y1 as width/height.  Until its
-        # fork fix is in the image, a nonzero-origin die cannot be signed off.
-        raise Refusal("LL_SEALRING_ORIGIN_UNSUPPORTED", str(die))
+    # The image's KLayout.SealRing sizes the ring from x1-x0 / y1-y0 (vibeic
+    # fork #13; read in vibeic-eda 0.3.86 steps/klayout.py die_dimensions), so a nonzero-origin die is sealed
+    # correctly; the stale refusal that stood here was removed (CUT_W1A).
     declared, sources = declaration_config(project)
     core = declared.get("CORE_AREA")
     if not core:

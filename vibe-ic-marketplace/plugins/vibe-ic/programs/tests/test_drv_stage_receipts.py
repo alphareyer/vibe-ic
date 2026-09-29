@@ -495,6 +495,60 @@ def test_synth_stage_runs_the_census_deck_and_binds_the_receipt(tmp_path):
     assert "behavior_report" not in plan._stages(project, False)[0][0]
 
 
+@pytest.mark.parametrize("tool_rc", [0, 1])
+def test_pnr_synth_census_uses_the_supervised_deck(tmp_path, monkeypatch, tool_rc):
+    """The PnR consumer reaches the real supervised branch and keeps receipts."""
+    from functools import partial
+    import phase3_one_shot_runner as runner
+    project = tmp_path / "proj"
+    receipts.claim(project)
+    netlist = runner._pl.synth_dir(project) / "top_synth.v"
+    netlist.parent.mkdir(parents=True)
+    netlist.write_text("module top; endmodule\n")
+    sdc = project / "constraint.sdc"
+    sdc.write_text("create_clock -period 24 [get_ports clk]\n"
+                   "set_max_fanout 4 [current_design]\n")
+    abc = receipts.abc_script_path(project)
+    abc.parent.mkdir(parents=True)
+    abc.write_text("buffer -N 4;\n")
+    seen = []
+
+    def supervised(container, cmd, marker, **kwargs):
+        assert container == "captured"
+        assert marker == str(abc.parent / "census.tcl") and marker in cmd
+        assert kwargs["log_path"] == abc.parent / "census.log"
+        deck = Path(marker).read_text()
+        assert "read_sdc {" + str(sdc) + "}" in deck
+        assert "link_design {top}" in deck
+        behavior = Path(deck.split("synth_census {")[1].split("}")[0])
+        behavior.write_text("clocks 1\nclock clk is_propagated=0\n" + drv._COMMAND + "\n"
+                            + "".join(f"{kind} violators=0\n" for kind in drv.KINDS))
+        seen.append((cmd, marker))
+        return tool_rc, "captured native census\n", ""
+
+    def raw(*args, **kwargs):
+        pytest.fail("synth census bypassed watchdog binding")
+
+    monkeypatch.setattr(runner._dwd, "run_docker_supervised", supervised)
+    monkeypatch.setattr(runner, "_docker_exec_raw", raw)
+    monkeypatch.setattr(runner, "_local_exec_mode", lambda: False)
+    monkeypatch.setattr(runner, "_to_container_path", lambda path, container: str(path))
+    monkeypatch.setattr(runner, "_log_invocation", lambda *args, **kwargs: None)
+    receipts.synth_stage_supervised(
+        project, netlist=netlist, top="top", liberties=["/l.lib"], sdc=sdc,
+        to_container=lambda path: runner._to_container_path(str(path), "captured"),
+        execute=partial(runner._docker_exec, "captured"))
+    assert len(seen) == 1
+    assert (abc.parent / "census.log").read_text().startswith(f"rc={tool_rc}\n")
+    row = plan._stages(project, False)[0][0]
+    if tool_rc == 0:
+        assert row["ran"] and row["applied"] == {"fanout": 4.0}
+        assert row["ideal_clock_excluded"] is True
+    else:
+        assert "behavior_report" not in row
+        assert not (abc.parent / "behavior.rpt").exists()
+
+
 def test_ran_is_the_evidence_not_the_receipts_word(tmp_path):
     project = tmp_path / "proj"
     run_id = receipts.claim(project)

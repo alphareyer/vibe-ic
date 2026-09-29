@@ -7,6 +7,13 @@ designs without reset chains, and empty directories.
 import sys
 from pathlib import Path
 
+# R-0929-TOOL-DEFAULT (owner, 2026-09-29): the step-3 default front end is the
+# Yosys JSON netlist. These tests pin the REGEX front end's behaviour, which is
+# kept and selectable (HARVEST-then-delete amendment), so each call names it
+# (`front_end="regex"`); the assertions are unchanged. The netlist-arm lessons
+# are pinned in test_t91_step3_cdc_netlist_front_end.py.
+
+
 import pytest
 
 SCRIPT = Path(__file__).parent.parent / 'reset_dependency_check.py'
@@ -47,7 +54,7 @@ endmodule
 """
     (tmp_path / "top.v").write_text(verilog)
 
-    result = rdc.audit(str(tmp_path))
+    result = rdc.audit(str(tmp_path), front_end="regex")
     assert result.passed is True
     assert result.summary["violations"] == 0
 
@@ -77,7 +84,7 @@ endmodule
 """
     (tmp_path / "top.v").write_text(verilog)
 
-    result = rdc.audit(str(tmp_path))
+    result = rdc.audit(str(tmp_path), front_end="regex")
     assert result.passed is False
     errors = [f for f in result.findings if f.rule == "CIRCULAR_RESET_DEPENDENCY"]
     assert len(errors) >= 1
@@ -105,7 +112,7 @@ endmodule
 """
     (tmp_path / "trivial.v").write_text(verilog)
 
-    result = rdc.audit(str(tmp_path))
+    result = rdc.audit(str(tmp_path), front_end="regex")
     assert result.passed is True
     assert result.summary["violations"] == 0
 
@@ -114,7 +121,7 @@ endmodule
 # Test 4: Empty directory → PASS
 # ---------------------------------------------------------------------------
 def test_empty_dir_passes(tmp_path):
-    result = rdc.audit(str(tmp_path))
+    result = rdc.audit(str(tmp_path), front_end="regex")
     assert result.passed is True
     assert result.summary["files_scanned"] == 0
     assert result.summary["violations"] == 0

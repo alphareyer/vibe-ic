@@ -2873,6 +2873,14 @@ _REHOME_CMD_PREFIX = "crosslayer_rewrite_equivalence_check ."
 #: THIS PIN IS PERMANENT, so this table only ever grows; that is the cost of the
 #: control keeping its stimulus, and it is paid one line per authored edit.
 _REHOMED = {
+    # CUT_W1A (R-0929-TOOL-DEFAULT Wave 1): step 10's corner reports moved
+    # to their OWN directory; the shared `per_corner/` now holds only step
+    # 23's post-route reports, so keeping it in step 10's scope would let a
+    # post-route report fail the pre-layout clause (STA_BASIS scope rule).
+    "sta_report_check . --mode sta --under phase3/stage3/sta/pre_pnr_timing.rpt "
+    "--under phase3/stage3/sta/per_corner --json reports/phase3/sta/pre_pnr_summary.json":
+    "sta_report_check . --mode sta --under phase3/stage3/sta/pre_pnr_timing.rpt "
+    "--under phase3/stage3/sta/prelayout_per_corner --json reports/phase3/sta/pre_pnr_summary.json",
     # NO ROW FOR THE 1.6x CLAUSE, and that is the point of the shape. vibe-ic#1779
     # folded step `1.6x` into step `2` and the gate moved BYTE FOR BYTE, so its
     # command is still in `live` under its own spelling and the exact-string test

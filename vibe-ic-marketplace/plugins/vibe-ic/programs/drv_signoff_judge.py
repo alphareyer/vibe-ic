@@ -619,6 +619,42 @@ def _check_post_stream_derivation(identity: dict, fails: list[str],
                        f"(verdict {verdict.get('status')})")
 
 
+#: The DRV standard's listed (never gated, never dropped) row classes
+#: (R-0928-DRV-IC, section 4, R-0929-CAP-MARGIN-SCOPE).  Every reader -- this
+#: judge, the capture census, Step 32's PRR census, sta_record R5 -- applies
+#: the SAME two rules below; none carries its own copy.
+OFFCHIP_PORT_TO_PAD_NET = "OFFCHIP_PORT_TO_PAD_NET"
+IO_STD_CELL_MARGIN_DISCLOSURE = "IO_STD_CELL_MARGIN_DISCLOSURE"
+
+
+def port_to_pad(port: str, net_pins, is_pad_pin) -> bool:
+    """A top-level port whose net reaches nothing but IO-cell (pad_cell) pins:
+    the off-chip port-to-PAD net.  `net_pins` is every pin on the port's net
+    (drivers and loads, the port itself included or not); `is_pad_pin(pin)`
+    answers from the reader's own source (OpenSTA net census or netlist)."""
+    others = [pin for pin in net_pins if pin != port]
+    return bool(others) and all(is_pad_pin(pin) for pin in others)
+
+
+def io_margin_scope(kind: str, cell_class: str | None, explicit_limit,
+                    tool_limit, cap_margin) -> bool:
+    """An IO-cell pin whose tool limit IS the design-scope std-cell cap margin
+    (R-0929-CAP-MARGIN-SCOPE): the known inheritance, not an instrument
+    disagreement."""
+    return (kind == "max_capacitance" and cell_class == "IO" and
+            explicit_limit is None and tool_limit is not None and
+            _positive_number(cap_margin) and tool_limit == cap_margin)
+
+
+def io_margin_disclosure(kind: str, cell_class: str | None, explicit_limit,
+                         tool_limit, measured, io_limit, cap_margin) -> bool:
+    """Section 4: an IO-cell row the tool FLAGGED against the std-cell margin
+    while within its own IO Liberty limit is listed apart, not gated."""
+    return (io_margin_scope(kind, cell_class, explicit_limit, tool_limit, cap_margin)
+            and measured is not None and _positive_number(io_limit) and
+            tool_limit < measured <= io_limit)
+
+
 def def_identity(bundle: dict, layout_def: Path | None) -> str | None:
     """THE comparison of a layout DEF with the bundle's judged DEF identity,
     shared by every caller (the CLI's current routed DEF and step-23 tool-arm
@@ -639,6 +675,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     missing: list[str] = []
     findings: list[dict] = []
     io_margin_disclosures: list[dict] = []
+    offchip_port_rows: list[dict] = []
     waived: list[dict] = []
     identity = bundle.get("identity") or {}
     frozen = bundle.get("frozen") or {}
@@ -1199,19 +1236,19 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                 # row the tool FLAGGED within its IO Liberty limit is a
                 # disclosure (merge note 4: tagging every IO pin broke the
                 # per-scene set check once one IO pin exceeded and one did not).
-                io_margin_scope = (kind == "max_capacitance" and
-                                   row.get("cell_class") == "IO" and
-                                   row.get("explicit_limit") is None and
-                                   row["limit"] == declared.get("cap_pf"))
-                io_disclosure = (io_margin_scope and
-                                 row["limit"] < row["measured"] <= effective)
+                in_margin_scope = io_margin_scope(
+                    kind, row.get("cell_class"), row.get("explicit_limit"),
+                    row["limit"], declared.get("cap_pf"))
+                io_disclosure = io_margin_disclosure(
+                    kind, row.get("cell_class"), row.get("explicit_limit"),
+                    row["limit"], row["measured"], effective, declared.get("cap_pf"))
                 if io_disclosure:
-                    row["failed_tier"] = "IO_STD_CELL_MARGIN_DISCLOSURE"
+                    row["failed_tier"] = IO_STD_CELL_MARGIN_DISCLOSURE
                     io_margin_disclosures.append(row)
                 elif row["limit"] > effective + tolerance:
                     fails.append(f"{name}: {kind} {row['pin']} tool limit "
                                  f"{row['limit']} exceeds frozen effective limit {effective}")
-                elif row["limit"] < effective - tolerance and not io_margin_scope:
+                elif row["limit"] < effective - tolerance and not in_margin_scope:
                     missing.append(f"{name}: {kind} {row['pin']} tool limit "
                                    "differs from frozen effective limit")
                 independently_violated = row["measured"] > effective + tolerance
@@ -1244,6 +1281,15 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     rows_by_kind["max_fanout"] = list(dedup.values())
     for kind, rows in rows_by_kind.items():
         for row in rows:
+            if (kind in ("max_slew", "max_capacitance") and
+                    row.get("cell_class") == "port" and row.get("port_to_pad") is True):
+                # R-0928-DRV-IC: the port-to-PAD net is off-chip. Its slew is
+                # the pad pin's own row (judged by IO Liberty T1) and its load
+                # is the pad's PAD-pin capacitance plus the set_load; the
+                # std-cell margin never applies. Listed, never a finding.
+                row["failed_tier"] = OFFCHIP_PORT_TO_PAD_NET
+                offchip_port_rows.append(row)
+                continue
             pin_limit = row["liberty_limit"]
             explicit = row["explicit_limit"]
             effective = row["effective_limit"]
@@ -1335,6 +1381,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             "final_signoff_capture": capture_point == "post_stream",
             "identity_bound_later": deferred,
             "io_margin_disclosures": io_margin_disclosures,
+            "offchip_port_rows": offchip_port_rows,
             "flow_defects": flow_defects,
             "failures": fails, "not_measured": missing,
             "out_of_scope": {k: "NOT_MEASURED" for k in

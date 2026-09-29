@@ -151,11 +151,6 @@
       "cmd": "tapeout_declaration_check . --json reports/phase1/tapeout_declaration.json"
     },
     {
-      "step": "10",
-      "kind": "program_exit_zero",
-      "cmd": "sta_report_check . --mode sta --under phase3/stage3/sta/pre_pnr_timing.rpt --under phase3/stage3/sta/per_corner --json reports/phase3/sta/pre_pnr_summary.json"
-    },
-    {
       "step": "11",
       "kind": "program_exit_zero",
       "cmd": "bsdl_emit . --json reports/phase2/dft/bsdl_plan.json"

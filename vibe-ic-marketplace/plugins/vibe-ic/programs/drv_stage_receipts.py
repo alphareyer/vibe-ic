@@ -331,6 +331,25 @@ def record_synth(project: Path, *, abc_script: Optional[Path],
     return _write_receipt(project, "synth", doc)
 
 
+def synth_stage_supervised(project: Path, *, netlist: Path, top: str,
+                           liberties: List[str], sdc: Path,
+                           to_container, execute) -> Optional[Path]:
+    """Bind supervision to the census producer's own generated deck and log.
+
+    `execute(cmd, marker=..., log_path=...)` runs the tool through the caller's
+    existing supervisor. The marker uses the mapped container deck path; the
+    log remains a host Path. The underlying synth_stage API and receipts stay
+    the same.
+    """
+    evidence = abc_script_path(project).parent
+    return synth_stage(
+        project, netlist=netlist, top=top, liberties=liberties, sdc=sdc,
+        to_container=to_container,
+        execute=lambda cmd: execute(
+            cmd, marker=to_container(evidence / "census.tcl"),
+            log_path=evidence / "census.log"))
+
+
 def synth_stage(project: Path, *, netlist: Path, top: str, liberties: List[str],
                 sdc: Path, to_container, execute) -> Optional[Path]:
     """Take the post-synthesis census in the EDA container (`execute(cmd)` ->

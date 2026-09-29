@@ -48,7 +48,11 @@ def _run(tmp_path, rtl):
     d = tmp_path / "phase2" / "stage1" / "rtl"
     d.mkdir(parents=True)
     (d / "dut.v").write_text(rtl)
-    return subprocess.run([sys.executable, str(SCRIPT), str(tmp_path)],
+    # The REGEX arm's #2063 regression (kept, selectable): the netlist became
+    # the step-3 default (R-0929-TOOL-DEFAULT), where port-ness is structural
+    # -- its twin is test_t91_...::test_a_suffix_named_internal_wire_is_not_a_port_on_the_netlist.
+    return subprocess.run([sys.executable, str(SCRIPT), str(tmp_path),
+                           "--front-end", "regex"],
                           capture_output=True, text=True)
 
 

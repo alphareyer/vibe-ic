@@ -330,6 +330,12 @@ def test_real_rtl_is_still_a_plain_pass(gate, json_rel, tmp_path):
     rtl = tmp_path / "phase2" / "stage1" / "rtl"
     rtl.mkdir(parents=True)
     (rtl / "top.v").write_text(CLEAN_RTL)
+    # Setup only: this is the REGEX arm's check, which a project selects by
+    # naming step 3 `direct` since the netlist became the default
+    # (R-0929-TOOL-DEFAULT); the netlist arm's twin is below.
+    (tmp_path / "phase3").mkdir()
+    (tmp_path / "phase3" / "librelane_switch.json").write_text(
+        json.dumps({"steps": {"3": "direct"}}))
 
     proc = _run(gate, json_rel, tmp_path)
     assert proc.returncode == _vx.RC_PASS
@@ -476,3 +482,55 @@ def test_the_honest_siblings_are_unchanged(gate, expected_rc, tmp_path):
         f"{gate} answered the empty tree with rc={proc.returncode}, not "
         f"rc={expected_rc}; the four step-3 clauses no longer agree the way "
         f"the finding measured them")
+
+
+def _bound_clean_netlist(tmp_path):
+    """Replay the source-owned native capture through production build/binding.
+
+    Only the Yosys execution seam is substituted; this fixture does not claim
+    live EDA. Discovery, source hashes, manifest and both gate CLIs are real.
+    """
+    from test_t91_step3_cdc_netlist_front_end import _produce
+    rtl = tmp_path / "phase2" / "stage1" / "rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "top.v").write_text(CLEAN_RTL)
+    fix = PROGRAMS / "tests" / "fixtures" / "cdc_netlist" / "clean_sync.json"
+    return _produce(tmp_path, fix)
+
+
+@pytest.mark.parametrize("gate,json_rel", STEP3_GATES)
+def test_real_rtl_with_its_netlist_is_a_plain_pass_by_default(gate, json_rel,
+                                                             tmp_path):
+    """Default frontend: current bound CLEAN_RTL capture is nonvacuous PASS."""
+    _bound_clean_netlist(tmp_path)
+    proc = _run(gate, json_rel, tmp_path)
+    assert proc.returncode == _vx.RC_PASS, proc.stdout + proc.stderr
+    assert not _consumer_sees_disclosure(proc)
+    report = json.loads((tmp_path / json_rel).read_text())
+    assert report["summary"]["files_scanned"] >= 1
+    assert report["summary"]["front_end"] == "netlist"
+    assert report.get("verdict") == "PASS"
+
+
+@pytest.mark.parametrize("gate,json_rel", STEP3_GATES)
+@pytest.mark.parametrize("fault", ["unbound", "changed-source", "partial-read"])
+def test_captured_clean_netlist_needs_current_complete_binding(gate, json_rel, tmp_path, fault):
+    import _cdc_netlist as cn
+    netlist = _bound_clean_netlist(tmp_path)
+    before = netlist.read_bytes()
+    manifest = tmp_path / cn.NETLIST_MANIFEST_REL
+    if fault == "unbound":
+        manifest.unlink()
+    elif fault == "changed-source":
+        source = tmp_path / "phase2/stage1/rtl/top.v"
+        source.write_text(source.read_text() + "\n// current input changed\n")
+    else:
+        rec = json.loads(manifest.read_text())
+        rec["producer"]["read_order"] = []
+        manifest.write_text(json.dumps(rec))
+    proc = _run(gate, json_rel, tmp_path)
+    assert proc.returncode != _vx.RC_PASS
+    report = json.loads((tmp_path / json_rel).read_text())
+    assert report.get("verdict") == "FAIL"
+    assert report["summary"]["netlist_read"] is False
+    assert netlist.read_bytes() == before

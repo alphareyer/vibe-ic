@@ -115,6 +115,8 @@ _POST_ROUTE_HEADER = (
 _STEP10_REL = "phase3/stage3/sta/pre_pnr_timing.rpt"
 _STEP23_REL = "phase3/stage3/sta/post_route_timing.rpt"
 _CORNER_REL = "phase3/stage3/sta/per_corner"
+#: step 10's own corner directory since CUT_W1A (the shared one was split)
+_STEP10_CORNER_REL = "phase3/stage3/sta/prelayout_per_corner"
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +477,7 @@ def test_step10_scope_declares_its_own_corner_directory(tmp_path):
     assert len(cmds) == 1, cmds
     scopes = _unders(cmds[0])
     assert _STEP10_REL in scopes, scopes
-    assert _CORNER_REL in scopes, (
+    assert _STEP10_CORNER_REL in scopes, (
         "step 10 is named 'Pre-layout STA (multi-corner)' and its declared "
         f"scope names no corner directory: {scopes}")
 
