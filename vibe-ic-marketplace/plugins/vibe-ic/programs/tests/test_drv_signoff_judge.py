@@ -1034,7 +1034,14 @@ def test_annotation_exclusion_requires_lef_pg_and_no_liberty_arc(tmp_path):
     Path(routed["path"]).write_text("NETS 1 ;\n - p ( PIN p ) ( u PAD ) + ROUTED metal1 ( 0 0 ) ( 1 0 ) ;\nEND NETS\n")
     bad = annotation(*args)
     assert {row["pin"] for row in bad["unresolved"]} == {"u/VDD", "p"}
+    # R-0928-DRV-IC: a *D_NET header that merely names the net carries no RC
+    # for any pin.  Only *CONN rows for the reported driver and its PAD
+    # endpoint restore the port-to-PAD net.
     Path(spef["path"]).write_text("*D_NET p 0.1\n*END\n")
+    header_only = annotation(*args)
+    assert {row["pin"] for row in header_only["unresolved"]} == {"u/VDD", "p"}
+    Path(spef["path"]).write_text(
+        "*D_NET p 0.1\n*CONN\n*P p I\n*I u:PAD I\n*CAP\n1 p 0.1\n*END\n")
     restored = annotation(*args)
     assert [row["pin"] for row in restored["unresolved"]] == ["u/VDD"]
 
@@ -1636,3 +1643,75 @@ def test_fresh_opensta_refuses_log_at_byte_ceiling(tmp_path, monkeypatch):
         verdict = "NOT_MEASURED" if detail.startswith("NOT_MEASURED:") else "OTHER_ERROR"
     assert verdict == "NOT_MEASURED", detail
     assert "raw log reached byte ceiling" in detail
+
+
+# --- DRVWIRE review wave 56: capture plan stage rows, step-32 layout binding
+# and port-to-PAD SPEF connectivity (R-0928-DRV-IC).
+
+def _port_pad_pins() -> dict:
+    return {"p": {"kind": "port", "cell": None, "cell_pin": None,
+                  "cell_class": "port", "net": "p"},
+            "u/PAD": {"kind": "pin", "cell": "pad", "cell_pin": "PAD",
+                      "cell_class": "IO", "net": "p"}}
+
+
+def _port_pad_scene(tmp_path: Path, spef_body: str, def_nets: str):
+    folder = tmp_path / "scene"
+    _file(folder, "annotation.rpt", "Found 1 unannotated drivers.\n p\n"
+          "Found 0 partially unannotated drivers.\n")
+    lef = _file(tmp_path, "pad.lef", "MACRO pad\n PIN PAD\n USE SIGNAL ;\n"
+                " END PAD\nEND pad\n")
+    lib = _file(tmp_path, "pad.lib", '''library (lib) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ cell (pad) { pad_cell : true;
+  pin (PAD) { direction : input; timing () { related_pin : "PAD"; } }
+ }
+}''')
+    routed = _file(tmp_path, "route.def", "NETS 1 ;\n" + def_nets + "END NETS\n")
+    spef = _file(tmp_path, "route.spef", spef_body)
+    return (folder, _port_pad_pins(), [lib], [lef], Path(routed["path"]),
+            Path(spef["path"]))
+
+
+_ROUTED_P = " - p ( PIN p ) ( u PAD ) + ROUTED Metal2 ( 0 0 ) ( 10 0 ) ;\n"
+
+
+def test_port_pad_spef_net_name_without_conn_stays_unannotated(tmp_path):
+    from drv_signoff_annotation import derive as annotation
+    header_only = annotation(*_port_pad_scene(
+        tmp_path, "*D_NET p 0.1\n*END\n", _ROUTED_P))
+    assert header_only["resolved"] == []
+    assert [row["pin"] for row in header_only["unresolved"]] == ["p"]
+
+
+def test_port_pad_spef_needs_conn_for_driver_and_pad_endpoint(tmp_path):
+    from drv_signoff_annotation import derive as annotation
+    spef = ('*SPEF "ieee 1481-1999"\n*DIVIDER /\n*DELIMITER :\n'
+            "*NAME_MAP\n*1 p\n*2 u\n*PORTS\n*1 I\n"
+            "*D_NET *1 0.1\n*CONN\n*P *1 I\n*I *2:PAD I *D pad\n"
+            "*CAP\n1 *1 0.05\n2 *2:PAD 0.05\n*RES\n1 *1 *2:PAD 1.0\n*END\n")
+    carried = annotation(*_port_pad_scene(tmp_path, spef, _ROUTED_P))
+    assert carried["unresolved"] == []
+    assert carried["resolved"] == [{"pin": "p", "net": "p",
+                                    "reason": "port_pad_spef_conn",
+                                    "spef_endpoints": ["p", "u/PAD"]}]
+    no_pad = annotation(*_port_pad_scene(
+        tmp_path, spef.replace("*I *2:PAD I *D pad\n", ""), _ROUTED_P))
+    assert [row["pin"] for row in no_pad["unresolved"]] == ["p"]
+    no_driver = annotation(*_port_pad_scene(
+        tmp_path, spef.replace("*P *1 I\n", ""), _ROUTED_P))
+    assert [row["pin"] for row in no_driver["unresolved"]] == ["p"]
+
+
+def test_port_pad_cover_wiring_is_not_a_zero_segment_proof(tmp_path):
+    from drv_signoff_annotation import derive as annotation
+    empty = "*D_NET other 0.1\n*END\n"
+    unrouted = annotation(*_port_pad_scene(
+        tmp_path, empty, " - p ( PIN p ) ( u PAD ) + USE SIGNAL ;\n"))
+    assert [row["reason"] for row in unrouted["resolved"]] == [
+        "port_pad_zero_routed_segments"]
+    covered = annotation(*_port_pad_scene(
+        tmp_path, empty,
+        " - p ( PIN p ) ( u PAD ) + COVER Metal2 ( 0 0 ) ( 10 0 ) ;\n"))
+    assert [row["pin"] for row in covered["unresolved"]] == ["p"]
+
