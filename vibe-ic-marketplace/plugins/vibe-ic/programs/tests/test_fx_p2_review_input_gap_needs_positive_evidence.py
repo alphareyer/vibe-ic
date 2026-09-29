@@ -217,7 +217,17 @@ def test_a_missing_named_image_is_the_inputs_gap_whatever_it_expects(tmp_path):
     gap = _gap(proj, hex_num)
     assert gap is not None and gap["missing_from_input"] == ["hello.hex"], gap
     rc, _msg = GATE._evaluate(proj)
-    assert rc == 2
+    # R-0929-OWNER-SUB-ACCEPT (2) (owner, 2026-09-29, RULINGS.md) supersedes
+    # the gate-level `rc == 2` this line asserted: a firmware row whose named
+    # image the input lacks is NOT_MEASURED [input_absent] and EXCLUDED from
+    # the verdict, exactly like FPGA steps 6/39 -- listed, never a pass, not
+    # blocking. The row's own NOT_MEASURED is asserted on its exclusion record.
+    assert rc == 0, (rc, _msg)
+    ran = GATE._oracles_that_actually_ran(proj)
+    assert [(e["case"], e["status"], e["reason_class"],
+             e["missing_from_input"]) for e in ran["not_measured_excluded"]] \
+        == [("hello_hex", "NOT_MEASURED", "input_absent", ["hello.hex"])], ran
+    assert "hello_hex" not in ran["executed"], ran
 
 
 # ---------------------------------------------------------------------------
