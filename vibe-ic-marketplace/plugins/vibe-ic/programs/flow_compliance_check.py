@@ -5089,17 +5089,6 @@ def _incomplete_hint(cmd: str, out: str) -> str:
             else f"{_INCOMPLETE_HINT_PREFIX}{cmd}")
 
 
-def _hint_declares_class(hints: List[str], cls: str) -> bool:
-    """True iff some hint carries the callee's own stated `reason_class=cls`.
-
-    R-0929-U14-OWNER-WAIVER: a flag that left an applicable step unperformed
-    (--skip-analog) is stated by the callee as FLOW_DOES_NOT_PERFORM, and the
-    step row carries that existing row word instead of `partial_population`.
-    Only the callee's own statement counts, never an inference."""
-    return any((m := _HINT_DECLARED_CLASS_RE.search(h)) and m.group(1) == cls
-               for h in hints)
-
-
 def _hint_declares_execution_error(hints: List[str]) -> bool:
     """True iff some incomplete hint carries the producer's own EXECUTION_ERROR.
 
