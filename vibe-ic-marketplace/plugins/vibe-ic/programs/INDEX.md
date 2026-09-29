@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1373
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1373)
+- **Total programs (excluding helpers / shims):** 1379
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1379)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1364 |
+| `any` | 1370 |
 
 ## Alphabetical listing
 
@@ -316,6 +316,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `declared_basis_matches_the_session_inputs` | any | — | the stage a report claims must be the stage its own session measured. |
 | `declared_clock_period` | any | — | read the clock period the DESIGN declares for the library this run is actually building against. |
 | `declared_invocation_accepted_by_its_own_parser` | any | — | A flow-declared invocation the invoked program's own parser refuses. |
+| `declared_knob_applied_parity` | any | — | Advisory comparison of design-declared knobs and values seen by a consumer. |
 | `declared_output_has_a_live_producer_check` | any | — | A file found in a committed corpus is not proof the flow still writes it. |
 | `declared_pdk_is_the_pdk_used_check` | any | — | the PDK that ran must be the PDK declared. |
 | `def_gds_port_power_restore` | any | — | restore top-level port labels + power-rail markers into a streamed GDS from its routed DEF, so LVS can name ports and unite a FOLLOWPIN p... |
@@ -398,6 +399,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `every_declared_step_reaches_the_evaluator_check` | any | — | A step the evaluator never receives cannot fail — and never appears. |
 | `every_required_metric_key_has_a_producer` | any | — | an axis proves from a metric somebody actually emits. |
 | `evidence_citation_resolves_check` | any | — | a cited evidence artifact must EXIST. |
+| `excluded_master_census_check` | any | — | ADVISORY per-step census of masters excluded by the run's cell policy. |
 | `expert_decision_table` | any | — | a decision table is DATED, and a stale one is refused. |
 | `explicit_argument_outranks_the_environment_pointer` | any | — | whatever a gate scanned, it says so. |
 | `explicit_argument_outranks_the_environment_pointer_census` | any | — | An environment pointer that overrules a location the caller NAMED. |
@@ -870,6 +872,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pad_side_constraint_check` | any | — | Gate: verify IO pin placements match the L-doc pad-side table (North/South/East/West per signal). |
 | `pad_signal_route_repair` | any | — | Bounded route-only recovery for native DRC nets attached to fixed IO pads. |
 | `page_states_one_figure_twice_check` | any | — | One quantity, two numbers, one page — and nothing reads both. |
+| `parameter_range_contract` | any | — | Minimum legal elaboration values stated by the design input. |
 | `parametric_spec_extractor` | any | — | deterministic baseline extractors for the PROSE PARAMETRIC element types (the design parameters a spec states in words but in a regular w... |
 | `path_delay_coverage_check` | any | — | REAL at-speed PATH-DELAY-FAULT (PDF) coverage gate for the timing-graded ATPG step (DT2). |
 | `path_delay_fault_atpg_run` | any | — | REAL at-speed TIMING-graded PATH-DELAY-FAULT (PDF) ATPG. Composes OpenSTA K-longest-path enumeration (real Liberty + SPEF timing) with th... |
@@ -1128,6 +1131,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `scratch_root_guard` | any | — | the suite's scratch root is part of its verdict, so every run states it, and refuses a root that manufactures failures. |
 | `sd_cmd_extractor` | any | — | for #36 Bug 8: SD-spec CMD table picker. |
 | `sdc_constraints` | any | v0.1.49 | ORGANIC #554 (a) — shared staged-SDC ground-truth helpers. |
+| `sdc_environment` | any | — | R8 SDC environment derivation from design, pinned PDK, and Liberty. |
 | `sdc_exception_correlation_check` | any | — | Step 8 SDC EXCEPTION justification screen (v2.3, advisory). |
 | `sdc_gen` | any | Wave 72 | auto-generate Synopsys Design Constraints (SDC). |
 | `sdc_syntax_check` | any | — | Deterministic compliance check for constraint-gen. |
@@ -1278,8 +1282,10 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `synth_area_stats_emit` | any | — | publish the synthesis area figure as an artefact. |
 | `synth_doctor` | any | v0.1.96 | Yosys synthesis-log error classifier (synth-doctor Pattern-B → program). |
 | `synth_frontend` | any | — | Shared SystemVerilog-frontend selection logic. |
+| `synth_full_adder_map` | any | — | Derive a Yosys $fa techmap from a Liberty cell's proven truth table. |
 | `synth_handoff_netlist_check` | any | — | Step 14 on the tool path: judge the synthesis HANDOFF NETLIST, not its recipe. |
 | `synth_netlist_check` | any | — | Deterministic synthesis netlist validation checker. |
+| `synth_recipe_postroute` | any | — | Elect a PDK synthesis recipe from matched, signed-off post-route A/B rows. |
 | `synth_wrapper_check` | any | — | Deterministic compliance check for synth-wrapper-gen. |
 | `synth_wrapper_gen` | any | — | auto-generate synthesis wrapper for inout-port designs. |
 | `table_lut_synth` | any | — | a DETERMINISTIC solver for the CVDP TABLE-DRIVEN COMBINATIONAL family: a combinational function FULLY specified by an enumerated table st... |
@@ -1445,7 +1451,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1364 programs)
+### `any` (1370 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1734,6 +1740,7 @@ _(no programs in this group)_
 - `declared_basis_matches_the_session_inputs` — the stage a report claims must be the stage its own session measured.
 - `declared_clock_period` — read the clock period the DESIGN declares for the library this run is actually building against.
 - `declared_invocation_accepted_by_its_own_parser` — A flow-declared invocation the invoked program's own parser refuses.
+- `declared_knob_applied_parity` — Advisory comparison of design-declared knobs and values seen by a consumer.
 - `declared_output_has_a_live_producer_check` — A file found in a committed corpus is not proof the flow still writes it.
 - `declared_pdk_is_the_pdk_used_check` — the PDK that ran must be the PDK declared.
 - `def_gds_port_power_restore` — restore top-level port labels + power-rail markers into a streamed GDS from its routed DEF, so LVS can name ports and unite a FOLLOWPIN p...
@@ -1815,6 +1822,7 @@ _(no programs in this group)_
 - `every_declared_step_reaches_the_evaluator_check` — A step the evaluator never receives cannot fail — and never appears.
 - `every_required_metric_key_has_a_producer` — an axis proves from a metric somebody actually emits.
 - `evidence_citation_resolves_check` — a cited evidence artifact must EXIST.
+- `excluded_master_census_check` — ADVISORY per-step census of masters excluded by the run's cell policy.
 - `expert_decision_table` — a decision table is DATED, and a stale one is refused.
 - `explicit_argument_outranks_the_environment_pointer` — whatever a gate scanned, it says so.
 - `explicit_argument_outranks_the_environment_pointer_census` — An environment pointer that overrules a location the caller NAMED.
@@ -2286,6 +2294,7 @@ _(no programs in this group)_
 - `pad_side_constraint_check` — Gate: verify IO pin placements match the L-doc pad-side table (North/South/East/West per signal).
 - `pad_signal_route_repair` — Bounded route-only recovery for native DRC nets attached to fixed IO pads.
 - `page_states_one_figure_twice_check` — One quantity, two numbers, one page — and nothing reads both.
+- `parameter_range_contract` — Minimum legal elaboration values stated by the design input.
 - `parametric_spec_extractor` — deterministic baseline extractors for the PROSE PARAMETRIC element types (the design parameters a spec states in words but in a regular w...
 - `path_delay_coverage_check` — REAL at-speed PATH-DELAY-FAULT (PDF) coverage gate for the timing-graded ATPG step (DT2).
 - `path_delay_fault_atpg_run` — REAL at-speed TIMING-graded PATH-DELAY-FAULT (PDF) ATPG. Composes OpenSTA K-longest-path enumeration (real Liberty + SPEF timing) with th...
@@ -2542,6 +2551,7 @@ _(no programs in this group)_
 - `scratch_root_guard` — the suite's scratch root is part of its verdict, so every run states it, and refuses a root that manufactures failures.
 - `sd_cmd_extractor` — for #36 Bug 8: SD-spec CMD table picker.
 - `sdc_constraints` — ORGANIC #554 (a) — shared staged-SDC ground-truth helpers.  _[v0.1.49]_
+- `sdc_environment` — R8 SDC environment derivation from design, pinned PDK, and Liberty.
 - `sdc_exception_correlation_check` — Step 8 SDC EXCEPTION justification screen (v2.3, advisory).
 - `sdc_gen` — auto-generate Synopsys Design Constraints (SDC).  _[Wave 72]_
 - `sdc_syntax_check` — Deterministic compliance check for constraint-gen.
@@ -2692,8 +2702,10 @@ _(no programs in this group)_
 - `synth_area_stats_emit` — publish the synthesis area figure as an artefact.
 - `synth_doctor` — Yosys synthesis-log error classifier (synth-doctor Pattern-B → program).  _[v0.1.96]_
 - `synth_frontend` — Shared SystemVerilog-frontend selection logic.
+- `synth_full_adder_map` — Derive a Yosys $fa techmap from a Liberty cell's proven truth table.
 - `synth_handoff_netlist_check` — Step 14 on the tool path: judge the synthesis HANDOFF NETLIST, not its recipe.
 - `synth_netlist_check` — Deterministic synthesis netlist validation checker.
+- `synth_recipe_postroute` — Elect a PDK synthesis recipe from matched, signed-off post-route A/B rows.
 - `synth_wrapper_check` — Deterministic compliance check for synth-wrapper-gen.
 - `synth_wrapper_gen` — auto-generate synthesis wrapper for inout-port designs.
 - `table_lut_synth` — a DETERMINISTIC solver for the CVDP TABLE-DRIVEN COMBINATIONAL family: a combinational function FULLY specified by an enumerated table st...
