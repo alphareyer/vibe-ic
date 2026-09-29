@@ -242,7 +242,13 @@ def acquire(suite_name: str, suite: Dict[str, Any], dest: Path,
             with cached.open("rb") as fh:
                 blob = fh.read(FETCH_MAX_BYTES + 1)
             if len(blob) <= FETCH_MAX_BYTES and verify_tarball(blob, suite)[0]:
-                data, source = blob, f"cache {cached}"
+                # The receipt names WHAT was compiled: the pinned URL and the
+                # lock digest the bytes were just re-verified against. The
+                # cache file is host scratch outside the project; naming it
+                # made the evidence depend on a volatile path.
+                data, source = blob, (
+                    f"cached copy of {suite.get('tarball_url')} "
+                    f"(tarball sha256 {suite.get('tarball_sha256')})")
         except OSError:
             pass
     if data is None:
@@ -251,7 +257,8 @@ def acquire(suite_name: str, suite: Dict[str, Any], dest: Path,
         except Exception as exc:  # noqa: BLE001 — no network is a reason
             return None, (f"{suite_name}: could not fetch "
                           f"{suite.get('tarball_url')}: {exc!r}")
-        source = f"fetched {suite.get('tarball_url')}"
+        source = (f"fetched {suite.get('tarball_url')} "
+                  f"(tarball sha256 {suite.get('tarball_sha256')})")
         if len(data) > FETCH_MAX_BYTES:
             return None, (f"{suite_name}: tarball byte ceiling "
                           f"{FETCH_MAX_BYTES} exceeded")
