@@ -98,6 +98,16 @@ def test_container_builtin_corners_are_used_when_none_are_staged(tmp_path,
     monkeypatch.setattr(R, "_liberty_drv_limits", lambda *a, **k: {})
     monkeypatch.setattr(R, "_emit_multi_corner_sta", lambda *a, **k: False)
 
+    # CUT_W4 step 7: the PVT matrix is the TOOL's resolved STA_CORNERS for the
+    # image's built-in PDK (the #565 case: nothing staged). Only the resolver
+    # container's file write is faked.
+    import _resolved_pdk_view_fixture as RV
+    RV.install(monkeypatch, proj, "sky130A", {
+        "STA_CORNERS": ["nom_ss_100C_1v60", "nom_tt_025C_1v80"],
+        "DEFAULT_CORNER": "nom_tt_025C_1v80",
+        "CELL_LIBS": {"*_ss_100C_1v60": ["/pdk/sky130A/x__ss_100C_1v60.lib"],
+                      "*_tt_025C_1v80": ["/pdk/sky130A/x__tt_025C_1v80.lib"]}})
+
     res = R.step_prelayout_signoff(proj, "chip_top", _Pdk(), "some-container")
 
     assert res.status != "SKIP", (
@@ -105,8 +115,10 @@ def test_container_builtin_corners_are_used_when_none_are_staged(tmp_path,
         f"detail={res.detail!r}")
     pvt = proj / "phase2" / "stage2" / "constraints" / "pvt_matrix.json"
     assert pvt.is_file(), "no pvt_matrix.json emitted from built-in corners"
-    labels = {c["label"] for c in json.loads(pvt.read_text())["corners"]}
+    doc = json.loads(pvt.read_text())
+    labels = {c["label"] for c in doc["corners"]}
     assert {"SS", "TT"} <= labels, labels
+    assert doc["corner_source"].startswith("LibreLane resolved STA_CORNERS"), doc
 
 
 def test_skip_message_names_both_corner_sources(tmp_path):
@@ -267,15 +279,19 @@ def test_staged_sdc_is_rescaled_into_the_liberty_units(tmp_path, monkeypatch):
     R.step_prelayout_signoff(
         proj, "chip_top", _corner_pdk(monkeypatch, str(lib)), "some-container")
 
+    # CUT_W4 step 7: the deck is not rescaled; it opens with the tool's units
+    # line, so OpenSTA reads the design's own ns numbers into the ps Liberty
+    # (measured in test_cut7_sdc_units_are_the_tools). The DESIGN's numerics
+    # must reach the deck verbatim, AFTER that line.
     text = (proj / "phase3" / "stage3" / "pnr" / "constraint.sdc").read_text()
-    clk = [ln for ln in text.splitlines() if "create_clock" in ln][0]
-    assert "core_clock" in clk and "10000" in clk, (
-        f"the DESIGN's clock was not rescaled into the liberty's ps units: "
-        f"{clk!r}")
-    out = [ln for ln in text.splitlines()
-           if ln.strip().startswith("set_output_delay")]
-    assert out and "3500" in out[0], (
-        f"the design's own 3.5 ns output delay was not rescaled to ps: "
+    lines = text.splitlines()
+    units = lines.index(R._SDC_UNITS_LINE)
+    clk = [i for i, ln in enumerate(lines) if "create_clock" in ln]
+    assert clk and units < clk[0], (units, clk, text[:400])
+    assert "core_clock" in lines[clk[0]] and "-period 10.0" in lines[clk[0]], lines[clk[0]]
+    out = [ln for ln in lines if ln.strip().startswith("set_output_delay")]
+    assert out and "3.5" in out[0].split(), (
+        f"the design's own 3.5 ns output delay did not reach the deck: "
         f"{out!r}\n{text[:400]}")
 
 

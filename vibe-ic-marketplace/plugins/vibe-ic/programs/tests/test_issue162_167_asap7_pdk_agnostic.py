@@ -144,46 +144,13 @@ def test_a3_unreadable_inputs_default_to_trust(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# #164 A4 — SDC unit scaling
+# #164 A4 — SDC unit scaling: MOVED (CUT_W4 step 7). The deck is no longer
+# rescaled by vibe-ic; it opens with `set_cmd_units -time ns -capacitance pF`
+# and OpenSTA converts. The three A4 tests' detection (a ps Liberty must not
+# read an ns deck 1000x tight; an ns PDK's deck is unchanged) is asserted on
+# the tool path in test_cut7_sdc_units_are_the_tools.py, against OpenSTA in the
+# pinned image.
 # ---------------------------------------------------------------------------
-def _lib(tmp, unit_time, unit_cap):
-    p = tmp / f"lib_{unit_time}_{unit_cap}.lib"
-    p.write_text(f'library(x){{\n time_unit : "{unit_time}";\n'
-                 f' capacitive_load_unit ({unit_cap});\n}}\n')
-    return p
-
-
-def test_a4_scale_staged_sdc_ps_ff(tmp_path):
-    lib = _lib(tmp_path, "1ps", "1,ff")
-    staged = ("create_clock -name clk -period 10.0 [get_ports clk]\n"
-              "set_max_transition 1.5 [current_design]\n"
-              "set_max_capacitance 5 [current_design]\n")
-    out = R._scale_sdc_to_liberty_units(staged, str(lib))
-    assert "create_clock -name clk -period 10000" in out
-    assert "set_max_transition 1500" in out
-    assert "set_max_capacitance 5000" in out
-
-
-def test_a4_scale_noop_for_ns_pf_pdk(tmp_path):
-    lib = _lib(tmp_path, "1ns", '1.0,"pf"')
-    staged = "create_clock -name clk -period 10.0 [get_ports clk]\n"
-    # ns/pF → scale factor 1 → byte-identical (regression-safe for sky130)
-    assert R._scale_sdc_to_liberty_units(staged, str(lib)) == staged
-
-
-def test_a4_auto_sdc_period_scales_ps_but_byte_identical_ns(tmp_path):
-    proj = tmp_path / "proj"
-    (proj / "phase1").mkdir(parents=True)
-    ps = R._build_auto_silicon_sdc(
-        proj, liberty_path=str(_lib(tmp_path, "1ps", "1,ff")))
-    ns = R._build_auto_silicon_sdc(
-        proj, liberty_path=str(_lib(tmp_path, "1ns", '1.0,"pf"')))
-    none = R._build_auto_silicon_sdc(proj)
-    # default 20 ns → ASAP7 emits 20000 (ps); sky130 keeps 20.0 == the no-lib case
-    assert "create_clock -name clk -period 20000 " in ps
-    assert "create_clock -name clk -period 20.0 " in ns
-    assert "create_clock -name clk -period 20.0 " in none
-    assert "set_input_delay  2000 " in ps and "set_input_delay  2 " in ns
 
 
 # ---------------------------------------------------------------------------

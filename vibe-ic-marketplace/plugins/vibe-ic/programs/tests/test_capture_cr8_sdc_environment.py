@@ -18,14 +18,20 @@ except ImportError:  # red-on-main: the R8 producer is absent there
     env = None
 
 
-_BASE = """set ::env(CLOCK_UNCERTAINTY_CONSTRAINT) 0.31
-set ::env(CLOCK_TRANSITION_CONSTRAINT) 0.12
-"""
-_CELL = """set ::env(SYNTH_DRIVING_CELL) "$::env(STD_CELL_LIBRARY)__inv_2/Z"
-set ::env(OUTPUT_CAP_LOAD) "91.5"
-set ::env(MAX_TRANSITION_CONSTRAINT) 2.7
-set ::env(MAX_CAPACITANCE_CONSTRAINT) 0.18
-"""
+import _resolved_pdk_view_fixture as RV  # noqa: E402
+
+
+def _resolved(library):
+    """What the image's LibreLane resolver answers for this PDK/library
+    (CUT_W4 step 7: the resolver, not a regex over config.tcl, is the PDK
+    tier; STD_CELL_LIBRARY substitution is the tool's)."""
+    return {"CLOCK_UNCERTAINTY_CONSTRAINT": "0.31",
+            "CLOCK_TRANSITION_CONSTRAINT": "0.12",
+            "SYNTH_DRIVING_CELL": f"{library}__inv_2/Z",
+            "OUTPUT_CAP_LOAD": "91.5",
+            "MAX_TRANSITION_CONSTRAINT": 2.7,
+            "MAX_CAPACITANCE_CONSTRAINT": 0.18,
+            "STD_CELL_LIBRARY": library}
 
 
 @pytest.mark.parametrize("library", ["quartz_sc", "basalt_sc"])
@@ -34,20 +40,14 @@ def test_pinned_pdk_values_emit_six_sourced_lines(tmp_path, monkeypatch, library
     project = tmp_path / library
     project.mkdir()
     liberty = f"/pdk/family/libs.ref/{library}/lib/slow.lib"
-
-    def run(argv, **kwargs):
-        config = argv[-1]
-        body = _CELL if config.endswith(f"/{library}/config.tcl") else _BASE
-        return subprocess.CompletedProcess(argv, 0, body, "")
-
-    monkeypatch.setattr(p3._cex, "docker_exec_argv",
-                        lambda container, *rest: ["docker", "exec", container, *rest])
-    monkeypatch.setattr(p3.subprocess, "run", run)
+    seen = RV.install(monkeypatch, project, "famxD", _resolved(library))
     values, unread = p3._sdc_environment_values(project, liberty, "pinned-eda",
-                                                None, None)
+                                                None, None, None, "famxD")
     assert not unread
     assert set(values) == set(p3._SDC_ENV_KEYS)
     assert values["set_driving_cell"][0] == f"{library}__inv_2/Z"
+    assert any(RV.RUN_IMAGE in " ".join(map(str, argv)) for argv in seen), \
+        "the resolver did not run in the image this run recorded"
     text = p3._sdc_environment_prefix(values, unread)
     text += p3._drv_constraints_sdc_block(
         float(values["set_max_transition"][0]),
@@ -58,7 +58,7 @@ def test_pinned_pdk_values_emit_six_sourced_lines(tmp_path, monkeypatch, library
     assert [line.split()[0] for line in commands] == list(p3._SDC_ENV_KEYS)
     for line in commands:
         pos = text.splitlines().index(line)
-        assert text.splitlines()[pos - 1].startswith("# R8 source: pinned PDK default")
+        assert text.splitlines()[pos - 1].startswith("# R8 source: LibreLane resolved")
     assert f"set_driving_cell -lib_cell {library}__inv_2 -pin Z" in text
     assert "set_load 0.0915 [all_outputs]" in text
 
@@ -105,16 +105,24 @@ def test_unreadable_pdk_is_disclosed_not_fabricated(tmp_path):
 
 
 def test_wrong_pinned_image_is_not_read(tmp_path, monkeypatch):
+    """PDK values come only from the image THIS run recorded; a run with no
+    image record is NOT_READ, and no container is started for it."""
     assert env is not None
-
-    def refuse(*_args):
-        raise p3._cex.ContainerImageMismatch("image identity differs")
-
-    monkeypatch.setattr(p3._cex, "docker_exec_argv", refuse)
-    liberty = "/pdk/family/libs.ref/quartz_sc/lib/slow.lib"
-    values, unread = p3._sdc_environment_pdk_values(liberty, "wrong-eda")
+    seen = RV.install(monkeypatch, tmp_path, "famxD", _resolved("quartz_sc"),
+                      record_image=False)
+    values, unread = p3._sdc_environment_pdk_values(tmp_path, "famxD")
     assert values == {}
     assert unread and all(item.startswith("NOT_READ:") for item in unread)
+    assert "LL_RUN_IMAGE_UNRECORDED" in unread[0]
+    assert seen == []
+
+
+def test_a_failing_resolver_is_not_read(tmp_path, monkeypatch):
+    assert env is not None
+    RV.install(monkeypatch, tmp_path, "famxD", None)
+    values, unread = p3._sdc_environment_pdk_values(tmp_path, "famxD")
+    assert values == {}
+    assert unread and "LL_CONFIG_RESOLUTION_FAILED" in unread[0], unread
 
 
 def test_auto_sdc_consumes_six_resolved_values(tmp_path, monkeypatch):
@@ -139,7 +147,11 @@ def test_auto_sdc_consumes_six_resolved_values(tmp_path, monkeypatch):
     assert text.count("# R8 source:") == 6
 
 
-def test_one_ps_liberty_scales_every_time_valued_environment_command(tmp_path, monkeypatch):
+def test_one_ps_liberty_deck_states_ns_under_the_tools_units_line(tmp_path, monkeypatch):
+    """CUT_W4 step 7: the deck is never rescaled. It opens with
+    `set_cmd_units -time ns -capacitance pF` before any timing command and
+    states every value in ns; OpenSTA converts (measured in
+    test_cut7_sdc_units_are_the_tools on a 1ps/1fF Liberty)."""
     liberty = tmp_path / 'one_ps.lib'
     liberty.write_text('library(neutral) { time_unit : "1ps"; }\n')
     values = {
@@ -150,45 +162,42 @@ def test_one_ps_liberty_scales_every_time_valued_environment_command(tmp_path, m
     monkeypatch.setattr(p3, '_sdc_environment_values', lambda *_: (values, []))
     monkeypatch.setattr(p3, '_synth_max_fanout', lambda *_: (None, '', []))
     text = p3._build_auto_silicon_sdc(tmp_path, liberty_path=str(liberty))
-    assert 'create_clock -name clk -period 20000' in text
-    assert 'set_clock_uncertainty 310 [all_clocks]' in text
-    assert 'set_clock_transition 120 [all_clocks]' in text
-    slew_lines = [line for line in text.splitlines()
-                  if line.startswith('set_max_transition ')]
+    lines = text.splitlines()
+    units = lines.index(env.SDC_UNITS_LINE)
+    first_timing = next(i for i, l in enumerate(lines) if l.startswith(
+        ('create_clock', 'set_input_delay', 'set_output_delay', 'set_clock_',
+         'set_max_', 'set_load')))
+    assert units < first_timing
+    assert 'create_clock -name clk -period 20.0' in text
+    assert 'set_clock_uncertainty 0.31 [all_clocks]' in text
+    assert 'set_clock_transition 0.12 [all_clocks]' in text
+    slew_lines = [line for line in lines if line.startswith('set_max_transition ')]
     assert len(slew_lines) == 1
-    assert float(slew_lines[0].split()[1]) == 2700.0
+    assert float(slew_lines[0].split()[1]) == 2.7
     assert slew_lines[0].endswith('[current_design]')
 
 
-def test_liberty_default_slew_is_already_in_its_own_one_ps_unit(tmp_path, monkeypatch):
+def test_a_liberty_default_slew_is_stated_in_ns(tmp_path):
+    """A Liberty default is read in that Liberty's units (2.7 in a 1ps
+    library) and stated once in the deck's ns: 0.0027."""
     liberty = tmp_path / 'one_ps.lib'
     liberty.write_text('library(neutral) { time_unit : "1ps"; '
+                       'capacitive_load_unit (1,ff); '
                        'default_max_transition : 2.7; }\n')
-    values = {'set_max_transition': ('2.7',
-              f'liberty default {liberty}:default_max_transition')}
-    monkeypatch.setattr(p3, '_sdc_environment_values', lambda *_: (values, []))
-    monkeypatch.setattr(p3, '_synth_max_fanout', lambda *_: (None, '', []))
-    text = p3._build_auto_silicon_sdc(tmp_path, liberty_path=str(liberty))
-    slew_lines = [line for line in text.splitlines()
-                  if line.startswith('set_max_transition ')]
-    assert len(slew_lines) == 1
-    assert float(slew_lines[0].split()[1]) == 2.7
+    values, _unread = env._sdc_environment_values(tmp_path, str(liberty), '',
+                                                  2.7, 150.0)
+    assert float(values['set_max_transition'][0]) == pytest.approx(0.0027)
+    assert float(values['set_max_capacitance'][0]) == pytest.approx(0.15)
+    assert values['set_max_transition'][1].startswith('liberty default ')
 
 
 def test_readable_but_non_declaring_pdk_names_every_absent_command(tmp_path, monkeypatch):
-    calls = []
-    monkeypatch.setattr(env._cex, 'docker_exec_argv',
-                        lambda container, *args: ['docker', 'exec', container, *args])
-
-    def readable(argv, **_kwargs):
-        calls.append(argv[-1])
-        return subprocess.CompletedProcess(argv, 0, '# no R8 declaration\n', '')
-
-    monkeypatch.setattr(env.subprocess, 'run', readable)
+    seen = RV.install(monkeypatch, tmp_path, 'famxD', {'STA_CORNERS': ['nom_tt']})
     liberty = '/pdk/family/libs.ref/neutral_sc/lib/slow.lib'
-    values, unread = env._sdc_environment_values(tmp_path, liberty, 'pin', None, None)
+    values, unread = env._sdc_environment_values(tmp_path, liberty, 'pin', None, None,
+                                                 None, 'famxD')
     assert values == {} and unread == []
-    assert len(calls) == 2
+    assert sum('Chip(config=design' in ' '.join(map(str, a)) for a in seen) == 1
     text = env._sdc_environment_prefix(values, unread)
     records = {line.split(': ', 1)[1].split(';', 1)[0]
                for line in text.splitlines() if line.startswith('# UNDECLARED: ')}
