@@ -908,6 +908,35 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         applied = stage.get("applied") or {}
         if name == "synth":
             script = _evidence(stage.get("abc_script") or {}, fails, "ABC script")
+            if (stage.get("tool_step") or {}).get("id") == "Yosys.Synthesis":
+                # Re-read at the FINAL verdict boundary. A plan's cached
+                # ran=True does not prove its native evidence is still valid.
+                fields = ("abc_source", "abc_execution_log", "tool_state",
+                          "tool_config", "tool_netlist", "netlist")
+                for field in fields:
+                    _evidence(stage.get(field) or {}, fails, "synth " + field)
+                receipt_text = _evidence(stage.get("stage_receipt") or {},
+                                         fails, "synth stage receipt")
+                claim_text = _evidence(stage.get("run_claim") or {}, fails, "synth run claim")
+                try:
+                    receipt, claim = json.loads(receipt_text), json.loads(claim_text)
+                    if receipt.get("name") != "synth" or not stage.get("run_id") or \
+                            stage.get("run_id") != identity.get("run_id") or \
+                            receipt.get("run_id") != stage["run_id"] or \
+                            claim.get("run_id") != stage["run_id"]:
+                        fails.append("synth: native provenance belongs to another stage/run")
+                    for field in (*fields, "abc_script"):
+                        if (receipt.get(field) or {}).get("sha256") != \
+                                (stage.get(field) or {}).get("sha256"):
+                            fails.append("synth: " + field + " differs from stage receipt")
+                except (ValueError, TypeError, AttributeError):
+                    fails.append("synth: native stage/run provenance unreadable")
+                if (stage.get("abc_source") or {}).get("sha256") != \
+                        (stage.get("abc_script") or {}).get("sha256"):
+                    fails.append("synth: retained ABC script differs from executed source")
+                if (stage.get("tool_netlist") or {}).get("sha256") != \
+                        (stage.get("netlist") or {}).get("sha256"):
+                    fails.append("synth: native netlist differs from synthesis handoff")
             limits = _abc_buffer_limits(script)
             if not stage.get("synth_abc_buffering") or not limits:
                 fails.append("synth: fanout buffering absent")

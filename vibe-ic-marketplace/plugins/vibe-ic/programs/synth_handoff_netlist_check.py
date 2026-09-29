@@ -68,8 +68,21 @@ def constant_connections(netlist: str) -> list[dict[str, str]]:
     """
     instrument_calibration.assert_calibrated(
         "synth_handoff_netlist_check::constant_connections")
-    from _hdl_code_text import strip_hdl_comments_and_strings
-    code = strip_hdl_comments_and_strings(netlist)
+    from _hdl_code_text import HDL_NONCODE_RE, strip_hdl_comments_and_strings
+    # An escaped identifier ends at whitespace and may contain //, /*, a
+    # quote or an apostrophe. Protect it BEFORE the shared non-code blanker.
+    # One left-to-right alternation preserves comment/string precedence.
+    escaped = {}
+    def protect_identifier(match: re.Match) -> str:
+        token = match[0]
+        if not token.startswith("\\"):
+            return token
+        placeholder = f"\\__vibeic_escaped_{len(escaped)}__"
+        escaped[placeholder] = token
+        return placeholder
+    protected = re.sub(r"\\\S+|" + HDL_NONCODE_RE.pattern, protect_identifier,
+                       netlist, flags=re.S)
+    code = strip_hdl_comments_and_strings(protected)
     code = re.sub(r"\(\*.*?\*\)", lambda m: " " * len(m[0]), code, flags=re.S)
     for match in reversed(list(re.finditer(r"#\s*\(", code))):
         end = _closing_paren(code, match.end()) + 1
@@ -78,6 +91,8 @@ def constant_connections(netlist: str) -> list[dict[str, str]]:
     def literals(kind: str, target: str, expression: str) -> None:
         # Escaped names may themselves contain apostrophes; they are signals.
         expression = re.sub(r"\\\S+", lambda m: " " * len(m[0]), expression)
+        for placeholder, identifier in escaped.items():
+            target = target.replace(placeholder, identifier)
         for literal in re.finditer(_LITERAL, expression):
             found.append({"kind": kind, "target": target.strip(), "value": literal[0]})
     for match in _ASSIGN_RE.finditer(code):

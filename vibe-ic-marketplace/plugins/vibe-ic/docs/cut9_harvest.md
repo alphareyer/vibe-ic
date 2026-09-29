@@ -21,8 +21,13 @@ The native ABC script fixture contains the unmodified bytes of a tool-generated
 buffer-only script. The producer reads ABC's own `source` log line rather than
 selecting a nearby script by filename. The stage receipt binds source, retained
 script, execution log, native state/config, native/handoff netlists and run ID.
+The final judge re-reads every native reference, stage receipt and run claim,
+and requires the stage's run ID to match the measured bundle's run ID.
 Changing any recorded evidence invalidates stage credit. Comments, strings,
 attributes and parameter overrides do not constitute constant connections.
+Escaped Verilog identifiers are protected before comment blanking: a legal
+identifier containing `//` must not hide a partially constant connection.
+Both boundaries have executable negative controls from independent review.
 
 The prior CUT9 harvest rows with no destination remain open: post-route-elected
 synthesis recipes, the `SYNTHESIS` retry, area retry, reference-flow LCU knobs,

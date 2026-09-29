@@ -33,12 +33,13 @@ class Refusal(RuntimeError):
 #: its deadline. The tool never answered, so neither is a FAIL; every other
 #: refusal keeps whatever its consumer already decides.
 TOOL_STOP_REASONS = {'LL_TOOL_STALLED': 'stalled',
-                     'LL_TOOL_DEADLINE': 'budget_exhausted',
-                     'LL_TOOL_FEATURE_ABSENT': 'tool_absent'}
+                     'LL_TOOL_DEADLINE': 'budget_exhausted'}
 
 
 def tool_stop_reason(code: str | None) -> str | None:
-    """The NOT_MEASURED reason class for a tool-stop refusal code, else None."""
+    """The NOT_MEASURED reason for a stopped tool or absent tool feature."""
+    if code == 'LL_TOOL_FEATURE_ABSENT':
+        return 'tool_absent'
     return TOOL_STOP_REASONS.get(code) if code else None
 
 

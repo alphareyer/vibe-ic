@@ -289,6 +289,10 @@ def _stages(project: Path, postroute_repair_ran: bool,
                 bound = bound and row["abc_source"]["sha256"] == row["abc_script"]["sha256"]
                 bound = bound and row["tool_netlist"]["sha256"] == row["netlist"]["sha256"]
                 row["tool_step"] = doc["tool_step"]
+                row["run_id"] = run_id
+                row["stage_receipt"] = {"path": str(path), "sha256": entry["sha256"]}
+                claim = project / STAGE_RECEIPT_DIR / drv_stage_receipts.CLAIM
+                row["run_claim"] = {"path": str(claim), "sha256": _sha(claim)}
                 row["ran"] = row["ran"] and bool(bound)
                 if not bound:
                     script = ""

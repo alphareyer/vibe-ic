@@ -314,6 +314,46 @@ def test_echo_of_buffer_command_cannot_certify_synthesis(tmp_path):
     assert "synth: fanout buffering absent" in result["failures"]
 
 
+@pytest.mark.parametrize("field", ["abc_source", "abc_execution_log", "tool_state",
+                                  "tool_config", "tool_netlist", "netlist",
+                                  "run_claim", "stage_receipt", "bundle_run_id"])
+def test_final_judge_rechecks_native_synth_evidence_after_capture(tmp_path, field):
+    import drv_capture_plan as plan
+    import drv_stage_receipts as receipts
+    bundle = _bundle(tmp_path / "bundle")
+    project = tmp_path / "project"
+    receipts.claim(project)
+    folder = project / "phase3/librelane/02-yosys-synthesis"
+    folder.mkdir(parents=True)
+    source = folder / "AREA_0.abc"
+    source.write_bytes((Path(__file__).parents[1] / "calibration/librelane_buffer_only.abc").read_bytes())
+    (folder / "yosys-synthesis.log").write_text(f"ABC: + source {source}\n")
+    native = folder / "neutral.nl.v"
+    native.write_text("module neutral; endmodule\n")
+    (folder / "state_out.json").write_text(json.dumps({"nl": str(native)}))
+    (folder / "config.json").write_text(json.dumps({"meta": {"step": "Yosys.Synthesis"}}))
+    abc = receipts.keep_librelane_abc_script(project, folder)
+    behavior = abc.parent / "behavior.rpt"
+    behavior.write_text(drv._COMMAND + "\nmax_slew violators=0\nmax_capacitance violators=0\n"
+                        "max_fanout violators=0\nclocks 1\nclock clk is_propagated=0\n")
+    netlist, sdc = abc.parent / "handoff.v", abc.parent / "constraints.sdc"
+    netlist.write_bytes(native.read_bytes())
+    sdc.write_text("set_max_fanout 4 [current_design]\n")
+    receipts.record_synth(project, abc_script=abc, behavior=behavior, netlist=netlist, sdc=sdc)
+    stage = plan._stages(project, False)[0][0]
+    bundle["stages"][0] = stage
+    bundle["identity"]["run_id"] = stage["run_id"]
+    assert drv.judge(bundle)["verdict"] == "PASS"
+    if field == "bundle_run_id":
+        bundle["identity"]["run_id"] = "another-run"
+    else:
+        changed = Path(stage[field]["path"])
+        changed.write_text(changed.read_text() + "\nchanged after capture\n")
+    result = drv.judge(bundle)
+    assert result["verdict"] == "FAIL", result
+    assert any("synth" in finding for finding in result["failures"])
+
+
 def test_unknown_pdk_cannot_use_bundle_selected_scene_set(tmp_path):
     bundle = _bundle(tmp_path)
     bundle["identity"]["pdk"] = "unknown_pdk"

@@ -57,6 +57,30 @@ endmodule
     assert handoff.constant_connections(text) == []
 
 
+def test_native_escaped_identifier_partial_constant_is_refused(tmp_path):
+    source = PROGRAMS / "calibration/synth_escaped_partial_constant.v"
+    report = handoff.check_project(_project(tmp_path, source, tool=False))
+    assert report["verdict"] == "FAIL", report
+    assert any(f.startswith("CONSTANT_NOT_TIED") for f in report["findings"])
+    assert any(f.startswith("UNDEFINED_CONSTANT") for f in report["findings"])
+    assert report["constants"][0]["target"] == "\\a//b"
+
+
+@pytest.mark.parametrize("body", [
+    "assign \\a/*b = { sig, 1'bx };",
+    "vector inst (.\\a//b ({ sig, 1'bx }));",
+    "assign bus = { \\signal//x , 1'bx };",
+])
+def test_escaped_identifiers_do_not_hide_constant_connections(body):
+    constants = handoff.constant_connections("module neutral; " + body + " endmodule")
+    assert len(constants) == 1 and constants[0]["value"] == "1'bx", constants
+
+
+def test_literals_in_escaped_signal_names_are_not_connections():
+    text = "module neutral; assign bus = { \\signal//1'bx , sig }; endmodule"
+    assert handoff.constant_connections(text) == []
+
+
 def _synth_receipt(tmp_path, script):
     project = tmp_path / "project"
     receipts.claim(project)
