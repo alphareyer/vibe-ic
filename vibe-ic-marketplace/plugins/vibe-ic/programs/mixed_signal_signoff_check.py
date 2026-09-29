@@ -23,7 +23,8 @@ This checker therefore performs REAL DETERMINISTIC SUBSTANCE verification:
      and re-checks the substantive PASS field each one carries (the same
      fields the M1/M2/M3 gates assert):
 
-        M1  reports/analog/mixed_signal/merge.json        verdict ∈ {PASS, WAIVED}
+        M1  reports/analog/mixed_signal/merge.json        verdict ∈ {PASS, PASS_WITH_WAIVERS, ...}
+                                                           (WAIVED is never a pass)
         M2  reports/analog/mixed_signal/power_domain.json all_crossings_protected == true
         M2  reports/analog/mixed_signal/level_shifter.json all_required_inserted == true
         M2  reports/analog/mixed_signal/isolation.json    all_required_inserted == true
@@ -45,7 +46,7 @@ Verdicts
                    project) AND no signoff.json → M4 inapplicable.
 * WAIVED  (rc=0) — ``waivers.json`` declares the step waived (evidence+ticket).
 * PASS    (rc=0) — ready_for_tapeout true AND every upstream M1–M3 report
-                   independently re-checks PASS/WAIVED.
+                   independently re-checks PASS (a WAIVED upstream is not).
 * FAIL    (rc=1) — required signoff.json missing (applicable step), or
                    ready_for_tapeout not true, or any upstream substance
                    does not roll up.
@@ -135,7 +136,10 @@ _UPSTREAM = [
     },
 ]
 
-_ACCEPT_VERDICTS = ("PASS", "WAIVED", "PASS_WITH_WAIVERS",
+#: `WAIVED` IS NOT ACCEPTED. An upstream merge that was waived did not pass, and
+#: the owner's rule is "WAIVED is never PASS" (DRV sign-off standard,
+#: owner-approved 2026-09-28): a tapeout sign-off cannot roll it up as one.
+_ACCEPT_VERDICTS = ("PASS", "PASS_WITH_WAIVERS",
                     "PASS_WITH_STUB", "PASS_WITH_STUB_PARTIAL")
 
 

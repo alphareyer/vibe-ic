@@ -235,3 +235,18 @@ def test_a_waived_phase1_step_is_not_a_waiver_pass():
     rows = [{"status": "PASS"}, {"status": "WAIVED"}]
     assert G._phase1_steps_verdict(rows) == "WAIVED"
     assert G._phase1_steps_verdict([{"status": "SKIP"}]) == "PASS_WITH_WAIVERS"
+
+
+# ── (3d) the mixed-signal sign-off's upstream roll-up ───────────────────────
+
+import mixed_signal_signoff_check as M4                       # noqa: E402
+
+
+def test_a_waived_upstream_merge_does_not_roll_up_as_pass(tmp_path):
+    spec = next(s for s in M4._UPSTREAM if s["verdict_based"])
+    target = tmp_path / spec["paths"][0]
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps({"verdict": "PASS"}))
+    assert M4._check_upstream(tmp_path, spec)["status"] == "PASS"   # control
+    target.write_text(json.dumps({"verdict": "WAIVED"}))
+    assert M4._check_upstream(tmp_path, spec)["status"] != "PASS"

@@ -91,13 +91,21 @@ def test_pass_when_ready_and_all_upstream_substance_pass(tmp_path):
 
 
 def test_pass_accepts_waived_merge_and_alias_paths(tmp_path):
-    """M1 verdict WAIVED is acceptable; bare reports/mixed_signal/ alias works."""
+    """The bare reports/mixed_signal/ alias works -- and a WAIVED M1 merge is
+    NOT a pass.
+
+    MIGRATED (owner rule, DRV sign-off standard 2026-09-28 "WAIVED is never
+    PASS"; R-0929-U14-OWNER-WAIVER "tests are migrated, never deleted or
+    weakened in what they detect"). This test used to accept a WAIVED merge as
+    PASS. The alias half is unchanged below with a PASS merge; the WAIVED half
+    now asserts the opposite -- the sign-off cannot roll a waived merge up as
+    passing -- which is a stricter statement about the same input.
+    """
     project = tmp_path / "proj"
     project.mkdir()
     _declare_analog_blocks(project)
-    # M1 waived
     _write(project, "reports/analog/mixed_signal/merge.json",
-           {"verdict": "WAIVED"})
+           {"verdict": "PASS"})
     # M2 at the bare alias path (no analog/ segment)
     _write(project, "reports/mixed_signal/power_domain.json",
            {"all_crossings_protected": True})
@@ -114,6 +122,15 @@ def test_pass_accepts_waived_merge_and_alias_paths(tmp_path):
     rc, report, _ = _run(project, tmp_path)
     assert rc == 0, report
     assert report["verdict"] == "PASS"
+
+    # M1 waived: the same project is no longer a tapeout-ready roll-up.
+    _write(project, "reports/analog/mixed_signal/merge.json",
+           {"verdict": "WAIVED"})
+    rc, report, _ = _run(project, tmp_path)
+    assert rc == 1, report
+    assert report["verdict"] == "FAIL"
+    assert any(f["rule"] == "OVERCLAIM_UNJUSTIFIED_SIGNOFF"
+               for f in report["findings"]), report["findings"]
 
 
 # ---------------------------------------------------------------------------
