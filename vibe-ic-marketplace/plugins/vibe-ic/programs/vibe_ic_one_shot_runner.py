@@ -564,8 +564,9 @@ def _stale_generated_docs_note(regenerating: bool,
 
 def _demote_for_stale_generated_docs(overall: str, why: Optional[str],
                                      reasons: List[str]) -> str:
-    """A green verdict over stale docs is NOT_MEASURED, never red, never green."""
-    if why and overall in ("PASS", "PASS_WITH_WAIVERS"):
+    """A green (or WAIVED) verdict over stale docs is NOT_MEASURED, never red,
+    never green: WAIVED means no FAIL and no NOT_MEASURED."""
+    if why and overall in _DEMOTABLE_TO_NOT_MEASURED:
         reasons.append(why)
         return "NOT_MEASURED"
     return overall
@@ -715,6 +716,18 @@ _PHASE_PASS_WITH_NOTE = frozenset({"PASS_WITH_WAIVERS",
 #: above the pass tiers (`verdict.RUN_PRECEDENCE`), and the run exits non-zero.
 _PHASE_WAIVED = frozenset({"WAIVED"})
 
+#: The exit status every phase runner gives a WAIVED report (`return 0 if ... in
+#: (PASS, PASS_WITH_WAIVERS) else 1`). Any other rc beside WAIVED is a report
+#: disagreeing with its own process -- rc 0, or a signal/crash code -- and is
+#: rolled up by rule (2) below as FAIL, never hidden behind the WAIVED word.
+_PHASE_WAIVED_RC = 1
+
+#: The words a later "this run did not measure part of the flow" demotion
+#: turns into NOT_MEASURED: every word it OUTRANKS in `verdict.RUN_PRECEDENCE`
+#: (FAIL > NOT_MEASURED > WAIVED > PASS_WITH_WAIVERS > PASS). WAIVED is one of
+#: them -- the DRV standard's WAIVED means "no FAIL and no NOT_MEASURED".
+_DEMOTABLE_TO_NOT_MEASURED = ("PASS", "PASS_WITH_WAIVERS", "WAIVED")
+
 #: The ONE reason a pass-tier row may carry a non-zero rc. R-0915-145.
 #:
 #: #505's demotion rewrites phase1's verdict to COVERAGE-INCOMPLETE and KEEPS its
@@ -833,9 +846,12 @@ def _roll_up(rows: List[Tuple[str, str, int]],
             rc_i = 0
         if v == "FAIL":
             fails.append(f"{name} FAIL (rc={rc_i})")
+        elif v in _PHASE_WAIVED and rc_i != _PHASE_WAIVED_RC:
+            fails.append(
+                f"{name} reported WAIVED but the phase exited rc={rc_i} (a "
+                f"phase runner exits {_PHASE_WAIVED_RC} on WAIVED) — a report "
+                f"disagreeing with its own process is not a verdict")
         elif v in _PHASE_WAIVED:
-            # Its rc is not consulted: a phase runner exits non-zero on WAIVED,
-            # and a WAIVED that exited 0 is still not a pass.
             waived.append(f"{name} WAIVED (rc={rc_i}) — an owner-waived measured "
                           f"residual; counted separately, never a pass")
         elif v in _PHASE_PASS or v in _PHASE_PASS_WITH_NOTE:
@@ -2583,7 +2599,7 @@ def main() -> int:
         _ai_scope.append("36")
     _ai_pending = _ai_judgement.pending(
         project, tuple(_ai_scope))
-    if _ai_pending and overall in ("PASS", "PASS_WITH_WAIVERS"):
+    if _ai_pending and overall in _DEMOTABLE_TO_NOT_MEASURED:
         overall = "NOT_MEASURED"
         _rollup_why.extend(_ai_pending.values())
     overall = _demote_for_stale_generated_docs(overall, _p1_stale_why,
@@ -2629,7 +2645,7 @@ def main() -> int:
     for _sid, _detail in _ai_pending.items():
         for _phase in summary["phases"]:
             if (_phase["name"] == _phase_for_ai[_sid]
-                    and _phase["verdict"] in ("PASS", "PASS_WITH_WAIVERS")):
+                    and _phase["verdict"] in _DEMOTABLE_TO_NOT_MEASURED):
                 _phase["verdict"] = "NOT_MEASURED"
                 _phase["rc"] = 1
     # v1.6.32: emit canonical final_summary.md (best-effort). Note that

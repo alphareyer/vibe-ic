@@ -23,13 +23,40 @@ import vibe_ic_one_shot_runner as V                           # noqa: E402
 # ── (1) the top-level runner ────────────────────────────────────────────────
 
 def test_a_waived_phase_is_not_rolled_up_as_a_waiver_pass():
-    for rc in (0, 1):
-        verdict, why = V._roll_up([("phase1", "PASS", 0), ("phase2", "PASS", 0),
-                                   ("phase3", "WAIVED", rc)],
+    verdict, why = V._roll_up([("phase1", "PASS", 0), ("phase2", "PASS", 0),
+                               ("phase3", "WAIVED", 1)],
+                              audit_axis={"state": "PASS"})
+    assert verdict == "WAIVED", (verdict, why)
+    assert not T.is_done_claim(verdict)
+    assert any("phase3 WAIVED" in w for w in why), why
+
+
+def test_a_waived_row_with_the_wrong_rc_does_not_hide_a_crash():
+    # Review wave 58: every phase runner exits 1 on WAIVED. rc 0 or a
+    # signal/crash code beside WAIVED is a report disagreeing with its
+    # process -- rule (2) makes that FAIL, never WAIVED.
+    for rc in (0, 2, 137):
+        verdict, why = V._roll_up([("phase3", "WAIVED", rc)],
                                   audit_axis={"state": "PASS"})
-        assert verdict == "WAIVED", (rc, verdict, why)
-        assert not T.is_done_claim(verdict)
-        assert any("phase3 WAIVED" in w for w in why), why
+        assert verdict == "FAIL", (rc, verdict, why)
+        assert any(f"rc={rc}" in w for w in why), why
+
+
+def test_the_not_measured_demotions_reach_waived():
+    # FAIL > NOT_MEASURED > WAIVED: a run that did not measure part of the
+    # flow cannot publish WAIVED (the DRV standard's WAIVED is "no FAIL and
+    # no NOT_MEASURED").
+    reasons = []
+    assert V._demote_for_stale_generated_docs("WAIVED", "stale", reasons) \
+        == "NOT_MEASURED"
+    assert reasons == ["stale"]
+    assert V._demote_for_stale_generated_docs("FAIL", "stale", []) == "FAIL"
+    assert "WAIVED" in V._DEMOTABLE_TO_NOT_MEASURED
+    assert "FAIL" not in V._DEMOTABLE_TO_NOT_MEASURED
+    # the AI-pending and the per-phase demotions read the same set
+    src = (PROGRAMS / "vibe_ic_one_shot_runner.py").read_text()
+    assert "_ai_pending and overall in _DEMOTABLE_TO_NOT_MEASURED" in src
+    assert '_phase["verdict"] in _DEMOTABLE_TO_NOT_MEASURED' in src
 
 
 def test_waived_ranks_below_fail_and_not_measured_and_above_the_passes():
