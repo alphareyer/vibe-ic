@@ -41,7 +41,8 @@ from _atomic_artefact import write_json
 
 PROGRAM = "pad_input_drive_check"
 SIGNOFF_DECK = "phase3/stage3/pnr/constraint.sdc"
-_RC = {"PASS": 0, "NOT_APPLICABLE": 0, "FAIL": 1, "NOT_MEASURED": 2}
+_RC = {"PASS": 0, "NOT_APPLICABLE": 0, "FAIL": 1, "NOT_MEASURED": 2,
+       "REFUSED": 1}
 
 
 def _is_die(project: Path) -> Optional[bool]:
@@ -85,6 +86,28 @@ def judge(project: Path, deck_rel: str = SIGNOFF_DECK) -> Dict[str, Any]:
     project = Path(project)
     out: Dict[str, Any] = {"program": PROGRAM, "project": str(project),
                            "record": _se.PAD_INPUT_DRIVE_REPORT, "deck": deck_rel}
+    # F15 -- STEP 23 ON THE TOOL. When step 23 runs `librelane` or `dual`, the
+    # deck that was signed off is the SDC the tool TIMED (its bound
+    # `state_out.json` view), not the runner's own copy; a tool arm that cannot
+    # be bound REFUSES before anything is judged, exactly as the other step-23
+    # gates do (`librelane_signoff.step23_tool_arm`).
+    import librelane_signoff as _ls
+    from librelane_contract import Refusal
+    try:
+        arm = _ls.step23_tool_arm(project)
+    except Refusal as exc:
+        return dict(out, verdict="REFUSED", refusal=exc.code,
+                    reason=f"step 23 runs on the tool and its sign-off cannot "
+                           f"be read: {exc}")
+    if arm is not None:
+        out["tool_arm"] = _ls.tool_arm_basis(arm)
+        try:
+            state = json.loads((Path(arm["folder"]) / "state_out.json").read_text())
+            deck_rel = str(state["sdc"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return dict(out, verdict="REFUSED", refusal="LL_STA_TOOL_ARM_UNREADABLE",
+                        reason=f"the SDC the tool timed cannot be named: {exc}")
+        out["deck"] = deck_rel
     die = _is_die(project)
     if die is None:
         return dict(out, verdict="NOT_MEASURED",

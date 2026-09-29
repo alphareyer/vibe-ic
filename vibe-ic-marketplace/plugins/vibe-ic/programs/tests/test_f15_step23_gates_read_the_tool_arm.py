@@ -38,6 +38,19 @@ GATES = ('achieved_period_recorded_check', 'hold_corner_coverage_check',
          'sta_assumed_clock_disclosure_check', 'clock_target_record_agreement_check',
          'drv_promotion_corroboration_check')
 
+#: Step-23 gates that BIND the tool arm like the nine above (a missing or
+#: unbound corner artefact REFUSES) but whose clean-arm answer is not a PASS
+#: from STAPostPNR's reports, for a stated reason pinned in
+#: `test_a_gate_that_cannot_pass_on_the_tools_reports_says_why`:
+#:   drv_signoff_judge      judges a fresh per-(pin, scene) OpenSTA capture
+#:                          (DRV sign-off standard); STAPostPNR's reports carry
+#:                          violator COUNTS only -> NOT_MEASURED without one.
+#:   pad_input_drive_check  judges the SDC the tool timed against the resolved
+#:                          bond-pad drive; this fixture's top is not a DIE ->
+#:                          NOT_APPLICABLE.
+OWN_ANSWER_GATES = ('drv_signoff_judge', 'pad_input_drive_check')
+ALL_STEP23_GATES = GATES + OWN_ANSWER_GATES
+
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -318,7 +331,8 @@ def test_the_gate_list_is_the_flows_own_step_23():
     gate = block[block.index('\n    gate:\n'):]
     named = set(re.findall(r'^\s+-?\s*(?:command|program_exit_zero|advisory_program_exit_zero'
                            r'|optional_program_exit_zero):\s*"(\w+)', gate, re.M))
-    assert named == set(GATES)
+    assert named == set(ALL_STEP23_GATES)
+    assert not set(GATES) & set(OWN_ANSWER_GATES)
 
 
 def test_the_reader_binds_every_file_to_what_the_tool_wrote(tmp_path):
@@ -384,7 +398,7 @@ def test_each_gate_passes_on_the_tools_clean_corners_and_names_them(tmp_path, na
         'phase3/stage3/sta/post_route_timing.rpt', ''), name
 
 
-@pytest.mark.parametrize('name', GATES)
+@pytest.mark.parametrize('name', ALL_STEP23_GATES)
 def test_each_gate_refuses_a_missing_corner_artefact(tmp_path, name):
     project = gate_inputs(tool_project(tmp_path))
     (project / STA / 'max_ss_125C_4v50' / signoff.CORNER_REPORT).unlink()
@@ -400,13 +414,54 @@ def test_each_gate_refuses_a_missing_corner_artefact(tmp_path, name):
     assert verdict(doc) == 'REFUSED', (name, doc)
 
 
-@pytest.mark.parametrize('name', GATES)
+@pytest.mark.parametrize('name', ALL_STEP23_GATES)
 def test_each_gate_refuses_a_corner_report_the_tool_did_not_write(tmp_path, name):
     project = gate_inputs(tool_project(tmp_path))
     report = project / STA / 'nom_tt_025C_5v00' / signoff.CORNER_REPORT
     report.write_text(report.read_text() + '\n')
     rc, doc = run_gate(name, project, tmp_path)
     assert (rc, verdict(doc)) == (1, 'REFUSED'), (name, doc)
+
+
+@pytest.mark.parametrize('name, answer, rc', [
+    ('drv_signoff_judge', 'NOT_MEASURED', 1),
+    ('pad_input_drive_check', 'NOT_APPLICABLE', 0),
+])
+@pytest.mark.parametrize('mode', ['librelane', 'dual'])
+def test_a_gate_that_cannot_pass_on_the_tools_reports_says_why(tmp_path, name,
+                                                               answer, rc, mode):
+    """The clean, bound tool arm: the gate read it (its basis names the tool's
+    step directory) and gives its OWN answer, never a PASS it cannot support
+    and never our deck."""
+    project = gate_inputs(tool_project(tmp_path, mode=mode))
+    got_rc, doc = run_gate(name, project, tmp_path)
+    assert (got_rc, verdict(doc)) == (rc, answer), (name, doc)
+    text = json.dumps(doc)
+    assert STA in text, name
+    assert 'sta_mcorner_ocv' not in text, name
+    if name == 'drv_signoff_judge':
+        assert any('STAPostPNR' in r for r in doc['not_measured']), doc
+    else:
+        # the deck judged is the SDC the tool timed, from its bound state
+        state = json.loads((project / STA / 'state_out.json').read_text())
+        assert doc['deck'] == state['sdc'], doc
+
+
+def test_the_drv_judge_binds_its_bundle_to_the_def_the_tool_timed(tmp_path):
+    """On the tool arm a DRV bundle certifies step 23 only for the DEF
+    STAPostPNR timed: a bundle whose routed DEF is another layout is
+    NOT_MEASURED, named -- even when the routed DEF on disk matches it."""
+    import drv_signoff_judge as drv
+    project = gate_inputs(tool_project(tmp_path))
+    routed = _write(project / 'phase3/stage3/pnr/routed.def', 'DESIGN other ;\n')
+    _write(project / 'reports/phase3/sta/drv_signoff_bundle.json', json.dumps({
+        'identity': {'artifacts': {'def': {'sha256': _sha(routed)}}}}))
+    out = tmp_path / 'drv.json'
+    assert drv.main([str(project), '--json', str(out)]) == 1
+    doc = json.loads(out.read_text())
+    assert doc['verdict'] != 'PASS'
+    assert any('not the DEF STAPostPNR timed' in r
+               for r in doc.get('not_measured', [])), doc
 
 
 # ------------------------------------ per gate: the judged field flips it ---
