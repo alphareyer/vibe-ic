@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from drv_signoff_judge import KINDS, _NUM, _liberty_limits
+from drv_signoff_judge import KINDS, _NUM, _liberty_limits, port_to_pad
 from drv_signoff_annotation import _lef_uses
 
 
@@ -127,11 +127,10 @@ def derive(scene_dir: Path, linked_liberties: list[dict],
             # Liberty on the pad pin, never by the std-cell margin. Proven from
             # OpenSTA's own net census (driver and load pins), else False.
             net = nets.get(pin["net"]) or {}
-            others = [p for p in (net.get("drivers", []) + net.get("loads", []))
-                      if p != name]
-            metadata[name]["port_to_pad"] = bool(others) and all(
-                pins.get(p, {}).get("kind") == "pin" and
-                pins[p].get("cell") in pad_cells for p in others)
+            metadata[name]["port_to_pad"] = port_to_pad(
+                name, net.get("drivers", []) + net.get("loads", []),
+                lambda p: (pins.get(p, {}).get("kind") == "pin" and
+                           pins[p].get("cell") in pad_cells))
     drivers = {name for name, pin in pins.items() if pin["driver"]}
     all_names = {kind: {row["pin"] for row in all_rows[kind]} for kind in KINDS}
     if any(not names.issubset(pins) for names in all_names.values()):

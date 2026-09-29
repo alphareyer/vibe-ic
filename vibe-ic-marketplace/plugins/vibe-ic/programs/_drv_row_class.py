@@ -33,8 +33,13 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-OFFCHIP_PORT = "OFFCHIP_PORT_TO_PAD_NET"
-IO_MARGIN = "IO_STD_CELL_MARGIN_DISCLOSURE"
+# ONE implementation of each class rule: the DRV judge's (this module only
+# gathers the inputs -- the run's netlist, its IO Liberty, its cap margin).
+from drv_signoff_judge import (IO_STD_CELL_MARGIN_DISCLOSURE as IO_MARGIN,  # noqa: E402
+                               OFFCHIP_PORT_TO_PAD_NET as OFFCHIP_PORT,
+                               _liberty_limits, _sdc_values, io_margin_disclosure,
+                               port_to_pad)
+
 COUNTED = "DRV"
 
 
@@ -66,7 +71,11 @@ def netlist_nets(text: str) -> Dict[str, List[Tuple[str, str, str]]]:
 class Classifier:
     """Classes of (corner, kind, pin, limit, value) rows for one sign-off run."""
 
-    def __init__(self, netlist: Path, pad_libs: Mapping[str, Sequence[Path]]):
+    def __init__(self, netlist: Path, pad_libs: Mapping[str, Sequence[Path]],
+                 cap_margin: Optional[float] = None):
+        """`cap_margin`: the design-scope std-cell cap margin the run's
+        sign-off SDC applied (None: the IO-margin class never applies)."""
+        self._cap_margin = cap_margin
         try:
             self._nets = netlist_nets(Path(netlist).read_text(errors="replace"))
         except OSError as exc:
@@ -75,7 +84,6 @@ class Classifier:
             raise Unavailable(f"netlist {netlist} names no instance connection")
         self._inst_master = {inst: master for conns in self._nets.values()
                              for inst, master, _ in conns}
-        from drv_signoff_judge import _liberty_limits
         self._libs: Dict[str, List[dict]] = {}
         for corner, paths in pad_libs.items():
             parsed = []
@@ -117,19 +125,26 @@ class Classifier:
                  limit: Optional[float], value: Optional[float]) -> str:
         if "/" not in pin:
             conns = self._nets.get(pin) or []
-            if conns and all(self._pad(corner, master) is not None
-                             for _, master, _ in conns):
-                return OFFCHIP_PORT
-            return COUNTED
+            masters = {f"{inst}/{p}": master for inst, master, p in conns}
+            return (OFFCHIP_PORT if port_to_pad(
+                pin, list(masters),
+                lambda p: self._pad(corner, masters.get(p)) is not None)
+                else COUNTED)
         inst, _, lib_pin = pin.rpartition("/")
         master = self._inst_master.get(inst)
-        if self._pad(corner, master) is None or limit is None or value is None:
+        if self._pad(corner, master) is None:
             return COUNTED
-        io = self.io_limit(corner, master, lib_pin, kind)
-        tol = 1e-6
-        if io is not None and limit < io - tol and value <= io + tol:
-            return IO_MARGIN
-        return COUNTED
+        return (IO_MARGIN if io_margin_disclosure(
+            kind, "IO", None, limit, value,
+            self.io_limit(corner, master, lib_pin, kind), self._cap_margin)
+            else COUNTED)
+
+
+def sdc_cap_margin(sdc_text: str) -> Optional[float]:
+    """The one design-scope `set_max_capacitance <v> [current_design]` value
+    the sign-off SDC applies, or None when absent or ambiguous."""
+    values = {v for v in _sdc_values(sdc_text, "set_max_capacitance")}
+    return values.pop() if len(values) == 1 else None
 
 
 def pad_libs_by_corner(pad_libs: object, corners: Iterable[str]) -> Dict[str, List[str]]:

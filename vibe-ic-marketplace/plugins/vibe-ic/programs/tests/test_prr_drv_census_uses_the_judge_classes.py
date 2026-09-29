@@ -129,7 +129,9 @@ def _stage(tmp_path, pad_libs=True, lib_text=_LIB):
     sta = tmp_path / "04-openroad-stapostpnr"
     (sta / CORNER).mkdir(parents=True)
     (sta / CORNER / "sta.log").write_text(_sta_log())
-    cfg = {"STA_CORNERS": [CORNER]}
+    sdc = tmp_path / "signoff.sdc"   # the design-scope std-cell margin STA read
+    sdc.write_text("set_max_capacitance 0.2 [current_design]\n")
+    cfg = {"STA_CORNERS": [CORNER], "SIGNOFF_SDC_FILE": str(sdc)}
     if pad_libs:
         cfg["PAD_LIBS"] = {"*_tt_025C_5v00": ["/pdk/io/io_tt.lib"]}
     (sta / "config.json").write_text(json.dumps(cfg))

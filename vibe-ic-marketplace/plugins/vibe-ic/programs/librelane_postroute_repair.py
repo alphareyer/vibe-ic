@@ -416,7 +416,10 @@ def _drv_classifier(ctx: Dict[str, Any], sta_folder: Path) -> Optional[Callable[
         netlist = _host_path(ctx, str(_load(sta_folder / "state_in.json")["nl"]))
         libs = {c: [_host_path(ctx, p) for p in paths] for c, paths in
                 _cls.pad_libs_by_corner(pad_libs, ctx["corners"]).items()}
-        return _cls.Classifier(netlist, libs).classify
+        sdc = cfg.get("SIGNOFF_SDC_FILE")
+        margin = (_cls.sdc_cap_margin(_host_path(ctx, str(sdc)).read_text())
+                  if sdc else None)
+        return _cls.Classifier(netlist, libs, margin).classify
     except (OSError, ValueError, KeyError, TypeError, _cls.Unavailable) as exc:
         reason = f"{type(exc).__name__}: {exc}"
 
