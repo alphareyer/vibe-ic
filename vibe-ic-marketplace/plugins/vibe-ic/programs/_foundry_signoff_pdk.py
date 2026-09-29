@@ -17,9 +17,12 @@ import _published_tree
 
 
 _ROOT = re.compile(r"/foss/pdks/([A-Za-z0-9._-]+)/")
+# Ciel and Volare keep each PDK at <store>/<family>/versions/<hash>/<variant>.
+# The store directory is where libraries live, never which process they are.
+_STORES = frozenset({"ciel", "volare"})
 _CIEL = re.compile(
-    r"/foss/pdks/ciel/[A-Za-z0-9._-]+/versions/[A-Za-z0-9._-]+/"
-    r"([A-Za-z0-9._-]+)(?=/|[^A-Za-z0-9._-])")
+    r"/foss/pdks/(?:ciel|volare)/[A-Za-z0-9._-]+/versions/[A-Za-z0-9._-]+/"
+    r"([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])")
 _FLOW_DIRS = ("/phase2/", "/phase3/")
 
 
@@ -46,12 +49,13 @@ def names_in_text(text: str) -> set[str]:
     the root itself and to its libraries must agree. Unrecognized paths retain
     the ordinary ambiguity behavior.
     """
-    normalized = _CIEL.sub(r"/foss/pdks/\1", text)
-    return set(_ROOT.findall(normalized))
+    normalized = _CIEL.sub(r"/foss/pdks/\1/", text)
+    # A path that stops at the store (a PDK_ROOT set to the version directory
+    # and expanded later) names no variant: it is no evidence, not a PDK.
+    return set(_ROOT.findall(normalized)) - _STORES
 
 
-def pdk_from_signoff_flow(project: Path) -> str | None:
-    """Return one PDK, or None for absent/ambiguous flow evidence."""
+def _flow_names(project: Path, stop_when_ambiguous: bool) -> set[str]:
     names: set[str] = set()
     for path in signoff_flow_texts(project):
         try:
@@ -66,6 +70,22 @@ def pdk_from_signoff_flow(project: Path) -> str | None:
             names.update(names_in_text(body.decode(errors="replace")))
         except OSError:
             continue
-        if len(names) > 1:
-            return None
+        if stop_when_ambiguous and len(names) > 1:
+            break
+    return names
+
+
+def signoff_pdk_evidence(project: Path) -> tuple[str | None, list[str]]:
+    """Return (the one PDK or None, every candidate name found).
+
+    None with no candidates is absent evidence; None with several is
+    ambiguous. A gate that cannot compare states which one it was.
+    """
+    names = _flow_names(project, stop_when_ambiguous=False)
+    return (next(iter(names)) if len(names) == 1 else None), sorted(names)
+
+
+def pdk_from_signoff_flow(project: Path) -> str | None:
+    """Return one PDK, or None for absent/ambiguous flow evidence."""
+    names = _flow_names(project, stop_when_ambiguous=True)
     return next(iter(names)) if len(names) == 1 else None
