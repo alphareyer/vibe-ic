@@ -220,3 +220,75 @@ def test_p0_and_step2_block_one_code_list():
     import verilator_lint_gate as step2
     assert "LATCH" in frontend.BLOCKING_CODES
     assert frontend.BLOCKING_CODES <= step2.BLOCKING_WARNINGS
+
+
+# ── audit §3.16 P0: the Yosys elaboration is KEPT, not written to /dev/null ──
+
+def _elab_fake(rc=0, doc=None):
+    """Yosys's file write, faked: write the JSON where the script says."""
+    import re as _re
+
+    def fake(tool, args, root, image):
+        if tool == "yosys":
+            m = _re.search(r"write_json (\S+)", args[-1])
+            assert m and m.group(1) != "/dev/null", args[-1]
+            if rc == 0:
+                Path(m.group(1)).write_text(json.dumps(doc if doc is not None else {
+                    "modules": {"top": {"attributes": {"top": "00000001"},
+                                        "ports": {"a": {"direction": "input",
+                                                        "bits": [2]}}}}}))
+            return subprocess.CompletedProcess([], rc, "", "")
+        return subprocess.CompletedProcess([], 0, "", "")
+    return fake
+
+
+def test_p0_keeps_the_tool_elaboration(monkeypatch, tmp_path):
+    project = _project(tmp_path)
+    monkeypatch.setattr(frontend, "_invoke", _elab_fake())
+    result = frontend.check(project, "test-image")
+    kept = project / frontend.RTL_ELAB_REL
+    assert result["passed"] and kept.is_file()
+    assert json.loads(kept.read_text())["modules"]["top"]["ports"]["a"]["direction"] == "input"
+    assert result["elaboration"]["written"] is True
+    assert result["elaboration"]["top"] == "top"
+
+
+def test_a_failed_or_empty_elaboration_keeps_nothing_and_clears_the_last(
+        monkeypatch, tmp_path):
+    project = _project(tmp_path)
+    kept = project / frontend.RTL_ELAB_REL
+    kept.parent.mkdir(parents=True)
+    kept.write_text('{"modules": {"stale": {}}}')
+    monkeypatch.setattr(frontend, "_invoke", _elab_fake(rc=1))
+    result = frontend.check(project, "test-image")
+    assert not kept.exists() and result["elaboration"]["written"] is False
+    assert "Yosys elaboration failed" in result["findings"]
+    monkeypatch.setattr(frontend, "_invoke", _elab_fake(doc={"modules": {}}))
+    result = frontend.check(project, "test-image")
+    assert not kept.exists() and "no module" in result["elaboration"]["why"]
+
+
+def test_the_docker_path_mounts_only_the_elaboration_scratch_writable(
+        monkeypatch, tmp_path):
+    """The project stays read-only; the one rw mount is P0's own scratch."""
+    import _watchdog
+    project = _project(tmp_path)
+    seen = {}
+    monkeypatch.setattr(frontend.shutil, "which",
+                        lambda t: "/usr/bin/docker" if t == "docker" else None)
+
+    def run(command, **kw):
+        seen["cmd"] = command
+        raise RuntimeError("stop after composing the command")
+    monkeypatch.setattr(_watchdog, "run_host_supervised", run)
+    scratch = tmp_path / (frontend._ELAB_SCRATCH_PREFIX + "x")
+    scratch.mkdir()
+    with pytest.raises(RuntimeError):
+        frontend._invoke("yosys", ["-p", f"proc; write_json {scratch}/rtl_elab.json"],
+                         project, "img")
+    cmd = seen["cmd"]
+    vols = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
+    root = str(project.resolve())
+    assert f"{root}:{root}:ro" in vols
+    assert f"{scratch}:{scratch}" in vols
+    assert len(vols) == 2
