@@ -408,6 +408,99 @@ def _now() -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Measured framing — what the oracle TB PROVED, against what was declared
+# --------------------------------------------------------------------------- #
+#: Where the runner persists the oracle TB's framing search
+#: (`_persist_oracle_calibrated_framing`), newest layout first.
+ORACLE_MANIFEST_RELS = (
+    "phase2/stage1/sim_full_stack/arith_oracle_manifest.json",
+    "sim/arith_oracle_manifest.json",
+)
+
+#: Provenance of a value this program took from that measurement.
+MEASURED_PROVENANCE = "oracle_measurement"
+
+
+def measured_framing(project: Path) -> Dict[str, Tuple[Any, str]]:
+    """{declaration field: (MEASURED value, where it was measured)}.
+
+    The oracle TB searches (in_order, out_order, offset) until ONE framing
+    reassembles the DUT stream to an independently computed golden for every
+    vector, and the runner records that winner under `calibrated_*` keys. That
+    is a measurement of the RTL; `declared_*` in the same manifest is only a
+    copy of the declaration and is never read here.
+
+    MEASURED on spm IC run v5c (2026-09-29): declaration.json said
+    `latency_cycles: 1` (written by the RTL generator, carried with
+    `provenance_verified: false`), the manifest said `calibrated_latency: 2`,
+    and the required-artifact gate read PASS.
+
+    `bit_order` is a single field; it is compared only when the input and the
+    output framing agree, because one value cannot state two orders.
+    Empty when no manifest or no measured key exists — nothing to compare."""
+    for rel in ORACLE_MANIFEST_RELS:
+        p = Path(project) / rel
+        if not p.is_file():
+            continue
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(d, dict):
+            continue
+        out: Dict[str, Tuple[Any, str]] = {}
+        lat = d.get("calibrated_latency")
+        if type(lat) is int and lat >= 0:
+            out["latency_cycles"] = (lat, "%s:calibrated_latency" % rel)
+        bo = d.get("calibrated_bit_order")
+        obo = d.get("calibrated_out_bit_order", bo)
+        if bo in ("LSB_first", "MSB_first") and obo == bo:
+            out["bit_order"] = (bo, "%s:calibrated_bit_order" % rel)
+        return out
+    return {}
+
+
+def same_framing(name: str, declared: Any, measured: Any) -> bool:
+    """Does `declared` state the framing `measured` found?
+
+    Judged in the ORACLE's own vocabulary, not by exact JSON: the oracle TB
+    that measured the framing reads a declaration through
+    `arith_oracle_tb_gen.read_declared_conventions`, which takes
+    `LSB-first` / `lsb_first` / `lsb` as one bit order and `"2"` as latency 2.
+    A spelling the measuring instrument accepts is the same framing."""
+    if name == "latency_cycles":
+        try:
+            return (type(declared) is not bool
+                    and int(str(declared).strip()) == int(measured))
+        except (TypeError, ValueError):
+            return False
+    if name == "bit_order":
+        try:
+            import arith_oracle_tb_gen as _ao  # noqa: PLC0415
+        except Exception:  # pragma: no cover - incomplete install
+            return _same_declared_value(declared, measured)
+
+        def _order(v: Any) -> Optional[str]:
+            t = str(v).strip().lower()
+            return ("LSB" if t in _ao._BIT_ORDER_LSB
+                    else "MSB" if t in _ao._BIT_ORDER_MSB else None)
+        a, b = _order(declared), _order(measured)
+        return a is not None and a == b
+    return _same_declared_value(declared, measured)
+
+
+def measurement_disagreements(project: Path,
+                              declared: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every declared field the oracle measured to a DIFFERENT value."""
+    out: List[Dict[str, Any]] = []
+    for name, (value, source) in sorted(measured_framing(project).items()):
+        if name in declared and not same_framing(name, declared[name], value):
+            out.append({"field": name, "declared": declared[name],
+                        "measured": value, "measured_at": source})
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Markdown table parsing
 # --------------------------------------------------------------------------- #
 
@@ -1070,7 +1163,9 @@ def resolve(contract: Dict[str, Any],
             overrides: Dict[str, Any],
             rtl_declared: Dict[str, Tuple[Any, str]],
             existing: Optional[Dict[str, Any]] = None,
-            prior: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+            prior: Optional[Dict[str, Dict[str, Any]]] = None,
+            measured: Optional[Dict[str, Tuple[Any, str]]] = None
+            ) -> Dict[str, Any]:
     """Resolve every contract field.  Returns a per-field status map.
 
     Priority, strongest first:
@@ -1095,9 +1190,19 @@ def resolve(contract: Dict[str, Any],
 
     At every tier, a value that states no choice (empty string, ``TBD``,
     ``<fill-me>``) resolves to UNDETERMINED, not to a declaration.
+
+    A MEASUREMENT OUTRANKS AN UNVERIFIED CARRIED VALUE. `measured` is what the
+    oracle TB proved about the RTL (`measured_framing`). A tier-2 value that
+    nothing accounts for (`provenance_verified: false`), or one this program
+    took from an earlier measurement, is replaced by the measurement when the
+    two differ, and the replaced value is recorded. A value someone DECLARED
+    (tier 1, a verified carried record, an RTL comment, the spec's own
+    designation) is never replaced: when it disagrees with the measurement the
+    RTL does not do what was declared, and `verify_declaration` FAILs it.
     """
     existing = existing or {}
     prior = prior or {}
+    measured = measured or {}
     status: Dict[str, Any] = {}
     for f in contract["fields"]:
         name = f["name"]
@@ -1222,6 +1327,38 @@ def resolve(contract: Dict[str, Any],
                             % (contract.get("source", "the spec"),
                                ("no value" if now is UNDETERMINED
                                 else repr(now)), name)))
+            # A value the SPEC designates, or the RTL declares, is a statement
+            # of intent the measurement is judged AGAINST -- never one it
+            # overwrites. When either disagrees with the measurement nothing
+            # is replaced, and `verify_declaration` FAILs the disagreement.
+            _intent = []
+            if len(designated) == 1:
+                _intent.append(_coerce(designated[0]))
+            if name in rtl_declared:
+                _intent.append(rtl_declared[name][0])
+            if name in measured and not any(
+                    not same_framing(name, v, measured[name][0])
+                    for v in _intent) and (
+                    entry.get("provenance_verified") is False
+                    or entry.get("provenance") == MEASURED_PROVENANCE):
+                m_value, m_source = measured[name]
+                if not same_framing(name, existing[name], m_value):
+                    entry = {k: v for k, v in entry.items()
+                             if k not in ("provenance_note",
+                                          "provenance_diverged",
+                                          "provenance_detail")}
+                    entry.update(
+                        status="determined", value=m_value,
+                        provenance=MEASURED_PROVENANCE,
+                        provenance_detail=m_source,
+                        recovered_from_prose=False,
+                        carried_from_declaration_file=False,
+                        provenance_verified=True,
+                        replaced_value=existing[name],
+                        replaced_because=(
+                            "the declaration file carried %r with no "
+                            "declared source; the oracle measured %r at %s"
+                            % (existing[name], m_value, m_source)))
         elif name in rtl_declared:
             value, src = rtl_declared[name]
             entry.update(status="determined", value=value,
@@ -1742,7 +1879,36 @@ def verify_declaration(project: Path, contract: Dict[str, Any],
             "reason": reason.strip() if isinstance(reason, str) else None,
             "reason_present": isinstance(reason, str) and bool(reason.strip())})
 
-    if result["missing_required"] or result["placeholder_required"]:
+    # The declaration must say what the RTL was MEASURED to do. A field the
+    # oracle TB framed to a different value is a false statement about the
+    # design, whoever wrote it.
+    result["measurement_disagreements"] = measurement_disagreements(
+        project, loaded)
+    # The spec's own single designation is intent too: a design measured to
+    # do something else does not meet its spec, whatever the file says.
+    _measured = measured_framing(project)
+    for f in contract["fields"]:
+        name = f["name"]
+        designated = list(f.get("designated_values") or [])
+        if name not in _measured or len(designated) != 1:
+            continue
+        want = _coerce(designated[0])
+        if want is UNDETERMINED or same_framing(name, want, _measured[name][0]):
+            continue
+        if any(d["field"] == name for d in result["measurement_disagreements"]):
+            continue
+        result["measurement_disagreements"].append({
+            "field": name, "declared": want,
+            "declared_by": "spec designation (%s)" % contract["source"],
+            "measured": _measured[name][0], "measured_at": _measured[name][1]})
+
+    if result["measurement_disagreements"]:
+        result["verdict"] = "FAIL_MEASUREMENT_DISAGREES"
+        result["note"] = "; ".join(
+            "%s declared %r, measured %r (%s)"
+            % (d["field"], d["declared"], d["measured"], d["measured_at"])
+            for d in result["measurement_disagreements"])
+    elif result["missing_required"] or result["placeholder_required"]:
         result["verdict"] = "FAIL"
         result["note"] = (
             "%d required field(s) missing, %d carrying a placeholder"
@@ -1970,7 +2136,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         overrides, names, existing,
         {"declared_outside_contract": _load_prior_outside(sidecar)})
 
-    status = resolve(contract, overrides, rtl_declared, existing, prior)
+    status = resolve(contract, overrides, rtl_declared, existing, prior,
+                     measured_framing(project))
 
     undetermined_required = sorted(
         n for n, e in status.items()

@@ -224,7 +224,10 @@ def test_emit_writes_the_l7_required_declaration(tmp_path):
     assert decl == {
         "bit_order": "LSB_first",
         "reset_polarity": "active_high",
-        "latency_cycles": 1,
+        # R-0929-SPM-LATENCY: 2 register stages (yr, pr) on the emitted
+        # serial path, as every oracle framing search measures; the pin said
+        # 1, a false fact the ruling ordered corrected.
+        "latency_cycles": 2,
         "integer_encoding": "unsigned",
     }
 
@@ -244,7 +247,7 @@ def test_declaration_reset_polarity_follows_the_designs_own_reset_name(tmp_path)
     assert decl["reset_polarity"] == "active_low"
     # and the OTHER three fields must NOT have moved with it
     assert decl["bit_order"] == "LSB_first"
-    assert decl["latency_cycles"] == 1
+    assert decl["latency_cycles"] == 2   # R-0929-SPM-LATENCY (yr + pr)
     assert decl["integer_encoding"] == "unsigned"
 
 
