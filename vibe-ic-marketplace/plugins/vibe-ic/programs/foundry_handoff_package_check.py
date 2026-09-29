@@ -85,6 +85,48 @@ import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
 import _foundry_signoff_pdk as _fsp
 
 
+#: The owner token `foundry_handoff_pack_gen.OWNER_US` writes for an item this
+#: flow itself must close (the generator's own constant, read here as data).
+_OWNER_THIS_FLOW = "this_flow"
+
+
+def _closing_evidence_problems(project, evidence):
+    """Why a CLOSED this_flow item's evidence does not stand ([] = it does).
+
+    Every entry must name a file under the project whose sha256 is the one
+    recorded; a pattern file must also name the trace it was converted from,
+    and that trace must still hash to what the pattern says."""
+    if not isinstance(evidence, list) or not evidence:
+        return ["no evidence list"]
+    bad = []
+    root = Path(project).resolve()
+    for ev in evidence:
+        if not isinstance(ev, dict) or not ev.get("path"):
+            bad.append(f"malformed entry {ev!r}")
+            continue
+        f = (root / str(ev["path"])).resolve()
+        if root not in f.parents or not f.is_file():
+            bad.append(f"{ev['path']}: absent")
+            continue
+        if sha256_file(f) != ev.get("sha256"):
+            bad.append(f"{ev['path']}: sha256 differs from the record")
+            continue
+        try:
+            doc = json.loads(f.read_text(errors="replace"))
+        except (OSError, ValueError):
+            doc = None
+        src = doc.get("source_trace") if isinstance(doc, dict) else None
+        if not isinstance(src, dict) or not src.get("path"):
+            bad.append(f"{ev['path']}: names no source trace")
+            continue
+        t = (root / str(src["path"])).resolve()
+        if root not in t.parents or not t.is_file() \
+                or sha256_file(t) != src.get("sha256"):
+            bad.append(f"{ev['path']}: its source trace {src['path']} is "
+                       f"absent or no longer hashes to the pattern's record")
+    return bad
+
+
 def _load_waivers(project):
     p = project / "waivers.json"
     if not p.is_file():
@@ -1146,6 +1188,51 @@ def main(argv=None):
                                 "owner_name": it.get("owner_name"),
                                 "closed_by": it.get("closed_by"),
                                 "status": it.get("status"),
+                            })
+                    # AN OPEN ITEM THIS FLOW OWNS IS UNFINISHED WORK, NOT A
+                    # DISCLOSURE. The foundry, the operator, the test house and
+                    # the contract close their items outside this flow, so
+                    # their OPEN is an honest hand-off; `this_flow` names US,
+                    # and a kit that still owes our own deliverable is not
+                    # complete. Only an item recorded OPEN blocks: an item the
+                    # generator resolved NOT_APPLICABLE_IN_MODE, or CLOSED
+                    # against its evidence, does not.
+                    for it in items:
+                        if (isinstance(it, dict)
+                                and it.get("owner") == _OWNER_THIS_FLOW
+                                and str(it.get("status") or "").upper()
+                                == "OPEN"):
+                            substance_findings.append({
+                                "severity": "ERROR",
+                                "rule": "FOUNDRY_HANDOFF_THIS_FLOW_ITEM_OPEN",
+                                "message": (
+                                    f"{rel}: open item {it.get('field')!r} "
+                                    f"is owned by this_flow and still OPEN "
+                                    f"(closed by: {it.get('closed_by')}). "
+                                    f"Work this flow owes is not a foundry "
+                                    f"hand-off item; the kit is not "
+                                    f"complete until it is closed."),
+                            })
+                    # A CLOSED item this flow owned is closed only by the files
+                    # it names, re-hashed here; a status word alone closes
+                    # nothing.
+                    for it in items:
+                        if not (isinstance(it, dict)
+                                and it.get("owner") == _OWNER_THIS_FLOW
+                                and str(it.get("status") or "").upper()
+                                == "CLOSED"):
+                            continue
+                        bad = _closing_evidence_problems(project,
+                                                         it.get("evidence"))
+                        if bad:
+                            substance_findings.append({
+                                "severity": "ERROR",
+                                "rule": "FOUNDRY_HANDOFF_THIS_FLOW_CLOSED_"
+                                        "WITHOUT_EVIDENCE",
+                                "message": (
+                                    f"{rel}: item {it.get('field')!r} is "
+                                    f"recorded CLOSED but its evidence does "
+                                    f"not stand: {bad[:6]}"),
                             })
                     hm = jd.get("handoff_mode")
                     if isinstance(hm, dict) and hm.get("mode"):

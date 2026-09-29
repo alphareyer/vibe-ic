@@ -25,6 +25,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import foundry_handoff_pack_gen as FH  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _step5_trace_fixture as _S5  # noqa: E402
+
 # field (foundry-handoff hollow chip GDS) — the chip GDS in this fixture must
 # carry GEOMETRY. A four-byte GDSII BOUNDARY record header (length 4, record
 # type 0x08) is the smallest thing that makes
@@ -68,6 +71,9 @@ def _run_checker(p):
 
 def test_fresh_generator_output_passes_own_gate(tmp_path):
     p = _proj(tmp_path)
+    # U18: the test-pattern item is THIS flow's, closed by converting the
+    # Step-5 trace a real run records; the fixture carries that trace.
+    _S5.plant(p)
     assert FH.main([str(p)]) == 0
     rc, rep = _run_checker(p)
     assert rc == 0, rep
