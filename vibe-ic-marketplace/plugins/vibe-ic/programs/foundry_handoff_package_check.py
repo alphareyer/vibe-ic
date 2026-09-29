@@ -115,6 +115,19 @@ def _closing_evidence_problems(project, evidence):
             doc = json.loads(f.read_text(errors="replace"))
         except (OSError, ValueError):
             doc = None
+        # The vector file IS the pattern a tester loads; the header only
+        # describes it. Re-hash it (U18 r2: a deleted or fabricated .vec.gz
+        # passed while the header still hashed).
+        vf = doc.get("vectors_file") if isinstance(doc, dict) else None
+        if not isinstance(vf, dict) or not vf.get("path"):
+            bad.append(f"{ev['path']}: names no vectors_file")
+            continue
+        v = (root / str(vf["path"])).resolve()
+        if root not in v.parents or not v.is_file() \
+                or sha256_file(v) != vf.get("sha256"):
+            bad.append(f"{ev['path']}: its vectors_file {vf['path']} is "
+                       f"absent or no longer hashes to the header's record")
+            continue
         src = doc.get("source_trace") if isinstance(doc, dict) else None
         if not isinstance(src, dict) or not src.get("path"):
             bad.append(f"{ev['path']}: names no source trace")
@@ -124,7 +137,35 @@ def _closing_evidence_problems(project, evidence):
                 or sha256_file(t) != src.get("sha256"):
             bad.append(f"{ev['path']}: its source trace {src['path']} is "
                        f"absent or no longer hashes to the pattern's record")
+            continue
+        # ...and the trace must be the one Step 5 recorded for this case, in
+        # a state the design PASSED — not any file that happens to hash.
+        if not _is_step5_passed_trace(root, doc.get("case"), src):
+            bad.append(f"{ev['path']}: its source trace is not the trace the "
+                       f"Step-5 record ({_STEP5_RECORD_REL}) lists for a "
+                       f"PASSED case {doc.get('case')!r}")
     return bad
+
+
+#: Step 5's functional record (`full_stack_functional_tb`), read as a path.
+_STEP5_RECORD_REL = ("phase2/stage1/sim_full_stack/functional/"
+                     "functional_cases.json")
+
+
+def _is_step5_passed_trace(root, case, src):
+    try:
+        rec = json.loads((Path(root) / _STEP5_RECORD_REL).read_text())
+    except (OSError, ValueError):
+        return False
+    for c in (rec.get("cases") if isinstance(rec, dict) else None) or []:
+        if not isinstance(c, dict) or c.get("name") != case:
+            continue
+        tr = c.get("trace") or {}
+        return (c.get("state") == "passed"
+                and bool(tr.get("scope_verified"))
+                and tr.get("vcd") == src.get("path")
+                and tr.get("sha256") == src.get("sha256"))
+    return False
 
 
 def _load_waivers(project):
@@ -1099,9 +1140,15 @@ def main(argv=None):
         if hf.suffix.lower() in (".gds", ".gds2", ".gdsii", ".oas"):
             continue
         try:
-            txt = hf.read_text(errors="replace")[:20000]
+            full = hf.read_text(errors="replace")
         except OSError:
             continue
+        # The TODO/TBD scan reads the leading 20000 characters; a JSON member
+        # is PARSED IN FULL. Parsing the cut text made every member longer
+        # than the slice a silent non-dict, and with it every rule below
+        # (owner, this_flow OPEN/CLOSED, mode) switched off without a word —
+        # a kit with ~80 L10 seeds passed with our own item OPEN (U18 r2).
+        txt = full[:20000]
         rel = str(hf.relative_to(project))
         # #449 field-audit hardening: `\bTODO\b` misses the `TODO_foo`
         # key shape (underscore is a word char — no boundary), so a
@@ -1120,9 +1167,17 @@ def main(argv=None):
             })
         if hf.suffix.lower() == ".json":
             try:
-                jd = json.loads(txt)
-            except ValueError:
+                jd = json.loads(full)
+            except ValueError as exc:
                 jd = None
+                # A member that does not parse carries no rule this gate can
+                # apply; it is refused by name, never skipped.
+                substance_findings.append({
+                    "severity": "ERROR",
+                    "rule": "FOUNDRY_HANDOFF_MEMBER_UNPARSEABLE",
+                    "message": (f"{rel}: not valid JSON ({exc}); none of "
+                                f"its open items can be judged."),
+                })
             if isinstance(jd, dict):
                 for k in jd:
                     if str(k).startswith("PENDING_FOUNDRY_"):
