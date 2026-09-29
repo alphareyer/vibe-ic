@@ -17680,6 +17680,12 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
             "cap)")
     for _u in _fo_unread:
         _fo_notes.append(f"tier unavailable: {_u}")
+    # DRV standard section 1: the synth stage's applied fanout is the
+    # `buffer -N` in the script ABC EXECUTED. `-showtmp -nocleanup` keep that
+    # script (yosys names it in the log); `drv_stage_receipts.keep_abc_script`
+    # copies it beside the netlist and removes the kept folders. Neither flag
+    # changes the mapping.
+    _abc_keep = " -showtmp -nocleanup"
     # FASTROUTE_LAYER_ADJUST is a ROUTING knob (the routing step is owned by a
     # sibling agent); ingested + surfaced here for provenance, NOT applied in
     # synth.
@@ -17723,7 +17729,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         f"{_fa_clause}"
         f"dfflibmap{_du_flags} -liberty {liberty_c}; "
         f"{dlatch_clause}"
-        f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
+        f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}{_abc_keep}; "
         f"{_remove_abc_buf_clause}"
         f"{hilomap_clause}"
         f"clean; stat -liberty {liberty_c}; "
@@ -17832,7 +17838,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
             f"{_fa_clause}"
             f"dfflibmap{_du_flags} -liberty {liberty_c}; "
             f"{dlatch_clause}"
-            f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
+            f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}{_abc_keep}; "
             f"{_remove_abc_buf_clause}"
             f"{hilomap_clause}"
             f"clean; stat -liberty {liberty_c}; "
@@ -17865,7 +17871,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 f"{_fa_clause}"
                 f"dfflibmap{_du_flags} -liberty {liberty_c}; "
                 f"{dlatch_clause}"
-                f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
+                f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}{_abc_keep}; "
                 f"{_remove_abc_buf_clause}"
                 f"{hilomap_clause}"
                 f"clean; stat -liberty {liberty_c}; "
@@ -17920,7 +17926,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 f"{_fa_clause}"
                 f"dfflibmap{_du_flags} -liberty {liberty_c}; "
                 f"{dlatch_clause}"
-                f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
+                f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}{_abc_keep}; "
                 f"{_remove_abc_buf_clause}"
                 f"{hilomap_clause}"
                 f"clean; stat -liberty {liberty_c}; "
@@ -18298,6 +18304,11 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                             "area_loop_adopted": False})
             _area_verdict = (" area_budget=ok" if _acp.returncode == 0
                              else f" area_budget=INCOMPLETE(rc={_acp.returncode})")
+    # DRV standard section 1: keep the script ABC executed for the synth
+    # stage receipt (`step_pnr` adds the census once the run's SDC exists).
+    import drv_stage_receipts as _drv_stages
+    _drv_stages.keep_abc_script(
+        project, out_dir, log.read_text(errors="replace") if log.is_file() else "")
     return StepResult("synth", "PASS", time.time() - t0,
                       f"netlist={netlist.name} cells={cell_count} "
                       f"frontend={synth_frontend}"
@@ -77458,6 +77469,12 @@ def main() -> int:
     # run starts, are what every in-flow DRV capture of this run binds.
     import drv_run_identity as _drv_run_identity
     _drv_run_identity.record(project)
+    # DRV standard section 1: this run owns the stage receipts from here on.
+    # Every earlier receipt is dropped and the run id just recorded binds the
+    # ones the stages write; the plan reader refuses a receipt from any other
+    # run.
+    import drv_stage_receipts as _drv_stages
+    _drv_stages.claim(project)
 
     # v0.2.55 — pure-analog flow gate. A pure-analog IC has NO digital
     # RTL track: its physical implementation (GDS) is produced by the
