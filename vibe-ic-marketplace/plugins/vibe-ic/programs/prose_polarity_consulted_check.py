@@ -150,6 +150,29 @@ _NOT_PROSE: Dict[str, str] = {
         "OpenSTA positive/negative Pin blocks calibrate this reader; "
         "tests/test_drv_signoff_judge.py::test_negated_table_title_cannot_be_a_measurement "
         "is its falsifier.",
+    "pad_input_drive_check::judge":
+        "NO SENTENCE IS READ. The gate reads its producer's JSON record "
+        "(verdict/sdc_lines/refused_core_driving_cell keys) and tests exact "
+        "SDC command-line membership in the sign-off deck, plus an anchored "
+        "`set_driving_cell ... -lib_cell <refused cell>` command match. An SDC "
+        "command has no negated form; a comment line never matches a "
+        "command. Falsifier: tests/test_pad_input_drive_check.py::"
+        "test_a_deck_that_drives_pads_with_the_core_cell_fails.",
+    "sdc_environment::_io_pad_view":
+        "ONE LIBERTY GROUP GRAMMAR, NO SENTENCE. Only brace-matched "
+        "cell/pin/timing/lu_table_template groups and their simple attributes "
+        "(is_pad : true, direction, max_transition, related_pin, "
+        "variable_N, index_N) are read; comments and prose never form a "
+        "group. Liberty has no negation form for an attribute. Falsifier: "
+        "tests/test_r0929_pad_input_drive.py::"
+        "test_a_pad_without_a_characterised_fast_edge_is_not_measured.",
+    "sdc_environment::staged_sdc_pad_input_drive":
+        "ONE SDC COMMAND GRAMMAR, NO SENTENCE. A design-staged deck declares "
+        "its drive only by an uncommented `set_input_transition` or "
+        "`set_driving_cell` command at line start; SDC has no negated form "
+        "of a command and a `#` comment never matches. Falsifier: "
+        "tests/test_r0929_pad_input_drive.py::"
+        "test_a_staged_sdc_without_a_drive_gets_the_ladder_and_a_fresh_record.",
     "sdc_environment::_sdc_environment_design_values":
         "ONE STRICT TABLE GRAMMAR, NO SENTENCE. Only adjacent L9 Markdown "
         "key/value cells whose first cell is one of six exact SDC or flow "
