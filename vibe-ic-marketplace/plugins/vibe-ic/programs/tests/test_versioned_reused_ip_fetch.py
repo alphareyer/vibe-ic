@@ -306,3 +306,142 @@ def test_a_timed_out_reference_clone_names_no_scratch_path(
     assert "timed out" in result.detail
     assert "ip-pin-verify-" not in result.detail, result.detail
     assert "<independent-pull scratch>" in result.detail
+
+
+# ── review wave 58 (U8FETCH): UNAVAILABLE is a fetch that never reached a
+# tree, and only when every comparison that COULD be made agreed. Each case
+# below was MEASURED as a false NOT_MEASURED on d3f820987; each must FAIL. ──
+
+def _first_pull(tmp_path, monkeypatch, matches, text):
+    import design_one_shot_runner as runner
+    import ip_catalog_query as query
+    import ip_catalog_pull as pull
+    monkeypatch.setattr(query, "query_catalog", lambda *a, **k: list(matches))
+    monkeypatch.setattr(pull, "CACHE_ROOT", tmp_path / "cache")
+    project = _project(tmp_path, text)
+    first = runner.step_rtl_gen(project, "processor_cpu")
+    assert first.status == "PASS_WITH_WAIVERS", first.detail
+    return runner, project
+
+
+def _repoint_tag(repo: Path, *, drop_leaf: bool = False) -> None:
+    """Upstream force-moves the release tag to a side commit off the old tag."""
+    _git(repo, "checkout", "-q", "-b", "rewrite", "2.3.4")
+    if drop_leaf:
+        _git(repo, "rm", "-q", "rtl/leaf.v")
+    else:
+        (repo / "rtl/leaf.v").write_text("module leaf; wire fixed = 1'bz; endmodule\n")
+        _git(repo, "add", "rtl/leaf.v")
+    _git(repo, "commit", "-qm", "rewritten release")
+    _git(repo, "tag", "-f", "2.3.4")
+    _git(repo, "checkout", "-q", "-")
+
+
+@pytest.mark.parametrize("drop_leaf,reason", [
+    (False, "IP_REUSE_ERRATUM_BASE_MISMATCH"),
+    (True, "IP_REUSE_RTL_MISSING"),
+])
+def test_a_rewritten_release_tag_with_an_erratum_is_a_mismatch(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drop_leaf, reason) -> None:
+    """The real catalog entry pins a TAG and carries errata. A re-pointed tag
+    is decided on the bytes the reference fetched, so it is a FAIL, exactly as
+    the same rewrite with no erratum already is."""
+    repo, erratum = _upstream(tmp_path)
+    runner, project = _first_pull(tmp_path, monkeypatch, [_match(repo, erratum)],
+                                  "Reuse leaf from vendor:reusable:leaf:2.3.4.")
+    _repoint_tag(repo, drop_leaf=drop_leaf)
+    result = runner.step_rtl_gen(project, "processor_cpu")
+    assert result.status == "FAIL", result.detail
+    assert "IP_REUSE_FETCH_PIN_MISMATCH" in result.detail
+    assert reason in result.detail
+
+
+def test_a_licence_refusal_of_the_reference_is_a_mismatch(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import ip_catalog_query as query
+    repo, erratum = _upstream(tmp_path)
+    runner, project = _first_pull(tmp_path, monkeypatch, [_match(repo, erratum)],
+                                  "Reuse leaf from vendor:reusable:leaf:2.3.4.")
+    gpl = _match(repo, erratum)
+    object.__setattr__(gpl, "license", "GPL-3.0-only") \
+        if getattr(type(gpl), "__dataclass_params__", None) and \
+        type(gpl).__dataclass_params__.frozen else setattr(gpl, "license", "GPL-3.0-only")
+    monkeypatch.setattr(query, "query_catalog", lambda *a, **k: [gpl])
+    result = runner.step_rtl_gen(project, "processor_cpu")
+    assert result.status == "FAIL", result.detail
+    assert "IP_REUSE_FETCH_PIN_MISMATCH" in result.detail
+
+
+def test_own_receipts_disagreeing_is_a_mismatch_even_when_upstream_is_gone(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, erratum = _upstream(tmp_path)
+    runner, project = _first_pull(tmp_path, monkeypatch, [_match(repo, erratum)],
+                                  "Reuse leaf from vendor:reusable:leaf:2.3.4.")
+    (project / "phase2/stage1/rtl/leaf.v").write_text("module leaf; endmodule\n")
+    repo.rename(tmp_path / "unreachable")
+    result = runner.step_rtl_gen(project, "processor_cpu")
+    assert result.status == "FAIL", result.detail
+    assert "own pin receipt" in result.detail
+
+
+def _twig(tmp_path: Path) -> CatalogMatch:
+    """A second declared IP from its own upstream clone."""
+    twig_repo = tmp_path / "twigup"
+    subprocess.run(["git", "clone", "-q", str(tmp_path / "reusable"), str(twig_repo)],
+                   check=True, capture_output=True)
+    fields = dict(ip_name="twig", category="cpu", version="2.3.4", license="MIT",
+                  canonical_url=str(twig_repo), canonical_commit="2.3.4",
+                  matched_pattern="L2.cpu_isa", confidence=0.9,
+                  manifest_path="synthetic", rtl_files=["soc_top.v"])
+    if "errata" in CatalogMatch.__dataclass_fields__:
+        fields["errata"] = []
+    return CatalogMatch(**fields)
+
+
+def test_an_unreachable_second_ip_cannot_hide_a_proven_mismatch_in_the_first(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, erratum = _upstream(tmp_path)
+    twig = _twig(tmp_path)
+    text = ("Reuse leaf from vendor:reusable:leaf:2.3.4. "
+            "Reuse twig from vendor:twigup:twig:2.3.4.")
+    runner, project = _first_pull(tmp_path, monkeypatch,
+                                  [_match(repo, erratum), twig], text)
+    # launder leaf with receipts that agree with the new bytes (the case
+    # test_complete_receipts_cannot_launder_changed_rtl guards) ...
+    rtl = project / "phase2/stage1/rtl"
+    arbitrary = b"module leaf; wire fixed = 1'bx; endmodule\n"
+    (rtl / "leaf.v").write_bytes(arbitrary)
+    digest = hashlib.sha256(arbitrary).hexdigest()
+    mf_path = rtl / "SOURCE_MANIFEST.json"
+    manifest = json.loads(mf_path.read_text())
+    for pin in manifest["source_pins"]:
+        if pin["ip_name"] == "leaf":
+            pin["files_sha256"]["rtl/leaf.v"] = digest
+    mf_path.write_text(json.dumps(manifest))
+    prov_path = project / "provenance.jsonl"
+    events = [json.loads(line) for line in prov_path.read_text().splitlines()]
+    for ev in events:
+        if ev.get("ip") == "leaf":
+            ev["outputs"]["phase2/stage1/rtl/leaf.v"] = "sha256:" + digest
+            ev["outputs_sha256"] = [digest]
+    prov_path.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    # ... and make ONLY twig's upstream unreachable
+    Path(twig.canonical_url).rename(tmp_path / "twig_gone")
+    result = runner.step_rtl_gen(project, "processor_cpu")
+    assert result.status == "FAIL", result.detail
+    assert "IP_REUSE_FETCH_PIN_MISMATCH" in result.detail
+
+
+def test_control_two_ips_one_unreachable_and_all_else_agreeing_is_not_measured(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, erratum = _upstream(tmp_path)
+    twig = _twig(tmp_path)
+    text = ("Reuse leaf from vendor:reusable:leaf:2.3.4. "
+            "Reuse twig from vendor:twigup:twig:2.3.4.")
+    runner, project = _first_pull(tmp_path, monkeypatch,
+                                  [_match(repo, erratum), twig], text)
+    Path(twig.canonical_url).rename(tmp_path / "twig_gone")
+    result = runner.step_rtl_gen(project, "processor_cpu")
+    assert result.status == "NOT_MEASURED", result.detail
+    assert "IP_REUSE_PIN_VERIFY_UNAVAILABLE" in result.detail
+    assert "twig" in result.detail and "leaf:" not in result.detail

@@ -8351,10 +8351,11 @@ def _step_rtl_gen_bound(
                 _pin_state, _pin_why = _verify_pins(
                     project, versioned_matches, existing)
                 if _pin_state == _PIN_UNAVAILABLE:
-                    # Nothing was compared: the independent reference pull
-                    # could not be made. Still refused, never accepted on the
-                    # project's own receipts, but not reported as bytes that
-                    # differ.
+                    # Every comparison that COULD be made agreed (the
+                    # project's own receipts, every fetched reference), and at
+                    # least one reference tree was never reached. Still
+                    # refused, never accepted on receipts alone, but not
+                    # reported as bytes that differ (review wave 58).
                     return StepResult(
                         "rtl_gen", "NOT_MEASURED", time.time() - t0,
                         "IP_REUSE_PIN_VERIFY_UNAVAILABLE: the independent "
