@@ -737,8 +737,9 @@ def generate(project: Path, container: Optional[str] = None,
         argv = ([SIMULATOR, "-g2012", "-s", name]
                 + (["-s", TRACE_TOP] if trace_top else [])
                 + ["-o", str(vvp)]
-                + [str(s) for s in sources] + [str(path)]
-                + ([str(trace_top)] if trace_top else []))
+                + [str(s) for s in sources]
+                + ([str(trace_top)] if trace_top else [])
+                + [str(path)])
         brc, blog = disp(argv, wd, container, SIMULATOR, BUILD_TIMEOUT_S)
         (wd / "build.log").write_text(" ".join(argv) + "\n\n" + (blog or ""))
         entry["build_log"] = _rel(project, wd / "build.log")
