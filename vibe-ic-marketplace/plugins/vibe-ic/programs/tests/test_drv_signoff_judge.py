@@ -719,7 +719,11 @@ def test_step32_rechecks_final_state_identity_after_late_repair(tmp_path, monkey
     source.write_text(json.dumps(bundle))
     repair._step32_drv_signoff(tmp_path, report)
     assert report["drv_signoff"]["verdict"] == "NOT_MEASURED"
-    assert report["verdict"] == "NOT_MEASURED"
+    # R-0929-DRV-IDENTITY (root, 2026-09-29) supersedes mapping the DRV
+    # verdict onto the actuator verdict that gates handoff: it is Step 32's
+    # own DRV verdict and never blocks the handoff of an adopted candidate.
+    assert report["drv_signoff_verdict"] == "NOT_MEASURED"
+    assert "verdict" not in report
 
 
 def test_step32_missing_final_state_refuses_stale_pass(tmp_path, monkeypatch):
