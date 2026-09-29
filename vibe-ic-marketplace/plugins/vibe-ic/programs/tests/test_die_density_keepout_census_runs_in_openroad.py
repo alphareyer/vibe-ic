@@ -328,3 +328,43 @@ def test_every_master_a_pad_or_macro_view_declares_is_protected_whatever_its_cla
         ('PAD', 'CORNERCELL', (0.0, 0.0, 30.0, 30.0)),
         ('PAD', 'NOCLASSPAD', (140.0, 160.0, 150.0, 170.0)),
     ])
+
+
+@pytest.mark.parametrize('text, code, reason', [
+    (None, 'LL_DENSITY_FILL_CORE_UNDECLARED', 'FileNotFoundError'),
+    ('{"answers": ', 'LL_DENSITY_FILL_CORE_UNDECLARED', 'JSONDecodeError'),
+    ('[]', 'LL_INVALID_JSON_OBJECT', ''),
+    ('{"answers": {}}', 'LL_DENSITY_FILL_CORE_UNDECLARED', 'core_area_um'),
+], ids=['absent', 'malformed', 'not-an-object', 'no-core'])
+def test_a_placed_pad_without_a_readable_core_names_the_declaration(
+        tmp_path, monkeypatch, text, code, reason):
+    """Review wave 57: a declaration error was swallowed into `{}` and the
+    refusal cited the density step config, which is not where CORE_AREA
+    comes from. It must name the tape-out declaration and the reader's reason
+    (a declaration Refusal keeps its own code)."""
+    from librelane_contract import DECLARATION_REL           # noqa: PLC0415
+    image, _ = _route(monkeypatch)
+    project, pdk_root, cfg = _stage(tmp_path)
+    (pdk_root / PDK / 'tech/layers.map').write_text('Metal1 NET 61 0\n')
+    (pdk_root / PDK / 'tech/density.drc').write_text(
+        'extract_single_layer_from_design.call(:metal1_drawn, 61, 0)\n'
+        'extract_single_layer_from_design.call(:metal1_dummy, 61, 7)\n'
+        '# Rule M1.4: Metal1 coverage over the entire die shall be >30%\n'
+        'if (metal1.area / chip_area) * 100 < 30\n'
+        " extent.output('M1.4', '30%')\nend\n")
+    cfg.update({'KLAYOUT_DEF_LAYER_MAP': f'/pdk/{PDK}/tech/layers.map',
+                'KLAYOUT_DENSITY_RUNSET': f'/pdk/{PDK}/tech/density.drc'})
+    config = tmp_path / 'density.json'
+    config.write_text(json.dumps(cfg))
+    declaration = project / DECLARATION_REL
+    if text is not None:
+        declaration.parent.mkdir(parents=True)
+        declaration.write_text(text)
+    gds = project / 'pdk_filled.gds'
+    gds.write_bytes(b'PDK filler GDS')
+    with pytest.raises(Refusal, match=code) as refused:
+        fill.top_up_density(project, image, pdk_root, PDK, gds, config,
+                            '37-core-source')
+    assert str(declaration) in str(refused.value)
+    assert reason in str(refused.value)
+    assert str(config) not in str(refused.value)

@@ -50,7 +50,7 @@ from metal_fill_config_gen import (build_metal_fill_config,
                                    density_rule_layer_identifiers)
 import die_level_deck_rule_attribution as _dla
 from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, digest,  # noqa: E402
-                                declaration_config, resolve_step_configs,
+                                DECLARATION_REL, declaration_config, resolve_step_configs,
                                 run_chain, select_arms,
                                 state_from_direct, run_container)
 
@@ -515,10 +515,15 @@ def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
     placed_pads = sorted({master for kind, master, _ in placed['boxes']
                           if kind == 'PAD'})
     if placed_pads:
+        # CORE_AREA comes from the tape-out declaration, so a refusal names
+        # that file and the reader's own reason; a declaration Refusal keeps
+        # its own code.
+        declaration = project / DECLARATION_REL
         try:
             declared, sources = declaration_config(project)
-        except (OSError, ValueError, Refusal):
-            declared, sources = {}, {}
+        except (OSError, ValueError) as exc:
+            raise Refusal('LL_DENSITY_FILL_CORE_UNDECLARED',
+                          f'{declaration}: {type(exc).__name__}: {exc}') from exc
         core = declared.get('CORE_AREA')
         if core:
             edge = _core_edge_keepout(cfg.get('DIE_AREA') or [], core)
@@ -529,7 +534,9 @@ def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
                 'core': core, 'source': sources.get('CORE_AREA'),
                 'placed_pad_masters': placed_pads}
         else:
-            raise Refusal('LL_DENSITY_FILL_CORE_UNDECLARED', str(density_config))
+            raise Refusal('LL_DENSITY_FILL_CORE_UNDECLARED',
+                          f'{declaration}: no core_area_um answer for the '
+                          f'placed pads {placed_pads}')
     root.mkdir(parents=True, exist_ok=True)
     config_path = root / 'pdk_fill_config.json'
     out = root / (gds.stem + '.topped.gds')
