@@ -106,12 +106,11 @@ def test_a_pdk_file_whose_bytes_changed_refuses(tmp_path):
 
 def test_the_window_records_its_pdk_before_dispatching_a_site(tmp_path, monkeypatch):
     pdk, project, _, deck, _ = _tree(tmp_path)
-    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", RUN)
+    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", RUN + "-dispatch")
     seen = {}
 
     def dispatch(project_, top, view, args, site, gate, run_id):
-        rec = project_ / f"reports/audit/windows/{run_id}/pdk_inputs.json"
-        seen["record"] = json.loads(rec.read_text()) if rec.is_file() else None
+        seen["record"] = p3._WINDOW_PDK_RECORDS.get(run_id)
         return p3.StepResult(site, "NOT_MEASURED", 0.0, "captured",
                              reason_class="not_executed")
 

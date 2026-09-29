@@ -75912,8 +75912,11 @@ def _phase3_window_run_id() -> str:
     return safe if safe not in ("", ".", "..") else f"window-{os.getpid()}"
 
 
-#: The window's record of the PDK files it may cite, written at its start.
-_WINDOW_PDK_RECORD = "pdk_inputs.json"
+#: The window's record of the PDK files it may cite, taken at its start and
+#: keyed by window run id. Held in memory, not written: a window's writes are
+#: a pinned set (test_phase3_bounded_window); the durable record of what was
+#: admitted is the publication receipt's `pdk_inputs`, sha by sha.
+_WINDOW_PDK_RECORDS: Dict[str, Dict[str, Any]] = {}
 
 
 def _window_pdk_record(project: Path, pdk: Any, container: str,
@@ -75931,8 +75934,9 @@ def _window_pdk_record(project: Path, pdk: Any, container: str,
     (the object the run's admission basis hashes, so for a sign-off window its
     bytes are the run's), and only those under that PDK's root. Each is hashed
     where it lives (`_step_pdk_hasher`) and its sha256 recorded here; the
-    publication re-hashes and refuses a mismatch. Any other outside path --
-    including another file under the same PDK root -- still refuses."""
+    publication re-hashes, refuses a mismatch and carries the sha in its
+    receipt. Any other outside path -- including another file under the same
+    PDK root -- still refuses."""
     import _step_identity as _si
     root = _pdk_root_c(pdk) if pdk is not None else ""
     files: Dict[str, str] = {}
@@ -75949,8 +75953,7 @@ def _window_pdk_record(project: Path, pdk: Any, container: str,
         notes += [f"{p}: unreadable" for p in paths if not got.get(p)]
     record = {"pdk": str(getattr(pdk, "name", "") or ""), "root": root,
               "container": container or "", "files": files, "notes": notes}
-    _aa.write_json(project / f"reports/audit/windows/{window_run_id}"
-                   / _WINDOW_PDK_RECORD, record)
+    _WINDOW_PDK_RECORDS[window_run_id] = record
     return record
 
 
@@ -75971,11 +75974,7 @@ def _phase3_window_publication(project: Path, isolated: Path,
     pending = list(sources)
     examined: Set[str] = set()
     import _cited_artefacts as _ca
-    try:
-        _pdk_rec = json.loads((root / f"reports/audit/windows/{window_run_id}"
-                               / _WINDOW_PDK_RECORD).read_text())
-    except (OSError, ValueError):
-        _pdk_rec = {}
+    _pdk_rec = _WINDOW_PDK_RECORDS.get(window_run_id) or {}
     pdk_files = dict((_pdk_rec or {}).get("files") or {})
     pdk_bound: Dict[str, str] = {}
     try:
