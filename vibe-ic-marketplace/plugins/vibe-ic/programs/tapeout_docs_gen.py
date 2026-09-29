@@ -381,7 +381,7 @@ def build_brief(m, design, pdk, plugin_ver, summary, ports):
 </div>"""
 
 
-def from_project(project: Path):
+def from_project(project: Path, ic_name: str | None = None):
     """Resolve every input from ONE project tree, so a document cannot mix runs.
 
     Returns (metrics_path, design, pdk, run_id) or raises. The alternative --
@@ -405,7 +405,7 @@ def from_project(project: Path):
             run_id = json.loads(pre.read_text()).get("run_id", NOT_MEASURED)
         except Exception:
             pass
-    design, pdk = identity(project)
+    design, pdk = identity(project, ic_name)
     return m, design, pdk, run_id
 
 
@@ -420,32 +420,80 @@ def from_project(project: Path):
 _DESIGN_KEYS = ("design", "design_name", "top", "top_module")
 _PDK_KEYS = ("pdk", "target_pdk", "pdk_target")
 
+# U19 (IC_BLOCKER_AUDIT 2026-09-29). MEASURED on an IC/DIE run of the flow's
+# own front door: no `input/project.json` exists there, so both documents were
+# written as `*_NOT_MEASURED_NOT_MEASURED.html` while the same tree held the
+# design's L1 identity and the PDK the sign-off tools actually ran on. These
+# are the run's own records, read in this order; a source that is absent is
+# NAMED, never replaced by a default.
+_PROJECT_JSON = "input/project.json"
+_L1_DOC = "phase1/generated_docs/L1_DATASHEET.json"
+_L1_KEYS = ("ic_name", "part_number")
+# Written by `librelane_contract.pdk_root_resolution` for every run that
+# resolved a PDK tree for its layout/sign-off tools: the PDK that was USED.
+_SIGNOFF_PDK_RECORD = "phase3/librelane_pdk_root.provenance.json"
+_SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
-def identity(project: Path) -> tuple[str, str]:
+
+def _read_json(path: Path) -> dict:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _first(doc: dict, keys) -> str:
+    for k in keys:
+        v = doc.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def _signoff_pdk(project: Path) -> str:
+    rec = _read_json(project / _SIGNOFF_PDK_RECORD)
+    for holder in (rec, rec.get("derivation") if isinstance(rec.get("derivation"), dict) else {}):
+        v = holder.get("pdk")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def resolve_identity(project: Path, ic_name: str | None = None) -> dict:
+    """{'design': (value, source), 'pdk': (value, source)}; value NOT_MEASURED
+    with source naming every place looked when nothing declares it."""
+    pj = _read_json(project / _PROJECT_JSON)
+    design = pdk = None
+    if ic_name and ic_name.strip():
+        design = (ic_name.strip(), "--ic-name")
+    elif _first(pj, _DESIGN_KEYS):
+        design = (_first(pj, _DESIGN_KEYS), _PROJECT_JSON)
+    elif _first(_read_json(project / _L1_DOC), _L1_KEYS):
+        design = (_first(_read_json(project / _L1_DOC), _L1_KEYS), _L1_DOC)
+    if _signoff_pdk(project):
+        pdk = (_signoff_pdk(project), _SIGNOFF_PDK_RECORD)
+    elif _first(pj, _PDK_KEYS):
+        pdk = (_first(pj, _PDK_KEYS), _PROJECT_JSON)
+    design = design or (NOT_MEASURED, "absent: --ic-name, "
+                        f"{_PROJECT_JSON} {'/'.join(_DESIGN_KEYS)}, "
+                        f"{_L1_DOC} {'/'.join(_L1_KEYS)}")
+    pdk = pdk or (NOT_MEASURED, f"absent: {_SIGNOFF_PDK_RECORD} pdk, "
+                  f"{_PROJECT_JSON} {'/'.join(_PDK_KEYS)}")
+    # the value becomes part of a FILENAME; keep the file where it was asked for
+    return {k: (_SAFE_NAME.sub("-", v).strip("-") or NOT_MEASURED, src)
+            for k, (v, src) in (("design", design), ("pdk", pdk))}
+
+
+def identity(project: Path, ic_name: str | None = None) -> tuple[str, str]:
     """Read (design, pdk) off the project, or NOT_MEASURED. Never a default.
 
     A guessed design name is the same failure as a guessed number: it makes a
     document that names the wrong chip, and nothing in the file says it was a
     guess.
     """
-    doc = {}
-    pj = project / "input" / "project.json"
-    if pj.is_file():
-        try:
-            loaded = json.loads(pj.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                doc = loaded
-        except Exception:
-            doc = {}
-
-    def pick(keys):
-        for k in keys:
-            v = doc.get(k)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        return NOT_MEASURED
-
-    return pick(_DESIGN_KEYS), pick(_PDK_KEYS)
+    got = resolve_identity(project, ic_name)
+    return got["design"][0], got["pdk"][0]
 
 
 def main():
@@ -455,6 +503,9 @@ def main():
                     help="resolve metrics + run id from ONE project tree")
     ap.add_argument("--design", default=None,
                     help="design name; read off --project when not given")
+    ap.add_argument("--ic-name", default=None,
+                    help="design identity (the runner's --ic-name); outranks "
+                         "input/project.json and L1 when --design is not given")
     ap.add_argument("--pdk", default=None,
                     help="PDK name; read off --project when not given")
     ap.add_argument("--plugin-version", default=NOT_MEASURED)
@@ -469,13 +520,18 @@ def main():
     a = ap.parse_args()
 
     if a.project and not a.metrics:
-        a.metrics, design, pdk, rid = from_project(a.project)
+        a.metrics, design, pdk, rid = from_project(a.project, a.ic_name)
+        for k, (v, src) in resolve_identity(a.project, a.ic_name).items():
+            if getattr(a, k) is None:
+                print(f"identity {k}={v} ({src})")
         if a.run_id == NOT_MEASURED:
             a.run_id = rid
         if a.design is None:
             a.design = design
         if a.pdk is None:
             a.pdk = pdk
+    if a.design is None and a.ic_name:
+        a.design = a.ic_name
     if a.design is None:
         a.design = NOT_MEASURED
     if a.pdk is None:
