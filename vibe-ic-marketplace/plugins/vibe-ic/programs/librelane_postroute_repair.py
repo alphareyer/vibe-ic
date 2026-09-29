@@ -273,7 +273,7 @@ def drv_pin_census(sta_folder: Path, summary: Dict[str, Any],
                 # The DRV standard's classes (R-0928-DRV-IC): a bond-pad port
                 # and an IO-cell pin under the std-cell margin are listed, not
                 # counted; everything else counts. Proof comes from the run's
-                # netlist and IO Liberty; an unreadable one is NOT_MEASURED.
+                # complete source-bound OpenSTA census and IO Liberty.
                 values = (parsed.get("pin_values") or {}).get(title) or []
                 if [v.get("pin") for v in values] != pins:
                     missing.append(f"{corner}: {kind} row values unreadable")
@@ -294,6 +294,8 @@ def drv_pin_census(sta_folder: Path, summary: Dict[str, Any],
             "drv_pin_checks": None if missing else [list(pair) for pair in sorted(pairs)],
             "drv_pin_checks_missing": missing,
             "drv_pin_checks_excluded": excluded,
+            "drv_pin_checks_connectivity": (getattr(getattr(classifier, "__self__", None),
+                                                   "connectivity_evidence", None)),
             "drv_pin_checks_sources": sources}
 
 
@@ -419,7 +421,9 @@ def _drv_classifier(ctx: Dict[str, Any], sta_folder: Path) -> Optional[Callable[
         sdc = cfg.get("SIGNOFF_SDC_FILE")
         margin = (_cls.sdc_cap_margin(_host_path(ctx, str(sdc)).read_text())
                   if sdc else None)
-        return _cls.Classifier(netlist, libs, margin).classify
+        return _cls.Classifier(netlist, libs, margin,
+                               project=Path(ctx["project"]) if ctx.get("project") else None,
+                               sdc=_host_path(ctx, str(sdc)) if sdc else None).classify
     except (OSError, ValueError, KeyError, TypeError, _cls.Unavailable) as exc:
         reason = f"{type(exc).__name__}: {exc}"
 

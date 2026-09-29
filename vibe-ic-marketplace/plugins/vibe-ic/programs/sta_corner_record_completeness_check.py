@@ -1296,7 +1296,8 @@ def drv_row_classes(project: Path, rpt: Optional[Path], text: str,
             margin = _cls.sdc_cap_margin(sdc.read_text()) if sdc else None
         except OSError:
             margin = None
-        classify = _cls.Classifier(netlist, {"*": io_libs}, margin).classify
+        classifier = _cls.Classifier(netlist, {"*": io_libs}, margin, project=project, sdc=sdc)
+        classify = classifier.classify
     except _cls.Unavailable as exc:
         return {"state": "UNAVAILABLE", "reason": str(exc),
                 "counted": {k: len(v) for k, v in values.items()}, "listed": []}
@@ -1311,6 +1312,7 @@ def drv_row_classes(project: Path, rpt: Optional[Path], text: str,
                 listed.append({"check": kind, "class": cls, **row})
     return {"state": "CLASSIFIED", "netlist": str(netlist),
             "io_liberty": [str(p) for p in io_libs],
+            "connectivity": classifier.connectivity_evidence,
             "counted": counted, "listed": listed}
 
 

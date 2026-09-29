@@ -1023,6 +1023,20 @@ def test_net_census_rejects_negated_count(tmp_path):
         _nets(report)
 
 
+def test_net_census_accepts_identical_native_alias_reports(tmp_path):
+    """get_nets may enumerate aliases whose report_net uses one canonical name."""
+    from drv_signoff_census import _nets
+    block = ("Net a\n Total capacitance: 2.91\n Number of drivers: 1\n"
+             " Number of loads: 2\n Number of pins: 3\n\nDriver pins\n a input port\n\n"
+             "Load pins\n u/A input (core) 0.01\n pad/PAD input (io) 2.9\n\n")
+    report = tmp_path / "net.rpt"
+    report.write_text(block + block)
+    assert _nets(report)["a"]["loads"] == ["u/A", "pad/PAD"]
+    report.write_text(block + block.replace("2.91", "2.92"))
+    with pytest.raises(ValueError, match="duplicated|malformed"):
+        _nets(report)
+
+
 def test_annotation_exclusion_requires_lef_pg_and_no_liberty_arc(tmp_path):
     from drv_signoff_annotation import derive as annotation
     folder = tmp_path / "scene"

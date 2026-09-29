@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import json
 import sys
+import pytest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 import test_sta_corner_record_completeness as T  # noqa: E402
+from _drv_class_fixture import write_witness
 
 _IO_LIB = """library (io) {
   time_unit : "1ns";
@@ -28,6 +30,7 @@ _IO_LIB = """library (io) {
   cell (PADIN) { pad_cell : true;
     pin (PAD) { max_transition : 1; direction : input; }
     pin (Y) { direction : output; } }
+  cell (BUF) { pin (A) { direction : input; } pin (Z) { direction : output; } }
 }
 """
 _NETLIST = """module chip (a, n);
@@ -67,6 +70,14 @@ def _stage(tmp_path, rows, *, with_deck=True):
                  f"read_sdc {run}/phase3/stage3/pnr/signoff.sdc\n")
         T._write(run / "phase3/stage3/pnr/signoff.sdc",
                  "set_max_capacitance 0.2 [current_design]\n")
+        write_witness(run, run / "phase3/stage3/pnr/chip_pnr.v",
+                      run / "phase3/stage3/pnr/signoff.sdc", host_pdk / "libs.ref/io/io.lib",
+                      [("a", "", "", "a", True), ("n", "", "", "n", True),
+                       ("u_pad_a/PAD", "PADIN", "PAD", "a", False),
+                       ("u_pad_a/Y", "PADIN", "Y", "a_core", True),
+                       ("u_core/u1/A", "BUF", "A", "a_core", False),
+                       ("u_core/u1/Z", "BUF", "Z", "z1", True),
+                       ("u2/A", "BUF", "A", "n", False), ("u2/Z", "BUF", "Z", "z2", True)])
         # A sibling deck on another netlist (the real run's power deck reads the
         # synthesis netlist): only the deck on the report's own netlist counts.
         T._write(run / "phase2/stage2/synth/chip_synth.v", "module chip (a); endmodule\n")
@@ -112,3 +123,39 @@ def test_without_the_deck_every_row_counts_as_before(tmp_path):
     """Control: no resolvable netlist/IO Liberty -> classes UNAVAILABLE."""
     rc, res = T._judge(_stage(tmp_path, [_PORT], with_deck=False), tmp_path)
     assert rc == 1 and "R5_DRV_VIOLATION" in res["rules_violated"]
+
+
+@pytest.mark.parametrize("connection", ["direct", "alias", "concat"])
+@pytest.mark.parametrize("fresh", [False, True])
+def test_core_connectivity_keeps_the_port_violation(tmp_path, connection, fresh):
+    run = _stage(tmp_path, [_PORT])
+    netlist = run / "phase3/stage3/pnr/chip_pnr.v"
+    replacement = {"direct": "a", "alias": "a_alias", "concat": "{n,a}"}[connection]
+    text = netlist.read_text().replace(".A(n)", f".A({replacement})")
+    if connection == "alias":
+        text = text.replace("endmodule", "wire a_alias; assign a_alias = a; endmodule")
+    netlist.write_text(text)
+    if fresh:
+        from drv_signoff_judge import _sha
+        source = run / "reports/phase3/sta/drv_signoff_bundle.json"
+        doc = json.loads(source.read_text())
+        doc["identity"]["artifacts"]["sta_netlist"]["sha256"] = _sha(netlist)
+        scene = doc["scenes"][0]
+        pins = Path(scene["pin_census_report"]["path"])
+        nets = Path(scene["net_census_report"]["path"])
+        pins.write_text(pins.read_text().replace("\tA\tn\t", "\tA\ta\t"))
+        # Explicit native-format endpoints, no Verilog reader in the fixture.
+        nets.write_text(nets.read_text().replace(" Number of loads: 1\n Number of pins: 2\n\nDriver pins\n a input",
+                                                " Number of loads: 2\n Number of pins: 3\n\nDriver pins\n a input")
+                       .replace(" u_pad_a/PAD input\n", " u_pad_a/PAD input\n u2/A input\n")
+                       .replace(" Number of loads: 1\n Number of pins: 2\n\nDriver pins\n n input",
+                                " Number of loads: 0\n Number of pins: 1\n\nDriver pins\n n input")
+                       .replace("Load pins\n u2/A input\n", "Load pins\n"))
+        for field, path in (("pin_census_report", pins), ("net_census_report", nets)):
+            scene[field]["sha256"] = _sha(path)
+        source.write_text(json.dumps(doc))
+    rc, res = T._judge(run, tmp_path)
+    assert rc == 1 and "R5_DRV_VIOLATION" in res["rules_violated"], res
+    proc = next(a for a in res["axis_evidence"] if a["axis"] == "process")
+    assert proc["drv"]["classes"]["counted"] == {"max_capacitance": 1}
+    assert proc["drv"]["classes"]["connectivity"]["state"] == ("SOURCE_BOUND" if fresh else "UNAVAILABLE")

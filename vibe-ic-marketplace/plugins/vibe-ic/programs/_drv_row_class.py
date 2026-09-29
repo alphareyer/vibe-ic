@@ -17,7 +17,7 @@ read) and a port can only be tightened below the design limit. On a pad-ring
 
 Every other row counts, including every IO-cell row at its Liberty limit (the
 IO library's default_max_fanout 1 is fix-only). A row is taken out of the count
-only on proof read from the netlist and the IO Liberty the sign-off STA linked;
+only on complete, source-bound OpenSTA connectivity and linked IO Liberty;
 anything unprovable counts, and an unreadable input raises `Unavailable`.
 
 chip-AGNOSTIC: an IO cell is a cell the run's own PAD_LIBS Liberty marks
@@ -26,6 +26,7 @@ chip-AGNOSTIC: an IO cell is a cell the run's own PAD_LIBS Liberty marks
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 import sys
 from pathlib import Path
@@ -37,8 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # gathers the inputs -- the run's netlist, its IO Liberty, its cap margin).
 from drv_signoff_judge import (IO_STD_CELL_MARGIN_DISCLOSURE as IO_MARGIN,  # noqa: E402
                                OFFCHIP_PORT_TO_PAD_NET as OFFCHIP_PORT,
-                               _liberty_limits, _sdc_values, io_margin_disclosure,
-                               port_to_pad)
+                               _liberty_limits, _sdc_values, _sha, io_margin_disclosure)
 
 COUNTED = "DRV"
 
@@ -54,7 +54,11 @@ def _name(token: str) -> str:
 
 def netlist_nets(text: str) -> Dict[str, List[Tuple[str, str, str]]]:
     """{net: [(instance, master, pin)]} from a flat or hierarchical-name
-    structural Verilog netlist (named port connections only)."""
+    structural Verilog netlist (named port connections only).
+
+    Used only to identify instance masters for IO Liberty margin disclosure.
+    This partial reader NEVER proves connectivity or a port exclusion.
+    """
     nets: Dict[str, List[Tuple[str, str, str]]] = {}
     body = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
     body = re.sub(r"//[^\n]*", " ", body)
@@ -72,7 +76,8 @@ class Classifier:
     """Classes of (corner, kind, pin, limit, value) rows for one sign-off run."""
 
     def __init__(self, netlist: Path, pad_libs: Mapping[str, Sequence[Path]],
-                 cap_margin: Optional[float] = None):
+                 cap_margin: Optional[float] = None, *, project: Optional[Path] = None,
+                 sdc: Optional[Path] = None):
         """`cap_margin`: the design-scope std-cell cap margin the run's
         sign-off SDC applied (None: the IO-margin class never applies)."""
         self._cap_margin = cap_margin
@@ -93,6 +98,104 @@ class Classifier:
                 except (OSError, ValueError) as exc:
                     raise Unavailable(f"IO Liberty {path} unreadable: {exc}") from exc
             self._libs[corner] = parsed
+        self._ports: Dict[str, set] = {}
+        self.connectivity_evidence = {"state": "UNAVAILABLE",
+                                      "reason": "no current OpenSTA connectivity bundle; ports counted"}
+        if project is not None and sdc is not None:
+            self._connectivity(Path(project), Path(netlist), Path(sdc), pad_libs)
+
+    def _connectivity(self, project: Path, netlist: Path, sdc: Path,
+                      pad_libs: Mapping[str, Sequence[Path]]) -> None:
+        """Reuse the existing capture's raw census, never its asserted classes.
+
+        The current run, netlist, SDC, linked libraries and raw report hashes
+        must agree. A stale, absent or malformed witness leaves ports counted.
+        A DRV FAIL is still useful connectivity evidence; no verdict is upgraded.
+        """
+        from drv_signoff_census import _pins, _nets, port_connectivity
+        import drv_run_identity
+        source = project / "reports/phase3/sta/drv_signoff_bundle.json"
+
+        def checked(ref):
+            if not isinstance(ref, dict) or not ref.get("path"):
+                raise ValueError("connectivity evidence reference absent")
+            path = Path(ref["path"])
+            if not re.fullmatch(r"[0-9a-f]{64}", str(ref.get("sha256") or "")) or _sha(path) != ref["sha256"]:
+                raise ValueError(f"connectivity evidence changed: {path}")
+            return path
+
+        try:
+            bundle = json.loads(source.read_text())
+            identity = bundle["identity"]
+            run = drv_run_identity.load(project)
+            if (not run.get("run_id") or not run.get("plugin_tree_sha256") or
+                    identity.get("run_id") != run["run_id"] or
+                    identity.get("tree_sha") != run["plugin_tree_sha256"] or
+                    Path(identity["project"]).resolve() != project.resolve()):
+                raise ValueError("connectivity capture differs from current run identity")
+            nl_ref = identity["artifacts"]["sta_netlist"]
+            if checked(nl_ref).resolve() != netlist.resolve() or nl_ref["sha256"] != _sha(netlist):
+                raise ValueError("connectivity capture differs from current netlist")
+            sdc_ref = bundle["current"]["sources"]["signoff_sdc"]
+            if checked(sdc_ref).resolve() != sdc.resolve() or sdc_ref["sha256"] != _sha(sdc):
+                raise ValueError("connectivity capture differs from current sign-off SDC")
+            if (not identity.get("opensta_commit") or
+                    not re.fullmatch(r"sha256:[0-9a-f]{64}", str(identity.get("tool_image_digest") or ""))):
+                raise ValueError("OpenSTA tool identity absent")
+            scenes = bundle["scenes"]
+            if not isinstance(scenes, list) or not scenes:
+                raise ValueError("OpenSTA connectivity scenes absent")
+            ports = {}
+            evidence = {}
+            for corner, paths in pad_libs.items():
+                required = {_sha(Path(p)) for p in paths}
+                linked = set()
+                proofs = []
+                refs = []
+                for scene in scenes:
+                    name = scene["name"]
+                    pvt, _, rc = name.rpartition("_")
+                    if corner != "*" and corner not in (name, f"{rc}_{pvt}"):
+                        continue
+                    if scene.get("fresh_process") is not True:
+                        raise ValueError("connectivity census lacks fresh-process receipt")
+                    scene_libs = scene["linked_liberties"]
+                    hashes = set()
+                    pads = set()
+                    limits = []
+                    for item in scene_libs:
+                        lib = checked(item)
+                        hashes.add(item["sha256"])
+                        parsed = _liberty_limits(lib.read_text())
+                        limits.append(parsed)
+                        pads.update(parsed["pad_cells"])
+                    linked.update(hashes)
+                    pin_ref, net_ref = scene["pin_census_report"], scene["net_census_report"]
+                    pin_path, net_path = checked(pin_ref), checked(net_ref)
+                    if pin_path.parent != net_path.parent:
+                        raise ValueError("OpenSTA pin/net census comes from different scenes")
+                    pins = _pins(pin_path)
+                    for pin, item in pins.items():
+                        if item["kind"] == "pin" and item.get("net"):
+                            matches = [lib for lib in limits if item["cell_pin"] in
+                                       lib["cells"].get(item["cell"], {})]
+                            if len(matches) != 1:
+                                raise ValueError(f"OpenSTA pin {pin} lacks unique linked Liberty identity")
+                    proofs.append(port_connectivity(pins, _nets(net_path), pads))
+                    refs.append({"scene": name, "pins": pin_ref, "nets": net_ref,
+                                 "unconnected_core_inputs": [p for p, item in pins.items()
+                                     if item["kind"] == "pin" and item.get("direction") in ("input", "inout")
+                                     and not item.get("net") and item.get("cell") not in pads]})
+                if not proofs or not required.issubset(linked):
+                    raise ValueError(f"no complete linked IO connectivity witness for {corner}")
+                ports[corner] = {p for p in proofs[0] if all(proof.get(p) is True for proof in proofs)}
+                evidence[corner] = refs
+            self._ports = ports
+            self.connectivity_evidence = {"state": "SOURCE_BOUND", "bundle": str(source),
+                                          "sha256": _sha(source), "scenes": evidence}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            self.connectivity_evidence = {"state": "UNAVAILABLE", "bundle": str(source),
+                                          "reason": f"{exc}; ports counted"}
 
     def _io(self, corner: str) -> List[dict]:
         if corner not in self._libs:
@@ -124,12 +227,7 @@ class Classifier:
     def classify(self, corner: str, kind: str, pin: str,
                  limit: Optional[float], value: Optional[float]) -> str:
         if "/" not in pin:
-            conns = self._nets.get(pin) or []
-            masters = {f"{inst}/{p}": master for inst, master, p in conns}
-            return (OFFCHIP_PORT if port_to_pad(
-                pin, list(masters),
-                lambda p: self._pad(corner, masters.get(p)) is not None)
-                else COUNTED)
+            return OFFCHIP_PORT if pin in self._ports.get(corner, set()) else COUNTED
         inst, _, lib_pin = pin.rpartition("/")
         master = self._inst_master.get(inst)
         if self._pad(corner, master) is None:

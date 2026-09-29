@@ -39,8 +39,14 @@ def _pins(path: Path) -> dict[str, dict]:
 
 def _nets(path: Path) -> dict[str, dict]:
     nets = {}
+    raw_blocks = {}
     for block in re.split(r"(?m)^Net ", path.read_text())[1:]:
         name, _, rest = block.partition("\n")
+        # OpenSTA enumerates Verilog aliases but report_net prints the same
+        # canonical net for each. Only byte-identical repetitions are benign;
+        # conflicting or truncated repetitions are refused, never combined.
+        if name in raw_blocks and block.strip() == raw_blocks[name]:
+            continue
         cap = re.search(r"(?m)^ Total capacitance:\s*(\S+)", rest)
         loads = re.search(r"(?ms)^Load pins\n(.*?)(?:\n\n|\Z)", rest)
         drivers = re.search(r"(?ms)^Driver pins\n(.*?)(?:\n\n|\Z)", rest)
@@ -63,6 +69,7 @@ def _nets(path: Path) -> dict[str, dict]:
         driver_names = ([line.strip().split()[0] for line in drivers.group(1).splitlines()
                          if line.strip()] if drivers is not None else [])
         nets[name] = {"cap_pf": cap_pf, "loads": load_names, "drivers": driver_names}
+        raw_blocks[name] = block.strip()
     return nets
 
 
@@ -74,6 +81,36 @@ def _disabled(path: Path) -> dict[str, str]:
             for port in words[1:3]:
                 result[words[0] + "/" + port] = (
                     "disabled" if words[3] == "constraint" else "constant")
+    return result
+
+
+def port_connectivity(pins: dict, nets: dict, pad_cells: set) -> dict[str, bool]:
+    """Prove the port class from BOTH complete OpenSTA pin and net censuses.
+
+    A partial report cannot prove absence of a core load. Reconcile every
+    endpoint with the independent pin inventory, including drivers and ports.
+    Unknown, duplicate, omitted or extra endpoints keep the port counted.
+    """
+    # A link-time port-width mismatch can leave the core input disconnected
+    # while report_net still looks IO-only. Such unresolved inputs cannot be
+    # used as proof of absence. Retain the measured port rows conservatively.
+    unresolved = any(p["kind"] == "pin" and p.get("direction") in ("input", "inout")
+                     and not p.get("net") and p.get("cell") not in pad_cells
+                     for p in pins.values())
+    result = {}
+    for name, pin in pins.items():
+        if pin["kind"] != "port":
+            continue
+        net_name = pin.get("net")
+        net = nets.get(net_name) or {}
+        endpoints = net.get("drivers", []) + net.get("loads", [])
+        inventory = {p for p, item in pins.items() if item.get("net") == net_name}
+        complete = (bool(net_name) and name in endpoints and
+                    len(endpoints) == len(set(endpoints)) and
+                    set(endpoints) == inventory)
+        result[name] = complete and not unresolved and port_to_pad(
+            name, endpoints, lambda p: (pins[p]["kind"] == "pin" and
+                                        pins[p].get("cell") in pad_cells))
     return result
 
 
@@ -94,6 +131,7 @@ def derive(scene_dir: Path, linked_liberties: list[dict],
                 for cell, pins_in_cell in limits["cells"].items()
                 for cell_pin, props in pins_in_cell.items()}
     pad_cells = set().union(*(limits["pad_cells"] for _, limits in libs)) if libs else set()
+    port_classes = port_connectivity(pins, nets, pad_cells)
     metadata = {}
     for name, pin in pins.items():
         if pin["kind"] == "port":
@@ -126,11 +164,7 @@ def derive(scene_dir: Path, linked_liberties: list[dict],
             # (the port-to-PAD net) is off-chip; the judge reads it by the IO
             # Liberty on the pad pin, never by the std-cell margin. Proven from
             # OpenSTA's own net census (driver and load pins), else False.
-            net = nets.get(pin["net"]) or {}
-            metadata[name]["port_to_pad"] = port_to_pad(
-                name, net.get("drivers", []) + net.get("loads", []),
-                lambda p: (pins.get(p, {}).get("kind") == "pin" and
-                           pins[p].get("cell") in pad_cells))
+            metadata[name]["port_to_pad"] = port_classes[name]
     drivers = {name for name, pin in pins.items() if pin["driver"]}
     all_names = {kind: {row["pin"] for row in all_rows[kind]} for kind in KINDS}
     if any(not names.issubset(pins) for names in all_names.values()):
