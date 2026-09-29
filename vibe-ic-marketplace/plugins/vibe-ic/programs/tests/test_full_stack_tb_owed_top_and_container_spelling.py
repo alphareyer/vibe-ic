@@ -169,3 +169,18 @@ def test_a_path_no_mount_covers_is_left_as_printed(monkeypatch):
             "/foss/pdks/lib.v\n/same/q.v\n'/foss/designs'")
     assert f(text, "c") == ("/data/x/p/a.v:1: e\n/foss/designsX/p/b.v\n"
                             "/foss/pdks/lib.v\n/same/q.v\n'/data/x'")
+
+
+def test_a_top_defined_only_inside_a_string_or_comment_is_still_owed(
+        tmp_path, container):
+    """The definition is read as Verilog, not as text: `module soc_top` in a
+    comment or a `$display` string defines nothing."""
+    proj = _project(tmp_path, top_authored=False, handed_off=True)
+    (proj / "phase2" / "stage1" / "rtl" / "notes.v").write_text(
+        "// module soc_top(input i_clk); -- to be authored\n"
+        "/* module soc_top */\n"
+        "module notes; initial $display(\"module soc_top pending\"); "
+        "endmodule\n")
+    res = _step(proj)
+    assert res.status == "NOT_MEASURED", res.detail
+    assert container == []

@@ -13889,7 +13889,6 @@ def _run_oracle_tb(project: Path, top_name: str, tb_path: Path,
 
 
 _FULL_STACK_DUT_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s+u_dut\s*\(", re.M)
-_VERILOG_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 
 
 def _full_stack_dut_not_in_rtl(project: Path, tb_path: Path,
@@ -13908,7 +13907,8 @@ def _full_stack_dut_not_in_rtl(project: Path, tb_path: Path,
     the TB carries no `u_dut` instance or any source defines the module."""
     try:
         m = _FULL_STACK_DUT_RE.search(
-            _VERILOG_COMMENT_RE.sub("", tb_path.read_text(errors="replace")))
+            _hdl_code_text.strip_hdl_comments_and_strings(
+                tb_path.read_text(errors="replace")))
     except OSError:
         return None
     if not m:
@@ -13917,8 +13917,8 @@ def _full_stack_dut_not_in_rtl(project: Path, tb_path: Path,
     define = re.compile(r"\bmodule\s+" + re.escape(dut) + r"\b")
     for f in rtl_files:
         try:
-            if define.search(_VERILOG_COMMENT_RE.sub(
-                    "", Path(f).read_text(errors="replace"))):
+            if define.search(_hdl_code_text.strip_hdl_comments_and_strings(
+                    Path(f).read_text(errors="replace"))):
                 return None
         except OSError:
             continue
