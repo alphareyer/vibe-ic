@@ -214,7 +214,10 @@ def test_waiver_rationale_field_is_normalized_to_reason(tmp_path):
             "rationale": "IR-drop tool unavailable on this PDK; "
                          "documented in ticket VIBE-1.",
             "ticket": "VIBE-1",
-            "approver": "user",
+            # U14: only a dated owner approval enters the loader (setup only).
+            "approver": "reyerchu",
+            "approved_at": "2026-09-28",
+            "owner_statement": "Owner-approved fixture waiver (U14 owner rule).",
             "review_required": True,
         }]
     }))
@@ -228,7 +231,9 @@ def test_waiver_explicit_reason_still_wins(tmp_path):
         "waived_steps": [{
             "id": 25, "reason": "explicit reason text wins",
             "rationale": "ignored when reason present",
-            "ticket": "VIBE-2", "approver": "user",
+            "ticket": "VIBE-2", "approver": "reyerchu",
+            "approved_at": "2026-09-28",
+            "owner_statement": "Owner-approved fixture waiver (U14 owner rule).",
             "review_required": True,
         }]
     }))

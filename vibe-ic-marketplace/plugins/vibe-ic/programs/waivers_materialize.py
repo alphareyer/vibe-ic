@@ -253,8 +253,34 @@ def declare_growth(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def prune_stale(project: Path) -> List[Dict[str, Any]]:
-    """Preserve historical machine entries for the refusing audit to report."""
-    return []
+    """Drop every AUTO-GENERATED waiver in <project>/waivers.json whose
+    reason-condition no longer holds — i.e. the ENV_UNAVAILABLE-excused step
+    actually EXECUTED in this run. Returns the refused entries (each carrying
+    `_refused_reason`) so the rejection is auditable, never silent.
+
+    A HUMAN-authored waivers.json is never touched (same invariant as
+    `materialize`); only machine-materialized entries are pruned. Under the
+    owner-approval rule (U14) no machine entry is ever honoured; pruning a
+    stale one only removes it, with the refusal kept on file for the audit."""
+    wpath = project / "waivers.json"
+    if not wpath.is_file():
+        return []
+    try:
+        data = json.loads(wpath.read_text())
+    except (OSError, ValueError):
+        return []                          # unreadable/foreign — never clobber
+    if not _is_auto_generated(data):
+        return []                          # HUMAN file wins — never touched
+    entries = list(data.get("waived_steps") or [])
+    keep, refused = _ws.filter_honorable(
+        [e for e in entries if isinstance(e, dict)], project)
+    if not refused:
+        return []
+    data["waived_steps"] = keep
+    data["_refused_stale_waivers"] = refused
+    declare_growth(data)          # the population just MOVED — re-derive it
+    wpath.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    return refused
 
 def materialize(project: Path, force: bool = False
                 ) -> Tuple[int, List[Any]]:
