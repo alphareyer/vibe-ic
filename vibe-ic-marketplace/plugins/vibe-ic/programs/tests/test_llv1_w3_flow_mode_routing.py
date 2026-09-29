@@ -40,7 +40,7 @@ PROGRAMS = Path(LC.__file__).resolve().parent
 LAYER = {
     "2": "direct", "3": "direct", "4": "direct", "5": "direct",
     "7": "librelane", "8": "dual", "9": "librelane", "10": "librelane",
-    "13": "direct",
+    "13": "dual",        # CUT_W4 (R-0929-TOOL-DEFAULT): lec_run + EQY
     "15": "librelane", "15.5ic": "librelane", "17": "librelane",
     "18": "librelane", "19": "librelane", "20": "librelane",
     "21": "librelane", "22": "librelane", "23": "librelane",
@@ -288,7 +288,7 @@ def test_under_librelane_every_site_gets_the_layers_answer(tmp_path, chip):
 
 def test_the_owners_kept_checks_are_not_replaced_by_the_tool(tmp_path):
     _record(tmp_path)
-    kept = {"13": "direct", "25": "direct", "2": "direct",
+    kept = {"13": "dual", "25": "direct", "2": "direct",
             "8": "dual", "24": "dual", "26": "dual", "31": "dual",
             "23": "librelane", "32": "librelane"}
     assert {s: LC.selected_mode(tmp_path, s) for s in kept} == kept
@@ -312,7 +312,7 @@ def test_a_switch_naming_only_out_of_layer_steps_is_honoured(tmp_path):
     _switch(tmp_path, {"A6": "librelane"})
     assert LC.selected_mode(tmp_path, "A6") == "librelane"
     assert LC.selected_mode(tmp_path, "21") == "librelane"
-    assert LC.selected_mode(tmp_path, "13") == "direct"
+    assert LC.selected_mode(tmp_path, "13") == "dual"
 
 
 def test_without_a_record_the_switch_file_still_rules(tmp_path):
