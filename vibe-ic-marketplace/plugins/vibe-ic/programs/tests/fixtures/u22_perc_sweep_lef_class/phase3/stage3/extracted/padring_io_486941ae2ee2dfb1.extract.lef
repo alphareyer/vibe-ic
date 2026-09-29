@@ -1,0 +1,8 @@
+VERSION 5.7 ;
+MACRO gf180mcu_fd_io__dvss
+  CLASS PAD POWER ;
+  ORIGIN 0.000 0.000 ;
+  SIZE 75.000 BY 350.000 ;
+  SYMMETRY X Y R90 ;
+END gf180mcu_fd_io__dvss
+END LIBRARY
