@@ -5759,6 +5759,55 @@ def _command_json_report(project: Path, cmd: str) -> Optional[Dict[str, Any]]:
     return _json_report_at(p)
 
 
+#: The program that writes stage-compliance receipts. Only ITS documents are
+#: compared by `_declared_receipt_disagreements`: their `overall` is a run word
+#: with one meaning, so two of them for one scope either agree or do not.
+_STAGE_RECEIPT_PROGRAM = "flow_compliance_check"
+
+
+def _receipt_overall(doc: Any) -> Optional[str]:
+    """A stage-compliance receipt's run word, or None for anything else."""
+    if (not isinstance(doc, dict)
+            or doc.get("program") != _STAGE_RECEIPT_PROGRAM):
+        return None
+    word = doc.get("overall")
+    return str(word).strip().upper() if isinstance(word, str) and \
+        word.strip() else None
+
+
+def _declared_receipt_disagreements(project: Path,
+                                    declared: List[str]) -> List[str]:
+    """U20 — declared stage receipts whose on-disk verdict is not this audit's.
+
+    MEASURED on spm v5, step 15: its declared output
+    `reports/phase2/gates/stage2_compliance.json` said `overall NOT_MEASURED`
+    (the run's producer copy), while the audit re-ran the same clause into a
+    scratch receipt (R-0915-126), read PASS there, and passed the step. The
+    run's own record and the audit's answer disagreed, and nothing said so.
+
+    Reads only: the run's document is never touched. Compares only what
+    `flow_compliance_check` wrote on BOTH sides (a stage receipt), and only a
+    path this audit actually re-wrote (`_RECEIPT_REDIRECTS` holds only the
+    receipts a gate wrote). Returns one sentence per disagreement.
+    """
+    out: List[str] = []
+    for rel in declared:
+        target = project / rel
+        moved = _RECEIPT_REDIRECTS.get(_resolved_key(target))
+        if moved is None:
+            continue
+        kept = _receipt_overall(_json_report_at(target))
+        fresh = _receipt_overall(_json_report_at(Path(moved[0])))
+        if kept and fresh and kept != fresh:
+            out.append(
+                f"DECLARED RECEIPT DISAGREES WITH THIS AUDIT: {rel} on disk "
+                f"says overall={kept}; this audit re-ran the step's own clause "
+                f"and measured overall={fresh}. The run's document is left "
+                f"alone (R-0915-126), so the step cannot PASS on it: re-produce "
+                f"it on the final tree.")
+    return out
+
+
 def _report_proves_executed_design_na(
         project: Path, report: Any, command: str) -> bool:
     """Validate an executed, design-owned zero-population contract.
@@ -16865,6 +16914,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     if _absent_before_gate:
         _claim_audit_will_create(project, sid, _absent_before_gate)
     _audit_produced: List[str] = []
+    _receipt_disagreements: List[str] = []
     if gate:
         # GAP-B (#789) — thread the run's skip_analog into the gate evaluation
         # so an analog-aware optional/required gate (#773) is invoked WITH
@@ -16873,6 +16923,9 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # closes the per-step optional/required gate wiring gap. No-op when
         # skip_analog is False.
         passed, reasons = _evaluate_gate(project, gate, skip_analog=skip_analog)
+        # U20 — read NOW, while this gate's redirected receipts are registered.
+        _receipt_disagreements = _declared_receipt_disagreements(
+            project, _declared_self_written)
         # IDEMPOTENCE, AND WHERE #1981 BOUGHT IT FROM THE WRONG BUDGET.
         # Refusing the audit's own output is only a measurement if the NEXT
         # audit gets the same answer. #1981 bought that by DELETING what the
@@ -17504,6 +17557,16 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # A gate that RAN and did not pass is a defect, not an absence.
             result.reason_class = ""
             result.reasons.extend(non_hint_reasons)
+        # U20 — A STEP DOES NOT PASS ON A DECLARED RECEIPT THAT CONTRADICTS
+        # THIS AUDIT (see `_declared_receipt_disagreements`). Applied after the
+        # chain so it can only move a green word, never a FAIL or an existing
+        # NOT_MEASURED; the step owes a current receipt, which is what
+        # MISSING_ARTEFACT names.
+        if _receipt_disagreements and result.status in (
+                _T.Verdict.PASS.value, _T.Verdict.PASS_WITH_WAIVERS.value):
+            result.status = _T.Verdict.NOT_MEASURED.value
+            result.reason_class = _T.ReasonClass.MISSING_ARTEFACT.value
+            result.reasons.extend(_receipt_disagreements)
         # THE DEMOTED SKIP IS STILL TRUE, so it is still on the row. It no
         # longer sets the tier -- the step produced everything it declares --
         # but a clause that honestly reported it examined nothing is exactly
