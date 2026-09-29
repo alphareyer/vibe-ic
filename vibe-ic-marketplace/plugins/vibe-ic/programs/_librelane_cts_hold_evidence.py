@@ -133,8 +133,8 @@ def worst_skew(ev: Dict[str, Any]) -> Optional[float]:
 
 
 def clock_tree_fanout(project: Path, ev: Dict[str, Any]) -> Dict[str, Any]:
-    """The tool-measured clock-tree fanout (`Vibeic.ClockPathDriveSizing`'s
-    `vibeic__cts__max_fanout`) and the cap the CTS step was configured with
+    """The tool-measured clock-tree fanout (`vibeic__cts__max_fanout`, written
+    by step 19's clock-path sizing step, either arm) and the cap the CTS step was configured with
     (`MAX_FANOUT_CONSTRAINT` in its own resolved config.json). Either may be
     None; the caller decides what an absent one means."""
     metrics = ev.get("metrics") or {}
