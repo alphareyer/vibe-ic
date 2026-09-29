@@ -166,8 +166,19 @@ def pad_ring_census(components: List["tuple"], classes: Dict[str, str]) -> Dict[
     negated = [m for m in pads
                if any(t in m.lower() for t in _p._ESD_NEGATION_HINTS)]
     unidentified = [m for m in pads if m not in identified and m not in negated]
+    # Masters that belong to the ring but whose LEF CLASS names no bond-pad / ring role:
+    # an IO-family name with no PAD/corner class, or a non-CORE macro class (e.g. a bare
+    # pad shipped as CLASS BLOCK). Never read as "no pad ring".
+    known = set(_PAD_SIGNAL_CLASSES) | set(_PAD_POWER_CLASSES) | set(_PAD_STRUCTURAL_CLASSES)
+    unclassified = sorted({
+        m for _i, m in components
+        if classes.get(m) not in known
+        and (_p._classify_io_cell(m) != "other"
+             or (classes.get(m) or "").split(" ")[0] in ("BLOCK", "COVER", "RING"))})
     if not pads:
-        presence, status = "N/A", "N/A"
+        # Classified corners/spacers with no classified bond pad: the ring exists and its
+        # pads' roles are unknown -- NOT_DETERMINED naming them, never N/A.
+        presence, status = "NOT_DETERMINED", "MANUAL_REVIEW"
     elif identified:
         presence, status = "PRESENT", "MANUAL_REVIEW"
     elif negated and not unidentified:
@@ -187,13 +198,18 @@ def pad_ring_census(components: List["tuple"], classes: Dict[str, str]) -> Dict[
         "esd_negated": len(negated),
         "esd_unidentified": len(unidentified),
         "esd_unidentified_masters": sorted(set(unidentified)),
-        "note": ("pad roles from LEF CLASS (PAD INPUT/OUTPUT/INOUT/AREAIO = signal, "
+        "unclassified_masters": unclassified,
+        "note": (("the ring has " + str(len(structural)) + " classified corner/spacer "
+                  "instance(s) but no master with a bond-pad LEF CLASS; unclassified ring "
+                  "master(s): " + (", ".join(unclassified) or "none named") + " -- pad and "
+                  "ESD roles NOT_DETERMINED, not N/A") if not pads else
+                 ("pad roles from LEF CLASS (PAD INPUT/OUTPUT/INOUT/AREAIO = signal, "
                  "PAD POWER = power, PAD SPACER / IO corner = structural, not a pad); counts "
                  "are instances. ESD content is not stated for "
                  f"{len(unidentified)} pad instance(s) by any artefact in the run tree: "
                  "NOT_DETERMINED, not MISSING -- confirm from the IO library's ESD "
                  "documentation." if unidentified and not identified else
-                 "pad roles from LEF CLASS; counts are instances"),
+                 "pad roles from LEF CLASS; counts are instances")),
     }
 
 
