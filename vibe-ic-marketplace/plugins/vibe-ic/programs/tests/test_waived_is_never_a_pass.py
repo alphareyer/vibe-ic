@@ -134,3 +134,49 @@ def test_a_pre_rename_audit_json_is_still_read_in_its_own_words():
     js = C._audit_json_buckets({"step_counts": {"PASS": 4, "WAIVED": 1,
                                                 "VACUOUS_PASS": 2}})
     assert js == {"PASS": 4, "WAIVED-DEFERRED": 1, "VACUOUS-PASS": 2}, js
+
+
+# ── (3) a gate's own step-waiver WAIVED, read by the flow ───────────────────
+
+import flow_compliance_check as F                             # noqa: E402
+
+_GATE_REPORT = "reports/analog/mixed_signal/level_shifter_check.json"
+
+
+def _self_waiving_project(tmp_path, gate_waiver=True):
+    """A project whose ONLY evidence for the step is a gate's own waiver
+    lookup: `level_shifter_required_check` finds `waived_steps` keyed by its
+    label, writes `verdict: WAIVED` and exits 0. The flow's own waiver record
+    (`check_step(..., waivers)`) does not cover the step."""
+    project = tmp_path / "p"
+    project.mkdir()
+    if gate_waiver:
+        (project / "waivers.json").write_text(json.dumps({"waived_steps": [{
+            "id": "level_shifter", "ticket": "T-1",
+            "reason": "no level-shifter list for this design"}]}))
+    return project
+
+
+def _step():
+    return {"id": 94, "name": "level-shifter audit", "stage": "stage3",
+            "required_outputs": [],
+            "gate": {"all_of": [{"program_exit_zero":
+                f"level_shifter_required_check . --json {_GATE_REPORT}"}]}}
+
+
+def test_a_gate_self_waiver_is_not_a_pass(tmp_path):
+    project = _self_waiving_project(tmp_path)
+    row = F.check_step(project, _step(), {})
+    receipt = json.loads((project / _GATE_REPORT).read_text())
+    assert receipt["verdict"] == "WAIVED"          # the gate did waive itself
+    assert row.status != "PASS", (row.status, row.reasons)
+    assert not T.is_done_claim(row.status), (row.status, row.reasons)
+    assert row.status == "NOT_MEASURED", (row.status, row.reasons)
+    assert any("says WAIVED" in r for r in row.reasons), row.reasons
+
+
+def test_the_same_gate_without_a_waiver_keeps_its_own_answer(tmp_path):
+    # Control: no waiver -> the gate's honest SKIP (rc 2), not the new branch.
+    project = _self_waiving_project(tmp_path, gate_waiver=False)
+    row = F.check_step(project, _step(), {})
+    assert not any("says WAIVED" in r for r in row.reasons), row.reasons

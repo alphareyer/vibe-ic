@@ -5869,6 +5869,41 @@ def _json_report_declares_nonverdict(report: Any) -> bool:
     return False
 
 
+#: A gate's OWN step-waiver word. Eighteen gates answer "a `waived_steps` entry
+#: matches my label" by writing `verdict: WAIVED` to their `--json` report and
+#: exiting 0. They examined nothing, and their lookup is their own (a label, or
+#: a substring of any entry's `ticket`), checked by no approver rule. Read by rc
+#: alone that was a clean PASS -- a waiver becoming PASS, which the owner's rule
+#: forbids (DRV sign-off standard 2026-09-28: "WAIVED is never PASS";
+#: R-0929-U14-OWNER-WAIVER: only the owner may waive). The flow's own
+#: `waived_steps` path short-circuits a step whose waiver IS recorded against
+#: it before any gate runs, so a gate self-waiver that reaches this reader is
+#: one the flow's record does not cover.
+_GATE_SELF_WAIVER_VERDICT = "WAIVED"
+
+
+def _gate_self_waiver_hint(project: Path, cmd: str, out: str) -> Optional[str]:
+    """An `__INCOMPLETE_HINT__` for a gate that exited 0 on its own waiver.
+
+    NOT a waiver and NOT a pass: the step reads NOT_MEASURED (the gate's input
+    was applicable and was not examined), with the gate's receipt named. The
+    DRV judge's WAIVED is a different word on a different channel (rc 1 and
+    `_DRV_WAIVED_HINT_PREFIX`) and is left to its own branch.
+    """
+    if out.startswith(_DRV_WAIVED_HINT_PREFIX):
+        return None
+    report = _command_json_report(project, cmd)
+    if _report_verdict(report) != _GATE_SELF_WAIVER_VERDICT:
+        return None
+    if isinstance(report, dict) and report.get("name") == "DRV(tran/cap/fanout)":
+        return None
+    return (f"{_INCOMPLETE_HINT_PREFIX}{cmd} — the gate exited 0 but its own "
+            f"--json report says WAIVED: it skipped its check under its own "
+            f"step-waiver lookup and examined nothing. A waiver is never a "
+            f"PASS, and only an owner-approved `waived_steps` record for THIS "
+            f"step (applied by the flow before any gate runs) may waive it")
+
+
 def _json_report_signals_vacuous(project: Path, cmd: str) -> bool:
     """True iff the report declares a skip-eligible non-verdict.
 
@@ -12717,6 +12752,10 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         # anything is decided about it, so the denominator cannot depend on the
         # outcome.
         reasons.append(f"{_RAN_HINT_PREFIX}{_cmd}")
+        _self_waiver = (_gate_self_waiver_hint(project, _cmd, out)
+                        if passed else None)
+        if _self_waiver:
+            reasons.append(_self_waiver)
         if (passed
                 and not out.startswith(_EXECUTED_DECLARED_NA_HINT_PREFIX)
                 and _json_report_signals_vacuous(project, _cmd)):
@@ -12877,6 +12916,10 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         # without reaching here and is deliberately NOT counted: it examined
         # nothing AND declared nothing, which is a different hole.
         reasons.append(f"{_RAN_HINT_PREFIX}{cmd}")
+        _self_waiver = (_gate_self_waiver_hint(project, cmd, out)
+                        if passed else None)
+        if _self_waiver:
+            reasons.append(_self_waiver)
         if (passed
                 and not out.startswith(_EXECUTED_DECLARED_NA_HINT_PREFIX)
                 and _json_report_signals_vacuous(project, cmd)):
