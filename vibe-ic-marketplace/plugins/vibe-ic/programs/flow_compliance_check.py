@@ -13109,7 +13109,10 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
                 reasons.append(f"{_VACUOUS_HINT_PREFIX}{cmd}")
         elif (enforcement == "DISCLOSED_INCOMPLETE"
                 and _gate_is_two_source_advisory(_gate_name(cmd))
-                and not _output_declares_non_waiverable(out)):
+                and not _output_declares_non_waiverable(out)
+                # R-0915-169 keeps its branch: a nested audit that is only
+                # waiting on an agent pass reads AWAITING, not advisory.
+                and not (_awaiting and record.get("reason_class") is None)):
             # U20 (IC_BLOCKER_AUDIT §2) — AN ADVISORY NOT_MEASURED IS TREATED
             # LIKE AN ADVISORY FAIL. Two branches up, a refusal from a gate
             # that BOTH its module and the flow declare advisory is reported
@@ -13126,12 +13129,25 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
             # untouched (DISCLOSED_INCOMPLETE, lossless), and a gate advisory
             # by only one source keeps the INCOMPLETE hint below, exactly as
             # its refusal keeps BLOCKING.
+            #
+            # U20 r2 (review wave 58) — AND IT STILL EXAMINED NOTHING. Moving
+            # the clause off the INCOMPLETE hint took it out of the #901
+            # numerator while its RAN hint stayed in the denominator, so a
+            # step where NO clause examined anything left the vacuous tier and
+            # read PASS. The clause is therefore ALSO a vacuous clause: a step
+            # whose every clause examined nothing stays NOT_MEASURED (vacuity);
+            # beside a substantive sibling it is disclosed as partial vacuity.
             reasons.append(
                 f"{_ADVISORY_HINT_PREFIX}NOT_MEASURED from a two-source "
                 f"advisory gate (non-blocking, as its refusal is): "
                 f"verdict={record['verdict']} rc={record['exit_code']} "
                 f"reason_class={record['reason_class']}: {cmd}"
                 + (f" :: {out[:200]}" if out else ""))
+            reasons.append(
+                f"{_VACUOUS_HINT_PREFIX}{cmd}\n"
+                f"NOT_MEASURED from a two-source advisory gate "
+                f"(reason_class={record['reason_class']}): it examined "
+                f"nothing, so it cannot be the clause that examined something")
         elif enforcement == "DISCLOSED_INCOMPLETE":
             # R-0915-169 — see `_nested_audit_awaiting_rows`.
             if _awaiting and record.get("reason_class") is None:
