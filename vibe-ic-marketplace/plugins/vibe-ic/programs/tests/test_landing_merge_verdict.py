@@ -63,6 +63,7 @@ import _watchdog  # noqa: E402
 import _hermetic_engine_capability as _CAP  # noqa: E402
 
 import _progress_run as _pr  # noqa: E402
+import _outcome_states as states  # noqa: E402
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
 _PROG = _PROGRAMS / "landing_merge_verdict.py"
@@ -3361,6 +3362,9 @@ fi
         # nothing ever reaps it. Settle the process first, then report which of
         # the two distinguishable things actually happened.
         still_running = proc.poll() is None
+        # The host's load is read HERE, at the ceiling, before the kill below
+        # changes what the host is doing (R-0929-ENV-AT-RUNTIME).
+        at_ceiling = states.run_conditions()
         if still_running:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -3371,6 +3375,15 @@ fi
             why = (f"the verifier was still running after {_T}s and no "
                    f"verifier worktree ever appeared in the subject "
                    f"repository, so the {hung_arm} control arm never started")
+            # THIS branch is the suite ceiling, a wall clock, and nothing at it
+            # shows where the verifier is (no worktree, no event): slow and
+            # wedged look the same from here. So it is NOT_MEASURED only when
+            # the host was MEASURABLY loaded at the ceiling -- never for the
+            # xdist worker count alone -- and on a quiet host it is the FAIL
+            # below, serial or parallel. The EXITED branch is never a clock.
+            states.skip_if_not_measurable(
+                why, progress=states.PROGRESS_UNOBSERVABLE,
+                conditions=at_ceiling)
         else:
             why = (f"the verifier EXITED rc={proc.returncode} without ever "
                    f"running the {hung_arm} control arm: the injected hang was "
@@ -3382,6 +3395,19 @@ fi
         os.kill(proc.pid, signal.SIGTERM)
     else:
         os.killpg(proc.pid, signal.SIGINT)
+    # WHAT THE VERIFIER HAD BUILT WHEN THE INTERRUPT LANDED, read right after
+    # it. Bash runs a trapped signal once the command in flight returns, and
+    # that one command can register at most one more worktree; every later
+    # worktree is a later COMMAND, i.e. the script went on as if never
+    # interrupted. That is the progress evidence the ceiling branch below needs
+    # (R-0929-ENV-AT-RUNTIME): it tells a verifier still inside its step from
+    # one that ignored the signal.
+    def _worktree_paths():
+        out = _git(repo, "worktree", "list", "--porcelain").stdout
+        return {line[len("worktree "):] for line in out.splitlines()
+                if line.startswith("worktree ")}
+
+    worktrees_at_signal = _worktree_paths()
     # Wait on the cleanup protocol, not on a wall-clock estimate of how fast a
     # loaded host can remove four worktrees.  `_T` is only the suite's final
     # dead-process safety ceiling; the success path is the atomic `done` event.
@@ -3394,6 +3420,33 @@ fi
             break
         time.sleep(0.05)
     if not cleanup_done.is_file():
+        # FOUR different things end the wait above, and they used to share one
+        # message:
+        #   * the verifier EXITED without the event -- a behaviour, always FAIL;
+        #   * it was still running at the `_T` ceiling AFTER `cleanup.started`
+        #     -- cleanup began and never reached `reaped`/`done`. That IS the
+        #     never-reaped arm this deadline exists to catch, and the events
+        #     are the progress evidence: cleanup was seen to start and then do
+        #     nothing observable. A hang, FAIL on any host at any load.
+        #     (Reverse mutation M9b -- cleanup() blocks right after
+        #     `cleanup_event started` -- read NOT_MEASURED at -n 2 on a host at
+        #     0.14 load per core while this branch keyed on the worker count.)
+        #   * it was still running at the ceiling and cleanup NEVER STARTED,
+        #     yet it had created later worktrees after the signal: it IGNORED
+        #     the interrupt and carried on -- a behaviour, FAIL at any load;
+        #   * it was still running, cleanup never started, and no later step
+        #     had begun: the interrupt was still deferred behind the step in
+        #     flight (bash runs a trapped signal only once that child
+        #     returns). Nothing here tells slow from wedged, so this one branch
+        #     is NOT_MEASURED when the host was MEASURABLY loaded at the
+        #     ceiling (R-0929-ENV-AT-RUNTIME), and a FAIL on a quiet host.
+        still_running = proc.poll() is None
+        # Read at the ceiling, before the kill below changes the host or lets
+        # a late event land: the verdict is about what was true AT `_T`.
+        at_ceiling = states.run_conditions()
+        started = cleanup_started.is_file()
+        reaped = cleanup_reaped.is_file()
+        after_signal = sorted(_worktree_paths() - worktrees_at_signal)
         # A failed cleanup test must clean up its own control process; leaving
         # the intentionally TERM-ignoring arm behind would contaminate every
         # later timing measurement in the same suite.
@@ -3402,9 +3455,39 @@ fi
         except ProcessLookupError:
             pass
         stdout, stderr = proc.communicate()
+        if still_running and started:
+            stuck = ("removing the worktrees never finished (cleanup.reaped "
+                     "present, cleanup.done absent)" if reaped else
+                     "an arm process group was never reaped (cleanup.started "
+                     "present, cleanup.reaped absent)")
+            pytest.fail(
+                f"cleanup STARTED and the verifier was still running at the "
+                f"suite safety ceiling ({_T}s): {stuck} -- a hang, not a slow "
+                f"host:\n{stdout}\n{stderr}")
+        if still_running and len(after_signal) >= 2:
+            # MEASURED 2026-09-29 on 8HD-6 (process tree at the ceiling): the
+            # verifier was not inside any step -- bash sat in `wait` on the
+            # hung base arm, which it had LAUNCHED ~25 s after the SIGINT, the
+            # whole candidate wave having run in between. A lost interrupt is
+            # the behaviour under test failing, not a slow host.
+            pytest.fail(
+                f"the verifier IGNORED the interrupt: cleanup never started, "
+                f"and {len(after_signal)} worktree(s) were created AFTER the "
+                f"signal ({', '.join(Path(w).name for w in after_signal)}), so "
+                f"the script went on as if never interrupted -- a behaviour, "
+                f"not a slow host:\n{stdout}\n{stderr}")
+        if still_running:
+            why = (f"verifier still running at the suite safety ceiling "
+                   f"({_T}s) and cleanup never STARTED (no cleanup.started), "
+                   f"with no later step begun after the signal: the interrupt "
+                   f"was still deferred behind the step in flight")
+            states.skip_if_not_measurable(
+                why, progress=states.PROGRESS_UNOBSERVABLE,
+                conditions=at_ceiling)
+            pytest.fail(f"{why}:\n{stdout}\n{stderr}")
         pytest.fail(
-            "verifier exited or reached the suite safety ceiling without the "
-            f"cleanup.done event:\n{stdout}\n{stderr}")
+            f"verifier exited rc={proc.returncode} without the cleanup.done "
+            f"event:\n{stdout}\n{stderr}")
     stdout, stderr = proc.communicate()
     assert proc.returncode != 0, stdout + stderr
     assert cleanup_started.is_file(), "cleanup never announced its start"

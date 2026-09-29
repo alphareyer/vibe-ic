@@ -27,8 +27,10 @@ WHAT REPLACES THE CLOCK
 Forward progress, measured by looking at the child rather than at the clock:
 
   * **output** — the bytes it has written to stdout/stderr (only ever grows),
-  * **CPU** — ``utime+stime`` from ``/proc/<pid>/stat``, summed over the child
-    AND its live descendants, so a quiet compute phase still counts as alive,
+  * **CPU** — ``utime+stime+cutime+cstime`` from ``/proc/<pid>/stat``, summed
+    over the child AND its live descendants, so a quiet compute phase still
+    counts as alive and a REAPED child's CPU stays in the sum (see
+    `_cpu_seconds`),
   * **I/O** — ``read_bytes+write_bytes`` from ``/proc/<pid>/io``, so a phase
     that is neither chatty nor CPU-bound (a large read, a slow fsync) counts.
 
@@ -255,6 +257,28 @@ def _descendants(pid: int) -> List[int]:
 
 
 def _cpu_seconds(pids: Sequence[int]) -> Optional[float]:
+    """CUMULATIVE CPU of the tree: utime+stime of every live process PLUS its
+    cutime+cstime, the CPU of the children it has already REAPED.
+
+    WITHOUT THE SECOND PAIR THE SUM FORGETS FINISHED WORK. A child that exits
+    and is reaped takes its whole utime+stime out of the live sum, the total
+    DROPS, and `_watchdog.ProgressMeter` -- which credits only a new MAXIMUM --
+    reads the still-working tree as motionless until it has re-earned the lost
+    seconds. MEASURED 2026-09-29 on 8HD-6 against the real
+    `gatekeeper_prepare_landing.prepare()` tree, sampled every 15 s at 0.5-1.8
+    load per core: the reaped-children-inclusive sum climbed ~1 CPU-s/s at
+    every look (0 consecutive still looks) while the live-only sum showed runs
+    of up to 9 still looks; minutes earlier, at 1.6-2.5 load per core, the
+    issue1129 real-program test on that host was reported STALLED (12 still
+    looks) after 497 s -- a false "no progress" that the stall reader could not
+    tell from a real wedge (prepare() asleep, zero CPU). The same defect, fixed
+    the same way, in `_container_exec.container_tree_probe` (lane mig114) and
+    `_gate_inflight_progress._tree_cpu_ticks`.
+
+    The pair can only ADD seconds a process really spent, so this can make the
+    supervisor more patient with a tree that is working and never less patient
+    with one that is not: a wedged tree reaps nothing and burns nothing.
+    """
     total = 0.0
     seen_any = False
     for p in pids:
@@ -263,7 +287,8 @@ def _cpu_seconds(pids: Sequence[int]) -> Optional[float]:
                 data = fh.read()
             f = data[data.rfind(b")") + 2:].split()
             # after the last ')': state(0) ppid(1) ... utime(11) stime(12)
-            total += (int(f[11]) + int(f[12])) / _CLK_TCK
+            # cutime(13) cstime(14)
+            total += (int(f[11]) + int(f[12]) + int(f[13]) + int(f[14])) / _CLK_TCK
             seen_any = True
         except (OSError, ValueError, IndexError):
             continue

@@ -16,7 +16,11 @@ Route, the way `_tcl_walk` resolves tclsh: the program's own `docker run` of
 the image named by `VIBEIC_EDA_CONTAINER` (else the plugin's pinned image);
 otherwise `openroad` on PATH (inside the image, where docker is absent), with
 the command's `-v host:guest` mounts applied to the script's paths. If neither
-answers the test FAILS as NOT_MEASURED -- never a skip.
+route exists on this host the test reports NOT_VERIFIED (owner R-0927: a tool
+or image the host lacks is reported, in the run, as not verified -- never a
+FAIL), naming the host and every route tried; a docker probe that never
+answered says so rather than claiming the image is absent. Where a route
+exists every assertion runs exactly as before.
 """
 import json
 import os
@@ -32,6 +36,8 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 import librelane_fill_dfm as fill                              # noqa: E402
 from librelane_contract import Refusal                         # noqa: E402
+import not_verified_tier as _nv                                # noqa: E402
+import _outcome_states as states                               # noqa: E402
 
 PDK = 'processA'
 
@@ -134,18 +140,33 @@ def _image():
 
 def _route(monkeypatch):
     """Return the image to hand the program; install the in-image route when
-    only a local `openroad` exists. Raise NOT_MEASURED when neither exists."""
+    only a local `openroad` exists. Report NOT_VERIFIED when neither exists.
+
+    Only the two ways the image question goes unanswered are caught -- no held
+    identity (`ImageNotResolvable`, incl. `ImageNotHeld`) and a `docker
+    inspect` that timed out -- where a bare `except Exception` used to fold
+    every error, a timeout included, into "not held". The held check goes
+    through `not_verified_tier.probe`, which keeps PRESENT / ABSENT / UNANSWERED
+    apart."""
+    import _eda_pin                                            # noqa: PLC0415
     tried = []
+    unanswered = ''
     if shutil.which('docker'):
         try:
             image = _image()
-            held = subprocess.run(['docker', 'image', 'inspect', image],
-                                  capture_output=True, text=True, timeout=60)
-            if held.returncode == 0:
+        except _eda_pin.ImageNotResolvable as exc:
+            tried.append(f'no held vibeic-eda image ({exc})')
+        except subprocess.TimeoutExpired as exc:
+            unanswered = (f"`{' '.join(map(str, exc.cmd))}` did not answer in "
+                          f"{exc.timeout}s")
+            tried.append(unanswered)
+        else:
+            state, detail = _nv.probe(['docker', 'image', 'inspect', image])
+            if state == _nv.PROBE_PRESENT:
                 return image, 'docker-run'
-            tried.append(f'docker image {image!r} not held')
-        except Exception as exc:                               # noqa: BLE001
-            tried.append(f'docker ({type(exc).__name__}: {exc})')
+            if state == _nv.PROBE_UNANSWERED:
+                unanswered = detail
+            tried.append(f'docker image {image!r} not held ({detail})')
     else:
         tried.append("docker (shutil.which('docker') -> None)")
     local = shutil.which('openroad')
@@ -171,9 +192,14 @@ def _route(monkeypatch):
         monkeypatch.setattr(fill, 'run_container', in_image)
         return 'in-image', f'local:{local}'
     tried.append("host PATH (shutil.which('openroad') -> None)")
-    raise AssertionError('NOT_MEASURED: the OpenDB keep-out census needs '
-                         'OpenROAD and neither route answered -- '
-                         + '; '.join(tried))
+    where = f'host {states.host()}'
+    pytest.skip(_nv.probe_skip_reason(
+        _nv.PROBE_UNANSWERED if unanswered else _nv.PROBE_ABSENT,
+        f'{where}: {unanswered}',
+        f'{where}: the OpenDB keep-out census needs OpenROAD and neither '
+        f'route exists here -- ' + '; '.join(tried),
+        f'pull the pinned vibeic-eda image on this host, or run inside it '
+        f'with {states.IMAGE_HARNESS} (openroad on PATH)'))
 
 
 def _um(placed):

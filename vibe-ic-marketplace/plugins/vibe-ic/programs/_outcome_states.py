@@ -21,12 +21,16 @@ re-runs a red to find out what kind of red it was. Four states:
                    (CONTAINER_IMAGE_MISMATCH, confirmed by a live pin check). The reason
                    names the host, the missing tool or resource, and the remedy.
     NOT_MEASURED   a test marked ``@pytest.mark.measures`` failed its
-                   measurement while the run's own conditions make that
-                   measurement untrustworthy: xdist worker count > 1, and/or the
-                   1-min load per core above LOAD_PER_CORE_LIMIT. The reason
-                   names the condition and the measured numbers. A quiet serial
-                   run keeps the same failure a FAIL, so an O(N) -> O(N^2)
-                   regression is still caught where it can be measured.
+                   measurement while the host was MEASURABLY loaded: the 1-min
+                   load per core, read when the failure was reported, above
+                   LOAD_PER_CORE_LIMIT. The reason names the measured numbers.
+                   The xdist worker count is quoted as context and is NEVER a
+                   cause on its own (R-0929-ENV-AT-RUNTIME): -n 2 on a quiet
+                   32-core host leaves every measurement a core of its own, and
+                   a real regression there is a FAIL like any other. A quiet
+                   host keeps the same failure a FAIL -- serial or parallel --
+                   so an O(N) -> O(N^2) regression is still caught wherever it
+                   can be measured.
     BOOKKEEPING    a test marked ``@pytest.mark.bookkeeping`` — one whose ONLY
                    subject is that a stated statistic (a published count in a
                    README / INVENTORY / INDEX / census block) matches reality —
@@ -46,6 +50,25 @@ that sets it, a converted NOT_VERIFIED still makes the session red.
 Nothing here changes which tests RUN: the two markers select nothing and
 deselect nothing (the `consistency` tier's deselection is a different, broader
 class: order, registers and member pins as well as numbers).
+
+AT THE SITE (owner, 2026-09-29: "工具環境的問題，應該在執行的過程就應該知道")
+Two helpers for what the hook cannot read from a failure's text:
+
+* ``require_tools(*tools, path=None)`` -- NOT_VERIFIED naming the host and the
+  absent tool(s), called where the test is about to run them. For a program
+  that turns a missing binary into its own verdict (no tool name in the
+  failure), and for a test that used to ``return`` without its tool and so
+  passed having verified nothing. Present tools: the test runs unchanged.
+* ``skip_if_not_measurable(message, progress=..., conditions=...)`` --
+  NOT_MEASURED for the ONE branch where a test's ceiling or stall window was
+  reached, and only when (a) the host was measurably loaded at that moment
+  and (b) the site did not OBSERVE zero progress. A site that can see the
+  subject's progress says what it saw (``PROGRESS_SLOW`` / ``PROGRESS_NONE``);
+  one that cannot says ``PROGRESS_UNOBSERVABLE``. ``PROGRESS_NONE`` -- the
+  subject was seen doing nothing -- is a hang, which load slows down but never
+  causes, and it is never converted. The caller's FAIL follows on the next
+  line, so a quiet host keeps it red and every behavioural assertion stays
+  FAIL.
 
 WHAT IS NEVER CONVERTED
 =======================
@@ -290,16 +313,43 @@ def classify_container_mismatch(exc: Optional[BaseException],
     return None
 
 
-def _tool_reason(tool: str) -> str:
-    if tool == "docker":
+def _tool_reason(tool: str, *more: str) -> str:
+    tools = (tool, *more)
+    names = ", ".join(f"`{t}`" for t in tools)
+    verb = "is" if len(tools) == 1 else "are"
+    if tools == ("docker",):
         remedy = (f"run on a host with a usable docker engine, or inside "
                   f"{IMAGE_HARNESS}, which binds the host engine in")
     else:
         remedy = (f"run inside the EDA image with {IMAGE_HARNESS}, or on a host "
-                  f"where `{tool}` is on PATH")
+                  f"where {names} {verb} on PATH")
     return _nv.not_verified_reason(
-        f"host {host()}: `{tool}` is not on PATH, so this verification could "
-        f"not run", remedy)
+        f"host {host()}: {names} {verb} not on PATH, so this verification "
+        f"could not run", remedy)
+
+
+def require_tools(*tools: str, path: Optional[str] = None) -> None:
+    """Report NOT_VERIFIED, in THIS run, when a tool the next step runs is absent.
+
+    The explicit half of the tier, for the sites the automatic reader above
+    cannot see: a program that turns a missing binary into an rc of its own
+    (``formal_structural_check.run_yosys`` makes FileNotFoundError rc=127, and
+    every obligation downstream reads "refused"), or a test that used to
+    ``return`` -- or skip its tool half -- and so PASSED having verified
+    nothing. Call it at the point the test is about to run the tool, after
+    every assertion that needs no tool.
+
+    Presence is asked of *path* (default: the PATH the test's own subprocess
+    will inherit), so a site whose program prepends directories of its own
+    passes exactly that search path. A tool that IS found returns normally and
+    the test runs and asserts exactly as it did; nothing here can hide a
+    failure of the checked behaviour.
+    """
+    if path is None:
+        path = os.environ.get("PATH", "")
+    missing = [t for t in tools if shutil.which(t, path=path) is None]
+    if missing:
+        pytest.skip(_tool_reason(*missing))
 
 
 def run_conditions(environ=None) -> Dict[str, float]:
@@ -317,20 +367,80 @@ def run_conditions(environ=None) -> Dict[str, float]:
             "load_per_core": load1 / cores}
 
 
-def classify_not_measured(cond: Dict[str, float], message: str) -> Optional[str]:
-    """NOT_MEASURED reason when the run's conditions void a measurement."""
-    why = []
-    if cond["workers"] > 1:
-        why.append(f"xdist workers={int(cond['workers'])} > 1")
-    if cond["load_per_core"] > LOAD_PER_CORE_LIMIT:
-        why.append(f"1-min load per core {cond['load_per_core']:.2f} > "
-                   f"{LOAD_PER_CORE_LIMIT}")
-    if not why:
+#: What a site OBSERVED about its subject's forward progress in the window
+#: its clock ran out on. The site states it; this module never guesses it.
+#:   PROGRESS_SLOW          the subject was seen advancing, just not finishing
+#:                          before the ceiling -- what a loaded host looks like.
+#:   PROGRESS_NONE          the subject was seen doing NOTHING (a stall detector
+#:                          read zero CPU/I-O/output; a cleanup that announced
+#:                          its start and never reached its next event). Load
+#:                          makes work slow; it does not make it stop. A hang,
+#:                          never NOT_MEASURED.
+#:   PROGRESS_UNOBSERVABLE  nothing the site can read tells slow from stuck at
+#:                          this branch. Only then does load alone decide.
+PROGRESS_SLOW = "slow"
+PROGRESS_NONE = "none"
+PROGRESS_UNOBSERVABLE = "unobservable"
+PROGRESS_KINDS = (PROGRESS_SLOW, PROGRESS_NONE, PROGRESS_UNOBSERVABLE)
+
+_PROGRESS_WORDS = {
+    PROGRESS_SLOW: "the subject was seen advancing, just not finishing",
+    PROGRESS_UNOBSERVABLE: "slow and stuck cannot be told apart at this branch",
+}
+
+
+def classify_not_measured(cond: Dict[str, float], message: str, *,
+                          progress: str = PROGRESS_UNOBSERVABLE) -> Optional[str]:
+    """NOT_MEASURED reason when the host's MEASURED load voids a measurement.
+
+    Owner ruling R-0929-ENV-AT-RUNTIME: a load/ceiling state is reported ONLY
+    when the measurement really could not be made under the current
+    conditions; a real behavioural failure stays FAIL. So the one cause is the
+    1-min load per core in *cond* above LOAD_PER_CORE_LIMIT. The xdist worker
+    count is quoted as context and is never a cause by itself: it was, and
+    two reverse mutations (an arm never reaped; prepare() asleep for ever) read
+    NOT_MEASURED at -n 2 on a host at 0.14 and 0.32 load per core.
+
+    *progress* is what the caller OBSERVED (see PROGRESS_KINDS): a subject seen
+    doing nothing is a hang however loaded the host is, so PROGRESS_NONE never
+    converts.
+    """
+    if progress not in PROGRESS_KINDS:
+        raise ValueError(f"progress must be one of {PROGRESS_KINDS}, not {progress!r}")
+    if progress == PROGRESS_NONE:
         return None
-    return (f"{NOT_MEASURED}: host {host()}: {' and '.join(why)} "
-            f"(load1={cond['load1']:.2f} over {int(cond['cores'])} cores); "
-            f"measured: {_one_line(message, 300)} — remedy: this measurement "
-            f"is only trusted in a serial run on a quiet host")
+    if not cond["load_per_core"] > LOAD_PER_CORE_LIMIT:
+        return None
+    return (f"{NOT_MEASURED}: host {host()}: 1-min load per core "
+            f"{cond['load_per_core']:.2f} > {LOAD_PER_CORE_LIMIT} "
+            f"(load1={cond['load1']:.2f} over {int(cond['cores'])} cores; "
+            f"xdist workers={int(cond['workers'])}); progress: "
+            f"{_PROGRESS_WORDS[progress]}; measured: {_one_line(message, 300)} "
+            f"— remedy: this measurement is only trusted on a host whose load "
+            f"per core is at most {LOAD_PER_CORE_LIMIT}")
+
+
+def skip_if_not_measurable(message: str, *, progress: str,
+                           conditions: Optional[Dict[str, float]] = None) -> None:
+    """NOT_MEASURED for ONE branch of a test: the one where its clock ran out.
+
+    ``@pytest.mark.measures`` classifies a WHOLE test, which is wrong for a
+    test that also asserts behaviour. Such a test calls this only inside the
+    branch where its safety ceiling or stall window was actually reached, and
+    then keeps its own ``pytest.fail`` / ``raise`` on the next line.
+
+    *progress* is REQUIRED, so every site states what it saw (PROGRESS_KINDS):
+    PROGRESS_NONE returns at once -- a subject seen doing nothing is a hang --
+    and the other two convert only when the host was MEASURABLY loaded
+    (`classify_not_measured`). *conditions* is `run_conditions()` sampled by
+    the caller AT the ceiling, before it kills or reaps anything; omitted, it
+    is sampled now. On a quiet host this returns -- serial or -n N -- and the
+    ceiling stays a FAIL, which is how a real hang is caught.
+    """
+    cond = run_conditions() if conditions is None else conditions
+    reason = classify_not_measured(cond, message, progress=progress)
+    if reason is not None:
+        pytest.skip(reason)
 
 
 def classify_bookkeeping(mark, message: str) -> Optional[str]:
@@ -357,8 +467,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         f"{MEASURES_MARK}: the test MEASURES wall-clock (ratios, budgets, stall "
-        f"windows); a failure under -n>1 or load/core>{LOAD_PER_CORE_LIMIT} is "
-        f"reported {NOT_MEASURED}, not red (_outcome_states.py).")
+        f"windows); a failure while the MEASURED load/core is above "
+        f"{LOAD_PER_CORE_LIMIT} is reported {NOT_MEASURED}, not red; the xdist "
+        f"worker count alone never is (_outcome_states.py).")
     config.addinivalue_line(
         "markers",
         f"{BOOKKEEPING_MARK}(regenerate=..., match=...): the test's only subject "

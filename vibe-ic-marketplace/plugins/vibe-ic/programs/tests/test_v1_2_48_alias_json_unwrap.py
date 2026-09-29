@@ -54,6 +54,7 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                     "..", "..", "benchmark"))
 import tb_toplevel_alias as A
+import _outcome_states as states  # noqa: E402
 
 
 class _FakeModuleNames:
@@ -230,15 +231,7 @@ def test_param_module_in_json_carries_param_port_list():
         "parameter name 'InWidth_g' must appear on the wrapper header"
 
 
-# ── 7: JSON iverilog compile check (skipped if iverilog absent) ─────────────
-def _has_iverilog():
-    try:
-        subprocess.run(["iverilog", "-V"], capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
-
-
+# ── 7: JSON iverilog compile check (NOT_VERIFIED if iverilog absent) ───────
 def test_json_wrapped_completion_compiles_under_iverilog():
     """Unwrap-then-wrap a clean `mytop` fixture (single-port module with a
     `wire`-declared output, NOT self-driving an input — that would be a
@@ -248,10 +241,12 @@ def test_json_wrapped_completion_compiles_under_iverilog():
     envelope, so this test extracts the FIRST RTL entry's value (which now
     carries the wrapper) and writes THAT to a .sv file for compile.
 
-    Skipped if iverilog is absent (the test environment may lack it).
+    NOT_VERIFIED, naming the host, if iverilog is absent (owner R-0927).
     """
-    if not _has_iverilog():
-        return  # iverilog absent — skip without failing
+    # It used to `return` here, so a host without the tool PASSED it having
+    # verified nothing. Absent tool -> NOT_VERIFIED naming the host (R-0927);
+    # present -> runs exactly as before.
+    states.require_tools("iverilog")
     src = (
         "module mytop (input clk, output reg q);\n"
         "  always @(posedge clk) q <= ~q;\n"

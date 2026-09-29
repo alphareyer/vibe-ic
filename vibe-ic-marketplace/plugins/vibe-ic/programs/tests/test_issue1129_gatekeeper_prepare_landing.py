@@ -67,6 +67,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+import _outcome_states as states  # noqa: E402
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 MOD = PROGRAMS / "gatekeeper_prepare_landing.py"
@@ -346,9 +347,34 @@ def test_the_real_program_runs_against_this_repo_and_honours_its_boundary(
         assert r.returncode == 0, (argv, r.stderr)
     assert not G.dirty_paths(checkout), "the private checkout is not clean"
     programs = checkout / PROGRAMS.relative_to(repo_root)
-    r = _pr.run([sys.executable, "-c", _PREPARE_IN_CHECKOUT, str(programs),
-                 str(checkout)],
-                cwd=str(checkout), capture_output=True, text=True)
+    try:
+        r = _pr.run([sys.executable, "-c", _PREPARE_IN_CHECKOUT, str(programs),
+                     str(checkout)],
+                    cwd=str(checkout), capture_output=True, text=True)
+    except _pr.Stalled as exc:
+        # `Stalled` is not a clock: it is `_progress_run` having LOOKED at the
+        # child's whole process tree N times running and seen every readable
+        # signal sit still. Its CPU reading is CUMULATIVE (live utime+stime
+        # plus the cutime+cstime of reaped children, `_progress_run._cpu_seconds`),
+        # so with CPU or I/O readable a stall is observed ZERO progress: a
+        # loaded host makes this tree slow, never motionless, and a slow tree
+        # is never Stalled (it is waited for, however long). So it is
+        # PROGRESS_NONE and stays the FAIL it is at any load and any -n
+        # (R-0929-ENV-AT-RUNTIME). Reverse mutation M10 -- prepare() asleep
+        # for ever -- read NOT_MEASURED at -n 2 on a host at 0.32 load per
+        # core while this branch keyed on the worker count. MEASURED the other
+        # way too: before the reading counted reaped children, the UNMUTATED
+        # run was reported Stalled after 497 s at 1.6-2.5 load per core on
+        # 8HD-6 while its tree was burning ~1 CPU-s/s. Only a probe that could
+        # read neither CPU nor I/O leaves slow and stuck apart unseen, and only
+        # then may a MEASURABLY loaded host make it NOT_MEASURED.
+        at_stall = states.run_conditions()
+        seen = exc.signals.get("cpu") or exc.signals.get("io")
+        states.skip_if_not_measurable(
+            str(exc), conditions=at_stall,
+            progress=(states.PROGRESS_NONE if seen
+                      else states.PROGRESS_UNOBSERVABLE))
+        raise
     assert r.returncode == 0, r.stderr[-2000:]
     import json
     out = json.loads(r.stdout.strip().splitlines()[-1])
