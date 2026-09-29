@@ -40,9 +40,14 @@ writes `formal_authoring_request.json`, invocation of this skill is mandatory:
 1. Read `property_contract.json` and the request. Preserve every obligation ID.
 2. Bind each unresolved L3/L6/L8 declaration to visible RTL signals. Never guess
    a signal mapping or transcribe an uncheckable prose promise into an assertion.
-3. Author properties in `phase2/stage1/formal/formal_<top>.sv`; update each
-   covered obligation with its exact property name and remove it from
-   `unresolved_obligations` only when the assertion exists.
+3. Author properties in `phase2/stage1/formal/formal_expert_properties.svh`,
+   the fragment the generated harness `formal_<top>.sv` includes — the harness
+   is rewritten by every `formal_harness_gen` run, the fragment never is. Only
+   when no harness could be generated, author `formal_<top>.sv` itself. Each
+   obligation is closed by the program's read-back only when its named
+   assertion exists. The Step-5 signed judgement
+   (`reports/audit/ai_judgements/5.json`) binds the fragment AND the harness,
+   so rerun the producers before signing, and re-sign after any change.
 4. Write `formal_expert_review.json` with `invocation_status: INVOKED`,
    `fallback_skill: formal-verify`, and a `dispositions` list with one
    `AUTHORED`, `DECLARATION_MISSING`, or `UNANSWERABLE` row for every request

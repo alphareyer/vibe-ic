@@ -17,6 +17,8 @@ from typing import Optional, Tuple
 
 SCHEMA = "vibeic.ai-judgement.v1"
 STEPS = frozenset(("D1", "1", "4", "5", "A1", "A2", "A9", "36"))
+#: Step 5's one formal directory (`_path_layout.formal_dir`).
+FORMAL_DIR = "phase2/stage1/formal"
 
 
 def _json(path: Path) -> dict:
@@ -52,13 +54,15 @@ def evidence(project: Path, step_id: str) -> list[Path]:
                       "reports/phase2/gates/professional_tb.json",
                       "phase1/generated_docs/L*.json")
     if sid == "5":
-        # The fragment is where the expert's properties live; a signature that
-        # did not cover it would outlive a weaker property under the same name.
-        return _files(project, "phase2/**/formal_authoring_request.json",
-                      "phase2/**/formal_expert_review.json",
-                      "phase2/**/formal_expert_properties.svh",
-                      "phase2/**/property_contract.json",
-                      "phase1/generated_docs/L*.json")
+        # Expert properties live in the fragment, or in the harness itself
+        # when no harness could be generated; a signature that did not cover
+        # both would outlive a weaker property under the same name. Only the
+        # formal directory's own files: sby copies sources into
+        # <task>/src/, and those scratch copies are not the reviewed bytes.
+        return _files(project, *(f"{FORMAL_DIR}/{name}" for name in (
+            "formal_authoring_request.json", "formal_expert_review.json",
+            "formal_expert_properties.svh", "formal_*.sv",
+            "property_contract.json")), "phase1/generated_docs/L*.json")
     if sid == "A1":
         return _files(project, "phase3/analog/*/spec_gap.json",
                       "phase3/analog/*/spec.json", "phase1/analog/*/spec_gap.json",
@@ -101,9 +105,9 @@ def _requested(project: Path, sid: str) -> bool:
         # formal_harness_gen and formal_property_run delete the request once
         # the expert's answer closes it, so the answer itself keeps the
         # hand-off open until a receipt signs it.
-        return bool(_files(project, "phase2/**/formal_authoring_request.json",
-                            "phase2/**/formal_expert_review.json",
-                            "phase2/**/formal_expert_properties.svh"))
+        return bool(_files(project, f"{FORMAL_DIR}/formal_authoring_request.json",
+                            f"{FORMAL_DIR}/formal_expert_review.json",
+                            f"{FORMAL_DIR}/formal_expert_properties.svh"))
     if sid == "A1":
         return bool(_files(project, "phase3/analog/*/spec_gap.json",
                             "phase1/analog/*/spec_gap.json"))
@@ -155,7 +159,7 @@ def check(project: Path, step_id: str) -> Tuple[bool, str]:
     required_ai_output = {
         "1": ("phase2/stage1/rtl/*.v", "phase2/stage1/rtl/*.sv"),
         "4": ("phase2/**/expert_reference_tb.py",),
-        "5": ("phase2/**/formal_expert_review.json",),
+        "5": (f"{FORMAL_DIR}/formal_expert_review.json",),
         "A1": ("phase3/analog/*/spec.json", "phase1/analog/*/spec.json"),
         "A2": ("phase3/analog/*/topology.json", "phase3/analog/*/topology.md",
                "phase2/analog/*/topology.md"),
