@@ -814,6 +814,10 @@ const _pdkGlobCache = new Map();
 function resolvePdkGlob(absGlob) {
   if (_pdkGlobCache.has(absGlob)) return _pdkGlobCache.get(absGlob);
   const r = dockerExec(`ls -1d ${absGlob} 2>/dev/null || true`, 30000);
+  if (r.success !== true) {
+    throw new Error(`PDK_ASSET_LOOKUP_FAILED: ${absGlob} (exit ${r.exitCode ?? "unknown"}): `
+      + (r.error || r.output || "Docker asset lookup failed without diagnostic"));
+  }
   const hits = String(r.output || "").split("\n").map((x) => x.trim()).filter(Boolean);
   if (hits.length === 1) _pdkGlobCache.set(absGlob, hits);
   return hits;
