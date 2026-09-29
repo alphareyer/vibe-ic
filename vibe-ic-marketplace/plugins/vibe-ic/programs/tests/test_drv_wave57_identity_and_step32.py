@@ -140,7 +140,11 @@ def test_an_adopted_candidate_is_handed_off_and_step32_carries_the_drv_fail(tmp_
     report = {"verdict": "FAIL", "adopted": "32-cand01", "code": "LL_PRR_FANOUT_VIOLATION",
               "drv_signoff_verdict": "FAIL",
               "drv_signoff": {"failures": ["u/Y max_fanout 9 > 4"], "not_measured": []},
-              "baseline": {"drv_count": 9}, "final": {"drv_count": 1}}
+              "baseline": {"drv_count": 9},
+              # main's cmp3 D15: the promoter measured its own output
+              "final": {"drv_count": 1, "antenna_nets": 0, "antenna_pins": 0},
+              "candidates": [{"candidate": "32-cand01", "repair_metrics": {
+                  "vibeic__prr__unrouted__added": 0}}]}
     row = R._postroute_repair_librelane_result(project, pnr, report, 0.0,
                                                handed=True, top="top")
     assert handed, "the adopted candidate must be handed off"
@@ -173,7 +177,10 @@ def test_the_in_chain_handoff_follows_adoption_not_the_verdict(tmp_path, monkeyp
     def fake_run_in_chain(project, **kw):
         _file(project, llprr.REPORT_REL, "{}")
         return {"verdict": "FAIL", "adopted": "32-cand01", "adopted_state": cand["path"],
-                "drv_signoff_verdict": "NOT_MEASURED"}
+                "drv_signoff_verdict": "NOT_MEASURED",
+                "final": {"antenna_nets": 0, "antenna_pins": 0},
+                "candidates": [{"candidate": "32-cand01", "repair_metrics": {
+                    "vibeic__prr__unrouted__added": 0}}]}
 
     monkeypatch.setattr(llprr, "run_in_chain", fake_run_in_chain)
     monkeypatch.setattr(ll, "digest", lambda path: "0" * 64)
