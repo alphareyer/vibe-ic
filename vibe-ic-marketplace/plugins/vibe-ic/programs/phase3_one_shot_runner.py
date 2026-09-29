@@ -3287,6 +3287,7 @@ def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, obj
 from sdc_environment import (  # R-0929-PAD-INPUT-DRIVE
     _pad_input_drive as _sdc_pad_input_drive,
     write_pad_input_drive_record as _sdc_write_pad_input_drive,
+    pad_drive_sdc_lines as _sdc_pad_drive_sdc_lines,
 )
 from sdc_environment import (  # R8 constraints, outside the PPA runner ledger
     _SDC_ENV_KEYS, _sdc_environment_values, _sdc_environment_prefix,
@@ -4510,9 +4511,11 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
     # Step-23 STA verdict, which cannot PASS on a NOT_MEASURED drive.
     _env, _pad_drive = _sdc_pad_input_drive(project, _env, container,
                                             _to_container_path)
+    _pad_drive["sdc_lines"] = _sdc_pad_drive_sdc_lines(_pad_drive, _tu_scale)
     try:
         _sdc_write_pad_input_drive(project, _pad_drive)
     except OSError:
+        # No record on a DIE top reads NOT_MEASURED downstream (fail closed).
         pass
     sdc_text += _sdc_environment_prefix(_env, _env_unread, time_scale=_tu_scale,
                                         pad_drive=_pad_drive)
