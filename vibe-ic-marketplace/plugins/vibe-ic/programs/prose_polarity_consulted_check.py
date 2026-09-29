@@ -151,6 +151,26 @@ _NOT_PROSE: Dict[str, str] = {
         "unknown rule identifiers remain NOT_MEASURED rather than receiving "
         "a guessed ratio. Falsifier: tests/test_die_density_finish.py::"
         "test_density_specs_ignore_comment_claims_and_refuse_missing_layers.",
+    "phase3_one_shot_runner::_emit_erc_report":
+        "ONE OPENROAD DIAGNOSTIC RECORD. The whole line is anchored to an "
+        "optional [INFO]/[WARNING]/[ERROR] code, optional 'found', a decimal "
+        "count, then 'floating nets' or 'floating pins'; arbitrary surrounding "
+        "words and negations cannot match. Missing or failed count records "
+        "produce NOT_DETERMINED, never a clean zero. Falsifier: "
+        "tests/test_phase3_signoff_chain_organic.py::TestErcReport::"
+        "test_missing_openroad_count_is_not_zero.",
+    "isa_suite_producer::objdump_guard":
+        "OBJDUMP INSTRUCTION GRAMMAR, NOT PROSE. The reader accepts only a "
+        "line-start hexadecimal address, then one four- or eight-hex-digit "
+        "instruction parcel and one mnemonic token; its anchored expression "
+        "does not capture comments, operands, or free text. A denial therefore "
+        "cannot reverse a decoded instruction: text such as `not c.nop` does "
+        "not make a parcel or mnemonic and is ignored, while a real c.nop "
+        "parcel is caught by the calibrated RVC fixture. A malformed or absent "
+        "instruction is not granted a clean result: it simply contributes no "
+        "decoded instruction and the actual built image remains independently "
+        "size-guarded. The fixed syntax has no negation production, and the "
+        "positive calibration includes a real CSR/system mnemonic as a control.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "
@@ -245,6 +265,16 @@ _NOT_PROSE: Dict[str, str] = {
         "None when the header is absent, so an unwritten section is "
         "NOT_MEASURED, never zero. Calibrated on real STAPrePNR checks.rpt "
         "pairs (instrument_calibration).",
+    "librelane_prelayout::pre_pnr_setup_gate":
+        "TWO CLOSED MACHINE RECORDS, NOT SENTENCES. The Step 7 PVT matrix is "
+        "JSON with name, label and Liberty path fields. The Step 10 report "
+        "carries exact STA_BASIS_CORNER, PVT_NAME, LIBERTY and SHA256 lines "
+        "that the runner writes from its resolved inputs. The reader requires "
+        "all fields to equal the current selection and digest; an absent or "
+        "negated path has no grammar production and returns NOT_MEASURED, "
+        "never PASS. Falsifier: test_timing_driven_pre_pnr_setup.py::"
+        "test_setup_gate_rejects_changed_liberty_or_pvt_mapping mutates the "
+        "library, mapping and stamp, and observes the named stale refusal.",
     "drc_feedback_repair::_def_nets":
         "DEF is a closed machine grammar: UNITS DISTANCE MICRONS, NETS, "
         "ROUTED and END NETS are parser tokens, not sentences. A denial such "
@@ -1479,6 +1509,20 @@ _NOT_PROSE: Dict[str, str] = {
         "DEF UNITS and SPECIALNETS ROUTED/NEW wire productions are formal layout "
         "grammar. Width tokens cannot be negated in that grammar; missing or "
         "unreadable declarations already produce an empty measured authority.",
+    "em_current_density_check::_def_via_cuts":
+        "DEF VIAS LAYERS/ROWCOL/RECT and SPECIALNETS coordinate-plus-via-name "
+        "productions are fixed layout grammar, not natural-language claims. "
+        "Their numeric cut counts have no negated form. A missing definition, "
+        "unknown name, ambiguous placement, or missing matching cut layer "
+        "produces no cut count and leaves the EM segment unscreened; the "
+        "unmatched-via regression proves that this cannot yield PASS.",
+    "em_current_density_check::_def_via_array_index":
+        "DEF VIAS CUTSIZE/CUTSPACING/ROWCOL/RECT and SPECIALNETS via placement "
+        "are fixed machine grammar with numeric coordinates and no negated "
+        "form. A missing definition, ambiguous placement, or unmatched cut "
+        "layer yields no exact array count; an over-limit one-cut bound then "
+        "stays NOT_MEASURED. The split-array and missing-geometry EM tests "
+        "exercise that refusal.",
     "pdk_analog_characterize::simulator_provenance":
         "The scan reads ngspice's machine/tool version banner, not a design "
         "document. A version token has no surrounding natural-language denial "

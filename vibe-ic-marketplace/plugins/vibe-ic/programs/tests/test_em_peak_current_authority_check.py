@@ -103,6 +103,73 @@ def _run(proj: Path, *args) -> subprocess.CompletedProcess:
         capture_output=True, text=True)
 
 
+def test_psm_resistor_identity_authorizes_exact_multicut_pass(tmp_path):
+    project = _project(tmp_path, peak="3.0e-04", power="1.0e-03",
+                       volt="1.0", with_csv=True)
+    reports = project / "reports/phase3"
+    lef = project / "tech.lef"
+    lef.write_text("""
+LAYER lower
+  TYPE ROUTING ;
+  WIDTH 1 ;
+  DCCURRENTDENSITY AVERAGE 1 ;
+END lower
+LAYER cut
+  TYPE CUT ;
+  RESISTANCE 4.5 ;
+  DCCURRENTDENSITY AVERAGE 0.18 ;
+END cut
+LAYER upper
+  TYPE ROUTING ;
+  WIDTH 1 ;
+  DCCURRENTDENSITY AVERAGE 1 ;
+END upper
+""")
+    routed = project / "phase3/stage3/pnr/routed.def"
+    routed.write_text("""
+UNITS DISTANCE MICRONS 1000 ;
+VIAS 1 ;
+  - array + CUTSIZE 200 200 + CUTSPACING 200 200
+    + LAYERS lower cut upper + ROWCOL 1 3 ;
+END VIAS
+SPECIALNETS 1 ;
+  - PWRNET + USE POWER + ROUTED lower 1000 ( 10000 10000 ) array ;
+END SPECIALNETS
+""")
+    csv_path = reports / "em_segments.csv"
+    csv_path.write_text(
+        "Net,Node0 Layer,Node0 X location,Node0 Y location,"
+        "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
+        "PWRNET,lower,10,10,upper,10,10,3.0e-04\n")
+    em = json.loads((reports / "em.json").read_text())
+    em["subject_def_sha256"] = hashlib.sha256(routed.read_bytes()).hexdigest()
+    (reports / "em.json").write_text(json.dumps(em))
+    resistors = reports / "em_psm_via_resistors.tsv"
+    resistors.write_text(
+        "net\tlayer0\tx0_dbu\ty0_dbu\tlayer1\tx1_dbu\ty1_dbu\tresistance_ohm\n"
+        "PWRNET\tlower\t10000\t10000\tupper\t10000\t10000\t1.5\n")
+    manifest = {
+        "def_sha256": em["subject_def_sha256"],
+        "em_segments_sha256": hashlib.sha256(csv_path.read_bytes()).hexdigest(),
+        "resistors_file": resistors.name,
+        "resistors_sha256": hashlib.sha256(resistors.read_bytes()).hexdigest(),
+    }
+    subject = reports / "em_psm_via_resistors_subject.json"
+    subject.write_text(json.dumps(manifest))
+    good = _run(project, "--tech-lef", lef, "--json", tmp_path / "good.json")
+    good_rep = json.loads((tmp_path / "good.json").read_text())
+    assert good.returncode == 0, good_rep
+    assert good_rep["jmax_screen"]["summary"]["segments_screened"] == 1
+    assert good_rep["jmax_screen"]["worst_segments"][0]["cut_count"] == 3
+    manifest["em_segments_sha256"] = "stale"
+    subject.write_text(json.dumps(manifest))
+    stale = _run(project, "--tech-lef", lef, "--json", tmp_path / "stale.json")
+    stale_rep = json.loads((tmp_path / "stale.json").read_text())
+    assert stale.returncode == 2, stale_rep
+    assert stale_rep["jmax_screen"]["verdict"] == "NOT_MEASURED"
+    assert stale_rep["jmax_screen"]["summary"]["segments_unscreened"] == 1
+
+
 # ── the DECISION ───────────────────────────────────────────────────────────
 def test_peak_over_supply_current_fails(tmp_path):
     """5.0 A on a net supplied with 7.44e-04 A is a contradiction inside one

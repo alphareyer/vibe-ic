@@ -342,10 +342,28 @@ def jmax_tier(project: Path, jmax: Optional[Path], tech_lef: Optional[Path],
                     geometry_path = candidate_geometry
         except (OSError, ValueError, TypeError):
             pass
+    psm_via_path = None
+    if local_def:
+        try:
+            subject = json.loads((project / "reports/phase3" /
+                                  "em_psm_via_resistors_subject.json").read_text())
+            name = subject.get("resistors_file")
+            candidate = project / "reports/phase3" / name
+            if (subject.get("def_sha256") == digest and
+                    subject.get("em_segments_sha256") ==
+                    hashlib.sha256(em_path.read_bytes()).hexdigest() and
+                    isinstance(name, str) and Path(name).name == name and
+                    candidate.is_file() and
+                    hashlib.sha256(candidate.read_bytes()).hexdigest() ==
+                    subject.get("resistors_sha256")):
+                psm_via_path = candidate
+        except (OSError, ValueError, TypeError):
+            pass
     verdict, rep = emc.evaluate(em_path, jpath, tlef, margin,
                                 emc._DEFAULT_BLACKS_N, net_hint, 20,
                                 def_path=local_def,
-                                pg_geometry_path=geometry_path)
+                                pg_geometry_path=geometry_path,
+                                psm_via_resistors_path=psm_via_path)
     return {"verdict": verdict, "skip_reason": rep.get("skip_reason"),
             "jmax_source": rep.get("jmax_source"),
             "summary": rep.get("summary"),

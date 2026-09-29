@@ -19212,14 +19212,16 @@ def _step_pdk_hasher(container: str, *, use_cache: bool = True):
     there, otherwise inside the container.
 
     Cached per (container, paths) for the life of the process, so the three
-    kinds do not pay for the same five files three times.
+    kinds do not pay for the same five files three times. Callers that test a
+    mutable live Liberty for pre-layout report reuse request ``fresh=True``.
 
     A probe that fails returns nothing for that path, and
     `_step_identity.pdk_digest` then REFUSES — an unreadable PDK is not a
     matching PDK."""
-    def _hash(paths: Sequence[str]) -> Dict[str, str]:
+    def _hash(paths: Sequence[str], *, fresh: bool = False) -> Dict[str, str]:
         key = (container or "", tuple(paths))
-        hit = _STEP_PDK_HASH_CACHE.get(key) if use_cache else None
+        hit = (_STEP_PDK_HASH_CACHE.get(key)
+               if use_cache and not fresh else None)
         if hit is not None:
             return hit
         out: Dict[str, str] = {}
@@ -19252,7 +19254,7 @@ def _step_pdk_hasher(container: str, *, use_cache: bool = True):
                         out[parts[1].strip()] = parts[0]
             except Exception:  # noqa: BLE001 — a failed probe is not a match
                 pass
-        if use_cache:
+        if use_cache and not fresh:
             _STEP_PDK_HASH_CACHE[key] = out
         return out
     return _hash
@@ -59532,7 +59534,9 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
         # composed report is always re-derived from THIS run.
         import librelane_prelayout as _llp
         _ll_reports = _llp.compose_corner_reports(
-            _ll["folder"], per_corner, _classify_corner_from_name)
+            _ll["folder"], per_corner, _classify_corner_from_name,
+            hash_liberty=lambda path: _prelayout_liberty_identity(
+                Path(path), container)[1])
         written.append(str(per_corner))
         pre_pnr.unlink(missing_ok=True)
     elif runner_sdc.is_file():
@@ -59547,19 +59551,73 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
             import librelane_prelayout as _llp
             _arm = project / "phase3/tool_arms/10/librelane/per_corner"
             _llp.compose_corner_reports(_ll["folder"], _arm,
-                                        _classify_corner_from_name)
+                                        _classify_corner_from_name,
+                                        hash_liberty=lambda path:
+                                        _prelayout_liberty_identity(
+                                            Path(path), container)[1])
             notes.append(f"step 10 dual: LibreLane arm reports in "
                          f"{_arm.relative_to(project)}; direct arm published")
     # Compose pre_pnr_timing.rpt from a GENUINE per-corner report (setup-worst
     # SS preferred, else TT/FF/any) — NOT a copy of the post-route sta.rpt.
-    # Re-compose when a stale pre_pnr_timing.rpt from an earlier post-route
-    # round is present: its body would carry STA_BASIS: POST_ROUTE_* under this
-    # step's PRE-LAYOUT header — the precise contradiction sta_report_check
-    # flags. A genuinely pre-layout report (or an absent one) is left alone.
+    # Re-compose when the basis or the timed inputs changed. A PRE_LAYOUT
+    # stamp alone cannot bind an old result to this netlist and SDC.
     pre_pnr = sta_out / "pre_pnr_timing.rpt"
+    _pre_nl_sha = _file_sha256(_pl.synth_dir(project) / f"{top}_synth.v")
+    _pre_sdc_sha = _file_sha256(runner_sdc)
+    import librelane_prelayout as _llp
+    try:
+        _matrix_rows = json.loads(pvt_path.read_text()).get("corners", [])
+    except (OSError, ValueError, TypeError):
+        _matrix_rows = []
+    _matrix_libs = {}
+    for _row in _matrix_rows:
+        if not isinstance(_row, dict):
+            continue
+        _label = _row.get("label")
+        _selected = _llp.matrix_liberty_path(pvt_path, _row.get("liberty"))
+        _selection = (_row.get("name"), _selected)
+        _matrix_libs[_label] = (_selection if _label not in _matrix_libs
+                                else None)  # duplicate process selection is ambiguous
+    if _ll and _ll_modes["10"] == "librelane":
+        import librelane_prelayout as _llp
+        _active = _llp.pvt_matrix_from_sta_corners(
+            _ll["resolved"], _ll["folder"], _classify_corner_from_name)
+        _pre_libs = {
+            row["label"]: (str(row["liberty"]),
+                           _prelayout_liberty_identity(
+                               Path(row["liberty"]), container)[1], row["name"])
+            for row in _active["corners"]
+            if isinstance(row.get("liberty"), str)
+        }
+    else:
+        _pre_libs = {
+            _classify_corner_from_name(lib.name): _prelayout_liberty_identity(lib, container)
+            for lib in staged_libs
+        }
+    _pvt_selection_ok = all(
+        _matrix_libs.get(corner) == (identity[2], identity[0])
+        for corner, identity in _pre_libs.items())
+    if not _pvt_selection_ok:
+        notes.append("PRELAYOUT_PVT_SELECTION_STALE: pvt_matrix.json does not "
+                     "name the Liberty selection timed by Step 10")
+
+    def _current_prelayout_report(body: str) -> bool:
+        _corner_match = re.search(r"(?m)^STA_BASIS_CORNER: (\S+)$", body)
+        _corner = _corner_match.group(1) if _corner_match else None
+        return bool(
+            _sta_basis.declared_basis(body) == "PRE_LAYOUT"
+            and _pre_nl_sha and _pre_sdc_sha
+            and _corner in _pre_libs
+            and _matrix_libs.get(_corner) == (_pre_libs[_corner][2],
+                                               _pre_libs[_corner][0])
+            and _prelayout_report_liberty_matches(body, _corner, _pre_libs[_corner])
+            and re.search(r"(?m)^STA_BASIS_NETLIST_SHA256: "
+                          + re.escape(_pre_nl_sha) + r"$", body)
+            and re.search(r"(?m)^STA_BASIS_SDC_SHA256: "
+                          + re.escape(_pre_sdc_sha) + r"$", body))
+
     _pre_pnr_stale = (pre_pnr.is_file()
-                      and _sta_basis.declared_basis(pre_pnr.read_text())
-                      != "PRE_LAYOUT")
+                      and not _current_prelayout_report(pre_pnr.read_text()))
     if not pre_pnr.is_file() or _pre_pnr_stale:
         # BLOCKING-1 (2026-08-05 review). The source must be chosen by what the
         # corner report DECLARES, not by its filename. Forcing the basis in
@@ -59575,8 +59633,7 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
         # does not own.
         def _prelayout_src(cand: Path) -> bool:
             try:
-                return (_sta_basis.declared_basis(cand.read_text())
-                        == "PRE_LAYOUT")
+                return _current_prelayout_report(cand.read_text())
             except OSError:
                 return False
 
@@ -59598,9 +59655,8 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
             notes.append(
                 "pre-layout compose REFUSED corner report(s) "
                 + ", ".join(_rejected)
-                + " — they do not declare STA_BASIS PRE_LAYOUT, and a "
-                  "pre-layout report composed from a post-route body is the "
-                  "contradiction this step exists to remove")
+                + " — they do not declare current PRE_LAYOUT netlist/SDC/Liberty "
+                  "identity; an unbound report cannot establish current timing")
         if src is not None:
             pre_pnr.write_text(
                 "# PRE-LAYOUT STA (Step 10) — genuine OpenSTA on the synth\n"
@@ -59633,10 +59689,14 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     # Step 10 scoring MISSING against an absent report is the honest outcome,
     # and a WARN says so where the run can see it.
     _pre_pnr_basis: Optional[str] = None
+    # This combined Step-7/10 producer may have no corner output when its
+    # tool is unavailable; the later pre-PnR gate records NOT_MEASURED and
+    # blocks PnR. Preserve this step's established SDC/PVT result in that case.
     _pre_pnr_ok = True
     if pre_pnr.is_file():
-        _pre_pnr_basis = _sta_basis.declared_basis(pre_pnr.read_text())
-        if _pre_pnr_basis != "PRE_LAYOUT":
+        _pre_pnr_body = pre_pnr.read_text()
+        _pre_pnr_basis = _sta_basis.declared_basis(_pre_pnr_body)
+        if not _current_prelayout_report(_pre_pnr_body):
             _pre_pnr_ok = False
             if _pre_pnr_basis == "POST_ROUTE":
                 _q = pre_pnr.parent / (pre_pnr.name + ".stale_basis")
@@ -59655,6 +59715,20 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                         f"pre_pnr_timing.rpt declares POST_ROUTE and could "
                         f"NOT be quarantined ({exc}) — a post-route body is "
                         f"published under a PRE-LAYOUT header")
+            elif _pre_pnr_basis == "PRE_LAYOUT":
+                _q = pre_pnr.parent / (pre_pnr.name + ".stale_input")
+                try:
+                    pre_pnr.replace(_q)
+                    notes.append(
+                        "pre_pnr_timing.rpt has stale/absent netlist, SDC or Liberty "
+                        f"identity and no current corner could replace it; "
+                        f"quarantined to {_q.name}; Step 10 is MISSING")
+                    if str(pre_pnr) in written:
+                        written.remove(str(pre_pnr))
+                except OSError as exc:
+                    notes.append(
+                        f"pre_pnr_timing.rpt input identity is stale and "
+                        f"could NOT be quarantined ({exc})")
             else:
                 notes.append(
                     "pre_pnr_timing.rpt carries NO recognised STA_BASIS stamp "
@@ -59665,7 +59739,7 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     # Step 7's declared SDC is now written in BOTH cases (FX_STEP7_ASIC_SDC),
     # so it is part of the predicate unconditionally.
     ok = runner_sdc.is_file() and pvt_path.is_file() and (
-        canon_sdc.is_file()) and _pre_pnr_ok
+        canon_sdc.is_file()) and _pre_pnr_ok and _pvt_selection_ok
     detail = (f"pre-layout stage-2 sign-off emitted BEFORE PnR: "
               f"{len(written)} artefact(s)"
               + ("; " + "; ".join(notes[-2:]) if notes else ""))
@@ -59675,7 +59749,8 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
         # reads clean at a glance, which is the whole failure mode.
         detail = (f"pre-layout basis UNSUBSTANTIATED "
                   f"(pre_pnr_timing.rpt declared "
-                  f"{_pre_pnr_basis or 'no STA_BASIS'}, not PRE_LAYOUT) — "
+                  f"{_pre_pnr_basis or 'no STA_BASIS'}; basis or input identity "
+                  f"is not current PRE_LAYOUT) — "
                   + detail)
     # Tool path: the gates judge the tool's own output, and they block.
     _ll_verdicts = [(step, _ll[key]) for step, key in (("8", "sdc"), ("10", "slack"))
@@ -65733,6 +65808,32 @@ def _reused_report_basis(rpt: Path) -> Tuple[Optional[str], Optional[str]]:
     return (raw, _sta_basis.declared_basis(text))
 
 
+def _prelayout_liberty_identity(lib: Path, container: str) -> Tuple[str, Optional[str], str]:
+    """Identify the bytes OpenSTA reads, including container-resident PDKs.
+
+    Host-staged files are hashed afresh: a same-process retry may follow an
+    edit, so the general PDK hasher's process cache is unsuitable for them.
+    """
+    path = str(lib)
+    host_sha = _file_sha256(lib)
+    if host_sha:
+        return path, host_sha, lib.stem
+    remote_sha = _step_pdk_hasher(container)([path], fresh=True).get(path)
+    return path, "sha256:" + remote_sha if remote_sha else None, lib.stem
+
+
+def _prelayout_report_liberty_matches(
+        body: str, corner: str,
+        identity: Tuple[str, Optional[str], str]) -> bool:
+    """A cached corner is current only for its actual PVT/library selection."""
+    path, sha, pvt_name = identity
+    return bool(sha and all(re.search(
+        rf"(?m)^STA_BASIS_{field}: {re.escape(value)}$", body)
+        for field, value in (("CORNER", corner), ("LIBERTY", path),
+                             ("LIBERTY_SHA256", sha),
+                             ("PVT_NAME", pvt_name))))
+
+
 # OpenSTA's unresolved-master warning. The phrase "Creating black box" is the
 # stable part across OpenSTA versions; the `Warning 198` number is not matched
 # so a renumbering upstream cannot silently disable this check.
@@ -65820,6 +65921,10 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
     # audit never raises. `MISSING` normalises to None, which the forced path
     # below treats as "not reusable" — the fail-safe direction.
     basis_norm = _sta_basis.normalise_basis(basis)
+    # A matching PRE_LAYOUT stamp alone is not a current measurement: the
+    # netlist or SDC may have been replaced after this report was written.
+    _pre_nl_sha = _file_sha256(netlist) if force_prelayout else None
+    _pre_sdc_sha = _file_sha256(sdc_path) if force_prelayout else None
     any_emitted = False
     # Corner reports REUSED from a previous call, bucketed by whether their own
     # stamped basis agrees with the basis the inputs now resolve to. See the
@@ -65828,6 +65933,8 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
     reused_unstamped: List[str] = []
     for lib in libs:
         corner = _classify_corner_from_name(lib.name)
+        _lib_identity = (_prelayout_liberty_identity(lib, container)
+                         if force_prelayout else None)
         rpt = out_dir / f"sta_{corner}.rpt"
         # Existence-only reuse is correct for the post-route caller, but a
         # FORCED pre-layout emit must NOT reuse a stale report left by an
@@ -65893,8 +66000,20 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
             # `_reused_report_basis` also absorbs the read error a bare
             # `rpt.read_text()` would raise out of this loop.
             _existing_raw, _existing_norm = _reused_report_basis(rpt)
-            if not force_prelayout or (basis_norm is not None
-                                       and _existing_norm == basis_norm):
+            _inputs_match = True
+            if force_prelayout:
+                try:
+                    _old_body = rpt.read_text(errors="replace")
+                    _inputs_match = bool(
+                        _pre_nl_sha and _pre_sdc_sha
+                        and f"STA_BASIS_NETLIST_SHA256: {_pre_nl_sha}" in _old_body
+                        and f"STA_BASIS_SDC_SHA256: {_pre_sdc_sha}" in _old_body
+                        and _prelayout_report_liberty_matches(
+                            _old_body, corner, _lib_identity))
+                except OSError:
+                    _inputs_match = False
+            if _inputs_match and (not force_prelayout or (basis_norm is not None
+                                                          and _existing_norm == basis_norm)):
                 if _existing_norm is None:
                     # Unreadable, unstamped, or an unrecognised token: cannot be
                     # confirmed to match, so disclose as unverified — never as
@@ -65919,12 +66038,15 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
             # next to it under a non-`.rpt` suffix so nothing globbing
             # `sta_*.rpt` can re-adopt them, and a reader can still see what
             # was displaced.
-            _quar = rpt.parent / (rpt.name + ".stale_basis")
+            _quar = rpt.parent / (rpt.name + (
+                ".stale_basis" if _existing_norm != basis_norm
+                else ".stale_input"))
             try:
                 rpt.replace(_quar)
                 notes.append(
                     f"forced pre-layout STA: quarantined {corner} report "
-                    f"declaring basis {_existing_raw or 'UNDECLARED'} -> "
+                    f"declaring basis {_existing_raw or 'UNDECLARED'} "
+                    f"(input identity {'matched' if _inputs_match else 'stale/absent'}) -> "
                     f"{_quar.name} before re-emit (a failed re-emit must "
                     f"leave NO report, never a mislabelled one)")
             except OSError as exc:
@@ -66026,6 +66148,15 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
                 f"netlist's technology and that every hard-macro .lib is staged.")
         else:
             any_emitted = True
+            if force_prelayout and _pre_nl_sha and _pre_sdc_sha:
+                with rpt.open("a") as _sta_out:
+                    _sta_out.write(
+                        f"STA_BASIS_NETLIST_SHA256: {_pre_nl_sha}\n"
+                        f"STA_BASIS_SDC_SHA256: {_pre_sdc_sha}\n"
+                        f"STA_BASIS_CORNER: {corner}\n"
+                        f"STA_BASIS_LIBERTY: {_lib_identity[0]}\n"
+                        f"STA_BASIS_LIBERTY_SHA256: {_lib_identity[1] or 'UNAVAILABLE'}\n"
+                        f"STA_BASIS_PVT_NAME: {_lib_identity[2]}\n")
             # The corner LINKED and its report survives, so now it
             # is an artefact this run can be held to.
             _log_surviving_artefact(
@@ -70303,7 +70434,10 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     for old in (em_geometry, out_dir / "em_pg_geometry_subject.json",
                 out_dir / "em_segments.csv", out_dir / "em_openroad_density.json",
                 out_dir / "em_openroad_ab.json", _em_limits,
+                out_dir / "em_psm_via_resistors.tsv",
+                out_dir / "em_psm_via_resistors_subject.json",
                 *(out_dir / f"em_segments_{net}.csv" for net in psm_nets),
+                *(out_dir / f"em_psm_{net}.spice" for net in psm_nets),
                 *(out_dir / f"em_openroad_density_{net}.csv" for net in psm_nets)):
         try:
             old.unlink()
@@ -70332,6 +70466,7 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     psm_blocks = []
     for net in psm_nets:
         _net_csv = f"{out_dir_c}/em_segments_{net}.csv"
+        _net_spice = f"{out_dir_c}/em_psm_{net}.spice"
         _density_csv = f"{out_dir_c}/em_openroad_density_{net}.csv"
         _density_tcl = (
             f'if {{[catch {{check_current_density -net {net} '
@@ -70344,7 +70479,11 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
             f'if {{[catch {{analyze_power_grid -net {net} -enable_em '
             f'-em_outfile {_net_csv}}} _psm_err]}} {{\n'
             f'  puts "PSM_NONFATAL {net}: $_psm_err"\n'
-            f'}} else {{\n{_density_tcl}}}\n')
+            f'}} else {{\n{_density_tcl}'
+            f'  if {{[catch {{write_pg_spice -net {net} {_net_spice}}} '
+            f'_psm_spice_err]}} {{\n'
+            f'    puts "PSM_VIA_RESISTORS_UNAVAILABLE {net}: $_psm_spice_err"\n'
+            f'  }}\n}}\n')
     # #362 — select the liberty's own operating condition when it declares
     # one but names no default. Without this PSM cannot determine the supply
     # voltage and aborts PSM-0079, taking static IR and EM with it. Emitted
@@ -70469,6 +70608,25 @@ catch {{set_wire_rc -clock -layer {mp}5}}
                     _n += 1
                 _psm_segment_counts[_net] = _n
     os.replace(_temp_name, _merged)
+    _spices = {net: out_dir / f"em_psm_{net}.spice" for net in psm_nets}
+    if _header_written and _spices and all(p.is_file() for p in _spices.values()):
+        try:
+            _compact = _emcd.compact_psm_spice_vias(_spices)
+            _resistors = out_dir / "em_psm_via_resistors.tsv"
+            _aa.write_text(_resistors, _compact)
+            _aa.write_text(out_dir / "em_psm_via_resistors_subject.json",
+                           json.dumps({
+                               "schema": "em_psm_via_resistors/1",
+                               "def_sha256": hashlib.sha256(def_file.read_bytes()).hexdigest(),
+                               "em_segments_sha256": hashlib.sha256(
+                                   _merged.read_bytes()).hexdigest(),
+                               "resistors_file": _resistors.name,
+                               "resistors_sha256": hashlib.sha256(
+                                   _resistors.read_bytes()).hexdigest(),
+                               "producer": "OpenROAD PSM write_pg_spice after analyze_power_grid",
+                           }, indent=2) + "\n")
+        except (OSError, ValueError) as _resistor_error:
+            notes.append(f"PSM via-resistor proof unavailable: {_resistor_error}")
     _density_rows = {}
     for _net in psm_nets:
         _path = out_dir / f"em_openroad_density_{_net}.csv"
@@ -73557,8 +73715,28 @@ exit
     erc_lines = [ln for ln in log.splitlines()
                  if re.search(r"floating|erc|unconnect|ERC-", ln, re.I)
                  or _name_re.match(ln)]
-    floating_m = re.search(r"(\d+)\s+floating net", log, re.I)
-    floating = int(floating_m.group(1)) if floating_m else 0
+    # OpenROAD can report floating *pins* without a "floating nets" line.
+    # Keep the historical floating_nets field as the combined finding count
+    # consumed by erc_density_check, and disclose each kind separately.
+    float_counts = {"net": 0, "pin": 0}
+    # These are complete OpenROAD diagnostic records, never a fragment of
+    # arbitrary prose. An absent or failed record is unmeasured, not zero.
+    count_lines = list(re.finditer(
+        r"(?im)^\s*(?:\[(?:INFO|WARNING|ERROR)(?: [A-Z0-9-]+)?\]\s*)?"
+        r"(?:found\s+)?(\d+)\s+floating\s+(nets?|pins?)\.?(?:\s*)$", log))
+    # Tcl catches these commands, so OpenROAD can exit zero after one failed
+    # while the other command has left a plausible zero-count diagnostic.
+    measurement_errors = re.findall(
+        r"(?m)^[ \t]*ERC_(?:FN|METRICS)_NONFATAL:[^\r\n]*", log)
+    for match in count_lines:
+        kind = "net" if match.group(2).lower().startswith("net") else "pin"
+        float_counts[kind] = max(float_counts[kind], int(match.group(1)))
+    floating = (sum(float_counts.values())
+                if count_lines and rc == 0 and not measurement_errors else None)
+    not_determined_reason = ("ERC_SUBCOMMAND_FAILED" if measurement_errors
+                             else "ERC_TOOL_FAILED" if rc != 0
+                             else "ERC_COUNT_MISSING" if not count_lines
+                             else None)
     # v0.3.16 #514: classify the verbose floats by owner so the runner can
     # tell benign design-for-ECO spare-cell I/O from a real functional
     # float. Best-effort (the classifier lives in its own program).
@@ -73576,9 +73754,15 @@ exit
         "# electrical-rule screen (floating nets + ERC metrics) on the\n"
         "# routed DEF. Full PERC (latch-up / ESD topology) needs Calibre.\n"
         "#\n"
-        f"ERC floating nets: {floating}\n"
-        f"ERC clean: {'YES' if floating == 0 else 'NO (review floating nets)'}\n"
-        "\n# === report_floating_nets / report_erc_metrics stdout ===\n"
+        f"ERC floating nets: {floating if floating is not None else 'NOT_DETERMINED'}\n"
+        f"ERC floating net count: {float_counts['net'] if floating is not None else 'NOT_DETERMINED'}\n"
+        f"ERC floating pin count: {float_counts['pin'] if floating is not None else 'NOT_DETERMINED'}\n"
+        f"ERC clean: {'YES' if floating == 0 else 'NOT_DETERMINED' if floating is None else 'NO (review floating nets)'}\n"
+        + (f"ERC not determined reason: {not_determined_reason}\n"
+           if not_determined_reason else "")
+        + ("ERC measurement errors: " + "; ".join(measurement_errors) + "\n"
+           if measurement_errors else "")
+        + "\n# === report_floating_nets / report_erc_metrics stdout ===\n"
         + ("\n".join(erc_lines) or "(no ERC lines captured)") + "\n"
         "\n# === full ERC log (last 2 KB) ===\n" + log[-2000:] + "\n"
         "# end of erc.rpt\n")
@@ -73587,12 +73771,17 @@ exit
     # (design-for-ECO spare-cell I/O) is waiver-eligible, not a raw REVIEW.
     _benign = bool(erc_classification
                    and erc_classification.get("classification") == "benign-ERC")
-    _erc_verdict = ("PASS" if floating == 0
+    _erc_verdict = ("NOT_DETERMINED" if floating is None else "PASS" if floating == 0
                     else "BENIGN-ERC" if _benign else "REVIEW")
     (erc_rpt.parent / "erc.json").write_text(json.dumps({
         "tool": "openroad",
         "mode": "erc_floating_nets_and_metrics",
         "floating_nets": floating,
+        "floating_net_count": float_counts["net"] if floating is not None else None,
+        "floating_pin_count": float_counts["pin"] if floating is not None else None,
+        "tool_returncode": rc,
+        "not_determined_reason": not_determined_reason,
+        "measurement_errors": measurement_errors,
         "clean": floating == 0,
         "source": str(erc_rpt.relative_to(project)),
         "verdict": _erc_verdict,
@@ -74662,12 +74851,16 @@ def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
         # still maps to FAIL. (§4.05 no-leak; chip-AGNOSTIC token mapping.)
         result = "PASS" if verdict == "PASS" else (
             "REVIEW" if verdict in ("REVIEW", "BENIGN-ERC") else
-            "INCOMPLETE" if verdict == "MEASURED" else "FAIL")
+            "INCOMPLETE" if verdict in ("MEASURED", "NOT_DETERMINED")
+            else "FAIL")
         out = {"category": name, "status": "AUTOMATED", "result": result,
                "tool": tool, "evidence": evidence, "source_verdict": verdict}
         if verdict == "MEASURED":
             out["note"] = ("measurement-only artifact (no budget "
                            "comparison applied) — review required (#444)")
+        elif verdict == "NOT_DETERMINED":
+            out["note"] = ("tool measurement incomplete; inspect the source "
+                           "report before sign-off")
         elif verdict == "BENIGN-ERC":
             out["note"] = ("benign float verdict from the #696 ERC screen "
                            "(VPWR/VGND/zero_/spare structural floats) — "
@@ -77135,6 +77328,39 @@ def main() -> int:
             plan.append(_pls)
             print(f"[prelayout] {_pls.status:5s} {_pls.name}: {_pls.detail}",
                   flush=True)
+            # A negative SS setup path is already unachievable on the
+            # synthesis netlist under the real SDC. Routing it spends hours
+            # without changing its logical depth. This gate reads Step 10's
+            # own pre-layout report, before either the cache or new PnR path.
+            import librelane_prelayout as _llp
+            _pre_gate_path = project / "reports/phase3/gates/pre_pnr_setup.json"
+            _pre_matrix = _pl.constraints_dir(project) / "pvt_matrix.json"
+            try:
+                _pre_gate = _llp.pre_pnr_setup_gate(
+                    _pre_matrix, _pl.sta_dir(project) / "per_corner",
+                    _pre_gate_path,
+                    netlist=_pl.synth_dir(project) / f"{effective_top}_synth.v",
+                    sdc=_pl.pnr_dir(project) / "constraint.sdc",
+                    hash_liberty=lambda path: _prelayout_liberty_identity(
+                        Path(path), args.container)[1])
+            except (OSError, ValueError, TypeError) as exc:
+                _pre_gate = {"verdict": "NOT_MEASURED",
+                             "reason": f"PRE_PNR_GATE_INPUT_UNREADABLE:{type(exc).__name__}",
+                             "path_classes": [], "setup_slack_ns": None}
+                _llp.write_json(_pre_gate_path, _pre_gate)
+            _pre_pnr_gate_ok = _pre_gate["verdict"] == "PASS"
+            _prelayout_ok = _pls.status == "PASS"
+            plan.append(StepResult(
+                "pre_pnr_setup", _pre_gate["verdict"], 0.0,
+                f"{_pre_gate['reason']}; SS setup slack "
+                f"{_pre_gate.get('setup_slack_ns')} ns; "
+                f"path classes {_pre_gate.get('path_classes', [])}",
+                [str(_pre_gate_path)],
+                reason_class=(_V.ReasonClass.EXECUTION_ERROR
+                              if _pre_gate["reason"].startswith(
+                                  "PRE_PNR_GATE_INPUT_UNREADABLE")
+                              else _V.ReasonClass.INCONCLUSIVE)
+                if _pre_gate["verdict"] == "NOT_MEASURED" else ""))
             # ORGANIC #593 — geometry-aware cache: a DEF that exists may
             # only be reused when the requested --die-um/--util match the
             # cached run's geometry (pnr_args.json). A congestion-recovery
@@ -77149,20 +77375,40 @@ def main() -> int:
             # where a 0-byte antenna report inherited from the cached run is
             # removed: on this path `step_pnr` never runs, so #2157's sweep,
             # which lives inside its approach loop, is never reached.
-            _pnr_cache = _cached_stage_decision(
+            _pnr_cache = (_cached_stage_decision(
                 project, _pnr_out, def_existing, kind="pnr",
                 top=effective_top, die_um=args.die_um, util=args.util,
                 pdk=pdk, container=args.container, args=args)
-            _cache_msg = _pnr_cache.reason
-            if _pnr_cache.accept:
+                if _prelayout_ok and _pre_pnr_gate_ok else None)
+            if _pnr_cache is None:
+                _blocked_reasons = []
+                if not _prelayout_ok:
+                    _blocked_reasons.append(
+                        f"prelayout_signoff={_pls.status}: {_pls.detail}")
+                if not _pre_pnr_gate_ok:
+                    _blocked_reasons.append(
+                        f"pre_pnr_setup={_pre_gate['verdict']}: "
+                        f"{_pre_gate['reason']}; "
+                        f"{_pre_gate.get('path_classes', [])} at "
+                        f"{_pre_gate.get('setup_slack_ns')} ns")
+                plan.append(StepResult(
+                    "pnr", "NOT_MEASURED", 0.0,
+                    "BLOCKED_BY_PRELAYOUT_SIGNOFF_OR_SETUP_GATE: "
+                    + " | ".join(_blocked_reasons),
+                    list(dict.fromkeys(_pls.output_files + [str(_pre_gate_path)])),
+                    reason_class=(_V.ReasonClass.UPSTREAM_FAILED
+                                  if _pls.status == "FAIL"
+                                  or _pre_gate["verdict"] == "FAIL"
+                                  else _V.ReasonClass.UPSTREAM_REFUSED)))
+            elif _pnr_cache.accept:
                 plan.append(StepResult(
                     "pnr", "PASS", 0.0,
                     f"DEF already present: {def_existing.name} (skipped "
-                    f"re-run; {_cache_msg})",
+                    f"re-run; {_pnr_cache.reason})",
                     [str(def_existing)]))
             else:
                 if def_existing.is_file():
-                    print(f"[pnr] cache invalid — {_cache_msg}",
+                    print(f"[pnr] cache invalid — {_pnr_cache.reason}",
                           file=sys.stderr)
                 # Canonical 15.5ic is executed inside this dispatch at the
                 # real floorplan->route seam. Its row is returned separately

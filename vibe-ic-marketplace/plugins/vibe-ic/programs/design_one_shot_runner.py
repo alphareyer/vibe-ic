@@ -6785,7 +6785,8 @@ def step_reused_ip_consume(project: Path,
         # Nothing to consume (rtl/ already populated OR design ships no build
         # RTL). Clean SKIP — the WAIVE-to-catalog-glue-author path is unchanged.
         return StepResult("reused_ip_consume", "NOT_APPLICABLE", time.time() - t0,
-                          res.get("reason", "no design-provided build RTL"),
+                          res.get("reason", "no design-provided build RTL")
+                          + _deviation_note(res),
                           extras=res, declared_by=res.get("reason", "the design ships no build RTL to consume"))
     # Provided RTL staged — now make a synthesizable top exist, mirroring
     # step_yosys_synth's EXACT resolution ORDER so we never bind a DIFFERENT
@@ -7077,8 +7078,18 @@ def step_reused_ip_consume(project: Path,
         "reused_ip_consume", _cone_status, time.time() - t0,
         f"Staged {len(res['staged'])} design-provided build-RTL file(s) into "
         f"phase2/stage1/rtl/ so synth no longer halts on empty rtl/."
-        + _ct + _sv + _cone_note,
+        + _ct + _sv + _cone_note + _deviation_note(res),
         extras=res)
+
+
+def _deviation_note(res: dict) -> str:
+    """One line per disclosed reused-IP deviation (`reused_ip_erratum`), so the
+    flow record of the staging step says the staged RTL is not the input."""
+    lines = list(res.get("deviation_disclosures") or [])
+    for row in (res.get("errata") or {}).get("rows") or []:
+        if row.get("status") == "REFUSED":
+            lines.append(f"erratum {row.get('why')}")
+    return "".join(f" DISCLOSED: {x}." for x in lines)
 
 
 # ── THE AUTHORING HAND-OFF MUST SERVE BYTES, NOT A NAME (vibe-ic#2193) ───
@@ -10948,6 +10959,12 @@ def step_full_stack_tb_gen(project: Path,
         return StepResult("full_stack_tb_gen", "NOT_MEASURED",
                           time.time() - t0,
                           f"L9 has no top_ports (top_module={top_module!r})", reason_class=_V.ReasonClass.INPUT_ABSENT)
+    from _delegated_port_groups import resolve_delegated_groups
+    _delegated_groups = resolve_delegated_groups(project, l9)
+    _delegated_examples = set().union(
+        *(row["example_ports"] for row in _delegated_groups))
+    _delegated_names = set().union(
+        *(row["declared_ports"] for row in _delegated_groups))
 
     # ORGANIC #629 — reconcile the DUT binding against the parsed synthesizable
     # RTL top surface, NOT L9.top_ports verbatim. A mis-extracted L9 (a width-
@@ -10967,11 +10984,22 @@ def step_full_stack_tb_gen(project: Path,
     # the reference_tb does not FAIL with "port `x` is not a port of u_dut".
     _tb_defines = _v671_tb_compile_defines(project)
     _rtl_ports = _v629_rtl_top_ports(project, top_module, _tb_defines)
+    if not _rtl_ports and _delegated_groups:
+        return StepResult("full_stack_tb_gen", "NOT_MEASURED",
+                          time.time() - t0,
+                          "plugin-declared port group needs the RTL top surface "
+                          "to supply directions and widths", reason_class=_V.ReasonClass.INPUT_ABSENT)
     _reconcile_note = ""
     if _rtl_ports:
         _l9_names = {(_p.get("name") or "").strip()
                      for _p in top_ports if isinstance(_p, dict)}
+        _l9_names = (_l9_names - _delegated_examples) | _delegated_names
         _rtl_names = {n for _d, n, _w in _rtl_ports}
+        _missing_declared = sorted(_delegated_names - _rtl_names)
+        if _missing_declared:
+            return StepResult("full_stack_tb_gen", "FAIL", time.time() - t0,
+                              "RTL omits plugin-declared port(s): "
+                              + ", ".join(_missing_declared))
         # ORGANIC #766 round-2 — PRESERVE L9 POWER/ground supply pins the RTL
         # surface does not expose. Supply pins are declared ONLY inside
         # `ifdef USE_POWER_PINS, and the RTL surface is parsed under the
@@ -22427,9 +22455,16 @@ def step_verilator_coverage(project: Path, top_name: str = "",
         return StepResult("verilator_coverage", "NOT_MEASURED", time.time() - t0,
                           "no RTL sources to instrument", [], reason_class=_V.ReasonClass.INPUT_ABSENT)
     if not tbs:
+        # A previous run's measurement cannot stand in for this run after
+        # discovery refused a connectivity-only testbench.
+        _pl.report_path(project, _vcm.COVERAGE_MEASUREMENT_REL).unlink(
+            missing_ok=True)
         return StepResult("verilator_coverage", "NOT_MEASURED", time.time() - t0,
-                          "no testbench to instrument — coverage cannot be "
-                          "measured without a stimulus that actually ran", [], reason_class=_V.ReasonClass.INPUT_ABSENT)
+                          "no testbench to instrument: no functional "
+                          "stimulus exists; "
+                          "testbench-gen hand-off must author and execute an "
+                          "oracle or professional L10 unit TB before coverage "
+                          "can be measured", [], reason_class=_V.ReasonClass.INPUT_ABSENT)
     tb = tbs[0]
     have = bool(container and _tool_in_container(container, "verilator")) \
         or bool(_shutil.which("verilator"))

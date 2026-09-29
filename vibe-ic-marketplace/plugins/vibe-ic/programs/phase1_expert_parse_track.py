@@ -2542,6 +2542,21 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
         base["observed"] = ("the expectation names no id and/or no layer, so "
                             "there is nothing to compare it against")
         return base
+    # `expected_tokens` is a LIST. The contract shows the token LANGUAGE as an
+    # object, and an answer that mirrored it (`{"matcher": ..., "tokens":
+    # [...]}`) was iterated above as a list: a mapping yields its KEYS, so the
+    # layer was asked for the words `matcher` and `tokens`, and every such row
+    # was published as a design gap about tokens nobody wrote. Any non-list is
+    # refused by name before a token is taken from it.
+    raw_tokens = exp.get("expected_tokens")
+    if raw_tokens is not None and not isinstance(raw_tokens, list):
+        base["expected_tokens"] = []
+        base["observed"] = (
+            f"`expected_tokens` is a {type(raw_tokens).__name__}, not a list "
+            f"of strings. The answer contract's object documents the token "
+            f"language; the value an expectation carries is the list of "
+            f"tokens itself, so none of this value was put to any document")
+        return base
     if not base["expected_tokens"]:
         base["observed"] = (
             "the expectation carries no `expected_tokens`, so it states a "
