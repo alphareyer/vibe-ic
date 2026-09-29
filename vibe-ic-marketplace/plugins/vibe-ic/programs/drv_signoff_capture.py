@@ -239,6 +239,53 @@ def _script(plan: dict, scene: dict, out: Path, *, control: bool,
                 for kind in KINDS) + "close $_f\n")
 
 
+#: What the pinned image says about its OpenROAD builds: one line per binary
+#: next to the one `openroad` resolves to (the LibreLane dispatcher runs the
+#: `openroad-python` build for its scripts, the direct deck runs `openroad`).
+_OPENROAD_PROBE = (
+    'd=$(dirname "$(readlink -f "$(command -v openroad)")"); '
+    'for b in "$d"/openroad "$d"/openroad-python; do [ -x "$b" ] || continue; '
+    'echo "OPENROAD_BINARY $b $(sha256sum "$b" | cut -d" " -f1) '
+    '$(LD_LIBRARY_PATH=/opt/or-tools/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} '
+    '"$b" -version 2>&1 | tail -n 1)"; done')
+_OPENROAD_LINE = re.compile(r"(?m)^OPENROAD_BINARY (\S+) ([0-9a-f]{64}) (\S+)\s*$")
+
+
+def openroad_identity(image: str, *, run=None) -> dict:
+    """The OpenROAD commit of the builds in the pinned image, asked of the
+    binaries themselves (review wave 58: `openroad_commit` was required by the
+    judge and produced by nothing, so every real capture was NOT_MEASURED).
+
+    `commit` is the `-g<hash>` of the version every build reports; builds that
+    disagree, a version with no commit, or no build at all leave it None with
+    the reason, never a guess."""
+    argv = ["docker", "run", *_docker_memory.docker_memory_flags(), "--rm",
+            image, "--skip", "bash", "-c", _OPENROAD_PROBE]
+    run = run or subprocess.run
+    try:
+        done = run(argv, capture_output=True, text=True, timeout=300)
+        text = (done.stdout or "") + (done.stderr or "")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"commit": None, "reason": f"OpenROAD version probe failed: {exc}"}
+    binaries = [{"path": m.group(1), "sha256": m.group(2), "version": m.group(3)}
+                for m in _OPENROAD_LINE.finditer(text)]
+    versions = {b["version"] for b in binaries}
+    record: dict = {"binaries": binaries, "commit": None}
+    if not binaries:
+        record["reason"] = "no OpenROAD binary answered the version probe"
+    elif len(versions) != 1:
+        record["reason"] = f"OpenROAD builds report different versions: {sorted(versions)}"
+    else:
+        version = versions.pop()
+        commit = re.search(r"-g([0-9a-f]{7,40})$", version)
+        record["version"] = version
+        if commit:
+            record["commit"] = commit.group(1)
+        else:
+            record["reason"] = f"OpenROAD version {version!r} names no commit"
+    return record
+
+
 def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
     """Run each scene and its planted control; return a content-addressed bundle."""
     import instrument_calibration
@@ -267,6 +314,10 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
     bundle["identity"]["tool_image"] = image
     bundle["identity"]["tool_image_digest"] = digest
     bundle["identity"]["tool_image_oci_version"] = version
+    openroad = openroad_identity(image)
+    bundle["identity"]["openroad_build"] = openroad
+    if openroad.get("commit"):
+        bundle["identity"]["openroad_commit"] = openroad["commit"]
     try:
         bundle["threshold_anchor"] = image_pdk_anchor(
             image, str(bundle["identity"].get("pdk") or ""),
