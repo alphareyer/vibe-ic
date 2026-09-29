@@ -269,6 +269,12 @@ def test_def_with_neither_declarations_nor_references_is_an_honest_skip(
         tmp_path):
     """DIRECTION-1 GUARD: the VIA_DEFS_NOT_FOUND disclosure must survive."""
     p = _proj(tmp_path, "VERSION 5.8 ;\nDESIGN top ;\nNETS 0 ;\nEND NETS\n")
+    # U14: a Step-34 PASS on record, so the density half is resolved and the
+    # verdict below is about the via screen alone.
+    g = p / "reports" / "phase2" / "gates"
+    g.mkdir(parents=True)
+    (g / "metal_fill_density.json").write_text(
+        '{"summary": {"pass": true, "errors_count": 0}}')
     rep = DFM.audit(p)
     assert rep["via_redundancy"] is None
     assert "VIA_DEFS_NOT_FOUND" in _cats(rep)

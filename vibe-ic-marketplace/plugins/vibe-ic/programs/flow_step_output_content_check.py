@@ -82,6 +82,15 @@ def check(project: Path, mode: str) -> list[str]:
             errors.append(f"{path}: repair_needed must be boolean")
         elif mode == "dfm" and (data["verdict"] not in ("PASS", "PASS_WITH_ADVISORIES") or not isinstance(data["findings"], list)):
             errors.append(f"{path}: invalid DFM screen verdict or findings")
+        elif mode == "dfm" and not _dfm_density_ref_present(data.get("density_ref")):
+            # U14 — the screen's CMP-density half is a cross-reference to the
+            # Step-34 verdict. A screen that carries no such reference
+            # (density_ref null) screened no density at all, so its
+            # PASS/PASS_WITH_ADVISORIES does not stand for Step 35.
+            errors.append(
+                f"{path}: density_ref is {data.get('density_ref')!r} — the "
+                f"screen carries no Step-34 density verdict, so its CMP-density "
+                f"half measured nothing")
         elif mode == "stage_analog" and not isinstance(data["overall"], str):
             errors.append(f"{path}: invalid stage verdict")
         elif mode == "si" and (not isinstance(data["nominal"], dict) or
@@ -89,6 +98,15 @@ def check(project: Path, mode: str) -> list[str]:
                                 not data["corners"]):
             errors.append(f"{path}: invalid SI corner evidence")
     return errors
+
+
+def _dfm_density_ref_present(ref) -> bool:
+    """A Step-34 density reference the screen actually resolved: an object that
+    names its source and carries a boolean `step34_pass` (the verdict read),
+    never null and never the `unparseable` placeholder."""
+    return (isinstance(ref, dict) and not ref.get("unparseable")
+            and isinstance(ref.get("source"), str) and bool(ref["source"])
+            and isinstance(ref.get("step34_pass"), bool))
 
 
 def main() -> int:

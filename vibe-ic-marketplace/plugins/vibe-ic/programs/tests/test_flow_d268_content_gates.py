@@ -38,8 +38,11 @@ CASES = {
         "max_crosstalk_noise": 0.02, "violations_count": 0}, ""),
     "32": ("phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json",
            {"repair_needed": False}, ""),
+    # U14: a screen whose density half resolved Step 34's verdict.
     "35": ("reports/phase3/dfm_screen.json",
-           {"verdict": "PASS", "findings": []}, ""),
+           {"verdict": "PASS", "findings": [],
+            "density_ref": {"source": "reports/phase2/gates/metal_fill_density.json",
+                            "step34_pass": True, "errors": 0}}, ""),
     "P0": ("phase2/stage1/rtl/top.v", "module top(); endmodule\n", ""),
 }
 

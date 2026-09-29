@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import dfm_screen_check as DFM  # noqa: E402
+from _filled_gds_fixture import write_filled_gds  # noqa: E402
 
 _DEF_TMPL = """\
 VERSION 5.8 ;
@@ -49,6 +50,7 @@ def _proj(tmp_path, extra_single=8, fillers=100, util=99.0):
     rpt.mkdir()
     (rpt / "density.json").write_text(json.dumps({
         "filler_instances": fillers, "row_utilization_pct": util}))
+    write_filled_gds(tmp_path)  # U14: Step 34 judges the filled GDS
     return tmp_path
 
 
@@ -101,8 +103,11 @@ def test_density_is_cross_reference_not_duplicate_gate(tmp_path):
                and f["severity"] == "WARNING" for f in rep["findings"])
 
 
-def test_density_ref_absent_is_info(tmp_path):
+def test_density_ref_absent_is_info(tmp_path, monkeypatch):
     p = _proj(tmp_path)
+    # U14: with no gate report on disk the screen now reads Step 34 in
+    # process; "absent" is the state where that judge cannot be loaded.
+    monkeypatch.setattr(DFM, "_step34_density_in_process", lambda _p: None)
     rep = DFM.audit(p)
     assert any(f["category"] == "DENSITY_REF"
                and f["severity"] == "INFO" for f in rep["findings"])
