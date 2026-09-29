@@ -28,6 +28,49 @@ def _write_doc(project: Path, name: str, text: str) -> None:
     (root / name).write_text(text, encoding="utf-8")
 
 
+def test_submodule_contract_descendants_have_named_carriage(tmp_path):
+    _write_consumers(tmp_path)
+    _write_doc(tmp_path, "L8_integration.md", """\
+layer: L8
+status: draft
+# Integration
+## Required sub-module contracts
+### Arbitrary wrapper
+The wrapper exposes separate instruction bus and data bus interfaces.
+#### Ordering
+Requests remain stable until acknowledged.
+### No optional module
+#### Hidden optional interface
+This denied subtree must not become a module contract.
+### Another wrapper
+This peer is back inside the required contract scope.
+## Implementation freedom
+### Unrelated wrapper
+This section is outside the contract scope.
+""")
+    C.run(tmp_path)
+    l9 = json.loads((tmp_path / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").read_text())
+    rows = l9["integration"]["submodule_contracts"]
+    assert [row["heading"] for row in rows] == ["Arbitrary wrapper", "Ordering", "Another wrapper"]
+    assert "instruction bus" in rows[0]["evidence"]
+    assert rows[0]["source"] == "input/docs/L8_integration.md"
+    assert C.run(tmp_path)["emitted_count"] == 0
+
+
+def test_denied_submodule_contract_heading_has_no_carriage(tmp_path):
+    _write_consumers(tmp_path)
+    _write_doc(tmp_path, "L8_integration.md", """\
+layer: L8
+status: draft
+# No submodule contracts
+## Arbitrary wrapper
+An instruction bus and a data bus appear only in this denied scope.
+""")
+    C.run(tmp_path)
+    l9 = json.loads((tmp_path / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").read_text())
+    assert "submodule_contracts" not in l9.get("integration", {})
+
+
 def test_positive_cross_layer_contracts_reach_their_consumers(tmp_path):
     """Positive: explicit layer contracts land in L9/L19 with provenance."""
     _write_consumers(tmp_path)

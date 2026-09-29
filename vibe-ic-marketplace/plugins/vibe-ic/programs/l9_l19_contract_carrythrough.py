@@ -141,6 +141,45 @@ def _put_if_absent(target: Dict[str, Any], key: str, value: Any,
     emitted.append(f"{prefix}.{key}")
 
 
+def _submodule_contracts(records: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Carry descendants of an explicit L8 submodule-contract heading.
+
+    Splitting at every heading otherwise discards contracts whose child
+    heading is only a module's chosen name. Heading depth bounds the scope;
+    names and bus vocabulary never decide which sections are selected.
+    """
+    module = re.compile(r"sub[- ]?modules?|子模組|子模块", re.I)
+    contract = re.compile(r"contracts?|契約|契约", re.I)
+    out: List[Dict[str, str]] = []
+    for record in records:
+        if record["layer"] != "L8" or record["status"] in {
+                "not-applicable", "not applicable", "n/a"}:
+            continue
+        parent_depth: Optional[int] = None
+        denied_depth: Optional[int] = None
+        for heading, text in _sections(record["text"]):
+            match = _HEADING_RE.match(text.splitlines()[0])
+            if match is None:
+                continue
+            depth = len(match.group(1))
+            if parent_depth is not None and depth <= parent_depth:
+                parent_depth = None
+            if denied_depth is not None:
+                if depth > denied_depth:
+                    continue
+                denied_depth = None
+            if _polarity.is_denied(heading):
+                denied_depth = depth
+                continue
+            if module.search(heading) and contract.search(heading):
+                parent_depth = depth
+                continue
+            if parent_depth is not None:
+                out.append({"source": record["source"],
+                            "heading": heading, "evidence": text})
+    return out
+
+
 def _l9_contract(records: List[Dict[str, str]]) -> Dict[str, Any]:
     build = _selected(records, ("L7",), re.compile(
         r"declaration\s+requirements?|聲明|声明", re.I))
@@ -203,6 +242,7 @@ def _l9_contract(records: List[Dict[str, str]]) -> Dict[str, Any]:
     values = {
         "build_declaration": build,
         "external_interface": external,
+        "submodule_contracts": _submodule_contracts(records),
         "architecture": architecture,
         "reset_boot": {"requirements": reset_boot,
                        "normalized_semantics": reset_semantics},
