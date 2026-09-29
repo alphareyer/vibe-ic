@@ -343,3 +343,25 @@ def write_review_request(project: Path, out_dir: Path) -> Path:
     _atomic_write_text(str(path), json.dumps(body, indent=2,
                                              ensure_ascii=False) + "\n")
     return path
+
+
+def point_handoff_at_review(out_dir: Path,
+                            handoff_name: str = "ic_expert_agent_handoff.json"
+                            ) -> bool:
+    """Name the request in the pack's handoff so the D1 reviewer is told to
+    read it. True when the handoff file was updated."""
+    from _atomic_artefact import write_text as _atomic_write_text
+    path = Path(out_dir) / handoff_name
+    doc = _json(path)
+    if doc is None:
+        return False
+    doc[FIELD + "_review"] = {
+        "file": REVIEW_REQUEST, "ruling": "R-0929-X-QUALIFIED-4",
+        "ask": ("for each candidate that passes the checklist, write the "
+                "qualified_by field on the L9 row of the data output AND the "
+                "matching 'qualified_by:<output>' expectation; sign D1 only "
+                "over those bytes. Leave any candidate you cannot verify "
+                "unwritten — an absent field is the strict, safe default")}
+    _atomic_write_text(str(path), json.dumps(doc, indent=2,
+                                             ensure_ascii=False) + "\n")
+    return True

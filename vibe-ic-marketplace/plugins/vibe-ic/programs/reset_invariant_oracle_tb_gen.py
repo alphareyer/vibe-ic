@@ -170,6 +170,12 @@ def qualifiers_from_statements(
 ) -> Dict[str, List[Dict[str, str]]]:
     """{output: [{qualifier, active, evidence}]} from the design's own text.
 
+    NOT CONSULTED BY THIS ORACLE (R-0929-X-QUALIFIED-4): `declared_output_
+    qualifiers` reads only the D1-signed structured `qualified_by` field
+    (`_qualified_by`). This text reader is kept as a pure function for
+    callers that PROPOSE a field for review; its answer is never trusted
+    as a declaration by itself.
+
     `statements` are (subject, text): a port-table row's description has its
     port as the implicit subject; a prose sentence has none and must name the
     qualified output itself. A qualifier is declared only when ONE statement

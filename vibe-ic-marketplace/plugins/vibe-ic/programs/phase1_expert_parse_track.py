@@ -2752,6 +2752,7 @@ def ai_subtrack(project: Path, prompt: str, out_dir: Path,
             import _qualified_by as _qb
             status["qualified_by_review"] = str(
                 _qb.write_review_request(project, out_dir))
+            _qb.point_handoff_at_review(out_dir)
         except Exception as exc:  # noqa: BLE001 — a request never blocks D1
             status["qualified_by_review_error"] = repr(exc)
         # The disposition is recorded for EVERY design, profiled or not: the
