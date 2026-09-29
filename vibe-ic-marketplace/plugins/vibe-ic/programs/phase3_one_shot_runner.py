@@ -38648,6 +38648,21 @@ def step_prepnr(project: Path, top: str, pdk: PdkConfig, container: str,
                             else _V.ReasonClass.INPUT_ABSENT.value)))
 
 
+def _take_synth_drv_census(project: Path, top: str, pdk: PdkConfig,
+                          container: str, sdc: Path) -> Optional[Path]:
+    """Keep the existing synth receipt, supervising its actual census deck."""
+    import drv_stage_receipts as stages
+    evidence = stages.abc_script_path(project).parent
+    return stages.synth_stage(
+        project, netlist=_pl.synth_dir(project) / f"{top}_synth.v", top=top,
+        liberties=[str(pdk.liberty)], sdc=sdc,
+        to_container=lambda path: _to_container_path(str(path), container),
+        execute=lambda cmd: _docker_exec(
+            container, cmd,
+            marker=_to_container_path(str(evidence / "census.tcl"), container),
+            log_path=evidence / "census.log"))
+
+
 def step_pnr(project: Path, top: str, pdk: PdkConfig,
              container: str, die_um: str, util: float,
              spare_density=None, pad_ring_step=step_pad_ring_gen,
@@ -38834,12 +38849,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         library=_active_std_cell_library(project, str(pdk.name)))
     # DRV standard section 1: the synth stage receipt (the script ABC ran,
     # kept by step_synth, and the post-synthesis census under this SDC).
-    import drv_stage_receipts as _drv_stages
-    _drv_stages.synth_stage(
-        project, netlist=_pl.synth_dir(project) / f"{top}_synth.v", top=top,
-        liberties=[str(pdk.liberty)], sdc=sdc,
-        to_container=lambda p: _to_container_path(str(p), container),
-        execute=lambda cmd: _docker_exec(container, cmd, timeout=1800))
+    _take_synth_drv_census(project, top, pdk, container, sdc)
     # Whichever branch ran, record what the DESIGN staged and what became of
     # it. A machine-readable sibling of the deck's own comment block, so a
     # later reader does not have to parse an SDC to learn that the design's
