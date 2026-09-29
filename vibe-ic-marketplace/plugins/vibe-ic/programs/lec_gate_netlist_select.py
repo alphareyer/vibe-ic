@@ -98,7 +98,10 @@ about the chip.
 post-DFT netlist when step 11's published scan record authorises it, the mapped
 pre-DFT netlist otherwise.  One implementation, so the proof and the router
 cannot disagree about the file.  The flow YAML declares the same edge: step 13
-and step 15 both read step 12's output.
+and step 15 both read step 12's output.  It is asked with the top step 15 is
+handed, already resolved: phase 3 passes its own ``effective_top``; phase 2,
+whose ``--top-name`` on a from-documents run is still the runner's placeholder
+default, resolves it exactly once with ``step15_top``.
 
 ``proof_subject_binding`` is the check behind the gate's refusal: the sha256
 the proof recorded for its gate side (``lec.json:proof_identity.gate_netlist``)
@@ -491,14 +494,56 @@ BINDING_NO_CONSUMER = "NO_CONSUMER"        # step 15's input does not exist yet
 BINDING_TOP_UNKNOWN = "TOP_UNKNOWN"
 
 
+def step15_top(project: Path, requested: str, *,
+               rederive_ic_name: Optional[str] = None) -> str:
+    """The module whose netlist step 15 routes, for phase 2's REQUESTED top.
+
+    Call it ONCE, at the phase-2 boundary, never on a top that is already
+    resolved: ``effective_top`` is not idempotent (``effective_top(P)`` may be
+    ``m`` through the L9 hint while ``effective_top(m)`` is ``m_asic`` when
+    rtl/ stages ``m_asic.sv``), so re-resolving a resolved top names a file
+    step 15 does not route. Phase 3's callers hand ``pnr_consumed_netlist`` /
+    ``proof_subject_binding`` / ``step_lec_equivalence`` the top phase 3 main
+    already resolved, and those take it as given.
+
+    Two resolutions sit between phase 2's ``--top-name`` and step 15:
+
+    1. the DRIVER's. The front door (``vibe_ic_one_shot_runner``) re-derives
+       phase 3's top after phase 2 when phase 2 got the placeholder default
+       (``_phase3_rederives_top`` / ``_resolve_top_name``: a staged
+       ``chip_top`` module, else the ``--ic-name`` module, else the sole root).
+       It says so by passing ``rederive_ic_name``; a driver that hands phase 3
+       the same name (``phase23_one_shot_runner``, a standalone run) passes
+       nothing and this step is skipped;
+    2. phase 3 main's ``_chip_synth_read.effective_top`` (``<top>_asic`` /
+       ``<top>_pad_wrapper`` when rtl/ stages one, else the structural
+       resolver; a real module is returned unchanged).
+
+    MEASURED on the spm DIE run (2026-09-28): phase 2 got ``chip_top``, asked
+    step 15's resolver with it, and recorded step 13 as NOT_MEASURED against
+    ``phase2/stage2/synth/chip_top_synth.v`` -- a file no producer declares or
+    writes. Phase 3 built and routed ``spm_synth.v``.
+    """
+    top = requested
+    if rederive_ic_name is not None:
+        import vibe_ic_one_shot_runner as _front_door
+        top, _note = _front_door._resolve_top_name(
+            Path(project), rederive_ic_name, requested, False)
+    import _chip_synth_read as _csr
+    return _csr.effective_top(Path(project), top)
+
+
 def pnr_consumed_netlist(project: Path,
                          top: str) -> Tuple[Optional[Path], str, bool]:
     """``(path, note, is_scan_inserted)`` of the netlist step 15 routes.
 
     Asks ``phase3_one_shot_runner.pnr_input_netlist``, the resolver
-    ``step_pnr`` itself calls, and restates none of its rule. ``path`` is None
-    only when that resolver cannot be asked; a returned path may not exist yet
-    (the mapped netlist is written by phase 3's synthesis half).
+    ``step_pnr`` itself calls, and restates none of its rule. ``top`` is the
+    top ``step_pnr`` is handed -- already resolved (phase 3 main's
+    ``effective_top``, or ``step15_top`` once at the phase-2 boundary); it is
+    never resolved again here. ``path`` is None only when that resolver
+    cannot be asked; a returned path may not exist yet (the mapped netlist is
+    written by phase 3's synthesis half).
     """
     try:
         import phase3_one_shot_runner as _p3
