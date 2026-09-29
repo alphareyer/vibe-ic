@@ -535,7 +535,8 @@ def _oracles_that_actually_ran(project: Path) -> dict:
             executed.append(case_id)
             continue
         if state == _l10x.NOT_EXECUTED:
-            credit, refusal = _l10x.isa_conformance_credit(project, case_id)
+            credit, refusal = _l10x.isa_conformance_credit(
+                project, case_id, rows.get(case_id))
             if credit is not None:
                 isa_credited.append(credit)
                 continue
@@ -779,22 +780,18 @@ def _credit_isa_goals(project: Path, summary: dict) -> None:
             if refusal:
                 r["isa_conformance_refused"] = refusal
             continue
-        ins = credit.get("instructions") or {}
-        stated = r.get("stated_pct")
-        if not ins.get("total") or not isinstance(stated, (int, float)):
-            r["isa_conformance_refused"] = (
-                "the conformance receipt carries no instruction count for "
-                "this goal")
+        # The ONE goal judgment the L10 table applies too.
+        verdict, achieved, why = _l10x.isa_goal_verdict(
+            r.get("stated_pct"), r.get("dimension"), credit)
+        if verdict is None:
+            r["isa_conformance_refused"] = why
             continue
-        achieved = 100.0 * ins["covered"] / ins["total"]
         r.update(
             achieved_pct=achieved,
             achieved_source=credit["sentence"],
             instrument=_l10x.ISA_CREDIT_KIND,
-            verdict=_cgc.PASS if achieved >= stated else _cgc.FAIL,
-            why=(f"case {r.get('case')!r}: instruction coverage {achieved:g}% "
-                 f"({ins['covered']}/{ins['total']}) vs the {stated:g}% the "
-                 f"design states, by {credit['sentence']}"),
+            verdict=_cgc.PASS if verdict == _l10x.PASS else _cgc.FAIL,
+            why=f"case {r.get('case')!r}: {why}, by {credit['sentence']}",
             isa_conformance_credit=credit)
         touched = True
     if touched:
