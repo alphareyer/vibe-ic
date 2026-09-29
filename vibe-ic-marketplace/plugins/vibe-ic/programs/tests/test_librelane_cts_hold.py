@@ -243,7 +243,10 @@ def test_the_producer_call_site_takes_the_librelane_split_only_when_selected(tmp
     overlay = seen[0]['overlay']
     assert overlay['CTS_DISTANCE_BETWEEN_BUFFERS'][0] == \
         runner._CTS_DEFAULT_DISTANCE_BETWEEN_BUFFERS_UM > 0
-    assert overlay['PL_RESIZER_HOLD_MAX_BUFFER_PCT'][0] == 5.0
+    # The area guardrail is not a count percentage: the overlay no longer
+    # hands it to the tool as one (step 20 converts it on the measured
+    # post-CTS state, `test_step20_hands_the_tool_the_area_budget_as_a_count`).
+    assert 'PL_RESIZER_HOLD_MAX_BUFFER_PCT' not in overlay
 
 
 # ------------------------------------------------------ the declared config ---
@@ -351,17 +354,44 @@ def test_the_plugin_step_sources_the_runners_one_sizing_pass():
 
 # ------------------------------------------------- the split, end to end ---
 
+#: A two-buffer library: a plain buffer and a delay cell, both structural
+#: buffers (one input, one output, output function = the input).
+NEUTRAL_LIB = (
+    'library(x) {\n'
+    ' cell (neutral__buf_1) {\n  area : 5.0 ;\n'
+    '  pin (A) {\n   direction : input ;\n  }\n'
+    '  pin (X) {\n   direction : output ;\n   function : "A" ;\n  }\n }\n'
+    ' cell (neutral__dly_1) {\n  area : 10.0 ;\n'
+    '  pin (A) {\n   direction : input ;\n  }\n'
+    '  pin (X) {\n   direction : output ;\n   function : "A" ;\n  }\n }\n'
+    '}\n')
+NEUTRAL_LEF = ('MACRO neutral__buf_1\n  SIZE 1.0 BY 5.0 ;\nEND neutral__buf_1\n'
+               'MACRO neutral__dly_1\n  SIZE 2.0 BY 5.0 ;\nEND neutral__dly_1\n')
+
+
 def _fake_tool_run(project, corners, *, hold, cts_buffers=7, fail_step=None):
     """What LibreLane writes for each step, at the run_chain edge."""
     seen = {}
 
     def chain(proj, image, triples, **kwargs):
-        seen['steps'] = [s for s, _, _ in triples]
-        seen['configs'] = [c for _, c, _ in triples]
+        # One lane may be run in more than one call (step 20's hold budget is
+        # measured between retap and the resizer): the calls accumulate, and
+        # `first_index` continues the lane's numbering as run_chain does.
+        first = kwargs.get('first_index', 1)
+        if first == 1:
+            seen['steps'], seen['configs'] = [], []
+        seen['steps'] += [s for s, _, _ in triples]
+        seen['configs'] += [c for _, c, _ in triples]
         seen['kwargs'] = kwargs
+        seen.setdefault('calls', []).append(
+            {'lane': kwargs.get('lane'), 'first_index': first,
+             'steps': [s for s, _, _ in triples],
+             'state_in': str(triples[0][2]) if triples else None})
         base = proj / 'phase3/librelane' / kwargs.get('lane', 'x')
-        folders, metrics = [], {}
-        for i, (step, _, _) in enumerate(triples, 1):
+        folders = []
+        metrics = dict(json.loads(Path(triples[0][2]).read_text()).get('metrics') or {}) \
+            if triples and Path(triples[0][2]).is_file() else {}
+        for i, (step, _, _) in enumerate(triples, first):
             folder = base / f'{i:02d}-{step.lower().replace(".", "-")}'
             if step == fail_step:
                 raise contract.Refusal('LL_STEP_FAILED', step)
@@ -371,13 +401,14 @@ def _fake_tool_run(project, corners, *, hold, cts_buffers=7, fail_step=None):
                                           'Total number of Sinks: 9.\n')
                 write(folder / 'openroad-cts.log', '[INFO CTS-0010]  Clock net "clk" has 9 sinks.\n')
                 metrics['design__instance__area__stdcell'] = 1000.0
+                metrics['design__instance__count'] = 400
             if step == 'OpenROAD.ResizerTimingPostCTS':
                 write(folder / 'openroad-resizertimingpostcts.log', '[INFO RSZ-0032] Inserted 2 hold buffers.\n')
                 metrics.update({'design__instance__count__hold_buffer': 2,
                                 'design__instance__count__setup_buffer': 0,
                                 'design__instance__area__stdcell': 1010.0})
             if step == 'OpenROAD.STAMidPNR':
-                corner = json.loads(triples[i - 1][1].read_text())['PNR_CORNERS'][0]
+                corner = json.loads(triples[i - first][1].read_text())['PNR_CORNERS'][0]
                 metrics[f'timing__hold__ws__corner:{corner}'] = hold[corner]
                 metrics[f'timing__setup__ws__corner:{corner}'] = 5.0
                 metrics[f'clock__skew__worst_setup__corner:{corner}'] = -0.1
@@ -392,14 +423,15 @@ def _fake_tool_run(project, corners, *, hold, cts_buffers=7, fail_step=None):
     def resolve(proj, image, pdk, step_ids, **kwargs):
         seen['overlay'] = kwargs.get('overlay')
         root = proj / 'phase3/librelane' / kwargs['folder']
-        lib = write(proj.parent / 'pdkroot' / pdk / 'neutral.lib',
-                    'library(x) {\n cell (neutral__dly_1) { }\n}\n')
+        lib = write(proj.parent / 'pdkroot' / pdk / 'neutral.lib', NEUTRAL_LIB)
+        lef = write(proj.parent / 'pdkroot' / pdk / 'neutral.lef', NEUTRAL_LEF)
         out = {}
         for step in step_ids:
             doc = {'meta': {'step': step}, 'STA_CORNERS': corners,
                    'PNR_CORNERS': None}
             if step in ('OpenROAD.CTS', 'OpenROAD.ResizerTimingPostCTS'):
                 doc.update(CELL_LIBS={'nom': [f'/pdk/{pdk}/{lib.name}']},
+                           CELL_LEFS=[f'/pdk/{pdk}/{lef.name}'],
                            EXTRA_EXCLUDED_CELLS=[])
             out[step] = put(root / f'{step}.json', doc)
             put(root / f'{step}.views.json', {'inputs': ['odb'], 'outputs': []})
@@ -427,7 +459,8 @@ def _split_project(tmp_path, switch):
     return project, out_dir, pnr_tcl
 
 
-def _run_split(tmp_path, monkeypatch, *, switch=None, hold=None, arm_hold=None, fail_step=None):
+def _run_split(tmp_path, monkeypatch, *, switch=None, hold=None, arm_hold=None, fail_step=None,
+               overlay_extra=None):
     switch = switch or {'steps': {'19': 'librelane', '20': 'librelane'}}
     project, out_dir, pnr_tcl = _split_project(tmp_path, switch)
     hold = hold or {c: 0.2 for c in CORNERS}
@@ -471,7 +504,8 @@ def _run_split(tmp_path, monkeypatch, *, switch=None, hold=None, arm_hold=None, 
         runner,
         project=project, pdk=SimpleNamespace(name='pdkX'), container='c', out_dir=out_dir,
         out_dir_c=str(out_dir), pnr_tcl=pnr_tcl, modes=modes, cmd=cmd, spare_plan=None,
-        overlay={'CTS_DISTANCE_BETWEEN_BUFFERS': (10.0, 'policy')}, exec_kwargs={})
+        overlay={'CTS_DISTANCE_BETWEEN_BUFFERS': (10.0, 'policy'), **(overlay_extra or {})},
+        exec_kwargs={})
     return SimpleNamespace(rc=rc, out=out, project=project, out_dir=out_dir, seen=seen,
                            execs=execs)
 
@@ -760,3 +794,110 @@ def test_the_split_works_on_the_step_17_18_librelane_consumer_deck(real_deck):
                          def_c='/w/post_hold.def', after_restore_tcl='')
     assert 'read_db /w/post_hold.odb' in tail and 'read_def /w/ll_placed.def' not in tail
     assert _has(tail, 'detailed_route') and not _has(tail, 'clock_tree_synthesis')
+
+
+# ------------------------------------------- step 20: the hold budget's unit ---
+
+def test_step20_hands_the_tool_the_area_budget_as_a_count(tmp_path, monkeypatch):
+    """cut-20 (audit §2 step 20, "5 % unit misuse"): OpenROAD's
+    `-max_buffer_percent` counts inserted buffers against the design's
+    INSTANCES; the guardrail is 5 % of standard-cell AREA. On spm x gf180mcuD
+    (run_v5c) the flow passed 5.0 straight through: 5 % of 38645 instances =
+    1932 buffers. The resizer must get the area budget converted on the state
+    it reads: floor(5 % x 1000 um2 / 10 um2 largest pool buffer) = 5 buffers
+    in 400 instances = 1.25 %."""
+    run = _run_split(tmp_path, monkeypatch)
+    assert run.rc == 0, run.out
+    head, tail = run.seen['calls'][:2]
+    assert head['steps'] == ['OpenROAD.CTS', 'Vibeic.ClockPathDriveSizing',
+                             'Vibeic.ExternalCaptureLaunchRetap']
+    # step 20 starts from the measured retap state and continues the lane
+    assert tail['steps'][0] == 'OpenROAD.ResizerTimingPostCTS'
+    assert tail['first_index'] == 4 and tail['lane'] == head['lane'] == '19-cts-hold'
+    assert tail['state_in'].endswith('03-vibeic-externalcapturelaunchretap/state_out.json')
+    rsz = json.loads(run.seen['configs'][3].read_text())
+    assert rsz['PL_RESIZER_HOLD_MAX_BUFFER_PCT'] == pytest.approx(1.25)
+    receipt = json.loads((run.project / llev.RECEIPT_REL).read_text())
+    budget = receipt['hold_budget']
+    assert (budget['max_buffers'], budget['largest_buffer'],
+            budget['design__instance__count']) == (5, 'neutral__dly_1', 400)
+    # never the area percentage in the count's place
+    assert rsz['PL_RESIZER_HOLD_MAX_BUFFER_PCT'] != \
+        importlib.import_module('hold_area_budget_check').AREA_BUDGET_PCT
+
+
+def test_a_ppa_candidates_hold_buffer_pct_is_already_the_tools_unit(tmp_path, monkeypatch):
+    """A PPA candidate sweeps the tool's own knob: its value reaches the
+    resizer as given, with no conversion."""
+    run = _run_split(tmp_path, monkeypatch, overlay_extra={
+        'PL_RESIZER_HOLD_MAX_BUFFER_PCT': (0.3, 'PPA candidate')})
+    assert run.rc == 0, run.out
+    receipt = json.loads((run.project / llev.RECEIPT_REL).read_text())
+    assert receipt['hold_budget'] == {'PL_RESIZER_HOLD_MAX_BUFFER_PCT': 0.3,
+                                      'source': 'PPA candidate'}
+
+
+def _pct_fixture(tmp_path, metrics, excluded=()):
+    root = tmp_path / 'pdkroot'
+    write(root / 'pdkX/neutral.lib', NEUTRAL_LIB)
+    write(root / 'pdkX/neutral.lef', NEUTRAL_LEF)
+    state = put(tmp_path / 'state_out.json', {'metrics': metrics})
+    cfg = put(tmp_path / 'rsz.json', {
+        'meta': {'step': 'OpenROAD.ResizerTimingPostCTS'},
+        'CELL_LIBS': {'nom': ['/pdk/pdkX/neutral.lib']},
+        'CELL_LEFS': ['/pdk/pdkX/neutral.lef'],
+        'EXTRA_EXCLUDED_CELLS': list(excluded)})
+    return state, cfg, root
+
+
+def test_hold_buffer_pct_sizes_the_cap_by_the_largest_insertable_buffer(tmp_path):
+    state, cfg, root = _pct_fixture(
+        tmp_path, {'design__instance__count': 400, 'design__instance__area__stdcell': 1000.0})
+    pct, rec = cts.hold_buffer_pct(runner, state, cfg, root, 'pdkX')
+    assert (pct, rec['largest_buffer'], rec['max_buffers']) == (1.25, 'neutral__dly_1', 5)
+    # a master the step excludes is not in the pool: the cap follows the pool
+    state, cfg, root = _pct_fixture(
+        tmp_path / 'x', {'design__instance__count': 400,
+                         'design__instance__area__stdcell': 1000.0},
+        excluded=['neutral__dly_*'])
+    pct, rec = cts.hold_buffer_pct(runner, state, cfg, root, 'pdkX')
+    assert (pct, rec['largest_buffer'], rec['max_buffers']) == (2.5, 'neutral__buf_1', 10)
+
+
+@pytest.mark.parametrize('metrics', [
+    {}, {'design__instance__count': 400}, {'design__instance__area__stdcell': 1000.0},
+    {'design__instance__count': 0, 'design__instance__area__stdcell': 1000.0}])
+def test_an_unmeasured_budget_basis_refuses_instead_of_passing_the_area_pct(tmp_path, metrics):
+    state, cfg, root = _pct_fixture(tmp_path, metrics)
+    with pytest.raises(contract.Refusal, match='LL_HOLD_BUDGET_UNMEASURED'):
+        cts.hold_buffer_pct(runner, state, cfg, root, 'pdkX')
+
+
+def test_step20_refuses_by_name_when_the_budget_cannot_be_converted(tmp_path, monkeypatch):
+    real = cts.hold_buffer_pct
+
+    def unmeasured(R, state_out, *a, **k):
+        put(state_out, {'metrics': {}})
+        return real(R, state_out, *a, **k)
+
+    monkeypatch.setattr(cts, 'hold_buffer_pct', unmeasured)
+    run = _run_split(tmp_path, monkeypatch)
+    assert run.rc != 0 and 'LL_HOLD_BUDGET_UNMEASURED' in run.out
+    assert 'OpenROAD.ResizerTimingPostCTS' not in run.seen['steps']
+    assert not (run.out_dir / 'post_hold.def').exists()
+
+
+# ----------------------------------- step 20: delay cells repair hold again ---
+
+def test_hold_repair_keeps_the_delay_family_every_other_inserter_excludes(tmp_path, monkeypatch):
+    """cut-20 (audit §2 step 20, "delay-cell exclusion"): the run's dont_use
+    families reach every LibreLane inserter, but hold repair is the one
+    whose job is delay. On spm run_v5c the resizer's EXTRA_EXCLUDED_CELLS held
+    all 12 gf180 dly* masters, so hold was closed with plain buffers only."""
+    run = _run_split(tmp_path, monkeypatch)
+    assert run.rc == 0
+    by_step = dict(zip(run.seen['steps'], run.seen['configs']))
+    cts_cfg = json.loads(by_step['OpenROAD.CTS'].read_text())
+    rsz_cfg = json.loads(by_step['OpenROAD.ResizerTimingPostCTS'].read_text())
+    assert 'neutral__dly_1' in cts_cfg['EXTRA_EXCLUDED_CELLS']
+    assert 'neutral__dly_1' not in rsz_cfg['EXTRA_EXCLUDED_CELLS']

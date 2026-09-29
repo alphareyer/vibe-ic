@@ -2355,8 +2355,14 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
               *, docker: str = 'docker', mounts: list[tuple[Path, str]] | None = None,
               lane: str | None = None, pdk_root: str | None = None,
               namespace: str | None = None,
-              openroad_init: list[str] | None = None) -> list[Path]:
+              openroad_init: list[str] | None = None,
+              first_index: int = 1) -> list[Path]:
     """Run pinned per-step snapshots. Step directories retain both inputs and outputs.
+
+    ``first_index``: the number of the first step's folder, so a chain that
+    must read a measured state between two of its steps (step 20's hold
+    budget is converted from the post-CTS instance count) continues the
+    same lane's numbering in a second call instead of restarting at 01.
 
     ``openroad_init``: extra Tcl lines for the OpenROAD init file every
     OpenROAD step reads (joins each step's fingerprint).
@@ -2394,7 +2400,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
     if namespace:
         base /= namespace
     home = openroad_home(base / '.openroad_home', capability, openroad_init)
-    for index, (step_id, config, initial_state) in enumerate(steps, 1):
+    for index, (step_id, config, initial_state) in enumerate(steps, first_index):
         name = f'{index:02d}-{step_id.lower().replace(".", "-")}'
         folder = base / name
         state_path = previous or initial_state

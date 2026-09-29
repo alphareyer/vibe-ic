@@ -24009,9 +24009,28 @@ def _emit_step18_spare_record(project: Path, out_dir: Path, log_path: Path,
 _DONT_USE_FAMILY_PATTERNS = (".*probe_.*", ".*probec_.*", ".*lpflow.*",
                              ".*clkdly.*", ".*dly.*", ".*delay.*")
 
-def _dont_use_family_cells(cell_names: Sequence[str]) -> List[str]:
-    """The library cells `_DONT_USE_FAMILY_PATTERNS` exclude, by whole name."""
-    rx = [re.compile(p, re.I) for p in _DONT_USE_FAMILY_PATTERNS]
+#: The delay families inside `_DONT_USE_FAMILY_PATTERNS`. They are excluded
+#: because a DRV/setup inserter picks them as slow buffers (the six-deep
+#: `dlyb_1` chain above); hold repair is the one inserter whose JOB is delay,
+#: so its step keeps them (audit TOOL_DUPLICATION §2 step 20, review70 step
+#: 20: OpenROAD's hold-buffer choice needs the delay cells to close hold with
+#: fewer, not more, inserted instances).
+_DELAY_FAMILY_PATTERNS = (".*clkdly.*", ".*dly.*", ".*delay.*")
+
+#: The LibreLane step that repairs hold (step 20): the run policy leaves the
+#: delay families in its pool, and only there.
+_HOLD_REPAIR_STEPS = frozenset({"OpenROAD.ResizerTimingPostCTS"})
+
+
+def _dont_use_family_cells(cell_names: Sequence[str], *,
+                           keep_delay: bool = False) -> List[str]:
+    """The library cells `_DONT_USE_FAMILY_PATTERNS` exclude, by whole name.
+
+    ``keep_delay``: for a hold-repair step, the delay families are not
+    excluded (`_DELAY_FAMILY_PATTERNS`)."""
+    patterns = [p for p in _DONT_USE_FAMILY_PATTERNS
+                if not (keep_delay and p in _DELAY_FAMILY_PATTERNS)]
+    rx = [re.compile(p, re.I) for p in patterns]
     return sorted({c for c in cell_names if any(r.fullmatch(c) for r in rx)})
 
 
@@ -24066,14 +24085,17 @@ def _resolved_cell_policy(configs: Dict[str, Path], pdk_root: Path,
                 raise _ll.Refusal("LL_CELL_POLICY_LIBERTY_UNREADABLE",
                                   f"{step}: {value} ({host}): {exc}") from exc
             excluded.update(_dont_use_family_cells(
-                _V1_6_596_RE_CELL_DECL.findall(text)))
+                _V1_6_596_RE_CELL_DECL.findall(text),
+                keep_delay=step in _HOLD_REPAIR_STEPS))
         out[step] = _ll.derive_step_config(
             config, config.with_name(config.stem + ".cell-policy.json"),
             {"EXTRA_EXCLUDED_CELLS": (
                 sorted(excluded),
                 "phase3_one_shot_runner._DONT_USE_FAMILY_PATTERNS over "
-                f"{step} resolved CELL_LIBS ({len(paths)} active Liberty files); "
-                "union with declared/PDK exclusions")})
+                f"{step} resolved CELL_LIBS ({len(paths)} active Liberty files)"
+                + ("; delay families kept for hold repair "
+                   "(_HOLD_REPAIR_STEPS)" if step in _HOLD_REPAIR_STEPS else "")
+                + "; union with declared/PDK exclusions")})
         covered.append(step)
     missing = sorted(set(required) - set(covered))
     if missing or not covered:

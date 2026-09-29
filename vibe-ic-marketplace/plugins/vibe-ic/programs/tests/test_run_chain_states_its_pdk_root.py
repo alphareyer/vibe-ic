@@ -259,14 +259,14 @@ def _enclosing_functions(tree: ast.AST) -> dict:
 #: A call that appears, disappears or moves changes this map and reddens the
 #: ratchet until it is re-pinned by name -- a count floor let six members
 #: leave the resolver's view unnoticed (analog_a6's `self.lc.run_chain` was
-#: one of them). 32 calls in 28 functions.
+#: one of them). 33 calls in 28 functions.
 EXPECTED_CALL_SITES = {
     '_ppa/post_dft.py::run_resynthesis_arms': 1,
     '_ppa/synthesis.py::run_exploration': 1,
     'analog_a6_librelane_drc.py::_Arm.run': 1,
     'analog_a7_post_layout_emit.py::run': 1,
     'design_one_shot_runner.py::step_rtl_lint_tool': 1,
-    'librelane_cts_hold.py::execute': 2,
+    'librelane_cts_hold.py::execute': 3,  # cut-20: 19 head, 20 + STA (hold budget between), direct arm
     'librelane_eqy.py::run_eqy': 1,
     'librelane_fill_dfm.py::run_density': 1,
     'librelane_fill_dfm.py::run_fill_insertion': 1,

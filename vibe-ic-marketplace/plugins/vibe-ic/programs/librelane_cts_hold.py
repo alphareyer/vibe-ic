@@ -152,12 +152,96 @@ def direct_arm_deck(R, deck: str, *, pre_odb_c: str, pre_def_c: str,
 
 
 #: The hold-fix skill's area guardrail (skills/hold-fix/SKILL.md, guardrail
-#: #2), the one budget the flow declares for hold buffering.  OpenROAD's
-#: `-max_buffer_percent` bounds the COUNT of inserted buffers as a percentage
-#: of instances; the same percentage is its declared ceiling.
+#: #2), the one budget the flow declares for hold buffering: hold buffers <=
+#: `hold_area_budget_check.AREA_BUDGET_PCT` % of standard-cell AREA.
+#: OpenROAD's `repair_timing -hold -max_buffer_percent` (LibreLane
+#: `PL_RESIZER_HOLD_MAX_BUFFER_PCT`) is a different unit: a COUNT of inserted
+#: buffers as a percentage of the design's INSTANCES. Passing the area
+#: percentage through unchanged (5 -> 5) let the tool insert 5 % of 38645
+#: instances = 1932 buffers on spm x gf180mcuD (fillties and pads count as
+#: instances), ~7x the area budget; `hold_buffer_pct` converts it instead.
 HOLD_BUFFER_BUDGET_SOURCE = (
     "skills/hold-fix/SKILL.md guardrail #2 (hold buffers <= 5% of cell area); "
     "hold_area_budget_check.AREA_BUDGET_PCT")
+
+
+def hold_buffer_pct(R, state_out: Path, rsz_config: Path, pdk_root: Path,
+                    pdk_name: str) -> Tuple[float, Dict[str, Any]]:
+    """The area budget as the tool's `PL_RESIZER_HOLD_MAX_BUFFER_PCT`.
+
+    Measured on the state the resizer reads (after CTS / sizing / retap):
+
+        budget_area = AREA_BUDGET_PCT/100 * design__instance__area__stdcell
+        max_buffers = floor(budget_area / a_max)
+        pct         = 100 * max_buffers / design__instance__count
+
+    `a_max` is the largest LEF footprint among the Liberty buffers (one input,
+    one output, output function = input: `R._i1958_liberty_buffer_cells`)
+    left in the step's pool by its EXTRA_EXCLUDED_CELLS, so every buffer the
+    tool may insert fits the budget at the cap. The area basis is the one
+    `hold_area_budget_check` judges afterwards (hold_area.json:
+    `design__instance__area__stdcell`), so the ex-ante cap and the ex-post
+    gate agree. Anything unmeasured raises `librelane_contract.Refusal`: the step refuses
+    rather than hand the tool a number in the wrong unit."""
+    import fnmatch
+    import librelane_contract as _ll
+    import _area_unit as _au
+    import hold_area_budget_check as _hab
+    metrics = json.loads(Path(state_out).read_text()).get("metrics") or {}
+    count = metrics.get("design__instance__count")
+    area = metrics.get("design__instance__area__stdcell")
+    if not (isinstance(count, (int, float)) and count > 0
+            and isinstance(area, (int, float)) and area > 0):
+        raise _ll.Refusal("LL_HOLD_BUDGET_UNMEASURED", f"{state_out} carries no positive "
+            f"design__instance__count ({count!r}) / "
+            f"design__instance__area__stdcell ({area!r})")
+    doc = json.loads(Path(rsz_config).read_text())
+    guest = f"/pdk/{pdk_name}/"
+
+    def _host(value: str) -> Path:
+        return (Path(pdk_root) / pdk_name / value[len(guest):]
+                if value.startswith(guest) else Path(value))
+
+    def _paths(value: Any) -> list:
+        groups = value.values() if isinstance(value, dict) else [value]
+        out: list = []
+        for group in groups:
+            out.extend(group if isinstance(group, list) else [group])
+        return sorted({v for v in out if isinstance(v, str) and v})
+
+    excluded = [str(x) for x in (doc.get("EXTRA_EXCLUDED_CELLS") or [])]
+    libs, lefs = _paths(doc.get("CELL_LIBS")), _paths(doc.get("CELL_LEFS"))
+    if not libs or not lefs:
+        raise _ll.Refusal("LL_HOLD_BUDGET_UNMEASURED", f"{rsz_config} names no "
+                         f"CELL_LIBS ({len(libs)}) / CELL_LEFS ({len(lefs)})")
+    buffers: set = set()
+    footprint: Dict[str, float] = {}
+    try:
+        for lib in libs:
+            buffers.update(name for name, _a in R._i1958_liberty_buffer_cells(
+                _host(lib).read_text(errors="replace")))
+        for lef in lefs:
+            footprint.update(_au.lef_footprints_um2(
+                _host(lef).read_text(errors="replace")))
+    except OSError as exc:
+        raise _ll.Refusal("LL_HOLD_BUDGET_UNMEASURED", f"{exc}") from exc
+    pool = {b: footprint[b] for b in buffers if b in footprint
+            and not any(fnmatch.fnmatchcase(b, x) for x in excluded)}
+    if not pool:
+        raise _ll.Refusal("LL_HOLD_BUDGET_UNMEASURED", f"no Liberty buffer with a LEF footprint "
+            f"is left in the pool of {rsz_config}")
+    a_max_cell = max(sorted(pool), key=lambda b: pool[b])
+    a_max = pool[a_max_cell]
+    budget_area = _hab.AREA_BUDGET_PCT / 100.0 * float(area)
+    max_buffers = int(budget_area // a_max)
+    pct = round(100.0 * max_buffers / float(count), 6)
+    return pct, {
+        "area_budget_pct": _hab.AREA_BUDGET_PCT,
+        "design__instance__area__stdcell": area,
+        "design__instance__count": count, "budget_area_um2": budget_area,
+        "largest_buffer": a_max_cell, "largest_buffer_um2": a_max,
+        "buffers_in_pool": len(pool), "max_buffers": max_buffers,
+        "PL_RESIZER_HOLD_MAX_BUFFER_PCT": pct, "measured_on": str(state_out)}
 
 
 #: The step-19/20 LibreLane knobs a PPA candidate may set, through
@@ -199,12 +283,14 @@ def overlay(R, project: Path, pdk_name: str, knobs: Dict[str, Any],
       skips the flag).  The reference-flow knob, else the direct deck's own
       policy value: at 0 TritonCTS collapsed spm x ihp-sg13g2 to a two-level
       tree whose root drove every leaf (MEASURED; 10 um and 40 um both cured it).
-    * `PL_RESIZER_HOLD_MAX_BUFFER_PCT`: the hold-fix guardrail (5 %).
+    * `PL_RESIZER_HOLD_MAX_BUFFER_PCT` is NOT set here: it is a count
+      percentage, converted from the area guardrail by `hold_buffer_pct` on
+      the measured post-CTS state inside `execute` (a PPA candidate's value,
+      already in the tool's unit, is kept as given).
     * a PPA candidate's `"knobs"` in the switch (`PPA_KNOBS`) win over all of
       the above; the fanout cap is checked on the result.
     """
     import librelane_contract as _ll
-    import hold_area_budget_check as _hab
     scratch.mkdir(parents=True, exist_ok=True)
     emitted = _ll.emit_config(project, pdk_name, scratch / "emitted_probe.json")
     overlay: Dict[str, Tuple[Any, str]] = {}
@@ -247,8 +333,6 @@ def overlay(R, project: Path, pdk_name: str, knobs: Dict[str, Any],
         (R._CTS_DEFAULT_DISTANCE_BETWEEN_BUFFERS_UM,
          "phase3_one_shot_runner._CTS_DEFAULT_DISTANCE_BETWEEN_BUFFERS_UM (the "
          "direct deck's policy; measured two-level collapse at 0)"))
-    overlay["PL_RESIZER_HOLD_MAX_BUFFER_PCT"] = (
-        _hab.AREA_BUDGET_PCT, HOLD_BUFFER_BUDGET_SOURCE)
     overlay.update(candidate)
     return overlay
 
@@ -448,8 +532,33 @@ def execute(
             {"odb": pre["odb"], "def": pre["def"], "nl": pre["nl.v"], "sdc": sdc},
             project / "phase3/librelane/19-config/bridge", mounts=mounts,
             chain=[c for _, c in chain[1:]])
-        folders = _ll.run_chain(project, image, [(s, c, state0) for s, c in chain],
+        # Step 19 (CTS .. retap), then the hold budget measured on the state
+        # step 20 reads, converted into the resizer's own unit, then step 20
+        # and the per-corner STA: one lane, continuous numbering.
+        head_steps = chain[:3]
+        folders = _ll.run_chain(project, image, [(s, c, state0) for s, c in head_steps],
                                 mounts=mounts, lane="19-cts-hold", pdk_root=_ll.PDK_GUEST_ROOT)
+        hold_in = folders[-1] / "state_out.json"
+        rsz_cfg = configs["OpenROAD.ResizerTimingPostCTS"]
+        if "PL_RESIZER_HOLD_MAX_BUFFER_PCT" in overlay:
+            hold_budget = {"PL_RESIZER_HOLD_MAX_BUFFER_PCT":
+                           overlay["PL_RESIZER_HOLD_MAX_BUFFER_PCT"][0],
+                           "source": overlay["PL_RESIZER_HOLD_MAX_BUFFER_PCT"][1]}
+        else:
+            pct, hold_budget = hold_buffer_pct(R, hold_in, rsz_cfg, Path(pdk_root),
+                                               str(pdk.name))
+            configs["OpenROAD.ResizerTimingPostCTS"] = rsz_cfg = _ll.derive_step_config(
+                rsz_cfg, rsz_cfg.with_name(rsz_cfg.stem + ".hold-budget.json"),
+                {"PL_RESIZER_HOLD_MAX_BUFFER_PCT": (
+                    pct, f"{HOLD_BUFFER_BUDGET_SOURCE}, converted to a count "
+                         f"percentage by librelane_cts_hold.hold_buffer_pct: "
+                         f"{hold_budget['max_buffers']} x {hold_budget['largest_buffer']} "
+                         f"({hold_budget['largest_buffer_um2']} um2) in "
+                         f"{hold_budget['design__instance__count']} instances")})
+            chain[3] = ("OpenROAD.ResizerTimingPostCTS", rsz_cfg)
+        folders += _ll.run_chain(project, image, [(s, c, hold_in) for s, c in chain[3:]],
+                                 mounts=mounts, lane="19-cts-hold", pdk_root=_ll.PDK_GUEST_ROOT,
+                                 first_index=len(head_steps) + 1)
     except (_ll.Refusal, ValueError, OSError) as exc:
         return _refuse(getattr(exc, "code", "LL_CTS_HOLD_CHAIN_FAILED"), str(exc), out)
     cts_folder, sizing_folder, retap_folder, rsz_folder = folders[:4]
@@ -562,6 +671,7 @@ def execute(
         "measured_state_sha256": _ll.digest(measured_state),
         "selection": selection, "views": {}}
     receipt["excluded_master_census"] = excluded_census
+    receipt["hold_budget"] = hold_budget
     # Written in this order so every report is newer than the DEF it
     # describes (the #519 emitter keys on that).
     for name in ("post_cts_def", "post_hold_def", "post_hold_odb", "cts_rpt"):

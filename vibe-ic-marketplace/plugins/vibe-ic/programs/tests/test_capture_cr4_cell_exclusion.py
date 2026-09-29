@@ -46,7 +46,13 @@ def test_resolved_corner_libraries_cover_floorplan_cts_and_hold(tmp_path):
                                required=tuple(configs))
     expected = ["famx__dly_1", "famx__dly_2", "famx__probe_1"]
     for step in configs:
-        assert json.loads(updated[step].read_text())["EXTRA_EXCLUDED_CELLS"] == expected
+        # cut-20 (audit §2 step 20): hold repair is the one inserter whose job
+        # is delay, so ITS pool keeps the delay family; every other inserter
+        # still excludes it, and every step keeps the other families and the
+        # PDK/declared exclusions.
+        want = (["famx__probe_1"] if step == "OpenROAD.ResizerTimingPostCTS"
+                else expected)
+        assert json.loads(updated[step].read_text())["EXTRA_EXCLUDED_CELLS"] == want
     assert set(covered) == set(configs)
 
 
