@@ -54383,7 +54383,11 @@ def _run_klayout_lvs(project: Path, top: str, pdk: PdkConfig,
               "layout_source": {"kind": "gds",
                                 "path": str(_mask_gds.relative_to(project)),
                                 "sha256": _mask_sha,
-                                "extracted": str(gds_path.relative_to(project))},
+                                "extracted": str(gds_path.relative_to(project)),
+                                # R-0929-GDSXOR-SPLIT: the bytes actually
+                                # extracted; a private `.lvs.gds` copy (DEF
+                                # rail markers) differs from the mask sha.
+                                "extracted_sha256": _sha256_file(gds_path)},
               "power_shorts": power_shorts,
               "power_short_locations": power_short_locs,
               "extracted_netlist": str(layout_sp.relative_to(project)),

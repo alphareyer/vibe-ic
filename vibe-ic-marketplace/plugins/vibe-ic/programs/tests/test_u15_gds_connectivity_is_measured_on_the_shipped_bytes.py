@@ -73,7 +73,7 @@ def test_a_self_xor_receipt_is_not_a_connectivity_pass(tmp_path):
 
 
 def test_a_bound_connectivity_measurement_passes(tmp_path):
-    _receipt(tmp_path, gds_connectivity={
+    _receipt(tmp_path, connectivity={
         "verdict": "PASS", "basis": "lvs_extracted_from_shipped_gds",
         "subject_sha256": LIVE})
     rc, line, _ = G.judge_receipt(tmp_path, G.REPORT_REL)
@@ -82,7 +82,7 @@ def test_a_bound_connectivity_measurement_passes(tmp_path):
 
 
 def test_a_connectivity_pass_about_other_bytes_is_not_measured(tmp_path):
-    _receipt(tmp_path, gds_connectivity={
+    _receipt(tmp_path, connectivity={
         "verdict": "PASS", "basis": "lvs_extracted_from_shipped_gds",
         "subject_sha256": "0" * 64})
     rc, line, _ = G.judge_receipt(tmp_path, G.REPORT_REL)
@@ -90,14 +90,14 @@ def test_a_connectivity_pass_about_other_bytes_is_not_measured(tmp_path):
 
 
 def test_an_unknown_basis_is_not_accepted(tmp_path):
-    _receipt(tmp_path, gds_connectivity={
+    _receipt(tmp_path, connectivity={
         "verdict": "PASS", "basis": "prefinish_self_xor", "subject_sha256": LIVE})
     rc, line, _ = G.judge_receipt(tmp_path, G.REPORT_REL)
     assert rc == 2, line
 
 
 def test_a_measured_connectivity_fail_blocks(tmp_path):
-    _receipt(tmp_path, gds_connectivity={
+    _receipt(tmp_path, connectivity={
         "verdict": "FAIL", "basis": "magic_vs_klayout_stream_xor",
         "subject_sha256": LIVE})
     rc, line, _ = G.judge_receipt(tmp_path, G.REPORT_REL)
@@ -117,15 +117,17 @@ def test_a_finishing_difference_still_fails_first(tmp_path):
 def test_a_def_extracted_lvs_does_not_measure_the_gds(tmp_path):
     _put(tmp_path, G.LVS_VERDICT_REL, _SPMIC2_LVS_VERDICT)
     conn = G.gds_connectivity(tmp_path, LIVE)
-    assert conn["verdict"] == "NOT_MEASURED", conn
+    assert conn["verdict"] == "NOT_DETERMINED", conn
     assert conn["reason_class"] == "FLOW_DOES_NOT_PERFORM"
     assert "routed DEF" in conn["reason"], conn["reason"]
 
 
-def _gds_lvs(status="PASS", sha=LIVE):
+def _gds_lvs(status="PASS", sha=LIVE, extracted_sha=None,
+             extracted="phase3/stage3/pnr/spm.gds"):
     return dict(_SPMIC2_LVS_VERDICT, status=status, result=status,
                 layout_source={"kind": "gds", "path": "phase3/stage3/pnr/spm.gds",
-                               "sha256": sha})
+                               "sha256": sha, "extracted": extracted,
+                               "extracted_sha256": extracted_sha or sha})
 
 
 def test_an_lvs_extracted_from_the_shipped_gds_measures_it(tmp_path):
@@ -138,8 +140,22 @@ def test_an_lvs_extracted_from_the_shipped_gds_measures_it(tmp_path):
 def test_an_lvs_of_other_gds_bytes_does_not_count(tmp_path):
     _put(tmp_path, G.LVS_VERDICT_REL, _gds_lvs(sha="f" * 64))
     conn = G.gds_connectivity(tmp_path, LIVE)
-    assert conn["verdict"] == "NOT_MEASURED", conn
+    assert conn["verdict"] == "NOT_DETERMINED", conn
     assert "different GDS" in conn["reason"]
+
+
+def test_an_lvs_of_the_private_rail_marker_copy_is_not_the_shipped_bytes(tmp_path):
+    """R-0929-GDSXOR-SPLIT: `_run_klayout_lvs` extracts `<top>.lvs.gds` when it
+    exists -- a copy with DEF-derived 901/902 rail markers that name power nets
+    by overlap, "robust to via gaps". Its layout_source.sha256 is the MASK sha
+    (== shipped), but the extracted bytes are not the shipped bytes, so a
+    stream-out that lost its PDN vias would still LVS-match."""
+    _put(tmp_path, G.LVS_VERDICT_REL, _gds_lvs(
+        extracted_sha="c" * 64, extracted="phase3/stage3/pnr/spm.lvs.gds"))
+    conn = G.gds_connectivity(tmp_path, LIVE)
+    assert conn["verdict"] == "NOT_DETERMINED", conn
+    assert "private DEF-augmented" in conn["reason"], conn["reason"]
+    assert "spm.lvs.gds" in conn["reason"]
 
 
 def test_an_lvs_mismatch_on_the_shipped_gds_fails(tmp_path):
@@ -171,7 +187,7 @@ def test_a_nonzero_stream_xor_fails_even_beside_a_clean_lvs(tmp_path):
 
 def test_a_stream_xor_of_other_promoted_bytes_does_not_count(tmp_path):
     _librelane_xor(tmp_path, 0, promoted="e" * 64)
-    assert G.gds_connectivity(tmp_path, LIVE)["verdict"] == "NOT_MEASURED"
+    assert G.gds_connectivity(tmp_path, LIVE)["verdict"] == "NOT_DETERMINED"
 
 
 # ── end to end through the producer (LibreLane finishing branch) ─────────────
@@ -194,13 +210,19 @@ def _librelane_project(project: Path) -> None:
 
 
 def test_the_producer_withholds_pass_until_connectivity_is_measured(tmp_path):
+    """R-0929-GDSXOR-SPLIT: `verdict` stays GEOMETRIC (drvfinal's
+    `_check_gds_derivation` reads it); connectivity is its own field and step
+    37.3's judge composes both, stating the receipt's own class."""
     _librelane_project(tmp_path)
     rc = G.main([str(tmp_path), "--json", str(tmp_path / G.REPORT_REL)])
     doc = json.loads((tmp_path / G.REPORT_REL).read_text())
-    assert rc == 2 and doc["verdict"] == "NOT_DETERMINED", doc
-    assert doc["reason_class"] == "FLOW_DOES_NOT_PERFORM"
-    assert doc["gds_connectivity"]["verdict"] == "NOT_MEASURED"
-    assert G.judge_receipt(tmp_path, G.REPORT_REL)[0] == 2
+    assert rc == 0 and doc["verdict"] == "PASS", doc
+    assert doc["connectivity"]["verdict"] == "NOT_DETERMINED"
+    assert doc["connectivity"]["reason_class"] == "FLOW_DOES_NOT_PERFORM"
+    assert doc["connectivity"]["basis"] is None
+    rc, line, _ = G.judge_receipt(tmp_path, G.REPORT_REL)
+    assert rc == 2, line
+    assert line.startswith("NOT_MEASURED [FLOW_DOES_NOT_PERFORM]"), line
 
 
 def test_the_producer_passes_with_the_stream_xor_bound_to_the_shipped_bytes(tmp_path):
@@ -209,7 +231,8 @@ def test_the_producer_passes_with_the_stream_xor_bound_to_the_shipped_bytes(tmp_
     rc = G.main([str(tmp_path), "--json", str(tmp_path / G.REPORT_REL)])
     doc = json.loads((tmp_path / G.REPORT_REL).read_text())
     assert rc == 0 and doc["verdict"] == "PASS", doc
-    assert doc["gds_connectivity"]["subject_sha256"] == LIVE
+    assert doc["connectivity"]["subject_sha256"] == LIVE
+    assert doc["connectivity"]["basis"] == "magic_vs_klayout_stream_xor"
     assert G.judge_receipt(tmp_path, G.REPORT_REL)[0] == 0
 
 
@@ -220,3 +243,36 @@ def test_klayout_lvs_records_the_mask_gds_it_extracted():
     body = src.split("def _run_klayout_lvs(", 1)[1].split("\ndef ", 1)[0]
     assert '"layout_source": {"kind": "gds"' in body
     assert "_mask_gds, _mask_sha = gds_path, _sha256_file(gds_path)" in body
+    assert '"extracted_sha256": _sha256_file(gds_path)' in body
+
+
+def test_the_judge_states_the_receipts_own_class_on_not_determined(tmp_path):
+    """Never a hard-coded CAPABILITY_ABSENT: a receipt stating
+    FLOW_DOES_NOT_PERFORM is bracketed as such; one stating none falls back."""
+    _receipt(tmp_path, verdict="NOT_DETERMINED", rc=2,
+             reason_class="FLOW_DOES_NOT_PERFORM", reason="not performed",
+             design_layer_differences=None, design__xor_difference__count=None)
+    rc, line, _ = G.judge_receipt(tmp_path, G.REPORT_REL)
+    assert rc == 2 and line.startswith("NOT_MEASURED [FLOW_DOES_NOT_PERFORM]"), line
+    _receipt(tmp_path, verdict="NOT_DETERMINED", rc=2, reason="no runner",
+             design_layer_differences=None, design__xor_difference__count=None)
+    assert G.judge_receipt(tmp_path, G.REPORT_REL)[1].startswith(
+        "NOT_MEASURED [CAPABILITY_ABSENT]")
+
+
+def test_the_audit_publishes_unmeasured_connectivity_as_a_flow_gap(tmp_path):
+    """The flow's own 37.3 clause over a producer-written receipt: the row is
+    NOT_MEASURED/flow_does_not_perform -- not a skip, not an environment state
+    (review wave 58: it read VACUOUS_PASS/tool_absent)."""
+    import yaml
+    import flow_compliance_check as F
+    import verdict as V
+    _librelane_project(tmp_path)
+    G.main([str(tmp_path), "--json", str(tmp_path / G.REPORT_REL)])
+    flow = yaml.safe_load((Path(G.__file__).parents[1]
+                           / "flow/phase1_phase2_phase3.yaml").read_text())
+    step = next(s for s in flow["steps"] if str(s.get("id")) == "37.3")
+    row = F.check_step(tmp_path, step, {})
+    assert row.status == "NOT_MEASURED", row
+    assert row.reason_class == "flow_does_not_perform", row
+    assert V.ReasonClass(row.reason_class) not in V.ENVIRONMENTAL_REASONS

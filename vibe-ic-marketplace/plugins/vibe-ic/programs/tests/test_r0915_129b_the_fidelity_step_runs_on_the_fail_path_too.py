@@ -314,7 +314,7 @@ _S_ARM_RECEIPT = {
     # measurement bound to their sha256; without it the judge reads
     # NOT_MEASURED (test_u15_gds_connectivity_is_measured_on_the_shipped_bytes).
     "shipped_sha256_live": "a" * 64,
-    "gds_connectivity": {"verdict": "PASS", "subject_sha256": "a" * 64,
+    "connectivity": {"verdict": "PASS", "subject_sha256": "a" * 64,
                          "basis": "magic_vs_klayout_stream_xor"},
 }
 

@@ -872,6 +872,16 @@ def gds_connectivity(project: Path, live_sha256: str) -> Dict[str, Any]:
         looked.append(f"{LVS_VERDICT_REL} extracted a different GDS "
                       f"({str(src.get('sha256'))[:16]}..., shipped "
                       f"{live_sha256[:16]}...)")
+    elif src.get("extracted_sha256") != live_sha256:
+        # R-0929-GDSXOR-SPLIT: the private `<top>.lvs.gds` carries DEF-derived
+        # rail markers that name power nets by overlap ("robust to via gaps"),
+        # so its extraction decides power connectivity from the DEF, not from
+        # the streamed bytes. Only an extraction OF the shipped bytes counts.
+        looked.append(
+            f"{LVS_VERDICT_REL} extracted {src.get('extracted') or 'unrecorded bytes'}"
+            f" (sha256 {str(src.get('extracted_sha256'))[:16]}...), not the "
+            f"shipped bytes ({live_sha256[:16]}...); a private DEF-augmented "
+            f"LVS copy is not an extraction of the shipped GDS")
     elif lvs.get("status") not in ("PASS", "FAIL"):
         looked.append(f"{LVS_VERDICT_REL} on the shipped GDS has status "
                       f"{lvs.get('status')!r}, not a measured compare")
@@ -889,7 +899,7 @@ def gds_connectivity(project: Path, live_sha256: str) -> Dict[str, Any]:
     elif found:
         out.update(verdict="PASS", basis=found[0]["basis"])
     else:
-        out.update(verdict="NOT_MEASURED",
+        out.update(verdict="NOT_DETERMINED", basis=None,
                    reason_class=_CONNECTIVITY_UNMEASURED_CLASS,
                    reason=("the shipped GDS's connectivity was not measured: "
                            + "; ".join(looked)))
@@ -965,6 +975,17 @@ def librelane_finishing_receipt(project: Path, live_sha256: str
                       f"stream counted {count} defect(s) ({rel})"}
 
 
+def _stated_class(doc: Dict[str, Any],
+                  default: str = _JUDGE_CAPABILITY_ABSENT) -> str:
+    """The reason class the receipt STATES (normalised), else `default`."""
+    try:
+        import _flow_reason_taxonomy as _tax  # noqa: PLC0415
+        stated = _tax.normalise(doc.get("reason_class"))
+    except Exception:                                      # pragma: no cover
+        stated = None
+    return stated or default
+
+
 def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
     """Decide step 37.3 from the receipt the PRODUCER wrote. Returns (rc, line, doc).
 
@@ -1023,7 +1044,7 @@ def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
         # could not measure; re-deriving that here is how two readers come to
         # disagree about one run.
         return 2, (
-            f"NOT_MEASURED [{_JUDGE_CAPABILITY_ABSENT}]: the run's own receipt "
+            f"NOT_MEASURED [{_stated_class(doc)}]: the run's own receipt "
             f"{rel} records verdict NOT_DETERMINED — {reason}"), doc
     if diffs or (isinstance(count, int) and count > 0):
         named = ", ".join(
@@ -1033,21 +1054,24 @@ def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
             f"FAIL: the run's own receipt {rel} records {len(diffs)} DESIGN "
             f"layer(s) differing between the shipped GDS and this run's "
             f"pre-finishing reference ({count} differing polygon(s): {named})"), doc
-    # U15: 0 design-layer differences against a pre-finishing reference is a
-    # FINISHING statement. PASS also needs the shipped bytes' connectivity
-    # measured, bound to the sha256 the receipt compared.
-    conn = doc.get("gds_connectivity")
+    # U15 / R-0929-GDSXOR-SPLIT: `verdict` is the GEOMETRIC answer (0
+    # design-layer differences). Step 37.3's composed status also needs the
+    # shipped bytes' connectivity (`connectivity`), bound to the sha256 the
+    # receipt compared.
+    conn = doc.get("connectivity")
     live = doc.get("shipped_sha256_live")
     ref = doc.get("reference") if isinstance(doc.get("reference"), dict) else {}
     if not isinstance(conn, dict) or conn.get("verdict") not in ("PASS", "FAIL"):
+        cls = _stated_class(conn if isinstance(conn, dict) else {},
+                            _CONNECTIVITY_UNMEASURED_CLASS)
         why = (conn.get("reason") if isinstance(conn, dict) and conn.get("reason")
-               else f"the receipt carries no gds_connectivity measurement; its "
+               else f"the receipt carries no connectivity measurement; its "
                     f"reference is the {ref.get('kind') or 'unstated'} "
                     f"pre-finishing stream, which proves finishing left the "
                     f"design layers alone and cannot see a stream-out that "
                     f"lost connectivity")
         return 2, (
-            f"NOT_MEASURED [{_CONNECTIVITY_UNMEASURED_CLASS}]: {rel} records 0 "
+            f"NOT_MEASURED [{cls}]: {rel} records 0 "
             f"design-layer difference(s) across {layers} layer(s) against the "
             f"pre-finishing reference, but {why}"), doc
     if (not isinstance(live, str) or not live
@@ -1055,7 +1079,7 @@ def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
             or conn.get("basis") not in CONNECTIVITY_BASES):
         return 2, (
             f"NOT_MEASURED [{_CONNECTIVITY_UNMEASURED_CLASS}]: {rel}'s "
-            f"gds_connectivity is not bound to the shipped GDS it compared "
+            f"connectivity is not bound to the shipped GDS it compared "
             f"(subject {str(conn.get('subject_sha256'))[:16]}..., shipped "
             f"{str(live)[:16]}..., basis {conn.get('basis')!r})"), doc
     if conn["verdict"] == "FAIL":
@@ -1144,8 +1168,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     fill_pairs, seal_pairs, prov = declared_finishing_layers(project)
     report["declared_finishing_layers"] = prov
 
-    def finish(verdict: str, rc: int, reason: str,
-               reason_class: str = _JUDGE_CAPABILITY_ABSENT) -> int:
+    def finish(verdict: str, rc: int, reason: str) -> int:
         report.update(verdict=verdict, rc=rc, reason=reason)
         # THE CLASS, STATED BY THE GATE THAT KNOWS IT. `_flow_reason_taxonomy
         # .report_reason_class` reads this field and `_p0_declared_reason_class`
@@ -1154,7 +1177,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # sentence, which is how "the tool was unreachable" and "this design has
         # no such thing" come to share a class.
         if verdict == "NOT_DETERMINED":
-            report["reason_class"] = reason_class
+            report["reason_class"] = _JUDGE_CAPABILITY_ABSENT
         else:
             report.pop("reason_class", None)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1192,21 +1215,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                       f"({ROUTE_EVIDENCE_REL} records {recorded[:16]}..., on disk "
                       f"{live[:16]}...), so this run's own pairing no longer holds")
 
-    def finish_connectivity(finishing_reason: str) -> int:
-        """The finishing comparison measured 0 design-layer differences. That
-        is a statement about FINISHING; PASS additionally needs the shipped
-        bytes' connectivity measured (U15, `gds_connectivity`)."""
+    def finish_geometric(verdict: str, rc: int, reason: str) -> int:
+        """R-0929-GDSXOR-SPLIT: `verdict` stays the GEOMETRIC answer; the
+        shipped bytes' connectivity is its own field, which step 37.3's
+        judge composes with it (`judge_receipt`)."""
         conn = gds_connectivity(project, live)
-        report["gds_connectivity"] = conn
-        if conn["verdict"] == "PASS":
-            return finish("PASS", 0, f"{finishing_reason}; connectivity of the "
-                                     f"shipped GDS measured by {conn['basis']}")
-        if conn["verdict"] == "FAIL":
-            return finish("FAIL", 1, f"{finishing_reason}; but the shipped GDS's "
-                                     f"connectivity FAILED under {conn['basis']}")
-        return finish("NOT_DETERMINED", 2,
-                      f"{finishing_reason} -- finishing fidelity only; "
-                      f"{conn['reason']}", conn["reason_class"])
+        report["connectivity"] = conn
+        return finish(verdict, rc, f"{reason}; connectivity of the shipped "
+                                   f"GDS: {conn['verdict']}"
+                                   + (f" ({conn['basis']})" if conn.get("basis")
+                                      else f" [{conn.get('reason_class')}]"))
 
     # STEP 37 ON LIBRELANE (lane mig105). When the shipped bytes are exactly
     # the stream LibreLane's step-37 chain promoted, the finishing comparison
@@ -1218,9 +1236,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ll = librelane_finishing_receipt(project, live)
     if ll is not None:
         report.update(ll["report"])
-        if ll["verdict"] != "PASS":
+        if ll["verdict"] not in ("PASS", "FAIL"):
             return finish(ll["verdict"], ll["rc"], ll["reason"])
-        return finish_connectivity(ll["reason"])
+        return finish_geometric(ll["verdict"], ll["rc"], ll["reason"])
 
     try:
         import _klayout_launch as _kl
@@ -1293,7 +1311,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                       f"({total} differing polygon(s): {named}) — finishing may add "
                       f"geometry on the layers it declares, and these are not "
                       f"those")
-    return finish_connectivity(
+    return finish_geometric(
+        "PASS", 0,
         f"the shipped GDS matches the {kind} pre-finishing reference "
         f"on every design layer (0 differences across "
         f"{len(counts)} layer(s) compared); "

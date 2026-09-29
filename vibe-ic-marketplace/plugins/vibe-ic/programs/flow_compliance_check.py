@@ -3741,11 +3741,21 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
             # evidence passed is the enumeration ALONE — not the whole report —
             # so no other branch of `infer_nonverdict_reason` (`skip_kind`,
             # `declared_absence_basis`, `reason_class`) changes behaviour here.
+            # R-0929-GDSXOR-SPLIT: a class the callee STATED in its own first
+            # line (`NOT_MEASURED [CLASS]: ...`) is carried when the clause
+            # names no report -- ONLY when it is not skip-eligible, so a
+            # statement can make the row stricter and never excuse it.
+            _explicit = report_cls
+            if not _reason_taxonomy.normalise(_explicit):
+                _stated = stated_nonverdict_class(
+                    None, report_message or legacy_message)
+                if _stated and _stated not in _reason_taxonomy.SKIP_ELIGIBLE:
+                    _explicit = _stated
             reason_class = _reason_taxonomy.infer_nonverdict_reason(
                 verdict="VACUOUS_PASS",
                 message=report_message or legacy_message,
                 evidence={_sa.EVIDENCE_KEY: _sa.evidence_of(report)},
-                explicit=report_cls)
+                explicit=_explicit)
         if substantive_alternate:
             pass
         elif reason_class in _reason_taxonomy.SKIP_ELIGIBLE:
@@ -5057,6 +5067,20 @@ def _hint_declares_execution_error(hints: List[str]) -> bool:
         if m and m.group(1) == _reason_taxonomy.EXECUTION_ERROR:
             return True
     return False
+def _hints_declare_flow_does_not_perform(hints: List[str]) -> bool:
+    """True iff EVERY incomplete hint carries the producer's own
+    FLOW_DOES_NOT_PERFORM (R-0929-GDSXOR-SPLIT: step 37.3 when no producer
+    measured the shipped GDS's connectivity). Unanimity, and only a class that
+    has a step-level member (`_T.ReasonClass.FLOW_DOES_NOT_PERFORM`)."""
+    if not hints:
+        return False
+    for h in hints:
+        m = _HINT_DECLARED_CLASS_RE.search(h)
+        if not m or m.group(1) != _reason_taxonomy.FLOW_DOES_NOT_PERFORM:
+            return False
+    return True
+
+
 def _report_declares_expert_pass_outstanding(report: Any) -> bool:
     """Does a gate's own report state that an EXPERT pass is outstanding?
 
@@ -12768,7 +12792,15 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         if passed and _stdout_signals_token(out, _SUBSTANTIVE_STDOUT_TOKEN):
             reasons.append(f"{_SUBSTANTIVE_HINT_PREFIX}{_cmd}")
         if passed and _stdout_signals_token(out, _INCOMPLETE_STDOUT_TOKEN):
-            reasons.append(f"{_INCOMPLETE_HINT_PREFIX}{_cmd}")
+            # R-0929-GDSXOR-SPLIT: a clause whose own classified line declares
+            # FLOW_DOES_NOT_PERFORM carries it to the step row (only that
+            # class; `_hints_declare_flow_does_not_perform`).
+            _dm = _HINT_DECLARED_CLASS_RE.search(_first_line(out))
+            _fdnp = (_dm is not None and _dm.group(1)
+                     == _reason_taxonomy.FLOW_DOES_NOT_PERFORM)
+            reasons.append(f"{_INCOMPLETE_HINT_PREFIX}{_cmd}"
+                           + (f" [reason_class={_dm.group(1)}]" if _fdnp
+                              else ""))
             # THE SAME ASYMMETRY THE VACUOUS COMMENT ABOVE DESCRIBES, for the
             # OTHER token. The OPTIONAL clause reader appends this awaiting hint
             # nested exactly here; the REQUIRED reader never looked for it, so
@@ -17174,6 +17206,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 # order between those two is not asserted further here.
                 else _T.ReasonClass.EXECUTION_ERROR.value
                 if _hint_declares_execution_error(incomplete_hints)
+                else _T.ReasonClass.FLOW_DOES_NOT_PERFORM.value
+                if _hints_declare_flow_does_not_perform(incomplete_hints)
                 else _T.ReasonClass.PARTIAL_POPULATION.value)
             for h in awaiting_hints:
                 result.reasons.append(
