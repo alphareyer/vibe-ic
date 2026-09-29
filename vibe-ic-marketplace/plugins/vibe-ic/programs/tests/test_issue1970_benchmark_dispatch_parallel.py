@@ -260,6 +260,13 @@ def test_real_refusal_cannot_collect_old_reports_and_resume_retries_only_that_ba
         assert bio.collect("rtllm", pid, project, supplied_rtl=True)["ok"] is True
     prior_report = run / "projects" / "p1" / "reports" / "orchestrator" / "phase2_one_shot.json"
     before = prior_report.read_bytes()
+    # The refusal must survive the explicit IP route fix: this operator has
+    # declared a DIE deliverable, so asking for IP conflicts before any gate.
+    from _delivery_route import admit
+    from _submission_template import DESIGN_ANSWERS_REL
+    assert admit(run / "projects" / "p1", "ic") is None
+    declaration = run / "projects" / "p1" / DESIGN_ANSWERS_REL
+    declared_bytes = declaration.read_bytes()
     native_run = bd.subprocess.run
     refuse = True
     calls = []
@@ -268,7 +275,7 @@ def test_real_refusal_cannot_collect_old_reports_and_resume_retries_only_that_ba
         pid = Path(argv[2]).name
         calls.append(pid)
         if pid == "p1" and refuse:
-            return native_run(argv + ["--no-dashboard"], **kwargs)
+            return native_run(argv + ["--no-dashboard", "--route", "ip"], **kwargs)
         _prior_collectable_report(Path(argv[2]))
         return SimpleNamespace(returncode=1, stdout="bounded NOT_MEASURED\n", stderr="")
 
@@ -278,9 +285,11 @@ def test_real_refusal_cannot_collect_old_reports_and_resume_retries_only_that_ba
     assert rows["p1"]["candidate_ready"] is False
     assert rows["p1"]["rc"] == 2
     assert "RUNNER_INVOCATION_REFUSED" in rows["p1"]["worker_error"]
+    assert "contradicts the existing owner-provenance answer DIE" in rows["p1"]["worker_error"]
     assert rows["p2"]["candidate_ready"] is True
     assert rows["p2"]["rc"] == 1
     assert prior_report.read_bytes() == before
+    assert declaration.read_bytes() == declared_bytes
     assert [r["id"] for r in bd._read_jsonl(run / bd._BACKUP_WORKLIST)] == ["p1"]
     healthy = bd._read_jsonl(run / bd._REVIEW_WORKLIST)
     assert [r["id"] for r in healthy] == ["p2"]
@@ -289,6 +298,7 @@ def test_real_refusal_cannot_collect_old_reports_and_resume_retries_only_that_ba
     calls.clear()
     assert bd.cmd_resume("rtllm", "/unused", str(run), jobs=2) == 2
     assert calls == ["p1"]
+    assert declaration.read_bytes() == declared_bytes
     after = {r["id"]: r for r in bd._read_jsonl(run / bd._REVIEW_WORKLIST)}
     assert after["p2"] == healthy[0]
     assert after["p1"]["program_verification"]["runner_rc"] == 1
