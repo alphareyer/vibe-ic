@@ -30,10 +30,12 @@ import verdict as V  # noqa: E402
 # ── the vocabulary is closed ─────────────────────────────────────────────
 
 def test_five_generic_verdicts_and_the_declared_attribution_tier():
-    """Only the producer-declared density tier extends the generic vocabulary."""
+    """Only the producer-declared density tier and the LEC residual (owner's
+    2026-09-28 LEC NOT_PROVEN rule, see R-0929-LEC-TEST) extend the generic
+    vocabulary."""
     assert [v.value for v in V.Verdict] == [
         "PASS", "PASS_WITH_WAIVERS", D.TIER_PASS_WITH_ATTRIBUTION,
-        "FAIL", "NOT_MEASURED", "NOT_APPLICABLE"]
+        "FAIL", "NOT_PROVEN", "NOT_MEASURED", "NOT_APPLICABLE"]
 
 
 @pytest.mark.parametrize("word", [v.value for v in V.Verdict])
