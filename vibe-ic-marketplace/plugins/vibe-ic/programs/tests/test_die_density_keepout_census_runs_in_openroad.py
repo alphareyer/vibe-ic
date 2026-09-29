@@ -301,3 +301,30 @@ def test_a_failed_fill_engine_keeps_its_reason_in_fill_log(tmp_path,
     log = project / 'phase3/librelane/37-engine-fails/fill.log'
     assert str(log) in str(refused.value)
     assert 'layer 61/7 unwritable' in log.read_text()
+
+
+def test_every_master_a_pad_or_macro_view_declares_is_protected_whatever_its_class(
+        tmp_path, monkeypatch):
+    """Review wave 57: OpenDB classifies by LEF CLASS, so a PAD_LEFS master
+    with no CLASS, or a corner declared CLASS ENDCAP, or a macro view's RING,
+    was read as an unprotected core cell and filled over. The view that
+    declared the master names its role; the std-cell ENDCAP still does not."""
+    image, _ = _route(monkeypatch)
+    placed = [*PLACED,
+              ('NC0', 'NOCLASSPAD', 140000, 160000, 'N'),
+              ('CORNER0', 'CORNERCELL', 0, 0, 'N'),
+              ('RING0', 'RINGCELL', 150000, 20000, 'N')]
+    project, pdk_root, cfg = _stage(tmp_path, placed=placed, pad_macros=(
+        _macro('NOCLASSPAD', None, 10, 10),
+        _macro('CORNERCELL', 'ENDCAP BOTTOMLEFT', 30, 30)))
+    block = project / 'macros/block.lef'
+    block.write_text(block.read_text().replace(
+        'END LIBRARY', _macro('RINGCELL', 'RING', 12, 6) + 'END LIBRARY'))
+    census = fill._placed_keepout_boxes(project, image, pdk_root, PDK, cfg,
+                                        project / 'phase3/librelane/census')
+    assert census['total'] == len(placed)
+    assert _um(census) == sorted(EXPECTED_UM + [
+        ('BLOCK', 'RINGCELL', (150.0, 20.0, 162.0, 26.0)),
+        ('PAD', 'CORNERCELL', (0.0, 0.0, 30.0, 30.0)),
+        ('PAD', 'NOCLASSPAD', (140.0, 160.0, 150.0, 170.0)),
+    ])
