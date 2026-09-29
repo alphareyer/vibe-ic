@@ -407,3 +407,93 @@ def test_tightening_the_spacing_never_kills_a_child_that_is_working():
     cp = R.run(_py(CHATTY_SLOW), poll_s=None, stall_looks=R.DEFAULT_STALL_LOOKS)
     assert cp.returncode == 0
     assert cp.stdout.count("tick") == 10, cp.stdout
+
+
+# ── 8. finished work stays in the CPU sum (2026-09-29, 8HD-6) ────────────────
+#: A child that burns *s* seconds of CPU, then (optionally) waits for a file.
+_BURN = ("import time, sys\nfrom pathlib import Path\n"
+         "t = time.process_time()\n"
+         "while time.process_time() - t < {s}: pass\n"
+         "if len(sys.argv) > 1:\n"
+         "    Path(sys.argv[1], 'burned').write_text('1')\n"
+         "    while not Path(sys.argv[1], 'go').exists(): time.sleep(0.01)\n")
+
+
+def _live_only_cpu(pids):
+    """The reading this probe used to take -- utime+stime of LIVE processes."""
+    total = 0.0
+    for p in pids:
+        try:
+            with open(f"/proc/{p}/stat", "rb") as fh:
+                data = fh.read()
+            f = data[data.rfind(b")") + 2:].split()
+            total += (int(f[11]) + int(f[12])) / R._CLK_TCK
+        except (OSError, ValueError, IndexError):
+            continue
+    return total
+
+
+def _wait_for(path, what):
+    deadline = time.monotonic() + 120
+    while not path.exists():
+        assert time.monotonic() < deadline, f"{what} never happened"
+        time.sleep(0.02)
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs /proc")
+def test_a_reaped_childs_cpu_stays_in_the_tree_sum(tmp_path):
+    """A/B on ONE real tree. The live-only sum -- what `_cpu_seconds` read
+    before -- DROPS when the parent reaps its busy child, so a max-crediting
+    meter reads the working tree as still until it re-earns the lost seconds.
+    MEASURED on the real prepare() tree: runs of 9 still looks at ~1 CPU-s/s,
+    and a false STALLED after 497 s. The cumulative sum must not drop."""
+    parent = ("import subprocess, sys, time\nfrom pathlib import Path\n"
+              "d = sys.argv[1]\n"
+              f"subprocess.run([sys.executable, '-c', {_BURN.format(s=1.0)!r}, d])\n"
+              "Path(d, 'reaped').write_text('1')\n"
+              "while not Path(d, 'end').exists(): time.sleep(0.05)\n")
+    proc = subprocess.Popen(_py(parent) + [str(tmp_path)])
+    try:
+        _wait_for(tmp_path / "burned", "the child's burn")
+        pids = R._descendants(proc.pid)
+        assert len(pids) == 2, pids
+        live_before, cum_before = _live_only_cpu(pids), R._cpu_seconds(pids)
+        (tmp_path / "go").write_text("1")
+        _wait_for(tmp_path / "reaped", "the reap")
+        pids = R._descendants(proc.pid)
+        assert pids == [proc.pid], pids
+        live_after, cum_after = _live_only_cpu(pids), R._cpu_seconds(pids)
+    finally:
+        (tmp_path / "end").write_text("1")
+        proc.wait()
+    # A: the defect is real on this host -- the live-only reading forgets.
+    assert live_before >= 1.0 and live_after < live_before - 0.5, (
+        live_before, live_after)
+    # B: the reading the stall predicate now uses does not.
+    assert cum_after >= cum_before, (cum_before, cum_after)
+
+
+def test_a_tree_that_keeps_reaping_busy_children_is_not_stalled():
+    """A big child first sets a high-water mark, then smaller children do the
+    rest one after another. Live-only, every look after the big one is below
+    the mark: STALLED at 3 looks. Cumulative, every reap and every tick counts."""
+    parent = ("import subprocess, sys\n"
+              f"subprocess.run([sys.executable, '-c', {_BURN.format(s=1.5)!r}])\n"
+              "for _ in range(8):\n"
+              f"    subprocess.run([sys.executable, '-c', {_BURN.format(s=0.25)!r}])\n"
+              "print('done')\n")
+    cp = R.run(_py(parent), **FAST)
+    assert cp.returncode == 0 and cp.stdout.strip() == "done", cp
+
+
+def test_a_tree_that_reaped_its_work_and_then_sleeps_is_still_caught():
+    """The other half: counting reaped CPU must not vouch for a tree that has
+    stopped. Once the busy child is reaped and the parent sleeps, nothing
+    moves, and the stall is still reported."""
+    parent = ("import subprocess, sys, time\n"
+              f"subprocess.run([sys.executable, '-c', {_BURN.format(s=0.5)!r}])\n"
+              "time.sleep(600)\n")
+    t0 = time.monotonic()
+    with pytest.raises(R.Stalled):
+        R.run(_py(parent), **FAST)
+    assert time.monotonic() - t0 < 120
