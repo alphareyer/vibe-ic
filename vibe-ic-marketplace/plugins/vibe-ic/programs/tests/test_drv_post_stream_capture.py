@@ -26,9 +26,12 @@ from test_drv_signoff_judge import (_bundle, _file,  # noqa: E402
 
 
 def _streamed(tmp_path, *, lvs_status="PASS", gds_def=None, lvs_def=None,
-              lvs_netlist_body=None, records=True):
+              lvs_netlist_body=None, records=True, xor=True, xor_def=None,
+              xor_gds=None, xor_differences=(), xor_verdict="PASS",
+              xor_layers=45, verdict_inputs="bound"):
     """A clean judged bundle whose layout was streamed and LVS-compared, with
-    the records the flow writes (GDS admission, LVS inputs, LVS verdict)."""
+    the records the flow writes (GDS admission, step 37.3's GDS XOR, LVS
+    inputs, and the LVS verdict naming the inputs it compared)."""
     bundle = _bundle(tmp_path)
     identity = bundle["identity"]
     project = Path(identity["project"])
@@ -38,7 +41,7 @@ def _streamed(tmp_path, *, lvs_status="PASS", gds_def=None, lvs_def=None,
         identity[name] = None
         identity["artifacts"].pop(name, None)
     for rel in ("reports/phase3/gds_admission.json", "reports/phase3/lvs_inputs.json",
-                "reports/phase3/lvs_verdict.json"):
+                "reports/phase3/lvs_verdict.json", "reports/phase3/gds_xor.json"):
         (project / rel).unlink(missing_ok=True)      # this test writes its own
     if records:
         gds = _file(project, "phase3/stage3/pnr/top.gds", "GDSII STREAM\n")
@@ -48,12 +51,27 @@ def _streamed(tmp_path, *, lvs_status="PASS", gds_def=None, lvs_def=None,
                              gds_def or drv._sha(judged_def)}}))
         schematic = (Path(_file(project, "other_pnr.v", lvs_netlist_body)["path"])
                      if lvs_netlist_body else sta_netlist)
-        _file(project, "reports/phase3/lvs_inputs.json", json.dumps({
+        if xor:
+            _file(project, "reports/phase3/gds_xor.json", json.dumps({
+                "gate": "gds_xor_check", "verdict": xor_verdict,
+                "attestation": {"gds": "phase3/stage3/pnr/top.gds",
+                                "def_sha256_recorded": xor_def or drv._sha(judged_def)},
+                "shipped_sha256_live": xor_gds or gds["sha256"],
+                "layers_compared": xor_layers,
+                "design_layer_differences": list(xor_differences)}))
+        compared = {
             "layout_def": {"path": str(judged_def),
                            "sha256": lvs_def or drv._sha(judged_def)},
-            "schematic_netlist": {"path": str(schematic), "sha256": drv._sha(schematic)}}))
-        _file(project, "reports/phase3/lvs_verdict.json", json.dumps({
-            "status": lvs_status, "compare_performed": True}))
+            "schematic_netlist": {"path": str(schematic), "sha256": drv._sha(schematic)}}
+        _file(project, "reports/phase3/lvs_inputs.json", json.dumps(compared))
+        verdict = {"status": lvs_status, "compare_performed": True}
+        if verdict_inputs == "bound":
+            verdict["compared_inputs"] = compared
+        elif verdict_inputs == "other":
+            verdict["compared_inputs"] = {
+                "layout_def": {"sha256": "d" * 64},
+                "schematic_netlist": compared["schematic_netlist"]}
+        _file(project, "reports/phase3/lvs_verdict.json", json.dumps(verdict))
     bundle["identity"] = capture_plan.post_stream_identity(
         project, {"identity": identity})["identity"]
     return project, bundle

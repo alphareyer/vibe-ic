@@ -627,6 +627,11 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
 LVS_INPUTS = Path("reports/phase3/lvs_inputs.json")
 LVS_VERDICT = Path("reports/phase3/lvs_verdict.json")
 GDS_ADMISSION = Path("reports/phase3/gds_admission.json")
+#: Step 37.3's stream-out fidelity record: the shipped GDS against the stream
+#: the gds step kept of the routed DEF before fill and seal ring.  It is the
+#: flow's only GEOMETRIC evidence that the shipped GDS is the judged DEF's
+#: layout (design layers identical); the admission record only names the DEF.
+GDS_XOR = Path("reports/phase3/gds_xor.json")
 
 
 def _read_json(path: Path) -> dict:
@@ -643,11 +648,15 @@ def post_stream_identity(project: Path, plan: dict) -> dict:
 
     * GDS: `gds_admission.json` names the admitted GDS, its sha256 and the
       routed DEF it was streamed from (`basis_inputs`).
+    * GDS geometry: `gds_xor.json` (step 37.3) compares the shipped GDS with
+      the stream of that DEF kept before fill and seal ring.
     * LVS: `lvs_inputs.json` names the DEF step 31 extracted the layout from
       and the gate netlist it compared against; `lvs_verdict.json` says
-      whether the compare matched.
-    The judge re-hashes every file and checks each link; this only gathers
-    the records.  A missing record leaves its identity absent (NOT_MEASURED).
+      whether the compare matched and (written by the same LVS) which inputs
+      it compared.
+    The judge re-hashes every record and re-reads every value from the
+    records themselves; this only gathers references.  A missing record
+    leaves its link absent (NOT_MEASURED).
     """
     identity = dict(plan["identity"])
     artifacts = dict(identity.get("artifacts") or {})
@@ -663,6 +672,8 @@ def post_stream_identity(project: Path, plan: dict) -> dict:
             "sha256": admission.get("gds_sha256"),
             "streamed_from_def_sha256": basis.get("phase3/stage3/pnr/routed.def"),
             "record": _ref(project / GDS_ADMISSION)}
+        if (project / GDS_XOR).is_file():
+            derivation["gds"]["xor_record"] = _ref(project / GDS_XOR)
     lvs = _read_json(project / LVS_INPUTS)
     verdict = _read_json(project / LVS_VERDICT)
     schematic = (lvs.get("schematic_netlist") or {}).get("path")
@@ -672,13 +683,16 @@ def post_stream_identity(project: Path, plan: dict) -> dict:
             "schematic_netlist": _ref(Path(schematic)),
             "verdict": verdict.get("status"),
             "compare_performed": verdict.get("compare_performed"),
-            "records": [_ref(project / LVS_INPUTS), _ref(project / LVS_VERDICT)]}
+            "inputs_record": _ref(project / LVS_INPUTS),
+            "verdict_record": _ref(project / LVS_VERDICT)}
         artifacts["lvs_netlist"] = derivation["lvs"]["schematic_netlist"]
         identity["lvs_netlist"] = artifacts["lvs_netlist"]["sha256"]
     if "gds" in derivation:
         # The netlist a streamed layout carries is the netlist of the DEF it
-        # was streamed from; the judge accepts it only when that DEF is the
-        # judged DEF (the plan binds DEF and STA netlist from one state).
+        # was streamed from.  This is a DERIVED identity, not a measurement:
+        # the judge accepts it only when the chain holds -- the admission names
+        # the judged DEF, the XOR shows the shipped GDS's design layers are that
+        # DEF's stream, and LVS matched that DEF against the judged netlist.
         artifacts["gds_netlist"] = dict(artifacts["sta_netlist"])
         identity["gds_netlist"] = artifacts["gds_netlist"]["sha256"]
     identity["artifacts"] = artifacts

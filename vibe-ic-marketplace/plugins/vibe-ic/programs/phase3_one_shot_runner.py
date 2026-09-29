@@ -52751,6 +52751,12 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
     # below belongs to the step, not to one producer: a pnr that died before
     # its final writes is skipped on every mode, so the switch is consulted
     # only when that skip does not apply. ``_direct``: the dual arm's re-entry.
+    #
+    # R-0929-DRV-IDENTITY: what the direct LVS compares is recorded below; an
+    # earlier run's record must never stand for it -- on ANY producer mode.
+    # Cleared before the switch: a LibreLane-produced LVS records no inputs,
+    # and must not inherit a direct run's record through its own verdict.
+    (project / "reports/phase3/lvs_inputs.json").unlink(missing_ok=True)
     if not _direct and not (
             upstream_pnr is not None and upstream_pnr.status != "PASS"
             and not (getattr(upstream_pnr, "extras", None) or {}).get(
@@ -52760,9 +52766,6 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
         if _routed is not None:
             return _routed
     t0 = time.time()
-    # R-0929-DRV-IDENTITY: what this LVS compares is recorded below; an earlier
-    # run's record must never stand for it.
-    (project / "reports/phase3/lvs_inputs.json").unlink(missing_ok=True)
     _vac = _vacuous_on_unrouted(project, "lvs", t0)
     if _vac is not None:
         return _vac
@@ -53350,6 +53353,21 @@ def _write_lvs_verdict(project: Path, status: str, finding: str,
     }
     if extras:
         payload.update(extras)
+    # R-0929-DRV-IDENTITY — THE VERDICT NAMES WHAT IT COMPARED. step_lvs
+    # clears `lvs_inputs.json` at its start and writes it once it has chosen
+    # the layout DEF and the netlist, so the record present NOW is this LVS's
+    # own. Carried into the verdict, it lets the final DRV capture tell this
+    # compare's verdict from one an earlier LVS left behind. No record (a
+    # refusal before input selection, a LibreLane-produced LVS) → no binding,
+    # and the final capture reads that as NOT_MEASURED, never as a match.
+    _compared = project / "reports/phase3/lvs_inputs.json"
+    try:
+        _compared_doc = json.loads(_compared.read_text())
+    except (OSError, ValueError):
+        _compared_doc = None
+    if isinstance(_compared_doc, dict):
+        payload["compared_inputs"] = {
+            k: _compared_doc.get(k) for k in ("layout_def", "schematic_netlist")}
     payload["phase2_synth"] = _pl.phase2_synth_input_identity(project)
     payload["phase3_inputs"] = _pl.phase3_signoff_input_identity(project)
     path.write_text(json.dumps(payload, indent=2) + "\n")
@@ -57060,8 +57078,12 @@ _PRESTREAM_GATES = (
      "reports/phase3/sta/post_route_signoff_corner.json", ()),
     ("sta_record", "sta_corner_record_completeness_check.py",
      "reports/phase3/sta/sta_corner_record_completeness.json", ()),
+    # R-0929-DRV-IDENTITY: the in-flow (pre-stream) capture gates stream-out
+    # only.  Its receipt is its own file: `drv_signoff.json` is Step 23's
+    # receipt and holds ONLY the final post-stream verdict, so an in-flow
+    # PASS can never stand where the IC verdict is read.
     ("drv_signoff", "drv_signoff_judge.py",
-     "reports/phase3/sta/drv_signoff.json", ()),
+     "reports/phase3/sta/drv_signoff_prestream.json", ()),
     ("ir_drop", "ir_drop_report_check.py",
      "reports/phase3/ir_drop_signoff.json", ("--mode", "ir_drop")),
     ("em_signoff", "em_report_check.py",
@@ -57898,7 +57920,9 @@ _PDK_AWARE_SIGNOFF_GATES = frozenset({"tapeout_precheck"})
 def step_declared_signoff_gates(project: Path,
                                 pdk_name: str = "",
                                 container: str = "",
-                                upstream_refusal: Optional[str] = None) -> List[StepResult]:
+                                upstream_refusal: Optional[str] = None,
+                                drv_after: Optional[Callable[[], Any]] = None
+                                ) -> List[StepResult]:
     """Every flow-declared step-23/25 sign-off gate, one StepResult each.
 
     `pdk_name` is the run's OWN `PdkConfig.name` — the distribution the flow was
@@ -57916,6 +57940,12 @@ def step_declared_signoff_gates(project: Path,
     own rule."  NO SECOND RESOLVER: this passes the value the run already
     resolved; `tapeout_precheck.resolve_pdk` still owns deciding what to do when
     nobody says.
+
+    `drv_after`: called (its result ignored) immediately before the final DRV
+    capture. The final capture binds step 37.3's GDS XOR record
+    (R-0929-DRV-IDENTITY); the runner runs that XOR concurrently with these
+    gates, so the capture must wait for it or it reads an absent record, or
+    an earlier run's.
     """
     if upstream_refusal is None:
         # Direct callers also need to refuse an inherited physical tree.  The
@@ -58006,6 +58036,13 @@ def step_declared_signoff_gates(project: Path,
         # Forwarded to the same named set, for the same reason `--pdk` is.
         if container and name in _PDK_AWARE_SIGNOFF_GATES:
             extra_argv = tuple(extra_argv) + ("--pdk-container", container)
+        if name == "drv_signoff" and drv_after is not None:
+            try:
+                drv_after()
+            except Exception as _exc:                          # noqa: BLE001
+                # The XOR's own row reports its failure; the capture then
+                # finds no record for this GDS and says NOT_MEASURED.
+                print(f"[phase3] GDS XOR before the final DRV capture: {_exc}")
         out.append(_run_declared_signoff_gate(
             project, name, program, out_rel, extra_argv))
     return _reconcile_sta_verdict(out)
@@ -77725,7 +77762,8 @@ def main() -> int:
                    if not _layout_refusal else None)
         plan.extend(step_declared_signoff_gates(
             project, pdk.name, args.container,
-            upstream_refusal=_layout_refusal))
+            upstream_refusal=_layout_refusal,
+            drv_after=(xor_job.result if xor_job is not None else None)))
         if xor_job is not None:
             _xor_rows = xor_job.result()
     # PRE-AUDIT PRODUCERS, run and REPORTED, never planned. Steps 36 and 38 each

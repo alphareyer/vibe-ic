@@ -6000,7 +6000,12 @@ steps:
         # output makes the audit read its own answer as run evidence
         # (test_a_declared_output_is_not_its_gates_verdict_target, a ratchet
         # that may only shrink).
-        - program_exit_zero: "drv_signoff_judge . --json reports/phase3/sta/drv_signoff.json"
+        # R-0929-DRV-IDENTITY: ONLY the final post-stream capture counts toward
+        # IC PASS, so this clause judges that capture and nothing else. An
+        # in-flow bundle (step 32 / pre-stream, GDS and LVS not yet bound) or a
+        # run that stopped before stream-out is NOT_MEASURED here, never PASS;
+        # the in-flow verdict lives in its own receipt (drv_signoff_prestream).
+        - program_exit_zero: "drv_signoff_judge . --capture-point post_stream --json reports/phase3/sta/drv_signoff.json"
         # vibe-ic#2081 — A SIGN-OFF VIOLATION THAT NO PHYSICAL REMEDY CAN
         # CLOSE IS A RE-AUTHORING REQUEST, AND IT MUST BE ROUTED AS ONE.
         # This step's own `closed_loop.fallback_to` is 32 (post-route timing

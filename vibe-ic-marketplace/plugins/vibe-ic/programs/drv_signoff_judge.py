@@ -544,13 +544,129 @@ def _waiver_support(waiver: dict, row: dict, bundle: dict,
     return not local_errors
 
 
+#: The admission record's key for the DEF the GDS step streamed.
+_STREAMED_DEF_KEY = "phase3/stage3/pnr/routed.def"
+
+
+def _digest_evidence(item: dict, errors: list[str], label: str) -> bool:
+    """`_evidence` for a file that is only hashed, never read as text (a GDS
+    is hundreds of MB of binary)."""
+    path = Path(str(item.get("path") or ""))
+    expected = str(item.get("sha256") or "")
+    if not path.is_file() or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        errors.append(f"{label}: file or sha256 absent")
+        return False
+    actual = _sha(path)
+    if actual != expected:
+        errors.append(f"{label}: sha256 changed ({expected} -> {actual})")
+        return False
+    return True
+
+
+def _record(item: dict | None, errors: list[str], label: str) -> dict | None:
+    """A flow record, re-hashed, then read.  Every value the derivation
+    check uses comes from here -- never from a value the plan copied."""
+    if not isinstance(item, dict) or not item:
+        errors.append(f"{label} absent")
+        return None
+    text = _evidence(item, errors, label)
+    if not text:
+        return None
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        doc = None
+    if not isinstance(doc, dict):
+        errors.append(f"{label}: not a JSON object")
+        return None
+    return doc
+
+
+def _check_gds_derivation(gds: dict, judged_def: str | None,
+                          fails: list[str], missing: list[str]) -> None:
+    """The shipped GDS is the judged DEF's layout: the admission names the
+    DEF the gds step streamed, and step 37.3's XOR shows the shipped GDS's
+    design layers equal that stream (only declared finishing layers differ).
+    The admission alone is a name; without the XOR nothing geometric links
+    the shipped bytes to the judged layout."""
+    _digest_evidence(gds, missing, "streamed GDS")
+    admission = _record(gds.get("record"), missing, "GDS admission record")
+    if admission is not None:
+        if admission.get("gds_sha256") != gds.get("sha256"):
+            missing.append("GDS admission record names another GDS")
+        source = (admission.get("basis_inputs") or {}).get(_STREAMED_DEF_KEY)
+        if not source:
+            missing.append("streamed GDS names no source DEF")
+        elif source != judged_def:
+            fails.append("streamed GDS derives from a DEF other than the judged DEF")
+    xor = _record(gds.get("xor_record"), missing, "GDS stream-out XOR record")
+    if xor is None:
+        return
+    if xor.get("shipped_sha256_live") != gds.get("sha256"):
+        # A comparison of some other stream says nothing about this one.
+        missing.append("GDS stream-out XOR measured another GDS")
+        return
+    reference_def = (xor.get("attestation") or {}).get("def_sha256_recorded")
+    if not reference_def:
+        missing.append("GDS stream-out XOR names no reference DEF")
+    elif reference_def != judged_def:
+        fails.append("shipped GDS's reference stream derives from a DEF other "
+                     "than the judged DEF")
+    differences = xor.get("design_layer_differences")
+    compared = xor.get("layers_compared")
+    if not isinstance(differences, list) or not isinstance(compared, int) \
+            or isinstance(compared, bool) or compared <= 0:
+        missing.append("GDS stream-out XOR compared no design layer")
+    elif differences:
+        fails.append(f"shipped GDS differs from the judged DEF's stream-out on "
+                     f"{len(differences)} design layer(s)")
+    elif xor.get("verdict") != "PASS":
+        missing.append(f"GDS stream-out XOR did not pass "
+                       f"(verdict {xor.get('verdict')})")
+
+
+def _check_lvs_derivation(lvs: dict, judged_def: str | None,
+                          judged_netlist: str | None,
+                          fails: list[str], missing: list[str]) -> None:
+    """LVS compared the judged DEF's layout with the judged netlist, and its
+    verdict is the verdict OF that compare: step 31 writes the inputs it
+    compared into its own verdict, so a verdict left by an earlier LVS (or
+    by a producer that recorded no inputs) is not evidence about this one."""
+    inputs = _record(lvs.get("inputs_record"), missing, "LVS inputs record")
+    verdict = _record(lvs.get("verdict_record"), missing, "LVS verdict record")
+    _evidence(lvs.get("schematic_netlist") or {}, missing, "LVS schematic netlist")
+    if inputs is not None:
+        layout = (inputs.get("layout_def") or {}).get("sha256")
+        schematic = (inputs.get("schematic_netlist") or {}).get("sha256")
+        if not layout:
+            missing.append("LVS names no layout DEF")
+        elif layout != judged_def:
+            fails.append("LVS compared a layout DEF other than the judged DEF")
+        if schematic != (lvs.get("schematic_netlist") or {}).get("sha256") \
+                or schematic != judged_netlist:
+            fails.append("LVS compared a netlist other than the judged STA netlist")
+    if verdict is None:
+        return
+    if verdict.get("status") != "PASS" or verdict.get("compare_performed") is not True:
+        missing.append(f"LVS did not prove the layout matches the netlist "
+                       f"(verdict {verdict.get('status')})")
+    bound = verdict.get("compared_inputs")
+    if not isinstance(bound, dict):
+        missing.append("LVS verdict is not bound to the inputs it compared")
+    elif inputs is not None and any(
+            (bound.get(k) or {}).get("sha256") != (inputs.get(k) or {}).get("sha256")
+            for k in ("layout_def", "schematic_netlist")):
+        missing.append("LVS verdict belongs to another compare than the "
+                       "recorded LVS inputs")
+
+
 def _check_post_stream_derivation(identity: dict, fails: list[str],
                                   missing: list[str]) -> None:
     """R-0929-DRV-IDENTITY: the final capture proves the streamed GDS and the
-    LVS netlist derive from the judged DEF / netlist.  Every file is
-    re-hashed here; a record the flow did not write is NOT_MEASURED, a link
-    that names a different DEF or netlist is FAIL (the verdict would be about
-    another layout)."""
+    LVS netlist derive from the judged DEF / netlist.  Every record is
+    re-hashed and re-read here; a record the flow did not write is
+    NOT_MEASURED, a link that names a different DEF or netlist is FAIL (the
+    verdict would be about another layout)."""
     derivation = identity.get("derivation")
     artifacts = identity.get("artifacts") or {}
     judged_def = (artifacts.get("def") or {}).get("sha256")
@@ -561,28 +677,13 @@ def _check_post_stream_derivation(identity: dict, fails: list[str],
     if not isinstance(gds, dict):
         missing.append("post-stream GDS admission record absent")
     else:
-        _evidence(gds, missing, "streamed GDS")
-        if not gds.get("streamed_from_def_sha256"):
-            missing.append("streamed GDS names no source DEF")
-        elif gds["streamed_from_def_sha256"] != judged_def:
-            fails.append("streamed GDS derives from a DEF other than the judged DEF")
-        _evidence(gds.get("record") or {}, missing, "GDS admission record")
+        _check_gds_derivation(gds, judged_def, fails, missing)
     lvs = derivation.get("lvs")
     if not isinstance(lvs, dict):
         missing.append("post-stream LVS record absent")
         return
-    for record in lvs.get("records") or [{}]:
-        _evidence(record, missing, "LVS record")
-    _evidence(lvs.get("schematic_netlist") or {}, missing, "LVS schematic netlist")
-    if not lvs.get("layout_def_sha256"):
-        missing.append("LVS names no layout DEF")
-    elif lvs["layout_def_sha256"] != judged_def:
-        fails.append("LVS compared a layout DEF other than the judged DEF")
-    if (lvs.get("schematic_netlist") or {}).get("sha256") != identity.get("sta_netlist"):
-        fails.append("LVS compared a netlist other than the judged STA netlist")
-    if lvs.get("verdict") != "PASS" or lvs.get("compare_performed") is False:
-        missing.append(f"LVS did not prove the layout matches the netlist "
-                       f"(verdict {lvs.get('verdict')})")
+    _check_lvs_derivation(lvs, judged_def, identity.get("sta_netlist"),
+                          fails, missing)
 
 
 def judge(bundle: dict, *, project: Path | None = None) -> dict:
