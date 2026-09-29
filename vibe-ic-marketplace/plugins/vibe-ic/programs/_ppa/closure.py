@@ -218,6 +218,7 @@ class State(str, Enum):
     JUDGED = "JUDGED"
     PROMOTED = "PROMOTED"
     ROLLED_BACK = "ROLLED_BACK"
+    ACTUATOR_FAILED = "ACTUATOR_FAILED"
     STOPPED = "STOPPED"
 
 
@@ -1149,6 +1150,7 @@ class Measurement:
     #: inputs (`Domain.floor_pointer`), with where it came from.
     floor: Optional[float] = None
     floor_source: str = ""
+    violating_members: Optional[Tuple[Tuple[str, str], ...]] = None
 
     def usable(self) -> bool:
         """docs/PPA_INTERFACES.md §2: only MEASURED and DERIVED may enter a
@@ -1171,6 +1173,8 @@ class Measurement:
         if self.usable():
             rec["value"] = self.value
             rec["formula"] = self.formula
+            if self.violating_members is not None:
+                rec["violating_members"] = [list(m) for m in self.violating_members]
         else:
             # No numeric sentinel. The row is PRINTED, with a reason, and it
             # carries no `value` key at all -- 0 and -1 never mean "not measured".
@@ -1286,6 +1290,103 @@ class ClosureRun:
 # The state machine
 # ---------------------------------------------------------------------------
 
+#: The actuator runs under the repo's progress-stall watchdog, never a clock
+#: (owner rule vibe-ic#2051: a tool job is stopped only on evidence that it
+#: stopped moving). The actuator's `wall_seconds` is its RECORDED budget:
+#: crossing it is announced and the job goes on. None = `_watchdog`'s default
+#: grace; a test sets a short one.
+ACTUATOR_STALL_GRACE_S: Optional[float] = None
+#: `_docker_watchdog.ephemeral_container_name`: `<prefix>_<pid>_<hex>`. A
+#: container whose pid is in the actuator's process tree is the actuator's.
+_OWNED_CONTAINER = re.compile(r"_(\d+)_[0-9a-f]+$")
+_DOCKER = "docker"
+
+
+def _tree_pids(pid: int) -> set:
+    """`pid` and every live descendant (host /proc)."""
+    import _watchdog as _wd
+    kids = _wd._proc_children_map()
+    seen, stack = set(), [int(pid)]
+    while stack:
+        cur = stack.pop()
+        if cur not in seen:
+            seen.add(cur)
+            stack.extend(kids.get(cur, ()))
+    return seen
+
+
+def owned_containers(pids: set, names: Sequence[str]) -> List[str]:
+    """The container names (from `docker ps`) minted by a process in `pids`."""
+    owned = []
+    for name in names:
+        match = _OWNED_CONTAINER.search(name.strip())
+        if match and int(match.group(1)) in pids:
+            owned.append(name.strip())
+    return owned
+
+
+def _docker_names() -> List[str]:
+    try:
+        done = subprocess.run([_DOCKER, "ps", "--format", "{{.Names}}"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return done.stdout.split() if done.returncode == 0 else []
+
+
+def run_actuator(argv: Sequence[str], *, cwd: Path,
+                 budget_s: float) -> Tuple[int, str]:
+    """Run one actuator invocation; return (rc, the tail of what it said).
+
+    Progress is the actuator's host process tree AND the containers it
+    started (a LibreLane actuator spends its time inside `docker run`, whose
+    processes are not the actuator's descendants). A stall kills the tree and
+    removes those containers by name, so nothing the actuator started keeps
+    running while the next candidate launches; the rc is `RC_STALLED`.
+    """
+    import _watchdog as _wd
+
+    def progress(proc: Any) -> Optional[float]:
+        total = _wd.host_tree_progress(proc.pid)
+        if total is None:
+            return None
+        for name in owned_containers(_tree_pids(proc.pid), _docker_names()):
+            try:
+                done = subprocess.run([_DOCKER, "inspect", "-f", "{{.State.Pid}}", name],
+                                      capture_output=True, text=True, timeout=30)
+                inner_pid = int(done.stdout.strip() or 0)
+            except (OSError, subprocess.SubprocessError, ValueError):
+                inner_pid = 0
+            # pid 0 (not started, gone, unreadable) is no reading: its "tree"
+            # is the whole host, which always moves.
+            inner = _wd.host_tree_progress(inner_pid) if inner_pid > 0 else None
+            total += inner or 0.0
+        return total
+
+    def reap(proc: Any, reason: str) -> None:
+        names = owned_containers(_tree_pids(proc.pid), _docker_names())
+        _wd._default_kill(proc, reason)
+        for name in names:
+            try:
+                subprocess.run([_DOCKER, "rm", "-f", name],
+                               capture_output=True, text=True, timeout=30)
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+    grace = (ACTUATOR_STALL_GRACE_S if ACTUATOR_STALL_GRACE_S is not None
+             else _wd.DEFAULT_STALL_GRACE_S)
+    res = _wd.run_host_supervised(list(argv), cwd=str(cwd), cpu_probe=progress,
+                                  kill=reap, stall_grace_s=grace,
+                                  hard_ceiling_s=budget_s)
+    if res.outcome == "launch_error":
+        raise OSError(res.err.strip() or "actuator could not be launched")
+    note = (res.out or res.err or "").strip()[-300:]
+    if res.outcome == "stalled":
+        note = (f"actuator made no progress for {grace:g} s and was stopped by "
+                f"the stall watchdog; {note}")[-300:]
+    return res.rc, note
+
+
 class ClosureController:
     """Runs ONE declared edge to a terminal outcome.
 
@@ -1367,6 +1468,17 @@ class ClosureController:
         # The number is computed FROM parsed fields, so it is DERIVED and it
         # carries its formula -- docs/PPA_INTERFACES.md §2 and §3.
         status = "DERIVED" if domain.extract.kind != "json_pointer" else "MEASURED"
+        members = doc.get("violating_members")
+        if members is not None and (not isinstance(members, list) or any(
+                not isinstance(pair, list) or len(pair) != 2 or
+                not all(isinstance(part, str) and part for part in pair)
+                for pair in members)):
+            return Measurement(
+                implementation_root=str(self.impl_root), domain=domain.name,
+                metric=domain.metric, status="NOT_MEASURED", value=None,
+                unit=domain.unit, rc=proc.returncode, formula="",
+                reason="invalid violating_members in measurement artefact",
+                argv=tuple(argv), stdout_tail=tail)
         floor, floor_source = None, ""
         if domain.floor_pointer:
             node = _json_pointer(doc, domain.floor_pointer)
@@ -1378,7 +1490,9 @@ class ClosureController:
                            floor=floor, floor_source=floor_source,
                            value=value, unit=domain.unit, rc=proc.returncode,
                            formula=formula, argv=tuple(argv), stdout_tail=tail,
-                           implementation_root=str(self.impl_root))
+                           implementation_root=str(self.impl_root),
+                           violating_members=(tuple(tuple(p) for p in members)
+                                              if members is not None else None))
 
     def _scope(self, tag: str) -> Dict[str, Any]:
         """What makes two of these numbers comparable, and nothing else."""
@@ -1552,17 +1666,9 @@ class ClosureController:
             it.argv = tuple(argv)
             invocations += 1
             try:
-                proc = subprocess.run(
-                    argv, capture_output=True, text=True,
-                    timeout=actuator.ceilings.wall_seconds,
-                    cwd=str(self.impl_root))
-                it.actuator_rc = proc.returncode
-                it.actuator_note = (proc.stdout or proc.stderr or "").strip()[-300:]
-            except subprocess.TimeoutExpired:
-                it.actuator_rc = None
-                it.actuator_note = (
-                    f"actuator exceeded its declared wall_seconds ceiling "
-                    f"({actuator.ceilings.wall_seconds}s) and was killed")
+                it.actuator_rc, it.actuator_note = run_actuator(
+                    argv, cwd=self.impl_root,
+                    budget_s=actuator.ceilings.wall_seconds)
             except OSError as exc:
                 it.actuator_rc = None
                 it.actuator_note = f"actuator could not be executed: {exc}"
@@ -1571,21 +1677,19 @@ class ClosureController:
             it.changed_implementation = it.digest_after != it.digest_before
 
             if it.actuator_rc != 0:
-                # The actuator itself refused or died. That is a handoff, not a
-                # repair and not a regression -- and whatever it left behind is
-                # rolled back so the next reader sees the baseline, not a
-                # half-applied action.
+                # An unsuccessful process produced no candidate measurement.
+                # Restore its bytes, but never book a measured rollback, plateau
+                # iteration, or design finding for an actuator failure.
                 self._restore(snap)
                 it.digest_restored = tree_digest(self.impl_root)
-                it.states.append(State.ROLLED_BACK.value)
-                run.rolled_back += 1
-                it.decision = "ROLLED_BACK"
+                it.states.append(State.ACTUATOR_FAILED.value)
+                it.decision = "ACTUATOR_FAILED"
                 it.decision_reason = (
                     f"actuator exited {it.actuator_rc}: {it.actuator_note}")
-                outcome, reason = Outcome.HANDOFF_REQUIRED, (
-                    f"actuator {actuator.action_id!r} refused plan[{index}] "
-                    f"(rc={it.actuator_rc}); the controller does not have an "
-                    f"action for this case: {it.actuator_note}")
+                outcome, reason = Outcome.NOT_MEASURED, (
+                    f"ACTUATOR_FAILED: {actuator.action_id!r} plan[{index}] "
+                    f"(rc={it.actuator_rc}); no candidate was measured: "
+                    f"{it.actuator_note}")
                 break
 
             # STATE: REMEASURED — every domain the action can disturb.
@@ -1626,14 +1730,31 @@ class ClosureController:
             hard_repair = objective.hardness == "hard" and improved
             collateral: List[str] = []
             spent: List[str] = []
+            unknown_collateral = ""
             for dom in remeasure:
                 if dom.name == objective.name:
                     continue
                 m = after[dom.name]
                 prev = best_records.get(dom.name)
                 prev_value = prev.get("value") if isinstance(prev, dict) else None
-                if m.usable() and isinstance(prev_value, (int, float)) \
-                        and dom.regresses(float(m.value), float(prev_value)):
+                before_members = (prev.get("violating_members")
+                                  if isinstance(prev, dict) else None)
+                if dom.name == "timing.drv" and (
+                        not m.usable() or not isinstance(before_members, list) or
+                        m.violating_members is None):
+                    unknown_collateral = (
+                        "timing.drv distinct (pin, check) members were not "
+                        f"measured before and after the candidate: {m.reason}")
+                    break
+                added_members = (set(m.violating_members) -
+                                 {tuple(p) for p in before_members}
+                                 if dom.name == "timing.drv" and
+                                 m.violating_members is not None and
+                                 isinstance(before_members, list) else None)
+                regressed = (bool(added_members) if added_members is not None else
+                             m.usable() and isinstance(prev_value, (int, float)) and
+                             dom.regresses(float(m.value), float(prev_value)))
+                if m.usable() and regressed:
                     if hard_repair and dom.hardness == "soft" \
                             and dom.within_floor(float(m.value), m.floor):
                         bound = dom.satisfied_value if m.floor is None else m.floor
@@ -1644,11 +1765,20 @@ class ClosureController:
                         continue
                     collateral.append(
                         f"{dom.metric}: {prev_value} -> {m.value} "
-                        f"({dom.direction.value})"
+                        + (f"new (pin, check) members={sorted(added_members)[:8]}"
+                           if added_members is not None else
+                           f"({dom.direction.value})")
                         + (f", below its floor "
                            f"{dom.satisfied_value if m.floor is None else m.floor}"
                            if hard_repair and dom.hardness == "soft" else ""))
 
+            if unknown_collateral:
+                self._restore(snap)
+                it.digest_restored = tree_digest(self.impl_root)
+                it.decision = "NOT_MEASURED"
+                it.decision_reason = unknown_collateral
+                outcome, reason = Outcome.NOT_MEASURED, unknown_collateral
+                break
             if collateral:
                 self._restore(snap)
                 it.digest_restored = tree_digest(self.impl_root)
@@ -1725,12 +1855,20 @@ class ClosureController:
         run.collateral = []
         for dom in remeasure:
             b, f = baseline_ms[dom.name], final_ms[dom.name]
-            if b.usable() and f.usable() and dom.regresses(float(f.value),
-                                                           float(b.value)):
+            member_delta = (set(f.violating_members) - set(b.violating_members)
+                            if dom.name == "timing.drv" and
+                            b.violating_members is not None and
+                            f.violating_members is not None else None)
+            final_regressed = (bool(member_delta) if member_delta is not None else
+                               b.usable() and f.usable() and
+                               dom.regresses(float(f.value), float(b.value)))
+            if b.usable() and f.usable() and final_regressed:
                 run.collateral.append({
                     "metric": dom.metric, "unit": dom.unit,
                     "from": b.value, "to": f.value,
                     "direction": dom.direction.value,
+                    **({"new_violating_members": [list(p) for p in sorted(member_delta)]}
+                       if member_delta is not None else {}),
                 })
         if not outcome.is_success():
             # The residual survives into the record and into the exit code. It

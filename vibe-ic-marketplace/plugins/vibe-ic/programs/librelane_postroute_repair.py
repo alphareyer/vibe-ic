@@ -57,6 +57,13 @@ HARD REFUSALS, BEFORE A CANDIDATE CAN BE ADOPTED
   more whole-design violations than it was given (DRT-0712), which fails the
   candidate's step; the ledger records it as TOOL_REFUSED.
 
+A step failure is TOOL_REFUSED (rc 0, the pointer stays, the next rung runs)
+only when its log carries one of the step's own named refusals
+(`[VIBEIC_]PRR_*_REFUSED` / `_RESIDUE`, check_placement's included, and
+`LL_PRR_FANOUT_LIMIT_BROKEN`) and no crash. A signal, a stall, or an unexplained failure is
+ACTUATOR_FAILED / NOT_MEASURED (rc 2); a step failure of that kind gets one
+retry in the `hold_first` move order.
+
 chip-AGNOSTIC: no design, PDK, corner, cell or net literal. Every value comes
 from the resolved LibreLane config, the direct deck's own files or the
 registry's declared ladder.
@@ -340,6 +347,10 @@ def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
     summary.update(pin_census)
     summary["drv_count"] = (len(pin_census["drv_pin_checks"])
                             if pin_census["drv_pin_checks_state"] == "PASS" else None)
+    # The closure's timing.drv collateral compares these members (a list, or
+    # None when the census could not be completed).
+    summary["drv_members"] = pin_census["drv_pin_checks"]
+    summary["drv_members_reason"] = "; ".join(pin_census["drv_pin_checks_missing"])
     # LibreLane RCX uses -lef_res, while the direct signoff extracts the
     # same route with -corner_cnt 1 -max_res 50 -coupling_threshold 0.1.
     # The latter is the acceptance instrument.  Keep the LibreLane values
@@ -457,11 +468,17 @@ def measure(impl: Path, domain: str, json_out: Path) -> int:
         print(f"no adopted candidate to measure: {exc}", file=sys.stderr)
         return RC_UNDETERMINED
     value = DOMAIN_VALUE[domain](cur)
+    if domain == "drv" and not isinstance(cur["measurement"].get("drv_members"), list):
+        print(f"drv: distinct violating members NOT_MEASURED: "
+              f"{cur['measurement'].get('drv_members_reason')}", file=sys.stderr)
+        return RC_UNDETERMINED
     if value is None:
         print(f"{domain}: the adopted candidate does not carry it", file=sys.stderr)
         return RC_UNDETERMINED
     doc = {"domain": domain, "value": value, "candidate": cur.get("candidate"),
            "sta_state": str(sta)}
+    if domain == "drv":
+        doc["violating_members"] = cur["measurement"]["drv_members"]
     try:
         floor = (_load(impl / CONTEXT).get("floors") or {}).get(domain)
     except (OSError, ValueError):
@@ -483,6 +500,46 @@ def _ledger_append(impl: Path, row: Dict[str, Any]) -> None:
     rows = _load(path)["candidates"] if path.is_file() else []
     rows.append(row)
     write_json(path, {"candidates": rows})
+
+
+#: The repair step's own named candidate refusals (postroute_repair.tcl: the
+#: scoped route, the lost route, the fanout limit, check_placement): the step
+#: measured THIS candidate and said no. Each ends the step with exit 1 after
+#: printing the line, so run_chain books it LL_STEP_FAILED exactly like a
+#: crash; the line, which the step itself prints, is what tells them apart.
+_STEP_REFUSAL = re.compile(r"^(?:(?:VIBEIC_)?PRR_[A-Z_]+_(?:REFUSED|RESIDUE):|"
+                           r"LL_PRR_FANOUT_LIMIT_BROKEN:)")
+_CRASH_SIGNATURE = re.compile(r"\bSignal\s+\d+\b|\bSIGSEGV\b|Segmentation fault")
+
+
+def _actuator_failure(exc: Exception) -> Dict[str, Any]:
+    """Book one refused candidate from the step's failure.
+
+    A crash signature (a signal line), a refusal that is not a step failure
+    (a stall, a missing state), or a step failure with no named refusal is a
+    native failure: ACTUATOR_FAILED, NOT_MEASURED. A step failure whose log
+    carries one of the step's own named refusals, and no crash, is the tool's
+    measured "no" for this candidate: TOOL_REFUSED, the pointer stays and the
+    controller goes on to its next rung.
+    """
+    reason = str(exc)
+    match = re.search(r"(/[^;\s]+/invocation\.log)", reason)
+    signature = refusal = None
+    if match:
+        try:
+            for line in Path(match.group(1)).read_text(errors="replace").splitlines():
+                if _CRASH_SIGNATURE.search(line):
+                    signature = line.strip()[:500]
+                elif refusal is None and _STEP_REFUSAL.match(line.strip()):
+                    refusal = line.strip()[:500]
+        except OSError:
+            pass
+    if (getattr(exc, "code", None) == "LL_STEP_FAILED" and refusal is not None
+            and signature is None and not re.search(r"\brc=-\d+", reason)):
+        return {"decision": "TOOL_REFUSED", "measurement_status": "MEASURED",
+                "reason": reason, "tool_refusal": refusal}
+    return {"decision": "ACTUATOR_FAILED", "measurement_status": "NOT_MEASURED",
+            "reason": reason, "tool_crash_signature": signature}
 
 
 def _host_path(ctx: Dict[str, Any], value: str) -> Path:
@@ -529,14 +586,38 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
         folder, measurement = _candidate(ctx, cfg, Path(cur["repair_input"]), lane)
         repaired = folder / "state_out.json"
     except _ll.Refusal as exc:
-        # The tool refused THIS candidate (e.g. the fork's scoped route
-        # refuses a route that adds a whole-design violation, DRT-0712). The
-        # pointer stays on the adopted state, so the controller sees no
-        # improvement and moves to the next rung; the reason is in the ledger.
-        row.update(decision="TOOL_REFUSED", reason=str(exc))
+        row.update(_actuator_failure(exc))
         _ledger_append(impl, row)
-        print(f"candidate {lane}: {exc}")
-        return 0
+        if row["decision"] == "TOOL_REFUSED":
+            # The tool refused THIS candidate (e.g. the fork's scoped route
+            # refuses a route that adds a whole-design violation, DRT-0712). The
+            # pointer stays on the adopted state, so the controller sees no
+            # improvement and moves to the next rung; the reason is in the ledger.
+            print(f"candidate {lane}: {row['tool_refusal']}")
+            return 0
+        if exc.code != "LL_STEP_FAILED":
+            print(f"candidate {lane}: {row['reason']}", file=sys.stderr)
+            return 2
+        # One bounded retry changes the operation order while retaining every
+        # limit, margin and candidate acceptance rule. Failed invocations do
+        # not spend the controller's measured-iteration budget.
+        lane = f"{lane}-retry"
+        retry_updates = dict(updates)
+        retry_updates["VIBEIC_PRR_MOVE_SEQUENCE"] = (
+            "hold_first", "one retry after a native actuator failure")
+        cfg = _ll.derive_step_config(
+            base_cfg, base_cfg.with_name(f"{REPAIR_STEP}@{lane}.json"), retry_updates)
+        row = {"candidate": lane, "retry_of": f"{ctx.get('lane', '32')}-cand{index:02d}",
+               "params": params, "from": cur.get("candidate"), "config": str(cfg),
+               "move_sequence": "hold_first"}
+        try:
+            folder, measurement = _candidate(ctx, cfg, Path(cur["repair_input"]), lane)
+            repaired = folder / "state_out.json"
+        except _ll.Refusal as retry_exc:
+            row.update(_actuator_failure(retry_exc))
+            _ledger_append(impl, row)
+            print(f"candidate {lane}: {row['reason']}", file=sys.stderr)
+            return 2
     state = _load(repaired)
     metrics = state.get("metrics") or {}
     row.update(repair_state=str(repaired), measurement=measurement,
@@ -926,20 +1007,64 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
     trigger = measured_repair_trigger(baseline)
     report["repair_trigger"] = trigger
     runs = []
+    # Which ledger rows each controller's actuations wrote: the ledger's length
+    # before and after that controller ran. A row is never attributed across
+    # a controller boundary, whatever the rows before it were.
+    spans: List[Tuple[int, int]] = []
+
+    def _ledger_len() -> int:
+        return len(_load(ledger)["candidates"]) if ledger.is_file() else 0
     if controllers and trigger["action"] == "RUN":
         reg = _cl.load_registry(registry, programs_dir=programs_dir)
         controller = _cl.ClosureController(reg, impl, arm / "closure")
         for cid in controllers:
+            start = _ledger_len()
             runs.append(controller.run_controller(cid).to_record())
+            spans.append((start, _ledger_len()))
     report["closure"] = runs
     candidates = _load(ledger)["candidates"] if ledger.is_file() else []
-    # One ledger row per actuation, in order: the closure's verdict on each.
-    actuated = [(r.get("controller"), it) for r in runs
-                for it in r.get("iterations") or [] if it.get("argv")]
-    for row, (cid, it) in zip(candidates, actuated):
-        row["controller"] = cid
-        row["closure_decision"] = it.get("decision")
-        row["closure_reason"] = it.get("decision_reason")
+    for closure_run, (start, end) in zip(runs, spans):
+        cid = closure_run.get("controller")
+        # One actuation = one candidate row plus, after a native failure, its
+        # retry row (`retry_of` names the candidate). The closure's verdict on
+        # an actuation goes to the row that was measured; a row the actuator
+        # itself booked ACTUATOR_FAILED keeps that verdict.
+        groups: List[List[Dict[str, Any]]] = []
+        for row in candidates[start:end]:
+            if row.get("retry_of") and groups and \
+                    groups[-1][0].get("candidate") == row["retry_of"]:
+                groups[-1].append(row)
+            else:
+                groups.append([row])
+        actuated = [it for it in closure_run.get("iterations") or [] if it.get("argv")]
+        for index, group in enumerate(groups):
+            it = actuated[index] if index < len(actuated) else {}
+            for row in group:
+                row["controller"] = cid
+                if row.get("decision") == "ACTUATOR_FAILED":
+                    row["closure_decision"] = "ACTUATOR_FAILED"
+                    row["closure_reason"] = row.get("reason")
+                else:
+                    row["closure_decision"] = it.get("decision")
+                    row["closure_reason"] = it.get("decision_reason")
+    for closure_run in runs:
+        cid = closure_run.get("controller")
+        final_all = closure_run.get("final_all") or {}
+        retained = {name: (final_all.get(domain) or {}).get("value")
+                    for name, domain in (("drv_count", "timing.drv"),
+                                         ("setup_ws_min", "timing.setup"),
+                                         ("hold_ws_min", "timing.hold"))}
+        closure_run["refused_candidates"] = [
+            {"candidate": row.get("candidate"),
+             "decision": row.get("closure_decision"),
+             "measurement_status": ("MEASURED" if row.get("measurement")
+                                    else "NOT_MEASURED"),
+             "measured": {key: (row.get("measurement") or {}).get(key)
+                          for key in retained},
+             "retained": retained,
+             "tool_crash_signature": row.get("tool_crash_signature")}
+            for row in candidates if row.get("controller") == cid and
+            row.get("closure_decision") != "PROMOTED"]
     report["candidates"] = candidates
     final = _load(impl / CURRENT)
     report["adopted"] = final.get("candidate")

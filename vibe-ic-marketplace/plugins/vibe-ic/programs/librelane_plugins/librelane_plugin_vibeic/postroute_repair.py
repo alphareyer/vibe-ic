@@ -84,6 +84,12 @@ class PostRouteRepair(ResizerStep):
                 default="default",
             ),
             Variable(
+                "VIBEIC_PRR_MOVE_SEQUENCE",
+                str,
+                "Repair operation order; hold_first is the one native-failure retry.",
+                default="standard",
+            ),
+            Variable(
                 "VIBEIC_PRR_HOLD_MARGIN",
                 Decimal,
                 "Hold slack margin for repair_timing -hold.",
