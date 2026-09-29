@@ -2924,11 +2924,69 @@ def _read_project_desc(project_dir: Path) -> Tuple[str, str]:
 
 
 # ======================================================================== CLI
+def declared_watchdog(project: Path) -> Optional[Dict]:
+    """Explicit source-bound mapping only; never infer watchdog policy from prose.
+
+    A bad present declaration is BLOCKING, not permission to guess a template.
+    """
+    from in_order_watchdog_synth import load_declared
+    return load_declared(project)
+
+
 def _emit_and_write(shape: str, out_path: Path, desc_text: str = "") -> str:
     rtl = emit_rtl(shape, desc_text)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(rtl)
     return str(out_path)
+
+
+def _publish_declared_watchdog(project: Path) -> Optional[Dict]:
+    """Validate a held snapshot and CAS-publish without following output links.
+
+    Reuse the normal consumer's transaction, including source/population checks,
+    ancestor identity and occupied-output refusal. No authored RTL is replaced.
+    """
+    import tempfile
+    import design_one_shot_runner as runner
+
+    binding = runner._Phase1ProjectBinding.open(project)
+    stage_binding = None
+    transaction = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="vibeic-watchdog-cli-") as td:
+            stage = Path(td) / project.name
+            baseline = runner._phase1_snapshot_to_stage(binding, stage)
+            stage_binding = runner._Phase1ProjectBinding.open(stage)
+            watchdog = declared_watchdog(stage)
+            if watchdog is None:
+                raise ValueError("WATCHDOG_CONTRACT_CHANGED_BEFORE_EMIT")
+            out = stage / "phase2/stage1/rtl" / (watchdog["module"] + ".v")
+            publication = runner._publish_phase1_rtl_no_clobber(
+                stage, out, watchdog["rtl"], project_binding=stage_binding)
+            try:
+                publication.require_current_chain()
+            except Exception:
+                publication.rollback()
+                raise
+            finally:
+                publication.close()
+            final = runner._phase1_tree_manifest_fd(stage_binding.project_fd, stage)
+            transaction = runner._phase1_commit_staged_tree(
+                binding, stage_binding, baseline, final)
+            binding.require_current()
+            result = {"verdict": "EMIT",
+                      "written": str(project / out.relative_to(stage)),
+                      **{k: v for k, v in watchdog.items() if k != "rtl"}}
+            cleanup_warning = transaction.finalize()
+            if cleanup_warning:
+                result["cleanup_warning"] = cleanup_warning
+            return result
+    finally:
+        if transaction is not None:
+            transaction.rollback()
+        if stage_binding is not None:
+            stage_binding.close()
+        binding.close()
 
 
 def main(argv=None) -> int:
@@ -2963,6 +3021,21 @@ def main(argv=None) -> int:
     if not a.project:
         ap.error("either <project_dir> or --from-desc is required")
     proj = Path(a.project).resolve()
+    try:
+        contract = proj / "input/in_order_watchdog.json"
+        if a.emit and (contract.exists() or contract.is_symlink()):
+            print(json.dumps(_publish_declared_watchdog(proj)))
+            return 0
+        watchdog = declared_watchdog(proj)
+        if watchdog is not None:
+            written = None
+            print(json.dumps({"verdict": "EMIT", "written": written,
+                              **{k: v for k, v in watchdog.items() if k != "rtl"}}))
+            return 0
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        print(json.dumps({"verdict": "REFUSED", "shape": "in_order_watchdog",
+                          "reason": "WATCHDOG_CONTRACT_REFUSED: " + str(exc)}))
+        return 2
     desc, _src = _read_project_desc(proj)
     shape = detect_shape(desc)
     if shape is None:

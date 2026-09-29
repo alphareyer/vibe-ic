@@ -2928,25 +2928,31 @@ def _try_canonical_primitive_rtl(
         import canonical_primitive_synth as _cps  # noqa: E402
     except Exception:
         return None
-    desc = _gather_spec_text(project, phase1_plain_text=phase1_plain_text)
-    _phase1_project_checkpoint(project)
-    if not desc:
-        return None
     try:
-        shape = _cps.detect_shape(desc)
-    except Exception:
-        return None
-    if not shape:
-        return None  # DEFER → fall through to spec-to-rtl
-    module = _cps.module_name_of(desc) or "chip_top"
-    try:
-        # `desc` is passed so a CONTRACT-composed shape can be composed from the
-        # acceptance contract the description states; the sixteen fixed-template
-        # shapes ignore it and emit byte-for-byte what they always emitted.
-        rtl = _cps.emit_rtl(shape, desc)
-    except Exception as e:
+        watchdog = _cps.declared_watchdog(project)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
         return StepResult("rtl_gen", "FAIL", time.time() - t0,
-                          f"canonical_primitive_synth emit failed for {shape}: {e}")
+                          f"WATCHDOG_CONTRACT_REFUSED: {exc}")
+    if watchdog is not None:
+        shape, module, rtl = watchdog["shape"], watchdog["module"], watchdog["rtl"]
+        desc = ""  # policy came from a declared mapping, not a prose guess
+    else:
+        desc = _gather_spec_text(project, phase1_plain_text=phase1_plain_text)
+        _phase1_project_checkpoint(project)
+        if not desc:
+            return None
+        try:
+            shape = _cps.detect_shape(desc)
+        except Exception:
+            return None
+        if not shape:
+            return None  # DEFER → fall through to spec-to-rtl
+        module = _cps.module_name_of(desc) or "chip_top"
+        try:
+            rtl = _cps.emit_rtl(shape, desc)
+        except Exception as e:
+            return StepResult("rtl_gen", "FAIL", time.time() - t0,
+                              f"canonical_primitive_synth emit failed for {shape}: {e}")
     _phase1_project_checkpoint(project)
     out = rtl_dir / f"{module}.v"
     # #2053 — the candidate STATES its time unit before it is published.
@@ -2985,6 +2991,8 @@ def _try_canonical_primitive_rtl(
                    "program_first": True,
                    "scoreboard_tb": tb_written or tb_note}
         _extras.update(ts_extras)
+        if watchdog is not None:
+            _extras["watchdog_contract"] = {k: v for k, v in watchdog.items() if k != "rtl"}
         result = StepResult(
             "rtl_gen", "PASS", time.time() - t0,
             f"deterministic RTL via canonical_primitive_synth[{shape}] "
@@ -8191,6 +8199,17 @@ def _step_rtl_gen_bound(
     _SUPPLY_BLOCKED.clear()
     _reclaim_stale_generated_rtl(project)
     project_binding.require_current()
+    # An explicit watchdog declaration elects its source-bound route before
+    # competing automatic emitters can publish (including input/rtl_spec.json).
+    # Canonical intake retains the authored/supplied guards; absent declarations
+    # leave the existing unrelated deterministic dispatch order unchanged.
+    _watchdog_path = project / "input" / "in_order_watchdog.json"
+    if _watchdog_path.exists() or _watchdog_path.is_symlink():
+        _watchdog = _try_canonical_primitive_rtl(
+            project, t0, phase1_plain_text=_phase1_plain.text)
+        project_binding.require_current()
+        if _watchdog is not None:
+            return _watchdog
     _det = _try_deterministic_rtl_dispatch(project, t0)
     project_binding.require_current()
     if _det is not None:
