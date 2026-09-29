@@ -242,3 +242,62 @@ def test_top_up_masks_the_real_census_and_bands_the_pad_ring(tmp_path,
         == ['PADCELL']
     assert derived['_derivation']['placed_instance_keepout'][
         'protected_count'] == len(EXPECTED_UM)
+
+
+@pytest.mark.parametrize('bad, reason', [
+    (('PAD_X', 'NO_SUCH_MASTER', 100000, 0, 'N'), 'NO_SUCH_MASTER'),
+    (('PAD_U', 'PADCELL', 100000, 0, 'N'), 'unplaced protected instance: PAD_U'),
+], ids=['unknown-master', 'unplaced-pad'])
+def test_a_refused_census_keeps_openroads_reason_in_the_log_it_names(
+        tmp_path, monkeypatch, bad, reason):
+    image, _ = _route(monkeypatch)
+    project, pdk_root, cfg = _stage(tmp_path, placed=[*PLACED[1:], bad])
+    if bad[0] == 'PAD_U':
+        routed = project / 'phase3/stage3/pnr/routed.def'
+        routed.write_text(routed.read_text().replace(
+            '- PAD_U PADCELL + FIXED ( 100000 0 ) N ;', '- PAD_U PADCELL ;'))
+    with pytest.raises(Refusal, match='LL_DENSITY_FILL_PLACEMENT_UNREADABLE') \
+            as refused:
+        fill._placed_keepout_boxes(project, image, pdk_root, PDK, cfg,
+                                   project / 'phase3/librelane/census')
+    log = project / 'phase3/librelane/census/placed_keepouts.log'
+    assert str(log) in str(refused.value)
+    assert log.is_file(), 'the refusal names a log that was never written'
+    assert reason in log.read_text()
+
+
+def test_a_failed_fill_engine_keeps_its_reason_in_fill_log(tmp_path,
+                                                          monkeypatch):
+    image, _ = _route(monkeypatch)
+    project, pdk_root, cfg = _stage(tmp_path)
+    (pdk_root / PDK / 'tech/layers.map').write_text('Metal1 NET 61 0\n')
+    (pdk_root / PDK / 'tech/density.drc').write_text(
+        'chip_area = extent.sized(0.0).area\n'
+        'extract_single_layer_from_design.call(:metal1_drawn, 61, 0)\n'
+        'extract_single_layer_from_design.call(:metal1_dummy, 61, 7)\n'
+        '# Rule M1.4: Metal1 coverage over the entire die shall be >30%\n'
+        'if (metal1.area / chip_area) * 100 < 30\n'
+        " extent.output('M1.4', '30%')\nend\n")
+    cfg.update({'KLAYOUT_DEF_LAYER_MAP': f'/pdk/{PDK}/tech/layers.map',
+                'KLAYOUT_DENSITY_RUNSET': f'/pdk/{PDK}/tech/density.drc'})
+    config = tmp_path / 'density.json'
+    config.write_text(json.dumps(cfg))
+    gds = project / 'pdk_filled.gds'
+    gds.write_bytes(b'PDK filler GDS')
+    monkeypatch.setattr(fill, 'declaration_config', lambda project: (
+        {'CORE_AREA': [35, 32, 165, 168]}, {'CORE_AREA': 'reviewed core'}))
+    census = fill.run_container
+
+    def engine_or_census(cmd, **kwargs):
+        if 'openroad' in cmd:
+            return census(cmd, **kwargs)
+        return subprocess.CompletedProcess(cmd, 1, 'engine started\n',
+                                           'engine: layer 61/7 unwritable\n')
+
+    monkeypatch.setattr(fill, 'run_container', engine_or_census)
+    with pytest.raises(Refusal, match='LL_DENSITY_FILL_FAILED') as refused:
+        fill.top_up_density(project, image, pdk_root, PDK, gds, config,
+                            '37-engine-fails')
+    log = project / 'phase3/librelane/37-engine-fails/fill.log'
+    assert str(log) in str(refused.value)
+    assert 'layer 61/7 unwritable' in log.read_text()

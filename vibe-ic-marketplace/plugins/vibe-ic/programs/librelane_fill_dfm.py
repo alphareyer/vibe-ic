@@ -323,6 +323,16 @@ def _core_edge_keepout(die: list, core: list) -> float:
     return max(gaps)
 
 
+def _run_logged(cmd: list, log: Path):
+    """`run_container` writes `log` only when it salvages a stalled job; a
+    refusal that names `log` must find the tool's own words there, so keep
+    what it printed on every exit."""
+    result = run_container(cmd, supervised=True, log=log)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(f'{result.stdout or ""}\n{result.stderr or ""}')
+    return result
+
+
 def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
                           cfg: dict, folder: Path) -> dict:
     """Read every placed PAD/BLOCK footprint from OpenDB, never DEF text.
@@ -415,7 +425,7 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
            '-v', f'{project.resolve()}:{project.resolve()}',
            '-v', f'{(pdk_root / pdk).resolve()}:/pdk/{pdk}:ro',
            *extra_mounts, image, '--skip', 'openroad', '-exit', str(script)]
-    result = run_container(cmd, supervised=True, log=folder / 'placed_keepouts.log')
+    result = _run_logged(cmd, folder / 'placed_keepouts.log')
     if result.returncode != 0 or not output.is_file():
         raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
                       f'{routed}: OpenDB rc={result.returncode}; '
@@ -504,10 +514,10 @@ def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
            str(project), '--gds', str(gds), '--config', str(config_path),
            '--out', str(out), '--report', str(report),
            '--cell', str(cfg.get('DESIGN_NAME') or '')]
-    result = run_container(cmd, supervised=True, log=root / 'fill.log')
+    result = _run_logged(cmd, root / 'fill.log')
     if result.returncode != 0 or not out.is_file() or not report.is_file():
         raise Refusal('LL_DENSITY_FILL_FAILED',
-                      f'{root}: rc={result.returncode}')
+                      f'{root}: rc={result.returncode}; {root / "fill.log"}')
     measured = _load(report)
     if not (measured.get('verdict') == 'PASS' or
             (measured.get('verdict') == 'PARTIAL' and
@@ -547,10 +557,11 @@ def measure_density_ratios(project: Path, image: str, pdk_root: Path, pdk: str,
            image, '--skip', 'python3', str(programs / 'die_density_ratio_emit.py'),
            '--gds', str(gds), '--specs', str(specs_path),
            '--die', json.dumps(die), '--out', str(report)]
-    result = run_container(cmd, supervised=True, log=root / 'density_ratios.log')
+    result = _run_logged(cmd, root / 'density_ratios.log')
     if not report.is_file():
         raise Refusal('LL_DENSITY_RATIOS_NOT_MEASURED',
-                      f'{root}: rc={result.returncode}')
+                      f'{root}: rc={result.returncode}; '
+                      f'{root / "density_ratios.log"}')
     measured = _load(report)
     if (result.returncode != 0 or measured.get('status') != 'MEASURED' or
             digest(gds) != before or
