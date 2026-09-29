@@ -13107,6 +13107,31 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
                 reasons.append(_vacuous_hint_with_diagnostic(out, _execution))
             else:
                 reasons.append(f"{_VACUOUS_HINT_PREFIX}{cmd}")
+        elif (enforcement == "DISCLOSED_INCOMPLETE"
+                and _gate_is_two_source_advisory(_gate_name(cmd))
+                and not _output_declares_non_waiverable(out)):
+            # U20 (IC_BLOCKER_AUDIT §2) — AN ADVISORY NOT_MEASURED IS TREATED
+            # LIKE AN ADVISORY FAIL. Two branches up, a refusal from a gate
+            # that BOTH its module and the flow declare advisory is reported
+            # and does not set the step's tier. The same gate answering
+            # NOT_MEASURED emitted the INCOMPLETE hint unconditionally and
+            # did. MEASURED on spm v5, step 7's `stage1_compliance` clause:
+            # FAIL in the whole-flow audit -> step PASS; NOT_MEASURED in the
+            # stage-2 audit -> step NOT_MEASURED. The less severe answer set
+            # the stricter tier. One policy, now applied to both answers.
+            #
+            # On the HELD-OUT advisory channel, not as a plain reason: a plain
+            # reason would sit in `non_hint_reasons` and stop an incomplete
+            # SIBLING clause from setting the step NOT_MEASURED. The record is
+            # untouched (DISCLOSED_INCOMPLETE, lossless), and a gate advisory
+            # by only one source keeps the INCOMPLETE hint below, exactly as
+            # its refusal keeps BLOCKING.
+            reasons.append(
+                f"{_ADVISORY_HINT_PREFIX}NOT_MEASURED from a two-source "
+                f"advisory gate (non-blocking, as its refusal is): "
+                f"verdict={record['verdict']} rc={record['exit_code']} "
+                f"reason_class={record['reason_class']}: {cmd}"
+                + (f" :: {out[:200]}" if out else ""))
         elif enforcement == "DISCLOSED_INCOMPLETE":
             # R-0915-169 — see `_nested_audit_awaiting_rows`.
             if _awaiting and record.get("reason_class") is None:
