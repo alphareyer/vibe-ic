@@ -650,15 +650,16 @@ def unexecuted_disposition(project: Path, case: dict, ic_class: Optional[str],
         return {"case": name, "disposition": DISP_EXCLUDED, "blocking": False,
                 "ruling": "R-0929-OWNER-SUB-ACCEPT (2)", "record": ex}
     import cpu_functional_oracle_waiver_check as _cfw
+    selection_issue: Dict[str, Any] = {}
+    selected = _cfw.design_selected_options(project, selection_issue)
     _app, na = _cfw.split_design_declared_na(
-        [case], _cfw.design_selected_options(project))
+        [case], selected)
     if na:
         aw = case.get("applies_when") or {}
         return {"case": name, "disposition": DISP_NOT_APPLICABLE,
                 "blocking": False,
                 "basis": {"option": aw.get("option"), "stated": aw.get("stated"),
-                          "design_selected": sorted(
-                              _cfw.design_selected_options(project) or [])},
+                          "design_selected": sorted(selected or [])},
                 "note": ("the case is conditional on an option the design "
                          "declares it does not have; not a case of the "
                          "delivered configuration, and not claimed verified")}
@@ -679,6 +680,8 @@ def unexecuted_disposition(project: Path, case: dict, ic_class: Optional[str],
                     f"`{top_module}` at the delivered memory size, and none "
                     f"did")}
     return {"case": name, "disposition": DISP_UNMEASURED, "blocking": True,
+            **({"selection_issue": selection_issue}
+               if selection_issue and case.get("applies_when") else {}),
             "reason": (
                 "not executed through the full-stack top, not excluded by a "
                 "named ruling and not credited"
