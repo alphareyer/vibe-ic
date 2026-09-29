@@ -1714,7 +1714,13 @@ DESIGN_CLASS_CHIP_PAD_RING = 'chip_pad_ring'
 #: or HARDMACRO design has no Chip-flow segment (LL_FLOORPLAN_CORE_ONLY_UNSUPPORTED),
 #: so it keeps `direct`. A step-wide `PRODUCTION_DEFAULTS` entry outranks these.
 CLASS_PRODUCTION_DEFAULTS: dict[str, dict[str, str]] = {
-    DESIGN_CLASS_CHIP_PAD_RING: {'15': 'librelane', '15.5ic': 'librelane',
+    DESIGN_CLASS_CHIP_PAD_RING: {# R-0929-TOOL-DEFAULT (CUT_W4 step 7): the
+                                 # design deck is timed by STAPrePNR (check_setup
+                                 # in checks.rpt, OpenSTA's own read_sdc
+                                 # diagnostics) and the PVT matrix is the tool's
+                                 # resolved STA_CORNERS.
+                                 '7': 'librelane',
+                                 '15': 'librelane', '15.5ic': 'librelane',
                                  '17': 'librelane', '18': 'librelane',
                                  '19': 'librelane', '20': 'librelane',
                                  # T99 + T102 r4 (owner ruling, CUT-OVER rule):
