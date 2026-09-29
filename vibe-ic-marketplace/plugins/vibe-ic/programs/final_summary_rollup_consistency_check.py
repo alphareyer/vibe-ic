@@ -89,8 +89,14 @@ DEFAULT_FLOW = PLUGIN_ROOT / "flow" / "phase1_phase2_phase3.yaml"
 # the canonical names `_parse_audit_tally` returns.
 _TABLE_LABEL_TO_BUCKET = dict(_frg._TALLY_LABEL_TO_BUCKET)
 _TABLE_LABEL_TO_BUCKET[_frg.NO_VERDICT] = _frg.NO_VERDICT
-# `phase23_completion_audit.json` spells the vacuous bucket with an
-# underscore and the waiver bucket without its `-DEFERRED` suffix.
+# A `phase23_completion_audit.json` written BEFORE R-0915-85 (no
+# `step_status_schema_version`, or one below 2) spells the vacuous bucket with an
+# underscore and the waiver bucket without its `-DEFERRED` suffix. This map is
+# THAT document's vocabulary and is applied only to such a document: in the
+# current vocabulary (`step_counts` keyed by `verdict.Verdict`, schema >= 2) the
+# key `WAIVED` is the DRV sign-off standard's word -- an owner-waived measured
+# residual, never PASS -- and reading it as the old waiver-tier pass bucket
+# moved a non-green count into a green one. See `_audit_json_buckets`.
 _AUDIT_JSON_KEY_TO_BUCKET = {
     "PASS": "PASS",
     "FAIL": "FAIL",
@@ -108,6 +114,27 @@ _AUDIT_JSON_KEY_TO_BUCKET = {
 }
 
 RECONCILIATION_FAILED_MARKER = "Roll-up reconciliation FAILED"
+
+#: The step-status schema that introduced the current vocabulary (R-0915-85).
+_CURRENT_STEP_STATUS_SCHEMA = 2
+
+
+def _audit_json_buckets(doc: Dict) -> Dict[str, int]:
+    """`step_counts` of one audit JSON, in the table's bucket names.
+
+    The document says which vocabulary it is in (`step_status_schema_version`).
+    A current document's keys ARE verdict words and map through the renderer's
+    own label map (`WAIVED` -> `WAIVED`, `PASS_WITH_WAIVERS` ->
+    `PASS_WITH_WAIVERS`); an older one goes through its own retired map.
+    """
+    raw = doc.get("step_counts") or {}
+    version = doc.get("step_status_schema_version")
+    if (isinstance(version, int) and not isinstance(version, bool)
+            and version >= _CURRENT_STEP_STATUS_SCHEMA):
+        keymap = _TABLE_LABEL_TO_BUCKET
+    else:
+        keymap = _AUDIT_JSON_KEY_TO_BUCKET
+    return {keymap[k]: v for k, v in raw.items() if k in keymap}
 
 # ─── a document written before R-0915-85 ─────────────────────────────────
 #
@@ -346,10 +373,8 @@ def check_project(project: Path, check_audit_json: bool = False,
             notes.append(f"FAIL: --check-audit-json but no {aj}")
             ok = False
         else:
-            raw = (json.loads(aj.read_text(encoding="utf-8", errors="replace"))
-                   .get("step_counts") or {})
-            js = {_AUDIT_JSON_KEY_TO_BUCKET[k]: v for k, v in raw.items()
-                  if k in _AUDIT_JSON_KEY_TO_BUCKET}
+            js = _audit_json_buckets(
+                json.loads(aj.read_text(encoding="utf-8", errors="replace")))
             jdiff = compare_buckets(table, js)
             notes.append(f"audit JSON step_counts: {json.dumps(js, sort_keys=True)}")
             if jdiff:

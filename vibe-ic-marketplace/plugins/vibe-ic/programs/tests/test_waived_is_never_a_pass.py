@@ -65,3 +65,72 @@ def test_the_exit_code_refuses_waived():
     assert "WAIVED" not in (V._PHASE_PASS | V._PHASE_PASS_WITH_NOTE)
     src = (PROGRAMS / "vibe_ic_one_shot_runner.py").read_text()
     assert 'return 0 if overall in ("PASS", "PASS_WITH_WAIVERS") else 1' in src
+
+
+# ── (2) the roll-up consistency gate's audit-JSON reader ────────────────────
+
+import json                                                   # noqa: E402
+
+import final_summary_rollup_consistency_check as C            # noqa: E402
+
+_CURRENT_SUMMARY = """# Final summary
+
+```
+=== Vibe-IC phase1_phase2_phase3 compliance ===
+Steps: 6 total
+  PASS=3  PASS_WITH_WAIVERS=1  WAIVED=1  WAIVED-DEFERRED=1  FAIL=0  NOT_MEASURED=1  NOT_APPLICABLE=0
+```
+
+### Verdict roll-up
+
+| Verdict | Count |
+|---|---:|
+| ✅ PASS | 3 |
+| PASS_WITH_WAIVERS | 1 |
+| WAIVED | 1 |
+| NOT_MEASURED | 1 |
+| **Total** | **6** |
+"""
+
+
+def _current_project(tmp_path, step_counts, schema=T.SCHEMA_VERSION):
+    (tmp_path / "reports" / "audit").mkdir(parents=True)
+    (tmp_path / "reports" / "final_summary.md").write_text(
+        _CURRENT_SUMMARY, encoding="utf-8")
+    doc = {"step_counts": step_counts}
+    if schema is not None:
+        doc["step_status_schema_version"] = schema
+    (tmp_path / "reports" / "audit" / "phase23_completion_audit.json"
+     ).write_text(json.dumps(doc))
+    return tmp_path
+
+
+def test_a_current_audit_json_keeps_waived_in_its_own_bucket(tmp_path):
+    counts = {"PASS": 3, "PASS_WITH_WAIVERS": 1, "PASS_WITH_ATTRIBUTION": 0,
+              "WAIVED": 1, "FAIL": 0, "NOT_MEASURED": 1, "NOT_APPLICABLE": 0}
+    js = C._audit_json_buckets({"step_counts": counts,
+                                "step_status_schema_version": T.SCHEMA_VERSION})
+    assert js["WAIVED"] == 1 and js["PASS_WITH_WAIVERS"] == 1, js
+    assert "WAIVED-DEFERRED" not in js, js
+    ok, notes = C.check_project(_current_project(tmp_path, counts),
+                                check_audit_json=True)
+    assert ok, notes
+    assert "PASS: roll-up table == audit JSON step_counts." in notes
+
+
+def test_a_waived_count_cannot_hide_in_the_waiver_pass_bucket(tmp_path):
+    # The audit says 2 WAIVED and 0 PASS_WITH_WAIVERS; the table says the
+    # opposite. Read as the old waiver bucket, the two were never compared.
+    counts = {"PASS": 3, "PASS_WITH_WAIVERS": 0, "WAIVED": 2,
+              "NOT_MEASURED": 1}
+    ok, notes = C.check_project(_current_project(tmp_path, counts),
+                                check_audit_json=True)
+    blob = "\n".join(notes)
+    assert not ok, blob
+    assert "WAIVED: table=1 audit_json=2" in blob, blob
+
+
+def test_a_pre_rename_audit_json_is_still_read_in_its_own_words():
+    js = C._audit_json_buckets({"step_counts": {"PASS": 4, "WAIVED": 1,
+                                                "VACUOUS_PASS": 2}})
+    assert js == {"PASS": 4, "WAIVED-DEFERRED": 1, "VACUOUS-PASS": 2}, js
