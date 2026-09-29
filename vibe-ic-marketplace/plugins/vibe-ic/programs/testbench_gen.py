@@ -1394,11 +1394,63 @@ def case_input_gap(project: Path, case: dict,
         "case": name,
         "missing_from_input": missing or [
             f"a program or testbench for {name!r}"],
+        # The NAMED program images the input lacks, and nothing else: empty
+        # for a bare-verdict case. `input_absent_exclusion` reads this field,
+        # never the prose.
+        "missing_images": list(missing),
         "stimulus": stimulus,
         "looked_in": looked,
         "reason": (f"case {name!r} cannot run: {what} (looked in "
                    f"{', '.join(looked)}). Supplying it is the design "
                    f"input's; this flow may not author it (§4.05)."),
+    }
+
+
+# ── A FIRMWARE ROW WHOSE IMAGE IS ABSENT LEAVES THE VERDICT, BY NAME ─────────
+#
+# Owner ruling R-0929-OWNER-SUB-ACCEPT (2), 2026-09-29: firmware rows whose
+# input is absent (the owner's 2026-09-28 ruling kept subservient's
+# `blinky.hex` / `hello.hex` input_absent -- they are the deliberately removed
+# reference software) are EXCLUDED from "real PASS" exactly like the FPGA
+# board steps 6/39: listed separately as NOT_MEASURED [input_absent], never
+# PASS, not blocking.
+#
+# THE SAME MECHANISM AS STEPS 6/39. `flow_compliance_check` (F10) marks a board
+# step that could not run NOT_MEASURED, gives it an `excluded_from_verdict`
+# sentence ("NOT_MEASURED, excluded from the run verdict: <basis>"), removes it
+# from every verdict bucket, and publishes it as `not_measured_excluded` beside
+# the verdict. A firmware row is the same fact one level down -- a declared
+# case, not a step -- so it gets the same three things from the gate that
+# judges it: the NOT_MEASURED status with `reason_class` input_absent, the
+# `excluded_from_verdict` sentence, and a place in that gate's own
+# `not_measured_excluded` list. Nothing about it is ever counted as a pass.
+#
+# WHICH ROWS. Exactly those `case_input_gap` already books the INPUT's gap
+# because the case's own stimulus NAMES a program image (`blinky.hex`) that is
+# nowhere in `input/**` -- its `missing_images` field, read as data. A row
+# that names no image (a bare "PASS" expected half with no program delivered)
+# is not a firmware row, stays in `input_not_supplied`, and keeps blocking.
+# Every refusal `case_input_gap` makes (a delivered program or testbench, a
+# claiming oracle family, an `applies_when` option, an image the input DOES
+# carry, an executed case) is inherited unchanged, because this asks it.
+EXCLUDED_FROM_VERDICT_PREFIX = "NOT_MEASURED, excluded from the verdict: "
+
+
+def input_absent_exclusion(project: Path, case: dict,
+                           ic_class: "str | None" = None) -> "dict | None":
+    """The exclusion record for a firmware row whose image the input lacks,
+    or None (the row is judged as before)."""
+    gap = case_input_gap(project, case, ic_class)
+    images = list((gap or {}).get("missing_images") or [])
+    if not gap or not images:
+        return None
+    import verdict as _vd                            # noqa: E402 (taxonomy)
+    return {
+        "case": gap["case"],
+        "status": _vd.Verdict.NOT_MEASURED.value,
+        "reason_class": _vd.ReasonClass.INPUT_ABSENT.value,
+        "missing_from_input": images,
+        "excluded_from_verdict": EXCLUDED_FROM_VERDICT_PREFIX + gap["reason"],
     }
 
 
