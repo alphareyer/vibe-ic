@@ -75569,6 +75569,16 @@ def _phase3_window_publication(project: Path, isolated: Path,
                     raise ValueError(f"window cited input absent: {token}: {exc}") from exc
                 if not resolved.is_relative_to(owner):
                     raise ValueError(f"window input outside project: {token}")
+                # Strict resolution applies ".." lexically after a component
+                # that may be a regular file (`x.def/../y.def`). Bind only
+                # what the literal spelling opens: the kernel's own walk.
+                try:
+                    literal = os.stat(cited)
+                except OSError as exc:
+                    raise ValueError(
+                        f"window cited input absent: {token}: {exc}") from exc
+                if not os.path.samestat(literal, os.stat(resolved)):
+                    raise ValueError(f"window cited input absent: {token}")
                 # A relative symlink would leave a dangling alias after the
                 # private tree is discarded; selected outputs must be files.
                 if (not path.is_absolute()
