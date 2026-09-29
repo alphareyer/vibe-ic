@@ -103,7 +103,9 @@ def test_the_validity_qualifier_still_works(tmp_path):
          "description": "serial data, sampled when o_cyc = 1"}])
     q = riv.declared_output_qualifiers(proj, _OUT, _IN)
     assert [r["qualifier"] for r in q["o_data"]] == ["o_we"]
-    assert [r["qualifier"] for r in q["o_q"]] == ["o_cyc"]
+    # strict: with no declared-role reader a 1-bit output is control/strobe
+    # and must be known after release, whatever its sentence says
+    assert "o_q" not in q
 
 
 def test_active_low_is_not_validity():
