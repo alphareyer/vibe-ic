@@ -115,6 +115,11 @@ def test_the_direct_deck_prints_the_same_enumeration():
     block = src[at:at + 2000]
     assert 'getIoType] ne \\"INPUT\\"' in block
     assert "SPARE_INPUT_PIN [$_si getName] [$_mt getName] [$_mt getSigType]" in block
+    # only supply pins are skipped -- a CLOCK-use input is enumerated
+    assert "[$_mt getSigType] in {POWER GROUND}} { continue }" in block
+    assert "CLOCK" not in block.split("SPARE_INPUT_PIN")[0].split("foreach _sn")[-1]
+    # the observation gate recognises the marker as insertion evidence
+    assert "SPARE_INPUT_PIN" in R._STEP18_INSERTION_MARKERS
 
 
 # ------------------------------------------------------------ step 18 gate --

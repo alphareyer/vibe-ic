@@ -113,7 +113,7 @@ def _erc_rpt(tmp_path, body):
 
 # The round-9 transcript's three benign BARE nets. Its 15 floating spare
 # INPUT pins (RSZ-0095) are no longer benign (U6): an undriven spare input is
-# a Design-for-ECO defect, asserted in test_spare_input_floats_fail_erc.py.
+# a Design-for-ECO defect, asserted in test_spare_clock_input_tied_and_proven.py.
 _R9_BODY = (
     "ERC floating nets: 3\n"
     "ERC clean: NO (review floating nets)\n"
