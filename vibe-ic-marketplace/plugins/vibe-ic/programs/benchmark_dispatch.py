@@ -120,6 +120,64 @@ def _ordered_parallel_map(items: Iterable[T], worker: Callable[[T], R],
 class _ProcessOutcome:
     rc: int | None
     error: str | None = None
+    invocation: dict | None = None
+
+
+def _runner_terminal_error(rc, stdout: str, stderr: str) -> str | None:
+    """BLOCKING process refusals, distinct from ordinary gate verdicts (rc 1)."""
+    if rc == 0:
+        return None
+    for line in (stderr + "\n" + stdout).splitlines():
+        if line.startswith(("REFUSED:", "CONCURRENT_RUN_REFUSED:")):
+            return "RUNNER_INVOCATION_REFUSED: " + line
+        if rc == 2 and (line.startswith("ERROR:") or "error: " in line
+                        and line.startswith("vibe_ic_one_shot_runner.py:")):
+            return "RUNNER_INVOCATION_REFUSED: " + line
+    if rc is not None and rc < 0:
+        return f"RUNNER_WORKER_FAILED: terminated by signal {-rc}"
+    if stderr.startswith("Traceback (most recent call last):"):
+        return "RUNNER_WORKER_FAILED: " + stderr.splitlines()[-1]
+    return None
+
+
+def _runner_reentry_reason(task: dict, result: dict) -> str | None:
+    """Legacy refusal exits cannot establish that the stored gates ran.
+
+    Normal rc 0/1 remains supported, including bounded NOT_MEASURED outcomes.
+    A receipt from a refused/failed invocation is never a gate measurement.
+    """
+    verification = task.get("program_verification") or {}
+    invocation = verification.get("runner_invocation")
+    if isinstance(invocation, dict):
+        if invocation.get("status") != "COMPLETED":
+            return str(invocation.get("error") or "RUNNER_INVOCATION_NOT_MEASURED")
+        try:
+            project = Path(task["project"]).resolve()
+            invocation_project = Path(invocation["project"]).resolve()
+            if invocation_project != project:
+                regate = _verified_program_regate(task)
+                if (regate is None or invocation_project !=
+                        (Path(regate["archive_path"]) / "staged_project").resolve()):
+                    raise ValueError("invocation project is not this task's gate producer")
+            for key in ("record_path", "stdout_path", "stderr_path"):
+                Path(invocation[key]).resolve().relative_to(invocation_project / "reports" / "benchmark_runner")
+            if json.loads(Path(invocation["record_path"]).read_text()) != invocation:
+                raise ValueError("invocation record changed")
+            for stream in ("stdout", "stderr"):
+                if _sha256_text(Path(invocation[stream + "_path"]).read_text()) != invocation[stream + "_sha256"]:
+                    raise ValueError(stream + " changed")
+            if (invocation.get("project") != str(invocation_project)
+                    or invocation.get("rc") != verification.get("runner_rc")
+                    or invocation.get("output_rtl_sha256") != task.get("rtl_sha256")
+                    or invocation.get("prompt_sha256") != task.get("prompt_sha256")):
+                raise ValueError("invocation does not bind this task")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return f"RUNNER_INVOCATION_NOT_MEASURED: {exc}"
+        return None
+    rc = verification.get("runner_rc", result.get("rc"))
+    if type(rc) is int and rc not in (0, 1):
+        return f"RUNNER_INVOCATION_NOT_MEASURED: legacy exit {rc} has no invocation evidence"
+    return None
 
 
 def _own_child_pids() -> list[int]:
@@ -296,19 +354,54 @@ class _RunnerBudget:
             kwargs["env"] = self._env
         if self.timeout_s is not None:
             kwargs["timeout"] = self.timeout_s
+        project = Path(argv[2]).resolve()
+        invocation_id = uuid.uuid4().hex
+        archive = project / "reports" / "benchmark_runner" / invocation_id
+        rc, error, stdout, stderr = None, None, "", ""
+        reports = [project / "reports" / "orchestrator" / name for name in
+                   ("phase1_one_shot.json", "phase2_one_shot.json",
+                    "phase3_one_shot.json", "vibe_ic_one_shot.json")]
+        before = {str(p): p.stat().st_mtime_ns if p.is_file() else None for p in reports}
         try:
             with self._heavy:
                 proc = subprocess.run(argv, **kwargs)
-        except subprocess.TimeoutExpired:
-            return _ProcessOutcome(
-                rc=None,
-                error=(f"TimeoutExpired: runner exceeded "
-                       f"VIBEIC_SOLVE_RUNNER_TIMEOUT_S={self.timeout_s:g}s "
-                       f"and was killed"))
+            rc = int(proc.returncode)
+            stdout, stderr = getattr(proc, "stdout", "") or "", getattr(proc, "stderr", "") or ""
+            error = _runner_terminal_error(rc, stdout, stderr)
+            if (error is None and rc not in (0, 1)
+                    and not any(p.is_file() and p.stat().st_mtime_ns != before[str(p)] for p in reports)):
+                error = f"RUNNER_INVOCATION_NOT_MEASURED: exit {rc} published no fresh runner report"
+        except subprocess.TimeoutExpired as exc:
+            stdout, stderr = exc.stdout or "", exc.stderr or ""
+            error = (f"RUNNER_WORKER_FAILED: TimeoutExpired: runner exceeded "
+                     f"VIBEIC_SOLVE_RUNNER_TIMEOUT_S={self.timeout_s:g}s and was killed")
         except Exception as exc:                         # noqa: BLE001
-            return _ProcessOutcome(
-                rc=None, error=f"{type(exc).__name__}: {exc}")
-        return _ProcessOutcome(rc=int(proc.returncode))
+            error = f"RUNNER_WORKER_FAILED: {type(exc).__name__}: {exc}"
+        stdout = stdout.decode(errors="replace") if isinstance(stdout, bytes) else stdout
+        stderr = stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr
+        invocation = {
+            "schema": "vibeic.benchmark.runner_invocation.v1",
+            "id": invocation_id, "project": str(project), "argv": list(argv),
+            "rc": rc, "error": error,
+            "status": ("REFUSED" if error and "RUNNER_INVOCATION_REFUSED" in error
+                       else "WORKER_ERROR" if error else "COMPLETED"),
+            "stdout_path": str(archive / "stdout.txt"),
+            "stderr_path": str(archive / "stderr.txt"),
+            "stdout_sha256": _sha256_text(stdout),
+            "stderr_sha256": _sha256_text(stderr),
+            "record_path": str(archive / "invocation.json"),
+            "prompt_sha256": (_sha256_text((project / "input" / "phase1_prompt.md").read_text())
+                              if (project / "input" / "phase1_prompt.md").is_file() else None),
+            "output_rtl_sha256": _sha256_text(_candidate_text(_rtl_files(project))),
+        }
+        try:
+            _write_immutable_text(archive / "stdout.txt", stdout)
+            _write_immutable_text(archive / "stderr.txt", stderr)
+            _write_immutable_json(archive / "invocation.json", invocation)
+        except OSError as exc:
+            error = f"RUNNER_DIAGNOSTICS_NOT_RECORDED: {exc}"
+            invocation = None
+        return _ProcessOutcome(rc=rc, error=error, invocation=invocation)
 
 
 @dataclass(frozen=True)
@@ -327,6 +420,7 @@ class _ResumeRunnerOutcome:
     rc: int | None
     collected_json: str | None
     error: str | None
+    invocation: dict | None = None
 
 
 def _phase_error_attribution() -> dict:
@@ -1374,6 +1468,7 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
                          repair_input_candidate: dict | None = None,
                          review_key: str | None = None,
                          archive_key: str | None = None,
+                         runner_invocation: dict | None = None,
                          expected_public_input: dict | None = None) -> dict:
     """Build the hash-bound, oracle-free handoff for one AI review."""
     project, run_p = Path(project).resolve(), Path(run_p).resolve()
@@ -1453,6 +1548,7 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
             "actor": "vibe_ic_one_shot_runner",
             "rtl_gen": got.get("rtl_gen"),
             "runner_rc": int(runner_rc),
+            **({"runner_invocation": runner_invocation} if runner_invocation is not None else {}),
             "functional_evidence": functional_evidence,
             "functional_evidence_source": functional_source,
             "functional_confirmation_required": confirmation_required,
@@ -3438,6 +3534,9 @@ def _shape_c_task_binding_reasons(task: dict, run_p: Path,
     if not isinstance(solve_result, dict):
         reasons.append("problem is absent from solve_report")
         return reasons
+    invocation_reason = _runner_reentry_reason(task, solve_result)
+    if invocation_reason:
+        reasons.append(invocation_reason)
     if (solve_result.get("ok") is not True
             or solve_result.get("candidate_ready") is not True):
         reasons.append("solve_report did not mark a runner-owned candidate ready")
@@ -4303,7 +4402,7 @@ def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget) -> dict
     process = runner_budget.run(argv)
     if process.error is not None:
         return {"status": "BLOCKED", "runner_rc": process.rc,
-                "reason": process.error}
+                "reason": process.error, "runner_invocation": getattr(process, "invocation", None)}
     try:
         prompt_after = _sha256_text(prompt.read_text(errors="replace"))
         rtl_after = _sha256_text(_candidate_text(_rtl_files(project)))
@@ -5015,6 +5114,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
         # when the worker died before routing: the one case nobody looked.
         route_backup: dict = {"status": "NOT_MEASURED", "skills": []}
         phase1_frontdoor = None
+        process = None
         try:
             route_task = task_by_route_id[pid]
             if proj.resolve() != Path(route_task["project"]):
@@ -5086,6 +5186,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 "id": pid, "nature": nature,
                 "entry": entry, "evidence": ev, "exit": exit_step,
                 "rc": rc,
+                "runner_invocation": getattr(process, "invocation", None),
                 "ok": bool(got.get("ok")),
                 "candidate_ready": bool(got.get("ok")),
                 "accepted": False, "staged": staged_chars,
@@ -5109,6 +5210,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 review_task = _make_ai_review_task(
                     pid, proj, got, verdict, rc, run_p, "PROGRAM",
                     program_phases=phases,
+                    runner_invocation=getattr(process, "invocation", None),
                     expected_public_input=staged["public_original_input"])
                 result["review_task"] = review_task["review_path"]
                 p1 = (phases.get("phase1_routing") or {})
@@ -5140,7 +5242,10 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
             result = {
                 "id": pid,
                 "nature": nature, "entry": entry,
-                "evidence": ev, "exit": exit_step, "rc": None,
+                "evidence": ev, "exit": exit_step,
+                "rc": process.rc if process and process.error else None,
+                "runner_invocation": (getattr(process, "invocation", None)
+                                      or (phase1_frontdoor or {}).get("runner_invocation")),
                 "worker_status": "ERROR", "worker_error": error,
                 "worker_retryable": (
                     proj / "input" / "phase1_prompt.md").is_file(),
@@ -5437,8 +5542,8 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         process = runner_budget.run(argv)
         if process.error is not None:
             return _ResumeRunnerOutcome(
-                problem_id=pid, rc=None, collected_json=None,
-                error=process.error)
+                problem_id=pid, rc=process.rc, collected_json=None,
+                error=process.error, invocation=getattr(process, "invocation", None))
         try:
             got = bio.collect(fmt, pid, proj, supplied_rtl=supplied_rtl,
                               required_top=_required_scorer_top(_entry(bench)))
@@ -5446,9 +5551,10 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         except Exception as exc:                          # noqa: BLE001
             return _ResumeRunnerOutcome(
                 problem_id=pid, rc=process.rc, collected_json=None,
-                error=f"{type(exc).__name__}: {exc}")
+                error=f"{type(exc).__name__}: {exc}", invocation=getattr(process, "invocation", None))
         return _ResumeRunnerOutcome(
-            problem_id=pid, rc=process.rc, collected_json=payload, error=None)
+            problem_id=pid, rc=process.rc, collected_json=payload, error=None,
+            invocation=getattr(process, "invocation", None))
 
     def _refresh_result(result: dict, proj: Path, rc: int, got: dict) -> None:
         routing = result.get("routing_verdict") or {}
@@ -5516,17 +5622,20 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                     "fix the named worker failure and run --resume again; "
                     "other coordinator-committed project results are retained"),
             })
-            result.update({"rc": None, "worker_status": "ERROR",
-                           "worker_error": outcome.error})
+            result.update({"rc": outcome.rc, "worker_status": "ERROR",
+                           "worker_error": outcome.error, "runner_invocation": outcome.invocation,
+                           "ok": False, "candidate_ready": False, "accepted": False})
             print(f"  {pid:44s} Program worker retry ERROR: {outcome.error}")
             continue
         rc = int(outcome.rc)
         got = json.loads(str(outcome.collected_json))
         _refresh_result(result, proj, rc, got)
+        result["runner_invocation"] = outcome.invocation
         if got.get("ok"):
             task = _make_ai_review_task(
                 pid, proj, got, result.get("routing_verdict") or {}, rc,
                 run_p, "PROGRAM", program_phases=result.get("phases"),
+                runner_invocation=outcome.invocation,
                 expected_public_input=result.get("public_original_input"))
             task_by_id[pid] = task
             result.update({
@@ -5690,7 +5799,8 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                     "other coordinator-committed project results are retained"),
             })
             result.update({
-                "rc": None, "worker_status": "ERROR",
+                "rc": outcome.rc, "worker_status": "ERROR",
+                "runner_invocation": outcome.invocation, "ok": False,
                 "worker_error": outcome.error, "accepted": False,
                 "candidate_ready": False, "awaiting_ai_backup": True,
                 "awaiting_ai_review": False, "awaiting_ai": True,
@@ -5702,10 +5812,12 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         got = json.loads(str(outcome.collected_json))
         proj = plan["project"]
         _refresh_result(result, proj, rc, got)
+        result["runner_invocation"] = outcome.invocation
         if got.get("ok"):
             task = _make_ai_review_task(
                 pid, proj, got, result.get("routing_verdict") or {}, rc,
                 run_p, "AI_BACKUP", program_phases=result.get("phases"),
+                runner_invocation=outcome.invocation,
                 expected_public_input=item["public_original_input"])
             task["backup_provenance"] = {
                 **plan["provenance"], "gated_rtl_sha256": task["rtl_sha256"]}
@@ -5752,6 +5864,45 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                 "repair": {"id": pid, "status": "INVALID_REVIEW_TASK",
                            "reasons": [
                                "review id is absent from solve_report"]},
+            })
+            continue
+        invocation_reason = _runner_reentry_reason(task, result)
+        if invocation_reason:
+            # A legacy pre-run refusal is not a completed gate invocation.
+            # Re-enter the SAME frozen bytes; no edit or author signature is
+            # authorised here. Keep old review/test/task records for audit.
+            proj = Path(str(task.get("project") or ""))
+            prompt_hash, frozen_hash, stated, frozen_paths = _current_task_material(task)
+            reasons = _validate_candidate_snapshot(task.get("candidate_snapshot"), pid)
+            reasons += _public_input_reasons(task)
+            if (prompt_hash != task.get("prompt_sha256") or frozen_hash != task.get("rtl_sha256")
+                    or stated != frozen_paths
+                    or _sha256_text(_candidate_text(_rtl_files(proj))) != task.get("rtl_sha256")):
+                reasons.append("unchanged bound prompt and working/frozen RTL required for runner re-entry")
+            if proj.resolve() != (run_p / "projects" / _safe_problem_id(pid)).resolve():
+                reasons.append("runner re-entry project is not coordinator-owned")
+            if pid in phase1_blocked:
+                reasons.append(phase1_blocked[pid])
+            if result.get("accepted") or Path(str(task.get("response_path"))).is_file():
+                reasons.append("runner re-entry cannot replace an accepted/published candidate")
+            if task.get("candidate_origin") == "AI_REPAIR":
+                reasons += _validate_embedded_repair_provenance(task)
+            if reasons:
+                repair_plans.append({"kind": "report", "id": pid, "repair": {
+                    "id": pid, "status": "RUNNER_REGATE_BLOCKED", "reasons": [invocation_reason, *reasons]}})
+                result.update({"accepted": False, "candidate_ready": False, "awaiting_ai_review": False})
+                continue
+            key = "runner-regate-" + uuid.uuid4().hex
+            archive = run_p / "runner_regates" / _safe_problem_id(pid) / key
+            _write_immutable_json(archive / "prior_task.json", task)
+            _write_immutable_json(archive / "prior_result.json", result)
+            repair_plans.append({
+                "kind": "regate", "id": pid, "task": task, "result": result,
+                "project": proj, "challenge": None, "review_key": key,
+                "archive": archive, "repair_parent_candidate": task.get("repair_parent_candidate_snapshot"),
+                "repair_provenance": task.get("repair_provenance"),
+                "repair_input_candidate": task.get("repair_input_candidate_snapshot"),
+                "program_first_phases": result.get("program_first_phases") or result.get("phases") or {},
             })
             continue
         pre_logs: list[str] = []
@@ -5894,7 +6045,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                 or result.get("phases") or {}),
         })
 
-    repair_run_plans = [p for p in repair_plans if p["kind"] == "run"]
+    repair_run_plans = [p for p in repair_plans if p["kind"] in {"run", "regate"}]
     gate_rc = _runtime_pair_before_fan_out(repair_run_plans, run_p,
                                            "resume:repair")
     if gate_rc is not None:
@@ -5929,7 +6080,9 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                     "other coordinator-committed project results are retained"),
             })
             result.update({
-                "rc": None, "worker_status": "ERROR",
+                "rc": outcome.rc, "worker_status": "ERROR",
+                "runner_invocation": outcome.invocation,
+                "ok": False, "candidate_ready": False,
                 "worker_error": outcome.error, "accepted": False,
                 "awaiting_ai": True, "awaiting_ai_review": False,
                 "ai_repair_required": True,
@@ -5939,6 +6092,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         rc = int(outcome.rc)
         got = json.loads(str(outcome.collected_json))
         _refresh_result(result, proj, rc, got)
+        result["runner_invocation"] = outcome.invocation
         program_first_phases = plan["program_first_phases"]
         if program_first_phases:
             result["program_first_phases"] = program_first_phases
@@ -5952,24 +6106,32 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                 inherited.append(plan["challenge"])
             new_task = _make_ai_review_task(
                 pid, proj, got, result.get("routing_verdict") or {}, rc,
-                run_p, "AI_REPAIR",
+                run_p, task.get("candidate_origin") if plan["kind"] == "regate" else "AI_REPAIR",
                 expected_public_input=task.get("public_original_input"),
+                runner_invocation=outcome.invocation,
                 program_phases=result.get("phases"),
                 verification_challenges=inherited,
                 program_candidate=(task.get("program_candidate_snapshot")
                                    or task.get("candidate_snapshot")),
                 repair_parent_candidate=plan.get("repair_parent_candidate"),
                 repair_provenance=plan["repair_provenance"],
-                repair_input_candidate=plan.get("repair_input_candidate"))
+                repair_input_candidate=plan.get("repair_input_candidate"),
+                review_key=plan.get("review_key"), archive_key=plan.get("review_key"))
+            if plan["kind"] == "regate":
+                for key in ("backup_provenance", "pre_gate_input", "program_regate"):
+                    if key in task:
+                        new_task[key] = task[key]
+                _write_immutable_json(plan["archive"] / "new_task.json", new_task)
             preserved = plan.get("pre_gate_input")
             if isinstance(preserved, dict):
                 new_task["pre_gate_input"] = _bind_pre_gate_output(
                     preserved, new_task["rtl_sha256"])
             task_by_id[pid] = new_task
             result["review_task"] = new_task["review_path"]
-            result["candidate_origin"] = "AI_REPAIR"
+            result["candidate_origin"] = new_task["candidate_origin"]
             result["ai_repair_required"] = False
-            print(f"  {pid:44s} changed RTL re-gated; fresh AI review required")
+            refreshed.add(pid)
+            print(f"  {pid:44s} RTL re-gated; fresh AI review required")
         else:
             repairs.append({
                 "schema": "vibeic.benchmark.ai_repair_task.v2",
@@ -5990,6 +6152,13 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         task = task_by_id.get(pid)
         if task is None:
             result["accepted"] = False
+            continue
+        invocation_reason = _runner_reentry_reason(task, result)
+        if result.get("worker_status") == "ERROR" or invocation_reason:
+            result.update({"accepted": False, "candidate_ready": False,
+                           "awaiting_ai_review": False})
+            review_outcomes.append({"id": pid, "status": "PENDING", "reasons": [
+                result.get("worker_error") or invocation_reason]})
             continue
         verdict = _validate_ai_review(task)
         _attach_ai_review_attribution(result, verdict, task)
@@ -7008,9 +7177,11 @@ def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
         runner = Path(__file__).resolve().parent / "vibe_ic_one_shot_runner.py"
         argv = _resume_solver_argv(runner, staged, True, result.get("entry"), result["exit"])
         process = _RunnerBudget(1, 1, worker_threads).run(argv)
-        got = bio.collect(fmt, pid, staged, supplied_rtl=True)
+        got = (bio.collect(fmt, pid, staged, supplied_rtl=True) if process.error is None
+               else {"ok": False, "reason": process.error})
         _write_immutable_json(archive / "runner_result.json", {
-            "argv": argv, "rc": process.rc, "error": process.error, "collected": got})
+            "argv": argv, "rc": process.rc, "error": process.error,
+            "runner_invocation": getattr(process, "invocation", None), "collected": got})
         if process.error or not got.get("ok"):
             refuse("Program runner failed; original task/project retained")
         _regate_project_tree(staged)
@@ -7044,6 +7215,7 @@ def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
         new_task = _make_ai_review_task(
             pid, project, got, result.get("routing_verdict") or {}, int(process.rc), run_p, "AI_REPAIR",
             program_phases=phases, verification_challenges=inherited,
+            runner_invocation=getattr(process, "invocation", None),
             expected_public_input=task.get("public_original_input"),
             program_candidate=task["program_candidate_snapshot"],
             repair_parent_candidate=task["repair_parent_candidate_snapshot"],

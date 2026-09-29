@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 sys.path.insert(0, str(PROGRAMS.parent / "benchmark"))
@@ -219,6 +221,144 @@ def _overlap(a: tuple[float, float], b: tuple[float, float]) -> bool:
     return max(a[0], b[0]) < min(a[1], b[1])
 
 
+def _prior_collectable_report(project: Path):
+    report = project / "reports" / "orchestrator" / "phase2_one_shot.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps({"verdict": "PASS", "steps": [
+        {"name": "rtl_gen", "status": "PASS"},
+        {"name": "rtl_validate", "status": "PASS"}]}))
+    docs = project / "phase1" / "generated_docs"
+    docs.mkdir(parents=True, exist_ok=True)
+    (docs / "L1_DATASHEET.json").write_text('{"schema": 1}')
+    return report
+
+
+def test_real_runner_refusal_is_preserved_instead_of_being_an_outcome(tmp_path):
+    runner = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic",
+                          "programs", "vibe_ic_one_shot_runner.py")
+    outcome = bd._RunnerBudget(1, 1, 0).run([
+        sys.executable, str(runner), str(tmp_path), "--no-dashboard",
+        "--entry-step", "2", "--exit-step", "2", "--skip-phase3"])
+    assert outcome.rc == 2
+    assert (outcome.error or "COMPLETED").split(":", 1)[0] == "RUNNER_INVOCATION_REFUSED"
+    receipt = outcome.invocation
+    assert receipt["status"] == "REFUSED"
+    assert json.loads(Path(receipt["record_path"]).read_text()) == receipt
+    stderr = Path(receipt["stderr_path"]).read_text()
+    assert stderr.startswith("REFUSED: DELIVERY_ROUTE_UNDECLARED")
+    assert bd._sha256_text(stderr) == receipt["stderr_sha256"]
+
+
+def test_real_refusal_cannot_collect_old_reports_and_resume_retries_only_that_backup(
+        tmp_path, monkeypatch):
+    _install_common_fakes(monkeypatch)
+    run = tmp_path / "run"
+    _write_resume_fixture(run)
+    for pid in ("p1", "p2"):
+        project = run / "projects" / pid
+        _prior_collectable_report(project)
+        assert bio.collect("rtllm", pid, project, supplied_rtl=True)["ok"] is True
+    prior_report = run / "projects" / "p1" / "reports" / "orchestrator" / "phase2_one_shot.json"
+    before = prior_report.read_bytes()
+    native_run = bd.subprocess.run
+    refuse = True
+    calls = []
+
+    def run_worker(argv, **kwargs):
+        pid = Path(argv[2]).name
+        calls.append(pid)
+        if pid == "p1" and refuse:
+            return native_run(argv + ["--no-dashboard"], **kwargs)
+        _prior_collectable_report(Path(argv[2]))
+        return SimpleNamespace(returncode=1, stdout="bounded NOT_MEASURED\n", stderr="")
+
+    monkeypatch.setattr(bd.subprocess, "run", run_worker)
+    assert bd.cmd_resume("rtllm", "/unused", str(run), jobs=2) == 2
+    rows = {r["id"]: r for r in json.loads((run / "solve_report.json").read_text())["results"]}
+    assert rows["p1"]["candidate_ready"] is False
+    assert rows["p1"]["rc"] == 2
+    assert "RUNNER_INVOCATION_REFUSED" in rows["p1"]["worker_error"]
+    assert rows["p2"]["candidate_ready"] is True
+    assert rows["p2"]["rc"] == 1
+    assert prior_report.read_bytes() == before
+    assert [r["id"] for r in bd._read_jsonl(run / bd._BACKUP_WORKLIST)] == ["p1"]
+    healthy = bd._read_jsonl(run / bd._REVIEW_WORKLIST)
+    assert [r["id"] for r in healthy] == ["p2"]
+    assert rows["p1"]["accepted"] is rows["p2"]["accepted"] is False
+    refuse = False
+    calls.clear()
+    assert bd.cmd_resume("rtllm", "/unused", str(run), jobs=2) == 2
+    assert calls == ["p1"]
+    after = {r["id"]: r for r in bd._read_jsonl(run / bd._REVIEW_WORKLIST)}
+    assert after["p2"] == healthy[0]
+    assert after["p1"]["program_verification"]["runner_rc"] == 1
+    assert after["p1"]["program_verification"]["runner_invocation"]["status"] == "COMPLETED"
+
+
+@pytest.mark.parametrize("rc,stderr,expected", [
+    (1, "ERROR: RTL compiler rejected the candidate", "COMPLETED"),
+    (1, "", "COMPLETED"),
+    (-9, "", "RUNNER_WORKER_FAILED"),
+    (2, "", "RUNNER_INVOCATION_NOT_MEASURED"),
+    (3, "CONCURRENT_RUN_REFUSED: occupied project", "RUNNER_INVOCATION_REFUSED"),
+])
+def test_runner_process_disposition_does_not_confuse_gate_results(
+        tmp_path, monkeypatch, rc, stderr, expected):
+    monkeypatch.setattr(bd.subprocess, "run", lambda *_a, **_k:
+                        SimpleNamespace(returncode=rc, stdout="complete stdout\n", stderr=stderr))
+    outcome = bd._RunnerBudget(1, 1, 0).run([sys.executable, "runner.py", str(tmp_path)])
+    assert outcome.rc == rc
+    assert (outcome.error or "COMPLETED").split(":", 1)[0] == expected
+    assert Path(outcome.invocation["stdout_path"]).read_text() == "complete stdout\n"
+    assert Path(outcome.invocation["stderr_path"]).read_text() == stderr
+
+
+def test_timeout_retains_the_partial_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIBEIC_SOLVE_RUNNER_TIMEOUT_S", "1")
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("runner", 1, output=b"partial stdout", stderr=b"partial stderr")
+    monkeypatch.setattr(bd.subprocess, "run", timeout)
+    outcome = bd._RunnerBudget(1, 1, 0).run([sys.executable, "runner.py", str(tmp_path)])
+    assert outcome.rc is None
+    assert outcome.error.startswith("RUNNER_WORKER_FAILED")
+    assert Path(outcome.invocation["stdout_path"]).read_text() == "partial stdout"
+    assert Path(outcome.invocation["stderr_path"]).read_text() == "partial stderr"
+
+
+def test_legacy_unmeasured_review_is_regated_without_rebinding_the_old_review(
+        tmp_path, monkeypatch):
+    from test_benchmark_program_first_ai_review import _task, _solve_report, _write_review, _valid_review
+    _rt_pair.assume_matching_runtime_pair(monkeypatch)
+    run, task, _ = _task(tmp_path)
+    task["program_verification"]["runner_rc"] = 2
+    _solve_report(run, task)
+    _write_review(task, _valid_review(task))
+    old_review = Path(task["review_path"]).read_bytes()
+    seen = []
+    native_run = bd.subprocess.run
+    def worker(argv, **_kwargs):
+        if Path(str(argv[1])).name != "vibe_ic_one_shot_runner.py":
+            return native_run(argv, **_kwargs)
+        seen.append(argv)
+        _prior_collectable_report(Path(argv[2]))
+        return SimpleNamespace(returncode=1, stdout="bounded NOT_MEASURED", stderr="")
+    monkeypatch.setattr(bd.subprocess, "run", worker)
+    assert bd.cmd_resume("rtllm", "/unused", str(run)) == 2
+    assert len(seen) == 1
+    assert seen[0][seen[0].index("--entry-step") + 1] == "2"
+    assert seen[0][seen[0].index("--exit-step") + 1] == "8"
+    fresh = bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0]
+    assert fresh["rtl_sha256"] == task["rtl_sha256"]
+    assert fresh["review_path"] != task["review_path"]
+    assert fresh["verification_challenges"] == task["verification_challenges"]
+    assert Path(task["review_path"]).read_bytes() == old_review
+    assert not Path(fresh["review_path"]).exists()
+    assert bd._runner_reentry_reason(fresh, {}) is None
+    assert json.loads((run / bd._ACCEPTANCE_REPORT).read_text())["accepted"] == 0
+    preserved = list((run / "runner_regates").rglob("prior_task.json"))
+    assert len(preserved) == 1 and json.loads(preserved[0].read_text()) == task
+
+
 def test_cli_exposes_jobs_for_solve_and_resume() -> None:
     dispatch = require_repo(
         "vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
@@ -278,6 +418,13 @@ def test_solve_jobs_overlap_and_commit_shared_artifacts_in_dataset_order(
     for report in (serial_report, parallel_report):
         for row in report["results"]:
             row["routing_verdict"].pop("ai_route_response_sha256", None)
+            # Invocation identities name their own run root and immutable
+            # log archive. Validate those facts before comparing outcomes.
+            invocation = row.pop("runner_invocation", None)
+            if invocation is not None:
+                assert invocation["status"] == "COMPLETED"
+                assert Path(invocation["project"]).name == row["id"]
+                assert json.loads(Path(invocation["record_path"]).read_text()) == invocation
     assert parallel_report == serial_report
     for name in (bd._BACKUP_WORKLIST, bd._REVIEW_WORKLIST,
                  bd._ACCEPTANCE_REPORT):
