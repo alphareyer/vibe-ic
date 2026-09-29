@@ -55,6 +55,7 @@ if BENCH not in sys.path:
 
 import cvdp_gate as G                      # noqa: E402
 import tb_toplevel_alias as A    # noqa: E402
+import _outcome_states as states  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -195,14 +196,6 @@ def test_emit_invariant_to_oracle():
 #      contract the alias must keep: a correctly-interfaced author under a
 #      prompt-name mismatch gets a valid wrapper). Independent of the oracle.
 # --------------------------------------------------------------------------- #
-def _has_iverilog() -> bool:
-    try:
-        subprocess.run(["iverilog", "-V"], capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
-
-
 def test_wrapper_correctness_from_prompt_name():
     prompt_top = G.skeleton_module_name_from_prompt(_PROMPT)  # 'foo'
     # feed a completion whose sole ANSI module is named DIFFERENTLY so the
@@ -213,17 +206,21 @@ def test_wrapper_correctness_from_prompt_name():
     assert "foo_impl u_foo_impl" in out
     assert ".clk(clk)" in out and ".d(d)" in out and ".q(q)" in out
     assert "DECOY" not in out
-    if _has_iverilog():
-        with tempfile.NamedTemporaryFile("w", suffix=".sv", delete=False) as f:
-            f.write(out)
-            path = f.name
-        try:
-            r = subprocess.run(
-                ["iverilog", "-g2012", "-s", "foo", "-o", os.devnull, path],
-                capture_output=True, text=True)
-            assert r.returncode == 0, f"wrapper failed to compile: {r.stderr}"
-        finally:
-            os.unlink(path)
+    # The tool half used to sit under `if <tool present>:` with no else, so a
+    # host without it PASSED having run none of it. Everything above needs no
+    # tool and has run; an absent tool -> NOT_VERIFIED naming the host
+    # (R-0927), a present one -> the half below runs unconditionally.
+    states.require_tools("iverilog")
+    with tempfile.NamedTemporaryFile("w", suffix=".sv", delete=False) as f:
+        f.write(out)
+        path = f.name
+    try:
+        r = subprocess.run(
+            ["iverilog", "-g2012", "-s", "foo", "-o", os.devnull, path],
+            capture_output=True, text=True)
+        assert r.returncode == 0, f"wrapper failed to compile: {r.stderr}"
+    finally:
+        os.unlink(path)
 
 
 # --------------------------------------------------------------------------- #

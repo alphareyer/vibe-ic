@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from not_verified_tier import not_verified_reason  # noqa: E402
 
 import _progress_run as _pr  # noqa: E402
+import _outcome_states as states  # noqa: E402
 
 PROG = Path(__file__).resolve().parents[1]
 
@@ -262,30 +263,34 @@ def test_autoemit_moves_pull_to_outermost_face_end_to_end(tmp_path):
         "inner wrapper port faces must be plain after auto-emit")
     assert "tri1 resetn__rcvar_pull;" in inner, "body pull nets must survive"
     # behavior through the two-level chain on the host simulator, BOTH faces
-    if shutil.which("iverilog"):
-        for sp in ("resetn", "rst_n"):
-            tb = tmp_path / f"tb_{sp}.v"
-            tb.write_text(
-                "module tb;\n  reg clk=0, r; wire [7:0] cnt; reg ok=1;\n"
-                f"  chip_top u (.{sp}(r), .clk(clk), .cnt(cnt));\n"
-                "  always #1 clk = ~clk;\n"
-                "  initial begin\n"
-                "    r = 0; #6; if (cnt !== 8'd0) ok = 0;\n"
-                "    r = 1; #6; if (cnt === 8'd0 || cnt === 8'hxx) ok = 0;\n"
-                "    r = 0; #6; if (cnt !== 8'd0) ok = 0;\n"
-                "    if (ok) $display(\"RESET_OK\");"
-                " else $display(\"RESET_DEAD\");\n"
-                "    $finish;\n  end\nendmodule\n")
-            binp = tmp_path / f"b_{sp}"
-            c = subprocess.run(
-                ["iverilog", "-g2012", "-s", "tb", "-o", str(binp), str(tb),
-                 str(proj / "phase2" / "stage1" / "rtl" / "chip_top.v"),
-                 str(proj / "phase2" / "stage1" / "rtl" / "counter.v")],
-                capture_output=True, text=True)
-            assert c.returncode == 0, c.stderr
-            r = _pr.run(["vvp", str(binp)], capture_output=True,
-                               text=True)
-            assert "RESET_OK" in r.stdout, (sp, r.stdout)
+    # The tool half used to sit under `if shutil.which("iverilog"):` with no
+    # else, so a host without it PASSED having simulated neither face. The
+    # synth assertions above have run; an absent simulator -> NOT_VERIFIED
+    # naming the host (R-0927), a present one -> the half below runs.
+    states.require_tools("iverilog", "vvp")
+    for sp in ("resetn", "rst_n"):
+        tb = tmp_path / f"tb_{sp}.v"
+        tb.write_text(
+            "module tb;\n  reg clk=0, r; wire [7:0] cnt; reg ok=1;\n"
+            f"  chip_top u (.{sp}(r), .clk(clk), .cnt(cnt));\n"
+            "  always #1 clk = ~clk;\n"
+            "  initial begin\n"
+            "    r = 0; #6; if (cnt !== 8'd0) ok = 0;\n"
+            "    r = 1; #6; if (cnt === 8'd0 || cnt === 8'hxx) ok = 0;\n"
+            "    r = 0; #6; if (cnt !== 8'd0) ok = 0;\n"
+            "    if (ok) $display(\"RESET_OK\");"
+            " else $display(\"RESET_DEAD\");\n"
+            "    $finish;\n  end\nendmodule\n")
+        binp = tmp_path / f"b_{sp}"
+        c = subprocess.run(
+            ["iverilog", "-g2012", "-s", "tb", "-o", str(binp), str(tb),
+             str(proj / "phase2" / "stage1" / "rtl" / "chip_top.v"),
+             str(proj / "phase2" / "stage1" / "rtl" / "counter.v")],
+            capture_output=True, text=True)
+        assert c.returncode == 0, c.stderr
+        r = _pr.run(["vvp", str(binp)], capture_output=True,
+                           text=True)
+        assert "RESET_OK" in r.stdout, (sp, r.stdout)
 
 
 @pytest.mark.skipif(

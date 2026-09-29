@@ -5,7 +5,6 @@ that no-match yields the LLM-fallback verdict (exit 3), and that each route
 produces compilable RTL.
 """
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +16,7 @@ SCRIPT = PROGRAMS / "deterministic_rtl_dispatcher.py"
 assert SCRIPT.exists()
 sys.path.insert(0, str(PROGRAMS))
 import deterministic_rtl_dispatcher as disp  # noqa: E402
+import _outcome_states as states  # noqa: E402
 
 FSM = {"module": "TopModule", "kind": "moore_comb", "encoding": {"A": 0, "B": 1},
        "transitions": {"A": {"0": "A", "1": "B"}, "B": {"0": "A", "1": "B"}},
@@ -86,10 +86,14 @@ def test_cli_generates_and_compiles(tmp_path):
     assert r.returncode == 0, r.stderr
     rtl = out.read_text()
     assert "assign out = {in[0], in[1], in[2], in[3]};" in rtl
-    if shutil.which("iverilog"):
-        c = subprocess.run(["iverilog", "-g2012", "-o", str(tmp_path / "b"), str(out)],
-                           capture_output=True, text=True)
-        assert c.returncode == 0, c.stderr
+    # The tool half used to sit under `if <tool present>:` with no else, so a
+    # host without it PASSED having run none of it. Everything above needs no
+    # tool and has run; an absent tool -> NOT_VERIFIED naming the host
+    # (R-0927), a present one -> the half below runs unconditionally.
+    states.require_tools("iverilog")
+    c = subprocess.run(["iverilog", "-g2012", "-o", str(tmp_path / "b"), str(out)],
+                       capture_output=True, text=True)
+    assert c.returncode == 0, c.stderr
 
 
 def test_matched_generator_invalid_spec_exit_1(tmp_path):

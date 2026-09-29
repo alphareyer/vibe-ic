@@ -41,6 +41,7 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                     "..", "..", "benchmark"))
 import tb_toplevel_alias as A  # noqa: E402
+import _outcome_states as states  # noqa: E402
 
 
 def _mods(src):
@@ -173,14 +174,6 @@ def test_no_leak_noop_when_toplevel_already_declared():
     assert out == PARAM_MODULE
 
 
-def _has_iverilog():
-    try:
-        subprocess.run(["iverilog", "-V"], capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
-
-
 def test_param_aliased_completion_compiles():
     """The wrapped completion (with parameter port block) compiles under
     `iverilog -g2012 -s cvdp_copilot_decode_firstbit -t null`.
@@ -191,8 +184,10 @@ def test_param_aliased_completion_compiles():
     parameter 'InWidth_g'` and dies. The patched wrapper re-declares
     `#(parameter int InWidth_g = 32, ...)` so the port width binds.
     """
-    if not _has_iverilog():
-        return
+    # It used to `return` here, so a host without the tool PASSED it having
+    # verified nothing. Absent tool -> NOT_VERIFIED naming the host (R-0927);
+    # present -> runs exactly as before.
+    states.require_tools("iverilog")
     out = A.maybe_alias_completion(PARAM_MODULE,
                                    "cvdp_copilot_decode_firstbit", _mods)
     with tempfile.NamedTemporaryFile("w", suffix=".sv", delete=False) as f:
@@ -214,8 +209,10 @@ def test_nonparam_aliased_completion_still_compiles():
     must continue to compile. If the patch broke the non-param path, all 7
     non-param alias-wrapped pids (Attenuator_0001 + 6 wirings) would fail
     on every fresh run."""
-    if not _has_iverilog():
-        return
+    # It used to `return` here, so a host without the tool PASSED it having
+    # verified nothing. Absent tool -> NOT_VERIFIED naming the host (R-0927);
+    # present -> runs exactly as before.
+    states.require_tools("iverilog")
     out = A.maybe_alias_completion(NONPARAM_MODULE, "findfasterclock", _mods)
     with tempfile.NamedTemporaryFile("w", suffix=".sv", delete=False) as f:
         f.write(out)

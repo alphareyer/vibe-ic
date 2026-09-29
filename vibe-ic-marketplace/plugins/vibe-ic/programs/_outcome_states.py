@@ -47,6 +47,19 @@ Nothing here changes which tests RUN: the two markers select nothing and
 deselect nothing (the `consistency` tier's deselection is a different, broader
 class: order, registers and member pins as well as numbers).
 
+AT THE SITE (owner, 2026-09-29: "工具環境的問題，應該在執行的過程就應該知道")
+Two helpers for what the hook cannot read from a failure's text:
+
+* ``require_tools(*tools, path=None)`` -- NOT_VERIFIED naming the host and the
+  absent tool(s), called where the test is about to run them. For a program
+  that turns a missing binary into its own verdict (no tool name in the
+  failure), and for a test that used to ``return`` without its tool and so
+  passed having verified nothing. Present tools: the test runs unchanged.
+* ``skip_if_not_measurable(message)`` -- NOT_MEASURED for the ONE branch where
+  a test's ceiling or stall window was reached, under the same conditions as
+  the ``measures`` mark; the caller's FAIL follows on the next line, so a
+  quiet serial run keeps it red and every behavioural assertion stays FAIL.
+
 WHAT IS NEVER CONVERTED
 =======================
 * A failure while the tool IS present. Presence is asked of the PATH the session
@@ -290,16 +303,43 @@ def classify_container_mismatch(exc: Optional[BaseException],
     return None
 
 
-def _tool_reason(tool: str) -> str:
-    if tool == "docker":
+def _tool_reason(tool: str, *more: str) -> str:
+    tools = (tool, *more)
+    names = ", ".join(f"`{t}`" for t in tools)
+    verb = "is" if len(tools) == 1 else "are"
+    if tools == ("docker",):
         remedy = (f"run on a host with a usable docker engine, or inside "
                   f"{IMAGE_HARNESS}, which binds the host engine in")
     else:
         remedy = (f"run inside the EDA image with {IMAGE_HARNESS}, or on a host "
-                  f"where `{tool}` is on PATH")
+                  f"where {names} {verb} on PATH")
     return _nv.not_verified_reason(
-        f"host {host()}: `{tool}` is not on PATH, so this verification could "
-        f"not run", remedy)
+        f"host {host()}: {names} {verb} not on PATH, so this verification "
+        f"could not run", remedy)
+
+
+def require_tools(*tools: str, path: Optional[str] = None) -> None:
+    """Report NOT_VERIFIED, in THIS run, when a tool the next step runs is absent.
+
+    The explicit half of the tier, for the sites the automatic reader above
+    cannot see: a program that turns a missing binary into an rc of its own
+    (``formal_structural_check.run_yosys`` makes FileNotFoundError rc=127, and
+    every obligation downstream reads "refused"), or a test that used to
+    ``return`` -- or skip its tool half -- and so PASSED having verified
+    nothing. Call it at the point the test is about to run the tool, after
+    every assertion that needs no tool.
+
+    Presence is asked of *path* (default: the PATH the test's own subprocess
+    will inherit), so a site whose program prepends directories of its own
+    passes exactly that search path. A tool that IS found returns normally and
+    the test runs and asserts exactly as it did; nothing here can hide a
+    failure of the checked behaviour.
+    """
+    if path is None:
+        path = os.environ.get("PATH", "")
+    missing = [t for t in tools if shutil.which(t, path=path) is None]
+    if missing:
+        pytest.skip(_tool_reason(*missing))
 
 
 def run_conditions(environ=None) -> Dict[str, float]:
@@ -331,6 +371,24 @@ def classify_not_measured(cond: Dict[str, float], message: str) -> Optional[str]
             f"(load1={cond['load1']:.2f} over {int(cond['cores'])} cores); "
             f"measured: {_one_line(message, 300)} — remedy: this measurement "
             f"is only trusted in a serial run on a quiet host")
+
+
+def skip_if_not_measurable(message: str) -> None:
+    """NOT_MEASURED for ONE branch of a test: the one where its clock ran out.
+
+    ``@pytest.mark.measures`` classifies a WHOLE test, which is wrong for a
+    test that also asserts behaviour -- under -n>1 its real regressions would
+    read NOT_MEASURED too. Such a test calls this only inside the branch where
+    its safety ceiling or stall window was actually reached, and then keeps
+    its own ``pytest.fail`` / ``raise`` on the next line. Same conditions and
+    the same limit as the mark (`classify_not_measured`): under xdist workers
+    > 1 or load/core > LOAD_PER_CORE_LIMIT it skips with the reason; in a
+    serial run on a quiet host it returns, and the ceiling stays a FAIL --
+    which is how a real hang is still caught where it can be measured.
+    """
+    reason = classify_not_measured(run_conditions(), message)
+    if reason is not None:
+        pytest.skip(reason)
 
 
 def classify_bookkeeping(mark, message: str) -> Optional[str]:

@@ -67,6 +67,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+import _outcome_states as states  # noqa: E402
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 MOD = PROGRAMS / "gatekeeper_prepare_landing.py"
@@ -346,9 +347,19 @@ def test_the_real_program_runs_against_this_repo_and_honours_its_boundary(
         assert r.returncode == 0, (argv, r.stderr)
     assert not G.dirty_paths(checkout), "the private checkout is not clean"
     programs = checkout / PROGRAMS.relative_to(repo_root)
-    r = _pr.run([sys.executable, "-c", _PREPARE_IN_CHECKOUT, str(programs),
-                 str(checkout)],
-                cwd=str(checkout), capture_output=True, text=True)
+    try:
+        r = _pr.run([sys.executable, "-c", _PREPARE_IN_CHECKOUT, str(programs),
+                     str(checkout)],
+                    cwd=str(checkout), capture_output=True, text=True)
+    except _pr.Stalled as exc:
+        # A stall window is a measurement of the host as much as of the
+        # program. MEASURED once on 8hd-3 (full census, -n16, load ~17/32):
+        # 12 still looks after 721s; the same file passed in every other run
+        # that contained it. Under -n>1 or load that is NOT_MEASURED (owner
+        # R-0927); in a quiet serial run a wedge is still raised as the FAIL
+        # it is. Every assertion below stays FAIL in every run.
+        states.skip_if_not_measurable(str(exc))
+        raise
     assert r.returncode == 0, r.stderr[-2000:]
     import json
     out = json.loads(r.stdout.strip().splitlines()[-1])

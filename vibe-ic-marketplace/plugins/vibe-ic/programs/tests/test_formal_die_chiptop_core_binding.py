@@ -2,15 +2,38 @@
 
 The structural reader and the Step-5/gate consumers run normally.  Only the
 external SBY executor's transcript is substituted in the accept/refute arms.
+
+The structural reader IS yosys, run on this filesystem (``container=None``).
+Without it `formal_structural_check.run_yosys` turns the FileNotFoundError into
+rc=127, the design reads "outside the class" and EVERY obligation comes back
+``program_refused`` -- so the two proving tests FAILED with no tool named, and
+the two stay-open tests PASSED for the wrong reason (the refusal they assert
+was the missing yosys, not the ambiguity under test). Each test therefore asks
+for yosys where it is about to run it and reports NOT_VERIFIED, naming the
+host, when it is absent (owner R-0927). Where yosys exists every test runs and
+asserts exactly as before.
 """
 import json
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _outcome_states as states  # noqa: E402
 import formal_harness_gen as gen  # noqa: E402
 import formal_property_run as proof  # noqa: E402
 import formal_proof_evidence_check as gate  # noqa: E402
+
+#: The directories `formal_structural_check.run_yosys` puts IN FRONT of the
+#: inherited PATH (its own `export PATH=...` line) before it runs yosys on this
+#: filesystem. The presence check asks exactly that search path, so it keys on
+#: the absence the program would hit and nothing else.
+_RUN_YOSYS_PATH_PREFIX = ("/foss/tools/bin", "/foss/tools/yosys/bin")
+
+
+def _require_yosys():
+    states.require_tools("yosys", path=os.pathsep.join(
+        [*_RUN_YOSYS_PATH_PREFIX, os.environ.get("PATH", "")]))
 
 
 RTL = """module core(input clk, input rst, input d, output reg q);
@@ -60,6 +83,7 @@ def _project(root):
 
 def _run(root, monkeypatch, status):
     rtl = _project(root)
+    _require_yosys()
     emitted = gen.generate(project=root, top="chip_top", container=None)
     assert emitted["verdict"] == "EMITTED", emitted
 
@@ -99,6 +123,7 @@ def test_ambiguous_l9_mapping_stays_open(tmp_path, monkeypatch):
     l9 = json.loads(l9_path.read_text())
     l9["top_ports"].append({"name": "rst", "direction": "input", "width": 1})
     l9_path.write_text(json.dumps(l9))
+    _require_yosys()
     emitted = gen.generate(project=tmp_path, top="chip_top", container=None)
     rows = {r["id"]: r for r in emitted["unresolved_obligations"]}
     assert all("program_refused" in rows[oid] for oid in L8_IDS - {
@@ -117,6 +142,7 @@ def test_two_pads_for_one_reset_port_stay_open(tmp_path):
             "pad_clk": {"port": "clk", "direction": "input"},
             "pad_rst_a": {"port": "rst", "direction": "input"},
             "pad_rst_b": {"port": "rst", "direction": "input"}}}))
+    _require_yosys()
     emitted = gen.generate(project=tmp_path, top="chip_top", container=None)
     rows = {r["id"]: r for r in emitted["unresolved_obligations"]}
     assert "program_refused" in rows[NAME_ID]
