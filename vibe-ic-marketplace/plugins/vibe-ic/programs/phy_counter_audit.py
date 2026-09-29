@@ -401,6 +401,8 @@ def main():
     if not args.out_dir:
         ap.error('--out-dir is required when no <project> positional given')
 
+    from _audit_receipt import subject_of
+    source_subject = subject_of(args.rtl_files)
     all_findings: List[Finding] = []
     for f in args.rtl_files:
         p = Path(f)
@@ -414,6 +416,7 @@ def main():
             return 2
 
     report = generate_report(all_findings)
+    report['source_subject'] = source_subject
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)

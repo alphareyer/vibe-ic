@@ -147,9 +147,20 @@ prose + the gate's structural flag.
 ```bash
 python3 plugins/vibe-ic/_shared/skill_compliance_check.py \
     --requirements plugins/vibe-ic/skills/rtl-review/compliance.yaml \
+    --review-json rtl_review.json \
     rtl_review.md
 ```
 
 Exit 0 = PASS; exit 1 = the program output is missing a required section
 (typically you forgot `--out-md` or the program crashed and you authored
 by hand instead).
+
+The native review JSON binds the complete reviewed RTL population and its
+content hashes. The checker uses the existing encoding, CRC-loader and PHY
+counter auditors to derive whether each named audit has a subject. An absent
+subject is disclosed as `NOT_APPLICABLE`, with its source digest and reasoning;
+this is never an audit PASS and requires no invented signal or receipt.
+Missing source binding, changed files, unresolved hierarchy and unsupported
+source extraction remain `NOT_MEASURED` and block. Report prose cannot waive a
+detected subject. A present receipt still needs its own producer identity,
+substantive evidence, source digest and verdict; failed or stale evidence blocks.

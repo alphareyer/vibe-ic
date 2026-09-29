@@ -49,19 +49,25 @@ cross_checks:
   # the three audits named here. With zero receipts on disk, a prose report
   # FAILED all three, and the SAME report plus that pasted header PASSED all
   # three. Each ID now resolves its OWN audit's report artefact; a missing
-  # receipt is NOT_MEASURED and blocking, never a pass.
+  # receipt is NOT_MEASURED and blocking, never a pass. #2847: the existing
+  # receipt rule also derives applicability from the native reviewed-source
+  # JSON. Only proven source absence is NOT_APPLICABLE; unresolved/stale
+  # source remains owed, and an existing receipt still undergoes validation.
   - id: X_interface_encoding_audit
     description: "Run interface_encoding_audit.py on multi-module design"
     rule: audit_receipt_evidence
     auditor: interface_encoding_audit
+    applicability: reviewed_rtl
   - id: X_crc_bitorder_check
     description: "Run crc_bitorder_check.py on TX modules"
     rule: audit_receipt_evidence
     auditor: crc_bitorder_check
+    applicability: reviewed_rtl
   - id: X_phy_counter_audit
     description: "Verify TX/RX counters use time-based approach (not bus-sampling)"
     rule: audit_receipt_evidence
     auditor: phy_counter_audit
+    applicability: reviewed_rtl
   # The other half of the output_type pairing. Repointing the three audits
   # above to their receipts removes the reason to paste the RTL header, but on
   # its own it also removes the only thing that ever reacted to the header

@@ -81,7 +81,7 @@ rules behave exactly as they did before, because guessing a skill's output
 type is the same class of unmeasured claim this field exists to stop.
 
 EVIDENCE STATES — a check that did not run is reported, never counted as a
-pass. `audit_receipt_evidence` reports three, mirroring ruling F2036-H in
+pass. `audit_receipt_evidence` retains the three receipt states from F2036-H in
 `docs/decisions/2026-09-06-rtl-review-producer-json.md`:
 
   PASS          receipt present, is this auditor's report, examined something,
@@ -91,6 +91,12 @@ pass. `audit_receipt_evidence` reports three, mirroring ruling F2036-H in
   NOT_MEASURED  no receipt, unreadable receipt, a receipt belonging to another
                 producer, a SKIP, or a receipt that examined nothing. Named,
                 and BLOCKING — absence of evidence is not evidence of a pass.
+  NOT_APPLICABLE reviewed source proves the conditional subject absent. INFO,
+                with source digest and reasoning; never counted as audit PASS.
+
+For `applicability: reviewed_rtl`, `--review-json` supplies the native review
+producer's complete source population and content hashes. Its absence cannot
+waive a receipt. Unsupported or ambiguous source remains NOT_MEASURED.
 
 EXIT CODES: 0 = PASS, 1 = FAIL, 2 = ERROR
 """
@@ -304,6 +310,7 @@ _KNOWN_OUTPUT_TYPES = (OUTPUT_TYPE_RTL, OUTPUT_TYPE_REPORT)
 STATE_PASS = 'PASS'
 STATE_FAIL = 'FAIL'
 STATE_NOT_MEASURED = 'NOT_MEASURED'
+STATE_NOT_APPLICABLE = 'NOT_APPLICABLE'
 
 
 @dataclass
@@ -323,6 +330,9 @@ class CheckContext:
     output_type: str = ''
     output_path: Optional[Path] = None
     evidence_dirs: List[Path] = field(default_factory=list)
+    # Native rtl_review_aggregate JSON, including its reviewed content digest.
+    # No report text or caller-written NA disposition is used as applicability.
+    review_json: Optional[Path] = None
 
     def receipt_roots(self, extra: Optional[str] = None) -> List[Path]:
         """Ordered, de-duplicated directories to look for a receipt in.
@@ -875,6 +885,118 @@ def _receipt_digest(path: Path) -> str:
     return sha256(path.read_bytes()).hexdigest()
 
 
+def _reviewed_rtl_subject(auditor: str, ctx: CheckContext
+                          ) -> Tuple[str, str, Optional[Dict[str, Any]]]:
+    """Derive a conditional audit's subject using the existing RTL auditors.
+
+    Only a complete, unchanged population from the review producer can prove
+    absence. Includes/macros, unparsed modules, positional/unresolved instances
+    and unclassified CRC/PHY declarations remain NOT_MEASURED. This is an
+    applicability decision, never an audit PASS or a manufactured receipt.
+    """
+    if ctx.review_json is None:
+        return STATE_NOT_MEASURED, 'No source-bound --review-json supplied.', None
+    program_dir = Path(__file__).resolve().parents[1] / 'programs'
+    if str(program_dir) not in sys.path:
+        sys.path.insert(0, str(program_dir))
+    from _audit_receipt import subject_of
+    import interface_encoding_audit as encoding
+    import crc_bitorder_check as crc
+    import phy_counter_audit as phy
+
+    try:
+        review = json.loads(Path(ctx.review_json).read_text())
+        if not isinstance(review, dict) or not str(review.get('emitted_by', '')).startswith(
+                'rtl_review_aggregate v'):
+            raise ValueError('not the RTL review producer document')
+        bound = review.get('source_subject')
+        if not isinstance(bound, dict) or not isinstance(bound.get('root'), str):
+            raise ValueError('review has no content-bound source subject')
+        root = Path(bound['root'])
+        if not root.is_absolute() or not root.is_dir():
+            raise ValueError('review source root is absent or unresolved')
+        files = sorted(p for p in root.rglob('*')
+                       if p.suffix in ('.v', '.sv') and p.is_file())
+        names = [str(p.relative_to(root)) for p in files]
+        current = subject_of(files, relative_to=root)
+        if not files or current['basis'] != 'content':
+            raise ValueError('reviewed source is empty or unreadable')
+        if (names != review.get('files_reviewed') or
+                any(bound.get(k) != current[k] for k in ('sha256', 'basis', 'items'))):
+            raise ValueError('stale review source binding: content or population changed')
+        trace = (f'review={ctx.review_json} sha256={current["sha256"]} '
+                 f'files={names}')
+        modules = {}
+        instances = []
+        sources = []
+        for file in files:
+            raw = file.read_text(encoding='utf-8')
+            source = encoding.strip_comments(raw)
+            parsed = encoding.parse_modules(source, str(file))
+            # The existing auditor does not resolve these constructs. Do not
+            # interpret its empty extraction as proof that a subject is absent.
+            if (not parsed or len(parsed) != len(re.findall(r'\bmodule\b', source)) or
+                    raw.count('/*') != raw.count('*/') or
+                    re.search(r'`|\\|\b(?:interface|package|class|bind|generate)\b', source)):
+                return STATE_NOT_MEASURED, trace + ' — unsupported source extraction.', current
+            for module in parsed:
+                if module.name in modules:
+                    return STATE_NOT_MEASURED, trace + ' — duplicate module declarations.', current
+                modules[module.name] = module
+                instances.extend(encoding.parse_instances(module.body, module.name))
+            sources.append(source)
+        if any(i.module_type not in modules or not i.connections for i in instances):
+            return STATE_NOT_MEASURED, trace + ' — unresolved or positional module boundary.', current
+        tokens = set(re.findall(r'\b[A-Za-z_]\w*\b', '\n'.join(sources)))
+
+        def derived(state: str, reason: str):
+            after = sorted(p for p in root.rglob('*')
+                           if p.suffix in ('.v', '.sv') and p.is_file())
+            if after != files or subject_of(after, relative_to=root) != {
+                    k: current[k] for k in ('sha256', 'basis', 'items')}:
+                raise ValueError('stale review source binding: source changed during extraction')
+            return state, trace + ' — ' + reason, current
+
+        if auditor == 'interface_encoding_audit':
+            interfaces = encoding.build_interface_map(modules, instances)
+            if interfaces:
+                return derived('APPLICABLE', f'{len(interfaces)} module boundary connection(s).')
+            if instances:
+                return STATE_NOT_MEASURED, trace + ' — module connections could not be resolved.', current
+            return derived(STATE_NOT_APPLICABLE, 'no instantiated cross-module encoding boundary.')
+        if auditor == 'crc_bitorder_check':
+            candidates = sorted(t for t in tokens if 'crc' in t.lower())
+            loads = [f for source in sources for signal in candidates
+                     for f in crc.find_crc_assignments(
+                         crc.normalize_multiline_assignments(source), signal, '')]
+            if loads:
+                signals = sorted({f.crc_signal for f in loads})
+                if len(signals) != 1:
+                    return STATE_NOT_MEASURED, trace + f' — multiple CRC loader subjects: {signals}.', current
+                current['audit_subject'] = {'crc_signal': signals[0]}
+                return derived('APPLICABLE', f'CRC loader signal: {signals[0]}.')
+            if candidates:
+                return STATE_NOT_MEASURED, trace + f' — CRC declarations without resolved loader: {candidates}.', current
+            if any('^' in source for source in sources):
+                return STATE_NOT_MEASURED, trace + ' — XOR datapath has no declared CRC signal; CRC role unresolved.', current
+            return derived(STATE_NOT_APPLICABLE, 'no CRC signal or data-loader declaration.')
+        if auditor == 'phy_counter_audit':
+            counters = [f for file in files for f in phy.audit_file(file)]
+            if counters:
+                return derived('APPLICABLE', f'PHY timing counter(s): {sorted({f.signal for f in counters})}.')
+            cues = sorted(t for t in tokens if phy.TX_COUNTER_RE.search(t) or
+                          re.search(r'(?:^|_)(?:tx|rx|phy|transmit\w*|receive\w*)(?:_|$)', t, re.I))
+            if cues:
+                return STATE_NOT_MEASURED, trace + f' — unresolved PHY/counter declarations: {cues}.', current
+            if any(re.search(r'\b(\w+)\s*(?:<=|=)\s*\1\s*[+\-]', source)
+                   for source in sources):
+                return STATE_NOT_MEASURED, trace + ' — unclassified counter update; PHY timing role unresolved.', current
+            return derived(STATE_NOT_APPLICABLE, 'no PHY timing counter declaration.')
+        return STATE_NOT_MEASURED, trace + ' — unknown applicability auditor.', current
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
+        return STATE_NOT_MEASURED, f'review={ctx.review_json} — {exc}', None
+
+
 def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
                                ctx: Optional[CheckContext] = None
                                ) -> List[Finding]:
@@ -975,12 +1097,33 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
         _what = rs.written_as or "this auditor's own --json audit document"
         looked_for = f'{_what} (matched by content, not by name)'
 
+    applicability = spec.get('applicability')
+    source_subject = None
+    subject_detail = ''
+    if applicability is not None:
+        if applicability != 'reviewed_rtl' or auditor not in (
+                'interface_encoding_audit', 'crc_bitorder_check', 'phy_counter_audit'):
+            return [Finding(cid, 'FAIL', 'Unknown audit applicability contract.',
+                            str(applicability), state=STATE_NOT_MEASURED)]
+        # Existing receipt validation remains authoritative when no review
+        # binding was supplied. An absent receipt then remains owed as before.
+        if ctx.review_json is not None:
+            state, subject_detail, source_subject = _reviewed_rtl_subject(auditor, ctx)
+            if state == STATE_NOT_MEASURED:
+                return [Finding(cid, 'FAIL',
+                                f'NOT_MEASURED: `{auditor}` subject is unresolved.',
+                                subject_detail, state=STATE_NOT_MEASURED)]
+            if found is None and state == STATE_NOT_APPLICABLE:
+                return [Finding(cid, 'INFO',
+                                f'NOT_APPLICABLE: `{auditor}` subject is absent from reviewed source.',
+                                subject_detail, state=STATE_NOT_APPLICABLE)]
+
     if found is None:
         return [Finding(
             cid, 'FAIL',
             f'NOT_MEASURED: no receipt from `{auditor}` for this report.',
             f'{desc} — looked for {looked_for} (emitted by '
-            f'{rs.emitted_by}) in: {searched}. Run the audit and place its '
+            f'{rs.emitted_by}) in: {searched}. {subject_detail} Run the audit and place its '
             'report where this check can read it; do not assert the verdict '
             'in prose.',
             state=STATE_NOT_MEASURED)]
@@ -1033,8 +1176,21 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
             state=STATE_NOT_MEASURED)]
 
     actual_subject = rs.subject(payload)
-    declared = spec.get('subject')
-    if isinstance(declared, dict):
+    if source_subject is not None and rs.verdict(payload) == STATE_PASS:
+        receipt_subject = payload.get('source_subject')
+        if not isinstance(receipt_subject, dict) or receipt_subject.get('basis') != 'content':
+            return [Finding(cid, 'FAIL',
+                            f'NOT_MEASURED: `{auditor}` receipt has no source content binding.',
+                            f'{trace} — {subject_detail}', state=STATE_NOT_MEASURED)]
+        if receipt_subject.get('sha256') != source_subject['sha256']:
+            return [Finding(cid, 'FAIL', f'`{auditor}` receipt has a stale source hash.',
+                            f'{trace} — {subject_detail}', state=STATE_FAIL)]
+    subjects = [spec.get('subject')]
+    if source_subject is not None:
+        subjects.append(source_subject.get('audit_subject'))
+    for declared in subjects:
+        if not isinstance(declared, dict):
+            continue
         mismatched = {k: (v, actual_subject.get(k))
                       for k, v in declared.items()
                       if actual_subject.get(k) != v}
@@ -1263,6 +1419,9 @@ def main():
     ap.add_argument('--requirements', required=True,
                     help='Path to compliance.yaml for this skill')
     ap.add_argument('--json', help='Write JSON audit report here')
+    ap.add_argument('--review-json', type=Path,
+                    help='Native rtl_review_aggregate JSON for source-bound '
+                         'conditional audit applicability. Stale/ambiguous source blocks.')
     ap.add_argument('--evidence-dir', action='append', default=[],
                     metavar='DIR',
                     help='Directory to search for audit receipts (repeatable). '
@@ -1283,7 +1442,8 @@ def main():
     text = out_path.read_text(errors='replace')
     ctx = CheckContext(
         output_path=out_path.resolve(),
-        evidence_dirs=[Path(d) for d in args.evidence_dir])
+        evidence_dirs=[Path(d) for d in args.evidence_dir],
+        review_json=args.review_json)
     findings = audit(text, compliance, ctx)
 
     total = len(compliance.get('requirements', []) or [])
@@ -1295,6 +1455,7 @@ def main():
     verdict = 'PASS' if not fails else 'FAIL'
 
     not_measured = [f for f in findings if f.state == STATE_NOT_MEASURED]
+    not_applicable = [f for f in findings if f.state == STATE_NOT_APPLICABLE]
 
     skill = compliance.get('skill', 'unknown')
     print(f"skill_compliance_check ({skill}): {verdict}")
@@ -1319,6 +1480,7 @@ def main():
             'total_requirements': total,
             'passed': passed,
             'not_measured': [f.id for f in not_measured],
+            'not_applicable': [f.id for f in not_applicable],
             'findings': [asdict(f) for f in findings],
         }, indent=2))
 

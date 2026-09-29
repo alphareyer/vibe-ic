@@ -69,6 +69,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import plugin_manifest_discovery as _pmd  # noqa: E402  (#800 ONE version reader)
+from _audit_receipt import subject_of
 
 
 # ---------------------------------------------------------------------------
@@ -624,6 +625,7 @@ class ReviewReport:
     #: Populated from exactly the records the score no longer counts, so the
     #: number can never be quoted without its coverage.
     auditors_not_run: List[Dict[str, str]] = field(default_factory=list)
+    source_subject: Dict[str, Any] = field(default_factory=dict)
 
     def coverage_note(self) -> str:
         """The clause that must travel with the score, or "" if fully covered."""
@@ -638,6 +640,7 @@ class ReviewReport:
         return {
             "rtl_dir": self.rtl_dir,
             "files_reviewed": self.files_reviewed,
+            "source_subject": self.source_subject,
             "per_category": {
                 k: {
                     "errors": v.errors,
@@ -712,6 +715,8 @@ def review_rtl_dir(rtl_dir: Path, tmp_dir: Path) -> ReviewReport:
     """
     files = sorted([p for p in rtl_dir.rglob("*")
                     if p.suffix in (".v", ".sv") and p.is_file()])
+    source_subject = subject_of(files, relative_to=rtl_dir)
+    source_subject['root'] = str(rtl_dir.resolve())
     findings: List[Finding] = []
 
     if files:
@@ -739,11 +744,18 @@ def review_rtl_dir(rtl_dir: Path, tmp_dir: Path) -> ReviewReport:
         precheck_json)
     findings.extend(_load_precheck_findings(precheck_json, rc, err))
 
-    return aggregate(
+    current_files = sorted(p for p in rtl_dir.rglob('*')
+                           if p.suffix in ('.v', '.sv') and p.is_file())
+    if (current_files != files or
+            subject_of(files, relative_to=rtl_dir)['sha256'] != source_subject['sha256']):
+        raise ProducerOutputError('RTL source changed during review; refusing stale source binding')
+    report = aggregate(
         findings,
         rtl_dir=str(rtl_dir),
         files_reviewed=[str(f.relative_to(rtl_dir)) for f in files],
     )
+    report.source_subject = source_subject
+    return report
 
 
 # ---------------------------------------------------------------------------

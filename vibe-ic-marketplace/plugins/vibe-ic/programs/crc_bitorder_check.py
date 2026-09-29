@@ -440,6 +440,8 @@ def main():
                     help='Output directory for JSON report')
     args = ap.parse_args()
 
+    from _audit_receipt import subject_of
+    source_subject = subject_of(args.rtl_files)
     all_findings: List[CrcLoadFinding] = []
     for f in args.rtl_files:
         all_findings += analyze_file(f, args.crc_signal)
@@ -451,6 +453,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     report_path = out / 'crc_bitorder_report.json'
     report_dict = asdict(report)
+    report_dict['source_subject'] = source_subject
     report_path.write_text(json.dumps(report_dict, indent=2))
 
     # Console summary

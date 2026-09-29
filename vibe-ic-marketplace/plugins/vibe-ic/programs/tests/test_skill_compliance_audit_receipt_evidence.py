@@ -630,3 +630,268 @@ def test_mutation_reading_the_header_again_reddens_these_tests(tmp_path,
     ids2 = {f.id for f in honest if f.severity == "FAIL"}
     assert set(_NAMED) <= ids2, (
         "with the real rule restored, all three must be blocking again")
+
+
+# #2847: applicability is derived from the reviewed source, never report prose.
+_PLAIN_RTL = """module register_block(input clk, input [7:0] data,
+    output reg [7:0] value);
+always @(posedge clk) begin
+    value <= data;
+end
+endmodule
+"""
+_CRC_RTL = """module transmitter(input clk, input [7:0] crc_result,
+    output reg [7:0] tx_data);
+always @(posedge clk) begin
+    tx_data <= crc_result;
+end
+endmodule
+"""
+_PHY_RTL = """module transmitter(input clk, input tx_en,
+    output reg [7:0] tx_timer);
+always @(posedge clk) begin
+    if (tx_en) tx_timer <= tx_timer + 1;
+end
+endmodule
+"""
+_BOUNDARY_RTL = """module producer(input clk, output reg [7:0] count);
+always @(posedge clk) begin count <= count + 1; end
+endmodule
+module consumer(input [7:0] count, output match);
+assign match = count == 8'd2;
+endmodule
+module assembly(input clk, output match);
+wire [7:0] count;
+producer u_p (.clk(clk), .count(count));
+consumer u_c (.count(count), .match(match));
+endmodule
+"""
+
+
+def _reviewed_context(tmp_path, source):
+    """Synthetic reviewed-source declaration, with real content hashes.
+
+    Assigning the context attribute also works on the reviewed main: that
+    consumer ignores it and still emits an observed NOT_MEASURED value.
+    """
+    sys.path.insert(0, str(_PLUGIN / "programs"))
+    from _audit_receipt import subject_of
+    import rtl_review_aggregate as rra
+    rtl = tmp_path / "rtl"
+    rtl.mkdir(parents=True, exist_ok=True)
+    file = rtl / "design.v"
+    file.write_text(source)
+    payload = rra.aggregate([], rtl_dir=str(rtl),
+                            files_reviewed=[file.name]).as_dict()
+    payload["source_subject"] = subject_of([file], relative_to=rtl)
+    payload["source_subject"]["root"] = str(rtl.resolve())
+    review = tmp_path / "review.json"
+    review.write_text(json.dumps(payload))
+    ctx = scc.CheckContext(output_path=tmp_path / "review.md")
+    ctx.review_json = review
+    return ctx, file
+
+
+def _reviewed_findings(ctx, text=_REVIEW):
+    spec = scc._load_yaml(_RTL_REVIEW_YML)
+    return {f.id: f for f in scc.audit(text, spec, ctx)}
+
+
+@pytest.mark.parametrize("source", [
+    _PLAIN_RTL,
+    "module packer(input [3:0] a, b, output [7:0] data);\n"
+    "assign data = {a, b};\nendmodule\n",
+    _PLAIN_RTL + "// crc_result, tx_timer and producer are absent.\n",
+], ids=['register-block', 'data-packer', 'comment-only-subject-names'])
+def test_issue2847_absent_subjects_are_derived_not_applicable(tmp_path, source):
+    ctx, file = _reviewed_context(tmp_path, source)
+    findings = _reviewed_findings(ctx)
+    actual = {cid: (findings[cid].severity, findings[cid].state)
+              for cid in _NAMED}
+    assert actual == {cid: ("INFO", "NOT_APPLICABLE") for cid in _NAMED}, actual
+    for cid in _NAMED:
+        assert "sha256=" in findings[cid].detail
+        assert file.name in findings[cid].detail
+    assert not any(tmp_path.glob("*receipt*.json"))
+
+
+@pytest.mark.parametrize("source,cid", [
+    (_BOUNDARY_RTL, _NAMED[0]), (_CRC_RTL, _NAMED[1]), (_PHY_RTL, _NAMED[2]),
+], ids=['encoding-boundary', 'crc-loader', 'phy-counter'])
+def test_issue2847_real_subject_cannot_be_waived_by_prose(tmp_path, source, cid):
+    ctx, _ = _reviewed_context(tmp_path, source)
+    f = _reviewed_findings(ctx, _REVIEW + "\nAll audits are NOT_APPLICABLE.\n")[cid]
+    assert (f.severity, f.state) == ("FAIL", "NOT_MEASURED")
+
+
+@pytest.mark.parametrize("source,cid", [
+    (_BOUNDARY_RTL, _NAMED[0]), (_CRC_RTL, _NAMED[1]), (_PHY_RTL, _NAMED[2]),
+], ids=['encoding-boundary', 'crc-loader', 'phy-counter'])
+def test_issue2847_subject_mutation_restores_blocker(tmp_path, source, cid):
+    ctx, file = _reviewed_context(tmp_path, _PLAIN_RTL)
+    assert _reviewed_findings(ctx)[cid].state == "NOT_APPLICABLE"
+    file.write_text(source)
+    # Reusing the old reviewed JSON is stale even before subject classification.
+    f = _reviewed_findings(ctx)[cid]
+    assert (f.severity, f.state) == ("FAIL", "NOT_MEASURED")
+    ctx, _ = _reviewed_context(tmp_path, source)
+    f = _reviewed_findings(ctx)[cid]
+    assert (f.severity, f.state) == ("FAIL", "NOT_MEASURED")
+
+
+def test_issue2847_content_edit_invalidates_absence_even_without_new_subject(tmp_path):
+    ctx, file = _reviewed_context(tmp_path, _PLAIN_RTL)
+    assert _reviewed_findings(ctx)[_NAMED[1]].state == "NOT_APPLICABLE"
+    file.write_text(_PLAIN_RTL.replace("value <= data", "value <= ~data"))
+    findings = _reviewed_findings(ctx)
+    assert {findings[cid].state for cid in _NAMED} == {"NOT_MEASURED"}
+    assert all("stale" in findings[cid].detail.lower() for cid in _NAMED)
+
+
+@pytest.mark.parametrize("source", [
+    "module unsupported; endmodule\n",  # unsupported header, not no subjects
+    "`include \"external.vh\"\n" + _PLAIN_RTL,
+    "module wrapper(input a, output b);\nunknown_ip u (.a(a), .b(b));\nendmodule\n",
+    "module tx_unknown(input clk, output reg [7:0] interval);\n"
+    "always @(posedge clk) interval <= interval + 1;\nendmodule\n",
+])
+def test_issue2847_ambiguous_source_stays_owed(tmp_path, source):
+    ctx, _ = _reviewed_context(tmp_path, source)
+    findings = _reviewed_findings(ctx)
+    assert any(findings[cid].state == "NOT_MEASURED" for cid in _NAMED)
+    assert all(findings[cid].state != "PASS" for cid in _NAMED)
+
+
+def test_issue2847_existing_bad_receipt_is_not_hidden_by_absence(tmp_path):
+    ctx, _ = _reviewed_context(tmp_path, _PLAIN_RTL)
+    receipt = _receipt_set(crc_status="WARN")["crc_bitorder_report.json"]
+    (tmp_path / "crc_bitorder_report.json").write_text(json.dumps(receipt))
+    f = _reviewed_findings(ctx)[_NAMED[1]]
+    assert (f.severity, f.state) == ("FAIL", "FAIL")
+
+
+def test_issue2847_real_crc_receipt_is_source_bound_and_stale_receipt_blocks(tmp_path):
+    ctx, file = _reviewed_context(tmp_path, _CRC_RTL)
+    proc = subprocess.run([sys.executable, str(_PLUGIN / "programs" / "crc_bitorder_check.py"),
+                           "--rtl-files", str(file), "--crc-signal", "crc_result",
+                           "--out-dir", str(tmp_path)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    f = _reviewed_findings(ctx)[_NAMED[1]]
+    assert (f.severity, f.state) == ("INFO", "PASS"), f
+    ctx, _ = _reviewed_context(tmp_path, _CRC_RTL.replace("<= crc_result", "<= ~crc_result"))
+    f = _reviewed_findings(ctx)[_NAMED[1]]
+    assert (f.severity, f.state) == ("FAIL", "FAIL"), f
+
+
+def test_issue2847_cli_consumes_native_review_json(tmp_path):
+    ctx, file = _reviewed_context(tmp_path, _PLAIN_RTL)
+    result = subprocess.run([sys.executable, str(_PLUGIN / "programs" / "rtl_review_aggregate.py"),
+                             "--rtl-dir", str(file.parent), "--out-json", str(ctx.review_json)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    ctx.output_path.write_text(_REVIEW)
+    out = tmp_path / "audit.json"
+    proc = subprocess.run([sys.executable, str(_CHECKER), "--requirements", str(_RTL_REVIEW_YML),
+                           "--review-json", str(ctx.review_json), "--json", str(out),
+                           str(ctx.output_path)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    data = json.loads(out.read_text())
+    assert data["not_applicable"] == list(_NAMED)
+    assert {_state(data, cid) for cid in _NAMED} == {("INFO", "NOT_APPLICABLE")}
+
+
+def test_issue2847_shipped_calibration_source_has_no_conditional_subject(tmp_path):
+    from _hostpaths import require_repo
+    source = require_repo('vibe-ic-marketplace', 'plugins', 'vibe-ic',
+                          'programs', 'calibration', 'cal_const_rtl.v')
+    ctx, _ = _reviewed_context(tmp_path, source.read_text())
+    findings = _reviewed_findings(ctx)
+    assert {cid: findings[cid].state for cid in _NAMED} == {
+        cid: 'NOT_APPLICABLE' for cid in _NAMED}
+
+
+@pytest.mark.parametrize('source,program,arguments,cid,filename', [
+    (_BOUNDARY_RTL, 'interface_encoding_audit.py',
+     ['--top-module', 'assembly'], _NAMED[0], 'encoding_audit_report.json'),
+    (_PHY_RTL, 'phy_counter_audit.py', [], _NAMED[2], 'phy_counter_audit_report.json'),
+])
+def test_issue2847_native_receipts_keep_identity_and_source_binding(
+        tmp_path, source, program, arguments, cid, filename):
+    ctx, file = _reviewed_context(tmp_path, source)
+    inputs = ['--rtl-dir', str(file.parent)] if program.startswith('interface') else [
+        '--rtl-files', str(file)]
+    proc = subprocess.run([sys.executable, str(_PLUGIN / 'programs' / program),
+                           *inputs, *arguments, '--out-dir', str(tmp_path)],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    f = _reviewed_findings(ctx)[cid]
+    assert (f.severity, f.state) == ('INFO', 'PASS'), f
+    ctx, _ = _reviewed_context(tmp_path, source + '// content changed\n')
+    f = _reviewed_findings(ctx)[cid]
+    assert (f.severity, f.state) == ('FAIL', 'FAIL'), f
+    # A wrong producer remains NOT_MEASURED even with a matching digest.
+    receipt = tmp_path / filename
+    payload = json.loads(receipt.read_text())
+    receipt.write_text(json.dumps({'tool': 'other', 'source_subject': payload['source_subject']}))
+    assert _reviewed_findings(ctx)[cid].state == 'NOT_MEASURED'
+
+
+def test_issue2847_added_source_invalidates_review_population(tmp_path):
+    ctx, file = _reviewed_context(tmp_path, _PLAIN_RTL)
+    assert _reviewed_findings(ctx)[_NAMED[0]].state == 'NOT_APPLICABLE'
+    (file.parent / 'new.v').write_text(_CRC_RTL)
+    assert {_reviewed_findings(ctx)[cid].state for cid in _NAMED} == {'NOT_MEASURED'}
+
+
+def test_issue2847_missing_review_binding_does_not_enable_prose_waiver(tmp_path):
+    ctx = scc.CheckContext(output_path=tmp_path / 'review.md')
+    findings = _reviewed_findings(ctx, _REVIEW + '\nAll audits are NOT_APPLICABLE.\n')
+    assert {findings[cid].state for cid in _NAMED} == {'NOT_MEASURED'}
+
+
+def test_issue2847_review_source_change_during_producer_run_refuses(tmp_path, monkeypatch):
+    sys.path.insert(0, str(_PLUGIN / 'programs'))
+    import rtl_review_aggregate as rra
+    rtl = tmp_path / 'rtl'
+    rtl.mkdir()
+    file = rtl / 'design.v'
+    file.write_text(_PLAIN_RTL)
+
+    def run_producer(program, args, output):
+        if program == 'rtl_precheck_gate.py':
+            file.write_text(_CRC_RTL)
+            output.write_text(json.dumps({'auditors': [
+                {'name': 'synthetic-auditor', 'passed': True, 'exit_code': 0}]}))
+        else:
+            output.write_text('[]')
+        return 0, '', ''
+
+    monkeypatch.setattr(rra, '_run_program_json', run_producer)
+    with pytest.raises(rra.ProducerOutputError, match='source changed during review'):
+        rra.review_rtl_dir(rtl, tmp_path)
+
+
+def test_issue2847_receipt_for_another_loader_cannot_discharge_crc(tmp_path):
+    source = _CRC_RTL.replace('input [7:0] crc_result,',
+                              'input [7:0] crc_result, input [7:0] data,').replace(
+        'tx_data <= crc_result;', 'tx_data <= crc_result;\n    tx_data <= data;')
+    ctx, file = _reviewed_context(tmp_path, source)
+    proc = subprocess.run([sys.executable, str(_PLUGIN / 'programs' / 'crc_bitorder_check.py'),
+                           '--rtl-files', str(file), '--crc-signal', 'data',
+                           '--out-dir', str(tmp_path)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    f = _reviewed_findings(ctx)[_NAMED[1]]
+    assert (f.severity, f.state) == ('FAIL', 'FAIL'), f
+    assert 'crc_signal' in f.detail
+
+
+@pytest.mark.parametrize('source,cid', [
+    ('module unnamed(input clk, input [7:0] data, output reg [7:0] state);\n'
+     'always @(posedge clk) state <= (state << 1) ^ data;\nendmodule\n', _NAMED[1]),
+    ('module unnamed(input clk, output reg [7:0] interval);\n'
+     'always @(posedge clk) interval <= interval + 1;\nendmodule\n', _NAMED[2]),
+])
+def test_issue2847_unclassified_datapath_role_does_not_prove_absence(tmp_path, source, cid):
+    ctx, _ = _reviewed_context(tmp_path, source)
+    f = _reviewed_findings(ctx)[cid]
+    assert (f.severity, f.state) == ('FAIL', 'NOT_MEASURED'), f

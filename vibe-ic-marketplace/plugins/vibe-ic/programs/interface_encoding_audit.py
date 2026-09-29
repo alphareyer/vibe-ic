@@ -814,6 +814,10 @@ def main():
                     help='Minimum severity to report (default: INFO)')
     args = ap.parse_args()
 
+    from _audit_receipt import subject_of
+    rtl_path = Path(args.rtl_dir)
+    files = sorted(rtl_path.glob('*.v')) + sorted(rtl_path.glob('*.sv'))
+    source_subject = subject_of(files)
     results = run_audit(args.rtl_dir, args.top_module)
 
     sev_order = {'ERROR': 2, 'WARN': 1, 'INFO': 0}
@@ -844,6 +848,7 @@ def main():
     out_path.mkdir(parents=True, exist_ok=True)
     report_file = out_path / 'encoding_audit_report.json'
     report = {
+        'source_subject': source_subject,
         'summary': {
             'total_interfaces': len(filtered),
             'mismatches': mismatches,
