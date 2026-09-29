@@ -1099,6 +1099,44 @@ _register(Instrument(
         artefact=_read("magic_overlap_negative.feedback")),
 ))
 
+def _judge_lvs_library_views(log_text: str) -> Optional[str]:
+    import lvs_layout_view_census as V
+    placed = V.def_component_masters(_read("cal_views.def")())
+    hits = V.masters_read_from_library(log_text, placed)
+    if not hits:
+        return None
+    return f"LIBRARY_LAYOUT masters={len(hits)} " + ",".join(sorted(hits))
+
+
+_register(Instrument(
+    name="lvs_layout_view_census::masters_read_from_library",
+    reads="magic's ext2spice.log from the step-31 LVS extraction",
+    ruling="(lvsfix, step-31 netgen rc 139 on a pad-ring die, 2026-09-29)",
+    owner="lvsfix",
+    why=("A placed master no LEF defined is loaded by Magic as the library's "
+         "FULL layout, announced only as `Cell <m> read from path <dir>`. The "
+         "extraction then describes a transistor-level cell the compare was "
+         "never meant to see; on a pad-ring die it produced two power-aware "
+         "mismatches and a netgen segfault. Absent the message is the clean "
+         "state, so the negative is the same structure with the missing LEF "
+         "read, extracted by the same tool."),
+    judge=_judge_lvs_library_views,
+    positive=Sample(
+        provenance=(
+            "Magic 8.3 in vibeic-eda 0.3.85 (sha256:70ebc4fb…), calibration "
+            "structure `cal_views` (cal_views.def: one gf180 std-cell inverter "
+            "and one IO filler): tech LEF and std-cell LEF read, the IO "
+            "filler's LEF NOT read, then `def read` -- Magic loads "
+            "gf180mcu_fd_io__fill1 from libs.ref/gf180mcu_fd_io/mag."),
+        artefact=_read("cal_views_magic_positive.log")),
+    expect="LIBRARY_LAYOUT masters=1 gf180mcu_fd_io__fill1",
+    negative=Sample(
+        provenance=(
+            "Same image, same `cal_views` structure, the IO filler's LEF read "
+            "before `def read`: no master is read from a library path."),
+        artefact=_read("cal_views_magic_negative.log")),
+))
+
 _register(Instrument(
     name="prose_polarity_consulted_check::scan",
     reads="the program tree (AST) — the extractors that write declared fields",
