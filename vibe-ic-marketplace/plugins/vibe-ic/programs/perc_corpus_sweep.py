@@ -62,7 +62,155 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _sweep_reach as _sr  # noqa: E402  (aggregate reach disclosure)
+import _pad_ring as _pr  # noqa: E402  (the one LEF MACRO CLASS parser)
 import phase3_one_shot_runner as _p  # noqa: E402  (shipped PERC functions — single source)
+
+
+# ------------------------------------------------------- physical classes of the masters
+# vibe-ic tail-b U22 (measured on the spm IC/DIE run cx_spmic2_run, 2026-09-28): the sweep
+# reported `welltap: ZERO_TAPS` on a routed DEF carrying 36,186 instances of the PDK's own
+# `CLASS core WELLTAP` cell (a tap named without a `tap` token), and `pads: 8` /
+# `esd_cells: 0` "Likely ESD GAP" -- eight distinct IO MASTERS, four of them corner/spacer
+# fillers, counted as signal pads, and an ESD verdict of MISSING read from cell NAMES that
+# simply do not spell a clamp. What a master IS comes from its LEF CLASS, and which cell is
+# the well tap is the PDK's own WELLTAP_CELL; both are read from the run tree, never from a
+# cell-name literal.
+_LEF_MAX_BYTES = 64 * 1024 * 1024
+#: LEF CLASS strings of a bond pad (LEF 5.8 `PAD` subtypes).
+_PAD_SIGNAL_CLASSES = ("PAD", "PAD INPUT", "PAD OUTPUT", "PAD INOUT", "PAD AREAIO")
+_PAD_POWER_CLASSES = ("PAD POWER",)
+#: Ring structure that is not a bond pad: spacers and the four IO corners.
+_PAD_STRUCTURAL_CLASSES = ("PAD SPACER", "ENDCAP TOPLEFT", "ENDCAP TOPRIGHT",
+                           "ENDCAP BOTTOMLEFT", "ENDCAP BOTTOMRIGHT")
+_WELLTAP_CLASS = "CORE WELLTAP"
+
+
+def _welltap_cells_of(value: Any) -> List[str]:
+    if isinstance(value, str):
+        return [v for v in value.split() if v]
+    if isinstance(value, (list, tuple)):
+        return [v for v in value if isinstance(v, str) and v]
+    return []
+
+
+def physical_classes(design_dir: Optional[str]) -> Dict[str, Any]:
+    """`{classes: {master: LEF CLASS}, welltap_cells: [...], sources: {...}}` for a run tree.
+
+    * LEF CLASS of every MACRO in any LEF the run tree carries (the pad ring's IO LEFs are
+      staged into it), parsed by `_pad_ring.parse_lef_macro_classes`.
+    * the PDK's configured `WELLTAP_CELL` from the run's LibreLane step configs.
+    A `CORE WELLTAP` master and the configured WELLTAP_CELL are both well taps. Nothing is
+    guessed: an empty result leaves every reader on its previous (name-hint) behaviour."""
+    out: Dict[str, Any] = {"classes": {}, "welltap_cells": [],
+                           "sources": {"lef": [], "welltap_cell_config": []}}
+    if not design_dir or not os.path.isdir(design_dir):
+        return out
+    root = Path(design_dir)
+    classes: Dict[str, str] = {}
+    for lef in sorted(root.rglob("*.lef")):
+        try:
+            if not lef.is_file() or lef.stat().st_size > _LEF_MAX_BYTES:
+                continue
+            got = _pr.parse_lef_macro_classes(lef.read_text(errors="replace"))
+        except OSError:
+            continue
+        if got:
+            classes.update(got)
+            out["sources"]["lef"].append(str(lef.relative_to(root)))
+    welltap = {m for m, c in classes.items() if c == _WELLTAP_CLASS}
+    cfg_cells: set = set()
+    for cfg in sorted(root.glob("phase3/librelane/**/config.json")):
+        try:
+            doc = json.loads(cfg.read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(doc, dict) and doc.get("WELLTAP_CELL"):
+            cells = _welltap_cells_of(doc.get("WELLTAP_CELL"))
+            if cells:
+                cfg_cells.update(cells)
+                out["sources"]["welltap_cell_config"].append(str(cfg.relative_to(root)))
+    out["sources"]["welltap_cell_config"] = out["sources"]["welltap_cell_config"][:5]
+    out["classes"] = classes
+    out["welltap_cells"] = sorted(welltap | cfg_cells)
+    out["welltap_from_lef_class"] = sorted(welltap)
+    out["welltap_from_pdk_config"] = sorted(cfg_cells)
+    return out
+
+
+def pad_ring_census(components: List["tuple"], classes: Dict[str, str]) -> Dict[str, Any]:
+    """Pad and ESD counts per INSTANCE, the pad role taken from the master's LEF CLASS.
+
+    Returns None-equivalent `{"source": None}` when no component's master has a PAD/IO-corner
+    class, so the caller keeps the name-hint reader. ESD per pad instance:
+      * `identified`   -- the master is ESD-bearing by the shipped ESD reader;
+      * `negated`      -- the master's name explicitly disclaims ESD (noesd, ...);
+      * `unidentified` -- neither: nothing in the run tree states whether this pad carries
+                          ESD, so it is NOT counted as a missing clamp.
+    esd_presence: PRESENT (>= 1 identified), MISSING (every pad negated), else
+    NOT_DETERMINED -- never "MISSING" read from a name that merely does not spell a clamp."""
+    signal: List[str] = []
+    power: List[str] = []
+    structural: List[str] = []
+    for inst, master in components:
+        c = classes.get(master)
+        if c in _PAD_SIGNAL_CLASSES:
+            signal.append(master)
+        elif c in _PAD_POWER_CLASSES:
+            power.append(master)
+        elif c in _PAD_STRUCTURAL_CLASSES:
+            structural.append(master)
+    pads = signal + power
+    if not pads and not structural:
+        return {"source": None}
+    identified = [m for m in pads if _p._classify_io_cell(m) == "esd_pad"]
+    negated = [m for m in pads
+               if any(t in m.lower() for t in _p._ESD_NEGATION_HINTS)]
+    unidentified = [m for m in pads if m not in identified and m not in negated]
+    # Masters that belong to the ring but whose LEF CLASS names no bond-pad / ring role:
+    # an IO-family name with no PAD/corner class, or a non-CORE macro class (e.g. a bare
+    # pad shipped as CLASS BLOCK). Never read as "no pad ring".
+    known = set(_PAD_SIGNAL_CLASSES) | set(_PAD_POWER_CLASSES) | set(_PAD_STRUCTURAL_CLASSES)
+    unclassified = sorted({
+        m for _i, m in components
+        if classes.get(m) not in known
+        and (_p._classify_io_cell(m) != "other"
+             or (classes.get(m) or "").split(" ")[0] in ("BLOCK", "COVER", "RING"))})
+    if not pads:
+        # Classified corners/spacers with no classified bond pad: the ring exists and its
+        # pads' roles are unknown -- NOT_DETERMINED naming them, never N/A.
+        presence, status = "NOT_DETERMINED", "MANUAL_REVIEW"
+    elif identified:
+        presence, status = "PRESENT", "MANUAL_REVIEW"
+    elif negated and not unidentified:
+        presence, status = "MISSING", "MANUAL_REVIEW"
+    else:
+        presence, status = "NOT_DETERMINED", "MANUAL_REVIEW"
+    return {
+        "source": "lef_class",
+        "status": status,
+        "esd_presence": presence,
+        "pads": len(pads),
+        "signal_pads": len(signal),
+        "power_pads": len(power),
+        "structural": len(structural),
+        "pad_masters": sorted(set(pads)),
+        "esd_cells": len(identified),
+        "esd_negated": len(negated),
+        "esd_unidentified": len(unidentified),
+        "esd_unidentified_masters": sorted(set(unidentified)),
+        "unclassified_masters": unclassified,
+        "note": (("the ring has " + str(len(structural)) + " classified corner/spacer "
+                  "instance(s) but no master with a bond-pad LEF CLASS; unclassified ring "
+                  "master(s): " + (", ".join(unclassified) or "none named") + " -- pad and "
+                  "ESD roles NOT_DETERMINED, not N/A") if not pads else
+                 ("pad roles from LEF CLASS (PAD INPUT/OUTPUT/INOUT/AREAIO = signal, "
+                 "PAD POWER = power, PAD SPACER / IO corner = structural, not a pad); counts "
+                 "are instances. ESD content is not stated for "
+                 f"{len(unidentified)} pad instance(s) by any artefact in the run tree: "
+                 "NOT_DETERMINED, not MISSING -- confirm from the IO library's ESD "
+                 "documentation." if unidentified and not identified else
+                 "pad roles from LEF CLASS; counts are instances")),
+    }
 
 
 def _pick_routed_def(design_dir: str) -> Optional[str]:
@@ -111,7 +259,8 @@ def _stage_score(basename: str) -> int:
 
 def artifact_vintage_guard(routed_def: str,
                            sibling_defs: Optional[List[str]] = None,
-                           std_cell_min: int = _STALE_STD_CELL_MIN) -> Dict[str, Any]:
+                           std_cell_min: int = _STALE_STD_CELL_MIN,
+                           welltap_cells: Optional[List[str]] = None) -> Dict[str, Any]:
     """WARN when a routed DEF with > std_cell_min placed std cells has 0 valid well/substrate
     taps AND an *older* sibling DEF (an earlier pipeline stage, or an older-version artifact of
     the same design) is ALSO 0-tap — the signature of a STALE pre-tapcell-fix artifact whose
@@ -139,7 +288,7 @@ def artifact_vintage_guard(routed_def: str,
         out["reason"] = "routed DEF not found"
         return out
     comps = _p._parse_def_components(rp)
-    wt = _p._welltap_presence_check(comps)
+    wt = _p._welltap_presence_check(comps, rated_tap_masters=welltap_cells)
     n_std = _count_std_cells(comps)
     out.update({"n_std_cells": n_std, "n_tap": wt["n_tap"], "welltap": wt["status"]})
 
@@ -168,7 +317,8 @@ def artifact_vintage_guard(routed_def: str,
         if _stage_score(sp.name) > routed_rank:
             continue   # only OLDER-or-equal stages count as the prior-vintage lineage
         scomps = _p._parse_def_components(sp)
-        if _p._welltap_presence_check(scomps)["n_tap"] == 0:
+        if _p._welltap_presence_check(
+                scomps, rated_tap_masters=welltap_cells)["n_tap"] == 0:
             older_zero_tap.append(sp.name)
 
     if older_zero_tap:
@@ -200,7 +350,8 @@ def _sibling_defs_for(routed_def: str) -> List[str]:
 
 
 def sweep_one(def_path: str, name: Optional[str] = None,
-              vintage: bool = True) -> Dict[str, Any]:
+              vintage: bool = True,
+              design_dir: Optional[str] = None) -> Dict[str, Any]:
     """Run the full PERC structural chain on ONE routed DEF. Pure; no container.
 
     When `vintage` is True (default) it also runs the artifact-vintage guard
@@ -219,16 +370,30 @@ def sweep_one(def_path: str, name: Optional[str] = None,
     out["perc_chain_ran"] = True
     comps = _p._parse_def_components(p)
     out["components"] = len(comps)
+    phys = physical_classes(design_dir)
+    welltap_cells = phys["welltap_cells"] or None
+    out["physical_classes"] = {
+        "welltap_cells": phys["welltap_cells"],
+        "welltap_from_lef_class": phys.get("welltap_from_lef_class", []),
+        "welltap_from_pdk_config": phys.get("welltap_from_pdk_config", []),
+        "lef_sources": len(phys["sources"]["lef"]),
+        "welltap_config_sources": phys["sources"]["welltap_cell_config"]}
+    census = pad_ring_census(comps, phys["classes"])
     esd = _p._esd_pad_ring_presence(comps)
-    out["esd_presence"] = {"status": esd["status"],
-                           "esd_presence": esd.get("esd_presence"),
-                           "pads": esd["pad_count"], "esd_cells": esd["esd_count"]}
-    if esd["status"] != "N/A":
+    if census.get("source"):
+        out["esd_presence"] = {k: v for k, v in census.items() if k != "note"}
+        out["esd_presence"]["note"] = census["note"]
+    else:
+        out["esd_presence"] = {"status": esd["status"],
+                               "esd_presence": esd.get("esd_presence"),
+                               "pads": esd["pad_count"], "esd_cells": esd["esd_count"],
+                               "source": "name_hint_masters"}
+    if out["esd_presence"]["status"] != "N/A":
         nt = _p._parse_def_net_terminals(p.read_text(errors="ignore"))
         topo = _p._esd_discharge_topology(comps, nt)
         out["esd_topology"] = {"status": topo["status"], "gaps": len(topo["gaps"]),
                                "unrated": topo["unrated_clamps"][:4]}
-    wt = _p._welltap_presence_check(comps)
+    wt = _p._welltap_presence_check(comps, rated_tap_masters=welltap_cells)
     out["welltap"] = {"status": wt["status"], "n_tap": wt["n_tap"],
                       "reason": wt.get("reason", "")}
     xd = _p._xdomain_levelshifter_check(p, comps)
@@ -237,7 +402,7 @@ def sweep_one(def_path: str, name: Optional[str] = None,
                       "n_ground_domains": len(xd["ground_domains"]),
                       "n_crossing": xd["n_crossing"], "source": xd["domain_source"]}
     if vintage:
-        vg = artifact_vintage_guard(str(p))
+        vg = artifact_vintage_guard(str(p), welltap_cells=welltap_cells)
         out["vintage"] = {"verdict": vg["verdict"], "warn": vg["warn"],
                           "reason": vg.get("reason", ""),
                           "older_zero_tap_siblings": vg.get("older_zero_tap_siblings", [])}
@@ -253,7 +418,7 @@ def sweep_dirs(dirs: List[str], vintage: bool = True) -> List[Dict[str, Any]]:
             rows.append({"name": name, "def": None, "error": "no routed DEF",
                          "perc_chain_ran": False})
             continue
-        rows.append(sweep_one(dp, name=name, vintage=vintage))
+        rows.append(sweep_one(dp, name=name, vintage=vintage, design_dir=d))
     return rows
 
 
