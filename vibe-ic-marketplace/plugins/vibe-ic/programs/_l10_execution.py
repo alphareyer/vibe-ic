@@ -8,6 +8,12 @@ staleness, malformed data, or a missing case row is ``NOT_EXECUTED``.
 This module is a reader/writer contract, not a verdict gate.  The consumer
 declares enforcement: ``FAIL`` and ``NOT_EXECUTED`` both block Step 4, while
 remaining distinct claims about the design and the run respectively.
+
+It also reads the ONE other per-case execution record a declared case can
+have: the core-ISA conformance suite's receipt (``isa_conformance_credit``,
+owner ruling R-0929-OWNER-SUB-ACCEPT (1)). That reader never changes
+``case_state``; a consumer asks it explicitly, for a case this record left
+``NOT_EXECUTED``, and discloses what it credited.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -307,3 +314,284 @@ def unclaimed_rows(case_ids: Iterable[str], record: Dict[str, Any]) -> List[str]
     """Rows naming no currently-declared L10 case."""
     declared = set(case_ids)
     return sorted(key for key in (record.get("rows") or {}) if key not in declared)
+
+
+# ── CORE-ISA CONFORMANCE AT A TEST PARAMETER (R-0929-OWNER-SUB-ACCEPT (1)) ────
+#
+# THE OWNER'S RULE, 2026-09-29: a CPU core-ISA conformance suite run on the
+# SAME RTL with only a memory-size PARAMETER changed COUNTS as the CPU
+# functional-verification evidence for the ISA rows, and is DISCLOSED in the
+# verdict (parameter name, delivered value vs test value, suite, programs and
+# instructions passed); the delivered-memory run is still reported as measured
+# or not. Any RTL change, a different top, or a failing suite gives no credit.
+#
+# WHY IT IS NEEDED — MEASURED on subservient x gf180mcuD (2026-09-29): the
+# delivered 1024-byte SRAM cannot hold a single riscv-arch-test program
+# (22848 B for `add`), so the delivered-memory arm reads RV32I 0/39 NOT_MEASURED
+# and Zifencei 1/2, while the same 23 RTL files instantiated with the top's own
+# memory-size parameter raised to 2 MiB pass 39/39 primary programs and 38/38
+# applicable instructions. Nothing about the CPU is different between the two
+# runs except the size of the array the testbench hands it.
+#
+# THIS IS A READER, NOT A PRODUCER. The receipt is the ISA-suite producer's
+# (`ISA_RECEIPT_REL`, schema `ISA_RECEIPT_SCHEMA`). Every condition of the rule
+# is re-checked HERE against the project's own files, never taken from the
+# receipt's summary words:
+#   * SAME RTL   an arm whose per-file sha256 set equals the delivered RTL
+#                (`_path_layout.rtl_dir`, every *.v / *.sv) exactly -- same
+#                names, same bytes, nothing extra, nothing missing;
+#   * SAME TOP   the receipt's top equals the design declaration's top_module;
+#   * PARAMETER  the receipt's memory-size parameter is a `parameter` of that
+#                top in the delivered RTL, and its default there is the
+#                receipt's delivered value (and equals the declaration's
+#                core_parameters entry when the declaration states one);
+#   * PASSING    every PRIMARY program of every unit the case binds PASSed on
+#                that arm at the test value, under every init pattern it ran,
+#                and no program of those units FAILed there (any role);
+#   * COUNTED    the passed programs and instructions are recomputed from the
+#                per-program rows and must agree with the receipt's own totals.
+# Anything short of that is a named refusal and the case keeps the verdict it
+# already had. A receipt that binds no ISA unit to the case says nothing about
+# it (None, None).
+ISA_RECEIPT_REL = "reports/phase2/isa_suites/isa_suite_receipt.json"
+ISA_RECEIPT_SCHEMA = "vibeic.isa_suite_receipt.v1"
+ISA_CREDIT_KIND = "core_isa_conformance_at_test_parameter"
+_DECLARATION_REL = "plugin_output/declaration.json"
+_HDL_SUFFIXES = (".v", ".sv")
+_HDL_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+_INT_LITERAL_RE = re.compile(r"^\s*(?:\d+\s*'\s*[sS]?[dD]\s*)?(\d+)\s*$")
+
+
+def _json_object(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        doc = json.loads(Path(path).read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _module_parameter_default(rtl_files: Iterable[Path], module: str,
+                              param: str) -> Tuple[Optional[str], str]:
+    """(default text, file name) of `parameter <param>` inside `module`."""
+    head = re.compile(r"\bmodule\s+" + re.escape(module) + r"\b(.*?)\bendmodule\b",
+                      re.S)
+    decl = re.compile(
+        r"\bparameter\b(?:\s+(?:integer|int|longint|shortint|logic|bit|reg|"
+        r"signed|unsigned))*\s*(?:\[[^\]]*\]\s*)?" + re.escape(param)
+        + r"\s*=\s*([^,;)]+)")
+    for f in rtl_files:
+        try:
+            text = _HDL_COMMENT_RE.sub(" ", Path(f).read_text(errors="replace"))
+        except OSError:
+            continue
+        m = head.search(text)
+        if not m:
+            continue
+        pm = decl.search(m.group(1))
+        return (pm.group(1).strip() if pm else None), Path(f).name
+    return None, ""
+
+
+def _int_literal(text: Any) -> Optional[int]:
+    if isinstance(text, bool):
+        return None
+    if isinstance(text, int):
+        return text
+    m = _INT_LITERAL_RE.match(str(text or ""))
+    return int(m.group(1)) if m else None
+
+
+def _program_state(entry: Dict[str, Any], key: str) -> str:
+    """PASS only when the program's run on `key` PASSed under every init."""
+    if entry.get("pre"):
+        return "NOT_MEASURED"
+    arm = (entry.get("arms") or {}).get(key)
+    if not isinstance(arm, dict):
+        return "NOT_MEASURED"
+    state = str(arm.get("state") or "")
+    by_init = arm.get("by_init")
+    if state == PASS:
+        if not isinstance(by_init, list) or not by_init or any(
+                not isinstance(x, dict) or x.get("state") != PASS
+                for x in by_init):
+            return "NOT_MEASURED"
+    return state or "NOT_MEASURED"
+
+
+def isa_conformance_credit(project: Path, case_id: str
+                           ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """`(credit, refusal)` for one declared L10 case; see the block above.
+
+    `(None, None)` when no receipt exists or it binds no ISA unit to the case;
+    `(None, why)` when it binds one and the rule is not met; `(credit, None)`
+    when it is -- `credit["sentence"]` is the disclosure the verdict carries.
+    """
+    project = Path(project)
+    receipt_path = project / ISA_RECEIPT_REL
+    if not receipt_path.is_file():
+        return None, None
+    doc = _json_object(receipt_path)
+    if doc is None:
+        return None, None
+    bound = doc.get("bound_cases")
+    units = bound.get(case_id) if isinstance(bound, dict) else None
+    if not (isinstance(units, list) and units
+            and all(isinstance(u, str) and u for u in units)):
+        return None, None
+    if doc.get("schema") != ISA_RECEIPT_SCHEMA:
+        return None, (f"{ISA_RECEIPT_REL} schema {doc.get('schema')!r} is not "
+                      f"{ISA_RECEIPT_SCHEMA!r}")
+    if doc.get("refusal"):
+        return None, f"the ISA-suite producer refused: {doc.get('refusal')}"
+    if doc.get("executor_rc") != 0:
+        return None, (f"the ISA-suite run did not complete "
+                      f"(executor_rc={doc.get('executor_rc')!r})")
+    facts = doc.get("design_facts")
+    if not isinstance(facts, dict):
+        return None, "the receipt records no design facts"
+    top, param = facts.get("top"), facts.get("memsize_param")
+    delivered = _int_literal(facts.get("memsize_declared"))
+    test = _int_literal(doc.get("memsize_full"))
+    if not (isinstance(top, str) and top and isinstance(param, str) and param
+            and delivered and test):
+        return None, ("the receipt does not name its top, its memory-size "
+                      "parameter, the delivered value and the test value")
+
+    decl = _json_object(project / _DECLARATION_REL) or {}
+    decl_top = decl.get("top_module")
+    if decl_top != top:
+        return None, (f"a different top: the suite instantiated {top!r}, the "
+                      f"design declares top_module {decl_top!r} "
+                      f"({_DECLARATION_REL})")
+
+    import _path_layout as _pl                      # noqa: E402 (lazy sibling)
+    rtl_dir = _pl.rtl_dir(project)
+    rtl_files = sorted(p for p in rtl_dir.glob("*")
+                       if p.is_file() and p.suffix in _HDL_SUFFIXES) \
+        if rtl_dir.is_dir() else []
+    if not rtl_files:
+        return None, f"no delivered RTL under {rtl_dir}"
+    delivered_sha = {p.name: file_sha256(p) for p in rtl_files}
+    arm_sha = doc.get("arm_rtl_sha256")
+    arm_sha = arm_sha if isinstance(arm_sha, dict) else {}
+    arm = next((a for a in (doc.get("arms") or [])
+                if isinstance(a, str) and arm_sha.get(a) == delivered_sha), None)
+    if arm is None:
+        diffs = []
+        for a in doc.get("arms") or []:
+            got = arm_sha.get(a) if isinstance(arm_sha.get(a), dict) else {}
+            changed = sorted(n for n in set(got) | set(delivered_sha)
+                             if got.get(n) != delivered_sha.get(n))
+            diffs.append(f"arm {a!r}: {len(changed)} file(s) differ "
+                         f"({', '.join(changed[:4])})")
+        return None, ("an RTL change: no arm of the suite ran the delivered "
+                      f"RTL ({len(delivered_sha)} file(s) under "
+                      f"{rtl_dir.name}/) byte for byte"
+                      + (f" -- {'; '.join(diffs)}" if diffs else ""))
+
+    default_text, top_file = _module_parameter_default(rtl_files, top, param)
+    if default_text is None:
+        return None, (f"{param!r} is not a parameter of {top!r} in the "
+                      f"delivered RTL" + (f" ({top_file})" if top_file else
+                                          " (no file defines the module)"))
+    if _int_literal(default_text) != delivered:
+        return None, (f"the delivered value of {param!r} is {default_text!r} in "
+                      f"{top_file}, not the receipt's {delivered}")
+    core = decl.get("core_parameters")
+    if isinstance(core, dict) and param in core \
+            and _int_literal(core.get(param)) != delivered:
+        return None, (f"the declaration states {param}={core.get(param)!r}, "
+                      f"not the receipt's delivered {delivered}")
+
+    programs = doc.get("programs")
+    programs = programs if isinstance(programs, dict) else {}
+    key = f"{arm}_full"
+    mine = {pid: e for pid, e in programs.items()
+            if isinstance(e, dict) and e.get("unit") in units}
+    primary = {pid: e for pid, e in mine.items() if e.get("role") == "primary"}
+    if not primary:
+        return None, f"the receipt carries no primary program for {units}"
+    failed = sorted(pid for pid, e in mine.items()
+                    if _program_state(e, key) == FAIL)
+    if failed:
+        return None, (f"a failing suite: {len(failed)} program(s) FAILed at "
+                      f"{param}={test} ({', '.join(failed[:4])})")
+    short = sorted(pid for pid, e in primary.items()
+                   if _program_state(e, key) != PASS)
+    if short:
+        return None, (f"{len(short)} of {len(primary)} primary program(s) did "
+                      f"not PASS at {param}={test} ({', '.join(short[:4])})")
+
+    summary = (doc.get("cases") or {}).get(case_id) \
+        if isinstance(doc.get("cases"), dict) else None
+    summary = summary if isinstance(summary, dict) else {}
+    full = summary.get("full_parameter")
+    full = full if isinstance(full, dict) else {}
+    if full.get("passed") != len(primary) \
+            or full.get("primary_programs") != len(primary) \
+            or _int_literal(full.get("memsize")) != test:
+        return None, ("the receipt is inconsistent with its own program rows: "
+                      f"it states {full.get('passed')!r}/"
+                      f"{full.get('primary_programs')!r} at memsize "
+                      f"{full.get('memsize')!r}; the rows give "
+                      f"{len(primary)}/{len(primary)} at {test}")
+    instructions = None
+    cov = full.get("coverage")
+    if isinstance(cov, dict):
+        total_rec = doc.get("instruction_total")
+        total_rec = total_rec if isinstance(total_rec, dict) else {}
+        excluded = sorted(str(x) for x in total_rec.get("excluded") or [])
+        total = _int_literal(total_rec.get("total"))
+        covered = sorted({str(e.get("instruction")) for e in primary.values()
+                          if e.get("instruction")
+                          and str(e.get("instruction")) not in excluded})
+        if not total or cov.get("covered") != len(covered) \
+                or cov.get("total") != total or len(covered) > total:
+            return None, ("the receipt's instruction coverage "
+                          f"{cov.get('covered')!r}/{cov.get('total')!r} does not "
+                          f"match its program rows ({len(covered)}/{total!r})")
+        instructions = {"covered": len(covered), "total": total,
+                        "excluded": excluded,
+                        "why_excluded": total_rec.get("why")}
+
+    dsum = summary.get("delivered")
+    dsum = dsum if isinstance(dsum, dict) else {}
+    delivered_run = {"verdict": dsum.get("verdict") or "NOT_MEASURED",
+                     "passed": dsum.get("passed"),
+                     "primary_programs": dsum.get("primary_programs"),
+                     "memsize": delivered}
+    suites = sorted({str(e.get("suite")) for e in primary.values()
+                     if e.get("suite")})
+    disclosures = [str(d) for d in doc.get("deviation_disclosures") or [] if d]
+    sentence = (
+        f"core ISA conformance at test {param}={test} (delivered {param}="
+        f"{delivered}; parameter only, same RTL: {len(delivered_sha)} file(s) "
+        f"sha256-identical to {rtl_dir.name}/, top {top}): "
+        f"{', '.join(suites)} {len(primary)}/{len(primary)} primary program(s) "
+        f"PASS for {', '.join(units)}"
+        + (f", {instructions['covered']}/{instructions['total']} instruction(s)"
+           if instructions else "")
+        + f"; delivered {param}={delivered} run: {delivered_run['verdict']} "
+        f"{delivered_run['passed']}/{delivered_run['primary_programs']}"
+        + "".join(f"; DISCLOSED {d}" for d in disclosures))
+    return {
+        "case": case_id,
+        "credited_by": ISA_CREDIT_KIND,
+        "units": list(units),
+        "suites": suites,
+        "suite_pins": [str(a) for a in doc.get("acquisition") or []],
+        "top": top,
+        "parameter": param,
+        "delivered_value": delivered,
+        "test_value": test,
+        "rtl_identity": {"arm": arm, "files": len(delivered_sha),
+                         "identical_to": str(rtl_dir.relative_to(project))
+                         if rtl_dir.is_relative_to(project) else str(rtl_dir)},
+        "programs_passed": len(primary),
+        "programs_total": len(primary),
+        "instructions": instructions,
+        "delivered_run": delivered_run,
+        "deviation_disclosures": disclosures,
+        "receipt": ISA_RECEIPT_REL,
+        "sentence": sentence,
+    }, None
