@@ -1211,15 +1211,18 @@ def test_d8_missing_does_not_preempt_an_explicit_waiver(tmp_path):
     raw_id = F.step_by_id(sid)["id"]
     project, step, dropped = _interaction_tree(
         tmp_path, "waived", FAIL_GATE, drop_last=True)
+    # R-0929-U14-OWNER-WAIVER: an approval counts only from the owner, dated
+    # and stated; the old 'd8-matrix' approver literal is not an owner.
     waivers = {raw_id: {"reason": "d8 fixture: approved deferral",
-                        "approver": "d8-matrix"}}
+                        "approver": "reyerchu", "approved_at": "2026-09-29",
+                        "owner_statement": "I approve this d8 fixture deferral."}}
     result = FCC.check_step(project, step, waivers)
     assert result.status == "PASS_WITH_WAIVERS", (
         f"step {sid}: an explicit waiver is on file for id {raw_id!r} and "
         f"declared output {dropped!r} is absent; check_step reported "
         f"{result.status!r} — reasons: {_reasons(result)}"
     )
-    assert any("d8-matrix" in str(r) for r in result.reasons), (
+    assert any("reyerchu" in str(r) for r in result.reasons), (
         f"step {sid}: WAIVED but no reason names the approver — reasons: "
         f"{_reasons(result)}"
     )
@@ -1242,10 +1245,16 @@ def test_d8_env_unavailable_waiver_converts_the_missing_it_produced(tmp_path):
     waivers = {raw_id: {"reason": "d8 fixture: tool absent on host",
                         "approver": "d8-matrix", "_env_unavailable": True}}
     result = FCC.check_step(project, step, waivers)
-    assert result.status == "PASS_WITH_WAIVERS", (
-        f"step {sid}: ENV_UNAVAILABLE waiver + absent output {dropped!r} "
+    # R-0929-U14-OWNER-WAIVER / R-0929-ENV-AT-RUNTIME: an environment-
+    # unavailable state is NOT_MEASURED with its reason, never a machine
+    # waiver and never a pass. The ordering pin is unchanged: it converts the
+    # MISSING it produced, and keeps the natural verdict as a breadcrumb.
+    assert result.status == "NOT_MEASURED", (
+        f"step {sid}: ENV_UNAVAILABLE record + absent output {dropped!r} "
         f"reported {result.status!r} — reasons: {_reasons(result)}"
     )
+    assert any("tool absent on host" in str(r) for r in result.reasons), (
+        _reasons(result))
     assert any("natural" in str(r) for r in result.reasons), (
         f"step {sid}: the ENV_UNAVAILABLE conversion dropped the natural "
         f"verdict breadcrumb — reasons: {_reasons(result)}. A waiver that hides "

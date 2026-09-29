@@ -101,13 +101,19 @@ def test_verification_intent_waived_under_skip_analog_with_anchor(tmp_path):
         "--summary", str(summary), "--out", str(out),
         "--skip-analog", "--project", str(tmp_path),
     ])
-    assert rc == 3
+    # R-0929-U14-OWNER-WAIVER: --skip-analog never produces a waiver. The four
+    # declared analog cases are NOT_MEASURED for the flag's gap (rc 2, typed
+    # FLOW_DOES_NOT_PERFORM) -- never waived, never a pass.
+    assert rc == 2
     data = json.loads(out.read_text())
-    assert data["waived"] == 4 and data["fail"] == 0
-    assert data["capability_gap"] == gate.CAP_ANALOG_VERIFICATION_INTENT
+    assert data["not_measured"] == 4 and data["waived"] == 0
+    assert data["fail"] == 0
+    assert (data["verdict"], data["reason_class"]) == (
+        "NOT_MEASURED", "FLOW_DOES_NOT_PERFORM")
     for r in data["results"]:
-        assert r["status"] == "waived"
-        assert r["review_required"] is True
+        assert r["status"] == "not_measured"
+        assert r["waived"] is False and r["review_required"] is False
+        assert r["skipped_by_flag"] == "--skip-analog"
         assert r["capability_gap"] == gate.CAP_ANALOG_VERIFICATION_INTENT
 
 
@@ -132,13 +138,15 @@ def test_noleak_digital_cmd_response_still_fails_under_skip_analog(tmp_path):
     ])
     assert rc == 1, "digital cmd_response with no evidence must STILL FAIL"
     data = json.loads(out.read_text())
-    # the verification_intent case is waived; the digital one remains an
-    # explicit Step-4 blocker without pretending an unrun test actually failed.
+    # the verification_intent case is NOT_MEASURED by the flag (R-0929-U14-
+    # OWNER-WAIVER; never waived); the digital one remains an explicit Step-4
+    # blocker without pretending an unrun test actually failed.
     by_id = {r["id"]: r for r in data["results"]}
     assert by_id["GET_ID_DIGITAL"]["status"] == "NOT_EXECUTED"
-    assert by_id["LDO_LINE_LOAD_SNDR"]["status"] == "waived"
+    assert by_id["LDO_LINE_LOAD_SNDR"]["status"] == "not_measured"
     assert data["not_executed"] == 1
-    assert data["fail"] == 0 and data["waived"] == 1
+    assert data["fail"] == 0 and data["waived"] == 0
+    assert data["not_measured"] == 1
 
 
 def test_noleak_unanchored_verification_intent_still_fails(tmp_path):
@@ -222,18 +230,23 @@ def test_issue478_endstate_subprocess_rc3_and_sentinel(tmp_path):
          "--skip-analog", "--project", str(tmp_path)],
         capture_output=True, text=True,
     )
-    assert proc.returncode == 3, (
-        f"expected rc=3 PASS_WITH_WAIVERS, got {proc.returncode}\n"
+    # R-0929-U14-OWNER-WAIVER: the flag's gap is NOT_MEASURED (rc 2, typed
+    # FLOW_DOES_NOT_PERFORM), announced at line start; no waiver sentinel and
+    # no vacuous-pass token may appear, so no reader can credit it.
+    assert proc.returncode == 2, (
+        f"expected rc=2 NOT_MEASURED, got {proc.returncode}\n"
         f"STDOUT:{proc.stdout}\nSTDERR:{proc.stderr}")
     combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    # mirror flow_compliance_check._stdout_signals_waiver: token at line-start
-    assert any(line.lstrip().startswith("PASS_WITH_WAIVERS")
-               for line in combined.splitlines()), \
-        f"no line-start PASS_WITH_WAIVERS sentinel in:\n{combined}"
+    lines = [line.lstrip() for line in combined.splitlines()]
+    assert any(line.startswith("NOT_MEASURED [FLOW_DOES_NOT_PERFORM]")
+               for line in lines), combined
+    assert not any(line.startswith(("PASS_WITH_WAIVERS", "VACUOUS_PASS"))
+                   for line in lines), combined
     assert out.is_file()
     data = json.loads(out.read_text())
-    assert data["waived"] == 4 and data["fail"] == 0
-    assert data["capability_gap"] == gate.CAP_ANALOG_VERIFICATION_INTENT
+    assert data["not_measured"] == 4 and data["waived"] == 0
+    assert data["fail"] == 0
+    assert data["reason_class"] == "FLOW_DOES_NOT_PERFORM"
 
 
 def test_issue478_endstate_subprocess_noleak_digital_rc1(tmp_path):

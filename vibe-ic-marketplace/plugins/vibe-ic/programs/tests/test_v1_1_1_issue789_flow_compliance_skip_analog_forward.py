@@ -140,24 +140,32 @@ def test_positive_evaluate_gate_skip_analog_waives_analog_l10(tmp_path):
 
 
 def test_positive_check_step_skip_analog_waived_not_fail(tmp_path):
-    """POSITIVE end-to-end: check_step(skip_analog=True) → WAIVED status; the
-    same step with skip_analog=False is FAIL (the flag had no effect pre-fix)."""
+    """POSITIVE end-to-end: check_step(skip_analog=True) → NOT_MEASURED; the
+    same step with skip_analog=False is FAIL (the flag had no effect pre-fix).
+
+    R-0929-U14-OWNER-WAIVER: the forwarded flag never produces a waiver. A
+    design that declares analog work and skips it by flag reads NOT_MEASURED
+    (the flag's gap, FLOW_DOES_NOT_PERFORM); the control arm is unchanged."""
     proj = _make_project(tmp_path, _ANALOG_L10)
     r_flag = F.check_step(proj, _l10_step(), waivers={}, skip_analog=True)
-    assert r_flag.status == "PASS_WITH_WAIVERS", (r_flag.status, r_flag.reasons)
+    assert r_flag.status == "NOT_MEASURED", (r_flag.status, r_flag.reasons)
+    assert "skipped by --skip-analog" in " ".join(r_flag.reasons), r_flag.reasons
     r_noflag = F.check_step(proj, _l10_step(), waivers={}, skip_analog=False)
     assert r_noflag.status == "FAIL", (r_noflag.status, r_noflag.reasons)
 
 
 def test_positive_artifact_written_with_waived_count(tmp_path):
-    """The L10 gate artifact is produced and credits the analog cases as
-    WAIVED (total=4, fail=0, waived=4) under forwarded --skip-analog."""
+    """The L10 gate artifact is produced and records the analog cases as
+    NOT_MEASURED by the flag (total=4, fail=0, not_measured=4, waived=0) under
+    forwarded --skip-analog (R-0929-U14-OWNER-WAIVER: never a waiver)."""
     proj = _make_project(tmp_path, _ANALOG_L10)
     F.check_step(proj, _l10_step(), waivers={}, skip_analog=True)
     art = proj / "reports" / "phase2" / "gates" / "l10_tb_conformance.json"
     assert art.is_file()
     d = json.loads(art.read_text())
-    assert d["total"] == 4 and d["fail"] == 0 and d["waived"] == 4, d
+    assert (d["total"], d["fail"], d["not_measured"], d["waived"]) == (
+        4, 0, 4, 0), d
+    assert d["reason_class"] == "FLOW_DOES_NOT_PERFORM", d
 
 
 # ───────────────────────── §4.05 NO-LEAK negatives ─────────────────────────

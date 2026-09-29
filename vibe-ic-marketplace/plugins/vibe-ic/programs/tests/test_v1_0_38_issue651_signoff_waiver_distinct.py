@@ -79,6 +79,21 @@ def _report_db(category_counts: dict) -> str:
         "</report-database>\n")
 
 
+def _write_ready_checklist(project: Path) -> None:
+    """Step 36's declared output as its producer writes it (setup only):
+    `tapeout_checklist_gen`, READY_FOR_TAPEOUT, every blocker present. The
+    step-36 gate now READS this document (R-0929-U14-OWNER-WAIVER)."""
+    checklist = project / "reports/audit/tapeout_checklist.json"
+    checklist.parent.mkdir(parents=True, exist_ok=True)
+    checklist.write_text(json.dumps({
+        "program": "tapeout_checklist_gen", "verdict": "READY_FOR_TAPEOUT",
+        "summary": {"blockers_total": 1, "blockers_present": 1,
+                    "blockers_missing": 0},
+        "items": [{"name": "gds", "severity": "blocker", "present": True}],
+        "reviewer_todo": ["Review the synthetic DRC waiver"],
+    }))
+
+
 def _base_project(tmp_path: Path) -> Path:
     """gds + netlist + timing + genuine-match LVS always present; DRC
     supplied per-test.
@@ -94,6 +109,7 @@ def _base_project(tmp_path: Path) -> Path:
     (tmp_path / "reports" / "phase3").mkdir(parents=True, exist_ok=True)
     (tmp_path / "reports/phase3/lvs.rpt").write_text(
         "Netlists match uniquely.\nFinal result: Circuits match uniquely.\n")
+    _write_ready_checklist(tmp_path)
     # 2026-07-28: tape-out mode gained an SI (crosstalk-delay) blocking
     # condition. This fixture is about the rc / sentinel / waiver-accounting
     # contract, so it carries a PROVED SI verdict — without one every case
@@ -135,12 +151,7 @@ def _run_signoff(proj: Path) -> subprocess.CompletedProcess:
 def _signed_waiver_project(path: Path) -> Path:
     project = _waiver_project(path)
     assert _run_signoff(project).returncode == sa.WAIVER_EXIT_CODE
-    checklist = project / "reports/audit/tapeout_checklist.json"
-    checklist.parent.mkdir(parents=True, exist_ok=True)
-    checklist.write_text(json.dumps({
-        "verdict": "READY_FOR_TAPEOUT",
-        "reviewer_todo": ["Review the synthetic DRC waiver"],
-    }))
+    _write_ready_checklist(project)
     _sign_ai_fixture(project, "36")
     return project
 
@@ -267,6 +278,9 @@ def test_check_step_three_way_status(tmp_path):
     waiver_p = _signed_waiver_project((tmp_path / "w"))
     owner_waivers = _approve_tapeout(waiver_p)
     clean_p = _clean_project((tmp_path / "c"))
+    # The step's evidence now includes its declared checklist, which the gate
+    # reads; the clean arm signs its judgement over it as the waiver arm does.
+    _sign_ai_fixture(clean_p, "36")
     fail_p = _fail_project((tmp_path / "f"))
 
     assert fc.check_step(waiver_p, step, waivers=owner_waivers).status == "PASS_WITH_WAIVERS"

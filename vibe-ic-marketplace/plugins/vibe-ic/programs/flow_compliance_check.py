@@ -5074,6 +5074,27 @@ _INCOMPLETE_HINT_PREFIX = "__INCOMPLETE_HINT__: "
 _HINT_DECLARED_CLASS_RE = re.compile(r"reason_class=([A-Za-z_][A-Za-z0-9_]*)")
 
 
+def _incomplete_hint(cmd: str, out: str) -> str:
+    """The INCOMPLETE hint for a clause, KEEPING what its callee stated.
+
+    `_check_program_exit_zero` renders a typed rc-2 report as
+    `INCOMPLETE: <cmd> — reason_class=<CLASS>; <reason>`. The hint used to keep
+    only `<cmd>`, so the class the callee STATED and its reason never reached
+    the step row (R-0929-U14-OWNER-WAIVER: a --skip-analog gap must read
+    NOT_MEASURED *with its reason*). Any other `out` gives the bare hint.
+    """
+    m = re.match(r"INCOMPLETE: .*? — (reason_class=[A-Za-z_][A-Za-z0-9_]*;.*)$",
+                 (out or "").splitlines()[0] if out else "")
+    return (f"{_INCOMPLETE_HINT_PREFIX}{cmd} [{m.group(1).strip()}]" if m
+            else f"{_INCOMPLETE_HINT_PREFIX}{cmd}")
+
+
+def _hint_declares_class(hints: List[str], cls: str) -> bool:
+    """True iff some hint carries the callee's own stated `reason_class=cls`."""
+    return any((m := _HINT_DECLARED_CLASS_RE.search(h)) and m.group(1) == cls
+               for h in hints)
+
+
 def _hint_declares_execution_error(hints: List[str]) -> bool:
     """True iff some incomplete hint carries the producer's own EXECUTION_ERROR.
 
@@ -5779,6 +5800,12 @@ def _json_report_at(path: Path) -> Optional[Dict[str, Any]]:
 def _command_json_report(project: Path, cmd: str) -> Optional[Dict[str, Any]]:
     """Read the JSON report path named by a gate command, when available."""
     m = re.search(r"--json[= ]+(\S+)", cmd or "")
+    if not m:
+        # A gate whose report flag is `--out <file>.json` (l10_tb_conformance,
+        # fpga_verification_audit) states its typed class there; read it the
+        # same way (R-0929-U14-OWNER-WAIVER: the --skip-analog gap is stated,
+        # never inferred from prose).
+        m = re.search(r"--out[= ]+(\S+\.json)\b", cmd or "")
     if not m:
         return None
     p = Path(m.group(1).strip("'\""))
@@ -13041,7 +13068,7 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         if passed and _stdout_signals_token(out, _SUBSTANTIVE_STDOUT_TOKEN):
             reasons.append(f"{_SUBSTANTIVE_HINT_PREFIX}{cmd}")
         if passed and _stdout_signals_token(out, _INCOMPLETE_STDOUT_TOKEN):
-            reasons.append(f"{_INCOMPLETE_HINT_PREFIX}{cmd}")
+            reasons.append(_incomplete_hint(cmd, out))
             if _stdout_signals_token(out, _AWAITING_STDOUT_TOKEN):
                 reasons.append(f"{_AWAITING_HINT_PREFIX}{cmd}")
         return passed, reasons
@@ -16398,6 +16425,14 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     owner_record = waivers.get(sid)
     owner_refusal = (_owner_waiver.refusal(owner_record)
                      if owner_record is not None else "no owner-approved record")
+    # R-0929-U14-OWNER-WAIVER / R-0929-ENV-AT-RUNTIME: an environment-
+    # unavailable record that is not an owner approval is still a FACT about
+    # the host, never a waiver. Kept aside so the natural MISSING it explains
+    # reads NOT_MEASURED with its reason below.
+    env_record = (owner_record if (owner_record is not None and owner_refusal
+                                   and isinstance(owner_record, dict)
+                                   and owner_record.get("_env_unavailable")
+                                   is True) else None)
     if owner_record is not None and owner_refusal:
         result.reasons.append(f"OWNER WAIVER REFUSED: {owner_refusal}")
         waivers = {key: value for key, value in waivers.items() if key != sid}
@@ -18026,6 +18061,23 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             f"(approver: {waivers[sid].get('approver', '?')})"
         ]
         # Preserve original natural reasons as breadcrumb for audit.
+        for r in original_reasons[:3]:
+            result.reasons.append(f"  ↳ natural: {r}")
+    elif (env_record is not None
+            and result.status == _T.Verdict.FAIL.value
+            and result.reason_class == _T.ReasonClass.MISSING_ARTEFACT.value):
+        # The declared output is absent BECAUSE the environment could not run
+        # the step: NOT_MEASURED with that reason -- never PASS, never a
+        # waiver, never mistaken for a design FAIL. A genuine gate FAIL is not
+        # this state and stays FAIL.
+        original_reasons = list(result.reasons)
+        result.status = _T.Verdict.NOT_MEASURED.value
+        result.reason_class = _T.ReasonClass.TOOL_ABSENT.value
+        result.reasons = [
+            f"ENVIRONMENT UNAVAILABLE (not a waiver; natural verdict was "
+            f"FAIL/MISSING): {env_record.get('reason', '(no reason)')} "
+            f"(recorded by: {env_record.get('approver', '?')})"
+        ]
         for r in original_reasons[:3]:
             result.reasons.append(f"  ↳ natural: {r}")
 

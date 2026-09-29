@@ -1900,7 +1900,24 @@ def evaluate(
         # cmd_response with no TB evidence STILL FAILs even if it also carries a
         # spurious verification_intent kind.
         cap_gap: Optional[str] = None
+        skipped_by_flag = False
         if (not ok and not executed_fail
+                and waiver_active and is_verification_intent(c)
+                and not _has_digital_signal(c, is_cmd_rsp)
+                and analog_anchor_kind == "deferred"):
+            # R-0929-U14-OWNER-WAIVER: `--skip-analog` never produces a waiver
+            # by itself. A declared analog case the flag skipped was NOT
+            # MEASURED -- the flag's gap (FLOW_DOES_NOT_PERFORM), never a pass,
+            # never a machine waiver; only the owner may waive.
+            skipped_by_flag = True
+            status = "not_measured"
+            cap_gap = CAP_ANALOG_VERIFICATION_INTENT
+            evidence = [
+                "NOT_MEASURED [FLOW_DOES_NOT_PERFORM]: verification_intent "
+                f"A/M-track oracle ({CAP_ANALOG_VERIFICATION_INTENT}) skipped "
+                f"by --skip-analog; reviewable anchor: {analog_anchor}"
+            ]
+        elif (not ok and not executed_fail
                 and waiver_active and is_verification_intent(c)
                 and not _has_digital_signal(c, is_cmd_rsp)):
             waived = True
@@ -2061,6 +2078,9 @@ def evaluate(
                 "capability_gap": cap_gap,
             }
         )
+        if skipped_by_flag:
+            results[-1]["skipped_by_flag"] = "--skip-analog"
+            results[-1]["reason_class"] = "FLOW_DOES_NOT_PERFORM"
         if _refused:
             # The receipt bound this case and the rule was not met: the row
             # keeps the verdict it had, and says why it was not credited.
@@ -2072,6 +2092,10 @@ def evaluate(
             # carried separately (count_waived) and reported via the rc=3
             # PASS_WITH_WAIVERS path, NOT folded into fail_count (which is
             # reserved for genuine, un-waivable digital misses — §4.05).
+            pass
+        elif skipped_by_flag:
+            # NOT_MEASURED for the flag's gap: neither a pass, a fail nor a
+            # waiver (R-0929-U14-OWNER-WAIVER); counted in `not_measured`.
             pass
         elif status == _l10x.NOT_EXECUTED:
             # Nothing ran the case: neither a design PASS nor a design FAIL.
@@ -2304,6 +2328,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     not_executed_count = count_not_executed(results)
     scope_gap = count_producer_scope_gap(results)
     waive_count = count_waived(results)
+    skipped_by_flag = [r for r in results if r.get("skipped_by_flag")]
     checklist_gap_count = count_checklist_gaps(results)
     waiver_caps = sorted({
         r["capability_gap"] for r in results
@@ -2357,6 +2382,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                  for case in all_cases], exec_record),
         },
         "waived": waive_count,
+        "not_measured": len(skipped_by_flag),
         "checklist_gaps": checklist_gap_count,
         "not_measured_excluded": [
             {"case": r["id"], "status": r["status"],
@@ -2396,6 +2422,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         "vacuous_testbench_files": vacuous_files,
         "results": results,
     }
+    if skipped_by_flag and not (fail_count or not_executed_count):
+        # R-0929-U14-OWNER-WAIVER — the step is NOT_MEASURED for the flag's
+        # gap, stated as a typed class the flow reads from this report.
+        out["verdict"] = "NOT_MEASURED"
+        out["reason_class"] = "FLOW_DOES_NOT_PERFORM"
+        out["reason"] = (f"{len(skipped_by_flag)} declared analog "
+                         f"verification_intent case(s) skipped by --skip-analog")
     if args.out is None:
         args.out = str(default_out_path(args.tb_dir))
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
@@ -2476,6 +2509,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.warn_only:
             return 0
         return 1
+
+    if skipped_by_flag:
+        # Never a waiver (R-0929-U14-OWNER-WAIVER): rc 2 with the typed class
+        # in the report, and no PASS_WITH_WAIVERS / VACUOUS_PASS token.
+        bits = [f"{ok_count}/{len(cases)} cases satisfied",
+                f"{len(skipped_by_flag)}/{len(cases)} declared analog "
+                f"verification_intent case(s) skipped by --skip-analog "
+                f"({CAP_ANALOG_VERIFICATION_INTENT}; anchor: {analog_anchor})"]
+        if waive_count or checklist_gap_count:
+            bits.append(f"{waive_count} other case(s) awaiting an owner "
+                        f"waiver; {checklist_gap_count} checklist gap(s)")
+        bits.extend(acceptance_bits)
+        print("NOT_MEASURED [FLOW_DOES_NOT_PERFORM]: l10_tb_conformance — "
+              + "; ".join(bits) + f"  → {args.out}")
+        return 2
 
     if waive_count or checklist_gap_count:
         # ORGANIC #773 — class/kind-aware A/M-track waiver, AND/OR

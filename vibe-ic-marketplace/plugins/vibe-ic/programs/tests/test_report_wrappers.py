@@ -4,6 +4,7 @@ Updated 2026-04-22 after BENCH-A v0.47 pilot to reflect tightened anti-fabricati
 gates: report fixtures must now include a tool-signature string AND meet a
 min-size threshold. Hand-typed <500B stubs are rejected.
 """
+import json
 import sys
 from pathlib import Path
 
@@ -26,6 +27,21 @@ PROGRAMS_DIR = Path(__file__).resolve().parent.parent
 # Padding to clear MIN_REPORT_BYTES thresholds (1-2 KB per mode).
 # Using a long comment-style filler keeps the report plausible.
 _PADDING = "# " + ("=" * 78 + "\n") * 40  # ~3.2 KB
+
+
+def _write_ready_checklist(project: Path) -> None:
+    """Step 36's declared output as its producer writes it (setup only):
+    `tapeout_checklist_gen`, READY_FOR_TAPEOUT, every blocker present. The
+    step-36 gate now READS this document (R-0929-U14-OWNER-WAIVER)."""
+    checklist = project / "reports/audit/tapeout_checklist.json"
+    checklist.parent.mkdir(parents=True, exist_ok=True)
+    checklist.write_text(json.dumps({
+        "program": "tapeout_checklist_gen", "verdict": "READY_FOR_TAPEOUT",
+        "summary": {"blockers_total": 1, "blockers_present": 1,
+                    "blockers_missing": 0},
+        "items": [{"name": "gds", "severity": "blocker", "present": True}],
+        "reviewer_todo": ["Review the synthetic DRC waiver"],
+    }))
 
 
 def _run_wrapper(name: str, project_dir: str) -> int:
@@ -194,6 +210,7 @@ class TestTapeoutSignoffCheck:
         _si_signoff_fixture.write_proved_si_report(tmp_path)
         # U17: the timing slot credits Step 23/32 PASS verdicts, not a report.
         _tapeout_timing_fixture.write_timing_signoff_pass(tmp_path)
+        _write_ready_checklist(tmp_path)
         assert _run_wrapper("tapeout_signoff_check.py", str(tmp_path)) == 0
 
 

@@ -1382,7 +1382,10 @@ def test_the_digital_signal_reader_sees_the_emitters_field_too(tmp_path):
     rc, data = _run(tmp_path, l10, sim / "tb", sim / "work" / "summary.txt",
                     extra=["--skip-analog"])
     st = {r["id"]: r["status"] for r in data["results"]}
-    assert st["genuine_am"] == "waived", data
+    # R-0929-U14-OWNER-WAIVER: the genuine A/M case reaches the flag's
+    # NOT_MEASURED state (not a waiver) -- still reachable, so this is not
+    # passing by the relaxation being unreachable.
+    assert st["genuine_am"] == "not_measured", data
     assert st["mislabelled_digital"] == "NOT_EXECUTED", data
 
 
@@ -1846,7 +1849,9 @@ def test_the_producer_gap_does_not_creep_onto_the_analog_population(tmp_path):
         "<functional_verified>false</functional_verified></results>")
     rc, data = _run(tmp_path, l10, sim / "tb", sim / "work" / "summary.txt",
                     extra=["--skip-analog"])
-    waived = [r for r in data["results"] if r["status"] == "waived"]
+    # R-0929-U14-OWNER-WAIVER: the A/M case skipped by the flag is now
+    # NOT_MEASURED rather than waived; the scope pin is about that same row.
+    waived = [r for r in data["results"] if r["status"] == "not_measured"]
     assert waived and all(
         r["capability_gap"] == gate.CAP_ANALOG_VERIFICATION_INTENT
         for r in waived), f"fixture invalid: {data}"

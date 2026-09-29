@@ -132,9 +132,12 @@ def test_the_deferred_path_is_untouched(tmp_path):
         "<capability_gap>cap:cpu_functional_oracle</capability_gap></r>")
     out = tmp_path / "deferred.json"
     res = _run(root, "--skip-analog", "--out", str(out))
-    assert res.returncode == 3, (res.returncode, res.out)
+    # R-0929-U14-OWNER-WAIVER: the deferred (flag) path is NOT_MEASURED, rc 2,
+    # never a waiver; the anchor and the flag are still named.
+    assert res.returncode == 2, (res.returncode, res.out)
     rec = json.loads(out.read_text())
-    assert rec["waived"] == 1 and rec["fail"] == 0, rec
+    assert rec["not_measured"] == 1 and rec["waived"] == 0, rec
+    assert rec["fail"] == 0, rec
     ev = " ".join(rec["results"][0]["evidence"])
     assert "--skip-analog" in ev, ev
     assert "results.xml" in rec["analog_anchor"], rec["analog_anchor"]
