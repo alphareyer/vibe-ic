@@ -499,6 +499,230 @@ def test_owned_containers_match_the_minting_pid_only():
 
 
 # --------------------------------------------------------------------------
+# The actuator's progress reading across container turnover (U7 follow-up).
+#
+# A LibreLane actuator runs one container per step, and a container's
+# processes leave /proc when it exits. `ProgressMeter` counts CPU only above
+# the highest total it has seen. Summing only the containers running NOW, the
+# total falls when the big repair step exits, and the smaller steps after it
+# never climb back over that peak: past the 1800 s grace a HEALTHY actuator
+# is killed as stalled (RC_STALLED -> ACTUATOR_FAILED).
+#
+# REAL: `run_actuator` (its probe, its reaper, its note), `_watchdog`'s
+# `run_host_supervised` / `run_supervised`, the `ProgressMeter` that fuses the
+# reading, and the `supervise` loop that decides a stall, at the shipped
+# default grace. SCRIPTED, because each is a boundary this file cannot own:
+# the actuator process (a stand-in whose pid no Linux can hand out, so the
+# reaper's group kill can never reach a real process), the clock (virtual
+# seconds), `docker` (a real executable reading the scripted world, so
+# `docker ps` / `docker inspect` / `docker rm` go through the shipped CLI
+# glue), and /proc (`host_tree_progress`, keyed by pid).
+# --------------------------------------------------------------------------
+
+def _unreal_pid(k: int) -> int:
+    """A pid above PID_MAX_LIMIT (2**22) and above this host's pid_max."""
+    try:
+        top = int(pathlib.Path("/proc/sys/kernel/pid_max").read_text())
+    except (OSError, ValueError):
+        top = 0
+    return max(top, 1 << 22) + 1000 + k
+
+
+class _Container:
+    """One step container: alive on [start, end); its tree's cumulative CPU
+    is `base + rate * (t - start)` while it is alive, and nothing after."""
+
+    def __init__(self, k, start, end, rate, base=0.0):
+        self.pid = _unreal_pid(1 + k)
+        self.start, self.end, self.rate, self.base = start, end, rate, base
+
+    def cpu(self, t):
+        return self.base + self.rate * (t - self.start)
+
+
+class _World:
+    """Virtual seconds, and what /proc and `docker` say at each of them."""
+
+    HORIZON_S = 40_000.0
+
+    def __init__(self, tmp_path, *, containers, exit_at, blind=None):
+        self.t = 0.0
+        self.act_pid = _unreal_pid(0)
+        self.containers = {f"vibeic_ll_{self.act_pid}_{k:04x}": c
+                           for k, c in enumerate(containers)}
+        self.exit_at = exit_at
+        self.blind = blind or (lambda container, t: False)
+        self.killed_at = None
+        self.readings = []
+        self.state = tmp_path / "docker_state"
+        self.state.mkdir()
+        self.calls = tmp_path / "docker_calls.txt"
+        self.calls.write_text("")
+        self.docker = tmp_path / "fake_docker"
+        self.docker.write_text(textwrap.dedent(f"""\
+            #!/bin/sh
+            echo "$@" >> {self.calls}
+            for last; do :; done
+            case "$1" in
+              ps) cat {self.state}/ps ;;
+              inspect) cat "{self.state}/pid_$last" 2>/dev/null || exit 1 ;;
+            esac
+            exit 0
+            """))
+        self.docker.chmod(0o755)
+        self._publish()
+
+    def alive(self):
+        return {name: c for name, c in self.containers.items()
+                if c.start <= self.t < c.end}
+
+    def _publish(self):
+        alive = self.alive()
+        (self.state / "ps").write_text("".join(f"{n}\n" for n in alive))
+        for name, c in self.containers.items():
+            pid_file = self.state / f"pid_{name}"
+            if name in alive and not self.blind(c, self.t):
+                pid_file.write_text(f"{c.pid}\n")
+            elif pid_file.exists():
+                pid_file.unlink()
+
+    def host_tree_progress(self, pid):
+        """/proc: the actuator's own tree is its python (1.0 CPU-s, idle
+        while its steps run) plus one `docker run` client per live container,
+        which spends a little relaying what its container does (nothing, for
+        an idle one) and leaves /proc with it; a container's init pid reads
+        its tree while it is alive."""
+        if pid == self.act_pid:
+            if self.rc() is not None:
+                return None
+            return 1.0 + sum(0.001 * c.cpu(self.t)
+                             for c in self.alive().values())
+        for c in self.alive().values():
+            if c.pid == pid:
+                return c.cpu(self.t)
+        return None
+
+    def rc(self):
+        if self.killed_at is not None:
+            return -9
+        if self.exit_at is not None and self.t >= self.exit_at:
+            return 0
+        return None
+
+    def clock(self):
+        return self.t
+
+    def wait(self, proc, timeout):
+        if self.rc() is not None:
+            return self.rc()
+        step = (timeout if self.exit_at is None
+                else min(timeout, self.exit_at - self.t))
+        self.t += step
+        assert self.t < self.HORIZON_S, (
+            f"the watchdog never stopped an actuator that stopped moving "
+            f"(virtual t={self.t:g} s)")
+        self._publish()
+        return self.rc()
+
+    def popen(self, cmd, **kw):
+        world = self
+
+        class _Proc:
+            pid = world.act_pid
+
+            def poll(self):
+                return world.rc()
+
+            def wait(self, timeout=None):
+                return world.rc()
+
+            def kill(self):
+                if world.killed_at is None:
+                    world.killed_at = world.t
+        return _Proc()
+
+
+def _run_in(world, tmp_path, monkeypatch):
+    import _watchdog as _wd
+    real = _wd.run_host_supervised
+
+    def virtual(cmd, **kw):
+        probe = kw["cpu_probe"]
+
+        def recorded(proc):
+            value = probe(proc)
+            world.readings.append((world.t, value))
+            return value
+        kw["cpu_probe"] = recorded
+        return real(cmd, popen_factory=world.popen, wait_fn=world.wait,
+                    clock=world.clock, **kw)
+    monkeypatch.setattr(_wd, "run_host_supervised", virtual)
+    monkeypatch.setattr(_wd, "host_tree_progress", world.host_tree_progress)
+    monkeypatch.setattr(closure, "_DOCKER", str(world.docker))
+    monkeypatch.setattr(closure, "ACTUATOR_STALL_GRACE_S", None)
+    return closure.run_actuator(["the-actuator"], cwd=tmp_path,
+                                budget_s=14400)
+
+
+def test_a_healthy_actuator_is_not_killed_when_smaller_steps_follow_a_big_one(
+        tmp_path, monkeypatch):
+    """PostRouteRepair (1200 CPU-s) exits; STAPostPNR and RCX each end below
+    that peak and together run 4600 s, far past the 1800 s grace. The
+    actuator is working the whole time and must be let finish (rc 0), and its
+    progress reading must never fall at a container boundary."""
+    import _watchdog as _wd
+    repair, sta, rcx = (_Container(0, 0, 1200, 1.0),
+                        _Container(1, 1200, 3600, 0.3),
+                        _Container(2, 3600, 5800, 0.4))
+    # The fixture IS the reviewed shape: every later step ends below the
+    # repair step's peak, and they outlast the grace.
+    peak = repair.cpu(repair.end)
+    assert all(c.cpu(c.end) < peak for c in (sta, rcx))
+    assert rcx.end - repair.end > _wd.DEFAULT_STALL_GRACE_S
+    world = _World(tmp_path, containers=[repair, sta, rcx], exit_at=6000)
+    rc, note = _run_in(world, tmp_path, monkeypatch)
+    assert rc == 0, (rc, note)
+    assert world.killed_at is None
+    assert "stall watchdog" not in note
+    assert not [line for line in world.calls.read_text().splitlines()
+                if line.startswith("rm ")], "nothing was reaped"
+    looks = [(t, v) for t, v in world.readings if v is not None]
+    assert len(looks) > 100 and looks[-1][0] > rcx.start, (
+        "the watchdog really looked, all the way")
+    falls = [(t, a, b) for (_, a), (t, b) in zip(looks, looks[1:]) if b < a]
+    assert not falls, f"the progress reading fell: (t, from, to) {falls[:3]}"
+
+
+def test_an_actuator_that_stops_moving_after_a_big_step_is_still_stopped(
+        tmp_path, monkeypatch):
+    """The repair step exits; the next container stays alive and idle, and
+    its `docker inspect` fails on every other look. Nothing moves, so the
+    watchdog stops the actuator once the grace has passed -- not before --
+    and removes the idle container it started, and only that one."""
+    import _watchdog as _wd
+    repair, hung = (_Container(0, 0, 1200, 1.0),
+                    _Container(1, 1200, float("inf"), 0.0, base=3.0))
+    world = _World(tmp_path, containers=[repair, hung], exit_at=None,
+                   blind=lambda c, t: c is hung and int(t // 30) % 2 == 0)
+    hung_name = next(n for n, c in world.containers.items() if c is hung)
+    rc, note = _run_in(world, tmp_path, monkeypatch)
+    assert rc == _wd.RC_STALLED, (rc, note)
+    assert "stall watchdog" in note
+    assert world.killed_at is not None
+    # when the reading last went past everything it had shown (what the
+    # meter counts as progress)
+    best, last_move = None, 0.0
+    for t, v in world.readings:
+        if v is not None and (best is None or v > best):
+            last_move, best = (t if best is not None else 0.0), v
+    assert world.killed_at - last_move > _wd.DEFAULT_STALL_GRACE_S
+    assert world.killed_at <= last_move + _wd.DEFAULT_STALL_GRACE_S + 2 * 30
+    removed = [line for line in world.calls.read_text().splitlines()
+               if line.startswith("rm ")]
+    assert removed == [f"rm -f {hung_name}"], removed
+
+
+# --------------------------------------------------------------------------
 # HANDOFF: the controller says it cannot, instead of pretending it did.
 # --------------------------------------------------------------------------
 
