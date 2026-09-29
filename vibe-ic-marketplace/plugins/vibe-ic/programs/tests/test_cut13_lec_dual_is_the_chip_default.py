@@ -220,3 +220,31 @@ def test_lec_run_reports_no_counterexample_count_it_never_measured():
             "unproven_points": 0, "non_equivalent_points": None}
     assert lec_run.pass_cache_eligible(full)
     assert not lec_run.pass_cache_eligible(dict(full, non_equivalent_points=1))
+
+
+# ── the EQY arm's own script (measured false counterexample) ───────────────
+def test_the_eqy_gate_is_flattened_and_purged_before_partitioning():
+    """CUT_W4 proof on spm x gf180mcuD (vibeic-eda 0.3.86, EQY v0.69): the
+    unflattened gate let EQY cut gold `pr` but drive the gate's `p` from the
+    liberty flop's private IQ state, so `spm.p`/`spm.c` read NOT_EQUIVALENT on
+    an unreachable state while lec_run proved 65/65. Flatten + purge before
+    EQY partitions: the real netlist PASSes, and three one-cell mutants
+    (p inverted, xor2->xnor2, nand2->and2) each FAIL (report cut_13)."""
+    import librelane_eqy as eqy
+    text = eqy.eqy_script("spm", [Path("/r/spm.v")], Path("/n/spm_synth.v"), "/l.lib")
+    gate = text.split("[gate]", 1)[1].split("[script]", 1)[0].split()
+    assert "flatten" in gate and "-purge" in gate
+    i = gate.index("read_verilog")
+    assert gate.index("flatten") > i and gate.index("-purge") > gate.index("flatten")
+
+
+def test_two_bound_proofs_are_recorded_as_corroborated(tmp_path):
+    import lec_equivalence_check as G
+    root = _gate_tree(tmp_path, dict(_arms("PASS", "lec_run", "PASS"),
+                                     arms={"lec_run": "PASS", "eqy": "PASS"}),
+                      lec={"verdict": "PASS", "equivalent": True, "compared_points": 65,
+                           "unproven_points": 0, "non_equivalent_points": None,
+                           "proof_identity": {"gate_netlist": {"path": GATE_REL,
+                                                               "sha256": SHA}}})
+    res = G.audit(root)
+    assert res.passed and res.summary["tool_arm"]["state"] == "CORROBORATED"
