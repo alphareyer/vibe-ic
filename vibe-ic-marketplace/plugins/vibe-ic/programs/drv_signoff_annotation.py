@@ -127,20 +127,69 @@ def _spef_connections(path: Path) -> dict[str, set[str]]:
     return nets
 
 
-def _def_segments(path: Path) -> dict[str, int]:
+#: Routed geometry in a DEF net record.  Regular wiring opens with one of
+#: the four wiring statuses (a SUBNET's wiring has no leading '+'); special
+#: wiring adds SHIELD and the DEF 5.8 RECT / POLYGON / VIA shapes.
+_REGULAR_WIRING = re.compile(r"\b(?:ROUTED|FIXED|COVER|NOSHIELD)\b")
+_SPECIAL_WIRING = re.compile(r"\b(?:ROUTED|FIXED|COVER|SHIELD|NOSHIELD)\b"
+                             r"|\+\s*(?:RECT|POLYGON|VIA)\b")
+_CONNECTION = re.compile(r"\(\s*(\S+)\s+(\S+)(?:\s+\+\s*SYNTHESIZED)?\s*\)")
+
+
+def _net_record(record: str) -> tuple[list[tuple[str, str]], str]:
+    """Split one net record into its connection list and the rest."""
+    connections = []
+    rest = record
+    while True:
+        match = _CONNECTION.match(rest.lstrip())
+        if not match:
+            break
+        connections.append(match.groups())
+        rest = rest.lstrip()[match.end():]
+    return connections, rest
+
+
+def _def_segments(path: Path) -> dict[str, dict]:
+    """Every NETS and SPECIALNETS net: its routed-geometry count and the pin
+    endpoints its connection list names (R-0928-DRV-IC: a zero-segment proof
+    needs both).  A net present in both sections is one net."""
     body = path.read_text(errors="replace")
-    match = re.search(r"(?ms)^NETS\s+\d+\s*;\s*(.*?)^END NETS\b", body)
-    if not match:
+    sections = {"NETS": re.search(r"(?ms)^NETS\s+\d+\s*;\s*(.*?)^END NETS\b", body),
+                "SPECIALNETS": re.search(
+                    r"(?ms)^SPECIALNETS\s+\d+\s*;\s*(.*?)^END SPECIALNETS\b", body)}
+    if not sections["NETS"]:
         raise ValueError("routed DEF NETS section absent")
-    result = {}
-    for item in re.finditer(r"(?ms)^\s*-\s+(\S+)\s+(.*?);", match.group(1)):
-        name, record = item.groups()
-        if name in result:
-            raise ValueError("routed DEF net repeated")
-        # Every DEF regular-wiring status opens routed geometry; a net with
-        # any of them is not a zero-segment net.
-        result[name] = len(re.findall(r"\b(?:ROUTED|FIXED|COVER|NOSHIELD)\b", record))
+    result: dict[str, dict] = {}
+    for section, match in sections.items():
+        if not match:
+            continue
+        seen: set[str] = set()
+        wiring = _REGULAR_WIRING if section == "NETS" else _SPECIAL_WIRING
+        for item in re.finditer(r"(?ms)^\s*-\s+(\S+)\s+(.*?);", match.group(1)):
+            name, record = item.groups()
+            if name in seen:
+                raise ValueError(f"routed DEF {section} net repeated")
+            seen.add(name)
+            connections, rest = _net_record(record)
+            net = result.setdefault(_unescape(name), {"segments": 0, "endpoints": set(),
+                                           "wildcard": False, "sections": []})
+            net["sections"].append(section)
+            net["segments"] += len(wiring.findall(rest))
+            for component, pin in connections:
+                if component == "*":
+                    net["wildcard"] = True  # every instance's pin: not a pin list
+                elif component == "PIN":
+                    net["endpoints"].add(_unescape(pin))
+                else:
+                    net["endpoints"].add(_unescape(component) + "/" + _unescape(pin))
     return result
+
+
+def _zero_segment_proof(net: dict | None, pins: set[str]) -> bool:
+    """The net carries no routed segment and its endpoints are exactly the
+    census pins on it."""
+    return bool(net) and net["segments"] == 0 and not net["wildcard"] and (
+        net["endpoints"] == pins)
 
 
 def derive(scene_dir: Path, pins: dict, liberties: list[dict], lefs: list[dict],
@@ -203,9 +252,11 @@ def derive(scene_dir: Path, pins: dict, liberties: list[dict], lefs: list[dict],
                 resolved.append({"pin": name, "net": net,
                                  "reason": "port_pad_spef_conn",
                                  "spef_endpoints": sorted(wanted)})
-            elif port_pad and segments.get(net) == 0:
+            elif port_pad and _zero_segment_proof(segments.get(_unescape(net)), wanted):
                 resolved.append({"pin": name, "net": net,
-                                 "reason": "port_pad_zero_routed_segments"})
+                                 "reason": "port_pad_zero_routed_segments",
+                                 "def_sections": segments[_unescape(net)]["sections"],
+                                 "def_endpoints": sorted(wanted)})
             else:
                 unresolved.append({"pin": name, "net": net,
                                    "reason": "missing_parasitic_or_geometry_proof"})

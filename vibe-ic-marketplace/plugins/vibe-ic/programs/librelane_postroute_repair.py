@@ -344,6 +344,10 @@ def _step32_drv_signoff(project: Path, report: Dict[str, Any]) -> None:
         source.unlink(missing_ok=True)
         if not report.get("final", {}).get("sta_state"):
             raise ValueError("final STAPostPNR state absent")
+        # The sign-off STA and post-route repair receipts are the final
+        # state's, not whichever candidate's chain happened to run last.
+        import drv_stage_receipts as _drv_stages
+        _drv_stages.record_step32(project, report)
         _drv_plan.capture_and_publish(project, final_state=report)
         bundle = json.loads(source.read_text())
         result = _drv.judge(bundle, project=project)
