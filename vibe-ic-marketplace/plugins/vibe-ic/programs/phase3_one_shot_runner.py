@@ -3363,15 +3363,19 @@ def _drv_constraints_sdc_block(slew_ns: Optional[float],
             "  }",
             "}",
         ])
-        # Only set_max_capacitance may take the hierarchical-pin scope. The
-        # other two get [current_design], which every DRV command accepts.
-        scope = "[get_pins -hierarchical *]"
+        # set_max_capacitance ACCEPTS the hierarchical-pin scope, but the
+        # checker never reads it: OpenSTA's CheckCapacitances::findLimit (and
+        # so repair_design) consults only the top-cell, port and Liberty
+        # limits. Measured on a routed gf180 die: the pin-scoped 0.2 pF left
+        # every internal driver at its Liberty limit (0.2336 pF on buf_1/Z),
+        # so repair never targeted the margin and sign-off read a tool limit
+        # above the frozen one. The margin therefore takes [current_design],
+        # like set_max_transition; the port list still names every signal port.
     if slew_ns is not None:
         if slew_source:
             lines.append(f"# R8 source: {slew_source}")
-        # NOT `scope`: set_max_transition REFUSES a Pin ("Error 100:
-        # unsupported object type Pin"), so the hierarchical-pin scope that
-        # set_max_capacitance takes would abort the SDC here.
+        # Never a pin scope: set_max_transition REFUSES a Pin ("Error 100:
+        # unsupported object type Pin").
         lines.append(f"set_max_transition {slew_ns} [current_design]")
         if supplies:
             if slew_source:

@@ -134,10 +134,14 @@ def test_set_max_transition_never_takes_a_pin_scope():
 
 
 def test_set_max_capacitance_keeps_the_pin_scope():
-    """NO-LEAK. Capacitance is the one command that DOES accept pins; the fix
-    must not narrow a constraint that was correct."""
+    """NO-LEAK. The capacitance margin must still reach every internal pin.
+    set_max_capacitance ACCEPTS the pin scope, but OpenSTA's checker never
+    reads a pin limit (measured, test_drv_cap_margin_reaches_the_checker.py:
+    u1/X stays at its Liberty 0.1584 pF under the pin scope), so the scope
+    that reaches every internal driver is the design."""
     text = _block()
-    assert "set_max_capacitance 0.12 [get_pins -hierarchical *]" in text, text
+    assert "set_max_capacitance 0.12 [current_design]" in text, text
+    assert "set_max_capacitance 0.12 $_vibeic_drv_signal_ports" in text, text
 
 
 # ── the control: a design that declares no fanout cap ────────────────────────
