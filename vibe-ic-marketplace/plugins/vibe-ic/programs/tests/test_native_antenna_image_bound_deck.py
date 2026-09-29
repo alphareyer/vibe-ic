@@ -679,3 +679,36 @@ def test_a_declared_receipt_naming_no_pdk_is_refused_by_name(tmp_path,
     assert result["verdict"] == "DISCLOSED_SKIP", result
     assert "declared PDK root" in result["reason"]
     assert "names no PDK" in result["reason"]
+
+
+# the same login-banner class, in die finishing's technology lookup ---------- #
+def test_die_finishing_names_the_technology_through_a_login_banner(
+        tmp_path, monkeypatch):
+    """Review wave 57 (ANTDECK, low): `derive_tech` listed `*.lyt` through
+    `run_argv` (`bash -lc` in the container), read the two banner lines as
+    two more technology files and refused. It now lists directly."""
+    import die_finishing_gen as dfg
+    tech = "/pdk/libs.tech/klayout/tech"
+    lyt = f"{tech}/fixture.lyt"
+
+    def fake_run(argv, **kw):
+        argv = list(argv)
+        if "bash" in argv and "-lc" in argv:       # the login-shell path
+            cmd = argv[-1]
+            if cmd.split()[:1] == ["head"] or " head " in f" {cmd} ":
+                body = LOGIN_BANNER + "<technology><name>fx</name></technology>\n"
+            else:
+                body = LOGIN_BANNER + lyt + "\n"
+            return subprocess.CompletedProcess(argv, 0, body, "")
+        assert argv[3:5] == ["find", "-L"], argv   # direct, no shell
+        return subprocess.CompletedProcess(argv, 0, lyt.encode() + b"\0", b"")
+
+    monkeypatch.setattr(launch._ce, "docker_exec_argv",
+                        lambda c, *rest, opts=(): ["docker", "exec", c, *rest])
+    monkeypatch.setattr(launch.subprocess, "run", fake_run)
+    monkeypatch.setattr(launch._pr, "run_best_effort",
+                        lambda argv, **kw: fake_run(argv, **kw), raising=False)
+    runner = launch.ContainerRunner("fixture-eda")
+    name, why = dfg.derive_tech(runner, f"{tech}/scripts/sealring.py")
+    assert name == "fx", why
+    assert "fixture.lyt" in why
