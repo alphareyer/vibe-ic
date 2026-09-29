@@ -530,3 +530,28 @@ def test_the_plan_reads_pad_cells_from_the_linked_liberty(tmp_path):
     lib.write_text('library (io) { time_unit : "1ns"; capacitive_load_unit (1, pf); '
                    'cell (padcell) { pad_cell : true; } cell (bufcell) { area : 1; } }')
     assert plan._pad_cells([{"path": str(lib)}]) == frozenset({"padcell"})
+
+
+def test_io_library_cells_without_pad_cell_are_io_class(tmp_path):
+    """Measured on spm's sign-off STA (real run, 0.3.85): the IO library's
+    fill/corner/supply cells (limit 1, library default) carry no pad_cell
+    attribute.  Read as core, they made the design limit ambiguous (None);
+    the scene's PAD_LIBS Liberty makes all of its cells IO class."""
+    io = tmp_path / "io.lib"
+    io.write_text('library (io) { time_unit : "1ns"; capacitive_load_unit (1, pf); '
+                  'cell (padcell) { pad_cell : true; pin (Y) { direction : output; } } '
+                  'cell (fillcell) { pin (VDD) { direction : inout; } } }')
+    std = tmp_path / "std.lib"
+    std.write_text('library (std) { time_unit : "1ns"; capacitive_load_unit (1, pf); '
+                   'cell (bufcell) { pin (Z) { direction : output; } } }')
+    libs = [{"path": str(io)}, {"path": str(std)}]
+    limits = ("max fanout\n\nPin u_fill/VDD\nmax fanout 1\nfanout 1\n-----------\nSlack 0 (MET)\n"
+              "\nPin u1/Z\nmax fanout 4\nfanout 2\n-----------\nSlack 2 (MET)\n")
+    cells = "pin_cell\tu_fill/VDD\tfillcell\npin_cell\tu1/Z\tbufcell\n"
+    assert plan._class_fanout_limits(limits, cells, plan._pad_cells(libs)) == {
+        "core": None, "io": None}                       # fill read as core: ambiguous
+    assert plan._class_fanout_limits(limits, cells, plan._pad_cells(libs, [io])) == {
+        "core": 4.0, "io": 1.0}
+    env = {"PAD_LIBS": "/pdk/p/libs.ref/io/lib/io__tt.lib /pdk/p/libs.ref/io/lib/io__ss.lib",
+           "CELL_LIBS": "/pdk/p/libs.ref/std/lib/std__tt.lib"}
+    assert plan._pad_lib_paths(env, tmp_path, "p", "tt") == [tmp_path / "p/libs.ref/io/lib/io__tt.lib"]

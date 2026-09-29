@@ -194,12 +194,27 @@ def _ideal_clock_excluded(behavior: str) -> bool:
         state == "0" for state in states)
 
 
-def _pad_cells(liberties) -> frozenset:
-    """Cells a linked Liberty declares `pad_cell : true` (the judge's IO class)."""
+def _pad_cells(liberties, io_library_paths=()) -> frozenset:
+    """The IO class of R-0929-DRV-FANOUT-LIMIT: every cell a linked Liberty
+    declares `pad_cell : true` (the judge's own IO test) and every cell of a
+    Liberty the scene links as an IO library (LibreLane PAD_LIBS -- its fill,
+    corner and supply cells carry the IO library's default limit but no
+    pad_cell attribute).  Everything else is core."""
+    io_paths = {str(Path(p).resolve()) for p in io_library_paths}
     cells: set[str] = set()
     for item in liberties:
-        cells |= set(_liberty_limits(Path(item["path"]).read_text())["pad_cells"])
+        limits = _liberty_limits(Path(item["path"]).read_text())
+        cells |= set(limits["pad_cells"])
+        if str(Path(item["path"]).resolve()) in io_paths:
+            cells |= set(limits["cells"])
     return frozenset(cells)
+
+
+def _pad_lib_paths(env: dict, root: Path, pdk: str, pvt: str) -> list[Path]:
+    """The scene's IO Liberties, as `_scene_files` links them from PAD_LIBS."""
+    return [_pdk_path(value, root, pdk)
+            for value in re.findall(r"/[^\s\"\\]+\.lib\b", env.get("PAD_LIBS", ""))
+            if pvt in value]
 
 
 def _class_fanout_limits(limits: str, pin_cells: str, pad_cells: frozenset) -> dict:
@@ -531,6 +546,7 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
     scene_libs = {}
     liberties = {}
     scenes = []
+    io_library_paths: list[Path] = []
     signoff_sdc = None
     for name in sorted(expected):
         pvt, _, rc = name.rpartition("_")
@@ -546,6 +562,7 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
         # and PAD_LIBS were read into STA.
         generated_liberty = _run_path(project, state["lib"][actual_name])
         linked, lefs = _scene_files(env, root, pdk, pvt)
+        io_library_paths.extend(_pad_lib_paths(env, root, pdk, pvt))
         for item in linked:
             existing = liberties.setdefault(item["name"], item)
             if existing != item:
@@ -615,7 +632,7 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
         postroute_repair_ran = bool(repair.is_file() and
                                     json.loads(repair.read_text()).get("adopted"))
     stages, stage_receipts = _stages(project, postroute_repair_ran,
-                                     _pad_cells(liberties.values()))
+                                     _pad_cells(liberties.values(), io_library_paths))
     return {"top": top, "identity": identity, "frozen": frozen,
             "current": current, "stages": stages,
             "stage_receipts": stage_receipts, "pins": {}, "scenes": scenes,
