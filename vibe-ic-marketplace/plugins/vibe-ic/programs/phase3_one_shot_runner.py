@@ -63710,21 +63710,22 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                          "OCV unavailable) — honest fallback, not auto-run.")
     # Durable disclosure of the trigger decision (§4.05 audit trail), bound to
     # the report it was decided from (`_step32_decision_record`).
-    # A bound producer receipt keeps its bytes; the canonical decision is then
-    # recorded beside it, not over it.
+    # The canonical decision is always recorded in its own declared file
+    # (`postroute_timing_repair_audit` ORs its demands in behind a producer
+    # receipt). The declared decision record gets the same bytes unless a
+    # bound producer receipt holds it, which keeps its bytes.
     try:
         _decision_record = json.dumps(_step32_decision_record(
             project, _repair_decision, mc_ocv_stance, _sta_for_repair), indent=2) + "\n"
+        _aa.write_text(postroute_timing_repair_out
+                       / "postroute_timing_repair_decision.canonical.json",
+                       _decision_record)
+        written.append(str(postroute_timing_repair_out
+                           / "postroute_timing_repair_decision.canonical.json"))
         if _producer_receipt is None:
             _aa.write_text(postroute_timing_repair_out / "postroute_timing_repair_decision.json",
                            _decision_record)
             written.append(str(postroute_timing_repair_out / "postroute_timing_repair_decision.json"))
-        else:
-            _aa.write_text(postroute_timing_repair_out
-                           / "postroute_timing_repair_decision.canonical.json",
-                           _decision_record)
-            written.append(str(postroute_timing_repair_out
-                               / "postroute_timing_repair_decision.canonical.json"))
     except Exception as _decision_exc:  # pragma: no cover — defensive
         notes.append(f"Step-32 decision record emit failed: {_decision_exc}")
 
@@ -65260,7 +65261,7 @@ def _step32_adopted_repair_log(project: Path, step32: Dict[str, Any]
     the producer's own report (bound by sha256), and the re-verification: the
     adopted route's STAPostPNR state, re-hashed now against the digest the
     producer recorded. `re_verified` is true only when that state still has
-    those bytes and every figure was measured."""
+    those bytes, every figure was measured and none is residual."""
     before, after = step32.get("baseline") or {}, step32.get("final") or {}
     state = after.get("sta_state")
     state_ok = False
@@ -65291,7 +65292,9 @@ def _step32_adopted_repair_log(project: Path, step32: Dict[str, Any]
             # The line R-0929-STEP32-RECORD puts HERE instead of a flag.
             "no_further_repair_needed": bool(state_ok and measured and not residual),
         },
-        "re_verified": bool(state_ok and measured),
+        # As the producer's own log: a route still carrying a violation is
+        # not re-verified clean.
+        "re_verified": bool(state_ok and measured and not residual),
         "residual_violation": bool(residual) if measured else None,
         # No `affected_steps`: that list is the timing-repair pass's derived
         # blast radius (one literal, pinned). An adopted candidate is the
@@ -75500,8 +75503,8 @@ def _run_derived_artefact_generators(project: Path, effective_top: Optional[str]
                                      ) -> List[Dict[str, Any]]:
     """Run `_DERIVED_ARTEFACT_GENERATORS` in order and return each outcome.
 
-    Best-effort as before: a generator's exit status never changes the run's
-    verdict here (each artefact has its own gate). What changed is that the
+    Best-effort for rc 0/1 (each artefact has its own gate); an rc-2 refusal
+    becomes a NOT_MEASURED plan row (`_derived_generator_refusals`). What changed is that the
     outcome is no longer thrown away. The loop used to capture every
     generator's stdout/stderr and drop the CompletedProcess, so a generator
     that refused -- and removed the artefact it owns -- left no trace in the
