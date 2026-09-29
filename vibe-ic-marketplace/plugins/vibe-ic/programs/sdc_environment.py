@@ -134,8 +134,123 @@ def _sdc_environment_values(project: Path, liberty_path: str, container: str,
         unread_design + unread_pdk
 
 
+#: R-0929-PAD-INPUT-DRIVE. The record of how a DIE top's bond-pad inputs are
+#: driven, read by the Step-23 STA verdict (a NOT_MEASURED drive cannot PASS).
+PAD_INPUT_DRIVE_REPORT = "reports/phase3/pad_input_drive.json"
+PAD_INPUT_DRIVE_SCHEMA = "vibeic.pad_input_drive.v1"
+_DESIGN_TIER = "design doc "
+
+
+def _design_input_transition(project: Path) -> Optional[Tuple[str, str]]:
+    """A design-declared off-chip input transition (ns): a strict L9 key/value
+    row `set_input_transition | <ns>`, the same grammar as every R8 key."""
+    for root in (project / "input" / "docs", _pl.generated_docs_dir(project)):
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("L9*")):
+            try:
+                lines = path.read_text(errors="replace").splitlines()
+            except OSError:
+                continue
+            for lineno, line in enumerate(lines, 1):
+                m = re.match(r"\s*\|\s*`?set_input_transition`?\s*\|"
+                             r"\s*\*{0,2}\s*([^|]+?)\s*\*{0,2}\s*\|", line)
+                if not m:
+                    continue
+                try:
+                    number = float(m.group(1).strip().strip("*` "))
+                except ValueError:
+                    continue
+                if math.isfinite(number) and number > 0:
+                    return f"{number:g}", f"{_DESIGN_TIER}{path}:{lineno}"
+    return None
+
+
+def _pdk_io_input_transition(project: Path) -> Optional[Tuple[str, str]]:
+    """The PDK IO-tier off-chip input transition, with its source.
+
+    No PDK this plugin supports documents one today: the IO Liberty carries
+    only table axes (`input_transition_time` index values, which are a
+    characterisation range, not a board driver) and the pinned LibreLane
+    config's only driving cells are the CORE library's synthesis cells. A PDK
+    that documents an IO-tier value is read here, with its file and key."""
+    return None
+
+
+def _pad_input_drive(project: Path, values: Dict[str, Tuple[str, str]]
+                     ) -> Tuple[Dict[str, Tuple[str, str]], Dict[str, object]]:
+    """R-0929-PAD-INPUT-DRIVE: resolve the off-chip drive of a DIE's inputs.
+
+    On a pad-ring (DIE) top every input is a bond-pad port. The core library's
+    synthesis driving cell (a tiny inverter from the pinned PDK's LibreLane
+    config) "driving" a pad's input capacitance is not a model of anything:
+    measured on a routed gf180 die it put 50.8 ns on the clock port and turned
+    9/9 positive scenes into -55.9 ns. The ladder is the design's declared
+    driver or input transition, then a PDK IO-tier value; with neither the
+    drive is NOT_MEASURED, and the STA verdict consumer must not read the
+    ideal edge the deck is then left with as a sign-off PASS. HARDMACRO / core
+    runs keep the synthesis driving cell (their inputs ARE driven on chip).
+    """
+    try:
+        import _tapeout_declaration as _td
+        die = bool(_td.requests_pad_ring(project))
+    except Exception as exc:  # noqa: BLE001 — an unreadable route is not a core route
+        return values, {"schema": PAD_INPUT_DRIVE_SCHEMA, "applies": None,
+                        "verdict": "NOT_MEASURED",
+                        "reason": f"route undeterminable: {exc!r}"}
+    if not die:
+        return values, {"schema": PAD_INPUT_DRIVE_SCHEMA, "applies": False,
+                        "verdict": "NOT_APPLICABLE",
+                        "reason": "not a pad-ring (DIE) top; the synthesis "
+                                  "driving cell models on-chip drive"}
+    out = dict(values)
+    cell = out.get("set_driving_cell")
+    record: Dict[str, object] = {"schema": PAD_INPUT_DRIVE_SCHEMA,
+                                 "applies": True}
+    if cell and cell[1].startswith(_DESIGN_TIER):
+        record.update(verdict="DECLARED", model="set_driving_cell",
+                      value=cell[0], source=cell[1])
+        return out, record
+    if cell:
+        record["refused_core_driving_cell"] = {"value": cell[0],
+                                               "source": cell[1]}
+        out.pop("set_driving_cell")
+    for tier, found in (("DECLARED", _design_input_transition(project)),
+                        ("PDK_IO_TIER", _pdk_io_input_transition(project))):
+        if found:
+            out["set_input_transition"] = found
+            record.update(verdict=tier, model="set_input_transition",
+                          value=found[0], source=found[1])
+            return out, record
+    record.update(verdict="NOT_MEASURED", reason=(
+        "no design-declared off-chip input driver/transition and no PDK "
+        "IO-tier value; the core synthesis driving cell never drives a bond "
+        "pad (R-0929-PAD-INPUT-DRIVE), so input-launched and clock-latency "
+        "timing is NOT_MEASURED"))
+    return out, record
+
+
+def write_pad_input_drive_record(project: Path, record: Dict[str, object]) -> Path:
+    import _atomic_artefact as _aa
+    import json
+    return _aa.write_json(Path(project) / PAD_INPUT_DRIVE_REPORT, record)
+
+
+def pad_input_drive_not_measured(project: Path) -> Optional[str]:
+    """The reason a sign-off STA verdict cannot PASS, or None."""
+    import json
+    try:
+        doc = json.loads((Path(project) / PAD_INPUT_DRIVE_REPORT).read_text())
+    except (OSError, ValueError):
+        return None
+    if isinstance(doc, dict) and doc.get("verdict") == "NOT_MEASURED":
+        return str(doc.get("reason") or "pad input drive NOT_MEASURED")
+    return None
+
+
 def _sdc_environment_prefix(values: Dict[str, Tuple[str, str]],
-                            unread: Sequence[str], time_scale: float = 1.0) -> str:
+                            unread: Sequence[str], time_scale: float = 1.0,
+                            pad_drive: Optional[Dict[str, object]] = None) -> str:
     """Emit sourced commands and name every command that could not be emitted.
 
     Time-valued declarations are in ns; OpenSTA reads the active Liberty unit.
@@ -144,14 +259,25 @@ def _sdc_environment_prefix(values: Dict[str, Tuple[str, str]],
     ``UNDECLARED`` instead.
     """
     lines = [f"# {item}" for item in unread]
+    pad = pad_drive if isinstance(pad_drive, dict) and pad_drive.get("applies") else None
+    if pad is not None:
+        refused = pad.get("refused_core_driving_cell")
+        if isinstance(refused, dict):
+            lines.append(f"# R-0929-PAD-INPUT-DRIVE: core synthesis driving cell "
+                         f"{refused.get('value')} ({refused.get('source')}) NOT "
+                         f"applied: every input of this DIE top is a bond pad")
+        if pad.get("verdict") == "NOT_MEASURED":
+            lines.append(f"# NOT_MEASURED: OFFCHIP_INPUT_DRIVE; {pad.get('reason')}")
     for name in _SDC_ENV_KEYS:
+        if pad is not None and name == "set_driving_cell":
+            continue
         if name not in values:
             status = "NOT_MEASURED" if unread else "UNDECLARED"
             reason = ("at least one source tier NOT_READ" if unread else
                       "no value in design, pinned PDK, or Liberty")
             lines.append(f"# {status}: {_SDC_ENV_KEYS[name]}; {reason}")
     for name in ("set_clock_uncertainty", "set_clock_transition",
-                 "set_driving_cell", "set_load"):
+                 "set_driving_cell", "set_input_transition", "set_load"):
         if name not in values:
             continue
         raw, source = values[name]
@@ -160,6 +286,8 @@ def _sdc_environment_prefix(values: Dict[str, Tuple[str, str]],
         elif name == "set_driving_cell":
             cell, pin = raw.split("/", 1)
             command = f"set_driving_cell -lib_cell {cell} -pin {pin} [all_inputs]"
+        elif name == "set_input_transition":
+            command = f"set_input_transition {float(raw) * time_scale:g} [all_inputs]"
         else:
             # LibreLane OUTPUT_CAP_LOAD is fF; OpenSTA set_load takes pF.
             command = f"set_load {float(raw) / 1000:g} [all_outputs]"
