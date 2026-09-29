@@ -22337,12 +22337,18 @@ def _lec_eqy_arm(project: Path, top_name: str, gate_netlist: str,
         if std_cell_library is None and pdk == declared:
             std_cell_library = switch.get("std_cell_library")
         # Image and PDK root through the contract's resolvers (declared >
-        # resolved at run time > refused, naming the cause). The EQY plugins
-        # ship in the released image (0.3.86), so nothing is overlaid.
+        # resolved at run time > refused, naming the cause).
         image = _llc.resolve_image(project)
         root = _llc.pdk_root_resolution(project, str(pdk), image=image)["path"]
         mounts: List[Tuple[Path, str]] = [(Path(root), "/pdk")]
         pdk_root = "/pdk"
+        overlay = switch.get("development_eqy_overlay")
+        if overlay:
+            # Development input only: the released image ships no EQY plugins.
+            base = Path(overlay)
+            mounts.append((base / "eqy", "/foss/tools/yosys/bin/eqy"))
+            mounts += [(base / name, "/foss/tools/bin/" + name) for name in
+                       ("eqy_combine.so", "eqy_partition.so", "eqy_recode.so")]
         rtl_dir = project / "phase2/stage1/rtl"
         rtl = sorted(rtl_dir.glob("*.sv")) + sorted(rtl_dir.glob("*.v"))
         folder = _eqy.run_eqy(project, image, str(pdk), top_name, rtl, netlist,
