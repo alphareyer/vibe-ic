@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _gdsii  # noqa: E402
 import _si_signoff_fixture  # noqa: E402
+import _tapeout_timing_fixture  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
@@ -191,6 +192,8 @@ class TestTapeoutSignoffCheck:
         # never ran, no longer certifies. "With evidence" now includes a
         # PROVED SI verdict.
         _si_signoff_fixture.write_proved_si_report(tmp_path)
+        # U17: the timing slot credits Step 23/32 PASS verdicts, not a report.
+        _tapeout_timing_fixture.write_timing_signoff_pass(tmp_path)
         assert _run_wrapper("tapeout_signoff_check.py", str(tmp_path)) == 0
 
 

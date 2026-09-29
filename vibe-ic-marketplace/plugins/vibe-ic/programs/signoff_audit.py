@@ -1228,6 +1228,203 @@ def _si_vacuity_disclosures(project_dir: Path) -> dict:
     return out
 
 
+#: U17 — the timing slot certifies the SIGN-OFF VERDICTS, not a report's
+#: existence: every blocking clause of Step 23 and Step 32's own gate
+#: evaluation. A -55 ns post-route report is a timing report; it is not
+#: tape-out timing.
+_STEP23_VERDICT_REL = "reports/phase3/sta/post_route_summary.json"
+_STEP23_PRODUCER = "eda_report_audit:sta"
+_STEP32_LIBRELANE_REL = "reports/phase3/librelane_postroute_repair.json"
+_STEP32_DECISION_REL = ("phase3/stage3/postroute_timing_repair/"
+                        "postroute_timing_repair_decision.json")
+#: step-32 audit categories that mean "no measured verdict", not "measured bad"
+_STEP32_UNMEASURED = frozenset({
+    "NO_REPAIR_ARTIFACT", "BAD_JSON", "STA_REPORT_MISSING",
+    "TIMING_BASIS_NOT_MEASURED", "SIGNOFF_DOMAIN_NOT_DETERMINED"})
+_FAIL_WORDS = frozenset({"FAIL", "FAILED", "REFUSED", "ERROR", "IO_ERROR",
+                         "VIOLATION", "INVALID"})
+
+
+def _worst(states) -> str:
+    """FAIL outranks NOT_MEASURED outranks WAIVED outranks PASS."""
+    states = list(states)
+    for s in ("FAIL", "NOT_MEASURED", "WAIVED"):
+        if s in states:
+            return s
+    return "PASS"
+
+
+def _step_clauses(step_id: str) -> list:
+    """The step's gate clauses as the shipped flow yaml declares them, as
+    ``(program, json_rel_or_None, condition_globs_or_None)``. Advisory clauses
+    are not verdicts and are left out; a clause added to the step later is
+    required here by construction."""
+    if _PROGRAMS_DIR not in sys.path:
+        sys.path.insert(0, _PROGRAMS_DIR)
+    import _flow_yaml  # noqa: PLC0415
+    step = next((st for st in (_flow_yaml.load() or {}).get("steps", [])
+                 if str(st.get("id")) == step_id), None)
+    if step is None:
+        raise ValueError(f"step {step_id} not declared in the flow yaml")
+    out = []
+    for clause in (step.get("gate") or {}).get("all_of", []):
+        cond = None
+        if "program_exit_zero" in clause:
+            cmd = clause["program_exit_zero"]
+        elif "optional_program_exit_zero" in clause:
+            spec = clause["optional_program_exit_zero"]
+            cmd = spec.get("command", "") if isinstance(spec, dict) else spec
+            cond = (spec.get("condition_files_exist") or []) \
+                if isinstance(spec, dict) else []
+        else:
+            continue
+        if isinstance(cmd, dict):
+            cmd = cmd.get("command", "")
+        toks = str(cmd).split()
+        if not toks:
+            continue
+        rel = toks[toks.index("--json") + 1] if "--json" in toks[:-1] else None
+        if rel is None:
+            # A clause that names no --json publishes its verdict at the
+            # step's declared output named after it (the runner's inline
+            # executor writes it there).
+            stem = toks[0].removesuffix("_check")
+            rel = next((o for o in step.get("required_outputs") or []
+                        if isinstance(o, str) and " OR " not in o
+                        and Path(o).suffix == ".json"
+                        and Path(o).stem in stem), None)
+        out.append((toks[0], rel, cond))
+    return out
+
+
+def _record_state(doc) -> tuple:
+    if not isinstance(doc, dict):
+        return "NOT_MEASURED", "not a JSON object"
+    word = str(doc.get("verdict") or doc.get("status") or "").upper()
+    if word == "PASS" or (not word and doc.get("passed") is True):
+        return "PASS", "PASS"
+    if word in _FAIL_WORDS or (not word and doc.get("passed") is False):
+        return "FAIL", word or "passed=false"
+    if word.startswith("WAIVED"):
+        return "WAIVED", word
+    if word in ("NOT_APPLICABLE", "N/A"):
+        # The clause DECIDED its subject is absent; it neither blocks nor
+        # stands in for a PASS the other clauses owe.
+        return "NA", word
+    return "NOT_MEASURED", word or "no verdict"
+
+
+def _step23_summary_state(project_dir: Path, doc) -> tuple:
+    """The nominal STA audit, bound to the report on disk NOW (#2057)."""
+    if not isinstance(doc, dict) or doc.get("program") != _STEP23_PRODUCER:
+        return "NOT_MEASURED", (f"not written by {_STEP23_PRODUCER} "
+                                f"(program={(doc or {}).get('program')!r})")
+    subject = doc.get("subject")
+    items = subject.get("items") if isinstance(subject, dict) else None
+    if (not isinstance(subject, dict) or subject.get("basis") != "content"
+            or not isinstance(items, list) or not items):
+        return "NOT_MEASURED", "no content-bound subject"
+    try:
+        import _audit_receipt as _rcpt  # noqa: PLC0415
+        paths = []
+        for item in items:
+            path = (project_dir / str(item.get("path"))).resolve()
+            if not path.is_relative_to(project_dir.resolve()) or not path.is_file():
+                return "NOT_MEASURED", f"audited report {item.get('path')!r} absent"
+            paths.append(path)
+        actual = _rcpt.subject_of(paths, relative_to=project_dir)
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        return "NOT_MEASURED", f"subject unreadable: {exc}"
+    if actual.get("sha256") != subject.get("sha256"):
+        return "NOT_MEASURED", ("stale: the audited report changed after the "
+                                "verdict was written")
+    return _record_state(doc)
+
+
+def _step23_timing_verdict(project_dir: Path) -> tuple:
+    """``(state, reason)`` for Step 23: EVERY blocking clause the flow yaml
+    declares for it, each read from the record it publishes. The nominal STA
+    summary alone is one clause (tt, single corner); the slow-corner, record
+    completeness, hold, DRV and residual clauses are the rest."""
+    try:
+        clauses = _step_clauses("23")
+    except Exception as exc:  # noqa: BLE001
+        return "NOT_MEASURED", f"step 23 clauses unreadable: {exc}"
+    rows = []
+    for program, rel, cond in clauses:
+        if cond is not None and not any(
+                any(project_dir.glob(g)) for g in cond):
+            continue            # the flow's own condition: clause not applicable
+        if rel is None:
+            rows.append(("NOT_MEASURED", f"{program}: publishes no verdict record"))
+            continue
+        path = project_dir / rel
+        try:
+            doc = json.loads(path.read_text())
+        except OSError:
+            rows.append(("NOT_MEASURED", f"{program}: {rel} absent"))
+            continue
+        except ValueError as exc:
+            rows.append(("NOT_MEASURED", f"{program}: {rel} unparseable: {exc}"))
+            continue
+        state, why = (_step23_summary_state(project_dir, doc)
+                      if rel == _STEP23_VERDICT_REL else _record_state(doc))
+        rows.append((state, f"{program}: {state} ({why}) [{rel}]"))
+    if not rows:
+        return "NOT_MEASURED", "step 23 declares no blocking verdict clause"
+    state = _worst(r[0] for r in rows)
+    bad = [r[1] for r in rows if r[0] not in ("PASS", "NA")]
+    return state, ("; ".join(bad)[:900] if bad
+                   else f"all {len(rows)} step-23 clause verdicts PASS "
+                        f"(or decided not applicable)")
+
+
+def _step32_timing_verdict(project_dir: Path) -> tuple:
+    """``(state, reason)`` for step 32's sign-off verdict.
+
+    Step 32's own gate (`postroute_timing_repair_audit.audit`) is evaluated
+    here rather than read from a gate JSON the same audit may not have
+    written yet; its declared decision record must exist. When the tool arm
+    ran, its report's verdict (timing, DRV and census, R-0929-DRV-IDENTITY)
+    must also be PASS. FAIL outranks NOT_MEASURED; WAIVED is its own state."""
+    if not (project_dir / _STEP32_DECISION_REL).is_file():
+        return "NOT_MEASURED", f"{_STEP32_DECISION_REL} (declared) is absent"
+    if _PROGRAMS_DIR not in sys.path:
+        sys.path.insert(0, _PROGRAMS_DIR)
+    try:
+        import postroute_timing_repair_audit as _pra  # noqa: PLC0415
+        findings, _stats = _pra.audit(project_dir)
+    except Exception as exc:  # noqa: BLE001
+        return "NOT_MEASURED", (f"postroute_timing_repair_audit could not "
+                                f"read step 32: {type(exc).__name__}: {exc}")
+    errs = [f for f in findings if f.severity == "ERROR"]
+    measured = [f for f in errs if f.category not in _STEP32_UNMEASURED]
+    unmeasured = [f for f in errs if f.category in _STEP32_UNMEASURED]
+    rows = []
+    if measured:
+        rows.append(("FAIL", f"postroute_timing_repair_audit "
+                             f"{measured[0].category}: "
+                             f"{str(measured[0].message)[:200]}"))
+    if unmeasured:
+        rows.append(("NOT_MEASURED", f"postroute_timing_repair_audit "
+                                     f"{unmeasured[0].category}: "
+                                     f"{str(unmeasured[0].message)[:200]}"))
+    ll = project_dir / _STEP32_LIBRELANE_REL
+    if ll.is_file():
+        try:
+            doc = json.loads(ll.read_text())
+            state, why = _record_state(doc)
+            if state != "PASS":
+                rows.append((state, f"{_STEP32_LIBRELANE_REL}: {why} "
+                                    f"{str(doc.get('reason') or '')[:200]}".rstrip()))
+        except (OSError, ValueError) as exc:
+            rows.append(("NOT_MEASURED", f"{_STEP32_LIBRELANE_REL} unreadable: {exc}"))
+    if not rows:
+        return "PASS", "postroute_timing_repair_audit: pass"
+    state = _worst(r[0] for r in rows)
+    return state, "; ".join(r[1] for r in rows if r[0] == state)
+
+
 # ---------------------------------------------------------------------------
 # Mode: tapeout
 # ---------------------------------------------------------------------------
@@ -1408,13 +1605,30 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
                                        _timing_rank)
     timing_signoff = [p for p in timing_files
                       if _timing_rank(p, project_dir) != _PRESIGNOFF_RANK]
-    if timing_signoff:
+    timing_verdicts = {"23": _step23_timing_verdict(project_dir),
+                       "32": _step32_timing_verdict(project_dir)}
+    timing_not_pass = {k: v for k, v in timing_verdicts.items()
+                       if v[0] != "PASS"}
+    if timing_signoff and timing_not_pass:
+        # U17: a report is present, but the sign-off steps that judged it did
+        # not PASS. The slot is not credited; each step is named with its state.
+        evidence["timing"] = False
+        for step, (state, why) in sorted(timing_not_pass.items()):
+            result.findings.append(Finding(
+                rule=f"TAPEOUT_TIMING_STEP{step}_{state}", severity="ERROR",
+                message=(f"Timing report {timing_signoff[0].name} is present, "
+                         f"but the Step-{step} sign-off verdict is {state} "
+                         f"({why}); tape-out timing needs Step 23 and Step 32 "
+                         f"to PASS, not a report to exist."),
+                file=str(timing_signoff[0])))
+    elif timing_signoff:
         chosen_timing = timing_signoff[0]
         evidence["timing"] = True
         evidence_count += 1
         result.findings.append(Finding(
             rule="TAPEOUT_TIMING_EXISTS", severity="INFO",
-            message=f"Timing report found: {chosen_timing.name}",
+            message=(f"Timing report found: {chosen_timing.name}; Step 23 and "
+                     f"Step 32 sign-off verdicts PASS"),
             file=str(chosen_timing)))
     elif timing_files:
         evidence["timing"] = False
@@ -1916,6 +2130,9 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
         "lvs_power_pin_only_waived": lvs_power_pin_waived,
         "lvs_report": str(lvs_report) if lvs_report else "",
         "lvs_verdict": lvs_verdict or "",
+        "timing_signoff_verdicts": {
+            k: {"state": v[0], "reason": v[1]}
+            for k, v in sorted(timing_verdicts.items())},
         "si_signoff": {
             "state": si_state,
             "report": si_detail.get("report", ""),
