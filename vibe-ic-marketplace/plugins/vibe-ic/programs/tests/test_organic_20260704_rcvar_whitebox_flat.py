@@ -11,7 +11,6 @@ The step-level transform is OPT-IN (VIBE_IC_RCVAR_WHITEBOX_FLAT=1) so the shippe
 default stays the wrapper (its #518/#689/#792 guard tests are untouched).
 """
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +18,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PROG = HERE.parent
 sys.path.insert(0, str(PROG))
+import _outcome_states as states       # noqa: E402
 import reset_clock_variant_alias as R  # noqa: E402
 import design_one_shot_runner as D     # noqa: E402
 
@@ -50,8 +50,9 @@ def test_flat_renames_in_place_no_inner_submodule():
 
 
 def test_flat_result_compiles_and_whitebox_signal_visible(tmp_path):
-    if not shutil.which("iverilog"):
-        return
+    # It used to `return` here, so an iverilog-less host PASSED it having
+    # compiled nothing. Absent tool -> NOT_VERIFIED naming the host (R-0927).
+    states.require_tools("iverilog")
     out = R.emit_variant_alias_flat(DUT, "widget", {"reset": "rst"})
     (tmp_path / "widget.v").write_text(out)
     tb = (            # WHITEBOX TB: binds the design's internal parity_out hierarchically

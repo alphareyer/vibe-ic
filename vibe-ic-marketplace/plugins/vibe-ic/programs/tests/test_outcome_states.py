@@ -387,3 +387,138 @@ def test_text_without_the_refusal_code_never_asks_docker():
     OS.classify_container_mismatch(AssertionError("container vibeic-eda runs fine"),
                                    lambda c: asked.append(c) or ("MISMATCH", "", c))
     assert asked == [], asked
+
+
+# ---------------------------------------------------------------------------
+# 6. at the site: require_tools / skip_if_not_measurable (owner 2026-09-29)
+# ---------------------------------------------------------------------------
+_REQUIRES = ("import _outcome_states as S\n"
+             "def test_x():\n"
+             "    S.require_tools({tools})\n"
+             "    assert 1 == 2, 'the tool half ran and found a real defect'\n")
+
+
+def test_require_tools_absent_is_not_verified_naming_host_and_tool(tmp_path):
+    rc, out = _session(tmp_path, _REQUIRES.format(tools="'yosys'"),
+                       path=_empty_bin(tmp_path))
+    assert _counts(out) == {"FAIL": 0, "NOT_VERIFIED": 1, "NOT_MEASURED": 0,
+                            "BOOKKEEPING": 0}, out
+    [line] = _state_lines(out, "NOT_VERIFIED")
+    assert f"host {socket.gethostname()}" in line, line
+    assert "`yosys` is not on PATH" in line, line
+    assert "remedy: run inside the EDA image with tools/ci/run_suite_in_eda_image.sh" in line
+    assert rc == 0, out
+
+
+def test_require_tools_present_runs_the_test_and_its_failure_stays_fail(tmp_path):
+    rc, out = _session(tmp_path, _REQUIRES.format(tools="'yosys'"),
+                       path=_empty_bin(tmp_path, "yosys"))
+    assert _counts(out)["FAIL"] == 1 and _counts(out)["NOT_VERIFIED"] == 0, out
+    assert "the tool half ran and found a real defect" in out, out
+    assert rc == 1, out
+
+
+def test_require_tools_names_only_the_absent_ones(tmp_path):
+    one, two = tmp_path / "one", tmp_path / "two"
+    one.mkdir()
+    two.mkdir()
+    body = _REQUIRES.format(tools="'iverilog', 'vvp'")
+    rc, out = _session(one, body, path=_empty_bin(one, "iverilog"))
+    [line] = _state_lines(out, "NOT_VERIFIED")
+    assert "`vvp` is not on PATH" in line and "`iverilog`" not in line, line
+    rc, out = _session(two, body, path=_empty_bin(two))
+    [line] = _state_lines(out, "NOT_VERIFIED")
+    assert "`iverilog`, `vvp` are not on PATH" in line, line
+
+
+def test_require_tools_asks_the_search_path_the_site_names(tmp_path):
+    """A program that prepends its own directories is asked about THAT path:
+    the tool found there runs, so its failure is a FAIL, not NOT_VERIFIED."""
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    body = ("import _outcome_states as S\n"
+            "def test_x():\n"
+            "    S.require_tools('yosys', path=os.environ['EXTRA'] + os.pathsep\n"
+            "                    + os.environ['PATH'])\n"
+            "    assert 1 == 2, 'ran with the prepended yosys'\n")
+    rc, out = _session(tmp_path, body, path=_empty_bin(tmp_path),
+                       env_extra={"EXTRA": _empty_bin(extra, "yosys")})
+    assert _counts(out)["FAIL"] == 1 and _counts(out)["NOT_VERIFIED"] == 0, out
+
+
+_CEILING = ("import _outcome_states as S\n"
+            "def test_x():\n"
+            "    S.skip_if_not_measurable('still running at the 55s ceiling')\n"
+            "    pytest.fail('still running at the 55s ceiling')\n")
+
+
+def test_a_ceiling_branch_under_many_workers_is_not_measured(tmp_path):
+    rc, out = _session(tmp_path, _CEILING, load=0.0,
+                       env_extra={"PYTEST_XDIST_WORKER_COUNT": "16"})
+    assert _counts(out)["NOT_MEASURED"] == 1 and _counts(out)["FAIL"] == 0, out
+    [line] = _state_lines(out, "NOT_MEASURED")
+    assert "xdist workers=16 > 1" in line, line
+    assert "still running at the 55s ceiling" in line, line
+    assert rc == 0, out
+
+
+def test_a_ceiling_branch_under_load_is_not_measured(tmp_path):
+    rc, out = _session(tmp_path, _CEILING, load=64.0 * (os.cpu_count() or 1))
+    [line] = _state_lines(out, "NOT_MEASURED")
+    assert "1-min load per core 64.00 > 0.5" in line, line
+
+
+def test_a_ceiling_branch_serial_and_quiet_stays_fail(tmp_path):
+    rc, out = _session(tmp_path, _CEILING, load=0.0)
+    assert _counts(out)["FAIL"] == 1 and _counts(out)["NOT_MEASURED"] == 0, out
+    assert rc == 1, out
+
+
+def _calls(path, func, callee):
+    import ast
+    tree = ast.parse((Path(__file__).parent / path).read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == func:
+            return any(isinstance(c, ast.Call)
+                       and getattr(c.func, "attr", getattr(c.func, "id", "")) == callee
+                       for c in ast.walk(node))
+    raise AssertionError(f"{path}::{func} not found")
+
+
+def test_the_named_sites_report_their_state_during_the_run():
+    """The sites the 2026-09-29 census found failing (or silently passing) for
+    a missing tool or a load-bound ceiling each call the site helper."""
+    sites = (
+        ("test_formal_die_chiptop_core_binding.py", "_require_yosys", "require_tools"),
+        ("test_organic_20260704_rcvar_whitebox_flat.py",
+         "test_flat_result_compiles_and_whitebox_signal_visible", "require_tools"),
+        ("test_v1_11_78_alias_wrapper_hidden_from_verilator_lint.py",
+         "test_iverilog_still_binds_the_alias_top", "require_tools"),
+        ("test_v1_11_78_alias_wrapper_hidden_from_verilator_lint.py",
+         "test_verilator_lint_is_clean_with_the_guard", "require_tools"),
+        ("test_v1_2_47_alias_param_forward.py",
+         "test_param_aliased_completion_compiles", "require_tools"),
+        ("test_v1_2_47_alias_param_forward.py",
+         "test_nonparam_aliased_completion_still_compiles", "require_tools"),
+        ("test_v1_2_48_alias_json_unwrap.py",
+         "test_json_wrapped_completion_compiles_under_iverilog", "require_tools"),
+        ("test_v1_2_harness_toplevel_alias.py",
+         "test_aliased_completion_compiles", "require_tools"),
+        ("test_v1_3_88_issue119_chip_top_reemit_pull_restore.py",
+         "test_reemit_restores_pull_and_design_resets", "require_tools"),
+        ("test_cvdp_gate_alias_compliance.py",
+         "test_wrapper_correctness_from_prompt_name", "require_tools"),
+        ("test_deterministic_rtl_dispatcher.py",
+         "test_cli_generates_and_compiles", "require_tools"),
+        ("test_v1_3_85_chip_top_vl_tri_outermost.py",
+         "test_autoemit_moves_pull_to_outermost_face_end_to_end", "require_tools"),
+        ("test_die_density_keepout_census_runs_in_openroad.py", "_route",
+         "probe_skip_reason"),
+        ("test_landing_merge_verdict.py",
+         "_assert_interruption_cleans_every_parallel_arm", "skip_if_not_measurable"),
+        ("test_issue1129_gatekeeper_prepare_landing.py",
+         "test_the_real_program_runs_against_this_repo_and_honours_its_boundary",
+         "skip_if_not_measurable"),
+    )
+    missing = [s for s in sites if not _calls(*s)]
+    assert missing == [], missing

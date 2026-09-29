@@ -33,6 +33,7 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                     "..", "..", "benchmark"))
 import tb_toplevel_alias as A  # noqa: E402
+import _outcome_states as states  # noqa: E402
 
 
 def _mods(text):
@@ -85,17 +86,11 @@ def test_every_guard_opened_is_closed():
         "unbalanced `ifndef/`endif would break every downstream tool")
 
 
-def _have(tool, *ver):
-    try:
-        subprocess.run([tool, *ver], capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
-
-
 def test_iverilog_still_binds_the_alias_top():
-    if not _have("iverilog", "-V"):
-        return
+    # It used to `return` here, so a host without the tool PASSED it having
+    # verified nothing. Absent tool -> NOT_VERIFIED naming the host (R-0927);
+    # present -> runs exactly as before.
+    states.require_tools("iverilog")
     out = _aliased()
     with tempfile.NamedTemporaryFile("w", suffix=".sv", delete=False) as f:
         f.write(out)
@@ -112,8 +107,10 @@ def test_iverilog_still_binds_the_alias_top():
 
 def test_verilator_lint_is_clean_with_the_guard():
     """The regression itself: -Wall must exit 0 on a wrapper-carrying file."""
-    if not _have("verilator", "--version"):
-        return
+    # It used to `return` here, so a host without the tool PASSED it having
+    # verified nothing. Absent tool -> NOT_VERIFIED naming the host (R-0927);
+    # present -> runs exactly as before.
+    states.require_tools("verilator")
     out = _aliased()
     d = tempfile.mkdtemp()
     path = os.path.join(d, "binary_to_gray.sv")   # stem matches the author top

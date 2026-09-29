@@ -38,6 +38,7 @@ sys.path.insert(
                     "..", "..", "benchmark"))
 import tb_toplevel_alias as A  # noqa: E402
 import cvdp_gate as G  # noqa: E402
+import _outcome_states as states  # noqa: E402
 
 
 def _mods(src):
@@ -133,18 +134,12 @@ def test_submodule_name_mismatch_wraps():
     _alias_and_check(comp, "hebb_gates")
 
 
-def _has_iverilog():
-    try:
-        subprocess.run(["iverilog", "-V"], capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
-
-
 def test_aliased_completion_compiles():
     """The wrapper compiles under iverilog -g2012 -s <toplevel>."""
-    if not _has_iverilog():
-        return  # skip when iverilog absent
+    # It used to `return` here, so a host without the tool PASSED it having
+    # verified nothing. Absent tool -> NOT_VERIFIED naming the host (R-0927);
+    # present -> runs exactly as before.
+    states.require_tools("iverilog")
     comp = ("module FindFasterClock (\n"
             "    input  wire clk_A,\n"
             "    input  wire clk_B,\n"

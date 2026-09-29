@@ -63,6 +63,7 @@ import _watchdog  # noqa: E402
 import _hermetic_engine_capability as _CAP  # noqa: E402
 
 import _progress_run as _pr  # noqa: E402
+import _outcome_states as states  # noqa: E402
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
 _PROG = _PROGRAMS / "landing_merge_verdict.py"
@@ -3371,6 +3372,10 @@ fi
             why = (f"the verifier was still running after {_T}s and no "
                    f"verifier worktree ever appeared in the subject "
                    f"repository, so the {hung_arm} control arm never started")
+            # THIS branch is the suite ceiling, a wall clock: under -n>1 or a
+            # loaded host it is NOT_MEASURED (owner R-0927), in a quiet serial
+            # run it stays the FAIL below. The EXITED branch is never a clock.
+            states.skip_if_not_measurable(why)
         else:
             why = (f"the verifier EXITED rc={proc.returncode} without ever "
                    f"running the {hung_arm} control arm: the injected hang was "
@@ -3394,6 +3399,15 @@ fi
             break
         time.sleep(0.05)
     if not cleanup_done.is_file():
+        # TWO different things end the wait above, and they used to share one
+        # message: the verifier EXITED without the event (a behaviour -- always
+        # FAIL), or it was STILL RUNNING at the `_T` ceiling (a wall clock).
+        # MEASURED on 8hd-3 (load ~17 on 32 cores, -n16, ngbt_land47): stdout
+        # stopped mid-verification, i.e. it was still working when killed, and
+        # the same file passed in ~20 other runs. So the ceiling branch alone
+        # is NOT_MEASURED under -n>1 or load (owner R-0927); in a quiet serial
+        # run it stays a FAIL, which is how a never-escalated arm is caught.
+        still_running = proc.poll() is None
         # A failed cleanup test must clean up its own control process; leaving
         # the intentionally TERM-ignoring arm behind would contaminate every
         # later timing measurement in the same suite.
@@ -3402,9 +3416,14 @@ fi
         except ProcessLookupError:
             pass
         stdout, stderr = proc.communicate()
+        if still_running:
+            why = (f"verifier still running at the suite safety ceiling "
+                   f"({_T}s) without the cleanup.done event")
+            states.skip_if_not_measurable(why)
+            pytest.fail(f"{why}:\n{stdout}\n{stderr}")
         pytest.fail(
-            "verifier exited or reached the suite safety ceiling without the "
-            f"cleanup.done event:\n{stdout}\n{stderr}")
+            f"verifier exited rc={proc.returncode} without the cleanup.done "
+            f"event:\n{stdout}\n{stderr}")
     stdout, stderr = proc.communicate()
     assert proc.returncode != 0, stdout + stderr
     assert cleanup_started.is_file(), "cleanup never announced its start"

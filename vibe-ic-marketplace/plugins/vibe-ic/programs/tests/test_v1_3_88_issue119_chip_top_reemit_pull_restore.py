@@ -35,6 +35,7 @@ import design_one_shot_runner as R          # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+import _outcome_states as states  # noqa: E402
 
 _NEUTRALIZED_WRAPPER = """\
 module counter (
@@ -133,8 +134,10 @@ def test_reemit_restores_pull_and_design_resets(tmp_path):
     ct = (proj / "phase2" / "stage1" / "rtl" / "chip_top.v").read_text()
     assert ct.count("tri1") == 2, "re-emitted chip_top must carry the restored pull"
     assert ct.count("`ifdef VERILATOR") == 2
-    if not shutil.which("iverilog"):
-        return
+    # This used to `return` here, dropping the reset-behaviour half (both
+    # faces) silently after the synth assertions above. Absent simulator ->
+    # NOT_VERIFIED naming the host (R-0927); present -> runs as before.
+    states.require_tools("iverilog", "vvp")
     for sp in ("resetn", "rst_n"):
         tb = tmp_path / f"tb_{sp}.v"
         tb.write_text(
