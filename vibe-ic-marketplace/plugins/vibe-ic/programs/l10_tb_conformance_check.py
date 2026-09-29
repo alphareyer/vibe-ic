@@ -1604,6 +1604,10 @@ def count_producer_scope_gap(results: List[Dict[str, Any]]) -> int:
                and r.get("producer_scaffold_scope") == "out")
 
 
+#: Sentinel for a lazily-resolved value that may legitimately be None.
+_UNSET = object()
+
+
 def evaluate(
     cases: List[Dict[str, Any]],
     tb_blob: str,
@@ -1682,6 +1686,10 @@ def evaluate(
     # decides whether the spec BINDS a reference output for a case's opcode.
     # None (no readable L3) fails CLOSED — no case can be waived.
     l3_opcodes = load_l3_opcodes(project_root)
+
+    # The ic_class `input_absent_exclusion` is asked with, resolved once and
+    # only when a row reaches it (the Step-4 gate asks with the same reader).
+    _gap_ic_class: List[Any] = [_UNSET]
 
     def _scaffold_scope(case: Dict[str, Any]) -> Optional[str]:
         """ORGANIC #761 — "in" / "out" of the TB producer's scaffold scope, or
@@ -1764,6 +1772,80 @@ def evaluate(
         exec_state, exec_reason = _l10x.case_state(case_id, execution_record)
         executed_fail = exec_state == _l10x.FAIL
         ok = exec_state == _l10x.PASS
+        # R-0929-OWNER-SUB-ACCEPT — the two owner rules, asked of a case this
+        # record left NOT_EXECUTED only (a FAIL is never asked), through the
+        # SAME readers the Step-4 functional gate asks, so the two consumers of
+        # this layer cannot disagree about a row:
+        #   (1) `_l10x.isa_conformance_credit` — the core-ISA conformance suite
+        #       ran it on the SAME RTL at a test value of the top's memory-size
+        #       PARAMETER: satisfied, and the credit sentence is its evidence;
+        #   (2) `testbench_gen.input_absent_exclusion` — a firmware row whose
+        #       named image the input lacks: NOT_MEASURED [input_absent] and
+        #       EXCLUDED from this verdict (F10, as steps 6/39), never a pass
+        #       and never a waiver.
+        _refused: Optional[str] = None
+        if exec_state == _l10x.NOT_EXECUTED and project_root:
+            _credit, _refused = _l10x.isa_conformance_credit(
+                Path(project_root), case_id, c)
+            # A coverage GOAL is judged by the credit's NUMBER against its own
+            # stated percentage -- the same judgment the Step-4 goal
+            # population applies (`_l10x.isa_goal_verdict`): short of it is a
+            # FAIL, not a pass; no number for it is no credit.
+            _goal = (_l10x.isa_goal_judgment(c, _credit)
+                     if _credit is not None else None)
+            if _goal is not None and _goal[0] is None:
+                _credit, _refused = None, _goal[2]
+                _goal = None
+            _excl = None
+            if _credit is None and _tbg is not None and hasattr(
+                    _tbg, "input_absent_exclusion"):
+                if _gap_ic_class[0] is _UNSET:
+                    _gap_ic_class[0] = _tbg._detect_ic_class(Path(project_root))
+                _excl = _tbg.input_absent_exclusion(
+                    Path(project_root), c, _gap_ic_class[0])
+            if _credit is not None or _excl is not None:
+                _row = {
+                    "id": case_id,
+                    "category": category,
+                    "kind": case_kind(c),
+                    "producer_scaffold_scope": _scaffold_scope(c),
+                    "oracle_resolution": None,
+                    _l10x.SIM_EXECUTED_KEY: False,
+                    "waived": False,
+                    "review_required": False,
+                    "capability_gap": None,
+                }
+                if _credit is not None and _goal is not None \
+                        and _goal[0] != _l10x.PASS:
+                    _row.update(
+                        evidence=[f"COVERAGE GOAL FAIL — {_goal[2]}, by "
+                                  f"{_credit['sentence']}"],
+                        status="fail", achieved_pct=_goal[1],
+                        isa_conformance_credit=_credit)
+                    _row["pass"] = False
+                    fail_count += 1
+                elif _credit is not None:
+                    _row.update(
+                        evidence=[f"CREDITED — "
+                                  + (f"{_goal[2]}, by " if _goal else "")
+                                  + _credit["sentence"]],
+                        status="pass", credited_by=_credit["credited_by"],
+                        isa_conformance_credit=_credit)
+                    if _goal is not None:
+                        _row["achieved_pct"] = _goal[1]
+                    _row["pass"] = True
+                    ok_count += 1
+                else:
+                    _row.update(
+                        evidence=[_excl["excluded_from_verdict"]],
+                        status=_excl["status"],
+                        reason_class=_excl["reason_class"],
+                        missing_from_input=_excl["missing_from_input"],
+                        excluded_from_verdict=_excl["excluded_from_verdict"])
+                    _row["pass"] = False
+                results.append(_row)
+                continue
+
         if ok:
             evidence = [f"EXECUTED+PASSED — {exec_reason}"]
         elif executed_fail:
@@ -1947,6 +2029,10 @@ def evaluate(
                 "capability_gap": cap_gap,
             }
         )
+        if _refused:
+            # The receipt bound this case and the rule was not met: the row
+            # keeps the verdict it had, and says why it was not credited.
+            results[-1]["isa_conformance_refused"] = _refused
         if ok:
             ok_count += 1
         elif waived:
@@ -2191,6 +2277,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         r["capability_gap"] for r in results
         if r.get("status") == "waived" and r.get("capability_gap")
     })
+    # R-0929-OWNER-SUB-ACCEPT — beside the verdict, never inside it.
+    excluded_rows = [r for r in results if r.get("excluded_from_verdict")]
+    credited_rows = [r for r in results if r.get("credited_by")]
+    acceptance_bits = []
+    if credited_rows:
+        acceptance_bits.append(
+            f"{len(credited_rows)}/{len(cases)} case(s) CREDITED by core ISA "
+            f"conformance at a test parameter value ("
+            + "; ".join(f"{r['id']}: {r['isa_conformance_credit']['sentence']}"
+                        for r in credited_rows) + ")")
+    if excluded_rows:
+        acceptance_bits.append(
+            f"{len(excluded_rows)}/{len(cases)} case(s) NOT_MEASURED "
+            f"[input_absent], EXCLUDED from the verdict (never a pass, not "
+            f"blocking): " + ", ".join(
+                f"{r['id']} ({', '.join(r.get('missing_from_input') or [])})"
+                for r in excluded_rows))
 
     out = {
         "total": len(cases),
@@ -2223,6 +2326,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         },
         "waived": waive_count,
         "checklist_gaps": checklist_gap_count,
+        "not_measured_excluded": [
+            {"case": r["id"], "status": r["status"],
+             "reason_class": r.get("reason_class"),
+             "missing_from_input": r.get("missing_from_input") or [],
+             "reason": r["excluded_from_verdict"]} for r in excluded_rows],
+        "isa_conformance_credited": [
+            r["isa_conformance_credit"] for r in credited_rows],
         "capability_gap": waiver_caps[0] if len(waiver_caps) == 1 else (waiver_caps or None),
         "capability_gaps": waiver_caps or None,
         "analog_anchor": analog_anchor,
@@ -2329,6 +2439,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"case(s) NOT_EXECUTED; this is not a design failure and not "
                 f"a pass, but it blocks Step 4 (see {args.out})",
                 file=sys.stderr)
+        for bit in acceptance_bits:
+            print(f"[l10-tb-conformance] {bit}", file=sys.stderr)
         if args.warn_only:
             return 0
         return 1
@@ -2378,12 +2490,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"{checklist_gap_count}/{len(cases)} verification_checklist "
                 f"DV-milestone row(s) not satisfied (review_required; "
                 f"ORGANIC #808 — process milestone, not TB-traceable)")
+        bits.extend(acceptance_bits)
         print(
             "PASS_WITH_WAIVERS: l10_tb_conformance — " + "; ".join(bits)
             + f"  → {args.out}")
         return 3
 
-    print(f"[l10-tb-conformance] PASS  {ok_count}/{len(cases)} cases covered  → {args.out}")
+    print(f"[l10-tb-conformance] PASS  {ok_count}/{len(cases)} cases covered"
+          + "".join(f"; {bit}" for bit in acceptance_bits)
+          + f"  → {args.out}")
     return 0
 
 

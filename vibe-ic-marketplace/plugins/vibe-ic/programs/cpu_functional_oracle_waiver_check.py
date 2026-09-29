@@ -31,6 +31,18 @@ Verdicts / exit codes (chip-AGNOSTIC — project artifacts only):
   1 = INCOMPLETE when a substantiated connectivity-only run exists without a
       real professional/oracle result; FAIL when the bridge evidence is forged
       or broken. Both are blocking and neither is a waiver.
+
+Owner ruling R-0929-OWNER-SUB-ACCEPT moves exactly two kinds of row, and every
+verdict above carries a bracketed disclosure when either did:
+  (1) a declared case or instruction goal the core-ISA conformance suite ran on
+      the SAME RTL with only the top's memory-size PARAMETER raised is CREDITED
+      by it (`_l10_execution.isa_conformance_credit`, which re-checks the rule
+      and names any refusal); the delivered-memory run is disclosed beside it;
+  (2) a firmware row whose named image the design input lacks is NOT_MEASURED
+      [input_absent] and EXCLUDED from the verdict, as FPGA steps 6/39 are
+      (`testbench_gen.input_absent_exclusion`), and is listed under
+      `not_measured_excluded` in the JSON report. It is never a pass and it
+      does not block.
 """
 from __future__ import annotations
 
@@ -501,6 +513,20 @@ def _oracles_that_actually_ran(project: Path) -> dict:
     # families), never here. A case that RAN keeps its verdict (a FAIL stays
     # a FAIL), and one this flow could have run stays blocking.
     input_not_supplied: list = []
+    # R-0929-OWNER-SUB-ACCEPT (1) — a case this record left NOT_EXECUTED that
+    # the core-ISA conformance suite ran on the SAME RTL at a test value of
+    # the top's memory-size PARAMETER is credited by that suite, and the
+    # credit is disclosed (`_l10x.isa_conformance_credit` re-checks every
+    # condition of the rule and names the one that fails). A FAIL is never
+    # asked: a case that ran and failed stays a FAIL.
+    isa_credited: list = []
+    isa_refused: list = []
+    # R-0929-OWNER-SUB-ACCEPT (2) — a firmware row whose named image the input
+    # lacks is NOT_MEASURED [input_absent] and EXCLUDED from this verdict, the
+    # F10 mechanism steps 6/39 use (`testbench_gen.input_absent_exclusion`).
+    # It stays listed in `input_not_supplied`, flagged, and is published
+    # under `not_measured_excluded`; it never blocks and is never a pass.
+    excluded: list = []
     rows = _l10_rows_by_name(project) if declared else {}
     ic_class = _tbg._detect_ic_class(project) if declared else None
     for case_id in declared:
@@ -508,13 +534,27 @@ def _oracles_that_actually_ran(project: Path) -> dict:
         if state == _l10x.PASS:
             executed.append(case_id)
             continue
+        if state == _l10x.NOT_EXECUTED:
+            credit, refusal = _l10x.isa_conformance_credit(
+                project, case_id, rows.get(case_id))
+            if credit is not None:
+                isa_credited.append(credit)
+                continue
+            if refusal:
+                isa_refused.append({"case": case_id, "why": refusal})
         gap = (_input_gap(project, rows.get(case_id), ic_class)
                if state == _l10x.NOT_EXECUTED else None)
         if gap is not None:
-            input_not_supplied.append({"case": case_id, "state": state,
-                                       "why": gap["reason"],
-                                       "missing_from_input":
-                                           gap["missing_from_input"]})
+            entry = {"case": case_id, "state": state,
+                     "why": gap["reason"],
+                     "missing_from_input": gap["missing_from_input"]}
+            excl = (_tbg.input_absent_exclusion(
+                project, rows.get(case_id), ic_class)
+                if gap.get("missing_images") else None)
+            if excl is not None:
+                entry["excluded_from_verdict"] = excl["excluded_from_verdict"]
+                excluded.append(excl)
+            input_not_supplied.append(entry)
         else:
             row = rows.get(case_id) if isinstance(rows.get(case_id), dict) \
                 else {}
@@ -538,6 +578,9 @@ def _oracles_that_actually_ran(project: Path) -> dict:
         "not_executed_count": len(not_executed),
         "input_not_supplied": input_not_supplied,
         "input_not_supplied_count": len(input_not_supplied),
+        "not_measured_excluded": excluded,
+        "isa_conformance_credited": isa_credited,
+        "isa_conformance_refused": isa_refused,
         "record_available": bool(record.get("available")),
         "record_reason": record.get("reason"),
         "asked_through": "_l10_execution.case_state",
@@ -712,6 +755,54 @@ def _goal_input_gap(project: Path, goal: "dict | None",
     }
 
 
+def _credit_isa_goals(project: Path, summary: dict) -> None:
+    """R-0929-OWNER-SUB-ACCEPT (1) for the GOAL population, in place.
+
+    A goal over the INSTRUCTION dimension that this run left without a number
+    (NOT_MEASURED, no achieved percentage) takes the number the core-ISA
+    conformance suite measured on the same RTL at the test parameter value:
+    instructions whose every primary program passed, over the declared
+    instruction total. It is then judged against its OWN stated percentage
+    exactly as a measured figure is (PASS when met, FAIL when not), and the
+    row carries the credit and its sentence. A goal this run DID measure keeps
+    its number: the credit only fills an absence. A refused credit is named on
+    the row, which keeps its verdict."""
+    rows = summary.get("rows") or []
+    touched = False
+    for r in rows:
+        if (r.get("verdict") != _cgc.NOT_MEASURED
+                or r.get("achieved_pct") is not None
+                or r.get("dimension") != "instruction"):
+            continue
+        credit, refusal = _l10x.isa_conformance_credit(
+            project, str(r.get("case") or ""))
+        if credit is None:
+            if refusal:
+                r["isa_conformance_refused"] = refusal
+            continue
+        # The ONE goal judgment the L10 table applies too.
+        verdict, achieved, why = _l10x.isa_goal_verdict(
+            r.get("stated_pct"), r.get("dimension"), credit)
+        if verdict is None:
+            r["isa_conformance_refused"] = why
+            continue
+        r.update(
+            achieved_pct=achieved,
+            achieved_source=credit["sentence"],
+            instrument=_l10x.ISA_CREDIT_KIND,
+            verdict=_cgc.PASS if verdict == _l10x.PASS else _cgc.FAIL,
+            why=f"case {r.get('case')!r}: {why}, by {credit['sentence']}",
+            isa_conformance_credit=credit)
+        touched = True
+    if touched:
+        summary["passed_count"] = sum(
+            1 for r in rows if r["verdict"] == _cgc.PASS)
+        summary["failed_count"] = sum(
+            1 for r in rows if r["verdict"] == _cgc.FAIL)
+        summary["not_measured_count"] = sum(
+            1 for r in rows if r["verdict"] == _cgc.NOT_MEASURED)
+
+
 def _coverage_goal_summary(project: Path) -> dict:
     """The COVERAGE-GOAL population and its OWN denominator.
 
@@ -731,6 +822,7 @@ def _coverage_goal_summary(project: Path) -> dict:
     summary = _cgc.measure_goals(goals, totals, rows,
                                  _l10x.load_record(project, l10))
     summary["totals_source"] = source
+    _credit_isa_goals(project, summary)
     # FX_P2 — a goal whose dimension IS instrumented, but which no executed
     # program could feed because the design input delivers none, is the
     # input's gap: NOT_MEASURED by name, not a refusal. A goal the flow cannot
@@ -828,13 +920,45 @@ INPUT_GAP_REASON_CLASS = "EXTERNAL"
 NOT_MEASURED_PREFIX = "NOT_MEASURED [EXTERNAL]:"
 
 
-def _input_gaps(project: Path) -> list:
+def _input_gaps(project: Path, *, include_excluded: bool = False) -> list:
     """Every declared case and goal that did not run because the design input
-    supplies no stimulus for it — each with its reason and what is missing."""
+    supplies no stimulus for it — each with its reason and what is missing.
+
+    A firmware row EXCLUDED from the verdict (R-0929-OWNER-SUB-ACCEPT (2)) is
+    not a blocking gap and is left out unless `include_excluded` asks for the
+    whole list (the published record, where it is flagged)."""
     ran = _oracles_that_actually_ran(project)
     goals = _coverage_goal_summary(project)
-    return (list(ran.get("input_not_supplied") or [])
+    gaps = (list(ran.get("input_not_supplied") or [])
             + list(goals.get("input_not_supplied") or []))
+    if include_excluded:
+        return gaps
+    return [g for g in gaps if not g.get("excluded_from_verdict")]
+
+
+def _acceptance_disclosure(project: Path) -> str:
+    """The sentence every verdict of this gate carries when either owner rule
+    of R-0929-OWNER-SUB-ACCEPT moved a row: what the core-ISA conformance
+    suite was credited with (parameter, delivered vs test value, suites,
+    programs and instructions, and the delivered-memory run), and which rows
+    are NOT_MEASURED and excluded. Empty when neither applied."""
+    ran = _oracles_that_actually_ran(project)
+    goals = _coverage_goal_summary(project)
+    credits = list(ran.get("isa_conformance_credited") or []) + [
+        r["isa_conformance_credit"] for r in goals.get("rows") or []
+        if r.get("isa_conformance_credit")]
+    bits = []
+    if credits:
+        bits.append(f"{len(credits)} declared case(s)/goal(s) CREDITED by "
+                    + "; ".join(f"{c['case']}: {c['sentence']}"
+                                for c in credits))
+    excl = list(ran.get("not_measured_excluded") or [])
+    if excl:
+        bits.append(f"{len(excl)} declared case(s) NOT_MEASURED "
+                    f"[input_absent] and EXCLUDED from the verdict (never a "
+                    f"pass, not blocking): "
+                    + "; ".join(e["excluded_from_verdict"] for e in excl))
+    return (" [" + " | ".join(bits) + "]") if bits else ""
 
 
 def _input_gap_sentence(gaps: list) -> str:
@@ -854,7 +978,31 @@ def _not_measured_on_input(project: Path, passed_because: str
         return None
     return 2, (f"{NOT_MEASURED_PREFIX} {passed_because}; but "
                f"{_input_gap_sentence(gaps)}. Not a FAIL (nothing ran and "
-               f"failed) and not a PASS (those cases are unverified).")
+               f"failed) and not a PASS (those cases are unverified)."
+               + _acceptance_disclosure(project))
+
+
+def _acceptance_record(project: Path) -> dict:
+    """Machine-readable half of `_acceptance_disclosure`."""
+    ran = _oracles_that_actually_ran(project)
+    goals = _coverage_goal_summary(project)
+    return {
+        "not_measured_excluded": [
+            {"case": e["case"], "status": e["status"],
+             "reason_class": e["reason_class"],
+             "missing_from_input": e["missing_from_input"],
+             "reason": e["excluded_from_verdict"]}
+            for e in ran.get("not_measured_excluded") or []],
+        "isa_conformance_credit": {
+            "credited": list(ran.get("isa_conformance_credited") or []) + [
+                r["isa_conformance_credit"] for r in goals.get("rows") or []
+                if r.get("isa_conformance_credit")],
+            "refused": list(ran.get("isa_conformance_refused") or []) + [
+                {"case": r.get("case"), "why": r["isa_conformance_refused"]}
+                for r in goals.get("rows") or []
+                if r.get("isa_conformance_refused")],
+        },
+    }
 
 
 def _evidence_summary(project: Path) -> dict:
@@ -964,6 +1112,10 @@ def _evidence_summary(project: Path) -> dict:
         # A reader must be able to tell "6 of 7 vectors executed" from "0 of
         # 4 goals measured" without subtracting one number from another.
         "coverage_goals": _coverage_goal_summary(project),
+        # R-0929-OWNER-SUB-ACCEPT — beside the verdict, never inside it: the
+        # rows (2) took OUT (F10's key and entry shape) and what (1) CREDITED,
+        # with every refusal named. Empty lists when neither rule applied.
+        **_acceptance_record(project),
         "coverage": coverage,
         "program_first": "professional_tb_gen",
         "expert_fallback": "testbench-gen",
@@ -1039,21 +1191,25 @@ def _evaluate(project: Path) -> "tuple[int, str]":
         if _refusal:
             return 1, (
                 "FAIL: connectivity-PASS record asserts "
-                f"functional_verified=true and {_refusal}.")
+                f"functional_verified=true and {_refusal}."
+                + _acceptance_disclosure(project))
         _nm_input = _not_measured_on_input(
             project, f"every case that could run executed and passed "
                      f"({shown['rel_path']})")
         if _nm_input:
             return _nm_input
+        _disc = _acceptance_disclosure(project)
         return 0, (
             "PASS: the record's functional_verified=true is SUBSTANTIATED by "
             f"{shown['rel_path']}: tests={shown['tests']} "
             f"passed={shown['passed']} failures={shown['failures']} "
             f"errors={shown['errors']}, AND every declared L10 case executed "
-            "its own oracle. The connectivity binding and the "
+            "its own oracle"
+            + (" or is accounted for in the bracket below" if _disc else "")
+            + ". The connectivity binding and the "
             "functional oracle are both recorded, and the "
             f"{CAP_CPU_FUNCTIONAL_ORACLE} marker is retained for the "
-            "per-case oracle gap it actually names.")
+            "per-case oracle gap it actually names." + _disc)
     evidence = _read_xml_field(xml, "evidence")
     if not evidence:
         return 1, ("FAIL: connectivity-PASS record carries no <evidence> "
@@ -1094,7 +1250,7 @@ def _evaluate(project: Path) -> "tuple[int, str]":
                 "INCOMPLETE: the professional-TB result slot cannot supersede "
                 f"the {CAP_CPU_FUNCTIONAL_ORACLE} capability record — "
                 f"{_refusal}. No waiver is granted and Step 4 is NOT a "
-                "functional PASS.")
+                "functional PASS." + _acceptance_disclosure(project))
         _nm_input = _not_measured_on_input(
             project, f"every case that could run executed and passed "
                      f"({';'.join(pro['rel_paths'])})")
@@ -1111,7 +1267,8 @@ def _evaluate(project: Path) -> "tuple[int, str]":
             f"({CAP_CPU_FUNCTIONAL_ORACLE}) is "
             "SUPERSEDED by this real functional PASS; Step 4 is a genuine "
             "functional simulation PASS, not WAIVED-DEFERRED."
-            + (f" [{_nm}]" if _nm else ""))
+            + (f" [{_nm}]" if _nm else "")
+            + _acceptance_disclosure(project))
 
     denom = _evidence_summary(project)["declared_denominator"]
     # A functional transcript that EXISTS and did not pass is not the same fact
@@ -1173,7 +1330,8 @@ def main(argv: "list[str] | None" = None) -> int:
         if code == 2 and msg.startswith(NOT_MEASURED_PREFIX):
             verdict = "NOT_MEASURED"
             extra = {"reason_class": INPUT_GAP_REASON_CLASS,
-                     "input_not_supplied": _input_gaps(project)}
+                     "input_not_supplied": _input_gaps(
+                         project, include_excluded=True)}
         out = {"verdict": verdict, "exit_code": code, "message": msg,
                **extra,
                "capability_gap": CAP_CPU_FUNCTIONAL_ORACLE,
