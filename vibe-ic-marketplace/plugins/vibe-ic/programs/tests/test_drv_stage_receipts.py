@@ -71,12 +71,21 @@ proc emit {text} {
         set f [open $::redirect a]; puts $f $text; close $f }
 }
 proc report_check_types {args} {
-    emit "max fanout\n\nPin u1/Z\nmax fanout $::fo\nfanout 5\n-----------\nSlack -1 (VIOLATED)"
+    if {"-violators" in $args} {
+        emit "max fanout\n\nPin u1/Z\nmax fanout $::fo\nfanout 5\n-----------\nSlack -1 (VIOLATED)"
+    } else {
+        # every pin with a fanout limit: an IO pad (library default 1, the
+        # worst slack) and a core driver under the SDC's limit
+        emit "max fanout\n\nPin u_pad/Y\nmax fanout 1\nfanout 3\n-----------\nSlack -2 (VIOLATED)\n\nPin u1/Z\nmax fanout $::fo\nfanout 2\n-----------\nSlack 2 (MET)"
+    }
 }
+proc get_pins {args} { set name [lindex $args end]; if {[string first / $name] >= 0} { return $name }; return {} }
+proc get_cells {args} { return [lindex [split [lindex $args end] /] 0] }
 namespace eval ::sta {}
 proc ::sta::redirect_file_append_begin {path} { set ::redirect $path }
 proc ::sta::redirect_file_end {} { set ::redirect "" }
-proc ::sta::max_fanout_check_limit {} { return $::fo }
+proc ::sta::redirect_file_begin {path} { close [open $path w]; set ::redirect $path }
+proc ::sta::max_fanout_check_limit {} { return 1 }   ;# the worst pin: the pad
 proc ::sta::max_slew_violation_count {} { return 0 }
 proc ::sta::max_capacitance_violation_count {} { return 0 }
 proc ::sta::max_fanout_violation_count {} { return 1 }
@@ -91,6 +100,7 @@ proc clock_tree_synthesis {args} { record clock_tree_synthesis {*}$args }
 proc all_clocks {} { return clk }
 proc get_property {obj prop} {
     if {$prop eq "is_propagated"} { return $::propagated }
+    if {$prop eq "ref_name"} { return [expr {$obj eq "u_pad" ? "padcell" : "bufcell"}] }
     return $obj
 }
 set ::propagated 0
@@ -225,7 +235,7 @@ def test_run_chain_writes_receipts_the_plan_reads_from_tool_bytes(tmp_path, monk
         for key in ("behavior_report", "sdc_snapshot", "command_args"):
             assert drv._sha(Path(doc[key]["path"])) == doc[key]["sha256"], key
         assert "applied" not in doc  # a receipt carries references, never values
-    rows, inventory = plan._stages(project, False)
+    rows, inventory = plan._stages(project, False, frozenset({"padcell"}))
     rows = {row["name"]: row for row in rows}
     assert inventory["synth"]["status"] == "absent"
     assert inventory["post_grt_repair"]["status"] == "absent"
@@ -234,6 +244,13 @@ def test_run_chain_writes_receipts_the_plan_reads_from_tool_bytes(tmp_path, monk
     assert rows["placement_repair"]["applied"] == {"fanout": 10.0, "slew_ns": 3.0,
                                                    "cap_pf": 0.2}
     assert rows["placement_repair"]["fanout_check_limit"] == 10.0
+    for name in ("placement_repair", "cts", "signoff_sta"):
+        # R-0929-DRV-FANOUT-LIMIT: the worst-slack pin is the pad (limit 1);
+        # the applied-limit check reads the core drivers', the IO cells'
+        # library value is recorded as their own class.
+        assert rows[name]["worst_pin_fanout_check_limit"] == 1.0
+        assert rows[name]["io_fanout_limit"] == 1.0
+    assert rows["cts"]["fanout_check_limit"] == 4.0
     assert rows["signoff_sta"]["applied"]["fanout"] == 4.0
     assert rows["cts"]["cts_parameters"] == {"root_buf": "clkbuf_16",
                                              "sink_clustering_size": "4",
@@ -279,8 +296,9 @@ def test_step32_rebinds_signoff_and_repair_to_the_final_state(tmp_path, monkeypa
     report = {"adopted": "32-base", "adopted_state": str(base[0] / "state_out.json"),
               "final": {"sta_state": str(base[1] / "state_out.json")}}
     receipts.record_step32(project, report)
-    rows = {row["name"]: row for row in plan._stages(project, True)[0]}
+    rows = {row["name"]: row for row in plan._stages(project, True, frozenset({"padcell"}))[0]}
     assert rows["signoff_sta"]["applied"]["fanout"] == 4.0
+    assert rows["signoff_sta"]["fanout_check_limit"] == 4.0
     assert rows["postroute_repair"]["applied"]["fanout"] == 4.0
     doc = json.loads((project / receipts.RECEIPT_DIR / "signoff_sta.json").read_text())
     assert doc["tool_step"]["folder"] == str(base[1].resolve())
@@ -491,3 +509,24 @@ def test_the_receipt_run_id_is_the_run_identity_recorded_at_start(tmp_path):
     project = tmp_path / "proj"
     recorded = drv_run_identity.record(project)["run_id"]
     assert receipts.claim(project) == recorded
+
+
+def test_an_io_pad_limit_is_never_read_as_the_design_limit(tmp_path, monkeypatch):
+    """Without the Liberty's pad_cell fact the pad's 1 and the core's 4 are one
+    class that disagrees: no single applied limit, so the judge cannot pass
+    the stage on it."""
+    docker = _fake_docker(tmp_path, monkeypatch)
+    project, state = _project(tmp_path)
+    receipts.claim(project)
+    _run(project, docker, state, ("OpenROAD.CTS", {}))
+    known = {r["name"]: r for r in plan._stages(project, False, frozenset({"padcell"}))[0]}
+    unknown = {r["name"]: r for r in plan._stages(project, False)[0]}
+    assert known["cts"]["fanout_check_limit"] == 4.0
+    assert unknown["cts"]["fanout_check_limit"] is None
+
+
+def test_the_plan_reads_pad_cells_from_the_linked_liberty(tmp_path):
+    lib = tmp_path / "io.lib"
+    lib.write_text('library (io) { time_unit : "1ns"; capacitive_load_unit (1, pf); '
+                   'cell (padcell) { pad_cell : true; } cell (bufcell) { area : 1; } }')
+    assert plan._pad_cells([{"path": str(lib)}]) == frozenset({"padcell"})
