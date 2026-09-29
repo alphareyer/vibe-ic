@@ -46,7 +46,7 @@ import _docker_watchdog as _dwd  # noqa: E402
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 
 __all__ = ["KLayoutRunner", "HostRunner", "ContainerRunner", "find_runner",
-           "find_container_runner"]
+           "find_container_runner", "login_shell_argv"]
 
 #: `_eda_pin.default_container_name()` IS this expression, plus the part
 #: that was missing: the default half derives from the pinned digest
@@ -66,6 +66,53 @@ def _memory_bounded_argv(argv: Sequence[str], memory_limit_mb: int) -> str:
     if limit <= 0 or not argv:
         raise ValueError("a positive memory ceiling and nonempty argv are required")
     return f"ulimit -v {limit * 1024} || exit 125; exec {shlex.join([str(a) for a in argv])}"
+
+
+# ── The container's LOGIN shell, with the profile's words kept off stdout ───
+# Every command a `ContainerRunner` starts runs in the container's login shell
+# (`bash -l`), because that is where the image puts its tools: PATH,
+# PYTHONPATH, LD_LIBRARY_PATH and the PDK variables come from its login
+# profile. The same profile PRINTS, and a login shell runs it on the command's
+# own stdout. MEASURED on vibeic-eda 0.3.85, `bash -lc 'echo MARK'`:
+#
+#     [INFO] Final PATH variable: /headless/.local/bin:/foss/tools/bin:...
+#     [INFO] Final PYTHONPATH variable: /headless/.local/lib/python3.12/...
+#     MARK
+#
+# Every caller that parses stdout then read those words as its tool's data:
+# byte-identical PDK antenna decks were reported as a "deck digest mismatch",
+# a `*.lyt` listing grew two phantom technology files, and caller after caller
+# grew its own `[INFO]`-line filter. The words are stopped HERE, at the one
+# place the login shell is started, so no caller has to remember to filter.
+#
+# HOW: a POSIX launcher copies the real stdout to fd 3 and starts the SAME
+# `bash -lc <cmd>` as before with fd 1 on /dev/null; the command's first act
+# (`_UNPARK_STDOUT`) takes fd 1 back and closes fd 3, so the tool starts with
+# exactly the descriptors it always had. Nothing about login startup is
+# re-implemented -- bash still decides which profile files it reads -- so the
+# environment the tools get is the one they got before. The profile's STDERR
+# is left alone: a broken profile stays diagnosable. Image-agnostic by
+# construction: `IIC_OSIC_TOOLS_QUIET` (the knob `_container_exec.exec_argv`
+# passes) silences the two echoes one image guards on it, whereas this
+# discards whatever any login profile writes to stdout.
+_PARK_STDOUT = 'exec 3>&1; exec "$0" "$@" >/dev/null'
+_UNPARK_STDOUT = "exec 1>&3 3>&-; "
+
+
+def _parked_login_argv(container: str, script: str) -> List[str]:
+    """`docker exec` argv running `script` in `container`'s login shell with
+    stdout still PARKED on fd 3. `script` must unpark it (`_UNPARK_STDOUT`)
+    before the output that belongs to the caller -- directly, or in a shell it
+    `exec`s, which is how the supervised route keeps its identity stamp and
+    nested login shell quiet too."""
+    return _ce.docker_exec_argv(container, "sh", "-c", _PARK_STDOUT,
+                                "bash", "-lc", script)
+
+
+def login_shell_argv(container: str, cmd: str) -> List[str]:
+    """`docker exec` argv running `cmd` in `container`'s login shell, with
+    `cmd`'s stdout carrying `cmd`'s output and nothing the profile printed."""
+    return _parked_login_argv(container, _UNPARK_STDOUT + cmd)
 
 
 def host_read_bytes(path) -> Optional[bytes]:
@@ -306,7 +353,7 @@ class ContainerRunner(KLayoutRunner):
             cmd += f"export {exports} && "
         cmd += f"{self._bin} {' '.join(self._flags)} {shlex.quote(script_c)}"
         try:
-            cp = subprocess.run(_ce.docker_exec_argv(self._c, "bash", "-lc", cmd),
+            cp = subprocess.run(login_shell_argv(self._c, cmd),
                                 capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return 124, "", f"klayout (container) timed out after {timeout}s"
@@ -321,7 +368,7 @@ class ContainerRunner(KLayoutRunner):
             cmd += f"export {exports} && "
         cmd += " ".join(shlex.quote(str(a)) for a in argv)
         try:
-            cp = subprocess.run(_ce.docker_exec_argv(self._c, "bash", "-lc", cmd),
+            cp = subprocess.run(login_shell_argv(self._c, cmd),
                                 capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return 124, "", f"command (container) timed out after {timeout}s"
@@ -332,7 +379,11 @@ class ContainerRunner(KLayoutRunner):
     def run_argv_supervised(self, argv, env, *, stall_grace_s,
                             memory_limit_mb, progress_paths=()):
         exports = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in env.items())
-        cmd = "export QT_QPA_PLATFORM=offscreen && "
+        # The watchdog wraps `cmd` in its identity stamp and a nested
+        # `exec bash -lc`, both run with stdout still parked (see
+        # `_parked_login_argv`); `cmd` itself unparks it, so the stamp shell,
+        # BOTH login profiles and nothing else stay off the tool's stdout.
+        cmd = _UNPARK_STDOUT + "export QT_QPA_PLATFORM=offscreen && "
         if exports:
             cmd += f"export {exports} && "
         cmd += _memory_bounded_argv(argv, memory_limit_mb)
@@ -340,7 +391,7 @@ class ContainerRunner(KLayoutRunner):
         def raw_exec(container, probe, timeout=30):
             try:
                 cp = subprocess.run(
-                    _ce.docker_exec_argv(container, "bash", "-lc", probe),
+                    login_shell_argv(container, probe),
                     capture_output=True, text=True, timeout=timeout)
                 return cp.returncode, cp.stdout or "", cp.stderr or ""
             except (OSError, subprocess.TimeoutExpired) as exc:
@@ -349,6 +400,7 @@ class ContainerRunner(KLayoutRunner):
         start = time.monotonic()
         rc, out, err = _dwd.run_docker_supervised(
             self._c, cmd, str(argv[0]), docker_exec_raw=raw_exec,
+            exec_argv=_parked_login_argv,
             progress_paths=progress_paths, stall_grace_s=stall_grace_s,
             poll_s=max(0.25, min(_wd.DEFAULT_POLL_S, stall_grace_s / 4)))
         outcome = "stalled" if rc == _wd.RC_STALLED else "natural"
@@ -465,7 +517,7 @@ class ContainerRunner(KLayoutRunner):
 def _container_has_klayout(container: str) -> bool:
     try:
         cp = _pr.run_best_effort(
-            _ce.docker_exec_argv(container, "bash", "-lc", "command -v klayout >/dev/null 2>&1"),
+            login_shell_argv(container, "command -v klayout >/dev/null 2>&1"),
             capture_output=True, text=True)
         return cp.returncode == 0
     except Exception:                                        # noqa: BLE001
