@@ -1395,19 +1395,6 @@ _NOT_PROSE: Dict[str, str] = {
         "Generated Verilog named-port connection syntax is parsed from the "
         "runner-owned testbench skeleton. The matched `.name(` token is an HDL "
         "grammar production and Verilog has no prose form that denies it.",
-    "design_one_shot_runner::_full_stack_dut_not_in_rtl":
-        "ONE FORMAL GRAMMAR, NO SENTENCE: Verilog. The runner-owned full-stack "
-        "TB's `<module> u_dut (` instance line (written by "
-        "`step_full_stack_tb_gen`) and `[macro]module [automatic|static] "
-        "<name>` headers in every HDL file under rtl/, all matched only after "
-        "`_hdl_code_text.strip_hdl_comments_and_strings` blanks comments and "
-        "string literals. Verilog has no form that denies an instantiation or "
-        "a definition -- a module is defined or it is not. The hand-off it "
-        "also requires is the caller's own rtl_gen StepResult, not text. The "
-        "result is never a design declaration and never a pass: it only "
-        "decides that nothing is compiled and the step is NOT_MEASURED. "
-        "Falsifier: test_full_stack_tb_owed_top_and_container_spelling.py::"
-        "test_a_top_defined_only_inside_a_string_or_comment_is_still_owed.",
     "clock_plan_check::_sdc_primary_clock_sources":
         "SDC `create_clock ... -name <n> [get_ports <p>]` commands, parsed after "
         "`#` comments are stripped (the same comment rule as `_sdc_clock_names`). "
