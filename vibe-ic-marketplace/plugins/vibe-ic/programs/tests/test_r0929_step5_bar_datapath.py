@@ -114,8 +114,8 @@ def test_a_conditional_row_is_demanded_only_when_the_design_selects_it(
     rec = _fsf().generate(na, "ctr", dispatch=base._FakeSim(),
                           model_resolver=base._resolver)
     assert rec["verdict"] == "PASS", rec["reason"]
-    assert rec["step5_bar"]["dispositions"][0]["disposition"] == \
-        "design_declared_na"
+    assert {d["case"]: d["disposition"] for d in rec["step5_bar"][
+        "dispositions"]}["opt_m_mul"] == "design_declared_na"
     rc, _res, _ = base._run_gate(na, tmp_path / "na", capsys)
     assert rc == 0
     # KNOWN-NEGATIVE: the design selected M -> the row is demanded, and blocks
@@ -453,7 +453,8 @@ def _ports():
     (lambda p, d: d.pop("memsize_bytes"), "memsize_bytes"),
     (lambda p, d: d.pop("core_parameters"), "reset vector"),
     (lambda p, d: d["sram_interface"].update(read_data="i_nope"), "i_nope"),
-    (lambda p, d: d.update(memsize_bytes=32), "fit"),
+    (lambda p, d: d["sram_interface"].update(rf_reserved_high_bytes=240),
+     "fit"),
 ])
 def test_the_builder_refuses_what_the_input_does_not_state(tmp_path, mutate,
                                                            needle):

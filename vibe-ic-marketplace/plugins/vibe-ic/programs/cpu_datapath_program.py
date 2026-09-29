@@ -37,7 +37,8 @@ right only if the load path returned the first. The expected bytes come from
 The testbench owns a plain byte SRAM of exactly the delivered size, preset to a
 non-zero pattern (a zero-register or unwritten-lane mistake cannot read as
 right), serves reads at the declared latency, and judges five checks:
-  reset_vector_fetch  a read at the reset vector after release
+  reset_vector_fetch  every byte of the image, from the reset vector on,
+                      read after release (enable-qualified)
   store_word          the stored A + B word
   load_store_word     the word computed from the LOADED value
   byte_lanes_written  every byte of both words written by the DUT
@@ -321,8 +322,86 @@ def sram_roles(decl: dict) -> Tuple[Optional[Dict[str, Any]], str]:
         "declaration sram_interface"
 
 
+#: A memory-size parameter, by the vocabulary cores use for it. Only the
+#: parameters the delivered top actually declares are read.
+_MEM_PARAM_RE = re.compile(
+    r"^(?:mem(?:ory)?_?size(?:_?bytes)?|mem_?bytes|s?ram_?size(?:_?bytes)?)$",
+    re.IGNORECASE)
+_PARAM_NAME_RE = re.compile(
+    r"\bparameter\b(?:\s+(?:integer|int|logic|bit|reg|signed|unsigned))*"
+    r"\s*(?:\[[^\]]*\]\s*)?([A-Za-z_]\w*)\s*=")
+
+
+def elaborated_memory(project: Path, dut_module: str, memsize: int,
+                      decl: dict, top_text: Optional[str] = None
+                      ) -> Tuple[Optional[Dict[str, Any]], str]:
+    """The memory-size parameter the delivered top ELABORATES, checked against
+    the declared `memsize_bytes` -- or a refusal naming the mismatch.
+
+    Review wave 58 (S5DP): the builder took the delivered size from the
+    declaration alone. The same check `_l10_execution.isa_conformance_credit`
+    makes is made here: the RTL default (or the chip top's instance override
+    of it) and `core_parameters` must equal it. A core with no memory-size
+    parameter has nothing to disagree with and says so."""
+    import _l10_execution as _l10x
+    rtl = _pl.rtl_dir(project)
+    files = sorted(list(rtl.glob("*.v")) + list(rtl.glob("*.sv"))) \
+        if rtl.is_dir() else []
+    head = re.compile(r"\bmodule\s+" + re.escape(dut_module)
+                      + r"\b(.*?)\bendmodule\b", re.S)
+    names: List[str] = []
+    for f in files:
+        m = head.search(_l10x._HDL_COMMENT_RE.sub(
+            " ", f.read_text(errors="replace")))
+        if m:
+            names = [n for n in _PARAM_NAME_RE.findall(m.group(1))
+                     if _MEM_PARAM_RE.match(n)]
+            break
+    core = decl.get("core_parameters")
+    core = core if isinstance(core, dict) else {}
+    names += [k for k in core if _MEM_PARAM_RE.match(str(k))
+              and k not in names]
+    if not names:
+        return {"parameter": None, "basis": (
+            f"`{dut_module}` declares no memory-size parameter; the delivered "
+            f"size is the declaration's {memsize}")}, "no memory parameter"
+    over: Dict[str, str] = {}
+    if top_text:
+        im = re.search(r"\b" + re.escape(dut_module)
+                       + r"\s*#\s*\((.*?)\)\s*[A-Za-z_]\w*\s*\(",
+                       _l10x._HDL_COMMENT_RE.sub(" ", top_text), re.S)
+        if im:
+            over = {a: b.strip() for a, b in re.findall(
+                r"\.\s*([A-Za-z_]\w*)\s*\(([^()]*)\)", im.group(1))}
+    rows = []
+    for n in names:
+        default, where = _l10x._module_parameter_default(files, dut_module, n)
+        value = over.get(n, default)
+        got = _l10x._int_literal(value) if value is not None else None
+        if n in core and _l10x._int_literal(core.get(n)) != memsize:
+            return None, (f"the declaration states core_parameters {n}="
+                          f"{core.get(n)!r}, not its memsize_bytes {memsize}")
+        if value is None and n not in core:
+            continue
+        if value is not None and got is None:
+            return None, (f"the elaborated {n} ({value!r}) does not resolve to "
+                          f"a number, so the delivered memory size is unknown")
+        if got is not None and got != memsize:
+            return None, (
+                f"the delivered top elaborates {n}={got} ("
+                + ("chip-top instance override" if n in over
+                   else f"RTL default in {where}")
+                + f"), but the declaration states memsize_bytes={memsize}: "
+                f"the testbench would model a memory the die does not have")
+        rows.append({"parameter": n, "elaborated": got,
+                     "source": ("chip-top override" if n in over
+                                else f"RTL default ({where})")})
+    return {"parameter": rows}, "memory parameter matches the declaration"
+
+
 def design_facts(project: Path, dut_module: str,
-                 ports: List[Tuple[str, str, str]]
+                 ports: List[Tuple[str, str, str]],
+                 top_text: Optional[str] = None
                  ) -> Tuple[Optional[Dict[str, Any]], str]:
     """Everything the image and the testbench need, or the first refusal."""
     project = Path(project)
@@ -343,6 +422,10 @@ def design_facts(project: Path, dut_module: str,
         return None, f"declaration reset_polarity {pol!r} is not active_high/low"
     sram, why = sram_roles(decl)
     if sram is None:
+        return None, why
+    mem_param, why = elaborated_memory(project, dut_module, memsize, decl,
+                                       top_text)
+    if mem_param is None:
         return None, why
     rv, rv_src = reset_vector(project, decl)
     if rv is None:
@@ -400,6 +483,7 @@ def design_facts(project: Path, dut_module: str,
         "ports": dict(sram["ports"]), "widths": widths,
         "read_latency": sram["read_latency"], "reset_pc": rv,
         "reset_pc_source": rv_src, "rf_reserved": rf, "rf_source": rf_src,
+        "memory_parameter": mem_param,
     }, "design facts from L1.isa_base, the declaration and the RTL ports"
 
 
@@ -407,10 +491,12 @@ def design_facts(project: Path, dut_module: str,
 # BUILD — image + testbench
 # ---------------------------------------------------------------------------
 def build(project: Path, dut_module: str, ports: List[Tuple[str, str, str]],
-          name: str = CASE_NAME) -> Tuple[Optional[Dict[str, Any]], str]:
+          name: str = CASE_NAME, top_text: Optional[str] = None
+          ) -> Tuple[Optional[Dict[str, Any]], str]:
     """{tb, hex, program, expected, facts} or (None, refusal). Deterministic:
-    the gate calls it again and compares bytes."""
-    facts, why = design_facts(project, dut_module, ports)
+    the gate calls it again and compares bytes. `top_text` is the full-stack
+    top's source, whose instance override of the memory parameter wins."""
+    facts, why = design_facts(project, dut_module, ports, top_text)
     if facts is None:
         return None, why
     ms, base, rf = facts["memsize"], facts["reset_pc"], facts["rf_reserved"]
@@ -435,7 +521,7 @@ def build(project: Path, dut_module: str, ports: List[Tuple[str, str, str]],
     for w, _t in prog:
         hex_lines += [f"{b:02x}" for b in w.to_bytes(4, "little")]
     hex_text = "\n".join(hex_lines) + "\n"
-    tb = _emit_tb(name, dut_module, facts, data, expected)
+    tb = _emit_tb(name, dut_module, facts, data, expected, prog_len)
     return {
         "name": name, "tb_text": tb, "hex_name": f"{name}.hex",
         "hex_text": hex_text,
@@ -449,7 +535,7 @@ def build(project: Path, dut_module: str, ports: List[Tuple[str, str, str]],
 
 
 def _emit_tb(name: str, dut: str, f: Dict[str, Any], data: int,
-             expected: List[int]) -> str:
+             expected: List[int], prog_len: int) -> str:
     p, lat, ms = f["ports"], int(f["read_latency"]), int(f["memsize"])
     aw = max(1, (ms - 1).bit_length())
     raw = int(f["widths"]["raddr"])
@@ -479,6 +565,7 @@ module {name};
   localparam integer MEMSIZE = {ms};
   localparam integer RESET_PC = {int(f['reset_pc'])};
   localparam integer DATA = {data};
+  localparam integer PROG_LEN = {prog_len};
   localparam integer RF_LO = {rf_lo};
   localparam integer LAT = {lat};
   localparam integer CYCLE_CAP = {CYCLE_CAP};
@@ -497,6 +584,10 @@ module {name};
   reg [7:0] mem [0:MEMSIZE-1];
   reg [7:0] rpipe [0:LAT-1];
   reg [7:0] lane_written;
+  // Every byte of the image, from the reset vector on, must be presented on
+  // the read address (enable-qualified when a read enable exists): an address
+  // idling at the reset vector is not a fetch of the program (review wave 58).
+  reg [PROG_LEN-1:0] fetched_bytes;
   integer i, cyc, settle, stray, oob, xctl, xdat, fetched, npass;
   {dut} u_dut ({', '.join(conns)});
   // The SRAM: writes and reads sampled on the rising edge, read data valid
@@ -509,7 +600,8 @@ module {name};
         if (^raddr === 1'bx || raddr >= MEMSIZE) oob = oob + 1;
         else begin
           rpipe[0] <= mem[raddr];
-          if (raddr == RESET_PC) fetched = 1;
+          if (raddr >= RESET_PC && raddr < RESET_PC + PROG_LEN)
+            fetched_bytes[raddr - RESET_PC] = 1'b1;
         end
       end
       if (we === 1'b1) begin
@@ -536,7 +628,7 @@ module {name};
   endfunction
   initial begin
     stray = 0; oob = 0; xctl = 0; xdat = 0; fetched = 0; npass = 0;
-    settle = 0; lane_written = 8'h00;
+    settle = 0; lane_written = 8'h00; fetched_bytes = {{PROG_LEN{{1'b0}}}};
     for (i = 0; i < MEMSIZE; i = i + 1) mem[i] = 8'h{FILL_BYTE:02x};
     for (i = 0; i < LAT; i = i + 1) rpipe[i] = 8'h00;
     $readmemh("{name}.hex", mem);
@@ -554,8 +646,10 @@ module {name};
     $display("DATAPATH_TRACE cycles=%0d word0=%h word1=%h lanes=%b stray=%0d oob=%0d xctl=%0d xdat=%0d",
              cyc, word_at(DATA), word_at(DATA + 4), lane_written, stray, oob,
              xctl, xdat);
+    fetched = (fetched_bytes === {{PROG_LEN{{1'b1}}}});
     if (fetched) npass = npass + 1;
-    $display("DATAPATH_CHECK reset_vector_fetch %s", fetched ? "PASS" : "MISS");
+    $display("DATAPATH_CHECK reset_vector_fetch %s (%0d of %0d image bytes read from the reset vector on)",
+             fetched ? "PASS" : "MISS", $countones(fetched_bytes), PROG_LEN);
     if (word_at(DATA) === EXP0) npass = npass + 1;
     $display("DATAPATH_CHECK store_word %s (%h, expected %h)",
              word_at(DATA) === EXP0 ? "PASS" : "MISS", word_at(DATA), EXP0);
