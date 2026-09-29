@@ -73,10 +73,15 @@ def _run_path(project: Path, value: str) -> Path:
     """Rebase an immutable run-state path when evaluating a copied project."""
     path = Path(value)
     if path.is_absolute():
+        if path.is_relative_to(project):
+            return path
         parts = path.parts
-        for marker in ("phase3", "phase1", "input", "reports"):
-            if marker in parts:
-                return project.joinpath(*parts[parts.index(marker):])
+        # Rebase at the first run-tree folder the path passes through: a
+        # `reports/phase3/...` path keeps its `reports` component.
+        hits = [parts.index(marker) for marker in ("phase3", "phase1", "input", "reports")
+                if marker in parts]
+        if hits:
+            return project.joinpath(*parts[min(hits):])
     return project / path if not path.is_absolute() else path
 
 
