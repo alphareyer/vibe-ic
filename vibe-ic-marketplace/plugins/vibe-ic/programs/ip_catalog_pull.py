@@ -26,7 +26,7 @@ import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Tuple, Any, Dict, List, Optional
 
 # Import sibling module
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -707,51 +707,164 @@ def pull_all_catalog_matches(project: Path,
     return aggregated
 
 
+#: `verify_existing_official_pins_outcome` states WHY a prior pull was not
+#: accepted.
+#: MISMATCH    — a comparison that could be made disagreed: the project's RTL
+#:               against its own receipts, or a fetched reference against the
+#:               project, or the reference refused the pin ON FETCHED BYTES or by
+#:               policy (erratum base, missing RTL, unverified source, licence,
+#:               a checkout at another sha). Always a FAIL.
+#: UNAVAILABLE — every comparison that could be made agreed, and at least one
+#:               IP's reference tree was never reached (clone failed, timed out,
+#:               git unavailable, the pinned ref absent upstream: its clone
+#:               record has no checked_out_sha). The prior pull is still not
+#:               accepted, but nothing about those bytes was compared.
+PIN_VERIFIED = "VERIFIED"
+PIN_MISMATCH = "MISMATCH"
+PIN_UNAVAILABLE = "UNAVAILABLE"
+
+_PULL_EVENT_KEYS = ("event", "ip", "version", "license", "commit_pinned",
+                    "commit_checked_out", "errata_applied", "files_pulled",
+                    "outputs", "outputs_sha256")
+
+
 def verify_existing_official_pins(project: Path,
                                   matches: List[CatalogMatch],
                                   manifest: Dict[str, Any]) -> bool:
+    """True only when every pin was independently reproduced (see below)."""
+    return verify_existing_official_pins_outcome(
+        project, matches, manifest)[0] == PIN_VERIFIED
+
+
+def _reference_never_reached(audit: Dict[str, Any]) -> bool:
+    """Did this IP's reference pull fail before any tree was checked out?
+
+    Only a transport-stage failure qualifies: the clone record exists and
+    holds no checked_out_sha. A refusal with no clone record (licence,
+    self-match, unverified source) or one reached on a checked-out tree is a
+    decision about the reference, not its absence."""
+    pin = audit.get("clone_pin")
+    return (audit.get("status") == "FAIL" and isinstance(pin, dict)
+            and not pin.get("checked_out_sha"))
+
+
+def _own_receipt_mismatch(project: Path, pins: List[Any],
+                          events: List[Any]) -> Optional[str]:
+    """Compare the project's RTL with its OWN receipts; no reference needed."""
+    rtl = project / "phase2" / "stage1" / "rtl"
+    for pin in pins:
+        if not isinstance(pin, dict):
+            return "a source_pins entry is not an object"
+        files = pin.get("files_sha256")
+        if not isinstance(files, dict) or not files:
+            return f"source_pins for {pin.get('ip_name')} record no file digests"
+        for rel, digest in files.items():
+            target = rtl / Path(str(rel)).name
+            if target.is_symlink() or not target.is_file() or \
+                    _sha256_file(target) != digest:
+                return (f"project RTL differs from its own pin receipt: "
+                        f"{target.relative_to(project)}")
+        pulls = [e for e in events if isinstance(e, dict)
+                 and e.get("event") == "ip_catalog_pull"
+                 and e.get("ip") == pin.get("ip_name")]
+        if not pulls:
+            return f"no project pull event for {pin.get('ip_name')}"
+        for rel, digest in (pulls[-1].get("outputs") or {}).items():
+            target = project / rel
+            if target.is_symlink() or not target.is_file() or \
+                    "sha256:" + _sha256_file(target) != digest:
+                return f"project RTL differs from its own pull event: {rel}"
+    return None
+
+
+def verify_existing_official_pins_outcome(project: Path,
+                                          matches: List[CatalogMatch],
+                                          manifest: Dict[str, Any]
+                                          ) -> Tuple[str, str]:
     """Accept a prior official pull only after independently reproducing its bytes.
 
     The project manifest and provenance are user-writable receipts, so matching
     their hashes to the project's own RTL cannot establish upstream origin.
     Re-run the pinned official pull in an isolated directory, then require its
     complete pin records, pull events, and output bytes in the project.
+
+    NOT ALL-OR-NOTHING (review wave 58). The order is: (1) the project's RTL
+    against its own receipts — a difference there is proven without any
+    reference; (2) every IP whose reference WAS fetched, against the project;
+    (3) only then, if nothing disagreed, an IP whose reference could not be
+    reached makes the answer UNAVAILABLE. A second IP whose clone always
+    fails therefore cannot hide a proven mismatch in the first.
     """
     if manifest.get("generated_by") != "ip_catalog_pull":
-        return False
+        return PIN_MISMATCH, "manifest was not written by ip_catalog_pull"
     pins = manifest.get("source_pins")
-    if not isinstance(pins, list) or len(pins) != len(matches):
-        return False
+    if not isinstance(pins, list) or len(pins) != len(matches) or \
+            sorted(str(p.get("ip_name")) for p in pins if isinstance(p, dict)) != \
+            sorted(m.ip_name for m in matches):
+        return PIN_MISMATCH, "source_pins do not cover the declared matches"
     try:
         events = [json.loads(line) for line in
                   (project / "provenance.jsonl").read_text().splitlines()]
     except (OSError, ValueError, TypeError):
-        return False
+        return PIN_MISMATCH, "project provenance.jsonl unreadable"
+    own = _own_receipt_mismatch(project, pins, events)
+    if own:
+        return PIN_MISMATCH, own
+    by_name = {p["ip_name"]: p for p in pins}
+    unreached: List[str] = []
     with tempfile.TemporaryDirectory(prefix="ip-pin-verify-") as scratch:
         reference = Path(scratch)
         audit = pull_all_catalog_matches(reference, matches, official_only=True,
                                          cache_root=reference / ".cache")
-        if audit.get("n_ips_pulled") != len(matches) or audit.get("n_ips_failed"):
-            return False
-        ref_manifest = json.loads((reference / "phase2/stage1/rtl/SOURCE_MANIFEST.json").read_text())
-        if pins != ref_manifest.get("source_pins"):
-            return False
-        reference_events = [json.loads(line) for line in
-                            (reference / "provenance.jsonl").read_text().splitlines()]
-        for expected in reference_events:
-            if not any(isinstance(event, dict) and
-                       all(event.get(key) == expected.get(key) for key in (
-                           "event", "ip", "version", "license", "commit_pinned",
-                           "commit_checked_out", "errata_applied", "files_pulled",
-                           "outputs", "outputs_sha256"))
-                       for event in events):
-                return False
-            for rel, digest in expected["outputs"].items():
-                target = project / rel
-                if target.is_symlink() or not target.is_file() or \
-                        "sha256:" + _sha256_file(target) != digest:
-                    return False
-    return True
+
+        def _scrub(text: Any) -> str:
+            # The reference pull runs in a throw-away directory; its path in a
+            # tool message would become a dangling external reference in every
+            # report that quotes this reason.
+            return str(text).replace(str(reference), "<independent-pull scratch>")
+
+        try:
+            ref_pins = {p.get("ip_name"): p for p in json.loads(
+                (reference / "phase2/stage1/rtl/SOURCE_MANIFEST.json").read_text()
+            ).get("source_pins") or [] if isinstance(p, dict)}
+        except (OSError, ValueError, AttributeError):
+            ref_pins = {}
+        try:
+            reference_events = [json.loads(line) for line in
+                                (reference / "provenance.jsonl").read_text().splitlines()]
+        except (OSError, ValueError):
+            reference_events = []
+        for used in audit.get("ip_catalog_used") or []:
+            if not isinstance(used, dict):
+                return PIN_MISMATCH, "reference pull returned a malformed record"
+            name = used.get("ip_name")
+            if used.get("status") != "PASS":
+                if _reference_never_reached(used):
+                    unreached.append(f"{name}: {_scrub(used.get('reason'))}")
+                    continue
+                return PIN_MISMATCH, (f"the reference for {name} was refused on "
+                                      f"what it fetched: {_scrub(used.get('reason'))}")
+            if by_name.get(name) != ref_pins.get(name):
+                return PIN_MISMATCH, f"source_pins for {name} differ from the reference pull"
+            expected_rows = [e for e in reference_events if isinstance(e, dict)
+                             and e.get("event") == "ip_catalog_pull"
+                             and e.get("ip") == name]
+            if not expected_rows:
+                return PIN_MISMATCH, f"the reference pull recorded no event for {name}"
+            for expected in expected_rows:
+                if not any(isinstance(event, dict) and
+                           all(event.get(k) == expected.get(k) for k in _PULL_EVENT_KEYS)
+                           for event in events):
+                    return PIN_MISMATCH, (f"no project pull event matches the "
+                                          f"reference for {name}")
+                for rel, digest in expected["outputs"].items():
+                    target = project / rel
+                    if target.is_symlink() or not target.is_file() or \
+                            "sha256:" + _sha256_file(target) != digest:
+                        return PIN_MISMATCH, f"output bytes differ: {rel}"
+    if unreached:
+        return PIN_UNAVAILABLE, "; ".join(unreached)
+    return PIN_VERIFIED, "every pin reproduced by an independent pull"
 
 
 # ---------------------------------------------------------------------------
