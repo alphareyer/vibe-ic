@@ -27,6 +27,7 @@ all under phase 1's own `ProducerRecorder`. chip-AGNOSTIC.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import subprocess
 import sys
@@ -40,6 +41,8 @@ if str(PROGRAMS) not in sys.path:
 
 import _step_identity as SI  # noqa: E402
 import vibe_ic_one_shot_runner as ORCH  # noqa: E402
+import phase1_expert_parse_track as TRACK  # noqa: E402
+from _hostpaths import require_repo  # noqa: E402
 
 try:                                   # absent on the unfixed tree
     import _phase1_producer_identity as PID  # noqa: E402
@@ -150,6 +153,122 @@ def test_docs_written_by_an_older_producer_are_regenerated(tmp_path,
     src.write_text(src.read_text() + "\n# the producer fix lands\n")
     assert _decide(proj, plug, monkeypatch) == (True, "docs")
     assert _fresh(proj, plug)["reason"] == "PRODUCER_CHANGED"
+
+
+def test_producer_change_precedes_unread_answer_but_keeps_identical_root(
+        tmp_path, monkeypatch):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    pack = proj / "reports/audit/phase1/expert_parse_track_pack"
+    assert TRACK.ai_subtrack(proj, "# spec", pack)["status"] == "HANDOFF_EMITTED"
+    answer = pack / "l_doc_expectations.json"
+    answer.write_text(json.dumps({"expectations": [{
+        "id": "input-fact", "layer": "L1_DOC", "requirement": "the input fact",
+        "expected_tokens": ["spec"], "evidence": ["input/docs/spec.md"],
+    }]}))
+    src = plug / "programs/fake_l_producer.py"
+    src.write_text(src.read_text() + "\n# revised producer\n")
+    # The old decision consumed the delivered answer before checking whether
+    # its L-doc root would be regenerated.
+    assert _decide(proj, plug, monkeypatch) == (True, "docs")
+    archive = PID.supersede_docs(proj, "PRODUCER_CHANGED")
+    assert archive is not None
+    assert answer.is_file()
+    _load(plug).produce(proj)  # same L-doc bytes after a code-only change
+    assert TRACK.ai_subtrack(proj, "# spec", pack)["status"] == "CONSUMED"
+    assert answer.is_file()
+
+
+def test_changed_root_retires_answer_before_the_expert_consumer_reads_it(
+        tmp_path):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    pack = proj / "reports/audit/phase1/expert_parse_track_pack"
+    assert TRACK.ai_subtrack(proj, "# spec", pack)["status"] == "HANDOFF_EMITTED"
+    answer = pack / "l_doc_expectations.json"
+    answer.write_text('{"expectations": []}')
+    doc = proj / "phase1/generated_docs/L1_DOC.json"
+    doc.write_bytes(doc.read_bytes() + b"\n")
+    assert PID.record_derivation(
+        proj, doc.name, hashlib.sha256(doc.read_bytes()).hexdigest(),
+        "later-flow-writer")
+    result = TRACK.ai_subtrack(proj, "# spec", pack)
+    assert result["status"] == "HANDOFF_EMITTED"
+    assert "EXPERT_ROOT_CHANGED" in result["reason"]
+    assert not answer.exists()
+    assert (Path(result["stale_pack_archived_at"])
+            / "l_doc_expectations.json").is_file()
+
+
+@pytest.mark.parametrize("missing_evidence", ["schema", "digest"])
+@pytest.mark.parametrize("change_root", [False, True])
+def test_answer_without_a_verifiable_prior_root_gets_a_new_handoff(
+        tmp_path, missing_evidence, change_root):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    pack = proj / "reports/audit/phase1/expert_parse_track_pack"
+    assert TRACK.ai_subtrack(proj, "# spec", pack)["status"] == "HANDOFF_EMITTED"
+    answer = pack / "l_doc_expectations.json"
+    old_answer = {"expectations": [{
+        "id": "input-fact", "layer": "L1_DOC", "requirement": "the input fact",
+        "expected_tokens": ["spec"], "evidence": ["input/docs/spec.md"],
+    }]}
+    answer.write_text(json.dumps(old_answer))
+    old_sha = hashlib.sha256(answer.read_bytes()).hexdigest()
+    schema_path = pack / "authoring_schema.json"
+    if missing_evidence == "schema":
+        schema_path.unlink()
+    else:
+        prior = json.loads(schema_path.read_text())
+        prior["phase1_root"].pop("digest")
+        schema_path.write_text(json.dumps(prior))
+    if change_root:
+        doc = proj / "phase1/generated_docs/L1_DOC.json"
+        doc.write_bytes(doc.read_bytes() + b"\n")
+        assert PID.record_derivation(
+            proj, doc.name, hashlib.sha256(doc.read_bytes()).hexdigest(),
+            "later-flow-writer")
+
+    result = TRACK.ai_subtrack(proj, "# spec", pack)
+    assert result["status"] == "HANDOFF_EMITTED"
+    assert "EXPERT_PRIOR_ROOT_UNVERIFIABLE" in result["reason"]
+    assert "answer_sha256" not in result
+    assert not answer.exists()
+    archive = Path(result["stale_pack_archived_at"])
+    assert json.loads((archive / "l_doc_expectations.json").read_text()) == old_answer
+    assert hashlib.sha256((archive / "l_doc_expectations.json").read_bytes()).hexdigest() == old_sha
+    assert json.loads(schema_path.read_text())["phase1_root"]["digest"] == (
+        TRACK.phase1_root_identity(proj)["digest"])
+
+
+def test_real_l_doc_flow_rewrite_routes_the_old_reading_to_its_consumer(
+        tmp_path, monkeypatch):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    # Exercise a checked-in L document, not a schema invented by this test.
+    source = require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
+        "fixtures", "a9_cosim_scenarios", "phase1", "generated_docs",
+        "L1_DATASHEET.json")
+    doc = proj / "phase1/generated_docs/L1_DATASHEET.json"
+    doc.write_bytes(source.read_bytes())
+    assert PID.record_derivation(
+        proj, doc.name, hashlib.sha256(doc.read_bytes()).hexdigest(),
+        "flow-fixture")
+    report = proj / "reports/audit/phase1/expert_parse_track.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({
+        "phase1_root": TRACK.phase1_root_identity(proj),
+        "ai_subtrack": {"status": "CONSUMED", "answer_sha256": "0" * 64},
+    }))
+    doc.write_bytes(doc.read_bytes() + b"\n")
+    assert PID.record_derivation(
+        proj, doc.name, hashlib.sha256(doc.read_bytes()).hexdigest(),
+        "flow-fixture")
+    assert _fresh(proj, plug)["state"] == PID.REUSE
+    assert "EXPERT_ROOT_CHANGED" in ORCH._expert_root_stale(proj)
+    assert _decide(proj, plug, monkeypatch) == (
+        True, "expert_second_pass")
 
 
 def test_docs_with_no_producer_identity_are_regenerated(tmp_path,
