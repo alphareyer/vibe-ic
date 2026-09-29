@@ -100,11 +100,18 @@ class Classifier:
         return None
 
     def io_limit(self, corner: str, master: str, pin: str, kind: str) -> Optional[float]:
-        lib = self._pad(corner, master)
-        if lib is None:
-            return None
-        value = (lib["cells"].get(master, {}).get(pin) or {}).get(kind)
-        return value if value is not None else lib["defaults"].get(kind)
+        """The tightest IO Liberty limit over every linked library that
+        declares `master` a pad cell (one per corner in a scene; all of them
+        when a report spans corners)."""
+        limits = []
+        for lib in self._io(corner):
+            if master not in lib["pad_cells"]:
+                continue
+            value = (lib["cells"].get(master, {}).get(pin) or {}).get(kind)
+            value = value if value is not None else lib["defaults"].get(kind)
+            if value is not None:
+                limits.append(value)
+        return min(limits) if limits else None
 
     def classify(self, corner: str, kind: str, pin: str,
                  limit: Optional[float], value: Optional[float]) -> str:
