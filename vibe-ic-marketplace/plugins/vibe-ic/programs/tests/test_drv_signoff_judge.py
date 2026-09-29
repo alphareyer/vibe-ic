@@ -1716,6 +1716,37 @@ def test_port_pad_cover_wiring_is_not_a_zero_segment_proof(tmp_path):
     assert [row["pin"] for row in covered["unresolved"]] == ["p"]
 
 
+def _stage_receipts(project: Path, *, skip=(), placement_sdc_fanout=4) -> None:
+    """Receipts an instrumented flow records as each stage runs."""
+    census = (drv._COMMAND + "\n" + "".join(
+        f"{kind} violators=0\n" for kind in drv.KINDS))
+    for name in (*drv._REQUIRED_STAGES, "postroute_repair"):
+        if name in skip:
+            continue
+        folder = project / "phase3/stage_evidence" / name
+        behavior = _file(folder, "drv_behavior.rpt", census + (
+            "" if name == "synth" else "sta::max_fanout_check_limit 4\n"))
+        receipt = {"name": name, "ran": True, "behavior_report": behavior,
+                   # a stage's own prose claim is never the applied value
+                   "applied": {"fanout": 99, "slew_ns": 99, "cap_pf": 99}}
+        if name == "synth":
+            receipt.update(abc_script=_file(folder, "abc.script",
+                                            "strash\nbuffer -N 4\n"),
+                           synth_abc_buffering=True, ideal_clock_excluded=True)
+        else:
+            fanout = placement_sdc_fanout if name == "placement_repair" else 4
+            receipt["sdc_snapshot"] = _file(
+                folder, "pre_command.sdc",
+                f"set_max_fanout {fanout} [current_design]\n"
+                "set_max_transition 3 [current_design]\n"
+                "set_max_capacitance 0.2 [current_design]\n")
+        if name == "cts":
+            receipt.update(cts_parameters={"sink_clustering_size": 4},
+                           clock_driver_fanout=[])
+        _file(project, f"reports/phase3/drv_stages/{name}.json",
+              json.dumps(receipt))
+
+
 def _librelane_final_sta(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     """A LibreLane routed run whose step-32 candidate reached STAPostPNR."""
     import drv_capture_plan as plan
@@ -1781,6 +1812,55 @@ def _step32_report(project: Path, adopted: Path) -> dict:
             "adopted_state": str(adopted),
             "final": {"sta_state": str(state),
                       "sta_state_sha256": drv._sha(state)}}
+
+
+def test_capture_plan_carries_every_required_stage_the_run_recorded(tmp_path, monkeypatch):
+    import drv_capture_plan as capture_plan
+    project, adopted = _librelane_final_sta(tmp_path, monkeypatch)
+    # Pre-stream capture after handoff: routed.def is the adopted route.
+    (project / "phase3/stage3/pnr/routed.def").write_bytes(
+        Path(json.loads(adopted.read_text())["def"]).read_bytes())
+    _stage_receipts(project)
+    plan = capture_plan.build(project)
+    assert [row["name"] for row in plan["stages"]] == list(drv._REQUIRED_STAGES)
+    synth, placement = plan["stages"][0], plan["stages"][1]
+    assert synth["applied"] == {"fanout": 4.0}
+    assert placement["applied"] == {"fanout": 4.0, "slew_ns": 3.0, "cap_pf": 0.2}
+    assert placement["fanout_check_limit"] == 4.0
+    assert all(plan["stage_receipts"][name]["status"] == "recorded"
+               for name in drv._REQUIRED_STAGES)
+    # These rows are the judge's only stage evidence: with them a clean run
+    # can reach a complete verdict; without them it never could.
+    bundle = _bundle(tmp_path)
+    bundle["stages"] = plan["stages"]
+    result = drv.judge(bundle)
+    assert not [f for f in result["failures"] if "stage" in f or
+                any(f.startswith(name) for name in drv._REQUIRED_STAGES)], result
+    assert result["verdict"] == "PASS", result
+
+
+def test_capture_plan_stage_evidence_is_bound_to_recorded_bytes(tmp_path, monkeypatch):
+    import drv_capture_plan as capture_plan
+    project, adopted = _librelane_final_sta(tmp_path, monkeypatch)
+    (project / "phase3/stage3/pnr/routed.def").write_bytes(
+        Path(json.loads(adopted.read_text())["def"]).read_bytes())
+    # Standard section 1: an unextractable stage is FAIL, never N/A.
+    _stage_receipts(project, skip=("cts",), placement_sdc_fanout=10)
+    snapshot = project / "phase3/stage_evidence/post_grt_repair/pre_command.sdc"
+    snapshot.write_text(snapshot.read_text().replace("fanout 4", "fanout 3"))
+    plan = capture_plan.build(project)
+    assert plan["stage_receipts"]["cts"]["status"] == "absent"
+    rows = {row["name"]: row for row in plan["stages"]}
+    assert "cts" not in rows
+    assert rows["placement_repair"]["applied"]["fanout"] == 10.0  # evidence, not prose
+    assert rows["post_grt_repair"]["applied"]["fanout"] is None
+    bundle = _bundle(tmp_path)
+    bundle["stages"] = plan["stages"]
+    result = drv.judge(bundle)
+    assert result["verdict"] == "FAIL"
+    failures = " ".join(result["failures"])
+    assert "cts: required stage absent" in failures
+    assert "post_grt_repair pre-command SDC: sha256 changed" in failures
 
 
 def test_step32_captures_adopted_candidate_before_handoff(tmp_path, monkeypatch):
