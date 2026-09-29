@@ -588,6 +588,11 @@ def assemble(prompt: str, iface: Optional[List[Dict[str, Any]]], target: Optiona
                 "never read an oracle, harness, golden artifact, or hidden answer",
                 "write the JSON object to l_doc_expectations.json",
                 "an empty expectations list is incomplete, not a completed review",
+                "`expected_tokens` in an answer is a JSON list of strings, "
+                "e.g. [\"read-only\", \"reset value\"]; the object shown under "
+                "`expected_tokens` above documents the token language and is "
+                "not the value to write. Any other type is refused by name "
+                "and the expectation is not converged",
             ] + ([
                 "address a layer this pack's generated_layer_contract names — "
                 "it lists EVERY layer this project emitted, not a subset",
