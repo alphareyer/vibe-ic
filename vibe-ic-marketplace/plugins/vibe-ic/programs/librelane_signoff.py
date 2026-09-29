@@ -125,6 +125,10 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str, *,
     overlay = ({'STA_EXTRA_CORNER_TCL_FILE': ('dir::' + EXTRA_TCL, DERATE_SOURCE +
                                               '; report body: vibe-ic step-23 emitters')}
                if extra else None)
+    # The RCX authority must read the technology of the route it extracts,
+    # including its recorded via legalization (also used by step 32).
+    import librelane_pv_signoff as pv
+    overlay = {**(overlay or {}), **(pv.tech_lef_overlay(project) or {})}
     configs = resolve_step_configs(project, image, pdk, list(STEPS), pdk_root=pdk_root,
                                    folder='22-config', overlay=overlay)
     rulesets = _load(configs['OpenROAD.RCX']).get('RCX_RULESETS') or {}
@@ -158,6 +162,8 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str, *,
     spefs = _load(folders[0] / 'state_out.json').get('spef') or {}
     if not isinstance(spefs, dict) or not spefs:
         raise Refusal('LL_RCX_NO_SPEF', str(folders[0] / 'state_out.json'))
+    if extract:
+        bind_rcx_spefs(folders[0], state)
     return {'rcx': folders[0] if extract else None,
             'sta': folders[-1] if time else None,
             'spef': {pattern: Path(path) for pattern, path in spefs.items()},
@@ -197,6 +203,62 @@ def publish_spefs(result: dict, top: str, nominal: Path, corner_dir: Path,
 
 
 # --- SPEF census -----------------------------------------------------------
+
+def bind_rcx_spefs(folder: Path, basis_state: Path,
+                  corners: Optional[list[str]] = None) -> dict:
+    """Audit native RCX outputs on the actual route; never extract a replacement.
+
+    Both step 22's publication and step 32's timing consume this authority.
+    A carried SPEF from an earlier step is not this producer's output.
+    """
+    state_path = folder / 'state_out.json'
+    try:
+        state, before, basis, cfg = (_load(p) for p in (
+            state_path, folder / 'state_in.json', basis_state, folder / 'config.json'))
+        rules = cfg.get('RCX_RULESETS') or {}
+        spefs = state.get('spef') or {}
+        if not isinstance(rules, dict) or not rules or not isinstance(spefs, dict):
+            raise ValueError('rulesets or SPEF map absent')
+        for view in ('def', 'odb', 'sdc'):
+            if view == 'def' or basis.get(view):
+                if not basis.get(view) or not before.get(view) or not state.get(view):
+                    raise ValueError(f'{view} route basis absent')
+                hashes = {digest(Path(doc[view])) for doc in (basis, before, state)}
+                if len(hashes) != 1:
+                    raise ValueError(f'{view} route basis differs')
+        required = list(corners) if corners is not None else list(rules)
+        if not required:
+            raise ValueError('no declared scenes')
+        bound = {}
+        for corner in required:
+            matched_rules = [(k, v) for k, v in rules.items()
+                             if k == corner or fnmatch.fnmatch(corner, k)]
+            matched_spefs = [(k, v) for k, v in spefs.items()
+                             if k == corner or fnmatch.fnmatch(corner, k)]
+            if len(matched_rules) != 1 or len(matched_spefs) != 1:
+                raise ValueError(f'{corner}: ambiguous or missing native RCX scene')
+            pattern, source = matched_spefs[0]
+            if pattern != matched_rules[0][0]:
+                raise ValueError(f'{corner}: SPEF pattern differs from ruleset')
+            path = Path(source).resolve()
+            if not path.is_relative_to(folder.resolve()) or not path.is_file():
+                raise ValueError(f'{corner}: native RCX SPEF absent or carried from another producer')
+            census = spef_census(path)
+            if not census['net_count'] or not math.isfinite(census['total_pf']) or census['total_pf'] <= 0:
+                raise ValueError(f'{corner}: native RCX capacitance absent')
+            if census['coupling_rows'] == 0 or census['coupling_pf'] <= 0:
+                raise ValueError(f'{corner}: native ruleset extraction has no coupling')
+            bound[corner] = {'pattern': pattern, 'path': str(path),
+                             'ruleset': matched_rules[0][1],
+                             **{k: census[k] for k in ('sha256', 'net_count', 'total_pf',
+                                                       'ground_pf', 'coupling_pf', 'coupling_rows')}}
+        return {'producer': 'OpenROAD.RCX', 'state': str(state_path),
+                'state_sha256': digest(state_path), 'config_sha256': digest(folder / 'config.json'),
+                'basis_state_sha256': digest(basis_state),
+                'route_sha256': {k: digest(Path(basis[k])) for k in ('def', 'odb', 'sdc') if basis.get(k)},
+                'scenes': bound}
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise Refusal('LL_RCX_OUTPUT_UNBOUND', f'{folder}: {exc}') from exc
 
 def spef_census(path: Path) -> dict:
     """Per-net total C and the split into grounded and coupling entries, in pF.

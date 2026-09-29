@@ -401,12 +401,14 @@ def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
     # None when the census could not be completed).
     summary["drv_members"] = pin_census["drv_pin_checks"]
     summary["drv_members_reason"] = "; ".join(pin_census["drv_pin_checks_missing"])
-    # LibreLane RCX uses -lef_res, while the direct signoff extracts the
-    # same route with -corner_cnt 1 -max_res 50 -coupling_threshold 0.1.
-    # The latter is the acceptance instrument.  Keep the LibreLane values
-    # for diagnosis, and make a missing native scene a hard refusal.
+    # One extraction authority for this candidate and step 22: native RCX.
+    # Keep signoff-scene STA until its AOCV/serialized-SDC HARVEST has a
+    # merged destination, but consume these exact SPEFs without re-extracting.
     import _native_postroute_timing as _native
-    native = _native.measure(ctx, folders[0] / "state_out.json",
+    rcx_state = folders[2] / "state_out.json"
+    native_ctx = {**ctx, "rcx_state": str(rcx_state),
+                  "rcx_state_sha256": _ll.digest(rcx_state)}
+    native = _native.measure(native_ctx, folders[0] / "state_out.json",
                              folders[0] / "native_signoff")
     antenna = antenna_census(folders[1])
     return folders[0], {"sta_state": str(sta_state),

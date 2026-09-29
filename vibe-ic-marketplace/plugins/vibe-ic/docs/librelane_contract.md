@@ -229,6 +229,14 @@ Refusals: `LL_PV_VIEW_MISSING`, `LL_PV_HALF_UNKNOWN`, `LL_PV_REPORT_MISSING`, `L
 
 **The default.** `CLASS_PRODUCTION_DEFAULTS['chip_pad_ring']` also sets `21` (routing, T99) and `32` (post-route repair) to `librelane`: a chip-path design with no switch runs LL15..20 → LL21 → `Vibeic.PostRouteRepair` → tail. `CLASS_DEFAULT_REQUIRES['32'] = ('21',)`: step 32's default is the repair inside 21's LibreLane chain, so naming 21 anything but `librelane` takes 32 back to the deck's own post-route repair; 21 needs nothing (it routes after direct 19/20 too). The direct route and the direct step 32 stay as the opt-out and `dual` arms; nothing was deleted. Evidence: spm with no switch file vs the same code with 21/32 forced direct (T102 report r4).
 
+## Shared extraction authority for steps 22 and 32 (CUT_W2 item 2)
+
+Step 22 defaults to `librelane` on the chip path. Both consumers use native
+`OpenROAD.RCX` on their own route basis. Step 32's retained signoff-scene STA
+reads its chain's exact, audited RCX SPEFs without re-extracting. Its OCV and
+serialized-SDC harvest gap remains explicit; no legacy source is deleted.
+See [the harvest and bounded proof](cutw2_shared_rcx.md).
+
 ## Step 32: post-route repair (T102; chip-path default since r4)
 
 **Selection.** `"32": "librelane"` or `"dual"` in the switch.

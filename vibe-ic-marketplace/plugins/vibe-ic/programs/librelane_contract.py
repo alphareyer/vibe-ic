@@ -1725,7 +1725,10 @@ CLASS_PRODUCTION_DEFAULTS: dict[str, dict[str, str]] = {
                                  # STA is OpenROAD.STAPostPNR (every declared
                                  # scene, setup AND hold); the direct 2-corner
                                  # deck timed hold only at FF.
-                                 '23': 'librelane'},
+                                 '23': 'librelane',
+                                 # CUT_W2 item 2: shared native RCX authority
+                                 # with the repair's own pre-tail route basis.
+                                 '22': 'librelane'},
 }
 
 #: A class default runs only inside the chain it continues. The producers are
@@ -2369,6 +2372,18 @@ def _sta_liberty_input_hashes(config: dict, project: Path,
     return result
 
 
+def _rcx_pdk_input_hashes(config: dict, project: Path,
+                          mounts: list[tuple[Path, str]]) -> dict[str, str | None]:
+    """RCX's declared rules and physical LEFs, at their mounted host bytes."""
+    paths = []
+    for field in ('RCX_RULESETS', 'TECH_LEFS', 'CELL_LEFS', 'EXTRA_LEFS'):
+        value = config.get(field) or []
+        groups = value.values() if isinstance(value, dict) else [value]
+        for group in groups:
+            paths.extend([group] if isinstance(group, str) else group)
+    return _sta_liberty_input_hashes({'CELL_LIBS': {'*': paths}}, project, mounts)
+
+
 def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
               *, docker: str = 'docker', mounts: list[tuple[Path, str]] | None = None,
               lane: str | None = None, pdk_root: str | None = None,
@@ -2443,6 +2458,12 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         if step_id == 'OpenROAD.STAPostPNR':
             fingerprint['liberty_files'] = _sta_liberty_input_hashes(
                 _load(config), project, mounts or [])
+        if step_id == 'OpenROAD.RCX':
+            fingerprint['rcx_pdk_files'] = _rcx_pdk_input_hashes(
+                _load(config), project, mounts or [])
+            if not fingerprint['rcx_pdk_files'] or any(
+                    value is None for value in fingerprint['rcx_pdk_files'].values()):
+                raise Refusal('LL_RCX_PDK_INPUT_UNREADABLE', str(config))
         if home:
             fingerprint['openroad_aliases'] = (capability or {}).get('openroad_aliases') or {}
         if step_id.startswith(PLUGIN_STEP_PREFIX):
@@ -2510,6 +2531,9 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         if step_id == 'OpenROAD.STAPostPNR' and fingerprint['liberty_files'] != \
                 _sta_liberty_input_hashes(_load(config), project, mounts or []):
             raise Refusal('LL_STA_LIBERTY_CHANGED_DURING_RUN', str(folder))
+        if step_id == 'OpenROAD.RCX' and fingerprint['rcx_pdk_files'] != \
+                _rcx_pdk_input_hashes(_load(config), project, mounts or []):
+            raise Refusal('LL_RCX_PDK_CHANGED_DURING_RUN', str(folder))
         hashes = {'state_out.json': digest(folder / 'state_out.json')}
         for path in _walk_paths({k: v for k, v in out_state.items() if k != 'metrics'}):
             if path.is_relative_to(folder):

@@ -59,7 +59,7 @@ _CHAIN_R4 = _CHAIN + ("21", "32")
 _T96_MEMBERS = {"15", "15.5ic", "17", "18", "19", "20"}
 _T102_MEMBERS = {"21", "32"}
 #: CUT_W2 (1): sign-off STA on STAPostPNR (R-0929-TOOL-DEFAULT).
-_CUTW2_MEMBERS = {"23"}
+_CUTW2_MEMBERS = {"22", "23"}
 
 
 def _chip(tmp_path, deliverable="DIE", *, marker="SELF_TAPEOUT.txt"):
@@ -87,7 +87,7 @@ def test_the_chip_path_runs_15_to_21_and_32_on_librelane_with_no_switch(tmp_path
     assert {s: LC.selected_mode(project, s) for s in _CHAIN_R4} == dict.fromkeys(_CHAIN_R4, "librelane")
     assert LC.selected_mode(project, "23") == "librelane"
     # outside the cut-over, nothing moves
-    for step in ("9", "16", "22", "26", "37"):
+    for step in ("9", "16", "26", "37"):
         assert LC.selected_mode(project, step) == "direct"
 
 
