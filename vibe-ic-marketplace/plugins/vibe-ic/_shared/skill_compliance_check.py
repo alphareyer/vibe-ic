@@ -924,6 +924,7 @@ def _reviewed_rtl_subject(auditor: str, ctx: CheckContext
         if (names != review.get('files_reviewed') or
                 any(bound.get(k) != current[k] for k in ('sha256', 'basis', 'items'))):
             raise ValueError('stale review source binding: content or population changed')
+        current['root'] = str(root.resolve())
         trace = (f'review={ctx.review_json} sha256={current["sha256"]} '
                  f'files={names}')
         modules = {}
@@ -1196,15 +1197,50 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
             state=STATE_NOT_MEASURED)]
 
     actual_subject = rs.subject(payload)
-    if source_subject is not None and rs.verdict(payload) == STATE_PASS:
+    v = rs.verdict(payload)
+    native_verdict = payload.get('summary_status') or _d(payload, 'summary', 'verdict') or v
+    historical_trace = (f'{trace} historical_receipt={found} '
+                        f'historical_native_verdict={native_verdict} '
+                        f'historical_source_sha256={_d(payload, "source_subject", "sha256")}')
+    if ctx.review_json is not None and applicability == 'reviewed_rtl' and source_subject is None:
+        return [Finding(cid, 'FAIL',
+                        f'NOT_MEASURED: `{auditor}` current source binding is unresolved.',
+                        historical_trace, state=STATE_NOT_MEASURED)]
+    # Receipt freshness is independent of its verdict. A prior failure remains
+    # historical evidence; it cannot become a measurement of changed source.
+    if source_subject is not None:
         receipt_subject = payload.get('source_subject')
         if not isinstance(receipt_subject, dict) or receipt_subject.get('basis') != 'content':
             return [Finding(cid, 'FAIL',
                             f'NOT_MEASURED: `{auditor}` receipt has no source content binding.',
-                            f'{trace} — {subject_detail}', state=STATE_NOT_MEASURED)]
-        if receipt_subject.get('sha256') != source_subject['sha256']:
-            return [Finding(cid, 'FAIL', f'`{auditor}` receipt has a stale source hash.',
-                            f'{trace} — {subject_detail}', state=STATE_FAIL)]
+                            f'{historical_trace} — {subject_detail}', state=STATE_NOT_MEASURED)]
+
+        def population(binding):
+            items = binding.get('items')
+            if not isinstance(items, list) or not items:
+                raise ValueError('missing source population')
+            result = []
+            for item in items:
+                if (not isinstance(item, dict) or not isinstance(item.get('path'), str) or
+                        not isinstance(item.get('sha256'), str) or item.get('is_file') is not True):
+                    raise ValueError('unreadable source population item')
+                path = Path(item['path'])
+                if not path.is_absolute():
+                    path = Path(source_subject['root']) / path
+                result.append((str(path.resolve()), item['sha256']))
+            return sorted(result)
+
+        try:
+            same_population = population(receipt_subject) == population(source_subject)
+        except (OSError, RuntimeError, ValueError, TypeError, KeyError) as exc:
+            return [Finding(cid, 'FAIL',
+                            f'NOT_MEASURED: `{auditor}` receipt source population is unresolved.',
+                            f'{historical_trace} — {exc}; {subject_detail}', state=STATE_NOT_MEASURED)]
+        if receipt_subject.get('sha256') != source_subject['sha256'] or not same_population:
+            return [Finding(cid, 'FAIL',
+                            f'NOT_MEASURED: `{auditor}` receipt has a stale source binding; '
+                            'the current audit remains owed.',
+                            f'{historical_trace} — {subject_detail}', state=STATE_NOT_MEASURED)]
     subjects = [spec.get('subject')]
     if source_subject is not None:
         subjects.append(source_subject.get('audit_subject'))
@@ -1224,7 +1260,6 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
                     for k, (d, a) in sorted(mismatched.items())),
                 state=STATE_FAIL)]
 
-    v = rs.verdict(payload)
     if v == STATE_PASS:
         if subject_state == STATE_NOT_MEASURED:
             return [Finding(cid, 'FAIL',
