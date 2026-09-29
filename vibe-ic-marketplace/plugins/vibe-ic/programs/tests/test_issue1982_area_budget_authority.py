@@ -44,6 +44,9 @@ def _project(tmp_path: Path, area_answer, *, chip_area=1000.0,
     project = tmp_path / "neutral_project"
     declaration = TD.blank_declaration()
     declaration[AREA_KEY] = area_answer
+    # A hand-written disposition is the owner's explicit answer, not a derived
+    # one (R-0929-DELIVERABLE-CONSISTENCY-2, `_owner_declared`).
+    _OD.attest_explicit(declaration)
     _write_json(project / "input/submission_template/tapeout_declaration.json",
                 declaration)
     _write_json(project / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json", {

@@ -1286,7 +1286,11 @@ def _drive_step_0_5ic(root: Path, *, deliverable: str) -> Path:
     answers = root.parent / "answers.json"
     answers.write_text(json.dumps({
         "deliverable": deliverable,
-        TD.PROVENANCE_KEY: _OD.provenance(),
+        # the hand-written area disposition is the owner's explicit answer,
+        # not a derived one (R-0929-DELIVERABLE-CONSISTENCY-2)
+        TD.PROVENANCE_KEY: {**_OD.provenance(), TD.SYNTHESIS_AREA_BUDGET_KEY: {
+            "answered_by": TD.ANSWERED_BY_OWNER_VALUE,
+            "citation": _OD.EXPLICIT_CITATION}},
         TD.SYNTHESIS_AREA_BUDGET_KEY: {
             "status": TD.AREA_BUDGET_NOT_APPLICABLE,
             "rationale": (
