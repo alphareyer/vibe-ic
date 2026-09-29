@@ -21263,7 +21263,9 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                        ic_class: str, full_chip: bool = True,
                        lec_max_completed_rungs: Optional[int] = None, *,
                        phase2_request: bool = False,
-                       rederive_ic_name: Optional[str] = None
+                       rederive_ic_name: Optional[str] = None,
+                       lec_pdk: Optional[str] = None,
+                       lec_std_cell_library: Optional[str] = None
                        ) -> List[StepResult]:
     """Flow steps 11-13 (stage-2 DFT → post-DFT → LEC).
 
@@ -22086,12 +22088,16 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                                    rederive_ic_name=rederive_ic_name)
                if phase2_request else top_name)
     return step_lec_equivalence(project, lec_top, container, results,
-                                lec_max_completed_rungs=lec_max_completed_rungs)
+                                lec_max_completed_rungs=lec_max_completed_rungs,
+                                pdk=lec_pdk,
+                                std_cell_library=lec_std_cell_library)
 
 
 def step_lec_equivalence(project: Path, top_name: str, container: str,
                          results: Optional[List[StepResult]] = None, *,
-                         lec_max_completed_rungs: Optional[int] = None
+                         lec_max_completed_rungs: Optional[int] = None,
+                         pdk: Optional[str] = None,
+                         std_cell_library: Optional[str] = None
                          ) -> List[StepResult]:
     """Flow step 13: prove RTL == the netlist step 15 routes.
 
@@ -22102,6 +22108,9 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
     `--top` and the EQY arm all take it as given.
     `results` are earlier rows of the chain; they are returned in front of
     this step's row.
+    `pdk` / `std_cell_library` are the caller's RESOLVED PDK (phase 3 passes
+    its own `PdkConfig`), handed to the EQY tool arm; phase 2 runs before the
+    PDK is resolved and passes none.
     """
     results = list(results or [])
     reports_dir = project / "reports"
@@ -22277,17 +22286,29 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
                            "unavailable")
         results.append(StepResult("lec_equivalence", "NOT_MEASURED", time.time() - t0,
                        "lec_run.py missing → disclosed-skip", reason_class=_V.ReasonClass.TOOL_ABSENT))
-    return _lec_eqy_arm(project, top_name, gate_netlist, results)
+    # The caller's resolved PDK reaches arm B only when there is one, so a
+    # caller without it keeps the arm's four-argument shape.
+    _pdk_kw = ({"pdk": pdk, "std_cell_library": std_cell_library}
+               if pdk else {})
+    return _lec_eqy_arm(project, top_name, gate_netlist, results, **_pdk_kw)
 
 
 def _lec_eqy_arm(project: Path, top_name: str, gate_netlist: str,
-                 results: List[StepResult]) -> List[StepResult]:
-    """Step 13 arm B (opt-in via phase3/librelane_switch.json step "13").
+                 results: List[StepResult], *, pdk: Optional[str] = None,
+                 std_cell_library: Optional[str] = None) -> List[StepResult]:
+    """Step 13 arm B: LibreLane Yosys.EQY beside lec_run (arm A).
 
-    lec_run (arm A) has already run. `librelane` and `dual` both add LibreLane
-    Yosys.EQY as arm B and keep the conclusive arm; EQY is never the sole
-    evidence (see `librelane_eqy`). The step row is replaced by the combined
-    verdict; both arm records stay on disk.
+    `dual` is the chip-path default (librelane_contract, R-0929-TOOL-DEFAULT);
+    `librelane` behaves the same. lec_run (arm A) has already run. EQY is
+    never the sole evidence (see `librelane_eqy`): `combine` keeps the
+    conclusive arm and a counterexample in either arm fails the step. The step
+    row is replaced by the combined verdict; both arm records stay on disk,
+    and `reports/lec_arms.json` binds both arms' subjects by sha256 so the
+    step-13 gate can audit the tool arm (`lec_equivalence_check`).
+
+    The PDK is the caller's resolved one (phase 3's `PdkConfig`), else the
+    switch's declared `pdk`; with neither, arm B is NOT_MEASURED naming both
+    missing sources -- never a guess.
     """
     import librelane_contract as _llc
     try:
@@ -22299,33 +22320,34 @@ def _lec_eqy_arm(project: Path, top_name: str, gate_netlist: str,
     import librelane_eqy as _eqy
     t0 = time.time()
     reports = project / "reports"
+    netlist = Path(gate_netlist)
+    if not netlist.is_absolute():
+        netlist = project / netlist
     try:
-        switch = json.loads((project / "phase3/librelane_switch.json").read_text())
-        pdk = switch.get("pdk")
+        switch_path = project / "phase3/librelane_switch.json"
+        switch = _llc._load(switch_path) if switch_path.is_file() else {}
+        declared = switch.get("pdk")
+        pdk = pdk or declared
         if not pdk:
-            raise _llc.Refusal("LL_SWITCH_INCOMPLETE",
-                               "step 13 needs pdk in phase3/librelane_switch.json")
+            raise _llc.Refusal(
+                "LL_PDK_UNDECLARED",
+                "step 13's EQY arm has no PDK: the caller passed no resolved "
+                "PDK (phase 2 runs before phase 3 resolves it) and "
+                "phase3/librelane_switch.json declares no `pdk`")
+        if std_cell_library is None and pdk == declared:
+            std_cell_library = switch.get("std_cell_library")
         # Image and PDK root through the contract's resolvers (declared >
-        # resolved at run time > refused, naming the cause).
+        # resolved at run time > refused, naming the cause). The EQY plugins
+        # ship in the released image (0.3.86), so nothing is overlaid.
         image = _llc.resolve_image(project)
         root = _llc.pdk_root_resolution(project, str(pdk), image=image)["path"]
         mounts: List[Tuple[Path, str]] = [(Path(root), "/pdk")]
         pdk_root = "/pdk"
-        overlay = switch.get("development_eqy_overlay")
-        if overlay:
-            # Development input only: the released image ships no EQY plugins.
-            base = Path(overlay)
-            mounts.append((base / "eqy", "/foss/tools/yosys/bin/eqy"))
-            mounts += [(base / name, "/foss/tools/bin/" + name) for name in
-                       ("eqy_combine.so", "eqy_partition.so", "eqy_recode.so")]
         rtl_dir = project / "phase2/stage1/rtl"
         rtl = sorted(rtl_dir.glob("*.sv")) + sorted(rtl_dir.glob("*.v"))
-        netlist = Path(gate_netlist)
-        if not netlist.is_absolute():
-            netlist = project / netlist
         folder = _eqy.run_eqy(project, image, str(pdk), top_name, rtl, netlist,
                               mounts=mounts, pdk_root=pdk_root,
-                              std_cell_library=switch.get("std_cell_library"))
+                              std_cell_library=std_cell_library)
         eqy_doc = _eqy.judge_eqy(folder, reports / "lec_eqy.json")
         eqy_doc["subject"] = str(netlist)
         # The netlist PnR consumes. When arm A's subject is a different file
@@ -22336,7 +22358,7 @@ def _lec_eqy_arm(project: Path, top_name: str, gate_netlist: str,
         if handoff.is_file() and handoff.resolve() != netlist.resolve():
             hfolder = _eqy.run_eqy(project, image, str(pdk), top_name, rtl, handoff,
                                    mounts=mounts, pdk_root=pdk_root,
-                                   std_cell_library=switch.get("std_cell_library"),
+                                   std_cell_library=std_cell_library,
                                    namespace="lec_eqy_handoff")
             handoff_doc = _eqy.judge_eqy(hfolder, reports / "lec_eqy_handoff.json")
             handoff_doc["subject"] = str(handoff)
@@ -22351,6 +22373,15 @@ def _lec_eqy_arm(project: Path, top_name: str, gate_netlist: str,
         lec_doc = {"verdict": "NOT_MEASURED"}
     combined = _eqy.combine(lec_doc, eqy_doc)
     combined["mode"] = mode
+    # What each arm proved, by content: the gate credits the tool arm only
+    # for the netlist arm A's own proof identity names.
+    _a_id = (lec_doc.get("proof_identity") or {}).get("gate_netlist") \
+        if isinstance(lec_doc.get("proof_identity"), dict) else None
+    combined["subjects"] = {
+        "lec_run": (_a_id.get("sha256") if isinstance(_a_id, dict) else None),
+        "eqy": (f"sha256:{_llc.digest(netlist)}" if netlist.is_file() else None),
+        "eqy_path": str(netlist)}
+    combined["eqy_xbits_partitions"] = list(eqy_doc.get("xbits_partitions") or [])
     if handoff_doc is not None:
         combined["handoff"] = {"subject": handoff_doc.get("subject"),
                                "verdict": handoff_doc.get("verdict"),
