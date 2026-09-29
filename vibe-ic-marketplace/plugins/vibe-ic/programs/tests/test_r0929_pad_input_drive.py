@@ -459,3 +459,65 @@ def test_an_absent_record_on_a_die_top_is_not_measured(tmp_path):
     import sdc_environment as SE
     assert "never resolved" in SE.pad_input_drive_not_measured(_die(tmp_path))
     assert SE.pad_input_drive_not_measured(_core(tmp_path)) is None
+
+
+# -- the flow order (review_wave58 BLOCKER) ---------------------------------
+#
+# Step 7 authors the SDC before step_pnr's pad-ring producer writes
+# io_pad_chip_top.json, so on a FRESH DIE run step 7's deck has no IO tier
+# yet. asic_sdc_for_pnr must not reuse it: the digest binds the record, and
+# the deck PnR and sign-off load is regenerated with the bracket.
+
+def _step7_fixtures():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "padin_step7_fixtures",
+        Path(__file__).resolve().parent / "test_step7_asic_sdc_is_authored_once_at_step7.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_fresh_die_run_carries_the_io_bracket_into_the_pnr_deck(tmp_path, monkeypatch):
+    S7 = _step7_fixtures()
+    from _ppa import timing as T
+    proj = S7._project(tmp_path)
+    marker = proj / TD.SELF_TAPEOUT_REL
+    marker.parent.mkdir(parents=True)
+    marker.write_text(TD.SELF_TAPEOUT_MARKER + "\n")
+    assert TD.requests_pad_ring(proj) is True
+    pdk = S7._pdk(monkeypatch)
+    # step 7: no pad ring yet -> no drive can be resolved
+    S7._step7(proj, pdk)
+    assert _record(proj)["verdict"] == "NOT_MEASURED"
+    step7_deck = (proj / S7._record(proj)["path"]).read_text()
+    assert "NOT_MEASURED: OFFCHIP_INPUT_DRIVE" in step7_deck
+    # step_pnr's pad-ring producer writes its record (the IO views it linked)
+    _io_record(proj, [_io_lib(tmp_path, "ss")])
+    got = T.asic_sdc_for_pnr(p3, proj, S7.TOP, pdk, "some-container")
+    assert got["regenerated"] and "io_pad_chip_top.json" in got["regenerated"]
+    rec = _record(proj)
+    assert rec["verdict"] == "PDK_IO_TIER"
+    assert all(ln in got["text"].splitlines() for ln in rec["sdc_lines"])
+    assert "set_input_transition -min $_vibeic_pad_min [all_inputs]" in got["text"]
+    # and the regenerated deck is now current: a second read reuses it
+    again = T.asic_sdc_for_pnr(p3, proj, S7.TOP, pdk, "some-container")
+    assert again["regenerated"] is None and again["text"] == got["text"]
+
+
+# -- the runner wiring of the STA fold (review_wave58 MINOR) ----------------
+
+def test_step_declared_signoff_gates_folds_the_pad_drive(tmp_path, monkeypatch):
+    project = _die(tmp_path)
+    _sdc(project, monkeypatch)            # no IO tier -> NOT_MEASURED record
+    seen = []
+
+    def fake_gate(_project, name, _program, _out_rel, _argv):
+        seen.append(name)
+        return p3.StepResult(name, "PASS", 0.0, f"{name} PASS", [], {})
+    monkeypatch.setattr(p3, "_run_declared_signoff_gate", fake_gate)
+    rows = p3.step_declared_signoff_gates(project)
+    by = {r.name: r for r in rows}
+    assert p3._STA_VERDICT_GATE in seen
+    assert by[p3._STA_VERDICT_GATE].status == "NOT_MEASURED"
+    assert "OFFCHIP_INPUT_DRIVE" in by[p3._STA_VERDICT_GATE].detail

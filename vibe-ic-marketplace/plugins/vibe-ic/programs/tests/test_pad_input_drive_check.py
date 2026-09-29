@@ -1,0 +1,166 @@
+"""pad_input_drive_check — the Step-23 clause of R-0929-IO-INPUT-TRANSITION-2.
+
+review_wave58 (PADIN_*, MAJOR): the NOT_MEASURED pad drive only demoted the
+runner's in-memory STA rows; no Step-23 gate clause read
+`reports/phase3/pad_input_drive.json`, so flow_compliance_check graded Step 23
+PASS on ideal bond-pad edges. This clause reads the record and the deck PnR
+and sign-off loaded. The records and decks are produced by the shipped
+`sdc_environment` code; the program is run by path, as the flow runs it, and
+through flow_compliance_check's own clause evaluator.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+PROGRAMS = Path(__file__).resolve().parents[1]
+FLOW = PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml"
+if str(PROGRAMS) not in sys.path:
+    sys.path.insert(0, str(PROGRAMS))
+
+import _tapeout_declaration as TD  # noqa: E402
+import sdc_environment as SE  # noqa: E402
+
+CLAUSE = "pad_input_drive_check . --json reports/phase3/sta/pad_input_drive_check.json"
+DECK = "phase3/stage3/pnr/constraint.sdc"
+_LIB = """library ("quartz_io__ss") {
+  time_unit : "1ns";
+  lu_table_template ("t") { variable_1 : "input_net_transition"; index_1("1, 2, 3"); }
+  cell ("quartz_io__in") {
+    pin ("PAD") { max_transition : 1.0; is_pad : true; direction : "input"; }
+    pin ("Y") { direction : "output";
+      timing () { related_pin : "PAD"; cell_rise ("t") { index_1("0.08, 0.5, 1"); } }
+    }
+  }
+}
+"""
+_CORE = ("quartz_sc__inv_1/ZN", "pinned PDK default cfg:SYNTH_DRIVING_CELL")
+
+
+def _die(tmp_path: Path, io: bool = True) -> Path:
+    p = tmp_path / "die"
+    marker = p / TD.SELF_TAPEOUT_REL
+    marker.parent.mkdir(parents=True)
+    marker.write_text(TD.SELF_TAPEOUT_MARKER + "\n")
+    if io:
+        lib = tmp_path / "quartz_io__ss.lib"
+        lib.write_text(_LIB)
+        rec = p / SE.IO_PAD_RECORD
+        rec.parent.mkdir(parents=True)
+        rec.write_text(json.dumps({"io_library_liberty": [str(lib)]}))
+    return p
+
+
+def _resolve(project: Path, deck_extra: str = "", write_deck: bool = True) -> dict:
+    """What the SDC producer does: resolve, record, render into the deck."""
+    _, rec = SE._pad_input_drive(project, {"set_driving_cell": _CORE})
+    rec["sdc_lines"] = SE.pad_drive_sdc_lines(rec)
+    SE.write_pad_input_drive_record(project, rec)
+    if write_deck:
+        deck = project / DECK
+        deck.parent.mkdir(parents=True, exist_ok=True)
+        deck.write_text("create_clock -name c -period 10 [get_ports clk]\n"
+                        + "\n".join(SE.render_pad_input_drive(rec)) + "\n" + deck_extra)
+    return rec
+
+
+def _run(project: Path):
+    out = subprocess.run([sys.executable, str(PROGRAMS / "pad_input_drive_check.py"),
+                          str(project), "--json", "reports/phase3/sta/pad_input_drive_check.json"],
+                         capture_output=True, text=True, timeout=120)
+    doc = json.loads((project / "reports/phase3/sta/pad_input_drive_check.json").read_text())
+    return out.returncode, doc
+
+
+def test_step23_declares_the_clause():
+    text = FLOW.read_text()
+    step23 = text[text.index("\n  - id: 23\n"):text.index("\n  - id: 24")]
+    assert f'- program_exit_zero: "{CLAUSE}"' in step23
+
+
+def test_the_io_tier_carried_by_the_deck_passes(tmp_path):
+    project = _die(tmp_path)
+    assert _resolve(project)["verdict"] == "PDK_IO_TIER"
+    rc, doc = _run(project)
+    assert (rc, doc["verdict"]) == (0, "PASS"), doc
+
+
+def test_a_not_measured_drive_is_rc2_never_pass(tmp_path):
+    project = _die(tmp_path, io=False)
+    assert _resolve(project)["verdict"] == "NOT_MEASURED"
+    rc, doc = _run(project)
+    assert (rc, doc["verdict"]) == (2, "NOT_MEASURED")
+    assert doc["reason_class"] == "BLOCKED_BY_UPSTREAM"
+
+
+def test_an_absent_record_on_a_die_is_rc2(tmp_path):
+    rc, doc = _run(_die(tmp_path))
+    assert (rc, doc["verdict"]) == (2, "NOT_MEASURED")
+
+
+def test_a_deck_without_the_resolved_drive_fails(tmp_path):
+    """The step-7 ideal-edge deck reused after the ring exists (the BLOCKER
+    shape): the record says PDK_IO_TIER, the deck carries no drive."""
+    project = _die(tmp_path)
+    _resolve(project)
+    (project / DECK).write_text("create_clock -name c -period 10 [get_ports clk]\n")
+    rc, doc = _run(project)
+    assert (rc, doc["verdict"]) == (1, "FAIL")
+    assert len(doc["lines_missing"]) == len(json.loads(
+        (project / SE.PAD_INPUT_DRIVE_REPORT).read_text())["sdc_lines"])
+
+
+def test_a_deck_that_drives_pads_with_the_core_cell_fails(tmp_path):
+    project = _die(tmp_path)
+    _resolve(project, "set_driving_cell -lib_cell quartz_sc__inv_1 -pin ZN [all_inputs]\n")
+    rc, doc = _run(project)
+    assert (rc, doc["verdict"]) == (1, "FAIL")
+    assert doc["core_driving_cell_lines"]
+
+
+def test_a_drive_resolved_from_an_older_pad_ring_record_is_rc2(tmp_path):
+    project = _die(tmp_path)
+    _resolve(project)
+    rec = project / SE.IO_PAD_RECORD
+    rec.write_text(rec.read_text().replace("]}", "], \"verdict\": \"WROTE\"}"))
+    rc, doc = _run(project)
+    assert (rc, doc["verdict"]) == (2, "NOT_MEASURED")
+    assert "different" in doc["reason"]
+
+
+def test_an_absent_signoff_deck_is_rc2(tmp_path):
+    project = _die(tmp_path)
+    _resolve(project, write_deck=False)
+    rc, doc = _run(project)
+    assert (rc, doc["verdict"]) == (2, "NOT_MEASURED")
+
+
+def test_control_a_core_top_is_not_applicable(tmp_path):
+    project = tmp_path / "core"
+    project.mkdir()
+    rc, doc = _run(project)
+    assert (rc, doc["verdict"]) == (0, "NOT_APPLICABLE")
+
+
+def test_flow_compliance_grades_step23_on_the_clause(tmp_path):
+    """flow_compliance_check.check_step over Step 23 as the yaml declares it,
+    reduced to this clause (the other clauses need a routed run): an
+    unresolved drive leaves Step 23 NOT_MEASURED, never PASS; a resolved one
+    carried by the deck lets the clause pass."""
+    import yaml
+    import flow_compliance_check as FC
+    step = next(s for s in yaml.safe_load(FLOW.read_text())["steps"]
+                if str(s.get("id")) == "23")
+    clause = [c for c in step["gate"]["all_of"]
+              if isinstance(c, dict) and c.get("program_exit_zero") == CLAUSE]
+    assert len(clause) == 1
+    only = dict(step, required_outputs=[], gate={"all_of": clause})
+    bad = _die(tmp_path / "a", io=False)
+    _resolve(bad)
+    assert FC.check_step(bad, only, {}).status == "NOT_MEASURED"
+    good = _die(tmp_path / "b")
+    _resolve(good)
+    res = FC.check_step(good, only, {})
+    assert res.status == "PASS", res.reasons
