@@ -619,6 +619,18 @@ def _check_post_stream_derivation(identity: dict, fails: list[str],
                        f"(verdict {verdict.get('status')})")
 
 
+def def_identity(bundle: dict, layout_def: Path | None) -> str | None:
+    """THE comparison of a layout DEF with the bundle's judged DEF identity,
+    shared by every caller (the CLI's current routed DEF and step-23 tool-arm
+    DEF, step 32's final DEF): "absent", "differs", or None when it is the
+    judged layout."""
+    recorded = ((bundle.get("identity") or {}).get("artifacts") or {}).get(
+        "def", {}).get("sha256")
+    if layout_def is None or not Path(layout_def).is_file():
+        return "absent"
+    return None if recorded and _sha(Path(layout_def)) == recorded else "differs"
+
+
 def judge(bundle: dict, *, project: Path | None = None) -> dict:
     """Judge measured rows independently of tool rc/checker summaries."""
     import instrument_calibration
@@ -1181,18 +1193,25 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                     continue
                 effective = row["effective_limit"]
                 tolerance = max(1e-6, abs(effective) * 1e-6)
-                io_disclosure = (kind == "max_capacitance" and
-                                 row.get("cell_class") == "IO" and
-                                 row.get("explicit_limit") is None and
-                                 row["measured"] <= effective and
-                                 row["limit"] == declared.get("cap_pf"))
+                # R-0929-CAP-MARGIN-SCOPE: the std-cell margin is design-wide,
+                # so every IO-cell pin carries it as its tool limit.  That is
+                # the known inheritance, not an instrument disagreement; only a
+                # row the tool FLAGGED within its IO Liberty limit is a
+                # disclosure (merge note 4: tagging every IO pin broke the
+                # per-scene set check once one IO pin exceeded and one did not).
+                io_margin_scope = (kind == "max_capacitance" and
+                                   row.get("cell_class") == "IO" and
+                                   row.get("explicit_limit") is None and
+                                   row["limit"] == declared.get("cap_pf"))
+                io_disclosure = (io_margin_scope and
+                                 row["limit"] < row["measured"] <= effective)
                 if io_disclosure:
                     row["failed_tier"] = "IO_STD_CELL_MARGIN_DISCLOSURE"
                     io_margin_disclosures.append(row)
                 elif row["limit"] > effective + tolerance:
                     fails.append(f"{name}: {kind} {row['pin']} tool limit "
                                  f"{row['limit']} exceeds frozen effective limit {effective}")
-                elif row["limit"] < effective - tolerance:
+                elif row["limit"] < effective - tolerance and not io_margin_scope:
                     missing.append(f"{name}: {kind} {row['pin']} tool limit "
                                    "differs from frozen effective limit")
                 independently_violated = row["measured"] > effective + tolerance
@@ -1356,7 +1375,6 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 state = json.loads((Path(arm["folder"]) / "state_out.json").read_text())
                 tool_arm["def"] = str(state["def"])
-                tool_arm["def_sha256"] = _sha(Path(state["def"]))
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 tool_arm["def_error"] = str(exc)
     try:
@@ -1376,15 +1394,20 @@ def main(argv: list[str] | None = None) -> int:
             if not (args.bundle / "reports/phase3/sta/drv_capture_plan.json").is_file():
                 result.setdefault("not_measured", []).append(
                     "fresh DRV capture plan absent")
-            routed = args.bundle / "phase3/stage3/pnr/routed.def"
-            recorded = ((bundle.get("identity") or {}).get("artifacts") or {}).get("def", {}).get("sha256")
-            if not routed.is_file():
+            routed = def_identity(bundle, args.bundle / "phase3/stage3/pnr/routed.def")
+            if routed == "absent":
                 result.setdefault("not_measured", []).append(
                     "current routed DEF absent")
-            elif _sha(routed) != recorded:
+            elif routed == "differs":
                 result.setdefault("not_measured", []).append(
                     "current routed DEF differs from judged layout identity")
-            if tool_arm is not None and tool_arm.get("def_sha256") != recorded:
+            # Merge note (F15 x DRV stack): "the DEF STAPostPNR timed" binds
+            # the step-23 (in-flow) capture only.  The FINAL capture binds the
+            # shipped DEF/GDS through its post-stream derivation; step 32
+            # repair or step 34 fill may change the DEF after step 23 timed it.
+            if (tool_arm is not None and args.capture_point != "post_stream" and
+                    def_identity(bundle, Path(tool_arm["def"]) if tool_arm.get("def")
+                                 else None) is not None):
                 # The DRV census is a fresh OpenSTA capture of a routed DEF; on
                 # the tool arm it certifies step 23 only if that DEF is the one
                 # STAPostPNR timed. STAPostPNR's own reports carry violator
