@@ -351,6 +351,7 @@ def test_actual_parameterized_register_matches_literal_control(
 @pytest.mark.parametrize("bounds,params,reason", [
     ("MISSING-1:0","", "PORT_WIDTH_UNRESOLVED"),
     ("WIDTH-1:0","parameter integer WIDTH = unknown_call(8)", "PORT_WIDTH_UNRESOLVED"),
+    ("WIDTH-1:0","parameter WIDTH = 8'd256", "PORT_WIDTH_UNRESOLVED"),
     ("WIDTH-1:0","parameter integer WIDTH = (8 > 4) ? 8 : 4", "PORT_WIDTH_UNRESOLVED"),
     ("(WIDTH > 4 ? WIDTH : 4)-1:0","parameter integer WIDTH = 8", "PORT_RANGE_UNSUPPORTED"),
     ("2**WIDTH-1:0","parameter integer WIDTH = 3", "PORT_WIDTH_UNRESOLVED"),

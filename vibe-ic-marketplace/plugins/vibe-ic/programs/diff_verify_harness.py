@@ -182,6 +182,8 @@ def _default_params(raw: Optional[str], body: str) -> Dict[str, int]:
     for _ in range(len(defaults) + 1):
         for name, rhs in defaults:
             if name not in params:
+                if "'" in rhs:
+                    continue  # based-literal sizing/sign/truncation needs elaboration
                 try:
                     params[name] = safe_eval_arith(" ".join(rhs.split()), params)
                 except ExpectError:
@@ -232,7 +234,7 @@ def parse_ports(code: str, top: Optional[str]) -> Tuple[Optional[str],
             width = 1
             if bracket:
                 bounds = re.fullmatch(r"\[([^:\]]+):([^:\]]+)\]", bracket)
-                if bounds is None:
+                if bounds is None or "'" in bracket:
                     raise ValueError("PORT_RANGE_UNSUPPORTED: " + port_name)
                 try:
                     width = abs(safe_eval_arith(" ".join(bounds[1].split()), params)
