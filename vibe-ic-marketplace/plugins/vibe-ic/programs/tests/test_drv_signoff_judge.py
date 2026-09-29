@@ -1347,6 +1347,37 @@ def test_signed_pre_run_freeze_does_not_require_a_routed_netlist(tmp_path, monke
     assert approved == [record]
 
 
+def test_fresh_opensta_refuses_when_the_ceiling_is_opted_out(tmp_path, monkeypatch):
+    # The shared helper returns [] when the operator opts out; the DRV capture
+    # must refuse (NOT_MEASURED) rather than start an unbounded container.
+    from types import SimpleNamespace
+    import drv_signoff_capture as capture
+    script = tmp_path / "s.tcl"
+    script.write_text("puts ready\n")
+    launched = []
+    monkeypatch.setenv("VIBEIC_DOCKER_MEMORY", "off")
+    monkeypatch.setattr(capture, "_watchdog", SimpleNamespace(
+        run_supervised=lambda argv, **kw: launched.append(argv)), raising=False)
+    with pytest.raises(RuntimeError, match="memory ceiling unavailable"):
+        capture._run_fresh(script, {tmp_path}, image="test:image")
+    assert launched == []
+
+
+def test_image_pdk_anchor_probe_carries_the_ceiling(monkeypatch):
+    import subprocess
+    import drv_signoff_anchor as anchor
+    seen = []
+    monkeypatch.setenv("VIBEIC_DOCKER_MEMORY", "3g")
+    monkeypatch.setattr(anchor.subprocess, "run", lambda argv, **kw: (
+        seen.append(argv) or subprocess.CompletedProcess(argv, 1, "", "no")))
+    with pytest.raises(ValueError):
+        anchor.image_pdk_anchor("img:1", "pdkA", "libA")
+    argv = seen[0]
+    assert argv[:2] == ["docker", "run"]
+    assert argv[argv.index("--memory") + 1] == "3g"
+    assert argv[argv.index("--memory-swap") + 1] == "3g"
+
+
 def test_fresh_opensta_has_memory_ceiling_and_progress_watchdog(tmp_path, monkeypatch):
     import subprocess
     from types import SimpleNamespace
@@ -1361,7 +1392,9 @@ def test_fresh_opensta_has_memory_ceiling_and_progress_watchdog(tmp_path, monkey
         return SimpleNamespace(outcome="natural", rc=0, err="")
 
     monkeypatch.setattr(capture, "_docker_memory",
-                        SimpleNamespace(memory_limit=lambda: "1g"), raising=False)
+                        SimpleNamespace(memory_limit=lambda: "1g",
+                                        docker_memory_flags=lambda: [
+                                            "--memory", "1g", "--memory-swap", "1g"]), raising=False)
     monkeypatch.setattr(capture, "_watchdog",
                         SimpleNamespace(run_supervised=supervised), raising=False)
     monkeypatch.setattr(capture.subprocess, "run", lambda argv, **kw:
@@ -1390,7 +1423,9 @@ def test_stalled_opensta_retains_raw_log_and_is_unmeasured(tmp_path, monkeypatch
                                err="no forward progress")
 
     monkeypatch.setattr(capture, "_docker_memory",
-                        SimpleNamespace(memory_limit=lambda: "1g"), raising=False)
+                        SimpleNamespace(memory_limit=lambda: "1g",
+                                        docker_memory_flags=lambda: [
+                                            "--memory", "1g", "--memory-swap", "1g"]), raising=False)
     monkeypatch.setattr(capture, "_watchdog",
                         SimpleNamespace(run_supervised=supervised), raising=False)
     monkeypatch.setattr(capture.subprocess, "run", lambda argv, **kw:
@@ -1420,7 +1455,9 @@ def test_fresh_opensta_refuses_error_in_middle_of_raw_log(tmp_path, monkeypatch)
         return SimpleNamespace(outcome="natural", rc=0, err="")
 
     monkeypatch.setattr(capture, "_docker_memory",
-                        SimpleNamespace(memory_limit=lambda: "1g"), raising=False)
+                        SimpleNamespace(memory_limit=lambda: "1g",
+                                        docker_memory_flags=lambda: [
+                                            "--memory", "1g", "--memory-swap", "1g"]), raising=False)
     monkeypatch.setattr(capture, "_watchdog",
                         SimpleNamespace(run_supervised=supervised), raising=False)
     verdict = "MEASURED"
@@ -1448,7 +1485,9 @@ def test_fresh_opensta_refuses_log_at_byte_ceiling(tmp_path, monkeypatch):
         return SimpleNamespace(outcome="natural", rc=0, err="")
 
     monkeypatch.setattr(capture, "_docker_memory",
-                        SimpleNamespace(memory_limit=lambda: "1g"), raising=False)
+                        SimpleNamespace(memory_limit=lambda: "1g",
+                                        docker_memory_flags=lambda: [
+                                            "--memory", "1g", "--memory-swap", "1g"]), raising=False)
     monkeypatch.setattr(capture, "_watchdog",
                         SimpleNamespace(run_supervised=supervised), raising=False)
     verdict = "MEASURED"
