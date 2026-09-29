@@ -77186,20 +77186,33 @@ def _step32_lets_the_chain_continue(status: str) -> bool:
 
 def _bounded_window_verdict(step_verdict: str,
                             gate_statuses: Iterable[str]) -> str:
-    """Combine selected runner steps with the gates actually refreshed."""
+    """Combine selected runner steps with the gates actually refreshed.
+
+    Only PASS / PASS_WITH_WAIVERS / NOT_APPLICABLE may yield a pass word. An
+    owner-WAIVED DRV residual stays WAIVED (non-green, never PASS -- as the
+    window verdict was before NOT_PROVEN joined it), and any other declared
+    word (e.g. PASS_WITH_ATTRIBUTION) or an unknown one is NOT_MEASURED here,
+    never a fall-through to PASS.
+    """
+    V = _V.Verdict
     words = {str(step_verdict), *(str(s) for s in gate_statuses)}
-    if _V.Verdict.FAIL.value in words:
-        return _V.Verdict.FAIL.value
-    if _V.Verdict.NOT_PROVEN.value in words:
-        return _V.Verdict.NOT_PROVEN.value
-    known = {v.value for v in _V.Verdict}
-    if _V.Verdict.NOT_MEASURED.value in words or words - known:
-        return _V.Verdict.NOT_MEASURED.value
-    if _V.Verdict.PASS_WITH_WAIVERS.value in words:
-        return _V.Verdict.PASS_WITH_WAIVERS.value
-    if _V.Verdict.PASS.value in words:
-        return _V.Verdict.PASS.value
-    return _V.Verdict.NOT_MEASURED.value
+    if V.FAIL.value in words:
+        return V.FAIL.value
+    if V.NOT_PROVEN.value in words:
+        return V.NOT_PROVEN.value
+    known = {v.value for v in V}
+    if V.NOT_MEASURED.value in words or words - known:
+        return V.NOT_MEASURED.value
+    if V.WAIVED.value in words:
+        return V.WAIVED.value
+    passing = {V.PASS.value, V.PASS_WITH_WAIVERS.value, V.NOT_APPLICABLE.value}
+    if words - passing:
+        return V.NOT_MEASURED.value
+    if V.PASS_WITH_WAIVERS.value in words:
+        return V.PASS_WITH_WAIVERS.value
+    if V.PASS.value in words:
+        return V.PASS.value
+    return V.NOT_MEASURED.value
 
 
 def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
