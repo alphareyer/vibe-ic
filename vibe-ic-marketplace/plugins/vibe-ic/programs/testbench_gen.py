@@ -2338,6 +2338,9 @@ def run_unit_tbs(project: Path, container: "str | None" = None,
                                 else "failed"),
                       "message": row["detail"][:400], "log_tail": "",
                       "time": 0.0, "work_dir": "", "tb_file": row["tb_file"],
+                      # The same execution-time identity every scaffold case
+                      # carries: the bytes of the evidence file that judged it.
+                      **_l10x.capture_tb_identity(Path(row["tb_file"])),
                       "has_case_oracle": True})
     executed = sum(1 for c in cases if c["state"] in ("passed", "failed"))
     report["cases"] = cases

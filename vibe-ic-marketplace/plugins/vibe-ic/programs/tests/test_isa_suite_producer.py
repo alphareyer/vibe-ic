@@ -741,3 +741,48 @@ def test_the_executor_publishes_the_isa_row(tmp_path):
     assert X.case_state("base_isa", rec)[0] == X.FAIL
     xml = (p / "phase2/stage1/sim_professional/l10_unit_tb/results.xml").read_text()
     assert 'name="base_isa"' in xml and "<failure" in xml
+
+
+def test_a_step4_run_writes_the_receipt_the_owner_credit_reads(tmp_path,
+                                                               monkeypatch):
+    """R-0929-OWNER-SUB-ACCEPT (1) end to end: Step 4's executor
+    (`testbench_gen.run_unit_tbs`, called with NO injected producer, so the
+    shipped wiring runs) writes `reports/phase2/isa_suites/isa_suite_receipt.json`
+    and the LANDED reader `_l10_execution.isa_conformance_credit` credits it.
+
+    Only the container job and the network are replaced (the executor writes
+    the files the job would write). The programs do not fit the delivered
+    memory, so the row stays NOT_EXECUTED at the delivered size and the case
+    is credited only by the test-parameter rule -- the owner's shape."""
+    import testbench_gen as TB
+    import _l10_execution as X
+    p = _project(tmp_path)
+    oversized = (WORDS, 0, HALT, WORDS, 0, 4096)
+    monkeypatch.setattr(I, "load_lock", lambda *_a, **_k: _lock())
+    monkeypatch.setattr(I, "default_fetch", lambda _u: TARBALL)
+    monkeypatch.setattr(I, "docker_executor", _fake_executor(
+        {"s-add": oversized, "s-fencei": oversized}))
+    tb = p / "phase2" / "stage1" / "sim" / "tb"
+    tb.mkdir(parents=True)
+    (tb / "base_isa.v").write_text(
+        f"// {TB.ORACLE_NONE_MARKER}\nmodule base_isa;\nendmodule\n")
+    TB.run_unit_tbs(p, report={}, dispatch=lambda *_a: (0, "ok"))
+
+    assert (p / X.ISA_RECEIPT_REL).is_file(), "Step 4 wrote no ISA receipt"
+    assert X.case_state("base_isa", X.load_record(p))[0] == X.NOT_EXECUTED
+    l10 = json.loads((p / "phase1/generated_docs/L10_TEST_CASES.json")
+                     .read_text())["fields"]["test_cases"]
+    row = next(r for r in l10 if r["name"] == "base_isa")
+    credit, refusal = X.isa_conformance_credit(p, "base_isa", row)
+    assert refusal is None, refusal
+    assert credit is not None
+    assert ("core ISA conformance at test memsize=2097152 (delivered "
+            "memsize=1024; parameter only, same RTL: 1 file(s)"
+            in credit["sentence"]), credit["sentence"]
+    # A FAIL anywhere in the suite is refused by the same reader.
+    failing = (WORDS, 0, HANG, None, 0, 4096)
+    monkeypatch.setattr(I, "docker_executor", _fake_executor(
+        {"s-add": failing, "s-fencei": oversized}))
+    TB.run_unit_tbs(p, report={}, dispatch=lambda *_a: (0, "ok"))
+    credit, refusal = X.isa_conformance_credit(p, "base_isa", row)
+    assert credit is None and "a failing suite" in (refusal or ""), refusal
