@@ -322,7 +322,16 @@ def test_drv_and_min_pulse_rows_alone_are_not_a_timing_measurement():
 
 def test_runner_stamps_unmeasured_timing_as_its_own_action(tmp_path, monkeypatch):
     import test_v0_3_26_issue527_spef_sta_canonical as H
-    monkeypatch.setattr(R, "_docker_exec", lambda c, cmd, timeout=0, **_: (1, "", ""))
+
+    def docker_exec(c, cmd, timeout=0, **_):
+        # ERC fails closed on a tool error (59634d719), and Step 32 then
+        # refuses "no repair needed" over that undetermined domain. This test
+        # is about the TIMING basis, so the ERC tool run is faked clean with
+        # OpenROAD's own count records; every other tool call still fails.
+        if "/erc_chip_top.tcl" in cmd:
+            return 0, "Found 0 floating nets.\nFound 0 floating pins.\n", ""
+        return 1, "", ""
+    monkeypatch.setattr(R, "_docker_exec", docker_exec)
     monkeypatch.setattr(R, "_to_container_path", lambda s, c: s)
 
     def decision_for(label, sta_text):
