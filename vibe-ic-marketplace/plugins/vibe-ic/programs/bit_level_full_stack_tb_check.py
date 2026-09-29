@@ -880,8 +880,13 @@ def functional_full_stack_verdict(project: Path):
     own `score_transcript`, gives the state the record claims. The design input
     and every compiled source must still be the bytes the record measured.
 
-      PASS          >= 1 case executed and every executed case matched (rc 0)
-      FAIL          an executed case disagreed with its oracle (rc 1)
+      PASS          >= 1 case executed, every executed case matched, and every
+                    declared case that did not execute is excluded by a named
+                    ruling, declared not applicable, or ISA-credited with the
+                    CPU data-path program passed through the same top
+                    (R-0929-STEP5-BAR, re-derived here) (rc 0)
+      FAIL          an executed case, or the CPU data-path program, disagreed
+                    with its oracle (rc 1)
       NOT_MEASURED  no functional population (connectivity-only), the chip top
                     is not built yet, a stale or self-inconsistent record, or a
                     case short of the population its own text states (rc 2)
@@ -975,6 +980,19 @@ def functional_full_stack_verdict(project: Path):
             "EXECUTION_ERROR", "functional_population_underivable",
             f"the declared case populations could not be re-derived from the "
             f"design input: {exc!r}", **common)
+    # R-0929-STEP5-BAR: every DECLARED case is judged, so the declared list is
+    # read from the design input (bytes re-checked above) and a case the
+    # record omits is not measured -- a record cannot shrink its denominator.
+    declared_rows = {str(k.get("name") or k.get("id") or ""): k
+                     for k in (_tbg.load_l10_cases(project) or [])
+                     if isinstance(k, dict)}
+    recorded = {str(c.get("name")) for c in rec.get("cases") or []
+                if isinstance(c, dict)}
+    omitted = sorted(set(declared_rows) - recorded)
+    if omitted:
+        problems.append(f"declared case(s) {omitted[:6]} are absent from the "
+                        f"record")
+    unexecuted: list = []
     for c in rec.get("cases") or []:
         if not isinstance(c, dict):
             problems.append(f"a case entry is not a record: {c!r:.60}")
@@ -991,6 +1009,8 @@ def functional_full_stack_verdict(project: Path):
             if c.get("run_log") or c.get("build_rc") is not None:
                 problems.append(f"{c.get('name')}: the record says {st} but "
                                 f"names a build/run of the case")
+                continue
+            unexecuted.append(row)
             continue
         tb = project / str(c.get("tb") or "")
         log = project / str(c.get("run_log") or "")
@@ -1031,13 +1051,49 @@ def functional_full_stack_verdict(project: Path):
         counts["executed"] += 1
         counts["passed" if st == _fsf.PASSED else "failed"] += 1
         row["checks"] = got["checks"]
+    datapath = _verify_datapath(project, rec, required, problems,
+                                set(declared_rows))
+    dispositions: list = []
+    try:
+        ic_class = _tbg._detect_ic_class(project)
+        for row in unexecuted:
+            case = declared_rows.get(str(row["case"]))
+            if case is None:
+                problems.append(f"{row['case']}: recorded but not a declared "
+                                f"case")
+                continue
+            cov = _fsf.coverage_figure_exemption(case)
+            if cov:
+                row["step5_disposition"] = cov["disposition"]
+                dispositions.append(cov)
+                continue
+            d = _fsf.unexecuted_disposition(
+                project, case, ic_class, datapath["state"] == _fsf.PASSED,
+                required["module"])
+            row["step5_disposition"] = d["disposition"]
+            dispositions.append(d)
+    except Exception as exc:  # noqa: BLE001 — a crash in the bar is no pass
+        return _functional_nm(
+            "EXECUTION_ERROR", "step5_bar_underivable",
+            f"the Step-5 bar could not be re-derived: {exc!r}", **common)
+    blocking = [d["case"] for d in dispositions if d["blocking"]]
     common.update(population=population, counts=counts,
-                  functional_record=str(rpath))
+                  functional_record=str(rpath), cpu_datapath=datapath,
+                  step5_dispositions=dispositions)
     if problems:
         return _functional_nm(
             "EXECUTION_ERROR", "functional_record_inconsistent",
             ("the functional record does not match its own evidence: "
              + "; ".join(problems[:6])), **common)
+    if datapath["state"] == _fsf.FAILED:
+        return 1, {"pass": False, "vacuous_pass": False,
+                   "functional_verified": False,
+                   "rule": "cpu_datapath_program_mismatch", "verdict": "FAIL",
+                   "rationale": (
+                       f"FAIL: the CPU data-path program the flow built from "
+                       f"the design input ran through `{required['module']}` "
+                       f"and did not store what the ISA computes "
+                       f"({datapath.get('checks')})"), **common}, None
     if counts["failed"]:
         return 1, {"pass": False, "vacuous_pass": False,
                    "functional_verified": False,
@@ -1067,6 +1123,15 @@ def functional_full_stack_verdict(project: Path):
             (f"the functional record executed no case through "
              f"`{required['module']}` — a connectivity-only population is not "
              f"functional evidence"), **common)
+    if blocking:
+        return _functional_nm(
+            "ZERO_DENOMINATOR", "step5_bar_unmeasured_cases",
+            (f"R-0929-STEP5-BAR: {len(blocking)} declared case(s) "
+             f"{blocking[:8]} were neither executed through "
+             f"`{required['module']}`, nor excluded by a named ruling, nor "
+             f"credited (ISA credit counts only with a CPU data-path case "
+             f"passed through that top; data-path: {datapath['state']})"),
+            **common)
     not_run = [r for r in population
                if r["state"] not in (_fsf.PASSED, _fsf.FAILED)]
     return 0, {"pass": True, "vacuous_pass": False, "functional_verified": True,
@@ -1076,9 +1141,127 @@ def functional_full_stack_verdict(project: Path):
                    f"PASS: {counts['executed']} functional case(s) executed "
                    f"through `{required['module']}` and every one matched the "
                    f"oracle its design input states"
-                   + (f"; {len(not_run)} declared case(s) did not execute and "
-                      f"are listed in `population`, never counted as passed"
-                      if not_run else "")), **common}, None
+                   + ("; the CPU data-path program passed"
+                      if datapath["state"] == _fsf.PASSED else "")
+                   + (f"; {len(not_run)} declared case(s) did not execute, "
+                      f"each excluded by a named ruling, declared not "
+                      f"applicable or credited (`step5_dispositions`), never "
+                      f"counted as passed" if not_run else "")), **common}, None
+
+
+def _verify_datapath(project: Path, rec: dict, required: dict,
+                     problems: list, declared_names: set = frozenset()) -> dict:
+    """Re-derive the CPU data-path case from the design input and re-score it.
+
+    Its state counts only when the program image and the testbench on disk are
+    the bytes `cpu_datapath_program` builds NOW from the design input, the
+    testbench instantiates the required top once (never the core behind a pad
+    ring) with no parameter override, and its transcript re-scores to the
+    state the record claims. Anything else is a problem or `no_oracle`."""
+    import full_stack_functional_tb as _fsf
+    import cpu_datapath_program as _cdp
+    import testbench_gen as _tbg
+    dp = rec.get(_fsf.DATAPATH_KEY)
+    out = {"state": _fsf.NO_ORACLE, "reason": "no data-path case recorded"}
+    if not isinstance(dp, dict):
+        return out
+    st = dp.get("state")
+    out.update(state=st if st in (_fsf.PASSED, _fsf.FAILED, _fsf.ERRORED)
+               else _fsf.NO_ORACLE, reason=dp.get("reason"))
+    name = str(dp.get("name") or _cdp.CASE_NAME)
+    core = required.get("core_module") or required.get("module")
+    top_text = None
+    if required.get("pad_ring") and required.get("source"):
+        try:
+            top_text = (project / str(required["source"])).read_text(
+                errors="replace")
+        except OSError:
+            top_text = None
+    mod, ports, why = _tbg.resolve_dut(project, str(core))
+    built = None
+    if mod is not None:
+        built, why = _cdp.build(project, mod, ports, name, top_text=top_text)
+    if st not in (_fsf.PASSED, _fsf.FAILED):
+        # Review wave 58 (S5DP): a record could relabel a FAILED data-path
+        # errored / no_oracle and the gate took the label. The same rule as
+        # the L10-case loop, and the label is re-derived, never read.
+        log = project / str(dp.get("run_log") or "")
+        if st == _fsf.ERRORED:
+            if dp.get("run_log"):
+                if not log.is_file() or \
+                        _fsf.sha256_file(log) != dp.get("run_log_sha256"):
+                    problems.append(f"{name}: transcript bytes differ from "
+                                    f"the record")
+                elif _fsf.score_transcript(
+                        name, dp.get("run_rc"),
+                        log.read_text(errors="replace"))["state"] \
+                        != _fsf.ERRORED:
+                    problems.append(f"{name}: the record says errored, but "
+                                    f"its transcript carries a verdict")
+            elif dp.get("build_rc") in (None, 0):
+                problems.append(f"{name}: the record says errored, but names "
+                                f"neither a failed build nor a run")
+            return out
+        if dp.get("run_log") or dp.get("build_rc") is not None \
+                or dp.get("tb") or dp.get("hex"):
+            problems.append(f"{name}: the record says {st} but names a "
+                            f"build/run of the data-path program")
+            return out
+        if built is not None and name not in declared_names:
+            want = built["tb_text"]
+            if required.get("pad_ring"):
+                want, _r = _fsf.retarget_instance(want, mod,
+                                                  required["module"])
+            if want is not None:
+                problems.append(f"{name}: the record says no data-path "
+                                f"program exists, but one builds from the "
+                                f"design input now")
+        return out
+    if built is None:
+        problems.append(f"{name}: the record claims {st}, but no data-path "
+                        f"program builds from the design input now ({why})")
+        return out
+    want = built["tb_text"]
+    if required.get("pad_ring"):
+        want, _r = _fsf.retarget_instance(want, mod, required["module"])
+    tb = project / str(dp.get("tb") or "")
+    hexp = project / str(dp.get("hex") or "")
+    log = project / str(dp.get("run_log") or "")
+    if want is None or not tb.is_file() \
+            or tb.read_text(errors="replace") != want \
+            or _fsf.sha256_file(tb) != dp.get("tb_sha256"):
+        problems.append(f"{name}: the testbench is not the one the flow builds "
+                        f"from the design input")
+        return out
+    if not hexp.is_file() or hexp.read_text(errors="replace") != \
+            built["hex_text"] or _fsf.sha256_file(hexp) != dp.get("hex_sha256"):
+        problems.append(f"{name}: the program image is not the one the flow "
+                        f"assembles from the design input")
+        return out
+    if _fsf.instance_count(want, required["module"]) != 1 or re.search(
+            r"\b" + re.escape(required["module"]) + r"\s*#", want):
+        problems.append(f"{name}: the testbench does not instantiate the "
+                        f"required top `{required['module']}` once at its "
+                        f"delivered parameters")
+        return out
+    if required.get("pad_ring") and required.get("core_module") \
+            and _fsf.instance_count(want, required["core_module"]):
+        problems.append(f"{name}: the testbench drives the core directly")
+        return out
+    if not log.is_file() or _fsf.sha256_file(log) != dp.get("run_log_sha256"):
+        problems.append(f"{name}: transcript bytes differ from the record")
+        return out
+    got = _fsf.score_transcript(name, dp.get("run_rc"),
+                                log.read_text(errors="replace"))
+    if got["state"] != st:
+        problems.append(f"{name}: the transcript scores {got['state']}, the "
+                        f"record claims {st}")
+        return out
+    out.update(state=st, checks=got["checks"],
+               delivered_memsize_bytes=built["delivered_memsize_bytes"],
+               expected_words=built["expected_words"],
+               program=[p["asm"] for p in built["program"]])
+    return out
 
 
 def main():

@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1385
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1385)
+- **Total programs (excluding helpers / shims):** 1386
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1386)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1376 |
+| `any` | 1377 |
 
 ## Alphabetical listing
 
@@ -274,6 +274,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `coverage_closure` | any | — | coverage GAP ANALYSIS over the MEASURED artefact. |
 | `coverage_metric_check` | any | — | coverage_metric_check.py -- Deterministic coverage report metric checker. |
 | `cpu_boot_latency_oracle_tb_gen` | any | — | deterministic golden oracle TB generator for the RESET-TO-FIRST-BUS-ACTIVITY LATENCY test-case shape (ORGANIC #778 companion — Step-4/L10... |
+| `cpu_datapath_program` | any | — | a CPU data-path case the flow builds itself (Step 5). |
 | `cpu_functional_oracle_waiver_check` | any | — | legacy-named Step-4 functional evidence requirement. |
 | `crc_bitorder_check` | any | — | Detect CRC bit-ordering mismatches in TX data loading. |
 | `crc_completeness_check` | any | — | deterministic compliance check derived from <chip-class> v040 debug. |
@@ -1457,7 +1458,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1376 programs)
+### `any` (1377 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1705,6 +1706,7 @@ _(no programs in this group)_
 - `coverage_closure` — coverage GAP ANALYSIS over the MEASURED artefact.
 - `coverage_metric_check` — coverage_metric_check.py -- Deterministic coverage report metric checker.
 - `cpu_boot_latency_oracle_tb_gen` — deterministic golden oracle TB generator for the RESET-TO-FIRST-BUS-ACTIVITY LATENCY test-case shape (ORGANIC #778 companion — Step-4/L10...
+- `cpu_datapath_program` — a CPU data-path case the flow builds itself (Step 5).
 - `cpu_functional_oracle_waiver_check` — legacy-named Step-4 functional evidence requirement.
 - `crc_bitorder_check` — Detect CRC bit-ordering mismatches in TX data loading.
 - `crc_completeness_check` — deterministic compliance check derived from <chip-class> v040 debug.
