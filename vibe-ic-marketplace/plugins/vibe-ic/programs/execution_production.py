@@ -91,6 +91,12 @@ def prepare(project: Path, top: str, pdk, lease: Path, record: Path):
     import librelane_image_facts as facts
     if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_$]*', top):
         raise em.Refusal('PRODUCTION_TOP_PATH_UNSAFE', repr(top))
+    switch = project / 'phase3/librelane_switch.json'
+    switch_data = json.loads(switch.read_text()) if switch.is_file() else {}
+    legacy_mode = lc.selected_mode(project, '9')
+    layer = lc.impl_step_modes(project)
+    if (switch_data.get('steps', {}).get('9') == 'direct' or (layer or {}).get('9') == 'direct'):
+        raise em.Refusal('PRODUCTION_EXPLICIT_DIRECT_NOT_IMPLEMENTED', str(project))
     image = lc.resolve_image(project)
     measured = facts.image_facts(image)
     image_id = measured.get('image_id', '')
@@ -103,8 +109,6 @@ def prepare(project: Path, top: str, pdk, lease: Path, record: Path):
         raise em.Refusal('PRODUCTION_NATIVE_STEPS_UNAVAILABLE', image_id)
     # Existing PDK image materialization starts separate copy containers. It
     # has no production lease here, so require an already-declared host root.
-    switch = project / 'phase3/librelane_switch.json'
-    switch_data = json.loads(switch.read_text()) if switch.is_file() else {}
     if not (switch_data.get('pdk_root_host') or os.environ.get('VIBEIC_LIBRELANE_PDK_ROOT')):
         raise em.Refusal('PRODUCTION_PDK_MATERIALIZATION_NOT_IMPLEMENTED', str(project))
     native_probe = ['docker', 'run', '--rm', '--entrypoint', 'yosys', image_id, '-V']
@@ -138,13 +142,14 @@ def prepare(project: Path, top: str, pdk, lease: Path, record: Path):
     row = next(s for s in em.load_portfolio()['steps'] if s['id'] == '9')
     spec = dict(top=top, pdk=asdict(pdk), original_project=str(project),
                 original_pdk_root=str(root), image_id=image_id, lease=str(lease),
+                legacy_native_mode=legacy_mode, selected_native_mode='librelane',
                 source_sha=sha, source_files=sources, qualification=measured,
                 input_hashes={k: em.digest(v) for k, v in inputs.items()})
     write_json(record, spec)
     inputs['request.json'] = record
     context = em.Context('9', sha, inputs, objective,
                          tuple(dict.fromkeys(row['mandatory_gate_programs'] + list(EXTRA_GATES))),
-                         native_mode=lc.selected_mode(project, '9'))
+                         native_mode='librelane')
     quota = json.loads((lease / 'lease.json').read_text())
     netlist = f'project/phase2/stage2/synth/{top}_synth.v'
     stats = 'project/phase2/stage2/synth/stats.json'

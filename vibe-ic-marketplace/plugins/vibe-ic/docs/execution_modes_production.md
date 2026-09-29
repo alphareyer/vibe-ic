@@ -15,6 +15,11 @@ enter canonical span admission. Native `direct/librelane/dual` remains a separat
 source fact. Unimplemented steps preserve their existing producer and disclose
 NOT_IMPLEMENTED coverage. `execution_production.py --catalog` lists every one
 of the 70 IDs. Public tool descriptions never instantiate executors.
+An explicit per-step or implementation-flow direct declaration refuses because
+that executor lacks a production lease; it is never silently interpreted as
+LibreLane. Otherwise the eligible selection binds native mode `librelane` and
+records the previous native default separately. Native dual retains its existing
+source behavior and migration obligation.
 
 The first executable adapter calls the existing
 `phase3_one_shot_runner._step_synth_librelane` exactly once in a source-owned

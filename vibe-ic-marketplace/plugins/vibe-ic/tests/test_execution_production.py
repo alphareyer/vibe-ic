@@ -318,3 +318,18 @@ def test_unimplemented_actuator_returns_typed_not_measured(tmp_path, monkeypatch
     assert result.status == 'NOT_MEASURED'
     assert result.reason_class == ReasonClass.NOT_EXECUTED
     assert 'PRODUCTION_PERIOD_RELAX_NOT_IMPLEMENTED' in result.detail
+
+
+def test_explicit_native_direct_refuses_instead_of_reinterpreting_identity(tmp_path, monkeypatch):
+    import execution_policy as policy
+    import execution_production as production
+    from verdict import ReasonClass
+    from _atomic_artefact import write_json
+    switch = tmp_path / 'phase3/librelane_switch.json'
+    switch.parent.mkdir(parents=True)
+    write_json(switch, dict(steps={'9': 'direct'}))
+    monkeypatch.setenv(policy.ENV, json.dumps(dict(mode='ultra', cpus=1, ram_mb=512)))
+    result = production.dispatch_synthesis(tmp_path, 'neutral', None, 'unused')
+    assert result.status == 'NOT_MEASURED'
+    assert result.reason_class == ReasonClass.NOT_EXECUTED
+    assert 'PRODUCTION_EXPLICIT_DIRECT_NOT_IMPLEMENTED' in result.detail
