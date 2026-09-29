@@ -78,8 +78,11 @@ CHECKLIST = (
     "both ports belong to ONE channel of ONE declared interface / port group "
     "(e.g. 寫入資料 <-> 寫入啟用 of one SRAM port); a generic shared word "
     "(from, pin, bit, write alone) is not a channel",
-    "active_level is stated by the input for the qualifier; if the input does "
-    "not state it, do not sign the field",
+    "active_level: as the input states it for the qualifier; when the input "
+    "names only the ROLE (an enable / valid / strobe) and marks no active-low "
+    "anywhere — no low-active phrase in any spelling, no _n/_b/# suffix — the "
+    "reviewer may sign 'high' and must quote that role text as basis; any "
+    "low marking means 'low'; if it is unclear, do not sign the field",
     "exactly one qualifier fits; two candidates -> no field",
     "every basis entry is an exact quotation of the design input with its "
     "file and line",
