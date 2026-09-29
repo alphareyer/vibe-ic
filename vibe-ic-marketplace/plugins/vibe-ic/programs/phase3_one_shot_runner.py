@@ -63826,15 +63826,19 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # the report it was decided from (`_step32_decision_record`).
     # A bound producer receipt keeps its bytes; the canonical decision is then
     # recorded beside it, not over it.
-    _decision_name = ("postroute_timing_repair_decision.canonical.json"
-                      if _producer_receipt is not None
-                      else "postroute_timing_repair_decision.json")
     try:
-        _aa.write_text(postroute_timing_repair_out / _decision_name,
-            json.dumps(_step32_decision_record(project, _repair_decision,
-                                               mc_ocv_stance, _sta_for_repair),
-                       indent=2) + "\n")
-        written.append(str(postroute_timing_repair_out / _decision_name))
+        _decision_record = json.dumps(_step32_decision_record(
+            project, _repair_decision, mc_ocv_stance, _sta_for_repair), indent=2) + "\n"
+        if _producer_receipt is None:
+            _aa.write_text(postroute_timing_repair_out / "postroute_timing_repair_decision.json",
+                           _decision_record)
+            written.append(str(postroute_timing_repair_out / "postroute_timing_repair_decision.json"))
+        else:
+            _aa.write_text(postroute_timing_repair_out
+                           / "postroute_timing_repair_decision.canonical.json",
+                           _decision_record)
+            written.append(str(postroute_timing_repair_out
+                               / "postroute_timing_repair_decision.canonical.json"))
     except Exception as _decision_exc:  # pragma: no cover — defensive
         notes.append(f"Step-32 decision record emit failed: {_decision_exc}")
 
@@ -65403,10 +65407,9 @@ def _step32_adopted_repair_log(project: Path, step32: Dict[str, Any]
         },
         "re_verified": bool(state_ok and measured),
         "residual_violation": bool(residual) if measured else None,
-        # The adopted route is the one Step 32 hands on, so every later step
-        # already consumes it: nothing downstream describes the pre-repair
-        # route.
-        "affected_steps": [],
+        # No `affected_steps`: that list is the timing-repair pass's derived
+        # blast radius (one literal, pinned). An adopted candidate is the
+        # route Step 32 hands on, so later steps consume it by construction.
     }
 
 
