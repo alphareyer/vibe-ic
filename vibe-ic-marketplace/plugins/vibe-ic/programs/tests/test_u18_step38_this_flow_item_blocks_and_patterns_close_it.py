@@ -321,5 +321,6 @@ def test_step5_generate_builds_with_the_trace_top(tmp_path, monkeypatch):
     rec = FSF.generate(tmp_path, None, None, dispatch=disp)
     build = [a for a in seen if a and a[0] == FSF.SIMULATOR][0]
     assert build[build.index("-s", build.index("-s") + 1) + 1] == FSF.TRACE_TOP
-    assert build[-1].endswith(f"{FSF.TRACE_TOP}.v")
+    assert build[-2].endswith(f"{FSF.TRACE_TOP}.v")
+    assert build[-1].endswith("c1.v")       # the case testbench stays last
     assert rec["dut_ports"] == [{"name": "clk", "direction": "input"}]
