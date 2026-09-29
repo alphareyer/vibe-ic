@@ -2457,7 +2457,6 @@ def _f_si_fold_applied(p: Path) -> None:
 FIXTURES: Dict[str, Callable[[Path], None]] = {
     "EMPTY": _f_empty,
     "SI_FOLD_NOT_APPLIED": _f_si_fold_not_applied,
-    "SI_FOLD_APPLIED": _f_si_fold_applied,
     "RTL_BAD": _f_rtl_bad,
     "ANALOG_STAGE_BAD_VERDICT": _f_analog_stage_bad_verdict,
     "ANALOG_P3": _f_analog_p3,
@@ -4817,8 +4816,10 @@ def test_d2_step27_reddens_on_a_measured_violation_and_only_on_it(
     red, out_red = _tier(_build_project(tmp_path, "si_red",
                                         "SI_FOLD_NOT_APPLIED"), command)
     assert red == RED and "FOLD_NOT_APPLIED" in out_red, out_red[-400:]
-    good, out_good = _tier(_build_project(tmp_path, "si_ok",
-                                          "SI_FOLD_APPLIED"), command)
+    ok = tmp_path / "si_ok"
+    ok.mkdir()
+    _f_si_fold_applied(ok)
+    good, out_good = _tier(ok, command)
     assert good == PASS, out_good[-400:]
     empty, out_empty = _tier(_build_project(tmp_path, "si_empty", "EMPTY"),
                              command)
