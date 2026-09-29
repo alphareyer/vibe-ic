@@ -1042,24 +1042,50 @@ def instruction_total(lock: Dict[str, Any], facts: Dict[str, Any]
 
 def _arms(project: Path, rtl_dir: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     """The verdict arm (the staged RTL) and, when a disclosed erratum changed
-    the staged copy, arm A: the same set with each deviated file replaced by
-    its unmodified input original."""
+    the staged copy AND the design input holds the pre-fix bytes, arm A: the
+    same set with each deviated file replaced by its unmodified input original.
+
+    The disclosures are `reused_ip_erratum.deviation_disclosures` -- judged by
+    the STAGED BYTES, so a fix a catalog pull staged is disclosed exactly like
+    one this flow applied (owner ruling 2B; review wave 58). A disclosure never
+    depends on arm A existing; when arm A cannot be built the line says why."""
     staged = sorted(str(p) for p in list(rtl_dir.glob("*.v")) + list(rtl_dir.glob("*.sv")))
     arms = [{"name": "staged", "rtl_files": staged}]
     notes: List[str] = []
     try:
         import reused_ip_erratum as _e
         doc = _e.read_flow_record(project)
-    except Exception:  # noqa: BLE001
+        notes = list(_e.deviation_disclosures(project, rtl_dir))
+    except Exception as exc:  # noqa: BLE001
         doc = {}
+        notes = [f"deviation record unreadable: {exc!r} -- the staged RTL may "
+                 f"differ from the design input undisclosed"]
     swaps = {}
+    no_arm_a = []
     for row in doc.get("rows") or []:
-        if row.get("status") in ("APPLIED", "ALREADY_APPLIED") and row.get("input_file"):
-            swaps[Path(row["staged_file"]).name] = row["input_file"]
-            notes.append(row.get("disclosure") or "")
+        if row.get("status") not in ("APPLIED", "ALREADY_APPLIED"):
+            continue
+        name = Path(str(row.get("staged_file") or row.get("file") or "")).name
+        src = row.get("input_file")
+        before = str(row.get("sha256_before") or "").lower()
+        if not src:
+            no_arm_a.append(f"{name}: no unique input original")
+            continue
+        try:
+            got = sha256_bytes(Path(src).read_bytes())
+        except OSError as exc:
+            no_arm_a.append(f"{name}: input original unreadable ({exc!r})")
+            continue
+        if got != before:
+            # An input that already carries the fix is not "unmodified" RTL.
+            no_arm_a.append(f"{name}: the input original is not the pre-fix "
+                            f"bytes (sha256 {got[:12]} != {before[:12]})")
+            continue
+        swaps[name] = src
     if swaps:
         unmod = [swaps.get(Path(f).name, f) for f in staged]
         arms.append({"name": "unmodified", "rtl_files": unmod})
+    notes += [f"unmodified-RTL arm A not built for {x}" for x in no_arm_a]
     return arms, [n for n in notes if n]
 
 

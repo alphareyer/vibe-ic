@@ -335,21 +335,134 @@ def read_flow_record(project: Path) -> Dict[str, Any]:
     return doc if isinstance(doc, dict) else {}
 
 
+#: Where a catalog pull records the upstream fixes it staged (`ip_catalog_pull`
+#: writes it beside the staged RTL, `source_pins[].errata_applied[]`).
+SOURCE_MANIFEST_NAME = "SOURCE_MANIFEST.json"
+
+
+def _staged_hashes(rtl_dir: Path) -> Dict[str, List[str]]:
+    """sha256 -> the staged HDL file names holding those bytes."""
+    out: Dict[str, List[str]] = {}
+    if not Path(rtl_dir).is_dir():
+        return out
+    for p in sorted(Path(rtl_dir).iterdir()):
+        if p.is_file() and p.suffix in (".v", ".sv"):
+            try:
+                out.setdefault(sha256_bytes(p.read_bytes()), []).append(p.name)
+            except OSError:
+                continue
+    return out
+
+
+def staged_deviations(project: Path, rtl_dir: Optional[Path] = None, *,
+                      root: Path = PLUGIN_ROOT) -> List[Dict[str, Any]]:
+    """Every STAGED RTL file whose bytes ARE a known upstream fix's after-image,
+    whichever staging path put them there (owner ruling 2B, 2026-09-28: an
+    applied upstream fix is a DISCLOSED deviation).
+
+    WHY BY BYTES. `apply_errata` records what IT applied, and only for a design
+    that declares `ip_upstream`. A catalog pull (`ip_catalog_pull`) stages the
+    same upstream fixes on its own and records them in the staged
+    `SOURCE_MANIFEST.json` instead -- so a disclosure keyed on the staging path
+    went silent exactly where the fix was in the silicon (review wave 58). The
+    staged bytes are what was verified and what ships; a staged file whose
+    sha256 equals a fix's after-hash IS the deviation, however it got there.
+
+    Known after-images: every shipped erratum record (`sha256_after`) and every
+    `errata_applied[].after_sha256` of the staged SOURCE_MANIFEST. One row per
+    (staged file, fix commit). chip-AGNOSTIC: hashes and two declared records.
+    """
+    project = Path(project)
+    rtl_dir = Path(rtl_dir) if rtl_dir is not None else project / STAGED_RTL_REL
+    staged = _staged_hashes(rtl_dir)
+    if not staged:
+        return []
+    known: List[Dict[str, Any]] = []
+    records, _refusals = load_errata(root)
+    for rec in records:
+        known.append({
+            "after": str(rec["sha256_after"]).lower(),
+            "before": str(rec["sha256_before"]).lower(),
+            "ip": rec["ip"], "version": rec["pinned_version"],
+            "commit": str(rec["fix_commit"]),
+            "what": f"erratum {rec['erratum']}",
+            "source": f"erratum record {Path(rec['_record_path']).name}"})
+    try:
+        manifest = json.loads((rtl_dir / SOURCE_MANIFEST_NAME).read_text())
+    except (OSError, ValueError):
+        manifest = {}
+    pins = manifest.get("source_pins") if isinstance(manifest, dict) else None
+    for pin in pins if isinstance(pins, list) else []:
+        if not isinstance(pin, dict):
+            continue
+        for e in pin.get("errata_applied") or []:
+            if not isinstance(e, dict):
+                continue
+            after = str(e.get("after_sha256") or "").lower()
+            commit = str(e.get("upstream_commit") or "")
+            if not _SHA_RE.match(after) or not commit:
+                continue
+            known.append({
+                "after": after,
+                "before": str(e.get("before_sha256") or "").lower(),
+                "ip": pin.get("ip_name") or pin.get("ip") or "reused IP",
+                "version": pin.get("version") or "unversioned",
+                "commit": commit,
+                "what": str(e.get("disclosure") or "upstream fix"),
+                "source": f"{rtl_dir.name}/{SOURCE_MANIFEST_NAME}"})
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for k in known:
+        for name in staged.get(k["after"], []):
+            key = (name, k["commit"][:10])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(dict(k, file=name, line=(
+                f"deviation from {k['ip']} {k['version']}: upstream "
+                f"{k['commit'][:10]} applied to staged {name} ({k['what']}); "
+                f"its bytes (sha256 {k['after'][:12]}) are the fix's "
+                f"after-image per {k['source']}")))
+    return out
+
+
+def deviation_disclosures(project: Path, rtl_dir: Optional[Path] = None, *,
+                          unmodified: Optional[str] = None,
+                          root: Path = PLUGIN_ROOT) -> List[str]:
+    """THE one disclosure list -- the ISA receipt, the credit sentence, the
+    staging note and the card all read this, so they cannot disagree.
+
+    Each APPLIED / ALREADY_APPLIED row of this flow's erratum record (with or
+    without an input original to build arm A from), then every staged-bytes
+    deviation (`staged_deviations`) no such row already names."""
+    project = Path(project)
+    lines: List[str] = []
+    named = set()
+    for row in read_flow_record(project).get("rows") or []:
+        if row.get("status") not in (APPLIED, ALREADY_APPLIED):
+            continue
+        lines.append(disclosure_line(row, unmodified))
+        named.add((Path(str(row.get("staged_file") or row.get("file") or ""))
+                   .name, str(row.get("fix_commit") or "")[:10]))
+    for dev in staged_deviations(project, rtl_dir, root=root):
+        if (dev["file"], dev["commit"][:10]) not in named:
+            lines.append(dev["line"])
+    return lines
+
+
 def disclosure_lines(project: Path) -> List[str]:
-    """The final-summary lines: each applied erratum, with the unmodified-RTL
-    ISA result filled in from the ISA producer's receipt when it exists."""
-    doc = read_flow_record(project)
+    """The final-summary lines: every disclosed deviation
+    (`deviation_disclosures`), with the unmodified-RTL ISA result filled in
+    from the ISA producer's receipt when it exists, then each REFUSED erratum."""
     unmodified = None
     try:
         import isa_suite_producer as _isa
         unmodified = _isa.unmodified_arm_summary(project)
     except Exception:  # noqa: BLE001 — the line is still disclosed without it
         unmodified = None
-    out = []
-    for row in doc.get("rows") or []:
-        if row.get("status") in (APPLIED, ALREADY_APPLIED):
-            out.append(disclosure_line(row, unmodified))
-        elif row.get("status") == REFUSED:
+    out = deviation_disclosures(project, unmodified=unmodified)
+    for row in read_flow_record(project).get("rows") or []:
+        if row.get("status") == REFUSED:
             out.append(f"erratum REFUSED for {row.get('ip')} "
                        f"{row.get('pinned_version')}: {row.get('why')}")
     return out
