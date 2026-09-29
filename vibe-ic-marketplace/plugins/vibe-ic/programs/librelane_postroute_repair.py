@@ -334,35 +334,42 @@ def _step32_drv_signoff(project: Path, report: Dict[str, Any]) -> None:
     own verdict remains a candidate-selection record, never sign-off evidence.
     """
     import drv_signoff_judge as _drv
+    import drv_capture_plan as _drv_plan
     source = project / "reports/phase3/sta/drv_signoff_bundle.json"
     result: Dict[str, Any]
     try:
+        # The candidate's own final STA state is available before this step's
+        # report is published. Capture from it; an older bundle cannot grade
+        # a newly adopted layout.
+        source.unlink(missing_ok=True)
+        if not report.get("final", {}).get("sta_state"):
+            raise ValueError("final STAPostPNR state absent")
+        # The sign-off STA and post-route repair receipts are the final
+        # state's, not whichever candidate's chain happened to run last.
+        import drv_stage_receipts as _drv_stages
+        _drv_stages.record_step32(project, report)
+        _drv_plan.capture_and_publish(project, final_state=report)
         bundle = json.loads(source.read_text())
         result = _drv.judge(bundle, project=project)
         state_path = report.get("adopted_state")
         state = _load(Path(state_path)) if state_path else {}
-        final_def = Path(str(state.get("def") or ""))
-        recorded = ((bundle.get("identity") or {}).get("artifacts") or {}).get(
-            "def", {}).get("sha256")
-        if not final_def.is_file() or _drv._sha(final_def) != recorded:
+        final = _drv.def_identity(
+            bundle, Path(str(state["def"])) if state.get("def") else None)
+        if final is not None:
             result.setdefault("not_measured", []).append(
-                "step 32 final routed DEF differs from DRV bundle identity"
-                if final_def.is_file() else "step 32 final routed DEF absent")
+                f"step 32 final routed DEF {'absent' if final == 'absent' else 'differs from judged layout identity'}")
             result["verdict"] = ("FAIL" if result.get("failures") else
                                  "NOT_MEASURED")
-    except (OSError, ValueError, TypeError) as exc:
+    except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
         result = {"name": "DRV(tran/cap/fanout)", "verdict": "NOT_MEASURED",
                   "not_measured": [f"step 32 DRV evidence unavailable: {exc}"]}
     report["drv_signoff"] = result
-    # The rejudge is a gate on the adopted layout, not an unused sidecar.
-    if source.is_file() and result["verdict"] == "FAIL":
-        report["verdict"] = "FAIL"
-    elif (source.is_file() and result["verdict"] == "NOT_MEASURED"
-          and report.get("verdict") != "FAIL"):
-        report["verdict"] = "NOT_MEASURED"
-    elif (source.is_file() and result["verdict"] == "WAIVED"
-          and report.get("verdict") == "PASS"):
-        report["verdict"] = "WAIVED"
+    # R-0929-DRV-IDENTITY / R-0929-STEP32-ADOPT: the DRV judgement is Step
+    # 32's own verdict (residual DRV keeps the step FAIL), recorded apart from
+    # the actuator verdict.  It never gates the handoff of the adopted
+    # candidate and never makes the pre-repair route ship; the sign-off DRV
+    # verdict of the handed-off route is the step-23 / pre-stream capture's.
+    report["drv_signoff_verdict"] = result["verdict"] if source.is_file() else "NOT_MEASURED"
     output = project / "reports/phase3/sta/drv_signoff_step32.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     write_json(output, result)
@@ -1119,7 +1126,10 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
 
 
 def _clear_declared_repair(project: Path) -> None:
-    """A new step-32 attempt invalidates any prior decision and outcome."""
+    """A new step-32 attempt invalidates any prior decision and outcome,
+    including the previous attempt's step-32 report: the in-step DRV judge
+    must never read another round's adoption record (review wave 57)."""
+    (project / REPORT_REL).unlink(missing_ok=True)
     out = project / DECLARED_REPAIR_REL
     for name in ("postroute_timing_repair_decision.json", "repair_log.json",
                  "no_repair_needed.flag"):
@@ -1150,6 +1160,20 @@ def _set_census_verdict(report: Dict[str, Any], *measurements: Dict[str, Any]) -
         report.pop("code", None)
 
 
+def adopted_candidate_measured(report: Dict[str, Any]) -> bool:
+    """R-0929-STEP32-ADOPT: a step-32 report whose route may be handed off and
+    declared -- PASS, or a FAIL whose only cause is a MEASURED residual
+    (fanout / DRV) with its antenna and STA-digest census measured.  Anything
+    unmeasured (LL_PRR_*_NOT_MEASURED, ...) is refused: an adopted candidate
+    nobody fully measured never ships (review wave 58)."""
+    return (report.get("verdict") == "PASS" or
+            (report.get("verdict") == "FAIL" and
+             report.get("code") in ("LL_PRR_FANOUT_VIOLATION",
+                                    "LL_PRR_DRV_VIOLATION") and
+             report.get("antenna_census", {}).get("verdict") == "PASS" and
+             report.get("sta_digest_census", {}).get("verdict") == "PASS"))
+
+
 def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path) -> None:
     """Publish step 32's measured decision before the pre-stream gate.
 
@@ -1165,12 +1189,7 @@ def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path
     # A measured fanout residue leaves Step 32 FAIL, while its declaration
     # must still reach the pre-stream audit so the adopted route and residual
     # are visible.  Other incomplete/failing reports cannot publish.
-    if (report.get("verdict") != "PASS" and
-            not (report.get("verdict") == "FAIL" and
-                 report.get("code") in ("LL_PRR_FANOUT_VIOLATION",
-                                        "LL_PRR_DRV_VIOLATION") and
-                 report.get("antenna_census", {}).get("verdict") == "PASS" and
-                 report.get("sta_digest_census", {}).get("verdict") == "PASS")):
+    if not adopted_candidate_measured(report):
         reason = ("the input/final OpenROAD.CheckAntennas net and pin census "
                   "is missing" if report.get("code") == "LL_PRR_ANTENNA_NOT_MEASURED"
                   else "the input/final STAPostPNR state digest is missing"
@@ -1454,6 +1473,14 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     report["input_baseline"] = arms["postdrt"]["baseline"]
     report["repair_trigger"] = chosen.get("repair_trigger")
     report["selected_arm"] = sel["selection"]
+    # The pregrt arm re-ran step 21's chain and rewrote the post-GRT receipt:
+    # bind the route the selected arm stands on before the step-32 capture.
+    import drv_stage_receipts as _drv_stages
+    _lane = ((list(zip(pre["ids"], pre["folders"])) if pre.get("folders")
+              else Path(pre["final"]).parent.parent)
+             if sel["selection"] in ("pregrt", "pregrt_postdrt")
+             else Path(route_state).parent.parent if route_state else None)
+    _drv_stages.rebind_lane(project, _lane, ("post_grt_repair",), sel["selection"])
     _stamp_verdict(report)
     _step32_drv_signoff(project, report)
     write_json(out, report)

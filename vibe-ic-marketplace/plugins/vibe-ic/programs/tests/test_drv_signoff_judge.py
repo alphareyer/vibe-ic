@@ -187,6 +187,25 @@ def _bundle(tmp_path: Path) -> dict:
                 "driver_cell": "logic", "loads": {"logical": 1,
                                                  "antenna_diode": 0, "cts_buffer": 0}}},
             "waiver_ledger": []}
+    # A complete bundle is the FINAL (post-stream) capture: the flow's own
+    # records show the GDS was streamed from, and LVS compared, this very DEF
+    # and netlist (R-0929-DRV-IDENTITY).
+    gds = _file(tmp_path, "stream/top.gds", "GDSII STREAM\n")
+    admission = _file(tmp_path, "reports/phase3/gds_admission.json", json.dumps({
+        "gds_relpath": "stream/top.gds", "gds_sha256": gds["sha256"],
+        "basis_inputs": {"phase3/stage3/pnr/routed.def": artifacts["def"]["sha256"]}}))
+    lvs_inputs = _file(tmp_path, "reports/phase3/lvs_inputs.json", json.dumps({
+        "layout_def": artifacts["def"], "schematic_netlist": netlist}))
+    # step 31's verdict names the inputs record of its own compare
+    lvs_verdict = _file(tmp_path, "reports/phase3/lvs_verdict.json", json.dumps({
+        "status": "PASS", "compare_performed": True, "lvs_inputs": lvs_inputs}))
+    bundle["identity"]["derivation"] = {
+        "gds": {**gds, "streamed_from_def_sha256": artifacts["def"]["sha256"],
+                "record": admission},
+        "lvs": {"layout_def_sha256": artifacts["def"]["sha256"],
+                "schematic_netlist": netlist, "verdict": "PASS",
+                "compare_performed": True, "inputs_record": lvs_inputs,
+                "verdict_record": lvs_verdict, "records": [lvs_inputs, lvs_verdict]}}
     _refresh_scripts(bundle, tmp_path)
     return bundle
 
@@ -628,7 +647,7 @@ def test_prestream_signoff_consumer_reads_judge_receipt_not_exit_code(tmp_path):
         tmp_path, "drv_signoff", "drv_signoff_judge.py",
         "reports/phase3/sta/drv_signoff.json")
     assert row.status == "NOT_MEASURED"
-    assert "capture plan absent" in row.detail
+    assert "fresh DRV capture did not complete" in row.detail
     assert any(s[0] == "drv_signoff" for s in runner._PRESTREAM_GATES)
     assert any(s[0] == "drv_signoff" for s in runner._DECLARED_SIGNOFF_GATES)
 
@@ -636,6 +655,7 @@ def test_prestream_signoff_consumer_reads_judge_receipt_not_exit_code(tmp_path):
 def test_consumer_preserves_waived_word_and_owner_row(tmp_path, monkeypatch):
     import subprocess
     import drv_signoff_capture as capture
+    import drv_capture_plan as capture_plan
     import phase3_one_shot_runner as runner
     _file(tmp_path, "phase3/stage3/pnr/routed.def", "ROUTED DEF\n")
     bundle = _bundle(tmp_path)
@@ -648,6 +668,7 @@ def test_consumer_preserves_waived_word_and_owner_row(tmp_path, monkeypatch):
     _mock_verified_owner_record(monkeypatch, bundle["waiver_ledger"][0])
     _file(tmp_path, "reports/phase3/sta/drv_capture_plan.json", "{}")
     monkeypatch.setattr(capture, "capture", lambda *a, **k: bundle)
+    monkeypatch.setattr(capture_plan, "capture_and_publish", lambda *a, **k: source)
     def run_judge(cmd, **kwargs):
         # A separately verified judge receipt is the consumer's contract.
         Path(cmd[-1]).write_text(json.dumps({
@@ -695,6 +716,7 @@ def test_flow_step_refuses_unsigned_owner_ledger(tmp_path):
 
 def test_step32_rechecks_final_state_identity_after_late_repair(tmp_path, monkeypatch):
     import librelane_postroute_repair as repair
+    import drv_capture_plan
     monkeypatch.setattr(drv, "judge", lambda *a, **k: {
         "name": "DRV(tran/cap/fanout)", "verdict": "PASS",
         "failures": [], "not_measured": []})
@@ -704,7 +726,11 @@ def test_step32_rechecks_final_state_identity_after_late_repair(tmp_path, monkey
     source.write_text(json.dumps(bundle))
     state = tmp_path / "final_state.json"
     state.write_text(json.dumps({"def": bundle["identity"]["artifacts"]["def"]["path"]}))
-    report = {"adopted_state": str(state)}
+    sta_state = tmp_path / "sta_state.json"
+    sta_state.write_text("{}")
+    report = {"adopted_state": str(state), "final": {"sta_state": str(sta_state)}}
+    monkeypatch.setattr(drv_capture_plan, "capture_and_publish",
+                        lambda *a, **k: source.write_text(json.dumps(bundle)))
     repair._step32_drv_signoff(tmp_path, report)
     assert report["drv_signoff"]["verdict"] == "PASS"
     bundle["identity"]["artifacts"]["def"] = _file(
@@ -712,7 +738,102 @@ def test_step32_rechecks_final_state_identity_after_late_repair(tmp_path, monkey
     source.write_text(json.dumps(bundle))
     repair._step32_drv_signoff(tmp_path, report)
     assert report["drv_signoff"]["verdict"] == "NOT_MEASURED"
-    assert report["verdict"] == "NOT_MEASURED"
+    # R-0929-DRV-IDENTITY (root, 2026-09-29) supersedes mapping the DRV
+    # verdict onto the actuator verdict that gates handoff: it is Step 32's
+    # own DRV verdict and never blocks the handoff of an adopted candidate.
+    assert report["drv_signoff_verdict"] == "NOT_MEASURED"
+    assert "verdict" not in report
+
+
+def test_step32_missing_final_state_refuses_stale_pass(tmp_path, monkeypatch):
+    import librelane_postroute_repair as repair
+    monkeypatch.setattr(drv, "judge", lambda *a, **k: {
+        "name": "DRV(tran/cap/fanout)", "verdict": "PASS",
+        "failures": [], "not_measured": []})
+    source = tmp_path / "reports/phase3/sta/drv_signoff_bundle.json"
+    source.parent.mkdir(parents=True)
+    bundle = _bundle(tmp_path)
+    source.write_text(json.dumps(bundle))
+    state = tmp_path / "adopted_state.json"
+    state.write_text(json.dumps({"def": bundle["identity"]["artifacts"]["def"]["path"]}))
+    report = {"verdict": "PASS", "adopted_state": str(state)}
+    repair._step32_drv_signoff(tmp_path, report)
+    assert report["drv_signoff"]["verdict"] == "NOT_MEASURED"
+    assert report["verdict"] == "PASS"  # repair actuator is a separate scope
+    assert not source.exists()
+
+
+def test_step32_capture_runtime_failure_is_named_not_measured(tmp_path, monkeypatch):
+    import librelane_postroute_repair as repair
+    import drv_capture_plan
+    source = tmp_path / "reports/phase3/sta/drv_signoff_bundle.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(json.dumps(_bundle(tmp_path)))
+    monkeypatch.setattr(drv_capture_plan, "capture_and_publish",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("EDA stopped")))
+    report = {"verdict": "PASS", "final": {"sta_state": "candidate/state_out.json"}}
+    repair._step32_drv_signoff(tmp_path, report)
+    assert report["drv_signoff"]["verdict"] == "NOT_MEASURED"
+    assert "EDA stopped" in report["drv_signoff"]["not_measured"][0]
+    assert not source.exists()
+
+
+def test_capture_plan_reads_applied_clock_and_io_values():
+    from drv_capture_plan import _clock_io_values
+    sdc = ("# create_clock -period 99 [get_ports clk]\n"
+           "create_clock -name clk -period 24.0 [get_ports clk]\n"
+           "set_input_delay 4.8 -clock clk [all_inputs]\n"
+           "set_output_delay 4.8 -clock clk [all_outputs]\n")
+    assert _clock_io_values(sdc) == (24.0, 4.8)
+    assert _clock_io_values(sdc + "set_output_delay 5 -clock clk [all_outputs]\n") == (24.0, None)
+
+
+def test_direct_capture_plan_uses_its_ran_decks_and_linked_lef(tmp_path, monkeypatch):
+    import _eda_image
+    import drv_capture_plan as plan
+    import librelane_contract
+    project = tmp_path / "design"
+    root = tmp_path / "installed"
+    lib = _file(root, "synthetic/libs.ref/lib/lib/std_typ.lib",
+                'library (std) { time_unit : "1ns"; capacitive_load_unit (1,pf); '
+                'nom_voltage : 5; nom_temperature : 25; }')
+    lef = _file(root, "synthetic/libs.ref/lib/lef/std.lef",
+                "MACRO std\n PIN A\n USE SIGNAL ;\n END A\nEND std\n")
+    _file(root, "synthetic/libs.tech/librelane/lib/config.tcl",
+          "set ::env(MAX_FANOUT_CONSTRAINT) 4\n"
+          "set ::env(MAX_TRANSITION_CONSTRAINT) 3\n"
+          "set ::env(MAX_CAPACITANCE_CONSTRAINT) 0.2\n")
+    netlist = _file(project, "phase3/stage3/pnr/final.v", "module top; endmodule\n")
+    _file(project, "phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\n")
+    sdc = _file(project, "phase3/stage3/sta/signoff.sdc",
+                "create_clock -period 24 [get_ports clk]\n"
+                "set_input_delay 4.8 -clock clk [all_inputs]\n"
+                "set_output_delay 4.8 -clock clk [all_outputs]\n")
+    _file(project, "input/docs/L7_design.md", "input L7\n")
+    _file(project, "input/docs/L9_constraints_floorplan.md", "input L9\n")
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"synthetic": {"pvt": {
+        "typ": {"nom_voltage": 5, "nom_temperature": 25}},
+        "rc_corners": ["nom", "max"]}}))
+    monkeypatch.setattr(plan, "_SCENE_PROFILES", profile)
+    monkeypatch.setattr(_eda_image, "resolve", lambda: "synthetic:test")
+    monkeypatch.setattr(librelane_contract, "resolve_pdk_root",
+                        lambda *a, **k: str(root))
+    for kind, rc in (("setup", "nom"), ("hold", "max")):
+        spef = _file(project, f"phase3/stage3/extracted/top.{rc}.spef",
+                     f"*SPEF {rc}\n")
+        deck = (f"read_liberty /original/synthetic/libs.ref/lib/lib/std_typ.lib\n"
+                f"read_verilog {netlist['path']}\n"
+                "link_design top\n"
+                f"read_sdc {sdc['path']}\n"
+                f"read_spef {spef['path']}\n")
+        _file(project, f"phase3/stage3/sta/sta_mcorner_ocv_{kind}.tcl", deck)
+    result = plan.build(project)
+    assert [s["name"] for s in result["scenes"]] == ["typ_nom", "typ_max"]
+    assert result["frozen"]["values"]["period_ns"] == 24
+    assert result["frozen"]["values"]["io_delay_ns"] == 4.8
+    assert all(s["linked_lefs"][0]["sha256"] == lef["sha256"]
+               for s in result["scenes"])
 
 
 def test_scene_linked_liberty_is_the_hard_slew_limit(tmp_path):
@@ -900,6 +1021,52 @@ def test_net_census_rejects_negated_count(tmp_path):
                       " Number of loads: NOT 0\n")
     with pytest.raises(ValueError, match="malformed"):
         _nets(report)
+
+
+def test_annotation_exclusion_requires_lef_pg_and_no_liberty_arc(tmp_path):
+    from drv_signoff_annotation import derive as annotation
+    folder = tmp_path / "scene"
+    _file(folder, "annotation.rpt", "Found 2 unannotated drivers.\n"
+          " u/VDD\n p\nFound 0 partially unannotated drivers.\n")
+    lef = _file(tmp_path, "pad.lef", "MACRO pad\n PIN VDD\n USE POWER ;\n"
+                " END VDD\n PIN PAD\n USE SIGNAL ;\n END PAD\nEND pad\n")
+    lib = _file(tmp_path, "pad.lib", '''library (lib) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ cell (pad) { pad_cell : true;
+  pin (VDD) { direction : input; }
+  pin (PAD) { direction : input; timing () { related_pin : "PAD"; } }
+ }
+}''')
+    routed = _file(tmp_path, "route.def", "NETS 1 ;\n - p ( PIN p ) ( u PAD ) ;\nEND NETS\n")
+    spef = _file(tmp_path, "route.spef", "*D_NET supply 0.1\n*END\n")
+    pins = {
+        "u/VDD": {"kind": "pin", "cell": "pad", "cell_pin": "VDD",
+                  "cell_class": "IO", "net": "supply"},
+        "p": {"kind": "port", "cell": None, "cell_pin": None,
+              "cell_class": "port", "net": "p"},
+        "u/PAD": {"kind": "pin", "cell": "pad", "cell_pin": "PAD",
+                  "cell_class": "IO", "net": "p"},
+    }
+    args = (folder, pins, [lib], [lef], Path(routed["path"]), Path(spef["path"]))
+    clean = annotation(*args)
+    assert {row["reason"] for row in clean["resolved"]} == {
+        "lef_pg_no_liberty_arc", "port_pad_zero_routed_segments"}
+    assert clean["unresolved"] == []
+    Path(lef["path"]).write_text(Path(lef["path"]).read_text().replace(
+        "USE POWER", "USE SIGNAL"))
+    Path(routed["path"]).write_text("NETS 1 ;\n - p ( PIN p ) ( u PAD ) + ROUTED metal1 ( 0 0 ) ( 1 0 ) ;\nEND NETS\n")
+    bad = annotation(*args)
+    assert {row["pin"] for row in bad["unresolved"]} == {"u/VDD", "p"}
+    # R-0928-DRV-IC: a *D_NET header that merely names the net carries no RC
+    # for any pin.  Only *CONN rows for the reported driver and its PAD
+    # endpoint restore the port-to-PAD net.
+    Path(spef["path"]).write_text("*D_NET p 0.1\n*END\n")
+    header_only = annotation(*args)
+    assert {row["pin"] for row in header_only["unresolved"]} == {"u/VDD", "p"}
+    Path(spef["path"]).write_text(
+        "*D_NET p 0.1\n*CONN\n*P p I\n*I u:PAD I\n*CAP\n1 p 0.1\n*END\n")
+    restored = annotation(*args)
+    assert [row["pin"] for row in restored["unresolved"]] == ["u/VDD"]
 
 
 def test_project_clean_opensta_census_can_reach_pass(tmp_path, monkeypatch):
@@ -1499,3 +1666,267 @@ def test_fresh_opensta_refuses_log_at_byte_ceiling(tmp_path, monkeypatch):
         verdict = "NOT_MEASURED" if detail.startswith("NOT_MEASURED:") else "OTHER_ERROR"
     assert verdict == "NOT_MEASURED", detail
     assert "raw log reached byte ceiling" in detail
+
+
+# --- DRVWIRE review wave 56: capture plan stage rows, step-32 layout binding
+# and port-to-PAD SPEF connectivity (R-0928-DRV-IC).
+
+def _port_pad_pins() -> dict:
+    return {"p": {"kind": "port", "cell": None, "cell_pin": None,
+                  "cell_class": "port", "net": "p"},
+            "u/PAD": {"kind": "pin", "cell": "pad", "cell_pin": "PAD",
+                      "cell_class": "IO", "net": "p"}}
+
+
+def _port_pad_scene(tmp_path: Path, spef_body: str, def_nets: str):
+    folder = tmp_path / "scene"
+    _file(folder, "annotation.rpt", "Found 1 unannotated drivers.\n p\n"
+          "Found 0 partially unannotated drivers.\n")
+    lef = _file(tmp_path, "pad.lef", "MACRO pad\n PIN PAD\n USE SIGNAL ;\n"
+                " END PAD\nEND pad\n")
+    lib = _file(tmp_path, "pad.lib", '''library (lib) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ cell (pad) { pad_cell : true;
+  pin (PAD) { direction : input; timing () { related_pin : "PAD"; } }
+ }
+}''')
+    routed = _file(tmp_path, "route.def", "NETS 1 ;\n" + def_nets + "END NETS\n")
+    spef = _file(tmp_path, "route.spef", spef_body)
+    return (folder, _port_pad_pins(), [lib], [lef], Path(routed["path"]),
+            Path(spef["path"]))
+
+
+_ROUTED_P = " - p ( PIN p ) ( u PAD ) + ROUTED Metal2 ( 0 0 ) ( 10 0 ) ;\n"
+
+
+def test_port_pad_spef_net_name_without_conn_stays_unannotated(tmp_path):
+    from drv_signoff_annotation import derive as annotation
+    header_only = annotation(*_port_pad_scene(
+        tmp_path, "*D_NET p 0.1\n*END\n", _ROUTED_P))
+    assert header_only["resolved"] == []
+    assert [row["pin"] for row in header_only["unresolved"]] == ["p"]
+
+
+def test_port_pad_spef_needs_conn_for_driver_and_pad_endpoint(tmp_path):
+    from drv_signoff_annotation import derive as annotation
+    spef = ('*SPEF "ieee 1481-1999"\n*DIVIDER /\n*DELIMITER :\n'
+            "*NAME_MAP\n*1 p\n*2 u\n*PORTS\n*1 I\n"
+            "*D_NET *1 0.1\n*CONN\n*P *1 I\n*I *2:PAD I *D pad\n"
+            "*CAP\n1 *1 0.05\n2 *2:PAD 0.05\n*RES\n1 *1 *2:PAD 1.0\n*END\n")
+    carried = annotation(*_port_pad_scene(tmp_path, spef, _ROUTED_P))
+    assert carried["unresolved"] == []
+    assert carried["resolved"] == [{"pin": "p", "net": "p",
+                                    "reason": "port_pad_spef_conn",
+                                    "spef_endpoints": ["p", "u/PAD"]}]
+    no_pad = annotation(*_port_pad_scene(
+        tmp_path, spef.replace("*I *2:PAD I *D pad\n", ""), _ROUTED_P))
+    assert [row["pin"] for row in no_pad["unresolved"]] == ["p"]
+    no_driver = annotation(*_port_pad_scene(
+        tmp_path, spef.replace("*P *1 I\n", ""), _ROUTED_P))
+    assert [row["pin"] for row in no_driver["unresolved"]] == ["p"]
+
+
+def test_port_pad_cover_wiring_is_not_a_zero_segment_proof(tmp_path):
+    from drv_signoff_annotation import derive as annotation
+    empty = "*D_NET other 0.1\n*END\n"
+    unrouted = annotation(*_port_pad_scene(
+        tmp_path, empty, " - p ( PIN p ) ( u PAD ) + USE SIGNAL ;\n"))
+    assert [row["reason"] for row in unrouted["resolved"]] == [
+        "port_pad_zero_routed_segments"]
+    covered = annotation(*_port_pad_scene(
+        tmp_path, empty,
+        " - p ( PIN p ) ( u PAD ) + COVER Metal2 ( 0 0 ) ( 10 0 ) ;\n"))
+    assert [row["pin"] for row in covered["unresolved"]] == ["p"]
+
+
+def _stage_receipts(project: Path, *, skip=(), placement_sdc_fanout=4) -> None:
+    """Receipts an instrumented flow records as each stage runs, bound to the
+    run instance that claimed the receipt directory."""
+    import drv_stage_receipts
+    run_id = drv_stage_receipts.claim(project)
+    census = (drv._COMMAND + "\n" + "".join(
+        f"{kind} violators=0\n" for kind in drv.KINDS))
+    for name in (*drv._REQUIRED_STAGES, "postroute_repair"):
+        if name in skip:
+            continue
+        folder = project / "phase3/stage_evidence" / name
+        behavior = _file(folder, "drv_behavior.rpt", (
+            "clocks 1\nclock clk is_propagated=0\n" + census if name == "synth"
+            else census + "sta::max_fanout_check_limit 4\n"))
+        # The tool's pre-command fanout-limit table and each pin's master
+        # (R-0929-DRV-FANOUT-LIMIT: the design limit is the core drivers').
+        limits = _file(folder, "fanout_limits.rpt",
+                       "max fanout\n\nPin u/Y\nmax fanout 4\nfanout 1\n"
+                       "-----------\nSlack 3 (MET)\n")
+        pin_cells = _file(folder, "pin_cells", "pin_cell\tu/Y\tlogic\n")
+        receipt = {"name": name, "run_id": run_id, "ran": True,
+                   "behavior_report": behavior,
+                   # a stage's own prose claim is never the applied value
+                   "applied": {"fanout": 99, "slew_ns": 99, "cap_pf": 99}}
+        if name == "synth":
+            receipt.update(abc_script=_file(folder, "abc.script",
+                                            "strash\nbuffer -N 4\n"))
+        else:
+            fanout = placement_sdc_fanout if name == "placement_repair" else 4
+            receipt.update(fanout_limit_report=limits, pin_cell_report=pin_cells)
+            receipt["sdc_snapshot"] = _file(
+                folder, "pre_command.sdc",
+                f"set_max_fanout {fanout} [current_design]\n"
+                "set_max_transition 3 [current_design]\n"
+                "set_max_capacitance 0.2 [current_design]\n")
+        if name == "cts":
+            receipt.update(
+                command_args=_file(folder, "cts.args", "-sink_clustering_size 4\n"),
+                clock_fanout_report=_file(folder, "cts.clock_fanout",
+                                          "clock_driver_fanout\tclkbuf_0/Z\tclknet_0\t4\n"))
+        _file(project, f"reports/phase3/drv_stages/{name}.json",
+              json.dumps(receipt))
+
+
+def _librelane_final_sta(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    """A LibreLane routed run whose step-32 candidate reached STAPostPNR."""
+    import drv_capture_plan as plan
+    import librelane_contract
+    project = tmp_path / "design"
+    root = tmp_path / "installed"
+    _file(root, "synthetic/libs.ref/lib/lib/std_typ.lib",
+          'library (std) { time_unit : "1ns"; capacitive_load_unit (1,pf); '
+          'nom_voltage : 5; nom_temperature : 25; }')
+    _file(root, "synthetic/libs.ref/lib/lef/std.lef",
+          "MACRO std\n PIN A\n USE SIGNAL ;\n END A\nEND std\n")
+    _file(root, "synthetic/libs.tech/librelane/lib/config.tcl",
+          "set ::env(MAX_FANOUT_CONSTRAINT) 4\n"
+          "set ::env(MAX_TRANSITION_CONSTRAINT) 3\n"
+          "set ::env(MAX_CAPACITANCE_CONSTRAINT) 0.2\n")
+    _file(project, "input/docs/L7_design.md", "input L7\n")
+    _file(project, "input/docs/L9_constraints_floorplan.md", "input L9\n")
+    sdc = _file(project, "phase3/librelane/32-config/signoff_scene.sdc",
+                "create_clock -period 24 [get_ports clk]\n"
+                "set_input_delay 4.8 -clock clk [all_inputs]\n"
+                "set_output_delay 4.8 -clock clk [all_outputs]\n"
+                "set_max_fanout 4 [current_design]\n")
+    image_id = "sha256:" + "c" * 64
+    _file(project, "phase3/librelane_pdk_root.provenance.json", json.dumps({
+        "path": str(root), "derivation": {"pdk": "synthetic",
+                                          "image": "synthetic:test",
+                                          "image_id": image_id}}))
+    monkeypatch.setattr(librelane_contract, "pdk_root_resolution",
+                        lambda *a, **k: {"path": str(root),
+                                         "derivation": {"image_id": image_id}})
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"synthetic": {"pvt": {
+        "typ": {"nom_voltage": 5, "nom_temperature": 25}},
+        "rc_corners": ["nom"]}}))
+    monkeypatch.setattr(plan, "_SCENE_PROFILES", profile)
+    cand = project / "phase3/librelane/32-cand01"
+    repair = cand / "01-vibeic-postrouterepair"
+    views = {"nl": _file(repair, "top.nl.v", "module top; endmodule\n"),
+             "odb": _file(repair, "top.odb", "CANDIDATE ODB\n"),
+             "def": _file(repair, "top.def", "VERSION 5.8 ;\nCANDIDATE ROUTE\n")}
+    adopted = repair / "state_out.json"
+    adopted.write_text(json.dumps({k: v["path"] for k, v in views.items()}))
+    spef = _file(cand, "03-openroad-rcx/nom/top.nom.spef", "*SPEF candidate\n")
+    sta = cand / "04-openroad-stapostpnr"
+    top_lib = _file(sta, "nom_typ/top.lib", "generated top Liberty\n")
+    _file(sta, "nom_typ/_env_sta.tcl",
+          f"set ::env(SIGNOFF_SDC_FILE) {sdc['path']}\n"
+          'set ::env(CELL_LIBS) "/pdk/synthetic/libs.ref/lib/lib/std_typ.lib"\n'
+          'set ::env(CELL_LEFS) "/pdk/synthetic/libs.ref/lib/lef/std.lef"\n'
+          "set ::env(STD_CELL_LIBRARY) lib\n")
+    state = sta / "state_out.json"
+    state.write_text(json.dumps({**{k: v["path"] for k, v in views.items()},
+                                 "lib": {"nom_typ": top_lib["path"]},
+                                 "spef": {"nom_*": spef["path"]}}))
+    # The canonical routed DEF still holds the pre-repair route until handoff.
+    _file(project, "phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\nOLD ROUTE\n")
+    return project, adopted
+
+
+def _step32_report(project: Path, adopted: Path) -> dict:
+    state = project / "phase3/librelane/32-cand01/04-openroad-stapostpnr/state_out.json"
+    return {"verdict": "PASS", "adopted": "32-cand01",
+            "adopted_state": str(adopted),
+            "final": {"sta_state": str(state),
+                      "sta_state_sha256": drv._sha(state)}}
+
+
+def test_capture_plan_carries_every_required_stage_the_run_recorded(tmp_path, monkeypatch):
+    import drv_capture_plan as capture_plan
+    project, adopted = _librelane_final_sta(tmp_path, monkeypatch)
+    # Pre-stream capture after handoff: routed.def is the adopted route.
+    (project / "phase3/stage3/pnr/routed.def").write_bytes(
+        Path(json.loads(adopted.read_text())["def"]).read_bytes())
+    _stage_receipts(project)
+    plan = capture_plan.build(project)
+    assert [row["name"] for row in plan["stages"]] == list(drv._REQUIRED_STAGES)
+    synth, placement = plan["stages"][0], plan["stages"][1]
+    assert synth["applied"] == {"fanout": 4.0}
+    assert placement["applied"] == {"fanout": 4.0, "slew_ns": 3.0, "cap_pf": 0.2}
+    assert placement["fanout_check_limit"] == 4.0
+    assert all(plan["stage_receipts"][name]["status"] == "recorded"
+               for name in drv._REQUIRED_STAGES)
+    # These rows are the judge's only stage evidence: with them a clean run
+    # can reach a complete verdict; without them it never could.
+    bundle = _bundle(tmp_path)
+    bundle["stages"] = plan["stages"]
+    result = drv.judge(bundle)
+    assert not [f for f in result["failures"] if "stage" in f or
+                any(f.startswith(name) for name in drv._REQUIRED_STAGES)], result
+    assert result["verdict"] == "PASS", result
+
+
+def test_capture_plan_stage_evidence_is_bound_to_recorded_bytes(tmp_path, monkeypatch):
+    import drv_capture_plan as capture_plan
+    project, adopted = _librelane_final_sta(tmp_path, monkeypatch)
+    (project / "phase3/stage3/pnr/routed.def").write_bytes(
+        Path(json.loads(adopted.read_text())["def"]).read_bytes())
+    # Standard section 1: an unextractable stage is FAIL, never N/A.
+    _stage_receipts(project, skip=("cts",), placement_sdc_fanout=10)
+    snapshot = project / "phase3/stage_evidence/post_grt_repair/pre_command.sdc"
+    snapshot.write_text(snapshot.read_text().replace("fanout 4", "fanout 3"))
+    plan = capture_plan.build(project)
+    assert plan["stage_receipts"]["cts"]["status"] == "absent"
+    rows = {row["name"]: row for row in plan["stages"]}
+    assert "cts" not in rows
+    assert rows["placement_repair"]["applied"]["fanout"] == 10.0  # evidence, not prose
+    assert rows["post_grt_repair"]["applied"]["fanout"] is None
+    bundle = _bundle(tmp_path)
+    bundle["stages"] = plan["stages"]
+    result = drv.judge(bundle)
+    assert result["verdict"] == "FAIL"
+    failures = " ".join(result["failures"])
+    assert "cts: required stage absent" in failures
+    assert "post_grt_repair pre-command SDC: sha256 changed" in failures
+
+
+def test_step32_captures_adopted_candidate_before_handoff(tmp_path, monkeypatch):
+    import drv_capture_plan as capture_plan
+    import drv_signoff_capture as capture
+    import librelane_postroute_repair as repair
+    project, adopted = _librelane_final_sta(tmp_path, monkeypatch)
+    candidate_def = Path(json.loads(adopted.read_text())["def"])
+    captured = []
+
+    def fresh_capture(plan, out_dir, *, image=None):
+        captured.append(plan)
+        return {k: plan[k] for k in ("identity", "frozen", "current", "stages",
+                                     "pins", "scenes")}
+
+    monkeypatch.setattr(capture, "capture", fresh_capture)
+    monkeypatch.setattr(drv, "judge", lambda *a, **k: {
+        "name": "DRV(tran/cap/fanout)", "verdict": "PASS",
+        "failures": [], "not_measured": []})
+    report = _step32_report(project, adopted)
+    repair._step32_drv_signoff(project, report)
+    assert report["drv_signoff"]["verdict"] == "PASS", report["drv_signoff"]
+    layout = captured[0]["identity"]["artifacts"]["def"]
+    assert layout["sha256"] == drv._sha(candidate_def)
+    assert captured[0]["scenes"][0]["spef_layout_sha256"] == layout["sha256"]
+    # Before handoff the pre-stream capture still refuses the stale route.
+    with pytest.raises(ValueError, match="differs from routed DEF"):
+        capture_plan.build(project)
+    (project / "phase3/stage3/pnr/routed.def").write_bytes(candidate_def.read_bytes())
+    after = capture_plan.build(project)
+    assert after["identity"]["artifacts"]["def"]["path"] == str(
+        (project / "phase3/stage3/pnr/routed.def").resolve())
+    assert after["identity"]["artifacts"]["def"]["sha256"] == layout["sha256"]

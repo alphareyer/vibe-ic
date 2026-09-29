@@ -1619,12 +1619,17 @@ def image_capability(image: str, docker: str = 'docker') -> dict:
 
 
 def openroad_home(folder: Path, capability: dict | None,
-                  extra: list[str] | None = None) -> Path | None:
+                  extra: list[str] | None = None,
+                  drv_probe: list[str] | None = None) -> Path | None:
     """Write the init file that defines the probe's aliases (and a caller's
     `extra` Tcl lines, e.g. a tool debug print the caller reads back), or
-    nothing when there is neither."""
+    nothing when there is neither.
+
+    `drv_probe`: the DRV stage probe (`drv_stage_receipts.probe_lines`). It is
+    written to OpenROAD's init file AND to OpenSTA's (`.sta`), because the
+    sign-off STA step runs the `sta` binary, which reads only its own."""
     aliases = (capability or {}).get('openroad_aliases') or {}
-    if not aliases and not extra:
+    if not aliases and not extra and not drv_probe:
         return None
     folder.mkdir(parents=True, exist_ok=True)
     lines = ['# vibe-ic librelane_contract: abbreviation aliases derived from the image']
@@ -1633,7 +1638,15 @@ def openroad_home(folder: Path, capability: dict | None,
                      f'{{ proc ::{short} {{args}} {{ return [::{full} {{*}}$args] }} }}')
     if extra:
         lines += ['# vibe-ic librelane_contract: caller-declared init lines', *extra]
+    if drv_probe:
+        lines += ['# vibe-ic librelane_contract: DRV stage probe', *drv_probe]
     (folder / '.openroad').write_text('\n'.join(lines) + '\n')
+    sta_init = folder / '.sta'
+    if drv_probe:
+        sta_init.write_text('\n'.join(['# vibe-ic librelane_contract: DRV stage probe',
+                                        *drv_probe]) + '\n')
+    else:
+        sta_init.unlink(missing_ok=True)
     (folder / '.bashrc').write_text('')
     return folder
 
@@ -2393,7 +2406,11 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         base /= lane
     if namespace:
         base /= namespace
-    home = openroad_home(base / '.openroad_home', capability, openroad_init)
+    import drv_stage_receipts as _drv_stages
+    drv_probe = (_drv_stages.probe_lines()
+                 if _drv_stages.chain_needs_probe(s for s, _, _ in steps) else None)
+    home = openroad_home(base / '.openroad_home', capability, openroad_init,
+                         drv_probe=drv_probe)
     for index, (step_id, config, initial_state) in enumerate(steps, 1):
         name = f'{index:02d}-{step_id.lower().replace(".", "-")}'
         folder = base / name
@@ -2422,11 +2439,13 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             fingerprint['liberty_files'] = _sta_liberty_input_hashes(
                 _load(config), project, mounts or [])
         if home:
-            fingerprint['openroad_aliases'] = capability['openroad_aliases']
+            fingerprint['openroad_aliases'] = (capability or {}).get('openroad_aliases') or {}
         if step_id.startswith(PLUGIN_STEP_PREFIX):
             fingerprint['plugin'] = _plugin_digests(step_id)
         if openroad_init:
             fingerprint['openroad_init'] = list(openroad_init)
+        if drv_probe:
+            fingerprint['drv_stage_probe'] = _drv_stages.probe_digest()
         receipt = folder / 'vibeic_receipt.json'
         # A folder is reused only if it was run under THIS stated root: one
         # from before the root was recorded (the CLI then took the image's
@@ -2439,6 +2458,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             _check_state(_load(folder / 'state_out.json'), outputs=True)
             previous = folder / 'state_out.json'
             outputs.append(folder)
+            _drv_stages.record_step(project, step_id, folder, reused=True)
             continue
         if folder.exists():
             archive = base / 'attempts'
@@ -2497,6 +2517,8 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         write_json(receipt, {'input': fingerprint, 'sha256': hashes})
         previous = folder / 'state_out.json'
         outputs.append(folder)
+        # DRV standard section 1: the stage's receipt, bound to this run.
+        _drv_stages.record_step(project, step_id, folder)
     return outputs
 
 

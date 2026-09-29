@@ -89,6 +89,10 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
                if before.get(name) != after.get(name)}
     allowed_reports = {
         "reports/audit/windows/bounded37/phase23_completion_audit.json",
+        # R-0929-DRV-IDENTITY / review wave 58: a window is a run; it records
+        # its own run identity and claims the DRV stage receipts it binds.
+        "reports/phase3/drv_run_identity.json",
+        "reports/phase3/drv_stages/run.json",
         # a14cafaa2: the selected steps' view is refreshed in the project.
         "reports/audit/steps_view.json",
         "reports/audit/windows/bounded37/steps_view.json",
@@ -271,6 +275,10 @@ def test_real_gds_step_with_container_write_keeps_other_stage_files(tmp_path, mo
                if before.get(name) != after.get(name)}
     allowed_reports = {
         "reports/audit/windows/realgds/phase23_completion_audit.json",
+        # R-0929-DRV-IDENTITY / review wave 58: a window is a run; it records
+        # its own run identity and claims the DRV stage receipts it binds.
+        "reports/phase3/drv_run_identity.json",
+        "reports/phase3/drv_stages/run.json",
         # a14cafaa2: the selected steps' view is refreshed in the project.
         "reports/audit/steps_view.json",
         "reports/audit/windows/realgds/steps_view.json",

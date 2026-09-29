@@ -24,6 +24,7 @@ import _docker_watchdog  # noqa: E402
 import _watchdog  # noqa: E402
 from drv_signoff_anchor import image_pdk_anchor  # noqa: E402
 from drv_signoff_census import derive as derive_census  # noqa: E402
+from drv_signoff_annotation import derive as derive_annotation  # noqa: E402
 from drv_signoff_judge import KINDS, _COMMAND, _sha, parse_check_types  # noqa: E402
 
 _COUNTER = re.compile(
@@ -238,6 +239,53 @@ def _script(plan: dict, scene: dict, out: Path, *, control: bool,
                 for kind in KINDS) + "close $_f\n")
 
 
+#: What the pinned image says about its OpenROAD builds: one line per binary
+#: next to the one `openroad` resolves to (the LibreLane dispatcher runs the
+#: `openroad-python` build for its scripts, the direct deck runs `openroad`).
+_OPENROAD_PROBE = (
+    'd=$(dirname "$(readlink -f "$(command -v openroad)")"); '
+    'for b in "$d"/openroad "$d"/openroad-python; do [ -x "$b" ] || continue; '
+    'echo "OPENROAD_BINARY $b $(sha256sum "$b" | cut -d" " -f1) '
+    '$(LD_LIBRARY_PATH=/opt/or-tools/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} '
+    '"$b" -version 2>&1 | tail -n 1)"; done')
+_OPENROAD_LINE = re.compile(r"(?m)^OPENROAD_BINARY (\S+) ([0-9a-f]{64}) (\S+)\s*$")
+
+
+def openroad_identity(image: str, *, run=None) -> dict:
+    """The OpenROAD commit of the builds in the pinned image, asked of the
+    binaries themselves (review wave 58: `openroad_commit` was required by the
+    judge and produced by nothing, so every real capture was NOT_MEASURED).
+
+    `commit` is the `-g<hash>` of the version every build reports; builds that
+    disagree, a version with no commit, or no build at all leave it None with
+    the reason, never a guess."""
+    argv = ["docker", "run", *_docker_memory.docker_memory_flags(), "--rm",
+            image, "--skip", "bash", "-c", _OPENROAD_PROBE]
+    run = run or subprocess.run
+    try:
+        done = run(argv, capture_output=True, text=True, timeout=300)
+        text = (done.stdout or "") + (done.stderr or "")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"commit": None, "reason": f"OpenROAD version probe failed: {exc}"}
+    binaries = [{"path": m.group(1), "sha256": m.group(2), "version": m.group(3)}
+                for m in _OPENROAD_LINE.finditer(text)]
+    versions = {b["version"] for b in binaries}
+    record: dict = {"binaries": binaries, "commit": None}
+    if not binaries:
+        record["reason"] = "no OpenROAD binary answered the version probe"
+    elif len(versions) != 1:
+        record["reason"] = f"OpenROAD builds report different versions: {sorted(versions)}"
+    else:
+        version = versions.pop()
+        commit = re.search(r"-g([0-9a-f]{7,40})$", version)
+        record["version"] = version
+        if commit:
+            record["commit"] = commit.group(1)
+        else:
+            record["reason"] = f"OpenROAD version {version!r} names no commit"
+    return record
+
+
 def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
     """Run each scene and its planted control; return a content-addressed bundle."""
     import instrument_calibration
@@ -260,9 +308,16 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
         digest, version = None, None
     if image_info.returncode or not str(digest).startswith("sha256:"):
         raise ValueError("pinned OpenSTA image identity unavailable")
+    expected_id = bundle["identity"].get("source_tool_image_id")
+    if expected_id and digest != expected_id:
+        raise ValueError("capture image differs from final STA image identity")
     bundle["identity"]["tool_image"] = image
     bundle["identity"]["tool_image_digest"] = digest
     bundle["identity"]["tool_image_oci_version"] = version
+    openroad = openroad_identity(image)
+    bundle["identity"]["openroad_build"] = openroad
+    if openroad.get("commit"):
+        bundle["identity"]["openroad_commit"] = openroad["commit"]
     try:
         bundle["threshold_anchor"] = image_pdk_anchor(
             image, str(bundle["identity"].get("pdk") or ""),
@@ -313,13 +368,26 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
         population = {kind: len(all_rows[kind]) for kind in KINDS}
         census = None
         try:
-            census = derive_census(scene_dir, scene["linked_liberties"], all_rows)
+            census = derive_census(scene_dir, scene["linked_liberties"], all_rows,
+                                   scene.get("linked_lefs"), allow_unproven=True)
             population = census["population"]
-            if bundle["pins"] and bundle["pins"] != census["pins"]:
-                raise ValueError("OpenSTA pin identity differs between scenes")
-            bundle["pins"] = census["pins"]
+            if bundle["pins"] and set(bundle["pins"]) != set(census["pins"]):
+                raise ValueError("OpenSTA pin names differ between scenes")
+            if not bundle["pins"]:
+                bundle["pins"] = census["pins"]
         except (OSError, ValueError, KeyError, TypeError) as exc:
             census_error = str(exc)
+        annotation_census = None
+        row_annotation_error = "pin census or linked LEF inventory absent"
+        if census is not None and scene.get("linked_lefs"):
+            try:
+                annotation_census = derive_annotation(
+                    scene_dir, census["pins"], scene["linked_liberties"],
+                    scene["linked_lefs"],
+                    Path(plan["identity"]["artifacts"]["def"]["path"]),
+                    Path(scene["spef"]["path"]))
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                row_annotation_error = str(exc)
         # A plan is only a request for measurement. It cannot attest which
         # pins OpenSTA excluded from its own DRV checks.
         row.pop("excluded_pins", None)
@@ -332,8 +400,9 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
                    population=population,
                    positive_control_fresh_process=True,
                    counters=counts, positive_control_counters=control_counts,
-                   unannotated_nets=(sum(map(int, unannotated))
-                                     if unannotated else None),
+                   unannotated_nets=(len(annotation_census["unresolved"])
+                                     if annotation_census is not None else
+                                     sum(map(int, unannotated)) if unannotated else None),
                    report=_ref(scene_dir / "violators.rpt"),
                    all_limits_report=_ref(scene_dir / "all_limits.rpt"),
                    counter_report=_ref(scene_dir / "counters.log"),
@@ -346,14 +415,24 @@ def capture(plan: dict, out_dir: Path, *, image: str | None = None) -> dict:
             excluded_path = scene_dir / "excluded_pins.json"
             write_text(excluded_path, json.dumps(census["excluded"], sort_keys=True) + "\n")
             row.update(excluded_pins=census["excluded"],
+                       pins=census["pins"],
                        excluded_pins_report=_ref(excluded_path),
                        clock_network_pins=census["clock_network_pins"],
                        driver_pin_census=census["driver_pins"],
+                       unproven_omitted_pins=census["unproven"],
                        pin_census_report=_ref(scene_dir / "pin_census.tsv"),
                        net_census_report=_ref(scene_dir / "net_census.rpt"),
                        disabled_edges_report=_ref(scene_dir / "disabled_edges.rpt"))
         else:
             row["census_error"] = census_error
+        if annotation_census is not None:
+            annotation_path = scene_dir / "annotation_census.json"
+            write_text(annotation_path,
+                       json.dumps(annotation_census, sort_keys=True) + "\n")
+            row["annotation_census"] = annotation_census
+            row["annotation_census_report"] = _ref(annotation_path)
+        elif scene.get("linked_lefs"):
+            row["annotation_census_error"] = row_annotation_error
         bundle["scenes"].append(row)
     return bundle
 

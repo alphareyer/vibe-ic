@@ -167,6 +167,11 @@ def _liberty_limits(body: str) -> dict:
                 kind: scaled(direct, kind)
                 for kind in KINDS}
             pins[pin.group(1).strip()]["fanout_load"] = _attribute(direct, "fanout_load")
+            pin_name = pin.group(1).strip()
+            related = re.findall(r'\brelated_pin\s*:\s*"?([^";]+)"?\s*;', cell_body)
+            pins[pin_name]["has_timing_arc"] = (
+                bool(re.search(r"\btiming\s*\(", pin_body)) or
+                any(pin_name in value.split() for value in related))
         cells[cell.group(1).strip()] = pins
     return {"defaults": defaults, "cells": cells, "pad_cells": pad_cells,
             "default_fanout_load": default_fanout_load}
@@ -539,6 +544,93 @@ def _waiver_support(waiver: dict, row: dict, bundle: dict,
     return not local_errors
 
 
+def _record(ref: dict, missing: list[str], label: str) -> dict | None:
+    """A flow record the bundle binds by sha256, RE-READ from its file: the
+    judgement is about what the record says, never the bundle's copy of it."""
+    text = _evidence(ref or {}, missing, label)
+    if not text:
+        return None
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        doc = None
+    if not isinstance(doc, dict):
+        missing.append(f"{label}: not a JSON object")
+        return None
+    return doc
+
+
+def _check_post_stream_derivation(identity: dict, fails: list[str],
+                                  missing: list[str]) -> None:
+    """R-0929-DRV-IDENTITY: the final capture proves the streamed GDS and the
+    LVS netlist derive from the judged DEF / netlist.  Every file is
+    re-hashed and every record re-read here (review wave 58: the bundle's
+    copy of a record's fields was trusted); a record the flow did not write is
+    NOT_MEASURED, a link that names a different DEF or netlist is FAIL (the
+    verdict would be about another layout)."""
+    derivation = identity.get("derivation")
+    artifacts = identity.get("artifacts") or {}
+    judged_def = (artifacts.get("def") or {}).get("sha256")
+    if not isinstance(derivation, dict):
+        missing.append("post-stream derivation record absent")
+        return
+    gds = derivation.get("gds")
+    if not isinstance(gds, dict):
+        missing.append("post-stream GDS admission record absent")
+    else:
+        _evidence(gds, missing, "streamed GDS")
+        admission = _record(gds.get("record") or {}, missing, "GDS admission record")
+        if admission is not None:
+            streamed_from = (admission.get("basis_inputs") or {}).get(
+                "phase3/stage3/pnr/routed.def")
+            if admission.get("gds_sha256") != gds.get("sha256"):
+                missing.append("GDS admission record admits another stream than the bound GDS")
+            if not streamed_from:
+                missing.append("streamed GDS names no source DEF")
+            elif streamed_from != judged_def:
+                fails.append("streamed GDS derives from a DEF other than the judged DEF")
+    lvs = derivation.get("lvs")
+    if not isinstance(lvs, dict):
+        missing.append("post-stream LVS record absent")
+        return
+    inputs_ref = lvs.get("inputs_record") or {}
+    inputs = _record(inputs_ref, missing, "LVS inputs record")
+    verdict = _record(lvs.get("verdict_record") or {}, missing, "LVS verdict record")
+    if inputs is None or verdict is None:
+        return
+    # The verdict is the verdict OF these inputs only when step 31 wrote it
+    # while this very record stood (a stale PASS of another layout is not).
+    if (verdict.get("lvs_inputs") or {}).get("sha256") != inputs_ref.get("sha256"):
+        missing.append("LVS verdict is not bound to the recorded LVS inputs")
+    layout = (inputs.get("layout_def") or {}).get("sha256")
+    schematic = inputs.get("schematic_netlist") or {}
+    # The netlist LVS compared is the one it recorded, by those bytes.
+    _evidence(schematic, missing, "LVS schematic netlist")
+    if (lvs.get("schematic_netlist") or {}).get("sha256") != schematic.get("sha256"):
+        missing.append("bundle LVS netlist differs from the LVS inputs record")
+    if not layout:
+        missing.append("LVS names no layout DEF")
+    elif layout != judged_def:
+        fails.append("LVS compared a layout DEF other than the judged DEF")
+    if schematic.get("sha256") != identity.get("sta_netlist"):
+        fails.append("LVS compared a netlist other than the judged STA netlist")
+    if verdict.get("status") != "PASS" or verdict.get("compare_performed") is False:
+        missing.append(f"LVS did not prove the layout matches the netlist "
+                       f"(verdict {verdict.get('status')})")
+
+
+def def_identity(bundle: dict, layout_def: Path | None) -> str | None:
+    """THE comparison of a layout DEF with the bundle's judged DEF identity,
+    shared by every caller (the CLI's current routed DEF and step-23 tool-arm
+    DEF, step 32's final DEF): "absent", "differs", or None when it is the
+    judged layout."""
+    recorded = ((bundle.get("identity") or {}).get("artifacts") or {}).get(
+        "def", {}).get("sha256")
+    if layout_def is None or not Path(layout_def).is_file():
+        return "absent"
+    return None if recorded and _sha(Path(layout_def)) == recorded else "differs"
+
+
 def judge(bundle: dict, *, project: Path | None = None) -> dict:
     """Judge measured rows independently of tool rc/checker summaries."""
     import instrument_calibration
@@ -562,16 +654,33 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             missing.append("project identity differs from judged project directory")
     if not run_id or not tree_sha or not identity.get("spec_version"):
         missing.append("run ID, tree SHA or specification version absent")
+    # R-0929-DRV-IDENTITY: an in-flow capture (step 23, step 32, pre-stream)
+    # cannot bind GDS / LVS-netlist identity, which exists only after
+    # stream-out; it names them as bound at the final post-stream capture.
+    # Any other capture (the default) must bind them.  The in-flow verdict is
+    # never the final one: the post-stream verdict counts toward IC PASS.
+    capture_point = "in_flow" if identity.get("capture_point") == "in_flow" else "post_stream"
+    bound_at = identity.get("bound_at") if capture_point == "in_flow" else {}
+    deferred = {name: str((bound_at or {}).get(name)) for name in ("lvs_netlist", "gds_netlist")
+                if isinstance(bound_at, dict) and (bound_at or {}).get(name)}
     for name in ("sta_netlist", "lvs_netlist", "gds_netlist"):
+        if name in deferred:
+            continue
         if not re.fullmatch(r"[0-9a-f]{64}", str(identity.get(name) or "")):
             missing.append(f"{name} sha256 absent")
     for name in ("sta_netlist", "lvs_netlist", "gds_netlist", "odb", "def"):
+        if name in deferred:
+            continue
         item = (identity.get("artifacts") or {}).get(name) or {}
         _evidence(item, missing, name)
         if name.endswith("netlist") and item.get("sha256") != identity.get(name):
             fails.append(f"{name}: recorded netlist sha256 disagrees with file")
-    if len({identity.get(name) for name in ("sta_netlist", "lvs_netlist",
-                                            "gds_netlist")}) != 1:
+    if capture_point == "post_stream":
+        _check_post_stream_derivation(identity, fails, missing)
+    identified_netlists = [identity.get(name) for name in
+                           ("sta_netlist", "lvs_netlist", "gds_netlist")
+                           if identity.get(name)]
+    if len(set(identified_netlists)) > 1:
         fails.append("STA/LVS/GDS netlist identity mismatch")
     for name in ("openroad_commit", "opensta_commit", "pdk_commit"):
         if not identity.get(name):
@@ -810,6 +919,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     spef_by_pvt: dict[str, dict[str, str]] = {}
     for scene in bundle.get("scenes") or []:
         name, mode = scene.get("name"), scene.get("mode")
+        scene_pins = scene.get("pins") or pins
         if not name or name in scene_names or name not in required_scenes:
             missing.append(f"scene identity missing, repeated or unexpected: {name}")
             continue
@@ -822,8 +932,10 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                         name + " parasitic annotation")
         counts_ann = re.findall(
             r"Found\s+(\d+)\s+(?:partially\s+)?unannotated\s+(?:drivers|nets)", ann)
-        if not counts_ann or any(int(count) for count in counts_ann):
-            missing.append(f"{name}: unannotated parasitic census not zero")
+        if not counts_ann:
+            missing.append(f"{name}: unannotated parasitic census absent")
+        if any(int(count) for count in counts_ann) and not scene.get("annotation_census"):
+            missing.append(f"{name}: unannotated parasitic census lacks pin proof")
         if scene.get("propagated_clocks") is not True or not scene.get("clock_properties"):
             missing.append(f"{name}: propagated clock evidence absent")
         if not scene.get("excluded_pins_recorded"):
@@ -831,7 +943,9 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         excluded = scene.get("excluded_pins")
         if not isinstance(excluded, list) or any(
                 not isinstance(p, dict) or not p.get("pin") or
-                p.get("reason") not in ("constant", "disabled", "ideal") or
+                p.get("reason") not in ("constant", "disabled", "ideal",
+                                        "lef_pg_no_liberty_arc", "unconnected_no_net",
+                                        "unproven") or
                 ("excluded_kinds" in p and
                  (not isinstance(p["excluded_kinds"], list) or
                   any(kind not in KINDS for kind in p["excluded_kinds"]))) or
@@ -849,6 +963,11 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         for item in excluded or []:
             if not isinstance(item, dict) or not item.get("pin"):
                 continue
+            if item.get("reason") in ("lef_pg_no_liberty_arc", "unconnected_no_net"):
+                continue
+            if item.get("reason") == "unproven":
+                missing.append(f"{name}: omitted pin {item['pin']} has no exclusion proof")
+                continue
             for kind, axis, direction in (
                     ("max_fanout", "fanout", "none"),
                     ("max_capacitance", "cap_pf", "none"),
@@ -862,7 +981,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                 row = {"pin": item["pin"], "scene": name, "mode": mode,
                        "direction": direction, "measured": measured,
                        "excluded_reason": item.get("reason")}
-                if not _annotate_limits(row, kind, scene, libs, pins,
+                if not _annotate_limits(row, kind, scene, libs, scene_pins,
                                         declared, missing):
                     continue
                 row["limit"] = row["effective_limit"]
@@ -965,6 +1084,27 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                              name + " all limits")
         all_rows = parse_check_types(all_text, scene=name, mode=mode,
                                      violators_only=False)
+        annotation_census = scene.get("annotation_census")
+        if annotation_census is not None:
+            raw_census = _evidence(scene.get("annotation_census_report") or {},
+                                   missing, name + " annotation census")
+            try:
+                if json.loads(raw_census) != annotation_census:
+                    missing.append(f"{name}: annotation census differs from recorded file")
+                from drv_signoff_annotation import derive as derive_annotation
+                scene_folder = Path(scene["parasitic_annotation_report"]["path"]).parent
+                lefs = scene.get("linked_lefs") or []
+                for item in lefs:
+                    _evidence(item, missing, name + " linked LEF")
+                derived = derive_annotation(
+                    scene_folder, scene_pins,
+                    scene.get("linked_liberties") or [], lefs,
+                    Path(identity["artifacts"]["def"]["path"]),
+                    Path(scene["spef"]["path"]))
+                if derived != annotation_census or len(derived["unresolved"]) != scene.get("unannotated_nets"):
+                    missing.append(f"{name}: independent annotation census differs")
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                missing.append(f"{name}: annotation proof incomplete: {exc}")
         if project is not None:
             census_refs = ("pin_census_report", "net_census_report",
                            "disabled_edges_report")
@@ -978,11 +1118,13 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                 try:
                     from drv_signoff_census import derive as derive_census
                     census = derive_census(census_paths[0].parent,
-                                           scene.get("linked_liberties") or [], all_rows)
-                    if (bundle.get("pins") != census["pins"] or
+                                           scene.get("linked_liberties") or [], all_rows,
+                                           scene.get("linked_lefs"), allow_unproven=True)
+                    if (scene_pins != census["pins"] or
                             scene.get("excluded_pins") != census["excluded"] or
                             scene.get("clock_network_pins") != census["clock_network_pins"] or
                             scene.get("driver_pin_census") != census["driver_pins"] or
+                            (scene.get("unproven_omitted_pins") or []) != census["unproven"] or
                             scene.get("population") != census["population"]):
                         missing.append(f"{name}: independent OpenSTA pin census differs from bundle")
                 except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -1046,23 +1188,30 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                     continue
                 if kind == "max_slew" and row["direction"] not in ("rise", "fall"):
                     missing.append(f"{name}: slew rise/fall absent for {row['pin']}")
-                if not _annotate_limits(row, kind, scene, libs, pins,
+                if not _annotate_limits(row, kind, scene, libs, scene_pins,
                                         declared, missing):
                     continue
                 effective = row["effective_limit"]
                 tolerance = max(1e-6, abs(effective) * 1e-6)
-                io_disclosure = (kind == "max_capacitance" and
-                                 row.get("cell_class") == "IO" and
-                                 row.get("explicit_limit") is None and
-                                 row["measured"] <= effective and
-                                 row["limit"] == declared.get("cap_pf"))
+                # R-0929-CAP-MARGIN-SCOPE: the std-cell margin is design-wide,
+                # so every IO-cell pin carries it as its tool limit.  That is
+                # the known inheritance, not an instrument disagreement; only a
+                # row the tool FLAGGED within its IO Liberty limit is a
+                # disclosure (merge note 4: tagging every IO pin broke the
+                # per-scene set check once one IO pin exceeded and one did not).
+                io_margin_scope = (kind == "max_capacitance" and
+                                   row.get("cell_class") == "IO" and
+                                   row.get("explicit_limit") is None and
+                                   row["limit"] == declared.get("cap_pf"))
+                io_disclosure = (io_margin_scope and
+                                 row["limit"] < row["measured"] <= effective)
                 if io_disclosure:
                     row["failed_tier"] = "IO_STD_CELL_MARGIN_DISCLOSURE"
                     io_margin_disclosures.append(row)
                 elif row["limit"] > effective + tolerance:
                     fails.append(f"{name}: {kind} {row['pin']} tool limit "
                                  f"{row['limit']} exceeds frozen effective limit {effective}")
-                elif row["limit"] < effective - tolerance:
+                elif row["limit"] < effective - tolerance and not io_margin_scope:
                     missing.append(f"{name}: {kind} {row['pin']} tool limit "
                                    "differs from frozen effective limit")
                 independently_violated = row["measured"] > effective + tolerance
@@ -1182,6 +1331,9 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
                            "scenes": required_scenes},
             "threshold_freeze": freeze_evidence,
             "stage_constraints": bundle.get("stages") or [],
+            "capture_point": capture_point,
+            "final_signoff_capture": capture_point == "post_stream",
+            "identity_bound_later": deferred,
             "io_margin_disclosures": io_margin_disclosures,
             "flow_defects": flow_defects,
             "failures": fails, "not_measured": missing,
@@ -1194,6 +1346,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("bundle", type=Path,
                         help="evidence JSON or project root containing reports/phase3/sta/drv_signoff_bundle.json")
     parser.add_argument("--json", type=Path, required=True)
+    parser.add_argument("--capture-point", choices=("in_flow", "post_stream"),
+                        help="the capture this gate judges; a bundle of another "
+                             "kind is NOT_MEASURED (R-0929-DRV-IDENTITY)")
     args = parser.parse_args(argv)
     source = (args.bundle / "reports/phase3/sta/drv_signoff_bundle.json"
               if args.bundle.is_dir() else args.bundle)
@@ -1220,12 +1375,16 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 state = json.loads((Path(arm["folder"]) / "state_out.json").read_text())
                 tool_arm["def"] = str(state["def"])
-                tool_arm["def_sha256"] = _sha(Path(state["def"]))
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 tool_arm["def_error"] = str(exc)
     try:
         bundle = json.loads(source.read_text())
         result = judge(bundle, project=args.bundle if args.bundle.is_dir() else None)
+        if args.capture_point and result.get("capture_point") != args.capture_point:
+            result.setdefault("not_measured", []).append(
+                f"gate judges the {args.capture_point} capture but the bundle is "
+                f"{result.get('capture_point')}")
+            result["verdict"] = ("FAIL" if result.get("failures") else "NOT_MEASURED")
         if not args.bundle.is_dir():
             result.setdefault("not_measured", []).append(
                 "project context absent; threshold sources cannot be authenticated")
@@ -1235,15 +1394,20 @@ def main(argv: list[str] | None = None) -> int:
             if not (args.bundle / "reports/phase3/sta/drv_capture_plan.json").is_file():
                 result.setdefault("not_measured", []).append(
                     "fresh DRV capture plan absent")
-            routed = args.bundle / "phase3/stage3/pnr/routed.def"
-            recorded = ((bundle.get("identity") or {}).get("artifacts") or {}).get("def", {}).get("sha256")
-            if not routed.is_file():
+            routed = def_identity(bundle, args.bundle / "phase3/stage3/pnr/routed.def")
+            if routed == "absent":
                 result.setdefault("not_measured", []).append(
                     "current routed DEF absent")
-            elif _sha(routed) != recorded:
+            elif routed == "differs":
                 result.setdefault("not_measured", []).append(
                     "current routed DEF differs from judged layout identity")
-            if tool_arm is not None and tool_arm.get("def_sha256") != recorded:
+            # Merge note (F15 x DRV stack): "the DEF STAPostPNR timed" binds
+            # the step-23 (in-flow) capture only.  The FINAL capture binds the
+            # shipped DEF/GDS through its post-stream derivation; step 32
+            # repair or step 34 fill may change the DEF after step 23 timed it.
+            if (tool_arm is not None and args.capture_point != "post_stream" and
+                    def_identity(bundle, Path(tool_arm["def"]) if tool_arm.get("def")
+                                 else None) is not None):
                 # The DRV census is a fresh OpenSTA capture of a routed DEF; on
                 # the tool arm it certifies step 23 only if that DEF is the one
                 # STAPostPNR timed. STAPostPNR's own reports carry violator

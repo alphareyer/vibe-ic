@@ -360,3 +360,33 @@ def test_dual_selecting_pregrt_carries_its_census_into_the_report(tmp_path, monk
     assert report['baseline_repair_metrics']['vibeic__prr__before__unrouted__count'] == 0
     m = R._step32_own_measurement(report)
     assert m['unrouted_added'] == 0 and R._promotion_unmeasured(m) == ''
+
+
+# --- review wave 58 (R-0929-STEP32-ADOPT): an unmeasured adoption never ships ----
+
+def _adopted_with(tmp_path, monkeypatch, **fields):
+    real = _chain_report
+
+    def report_with(project, adopted_state, **kw):
+        report = real(project, adopted_state, **kw)
+        report.update(fields)
+        return put(project / prr.REPORT_REL, report) and report
+    monkeypatch.setattr(sys.modules[__name__], '_chain_report', report_with)
+    return _after_route(tmp_path, monkeypatch, measured=True)
+
+
+def test_an_adopted_candidate_whose_step32_is_not_measured_is_not_handed_off(
+        tmp_path, monkeypatch):
+    project, out, _ = _adopted_with(tmp_path, monkeypatch, verdict='NOT_MEASURED',
+                                    code='LL_PRR_DRV_NOT_MEASURED')
+    assert out['views'] == {}, out
+    assert 'R-0929-STEP32-ADOPT' in out['record']['promotion_refused']
+    assert not (project / RECORD).exists()
+
+
+def test_an_adopted_candidate_with_a_measured_residual_is_handed_off(tmp_path, monkeypatch):
+    """Control: residual DRV keeps Step 32 FAIL but never blocks the handoff."""
+    project, out, cdef = _adopted_with(
+        tmp_path, monkeypatch, verdict='FAIL', code='LL_PRR_FANOUT_VIOLATION',
+        antenna_census={'verdict': 'PASS'}, sta_digest_census={'verdict': 'PASS'})
+    assert out['views']['def'] == cdef

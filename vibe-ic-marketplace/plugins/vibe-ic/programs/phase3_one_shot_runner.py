@@ -17680,6 +17680,12 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
             "cap)")
     for _u in _fo_unread:
         _fo_notes.append(f"tier unavailable: {_u}")
+    # DRV standard section 1: the synth stage's applied fanout is the
+    # `buffer -N` in the script ABC EXECUTED. `-showtmp -nocleanup` keep that
+    # script (yosys names it in the log); `drv_stage_receipts.keep_abc_script`
+    # copies it beside the netlist and removes the kept folders. Neither flag
+    # changes the mapping.
+    _abc_keep = " -showtmp -nocleanup"
     # FASTROUTE_LAYER_ADJUST is a ROUTING knob (the routing step is owned by a
     # sibling agent); ingested + surfaced here for provenance, NOT applied in
     # synth.
@@ -17723,7 +17729,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         f"{_fa_clause}"
         f"dfflibmap{_du_flags} -liberty {liberty_c}; "
         f"{dlatch_clause}"
-        f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
+        f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}{_abc_keep}; "
         f"{_remove_abc_buf_clause}"
         f"{hilomap_clause}"
         f"clean; stat -liberty {liberty_c}; "
@@ -17832,7 +17838,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
             f"{_fa_clause}"
             f"dfflibmap{_du_flags} -liberty {liberty_c}; "
             f"{dlatch_clause}"
-            f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
+            f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}{_abc_keep}; "
             f"{_remove_abc_buf_clause}"
             f"{hilomap_clause}"
             f"clean; stat -liberty {liberty_c}; "
@@ -17865,7 +17871,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 f"{_fa_clause}"
                 f"dfflibmap{_du_flags} -liberty {liberty_c}; "
                 f"{dlatch_clause}"
-                f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
+                f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}{_abc_keep}; "
                 f"{_remove_abc_buf_clause}"
                 f"{hilomap_clause}"
                 f"clean; stat -liberty {liberty_c}; "
@@ -17920,7 +17926,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 f"{_fa_clause}"
                 f"dfflibmap{_du_flags} -liberty {liberty_c}; "
                 f"{dlatch_clause}"
-                f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
+                f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}{_abc_keep}; "
                 f"{_remove_abc_buf_clause}"
                 f"{hilomap_clause}"
                 f"clean; stat -liberty {liberty_c}; "
@@ -18298,6 +18304,11 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                             "area_loop_adopted": False})
             _area_verdict = (" area_budget=ok" if _acp.returncode == 0
                              else f" area_budget=INCOMPLETE(rc={_acp.returncode})")
+    # DRV standard section 1: keep the script ABC executed for the synth
+    # stage receipt (`step_pnr` adds the census once the run's SDC exists).
+    import drv_stage_receipts as _drv_stages
+    _drv_stages.keep_abc_script(
+        project, out_dir, log.read_text(errors="replace") if log.is_file() else "")
     return StepResult("synth", "PASS", time.time() - t0,
                       f"netlist={netlist.name} cells={cell_count} "
                       f"frontend={synth_frontend}"
@@ -37744,6 +37755,13 @@ def _prepare_librelane_floorplan_for_route(
         notes.append(f"step 17 dual: selection={selection.get('selection')} "
                      f"({selection.get('reason') or 'dominates'}; "
                      "phase3/tool_arms/17/selection.json)")
+        # The shipped placement-repair receipt is the SELECTED arm's; the
+        # direct arm carries no DRV stage probe (DRV standard section 1).
+        import drv_stage_receipts as _drv_stages
+        _drv_stages.rebind_lane(
+            project, list(zip(steps, folders))
+            if _placement_arm_to_route(selection) == "librelane" else None,
+            ("placement_repair",), str(_placement_arm_to_route(selection)))
         if _placement_arm_to_route(selection) != "librelane":
             # the direct arm won, or the comparison was not measured on one
             # scope: the incumbent direct placement runs in the routing
@@ -38785,6 +38803,14 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _knob_parity.write_sdc_report(
         project, sdc, pdk=str(pdk.name),
         library=_active_std_cell_library(project, str(pdk.name)))
+    # DRV standard section 1: the synth stage receipt (the script ABC ran,
+    # kept by step_synth, and the post-synthesis census under this SDC).
+    import drv_stage_receipts as _drv_stages
+    _drv_stages.synth_stage(
+        project, netlist=_pl.synth_dir(project) / f"{top}_synth.v", top=top,
+        liberties=[str(pdk.liberty)], sdc=sdc,
+        to_container=lambda p: _to_container_path(str(p), container),
+        execute=lambda cmd: _docker_exec(container, cmd, timeout=1800))
     # Whichever branch ran, record what the DESIGN staged and what became of
     # it. A machine-readable sibling of the deck's own comment block, so a
     # later reader does not have to parse an SDC to learn that the design's
@@ -46584,11 +46610,18 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
               "selected_arm": report.get("selected_arm")}
     views: Dict[str, Path] = {}
     state = report.get("adopted_state")
-    if report.get("verdict") == "PASS" and state and Path(state) != Path(route_state):
+    # R-0929-STEP32-ADOPT: an adopted candidate is handed off; neither its
+    # residual DRV nor the step-32 DRV verdict keeps the pre-repair route.
+    if ((report.get("adopted") or report.get("verdict") == "PASS")
+            and state and Path(state) != Path(route_state)):
         # cmp3 D15: a route is promoted only with its promoter's own antenna
         # and unrouted measurement of it; without one the input route stays.
         own = _step32_own_measurement(report)
         refused = _promotion_unmeasured(own)
+        if not refused and not _llprr.adopted_candidate_measured(report):
+            refused = (f"R-0929-STEP32-ADOPT: adopted {report.get('adopted')} but "
+                       f"step 32 is {report.get('verdict')} ({report.get('code')}), "
+                       "not fully measured")
         pnr_out = _pl.pnr_dir(project)
         pnr_out.mkdir(parents=True, exist_ok=True)
         if refused:
@@ -46635,7 +46668,7 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
         return StepResult("postroute_repair_librelane", "NOT_MEASURED",
                           time.time() - t0, f"LL_PRR_TRIGGER_NOT_MEASURED: {_why}",
                           reason_class=_V.ReasonClass.INCONCLUSIVE)
-    if report.get("verdict") != "PASS":
+    if report.get("verdict") != "PASS" and not report.get("adopted"):
         _drv_promotion_disclose(pnr_out, "postroute_repair_refused",
                                 str(report.get("reason") or report.get("code")))
         return StepResult("postroute_repair_librelane",
@@ -46662,6 +46695,20 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
                           f"promoted ({refused}); input route kept; its closure "
                           "was not established by step 32",
                           reason_class=_V.ReasonClass.INCONCLUSIVE)
+    # Step 32's own verdict: the actuator's and the step-32 DRV judgement's,
+    # the worse of the two (R-0929-DRV-IDENTITY: residual DRV keeps the step
+    # FAIL).  It is reported, and never decides the handoff below.
+    _rank = {"PASS": 0, "WAIVED": 1, "NOT_MEASURED": 2, "FAIL": 3}
+    _drv_v = report.get("drv_signoff_verdict")
+    step_status = max((str(report.get("verdict") or "NOT_MEASURED"),
+                       str(_drv_v or "PASS")),
+                      key=lambda v: _rank.get(v, 2))
+    if step_status not in _rank:
+        step_status = "NOT_MEASURED"
+    drv_note = (f"; step-32 DRV {_drv_v}: "
+                + "; ".join(((report.get("drv_signoff") or {}).get("failures") or [])[:3]
+                            + ((report.get("drv_signoff") or {}).get("not_measured") or [])[:3])
+                if _drv_v and _drv_v != "PASS" else "")
     if not report.get("adopted"):
         if _trigger is not None and _trigger.get("action") != "RUN":
             # Measured clean input: the closure was deliberately not run.
@@ -46675,9 +46722,9 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
                                  for r in report.get("closure") or [])
                        or "no controller outcome was recorded"))
         _drv_promotion_disclose(pnr_out, "librelane_closure_kept_input", _why)
-        return StepResult("postroute_repair_librelane", "PASS", time.time() - t0,
+        return StepResult("postroute_repair_librelane", step_status, time.time() - t0,
                           f"no candidate adopted (input route kept): {summary}; "
-                          + _why)
+                          + _why + drv_note)
     routed = pnr_out / "routed.def"
     netlist = pnr_out / f"{top}_pnr.v"
     if handed:
@@ -46707,12 +46754,12 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
     _gds = pnr_out / f"{top}.gds"
     if top and _gds.is_file():
         _gds.unlink()   # step_gds re-derives from the promoted route
-    return StepResult("postroute_repair_librelane", "PASS", time.time() - t0,
+    return StepResult("postroute_repair_librelane", step_status, time.time() - t0,
                       f"ADOPTED {report.get('adopted')}"
                       + (f" (dual arm {report['selected_arm']})"
                          if report.get("selected_arm") else "")
                       + (" in the step-21 LibreLane chain" if not handed else "")
-                      + f": {summary}",
+                      + f": {summary}{drv_note}",
                       [str(routed), str(netlist)],
                       extras={"pg_supply_ownership":
                               (report.get("final_supply_ownership") or {}).get("verdict")})
@@ -52791,6 +52838,13 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
     # below belongs to the step, not to one producer: a pnr that died before
     # its final writes is skipped on every mode, so the switch is consulted
     # only when that skip does not apply. ``_direct``: the dual arm's re-entry.
+    if not _direct:
+        # R-0929-DRV-IDENTITY: step 31 starts with no LVS record on disk, in
+        # EVERY mode (the LibreLane half returns from the dispatch below and
+        # writes no inputs record): an earlier run's inputs or verdict must
+        # never stand for this compare.
+        for _rec in ("lvs_inputs.json", "lvs_verdict.json"):
+            (project / "reports/phase3" / _rec).unlink(missing_ok=True)
     if not _direct and not (
             upstream_pnr is not None and upstream_pnr.status != "PASS"
             and not (getattr(upstream_pnr, "extras", None) or {}).get(
@@ -52800,6 +52854,9 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
         if _routed is not None:
             return _routed
     t0 = time.time()
+    # R-0929-DRV-IDENTITY: what this LVS compares is recorded below; an earlier
+    # run's record must never stand for it.
+    (project / "reports/phase3/lvs_inputs.json").unlink(missing_ok=True)
     _vac = _vacuous_on_unrouted(project, "lvs", t0)
     if _vac is not None:
         return _vac
@@ -53056,6 +53113,13 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
             + ("routed-DEF " if not def_file.is_file() else "")
             + ("gate-netlist" if not netlist.is_file() else "")
             + " — run PnR first (#443/#509)", reason_class=_V.ReasonClass.INPUT_ABSENT)
+    # The final DRV capture proves LVS compared the judged layout and netlist
+    # (R-0929-DRV-IDENTITY): the layout DEF and the gate netlist, by sha256.
+    _aa.write_json(project / "reports/phase3/lvs_inputs.json", {
+        "layout_def": {"path": str(def_file.resolve()), "sha256": _sha256_file(def_file)},
+        "schematic_netlist": {"path": str(netlist.resolve()),
+                              "sha256": _sha256_file(netlist)},
+        "selected_because": _nl_reason})
     # ORGANIC-20260606 #477 — run-completion honesty check (b): a 0-byte
     # layout source must NEVER feed a "clean" LVS. Extracting from an empty
     # DEF yields an empty netlist + a meaningless compare; FAIL here BEFORE
@@ -53382,6 +53446,12 @@ def _write_lvs_verdict(project: Path, status: str, finding: str,
         payload.update(extras)
     payload["phase2_synth"] = _pl.phase2_synth_input_identity(project)
     payload["phase3_inputs"] = _pl.phase3_signoff_input_identity(project)
+    # R-0929-DRV-IDENTITY: the verdict names the inputs record of THIS compare
+    # (step 31 clears both records at its start), so the final DRV capture can
+    # tell this verdict from a stale one of another layout.
+    _inputs = rpt_dir / "lvs_inputs.json"
+    payload["lvs_inputs"] = ({"path": str(_inputs.resolve()), "sha256": _sha256_file(_inputs)}
+                             if _inputs.is_file() else None)
     path.write_text(json.dumps(payload, indent=2) + "\n")
     try:
         return str(path.relative_to(project))
@@ -56620,8 +56690,12 @@ _DECLARED_SIGNOFF_GATES = (
     # refused core cell, NOT_APPLICABLE_BY_STRUCTURE off a DIE top).
     ("pad_input_drive", "pad_input_drive_check.py",
      "reports/phase3/sta/pad_input_drive_check.json", ()),
+    # R-0929-DRV-IDENTITY: these gates run after stream-out and LVS, so this
+    # DRV capture is the FINAL one (it binds the GDS and the LVS netlist); the
+    # judge refuses a bundle that is not.  Only this verdict counts toward IC
+    # PASS; the pre-stream row (`_PRESTREAM_GATES`) is the in-flow capture.
     ("drv_signoff", "drv_signoff_judge.py",
-     "reports/phase3/sta/drv_signoff.json", ()),
+     "reports/phase3/sta/drv_signoff.json", ("--capture-point", "post_stream")),
     # Step 23 declares this report, but the inline executor must produce and
     # consume it too. Its real subprocess verdict reaches the same release
     # fold as the other sign-off gates; missing inputs remain BLOCKED.
@@ -57825,18 +57899,15 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
         return _signoff_not_checked(
             name, t0, f"cannot create {out_json.parent}: {exc}")
     if name == "drv_signoff":
-        plan_path = project / "reports/phase3/sta/drv_capture_plan.json"
-        if not plan_path.is_file():
-            return _signoff_not_checked(
-                name, t0, "DRV capture plan absent; fresh measurement unavailable")
+        # A failed new capture must also invalidate an earlier judge receipt.
+        out_json.unlink(missing_ok=True)
         try:
-            import drv_signoff_capture as _drv_capture
-            from _atomic_artefact import write_text as _drv_write
-            plan = json.loads(plan_path.read_text())
-            bundle = _drv_capture.capture(
-                plan, project / "reports/phase3/sta/drv_capture")
-            _drv_write(project / "reports/phase3/sta/drv_signoff_bundle.json",
-                       json.dumps(bundle, indent=2) + "\n")
+            import drv_capture_plan as _drv_plan
+            # The row's own declaration says which capture it judges.
+            _argv = list(extra_argv)
+            _point = (_argv[_argv.index("--capture-point") + 1]
+                      if "--capture-point" in _argv[:-1] else "in_flow")
+            _drv_plan.capture_and_publish(project, capture_point=_point)
         except (OSError, ValueError, RuntimeError, KeyError) as exc:
             return _signoff_not_checked(
                 name, t0, f"fresh DRV capture did not complete: {exc}")
@@ -57879,6 +57950,13 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
         # checker may not translate a DRV result into a different verdict.
         try:
             doc = json.loads(out_json.read_text())
+            if isinstance(doc, dict) and doc.get("verdict") == "REFUSED":
+                # F15: the judge refused before judging (the tool arm it must
+                # bind cannot be read).  A refusal record, not a verdict word:
+                # named as such, never as an unreadable receipt.
+                return _signoff_not_checked(
+                    name, t0, f"DRV judge REFUSED ({doc.get('refusal')}): "
+                    f"{doc.get('reason')}", outputs)
             tier = _V.parse(doc["verdict"])
         except (OSError, ValueError, KeyError, _V.UnknownVerdictWord) as exc:
             return _signoff_not_checked(name, t0,
@@ -76831,6 +76909,14 @@ def _phase3_window_output_audit(project: Path, step_ids: Set[str]
     return checks
 
 
+def _step32_lets_the_chain_continue(status: str) -> bool:
+    """Step 32's own row carries its DRV verdict (R-0929-DRV-IDENTITY).  The
+    chain continues to stream-out on PASS and, like the pre-stream gate, on an
+    owner-signed WAIVED -- otherwise a signed waiver at step 32 would stop the
+    flow before the final post-stream capture, the only one that counts."""
+    return status in ("PASS", "WAIVED")
+
+
 def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                        args, selected: List[str]) -> int:
     """Dispatch only selected sites and publish a bounded audit of this run.
@@ -76851,6 +76937,8 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
         print(f"[phase3] window run id already published: {window_run_id}; "
               "refusing to overwrite its receipts", file=sys.stderr)
         return 2
+    import drv_run_identity as _drv_run_identity
+    _drv_run_identity.start(project)   # R-0929-DRV-IDENTITY: this run's identity + receipts
     before = _phase3_file_manifest(project)
     rows: List[StepResult] = []
     changed_sites: List[str] = []
@@ -77426,6 +77514,8 @@ def main() -> int:
         return _run_phase3_window(project, effective_top, pdk, args,
                                   _window_sites)
     plan: List[StepResult] = []
+    import drv_run_identity as _drv_run_identity
+    _drv_run_identity.start(project)   # R-0929-DRV-IDENTITY: this run's identity + receipts
 
     # v0.2.55 — pure-analog flow gate. A pure-analog IC has NO digital
     # RTL track: its physical implementation (GDS) is produced by the
@@ -77794,7 +77884,7 @@ def main() -> int:
                 project, effective_top, pdk, args.container)
             if _prr is not None:
                 plan.append(_prr)
-                _chain_ok = (_prr.status == "PASS")
+                _chain_ok = _step32_lets_the_chain_continue(_prr.status)
         if _chain_ok and not _prr_on_librelane:
             # #527 estimate-vs-SPEF — SHIPPED post-route real-SPEF setup repair at
             # the slow sign-off corner, BEFORE gds/drc/lvs so the shipped design is

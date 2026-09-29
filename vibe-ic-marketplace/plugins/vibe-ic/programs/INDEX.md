@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1391
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1391)
+- **Total programs (excluding helpers / shims):** 1395
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1395)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1382 |
+| `any` | 1386 |
 
 ## Alphabetical listing
 
@@ -370,11 +370,15 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `drc_report_check` | any | — | DRC report check — wrapper for eda_report_audit --mode drc. |
 | `drc_rule_layer_classify` | any | v0.3.16 | ORGANIC #513. Classify DRC violations by RULE-LAYER into stdcell-library-internal vs design-level. |
 | `drc_vacuous_pass_check` | any | — | drc_vacuous_pass_check.py -- Reject a "0 DRC violations" verdict when the layout the checker ran on was EMPTY. |
+| `drv_capture_plan` | any | — | Build a DRV capture request from the routed run's own STA state. |
 | `drv_promotion_corroboration_check` | any | — | a route promoted on its OWN re-measurement must be corroborated by the SIGN-OFF report it claims to improve (#293). |
+| `drv_run_identity` | any | — | The run identity an in-flow DRV capture binds (ruling R-0929-DRV-IDENTITY). |
 | `drv_signoff_anchor` | any | — | Read the installed PDK threshold source from the pinned EDA image. |
+| `drv_signoff_annotation` | any | — | Reconcile OpenSTA's unannotated names with Liberty, LEF and route evidence. |
 | `drv_signoff_capture` | any | — | Capture raw post-route DRV evidence in fresh pinned OpenSTA processes. |
 | `drv_signoff_census` | any | — | Derive DRV populations and pin classes from fresh OpenSTA census files. |
 | `drv_signoff_judge` | any | — | BLOCKING post-route DRV(tran/cap/fanout) sign-off judge. |
+| `drv_stage_receipts` | any | — | Record the DRV stage receipts `drv_capture_plan._stages` reads. |
 | `ds_quality_check` | any | — | Datasheet (L1) quality scorer, 0-100. |
 | `dual_track_select` | any | — | deterministic DUAL-TRACK convergence selector. |
 | `dynamic_ir_drop_check` | any | — | transient (dynamic) IR-drop budget gate for tapeout. |
@@ -1463,7 +1467,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1382 programs)
+### `any` (1386 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1805,11 +1809,15 @@ _(no programs in this group)_
 - `drc_report_check` — DRC report check — wrapper for eda_report_audit --mode drc.
 - `drc_rule_layer_classify` — ORGANIC #513. Classify DRC violations by RULE-LAYER into stdcell-library-internal vs design-level.  _[v0.3.16]_
 - `drc_vacuous_pass_check` — drc_vacuous_pass_check.py -- Reject a "0 DRC violations" verdict when the layout the checker ran on was EMPTY.
+- `drv_capture_plan` — Build a DRV capture request from the routed run's own STA state.
 - `drv_promotion_corroboration_check` — a route promoted on its OWN re-measurement must be corroborated by the SIGN-OFF report it claims to improve (#293).
+- `drv_run_identity` — The run identity an in-flow DRV capture binds (ruling R-0929-DRV-IDENTITY).
 - `drv_signoff_anchor` — Read the installed PDK threshold source from the pinned EDA image.
+- `drv_signoff_annotation` — Reconcile OpenSTA's unannotated names with Liberty, LEF and route evidence.
 - `drv_signoff_capture` — Capture raw post-route DRV evidence in fresh pinned OpenSTA processes.
 - `drv_signoff_census` — Derive DRV populations and pin classes from fresh OpenSTA census files.
 - `drv_signoff_judge` — BLOCKING post-route DRV(tran/cap/fanout) sign-off judge.
+- `drv_stage_receipts` — Record the DRV stage receipts `drv_capture_plan._stages` reads.
 - `ds_quality_check` — Datasheet (L1) quality scorer, 0-100.
 - `dual_track_select` — deterministic DUAL-TRACK convergence selector.
 - `dynamic_ir_drop_check` — transient (dynamic) IR-drop budget gate for tapeout.

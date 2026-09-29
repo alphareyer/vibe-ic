@@ -61,6 +61,7 @@ SEGMENT = ("OpenROAD.GlobalRouting", "OpenROAD.FillInsertion")
 #: arms are measured after the route by one instrument instead (`measure_arm`).
 MEASURE_ONLY = ("OpenROAD.STAMidPNR",)
 DRT = "OpenROAD.DetailedRouting"
+POST_GRT_REPAIR = "OpenROAD.RepairDesignPostGRT"
 DRT_SEEDED = "Vibeic.DetailedRoutingSeeded"
 NVR = "Vibeic.NamedViolationReroute"
 
@@ -257,6 +258,15 @@ def deck_sdc(R, deck: str, *, container: str, project: Path, out_dir: Path) -> P
             if match else out_dir / "constraint.sdc")
 
 
+#: R-0929-POSTGRT: the DRV standard's required post-GRT repair stage runs.
+#: LibreLane gates `OpenROAD.RepairDesignPostGRT` off by default, which left
+#: the stage absent (section 1 FAIL) on every run.  Only the design (DRV)
+#: repair is switched on; the post-GRT timing repair stays the flow's choice.
+POST_GRT_DESIGN_REPAIR: Dict[str, Tuple[Any, str]] = {
+    "RUN_POST_GRT_DESIGN_REPAIR": (
+        True, "R-0929-POSTGRT: the DRV standard's required post_grt_repair stage")}
+
+
 def overlay(R, project: Path, sdc: Path, scratch: Path) -> Dict[str, Tuple[Any, str]]:
     """Declared step-21 config for LibreLane, each value with its source.
 
@@ -264,6 +274,7 @@ def overlay(R, project: Path, sdc: Path, scratch: Path) -> Dict[str, Tuple[Any, 
       (`librelane_cts_hold.signoff_scene_sdc`): the post-GRT timing repair
       works in the scene the sign-off judges, as steps 19/20 do (T98).
     * the route checkers record only (`CHECKER_RECORD_ONLY`).
+    * the post-GRT design repair runs (`POST_GRT_DESIGN_REPAIR`).
     * a PPA candidate's `route_knobs` (`PPA_KNOBS`) win over the above.
     """
     import librelane_cts_hold as _cts
@@ -273,6 +284,7 @@ def overlay(R, project: Path, sdc: Path, scratch: Path) -> Dict[str, Tuple[Any, 
                          f"{sdc.name} + the sign-off STA's flat-OCV derate "
                          "(phase3_one_shot_runner._FLAT_OCV_DERATE_EARLY/LATE)")}
     out.update(CHECKER_RECORD_ONLY)
+    out.update(POST_GRT_DESIGN_REPAIR)
     out.update(switch_knobs(project))
     return out
 
@@ -544,6 +556,14 @@ def execute(
                 steps.append((sid, cfg))
             folders = _ll.run_chain(project, image, [(s, c, state0) for s, c in steps],
                                     mounts=mounts, lane=lane, pdk_root=_ll.PDK_GUEST_ROOT)
+            if POST_GRT_REPAIR not in arm_ids:
+                # DRV standard section 1: post-GRT repair is a required stage;
+                # a chain the flow gated it out of records that it did not run.
+                import drv_stage_receipts as _drv_stages
+                _drv_stages.record_not_run(
+                    project, "post_grt_repair",
+                    f"{POST_GRT_REPAIR} is not in step 21's chain ({lane}); "
+                    f"flow gates false: {gated_off.get(POST_GRT_REPAIR) or 'not requested'}")
             final = folders[-1] / "state_out.json"
             mfolders = _ll.run_chain(project, image, [(s, c, final) for s, c in measure],
                                      mounts=mounts, lane=f"{lane}-measure", pdk_root=_ll.PDK_GUEST_ROOT)
@@ -649,6 +669,13 @@ def execute(
                          "drc": arms[selected]["nvr"] / "named_viol_after.drc"}
         elif json.loads(gates["librelane"].read_text()).get("verdict") == "NOT_MEASURED":
             return _refuse("LL_ROUTE_NOT_MEASURED", str(gates["librelane"]), out)
+        # The shipped route's post-GRT repair receipt is the SELECTED arm's
+        # (seed arms and the step-32 pregrt arm rewrite it as they run).
+        import drv_stage_receipts as _drv_stages
+        _drv_stages.rebind_lane(
+            project, list(zip(arms[selected]["ids"], arms[selected]["folders"]))
+            if selected in arms else None,
+            ("post_grt_repair",), selected)
         # Step 32 on LibreLane (T102 r2) runs HERE, on the routed database the
         # selection just chose, before the tail: LL21 -> Vibeic.PostRouteRepair
         # -> tail. `variant_arm` is this step's own LibreLane route with extra

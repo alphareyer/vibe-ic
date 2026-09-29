@@ -128,6 +128,35 @@ _NOT_PROSE: Dict[str, str] = {
         "There is no prose denial form in these fields. Falsifier: "
         "test_capture_cr14_postroute_recipe.py::"
         "test_liberty_truth_table_and_area_discover_neutral_full_adder.",
+    "drv_capture_plan::_stages":
+        "TOOL-FILE GRAMMARS, NO SENTENCE. The stage values come from the ABC "
+        "script's own `buffer -N <n>` command line, OpenROAD write_sdc's "
+        "`set_max_* <n>` commands and the probe's `sta::max_fanout_check_limit "
+        "<n>` / `clock <c> is_propagated=<0|1>` lines, all hashed tool output; "
+        "a comment or prose line cannot negate a command. test_drv_stage_receipts"
+        "::test_synth_flags_come_from_evidence_not_the_receipt falsifies it.",
+    "drv_capture_plan::_env":
+        "LIBRELANE TCL ASSIGNMENT GRAMMAR, NO SENTENCE. Only a line beginning "
+        "with the exact set ::env(NAME) form is an environment assignment; a "
+        "comment or prose statement cannot negate one. The final scene inputs "
+        "are still checked for file presence and content hashes by the plan.",
+    "drv_signoff_annotation::_lef_uses":
+        "LEF PIN AND USE GRAMMAR, NO SENTENCE. Only a USE POWER or USE GROUND "
+        "token within a named MACRO/PIN block qualifies; other USE forms and "
+        "free text cannot negate or create that formal token. The annotation "
+        "fixture flips USE POWER to USE SIGNAL and observes refusal.",
+    "drv_signoff_capture::openroad_identity":
+        "ONE PROBE LINE GRAMMAR, NO SENTENCE. The only text read is the "
+        "capture's own probe output, one `OPENROAD_BINARY <path> <sha256> "
+        "<version>` line per build, anchored and field-typed (64-hex digest, "
+        "one whitespace-free version token); `-g<hash>` is git describe's "
+        "commit field. No negation form exists; builds that disagree or a "
+        "version with no commit leave the commit absent (tested).",
+    "drv_signoff_judge::_liberty_limits":
+        "LIBERTY ATTRIBUTE GRAMMAR, NO SENTENCE. Pin limits and related_pin "
+        "are parsed from structured cell and pin groups with balanced braces; "
+        "a prose negation is not a legal Liberty attribute. Linked limit tests "
+        "exercise the numerical hard limit and absent-attribute cases.",
     "drv_signoff_census::_nets":
         "ONE OPENSTA REPORT_NET GRAMMAR, NO SENTENCE. The reader accepts only "
         "anchored 'Net', 'Total capacitance' and 'Number of loads' fields with "
