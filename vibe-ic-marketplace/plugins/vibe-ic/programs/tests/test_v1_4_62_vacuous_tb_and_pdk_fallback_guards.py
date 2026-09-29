@@ -194,18 +194,27 @@ def test_a_positive_opcode_stream_path_unchanged(tmp_path):
 
 
 def test_a_positive_pure_datapath_still_vacuous_na(tmp_path):
-    """POSITIVE — a genuinely non-protocol IC still gets its honest N/A.
+    """A non-protocol IC is not N/A for its FUNCTION (FULLSTACKTB, 2026-09-29).
 
-    No opcodes AND no register map => nothing was failed to be synthesised;
-    the opcode-driven full-stack TB is legitimately not applicable.
+    No opcodes AND no register map => the opcode-driven command-byte TB is
+    still not applicable, and the gate still never reports the register-map
+    FUNCTIONAL_COVERAGE_GAP here. What changed is the verdict on this exact
+    shape: 0 golden-scored vectors and 8 placeholders is a CONNECTIVITY-ONLY
+    population, and the FULLSTACKTB brief requires the gate to refuse it as
+    functional evidence. It used to read `vacuous_pass: true` (rc 2, rule N/A);
+    it is now NOT_MEASURED (rc 2, `ZERO_DENOMINATOR`), never a pass of any
+    kind. Stricter, not weaker: every assertion that could fail before can
+    still fail, and the pass it granted is withdrawn.
     """
     proj = _mk_project(tmp_path, opcodes=[], registers=[],
                        scored_vectors=0, placeholder_vectors=8)
     rc, res = _run_gate(proj, tmp_path)
     assert rc == 2
-    assert res["pass"] is True
-    assert res["vacuous_pass"] is True
-    assert res["rule"] == "N/A"
+    assert res.get("verdict") != "FUNCTIONAL_COVERAGE_GAP"
+    assert res["pass"] is False
+    assert res["vacuous_pass"] is False
+    assert res["verdict"] == "NOT_MEASURED"
+    assert res["reason_class"] == "ZERO_DENOMINATOR"
 
 
 def test_a_positive_regmap_with_real_golden_coverage_not_flagged(tmp_path):
@@ -219,7 +228,14 @@ def test_a_positive_regmap_with_real_golden_coverage_not_flagged(tmp_path):
                        scored_vectors=8, placeholder_vectors=0)
     rc, res = _run_gate(proj, tmp_path)
     assert res.get("verdict") != "FUNCTIONAL_COVERAGE_GAP"
-    assert rc == 2 and res["vacuous_pass"] is True
+    # FULLSTACKTB (2026-09-29): the tail of this test pinned the old
+    # fall-through, `rc == 2 and vacuous_pass`. Eight golden-scored vectors in
+    # `results.json` that no functional record binds to an executed testbench
+    # through the required top are not a full-stack population either, so the
+    # fall-through is now NOT_MEASURED -- still rc 2, and still no GAP, which
+    # is what this test exists to prove.
+    assert rc == 2 and res["vacuous_pass"] is False
+    assert res["verdict"] == "NOT_MEASURED"
 
 
 # ===========================================================================
@@ -297,17 +313,22 @@ def test_a_positive_processor_cpu_csr_is_vacuous_na(tmp_path):
     identical to the FUNCTIONAL_COVERAGE_GAP canary — but because the IC is a
     CPU core it has NO externally-addressable register-slave protocol, so the
     gate mirrors reports/ic_class.json (has_command_protocol=false) and the
-    cpu_functional_oracle deferral: VACUOUS_PASS, not a FAIL.
+    cpu_functional_oracle deferral: not a FAIL — and, since FULLSTACKTB
+    (2026-09-29), not a VACUOUS_PASS either, see the assertions below.
     """
     proj = _mk_project(tmp_path, opcodes=[], registers=_regs(43),
                        scored_vectors=0, placeholder_vectors=8)
     _stamp_ic_class(proj, "processor_cpu")
     rc, res = _run_gate(proj, tmp_path)
     assert rc == 2, res
-    assert res["pass"] is True
-    assert res["vacuous_pass"] is True
-    assert res["rule"] == "N/A"
     assert res.get("verdict") != "FUNCTIONAL_COVERAGE_GAP"
+    # FULLSTACKTB (2026-09-29): the CSR map still is not a register-slave
+    # protocol (no GAP, rc 2), but a CPU with 0 golden-scored vectors has a
+    # CONNECTIVITY-ONLY full-stack population, and that is refused as
+    # functional evidence -- it used to read `vacuous_pass: true`.
+    assert res["pass"] is False
+    assert res["vacuous_pass"] is False
+    assert res["verdict"] == "NOT_MEASURED"
 
 
 def test_a_negative_non_cpu_slave_stamp_still_caught(tmp_path):
