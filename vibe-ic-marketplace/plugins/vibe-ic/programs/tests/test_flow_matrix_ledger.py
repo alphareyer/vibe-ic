@@ -804,6 +804,7 @@ PINNED_OUTPUT_MEMBERS = frozenset({
     ('31', 'reports/phase3/magic_illegal_overlap.json'),
     ('31', 'reports/phase3/perc_sweep.json'),
     ('32', 'phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json'),
+    ('32', 'phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json'),
     ('32', 'phase3/stage3/postroute_timing_repair/repair_log.json OR phase3/stage3/postroute_timing_repair/no_repair_needed.flag'),
     ('33', 'reports/phase3/power.json'),
     ('33', 'reports/phase3/power.rpt'),
@@ -1403,7 +1404,12 @@ def test_output_entries_classify_into_the_four_kinds():
     # Magic-streamed run a file its engine never writes. The declaration is now
     # an engine-neutral ANY_OF entry, which is what the flow actually requires --
     # the exact recipe for whichever stream engine produced the sign-off GDS.
-    assert seen[F.FILE] == 140, (seen, REDERIVE)
+    # 140 -> 141 FILE (STEP32FLAG, review wave 58), one entry arrives, none leaves:
+    #   + ('32', 'phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json') FILE
+    # the canonical Step-32 decision, written on every canonicalize pass;
+    # behind a bound LibreLane producer receipt it is where the canonical
+    # demands live, and postroute_timing_repair_audit ORs them in.
+    assert seen[F.FILE] == 141, (seen, REDERIVE)
     assert seen[F.GLOB] == 29, (seen, REDERIVE)
     assert seen[F.ANY_OF] == 27, (seen, REDERIVE)
     # Reported to the orchestrator: the PROGRAM_EXIT form described in the brief
