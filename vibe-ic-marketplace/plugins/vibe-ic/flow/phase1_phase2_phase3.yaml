@@ -2574,6 +2574,14 @@ steps:
       # bit-level integration bugs surface in sim (~30 s) instead of in
       # the 15-min Quartus + JTAG cycle.
       - bit_level_full_stack_tb_check
+      # FULLSTACKTB (2026-09-29) — the PRODUCER of the functional full-stack
+      # population the clause above now judges for an IC with no command
+      # protocol: the design's own L10 cases, each with the oracle its input
+      # states, run through the full-stack top (the pad-ring chip top on a DIE
+      # route). Executed by design_one_shot_runner (Phase 2) and re-run by
+      # phase3_one_shot_runner once io_pad_chip_top_gen has written the chip
+      # top; the connectivity skeleton is refused as functional evidence.
+      - full_stack_functional_tb
     required_outputs:
       - "phase2/stage1/formal/*.sby OR phase2/stage1/formal/formal_authoring_request.json OR phase2/stage1/formal/formal_not_applicable.json"
       - "phase2/stage1/formal/results.json OR phase2/stage1/formal/formal_authoring_request.json OR phase2/stage1/formal/formal_not_applicable.json"
