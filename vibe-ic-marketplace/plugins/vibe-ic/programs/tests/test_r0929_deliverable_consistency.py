@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""R-0929-DELIVERABLE-CONSISTENCY — derived answer text follows the owner.
+"""R-0929-DELIVERABLE-CONSISTENCY(-2) — derived answers follow the owner,
+decided from their recorded STRUCTURE, never from their prose.
 
 WHAT WAS MEASURED. Two designs' `input/step_0_5ic_answers.json` carry the
 owner-attested `deliverable = DIE` (R-0915-95) beside a DERIVED
@@ -8,25 +9,32 @@ agent's HARDMACRO, that says "declares deliverable=HARDMACRO". Nothing
 produced that text, so nothing re-derived it when the owner ruled, and no check
 compared it with the answer it depended on.
 
+The first gate read that prose for "deliverable=X" and review_wave58 (DELIVC)
+measured it wrong both ways: owner contrast wording FAILed and real claims
+("hard macro", "交付物為 HARDMACRO") PASSed. R-0929-DELIVERABLE-CONSISTENCY-2
+replaces it: every derived answer carries `answer_provenance.<key>` =
+{answered_by: program, producer, derived_from_attested: {deliverable: <v>},
+inputs, inputs_sha256}; the gate FAILs one with no such record, or whose
+recorded attested value differs from the owner's current one; it never reads
+prose and never gates an owner-attested field.
+
 EVERY PROPERTY BELOW IS ASSERTED IN THE DIRECTION THAT COULD FAIL.
 
-  1. GATE, NEGATIVE   the stale sentence FAILs the step-0.5ic checker, named by
-                      file, field and sentence, in the answers file AND in the
-                      declaration generated from it.
-  2. GATE, DISCRIMINATION  a MENTION is not an assertion: "not the IP path (a
-                      HARDMACRO whose ...)", "argued HARDMACRO", a list of the
-                      choices and a key named `deliverable_rationale` pass.
-  3. PRODUCER         the answer is regenerated from the design's documents
-                      with the premise READ from the attested deliverable: the
-                      stale sentence is gone, the DIE basis (pad-limited die:
-                      core + pad ring + power ring) is present, the std-cell
-                      gate row is carried, the owner's answer is byte-for-byte
-                      untouched, and the revision records its reason and both
-                      rulings. The regenerated file PASSes the gate.
-  4. BOTH ROUTES      a HARDMACRO attestation keeps the HARDMACRO meaning; the
-                      premise follows the value, not a literal.
-  5. REFUSALS         no owner attestation, or an input that fixes and declines
-                      a die, writes nothing.
+  1. GATE, NO PROVENANCE  the old hand-written answer FAILs, at the answers
+                      file and at the declaration generated from it.
+  2. GATE, STALE      a recorded deliverable that differs from the owner's
+                      FAILs, naming both values; so do a lost attestation and
+                      changed inputs.
+  3. PROSE IS NOT READ  the same sentences (contrast wording and real claims
+                      alike) PASS under current provenance and FAIL under stale
+                      provenance: the verdict is the structure's.
+  4. OWNER FIELDS     deliverable_rationale (any wording) and an
+                      owner-attested derived-key answer are never gated.
+  5. PRODUCER         regenerates with provenance, keeps the owner's fields
+                      byte-identical, passes the checker, second run is a no-op;
+                      a FIXED die gives LIMIT with the rectangle and no outcome
+                      premise, for both deliverables.
+  6. REFUSALS         no owner attestation / fixes-and-declines write nothing.
 
 chip-AGNOSTIC: no vendor, foundry, process node, SKU or design name. The
 producer is imported inside each test so this file COLLECTS on a tree without
@@ -51,7 +59,9 @@ import tapeout_declaration_check as CHECK                      # noqa: E402
 import tapeout_declaration_gen as GEN                          # noqa: E402
 
 ANSWERS_REL = "input/step_0_5ic_answers.json"
-RULE = "DERIVED_TEXT_CONTRADICTS_OWNER_ANSWER"
+NO_PROV = "DERIVED_ANSWER_WITHOUT_PROVENANCE"
+STALE_RULE = "DERIVED_ANSWER_STALE"
+FIELD = "answers.synthesis_area_budget"
 CITATION = "R-0915-95 (2026-09-17) — owner ruling: the IC path."
 STALE = ("The input states NO die or core rectangle to fit inside, so there "
          "is no max_die_dimensions_um for a LIMIT to carry. It declines the "
@@ -148,22 +158,30 @@ def _declare(proj):
                      "--json", str(proj / "gen.json")]) == 0
 
 
+def _derived_rules(res_or_list):
+    rows = res_or_list["refusals"] if isinstance(res_or_list, dict) \
+        else res_or_list
+    return [r for r in rows if r["rule"] in (NO_PROV, STALE_RULE)]
+
+
+def _regenerated(tmp_path, **kw):
+    proj = _project(tmp_path, **kw)
+    assert _gen().main([str(proj)]) == 0
+    return proj, _load(proj)
+
+
 # --------------------------------------------------------------------------- #
-# 1. the gate refuses the stale sentence, at its source and at its copy
+# 1. an answer with no producer provenance is refused, at source and at copy
 # --------------------------------------------------------------------------- #
-def test_the_stale_rationale_is_refused_by_sentence_and_field():
-    got = TD.derived_text_contradictions(_answers(), source=ANSWERS_REL)
-    assert len(got) == 1, got
+def test_the_old_hand_written_answer_has_no_provenance_and_is_refused():
+    got = TD.derived_answer_refusals(_answers(), source=ANSWERS_REL)
+    assert [(r["rule"], r["field"]) for r in got] == [(NO_PROV, FIELD)], got
     r = got[0]
-    assert r["rule"] == RULE
-    assert r["field"] == "answers.synthesis_area_budget.rationale"
-    assert STALE_SENTENCE_FRAGMENT in r["sentence"]
-    assert "The one absolute area threshold" not in r["sentence"]
-    assert r["claimed"] == "HARDMACRO" and r["attested"] == "DIE"
     assert r["producer"] == "area_budget_basis_gen"
-    for needle in (ANSWERS_REL, r["sentence"], "area_budget_basis_gen",
-                   "R-0929-DELIVERABLE-CONSISTENCY"):
-        assert needle in r["message"]
+    for needle in (ANSWERS_REL, FIELD, "area_budget_basis_gen",
+                   "R-0929-DELIVERABLE-CONSISTENCY-2",
+                   "no `answer_provenance.synthesis_area_budget` record"):
+        assert needle in r["message"], needle
 
 
 def test_the_checker_fails_on_the_answers_file_and_on_the_declaration(
@@ -172,72 +190,154 @@ def test_the_checker_fails_on_the_answers_file_and_on_the_declaration(
     _declare(proj)
     res = CHECK.evaluate(proj)
     assert res["verdict"] == "FAIL"
-    mine = [r for r in res["refusals"] if r["rule"] == RULE]
-    assert {r["path"] for r in mine} == {ANSWERS_REL, TD.DECLARATION_REL}
-    assert {r["field"] for r in mine} == {
-        "answers.synthesis_area_budget.rationale",
-        "synthesis_area_budget.rationale"}
+    mine = _derived_rules(res)
+    assert {(r["path"], r["rule"]) for r in mine} == {
+        (ANSWERS_REL, NO_PROV), (TD.DECLARATION_REL, NO_PROV)}
     assert CHECK.main([str(proj), "--json", str(proj / "chk.json")]) == 1
 
 
-@pytest.mark.parametrize("text", [
-    "The deliverable is a HARDMACRO, so no slot applies.",
-    "`deliverable`: `HARDMACRO` per the earlier reading.",
-    "A HARDMACRO deliverable needs no pad ring.",
-    "deliverable 為 HARDMACRO。",
+@pytest.mark.parametrize("breakage,needle", [
+    (lambda rec: rec.update(answered_by="agent"), "answered_by is 'agent'"),
+    (lambda rec: rec.update(producer="somebody_else"), "producer is"),
+    (lambda rec: rec.pop("derived_from_attested"), "no `derived_from_attested`"),
+    (lambda rec: rec.update(derived_from_attested={"top_cell": "widget"}),
+     "omits `deliverable`"),
+    (lambda rec: rec.pop("inputs"), "no `inputs` list"),
+    (lambda rec: rec.update(inputs_sha256="abc"), "no `inputs_sha256`"),
 ])
-def test_every_assertion_shape_is_refused(text):
-    got = TD.derived_text_contradictions(_answers(rationale=text))
-    assert [r["claimed"] for r in got] == ["HARDMACRO"], text
-
-
-def test_a_derived_structured_field_naming_another_deliverable_is_refused():
-    doc = _answers(rationale="No die ceiling is stated.")
-    doc["answers"]["synthesis_area_budget"]["basis"] = {
-        "deliverable": "HARDMACRO"}
-    got = TD.derived_text_contradictions(doc)
-    assert [r["field"] for r in got] == [
-        "answers.synthesis_area_budget.basis.deliverable"]
+def test_each_missing_part_of_the_provenance_is_named(tmp_path, breakage,
+                                                        needle):
+    proj, doc = _regenerated(tmp_path)
+    assert TD.derived_answer_refusals(doc, proj) == []
+    breakage(doc["answer_provenance"]["synthesis_area_budget"])
+    got = TD.derived_answer_refusals(doc, proj)
+    assert [r["rule"] for r in got] == [NO_PROV], got
+    assert needle in got[0]["message"]
 
 
 # --------------------------------------------------------------------------- #
-# 2. a mention is not an assertion; the owner's own fields are the reference
+# 2. stale: the recorded attested value is not the owner's current one
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("text", [
+def test_a_recorded_deliverable_the_owner_no_longer_attests_is_stale(
+        tmp_path):
+    proj, doc = _regenerated(tmp_path)
+    doc["answer_provenance"]["synthesis_area_budget"][
+        "derived_from_attested"]["deliverable"] = "HARDMACRO"
+    got = TD.derived_answer_refusals(doc, proj, source=ANSWERS_REL)
+    assert [(r["rule"], r["depends_on"], r["recorded"], r["attested"])
+            for r in got] == [(STALE_RULE, "deliverable", "HARDMACRO", "DIE")]
+    assert "'HARDMACRO'" in got[0]["message"]
+    assert "'DIE'" in got[0]["message"]
+
+
+def test_an_owner_answer_that_changed_after_derivation_is_stale(tmp_path):
+    """The measured case, in the direction the owner moved: derived under one
+    attested value, the owner then attests the other."""
+    proj, doc = _regenerated(tmp_path, answers=_answers(
+        deliverable="HARDMACRO", rationale="stale"))
+    doc["answers"]["deliverable"] = "DIE"
+    got = TD.derived_answer_refusals(doc, proj)
+    assert [(r["rule"], r["recorded"], r["attested"]) for r in got] == [
+        (STALE_RULE, "HARDMACRO", "DIE")]
+
+
+def test_a_lost_owner_attestation_makes_the_derived_answer_stale(tmp_path):
+    proj, doc = _regenerated(tmp_path)
+    doc["answer_provenance"]["deliverable"]["answered_by"] = "agent"
+    got = TD.derived_answer_refusals(doc, proj)
+    assert [r["rule"] for r in got] == [STALE_RULE]
+    assert got[0]["attested"] is None
+
+
+def test_changed_inputs_make_the_derived_answer_stale(tmp_path):
+    proj, doc = _regenerated(tmp_path)
+    l7 = proj / "input" / "docs" / "L7_verification_plan.md"
+    l7.write_text(l7.read_text("utf-8").replace("1,300", "1,400"), "utf-8")
+    got = TD.derived_answer_refusals(doc, proj)
+    assert [r["rule"] for r in got] == [STALE_RULE]
+    assert "have changed since" in got[0]["message"]
+    # without a project the digest cannot be recomputed; the rest still holds
+    assert TD.derived_answer_refusals(doc) == []
+
+
+# --------------------------------------------------------------------------- #
+# 3. the verdict is the structure's; no sentence is read
+# --------------------------------------------------------------------------- #
+PROSE = [
+    # review_wave58 false FAILs of the prose gate (contrast wording)
+    "The owner chose the IC path (deliverable=DIE), not the IP path "
+    "(deliverable=HARDMACRO).",
+    "The IC path is taken instead of a HARDMACRO deliverable.",
+    "An earlier agent reading said deliverable=HARDMACRO; R-0915-95 overruled it.",
+    "If deliverable=HARDMACRO the pad fields are not applicable; here it is DIE.",
+    "Unlike a HARDMACRO deliverable, a DIE carries its own pad ring.",
+    # review_wave58 false PASSes of the prose gate (real claims)
+    "The design declares HARDMACRO as the deliverable.",
+    "The deliverable is a hard macro.",
+    "The design walks the IP path, so it takes no operator slot.",
+    "本設計交付物為 HARDMACRO。",
+    "delivered as a HARDMACRO",
+]
+
+
+@pytest.mark.parametrize("text", PROSE)
+def test_prose_decides_nothing(tmp_path, text):
+    proj, doc = _regenerated(tmp_path)
+    doc["answers"]["synthesis_area_budget"]["rationale"] = text
+    # current provenance: PASS whatever the sentence says ...
+    assert TD.derived_answer_refusals(doc) == [], text
+    # ... stale provenance: FAIL whatever the sentence says
+    doc["answer_provenance"]["synthesis_area_budget"][
+        "derived_from_attested"]["deliverable"] = "HARDMACRO"
+    assert [r["rule"] for r in TD.derived_answer_refusals(doc)] == [
+        STALE_RULE], text
+
+
+# --------------------------------------------------------------------------- #
+# 4. owner-attested fields are never gated as derived text
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("owner_text", [
     OWNER_RATIONALE,
-    "Declare answers.deliverable (DIE or HARDMACRO) with its provenance.",
-    "Allowed: deliverable = DIE or HARDMACRO.",
-    "deliverable_rationale: see the owner ruling on HARDMACRO vs DIE.",
-    "The deliverable is DIE; the die area is an outcome of the run.",
+    "DIE. R-0915-95: the agent's reading (deliverable=HARDMACRO) is "
+    "overruled; the IC path is taken.",
+    "DIE — the IC path, not a HARDMACRO deliverable.",
+    "IC path (DIE deliverable) vs IP path (HARDMACRO deliverable): the owner "
+    "chose the IC path.",
 ])
-def test_a_mention_or_a_consistent_claim_is_not_refused(text):
-    assert TD.derived_text_contradictions(_answers(rationale=text)) == []
+def test_the_owners_deliverable_rationale_is_never_gated(tmp_path,
+                                                          owner_text):
+    proj, doc = _regenerated(tmp_path)
+    doc["answers"]["deliverable_rationale"] = owner_text
+    assert TD.derived_answer_refusals(doc, proj) == []
+    del doc["answers"]["synthesis_area_budget"]
+    assert TD.derived_answer_refusals(doc, proj) == []
 
 
-def test_a_list_of_the_choices_asserts_nothing_either_way():
-    doc = _answers(deliverable="HARDMACRO",
-                   rationale="Allowed: deliverable = DIE or HARDMACRO.")
-    assert TD.derived_text_contradictions(doc) == []
+def test_an_owner_attested_area_answer_is_not_derived():
+    doc = _answers()
+    doc["answer_provenance"]["synthesis_area_budget"] = {
+        "answered_by": "owner", "citation": "owner ruling R-0000-X"}
+    assert TD.derived_answer_refusals(doc) == []
 
 
-def test_an_unattested_deliverable_has_nothing_to_contradict():
-    """Silence is not refused here; `owner_attestation_refusals` owns it."""
-    assert TD.derived_text_contradictions(_answers(owner=False)) == []
-
-
-def test_the_provenance_map_and_the_revision_log_are_not_derived_text():
-    doc = _answers(rationale="No die ceiling is stated.")
-    doc["answer_provenance"]["deliverable"]["citation"] += (
-        " It changed deliverable=HARDMACRO to DIE.")
-    doc[TD.REVISIONS_KEY] = [{"resolved_contradictions": [
-        {"sentence": "declares deliverable=HARDMACRO"}]}]
-    assert TD.derived_text_contradictions(doc) == []
+def test_an_unanswered_derived_key_is_not_gated():
+    doc = _answers()
+    doc["answers"]["synthesis_area_budget"] = "NOT_DETERMINED"
+    assert TD.derived_answer_refusals(doc) == []
 
 
 # --------------------------------------------------------------------------- #
-# 3. the producer regenerates the answer; the regenerated file passes
+# 5. the producer regenerates with provenance; the result passes
 # --------------------------------------------------------------------------- #
-def test_the_producer_replaces_the_stale_premise_with_the_die_basis(tmp_path):
+def _owner_fields(doc):
+    return (json.dumps(doc["answers"]["deliverable"]),
+            json.dumps(doc["answers"]["deliverable_rationale"],
+                       ensure_ascii=False),
+            json.dumps(doc["answer_provenance"]["deliverable"],
+                       ensure_ascii=False, sort_keys=True))
+
+
+def test_the_producer_writes_the_die_basis_with_provenance(tmp_path):
     proj = _project(tmp_path)
     before = _load(proj)
     assert _gen().main([str(proj)]) == 0
@@ -246,66 +346,68 @@ def test_the_producer_replaces_the_stale_premise_with_the_die_basis(tmp_path):
     text = budget["rationale"]
     assert STALE_SENTENCE_FRAGMENT not in text
     assert budget["status"] == "NOT_APPLICABLE"
-    # the ruling's DIE basis
-    assert "The deliverable is DIE" in text
-    assert "R-0915-95" in text
+    assert "The deliverable is DIE" in text and "R-0915-95" in text
     assert "pad-limited die, die = core + pad ring + power ring" in text
     assert "pad-ring perimeter when the pad count dominates" in text
     assert "NOT_APPLICABLE disposes of the die LIMIT only" in text
-    # the input's declines and the outcome statement, cited by line
     assert "input/docs/L1_product_metadata.md:7" in text
     assert "input/docs/L9_constraints_floorplan.md:3-4" in text
     assert "input/docs/L1_product_metadata.md:4" in text
-    # the std-cell gate still applies and is carried, row and all
     gate = budget["stdcell_area_gate"]
     assert [(g["source"], g["line"], g["value_um2"]) for g in gate] == [
         ("input/docs/L7_verification_plan.md", 15, 1300.0)]
-    assert "stdcell area" in gate[0]["row"]
-    assert "input/docs/L7_verification_plan.md:15" in text
-    assert "1,300 µm²" in text and "1,000 µm²" in text
-    # the baseline die-area figure is a measurement, not a gate
     assert "input/docs/L7_verification_plan.md:8 (4,000 µm²)" in text
-    # the owner's answer is never rewritten
-    assert after["answers"]["deliverable"] == before["answers"]["deliverable"]
-    assert (after["answer_provenance"]["deliverable"]
-            == before["answer_provenance"]["deliverable"])
-    assert (after["answers"]["deliverable_rationale"]
-            == before["answers"]["deliverable_rationale"])
-    # WHO answered, and why it changed
+    # the owner's fields: untouched
+    assert _owner_fields(after) == _owner_fields(before)
+    # the structure the gate reads
     prov = after["answer_provenance"]["synthesis_area_budget"]
     assert prov["answered_by"] == "program"
     assert prov["producer"] == "area_budget_basis_gen"
+    assert prov["derived_from_attested"] == {"deliverable": "DIE"}
+    assert prov["inputs"] == sorted(
+        f"input/docs/{n}" for n in ("L1_product_metadata.md",
+                                    "L7_verification_plan.md",
+                                    "L9_constraints_floorplan.md"))
+    assert prov["inputs_sha256"] == TD.derived_inputs_sha256(
+        proj, prov["inputs"])
     rev = after[TD.REVISIONS_KEY]
     assert len(rev) == 1
     assert rev[0]["rulings"] == ["R-0929-DELIVERABLE-CONSISTENCY",
+                                 "R-0929-DELIVERABLE-CONSISTENCY-2",
                                  "R-0915-95"]
-    assert "contradicted the owner-attested deliverable=DIE" in \
-        rev[0]["reason"]
-    assert [c["claimed"] for c in rev[0]["resolved_contradictions"]] == [
-        "HARDMACRO"]
-    assert STALE_SENTENCE_FRAGMENT in \
-        rev[0]["resolved_contradictions"][0]["sentence"]
-    assert TD.derived_text_contradictions(after, source=ANSWERS_REL) == []
+    assert "carried no producer provenance" in rev[0]["reason"]
+    assert rev[0]["previous"]["provenance"] is None
+    assert TD.derived_answer_refusals(after, proj, source=ANSWERS_REL) == []
 
 
 def test_the_regenerated_answers_pass_the_checker(tmp_path):
-    proj = _project(tmp_path)
-    assert _gen().main([str(proj)]) == 0
+    proj, _ = _regenerated(tmp_path)
     _declare(proj)
     res = CHECK.evaluate(proj)
-    assert [r for r in res["refusals"] if r["rule"] == RULE] == []
+    assert _derived_rules(res) == []
     assert res["verdict"] == "PASS", res["refusals"]
     decl = json.loads((proj / TD.DECLARATION_REL).read_text("utf-8"))
-    assert decl["synthesis_area_budget"]["stdcell_area_gate"]
     assert TD.area_budget_resolution(decl)["status"] == "NOT_APPLICABLE"
 
 
 def test_a_second_run_writes_nothing(tmp_path):
-    proj = _project(tmp_path)
-    assert _gen().main([str(proj)]) == 0
+    proj, _ = _regenerated(tmp_path)
     first = (proj / ANSWERS_REL).read_bytes()
     assert _gen().main([str(proj)]) == 0
     assert (proj / ANSWERS_REL).read_bytes() == first
+
+
+def test_a_stale_record_is_regenerated_with_its_reason(tmp_path):
+    proj, doc = _regenerated(tmp_path)
+    doc["answer_provenance"]["synthesis_area_budget"][
+        "derived_from_attested"]["deliverable"] = "HARDMACRO"
+    (proj / ANSWERS_REL).write_text(json.dumps(doc, ensure_ascii=False),
+                                    "utf-8")
+    assert _gen().main([str(proj)]) == 0
+    after = _load(proj)
+    assert "rendered from deliverable='HARDMACRO'" in \
+        after[TD.REVISIONS_KEY][-1]["reason"]
+    assert TD.derived_answer_refusals(after, proj) == []
 
 
 def test_out_writes_a_copy_and_leaves_the_source(tmp_path):
@@ -315,43 +417,65 @@ def test_out_writes_a_copy_and_leaves_the_source(tmp_path):
     assert _gen().main([str(proj), "--out", str(out)]) == 0
     assert (proj / ANSWERS_REL).read_bytes() == src
     regen = json.loads(out.read_text("utf-8"))
-    assert STALE_SENTENCE_FRAGMENT not in \
-        regen["answers"]["synthesis_area_budget"]["rationale"]
-    assert TD.derived_text_contradictions(regen) == []
+    assert TD.derived_answer_refusals(regen, proj) == []
 
 
-# --------------------------------------------------------------------------- #
-# 4. the premise follows the attested value
-# --------------------------------------------------------------------------- #
 def test_a_hardmacro_attestation_keeps_the_hardmacro_meaning(tmp_path):
-    proj = _project(tmp_path, answers=_answers(
-        deliverable="HARDMACRO",
-        rationale="The design declares deliverable=DIE."))
-    assert TD.derived_text_contradictions(_load(proj))  # stale the other way
-    assert _gen().main([str(proj)]) == 0
-    after = _load(proj)
+    proj, after = _regenerated(tmp_path, answers=_answers(
+        deliverable="HARDMACRO", rationale="stale"))
     text = after["answers"]["synthesis_area_budget"]["rationale"]
     assert "The deliverable is HARDMACRO" in text
     assert "takes no operator slot whose geometry could supply a ceiling" in \
         text
     assert "pad ring + power ring" not in text
-    assert after["answers"]["synthesis_area_budget"]["stdcell_area_gate"]
-    assert TD.derived_text_contradictions(after) == []
+    assert after["answer_provenance"]["synthesis_area_budget"][
+        "derived_from_attested"] == {"deliverable": "HARDMACRO"}
+    assert TD.derived_answer_refusals(after, proj) == []
+
+
+L9_FIXED = """# L9 Constraints
+
+### 9.2.3 Floorplan
+| Item | Value |
+|---|---|
+| Core die (no seal ring) | 300 × 200 µm |
+"""
 
 
 @pytest.mark.parametrize("deliverable", ["DIE", "HARDMACRO"])
-def test_the_premise_names_exactly_the_attested_deliverable(deliverable):
+def test_a_fixed_die_is_a_limit_and_never_an_outcome(tmp_path, deliverable):
+    """R-0929-DELIVERABLE-CONSISTENCY-2 / review_wave58 MAJOR 4: an input that
+    FIXES the die (and declines nothing) gives LIMIT with that rectangle, and
+    the rationale carries no outcome / pad-limited premise."""
+    proj = _project(tmp_path, answers=_answers(deliverable=deliverable,
+                                               rationale="old"), l9=L9_FIXED)
+    for name in ("L1_product_metadata.md",):
+        (proj / "input" / "docs" / name).write_text("# L1\n", "utf-8")
+    assert _gen().main([str(proj)]) == 0
+    budget = _load(proj)["answers"]["synthesis_area_budget"]
+    assert budget["status"] == "LIMIT"
+    assert budget["max_die_dimensions_um"] == [300.0, 200.0]
+    text = budget["rationale"]
+    assert "300x200" in text
+    for forbidden in ("OUTCOME", "outcome", "pad-limited",
+                      "sized by the pad-ring perimeter", "NOT_APPLICABLE"):
+        assert forbidden not in text, forbidden
+    assert f"The deliverable is {deliverable}" in text
+    assert TD.derived_answer_refusals(_load(proj), proj) == []
+
+
+@pytest.mark.parametrize("deliverable", ["DIE", "HARDMACRO"])
+def test_the_premise_follows_the_disposition(deliverable):
     gen = _gen()
-    text = gen.premise(deliverable, "R-0915-95")
-    doc = _answers(deliverable=deliverable, rationale=text)
-    assert TD.derived_text_contradictions(doc) == []
-    other = "HARDMACRO" if deliverable == "DIE" else "DIE"
-    assert TD.derived_text_contradictions(
-        _answers(deliverable=other, rationale=text))
+    declined = gen.premise(deliverable, "R-0915-95")
+    fixed = gen.premise(deliverable, "R-0915-95", "300x200")
+    assert f"The deliverable is {deliverable}" in declined
+    assert "outcome" in declined.lower()
+    assert "outcome" not in fixed.lower() and "300x200" in fixed
 
 
 # --------------------------------------------------------------------------- #
-# 5. refusals write nothing
+# 6. refusals write nothing
 # --------------------------------------------------------------------------- #
 def test_no_owner_attestation_no_premise(tmp_path):
     proj = _project(tmp_path, answers=_answers(owner=False))
@@ -377,9 +501,17 @@ def test_an_input_that_states_nothing_stays_unanswered(tmp_path):
     assert (proj / ANSWERS_REL).read_bytes() == before
 
 
+def test_the_gate_reads_no_prose():
+    """The structural rule, stated where the author sees it: the gate's source
+    carries no regular expression over a choice value and no sentence split."""
+    import inspect
+    src = inspect.getsource(TD.derived_answer_refusals)
+    for token in ("sentence_scope", "finditer", "HARDMACRO", "rationale"):
+        assert token not in src, token
+
+
 def test_the_producer_names_no_design():
-    """chip-AGNOSTIC, stated where the author sees it: no literal design or
-    technology token in the producer's logic."""
+    """chip-AGNOSTIC: no literal design or technology token in the producer."""
     src = (_PROGRAMS / "area_budget_basis_gen.py").read_text("utf-8").lower()
     for token in ("sky130", "gf180", "spm", "subservient", "openmpw"):
         assert token not in src, token

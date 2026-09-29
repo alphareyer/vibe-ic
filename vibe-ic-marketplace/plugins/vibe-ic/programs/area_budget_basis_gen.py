@@ -23,11 +23,13 @@ answer is REGENERATED — never hand-edited — from two inputs:
 
 THE PREMISE IS READ, NEVER TYPED
 ================================
-The deliverable sentence is rendered from the attested value. For a DIE it
-states the ruling's basis: the input declines a die size, the die area is an
-OUTCOME of the run (a pad-limited die: die = core + pad ring + power ring,
-sized by the pad-ring perimeter when the pad count dominates), and the input's
-std-cell area gate still applies. For a HARDMACRO it keeps the earlier meaning
+The deliverable sentence is rendered from the attested value and from the
+input's die disposition. For a DIE whose input DECLINES a die size it states
+the ruling's basis: the die area is an OUTCOME of the run (a pad-limited die:
+die = core + pad ring + power ring, sized by the pad-ring perimeter when the
+pad count dominates), and the input's std-cell area gate still applies. For an
+input that FIXES the die the status is LIMIT with that rectangle, and nothing
+about the die is called an outcome (R-0929-DELIVERABLE-CONSISTENCY-2). For a HARDMACRO it keeps the earlier meaning
 (a macro takes no operator slot whose geometry could supply a ceiling).
 `NOT_APPLICABLE` disposes of the die LIMIT only; the std-cell gate is carried
 in `stdcell_area_gate`, with its file, line and row.
@@ -37,12 +39,18 @@ WHAT IS WRITTEN
   answers.synthesis_area_budget        status, rationale, stdcell_area_gate,
                                        basis (every citation, structured)
   answer_provenance.synthesis_area_budget
-                                       answered_by=program, producer, inputs
+                                       answered_by=program, producer,
+                                       derived_from_attested {deliverable:
+                                       <the attested value>}, inputs (every
+                                       document read) and inputs_sha256 — the
+                                       STRUCTURE the step-0.5ic gate compares
+                                       with the owner's current answer
+                                       (R-0929-DELIVERABLE-CONSISTENCY-2)
   answer_revisions[]                   one record per change: reason, the
                                        rulings followed (this ruling and the
                                        one cited by the owner's attestation),
-                                       the previous text's sha256 and every
-                                       contradicting sentence it replaced
+                                       the previous text's sha256 and the
+                                       previous provenance record
 
 Nothing else in the file changes, except one line appended to a `_comment`
 that says nothing in the file is derived by a program. A second run with the
@@ -203,10 +211,20 @@ def _ruling_ref(citation: Optional[str]) -> str:
     return f"'{c[:80]}'" if c else "no citation"
 
 
-def premise(deliverable: str, ref: str) -> str:
-    """The deliverable sentence, rendered FROM the attested value."""
+def premise(deliverable: str, ref: str, fixed: Optional[str] = None) -> str:
+    """The deliverable sentence, rendered FROM the attested value AND the
+    input's die disposition. When the input FIXES the die (`fixed` = "WxH"),
+    that rectangle is the LIMIT and nothing about the die is an outcome of
+    the run; the pad-limited outcome basis is for an input that declines a
+    die size (R-0929-DELIVERABLE-CONSISTENCY-2)."""
     attested = (f"The deliverable is {deliverable}, attested by the owner "
                 f"(`{TD.PROVENANCE_KEY}.deliverable`, {ref})")
+    if fixed:
+        if deliverable == TD.DELIVERABLE_DIE:
+            return (attested + f", so the die is the input's fixed {fixed} "
+                    "um: core = die minus the pad ring and the power ring.")
+        return (attested + f", so the macro outline is the input's fixed "
+                f"{fixed} um, and the macro takes no operator slot.")
     if deliverable == TD.DELIVERABLE_DIE:
         return (attested + ", so the die area is an OUTCOME of this run, not "
                 "a ceiling the input set: a pad-limited die, die = core + pad "
@@ -272,7 +290,7 @@ def derive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
         parts.append(f"The input fixes the die at {fixed[0]} um "
                      f"({fixed[1]}); that rectangle is the LIMIT carried "
                      "here.")
-        parts.append(premise(deliverable, ref))
+        parts.append(premise(deliverable, ref, fixed[0]))
     else:
         if declines:
             parts.append("The input declines a die size: "
@@ -313,10 +331,17 @@ def derive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
         {k: r[k] for k in ("source", "line", "row", "value_um2")}
         for r in gates]
     budget["basis"] = basis
+    # EVERY document the derivation read, not only the ones it cited: a
+    # decline or a gate added to any of them changes the answer, so each is
+    # part of what the answer was derived from.
+    inputs = sorted({rel for rel, _p, _t in docs}
+                    | {rel for rel, _t in ASB.l7_docs_of(project)})
+    digest = TD.derived_inputs_sha256(project, inputs)
+    if digest is None:                               # pragma: no cover
+        return {"status": "REFUSED", "rc": 1, "basis": basis,
+                "reason": f"an input it read cannot be re-read: {inputs}"}
     return {"status": "WRITE", "rc": 0, "budget": budget,
-            "inputs": sorted({r["source"] for r in declines + outcomes}
-                             | {r["source"] for r in gates}
-                             | ({fixed[1]} if fixed else set())),
+            "inputs": inputs, "inputs_sha256": digest,
             "ref": ref, "attestation": att, "deliverable": deliverable}
 
 
@@ -333,21 +358,35 @@ def apply(doc: Dict[str, Any], got: Dict[str, Any],
     the revision log and (once) the `_comment` disclosure change."""
     old = (doc.get("answers") or {}).get(KEY)
     new = copy.deepcopy(doc)
-    if old == got["budget"]:
-        return new, {}
-    resolved = [r for r in TD.derived_text_contradictions(doc)
-                if r["field"].startswith(f"answers.{KEY}")]
     deliverable, ref = got["deliverable"], got["ref"]
-    reason = (f"the derived premise contradicted the owner-attested "
-              f"deliverable={deliverable} ({ref}): {len(resolved)} "
-              f"sentence(s) asserted another deliverable; regenerated from "
-              f"the design's documents with the attested premise"
-              if resolved else
-              f"regenerated from the design's documents and the "
-              f"owner-attested deliverable={deliverable} ({ref})")
+    old_prov_map = doc.get(TD.PROVENANCE_KEY)
+    old_prov = (old_prov_map.get(KEY) if isinstance(old_prov_map, dict)
+                else None)
+    prov_rec = {"answered_by": TD.ANSWERED_BY_PROGRAM_VALUE,
+                "producer": PROGRAM,
+                TD.DERIVED_FROM_ATTESTED: {"deliverable": deliverable},
+                TD.DERIVED_INPUTS: got["inputs"],
+                TD.DERIVED_INPUTS_SHA256: got["inputs_sha256"]}
+    if old == got["budget"] and old_prov == prov_rec:
+        return new, {}
+    # WHY it changed, from the recorded structure only (never its prose).
+    recorded = (old_prov.get(TD.DERIVED_FROM_ATTESTED)
+                if isinstance(old_prov, dict) else None)
+    if not isinstance(recorded, dict):
+        reason = (f"the previous answer carried no producer provenance, so "
+                  f"nothing showed which deliverable it was rendered from; "
+                  f"regenerated from the design's documents and the "
+                  f"owner-attested deliverable={deliverable} ({ref})")
+    elif recorded.get("deliverable") != deliverable:
+        reason = (f"the previous answer was rendered from "
+                  f"deliverable={recorded.get('deliverable')!r}; the owner "
+                  f"attests deliverable={deliverable} ({ref}); regenerated")
+    else:
+        reason = (f"the design's documents changed; regenerated from them and "
+                  f"the owner-attested deliverable={deliverable} ({ref})")
     if extra_reason.strip():
         reason += f". {extra_reason.strip()}"
-    rulings = [TD.RULING_DERIVED_FOLLOWS_OWNER]
+    rulings = [TD.RULING_DERIVED_FOLLOWS_OWNER, TD.RULING_DERIVED_STRUCTURAL]
     if _RULING_RE.fullmatch(ref) and ref not in rulings:
         rulings.append(ref)
     new["answers"][KEY] = got["budget"]
@@ -355,10 +394,7 @@ def apply(doc: Dict[str, Any], got: Dict[str, Any],
     if not isinstance(prov, dict):
         prov = {}
         new[TD.PROVENANCE_KEY] = prov
-    prov[KEY] = {"answered_by": TD.ANSWERED_BY_PROGRAM_VALUE,
-                 "producer": PROGRAM,
-                 "follows": ["deliverable"],
-                 "inputs": got["inputs"]}
+    prov[KEY] = prov_rec
     revision = {
         "field": f"answers.{KEY}",
         "producer": PROGRAM,
@@ -371,10 +407,8 @@ def apply(doc: Dict[str, Any], got: Dict[str, Any],
         "previous": {
             "status": old.get("status") if isinstance(old, dict) else old,
             "rationale_sha256": _sha(old.get("rationale"))
-            if isinstance(old, dict) else None},
-        "resolved_contradictions": [
-            {"sentence": r["sentence"], "claimed": r["claimed"]}
-            for r in resolved],
+            if isinstance(old, dict) else None,
+            "provenance": old_prov if isinstance(old_prov, dict) else None},
     }
     log = new.get(TD.REVISIONS_KEY)
     if not isinstance(log, list):
@@ -430,10 +464,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     rc = got["rc"]
     if got["status"] == "WRITE":
         new, revision = apply(doc, got, args.reason)
-        own = [r for r in TD.derived_text_contradictions(new)
-               if r["field"].startswith(f"answers.{KEY}")]
+        own = [r for r in TD.derived_answer_refusals(new, project)
+               if r["field"] == f"answers.{KEY}"]
         if own:                                      # pragma: no cover
-            print(f"REFUSED: {PROGRAM} rendered a contradicting sentence: "
+            print(f"REFUSED: {PROGRAM} wrote an answer its own gate refuses: "
                   f"{own[0]['message']}", file=sys.stderr)
             return 1
         out = args.out or src
@@ -447,7 +481,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         report.update({"status": "WRITTEN" if revision else "UNCHANGED",
                        "out": str(out), "budget": got["budget"],
                        "revision": revision or None})
-        others = TD.derived_text_contradictions(new)
+        others = TD.derived_answer_refusals(new, project)
         for r in others:
             print(f"  NOTE (not this program's field): {r['message']}",
                   file=sys.stderr)

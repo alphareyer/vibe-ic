@@ -246,9 +246,7 @@ ANSWERED_BY_AGENT_VALUE = "agent"
 ANSWERED_BY_PROGRAM_VALUE = "program"
 
 #: The change log of derived answers: one record per regeneration, carrying
-#: its reason and the rulings it follows. It is a HISTORY, not an answer, so
-#: `derived_text_contradictions` does not read it (a record of a resolved
-#: contradiction quotes the sentence it resolved).
+#: its reason and the rulings it follows. It is a HISTORY, not an answer.
 REVISIONS_KEY = "answer_revisions"
 
 #: What `attestation_of` reports for a question nobody attributed. It is this
@@ -1311,169 +1309,183 @@ def owner_attestation_refusals(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------- #
-# DERIVED TEXT FOLLOWS THE OWNER (R-0929-DELIVERABLE-CONSISTENCY, owner go
-# 2026-09-29)
+# DERIVED ANSWERS FOLLOW THE OWNER — STRUCTURALLY
+# (R-0929-DELIVERABLE-CONSISTENCY, owner go 2026-09-29;
+#  R-0929-DELIVERABLE-CONSISTENCY-2, root 2026-09-29)
 #
 # MEASURED: two designs' answers files carry the owner-attested
 # `deliverable = DIE` (R-0915-95) beside a DERIVED `synthesis_area_budget`
 # rationale, written while the deliverable was still an agent's HARDMACRO, that
 # says "declares deliverable=HARDMACRO". The owner changed the answer; nothing
-# re-derived the text that depended on it, and no check compared the two, so
-# the file read as a design declaring both routes at once.
+# re-derived the text that depended on it.
 #
-# The owner's field is authoritative and is never rewritten. A derived text
-# that asserts a different value for an owner-attested question is refused
-# here, by sentence and by field, and the remedy is its producer.
+# The first gate read that PROSE for "deliverable=X" and was wrong both ways
+# (review_wave58 / DELIVC): owner contrast wording ("not the IP path",
+# "instead of a HARDMACRO deliverable", the owner's own deliverable_rationale)
+# FAILed, and real claims ("hard macro", "交付物為 HARDMACRO", "delivered as a
+# hardmacro") PASSed. Prose has no grammar to decide it. So the staleness is
+# decided from STRUCTURE, never from the text: a derived answer is written only
+# by its producer, and records WHICH owner-attested values it was rendered
+# from. When an owner answer moves, every derived answer rendered from the old
+# value is stale by a comparison of two values, whatever its sentences say.
 # --------------------------------------------------------------------------- #
-RULE_DERIVED_CONTRADICTS_OWNER = "DERIVED_TEXT_CONTRADICTS_OWNER_ANSWER"
+RULE_DERIVED_NO_PROVENANCE = "DERIVED_ANSWER_WITHOUT_PROVENANCE"
+RULE_DERIVED_STALE = "DERIVED_ANSWER_STALE"
 RULING_DERIVED_FOLLOWS_OWNER = "R-0929-DELIVERABLE-CONSISTENCY"
+RULING_DERIVED_STRUCTURAL = "R-0929-DELIVERABLE-CONSISTENCY-2"
 
-#: The program that regenerates each derived answer. The refusal names it, so
-#: the remedy is a command and never a hand edit.
-DERIVED_PRODUCERS: Dict[str, str] = {
-    SYNTHESIS_AREA_BUDGET_KEY: "area_budget_basis_gen",
+#: The provenance fields a derived answer's `answer_provenance.<key>` record
+#: must carry, besides `answered_by: program` and `producer`.
+DERIVED_FROM_ATTESTED = "derived_from_attested"
+DERIVED_INPUTS = "inputs"
+DERIVED_INPUTS_SHA256 = "inputs_sha256"
+
+#: Every DERIVED answer: the one program that writes it, and the
+#: owner-attested answers it is rendered from. An answer joins this map when a
+#: producer for it exists; the gate below is the reason to write one.
+DERIVED_ANSWERS: Dict[str, Tuple[str, Tuple[str, ...]]] = {
+    SYNTHESIS_AREA_BUDGET_KEY: ("area_budget_basis_gen", ("deliverable",)),
 }
-
-#: What asserts a value: `=`, `:`, `is` or the two zh copulas (present
-#: tense only: a history belongs in `REVISIONS_KEY`, not in an answer). The
-#: field name is bounded by non-word characters, so `deliverable_rationale:`
-#: does not assert anything about `deliverable`.
-_ASSERT_VERBS = r"(?:==|=|:|\bis\b|為|是)"
-_QUOTE_CHARS = r"[`'\"*]*"
+DERIVED_PRODUCERS: Dict[str, str] = {k: v[0] for k, v in DERIVED_ANSWERS.items()}
 
 
-def _assertion_patterns(key: str, choices: Tuple[str, ...]):
-    alts = "|".join(re.escape(c) for c in choices)
-    k = re.escape(key)
-    forward = re.compile(
-        rf"(?<!\w){_QUOTE_CHARS}{k}{_QUOTE_CHARS}(?!\w)\s*{_ASSERT_VERBS}\s*"
-        rf"{_QUOTE_CHARS}(?:an?\s+)?{_QUOTE_CHARS}({alts})(?!\w)",
-        re.IGNORECASE)
-    backward = re.compile(
-        rf"(?<!\w)({alts}){_QUOTE_CHARS}\s+{k}(?!\w)", re.IGNORECASE)
-    # "DIE or HARDMACRO", "DIE/HARDMACRO": a list of the choices, not a claim.
-    listing = re.compile(rf"^{_QUOTE_CHARS}\s*(?:or|/|\||,|或)\s*"
-                         rf"{_QUOTE_CHARS}(?:{alts})(?!\w)", re.IGNORECASE)
-    return forward, backward, listing
+def derived_inputs_sha256(project: Path, rels: List[str]) -> Optional[str]:
+    """One digest over the named project-relative inputs (path and bytes), in
+    sorted order. None when a named input cannot be read: a digest over the
+    files that happen to be left is not a digest of what was derived from."""
+    import hashlib
+    h = hashlib.sha256()
+    for rel in sorted(set(rels)):
+        try:
+            data = (Path(project) / rel).read_bytes()
+        except OSError:
+            return None
+        r = rel.encode("utf-8")
+        h.update(len(r).to_bytes(8, "big"))
+        h.update(r)
+        h.update(len(data).to_bytes(8, "big"))
+        h.update(data)
+    return h.hexdigest()
 
 
-def _derived_strings(node: Any, path: str, skip: set):
-    """(json path, string) for every string under ``node``, minus ``skip``."""
-    if path in skip:
-        return
-    if isinstance(node, str):
-        yield path, node
-    elif isinstance(node, dict):
-        for k, v in node.items():
-            yield from _derived_strings(v, f"{path}.{k}" if path else str(k),
-                                        skip)
-    elif isinstance(node, list):
-        for i, v in enumerate(node):
-            yield from _derived_strings(v, f"{path}[{i}]", skip)
+def _derived_present(value: Any) -> bool:
+    if isinstance(value, dict):
+        return is_answered(value.get("status")) or any(
+            is_answered(v) for k, v in value.items() if k != "status")
+    return is_answered(value)
 
 
-def _structured_claims(node: Any, path: str, key: str, skip: set):
-    """(json path, value) for every DERIVED mapping entry named ``key``."""
-    if path in skip:
-        return
-    if isinstance(node, dict):
-        for k, v in node.items():
-            sub = f"{path}.{k}" if path else str(k)
-            if k == key and isinstance(v, str) and sub not in skip:
-                yield sub, v
-            yield from _structured_claims(v, sub, key, skip)
-    elif isinstance(node, list):
-        for i, v in enumerate(node):
-            yield from _structured_claims(v, f"{path}[{i}]", key, skip)
+def derived_answer_refusals(doc: Any, project: Optional[Path] = None,
+                            source: str = "") -> List[Dict[str, Any]]:
+    """Refuse every DERIVED answer that cannot show it follows the owner.
 
+    Structural, never textual: no sentence of any field is read. For each
+    answer in `DERIVED_ANSWERS` that is present and is not itself
+    owner-attested (an owner answer is the reference, never derived text):
 
-def derived_text_contradictions(doc: Any, source: str = ""
-                                ) -> List[Dict[str, Any]]:
-    """Refuse every DERIVED statement that contradicts an OWNER-ATTESTED answer.
+      * `DERIVED_ANSWER_WITHOUT_PROVENANCE` — its `answer_provenance` record
+        does not say `answered_by: program`, does not name its registered
+        producer, or lacks `derived_from_attested` (covering every owner
+        answer it depends on), `inputs` or `inputs_sha256`;
+      * `DERIVED_ANSWER_STALE` — a value in `derived_from_attested` differs
+        from the owner's current attested answer (both named), that answer is
+        no longer owner-attested, or (with `project`) the recorded inputs no
+        longer hash to `inputs_sha256`.
 
-    Owner-attested = an owner-only question (`OWNER_ANSWERED`) whose answer is
-    believed by `attestation_of` (the owner, with a citation). Derived = every
-    other string in the document (either shape: the design's answers file or
-    the generated declaration), except the provenance map (WHO answered), the
-    revision log (a history, which quotes what it resolved) and the attested
-    answers themselves. Two shapes of claim are read:
-
-      * prose that ASSERTS a value — ``deliverable=HARDMACRO``, ``the
-        deliverable is a HARDMACRO``, ``a HARDMACRO deliverable`` — naming a
-        choice other than the attested one;
-      * a derived mapping entry named after the question (``deliverable:
-        HARDMACRO`` nested anywhere outside ``answers``) with such a value.
-
-    A MENTION is not an assertion: "not the IP path (a HARDMACRO whose ...)"
-    and "earlier rationales argued HARDMACRO" name the value without assigning
-    it, and a list of the choices ("DIE or HARDMACRO") assigns nothing.
-
-    Each refusal names the file, the field path, the sentence, the claimed and
-    the attested value, and the producer that regenerates the field. Nothing
-    here rewrites anything: the owner's answer is the reference, not a
-    candidate for correction.
+    The remedy is always the producer, never a hand edit of the derived answer
+    and never a rewrite of the owner's.
     """
     out: List[Dict[str, Any]] = []
     if not isinstance(doc, dict) or not isinstance(doc.get("answers"), dict):
         return out
-    from _prose_polarity import sentence_scope
     where = f"{source}: " if source else ""
-    for key in OWNER_ANSWERED:
-        q = question(key)
-        if q is None or not q.choices:
+    prov_map = doc.get(PROVENANCE_KEY)
+    prov_map = prov_map if isinstance(prov_map, dict) else {}
+    for key, (producer, depends) in DERIVED_ANSWERS.items():
+        # Where `answer` reads it: a declaration carries the extra keys at
+        # its top level, the design's answers file under `answers`.
+        if key in EXTRA_KEYS and key in doc:
+            value, field_path = doc.get(key), key
+        else:
+            value, field_path = doc["answers"].get(key), f"answers.{key}"
+        if not _derived_present(value):
             continue
-        attested = answer(doc, key)
-        if not is_answered(attested) or attested not in q.choices:
+        if attestation_of(doc, key)["declares"]:
             continue
-        att = attestation_of(doc, key)
-        others = tuple(c for c in q.choices if c != attested)
-        if not others:
-            continue
-        skip = {PROVENANCE_KEY, REVISIONS_KEY, f"answers.{key}", "schema"}
-        forward, backward, listing = _assertion_patterns(key, q.choices)
-        hits: List[Tuple[str, str, str]] = []
-        for path, text in _derived_strings(doc, "", skip):
-            for rx in (forward, backward):
-                for m in rx.finditer(text):
-                    claimed = m.group(1).upper()
-                    if claimed == attested or claimed not in others:
-                        continue
-                    if rx is forward and listing.match(text[m.end():]):
-                        continue
-                    lo, hi = sentence_scope(text, m.start(), m.end(),
-                                            before=1200, after=1200,
-                                            extra_breaks=("。", "；"))
-                    hits.append((path, claimed, text[lo:hi].strip()))
-        for path, value in _structured_claims(doc, "", key, skip):
-            claimed = value.strip().upper()
-            if claimed in others:
-                hits.append((path, claimed, f"{key}={value.strip()}"))
-        seen = set()
-        for path, claimed, sentence in hits:
-            if (path, sentence) in seen:
-                continue
-            seen.add((path, sentence))
-            parts = path.split(".")
-            field_key = parts[1] if parts[0] == "answers" and len(parts) > 1 \
-                else parts[0]
-            field_key = field_key.split("[", 1)[0]
-            producer = DERIVED_PRODUCERS.get(field_key)
-            remedy = (f"regenerate it with its producer: `python3 "
-                      f"programs/{producer}.py <project>`" if producer else
-                      f"regenerate `{field_key}` from its source with the "
-                      f"attested premise")
+        remedy = (f"Remedy: regenerate it with `python3 programs/{producer}.py "
+                  f"<project>`; never hand-edit it, and never rewrite the "
+                  f"owner's answers ({RULING_DERIVED_STRUCTURAL}).")
+        rec = prov_map.get(key)
+        missing: List[str] = []
+        if not isinstance(rec, dict):
+            missing.append(f"no `{PROVENANCE_KEY}.{key}` record")
+            rec = {}
+        else:
+            if rec.get("answered_by") != ANSWERED_BY_PROGRAM_VALUE:
+                missing.append(f"answered_by is {rec.get('answered_by')!r}, "
+                               f"not {ANSWERED_BY_PROGRAM_VALUE!r}")
+            if rec.get("producer") != producer:
+                missing.append(f"producer is {rec.get('producer')!r}, not "
+                               f"{producer!r}")
+            dfa = rec.get(DERIVED_FROM_ATTESTED)
+            if not isinstance(dfa, dict) or not dfa:
+                missing.append(f"no `{DERIVED_FROM_ATTESTED}` mapping")
+            else:
+                for dep in depends:
+                    if dep not in dfa:
+                        missing.append(f"`{DERIVED_FROM_ATTESTED}` omits "
+                                       f"`{dep}`")
+            ins = rec.get(DERIVED_INPUTS)
+            if not (isinstance(ins, list) and ins
+                    and all(isinstance(x, str) and x for x in ins)):
+                missing.append(f"no `{DERIVED_INPUTS}` list")
+            sha = rec.get(DERIVED_INPUTS_SHA256)
+            if not (isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha)):
+                missing.append(f"no `{DERIVED_INPUTS_SHA256}`")
+        if missing:
             out.append(_refusal(
-                RULE_DERIVED_CONTRADICTS_OWNER,
-                f"{where}derived text at `{path}` asserts {key}={claimed} "
-                f"-- sentence: \"{sentence}\" -- but the owner attested "
-                f"{key}={attested} (`{PROVENANCE_KEY}.{key}`: "
-                f"{(att['citation'] or '')[:160]}). Derived text follows the "
-                f"owner's answer, never the reverse "
-                f"({RULING_DERIVED_FOLLOWS_OWNER}). Remedy: {remedy}; never "
-                f"hand-edit the derived text, and never rewrite the owner's "
-                f"`{key}`.",
-                key=key, attested=attested, claimed=claimed, field=path,
-                sentence=sentence, producer=producer, path=source or None))
+                RULE_DERIVED_NO_PROVENANCE,
+                f"{where}derived answer `{field_path}` carries no producer "
+                f"provenance ({'; '.join(missing)}), so nothing shows which "
+                f"owner-attested answers it was rendered from. {remedy}",
+                key=key, field=field_path, producer=producer,
+                missing=missing, path=source or None))
+            continue
+        for dep, recorded in sorted(rec[DERIVED_FROM_ATTESTED].items()):
+            att = attestation_of(doc, dep)
+            current = answer(doc, dep)
+            if not att["declares"]:
+                out.append(_refusal(
+                    RULE_DERIVED_STALE,
+                    f"{where}derived answer `{field_path}` was rendered from "
+                    f"owner-attested {dep}={recorded!r}, but `{dep}` is not "
+                    f"owner-attested now ({att['why_not']}). {remedy}",
+                    key=key, field=field_path, producer=producer,
+                    depends_on=dep, recorded=recorded, attested=None,
+                    path=source or None))
+            elif current != recorded:
+                out.append(_refusal(
+                    RULE_DERIVED_STALE,
+                    f"{where}derived answer `{field_path}` was rendered from "
+                    f"{dep}={recorded!r}, but the owner attests "
+                    f"{dep}={current!r} (`{PROVENANCE_KEY}.{dep}`: "
+                    f"{(att['citation'] or '')[:160]}). {remedy}",
+                    key=key, field=field_path, producer=producer,
+                    depends_on=dep, recorded=recorded, attested=current,
+                    path=source or None))
+        if project is not None:
+            now = derived_inputs_sha256(Path(project), rec[DERIVED_INPUTS])
+            if now != rec[DERIVED_INPUTS_SHA256]:
+                why = ("a recorded input cannot be read" if now is None else
+                       f"they hash to {now[:12]}, not the recorded "
+                       f"{rec[DERIVED_INPUTS_SHA256][:12]}")
+                out.append(_refusal(
+                    RULE_DERIVED_STALE,
+                    f"{where}derived answer `{field_path}` was rendered from "
+                    f"inputs {rec[DERIVED_INPUTS]} that have changed since "
+                    f"({why}). {remedy}",
+                    key=key, field=field_path, producer=producer,
+                    path=source or None))
     return out
 
 
