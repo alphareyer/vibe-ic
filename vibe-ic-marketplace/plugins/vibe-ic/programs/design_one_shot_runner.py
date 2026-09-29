@@ -22323,6 +22323,7 @@ def _lec_eqy_arm(project: Path, top_name: str, gate_netlist: str,
     netlist = Path(gate_netlist)
     if not netlist.is_absolute():
         netlist = project / netlist
+    handoff_doc = None
     try:
         switch_path = project / "phase3/librelane_switch.json"
         switch = _llc._load(switch_path) if switch_path.is_file() else {}
@@ -22356,23 +22357,29 @@ def _lec_eqy_arm(project: Path, top_name: str, gate_netlist: str,
                               std_cell_library=std_cell_library)
         eqy_doc = _eqy.judge_eqy(folder, reports / "lec_eqy.json")
         eqy_doc["subject"] = str(netlist)
-        # The netlist PnR consumes. When arm A's subject is a different file
-        # (the generic phase-2 netlist), prove the mapped handoff netlist too:
-        # a counterexample there is decisive for the step.
-        handoff = _pl.synth_dir(project) / f"{top_name}_synth.v"
-        handoff_doc = None
-        if handoff.is_file() and handoff.resolve() != netlist.resolve():
-            hfolder = _eqy.run_eqy(project, image, str(pdk), top_name, rtl, handoff,
-                                   mounts=mounts, pdk_root=pdk_root,
-                                   std_cell_library=std_cell_library,
-                                   namespace="lec_eqy_handoff")
-            handoff_doc = _eqy.judge_eqy(hfolder, reports / "lec_eqy_handoff.json")
-            handoff_doc["subject"] = str(handoff)
-            _llc.write_json(reports / "lec_eqy_handoff.json", handoff_doc)
     except (_llc.Refusal, OSError, ValueError) as exc:
         eqy_doc = {"verdict": "NOT_MEASURED", "explanation": str(exc)}
-        handoff_doc = None
         _llc.write_json(reports / "lec_eqy.json", eqy_doc)
+    else:
+        # The completed primary report and its native capture keep their own
+        # error scope. A later handoff refusal cannot erase a counterexample.
+        handoff = _pl.synth_dir(project) / f"{top_name}_synth.v"
+        try:
+            if handoff.is_file() and handoff.resolve() != netlist.resolve():
+                hfolder = _eqy.run_eqy(project, image, str(pdk), top_name, rtl, handoff,
+                                       mounts=mounts, pdk_root=pdk_root,
+                                       std_cell_library=std_cell_library,
+                                       namespace="lec_eqy_handoff")
+                handoff_doc = _eqy.judge_eqy(hfolder, reports / "lec_eqy_handoff.json")
+                handoff_doc["subject"] = str(handoff)
+                _llc.write_json(reports / "lec_eqy_handoff.json", handoff_doc)
+        except (_llc.Refusal, OSError, ValueError) as exc:
+            handoff_doc = {"verdict": "NOT_MEASURED", "subject": str(handoff),
+                           "explanation": str(exc),
+                           "execution_error": {"scope": "lec_eqy_handoff",
+                                               "type": type(exc).__name__,
+                                               "message": str(exc)}}
+            _llc.write_json(reports / "lec_eqy_handoff.json", handoff_doc)
     try:
         lec_doc = json.loads((reports / "lec.json").read_text())
     except (OSError, ValueError):
@@ -22395,6 +22402,12 @@ def _lec_eqy_arm(project: Path, top_name: str, gate_netlist: str,
         if handoff_doc.get("verdict") == "FAIL":
             combined["verdict"] = "FAIL"
             combined["reason"] = "HANDOFF_NETLIST_NOT_EQUIVALENT"
+        elif handoff_doc.get("verdict") != "PASS" and combined["verdict"] != "FAIL":
+            # A completed FAIL always wins over missing secondary evidence.
+            # A primary PASS cannot release a still-unproved handoff subject.
+            combined["verdict"] = "INCONCLUSIVE"
+            combined["reason"] = "HANDOFF_NETLIST_NOT_MEASURED"
+            combined.pop("selected", None)
     _llc.write_json(reports / "lec_arms.json", combined)
     arm_a = next((r for r in results if r.name == "lec_equivalence"), None)
     kept = [r for r in results if r.name != "lec_equivalence"]
