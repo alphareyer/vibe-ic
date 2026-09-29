@@ -1,0 +1,62 @@
+{
+  "slot": "1x1",
+  "slot_name_source": "key SLOT",
+  "source_file": "input/submission_template_source/1x1.json",
+  "source_relpath": "1x1.json",
+  "source_sha256": "e08a5eee9398e21c2b5c16493147f8131e184fb9aff49acbae200d81238cdcef",
+  "die_area": {
+    "key": "DIE_AREA",
+    "raw": "0 0 3932.0 5122.0",
+    "rect": [
+      "0",
+      "0",
+      "3932.0",
+      "5122.0"
+    ],
+    "width": "3932.0",
+    "height": "5122.0"
+  },
+  "core_area": null,
+  "fp_sizing": null,
+  "pads": {
+    "pattern": "^PAD(?:S|_LIST|_ORDER|_(?:NORTH|SOUTH|EAST|WEST))?$",
+    "lists": [],
+    "keys_matched": [],
+    "count": 0,
+    "unmatched_list_keys": [],
+    "non_pad_lists": [
+      {
+        "key": "FORBIDDEN_LAYERS",
+        "raw": [
+          {
+            "name": "MetalTop",
+            "layer": 53,
+            "datatype": 0
+          },
+          {
+            "name": "Via5",
+            "layer": 82,
+            "datatype": 0
+          }
+        ],
+        "kind": "gds_layer_inventory"
+      },
+      {
+        "key": "REQUIRED_MARKER_LAYERS",
+        "raw": [
+          {
+            "name": "GUARD_RING_MK",
+            "layer": 167,
+            "datatype": 5
+          }
+        ],
+        "kind": "gds_layer_inventory"
+      }
+    ]
+  },
+  "ring": {
+    "key": "SEAL_RING_WIDTH",
+    "raw": 26,
+    "value": "26"
+  }
+}

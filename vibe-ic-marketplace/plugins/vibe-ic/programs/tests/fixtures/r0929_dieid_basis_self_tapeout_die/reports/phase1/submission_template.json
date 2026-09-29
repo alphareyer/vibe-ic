@@ -1,0 +1,311 @@
+{
+  "schema": "submission_template/1",
+  "program": "submission_template_ingest",
+  "ingest": {
+    "status": "INGESTED",
+    "lookup": {
+      "attempted": true,
+      "searched": [
+        "input/submission_template_source"
+      ],
+      "template_root": "input/submission_template_source",
+      "path_exists": true,
+      "template_present": true
+    },
+    "no_template_reason": "No shuttle/operator submission template applies: nothing in L1-L9 names an operator, a slot, a submission template or a package. L1 'Tapeout 目標' names only the target PDK families, the target std-cell libraries, the target clock periods and the OpenLane floorplan/PDN knobs (input/docs/L1_product_metadata.md lines 30-42), and L1's own '不在 L1 約束的事' declines both the die size and the pad ring outright: ':53 ❌ 不指定 die size(Plugin 可自選)' and ':54 ❌ 不指定 pad ring 數量'. The design's stated origin is an OpenLane reference design that has repeatedly passed sign-off (:26), i.e. a macro hardening flow that hands back its own views. There is no operator whose terms could have been fetched, so this is a genuine NOT_APPLICABLE and not an unfetched template.",
+    "declared_slot": null,
+    "declared_slot_source": null,
+    "slots": [
+      {
+        "slot": "0p5x0p5",
+        "slot_name_source": "key SLOT",
+        "source_file": "input/submission_template_source/0p5x0p5.json",
+        "source_relpath": "0p5x0p5.json",
+        "source_sha256": "5985dafff1ed78bb9fcb372ac7af54444fc3a36f35f536e9fb2f893c53075810",
+        "die_area": {
+          "key": "DIE_AREA",
+          "raw": "0 0 1936.0 2531.0",
+          "rect": [
+            "0",
+            "0",
+            "1936.0",
+            "2531.0"
+          ],
+          "width": "1936.0",
+          "height": "2531.0"
+        },
+        "core_area": null,
+        "fp_sizing": null,
+        "pads": {
+          "pattern": "^PAD(?:S|_LIST|_ORDER|_(?:NORTH|SOUTH|EAST|WEST))?$",
+          "lists": [],
+          "keys_matched": [],
+          "count": 0,
+          "unmatched_list_keys": [],
+          "non_pad_lists": [
+            {
+              "key": "FORBIDDEN_LAYERS",
+              "raw": [
+                {
+                  "name": "MetalTop",
+                  "layer": 53,
+                  "datatype": 0
+                },
+                {
+                  "name": "Via5",
+                  "layer": 82,
+                  "datatype": 0
+                }
+              ],
+              "kind": "gds_layer_inventory"
+            },
+            {
+              "key": "REQUIRED_MARKER_LAYERS",
+              "raw": [
+                {
+                  "name": "GUARD_RING_MK",
+                  "layer": 167,
+                  "datatype": 5
+                }
+              ],
+              "kind": "gds_layer_inventory"
+            }
+          ]
+        },
+        "ring": {
+          "key": "SEAL_RING_WIDTH",
+          "raw": 26,
+          "value": "26"
+        },
+        "ingested_to": "input/submission_template/slots/0p5x0p5.yaml"
+      },
+      {
+        "slot": "0p5x1",
+        "slot_name_source": "key SLOT",
+        "source_file": "input/submission_template_source/0p5x1.json",
+        "source_relpath": "0p5x1.json",
+        "source_sha256": "2c53a6aaaedd1e224c0160d538f13c0e494f4691fb98f8a9d2ea6f3f1f23e403",
+        "die_area": {
+          "key": "DIE_AREA",
+          "raw": "0 0 1936.0 5122.0",
+          "rect": [
+            "0",
+            "0",
+            "1936.0",
+            "5122.0"
+          ],
+          "width": "1936.0",
+          "height": "5122.0"
+        },
+        "core_area": null,
+        "fp_sizing": null,
+        "pads": {
+          "pattern": "^PAD(?:S|_LIST|_ORDER|_(?:NORTH|SOUTH|EAST|WEST))?$",
+          "lists": [],
+          "keys_matched": [],
+          "count": 0,
+          "unmatched_list_keys": [],
+          "non_pad_lists": [
+            {
+              "key": "FORBIDDEN_LAYERS",
+              "raw": [
+                {
+                  "name": "MetalTop",
+                  "layer": 53,
+                  "datatype": 0
+                },
+                {
+                  "name": "Via5",
+                  "layer": 82,
+                  "datatype": 0
+                }
+              ],
+              "kind": "gds_layer_inventory"
+            },
+            {
+              "key": "REQUIRED_MARKER_LAYERS",
+              "raw": [
+                {
+                  "name": "GUARD_RING_MK",
+                  "layer": 167,
+                  "datatype": 5
+                }
+              ],
+              "kind": "gds_layer_inventory"
+            }
+          ]
+        },
+        "ring": {
+          "key": "SEAL_RING_WIDTH",
+          "raw": 26,
+          "value": "26"
+        },
+        "ingested_to": "input/submission_template/slots/0p5x1.yaml"
+      },
+      {
+        "slot": "1x0p5",
+        "slot_name_source": "key SLOT",
+        "source_file": "input/submission_template_source/1x0p5.json",
+        "source_relpath": "1x0p5.json",
+        "source_sha256": "f2c4991417f6794f3c8052c15a6fc292a0e1ffd79df0826dda6b50fe1cb34ec5",
+        "die_area": {
+          "key": "DIE_AREA",
+          "raw": "0 0 3932.0 2531.0",
+          "rect": [
+            "0",
+            "0",
+            "3932.0",
+            "2531.0"
+          ],
+          "width": "3932.0",
+          "height": "2531.0"
+        },
+        "core_area": null,
+        "fp_sizing": null,
+        "pads": {
+          "pattern": "^PAD(?:S|_LIST|_ORDER|_(?:NORTH|SOUTH|EAST|WEST))?$",
+          "lists": [],
+          "keys_matched": [],
+          "count": 0,
+          "unmatched_list_keys": [],
+          "non_pad_lists": [
+            {
+              "key": "FORBIDDEN_LAYERS",
+              "raw": [
+                {
+                  "name": "MetalTop",
+                  "layer": 53,
+                  "datatype": 0
+                },
+                {
+                  "name": "Via5",
+                  "layer": 82,
+                  "datatype": 0
+                }
+              ],
+              "kind": "gds_layer_inventory"
+            },
+            {
+              "key": "REQUIRED_MARKER_LAYERS",
+              "raw": [
+                {
+                  "name": "GUARD_RING_MK",
+                  "layer": 167,
+                  "datatype": 5
+                }
+              ],
+              "kind": "gds_layer_inventory"
+            }
+          ]
+        },
+        "ring": {
+          "key": "SEAL_RING_WIDTH",
+          "raw": 26,
+          "value": "26"
+        },
+        "ingested_to": "input/submission_template/slots/1x0p5.yaml"
+      },
+      {
+        "slot": "1x1",
+        "slot_name_source": "key SLOT",
+        "source_file": "input/submission_template_source/1x1.json",
+        "source_relpath": "1x1.json",
+        "source_sha256": "e08a5eee9398e21c2b5c16493147f8131e184fb9aff49acbae200d81238cdcef",
+        "die_area": {
+          "key": "DIE_AREA",
+          "raw": "0 0 3932.0 5122.0",
+          "rect": [
+            "0",
+            "0",
+            "3932.0",
+            "5122.0"
+          ],
+          "width": "3932.0",
+          "height": "5122.0"
+        },
+        "core_area": null,
+        "fp_sizing": null,
+        "pads": {
+          "pattern": "^PAD(?:S|_LIST|_ORDER|_(?:NORTH|SOUTH|EAST|WEST))?$",
+          "lists": [],
+          "keys_matched": [],
+          "count": 0,
+          "unmatched_list_keys": [],
+          "non_pad_lists": [
+            {
+              "key": "FORBIDDEN_LAYERS",
+              "raw": [
+                {
+                  "name": "MetalTop",
+                  "layer": 53,
+                  "datatype": 0
+                },
+                {
+                  "name": "Via5",
+                  "layer": 82,
+                  "datatype": 0
+                }
+              ],
+              "kind": "gds_layer_inventory"
+            },
+            {
+              "key": "REQUIRED_MARKER_LAYERS",
+              "raw": [
+                {
+                  "name": "GUARD_RING_MK",
+                  "layer": 167,
+                  "datatype": 5
+                }
+              ],
+              "kind": "gds_layer_inventory"
+            }
+          ]
+        },
+        "ring": {
+          "key": "SEAL_RING_WIDTH",
+          "raw": 26,
+          "value": "26"
+        },
+        "ingested_to": "input/submission_template/slots/1x1.yaml"
+      }
+    ],
+    "slots_shipped": [
+      "0p5x0p5",
+      "0p5x1",
+      "1x0p5",
+      "1x1"
+    ],
+    "fixtures": [],
+    "scan": {
+      "max_depth": 12,
+      "max_files": 20000,
+      "truncated": false,
+      "truncated_reason": null,
+      "root": "input/submission_template_source",
+      "config_files_examined": 4,
+      "files_seen": 4,
+      "unparsable": []
+    },
+    "path_selector": {
+      "file": "input/submission_template/slots/*.yaml",
+      "declared": true,
+      "selects": "the path for a design that has a slot contract"
+    },
+    "provenance": {
+      "fetched_by_this_program": false,
+      "network": "never — the template is a path, not a download",
+      "vendored_into_this_repo": false
+    },
+    "written": {
+      "slot_files": [
+        "input/submission_template/slots/0p5x0p5.yaml",
+        "input/submission_template/slots/0p5x1.yaml",
+        "input/submission_template/slots/1x0p5.yaml",
+        "input/submission_template/slots/1x1.yaml"
+      ],
+      "no_template": null,
+      "no_declaration": null,
+      "retired_stale": []
+    }
+  }
+}
