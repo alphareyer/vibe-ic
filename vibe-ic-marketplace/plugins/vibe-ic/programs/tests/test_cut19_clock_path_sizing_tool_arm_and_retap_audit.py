@@ -15,8 +15,11 @@ own retap sub-step is audited.
    them (the only EDA output faked here).
 """
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -60,16 +63,82 @@ NL_KEPT = NL_IN.replace(
 def _project(tmp_path, log, nl_out, nl_in=NL_IN):
     project = tmp_path / "proj"
     folder = project / "phase3/librelane/19-cts-hold/03-vibeic-externalcapturelaunchretap"
-    folder.mkdir(parents=True)
-    (folder / "vibeic-externalcapturelaunchretap.log").write_text(log)
-    (folder / "in.nl.v").write_text(nl_in)
-    (folder / "chip_top.nl.v").write_text(nl_out)
-    (folder / "state_in.json").write_text(json.dumps({"nl": str(folder / "in.nl.v")}))
-    (folder / "state_out.json").write_text(json.dumps({"nl": str(folder / "chip_top.nl.v")}))
+    inputs = project / "inputs"
+    inputs.mkdir(parents=True)
+    state = {}
+    for key, contents in (("nl", nl_in), ("odb", "captured input ODB\n"),
+                          ("def", "captured input DEF\n"),
+                          ("sdc", "create_clock -period 20 [get_ports clk]\n")):
+        path = inputs / ("input." + key)
+        path.write_text(contents)
+        state[key] = str(path)
+    (inputs / "cells.lib").write_text('library(neutral) { time_unit : "1ns"; }\n')
+    initial = inputs / "state.json"
+    initial.write_text(json.dumps(state))
+    config = inputs / "config.json"
+    config.write_text(json.dumps({"meta": {"step": RA.STEP_ID},
+                                 "PNR_SDC_FILE": state["sdc"], "PNR_CORNERS": ["nom"],
+                                 "CELL_LIBS": {"nom": [str(inputs / "cells.lib")]}}))
+    (project / "phase3").mkdir()
+    (project / "phase3/librelane_switch.json").write_text(json.dumps(
+        {"steps": {"19": "librelane", "20": "librelane"}}))
+
+    def captured_native(cmd, **kwargs):
+        # No native process: only the real producer's execution edge is replaced.
+        assert cmd[cmd.index('--id') + 1] == RA.STEP_ID
+        target = Path(cmd[cmd.index('-o') + 1])
+        (target / "state_in.json").write_text(initial.read_text())
+        (target / "config.json").write_text(config.read_text())
+        outputs = {}
+        for key, contents in (("nl", nl_out), ("odb", "captured output ODB\n"),
+                              ("def", "captured output DEF\n")):
+            path = target / ("chip_top.nl.v" if key == "nl" else "output." + key)
+            path.write_text(contents)
+            outputs[key] = str(path)
+        outputs['sdc'] = state['sdc']
+        (target / "state_out.json").write_text(json.dumps(outputs))
+        (target / RA.LOG_NAME).write_text(log)
+        return subprocess.CompletedProcess(cmd, 0, "captured native execution\n", "")
+
+    # Captured preceding steps preserve the original proof's exact folder.
+    # The actual run_chain retains fingerprints, native execution and view hashes.
+    passthrough = inputs / "passthrough.json"
+    passthrough.write_text(json.dumps({"meta": {"step": "OpenROAD.CTS"}}))
+    sizing = inputs / "sizing.json"
+    sizing.write_text(json.dumps({"meta": {"step": cts.CLOCK_PATH_SIZING_ARMS["tool"]}}))
+    def native(cmd, **kwargs):
+        if cmd[cmd.index('--id') + 1] == RA.STEP_ID:
+            return captured_native(cmd, **kwargs)
+        target = Path(cmd[cmd.index('-o') + 1])
+        (target / "state_out.json").write_text(initial.read_text())
+        return subprocess.CompletedProcess(cmd, 0, "captured preceding step\n", "")
+    with patch.object(contract, "image_capability", return_value={}), \
+            patch.object(contract, "run_container", side_effect=native):
+        produced = contract.run_chain(project, "captured-image", [
+            ("OpenROAD.CTS", passthrough, initial),
+            (cts.CLOCK_PATH_SIZING_ARMS["tool"], sizing, initial),
+            (RA.STEP_ID, config, initial)], lane="19-cts-hold", pdk_root="/pdk")
+    assert produced[-1] == folder
+    # Preserve the original proof's input pathname; it aliases the actual input.
+    (folder / "in.nl.v").symlink_to(inputs / "input.nl")
+    outputs = json.loads((folder / "state_out.json").read_text())
     receipt = project / "reports/phase3/librelane_cts_hold_handoff.json"
     receipt.parent.mkdir(parents=True)
-    receipt.write_text(json.dumps({"chain": {
-        "Vibeic.ExternalCaptureLaunchRetap": str(folder.relative_to(project))}}))
+    views = {}
+    for name, key in (("post_cts_def", "def"), ("post_hold_def", "def"),
+                      ("post_hold_odb", "odb")):
+        source = Path(outputs[key])
+        dest = project / "adopted" / name
+        dest.parent.mkdir(exist_ok=True)
+        shutil.copyfile(source, dest)
+        views[name] = {"source": str(source), "source_sha256": contract.digest(source),
+                       "dest": str(dest.relative_to(project)), "dest_sha256": contract.digest(dest)}
+    receipt.write_text(json.dumps({"chain": {RA.STEP_ID: str(folder.relative_to(project))},
+        "image": "captured-image", "modes": cts.modes(project),
+        "selected": "librelane", "selection": {"selection": "librelane"},
+        "clock_path_sizing": {"arm": "tool", "step": cts.CLOCK_PATH_SIZING_ARMS["tool"]},
+        "measured_state": str((folder / "state_out.json").relative_to(project)),
+        "measured_state_sha256": contract.digest(folder / "state_out.json"), "views": views}))
     return project
 
 
@@ -120,6 +189,140 @@ def test_a_retained_retap_matched_to_its_netlist_change_passes(tmp_path):
     assert rc == 0 and doc["verdict"] == "PASS", doc
     assert [k["inst"] for k in doc["keeps"]] == ["u_core/_1753_"]
     assert doc["netlist"]["moved_connections"] == 1
+    assert doc["binding"]["retap_adopted"] is True
+
+
+@pytest.mark.parametrize("changed", ["both-netlists", "input-state", "config", "scene",
+                                     "liberty", "output-netlist", "step-log", "invocation-log",
+                                     "adopted-def", "measured-hash", "mode", "sizing-arm"])
+def test_current_retap_views_require_the_same_timing_run_and_adoption(tmp_path, changed):
+    project = _project(tmp_path, KEEP_LOG, NL_KEPT)
+    folder = project / "phase3/librelane/19-cts-hold/03-vibeic-externalcapturelaunchretap"
+    receipt = json.loads((folder / "vibeic_receipt.json").read_text())
+    if changed == "both-netlists":
+        for path in (folder / "in.nl.v", folder / "chip_top.nl.v"):
+            path.write_text(path.read_text().replace('.D(n1)', '.D(other_data)'))
+        # The old keep still explains the sole current CLK delta. Only its
+        # measured input ownership changed; pin-delta logic alone cannot see it.
+        delta = RA.netlist_delta((folder / "in.nl.v").read_text(),
+                                 (folder / "chip_top.nl.v").read_text())
+        assert delta['moved'] == [('u_core/_1753_', 'CLK',
+                                  'clknet_leaf_17_i_clk__core', 'clknet_0_i_clk__core')]
+    elif changed == "input-state":
+        path = folder / "state_in.json"
+        path.write_text(path.read_text() + '\n')
+    elif changed == "config":
+        path = Path(receipt['execution']['config'])
+        config = json.loads(path.read_text())
+        config['PNR_CORNERS'] = ['other']
+        path.write_text(json.dumps(config))
+    elif changed in ("scene", "liberty"):
+        path = project / "inputs" / ('input.sdc' if changed == 'scene' else 'cells.lib')
+        path.write_text(path.read_text() + '\n// bytes changed after the native decision\n')
+    elif changed in ("output-netlist", "step-log", "invocation-log"):
+        name = {'output-netlist': 'chip_top.nl.v', 'step-log': RA.LOG_NAME,
+                'invocation-log': 'invocation.log'}[changed]
+        path = folder / name
+        path.write_text(path.read_text() + '\n// output changed\n')
+    elif changed == "adopted-def":
+        (project / "adopted/post_cts_def").write_text('changed handoff DEF bytes\n')
+    elif changed == "mode":
+        (project / "phase3/librelane_switch.json").write_text(json.dumps(
+            {'steps': {'19': 'direct', '20': 'direct'}}))
+    elif changed == "sizing-arm":
+        (project / "phase3/librelane_switch.json").write_text(json.dumps(
+            {'steps': {'19': 'librelane', '20': 'librelane'},
+             'arms': {'19.clock_path_sizing': 'own'}}))
+    else:
+        path = project / RA.HANDOFF
+        handoff = json.loads(path.read_text())
+        handoff['measured_state_sha256'] = '0' * 64
+        path.write_text(json.dumps(handoff))
+    rc, doc = _run(project)
+    assert (rc, doc['verdict']) == (2, 'NOT_MEASURED'), doc
+    assert 'RETAP_TIMING_EVIDENCE_UNBOUND' in doc['reason']
+    if changed == 'both-netlists':
+        assert 'LL_RETAP_INPUT_STALE' in doc['reason']
+
+
+@pytest.mark.parametrize('missing', ['receipt', 'partial-input', 'execution', 'failed-run',
+                                   'wrong-command', 'library', 'adopted-view', 'scene'])
+def test_missing_partial_or_unresolved_timing_evidence_blocks_keep_consumption(tmp_path, missing):
+    project = _project(tmp_path, KEEP_LOG, NL_KEPT)
+    folder = project / 'phase3/librelane/19-cts-hold/03-vibeic-externalcapturelaunchretap'
+    path = folder / 'vibeic_receipt.json'
+    rec = json.loads(path.read_text())
+    if missing == 'receipt':
+        path.unlink()
+    elif missing == 'library':
+        (project / 'inputs/cells.lib').unlink()
+    elif missing == 'scene':
+        (project / 'inputs/input.sdc').unlink()
+    elif missing == 'adopted-view':
+        (project / 'adopted/post_hold_odb').unlink()
+    else:
+        if missing == 'partial-input':
+            rec['input']['state_files'] = {}
+        elif missing == 'execution':
+            rec.pop('execution')
+        elif missing == 'failed-run':
+            rec['execution']['rc'] = 1
+        else:
+            rec['execution']['argv'][-1] = '/wrong-pdk-root'
+        path.write_text(json.dumps(rec))
+    rc, doc = _run(project)
+    assert (rc, doc['verdict']) == (2, 'NOT_MEASURED'), doc
+    assert 'RETAP_TIMING_EVIDENCE_UNBOUND' in doc['reason']
+
+
+def test_fresh_rejected_trials_with_no_netlist_change_pass(tmp_path):
+    rc, doc = _run(_project(tmp_path, REJECT_LOG, NL_IN))
+    assert (rc, doc['verdict']) == (0, 'PASS'), doc
+    assert doc['keeps'] == [] and doc['netlist']['moved_connections'] == 0
+
+
+def _repeat_chain(project, native):
+    inputs = project / 'inputs'
+    with patch.object(contract, 'image_capability', return_value={}), \
+            patch.object(contract, 'run_container', side_effect=native):
+        return contract.run_chain(project, 'captured-image', [
+            ('OpenROAD.CTS', inputs / 'passthrough.json', inputs / 'state.json'),
+            (cts.CLOCK_PATH_SIZING_ARMS['tool'], inputs / 'sizing.json', inputs / 'state.json'),
+            (RA.STEP_ID, inputs / 'config.json', inputs / 'state.json')],
+            lane='19-cts-hold', pdk_root='/pdk')
+
+
+def test_unchanged_complete_native_binding_reuses_the_existing_run(tmp_path):
+    project = _project(tmp_path, KEEP_LOG, NL_KEPT)
+    def unexpected(*args, **kwargs):
+        pytest.fail('a complete unchanged producer binding must be reusable')
+    _repeat_chain(project, unexpected)
+    assert _run(project)[0] == 0
+
+
+@pytest.mark.parametrize('failure', ['native-failed', 'input-changed-during-run'])
+def test_failed_or_concurrently_changed_producer_cannot_publish_an_admission(tmp_path, failure):
+    project = _project(tmp_path, KEEP_LOG, NL_KEPT)
+    folder = project / 'phase3/librelane/19-cts-hold/03-vibeic-externalcapturelaunchretap'
+    (folder / RA.LOG_NAME).write_text('changed log forces a new retap run\n')
+    calls = []
+    def native(cmd, **kwargs):
+        calls.append(cmd[cmd.index('--id') + 1])
+        assert calls[-1] == RA.STEP_ID
+        if failure == 'native-failed':
+            return subprocess.CompletedProcess(cmd, 1, '', 'captured native failure\n')
+        state = json.loads(Path(cmd[cmd.index('-i') + 1]).read_text())
+        target = Path(cmd[cmd.index('-o') + 1])
+        (target / 'state_out.json').write_text(json.dumps(state))
+        path = project / 'inputs/input.nl'
+        path.write_text(path.read_text().replace('.D(n1)', '.D(other_data)'))
+        return subprocess.CompletedProcess(cmd, 0, 'captured edited input\n', '')
+    code = 'LL_STEP_FAILED' if failure == 'native-failed' else 'LL_RETAP_INPUT_STALE'
+    with pytest.raises(contract.Refusal, match=code):
+        _repeat_chain(project, native)
+    assert calls == [RA.STEP_ID]
+    assert not (folder / 'vibeic_receipt.json').exists()
+    assert _run(project)[0] == 2
 
 
 def test_a_netlist_change_no_keep_row_explains_fails(tmp_path):

@@ -15,6 +15,10 @@ does, from the step's own two artefacts:
      (`state_out.json` `nl`).
 
 Rules (TOOL_DUPLICATION_AUDIT §2 row 19 "retap 要有稽核"):
+  * current native input/config/scene/output/log and adopted handoff must
+    match their producer receipts before keep decisions are consumed;
+    missing, unresolved or stale timing evidence is NOT_MEASURED (rc 2),
+    which blocks this step's existing program_exit_zero gate;
   * every `keep` row must satisfy the retap policy when RE-DECIDED here from
     the numbers it printed: the local path improved, the design's worst setup
     slack and TNS did not regress, and hold is non-negative (or, when it was
@@ -162,16 +166,61 @@ def audit(project: Path) -> Tuple[str, Dict[str, Any]]:
     doc: Dict[str, Any] = {"program": PROGRAM, "step": STEP_ID, "findings": []}
     handoff = project / HANDOFF
     try:
-        chain = json.loads(handoff.read_text()).get("chain") or {}
-    except (OSError, ValueError) as exc:
+        handoff_record = json.loads(handoff.read_text())
+        chain = handoff_record.get("chain") or {}
+    except (OSError, ValueError, AttributeError) as exc:
         doc["reason"] = f"{HANDOFF} unreadable: {exc}"
         return "NOT_MEASURED", doc
     rel = chain.get(STEP_ID)
-    if not rel:
+    if not isinstance(rel, str) or not rel:
         doc["reason"] = f"{HANDOFF} names no {STEP_ID} step in its chain"
         return "NOT_MEASURED", doc
     folder = project / rel
     doc["folder"] = rel
+    import librelane_contract as ll
+    try:
+        if not folder.resolve().is_relative_to(project.resolve()):
+            raise ValueError("RETAP_RUN_OUTSIDE_PROJECT")
+        binding = ll.require_retap_binding(project, folder)
+        import librelane_cts_hold as cts
+        if (handoff_record.get("modes") != cts.modes(project)
+                or handoff_record.get("image") != binding["input"]["image"]):
+            raise ValueError("RETAP_HANDOFF_RUN_MISMATCH: current modes/image")
+        selected = handoff_record.get("selected")
+        if selected not in ("librelane", "openroad") or selected != (
+                handoff_record.get("selection") or {}).get("selection"):
+            raise ValueError("RETAP_HANDOFF_UNBOUND: selected arm")
+        if selected == "openroad" and handoff_record["modes"].get("19") != "dual":
+            raise ValueError("RETAP_HANDOFF_RUN_MISMATCH: direct arm requires dual selection")
+        sizing_arm = cts.clock_path_sizing_arm(project)
+        if handoff_record.get("clock_path_sizing") != {
+                "arm": sizing_arm, "step": cts.CLOCK_PATH_SIZING_ARMS[sizing_arm]}:
+            raise ValueError("RETAP_HANDOFF_RUN_MISMATCH: current sizing arm")
+        measured = project / handoff_record.get("measured_state", "")
+        if (not measured.resolve().is_relative_to(project.resolve())
+                or not measured.is_file()
+                or ll.digest(measured) != handoff_record.get("measured_state_sha256")):
+            raise ValueError("RETAP_HANDOFF_STALE: measured state")
+        views = handoff_record.get("views") or {}
+        if not {"post_cts_def", "post_hold_def", "post_hold_odb"} <= views.keys():
+            raise ValueError("RETAP_HANDOFF_UNBOUND: adopted views")
+        for name, view in views.items():
+            source, dest = Path(view["source"]), project / view["dest"]
+            if (not source.resolve().is_relative_to(project.resolve())
+                    or not dest.resolve().is_relative_to(project.resolve())
+                    or not source.is_file() or not dest.is_file()
+                    or ll.digest(source) != view.get("source_sha256")
+                    or ll.digest(dest) != view.get("dest_sha256")
+                    or view["source_sha256"] != view["dest_sha256"]):
+                raise ValueError(f"RETAP_HANDOFF_STALE: {name}")
+        if selected == "librelane" and Path(views["post_cts_def"]["source"]).resolve() != Path(
+                ll._load(folder / "state_out.json")["def"]).resolve():
+            raise ValueError("RETAP_HANDOFF_RUN_MISMATCH: adopted CTS source")
+        doc["binding"] = {"input": binding["input"], "selected": selected,
+                          "retap_adopted": selected == "librelane"}
+    except (ll.Refusal, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        doc["reason"] = f"RETAP_TIMING_EVIDENCE_UNBOUND: {exc}"
+        return "NOT_MEASURED", doc
     try:
         text = (folder / LOG_NAME).read_text(errors="replace")
     except OSError as exc:

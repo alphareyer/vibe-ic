@@ -2364,6 +2364,96 @@ def _sta_liberty_input_hashes(config: dict, project: Path,
     return result
 
 
+_RETAP_STEP = 'Vibeic.ExternalCaptureLaunchRetap'
+
+
+def require_retap_binding(project: Path, folder: Path) -> dict:
+    """Validate the retap run's existing input/output receipt without a tool probe.
+
+    A keep log is timing evidence only for the bytes this native invocation
+    actually read and wrote. Legacy, incomplete and unresolved records refuse.
+    """
+    rec = _load(folder / 'vibeic_receipt.json')
+    inputs = rec.get('input') or {}
+    # Check measured input bytes first, even for an incomplete legacy receipt.
+    # This distinguishes a stale timing decision from mere missing metadata.
+    for key in ('state_files', 'config_files'):
+        for name, expected in (inputs.get(key) or {}).items():
+            path = Path(name)
+            if not path.is_file() or digest(path) != expected:
+                raise Refusal('LL_RETAP_INPUT_STALE', f'{key}: {name}')
+    execution = rec.get('execution') or {}
+    if (not {'argv', 'rc', 'config', 'state', 'mounts', 'init_files'} <= execution.keys()
+            or not isinstance(execution['mounts'], list)
+            or not isinstance(execution['init_files'], dict)
+            or inputs.get('step') != _RETAP_STEP or type(execution.get('rc')) is not int
+            or execution['rc'] != 0 or not execution.get('argv')):
+        raise Refusal('LL_RETAP_RUN_UNBOUND', str(folder))
+    config = Path(execution.get('config', ''))
+    state_path = Path(execution.get('state', ''))
+    if not all(p.is_file() and p.resolve().is_relative_to(project.resolve())
+               for p in (config, state_path)):
+        raise Refusal('LL_RETAP_RUN_UNBOUND', 'config/input state outside project or missing')
+    state, cfg = _load(state_path), _load(config)
+    _check_state(state, step_id=_RETAP_STEP)
+    current = {
+        'state': digest(state_path), 'config': digest(config),
+        'state_files': {str(p): digest(p) for p in _walk_paths(
+            {k: v for k, v in state.items() if k != 'metrics'})},
+        'config_files': {str(p): digest(p) for p in _walk_paths(cfg) if p.is_file()},
+        'plugin': _plugin_digests(_RETAP_STEP),
+    }
+    if any(inputs.get(key) != value for key, value in current.items()):
+        raise Refusal('LL_RETAP_INPUT_STALE', 'current input/config/source population differs')
+    mounts = [(Path(host), guest) for host, guest in execution.get('mounts', [])]
+    libraries = _sta_liberty_input_hashes(cfg, project, mounts)
+    scene = cfg.get('PNR_SDC_FILE')
+    if (not libraries or any(value is None for value in libraries.values())
+            or libraries != inputs.get('liberty_files')
+            or not isinstance(scene, str) or scene not in current['config_files']
+            or not cfg.get('PNR_CORNERS')):
+        raise Refusal('LL_RETAP_SCENE_UNBOUND', 'current SDC/corners/Liberty scene is unresolved or stale')
+    if inputs.get('drv_stage_probe') is not None:
+        import drv_stage_receipts
+        if inputs['drv_stage_probe'] != drv_stage_receipts.probe_digest():
+            raise Refusal('LL_RETAP_INPUT_STALE', 'DRV scene probe changed')
+    if (cfg.get('meta', {}).get('step') != _RETAP_STEP
+            or _load(folder / 'input_fingerprint.json') != inputs
+            or _load(folder / 'state_in.json') != state):
+        raise Refusal('LL_RETAP_RUN_UNBOUND', 'native saved input/config does not match invocation')
+    argv = execution['argv']
+    if not isinstance(argv, list) or not all(isinstance(v, str) for v in argv):
+        raise Refusal('LL_RETAP_RUN_UNBOUND', 'invalid native invocation')
+    tail = ['-m', 'librelane.steps', 'run', '--id', _RETAP_STEP, '-c', str(config),
+            '-i', str(state_path), '-o', str(folder), '--pdk-root',
+            _load(folder / 'pdk_root.json').get('cli_pdk_root')]
+    if (argv[-len(tail):] != tail or not inputs.get('image')
+            or ['--entrypoint', 'python3', inputs['image']] not in
+            [argv[i:i + 3] for i in range(len(argv) - 2)]):
+        raise Refusal('LL_RETAP_RUN_UNBOUND', 'native command differs from input/config/scene')
+    hashes = rec.get('sha256') or {}
+    required = {'state_in.json', 'state_out.json', 'input_fingerprint.json',
+                'pdk_root.json', 'invocation.log', 'vibeic-externalcapturelaunchretap.log'}
+    if not required <= hashes.keys():
+        raise Refusal('LL_RETAP_OUTPUT_UNBOUND', 'missing native state/log hashes')
+    for name, expected in hashes.items():
+        path = folder / name
+        if (not path.resolve().is_relative_to(folder.resolve())
+                or not path.is_file() or digest(path) != expected):
+            raise Refusal('LL_RETAP_OUTPUT_STALE', name)
+    out_state = _load(folder / 'state_out.json')
+    _check_state(out_state, outputs=True)
+    output_files = {str(p): digest(p) for p in _walk_paths(
+        {k: v for k, v in out_state.items() if k != 'metrics'})}
+    if not output_files or output_files != rec.get('output_files'):
+        raise Refusal('LL_RETAP_OUTPUT_STALE', 'native output view population/bytes differ')
+    for name, expected in execution.get('init_files', {}).items():
+        path = Path(name)
+        if not path.is_file() or digest(path) != expected:
+            raise Refusal('LL_RETAP_INPUT_STALE', 'OpenROAD init changed')
+    return rec
+
+
 def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
               *, docker: str = 'docker', mounts: list[tuple[Path, str]] | None = None,
               lane: str | None = None, pdk_root: str | None = None,
@@ -2435,7 +2525,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                        'config_files': {str(path): digest(path) for path in _walk_paths(
                            _load(config)) if path.is_file()},
                        'step': step_id}
-        if step_id == 'OpenROAD.STAPostPNR':
+        if step_id in ('OpenROAD.STAPostPNR', _RETAP_STEP):
             fingerprint['liberty_files'] = _sta_liberty_input_hashes(
                 _load(config), project, mounts or [])
         if home:
@@ -2451,7 +2541,13 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         # from before the root was recorded (the CLI then took the image's
         # PDK_ROOT) or under another root/mount is archived and re-run. The
         # fingerprint itself is unchanged, so no other step re-runs for it.
-        if (receipt.exists() and _load(receipt).get('input') == fingerprint
+        retap_current = True
+        if step_id == _RETAP_STEP and receipt.is_file():
+            try:
+                require_retap_binding(project, folder)
+            except (Refusal, OSError, ValueError, KeyError, TypeError, AttributeError):
+                retap_current = False
+        if (retap_current and receipt.exists() and _load(receipt).get('input') == fingerprint
                 and (folder / 'state_out.json').exists()
                 and (folder / 'pdk_root.json').is_file()
                 and _load(folder / 'pdk_root.json') == pdk_record):
@@ -2502,7 +2598,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             raise Refusal('LL_STEP_FAILED', f'{step_id}: rc={completed.returncode}; {folder / "invocation.log"}')
         out_state = _load(folder / 'state_out.json')
         _check_state(out_state, outputs=True)
-        if step_id == 'OpenROAD.STAPostPNR' and fingerprint['liberty_files'] != \
+        if step_id in ('OpenROAD.STAPostPNR', _RETAP_STEP) and fingerprint['liberty_files'] != \
                 _sta_liberty_input_hashes(_load(config), project, mounts or []):
             raise Refusal('LL_STA_LIBERTY_CHANGED_DURING_RUN', str(folder))
         hashes = {'state_out.json': digest(folder / 'state_out.json')}
@@ -2512,9 +2608,29 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         for path in folder.rglob('*'):
             if path.is_file() and path.name.endswith(('.json', '.rpt')) and path.name not in ('vibeic_receipt.json',):
                 hashes[str(path.relative_to(folder))] = digest(path)
-            if step_id == 'OpenROAD.STAPostPNR' and path.is_file() and path.name == 'sta.log':
+            if ((step_id == 'OpenROAD.STAPostPNR' and path.name == 'sta.log')
+                    or (step_id == _RETAP_STEP and path.suffix == '.log')) and path.is_file():
                 hashes[str(path.relative_to(folder))] = digest(path)
-        write_json(receipt, {'input': fingerprint, 'sha256': hashes})
+        record = {'input': fingerprint, 'sha256': hashes}
+        if step_id == _RETAP_STEP:
+            # Publish native execution and all views at this existing receipt
+            # boundary; no clock/data or retap policy decision changes here.
+            record['execution'] = {'argv': cmd, 'rc': completed.returncode,
+                                   'config': str(config), 'state': str(state_path),
+                                   'mounts': [[str(host.resolve()), guest]
+                                              for host, guest in mounts or []],
+                                   'init_files': {str(p): digest(p) for p in
+                                                  home.rglob('*') if p.is_file()} if home else {}}
+            record['output_files'] = {str(p): digest(p) for p in _walk_paths(
+                {k: v for k, v in out_state.items() if k != 'metrics'})}
+            # A tool run concurrent with an edit cannot publish an admission.
+            for key in ('state_files', 'config_files'):
+                if any(not Path(p).is_file() or digest(Path(p)) != h
+                       for p, h in fingerprint[key].items()):
+                    raise Refusal('LL_RETAP_INPUT_STALE', 'inputs changed during native run')
+            if digest(config) != fingerprint['config'] or digest(state_path) != fingerprint['state']:
+                raise Refusal('LL_RETAP_INPUT_STALE', 'config/state changed during native run')
+        write_json(receipt, record)
         previous = folder / 'state_out.json'
         outputs.append(folder)
         # DRV standard section 1: the stage's receipt, bound to this run.
