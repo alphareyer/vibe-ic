@@ -869,6 +869,26 @@ def _functional_nm(reason_class: str, rule: str, why: str, **extra):
     return 2, res, f"INCOMPLETE: [{reason_class}] {why}"
 
 
+def _case_set_difference(l10_cases, record_cases):
+    """(missing, extra): the L10 case names the record lacks, and the record
+    case names the L10 does not declare -- compared as MULTISETS.
+
+    WHY: the producer writes exactly one `cases` row per L10 case, named
+    `name` or else `id`, whatever became of it (passed, failed, errored,
+    short, no_oracle, excluded). The per-case checks judge only the rows that
+    are there, so a record with its errored or short row deleted outright was
+    judged on the rows left and read PASS, and a row the L10 does not declare
+    was counted as if it did. A set that is not the L10's is not a
+    measurement of this design's population. A multiset, so a duplicated row
+    cannot stand in for a deleted one."""
+    from collections import Counter
+    want = Counter(str(k.get("name") or k.get("id") or "")
+                   for k in l10_cases if isinstance(k, dict))
+    have = Counter(str(c.get("name"))
+                   for c in record_cases if isinstance(c, dict))
+    return list((want - have).elements()), list((have - want).elements())
+
+
 def functional_full_stack_verdict(project: Path):
     """(rc, report, stdout sentinel or None) for a non-protocol IC.
 
@@ -986,12 +1006,21 @@ def functional_full_stack_verdict(project: Path):
     declared_rows = {str(k.get("name") or k.get("id") or ""): k
                      for k in (_tbg.load_l10_cases(project) or [])
                      if isinstance(k, dict)}
-    recorded = {str(c.get("name")) for c in rec.get("cases") or []
-                if isinstance(c, dict)}
-    omitted = sorted(set(declared_rows) - recorded)
-    if omitted:
-        problems.append(f"declared case(s) {omitted[:6]} are absent from the "
-                        f"record")
+    # ...and EXACTLY the L10 case set, compared as a multiset (CASESET): no
+    # case cut, none added, none duplicated to stand in for a cut one. The
+    # rows the STEP5-BAR dispositions credit (ISA-credited, data-path
+    # dependent, coverage figures) are included: a credited row is still one
+    # L10 case and cannot stand in for another.
+    missing, extra = _case_set_difference(_tbg.load_l10_cases(project) or [],
+                                          rec.get("cases") or [])
+    if missing or extra:
+        problems.append(
+            "the record does not carry the case set its design input declares"
+            + (f"; declared case(s) {missing[:6]} are absent from the record"
+               if missing else "")
+            + (f"; record case(s) {extra[:6]} are not declared (or are "
+               f"duplicated)" if extra else ""))
+    common.update(missing_cases=missing, extra_cases=extra)
     unexecuted: list = []
     for c in rec.get("cases") or []:
         if not isinstance(c, dict):
