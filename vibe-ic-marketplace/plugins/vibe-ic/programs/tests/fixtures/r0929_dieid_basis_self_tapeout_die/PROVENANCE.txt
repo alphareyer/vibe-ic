@@ -1,0 +1,1 @@
+Copied read-only from spm IC/DIE run cx_spmic2_run (8HD-4, 2026-09-28): input/submission_template, input/step_0_5ic_answers.json, reports/phase1/submission_template.json; L1 minimized to its two packaging fields.

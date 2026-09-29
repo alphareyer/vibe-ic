@@ -902,6 +902,30 @@ def design_declares_no_package(project: Optional[Path]) -> Optional[str]:
             f"submission")
 
 
+#: R-0929-DIEID-BASIS, verbatim: the basis a DIE with no operator records.
+DIE_ID_NO_OPERATOR_BASIS = "no operator die-ID requirement for deliverable DIE"
+
+
+def operator_route(project: Optional[Path]) -> Optional[str]:
+    """The declaration's route (SELF_TAPEOUT / SHUTTLE / IP), or None.
+
+    Read through `_tapeout_declaration.declared_route_on_disk` -- the one
+    predicate the declaration's producer used -- so a retained slot catalogue
+    beside an owner self-tape-out DIE is not mistaken for an operator. Any
+    unreadable or undeclared state is None: never a guessed route."""
+    if project is None:
+        return None
+    project = Path(project)
+    slots = project / _td.SLOTS_REL
+    has_slots = slots.is_dir() and any(slots.glob("*.yaml"))
+    try:
+        route, _why = _td.declared_route_on_disk(project, has_slots)
+    except Exception:  # noqa: BLE001 -- a contradictory route decides nothing here
+        return None
+    return route if route in (_td.ROUTE_SELF_TAPEOUT, _td.ROUTE_SHUTTLE,
+                              _td.ROUTE_IP) else None
+
+
 def die_id_state(cfg: Dict[str, Any],
                  ring_check: Optional[Dict[str, Any]],
                  project: Optional[Path] = None) -> Dict[str, Any]:
@@ -939,6 +963,35 @@ def die_id_state(cfg: Dict[str, Any],
     base = {"packaging": packaging, "cells": cells}
 
     if not isinstance(packaging, str) or not packaging.strip():
+        # R-0929-DIEID-BASIS: die ID is OPERATOR-specific (the shuttle
+        # operator's generate_id). Which operator -- if any -- is the
+        # declaration's route, so that is read FIRST: a self-tape-out DIE has
+        # no operator and so no die-ID requirement (NOT_APPLICABLE on that
+        # basis, not on "no package"); a declared operator keeps the
+        # requirement owed until its packaging is declared.
+        route = operator_route(project)
+        if route == _td.ROUTE_SELF_TAPEOUT:
+            return {**base, "state": "NOT_APPLICABLE",
+                    "packaging_basis": DIE_ID_NO_OPERATOR_BASIS,
+                    "route": route,
+                    "reason": (
+                        "die identification is NOT_APPLICABLE: "
+                        f"{DIE_ID_NO_OPERATOR_BASIS}. The declaration "
+                        f"({_td.DECLARATION_REL}) selects route {route!r} -- "
+                        "deliverable DIE with no shuttle operator -- and die "
+                        "identification is the operator's requirement (its "
+                        f"generate_id places its cells only for {_COB!r}). It "
+                        "does not gate the seal ring.")}
+        if route == _td.ROUTE_SHUTTLE:
+            return {**base, "state": "NOT_DETERMINED", "route": route,
+                    "reason": (
+                        "an operator template was ingested (route "
+                        f"{route!r}), so the operator's die-identification "
+                        "requirement is OWED: it is conditional on the "
+                        "packaging choice, which is not declared. Declare "
+                        "die_finishing.die_id.packaging in the PDK-bridge "
+                        f"config ({_COB!r} for chip-on-board) to settle this "
+                        "half. It does not gate the seal ring.")}
         _declared = design_declares_no_package(project)
         if _declared:
             return {**base, "state": "NOT_APPLICABLE",

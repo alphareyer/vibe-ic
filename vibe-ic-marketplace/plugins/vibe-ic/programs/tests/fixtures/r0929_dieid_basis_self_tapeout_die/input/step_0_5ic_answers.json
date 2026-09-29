@@ -1,0 +1,72 @@
+{
+  "schema": "vibe-ic/step_0_5ic_answers/1",
+  "_comment": [
+    "The design's OWN side of flow step 0.5ic. Read by phase1_one_shot_runner",
+    "._run_step_0_5ic via _submission_template.DESIGN_ANSWERS_REL; nothing in",
+    "this file is inferred by any program. Every claim below cites a line of a",
+    "document staged under input/docs/. Where the input states nothing, the",
+    "answer is NOT_DETERMINED and the search that established the absence is",
+    "recorded in derived_from -- never a default."
+  ],
+  "operator_template": {
+    "path": null,
+    "slot": null,
+    "absent_reason": "No shuttle/operator submission template applies: nothing in L1-L9 names an operator, a slot, a submission template or a package. L1 'Tapeout 目標' names only the target PDK families, the target std-cell libraries, the target clock periods and the OpenLane floorplan/PDN knobs (input/docs/L1_product_metadata.md lines 30-42), and L1's own '不在 L1 約束的事' declines both the die size and the pad ring outright: ':53 ❌ 不指定 die size(Plugin 可自選)' and ':54 ❌ 不指定 pad ring 數量'. The design's stated origin is an OpenLane reference design that has repeatedly passed sign-off (:26), i.e. a macro hardening flow that hands back its own views. There is no operator whose terms could have been fetched, so this is a genuine NOT_APPLICABLE and not an unfetched template."
+  },
+  "answers": {
+    "deliverable": "DIE",
+    "deliverable_rationale": "DIE. Owner ruling 2026-09-17 (R-0915-95): the benchmark ICs walk the IC path — a tapeout-able die with its own pad ring and die-level sign-off (DRC incl. density, LVS, antenna) — not the IP path (a HARDMACRO whose die-level rules are handed to an integrator). Earlier rationales argued HARDMACRO from the input's silence about a pad ring; the owner's declaration decides the deliverable, not the silence.",
+    "top_cell": "spm",
+    "die_area_um": "NOT_DETERMINED",
+    "core_area_um": "NOT_DETERMINED",
+    "fp_sizing": "NOT_DETERMINED",
+    "die_origin_um": "NOT_DETERMINED",
+    "database_unit_um": "NOT_DETERMINED",
+    "pad_order_by_side": "NOT_DETERMINED",
+    "pad_site_name": "NOT_DETERMINED",
+    "pad_corner_site_name": "NOT_DETERMINED",
+    "pad_edge_spacing_um": "NOT_DETERMINED",
+    "pad_rotations": "NOT_DETERMINED",
+    "pad_corner_master": "NOT_DETERMINED",
+    "pad_fillers": "NOT_DETERMINED",
+    "pad_signal_map": "NOT_DETERMINED",
+    "seal_ring_required": "NOT_DETERMINED",
+    "seal_ring_script": "NOT_DETERMINED",
+    "seal_ring_marker_layer": "NOT_DETERMINED",
+    "synthesis_area_budget": {
+      "status": "NOT_APPLICABLE",
+      "rationale": "The input states NO die or core rectangle to fit inside, so there is no max_die_dimensions_um for a LIMIT to carry. It declines the die size twice -- input/docs/L1_product_metadata.md:53 and input/docs/L9_constraints_floorplan.md:75-76 (die size '不指定', derived by the flow from FP_CORE_UTIL) -- and declares deliverable=HARDMACRO, so it takes no operator slot whose geometry could supply one. The one absolute area threshold the input DOES gate on is a STD-CELL area, not a die: input/docs/L7_verification_plan.md:111 '| stdcell area | (0, baseline × 1.3] | ≤ 4,735 µm² | ✅ 是 |', measured against the baseline stdcell area of 3,642.24 µm² at :94. A cell-area ceiling in µm² is not two die dimensions in um and must not be re-typed as one; and L7:118's own R3 note says cell counts are not comparable across algorithms. The related die-area figure at L7:95 (11,317.8 µm²) is a BASELINE MEASUREMENT of a reference run (L7:89 names its PDK, library, corner and period), reported for comparison, and it appears in no row of the L7:108-116 sign-off gate table. The stdcell-area expectation is reported and gated at sign-off by L7's own comparison, not by a declared die ceiling here."
+    }
+  },
+  "answer_provenance": {
+    "deliverable": {
+      "answered_by": "owner",
+      "citation": "R-0915-95 (2026-09-17) — owner ruling, verbatim: 我們現在走的是IC的路徑 (\"the path we are on now is the IC path\"). Recorded in benchmark-data ce09bc814451c93ca960f4ad82ae1f16f9e92174 (2026-09-17, authored by the repo owner), which changed this file's deliverable from HARDMACRO to DIE. The prior HARDMACRO was an agent's reading of this design's documents being silent about a pad ring; the owner's declaration decides the deliverable, not the silence."
+    }
+  },
+  "derived_from": [
+    "input/docs/L1_product_metadata.md:22 (product_name `spm`) -- top_cell",
+    "input/docs/L1_product_metadata.md:26 (設計起源: OpenLane reference design, 已多次 sign-off 通過) -- a macro hardening flow",
+    "input/docs/L1_product_metadata.md:30-42 (Tapeout 目標: PDK families, std-cell libraries, clock periods, FP_CORE_UTIL, PL_TARGET_DENSITY, PDN offsets, FP_PDN_SKIPTRIM) -- names no operator, slot or submission template",
+    "input/docs/L1_product_metadata.md:46-49 (量產期望: DRC/LVS/STA sign-off, L9 SDC, area/power within reference ±30%, functional equivalence)",
+    "input/docs/L1_product_metadata.md:53 ('❌ 不指定 die size(Plugin 可自選)') -- DECLINES the die",
+    "input/docs/L1_product_metadata.md:54 ('❌ 不指定 pad ring 數量(由 L3 port list 自然決定)') -- DECLINES the pad ring",
+    "input/docs/L3_external_interface.md:19-25 (the 5-port contract clk / rst / x / y / p) -- the port contract",
+    "input/docs/L3_external_interface.md:33-42 ('Physical Pad Placement' and its four-side signal grouping)",
+    "input/docs/L3_external_interface.md:35 ('對齊 OpenLane 的 `pin_order.cfg`') -- the table is an OpenLane PIN-ORDER reference",
+    "input/docs/L3_external_interface.md:44-46 ('min_distance = 0.1' um between north entries; wildcard pattern 'x.*') -- a pin pitch, not a bond-pad pitch",
+    "input/docs/L3_external_interface.md:55 ('❌ I/O cell 型別(由 PDK 預設;Plugin 可自選 io pad library)') -- DECLINES the IO pad library",
+    "input/docs/L3_external_interface.md:56 ('❌ ESD strategy(由 PDK 預設)') -- DECLINES the ESD strategy",
+    "input/docs/L3_external_interface.md:57 ('❌ Pad ordering 在同一邊內的順序') -- DECLINES the pad order",
+    "input/docs/L7_verification_plan.md:89-102 (7.4.1 baseline measurements of a reference run; :94 stdcell area 3,642.24 µm², :95 die area 11,317.8 µm²)",
+    "input/docs/L7_verification_plan.md:108-116 (7.4.2 sign-off acceptance table; :111 stdcell area ≤ 4,735 µm² is a gate, and NO row gates a die area) -- synthesis_area_budget",
+    "input/docs/L8_submodule_integration.md:19 ('`spm` 為單一 top module') -- top_cell",
+    "input/docs/L8_submodule_integration.md:23 ('1 個 top module(名稱 = `spm`,以對應 L1 product name 與 L3 module header)') -- top_cell, stated verbatim",
+    "input/docs/L9_constraints_floorplan.md:59-64 (9.2.1 Core Utilization: FP_CORE_UTIL 45% / 40%, PL_TARGET_DENSITY 0.5) -- relative sizing, not an absolute die",
+    "input/docs/L9_constraints_floorplan.md:66-73 (9.2.2 Pad 配置 -- the same four-side grouping as L3; :73 '西側順序由 Plugin 自選')",
+    "input/docs/L9_constraints_floorplan.md:75-76 (9.2.3 Die size: '不指定。由 Plugin 依照 `FP_CORE_UTIL` 與 pad ring 推算決定。') -- DECLINES the die",
+    "input/docs/L9_constraints_floorplan.md:89-97 (9.4 簽核目標: STA all corners, DRC, LVS, antenna, no disconnected PDN port) -- no pad-ring, seal-ring or submission step",
+    "absence-of-evidence, checked 2026-09-07 on the pinned image's host: LC_ALL=C grep -rnE 'seal ?ring|corner cell|pad filler|bond|wirebond|package|封裝|打線' input/docs/ -> 0 matches in all 9 documents. No seal ring, no package, no wirebond, no corner cell and no pad filler is stated anywhere in this design's input -- which is why seal_ring_* and 6 of the 8 pad_* answers are NOT_DETERMINED rather than answered.",
+    "database_unit_um is NOT_DETERMINED, NOT unmeasured. The question asks what the TECHNOLOGY FILE declares, and this design declares TWO target PDK families whose technology files declare DIFFERENT database units: input/docs/L1_product_metadata.md:32 ('目標 PDK family | open-source(SKY130 主目標,GF180MCU 為次目標)'), :33-34 naming both library sets, restated at L9:29-36. Transcribed from the technology files the pinned EDA image ships (vibeic-eda 0.3.47, sha256:8da785a8d3275884ad0d0ee0fb10f7e90d8b7bf11a08d38e9559b0764112480f): /foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/techlef/gf180mcu_fd_sc_mcu7t5v0__{min,nom,max}.tlef:40 'DATABASE MICRONS 2000' -> 0.0005 um (identical in the mcu9t5v0 techlef, same line), while /foss/pdks/sky130A/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__{min,nom,max}.tlef:26 'DATABASE MICRONS 1000' -> 0.001 um. The input names SKY130 as the PRIMARY target and GF180MCU as the secondary and nowhere picks one for the deliverable, so no single value can be transcribed without asserting a target the design did not choose. Both measurements are recorded here so a one-line owner ruling on the target family answers the field."
+  ]
+}
