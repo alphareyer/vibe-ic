@@ -291,6 +291,7 @@ def keep_abc_script(project: Path, synth_dir: Path, log_text: str) -> Optional[P
     names) into the run's evidence and drop yosys's kept temp folders."""
     target = abc_script_path(project)
     target.unlink(missing_ok=True)
+    target.with_name("abc_origin.json").unlink(missing_ok=True)
     names = _ABC_SCRIPT.findall(log_text)
     kept = None
     if names and current_run(project) is not None:
@@ -303,6 +304,47 @@ def keep_abc_script(project: Path, synth_dir: Path, log_text: str) -> Optional[P
     for folder in synth_dir.glob("_tmp_yosys-abc-*"):
         shutil.rmtree(folder, ignore_errors=True)
     return kept
+
+
+def keep_librelane_abc_script(project: Path, folder: Path) -> Optional[Path]:
+    """Keep the native script the synthesis log says ABC sourced, unchanged.
+
+    Never pick a script by its filename or the requested config. LibreLane
+    retains its generated script while Yosys removes the temporary wrapper.
+    The origin record is folded into the later post-synthesis census receipt.
+    """
+    target = abc_script_path(project)
+    origin = target.with_name("abc_origin.json")
+    target.unlink(missing_ok=True)
+    origin.unlink(missing_ok=True)
+    run_id = current_run(project)
+    if run_id is None:
+        return None
+    log = folder / "yosys-synthesis.log"
+    if not log.is_file():
+        return None
+    names = re.findall(r"(?m)^ABC:\s*\+\s*source\s+(.+?)\s*$", log.read_text(errors="replace"))
+    if not names:
+        return None
+    source = Path(names[-1])
+    source = source if source.is_absolute() else folder / source
+    state_path, config = folder / "state_out.json", folder / "config.json"
+    if not source.is_file() or not source.resolve().is_relative_to(folder.resolve()):
+        return None
+    state = json.loads(state_path.read_text())
+    native = Path(state.get("nl") or "")
+    if not native.is_file():
+        return None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    write_text(origin, json.dumps({
+        "run_id": run_id, "abc_script": _ref(target),
+        "abc_source": _ref(source), "abc_execution_log": _ref(log),
+        "tool_state": _ref(state_path), "tool_config": _ref(config),
+        "tool_netlist": _ref(native),
+        "tool_step": {"id": "Yosys.Synthesis", "folder": str(folder.resolve())}},
+        indent=2) + "\n")
+    return target
 
 
 def synth_census_tcl(*, liberties: List[str], netlist: str, top: str, sdc: str,
@@ -324,6 +366,17 @@ def record_synth(project: Path, *, abc_script: Optional[Path],
                  "census_sdc": _ref(sdc) if sdc.is_file() else None}
     if abc_script is not None and abc_script.is_file():
         doc["abc_script"] = _ref(abc_script)
+        origin = abc_script.with_name("abc_origin.json")
+        if origin.is_file():
+            provenance = json.loads(origin.read_text())
+            if provenance.get("run_id") == current_run(project) and \
+                    provenance.get("abc_script") == doc["abc_script"]:
+                doc.update({key: value for key, value in provenance.items()
+                            if key not in ("run_id", "abc_script")})
+            else:
+                doc.pop("abc_script")
+                doc["ran"] = False
+                doc["reason"] = "LibreLane ABC origin differs from this run/script"
     else:
         doc["reason"] = "the synthesis log names no ABC script ABC ran"
     if behavior is not None and behavior.is_file():

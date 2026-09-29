@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_text
-from drv_signoff_judge import (_NUM, _REQUIRED_STAGES, _SCENE_PROFILES,
+from drv_signoff_judge import (_abc_buffer_limits, _NUM, _REQUIRED_STAGES, _SCENE_PROFILES,
                                _integrator_value, _liberty_header, _liberty_limits,
                                _sdc_values, _sha, parse_check_types)
 
@@ -277,8 +277,22 @@ def _stages(project: Path, postroute_repair_ran: bool,
             name != "synth" or bool(_recorded_text(row.get("abc_script"))))
         if name == "synth":
             script = _recorded_text(row.get("abc_script"))
-            buffers = [float(v) for v in re.findall(
-                rf"(?m)^\s*buffer\s+-N\s+({_NUM})\s*;?\s*$", script)]
+            if (doc.get("tool_step") or {}).get("id") == "Yosys.Synthesis":
+                # The tool path binds its executed source, log, state/config
+                # and native netlist to the SAME run and handoff bytes.
+                for field in ("abc_source", "abc_execution_log", "tool_state",
+                              "tool_config", "tool_netlist", "netlist"):
+                    row[field] = _recorded_ref(project, doc.get(field))
+                bound = all(_recorded_text(row.get(field)) for field in (
+                    "abc_source", "abc_execution_log", "tool_state",
+                    "tool_config", "tool_netlist", "netlist", "abc_script"))
+                bound = bound and row["abc_source"]["sha256"] == row["abc_script"]["sha256"]
+                bound = bound and row["tool_netlist"]["sha256"] == row["netlist"]["sha256"]
+                row["tool_step"] = doc["tool_step"]
+                row["ran"] = row["ran"] and bool(bound)
+                if not bound:
+                    script = ""
+            buffers = _abc_buffer_limits(script)
             row["applied"] = {"fanout": _one(buffers)}
             row["synth_abc_buffering"] = bool(buffers)
             row["ideal_clock_excluded"] = _ideal_clock_excluded(behavior)

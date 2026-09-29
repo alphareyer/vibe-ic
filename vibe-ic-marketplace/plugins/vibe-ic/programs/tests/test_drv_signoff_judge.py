@@ -295,6 +295,25 @@ def test_complete_measured_bundle_passes(tmp_path):
     assert drv.judge(_bundle(tmp_path))["verdict"] == "PASS"
 
 
+@pytest.mark.parametrize("script", [
+    "buffer -N 4 -S 3000\n", "buffer -S 3000 -N 4; stime -p\n",
+    "strash; buffer -N 4 -S 3000; stime -p\n",
+])
+def test_synth_buffer_options_share_the_capture_parser(tmp_path, script):
+    bundle = _bundle(tmp_path)
+    bundle["stages"][0]["abc_script"] = _file(tmp_path, "abc.script", script)
+    assert drv.judge(bundle)["verdict"] == "PASS"
+
+
+def test_echo_of_buffer_command_cannot_certify_synthesis(tmp_path):
+    bundle = _bundle(tmp_path)
+    bundle["stages"][0]["abc_script"] = _file(
+        tmp_path, "abc.script", 'echo "buffer -N 4";\n# buffer -N 4\n')
+    result = drv.judge(bundle)
+    assert result["verdict"] == "FAIL"
+    assert "synth: fanout buffering absent" in result["failures"]
+
+
 def test_unknown_pdk_cannot_use_bundle_selected_scene_set(tmp_path):
     bundle = _bundle(tmp_path)
     bundle["identity"]["pdk"] = "unknown_pdk"

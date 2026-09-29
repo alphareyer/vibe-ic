@@ -17217,6 +17217,8 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
             ("Yosys.Synthesis", synthesis_config, state_in)] + checker_steps,
             mounts=mounts, pdk_root=pdk_root_guest)
         folder = folders[1]
+        import drv_stage_receipts as _drv_stages
+        _drv_stages.keep_librelane_abc_script(project, folder)
         state = json.loads((folder / "state_out.json").read_text())
         source = Path(state.get("nl") or "")
         stat = folder / "reports/stat.json"

@@ -42,22 +42,51 @@ from _atomic_artefact import write_json  # noqa: E402
 import instrument_calibration  # noqa: E402
 
 #: A Verilog sized literal as Yosys `write_verilog` prints a constant.
-_LITERAL = r"\d+'[bhdo][0-9a-fA-FxXzZ_?]+"
-_ASSIGN_CONST_RE = re.compile(r"^\s*assign\s+(\S+)\s*=\s*(" + _LITERAL + r")\s*;", re.M)
-_PIN_CONST_RE = re.compile(r"\.(\w+)\(\s*(" + _LITERAL + r")\s*\)")
+_LITERAL = r"\d+'[sS]?[bBhHdDoO][0-9a-fA-FxXzZ_?]+|'[01xXzZ]"
+_ASSIGN_RE = re.compile(r"\bassign\s+([^;=]+?)\s*=\s*([^;]+);", re.S)
+_PIN_RE = re.compile(r"\.([A-Za-z_$][\w$]*|\\\S+)\s*\(")
 _CONST_NET_RE = re.compile(r"\b(zero_|one_)\b")
 
 
+def _closing_paren(text: str, start: int) -> int:
+    depth = 1
+    for end in range(start, len(text)):
+        if text[end] == "(":
+            depth += 1
+        elif text[end] == ")":
+            depth -= 1
+            if depth == 0:
+                return end
+    return len(text)
+
+
 def constant_connections(netlist: str) -> list[dict[str, str]]:
-    """Every literal constant driving a port (assign) or a cell pin."""
+    """Every literal in an assign RHS or pin expression, including concatenations.
+
+    Comments, strings, attributes and parameter overrides do not drive pins.
+    Yosys writes partial bus constants as concatenations with live signals.
+    """
     instrument_calibration.assert_calibrated(
         "synth_handoff_netlist_check::constant_connections")
-    found = [{"kind": "assign", "target": m.group(1), "value": m.group(2)}
-             for m in _ASSIGN_CONST_RE.finditer(netlist)]
-    found += [{"kind": "pin", "target": m.group(1), "value": m.group(2)}
-              for m in _PIN_CONST_RE.finditer(netlist)]
+    from _hdl_code_text import strip_hdl_comments_and_strings
+    code = strip_hdl_comments_and_strings(netlist)
+    code = re.sub(r"\(\*.*?\*\)", lambda m: " " * len(m[0]), code, flags=re.S)
+    for match in reversed(list(re.finditer(r"#\s*\(", code))):
+        end = _closing_paren(code, match.end()) + 1
+        code = code[:match.start()] + " " * (end - match.start()) + code[end:]
+    found = []
+    def literals(kind: str, target: str, expression: str) -> None:
+        # Escaped names may themselves contain apostrophes; they are signals.
+        expression = re.sub(r"\\\S+", lambda m: " " * len(m[0]), expression)
+        for literal in re.finditer(_LITERAL, expression):
+            found.append({"kind": kind, "target": target.strip(), "value": literal[0]})
+    for match in _ASSIGN_RE.finditer(code):
+        literals("assign", match[1], match[2])
+    for match in _PIN_RE.finditer(code):
+        end = _closing_paren(code, match.end())
+        literals("pin", match[1], code[match.end():end])
     found += [{"kind": "net", "target": m.group(1), "value": m.group(1)}
-              for m in _CONST_NET_RE.finditer(netlist)]
+              for m in _CONST_NET_RE.finditer(code)]
     return found
 
 

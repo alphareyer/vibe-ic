@@ -33,7 +33,8 @@ class Refusal(RuntimeError):
 #: its deadline. The tool never answered, so neither is a FAIL; every other
 #: refusal keeps whatever its consumer already decides.
 TOOL_STOP_REASONS = {'LL_TOOL_STALLED': 'stalled',
-                     'LL_TOOL_DEADLINE': 'budget_exhausted'}
+                     'LL_TOOL_DEADLINE': 'budget_exhausted',
+                     'LL_TOOL_FEATURE_ABSENT': 'tool_absent'}
 
 
 def tool_stop_reason(code: str | None) -> str | None:
@@ -692,6 +693,9 @@ def emit_synthesis_config(project: Path, pdk: str, output: Path,
     _set(result, sources, 'SYNTH_ABC_BUFFER_ONLY', True,
          'harvest: phase3_one_shot_runner._ABC_FANOUT_SCRIPT (buffer -N cap, '
          'no upsize/dnsize); DRV_SIGNOFF_STANDARD synth buffer -N')
+    _set(result, sources, 'SYNTH_TRIBUF_LOGIC', True,
+         'harvest: direct tribuf -logic; vibeic/librelane#29 merged '
+         '(7834b463); installed Yosys.Synthesis must declare this feature')
     # A catalogued IP that is itself the top: SYNTH_PARAMETERS reaches it
     # (`chparam ... <top>`). Below the top, the glue pins it (step-1 gate).
     pinned = catalog_synth_safe_params_check.top_synth_parameters(project, top) if top else None
@@ -2329,11 +2333,17 @@ def resolve_step_config(project: Path, image: str, source: Path, output: Path,
                         pdk_root: str | None = None, docker: str = 'docker') -> Path:
     """Ask LibreLane to apply its PDK config before the step-only CLI runs."""
     script = (
-        'import json,os,tempfile;'
+        'import json,os,sys,tempfile;'
         'from librelane.config import Config;'
         'from librelane.steps import Step;'
         f'p={str(source)!r}; out={str(output)!r}; root={pdk_root!r};'
         '_,cls=Step.factory.from_step_config(p);'
+        'declared=json.load(open(p));'
+        'names={v.name for v in cls.get_all_config_variables()};'
+        'missing=[k for k in ("SYNTH_TRIBUF_LOGIC",) '
+        'if declared.get("meta",{}).get("step")=="Yosys.Synthesis" '
+        'and declared.get(k) and k not in names];'
+        'missing and sys.exit("LL_TOOL_FEATURE_ABSENT: "+",".join(missing));'
         f'cfg,_=Config.load(p,cls.get_all_config_variables(),design_dir={str(project)!r},pdk_root=root);'
         'fd,tmp=tempfile.mkstemp(dir=os.path.dirname(out));'
         'os.write(fd,cfg.dumps().encode());os.close(fd);os.replace(tmp,out)'
@@ -2344,6 +2354,8 @@ def resolve_step_config(project: Path, image: str, source: Path, output: Path,
     result = run_container([docker, 'run', *_dmem.docker_memory_flags(), '--rm', *volumes,
                             '--entrypoint', 'python3', image, '-c', script],
                            probe_deadline_s=PROBE_DEADLINE_S)
+    if result.returncode and 'LL_TOOL_FEATURE_ABSENT:' in (result.stderr or ''):
+        raise Refusal('LL_TOOL_FEATURE_ABSENT', result.stderr.strip())
     if result.returncode or not output.is_file():
         raise Refusal('LL_CONFIG_RESOLVE_FAILED',
                       (result.stderr or result.stdout)[-1000:])

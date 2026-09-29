@@ -39,6 +39,36 @@ _OWNER_SIGNERS = Path(__file__).resolve().parent / "data/drv_owner_allowed_signe
 _THRESHOLD_FREEZES = Path(__file__).resolve().parent / "data/drv_threshold_freezes.json"
 
 
+
+def _abc_buffer_limits(script: str) -> list[float]:
+    """ABC command boundaries and -N, with other options in either order.
+
+    The native LibreLane script uses `buffer -N 4 -S 3000`. An echo or
+    commented command is not an executed buffer command.
+    """
+    import shlex
+    lexer = shlex.shlex(script, posix=True, punctuation_chars=";\n")
+    lexer.whitespace = " \t\r"
+    commands, command = [], []
+    try:
+        for word in lexer:
+            if word and all(ch in ";\n" for ch in word):
+                commands.append(command)
+                command = []
+            else:
+                command.append(word)
+    except ValueError:
+        return []
+    commands.append(command)
+    limits = []
+    for words in commands:
+        if not words or words[0] != "buffer":
+            continue
+        for index, word in enumerate(words[:-1]):
+            if word == "-N" and re.fullmatch(_NUM, words[index + 1]):
+                limits.append(float(words[index + 1]))
+    return limits
+
 def _sha(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as stream:
@@ -878,10 +908,10 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
         applied = stage.get("applied") or {}
         if name == "synth":
             script = _evidence(stage.get("abc_script") or {}, fails, "ABC script")
-            match = re.search(r"\bbuffer\s+-N\s+(" + _NUM + r")\b", script)
-            if not stage.get("synth_abc_buffering") or not match:
+            limits = _abc_buffer_limits(script)
+            if not stage.get("synth_abc_buffering") or not limits:
                 fails.append("synth: fanout buffering absent")
-            elif float(match.group(1)) != applied.get("fanout"):
+            elif any(value != applied.get("fanout") for value in limits):
                 fails.append("synth: applied fanout differs from ABC buffer -N")
         else:
             snapshot = _evidence(stage.get("sdc_snapshot") or {}, fails,
