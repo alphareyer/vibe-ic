@@ -110,6 +110,10 @@ RECORD_NAME = "functional_cases.json"
 #: `sdf_gate_sim` read.
 CHIP_TOP_RECORD_REL = "reports/phase3/io_pad_chip_top.json"
 SIMULATOR = "iverilog"
+#: The second simulation top that dumps the DUT's own scope (depth 1: its
+#: ports and top-level nets) for Step 38's ATE patterns (`ate_pattern_gen`).
+#: A second top, so the case testbench is never edited.
+TRACE_TOP = "vibeic_ate_trace"
 BUILD_TIMEOUT_S = 900
 RUN_TIMEOUT_S = 3600
 
@@ -481,6 +485,62 @@ def stage_models(project: Path, out_dir: Path, used_cells: set,
 # ---------------------------------------------------------------------------
 # DISPATCH
 # ---------------------------------------------------------------------------
+def dut_instance_name(text: str, module: str) -> Optional[str]:
+    """The name of the testbench's ONE instance of `module`, or None."""
+    hits = list(_instance_re(module).finditer(
+        _hdl_text.strip_hdl_comments_and_strings(text)))
+    if len(hits) != 1:
+        return None
+    m = re.search(r"([A-Za-z_][A-Za-z0-9_$]*)\s*(?:\[[^\]]*\]\s*)?\($",
+                  hits[0].group(1))
+    return m.group(1) if m else None
+
+
+def trace_dumper(text: str, tb_top: str, dut_module: str, wd: Path
+                 ) -> Tuple[Optional[Path], Dict[str, Any]]:
+    """(dumper source or None, trace intent) for one case run.
+
+    The dumper is a second simulation top that `$dumpvars(1, <tb>.<inst>)` the
+    DUT scope into `<wd>/<tb>.vcd` (a name relative to the run directory, so
+    the same deck works in a container that mounts the tree elsewhere). No
+    unique DUT instance -> no dumper, and the trace says why."""
+    inst = dut_instance_name(text, dut_module)
+    vcd = wd / f"{tb_top}.vcd"
+    vcd.unlink(missing_ok=True)
+    if inst is None:
+        return None, {"vcd": None, "reason": (
+            f"the testbench makes no single instance of `{dut_module}`; its "
+            f"pins cannot be traced")}
+    src = wd / f"{TRACE_TOP}.v"
+    src.write_text(f"module {TRACE_TOP};\n  initial begin\n"
+                   f"    $dumpfile(\"{vcd.name}\");\n"
+                   f"    $dumpvars(1, {tb_top}.{inst});\n  end\nendmodule\n")
+    return src, {"vcd": vcd, "scope": f"{tb_top}/{inst}",
+                 "dut_module": dut_module}
+
+
+def record_trace(project: Path, trace: Dict[str, Any]) -> Dict[str, Any]:
+    """The record's trace entry: the VCD path, its hash and whether its header
+    declares the DUT scope the dumper named."""
+    vcd = trace.get("vcd")
+    if vcd is None:
+        return {"scope_verified": False, "reason": trace.get("reason")}
+    vcd = Path(vcd)
+    out: Dict[str, Any] = {"vcd": _rel(project, vcd),
+                           "scope": trace["scope"],
+                           "dut_module": trace["dut_module"],
+                           "scope_verified": False}
+    if not vcd.is_file() or vcd.stat().st_size == 0:
+        out["reason"] = "the simulation wrote no VCD"
+        return out
+    import sim_activity_dump as _sad
+    out["scope_verified"] = trace["scope"] in _sad.vcd_scopes(vcd)
+    out["sha256"] = sha256_file(vcd)
+    if not out["scope_verified"]:
+        out["reason"] = f"the VCD header declares no scope {trace['scope']}"
+    return out
+
+
 def default_dispatch(argv: List[str], run_dir: Path, container: Optional[str],
                      tool: str, timeout: int) -> Tuple[int, str]:
     """The runner's ONE simulator dispatch site (via testbench_gen)."""
@@ -712,6 +772,13 @@ def generate(project: Path, container: Optional[str] = None,
         sources.append(top_src)
     rtl_files = _rtl_sources(project)
     sources += rtl_files
+    # The DUT's pin surface as its own source declares it (direction + name),
+    # so a trace of this run can be read as pins by `ate_pattern_gen`.
+    dut_mod = top["module"] if top["pad_ring"] else core_mod
+    _dut_ports = (_tbg._parse_ports(top_text, top["module"])
+                  if top["pad_ring"] else core_ports)
+    rec["dut_ports"] = [{"name": n, "direction": d}
+                        for d, _w, n in _dut_ports or []]
     rec["sources"] = [{"path": _rel(project, s), "sha256": sha256_file(s)}
                       for s in sources]
 
@@ -788,8 +855,13 @@ def generate(project: Path, container: Optional[str] = None,
         wd = run_root / name
         wd.mkdir(parents=True, exist_ok=True)
         vvp = wd / f"{name}.vvp"
-        argv = ([SIMULATOR, "-g2012", "-s", name, "-o", str(vvp)]
-                + [str(s) for s in sources] + [str(path)])
+        trace_top, trace = trace_dumper(text, name, dut_mod, wd)
+        argv = ([SIMULATOR, "-g2012", "-s", name]
+                + (["-s", TRACE_TOP] if trace_top else [])
+                + ["-o", str(vvp)]
+                + [str(s) for s in sources]
+                + ([str(trace_top)] if trace_top else [])
+                + [str(path)])
         brc, blog = disp(argv, wd, container, SIMULATOR, BUILD_TIMEOUT_S)
         (wd / "build.log").write_text(" ".join(argv) + "\n\n" + (blog or ""))
         entry["build_log"] = _rel(project, wd / "build.log")
@@ -806,6 +878,7 @@ def generate(project: Path, container: Optional[str] = None,
         entry["run_log"] = _rel(project, run_log)
         entry["run_log_sha256"] = sha256_file(run_log)
         entry["run_rc"] = rrc
+        entry["trace"] = record_trace(project, trace)
         score = score_transcript(name, rrc, rlog or "")
         entry.update(state=score["state"], checks=score["checks"],
                      reason=score["message"])
