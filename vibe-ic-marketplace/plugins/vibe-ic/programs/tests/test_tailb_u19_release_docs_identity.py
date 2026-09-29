@@ -102,16 +102,15 @@ def test_absent_sources_stay_not_measured_and_are_named(tmp_path):
     assert "L1_DATASHEET.json" in r.stdout and "librelane_pdk_root.provenance.json" in r.stdout, r.stdout
 
 
-def test_runner_forwards_its_ic_name_to_the_producer(tmp_path):
-    """The phase-3 dispatch passes the operator's --ic-name through."""
+
+def test_runner_dispatch_reads_the_same_records(tmp_path):
+    """The phase-3 dispatch (``--project`` only) names the documents from the run's records."""
     import phase3_one_shot_runner as runner
-    from _phase3_main_dispatch import guarded_producer_line
-    assert guarded_producer_line("step_tapeout_docs_gen", "tapeout_docs_gen")
-    project = _tree(tmp_path, l1=False)
+    project = _tree(tmp_path)
     (project / "input" / "submission_template").mkdir(parents=True)
     (project / "input" / "submission_template" / "SELF_TAPEOUT.txt").write_text(
         "self tape-out\n", encoding="utf-8")
-    res = runner.step_tapeout_docs_gen(project, "widget")
+    res = runner.step_tapeout_docs_gen(project)
     assert res.status == "PASS", res
     assert sorted(Path(p).name for p in res.output_files) == [
-        "BRIEF_widget_gf180mcuD.html", "SIGNOFF_widget_gf180mcuD.html"], res
+        "BRIEF_spm_gf180mcuD.html", "SIGNOFF_spm_gf180mcuD.html"], res
