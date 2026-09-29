@@ -2388,7 +2388,12 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
             if native and native.get("ran"):
                 cp2 = _pr.run(cmd, capture_output=True,
                                       text=True)
-                passed = cp2.returncode == 0
+                # The re-run judges what native PV just MEASURED; the gate's
+                # own step-waiver lookup must not turn those defects into a
+                # PASS here either (see the first-run branch).
+                self_waived = (cp2.returncode == 0
+                               and _gate_self_waived(cp2.stdout))
+                passed = cp2.returncode == 0 and not self_waived
                 return StepResult(
                     step_name, bname,
                     # R-0915-85 — `PASS_WITH_NATIVE_PV` said PASS and named
@@ -2398,10 +2403,11 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     _V.Verdict.PASS.value if passed
                     else _V.Verdict.FAIL.value,
                     time.time() - t0,
-                    (f"native per-block PV executed "
+                    (("A6_SELF_WAIVER_REFUSED: " if self_waived else "")
+                     + f"native per-block PV executed "
                      f"(DRC={_pv_verdict(native, 'drc')}, "
                      f"LVS={_pv_verdict(native, 'lvs')}); A6 gate re-ran "
-                     f"{'PASS' if passed else 'FAIL'}"),
+                     f"{'PASS' if passed else 'WAIVED its own measured defects' if self_waived else 'FAIL'}"),
                     extras={"native_pv": native,
                             "extraction_strategy": "native_signoff_pv",
                             "low_confidence": False})
@@ -2412,6 +2418,12 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
             if stub_paths:
                 cp2 = _pr.run(cmd, capture_output=True,
                                       text=True)
+                if cp2.returncode == 0 and _gate_self_waived(cp2.stdout):
+                    return StepResult(
+                        step_name, bname, "FAIL", time.time() - t0,
+                        "A6_SELF_WAIVER_REFUSED: the block-PV gate re-ran over "
+                        "the emitted stub and waived its findings under its "
+                        "own step-waiver lookup — " + (cp2.stdout or "")[-300:])
                 if cp2.returncode == 0:
                     # R-0915-85 — see the sibling site above: a gate that
                     # passed over an emitted stub is PASS_WITH_WAIVERS carrying

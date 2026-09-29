@@ -317,3 +317,30 @@ def test_the_self_waiver_reader_is_the_gates_verdict_line():
     assert AOSR._gate_self_waived("=== g ===\n  verdict: WAIVED (0/1 block(s))\n")
     assert not AOSR._gate_self_waived("  verdict: PASS (1/1)\n  waiver:  T\n")
     assert not AOSR._gate_self_waived("note: the verdict: WAIVED rule\n")
+
+
+def test_the_native_pv_rerun_does_not_pass_a_self_waived_a6(tmp_path, monkeypatch):
+    # Review wave 58 MAJOR: the first A6 run has no DRC/LVS evidence (its own
+    # FAIL), native per-block PV then MEASURES 3 DRC violations and an LVS
+    # mismatch, and the gate re-runs. Under its own waiver lookup it exits 0
+    # with verdict WAIVED -- the re-run was judged by rc alone and read PASS.
+    proj = tmp_path / "proj"
+    d = proj / "phase3" / "analog" / "ldo"
+    d.mkdir(parents=True)
+    (proj / "phase3" / "analog" / "analog_block_list.json").write_text(
+        json.dumps({"blocks": ["ldo"]}))
+    (proj / "phase3" / "analog" / "waivers.json").write_text(json.dumps({
+        "waived_steps": [{"id": "analog_block_pv", "ticket": "ECO-123",
+                          "reason": "PV deferred to top-level signoff"}]}))
+
+    def native(project, block, container):
+        # fake only the EDA tools' file writes
+        (d / "drc_clean.flag").write_text("violations: 3\n")
+        (d / "lvs_match.flag").write_text("lvs: mismatch\n")
+        return {"ran": True, "drc": {"verdict": "FAIL"},
+                "lvs": {"verdict": "FAIL"}}
+
+    monkeypatch.setattr(AOSR, "_try_native_a6_pv", native)
+    row = AOSR.step_for_block(proj, {"name": "ldo"}, "A6_block_pv", None)
+    assert row.status == "FAIL", (row.status, row.detail)
+    assert "A6_SELF_WAIVER_REFUSED" in row.detail, row.detail
