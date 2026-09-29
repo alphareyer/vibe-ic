@@ -31,6 +31,14 @@ def complete_ai_routes(dispatch, bench: str, dataset, run, *, jobs: int = 1,
                           "and the declared input context, never an oracle. " * 3),
             "prompt_evidence": [],
         }
+        if disposition == "OVERRIDE":
+            # An OVERRIDE must cite the visible input for the nature chosen;
+            # cite the synthetic prompt's own opening words.
+            words = Path(task["prompt_path"]).read_text(errors="replace").split()
+            response["prompt_evidence"] = [{
+                "excerpt": " ".join(words[:12]),
+                "supports": f"Synthetic control routes this input to {nature}.",
+            }]
         path = Path(task["response_path"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(response))
