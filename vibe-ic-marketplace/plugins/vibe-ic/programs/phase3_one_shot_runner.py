@@ -75514,6 +75514,167 @@ def _phase3_window_clone(project: Path, target: Path) -> None:
     (target / _runner_lock.LOCK_FILENAME).unlink(missing_ok=True)
 
 
+def _phase3_window_run_id() -> str:
+    """A path-safe identity shared by this window's reports and publications."""
+    raw = (os.environ.get("VIBEIC_PHASE3_WINDOW_RUN_ID")
+           or f"{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}")
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", raw)
+    return safe if safe not in ("", ".", "..") else f"window-{os.getpid()}"
+
+
+def _phase3_window_publication(project: Path, isolated: Path,
+                               sources: List[Path],
+                               window_run_id: str) -> Tuple[List[str], str]:
+    """Publish selected outputs with their in-tree inputs and a SHA receipt.
+
+    Preflight *all* selected JSON before copying anything. A path into the
+    disposable clone, or any other outside tree, makes the publication
+    unusable. Relative file references in the clone are copied with the
+    output; absolute references to existing project inputs are bound by SHA.
+    """
+    root = project.resolve()
+    private = isolated.resolve()
+    to_copy: Dict[str, Path] = {}
+    inputs: Dict[str, str] = {}
+    pending = list(sources)
+    examined: Set[str] = set()
+    import _cited_artefacts as _ca
+    try:
+        while pending:
+            source = pending.pop()
+            rel = str(source.relative_to(private))
+            if rel in examined:
+                continue
+            examined.add(rel)
+            if not source.is_file() or source.is_symlink():
+                return [], f"window output missing or symlink: {source}"
+            to_copy[rel] = source
+            if source.suffix.lower() != ".json":
+                continue
+            try:
+                doc = json.loads(source.read_text())
+            except (OSError, ValueError):
+                continue
+
+            def cite(token: str) -> None:
+                """Resolve one citation against its owning project, then bind it."""
+                path = Path(token)
+                owner = root if path.is_absolute() else private
+                cited = path if path.is_absolute() else private / path
+                # An absolute spelling that walks through the disposable copy
+                # dangles once the copy is removed, even when a carried link
+                # or a ".." leads it back into the project. Judge every
+                # spelled prefix, not only the resolved target.
+                if path.is_absolute():
+                    for depth in range(1, len(path.parts) + 1):
+                        prefix = os.path.realpath(Path(*path.parts[:depth]))
+                        if Path(prefix).is_relative_to(private):
+                            raise ValueError(
+                                f"window input outside project: {token}")
+                # Resolve the spelling as cited. Normalizing first erases a
+                # missing component or a symlink before a following "..".
+                try:
+                    resolved = cited.resolve(strict=True)
+                except (OSError, RuntimeError) as exc:
+                    # A missing absolute reference into the disposable copy
+                    # still names an outside-project input. This best-effort
+                    # resolution only classifies the refusal; it never admits
+                    # or hashes a path that strict resolution could not open.
+                    try:
+                        unresolved = cited.resolve(strict=False)
+                    except (OSError, RuntimeError):
+                        unresolved = None
+                    if unresolved is not None and not unresolved.is_relative_to(owner):
+                        raise ValueError(f"window input outside project: {token}") from exc
+                    raise ValueError(f"window cited input absent: {token}: {exc}") from exc
+                if not resolved.is_relative_to(owner):
+                    raise ValueError(f"window input outside project: {token}")
+                # Strict resolution applies ".." lexically after a component
+                # that may be a regular file (`x.def/../y.def`). Bind only
+                # what the literal spelling opens: the kernel's own walk.
+                try:
+                    literal = os.stat(cited)
+                except OSError as exc:
+                    raise ValueError(
+                        f"window cited input absent: {token}: {exc}") from exc
+                if not os.path.samestat(literal, os.stat(resolved)):
+                    raise ValueError(f"window cited input absent: {token}")
+                # A relative symlink would leave a dangling alias after the
+                # private tree is discarded; selected outputs must be files.
+                if (not path.is_absolute()
+                        and resolved != Path(os.path.normpath(cited))):
+                    raise ValueError(f"relative window input is symlink: {token}")
+                if not resolved.is_file():
+                    raise ValueError(f"window cited input absent: {token}")
+                name = str(resolved.relative_to(owner))
+                if path.is_absolute():
+                    inputs[name] = _sha256_file(resolved)
+                elif resolved != source.resolve():
+                    inputs[name] = _sha256_file(resolved)
+                    pending.append(resolved)
+
+            def visit(value: Any, *, path_field: bool = False) -> None:
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        visit(item, path_field=_ca._path_field(key))
+                elif isinstance(value, list):
+                    for item in value:
+                        visit(item, path_field=path_field)
+                elif isinstance(value, str):
+                    # A declared file field is a citation even when absent.
+                    # Other strings retain the existing file/prose discovery.
+                    if value.startswith(("http:", "https:")):
+                        return
+                    candidate = private / value
+                    if (path_field or Path(value).is_absolute()
+                            or candidate.is_file() or candidate.is_symlink()):
+                        cite(value)
+                        return
+                    for token in re.findall(
+                            r"(?<![A-Za-z0-9:/.])/(?!/)[^\s,;\"'()\[\]{}]+", value):
+                        cite(token.rstrip("."))
+
+            visit(doc)
+        receipt = (root / "reports/audit/windows"
+                   / window_run_id / "publication.json")
+        try:
+            run_record = json.loads((root / _ca.REPORT_REL).read_text())
+            cited = run_record.get("cited_artefacts") or {}
+        except (OSError, ValueError, AttributeError):
+            cited = {}
+        for rel, source in to_copy.items():
+            if rel in (_ca.REPORT_REL, _ca.AUDIT_REL,
+                       "reports/audit/steps_view.json"):
+                return [], f"window may not publish canonical whole-flow record: {rel}"
+            if rel in cited:
+                target = root / rel
+                if not target.is_file() or _sha256_file(target) != _sha256_file(source):
+                    return [], f"window may not overwrite run-cited artefact: {rel}"
+            if rel in inputs:
+                inputs[rel] = _sha256_file(source)
+        existing = json.loads(receipt.read_text()) if receipt.is_file() else {}
+        outputs = dict(existing.get("outputs") or {})
+        inputs = {**(existing.get("inputs") or {}), **inputs}
+        for rel, source in to_copy.items():
+            outputs[rel] = _sha256_file(source)
+        publication = {"window_run_id": window_run_id,
+                       "outputs": outputs, "inputs": inputs}
+        _aa.write_json(receipt, {**publication, "status": "PREPARING"})
+        copied = []
+        for rel, source in to_copy.items():
+            target = root / rel
+            if not target.is_file() or _sha256_file(target) != outputs[rel]:
+                with _aa.writing(target, "wb") as stream, source.open("rb") as original:
+                    shutil.copyfileobj(original, stream, length=1024 * 1024)
+            if _sha256_file(target) != outputs[rel]:
+                return [], f"window publication SHA mismatch: {rel}"
+            copied.append(str(target))
+        _aa.write_json(receipt, {**publication, "status": "PUBLISHED"})
+        return copied, ""
+    except (OSError, ValueError, TypeError) as exc:
+        return [], str(exc)
+
+
 def _phase3_window_full_gate_audit(project: Path, step_ids: Set[str]
                                    ) -> Dict[str, Dict[str, Any]]:
     """Run exactly each selected step's canonical full gate on a private copy."""
@@ -75540,7 +75701,8 @@ def _phase3_window_full_gate_audit(project: Path, step_ids: Set[str]
 
 
 def _direct_flow_window(project: Path, top: str, pdk: PdkConfig,
-                               args, site: str, window_gate) -> StepResult:
+                               args, site: str, window_gate,
+                               window_run_id: str) -> StepResult:
     """Dispatch an existing site privately; publish only its declared outputs."""
     import tempfile
     import yaml
@@ -75608,7 +75770,7 @@ def _direct_flow_window(project: Path, top: str, pdk: PdkConfig,
                               _preflight_refusal(site), step_lvs,
                               isolated, top, pdk, args.container,
                               upstream_pnr=None)
-        outputs = []
+        selected_sources = []
         for step in steps:
             for spec in step.get("required_outputs") or []:
                 for pattern in str(spec).split(" OR "):
@@ -75616,27 +75778,24 @@ def _direct_flow_window(project: Path, top: str, pdk: PdkConfig,
                         if source.is_file():
                             if site == "gds" and row.status != "PASS" and source.suffix.lower() == ".gds":
                                 continue
-                            target = project / source.relative_to(isolated)
-                            target.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(source, target)
-                            outputs.append(str(target))
+                            selected_sources.append(source)
         if site == "gds":
             # A failed window keeps candidate bytes only in private scratch.
             source = _pl.pnr_dir(isolated) / f"{top}.gds"
             if row.status == "PASS" and source.is_file():
-                target = _pl.pnr_dir(project) / f"{top}.gds"
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-                outputs.append(str(target))
-                receipt = _ga.admission_path(project)
-                receipt.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(_ga.admission_path(isolated), receipt)
-                outputs.append(str(receipt))
+                selected_sources.extend((source, _ga.admission_path(isolated)))
+        outputs, publication_error = _phase3_window_publication(
+            project, isolated, selected_sources, window_run_id
+        ) if selected_sources else ([], "")
+        if publication_error:
+            row.status = "NOT_MEASURED"
+            row.reason_class = _V.ReasonClass.MISSING_ARTEFACT.value
+            row.detail += f"; window publication refused: {publication_error}"
         row.output_files = outputs
         return row
 
 
-def _phase3_window_metrics(project: Path) -> StepResult:
+def _phase3_window_metrics(project: Path, window_run_id: str) -> StepResult:
     """Step 37.4 producer on a private tree; publish its two declared outputs."""
     import tempfile
     with tempfile.TemporaryDirectory(prefix="phase3-metrics-",
@@ -75644,21 +75803,25 @@ def _phase3_window_metrics(project: Path) -> StepResult:
         isolated = Path(temp) / project.name
         _phase3_window_clone(project, isolated)
         result = step_signoff_metrics_aggregate(isolated)
-        outputs = []
+        sources = []
         for rel in ("phase3/final/metrics.json",
                     "reports/phase3/signoff_metrics_aggregate.json"):
             source = isolated / rel
             if source.is_file():
-                target = project / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-                outputs.append(str(target))
+                sources.append(source)
+        outputs, error = _phase3_window_publication(
+            project, isolated, sources, window_run_id)
+        if error:
+            result.status = "NOT_MEASURED"
+            result.reason_class = _V.ReasonClass.MISSING_ARTEFACT.value
+            result.detail += f"; window publication refused: {error}"
         result.output_files = outputs
         return result
 
 
 def _phase3_window_pre_audit_producer(project: Path, site: str,
-                                      container: str) -> StepResult:
+                                      container: str,
+                                      window_run_id: str) -> StepResult:
     """Run one declared producer without refreshing any sibling output."""
     import tempfile
     table = {name: (program, out_rel, extra)
@@ -75679,15 +75842,18 @@ def _phase3_window_pre_audit_producer(project: Path, site: str,
         import flow_compliance_check as _fcc
         flow = yaml.safe_load(_fcc.DEFAULT_FLOW_DEF.read_text()) or {}
         step = next(s for s in flow["steps"] if str(s.get("id")) == step_id)
-        outputs = []
+        sources = []
         for spec in step.get("required_outputs") or []:
             for pattern in str(spec).split(" OR "):
                 for source in isolated.glob(pattern.strip()):
                     if source.is_file():
-                        target = project / source.relative_to(isolated)
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(source, target)
-                        outputs.append(str(target))
+                        sources.append(source)
+        outputs, error = _phase3_window_publication(
+            project, isolated, sources, window_run_id)
+        if error:
+            row.status = "NOT_MEASURED"
+            row.reason_class = _V.ReasonClass.MISSING_ARTEFACT.value
+            row.detail += f"; window publication refused: {error}"
         row.output_files = outputs
         return row
 
@@ -75964,7 +76130,10 @@ def _enclosing_outcome(unit: str, unit_ok: bool, unit_rc: int,
 
 def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                              args, step_ids: Set[str],
-                             unit: str = "phase3") -> StepResult:
+                             unit: str = "phase3",
+                             window_run_id: Optional[str] = None) -> StepResult:
+    if window_run_id is None:
+        window_run_id = _phase3_window_run_id()
     """Run the unsplit Phase-3 unit privately and publish only selected outputs."""
     import tempfile
     import yaml
@@ -76023,7 +76192,7 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                 unit_doc = None
             unit_verdict = (unit_doc.get("verdict")
                             if isinstance(unit_doc, dict) else None)
-        copied = []
+        selected_sources = []
         produced = []
         for step in steps:
             for spec in step.get("required_outputs") or []:
@@ -76035,9 +76204,10 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                                     source.stat().st_mtime_ns != target.stat().st_mtime_ns or
                                     source.stat().st_size != target.stat().st_size):
                                 produced.append(str(source.relative_to(isolated)))
-                                target.parent.mkdir(parents=True, exist_ok=True)
-                                shutil.copy2(source, target)
-                                copied.append(str(target))
+                                selected_sources.append(source)
+        copied, publication_error = _phase3_window_publication(
+            project, isolated, selected_sources, window_run_id
+        ) if selected_sources else ([], "")
         unit_ok = unit_rc == 0 and bool(produced) and unit_verdict in (
             "PASS", "PASS_WITH_WAIVERS")
         if unit == "phase3":
@@ -76049,6 +76219,10 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
         else:
             status, reason_class, outcome = _enclosing_outcome(
                 unit, unit_ok, unit_rc, unit_verdict, unit_reason, unit_detail)
+        if publication_error:
+            status = "NOT_MEASURED"
+            reason_class = _V.ReasonClass.MISSING_ARTEFACT
+            outcome = f"window publication refused: {publication_error}"
         unit_log = ""
         if unit == "phase3":
             unit_log = f"; stderr log {log} (stdout and report beside it)"
@@ -76117,6 +76291,13 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     No canonicalisation, derived generators or whole-flow summary is called:
     those are separate whole-flow producers and may rewrite unrelated steps.
     """
+    window_run_id = _phase3_window_run_id()
+    window_root = project / "reports/orchestrator/windows" / window_run_id
+    audit_root = project / "reports/audit/windows" / window_run_id
+    if window_root.exists() or audit_root.exists():
+        print(f"[phase3] window run id already published: {window_run_id}; "
+              "refusing to overwrite its receipts", file=sys.stderr)
+        return 2
     before = _phase3_file_manifest(project)
     rows: List[StepResult] = []
     changed_sites: List[str] = []
@@ -76156,15 +76337,17 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                     "enclosing_canonicalize"):
             row = _phase3_window_enclosing(
                 project, top, pdk, args, window_ids,
-                unit=site.removeprefix("enclosing_"))
+                unit=site.removeprefix("enclosing_"),
+                window_run_id=window_run_id)
         elif site == "signoff_metrics_aggregate":
-            row = _phase3_window_metrics(project)
+            row = _phase3_window_metrics(project, window_run_id)
         elif site in ("tapeout_checklist", "gds_xor", "foundry_handoff"):
             row = _phase3_window_pre_audit_producer(
-                project, site, args.container)
+                project, site, args.container, window_run_id)
         else:
             row = _direct_flow_window(
-                project, top, pdk, args, site, window_gate)
+                project, top, pdk, args, site, window_gate,
+                window_run_id)
         rows.append(row)
         site_after = _phase3_file_manifest(project)
         if any(site_before.get(k) != site_after.get(k)
@@ -76205,7 +76388,7 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
         "program": "phase3_one_shot_runner", "bounded": True,
         "phase2_synth": _pl.phase2_synth_input_identity(project),
         "phase3_inputs": _pl.phase3_signoff_input_identity(project),
-        "window_run_id": os.environ.get("VIBEIC_PHASE3_WINDOW_RUN_ID"),
+        "window_run_id": window_run_id,
         "declared_window": {"entry_step": args.entry_step,
                             "exit_step": args.exit_step,
                             "canonical_step_ids": sorted(window_ids),
@@ -76230,12 +76413,10 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                     "not rewritten by this window"},
         ],
     }
-    out = _pl.report_path(project, "phase3_one_shot.json")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2) + "\n")
-    audit = _pl.report_path(project, "phase23_completion_audit.json")
-    audit.parent.mkdir(parents=True, exist_ok=True)
-    audit.write_text(json.dumps({
+    out = window_root / "phase3_one_shot.json"
+    audit = audit_root / "phase23_completion_audit.json"
+    _aa.write_json(out, report)
+    _aa.write_json(audit, {
         "program": "phase3_one_shot_runner",
         "audit_kind": "bounded_invalidation; flow_compliance_check not run",
         "bounded": True,
@@ -76246,7 +76427,7 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
             {"id": sid, "status": item["status"], "reason": item["reason"]}
             for sid, item in stale.items()],
         "dispatched_sites": selected,
-        "stale_downstream": stale}, indent=2) + "\n")
+        "stale_downstream": stale})
     audit_doc = json.loads(audit.read_text())
     # The enclosing unit published the selected producer outputs. Refresh
     # those steps' own write records before check_step consumes attribution;
@@ -77582,17 +77763,18 @@ def main() -> int:
     # quote THIS run; the full record still overwrites it at the end.
     try:
         import _impl_outcomes as _io_pre
+        import _cited_artefacts as _ca
         _pre = project / "reports" / "orchestrator" / "phase3_one_shot.json"
-        _pre.parent.mkdir(parents=True, exist_ok=True)
-        _pre.write_text(json.dumps(
-            {"program": "phase3_one_shot_runner",
+        _pre_record = {"program": "phase3_one_shot_runner",
              "record": "in-progress (steps only; the full record is written "
                        "at the end of this run)",
              # llv1 W14: the summary emitted next echoes the implementation
              # flow from THIS record (ORGANIC #399). {} by default.
              **_io_pre.report_fields(project),
-             "steps": [asdict(s) for s in plan]},
-            indent=2, ensure_ascii=False) + "\n")
+             "steps": [asdict(s) for s in plan]}
+        _pre_record["cited_artefacts"] = _ca.bind(project, _pre_record["steps"])
+        _pre_record["cited_artefacts"].pop(_ca.AUDIT_REL, None)
+        _aa.write_json(_pre, _pre_record)
     except Exception as _pre_exc:      # best-effort; never crash finalize
         print(f"[WARN] pre-summary step record non-fatal: {_pre_exc}",
               file=sys.stderr)
@@ -77806,6 +77988,9 @@ def main() -> int:
     import _impl_outcomes as _io
     summary.update(_io.report_fields(project, run_started_at=_RUN_STARTED_AT))
     _io.demote_verdict(summary)    # a step the flow did not do: never PASS
+    import _cited_artefacts as _ca
+    summary["cited_artefacts"] = _ca.bind(
+        project, summary, extra_paths=(_ca.AUDIT_REL,))
     # Per-step output view — <project>/steps/<phase>/<stage>/<id>_<slug>/.
     # A phase3-driven run used to end with NO steps tree (only the top
     # orchestrator built one), so the backend evidence had no per-step folder
@@ -77815,7 +78000,9 @@ def main() -> int:
     summary["steps_view"], out_path = _pl.publish_report_then_steps_view(
         project, PROGRAMS_DIR, "phase3_one_shot_runner", summary,
         "phase3_one_shot.json")
-    out_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+    summary["cited_artefacts"] = _ca.bind(
+        project, summary, extra_paths=(_ca.AUDIT_REL,))
+    _aa.write_json(out_path, summary)
 
     print(f"\n=== phase3_one_shot_runner DONE ===")
     print(f"verdict (design): {summary['verdict']}"

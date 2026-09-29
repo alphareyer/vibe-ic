@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json, subprocess, sys
 from pathlib import Path
+import pytest
 
 PROG = Path(__file__).resolve().parent.parent / "flow_compliance_check.py"
 
@@ -371,3 +372,114 @@ def test_missing_required_hint_flags_genuinely_absent(tmp_path):
     for label in ("generated_docs", "extraction_patterns.json", "waivers.json",
                   "reports/extraction_coverage_report.md"):
         assert label in missing
+
+
+def test_changed_cited_artefact_is_not_run_evidence(tmp_path):
+    artefact = tmp_path / "phase3/route.def"
+    artefact.parent.mkdir(parents=True)
+    artefact.write_text("changed after the run")
+    report = tmp_path / "reports/orchestrator/phase3_one_shot.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({
+        "verdict": "PASS", "steps": [],
+        "cited_artefacts": {"phase3/route.def": "0" * 64},
+    }))
+    flow = tmp_path / "flow.yaml"
+    flow.write_text("version: 2\nflow_name: phase1_phase2_phase3\n"
+                    "total_steps: 1\nsteps:\n  - id: '1'\n"
+                    "    name: route\n    stage: stage3\n"
+                    "    required_outputs: ['phase3/route.def']\n"
+                    "    gate:\n      files_exist: ['phase3/route.def']\n")
+    _run(tmp_path, ("--strict", "--flow-def", str(flow)))
+    audit = json.loads((tmp_path / "reports/audit/phase23_completion_audit.json")
+                       .read_text())
+    assert audit["verdict"] == "NOT_MEASURED"
+    assert audit.get("citation_verdict") == "NOT_MEASURED"
+    assert any(row.get("path") == "phase3/route.def"
+               and row.get("status") == "NOT_MEASURED"
+               and row.get("reason") == "STALE_CITATION"
+               for row in audit.get("cited_artefact_checks", []))
+
+
+def test_missing_step_file_is_retained_in_citation_verdict(tmp_path):
+    sys.path.insert(0, str(PROG.parent))
+    import _cited_artefacts as cited
+
+    audit = tmp_path / cited.AUDIT_REL
+    audit.parent.mkdir(parents=True)
+    audit.write_text('{"verdict":"PASS"}\n')
+    citations = cited.bind(
+        tmp_path, {"output_files": ["phase3/missing.def"]},
+        extra_paths=(cited.AUDIT_REL,))
+
+    verdict, rows = cited.check(tmp_path, {"cited_artefacts": citations})
+    assert verdict == "NOT_MEASURED"
+    assert citations.get("phase3/missing.def") == "MISSING"
+    assert citations[cited.AUDIT_REL] == cited.digest(audit)
+    assert any(row["path"] == "phase3/missing.def"
+               and row["status"] == "NOT_MEASURED"
+               and row["reason"] == "MISSING_CITATION" for row in rows)
+    missing = tmp_path / "phase3/missing.def"
+    missing.parent.mkdir(parents=True)
+    missing.write_text("arrived after binding")
+    assert cited.check(tmp_path, {"cited_artefacts": citations})[0] == "NOT_MEASURED"
+
+
+@pytest.mark.parametrize("missing", (
+    "phase3/stage3/pnr/top routed.def", "routed.def"))
+def test_missing_output_file_spellings_cannot_pass_citation_check(missing):
+    """StepResult.output_files names citations even when their names lack a suffix shape."""
+    sys.path.insert(0, str(PROG.parent))
+    import _cited_artefacts as cited
+    from _hostpaths import require_repo
+
+    source = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic",
+                          "flow", "phase1_phase2_phase3.yaml")
+    project = source.parent.parent
+    present = str(source.relative_to(project))
+    citations = cited.bind(project, {"steps": [{
+        "output_files": [missing, present],
+        "detail": "unmentioned.def",
+    }]})
+    verdict, rows = cited.check(project, {"cited_artefacts": citations})
+    assert citations[present] == cited.digest(source)
+    assert verdict == "NOT_MEASURED"
+    assert citations.get(missing) == "MISSING"
+    assert any(row["path"] == missing and row["reason"] == "MISSING_CITATION"
+               for row in rows)
+    assert "unmentioned.def" not in citations
+
+
+def test_present_root_output_file_is_hashed_alongside_missing_file(tmp_path):
+    sys.path.insert(0, str(PROG.parent))
+    import _cited_artefacts as cited
+
+    present = tmp_path / "top.def"
+    present.write_text("present route view\n")
+    missing = "phase3/stage3/pnr/top routed.def"
+    citations = cited.bind(tmp_path, {"steps": [{
+        "output_files": [str(present), missing],
+    }]})
+    verdict, _ = cited.check(tmp_path, {"cited_artefacts": citations})
+    assert citations["top.def"] == cited.digest(present)
+    assert verdict == "NOT_MEASURED"
+    assert citations.get(missing) == "MISSING"
+
+
+def test_recheck_preserves_the_run_cited_audit(tmp_path):
+    audit_path = tmp_path / "reports/audit/phase23_completion_audit.json"
+    audit_path.parent.mkdir(parents=True)
+    audit_path.write_text('{"verdict":"PASS","scope":{"whole_flow":true}}\n')
+    original = audit_path.read_bytes()
+    import hashlib
+    report = tmp_path / "reports/orchestrator/phase3_one_shot.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({"verdict": "PASS", "steps": [],
+                                  "cited_artefacts": {
+                                      "reports/audit/phase23_completion_audit.json":
+                                      hashlib.sha256(original).hexdigest()}}))
+    _run(tmp_path, ("--strict",))
+    assert audit_path.read_bytes() == original
+    receipts = list(audit_path.parent.glob("phase23_completion_audit.*.json"))
+    assert len(receipts) == 1
+    assert len(receipts[0].stem.split(".")[-1]) == 64

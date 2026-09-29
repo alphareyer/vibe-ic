@@ -161,6 +161,12 @@ def test_integration_report_shape(tmp_path):
     assert body["top"] == "chip_top"
     assert isinstance(body["steps"], list)
     assert len(body["steps"]) >= 1
+    import hashlib
+    audit_rel = "reports/audit/phase23_completion_audit.json"
+    audit = project / audit_rel
+    assert audit.is_file()
+    assert body["cited_artefacts"][audit_rel] == hashlib.sha256(
+        audit.read_bytes()).hexdigest()
 
 
 def test_edge_custom_top_name(tmp_path):

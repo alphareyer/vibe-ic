@@ -393,6 +393,361 @@ def test_an_out_of_window_drc_fail_does_not_decide_window_9_to_30(
     assert "rows of steps outside the window: drc (31) FAIL" in row.detail
 
 
+def test_window_refuses_report_pointing_into_discarded_copy(project, monkeypatch):
+    report = _rows(("sta_signoff", "PASS", "", ""))
+    report["verdict"] = "PASS"
+    output = "reports/phase3/sta/post_route_summary.json"
+    code = ("import json, pathlib, sys\n"
+            "iso = pathlib.Path(sys.argv[1])\n"
+            f"out = iso / {output!r}\n"
+            "out.parent.mkdir(parents=True, exist_ok=True)\n"
+            "out.write_text(json.dumps({'input_def': str(iso / 'phase3/input.def')}))\n"
+            "report = iso / 'reports/orchestrator/phase3_one_shot.json'\n"
+            "report.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"report.write_text(json.dumps({report!r}))\n"
+            f"print({BANNER!r})\n")
+    row = _enclose_with(project, monkeypatch, code, "outside-input", steps=("23",))
+    assert row.status == "NOT_MEASURED", row.detail
+    assert not (project / output).exists()
+    assert "outside project" in row.detail
+
+
+def test_window_publishes_in_tree_input_with_provenance(project, monkeypatch):
+    input_def = project / "phase3/input.def"
+    input_def.parent.mkdir(parents=True)
+    input_def.write_text("source DEF")
+    report = _rows(("sta_signoff", "PASS", "", ""))
+    report["verdict"] = "PASS"
+    output = "reports/phase3/sta/post_route_summary.json"
+    code = ("import json, pathlib, sys\n"
+            "iso = pathlib.Path(sys.argv[1])\n"
+            f"out = iso / {output!r}\n"
+            "out.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"out.write_text(json.dumps({{'input_def': {str(input_def)!r}}}))\n"
+            "report = iso / 'reports/orchestrator/phase3_one_shot.json'\n"
+            "report.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"report.write_text(json.dumps({report!r}))\n"
+            f"print({BANNER!r})\n")
+    row = _enclose_with(project, monkeypatch, code, "inside-input", steps=("23",))
+    assert row.status == "PASS", row.detail
+    assert (project / output).is_file()
+    receipt = project / "reports/audit/windows/inside-input/publication.json"
+    assert receipt.is_file()
+    publication = json.loads(receipt.read_text())
+    assert publication["status"] == "PUBLISHED"
+    assert output in publication["outputs"]
+    assert "phase3/input.def" in publication["inputs"]
+
+
+def test_enclosing_window_stops_before_publishing_missing_citation(
+        project, monkeypatch):
+    report = _rows(("sta_signoff", "PASS", "", ""))
+    report["verdict"] = "PASS"
+    output = "reports/phase3/sta/post_route_summary.json"
+    code = ("import json, pathlib, sys\n"
+            "iso = pathlib.Path(sys.argv[1])\n"
+            f"out = iso / {output!r}\n"
+            "out.parent.mkdir(parents=True, exist_ok=True)\n"
+            "out.write_text(json.dumps({'output_files': ['./missing.def']}))\n"
+            "record = iso / 'reports/orchestrator/phase3_one_shot.json'\n"
+            "record.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"record.write_text(json.dumps({report!r}))\n"
+            f"print({BANNER!r})\n")
+
+    row = _enclose_with(project, monkeypatch, code, "missing-citation",
+                        steps=("23",))
+
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.MISSING_ARTEFACT
+    assert "window cited input absent: ./missing.def" in row.detail
+    assert not (project / output).exists()
+    assert not (project / "reports/audit/windows/missing-citation/"
+            "publication.json").exists()
+
+
+@pytest.mark.parametrize("case", ["missing_component", "file_component",
+                                  "symlink_parent"])
+def test_enclosing_window_resolves_citation_components_before_publication(
+        project, tmp_path, monkeypatch, case):
+    decoy = project / "payload.def"
+    decoy.write_text("decoy bytes")
+    if case == "missing_component":
+        citation = "absent/../payload.def"
+        assert not (project / "absent").exists()
+    elif case == "file_component":
+        # A regular file before ".." cannot be walked through: the literal
+        # spelling does not open, whatever a lexical ".." would reach.
+        (project / "x.def").write_text("not a directory")
+        citation = "x.def/../payload.def"
+        with pytest.raises(NotADirectoryError):
+            (project / citation).open()
+    else:
+        outside = tmp_path / "outside"
+        child = outside / "child"
+        child.mkdir(parents=True)
+        (outside / "payload.def").write_text("outside bytes")
+        (project / "link").symlink_to(child, target_is_directory=True)
+        citation = "link/../payload.def"
+        assert (project / citation).resolve(strict=True) == outside / "payload.def"
+
+    report = _rows(("sta_signoff", "PASS", "", ""))
+    report["verdict"] = "PASS"
+    output = "reports/phase3/sta/post_route_summary.json"
+    code = ("import json, pathlib, sys\n"
+            "iso = pathlib.Path(sys.argv[1])\n"
+            f"out = iso / {output!r}\n"
+            "out.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"out.write_text(json.dumps({{'output_files': [{citation!r}]}}))\n"
+            "record = iso / 'reports/orchestrator/phase3_one_shot.json'\n"
+            "record.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"record.write_text(json.dumps({report!r}))\n"
+            f"print({BANNER!r})\n")
+
+    row = _enclose_with(project, monkeypatch, code, case, steps=("23",))
+
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.MISSING_ARTEFACT
+    assert ("window input outside project" if case == "symlink_parent"
+            else "window cited input absent") in row.detail
+    assert decoy.read_text() == "decoy bytes"
+    assert not (project / output).exists()
+    assert not (project / f"reports/audit/windows/{case}/publication.json").exists()
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_window_citation_through_a_file_component_is_absent(
+        project, tmp_path, absolute):
+    """`x.def/../payload.def` with x.def a regular file: the literal path
+    raises ENOTDIR, so nothing may be bound to the lexical target."""
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    owner = project if absolute else isolated
+    (owner / "x.def").write_text("a file, not a directory")
+    (owner / "payload.def").write_text("payload")
+    citation = (str(owner / "x.def/../payload.def") if absolute
+                else "x.def/../payload.def")
+    result = isolated / "result.json"
+    result.write_text(json.dumps({"output_files": [citation]}))
+
+    published, error = p3._phase3_window_publication(
+        project, isolated, [result], "file-component")
+
+    assert published == []
+    assert "window cited input absent" in error, error
+    assert not (project / "result.json").exists()
+    assert not (project / "reports/audit/windows/file-component/"
+                "publication.json").exists()
+
+
+@pytest.mark.parametrize("spelling", ["carried_link", "root_link", "dotdot"])
+def test_window_absolute_citation_spelled_into_the_copy_is_refused(
+        project, tmp_path, spelling):
+    """A path spelled through the disposable copy dangles once the copy is
+    removed, even when it resolves back into the project (bf9318cc8)."""
+    (project / "phase3").mkdir()
+    (project / "phase3/real.def").write_text("project bytes")
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    if spelling == "carried_link":
+        # `cp -a` keeps a legacy absolute intra-project link verbatim.
+        (isolated / "steps").mkdir()
+        (isolated / "steps/alias").symlink_to(project / "phase3",
+                                              target_is_directory=True)
+        citation = str(isolated / "steps/alias/real.def")
+    elif spelling == "root_link":
+        (isolated / "rootlink").symlink_to(project, target_is_directory=True)
+        citation = str(isolated / "rootlink/phase3/real.def")
+    else:
+        citation = f"{isolated}/../{project.name}/phase3/real.def"
+    assert Path(citation).resolve(strict=True) == project / "phase3/real.def"
+    result = isolated / "result.json"
+    result.write_text(json.dumps({"input_def": citation}))
+
+    published, error = p3._phase3_window_publication(
+        project, isolated, [result], "spelled-into-copy")
+
+    assert published == []
+    assert "window input outside project" in error, error
+    assert not (project / "result.json").exists()
+    assert not (project / "reports/audit/windows/spelled-into-copy/"
+                "publication.json").exists()
+
+
+@pytest.mark.parametrize("spelling", ["outside_prefix_link", "in_project_link"])
+def test_window_absolute_citation_spelling_the_project_by_a_link_publishes(
+        project, tmp_path, spelling):
+    """Control: an absolute spelling of the project itself, through a link
+    that never enters the copy, is still bound by SHA."""
+    (project / "phase3").mkdir()
+    (project / "phase3/real.def").write_text("project bytes")
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    if spelling == "outside_prefix_link":
+        (tmp_path / "plink").symlink_to(project, target_is_directory=True)
+        citation = str(tmp_path / "plink/phase3/real.def")
+    else:
+        (project / "steps").mkdir()
+        (project / "steps/alias").symlink_to(project / "phase3",
+                                             target_is_directory=True)
+        citation = str(project / "steps/alias/real.def")
+    result = isolated / "result.json"
+    result.write_text(json.dumps({"input_def": citation}))
+
+    published, error = p3._phase3_window_publication(
+        project, isolated, [result], "project-by-link")
+
+    assert error == "", error
+    assert published == [str(project / "result.json")]
+    receipt = json.loads((project / "reports/audit/windows/project-by-link/"
+                          "publication.json").read_text())
+    assert receipt["status"] == "PUBLISHED"
+    assert "phase3/real.def" in receipt["inputs"]
+
+
+def test_enclosing_window_refuses_citation_through_a_carried_absolute_link(
+        project, monkeypatch):
+    """The integrity probe: a legacy absolute intra-project link under steps/
+    rides into the copy; citing the copy's spelling must not publish."""
+    (project / "phase3").mkdir()
+    (project / "phase3/input.def").write_text("source DEF")
+    (project / "steps/23").mkdir(parents=True)
+    (project / "steps/23/input.def").symlink_to(project / "phase3/input.def")
+    report = _rows(("sta_signoff", "PASS", "", ""))
+    report["verdict"] = "PASS"
+    output = "reports/phase3/sta/post_route_summary.json"
+    code = ("import json, pathlib, sys\n"
+            "iso = pathlib.Path(sys.argv[1])\n"
+            f"out = iso / {output!r}\n"
+            "out.parent.mkdir(parents=True, exist_ok=True)\n"
+            "out.write_text(json.dumps({'input_def': str(iso / 'steps/23/input.def')}))\n"
+            "record = iso / 'reports/orchestrator/phase3_one_shot.json'\n"
+            "record.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"record.write_text(json.dumps({report!r}))\n"
+            f"print({BANNER!r})\n")
+
+    row = _enclose_with(project, monkeypatch, code, "carried-link",
+                        steps=("23",))
+
+    assert row.status == "NOT_MEASURED", row.detail
+    assert "window input outside project" in row.detail
+    assert not (project / output).exists()
+    assert not (project / "reports/audit/windows/carried-link/"
+                "publication.json").exists()
+
+
+def test_window_publishes_dot_relative_file_reference(project, tmp_path):
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    payload = isolated / "payload with space.def"
+    payload.write_text("private output")
+    result = isolated / "result.json"
+    result.write_text(json.dumps({"output_file": "./payload with space.def"}))
+
+    published, error = p3._phase3_window_publication(
+        project, isolated, [result], "dot-relative")
+
+    assert error == "", error
+    assert set(published) == {str(project / "result.json"),
+                              str(project / payload.name)}
+    assert (project / payload.name).read_text() == "private output"
+    receipt = json.loads((project / "reports/audit/windows/dot-relative/"
+                          "publication.json").read_text())
+    assert receipt["status"] == "PUBLISHED"
+    assert payload.name in receipt["outputs"]
+    assert payload.name in receipt["inputs"]
+
+
+@pytest.mark.parametrize("spelling", [
+    "./payload.def", "payload.def", "a/../payload.def",
+    "dir with space/payload.def",
+])
+@pytest.mark.parametrize("present", [True, False])
+def test_window_structured_relative_citation_requires_file(
+        project, tmp_path, spelling, present):
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    target = isolated / spelling
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if present:
+        target.write_text("cited output")
+    result = isolated / "result.json"
+    result.write_text(json.dumps({"output_files": [spelling]}))
+
+    published, error = p3._phase3_window_publication(
+        project, isolated, [result], "structured-relative")
+    receipt = project / "reports/audit/windows/structured-relative/publication.json"
+    if present:
+        rel = str(target.resolve().relative_to(isolated.resolve()))
+        assert error == "", error
+        assert set(published) == {str(project / "result.json"), str(project / rel)}
+        assert (project / rel).read_text() == "cited output"
+        body = json.loads(receipt.read_text())
+        assert body["status"] == "PUBLISHED"
+        assert rel in body["inputs"] and rel in body["outputs"]
+    else:
+        assert published == []
+        assert "absent" in error or "missing" in error
+        assert not (project / "result.json").exists()
+        assert not receipt.exists()
+
+
+@pytest.mark.parametrize("location", ["project", "outside", "escaping_symlink"])
+@pytest.mark.parametrize("present", [True, False])
+def test_window_structured_absolute_and_symlink_citations(
+        project, tmp_path, location, present):
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    if location == "project":
+        target = project / "input.def"
+        citation = str(target)
+    else:
+        target = tmp_path / "outside.def"
+        if location == "escaping_symlink":
+            link = isolated / "escape.def"
+            link.symlink_to(target)
+            citation = "escape.def"
+        else:
+            citation = str(target)
+    if present:
+        target.write_text("cited input")
+    result = isolated / "result.json"
+    result.write_text(json.dumps({"output_files": [citation]}))
+
+    published, error = p3._phase3_window_publication(
+        project, isolated, [result], "structured-absolute")
+    receipt = project / "reports/audit/windows/structured-absolute/publication.json"
+    if location == "project" and present:
+        assert error == "", error
+        assert published == [str(project / "result.json")]
+        assert json.loads(receipt.read_text())["inputs"]["input.def"]
+    else:
+        assert published == []
+        assert ("outside" in error if location != "project"
+                else "absent" in error or "missing" in error)
+        assert not (project / "result.json").exists()
+        assert not receipt.exists()
+
+
+def test_window_does_not_replace_a_run_cited_artefact(project, monkeypatch):
+    import hashlib
+    output = "reports/phase3/sta/post_route_summary.json"
+    target = project / output
+    target.parent.mkdir(parents=True)
+    target.write_text('{"old_run":true}')
+    report_path = project / "reports/orchestrator/phase3_one_shot.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text(json.dumps({
+        "verdict": "PASS", "steps": [], "cited_artefacts": {
+            output: hashlib.sha256(target.read_bytes()).hexdigest()}}))
+    report = _rows(("sta_signoff", "PASS", "", ""))
+    report["verdict"] = "PASS"
+    code = _unit(report, rc=0, outputs=(output,))
+    row = _enclose_with(project, monkeypatch, code, "cited-output", steps=("23",))
+    assert row.status == "NOT_MEASURED", row.detail
+    assert "run-cited artefact" in row.detail
+    assert target.read_text() == '{"old_run":true}'
+
+
 def _rows_main_emits():
     """Every StepResult row name `phase3_one_shot_runner` spells literally,
     plus its declared gate tables: the rows a report can carry. The
