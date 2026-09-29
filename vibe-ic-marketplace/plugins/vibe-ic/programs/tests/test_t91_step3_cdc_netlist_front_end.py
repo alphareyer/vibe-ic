@@ -65,7 +65,8 @@ def test_the_netlist_sees_a_crossing_the_regex_arm_misses(tmp_path):
     inside); the flattened netlist can, and the capture is one flop deep.
     """
     pj = _project(tmp_path, "via_sub", FIX / "cdc_via_submodule.v", None, None)
-    rc, doc = _run("clock_domain_reg_crossing_check", str(pj))
+    rc, doc = _run("clock_domain_reg_crossing_check", str(pj),
+                   "--front-end", "regex")
     assert (rc, _rules(doc)) == (0, [])      # the regex arm's known blind spot
     rc, doc = _run("clock_domain_reg_crossing_check", str(pj),
                    "--netlist", str(FIX / "cdc_via_submodule.json"))
@@ -140,8 +141,20 @@ def test_a_selected_netlist_front_end_never_falls_back_to_regex(tmp_path):
         assert (rc, _rules(doc)) == (1, ["NETLIST_MISSING"]), gate
 
 
-def test_no_switch_keeps_the_regex_default(tmp_path):
+def test_no_switch_takes_the_netlist_default(tmp_path):
+    """R-0929-TOOL-DEFAULT (owner, 2026-09-29): the tool is the default. This
+    was `test_no_switch_keeps_the_regex_default` -- with no switch the regex
+    arm decided and passed the submodule crossing it cannot see (0, []). The
+    netlist front end is now the production default for step 3
+    (librelane_contract.PRODUCTION_DEFAULTS), so the same project with its
+    netlist and no switch finds the crossing; naming step 3 `direct` still
+    selects the regex arm, which is kept (HARVEST-then-delete amendment)."""
     pj = _project(tmp_path, "plain", FIX / "cdc_via_submodule.v", None,
+                  FIX / "cdc_via_submodule.json")
+    rc, doc = _run("clock_domain_reg_crossing_check", str(pj))
+    assert (rc, _rules(doc)) == (1, ["CDC_REG_NO_SYNC"])
+    assert doc["summary"]["front_end"] == "netlist"
+    pj = _project(tmp_path, "direct", FIX / "cdc_via_submodule.v", "direct",
                   FIX / "cdc_via_submodule.json")
     rc, doc = _run("clock_domain_reg_crossing_check", str(pj))
     assert (rc, _rules(doc)) == (0, [])

@@ -26,6 +26,13 @@ size floor; no chip-specific literal.
 import sys
 from pathlib import Path
 
+# R-0929-TOOL-DEFAULT (owner, 2026-09-29): the step-3 default front end is the
+# Yosys JSON netlist. These tests pin the REGEX front end's behaviour, which is
+# kept and selectable (HARVEST-then-delete amendment), so each call names it
+# (`front_end="regex"`); the assertions are unchanged. The netlist-arm lessons
+# are pinned in test_t91_step3_cdc_netlist_front_end.py.
+
+
 PLUGIN = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PLUGIN / "programs"))
 import reset_dependency_check as R  # noqa: E402
@@ -73,7 +80,7 @@ def test_synth_netlists_skipped_design_rtl_scanned(tmp_path):
     synth.mkdir(parents=True)
     (synth / "netlist.v").write_text("module top; foo u(.rstn(x),.done(y)); endmodule\n")
     (synth / "netlist_yosys.v").write_text("// gate netlist\n")
-    res = R.audit(str(tmp_path))
+    res = R.audit(str(tmp_path), front_end="regex")
     names_skipped = {Path(s["file"]).name for s in res.summary["skipped"]}
     assert {"netlist.v", "netlist_yosys.v"} <= names_skipped
     assert res.summary["files_scanned"] == 1  # only top.v
@@ -86,7 +93,7 @@ def test_size_floor_skips_large_file(tmp_path):
     big = rtl / "huge_generated.v"
     big.write_text("// pad\n" + ("wire w;\n" * 300_000))  # > 2 MB
     assert big.stat().st_size > R._SIZE_FLOOR_BYTES
-    res = R.audit(str(tmp_path))
+    res = R.audit(str(tmp_path), front_end="regex")
     skipped = {Path(s["file"]).name: s["reason"] for s in res.summary["skipped"]}
     assert "huge_generated.v" in skipped
     assert "size>" in skipped["huge_generated.v"]
@@ -98,7 +105,7 @@ def test_circular_reset_in_design_rtl_still_detected(tmp_path):
     (tmp_path / "phase2/stage1/rtl/top.v").write_text(_CIRCULAR_TOP)
     (tmp_path / "phase2/stage2/synth").mkdir(parents=True)
     (tmp_path / "phase2/stage2/synth/netlist.v").write_text("// netlist\n")
-    res = R.audit(str(tmp_path))
+    res = R.audit(str(tmp_path), front_end="regex")
     assert res.passed is False
     assert any(f.rule == "CIRCULAR_RESET_DEPENDENCY" for f in res.findings)
     assert all(Path(f.file).name == "top.v" for f in res.findings)
@@ -109,7 +116,7 @@ def test_normal_project_skips_nothing(tmp_path):
     rtl = _design_rtl(tmp_path)
     (rtl / "alu.v").write_text("module alu(input clk, input rst_n); endmodule\n")
     (rtl / "fifo.v").write_text("module fifo(input clk, input rst_n); endmodule\n")
-    res = R.audit(str(tmp_path))
+    res = R.audit(str(tmp_path), front_end="regex")
     assert res.summary["files_scanned"] == 2
     assert res.summary["files_skipped"] == 0
     assert res.passed is True
