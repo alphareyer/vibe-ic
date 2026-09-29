@@ -52806,6 +52806,9 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
         if _routed is not None:
             return _routed
     t0 = time.time()
+    # R-0929-DRV-IDENTITY: what this LVS compares is recorded below; an earlier
+    # run's record must never stand for it.
+    (project / "reports/phase3/lvs_inputs.json").unlink(missing_ok=True)
     _vac = _vacuous_on_unrouted(project, "lvs", t0)
     if _vac is not None:
         return _vac
@@ -53062,6 +53065,13 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
             + ("routed-DEF " if not def_file.is_file() else "")
             + ("gate-netlist" if not netlist.is_file() else "")
             + " — run PnR first (#443/#509)", reason_class=_V.ReasonClass.INPUT_ABSENT)
+    # The final DRV capture proves LVS compared the judged layout and netlist
+    # (R-0929-DRV-IDENTITY): the layout DEF and the gate netlist, by sha256.
+    _aa.write_json(project / "reports/phase3/lvs_inputs.json", {
+        "layout_def": {"path": str(def_file.resolve()), "sha256": _sha256_file(def_file)},
+        "schematic_netlist": {"path": str(netlist.resolve()),
+                              "sha256": _sha256_file(netlist)},
+        "selected_because": _nl_reason})
     # ORGANIC-20260606 #477 — run-completion honesty check (b): a 0-byte
     # layout source must NEVER feed a "clean" LVS. Extracting from an empty
     # DEF yields an empty netlist + a meaningless compare; FAIL here BEFORE
@@ -57786,7 +57796,8 @@ _ADVISORY_TIER_SIGNOFF_GATES = {"dfm_screen": "PASS_WITH_ADVISORIES"}
 
 def _run_declared_signoff_gate(project: Path, name: str, program: str,
                                out_rel: str,
-                               extra_argv: tuple = ()) -> StepResult:
+                               extra_argv: tuple = (),
+                               drv_capture_point: str = "in_flow") -> StepResult:
     """Invoke one flow-declared sign-off gate inline, blocking on its verdict.
 
     Exactly two exit codes are verdicts about the design — 0 (PASS) and 1
@@ -57822,7 +57833,7 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
         out_json.unlink(missing_ok=True)
         try:
             import drv_capture_plan as _drv_plan
-            _drv_plan.capture_and_publish(project)
+            _drv_plan.capture_and_publish(project, capture_point=drv_capture_point)
         except (OSError, ValueError, RuntimeError, KeyError) as exc:
             return _signoff_not_checked(
                 name, t0, f"fresh DRV capture did not complete: {exc}")
@@ -58039,8 +58050,13 @@ def step_declared_signoff_gates(project: Path,
         # Forwarded to the same named set, for the same reason `--pdk` is.
         if container and name in _PDK_AWARE_SIGNOFF_GATES:
             extra_argv = tuple(extra_argv) + ("--pdk-container", container)
+        # R-0929-DRV-IDENTITY: these gates run after stream-out and LVS, so
+        # the DRV capture here is the FINAL one: it binds the GDS and the LVS
+        # netlist and proves they derive from the judged DEF / netlist.  Only
+        # this verdict counts toward IC PASS; the pre-stream one is in-flow.
         out.append(_run_declared_signoff_gate(
-            project, name, program, out_rel, extra_argv))
+            project, name, program, out_rel, extra_argv,
+            drv_capture_point="post_stream"))
     # R-0929-PAD-INPUT-DRIVE: no STA PASS on a NOT_MEASURED pad drive.
     out = _ppa_timing.pad_drive_sta_verdict(sys.modules[__name__], project, out)
     return _reconcile_sta_verdict(out)
