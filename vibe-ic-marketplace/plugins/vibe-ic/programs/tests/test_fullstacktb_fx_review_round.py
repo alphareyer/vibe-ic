@@ -297,6 +297,10 @@ def test_nothing_is_inferred_from_names_or_a_denied_sentence():
         _OUT, _IN) == {}
     assert riv.qualifiers_from_statements(
         [(None, "o_data is not qualified by o_we = 1")], _OUT, _IN) == {}
+    # naming both under a condition word is not a declaration: the text must
+    # bind the qualifier's ACTIVE level
+    assert riv.qualifiers_from_statements(
+        [("o_data", "write data, valid when o_we is set up")], _OUT, _IN) == {}
     # a multi-bit port is never a qualifier
     assert riv.qualifiers_from_statements(
         [("o_cyc", "valid when o_data = 1")], _OUT, _IN) == {}
