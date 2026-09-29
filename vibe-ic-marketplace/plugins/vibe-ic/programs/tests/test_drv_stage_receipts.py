@@ -498,7 +498,7 @@ def test_synth_stage_runs_the_census_deck_and_binds_the_receipt(tmp_path):
 @pytest.mark.parametrize("tool_rc", [0, 1])
 def test_pnr_synth_census_uses_the_supervised_deck(tmp_path, monkeypatch, tool_rc):
     """The PnR consumer reaches the real supervised branch and keeps receipts."""
-    from types import SimpleNamespace
+    from functools import partial
     import phase3_one_shot_runner as runner
     project = tmp_path / "proj"
     receipts.claim(project)
@@ -534,8 +534,10 @@ def test_pnr_synth_census_uses_the_supervised_deck(tmp_path, monkeypatch, tool_r
     monkeypatch.setattr(runner, "_local_exec_mode", lambda: False)
     monkeypatch.setattr(runner, "_to_container_path", lambda path, container: str(path))
     monkeypatch.setattr(runner, "_log_invocation", lambda *args, **kwargs: None)
-    runner._take_synth_drv_census(project, "top", SimpleNamespace(liberty="/l.lib"),
-                                 "captured", sdc)
+    receipts.synth_stage_supervised(
+        project, netlist=netlist, top="top", liberties=["/l.lib"], sdc=sdc,
+        to_container=lambda path: runner._to_container_path(str(path), "captured"),
+        execute=partial(runner._docker_exec, "captured"))
     assert len(seen) == 1
     assert (abc.parent / "census.log").read_text().startswith(f"rc={tool_rc}\n")
     row = plan._stages(project, False)[0][0]
