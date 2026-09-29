@@ -362,15 +362,12 @@ def _step32_drv_signoff(project: Path, report: Dict[str, Any]) -> None:
         result = {"name": "DRV(tran/cap/fanout)", "verdict": "NOT_MEASURED",
                   "not_measured": [f"step 32 DRV evidence unavailable: {exc}"]}
     report["drv_signoff"] = result
-    # The rejudge is a gate on the adopted layout, not an unused sidecar.
-    if source.is_file() and result["verdict"] == "FAIL":
-        report["verdict"] = "FAIL"
-    elif (source.is_file() and result["verdict"] == "NOT_MEASURED"
-          and report.get("verdict") != "FAIL"):
-        report["verdict"] = "NOT_MEASURED"
-    elif (source.is_file() and result["verdict"] == "WAIVED"
-          and report.get("verdict") == "PASS"):
-        report["verdict"] = "WAIVED"
+    # R-0929-DRV-IDENTITY / R-0929-STEP32-ADOPT: the DRV judgement is Step
+    # 32's own verdict (residual DRV keeps the step FAIL), recorded apart from
+    # the actuator verdict.  It never gates the handoff of the adopted
+    # candidate and never makes the pre-repair route ship; the sign-off DRV
+    # verdict of the handed-off route is the step-23 / pre-stream capture's.
+    report["drv_signoff_verdict"] = result["verdict"] if source.is_file() else "NOT_MEASURED"
     output = project / "reports/phase3/sta/drv_signoff_step32.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     write_json(output, result)
@@ -1127,7 +1124,10 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
 
 
 def _clear_declared_repair(project: Path) -> None:
-    """A new step-32 attempt invalidates any prior decision and outcome."""
+    """A new step-32 attempt invalidates any prior decision and outcome,
+    including the previous attempt's step-32 report: the in-step DRV judge
+    must never read another round's adoption record (review wave 57)."""
+    (project / REPORT_REL).unlink(missing_ok=True)
     out = project / DECLARED_REPAIR_REL
     for name in ("postroute_timing_repair_decision.json", "repair_log.json",
                  "no_repair_needed.flag"):
