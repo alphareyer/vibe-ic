@@ -26,7 +26,9 @@ stands for the shapes this solver declines.
 
 Latency + bit-order are Plugin-chosen (the spec grants R3 freedom) and the
 oracle self-calibrates them, so the emitted core uses a clean textbook
-carry-save shift-add datapath (LSB-first y / LSB-first p, latency 1). Provenance:
+carry-save shift-add datapath (LSB-first y / LSB-first p; its latency is the
+register-stage count of the emitted serial path, `serial_path_latency`: `yr`
+then `pr`, i.e. 2 -- R-0929-SPM-LATENCY). Provenance:
 authored from the public/textbook carry-save serial-parallel multiplier
 algorithm — NOT copied from any benchmark reference RTL.
 
@@ -330,6 +332,45 @@ endmodule
 """
 
 
+_REG_DECL_RE = re.compile(r"^\s*reg\b[^;]*?([A-Za-z_]\w*)\s*;", re.M)
+_NB_RE = re.compile(r"\b([A-Za-z_]\w*)\s*<=\s*([^;]+);")
+_COMB_RE = re.compile(
+    r"^\s*(?:assign|wire\b[^=;]*?)\s*([A-Za-z_]\w*)\s*=\s*([^;]+);", re.M)
+_IDENT_RE = re.compile(r"\b[A-Za-z_]\w*\b")
+
+
+def serial_path_latency(rtl: str, serial_in: str, serial_out: str) -> Optional[int]:
+    """Clock cycles from a serial input bit to the output bit it reaches: the
+    FEWEST registers on any dependency path from `serial_out` back to
+    `serial_in` in the emitted RTL (a nonblocking `<=` is one register stage,
+    `assign` / `wire x =` is none). Derived from the RTL this solver emits,
+    never restated: on `emit_rtl` the path is y -> yr -> m -> so -> pr -> p,
+    two registers, which every oracle framing search measured
+    (R-0929-SPM-LATENCY; U5). None when no path exists."""
+    regs = set(_REG_DECL_RE.findall(rtl))
+    edges: Dict[str, List[Tuple[str, int]]] = {}
+    for lhs, rhs in _NB_RE.findall(rtl):
+        for ident in _IDENT_RE.findall(rhs):
+            edges.setdefault(lhs, []).append((ident, 1 if lhs in regs else 0))
+    for lhs, rhs in _COMB_RE.findall(rtl):
+        for ident in _IDENT_RE.findall(rhs):
+            edges.setdefault(lhs, []).append((ident, 0))
+    import heapq
+    best = {serial_out: 0}
+    heap = [(0, serial_out)]
+    while heap:
+        cost, node = heapq.heappop(heap)
+        if node == serial_in:
+            return cost
+        if cost > best.get(node, cost):
+            continue
+        for nxt, w in edges.get(node, ()):
+            if cost + w < best.get(nxt, 1 << 30):
+                best[nxt] = cost + w
+                heapq.heappush(heap, (cost + w, nxt))
+    return None
+
+
 def plugin_declaration(spec: Dict[str, Any]) -> Dict[str, Any]:
     """The L7-required ``plugin_output/declaration.json`` payload for *spec*.
 
@@ -337,11 +378,10 @@ def plugin_declaration(spec: Dict[str, Any]) -> Dict[str, Any]:
     states: "Plugin, before starting RTL design, MUST declare {bit_order,
     reset_polarity, latency_cycles, integer_encoding} in
     ``plugin_output/declaration.json``; the L7 comparison procedure reads this
-    file to correctly pair reference outputs." This solver's own choices for
-    all four are already FIXED and stated in its module docstring and in
-    ``emit_rtl``'s comment block ("LSB-first y / LSB-first p, latency 1") — the
-    values here are not derived or guessed, only restated in the schema the
-    spec's own comparison procedure reads.
+    file to correctly pair reference outputs." Bit order, encoding and reset
+    polarity are this solver's FIXED choices, stated in ``emit_rtl``'s comment
+    block ("LSB-first y / LSB-first p"); the latency is counted on the RTL that
+    block heads (below) -- none of the four is guessed.
 
     ``bit_order``   : LSB_first — both the serial multiplier input and the
                      serial product output shift LSB-first (see ``emit_rtl``'s
@@ -349,10 +389,12 @@ def plugin_declaration(spec: Dict[str, Any]) -> Dict[str, Any]:
     ``reset_polarity``: read from ``spec["rst_active_low"]``, which
                      ``extract_serial_parallel_mul_spec`` already derived from
                      the design's own reset port name — never re-derived here.
-    ``latency_cycles``: 1 — one register stage (``yr``) between a serial input
-                     bit and the product bit it contributes to; stated, not
-                     computed, because the datapath topology is fixed by
-                     ``emit_rtl`` and this solver is the only writer of it.
+    ``latency_cycles``: the register stages between a serial input bit and
+                     the product bit it reaches, COUNTED on the RTL
+                     ``emit_rtl`` returns (``serial_path_latency``): ``yr``
+                     then ``pr``, 2. It used to be the literal 1 ("one
+                     register stage (``yr``)"), which missed ``pr``; every
+                     oracle framing search measured 2 (R-0929-SPM-LATENCY).
     ``integer_encoding``: unsigned — the algorithm computes
                      ``p = (x * y) mod 2^N``; ``emit_rtl`` declares no signed
                      port and applies no two's-complement handling anywhere.
@@ -360,7 +402,8 @@ def plugin_declaration(spec: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "bit_order": "LSB_first",
         "reset_polarity": "active_low" if spec["rst_active_low"] else "active_high",
-        "latency_cycles": 1,
+        "latency_cycles": serial_path_latency(
+            emit_rtl(spec), spec["serial_in"], spec["serial_out"]),
         "integer_encoding": "unsigned",
     }
 

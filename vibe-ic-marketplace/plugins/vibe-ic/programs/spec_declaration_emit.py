@@ -460,12 +460,41 @@ def measured_framing(project: Path) -> Dict[str, Tuple[Any, str]]:
     return {}
 
 
+def same_framing(name: str, declared: Any, measured: Any) -> bool:
+    """Does `declared` state the framing `measured` found?
+
+    Judged in the ORACLE's own vocabulary, not by exact JSON: the oracle TB
+    that measured the framing reads a declaration through
+    `arith_oracle_tb_gen.read_declared_conventions`, which takes
+    `LSB-first` / `lsb_first` / `lsb` as one bit order and `"2"` as latency 2.
+    A spelling the measuring instrument accepts is the same framing."""
+    if name == "latency_cycles":
+        try:
+            return (type(declared) is not bool
+                    and int(str(declared).strip()) == int(measured))
+        except (TypeError, ValueError):
+            return False
+    if name == "bit_order":
+        try:
+            import arith_oracle_tb_gen as _ao  # noqa: PLC0415
+        except Exception:  # pragma: no cover - incomplete install
+            return _same_declared_value(declared, measured)
+
+        def _order(v: Any) -> Optional[str]:
+            t = str(v).strip().lower()
+            return ("LSB" if t in _ao._BIT_ORDER_LSB
+                    else "MSB" if t in _ao._BIT_ORDER_MSB else None)
+        a, b = _order(declared), _order(measured)
+        return a is not None and a == b
+    return _same_declared_value(declared, measured)
+
+
 def measurement_disagreements(project: Path,
                               declared: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Every declared field the oracle measured to a DIFFERENT value."""
     out: List[Dict[str, Any]] = []
     for name, (value, source) in sorted(measured_framing(project).items()):
-        if name in declared and not _same_declared_value(declared[name], value):
+        if name in declared and not same_framing(name, declared[name], value):
             out.append({"field": name, "declared": declared[name],
                         "measured": value, "measured_at": source})
     return out
@@ -1298,11 +1327,22 @@ def resolve(contract: Dict[str, Any],
                             % (contract.get("source", "the spec"),
                                ("no value" if now is UNDETERMINED
                                 else repr(now)), name)))
-            if name in measured and (
+            # A value the SPEC designates, or the RTL declares, is a statement
+            # of intent the measurement is judged AGAINST -- never one it
+            # overwrites. When either disagrees with the measurement nothing
+            # is replaced, and `verify_declaration` FAILs the disagreement.
+            _intent = []
+            if len(designated) == 1:
+                _intent.append(_coerce(designated[0]))
+            if name in rtl_declared:
+                _intent.append(rtl_declared[name][0])
+            if name in measured and not any(
+                    not same_framing(name, v, measured[name][0])
+                    for v in _intent) and (
                     entry.get("provenance_verified") is False
                     or entry.get("provenance") == MEASURED_PROVENANCE):
                 m_value, m_source = measured[name]
-                if not _same_declared_value(m_value, existing[name]):
+                if not same_framing(name, existing[name], m_value):
                     entry = {k: v for k, v in entry.items()
                              if k not in ("provenance_note",
                                           "provenance_diverged",
@@ -1844,6 +1884,23 @@ def verify_declaration(project: Path, contract: Dict[str, Any],
     # design, whoever wrote it.
     result["measurement_disagreements"] = measurement_disagreements(
         project, loaded)
+    # The spec's own single designation is intent too: a design measured to
+    # do something else does not meet its spec, whatever the file says.
+    _measured = measured_framing(project)
+    for f in contract["fields"]:
+        name = f["name"]
+        designated = list(f.get("designated_values") or [])
+        if name not in _measured or len(designated) != 1:
+            continue
+        want = _coerce(designated[0])
+        if want is UNDETERMINED or same_framing(name, want, _measured[name][0]):
+            continue
+        if any(d["field"] == name for d in result["measurement_disagreements"]):
+            continue
+        result["measurement_disagreements"].append({
+            "field": name, "declared": want,
+            "declared_by": "spec designation (%s)" % contract["source"],
+            "measured": _measured[name][0], "measured_at": _measured[name][1]})
 
     if result["measurement_disagreements"]:
         result["verdict"] = "FAIL_MEASUREMENT_DISAGREES"
