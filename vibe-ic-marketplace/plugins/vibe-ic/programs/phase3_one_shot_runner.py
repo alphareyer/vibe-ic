@@ -23477,6 +23477,22 @@ def _build_spare_postfix_tcl(plan: Dict[str, Any],
             # must not print the same line as one that tied off everything.
             "  puts \"SPARE_TIEOFF_CONNECTED $_tie_n of $_tie_tot\"",
             "  puts \"SPARE_TIEOFF_DRIVERS $_tie_drv\"",
+            # EVERY non-supply input of every spare, with the net it now has
+            # ("-" when none). The count above says how many pins this loop
+            # tied; only this list says WHICH pins exist, so a reader can prove
+            # none was outside the set (U6: a CLOCK-use pin was, on spm v5c).
+            f"  foreach _sp [list {_xy_tcl}] {{",
+            "    set _si [$_blk findInst [lindex $_sp 0]]",
+            "    if {$_si eq \"NULL\" || $_si eq \"\"} { continue }",
+            "    foreach _it [$_si getITerms] {",
+            "      set _mt [$_it getMTerm]",
+            "      if {[$_mt getIoType] ne \"INPUT\"} { continue }",
+            "      if {[$_mt getSigType] in {POWER GROUND}} { continue }",
+            "      set _nn [$_it getNet]",
+            "      set _nm [expr {($_nn eq \"NULL\" || $_nn eq \"\") ? \"-\" : [$_nn getName]}]",
+            "      puts \"SPARE_INPUT_PIN [$_si getName] [$_mt getName] [$_mt getSigType] $_nm\"",
+            "    }",
+            "  }",
             "  puts \"SPARE_TIEOFF_DONE: nets $_spare_tie_nets\"",
             "} _tie_err]} { puts \"SPARE_TIEOFF_NONFATAL: $_tie_err\" }",
             # === #563 r3: tie-driver legalization — ITS OWN catch, ALWAYS runs
@@ -23574,6 +23590,11 @@ def _build_spare_postfix_tcl(plan: Dict[str, Any],
 _SPARE_TIEOFF_COUNT_RE = re.compile(
     r"SPARE_TIEOFF_CONNECTED\s+(\d+)\s+of\s+(\d+)")
 
+# `SPARE_INPUT_PIN <inst> <pin> <use> <net|->` — one line per non-supply
+# input of every spare, printed by both insertion paths after the tie-off.
+_SPARE_INPUT_PIN_RE = re.compile(
+    r"\bSPARE_INPUT_PIN\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)[ \t]*$", re.M)
+
 
 def _spare_tieoff_measured_from_log(log_path: Path) -> Dict[str, Any]:
     """MEASURE the spare tie-off from OpenROAD's own log instead of asserting it.
@@ -23624,6 +23645,24 @@ def _spare_tieoff_measured_from_log(log_path: Path) -> Dict[str, Any]:
         return out
     connected, candidates = int(hits[-1][0]), int(hits[-1][1])
     out.update(measured=True, connected=connected, candidates=candidates)
+    # WHICH pins exist, each with its net: the enumeration the count is over.
+    # Both insertion paths print it right after the count, so the LAST pass's
+    # list is the text after the last count line (the retry reason above).
+    _pins = _SPARE_INPUT_PIN_RE.findall(
+        text[text.rfind("SPARE_TIEOFF_CONNECTED"):])
+    if _pins:
+        out["inputs"] = [{"inst": i, "pin": p, "use": u,
+                          "net": None if n == "-" else n}
+                         for i, p, u, n in _pins]
+        _open = [f"{r['inst']}/{r['pin']}" for r in out["inputs"]
+                 if r["net"] is None]
+        if _open:
+            out["tied_off"] = False
+            out["reason"] = (
+                f"measured {connected}/{candidates} counted input(s) tied, but "
+                f"{len(_open)} spare input(s) have no net: "
+                + ", ".join(_open[:20]))
+            return out
     if candidates == 0:
         out["tied_off"] = True
         out["reason"] = ("no unconnected spare inputs to tie — vacuously tied "
