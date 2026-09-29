@@ -281,6 +281,27 @@ def main(argv=None) -> int:
     decision = _repair_dec.decide(
         stance_path, single_corner_clean, project=project,
         single_corner_evidence=info["timing_measurement"])
+    # R-0929-STEP32-RECORD — the recorded Step-32 decision is read only when
+    # it is bound to the bytes it was decided from; an unbound or stale
+    # record certifies nothing, so the no-repair flag is withdrawn. A bound
+    # repair_needed=true (the producer's receipt, or the canonical record of
+    # an adopted repair) is ORed in: this generator never flips it to false.
+    record_path = postroute_timing_repair_dir / "postroute_timing_repair_decision.json"
+    measured_step32 = None
+    if record_path.is_file():
+        try:
+            measured_step32 = _repair_dec.verify_receipt(
+                project, json.loads(record_path.read_text(errors="replace")))
+        except (OSError, ValueError, TypeError) as exc:
+            (postroute_timing_repair_dir / "no_repair_needed.flag").unlink(missing_ok=True)
+            print(f"NOT_MEASURED: Step-32 decision invalid: {exc}", file=sys.stderr)
+            return 2
+    if measured_step32 and measured_step32["repair_needed"] and not decision["repair_needed"]:
+        decision["repair_needed"] = True
+        decision["basis"] += "+measured_step32"
+        decision["reason"] += (
+            f"; the recorded Step-32 decision says repair_needed=true "
+            f"(action={measured_step32.get('action')})")
     summary = {
         "program": "postroute_timing_repair_status_gen",
         "version": "1.1.0",
@@ -297,6 +318,8 @@ def main(argv=None) -> int:
     summary["timing_repair_needed"] = decision["timing_repair_needed"]
     if decision["nontiming_failures"]:
         summary["nontiming_failures"] = decision["nontiming_failures"]
+    if measured_step32 is not None:
+        summary["measured_step32_repair_needed"] = measured_step32["repair_needed"]
     if info["non_path_violations"]["count"]:
         # Disclosed, not judged here: Step 23's STA record gate owns the DRV
         # verdict. Folding these rows into the timing verdict would call a
