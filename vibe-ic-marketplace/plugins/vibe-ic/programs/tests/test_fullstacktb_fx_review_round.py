@@ -80,9 +80,9 @@ def test_a_measured_functional_fail_is_not_informational(tmp_path,
     passed, reasons = fcc._evaluate_gate(proj, {"program_exit_zero": _GATE_CMD})
     assert passed is False
     assert any(r.startswith("program failed:") for r in reasons)
+    assert fcc._step_failure_is_informational_only(_step5(reasons)) is False
     assert any(r.startswith(fcc._INFORMATIONAL_MEASURED_FAIL_PREFIX)
                and "functional_full_stack_mismatch" in r for r in reasons)
-    assert fcc._step_failure_is_informational_only(_step5(reasons)) is False
 
 
 def test_the_legacy_skeleton_failure_stays_informational(tmp_path):
@@ -317,6 +317,8 @@ def test_declared_output_qualifiers_reads_l9(tmp_path):
 def _glitch_tb(qualifiers=None):
     case = {"name": "g", "stimulus": "rst glitch 不應導致 fetch race",
             "expected": "holds"}
+    if qualifiers is None:
+        return riv.emit_case_oracle_from_ports(case, "dut", _IN, _OUT, [])
     return riv.emit_case_oracle_from_ports(case, "dut", _IN, _OUT, [],
                                            qualifiers=qualifiers)
 
