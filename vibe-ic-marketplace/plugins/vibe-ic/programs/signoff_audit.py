@@ -1228,6 +1228,74 @@ def _si_vacuity_disclosures(project_dir: Path) -> dict:
     return out
 
 
+#: U17 — the timing slot certifies the SIGN-OFF VERDICTS, not a report's
+#: existence. Step 23's declared verdict (its `sta_report_check` output, a
+#: step-23 `required_outputs` entry the runner writes inline) and step 32's
+#: own gate evaluation. A -55 ns post-route report is a timing report; it is
+#: not tape-out timing.
+_STEP23_VERDICT_REL = "reports/phase3/sta/post_route_summary.json"
+_STEP32_LIBRELANE_REL = "reports/phase3/librelane_postroute_repair.json"
+#: step-32 audit categories that mean "no measured verdict", not "measured bad"
+_STEP32_UNMEASURED = frozenset({
+    "NO_REPAIR_ARTIFACT", "BAD_JSON", "STA_REPORT_MISSING",
+    "TIMING_BASIS_NOT_MEASURED", "SIGNOFF_DOMAIN_NOT_DETERMINED"})
+
+
+def _step23_timing_verdict(project_dir: Path) -> tuple:
+    """``(state, reason)`` for step 23's sign-off STA verdict.
+
+    PASS only when the declared summary parses and says ``passed: true``.
+    Absent or unreadable is NOT_MEASURED; anything else is FAIL, named by the
+    first ERROR finding the summary carries."""
+    path = project_dir / _STEP23_VERDICT_REL
+    if not path.is_file():
+        return "NOT_MEASURED", f"{_STEP23_VERDICT_REL} is absent"
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return "NOT_MEASURED", f"{_STEP23_VERDICT_REL} unreadable: {exc}"
+    if not isinstance(doc, dict):
+        return "NOT_MEASURED", f"{_STEP23_VERDICT_REL} is not a JSON object"
+    if doc.get("passed") is True and doc.get("verdict") in (None, "PASS"):
+        return "PASS", f"{_STEP23_VERDICT_REL}: passed"
+    errs = [f for f in (doc.get("findings") or [])
+            if isinstance(f, dict) and f.get("severity") == "ERROR"]
+    why = (f"{errs[0].get('rule')}: {str(errs[0].get('message'))[:200]}"
+           if errs else f"verdict={doc.get('verdict')!r} passed={doc.get('passed')!r}")
+    return "FAIL", f"{_STEP23_VERDICT_REL}: {why}"
+
+
+def _step32_timing_verdict(project_dir: Path) -> tuple:
+    """``(state, reason)`` for step 32's sign-off verdict.
+
+    Step 32's own gate (`postroute_timing_repair_audit.audit`) is evaluated
+    here rather than read from a gate JSON the same audit may not have
+    written yet. When the tool arm ran, its report's verdict (timing, DRV and
+    census, R-0929-DRV-IDENTITY) must also be PASS."""
+    if _PROGRAMS_DIR not in sys.path:
+        sys.path.insert(0, _PROGRAMS_DIR)
+    import postroute_timing_repair_audit as _pra  # noqa: PLC0415
+    findings, stats = _pra.audit(project_dir)
+    errs = [f for f in findings if f.severity == "ERROR"]
+    if errs:
+        state = ("NOT_MEASURED" if any(f.category in _STEP32_UNMEASURED
+                                       for f in errs) else "FAIL")
+        return state, (f"postroute_timing_repair_audit {errs[0].category}: "
+                       f"{str(errs[0].message)[:200]}")
+    ll = project_dir / _STEP32_LIBRELANE_REL
+    if ll.is_file():
+        try:
+            doc = json.loads(ll.read_text())
+        except (OSError, ValueError) as exc:
+            return "NOT_MEASURED", f"{_STEP32_LIBRELANE_REL} unreadable: {exc}"
+        verdict = doc.get("verdict") if isinstance(doc, dict) else None
+        if verdict != "PASS":
+            return ("FAIL" if verdict == "FAIL" else "NOT_MEASURED"), (
+                f"{_STEP32_LIBRELANE_REL}: verdict={verdict!r} "
+                f"{str((doc or {}).get('reason') or '')[:200]}".rstrip())
+    return "PASS", "postroute_timing_repair_audit: pass"
+
+
 # ---------------------------------------------------------------------------
 # Mode: tapeout
 # ---------------------------------------------------------------------------
@@ -1408,13 +1476,30 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
                                        _timing_rank)
     timing_signoff = [p for p in timing_files
                       if _timing_rank(p, project_dir) != _PRESIGNOFF_RANK]
-    if timing_signoff:
+    timing_verdicts = {"23": _step23_timing_verdict(project_dir),
+                       "32": _step32_timing_verdict(project_dir)}
+    timing_not_pass = {k: v for k, v in timing_verdicts.items()
+                       if v[0] != "PASS"}
+    if timing_signoff and timing_not_pass:
+        # U17: a report is present, but the sign-off steps that judged it did
+        # not PASS. The slot is not credited; each step is named with its state.
+        evidence["timing"] = False
+        for step, (state, why) in sorted(timing_not_pass.items()):
+            result.findings.append(Finding(
+                rule=f"TAPEOUT_TIMING_STEP{step}_{state}", severity="ERROR",
+                message=(f"Timing report {timing_signoff[0].name} is present, "
+                         f"but the Step-{step} sign-off verdict is {state} "
+                         f"({why}); tape-out timing needs Step 23 and Step 32 "
+                         f"to PASS, not a report to exist."),
+                file=str(timing_signoff[0])))
+    elif timing_signoff:
         chosen_timing = timing_signoff[0]
         evidence["timing"] = True
         evidence_count += 1
         result.findings.append(Finding(
             rule="TAPEOUT_TIMING_EXISTS", severity="INFO",
-            message=f"Timing report found: {chosen_timing.name}",
+            message=(f"Timing report found: {chosen_timing.name}; Step 23 and "
+                     f"Step 32 sign-off verdicts PASS"),
             file=str(chosen_timing)))
     elif timing_files:
         evidence["timing"] = False
@@ -1916,6 +2001,9 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
         "lvs_power_pin_only_waived": lvs_power_pin_waived,
         "lvs_report": str(lvs_report) if lvs_report else "",
         "lvs_verdict": lvs_verdict or "",
+        "timing_signoff_verdicts": {
+            k: {"state": v[0], "reason": v[1]}
+            for k, v in sorted(timing_verdicts.items())},
         "si_signoff": {
             "state": si_state,
             "report": si_detail.get("report", ""),

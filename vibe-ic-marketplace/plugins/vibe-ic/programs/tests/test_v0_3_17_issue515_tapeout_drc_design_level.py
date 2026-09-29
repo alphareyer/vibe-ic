@@ -27,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _gdsii  # noqa: E402
 import _si_signoff_fixture  # noqa: E402
+import _tapeout_timing_fixture  # noqa: E402
 
 # 2026-07-27 (review follow-up): the tape-out GDS slot credits ONLY the flow's
 # declared stream-out artefact (phase3/stage4/gds/*.gds), and only when it
@@ -83,6 +84,8 @@ def _proj(tmp_path, drc_text=None, drc_name="drc_signoff.rpt"):
     # SI verdict — without one every case here would collapse onto the
     # SI refusal and stop discriminating what it exists to pin.
     _si_signoff_fixture.write_proved_si_report(tmp_path)
+    # U17: the timing slot credits Step 23/32 PASS verdicts, not a report.
+    _tapeout_timing_fixture.write_timing_signoff_pass(tmp_path)
     if drc_text is not None:
         (tmp_path / drc_name).write_text(drc_text)
     return tmp_path
