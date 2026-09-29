@@ -324,3 +324,74 @@ def test_step5_generate_builds_with_the_trace_top(tmp_path, monkeypatch):
     assert build[-2].endswith(f"{FSF.TRACE_TOP}.v")
     assert build[-1].endswith("c1.v")       # the case testbench stays last
     assert rec["dut_ports"] == [{"name": "clk", "direction": "input"}]
+
+
+# ── round 2: a large member is parsed in full; the vectors are re-hashed ────
+
+def test_an_open_item_in_a_member_longer_than_the_todo_slice_still_fails(
+        tmp_path):
+    """r2 MAJOR 1. The gate parsed `read_text()[:20000]`; a member longer than
+    that became a silent non-dict and every rule on it switched off. 120 L10
+    seeds and no Step-5 record put corner_test_vectors.json far past the slice
+    (each unconverted seed carries its reason) with our item still OPEN."""
+    proj = _project(tmp_path)
+    l10 = proj / "phase1/generated_docs/L10_TEST_CASES.json"
+    l10.write_text(json.dumps({"test_cases": [
+        {"id": f"case_{i:03d}"} for i in range(120)]}))
+    FH.main([str(proj)])
+    member = proj / "phase3/stage4/foundry_handoff/corner_test_vectors.json"
+    assert len(member.read_text()) > 20000
+    item = {i["field"]: i for i in json.loads(member.read_text())[
+        "open_items"]}["PENDING_FOUNDRY_test_patterns"]
+    assert item["status"] == "OPEN"
+    rc, _rep, rules = _gate(proj)
+    assert OPEN_RULE in rules
+    assert rc == 1
+
+
+def test_a_member_that_is_not_json_is_refused_by_name(tmp_path):
+    proj = _project(tmp_path)
+    S5.plant(proj)
+    FH.main([str(proj)])
+    member = proj / "phase3/stage4/foundry_handoff/corner_test_vectors.json"
+    member.write_text(member.read_text()[:-40])
+    rc, _rep, rules = _gate(proj)
+    assert rc == 1 and "FOUNDRY_HANDOFF_MEMBER_UNPARSEABLE" in rules
+
+
+def test_an_altered_vector_file_fails(tmp_path):
+    """r2 MAJOR 2. The .vec.gz is the pattern a tester loads; the header only
+    describes it. Fabricated rows (header untouched) must not stay CLOSED."""
+    proj = _project(tmp_path)
+    S5.plant(proj)
+    FH.main([str(proj)])
+    assert _gate(proj)[0] == 0
+    vec = proj / "phase3/stage4/foundry_handoff/ate_patterns" \
+        / f"{S5.CASE}.vec.gz"
+    vec.write_bytes(gzip.compress(b"0 fabricated_rows 1 1_0\n", mtime=0))
+    rc, _rep, rules = _gate(proj)
+    assert rc == 1 and CLOSED_RULE in rules
+
+
+def test_a_deleted_vector_file_fails(tmp_path):
+    proj = _project(tmp_path)
+    S5.plant(proj)
+    FH.main([str(proj)])
+    (proj / "phase3/stage4/foundry_handoff/ate_patterns"
+     / f"{S5.CASE}.vec.gz").unlink()
+    rc, _rep, rules = _gate(proj)
+    assert rc == 1 and CLOSED_RULE in rules
+
+
+def test_a_source_trace_that_is_not_step5s_passed_trace_fails(tmp_path):
+    """A header whose source_trace names some other project file with its
+    real hash does not close our item: the trace must be the one the Step-5
+    record lists for that case in state passed."""
+    proj = _project(tmp_path)
+    rec = S5.plant(proj)
+    FH.main([str(proj)])
+    assert _gate(proj)[0] == 0
+    rec["cases"][0]["state"] = "failed"
+    (proj / S5.STEP5_REL).write_text(json.dumps(rec))
+    rc, _rep, rules = _gate(proj)
+    assert rc == 1 and CLOSED_RULE in rules
