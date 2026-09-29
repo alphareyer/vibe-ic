@@ -37,7 +37,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
 import formal_property_run as _F  # noqa: E402
-from not_verified_tier import not_verified_reason  # noqa: E402
+from not_verified_tier import not_verified_reason, skip_not_verified  # noqa: E402
 
 _PROGRAMS = Path(__file__).resolve().parent.parent
 _FORMAL = _PROGRAMS / "formal_property_run.py"
@@ -255,6 +255,37 @@ def test_absent_env_gate_fails_but_names_the_gap(tmp_path):
         f"start it (docker start {_REAL_CONTAINER}), and run where "
         f"Path.home() is the account home that container mounts"),
 )
+def _skip_unless_the_pinned_engine_is_reachable(container: str) -> None:
+    """R-0929-ENV-AT-RUNTIME: ask, during the run, whether the engine this arm
+    verifies WITH is reachable, and report NOT_VERIFIED naming the tool and the
+    host when it is not. The decorator above sees only that SOME container of
+    that name is up. MEASURED on 8HD-6 (192.168.1.108, 2026-09-29): `vibeic-eda`
+    was running vibeic-eda:0.3.85, not the pinned runtime digest, so
+    `formal_property_run` refused to attach (CONTAINER_IMAGE_MISMATCH) before
+    any engine ran and the arm FAILed on a missing results.json -- a statement
+    about the host, not about formal. Where the pinned engine IS reachable the
+    arm runs and asserts exactly as before, so a wrong proof still FAILs."""
+    import socket
+    import _eda_pin
+    host = socket.gethostname()
+    refusal = _eda_pin.container_attach_refusal(container)
+    if refusal:
+        skip_not_verified(
+            f"on {host}: the formal engine container is not the pinned "
+            f"runtime ({refusal[:240]})",
+            f"run the pinned image as {container!r} on this host, or run this "
+            f"arm on a host that does")
+    probe = subprocess.run(
+        ["docker", "exec", container, "sh", "-c",
+         "command -v sby && command -v yosys"],
+        capture_output=True, text=True, timeout=60)
+    if probe.returncode != 0:
+        skip_not_verified(
+            f"on {host}: sby/yosys not found in container {container!r} "
+            f"({(probe.stderr or probe.stdout).strip()[:200]})",
+            "provision SymbiYosys and yosys in the pinned image")
+
+
 def test_available_env_runs_a_real_proof_and_needs_no_waiver(tmp_path):
     """The decisive test for "is this a discovery bug or an environment
     gap?": when the engine IS reachable, formal RUNS, proves the property,
@@ -270,6 +301,7 @@ def test_available_env_runs_a_real_proof_and_needs_no_waiver(tmp_path):
     starts declaring the environment unavailable while sby is right there
     is caught immediately.
     """
+    _skip_unless_the_pinned_engine_is_reachable(_REAL_CONTAINER)
     # The pinned container sees the shared design mount, not arbitrary $HOME.
     home_tmp = Path.home() / "vibeic-designs" / ".pytest_formal_211" / tmp_path.name
     if home_tmp.exists():
