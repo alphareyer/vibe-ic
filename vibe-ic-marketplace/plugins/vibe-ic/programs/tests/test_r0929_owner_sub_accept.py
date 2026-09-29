@@ -199,11 +199,15 @@ def _project(tmp_path: Path, cases, verdicts, *, receipt=None,
         rows.append({"id": c["name"], "verdict": v,
                      "sim_executed": v in ("PASS", "FAIL"),
                      "detail": "planted"})
-    L10X.write_record(proj, l10, rows, producer="testbench_gen.run_unit_tbs")
+    rp = proj / RECEIPT_REL
     if receipt is not None:
-        rp = proj / RECEIPT_REL
         rp.parent.mkdir(parents=True, exist_ok=True)
         rp.write_text(json.dumps(receipt))
+    # Setup only (review wave 58): the Step-4 execution record binds the
+    # receipt its own run produced, exactly as `run_unit_tbs` writes it; the
+    # reader credits nothing else. Assertions are unchanged.
+    L10X.write_record(proj, l10, rows, producer="testbench_gen.run_unit_tbs",
+                      isa_receipt=rp)
     return proj
 
 

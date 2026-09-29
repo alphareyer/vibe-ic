@@ -93,6 +93,8 @@ EMISSION_RE = re.compile(
 #: Where a per-case L10 testbench transcript lands, relative to the project.
 _TRANSCRIPT_RELS = (
     "phase2/stage1/sim_professional/l10_unit_tb/{case}/run.log",
+    # the ISA-suite producer's transcript (`isa_suite_producer.TRANSCRIPT_REL`)
+    "phase2/stage1/sim_professional/l10_unit_tb/{case}/isa_suite.log",
     "phase2/stage1/sim/tb/{case}.log",
 )
 
