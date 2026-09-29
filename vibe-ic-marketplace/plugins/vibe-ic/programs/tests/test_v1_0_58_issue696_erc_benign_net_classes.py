@@ -111,15 +111,15 @@ def _erc_rpt(tmp_path, body):
     return tmp_path
 
 
+# The round-9 transcript's three benign BARE nets. Its 15 floating spare
+# INPUT pins (RSZ-0095) are no longer benign (U6): an undriven spare input is
+# a Design-for-ECO defect, asserted in test_spare_clock_input_tied_and_proven.py.
 _R9_BODY = (
     "ERC floating nets: 3\n"
     "ERC clean: NO (review floating nets)\n"
     "=== ERC: floating nets ===\n"
     "[WARNING RSZ-0020] found 3 floating nets.\n"
     " VGND\n VPWR\n zero_\n"
-    "[WARNING RSZ-0095] found 15 floating pins.\n"
-    " spare_aoi_0/A1\n spare_dff_0/CLK\n spare_mux2_0/S\n"
-    " spare_nand2_0/A\n spare_nor2_0/B\n spare_inverter_0/A\n"
 )
 
 
@@ -131,7 +131,7 @@ def _run_erc(tmp_path):
 
 
 def test_gate_passes_on_all_benign_floats(tmp_path):
-    """POSITIVE: 3 benign bare nets + spare pins → ERC_BENIGN_FLOATS INFO,
+    """POSITIVE: 3 benign bare nets → ERC_BENIGN_FLOATS INFO,
     no ERC_DIRTY error → erc_clean True."""
     _erc_rpt(tmp_path, _R9_BODY)
     findings, stats = _run_erc(tmp_path)

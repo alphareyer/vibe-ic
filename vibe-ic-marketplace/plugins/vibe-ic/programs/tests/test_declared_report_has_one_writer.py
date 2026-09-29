@@ -324,7 +324,12 @@ def _project(tmp_path, count: int, placed: int) -> Path:
         "actual_density": round(count / placed, 6),
         "target_density": 0.02,
         "tied_off": True,
-        "instances": [{"llx": i * 10, "lly": i * 10} for i in range(count)],
+        # the per-pin enumeration the insertion step prints (U6)
+        "tie_off": {"tied_off": True, "inputs": [
+            {"inst": f"spare_{i}", "pin": "I", "use": "SIGNAL",
+             "net": f"spare_tielo_spare_{i}"} for i in range(count)]},
+        "instances": [{"name": f"spare_{i}", "llx": i * 10, "lly": i * 10}
+                      for i in range(count)],
     }
     (tmp_path / "phase3/stage3/pnr/spare_cells.json").write_text(
         json.dumps(plan))

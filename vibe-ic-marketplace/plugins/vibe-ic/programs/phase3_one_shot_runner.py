@@ -23404,6 +23404,7 @@ def _build_spare_postfix_tcl(plan: Dict[str, Any],
         _spare_xy = [(i.get("name"), i.get("llx", 0), i.get("lly", 0))
                      for i in instances if i.get("cell") and i.get("name")]
         _xy_tcl = " ".join("{%s %s %s}" % (n, x, y) for n, x, y in _spare_xy)
+        _names_tcl = " ".join(n for n, _x, _y in _spare_xy)
         lines += [
             "# === ORGANIC #563 r2 / r4: tie off floating spare inputs ===",
             "# ONE driver per spare, placed AT that spare. `_spare_tie_nets`",
@@ -23498,6 +23499,24 @@ def _build_spare_postfix_tcl(plan: Dict[str, Any],
             # must not print the same line as one that tied off everything.
             "  puts \"SPARE_TIEOFF_CONNECTED $_tie_n of $_tie_tot\"",
             "  puts \"SPARE_TIEOFF_DRIVERS $_tie_drv\"",
+            # EVERY non-supply input of every spare, with the net it now has
+            # ("-" when none). The count above says how many pins this loop
+            # tied; only this list says WHICH pins exist, so a reader can prove
+            # none was outside the set (U6: a CLOCK-use pin was, on spm v5c).
+            # NAMES only: the coordinate list is emitted once, in the tie-off
+            # loop above (r4: one driver per spare at its own location).
+            f"  foreach _sn [list {_names_tcl}] {{",
+            "    set _si [$_blk findInst $_sn]",
+            "    if {$_si eq \"NULL\" || $_si eq \"\"} { continue }",
+            "    foreach _it [$_si getITerms] {",
+            "      set _mt [$_it getMTerm]",
+            "      if {[$_mt getIoType] ne \"INPUT\"} { continue }",
+            "      if {[$_mt getSigType] in {POWER GROUND}} { continue }",
+            "      set _nn [$_it getNet]",
+            "      set _nm [expr {($_nn eq \"NULL\" || $_nn eq \"\") ? \"-\" : [$_nn getName]}]",
+            "      puts \"SPARE_INPUT_PIN [$_si getName] [$_mt getName] [$_mt getSigType] $_nm\"",
+            "    }",
+            "  }",
             "  puts \"SPARE_TIEOFF_DONE: nets $_spare_tie_nets\"",
             "} _tie_err]} { puts \"SPARE_TIEOFF_NONFATAL: $_tie_err\" }",
             # === #563 r3: tie-driver legalization — ITS OWN catch, ALWAYS runs
@@ -23595,6 +23614,11 @@ def _build_spare_postfix_tcl(plan: Dict[str, Any],
 _SPARE_TIEOFF_COUNT_RE = re.compile(
     r"SPARE_TIEOFF_CONNECTED\s+(\d+)\s+of\s+(\d+)")
 
+# `SPARE_INPUT_PIN <inst> <pin> <use> <net|->` — one line per non-supply
+# input of every spare, printed by both insertion paths after the tie-off.
+_SPARE_INPUT_PIN_RE = re.compile(
+    r"\bSPARE_INPUT_PIN\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)[ \t]*$", re.M)
+
 
 def _spare_tieoff_measured_from_log(log_path: Path) -> Dict[str, Any]:
     """MEASURE the spare tie-off from OpenROAD's own log instead of asserting it.
@@ -23645,6 +23669,24 @@ def _spare_tieoff_measured_from_log(log_path: Path) -> Dict[str, Any]:
         return out
     connected, candidates = int(hits[-1][0]), int(hits[-1][1])
     out.update(measured=True, connected=connected, candidates=candidates)
+    # WHICH pins exist, each with its net: the enumeration the count is over.
+    # Both insertion paths print it right after the count, so the LAST pass's
+    # list is the text after the last count line (the retry reason above).
+    _pins = _SPARE_INPUT_PIN_RE.findall(
+        text[text.rfind("SPARE_TIEOFF_CONNECTED"):])
+    if _pins:
+        out["inputs"] = [{"inst": i, "pin": p, "use": u,
+                          "net": None if n == "-" else n}
+                         for i, p, u, n in _pins]
+        _open = [f"{r['inst']}/{r['pin']}" for r in out["inputs"]
+                 if r["net"] is None]
+        if _open:
+            out["tied_off"] = False
+            out["reason"] = (
+                f"measured {connected}/{candidates} counted input(s) tied, but "
+                f"{len(_open)} spare input(s) have no net: "
+                + ", ".join(_open[:20]))
+            return out
     if candidates == 0:
         out["tied_off"] = True
         out["reason"] = ("no unconnected spare inputs to tie — vacuously tied "
@@ -23767,6 +23809,8 @@ _STEP18_INSERTION_MARKERS = (
     "SPARE_TIEOFF_DONE",
     "SPARE_TIEOFF_DRIVERS",
     "SPARE_TIEOFF_ITERM_NONFATAL",
+    # per-pin enumeration of every spare input, printed after the tie-off (U6)
+    "SPARE_INPUT_PIN",
     "SPARE_TIEOFF_LEGALIZED",
     "SPARE_TIEOFF_LEGALIZE_NONFATAL",
     "SPARE_TIE_NET_DONT_TOUCH",
@@ -73842,6 +73886,12 @@ exit
                  or _name_re.match(ln)]
     floating_m = re.search(r"(\d+)\s+floating net", log, re.I)
     floating = int(floating_m.group(1)) if floating_m else 0
+    # Floating PINS (RSZ-0095: instance inputs with no net) are their own
+    # count. The headline used to carry only the net count, so the spm tail
+    # run shipped `ERC floating nets: 0 / ERC clean: YES` over a transcript
+    # listing `spare_dff_0/CLK` as a floating pin (U6).
+    fpins_m = re.search(r"(\d+)\s+floating pin", log, re.I)
+    floating_pins = int(fpins_m.group(1)) if fpins_m else 0
     # v0.3.16 #514: classify the verbose floats by owner so the runner can
     # tell benign design-for-ECO spare-cell I/O from a real functional
     # float. Best-effort (the classifier lives in its own program).
@@ -73849,9 +73899,11 @@ exit
     try:
         import erc_float_owner_classify as _efc
         _floats = _efc.parse_floats(log)
-        erc_classification = _efc.classify(_floats)
+        erc_classification = _efc.classify(
+            _floats, input_pins=_efc.parse_floating_input_pins(log))
     except Exception:
         erc_classification = None
+    _erc_clean = floating == 0 and floating_pins == 0
     body = (
         "# Electrical Rule Check (ERC) — OpenROAD open-source path\n"
         "# (ORGANIC-20260531 Step 31 sub-item). Tool: openroad.\n"
@@ -73860,7 +73912,8 @@ exit
         "# routed DEF. Full PERC (latch-up / ESD topology) needs Calibre.\n"
         "#\n"
         f"ERC floating nets: {floating}\n"
-        f"ERC clean: {'YES' if floating == 0 else 'NO (review floating nets)'}\n"
+        f"ERC floating pins: {floating_pins}\n"
+        f"ERC clean: {'YES' if _erc_clean else 'NO (review floating nets/pins)'}\n"
         "\n# === report_floating_nets / report_erc_metrics stdout ===\n"
         + ("\n".join(erc_lines) or "(no ERC lines captured)") + "\n"
         "\n# === full ERC log (last 2 KB) ===\n" + log[-2000:] + "\n"
@@ -73870,13 +73923,14 @@ exit
     # (design-for-ECO spare-cell I/O) is waiver-eligible, not a raw REVIEW.
     _benign = bool(erc_classification
                    and erc_classification.get("classification") == "benign-ERC")
-    _erc_verdict = ("PASS" if floating == 0
+    _erc_verdict = ("PASS" if _erc_clean
                     else "BENIGN-ERC" if _benign else "REVIEW")
     (erc_rpt.parent / "erc.json").write_text(json.dumps({
         "tool": "openroad",
         "mode": "erc_floating_nets_and_metrics",
         "floating_nets": floating,
-        "clean": floating == 0,
+        "floating_pins": floating_pins,
+        "clean": _erc_clean,
         "source": str(erc_rpt.relative_to(project)),
         "verdict": _erc_verdict,
         # v0.3.16 #514 — by-owner classification of the floats.

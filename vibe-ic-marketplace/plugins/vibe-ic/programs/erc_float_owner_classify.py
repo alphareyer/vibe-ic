@@ -119,18 +119,52 @@ def parse_floats(report_text: str) -> List[str]:
     return uniq
 
 
+def parse_floating_input_pins(report_text: str) -> List[str]:
+    """The `<inst>/<pin>` names OpenROAD lists under "found N floating pins"
+    (RSZ-0095): instance INPUT pins with no net. Its own definition, not ours:
+    on the spm tail run it listed `spare_dff_0/CLK` and not the flop's
+    unconnected output Q."""
+    out: List[str] = []
+    capture = False
+    for line in report_text.splitlines():
+        if re.search(r'floating (pin|net)', line, re.I):
+            capture = bool(re.search(r'floating pins?\b', line, re.I))
+            continue
+        if capture:
+            m = _FLOAT_LINE_RE.match(line)
+            if m and "/" in m.group(1):
+                if m.group(1) not in out:
+                    out.append(m.group(1))
+            else:
+                capture = False
+    return out
+
+
 def classify(floats: List[str],
-             optional_ports: Set[str] | None = None) -> dict:
+             optional_ports: Set[str] | None = None,
+             input_pins: Set[str] | List[str] | None = None) -> dict:
     """Classify floats by owner. benign = spare-cell I/O (owner contains
-    'spare') OR an optional-unused top port; functional = everything else."""
+    'spare') OR an optional-unused top port; functional = everything else.
+
+    A FLOATING INPUT is never benign by ownership (U6). `input_pins` are the
+    pins the tool reported as unconnected inputs (`parse_floating_input_pins`).
+    A spare's output may float until an ECO wires it; its input may not -- an
+    undriven CMOS gate input takes an undefined level and conducts, and the
+    Design-for-ECO contract ties every spare input. A caller that passes no
+    `input_pins` gets the name-only rule, which cannot tell the two apart."""
     optional_ports = optional_ports or set()
+    input_pins = set(input_pins or ())
     benign: List[str] = []
     functional: List[str] = []
+    floating_spare_inputs: List[str] = []
     by_owner: Counter = Counter()
     for f in floats:
         owner = f.split("/", 1)[0]
         by_owner[owner] += 1
-        if _SPARE_RE.search(owner):
+        if f in input_pins and _SPARE_RE.search(owner):
+            floating_spare_inputs.append(f)
+            functional.append(f)
+        elif _SPARE_RE.search(owner):
             benign.append(f)
         elif f in optional_ports or owner in optional_ports:
             benign.append(f)
@@ -151,6 +185,7 @@ def classify(floats: List[str],
         "benign_count": len(benign),
         "functional_count": len(functional),
         "functional_floats": functional[:50],
+        "floating_spare_inputs": floating_spare_inputs[:50],
         "by_owner": dict(by_owner.most_common()),
         "classification": classification,
         "waiver_eligible": classification in ("clean", "benign-ERC"),
@@ -169,8 +204,10 @@ def main(argv=None) -> int:
     if not p.is_file():
         print(f"ERROR: report not found: {p}", file=sys.stderr)
         return 2
-    floats = parse_floats(p.read_text(errors="replace"))
-    summary = classify(floats, set(args.optional_port))
+    text = p.read_text(errors="replace")
+    floats = parse_floats(text)
+    summary = classify(floats, set(args.optional_port),
+                       parse_floating_input_pins(text))
     out = json.dumps(summary, indent=2, ensure_ascii=False)
     if args.json:
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)
