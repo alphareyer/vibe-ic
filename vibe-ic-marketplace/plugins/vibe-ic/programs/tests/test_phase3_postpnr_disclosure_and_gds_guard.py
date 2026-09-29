@@ -485,21 +485,29 @@ def test_an_appended_repair_row_does_not_disable_the_guard(tmp_path,
 
 
 # ---------------------------------------------------------------------------
-# The chain gating must be PRESERVED exactly: a FAILING repair row still
-# stops the GDS/DRC-facing steps, as it did before.
+# MIGRATED by R-0929-TAIL-CONTINUES (root, IC expert, 2026-09-29). This case
+# asserted that a FAILING repair row stops the GDS. The ruling reverses that: a
+# measured Step-32 FAIL is recorded FAIL and keeps the run FAIL, but stream-out
+# and the tail are still measured on the route it leaves. The case keeps both of
+# its observations -- the FAIL row survives, and the run does not exit 0 -- and
+# the stopping direction is kept where the ruling keeps it (a Step-32 row that
+# leaves NO route): `test_r0929_tail_continues.py::test_step32_that_left_no_route_*`.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("producer", sorted(_REPAIR_PRODUCERS))
-def test_a_failing_repair_row_still_stops_the_gds(tmp_path, monkeypatch, producer):
+def test_a_failing_repair_row_is_kept_and_the_gds_is_still_measured(
+        tmp_path, monkeypatch, producer):
     project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
     d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
     row = _repair_producer(monkeypatch, project, producer, "FAIL", "repair blew up")
-    R.main()
+    rc = R.main()
 
     plan = _plan(project)
     assert plan[row]["status"] == "FAIL"
-    assert "gds" not in d.called, (
-        "a FAILED repair must still gate the GDS step (unchanged behaviour)")
+    assert "gds" in d.called, (
+        "R-0929-TAIL-CONTINUES: a measured Step-32 FAIL must not stop "
+        f"stream-out; gds row: {plan.get('gds')}")
+    assert rc != 0, "the Step-32 FAIL must keep the run FAIL"
 
 
 def test_failed_pnr_gates_the_gds_and_emits_no_padside_row(tmp_path,

@@ -7020,7 +7020,7 @@ steps:
     stage: stage3
     closed_loop:
       fallback_to: 32
-      trigger: "Aggregator: re-run #21-#28 after post-route timing repair"
+      trigger: "Aggregator: re-measure #22-#30 on the repaired route (the runner's pre-stream pass) after post-route timing repair"
     skills: [sta-review]
     required_outputs:
       - "phase3/stage3/postroute_timing_repair/repair_log.json OR phase3/stage3/postroute_timing_repair/no_repair_needed.flag"
