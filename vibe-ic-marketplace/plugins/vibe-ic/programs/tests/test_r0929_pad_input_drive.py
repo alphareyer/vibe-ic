@@ -478,6 +478,12 @@ def _step7_fixtures():
     return mod
 
 
+def _switch_step7_direct(proj):
+    sw = proj / "phase3" / "librelane_switch.json"
+    sw.parent.mkdir(parents=True, exist_ok=True)
+    sw.write_text(json.dumps({"steps": {"7": "direct"}}))
+
+
 def test_a_fresh_die_run_carries_the_io_bracket_into_the_pnr_deck(tmp_path, monkeypatch):
     S7 = _step7_fixtures()
     from _ppa import timing as T
@@ -485,6 +491,10 @@ def test_a_fresh_die_run_carries_the_io_bracket_into_the_pnr_deck(tmp_path, monk
     marker = proj / TD.SELF_TAPEOUT_REL
     marker.parent.mkdir(parents=True)
     marker.write_text(TD.SELF_TAPEOUT_MARKER + "\n")
+    # This fixture has no synthesis netlist, so step 7's DIE default (the
+    # STAPrePNR tool arm, CUT_W4) cannot time it; the SDC/pad-drive subject
+    # is identical on the direct arm, which the project names.
+    _switch_step7_direct(proj)
     assert TD.requests_pad_ring(proj) is True
     pdk = S7._pdk(monkeypatch)
     # step 7: no pad ring yet -> no drive can be resolved
@@ -532,6 +542,10 @@ def test_step7_with_a_staged_sdc_on_a_die_resolves_and_rewrites_the_record(tmp_p
     marker = proj / TD.SELF_TAPEOUT_REL
     marker.parent.mkdir(parents=True)
     marker.write_text(TD.SELF_TAPEOUT_MARKER + "\n")
+    # This fixture has no synthesis netlist, so step 7's DIE default (the
+    # STAPrePNR tool arm, CUT_W4) cannot time it; the SDC/pad-drive subject
+    # is identical on the direct arm, which the project names.
+    _switch_step7_direct(proj)
     (proj / "input/constraints").mkdir(parents=True)
     (proj / "input/constraints/clock.sdc").write_text(
         "create_clock -name core -period 10 [get_ports clk]\n")

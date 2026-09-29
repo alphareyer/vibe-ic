@@ -372,7 +372,13 @@ def test_a_legacy_design_sdc_is_never_overwritten(tmp_path, monkeypatch):
                if "create_clock" in l][0]
         periods.append(clk)
         assert legacy.read_text() == design
-    assert periods[0] == periods[1] and "10000" in periods[0], periods
+    # CUT_W4 step 7: the deck is never rescaled; it opens with the tool's
+    # units line (the tool converts 10.0 ns to the ps Liberty's 10000 --
+    # measured in test_cut7_sdc_units_are_the_tools). Two runs: same line.
+    assert periods[0] == periods[1] and "-period 10.0" in periods[0], periods
+    deck = (proj / _record(proj)["path"]).read_text().splitlines()
+    assert deck.index(R._SDC_UNITS_LINE) < next(
+        i for i, l in enumerate(deck) if "create_clock" in l), deck[:12]
 
 
 def test_a_changed_step7_copy_cannot_replace_the_legacy_design_sdc(
@@ -457,7 +463,9 @@ def test_external_liberty_bytes_changed_after_step7_regenerate(tmp_path,
     _step7(proj, pdk)
     liberty.write_text('library(test) { time_unit : "1ps"; }\n')
     got = T.asic_sdc_for_pnr(R, proj, TOP, pdk, "some-container")
-    assert "-period 25000" in got["text"]
+    # CUT_W4 step 7: still ns under the tool's units line; the freshness
+    # rule (a changed Liberty regenerates) is what this test pins.
+    assert "-period 25.0" in got["text"] and R._SDC_UNITS_LINE in got["text"]
     assert got["regenerated"] is not None, got
     assert "inputs changed since step 7" in got["regenerated"]
     assert "@liberty_sha256" in got["regenerated"]

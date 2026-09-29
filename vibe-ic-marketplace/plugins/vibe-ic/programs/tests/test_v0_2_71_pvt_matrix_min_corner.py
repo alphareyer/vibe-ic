@@ -125,8 +125,15 @@ def test_both_writers_go_through_the_one_stamper():
     src = _P3_SRC
     code = "\n".join(l for l in src.splitlines()
                       if not l.lstrip().startswith("#"))
-    assert code.count("stamp_pvt_corner_coverage(pvt, corners)") == 2, (
-        "a writer stopped calling the shared stamper")
+    # CUT_W4 step 7: there is ONE writer now (`_write_pvt_matrix`), called
+    # from both sites, and it calls the stamper; no site writes the file
+    # itself, so neither can skip the stamp.
+    assert code.count('stamp_pvt_corner_coverage(pvt, pvt["corners"])') == 1, (
+        "the one writer stopped calling the shared stamper")
+    assert code.count("_write_pvt_matrix(project, pdk, pvt_path") == 2, (
+        "a pvt_matrix.json site stopped going through the one writer")
+    assert "pvt_path.write_text(" not in code, (
+        "a site writes pvt_matrix.json around the one writer")
     # EXACTLY ONCE in the whole file — inside the stamper. Slicing "everything
     # after the stamper's `def`" cannot tell the stamper's own body from a
     # writer's, which is what the first version of this assertion did.

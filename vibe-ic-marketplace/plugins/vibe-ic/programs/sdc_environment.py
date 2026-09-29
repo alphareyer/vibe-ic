@@ -85,6 +85,11 @@ def _sdc_environment_pdk_values(project: Path, pdk_name: Optional[str]
                         f"{' '.join(str(exc).split())[:300]}"]
     config = view.get("config") or {}
     declared = view.get("design_provenance") or {}
+    where = str(view.get("path"))
+    try:
+        where = str(Path(where).relative_to(Path(project)))
+    except ValueError:
+        pass
     for name, key in _SDC_ENV_KEYS.items():
         raw = config.get(key)
         if raw is None or isinstance(raw, (list, dict)):
@@ -102,7 +107,7 @@ def _sdc_environment_pdk_values(project: Path, pdk_name: Optional[str]
             continue
         origin = (f"declared design config: {declared[key]}" if key in declared
                   else f"PDK config {pdk_name}")
-        values[name] = (raw, f"LibreLane resolved {view.get('path')}:{key} "
+        values[name] = (raw, f"LibreLane resolved {where}:{key} "
                              f"({origin}; image {view.get('image')})")
     return values, []
 
