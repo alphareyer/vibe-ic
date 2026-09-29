@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1387
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1387)
+- **Total programs (excluding helpers / shims):** 1389
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1389)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1378 |
+| `any` | 1380 |
 
 ## Alphabetical listing
 
@@ -614,6 +614,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `ir_drop_budget_check` | any | — | numeric IR-drop budget gate for tapeout sign-off. |
 | `ir_drop_report_check` | any | — | IR-drop report check — wrapper for eda_report_audit --mode ir_drop. |
 | `ir_drop_triage_classify` | any | v0.1.50 | IR-drop triage classifier (Pattern-B → program). |
+| `isa_suite_producer` | any | — | run the pinned public ISA suites on a processor design's own RTL and judge each program by the suite's OWN criterion. |
 | `isolation_cell_required_check` | any | — | M2 gate (substance-verifying). |
 | `iterative_recurrence_timing_diagnosis` | any | — | chip-AGNOSTIC diagnosis of a setup-limited ITERATIVE datapath whose worst path is a single-register self-recurrence (a self-loop with exa... |
 | `iterative_search` | any | — | iterative_search.py -- Generic bounded iterative-search primitive. |
@@ -1093,6 +1094,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `response_payload_template_check` | any | — | M5: Verify that response payload bytes are assembled from dynamic data (register values, echoed arguments, computed results) rather than ... |
 | `result_md_audit_provenance_check` | any | Wave 33 | Wave 33 (v0.119.65). |
 | `retired_pytest_plugin_request_check` | any | — | no file may hand pytest a plugin the anchored runtime does not carry. |
+| `reused_ip_erratum` | any | — | apply a pinned upstream ERRATUM to the STAGED copy of a reused IP, as a DISCLOSED deviation. Never a hand edit, never on the input. |
 | `reused_ip_rtl_consume` | any | — | Deterministic reused-IP RTL CONSUME step. |
 | `rig_firmware_capability_check` | aid_class_half_duplex, digital_cmd_driven, mixed_signal_otp, unknown | Wave 58 | Wave 58 / BACKLOG-v12 P0.5 plugin gate. |
 | `rig_topology_disclosure_check` | any | — | verify hardware rig topology is declared. |
@@ -1459,7 +1461,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1378 programs)
+### `any` (1380 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2045,6 +2047,7 @@ _(no programs in this group)_
 - `ir_drop_budget_check` — numeric IR-drop budget gate for tapeout sign-off.
 - `ir_drop_report_check` — IR-drop report check — wrapper for eda_report_audit --mode ir_drop.
 - `ir_drop_triage_classify` — IR-drop triage classifier (Pattern-B → program).  _[v0.1.50]_
+- `isa_suite_producer` — run the pinned public ISA suites on a processor design's own RTL and judge each program by the suite's OWN criterion.
 - `isolation_cell_required_check` — M2 gate (substance-verifying).
 - `iterative_recurrence_timing_diagnosis` — chip-AGNOSTIC diagnosis of a setup-limited ITERATIVE datapath whose worst path is a single-register self-recurrence (a self-loop with exa...
 - `iterative_search` — iterative_search.py -- Generic bounded iterative-search primitive.
@@ -2523,6 +2526,7 @@ _(no programs in this group)_
 - `response_payload_template_check` — M5: Verify that response payload bytes are assembled from dynamic data (register values, echoed arguments, computed results) rather than ...
 - `result_md_audit_provenance_check` — Wave 33 (v0.119.65).  _[Wave 33]_
 - `retired_pytest_plugin_request_check` — no file may hand pytest a plugin the anchored runtime does not carry.
+- `reused_ip_erratum` — apply a pinned upstream ERRATUM to the STAGED copy of a reused IP, as a DISCLOSED deviation. Never a hand edit, never on the input.
 - `reused_ip_rtl_consume` — Deterministic reused-IP RTL CONSUME step.
 - `rig_topology_disclosure_check` — verify hardware rig topology is declared.
 - `rig_topology_image_extracted_check` — gate (LL-35).  _[v0.119.32]_

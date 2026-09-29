@@ -125,8 +125,14 @@ def clear_record(project: Path) -> None:
 def write_record(project: Path, l10_path: Path,
                  rows: Iterable[Dict[str, Any]], *, producer: str,
                  tb_dir: Optional[Path] = None,
-                 source_junit: Optional[Path] = None) -> Path:
-    """Atomically publish a completed execution record."""
+                 source_junit: Optional[Path] = None,
+                 isa_receipt: Optional[Path] = None) -> Path:
+    """Atomically publish a completed execution record.
+
+    `isa_receipt`: the ISA-suite receipt THIS execution's producer wrote. Its
+    sha256 and run id are bound here (`ISA_RECEIPT_BINDING_KEY`), and
+    `isa_conformance_credit` credits only the receipt this record binds -- so a
+    receipt left by an earlier run can never stand in for this one."""
     target = record_path(project)
     target.parent.mkdir(parents=True, exist_ok=True)
     doc: Dict[str, Any] = {
@@ -135,6 +141,12 @@ def write_record(project: Path, l10_path: Path,
         "l10_sha256": file_sha256(l10_path),
         CASES_KEY: [],
     }
+    if isa_receipt is not None and Path(isa_receipt).is_file():
+        receipt_doc = _json_object(Path(isa_receipt)) or {}
+        doc[ISA_RECEIPT_BINDING_KEY] = {
+            "path": ISA_RECEIPT_REL,
+            "sha256": file_sha256(Path(isa_receipt)),
+            "run_id": receipt_doc.get("run_id")}
     for original in rows:
         row = dict(original)
         tb = _tb_path(project, tb_dir, row.get("tb_file"))
@@ -371,6 +383,8 @@ def unclaimed_rows(case_ids: Iterable[str], record: Dict[str, Any]) -> List[str]
 ISA_RECEIPT_REL = "reports/phase2/isa_suites/isa_suite_receipt.json"
 ISA_RECEIPT_SCHEMA = "vibeic.isa_suite_receipt.v1"
 ISA_CREDIT_KIND = "core_isa_conformance_at_test_parameter"
+#: The execution-record key that binds the ISA receipt this run produced.
+ISA_RECEIPT_BINDING_KEY = "isa_suite_receipt"
 _DECLARATION_REL = "plugin_output/declaration.json"
 _HDL_SUFFIXES = (".v", ".sv")
 _HDL_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
@@ -383,6 +397,33 @@ def _json_object(path: Path) -> Optional[Dict[str, Any]]:
     except (OSError, ValueError):
         return None
     return doc if isinstance(doc, dict) else None
+
+
+def _isa_receipt_unbound(project: Path, receipt_path: Path,
+                         receipt: Dict[str, Any]) -> Optional[str]:
+    """Why the receipt is NOT the one the current Step-4 execution record
+    binds, or None when it is."""
+    rec_path = resolve_record(project)
+    rec = _json_object(rec_path) if rec_path is not None else None
+    if rec is None:
+        return (f"a receipt no execution record binds: {ISA_RECEIPT_REL} "
+                f"exists but there is no Step-4 execution record, so it was "
+                f"not produced by the current run")
+    bound = rec.get(ISA_RECEIPT_BINDING_KEY)
+    if not isinstance(bound, dict):
+        return (f"a receipt this run did not produce: the Step-4 execution "
+                f"record binds no ISA receipt, yet {ISA_RECEIPT_REL} exists "
+                f"(left by an earlier run)")
+    got = file_sha256(receipt_path)
+    if bound.get("sha256") != got:
+        return (f"a receipt this run did not produce: the execution record "
+                f"binds sha256 {str(bound.get('sha256'))[:12]}, the receipt "
+                f"on disk is {got[:12]}")
+    if bound.get("run_id") != receipt.get("run_id"):
+        return (f"a receipt this run did not produce: run id "
+                f"{receipt.get('run_id')!r} is not the bound "
+                f"{bound.get('run_id')!r}")
+    return None
 
 
 def _module_parameter_default(rtl_files: Iterable[Path], module: str,
@@ -612,6 +653,13 @@ def isa_conformance_credit(project: Path, case_id: str,
     if doc.get("schema") != ISA_RECEIPT_SCHEMA:
         return None, (f"{ISA_RECEIPT_REL} schema {doc.get('schema')!r} is not "
                       f"{ISA_RECEIPT_SCHEMA!r}")
+    # PRODUCED BY THIS RUN. The Step-4 execution record binds the receipt its
+    # own producer wrote (sha256 + run id); a receipt no current record binds
+    # -- left by an earlier run whose rerun produced nothing, crashed, or never
+    # reached the producer -- credits nothing (review wave 58).
+    stale = _isa_receipt_unbound(project, receipt_path, doc)
+    if stale:
+        return None, stale
     if doc.get("refusal"):
         return None, f"the ISA-suite producer refused: {doc.get('refusal')}"
     if doc.get("executor_rc") != 0:
