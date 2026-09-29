@@ -19,6 +19,7 @@ import io
 import json
 import re
 import sys
+import shutil
 import tarfile
 import urllib.request
 from pathlib import Path
@@ -786,3 +787,188 @@ def test_a_step4_run_writes_the_receipt_the_owner_credit_reads(tmp_path,
     TB.run_unit_tbs(p, report={}, dispatch=lambda *_a: (0, "ok"))
     credit, refusal = X.isa_conformance_credit(p, "base_isa", row)
     assert credit is None and "a failing suite" in (refusal or ""), refusal
+
+
+# ── review wave 58: disclosure by staged bytes, no stale receipt ───────────
+
+def _step4(p, monkeypatch, outcome):
+    """Step 4's executor with the shipped wiring; only the container job and
+    the network are replaced."""
+    import testbench_gen as TB
+    monkeypatch.setattr(I, "load_lock", lambda *_a, **_k: _lock())
+    monkeypatch.setattr(I, "default_fetch", lambda _u: TARBALL)
+    monkeypatch.setattr(I, "docker_executor", _fake_executor(outcome))
+    tb = p / "phase2" / "stage1" / "sim" / "tb"
+    tb.mkdir(parents=True, exist_ok=True)
+    (tb / "base_isa.v").write_text(
+        f"// {TB.ORACLE_NONE_MARKER}\nmodule base_isa;\nendmodule\n")
+    return TB.run_unit_tbs(p, report={}, dispatch=lambda *_a: (0, "ok"))
+
+
+def _base_isa_credit(p):
+    import _l10_execution as X
+    l10 = json.loads((p / "phase1/generated_docs/L10_TEST_CASES.json")
+                     .read_text())["fields"]["test_cases"]
+    row = next(r for r in l10 if r["name"] == "base_isa")
+    return X.isa_conformance_credit(p, "base_isa", row)
+
+
+OVERSIZED = (WORDS, 0, HALT, WORDS, 0, 4096)
+FIX_BEFORE = "module fixed_core; /* pinned, with the defect */ endmodule\n"
+FIX_AFTER = "module fixed_core; /* the upstream fix */ endmodule\n"
+
+
+def test_a_fix_a_catalog_pull_staged_is_disclosed_in_the_credit(tmp_path,
+                                                                monkeypatch):
+    """Owner ruling 2B: the design declares no `ip_upstream`, a catalog pull
+    staged an upstream fix and recorded it in the staged SOURCE_MANIFEST. The
+    STAGED BYTES are the fix's after-image, so the receipt, the Step-4 credit
+    sentence and the card each DISCLOSE it."""
+    import final_report_generate as FRG
+    p = _project(tmp_path)
+    rtl = p / "phase2" / "stage1" / "rtl"
+    (rtl / "fixed_core.v").write_text(FIX_AFTER)
+    (rtl / "SOURCE_MANIFEST.json").write_text(json.dumps({"source_pins": [{
+        "ip_name": "somecore", "version": "9.9",
+        "errata_applied": [{
+            "upstream_commit": "abcdef0123456789" * 2 + "abcdef01",
+            "file": "src/fixed_core.v", "disclosure": "upstream fix",
+            "before_sha256": _sha(FIX_BEFORE.encode()),
+            "after_sha256": _sha(FIX_AFTER.encode())}]}]}))
+    _step4(p, monkeypatch, {"s-add": OVERSIZED, "s-fencei": OVERSIZED})
+    rec = json.loads((p / I.RECEIPT_REL).read_text())
+    assert any("upstream abcdef0123 applied to staged fixed_core.v" in d
+               for d in rec["deviation_disclosures"]), rec["deviation_disclosures"]
+    credit, refusal = _base_isa_credit(p)
+    assert refusal is None, refusal
+    assert "DISCLOSED deviation from somecore 9.9: upstream abcdef0123" \
+        in credit["sentence"], credit["sentence"]
+    card = "\n".join(FRG._deviation_section(p))
+    assert "## Disclosed deviations" in card and "abcdef0123" in card
+
+
+def test_an_unmodified_staged_file_discloses_nothing(tmp_path, monkeypatch):
+    """The control: the same manifest, but the staged file is the PRE-fix
+    bytes -- no deviation is in the silicon, so none is disclosed."""
+    p = _project(tmp_path)
+    rtl = p / "phase2" / "stage1" / "rtl"
+    (rtl / "fixed_core.v").write_text(FIX_BEFORE)
+    (rtl / "SOURCE_MANIFEST.json").write_text(json.dumps({"source_pins": [{
+        "ip_name": "somecore", "version": "9.9",
+        "errata_applied": [{
+            "upstream_commit": "abcdef0123456789" * 2 + "abcdef01",
+            "file": "src/fixed_core.v", "disclosure": "upstream fix",
+            "after_sha256": _sha(FIX_AFTER.encode())}]}]}))
+    _step4(p, monkeypatch, {"s-add": OVERSIZED, "s-fencei": OVERSIZED})
+    rec = json.loads((p / I.RECEIPT_REL).read_text())
+    assert rec["deviation_disclosures"] == []
+    credit, _ = _base_isa_credit(p)
+    assert "DISCLOSED" not in credit["sentence"]
+
+
+def test_an_applied_erratum_without_an_input_original_is_still_disclosed(
+        tmp_path, monkeypatch):
+    """An APPLIED flow-record row whose input original is not unique: arm A
+    cannot be built, but the disclosure is not dropped -- and the receipt says
+    arm A was not built."""
+    import reused_ip_erratum as E
+    p = _project(tmp_path)
+    rtl = p / "phase2" / "stage1" / "rtl"
+    (rtl / "fixed_core.v").write_text(FIX_AFTER)
+    row = {"status": E.APPLIED, "ip": "somecore", "pinned_version": "9.9",
+           "fix_commit": "1234567890abcdef", "erratum": "zeroing",
+           "file": "src/fixed_core.v", "staged_file": str(rtl / "fixed_core.v"),
+           "input_file": None, "sha256_before": _sha(FIX_BEFORE.encode()),
+           "sha256_after": _sha(FIX_AFTER.encode())}
+    (p / E.FLOW_RECORD_REL).parent.mkdir(parents=True, exist_ok=True)
+    (p / E.FLOW_RECORD_REL).write_text(json.dumps({"rows": [row]}))
+    _step4(p, monkeypatch, {"s-add": OVERSIZED, "s-fencei": OVERSIZED})
+    rec = json.loads((p / I.RECEIPT_REL).read_text())
+    assert rec["arms"] == ["staged"]
+    assert any("upstream 1234567890 applied" in d
+               for d in rec["deviation_disclosures"])
+    assert any("arm A not built for fixed_core.v" in d
+               for d in rec["deviation_disclosures"])
+    credit, _ = _base_isa_credit(p)
+    assert "DISCLOSED deviation from somecore 9.9: upstream 1234567890" \
+        in credit["sentence"]
+
+
+def test_a_rerun_whose_producer_crashes_keeps_no_credit(tmp_path, monkeypatch):
+    """Run 1 credits; run 2's container job raises. The earlier receipt must
+    not credit run 2 (review wave 58 P1)."""
+    p = _project(tmp_path)
+    _step4(p, monkeypatch, {"s-add": OVERSIZED, "s-fencei": OVERSIZED})
+    assert _base_isa_credit(p)[0] is not None
+
+    def _boom(_job, _work):
+        raise RuntimeError("docker daemon gone")
+    monkeypatch.setattr(I, "docker_executor", _boom)
+    import testbench_gen as TB
+    TB.run_unit_tbs(p, report={}, dispatch=lambda *_a: (0, "ok"))
+    credit, refusal = _base_isa_credit(p)
+    assert credit is None and "docker daemon gone" in (refusal or ""), refusal
+
+
+def test_a_rerun_that_binds_nothing_or_never_runs_keeps_no_credit(
+        tmp_path, monkeypatch):
+    """P1b: the declaration stops listing the ISA units -- nothing produced.
+    P1c: no TB, so run_unit_tbs never reaches the producer. Either way the
+    earlier receipt is gone and nothing is credited."""
+    import testbench_gen as TB
+    p = _project(tmp_path)
+    _step4(p, monkeypatch, {"s-add": OVERSIZED, "s-fencei": OVERSIZED})
+    assert _base_isa_credit(p)[0] is not None
+    decl = p / "plugin_output" / "declaration.json"
+    d = json.loads(decl.read_text())
+    decl.write_text(json.dumps(dict(d, isa_extensions=[])))
+    TB.run_unit_tbs(p, report={}, dispatch=lambda *_a: (0, "ok"))
+    assert not (p / I.RECEIPT_REL).exists()
+    assert _base_isa_credit(p) == (None, None)
+
+    q = _project(tmp_path / "c")
+    _step4(q, monkeypatch, {"s-add": OVERSIZED, "s-fencei": OVERSIZED})
+    shutil.rmtree(q / "phase2" / "stage1" / "sim" / "tb")
+    assert TB.run_unit_tbs(q, report={}, dispatch=lambda *_a: (0, "ok")) < 0
+    assert not (q / I.RECEIPT_REL).exists()
+
+
+def test_a_receipt_the_execution_record_does_not_bind_credits_nothing(
+        tmp_path, monkeypatch):
+    """A receipt copied back beside a record that binds another one (or none)
+    is not this run's evidence."""
+    import _l10_execution as X
+    p = _project(tmp_path)
+    _step4(p, monkeypatch, {"s-add": OVERSIZED, "s-fencei": OVERSIZED})
+    rp = p / I.RECEIPT_REL
+    doc = json.loads(rp.read_text())
+    rp.write_text(json.dumps(dict(doc, run_id="an-earlier-run")))
+    credit, refusal = _base_isa_credit(p)
+    assert credit is None and "did not produce" in refusal, refusal
+    rec = json.loads(X.record_path(p).read_text())
+    rec.pop(X.ISA_RECEIPT_BINDING_KEY)
+    X.record_path(p).write_text(json.dumps(rec))
+    rp.write_text(json.dumps(doc))
+    credit, refusal = _base_isa_credit(p)
+    assert credit is None and "binds no ISA receipt" in refusal, refusal
+
+
+def test_core_parameters_with_csr_decides_trap_support(tmp_path):
+    facts, _ = I.design_facts(_project(
+        tmp_path, core_parameters={"WITH_CSR": 1}))
+    assert I.instruction_total(_lock(), facts)[:2] == (4, [])
+    facts, _ = I.design_facts(_project(
+        tmp_path / "b", core_parameters={"WITH_CSR": 0}))
+    assert I.instruction_total(_lock(), facts)[:2] == (2, ["ecall", "ebreak"])
+
+
+def test_the_isa_transcript_never_overwrites_the_scaffold_run_log(
+        tmp_path, monkeypatch):
+    """The scaffold TB's own transcript stays its evidence; the ISA producer
+    writes beside it."""
+    p = _project(tmp_path)
+    _step4(p, monkeypatch, {"s-add": OVERSIZED, "s-fencei": OVERSIZED})
+    case = p / "phase2/stage1/sim_professional/l10_unit_tb/base_isa"
+    assert (case / "isa_suite.log").is_file()
+    assert "CORE ISA" in (case / "isa_suite.log").read_text()
+    assert "CORE ISA" not in (case / "run.log").read_text()
