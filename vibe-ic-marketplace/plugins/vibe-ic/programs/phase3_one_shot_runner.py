@@ -52823,6 +52823,13 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
     # below belongs to the step, not to one producer: a pnr that died before
     # its final writes is skipped on every mode, so the switch is consulted
     # only when that skip does not apply. ``_direct``: the dual arm's re-entry.
+    if not _direct:
+        # R-0929-DRV-IDENTITY: step 31 starts with no LVS record on disk, in
+        # EVERY mode (the LibreLane half returns from the dispatch below and
+        # writes no inputs record): an earlier run's inputs or verdict must
+        # never stand for this compare.
+        for _rec in ("lvs_inputs.json", "lvs_verdict.json"):
+            (project / "reports/phase3" / _rec).unlink(missing_ok=True)
     if not _direct and not (
             upstream_pnr is not None and upstream_pnr.status != "PASS"
             and not (getattr(upstream_pnr, "extras", None) or {}).get(
@@ -53424,6 +53431,12 @@ def _write_lvs_verdict(project: Path, status: str, finding: str,
         payload.update(extras)
     payload["phase2_synth"] = _pl.phase2_synth_input_identity(project)
     payload["phase3_inputs"] = _pl.phase3_signoff_input_identity(project)
+    # R-0929-DRV-IDENTITY: the verdict names the inputs record of THIS compare
+    # (step 31 clears both records at its start), so the final DRV capture can
+    # tell this verdict from a stale one of another layout.
+    _inputs = rpt_dir / "lvs_inputs.json"
+    payload["lvs_inputs"] = ({"path": str(_inputs.resolve()), "sha256": _sha256_file(_inputs)}
+                             if _inputs.is_file() else None)
     path.write_text(json.dumps(payload, indent=2) + "\n")
     try:
         return str(path.relative_to(project))

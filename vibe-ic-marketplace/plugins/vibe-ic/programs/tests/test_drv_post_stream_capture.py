@@ -26,7 +26,7 @@ from test_drv_signoff_judge import (_bundle, _file,  # noqa: E402
 
 
 def _streamed(tmp_path, *, lvs_status="PASS", gds_def=None, lvs_def=None,
-              lvs_netlist_body=None, records=True):
+              lvs_netlist_body=None, records=True, verdict_inputs=None):
     """A clean judged bundle whose layout was streamed and LVS-compared, with
     the records the flow writes (GDS admission, LVS inputs, LVS verdict)."""
     bundle = _bundle(tmp_path)
@@ -48,12 +48,14 @@ def _streamed(tmp_path, *, lvs_status="PASS", gds_def=None, lvs_def=None,
                              gds_def or drv._sha(judged_def)}}))
         schematic = (Path(_file(project, "other_pnr.v", lvs_netlist_body)["path"])
                      if lvs_netlist_body else sta_netlist)
-        _file(project, "reports/phase3/lvs_inputs.json", json.dumps({
+        inputs = _file(project, "reports/phase3/lvs_inputs.json", json.dumps({
             "layout_def": {"path": str(judged_def),
                            "sha256": lvs_def or drv._sha(judged_def)},
             "schematic_netlist": {"path": str(schematic), "sha256": drv._sha(schematic)}}))
+        # step 31's verdict names the inputs record of its own compare
         _file(project, "reports/phase3/lvs_verdict.json", json.dumps({
-            "status": lvs_status, "compare_performed": True}))
+            "status": lvs_status, "compare_performed": True,
+            "lvs_inputs": verdict_inputs if verdict_inputs is not None else inputs}))
     bundle["identity"] = capture_plan.post_stream_identity(
         project, {"identity": identity})["identity"]
     return project, bundle
@@ -175,3 +177,83 @@ def test_an_lvs_that_stops_early_leaves_no_earlier_record(tmp_path, monkeypatch)
     monkeypatch.setattr(R, "_to_container_path", lambda s, c: s)
     R.step_lvs(project, "chip_top", _pdk(), "x")
     assert not stale.exists()
+
+
+# --- review wave 58 DRVSTACK integrity probes P1 / P3 ----------------------------
+
+def test_p1_a_stale_pass_verdict_of_another_layout_never_passes(tmp_path):
+    """Fresh lvs_inputs for the judged DEF + a PASS verdict left by an earlier
+    compare of another layout (its own inputs record): not a proof."""
+    stale = {"path": str(tmp_path / "old_lvs_inputs.json"), "sha256": "c" * 64}
+    _, bundle = _streamed(tmp_path, verdict_inputs=stale)
+    result = drv.judge(bundle)
+    assert result["verdict"] != "PASS"
+    assert "LVS verdict is not bound to the recorded LVS inputs" in result["not_measured"]
+
+
+def test_a_verdict_that_names_no_inputs_record_never_passes(tmp_path):
+    _, bundle = _streamed(tmp_path, verdict_inputs={})
+    assert drv.judge(bundle)["verdict"] != "PASS"
+
+
+def test_p3_the_judge_reads_the_record_not_the_bundles_copy(tmp_path):
+    """The inputs record says LVS compared another DEF; the bundle's copied
+    field claims the judged DEF.  The record decides."""
+    _, bundle = _streamed(tmp_path, lvs_def="e" * 64)
+    lvs = bundle["identity"]["derivation"]["lvs"]
+    lvs["layout_def_sha256"] = bundle["identity"]["artifacts"]["def"]["sha256"]
+    assert "LVS compared a layout DEF other than the judged DEF" in \
+        drv.judge(bundle)["failures"]
+
+
+def test_the_admission_record_not_the_bundle_names_the_streamed_def(tmp_path):
+    _, bundle = _streamed(tmp_path, gds_def="f" * 64)
+    gds = bundle["identity"]["derivation"]["gds"]
+    gds["streamed_from_def_sha256"] = bundle["identity"]["artifacts"]["def"]["sha256"]
+    assert "streamed GDS derives from a DEF other than the judged DEF" in \
+        drv.judge(bundle)["failures"]
+
+
+def test_the_schematic_is_bound_by_the_bytes_lvs_recorded(tmp_path):
+    """A netlist rewritten after LVS is not the netlist LVS compared."""
+    project, bundle = _streamed(tmp_path)
+    inputs = json.loads((project / "reports/phase3/lvs_inputs.json").read_text())
+    Path(inputs["schematic_netlist"]["path"]).write_text("module rewritten; endmodule\n")
+    bundle["identity"] = capture_plan.post_stream_identity(
+        project, {"identity": bundle["identity"]})["identity"]
+    assert bundle["identity"]["lvs_netlist"] == inputs["schematic_netlist"]["sha256"]
+    assert drv.judge(bundle)["verdict"] != "PASS"
+
+
+def test_step31_start_clears_both_lvs_records_in_librelane_mode(tmp_path, monkeypatch):
+    """The LibreLane half returns from the dispatch and writes no inputs
+    record: a direct-mode record from an earlier run must not survive."""
+    import phase3_one_shot_runner as R
+    from test_v0_2_97_issue477_lvs_incomplete import _pdk, _proj
+    project = _proj(tmp_path)
+    for rel in ("reports/phase3/lvs_inputs.json", "reports/phase3/lvs_verdict.json"):
+        _file(project, rel, '{"stale": true}')
+    seen = {}
+
+    def librelane_half(p, top, pdk, half, publish):
+        seen["records"] = [(p / "reports/phase3" / n).exists()
+                           for n in ("lvs_inputs.json", "lvs_verdict.json")]
+        return R.StepResult(half, "PASS", 0.0, "tool half")
+    monkeypatch.setattr(R, "_step31_librelane", librelane_half)
+    monkeypatch.setattr(R, "_vacuous_on_unrouted", lambda *a: None)
+    import librelane_contract
+    monkeypatch.setattr(librelane_contract, "selected_mode", lambda p, s: "librelane")
+    R.step_lvs(project, "chip_top", _pdk(), "x")
+    assert seen["records"] == [False, False]
+
+
+def test_step_lvs_verdict_names_its_own_inputs_record(tmp_path, monkeypatch):
+    import phase3_one_shot_runner as R
+    from test_v0_2_97_issue477_lvs_incomplete import _pdk, _proj
+    project = _proj(tmp_path, def_bytes=b"")          # stops at the 0-byte guard
+    monkeypatch.setattr(R, "_docker_exec", lambda c, cmd, timeout=0, **_: (0, "", ""))
+    monkeypatch.setattr(R, "_to_container_path", lambda s, c: s)
+    R.step_lvs(project, "chip_top", _pdk(), "x")
+    inputs = project / "reports/phase3/lvs_inputs.json"
+    verdict = json.loads((project / "reports/phase3/lvs_verdict.json").read_text())
+    assert verdict["lvs_inputs"]["sha256"] == drv._sha(inputs)
