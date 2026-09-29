@@ -25,7 +25,16 @@ import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the 
 # The retired bit-range and port regex gates blocked range errors and
 # unknown port names. Their warning-only width/unconnected reports remain
 # visible in diagnostics without becoming a stricter new P0 policy.
-BLOCKING_CODES = frozenset({"SELRANGE", "PINNOTFOUND", "MULTIDRIVEN"})
+#
+# LATCH (audit §3.16, R-0929-TOOL-DEFAULT wave 1): an inferred latch in
+# combinational logic blocked nowhere before synthesis -- rtl_hygiene_lint
+# rates it WARN (the regex also missed the if-form, c6c23acc4) and step 5 only
+# books the resulting $dlatch as NOT_DISCHARGED -- while LibreLane's own
+# Verilator.Lint makes LATCH an error by default (LINTER_ERROR_ON_LATCH) and
+# step 2's verilator_lint_gate blocks it. P0 now blocks it too, so the two
+# front ends answer one code list. MEASURED on 0.3.86 before promoting it:
+# spm 0 diagnostics, subservient (serv 1.4.0) 0 LATCH.
+BLOCKING_CODES = frozenset({"SELRANGE", "PINNOTFOUND", "MULTIDRIVEN", "LATCH"})
 
 # RETIRED BY THIS FRONT END, and what blocks each one's finding now:
 #   bitwidth_consistency_check  bitselect-out-of-range -> SELRANGE     (program deleted)

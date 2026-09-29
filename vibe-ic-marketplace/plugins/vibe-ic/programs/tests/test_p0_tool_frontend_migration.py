@@ -191,3 +191,32 @@ def test_a_retired_gate_file_is_deleted_or_still_a_library(gate):
     program = RETIRED_REGEX_GATES[gate]["program"]
     assert program in ("deleted", "library"), program
     assert path.exists() is (program == "library"), path
+
+
+# ── audit §3.16 / R-0929-TOOL-DEFAULT wave 1: LATCH blocks at P0 ────────────
+
+#: REAL Verilator 5.053 output (vibeic-eda 0.3.86) on a combinational
+#: `always @(*) if (en) q = d;` -- the if-form the regex latch rule missed.
+LATCH_LINE = ("%Warning-LATCH: top.v:2:3: Latch inferred for signal 'q' (not "
+              "all control paths of combinational always assign a value)\n")
+
+
+def test_an_inferred_latch_blocks_the_front_end(monkeypatch, tmp_path):
+    project = _project(tmp_path)
+
+    def fake(tool, args, root, image):
+        text = LATCH_LINE if tool == "verilator" else ""
+        return subprocess.CompletedProcess([], 0, "", text)
+
+    monkeypatch.setattr(frontend, "_invoke", fake)
+    result = frontend.check(project, "test-image")
+    assert not result["passed"]
+    assert "Verilator Warning-LATCH" in result["findings"]
+
+
+def test_p0_and_step2_block_one_code_list():
+    """Every code P0 blocks is also blocked by step 2's Verilator.Lint judge,
+    so the two front ends cannot disagree about a class they both see."""
+    import verilator_lint_gate as step2
+    assert "LATCH" in frontend.BLOCKING_CODES
+    assert frontend.BLOCKING_CODES <= step2.BLOCKING_WARNINGS
