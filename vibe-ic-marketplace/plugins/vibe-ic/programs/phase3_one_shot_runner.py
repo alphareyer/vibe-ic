@@ -73881,6 +73881,12 @@ exit
                  or _name_re.match(ln)]
     floating_m = re.search(r"(\d+)\s+floating net", log, re.I)
     floating = int(floating_m.group(1)) if floating_m else 0
+    # Floating PINS (RSZ-0095: instance inputs with no net) are their own
+    # count. The headline used to carry only the net count, so the spm tail
+    # run shipped `ERC floating nets: 0 / ERC clean: YES` over a transcript
+    # listing `spare_dff_0/CLK` as a floating pin (U6).
+    fpins_m = re.search(r"(\d+)\s+floating pin", log, re.I)
+    floating_pins = int(fpins_m.group(1)) if fpins_m else 0
     # v0.3.16 #514: classify the verbose floats by owner so the runner can
     # tell benign design-for-ECO spare-cell I/O from a real functional
     # float. Best-effort (the classifier lives in its own program).
@@ -73888,9 +73894,11 @@ exit
     try:
         import erc_float_owner_classify as _efc
         _floats = _efc.parse_floats(log)
-        erc_classification = _efc.classify(_floats)
+        erc_classification = _efc.classify(
+            _floats, input_pins=_efc.parse_floating_input_pins(log))
     except Exception:
         erc_classification = None
+    _erc_clean = floating == 0 and floating_pins == 0
     body = (
         "# Electrical Rule Check (ERC) — OpenROAD open-source path\n"
         "# (ORGANIC-20260531 Step 31 sub-item). Tool: openroad.\n"
@@ -73899,7 +73907,8 @@ exit
         "# routed DEF. Full PERC (latch-up / ESD topology) needs Calibre.\n"
         "#\n"
         f"ERC floating nets: {floating}\n"
-        f"ERC clean: {'YES' if floating == 0 else 'NO (review floating nets)'}\n"
+        f"ERC floating pins: {floating_pins}\n"
+        f"ERC clean: {'YES' if _erc_clean else 'NO (review floating nets/pins)'}\n"
         "\n# === report_floating_nets / report_erc_metrics stdout ===\n"
         + ("\n".join(erc_lines) or "(no ERC lines captured)") + "\n"
         "\n# === full ERC log (last 2 KB) ===\n" + log[-2000:] + "\n"
@@ -73909,13 +73918,14 @@ exit
     # (design-for-ECO spare-cell I/O) is waiver-eligible, not a raw REVIEW.
     _benign = bool(erc_classification
                    and erc_classification.get("classification") == "benign-ERC")
-    _erc_verdict = ("PASS" if floating == 0
+    _erc_verdict = ("PASS" if _erc_clean
                     else "BENIGN-ERC" if _benign else "REVIEW")
     (erc_rpt.parent / "erc.json").write_text(json.dumps({
         "tool": "openroad",
         "mode": "erc_floating_nets_and_metrics",
         "floating_nets": floating,
-        "clean": floating == 0,
+        "floating_pins": floating_pins,
+        "clean": _erc_clean,
         "source": str(erc_rpt.relative_to(project)),
         "verdict": _erc_verdict,
         # v0.3.16 #514 — by-owner classification of the floats.

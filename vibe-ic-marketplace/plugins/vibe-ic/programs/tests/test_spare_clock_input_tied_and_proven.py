@@ -1,0 +1,318 @@
+"""A spare cell's CLOCK-use input is an input: tie it, prove it, count it (U6).
+
+MEASURED (2026-09-29):
+  * spm IC run v5c, `phase3/stage3/pnr/spm_pnr.v:113595`
+        gf180mcu_fd_sc_mcu7t5v0__dffq_2 spare_dff_0 (.D(spare_tielo_spare_dff_0));
+    CLK has no net. subservient v4 `nl.v:60881`: the same shape.
+  * the LEF says `PIN CLK ... USE CLOCK`; `Vibeic.InsertSpareCells` tied only
+    `getSigType() == "SIGNAL"` pins, and logged `SPARE_TIEOFF_CONNECTED 12 of 12`
+    -- complete over the 12 pins it had chosen to count.
+  * `spare_cells.json` therefore said `tied_off: true`, and
+    `spare_cell_coverage.json` read PASS ("measured 12/12 spare input(s) tied").
+  * the spm tail run's Step-31 `erc.rpt` headline said `ERC floating nets: 0 /
+    ERC clean: YES` and `erc.json` said verdict PASS, over a transcript in
+    which OpenROAD listed `[WARNING RSZ-0095] found 1 floating pins.
+    spare_dff_0/CLK`, classified "benign-ERC" because its owner is a spare.
+
+Each layer is driven through the real code: the odbpy step (fake odb only),
+the runner's log reader and ERC emitter (fake container only), and the three
+gates on the run's own record, netlist line and transcript.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+PROGRAMS = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROGRAMS))
+
+import spare_cell_coverage_check as cov  # noqa: E402
+import spare_cell_preservation_check as pres  # noqa: E402
+import erc_float_owner_classify as efc  # noqa: E402
+import erc_density_check as edc  # noqa: E402
+
+
+def _mig97():
+    spec = importlib.util.spec_from_file_location(
+        "_mig97_fakes", PROGRAMS / "tests" / "test_mig97_placement_spares.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# ---------------------------------------------------------------- producer --
+
+def test_insertion_ties_the_clock_use_input_and_enumerates_every_pin(
+        monkeypatch, capsys):
+    """The odbpy step on a spare flop whose CLK is `USE CLOCK`."""
+    m = _mig97()
+    # the gf180 7t dffq pin table (LEF: D INPUT, CLK INPUT USE CLOCK, Q OUTPUT)
+    monkeypatch.setitem(m._PINS, "dffq", [
+        ("D", "SIGNAL", "INPUT"), ("CLK", "CLOCK", "INPUT"),
+        ("Q", "SIGNAL", "OUTPUT"), ("VDD", "POWER", "INOUT"),
+        ("VSS", "GROUND", "INOUT")])
+    monkeypatch.setitem(m._TYPES, "dffq", "CORE")
+    # odb's own rule: dbITerm::isInputSignal is false for POWER/GROUND and
+    # true for an INPUT of any other USE -- CLOCK included
+    monkeypatch.setattr(m._ITerm, "isInputSignal", lambda self: (
+        self.mterm.sig not in ("POWER", "GROUND")
+        and self.mterm.io in ("INPUT", "INOUT")))
+    mod, reader, _dpl, _tcl = m._odbpy(monkeypatch)
+    plan = {"instances": [{"name": "spare_dff_0", "cell": "dffq",
+                           "llx": 10, "lly": 20}]}
+    measured = mod.insert(reader, {"VIBEIC_SPARE_TIELO_CELL": "tiel/ZN"}, plan)
+    out = capsys.readouterr().out
+    dff = reader.block.findInst("spare_dff_0")
+    conns = {i.mterm.name: (i.getNet().getName() if i.getNet() else None)
+             for i in dff.iterms}
+    assert conns["CLK"] == "spare_tielo_spare_dff_0", conns
+    assert conns["D"] == "spare_tielo_spare_dff_0"
+    assert conns["Q"] is None                      # an output may float
+    assert measured["tieoff_candidates"] == 2 == measured["tieoff_connected"]
+    assert "SPARE_INPUT_PIN spare_dff_0 CLK CLOCK spare_tielo_spare_dff_0" in out
+    assert "SPARE_INPUT_PIN spare_dff_0 D SIGNAL spare_tielo_spare_dff_0" in out
+    assert "SPARE_INPUT_PIN spare_dff_0 Q" not in out
+
+
+# v5c's step log shape: the count over the pins the step chose, then (new)
+# every input it has. spare_dff_0/CLK carries no net.
+_V5C_LOG = """SPARE_TIEOFF_CONNECTED 12 of 12
+SPARE_TIEOFF_DRIVERS 6
+SPARE_INPUT_PIN spare_inverter_0 I SIGNAL spare_tielo_spare_inverter_0
+SPARE_INPUT_PIN spare_dff_0 D SIGNAL spare_tielo_spare_dff_0
+SPARE_INPUT_PIN spare_dff_0 CLK CLOCK -
+SPARE_TIEOFF_DONE: nets spare_tielo_spare_inverter_0 spare_tielo_spare_dff_0
+"""
+
+
+def test_the_runner_reads_the_enumeration_not_just_the_count(tmp_path):
+    import phase3_one_shot_runner as R
+    log = tmp_path / "librelane_spare_cells.log"
+    log.write_text(_V5C_LOG)
+    got = R._spare_tieoff_measured_from_log(log)
+    assert got["measured"] is True
+    assert got["tied_off"] is False, got
+    assert "spare_dff_0/CLK" in got["reason"]
+    assert {"inst": "spare_dff_0", "pin": "CLK", "use": "CLOCK",
+            "net": None} in got["inputs"]
+    # the same log with the CLK tied is tied off
+    log.write_text(_V5C_LOG.replace("CLK CLOCK -",
+                                    "CLK CLOCK spare_tielo_spare_dff_0"))
+    ok = R._spare_tieoff_measured_from_log(log)
+    assert ok["tied_off"] is True and len(ok["inputs"]) == 3
+
+
+def test_the_direct_deck_prints_the_same_enumeration():
+    import phase3_one_shot_runner as R
+    import inspect
+    src = inspect.getsource(R)
+    at = src.index("SPARE_TIEOFF_DRIVERS $_tie_drv")
+    block = src[at:at + 2000]
+    assert 'getIoType] ne \\"INPUT\\"' in block
+    assert "SPARE_INPUT_PIN [$_si getName] [$_mt getName] [$_mt getSigType]" in block
+
+
+# ------------------------------------------------------------ step 18 gate --
+
+# spm v5c `phase3/stage3/pnr/spare_cells.json`, the fields the gate reads.
+_V5C_RECORD = {
+    "count": 6, "density": 0.02, "tied_off": True,
+    "placed_cells_est": 273, "target_density": 0.02,
+    "actual_density": 0.021978,
+    "instances": [
+        {"name": "spare_inverter_0", "llx": 520.24, "lly": 517.44},
+        {"name": "spare_nand2_0", "llx": 1226.96, "lly": 517.44},
+        {"name": "spare_nor2_0", "llx": 1934.8, "lly": 517.44},
+        {"name": "spare_mux2_0", "llx": 519.12, "lly": 1579.76},
+        {"name": "spare_aoi_0", "llx": 1226.96, "lly": 1579.76},
+        {"name": "spare_dff_0", "llx": 1932.56, "lly": 1579.76}],
+    "tie_off": {"measured": True, "connected": 12, "candidates": 12,
+                "tied_off": True,
+                "reason": "measured 12/12 spare input(s) tied to their "
+                          "per-spare tie-low net"},
+}
+
+_PINS_OF = {"spare_inverter_0": ["I"], "spare_nand2_0": ["A1", "A2"],
+            "spare_nor2_0": ["A1", "A2"], "spare_mux2_0": ["I0", "I1", "S"],
+            "spare_aoi_0": ["A1", "A2", "B"], "spare_dff_0": ["D", "CLK"]}
+
+
+def _enumerated(clk_net):
+    rec = json.loads(json.dumps(_V5C_RECORD))
+    rows = []
+    for inst, pins in _PINS_OF.items():
+        for p in pins:
+            net = f"spare_tielo_{inst}"
+            if (inst, p) == ("spare_dff_0", "CLK"):
+                net = clk_net
+            rows.append({"inst": inst, "pin": p,
+                         "use": "CLOCK" if p == "CLK" else "SIGNAL",
+                         "net": net})
+    rec["tie_off"]["inputs"] = rows
+    return rec
+
+
+def test_coverage_refuses_the_v5c_record():
+    """A tie COUNT with no pin enumeration was PASS on main."""
+    r = cov.evaluate_coverage(json.loads(json.dumps(_V5C_RECORD)))
+    assert r["verdict"] == "FAIL", r
+    assert r["tie_off_ok"] is False
+    assert any("not proven per pin" in x for x in r["reasons"])
+
+
+def test_coverage_refuses_an_enumerated_floating_clock():
+    r = cov.evaluate_coverage(_enumerated(None))
+    assert r["verdict"] == "FAIL"
+    assert r["tie_off_inputs"]["without_net"] == ["spare_dff_0/CLK"]
+
+
+def test_coverage_passes_when_every_input_has_a_net():
+    r = cov.evaluate_coverage(_enumerated("spare_tielo_spare_dff_0"))
+    assert r["verdict"] == "PASS", r["reasons"]
+    assert r["tie_off_inputs"]["enumerated"] == 13
+
+
+def test_coverage_refuses_a_spare_missing_from_the_enumeration():
+    rec = _enumerated("spare_tielo_spare_dff_0")
+    rec["tie_off"]["inputs"] = [x for x in rec["tie_off"]["inputs"]
+                                if x["inst"] != "spare_mux2_0"]
+    r = cov.evaluate_coverage(rec)
+    assert r["verdict"] == "FAIL"
+    assert r["tie_off_inputs"]["spares_not_enumerated"] == ["spare_mux2_0"]
+
+
+# ------------------------------------------------------------ step 34 gate --
+
+_CELL = {"spare_inverter_0": "inv_1", "spare_nand2_0": "nand2_2",
+         "spare_nor2_0": "nor2_2", "spare_mux2_0": "mux2_1",
+         "spare_aoi_0": "aoi21_2", "spare_dff_0": "dffq_2"}
+
+
+def _shipped_netlist(clk_connected: bool) -> str:
+    lines = ["module chip_top ();"]
+    for inst, pins in _PINS_OF.items():
+        conns = [f".{p}(spare_tielo_{inst})" for p in pins
+                 if clk_connected or (inst, p) != ("spare_dff_0", "CLK")]
+        lines.append(f" gf180mcu_fd_sc_mcu7t5v0__{_CELL[inst]} {inst} "
+                     f"({', '.join(conns)});")
+    lines.append("endmodule")
+    return "\n".join(lines) + "\n"
+
+
+def test_v5c_netlist_line_is_what_the_fixture_writes():
+    assert (" gf180mcu_fd_sc_mcu7t5v0__dffq_2 spare_dff_0 "
+            "(.D(spare_tielo_spare_dff_0));") in _shipped_netlist(False)
+
+
+def _project(tmp_path, record, netlist):
+    pnr = tmp_path / "phase3/stage3/pnr"
+    pnr.mkdir(parents=True)
+    (pnr / "spare_cells.json").write_text(json.dumps(record))
+    (pnr / "spm_pnr.v").write_text(netlist)
+    (pnr / "routed.def").write_text(
+        "DESIGN chip_top ;\nCOMPONENTS 6 ;\n"
+        + "".join(f"- {n} c + FIXED ( 0 0 ) N ;\n" for n in _PINS_OF)
+        + "END COMPONENTS\nEND DESIGN\n")
+    return tmp_path
+
+
+def test_preservation_refuses_the_shipped_floating_clock(tmp_path):
+    """Every spare survived by name; the shipped netlist leaves CLK open."""
+    proj = _project(tmp_path, _enumerated("spare_tielo_spare_dff_0"),
+                    _shipped_netlist(clk_connected=False))
+    r = pres.audit(proj)
+    assert r["verdict"] == "FAIL", r
+    assert r["spare_input_pins"]["floating"] == ["spare_dff_0/CLK"]
+    assert pres.main([str(proj)]) == 1
+
+
+def test_preservation_passes_the_connected_netlist(tmp_path):
+    proj = _project(tmp_path, _enumerated("spare_tielo_spare_dff_0"),
+                    _shipped_netlist(clk_connected=True))
+    r = pres.audit(proj)
+    assert r["spare_input_pins"]["status"] == "PASS", r["spare_input_pins"]
+    assert r["spare_input_pins"]["checked"] == 13
+
+
+# ------------------------------------------------------------------ ERC --
+
+# The spm tail run's reports/phase3/erc.rpt, head and transcript.
+_TAIL_ERC_RPT = """# Electrical Rule Check (ERC) — OpenROAD open-source path
+#
+ERC floating nets: 0
+ERC clean: YES
+
+# === report_floating_nets / report_erc_metrics stdout ===
+=== ERC: floating nets ===
+[WARNING RSZ-0095] found 1 floating pins.
+ spare_dff_0/CLK
+=== ERC metrics ===
+"""
+
+
+def test_classifier_counts_a_floating_spare_input_as_functional():
+    got = efc.classify(efc.parse_floats(_TAIL_ERC_RPT),
+                       input_pins=efc.parse_floating_input_pins(_TAIL_ERC_RPT))
+    assert efc.parse_floating_input_pins(_TAIL_ERC_RPT) == ["spare_dff_0/CLK"]
+    assert got["functional_count"] == 1
+    assert got["floating_spare_inputs"] == ["spare_dff_0/CLK"]
+    assert got["waiver_eligible"] is False
+
+
+def test_classifier_cli_refuses_the_tail_transcript(tmp_path):
+    rpt = tmp_path / "erc.rpt"
+    rpt.write_text(_TAIL_ERC_RPT)
+    assert efc.main([str(rpt)]) == 1
+
+
+def test_step31_gate_refuses_the_tail_report(tmp_path):
+    d = tmp_path / "reports" / "phase3"
+    d.mkdir(parents=True)
+    (d / "erc.rpt").write_text(_TAIL_ERC_RPT)
+    findings, stats = [], {}
+    edc._check_erc(tmp_path, findings, stats)
+    cats = {f.category for f in findings}
+    assert "ERC_DIRTY" in cats, [(f.category, f.message) for f in findings]
+    assert stats["erc_floating_pins"] == 1
+    assert stats.get("erc_clean") is not True
+
+
+def test_a_floating_spare_output_net_stays_benign(tmp_path):
+    """Only INPUT pins changed class: a bare floating net is judged as before."""
+    body = ("ERC floating nets: 1\nERC clean: NO\n"
+            "[WARNING RSZ-0020] found 1 floating nets.\n VGND\n")
+    d = tmp_path / "reports" / "phase3"
+    d.mkdir(parents=True)
+    (d / "erc.rpt").write_text(body)
+    findings, stats = [], {}
+    edc._check_erc(tmp_path, findings, stats)
+    assert "ERC_BENIGN_FLOATS" in {f.category for f in findings}
+
+
+def test_the_erc_producer_counts_floating_pins(tmp_path, monkeypatch):
+    """`_emit_erc_report` on the tail run's tool transcript (container faked)."""
+    import phase3_one_shot_runner as R
+    transcript = ("=== ERC: floating nets ===\n"
+                  "[WARNING RSZ-0095] found 1 floating pins.\n"
+                  " spare_dff_0/CLK\n=== ERC metrics ===\n")
+    monkeypatch.setattr(R, "_to_container_path", lambda p, c: p)
+    monkeypatch.setattr(R, "_docker_exec",
+                        lambda *a, **k: (0, transcript, ""))
+    pnr = R._pl.pnr_dir(tmp_path)
+    pnr.mkdir(parents=True)
+    (pnr / "chip_top.def").write_text("DESIGN chip_top ;\n")
+    pdk = SimpleNamespace(tech_lef="t.lef", cell_lef="c.lef",
+                          liberty="c.lib", macro_lefs=[])
+    rpt = tmp_path / "reports" / "phase3" / "erc.rpt"
+    assert R._emit_erc_report(tmp_path, "chip_top", pdk, "ctr", rpt, [])
+    text = rpt.read_text()
+    assert "ERC floating pins: 1" in text
+    assert "ERC clean: YES" not in text
+    rec = json.loads((rpt.parent / "erc.json").read_text())
+    assert rec["clean"] is False and rec["verdict"] != "PASS", rec
+    assert rec["float_classification"]["functional_count"] == 1

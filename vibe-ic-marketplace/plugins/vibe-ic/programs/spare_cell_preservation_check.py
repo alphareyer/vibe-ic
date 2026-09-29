@@ -645,6 +645,89 @@ def _agreement_reasons(agreement: dict,
     return out
 
 
+_PIN_CONN_RE = re.compile(r"\.([A-Za-z_][\w$]*)\s*\(\s*([^()]*?)\s*\)")
+
+
+def _instance_connections(text: str, inst: str) -> Optional[Dict[str, str]]:
+    """{pin: net} of instance `inst` in a structural Verilog netlist, or None
+    when the netlist does not instantiate it. Only pins the netlist WRITES
+    appear: `write_verilog` omits an unconnected pin entirely."""
+    for token in (inst, "\\" + inst):
+        at = 0
+        while True:
+            at = text.find(" " + token, at)
+            if at < 0:
+                break
+            end_name = at + 1 + len(token)
+            rest = text[end_name:end_name + 4]
+            if rest[:1] not in (" ", "(", "\t", "\n"):
+                at = end_name
+                continue
+            open_at = text.find("(", end_name)
+            if open_at < 0 or text[end_name:open_at].strip():
+                at = end_name
+                continue
+            close_at = text.find(");", open_at)
+            if close_at < 0:
+                return None
+            body = text[open_at + 1:close_at]
+            return {pin: net for pin, net in _PIN_CONN_RE.findall(body)}
+    return None
+
+
+def spare_inputs_in_netlist(plan: dict, netlist_text: str) -> Dict[str, Any]:
+    """Is every spare input the insertion step enumerated connected in the
+    SHIPPED netlist? (U6)
+
+    spm v5c `<top>_pnr.v:113595` instantiates the spare flop as
+    `dffq_2 spare_dff_0 (.D(spare_tielo_spare_dff_0));` -- CLK absent, i.e.
+    no net -- while every other gate called the pool tied. The pins to look
+    for come from the insertion step's per-pin enumeration
+    (`tie_off.inputs`). A record without it cannot say which pins exist; that
+    is step 18's refusal (`spare_cell_coverage_check.prove_inputs_tied`), so
+    here it is DISCLOSED as NOT_ENUMERATED rather than refused a second time
+    for the same missing record."""
+    tie = plan.get("tie_off")
+    inputs = tie.get("inputs") if isinstance(tie, dict) else None
+    out: Dict[str, Any] = {"status": "FAIL", "checked": 0, "floating": [],
+                           "instances_absent": []}
+    if not isinstance(inputs, list) or not inputs:
+        out["status"] = "NOT_ENUMERATED"
+        out["reason"] = ("spare_cells.json carries no per-pin enumeration of "
+                         "the spare inputs (tie_off.inputs), so their "
+                         "connection in the shipped netlist was not checked "
+                         "here; step 18's coverage gate refuses that record")
+        return out
+    cache: Dict[str, Optional[Dict[str, str]]] = {}
+    for row in inputs:
+        if not isinstance(row, dict):
+            continue
+        inst, pin = str(row.get("inst")), str(row.get("pin"))
+        if inst not in cache:
+            cache[inst] = _instance_connections(netlist_text, inst)
+        conns = cache[inst]
+        out["checked"] += 1
+        if conns is None:
+            if inst not in out["instances_absent"]:
+                out["instances_absent"].append(inst)
+            continue
+        if not conns.get(pin):
+            out["floating"].append(f"{inst}/{pin}")
+    if out["floating"]:
+        out["reason"] = ("SPARE_INPUT_FLOATING: %d spare input(s) have no net "
+                         "in the shipped netlist: %s"
+                         % (len(out["floating"]),
+                            ", ".join(out["floating"][:20])))
+    elif out["instances_absent"]:
+        out["reason"] = ("SPARE_INPUT_INSTANCE_ABSENT: the shipped netlist does "
+                         "not instantiate %s" % ", ".join(out["instances_absent"][:20]))
+    else:
+        out["status"] = "PASS"
+        out["reason"] = ("%d enumerated spare input(s) each connected in the "
+                         "shipped netlist" % out["checked"])
+    return out
+
+
 def audit(project: Path) -> dict:
     if _pl is not None:
         spare_json = _pl.pnr_dir(project) / "spare_cells.json"
@@ -699,6 +782,19 @@ def audit(project: Path) -> dict:
         result["reasons"] = (list(result.get("reasons") or [])
                              + _agreement_reasons(agreement,
                                                   agreement["witnesses"]))
+    # Every spare INPUT the insertion enumerated must have a net in the
+    # shipped netlist (U6). Only the netlist names pin connections.
+    pins = spare_inputs_in_netlist(resolved_plan,
+                                   final_texts.get("netlist") or "")
+    if pins["status"] not in ("PASS", "NOT_ENUMERATED") and not final_texts.get("netlist"):
+        pins = {"status": "FAIL", "reason": (
+            "SPARE_INPUTS_NOT_PROVEN: no readable post-PnR netlist "
+            "(<top>_pnr.v) to prove the enumerated spare inputs are "
+            "connected in")}
+    result["spare_input_pins"] = pins
+    if pins["status"] == "FAIL":
+        result["verdict"] = "FAIL"
+        result["reasons"] = list(result.get("reasons") or []) + [pins["reason"]]
     # v0.1.25+1: emit output_files[] so provenance_hash_audit can verify
     # the PASS verdict is backed by real artefacts on disk. chip-AGNOSTIC.
     try:
