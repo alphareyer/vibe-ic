@@ -682,13 +682,19 @@ def post_stream_identity(project: Path, plan: dict) -> dict:
             "record": _ref(project / GDS_ADMISSION)}
     lvs = _read_json(project / LVS_INPUTS)
     verdict = _read_json(project / LVS_VERDICT)
-    schematic = (lvs.get("schematic_netlist") or {}).get("path")
-    if schematic and Path(schematic).is_file() and (project / LVS_VERDICT).is_file():
+    # The netlist LVS compared is the one step 31 RECORDED (path + sha256 at
+    # compare time), never whatever that path holds now; the judge re-hashes it.
+    schematic = lvs.get("schematic_netlist") or {}
+    if (schematic.get("path") and schematic.get("sha256")
+            and (project / LVS_INPUTS).is_file() and (project / LVS_VERDICT).is_file()):
         derivation["lvs"] = {
             "layout_def_sha256": (lvs.get("layout_def") or {}).get("sha256"),
-            "schematic_netlist": _ref(Path(schematic)),
+            "schematic_netlist": {"path": str(schematic["path"]),
+                                  "sha256": str(schematic["sha256"])},
             "verdict": verdict.get("status"),
             "compare_performed": verdict.get("compare_performed"),
+            "inputs_record": _ref(project / LVS_INPUTS),
+            "verdict_record": _ref(project / LVS_VERDICT),
             "records": [_ref(project / LVS_INPUTS), _ref(project / LVS_VERDICT)]}
         artifacts["lvs_netlist"] = derivation["lvs"]["schematic_netlist"]
         identity["lvs_netlist"] = artifacts["lvs_netlist"]["sha256"]

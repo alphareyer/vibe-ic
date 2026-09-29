@@ -544,13 +544,30 @@ def _waiver_support(waiver: dict, row: dict, bundle: dict,
     return not local_errors
 
 
+def _record(ref: dict, missing: list[str], label: str) -> dict | None:
+    """A flow record the bundle binds by sha256, RE-READ from its file: the
+    judgement is about what the record says, never the bundle's copy of it."""
+    text = _evidence(ref or {}, missing, label)
+    if not text:
+        return None
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        doc = None
+    if not isinstance(doc, dict):
+        missing.append(f"{label}: not a JSON object")
+        return None
+    return doc
+
+
 def _check_post_stream_derivation(identity: dict, fails: list[str],
                                   missing: list[str]) -> None:
     """R-0929-DRV-IDENTITY: the final capture proves the streamed GDS and the
     LVS netlist derive from the judged DEF / netlist.  Every file is
-    re-hashed here; a record the flow did not write is NOT_MEASURED, a link
-    that names a different DEF or netlist is FAIL (the verdict would be about
-    another layout)."""
+    re-hashed and every record re-read here (review wave 58: the bundle's
+    copy of a record's fields was trusted); a record the flow did not write is
+    NOT_MEASURED, a link that names a different DEF or netlist is FAIL (the
+    verdict would be about another layout)."""
     derivation = identity.get("derivation")
     artifacts = identity.get("artifacts") or {}
     judged_def = (artifacts.get("def") or {}).get("sha256")
@@ -562,27 +579,44 @@ def _check_post_stream_derivation(identity: dict, fails: list[str],
         missing.append("post-stream GDS admission record absent")
     else:
         _evidence(gds, missing, "streamed GDS")
-        if not gds.get("streamed_from_def_sha256"):
-            missing.append("streamed GDS names no source DEF")
-        elif gds["streamed_from_def_sha256"] != judged_def:
-            fails.append("streamed GDS derives from a DEF other than the judged DEF")
-        _evidence(gds.get("record") or {}, missing, "GDS admission record")
+        admission = _record(gds.get("record") or {}, missing, "GDS admission record")
+        if admission is not None:
+            streamed_from = (admission.get("basis_inputs") or {}).get(
+                "phase3/stage3/pnr/routed.def")
+            if admission.get("gds_sha256") != gds.get("sha256"):
+                missing.append("GDS admission record admits another stream than the bound GDS")
+            if not streamed_from:
+                missing.append("streamed GDS names no source DEF")
+            elif streamed_from != judged_def:
+                fails.append("streamed GDS derives from a DEF other than the judged DEF")
     lvs = derivation.get("lvs")
     if not isinstance(lvs, dict):
         missing.append("post-stream LVS record absent")
         return
-    for record in lvs.get("records") or [{}]:
-        _evidence(record, missing, "LVS record")
-    _evidence(lvs.get("schematic_netlist") or {}, missing, "LVS schematic netlist")
-    if not lvs.get("layout_def_sha256"):
+    inputs_ref = lvs.get("inputs_record") or {}
+    inputs = _record(inputs_ref, missing, "LVS inputs record")
+    verdict = _record(lvs.get("verdict_record") or {}, missing, "LVS verdict record")
+    if inputs is None or verdict is None:
+        return
+    # The verdict is the verdict OF these inputs only when step 31 wrote it
+    # while this very record stood (a stale PASS of another layout is not).
+    if (verdict.get("lvs_inputs") or {}).get("sha256") != inputs_ref.get("sha256"):
+        missing.append("LVS verdict is not bound to the recorded LVS inputs")
+    layout = (inputs.get("layout_def") or {}).get("sha256")
+    schematic = inputs.get("schematic_netlist") or {}
+    # The netlist LVS compared is the one it recorded, by those bytes.
+    _evidence(schematic, missing, "LVS schematic netlist")
+    if (lvs.get("schematic_netlist") or {}).get("sha256") != schematic.get("sha256"):
+        missing.append("bundle LVS netlist differs from the LVS inputs record")
+    if not layout:
         missing.append("LVS names no layout DEF")
-    elif lvs["layout_def_sha256"] != judged_def:
+    elif layout != judged_def:
         fails.append("LVS compared a layout DEF other than the judged DEF")
-    if (lvs.get("schematic_netlist") or {}).get("sha256") != identity.get("sta_netlist"):
+    if schematic.get("sha256") != identity.get("sta_netlist"):
         fails.append("LVS compared a netlist other than the judged STA netlist")
-    if lvs.get("verdict") != "PASS" or lvs.get("compare_performed") is False:
+    if verdict.get("status") != "PASS" or verdict.get("compare_performed") is False:
         missing.append(f"LVS did not prove the layout matches the netlist "
-                       f"(verdict {lvs.get('verdict')})")
+                       f"(verdict {verdict.get('status')})")
 
 
 def judge(bundle: dict, *, project: Path | None = None) -> dict:

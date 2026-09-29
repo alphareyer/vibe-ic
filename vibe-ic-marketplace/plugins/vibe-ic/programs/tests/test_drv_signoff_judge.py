@@ -196,14 +196,16 @@ def _bundle(tmp_path: Path) -> dict:
         "basis_inputs": {"phase3/stage3/pnr/routed.def": artifacts["def"]["sha256"]}}))
     lvs_inputs = _file(tmp_path, "reports/phase3/lvs_inputs.json", json.dumps({
         "layout_def": artifacts["def"], "schematic_netlist": netlist}))
+    # step 31's verdict names the inputs record of its own compare
     lvs_verdict = _file(tmp_path, "reports/phase3/lvs_verdict.json", json.dumps({
-        "status": "PASS", "compare_performed": True}))
+        "status": "PASS", "compare_performed": True, "lvs_inputs": lvs_inputs}))
     bundle["identity"]["derivation"] = {
         "gds": {**gds, "streamed_from_def_sha256": artifacts["def"]["sha256"],
                 "record": admission},
         "lvs": {"layout_def_sha256": artifacts["def"]["sha256"],
                 "schematic_netlist": netlist, "verdict": "PASS",
-                "compare_performed": True, "records": [lvs_inputs, lvs_verdict]}}
+                "compare_performed": True, "inputs_record": lvs_inputs,
+                "verdict_record": lvs_verdict, "records": [lvs_inputs, lvs_verdict]}}
     _refresh_scripts(bundle, tmp_path)
     return bundle
 
