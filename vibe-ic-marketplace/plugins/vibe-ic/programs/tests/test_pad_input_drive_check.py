@@ -193,6 +193,33 @@ def test_route_is_never_read_from_absent_files(tmp_path):
     marker.write_text(TD.SELF_TAPEOUT_MARKER + "\n")
     rc, doc = _run(p)
     assert (rc, doc["verdict"]) == (2, "NOT_MEASURED"), doc
+    # NOT_MEASURED for the RIGHT reason: no owner answer -- not "judged as a
+    # DIE from the marker, record missing" (review ROUTESIL r2: main returned
+    # rc 2 here too, for that wrong reason)
+    assert "no owner-attested deliverable" in doc["reason"], doc
+    assert "no owner-attested deliverable" in doc["route_basis"], doc
+
+
+def test_an_owner_hardmacro_contradicted_by_the_run_is_not_applicable_unearned(tmp_path):
+    """Review ROUTESIL r2 probe, MEASURED on a copy of the real spm run_v5c
+    (SELF_TAPEOUT.txt + slots + owner-attested DIE declaration) with ONLY
+    `answers.deliverable` in input/step_0_5ic_answers.json flipped to
+    HARDMACRO: Phase 3 still builds the ring, and the gate answered
+    NOT_APPLICABLE rc 0. The contradiction must be named, never N/A."""
+    import _owner_declared as OD
+    p = tmp_path / "flipped"
+    (p / TD.SELF_TAPEOUT_REL).parent.mkdir(parents=True)
+    (p / TD.SELF_TAPEOUT_REL).write_text(TD.SELF_TAPEOUT_MARKER + "\n")
+    (p / TD.SLOTS_REL).mkdir(parents=True)
+    (p / TD.SLOTS_REL / "1x1.yaml").write_text("slot: catalogue entry\n")
+    (p / TD.DECLARATION_REL).write_text(json.dumps(OD.attest(
+        {"schema": "vibe-ic/tapeout_declaration/1",
+         "answers": {"deliverable": "DIE", "top_cell": "t"}})) + "\n")
+    _declare(p, TD.DELIVERABLE_HARDMACRO)
+    rc, doc = _run(p)
+    assert (rc, doc["verdict"]) == (2, "NOT_MEASURED"), doc
+    assert "disagree" in doc["contradiction"], doc
+    assert TD.DECLARATION_REL in doc["reason"]
 
 
 def test_an_unattested_hardmacro_is_not_an_answer(tmp_path):
@@ -250,3 +277,18 @@ def test_flow_compliance_grades_step23_on_the_clause(tmp_path):
     _resolve(good)
     res = FC.check_step(good, _step23_only(), {})
     assert res.status == "PASS", res.reasons
+
+
+def test_an_owner_hardmacro_where_phase3_builds_a_ring_is_not_applicable_unearned(
+        tmp_path, monkeypatch):
+    """The second contradiction arm: both owner files say HARDMACRO, but the
+    producer's own condition (requests_pad_ring) builds a ring. Only the
+    predicate is faked; the gate runs its real code."""
+    import pad_input_drive_check as G
+    p = tmp_path / "ring"
+    p.mkdir()
+    _declare(p, TD.DELIVERABLE_HARDMACRO)
+    monkeypatch.setattr(TD, "requests_pad_ring", lambda project: True)
+    doc = G.judge(p)
+    assert doc["verdict"] == "NOT_MEASURED", doc
+    assert "builds a pad ring" in doc["contradiction"]

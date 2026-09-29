@@ -61,6 +61,42 @@ def _route(project: Path):
         return None, f"the owner-attested route could not be read: {exc}"
 
 
+def _hardmacro_contradiction(project: Path) -> Optional[str]:
+    """Why an owner HARDMACRO cannot stand here, or None.
+
+    NOT_APPLICABLE on a HARDMACRO is earned only when nothing in the run says
+    otherwise (review ROUTESIL r2, MEASURED on a copy of spm run_v5c with only
+    step_0_5ic_answers.json flipped to HARDMACRO: Phase 3 still built a ring
+    and this gate answered NOT_APPLICABLE rc 0). Two ways the run says
+    otherwise:
+      * the two owner files disagree (the raw step-0.5ic answers and the
+        generated tapeout declaration each attest a different deliverable);
+      * Phase 3's own ring predicate (`requests_pad_ring`, the producer's
+        condition) builds a pad ring, or refuses to answer.
+    """
+    import _submission_template as _st
+    import _tapeout_declaration as _td
+    got = {}
+    for rel in (_st.DESIGN_ANSWERS_REL, _td.DECLARATION_REL):
+        if not (project / rel).exists():
+            continue
+        try:
+            got[rel] = _td.read_owner_delivery(project, rel)[1]
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    if len(set(got.values())) > 1:
+        return ("the owner files disagree: " + ", ".join(
+            f"{rel} says {d}" for rel, d in sorted(got.items())))
+    try:
+        ring = bool(_td.requests_pad_ring(project))
+    except Exception as exc:                                 # noqa: BLE001
+        return f"Phase 3's ring predicate refused ({exc})"
+    if ring:
+        return ("Phase 3's ring predicate (requests_pad_ring) builds a pad "
+                "ring for this project")
+    return None
+
+
 def _not_a_die(out: Dict[str, Any], basis: str) -> Dict[str, Any]:
     """NOT_APPLICABLE_BY_STRUCTURE on the owner's HARDMACRO answer: a hard
     macro's inputs are driven on chip, so there is no bond pad to drive. It is
@@ -111,6 +147,12 @@ def judge(project: Path, deck_rel: str = SIGNOFF_DECK) -> Dict[str, Any]:
                            f"is absent on disk")
     import _tapeout_declaration as _td
     if delivery != _td.DELIVERABLE_DIE:
+        why = _hardmacro_contradiction(project)
+        if why:
+            return dict(out, verdict="NOT_MEASURED", contradiction=why,
+                        reason=f"{basis}, but {why} -- the route is "
+                               f"contradictory, so NOT_APPLICABLE is not "
+                               f"earned and the bond-pad drive was not judged")
         return _not_a_die(out, basis)
     try:
         rec = json.loads((project / _se.PAD_INPUT_DRIVE_REPORT).read_text())
