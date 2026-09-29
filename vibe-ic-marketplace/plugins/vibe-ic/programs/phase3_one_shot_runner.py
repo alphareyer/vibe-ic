@@ -72633,6 +72633,14 @@ def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
                   f"LibreLane KLayout.Filler ({tool['filler']['script']}); PDK "
                         f"density deck: {tool[_lf.DENSITY_METRIC]} error(s) "
                         f"{tool.get('rules')}")
+        if tool[_lf.DENSITY_METRIC] != 0:
+            # Nothing was copied, so the record must not name the tool arm
+            # (or its digest) as the bytes in gds_out: in `dual` those are the
+            # direct arm's, measured on the same deck; otherwise no arm shipped.
+            doc["ship_refusal"] = (
+                f"librelane arm not shipped: PDK density deck "
+                f"{tool[_lf.DENSITY_METRIC]} error(s); gds_out was not replaced")
+            shipped = "direct" if direct else None
     elif ctx["mode"] == "librelane":
         result = (False, f"LibreLane KLayout.Filler REFUSED: {doc.get('tool_refusal')}")
     doc.update({"shipped": shipped, "direct": direct, "librelane": tool,
