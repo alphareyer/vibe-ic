@@ -150,14 +150,6 @@ _NOT_PROSE: Dict[str, str] = {
         "OpenSTA positive/negative Pin blocks calibrate this reader; "
         "tests/test_drv_signoff_judge.py::test_negated_table_title_cannot_be_a_measurement "
         "is its falsifier.",
-    "sdc_environment::_design_input_transition":
-        "ONE STRICT TABLE GRAMMAR, NO SENTENCE. Only an L9 Markdown key/value "
-        "row whose first cell is exactly `set_input_transition` is read, and "
-        "its second cell must parse WHOLE as a positive finite number (ns). A "
-        "negated or worded value cannot parse, so it is no declaration and the "
-        "drive falls through to the PDK IO tier or NOT_MEASURED. Falsifier: "
-        "tests/test_r0929_pad_input_drive.py::"
-        "test_a_declared_input_transition_drives_the_die_inputs.",
     "sdc_environment::_sdc_environment_design_values":
         "ONE STRICT TABLE GRAMMAR, NO SENTENCE. Only adjacent L9 Markdown "
         "key/value cells whose first cell is one of six exact SDC or flow "
