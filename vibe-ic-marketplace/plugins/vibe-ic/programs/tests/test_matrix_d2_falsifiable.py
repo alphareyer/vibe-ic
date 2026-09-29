@@ -2371,8 +2371,31 @@ def _f_xor_design_layer_differs(p: Path) -> None:
     }, indent=2) + "\n")
 
 
+def _f_si_fold_not_applied(p: Path) -> None:
+    """A MEASURED SI violation for step 27 (R-0929-SIMCF-NOTRUN).
+
+    Since SIMCF 7b867728c the could-not-run state is NOT_MEASURED/rc 2, so the
+    bare EMPTY tree no longer reddens `si_mcf_sta_check` — and must not: it
+    reddened only because a missing input used to be rc 1. The reachable FAIL
+    is the defect the gate was written for: the emitter's bounded setup SPEF
+    carries the coupling unfolded (FOLD_NOT_APPLIED), with every input present
+    and project-bound. The builder is the SI gate's own test fixture, so the
+    two suites cannot drift onto different notions of "measured"."""
+    from test_si_mcf_not_run_is_not_a_design_failure import (
+        _b_fold_not_applied)
+    _b_fold_not_applied(p)
+
+
+def _f_si_fold_applied(p: Path) -> None:
+    """The control for `_f_si_fold_not_applied`: the same tree, folded."""
+    from test_si_mcf_not_run_is_not_a_design_failure import _project
+    _project(p)
+
+
 FIXTURES: Dict[str, Callable[[Path], None]] = {
     "EMPTY": _f_empty,
+    "SI_FOLD_NOT_APPLIED": _f_si_fold_not_applied,
+    "SI_FOLD_APPLIED": _f_si_fold_applied,
     "RTL_BAD": _f_rtl_bad,
     "ANALOG_STAGE_BAD_VERDICT": _f_analog_stage_bad_verdict,
     "ANALOG_P3": _f_analog_p3,
@@ -2432,6 +2455,10 @@ FIXTURES: Dict[str, Callable[[Path], None]] = {
 #: not redden it) fails loudly rather than silently keeping a stale recipe.
 #: Clauses absent from this table use ``EMPTY``.
 CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
+    # Step 27 reddens through a MEASURED SI violation, never through a
+    # could-not-run tree (R-0929-SIMCF-NOTRUN): EMPTY is NOT_MEASURED, rc 2.
+    ("27", "si_mcf_sta_check . --json reports/phase3/si_mcf_sta_check.json"):
+        "SI_FOLD_NOT_APPLIED",
     # The analog gate self-skips on a digital-only project. Declare analog
     # work, then deliver a structurally invalid verdict to reach its refusal.
     ("14", "flow_step_output_content_check . --mode stage_analog"):
@@ -4678,3 +4705,22 @@ def matrix_cell_state(step_id) -> str:
     if W.waiver_for(step_id, DIM) is not None:
         return "WAIVED"
     return "ENFORCED"
+
+
+def test_d2_step27_reddens_on_a_measured_violation_and_only_on_it(
+        tmp_path, _gate_timeout):
+    """R-0929-SIMCF-NOTRUN, both halves at the matrix's own consumer.
+
+    The FAIL is content-earned: the same tree with the fold applied passes,
+    and the tree with no evidence at all is a disclosed NOT_MEASURED, not a
+    FAIL and not a pass."""
+    command = "si_mcf_sta_check . --json reports/phase3/si_mcf_sta_check.json"
+    red, out_red = _tier(_build_project(tmp_path, "si_red",
+                                        "SI_FOLD_NOT_APPLIED"), command)
+    assert red == RED and "FOLD_NOT_APPLIED" in out_red, out_red[-400:]
+    good, out_good = _tier(_build_project(tmp_path, "si_ok",
+                                          "SI_FOLD_APPLIED"), command)
+    assert good == PASS, out_good[-400:]
+    empty, out_empty = _tier(_build_project(tmp_path, "si_empty", "EMPTY"),
+                             command)
+    assert empty not in (RED, PASS), (empty, out_empty[-400:])
