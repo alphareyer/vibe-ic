@@ -59285,8 +59285,9 @@ def _clear_superseded_dft_nonmeasurements(dft_dir: Path) -> List[str]:
     return cleared
 
 
-def run_step11_dft_after_synth(project: Path, top: str,
-                               container: str) -> List[StepResult]:
+def run_step11_dft_after_synth(project: Path, top: str, container: str,
+                               pdk: Optional["PdkConfig"] = None
+                               ) -> List[StepResult]:
     """Run canonical Step 11 (+12, +13) now that the mapped netlist exists.
 
     Invoked from main() immediately after `step_synth` PASSes and BEFORE PnR --
@@ -59389,7 +59390,9 @@ def run_step11_dft_after_synth(project: Path, top: str,
         import design_one_shot_runner as _d2
         ic_class = str((_detect(project) or {}).get("ic_class") or "unknown")
         rows = _d2.step_dft_lec_chain(project, top, container, ic_class,
-                                      full_chip=True)
+                                      full_chip=True,
+                                      **{f"lec_{k}": v for k, v in
+                                         _step13_pdk_kwargs(pdk).items()})
     except Exception as exc:
         return [StepResult(
             "dft_atpg_order_selfheal", "FAIL", time.time() - t0,
@@ -59439,8 +59442,19 @@ def run_step11_dft_after_synth(project: Path, top: str,
     return out
 
 
-def run_step13_lec_on_pnr_input(project: Path, top: str,
-                                container: str) -> List[StepResult]:
+def _step13_pdk_kwargs(pdk: Optional["PdkConfig"]) -> Dict[str, str]:
+    """This run's resolved PDK for step 13's EQY tool arm (R-0929-TOOL-DEFAULT:
+    the chip path runs step 13 dual). Empty when phase 3 has none, so the arm
+    names the missing PDK instead of guessing one."""
+    if pdk is None or not getattr(pdk, "name", None):
+        return {}
+    return {"pdk": str(pdk.name),
+            "std_cell_library": _pdk_std_cell_library(pdk) or None}
+
+
+def run_step13_lec_on_pnr_input(project: Path, top: str, container: str,
+                                pdk: Optional["PdkConfig"] = None
+                                ) -> List[StepResult]:
     """Prove canonical Step 13 on the netlist step 15 is about to route.
 
     Owner decision F1. Step 13 proves RTL == the netlist `pnr_input_netlist`
@@ -59490,7 +59504,8 @@ def run_step13_lec_on_pnr_input(project: Path, top: str,
             reason_class=_V.ReasonClass.INPUT_ABSENT)]
     try:
         import design_one_shot_runner as _d2
-        rows = _d2.step_lec_equivalence(project, top, container)
+        rows = _d2.step_lec_equivalence(project, top, container,
+                                        **_step13_pdk_kwargs(pdk))
     except Exception as exc:  # noqa: BLE001 — reported, never swallowed
         return [StepResult(
             "lec_pnr_input", "FAIL", time.time() - t0,
@@ -77935,7 +77950,7 @@ def main() -> int:
             # downstream decision. Emits NOTHING when Step 11 already carries a
             # real measurement, so an already-measured tree is untouched.
             for _s11 in run_step11_dft_after_synth(
-                    project, effective_top, args.container):
+                    project, effective_top, args.container, pdk):
                 plan.append(_s11)
                 print(f"[dft] {_s11.status:5s} {_s11.name}: {_s11.detail}",
                       flush=True)
@@ -77944,7 +77959,7 @@ def main() -> int:
             # before PnR: the proof must be about the netlist PnR routes.
             # Emits nothing when the recorded proof already is.
             for _s13 in run_step13_lec_on_pnr_input(
-                    project, effective_top, args.container):
+                    project, effective_top, args.container, pdk):
                 plan.append(_s13)
                 print(f"[lec] {_s13.status:5s} {_s13.name}: {_s13.detail}",
                       flush=True)

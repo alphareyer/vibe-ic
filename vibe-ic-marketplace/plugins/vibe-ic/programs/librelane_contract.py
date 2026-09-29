@@ -1725,7 +1725,13 @@ CLASS_PRODUCTION_DEFAULTS: dict[str, dict[str, str]] = {
                                  # STA is OpenROAD.STAPostPNR (every declared
                                  # scene, setup AND hold); the direct 2-corner
                                  # deck timed hold only at FF.
-                                 '23': 'librelane'},
+                                 '23': 'librelane',
+                                 # CUT_W4 (R-0929-TOOL-DEFAULT): LEC runs its
+                                 # tool arm (Yosys.EQY) beside lec_run; the
+                                 # combined verdict is the step's, and a
+                                 # counterexample in either arm is never
+                                 # outvoted (librelane_eqy.combine).
+                                 '13': 'dual'},
 }
 
 #: A class default runs only inside the chain it continues. The producers are
@@ -1787,8 +1793,10 @@ def _class_default(project: Path, step: str, named: dict[str, Any],
 #:   3/4/5 direct  CDC, simulation and formal are vibe-ic's (no LibreLane step).
 #:   8   dual    `librelane` replaces the SDC semantic checks with OpenSTA's
 #:               read verdict; both must pass (a: the spec SDC is kept).
-#:   13  direct  vibe-ic LEC on the exact netlist segment 2 consumes (b); the
-#:               EQY arm is off by default and skips gf180 in LibreLane.
+#:   13  dual    vibe-ic LEC (lec_run, arm A) on the exact netlist segment 2
+#:               consumes (b), with the EQY tool arm beside it
+#:               (R-0929-TOOL-DEFAULT); arm A is never replaced, and a
+#:               counterexample in either arm fails the step.
 #:   24  dual    LibreLane's IR is static and report-only; vibe-ic's budget
 #:               gates judge too (d).
 #:   25  direct  LibreLane has no EM step; vibe-ic runs it on the tool's ODB.
@@ -1809,7 +1817,7 @@ IMPL_STEP_MODES: dict[str, dict[str, str]] = {
     'librelane': {
         '2': 'direct', '3': 'direct', '4': 'direct', '5': 'direct',
         '7': 'librelane', '8': 'dual', '9': 'librelane', '10': 'librelane',
-        '13': 'direct',
+        '13': 'dual',
         '15': 'librelane', '15.5ic': 'librelane', '17': 'librelane',
         '18': 'librelane', '19': 'librelane', '20': 'librelane',
         '21': 'librelane', '22': 'librelane', '23': 'librelane',
