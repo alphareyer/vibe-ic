@@ -122,6 +122,15 @@ POST_RELEASE_CYCLES = 8
 _QUAL_COND_RE = re.compile(
     r"\bwhen(?:ever)?\b|\bwhile\b|\bif\b|\bqualified\s+by\b|\bsampled\b|"
     r"\bvalid\b|當|時|期間|有效|取樣", re.IGNORECASE)
+#: VALIDITY semantics (R-0929-X-QUALIFIED): the clause says the output's value
+#: is VALID / SAMPLED / QUALIFIED / CAPTURED at the qualifier's level. A bare
+#: condition ("o_done is high when o_busy is low", "o_q cleared to 0 when
+#: rst_n is low") is a behaviour or a reset value, not a validity qualifier.
+#: `低有效` / `高電位有效` spell ACTIVE-LOW / -HIGH, not validity.
+_QUAL_VALIDITY_RE = re.compile(
+    r"\bvalid(?:ity)?\b|\bsampled\b|\bqualified\b|\bqualifies\b|"
+    r"\bcaptured\b|\blatched\b|\bstrobed\b|(?<![低高位])有效|取樣|採樣|鎖存",
+    re.IGNORECASE)
 _ID_CH = r"A-Za-z0-9_$"
 #: `<q> = 1`, `<q>==1'b1`, `<q> 為 0`, `<q> is 1`
 _QUAL_BIT_TMPL = (r"(?<![{c}]){q}`?\s*(?:==?|為|是|is)\s*(?:1'b)?([01])(?![{c}'])")
@@ -156,6 +165,8 @@ def qualifiers_from_statements(
         statements: List[Tuple[Optional[str], str]],
         outputs: List[Tuple[str, str]],
         inputs: List[Tuple[str, str]],
+        excluded: "Tuple[str, ...]" = (),
+        data_outputs: "Optional[List[str]]" = None,
 ) -> Dict[str, List[Dict[str, str]]]:
     """{output: [{qualifier, active, evidence}]} from the design's own text.
 
@@ -166,19 +177,31 @@ def qualifiers_from_statements(
     port and carries a condition word -- and is not denied (`_prose_polarity`).
     Nothing is inferred from a port's NAME: an output the text never qualifies
     has no qualifier, and X on it after reset release is a FAIL.
+
+    FULLSTACKTB final review (a false PASS): the clause must state VALIDITY
+    (`_QUAL_VALIDITY_RE`), the qualified output must be a DATA output
+    (`data_outputs`: the caller names them; default and `declared_output_qualifiers`:
+    default multi-bit), and the ports the testbench drives as CLOCK and RESET
+    (`excluded`) are never a qualifier -- a reset-value sentence ("o_q cleared
+    to 0 when rst_n is low") is the very invariant the X check tests, and read
+    as a qualifier it exempted an UNRESET output after release.
     """
     import _prose_polarity as _pp
-    one_bit = [n for n, w in (outputs + inputs) if not w]
-    out_names = [n for n, _w in outputs]
+    one_bit = [n for n, w in (outputs + inputs)
+               if not w and n not in excluded]
+    out_names = [n for n, w in outputs if n not in excluded]
+    if data_outputs is None:
+        data_outputs = [n for n, w in outputs if w]
     found: Dict[str, List[Dict[str, str]]] = {}
     for subject, text in statements:
-        for sent in ([text] if subject else _QUAL_SPLIT_RE.split(text or "")):
+        for sent in _QUAL_SPLIT_RE.split(text or ""):
             sent = (sent or "").strip()
             if not sent or not _QUAL_COND_RE.search(sent) \
+                    or not _QUAL_VALIDITY_RE.search(sent) \
                     or _pp.is_denied(sent):
                 continue
-            targets = [d for d in out_names
-                       if d == subject or _names(sent, d)]
+            targets = [d for d in out_names if d in data_outputs
+                       and (d == subject or _names(sent, d))]
             for d in targets:
                 for q in one_bit:
                     if q == d or not _names(sent, q):
@@ -218,7 +241,15 @@ def declared_output_qualifiers(
     for n in (notes if isinstance(notes, list) else [notes]):
         if isinstance(n, str):
             statements.append((None, n))
-    return qualifiers_from_statements(statements, outputs, inputs)
+    excluded = tuple(n for n in (_pick_clock(inputs), _pick_reset(inputs)[0])
+                     if n)
+    # Only a DATA output is qualified. Without a declared role reader the
+    # data outputs are the multi-bit ones (fail-closed: a 1-bit output is a
+    # control/strobe output and must be known after release).
+    data_outputs = [n for n, w in outputs if w]
+    return qualifiers_from_statements(statements, outputs, inputs,
+                                      excluded=excluded,
+                                      data_outputs=data_outputs)
 
 
 def _text(case: dict) -> str:
