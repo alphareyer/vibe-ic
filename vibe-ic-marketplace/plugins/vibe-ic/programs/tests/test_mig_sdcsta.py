@@ -280,6 +280,55 @@ def test_eqy_pass_over_xbits_is_inconclusive(tmp_path):
     assert report["xbits_partitions"] == ["cal_chain.y", "cal_chain.q0"]
 
 
+@pytest.mark.parametrize("status", [None, "UNKNOWN", "ERROR", "TIMEOUT", "", "UNRECOGNIZED"])
+def test_eqy_accounts_for_every_declared_partition(tmp_path, status):
+    folder = eqy_folder(tmp_path, "eqy_defined_init_negative")
+    for path in (folder / "scratch/strategies/cal_chain.y").glob("*/status"):
+        if status is None:
+            path.unlink()
+        else:
+            path.write_text(status)
+    report = eqy.judge_eqy(folder, tmp_path / "partial.json")
+    assert (report["verdict"], report["compared_points"], report["proven_points"],
+            report["unproven_points"]) == ("INCONCLUSIVE", 2, 1, ["cal_chain.y"])
+    combined = eqy.combine({"verdict": "INCONCLUSIVE"}, report)
+    assert combined["verdict"] == "INCONCLUSIVE"
+
+
+@pytest.mark.parametrize("population", [None, "", "broken record\n", "duplicate", "extra_status"])
+def test_eqy_requires_a_complete_partition_population(tmp_path, population):
+    folder = eqy_folder(tmp_path, "eqy_defined_init_negative")
+    listing = folder / "scratch/partition.list"
+    if population is None:
+        listing.unlink()
+    elif population == "duplicate":
+        listing.write_text(listing.read_text() * 2)
+    elif population == "extra_status":
+        path = folder / "scratch/strategies/undeclared/sat/status"
+        path.parent.mkdir(parents=True)
+        path.write_text("PASS")
+    else:
+        listing.write_text(population)
+    report = eqy.judge_eqy(folder, tmp_path / "population.json")
+    assert report["verdict"] == "INCONCLUSIVE"
+
+
+def test_eqy_counterexample_precedes_missing_partition_status(tmp_path):
+    folder = eqy_folder(tmp_path, "eqy_not_equivalent_positive")
+    for path in (folder / "scratch/strategies/cal_chain.q0").glob("*/status"):
+        path.unlink()
+    report = eqy.judge_eqy(folder, tmp_path / "failure.json")
+    assert (report["verdict"], report["non_equivalent_points"],
+            report["unproven_points"]) == ("FAIL", ["cal_chain.y"], ["cal_chain.q0"])
+
+
+def test_eqy_a_failure_is_not_outvoted_by_a_passing_strategy(tmp_path):
+    folder = eqy_folder(tmp_path, "eqy_defined_init_negative")
+    (folder / "scratch/strategies/cal_chain.y/sat/status").write_text("FAIL")
+    report = eqy.judge_eqy(folder, tmp_path / "disagreement.json")
+    assert (report["verdict"], report["non_equivalent_points"]) == ("FAIL", ["cal_chain.y"])
+
+
 def test_eqy_script_drops_bitwuzla_and_defines_initial_values():
     text = eqy.eqy_script("top", [Path("/r.v")], Path("/n.v"), "/lib/tt.lib")
     assert "bitwuzla" not in text and "setundef -init -zero" in text

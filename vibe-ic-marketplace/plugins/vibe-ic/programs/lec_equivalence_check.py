@@ -76,6 +76,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -440,6 +441,37 @@ def _arm_a_proof_sha(project: Path) -> Optional[str]:
     return sha if isinstance(sha, str) and sha.startswith("sha256:") else None
 
 
+def _eqy_proof_is_current(project: Path, binding: dict, subjects: dict) -> bool:
+    """EQY's pre-run input snapshot, not a post-run subject label, binds credit."""
+    if binding.get("state") != _B_MATCH:
+        return False
+    try:
+        doc = json.loads((project / "reports/lec_eqy.json").read_text())
+        identity = doc["proof_identity"]
+        gold = identity["gold_rtl"]
+        gate = identity["gate_netlist"]
+        rtl_dir = project / "phase2/stage1/rtl"
+        current_rtl = sorted(rtl_dir.glob("*.sv")) + sorted(rtl_dir.glob("*.v"))
+        if (doc.get("verdict") != "PASS" or doc.get("xbits_partitions")
+                or identity.get("top") != binding.get("top")
+                or not isinstance(gold, list) or not gold
+                or gate.get("sha256") != binding.get("consumer_sha256")
+                or gate.get("sha256") != subjects.get("eqy")):
+            return False
+        if [(project / item["path"]).resolve() for item in gold] != [
+                path.resolve() for path in current_rtl]:
+            return False
+        for item in [gate, *gold, identity["equivalence_script"]]:
+            path = project / item["path"]
+            if item["sha256"] != "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest():
+                return False
+        # The composed record must identify that same gate file, not another
+        # path that happened to receive its sha256 after the proof completed.
+        return (project / subjects["eqy_path"]).resolve() == (project / gate["path"]).resolve()
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+
+
 def audit_tool_arm(project: Path, res: AuditResult) -> AuditResult:
     """Fold step 13's EQY tool arm into arm A's result.
 
@@ -451,7 +483,8 @@ def audit_tool_arm(project: Path, res: AuditResult) -> AuditResult:
       netlist) FAILs the gate -- it is never outvoted, and before this reader
       an EQY counterexample never reached the audit at all;
     * an EQY PASS stands for an UNDECIDED arm A only when EQY proved the very
-      netlist arm A was asked about (same sha256), compared no gold-x
+      CURRENT consumer netlist arm A was asked about (same sha256), with a
+      current pre-run snapshot of its RTL and script inputs, compared no gold-x
       (`xbits`) partition, and arm A recorded no counterexample. EQY treats
       gold x as don't-care, so its PASS is never evidence beyond that.
     """
@@ -497,14 +530,17 @@ def audit_tool_arm(project: Path, res: AuditResult) -> AuditResult:
         res.not_measured = False
         return res
     arm_b = str((arms.get("arms") or {}).get("eqy") or "").upper()
+    current = _eqy_proof_is_current(project, res.summary.get("subject_binding") or {}, subjects)
+    note["proof_inputs_current"] = current
     credit = (verdict == "PASS" and arms.get("selected") == "eqy"
-              and arm_b == "PASS" and not res.passed
+              and arm_b == "PASS" and not res.passed and current
+              and (res.inconclusive or res.not_measured)
               and subjects.get("eqy") == proof_sha
               and not arms.get("eqy_xbits_partitions")
               and res.non_equivalent_points in (None, 0))
     if not credit:
         same = subjects.get("eqy") == proof_sha
-        note["state"] = ("CORROBORATED" if res.passed and arm_b == "PASS" and same
+        note["state"] = ("CORROBORATED" if res.passed and arm_b == "PASS" and same and current
                          else "NOT_CREDITED" if arm_b == "PASS" else "UNDECIDED")
         return res
     note["state"] = "CREDITED"
