@@ -89,6 +89,8 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
                if before.get(name) != after.get(name)}
     allowed_reports = {
         "reports/audit/windows/bounded37/phase23_completion_audit.json",
+        # a14cafaa2: the selected steps' view is refreshed in the project.
+        "reports/audit/steps_view.json",
         "reports/audit/windows/bounded37/steps_view.json",
         "reports/audit/windows/bounded37/publication.json",
         "reports/orchestrator/windows/bounded37/phase3_one_shot.json",
@@ -224,7 +226,7 @@ def test_changed_route_cannot_sign_off_old_gds(tmp_path, monkeypatch):
     assert (project / "phase3" / "pnr" / "top.gds").read_bytes() == b"old GDS"
 
 
-def test_real_gds_window_refuses_external_input_paths(tmp_path, monkeypatch):
+def test_real_gds_step_with_container_write_keeps_other_stage_files(tmp_path, monkeypatch):
     from test_phase3_postpnr_disclosure_and_gds_guard import _pdk
     project = tmp_path / "project"
     monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "realgds")
@@ -269,6 +271,8 @@ def test_real_gds_window_refuses_external_input_paths(tmp_path, monkeypatch):
                if before.get(name) != after.get(name)}
     allowed_reports = {
         "reports/audit/windows/realgds/phase23_completion_audit.json",
+        # a14cafaa2: the selected steps' view is refreshed in the project.
+        "reports/audit/steps_view.json",
         "reports/audit/windows/realgds/steps_view.json",
         "reports/audit/windows/realgds/publication.json",
         "reports/orchestrator/windows/realgds/phase3_one_shot.json",
@@ -285,14 +289,13 @@ def test_real_gds_window_refuses_external_input_paths(tmp_path, monkeypatch):
         "phase3/stage3/pnr/top.stream_inputs.json",
         "phase3/stage3/pnr/stream_out.py",
         "phase3/stage4/gds/top.gds"}, sorted(changed)
-    report = json.loads(_window_record(project, "orchestrator",
-                                       "phase3_one_shot.json").read_text())
-    assert report["steps"][0]["status"] == "NOT_MEASURED"
-    assert "outside project" in report["steps"][0]["detail"]
-    assert "phase3/stage3/pnr/stream_out.py" not in after
+    assert "phase3/stage3/pnr/stream_out.py" in after, (
+        "the stream-input record pins the recipe bytes, so the bounded-window "
+        "publisher must carry that exact recipe with the record"
+    )
     assert calls, "the real GDS step never reached the container"
-    assert not p3._ga.admitted_gds(project, pnr / "top.gds", basis)
-    assert not any(name.endswith(".gds") for name in after)
+    assert p3._ga.admitted_gds(project, pnr / "top.gds", basis)
+    assert any(name.endswith(".gds") for name in after)
     assert after["phase3/stage3/pnr/top.def"] == before["phase3/stage3/pnr/top.def"]
     assert after["phase3/synth/top_synth.v"] == before["phase3/synth/top_synth.v"]
     assert after["reports/phase3/drc.rpt"] == before["reports/phase3/drc.rpt"]
