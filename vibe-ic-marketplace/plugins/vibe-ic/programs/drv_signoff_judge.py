@@ -1195,9 +1195,35 @@ def main(argv: list[str] | None = None) -> int:
                         help="evidence JSON or project root containing reports/phase3/sta/drv_signoff_bundle.json")
     parser.add_argument("--json", type=Path, required=True)
     args = parser.parse_args(argv)
+    source = (args.bundle / "reports/phase3/sta/drv_signoff_bundle.json"
+              if args.bundle.is_dir() else args.bundle)
+    tool_arm = None
+    if args.bundle.is_dir():
+        # F15 -- STEP 23 ON THE TOOL. When step 23 runs `librelane` or `dual`
+        # the route that was signed off is the one STAPostPNR timed. Bind that
+        # arm first, exactly as the other step-23 gates do: a tool arm that
+        # cannot be read REFUSES (rc 1) before anything is judged.
+        import librelane_signoff as _ls
+        from librelane_contract import Refusal
+        try:
+            arm = _ls.step23_tool_arm(args.bundle)
+        except Refusal as exc:
+            result = {"name": "DRV(tran/cap/fanout)", "verdict": "REFUSED",
+                      "refusal": exc.code,
+                      "reason": (f"step 23 runs on the tool and its sign-off "
+                                 f"cannot be read: {exc}")}
+            write_text(args.json, json.dumps(result, indent=2) + "\n")
+            print(result["verdict"], result["name"])
+            return 1
+        if arm is not None:
+            tool_arm = {"basis": _ls.tool_arm_basis(arm)}
+            try:
+                state = json.loads((Path(arm["folder"]) / "state_out.json").read_text())
+                tool_arm["def"] = str(state["def"])
+                tool_arm["def_sha256"] = _sha(Path(state["def"]))
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                tool_arm["def_error"] = str(exc)
     try:
-        source = (args.bundle / "reports/phase3/sta/drv_signoff_bundle.json"
-                  if args.bundle.is_dir() else args.bundle)
         bundle = json.loads(source.read_text())
         result = judge(bundle, project=args.bundle if args.bundle.is_dir() else None)
         if not args.bundle.is_dir():
@@ -1217,12 +1243,29 @@ def main(argv: list[str] | None = None) -> int:
             elif _sha(routed) != recorded:
                 result.setdefault("not_measured", []).append(
                     "current routed DEF differs from judged layout identity")
+            if tool_arm is not None and tool_arm.get("def_sha256") != recorded:
+                # The DRV census is a fresh OpenSTA capture of a routed DEF; on
+                # the tool arm it certifies step 23 only if that DEF is the one
+                # STAPostPNR timed. STAPostPNR's own reports carry violator
+                # COUNTS, not the per-(pin, scene) census the standard judges,
+                # so they cannot stand in for the capture.
+                result.setdefault("not_measured", []).append(
+                    "step 23 runs on the tool: the DRV bundle's routed DEF is "
+                    "not the DEF STAPostPNR timed "
+                    f"({tool_arm.get('def') or tool_arm.get('def_error')})")
             result["verdict"] = ("FAIL" if result.get("failures") else
                                  "NOT_MEASURED" if result.get("not_measured") else
                                  result["verdict"])
     except Exception as exc:  # noqa: BLE001 - a crashed instrument has no verdict
         result = {"name": "DRV(tran/cap/fanout)", "verdict": "NOT_MEASURED",
                   "not_measured": [f"bundle unreadable: {exc}"]}
+        if tool_arm is not None:
+            result["not_measured"].append(
+                "step 23 runs on the tool, and STAPostPNR's reports carry DRV "
+                "violator counts, not the per-(pin, scene) census the DRV "
+                "standard judges: a fresh capture of the DEF it timed is required")
+    if tool_arm is not None:
+        result["tool_arm"] = tool_arm
     if result["verdict"] == "NOT_MEASURED":
         result["reason_class"] = ("input_absent" if not source.is_file()
                                   else "partial_population")
