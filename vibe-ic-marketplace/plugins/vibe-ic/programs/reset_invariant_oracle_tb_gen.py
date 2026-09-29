@@ -57,11 +57,19 @@ never on a case-name, chip, vendor or SKU literal.
 """
 from __future__ import annotations
 
+# --- sibling-import path (vibe-ic#2104) ------------------------------------
+import os as _os                                                    # noqa: E402
+import sys as _sys                                                  # noqa: E402
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# ---------------------------------------------------------------------------
+
 import json
 import re
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # ── the case's own grammar ────────────────────────────────────────────────
 #: reset is ASSERTED (held), as opposed to released — the boot-latency family
@@ -103,6 +111,145 @@ _ACTIVE_LOW_RE = re.compile(r"(?:_n$|n$|_b$|(?:^|_)(?:rstn|resetn)(?:$|_))",
 
 FAMILY_HOLD = "RESET_ASSERT_HOLD"
 FAMILY_GLITCH = "RESET_GLITCH_NO_RACE"
+
+#: Cycles observed after the glitch is released. Every one is sampled, from
+#: the FIRST edge after release (R-0929-X-QUALIFIED), not a single late look.
+POST_RELEASE_CYCLES = 8
+
+# ── R-0929-X-QUALIFIED: the qualifiers the DESIGN INPUT declares ──────────
+#: A condition word: the sentence makes one signal's meaning conditional on
+#: another's level ("wdata is sampled WHEN wen=1", "資料於 we 為 1 時有效").
+_QUAL_COND_RE = re.compile(
+    r"\bwhen(?:ever)?\b|\bwhile\b|\bif\b|\bqualified\s+by\b|\bsampled\b|"
+    r"\bvalid\b|當|時|期間|有效|取樣", re.IGNORECASE)
+#: VALIDITY semantics (R-0929-X-QUALIFIED): the clause says the output's value
+#: is VALID / SAMPLED / QUALIFIED / CAPTURED at the qualifier's level. A bare
+#: condition ("o_done is high when o_busy is low", "o_q cleared to 0 when
+#: rst_n is low") is a behaviour or a reset value, not a validity qualifier.
+#: `低有效` / `高電位有效` spell ACTIVE-LOW / -HIGH, not validity.
+_QUAL_VALIDITY_RE = re.compile(
+    r"\bvalid(?:ity)?\b|\bsampled\b|\bqualified\b|\bqualifies\b|"
+    r"\bcaptured\b|\blatched\b|\bstrobed\b|(?<![低高位])有效|取樣|採樣|鎖存",
+    re.IGNORECASE)
+_ID_CH = r"A-Za-z0-9_$"
+#: `<q> = 1`, `<q>==1'b1`, `<q> 為 0`, `<q> is 1`
+_QUAL_BIT_TMPL = (r"(?<![{c}]){q}`?\s*(?:==?|為|是|is)\s*(?:1'b)?([01])(?![{c}'])")
+#: `<q> high|asserted|拉高` / `<q> low|deasserted|拉低`
+_QUAL_WORD_TMPL = (r"(?<![{c}]){q}`?\s*(?:is\s+|為)?\s*"
+                   r"(asserted|deasserted|high|low|拉高|拉低|高|低)")
+_QUAL_WORD_LEVEL = {"asserted": "1", "high": "1", "拉高": "1", "高": "1",
+                    "deasserted": "0", "low": "0", "拉低": "0", "低": "0"}
+#: What ends one statement in the L9 prose (sentences, table cells, lines).
+_QUAL_SPLIT_RE = re.compile(r"[。;；|\n]|\.\s")
+
+
+def _names(text: str, name: str) -> bool:
+    return bool(re.search(rf"(?<![{_ID_CH}]){re.escape(name)}(?![{_ID_CH}])",
+                          text))
+
+
+def _qualifier_level(sentence: str, q: str) -> Optional[str]:
+    """The ACTIVE level the sentence binds to `q`, or None."""
+    qe = re.escape(q)
+    m = re.search(_QUAL_BIT_TMPL.format(c=_ID_CH, q=qe), sentence)
+    if m:
+        return m.group(1)
+    m = re.search(_QUAL_WORD_TMPL.format(c=_ID_CH, q=qe), sentence,
+                  re.IGNORECASE)
+    if m:
+        return _QUAL_WORD_LEVEL[m.group(1).lower()]
+    return None
+
+
+def qualifiers_from_statements(
+        statements: List[Tuple[Optional[str], str]],
+        outputs: List[Tuple[str, str]],
+        inputs: List[Tuple[str, str]],
+        excluded: "Tuple[str, ...]" = (),
+        data_outputs: "Optional[List[str]]" = None,
+) -> Dict[str, List[Dict[str, str]]]:
+    """{output: [{qualifier, active, evidence}]} from the design's own text.
+
+    `statements` are (subject, text): a port-table row's description has its
+    port as the implicit subject; a prose sentence has none and must name the
+    qualified output itself. A qualifier is declared only when ONE statement
+    names the output, names another 1-bit port, binds an active level to that
+    port and carries a condition word -- and is not denied (`_prose_polarity`).
+    Nothing is inferred from a port's NAME: an output the text never qualifies
+    has no qualifier, and X on it after reset release is a FAIL.
+
+    FULLSTACKTB final review (a false PASS): the clause must state VALIDITY
+    (`_QUAL_VALIDITY_RE`), the qualified output must be a DATA output
+    (`data_outputs`; by default, and always from `declared_output_qualifiers`,
+    the multi-bit outputs), and the ports the testbench drives as CLOCK and RESET
+    (`excluded`) are never a qualifier -- a reset-value sentence ("o_q cleared
+    to 0 when rst_n is low") is the very invariant the X check tests, and read
+    as a qualifier it exempted an UNRESET output after release.
+    """
+    import _prose_polarity as _pp
+    one_bit = [n for n, w in (outputs + inputs)
+               if not w and n not in excluded]
+    out_names = [n for n, w in outputs if n not in excluded]
+    if data_outputs is None:
+        data_outputs = [n for n, w in outputs if w]
+    found: Dict[str, List[Dict[str, str]]] = {}
+    for subject, text in statements:
+        for sent in _QUAL_SPLIT_RE.split(text or ""):
+            sent = (sent or "").strip()
+            if not sent or not _QUAL_COND_RE.search(sent) \
+                    or not _QUAL_VALIDITY_RE.search(sent) \
+                    or _pp.is_denied(sent):
+                continue
+            targets = [d for d in out_names if d in data_outputs
+                       and (d == subject or _names(sent, d))]
+            for d in targets:
+                for q in one_bit:
+                    if q == d or not _names(sent, q):
+                        continue
+                    level = _qualifier_level(sent, q)
+                    if level is None:
+                        continue
+                    rows = found.setdefault(d, [])
+                    if not any(r["qualifier"] == q for r in rows):
+                        rows.append({"qualifier": q, "active": level,
+                                     "evidence": sent[:200]})
+    return found
+
+
+def declared_output_qualifiers(
+        project: Path, outputs: List[Tuple[str, str]],
+        inputs: List[Tuple[str, str]],
+) -> Dict[str, List[Dict[str, str]]]:
+    """The qualifiers L9 (port table + interface prose) declares. §4.05: reads
+    the design input only; an unreadable L9 declares nothing (fail-closed)."""
+    import _path_layout as _pl
+    f = _pl.generated_docs_dir(Path(project)) / "L9_INTEGRATION_SPEC.json"
+    try:
+        doc = json.loads(f.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    statements: List[Tuple[Optional[str], str]] = []
+    for key in ("ports", "top_ports", "top_module_pins"):
+        for row in doc.get(key) or []:
+            if isinstance(row, dict) and isinstance(row.get("description"),
+                                                    str):
+                statements.append((str(row.get("name") or "") or None,
+                                   row["description"]))
+    notes = doc.get("notes")
+    for n in (notes if isinstance(notes, list) else [notes]):
+        if isinstance(n, str):
+            statements.append((None, n))
+    excluded = tuple(n for n in (_pick_clock(inputs), _pick_reset(inputs)[0])
+                     if n)
+    # Only a DATA output is qualified. Without a declared role reader the
+    # data outputs are the multi-bit ones (fail-closed: a 1-bit output is a
+    # control/strobe output and must be known after release).
+    data_outputs = [n for n, w in outputs if w]
+    return qualifiers_from_statements(statements, outputs, inputs,
+                                      excluded=excluded,
+                                      data_outputs=data_outputs)
 
 
 def _text(case: dict) -> str:
@@ -164,8 +311,17 @@ def emit_case_oracle_from_ports(
     inputs: List[Tuple[str, str]],
     outputs: List[Tuple[str, str]],
     inouts: List[Tuple[str, str]],
+    qualifiers: Optional[Dict[str, List[Dict[str, str]]]] = None,
 ) -> Optional[str]:
-    """Core, project-I/O-free emitter. Returns TB text, or None (fail-closed)."""
+    """Core, project-I/O-free emitter. Returns TB text, or None (fail-closed).
+
+    `qualifiers` is `declared_output_qualifiers`' answer. After the glitch is
+    released every output is sampled on every one of `POST_RELEASE_CYCLES`
+    cycles from the first edge (R-0929-X-QUALIFIED): an output with no declared
+    qualifier must be a known 0/1 on each; one with declared qualifiers may be
+    X/Z only on a cycle where EVERY qualifier is known and at its inactive
+    level, and each such cycle is printed as an `X_EXEMPT` line."""
+    qualifiers = qualifiers or {}
     name = case.get("name", "")
     family = case_family(case)
     if family is None:
@@ -201,9 +357,16 @@ def emit_case_oracle_from_ports(
         L.append("// GLITCH must not cause a bus/fetch race. This TB runs the")
         L.append(f"// design, applies a ONE-CYCLE pulse on '{rst}', and FAILs if")
         L.append(f"// '{observed}' is asserted anywhere inside the pulse, or if")
-        L.append("// any observable output is left X/Z after release. It does")
-        L.append("// NOT claim the converse: a race-free pulse is not a proof")
-        L.append("// that the fetch which follows is correct.")
+        L.append("// any observable output is X/Z on any cycle after release")
+        L.append("// (R-0929-X-QUALIFIED: X is allowed only on an output whose")
+        L.append("// declared qualifier is known and inactive). It does NOT")
+        L.append("// claim the converse: a race-free pulse is not a proof that")
+        L.append("// the fetch which follows is correct.")
+        for d, rows in sorted(qualifiers.items()):
+            for r in rows:
+                L.append(f"// qualifier (design input): '{d}' qualified by "
+                         f"'{r['qualifier']}' active={r['active']} -- "
+                         + r["evidence"].replace("\n", " ")[:120])
     L.append("`timescale 1ns/1ps")
     L.append(f"module {name};")
     for n, w in inputs:
@@ -266,13 +429,40 @@ def emit_case_oracle_from_ports(
                  f'inside the reset glitch — a transaction races the reset");')
         L.append("    end")
         L.append(f"    {rst} = 1'b{released};")
-        L.append("    repeat (8) @(posedge " + clk + ");")
+        # R-0929-X-QUALIFIED — from the FIRST edge after release, every cycle.
+        L.append(f"    for (_i = 0; _i < {POST_RELEASE_CYCLES}; _i = _i + 1) "
+                 "begin")
+        L.append(f"      @(posedge {clk}); @(negedge {clk});")
         for n, _w in outputs:
-            L.append(f"    if (^({n}) === 1'bx) begin")
-            L.append("      errors = errors + 1;")
-            L.append(f'      $display("[TB {name}] FAIL: output \'{n}\' is X/Z '
-                     f'after the glitch was released");')
-            L.append("    end")
+            rows = [r for r in qualifiers.get(n) or []
+                    if r.get("active") in ("0", "1")]
+            L.append(f"      if (^({n}) === 1'bx) begin")
+            if rows:
+                inactive = " && ".join(
+                    f"({r['qualifier']} === 1'b{1 - int(r['active'])})"
+                    for r in rows)
+                shown = ", ".join(f"{r['qualifier']}=%b" for r in rows)
+                args = ", ".join(r["qualifier"] for r in rows)
+                L.append(f"        if ({inactive})")
+                L.append(f'          $display("[TB {name}] X_EXEMPT: cycle %0d '
+                         f'after release: output \'{n}\' is X/Z while its '
+                         f'declared qualifier(s) are inactive and known: '
+                         f'{shown}", _i, {args});')
+                L.append("        else begin")
+                L.append("          errors = errors + 1;")
+                L.append(f'          $display("[TB {name}] FAIL: output '
+                         f'\'{n}\' is X/Z at cycle %0d after the glitch was '
+                         f'released while a declared qualifier is asserted or '
+                         f'unknown: {shown}", _i, {args});')
+                L.append("        end")
+            else:
+                L.append("        errors = errors + 1;")
+                L.append(f'        $display("[TB {name}] FAIL: output \'{n}\' '
+                         f'is X/Z at cycle %0d after the glitch was released '
+                         f'(no qualifier declared for it in the design input)",'
+                         f' _i);')
+            L.append("      end")
+        L.append("    end")
     L.append("    if (errors != 0) begin")
     L.append(f'      $display("[TB {name}] FAIL — %0d check(s) failed", errors);')
     L.append("      $fatal(1);")

@@ -727,12 +727,19 @@ def stamp_generated(text: str, emitter: str) -> str:
 
 def _emit_case_golden_oracle(project: Path, ic_class: "str | None",
                              case: dict, out_dir: Path,
-                             report: "dict | None") -> "Path | None":
+                             report: "dict | None",
+                             case_stated: bool = False) -> "Path | None":
     """Emit a REAL per-case golden oracle TB (no ORACLE_NONE) for an L10
     `functional_vector` case, using the declared-function convention in
     arith_oracle_tb_gen. Returns the written path, or None when no closed-form
     oracle is derivable for this design (→ caller falls back to the substance
-    floor; fail-closed)."""
+    floor; fail-closed).
+
+    `case_stated` hands the case itself to the emitter so the population, the
+    corners and the reset-mid-computation scenario the case's OWN text states
+    are what the module drives (`arith_oracle_tb_gen.case_oracle_options`).
+    The full-stack functional producer asks for it; the Step-4 unit-TB loop
+    keeps the historical sample."""
     name = case.get("name", "")
     if not _LEGAL_ID_RE.match(str(name)):
         return None
@@ -744,8 +751,11 @@ def _emit_case_golden_oracle(project: Path, ic_class: "str | None",
     except Exception:
         return None
     try:
+        # `case=` only when asked: the Step-4 call keeps its historical
+        # four-argument shape exactly.
+        _stated = {"case": case} if case_stated else {}
         text = _aog.emit_case_oracle(
-            project, ic_class, str(name), _case_profile(case))
+            project, ic_class, str(name), _case_profile(case), **_stated)
     except Exception as e:  # pragma: no cover — never let it break the loop
         if report is not None:
             report.setdefault("oracle_errors", []).append(
@@ -832,8 +842,11 @@ def _emit_case_reset_invariant_oracle(project: Path, case: dict,
         return None
     inputs, outputs, inouts = _classify(ports)
     try:
+        # R-0929-X-QUALIFIED — which outputs the DESIGN INPUT qualifies, and
+        # by what; every other output must be known after reset release.
+        quals = _riv.declared_output_qualifiers(project, outputs, inputs)
         text = _riv.emit_case_oracle_from_ports(
-            case, dut_module, inputs, outputs, inouts)
+            case, dut_module, inputs, outputs, inouts, qualifiers=quals)
     except Exception as e:  # pragma: no cover — never break the loop
         if report is not None:
             report.setdefault("oracle_errors", []).append(
@@ -1798,9 +1811,24 @@ def oracle_provenance(project: Path) -> dict:
     }
 
 
+#: Which oracle family wrote a case's TB, by the emitter's stamp. The full-stack
+#: functional producer records it per case.
+ORACLE_FAMILY_BY_EMITTER = {
+    "_emit_case_delivered_oracle": "delivered_oracle",
+    "_emit_case_known_answer_vector": "known_answer_vector",
+    "_emit_case_stated_vector_bus": "stated_vector_bus",
+    "_emit_case_golden_oracle": "declared_function_golden",
+    "_emit_case_boot_latency_oracle": "boot_latency",
+    "_emit_case_reset_invariant_oracle": "reset_invariant",
+}
+
+
 def emit_unit_tbs(project: Path, top: str = "chip_top",
                   kind: "str | None" = None,
-                  report: "dict | None" = None) -> int:
+                  report: "dict | None" = None,
+                  out_dir: "Path | None" = None,
+                  scaffold: bool = True,
+                  case_stated: bool = False) -> int:
     """ORGANIC #797 — importable producer entry point. Emit one unit TB per L10
     test case under `<project>/sim/tb/`, optionally KIND-SCOPED.
 
@@ -1830,7 +1858,18 @@ def emit_unit_tbs(project: Path, top: str = "chip_top",
 
     `report["scope"]` always carries the `producer_scope` record, on every
     return path INCLUDING the refusals, so the caller can state the LAYER fact
-    (how many cases exist, of which kinds) rather than only the FILTER fact."""
+    (how many cases exist, of which kinds) rather than only the FILTER fact.
+
+    FULLSTACKTB — the Step-5 full-stack functional producer asks the SAME
+    ladder the same question, so it calls this function rather than a second
+    copy of it: `out_dir` puts the testbenches in its own directory,
+    `scaffold=False` withholds the substance-floor scaffold (a case no REAL
+    oracle grounds gets no file at all — a scaffold is exactly the
+    connectivity-only evidence that producer exists to refuse), and
+    `case_stated` hands each case to the declared-function emitter so its own
+    stated population, corners and reset-mid-computation scenario are driven
+    (`_emit_case_golden_oracle`). The defaults are the Step-4 behaviour,
+    unchanged."""
     if report is None:
         report = {}
     cases = load_l10_cases(project)
@@ -1851,7 +1890,7 @@ def emit_unit_tbs(project: Path, top: str = "chip_top",
             f"the DUT would print a PASS it never verified (#209).")
         return -2
 
-    out_dir = _pl.sim_dir(project) / "tb"
+    out_dir = Path(out_dir) if out_dir is not None else _pl.sim_dir(project) / "tb"
     out_dir.mkdir(parents=True, exist_ok=True)
     # For the arithmetic-primitive family the L10 functional_vector cases have a
     # closed-form golden (the declared function p = a OP b mod 2^N). Author a
@@ -1890,7 +1929,7 @@ def emit_unit_tbs(project: Path, top: str = "chip_top",
                                                  ports, out_dir, report)
         if wrote is None:
             wrote = _emit_case_golden_oracle(project, ic_class, c, out_dir,
-                                             report)
+                                             report, case_stated=case_stated)
         if wrote is None:
             # ORGANIC #778 companion — the datapath (arith) convention
             # didn't ground this case; try the CPU-core / clocked-core
@@ -1905,7 +1944,10 @@ def emit_unit_tbs(project: Path, top: str = "chip_top",
             # Beside the release-side family above, same fail-closed rule.
             wrote = _emit_case_reset_invariant_oracle(
                 project, c, dut_module, ports, out_dir, report)
-        if wrote is None:
+        if wrote is None and not scaffold:
+            report.setdefault("no_real_oracle", []).append(
+                str(c.get("name", c.get("id", ""))))
+        elif wrote is None:
             # The substance-floor SCAFFOLD stays kind-scoped. It is the part
             # with a §4.05 side effect: a scaffold is a LIVE driver, and
             # `l10_tb_conformance_check` suppresses its whole evidence blob only
