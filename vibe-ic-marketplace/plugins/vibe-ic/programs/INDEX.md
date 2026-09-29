@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1395
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1395)
+- **Total programs (excluding helpers / shims):** 1396
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1396)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1386 |
+| `any` | 1387 |
 
 ## Alphabetical listing
 
@@ -766,6 +766,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `lpc_protocol_synth` | any | — | Low Pin Count (LPC) Interface protocol synth helper. |
 | `lpddr5_protocol_synth` | any | v0.1.89 | LPDDR5 SDRAM (JEDEC JESD209-5)-class protocol synth helper. |
 | `lvs_def_port_seed` | any | v0.1.114 | DEF-pin port-seed generator for top-level netgen LVS pin matching. |
+| `lvs_layout_view_census` | any | — | name every placed master that the LVS extraction read as a full library layout instead of the abstract the flow supplied. |
 | `lvs_netgen_setup_emit` | any | v0.1.49 | Netgen supplementary LVS setup-file generator. |
 | `lvs_power_aware_extract_tcl` | any | — | the LVS ROOT FIX (extraction side). |
 | `lvs_power_aware_netlist_emit` | any | — | the LVS ROOT FIX: power-aware gate netlist. |
@@ -1467,7 +1468,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1386 programs)
+### `any` (1387 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2204,6 +2205,7 @@ _(no programs in this group)_
 - `lpc_protocol_synth` — Low Pin Count (LPC) Interface protocol synth helper.
 - `lpddr5_protocol_synth` — LPDDR5 SDRAM (JEDEC JESD209-5)-class protocol synth helper.  _[v0.1.89]_
 - `lvs_def_port_seed` — DEF-pin port-seed generator for top-level netgen LVS pin matching.  _[v0.1.114]_
+- `lvs_layout_view_census` — name every placed master that the LVS extraction read as a full library layout instead of the abstract the flow supplied.
 - `lvs_netgen_setup_emit` — Netgen supplementary LVS setup-file generator.  _[v0.1.49]_
 - `lvs_power_aware_extract_tcl` — the LVS ROOT FIX (extraction side).
 - `lvs_power_aware_netlist_emit` — the LVS ROOT FIX: power-aware gate netlist.
