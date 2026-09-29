@@ -61,7 +61,8 @@ STAGE_STEPS: Dict[str, tuple] = {
 
 #: A probe file name: <command>.<corner|all>.<sequence>.<kind>
 _TAG = re.compile(r"^(?P<command>[A-Za-z_]+)\.(?P<corner>[^.]+)\.(?P<seq>\d+)\."
-                  r"(?P<kind>pre\.sdc|behavior\.rpt|args|clock_fanout|error)$")
+                  r"(?P<kind>pre\.sdc|behavior\.rpt|args|clock_fanout|fanout_limits\.rpt"
+                  r"|pin_cells|error)$")
 
 
 def _sha(path: Path) -> str:
@@ -201,6 +202,11 @@ def record_step(project: Path, step_id: str, folder: Path, *,
         doc["sdc_snapshot"] = _one_file(project, name, "pre.sdc", files["pre.sdc"])
     if files.get("args"):
         doc["command_args"] = _one_file(project, name, "args", files["args"])
+    if files.get("fanout_limits.rpt"):
+        doc["fanout_limit_report"] = _one_file(project, name, "fanout_limits.rpt",
+                                               files["fanout_limits.rpt"])
+    if files.get("pin_cells"):
+        doc["pin_cell_report"] = _one_file(project, name, "pin_cells", files["pin_cells"])
     if files.get("clock_fanout"):
         doc["clock_fanout_report"] = _one_file(project, name, "clock_fanout",
                                                files["clock_fanout"])

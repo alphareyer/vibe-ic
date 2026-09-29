@@ -1751,6 +1751,12 @@ def _stage_receipts(project: Path, *, skip=(), placement_sdc_fanout=4) -> None:
         behavior = _file(folder, "drv_behavior.rpt", (
             "clocks 1\nclock clk is_propagated=0\n" + census if name == "synth"
             else census + "sta::max_fanout_check_limit 4\n"))
+        # The tool's pre-command fanout-limit table and each pin's master
+        # (R-0929-DRV-FANOUT-LIMIT: the design limit is the core drivers').
+        limits = _file(folder, "fanout_limits.rpt",
+                       "max fanout\n\nPin u/Y\nmax fanout 4\nfanout 1\n"
+                       "-----------\nSlack 3 (MET)\n")
+        pin_cells = _file(folder, "pin_cells", "pin_cell\tu/Y\tlogic\n")
         receipt = {"name": name, "run_id": run_id, "ran": True,
                    "behavior_report": behavior,
                    # a stage's own prose claim is never the applied value
@@ -1760,6 +1766,7 @@ def _stage_receipts(project: Path, *, skip=(), placement_sdc_fanout=4) -> None:
                                             "strash\nbuffer -N 4\n"))
         else:
             fanout = placement_sdc_fanout if name == "placement_repair" else 4
+            receipt.update(fanout_limit_report=limits, pin_cell_report=pin_cells)
             receipt["sdc_snapshot"] = _file(
                 folder, "pre_command.sdc",
                 f"set_max_fanout {fanout} [current_design]\n"

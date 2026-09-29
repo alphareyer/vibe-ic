@@ -23,8 +23,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_text
 from drv_signoff_judge import (_NUM, _REQUIRED_STAGES, _SCENE_PROFILES,
-                               _integrator_value, _liberty_header, _sdc_values,
-                               _sha)
+                               _integrator_value, _liberty_header, _liberty_limits,
+                               _sdc_values, _sha, parse_check_types)
 
 #: Where an implementation stage records its DRV-constraint receipt, one JSON
 #: document per stage named ``<stage>.json`` (``synth``, ``placement_repair``,
@@ -194,7 +194,39 @@ def _ideal_clock_excluded(behavior: str) -> bool:
         state == "0" for state in states)
 
 
-def _stages(project: Path, postroute_repair_ran: bool) -> tuple[list[dict], dict]:
+def _pad_cells(liberties) -> frozenset:
+    """Cells a linked Liberty declares `pad_cell : true` (the judge's IO class)."""
+    cells: set[str] = set()
+    for item in liberties:
+        cells |= set(_liberty_limits(Path(item["path"]).read_text())["pad_cells"])
+    return frozenset(cells)
+
+
+def _class_fanout_limits(limits: str, pin_cells: str, pad_cells: frozenset) -> dict:
+    """R-0929-DRV-FANOUT-LIMIT: the fanout limit the tool enforces, per class,
+    from its own pre-command limit table.  `core` is the design-level limit
+    on standard-cell drivers; `io` the IO cells' own (library) limit; a
+    top-level port is neither.  A class whose pins disagree has no single
+    value (None)."""
+    cell_of = {}
+    for line in pin_cells.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3 and parts[0] == "pin_cell":
+            cell_of[parts[1]] = parts[2]
+    rows = parse_check_types(limits, scene="stage", mode="stage",
+                             violators_only=False)["max_fanout"]
+    by_class: dict[str, set] = {"core": set(), "io": set()}
+    for row in rows:
+        cell = cell_of.get(row["pin"])
+        if cell is None or cell == "<port>" or not isinstance(row.get("limit"), float):
+            continue
+        by_class["io" if cell in pad_cells else "core"].add(row["limit"])
+    return {name: (next(iter(values)) if len(values) == 1 else None)
+            for name, values in by_class.items()}
+
+
+def _stages(project: Path, postroute_repair_ran: bool,
+            pad_cells: frozenset = frozenset()) -> tuple[list[dict], dict]:
     """Derive each required stage row from the receipt the stage recorded.
 
     A receipt counts only when it belongs to the run instance that claimed
@@ -242,8 +274,22 @@ def _stages(project: Path, postroute_repair_ran: bool) -> tuple[list[dict], dict
                                   ("fanout", "set_max_fanout"),
                                   ("slew_ns", "set_max_transition"),
                                   ("cap_pf", "set_max_capacitance"))}
-            row["fanout_check_limit"] = _one([float(v) for v in re.findall(
+            # The zero-argument OpenSTA call names the worst-slack pin's limit;
+            # on a padded die that is an IO cell's library default.  It stays a
+            # disclosure; the applied-limit check reads the core drivers'
+            # enforced limit (R-0929-DRV-FANOUT-LIMIT).
+            row["worst_pin_fanout_check_limit"] = _one([float(v) for v in re.findall(
                 rf"(?m)^\s*sta::max_fanout_check_limit\s+({_NUM})\s*$", behavior)])
+            for field in ("fanout_limit_report", "pin_cell_report"):
+                ref = _recorded_ref(project, doc.get(field))
+                if ref is not None:
+                    row[field] = ref
+            limits = _recorded_text(row.get("fanout_limit_report"))
+            cells = _recorded_text(row.get("pin_cell_report"))
+            by_class = (_class_fanout_limits(limits, cells, pad_cells)
+                        if limits and cells else {"core": None, "io": None})
+            row["fanout_check_limit"] = by_class["core"]
+            row["io_fanout_limit"] = by_class["io"]
             if name == "cts":
                 args = _recorded_text(row.get("command_args"))
                 row["cts_parameters"] = _cts_parameters(args) if args else None
@@ -426,7 +472,8 @@ def _build_direct(project: Path) -> dict:
                 "source_tool_image": image,
                 "sta_netlist": artifacts["sta_netlist"]["sha256"],
                 "lvs_netlist": None, "gds_netlist": None}
-    stages, stage_receipts = _stages(project, False)
+    stages, stage_receipts = _stages(project, False,
+                                     _pad_cells(linked_all.values()))
     return {"top": decks[0]["top"], "identity": identity,
             "frozen": frozen, "current": current, "stages": stages,
             "stage_receipts": stage_receipts, "pins": {},
@@ -567,7 +614,8 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
         repair = project / "reports/phase3/librelane_postroute_repair.json"
         postroute_repair_ran = bool(repair.is_file() and
                                     json.loads(repair.read_text()).get("adopted"))
-    stages, stage_receipts = _stages(project, postroute_repair_ran)
+    stages, stage_receipts = _stages(project, postroute_repair_ran,
+                                     _pad_cells(liberties.values()))
     return {"top": top, "identity": identity, "frozen": frozen,
             "current": current, "stages": stages,
             "stage_receipts": stage_receipts, "pins": {}, "scenes": scenes,
