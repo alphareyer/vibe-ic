@@ -145,6 +145,13 @@ _NOT_PROSE: Dict[str, str] = {
         "token within a named MACRO/PIN block qualifies; other USE forms and "
         "free text cannot negate or create that formal token. The annotation "
         "fixture flips USE POWER to USE SIGNAL and observes refusal.",
+    "drv_signoff_capture::openroad_identity":
+        "ONE PROBE LINE GRAMMAR, NO SENTENCE. The only text read is the "
+        "capture's own probe output, one `OPENROAD_BINARY <path> <sha256> "
+        "<version>` line per build, anchored and field-typed (64-hex digest, "
+        "one whitespace-free version token); `-g<hash>` is git describe's "
+        "commit field. No negation form exists; builds that disagree or a "
+        "version with no commit leave the commit absent (tested).",
     "drv_signoff_judge::_liberty_limits":
         "LIBERTY ATTRIBUTE GRAMMAR, NO SENTENCE. Pin limits and related_pin "
         "are parsed from structured cell and pin groups with balanced braces; "
