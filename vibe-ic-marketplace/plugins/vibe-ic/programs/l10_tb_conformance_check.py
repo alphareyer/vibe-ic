@@ -1098,6 +1098,39 @@ _RE_CONDITIONAL_OPTIONAL = re.compile(
 )
 
 
+#: Row status for a case the design declares it does not have
+#: (R-0929-UNSELECTED-FEATURES). Counted as none of ok / fail / NOT_EXECUTED /
+#: waived; listed under `design_declared_na` in the report.
+STATUS_DESIGN_DECLARED_NA = "not_applicable"
+
+
+def design_declared_unselected(project_root: Optional[str],
+                               case: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The basis on which `case` is design-declared NOT_APPLICABLE, or None.
+
+    Two DECLARED documents are compared, exactly as the Step-4 gate
+    (`cpu_functional_oracle_waiver_check.split_design_declared_na`) compares
+    them: the case's own `applies_when.option` (attached by Phase 1 where the
+    input states the case conditionally) against the selection the design
+    records in `plugin_output/declaration.json`. None -- the case stays owed
+    -- when the case declares no option, when the design states no selection,
+    or when the option IS selected."""
+    aw = case.get("applies_when") if isinstance(case, dict) else None
+    option = (aw or {}).get("option") if isinstance(aw, dict) else None
+    if not project_root or not option or not str(option).strip():
+        return None
+    import cpu_functional_oracle_waiver_check as _cfow  # noqa: PLC0415
+    selected = _cfow.design_selected_options(Path(project_root))
+    _applicable, na = _cfow.split_design_declared_na([case], selected)
+    if not na:
+        return None
+    return {"option": str(option).strip(),
+            "stated": aw.get("stated"),
+            "source": aw.get("source"),
+            "design_selected": sorted(selected or ()),
+            "declaration": _cfow._DECLARATION_REL}
+
+
 def is_conditional_optional_case(case: Dict[str, Any]) -> Optional[str]:
     """Returns the referenced feature TOKEN when this case's stimulus/
     expected text carries the explicit "(if Plugin selects <token>)"
@@ -1784,6 +1817,39 @@ def evaluate(
                 checklist_gap_count += 1
             continue
 
+        # R-0929-UNSELECTED-FEATURES — a case whose declared option the design
+        # declares it did NOT select is design-declared NOT_APPLICABLE: not
+        # owed, not waived, not a pass. Decided by the SAME reader the Step-4
+        # gate narrows with (`design_declared_unselected`), so the L10 table
+        # and Step 4 cannot disagree about a row. A selected option, or a
+        # design that states no selection, falls through unchanged.
+        _na = design_declared_unselected(project_root, c)
+        if _na is not None:
+            results.append({
+                "id": case_id,
+                "category": category,
+                "kind": case_kind(c),
+                "producer_scaffold_scope": _scaffold_scope(c),
+                "oracle_resolution": None,
+                _l10x.SIM_EXECUTED_KEY: False,
+                "evidence": [
+                    f"NOT_APPLICABLE (design-declared): the case applies when "
+                    f"option '{_na['option']}' is selected "
+                    f"({_na.get('stated') or 'applies_when'}; "
+                    f"{_na.get('source') or 'L10'}), and "
+                    f"{_na['declaration']} selects "
+                    f"{_na['design_selected']} — not owed, not waived, not "
+                    f"a pass"],
+                "pass": False,
+                "status": STATUS_DESIGN_DECLARED_NA,
+                "reason_class": "DESIGN_DECLARED_NA",
+                "design_declared_na": _na,
+                "waived": False,
+                "review_required": False,
+                "capability_gap": None,
+            })
+            continue
+
         # The verdict source is the executor's per-case record.  `tb_blob`
         # remains available only to the separate vacuity/substance check; a
         # case id or opcode in source text is never evidence that the case ran.
@@ -2319,6 +2385,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"conformance at a test parameter value ("
             + "; ".join(f"{r['id']}: {r['isa_conformance_credit']['sentence']}"
                         for r in credited_rows) + ")")
+    declared_na_rows = [r for r in results
+                        if r.get("status") == STATUS_DESIGN_DECLARED_NA]
+    if declared_na_rows:
+        acceptance_bits.append(
+            f"{len(declared_na_rows)}/{len(cases)} case(s) NOT_APPLICABLE "
+            f"(design-declared, R-0929-UNSELECTED-FEATURES — not owed, not "
+            f"waived): " + ", ".join(
+                f"{r['id']} (option {r['design_declared_na']['option']})"
+                for r in declared_na_rows))
     if excluded_rows:
         acceptance_bits.append(
             f"{len(excluded_rows)}/{len(cases)} case(s) NOT_MEASURED "
@@ -2363,6 +2438,9 @@ def main(argv: Optional[List[str]] = None) -> int:
              "reason_class": r.get("reason_class"),
              "missing_from_input": r.get("missing_from_input") or [],
              "reason": r["excluded_from_verdict"]} for r in excluded_rows],
+        "design_declared_na": [
+            {"case": r["id"], **r["design_declared_na"]}
+            for r in declared_na_rows],
         "isa_conformance_credited": [
             r["isa_conformance_credit"] for r in credited_rows],
         "capability_gap": waiver_caps[0] if len(waiver_caps) == 1 else (waiver_caps or None),
