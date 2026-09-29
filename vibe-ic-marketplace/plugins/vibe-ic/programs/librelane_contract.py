@@ -2439,7 +2439,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             fingerprint['liberty_files'] = _sta_liberty_input_hashes(
                 _load(config), project, mounts or [])
         if home:
-            fingerprint['openroad_aliases'] = capability['openroad_aliases']
+            fingerprint['openroad_aliases'] = (capability or {}).get('openroad_aliases') or {}
         if step_id.startswith(PLUGIN_STEP_PREFIX):
             fingerprint['plugin'] = _plugin_digests(step_id)
         if openroad_init:

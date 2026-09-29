@@ -281,6 +281,35 @@ def record_synth(project: Path, *, abc_script: Optional[Path],
     return _write_receipt(project, "synth", doc)
 
 
+def synth_stage(project: Path, *, netlist: Path, top: str, liberties: List[str],
+                sdc: Path, to_container, execute) -> Optional[Path]:
+    """Take the post-synthesis census in the EDA container (`execute(cmd)` ->
+    (rc, out, err); `to_container(path)` maps a host path) and write the
+    synth receipt.  Outside a claimed run nothing is written."""
+    if current_run(project) is None:
+        return None
+    abc = abc_script_path(project)
+    evidence = abc.parent
+    evidence.mkdir(parents=True, exist_ok=True)
+    behavior = evidence / "behavior.rpt"
+    behavior.unlink(missing_ok=True)
+    if netlist.is_file() and sdc.is_file():
+        probe = evidence / "drv_stage_probe.tcl"
+        probe.write_text(PROBE_TCL.read_text())
+        deck = evidence / "census.tcl"
+        deck.write_text(synth_census_tcl(
+            liberties=[to_container(lib) for lib in liberties],
+            netlist=to_container(netlist), top=top, sdc=to_container(sdc),
+            probe=to_container(probe), out=to_container(behavior)))
+        rc, out, err = execute(f"sta -no_init -no_splash -exit {to_container(deck)}")
+        write_text(evidence / "census.log", f"rc={rc}\n{out}\n{err}")
+        if rc:
+            behavior.unlink(missing_ok=True)
+    return record_synth(project, abc_script=abc if abc.is_file() else None,
+                        behavior=behavior if behavior.is_file() else None,
+                        netlist=netlist, sdc=sdc)
+
+
 # --- step 32 ---------------------------------------------------------------------
 
 def record_step32(project: Path, report: dict) -> List[Path]:
