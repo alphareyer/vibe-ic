@@ -2786,7 +2786,8 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
         "DRV_PROMOTION_CONTRADICTED",
     # A missing bundle is honestly NOT_MEASURED. This present bundle violates
     # the declared fanout with an SDC value of 10, so the gate must reach FAIL.
-    ("23", "drv_signoff_judge . --json reports/phase3/sta/drv_signoff.json"):
+    ("23", "drv_signoff_judge . --json reports/phase3/sta/drv_signoff.json "
+           "--capture-point post_stream"):
         "DRV_SIGNOFF_BAD_SDC",
     # R-0929-IO-INPUT-TRANSITION-2. EMPTY is not a DIE top (a decided
     # NOT_APPLICABLE_BY_STRUCTURE); the fixture is a die whose resolved drive
@@ -3604,7 +3605,8 @@ def _tier(project: Path, command: str) -> Tuple[str, str]:
 
 def test_d2_drv_signoff_fixture_reddens_on_the_wrong_sdc_value(tmp_path):
     import hashlib
-    command = "drv_signoff_judge . --json reports/phase3/sta/drv_signoff.json"
+    command = ("drv_signoff_judge . --json reports/phase3/sta/drv_signoff.json "
+               "--capture-point post_stream")
     project = _build_project(tmp_path, "drv", "DRV_SIGNOFF_BAD_SDC")
     tier, _ = _tier(project, command)
     result = json.loads((project / "reports/phase3/sta/drv_signoff.json").read_text())

@@ -46618,6 +46618,10 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
         # and unrouted measurement of it; without one the input route stays.
         own = _step32_own_measurement(report)
         refused = _promotion_unmeasured(own)
+        if not refused and not _llprr.adopted_candidate_measured(report):
+            refused = (f"R-0929-STEP32-ADOPT: adopted {report.get('adopted')} but "
+                       f"step 32 is {report.get('verdict')} ({report.get('code')}), "
+                       "not fully measured")
         pnr_out = _pl.pnr_dir(project)
         pnr_out.mkdir(parents=True, exist_ok=True)
         if refused:
@@ -76818,6 +76822,14 @@ def _phase3_window_output_audit(project: Path, step_ids: Set[str]
     return checks
 
 
+def _step32_lets_the_chain_continue(status: str) -> bool:
+    """Step 32's own row carries its DRV verdict (R-0929-DRV-IDENTITY).  The
+    chain continues to stream-out on PASS and, like the pre-stream gate, on an
+    owner-signed WAIVED -- otherwise a signed waiver at step 32 would stop the
+    flow before the final post-stream capture, the only one that counts."""
+    return status in ("PASS", "WAIVED")
+
+
 def _drv_run_start(project: Path) -> None:
     """R-0929-DRV-IDENTITY: the run's id and code identity, recorded when the
     run starts, are what every in-flow DRV capture of this run binds; and
@@ -77797,7 +77809,7 @@ def main() -> int:
                 project, effective_top, pdk, args.container)
             if _prr is not None:
                 plan.append(_prr)
-                _chain_ok = (_prr.status == "PASS")
+                _chain_ok = _step32_lets_the_chain_continue(_prr.status)
         if _chain_ok and not _prr_on_librelane:
             # #527 estimate-vs-SPEF — SHIPPED post-route real-SPEF setup repair at
             # the slow sign-off corner, BEFORE gds/drc/lvs so the shipped design is

@@ -1160,6 +1160,20 @@ def _set_census_verdict(report: Dict[str, Any], *measurements: Dict[str, Any]) -
         report.pop("code", None)
 
 
+def adopted_candidate_measured(report: Dict[str, Any]) -> bool:
+    """R-0929-STEP32-ADOPT: a step-32 report whose route may be handed off and
+    declared -- PASS, or a FAIL whose only cause is a MEASURED residual
+    (fanout / DRV) with its antenna and STA-digest census measured.  Anything
+    unmeasured (LL_PRR_*_NOT_MEASURED, ...) is refused: an adopted candidate
+    nobody fully measured never ships (review wave 58)."""
+    return (report.get("verdict") == "PASS" or
+            (report.get("verdict") == "FAIL" and
+             report.get("code") in ("LL_PRR_FANOUT_VIOLATION",
+                                    "LL_PRR_DRV_VIOLATION") and
+             report.get("antenna_census", {}).get("verdict") == "PASS" and
+             report.get("sta_digest_census", {}).get("verdict") == "PASS"))
+
+
 def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path) -> None:
     """Publish step 32's measured decision before the pre-stream gate.
 
@@ -1175,12 +1189,7 @@ def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path
     # A measured fanout residue leaves Step 32 FAIL, while its declaration
     # must still reach the pre-stream audit so the adopted route and residual
     # are visible.  Other incomplete/failing reports cannot publish.
-    if (report.get("verdict") != "PASS" and
-            not (report.get("verdict") == "FAIL" and
-                 report.get("code") in ("LL_PRR_FANOUT_VIOLATION",
-                                        "LL_PRR_DRV_VIOLATION") and
-                 report.get("antenna_census", {}).get("verdict") == "PASS" and
-                 report.get("sta_digest_census", {}).get("verdict") == "PASS")):
+    if not adopted_candidate_measured(report):
         reason = ("the input/final OpenROAD.CheckAntennas net and pin census "
                   "is missing" if report.get("code") == "LL_PRR_ANTENNA_NOT_MEASURED"
                   else "the input/final STAPostPNR state digest is missing"
