@@ -1953,3 +1953,84 @@ def test_step32_captures_adopted_candidate_before_handoff(tmp_path, monkeypatch)
     assert after["identity"]["artifacts"]["def"]["path"] == str(
         (project / "phase3/stage3/pnr/routed.def").resolve())
     assert after["identity"]["artifacts"]["def"]["sha256"] == layout["sha256"]
+
+
+# ── R-0928-DRV-IC / root audit U1: the port-to-PAD net is off-chip ──────────
+# MEASURED on the routed spm DIE (lane drvrcpt, 9 scenes): 35 bond-pad input
+# ports read 2.9-3.1 pF (the pad's own PAD-pin capacitance) against the
+# std-cell 0.2 pF margin, and the judge booked 315 T3_MARGIN cap rows plus
+# 306 T3 / 9 T2 port slew rows. The pad pin's own row (IO Liberty T1) carries
+# the same slew and stays a finding.
+
+def _port_row(bundle, *, port_to_pad):
+    bundle["pins"]["u/Y"] = {"net_class": "IO", "cell_class": "port",
+                             "cell": None, "cell_pin": None, "liberty": None,
+                             "driver_pin": "u/Y", "driver_cell": None,
+                             "port_to_pad": port_to_pad,
+                             "loads": {"logical": 1, "antenna_diode": 0,
+                                       "cts_buffer": 0}}
+
+
+@pytest.mark.parametrize("kind,value,limit", [
+    ("max_capacitance", 2.989206, .2), ("max_slew", 49.2, 3)])
+def test_a_proven_port_to_pad_row_is_listed_never_a_margin_finding(tmp_path, kind,
+                                                                    value, limit):
+    bundle = _bundle(tmp_path)
+    _violate(bundle, tmp_path, kind, value=value, limit=limit,
+             net_class="IO", cell_class="port")
+    _port_row(bundle, port_to_pad=True)
+    result = drv.judge(bundle)
+    assert result["findings"] == [], result["findings"]
+    assert [r["failed_tier"] for r in result["offchip_port_rows"]] == [
+        "OFFCHIP_PORT_TO_PAD_NET"], result
+    assert result["verdict"] == "PASS", result["failures"]
+
+
+def test_a_port_without_the_pad_proof_keeps_the_margin_finding(tmp_path):
+    """Control: a port whose net reaches a std cell is std-cell driven."""
+    bundle = _bundle(tmp_path)
+    _violate(bundle, tmp_path, "max_capacitance", value=2.989206, limit=.2,
+             net_class="IO", cell_class="port")
+    _port_row(bundle, port_to_pad=False)
+    result = drv.judge(bundle)
+    assert result["verdict"] == "FAIL"
+    assert [r["failed_tier"] for r in result["findings"]] == ["T3_MARGIN"]
+
+
+def _census_rows(text):
+    return drv.parse_check_types(text, scene="typ_nom", mode="functional",
+                                 violators_only=False)
+
+
+def test_opensta_census_proves_the_port_to_pad_net(tmp_path):
+    from drv_signoff_census import derive
+    folder = tmp_path / "tool"
+    _file(folder, "pin_census.tsv", "".join((
+        "a\tport\tinput\t1\t\t\t\ta\tinput\t0.1\t0.1\t0\tX\t0\n",
+        "b\tport\tinput\t1\t\t\t\tb\tinput\t0.1\t0.1\t0\tX\t0\n",
+        "u/PAD\tpin\tinput\t0\tu\tpad\tPAD\ta\tinput\t0.1\t0.1\t0\tX\t0\n",
+        "v/A\tpin\tinput\t0\tv\tlogic\tA\tb\tinput\t0.1\t0.1\t0\tX\t0\n")))
+    _file(folder, "net_census.rpt",
+          "Net a\n Total capacitance: 2.9\n Number of drivers: 1\n"
+          " Number of loads: 1\n Number of pins: 2\n\nDriver pins\n a input port\n\n"
+          "Load pins\n u/PAD input (pad) 2.9\n\n"
+          "Net b\n Total capacitance: 0.1\n Number of drivers: 1\n"
+          " Number of loads: 1\n Number of pins: 2\n\nDriver pins\n b input port\n\n"
+          "Load pins\n v/A input (logic) 0.1\n\n")
+    _file(folder, "disabled_edges.rpt", "")
+    report = "".join(
+        f"{title}\n" + "".join(
+            f"Pin {pin} {mark}\n{title} 9.000000\n{meas} 0.100000\nSlack 8.9 (MET)\n"
+            for pin in pins) + "\n"
+        for title, meas, mark, pins in (
+            ("max slew", "slew", "^", ("a", "b", "u/PAD", "v/A")),
+            ("max fanout", "fanout", "", ("a", "b")),
+            ("max capacitance", "capacitance", "^", ("a", "b"))))
+    lib = _file(tmp_path, "pad.lib", '''library (lib) {
+ time_unit : "1ns"; capacitive_load_unit (1, pf);
+ cell (pad) { pad_cell : true; pin (PAD) { direction : input; } }
+ cell (logic) { pin (A) { direction : input; } }
+}''')
+    pins = derive(folder, [{"name": "io", **lib}], _census_rows(report))["pins"]
+    assert pins["a"]["port_to_pad"] is True
+    assert pins["b"]["port_to_pad"] is False

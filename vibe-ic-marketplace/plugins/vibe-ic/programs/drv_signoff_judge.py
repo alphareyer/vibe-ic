@@ -639,6 +639,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     missing: list[str] = []
     findings: list[dict] = []
     io_margin_disclosures: list[dict] = []
+    offchip_port_rows: list[dict] = []
     waived: list[dict] = []
     identity = bundle.get("identity") or {}
     frozen = bundle.get("frozen") or {}
@@ -1244,6 +1245,15 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
     rows_by_kind["max_fanout"] = list(dedup.values())
     for kind, rows in rows_by_kind.items():
         for row in rows:
+            if (kind in ("max_slew", "max_capacitance") and
+                    row.get("cell_class") == "port" and row.get("port_to_pad") is True):
+                # R-0928-DRV-IC: the port-to-PAD net is off-chip. Its slew is
+                # the pad pin's own row (judged by IO Liberty T1) and its load
+                # is the pad's PAD-pin capacitance plus the set_load; the
+                # std-cell margin never applies. Listed, never a finding.
+                row["failed_tier"] = "OFFCHIP_PORT_TO_PAD_NET"
+                offchip_port_rows.append(row)
+                continue
             pin_limit = row["liberty_limit"]
             explicit = row["explicit_limit"]
             effective = row["effective_limit"]
@@ -1335,6 +1345,7 @@ def judge(bundle: dict, *, project: Path | None = None) -> dict:
             "final_signoff_capture": capture_point == "post_stream",
             "identity_bound_later": deferred,
             "io_margin_disclosures": io_margin_disclosures,
+            "offchip_port_rows": offchip_port_rows,
             "flow_defects": flow_defects,
             "failures": fails, "not_measured": missing,
             "out_of_scope": {k: "NOT_MEASURED" for k in

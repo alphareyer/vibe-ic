@@ -43,6 +43,7 @@ def _nets(path: Path) -> dict[str, dict]:
         name, _, rest = block.partition("\n")
         cap = re.search(r"(?m)^ Total capacitance:\s*(\S+)", rest)
         loads = re.search(r"(?ms)^Load pins\n(.*?)(?:\n\n|\Z)", rest)
+        drivers = re.search(r"(?ms)^Driver pins\n(.*?)(?:\n\n|\Z)", rest)
         count = re.search(r"(?m)^ Number of loads:\s*(\d+)", rest)
         if not cap or not count or name in nets or (loads is None and int(count.group(1))):
             raise ValueError("OpenSTA net census malformed")
@@ -59,7 +60,9 @@ def _nets(path: Path) -> dict[str, dict]:
         cap_pf = max(float(value) for value in cap_range.groups() if value is not None)
         if not math.isfinite(cap_pf) or cap_pf < 0:
             raise ValueError("OpenSTA net capacitance census is not finite")
-        nets[name] = {"cap_pf": cap_pf, "loads": load_names}
+        driver_names = ([line.strip().split()[0] for line in drivers.group(1).splitlines()
+                         if line.strip()] if drivers is not None else [])
+        nets[name] = {"cap_pf": cap_pf, "loads": load_names, "drivers": driver_names}
     return nets
 
 
@@ -90,6 +93,7 @@ def derive(scene_dir: Path, linked_liberties: list[dict],
     lib_pins = {(cell, cell_pin): props for _, limits in libs
                 for cell, pins_in_cell in limits["cells"].items()
                 for cell_pin, props in pins_in_cell.items()}
+    pad_cells = set().union(*(limits["pad_cells"] for _, limits in libs)) if libs else set()
     metadata = {}
     for name, pin in pins.items():
         if pin["kind"] == "port":
@@ -117,6 +121,17 @@ def derive(scene_dir: Path, linked_liberties: list[dict],
                           "driver_pin": name if pin["driver"] else None,
                           "driver_cell": pin["cell"] or None,
                           "net": pin["net"] or None}
+        if pin["kind"] == "port":
+            # R-0928-DRV-IC: a port whose net reaches nothing but IO-cell pins
+            # (the port-to-PAD net) is off-chip; the judge reads it by the IO
+            # Liberty on the pad pin, never by the std-cell margin. Proven from
+            # OpenSTA's own net census (driver and load pins), else False.
+            net = nets.get(pin["net"]) or {}
+            others = [p for p in (net.get("drivers", []) + net.get("loads", []))
+                      if p != name]
+            metadata[name]["port_to_pad"] = bool(others) and all(
+                pins.get(p, {}).get("kind") == "pin" and
+                pins[p].get("cell") in pad_cells for p in others)
     drivers = {name for name, pin in pins.items() if pin["driver"]}
     all_names = {kind: {row["pin"] for row in all_rows[kind]} for kind in KINDS}
     if any(not names.issubset(pins) for names in all_names.values()):
