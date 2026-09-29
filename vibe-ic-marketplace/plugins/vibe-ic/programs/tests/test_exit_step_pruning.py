@@ -355,12 +355,8 @@ def _install_solve_fakes(monkeypatch, argv_seen: dict, exit_step: str):
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(bd.subprocess, "run", fake_run)
-    # The landed #1985 path runs the solver through _RunnerBudget.run, not
-    # bare subprocess.run — capture there too, same claim, current surface.
-    monkeypatch.setattr(
-        bd._RunnerBudget, "run",
-        lambda self, argv, *a, **k: (argv_seen.__setitem__("argv", list(argv)),
-                                     SimpleNamespace(rc=0, error=None))[1])
+    # Keep the real budget producer so argv/freshness receipts are genuine.
+    # The fake replaces only the child execution boundary.
 
 
 def test_solve_passes_exit_step_alongside_skip_phase3(tmp_path, monkeypatch):
@@ -399,16 +395,16 @@ def test_solve_midflow_entry_runs_phase1_frontdoor_before_owning_loop(
     monkeypatch.setattr(tnr, "flow_step_ids",
                         lambda: ["D1", "2", "4", "8", "15"])
 
-    def fake_budget_run(_self, argv, *_args, **_kwargs):
+    def fake_budget_run(argv, *_args, **_kwargs):
         argv_seen.append(list(argv))
         if argv[argv.index("--exit-step") + 1] == "D1":
             project = Path(argv[2])
             docs = project / "phase1" / "generated_docs"
             docs.mkdir(parents=True)
             (docs / "L1_DATASHEET.json").write_text('{"schema": 1}\n')
-        return SimpleNamespace(rc=0, error=None)
+        return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(bd._RunnerBudget, "run", fake_budget_run)
+    monkeypatch.setattr(bd.subprocess, "run", fake_budget_run)
     dataset = tmp_path / "dataset"
     dataset.mkdir()
     _solve_after_ai_route("rtllm", dataset, tmp_path / "run", jobs=1)
@@ -431,11 +427,11 @@ def test_solve_midflow_frontdoor_failure_blocks_owning_loop(
     monkeypatch.setattr(tnr, "flow_step_ids",
                         lambda: ["D1", "2", "4", "8", "15"])
 
-    def fake_budget_run(_self, argv, *_args, **_kwargs):
+    def fake_budget_run(argv, *_args, **_kwargs):
         argv_seen.append(list(argv))
-        return SimpleNamespace(rc=1, error=None)
+        return SimpleNamespace(returncode=1)
 
-    monkeypatch.setattr(bd._RunnerBudget, "run", fake_budget_run)
+    monkeypatch.setattr(bd.subprocess, "run", fake_budget_run)
     dataset = tmp_path / "dataset"
     dataset.mkdir()
     run = tmp_path / "run"
@@ -473,7 +469,7 @@ def test_resume_preserves_routed_exit_step(
     assert "--skip-phase3" in argv, argv
 
 
-def test_midflow_route_gets_d1_only_frontdoor_without_changing_rtl(tmp_path):
+def test_midflow_route_gets_d1_only_frontdoor_without_changing_rtl(tmp_path, monkeypatch):
     project = tmp_path / "generic_proj"
     prompt = project / "input" / "phase1_prompt.md"
     rtl = project / "phase2" / "stage1" / "rtl" / "dut.sv"
@@ -483,19 +479,19 @@ def test_midflow_route_gets_d1_only_frontdoor_without_changing_rtl(tmp_path):
     rtl_text = "module dut(input logic a, output logic y); assign y=a; endmodule\n"
     rtl.write_text(rtl_text)
 
-    class _Budget:
-        def run(self, argv):
-            assert argv[argv.index("--exit-step") + 1] == "D1"
-            assert "--entry-step" not in argv
-            assert "--skip-phase3" in argv
-            assert "--no-dashboard" in argv
-            docs = project / "phase1" / "generated_docs"
-            docs.mkdir(parents=True)
-            (docs / "L1_DATASHEET.json").write_text('{"schema": 1}\n')
-            return SimpleNamespace(rc=1, error=None)
+    def fake_run(argv, **kwargs):
+        assert argv[argv.index("--exit-step") + 1] == "D1"
+        assert "--entry-step" not in argv
+        assert "--skip-phase3" in argv
+        assert "--no-dashboard" in argv
+        docs = project / "phase1" / "generated_docs"
+        docs.mkdir(parents=True)
+        (docs / "L1_DATASHEET.json").write_text('{"schema": 1}\n')
+        return SimpleNamespace(returncode=1)
+    monkeypatch.setattr(bd.subprocess, "run", fake_run)
 
     result = bd._ensure_phase1_frontdoor(
-        Path("runner.py"), project, _Budget())
+        PROGRAMS / "vibe_ic_one_shot_runner.py", project, bd._RunnerBudget(1, None, 0))
     assert result["status"] == "GENERATED"
     assert result["runner_rc"] == 1
     assert result["provenance"]["ran"] is True

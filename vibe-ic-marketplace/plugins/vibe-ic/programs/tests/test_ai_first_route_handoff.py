@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -109,11 +110,11 @@ def test_confirmed_ai_route_enters_only_its_derived_product_path(tmp_path,
     dataset, run = _dataset(tmp_path), tmp_path / "run"
     calls = []
 
-    def fake_runner(_budget, argv):
+    def fake_runner(argv, *args, **kwargs):
         calls.append(argv)
-        return bd._ProcessOutcome(rc=1)
+        return SimpleNamespace(returncode=1)
 
-    monkeypatch.setattr(bd._RunnerBudget, "run", fake_runner)
+    monkeypatch.setattr(bd.subprocess, "run", fake_runner)
     assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
     task = _task(run)
     _write_answer(task, _answer(task, "spec_generation"))
@@ -155,11 +156,11 @@ def test_ai_override_selects_derived_midflow_entry(tmp_path, monkeypatch):
                         lambda *_a: frontdoors.append(1) or {
                             "status": "GENERATED", "provenance": {"ran": True}})
 
-    def fake_runner(_budget, argv):
+    def fake_runner(argv, *args, **kwargs):
         calls.append(argv)
-        return bd._ProcessOutcome(rc=1)
+        return SimpleNamespace(returncode=1)
 
-    monkeypatch.setattr(bd._RunnerBudget, "run", fake_runner)
+    monkeypatch.setattr(bd.subprocess, "run", fake_runner)
     assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
     task = _task(run)
     answer = _answer(task, "debug", "OVERRIDE")
@@ -199,8 +200,8 @@ def test_route_table_drift_refuses_before_runner(tmp_path, monkeypatch):
 
 def test_route_confirmation_does_not_unlock_score(tmp_path, monkeypatch):
     dataset, run = _dataset(tmp_path), tmp_path / "run"
-    monkeypatch.setattr(bd._RunnerBudget, "run",
-                        lambda *_a: bd._ProcessOutcome(rc=1))
+    monkeypatch.setattr(bd.subprocess, "run",
+                        lambda *_a, **_k: SimpleNamespace(returncode=1))
     assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
     task = _task(run)
     _write_answer(task, _answer(task, "spec_generation"))
@@ -216,11 +217,11 @@ def test_batch_waits_for_every_route_then_resumes_without_restaging(
         "Design a second generic output buffer with one input and one output.")
     calls = []
 
-    def fake_runner(_budget, argv):
+    def fake_runner(argv, *args, **kwargs):
         calls.append(argv)
-        return bd._ProcessOutcome(rc=1)
+        return SimpleNamespace(returncode=1)
 
-    monkeypatch.setattr(bd._RunnerBudget, "run", fake_runner)
+    monkeypatch.setattr(bd.subprocess, "run", fake_runner)
     assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
     tasks = bd._read_jsonl(run / bd._ROUTE_WORKLIST)
     assert len(tasks) == 2
@@ -258,8 +259,8 @@ def test_checked_in_prompt_reaches_runner_only_after_ai_route(tmp_path,
     run = tmp_path / "run"
     calls = []
     monkeypatch.setattr(
-        bd._RunnerBudget, "run",
-        lambda _budget, argv: calls.append(argv) or bd._ProcessOutcome(rc=1))
+        bd.subprocess, "run",
+        lambda argv, **_kwargs: calls.append(argv) or SimpleNamespace(returncode=1))
 
     assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
     assert calls == []
@@ -293,8 +294,8 @@ def _override_run(tmp_path, monkeypatch, prompt: str):
                         lambda *_a: {"status": "GENERATED",
                                      "provenance": {"ran": True}})
     monkeypatch.setattr(
-        bd._RunnerBudget, "run",
-        lambda _budget, argv: calls.append(argv) or bd._ProcessOutcome(rc=1))
+        bd.subprocess, "run",
+        lambda argv, **_kwargs: calls.append(argv) or SimpleNamespace(returncode=1))
     assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
     return dataset, run, calls, _task(run)
 
