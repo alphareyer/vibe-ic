@@ -1086,7 +1086,32 @@ def main(argv: list = None) -> int:
     companion = (pnr_companion(netlist_path, args.min_cells)
                  if pnr_role is None else None)
     if companion is not None:
-        findings.extend(companion.pop("_findings"))
+        c_findings = companion.pop("_findings")
+        # DISCLOSED, NOT BLOCKING, when the mapped arm cannot be this run's:
+        # (a) `--rtl` given -- phase 2's own producer self-check
+        #     (design_one_shot_runner.step_yosys_synth), which runs BEFORE
+        #     phase 3 rebuilds the mapped arm, so any mapped arm it meets is a
+        #     previous run's; blocking on it would stop the only producer
+        #     that can replace it;
+        # (b) the mapped arm is OLDER than the netlist under audit -- phase 3
+        #     writes it after phase 2, so an older one predates this synthesis.
+        why = None
+        if args.rtl:
+            why = ("phase-2 producer self-check (--rtl given): the mapped arm "
+                   "is a previous run's until phase 3 rebuilds it")
+        else:
+            try:
+                if Path(companion["netlist"]).stat().st_mtime < netlist_path.stat().st_mtime:
+                    why = ("the mapped arm is OLDER than %s, so it predates "
+                           "this synthesis" % netlist_path.name)
+            except OSError:
+                pass
+        companion["blocking"] = why is None
+        if why is None:
+            findings.extend(c_findings)
+        else:
+            companion["not_blocking_because"] = why
+            companion["findings"] = [asdict(f) for f in c_findings]
 
     # Step 9's OTHER declared artefact. Only meaningful once the netlist is
     # readable — the area accounting is a claim ABOUT the netlist, so an

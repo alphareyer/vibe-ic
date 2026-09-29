@@ -218,6 +218,28 @@ def writes_netlist(cmd: str, netlist_name: str) -> bool:
     return False
 
 
+def _producer_of(project: Path, netlist: Path) -> str:
+    """Who provenance.jsonl says produced `netlist` (latest record), or a
+    sentence saying no record names it."""
+    import json as _json
+    try:
+        rel = str(netlist.relative_to(project))
+    except ValueError:
+        rel = str(netlist)
+    who = None
+    try:
+        for line in (project / "provenance.jsonl").read_text().splitlines():
+            try:
+                e = _json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(e, dict) and rel in (e.get("outputs") or {}):
+                who = e.get("produced_by") or e.get("tool") or who
+    except OSError:
+        pass
+    return who or "a producer no provenance.jsonl record names"
+
+
 def _pnr_netlist(project: Path) -> Optional[Path]:
     """The mapped netlist PnR routes (`_path_layout.mapped_synth_netlist`)."""
     try:
@@ -299,10 +321,17 @@ def audit_inline_yosys(project: Path) -> Tuple[str, List[str], List[str]]:
         own = [(rel, cmd) for rel, cmd in cmds
                if writes_netlist(cmd, mapped.name)]
         if not own:
-            return "FAIL", [], [
-                "the netlist PnR routes (%s) is written by no synthesis "
-                "command any synth log echoes, so the recipe that produced "
-                "it cannot be checked for hilomap/flatten" % mapped.name]
+            # NOT a FAIL by that fact alone. The LibreLane step-9 arm writes
+            # the mapped netlist from LibreLane's own synthesis script (its
+            # transcript stays under phase3/librelane/, and its in-step
+            # YosysUnmappedCells / YosysSynthChecks gate it), so no phase log
+            # echoes a `write_verilog` for it. The recipe was not READ here,
+            # which is NOT_MEASURED, naming who produced the netlist.
+            return "NOT_MEASURED", [], [
+                "the netlist PnR routes (%s) was written by %s, and no synth "
+                "log this gate reads echoes the command that wrote it, so its "
+                "hilomap/flatten recipe was not judged here"
+                % (mapped.name, _producer_of(project, mapped))]
         reasons: List[str] = []
         for rel, cmd in own:
             passed, classification, sub_reasons = \
@@ -384,6 +413,16 @@ def resolve_no_ys_script(project: Path) -> Tuple[int, dict]:
         was echoed at all; a non-Yosys flow (Genus/DC) is legitimate here.
     """
     verdict, evidence_logs, reasons = audit_inline_yosys(project)
+    if verdict == "NOT_MEASURED":
+        return 2, {
+            "verdict": "NOT_MEASURED",
+            # 0 of 1 recipes judged: the INCOMPLETE tier, never a PASS and
+            # never a design FAIL.
+            "reason_class": "ZERO_DENOMINATOR",
+            "reason": reasons[0],
+            "inline_evidence": [],
+            "messages": list(reasons),
+        }
     if verdict == "FAIL":
         return 1, {
             "verdict": "FAIL",
