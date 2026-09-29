@@ -63529,15 +63529,19 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             _sta_for_repair.read_text(errors="replace"))["timing_measurement"]
     except OSError:
         _single_corner_evidence = "NOT_MEASURED"
-    _repair_decision = _repair_dec.decide(
-        mc_ocv_stance, tns_zero, project=project,
-        single_corner_evidence=_single_corner_evidence)
-    _no_repair_flag = postroute_timing_repair_out / "no_repair_needed.flag"
     # R-0929-STEP32-RECORD — a bound Step-32 PRODUCER receipt (the LibreLane
     # producer's decision record: bound to its source bytes, not written by
     # this site) is never overwritten, and its repair_needed=true is carried
     # forward: this decision can add a repair demand, never remove one.
+    # `decide()` folds it in; nothing may store into `_repair_decision`
+    # between this call and the `repair_needed` guard below, or the
+    # closed-loop prover loses edges 23 and 32 (MAINRED_CL9).
     _producer_receipt = _step32_producer_receipt(project, postroute_timing_repair_out)
+    _repair_decision = _repair_dec.decide(
+        mc_ocv_stance, tns_zero, project=project,
+        single_corner_evidence=_single_corner_evidence,
+        producer_receipt=_producer_receipt)
+    _no_repair_flag = postroute_timing_repair_out / "no_repair_needed.flag"
     # This canonical decision supersedes a pre-stream log that nothing bound
     # vouches for: it must not certify a fallback in which this pass applied
     # no repair. A log beside a current bound producer receipt is that
@@ -63546,12 +63550,6 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     if _prior_repair_log.is_file() and _producer_receipt is None:
         _prior_repair_log.unlink()
         notes.append("superseded pre-stream repair_log.json before the canonical decision")
-    if _producer_receipt is not None and _producer_receipt["repair_needed"] \
-            and not _repair_decision["repair_needed"]:
-        _repair_decision["repair_needed"] = True
-        _repair_decision["reason"] += (
-            "; the bound Step-32 producer receipt records repair_needed=true "
-            f"(action={_producer_receipt.get('action')!r})")
     if not _repair_decision["repair_needed"]:
         # No violation at the authoritative basis → no post-route repair needed.
         if not _no_repair_flag.is_file():
