@@ -58,6 +58,8 @@ _CHAIN_R4 = _CHAIN + ("21", "32")
 #: route (21, T99) and the post-route repair (32) as one chain.
 _T96_MEMBERS = {"15", "15.5ic", "17", "18", "19", "20"}
 _T102_MEMBERS = {"21", "32"}
+#: R-0929-TOOL-DEFAULT (owner), wave 3 item 1: step 31 PV by the tool.
+_CUT31_MEMBERS = {"31"}
 
 
 def _chip(tmp_path, deliverable="DIE", *, marker="SELF_TAPEOUT.txt"):
@@ -81,7 +83,7 @@ def test_the_chip_path_runs_15_to_21_and_32_on_librelane_with_no_switch(tmp_path
     project = _chip(tmp_path)
     assert LC.design_class(project) == LC.DESIGN_CLASS_CHIP_PAD_RING
     assert set(LC.CLASS_PRODUCTION_DEFAULTS[LC.DESIGN_CLASS_CHIP_PAD_RING]) \
-        == _T96_MEMBERS | _T102_MEMBERS
+        == _T96_MEMBERS | _T102_MEMBERS | _CUT31_MEMBERS
     assert {s: LC.selected_mode(project, s) for s in _CHAIN_R4} == dict.fromkeys(_CHAIN_R4, "librelane")
     # outside the cut-over, nothing moves
     for step in ("9", "16", "22", "23", "26", "37"):
@@ -171,8 +173,14 @@ def test_the_class_default_is_part_of_the_admission_identity(tmp_path):
     assert R._librelane_admission_facts(tmp_path) == {}
     project = _chip(tmp_path / "chip")
     facts = R._librelane_admission_facts(project)
-    assert facts["librelane_class_defaults"] == dict.fromkeys(_CHAIN_R4, "librelane")
+    assert facts["librelane_class_defaults"] == dict.fromkeys(
+        _CHAIN_R4 + tuple(sorted(_CUT31_MEMBERS)), "librelane")
     assert facts["librelane_contract_sha256"] == LC.digest(Path(LC.__file__))
     _switch(project, dict.fromkeys(_CHAIN_R4, "direct"))
+    facts = R._librelane_admission_facts(project)
+    # step 31 (tool PV of the shipped GDS) continues no chain: it stays
+    # the class default until the project names it too
+    assert facts["librelane_class_defaults"] == {"31": "librelane"}
+    _switch(project, dict.fromkeys(_CHAIN_R4 + ("31",), "direct"))
     facts = R._librelane_admission_facts(project)
     assert "librelane_class_defaults" not in facts and "librelane_switch" in facts

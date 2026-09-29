@@ -5,7 +5,8 @@ Physical verification, the finishing XOR and the sign-off metrics record,
 measured by LibreLane's own steps on the stream the run ships:
 
 * **31** ``Magic.DRC`` + ``KLayout.DRC`` (+ ``KLayout.Density``) on the GDS, and
-  ``Magic.SpiceExtraction`` -> ``Netgen.LVS`` on the routed DEF, all from ONE
+  ``Magic.SpiceExtraction`` (``MAGIC_EXT_USE_GDS``) -> ``Netgen.LVS`` on the
+  same shipped GDS, with ``KLayout.LVS`` as the second arm, all from ONE
   bridged State (``state_from_direct``, which writes the powered netlist from
   the DEF's own database as LibreLane's OpenROAD steps do).
 * **37.3** ``Vibeic.FinishingXOR`` (plugin step): finishing never removes,
@@ -54,6 +55,10 @@ PRODUCED: dict[str, tuple[str, ...]] = {
     'Magic.SpiceExtraction': ('magic__illegal_overlap__count',),
     'Netgen.LVS': ('design__lvs_error__count', 'design__lvs_unmatched_device__count',
                    'design__lvs_unmatched_net__count', 'design__lvs_unmatched_pin__count'),
+    # The second LVS arm (audit §3.2): KLayout's own runset on the GDS.  Its
+    # shared `design__lvs_error__count` is Netgen's when Netgen ran first, so
+    # only the KLayout-only count credits it (a skipped runset is absent).
+    'KLayout.LVS': ('klayout__lvs_error__count',),
     'KLayout.XOR': ('design__xor_difference__count',),
     'Vibeic.FinishingXOR': ('vibeic__finishing_xor__defect__count',
                             'vibeic__finishing_xor__removed__count',
@@ -67,7 +72,20 @@ PRODUCED: dict[str, tuple[str, ...]] = {
 CLEAN = 0
 
 DRC_CHAIN = ('Magic.DRC', 'KLayout.DRC', 'KLayout.Density')
-LVS_CHAIN = ('Magic.SpiceExtraction', 'Netgen.LVS')
+#: LVS on the SHIPPED GDS (``MAGIC_EXT_USE_GDS``, `LVS_GDS_OVERLAY`), then the
+#: second arm: ``OpenROAD.WriteCDL`` writes the schematic CDL from the bridged
+#: database and ``KLayout.LVS`` runs the PDK's declared runset on the same GDS.
+#: For verification both arms must be clean.
+LVS_CHAIN = ('Magic.SpiceExtraction', 'Netgen.LVS', 'OpenROAD.WriteCDL', 'KLayout.LVS')
+
+#: R-0929-TOOL-DEFAULT, audit §3.2: LibreLane's default MAGIC_EXT_USE_GDS=False
+#: extracts the routed DEF + LEF abstracts, so the GDS that ships was never
+#: extracted (spm: a PASS on a stream whose std cells carried no pin label;
+#: extracting the stream showed 29 pin mismatches).  Step 31 extracts the GDS.
+LVS_GDS_OVERLAY: dict[str, tuple[Any, str]] = {
+    'MAGIC_EXT_USE_GDS': (True, 'R-0929-TOOL-DEFAULT (audit 3.2): step 31 extracts the shipped GDS'),
+    'MAGIC_EXT_ABSTRACT': (False, 'MAGIC_EXT_USE_GDS extracts the GDS itself (magic.py: both True refuses)'),
+}
 HALVES = {'drc': DRC_CHAIN, 'lvs': LVS_CHAIN}
 
 #: Where each half's judgment is written (project-relative).
@@ -227,9 +245,12 @@ def run_half(project: Path, image: str, pdk_root: Path, pdk: str, half: str, *,
     if half not in HALVES:
         raise Refusal('LL_PV_HALF_UNKNOWN', half)
     chain = HALVES[half]
+    overlay = dict(tech_lef_overlay(project) or {})
+    if half == 'lvs':
+        overlay.update(LVS_GDS_OVERLAY)
     configs = resolve_step_configs(project, image, pdk, list(chain), pdk_root=pdk_root,
                                    folder=f'31-{half}-config',
-                                   overlay=tech_lef_overlay(project))
+                                   overlay=overlay or None)
     state = bridge(project, image, pdk_root, pdk, configs, chain,
                    {'def': routed_def, 'nl': netlist, 'sdc': sdc, 'gds': gds},
                    f'31-{half}-config')

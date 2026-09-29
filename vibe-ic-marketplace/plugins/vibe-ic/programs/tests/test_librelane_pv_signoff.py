@@ -134,6 +134,9 @@ def _fake_tool(monkeypatch, writes):
             if step == "Magic.SpiceExtraction":  # the view the step writes
                 (folder / "chip.spice").write_text("* extracted")
                 out["spice"] = str(folder / "chip.spice")
+            if step == "OpenROAD.WriteCDL":  # the view the step writes
+                (folder / "chip.cdl").write_text("* cdl")
+                out["cdl"] = str(folder / "chip.cdl")
             _put(folder / "state_out.json", out)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if "openroad" in cmd:
@@ -162,7 +165,10 @@ def _half_project(tmp_path, chain):
     views = {"Magic.DRC": (["gds"], []), "KLayout.DRC": (["gds"], []),
              "KLayout.Density": (["gds"], []),
              "Magic.SpiceExtraction": (["gds", "def"], ["spice"]),
-             "Netgen.LVS": (["spice", "pnl"], [])}
+             "Netgen.LVS": (["spice", "pnl"], []),
+             # the second LVS arm (R-0929-TOOL-DEFAULT, audit 3.2)
+             "OpenROAD.WriteCDL": (["odb"], ["cdl"]),
+             "KLayout.LVS": (["cdl", "gds"], [])}
     configs = {}
     for step in chain:
         configs[step] = _put(cfg / f"{step}.json", {"meta": {"step": step}, "DESIGN_NAME": "chip",
@@ -196,7 +202,9 @@ def test_lvs_half_bridges_a_powered_netlist_from_the_routed_database(tmp_path, m
     project, pnr, configs, pdk_root = _half_project(tmp_path, pv.LVS_CHAIN)
     monkeypatch.setattr(pv, "resolve_step_configs", lambda *a, **k: configs)
     _fake_tool(monkeypatch, {"Magic.SpiceExtraction": {"magic__illegal_overlap__count": 0},
-                             "Netgen.LVS": {k: 0 for k in pv.PRODUCED["Netgen.LVS"]}})
+                             "Netgen.LVS": {k: 0 for k in pv.PRODUCED["Netgen.LVS"]},
+                             # the second arm must be clean too (audit 3.2)
+                             "KLayout.LVS": {"klayout__lvs_error__count": 0}})
     record = pv.run_half(project, "img", pdk_root, "procA", "lvs", gds=pnr / "chip.gds",
                          routed_def=pnr / "chip.def", netlist=pnr / "chip_pnr.v",
                          sdc=pnr / "constraint.sdc")
