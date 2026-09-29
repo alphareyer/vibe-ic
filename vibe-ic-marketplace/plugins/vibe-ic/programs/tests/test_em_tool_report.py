@@ -188,3 +188,31 @@ def test_ab_reads_fresh_tool_rows_instead_of_cached_summary(tmp_path):
     result = json.loads((folder / "em_openroad_ab.json").read_text())
     assert result["tool_worst_utilization"] == 0.5
     assert result["utilization_agrees"] is False
+
+
+def test_native_cli_discloses_audited_population_and_authority(tmp_path, monkeypatch, capsys):
+    folder, _, _ = evidence(tmp_path)
+    switch = tmp_path / "phase3/librelane_switch.json"
+    switch.parent.mkdir()
+    switch.write_text(json.dumps({"schema": "librelane_switch/1", "steps": {"25": "dual"}}))
+    (folder / "em.json").write_text(json.dumps({"segments_analysed": 2}))
+    monkeypatch.setattr(A, "jmax_tier", lambda *args: {"verdict": "PASS", "summary": {
+        "segments_screened": 999, "segments_total": 999, "worst_utilization": 0.9}})
+    monkeypatch.setattr(A, "read_peaks", lambda *args: [])
+    monkeypatch.setattr(A, "read_supply_authority", lambda *args: [])
+    assert A.main([str(tmp_path)]) == 0
+    output = capsys.readouterr().out
+    assert "2 of 2 segment(s)" in output
+    assert "OpenROAD.check_current_density" in output
+    assert "trusted LEF routing and PDK per-cut authority" in output
+    assert "worst utilization 0.5" in output
+    assert "999" not in output and "from None" not in output
+
+
+def test_partial_native_disclosure_retains_full_solved_denominator(tmp_path):
+    folder = tmp_path / "reports/phase3"
+    folder.mkdir(parents=True)
+    (folder / "em.json").write_text(json.dumps({"segments_analysed": 10}))
+    native = {"scope": "power-grid wires and vias", "nets": {
+        "one_rail": {"checked": 3, "psm_segments": 4}}}
+    assert A._segments_screened(tmp_path, native) == (3, 10)

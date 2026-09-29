@@ -470,6 +470,12 @@ def _segments_screened(project: Path, jt: Dict[str, Any]) -> Tuple[int, int]:
     total = int(s.get("segments_total") or 0)
     if total:
         return screened, total
+    if jt.get("scope") == "power-grid wires and vias":
+        # The native audit has already verified these populations against
+        # the solved resistor files. Never borrow the retained arm's totals.
+        nets = jt.get("nets") or {}
+        screened = sum(int(n.get("checked", 0)) for n in nets.values())
+        total = sum(int(n.get("psm_segments", 0)) for n in nets.values())
     for fp in discover(project, _JSON_GLOBS):
         try:
             doc = json.loads(fp.read_text(errors="replace"))
@@ -517,10 +523,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ss = rep["supply_current_screen"]
     jt = rep["jmax_screen"]
     screened, total = _segments_screened(project, jt)
+    tool_authority = rep.get("verdict_source") == "OpenROAD.check_current_density"
+    layer_authority = "native LEF/PDK layer limits" if tool_authority else "Jmax"
     # A PASS must say how much it looked at AND what it compared against.
     scope = (f"read {len(rep['peak_currents_read'])} peak-current figure(s) and "
              f"{len(rep['supply_authority'])} declared supply authority(ies); "
-             f"{screened} of {total} segment(s) screened against Jmax")
+             f"{screened} of {total} segment(s) screened against {layer_authority}")
 
     if verdict == "FAIL":
         print(f"[FAIL] {TOOL}: {scope}")
@@ -529,6 +537,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         return RC_FINDINGS
 
     if verdict == "PASS":
+        if tool_authority:
+            worst_ratio = max(n["worst_ratio"] for n in jt["nets"].values())
+            print(f"[PASS] {TOOL}: {scope}. OpenROAD.check_current_density "
+                  f"judged the power-grid wires and vias using trusted LEF routing "
+                  f"and PDK per-cut authority (worst utilization {worst_ratio}); "
+                  f"signal EM unmeasured. Net supply current "
+                  f"{ss.get('supply_current_A')!r} A (ratio {ss.get('ratio')}, "
+                  f"limit 1.0)")
+            return RC_OK
         s = jt.get("summary") or {}
         print(f"[PASS] {TOOL}: {scope}. Compared against Jmax from "
               f"{jt.get('jmax_source')!r} (worst utilization "
