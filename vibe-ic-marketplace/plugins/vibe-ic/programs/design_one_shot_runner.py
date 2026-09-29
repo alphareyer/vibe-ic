@@ -20968,7 +20968,9 @@ def _positive_completed_rung_cap(value: str) -> int:
 
 def step_dft_lec_chain(project: Path, top_name: str, container: str,
                        ic_class: str, full_chip: bool = True,
-                       lec_max_completed_rungs: Optional[int] = None
+                       lec_max_completed_rungs: Optional[int] = None, *,
+                       phase2_request: bool = False,
+                       rederive_ic_name: Optional[str] = None
                        ) -> List[StepResult]:
     """Flow steps 11-13 (stage-2 DFT → post-DFT → LEC).
 
@@ -20986,6 +20988,13 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
       12 post : post_dft_netlist.v — yosys opt_clean of the scan netlist.
       13 LEC  : lec_run.py — yosys equiv proving RTL ≡ handoff netlist →
                 reports/lec.{json,rpt}.
+
+    ``phase2_request``: ``top_name`` is phase 2's REQUESTED ``--top-name``
+    (phase 2 main is the only caller that sets it). Step 13 then resolves it
+    ONCE, with ``lec_gate_netlist_select.step15_top`` (and the driver's
+    ``rederive_ic_name``), to the top step 15 will route. Phase 3's callers
+    pass the top phase 3 main already resolved and leave it False: resolving
+    a resolved top again is not a no-op (``effective_top`` is not idempotent).
 
     HONEST + fail-safe: any sub-step whose real tool cannot run writes a
     conscious skip-sentinel (verdict=SKIPPED-CONDITION) beside its absent output
@@ -21778,8 +21787,12 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                        "no scan netlist → post-DFT disclosed-skip", reason_class=_V.ReasonClass.INPUT_ABSENT))
 
     # ================= Step 13 — LEC (RTL ≡ handoff netlist) =================
-    # The handoff netlist is the one step 15 routes (see step_lec_equivalence).
-    return step_lec_equivalence(project, top_name, container, results,
+    # The handoff netlist is the one step 15 routes (see step_lec_equivalence),
+    # for the top step 15 is handed: resolved here, once, on phase 2's request.
+    lec_top = (_lec_gns.step15_top(project, top_name,
+                                   rederive_ic_name=rederive_ic_name)
+               if phase2_request else top_name)
+    return step_lec_equivalence(project, lec_top, container, results,
                                 lec_max_completed_rungs=lec_max_completed_rungs)
 
 
@@ -21791,6 +21804,9 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
 
     Split out of `step_dft_lec_chain` so phase 3 can re-prove after its
     synthesis half writes the mapped netlist, without re-running steps 11/12.
+    `top_name` is the top step 15 is handed, ALREADY resolved (phase 3 main's
+    `effective_top`, or `step15_top` at phase 2's boundary); the subject, lec_run
+    `--top` and the EQY arm all take it as given.
     `results` are earlier rows of the chain; they are returned in front of
     this step's row.
     """
@@ -21830,16 +21846,10 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
                        time.time() - t0, _why,
                        reason_class=_V.ReasonClass.INPUT_ABSENT))
         return results
-    # The top BOTH arms prove is the module whose netlist the subject IS: the
-    # top step 15 is handed, resolved by the same function that named the
-    # subject above. `top_name` is the REQUESTED top, and on a from-documents
-    # run it is still the runner's placeholder default (spm DIE, 2026-09-28:
-    # `chip_top`, while the subject is `spm_synth.v`).
-    lec_top = _lec_gns.step15_top(project, top_name)
     lec_run = PROGRAMS_DIR / "lec_run.py"
     if lec_run.is_file():
         cmd = _lec_run_argv(
-            project, lec_run, gate_netlist, lec_top, container,
+            project, lec_run, gate_netlist, top_name, container,
             lec_max_completed_rungs=lec_max_completed_rungs)
         # FUNCTIONAL-MODE CONSTRAINTS — only when this run really has a scan
         # chain. The gate netlist then carries `sin`/`shift`/`test`/`tck`/`sout`,
@@ -21966,7 +21976,7 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
                            "unavailable")
         results.append(StepResult("lec_equivalence", "NOT_MEASURED", time.time() - t0,
                        "lec_run.py missing → disclosed-skip", reason_class=_V.ReasonClass.TOOL_ABSENT))
-    return _lec_eqy_arm(project, lec_top, gate_netlist, results)
+    return _lec_eqy_arm(project, top_name, gate_netlist, results)
 
 
 def _lec_eqy_arm(project: Path, top_name: str, gate_netlist: str,
@@ -24434,6 +24444,13 @@ def main() -> int:
                         "rung cap only to Step 13 lec_run.py. Omitted keeps "
                         "LEC unbounded; this is never a wall-clock timeout.")
     p.add_argument("--top-name", default="chip_top")
+    p.add_argument("--phase3-rederives-top-with-ic-name", default=None,
+                   metavar="IC_NAME",
+                   help="Set by the front door when it will hand phase 3 "
+                        "_resolve_top_name(<rtl>, IC_NAME, --top-name) instead "
+                        "of --top-name (the placeholder default of a "
+                        "from-documents run). Step 13 then proves the netlist "
+                        "of that top. Omitted: phase 3 gets --top-name.")
     p.add_argument("--container", default=_pin.default_container_name())
     p.add_argument("--skip-phase3", action="store_true",
                    help="Lightweight/RTL-only flow (no silicon target). Gates "
@@ -25513,6 +25530,8 @@ def main() -> int:
             step_dft_lec_chain, project, args.top_name, args.container,
             ic_class, full_chip=not args.skip_phase3,
             lec_max_completed_rungs=args.lec_max_completed_rungs,
+            phase2_request=True,
+            rederive_ic_name=args.phase3_rederives_top_with_ic_name,
             _preflight_not_applicable=(_analog_reason if _analog_absent
                                        else None))
         plan.extend(_dft_chain)

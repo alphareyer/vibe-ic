@@ -651,7 +651,9 @@ def _phase2_runner_argv(project: Path, *, top_name: str, container: str,
                        lec_max_completed_rungs: Optional[int],
                        skip_hardware: bool, skip_phase3: bool,
                        skip_analog: bool, entry_step: Optional[str],
-                       exit_step: Optional[str]) -> List[str]:
+                       exit_step: Optional[str],
+                       phase3_rederive_ic_name: Optional[str] = None
+                       ) -> List[str]:
     """Build the canonical Phase-2 argv with explicit opt-ins only.
 
     The bounded LEC value is absent by default, preserving Step 13's
@@ -672,6 +674,11 @@ def _phase2_runner_argv(project: Path, *, top_name: str, container: str,
         result += ["--entry-step", str(entry_step)]
     if exit_step:
         result += ["--exit-step", str(exit_step)]
+    if phase3_rederive_ic_name is not None:
+        # Phase 3 will be handed `_resolve_top_name(..., ic_name, ...)`, not
+        # `top_name` (see `_phase3_rederives_top`); step 13 needs the same.
+        result += ["--phase3-rederives-top-with-ic-name",
+                   phase3_rederive_ic_name]
     return result
 
 
@@ -1401,6 +1408,17 @@ def _resolve_top_name(project: Path, ic_name: str, top_name: str,
     # unchanged so synth fails loudly and honestly rather than on a guess.
     return top_name, override_note
 
+
+
+def _phase3_rederives_top(flow_top: str, explicit: bool) -> bool:
+    """Does the front door re-derive phase 3's top after phase 2?
+
+    Only for the placeholder default the user did not type: phase 2 of a
+    from-documents run writes the RTL, so the flow-level resolution above
+    could not see it. Known BEFORE phase 2, which is why phase 2 is told
+    (``--phase3-rederives-top-with-ic-name``): its step 13 must prove the
+    netlist of the top phase 3 will build, not the placeholder's."""
+    return flow_top == _TOP_NAME_DEFAULT and not explicit
 
 
 def _line_buffer_own_stream() -> None:
@@ -2233,7 +2251,11 @@ def main() -> int:
             skip_analog=False,
             entry_step=(str(args.entry_step)
                         if _entry_runner == "design_one_shot_runner" else None),
-            exit_step=(str(args.exit_step) if args.exit_step else None))
+            exit_step=(str(args.exit_step) if args.exit_step else None),
+            phase3_rederive_ic_name=(
+                args.ic_name
+                if _phase3_rederives_top(flow_top, top_name_explicit)
+                else None))
         if args.skip_analog:
             p2_args.append("--skip-analog")
         elif not run_analog:
@@ -2319,7 +2341,7 @@ def main() -> int:
         # above), re-resolve now that phase-2 output exists so phase-3 still
         # gets the real top rather than the default 'chip_top'.
         phase3_top = flow_top
-        if phase3_top == _TOP_NAME_DEFAULT and not top_name_explicit:
+        if _phase3_rederives_top(phase3_top, top_name_explicit):
             phase3_top, top_note = _resolve_top_name(
                 project, args.ic_name, args.top_name, top_name_explicit)
             if top_note:
