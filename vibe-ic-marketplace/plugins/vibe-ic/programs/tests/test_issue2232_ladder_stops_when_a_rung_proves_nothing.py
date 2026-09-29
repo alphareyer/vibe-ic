@@ -82,6 +82,7 @@ class _FakeYosys:
 
     def __init__(self, total=100, gains=None, default_gain=20, die_at=None):
         self.scripts = []
+        self.search_scripts = []
         self.rungs_run = []
         self.total = total
         self.proved = 0
@@ -119,6 +120,23 @@ class _FakeYosys:
         # today's exact signature would turn every future producer keyword into
         # a red here, which would say nothing about the ladder.
         script = Path(ys_path).read_text(encoding="utf-8")
+        # R-0929-LECNP-STATE: the bounded SAT counterexample search is its own
+        # phase after the ladder, never a rung. It is counted apart from the
+        # per-rung processes and answered the way yosys answers it: the
+        # flattened miter it is told to write (sequential here, like the
+        # design), then SAT's decisive "no model within the bound" line.
+        if "equiv_miter -trigger" in script:
+            self.search_scripts.append(script)
+            for ln in script.splitlines():
+                if ln.startswith("write_rtlil "):
+                    flat = Path(shlex.split(ln)[1])
+                    flat.parent.mkdir(parents=True, exist_ok=True)
+                    flat.write_text("module \\lec_cex_miter\n"
+                                    "  wire input 1 \\clk\n"
+                                    "  wire output 1 \\trigger\n"
+                                    "  cell $dff $q\n  end\nend\n",
+                                    encoding="utf-8")
+            return True, "SAT proof finished - no model found: SUCCESS!\n"
         self.scripts.append(script)
         lines = script.splitlines()
         rung = self._rung_of(lines)
@@ -233,6 +251,9 @@ def test_a_rung_that_proved_nothing_new_does_not_earn_the_next_one(monkeypatch):
     assert len(fake.scripts) == 4, (
         f"{len(fake.scripts)} yosys process(es) ran; the ladder was supposed "
         "to stop at the rung that proved nothing")
+    # R-0929-LECNP-STATE: the counterexample search is its own phase after
+    # the ladder, exactly one process, never counted as a rung.
+    assert len(fake.search_scripts) == 1, len(fake.search_scripts)
 
 
 def test_the_stop_names_the_rung_and_says_it_proved_nothing_new(monkeypatch):
@@ -286,10 +307,17 @@ def test_a_flat_wall_stop_is_INCONCLUSIVE_and_never_a_PASS(monkeypatch):
     the direction the change must not go, so a red here would mean the stop had
     moved a verdict rather than saved a rung."""
     _rc, report = _drive(monkeypatch, _FakeYosys(gains=_FLAT_AT_SEQ16))
-    assert report["verdict"] == "INCONCLUSIVE", report["verdict"]
+    # R-0929-LECNP-STATE (owner's LEC rule): unproven points with no proven
+    # witness are NOT_PROVEN — the pre-rule word here was INCONCLUSIVE. Still
+    # never a PASS, never a booked mismatch, and the explanation says the
+    # ladder stopped and gives the search's result and bound.
+    assert report["verdict"] == "NOT_PROVEN", report["verdict"]
     assert report["equivalent"] is not True
     assert report["non_equivalent_points"] in (0, None)
     assert report["unproven_points"] == 2
+    why = report.get("verdict_explanation") or ""
+    assert "proof ladder stopped" in why and "equiv_induct_seq16" in why, why
+    assert "K=" in why and "NONE_FOUND" in why, why
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +406,7 @@ def test_the_ladder_stops_at_the_FIRST_rung_that_proves_nothing(
     _rc, report = _drive(monkeypatch, fake)
     assert [lg["rung"] for lg in report["lec_ladder"]["legs"]] == climbed
     assert fake.rungs_run == climbed
+    assert len(fake.search_scripts) == 1       # its own phase, not a rung
 
 
 def test_a_leg_KILLED_mid_rung_is_not_re_labelled_a_flat_wall(monkeypatch):
@@ -407,3 +436,19 @@ def test_a_leg_KILLED_mid_rung_is_not_re_labelled_a_flat_wall(monkeypatch):
     assert ladder.get("stopped_on_no_progress") is not True
     assert ladder["complete"] is False, (
         "a leg that was cut off left the ladder reported as finished")
+
+
+def test_the_search_is_one_process_after_a_residual_and_none_after_a_proof(
+        monkeypatch):
+    """R-0929-LECNP-STATE, both arms. The bounded SAT search runs once, after
+    the ladder, only when the ladder left a residual; a ladder that proves
+    every point launches no search. The per-rung count is untouched."""
+    flat = _FakeYosys(gains=_FLAT_AT_SEQ16)
+    _rc, report = _drive(monkeypatch, flat)
+    assert (len(flat.scripts), len(flat.search_scripts)) == (4, 1)
+    assert report["unproven_points"] == 2
+    proved = _FakeYosys()                      # 5 rungs x 20 = all 100 proven
+    _rc, report = _drive(monkeypatch, proved)
+    assert report["unproven_points"] in (0, None), report["unproven_points"]
+    assert (len(proved.scripts), len(proved.search_scripts)) == (5, 0)
+    assert report["verdict"] == "PASS", report["verdict"]

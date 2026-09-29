@@ -6946,6 +6946,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"search: {_lec_cex.search_summary(_search)}.").strip()
         else:
             report["verdict_explanation"] = _decision["explanation"]
+            if (_decision["verdict"] == "NOT_PROVEN"
+                    and ladder_record.get("stopped_on_no_progress")
+                    and ladder_record.get("stopped_because")):
+                # R-0929-LECNP-STATE: a residual ladder stop is NOT_PROVEN, and
+                # its explanation says the ladder stopped and why, before the
+                # search's own result and bound.
+                report["verdict_explanation"] = (
+                    f"{_decision['explanation']} The proof ladder stopped: "
+                    f"{ladder_record['stopped_because']}")
             if _decision["verdict"] == "NON_EQUIVALENT":
                 report["equivalent"] = False
                 report["non_equivalent_points"] = _decision["non_equivalent_points"]

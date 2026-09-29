@@ -218,6 +218,7 @@ class _FakeYosys:
 
     def __init__(self, total=100, die_at_rung=None, silent=False):
         self.scripts = []
+        self.search_scripts = []
         self.total = total
         self.proved = 0
         self.die_at_rung = die_at_rung
@@ -234,6 +235,23 @@ class _FakeYosys:
         # every future producer keyword into a red in THIS suite, which says
         # nothing about the ladder.
         script = Path(ys_path).read_text(encoding="utf-8")
+        # R-0929-LECNP-STATE: the bounded SAT counterexample search is its own
+        # phase after the ladder, never a rung. It is counted apart from the
+        # per-rung processes and answered the way yosys answers it: the
+        # flattened miter it is told to write (sequential here, like the
+        # design), then SAT's decisive "no model within the bound" line.
+        if "equiv_miter -trigger" in script:
+            self.search_scripts.append(script)
+            for ln in script.splitlines():
+                if ln.startswith("write_rtlil "):
+                    flat = Path(shlex.split(ln)[1])
+                    flat.parent.mkdir(parents=True, exist_ok=True)
+                    flat.write_text("module \\lec_cex_miter\n"
+                                    "  wire input 1 \\clk\n"
+                                    "  wire output 1 \\trigger\n"
+                                    "  cell $dff $q\n  end\nend\n",
+                                    encoding="utf-8")
+            return True, "SAT proof finished - no model found: SUCCESS!\n"
         self.scripts.append(script)
         lines = script.splitlines()
         out = ["", " /----- Yosys 0.68+ (fake) -----\\", ""]
@@ -332,6 +350,10 @@ def test_every_rung_gets_its_own_process(monkeypatch):
             "one process carried more than one induction rung:\n" + script)
     for leg in ladder["legs"]:
         assert leg["rungs_in_this_process"] == 1
+    # R-0929-LECNP-STATE: the counterexample search after a residual is its
+    # own single process, never one of the rung processes counted above.
+    assert len(fake.search_scripts) == (1 if report.get("unproven_points")
+                                        else 0), len(fake.search_scripts)
 
 
 def test_each_rung_after_the_first_reads_the_previous_rungs_checkpoint(
