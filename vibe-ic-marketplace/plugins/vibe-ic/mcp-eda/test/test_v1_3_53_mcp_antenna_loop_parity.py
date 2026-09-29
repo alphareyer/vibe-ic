@@ -156,11 +156,27 @@ def test_index_js_wires_emitter_into_detailed_route_path():
 def test_index_js_sources_diode_from_pdk_config_not_tcl_logic():
     """The diode master is a per-PDK config field (data), so the Tcl-generation
     logic never hardcodes a cell name — mirrors phase3's PdkConfig field."""
+    # Since the registry cut-over (audit §3.23-1) the per-PDK data lives in
+    # programs/pdk_registry.json (gf180) and src/lib/pdk_registry.mjs (the
+    # PDKs whose registry entry carries no diode); the Tcl logic still reads
+    # the config field only.
     src = INDEX_JS.read_text()
-    assert 'antenna_diode_cell: "sky130_fd_sc_hd__diode_2"' in src
-    assert 'antenna_diode_cell: "gf180mcu_fd_sc_mcu7t5v0__antenna"' in src
+    table = _PDK_TABLE.read_text()
+    assert 'antenna_diode_cell: "sky130_fd_sc_hd__diode_2"' in table
+    assert _registry_value("gf180", "antenna_diode_cell") == \
+        "gf180mcu_fd_sc_mcu7t5v0__antenna"
     # custom PDK: null unless the caller supplies one -> SKIP, never invented
     assert "antenna_diode_cell: customOpts.custom_antenna_diode || null" in src
+
+
+_PDK_TABLE = MCP_ROOT / "src" / "lib" / "pdk_registry.mjs"
+
+
+def _registry_value(key, field):
+    import json
+    doc = json.loads((MCP_ROOT.parent / "programs" / "pdk_registry.json").read_text())
+    return next(e for e in doc["pdks"]
+                if e.get("per_pdk_table_key") == key).get(field)
 
 
 def _resolve_phase3_runner():
@@ -190,4 +206,4 @@ def test_sky130_diode_matches_phase3_runner_cell_for_cell():
     assert m, "phase3 runner has no antenna_diode_cell literal"
     phase3_diode = m.group(1)
     assert phase3_diode == _DIODE
-    assert f'antenna_diode_cell: "{phase3_diode}"' in INDEX_JS.read_text()
+    assert f'antenna_diode_cell: "{phase3_diode}"' in _PDK_TABLE.read_text()

@@ -73,6 +73,7 @@ import { gateManifestEntry } from "./lib/manifest_metrics.mjs";
 import { parseWns, parseTns } from "./lib/sta_slack.mjs";
 import { parseIrReport, parseReportPower } from "./lib/psm_report.mjs";
 import { evaluateStaEvidence, staEvidenceTcl, STA_EVIDENCE_TERMS } from "./lib/sta_evidence.mjs";
+import { registryPdkConfig, assetPath } from "./lib/pdk_registry.mjs";
 
 function _shellSingleQuotedHeredoc(content, sentinel) {
   // Run `<content>` through a `cat << 'SENTINEL' > target` block. The
@@ -770,79 +771,12 @@ function staAssertionTcl({ allowUnconstrained = false } = {}) {
   ].join("\n");
 }
 
-// PDK config lookup
+// PDK config lookup — from programs/pdk_registry.json (lib/pdk_registry.mjs),
+// the SAME registry the flow reads. This used to be a second, hand-kept table
+// here that selected gf180's __tt_025C_3v30.lib while the flow signs off on
+// tt_025C_5v00 (audit §3.23-1). An unknown named PDK is an error, not a silent
+// fall-through to gf180.
 function pdkConfig(pdk, customOpts) {
-  const configs = {
-    gf180: {
-      pdk_path: `${PDK_ROOT}/gf180mcuD`,
-      scl: "gf180mcu_fd_sc_mcu7t5v0",
-      lib_suffix: "__tt_025C_3v30.lib",
-      techlef_suffix: "__nom.tlef",
-      site: "GF018hv5v_mcu_sc7",
-      metal_prefix: "Metal",
-      vdd_pin: "VDD",
-      vss_pin: "VSS",
-      // The PDN NET name eda_pnr creates, which is NOT the std-cell PIN name in
-      // vdd_pin: eda_pnr writes `add_global_connection -net <vdd_net>
-      // -pin_pattern "<vdd_pin>"`, so on sky130 the DEF's SPECIALNETS are
-      // VDD/VSS while the cell pins matched are VPWR/VGND. Any consumer that
-      // needs a NET (OpenROAD PSM's `analyze_power_grid -net`) must read this
-      // one; reading vdd_pin asks PSM for a net that does not exist.
-      vdd_net: "VDD",
-      vss_net: "VSS",
-      // v1.3.53 R9 — antenna diode master from the PDK's own std-cell library
-      // (data, NOT logic): consumed by antennaRepairTcl for the incremental
-      // repair->reroute loop. Chip-AGNOSTIC — the Tcl-gen never hardcodes it.
-      antenna_diode_cell: "gf180mcu_fd_sc_mcu7t5v0__antenna",
-    },
-    sky130: {
-      pdk_path: `${PDK_ROOT}/sky130A`,
-      scl: "sky130_fd_sc_hd",
-      lib_suffix: "__tt_025C_1v80.lib",
-      techlef_suffix: "__nom.tlef",
-      site: "unithd",
-      metal_prefix: "met",
-      vdd_pin: "VPWR",
-      vss_pin: "VGND",
-      // The PDN NET name eda_pnr creates, which is NOT the std-cell PIN name in
-      // vdd_pin: eda_pnr writes `add_global_connection -net <vdd_net>
-      // -pin_pattern "<vdd_pin>"`, so on sky130 the DEF's SPECIALNETS are
-      // VDD/VSS while the cell pins matched are VPWR/VGND. Any consumer that
-      // needs a NET (OpenROAD PSM's `analyze_power_grid -net`) must read this
-      // one; reading vdd_pin asks PSM for a net that does not exist.
-      vdd_net: "VDD",
-      vss_net: "VSS",
-      // v1.3.53 R9 — same sky130 diode master the phase3 runner uses
-      // (phase3_one_shot_runner.py PdkConfig.antenna_diode_cell), so both PnR
-      // paths repair antennas identically.
-      antenna_diode_cell: "sky130_fd_sc_hd__diode_2",
-    },
-    nangate45: {
-      // NanGate / FreePDK45 Open Cell Library (Si2, Apache-2.0) — a GENERIC,
-      // non-foundry 45nm std-cell lib. synth/PnR/CTS/STA/area run; the KLayout
-      // FreePDK45 decks are EDUCATIONAL, not a manufacturable sign-off (see
-      // programs/pdk_registry.json nangate45: tapeout_capable=false). Assets are
-      // the OpenROAD-flow-scripts nangate45 platform re-staged into the
-      // open_pdks libs.ref/<scl>/ layout by the vibeic-eda Dockerfile.
-      pdk_path: `${PDK_ROOT}/nangate45`,
-      scl: "NangateOpenCellLibrary",
-      lib_suffix: "_typical.lib",
-      techlef_suffix: ".tech.lef",
-      site: "FreePDK45_38x28_10R_NP_162NW_34O",
-      metal_prefix: "metal",
-      vdd_pin: "VDD",
-      vss_pin: "VSS",
-      // The PDN NET name eda_pnr creates, which is NOT the std-cell PIN name in
-      // vdd_pin: eda_pnr writes `add_global_connection -net <vdd_net>
-      // -pin_pattern "<vdd_pin>"`, so on sky130 the DEF's SPECIALNETS are
-      // VDD/VSS while the cell pins matched are VPWR/VGND. Any consumer that
-      // needs a NET (OpenROAD PSM's `analyze_power_grid -net`) must read this
-      // one; reading vdd_pin asks PSM for a net that does not exist.
-      vdd_net: "VDD",
-      vss_net: "VSS",
-      antenna_diode_cell: "ANTENNA_X1",
-    },
-  };
   if (pdk === "custom" && customOpts) {
     // v0.63: metal_prefix used to be hardcoded to "met" here, which silently
     // broke any custom PDK whose layers don't follow SKY130's naming
@@ -871,12 +805,24 @@ function pdkConfig(pdk, customOpts) {
       custom_cellgds: customOpts.custom_cellgds,
     };
   }
-  return configs[pdk] || configs.gf180;
+  return registryPdkConfig(pdk || "gf180", PDK_ROOT);
+}
+
+// A registry asset glob is resolved inside the EDA container (where the PDK
+// lives) and must match exactly one file; memoised per process.
+const _pdkGlobCache = new Map();
+function resolvePdkGlob(absGlob) {
+  if (_pdkGlobCache.has(absGlob)) return _pdkGlobCache.get(absGlob);
+  const r = dockerExec(`ls -1d ${absGlob} 2>/dev/null || true`, 30000);
+  const hits = String(r.output || "").split("\n").map((x) => x.trim()).filter(Boolean);
+  if (hits.length === 1) _pdkGlobCache.set(absGlob, hits);
+  return hits;
 }
 
 // P-3: the characterised supply of the Liberty that will actually be loaded.
 // eda_ir_drop's `voltage` is a caller DEFAULT of 1.8 while `pdk` defaults to
-// gf180, whose Liberty this same file selects as __tt_025C_3v30.lib (3.3 V). PSM
+// gf180, whose Liberty this file then selected as __tt_025C_3v30.lib (3.3 V; the
+// registry's tt_025C_5v00, 5 V, since audit §3.23-1). PSM
 // echoes the supplied voltage back as "Supply voltage" and computes "Percentage
 // drop" against it, so a wrong VDD silently rescales the answer and the tool
 // reports the caller's own assumption as a measurement. Nothing compared the two.
@@ -899,11 +845,11 @@ function libNomVoltage(cfg) {
 
 function libPath(cfg) {
   if (cfg.custom_lib) return cfg.custom_lib;
-  return `${cfg.pdk_path}/libs.ref/${cfg.scl}/lib/${cfg.scl}${cfg.lib_suffix}`;
+  return assetPath(cfg, cfg.liberty_rel, resolvePdkGlob);
 }
 function techlefPath(cfg) {
   if (cfg.custom_techlef) return cfg.custom_techlef;
-  return `${cfg.pdk_path}/libs.ref/${cfg.scl}/techlef/${cfg.scl}${cfg.techlef_suffix}`;
+  return assetPath(cfg, cfg.techlef_rel, resolvePdkGlob);
 }
 function celllefPath(cfg) {
   if (cfg.custom_celllef) return cfg.custom_celllef;
@@ -2907,11 +2853,10 @@ server.tool(
     } catch (e) { return guardError(e); }
     if (mode === "yosys_equiv") {
       const t0 = Date.now();
-      const libPathLocal = custom_lib || (pdk === "gf180"
-        ? `${PDK_ROOT}/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/gf180mcu_fd_sc_mcu7t5v0__tt_025C_3v30.lib`
-        : pdk === "sky130"
-          ? `${PDK_ROOT}/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib`
-          : "");
+      // the registry's Liberty (programs/pdk_registry.json), not a literal
+      const libPathLocal = custom_lib || ((pdk === "gf180" || pdk === "sky130")
+        ? libPath(pdkConfig(pdk))
+        : "");
       if (!libPathLocal) {
         return wrapResult({ success: false, t0, error: "yosys_equiv mode needs custom_lib (or use pdk=gf180/sky130)", output: "" });
       }
@@ -3676,7 +3621,7 @@ server.tool(
   {
     def_file: z.string().describe("DEF file with placed design"),
     pdk: z.enum(["gf180", "sky130", "nangate45", "custom"]).default("gf180"),
-    voltage: z.number().optional().describe("VDD voltage in volts. OMIT IT and the tool reads the characterised supply (nom_voltage) out of the Liberty it is about to load, which is the right source: this used to default to 1.8 while `pdk` defaults to gf180, whose Liberty this same file selects as __tt_025C_3v30.lib (3.3 V), so the default run fed 1.8 V into a 3.3 V library. PSM echoes the supplied voltage back as \"Supply voltage\" and computes \"Percentage drop\" against it, so a wrong value silently rescales the answer. When you DO pass one it is used (an off-nominal corner is legitimate) and cross-checked against nom_voltage, with a warning on disagreement."),
+    voltage: z.number().optional().describe("VDD voltage in volts. OMIT IT and the tool reads the characterised supply (nom_voltage) out of the Liberty it is about to load, which is the right source: this used to default to 1.8 while `pdk` defaults to gf180, whose Liberty (programs/pdk_registry.json: tt_025C_5v00, 5 V) is not a 1.8 V library, so the default run fed 1.8 V into a higher-rail library. PSM echoes the supplied voltage back as \"Supply voltage\" and computes \"Percentage drop\" against it, so a wrong value silently rescales the answer. When you DO pass one it is used (an off-nominal corner is legitimate) and cross-checked against nom_voltage, with a warning on disagreement."),
     custom_lib: z.string().optional(),
     custom_techlef: z.string().optional(),
     custom_celllef: z.string().optional(),

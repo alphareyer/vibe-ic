@@ -48,10 +48,16 @@ def _tool(name: str) -> str:
 
 
 def test_pdkconfig_separates_the_net_name_from_the_pin_name():
-    """sky130 is the PDK where the two genuinely differ — the regression case."""
-    i = SRC.find("sky130: {")
+    """sky130 is the PDK where the two genuinely differ — the regression case.
+
+    The pin/net table moved with the registry cut-over (audit §3.23-1): the
+    asset/corner facts come from programs/pdk_registry.json, the electrical
+    names live in src/lib/pdk_registry.mjs ELECTRICAL. Same assertions, read
+    where the data now is; `test_pdk_registry_config_*` below executes it."""
+    reg = (MCP_ROOT / "src" / "lib" / "pdk_registry.mjs").read_text()
+    i = reg.find("sky130: {")
     assert i > 0
-    blk = SRC[i:i + 1200]
+    blk = reg[i:i + 400]
     assert 'vdd_pin: "VPWR"' in blk, "sky130 std-cell pin name changed"
     assert 'vdd_net: "VDD"' in blk, "sky130 has no vdd_net — the NET name eda_pnr writes"
     assert 'vss_net: "VSS"' in blk
@@ -59,8 +65,8 @@ def test_pdkconfig_separates_the_net_name_from_the_pin_name():
     # later cannot reintroduce the ambiguity. Match DECLARATION lines only — the
     # token also appears in the comment prose above each entry, and counting
     # occurrences instead of declarations is how this assertion first went wrong.
-    cfg = SRC[SRC.index("function pdkConfig("):SRC.index('  if (pdk === "custom"')]
-    decl = lambda k: len(re.findall(rf"^\s+{k}:\s*\S", cfg, re.M))
+    cfg = reg[reg.index("const ELECTRICAL = {"):reg.index("};", reg.index("const ELECTRICAL = {"))]
+    decl = lambda k: len(re.findall(rf"\b{k}:\s*\S", cfg))
     assert decl("vdd_pin") > 0 and decl("vdd_pin") == decl("vdd_net"), (
         f"a pdkConfig PDK entry declares vdd_pin without vdd_net "
         f"(vdd_pin={decl('vdd_pin')}, vdd_net={decl('vdd_net')})"
