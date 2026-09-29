@@ -170,6 +170,89 @@ def _has_disclosed_skip(anchors, runner_text):
     return False
 
 
+#: `mcp_tools:` entry forms the flow declares (audit §3.23-1): the runner entry
+#: point that performs the step, and the LibreLane step class of its tool arm.
+_RUNNER_EXECUTOR = re.compile(r"^(?P<module>[A-Za-z_][A-Za-z0-9_]*)\.(?P<func>[A-Za-z_][A-Za-z0-9_]*)$")
+_LIBRELANE_EXECUTOR = re.compile(r"^librelane:(?P<cls>[A-Za-z][A-Za-z0-9_]*\.[A-Za-z][A-Za-z0-9_]*)$")
+_AST_CACHE: dict = {}
+
+
+def _runner_ast(module: str):
+    """(defined function names, called names, string constants) of a runner."""
+    if module in _AST_CACHE:
+        return _AST_CACHE[module]
+    import ast
+    path = _HERE / f"{module}.py"
+    out = None
+    if f"{module}.py" in _RUNNER_FILES and path.is_file():
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+        defined = {n.name for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        called = set()
+        consts = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call):
+                f = n.func
+                name = getattr(f, "id", None) or getattr(f, "attr", None)
+                if name:
+                    called.add(name)
+                # a function handed to a dispatcher is called by it
+                for a in list(n.args) + [k.value for k in n.keywords]:
+                    if isinstance(a, ast.Name):
+                        called.add(a.id)
+            elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+                consts.add(n.value)
+        out = (defined, called, consts)
+    _AST_CACHE[module] = out
+    return out
+
+
+def _librelane_classes_for(step_id: str) -> set:
+    """The LibreLane step classes the import maps to this flow step."""
+    try:
+        sys.path.insert(0, str(_HERE))
+        import librelane_import as _li                     # noqa: PLC0415
+    except Exception:                                      # noqa: BLE001
+        return set()
+    return {r.step for r in _li.IMPORT_RULES if str(r.flow_step) == step_id}
+
+
+def verify_executor(entry: str, step_id: str):
+    """`(True, why)` when `entry` is PROVEN, by parse, to execute `step_id`.
+
+    `<runner>.<function>`: `<runner>` is one of `_RUNNER_FILES`, its AST
+    DEFINES `<function>` and CALLS it (directly, or by handing it to a
+    dispatcher). `librelane:<Class>`: the LibreLane import maps `<Class>` to
+    this step (`librelane_import.IMPORT_RULES`), or a runner passes the class
+    id as a literal (a plugin step class such as `Vibeic.InsertSpareCells`).
+    Any other string -- an mcp-eda tool name included -- proves nothing."""
+    m = _RUNNER_EXECUTOR.match(entry)
+    if m:
+        facts = _runner_ast(m.group("module"))
+        if facts is None:
+            return False, f"{m.group('module')} is not a flow runner"
+        defined, called, _consts = facts
+        if m.group("func") not in defined:
+            return False, f"{m.group('module')} defines no {m.group('func')}"
+        if m.group("func") not in called:
+            return False, (f"{m.group('module')}.{m.group('func')} is defined "
+                           f"but never called")
+        return True, "runner entry defined and called"
+    m = _LIBRELANE_EXECUTOR.match(entry)
+    if m:
+        cls = m.group("cls")
+        if cls in _librelane_classes_for(step_id):
+            return True, "LibreLane import maps this class to the step"
+        for f in _RUNNER_FILES:
+            facts = _runner_ast(f[:-3])
+            if facts and cls in facts[2]:
+                return True, f"{f} passes the class id to LibreLane"
+        return False, (f"no LibreLane import rule maps {cls} to step "
+                       f"{step_id} and no runner passes it")
+    return False, ("not an executor form (<runner>.<function> or "
+                   "librelane:<StepClass>); a tool NAME wires nothing")
+
+
 def classify(doc, runner_text: str):
     steps = _iter_steps(doc)
     rows = []
@@ -193,12 +276,25 @@ def classify(doc, runner_text: str):
             if sig and sig in runner_text:
                 wired_by, matched = "output", sig
                 break
-        # 2) or invoke its EXECUTOR (mcp tool)?
-        if not wired_by:
-            for t in mcp:
-                if t and t in runner_text:
-                    wired_by, matched = "mcp_tool", t
-                    break
+        # 2) or name an EXECUTOR that is proven by PARSE to run it?
+        #
+        # A NAME IN RUNNER TEXT IS NOT WIRING (audit §3.23-1, R-0929-TOOL-DEFAULT).
+        # This used to credit a step whenever one of its `mcp_tools:` names
+        # appeared anywhere in the runner source. 25 step slots named mcp-eda
+        # handlers (eda_synth, eda_sta, eda_gds, eda_extraction, ...) that no
+        # runner calls; the names occurred in comments and error strings, so the
+        # steps read WIRED to a parallel flow that is never gated. An entry now
+        # counts only when `verify_executor` proves it: a `<runner>.<function>`
+        # the runner module DEFINES and CALLS, or a `librelane:<StepClass>` the
+        # LibreLane import maps to this very step. Anything else is reported
+        # (`unverified_executors`) and wires nothing.
+        verified, unverified = [], []
+        for t in mcp:
+            ok, why = verify_executor(str(t), sid)
+            (verified if ok else unverified).append(
+                str(t) if ok else f"{t}: {why}")
+        if not wired_by and verified:
+            wired_by, matched = "executor", verified[0]
         # 3) or DELEGATE to the plugin PROGRAM it declares?
         #
         # THE THIRD WAY A STEP IS EXECUTED, AND THIS GATE COULD NOT SEE IT.
@@ -279,6 +375,8 @@ def classify(doc, runner_text: str):
             "required_outputs": ro, "mcp_tools": mcp,
             "skills": skills, "classification": cls,
             "wired_by": wired_by, "matched_signal": matched,
+            "verified_executors": verified,
+            "unverified_executors": unverified,
         })
     return rows
 

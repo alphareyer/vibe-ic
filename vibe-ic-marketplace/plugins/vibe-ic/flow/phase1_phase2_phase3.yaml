@@ -2222,7 +2222,7 @@ steps:
       fallback_to: 1
       trigger: "Test fail traceable to RTL"
     skills: [testbench-gen]
-    mcp_tools: [eda_simulate, eda_professional_tb]
+    mcp_tools: [design_one_shot_runner.step_l10_unit_tb_run, design_one_shot_runner.step_professional_tb_gen, design_one_shot_runner.step_verilator_coverage]
     programs:
       # 2026-07-11 — PROFESSIONAL testbench generator (deterministic, combines
       # cocotb + cocotb-coverage + Verilator/Icarus + an SVA bind). Derives a
@@ -2542,7 +2542,7 @@ steps:
     # route v1.12.76 already corrected in ic_class_registry.json, for the
     # same reason. formal-verify ships and is this step's AI half.
     skills: [formal-verify]
-    mcp_tools: [eda_formal]
+    mcp_tools: [design_one_shot_runner.step_emit_phase2_manifests]
     programs:
       - assertion_property_check
       # Program-first authoring floor: derives construction-safe reset
@@ -2631,7 +2631,7 @@ steps:
     # `fpga_led_probe_lint` entry below says it "Enforces the four LED-probe
     # anti-patterns of skills/fpga-led-probe-allocation".
     skills: [fpga-led-probe-allocation]
-    mcp_tools: [eda_synth]
+    mcp_tools: [design_one_shot_runner.step_fpga_compile]
     programs:
       # DECLARATION CORRECTION (2026-07-27). This entry used to read: "emit
       # the FPGA test-harness wrapper before Quartus picks it up.
@@ -3117,7 +3117,7 @@ steps:
       # design_one_shot_runner synthesizes before step_sdc_gen. Synthesis
       # obtains its period from Phase-1 timing intent, so SDC is not an input.
     skills: [synth-doctor]
-    mcp_tools: [eda_synth]
+    mcp_tools: [design_one_shot_runner.step_yosys_synth, phase3_one_shot_runner.step_synth]
     programs:
       # `synth_wrapper_gen` generates a synthesis wrapper for inout-port
       # designs (it splits each inout into in/out/oen nets so Yosys can map
@@ -3285,7 +3285,7 @@ steps:
       fallback_to: 7
       trigger: "Setup violation; constraint or phase2/stage2/synth opt re-do"
     skills: [sta-review]
-    mcp_tools: [eda_sta]
+    mcp_tools: [phase3_one_shot_runner.step_prelayout_signoff]
     programs:
       # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
       # This step's own gate clause below invokes the program with
@@ -3468,7 +3468,7 @@ steps:
     # unparseable one, a field that is not there -- RUNS the step. The
     # discriminator the owner mechanism exists to supply is supplied inline, so
     # naming an owner here would only assert a record that does not exist.
-    mcp_tools: [eda_dft]
+    mcp_tools: [design_one_shot_runner.step_dft_lec_chain]
     programs:
       # Fault (cloudv-io/fault) for open-source stuck-at ATPG.
       # Integrated 2026-04-22 to eliminate the "no commercial ATPG" waiver
@@ -3963,7 +3963,7 @@ steps:
           the PDK device models / tech decks (PDK_ROOT — outside the project
           tree)
     skills: [analog-netlist-gen]
-    mcp_tools: [eda_xschem_netlist]
+    mcp_tools: [analog_one_shot_runner.step_for_block]
     condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
@@ -3998,7 +3998,7 @@ steps:
       - from: A1
         path: "phase3/analog/*/spec.json OR phase1/analog/*/spec.json"
     skills: [analog-sizing-loop]
-    mcp_tools: [eda_spice_corner]
+    mcp_tools: [analog_one_shot_runner.step_for_block]
     condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
@@ -4094,7 +4094,7 @@ steps:
       - from: A3
         path: "phase3/analog/*/*.sp OR phase2/analog/*/*.sp"
     skills: [analog-layout]
-    mcp_tools: [eda_analog_layout]
+    mcp_tools: [analog_one_shot_runner.step_for_block]
     condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
@@ -4217,7 +4217,7 @@ steps:
       fallback_to: A3
       trigger: "Performance degradation > 10% post-extraction"
     skills: [analog-extraction-resim]
-    mcp_tools: [eda_spice_corner]
+    mcp_tools: [analog_one_shot_runner.step_for_block]
     condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
@@ -4397,7 +4397,7 @@ steps:
       fallback_to: A3
       trigger: "HW mismatch; netlist or analog/hardmacro fix"
     skills: [mixed-signal-cosim, analog-hw-tuning-loop]
-    mcp_tools: [eda_spice, eda_simulate]
+    mcp_tools: [analog_one_shot_runner.step_for_block]
     condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
@@ -4664,7 +4664,7 @@ steps:
         path: "phase2/stage2/synth/post_dft_netlist.v"
       - from: 7
         path: "phase2/stage2/constraints/*.sdc"
-    mcp_tools: [eda_pnr]
+    mcp_tools: [phase3_one_shot_runner.step_pnr, librelane:OpenROAD.GeneratePDN]
     programs:
       # Wave 82 — `phase3_backend_step` is the per-step dispatcher
       # that wraps each backend invocation (synth → PnR → STA → DRC)
@@ -5024,7 +5024,7 @@ steps:
       - program: placement_legality_check
         path: "reports/phase3/placement_legality.json"
         producer_command: "placement_legality_check . --json reports/phase3/placement_legality.json"
-    mcp_tools: [eda_pnr]
+    mcp_tools: [phase3_one_shot_runner.step_pnr, librelane:OpenROAD.DetailedPlacement]
     required_outputs:
       - "phase3/stage3/pnr/placed.def"
       - "reports/phase3/placement_legality.json"
@@ -5131,7 +5131,7 @@ steps:
     required_inputs:
       - from: 17
         path: "phase3/stage3/pnr/placed.def"
-    mcp_tools: [eda_pnr]
+    mcp_tools: [phase3_one_shot_runner.step_pnr, librelane:Vibeic.InsertSpareCells]
     programs:
       - spare_cell_coverage_check
     required_outputs:
@@ -5210,7 +5210,7 @@ steps:
         path: "phase3/stage3/pnr/placed.def"
       - from: 16
         path: "phase3/stage3/cts/clock_plan.json"
-    mcp_tools: [eda_pnr]
+    mcp_tools: [phase3_one_shot_runner.step_pnr, librelane:OpenROAD.CTS]
     programs:
       - cts_quality_check
     required_outputs:
@@ -5274,7 +5274,7 @@ steps:
     required_inputs:
       - from: 20
         path: "phase3/stage3/pnr/post_hold.def"
-    mcp_tools: [eda_pnr]
+    mcp_tools: [phase3_one_shot_runner.step_pnr, librelane:OpenROAD.DetailedRouting]
     programs:
       # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
       # This step's own gate clause below invokes the program with
@@ -5431,7 +5431,7 @@ steps:
     required_inputs:
       - from: 21
         path: "phase3/stage3/pnr/routed.def"
-    mcp_tools: [eda_extraction]
+    mcp_tools: [phase3_one_shot_runner.step_pnr]
     programs:
       - spef_extraction_check
     program_outputs:
@@ -5730,7 +5730,7 @@ steps:
       fallback_to: 32
       trigger: "Setup/Hold violation; post-route timing repair required"
     skills: [sta-review]
-    mcp_tools: [eda_sta]
+    mcp_tools: [phase3_one_shot_runner.step_canonicalize_artefacts]
     programs:
       # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
       # This step's own gate clause below invokes the program with
@@ -6876,7 +6876,7 @@ steps:
     required_inputs:
       - from: 12
         path: "phase2/stage2/synth/post_dft_netlist.v"
-    mcp_tools: [eda_simulate]
+    mcp_tools: [phase3_one_shot_runner.step_canonicalize_artefacts]
     programs:
       - post_layout_sim_check
     required_outputs:
@@ -6939,7 +6939,7 @@ steps:
           the PDK device models / tech decks (PDK_ROOT — outside the project
           tree)
     skills: [ams-sim]
-    mcp_tools: [eda_spice]
+    mcp_tools: [phase3_one_shot_runner.step_canonicalize_artefacts]
     programs:
       - spice_correlation_check
     required_outputs:
@@ -7226,7 +7226,7 @@ steps:
         path: "phase3/stage3/pnr/routed.def"
       - from: 18
         path: "phase3/stage3/pnr/spare_cells.json"
-    mcp_tools: [eda_pnr]
+    mcp_tools: [phase3_one_shot_runner.step_canonicalize_artefacts]
     programs:
       - metal_fill_density_check
       # ECO-aware: re-confirm spares survive fill (no overlap / removal).
@@ -7350,7 +7350,7 @@ steps:
     required_inputs:
       - from: 34
         path: "phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done"
-    mcp_tools: [eda_gds]
+    mcp_tools: [phase3_one_shot_runner.step_gds]
     programs:
       # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
       # This step's own gate clause below invokes the program with
@@ -7771,7 +7771,7 @@ steps:
     # perc_signoff_check); the SKILL half never did. drc-fix and lvs-triage
     # both ship and are this step's physical-verification triage.
     skills: [drc-fix, lvs-triage]
-    mcp_tools: [eda_drc_klayout, eda_lvs]
+    mcp_tools: [phase3_one_shot_runner.step_drc, phase3_one_shot_runner.step_lvs]
     programs:
       # The runner executes this producer inline after extraction and before
       # LVS; the gate below first validates its record, then runs an
@@ -8272,9 +8272,10 @@ steps:
         # `cross_checks:` row outside the ppa-* skills' own tests, so the
         # advertised layer had no executor anywhere in the tree.
         #
-        # THIS STEP IS WHERE IT BELONGS, not a whole-run slot: Step 31 is the
-        # one that names `mcp_tools: [eda_drc_klayout, eda_lvs]`, and `drc` /
-        # `lvs` are the exact `step` tokens those two tools write into the
+        # THIS STEP IS WHERE IT BELONGS, not a whole-run slot: Step 31's DRC
+        # and LVS are the ones mcp-eda also offers (eda_drc_klayout, eda_lvs --
+        # NOT the step's executors, which `mcp_tools:` names: audit §3.23-1),
+        # and `drc` / `lvs` are the exact `step` tokens those two tools write into the
         # manifest (mcp-eda/src/index.js). Asking the question here asks it of
         # the tools the step declares; asking it once at the end would have to
         # invent a list.
