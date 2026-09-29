@@ -3284,6 +3284,11 @@ def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, obj
     return out
 
 
+from sdc_environment import (  # R-0929-PAD-INPUT-DRIVE
+    _pad_input_drive as _sdc_pad_input_drive,
+    write_pad_input_drive_record as _sdc_write_pad_input_drive,
+    pad_input_drive_not_measured as _sdc_pad_input_drive_not_measured,
+)
 from sdc_environment import (  # R8 constraints, outside the PPA runner ledger
     _SDC_ENV_KEYS, _sdc_environment_values, _sdc_environment_prefix,
     _sdc_environment_pdk_values, _sdc_environment_design_values,
@@ -4501,7 +4506,16 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
     _env, _env_unread = _sdc_environment_values(
         project, liberty_path, container, drv_slew_ns, drv_cap_pf,
         _to_container_path)
-    sdc_text += _sdc_environment_prefix(_env, _env_unread, time_scale=_tu_scale)
+    # R-0929-PAD-INPUT-DRIVE: a DIE top's bond-pad inputs are never driven by
+    # the core synthesis driving cell; the resolved drive is recorded for the
+    # Step-23 STA verdict, which cannot PASS on a NOT_MEASURED drive.
+    _env, _pad_drive = _sdc_pad_input_drive(project, _env)
+    try:
+        _sdc_write_pad_input_drive(project, _pad_drive)
+    except OSError:
+        pass
+    sdc_text += _sdc_environment_prefix(_env, _env_unread, time_scale=_tu_scale,
+                                        pad_drive=_pad_drive)
     _env_slew = _env.get("set_max_transition")
     _env_cap = _env.get("set_max_capacitance")
     # Design and LibreLane config time values are ns. A default read directly
@@ -57887,7 +57901,7 @@ def step_declared_signoff_gates(project: Path,
             extra_argv = tuple(extra_argv) + ("--pdk-container", container)
         out.append(_run_declared_signoff_gate(
             project, name, program, out_rel, extra_argv))
-    return _reconcile_sta_verdict(out)
+    return _reconcile_sta_verdict(_pad_drive_sta_verdict(project, out))
 
 
 # ---------------------------------------------------------------------------
@@ -57990,6 +58004,35 @@ def _sta_single_corner_disclosed(row: StepResult) -> bool:
                 "signoff_corners_from_sta_records") or 0) >= 1:
             return True
     return False
+
+
+def _pad_drive_sta_verdict(project: Path,
+                           rows: List[StepResult]) -> List[StepResult]:
+    """R-0929-PAD-INPUT-DRIVE: no sign-off STA PASS on an unmodelled pad drive.
+
+    When the DIE top's bond-pad input drive is NOT_MEASURED (neither declared
+    nor PDK IO-tier), the deck carries no driver and its input edges are
+    ideal, which is optimistic. A PASS measured that way is not a sign-off
+    verdict, so each STA verdict row (`sta_signoff` and the multi-corner
+    gates) that PASSed becomes NOT_MEASURED with the reason. A FAIL stays a
+    FAIL: a violation under an optimistic edge is still a violation.
+    """
+    why = _sdc_pad_input_drive_not_measured(project)
+    if not why:
+        return rows
+    names = {_STA_VERDICT_GATE, *_STA_MULTICORNER_GATES}
+    out: List[StepResult] = []
+    for r in rows:
+        if r.name in names and r.status == "PASS":
+            r = StepResult(
+                r.name, "NOT_MEASURED", r.duration_s,
+                f"{_SIGNOFF_NOT_CHECKED}: OFFCHIP_INPUT_DRIVE — {why}. The "
+                f"gate's own finding (ideal input edges) was: "
+                f"{_rsum.summary_detail(r.detail, width=200)}",
+                list(r.output_files), dict(r.extras),
+                reason_class=_V.ReasonClass.INPUT_ABSENT)
+        out.append(r)
+    return out
 
 
 def _reconcile_sta_verdict(rows: List[StepResult]) -> List[StepResult]:
