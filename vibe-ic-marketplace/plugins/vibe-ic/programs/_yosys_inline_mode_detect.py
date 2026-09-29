@@ -205,6 +205,28 @@ def extract_inline_yosys_commands(project: Path) -> List[Tuple[str, str]]:
     return out
 
 
+_WRITE_VERILOG_RE = re.compile(r"\bwrite_verilog\b([^;]*)")
+
+
+def writes_netlist(cmd: str, netlist_name: str) -> bool:
+    """Does this yosys command `write_verilog` a file named `netlist_name`?
+    The target is the clause's last token; only its basename is compared."""
+    for m in _WRITE_VERILOG_RE.finditer(cmd):
+        toks = m.group(1).split()
+        if toks and Path(toks[-1].strip("'\"")).name == netlist_name:
+            return True
+    return False
+
+
+def _pnr_netlist(project: Path) -> Optional[Path]:
+    """The mapped netlist PnR routes (`_path_layout.mapped_synth_netlist`)."""
+    try:
+        import _path_layout as _pl  # noqa: PLC0415
+    except Exception:  # pragma: no cover - incomplete install
+        return None
+    return _pl.mapped_synth_netlist(project)
+
+
 def check_inline_command_conformance(
     cmd: str,
 ) -> Tuple[bool, str, List[str]]:
@@ -268,6 +290,31 @@ def audit_inline_yosys(project: Path) -> Tuple[str, List[str], List[str]]:
     chip-AGNOSTIC.
     """
     cmds = extract_inline_yosys_commands(project)
+    # THE NETLIST PnR ROUTES decides which command is judged (U11). spm v5c's
+    # step-14 gates read the simulation-only synth that wrote the generic
+    # netlist.v and reported VACUOUS_PASS; the command that wrote the mapped
+    # `<top>_synth.v` PnR consumed was never the subject.
+    mapped = _pnr_netlist(project)
+    if mapped is not None:
+        own = [(rel, cmd) for rel, cmd in cmds
+               if writes_netlist(cmd, mapped.name)]
+        if not own:
+            return "FAIL", [], [
+                "the netlist PnR routes (%s) is written by no synthesis "
+                "command any synth log echoes, so the recipe that produced "
+                "it cannot be checked for hilomap/flatten" % mapped.name]
+        reasons: List[str] = []
+        for rel, cmd in own:
+            passed, classification, sub_reasons = \
+                check_inline_command_conformance(cmd)
+            if classification != "real_pdk":
+                reasons.append(
+                    "%s: the command that wrote %s binds no Liberty library "
+                    "-- the netlist PnR routes was never mapped to cells"
+                    % (rel, mapped.name))
+            reasons.extend("%s: %s" % (rel, r) for r in sub_reasons)
+        return ("FAIL" if reasons else "PASS",
+                sorted({rel for rel, _ in own}), reasons)
     if not cmds:
         return "NO_INLINE_COMMAND", [], []
 

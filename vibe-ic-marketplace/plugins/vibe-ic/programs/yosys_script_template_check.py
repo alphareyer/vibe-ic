@@ -200,6 +200,25 @@ def audit(ys_path: str, simulation_only: bool = False,
 # ---------------------------------------------------------------------------
 HANDOFF_NETLIST_REL = "phase2/stage2/synth/netlist.v"
 
+
+def handoff_netlist_rel(project) -> str:
+    """The netlist handed to PnR: the MAPPED `<top>_synth.v` phase 3's
+    step_synth names in synth_inputs.json when it exists (U11 -- netlist.v is
+    the generic pre-map arm, not what PnR routes), else the declared
+    `HANDOFF_NETLIST_REL`."""
+    from pathlib import Path as _Path
+    try:
+        import _path_layout as _pl  # noqa: PLC0415
+        mapped = _pl.mapped_synth_netlist(_Path(project))
+    except Exception:  # pragma: no cover - incomplete install
+        mapped = None
+    if mapped is not None:
+        try:
+            return str(mapped.relative_to(_Path(project)))
+        except ValueError:
+            pass
+    return HANDOFF_NETLIST_REL
+
 _MODULE_DECL_RE = re.compile(r"^\s*module\s+[\\A-Za-z_]", re.MULTILINE)
 
 # `write_verilog [-flags ...] <path>` — the yosys command that produces a
@@ -229,7 +248,7 @@ def declares_handoff_netlist(ys_path, project) -> bool:
     """
     from pathlib import Path as _Path
     script = _Path(ys_path)
-    handoff = (_Path(project) / HANDOFF_NETLIST_REL)
+    handoff = (_Path(project) / handoff_netlist_rel(project))
     try:
         text = script.read_text(errors="replace")
     except OSError:
@@ -258,14 +277,17 @@ def audit_handoff_netlist(project, ys_files: List[str]):
     absent, and when no audited script claims to write it).
     """
     from pathlib import Path as _Path
-    netlist = _Path(project) / HANDOFF_NETLIST_REL
-    report = {"handoff_netlist": HANDOFF_NETLIST_REL, "present": False,
+    rel = handoff_netlist_rel(project)
+    netlist = _Path(project) / rel
+    report = {"handoff_netlist": rel, "present": False,
+              "role": ("pnr_consumed_mapped" if rel != HANDOFF_NETLIST_REL
+                       else "declared_step9_netlist"),
               "bytes": None, "has_module": None, "stale_vs_scripts": [],
               "producer_scripts": [], "scripts_considered": len(ys_files)}
     msgs: List[str] = []
     if not netlist.is_file():
         msgs.append(
-            f"{HANDOFF_NETLIST_REL} absent — step 14 declares it as the "
+            f"{rel} absent — step 14 declares it as the "
             f"artefact handed to PnR; step 9's files_exist clause is what "
             f"blocks on that, so this gate records it rather than re-failing it")
         return 0, report, msgs
@@ -276,7 +298,7 @@ def audit_handoff_netlist(project, ys_files: List[str]):
         nl_mtime = netlist.stat().st_mtime
     except OSError as exc:
         report["bytes"] = 0
-        msgs.append(f"{HANDOFF_NETLIST_REL} unreadable: {exc}")
+        msgs.append(f"{rel} unreadable: {exc}")
         return 1, report, msgs
 
     report["bytes"] = len(text.encode("utf-8", "replace"))
@@ -288,13 +310,13 @@ def audit_handoff_netlist(project, ys_files: List[str]):
     if not body:
         rc = 1
         msgs.append(
-            f"{HANDOFF_NETLIST_REL} is empty or comment-only — the synthesis "
+            f"{rel} is empty or comment-only — the synthesis "
             f"recipe this gate certified produced no netlist, and PnR would "
             f"consume nothing")
     elif not report["has_module"]:
         rc = 1
         msgs.append(
-            f"{HANDOFF_NETLIST_REL} declares no `module` — the handoff "
+            f"{rel} declares no `module` — the handoff "
             f"artefact is not a Verilog netlist")
 
     producers = [f for f in ys_files if declares_handoff_netlist(f, project)]
@@ -310,7 +332,7 @@ def audit_handoff_netlist(project, ys_files: List[str]):
     if stale:
         rc = 1
         msgs.append(
-            f"{HANDOFF_NETLIST_REL} is OLDER than the script(s) that declare "
+            f"{rel} is OLDER than the script(s) that declare "
             f"themselves its producer ({stale}) — the netlist handed to PnR is "
             f"not the product of the audited recipe; re-run synthesis before "
             f"handing off")
@@ -319,7 +341,7 @@ def audit_handoff_netlist(project, ys_files: List[str]):
         # indistinguishable from "checked and agreed".
         msgs.append(
             f"staleness not compared: none of the {len(ys_files)} audited "
-            f"script(s) names {HANDOFF_NETLIST_REL} as its own write_verilog "
+            f"script(s) names {rel} as its own write_verilog "
             f"target, so none of them is a declared producer of it and their "
             f"timestamps carry no information about it")
     return rc, report, msgs
