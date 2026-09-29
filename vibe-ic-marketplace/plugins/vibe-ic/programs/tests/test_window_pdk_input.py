@@ -123,3 +123,17 @@ def test_the_window_records_its_pdk_before_dispatching_a_site(tmp_path, monkeypa
     assert seen["record"]["files"].get(str(deck)) == \
         hashlib.sha256(deck.read_bytes()).hexdigest()
     assert seen["record"]["root"] == str(tmp_path / "pdks" / "calpdk")
+
+
+def test_a_pdk_field_outside_the_pdk_root_still_refuses(tmp_path):
+    """The record binds the PDK TREE's files; a field pointing elsewhere is
+    not a PDK input just because the configuration names it."""
+    pdk, project, isolated, _, _ = _tree(tmp_path)
+    outside = tmp_path / "elsewhere" / "deck.drc"
+    outside.parent.mkdir()
+    outside.write_text("# outside the PDK root\n")
+    pdk.drc_deck = str(outside)
+    _record(project, pdk)
+    copied, error = _publish(project, isolated, str(outside))
+    assert copied == []
+    assert error == f"window input outside project: {outside}"
