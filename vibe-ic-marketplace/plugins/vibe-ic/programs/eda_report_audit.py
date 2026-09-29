@@ -1592,20 +1592,26 @@ def _empty_router_drc_receipt(report: Path) -> Optional[Path]:
         return None
     # Step snapshots publish this report as a symlink. The receipt belongs to
     # the file that actually wrote the bytes, beside the canonical report and
-    # its log/DEF, not beside the snapshot link. Validate that whole producer
-    # tuple after resolution; a dangling or redirected alias cannot borrow a
-    # receipt from the Step folder.
+    # its log/DEF, not beside the snapshot link. step_pnr writes it only in
+    # <project>/phase3/stage3/pnr, so the project is read from the LITERAL
+    # path (the parent of its `steps/` tree, or of that pnr directory) and
+    # the RESOLVED report must be that project's canonical one. A dangling
+    # alias, a redirected leaf link and a redirected DIRECTORY (any symlinked
+    # component inside the project) all fail that comparison.
     try:
-        alias = report if report.is_symlink() else None
-        report = report.resolve(strict=True)
-        if alias is not None:
-            steps_root = next((parent for parent in alias.parents
-                               if parent.name == "steps"), None)
-            if steps_root is None:
-                return None
-            project = steps_root.parent.resolve(strict=True)
-            if report != (project / "phase3/stage3/pnr/routed_router.drc.rpt"):
-                return None
+        literal = Path(os.path.abspath(report))
+        projects = []
+        if literal.parts[-4:-1] == ("phase3", "stage3", "pnr"):
+            projects.append(literal.parents[3])
+        steps_root = next((parent for parent in literal.parents
+                           if parent.name == "steps"), None)
+        if steps_root is not None:
+            projects.append(steps_root.parent)
+        report = literal.resolve(strict=True)
+        if not any(report == project.resolve()
+                   / "phase3/stage3/pnr/routed_router.drc.rpt"
+                   for project in projects):
+            return None
     except (OSError, RuntimeError):
         return None
     receipt = report.parent / "routed_router.drc.receipt.json"

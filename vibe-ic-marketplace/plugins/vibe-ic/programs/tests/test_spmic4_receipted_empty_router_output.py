@@ -216,3 +216,36 @@ def test_an_iteration_copy_votes_when_the_final_report_is_absent(tmp_path):
     assert result["summary"]["ignored_intermediate_reports"] == []
     # The iteration copy and the projection both vote.
     assert result["summary"]["files_found"] == 2
+
+
+def test_a_redirected_step_directory_cannot_borrow_another_projects_receipt(
+        tmp_path):
+    """Review wave 57: confinement applied only to a symlinked LEAF, so a
+    Step folder that is itself a symlink to another project's pnr directory
+    borrowed that project's receipt (and flow credited the empty file)."""
+    _route(tmp_path / "foreign")
+    step = tmp_path / "subject/steps/phase3/stage3/21_routing_global_detailed"
+    step.parent.mkdir(parents=True)
+    step.symlink_to(tmp_path / "foreign/phase3/stage3/pnr",
+                    target_is_directory=True)
+    alias = step / "routed_router.drc.rpt"
+    assert audit._empty_router_drc_receipt(alias) is None
+    assert flow._live_artefact_state(alias)[0] is False
+    # The same redirect of the subject's OWN pnr directory is refused too.
+    pnr = tmp_path / "subject/phase3/stage3/pnr"
+    pnr.parent.mkdir(parents=True)
+    pnr.symlink_to(tmp_path / "foreign/phase3/stage3/pnr",
+                   target_is_directory=True)
+    assert audit._empty_router_drc_receipt(pnr / "routed_router.drc.rpt") is None
+
+
+def test_a_project_reached_through_a_symlinked_ancestor_keeps_its_receipt(
+        tmp_path):
+    """The confinement compares resolved paths, so a project whose own
+    location is a symlink (a mount alias above it) is not refused."""
+    report = _route(tmp_path / "real")
+    (tmp_path / "linked").symlink_to(tmp_path / "real",
+                                     target_is_directory=True)
+    via = tmp_path / "linked" / REPORT
+    assert audit._empty_router_drc_receipt(via) == report.with_name(
+        "routed_router.drc.receipt.json")
