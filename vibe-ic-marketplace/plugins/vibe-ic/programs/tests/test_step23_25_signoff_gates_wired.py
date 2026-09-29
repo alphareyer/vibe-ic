@@ -153,6 +153,14 @@ def _project(tmp: Path) -> Path:
     (st / "NO_TEMPLATE.txt").write_text(
         "# submission_template_ingest: no template record\n"
         "STATUS: ABSENT — this fixture delivers an IP, not a die.\n")
+    # R-0929-ROUTE-NOT-FROM-SILENCE: "an IP, not a die" is the OWNER's answer,
+    # never read from what is absent. Declared, attested, as a real design's
+    # step-0.5ic answers carry it.
+    import json as _json
+    import _owner_declared as _OD
+    (st / "tapeout_declaration.json").write_text(_json.dumps(
+        _OD.attest({"schema": "vibe-ic/tapeout_declaration/1",
+                    "answers": {"deliverable": "HARDMACRO"}})) + "\n")
     return tmp
 
 

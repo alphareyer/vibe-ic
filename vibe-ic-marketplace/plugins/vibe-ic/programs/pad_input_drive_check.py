@@ -13,7 +13,9 @@ writes `reports/phase3/pad_input_drive.json` with the exact command lines the
 deck must carry (`sdc_lines`). This gate reads that record and the deck PnR
 and sign-off loaded (`phase3/stage3/pnr/constraint.sdc`):
 
-* not a DIE top                                   -> NOT_APPLICABLE, rc 0
+* no owner-attested deliverable                   -> NOT_MEASURED,   rc 2
+* owner-attested HARDMACRO (not a DIE top)        -> NOT_APPLICABLE, rc 0
+* owner-attested DIE                              -> judged, below:
 * record absent / unreadable / NOT_MEASURED       -> NOT_MEASURED,   rc 2
 * record resolved against an older pad-ring record -> NOT_MEASURED,  rc 2
 * sign-off deck absent                            -> NOT_MEASURED,   rc 2
@@ -45,37 +47,29 @@ _RC = {"PASS": 0, "NOT_APPLICABLE": 0, "FAIL": 1, "NOT_MEASURED": 2,
        "REFUSED": 1}
 
 
-def _is_die(project: Path) -> Optional[bool]:
+def _route(project: Path):
+    """(DIE | HARDMACRO | None, basis) from the OWNER-ATTESTED deliverable
+    (`_delivery_route.owner_route`). R-0929-ROUTE-NOT-FROM-SILENCE: the route
+    is never decided from absent files -- no SELF_TAPEOUT.txt and no slots/
+    is silence, not a HARDMACRO answer. ef1b46bc65 decided "not a DIE" from
+    exactly that silence, so an empty project read NOT_APPLICABLE and Step 23
+    PASSed on a question nobody had answered."""
     try:
-        import _tapeout_declaration as _td
-        return bool(_td.requests_pad_ring(project))
-    except Exception:                                        # noqa: BLE001
-        return None
+        import _delivery_route as _dr
+        return _dr.owner_route(project)
+    except Exception as exc:                                 # noqa: BLE001
+        return None, f"the owner-attested route could not be read: {exc}"
 
 
-def _not_a_die(project: Path, out: Dict[str, Any]) -> Dict[str, Any]:
-    """NOT_APPLICABLE_BY_STRUCTURE with the enumeration `requests_pad_ring`
-    itself consulted: an attested HARDMACRO declaration, or the two places a
-    pad ring is requested from (self-tape-out marker, slot catalogue) found
-    holding no request. It is never a PASS (R-0915-119)."""
+def _not_a_die(out: Dict[str, Any], basis: str) -> Dict[str, Any]:
+    """NOT_APPLICABLE_BY_STRUCTURE on the owner's HARDMACRO answer: a hard
+    macro's inputs are driven on chip, so there is no bond pad to drive. It is
+    never a PASS (R-0915-119)."""
     import _structural_absence as _sa
-    import _tapeout_declaration as _td
-    decl, err = _td.load(project / _td.DECLARATION_REL)
-    if err is None and isinstance(decl, dict) and \
-            _td.answer(decl, "deliverable") == _td.DELIVERABLE_HARDMACRO:
-        ev = _sa.absence("tapeout declarations requesting a pad ring", 1, 0,
-                         names=[_td.DECLARATION_REL],
-                         detail="deliverable HARDMACRO: inputs are driven on chip")
-    else:
-        slots = sorted((project / _td.SLOTS_REL).glob("*.yaml")) \
-            if (project / _td.SLOTS_REL).is_dir() else []
-        if (project / _td.SELF_TAPEOUT_REL).is_file() or slots:
-            return dict(out, verdict="NOT_MEASURED",
-                        reason="a pad-ring request exists but the route "
-                               "predicate answered no; the route is undetermined")
-        ev = _sa.absence("pad-ring request locations", 2, 0,
-                         names=[_td.SELF_TAPEOUT_REL, _td.SLOTS_REL],
-                         detail="no self-tape-out marker and no slot catalogue")
+    import _delivery_route as _dr
+    ev = _sa.absence("owner-attested deliverables requesting a pad ring", 1, 0,
+                     names=[_dr.owner_route_rel(Path(out["project"]))],
+                     detail=f"{basis}: inputs are driven on chip")
     doc = dict(out, verdict="NOT_APPLICABLE",
                reason=_sa.sentence(ev, "bond-pad input drive"))
     return _sa.attach(doc, ev)
@@ -108,12 +102,16 @@ def judge(project: Path, deck_rel: str = SIGNOFF_DECK) -> Dict[str, Any]:
             return dict(out, verdict="REFUSED", refusal="LL_STA_TOOL_ARM_UNREADABLE",
                         reason=f"the SDC the tool timed cannot be named: {exc}")
         out["deck"] = deck_rel
-    die = _is_die(project)
-    if die is None:
+    delivery, basis = _route(project)
+    out["route_basis"] = basis
+    if delivery is None:
         return dict(out, verdict="NOT_MEASURED",
-                    reason="the route (DIE or not) could not be determined")
-    if not die:
-        return _not_a_die(project, out)
+                    reason=f"{basis} -- the route (DIE or not) is the owner's "
+                           f"answer at step 0.5ic and is not read from what "
+                           f"is absent on disk")
+    import _tapeout_declaration as _td
+    if delivery != _td.DELIVERABLE_DIE:
+        return _not_a_die(out, basis)
     try:
         rec = json.loads((project / _se.PAD_INPUT_DRIVE_REPORT).read_text())
     except (OSError, ValueError):

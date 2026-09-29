@@ -46,8 +46,9 @@ GATES = ('achieved_period_recorded_check', 'hold_corner_coverage_check',
 #:                          (DRV sign-off standard); STAPostPNR's reports carry
 #:                          violator COUNTS only -> NOT_MEASURED without one.
 #:   pad_input_drive_check  judges the SDC the tool timed against the resolved
-#:                          bond-pad drive; this fixture's top is not a DIE ->
-#:                          NOT_APPLICABLE.
+#:                          bond-pad drive; this fixture's OWNER declares
+#:                          HARDMACRO (R-0929-ROUTE-NOT-FROM-SILENCE: the route
+#:                          is never read from absent files) -> NOT_APPLICABLE.
 OWN_ANSWER_GATES = ('drv_signoff_judge', 'pad_input_drive_check')
 ALL_STEP23_GATES = GATES + OWN_ANSWER_GATES
 
@@ -434,6 +435,11 @@ def test_a_gate_that_cannot_pass_on_the_tools_reports_says_why(tmp_path, name,
     step directory) and gives its OWN answer, never a PASS it cannot support
     and never our deck."""
     project = gate_inputs(tool_project(tmp_path, mode=mode))
+    if name == 'pad_input_drive_check':
+        import _owner_declared as OD
+        _write(project / 'input/step_0_5ic_answers.json', json.dumps(OD.attest(
+            {'schema': 'vibe-ic/step_0_5ic_answers/1',
+             'answers': {'deliverable': 'HARDMACRO'}})))
     got_rc, doc = run_gate(name, project, tmp_path)
     assert (got_rc, verdict(doc)) == (rc, answer), (name, doc)
     text = json.dumps(doc)

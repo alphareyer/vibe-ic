@@ -108,10 +108,40 @@ def refusal_message(reason: str) -> str:
             "the prompt sentence or the person's reply), or pass --route ic|ip.")
 
 
+def owner_route_rel(project: Path) -> str:
+    """Which file carries the owner's route: the raw step-0.5ic answers when
+    present, else the generated tapeout declaration."""
+    return (_st.DESIGN_ANSWERS_REL
+            if (Path(project) / _st.DESIGN_ANSWERS_REL).exists()
+            else _td.DECLARATION_REL)
+
+
+def owner_route(project: Path) -> "tuple[Optional[str], str]":
+    """(DIE | HARDMACRO, basis) from the OWNER-ATTESTED deliverable, or
+    (None, why not). Never from what is absent on disk (R-0929-ROUTE-NOT-FROM-
+    SILENCE).
+
+    The same read as `admit` and `report_label`: the raw step-0.5ic answers
+    when that file exists (a present but unanswered raw file is not rescued by
+    the generated declaration), else the generated tapeout declaration, each
+    through `_tapeout_declaration.read_owner_delivery`, which refuses a value
+    nobody attested."""
+    rel = owner_route_rel(project)
+    if not (Path(project) / rel).exists():
+        return None, (f"no owner-attested deliverable: neither "
+                      f"{_st.DESIGN_ANSWERS_REL} nor {_td.DECLARATION_REL} "
+                      f"exists")
+    try:
+        _, delivery = _td.read_owner_delivery(Path(project), rel)
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        return None, f"no owner-attested deliverable: {exc}"
+    return delivery, f"owner-attested deliverable {delivery} in {rel}"
+
+
 def report_label(project: Path) -> dict:
     """Route labels for the run's top-level report, from the same owner read."""
-    rel = (_st.DESIGN_ANSWERS_REL if (project / _st.DESIGN_ANSWERS_REL).exists()
-           else _td.DECLARATION_REL)
-    _, delivery = _td.read_owner_delivery(project, rel)
+    delivery, why = owner_route(project)
+    if delivery is None:
+        raise ValueError(why)
     return {"delivery_route": "IC" if delivery == _td.DELIVERABLE_DIE else "IP",
             "deliverable": delivery}

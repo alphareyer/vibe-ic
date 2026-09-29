@@ -712,8 +712,9 @@ def _f_pnr_bad(p: Path) -> None:
 def _f_pad_drive_uncarried(p: Path) -> None:
     """A DIE whose off-chip input drive was resolved but never reached the deck.
 
-    `pad_input_drive_check` (step 23, R-0929-IO-INPUT-TRANSITION-2). EMPTY is
-    not a DIE top, so it answers NOT_APPLICABLE_BY_STRUCTURE. The shape that
+    `pad_input_drive_check` (step 23, R-0929-IO-INPUT-TRANSITION-2). EMPTY has
+    no owner-attested deliverable, so it answers NOT_MEASURED (rc 2,
+    R-0929-ROUTE-NOT-FROM-SILENCE). The shape that
     matters is a self-tape-out die whose drive record names the declared
     `set_input_transition` while the sign-off deck PnR loaded carries none of
     it and still drives the bond pads with the refused core-library cell (the
@@ -721,6 +722,13 @@ def _f_pad_drive_uncarried(p: Path) -> None:
     """
     _w(p, "input/submission_template/SELF_TAPEOUT.txt",
        "# tapeout_declaration: self tape-out, no operator\n")
+    # the route is the OWNER's answer, never a marker file's presence
+    _w(p, "input/step_0_5ic_answers.json", {
+        "schema": "vibe-ic/step_0_5ic_answers/1",
+        "answers": {"deliverable": "DIE"},
+        "answer_provenance": {"deliverable": {
+            "answered_by": "owner",
+            "citation": "test fixture: the owner declared this delivery a DIE"}}})
     _w(p, "reports/phase3/pad_input_drive.json", {
         "schema": "vibeic.pad_input_drive.v1", "applies": True,
         "verdict": "DECLARED", "model": "set_input_transition",
@@ -2789,8 +2797,8 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
     ("23", "drv_signoff_judge . --json reports/phase3/sta/drv_signoff.json "
            "--capture-point post_stream"):
         "DRV_SIGNOFF_BAD_SDC",
-    # R-0929-IO-INPUT-TRANSITION-2. EMPTY is not a DIE top (a decided
-    # NOT_APPLICABLE_BY_STRUCTURE); the fixture is a die whose resolved drive
+    # R-0929-IO-INPUT-TRANSITION-2. EMPTY has no owner answer (NOT_MEASURED,
+    # R-0929-ROUTE-NOT-FROM-SILENCE); the fixture is an owner-declared die whose resolved drive
     # never reached the sign-off deck, which still applies the core cell.
     ("23", "pad_input_drive_check . --json "
            "reports/phase3/sta/pad_input_drive_check.json"): "PAD_DRIVE_UNCARRIED",

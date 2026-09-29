@@ -39,11 +39,23 @@ _LIB = """library ("quartz_io__ss") {
 _CORE = ("quartz_sc__inv_1/ZN", "pinned PDK default cfg:SYNTH_DRIVING_CELL")
 
 
+def _declare(project: Path, deliverable: str) -> None:
+    """The owner's route, as a real design's step-0.5ic answers carry it."""
+    import _owner_declared as OD
+    import _submission_template as ST
+    f = project / ST.DESIGN_ANSWERS_REL
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(OD.attest(
+        {"schema": "vibe-ic/step_0_5ic_answers/1",
+         "answers": {"deliverable": deliverable}})) + "\n")
+
+
 def _die(tmp_path: Path, io: bool = True) -> Path:
     p = tmp_path / "die"
     marker = p / TD.SELF_TAPEOUT_REL
     marker.parent.mkdir(parents=True)
     marker.write_text(TD.SELF_TAPEOUT_MARKER + "\n")
+    _declare(p, TD.DELIVERABLE_DIE)
     if io:
         lib = tmp_path / "quartz_io__ss.lib"
         lib.write_text(_LIB)
@@ -149,17 +161,60 @@ def _step23_only():
 
 
 def test_control_a_core_top_is_decided_not_applicable(tmp_path):
-    """No pad ring requested anywhere: NOT_APPLICABLE_BY_STRUCTURE with the
-    enumeration the route predicate consulted, which Step 23 counts as
-    decided (an IP/core run must not be blocked by this clause)."""
+    """MIGRATED by R-0929-ROUTE-NOT-FROM-SILENCE. It pinned "no pad ring
+    requested anywhere -> NOT_APPLICABLE -> Step 23 PASS" on an EMPTY project,
+    i.e. the route decided from absent files. Now: an empty project has no
+    owner answer and reads NOT_MEASURED (never N/A, never PASS); a core top
+    the OWNER declared HARDMACRO reads NOT_APPLICABLE_BY_STRUCTURE, which
+    Step 23 counts as decided (an IP/core run is not blocked by this clause)."""
     import flow_compliance_check as FC
-    project = tmp_path / "core"
-    project.mkdir()
-    rc, doc = _run(project)
-    assert (rc, doc["verdict"]) == (0, "NOT_APPLICABLE")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    rc, doc = _run(empty)
+    assert (rc, doc["verdict"]) == (2, "NOT_MEASURED"), doc
+    assert "no owner-attested deliverable" in doc["reason"]
+    assert FC.check_step(empty, _step23_only(), {}).status == "NOT_MEASURED"
+
+    core = tmp_path / "core"
+    core.mkdir()
+    _declare(core, TD.DELIVERABLE_HARDMACRO)
+    rc, doc = _run(core)
+    assert (rc, doc["verdict"]) == (0, "NOT_APPLICABLE"), doc
     assert doc["reason_class"] == "NOT_APPLICABLE_BY_STRUCTURE"
-    assert doc["structural_absence"]["scanned"] == 2
-    assert FC.check_step(project, _step23_only(), {}).status == "PASS"
+    assert FC.check_step(core, _step23_only(), {}).status == "PASS"
+
+
+def test_route_is_never_read_from_absent_files(tmp_path):
+    """A SELF_TAPEOUT marker without an owner answer is not a DIE either:
+    both directions of silence read NOT_MEASURED."""
+    p = tmp_path / "marker_only"
+    marker = p / TD.SELF_TAPEOUT_REL
+    marker.parent.mkdir(parents=True)
+    marker.write_text(TD.SELF_TAPEOUT_MARKER + "\n")
+    rc, doc = _run(p)
+    assert (rc, doc["verdict"]) == (2, "NOT_MEASURED"), doc
+
+
+def test_an_unattested_hardmacro_is_not_an_answer(tmp_path):
+    import _submission_template as ST
+    p = tmp_path / "unattested"
+    f = p / ST.DESIGN_ANSWERS_REL
+    f.parent.mkdir(parents=True)
+    f.write_text(json.dumps({"schema": "vibe-ic/step_0_5ic_answers/1",
+                             "answers": {"deliverable": "HARDMACRO"}}) + "\n")
+    rc, doc = _run(p)
+    assert (rc, doc["verdict"]) == (2, "NOT_MEASURED"), doc
+
+
+def test_an_attested_die_without_a_marker_is_judged(tmp_path):
+    """The owner said DIE: the drive is judged whether or not a marker file is
+    on disk (absence decides nothing in either direction)."""
+    p = tmp_path / "die_nomarker"
+    p.mkdir()
+    _declare(p, TD.DELIVERABLE_DIE)
+    rc, doc = _run(p)
+    assert (rc, doc["verdict"]) == (2, "NOT_MEASURED"), doc
+    assert "pad-input-drive record" in doc["reason"]
 
 
 def test_control_an_attested_hardmacro_is_decided_not_applicable(tmp_path):
