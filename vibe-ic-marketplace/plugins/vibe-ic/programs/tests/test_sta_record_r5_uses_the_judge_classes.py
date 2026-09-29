@@ -63,7 +63,10 @@ def _stage(tmp_path, rows, *, with_deck=True):
         T._write(sta / "sta_mcorner_ocv_setup.tcl",
                  "read_liberty /foss/pdks/vendor/v1/mypdk/libs.ref/io/io.lib\n"
                  f"read_verilog {run}/phase3/stage3/pnr/chip_pnr.v\n"
-                 "link_design chip\n")
+                 "link_design chip\n"
+                 f"read_sdc {run}/phase3/stage3/pnr/signoff.sdc\n")
+        T._write(run / "phase3/stage3/pnr/signoff.sdc",
+                 "set_max_capacitance 0.2 [current_design]\n")
         # A sibling deck on another netlist (the real run's power deck reads the
         # synthesis netlist): only the deck on the report's own netlist counts.
         T._write(run / "phase2/stage2/synth/chip_synth.v", "module chip (a); endmodule\n")

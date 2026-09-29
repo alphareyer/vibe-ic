@@ -1223,7 +1223,7 @@ def _deck_args(text: str, command: str) -> List[str]:
 
 
 def _drv_class_inputs(project: Path, rpt: Optional[Path],
-                      text: str) -> Tuple[Optional[Path], List[Path], str]:
+                      text: str) -> Tuple[Optional[Path], List[Path], str, Optional[Path]]:
     """(netlist, linked Liberty files, why-not) behind one STA report.
 
     A direct deck report names its netlist (`STA_BASIS_NETLIST:`); the sibling
@@ -1231,7 +1231,7 @@ def _drv_class_inputs(project: Path, rpt: Optional[Path],
     STAPostPNR report sits in a step folder whose `state_in.json` / `config.json`
     name the netlist and PAD_LIBS. Anything else is unresolved."""
     if rpt is None:
-        return None, [], "no report path"
+        return None, [], "no report path", None
     for folder in (rpt.parent, rpt.parent.parent):
         cfg, state = folder / "config.json", folder / "state_in.json"
         if cfg.is_file() and state.is_file():
@@ -1240,15 +1240,18 @@ def _drv_class_inputs(project: Path, rpt: Optional[Path],
             paths = ([p for v in pads.values() for p in ([v] if isinstance(v, str) else v)]
                      if isinstance(pads, dict) else list(pads or []))
             nl = st.get("nl")
+            sdc = c.get("SIGNOFF_SDC_FILE")
             if nl and paths:
                 return (_host_pdk_path(project, str(nl)),
-                        [_host_pdk_path(project, str(p)) for p in paths], "")
-            return None, [], f"{folder.name}: no netlist or PAD_LIBS recorded"
+                        [_host_pdk_path(project, str(p)) for p in paths], "",
+                        _host_pdk_path(project, str(sdc)) if sdc else None)
+            return None, [], f"{folder.name}: no netlist or PAD_LIBS recorded", None
     names = set(re.findall(r"(?m)^STA_BASIS_NETLIST:\s*(\S+)", text))
     if not names:
-        return None, [], "report names no STA_BASIS_NETLIST"
+        return None, [], "report names no STA_BASIS_NETLIST", None
     netlists: set = set()
     libs: List[Path] = []
+    sdcs: set = set()
     for deck in sorted(rpt.parent.glob("*.tcl")):
         try:
             body = deck.read_text(errors="replace")
@@ -1259,9 +1262,11 @@ def _drv_class_inputs(project: Path, rpt: Optional[Path],
             continue
         netlists.update(_host_pdk_path(project, v) for v in reads)
         libs.extend(_host_pdk_path(project, v) for v in _deck_args(body, "read_liberty"))
+        sdcs.update(_host_pdk_path(project, v) for v in _deck_args(body, "read_sdc"))
     if len(netlists) != 1:
-        return None, [], f"{len(netlists)} deck netlists match {sorted(names)}"
-    return next(iter(netlists)), sorted(set(libs)), ""
+        return None, [], f"{len(netlists)} deck netlists match {sorted(names)}", None
+    return (next(iter(netlists)), sorted(set(libs)), "",
+            next(iter(sdcs)) if len(sdcs) == 1 else None)
 
 
 def drv_row_classes(project: Path, rpt: Optional[Path], text: str,
@@ -1274,7 +1279,7 @@ def drv_row_classes(project: Path, rpt: Optional[Path], text: str,
     values = drv.get("pin_values") or {}
     if not values:
         return {"state": "NO_ROWS", "counted": {}, "listed": []}
-    netlist, libs, why = _drv_class_inputs(project, rpt, text)
+    netlist, libs, why, sdc = _drv_class_inputs(project, rpt, text)
     io_libs = []
     for lib in libs:
         try:
@@ -1287,7 +1292,11 @@ def drv_row_classes(project: Path, rpt: Optional[Path], text: str,
                 "counted": {k: len(v) for k, v in values.items()}, "listed": []}
     import _drv_row_class as _cls
     try:
-        classify = _cls.Classifier(netlist, {"*": io_libs}).classify
+        try:
+            margin = _cls.sdc_cap_margin(sdc.read_text()) if sdc else None
+        except OSError:
+            margin = None
+        classify = _cls.Classifier(netlist, {"*": io_libs}, margin).classify
     except _cls.Unavailable as exc:
         return {"state": "UNAVAILABLE", "reason": str(exc),
                 "counted": {k: len(v) for k, v in values.items()}, "listed": []}
