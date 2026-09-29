@@ -51,6 +51,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any, Dict
 
 sys.path.insert(0, str(Path(__file__).parent))
 import _path_layout as _pl  # noqa: E402
@@ -307,20 +308,98 @@ def design_selected_options(project: Path) -> "Optional[frozenset]":
     return None
 
 
+#: The only option spellings the narrowing decides on: RISC-V base/extension
+#: names that no other name in the set overlaps. A token outside it -- a
+#: subset/superset extension such as Zmmul or Zca, a combined string such as
+#: RV32IMC, G or rv32im_zicsr, free text such as "M (mul/div)", or an entry of
+#: an unrelated generic options list -- is never decided by string equality,
+#: so a case conditional on it stays DEMANDED (R-0929-UNSELECTED-FEATURES:
+#: only an EXPLICIT unselected declaration makes a case N/A). Moved here from
+#: professional_tb_check so every consumer makes ONE decision.
+NARROWING_VOCABULARY = frozenset(
+    {"i", "e", "m", "a", "f", "d", "q", "c", "v", "h", "zicsr", "zifencei"})
+
+#: The emitter's sidecar recording, per declaration field, who chose it.
+DECLARATION_PROVENANCE_REL = "plugin_output/declaration.provenance.json"
+
+
 def split_design_declared_na(rows: list,
-                             selected: "Optional[frozenset]") -> "tuple[list, list]":
-    """(applicable, design_declared_na) over declared rows."""
+                             selected: "Optional[frozenset]",
+                             not_narrowed: "Optional[list]" = None
+                             ) -> "tuple[list, list]":
+    """(applicable, design_declared_na) over declared rows. FAIL-CLOSED.
+
+    A row is design-declared N/A only when its `applies_when.option` AND every
+    entry of the design's selection are spelled in `NARROWING_VOCABULARY` and
+    the option is not selected. Anything else stays applicable (demanded); when
+    `not_narrowed` is given, each row that would have been narrowed but could
+    not be decided is appended to it with the reason (`row` = its index in
+    `rows`)."""
     if selected is None:
         return list(rows), []
+    undecodable = sorted(o for o in selected if o not in NARROWING_VOCABULARY)
     applicable, na = [], []
-    for row in rows:
+    for index, row in enumerate(rows):
         aw = row.get("applies_when") if isinstance(row, dict) else None
         opt = (aw or {}).get("option") if isinstance(aw, dict) else None
-        if opt and str(opt).strip().lower() not in selected:
-            na.append(row)
-        else:
+        tok = str(opt).strip().lower() if opt else ""
+        if not tok or tok in selected:
             applicable.append(row)
+            continue
+        why = None
+        if undecodable:
+            why = (f"the declaration's selection is not parseable in the "
+                   f"vocabulary {sorted(NARROWING_VOCABULARY)}: {undecodable}")
+        elif tok not in NARROWING_VOCABULARY:
+            why = (f"option token {opt!r} is not in the vocabulary "
+                   f"{sorted(NARROWING_VOCABULARY)}")
+        if why:
+            applicable.append(row)
+            if not_narrowed is not None:
+                not_narrowed.append({
+                    "case": row.get("name") or row.get("id"), "row": index,
+                    "option": opt, "why": why + " -- the case is DEMANDED"})
+        else:
+            na.append(row)
     return applicable, na
+
+
+def selection_basis_provenance(project: Path) -> Dict[str, Any]:
+    """The provenance record of the declaration field the narrowing read.
+
+    Same field lookup as `design_selected_options` (first of
+    `_SELECTION_FIELDS` holding a list); the record comes from the emitter's
+    own sidecar. Absent sidecar / field -> said, never assumed verified."""
+    project = Path(project)
+    field = None
+    try:
+        obj = json.loads((project / _DECLARATION_REL).read_text(
+            errors="replace"))
+        fields = obj.get("fields") if isinstance(obj.get("fields"), dict) else obj
+        field = next((k for k in _SELECTION_FIELDS
+                      if isinstance(fields.get(k), list)), None)
+    except (OSError, ValueError, AttributeError):
+        pass
+    out: Dict[str, Any] = {"field": field,
+                           "sidecar": DECLARATION_PROVENANCE_REL,
+                           "provenance": None, "provenance_verified": None}
+    try:
+        side = json.loads((project / DECLARATION_PROVENANCE_REL).read_text(
+            errors="replace"))
+        rec = (side.get("fields") or {}).get(field) if field else None
+    except (OSError, ValueError, AttributeError):
+        out["why"] = "no readable provenance sidecar -- the basis is UNVERIFIED"
+        return out
+    if not isinstance(rec, dict):
+        out["why"] = (f"the sidecar carries no record for {field!r} -- the "
+                      f"basis is UNVERIFIED")
+        return out
+    out["provenance"] = rec.get("provenance")
+    out["provenance_verified"] = rec.get("provenance_verified") is True
+    if not out["provenance_verified"]:
+        out["why"] = ("the sidecar does not verify who chose this selection "
+                      "-- the basis is UNVERIFIED")
+    return out
 
 
 def _design_declared_na_disclosure(project: Path) -> dict:
