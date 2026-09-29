@@ -104,3 +104,71 @@ def test_a_step_outside_the_chip_flow_is_resolved_under_its_own_variables():
     assert "step_id not in chip_steps" in src
     assert "names - set(selected)" in src
     assert "Config.load(design, target.get_all_config_variables()" in src
+
+
+# --- what the extraction read, carried to step 37.3 ---------------------------
+
+def _lvs_scope(tmp_path, monkeypatch, use_gds):
+    chain = pv.HALVES["lvs"]
+    project, pnr, configs, pdk_root = _half_project(tmp_path, chain)
+    cfg = json.loads(configs["Magic.SpiceExtraction"].read_text())
+    if use_gds is not None:
+        cfg["MAGIC_EXT_USE_GDS"] = use_gds
+    configs["Magic.SpiceExtraction"].write_text(json.dumps(cfg))
+    monkeypatch.setattr(pv, "resolve_step_configs", lambda *a, **k: configs)
+    _fake_tool(monkeypatch, {"Magic.SpiceExtraction": {"magic__illegal_overlap__count": 0},
+                             "Netgen.LVS": _NETGEN_CLEAN,
+                             "KLayout.LVS": {"klayout__lvs_error__count": 0}})
+    record = pv.run_half(project, "img", pdk_root, "procA", "lvs", gds=pnr / "chip.gds",
+                         routed_def=pnr / "chip.def", netlist=pnr / "chip_pnr.v",
+                         sdc=pnr / "constraint.sdc")
+    return record["scope"], contract.digest(pnr / "chip.gds")
+
+
+def test_the_record_states_that_the_shipped_gds_was_extracted(tmp_path, monkeypatch):
+    scope, sha = _lvs_scope(tmp_path, monkeypatch, True)
+    assert scope["magic_ext_use_gds"] is True and scope["extracted_gds_sha256"] == sha
+
+
+def test_a_def_extraction_states_no_extracted_gds(tmp_path, monkeypatch):
+    scope, _ = _lvs_scope(tmp_path, monkeypatch, None)
+    assert scope["magic_ext_use_gds"] is False and scope["extracted_gds_sha256"] is None
+
+
+def _published(tmp_path, monkeypatch, extracted):
+    import phase3_one_shot_runner as runner
+    from test_librelane_pv_signoff import _published_half
+    folder = "phase3/librelane/31-lvs/02-netgen-lvs"
+    project = tmp_path / "p"
+    gds = project / "phase3/stage3/pnr/chip.gds"
+    gds.parent.mkdir(parents=True, exist_ok=True)
+    gds.write_bytes(b"shipped stream")
+    sha = contract.digest(gds)
+    record = {"verdict": "PASS", "reasons": [],
+              "scope": {"gds_sha256": sha,
+                        "extracted_gds_sha256": sha if extracted else None},
+              "metrics": {key: {"step": "Netgen.LVS", "status": "MEASURED", "value": 0,
+                                "folder": str(project / folder)}
+                          for key in pv.PRODUCED["Netgen.LVS"]}}
+    _published_half(tmp_path, runner, monkeypatch, "lvs", record,
+                    {f"{folder}/reports/lvs.netgen.rpt":
+                     "Final result: Circuits match uniquely.\n"})
+    return project, sha
+
+
+def test_step_37_3_credits_the_lvs_of_the_shipped_gds(tmp_path, monkeypatch):
+    import gds_xor_check
+    project, sha = _published(tmp_path, monkeypatch, True)
+    verdict = json.loads((project / "reports/phase3/lvs_verdict.json").read_text())
+    assert verdict["layout_source"]["kind"] == "gds"
+    assert verdict["layout_source"]["extracted_sha256"] == sha
+    got = gds_xor_check.gds_connectivity(project, sha)
+    assert got["verdict"] == "PASS" and got["basis"] == "lvs_extracted_from_shipped_gds"
+
+
+def test_an_lvs_of_the_routed_def_is_not_step_37_3s_connectivity(tmp_path, monkeypatch):
+    import gds_xor_check
+    project, sha = _published(tmp_path, monkeypatch, False)
+    verdict = json.loads((project / "reports/phase3/lvs_verdict.json").read_text())
+    assert "layout_source" not in verdict
+    assert gds_xor_check.gds_connectivity(project, sha)["verdict"] == "NOT_DETERMINED"

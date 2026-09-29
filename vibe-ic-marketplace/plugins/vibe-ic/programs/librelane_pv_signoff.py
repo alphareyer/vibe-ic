@@ -257,8 +257,17 @@ def run_half(project: Path, image: str, pdk_root: Path, pdk: str, half: str, *,
     folders = run_chain(project, image, [(step, configs[step], state) for step in chain],
                         mounts=[(pdk_root / pdk, f'/pdk/{pdk}')], lane=f'31-{half}', pdk_root=PDK_GUEST_ROOT)
     required = tuple(step for step in chain if step in PRODUCED)
+    scope = {'gds_sha256': digest(gds), 'def_sha256': digest(routed_def)}
+    if half == 'lvs':
+        # What the extraction READ, from the config the step ran with: the
+        # shipped GDS only when MAGIC_EXT_USE_GDS was set (step 37.3's
+        # connectivity check credits only an extraction of the shipped bytes).
+        ext = _load(configs['Magic.SpiceExtraction'])
+        scope['magic_ext_use_gds'] = ext.get('MAGIC_EXT_USE_GDS') is True
+        scope['extracted_gds_sha256'] = (scope['gds_sha256']
+                                         if scope['magic_ext_use_gds'] else None)
     return judge_pv(folders, required, project / RECORD_REL.format(half=half),
-                    scope={'gds_sha256': digest(gds), 'def_sha256': digest(routed_def)})
+                    scope=scope)
 
 
 def run_finishing_xor(project: Path, image: str, pdk_root: Path, pdk: str, *,

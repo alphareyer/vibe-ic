@@ -51835,7 +51835,17 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
                     "; ".join(record["reasons"]) or
                     "Netgen.LVS: circuits match uniquely (LibreLane chain)",
                     {"generated_by": "librelane_pv_signoff.run_half (mig105)",
-                     "librelane_pv": str(record_path)}))
+                     "librelane_pv": str(record_path),
+                     # step 37.3's connectivity basis: an LVS whose layout
+                     # was extracted FROM the shipped GDS (gds_xor_check.
+                     # gds_connectivity). Stated only when the extraction's
+                     # own config read the GDS; a DEF extraction states none.
+                     **({"layout_source": {
+                         "kind": "gds", "path": str(pnr / f"{top}.gds"),
+                         "sha256": record["scope"]["gds_sha256"],
+                         "extracted_sha256": record["scope"]["extracted_gds_sha256"]}}
+                        if (record.get("scope") or {}).get("extracted_gds_sha256")
+                        else {})}))
         except Refusal as exc:
             return StepResult(half, "FAIL", time.time() - t0,
                               f"LibreLane step 31 publication: {exc}", outputs, extras)
