@@ -64,11 +64,13 @@ def test_frontdoor_names_the_actual_refusal_instead_of_missing_provenance(tmp_pa
     assert result["reason"].startswith("REFUSED: DELIVERY_ROUTE_UNDECLARED")
 
 
-def _report(project, status="PASS"):
+def _report(project, status="PASS", *, invocation_context=None):
     report = project / "reports" / "orchestrator" / "phase2_one_shot.json"
     report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(json.dumps({"steps": [{"name": "rtl_gen",
-                         "status": status, "detail": "neutral evidence"}]}))
+    from design_one_shot_runner import _write_phase2_report
+    _write_phase2_report(report, {"steps": [{"name": "rtl_gen",
+                         "status": status, "detail": "neutral evidence"}]}, project,
+                         invocation_context=invocation_context)
     return report
 
 
@@ -106,7 +108,7 @@ def test_solve_exposes_the_current_refusal_with_stale_scaffolds(tmp_path, monkey
 def test_fresh_reports_preserve_collection_even_after_nonzero_handoffs(
         tmp_path, monkeypatch, rc):
     def producer(argv, **_kwargs):
-        _report(tmp_path)
+        _report(tmp_path, invocation_context=json.loads(_kwargs["env"][bd._RUNNER_CONTEXT_ENV]))
         return subprocess.CompletedProcess(argv, rc, "complete stdout\n" * 500,
                                            "REFUSED: INNER_HANDOFF: continue by evidence\n")
 
@@ -144,7 +146,7 @@ def test_stale_pass_report_cannot_lend_evidence_to_a_new_invocation(
 def test_diagnostics_cannot_be_rebound_or_replayed(tmp_path, monkeypatch, corruption):
     argv = _argv(tmp_path)
     monkeypatch.setattr(bd.subprocess, "run", lambda *a, **k:
-                        (_report(tmp_path), subprocess.CompletedProcess(a[0], 0, "ok", ""))[1])
+                        (_report(tmp_path, invocation_context=json.loads(k["env"][bd._RUNNER_CONTEXT_ENV])), subprocess.CompletedProcess(a[0], 0, "ok", ""))[1])
     process = bd._RunnerBudget(1, None, 0).run(argv)
     project = tmp_path
     if corruption == "project":
@@ -242,7 +244,9 @@ def test_d1_nonzero_handoff_uses_fresh_phase1_evidence_with_an_old_phase2_report
 
     def producer(argv, **kwargs):
         report = tmp_path / "reports" / "orchestrator" / "phase1_one_shot.json"
-        report.write_text(json.dumps({"status": "NOT_MEASURED", "handoff": "expert"}))
+        from design_one_shot_runner import _write_phase2_report
+        _write_phase2_report(report, {"status": "NOT_MEASURED", "handoff": "expert"}, tmp_path,
+                             invocation_context=json.loads(kwargs["env"][bd._RUNNER_CONTEXT_ENV]))
         emitted.append(True)
         return subprocess.CompletedProcess(argv, 2, "Phase 1 expert handoff\n", "")
 

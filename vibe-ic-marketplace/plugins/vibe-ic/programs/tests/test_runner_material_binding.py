@@ -34,15 +34,17 @@ def _invoke(tmp_path, *, generate=False, crlf=False):
     # This child is neutral maintenance, not an execution of the IC flow.
     runner = tmp_path / "vibe_ic_one_shot_runner.py"
     runner.write_text("""import json, pathlib, sys
+sys.path.insert(0, %r)
+import design_one_shot_runner as producer
 p = pathlib.Path(sys.argv[1])
 if sys.argv[2] == 'generate':
     (p/'phase2/stage1/rtl/neutral.v').write_text(%r)
-(p/'reports/orchestrator/phase2_one_shot.json').write_text(json.dumps(
-    {'steps': [{'name': 'rtl_gen', 'status': 'PASS', 'detail': 'fresh neutral report'}]}))
+producer._write_phase2_report(p/'reports/orchestrator/phase2_one_shot.json',
+    {'steps': [{'name': 'rtl_gen', 'status': 'PASS', 'detail': 'fresh neutral report'}]}, p)
 print('complete neutral stdout')
 print('bounded neutral rc1', file=sys.stderr)
 raise SystemExit(1)
-""" % WIRE)
+""" % (str(Path(__file__).resolve().parents[1]), WIRE))
     argv = [sys.executable, str(runner), str(project), "generate" if generate else "fresh"]
     process = bd._RunnerBudget(1, 1, 0).run(argv)
     assert process.rc == 1 and process.error is None

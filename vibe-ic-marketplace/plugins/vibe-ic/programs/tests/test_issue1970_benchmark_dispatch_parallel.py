@@ -221,12 +221,14 @@ def _overlap(a: tuple[float, float], b: tuple[float, float]) -> bool:
     return max(a[0], b[0]) < min(a[1], b[1])
 
 
-def _prior_collectable_report(project: Path):
+def _prior_collectable_report(project: Path, *, invocation_context=None):
     report = project / "reports" / "orchestrator" / "phase2_one_shot.json"
     report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(json.dumps({"verdict": "PASS", "steps": [
+    from design_one_shot_runner import _write_phase2_report
+    _write_phase2_report(report, {"verdict": "PASS", "steps": [
         {"name": "rtl_gen", "status": "PASS"},
-        {"name": "rtl_validate", "status": "PASS"}]}))
+        {"name": "rtl_validate", "status": "PASS"}]}, project,
+                         invocation_context=invocation_context)
     docs = project / "phase1" / "generated_docs"
     docs.mkdir(parents=True, exist_ok=True)
     (docs / "L1_DATASHEET.json").write_text('{"schema": 1}')
@@ -276,7 +278,7 @@ def test_real_refusal_cannot_collect_old_reports_and_resume_retries_only_that_ba
         calls.append(pid)
         if pid == "p1" and refuse:
             return native_run(argv + ["--no-dashboard", "--route", "ip"], **kwargs)
-        _prior_collectable_report(Path(argv[2]))
+        _prior_collectable_report(Path(argv[2]), invocation_context=json.loads(kwargs["env"][bd._RUNNER_CONTEXT_ENV]))
         return SimpleNamespace(returncode=1, stdout="bounded NOT_MEASURED\n", stderr="")
 
     monkeypatch.setattr(bd.subprocess, "run", run_worker)
@@ -350,7 +352,7 @@ def test_legacy_unmeasured_review_is_regated_without_rebinding_the_old_review(
         if Path(str(argv[1])).name != "vibe_ic_one_shot_runner.py":
             return native_run(argv, **_kwargs)
         seen.append(argv)
-        _prior_collectable_report(Path(argv[2]))
+        _prior_collectable_report(Path(argv[2]), invocation_context=json.loads(_kwargs["env"][bd._RUNNER_CONTEXT_ENV]))
         return SimpleNamespace(returncode=1, stdout="bounded NOT_MEASURED", stderr="")
     monkeypatch.setattr(bd.subprocess, "run", worker)
     assert bd.cmd_resume("rtllm", "/unused", str(run)) == 2

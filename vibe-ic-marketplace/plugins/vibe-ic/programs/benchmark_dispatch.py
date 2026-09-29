@@ -132,12 +132,61 @@ class _ProcessOutcome:
 
 _RUNNER_REPORT_NAMES = ("phase1_one_shot.json", "phase2_one_shot.json",
                         "phase3_one_shot.json", "vibe_ic_one_shot.json")
+_RUNNER_CONTEXT_ENV = "VIBEIC_RUNNER_INVOCATION_CONTEXT"
+
+
+def _runner_source_snapshot(argv: list[str]) -> dict:
+    """Identity of the executable and actual script, including invocation options.
+
+    The dispatcher is a consumer, not a substitute for argv[1]'s producer.
+    Resolve executable names through PATH just as subprocess does.
+    """
+    def source(value: str) -> dict:
+        path = Path(value).resolve(strict=True)
+        raw = path.read_bytes()
+        return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest()}
+
+    executable = shutil.which(argv[0]) or argv[0]
+    return {"argv": list(argv), "executable": source(executable),
+            "runner": source(argv[1]), "consumer": source(__file__)}
+
+
+def _bind_runner_report(summary: dict, project: Path, producer: str,
+                        report_name: str, *, context: dict | None = None) -> dict:
+    """Called by the actual report writer, before publishing its measured data.
+
+    Standalone producers have no dispatch generation and retain their ordinary
+    format. A dispatched producer states its generation and material itself;
+    the caller must not add this field to a report it merely found on disk.
+    This is provenance, never a successful gate verdict.
+    """
+    if context is None:
+        raw = os.environ.get(_RUNNER_CONTEXT_ENV)
+        if raw is None:
+            return summary
+        context = json.loads(raw)
+    project = Path(project).resolve()
+    if context["project"] != str(project):
+        return summary  # an internal isolated child has its own report subject
+    if (context["source"] != _runner_source_snapshot(context["argv"])
+            or report_name not in _RUNNER_REPORT_NAMES):
+        raise ValueError("RUNNER_REPORT_UNBOUND: producer context/source differs")
+    producer_path = Path(producer).resolve(strict=True)
+    return {**summary, "runner_binding": {
+        "schema": "vibeic.runner_report_binding.v1",
+        "invocation_id": context["invocation_id"],
+        "project": str(project), "argv": context["argv"],
+        "source": context["source"], "report_name": report_name,
+        "producer": {"path": str(producer_path),
+                     "sha256": hashlib.sha256(producer_path.read_bytes()).hexdigest()},
+        "material": _runner_material_snapshot(project),
+    }}
 
 
 def _runner_report_snapshot(project: Path) -> dict:
     """Bind canonical reports to their bytes and filesystem generation.
 
-    A rewritten byte-identical report is fresh; an unchanged scaffold is not.
+    Filesystem generation is retained for audit, not used as gate generation.
     No receipt in runner_invocations is itself a runner report.
     """
     reports = {}
@@ -146,15 +195,66 @@ def _runner_report_snapshot(project: Path) -> dict:
         try:
             raw = path.read_bytes()
             stat = path.stat()
-            valid = isinstance(json.loads(raw), dict)
+            document = json.loads(raw)
+            valid = isinstance(document, dict)
         except (OSError, ValueError):
             continue
         reports[name] = {
             "sha256": hashlib.sha256(raw).hexdigest(), "valid": valid,
             "mtime_ns": stat.st_mtime_ns, "ctime_ns": stat.st_ctime_ns,
             "inode": stat.st_ino, "size": stat.st_size,
+            "project": document.get("project") if valid else None,
+            "runner_binding": document.get("runner_binding") if valid else None,
         }
     return reports
+
+
+def _runner_fresh_reports(before: dict, after: dict) -> list[str]:
+    """A rewrite of old identical bytes is replay, even with a new inode/mtime.
+
+    Native producers' generation binding changes for every invocation, including
+    legitimate repeated measurements of identical RTL and identical verdicts.
+    Legacy reports remain usable when they have genuinely new report content.
+    """
+    return [name for name, record in after.items() if record["valid"]
+            and record["sha256"] != before.get(name, {}).get("sha256")]
+
+
+def _runner_report_binding_reason(receipt: dict, *, require_phase2: bool) -> str | None:
+    """The same report subject/generation check at collect, freeze and reentry."""
+    fresh = _runner_fresh_reports(receipt["reports_before"], receipt["reports_after"])
+    for name, record in receipt["reports_after"].items():
+        if name not in fresh:
+            continue  # an earlier phase's retained history is not this producer
+        declared_project = record.get("project")
+        if declared_project is not None and (
+                not isinstance(declared_project, str)
+                or Path(declared_project).resolve() != Path(receipt["project"])):
+            return "RUNNER_REPORT_UNBOUND: report explicitly names another project"
+        binding = record.get("runner_binding")
+        if binding is None:
+            if receipt["reports_before"].get(name, {}).get("runner_binding") is not None:
+                return "RUNNER_REPORT_UNBOUND: report dropped its producer generation binding"
+            return "RUNNER_REPORT_UNBOUND: fresh report has no producer generation binding"
+        try:
+            if (binding["schema"] != "vibeic.runner_report_binding.v1"
+                    or binding["invocation_id"] != receipt["invocation_id"]
+                    or binding["project"] != receipt["project"]
+                    or binding["argv"] != receipt["argv"]
+                    or binding["source"] != receipt["source_before"]
+                    or binding["report_name"] != name):
+                raise ValueError("report invocation/source differs")
+            producer = binding["producer"]
+            if hashlib.sha256(Path(producer["path"]).read_bytes()).hexdigest() != producer["sha256"]:
+                raise ValueError("report producer source changed")
+            # Phase 1 can precede legitimate RTL generation in the same run.
+            # Its historical output population is not phase 2's measurement.
+            if (name != "phase1_one_shot.json" or not require_phase2):
+                if binding["material"] != receipt["material_after"]:
+                    raise ValueError("report input/output material differs")
+        except (OSError, ValueError, KeyError, TypeError):
+            return "RUNNER_REPORT_UNBOUND: report generation/source/material does not bind this invocation"
+    return None
 
 
 def _runner_material_snapshot(project: Path) -> dict:
@@ -245,13 +345,21 @@ def _runner_diagnostics(process: _ProcessOutcome, argv: list[str],
             return {**diagnostic, "status": "MATERIAL_MISMATCH",
                     "reason_class": "RUNNER_MATERIAL_UNBOUND",
                     "reason": "RUNNER_MATERIAL_UNBOUND: input or output file population/content changed after invocation"}
+        if not (receipt["source_before"] == receipt["source_after"]
+                == _runner_source_snapshot(argv)):
+            return {**diagnostic, "status": "SOURCE_MISMATCH",
+                    "reason_class": "RUNNER_SOURCE_UNBOUND",
+                    "reason": "RUNNER_SOURCE_UNBOUND: actual runner executable/source/options changed"}
     except (OSError, ValueError, KeyError, TypeError):
         return {**diagnostic, "status": "INVOCATION_MISMATCH",
                 "reason_class": "RUNNER_INVOCATION_UNBOUND",
                 "reason": "RUNNER_INVOCATION_UNBOUND: missing, changed or mismatched runner receipt/reports"}
-    fresh = [name for name, record in receipt["reports_after"].items()
-             if record["valid"] and record != receipt["reports_before"].get(name)]
+    fresh = _runner_fresh_reports(receipt["reports_before"], receipt["reports_after"])
     diagnostic["fresh_reports"] = fresh
+    binding_reason = _runner_report_binding_reason(receipt, require_phase2=require_phase2)
+    if binding_reason:
+        return {**diagnostic, "status": "REPORT_BINDING_MISMATCH",
+                "reason_class": "RUNNER_REPORT_UNBOUND", "reason": binding_reason}
     if not fresh:
         for line in (process.stderr or "").splitlines() + (process.stdout or "").splitlines():
             refusal = re.match(r"^REFUSED:\s*([A-Z][A-Z0-9_]*)\b", line)
@@ -262,7 +370,7 @@ def _runner_diagnostics(process: _ProcessOutcome, argv: list[str],
     if require_phase2 and phase2 in receipt["reports_after"] and phase2 not in fresh:
         return {**diagnostic, "status": "STALE_RUNNER_REPORT",
                 "reason_class": "RUNNER_REPORT_NOT_FRESH",
-                "reason": "RUNNER_REPORT_NOT_FRESH: phase2 report predates this invocation"}
+                "reason": "RUNNER_REPORT_NOT_FRESH: phase2 report predates this invocation or replays identical report bytes"}
     # Some alternate subprocess implementations do not supply captured streams.
     # Their receipt still binds the invocation/reports, but cannot disclose a
     # stdout/stderr diagnostic. Never invent empty logs for an unavailable capture.
@@ -343,6 +451,8 @@ def _runner_reentry_reason(task: dict, result: dict) -> str | None:
                     or invocation.get("output_rtl_sha256") != task.get("rtl_sha256")
                     or invocation.get("prompt_sha256") != task.get("prompt_sha256")):
                 raise ValueError("invocation does not bind this task")
+            if verification.get("runner_argv") != invocation["argv"]:
+                raise ValueError("invocation options differ from the frozen task")
         except (OSError, ValueError, KeyError, TypeError) as exc:
             return f"RUNNER_INVOCATION_NOT_MEASURED: {exc}"
         return None
@@ -570,17 +680,26 @@ class _RunnerBudget:
         rc, error, stdout, stderr = None, None, None, None
         before, after = {}, {}
         material_before = material_after = None
+        source_before = source_after = None
         started_ns = finished_ns = None
         try:
             with self._heavy:
                 before = _runner_report_snapshot(project) if project else {}
                 material_before = _runner_material_snapshot(project) if project else None
+                source_before = _runner_source_snapshot(argv) if project else None
                 started_ns = time.time_ns()
                 if project:
                     _atomic_write_json(project / "reports" / "orchestrator" / "runner_invocations" / "latest.json", {
                         "invocation_id": invocation_id, "argv": argv,
                         "project": str(project), "started_ns": started_ns,
                     })
+                    # A private per-call env, including when worker_threads=0.
+                    # Never mutate a shared worker environment across siblings.
+                    kwargs["env"] = dict(kwargs.get("env") or os.environ)
+                    kwargs["env"][_RUNNER_CONTEXT_ENV] = json.dumps({
+                        "invocation_id": invocation_id, "argv": argv,
+                        "project": str(project), "source": source_before,
+                    }, sort_keys=True)
                 proc = subprocess.run(argv, **kwargs)
                 rc = int(proc.returncode)
                 stdout = getattr(proc, "stdout", None)
@@ -597,13 +716,13 @@ class _RunnerBudget:
             after = _runner_report_snapshot(project) if project else {}
             try:
                 material_after = _runner_material_snapshot(project) if project else None
+                source_after = _runner_source_snapshot(argv) if project else None
             except (OSError, ValueError) as exc:
                 error = f"RUNNER_MATERIAL_UNBOUND: {exc}; runner_error={error}"
         # TimeoutExpired may carry bytes even when text=True was requested.
         stdout = stdout.decode(errors="replace") if isinstance(stdout, bytes) else stdout
         stderr = stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr
-        fresh = [name for name, record in after.items()
-                 if record["valid"] and record != before.get(name)]
+        fresh = _runner_fresh_reports(before, after)
         if error is None:
             terminal_error = _runner_terminal_error(rc, stdout or "", stderr or "")
             # A killed/crashed worker cannot complete a gate. Fresh bounded
@@ -624,6 +743,7 @@ class _RunnerBudget:
                 "started_ns": started_ns, "finished_ns": finished_ns,
                 "reports_before": before, "reports_after": after,
                 "material_before": material_before, "material_after": material_after,
+                "source_before": source_before, "source_after": source_after,
                 "prompt_sha256": (material_after or {}).get("prompt_sha256"),
                 "output_rtl_sha256": (material_after or {}).get("output_rtl_sha256"),
                 "record_path": str(path),
@@ -1740,6 +1860,11 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
     if not prompt.is_file() or not paths or not got.get("ok") or not completion:
         raise ValueError("cannot request AI review without prompt + gated RTL")
     safe = _safe_problem_id(problem_id)
+    if runner_invocation is not None:
+        # The response includes transient diagnostics. Archive each actual
+        # generation separately; never rewrite a content-addressed old payload.
+        generation = _safe_problem_id(runner_invocation["invocation_id"])
+        archive_key = f"{archive_key or candidate_origin}-inv-{generation}"
     candidate = _archive_candidate(
         problem_id, project, got, run_p, candidate_origin, archive_key=archive_key)
     if runner_invocation is not None:
@@ -1754,6 +1879,8 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
     challenges = verification_challenges or []
     review_key = review_key or (f"{_safe_problem_id(candidate_origin).lower()}-"
                                f"r{len(challenges)}-{candidate['rtl_sha256']}")
+    if runner_invocation is not None:
+        review_key = f"{review_key}-inv-{generation}"
     challenge_dir = (run_p / "ai_verification_challenges" / safe /
                      review_key)
     challenge_file = str((challenge_dir / "challenge_tb.sv").resolve())
@@ -1816,6 +1943,7 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
             "rtl_gen": got.get("rtl_gen"),
             "runner_rc": int(runner_rc),
             **({"runner_invocation": runner_invocation} if runner_invocation is not None else {}),
+            **({"runner_argv": list(runner_invocation["argv"])} if runner_invocation is not None else {}),
             "functional_evidence": functional_evidence,
             "functional_evidence_source": functional_source,
             "functional_confirmation_required": confirmation_required,
