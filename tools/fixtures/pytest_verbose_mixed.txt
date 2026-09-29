@@ -1,0 +1,10 @@
+============================= test session starts ==============================
+collecting ... collected 2 items
+
+test_neutral.py::test_pass PASSED
+test_neutral.py::test_fail NATIVE_PID=1088304
+FAILED
+
+=========================== short test summary info ============================
+FAILED test_neutral.py::test_fail - assert False
+========================= 1 failed, 1 passed in 0.00s ==========================

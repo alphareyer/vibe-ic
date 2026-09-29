@@ -1866,7 +1866,7 @@ def force_verdict(source: str, const: int) -> Tuple[Optional[str], int]:
 #: Node IDs, because a COUNT cannot tell one test going green and another going
 #: red from nothing happening -- and the flow-change-acceptance doctrine says so
 #: in as many words: "compare failure name sets, not counts".
-_PYTEST_FAILED = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)", re.M)
+_PYTEST_FAILED = re.compile(r"^(?:FAILED|ERROR)[ \t]+(\S+)", re.M)
 _PYTEST_PASSED = re.compile(r"(\d+) passed")
 
 #: pytest's own closing line -- `1 failed, 155 passed in 30.42s`, or `no tests
@@ -1893,10 +1893,15 @@ _PYTEST_PASSED = re.compile(r"(\d+) passed")
 #: sweep, climbing, all of them with durations above the minute. That direction
 #: is the safe one -- it declines rather than accuses -- but it silently destroys
 #: coverage, which is the same family of defect one step over.
+_PYTEST_OUTCOME_COUNT = (
+    r"\d+[ \t]+(?:passed|failed|skipped|xfailed|xpassed|deselected|errors?|warnings?|reruns?)")
 _PYTEST_DONE = re.compile(
-    # Verbose pytest wraps its real closing summary in '=' characters. A
-    # complete nested arm remains a measurement when verbosity is inherited.
-    r"in \d+(?:\.\d+)?s(?:\s*\(\d+:\d{2}:\d{2}\))?(?:[ \t]+=+)?\s*$", re.M)
+    # Recognize the complete native summary, with either both decorations or
+    # neither. Ordinary duration diagnostics are not completion receipts.
+    r"^[ \t]*(?P<decor>=+[ \t]+)?"
+    r"(?:" + _PYTEST_OUTCOME_COUNT + r"(?:,[ \t]+" + _PYTEST_OUTCOME_COUNT +
+    r")*|no tests ran)[ \t]+in[ \t]+\d+(?:\.\d+)?s"
+    r"(?:[ \t]*\(\d+:\d{2}:\d{2}\))?(?(decor)[ \t]+=+)[ \t]*$", re.M)
 
 
 @dataclass
@@ -1974,7 +1979,8 @@ def _run_selection(cwd: Path, selection: List[Path],
     return ArmResult(failed=set(_PYTEST_FAILED.findall(out)),
                      passed=int(counts[-1]) if counts else 0,
                      rc=proc.returncode,
-                     completed=bool(_PYTEST_DONE.search(out)))
+                     completed=(proc.returncode in (0, 1, 5) and
+                                bool(_PYTEST_DONE.search(out))))
 
 
 @dataclass

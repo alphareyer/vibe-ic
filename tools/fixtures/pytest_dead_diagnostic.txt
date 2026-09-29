@@ -1,0 +1,5 @@
+============================= test session starts ==============================
+collecting ... collected 1 item
+
+test_neutral.py::test_dead NATIVE_PID=1088472
+worker stopped in 0.01s ===

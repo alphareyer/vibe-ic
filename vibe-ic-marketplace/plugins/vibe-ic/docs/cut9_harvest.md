@@ -42,3 +42,10 @@ closing decoration while retaining the dead-session guard. The unchanged real
 terminal is retained in `tools/fixtures/pytest_verbose_terminal.txt`; bounded
 controls include the seven exact gate failures and the existing timeout/empty
 completion cases. No assertion or verdict threshold was relaxed.
+
+Independent native review rejected duration-only completion: a killed process
+can print a decorated duration or forged passing summary. Completion now requires
+the full outcome-count/no-tests grammar, paired decorations, and native pytest
+exit 0, 1 or 5. The failure-ID reader uses horizontal whitespace so a standalone
+verbose FAILED label cannot consume the next header line. Native mixed and dead
+outputs are retained as fixtures; exact failed IDs and death remain distinct.
