@@ -1585,7 +1585,11 @@ def test_a_could_not_run_verdict_is_refused_though_it_names_a_vacuity(
     rp.write_text(json.dumps(doc, indent=2))
 
     rc, out = _run_si_gate(project)
-    assert (rc, out["verdict"]) == (sic.RC_FAIL, "NOT_RUN")
+    # R-0929-SIMCF-NOTRUN: the could-not-run state is NOT_MEASURED at rc 2 with
+    # the typed EXECUTION_ERROR class (was NOT_RUN/rc 1, #506). It must still
+    # never be credited: every refusal below is unchanged.
+    assert (rc, out["verdict"]) == (sic.RC_NOT_MEASURED, "NOT_MEASURED")
+    assert out["summary"]["reason_class"] == "EXECUTION_ERROR"
     assert [f["category"] for f in out["findings"]
             if f["severity"] == "ERROR"] == ["NO_SPEF"]
     # (3) THE PRODUCER-SIDE LINE (#535). The state is still NAMED — the
@@ -1628,7 +1632,9 @@ def test_a_could_not_run_verdict_is_refused_though_it_names_a_vacuity(
     state, detail = sa._classify_si(project)
     assert state not in sa._SI_WAIVABLE_STATES, state
     assert state == sa.SI_UNDISCLOSED, state
-    assert "NOT_RUN" in detail["why"], detail["why"]
+    # R-0929-SIMCF-NOTRUN: the verdict token is now NOT_MEASURED; it is
+    # still unrecognised by the waivable branch and still refused.
+    assert "'NOT_MEASURED'" in detail["why"], detail["why"]
     assert sa._check_tapeout(project).passed is False
     assert sa.main([str(project), "--mode", "tapeout"]) == 1
 
@@ -1872,17 +1878,45 @@ def _not_run_projects(tmp_path: Path) -> list:
 def test_a_could_not_run_state_reaches_the_vacuity_branches_at_all(tmp_path):
     """THE PREMISE, measured before anything is built on it.
 
-    Every row must actually reach `NOT_RUN` with a zero denominator. A row
-    that silently reached some other state would make the guard below assert
-    something about a state that cannot happen."""
+    Every row must actually reach the could-not-run state with a zero
+    denominator. A row that silently reached some other state would make the
+    guard below assert something about a state that cannot happen.
+
+    R-0929-SIMCF-NOTRUN migrated this state from `NOT_RUN`/rc 1 (#506) to
+    `NOT_MEASURED`/rc 2 with the typed `EXECUTION_ERROR` class. rc 2 is also
+    the VACUOUS_PASS code, so the ruling's conditions are asserted per row:
+    no VACUOUS_PASS token, never PASS or a skip at the real Step-27
+    adjudicator, and tapeout (hence the IC PASS verdict) still refused."""
+    import flow_compliance_check as F
+    from test_si_mcf_not_run_is_not_a_design_failure import (
+        _step27_si_gate_spec)
+    gate = {"optional_program_exit_zero": _step27_si_gate_spec()}
     cases = _not_run_projects(tmp_path)
     assert len(cases) == 6, "the premise must be measured on every row"
     for label, _code, project in cases:
+        run = _pr.run([sys.executable, str(_SI_GATE), str(project)],
+                      capture_output=True, text=True)
         rc, doc = _run_si_gate(project)
+        assert run.returncode == rc, label
         errors = [f["category"] for f in doc["findings"]
                   if f["severity"] == "ERROR"]
-        assert doc["verdict"] == "NOT_RUN", (label, doc["verdict"])
-        assert rc == sic.RC_FAIL, (label, rc)
+        assert doc["verdict"] == "NOT_MEASURED", (label, doc["verdict"])
+        assert rc == sic.RC_NOT_MEASURED, (label, rc)
+        assert doc["summary"]["reason_class"] == "EXECUTION_ERROR", label
+        assert not any(ln.lstrip().startswith("VACUOUS_PASS")
+                       for ln in (run.stdout + run.stderr).splitlines()), label
+        # Never a pass or a skip at the step the flow adjudicates. The emitter
+        # report is the step's condition file, so the two rows without a
+        # readable one are not dispatched there; tapeout below still holds them.
+        if (project / "reports/phase3/si_mcf_sta.json").is_file():
+            step = {"id": 27, "name": "Signal Integrity", "stage": "stage3",
+                    "required_outputs": [], "gate": gate}
+            result = F.check_step(project, step, {})
+            assert result.status == "NOT_MEASURED", (label, result.reasons)
+        # ...and it still blocks tapeout, even with every vacuity accepted.
+        _waive_every_vacuity(project)
+        assert sa._check_tapeout(project).passed is False, label
+        assert sa.main([str(project), "--mode", "tapeout"]) == 1, label
         assert doc["summary"]["denominator"]["examined"] == 0, label
         assert errors, (label, "no ERROR finding — not a could-not-run run")
         assert set(errors) <= sic.NOT_RUN_CATEGORIES, (label, errors)
