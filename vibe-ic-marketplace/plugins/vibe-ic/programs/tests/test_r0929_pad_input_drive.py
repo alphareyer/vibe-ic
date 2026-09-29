@@ -139,8 +139,9 @@ def _rows():
 
 
 def _fold(project, rows):
-    fold = getattr(p3, "_pad_drive_sta_verdict", lambda _p, r: r)
-    return {r.name: r for r in fold(project, rows)}
+    # the runner folds its declared sign-off rows through this, in
+    # step_declared_signoff_gates (the PPA ledger keeps the logic in _ppa)
+    return {r.name: r for r in p3._ppa_timing.pad_drive_sta_verdict(p3, project, rows)}
 
 
 def test_a_not_measured_drive_turns_sta_pass_into_not_measured(tmp_path, monkeypatch):
