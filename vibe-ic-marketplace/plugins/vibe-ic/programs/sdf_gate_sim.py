@@ -1971,11 +1971,11 @@ _TB_TIMESCALE_RE = re.compile(
     r"`timescale\s+(1|10|100)\s*(s|ms|us|ns|ps|fs)\s*/\s*(1|10|100)\s*(s|ms|us|ns|ps|fs)")
 #: OpenSTA's `write_sdf` states the time unit of the session's default
 #: liberty (SdfWriter: `timescale_ = default_lib->units()->timeUnit()`), which
-#: is also the unit that session read the SDC's numbers in.
+#: is the fallback unit for SDC numbers unless the deck sets command units.
 _SDF_TIMESCALE_RE = re.compile(
     r"\(\s*TIMESCALE\s+(1|10|100)(?:\.0*)?\s*(s|ms|us|ns|ps|fs)\s*\)")
 _SDC_SET_UNITS_TIME_RE = re.compile(
-    r"^\s*set_units\b[^\n]*?-time\s+\{?\s*(\d*\.?\d+)?\s*(s|ms|us|ns|ps|fs)\b", re.M)
+    r"^\s*(set_(?:cmd_)?units)\b[^\n]*?-time\s+\{?\s*(\d*\.?\d+)?\s*(s|ms|us|ns|ps|fs)\b", re.M)
 _CLOCK_GEN_RE = re.compile(
     r"(?m)^(\s*always\s*#\s*)(\(\s*[0-9.]+\s*\)|[0-9.]+)(\s*)([A-Za-z_][\w$]*)"
     r"(\s*<?=\s*[~!]\s*)([A-Za-z_][\w$]*)(\s*;)")
@@ -1987,8 +1987,9 @@ def declared_sdc_clocks(sdc: Path, sdf_texts: List[str]) -> Dict[str, object]:
     F21, MEASURED on spm x gf180mcuD: the L10 bench toggled its clock every
     5 ns (a 10 ns period) against a declared `create_clock -period 24.0`, and
     every ss corner failed all five cases. The bench's number is a default; the
-    SDC is the design's. The unit is the SDC's `set_units -time` when it states
-    one, else the unit the STA session read it in -- the SDF TIMESCALE that
+    SDC is the design's. The unit is the SDC's `set_cmd_units -time` (or legacy
+    `set_units -time`) when it states one, else the unit the STA session read
+    it in -- the SDF TIMESCALE that
     session wrote. Anything this cannot read refuses (ValueError): an unreadable
     SDC, a port clock with no literal period, two periods on one port, no unit.
     An SDC that creates no PORT clock (a combinational design, a virtual clock)
@@ -2015,9 +2016,9 @@ def declared_sdc_clocks(sdc: Path, sdf_texts: List[str]) -> Dict[str, object]:
                 "unit_source": "no port clock is declared"}
     units = _SDC_SET_UNITS_TIME_RE.findall(text)
     if units:
-        scale, unit = units[-1]
+        command, scale, unit = units[-1]
         unit_s = float(scale or 1) * _UNIT_S[unit]
-        unit_source = f"{sdc}: set_units -time"
+        unit_source = f"{sdc}: {command} -time"
     else:
         # The WHOLE text: a header statement past any fixed prefix is still
         # the file's statement, never "unstated" (issue #1410 window rule).
@@ -2025,7 +2026,7 @@ def declared_sdc_clocks(sdc: Path, sdf_texts: List[str]) -> Dict[str, object]:
                   for m in [_SDF_TIMESCALE_RE.search(t)] if m}
         if len(stated) != 1 or len(sdf_texts) == 0 or any(
                 not _SDF_TIMESCALE_RE.search(t) for t in sdf_texts):
-            raise ValueError(f"SDC_TIME_UNIT_UNSTATED: {sdc} has no set_units "
+            raise ValueError(f"SDC_TIME_UNIT_UNSTATED: {sdc} has no set_cmd_units/set_units "
                              f"-time and the SDFs state {sorted(stated)}")
         scale, unit = stated.pop()
         unit_s = float(scale) * _UNIT_S[unit]

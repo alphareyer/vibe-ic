@@ -167,6 +167,42 @@ def test_the_sdc_units_statement_outranks_the_sdf_timescale(tmp_path):
     assert 'set_units' in clocks['unit_source']
 
 
+@pytest.mark.parametrize('command', ['set_units', 'set_cmd_units'])
+@pytest.mark.parametrize('time_unit,period,expected', [
+    ('ns', 20, 20e-9), ('ps', 20000, 20e-9), ('{10 ps}', 2000, 20e-9),
+])
+def test_command_units_preserve_the_physical_clock_at_the_sdf_consumer(
+        tmp_path, command, time_unit, period, expected):
+    sdc = write(tmp_path / 'clock.sdc',
+                f'{command} -capacitance pF -time {time_unit}\n'
+                f'create_clock -period {period} [get_ports clk]\n')
+    clocks = sgs.declared_sdc_clocks(sdc, ['(DELAYFILE (TIMESCALE 1ps))'])
+    assert clocks['clocks_s']['clk'] == pytest.approx(expected, rel=1e-9, abs=1e-15)
+    assert clocks['unit_source'] == f'{sdc}: {command} -time'
+
+
+def test_a_staged_calibration_deck_uses_the_authored_command_unit(tmp_path):
+    import sdc_environment
+    from _hostpaths import require_repo
+    # Checked-in SDC content goes through the real staged-deck writer and reader.
+    source = require_repo('vibe-ic-marketplace', 'plugins', 'vibe-ic', 'programs',
+                          'calibration', 'cal_one_clock.sdc').read_text()
+    sdc = write(tmp_path / 'staged.sdc', sdc_environment.with_sdc_units(source))
+    clocks = sgs.declared_sdc_clocks(sdc, ['(DELAYFILE (TIMESCALE 1ps))'])
+    assert clocks['clocks_s']['clk'] == pytest.approx(20e-9, rel=1e-9, abs=1e-15)
+    assert 'set_cmd_units -time' in clocks['unit_source']
+
+
+def test_the_last_explicit_command_units_win_and_commented_units_do_not(tmp_path):
+    sdc = write(tmp_path / 'clock.sdc',
+                'set_units -time ps\nset_cmd_units -time ns\n'
+                '# set_cmd_units -time fs\n'
+                'create_clock -period 20 [get_ports clk]\n')
+    clocks = sgs.declared_sdc_clocks(sdc, ['(DELAYFILE (TIMESCALE 1ps))'])
+    assert clocks['clocks_s']['clk'] == pytest.approx(20e-9, rel=1e-9, abs=1e-15)
+    assert 'set_cmd_units -time' in clocks['unit_source']
+
+
 @pytest.mark.parametrize('sdc,sdfs,code', [
     (None, [SDF_HEAD], 'SDC_UNREADABLE'),
     ('create_clock -period [expr 2*$p] [get_ports clk]\n', [SDF_HEAD], 'SDC_CLOCK_UNREADABLE'),
