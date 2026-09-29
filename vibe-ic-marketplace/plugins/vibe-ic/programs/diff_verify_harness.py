@@ -512,13 +512,15 @@ def run_rtl_sequence(rtl_path: Path, top: str, clk: Optional[Port],
         except (OSError, KeyError, TypeError, ValueError) as exc:
             return None, f"DIFF_PORT_CONTEXT_CHANGED: {exc}"
     tb = _build_tb(top, clk, resets, din, dout, seq)
+    mismatch_marker = None
     if binding is not None:
         # Native sizing is checked before any CYC sample can be compared. A
         # frontend disagreement must not truncate a wider real DUT into AGREE.
+        mismatch_marker = "DIFF_PORT_CONTEXT_MISMATCH:" + binding["binding_sha256"] + ":"
         checks = ["  initial begin"]
         for port in binding["ports"]:
             checks += [f"    if ($bits(dut.{port['name']}) != {port['width']}) begin",
-                       f"      $display(\"DIFF_PORT_CONTEXT_MISMATCH: {port['name']}\");",
+                       f"      $display(\"{mismatch_marker}{port['name']}\");",
                        "      $finish;", "    end"]
         checks.append("  end")
         tb = tb.replace("  always #5", "\n".join(checks) + "\n  always #5", 1)
@@ -535,7 +537,7 @@ def run_rtl_sequence(rtl_path: Path, top: str, clk: Optional[Port],
     sim = (out2 or "")
     if binding is not None and rc2 != 0:
         return None, f"DIFF_PORT_EXECUTION_FAILED: native simulator rc={rc2}"
-    if "DIFF_PORT_CONTEXT_MISMATCH:" in sim:
+    if mismatch_marker is not None and mismatch_marker in sim:
         return None, "DIFF_PORT_CONTEXT_MISMATCH: native Icarus port sizing differs from Slang"
     samples: Dict[int, int] = {}
     for m in _CYC_RE.finditer(sim):

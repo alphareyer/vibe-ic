@@ -99,6 +99,13 @@ def test_matching_pipeline_in_same_macro_context_agrees(native_tools, scratch):
     assert report["driven_input"]["width"] == report["sampled_output"]["width"] == 8
 
 
+def test_dut_log_text_cannot_impersonate_native_width_guard(native_tools, scratch):
+    code = (F / "macro_pipe.sv").read_text().replace("d ^ 8'h80", "d")
+    code = code.replace("endmodule", 'initial $display("DIFF_PORT_CONTEXT_MISMATCH: ordinary DUT log"); endmodule')
+    report = check(scratch, code, "macro_pipe", "dut_log_collision")
+    assert (report["verdict"], report["n_sequences"]) == ("AGREE", 22), report
+
+
 def test_typed_integer_default_width_must_match_both_live_tools(native_tools, scratch):
     # Exact reviewed integer_defaults.sv: 32-bit declared integer overflow,
     # not an unbounded Python calculation, resolves TOTAL=1 and W=8.
