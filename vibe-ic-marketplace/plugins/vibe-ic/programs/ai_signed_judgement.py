@@ -52,8 +52,11 @@ def evidence(project: Path, step_id: str) -> list[Path]:
                       "reports/phase2/gates/professional_tb.json",
                       "phase1/generated_docs/L*.json")
     if sid == "5":
+        # The fragment is where the expert's properties live; a signature that
+        # did not cover it would outlive a weaker property under the same name.
         return _files(project, "phase2/**/formal_authoring_request.json",
                       "phase2/**/formal_expert_review.json",
+                      "phase2/**/formal_expert_properties.svh",
                       "phase2/**/property_contract.json",
                       "phase1/generated_docs/L*.json")
     if sid == "A1":
@@ -95,7 +98,12 @@ def _requested(project: Path, sid: str) -> bool:
                  .get("dut_kind") == "expert_reference")
                 or bool(_files(project, "phase2/**/expert_reference_tb.py")))
     if sid == "5":
-        return bool(_files(project, "phase2/**/formal_authoring_request.json"))
+        # formal_harness_gen and formal_property_run delete the request once
+        # the expert's answer closes it, so the answer itself keeps the
+        # hand-off open until a receipt signs it.
+        return bool(_files(project, "phase2/**/formal_authoring_request.json",
+                            "phase2/**/formal_expert_review.json",
+                            "phase2/**/formal_expert_properties.svh"))
     if sid == "A1":
         return bool(_files(project, "phase3/analog/*/spec_gap.json",
                             "phase1/analog/*/spec_gap.json"))
