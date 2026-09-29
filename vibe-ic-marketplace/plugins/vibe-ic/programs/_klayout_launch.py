@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import shlex
 import shutil
 import subprocess
@@ -44,7 +45,8 @@ import _watchdog as _wd  # noqa: E402
 import _docker_watchdog as _dwd  # noqa: E402
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 
-__all__ = ["KLayoutRunner", "HostRunner", "ContainerRunner", "find_runner"]
+__all__ = ["KLayoutRunner", "HostRunner", "ContainerRunner", "find_runner",
+           "find_container_runner"]
 
 #: `_eda_pin.default_container_name()` IS this expression, plus the part
 #: that was missing: the default half derives from the pinned digest
@@ -64,6 +66,63 @@ def _memory_bounded_argv(argv: Sequence[str], memory_limit_mb: int) -> str:
     if limit <= 0 or not argv:
         raise ValueError("a positive memory ceiling and nonempty argv are required")
     return f"ulimit -v {limit * 1024} || exit 125; exec {shlex.join([str(a) for a in argv])}"
+
+
+def host_read_bytes(path) -> Optional[bytes]:
+    """The bytes of a HOST file, or None when it cannot be read."""
+    try:
+        return Path(str(path)).read_bytes()
+    except OSError:
+        return None
+
+
+def host_list_files(directory, suffix: str) -> Optional[List[str]]:
+    """Regular HOST files directly inside `directory` ending in `suffix`."""
+    try:
+        return sorted(str(p) for p in Path(str(directory)).iterdir()
+                      if p.name.endswith(suffix) and p.is_file())
+    except OSError:
+        return None
+
+
+def host_list_tree(directory) -> Optional[List[str]]:
+    """Every regular HOST file under `directory`, recursively (links followed)."""
+    root = Path(str(directory))
+    if not root.is_dir():
+        return None
+    out: List[str] = []
+    try:
+        for base, _dirs, files in os.walk(root, followlinks=True):
+            out.extend(str(Path(base) / f) for f in files
+                       if (Path(base) / f).is_file())
+    except OSError:
+        return None
+    return sorted(out)
+
+
+def image_tree_overlays(trees: Sequence[str], mount_destinations: Sequence[str],
+                        changed_paths: Sequence[str]) -> List[str]:
+    """Why the bytes under `trees` inside a container may NOT be its image's.
+
+    A container shows its image's bytes at a path only when no mount sits at,
+    above or below that path and its writable layer changed nothing at or below
+    it. `mount_destinations` are the container's bind/volume/tmpfs targets
+    (`docker inspect`), `changed_paths` the paths `docker diff` lists. Pass a
+    tree both as named and as resolved: a symlinked tree is read through its
+    target. Empty = nothing overlays the image bytes.
+    """
+    out: List[str] = []
+    for tree in dict.fromkeys(posixpath.normpath(t) for t in trees if t):
+        for dst in mount_destinations:
+            dst = posixpath.normpath(dst)
+            if (tree == dst or tree.startswith(dst.rstrip("/") + "/")
+                    or dst.startswith(tree + "/")):
+                out.append(f"mount {dst} overlays {tree}")
+        for changed in changed_paths:
+            changed = posixpath.normpath(changed)
+            if changed == tree or changed.startswith(tree + "/"):
+                out.append(f"writable-layer change {changed} under {tree}")
+    return out
 
 
 def _container_mounts(container: str) -> List[Tuple[str, str]]:
@@ -138,6 +197,22 @@ class KLayoutRunner:
     def exists(self, path) -> bool:
         """True when `path` is a readable file IN THIS RUNNER'S environment."""
         return Path(str(path)).is_file()
+
+    # A PDK deck the tool will execute is identified by the bytes THIS RUNNER'S
+    # KLayout reads, not by a same-named file on some other filesystem. These
+    # two readers answer from the runner's own environment and return None
+    # when that environment cannot answer, never a guess.
+    def read_bytes(self, path) -> Optional[bytes]:
+        """The bytes of `path` as this runner's KLayout would read them."""
+        return host_read_bytes(path)
+
+    def list_files(self, directory, suffix: str) -> Optional[List[str]]:
+        """Regular files directly inside `directory` ending in `suffix`."""
+        return host_list_files(directory, suffix)
+
+    def list_tree(self, directory) -> Optional[List[str]]:
+        """Every regular file under `directory`, recursively."""
+        return host_list_tree(directory)
 
     def klayout_bin(self) -> str:
         """The KLayout GUI-class binary, for callers that need its own CLI
@@ -286,6 +361,97 @@ class ContainerRunner(KLayoutRunner):
     def klayout_bin(self) -> str:
         return "klayout"
 
+    def _exec_bytes(self, *argv: str) -> Optional[bytes]:
+        """stdout of `argv` run DIRECTLY in the container, or None.
+
+        No shell, and above all no LOGIN shell: the image's profile prints
+        `[INFO] Final PATH variable: ...` banners on stdout. MEASURED on the
+        IC-die run (vibeic-eda 0.3.85): a positional parse of
+        `bash -lc "sha256sum <parent> <rule>"` read those banner words as the
+        two digests, so byte-identical PDK decks were reported as differing
+        and Step 26 was never measured.
+        """
+        try:
+            cp = subprocess.run(_ce.docker_exec_argv(self._c, *argv),
+                                capture_output=True, timeout=120)
+        except (OSError, subprocess.SubprocessError, _ce.ContainerImageMismatch):
+            return None
+        return cp.stdout if cp.returncode == 0 else None
+
+    def read_bytes(self, path):
+        return self._exec_bytes("cat", "--", str(path))
+
+    def list_files(self, directory, suffix):
+        out = self._exec_bytes("find", "-L", str(directory), "-mindepth", "1",
+                               "-maxdepth", "1", "-type", "f",
+                               "-name", f"*{suffix}", "-print0")
+        if out is None:
+            return None
+        return sorted(p.decode("utf-8", "surrogateescape")
+                      for p in out.split(b"\0") if p)
+
+    def list_tree(self, directory):
+        out = self._exec_bytes("find", "-L", str(directory), "-type", "f",
+                               "-print0")
+        if out is None:
+            return None
+        return sorted(p.decode("utf-8", "surrogateescape")
+                      for p in out.split(b"\0") if p)
+
+    def image_id(self) -> Tuple[Optional[str], str]:
+        """`(image_id, why_not)` of the image this container is running."""
+        return _pin.container_image_id(self._c)
+
+    def image_tree_proof(self, tree) -> Tuple[bool, str, Dict[str, object]]:
+        """`(proven, why_not, record)`: are the bytes under `tree` the image's?
+
+        A matching image id names the image, not the bytes a process in the
+        container reads: a bind mount / volume / tmpfs at, above or below the
+        tree, or an edit in the container's writable layer, replaces them
+        while `.Image` stays the same. Proven only when `docker inspect`
+        (mounts, tmpfs) and `docker diff` both answer and nothing overlays the
+        tree as named or as resolved inside the container. Any unanswerable
+        probe is "not proven", never "proven".
+        """
+        record: Dict[str, object] = {"guest_tree": str(tree)}
+        real = self._exec_bytes("readlink", "-f", "--", str(tree))
+        real_path = real.decode("utf-8", "surrogateescape").strip() if real else ""
+        if not real_path.startswith("/"):
+            return False, f"{tree} does not resolve inside {self._c}", record
+        record["guest_tree_resolved"] = real_path
+        try:
+            ins = subprocess.run(
+                ["docker", "inspect", "--format",
+                 "{{json .Mounts}}\t{{json .HostConfig.Tmpfs}}", self._c],
+                capture_output=True, text=True, timeout=30)
+            dif = subprocess.run(["docker", "diff", self._c],
+                                 capture_output=True, text=True, timeout=300)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, f"container mounts/diff unanswerable: {exc}", record
+        if ins.returncode != 0 or dif.returncode != 0:
+            return False, (f"docker inspect/diff of {self._c} failed "
+                           f"(rc {ins.returncode}/{dif.returncode})"), record
+        try:
+            mounts_json, tmpfs_json = ins.stdout.strip().split("\t", 1)
+            mounts = json.loads(mounts_json) or []
+            tmpfs = json.loads(tmpfs_json) or {}
+            destinations = [str(m["Destination"]) for m in mounts]
+            destinations += [str(d) for d in tmpfs]
+        except (ValueError, KeyError, TypeError) as exc:
+            return False, f"docker inspect of {self._c} is unreadable: {exc}", record
+        # `docker diff` prints one "<A|C|D> <path>" per changed path.
+        changed = [ln[2:] for ln in dif.stdout.splitlines()
+                   if len(ln) > 2 and ln[0] in "ACD" and ln[1] == " "]
+        record.update(mounts_checked=len(destinations),
+                      writable_layer_changes_checked=len(changed))
+        overlays = image_tree_overlays([str(tree), real_path], destinations,
+                                       changed)
+        if overlays:
+            record["overlays"] = overlays
+            return False, ("the image-bound tree is not the image's bytes in "
+                           f"{self._c}: " + "; ".join(overlays)), record
+        return True, "", record
+
     def exists(self, path):
         try:
             cp = _pr.run_best_effort(
@@ -361,6 +527,20 @@ def find_runner(container: Optional[str] = None,
         found = shutil.which(cand)
         if found:
             return HostRunner(found, flags)
+    return find_container_runner(container, project=project)
+
+
+def find_container_runner(container: Optional[str] = None,
+                          project=None) -> Optional["ContainerRunner"]:
+    """The CONTAINER half of :func:`find_runner`, with no host fallback.
+
+    For a caller whose input lives INSIDE an image -- a PDK tree bound to the
+    image the run used -- a host KLayout is not a substitute: it could only
+    read some other copy of that tree. Same resolution order and the same
+    test hook as :func:`find_runner`.
+    """
+    if os.environ.get("VIBEIC_KLAYOUT_FORCE_ABSENT"):
+        return None
     if shutil.which("docker"):
         recorded = container_the_run_recorded(project) if project else None
         for name in (container, recorded, DEFAULT_CONTAINER):

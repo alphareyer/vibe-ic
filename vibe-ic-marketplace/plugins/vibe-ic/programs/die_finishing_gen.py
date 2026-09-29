@@ -691,9 +691,20 @@ def derive_tech(runner, script: str) -> Tuple[Optional[str], str]:
     that owns it, and it keeps working for a PDK whose name does not encode it.
     """
     techdir = str(Path(script).parent.parent)
-    rc, out, _ = runner.run_argv(
-        ["sh", "-c", f"ls {techdir}/*.lyt 2>/dev/null"], {}, timeout=60)
-    lyts = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    lister = getattr(runner, "list_files", None)
+    if callable(lister):
+        # Listed by the runner DIRECTLY (no shell). A container runner's
+        # `run_argv` goes through the image's LOGIN shell, whose profile
+        # prints `[INFO] Final PATH/PYTHONPATH variable: ...` on stdout.
+        # MEASURED (vibeic-eda 0.3.85, gf180mcuD): `ls <tech>/*.lyt` through
+        # it gave three lines for one .lyt, and this refused with "more than
+        # one KLayout technology file (osic-multitool, python, gf180mcu.lyt)".
+        found = lister(techdir, ".lyt")
+        rc, lyts = (0, list(found)) if found is not None else (1, [])
+    else:
+        rc, out, _ = runner.run_argv(
+            ["sh", "-c", f"ls {techdir}/*.lyt 2>/dev/null"], {}, timeout=60)
+        lyts = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
     if rc != 0 or not lyts:
         return None, f"no KLayout technology file (*.lyt) beside the script in {techdir}"
     if len(lyts) > 1:

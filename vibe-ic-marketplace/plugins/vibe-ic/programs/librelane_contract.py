@@ -1461,6 +1461,17 @@ def pdk_root_resolution(project: Path | None = None, pdk: str | None = None, *,
         answer = {'path': os.environ['VIBEIC_LIBRELANE_PDK_ROOT'], 'source': 'declared',
                   'declared_by': 'env VIBEIC_LIBRELANE_PDK_ROOT'}
     else:
+        answer = None
+    if answer is not None:
+        # A declared root is a PDK_ROOT: the tree a consumer reads is
+        # <path>/<pdk>. Record WHICH PDK when it is known, so a consumer of
+        # the receipt (gds_antenna_deck_check) does not have to guess it.
+        declared_pdk = pdk or switch.get('pdk')
+        if declared_pdk and _PDK_NAME.match(str(declared_pdk)):
+            answer['pdk'] = str(declared_pdk)
+            answer['pdk_from'] = ('caller (the design\'s resolved PDK)' if pdk
+                                  else 'phase3/librelane_switch.json pdk')
+    else:
         pdk_source = 'caller (the design\'s resolved PDK)' if pdk else \
             'phase3/librelane_switch.json pdk'
         pdk = pdk or switch.get('pdk')
