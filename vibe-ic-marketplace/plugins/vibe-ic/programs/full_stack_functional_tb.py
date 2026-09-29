@@ -505,6 +505,83 @@ def _not_run_detail(project: Path, case: dict, ic_class: Optional[str],
     return out
 
 
+# ---------------------------------------------------------------------------
+# R-0929-STEP5-BAR — what every declared case must be for Step 5 to PASS
+# ---------------------------------------------------------------------------
+# Root ruling (IC expert, 2026-09-29), found by FULLSTACKTB: the PASS bar
+# counted only EXECUTED cases (subservient: 3 executed, 7 no_oracle including
+# every CPU data-path case, and the record read PASS over them). Every L10 case
+# must now be (a) executed and passed through the required full-stack top, or
+# (b) excluded by a named ruling -- a firmware row whose named image the input
+# lacks (R-0929-OWNER-SUB-ACCEPT (2)) -- or (c) credited by the ISA-suite rule
+# (R-0929-OWNER-SUB-ACCEPT (1)), and (c) counts here ONLY when a CPU data-path
+# case (`cpu_datapath_program`: fetch, execute, load/store over the delivered
+# memory) executed and passed through that same top. Anything else is
+# NOT_MEASURED: no case passes by construction.
+#
+# Two further dispositions were already landed contracts and are kept, each
+# re-derived from the design input, never read off a record label: a case
+# whose acceptance is a coverage FIGURE is not a functional case (FULLSTACKTB),
+# and a case conditional on an option the design declares it does not have
+# (`applies_when` against the declaration's selection, the reader the Step-4
+# gate uses) is not a case of the delivered configuration.
+DISP_EXCLUDED = "excluded_by_ruling"
+DISP_NOT_APPLICABLE = "design_declared_na"
+DISP_ISA_CREDITED = "isa_credited"
+DISP_UNMEASURED = "not_measured"
+DATAPATH_KEY = "cpu_datapath"
+
+
+def unexecuted_disposition(project: Path, case: dict, ic_class: Optional[str],
+                           datapath_passed: bool,
+                           top_module: Optional[str] = None) -> Dict[str, Any]:
+    """How a declared case that did not execute stands against the Step-5 bar.
+
+    Asked of the design input every time (the producer AND the gate call it);
+    `blocking` is True unless a named ruling or a landed declared-NA contract
+    places the case outside the verdict."""
+    name = str(case.get("name") or case.get("id") or "")
+    import testbench_gen as _tbg
+    ex = _tbg.input_absent_exclusion(project, case, ic_class)
+    if ex:
+        return {"case": name, "disposition": DISP_EXCLUDED, "blocking": False,
+                "ruling": "R-0929-OWNER-SUB-ACCEPT (2)", "record": ex}
+    import cpu_functional_oracle_waiver_check as _cfw
+    _app, na = _cfw.split_design_declared_na(
+        [case], _cfw.design_selected_options(project))
+    if na:
+        aw = case.get("applies_when") or {}
+        return {"case": name, "disposition": DISP_NOT_APPLICABLE,
+                "blocking": False,
+                "basis": {"option": aw.get("option"), "stated": aw.get("stated"),
+                          "design_selected": sorted(
+                              _cfw.design_selected_options(project) or [])},
+                "note": ("the case is conditional on an option the design "
+                         "declares it does not have; not a case of the "
+                         "delivered configuration, and not claimed verified")}
+    import _l10_execution as _l10x
+    credit, refusal = _l10x.isa_conformance_credit(project, name, case)
+    if credit:
+        if datapath_passed:
+            return {"case": name, "disposition": DISP_ISA_CREDITED,
+                    "blocking": False,
+                    "ruling": ("R-0929-OWNER-SUB-ACCEPT (1), counted at Step 5 "
+                               "by R-0929-STEP5-BAR (c)"),
+                    "sentence": credit.get("sentence")}
+        return {"case": name, "disposition": DISP_UNMEASURED, "blocking": True,
+                "reason": (
+                    f"ISA-suite credit exists ({credit.get('sentence')}), but "
+                    f"R-0929-STEP5-BAR counts it at Step 5 only when a CPU "
+                    f"data-path case executed and passed through "
+                    f"`{top_module}` at the delivered memory size, and none "
+                    f"did")}
+    return {"case": name, "disposition": DISP_UNMEASURED, "blocking": True,
+            "reason": (
+                "not executed through the full-stack top, not excluded by a "
+                "named ruling and not credited"
+                + (f" (ISA credit refused: {refusal})" if refusal else ""))}
+
+
 def generate(project: Path, container: Optional[str] = None,
              route: Optional[str] = None,
              dispatch: Optional[Callable] = None,
@@ -693,14 +770,32 @@ def generate(project: Path, container: Optional[str] = None,
                                      score["checks"])
         if score["state"] == PASSED and short:
             entry.update(state=SHORT, reason=short)
+    dp = _datapath_case(project, core_mod, core_ports, top, sources, fdir,
+                        run_root, disp, container,
+                        {c["name"] for c in rec["cases"]})
+    rec[DATAPATH_KEY] = dp
+    dp_passed = dp.get("state") == PASSED
+    bar = {"datapath": dp.get("state"), "dispositions": []}
+    for case, entry in zip(cases, rec["cases"]):
+        if entry.get("state") != NO_ORACLE:
+            continue
+        d = unexecuted_disposition(project, case, ic_class, dp_passed,
+                                   top["module"])
+        entry["step5_disposition"] = d
+        bar["dispositions"].append(d)
+    rec["step5_bar"] = bar
+    blocking = [d["case"] for d in bar["dispositions"] if d["blocking"]]
     executed = sum(1 for c in rec["cases"] if c.get("state") in EXECUTED_STATES)
     failed = sum(1 for c in rec["cases"] if c.get("state") == FAILED)
     short = sum(1 for c in rec["cases"] if c.get("state") == SHORT)
     errored = sum(1 for c in rec["cases"] if c.get("state") == ERRORED)
-    if failed:
+    if failed or dp.get("state") == FAILED:
         return _finish(FAIL, None, (
-            f"{failed} functional case(s) through `{top['module']}` disagreed "
-            f"with the oracle their design input states"))
+            f"{failed} functional case(s)"
+            + (" and the CPU data-path program" if dp.get("state") == FAILED
+               else "")
+            + f" through `{top['module']}` disagreed with the oracle their "
+              f"design input states"))
     if short:
         return _finish(NOT_MEASURED, ZERO_DENOMINATOR, (
             f"{short} case(s) executed fewer vectors than their own text "
@@ -722,9 +817,92 @@ def generate(project: Path, container: Optional[str] = None,
             f"({errored} could not be built or gave no verdict; "
             f"{len(rec['cases']) - errored} were not grounded by any oracle "
             f"family or are not functional cases)"))
+    if blocking:
+        return _finish(NOT_MEASURED, ZERO_DENOMINATOR, (
+            f"R-0929-STEP5-BAR: {len(blocking)} declared case(s) "
+            f"{blocking[:8]} were neither executed through `{top['module']}`, "
+            f"nor excluded by a named ruling, nor credited; {executed} "
+            f"executed and passed"))
+    kinds = {k: sum(1 for d in bar["dispositions"] if d["disposition"] == k)
+             for k in (DISP_EXCLUDED, DISP_NOT_APPLICABLE, DISP_ISA_CREDITED)}
     return _finish(PASS, None, (
         f"{executed} functional case(s) executed through `{top['module']}` and "
-        f"every one matched the oracle its design input states"))
+        f"every one matched the oracle its design input states"
+        + (f"; CPU data-path program PASSED" if dp_passed else "")
+        + "".join(f"; {n} {k}" for k, n in kinds.items() if n)))
+
+
+def _run_case(name: str, path: Path, sources: List[Path], wd: Path,
+              disp: Callable, container: Optional[str], project: Path
+              ) -> Dict[str, Any]:
+    """Build and run one case testbench; the transcript scored, nothing else."""
+    wd.mkdir(parents=True, exist_ok=True)
+    vvp = wd / f"{name}.vvp"
+    argv = ([SIMULATOR, "-g2012", "-s", name, "-o", str(vvp)]
+            + [str(s) for s in sources] + [str(path)])
+    brc, blog = disp(argv, wd, container, SIMULATOR, BUILD_TIMEOUT_S)
+    (wd / "build.log").write_text(" ".join(argv) + "\n\n" + (blog or ""))
+    out: Dict[str, Any] = {"build_log": _rel(project, wd / "build.log"),
+                           "build_rc": brc}
+    if brc != 0:
+        out.update(state=ERRORED, reason=(
+            f"the simulator could not build this case (rc={brc}); nothing "
+            f"about the design was judged"))
+        return out
+    rrc, rlog = disp(["vvp", "-n", str(vvp)], wd, container, SIMULATOR,
+                     RUN_TIMEOUT_S)
+    run_log = wd / "run.log"
+    run_log.write_text(rlog or "")
+    score = score_transcript(name, rrc, rlog or "")
+    out.update(run_log=_rel(project, run_log),
+               run_log_sha256=sha256_file(run_log), run_rc=rrc,
+               state=score["state"], checks=score["checks"],
+               reason=score["message"])
+    return out
+
+
+def _datapath_case(project: Path, core_mod: str, core_ports: list,
+                   top: Dict[str, Any], sources: List[Path], fdir: Path,
+                   run_root: Path, disp: Callable, container: Optional[str],
+                   taken: set) -> Dict[str, Any]:
+    """Build (from the design input), retarget and run the CPU data-path
+    program — R-0929-STEP5-BAR's case (c) precondition. Never raises."""
+    import cpu_datapath_program as _cdp
+    name = _cdp.CASE_NAME
+    entry: Dict[str, Any] = {"name": name, "schema": _cdp.SCHEMA}
+    if name in taken:
+        entry.update(state=NO_ORACLE, reason=(
+            f"a declared L10 case is already named `{name}`"))
+        return entry
+    try:
+        built, why = _cdp.build(project, core_mod, core_ports, name)
+    except Exception as exc:  # noqa: BLE001 — a builder crash is not a pass
+        built, why = None, f"the data-path builder raised {exc!r}"
+    if built is None:
+        entry.update(state=NO_ORACLE, reason=(
+            f"no CPU data-path program is built from the design input: {why}"))
+        return entry
+    entry.update({k: built[k] for k in ("program", "data_address",
+                                        "expected_words", "facts",
+                                        "delivered_memsize_bytes")})
+    text = built["tb_text"]
+    if top["pad_ring"]:
+        text, rwhy = retarget_instance(text, core_mod, top["module"])
+        if text is None:
+            entry.update(state=NO_ORACLE, reason=rwhy)
+            return entry
+        entry["retarget"] = rwhy
+    path = fdir / f"{name}.v"
+    path.write_text(text)
+    wd = run_root / name
+    wd.mkdir(parents=True, exist_ok=True)
+    hexp = wd / built["hex_name"]
+    hexp.write_text(built["hex_text"])
+    entry.update(tb=_rel(project, path), tb_sha256=sha256_file(path),
+                 hex=_rel(project, hexp), hex_sha256=sha256_file(hexp),
+                 instantiates=top["module"])
+    entry.update(_run_case(name, path, sources, wd, disp, container, project))
+    return entry
 
 
 def main(argv: Optional[List[str]] = None) -> int:
