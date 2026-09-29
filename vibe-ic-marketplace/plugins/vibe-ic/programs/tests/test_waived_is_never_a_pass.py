@@ -250,3 +250,30 @@ def test_a_waived_upstream_merge_does_not_roll_up_as_pass(tmp_path):
     assert M4._check_upstream(tmp_path, spec)["status"] == "PASS"   # control
     target.write_text(json.dumps({"verdict": "WAIVED"}))
     assert M4._check_upstream(tmp_path, spec)["status"] != "PASS"
+
+
+def test_a_gate_self_waiver_over_measured_defects_fails_the_step(tmp_path):
+    # analog_a6_block_pv_check MEASURES 3 DRC violations and an LVS mismatch,
+    # then waives them under its own `waived_steps` lookup (label match, no
+    # approver) and exits 0 with verdict WAIVED. No flow record covers the
+    # step, so the measured defects stand.
+    project = tmp_path / "p"
+    d = project / "phase3" / "analog" / "ldo"
+    d.mkdir(parents=True)
+    (project / "phase3" / "analog" / "analog_block_list.json").write_text(
+        json.dumps({"blocks": ["ldo"]}))
+    (d / "drc_clean.flag").write_text("violations: 3\n")
+    (d / "lvs_match.flag").write_text("lvs: mismatch\n")
+    (project / "phase3" / "analog" / "waivers.json").write_text(json.dumps({
+        "waived_steps": [{"id": "analog_block_pv", "ticket": "ECO-123",
+                          "reason": "PV deferred to top-level signoff"}]}))
+    report = "reports/analog/a6_block_pv.json"
+    step = {"id": 95, "name": "block PV", "stage": "stage3",
+            "required_outputs": [],
+            "gate": {"all_of": [{"program_exit_zero":
+                f"analog_a6_block_pv_check . --json {report}"}]}}
+    row = F.check_step(project, step, {})
+    assert json.loads((project / report).read_text())["verdict"] == "WAIVED"
+    assert row.status == "FAIL", (row.status, row.reasons)
+    blob = "\n".join(row.reasons)
+    assert "MEASURED" in blob and "A6_PV_DRC_VIOLATIONS" in blob, blob

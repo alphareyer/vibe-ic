@@ -5882,12 +5882,24 @@ def _json_report_declares_nonverdict(report: Any) -> bool:
 _GATE_SELF_WAIVER_VERDICT = "WAIVED"
 
 
-def _gate_self_waiver_hint(project: Path, cmd: str, out: str) -> Optional[str]:
-    """An `__INCOMPLETE_HINT__` for a gate that exited 0 on its own waiver.
+#: Severities a gate uses for a MEASURED defect. A self-waiver report that still
+#: lists one (beside, or in `suppressed_findings`) waived something it found.
+_MEASURED_DEFECT_SEVERITIES = frozenset({"ERROR", "FAIL", "CRITICAL"})
 
-    NOT a waiver and NOT a pass: the step reads NOT_MEASURED (the gate's input
-    was applicable and was not examined), with the gate's receipt named. The
-    DRV judge's WAIVED is a different word on a different channel (rc 1 and
+
+def _gate_self_waiver(project: Path, cmd: str, out: str
+                      ) -> Optional[Tuple[bool, str]]:
+    """`(measured_defect, reason)` for a gate that exited 0 on its own waiver.
+
+    NOT a waiver and NOT a pass. Two cases, told apart by the gate's own report:
+
+    * it waived MEASURED defects (`suppressed_findings`, or an ERROR/FAIL
+      finding kept beside the waiver) -> the clause FAILS: the defects were
+      measured, and no owner-approved record for this step accepted them;
+    * it waived an absent input and examined nothing -> an `__INCOMPLETE_HINT__`:
+      the step reads NOT_MEASURED (applicable, not examined).
+
+    The DRV judge's WAIVED is a different word on a different channel (rc 1 and
     `_DRV_WAIVED_HINT_PREFIX`) and is left to its own branch.
     """
     if out.startswith(_DRV_WAIVED_HINT_PREFIX):
@@ -5895,9 +5907,23 @@ def _gate_self_waiver_hint(project: Path, cmd: str, out: str) -> Optional[str]:
     report = _command_json_report(project, cmd)
     if _report_verdict(report) != _GATE_SELF_WAIVER_VERDICT:
         return None
-    if isinstance(report, dict) and report.get("name") == "DRV(tran/cap/fanout)":
+    if not isinstance(report, dict) or report.get("name") == "DRV(tran/cap/fanout)":
         return None
-    return (f"{_INCOMPLETE_HINT_PREFIX}{cmd} — the gate exited 0 but its own "
+    measured = [f for f in (report.get("suppressed_findings") or [])
+                if isinstance(f, dict)]
+    measured += [f for f in (report.get("findings") or [])
+                 if isinstance(f, dict) and str(f.get("severity") or "").upper()
+                 in _MEASURED_DEFECT_SEVERITIES]
+    if measured:
+        rules = sorted({str(f.get("rule") or "?") for f in measured})
+        return (True,
+                f"gate self-waiver refused: {cmd} exited 0 with its own --json "
+                f"report saying WAIVED over {len(measured)} MEASURED "
+                f"finding(s) ({', '.join(rules[:6])}). A waiver is never a "
+                f"PASS, and only an owner-approved `waived_steps` record for "
+                f"THIS step (applied by the flow before any gate runs) may "
+                f"accept a measured defect")
+    return (False, f"{_INCOMPLETE_HINT_PREFIX}{cmd} — the gate exited 0 but its own "
             f"--json report says WAIVED: it skipped its check under its own "
             f"step-waiver lookup and examined nothing. A waiver is never a "
             f"PASS, and only an owner-approved `waived_steps` record for THIS "
@@ -12752,10 +12778,14 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         # anything is decided about it, so the denominator cannot depend on the
         # outcome.
         reasons.append(f"{_RAN_HINT_PREFIX}{_cmd}")
-        _self_waiver = (_gate_self_waiver_hint(project, _cmd, out)
+        _self_waiver = (_gate_self_waiver(project, _cmd, out)
                         if passed else None)
-        if _self_waiver:
-            reasons.append(_self_waiver)
+        if _self_waiver and _self_waiver[0]:
+            passed = False
+            out = _self_waiver[1]
+            reasons.append(_self_waiver[1])
+        elif _self_waiver:
+            reasons.append(_self_waiver[1])
         if (passed
                 and not out.startswith(_EXECUTED_DECLARED_NA_HINT_PREFIX)
                 and _json_report_signals_vacuous(project, _cmd)):
@@ -12916,10 +12946,14 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         # without reaching here and is deliberately NOT counted: it examined
         # nothing AND declared nothing, which is a different hole.
         reasons.append(f"{_RAN_HINT_PREFIX}{cmd}")
-        _self_waiver = (_gate_self_waiver_hint(project, cmd, out)
+        _self_waiver = (_gate_self_waiver(project, cmd, out)
                         if passed else None)
-        if _self_waiver:
-            reasons.append(_self_waiver)
+        if _self_waiver and _self_waiver[0]:
+            passed = False
+            out = _self_waiver[1]
+            reasons.append(_self_waiver[1])
+        elif _self_waiver:
+            reasons.append(_self_waiver[1])
         if (passed
                 and not out.startswith(_EXECUTED_DECLARED_NA_HINT_PREFIX)
                 and _json_report_signals_vacuous(project, cmd)):
