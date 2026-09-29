@@ -94,8 +94,10 @@ def test_real_no_spef_fallback_artifact_is_disclosed(tmp_path):
     screen, not reported as a clean sign-off PASS."""
     proj = _proj(tmp_path, _REAL_NO_SPEF_FALLBACK)
     rc, rep = _run_cli(proj)
-    assert rc == 0, "disclosure is a WARNING; rc must stay 0"
-    assert rep["verdict"] == "ADVISORY_SCREEN_ONLY", (
+    # U12 (2026-09-29): an advisory screen is NOT_MEASURED, rc 2 — never PASS.
+    assert rc == 2, "an advisory screen measured no SI sign-off"
+    assert rep["screen_tier"] == "ADVISORY_SCREEN_ONLY"
+    assert rep["verdict"] == "NOT_MEASURED", (
         "an artefact whose own note says 'not a full SI sign-off' must not "
         f"headline as {rep['verdict']}"
     )
@@ -111,9 +113,9 @@ def test_unlabelled_si_json_defaults_to_advisory(tmp_path):
     proj = _proj(tmp_path, {"max_crosstalk_noise": 0.02,
                             "violations_count": 0})
     rc, rep = _run_cli(proj)
-    assert rc == 0
+    assert rc == 2                      # U12: NOT_MEASURED, never PASS
     assert rep["summary"]["advisory_screen_only"] is True
-    assert rep["verdict"] == "ADVISORY_SCREEN_ONLY"
+    assert rep["verdict"] == "NOT_MEASURED"
 
 
 def test_novel_emitter_string_cannot_buy_a_clean_pass(tmp_path):
@@ -124,7 +126,7 @@ def test_novel_emitter_string_cannot_buy_a_clean_pass(tmp_path):
         "verdict": "WIRE_RC_QUICK_CHECK_OK",
         "method": "structural pre-route estimate"})
     rc, rep = _run_cli(proj)
-    assert rc == 0
+    assert rc == 2                      # U12: NOT_MEASURED, never PASS
     assert rep["summary"]["advisory_screen_only"] is True
 
 
@@ -138,9 +140,9 @@ def test_rpt_only_screen_is_disclosed(tmp_path):
                      "crosstalk screen: PASS (decoupled-C; SPEF-based SI "
                      "deferred)\n")
     rc, rep = _run_cli(proj)
-    assert rc == 0
+    assert rc == 2                      # U12: NOT_MEASURED, never PASS
     assert rep["summary"]["advisory_screen_only"] is True
-    assert rep["verdict"] == "ADVISORY_SCREEN_ONLY"
+    assert rep["verdict"] == "NOT_MEASURED"
     assert any(f["category"] == "SI_ADVISORY_SCREEN_ONLY"
                for f in rep["findings"])
 
@@ -202,7 +204,9 @@ def test_guard_violations_with_waiver_still_rc0(tmp_path):
     (proj / "waivers.json").write_text(json.dumps(
         {"waivers": [{"step": "si_crosstalk", "reason": "accepted"}]}))
     rc, rep = _run_cli(proj)
-    assert rc == 0
+    # U12: the waiver still clears the ERROR; the undeclared screen tier is
+    # NOT_MEASURED (rc 2), never a PASS.
+    assert rc == 2
     assert rep["summary"]["errors_count"] == 0
 
 

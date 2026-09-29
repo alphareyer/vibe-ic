@@ -99,6 +99,17 @@ def _fake_pdk() -> "runner.PdkConfig":
     )
 
 
+def _fake_pdk_with_liberty(tmp_path) -> "runner.PdkConfig":
+    """Same as _fake_pdk with a host corner liberty that declares its supply
+    (U12: the SI screen takes VDD from the PDK liberty, never a literal)."""
+    lib = tmp_path / "corner.lib"
+    lib.write_text('library (corner) {\n  voltage_map (VDD, 1.8);\n'
+                   '  voltage_map (VSS, 0.0);\n}\n')
+    pdk = _fake_pdk()
+    pdk.liberty = str(lib)
+    return pdk
+
+
 def _fake_pdk_with_diode() -> "runner.PdkConfig":
     """Same as _fake_pdk but with the sky130A antenna diode cell set (v0.2.14)."""
     pdk = _fake_pdk()
@@ -953,7 +964,8 @@ class TestSiCrosstalk:
         assert j["violations_count"] == 0
         # gate still PASSes (screen, not a proven-failure sign-off)
         import si_crosstalk_check as sic
-        assert sic.main([str(project)]) == 0
+        # U12: an advisory screen is NOT_MEASURED (rc 2), never PASS.
+        assert sic.main([str(project)]) == 2
 
     def test_si_falls_back_to_decoupled_screen_without_spef(self, tmp_path):
         project = _mk_project(tmp_path)
@@ -967,7 +979,8 @@ class TestSiCrosstalk:
         j = json.loads((rpt3 / "si_crosstalk.json").read_text())
         assert "screen" in j["verdict"].lower()
         import si_crosstalk_check as sic
-        assert sic.main([str(project)]) == 0
+        # U12: an advisory screen is NOT_MEASURED (rc 2), never PASS.
+        assert sic.main([str(project)]) == 2
 
     def test_si_gate_passes_both_paths(self, tmp_path):
         # the gate must pass on the SPEF screen too (violations_count == 0)
@@ -980,7 +993,8 @@ class TestSiCrosstalk:
             project, "chip_top", spef, rpt3 / "ir_drop.rpt",
             rpt3 / "si_crosstalk.rpt", [])
         import si_crosstalk_check as sic
-        assert sic.main([str(project)]) == 0
+        # U12: an advisory screen is NOT_MEASURED (rc 2), never PASS.
+        assert sic.main([str(project)]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1893,7 +1907,7 @@ class TestSiTimingAwareAdvisory:
         project, rpt3, spef = self._setup(tmp_path, _SPEF_SAMPLE, pins)
         ok = runner._emit_si_crosstalk_report(
             project, "chip_top", spef, rpt3 / "ir_drop.rpt",
-            rpt3 / "si_crosstalk.rpt", [], pdk=_fake_pdk(), container="x")
+            rpt3 / "si_crosstalk.rpt", [], pdk=_fake_pdk_with_liberty(tmp_path), container="x")
         assert ok
         j = json.loads((rpt3 / "si_crosstalk.json").read_text())
         # Existing schema preserved (gate reads these).
@@ -1915,7 +1929,8 @@ class TestSiTimingAwareAdvisory:
         assert "NOT a commercial pass/fail" in rpt or "NOT a proven failure" in rpt
         # ADVISORY → the gate still PASSES (build not blocked).
         import si_crosstalk_check as sic
-        assert sic.main([str(project)]) == 0
+        # U12: an advisory screen is NOT_MEASURED (rc 2), never PASS.
+        assert sic.main([str(project)]) == 2
 
     def test_advisory_does_not_block_even_with_high_watchlist(self, tmp_path,
                                                               monkeypatch):
@@ -1929,7 +1944,7 @@ class TestSiTimingAwareAdvisory:
         project, rpt3, spef = self._setup(tmp_path, _SPEF_SAMPLE, {})
         runner._emit_si_crosstalk_report(
             project, "chip_top", spef, rpt3 / "ir_drop.rpt",
-            rpt3 / "si_crosstalk.rpt", [], pdk=_fake_pdk(), container="x")
+            rpt3 / "si_crosstalk.rpt", [], pdk=_fake_pdk_with_liberty(tmp_path), container="x")
         j = json.loads((rpt3 / "si_crosstalk.json").read_text())
         ta = j["timing_aware_advisory"]
         # *1<->*2 couple at ratio ~0.99 of 1.8V => >100 mV undriven => HIGH.
@@ -1939,7 +1954,8 @@ class TestSiTimingAwareAdvisory:
         # 0 and the gate PASSES — the advisory NEVER blocks the build.
         assert j["violations_count"] == 0
         import si_crosstalk_check as sic
-        assert sic.main([str(project)]) == 0
+        # U12: an advisory screen is NOT_MEASURED (rc 2), never PASS.
+        assert sic.main([str(project)]) == 2
 
     def test_falls_back_to_floating_screen_without_sta(self, tmp_path, monkeypatch):
         # No sta.rpt → the advisory upgrade is withheld (no fabricated windows);
@@ -1955,14 +1971,15 @@ class TestSiTimingAwareAdvisory:
         notes = []
         ok = runner._emit_si_crosstalk_report(
             project, "chip_top", spef, rpt3 / "ir_drop.rpt",
-            rpt3 / "si_crosstalk.rpt", notes, pdk=_fake_pdk(), container="x")
+            rpt3 / "si_crosstalk.rpt", notes, pdk=_fake_pdk_with_liberty(tmp_path), container="x")
         assert ok
         j = json.loads((rpt3 / "si_crosstalk.json").read_text())
         assert "timing_aware_advisory" not in j     # withheld, no over-claim
         assert j["violations_count"] == 0
         assert any("no post-route STA" in n for n in notes)
         import si_crosstalk_check as sic
-        assert sic.main([str(project)]) == 0
+        # U12: an advisory screen is NOT_MEASURED (rc 2), never PASS.
+        assert sic.main([str(project)]) == 2
 
     def test_no_pdk_keeps_legacy_screen(self, tmp_path):
         # Called the legacy way (no pdk/container) → pure floating screen, no

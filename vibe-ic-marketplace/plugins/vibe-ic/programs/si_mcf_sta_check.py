@@ -593,6 +593,21 @@ def audit(project_dir: Path,
                 f"window conservatively assumes overlap — the corner slacks are "
                 f"an envelope over that assumption for those nets, not a "
                 f"measurement of their switching"))
+    # U12 — a window run that resolved ZERO windows measured nothing: the
+    # timer did not time this design (cx_spmic2_run: 0 of 582, the pad cells
+    # unlinked, every slack null). Coverage must be > 0. A run with no window
+    # file at all is the declared window-independent floor mode (every net
+    # folded at the worst Miller factor, `mode` says so) and is not this state.
+    # ERROR in the default LOUD tier, deliberately not NOT_RUN_CATEGORIES: the
+    # gate HAD its inputs; what it found is a report that times nothing.
+    if (pairs and isinstance(net_windows, dict) and net_windows
+            and not stats.get("windows_resolved")):
+        findings.append(Finding(
+            "ERROR", "WINDOWS_NOT_MEASURED",
+            f"switching windows resolved for 0 of "
+            f"{stats.get('windows_total', 0)} coupling net(s): no net's "
+            f"switching was measured, so the MCF fold is an assumption "
+            f"throughout, not a measurement of this design"))
     guard = float(report.get("overlap_guard_ns", 0.0) or 0.0)
 
     corners = report.get("corners", {})
@@ -674,6 +689,14 @@ def audit(project_dir: Path,
         # (4) monotonicity vs the nominal grounded run
         before = cinfo.get("worst_slack_before_ns")
         after = cinfo.get("worst_slack_after_ns")
+        if not (isinstance(before, (int, float))
+                and isinstance(after, (int, float))):
+            # U12 — a null slack is a corner OpenSTA did not time.
+            findings.append(Finding(
+                "ERROR", "SLACK_NOT_MEASURED",
+                f"{corner}: worst slack before={before!r} after={after!r} — "
+                f"the SI-bounded STA produced no slack, so nothing about "
+                f"crosstalk delay was measured on this corner"))
         mono_ok = True
         if isinstance(before, (int, float)) and isinstance(after, (int, float)):
             # setup: MORE cap => after <= before; hold: LESS cap => after <= before.

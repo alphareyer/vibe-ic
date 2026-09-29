@@ -109,6 +109,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -948,6 +949,60 @@ def _run_windows(container: str, work: Path, liberty_c: str, netlist_c: str,
     return {"pins": {}}, rc
 
 
+# ── U12: the die top's IO views and the supply, from the PDK ─────────────────
+#: The pad-ring producer's record of every IO library view it discovered. The
+#: same record and the same exact-PVT rule `phase3_one_shot_runner.
+#: _sta_extra_liberties` uses for sign-off STA, so SI STA links the SAME IO
+#: view the timing sign-off does.
+IO_RECORD_REL = "reports/phase3/io_pad_chip_top.json"
+
+
+def io_liberties_for(project: Path, liberty: str) -> List[str]:
+    """The IO-library Liberty views at the SAME process/temperature/voltage as
+    ``liberty`` (its ``__<pvt>`` stem suffix), from the pad-ring record.
+
+    Empty when the design has no pad ring or the record names no view at that
+    PVT. A die top whose pad cells are not linked times nothing through them:
+    the windows and slacks come back empty and the run reads as measured."""
+    stem = Path(str(liberty)).stem
+    _sep, marker, suffix = stem.rpartition("__")
+    if not marker or not suffix:
+        return []
+    try:
+        raw = json.loads((Path(project) / IO_RECORD_REL).read_text()).get(
+            "io_library_liberty", [])
+    except (OSError, ValueError, AttributeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    return sorted({str(v) for v in raw if isinstance(v, str)
+                   and Path(v).stem.endswith("__" + suffix)})
+
+
+def liberty_supply_v(liberty_text: str) -> Optional[float]:
+    """The supply voltage the corner Liberty declares (its largest
+    ``voltage_map`` / ``power_rail``), or None when it declares none.
+
+    Read with the shared Liberty reader (`path_spice_tool.supply_voltages`);
+    never a default: a 5 V library timed and screened at 1.8 V is a number
+    about a different circuit."""
+    import path_spice_tool as _pst                          # noqa: PLC0415
+    volts = [v for v in _pst.supply_voltages([liberty_text]).values() if v > 0]
+    return max(volts) if volts else None
+
+
+def read_liberty_text(liberty: str, container: Optional[str]) -> str:
+    """The Liberty's text from the host, else from inside the EDA container."""
+    p = Path(str(liberty))
+    if p.is_file():
+        return p.read_text(errors="replace")
+    if not container or not str(liberty).strip():
+        return ""
+    rc, out, _err = _docker_exec_raw(container, f"cat {shlex.quote(str(liberty))}",
+                                     timeout=60)
+    return out if rc == 0 else ""
+
+
 def _pl_import():
     import _path_layout as _pl
     return _pl
@@ -1068,7 +1123,7 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
         spef: Optional[str] = None, netlist: Optional[str] = None,
         sdc: Optional[str] = None, liberty: Optional[str] = None,
         top: Optional[str] = None, macro_libs: Optional[List[str]] = None,
-        vdd_v: float = 1.8, overlap_guard_ns: float = 0.0,
+        vdd_v: Optional[float] = None, overlap_guard_ns: float = 0.0,
         out_json: Optional[PathLike] = None, timeout: int = 1800,
         work_dir: Optional[PathLike] = None) -> dict:
     """End-to-end: OpenSTA windows -> MCF fold (setup + hold) -> re-STA -> report.
@@ -1107,7 +1162,17 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
         # verdict. Recover the liberty the phase-3 flow already resolved.
         if not liberty:
             liberty = _resolve_flow_liberty(project) or ""
-    macro_libs = macro_libs or []
+    macro_libs = list(macro_libs or [])
+    # U12 — a die top links its IO views at the SAME PVT as the corner
+    # liberty; the supply is the one that liberty declares.
+    io_libs = [q for q in io_liberties_for(project, str(liberty))
+               if q not in macro_libs]
+    macro_libs += io_libs
+    vdd_source = "caller"
+    if vdd_v is None:
+        vdd_v = liberty_supply_v(read_liberty_text(str(liberty), container))
+        vdd_source = (f"liberty voltage_map: {liberty}" if vdd_v is not None
+                      else "NOT_RESOLVED: the corner liberty declares no supply")
 
     # field (caravel SI-STA liberty) — hard guard: a genuinely UNRESOLVABLE
     # liberty is a CLEAR, NAMED ERROR — never a malformed `read_liberty <dir>`
@@ -1262,6 +1327,8 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
         "spef": str(spef_p),
         "windows_json": str(win_json),
         "vdd_v": vdd_v,
+        "vdd_source": vdd_source,
+        "io_liberties": io_libs,
         "overlap_guard_ns": overlap_guard_ns,
         "mcf_model": {"quiet": MCF_QUIET, "setup_worst": MCF_SETUP_WORST,
                       "hold_worst": MCF_HOLD_WORST},
@@ -1359,7 +1426,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     r.add_argument("--liberty", default=None)
     r.add_argument("--top", default=None)
     r.add_argument("--macro-lib", action="append", default=[])
-    r.add_argument("--vdd", type=float, default=1.8)
+    r.add_argument("--vdd", type=float, default=None,
+                   help="supply volts; default: the corner liberty's own")
     r.add_argument("--overlap-guard-ns", type=float, default=0.0)
     r.add_argument("--out-json", default=None)
     r.add_argument("--timeout", type=int, default=1800)

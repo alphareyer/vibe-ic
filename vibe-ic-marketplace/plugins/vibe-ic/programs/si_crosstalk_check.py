@@ -269,8 +269,11 @@ def build_report(findings: List[Finding], stats: dict,
         "project_dir": project_dir,
         # #437 follow-up: the headline names the tier — an advisory
         # capacitive screen is never presented as plain sign-off PASS.
-        "verdict": ("ADVISORY_SCREEN_ONLY" if ok and advisory
+        # U12 (2026-09-29): an advisory screen measured no SI noise/glitch
+        # sign-off, so it is NOT_MEASURED — never a PASS, whatever it found.
+        "verdict": ("NOT_MEASURED" if ok and advisory
                     else "PASS" if ok else "FAIL"),
+        "screen_tier": "ADVISORY_SCREEN_ONLY" if advisory else "",
         "summary": {
             "report_found": stats["report_found"],
             "format": stats["format"],
@@ -304,6 +307,11 @@ def main(argv: list = None) -> int:
         Path(args.json).write_text(out)
 
     print(out)
+    if report["verdict"] == "NOT_MEASURED":
+        # Last, short line: the flow keeps only the tail of stdout.
+        print("INCOMPLETE: SI noise/glitch sign-off not measured "
+              "(ADVISORY_SCREEN_ONLY)")
+        return 2
     return 0 if report["summary"]["pass"] else 1
 
 

@@ -23,8 +23,11 @@ def _write_json(path: Path, data: dict):
 
 
 def test_pass_json_no_violations(tmp_path):
+    # U12: only an artefact that DECLARES timing-window SI sign-off can PASS;
+    # an advisory screen reads NOT_MEASURED (test_u12_*).
     _write_json(tmp_path / "reports" / "phase3" / "si_crosstalk.json",
-                {"max_crosstalk_noise": 0.02, "violations_count": 0})
+                {"max_crosstalk_noise": 0.02, "violations_count": 0,
+                 "timing_window_signoff": True})
     result = _run(tmp_path)
     assert result.returncode == 0
     report = json.loads((tmp_path / "out.json").read_text())
@@ -34,7 +37,8 @@ def test_pass_json_no_violations(tmp_path):
 def test_pass_rpt_format(tmp_path):
     rpt = tmp_path / "reports" / "phase3" / "si_crosstalk.rpt"
     rpt.parent.mkdir(parents=True, exist_ok=True)
-    rpt.write_text("Crosstalk analysis complete\nNo violations\n")
+    # U12: a declared timing-window sign-off, not a screen.
+    rpt.write_text("Timing-window crosstalk analysis complete\nNo violations\n")
     result = _run(tmp_path)
     assert result.returncode == 0
 
@@ -53,7 +57,8 @@ def test_fail_violations_no_waiver(tmp_path):
 
 def test_pass_violations_with_waiver(tmp_path):
     _write_json(tmp_path / "reports" / "phase3" / "si_crosstalk.json",
-                {"max_crosstalk_noise": 0.15, "violations_count": 3})
+                {"max_crosstalk_noise": 0.15, "violations_count": 3,
+                 "timing_window_signoff": True})     # U12: a declared sign-off
     _write_json(tmp_path / "waivers.json",
                 {"waivers": [{"step": "si_crosstalk", "reason": "accepted"}]})
     result = _run(tmp_path)
@@ -105,7 +110,11 @@ def test_a_coherent_artefact_still_PASSES(tmp_path):
     `benchmark-data/ic/caravel_user_project/v1.9.43_sky130A`; a rule that
     reddened them would be a ban, not a check."""
     _write_json(tmp_path / "reports" / "phase3" / "si_crosstalk.json", dict(_COHERENT))
-    assert _run(tmp_path).returncode == 0
+    # U12: an advisory screen is NOT_MEASURED (rc 2), never PASS — and never
+    # FAIL either: no coherence rule reddens it.
+    assert _run(tmp_path).returncode == 2
+    assert "SI_ADVISORY_SCREEN_ONLY" in _rules(tmp_path)
+    assert json.loads((tmp_path / "out.json").read_text())["summary"]["errors_count"] == 0
 
 
 @pytest.mark.parametrize("field,value,rule", [
@@ -163,4 +172,6 @@ def test_fields_the_document_does_not_state_are_not_demanded(tmp_path):
     """
     _write_json(tmp_path / "reports" / "phase3" / "si_crosstalk.json",
                 {"max_crosstalk_noise": 0.02, "violations_count": 0})
-    assert _run(tmp_path).returncode == 0
+    # U12: rc 2 (advisory => NOT_MEASURED), and no ERROR demanded a field.
+    assert _run(tmp_path).returncode == 2
+    assert json.loads((tmp_path / "out.json").read_text())["summary"]["errors_count"] == 0

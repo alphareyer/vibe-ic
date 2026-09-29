@@ -41,9 +41,12 @@ def test_advisory_screen_disclosed(tmp_path):
         "verdict": "ADVISORY_SCREEN_ONLY"})
     findings, stats = SI.audit(tmp_path)
     rep = SI.build_report(findings, stats, str(tmp_path))
-    assert rep["verdict"] == "ADVISORY_SCREEN_ONLY"
+    # U12 (2026-09-29): an advisory screen is NOT_MEASURED, never PASS; the
+    # tier is still named.
+    assert rep["verdict"] == "NOT_MEASURED"
+    assert rep["screen_tier"] == "ADVISORY_SCREEN_ONLY"
     assert rep["summary"]["advisory_screen_only"] is True
-    assert rep["summary"]["pass"] is True  # advisory: rc 0, but NAMED
+    assert rep["summary"]["pass"] is True  # no ERROR finding
     cats = {f["category"] for f in rep["findings"]}
     assert "SI_ADVISORY_SCREEN_ONLY" in cats
     assert "SI_COUPLING_DOMINATED_WATCHLIST" in cats

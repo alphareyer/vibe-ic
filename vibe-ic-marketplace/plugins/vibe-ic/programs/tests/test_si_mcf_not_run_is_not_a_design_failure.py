@@ -279,6 +279,24 @@ def _b_dropped_fold_at_a_zero_denominator(root: Path) -> Path:
                     hold_bounded=_SPEF_ZERO_VALUE_COUPLING)
 
 
+def _b_windows_not_measured(root: Path) -> Path:
+    """U12: the emitter's window run resolved ZERO windows (cx_spmic2_run:
+    0 of 582, pad cells unlinked)."""
+    proj = _project(root)
+    wj = proj / "windows.json"
+    wj.write_text(json.dumps({"pins": {}}))
+    rp = proj / "reports" / "phase3" / "si_mcf_sta.json"
+    doc = json.loads(rp.read_text())
+    doc["windows_json"] = str(wj)
+    rp.write_text(json.dumps(doc))
+    return proj
+
+
+def _b_slack_not_measured(root: Path) -> Path:
+    """U12: the SI-bounded STA produced no slack for a corner."""
+    return _project(root, setup_after=None)
+
+
 #: category -> builder, for the categories that mean NOTHING WAS EXAMINED.
 NOT_RUN_CASES = {
     "NO_REPORT": _b_no_report,
@@ -297,6 +315,9 @@ EXAMINED_AND_WRONG_CASES = {
     "FOLD_WITHOUT_SOURCE": _b_fold_without_source,
     "FOLD_NOT_APPLIED": _b_fold_not_applied,
     "SLACK_BETTER_THAN_BOUND": _b_slack_better_than_bound,
+    # U12: a report that times nothing is examined and wrong, never a pass.
+    "WINDOWS_NOT_MEASURED": _b_windows_not_measured,
+    "SLACK_NOT_MEASURED": _b_slack_not_measured,
 }
 
 #: The same five categories, in the ZERO-DENOMINATOR shapes they are reachable

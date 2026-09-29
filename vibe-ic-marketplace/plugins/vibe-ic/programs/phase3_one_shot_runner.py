@@ -72154,7 +72154,19 @@ def _emit_si_crosstalk_report(project: Path, top: str, spef: Optional[Path],
         except OSError:
             cg, cc = {}, {}
         if cc:  # the SPEF carried inter-net coupling caps
-            m = _si_coupling_metrics(cg, cc)
+            # U12 — the supply is the one the PDK's corner liberty declares,
+            # never a 1.8 V literal (a 5 V library screened at 1.8 V reports
+            # noise for a different circuit). Unresolved stays None, stated.
+            _si_vdd_v = None
+            if pdk is not None and getattr(pdk, "liberty", None):
+                try:
+                    import si_mcf_sta as _si_sta            # noqa: PLC0415
+                    _si_vdd_v = _si_sta.liberty_supply_v(
+                        _si_sta.read_liberty_text(str(pdk.liberty), container))
+                except Exception:                            # noqa: BLE001
+                    _si_vdd_v = None
+            m = _si_coupling_metrics(
+                cg, cc, vdd_mv=(_si_vdd_v * 1000.0 if _si_vdd_v else 0.0))
             # IMPORTANT honesty boundary: a high coupling ratio on a DRIVEN net is NOT a
             # proven SI failure — the capacitive-divider noise bound assumes a FLOATING
             # victim, which dense digital routing never is (mean ratio ~0.66 is normal for
@@ -72173,8 +72185,11 @@ def _emit_si_crosstalk_report(project: Path, top: str, spef: Optional[Path],
                            "driven victim sees far less. Coupling-dominated (>0.90) nets are "
                            "a watch-list, NOT proven failures: a full SI sign-off needs "
                            "timing-window + driver-strength analysis (commercial SI tool)."),
-                "vdd_mv": 1800.0,
-                "max_crosstalk_noise": m["max_crosstalk_noise_mv"],
+                "vdd_mv": (_si_vdd_v * 1000.0 if _si_vdd_v else None),
+                "vdd_source": ("pdk corner liberty voltage_map"
+                               if _si_vdd_v else "NOT_RESOLVED"),
+                "max_crosstalk_noise": (m["max_crosstalk_noise_mv"]
+                                        if _si_vdd_v else None),
                 "max_coupling_ratio": m["max_coupling_ratio"],
                 "mean_coupling_ratio": m["mean_coupling_ratio"],
                 "nets_analyzed": m["nets"],
@@ -72192,9 +72207,9 @@ def _emit_si_crosstalk_report(project: Path, top: str, spef: Optional[Path],
             # touches violations_count / max_crosstalk_noise (the gate-read
             # schema), so the si_crosstalk_check gate still PASSES. Pure
             # fall-through if pdk/container/STA are unavailable.
-            if pdk is not None and container is not None:
+            if pdk is not None and container is not None and _si_vdd_v:
                 _merge_si_timing_aware(project, top, pdk, container, spef,
-                                       sbody, notes)
+                                       sbody, notes, vdd_v=_si_vdd_v)
             _aa.write_text(si_rpt.parent / "si_crosstalk.json",
                 json.dumps(sbody, indent=2) + "\n")
             # Advisory timing-window tail (only present when the upgrade ran).
@@ -72233,7 +72248,7 @@ def _emit_si_crosstalk_report(project: Path, top: str, spef: Optional[Path],
                 f"nets_elevated (ratio>0.5): {m['nets_elevated_gt0p5']}\n"
                 f"nets_coupling_dominated (ratio>0.9, advisory watch-list): {dominated}\n"
                 f"max_crosstalk_noise: {m['max_crosstalk_noise_mv']} mV "
-                "(worst-case FLOATING-victim capacitive-divider bound @ Vdd=1.8V; "
+                f"(worst-case FLOATING-victim capacitive-divider bound @ Vdd={_si_vdd_v}V; "
                 "driven victims see far less)\n"
                 "violations_count: 0 (screen — coupling ratio alone is not a proven "
                 "failure; full SI sign-off needs a timing-window/driver-strength tool)\n"
