@@ -129,7 +129,8 @@ def test_count_placed_cells_from_netlist():
 # ──────────────────────────────────────────────────────────────────
 # helpers to synthesise a spare_cells.json
 # ──────────────────────────────────────────────────────────────────
-def _good_plan(n=20, density=0.02, tied=True, distributed=True):
+def _good_plan(n=20, density=0.02, tied=True, distributed=True,
+               enumerated=False):
     instances = []
     for i in range(n):
         if distributed:
@@ -149,10 +150,12 @@ def _good_plan(n=20, density=0.02, tied=True, distributed=True):
         "placed_cells_est": int(round(n / density)) if density else 0,
         "types": {"inverter": n},
         "tied_off": tied,
-        # the per-pin enumeration the insertion step prints (U6)
-        "tie_off": {"tied_off": tied, "inputs": [
+        # the per-pin enumeration the insertion step prints (U6); step 18's
+        # coverage gate proves the tie-off from it
+        **({"tie_off": {"tied_off": tied, "inputs": [
             {"inst": i["name"], "pin": "I", "use": "SIGNAL",
-             "net": f"spare_tielo_{i['name']}"} for i in instances]},
+             "net": f"spare_tielo_{i['name']}"} for i in instances]}}
+           if enumerated else {}),
         "instances": instances,
         "spare_pads": [],
     }
@@ -169,7 +172,7 @@ def _write_project(tmp_path, plan):
 # 3) coverage-check PASS / FAIL
 # ──────────────────────────────────────────────────────────────────
 def test_coverage_pass_good_plan():
-    r = cov.evaluate_coverage(_good_plan(), target_density=0.02)
+    r = cov.evaluate_coverage(_good_plan(enumerated=True), target_density=0.02)
     assert r["verdict"] == "PASS", r["reasons"]
     assert r["density_ok"] and r["distribution_ok"] and r["tie_off_ok"]
 
@@ -196,7 +199,7 @@ def test_coverage_fail_below_density():
 
 
 def test_coverage_check_cli_pass(tmp_path):
-    proj = _write_project(tmp_path, _good_plan())
+    proj = _write_project(tmp_path, _good_plan(enumerated=True))
     cp = subprocess.run(
         [sys.executable, str(COV_SCRIPT), str(proj),
          "--json", str(tmp_path / "out.json")],

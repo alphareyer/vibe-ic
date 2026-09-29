@@ -356,6 +356,17 @@ def _check_erc(project_dir: Path, findings: List[Finding], stats: dict) -> None:
     if m:
         floating = int(m.group(1))
         stats["erc_floating_nets"] = floating
+    # Floating PINS (OpenROAD RSZ-0095: instance inputs with no net) are a
+    # separate count from floating nets. The report headline used to carry
+    # the net count alone, so `ERC floating nets: 0 / ERC clean: YES` shipped
+    # over a transcript listing `spare_dff_0/CLK` as a floating pin (U6).
+    pm = re.search(r"ERC floating pins\s*[:=]\s*([0-9]+)", text, re.I)
+    if pm is None:
+        pm = re.search(r"found\s+([0-9]+)\s+floating pins", text, re.I)
+    floating_pins = int(pm.group(1)) if pm else 0
+    stats["erc_floating_pins"] = floating_pins
+    if floating_pins:
+        floating = (floating or 0) + floating_pins
 
     clean_no = re.search(r"ERC clean\s*[:=]\s*NO", text, re.I) is not None
     clean_yes = re.search(r"ERC clean\s*[:=]\s*YES", text, re.I) is not None
@@ -386,7 +397,8 @@ def _check_erc(project_dir: Path, findings: List[Finding], stats: dict) -> None:
             import erc_float_owner_classify as _efc  # noqa: PLC0415
             names = _efc.parse_floats(text)
             if names:
-                classified = _efc.classify(names)
+                classified = _efc.classify(
+                    names, input_pins=_efc.parse_floating_input_pins(text))
                 functional = classified["functional_count"]
         except Exception:
             classified = None  # fall through to raw-count FAIL
