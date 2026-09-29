@@ -34,3 +34,11 @@ synthesis recipes, the `SYNTHESIS` retry, area retry, reference-flow LCU knobs,
 hard-macro blackboxes and readmemh input staging. Their direct implementations
 remain present. This source repair makes no full-IC PASS claim and does not
 repeat old synthesis, placement, routing or signoff runs.
+
+The final gate exposed a separate mutation-receipt parser defect: inherited
+pytest verbosity wraps a completed native summary in `=` characters, which the
+old census reader called ARM_DIED. `tools/liar_census.py` now accepts that native
+closing decoration while retaining the dead-session guard. The unchanged real
+terminal is retained in `tools/fixtures/pytest_verbose_terminal.txt`; bounded
+controls include the seven exact gate failures and the existing timeout/empty
+completion cases. No assertion or verdict threshold was relaxed.

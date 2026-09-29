@@ -1894,7 +1894,9 @@ _PYTEST_PASSED = re.compile(r"(\d+) passed")
 #: is the safe one -- it declines rather than accuses -- but it silently destroys
 #: coverage, which is the same family of defect one step over.
 _PYTEST_DONE = re.compile(
-    r"in \d+(?:\.\d+)?s(?:\s*\(\d+:\d{2}:\d{2}\))?\s*$", re.M)
+    # Verbose pytest wraps its real closing summary in '=' characters. A
+    # complete nested arm remains a measurement when verbosity is inherited.
+    r"in \d+(?:\.\d+)?s(?:\s*\(\d+:\d{2}:\d{2}\))?(?:[ \t]+=+)?\s*$", re.M)
 
 
 @dataclass
