@@ -149,6 +149,17 @@ _RUNNER_VOICE_RE = re.compile(r"^\s*\[formal_property_run\].*$", re.MULTILINE)
 # literal, so the classification is chip-AGNOSTIC.
 _ENV_GAP_SIGNATURES = (
     # (regex, missing_capability, remedy_template)
+    # The container IS running, but on other bytes than the pinned runtime, so
+    # `_container_exec` refused to attach before any engine ran. MEASURED on
+    # 8HD-6 (2026-09-29): vibeic-eda on 0.3.85 vs the pinned digest -- the
+    # refusal escaped as an uncaught traceback and no manifest was written.
+    (re.compile(r"CONTAINER_IMAGE_MISMATCH:[^\n]*"),
+     "the pinned EDA image",
+     "the container named {searched_container!r} runs an image other than the "
+     "pinned runtime, so the flow refused to attach and no engine ran. Recycle "
+     "it to the pinned image (tools/vibeic-eda/restart-eda.sh, or docker rm -f "
+     "{searched_container!r} and re-create it from the pinned reference), or "
+     "run this step on a host whose container matches the pin"),
     # ORDER MATTERS, most specific first. A container was NAMED and the
     # `docker` CLI through which we would reach it is absent — this host has
     # no such container because it has no containers. The generic docker-daemon
@@ -1238,7 +1249,10 @@ def detect_engines(container: Optional[str]) -> Dict[str, bool]:
         # (e.g. "No such container") — the probe result is not evidence.
         if p.returncode != 0 and not found:
             reachable = False
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError,
+            _ce.ContainerImageMismatch):
+        # A refused attach (the container runs other bytes than the pin) is
+        # the container NOT probed: nothing about its tools is known.
         found = set()
         reachable = False
     avail: Dict[str, bool] = {t: (reachable and t in found)
@@ -1587,7 +1601,12 @@ def _run_sby(sby_path: Path, formal_dir: Path, container: Optional[str],
     _ul = f"ulimit -v {_lim}; " if _lim else ""
     inner = (f"{_ul}{path_export}; cd {formal_dir} && rm -rf {sby_path.stem} "
              f"&& sby -f {name}")
-    cmd = _ce.docker_exec_argv(container, "timeout", "-k", str(_CE.DEFAULT_KILL_GRACE_S), str(int(timeout)), "bash", "-lc", inner)
+    try:
+        cmd = _ce.docker_exec_argv(container, "timeout", "-k", str(_CE.DEFAULT_KILL_GRACE_S), str(int(timeout)), "bash", "-lc", inner)
+    except _ce.ContainerImageMismatch as exc:
+        # The refusal is the transcript: `classify_env_gap` names it, and the
+        # run writes its ENV_UNAVAILABLE manifest instead of a traceback.
+        return f"[formal_property_run] {exc}\n"
     timeout = int(timeout) + _CE.CLIENT_GRACE_S
     try:
         p = _pr.run(cmd, cwd=str(formal_dir), capture_output=True,
