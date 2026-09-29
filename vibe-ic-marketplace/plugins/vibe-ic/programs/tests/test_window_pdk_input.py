@@ -136,3 +136,15 @@ def test_a_pdk_field_outside_the_pdk_root_still_refuses(tmp_path):
     copied, error = _publish(project, isolated, str(outside))
     assert copied == []
     assert error == f"window input outside project: {outside}"
+
+
+def test_a_sentence_too_long_to_be_a_file_name_is_not_a_citation(tmp_path):
+    """A published record carries prose (an LVS verdict's `message`). Probing a
+    >255-byte sentence as a path raised ENAMETOOLONG out of `is_file`, and the
+    whole publication was refused (spm window, 2026-09-29)."""
+    _pdk, project, isolated, _, _ = _tree(tmp_path)
+    out = isolated / "reports/phase3/lvs_verdict.json"
+    out.write_text(json.dumps({"status": "PASS", "message": "netgen LVS: " + "x" * 400}))
+    copied, error = p3._phase3_window_publication(project, isolated, [out], RUN)
+    assert error == "", error
+    assert copied == [str(project / "reports/phase3/lvs_verdict.json")]

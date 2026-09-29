@@ -62,6 +62,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 
 import argparse
+import errno
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import functools
@@ -76076,8 +76077,18 @@ def _phase3_window_publication(project: Path, isolated: Path,
                     if value.startswith(("http:", "https:")):
                         return
                     candidate = private / value
-                    if (path_field or Path(value).is_absolute()
-                            or candidate.is_file() or candidate.is_symlink()):
+                    try:
+                        names_file = candidate.is_file() or candidate.is_symlink()
+                    except OSError as exc:
+                        # A sentence longer than the kernel accepts as a file
+                        # name (ENAMETOOLONG) names no file; `is_file` does
+                        # not swallow that errno and it refused the whole
+                        # publication (spm, lvs_verdict.json `message`). Any
+                        # other error still refuses.
+                        if exc.errno != errno.ENAMETOOLONG:
+                            raise
+                        names_file = False
+                    if (path_field or Path(value).is_absolute() or names_file):
                         cite(value)
                         return
                     for token in re.findall(
