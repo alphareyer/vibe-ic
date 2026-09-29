@@ -1031,8 +1031,14 @@ def _touch(project: Path, rel: str, body: str = "x\n") -> Path:
     # Step 32 repair: the trigger decision is written on EVERY branch, including
     # the one that writes neither repair_log.json nor no_repair_needed.flag.
     (32, ["phase3/stage3/postroute_timing_repair/no_repair_needed.flag",
-          "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json"],
+          "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json",
+          "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json"],
      "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json"),
+    # ... and the canonical decision beside it (STEP32FLAG, review wave 58).
+    (32, ["phase3/stage3/postroute_timing_repair/no_repair_needed.flag",
+          "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json",
+          "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json"],
+     "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json"),
     # Step 34 metal fill: reports/density.{json,rpt} come off the same success
     # path as filled.def, and TWO gates read them (this step's and Step 31's).
     (34, ["phase3/stage3/pnr/filled.def",

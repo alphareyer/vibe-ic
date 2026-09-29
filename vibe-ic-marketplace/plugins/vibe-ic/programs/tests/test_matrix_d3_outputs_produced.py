@@ -6259,6 +6259,9 @@ DECLARED_OUTSIDE_THE_PUBLISH_CONTRACT: Tuple[Tuple[str, str], ...] = (
     ("32", "phase3/stage3/postroute_timing_repair/repair_log.json OR "
            "phase3/stage3/postroute_timing_repair/no_repair_needed.flag"),
     ("32", "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json"),
+    # STEP32FLAG (review wave 58): the canonical Step-32 decision, beside the
+    # declared record above and under the same unpublished prefix.
+    ("32", "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json"),
     ("34", "phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done"),
     # JOINED 2026-09-22, and the reason this pin demands is the SECOND of its
     # three: THE FLOW MOVED THE DECLARATION. Step 37 always wrote this
