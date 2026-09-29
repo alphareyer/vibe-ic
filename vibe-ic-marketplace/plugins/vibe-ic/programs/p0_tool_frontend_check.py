@@ -36,6 +36,17 @@ import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the 
 # spm 0 diagnostics, subservient (serv 1.4.0) 0 LATCH.
 BLOCKING_CODES = frozenset({"SELRANGE", "PINNOTFOUND", "MULTIDRIVEN", "LATCH"})
 
+#: P0 KEEPS THE ELABORATION (audit §3.16 P0, R-0929-TOOL-DEFAULT wave 1). The
+#: Yosys elaboration used to be written to /dev/null while 4+ regex port parsers
+#: re-derived the same facts. It is now kept here, the tool's own JSON, for
+#: readers to use instead of re-parsing RTL text. Absent unless this run's
+#: elaboration succeeded (a stale copy is removed first).
+RTL_ELAB_REL = "reports/audit/phase2/rtl_elab.json"
+#: Scratch directory prefix the tool writes into; the ONLY writable mount of
+#: the docker path (the project stays read-only).
+_ELAB_SCRATCH_PREFIX = "vibeic_p0_elab_"
+_ELAB_TARGET_RE = re.compile(r"write_json (/\S*/" + _ELAB_SCRATCH_PREFIX + r"[^/\s]+)/")
+
 # RETIRED BY THIS FRONT END, and what blocks each one's finding now:
 #   bitwidth_consistency_check  bitselect-out-of-range -> SELRANGE     (program deleted)
 #   module_port_audit           port-name MISMATCH     -> PINNOTFOUND  (kept as a port
@@ -161,11 +172,16 @@ def _invoke(tool: str, args: list[str], project: Path,
         image = image or default_image()
         root = str(project.resolve())
         container = _dwd.ephemeral_container_name(f"vibeic_p0_{tool}")
+        # The one writable mount: the elaboration scratch directory this
+        # program created for its own `write_json` (never the project).
+        scratch = [m.group(1) for a in args for m in _ELAB_TARGET_RE.finditer(a)]
         command = ["docker", "run", "--rm", "--name", container,
                    *_dmem.docker_memory_flags(),
                    "--network", "none",
-                   "-v", f"{root}:{root}:ro", "--entrypoint", tool,
-                   image, *args]
+                   "-v", f"{root}:{root}:ro",
+                   *[x for d in sorted(set(scratch)) for x in ("-v", f"{d}:{d}")],
+                   "-u", f"{os.getuid()}:{os.getgid()}",
+                   "--entrypoint", tool, image, *args]
         kw = {"kill": _dwd.ephemeral_container_reap(container),
               "cpu_probe": _dwd.ephemeral_container_cpu_probe(container)}
     else:
@@ -342,7 +358,20 @@ def _diagnostic_file(name: str, rtl: list[str]) -> str | None:
 
 def check(project: Path, image: str | None = None) -> dict:
     """`image` is the declared one (`--image`); None resolves it only if a
-    tool actually has to run in docker."""
+    tool actually has to run in docker. The elaboration scratch directory
+    lives exactly as long as this call, on every return path."""
+    import tempfile
+    scratch = Path(tempfile.mkdtemp(prefix=_ELAB_SCRATCH_PREFIX))
+    try:
+        return _check(project, image, scratch)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _check(project: Path, image: str | None, scratch: Path) -> dict:
+    # A previous run's elaboration is never this run's (removed before any
+    # return path, so no RTL / a refusal leaves none behind).
+    (Path(project) / RTL_ELAB_REL).unlink(missing_ok=True)
     files = rtl_source_files(project)
     result = {"program": "p0_tool_frontend_check", "passed": False,
               "sources": [str(p.relative_to(project)) for p in files],
@@ -361,12 +390,14 @@ def check(project: Path, image: str | None = None) -> dict:
     selected_top = f"--top {top} " if top else ""
     hierarchy = f"-top {top}" if top else "-auto-top"
 
+    elab_out = scratch / "rtl_elab.json"
+
     def _script(extra: str = "") -> str:
         return ("read_slang --single-unit " + extra + selected_top +
                 " ".join("-I " + directory for directory in include_dirs) +
                 " " + " ".join(names) +
                 "; hierarchy -check " + hierarchy +
-                "; proc; write_json /dev/null")
+                f"; proc; write_json {elab_out}")
     import _eda_pin
     try:
         yosys_image = _route_image("yosys", image)
@@ -457,6 +488,8 @@ def check(project: Path, image: str | None = None) -> dict:
                                             "execution": "host" if shutil.which("verilator") else verilator_image,
                                             "diagnostics": diagnostics,
                                             "output": lint_log[-8000:]}
+    result["elaboration"] = _keep_elaboration(project, elab_out,
+                                              yosys.returncode, top)
     if yosys.returncode:
         result["findings"].append("Yosys elaboration failed")
     if verilator.returncode:
@@ -467,6 +500,33 @@ def check(project: Path, image: str | None = None) -> dict:
                 f"Verilator {diagnostic['severity']}-{diagnostic['code']}")
     result["passed"] = not result["findings"]
     return result
+
+
+def _keep_elaboration(project: Path, produced: Path, rc: int,
+                      top: str | None) -> dict:
+    """Publish the tool's elaboration JSON at RTL_ELAB_REL when THIS run
+    elaborated; say why not otherwise. A record, not a verdict: the elaboration
+    verdict is `Yosys elaboration failed` above."""
+    rec: dict = {"path": RTL_ELAB_REL, "written": False}
+    if rc:
+        rec["why"] = f"yosys exited {rc}; no elaboration to keep"
+        return rec
+    try:
+        doc = json.loads(produced.read_text())
+    except (OSError, ValueError) as exc:
+        rec["why"] = f"yosys wrote no readable JSON ({type(exc).__name__})"
+        return rec
+    modules = doc.get("modules") if isinstance(doc, dict) else None
+    if not isinstance(modules, dict) or not modules:
+        rec["why"] = "the JSON holds no module"
+        return rec
+    import _atomic_artefact as _aa
+    _aa.write_bytes(project / RTL_ELAB_REL, produced.read_bytes())
+    rec.update(written=True, modules=len(modules),
+               top=top or next((n for n, m in modules.items()
+                                if str((m.get("attributes") or {}).get("top", ""))
+                                .strip("0") == "1"), None))
+    return rec
 
 
 def main() -> int:
