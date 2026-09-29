@@ -231,16 +231,17 @@ CPU_CASES = [
 ]
 
 
-def _chip_top() -> str:
+def _chip_top(ports=None, override: str = "") -> str:
+    ports = CPU_PORTS if ports is None else ports
     lines = ["module chip_top ("]
     decls = []
-    for d, w, n in CPU_PORTS:
+    for d, w, n in ports:
         rng = f" [{w - 1}:0]" if w > 1 else ""
         decls.append(f"    {d}{rng} {n}")
     lines.append(",\n".join(decls + ["    inout VDD", "    inout VSS"]))
     lines.append(");")
     conns = []
-    for d, w, n in CPU_PORTS:
+    for d, w, n in ports:
         rng = f" [{w - 1}:0]" if w > 1 else ""
         lines.append(f"    wire{rng} {n}__core;")
         for b in range(w):
@@ -252,13 +253,14 @@ def _chip_top() -> str:
                 lines.append(f"    PADOUT u_pad_{n}_{b} (.A({n}__core{sfx}), "
                              f".PAD({n}{sfx}));")
         conns.append(f".{n}({n}__core)")
-    lines.append(f"    {CPU} u_core ({', '.join(conns)});")
+    lines.append(f"    {CPU} {override}u_core ({', '.join(conns)});")
     lines.append("endmodule")
     return "\n".join(lines) + "\n"
 
 
 def _cpu_project(tmp_path: Path, *, decl=DECL, load=GOOD_LOAD,
-                 cases=CPU_CASES) -> Path:
+                 cases=CPU_CASES, rtl=None, ports=None,
+                 override: str = "") -> Path:
     proj = tmp_path / "cpu"
     gd = proj / "phase1" / "generated_docs"
     w = base._write
@@ -269,10 +271,11 @@ def _cpu_project(tmp_path: Path, *, decl=DECL, load=GOOD_LOAD,
     w(gd / "L10_TEST_CASES.json",
       json.dumps({"test_cases": cases}, ensure_ascii=False))
     w(proj / "phase2" / "stage1" / "rtl" / f"{CPU}.v",
-      CPU_V.replace("LOADVAL", load))
+      (rtl or CPU_V).replace("LOADVAL", load))
     w(proj / "plugin_output" / "declaration.json", json.dumps(decl))
     w(proj / "input" / "submission_template" / "SELF_TAPEOUT.txt", "self\n")
-    w(proj / "phase3" / "stage3" / "pnr" / "chip_top_io.v", _chip_top())
+    w(proj / "phase3" / "stage3" / "pnr" / "chip_top_io.v",
+      _chip_top(ports, override))
     w(proj / "reports" / "phase3" / "io_pad_chip_top.json", json.dumps(
         {"verdict": "WROTE", "chip_top_module": "chip_top",
          "core_module": CPU,
@@ -474,3 +477,168 @@ def test_the_builder_is_deterministic_and_sized_to_the_delivered_memory(
     assert a["tb_text"] == b["tb_text"] and a["hex_text"] == b["hex_text"]
     assert "localparam integer MEMSIZE = 256;" in a["tb_text"]
     assert f"{CPU} u_dut (" in a["tb_text"] and f"{CPU} #" not in a["tb_text"]
+
+
+# ===========================================================================
+# D. REVIEW WAVE 58 (S5DP) — each finding pinned
+# ===========================================================================
+def _run(proj):
+    rec = _gen(proj)
+    dp = rec["cpu_datapath"]
+    log = (proj / dp["run_log"]).read_text() if dp.get("run_log") else ""
+    return rec, dp, log
+
+
+# ---- MAJOR: a bare percentage is not a coverage figure by itself ----------
+def test_a_bare_percentage_row_that_never_ran_blocks_step5(tmp_path, cpu_env,
+                                                           capsys):
+    """RED on 381297e80: an ISA row written '100%' (no coverage word), never
+    run and never credited (no data-path program), read PASS / gate rc 0."""
+    decl = {k: v for k, v in DECL.items() if k != "sram_interface"}
+    rows = [CPU_CASES[0], {"name": "rv32i_suite", "kind": "functional_vector",
+                           "stimulus": "整套 RV32I 指令單元測試",
+                           "expected": "100%"}]
+    proj = _cpu_project(tmp_path, decl=decl, cases=rows)
+    rec = _gen(proj)
+    by = {c["name"]: c for c in rec["cases"]}
+    assert by["rv32i_suite"]["state"] == "no_oracle"
+    assert rec["verdict"] == "NOT_MEASURED", rec["reason"]
+    rc, res, _ = base._run_gate(proj, tmp_path, capsys)
+    assert rc == 2 and res["rule"] == "step5_bar_unmeasured_cases", res
+
+
+def test_a_row_naming_coverage_is_listed_with_its_basis(tmp_path, arith_class,
+                                                        capsys):
+    """KNOWN-POSITIVE: the landed spm-shaped row (`toggle_branch_coverage`,
+    '≥ 95%') is still exempt, and now LISTED with the text that names it."""
+    proj = base._mk_project(tmp_path, die=True)
+    rec = _fsf().generate(proj, "ctr", dispatch=base._FakeSim(),
+                          model_resolver=base._resolver)
+    assert rec["verdict"] == "PASS", rec["reason"]
+    rc, res, _ = base._run_gate(proj, tmp_path, capsys)
+    assert rc == 0, res
+    (d,) = res["step5_dispositions"]
+    assert d["case"] == "toggle_branch_coverage"
+    assert d["disposition"] == "coverage_figure_not_a_case"
+    assert d["basis"]["names_coverage_in"] == "name"
+    fsf = _fsf()
+    assert fsf.coverage_figure_exemption({"name": "c", "expected": "100%"}) \
+        is None
+    assert fsf.coverage_figure_exemption(
+        {"name": "c", "stimulus": "line 覆蓋率", "expected": "≥ 90%"})
+
+
+# ---- (b) the data-path record cannot be relabelled ------------------------
+@pytest.mark.parametrize("label", ["errored", "no_oracle"])
+def test_a_failed_datapath_cannot_be_relabelled(tmp_path, cpu_env, capsys,
+                                                label):
+    """RED on 381297e80: the relabelled record read gate rc 0 PASS."""
+    rows = [CPU_CASES[0]]
+    proj = _cpu_project(tmp_path, load=BROKEN_LOAD, cases=rows)
+    rec = _gen(proj)
+    assert rec["cpu_datapath"]["state"] == "failed"
+    rec["cpu_datapath"]["state"] = label
+    _fsf().record_path(proj).write_text(json.dumps(rec))
+    rc, res, _ = base._run_gate(proj, tmp_path, capsys)
+    assert rc == 2 and res["rule"] == "functional_record_inconsistent", res
+    assert "cpu_datapath_program" in res["rationale"]
+
+
+def test_a_datapath_record_cannot_claim_no_program_when_one_builds(
+        tmp_path, cpu_env, capsys):
+    rows = [CPU_CASES[0]]
+    proj = _cpu_project(tmp_path, load=BROKEN_LOAD, cases=rows)
+    rec = _gen(proj)
+    rec["cpu_datapath"] = {"name": "cpu_datapath_program",
+                           "state": "no_oracle", "reason": "none"}
+    _fsf().record_path(proj).write_text(json.dumps(rec))
+    rc, res, _ = base._run_gate(proj, tmp_path, capsys)
+    assert rc == 2 and "builds from the design input now" in \
+        res["rationale"], res
+
+
+# ---- (c) the delivered memory is the one the top elaborates ---------------
+def test_a_memory_the_top_does_not_elaborate_is_refused(tmp_path):
+    """RED on 381297e80: memsize_bytes alone decided the TB memory."""
+    big = CPU_V.replace("parameter memsize = 256", "parameter memsize = 2048")
+    proj = _cpu_project(tmp_path, rtl=big)
+    built, why = _cdp().build(proj, CPU, _ports())
+    assert built is None and "memsize=2048" in why and "RTL default" in why
+    decl = json.loads(json.dumps(DECL))
+    decl["core_parameters"]["memsize"] = 512
+    (proj / "plugin_output/declaration.json").write_text(json.dumps(decl))
+    built, why = _cdp().build(proj, CPU, _ports())
+    assert built is None and "core_parameters memsize=512" in why
+
+
+def test_the_chip_tops_parameter_override_is_what_counts(tmp_path, cpu_env):
+    proj = _cpu_project(tmp_path, override="#(.memsize(512)) ")
+    rec = _gen(proj)
+    dp = rec["cpu_datapath"]
+    assert dp["state"] == "no_oracle", dp
+    assert "memsize=512" in dp["reason"] and "override" in dp["reason"]
+    ok, _ = _cdp().build(proj, CPU, _ports(), top_text=_chip_top())
+    assert ok["facts"]["memory_parameter"]["parameter"][0]["elaborated"] == 256
+
+
+# ---- (d) each data-path check has a design that fails it ------------------
+STRAY_V = CPU_V.replace(
+    "if (n == 3) begin n <= 0; pc <= pc + 4; st <= 0; end\n"
+    "               else n <= n + 1; end",
+    "if (n == 3) begin n <= 0; pc <= pc + 4; st <= 9; end\n"
+    "               else n <= n + 1; end\n"
+    "      9: begin o_mem_we <= 1; o_mem_waddr <= 8'h80; o_mem_wdata <= 8'h5a;"
+    " st <= 0; end")
+ONE_LANE_V = CPU_V.replace("4: begin o_mem_we <= 1;",
+                           "4: begin o_mem_we <= (n == 0);")
+NO_REN_V = (CPU_V.replace("output reg o_mem_we, output reg o_mem_ren);",
+                          "output reg o_mem_we);")
+            .replace(" o_mem_ren <= 0;", "").replace("o_mem_ren <= 1; ", ""))
+NO_REN_STUCK_V = NO_REN_V.replace("1: st <= 2;", "1: st <= 1;")
+NO_REN_PORTS = [p for p in CPU_PORTS if p[2] != "o_mem_ren"]
+NO_REN_DECL = json.loads(json.dumps(DECL))
+NO_REN_DECL["sram_interface"].pop("read_enable")
+
+
+def test_design_variants_are_well_formed():
+    for v in (STRAY_V, ONE_LANE_V, NO_REN_V, NO_REN_STUCK_V):
+        assert v != CPU_V
+    assert "o_mem_ren" not in NO_REN_V
+
+
+def test_write_discipline_catches_a_stray_store(tmp_path, cpu_env):
+    rec, dp, log = _run(_cpu_project(tmp_path, rtl=STRAY_V))
+    assert dp["state"] == "failed" and dp["checks"] == {"passed": 4,
+                                                         "total": 5}
+    assert "DATAPATH_CHECK write_discipline MISS (stray=2 " in log
+    assert rec["verdict"] == "FAIL"
+
+
+def test_byte_lanes_written_catches_a_one_lane_store(tmp_path, cpu_env):
+    _rec, dp, log = _run(_cpu_project(tmp_path, rtl=ONE_LANE_V))
+    assert dp["state"] == "failed"
+    assert "DATAPATH_CHECK byte_lanes_written MISS (00010001)" in log
+    assert "DATAPATH_CHECK reset_vector_fetch PASS" in log
+    assert "DATAPATH_CHECK write_discipline PASS" in log
+    assert dp["checks"] == {"passed": 2, "total": 5}
+
+
+def test_without_a_read_enable_the_program_still_runs_and_passes(tmp_path,
+                                                                 cpu_env):
+    """KNOWN-POSITIVE of the no-read-enable path: reads every cycle."""
+    _rec, dp, log = _run(_cpu_project(tmp_path, rtl=NO_REN_V,
+                                      ports=NO_REN_PORTS, decl=NO_REN_DECL))
+    assert "wire ren = 1'b1;" in (tmp_path / "cpu" / dp["tb"]).read_text()
+    assert dp["state"] == "passed", log[-600:]
+    assert "32 of 32 image bytes" in log
+
+
+def test_an_idle_read_address_at_the_reset_vector_is_not_a_fetch(tmp_path,
+                                                                  cpu_env):
+    """RED on 381297e80: with no read enable declared, the stalled core's read
+    address sits at the reset vector and reset_vector_fetch read PASS."""
+    _rec, dp, log = _run(_cpu_project(tmp_path, rtl=NO_REN_STUCK_V,
+                                      ports=NO_REN_PORTS, decl=NO_REN_DECL))
+    assert dp["state"] == "failed"
+    assert "DATAPATH_CHECK reset_vector_fetch MISS (1 of 32 image bytes" in log
+    assert dp["checks"] == {"passed": 1, "total": 5}
