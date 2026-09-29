@@ -149,6 +149,10 @@ def _good_plan(n=20, density=0.02, tied=True, distributed=True):
         "placed_cells_est": int(round(n / density)) if density else 0,
         "types": {"inverter": n},
         "tied_off": tied,
+        # the per-pin enumeration the insertion step prints (U6)
+        "tie_off": {"tied_off": tied, "inputs": [
+            {"inst": i["name"], "pin": "I", "use": "SIGNAL",
+             "net": f"spare_tielo_{i['name']}"} for i in instances]},
         "instances": instances,
         "spare_pads": [],
     }

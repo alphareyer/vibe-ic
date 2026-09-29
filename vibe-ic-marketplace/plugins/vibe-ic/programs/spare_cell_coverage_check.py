@@ -12,7 +12,9 @@ spare-cell ECO budget:
        spot) — measured as distinct grid-cell occupancy >= a minimum
        fraction of the spare count (and at least 2 distinct positions
        when there is more than 1 spare).
-    3. all spares are tied off (tied_off == true).
+    3. all spares are tied off (tied_off == true), PROVEN per pin: every
+       spare's every non-supply input is enumerated with a net
+       (`prove_inputs_tied`).
 
 Emits a JSON verdict and exits 0 (PASS) / 1 (FAIL) / 2 (IO/arg error).
 chip-AGNOSTIC: reads only the generic spare_cells.json schema.
@@ -80,6 +82,52 @@ def compute_distribution(instances: List[Dict[str, Any]]
     return n_distinct, total, distributed_ok
 
 
+def prove_inputs_tied(spare_plan: dict) -> Dict[str, Any]:
+    """Does the record ENUMERATE every spare input, each with a net?
+
+    `tied_off` and the `tie_off.connected/candidates` count are the insertion
+    step's statement about the pins IT chose to count. On spm v5c and
+    subservient v4 that count was "12/12" while each spare flop's CLK (a LEF
+    `USE CLOCK` pin, outside the step's SIGNAL-only filter) had no net in the
+    shipped netlist: the count was complete over a set that was not.
+
+    So the proof is the per-pin enumeration `tie_off.inputs` ({inst, pin,
+    use, net}) the insertion step prints for every non-supply input of every
+    spare: every recorded spare must appear in it, and every pin must carry a
+    net. A record without the enumeration proves nothing about the pins it
+    does not list, and is not a PASS. Pure, chip-AGNOSTIC."""
+    tie = spare_plan.get("tie_off")
+    inputs = tie.get("inputs") if isinstance(tie, dict) else None
+    names = [i.get("name") for i in spare_plan.get("instances") or []
+             if isinstance(i, dict) and i.get("name")]
+    out: Dict[str, Any] = {"proven": False, "enumerated": 0,
+                           "without_net": [], "spares_not_enumerated": []}
+    if not isinstance(inputs, list) or not inputs:
+        out["reason"] = (
+            "spare tie-off not proven per pin: the record carries a tie "
+            "COUNT but no enumeration of every spare input (tie_off.inputs), "
+            "so an input outside the counted set cannot be excluded")
+        return out
+    rows = [r for r in inputs if isinstance(r, dict)]
+    out["enumerated"] = len(rows)
+    out["without_net"] = sorted(f"{r.get('inst')}/{r.get('pin')}"
+                                for r in rows if not r.get("net"))
+    seen = {r.get("inst") for r in rows}
+    out["spares_not_enumerated"] = sorted(n for n in names if n not in seen)
+    if out["without_net"]:
+        out["reason"] = ("%d spare input(s) have no net: %s" % (
+            len(out["without_net"]), ", ".join(out["without_net"][:20])))
+    elif out["spares_not_enumerated"]:
+        out["reason"] = ("%d spare(s) with no enumerated input: %s" % (
+            len(out["spares_not_enumerated"]),
+            ", ".join(out["spares_not_enumerated"][:20])))
+    else:
+        out["proven"] = True
+        out["reason"] = ("%d spare input(s) enumerated over %d spare(s), "
+                         "each with a net" % (len(rows), len(names)))
+    return out
+
+
 def evaluate_coverage(spare_plan: dict,
                       target_density: float = _DEFAULT_TARGET_DENSITY
                       ) -> dict:
@@ -143,6 +191,10 @@ def evaluate_coverage(spare_plan: dict,
     tie_off_ok = bool(spare_plan.get("tied_off"))
     if not tie_off_ok:
         reasons.append("spares not tied off (tied_off != true)")
+    pin_proof = prove_inputs_tied(spare_plan)
+    if tie_off_ok and count > 0 and not pin_proof["proven"]:
+        tie_off_ok = False
+        reasons.append(pin_proof["reason"])
 
     verdict = "PASS" if (density_ok and distribution_ok and tie_off_ok
                          and count > 0) else "FAIL"
@@ -155,6 +207,7 @@ def evaluate_coverage(spare_plan: dict,
         "distinct_positions": n_distinct,
         "distribution_ok": distribution_ok,
         "tie_off_ok": tie_off_ok,
+        "tie_off_inputs": pin_proof,
         "density_ok": density_ok,
         "verdict": verdict,
         "reasons": reasons,

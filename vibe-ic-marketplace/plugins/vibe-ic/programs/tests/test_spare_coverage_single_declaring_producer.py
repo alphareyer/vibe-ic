@@ -158,6 +158,10 @@ def _plan(count, placed, actual_density):
         "target_density": 0.02,
         "actual_density": actual_density,
         "tied_off": True,
+        # the per-pin enumeration the insertion step prints (U6)
+        "tie_off": {"tied_off": True, "inputs": [
+            {"inst": f"spare_{i}", "pin": "I", "use": "SIGNAL",
+             "net": f"spare_tielo_spare_{i}"} for i in range(count)]},
         "instances": [{"name": f"spare_{i}", "llx": 10 * i, "lly": 10 * i,
                        "keep": True} for i in range(count)],
     }

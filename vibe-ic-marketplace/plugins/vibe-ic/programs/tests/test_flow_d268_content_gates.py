@@ -32,6 +32,10 @@ CASES = {
     "18": ("phase3/stage3/pnr/spare_cells.json", {
         "count": 2, "placed_cells_est": 50, "actual_density": 0.04,
         "tied_off": True,
+        # the per-pin enumeration the insertion step prints (U6)
+        "tie_off": {"tied_off": True, "inputs": [
+            {"inst": "s0", "pin": "A", "use": "SIGNAL", "net": "t0"},
+            {"inst": "s1", "pin": "CLK", "use": "CLOCK", "net": "t1"}]},
         "instances": [{"name": "s0", "llx": 0, "lly": 0, "keep": True},
                       {"name": "s1", "llx": 10, "lly": 10, "keep": True}]}, ""),
     "27": ("reports/phase3/si_crosstalk.json", {

@@ -41,6 +41,9 @@ from reader import click, click_odb, odb  # LibreLane's odbpy harness
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 import _spare_plan as sp  # noqa: E402  (vibe-ic programs/, mounted read-only)
 
+#: Supply pins are connected by `connect_supply`, never tied off.
+_SUPPLY_SIG_TYPES = ("POWER", "GROUND")
+
 #: Master classes that are logic (what the direct flow's netlist count sees).
 _LOGIC_TYPES = {"CORE", "CORE_TIEHIGH", "CORE_TIELOW", "BLOCK"}
 
@@ -171,9 +174,13 @@ def insert(reader, config: dict, plan: dict) -> dict:
         say(f"SPARE_TIEOFF_SKIPPED: no tie-low cell/pin resolved from {tie!r} "
             "-- spare inputs remain floating")
     for inst in spares if tie_master is not None and tie_pin else []:
+        # Every non-supply INPUT, whatever its USE. The filter used to be
+        # `getSigType() == "SIGNAL"`, which skips a LEF `USE CLOCK` pin: the
+        # spare flop's CLK stayed floating on spm v5c and subservient v4 while
+        # this step counted "12/12" over the pins it had chosen to look at.
         floating = [it for it in inst.getITerms()
-                    if it.getSigType() == "SIGNAL" and it.isInputSignal()
-                    and it.getNet() is None]
+                    if it.getSigType() not in _SUPPLY_SIG_TYPES
+                    and it.isInputSignal() and it.getNet() is None]
         if not floating:
             continue
         measured["tieoff_candidates"] += len(floating)
@@ -198,6 +205,13 @@ def insert(reader, config: dict, plan: dict) -> dict:
     say(f"SPARE_TIEOFF_CONNECTED {measured['tieoff_connected']} of "
         f"{measured['tieoff_candidates']}")
     say(f"SPARE_TIEOFF_DRIVERS {len(drivers)}")
+    for inst in spares:
+        for it in inst.getITerms():
+            if it.getSigType() in _SUPPLY_SIG_TYPES or not it.isInputSignal():
+                continue
+            net = it.getNet()
+            say(f"SPARE_INPUT_PIN {inst.getName()} {it.getMTerm().getName()} "
+                f"{it.getSigType()} {net.getName() if net is not None else '-'}")
     say("SPARE_TIEOFF_DONE: nets " + " ".join(n.getName() for n in tie_nets))
     if drivers:
         result = _legalize_only(block, dpl, drivers, config)
