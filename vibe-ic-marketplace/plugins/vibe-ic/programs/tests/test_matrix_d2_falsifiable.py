@@ -1629,17 +1629,27 @@ def _routed_def(*, spanning: int, total: int = 10) -> str:
     Only the ORDINATE of a segment changes between the two arms — same macro,
     same orientation, same net, same layer, same segment count — so the
     control cannot pass by having fewer wires or a differently-shaped tree.
+
+    ONE net, *total* paths. DEF's SPECIALNETS count is the number of NETS, and
+    one supply net carries its paths as ``+ ROUTED`` then ``NEW``. This builder
+    used to write one ``- VDD`` statement per segment under
+    ``SPECIALNETS 1 ;``: ten statements against a declared count of one. The
+    gate now proves it read the whole special-net population before it
+    certifies a layer free of supply metal (``pdn_read_evidence``), so that
+    count mismatch made the PASS control below read INCOMPLETE -- a property
+    of the malformed fixture, not of the crossing the control is about.
     """
-    rows = []
+    paths = []
     for i in range(total):
         y = 102000 + i * 2000 if i < spanning else 20000 + i * 2000
-        rows.append(
-            f"- VDD ( * VDD ) + USE POWER + ROUTED metalA 140 + SHAPE "
-            f"FOLLOWPIN ( 100000 {y} ) ( 400000 {y} ) ;")
+        paths.append(f"metalA 140 + SHAPE FOLLOWPIN "
+                     f"( 100000 {y} ) ( 400000 {y} )")
+    net = ("- VDD ( * VDD ) + USE POWER\n  + ROUTED "
+           + "\n  NEW ".join(paths) + " ;")
     return ("VERSION 5.8 ;\nDESIGN top ;\nUNITS DISTANCE MICRONS 1000 ;\n"
             "COMPONENTS 1 ;\n"
             "- u_ip big_ip + FIXED ( 200000 100000 ) N ;\n"
-            "END COMPONENTS\nSPECIALNETS 1 ;\n" + "\n".join(rows)
+            "END COMPONENTS\nSPECIALNETS 1 ;\n" + net
             + "\nEND SPECIALNETS\nEND DESIGN\n")
 
 
