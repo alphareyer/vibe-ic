@@ -1293,12 +1293,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("bundle", type=Path,
                         help="evidence JSON or project root containing reports/phase3/sta/drv_signoff_bundle.json")
     parser.add_argument("--json", type=Path, required=True)
+    parser.add_argument("--capture-point", choices=("in_flow", "post_stream"),
+                        help="the capture this gate judges; a bundle of another "
+                             "kind is NOT_MEASURED (R-0929-DRV-IDENTITY)")
     args = parser.parse_args(argv)
     try:
         source = (args.bundle / "reports/phase3/sta/drv_signoff_bundle.json"
                   if args.bundle.is_dir() else args.bundle)
         bundle = json.loads(source.read_text())
         result = judge(bundle, project=args.bundle if args.bundle.is_dir() else None)
+        if args.capture_point and result.get("capture_point") != args.capture_point:
+            result.setdefault("not_measured", []).append(
+                f"gate judges the {args.capture_point} capture but the bundle is "
+                f"{result.get('capture_point')}")
+            result["verdict"] = ("FAIL" if result.get("failures") else "NOT_MEASURED")
         if not args.bundle.is_dir():
             result.setdefault("not_measured", []).append(
                 "project context absent; threshold sources cannot be authenticated")
