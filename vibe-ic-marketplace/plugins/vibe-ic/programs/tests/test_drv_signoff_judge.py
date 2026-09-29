@@ -1481,9 +1481,32 @@ def test_missing_committed_threshold_freeze_is_not_measured(tmp_path, monkeypatc
 
 
 def test_committed_threshold_freeze_digest_is_owner_controlled():
+    # 2026-09-29 (ROOT task MAINRED_PORTABLE): the two citation strings named
+    # the standard by an absolute personal home path, which the shipped-path
+    # portability check refuses; they now name it as ~/codex_tasks/... on the
+    # fleet lane hosts. That is the ONLY change: the second pin below hashes
+    # every field except the two citation strings and is identical before and
+    # after (4a55fc6ef37e... -> e98c3e78ff9e... for the bytes). The owner's
+    # R-0929-DRV-FREEZE rule still governs any change to a frozen VALUE.
     assert drv._sha(drv._THRESHOLD_FREEZES) == (
-        "4a55fc6ef37e484318e391d05930e641656bbe180dc6e54f46baec55105193a0"
+        "e98c3e78ff9e284ecf85283a2e5fd985e02f79271937d983729c578c75e09fc6"
     ), "a threshold freeze change needs a RULINGS owner citation"
+    doc = json.loads(drv._THRESHOLD_FREEZES.read_text())
+
+    def _strip_citations(node):
+        if isinstance(node, dict):
+            node.pop("citation", None)
+            node.pop("owner_approval_citation", None)
+            for value in node.values():
+                _strip_citations(value)
+        elif isinstance(node, list):
+            for value in node:
+                _strip_citations(value)
+    _strip_citations(doc)
+    assert hashlib.sha256(json.dumps(doc, sort_keys=True, separators=(",", ":"))
+                          .encode()).hexdigest() == (
+        "ba13c0900231913e718d104e6dfef86f6d593d292bd4c887edea8dfc282ff5ee"
+    ), "a frozen DRV threshold value changed: that needs a RULINGS owner citation"
 
 
 def test_signed_pre_run_freeze_does_not_require_a_routed_netlist(tmp_path, monkeypatch):
