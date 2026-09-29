@@ -78,19 +78,45 @@ def test_psm_keeps_both_rails_and_audits_tool_density_on_the_same_def(
         "LAYER M3\n TYPE ROUTING ;\n WIDTH 0.4 ;\n"
         " THICKNESS 0.5 ;\n DCCURRENTDENSITY AVERAGE 1.0 ;\nEND M3\n"))
 
+    (R._pl.pnr_dir(project) / "constraint.sdc").write_text("create_clock -period 10 clk\n")
+    extracted = R._pl.extracted_dir(project)
+    extracted.mkdir(parents=True)
+    (extracted / "chip_top.spef").write_text("*SPEF \"IEEE 1481-1998\"\n")
+    import container_image_provenance as C
+    monkeypatch.setattr(C, "inspect_container", lambda _: {
+        "image_id": "sha256:" + "d" * 64, "image_ref": "neutral-image"})
+
     def fake_eda(_container, _cmd, **_kwargs):
         tcl = (rpt / "ir_em_chip_top.tcl").read_text()
         assert "check_current_density -net VGND" in tcl
         assert "check_current_density -net VPWR" in tcl
+        log = "EM_TOOL_VERSION fixture\nEM_TOOL_BINARY_SHA256 " + "e" * 64 + "\n"
         for net in ("VGND", "VPWR"):
             (rpt / f"em_segments_{net}.csv").write_text(
                 "Node0 Layer,Node0 X location,Node0 Y location,"
                 "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
                 f"M3,0,0,M3,1,0,{1 if net == 'VPWR' else 2}e-6\n")
             (rpt / f"em_openroad_density_{net}.csv").write_text(
-                "Layer,Ratio,Status\nM3,0.01,OK\n")
-        return 0, ("Maximum current : 2e-6 A\n"
-                   "Worstcase IR drop: 1e-4 V\nSupply voltage: 1 V\n"), ""
+                "Layer,Ratio,Status,Cuts,Basis,Jlimit(A/um^2)\n"
+                "M3,0.01,OK,0,AREAL,0.0018\n")
+            log += (f"=== EM_TOOL_BEGIN {net} ===\nNet : {net}\n"
+                    "Segments checked : 1\nWith J-limit : 1\nVias judged per cut: 0\n"
+                    "No J-limit (skipped): 0\nNo area (skipped) : 0\nViolations : 0\n"
+                    f"Verdict : PASS\nEM_TOOL_OK {net}\n=== EM_TOOL_END {net} ===\n")
+        import re
+        import shlex
+        import _em_tool_report as T
+        native = re.search(r"openroad -no_init -exit ([^;]+);", _cmd)[0].rstrip(";")
+        log += "EM_TOOL_COMMAND_SHA256 " + hashlib.sha256(native.encode()).hexdigest() + "\n"
+        log += "EM_TOOL_TCL_SHA256 " + T.digest(rpt / "ir_em_chip_top.tcl") + "\n"
+        for word in re.findall(r'printf "EM_TOOL_INPUT_SHA256 "; sha256sum ([^;]+);', _cmd):
+            path = shlex.split(word)[0]
+            sha = T.digest(path) if Path(path).is_file() else (
+                T.digest(rpt / "em_tool_tech.lef") if path.endswith("tech.tlef") else "f" * 64)
+            log += f"EM_TOOL_INPUT_SHA256 {sha}  {path}\n"
+        log += "Maximum current : 2e-6 A\nWorstcase IR drop: 1e-4 V\nSupply voltage: 1 V\nTotal power : 1e-3 W\n"
+        (rpt / "ir_em.log").write_text(log)
+        return 0, log, ""
 
     monkeypatch.setattr(R, "_docker_exec", fake_eda)
     R._emit_ir_em_reports(project, "chip_top", _fake_pdk(), "image",
@@ -100,32 +126,34 @@ def test_psm_keeps_both_rails_and_audits_tool_density_on_the_same_def(
     assert "VPWR,M3,0,0,M3,1,0,1e-6" in merged
     assert "VGND,M3,0,0,M3,1,0,2e-6" in merged
     tool = json.loads((rpt / "em_openroad_density.json").read_text())
-    assert tool["verdict"] == "MEASURED"
+    assert tool["verdict"] == "PASS"
     assert set(tool["nets"]) == {"VPWR", "VGND"}
     assert all(row["psm_segments"] == 1 for row in tool["nets"].values())
-    assert tool["scope"] == "routing wires only"
+    assert tool["scope"] == "power-grid wires and vias"
     assert tool["via_cut_status"].startswith("NOT_MEASURED")
     assert tool["def_sha256"] == hashlib.sha256(
         (R._pl.pnr_dir(project) / "chip_top.def").read_bytes()).hexdigest()
 
 
 def test_em_ab_refuses_empty_tool_pass_and_discloses_utilization_difference(tmp_path):
-    rpt = R._pl.reports_phase3_dir(tmp_path)
-    rpt.mkdir(parents=True)
-    subject = {"subject_def_sha256": "abc"}
-    gate = {"jmax_screen": {"verdict": "PASS", "offender_count": 0,
-                            "summary": {"worst_utilization": 0.01}}}
+    from test_em_tool_report import evidence
+    import _em_tool_report as T
+    rpt, tool, _subject = evidence(tmp_path)
+    subject = {"subject_def_sha256": tool["def_sha256"]}
+    gate = {"retained_jmax_screen": {"verdict": "PASS", "offender_count": 0,
+                                     "summary": {"worst_utilization": 0.01}}}
     (rpt / "em.json").write_text(json.dumps(subject))
     (rpt / "em_current_authority.json").write_text(json.dumps(gate))
-    tool = {"def_sha256": "abc", "verdict": "MEASURED",
-            "nets": {"VPWR": {"checked": 0, "no_limit": 1,
-                               "violated": 0, "worst_ratio": None}}}
+    valid = T.audit_project(tmp_path)
+    assert valid["verdict"] == "PASS"
+    tool.update(valid)
+    report = rpt / "em_openroad_density_supply.csv"
+    original = report.read_bytes()
+    report.write_bytes(original.splitlines()[0] + b"\n")
     (rpt / "em_openroad_density.json").write_text(json.dumps(tool))
     E.emit_openroad_ab(tmp_path, [])
     assert json.loads((rpt / "em_openroad_ab.json").read_text())["verdict"] == "NOT_MEASURED"
-    tool["nets"]["VPWR"] = {"checked": 1, "no_limit": 0,
-                              "violated": 0, "worst_ratio": 0.13}
-    (rpt / "em_openroad_density.json").write_text(json.dumps(tool))
+    report.write_bytes(original)
     notes = []
     E.emit_openroad_ab(tmp_path, notes)
     ab = json.loads((rpt / "em_openroad_ab.json").read_text())

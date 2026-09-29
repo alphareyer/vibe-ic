@@ -399,6 +399,13 @@ def evaluate(project: Path, jmax: Optional[Path], tech_lef: Optional[Path],
 
     # ---- authority 1: the PDK per-layer Jmax -------------------------------
     jt = jmax_tier(project, jmax, tech_lef, margin)
+    from librelane_contract import selected_mode
+    if selected_mode(project, "25") == "dual":
+        # HARVEST: retain the custom arm for comparison; the tool owns J.
+        rep["retained_jmax_screen"] = jt
+        from _em_tool_report import audit_project
+        jt = audit_project(project)
+        rep["verdict_source"] = "OpenROAD.check_current_density"
     rep["jmax_screen"] = jt
     if jt["verdict"] == "FAIL":
         for f in jt.get("findings", []):

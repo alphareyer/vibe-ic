@@ -1720,7 +1720,7 @@ CLASS_PRODUCTION_DEFAULTS: dict[str, dict[str, str]] = {
                                  # T99 + T102 r4 (owner ruling, CUT-OVER rule):
                                  # routing and the post-route repair, as one
                                  # chain (LL21 -> Vibeic.PostRouteRepair -> tail)
-                                 '21': 'librelane', '32': 'librelane'},
+                                 '21': 'librelane', '32': 'librelane', '25': 'dual'},
 }
 
 #: A class default runs only inside the chain it continues. The producers are
@@ -1786,7 +1786,9 @@ def _class_default(project: Path, step: str, named: dict[str, Any],
 #:               EQY arm is off by default and skips gf180 in LibreLane.
 #:   24  dual    LibreLane's IR is static and report-only; vibe-ic's budget
 #:               gates judge too (d).
-#:   25  direct  LibreLane has no EM step; vibe-ic runs it on the tool's ODB.
+#:   25  dual    LibreLane has no EM step; OpenROAD judges the grid,
+#:               vibe-ic audits its Verdict/Status/Cuts/Basis and keeps the
+#:               custom arm pending complete HARVEST evidence.
 #:   26  dual    Classic reports antenna violations without gating on them;
 #:               `librelane` would drop vibe-ic's own antenna re-read (h).
 #:   31  dual    LibreLane's reduced DRC deck, no ERC, LVS from a DEF
@@ -1808,7 +1810,7 @@ IMPL_STEP_MODES: dict[str, dict[str, str]] = {
         '15': 'librelane', '15.5ic': 'librelane', '17': 'librelane',
         '18': 'librelane', '19': 'librelane', '20': 'librelane',
         '21': 'librelane', '22': 'librelane', '23': 'librelane',
-        '24': 'dual', '25': 'direct', '26': 'dual', '26.5ic': 'librelane',
+        '24': 'dual', '25': 'dual', '26': 'dual', '26.5ic': 'librelane',
         '29': 'librelane', '30': 'direct',
         '31': 'dual', '32': 'librelane', '33': 'librelane', '34': 'librelane',
         '37': 'librelane', 'DT2': 'librelane', 'DT3': 'librelane',

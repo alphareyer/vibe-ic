@@ -1163,12 +1163,15 @@ def emit_openroad_ab(project: Path, notes: List[str]) -> None:
         return
     same_def = (tool.get("def_sha256") and
                 tool.get("def_sha256") == subject.get("subject_def_sha256"))
-    nets = tool.get("nets") or {}
-    measured = (same_def and tool.get("verdict") == "MEASURED" and
+    from _em_tool_report import audit_project
+    audited = audit_project(project)
+    nets = audited.get("nets") or {}
+    measured = (same_def and audited.get("verdict") in ("PASS", "FAIL") and
                 isinstance(nets, dict) and nets and
                 all(row.get("checked", 0) > 0 and row.get("no_limit") == 0
+                    and row.get("no_area") == 0
                     for row in nets.values()))
-    jmax = gate.get("jmax_screen") or {}
+    jmax = gate.get("retained_jmax_screen") or gate.get("jmax_screen") or {}
     summary = jmax.get("summary") or {}
     if not measured or jmax.get("verdict") not in ("PASS", "FAIL"):
         result = {"verdict": "NOT_MEASURED", "same_def": bool(same_def),

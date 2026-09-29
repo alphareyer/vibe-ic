@@ -62587,7 +62587,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         try:
             _em_tool_doc = json.loads((rpt_phase3 / "em_openroad_density.json").read_text())
             _em_dual_due = (_em_tool_doc.get("mode") != "dual" or
-                            _em_tool_doc.get("verdict") != "MEASURED" or
+                            _em_tool_doc.get("schema") != "openroad_em/2" or
                             _em_tool_doc.get("def_sha256") !=
                             hashlib.sha256(primary_def.read_bytes()).hexdigest())
         except (OSError, ValueError):
@@ -70732,11 +70732,9 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     _tlef = _read_pdk_text(str(pdk.tech_lef), container) or ""
     _jmax = _emcd.parse_lef_jmax(_tlef)
     _em_limits = out_dir / "em_openroad_limits.txt"
-    _limit_rows = [
-        f"{row['orig_name']} {row['jmax_areal_A_per_um2'] * (1 - _emcd._DEFAULT_MARGIN):.12g}"
-        for row in _jmax.values()
-        if row.get("kind") == "routing" and row.get("jmax_areal_A_per_um2")
-    ]
+    import _em_tool_report as _em_tool
+    _limit_rows, _limit_provenance = _em_tool.limits(
+        getattr(pdk, "name", ""), _tlef, _jmax, _emcd._DEFAULT_MARGIN)
     if _audit_tool and not _limit_rows:
         notes.append("OpenROAD EM density NOT_MEASURED: tech LEF has no routing Jmax plus THICKNESS")
     em_geometry = out_dir / "em_pg_geometry.tsv"
@@ -70752,6 +70750,7 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
             pass
     if _audit_tool and _limit_rows:
         _aa.write_text(_em_limits, "\n".join(_limit_rows) + "\n")
+        _aa.write_text(out_dir / "em_tool_tech.lef", _tlef)
     # DEF SPECIALNETS omit the layer metal inside generated via arrays. PSM
     # nonetheless reports current between nodes on those via enclosures. Dump
     # the loaded ODB's actual routing-layer boxes so those edges have a real
@@ -70775,11 +70774,14 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
         _net_csv = f"{out_dir_c}/em_segments_{net}.csv"
         _density_csv = f"{out_dir_c}/em_openroad_density_{net}.csv"
         _density_tcl = (
+            f'puts "=== EM_TOOL_BEGIN {net} ==="\n'
             f'if {{[catch {{check_current_density -net {net} '
             f'-em_limits_file {out_dir_c}/{_em_limits.name} '
             f'-em_report {_density_csv} -allow_reuse}} _em_err]}} {{\n'
             f'  puts "EM_TOOL_NONFATAL {net}: $_em_err"\n'
-            f'}}\n' if _audit_tool and _limit_rows else '')
+            f'}} else {{ puts "EM_TOOL_OK {net}" }}\n'
+            f'puts "=== EM_TOOL_END {net} ==="\n'
+            if _audit_tool and _limit_rows else '')
         psm_blocks.append(
             f'puts "=== PSM_NET {net} ==="\n'
             f'if {{[catch {{analyze_power_grid -net {net} -enable_em '
@@ -70851,12 +70853,38 @@ catch {{set_wire_rc -clock -layer {mp}5}}
 {via_rc_tcl}{_psm_sm.exclude_promoted_pins_tcl()}{''.join(psm_blocks)}exit
 """)
     tcl_c = _to_container_path(str(tcl_path), container)
+    # Bind the report to the actual binary/container and a fresh invocation.
+    # pipefail preserves OpenROAD's native rc instead of tee's successful rc.
+    from container_image_provenance import inspect_container as _em_inspect
+    _em_image = _em_inspect(container)
+    _em_inputs = _em_tool.snapshot(out_dir, [tcl_path, _em_limits,
+                                            out_dir / "em_tool_tech.lef"])
+    _em_def_before = _em_tool.digest(def_file)
+    _em_started_ns = time.time_ns()
+    _em_loaded_paths = list(dict.fromkeys([
+        tech_lef_c, cell_lef_c, liberty_c, def_c,
+        *(_to_container_path(str(f), container) for f in pdk.macro_lefs),
+        *_pb_libs,
+        *(_to_container_path(str(_basis[k]), container)
+          for k in ("sdc", "spef") if _basis[k]),
+    ]))
+    _em_hash_inputs = " ".join(
+        'printf "EM_TOOL_INPUT_SHA256 "; sha256sum ' + shlex.quote(path) + ';'
+        for path in _em_loaded_paths)
+    _em_native_command = f"openroad -no_init -exit {tcl_c}"
+    _em_command_sha = hashlib.sha256(_em_native_command.encode()).hexdigest()
     cmd = (
-        f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
+        f"set -o pipefail; export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
         f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
-        f"openroad -no_init -exit {tcl_c} 2>&1 | tee {out_dir_c}/ir_em.log"
+        f'{{ printf "EM_TOOL_COMMAND_SHA256 {_em_command_sha}\\n"; '
+        f'printf "EM_TOOL_VERSION "; openroad -version; '
+        f'printf "EM_TOOL_BINARY_SHA256 "; sha256sum "$(command -v openroad)"; '
+        f'printf "EM_TOOL_TCL_SHA256 "; sha256sum {shlex.quote(tcl_c)}; '
+        f'{_em_hash_inputs} {_em_native_command}; _em_native_rc=$?; '
+        f'{_em_hash_inputs} exit "$_em_native_rc"; }} 2>&1 | tee {out_dir_c}/ir_em.log'
     )
     rc, out, err = _docker_exec(container, cmd, marker=tcl_c, outputs=[out_dir / "ir_em.log"])
+    _em_finished_ns = time.time_ns()
     if rc == 0 and em_geometry.is_file():
         _aa.write_text(out_dir / "em_pg_geometry_subject.json", json.dumps({
             "schema": "em_pg_geometry/1",
@@ -70910,43 +70938,43 @@ catch {{set_wire_rc -clock -layer {mp}5}}
                     _n += 1
                 _psm_segment_counts[_net] = _n
     os.replace(_temp_name, _merged)
-    _density_rows = {}
-    for _net in psm_nets:
-        _path = out_dir / f"em_openroad_density_{_net}.csv"
-        _counts = {"checked": 0, "no_limit": 0, "violated": 0,
-                   "worst_ratio": None}
-        if _path.is_file():
-            import csv as _csv
-            with _path.open(newline="", errors="replace") as _fh:
-                for _row in _csv.DictReader(_fh):
-                    if _row.get("Status") == "NO_LIMIT":
-                        _counts["no_limit"] += 1
-                    elif _row.get("Status") in ("OK", "VIOLATED"):
-                        _counts["checked"] += 1
-                        _counts["violated"] += _row["Status"] == "VIOLATED"
-                        try:
-                            _ratio = float(_row["Ratio"])
-                        except (KeyError, ValueError):
-                            continue
-                        _counts["worst_ratio"] = max(
-                            _counts["worst_ratio"] or 0.0, _ratio)
-        _counts["psm_segments"] = _psm_segment_counts.get(_net, 0)
-        _density_rows[_net] = _counts
     _psm_model = _psm_sm.describe(log)
-    _aa.write_text(out_dir / "em_openroad_density.json", json.dumps({
-        "tool": "OpenROAD.check_current_density",
-        "source_model": _psm_model["model"],
-        "psm_source_model": _psm_model,
-        "sdc_spef_loaded": False, "nets": _density_rows,
-        "verdict": ("MEASURED" if _audit_tool and _density_rows and all(
-            r["checked"] > 0 and r["no_limit"] == 0 for r in _density_rows.values())
-            else "NOT_MEASURED"),
-        "mode": _em_mode,
-        "scope": "routing wires only",
-        "via_cut_status": "NOT_MEASURED: OpenROAD density CSV omits via-cut records",
-        "def_sha256": hashlib.sha256(def_file.read_bytes()).hexdigest(),
-        "signal_em": "NOT_MEASURED: no activity and signal J-limit authority",
-    }, indent=2) + "\n")
+    _em_version = re.search(r"^EM_TOOL_VERSION (.+)$", log, re.M)
+    _em_binary = re.search(r"^EM_TOOL_BINARY_SHA256 ([0-9a-f]{64})", log, re.M)
+    _em_image_after = _em_inspect(container)
+    _tool_record = {
+        "schema": _em_tool.SCHEMA, "tool": "OpenROAD.check_current_density",
+        "source_model": _psm_model["model"], "psm_source_model": _psm_model,
+        "power_basis": _basis_record, "pdk_name": getattr(pdk, "name", ""),
+        "sdc_spef_loaded": bool(_basis.get("sdc") and _basis.get("spef")),
+        "mode": _em_mode, "expected_nets": psm_nets,
+        "subject_def": str(def_file.relative_to(project)),
+        "def_sha256": _em_def_before, "limits": _limit_provenance,
+        "invocation": {
+            "container": container, "image_id": _em_image.get("image_id"),
+            "image_ref": _em_image.get("image_ref"),
+            "tool_version": _em_version[1] if _em_version else None,
+            "tool_binary_sha256": _em_binary[1] if _em_binary else None,
+            "native_rc": rc, "started_ns": _em_started_ns,
+            "finished_ns": _em_finished_ns, "command": _em_native_command,
+            "executed_command": cmd, "tcl_file": tcl_path.name,
+            "tech_lef": tech_lef_c, "required_input_paths": _em_loaded_paths,
+            "tool_inputs": dict((path, sha) for sha, path in re.findall(
+                r"^EM_TOOL_INPUT_SHA256 ([0-9a-f]{64})\s+(.+)$", log, re.M)),
+            "inputs": _em_inputs,
+            "inputs_unchanged": (
+                _em_def_before == _em_tool.digest(def_file)
+                and _em_inputs == _em_tool.snapshot(out_dir, [tcl_path, _em_limits,
+                                                              out_dir / "em_tool_tech.lef"])
+                and _em_image.get("image_id") == _em_image_after.get("image_id")),
+            "outputs": _em_tool.snapshot(out_dir, [out_dir / "ir_em.log",
+                *(out_dir / f"em_segments_{net}.csv" for net in psm_nets),
+                *(out_dir / f"em_openroad_density_{net}.csv" for net in psm_nets)]),
+        },
+    }
+    _tool_record.update(_em_tool.audit(out_dir, _tool_record, def_file))
+    _aa.write_text(out_dir / "em_openroad_density.json",
+                   json.dumps(_tool_record, indent=2) + "\n")
     # Parse IR + EM numbers from PSM stdout (deterministic regex).
     ir_lines = [ln for ln in log.splitlines()
                 if re.search(r"voltage|IR drop|PSM-|Supply", ln, re.I)]
