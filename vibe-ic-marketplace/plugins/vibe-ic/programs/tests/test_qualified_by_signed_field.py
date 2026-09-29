@@ -157,34 +157,6 @@ def test_the_oracle_never_reads_a_description(tmp_path):
     assert riv.declared_output_qualifiers(p, _OUT, _IN) == {}
 
 
-def test_the_proposal_quotes_one_table_and_decides_nothing(tmp_path):
-    p = _proj(tmp_path)
-    stage_field(p, "o_data", "o_we", "high")   # writes the design-input table
-    l9 = p / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
-    doc = json.loads(l9.read_text())
-    for r in doc["top_ports"]:
-        r.pop("qualified_by", None)
-    l9.write_text(json.dumps(doc))
-    before = l9.read_bytes()
-    out = tmp_path / "pack"
-    out.mkdir()
-    path = qb.write_review_request(p, out)
-    req = json.loads(path.read_text())
-    assert l9.read_bytes() == before                     # writes no field
-    (cand,) = req["candidates"]
-    assert (cand["output"], cand["port"]) == ("o_data", "o_we")
-    assert [b["line"] for b in cand["basis"]] == [5, 6]
-    assert qb.basis_refusal(p, cand["basis"]) is None    # exact quotations
-    assert req["checklist"] and req["signing"]["expectation"]["id"] == \
-        "qualified_by:<output>"
-    assert qb.trusted_qualifiers(p, _OUT, _IN)[0] == {}  # a proposal is inert
-
-
-def test_the_d1_pack_carries_the_review_request():
-    src = (PROGRAMS / "phase1_expert_parse_track.py").read_text()
-    assert "write_review_request(project, out_dir)" in src
-
-
 # ── iverilog: signed exempts, unsigned does not, asserted never ────────────
 _CASE = {"name": "rst_glitch", "stimulus": "rst_n glitch 不應導致 bus race",
          "expected": "holds"}
@@ -241,13 +213,3 @@ def test_a_signed_field_never_exempts_an_asserted_qualifier(tmp_path):
     state, out = _simulate(p, tmp_path, 0)
     assert state == "failed" and "X_EXEMPT" not in out
     assert "while a declared qualifier is asserted or unknown" in out
-
-
-def test_the_handoff_names_the_review_request(tmp_path):
-    (tmp_path / "ic_expert_agent_handoff.json").write_text(
-        json.dumps({"answer_contract": {}}))
-    assert qb.point_handoff_at_review(tmp_path) is True
-    doc = json.loads((tmp_path / "ic_expert_agent_handoff.json").read_text())
-    assert doc["qualified_by_review"]["file"] == qb.REVIEW_REQUEST
-    assert doc["answer_contract"] == {}                  # nothing else moved
-    assert qb.point_handoff_at_review(tmp_path / "none") is False

@@ -2745,16 +2745,6 @@ def ai_subtrack(project: Path, prompt: str, out_dir: Path,
             output_target="l_doc_expectations.json",
             ic_class=ic_class, authoring_schema=schema)
         status["handoff"] = handoff
-        # R-0929-X-QUALIFIED-4 — the qualified_by review request: candidates
-        # with exact quotations and the D1 checklist. A proposal only: it
-        # writes no L-doc and decides nothing.
-        try:
-            import _qualified_by as _qb
-            status["qualified_by_review"] = str(
-                _qb.write_review_request(project, out_dir))
-            _qb.point_handoff_at_review(out_dir)
-        except Exception as exc:  # noqa: BLE001 — a request never blocks D1
-            status["qualified_by_review_error"] = repr(exc)
         # The disposition is recorded for EVERY design, profiled or not: the
         # pack file only gains a `class_first` block when there was a profile
         # to confine it with, so without this the unprofiled case would leave
