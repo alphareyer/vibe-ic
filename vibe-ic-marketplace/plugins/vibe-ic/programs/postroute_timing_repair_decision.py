@@ -459,6 +459,7 @@ def decide(stance: Union["Path", str, dict, None],
            project: Union["Path", str, None] = None,
            signoff_reports: Optional[Dict[str, Any]] = None,
            single_corner_evidence: Optional[str] = None,
+           producer_receipt: Optional[Dict[str, Any]] = None,
            ) -> Dict[str, Any]:
     """Return the post-route timing-repair trigger decision.
 
@@ -479,6 +480,15 @@ def decide(stance: Union["Path", str, dict, None],
         and withholds the no-repair certificate. The multi-corner OCV basis,
         when authoritative, replaces it. Echoed as ``timing_basis_status``
         ("LEGACY_BOOLEAN" when omitted).
+      producer_receipt: OPTIONAL bound Step-32 PRODUCER receipt (a decision
+        record that `verify_receipt` accepted and that the canonical recorder
+        did not write). R-0929-STEP32-RECORD: its ``repair_needed=true`` is
+        carried forward -- this decision can add a repair demand, never remove
+        one. Folded in HERE rather than by the caller editing the returned
+        dict: the closed-loop prover (`closed_loop_executable_coverage_check`)
+        follows the trigger result from this call to its guard, and a store
+        into that result in between (421707b90) cut the proof for edges 23 and
+        32 on every run.
 
     Returns a dict:
       basis:            "multi_corner_ocv" | "single_corner_tt" — the TIMING
@@ -663,4 +673,10 @@ def decide(stance: Union["Path", str, dict, None],
                 f"no setup/hold violation at basis {out['basis']}"
                 + (" and no non-timing sign-off failure"
                    if (project is not None or signoff_reports is not None) else ""))
+    if (producer_receipt is not None and producer_receipt.get("repair_needed")
+            and not out["repair_needed"]):
+        out["repair_needed"] = True
+        out["reason"] += (
+            "; the bound Step-32 producer receipt records repair_needed=true "
+            f"(action={producer_receipt.get('action')!r})")
     return out
