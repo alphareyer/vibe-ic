@@ -475,7 +475,8 @@ def tool_arm_findings(project_dir: Path) -> Tuple[List[Finding], dict]:
         source = f"{_lf.RECORD_REL} gds.{shipped}"
         if not shipped:
             findings.append(Finding("ERROR", "LL_FILL_GDS_REFUSED",
-                                    str(gds.get("tool_refusal") or "no GDS fill shipped")))
+                                    str(gds.get("tool_refusal") or gds.get("ship_refusal")
+                                        or "no GDS fill shipped")))
         elif isinstance(arm, dict):
             count = arm.get(_lf.DENSITY_METRIC)
     elif _llc.selected_mode(project_dir, "37") != "direct":
