@@ -174,9 +174,11 @@ def test_drv_scope_excludes_only_producer_proven_supply_ports(tmp_path):
     assert "set _vibeic_drv_signal_ports {}" in sdc
     assert '$_vibeic_drv_name ne "VDD"' in sdc
     assert '$_vibeic_drv_name ne "VSS"' in sdc
-    assert "set_max_capacitance 5.0 [get_pins -hierarchical *]" in sdc
+    # The pin scope is accepted but never read by OpenSTA's checker, so the
+    # margin takes the design (test_drv_cap_margin_reaches_the_checker.py).
+    assert "set_max_capacitance 5.0 [current_design]" in sdc
     assert "set_max_capacitance 5.0 $_vibeic_drv_signal_ports" in sdc
-    assert "set_max_capacitance 5.0 [current_design]" not in sdc
+    assert "set_max_capacitance 5.0 [get_pins -hierarchical *]" not in sdc
 
 
 def test_drv_scope_without_matching_producer_record_keeps_legacy_design_scope(
