@@ -41,6 +41,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+from _hostpaths import require_repo
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
 _PROG = _PROGRAMS / "diff_verify_harness.py"
@@ -271,6 +272,160 @@ def test_bad_inputs_rc2(tmp_path):
     assert rc == 2
     rc, _, _ = _run_cli(["--rtl", str(tmp_path / "nope.sv"), "--ref", str(ref)])
     assert rc == 2
+
+
+# ── symbolic packed ranges: actual parser + native differential CLI ──────────
+def _vector_register(params="parameter integer WIDTH = 8", bounds="WIDTH-1:0",
+                     nonansi=False, renamed=False, body_params=""):
+    names = (renamed if isinstance(renamed,tuple) else
+             ("clock", "reset_n", "source_word", "sink_word") if renamed else
+             ("clk", "rst_n", "data_in", "data_out"))
+    clk, reset, din, dout = names
+    declarations = (f"input wire {clk}; input wire {reset}; "
+                    f"input wire [{bounds}] {din}; output reg [{bounds}] {dout};")
+    header = (", ".join(names) if nonansi else
+              f"input wire {clk}, input wire {reset}, input wire [{bounds}] {din}, "
+              f"output reg [{bounds}] {dout}")
+    source = (f"module vector_register {'#('+params+')' if params else ''} ({header});\n"
+              + body_params + (declarations if nonansi else "") +
+              f"\nalways @(posedge {clk} or negedge {reset}) begin\n"
+              f"if (!{reset}) {dout} <= 0; else {dout} <= {din};\n"
+              "end\nendmodule\n")
+    return source, names
+
+
+def _port_cli(tmp_path, source, ref="def ref(seq): return [0]+list(seq[:-1])\n",
+              top="vector_register"):
+    rtl = _write(tmp_path, "port_register.sv", source)
+    reference = _write(tmp_path, "independent_ref.py", ref)
+    report = tmp_path / "native_report.json"
+    rc, out, err = _run_cli(["--rtl", str(rtl), "--ref", str(reference),
+                             "--top", top, "--vectors", "directed+random+boundary",
+                             "--cycles", "16", "--require-tools", "--json", str(report)])
+    import json
+    return rc, out, err, json.loads(report.read_text())
+
+
+@pytest.mark.parametrize("params,bounds,nonansi,renamed,body_params", [
+    ("parameter integer WIDTH = 8", "WIDTH-1:0", False, False, ""),
+    ("parameter integer WIDTH = 8", "WIDTH-1:0", False, True, ""),
+    ("parameter integer WIDTH = 8", "WIDTH-1:0", False, ("clk","rst_n","x","z"), ""),
+    ("parameter integer BASE = 4, WIDTH = BASE*2", "WIDTH-1:0", False, False, ""),
+    ("parameter integer DEPTH = 256, parameter integer WIDTH = $clog2(DEPTH)",
+     "WIDTH-1:0", False, False, ""),
+    ("parameter integer WIDTH = 4\n * 2", "(WIDTH*2)-1:WIDTH", False, False, ""),
+    ("parameter integer WIDTH = 8", "0:WIDTH-1", False, False, ""),
+    ("parameter integer WIDTH = 8", "WIDTH-1:0", True, True, ""),
+    ("", "WIDTH-1:0", True, False, "parameter integer WIDTH = 8;"),
+    ("parameter integer BASE = 4", "WIDTH-1:0", True, False,
+     "localparam integer WIDTH = BASE*2;"),
+    ("", "7:0", False, False, ""),
+])
+def test_actual_parameterized_register_matches_literal_control(
+        tmp_path,params,bounds,nonansi,renamed,body_params):
+    source, names = _vector_register(params,bounds,nonansi,renamed,body_params)
+    name, ports, error = dvh.parse_ports(source,"vector_register")
+    # Observe the BASE parser's actual wire/reg width-one result first. No new
+    # helper import, missing-field control, or compilation-only acceptance.
+    assert [(p.name,p.direction,p.width) for p in ports] == [
+        (names[0],"input",1),(names[1],"input",1),
+        (names[2],"input",8),(names[3],"output",8)], error
+    assert name == "vector_register" and error == ""
+    if not _HAVE_IVERILOG:
+        pytest.skip("NOT_MEASURED: native Icarus/vvp unavailable")
+    for variant, text in (("symbolic",source), ("literal",_vector_register("","7:0",nonansi,renamed)[0])):
+        project = tmp_path / variant
+        project.mkdir()
+        standalone = _write(project,"standalone.sv",text)
+        built = _pr.run(["iverilog","-g2012","-s","vector_register","-o",
+                         str(project/"standalone.vvp"),str(standalone)],capture_output=True,text=True)
+        assert built.returncode == 0, built.stderr
+        rc,out,err,report = _port_cli(project,text)
+        assert report["verdict"] == "AGREE", report
+        assert (rc,out.strip()) == (0,"AGREE"), err
+        assert report["driven_input"] == {"name":names[2],"width":8}
+        assert report["sampled_output"] == {"name":names[3],"width":8}
+        assert report["n_sequences"] == 22
+
+
+@pytest.mark.parametrize("bounds,params,reason", [
+    ("MISSING-1:0","", "PORT_WIDTH_UNRESOLVED"),
+    ("WIDTH-1:0","parameter integer WIDTH = unknown_call(8)", "PORT_WIDTH_UNRESOLVED"),
+    ("WIDTH-1:0","parameter WIDTH = 8'd256", "PORT_WIDTH_UNRESOLVED"),
+    ("WIDTH-1:0","parameter integer WIDTH = (8 > 4) ? 8 : 4", "PORT_WIDTH_UNRESOLVED"),
+    ("(WIDTH > 4 ? WIDTH : 4)-1:0","parameter integer WIDTH = 8", "PORT_RANGE_UNSUPPORTED"),
+    ("2**WIDTH-1:0","parameter integer WIDTH = 3", "PORT_WIDTH_UNRESOLVED"),
+    ("WIDTH-1:0","parameter [3:0] WIDTH = 16", "PORT_PARAMETER_TYPE_UNSUPPORTED"),
+])
+def test_actual_unresolved_or_unsupported_range_blocks_before_reference(
+        tmp_path,bounds,params,reason):
+    source,_ = _vector_register(params,bounds)
+    rc,out,err,report = _port_cli(tmp_path,source,
+                                "raise RuntimeError('reference must not load')\n")
+    assert report["reason"].split(": ")[1].split(":")[0] == reason, report
+    assert (rc,report["verdict"],out) == (2,"ERROR","")
+    assert "reference load failed" not in report["reason"]
+    assert "driven_input" not in report and "sampled_output" not in report
+
+
+@pytest.mark.parametrize("declaration", [
+    "input wire [7:0][1:0] data_in", "input wire [7:0] data_in [0:1]",
+    "input integer data_in", "input custom_t data_in", "input pkg::word_t data_in",
+    "input wire", "input wire [7:0] data_in = 0",
+])
+def test_actual_incomplete_or_nonvector_declaration_is_not_guessed(tmp_path,declaration):
+    source = f"module vector_register(input clk, {declaration}, output [7:0] data_out); endmodule"
+    rc,out,err,report = _port_cli(tmp_path,source,"raise RuntimeError('must not load')\n")
+    assert report["reason"].startswith("port parse failed: PORT_"), report
+    assert (rc,report["verdict"],out) == (2,"ERROR","")
+    assert "reference load failed" not in report["reason"]
+
+
+def test_selected_module_does_not_borrow_other_module_defaults():
+    source,_ = _vector_register("","MISSING-1:0")
+    source = "module unrelated #(parameter MISSING=8) (input a); endmodule\n"+source
+    name,ports,error = dvh.parse_ports(source,"vector_register")
+    assert error.startswith("PORT_WIDTH_UNRESOLVED: data_in"), error
+    assert name is None and ports == []
+
+
+@pytest.mark.skipif(not _HAVE_IVERILOG,reason="NOT_MEASURED: native Icarus/vvp unavailable")
+def test_parameterized_mismatch_remains_a_real_comparison_failure(tmp_path):
+    source,names = _vector_register()
+    rc,out,err,report = _port_cli(tmp_path,source,"def ref(seq): return list(seq)\n")
+    assert report["verdict"] == "MISMATCH", report
+    assert rc == 1 and "MISMATCH" in out
+    assert report["first_mismatch"]["signal"] == names[3]
+    assert report["first_mismatch"]["rtl"] != report["first_mismatch"]["ref"]
+
+
+@pytest.mark.skipif(not _HAVE_IVERILOG,reason="NOT_MEASURED: native Icarus/vvp unavailable")
+def test_primary_selection_is_disclosed_not_multi_input_semantics(tmp_path):
+    source = """module vector_register #(parameter WIDTH=8)(
+        input clk,input [1:0] auxiliary,input [WIDTH-1:0] data_in,
+        output reg [WIDTH-1:0] data_out, output status);
+        always @(posedge clk) data_out<=data_in; assign status=1'b0; endmodule
+    """
+    rc,out,err,report = _port_cli(tmp_path,source)
+    assert report["verdict"] == "AGREE", report
+    assert report["driven_input"] == {"name":"data_in","width":8}
+    assert report["sampled_output"] == {"name":"data_out","width":8}
+    assert report["undriven_data_inputs"] == ["auxiliary"]
+    assert report["unsampled_outputs"] == ["status"]
+    assert "not multi-input semantic verification" in report["primary_io_scope"]
+
+
+@pytest.mark.skipif(not _HAVE_IVERILOG,reason="NOT_MEASURED: native Icarus/vvp unavailable")
+def test_actual_checked_in_nonansi_calibration_uses_same_consumer(tmp_path):
+    artifact = require_repo("vibe-ic-marketplace","plugins","vibe-ic","programs",
+                            "calibration","cal_const_rtl.v")
+    source = artifact.read_text()
+    rc,out,err,report = _port_cli(tmp_path,source,
+                                "def ref(seq): return [1]+[1-v for v in seq[:-1]]\n",top="cal_const")
+    assert report["verdict"] == "AGREE", report
+    assert rc == 0
+    assert report["driven_input"] == {"name":"a","width":1}
+    assert report["sampled_output"] == {"name":"y","width":1}
 
 
 # ── chip-AGNOSTIC guard ──────────────────────────────────────────────────────

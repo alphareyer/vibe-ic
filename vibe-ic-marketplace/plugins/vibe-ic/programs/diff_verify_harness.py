@@ -48,7 +48,7 @@ designer-vs-reference mismatch with the cycle and signal. The PROGRAM does NOT
 author the reference (that is the AI judgment recorded in the issue's
 why_not_bucket_a) — it only DRIVES the differential comparison.
 
-It reads ONLY the RTL header (to parse clk + input/output ports), the reference
+It reads ONLY the RTL interface/parameter declarations (to parse clk + ports), the reference
 model, and the vectors. It has NO access to any oracle, hidden TB, or dataset:
 a misread cannot leak in through the comparison, because BOTH sides come from
 the spec-reader, not from the scorer.
@@ -72,6 +72,13 @@ Exit codes
 chip-AGNOSTIC: pure structure — module/port header parse, vector generation,
 iverilog/vvp drive, per-cycle integer compare. No chip / vendor / SKU literal,
 no dataset access.
+
+Port parsing is BLOCKING for this invocation: unsupported declarations or
+unresolved packed ranges report ERROR/rc2 before reference loading or simulation,
+never a guessed scalar. Shared balanced port/parameter readers and safe integer
+arithmetic resolve declared defaults; this is not a full SV elaborator.
+The comparison remains ONE primary input/output (widest, first on ties), not
+multi-input semantic verification; other data inputs/outputs are disclosed.
 """
 from __future__ import annotations
 
@@ -87,6 +94,15 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import reset_clock_variant_alias as _ports
+from latency_conformance_check import (ExpectError, _iter_param_defaults,
+                                      safe_eval_arith)
+from _specrtl_common import _strip_subprograms
+from rtl_hygiene_lint import VERILOG_KEYWORDS
+
+# The lint set also contains unknown-value tokens; x/z are legal identifiers.
+_PORT_KEYWORDS = VERILOG_KEYWORDS - {"x", "z"}
+
 # ── RTL header parse (reuse the comment-stripped-view doctrine) ──────────────
 _LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
@@ -98,27 +114,6 @@ def _strip_comments(text: str) -> str:
     t = _LINE_COMMENT_RE.sub(" ", t)
     return _STRING_LIT_RE.sub('""', t)
 
-
-_MODULE_HDR_RE = re.compile(
-    r"\bmodule\s+([A-Za-z_]\w*)\s*"
-    r"(?:#\s*\((?:[^()]|\([^()]*\))*\)\s*)?"   # optional #(params)
-    r"(?:\((?P<ports>(?:[^()]|\([^()]*\))*)\))?\s*;",
-    re.DOTALL)
-
-# ANSI port: `input wire [7:0] foo`, `output reg bar`, `inout baz`. Captures
-# direction, optional [msb:lsb] range, and the name.
-_ANSI_PORT_RE = re.compile(
-    r"\b(input|output|inout)\b"
-    r"(?:\s+(?:wire|reg|logic|bit|signed|unsigned))*"
-    r"(?:\s*\[\s*(\d+)\s*:\s*(\d+)\s*\])?\s*"
-    r"([A-Za-z_]\w*)")
-
-# non-ANSI body decl: `input [7:0] foo, bar;` / `output reg q;`
-_NONANSI_PORT_RE = re.compile(
-    r"\b(input|output|inout)\b"
-    r"(?:\s+(?:wire|reg|logic|bit|signed|unsigned))*"
-    r"(?:\s*\[\s*(\d+)\s*:\s*(\d+)\s*\])?\s*"
-    r"((?:[A-Za-z_]\w*\s*,\s*)*[A-Za-z_]\w*)\s*;")
 
 _MODULE_NAME_RE = re.compile(r"\bmodule\s+([A-Za-z_]\w*)", re.MULTILINE)
 
@@ -149,68 +144,111 @@ def module_names(code: str) -> List[str]:
     return list(seen.keys())
 
 
-def _width(msb: Optional[str], lsb: Optional[str]) -> int:
-    if msb is None or lsb is None:
-        return 1
-    return abs(int(msb) - int(lsb)) + 1
+def _complete_port_decl(text: str, pattern) -> bool:
+    """The shared reader is permissive; this consumer must not guess from a prefix.
+
+    Accept the existing bit-vector type subset only. Typedefs, implicit-width
+    integer/real types and unpacked/multiple dimensions require elaboration.
+    """
+    text = text.strip()
+    match = pattern.fullmatch(text)
+    if match is None:
+        return False
+    name_group = 2 if pattern is _ports._CONT_PORT_RE else 3
+    prefix = re.sub(r"\[[^\]]*\]", "", text[:match.start(name_group)])
+    return all(t in {"input", "output", "inout", "wire", "reg", "logic",
+                     "bit", "signed", "unsigned"}
+               for t in prefix.split()) and "[" not in match.group(name_group)
+
+
+def _default_params(raw: Optional[str], body: str) -> Dict[str, int]:
+    # Reuse the shared top-level comma reader and whitelisted AST evaluator.
+    # Module declarations only, never function/generate-local constants.
+    declarations = [raw or ""] + re.findall(
+        r"\b(?:parameter|localparam)\b([^;]*);", body)
+    defaults = []
+    for declaration in declarations:
+        for segment in _ports._split_top_level_commas(declaration):
+            if "=" not in segment:
+                continue
+            lhs = segment.split("=", 1)[0]
+            # A narrowed/typed parameter needs HDL type elaboration. Do not
+            # resolve it as an unbounded Python integer or ignore truncation.
+            if "[" in lhs or any(t not in {"parameter", "localparam", "int", "integer"}
+                                 for t in re.findall(r"[A-Za-z_]\w*", lhs)[:-1]):
+                raise ValueError("PORT_PARAMETER_TYPE_UNSUPPORTED: " + lhs.strip())
+            defaults.extend(_iter_param_defaults(segment))
+    params: Dict[str, int] = {}
+    for _ in range(len(defaults) + 1):
+        for name, rhs in defaults:
+            if name not in params:
+                if "'" in rhs:
+                    continue  # based-literal sizing/sign/truncation needs elaboration
+                try:
+                    params[name] = safe_eval_arith(" ".join(rhs.split()), params)
+                except ExpectError:
+                    pass  # used unresolved names are rejected at the port below
+    return params
 
 
 def parse_ports(code: str, top: Optional[str]) -> Tuple[Optional[str],
                                                         List[Port], str]:
-    """Parse the named module's (or sole module's) port list into Port objects
-    with direction + bit-width. Handles ANSI (header) and non-ANSI (body)."""
-    src = _strip_comments(code)
-    # Locate the requested module header (default: first/sole module).
-    chosen = None
-    for m in _MODULE_HDR_RE.finditer(src):
-        if top is None or m.group(1) == top:
-            chosen = m
-            break
-    if chosen is None:
-        names = module_names(code)
-        if top and top not in names:
-            return None, [], (f"requested --top {top!r} not declared "
-                              f"(declared: {names or 'none'})")
+    """Shared ANSI/non-ANSI parsing; unknown/unsupported widths are a hard error."""
+    src = _strip_subprograms(_strip_comments(code))
+    names = module_names(src)
+    if top and top not in names:
+        return None, [], f"requested --top {top!r} not declared (declared: {names or 'none'})"
+    if not names:
         return None, [], "no module declaration found in RTL"
-    name = chosen.group(1)
-    ports_blob = chosen.group("ports") or ""
-    ports: Dict[str, Port] = {}
-    order: List[str] = []
-    # ANSI directions in the header.
-    for pm in _ANSI_PORT_RE.finditer(ports_blob):
-        nm = pm.group(4)
-        if nm not in ports:
-            ports[nm] = Port(nm, pm.group(1).lower(),
-                             _width(pm.group(2), pm.group(3)))
-            order.append(nm)
-    # bare header names (non-ANSI — directions live in the body).
-    header_bare: List[str] = []
-    if ports_blob.strip():
-        for nm in re.findall(r"[A-Za-z_]\w*", ports_blob):
-            if nm in ("input", "output", "inout", "wire", "reg", "logic",
-                      "bit", "signed", "unsigned"):
-                continue
-            if nm not in ports and nm not in header_bare:
-                header_bare.append(nm)
-    # non-ANSI body declarations.
-    body = src[chosen.end():]
-    em = re.search(r"\bendmodule\b", body)
-    if em:
-        body = body[:em.start()]
-    for pm in _NONANSI_PORT_RE.finditer(body):
-        direction = pm.group(1).lower()
-        w = _width(pm.group(2), pm.group(3))
-        for nm in re.split(r"\s*,\s*", pm.group(4).strip()):
-            nm = nm.strip()
-            if nm and nm not in ports:
-                ports[nm] = Port(nm, direction, w)
-                if nm not in order:
-                    order.append(nm)
-    for nm in header_bare:
-        if nm not in ports:
-            ports[nm] = Port(nm, "unknown", 1)
-            order.append(nm)
-    return name, [ports[n] for n in order], ""
+    name = top or names[0]
+    header = _ports._module_header(src, name)
+    if header is None:
+        return None, [], "PORT_HEADER_UNSUPPORTED"
+    raw_params, blob, _imports = header
+    body = _ports._module_body(src, name) or ""
+    cut = re.search(r"\b(always|assign|initial|generate)\b", body)
+    declarations = body[:cut.start()] if cut else body
+    try:
+        ansi = bool(re.search(r"\b(input|output|inout)\b", blob))
+        if ansi:
+            if not re.match(r"\s*(input|output|inout)\b", blob):
+                raise ValueError("PORT_DECLARATION_UNSUPPORTED: " + blob.strip())
+            for segment in _ports._split_top_level_commas(blob):
+                pattern = (_ports._PORT_DECL_RE if re.match(r"\s*(input|output|inout)\b", segment)
+                           else _ports._CONT_PORT_RE)
+                if not _complete_port_decl(segment, pattern):
+                    raise ValueError("PORT_DECLARATION_UNSUPPORTED: " + segment.strip())
+        else:
+            if any(not re.fullmatch(r"[A-Za-z_]\w*", s.strip())
+                   for s in _ports._split_top_level_commas(blob)):
+                raise ValueError("PORT_DECLARATION_UNSUPPORTED: " + blob.strip())
+            for decl in re.findall(r"\b(?:input|output|inout)\b[^;]*;", declarations):
+                if not _complete_port_decl(decl, _ports._NONANSI_BODY_PORT_RE):
+                    raise ValueError("PORT_DECLARATION_UNSUPPORTED: " + decl.strip())
+        params = _default_params(raw_params, declarations)
+        result = []
+        for direction, bracket, port_name in _ports.parse_module_ports(src, name):
+            if (port_name in _PORT_KEYWORDS or re.fullmatch(_ports._NET_QUAL_RE, port_name)
+                    or not re.fullmatch(r"[A-Za-z_]\w*", port_name)):
+                raise ValueError("PORT_IDENTIFIER_UNSUPPORTED: " + port_name)
+            width = 1
+            if bracket:
+                bounds = re.fullmatch(r"\[([^:\]]+):([^:\]]+)\]", bracket)
+                if bounds is None or "'" in bracket:
+                    raise ValueError("PORT_RANGE_UNSUPPORTED: " + port_name)
+                try:
+                    width = abs(safe_eval_arith(" ".join(bounds[1].split()), params)
+                                - safe_eval_arith(" ".join(bounds[2].split()), params)) + 1
+                except ExpectError as exc:
+                    raise ValueError("PORT_WIDTH_UNRESOLVED: " + port_name + " " + bracket) from exc
+            result.append(Port(port_name, direction, width))
+        if not ansi and [p.name for p in result] != [s.strip() for s in _ports._split_top_level_commas(blob)]:
+            raise ValueError("PORT_DECLARATION_INCOMPLETE")
+        if len({p.name for p in result}) != len(result):
+            raise ValueError("PORT_DECLARATION_DUPLICATE")
+        return name, result, ""
+    except ValueError as exc:
+        return None, [], str(exc)
 
 
 def _classify_ports(ports: List[Port]) -> Tuple[Optional[Port], List[Port],
@@ -469,7 +507,7 @@ def diff_verify(rtl_path: Path, ref_path: Path, top: Optional[str],
                            "(FLOOR per #697)"),
         "complement_to": ["#697 spec_coverage_check (deterministic dimension "
                           "coverage)", "#699 timing/encoding reading disciplines"],
-        "reads_only": "RTL header + independent reference + generated vectors "
+        "reads_only": "RTL interface/parameter declarations + independent reference + generated vectors "
                       "(no oracle / hidden TB / dataset)",
         "vectors": vectors,
     }
@@ -499,6 +537,9 @@ def diff_verify(rtl_path: Path, ref_path: Path, top: Optional[str],
     report["sampled_output"] = {"name": dout_port.name, "width": dout_port.width}
     report["clk"] = clk.name if clk else None
     report["resets_held_inactive"] = [r.name for r in resets]
+    report["primary_io_scope"] = "one widest data input/output, first on ties; not multi-input semantic verification"
+    report["undriven_data_inputs"] = [p.name for p in din if p is not din_port]
+    report["unsampled_outputs"] = [p.name for p in dout if p is not dout_port]
 
     kinds, verr = _parse_vectors_arg(vectors)
     if verr:
