@@ -31,6 +31,8 @@ exercised on the real grammar.
 from __future__ import annotations
 
 import json
+# U12 (R-0929-SI-VERDICT (5)): no 1.8 V default anywhere; the synthetic
+# fixtures below are 1.8 V circuits, so every call states the supply.
 import subprocess
 import sys
 from pathlib import Path
@@ -291,8 +293,8 @@ def test_windows_overlap_logic():
 def test_scorer_always_advisory_verdict():
     """The verdict is ALWAYS the single advisory value, regardless of the
     coupling/overlap outcome — no PASS/FAIL split that implies sign-off."""
-    v_overlap = m.score_si_timing_aware(SYNTH_SPEF, TIMING_OVERLAP)
-    v_decoup = m.score_si_timing_aware(SYNTH_SPEF, TIMING_DECOUPLED)
+    v_overlap = m.score_si_timing_aware(SYNTH_SPEF, TIMING_OVERLAP, vdd_v=1.8)
+    v_decoup = m.score_si_timing_aware(SYNTH_SPEF, TIMING_DECOUPLED, vdd_v=1.8)
     assert v_overlap["verdict"] == "SI_TIMING_AWARE_SCREEN"
     assert v_decoup["verdict"] == "SI_TIMING_AWARE_SCREEN"
     # no FAIL/PASS sign-off verdict must ever be emitted
@@ -353,7 +355,7 @@ def test_scorer_low_coupling_never_flagged():
 
 def test_scorer_driven_damping_applied():
     """A driven victim's gated noise is the base noise * damping derate."""
-    v = m.score_si_timing_aware(SYNTH_SPEF, TIMING_OVERLAP)
+    v = m.score_si_timing_aware(SYNTH_SPEF, TIMING_OVERLAP, vdd_v=1.8)
     high = [e for e in v["watchlist"] if e["priority"] == "high"]
     e = high[0]
     assert e["victim_driven"] is True
@@ -363,15 +365,15 @@ def test_scorer_driven_damping_applied():
 
 def test_scorer_deterministic():
     """Same inputs -> byte-identical verdict (determinism)."""
-    a = m.score_si_timing_aware(SYNTH_SPEF, TIMING_OVERLAP)
-    b = m.score_si_timing_aware(SYNTH_SPEF, TIMING_OVERLAP)
+    a = m.score_si_timing_aware(SYNTH_SPEF, TIMING_OVERLAP, vdd_v=1.8)
+    b = m.score_si_timing_aware(SYNTH_SPEF, TIMING_OVERLAP, vdd_v=1.8)
     assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
 
 
 def test_scorer_margin_tunable():
     """Raising the margin above the gated noise clears the HIGH watch-list
     (the verdict stays the single advisory value either way)."""
-    v_hi = m.score_si_timing_aware(SYNTH_SPEF, TIMING_OVERLAP,
+    v_hi = m.score_si_timing_aware(SYNTH_SPEF, TIMING_OVERLAP, vdd_v=1.8,
                                    noise_margin_mv=2000.0)
     assert v_hi["verdict"] == "SI_TIMING_AWARE_SCREEN"
     assert v_hi["watchlist_high_count"] == 0
@@ -383,7 +385,7 @@ def test_scorer_honesty_scope_strings():
     explicit that it is CONCLUSIVE ONLY in the decoupled-safe direction while
     the flagged direction is an ADVISORY watch needing foundry-calibrated
     models (CCS-Noise / RLC(K)) — a physical need, not tool lock-in."""
-    v = m.score_si_timing_aware(SYNTH_SPEF, TIMING_OVERLAP)
+    v = m.score_si_timing_aware(SYNTH_SPEF, TIMING_OVERLAP, vdd_v=1.8)
     blob = (v["scope"] + " " + v["method"]).lower()
     assert "screen" in blob
     assert "advisory" in blob
@@ -483,7 +485,7 @@ def test_cli_score_exit_code_advisory_default_zero(tmp_path):
     tj = tmp_path / "t.json"
     tj.write_text(json.dumps(TIMING_OVERLAP))
     r = subprocess.run(
-        [sys.executable, str(PROG), "score", str(spef), str(tj)],
+        [sys.executable, str(PROG), "score", str(spef), str(tj), "--vdd", "1.8"],
         capture_output=True, text=True)
     assert r.returncode == 0  # advisory => never fails a build
     out = json.loads(r.stdout)
@@ -499,7 +501,7 @@ def test_cli_score_strict_exits_one_on_high_watchlist(tmp_path):
     tj = tmp_path / "t.json"
     tj.write_text(json.dumps(TIMING_OVERLAP))
     r = subprocess.run(
-        [sys.executable, str(PROG), "score", str(spef), str(tj), "--strict"],
+        [sys.executable, str(PROG), "score", str(spef), str(tj), "--vdd", "1.8", "--strict"],
         capture_output=True, text=True)
     assert r.returncode == 1
     assert json.loads(r.stdout)["verdict"] == "SI_TIMING_AWARE_SCREEN"
@@ -520,12 +522,12 @@ def test_cli_score_exit_code_advisory_no_flags(tmp_path):
                    "slew_rise_max": 0.05, "slew_fall_max": 0.05},
     })))
     r = subprocess.run(
-        [sys.executable, str(PROG), "score", str(spef), str(tj)],
+        [sys.executable, str(PROG), "score", str(spef), str(tj), "--vdd", "1.8"],
         capture_output=True, text=True)
     assert r.returncode == 0
     assert json.loads(r.stdout)["verdict"] == "SI_TIMING_AWARE_SCREEN"
     r2 = subprocess.run(
-        [sys.executable, str(PROG), "score", str(spef), str(tj), "--strict"],
+        [sys.executable, str(PROG), "score", str(spef), str(tj), "--vdd", "1.8", "--strict"],
         capture_output=True, text=True)
     assert r2.returncode == 0  # no HIGH watch-list -> strict still passes
 

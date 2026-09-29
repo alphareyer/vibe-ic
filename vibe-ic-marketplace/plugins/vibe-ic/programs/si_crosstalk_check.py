@@ -26,6 +26,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Tuple
 import _path_layout as _pl
+import si_mcf_verdict_basis as _svb  # R-0915-66: the ONE delta-delay reading
 
 
 @dataclass
@@ -192,6 +193,25 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
         # sign-off PASS. Surface the tier + the coupling-dominated
         # watch-list. v1.7.64 makes the predicate fail-closed (see the
         # module-level note on `declares_si_signoff`).
+        # R-0929-SI-VERDICT / R-0915-66 — the timing-window delta-delay
+        # screen's GENUINE verdict (pairs slack-checked; a kernel cross-check,
+        # when it ran, AGREEd — the runner withdraws the reading otherwise) IS
+        # step 27's verdict. Read through the same function that decides the
+        # MCF verdict basis, so the two can never disagree.
+        dd_verdict, dd_evidence = _svb.delta_delay_reading(data)
+        kx = data.get("kernel_cross_check")
+        if (dd_verdict is not None and isinstance(kx, dict)
+                and kx.get("verdict") != "AGREE"):
+            dd_verdict, dd_evidence = None, {
+                "why": f"kernel cross-check {kx.get('verdict')!r}, not AGREE"}
+        stats["delta_delay_verdict"] = dd_verdict
+        stats["delta_delay_basis"] = dd_evidence
+        if dd_verdict == "FAIL":
+            findings.append(Finding(
+                "ERROR", "SI_DELTA_DELAY_FAIL",
+                f"coupling delta-delay screen: a proven push-negative on "
+                f"{dd_evidence.get('violations_count')} pair(s) over "
+                f"{dd_evidence.get('pairs_slack_checked')} slack-checked"))
         blob = " ".join(str(data.get(k, "")) for k in
                         ("verdict", "method", "mode", "tool", "note"))
         is_advisory = not declares_si_signoff(blob, data)
@@ -269,10 +289,19 @@ def build_report(findings: List[Finding], stats: dict,
         "project_dir": project_dir,
         # #437 follow-up: the headline names the tier — an advisory
         # capacitive screen is never presented as plain sign-off PASS.
-        # U12 (2026-09-29): an advisory screen measured no SI noise/glitch
-        # sign-off, so it is NOT_MEASURED — never a PASS, whatever it found.
-        "verdict": ("NOT_MEASURED" if ok and advisory
-                    else "PASS" if ok else "FAIL"),
+        # R-0929-SI-VERDICT: a genuine delta-delay verdict decides (PASS
+        # here; its FAIL is an ERROR above); an artefact that positively
+        # declares timing-window sign-off is the other basis; an advisory
+        # screen alone is NOT_MEASURED — never PASS, never FAIL.
+        "verdict": ("FAIL" if not ok
+                    else "PASS" if (stats.get("delta_delay_verdict") == "PASS"
+                                    or not advisory)
+                    else "NOT_MEASURED"),
+        "verdict_basis": ("coupling_delta_delay_screen"
+                          if stats.get("delta_delay_verdict") else
+                          "declared_timing_window_signoff" if not advisory
+                          else "advisory_screen_only"),
+        "delta_delay_basis": stats.get("delta_delay_basis"),
         "screen_tier": "ADVISORY_SCREEN_ONLY" if advisory else "",
         "summary": {
             "report_found": stats["report_found"],

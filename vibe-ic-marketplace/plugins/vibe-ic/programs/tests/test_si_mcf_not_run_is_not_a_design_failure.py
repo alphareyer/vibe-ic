@@ -304,6 +304,10 @@ NOT_RUN_CASES = {
     "NO_SPEF": _b_no_spef,
     "NO_CORNER": _b_no_corner,
     "NO_BOUNDED_SPEF": _b_no_bounded_spef,
+    # U12 / R-0929-SIMCF-NOTRUN: the tool timed nothing — could-not-run,
+    # never PASS, never a design defect.
+    "WINDOWS_NOT_MEASURED": _b_windows_not_measured,
+    "SLACK_NOT_MEASURED": _b_slack_not_measured,
 }
 
 #: category -> builder, for the categories that mean SOMETHING WAS EXAMINED
@@ -315,9 +319,6 @@ EXAMINED_AND_WRONG_CASES = {
     "FOLD_WITHOUT_SOURCE": _b_fold_without_source,
     "FOLD_NOT_APPLIED": _b_fold_not_applied,
     "SLACK_BETTER_THAN_BOUND": _b_slack_better_than_bound,
-    # U12: a report that times nothing is examined and wrong, never a pass.
-    "WINDOWS_NOT_MEASURED": _b_windows_not_measured,
-    "SLACK_NOT_MEASURED": _b_slack_not_measured,
 }
 
 #: The same five categories, in the ZERO-DENOMINATOR shapes they are reachable

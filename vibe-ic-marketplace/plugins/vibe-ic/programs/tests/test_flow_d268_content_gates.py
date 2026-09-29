@@ -34,11 +34,11 @@ CASES = {
         "tied_off": True,
         "instances": [{"name": "s0", "llx": 0, "lly": 0, "keep": True},
                       {"name": "s1", "llx": 10, "lly": 10, "keep": True}]}, ""),
-    # U12: the healthy SI artefact DECLARES timing-window sign-off; an
-    # undeclared screen reads NOT_MEASURED and could not stand for "good".
+    # U12 / R-0929-SI-VERDICT: the healthy SI artefact carries the producer's
+    # genuine delta-delay PASS; a screen alone reads NOT_MEASURED.
     "27": ("reports/phase3/si_crosstalk.json", {
         "max_crosstalk_noise": 0.02, "violations_count": 0,
-        "timing_window_signoff": True}, ""),
+        "delta_delay": {"verdict": "PASS", "pairs_slack_checked": 12, "violations_count": 0}}, ""),
     "32": ("phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json",
            {"repair_needed": False}, ""),
     "35": ("reports/phase3/dfm_screen.json",

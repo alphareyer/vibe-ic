@@ -64,7 +64,7 @@ PUBLIC API (what the phase3 runner calls)
         spef_path: str | Path,
         timing_json_path: str | Path,
         *,
-        vdd_v: float = 1.8,
+        vdd_v: Optional[float] = None,
         noise_margin_mv: float = 100.0,
         out_json: str | Path | None = None,
         out_rpt: str | Path | None = None,
@@ -104,7 +104,7 @@ TIMING_JSON_SHAPE = {
     "tool": "OpenSTA",
     "design": "<top>",
     "time_unit": "ns",
-    "vdd_v": 1.8,
+    "vdd_v": "float|null (V, from the PDK corner liberty)",
     "pins": {
         "<pin_full_name>": {
             "arr_rise_min": "float|null (ns)",
@@ -495,7 +495,7 @@ def score_si_timing_aware(
     spef: Union[str, dict],
     timing: Union[str, dict, PathLike],
     *,
-    vdd_v: float = 1.8,
+    vdd_v: Optional[float] = None,
     noise_margin_mv: float = 100.0,
     overlap_guard_ns: float = 0.0,
 ) -> dict:
@@ -505,7 +505,7 @@ def score_si_timing_aware(
       spef    : SPEF text OR a pre-parsed dict from parse_spef().
       timing  : OpenSTA timing JSON path / JSON string / pre-loaded dict
                 (shape == TIMING_JSON_SHAPE).
-      vdd_v   : supply (default 1.8 V for sky130).
+      vdd_v   : supply in volts from the PDK corner liberty; None = unresolved (noise numbers null, never a default).
       noise_margin_mv : DC noise margin a glitch must exceed to count as a
                 violation (default 100 mV ~ sky130 1.8 V std-cell guidance).
       overlap_guard_ns : slack added to the overlap test (0 = strict).
@@ -541,7 +541,11 @@ def score_si_timing_aware(
         tj = load_timing_json(timing)
 
     pins = tj.get("pins", {})
-    vdd_mv = vdd_v * 1000.0
+    # U12 / R-0929-SI-VERDICT (5): an UNRESOLVED supply (None) still runs the
+    # window gating; only the Vdd-dependent noise numbers are published null.
+    vdd_known = vdd_v is not None
+    vdd_calc = vdd_v if vdd_known else 0.0
+    vdd_mv = vdd_calc * 1000.0
     DRIVEN_DAMPING = 0.5  # conservative screen derate for a driven victim
 
     cg = sp["cg"]
@@ -582,7 +586,7 @@ def score_si_timing_aware(
             if denom <= 0:
                 continue
             pairs_evaluated += 1
-            base_v = (cc_val / denom) * vdd_v
+            base_v = (cc_val / denom) * vdd_calc
             base_mv = base_v * 1000.0
             max_base_noise_mv = max(max_base_noise_mv, base_mv)
 
@@ -681,12 +685,15 @@ def score_si_timing_aware(
         "pairs_evaluated": pairs_evaluated,
         # the only conclusive result: non-overlapping windows => safe.
         "pairs_decoupled_by_window": decoupled_count,
-        "max_base_noise_mv": round(max_base_noise_mv, 2),
-        "max_gated_noise_mv": round(max_gated_noise_mv, 2),
+        "max_base_noise_mv": (round(max_base_noise_mv, 2) if vdd_known
+                              else None),
+        "max_gated_noise_mv": (round(max_gated_noise_mv, 2) if vdd_known
+                               else None),
         # NOTE: flagged_* are ADVISORY watch-list counts, NOT proven failures.
-        "watchlist_high_count": len(watch_high),
-        "watchlist_low_count": len(watch_low),
-        "watchlist_count": len(watchlist),
+        "watchlist_high_count": len(watch_high) if vdd_known else None,
+        "watchlist_low_count": len(watch_low) if vdd_known else None,
+        "watchlist_count": len(watchlist) if vdd_known else None,
+        "vdd_unresolved": not vdd_known,
         "watchlist": watchlist[:200],
         "verdict": verdict,
     }
@@ -711,7 +718,7 @@ def score_delta_delay(
     spef: Union[str, dict],
     timing: Union[str, dict, PathLike],
     *,
-    vdd_v: float = 1.8,
+    vdd_v: Optional[float] = None,
     miller_factor: float = DELTA_DELAY_MILLER_FACTOR,
     overlap_guard_ns: float = 0.0,
 ) -> dict:
@@ -888,7 +895,7 @@ def build_opensta_si_tcl(
     spef: str,
     out_json: str,
     *,
-    vdd_v: float = 1.8,
+    vdd_v: Optional[float] = None,
     extra_lefs: Optional[List[str]] = None,
     extra_liberties: Optional[List[str]] = None,
     propagated_clock: bool = False,
@@ -968,7 +975,7 @@ puts $_si_out "{{"
 puts $_si_out "  \\"tool\\": \\"OpenSTA\\","
 puts $_si_out "  \\"design\\": \\"{top}\\","
 puts $_si_out "  \\"time_unit\\": \\"ns\\","
-puts $_si_out "  \\"vdd_v\\": {vdd_v},"
+puts $_si_out "  \\"vdd_v\\": {'null' if vdd_v is None else vdd_v},"
 puts $_si_out "  \\"pins\\": {{"
 set _si_first 1
 set _si_n 0
@@ -1187,7 +1194,7 @@ def run_si_signoff_timing_aware(
     spef_path: PathLike,
     timing_json_path: PathLike,
     *,
-    vdd_v: float = 1.8,
+    vdd_v: Optional[float] = None,
     noise_margin_mv: float = 100.0,
     out_json: Optional[PathLike] = None,
     out_rpt: Optional[PathLike] = None,
@@ -1238,7 +1245,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp_s = sub.add_parser("score", help="score SI from a SPEF + OpenSTA timing JSON")
     sp_s.add_argument("spef")
     sp_s.add_argument("timing_json")
-    sp_s.add_argument("--vdd", type=float, default=1.8)
+    sp_s.add_argument("--vdd", type=float, default=None)
     sp_s.add_argument("--margin-mv", type=float, default=100.0)
     sp_s.add_argument("--out-json", default=None)
     sp_s.add_argument("--out-rpt", default=None)
@@ -1262,7 +1269,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp_t.add_argument("--sdc", required=True)
     sp_t.add_argument("--spef", required=True)
     sp_t.add_argument("--out-json", required=True)
-    sp_t.add_argument("--vdd", type=float, default=1.8)
+    sp_t.add_argument("--vdd", type=float, default=None)
     sp_t.add_argument("--lef", action="append", default=[])
     sp_t.add_argument("--extra-liberty", action="append", default=[])
 
@@ -1298,6 +1305,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         # push-negative. --strict keeps the legacy HIGH-noise-watch gate.
         if args.strict_delta and v.get("delta_delay_verdict") == "FAIL":
             return 1
+        if args.strict and v["watchlist_high_count"] is None:
+            return 2        # no supply: the noise watch-list was not measured
         if args.strict and v["watchlist_high_count"] > 0:
             return 1
         return 0

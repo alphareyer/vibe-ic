@@ -179,3 +179,163 @@ def test_runner_noise_screen_takes_vdd_from_the_pdk_liberty(tmp_path):
     j = json.loads((rpt3 / "si_crosstalk.json").read_text())
     assert j["vdd_mv"] == 5000.0, j
     assert "Vdd=5.0V" in (rpt3 / "si_crosstalk.rpt").read_text()
+
+
+# ── Round 2 (review wave 58, R-0929-SI-VERDICT) ────────────────────────────
+_R25_DELTA = {  # subservient r25's genuine delta-delay reading
+    "verdict": "PASS", "violations_count": 0, "max_delta_delay_ns": 0.04,
+    "pairs_slack_checked": 35902, "pairs_decoupled_by_window": 1192,
+    "scope": "coupling delta-delay vs the victim's own STA path slack"}
+
+
+def _runner_si_report(tmp_path, *, volts=5.0, delta=None):
+    """si_crosstalk.json exactly as the runner emits it (advisory screen),
+    optionally carrying the delta-delay block the timing-aware merge adds."""
+    project = _mk_project(tmp_path)
+    rpt3 = runner._pl.reports_phase3_dir(project)
+    rpt3.mkdir(parents=True, exist_ok=True)
+    spef = tmp_path / "chip_top.spef"
+    spef.write_text(_SPEF_SAMPLE)
+    pdk = _fake_pdk()
+    pdk.liberty = str(_liberty(tmp_path / "corner.lib", volts)) \
+        if volts is not None else str(tmp_path / "absent.lib")
+    assert runner._emit_si_crosstalk_report(
+        project, "chip_top", spef, rpt3 / "ir_drop.rpt",
+        rpt3 / "si_crosstalk.rpt", [], pdk=pdk, container="none")
+    if delta is not None:
+        p = rpt3 / "si_crosstalk.json"
+        j = json.loads(p.read_text())
+        j["delta_delay"] = dict(delta)
+        j["delta_delay_verdict"] = delta["verdict"]
+        p.write_text(json.dumps(j))
+    return project
+
+
+def _prestream_si(project):
+    spec = next(s for s in runner._PRESTREAM_GATES if s[0] == "si")
+    row = runner._prestream_si_disclosure(
+        runner._run_declared_signoff_gate(project, *spec))
+    verdict, failed, unmeasured, _w = runner._prestream_status([row])
+    return row, verdict
+
+
+def test_prestream_a_clean_design_with_an_advisory_screen_still_streams(tmp_path):
+    """BLOCKER (wave 58): the REAL checker on the runner-emitted report; the
+    row is NOT_MEASURED and disclosed, and it does not quarantine the GDS."""
+    project = _runner_si_report(tmp_path)
+    row, verdict = _prestream_si(project)
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.extras.get("advisory_screen_only") is True
+    assert verdict == "PASS"
+
+
+def test_prestream_follows_a_genuine_delta_delay_verdict(tmp_path):
+    row, verdict = _prestream_si(_runner_si_report(tmp_path, delta=_R25_DELTA))
+    assert (row.status, verdict) == ("PASS", "PASS"), row.detail
+    fail = dict(_R25_DELTA, verdict="FAIL", violations_count=3)
+    row, verdict = _prestream_si(_runner_si_report(tmp_path / "f", delta=fail))
+    assert (row.status, verdict) == ("FAIL", "FAIL"), row.detail
+
+
+def test_a_genuine_delta_delay_pass_is_the_step27_verdict(tmp_path):
+    project = _runner_si_report(tmp_path, delta=_R25_DELTA)
+    assert SIC.main([str(project)]) == 0
+    rep = SIC.build_report(*SIC.audit(project), str(project))
+    assert rep["verdict_basis"] == "coupling_delta_delay_screen"
+
+
+def test_a_kernel_disagreement_or_no_slack_basis_is_not_a_verdict(tmp_path):
+    body = dict(_SCREEN, delta_delay=dict(_R25_DELTA),
+                kernel_cross_check={"verdict": "DISAGREE"})
+    assert SIC.main([str(_si_proj(tmp_path / "k", body))]) == 2
+    body = dict(_SCREEN, delta_delay=dict(_R25_DELTA, verdict="ADVISORY"))
+    assert SIC.main([str(_si_proj(tmp_path / "a", body))]) == 2
+    body = dict(_SCREEN, delta_delay=dict(_R25_DELTA, pairs_slack_checked=0))
+    assert SIC.main([str(_si_proj(tmp_path / "z", body))]) == 2
+
+
+def test_a_subservient_r25_shaped_artefact_reads_step27_pass(tmp_path):
+    """delta-delay PASS over 35902 slack-checked pairs; the MCF envelope
+    self-reports -0.266 ns and is disclosed beside it (R-0915-66)."""
+    proj = _mcf_project(tmp_path / "p", setup_after=-0.266)
+    _si_proj(proj, dict(_SCREEN, delta_delay=dict(_R25_DELTA),
+                        delta_delay_verdict="PASS"))
+    import si_mcf_verdict_basis as VB
+    VB.apply(proj)
+    step = next(s for s in yaml.safe_load(_FLOW.read_text())["steps"]
+                if str(s.get("id")) == "27")
+    subject = {**step, "required_outputs": [
+        "reports/phase3/si_crosstalk.json", "reports/phase3/si_mcf_sta.json"],
+        "gate": {"all_of": [step["gate"]["all_of"][0], step["gate"]["all_of"][-1]]}}
+    row = FCC.check_step(proj, subject, {})
+    assert row.status == "PASS", (row.status, row.reasons)
+    mcf = json.loads((proj / "reports/phase3/si_mcf_sta.json").read_text())
+    assert mcf["verdict_basis"]["envelope"]["mcf_setup_ns"] == -0.266
+
+
+def test_unresolved_vdd_runs_the_merge_and_nulls_only_noise_numbers(
+        tmp_path, monkeypatch):
+    """No 1.8 V default: a liberty that declares no supply keeps the
+    timing-aware (delta-delay) merge running; only noise numbers are null."""
+    seen = {}
+
+    def fake_merge(project, top, pdk, container, spef, sbody, notes, vdd_v=0):
+        seen["vdd"] = vdd_v
+        sbody["delta_delay"] = dict(_R25_DELTA)
+
+    monkeypatch.setattr(runner, "_merge_si_timing_aware", fake_merge)
+    project = _runner_si_report(tmp_path, volts=None)
+    j = json.loads((runner._pl.reports_phase3_dir(project)
+                    / "si_crosstalk.json").read_text())
+    assert "vdd" in seen and seen["vdd"] is None
+    assert j["vdd_mv"] is None and j["max_crosstalk_noise"] is None
+    assert j["vdd_source"] == "NOT_RESOLVED"
+    assert j["delta_delay"]["verdict"] == "PASS"
+    rpt = (runner._pl.reports_phase3_dir(project) / "si_crosstalk.rpt").read_text()
+    assert "0.0 mV" not in rpt and "max_crosstalk_noise: null" in rpt
+
+
+def test_the_scorer_nulls_noise_numbers_without_a_supply():
+    import si_signoff_timing_aware as STA
+    v = STA.score_si_timing_aware(STA.parse_spef(_SPEF_SAMPLE), {"pins": {}},
+                                  vdd_v=None)
+    assert v["max_base_noise_mv"] is None and v["watchlist_high_count"] is None
+    assert v["vdd_unresolved"] is True
+    assert isinstance(v["pairs_decoupled_by_window"], int)
+
+
+def test_si_mcf_run_states_an_unresolved_supply(tmp_path, monkeypatch):
+    proj = _mcf_project(tmp_path / "p")
+    lib = tmp_path / "stdlib__ss_125C_4v50.lib"
+    lib.write_text("library (x) {\n}\n")
+    monkeypatch.setattr(M, "_run_windows", lambda *a, **k: ({"pins": {}}, 0))
+    monkeypatch.setattr(M, "_run_sta_slack", lambda *a, **k: (1.0, 0.2, "", 0))
+    monkeypatch.setattr(M, "_to_container_path", lambda p, c: str(p))
+    rep = M.run(proj, container="none", spef=str(proj / "design.spef"),
+                liberty=str(lib), top="top", out_json=str(tmp_path / "si.json"),
+                work_dir=str(tmp_path / "work"))
+    assert rep["vdd_v"] is None
+    assert rep["vdd_source"].startswith("NOT_RESOLVED")
+
+
+def test_timed_nothing_is_not_run_never_a_design_fail(tmp_path):
+    rep = _gate(_zero_window_null_slack(tmp_path / "p"))
+    assert rep["verdict"] == "NOT_RUN", rep["verdict"]
+
+
+def test_control_a_healthy_run_with_a_window_file_passes(tmp_path):
+    """Measured windows (overlapping, so the emitter's fold stands) and
+    measured slacks: the window check must not refuse a real run."""
+    proj = _mcf_project(tmp_path / "p")
+    rec = {"arr_rise_min": 0.1, "arr_rise_max": 0.2, "arr_fall_min": 0.1,
+           "arr_fall_max": 0.2, "slew_rise_max": 0.05, "slew_fall_max": 0.05}
+    wj = proj / "windows.json"
+    wj.write_text(json.dumps({"pins": {p: rec for p in
+                                       ("ua:Z", "ub:Z", "ua/Z", "ub/Z")}}))
+    rp = proj / "reports" / "phase3" / "si_mcf_sta.json"
+    doc = json.loads(rp.read_text())
+    doc["windows_json"] = str(wj)
+    rp.write_text(json.dumps(doc))
+    rep = _gate(proj)
+    assert rep["summary"]["windows_resolved"] >= 1, rep["summary"]
+    assert rep["verdict"] == "PASS", rep["findings"]

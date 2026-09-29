@@ -343,7 +343,17 @@ NOT_RUN_CATEGORIES = frozenset({
     "NO_SPEF",           # the SPEF the report names is not on this host
     "NO_CORNER",         # the report carries no record for a corner
     "NO_BOUNDED_SPEF",   # ... or names a bounded SPEF that is not there
+    # U12 / R-0929-SI-VERDICT (4) / R-0929-SIMCF-NOTRUN: the tool TIMED NOTHING.
+    "WINDOWS_NOT_MEASURED",  # a window run resolved zero switching windows
+    "SLACK_NOT_MEASURED",    # a corner's SI-bounded STA produced no slack
 })
+
+#: The could-not-run categories that void the WHOLE run, not one input of it:
+#: when the timer timed nothing, folds "proved" against an assumed window are
+#: not work the gate did on this design, so `denominator` counts none of them
+#: and the partial-run FAIL branch of `verdict_for` never reaches this state.
+TIMED_NOTHING_CATEGORIES = frozenset({"WINDOWS_NOT_MEASURED",
+                                      "SLACK_NOT_MEASURED"})
 
 #: The vacuity codes a tapeout acceptance MAY quote (#535). See the
 #: "A VACUITY A WAIVER MAY ACCEPT" section of the module docstring.
@@ -598,10 +608,15 @@ def audit(project_dir: Path,
     # unlinked, every slack null). Coverage must be > 0. A run with no window
     # file at all is the declared window-independent floor mode (every net
     # folded at the worst Miller factor, `mode` says so) and is not this state.
-    # ERROR in the default LOUD tier, deliberately not NOT_RUN_CATEGORIES: the
-    # gate HAD its inputs; what it found is a report that times nothing.
-    if (pairs and isinstance(net_windows, dict) and net_windows
-            and not stats.get("windows_resolved")):
+    # A could-not-run state (NOT_RUN_CATEGORIES): never PASS, never a design
+    # defect; a measured violation elsewhere still FAILs.
+    # The emitter's own count is read too, so deleting or truncating the window
+    # file cannot turn this state into the floor mode (review wave 58).
+    _emitted_none = (report.get("nets_with_windows") == 0
+                     and isinstance(report.get("nets_total"), int)
+                     and report.get("nets_total") > 0)
+    if pairs and ((isinstance(net_windows, dict) and net_windows
+                   and not stats.get("windows_resolved")) or _emitted_none):
         findings.append(Finding(
             "ERROR", "WINDOWS_NOT_MEASURED",
             f"switching windows resolved for 0 of "
@@ -905,6 +920,10 @@ def denominator(stats: dict,
     considered = sum(int((v or {}).get("nets_checked", 0) or 0)
                      for v in recount.values())
     not_run, defect = error_categories(findings or [])
+    if TIMED_NOTHING_CATEGORIES & set(not_run):
+        # U12 / R-0929-SI-VERDICT (4): the timer timed nothing, so a fold
+        # "proved" against an assumed window proved nothing about this design.
+        examined = 0
     code, prose = _vacuity(stats)
     vacuity_code = unwaivable_code = ""
     # ONE BRANCH DECIDES THE PROSE AND THE CODE AND THE FIELD, and the
@@ -1236,8 +1255,19 @@ RECORD_ADJUDICATION = _ra.declare(
     # RECORDED SHAPE, not from the published files. The rule reads only fields
     # a record carries, which is why that substitution is sound for THIS rule
     # and would not be for one that re-opened an artefact.
+    #
+    # U12 round 2 (2026-09-29, R-0929-SI-VERDICT (4)) moved the closure a FIFTH
+    # time: NOT_RUN_CATEGORIES gained WINDOWS_NOT_MEASURED and
+    # SLACK_NOT_MEASURED, and `denominator` counts no fold as proved when one
+    # of them (TIMED_NOTHING_CATEGORIES) is present, so the run reads NOT_RUN
+    # and never the partial-run FAIL. `verdict_for` and `_vacuity` are
+    # unchanged. Re-reviewed:
+    # the rule reads `summary.coupling_pairs` and the record's own findings; a
+    # record written before U12 carries neither category and adjudicates
+    # exactly as before, and a `coupling_pairs: 0` record cannot carry
+    # WINDOWS_NOT_MEASURED (raised only when pairs exist).
     decision_digest=(
-        "67a5a6c5d5a4e3673bbbf8a559e4d88e21dd61366419f94cd4b2344556d88dad"),
+        "3880b61e00f497d3273791f703b215302076829db7cbd72d1968a0683871b57a"),
     rules=(
         _ra.Rule(
             rule_id="si_mcf_sta_check.zero-fold-is-not-a-signoff",

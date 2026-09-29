@@ -57300,11 +57300,36 @@ def _netlist_port_decls_row(nports: Dict[str, Any]) -> Optional[StepResult]:
         reason_class=_V.ReasonClass.INCONCLUSIVE)
 
 
+def _prestream_si_disclosure(row: StepResult) -> StepResult:
+    """R-0929-SI-VERDICT (3): the pre-stream 'si' row follows step 27's
+    verdict. When step 27 has no genuine delta-delay verdict (an advisory
+    screen only), the row stays NOT_MEASURED but is DISCLOSED and marked so
+    `_prestream_status` does not let it quarantine the stream."""
+    if row.name != "si" or row.status != "NOT_MEASURED":
+        return row
+    try:
+        doc = json.loads(Path(row.output_files[0]).read_text()) \
+            if row.output_files else {}
+    except (OSError, ValueError):
+        doc = {}
+    if (isinstance(doc, dict) and doc.get("verdict") == "NOT_MEASURED"
+            and doc.get("verdict_basis") == "advisory_screen_only"):
+        row.extras["advisory_screen_only"] = True
+        row.disclosures.append(_V.Disclosure.ADVISORY.value)
+        row.detail += ("; step 27 has no genuine delta-delay verdict "
+                       "(advisory screen only): NOT_MEASURED, disclosed, "
+                       "not a stream blocker (R-0929-SI-VERDICT)")
+    return row
+
+
 def _prestream_status(rows: List[StepResult]) -> Tuple[str, list, list, list]:
     """Keep a missing measurement distinct from a measured pre-stream failure."""
     failed = [r for r in rows if r.status == "FAIL"]
+    # R-0929-SI-VERDICT (3): an advisory SI screen by itself never quarantines
+    # the stream; the row stays NOT_MEASURED and is disclosed, not blocking.
     unmeasured = [r for r in rows
-                  if r.status not in ("PASS", "WAIVED", "FAIL")]
+                  if r.status not in ("PASS", "WAIVED", "FAIL")
+                  and not r.extras.get("advisory_screen_only")]
     waived = [r for r in rows if r.status == "WAIVED"]
     verdict = ("FAIL" if failed else "NOT_MEASURED" if unmeasured
                else "WAIVED" if waived else "PASS")
@@ -57425,6 +57450,8 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
             return rerun
     rows = [_run_declared_signoff_gate(project, *spec)
             for spec in _PRESTREAM_GATES]
+    for row in rows:
+        _prestream_si_disclosure(row)
     _nports_row = _netlist_port_decls_row(_nports)
     if _nports_row is not None:
         rows.append(_nports_row)
@@ -71829,7 +71856,7 @@ def _si_timing_aware_module():
 
 def _emit_si_timing_json(project: Path, top: str, pdk: PdkConfig, container: str,
                          spef: Path, sdc: Path, netlist: Path, out_json: Path,
-                         notes: List[str], vdd_v: float = 1.8) -> bool:
+                         notes: List[str], vdd_v: Optional[float] = None) -> bool:
     """Produce the OpenSTA per-pin arrival-window + slew JSON the timing-aware
     SI screen consumes, by running build_opensta_si_tcl's recipe in the
     container (Step 27 advisory upgrade — ADVISORY, never blocks the build).
@@ -71940,7 +71967,7 @@ def _librelane_si_corner_inputs(project: Path) -> Optional[dict]:
 
 
 def _librelane_si_windows_json(project: Path, top: str, tool: dict, out_json: Path,
-                              notes: List[str], vdd_v: float = 1.8) -> bool:
+                              notes: List[str], vdd_v: Optional[float] = None) -> bool:
     """The SI timing JSON on the tool corner's inputs, in the tool's image."""
     mod = _si_timing_aware_module()
     import librelane_signoff as _ls
@@ -72014,7 +72041,7 @@ def _librelane_si_kernel_check(project: Path, top: str, tool: dict, spef: Path,
 
 def _merge_si_timing_aware(project: Path, top: str, pdk: PdkConfig,
                            container: str, spef: Path, sbody: dict,
-                           notes: List[str], vdd_v: float = 1.8) -> None:
+                           notes: List[str], vdd_v: Optional[float] = None) -> None:
     """ADVISORY upgrade: when a routed SPEF + STA run are available, ALSO
     produce the OpenSTA SI timing JSON and run the timing-window-aware SI
     screen, then MERGE its watch-list fields into the SI report body `sbody`
@@ -72207,7 +72234,10 @@ def _emit_si_crosstalk_report(project: Path, top: str, spef: Optional[Path],
             # touches violations_count / max_crosstalk_noise (the gate-read
             # schema), so the si_crosstalk_check gate still PASSES. Pure
             # fall-through if pdk/container/STA are unavailable.
-            if pdk is not None and container is not None and _si_vdd_v:
+            # R-0929-SI-VERDICT (5): the merge runs whatever the Vdd — the
+            # delta-delay verdict does not depend on it; only the noise
+            # numbers are null when the supply is unresolved.
+            if pdk is not None and container is not None:
                 _merge_si_timing_aware(project, top, pdk, container, spef,
                                        sbody, notes, vdd_v=_si_vdd_v)
             _aa.write_text(si_rpt.parent / "si_crosstalk.json",
@@ -72247,8 +72277,9 @@ def _emit_si_crosstalk_report(project: Path, top: str, spef: Optional[Path],
                 f"mean_coupling_ratio: {m['mean_coupling_ratio']}\n"
                 f"nets_elevated (ratio>0.5): {m['nets_elevated_gt0p5']}\n"
                 f"nets_coupling_dominated (ratio>0.9, advisory watch-list): {dominated}\n"
-                f"max_crosstalk_noise: {m['max_crosstalk_noise_mv']} mV "
-                f"(worst-case FLOATING-victim capacitive-divider bound @ Vdd={_si_vdd_v}V; "
+                + (f"max_crosstalk_noise: {m['max_crosstalk_noise_mv']} mV "
+                 if _si_vdd_v else "max_crosstalk_noise: null (Vdd NOT_RESOLVED) ")
+                + f"(worst-case FLOATING-victim capacitive-divider bound @ Vdd={_si_vdd_v}V; "
                 "driven victims see far less)\n"
                 "violations_count: 0 (screen — coupling ratio alone is not a proven "
                 "failure; full SI sign-off needs a timing-window/driver-strength tool)\n"

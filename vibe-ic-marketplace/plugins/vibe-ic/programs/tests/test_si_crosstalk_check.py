@@ -27,7 +27,8 @@ def test_pass_json_no_violations(tmp_path):
     # an advisory screen reads NOT_MEASURED (test_u12_*).
     _write_json(tmp_path / "reports" / "phase3" / "si_crosstalk.json",
                 {"max_crosstalk_noise": 0.02, "violations_count": 0,
-                 "timing_window_signoff": True})
+                 # R-0929-SI-VERDICT: the producer's genuine delta-delay PASS
+                 "delta_delay": {"verdict": "PASS", "pairs_slack_checked": 12, "violations_count": 0}})
     result = _run(tmp_path)
     assert result.returncode == 0
     report = json.loads((tmp_path / "out.json").read_text())
@@ -58,7 +59,7 @@ def test_fail_violations_no_waiver(tmp_path):
 def test_pass_violations_with_waiver(tmp_path):
     _write_json(tmp_path / "reports" / "phase3" / "si_crosstalk.json",
                 {"max_crosstalk_noise": 0.15, "violations_count": 3,
-                 "timing_window_signoff": True})     # U12: a declared sign-off
+                 "delta_delay": {"verdict": "PASS", "pairs_slack_checked": 12, "violations_count": 0}})  # R-0929-SI-VERDICT
     _write_json(tmp_path / "waivers.json",
                 {"waivers": [{"step": "si_crosstalk", "reason": "accepted"}]})
     result = _run(tmp_path)
