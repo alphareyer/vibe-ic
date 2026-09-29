@@ -88,7 +88,10 @@ def _answers(project: Path, doc):
     path.parent.mkdir(parents=True, exist_ok=True)
     # A fixture that answers `deliverable` is modelling a design whose owner
     # declared the route; since R-0915-95 it has to say so (`_owner_declared`).
-    path.write_text(json.dumps(_OD.attest(doc), indent=2) + "\n",
+    # A hand-written area disposition is the owner's explicit answer, not a
+    # derived one (R-0929-DELIVERABLE-CONSISTENCY-2, `_owner_declared`).
+    path.write_text(json.dumps(_OD.attest_explicit(_OD.attest(doc)),
+                               indent=2) + "\n",
                     encoding="utf-8")
 
 
