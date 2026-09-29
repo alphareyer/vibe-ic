@@ -204,6 +204,62 @@ def test_a_stale_mapped_arm_does_not_block_a_phase2_rerun(tmp_path):
     assert cp.returncode == 0, cp.stdout[-800:]
 
 
+def _phase2_producer_call(proj, rtl=True):
+    argv = [sys.executable, str(PROGRAMS / "synth_netlist_check.py"),
+            "--netlist", str(proj / SYNTH / "netlist.v"),
+            "--json", str(proj / "r.json")]
+    if rtl:
+        (proj / "rtl.v").write_text("module spm; endmodule\n")
+        argv += ["--rtl", str(proj / "rtl.v")]
+        import os
+        os.utime(proj / "rtl.v", (1000, 1000))
+    cp = subprocess.run(argv, capture_output=True, text=True)
+    return cp, json.loads((proj / "r.json").read_text())
+
+
+@pytest.mark.parametrize("stale", ["module spm; endmodule\n", "", None])
+def test_phase2_producer_call_discloses_a_stale_mapped_arm(tmp_path, stale):
+    """Round 2: design_one_shot_runner.step_yosys_synth calls the checker with
+    --rtl before phase 3 rebuilds the mapped arm. A previous run's empty,
+    module-only or generic-only arm is disclosed, never blocking."""
+    text = _generic() if stale is None else stale
+    proj = _project(tmp_path, mapped_text=text)
+    cp, rep = _phase2_producer_call(proj)
+    assert cp.returncode == 0, rep["findings"]
+    assert rep["pnr_netlist"]["blocking"] is False
+    assert rep["pnr_netlist"]["findings"], rep["pnr_netlist"]
+
+
+def test_an_older_mapped_arm_is_disclosed_not_blocking(tmp_path):
+    import os
+    proj = _project(tmp_path, mapped_text=_generic())
+    os.utime(proj / SYNTH / "spm_synth.v", (1000, 1000))
+    cmd = _clause("9", "synth_netlist_check")
+    cp = _run_clause(proj, cmd)
+    rep = json.loads((proj / _json_arg(cmd)).read_text())
+    assert cp.returncode == 0 and rep["pnr_netlist"]["blocking"] is False
+
+
+def test_the_flow_gate_blocks_on_an_empty_current_mapped_arm(tmp_path):
+    """The companion's structural ERRORs block in the flow-gate call."""
+    proj = _project(tmp_path, mapped_text="module spm; endmodule\n")
+    cmd = _clause("9", "synth_netlist_check")
+    cp = _run_clause(proj, cmd)
+    rep = json.loads((proj / _json_arg(cmd)).read_text())
+    assert cp.returncode == 1
+    assert "PNR_NETLIST_EMPTY_NETLIST" in {f["category"] for f in rep["findings"]}
+
+
+def test_step9_provenance_refuses_a_mapped_record_from_another_tool(tmp_path):
+    cmd = _clause("9", "provenance_check")
+    proj = _project(tmp_path, mapped_text=_mapped())
+    prov = proj / "provenance.jsonl"
+    rows = [json.loads(l) for l in prov.read_text().splitlines()]
+    rows[-1]["tool"] = "cp"
+    prov.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert _run_clause(proj, cmd).returncode == 1
+
+
 def test_pnr_mode_before_phase3_is_asked_before_producer(tmp_path):
     proj = _project(tmp_path, mapped_text=None)
     out = tmp_path / "r.json"
@@ -241,13 +297,23 @@ def test_step14_judges_the_command_that_wrote_the_pnr_netlist(tmp_path, program)
 
 @pytest.mark.parametrize("program", ["yosys_hilomap_required_check",
                                      "yosys_script_template_check"])
-def test_step14_refuses_a_pnr_netlist_with_no_recipe(tmp_path, program):
-    """v5c's shape at audit time minus the log: only the simulation-only
-    command is echoed, and it did not write the netlist PnR routes."""
+def test_step14_an_unechoed_pnr_recipe_is_not_measured_not_failed(tmp_path, program):
+    """Round 2 (review wave58): no phase log echoes the command that wrote the
+    netlist PnR routes -- the LibreLane step-9 arm's shape (its transcript is
+    under phase3/librelane/, provenance says LibreLane.Yosys.Synthesis). The
+    recipe was not read: NOT_MEASURED (rc 2) naming the producer, never a
+    FAIL by that fact alone, and never the PASS the sim-only command gave."""
     cmd = _clause("14", program)
     proj = _project(tmp_path, mapped_text=_mapped(), synth_log=False)
+    prov = proj / "provenance.jsonl"
+    rows = [json.loads(l) for l in prov.read_text().splitlines()]
+    rows[-1]["produced_by"] = "LibreLane.Yosys.Synthesis"
+    prov.write_text("".join(json.dumps(r) + "\n" for r in rows))
     cp = _run_clause(proj, cmd)
-    assert cp.returncode == 1, cp.stdout[-600:] + cp.stderr[-600:]
+    assert cp.returncode == 2, cp.stdout[-600:] + cp.stderr[-600:]
+    rep = json.loads((proj / _json_arg(cmd)).read_text())
+    assert rep["verdict"] == "NOT_MEASURED"
+    assert "LibreLane.Yosys.Synthesis" in rep["reason"]
 
 
 @pytest.mark.parametrize("program", ["yosys_hilomap_required_check",
