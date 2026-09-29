@@ -46521,7 +46521,8 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
     state = report.get("adopted_state")
     # R-0929-STEP32-ADOPT: an adopted candidate is handed off; neither its
     # residual DRV nor the step-32 DRV verdict keeps the pre-repair route.
-    if report.get("adopted") and state and Path(state) != Path(route_state):
+    if ((report.get("adopted") or report.get("verdict") == "PASS")
+            and state and Path(state) != Path(route_state)):
         # cmp3 D15: a route is promoted only with its promoter's own antenna
         # and unrouted measurement of it; without one the input route stays.
         own = _step32_own_measurement(report)
