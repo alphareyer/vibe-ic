@@ -104,7 +104,11 @@ def _pack_dir(project: Path) -> Path:
 
 def _answer(project: Path, expectations):
     d = _pack_dir(project)
-    d.mkdir(parents=True, exist_ok=True)
+    # An answer is read only inside a pack rooted by the producer's own
+    # hand-off (D1FIX; the pattern of d063a8a59). Setup only.
+    if not (d / "authoring_schema.json").is_file():
+        assert T.ai_subtrack(project, T.input_text(project), d)[
+            "status"] == "HANDOFF_EMITTED"
     (d / "l_doc_expectations.json").write_text(
         json.dumps({"expectations": expectations}))
 
