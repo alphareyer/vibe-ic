@@ -210,10 +210,10 @@ def test_a_derived_generator_refusal_is_reported_not_discarded(
     outcomes = R._run_derived_artefact_generators(tmp_path, None)
     assert [o["program"] for o in outcomes] == [STATUS_GEN]
     assert outcomes[0]["rc"] == 2
-    assert "no STA report" in outcomes[0]["message"]
+    assert "No candidate post-route STA report" in outcomes[0]["message"]
     err = capsys.readouterr().err
     assert f"{STATUS_GEN} exited rc=2" in err
-    assert "no STA report" in err
+    assert "No candidate post-route STA report" in err
 
 
 # ---------------------------------------------------------------------------
@@ -386,4 +386,4 @@ def test_a_generator_refusal_is_in_the_run_record(tmp_path, monkeypatch):
     assert record["outcomes"] == outcomes and outcomes[0]["rc"] == 2
     steps = R._derived_generator_refusals(outcomes)
     assert [s.status for s in steps] == ["NOT_MEASURED"]
-    assert STATUS_GEN in steps[0].name and "no STA report" in steps[0].detail
+    assert STATUS_GEN in steps[0].name and "No candidate post-route STA report" in steps[0].detail
