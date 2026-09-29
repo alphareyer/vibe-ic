@@ -2,8 +2,13 @@
 """Build a DRV capture request from the routed run's own STA state.
 
 The plan is an input inventory, never a sign-off assertion.  Missing inputs
-raise an error; absent implementation-stage receipts remain absent for the
-judge to report.  The final STAPostPNR state is the source of scene identity.
+raise an error.  Implementation-stage evidence is read from the receipts each
+stage recorded when it ran (`STAGE_RECEIPT_DIR`); a stage without one stays
+absent, which the judge reports as FAIL (DRV standard section 1: a stage whose
+applied value cannot be extracted is FAIL, never N/A or NOT_MEASURED).  Identity
+the run genuinely cannot hold yet is named in ``identity["unavailable"]`` and
+left for the judge to report NOT_MEASURED.  The final STAPostPNR state is the
+source of scene identity.
 """
 from __future__ import annotations
 
@@ -14,8 +19,30 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_text
-from drv_signoff_judge import (_SCENE_PROFILES, _integrator_value,
-                               _liberty_header, _sdc_values, _sha)
+from drv_signoff_judge import (_NUM, _REQUIRED_STAGES, _SCENE_PROFILES,
+                               _integrator_value, _liberty_header, _sdc_values,
+                               _sha)
+
+#: Where an implementation stage records its DRV-constraint receipt, one JSON
+#: document per stage named ``<stage>.json`` (``synth``, ``placement_repair``,
+#: ``cts``, ``post_grt_repair``, ``signoff_sta`` and, when step 32 adopted a
+#: candidate, ``postroute_repair``).  Each document carries ``name``, ``ran``
+#: and ``{"path", "sha256"}`` references written when the stage ran:
+#: ``behavior_report`` (the declared-value DRV census, including a
+#: ``sta::max_fanout_check_limit <value>`` line for an OpenROAD stage),
+#: ``abc_script`` (synth) or ``sdc_snapshot`` (the ``write_sdc`` taken in the
+#: same process on the line before the stage command).  The applied values are
+#: derived here from those hashed bytes, never taken from the receipt's prose.
+STAGE_RECEIPT_DIR = Path("reports/phase3/drv_stages")
+
+#: Identity fields no run record holds before the named later step.  They stay
+#: absent so the judge reports NOT_MEASURED; they are never invented.
+_UNAVAILABLE_IDENTITY = {
+    "tree_sha": "the run records no source tree SHA",
+    "spec_version": "the run records no specification version",
+    "lvs_netlist": "no LVS netlist identity exists before stream-out and LVS",
+    "gds_netlist": "no GDS netlist identity exists before stream-out",
+}
 
 
 def _ref(path: Path) -> dict:
@@ -54,6 +81,76 @@ def _state(project: Path, final_state: dict | None = None) -> tuple[dict, Path]:
     if len(candidates) != 1:
         raise ValueError("final STAPostPNR state is not uniquely identified")
     return json.loads(candidates[0].read_text()), candidates[0]
+
+
+def _recorded_ref(project: Path, item: object) -> dict | None:
+    """Keep the hash a stage recorded; the judge re-reads the bytes."""
+    if not isinstance(item, dict) or not item.get("path"):
+        return None
+    return {"path": str(_run_path(project, str(item["path"]))),
+            "sha256": item.get("sha256")}
+
+
+def _recorded_text(ref: dict | None) -> str:
+    """Bytes a stage recorded, or nothing when they changed since."""
+    if not ref or not re.fullmatch(r"[0-9a-f]{64}", str(ref.get("sha256") or "")):
+        return ""
+    path = Path(ref["path"])
+    if not path.is_file() or _sha(path) != ref["sha256"]:
+        return ""
+    return path.read_text(errors="replace")
+
+
+def _one(values: list[float]) -> float | None:
+    return values[0] if values and len(set(values)) == 1 else None
+
+
+def _stages(project: Path, postroute_repair_ran: bool) -> tuple[list[dict], dict]:
+    """Derive each required stage row from the receipt the stage recorded."""
+    names = [*_REQUIRED_STAGES, *(("postroute_repair",) if postroute_repair_ran else ())]
+    rows: list[dict] = []
+    inventory: dict[str, dict] = {}
+    for name in names:
+        path = project / STAGE_RECEIPT_DIR / f"{name}.json"
+        entry = {"receipt": str(path)}
+        inventory[name] = entry
+        if not path.is_file():
+            entry["status"] = "absent"
+            continue
+        try:
+            doc = json.loads(path.read_text())
+        except ValueError:
+            doc = None
+        if not isinstance(doc, dict) or doc.get("name") != name:
+            entry["status"] = "unreadable or names another stage"
+            continue
+        entry.update(status="recorded", sha256=_sha(path))
+        row: dict = {"name": name, "ran": doc.get("ran") is True}
+        for field in ("behavior_report", "abc_script", "sdc_snapshot"):
+            ref = _recorded_ref(project, doc.get(field))
+            if ref is not None:
+                row[field] = ref
+        if name == "synth":
+            script = _recorded_text(row.get("abc_script"))
+            row["applied"] = {"fanout": _one([float(v) for v in re.findall(
+                rf"\bbuffer\s+-N\s+({_NUM})\b", script)])}
+            row["synth_abc_buffering"] = doc.get("synth_abc_buffering") is True
+            row["ideal_clock_excluded"] = doc.get("ideal_clock_excluded") is True
+        else:
+            snapshot = _recorded_text(row.get("sdc_snapshot"))
+            row["applied"] = {field: _one(_sdc_values(snapshot, command))
+                              for field, command in (
+                                  ("fanout", "set_max_fanout"),
+                                  ("slew_ns", "set_max_transition"),
+                                  ("cap_pf", "set_max_capacitance"))}
+            behavior = _recorded_text(row.get("behavior_report"))
+            row["fanout_check_limit"] = _one([float(v) for v in re.findall(
+                rf"(?m)^\s*sta::max_fanout_check_limit\s+({_NUM})\s*$", behavior)])
+            if name == "cts":
+                row["cts_parameters"] = doc.get("cts_parameters")
+                row["clock_driver_fanout"] = doc.get("clock_driver_fanout")
+        rows.append(row)
+    return rows, inventory
 
 
 def _env(scene_dir: Path) -> dict[str, str]:
@@ -228,9 +325,12 @@ def _build_direct(project: Path) -> dict:
                 "library": library, "artifacts": artifacts,
                 "source_tool_image": image,
                 "sta_netlist": artifacts["sta_netlist"]["sha256"],
-                "lvs_netlist": None, "gds_netlist": None}
+                "lvs_netlist": None, "gds_netlist": None,
+                "unavailable": dict(_UNAVAILABLE_IDENTITY)}
+    stages, stage_receipts = _stages(project, False)
     return {"top": decks[0]["top"], "identity": identity,
-            "frozen": frozen, "current": current, "stages": [], "pins": {},
+            "frozen": frozen, "current": current, "stages": stages,
+            "stage_receipts": stage_receipts, "pins": {},
             "scenes": scenes, "postroute_repair_ran": False}
 
 
@@ -360,10 +460,21 @@ def build(project: Path, *, final_state: dict | None = None) -> dict:
                 "source_tool_image_id": provenance["derivation"]["image_id"],
                 "artifacts": artifacts,
                 **{key: artifacts[key].get("sha256") for key in
-                   ("sta_netlist", "lvs_netlist", "gds_netlist")}}
+                   ("sta_netlist", "lvs_netlist", "gds_netlist")},
+                "unavailable": dict(_UNAVAILABLE_IDENTITY)}
+    # The judge requires post-route repair constraints exactly when step 32
+    # adopted a candidate; use the same adoption record.
+    if final_state is not None:
+        postroute_repair_ran = bool(final_state.get("adopted"))
+    else:
+        repair = project / "reports/phase3/librelane_postroute_repair.json"
+        postroute_repair_ran = bool(repair.is_file() and
+                                    json.loads(repair.read_text()).get("adopted"))
+    stages, stage_receipts = _stages(project, postroute_repair_ran)
     return {"top": top, "identity": identity, "frozen": frozen,
-            "current": current, "stages": [], "pins": {}, "scenes": scenes,
-            "postroute_repair_ran": bool((project / "reports/phase3/librelane_postroute_repair.json").is_file())}
+            "current": current, "stages": stages,
+            "stage_receipts": stage_receipts, "pins": {}, "scenes": scenes,
+            "postroute_repair_ran": postroute_repair_ran}
 
 
 def publish(project: Path, *, final_state: dict | None = None) -> Path:
