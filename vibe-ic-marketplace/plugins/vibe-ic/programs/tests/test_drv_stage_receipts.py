@@ -426,3 +426,17 @@ def test_a_net_routed_in_nets_is_not_proven_by_its_empty_specialnet(tmp_path):
             "END SPECIALNETS\n")
     result = derive(*_pad_scene(tmp_path, body))
     assert [row["pin"] for row in result["unresolved"]] == ["p"]
+
+
+def test_a_copied_run_rebases_report_evidence_with_its_reports_folder(tmp_path):
+    """Receipt evidence lives under reports/phase3/; a path recorded on the
+    producer host must keep that `reports` component when the copied project
+    is evaluated elsewhere (the plan otherwise reads a phase3/ path that
+    does not exist and the stage turns absent)."""
+    copy = tmp_path / "copy"
+    recorded = "/elsewhere/run/spm/reports/phase3/drv_stages/evidence/synth/abc.script"
+    assert plan._run_path(copy, recorded) == copy / "reports/phase3/drv_stages/evidence/synth/abc.script"
+    step = "/elsewhere/run/spm/phase3/librelane/32-base/04-openroad-stapostpnr/state_out.json"
+    assert plan._run_path(copy, step) == copy / "phase3/librelane/32-base/04-openroad-stapostpnr/state_out.json"
+    inside = copy / "reports/phase3/x.json"
+    assert plan._run_path(copy, str(inside)) == inside
