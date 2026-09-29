@@ -60489,7 +60489,7 @@ def step_signoff_metrics_aggregate(project: Path) -> StepResult:
                        "drc_attribution_reports": drc_attr})
 
 
-def step_tapeout_docs_gen(project: Path, ic_name: Optional[str] = None) -> StepResult:
+def step_tapeout_docs_gen(project: Path) -> StepResult:
     """Canonical step 37.5ic's release-document producer.
 
     The program remains the step's blocking gate clause because it carries a
@@ -60517,10 +60517,6 @@ def step_tapeout_docs_gen(project: Path, ic_name: Optional[str] = None) -> StepR
     out_dir = project / "reports" / "phase3" / "docs"
     cmd = [sys.executable, str(prog), "--project", str(project),
            "--out-dir", str(out_dir)]
-    # U19: the operator's design identity names the documents; without it the
-    # producer reads the run's own records (project.json, then L1).
-    if ic_name and str(ic_name).strip():
-        cmd += ["--ic-name", str(ic_name).strip()]
     try:
         cp = subprocess.run(cmd, capture_output=True, text=True,
                             errors="replace", timeout=120)
@@ -77717,7 +77713,7 @@ def main() -> int:
 
     plan.append(_upstream_signoff_not_measured("tapeout_docs_gen",
                  _layout_refusal) if _layout_refusal else
-                step_tapeout_docs_gen(project, args.ic_name))
+                step_tapeout_docs_gen(project))
 
     # And the PRODUCT documents beside the sign-off evidence. The generator
     # above writes what was CHECKED; this writes what the part IS — and refuses
