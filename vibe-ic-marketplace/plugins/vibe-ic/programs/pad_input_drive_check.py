@@ -52,6 +52,34 @@ def _is_die(project: Path) -> Optional[bool]:
         return None
 
 
+def _not_a_die(project: Path, out: Dict[str, Any]) -> Dict[str, Any]:
+    """NOT_APPLICABLE_BY_STRUCTURE with the enumeration `requests_pad_ring`
+    itself consulted: an attested HARDMACRO declaration, or the two places a
+    pad ring is requested from (self-tape-out marker, slot catalogue) found
+    holding no request. It is never a PASS (R-0915-119)."""
+    import _structural_absence as _sa
+    import _tapeout_declaration as _td
+    decl, err = _td.load(project / _td.DECLARATION_REL)
+    if err is None and isinstance(decl, dict) and \
+            _td.answer(decl, "deliverable") == _td.DELIVERABLE_HARDMACRO:
+        ev = _sa.absence("tapeout declarations requesting a pad ring", 1, 0,
+                         names=[_td.DECLARATION_REL],
+                         detail="deliverable HARDMACRO: inputs are driven on chip")
+    else:
+        slots = sorted((project / _td.SLOTS_REL).glob("*.yaml")) \
+            if (project / _td.SLOTS_REL).is_dir() else []
+        if (project / _td.SELF_TAPEOUT_REL).is_file() or slots:
+            return dict(out, verdict="NOT_MEASURED",
+                        reason="a pad-ring request exists but the route "
+                               "predicate answered no; the route is undetermined")
+        ev = _sa.absence("pad-ring request locations", 2, 0,
+                         names=[_td.SELF_TAPEOUT_REL, _td.SLOTS_REL],
+                         detail="no self-tape-out marker and no slot catalogue")
+    doc = dict(out, verdict="NOT_APPLICABLE",
+               reason=_sa.sentence(ev, "bond-pad input drive"))
+    return _sa.attach(doc, ev)
+
+
 def judge(project: Path, deck_rel: str = SIGNOFF_DECK) -> Dict[str, Any]:
     import sdc_environment as _se
     project = Path(project)
@@ -62,8 +90,7 @@ def judge(project: Path, deck_rel: str = SIGNOFF_DECK) -> Dict[str, Any]:
         return dict(out, verdict="NOT_MEASURED",
                     reason="the route (DIE or not) could not be determined")
     if not die:
-        return dict(out, verdict="NOT_APPLICABLE",
-                    reason="not a pad-ring (DIE) top: its inputs are driven on chip")
+        return _not_a_die(project, out)
     try:
         rec = json.loads((project / _se.PAD_INPUT_DRIVE_REPORT).read_text())
     except (OSError, ValueError):

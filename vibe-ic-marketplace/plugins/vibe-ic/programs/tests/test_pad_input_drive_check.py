@@ -138,11 +138,48 @@ def test_an_absent_signoff_deck_is_rc2(tmp_path):
     assert (rc, doc["verdict"]) == (2, "NOT_MEASURED")
 
 
-def test_control_a_core_top_is_not_applicable(tmp_path):
+def _step23_only():
+    import yaml
+    step = next(s for s in yaml.safe_load(FLOW.read_text())["steps"]
+                if str(s.get("id")) == "23")
+    clause = [c for c in step["gate"]["all_of"]
+              if isinstance(c, dict) and c.get("program_exit_zero") == CLAUSE]
+    assert len(clause) == 1
+    return dict(step, required_outputs=[], gate={"all_of": clause})
+
+
+def test_control_a_core_top_is_decided_not_applicable(tmp_path):
+    """No pad ring requested anywhere: NOT_APPLICABLE_BY_STRUCTURE with the
+    enumeration the route predicate consulted, which Step 23 counts as
+    decided (an IP/core run must not be blocked by this clause)."""
+    import flow_compliance_check as FC
     project = tmp_path / "core"
     project.mkdir()
     rc, doc = _run(project)
     assert (rc, doc["verdict"]) == (0, "NOT_APPLICABLE")
+    assert doc["reason_class"] == "NOT_APPLICABLE_BY_STRUCTURE"
+    assert doc["structural_absence"]["scanned"] == 2
+    assert FC.check_step(project, _step23_only(), {}).status == "PASS"
+
+
+def test_control_an_attested_hardmacro_is_decided_not_applicable(tmp_path):
+    """The IP route: a slot catalogue is staged, but the owner-attested
+    declaration says HARDMACRO, so no pad ring exists."""
+    import _owner_declared as OD
+    import flow_compliance_check as FC
+    project = tmp_path / "ip"
+    slots = project / TD.SLOTS_REL
+    slots.mkdir(parents=True)
+    (slots / "s.yaml").write_text("slot: catalogue entry\n")
+    (project / TD.DECLARATION_REL).write_text(json.dumps(OD.attest(
+        {"schema": "vibe-ic/tapeout_declaration/1",
+         "answers": {"deliverable": "HARDMACRO", "top_cell": "t",
+                     "pad_order_by_side": "NOT_DETERMINED"}})) + "\n")
+    assert TD.requests_pad_ring(project) is False
+    rc, doc = _run(project)
+    assert (rc, doc["verdict"]) == (0, "NOT_APPLICABLE")
+    assert doc["structural_absence"]["scanned_names"] == [TD.DECLARATION_REL]
+    assert FC.check_step(project, _step23_only(), {}).status == "PASS"
 
 
 def test_flow_compliance_grades_step23_on_the_clause(tmp_path):
@@ -150,18 +187,11 @@ def test_flow_compliance_grades_step23_on_the_clause(tmp_path):
     reduced to this clause (the other clauses need a routed run): an
     unresolved drive leaves Step 23 NOT_MEASURED, never PASS; a resolved one
     carried by the deck lets the clause pass."""
-    import yaml
     import flow_compliance_check as FC
-    step = next(s for s in yaml.safe_load(FLOW.read_text())["steps"]
-                if str(s.get("id")) == "23")
-    clause = [c for c in step["gate"]["all_of"]
-              if isinstance(c, dict) and c.get("program_exit_zero") == CLAUSE]
-    assert len(clause) == 1
-    only = dict(step, required_outputs=[], gate={"all_of": clause})
     bad = _die(tmp_path / "a", io=False)
     _resolve(bad)
-    assert FC.check_step(bad, only, {}).status == "NOT_MEASURED"
+    assert FC.check_step(bad, _step23_only(), {}).status == "NOT_MEASURED"
     good = _die(tmp_path / "b")
     _resolve(good)
-    res = FC.check_step(good, only, {})
+    res = FC.check_step(good, _step23_only(), {})
     assert res.status == "PASS", res.reasons
