@@ -60,6 +60,8 @@ _T96_MEMBERS = {"15", "15.5ic", "17", "18", "19", "20"}
 _T102_MEMBERS = {"21", "32"}
 #: CUT_W2 (1): sign-off STA on STAPostPNR (R-0929-TOOL-DEFAULT).
 _CUTW2_MEMBERS = {"23"}
+#: R-0929-TOOL-DEFAULT Wave 1 (CUT_W1A): 8 dual, 10/26/26.5ic on the tool.
+_W1A_MODES = {"8": "dual", "10": "librelane", "26": "librelane", "26.5ic": "librelane"}
 
 
 def _chip(tmp_path, deliverable="DIE", *, marker="SELF_TAPEOUT.txt"):
@@ -83,11 +85,12 @@ def test_the_chip_path_runs_15_to_21_and_32_on_librelane_with_no_switch(tmp_path
     project = _chip(tmp_path)
     assert LC.design_class(project) == LC.DESIGN_CLASS_CHIP_PAD_RING
     assert set(LC.CLASS_PRODUCTION_DEFAULTS[LC.DESIGN_CLASS_CHIP_PAD_RING]) \
-        == _T96_MEMBERS | _T102_MEMBERS | _CUTW2_MEMBERS
+        == _T96_MEMBERS | _T102_MEMBERS | _CUTW2_MEMBERS | set(_W1A_MODES)
     assert {s: LC.selected_mode(project, s) for s in _CHAIN_R4} == dict.fromkeys(_CHAIN_R4, "librelane")
     assert LC.selected_mode(project, "23") == "librelane"
+    assert {s: LC.selected_mode(project, s) for s in _W1A_MODES} == _W1A_MODES
     # outside the cut-over, nothing moves
-    for step in ("9", "16", "22", "26", "37"):
+    for step in ("9", "16", "22", "37"):
         assert LC.selected_mode(project, step) == "direct"
 
 
@@ -102,6 +105,8 @@ def test_a_design_with_no_pad_ring_keeps_direct(tmp_path, fixture):
                else _chip(tmp_path, deliverable="HARDMACRO", marker="slots"))
     assert LC.design_class(project) is None
     assert {LC.selected_mode(project, s) for s in _CHAIN_R4} == {"direct"}
+    assert {LC.selected_mode(project, s) for s in _W1A_MODES} == {"direct"}
+    assert LC.selected_mode(project, "23") == "direct"
     assert LC.class_defaults_in_force(project) == {}
 
 
@@ -174,10 +179,12 @@ def test_the_class_default_is_part_of_the_admission_identity(tmp_path):
     assert R._librelane_admission_facts(tmp_path) == {}
     project = _chip(tmp_path / "chip")
     facts = R._librelane_admission_facts(project)
-    assert facts["librelane_class_defaults"] == dict.fromkeys(
-        _CHAIN_R4 + tuple(sorted(_CUTW2_MEMBERS)), "librelane")
+    assert facts["librelane_class_defaults"] == dict(
+        dict.fromkeys(_CHAIN_R4 + tuple(sorted(_CUTW2_MEMBERS)), "librelane"),
+        **_W1A_MODES)
     assert facts["librelane_contract_sha256"] == LC.digest(Path(LC.__file__))
-    # a switch that names every class-default step leaves none in force
-    _switch(project, dict.fromkeys(_CHAIN_R4 + tuple(sorted(_CUTW2_MEMBERS)), "direct"))
+    # An explicit switch naming every class-default key leaves none in force.
+    _switch(project, dict.fromkeys(
+        _CHAIN_R4 + tuple(sorted(_CUTW2_MEMBERS)) + tuple(_W1A_MODES), "direct"))
     facts = R._librelane_admission_facts(project)
     assert "librelane_class_defaults" not in facts and "librelane_switch" in facts
