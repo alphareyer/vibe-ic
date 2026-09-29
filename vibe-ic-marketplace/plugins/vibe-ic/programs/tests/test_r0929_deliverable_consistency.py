@@ -583,3 +583,65 @@ def test_re_derivation_passes_the_producers_own_output(tmp_path):
     _declare(proj)
     decl = json.loads((proj / TD.DECLARATION_REL).read_text("utf-8"))
     assert TD.derived_answer_refusals(decl, proj) == []
+
+
+# --------------------------------------------------------------------------- #
+# 8. DELIVC3 final check: D1's copy of the documents is not a second input
+# --------------------------------------------------------------------------- #
+def _run_d1_copy(proj):
+    """The REAL flow step D1 text staging (input/docs/X.md ->
+    phase1/input_doc/X.txt), not a hand-written imitation of it."""
+    import phase1_doc_one_shot_runner as P1
+    P1.extract_text_pipeline(proj)
+    copies = sorted(p.name for p in (proj / "phase1" / "input_doc").glob("*.txt"))
+    assert "L7_verification_plan.txt" in copies, copies
+    return copies
+
+
+def test_the_d1_copy_does_not_make_a_fresh_answer_stale(tmp_path):
+    proj, doc = _regenerated(tmp_path)
+    before = (proj / ANSWERS_REL).read_bytes()
+    _run_d1_copy(proj)
+    # the gate, on the answers file and on the declaration, after D1
+    assert TD.derived_answer_refusals(doc, proj, source=ANSWERS_REL) == []
+    _declare(proj)
+    res = CHECK.evaluate(proj)
+    assert _derived_rules(res) == [], res["refusals"]
+    assert res["verdict"] == "PASS", res["refusals"]
+    # and the producer reads the same documents it read before D1
+    assert _gen().main([str(proj)]) == 0
+    assert (proj / ANSWERS_REL).read_bytes() == before
+
+
+def test_an_answer_produced_after_d1_reads_each_document_once(tmp_path):
+    proj = _project(tmp_path)
+    _run_d1_copy(proj)
+    assert _gen().main([str(proj)]) == 0
+    after = _load(proj)
+    prov = after["answer_provenance"]["synthesis_area_budget"]
+    assert not [i for i in prov["inputs"] if "input_doc" in i], prov["inputs"]
+    assert len(after["answers"]["synthesis_area_budget"][
+        "stdcell_area_gate"]) == 1
+
+
+def test_a_document_only_d1_holds_is_still_read(tmp_path):
+    """Only a COPY of an existing original is skipped: a phase1/input_doc
+    file with no input/docs original is design input the producer reads."""
+    proj, doc = _regenerated(tmp_path)
+    extra = proj / "phase1" / "input_doc" / "L2_extra_notes.txt"
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_text("# L2\n\n### Die size\n- 不指定。由 Plugin 自選。\n", "utf-8")
+    got = TD.derived_answer_refusals(doc, proj)
+    assert [r["rule"] for r in got] == [STALE_RULE], got
+
+
+def test_a_padded_owner_record_is_not_overwritten(tmp_path):
+    """The producer decides "owner" with the gate's own reader."""
+    doc = _answers()
+    doc["answer_provenance"]["synthesis_area_budget"] = {
+        "answered_by": " owner ", "citation": "owner ruling R-0000-X"}
+    assert TD.attestation_of(doc, "synthesis_area_budget")["declares"]
+    proj = _project(tmp_path, answers=doc)
+    before = (proj / ANSWERS_REL).read_bytes()
+    assert _gen().main([str(proj)]) == 1
+    assert (proj / ANSWERS_REL).read_bytes() == before

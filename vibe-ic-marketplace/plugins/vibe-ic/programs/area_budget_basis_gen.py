@@ -138,12 +138,51 @@ def _quote(line: str, limit: int = 160) -> str:
     return q if len(q) <= limit else q[:limit - 3].rstrip() + "..."
 
 
+#: Where flow step D1 writes its plain-text copy of `input/docs/`
+#: (`phase1_doc_one_shot_runner.extract_text_pipeline`).
+_D1_COPY_ROOTS = ("phase1/input_doc/", "input_doc/")
+
+
+def _d1_copy_stems(project: Path) -> set:
+    """The names D1 gives its copies of `input/docs/*`: `<sub>__<stem>`,
+    lower-cased (`spec/foo.pdf` -> `spec__foo.txt`)."""
+    src = Path(project) / "input" / "docs"
+    if not src.is_dir():
+        return set()
+    return {"__".join(f.relative_to(src).with_suffix("").parts).lower()
+            for f in src.rglob("*") if f.is_file()}
+
+
+def _one_copy(project: Path, items, rel_of) -> list:
+    """Read each design document ONCE. D1 copies `input/docs/X.md` to
+    `phase1/input_doc/X.txt`; when the original exists its copy is skipped,
+    exactly as `l8_doc_clock_freq_synth._iter_docs` does. Otherwise the same
+    table is read twice (two std-cell rows, the copies among the inputs) and a
+    re-derivation after D1 disagrees with the answer derived before it
+    (DELIVC3 final check)."""
+    originals = _d1_copy_stems(project)
+    out = []
+    for item in items:
+        rel = rel_of(item)
+        if (rel.startswith(_D1_COPY_ROOTS)
+                and Path(rel).stem.lower() in originals):
+            continue
+        out.append(item)
+    return out
+
+
+def l7_docs(project: Path) -> List[Tuple[str, str]]:
+    """The L7 documents, each read once (see `_one_copy`)."""
+    return _one_copy(project, ASB.l7_docs_of(project), lambda it: it[0])
+
+
 def design_docs(project: Path) -> List[Tuple[str, Path, str]]:
     """The design's own prose documents, through the shared input walker
     (which already skips every oracle/reference tree). Operator material under
     the submission-template directories is not the design speaking."""
     out = []
-    for rel, path, text in FPC._iter_input_files(project):
+    for rel, path, text in _one_copy(project, FPC._iter_input_files(project),
+                                     lambda it: it[0]):
         if path.suffix.lower() not in _PROSE_SUFFIXES:
             continue
         if rel.startswith("input/submission_template"):
@@ -188,7 +227,7 @@ def die_size_statements(docs: Sequence[Tuple[str, Path, str]]
 def _table_rows(project: Path, metric) -> Dict[str, List[Dict[str, Any]]]:
     out: Dict[str, List[Dict[str, Any]]] = {"ceilings": [], "baselines": []}
     seen = set()
-    for rel, text in ASB.l7_docs_of(project):
+    for rel, text in l7_docs(project):
         got = ASB.parse_signoff_statements(text, metric, source=rel)
         for kind in ("ceilings", "baselines"):
             for row in got[kind]:
@@ -244,9 +283,10 @@ def derive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
     # THE OWNER'S FIELD IS NEVER OVERWRITTEN (DELIVC final check, finding 2).
     # Any owner record, cited or not: an uncited one is a defect the owner
     # fixes, never a licence for a program to replace the owner's answer.
-    prov_map = doc.get(TD.PROVENANCE_KEY)
-    own = prov_map.get(KEY) if isinstance(prov_map, dict) else None
-    if isinstance(own, dict) and own.get("answered_by") == \
+    # Decided by the repo's one reader, the same one the gate uses, so a
+    # record the gate reads as the owner's (e.g. " owner ") is never
+    # overwritten here (DELIVC3 final check).
+    if TD.attestation_of(doc, KEY)["answered_by"] == \
             TD.ANSWERED_BY_OWNER_VALUE:
         return {"status": "REFUSED", "rc": 1,
                 "reason": (f"`{TD.PROVENANCE_KEY}.{KEY}` says the owner "
@@ -346,7 +386,7 @@ def derive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
     # decline or a gate added to any of them changes the answer, so each is
     # part of what the answer was derived from.
     inputs = sorted({rel for rel, _p, _t in docs}
-                    | {rel for rel, _t in ASB.l7_docs_of(project)})
+                    | {rel for rel, _t in l7_docs(project)})
     digest = TD.derived_inputs_sha256(project, inputs)
     if digest is None:                               # pragma: no cover
         return {"status": "REFUSED", "rc": 1, "basis": basis,
