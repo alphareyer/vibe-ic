@@ -157,6 +157,39 @@ def test_a_different_clock_source_still_requires_its_own_root(tmp_path):
     assert "CTS_CLOCK_MISSING" in rules
 
 
+def test_unbraced_silicon_port_and_braced_fpga_alias_are_one_clock(tmp_path):
+    """The shape a gf180 DIE run writes (subservient IC path, v4 tree): the
+    silicon SDC names the port without braces, the FPGA SDC names the same
+    port braced under the port's own name, and LibreLane CTS reports the one
+    root. Reading `[get_ports i_clk]` as `i_clk]` made the FPGA alias look like
+    a second, missing clock (LIBRELANE_CLOCK_MISSING on a single-clock die)."""
+    project = tmp_path / "die"
+    _write_sdc(project,
+               "create_clock -name clk -period 20.0 [get_ports i_clk]\n",
+               "phase2/stage2/constraints/top.asic.sdc")
+    _write_sdc(project,
+               "create_clock -name i_clk -period 20 [get_ports {i_clk}]\n",
+               "phase2/stage1/fpga/top.sdc")
+    _write_plan(project, {"clocks": [
+        {"name": "clk", "period_ns": 20, "source": "i_clk"},
+        {"name": "i_clk", "period_ns": 20, "source": "i_clk"},
+    ]})
+    config = project / "phase3/librelane/19-config/OpenROAD.CTS.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"CLOCK_PORT": "clk", "CLOCK_NET": None,
+                                  "meta": {"step": "OpenROAD.CTS"}}))
+    (_cts_dir(project) / "clock_tree.rpt").write_text(
+        '[INFO CTS-0007] Net "i_clk" found for clock "clk".\n')
+
+    assert mod._sdc_primary_clock_sources(
+        [project / "phase2/stage2/constraints/top.asic.sdc"]) == {"clk": "i_clk"}
+    rc, report = _run(project, tmp_path)
+    rules = {f["rule"] for f in report["findings"]}
+    assert "LIBRELANE_CLOCK_MISSING" not in rules, report["findings"]
+    assert "LIBRELANE_CLOCKS_MATCH_SDC" in rules
+    assert rc == 0, rules
+
+
 def test_checked_in_silicon_sdc_source_excludes_tcl_closing_bracket():
     sdc = require_repo(
         "vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
