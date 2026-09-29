@@ -1008,6 +1008,9 @@ def _answers(project: Path, doc) -> None:
             "This route-only fixture does not exercise implementation area; "
             "the declaration gate still requires an explicit disposition."),
     })
+    # ...which is the owner's explicit answer, not a derived one
+    # (R-0929-DELIVERABLE-CONSISTENCY-2, `_owner_declared`).
+    doc = _OD.attest_explicit(doc)
     path = project / ST.DESIGN_ANSWERS_REL
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, indent=2) + "\n")

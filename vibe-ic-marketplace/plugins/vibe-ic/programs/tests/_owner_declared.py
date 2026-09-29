@@ -63,3 +63,33 @@ def attest(doc: Dict[str, Any], key: str = "deliverable") -> Dict[str, Any]:
     merged.setdefault(key, provenance(key)[key])
     doc[_TD.PROVENANCE_KEY] = merged
     return doc
+
+
+#: R-0929-DELIVERABLE-CONSISTENCY-2: an answer in `_TD.DERIVED_ANSWERS` passes
+#: step 0.5ic only with its producer's provenance or as the owner's own answer.
+#: A fixture that HAND-WRITES one (an explicit disposition, no program behind
+#: it) is modelling the second, and says so here instead of at each site.
+EXPLICIT_CITATION = ("test fixture: the owner answered this explicitly "
+                     "(models an owner-attested answer, not one a program "
+                     "derived)")
+
+
+def attest_explicit(doc: Dict[str, Any],
+                    key: str = _TD.SYNTHESIS_AREA_BUDGET_KEY) -> Dict[str, Any]:
+    """Attest a hand-written `key` to the owner IF the fixture answered it,
+    wherever the fixture put it (under `answers` or at the top level). Never
+    overwrites a provenance record the fixture wrote on purpose."""
+    if not isinstance(doc, dict):
+        return doc
+    answers = doc.get("answers")
+    value = doc.get(key)
+    if value is None and isinstance(answers, dict):
+        value = answers.get(key)
+    if not _TD.is_answered(value):
+        return doc
+    existing = doc.get(_TD.PROVENANCE_KEY)
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    merged.setdefault(key, {"answered_by": _TD.ANSWERED_BY_OWNER_VALUE,
+                            "citation": EXPLICIT_CITATION})
+    doc[_TD.PROVENANCE_KEY] = merged
+    return doc
