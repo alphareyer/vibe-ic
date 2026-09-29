@@ -27,6 +27,8 @@ import re
 import sys
 from pathlib import Path
 
+from _filled_gds_fixture import write_filled_gds
+
 import pytest
 
 
@@ -1015,6 +1017,7 @@ class TestMetalFill:
         assert (pnr / "metal_fill.done").is_file()
         assert (project / "reports" / "density.json").is_file()
         import metal_fill_density_check as mfd
+        write_filled_gds(project)  # U14: Step 34 now needs the filled GDS's bound per-layer density
         rc = mfd.main([str(project)])
         assert rc == 0, "metal_fill_density_check must PASS"
 

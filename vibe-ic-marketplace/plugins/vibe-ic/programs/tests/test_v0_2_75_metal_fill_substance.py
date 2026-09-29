@@ -20,6 +20,8 @@ import json
 import sys
 from pathlib import Path
 
+from _filled_gds_fixture import write_filled_gds
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import metal_fill_density_check as MF  # noqa: E402
 
@@ -66,6 +68,7 @@ def test_noop_fill_fails(tmp_path):
 
 def test_rows_already_full_zero_fillers_passes(tmp_path):
     _proj(tmp_path, filler_n=0, row_util=99.2)
+    write_filled_gds(tmp_path)  # U14: Step 34 now needs the filled GDS's bound per-layer density
     findings, stats = MF.audit(tmp_path)
     assert not any(f.severity == "ERROR" for f in findings)
     assert stats["rows_already_full"] is True
@@ -73,6 +76,7 @@ def test_rows_already_full_zero_fillers_passes(tmp_path):
 
 def test_fillers_placed_and_def_grew_passes(tmp_path):
     _proj(tmp_path, filler_n=1234, filled_sz=500, routed_sz=100)
+    write_filled_gds(tmp_path)  # U14: Step 34 now needs the filled GDS's bound per-layer density
     findings, stats = MF.audit(tmp_path)
     assert not any(f.severity == "ERROR" for f in findings)
 
@@ -87,6 +91,7 @@ def test_in_window_per_layer_density_passes(tmp_path):
     _proj(tmp_path, filler_n=0,
           layers=[{"name": "met1", "density_pct": 42.0},
                   {"name": "met2", "density_pct": 55.0}])
+    write_filled_gds(tmp_path)  # U14: Step 34 now needs the filled GDS's bound per-layer density
     findings, stats = MF.audit(tmp_path)
     assert not any(f.severity == "ERROR" for f in findings)
     assert stats["layers_ok"] == 2
@@ -155,6 +160,7 @@ def test_byte_identical_rows_full_and_fill_present_passes(tmp_path):
     measurably carries fill cells → no FILL_NOOP, and FILL_DONE_AT_PNR is
     DISCLOSED with the measured count so the byte-identity is explained."""
     p = _byte_identical_project(tmp_path, _DEF_ALREADY_FILLED, 100.0)
+    write_filled_gds(p)  # U14: Step 34 now needs the filled GDS's bound per-layer density
     findings, stats = MF.audit(p)
     assert stats["filled_byte_identical"] is True
     assert stats["rows_already_full"] is True

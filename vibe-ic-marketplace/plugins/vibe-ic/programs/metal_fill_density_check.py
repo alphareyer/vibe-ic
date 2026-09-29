@@ -125,6 +125,132 @@ def baseline_fill_instance_count(routed_def: Path) -> Optional[int]:
     return n if saw_components else None
 
 
+def _metal_density_report(project_dir: Path) -> Optional[Path]:
+    """The per-layer measurement the runner's KLayout recipe writes
+    (`_emit_metal_density_report`): reports/phase3/metal_density.json, or the
+    reports/ root copy. None when neither exists."""
+    for p in (_pl.reports_phase3_dir(project_dir) / "metal_density.json",
+              project_dir / "reports" / "metal_density.json"):
+        if p.is_file():
+            return p
+    return None
+
+
+def filled_gds_density(project_dir: Path) -> Tuple[List[Finding], dict]:
+    """U14 — Step 34 judges the per-layer density of the FILLED GDS.
+
+    The metal fill of the direct flow is written into the STREAM
+    (`metal_fill_emit` inside streamout), not into filled.def, so the only
+    measurement that can say the fill reached the foundry's per-layer window is
+    the per-layer KLayout measurement of the stream that ships. It counts here
+    only when it is BOUND to that stream:
+
+      * the measurement records `gds_sha256`, the sha of the GDS it measured
+        (a report that records only a path could be about any earlier round);
+      * the GDS it names still has exactly those bytes;
+      * those bytes are the streamed (filled) GDS the flow ships
+        (`_path_layout.gds_dir`), not a pre-fill or side stream.
+
+    Then every per-layer value is judged by `metal_layer_density_check` against
+    the PDK's own stated window (the report's `pdk`), bound by bound, with the
+    disclosed generic default only where the PDK states no bound.
+
+    State: PASS / FAIL (a layer outside its window) / NOT_MEASURED (no bound
+    measurement). Both non-PASS states are ERROR findings: an unbound or absent
+    measurement is never a pass."""
+    stats: dict = {"state": "NOT_MEASURED", "report": None, "gds": None,
+                   "gds_sha256": None, "shipped_gds": [], "per_layer": None,
+                   "reason": None}
+
+    def _not_measured(reason: str) -> Tuple[List[Finding], dict]:
+        stats["reason"] = reason
+        return [Finding("ERROR", "FILLED_GDS_DENSITY_NOT_MEASURED",
+                        "Step 34 cannot judge the filled GDS: " + reason)], stats
+
+    rpt = _metal_density_report(project_dir)
+    if rpt is None:
+        return _not_measured(
+            "no per-layer measurement of the streamed GDS "
+            "(reports/phase3/metal_density.json absent)")
+    stats["report"] = str(rpt.relative_to(project_dir)) \
+        if rpt.is_relative_to(project_dir) else str(rpt)
+    try:
+        doc = json.loads(rpt.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
+        return _not_measured(f"{rpt.name} unreadable: {exc}")
+    if not isinstance(doc, dict):
+        return _not_measured(f"{rpt.name} is not a JSON object")
+    gds_rec = doc.get("gds")
+    sha_rec = doc.get("gds_sha256")
+    stats["gds"], stats["gds_sha256"] = gds_rec, sha_rec
+    if not isinstance(gds_rec, str) or not gds_rec.strip():
+        return _not_measured(f"{rpt.name} names no measured GDS")
+    if not isinstance(sha_rec, str) or not re.fullmatch(r"[0-9a-f]{64}", sha_rec):
+        return _not_measured(
+            f"{rpt.name} measured {gds_rec} but records no gds_sha256, so the "
+            f"measurement is bound to no bytes")
+    gds_path = Path(gds_rec)
+    if not gds_path.is_absolute():
+        gds_path = project_dir / gds_path
+    cur = _sha256(gds_path)
+    if cur is None:
+        return _not_measured(f"the measured GDS {gds_rec} is absent")
+    if cur != sha_rec:
+        return _not_measured(
+            f"the measured GDS {gds_rec} changed since it was measured "
+            f"(recorded {sha_rec[:12]}, now {cur[:12]})")
+    gdir = _pl.gds_dir(project_dir)
+    shipped = sorted(gdir.glob("*.gds")) if gdir.is_dir() else []
+    shipped_sha = {str(p.relative_to(project_dir)): _sha256(p) for p in shipped}
+    stats["shipped_gds"] = sorted(shipped_sha)
+    if not shipped_sha:
+        return _not_measured(
+            f"no streamed GDS under {gdir.relative_to(project_dir)} to bind "
+            f"the measurement to")
+    if sha_rec not in shipped_sha.values():
+        stats["state"] = "FAIL"
+        stats["reason"] = "measured GDS is not the shipped stream"
+        return [Finding(
+            "ERROR", "FILLED_GDS_DENSITY_WRONG_SUBJECT",
+            f"the per-layer density was measured on {gds_rec} "
+            f"({sha_rec[:12]}), whose bytes are not the streamed GDS the flow "
+            f"ships ({', '.join(sorted(shipped_sha))}) — a density of another "
+            f"stream says nothing about the filled one")], stats
+    try:
+        import metal_layer_density_check as _mld  # noqa: PLC0415
+    except ImportError as exc:
+        return _not_measured(f"metal_layer_density_check unavailable: {exc}")
+    pdk = doc.get("pdk") if isinstance(doc.get("pdk"), str) else None
+    windows, prov = (_mld.pdk_windows_for(pdk) if pdk else ({}, None))
+    res = _mld.check(rpt, windows, _mld._DEFAULT_MIN, _mld._DEFAULT_MAX, prov)
+    stats["per_layer"] = res.get("per_layer")
+    stats["pdk"] = pdk
+    verdict = res.get("verdict")
+    if verdict == "PASS":
+        stats["state"] = "PASS"
+        return [], stats
+    if verdict == "IO_ERROR":
+        return _not_measured(str(res.get("error")))
+    stats["state"] = "FAIL"
+    why = "; ".join(res.get("failures") or []) or str(res.get("detail") or "")
+    if not why and res.get("unchecked_layers"):
+        why = f"layers with no window: {res['unchecked_layers']}"
+    stats["reason"] = why
+    return [Finding("ERROR", "FILLED_GDS_DENSITY_OOB",
+                    f"per-layer density of the filled GDS {gds_rec} "
+                    f"({sha_rec[:12]}) fails its window: {why}")], stats
+
+
+def _judges_filled_gds(project_dir: Path) -> bool:
+    """The filled-GDS judgement belongs to the direct arm. On the LibreLane arm
+    `tool_arm_findings` judges the shipped GDS with the PDK density deck."""
+    try:
+        import librelane_contract as _llc  # noqa: PLC0415
+        return _llc.selected_mode(project_dir, "34") != "librelane"
+    except Exception:  # noqa: BLE001 -- unreadable switch: judge, never skip
+        return True
+
+
 def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
     findings: List[Finding] = []
     pnr = _pl.pnr_dir(project_dir)
@@ -158,6 +284,15 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
                                 "Neither pnr/filled.def nor pnr/metal_fill.done found"))
         return findings, stats
     stats["fill_marker"] = True
+
+    # U14 — the filled GDS, bound by its sha, is Step 34's density subject.
+    gds_state = None
+    if _judges_filled_gds(project_dir):
+        gds_findings, gds_stats = filled_gds_density(project_dir)
+        findings.extend(gds_findings)
+        stats["filled_gds_density"] = gds_stats
+        gds_state = gds_stats["state"]
+    filled_gds_pass = gds_state == "PASS"
 
     if filled_def.exists() and routed_def.exists():
         filled_sz = filled_def.stat().st_size
@@ -331,8 +466,29 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
     stats["fill_present_in_baseline"] = fill_present_in_baseline
     fill_done_at_pnr = rows_already_full and fill_present_in_baseline
     stats["fill_done_at_pnr"] = fill_done_at_pnr
-    if (stats.get("filled_byte_identical") and not sparse_fill_attested
-            and not fill_done_at_pnr):
+    # U14 — A BYTE COPY IS NOT FILL EVIDENCE. Row-fill cells in the routed.def
+    # baseline are standard-cell ROW fill, not the per-layer METAL fill the
+    # CMP rule is about, so `fill_done_at_pnr` no longer excuses a byte-copy
+    # filled.def by itself (measured: spm IC run, filled.def == routed.def,
+    # Step 34 PASS with `per_layer_density_verified: false`). A byte copy
+    # passes only when the fill is proven where the direct flow writes it —
+    # the filled GDS, judged per layer and bound by its sha (above).
+    byte_copy = bool(stats.get("filled_byte_identical")) and not sparse_fill_attested
+    if byte_copy and filled_gds_pass:
+        findings.append(Finding(
+            "INFO", "FILLED_DEF_IS_BYTE_COPY",
+            "filled.def is byte-identical to routed.def and is NOT counted as "
+            "fill evidence; the fill is judged on the filled GDS, whose "
+            "per-layer density is within its window and bound by its sha256",
+            details=f"baseline_fill_instances={baseline_fill_n}"))
+    elif byte_copy and fill_done_at_pnr:
+        findings.append(Finding(
+            "ERROR", "FILL_BYTE_COPY_NOT_EVIDENCE",
+            "filled.def is a byte copy of routed.def: row-fill cells in the "
+            "PnR baseline are not metal fill, and no bound per-layer density "
+            "of the filled GDS is PASS — a byte copy is not fill evidence",
+            details=f"baseline_fill_instances={baseline_fill_n}"))
+    elif byte_copy:
         findings.append(Finding(
             "ERROR", "FILL_NOOP",
             "metal fill emitted NOTHING: filled.def is BYTE-IDENTICAL to "
@@ -340,21 +496,17 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
             "density reading cannot substantiate a fill that produced not "
             "one byte — the deck's floor is per-layer over the whole die "
             "(#364)"))
-    elif (stats.get("filled_byte_identical") and fill_done_at_pnr
-            and not sparse_fill_attested):
-        # Transparent disclosure: byte-identical is EXPECTED here (fill already
-        # placed at PnR); recorded so a reader is not left to infer it. The
-        # MEASURED instance count is stated, so the "fill is present" claim is
-        # backed by the number that was actually counted rather than asserted.
+    if byte_copy and fill_done_at_pnr:
+        # The measured row-fill count is still disclosed — it is a real
+        # measurement — but as what it is: ROW fill, which says nothing about
+        # the per-layer metal density the CMP rule judges.
         findings.append(Finding(
             "INFO", "FILL_DONE_AT_PNR",
-            f"filled.def is byte-identical to routed.def, rows are already "
-            f"full (row_utilization_pct={row_util}) AND the routed.def "
-            f"baseline already carries {baseline_fill_n} row-fill cell "
-            f"instance(s) — the standard-cell fill was inserted during PnR "
-            f"(filler_placement after detailed_route), so the standalone fill "
-            f"step correctly added nothing. Fill is present in the routed.def "
-            f"baseline, not missing.",
+            f"filled.def is byte-identical to routed.def; rows are full "
+            f"(row_utilization_pct={row_util}) and the routed.def baseline "
+            f"carries {baseline_fill_n} row-fill cell instance(s) inserted at "
+            f"PnR. That is standard-cell ROW fill, not per-layer metal fill, so "
+            f"it is disclosed here and not counted as Step-34 fill evidence.",
             details=f"baseline_fill_instances={baseline_fill_n}"))
     if placed_fillers and stats["filled_larger"] is False:
         # contradiction: claims fillers but the DEF didn't grow
@@ -364,6 +516,7 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
             f"filled.def is not larger than routed.def (#445)"))
     else:
         substance = (per_layer_ok or rows_already_full or sparse_fill_attested
+                     or filled_gds_pass
                      or (not counted_zero
                          and (grew or (no_baseline and placed_fillers))))
         if not substance:
@@ -528,6 +681,9 @@ def build_report(findings: List[Finding], stats: dict,
             # not the same as 0 and never buys the exemption.
             "baseline_fill_instances": stats.get("baseline_fill_instances"),
             "fill_done_at_pnr": stats.get("fill_done_at_pnr", False),
+            # U14 — the filled-GDS per-layer judgement: PASS / FAIL /
+            # NOT_MEASURED (null when the LibreLane arm judges instead).
+            "filled_gds_density": (stats.get("filled_gds_density") or {}).get("state"),
             "findings_count": len(findings),
             "errors_count": sum(1 for f in findings if f.severity == "ERROR"),
             "pass": all(f.severity != "ERROR" for f in findings),
