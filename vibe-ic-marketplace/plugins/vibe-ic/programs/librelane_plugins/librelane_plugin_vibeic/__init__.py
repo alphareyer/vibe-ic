@@ -60,11 +60,11 @@ from librelane.config import Variable
 from librelane.state import DesignFormat, State
 from librelane.steps.common_variables import dpl_variables
 from librelane.steps.odb import OdbpyStep
-from librelane.steps.openroad import OpenROADStep
+from librelane.steps.openroad import OpenROADStep, ResizerTimingPostCTS
 from librelane.steps.step import MetricsUpdate, Step, StepError, ViewsUpdate
 
 __all__ = ["InsertSpareCells", "GateLevelSim", "ClockPathDriveSizing",
-           "ExternalCaptureLaunchRetap"]
+           "ClockNetworkGlobalSizing", "ExternalCaptureLaunchRetap"]
 
 
 @Step.factory.register()
@@ -280,6 +280,36 @@ class ClockPathDriveSizing(OpenROADStep):
 
     def get_script_path(self) -> str:
         return os.path.join(os.path.dirname(__file__), "clock_path_drive_sizing.tcl")
+
+
+@Step.factory.register()
+class ClockNetworkGlobalSizing(ResizerTimingPostCTS):
+    """Step 19's clock-path sizing, done by the TOOL (CUT_W4, R-0929-TOOL-DEFAULT).
+
+    OpenROAD's `repair_timing -phases GLOBAL_SIZING` with
+    `set_global_sizing_config -include_clock_network` sizes clock-network
+    cells too, which the resizer's default phases exclude -- the gap #2160
+    closed with vibe-ic's own sizing algorithm (`ClockPathDriveSizing`). The
+    step reads `ResizerTimingPostCTS`'s own variables (the setup margin), so
+    the same generated config drives both. It also records the CTS tree's
+    created-instance count and fanout (an audit input for
+    `cts_quality_check`, told apart by the pre-CTS snapshot).
+    """
+
+    id = "Vibeic.ClockNetworkGlobalSizing"
+    name = "Clock-network global sizing (OpenROAD GLOBAL_SIZING)"
+
+    config_vars = ResizerTimingPostCTS.config_vars + [
+        Variable(
+            "VIBEIC_CLKPATH_PRECTS_INSTANCES",
+            Path,
+            "Instance names of the ODB that OpenROAD.CTS read, one per line.",
+        ),
+    ]
+
+    def get_script_path(self) -> str:
+        return os.path.join(os.path.dirname(__file__),
+                            "clock_network_global_sizing.tcl")
 
 
 @Step.factory.register()
