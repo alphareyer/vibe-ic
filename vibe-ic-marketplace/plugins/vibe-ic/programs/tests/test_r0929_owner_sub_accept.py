@@ -61,8 +61,11 @@ FIRMWARE = {"name": "firmware_toggle", "kind": "functional_vector",
             "stimulus": "toggle.hex", "expected": "GPIO 輸出規則性 toggle"}
 FENCE = {"name": "fence_case", "kind": "functional_vector",
          "stimulus": "Zifencei 指令", "expected": "PASS"}
+# The producer (`isa_suite_producer.bind_case`) binds the base unit only to a
+# row whose own text names `RV<xlen>I`, and the reader now re-derives that
+# binding (review wave 57, SUBACCEPT P4), so the goal row names it.
 GOAL = {"name": "base_isa_goal", "kind": "functional_vector",
-        "stimulus": "full base instruction set unit tests",
+        "stimulus": "full RV32I instruction set unit tests",
         "expected": "100% PASS"}
 
 RTL = {
@@ -519,3 +522,135 @@ def test_a_malformed_receipt_never_credits(tmp_path, mutate):
     assert credit is None and why, why
     rc, _msg = GATE._evaluate(proj)
     assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# review wave 57 (SUBACCEPT) — the four false-PASS paths it found
+# ---------------------------------------------------------------------------
+def _short_goal_receipt() -> dict:
+    """3 of 4 instructions covered: 75% against a stated 100%."""
+    rec = _receipt({GOAL["name"]: ["I"]})
+    rec["instruction_total"]["total"] = 4
+    rec["cases"][GOAL["name"]]["full_parameter"]["coverage"]["total"] = 4
+    return rec
+
+
+def test_the_l10_table_fails_a_goal_the_suite_falls_short_of(tmp_path):
+    """HIGH (P1): the L10 table credited the goal row as pass at 3/4 = 75%
+    against a stated 100% while Step 4 FAILed the same row. The two
+    consumers now apply ONE judgment (`_l10x.isa_goal_verdict`)."""
+    proj = _project(tmp_path, [BOOT, GOAL], {BOOT["name"]: "PASS"},
+                    receipt=_short_goal_receipt())
+    rc_gate, _msg = GATE._evaluate(proj)
+    rc, rep = _l10c(tmp_path, proj)
+    row = {r["id"]: r for r in rep["results"]}[GOAL["name"]]
+    assert row["status"] == "fail" and row["pass"] is False, row
+    assert row["achieved_pct"] == 75.0, row
+    assert rc == 1 and rc_gate == 1, (rc, rc_gate)
+    # `_v1_6_609_l10_conformance_ok` upgrades coverage on ok == total.
+    assert rep["ok"] != rep["total"], rep
+    assert GOAL["name"] not in {c["case"] for c in
+                                rep["isa_conformance_credited"]}
+
+
+def test_the_l10_table_still_credits_a_goal_the_suite_meets(tmp_path):
+    proj = _project(tmp_path, [BOOT, GOAL], {BOOT["name"]: "PASS"},
+                    receipt=_receipt({GOAL["name"]: ["I"]}))
+    rc, rep = _l10c(tmp_path, proj)
+    row = {r["id"]: r for r in rep["results"]}[GOAL["name"]]
+    assert row["status"] == "pass" and row["achieved_pct"] == 100.0, row
+    assert rc == 0, rep
+
+
+def test_a_fail_on_the_delivered_arm_refuses_the_credit(tmp_path):
+    """MEDIUM (P2): a program that fits the delivered memory and FAILs there
+    was published inside a PASS credit."""
+    rec = _receipt({FENCE["name"]: ["Zifencei"]})
+    rec["programs"]["act-Zifencei-01"]["arms"]["staged_delivered"] = {
+        "state": "FAIL", "by_init": [
+            {"init": "ff", "state": "FAIL", "why": "signature differs"},
+            {"init": "a5", "state": "FAIL", "why": "signature differs"}]}
+    rec["cases"][FENCE["name"]]["delivered"].update(verdict="FAIL")
+    rc, msg, why = _credit_refusal(tmp_path, receipt=rec)
+    assert "a failing delivered configuration" in why, why
+    assert rc != 0 and "CREDITED" not in msg, (rc, msg)
+
+
+def test_a_fail_under_one_init_on_the_delivered_arm_refuses(tmp_path):
+    rec = _receipt({GOAL["name"]: ["I"]})
+    rec["programs"]["rv32ui-p-add"]["arms"]["staged_delivered"][
+        "by_init"][0]["state"] = "FAIL"
+    proj = _project(tmp_path, [BOOT, GOAL], {BOOT["name"]: "PASS"},
+                    receipt=rec)
+    _c, why = L10X.isa_conformance_credit(proj, GOAL["name"])
+    assert _c is None and "a failing delivered configuration" in why, why
+
+
+def test_the_delivered_run_is_counted_from_the_rows(tmp_path):
+    """MEDIUM (P2): delivered_run was copied from the receipt's summary
+    words. Summary words that disagree with the rows are refused."""
+    rec = _receipt({FENCE["name"]: ["Zifencei"]})
+    rec["cases"][FENCE["name"]]["delivered"].update(verdict="PASS", passed=1)
+    rc, msg, why = _credit_refusal(tmp_path, receipt=rec)
+    assert "inconsistent" in why and "delivered run" in why, why
+    rec = _receipt({FENCE["name"]: ["Zifencei"]})
+    rec["programs"]["act-Zifencei-01"]["arms"].update(
+        _passing("staged_delivered"))
+    rec["cases"][FENCE["name"]]["delivered"].update(passed=1)
+    proj = _project(tmp_path / "b", [BOOT, FENCE], {BOOT["name"]: "PASS"},
+                    receipt=rec)
+    credit, why = L10X.isa_conformance_credit(proj, FENCE["name"])
+    assert why is None, why
+    assert credit["delivered_run"] == {"verdict": "PASS", "passed": 1,
+                                       "primary_programs": 1,
+                                       "memsize": DELIVERED}
+
+
+RESET_SRAM = {"name": "reset_during_sram_write", "kind": "functional_vector",
+              "stimulus": "assert reset while an SRAM write is in flight",
+              "expected": "PASS"}
+
+
+def test_a_binding_the_case_text_does_not_name_credits_nothing(tmp_path):
+    """MEDIUM (P4): the receipt's bound_cases was trusted verbatim; a
+    reset/SRAM row bound to Zifencei was CREDITED and Step 4 read PASS."""
+    proj = _project(tmp_path, [BOOT, RESET_SRAM], {BOOT["name"]: "PASS"},
+                    receipt=_receipt({RESET_SRAM["name"]: ["Zifencei"]}))
+    credit, why = L10X.isa_conformance_credit(proj, RESET_SRAM["name"])
+    assert credit is None and "names no ISA unit" in why, why
+    rc, msg = GATE._evaluate(proj)
+    assert rc != 0 and "CREDITED" not in msg, (rc, msg)
+    rc, rep = _l10c(tmp_path, proj)
+    row = {r["id"]: r for r in rep["results"]}[RESET_SRAM["name"]]
+    assert row["status"] != "pass", row
+
+
+def test_a_binding_to_a_row_the_declaration_lacks_credits_nothing(tmp_path):
+    proj = _project(tmp_path, [BOOT, FENCE], {BOOT["name"]: "PASS"},
+                    receipt=_receipt({FENCE["name"]: ["Zifencei"],
+                                      "gone_case": ["Zifencei"]}))
+    credit, why = L10X.isa_conformance_credit(proj, "gone_case")
+    assert credit is None and "not a row" in why, why
+
+
+FW_RV32I = {"name": "firmware_rv32i", "kind": "functional_vector",
+            "stimulus": "toggle.hex (RV32I firmware)",
+            "expected": "GPIO 輸出規則性 toggle"}
+
+
+def test_a_firmware_row_naming_rv32i_is_excluded_not_credited(tmp_path):
+    """MEDIUM (P3): rule (1) was asked before rule (2), so a firmware row
+    whose stimulus also names RV32I was CREDITED as a PASS instead of being
+    NOT_MEASURED [input_absent]."""
+    proj = _project(tmp_path, [BOOT, FW_RV32I], {BOOT["name"]: "PASS"},
+                    receipt=_receipt({FW_RV32I["name"]: ["I"]}))
+    credit, why = L10X.isa_conformance_credit(proj, FW_RV32I["name"])
+    assert credit is None and "a firmware row" in why, why
+    rc, rep = _gate_json(tmp_path, proj)
+    assert [e["case"] for e in rep["not_measured_excluded"]] == \
+        [FW_RV32I["name"]], rep
+    assert rep["isa_conformance_credit"]["credited"] == [], rep
+    rc, rep = _l10c(tmp_path, proj)
+    row = {r["id"]: r for r in rep["results"]}[FW_RV32I["name"]]
+    assert row["status"] == "NOT_MEASURED" and row["pass"] is False, row
+    assert row.get("excluded_from_verdict"), row

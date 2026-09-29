@@ -1786,7 +1786,16 @@ def evaluate(
         _refused: Optional[str] = None
         if exec_state == _l10x.NOT_EXECUTED and project_root:
             _credit, _refused = _l10x.isa_conformance_credit(
-                Path(project_root), case_id)
+                Path(project_root), case_id, c)
+            # A coverage GOAL is judged by the credit's NUMBER against its own
+            # stated percentage -- the same judgment the Step-4 goal
+            # population applies (`_l10x.isa_goal_verdict`): short of it is a
+            # FAIL, not a pass; no number for it is no credit.
+            _goal = (_l10x.isa_goal_judgment(c, _credit)
+                     if _credit is not None else None)
+            if _goal is not None and _goal[0] is None:
+                _credit, _refused = None, _goal[2]
+                _goal = None
             _excl = None
             if _credit is None and _tbg is not None and hasattr(
                     _tbg, "input_absent_exclusion"):
@@ -1806,11 +1815,24 @@ def evaluate(
                     "review_required": False,
                     "capability_gap": None,
                 }
-                if _credit is not None:
+                if _credit is not None and _goal is not None \
+                        and _goal[0] != _l10x.PASS:
                     _row.update(
-                        evidence=[f"CREDITED — {_credit['sentence']}"],
+                        evidence=[f"COVERAGE GOAL FAIL — {_goal[2]}, by "
+                                  f"{_credit['sentence']}"],
+                        status="fail", achieved_pct=_goal[1],
+                        isa_conformance_credit=_credit)
+                    _row["pass"] = False
+                    fail_count += 1
+                elif _credit is not None:
+                    _row.update(
+                        evidence=[f"CREDITED — "
+                                  + (f"{_goal[2]}, by " if _goal else "")
+                                  + _credit["sentence"]],
                         status="pass", credited_by=_credit["credited_by"],
                         isa_conformance_credit=_credit)
+                    if _goal is not None:
+                        _row["achieved_pct"] = _goal[1]
                     _row["pass"] = True
                     ok_count += 1
                 else:
