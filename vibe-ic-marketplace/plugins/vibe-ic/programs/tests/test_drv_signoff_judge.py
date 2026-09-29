@@ -1715,3 +1715,102 @@ def test_port_pad_cover_wiring_is_not_a_zero_segment_proof(tmp_path):
         " - p ( PIN p ) ( u PAD ) + COVER Metal2 ( 0 0 ) ( 10 0 ) ;\n"))
     assert [row["pin"] for row in covered["unresolved"]] == ["p"]
 
+
+def _librelane_final_sta(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    """A LibreLane routed run whose step-32 candidate reached STAPostPNR."""
+    import drv_capture_plan as plan
+    import librelane_contract
+    project = tmp_path / "design"
+    root = tmp_path / "installed"
+    _file(root, "synthetic/libs.ref/lib/lib/std_typ.lib",
+          'library (std) { time_unit : "1ns"; capacitive_load_unit (1,pf); '
+          'nom_voltage : 5; nom_temperature : 25; }')
+    _file(root, "synthetic/libs.ref/lib/lef/std.lef",
+          "MACRO std\n PIN A\n USE SIGNAL ;\n END A\nEND std\n")
+    _file(root, "synthetic/libs.tech/librelane/lib/config.tcl",
+          "set ::env(MAX_FANOUT_CONSTRAINT) 4\n"
+          "set ::env(MAX_TRANSITION_CONSTRAINT) 3\n"
+          "set ::env(MAX_CAPACITANCE_CONSTRAINT) 0.2\n")
+    _file(project, "input/docs/L7_design.md", "input L7\n")
+    _file(project, "input/docs/L9_constraints_floorplan.md", "input L9\n")
+    sdc = _file(project, "phase3/librelane/32-config/signoff_scene.sdc",
+                "create_clock -period 24 [get_ports clk]\n"
+                "set_input_delay 4.8 -clock clk [all_inputs]\n"
+                "set_output_delay 4.8 -clock clk [all_outputs]\n"
+                "set_max_fanout 4 [current_design]\n")
+    image_id = "sha256:" + "c" * 64
+    _file(project, "phase3/librelane_pdk_root.provenance.json", json.dumps({
+        "path": str(root), "derivation": {"pdk": "synthetic",
+                                          "image": "synthetic:test",
+                                          "image_id": image_id}}))
+    monkeypatch.setattr(librelane_contract, "pdk_root_resolution",
+                        lambda *a, **k: {"path": str(root),
+                                         "derivation": {"image_id": image_id}})
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"synthetic": {"pvt": {
+        "typ": {"nom_voltage": 5, "nom_temperature": 25}},
+        "rc_corners": ["nom"]}}))
+    monkeypatch.setattr(plan, "_SCENE_PROFILES", profile)
+    cand = project / "phase3/librelane/32-cand01"
+    repair = cand / "01-vibeic-postrouterepair"
+    views = {"nl": _file(repair, "top.nl.v", "module top; endmodule\n"),
+             "odb": _file(repair, "top.odb", "CANDIDATE ODB\n"),
+             "def": _file(repair, "top.def", "VERSION 5.8 ;\nCANDIDATE ROUTE\n")}
+    adopted = repair / "state_out.json"
+    adopted.write_text(json.dumps({k: v["path"] for k, v in views.items()}))
+    spef = _file(cand, "03-openroad-rcx/nom/top.nom.spef", "*SPEF candidate\n")
+    sta = cand / "04-openroad-stapostpnr"
+    top_lib = _file(sta, "nom_typ/top.lib", "generated top Liberty\n")
+    _file(sta, "nom_typ/_env_sta.tcl",
+          f"set ::env(SIGNOFF_SDC_FILE) {sdc['path']}\n"
+          'set ::env(CELL_LIBS) "/pdk/synthetic/libs.ref/lib/lib/std_typ.lib"\n'
+          'set ::env(CELL_LEFS) "/pdk/synthetic/libs.ref/lib/lef/std.lef"\n'
+          "set ::env(STD_CELL_LIBRARY) lib\n")
+    state = sta / "state_out.json"
+    state.write_text(json.dumps({**{k: v["path"] for k, v in views.items()},
+                                 "lib": {"nom_typ": top_lib["path"]},
+                                 "spef": {"nom_*": spef["path"]}}))
+    # The canonical routed DEF still holds the pre-repair route until handoff.
+    _file(project, "phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\nOLD ROUTE\n")
+    return project, adopted
+
+
+def _step32_report(project: Path, adopted: Path) -> dict:
+    state = project / "phase3/librelane/32-cand01/04-openroad-stapostpnr/state_out.json"
+    return {"verdict": "PASS", "adopted": "32-cand01",
+            "adopted_state": str(adopted),
+            "final": {"sta_state": str(state),
+                      "sta_state_sha256": drv._sha(state)}}
+
+
+def test_step32_captures_adopted_candidate_before_handoff(tmp_path, monkeypatch):
+    import drv_capture_plan as capture_plan
+    import drv_signoff_capture as capture
+    import librelane_postroute_repair as repair
+    project, adopted = _librelane_final_sta(tmp_path, monkeypatch)
+    candidate_def = Path(json.loads(adopted.read_text())["def"])
+    captured = []
+
+    def fresh_capture(plan, out_dir, *, image=None):
+        captured.append(plan)
+        return {k: plan[k] for k in ("identity", "frozen", "current", "stages",
+                                     "pins", "scenes")}
+
+    monkeypatch.setattr(capture, "capture", fresh_capture)
+    monkeypatch.setattr(drv, "judge", lambda *a, **k: {
+        "name": "DRV(tran/cap/fanout)", "verdict": "PASS",
+        "failures": [], "not_measured": []})
+    report = _step32_report(project, adopted)
+    repair._step32_drv_signoff(project, report)
+    assert report["drv_signoff"]["verdict"] == "PASS", report["drv_signoff"]
+    layout = captured[0]["identity"]["artifacts"]["def"]
+    assert layout["sha256"] == drv._sha(candidate_def)
+    assert captured[0]["scenes"][0]["spef_layout_sha256"] == layout["sha256"]
+    # Before handoff the pre-stream capture still refuses the stale route.
+    with pytest.raises(ValueError, match="differs from routed DEF"):
+        capture_plan.build(project)
+    (project / "phase3/stage3/pnr/routed.def").write_bytes(candidate_def.read_bytes())
+    after = capture_plan.build(project)
+    assert after["identity"]["artifacts"]["def"]["path"] == str(
+        (project / "phase3/stage3/pnr/routed.def").resolve())
+    assert after["identity"]["artifacts"]["def"]["sha256"] == layout["sha256"]
