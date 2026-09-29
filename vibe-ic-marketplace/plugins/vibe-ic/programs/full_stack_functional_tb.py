@@ -350,6 +350,15 @@ def default_model_resolver(project: Path, used_cells: set,
     chip-top producer used (via `sdf_gate_sim`'s resolver), or (None, why)."""
     if not container:
         return None, "no EDA container to read the PDK models from"
+    # NAME THE ATTACH REFUSAL. `sdf_gate_sim` reads the models through the
+    # guarded exec, which refuses a container whose image is not the pinned
+    # runtime and then reports only "no model". MEASURED on the replay host
+    # when a newer release landed mid-session: the record said "no PDK cell
+    # Verilog model resolves" over a PDK that was there, behind a refused exec.
+    import _eda_pin
+    state, detail = _eda_pin.container_pin_state(container)
+    if state == "MISMATCH":
+        return None, f"the EDA container cannot be attached: {detail}"
     import sdf_gate_sim as _sgs
     models = _sgs.resolve_cell_models(project, used_cells, container)
     if models is None:
