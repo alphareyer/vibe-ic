@@ -1813,6 +1813,37 @@ def _f_pad_decl_partial(p: Path) -> None:
     decl.write_text(json.dumps(doc, indent=2), encoding="utf-8")
 
 
+def _f_retap_unexplained(p: Path) -> None:
+    """Step 19's retap step moved a clock pin that none of its rows accounts for.
+
+    Reddens the Step-19 clause
+    ``retap_audit_check . --json reports/phase3/gates/retap_audit.json``.
+
+    EMPTY cannot reach it, and correctly: with no LibreLane handoff receipt the
+    clause's condition is unmet, and with a receipt but no retap step the gate
+    is NOT_MEASURED at rc 2. So the fixture makes the retap step look RUN and
+    WRONG: the receipt names the step, the step's log carries the real grammar
+    (one trial, REJECTED, nothing kept), and the netlist it wrote nevertheless
+    moved a register's clock pin to another net. The gate compares the two
+    views and fires ``RETAP_UNEXPLAINED_NETLIST_CHANGE`` (rc 1) -- a branch it
+    has to LOOK at the netlists to reach. Chip- and PDK-AGNOSTIC.
+    """
+    folder = "phase3/librelane/19-cts-hold/03-vibeic-externalcapturelaunchretap"
+    _w(p, "reports/phase3/librelane_cts_hold_handoff.json",
+       {"chain": {"Vibeic.ExternalCaptureLaunchRetap": folder}})
+    _w(p, f"{folder}/vibeic-externalcapturelaunchretap.log",
+       "VIC_RETAP margin=0.75 candidates=1\n"
+       "VIC_RETAP reject r1 reason=HOLD_REGRESSED local=-2.6->1.9 "
+       "setup=-2.6->-2.3 tns=-2.6->-2.3 hold=-2.7->-2.9\n")
+    before = ("module top (clk);\n input clk;\n"
+              " cbuf c0 (.I(clk), .Z(n0));\n cbuf c1 (.I(n0), .Z(n1));\n"
+              " dff r1 (.CLK(n1), .D(d), .Q(q));\nendmodule\n")
+    nl_in = _w(p, f"{folder}/in.nl.v", before)
+    nl_out = _w(p, f"{folder}/chip_top.nl.v", before.replace(".CLK(n1)", ".CLK(n0)"))
+    _w(p, f"{folder}/state_in.json", {"nl": str(nl_in)})
+    _w(p, f"{folder}/state_out.json", {"nl": str(nl_out)})
+
+
 def _f_die_unfinished(p: Path) -> None:
     """The die-finishing report claims a seal ring the run did not leave behind.
 
@@ -2470,6 +2501,7 @@ FIXTURES: Dict[str, Callable[[Path], None]] = {
     "POWER_OVER_BUDGET": _f_power_over_budget,
     "AREA_OVER_CEILING": _f_area_over_ceiling,
     "DIE_UNFINISHED": _f_die_unfinished,
+    "RETAP_UNEXPLAINED": _f_retap_unexplained,
     "HARDMACRO_KIT_INCOMPLETE": _f_hardmacro_kit_incomplete,
     "IP_RELEASE_PIN_COUNT_LIE": _f_ip_release_docs_pin_count_lie,
     "PAD_DRIVE_UNCARRIED": _f_pad_drive_uncarried,
@@ -2653,6 +2685,11 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
     # at the tree to reach.
     ("26.5ic", "die_finishing_check . --json "
                "reports/phase3/die_finishing.json"): "DIE_UNFINISHED",
+    # CUT_W4 (R-0929-TOOL-DEFAULT) wired the retap audit into step 19, on the
+    # LibreLane chain's receipt. EMPTY meets no condition; the fixture makes the
+    # retap step look RUN and WRONG (a clock pin moved that no row explains).
+    ("19", "retap_audit_check . --json "
+           "reports/phase3/gates/retap_audit.json"): "RETAP_UNEXPLAINED",
     # vibe-ic#1410/cpath wired `pad_assignment_gen` into 15.5ic as the AUTHOR
     # of `phase3/stage3/pnr/pad_assignment.json`, which nothing had ever
     # written. EMPTY answers NOT_ASKED at rc 2 — the disclosed-skip tier —
