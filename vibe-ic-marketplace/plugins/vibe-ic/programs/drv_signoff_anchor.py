@@ -8,6 +8,11 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _docker_memory  # noqa: E402
 
 
 _IMAGE_PROBE = r'''
@@ -33,8 +38,9 @@ def image_pdk_anchor(image: str, pdk: str, library: str) -> dict:
     if not all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", value)
                for value in (pdk, library)):
         raise ValueError("PDK/library identity invalid")
+    # The same memory ceiling as every other container this plugin creates.
     process = subprocess.run(
-        ["docker", "run", "--rm", image, "--skip", "python3", "-c",
+        ["docker", "run", *_docker_memory.docker_memory_flags(), "--rm", image, "--skip", "python3", "-c",
          _IMAGE_PROBE, pdk, library],
         capture_output=True, text=True, check=False, timeout=90)
     if process.returncode:

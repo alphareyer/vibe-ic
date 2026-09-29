@@ -77,15 +77,16 @@ def _run_fresh(script: Path, roots: set[Path], *, image: str) -> str:
     for root in sorted(roots):
         root = root.resolve()
         mounts.extend(("-v", f"{root}:{root}"))
-    limit = _docker_memory.memory_limit()
-    if not limit:
-        raise RuntimeError("NOT_MEASURED: OpenSTA memory ceiling unavailable")
     name = _docker_watchdog.ephemeral_container_name("vibeic_drv_sta")
     raw = script.with_suffix(".tool.log")
-    argv = ["docker", "run", "--rm", "--name", name,
-            "--memory", limit, "--memory-swap", limit,
+    argv = ["docker", "run", *_docker_memory.docker_memory_flags(),
+            "--rm", "--name", name,
             *mounts, image, "--skip", "bash", "-c",
             f"sta -no_init -exit {shlex.quote(str(script.resolve()))}"]
+    if "--memory" not in argv:
+        # An opted-out or undeterminable ceiling is a refusal here, never an
+        # unbounded OpenSTA container.
+        raise RuntimeError("NOT_MEASURED: OpenSTA memory ceiling unavailable")
 
     def launch(cmd, **kw):
         kw.pop("stdout", None)
