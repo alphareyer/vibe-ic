@@ -7009,6 +7009,23 @@ def _render_os_deferral(d: Dict[str, Any]) -> Optional[str]:
             f"{d.get('commercial_tool_required', '?')}")
 
 
+#: The run ladder's rung of each word (lower = decides first), from
+#: `verdict.RUN_PRECEDENCE` itself so the promotion cannot order them apart.
+_RUN_RUNG: Dict[str, int] = {v.value: i
+                             for i, v in enumerate(_T.RUN_PRECEDENCE)}
+
+
+def _residual_word(status: Any) -> Optional[str]:
+    """The run-ladder word a row NOT deferred by the OS-constraints promotion
+    still contributes, or None when it is green / not applicable
+    (MAIN_FALSEPASS_OSS). An undeclared word never greens: NOT_MEASURED."""
+    try:
+        word = _T.parse(status).value
+    except Exception:  # noqa: BLE001 — unreadable is not green
+        return _T.Verdict.NOT_MEASURED.value
+    return word if _T.is_non_green(word) else None
+
+
 def _os_constraints_prereq_satisfied(result: Any,
                                      waivers: Dict[Any, Any]) -> bool:
     """Has this prerequisite step NOT FAILED?  (R-0915-55 part 1.)
@@ -22084,6 +22101,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     # breakdown so the tape-out reviewer sees exactly which structural
     # gaps were deferred and why.
     os_constraints_deferrals: List[Dict[str, Any]] = []
+    # The verdict's rows, held BEFORE the prerequisite loop below rebinds the
+    # name `scoped` to a bool (MAIN_FALSEPASS_OSS reads the rows afterwards).
+    _verdict_rows = list(scoped)
     if (overall == _T.Verdict.FAIL.value
             and not args.strict_no_os_constraints):
         # v1.6.211 — locate P0 result + categorise its sub-gate fails.
@@ -22252,7 +22272,32 @@ def main(argv: Optional[List[str]] = None) -> int:
             # beside the verdict so nothing goes silent. (R-0915-57 had already
             # emptied this list at its producer; the word outliving the tier is
             # exactly the residue this ruling deletes.)
-            overall = _T.Verdict.PASS_WITH_WAIVERS.value
+            #
+            # MAIN_FALSEPASS_OSS (root, 2026-09-29) — THE PROMOTION LIFTS THE
+            # DEFERRED ROWS OFF THE FAIL RUNG, NOT THE REST OF THE LADDER. The
+            # guard above reads failing / missing / oss_blocked_skipped /
+            # not_owed and refuses WAIVED; a plain NOT_MEASURED row sits in
+            # none of them. MEASURED: step 13 NOT_MEASURED(inconclusive) alone
+            # read NOT_MEASURED rc 1, and the SAME run plus an OSS-blocked
+            # step-28 FAIL read PASS_WITH_WAIVERS rc 0 -- adding a failure
+            # turned the run green. Every in-scope row that is not being
+            # deferred here (`scoped` already excludes `excluded_from_verdict`
+            # rows, F10; held as `_verdict_rows` because the prerequisite
+            # loop above reuses the name) is read again with the run ladder's
+            # own precedence;
+            # FAIL rows are the guard's (`failing` refused above, an
+            # informational-only FAIL never gated), so only the rungs below it
+            # are read here.
+            _deferred = {id(r) for r in deferral_source}
+            _residual = sorted({
+                _residual_word(r.status) for r in _verdict_rows
+                if id(r) not in _deferred
+                and r.status != _T.Verdict.FAIL.value
+                and _residual_word(r.status) is not None
+                and not (args.lenient and not_owed_root(r) is not None)},
+                key=lambda w: _RUN_RUNG.get(w, -1))
+            overall = (_residual[0] if _residual
+                       else _T.Verdict.PASS_WITH_WAIVERS.value)
 
     print(f"\nOverall: {overall}  (strict={not args.lenient})")
     if not_measured_excluded:
