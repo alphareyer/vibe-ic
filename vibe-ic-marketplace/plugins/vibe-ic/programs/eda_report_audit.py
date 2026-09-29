@@ -491,7 +491,9 @@ def _name_token_match(name: str, prefixes: Sequence[str]) -> bool:
 
 def _discover(project_dir: Path, patterns: List[str],
               exclude_name_tokens: Sequence[str] = (),
-              collapse_identical: bool = False) -> List[Path]:
+              collapse_identical: bool = False,
+              defer_to_final: Optional[Tuple[str, str]] = None,
+              deferred: Optional[List[Path]] = None) -> List[Path]:
     """Glob for files matching any of the given patterns recursively,
     skipping hidden / backup-flavored directories (#525), this program's own
     verdict documents, names carrying any of `exclude_name_tokens`, and
@@ -543,6 +545,11 @@ def _discover(project_dir: Path, patterns: List[str],
     seen = set()
     unique = []
     tokens = tuple(t.lower() for t in exclude_name_tokens)
+    # `defer_to_final=(name_regex, final_name)`: a file whose name matches is
+    # a copy that defers to `final_name` beside it, and is left out (listed in
+    # `deferred`) ONLY when that final report is itself discovered. Filtered
+    # here, before any key is claimed, for the reason above: a byte-identical
+    # copy walked first must not evict the final report and then vanish.
     for p in found:
         key = _identity(p)
         if key in seen:
@@ -555,6 +562,13 @@ def _discover(project_dir: Path, patterns: List[str],
             continue
         if not _in_scope(p):
             continue
+        if defer_to_final and re.fullmatch(defer_to_final[0], p.name, re.I):
+            final = p.with_name(defer_to_final[1])
+            if (final.is_file() and not _is_backup_path(final, project_dir)
+                    and _in_scope(final)):
+                if deferred is not None and p not in deferred:
+                    deferred.append(p)
+                continue
         seen.add(key)
         unique.append(p)
     return _collapse_identical_content(unique) if collapse_identical else unique
@@ -1835,19 +1849,20 @@ def _check_drc(project_dir: Path) -> AuditResult:
     # outcome that step calls its most valuable signal. Selection is by CONTENT
     # (the parser sniffs `<items>`), so widening the glob cannot mis-parse a
     # file: an unreadable one still returns None and is reported unreadable.
+    intermediate: List[Path] = []
     files = _discover(project_dir, ["*drc*.rpt", "*drc*.log", "*drc*.txt",
                                      "*drc*.lyrdb",
                                      "*DRC*.rpt", "*DRC*.log", "*DRC*.txt",
                                      "*DRC*.lyrdb"],
-                      collapse_identical=True)
-    # OpenROAD may retain one report per intermediate DRT iteration beside
-    # routed_router.drc.rpt. Those are diagnostic checkpoints, not the final
-    # route's DRC answer; an empty iter0 file has no final-count receipt and
-    # must neither veto nor certify the completed route. An explicit scope
-    # containing ONLY iteration files still fails the report-exists check.
-    intermediate = [p for p in files if re.fullmatch(
-        r"routed_router\.drc\.iter[0-9]+\.rpt", p.name, re.I)]
-    files = [p for p in files if p not in intermediate]
+                      collapse_identical=True,
+                      defer_to_final=(r"routed_router\.drc\.iter[0-9]+\.rpt",
+                                      "routed_router.drc.rpt"),
+                      deferred=intermediate)
+    # step_pnr copies each routing rung's report to routed_router.drc.iterN.rpt
+    # beside routed_router.drc.rpt (the last rung's copy is byte-identical to
+    # it). Those copies are not the final route's answer and do not vote --
+    # but only while the final report they defer to is itself discovered;
+    # with it absent an iteration copy is the only router evidence and votes.
     ignored_intermediate = [str(p.relative_to(project_dir))
                             for p in intermediate]
     if not files:
