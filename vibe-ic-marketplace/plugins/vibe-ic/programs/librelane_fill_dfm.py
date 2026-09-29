@@ -362,14 +362,27 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
             raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
                           f'invalid physical LEF path: {value!r}')
 
+    # A master is protected by its LEF CLASS (PAD / BLOCK) or, whatever its
+    # class says, by the view that declared it: every master a PAD_LEFS file
+    # defines is a pad-ring member (corner ENDCAPs, a classless pad) and every
+    # master of a macro view is a macro (RING, COVER, no CLASS).
+    ring_role: Dict[str, str] = {}
     for key in ('CELL_LEFS', 'PAD_LEFS', 'MACRO_LEFS', 'EXTRA_LEFS'):
-        lefs.extend(lef_paths(cfg.get(key) or []))
-    lefs.extend(path for path in lef_paths(cfg.get('MACROS') or {}, strict=False)
-                if path.lower().endswith(('.lef', '.lef.gz')))
+        paths = list(lef_paths(cfg.get(key) or []))
+        lefs.extend(paths)
+        if key in ('PAD_LEFS', 'MACRO_LEFS'):
+            for path in paths:
+                ring_role.setdefault(str(path),
+                                     'PAD' if key == 'PAD_LEFS' else 'BLOCK')
+    for path in lef_paths(cfg.get('MACROS') or {}, strict=False):
+        if path.lower().endswith(('.lef', '.lef.gz')):
+            lefs.append(path)
+            ring_role.setdefault(str(path), 'BLOCK')
     if not lefs:
         raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
                       f'{routed}: no physical LEF views')
     guest_lefs = []
+    guest_roles: Dict[str, str] = {}
     extra_mounts = []
     pdk_dir = (pdk_root / pdk).resolve()
     project_dir = project.resolve()
@@ -384,6 +397,8 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
         guest = (str(Path('/pdk') / pdk / host.relative_to(pdk_dir))
                  if host.is_relative_to(pdk_dir) else str(host))
         guest_lefs.append(guest)
+        if value in ring_role:
+            guest_roles[guest] = ring_role[value]
         if not (host.is_relative_to(project_dir) or host.is_relative_to(pdk_dir)):
             extra_mounts.extend(['-v', f'{host}:{guest}:ro'])
 
@@ -396,8 +411,20 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
     output.unlink(missing_ok=True)
     partial.unlink(missing_ok=True)
     script = folder / 'placed_keepouts.tcl'
+    reads = ['set _role [dict create]']
+    for path in guest_lefs:
+        if path not in guest_roles:
+            reads.append(f'read_lef {word(path)}')
+            continue
+        reads += [
+            'set _nlib [llength [[ord::get_db] getLibs]]',
+            f'read_lef {word(path)}',
+            'foreach _lib [lrange [[ord::get_db] getLibs] $_nlib end] {',
+            '  foreach _m [$_lib getMasters] { dict set _role [$_m getName] '
+            f'{guest_roles[path]} }}',
+            '}']
     script.write_text('\n'.join([
-        *(f'read_lef {word(path)}' for path in guest_lefs),
+        *reads,
         f'read_def {word(routed.resolve())}',
         'set _block [[[ord::get_db] getChip] getBlock]',
         'if {$_block eq "NULL"} { error "placed design has no OpenDB block" }',
@@ -409,7 +436,9 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
         'set _protected 0',
         'foreach _inst [$_block getInsts] {',
         '  set _master [$_inst getMaster]',
-        '  if {[$_master isPad]} { set _kind PAD } elseif {[$_master isBlock]} { set _kind BLOCK } else { continue }',
+        '  if {[$_master isPad]} { set _kind PAD } elseif {[$_master isBlock]} { set _kind BLOCK } '
+        'elseif {[dict exists $_role [$_master getName]]} { set _kind [dict get $_role [$_master getName]] } '
+        'else { continue }',
         '  if {![$_inst isPlaced]} { error "unplaced protected instance: [$_inst getName]" }',
         '  set _box [$_inst getBBox]',
         '  if {[$_box xMin] >= [$_box xMax] || [$_box yMin] >= [$_box yMax]} { error "empty protected bbox: [$_inst getName]" }',
