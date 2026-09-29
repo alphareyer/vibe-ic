@@ -8,18 +8,20 @@ Step-5 record naming the seed PASSED, and the trace, hashed in that record.
 The trace is the first 400 ns of the VCD `full_stack_functional_tb` wrote for
 the `case_3` L10 case through a pad-ring chip top (iverilog in vibeic-eda
 0.3.86, 2026-09-29, spm run_v5c tree re-run with the U18 trace top), cut at a
-timestamp boundary. The design and case names are the fixture's only link to
+timestamp boundary. It is stored gzip-compressed: a raw VCD in the plugin tree
+is a finding of `waveform_artifact_hygiene_check` (content-classified), and a
+fixture must not be one. The design and case names are the fixture's only link to
 that run; nothing here reads them as a rule.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import shutil
+import gzip
 from pathlib import Path
 
 FIXTURE_VCD = Path(__file__).resolve().parent / "fixtures" / "u18_step38" \
-    / "case_3.head.vcd"
+    / "case_3.head.vcd.gz"
 CASE = "case_3"
 STEP5_REL = "phase2/stage1/sim_full_stack/functional/functional_cases.json"
 DUT_PORTS = [
@@ -35,6 +37,11 @@ DUT_PORTS = [
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def trace_bytes() -> bytes:
+    """The fixture trace, decompressed: the bytes iverilog wrote."""
+    return gzip.decompress(FIXTURE_VCD.read_bytes())
 
 
 def plant(project: Path, state: str = "passed") -> dict:
@@ -54,7 +61,7 @@ def plant(project: Path, state: str = "passed") -> dict:
     run = project / "phase2/stage1/sim_full_stack/functional/run" / CASE
     run.mkdir(parents=True, exist_ok=True)
     vcd = run / f"{CASE}.vcd"
-    shutil.copyfile(FIXTURE_VCD, vcd)
+    vcd.write_bytes(trace_bytes())
     rel = str(vcd.relative_to(project))
     rec = {
         "program": "full_stack_functional_tb",

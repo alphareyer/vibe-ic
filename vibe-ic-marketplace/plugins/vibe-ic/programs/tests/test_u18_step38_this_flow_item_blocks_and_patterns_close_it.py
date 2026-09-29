@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import gzip
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -283,7 +282,7 @@ def test_step5_dumper_targets_the_single_dut_instance(tmp_path):
 
 def test_step5_records_the_real_trace_with_its_scope_and_hash(tmp_path):
     vcd = tmp_path / "case_3.vcd"
-    shutil.copyfile(S5.FIXTURE_VCD, vcd)
+    vcd.write_bytes(S5.trace_bytes())
     rec = FSF.record_trace(tmp_path, {"vcd": vcd, "scope": "case_3/dut",
                                       "dut_module": "chip_top"})
     assert rec["scope_verified"] is True
