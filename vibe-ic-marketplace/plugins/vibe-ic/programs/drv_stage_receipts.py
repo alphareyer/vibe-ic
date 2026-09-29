@@ -234,6 +234,45 @@ def record_chain(project: Path, steps: Iterable[tuple]) -> List[Path]:
     return written
 
 
+def rebind_lane(project: Path, lane_dir, stages: Iterable[str],
+                arm: str) -> List[Path]:
+    """After an arm selection: the receipts of `stages` come from the SELECTED
+    arm, never from whichever arm ran last (review wave 58 DRVSTACK: seed arms,
+    21-route-pregrt and a dual direct arm each rewrote the same receipt).
+
+    `lane_dir` is the selected LibreLane arm's own (step id, folder) pairs, or
+    its chain folder (run_chain names each step folder `NN-<step id>`); the
+    last folder of a stage's step is its run. A selected arm with no chain (a
+    direct arm, which carries no probe) or whose chain lacks the stage records
+    the stage as not run, naming the arm: section 1 then reads FAIL "did not
+    run", never another arm's row."""
+    by_folder = {sid.lower().replace(".", "-"): sid for sid in STAGE_STEPS}
+    found: Dict[str, tuple] = {}
+    if lane_dir is not None and not isinstance(lane_dir, (str, Path)):
+        for sid, folder in lane_dir:
+            if sid in STAGE_STEPS:
+                found[STAGE_STEPS[sid][0]] = (sid, Path(folder))
+        lane_dir = Path(next(iter(found.values()))[1]).parent if found else "the arm's chain"
+    elif lane_dir is not None and Path(lane_dir).is_dir():
+        for folder in sorted(Path(lane_dir).iterdir()):
+            head, _, tail = folder.name.partition("-")
+            sid = by_folder.get(tail)
+            if folder.is_dir() and head.isdigit() and sid:
+                found[STAGE_STEPS[sid][0]] = (sid, folder)
+    written = []
+    for name in stages:
+        if name in found:
+            path = record_step(project, found[name][0], found[name][1])
+        else:
+            where = (f"chain {Path(lane_dir).name}" if lane_dir is not None
+                     else "a direct arm with no DRV stage probe")
+            path = record_not_run(project, name,
+                                  f"the selected arm {arm} ({where}) has no {name} step")
+        if path is not None:
+            written.append(path)
+    return written
+
+
 # --- synthesis -------------------------------------------------------------------
 
 #: yosys `abc -showtmp` names the script ABC ran; `<abc-temp-dir>` is a run

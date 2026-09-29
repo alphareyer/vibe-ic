@@ -1466,6 +1466,14 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     report["input_baseline"] = arms["postdrt"]["baseline"]
     report["repair_trigger"] = chosen.get("repair_trigger")
     report["selected_arm"] = sel["selection"]
+    # The pregrt arm re-ran step 21's chain and rewrote the post-GRT receipt:
+    # bind the route the selected arm stands on before the step-32 capture.
+    import drv_stage_receipts as _drv_stages
+    _lane = ((list(zip(pre["ids"], pre["folders"])) if pre.get("folders")
+              else Path(pre["final"]).parent.parent)
+             if sel["selection"] in ("pregrt", "pregrt_postdrt")
+             else Path(route_state).parent.parent if route_state else None)
+    _drv_stages.rebind_lane(project, _lane, ("post_grt_repair",), sel["selection"])
     _stamp_verdict(report)
     _step32_drv_signoff(project, report)
     write_json(out, report)

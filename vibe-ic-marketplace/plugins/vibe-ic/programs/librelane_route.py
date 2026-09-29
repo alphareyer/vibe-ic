@@ -669,6 +669,13 @@ def execute(
                          "drc": arms[selected]["nvr"] / "named_viol_after.drc"}
         elif json.loads(gates["librelane"].read_text()).get("verdict") == "NOT_MEASURED":
             return _refuse("LL_ROUTE_NOT_MEASURED", str(gates["librelane"]), out)
+        # The shipped route's post-GRT repair receipt is the SELECTED arm's
+        # (seed arms and the step-32 pregrt arm rewrite it as they run).
+        import drv_stage_receipts as _drv_stages
+        _drv_stages.rebind_lane(
+            project, list(zip(arms[selected]["ids"], arms[selected]["folders"]))
+            if selected in arms else None,
+            ("post_grt_repair",), selected)
         # Step 32 on LibreLane (T102 r2) runs HERE, on the routed database the
         # selection just chose, before the tail: LL21 -> Vibeic.PostRouteRepair
         # -> tail. `variant_arm` is this step's own LibreLane route with extra
