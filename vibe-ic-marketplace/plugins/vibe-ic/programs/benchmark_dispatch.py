@@ -172,7 +172,7 @@ def _runner_diagnostics(process: _ProcessOutcome, argv: list[str],
     try:
         raw = Path(process.receipt_path or "").read_bytes()
         receipt = json.loads(raw)
-        latest = json.loads((project / "reports" / "runner_invocations"
+        latest = json.loads((project / "reports" / "orchestrator" / "runner_invocations"
                              / "latest.json").read_bytes())
         if not (hashlib.sha256(raw).hexdigest() == process.receipt_sha256
                 and receipt["invocation_id"] == process.invocation_id == latest["invocation_id"]
@@ -409,7 +409,7 @@ class _RunnerBudget:
                 before = _runner_report_snapshot(project) if project else {}
                 started_ns = time.time_ns()
                 if project:
-                    _atomic_write_json(project / "reports" / "runner_invocations" / "latest.json", {
+                    _atomic_write_json(project / "reports" / "orchestrator" / "runner_invocations" / "latest.json", {
                         "invocation_id": invocation_id, "argv": argv,
                         "project": str(project), "started_ns": started_ns,
                     })
@@ -432,7 +432,7 @@ class _RunnerBudget:
         stderr = stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr
         receipt_path = receipt_sha256 = None
         if project:
-            path = project / "reports" / "runner_invocations" / f"{invocation_id}.json"
+            path = project / "reports" / "orchestrator" / "runner_invocations" / f"{invocation_id}.json"
             receipt = {
                 "schema": "vibeic.runner_invocation.v1", "invocation_id": invocation_id,
                 "argv": argv, "project": str(project), "rc": rc, "error": error,
