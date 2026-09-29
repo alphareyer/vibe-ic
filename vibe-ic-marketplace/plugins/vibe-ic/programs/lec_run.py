@@ -919,7 +919,9 @@ def pass_cache_eligible(report: Any) -> bool:
         and report.get("equivalent") is True
         and isinstance(report.get("compared_points"), int)
         and report["compared_points"] > 0
-        and report.get("non_equivalent_points") == 0
+        # None is the engine's "not measured" (build_report); a count > 0 is
+        # a counterexample and never seeds the cache.
+        and report.get("non_equivalent_points") in (None, 0)
         and report.get("unproven_points") == 0
         and not report.get("inconclusive")
         and not report.get("parse_error")
@@ -2957,7 +2959,7 @@ def parse_equiv_output(text: str, *,
                 f"A {total if total is not None else '?'}-point equivalence "
                 "miter was built, but the proof recorded NO decided points "
                 f"({_noconv_ev}) and NO counterexample "
-                "(non_equivalent_points=0). A run that decided nothing is NOT "
+                "(no counterexample in the log). A run that decided nothing is NOT "
                 "evidence of non-equivalence: a real difference produces a "
                 "counterexample or a completed equiv_status with unproven>0. "
                 "→ INCONCLUSIVE (a killed/interrupted run outside the "
@@ -3007,7 +3009,7 @@ def parse_equiv_output(text: str, *,
                     f"{unproven if unproven is not None else '?'} unproven — "
                     f"and the proof ladder STOPPED BELOW ITS INDUCTION RUNGS "
                     f"({_noconv_ev}), with NO counterexample recorded "
-                    "(non_equivalent_points=0). This is NOT a statement about "
+                    "(no counterexample in the log). This is NOT a statement about "
                     "the engine's sequential depth and NOT a capability gap: "
                     "equiv_induct was never asked, so nothing about the "
                     "remainder was learned. → INCONCLUSIVE (the recipe stopped "
@@ -3024,7 +3026,7 @@ def parse_equiv_output(text: str, *,
                     f"{unproven if unproven is not None else '?'} unproven — "
                     f"and the proof was STOPPED before it could finish "
                     f"({_noconv_ev}), with NO counterexample recorded "
-                    "(non_equivalent_points=0). This is NOT a statement about "
+                    "(no counterexample in the log). This is NOT a statement about "
                     "the engine's sequential depth and NOT a capability gap: "
                     "the remainder was never attempted, so nothing about it was "
                     "learned. → INCONCLUSIVE (the run was cut off), never a "
@@ -3041,7 +3043,7 @@ def parse_equiv_output(text: str, *,
                     f"{unproven if unproven is not None else '?'} unproven — but "
                     "equiv_induct did NOT converge "
                     f"({_noconv_ev}) and NO counterexample was recorded "
-                    "(non_equivalent_points=0). Non-convergence is NOT "
+                    "(no counterexample in the log). Non-convergence is NOT "
                     "non-equivalence: a real difference produces a counterexample. "
                     "→ INCONCLUSIVE (a disclosed sequential-depth capability gap), "
                     "never a false NOT_EQUIVALENT. Close the remainder with sign-off "
@@ -3105,8 +3107,10 @@ def build_report(parsed: Dict, top: str, gate_netlist: str,
         # actions. None only when no total was parseable (never fabricated).
         "miter_points": parsed.get("total"),
         # Yosys equiv_status does not emit a distinct proven-non-equivalent
-        # count; a genuine difference surfaces as `unproven`, so this stays 0.
-        "non_equivalent_points": 0,
+        # count; a genuine difference surfaces as `unproven`. The engine never
+        # MEASURES this count, so it is None (not measured), never a 0 that
+        # reads as "zero counterexamples were found" (audit 3.14, step 13).
+        "non_equivalent_points": None,
         "unproven_points": unproven if unproven is not None else 0,
         "gold": f"{top} (RTL)",
         "gate": f"{Path(gate_netlist).name} (synth)",
