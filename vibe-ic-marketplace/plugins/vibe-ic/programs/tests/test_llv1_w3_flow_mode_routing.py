@@ -268,7 +268,11 @@ def test_no_record_gives_todays_answer_at_every_site_and_writes_nothing(tmp_path
     for _, _, steps in call_sites():
         for step in steps:
             assert getattr(LC, "impl_step_modes", lambda p: None)(project) is None
-            expected = (LC._class_default(project, step, {}) or "direct")
+            # selected_mode's documented order with no switch: a step-wide
+            # production default (R-0929-TOOL-DEFAULT: step 3), then the
+            # design class's, then `direct`.
+            expected = (LC.PRODUCTION_DEFAULTS.get(step)
+                        or LC._class_default(project, step, {}) or "direct")
             assert LC.selected_mode(project, step) == expected, step
     assert _tree(project) == before
 
