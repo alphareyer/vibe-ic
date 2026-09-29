@@ -11,12 +11,14 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 import hashlib
+import hmac
 import inspect
 import json
 import math
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -25,7 +27,16 @@ import time
 from typing import Callable, Mapping
 import uuid
 
-from _atomic_artefact import write_json
+from _atomic_artefact import write_bytes, write_json
+
+
+# The issuer is owned by this live controller process, never a caller-supplied
+# digest or a secret serialized beside editable run receipts. A new interpreter
+# cannot adopt a previous issuer's run: durable external supervision is not wired.
+_COMPLETION_KEY = secrets.token_bytes(32)
+_ISSUED_AUTHORITY: dict[str, str] = {}
+_CONTROL_NAMES = frozenset({'.', '..', 'plan.json', 'result.json', 'adoption.json',
+                            'refusal.json', 'issued-plan.json', 'selected'})
 
 
 class Refusal(RuntimeError):
@@ -53,6 +64,26 @@ def digest(path: Path) -> str:
 def _hash(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True,
                                     separators=(',', ':')).encode()).hexdigest()
+
+
+def _seal(value: dict) -> dict:
+    payload = json.loads(json.dumps(value))
+    signature = hmac.new(_COMPLETION_KEY, _hash(payload).encode(), hashlib.sha256).hexdigest()
+    return dict(payload=payload, signature=signature)
+
+
+def _issued(path: Path) -> dict:
+    document = json.loads(path.read_text())
+    expected = hmac.new(_COMPLETION_KEY, _hash(document['payload']).encode(), hashlib.sha256).hexdigest()
+    if not isinstance(document.get('signature'), str) or not hmac.compare_digest(
+            expected, document['signature']):
+        raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
+    observed = _ISSUED_AUTHORITY.get(str(path))
+    if observed is None:
+        raise Refusal('ISSUED_AUTHORITY_UNAVAILABLE', str(path))
+    if json.loads(observed) != document['payload']:
+        raise Refusal('ISSUED_AUTHORITY_CHANGED', str(path))
+    return document['payload']
 
 
 def _relative(value: str) -> Path:
@@ -177,7 +208,7 @@ class Registry:
     def register(self, adapter: Adapter) -> None:
         if adapter.arm_id in self._adapters:
             raise Refusal('DUPLICATE_ARM', adapter.arm_id)
-        if not re.fullmatch(r'[A-Za-z0-9_.-]+', adapter.arm_id):
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+', adapter.arm_id) or adapter.arm_id in _CONTROL_NAMES:
             raise Refusal('UNSAFE_ARM_ID', adapter.arm_id)
         if not adapter.source_files or not adapter.tool_version or not (
                 adapter.engine_families and adapter.components and
@@ -364,7 +395,10 @@ class Controller:
             *, cancel: threading.Event | None = None,
             superiority: Superiority | None = None) -> dict:
         output = Path(output).resolve()
-        output.mkdir(parents=True, exist_ok=False)
+        try:
+            output.mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
+            raise Refusal('RUN_OUTPUT_UNAVAILABLE', str(output)) from exc
         run_id = uuid.uuid4().hex
         cancel = cancel or threading.Event()
         try:
@@ -376,8 +410,14 @@ class Controller:
             raise
         plan.update(run_id=run_id, budget=asdict(self.budget),
                     public_portfolio=self.portfolio,
-                    public_portfolio_sha256=_hash(self.portfolio))
+                    public_portfolio_sha256=_hash(self.portfolio),
+                    run_root=str(output),
+                    superiority=None if superiority is None else {
+                        **asdict(superiority),
+                        'receipts': {k: str(v) for k, v in superiority.receipts.items()}})
         _write(output / 'plan.json', plan)
+        _ISSUED_AUTHORITY[str(output / 'issued-plan.json')] = json.dumps(plan)
+        _write(output / 'issued-plan.json', _seal(plan))
         if not plan['arms']:
             _write(output / 'result.json', plan)
             return plan
@@ -430,7 +470,10 @@ class Controller:
     def _run_arm(self, arm: Adapter, context: Context, plan: dict, root: Path,
                  cancel: threading.Event, cpuset: list[int] | None = None) -> dict:
         directory = root / arm.arm_id
-        directory.mkdir()
+        try:
+            directory.mkdir()
+        except OSError as exc:
+            raise Refusal('ARM_OUTPUT_UNAVAILABLE', str(directory)) from exc
         inputs, outputs = directory / 'inputs', directory / 'outputs'
         inputs.mkdir(); outputs.mkdir()
         receipt = dict(run_id=plan['run_id'], arm_id=arm.arm_id,
@@ -523,8 +566,80 @@ class Controller:
         except Exception as exc:
             receipt.update(status='NOT_MEASURED', reason='ADAPTER_ERROR', detail=repr(exc))
         receipt['ended_ns'] = time.monotonic_ns()
+        # This completion is issued from observed Popen.wait results. Gate
+        # evidence remains separately reconsumed; a source-issued process rc0
+        # does not grant PASS or replace a failed/unmeasured output consumer.
+        completion = {k: receipt[k] for k in ('run_id', 'arm_id', 'binding',
+                      'adapter', 'processes', 'input_root', 'output_root')}
+        completion.update(actual_status=receipt['status'], actual_reason=receipt['reason'],
+                          ended_ns=receipt['ended_ns'], run_root=str(root))
+        _ISSUED_AUTHORITY[str(directory / 'issued-completion.json')] = json.dumps(completion)
+        _write(directory / 'issued-completion.json', _seal(completion))
         _write(directory / 'receipt.json', receipt)
         return receipt
+
+    @staticmethod
+    def _execution_authority(root: Path, plan: dict, receipt: dict, arm: Adapter) -> None:
+        issued_plan = _issued(root / 'issued-plan.json')
+        if issued_plan != plan or plan.get('run_root') != str(root):
+            raise Refusal('ISSUED_PLAN_MISMATCH', arm.arm_id)
+        completion = _issued(root / arm.arm_id / 'issued-completion.json')
+        fields = ('run_id', 'arm_id', 'binding', 'adapter', 'processes', 'input_root', 'output_root')
+        if (completion.get('run_root') != str(root) or
+                completion.get('run_id') != plan['run_id'] or
+                any(completion.get(k) != receipt.get(k) for k in fields)):
+            raise Refusal('EXECUTION_AUTHORITY_MISMATCH', arm.arm_id)
+        processes = completion['processes']
+        if len(processes) != len(arm.components) or any(
+                p.get('rc') != 0 or p.get('stop_reason') or not p.get('pid') or
+                not p.get('ended_ns') for p in processes):
+            raise Refusal('ISSUED_EXECUTION_INCOMPLETE', arm.arm_id)
+
+    def _current_admission(self, context: Context, plan: dict, arm: Adapter) -> None:
+        if self._admission(arm, context) != 'READY':
+            raise Refusal('CURRENT_ADMISSION_REJECTED', arm.arm_id)
+        override = plan.get('superiority')
+        if override:
+            override = Superiority(**{**override, 'receipts': {
+                k: Path(v) for k, v in override['receipts'].items()}})
+        current = self.plan(context, plan['mode'], override)
+        if arm.arm_id not in current['arms']:
+            raise Refusal('CURRENT_POLICY_REJECTED', arm.arm_id)
+
+    @staticmethod
+    def _selected_generation(root: Path, receipt: dict) -> dict:
+        parent = root / 'selected'
+        if parent.is_symlink():
+            raise Refusal('SELECTED_NAMESPACE_UNSAFE', str(parent))
+        parent.mkdir(exist_ok=True)
+        generation = uuid.uuid4().hex
+        target = parent / generation
+        target.mkdir()
+        hashes = receipt['evidence']['outputs']
+        for name, expected in hashes.items():
+            source = Path(receipt['output_root']) / _relative(name)
+            content = source.read_bytes()
+            if hashlib.sha256(content).hexdigest() != expected:
+                raise Refusal('SELECTED_ARTIFACT_CHANGED', name)
+            dest = target / _relative(name)
+            write_bytes(dest, content)
+            dest.chmod(0o444)
+        manifest = dict(generation=generation, directory=str(target),
+                        run_id=receipt['run_id'], arm_id=receipt['arm_id'],
+                        binding=receipt['binding'], outputs=hashes)
+        _ISSUED_AUTHORITY[str(target / 'manifest.json')] = json.dumps(manifest)
+        _write(target / 'manifest.json', _seal(manifest))
+        return manifest
+
+    @staticmethod
+    def _generation_current(generation: dict) -> None:
+        directory = Path(generation['directory'])
+        if _issued(directory / 'manifest.json') != generation:
+            raise Refusal('SELECTED_MANIFEST_CHANGED', generation['generation'])
+        for name, expected in generation['outputs'].items():
+            path = directory / _relative(name)
+            if path.is_symlink() or not path.is_file() or digest(path) != expected:
+                raise Refusal('SELECTED_GENERATION_CHANGED', name)
 
     @staticmethod
     def _source_current(arm: Adapter) -> None:
@@ -585,10 +700,11 @@ class Controller:
         Adoption records the result; it does not overwrite native project outputs.
         """
         root = Path(root).resolve()
-        plan = json.loads((root / 'plan.json').read_text())
-        adoption = dict(run_id=plan['run_id'], status='REFUSED', selected=None,
+        adoption = dict(run_id=None, status='REFUSED', selected=None,
                         ai_choice=dict(choice) if choice is not None else None)
         try:
+            plan = json.loads((root / 'plan.json').read_text())
+            adoption['run_id'] = plan['run_id']
             if not choice or not all(isinstance(choice.get(k), str) and choice[k].strip()
                                      for k in ('arm_id', 'receipt_sha256', 'rationale', 'reviewer')):
                 raise Refusal('AI_CHOICE_MISSING', context.step_id)
@@ -607,20 +723,39 @@ class Controller:
             if (Path(receipt['output_root']).resolve() != root / str(arm_id) / 'outputs' or
                     Path(receipt['input_root']).resolve() != root / str(arm_id) / 'inputs'):
                 raise Refusal('WRONG_ARM_OUTPUT_SPACE', str(arm_id))
+            self._execution_authority(root, plan, receipt, arm)
+            self._current_admission(context, plan, arm)
             self._eligible(receipt, context, arm)
             fresh = asdict(arm.validate(Path(receipt['output_root']), context.binding()))
             if fresh != receipt['evidence']:
                 raise Refusal('EVIDENCE_CHANGED', str(arm_id))
+            # A source validator can legitimately pause. Its return is not a
+            # lease on the earlier input/executable/output bytes. Recheck after
+            # it returns, then capture and bind the selected artifact generation.
+            self._eligible(receipt, context, arm)
+            generation = self._selected_generation(root, receipt)
+            self._execution_authority(root, plan, receipt, arm)
+            self._current_admission(context, plan, arm)
+            self._eligible(receipt, context, arm)
+            self._generation_current(generation)
             adoption.update(status='ADOPTED', selected=arm_id,
                             evidence=receipt['evidence'],
-                            independence=plan['independence'])
+                            independence=plan['independence'],
+                            selected_generation=generation)
+            _write(root / 'adoption.json', adoption)
         except Refusal as exc:
             adoption.update(reason=exc.code, detail=str(exc))
-            _write(root / 'adoption.json', adoption)
+            try:
+                _write(root / 'adoption.json', adoption)
+            except OSError as recording:
+                raise Refusal('ADOPTION_RECORD_UNAVAILABLE', f'{exc}; {recording}') from recording
             raise
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            adoption.update(reason='INVALID_ADOPTION_EVIDENCE', detail=str(exc))
-            _write(root / 'adoption.json', adoption)
+            adoption.update(status='REFUSED', selected=None,
+                            reason='INVALID_ADOPTION_EVIDENCE', detail=str(exc))
+            try:
+                _write(root / 'adoption.json', adoption)
+            except OSError as recording:
+                raise Refusal('ADOPTION_RECORD_UNAVAILABLE', f'{exc}; {recording}') from recording
             raise Refusal('INVALID_ADOPTION_EVIDENCE', str(exc)) from exc
-        _write(root / 'adoption.json', adoption)
         return adoption

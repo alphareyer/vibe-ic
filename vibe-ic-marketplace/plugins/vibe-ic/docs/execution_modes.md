@@ -71,6 +71,23 @@ proposal to change existing EDA progress watchdog or native tool-stop policy.
 Address-space limits are per process, not a cgroup aggregate RSS limit; production
 container/process-tree memory and license leases still require the owning runner.
 
+The source run also issues `issued-plan.json` and an arm-local
+`issued-completion.json` from the actual observed process completion. Its live
+process keeps a separate immutable serialized transcript and signing key outside
+the editable run directory. Adoption verifies both issuance and the process
+transcript; replacing receipt rc/status/evidence and selecting its new digest
+cannot upgrade a real nonzero execution. A signature alone cannot fabricate
+source issuance. The original plan, native rc, logs and output proof remain
+auditable. Gate evidence is still independently consumed: an issued rc0 grants
+no design PASS, and measured FAIL retains precedence over NOT_MEASURED gates.
+
+This issuer is scoped to one interpreter lifetime and source-owned trusted code.
+Another controller in that process can consume the same issued run; restarting
+the interpreter loses authority and fails closed. Persistent external supervisor
+authority and cross-process key/lease management are unimplemented. These
+process transcripts do not claim protection against arbitrary hostile Python
+code executing inside the issuer process.
+
 Process rc0 and file existence never establish eligibility. Actual measured
 `FAIL` gates yield `FAIL`; missing/failed execution, stale/unbound evidence and
 `NOT_MEASURED` gates stay `NOT_MEASURED`. No run automatically selects an arm:
@@ -81,6 +98,28 @@ unmeasured candidates, wrong source or changed tool identity refuse. Adoption
 reconsumes the actual output validator and persists `adoption.json`; it records
 adoption without publishing into the project's native outputs. This is an API
 blocking boundary, not a claim that a currently unmodified runner stops here.
+
+Adoption also checks the currently relevant applicability, qualification,
+availability, license-seat/resource declarations and selection policy against
+the source-issued original run. These are declared controller admission checks,
+not proof of an actual production license lease. The same checks, source/current
+input/frozen input/output hashes and issued completion are checked again after
+the source validator returns. A validator may pause; its earlier hashes cannot
+authorize bytes another thread changed during validation.
+
+The exact validated artifacts are copied into a unique `selected/<generation>`
+directory, with a source-issued manifest binding run, arm, inputs and output
+digests. The generation and relevant current identities are checked before the
+atomic adoption record is committed. `selected_generation` identifies those
+captured bytes, rather than leaving the record pointed at mutable candidate
+outputs. Read-only files plus issued hashes expose later disk changes; they are
+not a host security sandbox. Any future native import must consume the exact
+generation and verify its manifest/digests. No such native import is added here.
+
+Arm IDs reject dot traversal and the controller-reserved plan/result/adoption,
+refusal, issued-plan and selected-generation names. Legitimate names such as
+`neutral.a` keep their existing output layout. Unavailable output directories or
+adoption records return named finite refusals, rather than raw filesystem errors.
 
 ## Proposed integration and explicit remaining work
 
@@ -117,6 +156,16 @@ production registry. The expected-contract base probe observes concrete values
 from the old native consumer on f881; on this branch it exercises the standalone
 parser. It does not prove production integration. Reverse source mutations test
 the substantive evidence guards separately.
+
+The initial review's two hash-bound original proof scripts are rerun unchanged
+against the original reviewed source and the repair: 14 original negative
+failures and 11 adjacent positives become 25 passing controls. They cover actual
+rc7 receipt rewrites, currently withdrawn admission, four event-synchronized
+validation races and five colliding arm names. The original 53 author assertions
+and fixture bytes remain unchanged. Appended source controls additionally
+challenge fabricated issuance, current resource/policy changes and the exact
+committed artifact generation. These are neutral subprocess/controller proofs,
+not additional EDA adapters or production rollout evidence.
 
 ## Layer Contract Decision — execution policy and portfolio
 
