@@ -209,19 +209,16 @@ def test_acceptance_prose_artifact_a3_waived_deferred(tmp_path):
 
     rc, out = _run_strict(proj)
     a3 = _a3_block(out)
-    assert "PASS_WITH_WAIVERS" in a3, out
-    assert "WAIVED-DEFERRED=" in out, out
-    assert "pdk-substitution" in a3.lower() or "PDK_SUBSTITUTION" in a3
-    assert fc._PDK_SUBSTITUTION_TICKET in a3
-    assert "review_required=True" in a3
-    # NOT counted as executed-PASS.
-    # R-0915-85 — `[PASS` is now a PREFIX of the deferral's own word, so the
-    # old form asserts the opposite of what it means. The property is that A3
-    # is not a FULL pass; the tally's executed-PASS numerator is what that
-    # costs, and the line below says it in words.
+    # R-0929-U14-OWNER-WAIVER — the same migration U14 made in
+    # test_v0_3_1_issue496_analog_pdk_waiver: a producer's disclosure is
+    # evidence, not the owner's approval, so A3 FAILs and is never waived.
+    assert "[FAIL" in a3, out
+    assert "PASS_WITH_WAIVERS" not in a3, a3
+    # NOT counted as executed-PASS. (The deferral's own wording -- ticket,
+    # review_required, "not executed-PASS", the named target -- belonged to
+    # the machine waiver the owner rule removed; U14's sibling migration drops
+    # those lines the same way.)
     assert "[PASS             ]" not in a3, a3
-    assert "not executed-PASS" in a3
-    assert _TARGET_PDK in a3.lower()
 
     # ── strip the disclosure entirely → A3 hard-FAILs ─────────────────────
     for rel in ("phase2/analog/delta_sigma/delta_sigma.sp",

@@ -182,7 +182,10 @@ def _run(tmp_path, monkeypatch, *, n_subgate_waivers=0, waived_steps=(),
              "reason": ("The bench this step measures on is not reachable "
                         "from this container, so the measurement it needs "
                         "cannot be taken here (test fixture)."),
-             "approver": "issue924-test-harness",
+             # U14 (R-0929-U14-OWNER-WAIVER): only a dated owner approval
+             # waives a step; setup only.
+             "approver": "reyerchu", "approved_at": "2026-09-29",
+             "owner_statement": "Owner-approved fixture waiver for #924.",
              "ticket": "TEST-924",
              "review_required": True,
              "date": "2026-08-10"}

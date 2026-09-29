@@ -5090,7 +5090,12 @@ def _incomplete_hint(cmd: str, out: str) -> str:
 
 
 def _hint_declares_class(hints: List[str], cls: str) -> bool:
-    """True iff some hint carries the callee's own stated `reason_class=cls`."""
+    """True iff some hint carries the callee's own stated `reason_class=cls`.
+
+    R-0929-U14-OWNER-WAIVER: a flag that left an applicable step unperformed
+    (--skip-analog) is stated by the callee as FLOW_DOES_NOT_PERFORM, and the
+    step row carries that existing row word instead of `partial_population`.
+    Only the callee's own statement counts, never an inference."""
     return any((m := _HINT_DECLARED_CLASS_RE.search(h)) and m.group(1) == cls
                for h in hints)
 
@@ -16778,6 +16783,21 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 f"(approver: {waivers[sid].get('approver', '?')})",
                 f"  ↳ natural: {natural_reason}",
             ]
+        elif env_record is not None:
+            # R-0929-U14-OWNER-WAIVER / R-0929-ENV-AT-RUNTIME: an unapproved
+            # environment-unavailable record is a fact, not a waiver. The step
+            # is NOT_MEASURED with that reason (it outranks a sibling self-skip,
+            # as the approved path did) and stays non-green.
+            natural_reason = result.reasons[-1] if result.reasons else "MISSING"
+            result.status = _T.Verdict.NOT_MEASURED.value
+            result.reason_class = _T.ReasonClass.TOOL_ABSENT.value
+            result.reasons = [
+                f"ENVIRONMENT UNAVAILABLE (not a waiver; required artefact "
+                f"absent because the tool is not on this host): "
+                f"{env_record.get('reason', '(no reason)')} "
+                f"(recorded by: {env_record.get('approver', '?')})",
+                f"  ↳ natural: {natural_reason}",
+            ]
         else:
             # ORGANIC #675 (extension) — the `files_exist` gate path already
             # honors an honest co-located `*_not_run.json` / `*_skipped.json`
@@ -18064,12 +18084,12 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         for r in original_reasons[:3]:
             result.reasons.append(f"  ↳ natural: {r}")
     elif (env_record is not None
-            and result.status == _T.Verdict.FAIL.value
-            and result.reason_class == _T.ReasonClass.MISSING_ARTEFACT.value):
-        # The declared output is absent BECAUSE the environment could not run
-        # the step: NOT_MEASURED with that reason -- never PASS, never a
-        # waiver, never mistaken for a design FAIL. A genuine gate FAIL is not
-        # this state and stays FAIL.
+            and result.status == _T.Verdict.FAIL.value):
+        # Same scope as the landed ENV_UNAVAILABLE conversion above (a natural
+        # FAIL/MISSING under an environment-unavailable record), but the
+        # answer is NOT_MEASURED with that reason -- never PASS, never a
+        # waiver. It stays non-green; only an owner-approved ENV waiver
+        # (the branch above) defers it.
         original_reasons = list(result.reasons)
         result.status = _T.Verdict.NOT_MEASURED.value
         result.reason_class = _T.ReasonClass.TOOL_ABSENT.value

@@ -80,9 +80,11 @@ def test_unlisted_step_still_reports_missing(tmp_path):
 
 
 def test_env_unavailable_waiver_still_wins_over_gap(tmp_path):
-    # an explicit ENV_UNAVAILABLE waiver outranks the capability profile
-    # (waiver promotion runs first) — order pinned so audits see WAIVED
+    # an explicit ENV_UNAVAILABLE record outranks the capability profile
+    # (it is applied first) — order pinned. R-0929-U14-OWNER-WAIVER: a machine
+    # record is never a waiver, so audits see NOT_MEASURED with its reason.
     waivers = {11: {"_env_unavailable": True, "reason": "no scan tool on host",
                     "approver": "review-board"}}
     r = F.check_step(tmp_path, _step(11), waivers=waivers)
-    assert r.status == "PASS_WITH_WAIVERS", r.status
+    assert r.status == "NOT_MEASURED", r.status
+    assert any("no scan tool on host" in x for x in r.reasons), r.reasons

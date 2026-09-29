@@ -146,8 +146,11 @@ def test_572a_check_step_drops_misfiled_waiver(tmp_path):
     # a step that would be MISSING, mis-waived, must NOT come back WAIVED.
     step = {"id": 37, "name": "GDSII sign-off", "stage": "stage5",
             "required_outputs": ["reports/phase3/never_exists.json"]}
+    # Owner-approved (U14), so the rejection measured here is the misfiled
+    # step name itself, not the missing owner approval.
     waivers = {37: {"step_name": "FPGA final", "reason": "no board",
-                    "approver": "user"}}
+                    "approver": "reyerchu", "approved_at": "2026-09-29",
+                    "owner_statement": "Owner-approved fixture waiver (U14 owner rule)."}}
     res = FC.check_step(tmp_path, step, waivers)
     assert res.status != "WAIVED"
     assert any("REJECTED" in r for r in res.reasons)

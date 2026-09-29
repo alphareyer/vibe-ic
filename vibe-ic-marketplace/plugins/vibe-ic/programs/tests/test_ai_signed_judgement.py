@@ -160,10 +160,13 @@ def test_env_unavailable_waiver_stays_disclosed_without_ai_credit(
     row = audit.check_step(tmp_path, step, {
         sid: {"_env_unavailable": True, "reason": "tool unavailable",
               "approver": "reviewer"}})
-    assert row.status == "PASS_WITH_WAIVERS"
-    assert any("ENV_UNAVAILABLE waiver applied" in reason
-               for reason in row.reasons)
-    assert any("grants no AI PASS credit" in reason for reason in row.reasons)
+    # R-0929-U14-OWNER-WAIVER / R-0929-ENV-AT-RUNTIME: an environment-
+    # unavailable record is disclosed as NOT_MEASURED with its reason -- no
+    # waiver, and (still) no AI PASS credit of any kind.
+    assert row.status == "NOT_MEASURED", (row.status, row.reasons)
+    assert row.status not in ("PASS", "PASS_WITH_WAIVERS")
+    assert any("ENVIRONMENT UNAVAILABLE" in reason and "tool unavailable"
+               in reason for reason in row.reasons), row.reasons
 
 
 def test_other_waiver_does_not_sign_expert_review(tmp_path):

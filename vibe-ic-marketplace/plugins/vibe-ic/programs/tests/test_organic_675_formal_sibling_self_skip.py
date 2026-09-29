@@ -475,15 +475,16 @@ def test_early_missing_present_output_passes_no_sibling_consult(tmp_path):
 
 
 def test_early_missing_env_unavailable_waiver_takes_precedence(tmp_path):
-    """An explicit ENV_UNAVAILABLE waiver still wins over the honest sibling: the
-    step becomes WAIVED (the approved path), not SKIPPED-CONDITION."""
+    """An explicit ENV_UNAVAILABLE record still wins over the honest sibling:
+    the step becomes NOT_MEASURED with that reason (R-0929-U14-OWNER-WAIVER:
+    a machine record is never a waiver), not SKIPPED-CONDITION."""
     s = _synth(tmp_path)
     (s / "atpg_not_run.json").write_text(_own_marker())
     step = {"id": 999, "name": "Post-DFT optimization",
             "required_outputs": [_EX_OUT]}
     waivers = {999: {"_env_unavailable": True, "reason": "tool not on host",
                      "approver": "field-agent-attest"}}
-    assert FCC.check_step(tmp_path, step, waivers=waivers).status == "PASS_WITH_WAIVERS"
+    assert FCC.check_step(tmp_path, step, waivers=waivers).status == "NOT_MEASURED"
 
 
 def test_early_missing_second_of_two_outputs_present_no_promotion(tmp_path):
