@@ -3376,7 +3376,8 @@ steps:
         #     `sta_corner_record_completeness_check` -67.610 / -51.460 ns) and
         #     both runs stay `overall: FAIL`.
         #
-        # SECOND SCOPE, `phase3/stage3/sta/per_corner`: this step is named
+        # SECOND SCOPE, `phase3/stage3/sta/prelayout_per_corner` (step 10's own
+        # directory since CUT_W1A; it was the shared `per_corner/`): this step is named
         # "Pre-layout STA (MULTI-CORNER)" and, unlike step 23 (which has
         # `post_route_signoff_corner_check` and
         # `sta_corner_record_completeness_check` below it), has no dedicated
@@ -3400,7 +3401,7 @@ steps:
         # per_corner/ there would let a PRE-layout corner report's negative
         # slack fail the post-route clause — exactly the cross-step
         # contamination #778 exists to prevent.
-        - program_exit_zero: "sta_report_check . --mode sta --under phase3/stage3/sta/pre_pnr_timing.rpt --under phase3/stage3/sta/per_corner --json reports/phase3/sta/pre_pnr_summary.json"
+        - program_exit_zero: "sta_report_check . --mode sta --under phase3/stage3/sta/pre_pnr_timing.rpt --under phase3/stage3/sta/prelayout_per_corner --json reports/phase3/sta/pre_pnr_summary.json"
     blocks_on: [9]
 
   - id: 11

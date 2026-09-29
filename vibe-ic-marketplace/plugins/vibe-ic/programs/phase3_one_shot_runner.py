@@ -59412,6 +59412,10 @@ def _repair_residual_note(project: "Path", residual: bool,
         "and the worst-path slew profile before recording one.")
 
 
+#: Step 10's pre-layout corner-report directory, under the STA dir (CUT_W1A).
+STEP10_CORNER_DIR = "prelayout_per_corner"
+
+
 def _prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
                          runner_sdc: Path, design_staged: bool,
                          modes: Dict[str, str], notes: List[str]) -> Dict[str, Any]:
@@ -59711,7 +59715,13 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     # holds a routed netlist + SPEF from a prior round — else the shared
     # file-existence precedence would emit a POST_ROUTE report here and label it
     # pre-layout (the contradiction sta_report_check flags).
-    per_corner = sta_out / "per_corner"
+    # CUT_W1A: step 10's corner reports live in their OWN directory. Step 23
+    # writes post-route corner reports to `per_corner/` and
+    # `_emit_multi_corner_sta` reuses what it finds there, so one shared
+    # directory let a pre-layout report stand as post-route evidence
+    # (TOOL_DUPLICATION_AUDIT §3.14). The audit counts both directories by
+    # each report's own STA_BASIS stamp, exactly as it counted the one.
+    per_corner = sta_out / STEP10_CORNER_DIR
     pre_pnr = sta_out / "pre_pnr_timing.rpt"
     if _ll and _ll_modes["10"] == "librelane":
         # The tool timed the synthesis netlist in its own step directory; its

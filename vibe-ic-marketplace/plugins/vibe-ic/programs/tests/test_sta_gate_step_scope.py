@@ -280,7 +280,7 @@ def test_step10_scope_is_not_wide_enough_to_reach_the_post_route_reports(
     # EXECUTED, not asserted from the string. The fixture carries step 23's,
     # step 32's (post-repair) and step 33's (aging) artefacts; step 10's scope
     # must reach none of them even with a genuine per_corner/ present.
-    pc = project / "phase3/stage3/sta/per_corner"
+    pc = project / "phase3/stage3/sta/prelayout_per_corner"   # step 10's own (CUT_W1A)
     pc.mkdir(parents=True, exist_ok=True)
     for corner in ("SS", "FF"):
         (pc / f"sta_{corner}.rpt").write_text(

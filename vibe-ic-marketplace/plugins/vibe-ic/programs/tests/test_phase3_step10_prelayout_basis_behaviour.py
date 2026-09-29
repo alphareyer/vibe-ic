@@ -182,7 +182,7 @@ def _rerun_project(root: Path, *, per_corner_bodies: dict,
     _write(R._pl.pnr_dir(proj) / f"{TOP}_pnr.v", "// routed netlist\n")
     _write(proj / "phase3/stage3/extracted" / f"{TOP}.spef", "*SPEF\n")
     for name, body in per_corner_bodies.items():
-        _write(R._pl.sta_dir(proj) / "per_corner" / name, body)
+        _write(R._pl.sta_dir(proj) / R.STEP10_CORNER_DIR / name, body)
     if pre_pnr_body is not None:
         _write(R._pl.sta_dir(proj) / "pre_pnr_timing.rpt", pre_pnr_body)
     return proj
@@ -229,11 +229,11 @@ def test_failed_corner_reemit_cannot_supply_the_pre_layout_body(tmp_path,
         f"{_sta_basis.declared_basis(pre_pnr.read_text())!r}: "
         + pre_pnr.read_text())
     # the failed corner leaves NO report — never a mislabelled one
-    assert not (sta / "per_corner" / "sta_SS.rpt").is_file(), (
+    assert not (sta / R.STEP10_CORNER_DIR / "sta_SS.rpt").is_file(), (
         "the stale POST_ROUTE SS report survived its failed re-emit")
     # ...and the quarantine decision point was actually ENTERED (not merely
     # an outcome that some other branch could have produced)
-    assert (sta / "per_corner" / "sta_SS.rpt.stale_basis").is_file()
+    assert (sta / R.STEP10_CORNER_DIR / "sta_SS.rpt.stale_basis").is_file()
     assert res.status == "PASS", (res.status, res.detail)
 
 
@@ -362,8 +362,8 @@ def test_reverse_healthy_pre_layout_rerun_is_left_byte_identical(tmp_path,
 
     sta = R._pl.sta_dir(proj)
     assert calls == [], f"burned an OpenSTA run on healthy reports: {calls}"
-    assert (sta / "per_corner" / "sta_SS.rpt").read_text() == body
-    assert (sta / "per_corner" / "sta_TT.rpt").read_text() == body
+    assert (sta / R.STEP10_CORNER_DIR / "sta_SS.rpt").read_text() == body
+    assert (sta / R.STEP10_CORNER_DIR / "sta_TT.rpt").read_text() == body
     assert (sta / "pre_pnr_timing.rpt").read_text() == pre
     assert not list(sta.rglob("*.stale_basis")), "quarantined a healthy report"
     assert res.status == "PASS", (res.status, res.detail)
@@ -411,7 +411,7 @@ def test_reverse_post_route_caller_is_untouched(tmp_path, monkeypatch):
                            "sta_TT.rpt": _STALE_POST_ROUTE},
         pre_pnr_body=None)
     _hermetic(monkeypatch, calls)
-    per_corner = R._pl.sta_dir(proj) / "per_corner"
+    per_corner = R._pl.sta_dir(proj) / R.STEP10_CORNER_DIR
     libs = sorted((proj / "input" / "pdk" / "liberty").glob("*.lib"))
     notes: list = []
 
@@ -469,7 +469,7 @@ def test_rerun_with_a_routed_netlist_still_publishes_a_pre_layout_report(
         f"{_sta_basis.declared_basis(pre_pnr.read_text())!r}: "
         f"{pre_pnr.read_text()}")
 
-    per_corner = R._pl.sta_dir(proj) / "per_corner"
+    per_corner = R._pl.sta_dir(proj) / R.STEP10_CORNER_DIR
     corner_rpts = sorted(per_corner.glob("sta_*.rpt"))
     assert corner_rpts, "no corner report was produced"
     for rpt in corner_rpts:
