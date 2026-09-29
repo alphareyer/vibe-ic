@@ -371,6 +371,23 @@ def _output_dirs(required_outputs: Any) -> List[str]:
 _SKIP_VERDICTS = {"SKIP", "SKIPPED", "SKIPPED-CONDITION"}
 
 
+def _not_run_superseded_by_bound_proof(project: Path, record: Path) -> bool:
+    """True when `record` is a not-run record a bound proof has superseded.
+
+    P2LECIN follow-up: phase 2's `reports/lec_not_run.json` (step 13 not
+    measured, before the netlist step 15 routes existed) is false once the
+    proof of that netlist binds it; a tree written before step 13 retired it
+    still carries one, and this scan would show step 13 -- or step 18, whose
+    `reports/spare_cell_coverage.json` shares the directory -- as skipped.
+    The step-13 gate answers (`lec_equivalence_check.lec_not_run_superseded`);
+    an unanswerable question supersedes nothing."""
+    try:
+        import lec_equivalence_check as _lec_gate  # noqa: PLC0415
+        return _lec_gate.lec_not_run_superseded(project, record) is not None
+    except Exception:  # noqa: BLE001 — fail closed: the record stands
+        return False
+
+
 def _disclosed_skip(project: Path, required_outputs: Any) -> Tuple[bool, str]:
     """A step is a DISCLOSED-SKIP if any *.json in its output dirs self-reports a
     top-level `verdict` in {SKIP, SKIPPED, SKIPPED-CONDITION} (case-insensitive,
@@ -385,6 +402,8 @@ def _disclosed_skip(project: Path, required_outputs: Any) -> Tuple[bool, str]:
         except OSError:
             continue
         for jf in jfiles:
+            if _not_run_superseded_by_bound_proof(project, jf):
+                continue
             name = jf.name.lower()
             if fnmatch.fnmatch(name, "*_not_run.json") or fnmatch.fnmatch(
                 name, "*_skipped*.json"
