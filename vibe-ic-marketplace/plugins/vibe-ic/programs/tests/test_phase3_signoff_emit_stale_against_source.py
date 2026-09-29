@@ -270,7 +270,11 @@ def _layout(tmp_path, *, report_older_than_gds: bool):
     gds = gdsd / "top.gds"
     gds.write_bytes(b"\x00\x06\x00\x02\x00\x07")
     out = rpt / "metal_density.json"
-    out.write_text('{"layers": {"met1": 0.11}}')
+    # U14: the producer binds the report to the GDS bytes it measured, so a
+    # current report carries that sha (an unbound one is re-emitted).
+    import hashlib
+    out.write_text('{"layers": {"met1": 0.11}, "gds_sha256": "%s"}'
+                   % hashlib.sha256(gds.read_bytes()).hexdigest())
     t = gds.stat().st_mtime
     os.utime(out, (t - 500, t - 500) if report_older_than_gds else (t + 500, t + 500))
     return proj, gds, out

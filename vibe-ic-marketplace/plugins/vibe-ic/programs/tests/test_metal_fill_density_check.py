@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _filled_gds_fixture import write_filled_gds
+
 import pytest
 
 PROG = Path(__file__).resolve().parent.parent / "metal_fill_density_check.py"
@@ -27,6 +29,7 @@ def test_pass_filled_def(tmp_path):
     pnr.mkdir(parents=True, exist_ok=True)
     (pnr / "routed.def").write_text("x" * 1000)
     (pnr / "filled.def").write_text("x" * 2000)
+    write_filled_gds(tmp_path)  # U14: Step 34 now needs the filled GDS's bound per-layer density
     result = _run(tmp_path)
     assert result.returncode == 0
     report = json.loads((tmp_path / "out.json").read_text())
@@ -84,6 +87,7 @@ def test_pass_density_in_bounds(tmp_path):
             {"name": "M2", "density_pct": 60.0},
         ]
     })
+    write_filled_gds(tmp_path)  # U14: Step 34 now needs the filled GDS's bound per-layer density
     result = _run(tmp_path)
     assert result.returncode == 0
 
@@ -148,6 +152,7 @@ def test_364_real_fill_growth_still_passes(tmp_path):
     (pnr / "routed.def").write_text("x" * 1000)
     (pnr / "filled.def").write_text("x" * 2000)
     (pnr / "metal_fill.done").write_text("done\n")
+    write_filled_gds(tmp_path)  # U14: Step 34 now needs the filled GDS's bound per-layer density
     r = _run(tmp_path)
     assert r.returncode == 0, r.stdout
 

@@ -329,7 +329,14 @@ RECORD_ADJUDICATION = _ra.declare(
     # to the advisory tier; the rule reads a plain `verdict: PASS` beside
     # VIA_*_NOT_FOUND, which neither path emits or removes, so no published
     # record changes adjudication.
-    decision_digest="010cd9f774dbbc49e825c8e20ac1adab7f4eaefbb1bb48b7deb185923d9c35b0",
+    # Re-reviewed for U14 (tailb, 2026-09-29): when step 34's gate report is
+    # not on disk yet, `audit` reads step 34's verdict in process
+    # (`_step34_density_in_process`) instead of leaving density_ref null. That
+    # adds only a DENSITY_REF finding (INFO on a step-34 PASS, WARNING
+    # otherwise); it neither emits nor removes VIA_*_NOT_FOUND and leaves a
+    # plain `verdict: PASS` beside them exactly as it was, so no published
+    # record changes adjudication.
+    decision_digest="cd5f8fee13c8be4070e7bfda8fc5e77d3e70280221ae3bbf60964f7e407a251f",
     rules=(
         _ra.Rule(
             rule_id="dfm_screen_check.via-screen-did-not-run",
@@ -340,6 +347,25 @@ RECORD_ADJUDICATION = _ra.declare(
         ),
     ),
 )
+
+
+def _step34_density_in_process(project: Path) -> "dict | None":
+    """U14 — when Step 34's gate report is not on disk yet (the runner emits
+    this screen before the audit runs Step 34's gate), read Step 34's verdict
+    from the same judge, in process and without writing its receipt, so the
+    screen never ships with density_ref null merely because of ordering.
+    None only when the judge cannot be loaded."""
+    try:
+        import metal_fill_density_check as _mfd  # noqa: PLC0415
+        findings, stats = _mfd.audit(project)
+        rep = _mfd.build_report(findings, stats, str(project))
+    except Exception:  # noqa: BLE001 -- no judge -> no reference, never a pass
+        return None
+    summ = rep.get("summary", {})
+    return {"step34_pass": bool(summ.get("pass")),
+            "errors": summ.get("errors_count"),
+            "filled_gds_density": summ.get("filled_gds_density"),
+            "source": "metal_fill_density_check (in process)"}
 
 
 def _step34_tool_density(project: Path):
@@ -419,6 +445,8 @@ def audit(project: Path) -> dict:
         except (OSError, ValueError):
             density_ref = {"unparseable": True,
                            "source": str(gate_json.relative_to(project))}
+    else:
+        density_ref = _step34_density_in_process(project)
     if density_ref is None:
         findings.append({
             "severity": "INFO", "category": "DENSITY_REF",

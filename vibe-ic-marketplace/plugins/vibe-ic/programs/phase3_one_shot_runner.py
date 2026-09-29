@@ -73475,6 +73475,13 @@ def _freshest_gds(alias_gds: Path, source_gds: Path) -> Optional[Path]:
         return s
 
 
+def _md_gds_sha256(gds: Path) -> Optional[str]:
+    """Bare hex sha256 of the GDS a density measurement reads (the form
+    `metal_fill_density_check` compares), or None when it cannot be read."""
+    tagged = _sha256_of_file(gds)
+    return tagged.split(":", 1)[1] if tagged else None
+
+
 def _emit_metal_density_report(project: Path, top: str, pdk: PdkConfig,
                                container: str, out_json: Path,
                                notes: List[str]) -> bool:
@@ -73505,13 +73512,25 @@ def _emit_metal_density_report(project: Path, top: str, pdk: PdkConfig,
     # re-run that rewrote the layout republished the previous round's density
     # while the report still named the current GDS: the number described a
     # design that no longer existed, and nothing in the artefact said so.
+    # U14 — "current" also means BOUND: Step 34 accepts the measurement only
+    # when it records the sha256 of the bytes it measured, so a report with no
+    # binding (or a binding to other bytes) is re-emitted rather than kept.
+    gds_sha = _md_gds_sha256(gds)
     if out_json.is_file():
         try:
-            if out_json.stat().st_mtime >= gds.stat().st_mtime:
+            _prev = json.loads(out_json.read_text(errors="replace"))
+        except (OSError, ValueError):
+            _prev = None
+        _bound = (isinstance(_prev, dict) and gds_sha is not None
+                  and _prev.get("gds_sha256") == gds_sha)
+        try:
+            if out_json.stat().st_mtime >= gds.stat().st_mtime and _bound:
                 return False          # current for the GDS actually read
             notes.append(
-                f"metal density re-emitted: {out_json.name} predates the GDS it "
-                f"describes ({gds.name})")
+                f"metal density re-emitted: {out_json.name} "
+                + ("predates the GDS it describes" if _bound else
+                   "is not bound by sha256 to the GDS it describes")
+                + f" ({gds.name})")
         except OSError:
             pass                      # cannot date it -> re-emit rather than trust it
     layermap = pdk.lefdef_layermap
@@ -73575,6 +73594,20 @@ def _emit_metal_density_report(project: Path, top: str, pdk: PdkConfig,
         f"-rd pdk={pdk.name} -rd out={out_c} 2>&1 | tee "
         f"{_to_container_path(str(script.parent / 'metal_density.log'), container)}"
     )
+    # U14 r2 — the previous report goes BEFORE the tool runs. It is being
+    # re-emitted because it is stale or unbound; left in place, a KLayout run
+    # that writes nothing (container gone, recipe crash, stall kill) would leave
+    # it to be read back below and stamped with THIS round's sha — a Step-34
+    # PASS on numbers never measured on these bytes. Removed, not renamed: a
+    # renamed copy would still match the `metal_density*.json` report globs.
+    try:
+        out_json.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        notes.append(f"metal density: cannot remove the previous report "
+                     f"({exc}); nothing is re-emitted over it")
+        return False
     rc, out, err = _docker_exec(container, cmd, marker=script_c, outputs=[out_json])
     if not out_json.is_file() or out_json.stat().st_size == 0:
         notes.append(f"metal density: KLayout produced no report (rc={rc})")
@@ -73584,6 +73617,24 @@ def _emit_metal_density_report(project: Path, top: str, pdk: PdkConfig,
     except (OSError, ValueError):
         notes.append("metal density: report is not valid JSON")
         return False
+    # U14 — BIND the measurement to the bytes it measured. The sha is taken
+    # before the tool ran and again after it exited; only an unchanged stream
+    # is bound. A stream rewritten mid-measurement records the refusal instead,
+    # and Step 34 then reads the measurement as NOT_MEASURED.
+    if isinstance(doc, dict):
+        _after = _md_gds_sha256(gds)
+        if rc == 0 and gds_sha is not None and _after == gds_sha:
+            doc["gds_sha256"] = gds_sha
+            doc.pop("gds_sha256_refused", None)
+        else:
+            doc.pop("gds_sha256", None)
+            doc["gds_sha256_refused"] = (
+                f"the measuring tool exited rc={rc}" if rc != 0 else
+                "the GDS could not be read or changed while it was measured")
+        try:
+            _aa.write_json(out_json, doc)
+        except OSError as exc:
+            notes.append(f"metal density: sha binding not written: {exc}")
     if "error" in doc or not doc.get("layers"):
         notes.append(f"metal density: no per-layer density measured "
                      f"({doc.get('error') or 'empty layers'})")
