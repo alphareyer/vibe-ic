@@ -9,7 +9,10 @@ project-level PASS prose never decide a case verdict.
 An L10 pass-rate coverage goal is a separate population. Its bound scenarios
 and achieved percentage are measured by ``cpu_functional_oracle_waiver_check``;
 this gate discloses the goal but does not demand a unit TB under the goal's own
-name. Both gates import the same structural L10 classifier.
+name. Both gates import the same structural L10 classifier. A row its producer
+typed as an executable kind (``functional_vector``) keeps its execution debt
+here even when its expected half states a percentage
+(``l10_coverage_goal_classify.execution_partition``).
 
 This gate complements `cmd_response_conformance_check.py` which only
 verifies CRC-residue correctness of the host vectors; it does NOT verify
@@ -1617,7 +1620,8 @@ def evaluate(
 
     Pass-rate goals are measured by the Step-4 scenario/coverage instrument,
     not by a per-goal unit TB. Partition through its shared classifier so a
-    direct ``evaluate`` caller cannot restore the old denominator.
+    direct ``evaluate`` caller cannot restore the old denominator; a typed
+    executable row stays here even with a percentage expected half.
 
     The per-case ``status`` field ("pass" / "fail" / ``NOT_EXECUTED`` /
     "waived" / "checklist_gap") and the project-level ``waive_count`` / checklist-gap
@@ -1657,7 +1661,7 @@ def evaluate(
         execution_record = {"available": False,
                             "reason": "no_execution_record",
                             "rows": {}, "malformed": []}
-    cases, _coverage_goals = _cgc.partition(cases)
+    cases, _coverage_goals = _cgc.execution_partition(cases)
     results: List[Dict[str, Any]] = []
     ok_count = 0
     fail_count = 0
@@ -2101,7 +2105,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         all_cases = load_l10(args.l10)
-        cases, coverage_goals = _cgc.partition(all_cases)
+        cases, coverage_goals = _cgc.execution_partition(all_cases)
     except Exception as e:
         print(f"[l10-tb-conformance] cannot load L10: {e}", file=sys.stderr)
         return 2

@@ -203,6 +203,36 @@ def partition(cases: Sequence[dict]) -> Tuple[List[dict], List[dict]]:
     return vectors, goals
 
 
+def execution_partition(cases: Sequence[dict]
+                        ) -> Tuple[List[dict], List[dict]]:
+    """`(vectors, delegated_goals)` for the per-case EXECUTION gate.
+
+    `partition` answers "which rows does the coverage instrument measure".
+    `l10_tb_conformance_check` asks a narrower question: for which rows may it
+    STOP demanding a unit-TB execution. Only a goal its producer did not type
+    as an executable row -- one that DECLARES a coverage kind, or an untyped
+    row whose expected half is an acceptance percentage.
+
+    A row its producer TYPED as an executable kind (`functional_vector`, ...)
+    stays in the execution population even when its expected half states a
+    percentage. `partition` still hands its percentage to the goal instrument
+    (R-0915-131), so the row answers to BOTH authorities -- as it did before
+    the populations were split -- and neither of them drops it. Delegating it
+    too would let a typed vector with no execution evidence and no waiver
+    anchor read PASS 0/0 at the execution gate (ORGANIC #778 no-leak).
+    """
+    vectors: List[dict] = []
+    goals: List[dict] = []
+    for c in cases:
+        if not isinstance(c, dict):
+            continue
+        kind, _field = declared_kind(c)
+        typed_executable = bool(kind) and kind not in _GOAL_KIND_TOKENS
+        delegated = classify(c)[0] == COVERAGE_GOAL and not typed_executable
+        (goals if delegated else vectors).append(c)
+    return vectors, goals
+
+
 def bind_scope(scope_text: Optional[str]) -> Tuple[Optional[str], str]:
     """`(dimension, why)` — the measured dimension this scope names.
 
