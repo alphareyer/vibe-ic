@@ -241,6 +241,17 @@ def _cites(recs: Sequence[Dict[str, Any]]) -> str:
 
 def derive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
     """{status: WRITE|REFUSED|NOT_DETERMINED, budget?, reason?, basis}."""
+    # THE OWNER'S FIELD IS NEVER OVERWRITTEN (DELIVC final check, finding 2).
+    # Any owner record, cited or not: an uncited one is a defect the owner
+    # fixes, never a licence for a program to replace the owner's answer.
+    prov_map = doc.get(TD.PROVENANCE_KEY)
+    own = prov_map.get(KEY) if isinstance(prov_map, dict) else None
+    if isinstance(own, dict) and own.get("answered_by") == \
+            TD.ANSWERED_BY_OWNER_VALUE:
+        return {"status": "REFUSED", "rc": 1,
+                "reason": (f"`{TD.PROVENANCE_KEY}.{KEY}` says the owner "
+                           f"answered `{KEY}`; this program never overwrites "
+                           f"an owner field")}
     deliverable = TD.answer(doc, "deliverable")
     att = TD.attestation_of(doc, "deliverable")
     if deliverable not in TD.DELIVERABLES:
@@ -345,6 +356,26 @@ def derive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
             "ref": ref, "attestation": att, "deliverable": deliverable}
 
 
+def provenance_record(got: Dict[str, Any]) -> Dict[str, Any]:
+    """The `answer_provenance.<KEY>` record for a WRITE result of `derive`."""
+    return {"answered_by": TD.ANSWERED_BY_PROGRAM_VALUE,
+            "producer": PROGRAM,
+            TD.DERIVED_FROM_ATTESTED: {"deliverable": got["deliverable"]},
+            TD.DERIVED_INPUTS: got["inputs"],
+            TD.DERIVED_INPUTS_SHA256: got["inputs_sha256"]}
+
+
+def rederive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
+    """What this producer would write NOW for `doc` in `project`, without
+    writing anything: {answer, provenance} on a WRITE, else {refused: reason}.
+    The step-0.5ic gate compares the recorded answer with this instead of
+    believing a self-declared provenance record (DELIVC final, finding 1)."""
+    got = derive(project, doc)
+    if got["status"] != "WRITE":
+        return {"refused": f"{got['status']}: {got.get('reason')}"}
+    return {"answer": got["budget"], "provenance": provenance_record(got)}
+
+
 def _sha(text: Any) -> Optional[str]:
     if not isinstance(text, str):
         return None
@@ -362,11 +393,7 @@ def apply(doc: Dict[str, Any], got: Dict[str, Any],
     old_prov_map = doc.get(TD.PROVENANCE_KEY)
     old_prov = (old_prov_map.get(KEY) if isinstance(old_prov_map, dict)
                 else None)
-    prov_rec = {"answered_by": TD.ANSWERED_BY_PROGRAM_VALUE,
-                "producer": PROGRAM,
-                TD.DERIVED_FROM_ATTESTED: {"deliverable": deliverable},
-                TD.DERIVED_INPUTS: got["inputs"],
-                TD.DERIVED_INPUTS_SHA256: got["inputs_sha256"]}
+    prov_rec = provenance_record(got)
     if old == got["budget"] and old_prov == prov_rec:
         return new, {}
     # WHY it changed, from the recorded structure only (never its prose).

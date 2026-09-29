@@ -1389,7 +1389,9 @@ def derived_answer_refusals(doc: Any, project: Optional[Path] = None,
         answer it depends on), `inputs` or `inputs_sha256`;
       * `DERIVED_ANSWER_STALE` — a value in `derived_from_attested` differs
         from the owner's current attested answer (both named), that answer is
-        no longer owner-attested, or (with `project`) the recorded inputs no
+        no longer owner-attested, or (with `project`) re-running the producer
+        on the project does not reproduce the recorded answer and record
+        (a forged record, a document added later), or the recorded inputs no
         longer hash to `inputs_sha256`.
 
     The remedy is always the producer, never a hand edit of the derived answer
@@ -1451,6 +1453,7 @@ def derived_answer_refusals(doc: Any, project: Optional[Path] = None,
                 key=key, field=field_path, producer=producer,
                 missing=missing, path=source or None))
             continue
+        before = len(out)
         for dep, recorded in sorted(rec[DERIVED_FROM_ATTESTED].items()):
             att = attestation_of(doc, dep)
             current = answer(doc, dep)
@@ -1473,19 +1476,59 @@ def derived_answer_refusals(doc: Any, project: Optional[Path] = None,
                     key=key, field=field_path, producer=producer,
                     depends_on=dep, recorded=recorded, attested=current,
                     path=source or None))
-        if project is not None:
-            now = derived_inputs_sha256(Path(project), rec[DERIVED_INPUTS])
-            if now != rec[DERIVED_INPUTS_SHA256]:
-                why = ("a recorded input cannot be read" if now is None else
-                       f"they hash to {now[:12]}, not the recorded "
-                       f"{rec[DERIVED_INPUTS_SHA256][:12]}")
-                out.append(_refusal(
-                    RULE_DERIVED_STALE,
-                    f"{where}derived answer `{field_path}` was rendered from "
-                    f"inputs {rec[DERIVED_INPUTS]} that have changed since "
-                    f"({why}). {remedy}",
-                    key=key, field=field_path, producer=producer,
-                    path=source or None))
+        if len(out) > before:
+            # the owner moved an answer: that named mismatch is the cause
+            continue
+        if project is None:
+            continue
+        now = derived_inputs_sha256(Path(project), rec[DERIVED_INPUTS])
+        if now != rec[DERIVED_INPUTS_SHA256]:
+            why = ("a recorded input cannot be read" if now is None else
+                   f"they hash to {now[:12]}, not the recorded "
+                   f"{rec[DERIVED_INPUTS_SHA256][:12]}")
+            out.append(_refusal(
+                RULE_DERIVED_STALE,
+                f"{where}derived answer `{field_path}` was rendered from "
+                f"inputs {rec[DERIVED_INPUTS]} that have changed since "
+                f"({why}). {remedy}",
+                key=key, field=field_path, producer=producer,
+                path=source or None))
+            continue
+        # THE PRODUCER IS RE-RUN, NOT BELIEVED (DELIVC final check,
+        # finding 1). The record above is self-declared: a hand-written
+        # answer can carry a copied record with the current deliverable
+        # and a real digest, and a design document added after the
+        # derivation is not among the recorded inputs at all. What the
+        # producer derives NOW from this project must be what is written.
+        import importlib
+        try:
+            mod = importlib.import_module(producer)
+            again = mod.rederive(Path(project), doc)
+        except Exception as exc:  # noqa: BLE001 — named, never a pass
+            again = {"refused": f"the producer could not be re-run: "
+                                f"{exc!r}"}
+        if "refused" in again:
+            out.append(_refusal(
+                RULE_DERIVED_STALE,
+                f"{where}derived answer `{field_path}`: re-running "
+                f"{producer} on this project now writes nothing "
+                f"({again['refused']}), so the recorded answer is not its "
+                f"output. {remedy}",
+                key=key, field=field_path, producer=producer,
+                path=source or None))
+            continue
+        differs = [name for name, now, was in (
+            ("answer", again["answer"], value),
+            ("provenance", again["provenance"], rec)) if now != was]
+        if differs:
+            out.append(_refusal(
+                RULE_DERIVED_STALE,
+                f"{where}derived answer `{field_path}`: re-running "
+                f"{producer} on this project gives a different "
+                f"{' and '.join(differs)} than the one recorded, so it is "
+                f"not (or no longer) that producer's output. {remedy}",
+                key=key, field=field_path, producer=producer,
+                differs=differs, path=source or None))
     return out
 
 
