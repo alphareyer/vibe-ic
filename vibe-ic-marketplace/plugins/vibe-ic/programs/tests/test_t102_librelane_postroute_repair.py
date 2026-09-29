@@ -323,7 +323,7 @@ def _impl_with(tmp_path, measurement, antenna=0):
     impl = tmp_path / 'impl'
     sta = put(tmp_path / 'sta/state_out.json', {'metrics': {}})
     put(impl / prr.CURRENT, {'candidate': None, 'measurement': dict(
-        measurement, antenna_nets=antenna, sta_state=str(sta),
+        measurement, drv_members=[], antenna_nets=antenna, sta_state=str(sta),
         sta_state_sha256=contract.digest(sta))})
     return impl, sta
 
@@ -401,7 +401,7 @@ def _def(extra_owned=True):
 SHIM = textwrap.dedent('''\
     """Test shim: the real program with only `run_chain` (the docker run of a
     LibreLane step) replaced by a writer of the folders a real run leaves."""
-    import json, os, sys
+    import json, os, sys, subprocess, signal
     from pathlib import Path
     sys.path.insert(0, os.environ["PRR_REAL_PROGRAMS"])
     import librelane_contract as ll
@@ -412,6 +412,23 @@ SHIM = textwrap.dedent('''\
     def run_chain(project, image, steps, *, mounts=None, lane=None, **kw):
         base = Path(project) / "phase3/librelane" / lane
         spec = SCENARIO[lane]
+        if spec.get("crash"):
+            crashed = subprocess.run([sys.executable, "-c",
+                "import os, signal, resource; "
+                "resource.setrlimit(resource.RLIMIT_CORE, (0, 0)); "
+                "os.kill(os.getpid(), signal.SIGSEGV)"])
+            assert crashed.returncode == -signal.SIGSEGV
+            log = base / "01-vibeic-postrouterepair/invocation.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text("OpenROAD: Signal 11 in rsz::Resizer::repairSetup\\n")
+            raise ll.Refusal("LL_STEP_FAILED", f"Vibeic.PostRouteRepair: rc={crashed.returncode}; {log}")
+        if spec.get("refuse"):
+            # The step's own measured "no": it prints its named refusal and
+            # exits 1, and run_chain books LL_STEP_FAILED (no signal).
+            log = base / "01-vibeic-postrouterepair/invocation.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text("[INFO] repair done\\n" + spec["refuse"] + "\\n")
+            raise ll.Refusal("LL_STEP_FAILED", f"Vibeic.PostRouteRepair: rc=1; {log}")
         folders = []
         for i, (step, cfg, state) in enumerate(steps, 1):
             folder = base / f"{i:02d}-{step.lower().replace('.', '-')}"
@@ -493,6 +510,7 @@ def _scenario_impl(tmp_path, baseline, candidates):
                             'measurement': dict(base_summary,
                                                 drv_pin_checks_state='PASS',
                                                 drv_pin_checks=base_pairs,
+                                                drv_members=base_pairs,
                                                 antenna_nets=0, antenna_pins=0,
                                                 sta_state=str(sta),
                                                 sta_state_sha256=contract.digest(sta))})
@@ -519,6 +537,188 @@ def _cand(setup, hold, drv=(0, 0, 0), *, changed=1, owned=True, antenna=0):
     return {'def': _def(owned), 'sta_metrics': _sta_metrics(setup, hold, drv),
             'antenna_metrics': _ant(antenna),
             'repair_metrics': {'vibeic__prr__changed': changed}}
+
+
+def _shim_close_arm(ns, monkeypatch):
+    """The SHIM's run_chain and native-scene writers, in-process, for a
+    direct `close_arm` call (the baseline census runs in this process)."""
+    import _native_postroute_timing as native
+    body = SHIM.replace('sys.path.insert(0, os.environ["PRR_REAL_PROGRAMS"])', '')
+    for line in ('ll.run_chain = run_chain\n', 'native.measure = native_scene\n',
+                 'sys.exit(prr.main())\n'):
+        assert line in body, line
+        body = body.replace(line, '')
+    exec(compile(body, 'shim', 'exec'), ns)
+    monkeypatch.setattr(contract, 'run_chain', ns['run_chain'])
+    monkeypatch.setattr(native, 'measure', ns['native_scene'])
+
+
+def test_native_signal_is_failed_and_retried_with_a_different_order(tmp_path, monkeypatch):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(1.0, 0.2, (0, 0, 3)),
+        candidates=[{'crash': True}])
+    scenario = json.loads((tmp_path / 'scenario.json').read_text())
+    scenario['32-cand01-retry'] = _cand(1.0, 0.2, (0, 0, 0))
+    put(tmp_path / 'scenario.json', scenario)
+    run = _controller(impl, arm, shim, monkeypatch, tmp_path).run_controller(
+        'postroute.repair_drv')
+    rows = json.loads((arm / prr.LEDGER).read_text())['candidates']
+    assert run.outcome is closure.Outcome.CONVERGED
+    assert len(run.iterations) == 1 and run.rolled_back == 0
+    assert rows[0]['decision'] == 'ACTUATOR_FAILED'
+    assert rows[0]['measurement_status'] == 'NOT_MEASURED'
+    assert 'Signal 11' in rows[0]['tool_crash_signature']
+    assert 'rc=-11' in rows[0]['reason']
+    assert rows[1]['move_sequence'] == 'hold_first'
+    assert rows[1]['config'] != rows[0]['config']
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] == '32-cand01-retry'
+
+
+def test_two_native_failures_are_not_a_measured_plateau(tmp_path, monkeypatch):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(1.0, 0.2, (0, 0, 3)), candidates=[{'crash': True}])
+    scenario = json.loads((tmp_path / 'scenario.json').read_text())
+    scenario['32-cand01-retry'] = {'crash': True}
+    put(tmp_path / 'scenario.json', scenario)
+    run = _controller(impl, arm, shim, monkeypatch, tmp_path).run_controller(
+        'postroute.repair_drv')
+    assert run.outcome is closure.Outcome.NOT_MEASURED
+    assert run.iterations[0].decision == 'ACTUATOR_FAILED'
+    assert run.rolled_back == 0 and run.promoted == 0
+    assert 'Signal 11' in json.loads((arm / prr.LEDGER).read_text())['candidates'][1]['tool_crash_signature']
+
+
+#: The plugin step's own named candidate refusals (postroute_repair.tcl): a
+#: measured tool "no" for THIS candidate, not a failed actuator.
+NAMED_REFUSALS = (
+    'VIBEIC_PRR_ECO_ROUTE_REFUSED: the scoped route added whole-design violations '
+    'on every attempt (3); the candidate is not written',
+    'VIBEIC_PRR_LOST_ROUTE_REFUSED: 2 signal net(s) the input had routed carry no '
+    'wire after the repair: [net1 net2]; the candidate is not written',
+    'LL_PRR_FANOUT_LIMIT_BROKEN: 1 net(s) over max_fanout 4 that became newly over '
+    'or worsened after repair_design: net7 5; the candidate is not written',
+    'VIBEIC_PRR_PLACEMENT_REFUSED: check_placement: DPL-0033; the candidate is '
+    'not written',
+)
+
+
+def test_every_check_placement_is_a_named_refusal():
+    """check_placement ends the step on an illegal placement; every call goes
+    through the step's own named refusal, so no tool error text has to be
+    read to tell a refused candidate from a crash."""
+    tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    calls = [line.strip() for line in tcl.splitlines()
+             if 'check_placement -verbose' in line
+             and not line.lstrip().startswith('#')]
+    assert len(calls) >= 3 and all(
+        c == 'if {[catch {check_placement -verbose} err]} {' for c in calls), calls
+    assert tcl.count('VIBEIC_PRR_PLACEMENT_REFUSED:') == len(calls)
+    assert 'VIBEIC_PRR_PLACEMENT_REFUSED:' in tcl
+    assert prr._STEP_REFUSAL.match('VIBEIC_PRR_PLACEMENT_REFUSED: check_placement: x')
+
+
+@pytest.mark.parametrize('line', NAMED_REFUSALS)
+def test_a_named_step_refusal_keeps_the_pointer_and_the_ladder_goes_on(
+        tmp_path, monkeypatch, line):
+    """U7 wave 57 (1): a refusal the step prints by name (DRT-0712 scoped
+    route, lost route, fanout limit, check_placement) is TOOL_REFUSED with rc 0:
+    the pointer stays and the controller tries its next declared rung. Only a
+    native failure is ACTUATOR_FAILED / NOT_MEASURED."""
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(-0.5, 0.2),
+        candidates=[{'refuse': line}, _cand(0.1, 0.2)])
+    run = _controller(impl, arm, shim, monkeypatch, tmp_path).run_controller(
+        'postroute.repair_setup')
+    rows = json.loads((arm / prr.LEDGER).read_text())['candidates']
+    assert [r['candidate'] for r in rows] == ['32-cand01', '32-cand02']
+    assert rows[0]['decision'] == 'TOOL_REFUSED'
+    assert rows[0]['measurement_status'] == 'MEASURED'
+    assert rows[0]['tool_refusal'] == line
+    assert rows[0].get('tool_crash_signature') is None
+    assert 'move_sequence' not in rows[1], 'a named refusal is not retried'
+    assert [it.decision for it in run.iterations] == ['ROLLED_BACK', 'PROMOTED']
+    assert run.outcome is closure.Outcome.CONVERGED
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] == '32-cand02'
+
+
+def test_a_crash_signature_outranks_a_refusal_line(tmp_path, monkeypatch):
+    """A log that carries a signal line is a native failure even when a
+    refusal line precedes it: the crash is what ended the step."""
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(-0.5, 0.2),
+        candidates=[{'refuse': NAMED_REFUSALS[0] +
+                     '\nOpenROAD: Signal 11 in rsz::Resizer::repairSetup'}])
+    scenario = json.loads((tmp_path / 'scenario.json').read_text())
+    scenario['32-cand01-retry'] = {'crash': True}
+    put(tmp_path / 'scenario.json', scenario)
+    run = _controller(impl, arm, shim, monkeypatch, tmp_path).run_controller(
+        'postroute.repair_setup')
+    rows = json.loads((arm / prr.LEDGER).read_text())['candidates']
+    assert rows[0]['decision'] == 'ACTUATOR_FAILED'
+    assert 'Signal 11' in rows[0]['tool_crash_signature']
+    assert rows[1]['move_sequence'] == 'hold_first'
+    assert run.outcome is closure.Outcome.NOT_MEASURED
+
+
+def test_close_arm_binds_each_row_to_its_own_controller(tmp_path, monkeypatch):
+    """U7 wave 57 (2): the first controller ends ACTUATOR_FAILED (both the
+    candidate and its retry crash); the second promotes. The adopted row is the
+    second controller's PROMOTED row, never the first one's ACTUATOR_FAILED."""
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(-0.5, -0.1), candidates=[{'crash': True}])
+    scenario = json.loads((tmp_path / 'scenario.json').read_text())
+    scenario['32-base'] = _cand(-0.5, -0.1, changed=0)
+    scenario['32-cand01-retry'] = {'crash': True}
+    scenario['32-cand03'] = _cand(-0.5, 0.1)
+    put(tmp_path / 'scenario.json', scenario)
+    monkeypatch.setenv('PRR_REAL_PROGRAMS', str(PROGRAMS))
+    monkeypatch.setenv('PRR_SCENARIO', str(tmp_path / 'scenario.json'))
+    ns = {}
+    _shim_close_arm(ns, monkeypatch)
+    ctx = json.loads((impl / prr.CONTEXT).read_text())
+    state0 = Path(json.loads((impl / prr.CURRENT).read_text())['repair_input'])
+    report = prr.close_arm(project, 'librelane', state0, image='img', pdk='pdk',
+                           configs={k: Path(v) for k, v in ctx['configs'].items()},
+                           corners=CORNERS, mounts=[], programs_dir=shim,
+                           derate=(0.95, 1.05),
+                           controllers=('postroute.repair_setup',
+                                        'postroute.repair_hold'))
+    assert report['adopted'] == '32-cand03'
+    rows = {r['candidate']: r for r in report['candidates']}
+    assert set(rows) == {'32-cand01', '32-cand01-retry', '32-cand03'}
+    for lane in ('32-cand01', '32-cand01-retry'):
+        assert rows[lane]['controller'] == 'postroute.repair_setup'
+        assert rows[lane]['closure_decision'] == 'ACTUATOR_FAILED'
+    assert rows['32-cand03']['controller'] == 'postroute.repair_hold'
+    assert rows['32-cand03']['closure_decision'] == 'PROMOTED'
+    setup_run, hold_run = report['closure']
+    assert [r['candidate'] for r in setup_run['refused_candidates']] == [
+        '32-cand01', '32-cand01-retry']
+    assert hold_run['refused_candidates'] == []
+
+
+def test_closure_discloses_a_refused_candidates_measured_nine(tmp_path, monkeypatch):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(1.0, 0.2, (0, 0, 36)),
+        candidates=[_cand(1.0, 0.2, (0, 0, 9), antenna=1)])
+    scenario = json.loads((tmp_path / 'scenario.json').read_text())
+    scenario['32-base'] = _cand(1.0, 0.2, (0, 0, 36), changed=0)
+    put(tmp_path / 'scenario.json', scenario)
+    monkeypatch.setenv('PRR_REAL_PROGRAMS', str(PROGRAMS))
+    monkeypatch.setenv('PRR_SCENARIO', str(tmp_path / 'scenario.json'))
+    ns = {}
+    _shim_close_arm(ns, monkeypatch)
+    ctx = json.loads((impl / prr.CONTEXT).read_text())
+    state0 = Path(json.loads((impl / prr.CURRENT).read_text())['repair_input'])
+    report = prr.close_arm(project, 'librelane', state0, image='img', pdk='pdk',
+                           configs={k: Path(v) for k, v in ctx['configs'].items()},
+                           corners=CORNERS, mounts=[], programs_dir=shim,
+                           derate=(0.95, 1.05),
+                           controllers=('postroute.repair_drv',))
+    refused = report['closure'][0]['refused_candidates'][0]
+    assert refused['measured']['drv_count'] == 9
+    assert refused['retained']['drv_count'] == 36
+    assert refused['decision'] == 'ROLLED_BACK'
 
 
 def _with_floors(impl, floors):
@@ -920,7 +1120,8 @@ def test_every_variable_the_script_reads_is_declared_by_the_step():
     src = (STEP_DIR / 'postroute_repair.py').read_text()
     declared = set(re.findall(r'"(VIBEIC_PRR_[A-Z_]+)"', src))
     used = {v for v in _tcl_env_vars() if not v.endswith(('_TOOL_INCAPABLE', '_EXTRACTION_FAILED',
-                                                           '_CORNER_UNANNOTATED', '_ROUTE_REFUSED'))}
+                                                           '_CORNER_UNANNOTATED', '_ROUTE_REFUSED',
+                                                           '_PLACEMENT_REFUSED'))}
     assert used <= declared, sorted(used - declared)
     assert set(prr.PARAM_VARS.values()) <= declared
 
