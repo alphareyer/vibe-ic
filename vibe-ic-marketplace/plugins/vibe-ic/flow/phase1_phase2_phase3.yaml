@@ -5213,6 +5213,10 @@ steps:
     mcp_tools: [eda_pnr]
     programs:
       - cts_quality_check
+      # Audit of the OWN_NECESSARY retap sub-step (TOOL_DUPLICATION_AUDIT
+      # §5.2): every retained retap re-decided from its printed numbers and
+      # matched to the netlist change it made (R-0929-TOOL-DEFAULT).
+      - retap_audit_check
     required_outputs:
       - "phase3/stage3/pnr/post_cts.def"
       - "phase3/stage3/cts/clock_tree.rpt"
@@ -5228,6 +5232,17 @@ steps:
         # the report/clock_plan states one. FAILs on the vacuous "CTS not
         # invoked" stub or zero buffers; never fabricates a skew limit.
         - program_exit_zero: "cts_quality_check . --json reports/phase3/gates/cts_quality.json"
+        - optional_program_exit_zero:
+            command: "retap_audit_check . --json reports/phase3/gates/retap_audit.json"
+            condition_files_exist: ["reports/phase3/librelane_cts_hold_handoff.json"]
+            absent_condition_reason: >-
+              The retap step exists only in step 19's LibreLane chain, whose
+              handoff receipt this is; a run whose step 19 ran the direct deck
+              has no retap step and nothing for this audit to read. A run that
+              DID take the LibreLane chain always writes the receipt, so the
+              clause cannot be silenced on the runs it is about; with the
+              receipt present, a missing retap step or log is NOT_MEASURED
+              (rc 2), never PASS.
     blocks_on: [18]
 
   - id: 20
