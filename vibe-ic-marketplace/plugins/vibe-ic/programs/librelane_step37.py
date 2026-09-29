@@ -246,7 +246,7 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
                "canonical": str(canonical_gds), "canonical_sha256": digest(canonical_gds)})
     # The winner's per-layer density travels with the result, NOT published
     # here: in `dual` the runner may still ship the direct stream. The runner
-    # publishes it once the shipped bytes are decided (`_publish_shipped_density`).
+    # publishes it once the shipped bytes are decided (in `step_gds`, after the selection).
     return {"engine": winner, "gds": canonical_gds, "drc": counts,
             "state": final_states[winner],
             "density_ratios": density_ratios[winner],
