@@ -210,6 +210,11 @@ def main(argv: List[str] | None = None) -> int:
                         "record). measured:false with a hard class FAILs; an "
                         "absent record is UNMEASURED — reported as INCOMPLETE "
                         "at rc 0, which is not a PASS and not a FAIL.")
+    p.add_argument("--pnr-netlist", action="store_true",
+                   help="Check the technology-MAPPED synthesis netlist PnR "
+                        "routes (named by phase 3 step_synth's "
+                        "synth_inputs.json) as the FIRST output; the first "
+                        "--tool pairs with it.")
     p.add_argument("--json", help="Write JSON report to this path")
     args = p.parse_args(argv)
 
@@ -218,6 +223,25 @@ def main(argv: List[str] | None = None) -> int:
         print(f"provenance_check: not a directory: {project}",
               file=sys.stderr)
         return 2
+
+    if args.pnr_netlist:
+        # The generic pre-map netlist.v is not what PnR routes; its entry in
+        # provenance.jsonl says nothing about the mapped netlist (U11).
+        import _path_layout as _pl  # noqa: PLC0415
+        mapped = _pl.mapped_synth_netlist(project)
+        if mapped is None:
+            report = {"project": str(project), "verdict": "NOT_MEASURED",
+                      "reason_class": "ASKED_BEFORE_PRODUCER",
+                      "reason": ("no mapped synthesis netlist named by "
+                                 f"{_pl.SYNTH_INPUTS_SIDECAR}: phase 3's "
+                                 "step_synth has not produced the netlist "
+                                 "PnR routes")}
+            if args.json:
+                Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.json).write_text(json.dumps(report, indent=2))
+            print(f"provenance_check: NOT_MEASURED — {report['reason']}")
+            return 2
+        args.output.insert(0, str(mapped.relative_to(project)))
 
     entries = _load_log(project)
 
@@ -248,6 +272,22 @@ def main(argv: List[str] | None = None) -> int:
         print("provenance_check: nothing to check; pass --output/--tool "
               "or --require-entries", file=sys.stderr)
         return 2
+
+    # Step 9's clause names the declared GENERIC arm `<synth>/netlist.v`. The
+    # netlist PnR routes is the MAPPED arm beside it; when it exists its
+    # provenance is required too, under the same tools (U11).
+    try:
+        import _path_layout as _pl  # noqa: PLC0415
+        _generic = str(_pl.synth_dir(project).relative_to(project) / "netlist.v")
+        _mapped = _pl.mapped_synth_netlist(project)
+    except (ImportError, ValueError, OSError):
+        _generic, _mapped = None, None
+    if _mapped is not None and _generic in args.output:
+        _mrel = str(_mapped.relative_to(project))
+        if _mrel not in args.output:
+            args.output.append(_mrel)
+            args.tool.append(args.tool[args.output.index(_generic)])
+            report["pnr_netlist_companion"] = _mrel
 
     overall_ok = True
     #: Artefacts whose bound run states nothing about whether it measured. They

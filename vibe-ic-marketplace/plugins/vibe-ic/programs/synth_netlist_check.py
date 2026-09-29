@@ -171,7 +171,19 @@ def count_cell_instances(netlist_text: str) -> Tuple[int, Dict[str, int]]:
 # Sequential-cell fingerprint: yosys `$_DFF_*_` / `$_SDFF*_` / `$_DLATCH*_`
 # primitives and PDK flop/latch cell names (…dfxtp…, …sdf…, …latch…).
 # chip-AGNOSTIC: structural cell-family vocabulary, not a chip class.
-_SEQ_CELL_RE = re.compile(r"(?i)(?:\$_S?DFF|\$_DLATCH|\$_SR|dff|sdf|latch)")
+_SEQ_CELL_RE = re.compile(
+    r"(?i)(?:\$_S?DFF|\$_ALDFF|\$_DLATCH|\$_SR|dff|sdf|latch)")
+
+
+def sequential_cell_count(cell_counts: Dict[str, int]) -> int:
+    """Flops + latches in a cell census, generic (`$_DFF_P_`) or mapped."""
+    return sum(c for t, c in cell_counts.items() if _SEQ_CELL_RE.search(t))
+
+
+def is_generic_only(cell_counts: Dict[str, int]) -> bool:
+    """Every cell a yosys `$_*_` primitive: a netlist no library can place."""
+    return bool(cell_counts) and all(
+        t.lstrip("\\").startswith("$_") for t in cell_counts)
 
 # RTL register declaration: `reg [h:l] name` / `reg name` (also `logic`).
 _RTL_REG_DECL_RE = re.compile(
@@ -313,6 +325,10 @@ def audit_netlist(
     stats["total_cells"] = total_cells
     stats["unique_cell_types"] = len(cell_counts)
     stats["cell_type_counts"] = cell_counts
+    # Counted for EVERY netlist, not only on the tiny-design branch below:
+    # spm v5c's 449-cell netlist carried 65 `$_DFF_P_` and reported
+    # `sequential_cells: 0` because only that branch ever filled it in.
+    stats["sequential_cells"] = sequential_cell_count(cell_counts)
 
     if total_cells == 0:
         # v1.6.194 (#81 P1) — detect yosys expression-form output.
@@ -357,9 +373,7 @@ def audit_netlist(
         # design, so a flat-count ERROR is unactionable; vouch structurally
         # first, hard-fail only on the real stub signatures, and otherwise
         # disclose as a WARNING.
-        seq_cells = sum(c for t, c in cell_counts.items()
-                        if _SEQ_CELL_RE.search(t))
-        stats["sequential_cells"] = seq_cells
+        seq_cells = stats["sequential_cells"]
         const_outs = _outputs_tied_constant(text)
         stats["outputs_tied_constant"] = const_outs
         rtl_bits = None
@@ -960,12 +974,63 @@ def build_report(findings: List[Finding], stats: dict,
     }
 
 
+def _generic_finding(cell_counts: Dict[str, int]) -> "Finding":
+    return Finding(
+        severity="ERROR", category="GENERIC_UNMAPPED_NETLIST",
+        message=("the netlist PnR routes holds only yosys `$_*_` primitives "
+                 "(%s) -- no standard cell, so it was never "
+                 "technology-mapped" % ", ".join(sorted(cell_counts)[:8])))
+
+
+def pnr_companion(netlist_path: Path, min_cells: int) -> Optional[dict]:
+    """Step 9's clause names the declared GENERIC arm, `<synth>/netlist.v`.
+    The netlist PnR routes is the MAPPED arm phase 3's step_synth writes
+    beside it (`_path_layout.mapped_synth_netlist`). When that exists, it is
+    audited too, as the PnR subject: a `$_*_`-only one FAILs, and an empty or
+    module-less one FAILs as it would on its own (U11).
+
+    Structure only -- the RTL-staleness guard is NOT applied here, so a
+    phase-2 re-run that meets a previous run's mapped arm is not refused for
+    a netlist phase 3 is about to rebuild. None when `netlist_path` is not a
+    project's declared step-9 netlist or no mapped arm exists."""
+    try:
+        import _path_layout as _pl  # noqa: PLC0415
+        nl = netlist_path.resolve()
+        project = nl.parents[3]
+        if _pl.synth_dir(project).resolve() != nl.parent or nl.name != "netlist.v":
+            return None
+        mapped = _pl.mapped_synth_netlist(project)
+    except (IndexError, OSError, ImportError):
+        return None
+    if mapped is None or mapped.resolve() == nl:
+        return None
+    m_findings, m_stats = audit_netlist(mapped, min_cells, [])
+    out = [Finding(severity=f.severity, category="PNR_NETLIST_" + f.category,
+                   message=f"{mapped.name}: {f.message}", details=f.details)
+           for f in m_findings if f.severity == "ERROR"]
+    if is_generic_only(m_stats.get("cell_type_counts") or {}):
+        out.append(_generic_finding(m_stats["cell_type_counts"]))
+    return {"_findings": out, "netlist": str(mapped),
+            "netlist_role": "pnr_consumed_mapped",
+            "total_cells": m_stats.get("total_cells"),
+            "sequential_cells": m_stats.get("sequential_cells"),
+            "unique_cell_types": m_stats.get("unique_cell_types"),
+            "generic_only": is_generic_only(m_stats.get("cell_type_counts") or {}),
+            "error_count": len(out)}
+
+
 def main(argv: list = None) -> int:
     parser = argparse.ArgumentParser(
         description="Verify synthesis netlist exists and has reasonable cell count"
     )
-    parser.add_argument('--netlist', required=True,
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument('--netlist',
                         help="Path to synthesized Verilog netlist")
+    target.add_argument('--pnr-netlist', metavar='PROJECT',
+                        help="Audit the technology-MAPPED netlist PnR routes "
+                             "(named by phase 3 step_synth's synth_inputs.json), "
+                             "not the generic pre-map netlist.v. A netlist of "
+                             "only `$_*_` primitives FAILs here.")
     parser.add_argument('--min-cells', type=int, default=10,
                         help="Advisory cell-count floor (default: 10)")
     parser.add_argument('--rtl', nargs='*', default=[],
@@ -979,9 +1044,74 @@ def main(argv: list = None) -> int:
                         help="Output JSON report path")
     args = parser.parse_args(argv)
 
-    netlist_path = Path(args.netlist)
+    pnr_role: Optional[dict] = None
+    if args.pnr_netlist is not None:
+        import _path_layout as _pl  # noqa: PLC0415
+        project = Path(args.pnr_netlist)
+        mapped = _pl.mapped_synth_netlist(project)
+        sidecar = _pl.synth_dir(project) / _pl.SYNTH_INPUTS_SIDECAR
+        try:
+            sidecar_rel = str(sidecar.relative_to(project))
+        except ValueError:
+            sidecar_rel = str(sidecar)
+        if mapped is None:
+            report = {
+                "program": "synth_netlist_check", "version": "1.2.0",
+                "netlist": None, "netlist_role": "pnr_consumed_mapped",
+                "verdict": "NOT_MEASURED",
+                "reason_class": "ASKED_BEFORE_PRODUCER",
+                "reason": (
+                    "no mapped synthesis netlist: %s names none that exists. "
+                    "Phase 3's step_synth writes the netlist PnR routes and "
+                    "that sidecar; the generic pre-map netlist.v is not it."
+                    % sidecar_rel),
+            }
+            out = json.dumps(report, indent=2, ensure_ascii=False)
+            if args.json:
+                Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.json).write_text(out)
+            print(out)
+            return 2
+        log = mapped.parent / "synth.log"
+        pnr_role = {"netlist_role": "pnr_consumed_mapped",
+                    "resolved_from": sidecar_rel,
+                    "synth_log": str(log) if log.is_file() else None}
+        netlist_path = mapped
+    else:
+        netlist_path = Path(args.netlist)
     findings, stats = audit_netlist(netlist_path, args.min_cells,
                                     [Path(p) for p in args.rtl])
+    if pnr_role is not None and is_generic_only(stats.get("cell_type_counts") or {}):
+        findings.append(_generic_finding(stats["cell_type_counts"]))
+    companion = (pnr_companion(netlist_path, args.min_cells)
+                 if pnr_role is None else None)
+    if companion is not None:
+        c_findings = companion.pop("_findings")
+        # DISCLOSED, NOT BLOCKING, when the mapped arm cannot be this run's:
+        # (a) `--rtl` given -- phase 2's own producer self-check
+        #     (design_one_shot_runner.step_yosys_synth), which runs BEFORE
+        #     phase 3 rebuilds the mapped arm, so any mapped arm it meets is a
+        #     previous run's; blocking on it would stop the only producer
+        #     that can replace it;
+        # (b) the mapped arm is OLDER than the netlist under audit -- phase 3
+        #     writes it after phase 2, so an older one predates this synthesis.
+        why = None
+        if args.rtl:
+            why = ("phase-2 producer self-check (--rtl given): the mapped arm "
+                   "is a previous run's until phase 3 rebuilds it")
+        else:
+            try:
+                if Path(companion["netlist"]).stat().st_mtime < netlist_path.stat().st_mtime:
+                    why = ("the mapped arm is OLDER than %s, so it predates "
+                           "this synthesis" % netlist_path.name)
+            except OSError:
+                pass
+        companion["blocking"] = why is None
+        if why is None:
+            findings.extend(c_findings)
+        else:
+            companion["not_blocking_because"] = why
+            companion["findings"] = [asdict(f) for f in c_findings]
 
     # Step 9's OTHER declared artefact. Only meaningful once the netlist is
     # readable — the area accounting is a claim ABOUT the netlist, so an
@@ -1010,6 +1140,10 @@ def main(argv: list = None) -> int:
         stats["cell_census"] = census_info
 
     report = build_report(findings, stats, str(netlist_path), args.min_cells)
+    if pnr_role is not None:
+        report.update(pnr_role)
+    if companion is not None:
+        report["pnr_netlist"] = companion
     report_json = json.dumps(report, indent=2, ensure_ascii=False)
 
     if args.json:

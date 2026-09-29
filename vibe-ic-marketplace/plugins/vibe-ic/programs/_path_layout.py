@@ -291,6 +291,39 @@ def synth_dir(project: Path) -> Path:
     return project / "phase2/stage2/synth"
 
 
+#: Written by phase 3's `step_synth` beside the netlist it mapped
+#: (`_write_synth_inputs_sidecar`): `{"netlist": "<top>_synth.v", ...}`.
+SYNTH_INPUTS_SIDECAR = "synth_inputs.json"
+
+
+def mapped_synth_netlist(project: Path) -> Optional[Path]:
+    """The technology-MAPPED synthesis netlist -- the one PnR routes.
+
+    Step 9 declares `netlist.v`, the GENERIC pre-map arm (`$_*_` primitives,
+    kept for LEC). The netlist `pnr_input_netlist` hands to PnR is the mapped
+    `<top>_synth.v` phase 3's `step_synth` writes into the same directory, and
+    that step names it in `synth_inputs.json`. The name comes from there;
+    when the sidecar is absent or unreadable (step_synth writes it best-effort)
+    the directory's ONE `*_synth.v` is it. None when neither names an existing
+    file inside the synthesis directory -- i.e. the mapped arm was not
+    produced -- or when several `*_synth.v` leave it ambiguous."""
+    import json
+
+    d = synth_dir(project)
+    try:
+        rec = json.loads((d / SYNTH_INPUTS_SIDECAR).read_text())
+    except (OSError, ValueError):
+        rec = None
+    if isinstance(rec, dict):
+        name = rec.get("netlist")
+        if not isinstance(name, str) or not name or Path(name).name != name:
+            return None
+        path = d / name
+        return path if path.is_file() else None
+    found = sorted(p for p in d.glob("*_synth.v") if p.is_file()) if d.is_dir() else []
+    return found[0] if len(found) == 1 else None
+
+
 def phase2_synth_input_identity(project: Path):
     """Content identity of Phase 2's canonical netlist consumed by Phase 3.
 

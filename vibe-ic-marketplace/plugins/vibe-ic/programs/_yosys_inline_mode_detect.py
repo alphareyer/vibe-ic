@@ -205,6 +205,50 @@ def extract_inline_yosys_commands(project: Path) -> List[Tuple[str, str]]:
     return out
 
 
+_WRITE_VERILOG_RE = re.compile(r"\bwrite_verilog\b([^;]*)")
+
+
+def writes_netlist(cmd: str, netlist_name: str) -> bool:
+    """Does this yosys command `write_verilog` a file named `netlist_name`?
+    The target is the clause's last token; only its basename is compared."""
+    for m in _WRITE_VERILOG_RE.finditer(cmd):
+        toks = m.group(1).split()
+        if toks and Path(toks[-1].strip("'\"")).name == netlist_name:
+            return True
+    return False
+
+
+def _producer_of(project: Path, netlist: Path) -> str:
+    """Who provenance.jsonl says produced `netlist` (latest record), or a
+    sentence saying no record names it."""
+    import json as _json
+    try:
+        rel = str(netlist.relative_to(project))
+    except ValueError:
+        rel = str(netlist)
+    who = None
+    try:
+        for line in (project / "provenance.jsonl").read_text().splitlines():
+            try:
+                e = _json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(e, dict) and rel in (e.get("outputs") or {}):
+                who = e.get("produced_by") or e.get("tool") or who
+    except OSError:
+        pass
+    return who or "a producer no provenance.jsonl record names"
+
+
+def _pnr_netlist(project: Path) -> Optional[Path]:
+    """The mapped netlist PnR routes (`_path_layout.mapped_synth_netlist`)."""
+    try:
+        import _path_layout as _pl  # noqa: PLC0415
+    except Exception:  # pragma: no cover - incomplete install
+        return None
+    return _pl.mapped_synth_netlist(project)
+
+
 def check_inline_command_conformance(
     cmd: str,
 ) -> Tuple[bool, str, List[str]]:
@@ -268,6 +312,38 @@ def audit_inline_yosys(project: Path) -> Tuple[str, List[str], List[str]]:
     chip-AGNOSTIC.
     """
     cmds = extract_inline_yosys_commands(project)
+    # THE NETLIST PnR ROUTES decides which command is judged (U11). spm v5c's
+    # step-14 gates read the simulation-only synth that wrote the generic
+    # netlist.v and reported VACUOUS_PASS; the command that wrote the mapped
+    # `<top>_synth.v` PnR consumed was never the subject.
+    mapped = _pnr_netlist(project)
+    if mapped is not None:
+        own = [(rel, cmd) for rel, cmd in cmds
+               if writes_netlist(cmd, mapped.name)]
+        if not own:
+            # NOT a FAIL by that fact alone. The LibreLane step-9 arm writes
+            # the mapped netlist from LibreLane's own synthesis script (its
+            # transcript stays under phase3/librelane/, and its in-step
+            # YosysUnmappedCells / YosysSynthChecks gate it), so no phase log
+            # echoes a `write_verilog` for it. The recipe was not READ here,
+            # which is NOT_MEASURED, naming who produced the netlist.
+            return "NOT_MEASURED", [], [
+                "the netlist PnR routes (%s) was written by %s, and no synth "
+                "log this gate reads echoes the command that wrote it, so its "
+                "hilomap/flatten recipe was not judged here"
+                % (mapped.name, _producer_of(project, mapped))]
+        reasons: List[str] = []
+        for rel, cmd in own:
+            passed, classification, sub_reasons = \
+                check_inline_command_conformance(cmd)
+            if classification != "real_pdk":
+                reasons.append(
+                    "%s: the command that wrote %s binds no Liberty library "
+                    "-- the netlist PnR routes was never mapped to cells"
+                    % (rel, mapped.name))
+            reasons.extend("%s: %s" % (rel, r) for r in sub_reasons)
+        return ("FAIL" if reasons else "PASS",
+                sorted({rel for rel, _ in own}), reasons)
     if not cmds:
         return "NO_INLINE_COMMAND", [], []
 
@@ -337,6 +413,16 @@ def resolve_no_ys_script(project: Path) -> Tuple[int, dict]:
         was echoed at all; a non-Yosys flow (Genus/DC) is legitimate here.
     """
     verdict, evidence_logs, reasons = audit_inline_yosys(project)
+    if verdict == "NOT_MEASURED":
+        return 2, {
+            "verdict": "NOT_MEASURED",
+            # 0 of 1 recipes judged: the INCOMPLETE tier, never a PASS and
+            # never a design FAIL.
+            "reason_class": "ZERO_DENOMINATOR",
+            "reason": reasons[0],
+            "inline_evidence": [],
+            "messages": list(reasons),
+        }
     if verdict == "FAIL":
         return 1, {
             "verdict": "FAIL",
