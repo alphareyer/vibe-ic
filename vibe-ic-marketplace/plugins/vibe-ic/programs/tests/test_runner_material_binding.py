@@ -175,3 +175,19 @@ def test_population_changed_during_freeze_cannot_be_issued(tmp_path, monkeypatch
     monkeypatch.setattr(bd, "_archive_candidate", archive)
     with pytest.raises(ValueError, match="frozen RTL population/content"):
         _freeze(tmp_path, project, process, got)
+
+
+@pytest.mark.parametrize("failure", ["signal", "traceback"])
+def test_fresh_report_cannot_authorize_a_killed_or_crashed_worker(tmp_path, failure):
+    project, _, argv = _invoke(tmp_path)
+    runner = Path(argv[1])
+    source = runner.read_text().replace("print('bounded neutral rc1', file=sys.stderr)", "")
+    termination = ("import os, signal; os.kill(os.getpid(), signal.SIGTERM)"
+                   if failure == "signal" else "raise RuntimeError('neutral worker failure')")
+    runner.write_text(source.replace("raise SystemExit(1)", termination))
+    process = bd._RunnerBudget(1, 1, 0).run(argv)
+    assert process.rc == (-15 if failure == "signal" else 1)
+    assert process.error.startswith("RUNNER_WORKER_FAILED:")
+    got = bd._collect_runner_result(process, argv, "neutral", "neutral", project)
+    assert got["ok"] is False and "completion" not in got
+    assert got["reason"].startswith("RUNNER_WORKER_FAILED:")

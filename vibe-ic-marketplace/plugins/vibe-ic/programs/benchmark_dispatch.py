@@ -604,9 +604,15 @@ class _RunnerBudget:
         stderr = stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr
         fresh = [name for name, record in after.items()
                  if record["valid"] and record != before.get(name)]
-        if error is None and not fresh:
-            error = _runner_terminal_error(rc, stdout or "", stderr or "")
-            if project and error is None and rc not in (0, 1):
+        if error is None:
+            terminal_error = _runner_terminal_error(rc, stdout or "", stderr or "")
+            # A killed/crashed worker cannot complete a gate. Fresh bounded
+            # handoff reports remain usable; a process failure is different.
+            if terminal_error and terminal_error.startswith("RUNNER_WORKER_FAILED:"):
+                error = terminal_error
+            elif not fresh:
+                error = terminal_error
+            if project and not fresh and error is None and rc not in (0, 1):
                 error = f"RUNNER_INVOCATION_NOT_MEASURED: exit {rc} published no fresh runner report"
         receipt_path = receipt_sha256 = invocation = None
         if project:
