@@ -179,7 +179,7 @@ def _run(project, docker, state, *steps, lane="l"):
     return ll.run_chain(project, "img",
                         [(step, _config(project, step, **extra), state)
                          for step, extra in steps],
-                        docker=str(docker), lane=lane)
+                        docker=str(docker), lane=lane, pdk_root=ll.PDK_GUEST_ROOT)
 
 
 pytestmark = pytest.mark.skipif(TCLSH is None, reason="tclsh absent")
