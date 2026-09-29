@@ -12754,11 +12754,11 @@ def _advisory_population_reasons(reasons: List[str]) -> List[str]:
     for hint in reasons:
         cmd = _reason_names_command(hint)
         rec = eligible.get(cmd)
-        if rec and rec["enforcement"] == "BLOCKING":
-            if hint.startswith(_RAN_HINT_PREFIX):
-                # This is a disclosed advisory FAIL, not the blocking
-                # examination that can take #901 out of unanimity.
-                continue
+        if (rec and rec["enforcement"] == "BLOCKING"
+                and hint.startswith(_RAN_HINT_PREFIX)):
+            # This is a disclosed advisory FAIL, not the blocking
+            # examination that can take #901 out of unanimity.
+            continue
         if (rec and rec["enforcement"] == "DISCLOSED_INCOMPLETE"
                 and hint.startswith(_INCOMPLETE_HINT_PREFIX)):
             # The structured vacuity channel cannot pre-empt STRUCTURE_ONLY.
@@ -17290,6 +17290,9 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             except (TypeError, ValueError):
                 rec = None
             if isinstance(rec, dict):
+                # This is an internal population decision. Preserve #1980's
+                # public lossless receipt schema exactly.
+                rec.pop("nonblocking_by_two_sources", None)
                 result.advisory_gate_records.append(rec)
         # W4 — a clause whose `condition_files_exist` matched nothing, which
         # therefore ran no program and concluded nothing, and which DECLARED
