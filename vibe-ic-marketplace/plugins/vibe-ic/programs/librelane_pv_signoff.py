@@ -313,14 +313,38 @@ STATE_KEYS: dict[str, tuple[str, str]] = {
 }
 
 
-def state_metric(project: Path, key: str) -> dict[str, Any] | None:
+def state_metric(project: Path, key: str, *, current: bool = False) -> dict[str, Any] | None:
     """The 37.4 row for ``key`` when its step runs on LibreLane, else None.
 
     None means "not this module's key in this run": the direct aggregator rule
     answers.  A switch that cannot be read is an answer (NOT_MEASURED), never a
     silent fall back to the direct reports.
+
+    ``current=True`` is the release consumer: readable receipt/input/config/
+    image/PDK and selected finished-GDS bindings are required. The default
+    retains the producer's staging/State assembly API, which is not signoff.
     """
     from librelane_contract import selected_mode
+    if current:
+        import librelane_signoff_evidence as native
+        if key == 'antenna__violation__count' and native.tool_selected(project, '26'):
+            measured = native.obligation(project, 'antenna')
+            # Net, pin and GDS-model counts are independent populations.
+            # Their scalar union requires the root-owned producer API decision.
+            return {'value': NOT_MEASURED,
+                    'record': 'reports/phase3/antenna_librelane.json',
+                    'reason': f"native antenna {measured['verdict']}: {measured['reason']}; "
+                              'no accepted producer-owned total across the independent models'}
+        final_drc = (any(key in keys for keys in native.COUNTS['drc'].values())
+                     and native.tool_selected(project, '37'))
+        density = (key == 'klayout__density_error__count'
+                   and (native.tool_selected(project, '34') or native.tool_selected(project, '37')))
+        if final_drc or density:
+            measured = native.obligation(project, 'density' if density else 'drc')
+            row = measured.get('rows', {}).get(key)
+            if row is None:
+                return {'value': NOT_MEASURED, 'reason': measured['reason']}
+            return dict(row, source=str(_rel(project, Path(row['source'])))) if row.get('source') else row
     if key not in STATE_KEYS:
         return None
     step, rel = STATE_KEYS[key]
@@ -330,6 +354,15 @@ def state_metric(project: Path, key: str) -> dict[str, Any] | None:
         return {'value': NOT_MEASURED, 'reason': f'step {step}: {exc}'}
     if mode != 'librelane':
         return None
+    if current:
+        import librelane_signoff_evidence as native
+        kind = 'lvs' if rel == RECORD_REL.format(half='lvs') else 'drc'
+        measured = native.obligation(project, kind)
+        row = (measured or {}).get('rows', {}).get(key)
+        if row is None:
+            return {'value': NOT_MEASURED, 'reason': (measured or {}).get(
+                'reason', f'current producer missing for {key}')}
+        return dict(row, source=str(_rel(project, Path(row['source'])))) if row.get('source') else row
     row = state_metrics(project, [project / rel]).get(key)
     if row is None:
         return {'value': NOT_MEASURED,
