@@ -234,8 +234,9 @@ def test_a_tool_run_is_supervised_by_progress_with_a_recorded_budget(monkeypatch
     assert cmd[:3] == ["docker", "run", "--rm"]
     name = cmd[cmd.index("--name") + 1]
     assert name.startswith("vibeic_p0_yosys")
-    # The EDA tool is the entrypoint; no clock wrapper can stop a live run.
-    assert cmd[cmd.index("--entrypoint") + 1] == "yosys"
+    # The image bridge retains its entrypoint and forwards the exact tool args.
+    assert "--entrypoint" not in cmd
+    assert cmd[-5:] == ["img@sha256:" + "0" * 64, "--skip", "yosys", "-p", "x"]
     assert "timeout" not in cmd and "-k" not in cmd
     # the stall is judged from inside the container, and reaped by name
     assert callable(kw.get("kill")) and callable(kw.get("cpu_probe"))
