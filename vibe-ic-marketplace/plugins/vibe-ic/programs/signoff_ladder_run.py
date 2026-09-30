@@ -277,6 +277,12 @@ def check_tier_1_drc(project_dir: Path) -> TierResult:
     legacy) and count violations. §4.05: an absent report still NOT_RUNs; a
     discovered report is parsed to its REAL count so a masked DRC FAIL
     surfaces, never a fabricated pass."""
+    import librelane_signoff_evidence as native
+    measured = native.obligation(project_dir, 'drc')
+    if measured is not None:
+        return TierResult('T1', 'Full DRC (KLayout/Magic)',
+                          'NOT_RUN' if measured['verdict'] == native.NM else measured['verdict'],
+                          details=measured, notes=measured['reason'])
     art = _discover_signoff_report(
         project_dir,
         phase3_names=("drc_signoff.rpt", "drc_signoff.json",
@@ -648,6 +654,12 @@ def check_tier_3_antenna(project_dir: Path) -> TierResult:
     §4.05: an absent report NOT_RUNs; a discovered report is parsed to its REAL
     verdict — surfacing the masked antenna FAIL is the whole point, and this
     can never fabricate a pass. Falls back to the legacy magic/klayout pair."""
+    import librelane_signoff_evidence as native
+    measured = native.obligation(project_dir, 'antenna')
+    if measured is not None:
+        return TierResult('T3', 'Antenna violations',
+                          'NOT_RUN' if measured['verdict'] == native.NM else measured['verdict'],
+                          details=measured, notes=measured['reason'])
     art = _discover_signoff_report(
         project_dir,
         phase3_names=("antenna.json",),
@@ -790,6 +802,12 @@ def check_tier_lvs_tapeout(project_dir: Path) -> TierResult:
       INCOMPLETE                -> INCOMPLETE       (evidence present but no
                                    top-level compare — non-releasing)
       IO_ERROR (no report)      -> NOT_RUN          (§4.05: absent → SKIP)"""
+    import librelane_signoff_evidence as native
+    measured = native.obligation(project_dir, 'lvs')
+    if measured is not None:
+        return TierResult('T4.5_LVS_TAPEOUT', 'LVS tapeout sign-off (genuine match)',
+                          'NOT_RUN' if measured['verdict'] == native.NM else measured['verdict'],
+                          details=measured, notes=measured['reason'])
     import lvs_tapeout_signoff_check as ltc
     rpt = _find_lvs_report(project_dir)
     if rpt is None:
@@ -1196,6 +1214,12 @@ def check_tier_metal_density(project_dir: Path,
                   per-layer metal-density data)
       IO_ERROR -> NOT_RUN  (no per-layer metal-density report → §4.05 SKIP;
                   the row-util density.json is never read here)"""
+    import librelane_signoff_evidence as native
+    measured = native.obligation(project_dir, 'density')
+    if measured is not None:
+        return TierResult('T_METAL_DENSITY', 'Per-layer metal density (CMP)',
+                          'NOT_RUN' if measured['verdict'] == native.NM else measured['verdict'],
+                          details=measured, notes=measured['reason'])
     import metal_layer_density_check as mld
     rpt = _find_metal_density_report(project_dir)
     if rpt is None:
