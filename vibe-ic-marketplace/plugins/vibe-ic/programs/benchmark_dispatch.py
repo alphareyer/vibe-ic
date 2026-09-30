@@ -426,6 +426,8 @@ def _runner_reentry_reason(task: dict, result: dict) -> str | None:
     A receipt from a refused/failed invocation is never a gate measurement.
     """
     verification = task.get("program_verification") or {}
+    if not isinstance(verification, dict):
+        return "Program verification record is malformed"
     invocation = verification.get("runner_invocation")
     if isinstance(invocation, dict):
         if invocation.get("status") != "COMPLETED":

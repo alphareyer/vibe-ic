@@ -1392,29 +1392,47 @@ def test_ai_repair_reenters_at_validation_without_regeneration(
     _write_ai_repair_record(
         run, task, bd._validate_ai_review(task)["verified_challenge"])
     seen = []
-    real_run = bd.subprocess.run
+    # Execute an actual fixture child through the production budget and
+    # native report-write seam. Only the runner path is substituted; route,
+    # reentry window, prompt, RTL and the original report states are retained.
+    # The report's fixture PASS is not a physical/native gate measurement.
+    runner = tmp_path / "fixture-runner" / "vibe_ic_one_shot_runner.py"
+    runner.parent.mkdir()
+    runner.write_text('''import pathlib, sys
+sys.path.insert(0, %r)
+from design_one_shot_runner import _write_phase2_report
+p = pathlib.Path(sys.argv[1]).resolve()
+assert sys.argv[sys.argv.index('--entry-step') + 1] == '2'
+report = p/'reports/orchestrator/phase2_one_shot.json'
+_write_phase2_report(report, {
+    'verdict':'PASS',
+    'steps':[{'name':'rtl_gen', 'status':'NOT_APPLICABLE',
+              'detail':'run declared --entry-step 2'}],
+    'measurement_scope':'SOURCE_ONLY_FIXTURE',
+    'native_gate_status':'NOT_MEASURED',
+}, p)
+''' % str(PROGRAMS))
+    real_argv = bd._resume_solver_argv
 
-    def fake_run(argv, *args, **kwargs):
-        if "vibe_ic_one_shot_runner.py" not in " ".join(str(v) for v in argv):
-            return real_run(argv, *args, **kwargs)
+    def fixture_argv(_runner, project, supplied_rtl, entry, exit_step):
+        argv = real_argv(runner, project, supplied_rtl, entry, exit_step)
         seen.append(argv)
-        report = (Path(task["project"]) / "reports" / "orchestrator" /
-                  "phase2_one_shot.json")
-        report.write_text(json.dumps({
-            "verdict": "PASS",
-            "steps": [{
-                "name": "rtl_gen", "status": "NOT_APPLICABLE",
-                "detail": "run declared --entry-step 2",
-            }],
-        }))
-        return SimpleNamespace(returncode=0)
+        return argv
 
-    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(bd, "_resume_solver_argv", fixture_argv)
     assert bd.cmd_resume("rtllm", "/unused", str(run)) == 2
     assert seen and seen[0][-2:] == ["--entry-step", "2"]
     solve = json.loads((run / "solve_report.json").read_text())
     assert solve["results"][0]["candidate_origin"] == "AI_REPAIR"
     assert solve["results"][0]["candidate_ready"] is True
+    invocation = solve["results"][0]["runner_invocation"]
+    assert invocation["source_before"]["runner"]["path"] == str(runner)
+    assert invocation["source_before"] == invocation["source_after"]
+    assert invocation["material_before"] == invocation["material_after"]
+    bound = invocation["reports_after"]["phase2_one_shot.json"]["runner_binding"]
+    assert bound["invocation_id"] == invocation["invocation_id"]
+    assert bound["source"] == invocation["source_before"]
+    assert bound["material"] == invocation["material_after"]
     refreshed = bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0]
     assert refreshed["rtl_sha256"] != task["rtl_sha256"]
     assert len(refreshed["verification_challenges"]) == 1
