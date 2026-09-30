@@ -610,64 +610,109 @@ def ephemeral_container_name(prefix: str) -> str:
 
 def ephemeral_container_cpu_probe(container: str, *, runner=None,
                                   timeout: int = 15):
-    """`cpu_probe` for `run_supervised` over an EPHEMERAL `docker run`.
+    """Read an owned local Docker container's cumulative cgroup-v2 CPU.
 
-    Returns a callable with the signature `run_supervised` calls -- it is
-    handed the live client proc and returns a monotonic reading, or None when
-    the container cannot be read (not started yet, already gone, no docker).
-    None is NOT zero: `ProgressMeter` carries an unavailable signal forward, so
-    a probe that flaps can never be mistaken for progress in either direction.
-
-    The reading is the SUM OF utime+stime OVER EVERY PROCESS IN THE CONTAINER,
-    read from the container's own /proc at the same field positions
-    `_watchdog._pid_cpu_s` reads on the host. No marker or identity filtering
-    is needed and none is done: the container was started `--rm` for this one
-    invocation, so every pid inside it is this job's. `/proc/[0-9]*/stat` is
-    read with `cat` rather than `ps` because the tool image is not required to
-    ship procps.
+    Inspect binds the immutable ID, native PID/starttime and host cgroup inode.
+    Subsequent looks inspect that ID, never a replacement carrying its name.
+    cpu.stat counts exited children as well as live ones. Remote/unsupported
+    cgroups, disappearance, read failure and recycled identities give None,
+    never a fabricated zero. The callable's last_observation records the exact
+    identity/raw counter or why it was NOT_MEASURED; ProgressMeter is unchanged.
+    No command is executed inside the container.
     """
     _run = runner or subprocess.run
+    container_id = container_name = None
+    lifetime = None
+    last_usage = None
+
+    def unavailable(reason, **fields):
+        probe.last_observation = {
+            "status": "NOT_MEASURED", "reason": reason,
+            "container_id": container_id, **fields}
+        return None
+
+    def start_ticks(pid_dir):
+        raw = (pid_dir / "stat").read_text()
+        return int(raw[raw.rfind(")") + 2:].split()[19])
 
     def probe(_proc):
+        nonlocal container_id, container_name, lifetime, last_usage
+        target = container_id or container
         try:
-            r = _run(_ce.docker_exec_argv(
-                container, "sh", "-c", "cat /proc/[0-9]*/stat 2>/dev/null"),
-                capture_output=True, text=True, timeout=timeout)
-        except Exception:  # nosec — a probe failure is "no reading", never 0
-            return None
-        # THE EXIT CODE IS NOT THE QUESTION, AND USING IT MADE THIS PROBE BLIND.
-        # MEASURED 2026-09-07 on 8HD-9, sampling a real `fault atpg` container
-        # every 3 s: `cat /proc/[0-9]*/stat` returned rc=1 on 7 of 12 looks
-        # while handing back 27-38 kB of perfectly good stat lines. The glob is
-        # expanded by the shell and then `cat` opens the files one at a time;
-        # in a container that starts and reaps short-lived helpers (which is
-        # every EDA tool) at least one pid is always gone by the time its turn
-        # comes, and `cat` exits non-zero for that ONE file. Judging the reading
-        # by that exit code discarded the other 200, so the CPU signal was
-        # unavailable most of the time and the supervisor was left with output
-        # alone -- exactly the blindness this probe exists to remove, and it
-        # fails SILENTLY, in the direction that kills a working job.
-        #
-        # The honest predicate is whether anything PARSED, which is what the
-        # `seen` flag below already answers: a container that is gone returns no
-        # stat lines and still yields None.
-        tck = _wd._clk_tck()
-        total = 0.0
-        seen = False
-        for line in r.stdout.splitlines():
-            cut = line.rfind(")")
-            if cut < 0:
-                continue
-            rest = line[cut + 2:].split()
-            if len(rest) < 13:
-                continue
-            try:
-                total += (float(rest[11]) + float(rest[12])) / tck
-                seen = True
-            except ValueError:  # nosec
-                continue
-        return total if seen else None
+            result = _run(["docker", "inspect", "--type", "container", target],
+                          capture_output=True, text=True, timeout=timeout)
+            if result.returncode != 0:
+                return unavailable("container unavailable or disappeared",
+                                   inspect_target=target, inspect_rc=result.returncode,
+                                   inspect_stderr=result.stderr)
+            documents = json.loads(result.stdout)
+            if not isinstance(documents, list) or len(documents) != 1:
+                return unavailable("invalid container inspect document")
+            document = documents[0]
+            cid, name = document["Id"], document["Name"]
+            if (not isinstance(cid, str) or len(cid) != 64
+                    or any(c not in "0123456789abcdef" for c in cid)):
+                return unavailable("invalid container identity")
+            if container_id is None:
+                if container not in (cid, name.lstrip("/")):
+                    return unavailable("container identity does not match owned target")
+                container_id, container_name = cid, name
+            elif (cid, name) != (container_id, container_name):
+                return unavailable("recycled container identity refused")
+            state = document["State"]
+            pid = state["Pid"]
+            if not state["Running"] or type(pid) is not int or pid <= 0:
+                return unavailable("short container not running or disappeared", native_pid=pid)
+            if lifetime is not None and pid != lifetime["native_pid"]:
+                return unavailable("recycled native PID identity refused", native_pid=pid)
+            pid_dir = Path("/proc") / str(pid)
+            start = start_ticks(pid_dir)
+            if lifetime is not None and start != lifetime["starttime_ticks"]:
+                return unavailable("recycled native PID/start identity refused", native_pid=pid)
+            rows = [line.split(":", 2) for line in (pid_dir / "cgroup").read_text().splitlines()]
+            if len(rows) != 1 or rows[0][:2] != ["0", ""]:
+                return unavailable("unsupported host cgroup interface; requires unified v2")
+            relative = rows[0][2]
+            root = Path("/sys/fs/cgroup").resolve(strict=True)
+            path = root / relative.lstrip("/")
+            if (not relative.startswith("/") or ".." in path.parts
+                    or not any(part in (cid, f"docker-{cid}.scope") for part in path.parts)):
+                return unavailable("host cgroup is not bound to container identity")
+            path = path.resolve(strict=True)
+            if not path.is_relative_to(root):
+                return unavailable("host cgroup escapes its bound root identity")
+            stat = path.stat()
+            identity = {"native_pid": pid, "starttime_ticks": start,
+                        "cgroup_path": str(path), "cgroup_dev": stat.st_dev,
+                        "cgroup_ino": stat.st_ino}
+            if lifetime is not None and identity != lifetime:
+                return unavailable("recycled cgroup identity refused", **identity)
+            raw = (path / "cpu.stat").read_text()
+            counters = [line.split() for line in raw.splitlines()
+                        if line.split()[:1] == ["usage_usec"]]
+            if len(counters) != 1 or len(counters[0]) != 2:
+                return unavailable("cgroup CPU counter unavailable", **identity)
+            usage = int(counters[0][1])
+            if usage < 0:
+                return unavailable("invalid negative cumulative CPU counter", **identity)
+            after = path.stat()
+            if (start_ticks(pid_dir) != start
+                    or (after.st_dev, after.st_ino) != (stat.st_dev, stat.st_ino)):
+                return unavailable("native PID/cgroup identity changed during reading", **identity)
+            if last_usage is not None and usage < last_usage:
+                return unavailable("cumulative CPU regressed; identity refused", **identity,
+                                   raw_cpu_stat=raw, usage_usec=usage)
+            lifetime, last_usage = identity, usage
+            probe.last_observation = {
+                "status": "MEASURED", "container_id": cid, "container_name": name,
+                "inspect_target": target, **identity, "raw_cpu_stat": raw,
+                "usage_usec": usage, "sample_monotonic_ns": time.monotonic_ns()}
+            return usage / 1e6
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError,
+                KeyError, IndexError) as exc:
+            return unavailable("host CPU read unavailable: " + str(exc), inspect_target=target)
 
+    probe.last_observation = {"status": "NOT_MEASURED", "reason": "not sampled"}
     return probe
 
 

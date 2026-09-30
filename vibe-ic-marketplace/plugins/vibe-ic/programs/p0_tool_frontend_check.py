@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -151,6 +152,25 @@ class ToolNotMeasured(RuntimeError):
         self.tool, self.how = tool, how
 
 
+#: Per-native Docker CPU limit for these single-core front ends. Operators may
+#: set a finite positive value; an explicit invalid value refuses the launch.
+#: This is a caller-local limit, not admission for a fleet of concurrent jobs.
+DOCKER_CPUS_ENV = "VIBEIC_P0_DOCKER_CPUS"
+
+
+def _docker_cpus(tool: str) -> str:
+    raw = os.environ.get(DOCKER_CPUS_ENV, "1")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+    if not math.isfinite(value) or value <= 0:
+        raise ToolNotMeasured(
+            tool, f"native launch refused: {DOCKER_CPUS_ENV}={raw!r} must be "
+                  "finite and positive")
+    return str(value)
+
+
 def _invoke(tool: str, args: list[str], project: Path,
             image: str | None) -> subprocess.CompletedProcess[str]:
     """Run `tool` once under progress supervision with a recorded wall budget.
@@ -167,6 +187,7 @@ def _invoke(tool: str, args: list[str], project: Path,
     if shutil.which(tool):
         command = [tool, *args]
     elif shutil.which("docker"):
+        cpus = _docker_cpus(tool)
         # Phase 2 needs only the released EDA image's tool binaries. LibreLane
         # CLI capability is neither requested nor assumed here.
         image = image or default_image()
@@ -176,12 +197,13 @@ def _invoke(tool: str, args: list[str], project: Path,
         # program created for its own `write_json` (never the project).
         scratch = [m.group(1) for a in args for m in _ELAB_TARGET_RE.finditer(a)]
         command = ["docker", "run", "--rm", "--name", container,
+                   "--cpus", cpus,
                    *_dmem.docker_memory_flags(),
                    "--network", "none",
                    "-v", f"{root}:{root}:ro",
                    *[x for d in sorted(set(scratch)) for x in ("-v", f"{d}:{d}")],
                    "-u", f"{os.getuid()}:{os.getgid()}",
-                   "--entrypoint", tool, image, *args]
+                   image, "--skip", tool, *args]
         kw = {"kill": _dwd.ephemeral_container_reap(container),
               "cpu_probe": _dwd.ephemeral_container_cpu_probe(container)}
     else:
