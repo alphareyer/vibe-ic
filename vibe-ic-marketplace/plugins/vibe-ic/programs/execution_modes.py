@@ -27,6 +27,12 @@ import time
 from typing import Callable, Mapping
 import uuid
 
+import os as _os                                                    # noqa: E402
+import sys as _sys                                                  # noqa: E402
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 from _atomic_artefact import write_bytes, write_json
 
 

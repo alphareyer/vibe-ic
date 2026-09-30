@@ -12,6 +12,12 @@ import json
 import re
 from pathlib import Path
 
+import os as _os                                                    # noqa: E402
+import sys as _sys                                                  # noqa: E402
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 from phase2_scaffold_gen import VERILOG_RESERVED
 
 CONTRACT_REL = Path("input/in_order_watchdog.json")

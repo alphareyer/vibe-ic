@@ -6100,6 +6100,144 @@
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     },
     {
+      "id": "32",
+      "title_en": "\ud83d\udd01 Post-route timing repair pass (multi-corner repair_design + repair_timing + reroute)",
+      "phase": "phase3",
+      "canonical_stage": "stage3",
+      "current_default": {
+        "mode": "class_scoped_librelane",
+        "tool_ids": [
+          "librelane",
+          "openroad",
+          "vibeic"
+        ],
+        "label_en": "Chip pad-ring: LibreLane; core-only/hardmacro: direct adapter",
+        "source": {
+          "repo": "https://github.com/vibeic/vibe-ic",
+          "ref": "origin/main",
+          "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
+          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
+          "canonical_step_id": "32",
+          "programs": [
+            "flow_step_output_content_check",
+            "postroute_timing_repair_audit"
+          ],
+          "capture_routes": [],
+          "review_row": "review70_final.json#/rows/step_id=32",
+          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
+        },
+        "verified": true,
+        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
+        "runtime_verified_now": false,
+        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
+      },
+      "policy_default": {
+        "tool_ids": [
+          "librelane"
+        ],
+        "primary_arm_count": 1,
+        "label_en": "LibreLane captured post-route repair and fresh verification",
+        "component_tool_ids": [
+          "openroad",
+          "vibeic"
+        ],
+        "status": "verified",
+        "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
+        "is_deployed_current": true,
+        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
+        "deployment_scope": "SOURCE_DEFAULT_FOR_CHIP_PAD_RING_ONLY",
+        "mode_framework_implemented": false
+      },
+      "ultra_tools": [
+        {
+          "arm_id": "32_librelane_1",
+          "tool_id": "librelane",
+          "role": "orchestrator",
+          "applicability": "Vibeic.PostRouteRepair / ResizerTimingPostGRT / RepairDesignPostGRT",
+          "integration_status": "verified",
+          "independence_family": "librelane_composite",
+          "same_output_interchangeable": true,
+          "selection_group": "candidate_producer",
+          "note_en": "Current chip class default retains post-DRT closure orchestration.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "32_openroad_fork_2",
+          "tool_id": "openroad_fork",
+          "role": "producer",
+          "applicability": "Post-DRT repair / incremental route / RC",
+          "integration_status": "verified",
+          "independence_family": "openroad",
+          "same_output_interchangeable": true,
+          "selection_group": "candidate_producer",
+          "note_en": "Same physical engine family.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "32_librelane_3",
+          "tool_id": "librelane",
+          "role": "orchestrator",
+          "applicability": "Odb.InsertECOBuffers",
+          "integration_status": "proposed",
+          "independence_family": "librelane_composite",
+          "same_output_interchangeable": true,
+          "selection_group": "candidate_producer",
+          "note_en": "Different repair actuator; reroute/RCX/STA/DRV/PV afterward.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "32_vibeic_4",
+          "tool_id": "vibeic",
+          "role": "checker",
+          "applicability": "Intent, completeness and artifact provenance",
+          "integration_status": "verified",
+          "independence_family": "vibeic",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PINNED_SOURCE",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        },
+        {
+          "arm_id": "32_siliconcompiler_missed25",
+          "tool_id": "siliconcompiler",
+          "role": "orchestrator",
+          "applicability": "Alternate orchestration; shared backend family and exact scope must be identified",
+          "integration_status": "proposed",
+          "independence_family": "siliconcompiler",
+          "same_output_interchangeable": false,
+          "selection_group": "complementary_evidence",
+          "note_en": "Accounted for from corrected review70. Exact target adapter, command semantics and runtime qualification are not inferred from historical presence.",
+          "runtime_verified_now": false,
+          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
+          "controller_executor": "NOT_REGISTERED",
+          "controller_runnable": false
+        }
+      ],
+      "limitations_en": "Non-PASS repair can continue measurement with FAIL/quarantine; it gains no release credit. Missing route inputs refuse stream-out.",
+      "mandatory_gate_programs": [
+        "flow_step_output_content_check",
+        "postroute_timing_repair_audit"
+      ],
+      "required_output_contract": [
+        "phase3/stage3/postroute_timing_repair/repair_log.json OR phase3/stage3/postroute_timing_repair/no_repair_needed.flag",
+        "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json",
+        "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json"
+      ],
+      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
+    },
+    {
       "id": "23",
       "title_en": "\ud83d\udd01 Post-route STA (multi-corner multi-mode sign-off)",
       "phase": "phase3",
@@ -7383,144 +7521,6 @@
       "required_output_contract": [
         "phase3/stage3/spice/*.sp OR phase3/stage3/spice/*.spice OR sim_spice/*.sp",
         "phase3/stage3/spice/correlation.json OR reports/phase3/spice_correlation.json"
-      ],
-      "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
-    },
-    {
-      "id": "32",
-      "title_en": "\ud83d\udd01 Post-route timing repair pass (multi-corner repair_design + repair_timing + reroute)",
-      "phase": "phase3",
-      "canonical_stage": "stage3",
-      "current_default": {
-        "mode": "class_scoped_librelane",
-        "tool_ids": [
-          "librelane",
-          "openroad",
-          "vibeic"
-        ],
-        "label_en": "Chip pad-ring: LibreLane; core-only/hardmacro: direct adapter",
-        "source": {
-          "repo": "https://github.com/vibeic/vibe-ic",
-          "ref": "origin/main",
-          "sha": "f88175263d96c3a76b4cb18f72c7714c68ec6627",
-          "canonical_file": "vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml",
-          "canonical_step_id": "32",
-          "programs": [
-            "flow_step_output_content_check",
-            "postroute_timing_repair_audit"
-          ],
-          "capture_routes": [],
-          "review_row": "review70_final.json#/rows/step_id=32",
-          "repo_source_url": "https://github.com/vibeic/vibe-ic/blob/f88175263d96c3a76b4cb18f72c7714c68ec6627/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml"
-        },
-        "verified": true,
-        "verification_scope": "PINNED_SOURCE_AND_EXISTING_RECEIPTS_ONLY",
-        "runtime_verified_now": false,
-        "source_note_en": "Current adapter classification follows actual calls in the cited corrected source review and pinned source; tool presence is not the integration criterion."
-      },
-      "policy_default": {
-        "tool_ids": [
-          "librelane"
-        ],
-        "primary_arm_count": 1,
-        "label_en": "LibreLane captured post-route repair and fresh verification",
-        "component_tool_ids": [
-          "openroad",
-          "vibeic"
-        ],
-        "status": "verified",
-        "selection_reason": "Prefer applicable LibreLane orchestration; preserve mandatory complementary checks and uncovered intent rules.",
-        "is_deployed_current": true,
-        "implementation_note": "Policy target, not a new source change or a runtime PASS.",
-        "deployment_scope": "SOURCE_DEFAULT_FOR_CHIP_PAD_RING_ONLY",
-        "mode_framework_implemented": false
-      },
-      "ultra_tools": [
-        {
-          "arm_id": "32_librelane_1",
-          "tool_id": "librelane",
-          "role": "orchestrator",
-          "applicability": "Vibeic.PostRouteRepair / ResizerTimingPostGRT / RepairDesignPostGRT",
-          "integration_status": "verified",
-          "independence_family": "librelane_composite",
-          "same_output_interchangeable": true,
-          "selection_group": "candidate_producer",
-          "note_en": "Current chip class default retains post-DRT closure orchestration.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "32_openroad_fork_2",
-          "tool_id": "openroad_fork",
-          "role": "producer",
-          "applicability": "Post-DRT repair / incremental route / RC",
-          "integration_status": "verified",
-          "independence_family": "openroad",
-          "same_output_interchangeable": true,
-          "selection_group": "candidate_producer",
-          "note_en": "Same physical engine family.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "32_librelane_3",
-          "tool_id": "librelane",
-          "role": "orchestrator",
-          "applicability": "Odb.InsertECOBuffers",
-          "integration_status": "proposed",
-          "independence_family": "librelane_composite",
-          "same_output_interchangeable": true,
-          "selection_group": "candidate_producer",
-          "note_en": "Different repair actuator; reroute/RCX/STA/DRV/PV afterward.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "32_vibeic_4",
-          "tool_id": "vibeic",
-          "role": "checker",
-          "applicability": "Intent, completeness and artifact provenance",
-          "integration_status": "verified",
-          "independence_family": "vibeic",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Mandatory evidence policy; not a competing EDA candidate.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PINNED_SOURCE",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        },
-        {
-          "arm_id": "32_siliconcompiler_missed25",
-          "tool_id": "siliconcompiler",
-          "role": "orchestrator",
-          "applicability": "Alternate orchestration; shared backend family and exact scope must be identified",
-          "integration_status": "proposed",
-          "independence_family": "siliconcompiler",
-          "same_output_interchangeable": false,
-          "selection_group": "complementary_evidence",
-          "note_en": "Accounted for from corrected review70. Exact target adapter, command semantics and runtime qualification are not inferred from historical presence.",
-          "runtime_verified_now": false,
-          "adapter_verification_scope": "PROPOSED_OR_ENVIRONMENT_DEPENDENT",
-          "controller_executor": "NOT_REGISTERED",
-          "controller_runnable": false
-        }
-      ],
-      "limitations_en": "Non-PASS repair can continue measurement with FAIL/quarantine; it gains no release credit. Missing route inputs refuse stream-out.",
-      "mandatory_gate_programs": [
-        "flow_step_output_content_check",
-        "postroute_timing_repair_audit"
-      ],
-      "required_output_contract": [
-        "phase3/stage3/postroute_timing_repair/repair_log.json OR phase3/stage3/postroute_timing_repair/no_repair_needed.flag",
-        "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json",
-        "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json"
       ],
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     },

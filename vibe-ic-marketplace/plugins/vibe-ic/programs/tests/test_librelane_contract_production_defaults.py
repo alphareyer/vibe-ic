@@ -59,7 +59,7 @@ _CHAIN_R4 = _CHAIN + ("21", "32")
 _T96_MEMBERS = {"15", "15.5ic", "17", "18", "19", "20"}
 _T102_MEMBERS = {"21", "32"}
 #: CUT_W2 (1): sign-off STA on STAPostPNR (R-0929-TOOL-DEFAULT).
-_CUTW2_MEMBERS = {"23"}
+_CUTW2_MEMBERS = {"22", "23"}
 #: R-0929-TOOL-DEFAULT Wave 1 (CUT_W1A): 8 dual, 10/26/26.5ic on the tool.
 _W1A_MODES = {"8": "dual", "10": "librelane", "26": "librelane", "26.5ic": "librelane"}
 
@@ -88,9 +88,10 @@ def test_the_chip_path_runs_15_to_21_and_32_on_librelane_with_no_switch(tmp_path
         == _T96_MEMBERS | _T102_MEMBERS | _CUTW2_MEMBERS | set(_W1A_MODES)
     assert {s: LC.selected_mode(project, s) for s in _CHAIN_R4} == dict.fromkeys(_CHAIN_R4, "librelane")
     assert LC.selected_mode(project, "23") == "librelane"
+    assert LC.selected_mode(project, "22") == "librelane"
     assert {s: LC.selected_mode(project, s) for s in _W1A_MODES} == _W1A_MODES
     # outside the cut-over, nothing moves
-    for step in ("9", "16", "22", "37"):
+    for step in ("9", "16", "37"):
         assert LC.selected_mode(project, step) == "direct"
 
 
