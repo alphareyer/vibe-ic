@@ -41,7 +41,9 @@ def _backup(tmp_path, monkeypatch):
         rtl = project / "phase2" / "stage1" / "rtl"
         rtl.mkdir(parents=True, exist_ok=True)
         (rtl / "unit.v").write_text(ORIGINAL)
-        fixture._write_rtl_gen_report(project, "WAIVED", fallback_skill="rtl-repair")
+        fixture._write_rtl_gen_report(
+            project, "WAIVED", fallback_skill="rtl-repair",
+            context=fixture._runner_invocation_context(kwargs))
         return SimpleNamespace(returncode=1)
 
     monkeypatch.setattr(bd.subprocess, "run", stage_only)
@@ -52,7 +54,9 @@ def _backup(tmp_path, monkeypatch):
 
     def regate(argv, **kwargs):
         calls.append(list(argv))
-        fixture._write_rtl_gen_report(Path(argv[2]), "PASS")
+        fixture._write_rtl_gen_report(
+            Path(argv[2]), "PASS",
+            context=fixture._runner_invocation_context(kwargs))
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(bd.subprocess, "run", regate)
