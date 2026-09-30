@@ -10,9 +10,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import librelane_pv_signoff as pv
 from librelane_contract import Refusal, _walk_paths, digest, selected_mode
 
