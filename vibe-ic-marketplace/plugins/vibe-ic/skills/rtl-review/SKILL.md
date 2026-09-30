@@ -147,9 +147,28 @@ prose + the gate's structural flag.
 ```bash
 python3 plugins/vibe-ic/_shared/skill_compliance_check.py \
     --requirements plugins/vibe-ic/skills/rtl-review/compliance.yaml \
+    --rtl-source-root <complete-rtl-source-directory> \
     rtl_review.md
 ```
 
 Exit 0 = PASS; exit 1 = the program output is missing a required section
 (typically you forgot `--out-md` or the program crashed and you authored
 by hand instead).
+
+The three named interface, CRC and counter obligations may be
+`NOT_APPLICABLE`, which is **not an audit PASS**. Their producing programs
+must prove structural absence over a complete source census, and the
+compliance checker independently re-elaborates the source directory selected
+by `--rtl-source-root` (or a check's `rtl_source_root`). The receipt's own path
+is not an independent source selection. The source files, hashes, subject and
+empty native audit population must all match the remeasured proof.
+
+The supported absence predicates are deliberately narrow: a closed single
+module with no child instances for interface encoding; no multi-bit nets or
+ports for CRC; and a closed single-module state graph with no transformed
+state recurrence for counters. A renamed counter is not absent. Missing or
+changed source, unresolved hierarchy, preprocessing, parameters, unsupported
+cells or memories, and a subject whose role is unknown remain blocking
+`NOT_MEASURED` at the zero-population boundary. A zero keyword-hit count or a
+prose-only `NOT_APPLICABLE` claim cannot discharge an obligation. Existing
+applicable-result and advisory CLI policies are unchanged.

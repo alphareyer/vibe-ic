@@ -281,7 +281,7 @@ class Finding:
     detail: str = ''
     # Evidence state for rules that resolve a measured receipt (#2048).
     # '' for pattern findings and configuration errors; otherwise exactly one
-    # of PASS / FAIL / NOT_MEASURED. `severity` stays the blocking axis:
+    # of PASS / FAIL / NOT_MEASURED / NOT_APPLICABLE. `severity` stays the blocking axis:
     # NOT_MEASURED is severity FAIL because a check that did not run is
     # reported, never counted as a pass.
     state: str = ''
@@ -304,6 +304,7 @@ _KNOWN_OUTPUT_TYPES = (OUTPUT_TYPE_RTL, OUTPUT_TYPE_REPORT)
 STATE_PASS = 'PASS'
 STATE_FAIL = 'FAIL'
 STATE_NOT_MEASURED = 'NOT_MEASURED'
+STATE_NOT_APPLICABLE = 'NOT_APPLICABLE'
 
 
 @dataclass
@@ -323,6 +324,8 @@ class CheckContext:
     output_type: str = ''
     output_path: Optional[Path] = None
     evidence_dirs: List[Path] = field(default_factory=list)
+    # Independently declared by the consumer, never selected by a receipt.
+    rtl_source_root: Optional[Path] = None
 
     def receipt_roots(self, extra: Optional[str] = None) -> List[Path]:
         """Ordered, de-duplicated directories to look for a receipt in.
@@ -909,6 +912,8 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
       * NOT_MEASURED -> severity FAIL, state NOT_MEASURED, naming the auditor,
                         the receipt filename and every directory searched.
                         Blocking, because absence of evidence is not a pass.
+      * NOT_APPLICABLE -> severity INFO, independently remeasured structural
+                        absence for the three RTL audits. Not an audit PASS.
 
     A configuration error (no `auditor:`, or an auditor with no known receipt
     contract) is severity FAIL with an empty state: nothing was measured and
@@ -1022,6 +1027,92 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
             f'{trace} — it does not carry the shape {rs.emitted_by} emits. '
             'A payload from another producer is no evidence at all.',
             state=STATE_NOT_MEASURED)]
+
+    applicability = payload.get('applicability')
+    if isinstance(applicability, dict) and \
+            applicability.get('state') == STATE_NOT_APPLICABLE:
+        # Only the three producing RTL auditors have this contract. Existing
+        # zero-population receipts from every other producer remain blocking.
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'programs'))
+        import _rtl_audit_applicability as rtl_applicability
+        valid_population = False
+        summary = payload.get('summary', {})
+        if not isinstance(summary, dict):
+            summary = {}
+        expected_source = applicability.get('source')
+        facts = applicability.get('facts')
+        if (not isinstance(expected_source, dict) or
+                not isinstance(expected_source.get('root'), str) or
+                not isinstance(expected_source.get('sha256'), str) or
+                not isinstance(expected_source.get('files'), list) or
+                not all(isinstance(p, dict) and isinstance(p.get('path'), str)
+                        for p in expected_source['files']) or
+                not isinstance(facts, dict)):
+            return [Finding(cid, 'FAIL', f'NOT_MEASURED: `{auditor}` has a '
+                            'malformed structural applicability claim.', trace,
+                            state=STATE_NOT_MEASURED)]
+        if auditor == 'interface_encoding_audit':
+            valid_population = (
+                payload.get('interfaces') == [] and
+                all(type(summary.get(k)) is int and summary[k] == 0
+                    for k in ('total_interfaces', 'mismatches', 'matches', 'unknowns')) and
+                summary.get('verdict') == STATE_NOT_APPLICABLE and
+                summary.get('top_module') ==
+                facts.get('top_module'))
+        elif auditor == 'phy_counter_audit':
+            valid_population = (
+                payload.get('findings') == [] and
+                all(type(summary.get(k)) is int and summary[k] == 0
+                    for k in ('total_counters_analyzed', 'bus_sampled_warnings',
+                              'time_based_clean')) and
+                summary.get('verdict') == STATE_NOT_APPLICABLE)
+        elif auditor == 'crc_bitorder_check':
+            valid_population = (payload.get('findings') == [] and
+                                payload.get('crc_signal') == '' and
+                                payload.get('summary_status') == STATE_NOT_APPLICABLE)
+        actual_subject = rs.subject(payload)
+        declared = spec.get('subject')
+        subject_ok = not isinstance(declared, dict) or all(
+            actual_subject.get(k) == v for k, v in declared.items())
+        if auditor == 'interface_encoding_audit':
+            source_ok = (isinstance(summary.get('rtl_dir'), str) and
+                         str(Path(summary['rtl_dir']).absolute()) ==
+                         expected_source.get('root'))
+        else:
+            scanned = payload.get('files_scanned')
+            source_ok = (isinstance(scanned, list) and
+                         all(isinstance(p, str) for p in scanned) and
+                         sorted(str(Path(p).absolute()) for p in scanned) ==
+                         sorted(str(Path(expected_source.get('root', '')) / p['path'])
+                                for p in expected_source.get('files', [])
+                                if isinstance(p, dict) and isinstance(p.get('path'), str)))
+        selected_root = ctx.rtl_source_root
+        configured_root = spec.get('rtl_source_root')
+        conflict = False
+        if isinstance(configured_root, str) and configured_root:
+            configured = Path(configured_root)
+            if not configured.is_absolute() and ctx.output_path is not None:
+                configured = ctx.output_path.parent / configured
+            conflict = (selected_root is not None and
+                        selected_root.absolute() != configured.absolute())
+            selected_root = configured if selected_root is None else selected_root
+        ok, reason = rtl_applicability.verify(applicability, auditor, selected_root)
+        if conflict:
+            ok, reason = False, 'consumer_source_root_conflict'
+        if not (ok and valid_population and subject_ok and source_ok):
+            return [Finding(
+                cid, 'FAIL', f'NOT_MEASURED: `{auditor}` structural applicability '
+                'claim could not be verified.',
+                f'{trace} — {reason}; empty native population={valid_population}, '
+                f'declared subject matches={subject_ok}, source set matches={source_ok}. '
+                'A receipt token, unknown scope, stale source or failed applicable '
+                'audit cannot discharge the obligation.', state=STATE_NOT_MEASURED)]
+        return [Finding(
+            cid, 'INFO', f'NOT_APPLICABLE: `{auditor}` has no subject in the '
+            'complete independently selected RTL source.',
+            f'{trace} source_sha256={expected_source["sha256"]} criterion={reason}; '
+            'this is a structural absence, not an audit PASS.',
+            state=STATE_NOT_APPLICABLE)]
 
     examined = rs.examined(payload)
     if examined <= 0:
@@ -1268,6 +1359,11 @@ def main():
                     help='Directory to search for audit receipts (repeatable). '
                          'Searched before the report-relative defaults. '
                          'Receipts are never looked for outside these roots.')
+    ap.add_argument('--rtl-source-root', metavar='DIR',
+                    help='Independently select the complete RTL source directory '
+                         'for structural NOT_APPLICABLE remeasurement. A receipt '
+                         'cannot select its own subject. Optional for measured '
+                         'PASS/FAIL receipts; required for structural absence.')
     args = ap.parse_args()
 
     out_path = Path(args.output_file)
@@ -1283,7 +1379,8 @@ def main():
     text = out_path.read_text(errors='replace')
     ctx = CheckContext(
         output_path=out_path.resolve(),
-        evidence_dirs=[Path(d) for d in args.evidence_dir])
+        evidence_dirs=[Path(d) for d in args.evidence_dir],
+        rtl_source_root=Path(args.rtl_source_root) if args.rtl_source_root else None)
     findings = audit(text, compliance, ctx)
 
     total = len(compliance.get('requirements', []) or [])
@@ -1295,6 +1392,7 @@ def main():
     verdict = 'PASS' if not fails else 'FAIL'
 
     not_measured = [f for f in findings if f.state == STATE_NOT_MEASURED]
+    not_applicable = [f for f in findings if f.state == STATE_NOT_APPLICABLE]
 
     skill = compliance.get('skill', 'unknown')
     print(f"skill_compliance_check ({skill}): {verdict}")
@@ -1305,6 +1403,9 @@ def main():
         # be able to quote the number without its coverage (ruling F2036-H).
         print(f"  Not measured: {len(not_measured)} — "
               + ', '.join(f.id for f in not_measured))
+    if not_applicable:
+        print(f"  Not applicable: {len(not_applicable)} — "
+              + ', '.join(f.id for f in not_applicable))
     print('-' * 70)
     for f in findings:
         tag = f' <{f.state}>' if f.state else ''
@@ -1319,6 +1420,7 @@ def main():
             'total_requirements': total,
             'passed': passed,
             'not_measured': [f.id for f in not_measured],
+            'not_applicable': [f.id for f in not_applicable],
             'findings': [asdict(f) for f in findings],
         }, indent=2))
 
