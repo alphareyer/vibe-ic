@@ -94,8 +94,24 @@ def test_report_body_is_the_direct_decks_emitters_on_the_corner_report():
 # ------------------------------------------------ run(): the chain edge ---
 
 def _tool_edge(tmp_path, *, rulesets=RULESETS, calls=None):
-    """A fake `docker run` that writes what each LibreLane invocation writes."""
+    """SOURCE_FIXTURE producer; no native extraction or PDK accuracy claim.
+
+    The real run_chain owns the fingerprint and receipt. This double supplies
+    mounted, digestible fixture inputs and the files LibreLane would write;
+    it does not replace any producer validator or signoff consumer.
+    """
     calls = calls if calls is not None else []
+    fixture_pdk = tmp_path / 'pdkroot/gf/source-fixture'
+    tech_lef = write(fixture_pdk / 'tech.lef',
+                     'VERSION 5.8 ;\nUNITS\n  DATABASE MICRONS 1000 ;\n'
+                     'END UNITS\nEND LIBRARY\n')
+    fixture_rules = {}
+    for pattern, declared in rulesets.items():
+        rule = put(fixture_pdk / f'rules.{pattern.strip("*_")}.json',
+                   {'scope': 'SOURCE_FIXTURE', 'corner_pattern': pattern,
+                    'declared_fixture_path': declared,
+                    'native_accuracy': 'NOT_MEASURED'})
+        fixture_rules[pattern] = '/pdk/gf/source-fixture/' + rule.name
 
     def fake(cmd, **_):
         calls.append(cmd)
@@ -106,8 +122,10 @@ def _tool_edge(tmp_path, *, rulesets=RULESETS, calls=None):
             design, requested, output = Path(cmd[-5]), Path(cmd[-4]), Path(cmd[-3])
             for step in json.loads(requested.read_text()):
                 cfg = {'meta': {'step': step}, 'DESIGN_NAME': 'chip_top',
-                       'TECH_LEFS': {'nom_*': '/pdk/x/nom.tlef'},
-                       'RCX_RULESETS': rulesets, 'TIME_DERATING_CONSTRAINT': 5,
+                       'TECH_LEFS': {'nom_*': '/pdk/gf/source-fixture/' + tech_lef.name},
+                       'RCX_RULESETS': fixture_rules,
+                       'STA_CORNERS': [c for c in CORNERS if c.split('_', 1)[0] + '_*' in rulesets],
+                       'TIME_DERATING_CONSTRAINT': 5,
                        **json.loads(design.read_text())}
                 put(output / f'{step}.json', cfg)
                 ins = ['def'] if step == 'OpenROAD.RCX' else ['nl', 'spef', 'odb']
@@ -121,11 +139,18 @@ def _tool_edge(tmp_path, *, rulesets=RULESETS, calls=None):
             return SimpleNamespace(returncode=0, stdout='', stderr='')
         if '-o' in cmd:
             folder = Path(cmd[cmd.index('-o') + 1])
-            state = json.loads(Path(cmd[cmd.index('-i') + 1]).read_text())
+            input_path = Path(cmd[cmd.index('-i') + 1])
+            config_path = Path(cmd[cmd.index('-c', cmd.index('--id')) + 1])
+            shutil.copyfile(input_path, folder / 'state_in.json')
+            shutil.copyfile(config_path, folder / 'config.json')
+            put(folder / 'source_fixture.json',
+                {'scope': 'SOURCE_FIXTURE', 'constructor': '_tool_edge',
+                 'native_execution': 'NOT_RUN', 'native_accuracy': 'NOT_MEASURED'})
+            state = json.loads(input_path.read_text())
             step = cmd[cmd.index('--id') + 1]
             if step == 'OpenROAD.RCX':
                 state['spef'] = {p: str(write(folder / p.strip('*_') / f'chip_top.{p.strip("*_")}.spef',
-                                              f'rcx {p}')) for p in rulesets}
+                                              RCX_FIXTURE_SPEFS[p])) for p in rulesets}
             put(folder / 'state_out.json', state)
             return SimpleNamespace(returncode=0, stdout='', stderr='')
         raise AssertionError(f'unexpected tool call: {cmd}')
@@ -138,10 +163,10 @@ def _project(tmp_path):
         {'clock_domains': [{'role': 'primary', 'period_ns': 24, 'source_pin': 'clk'}]})
     put(p / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json', {})
     put(p / 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json', {})
-    put(p / 'input/submission_template/tapeout_declaration.json', {'answers': {'top_cell': 'chip_top'}})
+    put(p / 'input/submission_template/tapeout_declaration.json', {'answers': {'top_cell': 'spm'}})
     pnr = p / 'phase3/stage3/pnr'
-    write(pnr / 'spm.def', 'VERSION 5.8 ;\nDESIGN chip_top ;\nCOMPONENTS 0 ;\n')
-    write(pnr / 'spm_pnr.v', 'module chip_top(); endmodule\n')
+    write(pnr / 'spm.def', 'VERSION 5.8 ;\nDESIGN spm ;\nCOMPONENTS 0 ;\n')
+    write(pnr / 'spm_pnr.v', 'module spm(); endmodule\n')
     write(pnr / 'constraint.sdc', 'create_clock -period 24 [get_ports clk]\n')
     root = tmp_path / 'pdkroot'
     (root / 'gf').mkdir(parents=True)
@@ -194,8 +219,8 @@ def test_rcx_spefs_reach_the_direct_consumers_bound_by_sha(tmp_path, monkeypatch
     write(extracted / 'spef_corners/spm.max.spef', 'an older direct corner')
     receipt = p / 'reports/phase3/librelane_rcx_handoff.json'
     signoff.publish_spefs(result, 'spm', extracted / 'spm.spef', extracted / 'spef_corners', receipt)
-    assert (extracted / 'spm.spef').read_text() == 'rcx nom_*'
-    assert (extracted / 'spef_corners/spm.max.spef').read_text() == 'rcx max_*'
+    assert (extracted / 'spm.spef').read_text() == RCX_FIXTURE_SPEFS['nom_*']
+    assert (extracted / 'spef_corners/spm.max.spef').read_text() == RCX_FIXTURE_SPEFS['max_*']
     runner = importlib.import_module('phase3_one_shot_runner')
     handed = runner._librelane_handed_spefs(receipt)
     assert sorted(handed) == ['max', 'min', 'nom']
@@ -264,6 +289,13 @@ SPEF = '''*SPEF "IEEE 1481-1998"
 2 *2:1 *1:2 2.0
 *END
 '''
+
+
+RCX_FIXTURE_SPEFS = {
+    'nom_*': '// SOURCE_FIXTURE nominal; no native extraction claim\n' + SPEF.replace('*DESIGN "chip_top"', '*DESIGN "spm"'),
+    'min_*': '// SOURCE_FIXTURE minimum; no native extraction claim\n' + SPEF.replace('*DESIGN "chip_top"', '*DESIGN "spm"'),
+    'max_*': '// SOURCE_FIXTURE maximum; no native extraction claim\n' + SPEF.replace('*DESIGN "chip_top"', '*DESIGN "spm"'),
+}
 
 
 def test_spef_census_splits_grounded_and_coupling_in_pf(tmp_path):

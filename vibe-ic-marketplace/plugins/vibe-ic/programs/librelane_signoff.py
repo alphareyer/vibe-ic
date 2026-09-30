@@ -54,7 +54,7 @@ from _atomic_artefact import write_json  # noqa: E402
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
 from librelane_contract import (PDK_GUEST_ROOT, Refusal, _load, digest, handoff_to_direct,  # noqa: E402
                                 resolve_step_configs, run_chain, run_container,
-                                state_from_direct)
+                                state_from_direct, validate_rcx_receipt)
 
 STEPS = ('OpenROAD.RCX', 'OpenROAD.STAPostPNR')
 #: Where the extra corner Tcl lives in the project, and its provenance.
@@ -125,6 +125,10 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str, *,
     overlay = ({'STA_EXTRA_CORNER_TCL_FILE': ('dir::' + EXTRA_TCL, DERATE_SOURCE +
                                               '; report body: vibe-ic step-23 emitters')}
                if extra else None)
+    # The RCX authority must read the technology of the route it extracts,
+    # including its recorded via legalization (also used by step 32).
+    import librelane_pv_signoff as pv
+    overlay = {**(overlay or {}), **(pv.tech_lef_overlay(project) or {})}
     configs = resolve_step_configs(project, image, pdk, list(STEPS), pdk_root=pdk_root,
                                    folder='22-config', overlay=overlay)
     rulesets = _load(configs['OpenROAD.RCX']).get('RCX_RULESETS') or {}
@@ -158,6 +162,8 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str, *,
     spefs = _load(folders[0] / 'state_out.json').get('spef') or {}
     if not isinstance(spefs, dict) or not spefs:
         raise Refusal('LL_RCX_NO_SPEF', str(folders[0] / 'state_out.json'))
+    if extract:
+        bind_rcx_spefs(folders[0], state)
     return {'rcx': folders[0] if extract else None,
             'sta': folders[-1] if time else None,
             'spef': {pattern: Path(path) for pattern, path in spefs.items()},
@@ -172,6 +178,12 @@ def rc_corner(pattern: str) -> str:
 def publish_spefs(result: dict, top: str, nominal: Path, corner_dir: Path,
                   receipt: Path) -> dict[str, Path]:
     """Hand the tool's SPEFs to the paths the direct consumers read."""
+    folder = Path(result['rcx'])
+    binding = bind_rcx_spefs(folder, folder / 'state_in.json')
+    produced = _load(folder / 'state_out.json')['spef']
+    if ({k: str(v) for k, v in result['spef'].items()} != produced or
+            top != _load(folder / 'config.json').get('DESIGN_NAME')):
+        raise Refusal('LL_RCX_OUTPUT_UNBOUND', 'publication population or top differs from producer')
     targets: dict[str, Path] = {}
     for pattern in result['spef']:
         name = rc_corner(pattern)
@@ -190,6 +202,14 @@ def publish_spefs(result: dict, top: str, nominal: Path, corner_dir: Path,
     nominal_doc = handoff_to_direct(result['rcx'] / 'state_out.json',
                                     {f'spef:{nominal_pattern}': nominal},
                                     receipt.with_name(receipt.stem + '_nominal.json'))
+    # Each copy must remain the receipt-bound producer output, including the
+    # nominal alias. A source edit during copying must not acquire authority.
+    output_hashes = binding['output_sha256']
+    for handoff in (doc, nominal_doc):
+        for view, row in handoff['views'].items():
+            expected = output_hashes[view.partition(':')[2]]
+            if row['source_sha256'] != expected or row['dest_sha256'] != expected:
+                raise Refusal('LL_RCX_OUTPUT_UNBOUND', f'{view}: publication bytes changed')
     handed = {rc_corner(view.partition(':')[2]): Path(row['dest'])
               for view, row in doc['views'].items()}
     handed['__nominal__'] = Path(nominal_doc['views'][f'spef:{nominal_pattern}']['dest'])
@@ -197,6 +217,88 @@ def publish_spefs(result: dict, top: str, nominal: Path, corner_dir: Path,
 
 
 # --- SPEF census -----------------------------------------------------------
+
+def bind_rcx_spefs(folder: Path, basis_state: Path,
+                  corners: Optional[list[str]] = None) -> dict:
+    """Audit native RCX outputs on the actual route; never extract a replacement.
+
+    Both step 22's publication and step 32's timing consume this authority.
+    A carried SPEF from an earlier step is not this producer's output.
+    """
+    state_path = folder / 'state_out.json'
+    try:
+        producer = validate_rcx_receipt(folder)
+        state, before, basis, cfg = (_load(p) for p in (
+            state_path, folder / 'state_in.json', basis_state, folder / 'config.json'))
+        rules = cfg.get('RCX_RULESETS') or {}
+        spefs = state.get('spef') or {}
+        if not isinstance(rules, dict) or not rules or not isinstance(spefs, dict):
+            raise ValueError('rulesets or SPEF map absent')
+        if set(spefs) != set(rules):
+            raise ValueError('complete SPEF population differs from owning rulesets')
+        aliases = [rc_corner(pattern) for pattern in spefs]
+        if len(set(aliases)) != len(aliases):
+            raise ValueError('RC publication aliases collide')
+        for view in ('def', 'odb', 'sdc'):
+            if view == 'def' or basis.get(view):
+                if not basis.get(view) or not before.get(view) or not state.get(view):
+                    raise ValueError(f'{view} route basis absent')
+                hashes = {digest(Path(doc[view])) for doc in (basis, before, state)}
+                recorded = producer['input']['state_files'].get(before[view])
+                if not recorded or hashes != {recorded}:
+                    raise ValueError(f'{view} route basis differs')
+        declared = cfg.get('STA_CORNERS')
+        if not isinstance(declared, list) or not declared or any(
+                not isinstance(c, str) or not c for c in declared):
+            raise ValueError('no declared scenes')
+        required = list(dict.fromkeys([*declared, *(corners or [])]))
+        # Audit every adopted output, including ones not selected by a caller.
+        censuses = {}
+        for pattern, source in spefs.items():
+            census = spef_census(Path(source))
+            recorded = producer['sha256'].get(str(
+                Path(source).resolve().relative_to(folder.resolve())))
+            if census['sha256'] != recorded:
+                raise ValueError(f'{pattern}: SPEF changed during census')
+            if not cfg.get('DESIGN_NAME') or census['design'] != cfg['DESIGN_NAME']:
+                raise ValueError(f'{pattern}: SPEF top differs from producer design')
+            if not census['net_count'] or census['total_pf'] <= 0:
+                raise ValueError(f'{pattern}: native RCX capacitance absent')
+            if census['coupling_rows'] == 0 or census['coupling_pf'] <= 0:
+                raise ValueError(f'{pattern}: native ruleset extraction has no coupling')
+            censuses[pattern] = census
+        bound = {}
+        for corner in required:
+            matched_rules = [(k, v) for k, v in rules.items()
+                             if k == corner or fnmatch.fnmatch(corner, k)]
+            matched_spefs = [(k, v) for k, v in spefs.items()
+                             if k == corner or fnmatch.fnmatch(corner, k)]
+            if len(matched_rules) != 1 or len(matched_spefs) != 1:
+                raise ValueError(f'{corner}: ambiguous or missing native RCX scene')
+            pattern, source = matched_spefs[0]
+            if pattern != matched_rules[0][0]:
+                raise ValueError(f'{corner}: SPEF pattern differs from ruleset')
+            path = Path(source).resolve()
+            if not path.is_relative_to(folder.resolve()) or not path.is_file():
+                raise ValueError(f'{corner}: native RCX SPEF absent or carried from another producer')
+            census = censuses[pattern]
+            if not census['net_count'] or not math.isfinite(census['total_pf']) or census['total_pf'] <= 0:
+                raise ValueError(f'{corner}: native RCX capacitance absent')
+            if census['coupling_rows'] == 0 or census['coupling_pf'] <= 0:
+                raise ValueError(f'{corner}: native ruleset extraction has no coupling')
+            bound[corner] = {'pattern': pattern, 'path': str(path),
+                             'ruleset': matched_rules[0][1],
+                             **{k: census[k] for k in ('sha256', 'net_count', 'total_pf',
+                                                       'ground_pf', 'coupling_pf', 'coupling_rows')}}
+        return {'producer': 'OpenROAD.RCX', 'state': str(state_path),
+                'producer_receipt_sha256': digest(folder / 'vibeic_receipt.json'),
+                'output_sha256': {pattern: row['sha256'] for pattern, row in censuses.items()},
+                'state_sha256': digest(state_path), 'config_sha256': digest(folder / 'config.json'),
+                'basis_state_sha256': digest(basis_state),
+                'route_sha256': {k: digest(Path(basis[k])) for k in ('def', 'odb', 'sdc') if basis.get(k)},
+                'scenes': bound}
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise Refusal('LL_RCX_OUTPUT_UNBOUND', f'{folder}: {exc}') from exc
 
 def spef_census(path: Path) -> dict:
     """Per-net total C and the split into grounded and coupling entries, in pF.
@@ -214,42 +316,91 @@ def spef_census(path: Path) -> dict:
     coupling_rows = 0
     section = None
     current = None
+    design = None
+
+    def finite_number(value: str) -> float:
+        number = float(value)
+        if not math.isfinite(number) or number < 0:
+            raise ValueError(f'nonfinite or negative census value: {value}')
+        return number
+
+    def resolved_node(value: str) -> str:
+        head = value.partition(':')[0]
+        if head.startswith('*') and head[1:].isdigit() and head not in names:
+            raise ValueError(f'unresolved SPEF name: {value}')
+        return names.get(value, value)
+
     with Path(path).open(errors='replace') as stream:
         for raw in stream:
             words = raw.split()
-            if not words:
+            if not words or words[0].startswith('//'):
                 continue
             head = words[0]
-            if head == '*C_UNIT' and len(words) >= 3:
+            if head == '*DESIGN':
+                match = re.fullmatch(r'\*DESIGN\s+"([^"]+)"\s*', raw.strip())
+                if not match or design is not None:
+                    raise ValueError('missing or ambiguous SPEF design')
+                design = match.group(1)
+            elif head == '*C_UNIT':
+                if len(words) != 3 or scale is not None:
+                    raise ValueError('missing or ambiguous SPEF capacitance unit')
                 unit = {'FF': 1e-3, 'PF': 1.0}.get(words[2].upper())
                 if unit is None:
                     raise Refusal('LL_SPEF_UNIT_UNKNOWN', f'{path}: {raw.strip()}')
-                scale = float(words[1]) * unit
+                scale = finite_number(words[1]) * unit
+                if scale <= 0:
+                    raise ValueError('nonpositive SPEF capacitance unit')
             elif head == '*NAME_MAP':
                 section = 'map'
             elif section == 'map' and head.startswith('*') and head[1:].isdigit() and len(words) >= 2:
                 names[head] = words[1]
-            elif head == '*D_NET' and len(words) >= 3:
+            elif head == '*D_NET':
+                if len(words) != 3:
+                    raise ValueError('missing SPEF net capacitance')
                 section = 'net'
-                current = names.get(words[1], words[1])
-                nets[current] = float(words[2])
+                current = resolved_node(words[1])
+                if current in nets:
+                    raise ValueError(f'duplicate SPEF net: {current}')
+                nets[current] = finite_number(words[2])
             elif head == '*CAP':
+                if current is None:
+                    raise ValueError('capacitance row has no owning net')
                 section = 'cap'
-            elif head in ('*RES', '*CONN', '*END', '*INDUC'):
+            elif head == '*RES':
+                section = 'res'
+            elif head in ('*CONN', '*END', '*INDUC'):
                 section = 'net' if head != '*END' else None
-            elif section == 'cap' and head.isdigit():
+                if head == '*END':
+                    current = None
+            elif section == 'cap':
+                if not head.isdigit():
+                    raise ValueError('unresolved SPEF capacitance row')
+                for node in words[1:-1]:
+                    resolved_node(node)
                 if len(words) == 3:
-                    ground += float(words[2])
-                elif len(words) >= 4:
-                    coupling += float(words[3])
+                    ground += finite_number(words[2])
+                elif len(words) == 4:
+                    coupling += finite_number(words[3])
                     coupling_rows += 1
+                else:
+                    raise ValueError('missing or malformed SPEF capacitance row')
+            elif section == 'res':
+                if not head.isdigit() or len(words) != 4:
+                    raise ValueError('missing or malformed SPEF resistance row')
+                resolved_node(words[1]); resolved_node(words[2])
+                finite_number(words[3])
     if scale is None:
         raise Refusal('LL_SPEF_UNIT_UNDECLARED', str(path))
-    return {'path': str(path), 'sha256': digest(Path(path)), 'unit_pf': scale,
-            'nets': {n: v * scale for n, v in nets.items()},
-            'net_count': len(nets), 'total_pf': sum(nets.values()) * scale,
-            'ground_pf': ground * scale, 'coupling_pf': coupling * scale,
-            'coupling_rows': coupling_rows}
+    result = {'path': str(path), 'sha256': digest(Path(path)), 'design': design,
+              'unit_pf': scale, 'nets': {n: v * scale for n, v in nets.items()},
+              'net_count': len(nets), 'total_pf': sum(nets.values()) * scale,
+              'ground_pf': ground * scale, 'coupling_pf': coupling * scale,
+              'coupling_rows': coupling_rows}
+    if any(not math.isfinite(value) for value in
+           (result['total_pf'], result['ground_pf'], result['coupling_pf'],
+            *result['nets'].values())):
+        raise ValueError('nonfinite scaled SPEF census')
+    return result
 
 
 def compare_extraction(direct: dict[str, Path], tool: dict[str, Path],

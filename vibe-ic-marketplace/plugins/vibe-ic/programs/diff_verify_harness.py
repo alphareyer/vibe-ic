@@ -48,15 +48,20 @@ designer-vs-reference mismatch with the cycle and signal. The PROGRAM does NOT
 author the reference (that is the AI judgment recorded in the issue's
 why_not_bucket_a) — it only DRIVES the differential comparison.
 
-It reads ONLY the RTL header (to parse clk + input/output ports), the reference
-model, and the vectors. It has NO access to any oracle, hidden TB, or dataset:
+It reads ONLY the supplied RTL and its declared includes, the reference model,
+and the vectors. Icarus preprocesses the one ordered root source using native
+builtins and include lookup from the captured cwd; Slang elaborates that frozen
+file, which Icarus also simulates. User -D/-I/-P options are not part of this API;
+parameters use declared defaults. Native port sizes must match before comparing
+samples. A text-only parse_ports call cannot certify executable agreement.
+It has NO access to any oracle, hidden TB, or dataset:
 a misread cannot leak in through the comparison, because BOTH sides come from
 the spec-reader, not from the scorer.
 
 Tool availability
 =================
-The live RTL side is iverilog/vvp. A live call is gated on `shutil.which`. When
-iverilog/vvp is ABSENT the run is reported `SKIP (tool unavailable)` with a
+Port elaboration uses pyslang; the live RTL side uses iverilog/vvp. A missing
+pyslang import or absent iverilog/vvp yields `SKIP (tool unavailable)` with
 disclosure and rc 0 — NEVER a faked AGREE (mirrors the refuse-don't-fake
 doctrine of harness_exact_selfverify #688 / cvdp_gate #604). The reference-side
 logic (`ref(seq)` + the per-cycle compare) is exercised independently of
@@ -65,17 +70,18 @@ iverilog so CI always covers the comparator.
 Exit codes
 ==========
     0  AGREE — every cycle of every vector matched the reference
-       (OR a disclosed SKIP because iverilog/vvp was absent — never a fake AGREE)
+       (OR a disclosed SKIP because a tool was absent — never a fake AGREE)
     1  MISMATCH — the first diverging cycle/signal is printed
     2  bad input (RTL/ref/port parse failure, bad --vectors, etc.)
 
-chip-AGNOSTIC: pure structure — module/port header parse, vector generation,
+chip-AGNOSTIC: pure structure — Slang port elaboration, vector generation,
 iverilog/vvp drive, per-cycle integer compare. No chip / vendor / SKU literal,
 no dataset access.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import random
@@ -87,7 +93,7 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# ── RTL header parse (reuse the comment-stripped-view doctrine) ──────────────
+# ── RTL port elaboration; comment-stripped module discovery ──────────────────
 _LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _STRING_LIT_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
@@ -98,27 +104,6 @@ def _strip_comments(text: str) -> str:
     t = _LINE_COMMENT_RE.sub(" ", t)
     return _STRING_LIT_RE.sub('""', t)
 
-
-_MODULE_HDR_RE = re.compile(
-    r"\bmodule\s+([A-Za-z_]\w*)\s*"
-    r"(?:#\s*\((?:[^()]|\([^()]*\))*\)\s*)?"   # optional #(params)
-    r"(?:\((?P<ports>(?:[^()]|\([^()]*\))*)\))?\s*;",
-    re.DOTALL)
-
-# ANSI port: `input wire [7:0] foo`, `output reg bar`, `inout baz`. Captures
-# direction, optional [msb:lsb] range, and the name.
-_ANSI_PORT_RE = re.compile(
-    r"\b(input|output|inout)\b"
-    r"(?:\s+(?:wire|reg|logic|bit|signed|unsigned))*"
-    r"(?:\s*\[\s*(\d+)\s*:\s*(\d+)\s*\])?\s*"
-    r"([A-Za-z_]\w*)")
-
-# non-ANSI body decl: `input [7:0] foo, bar;` / `output reg q;`
-_NONANSI_PORT_RE = re.compile(
-    r"\b(input|output|inout)\b"
-    r"(?:\s+(?:wire|reg|logic|bit|signed|unsigned))*"
-    r"(?:\s*\[\s*(\d+)\s*:\s*(\d+)\s*\])?\s*"
-    r"((?:[A-Za-z_]\w*\s*,\s*)*[A-Za-z_]\w*)\s*;")
 
 _MODULE_NAME_RE = re.compile(r"\bmodule\s+([A-Za-z_]\w*)", re.MULTILINE)
 
@@ -149,68 +134,71 @@ def module_names(code: str) -> List[str]:
     return list(seen.keys())
 
 
-def _width(msb: Optional[str], lsb: Optional[str]) -> int:
-    if msb is None or lsb is None:
-        return 1
-    return abs(int(msb) - int(lsb)) + 1
-
-
-def parse_ports(code: str, top: Optional[str]) -> Tuple[Optional[str],
+def parse_ports(code: str, top: Optional[str], *,
+                source_path: Optional[Path] = None) -> Tuple[Optional[str],
                                                         List[Port], str]:
-    """Parse the named module's (or sole module's) port list into Port objects
-    with direction + bit-width. Handles ANSI (header) and non-ANSI (body)."""
-    src = _strip_comments(code)
-    # Locate the requested module header (default: first/sole module).
-    chosen = None
-    for m in _MODULE_HDR_RE.finditer(src):
-        if top is None or m.group(1) == top:
-            chosen = m
-            break
-    if chosen is None:
-        names = module_names(code)
-        if top and top not in names:
-            return None, [], (f"requested --top {top!r} not declared "
-                              f"(declared: {names or 'none'})")
+    """Use Slang's elaborated ports and declared parameter defaults.
+
+    Slang supplies names, directions, packed bit widths and declaration order;
+    this adapter never evaluates HDL range arithmetic. No synthesis is required.
+    Unsupported port types or unresolved ranges refuse before generating a TB.
+    The existing first-module default and widest-port tie order are preserved.
+    Text-only calls are introspection, not executable verification. diff_verify
+    supplies the frozen Icarus-preprocessed file used by simulation.
+    """
+    try:
+        import pyslang as slang
+    except ImportError as exc:
+        return None, [], f"DIFF_PORT_TOOL_UNAVAILABLE: pyslang absent: {exc}"
+
+    names = module_names(code)
+    if top and top not in names:
+        return None, [], (f"requested --top {top!r} not declared "
+                          f"(declared: {names or 'none'})")
+    if not names:
         return None, [], "no module declaration found in RTL"
-    name = chosen.group(1)
-    ports_blob = chosen.group("ports") or ""
-    ports: Dict[str, Port] = {}
-    order: List[str] = []
-    # ANSI directions in the header.
-    for pm in _ANSI_PORT_RE.finditer(ports_blob):
-        nm = pm.group(4)
-        if nm not in ports:
-            ports[nm] = Port(nm, pm.group(1).lower(),
-                             _width(pm.group(2), pm.group(3)))
-            order.append(nm)
-    # bare header names (non-ANSI — directions live in the body).
-    header_bare: List[str] = []
-    if ports_blob.strip():
-        for nm in re.findall(r"[A-Za-z_]\w*", ports_blob):
-            if nm in ("input", "output", "inout", "wire", "reg", "logic",
-                      "bit", "signed", "unsigned"):
-                continue
-            if nm not in ports and nm not in header_bare:
-                header_bare.append(nm)
-    # non-ANSI body declarations.
-    body = src[chosen.end():]
-    em = re.search(r"\bendmodule\b", body)
-    if em:
-        body = body[:em.start()]
-    for pm in _NONANSI_PORT_RE.finditer(body):
-        direction = pm.group(1).lower()
-        w = _width(pm.group(2), pm.group(3))
-        for nm in re.split(r"\s*,\s*", pm.group(4).strip()):
-            nm = nm.strip()
-            if nm and nm not in ports:
-                ports[nm] = Port(nm, direction, w)
-                if nm not in order:
-                    order.append(nm)
-    for nm in header_bare:
-        if nm not in ports:
-            ports[nm] = Port(nm, "unknown", 1)
-            order.append(nm)
-    return name, [ports[n] for n in order], ""
+    name = top or names[0]
+    try:
+        options = slang.ast.CompilationOptions()
+        options.topModules = {name}
+        bag = slang.Bag()
+        bag.compilationOptions = options
+        compilation = slang.ast.Compilation(bag)
+        tree = (slang.syntax.SyntaxTree.fromFile(str(source_path))
+                if source_path is not None else slang.syntax.SyntaxTree.fromText(code))
+        compilation.addSyntaxTree(tree)
+        instances = compilation.getRoot().topInstances
+        diagnostics = compilation.getAllDiagnostics()
+        if any(d.isError() for d in diagnostics):
+            detail = slang.DiagnosticEngine.reportAll(
+                compilation.sourceManager, diagnostics).strip()
+            return None, [], f"DIFF_PORT_ELABORATION_FAILED: {detail}"
+        selected = [i for i in instances if i.name == name]
+        if len(selected) != 1:
+            return None, [], f"DIFF_PORT_TOP_UNRESOLVED: {name!r}"
+        directions = {slang.ast.ArgumentDirection.In: "input",
+                      slang.ast.ArgumentDirection.Out: "output",
+                      slang.ast.ArgumentDirection.InOut: "inout"}
+        ports = []
+        for port in selected[0].body.portList:
+            if not isinstance(port, slang.ast.PortSymbol):
+                return None, [], (f"DIFF_PORT_UNSUPPORTED: {port.name!r} "
+                                  "is not a plain integral port")
+            # The emitted TB uses ordinary identifiers and packed bit vectors.
+            # Escaped names and unpacked/interface/ref ports need another TB
+            # shape, so refuse them instead of inventing a scalar connection.
+            token = getattr(port.syntax, "name", None)
+            if (not re.fullmatch(r"[A-Za-z_]\w*", port.name)
+                    or token is None or token.rawText.startswith("\\")
+                    or port.direction not in directions
+                    or not port.type.isIntegral or port.type.bitWidth <= 0):
+                return None, [], (f"DIFF_PORT_UNSUPPORTED: {port.name!r} "
+                                  f"has unsupported name, direction or type {port.type}")
+            ports.append(Port(port.name, directions[port.direction],
+                              port.type.bitWidth))
+        return name, ports, ""
+    except Exception as exc:  # tool/API failure must never mint guessed ports
+        return None, [], f"DIFF_PORT_ELABORATION_FAILED: {type(exc).__name__}: {exc}"
 
 
 def _classify_ports(ports: List[Port]) -> Tuple[Optional[Port], List[Port],
@@ -424,25 +412,133 @@ def _run(cmd: List[str], timeout: int = 120,
         return 127, "", str(e)
 
 
+def _bind_rtl_unit(rtl_path: Path, top: Optional[str], workdir: Path):
+    """Freeze native Icarus preprocessing, then elaborate those exact bytes.
+
+    This API has one ordered root source, no -D/-I/-P options and declared
+    parameter defaults only. Includes use Icarus's native search from the
+    captured cwd. Slang and every simulation consume the same flattened file;
+    neither reopens the roots/includes or independently chooses macro branches.
+    """
+    compiler, simulator = shutil.which("iverilog"), shutil.which("vvp")
+    if compiler is None or simulator is None:
+        # Diagnostic-only Slang refusal preserves unsupported-port reporting
+        # without certifying any executable widths when preprocessing is absent.
+        _, _, error = parse_ports(rtl_path.read_text(errors="replace"), top)
+        if error and not error.startswith("DIFF_PORT_TOOL_UNAVAILABLE:"):
+            return None, [], None, {}, error + " — NOT_VERIFIED: iverilog/vvp absent"
+        return None, [], None, {}, (error or "DIFF_PORT_TOOL_UNAVAILABLE: iverilog/vvp absent")
+    source = rtl_path.resolve()
+    cwd = str(Path.cwd().resolve())
+    original_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+    unit, deps = workdir / "rtl_unit.sv", workdir / "dependencies.txt"
+    argv = [compiler, "-g2012", "-E", "-Mall=" + str(deps),
+            "-o", str(unit), str(source)]
+    rc, out, err = _run(argv, cwd=cwd)
+    context = {"ordered_sources": [str(source)], "source_sha256": original_sha,
+               "working_directory": cwd, "language": "SystemVerilog-2012",
+               "defines": [], "include_dirs": [], "parameter_overrides": [],
+               "parameter_policy": "declared defaults only; no override API",
+               "preprocessor": "native Icarus builtins and include resolution",
+               "preprocessing_argv": argv, "preprocessing_rc": rc,
+               "compiler": compiler, "simulator": simulator}
+    if rc != 0 or not unit.is_file() or not deps.is_file():
+        detail = "; ".join(((out or "") + "\n" + (err or "")).strip().splitlines()[:6])
+        return None, [], None, context, f"DIFF_PORT_PREPROCESS_FAILED: rc={rc}: {detail}"
+    if hashlib.sha256(source.read_bytes()).hexdigest() != original_sha:
+        return None, [], None, context, "DIFF_PORT_CONTEXT_CHANGED: root changed during preprocessing"
+    # Dependencies are the native preprocessor's ordered observations. Their
+    # hashes describe files after preprocessing; the frozen unit is the exact
+    # executable input, even if a source subsequently changes.
+    dependencies = []
+    for filename in deps.read_text().splitlines():
+        path = Path(filename).resolve()
+        dependencies.append({"path": str(path),
+                             "sha256_after_preprocessing": hashlib.sha256(path.read_bytes()).hexdigest()})
+    raw_unit = unit.read_bytes()
+    unit_sha = hashlib.sha256(raw_unit).hexdigest()
+    text = raw_unit.decode()
+    name, ports, error = parse_ports(text, top, source_path=unit)
+    if error:
+        return None, [], None, context, error
+    if hashlib.sha256(unit.read_bytes()).hexdigest() != unit_sha:
+        return None, [], None, context, "DIFF_PORT_CONTEXT_CHANGED: unit changed during elaboration"
+    import pyslang
+    context.update({"dependencies": dependencies, "selected_top": name,
+                    "executable_unit": str(unit),
+                    "executable_unit_sha256": unit_sha,
+                    "elaborator": "pyslang", "elaborator_version": pyslang.__version__,
+                    "ports": [{"name": p.name, "direction": p.direction,
+                               "width": p.width} for p in ports]})
+    for label, executable in (("compiler", compiler), ("simulator", simulator)):
+        rc, out, err = _run([executable, "-V"], cwd=cwd)
+        if rc != 0:
+            return None, [], None, context, f"DIFF_PORT_CONTEXT_FAILED: {label} identity rc={rc}"
+        context[label + "_version"] = (out + err).strip()
+        context[label + "_version_rc"] = rc
+        context[label + "_sha256"] = hashlib.sha256(Path(executable).read_bytes()).hexdigest()
+    context["binding_sha256"] = hashlib.sha256(
+        json.dumps(context, sort_keys=True).encode()).hexdigest()
+    return name, ports, unit, context, ""
+
+
 def run_rtl_sequence(rtl_path: Path, top: str, clk: Optional[Port],
                      resets: List[Port], din: Port, dout: Port,
-                     seq: List[int], workdir: Path) -> Tuple[Optional[List[int]],
+                     seq: List[int], workdir: Path,
+                     binding: Optional[Dict] = None) -> Tuple[Optional[List[int]],
                                                              str]:
     """Compile + run one input sequence through the RTL, returning the sampled
     output sequence (one int per cycle) or (None, error). The caller has
     already confirmed iverilog/vvp are present."""
+    compiler, simulator, cwd = "iverilog", "vvp", None
+    if binding is not None:
+        try:
+            identity = {k: v for k, v in binding.items() if k != "binding_sha256"}
+            if (hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+                    != binding["binding_sha256"] or top != binding["selected_top"]
+                    or str(rtl_path) != binding["executable_unit"]
+                    or hashlib.sha256(rtl_path.read_bytes()).hexdigest()
+                    != binding["executable_unit_sha256"]):
+                return None, "DIFF_PORT_CONTEXT_CHANGED: unit, selected top or context changed"
+            port_contract = {p["name"]: (p["direction"], p["width"]) for p in binding["ports"]}
+            if any(port_contract.get(p.name) != (p.direction, p.width)
+                   for p in [din, dout, *resets, *([clk] if clk else [])]):
+                return None, "DIFF_PORT_CONTEXT_CHANGED: selected ports changed"
+            compiler, simulator = binding["compiler"], binding["simulator"]
+            cwd = binding["working_directory"]
+            for label, executable in (("compiler", compiler), ("simulator", simulator)):
+                if hashlib.sha256(Path(executable).read_bytes()).hexdigest() != binding[label + "_sha256"]:
+                    return None, "DIFF_PORT_CONTEXT_CHANGED: " + label + " changed"
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            return None, f"DIFF_PORT_CONTEXT_CHANGED: {exc}"
     tb = _build_tb(top, clk, resets, din, dout, seq)
+    mismatch_marker = None
+    if binding is not None:
+        # Native sizing is checked before any CYC sample can be compared. A
+        # frontend disagreement must not truncate a wider real DUT into AGREE.
+        mismatch_marker = "DIFF_PORT_CONTEXT_MISMATCH:" + binding["binding_sha256"] + ":"
+        checks = ["  initial begin"]
+        for port in binding["ports"]:
+            checks += [f"    if ($bits(dut.{port['name']}) != {port['width']}) begin",
+                       f"      $display(\"{mismatch_marker}{port['name']}\");",
+                       "      $finish;", "    end"]
+        checks.append("  end")
+        tb = tb.replace("  always #5", "\n".join(checks) + "\n  always #5", 1)
     tb_path = workdir / "diff_tb.sv"
     tb_path.write_text(tb)
     binp = workdir / "diff_sim.vvp"
-    rc, out, err = _run(["iverilog", "-g2012", "-o", str(binp),
-                         "-s", "diff_tb", str(rtl_path), str(tb_path)])
+    rc, out, err = _run([compiler, "-g2012", "-o", str(binp),
+                         "-s", "diff_tb", str(rtl_path), str(tb_path)], cwd=cwd)
     if rc != 0:
         blob = ((out or "") + "\n" + (err or "")).strip()
         return None, ("RTL+diff-TB did not compile: "
                       + "; ".join(blob.splitlines()[:4]))
-    rc2, out2, err2 = _run(["vvp", str(binp)])
+    rc2, out2, err2 = _run([simulator, str(binp)], cwd=cwd)
     sim = (out2 or "")
+    if binding is not None and rc2 != 0:
+        return None, f"DIFF_PORT_EXECUTION_FAILED: native simulator rc={rc2}"
+    if mismatch_marker is not None and mismatch_marker in sim:
+        return None, "DIFF_PORT_CONTEXT_MISMATCH: native Icarus port sizing differs from Slang"
     samples: Dict[int, int] = {}
     for m in _CYC_RE.finditer(sim):
         samples[int(m.group(1))] = int(m.group(2))
@@ -469,15 +565,36 @@ def diff_verify(rtl_path: Path, ref_path: Path, top: Optional[str],
                            "(FLOOR per #697)"),
         "complement_to": ["#697 spec_coverage_check (deterministic dimension "
                           "coverage)", "#699 timing/encoding reading disciplines"],
-        "reads_only": "RTL header + independent reference + generated vectors "
+        "reads_only": "supplied RTL/includes + independent reference + generated vectors "
                       "(no oracle / hidden TB / dataset)",
         "vectors": vectors,
     }
-    code = rtl_path.read_text(errors="replace")
-    name, ports, perr = parse_ports(code, top)
+    with tempfile.TemporaryDirectory(prefix="diffvh_") as scratch:
+        return _diff_verify_bound(rtl_path, ref_path, top, vectors, n_random,
+                                  seed, require_tools, report, Path(scratch))
+
+
+def _diff_verify_bound(rtl_path, ref_path, top, vectors, n_random, seed,
+                       require_tools, report, workdir):
+    kinds, verr = _parse_vectors_arg(vectors)
+    if verr:
+        report["verdict"] = "ERROR"
+        report["reason"] = verr
+        return report
+    report["vector_kinds"] = kinds
+
+    try:
+        name, ports, unit, binding, perr = _bind_rtl_unit(rtl_path, top, workdir)
+    except (OSError, ValueError) as exc:
+        name, ports, unit, binding, perr = None, [], None, {}, f"DIFF_PORT_CONTEXT_FAILED: {exc}"
+    report["compilation_context"] = binding
     if name is None:
         report["verdict"] = "ERROR"
         report["reason"] = "port parse failed: " + perr
+        if perr.startswith("DIFF_PORT_TOOL_UNAVAILABLE:"):
+            report["tool_available"] = False
+            report["verdict"] = "ERROR" if require_tools else "SKIP"
+            report["reason"] += " — NOT_VERIFIED: the RTL ports were not elaborated (refuse-don't-fake)"
         return report
     report["resolved_top"] = name
     clk, resets, din, dout = _classify_ports(ports)
@@ -499,13 +616,11 @@ def diff_verify(rtl_path: Path, ref_path: Path, top: Optional[str],
     report["sampled_output"] = {"name": dout_port.name, "width": dout_port.width}
     report["clk"] = clk.name if clk else None
     report["resets_held_inactive"] = [r.name for r in resets]
-
-    kinds, verr = _parse_vectors_arg(vectors)
-    if verr:
-        report["verdict"] = "ERROR"
-        report["reason"] = verr
-        return report
-    report["vector_kinds"] = kinds
+    report["primary_io_scope"] = ("one widest data input and one widest output, first on ties; "
+                                  "unsigned packed-bit reference vectors; not multi-input semantic verification")
+    report["undriven_data_inputs"] = [p.name for p in din if p is not din_port]
+    report["unsampled_outputs"] = [p.name for p in dout if p is not dout_port]
+    report["unconnected_inout_ports"] = [p.name for p in ports if p.direction == "inout"]
 
     try:
         ref = load_reference(ref_path)
@@ -530,34 +645,30 @@ def diff_verify(rtl_path: Path, ref_path: Path, top: Optional[str],
         return report
     report["tool_available"] = True
 
-    workdir = Path(tempfile.mkdtemp(prefix="diffvh_"))
-    try:
-        for si, seq in enumerate(seqs):
-            rtl_out, rerr = run_rtl_sequence(rtl_path, name, clk, resets,
-                                             din_port, dout_port, seq, workdir)
-            if rtl_out is None:
-                report["verdict"] = "ERROR"
-                report["reason"] = f"sequence {si}: {rerr}"
-                return report
-            try:
-                ref_out = list(ref(list(seq)))
-            except Exception as e:  # noqa: BLE001
-                report["verdict"] = "ERROR"
-                report["reason"] = f"reference ref(seq) raised on seq {si}: {e}"
-                return report
-            ref_out = [int(v) & _mask(dout_port.width) for v in ref_out]
-            agree, mm = compare_sequences(rtl_out, ref_out, dout_port.name)
-            if not agree and mm is not None:
-                report["verdict"] = "MISMATCH"
-                report["first_mismatch"] = {**mm, "sequence": si}
-                report["reason"] = (
-                    f"DIFF at sequence {si} cycle {mm['cycle']} signal "
-                    f"{mm['signal']}: RTL={mm['rtl']} ref={mm['ref']} — the "
-                    f"designer's RTL diverges from the independently-derived "
-                    f"reference (an oversight misread, or a real RTL bug)")
-                return report
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    for si, seq in enumerate(seqs):
+        rtl_out, rerr = run_rtl_sequence(unit, name, clk, resets,
+                                         din_port, dout_port, seq, workdir, binding)
+        if rtl_out is None:
+            report["verdict"] = "ERROR"
+            report["reason"] = f"sequence {si}: {rerr}"
+            return report
+        try:
+            ref_out = list(ref(list(seq)))
+        except Exception as e:  # noqa: BLE001
+            report["verdict"] = "ERROR"
+            report["reason"] = f"reference ref(seq) raised on seq {si}: {e}"
+            return report
+        ref_out = [int(v) & _mask(dout_port.width) for v in ref_out]
+        agree, mm = compare_sequences(rtl_out, ref_out, dout_port.name)
+        if not agree and mm is not None:
+            report["verdict"] = "MISMATCH"
+            report["first_mismatch"] = {**mm, "sequence": si}
+            report["reason"] = (
+                f"DIFF at sequence {si} cycle {mm['cycle']} signal "
+                f"{mm['signal']}: RTL={mm['rtl']} ref={mm['ref']} — the "
+                f"designer's RTL diverges from the independently-derived "
+                f"reference (an oversight misread, or a real RTL bug)")
+            return report
 
     report["verdict"] = "AGREE"
     report["reason"] = (f"RTL agrees with the independent reference across all "
@@ -572,7 +683,8 @@ def main(argv=None) -> int:
                     "`ref(seq)`, cycle-accurately, over directed/random/boundary "
                     "vectors. Catches OVERSIGHT misreads single-self-TB passes; "
                     "does NOT beat genuine-ambiguity FLOOR.")
-    ap.add_argument("--rtl", required=True, help="the blind-authored RTL (.v/.sv)")
+    ap.add_argument("--rtl", required=True,
+                    help="one RTL source (.v/.sv), native includes from cwd, declared parameter defaults")
     ap.add_argument("--ref", required=True,
                     help="independent reference: a Python module exposing "
                          "`ref(seq)` (input-sequence → expected-output-sequence)")
@@ -587,7 +699,7 @@ def main(argv=None) -> int:
                     help="PRNG seed for the random vectors (deterministic)")
     ap.add_argument("--json", default=None, help="optional JSON report path")
     ap.add_argument("--require-tools", action="store_true",
-                    help="treat an absent iverilog/vvp as a hard error (exit 2) "
+                    help="treat an absent pyslang/iverilog/vvp as a hard error (exit 2) "
                          "for a CI/container run that MUST enforce")
     args = ap.parse_args(argv)
 

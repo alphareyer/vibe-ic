@@ -1,10 +1,14 @@
-"""Post-route timing measured with the direct signoff RCX recipe.
+"""Retained signoff-scene STA consumer of the shared OpenROAD.RCX output.
 
 LibreLane's RCX uses ``-lef_res``.  The direct Phase-3 signoff extracts with
 ``-corner_cnt 1 -max_res 50 -coupling_threshold 0.1``; on a routed candidate
 those recipes can disagree at a zero-slack boundary.  This module measures the
 same routed ODB at every declared RC/process scene before a controller accepts
-setup or hold closure.  It never changes a route or a constraint.
+setup or hold closure. It never changes a route or a constraint. The
+production step-32 caller supplies its own native RCX state; that path never
+extracts again. The legacy extraction entry remains for the explicit direct
+arm until its HARVEST destinations have merged. AOCV-or-flat scene handling
+and normalized serialized SDC are still owned here pending that migration.
 """
 from __future__ import annotations
 
@@ -135,12 +139,22 @@ def measure(ctx: dict[str, Any], repair_state: Path, out_dir: Path) -> dict[str,
     # Reuse one SPEF per RC ruleset.  The direct signoff's three parasitic
     # scenes (nom/min/max) can each serve every matching process library.
     parasitics: dict[str, Path] = {}
+    rcx_binding = None
+    if ctx.get('rcx_state'):
+        import librelane_signoff as signoff
+        rcx_state = Path(ctx['rcx_state'])
+        if ll.digest(rcx_state) != ctx.get('rcx_state_sha256'):
+            raise ll.Refusal('NATIVE_POSTROUTE_RCX_STATE_DRIFT', str(rcx_state))
+        rcx_binding = signoff.bind_rcx_spefs(rcx_state.parent, repair_state, list(corners))
     setup: dict[str, float] = {}
     hold: dict[str, float] = {}
     applied: dict[str, str] = {}
     for corner in corners:
         rules = _one(rulesets, corner, "RCX ruleset")
-        if rules not in parasitics:
+        if rcx_binding is not None:
+            spef = Path(rcx_binding['scenes'][corner]['path'])
+            parasitics[corner] = spef
+        elif rules not in parasitics:
             index = len(parasitics)
             spef = out_dir / f"rc_{index}.spef"
             script = out_dir / f"extract_{index}.tcl"
@@ -154,13 +168,14 @@ def measure(ctx: dict[str, Any], repair_state: Path, out_dir: Path) -> dict[str,
             script.write_text("\n".join(lines) + "\n")
             _run(ctx, script, spef)
             parasitics[rules] = spef
+        spef = parasitics[corner] if rcx_binding is not None else parasitics[rules]
         report = out_dir / f"sta_{corner}.rpt"
         script = out_dir / f"sta_{corner}.tcl"
         libs = _one(cell_libs, corner, "cell liberty")
         pads = _one(pad_libs, corner, "pad liberty") if pad_libs else []
         lines = [f"read_db {_q(odb)}"]
         lines += [f"read_liberty {_q(lib)}" for lib in [*libs, *pads]]
-        lines += [f"read_sdc {_q(measured_sdc)}", f"read_spef {_q(parasitics[rules])}",
+        lines += [f"read_sdc {_q(measured_sdc)}", f"read_spef {_q(spef)}",
                   "set_propagated_clock [all_clocks]",
                   *_ocv_tcl(report, early, late, aocv_table),
                   f"report_worst_slack -max -digits 6 >> {_q(report)}",
@@ -192,4 +207,7 @@ def measure(ctx: dict[str, Any], repair_state: Path, out_dir: Path) -> dict[str,
             "native_measurement_sdc_sha256": ll.digest(measured_sdc),
             "native_spef_sha256": {rules: ll.digest(path) for rules, path in parasitics.items()},
             "ocv_applied": ocv,
-            "measurement_basis": f"direct_phase3_rcx_recipe+post_route_spef+{mode}"}
+            "rcx_binding": rcx_binding,
+            "retained_dual_gap": "SIGNOFF_SCENE_STA_HARVEST_PENDING_MERGE",
+            "measurement_basis": (("OpenROAD.RCX" if rcx_binding else "direct_phase3_rcx_recipe")
+                                  + f"+post_route_spef+{mode}")}

@@ -62,6 +62,66 @@ Re-run /rtl-review to confirm clean, then /testbench-gen or existing tests.
 
 Implements the iterative repair loop from AutoChip, RTLFixer, and VerilogCoder. Empirical result: iterative compile-feedback-repair lifts functional correctness of LLM-generated RTL by 20–40% over single-shot generation.
 
+## Declared in-order transaction watchdog (Program First)
+
+A single-flight timer that clears on any completion is not a multi-outstanding
+watchdog. The reusable mechanism is enforced by
+`programs/in_order_watchdog_synth.py`, consumed by the existing
+`canonical_primitive_synth.py` project front door and the normal RTL runner's
+canonical-primitive path. It emits a new candidate only; it never replaces an
+existing design or marks it functionally accepted.
+
+Before emission, map the PUBLIC input to `input/in_order_watchdog.json`.
+Mapping the prose's policy choices is explicit AI/owner work, not a regex guess.
+Use schema `vibeic.in_order_watchdog.v1` and declare all of:
+
+- `module` and distinct `ports` roles: `clock`, `reset`, `request_valid`,
+  `request_ready`, `response_done`, `threshold`, `timed_out`, `violation`.
+- `counter_bits` (1..64), `max_accepted` (1..1024), and `response_order:
+  "in_order"`. Capacity is that bound plus ONE stalled slot only for
+  `start: "first_valid"`; `start: "accepted"` measures accepted requests only.
+  Declare `request_protocol: "hold_valid_until_accepted"`; cancellation is
+  unsupported. Withdrawing a stalled VALID or accepting above the bound also
+  asserts the runtime contract violation rather than silently losing a timer.
+- `reset: {"polarity": "high"|"low", "synchrony": "sync"|"async"}` and
+  `flag: "sticky_until_reset"|"pulse"`. Never clear a prompt-sticky flag on
+  completion or idle. Other clear policies are unsupported, not defaulted.
+- `initial_age: 0`, `timeout_compare: "next_age_ge"`, `saturation: "max"`,
+  `zero_latency: "complete_on_accept"`, and `violation_policy:
+  "sticky_until_reset"`. Age zero is stored on the start edge; existing
+  next-age >= runtime threshold is compared on each subsequent sampling edge.
+  Threshold zero also trips a new entry. A same-edge accepted completion with
+  no older work creates no unfinished entry. Retiring the oldest does not
+  suppress comparisons for other transactions.
+- `mapping: {"actor": "AI"|"owner", "source": "input/<public>.md",
+  "sha256": "<source digest>", "citations": {...}}`. Supply a nonempty exact
+  source quote for EACH field above (including `module`, `ports`, `reset` and
+  all policy fields; exclude `schema` and `mapping`). Hash and quote checking
+  binds the source; it does NOT prove the mapping entails the policy. Retain
+  the mapping for independent AI review and normal Program gates.
+
+Invoke the ACTUAL shared consumer, not an unused utility:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/programs/canonical_primitive_synth.py <project> --emit
+```
+
+EMIT is generation, not PASS of the repaired design. Existing RTL is never
+clobbered: the normal runner defers to authored/supplied RTL, and this explicit
+CLI refuses an occupied output. Missing declaration leaves ordinary canonical
+detection unchanged; incomplete/changed source, malformed parameters, unknown
+policy or out-of-order retirement emits `WATCHDOG_CONTRACT_REFUSED` and writes
+no candidate. Runtime capacity overflow or orphan completion asserts the
+declared sticky `violation` output; the integrator must treat it as a contract
+failure, not waive it or silently drop outstanding work.
+
+Verify at least: first completion with a second request still unfinished;
+held VALID versus consecutive accepts; simultaneous pop/push; threshold 0/1
+and runtime changes; saturation; reset polarity/synchrony and sticky/pulse
+policy. Re-run the original independent challenge, normal gates and fresh
+review before claiming repair acceptance. A prepared product capture is not
+closed while those checks or publication are pending.
+
 ## Do not
 
 - Do not silently change module interfaces — if a port must change, flag it explicitly

@@ -108,30 +108,64 @@ def test_existing_owner_ip_choice_is_preserved(tmp_path):
 
 
 def test_phase1_provenance_frontdoor_supplies_the_same_delivery_route(tmp_path):
-    from _delivery_route import admit
     prompt = tmp_path / "input" / "phase1_prompt.md"
     prompt.parent.mkdir()
     prompt.write_text("Design a combinational module with one input and output.")
     calls = []
+    # A real Python fixture child models only the D1 report boundary. Its
+    # actual argv/source, delivery admission and emitted bytes are bound by
+    # the production budget; it does not claim a native Phase-1 gate PASS.
+    runner = tmp_path / "fixture-runner" / "vibe_ic_one_shot_runner.py"
+    runner.parent.mkdir()
+    runner.write_text('''import json, pathlib, sys
+sys.path.insert(0, %r)
+from _delivery_route import admit
+from benchmark_dispatch import _bind_runner_report
+p = pathlib.Path(sys.argv[1]).resolve()
+route = sys.argv[sys.argv.index('--route') + 1]
+refusal = admit(p, route)
+if refusal:
+    print(refusal, file=sys.stderr)
+    raise SystemExit(2)
+docs = p/'phase1/generated_docs'
+docs.mkdir(parents=True)
+(docs/'L1_DATASHEET.json').write_text('{"schema": 1}\\n')
+out = p/'reports/orchestrator/phase1_one_shot.json'
+out.parent.mkdir(parents=True, exist_ok=True)
+summary = {'project':str(p), 'verdict':'NOT_MEASURED',
+           'measurement_scope':'SOURCE_ONLY_FIXTURE'}
+summary = _bind_runner_report(summary, p, __file__, out.name)
+out.write_text(json.dumps(summary))
+''' % str(PROGRAMS))
 
-    def run(argv):
-        calls.append(argv)
-        route = argv[argv.index("--route") + 1] if "--route" in argv else None
-        refusal = admit(tmp_path, route)
-        if refusal:
-            return SimpleNamespace(rc=2, error=refusal)
-        docs = tmp_path / "phase1" / "generated_docs"
-        docs.mkdir(parents=True)
-        (docs / "L1_DATASHEET.json").write_text('{"schema": 1}\n')
-        return SimpleNamespace(rc=0, error=None)
+    class RunnerBudget(dispatch._RunnerBudget):
+        def run(self, argv):
+            calls.append(argv)
+            return super().run(argv)
+
+    budget = RunnerBudget(1, 1, 1)
 
     result = dispatch._ensure_phase1_frontdoor(
-        PROGRAMS / "vibe_ic_one_shot_runner.py", tmp_path,
-        SimpleNamespace(run=run))
+        runner, tmp_path, budget)
     assert result["status"] == "GENERATED", result
     assert result["runner_rc"] == 0
     assert calls[0][calls[0].index("--exit-step") + 1] == "D1"
     assert "--entry-step" not in calls[0]
+    assert calls[0][calls[0].index("--route") + 1] == "ip"
+    invocation = result["runner_invocation"]
+    assert invocation["source_before"]["runner"]["path"] == str(runner)
+    assert invocation["source_before"] == invocation["source_after"]
+    # Delivery admission adds its owner answer; D1 still cannot regenerate
+    # supplied RTL or change the prompt it was asked to carry forward.
+    assert invocation["material_before"]["output_rtl"] == invocation["material_after"]["output_rtl"]
+    assert invocation["material_before"]["prompt_sha256"] == invocation["material_after"]["prompt_sha256"]
+    bound = invocation["reports_after"]["phase1_one_shot.json"]["runner_binding"]
+    assert bound["invocation_id"] == invocation["invocation_id"]
+    assert bound["source"] == invocation["source_before"]
+    assert bound["material"] == invocation["material_after"]
+    reused = dispatch._ensure_phase1_frontdoor(runner, tmp_path, budget)
+    assert reused["status"] == "REUSED"
+    assert len(calls) == 1
 
 
 def test_shipped_open_registry_all_uses_the_explicit_ip_entry(tmp_path):

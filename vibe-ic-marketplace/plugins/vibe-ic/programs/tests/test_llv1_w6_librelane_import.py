@@ -41,16 +41,114 @@ def _sha(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
-def _project(tmp_path: Path, host: str = "8HD-4") -> Path:
+def _project(tmp_path: Path, host: str = "8HD-4", *, run_rel=RUN_REL,
+             finish_fixture=False) -> Path:
+    """Copy historical headers, then construct a SOURCE_FIXTURE copy witness.
+
+    This producer copies opaque trimmed SPEF bytes; it does not extract a
+    route, run EDA, or attest historical native execution/accuracy. Finalize
+    once after the caller has supplied its positive fixture variations.
+    Existing receipts are never refreshed, so later tampering stays unbound.
+    """
+    import librelane_contract as C
     proj = tmp_path / "proj"
-    run = proj / RUN_REL
+    run = proj / run_rel
+    rcx = run / "54-openroad-rcx"
+    inputs = rcx / "source_fixture_inputs"
+    marker = rcx / "source_fixture.json"
+    if finish_fixture:
+        if (rcx / "vibeic_receipt.json").exists():
+            return proj
+        prepared = json.loads(marker.read_text())
+        state = json.loads((rcx / "state_out.json").read_text())
+        before = json.loads((rcx / "state_in.json").read_text())
+        cfg = json.loads((rcx / "config.json").read_text())
+        if (state["spef"] != prepared["spef_population"] or
+                cfg["RCX_RULESETS"] != prepared["rules_population"] or
+                cfg["meta"]["step"] != "OpenROAD.RCX"):
+            raise C.Refusal("LL_RCX_OUTPUT_UNBOUND", "fixture population changed")
+        for path, recorded in prepared["input_files"].items():
+            if C.digest(Path(path)) != recorded:
+                raise C.Refusal("LL_RCX_OUTPUT_UNBOUND", "fixture input changed")
+        for view in ("def", "odb", "nl", "sdc"):
+            if state[view] != before[view] or before[view] not in prepared["input_files"]:
+                raise C.Refusal("LL_RCX_OUTPUT_UNBOUND", "fixture route basis changed")
+        payload_inputs = {}
+        for pattern, value in state["spef"].items():
+            output = Path(value)
+            if output.is_symlink() or not output.resolve().is_relative_to(rcx.resolve()):
+                raise C.Refusal("LL_RCX_OUTPUT_UNBOUND", "fixture SPEF outside producer")
+            payload = inputs / (pattern.strip("*_") + ".spef.input")
+            payload.write_bytes(output.read_bytes())
+            payload_inputs[str(payload)] = C.digest(payload)
+            shutil.copyfile(payload, output)
+        fingerprint = {
+            "scope": "SOURCE_FIXTURE", "producer": "_project:software_copy",
+            "native_execution": "NOT_RUN", "native_accuracy": "NOT_MEASURED",
+            "image": None, "step": "OpenROAD.RCX",
+            "state": C.digest(rcx / "state_in.json"),
+            "config": C.digest(rcx / "config.json"),
+            "state_files": {str(p): C.digest(p) for p in C._walk_paths(before)},
+            "config_files": {str(p): C.digest(p) for p in C._walk_paths(cfg) if p.is_file()},
+            "rcx_pdk_files": C._rcx_pdk_input_hashes(cfg, proj, []),
+            "copy_input_files": payload_inputs,
+        }
+        C.write_json(rcx / "input_fingerprint.json", fingerprint)
+        hashes = {str(p.relative_to(rcx)): C.digest(p) for p in rcx.rglob("*")
+                  if p.is_file() and p.name.endswith(".json")
+                  and p.name != "vibeic_receipt.json"}
+        hashes.update({str(Path(p).relative_to(rcx)): C.digest(Path(p))
+                       for p in state["spef"].values()})
+        C.write_json(rcx / "vibeic_receipt.json", {"scope": "SOURCE_FIXTURE",
+                     "input": fingerprint, "sha256": hashes})
+        C.validate_rcx_receipt(rcx)
+        return proj
     run.parent.mkdir(parents=True)
     shutil.copytree(FIXTURES / host / "runs" / "cmp3", run)
+    inputs.mkdir()
+    historical = json.loads((rcx / "state_out.json").read_text())
+    cfg = json.loads((rcx / "config.json").read_text())
+    historical_config = dict(cfg)
+    top = json.loads((run / "resolved.json").read_text())["DESIGN_NAME"]
+    # These are byte-copy fixture inputs, explicitly still trimmed headers.
+    # Do not invent the missing historical step-53 route or native SDC.
+    views = {}
+    for view, source, suffix in (
+            ("def", "52-openroad-fillinsertion", "def"),
+            ("odb", "44-openroad-detailedrouting", "odb"),
+            ("nl", "06-yosys-synthesis", "nl.v")):
+        dest = inputs / ("route." + suffix)
+        shutil.copyfile(run / source / (top + "." + suffix), dest)
+        views[view] = str(dest.resolve())
+    sdc = inputs / "source_fixture.sdc"
+    sdc.write_text("# SOURCE_FIXTURE copy inputs; no native clocks/timing asserted\n")
+    views["sdc"] = str(sdc.resolve())
+    tech = inputs / "source_fixture.lef"
+    tech.write_text("VERSION 5.8 ;\nUNITS\n DATABASE MICRONS 1000 ;\nEND UNITS\nEND LIBRARY\n")
+    spefs, rules = {}, {}
+    for pattern, historical_path in historical["spef"].items():
+        spefs[pattern] = str((run / historical_path.split("/runs/cmp3/", 1)[1]).resolve())
+        rule = inputs / ("rules." + pattern.strip("*_") + ".json")
+        C.write_json(rule, {"scope": "SOURCE_FIXTURE", "operation": "byte_copy",
+                           "corner_pattern": pattern, "native_accuracy": "NOT_MEASURED"})
+        rules[pattern] = str(rule.resolve())
+    cfg.update({"DESIGN_NAME": top, "TECH_LEFS": {"nom_*": str(tech.resolve())},
+                "RCX_RULESETS": rules})
+    C.write_json(rcx / "config.json", cfg)
+    C.write_json(rcx / "state_in.json", {**views, "metrics": {}})
+    C.write_json(rcx / "state_out.json", {**views, "spef": spefs, "metrics": {}})
+    C.write_json(marker, {"scope": "SOURCE_FIXTURE", "producer": "software_copy",
+                         "native_execution": "NOT_RUN", "native_accuracy": "NOT_MEASURED",
+                         "route_inputs": "opaque historical 4096-byte headers; not native route proof",
+                         "historical_state": historical, "historical_config": historical_config,
+                         "spef_population": spefs, "rules_population": rules,
+                         "input_files": {str(p.resolve()): C.digest(p) for p in inputs.iterdir()}})
     return proj
 
 
 def _import(proj: Path):
     import librelane_import as LI
+    _project(proj.parent, finish_fixture=True)
     return LI.import_run(proj, proj / RUN_REL)
 
 
@@ -468,8 +566,8 @@ def _segment_project(tmp_path: Path) -> Path:
     every step outside the range, the steps it ran, then its closing lines."""
     proj = tmp_path / "proj"
     for rel in (SEG1, SEG2):
-        (proj / rel).parent.mkdir(parents=True)
-        shutil.copytree(FIXTURES / "8HD-4" / "runs" / "cmp3", proj / rel)
+        _project(tmp_path, run_rel=rel)
+        _project(tmp_path, run_rel=rel, finish_fixture=True)
     lines = _flow_lines(proj, SEG1)
     cut = _at(lines, "'OpenROAD.CheckSDCFiles'")
     head, rest = lines[:cut], lines[cut:]

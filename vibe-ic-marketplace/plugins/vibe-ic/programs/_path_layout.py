@@ -1436,6 +1436,10 @@ def publish_report_then_steps_view(project, programs_dir, runner, summary,
 
     out = report_path(project, report_name)
     try:
+        if report_name in {"phase1_one_shot.json", "phase2_one_shot.json", "phase3_one_shot.json"}:
+            from benchmark_dispatch import _bind_runner_report
+            summary.update(_bind_runner_report(
+                summary, project, str(Path(programs_dir) / (runner + ".py")), report_name))
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     except Exception:                                     # noqa: BLE001
