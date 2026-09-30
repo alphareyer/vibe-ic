@@ -57,19 +57,31 @@ def _write_dataset(dataset: Path, prompts: dict[str, str]) -> None:
 
 
 def _write_rtl_gen_report(project: Path, status: str, *,
-                          fallback_skill: str | None = None) -> None:
+                          fallback_skill: str | None = None,
+                          context: dict | None = None) -> None:
     report = project / "reports" / "orchestrator" / "phase2_one_shot.json"
     report.parent.mkdir(parents=True, exist_ok=True)
     extras = ({"fallback_skill": fallback_skill} if fallback_skill else
               {"deterministic_generator": "generic-test-emitter"})
-    report.write_text(json.dumps({
+    document = {
         "verdict": "PASS" if status == "PASS" else "WAIVED",
         "steps": [{
             "name": "rtl_gen", "status": status,
             "detail": f"generic fixture {status.lower()}",
             "extras": extras,
         }],
-    }))
+    }
+    if context is not None:
+        document = bd._bind_runner_report(
+            document, project, __file__, report.name, context=context)
+    report.write_text(json.dumps(document))
+
+
+def _runner_invocation_context(kwargs: dict) -> dict | None:
+    env = kwargs.get("env")
+    raw = (env.get("VIBEIC_RUNNER_INVOCATION_CONTEXT")
+           if isinstance(env, dict) else None)
+    return json.loads(raw) if raw is not None else None
 
 
 def _is_d1_frontdoor(argv: list[str]) -> bool:
@@ -106,11 +118,13 @@ def _fake_runner(*, program_ids: set[str] | None = None,
             (rtl / "top_module.v").write_text(
                 "module TopModule(input wire a, output wire y); "
                 "assign y = a; endmodule\n")
-            _write_rtl_gen_report(project, "PASS")
+            _write_rtl_gen_report(
+                project, "PASS", context=_runner_invocation_context(_kwargs))
             return SimpleNamespace(returncode=0)
         if project.name in waived:
             _write_rtl_gen_report(
-                project, "WAIVED", fallback_skill=waived[project.name])
+                project, "WAIVED", fallback_skill=waived[project.name],
+                context=_runner_invocation_context(_kwargs))
         return SimpleNamespace(returncode=1)
 
     return run

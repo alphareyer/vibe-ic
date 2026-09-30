@@ -576,6 +576,13 @@ def diff_verify(rtl_path: Path, ref_path: Path, top: Optional[str],
 
 def _diff_verify_bound(rtl_path, ref_path, top, vectors, n_random, seed,
                        require_tools, report, workdir):
+    kinds, verr = _parse_vectors_arg(vectors)
+    if verr:
+        report["verdict"] = "ERROR"
+        report["reason"] = verr
+        return report
+    report["vector_kinds"] = kinds
+
     try:
         name, ports, unit, binding, perr = _bind_rtl_unit(rtl_path, top, workdir)
     except (OSError, ValueError) as exc:
@@ -614,13 +621,6 @@ def _diff_verify_bound(rtl_path, ref_path, top, vectors, n_random, seed,
     report["undriven_data_inputs"] = [p.name for p in din if p is not din_port]
     report["unsampled_outputs"] = [p.name for p in dout if p is not dout_port]
     report["unconnected_inout_ports"] = [p.name for p in ports if p.direction == "inout"]
-
-    kinds, verr = _parse_vectors_arg(vectors)
-    if verr:
-        report["verdict"] = "ERROR"
-        report["reason"] = verr
-        return report
-    report["vector_kinds"] = kinds
 
     try:
         ref = load_reference(ref_path)
