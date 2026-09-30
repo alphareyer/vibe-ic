@@ -318,7 +318,7 @@ def test_runner_process_disposition_does_not_confuse_gate_results(
         tmp_path, monkeypatch, rc, stderr, expected):
     monkeypatch.setattr(bd.subprocess, "run", lambda *_a, **_k:
                         SimpleNamespace(returncode=rc, stdout="complete stdout\n", stderr=stderr))
-    outcome = bd._RunnerBudget(1, 1, 0).run([sys.executable, "vibe_ic_one_shot_runner.py", str(tmp_path)])
+    outcome = bd._RunnerBudget(1, 1, 0).run([sys.executable, str(PROGRAMS / "vibe_ic_one_shot_runner.py"), str(tmp_path)])
     assert outcome.rc == rc
     assert (outcome.error or "COMPLETED").split(":", 1)[0] == expected
     assert Path(outcome.invocation["stdout_path"]).read_text() == "complete stdout\n"
@@ -330,7 +330,7 @@ def test_timeout_retains_the_partial_output(tmp_path, monkeypatch):
     def timeout(*_args, **_kwargs):
         raise subprocess.TimeoutExpired("runner", 1, output=b"partial stdout", stderr=b"partial stderr")
     monkeypatch.setattr(bd.subprocess, "run", timeout)
-    outcome = bd._RunnerBudget(1, 1, 0).run([sys.executable, "vibe_ic_one_shot_runner.py", str(tmp_path)])
+    outcome = bd._RunnerBudget(1, 1, 0).run([sys.executable, str(PROGRAMS / "vibe_ic_one_shot_runner.py"), str(tmp_path)])
     assert outcome.rc is None
     assert outcome.error.startswith("RUNNER_WORKER_FAILED")
     assert Path(outcome.invocation["stdout_path"]).read_text() == "partial stdout"
