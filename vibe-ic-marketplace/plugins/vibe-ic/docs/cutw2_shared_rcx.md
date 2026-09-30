@@ -14,6 +14,14 @@ the mounted ruleset and physical LEF bytes; a PDK change during the native
 run refuses the receipt. Existing extraction and provenance gates still judge
 the published artifacts.
 
+The producer receipt now binds the extraction-time route and current output
+bytes at cache reuse, shared binding, direct handoff and publication. Missing
+receipt hashes refuse reuse; current aliases cannot conceal changed DEF/ODB
+bytes. Publication checks all declared runtime STA scenes, the complete
+rules-owned SPEF population, unique RC aliases and the producing design top.
+Every adopted census number and capacitance/resistance row must be finite;
+finite totals cannot excuse a NaN row.
+
 ## Harvest and retained gaps
 
 No legacy extractor or STA code is deleted in this change.
@@ -61,3 +69,20 @@ Raw source controls, mutations, tool argv, admissions, PID/CID/rc records,
 native artifacts and hashes live under
 `/mnt/ssd2/codex0930/c930w2_rcx/evidence/` and `native/` on the evidence host.
 The feature receipt is `/home/reyerchu/codex_tasks/out/c930w2_rcx.result.json`.
+
+## Original first-pair source repair
+
+The original correctness and integrity reviews found five source gaps after
+the native proof at `bee09d713467754548ed7d41e133f751e2829251`. Their unchanged
+C19 and I25 source controls are reproduced on that commit, then rerun against
+the producer/consumer guards above. A concrete NaN-ground-row control retains
+finite 4 pF net totals and 1 pF coupling while requiring refusal. Reversing the
+guards must restore the original invalid acceptances. The original author
+value obligations and frozen nine-scene native producer bytes remain usable.
+
+This continuation launches no native tools and establishes source contracts
+only. The earlier native proof and original SS hold failure remain immutable;
+fresh numerical accuracy, physical signoff and shipping receive no credit.
+The exact repair receipt is
+`/home/reyerchu/codex_tasks/out/c930rcx_fivegap_repair.result.json`.
+Root sends that source to the same original reviewers for bounded closure.

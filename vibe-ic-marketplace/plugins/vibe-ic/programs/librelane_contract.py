@@ -996,6 +996,8 @@ def handoff_to_direct(state_path: Path, targets: dict[str, Path], receipt: Path,
     container prefix to its host path for states written by a whole-flow run.
     Every handed file is bound by sha256 on both sides.
     """
+    rcx_receipt = (validate_rcx_receipt(state_path.parent)
+                   if _state_step_id(state_path.parent) == 'OpenROAD.RCX' else None)
     state = _load(state_path)
     rows: dict[str, Any] = {}
     for view, dest in targets.items():
@@ -1027,6 +1029,11 @@ def handoff_to_direct(state_path: Path, targets: dict[str, Path], receipt: Path,
             rows[view]['design'] = _def_design_name(source)
         if rows[view]['source_sha256'] != rows[view]['dest_sha256']:
             raise Refusal('LL_HANDOFF_COPY_MISMATCH', view)
+        if rcx_receipt is not None and key == 'spef':
+            recorded = rcx_receipt['sha256'].get(
+                str(source.resolve().relative_to(state_path.parent.resolve())))
+            if not recorded or rows[view]['dest_sha256'] != recorded:
+                raise Refusal('LL_RCX_OUTPUT_UNBOUND', f'{view}: handoff bytes changed')
     document = {'state': str(state_path), 'state_sha256': digest(state_path),
                 'views': rows}
     write_json(receipt, document)
@@ -2384,6 +2391,47 @@ def _rcx_pdk_input_hashes(config: dict, project: Path,
     return _sta_liberty_input_hashes({'CELL_LIBS': {'*': paths}}, project, mounts)
 
 
+def validate_rcx_receipt(folder: Path) -> dict:
+    """Require the producing receipt's bytes before sharing or reusing RCX.
+
+    Current path equality and a newly computed output hash cannot establish
+    which route was extracted or which SPEF the producer actually wrote.
+    """
+    try:
+        folder = Path(folder).resolve()
+        receipt = _load(folder / 'vibeic_receipt.json')
+        fingerprint, hashes = receipt['input'], receipt['sha256']
+        if fingerprint.get('step') != 'OpenROAD.RCX' or not isinstance(hashes, dict):
+            raise ValueError('not an RCX producer receipt')
+        for name in ('state_out.json', 'state_in.json', 'config.json',
+                     'input_fingerprint.json'):
+            if not hashes.get(name) or hashes[name] != digest(folder / name):
+                raise ValueError(f'{name}: producer bytes absent or changed')
+        if _load(folder / 'input_fingerprint.json') != fingerprint:
+            raise ValueError('producer input fingerprint differs')
+        before = _load(folder / 'state_in.json')
+        state = _load(folder / 'state_out.json')
+        for view in ('def', 'odb', 'nl', 'sdc'):
+            if before.get(view):
+                recorded = fingerprint['state_files'].get(before[view])
+                if not recorded or any(not doc.get(view) or
+                        digest(Path(doc[view])) != recorded for doc in (before, state)):
+                    raise ValueError(f'{view}: extraction input bytes changed')
+        spefs = state.get('spef')
+        if not isinstance(spefs, dict) or not spefs:
+            raise ValueError('producer SPEF population absent')
+        for pattern, source in spefs.items():
+            path = Path(source).resolve()
+            if not path.is_relative_to(folder):
+                raise ValueError(f'{pattern}: SPEF belongs to another producer')
+            recorded = hashes.get(str(path.relative_to(folder)))
+            if not recorded or recorded != digest(path):
+                raise ValueError(f'{pattern}: producer SPEF bytes absent or changed')
+        return receipt
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise Refusal('LL_RCX_OUTPUT_UNBOUND', f'{folder}: {exc}') from exc
+
+
 def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
               *, docker: str = 'docker', mounts: list[tuple[Path, str]] | None = None,
               lane: str | None = None, pdk_root: str | None = None,
@@ -2481,6 +2529,8 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                 and (folder / 'state_out.json').exists()
                 and (folder / 'pdk_root.json').is_file()
                 and _load(folder / 'pdk_root.json') == pdk_record):
+            if step_id == 'OpenROAD.RCX':
+                validate_rcx_receipt(folder)
             _check_state(_load(folder / 'state_out.json'), outputs=True)
             previous = folder / 'state_out.json'
             outputs.append(folder)
@@ -2534,6 +2584,17 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         if step_id == 'OpenROAD.RCX' and fingerprint['rcx_pdk_files'] != \
                 _rcx_pdk_input_hashes(_load(config), project, mounts or []):
             raise Refusal('LL_RCX_PDK_CHANGED_DURING_RUN', str(folder))
+        if step_id == 'OpenROAD.RCX':
+            try:
+                inputs_unchanged = (fingerprint['state'] == digest(state_path) and
+                    fingerprint['config'] == digest(config) and
+                    all(digest(Path(path)) == recorded
+                        for path, recorded in fingerprint['state_files'].items()))
+            except OSError:
+                inputs_unchanged = False
+            if not inputs_unchanged:
+                raise Refusal('LL_RCX_OUTPUT_UNBOUND',
+                              f'{folder}: extraction input bytes changed during execution')
         hashes = {'state_out.json': digest(folder / 'state_out.json')}
         for path in _walk_paths({k: v for k, v in out_state.items() if k != 'metrics'}):
             if path.is_relative_to(folder):
