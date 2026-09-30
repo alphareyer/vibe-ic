@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,11 @@ import sys as _rt_sys
 from pathlib import Path as _rt_path
 _rt_sys.path.insert(0, str(_rt_path(__file__).resolve().parent))
 import _runtime_pair_fixture as _rt_pair  # noqa: E402
+import _eda_pin as _pin  # noqa: E402
+import _container_exec as _ce  # noqa: E402
+
+_LIVE_PIN_FUNCTIONS = {name: getattr(_pin, name) for name in (
+    "resolved_image_digest", "pinned_image_present", "container_image_digest")}
 
 
 @pytest.fixture(autouse=True)
@@ -2304,3 +2310,271 @@ def test_a_retryable_worker_error_is_retried_not_refused_at_the_front_door(
     assert Path(task["response_path"]).exists()
     repairs = bd._read_jsonl(run / bd._REPAIR_WORKLIST)
     assert [r["status"] for r in repairs] == ["PROJECT_WORKER_ERROR"]
+
+
+# Execution identity is measured through the same AI-review consumer as
+# acceptance. No dataset, scorer, prior candidate, or hidden test is used.
+def _declared_host_task(tmp_path):
+    run, task, got = _task(tmp_path)
+    task["verification_execution"] = {"backend": "host", "selection": "explicit test host"}
+    return run, task, got
+
+
+@_NEEDS_SIMULATOR
+@pytest.mark.parametrize("bad", [False, True])
+def test_explicit_host_challenge_keeps_functional_good_and_bad_controls(tmp_path, bad):
+    _, task, _ = _declared_host_task(tmp_path)
+    if bad:
+        project = Path(task["project"])
+        Path(task["working_rtl_paths"][0]).write_text(
+            "module dut(input wire a, output wire y); assign y = ~a; endmodule\n")
+        got = bio.collect("rtllm", task["id"], project)
+        task = bd._make_ai_review_task(task["id"], project, got, ROUTING, 0,
+            tmp_path / "run", "PROGRAM")
+        task["verification_execution"] = {"backend": "host", "selection": "explicit test host"}
+    _write_review(task, _valid_review(task))
+    verdict = bd._validate_ai_review(task)
+    assert verdict["status"] == ("REJECTED" if bad else "ACCEPTED"), verdict
+    proof = verdict["challenge_result"]
+    assert proof["status"] == ("FAIL" if bad else "PASS"), proof
+    commands = {c["stage"]: c for c in proof["execution"]["commands"]}
+    assert commands["compile"]["returncode"] == 0
+    assert commands["runtime"]["returncode"] == (1 if bad else 0)
+    assert proof["execution"]["declaration"]["backend"] == "host"
+
+
+@_NEEDS_SIMULATOR
+@pytest.mark.parametrize("defect", ["missing", "cid_drift", "image_drift", "digest_drift"])
+def test_required_native_identity_cannot_spend_a_host_pass(tmp_path, monkeypatch, defect):
+    _, task, _ = _declared_host_task(tmp_path)
+    cid = "6b" * 32
+    image = "sha256:" + "7c" * 32
+    declaration = {"backend": "native", "container": "neutral-selected-runtime",
+        "container_id": cid, "image_id": image, "image_digest": _rt_pair.PAIR_DIGEST}
+    task["verification_execution"] = declaration
+    monkeypatch.setattr(_ce, "container_id", lambda _name: (
+        None if defect == "missing" else "8d" * 32 if defect == "cid_drift" else cid))
+    monkeypatch.setattr(_pin, "container_image_id", lambda _name: (
+        "sha256:" + "9e" * 32 if defect == "image_drift" else image, ""))
+    monkeypatch.setattr(_pin, "container_image_digest", lambda _name: (
+        "sha256:" + "af" * 32 if defect == "digest_drift" else _rt_pair.PAIR_DIGEST, ""))
+    _write_review(task, _valid_review(task))
+    verdict = bd._validate_ai_review(task)
+    # On the pre-fix consumer these are ACCEPTED, from a real host simulation.
+    # This observes a wrong verdict VALUE, not merely absence of a new field.
+    assert verdict["status"] == bd._NOT_MEASURED, verdict
+    assert verdict["challenge_result"]["status"] == bd._CHALLENGE_UNAVAILABLE
+    assert verdict["reasons"] == []
+    assert verdict["challenge_result"]["execution"]["commands"] == []
+
+
+@_NEEDS_SIMULATOR
+@pytest.mark.parametrize("pair_bytes", ["{", '{}', '{"verdict":"RUNTIME_PAIR_MISMATCH"}'])
+def test_existing_runtime_pair_never_degrades_to_legacy_host(tmp_path, pair_bytes):
+    run, task, _ = _task(tmp_path)
+    (run / "runtime_pair_preflight.json").write_text(pair_bytes)
+    # Exercise a historical task, before verification_execution existed.
+    task.pop("verification_execution", None)
+    _write_review(task, _valid_review(task))
+    verdict = bd._validate_ai_review(task)
+    assert verdict["status"] == bd._NOT_MEASURED, verdict
+    assert verdict["challenge_result"]["status"] == bd._CHALLENGE_UNAVAILABLE
+    assert verdict["challenge_result"]["execution"]["declaration"]["backend"] == "native"
+
+
+@_NEEDS_SIMULATOR
+def test_canonical_run_without_pair_has_no_legacy_host_fallback(tmp_path):
+    run, task, _ = _task(tmp_path)
+    (run / ".bench_config.json").write_text('{"schema": 1}')
+    task.pop("verification_execution", None)
+    _write_review(task, _valid_review(task))
+    verdict = bd._validate_ai_review(task)
+    assert verdict["status"] == bd._NOT_MEASURED, verdict
+    assert verdict["challenge_result"]["status"] == bd._CHALLENGE_UNAVAILABLE
+
+
+@_NEEDS_SIMULATOR
+def test_legacy_task_cannot_hide_a_later_native_runtime_declaration(tmp_path):
+    run, task, _ = _task(tmp_path)
+    (run / "runtime_pair_preflight.json").write_text('{}')
+    # Retain the legacy host field; a later canonical declaration must still
+    # prevent spending that field as an implicit host fallback.
+    task["verification_execution"] = {"backend": "host", "selection": "legacy caller without runtime pair"}
+    _write_review(task, _valid_review(task))
+    verdict = bd._validate_ai_review(task)
+    assert verdict["status"] == bd._NOT_MEASURED, verdict
+    assert verdict["challenge_result"]["status"] == bd._CHALLENGE_UNAVAILABLE
+
+
+def test_tool_identity_probe_timeout_is_not_a_candidate_verdict(tmp_path, monkeypatch):
+    _, task, _ = _declared_host_task(tmp_path)
+    monkeypatch.setattr(bd.shutil, "which", lambda name, *a, **kw: "/stub/" + name)
+    def timeout(argv, **kwargs):
+        raise bd.subprocess.TimeoutExpired(argv, 30)
+    monkeypatch.setattr(bd.subprocess, "run", timeout)
+    _write_review(task, _valid_review(task))
+    verdict = bd._validate_ai_review(task)
+    assert verdict["status"] == bd._NOT_MEASURED, verdict
+    assert verdict["challenge_result"]["status"] == bd._CHALLENGE_UNAVAILABLE
+
+
+@_NEEDS_SIMULATOR
+def test_operator_explicit_host_mode_is_preserved_in_a_native_run(tmp_path, monkeypatch):
+    run, old_task, _ = _task(tmp_path)
+    (run / "runtime_pair_preflight.json").write_text('{"verdict":"RUNTIME_PAIR_MISMATCH"}')
+    monkeypatch.setenv("VIBEIC_CHALLENGE_BACKEND", "host")
+    project = Path(old_task["project"])
+    got = bio.collect("rtllm", old_task["id"], project)
+    task = bd._make_ai_review_task(old_task["id"], project, got, ROUTING, 0, run, "PROGRAM")
+    _write_review(task, _valid_review(task))
+    verdict = bd._validate_ai_review(task)
+    assert verdict["status"] == "ACCEPTED", verdict
+    assert verdict["challenge_result"]["execution"]["declaration"] == {
+        "backend": "host", "selection": "VIBEIC_CHALLENGE_BACKEND=host"}
+
+
+@_NEEDS_SIMULATOR
+def test_native_declared_missing_docker_keeps_inherited_proof_not_measured(tmp_path, monkeypatch):
+    _, task, _ = _declared_host_task(tmp_path)
+    task["verification_execution"] = {"backend": "native", "container": "absent-neutral-runtime"}
+    task["verification_challenges"] = [{**_write_direct_assignment_challenge(task),
+        "id": task["id"], "prompt_sha256": task["prompt_sha256"]}]
+    monkeypatch.setattr(_ce, "container_id", lambda _name: None)
+    monkeypatch.setattr(_pin, "container_image_id", lambda _name: (None, "docker unavailable"))
+    _write_review(task, _valid_review(task))
+    verdict = bd._validate_ai_review(task)
+    assert verdict["status"] == bd._NOT_MEASURED, verdict
+    assert [r["status"] for r in verdict["inherited_challenge_results"]] == [bd._CHALLENGE_UNAVAILABLE]
+
+
+def test_repo_runtime_declaration_drives_the_challenge_consumer(tmp_path, monkeypatch):
+    from _hostpaths import require_repo
+    # Read the shipped MCP configuration, the same producer that selects the
+    # native shared container. This is repo-backed and contains no design data.
+    config_path = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", ".mcp.json")
+    config = json.loads(config_path.read_text())
+    server = next(s for s in config["mcpServers"].values()
+                  if s.get("env", {}).get("EDA_CONTAINER"))
+    container = server["env"]["EDA_CONTAINER"]
+    run, task, _ = _task(tmp_path)
+    (run / "runtime_pair_preflight.json").write_text(json.dumps({
+        "verdict": "RUNTIME_PAIR_MATCH", "container": container,
+        "required_digest": _rt_pair.PAIR_DIGEST, "found_digest": _rt_pair.PAIR_DIGEST}))
+    task.pop("verification_execution", None)
+    monkeypatch.setattr(_ce, "container_id", lambda _name: None)
+    monkeypatch.setattr(_pin, "container_image_id", lambda _name: (None, "selected runtime unavailable"))
+    _write_review(task, _valid_review(task))
+    verdict = bd._validate_ai_review(task)
+    assert verdict["status"] == bd._NOT_MEASURED, verdict
+    declaration = verdict["challenge_result"]["execution"]["declaration"]
+    assert declaration["container"] == container
+    assert declaration["backend"] == "native"
+
+
+@pytest.fixture
+def live_challenge_native(tmp_path, monkeypatch):
+    container = os.environ.get("VIBEIC_CHALLENGE_NATIVE_CONTAINER")
+    if not container:
+        pytest.skip(not_verified_reason(
+            "NOT_MEASURED: native challenge proof needs a declared live EDA container and a bind-mounted pytest basetemp",
+            "VIBEIC_CHALLENGE_NATIVE_CONTAINER=<container> python3 -m pytest programs/tests/test_benchmark_program_first_ai_review.py --basetemp=<mounted-scratch>"))
+    for name, fn in _LIVE_PIN_FUNCTIONS.items():
+        monkeypatch.setattr(_pin, name, fn)
+    monkeypatch.setenv("VIBEIC_EDA_CONTAINER", container)
+    digest, why = _pin.container_image_digest(container)
+    assert digest, f"declared native runtime unavailable, NOT_MEASURED: {why}"
+    monkeypatch.setenv("VIBEIC_EDA_IMAGE", "unused-repository@" + digest)
+    monkeypatch.setenv("VIBEIC_CHALLENGE_BACKEND", "native")
+    return container, digest
+
+
+@pytest.mark.parametrize("bad", [False, True])
+def test_live_native_challenge_ignores_foreign_real_host_path(tmp_path, monkeypatch, live_challenge_native, bad):
+    container, digest = live_challenge_native
+    host_tool = __import__("shutil").which("iverilog")
+    if not host_tool:
+        pytest.skip(not_verified_reason("NOT_MEASURED: no foreign real host compiler for the two-runtime control", "install a host Icarus compiler"))
+    # Expose the foreign real binary by symlink, never a pass-printing broker.
+    foreign = tmp_path / "foreign-bin"
+    foreign.mkdir()
+    for tool in ("iverilog", "vvp"):
+        actual = __import__("shutil").which(tool)
+        assert actual, "the declared foreign host control needs both real tools"
+        (foreign / tool).symlink_to(actual)
+    monkeypatch.setenv("PATH", str(foreign) + os.pathsep + os.environ["PATH"])
+    host_version = bd.subprocess.run([host_tool, "-V"], capture_output=True, text=True)
+    run, task, _ = _task(tmp_path)
+    (run / "runtime_pair_preflight.json").write_text(json.dumps({
+        "verdict": "RUNTIME_PAIR_MATCH", "container": container,
+        "required_digest": digest, "found_digest": digest}))
+    project = Path(task["project"])
+    if bad:
+        Path(task["working_rtl_paths"][0]).write_text(
+            "module dut(input wire a, output wire y); assign y = ~a; endmodule\n")
+    got = bio.collect("rtllm", task["id"], project)
+    task = bd._make_ai_review_task(task["id"], project, got, ROUTING, 0, run, "PROGRAM")
+    _write_review(task, _valid_review(task))
+    seen = []
+    real_run = bd.subprocess.run
+    def recording(argv, *args, **kwargs):
+        seen.append(list(argv))
+        return real_run(argv, *args, **kwargs)
+    monkeypatch.setattr(bd.subprocess, "run", recording)
+    verdict = bd._validate_ai_review(task)
+    # Pre-fix native declaration is ignored and this actual argv names host.
+    compile_argv = next(a for a in seen if "-g2012" in a or any("-g2012" in v for v in a))
+    assert compile_argv[:2] == ["docker", "exec"], compile_argv
+    assert verdict["status"] == ("REJECTED" if bad else "ACCEPTED"), verdict
+    proof = verdict["challenge_result"]
+    assert proof["status"] == ("FAIL" if bad else "PASS"), proof
+    execution = proof["execution"]
+    assert execution["declaration"]["container_id"] in compile_argv
+    assert execution["identity_after_runtime"]["image_digest"] == digest
+    native_version = execution["tools"]["iverilog"]["version_stdout"]
+    assert host_version.stdout.splitlines()[0] != native_version.splitlines()[0], (
+        "the foreign host binary must be a different real tool build", host_version.stdout, native_version)
+    commands = {c["stage"]: c for c in execution["commands"]}
+    assert commands["compile"]["returncode"] == 0
+    assert commands["runtime"]["returncode"] == (1 if bad else 0)
+    evidence_dir = os.environ.get("VIBEIC_CHALLENGE_PROOF_DIR")
+    if evidence_dir:
+        Path(evidence_dir).mkdir(parents=True, exist_ok=True)
+        (Path(evidence_dir) / ("native_bad.json" if bad else "native_good.json")).write_text(
+            json.dumps({"task": task, "verdict": verdict, "actual_argv": seen,
+                        "foreign_host_version": host_version.stdout}, indent=2))
+
+
+@pytest.mark.parametrize("stage", ["compile", "runtime"])
+def test_live_native_identity_drift_invalidates_completed_raw_proof(tmp_path, monkeypatch, live_challenge_native, stage):
+    container, digest = live_challenge_native
+    run, task, _ = _task(tmp_path)
+    (run / "runtime_pair_preflight.json").write_text(json.dumps({
+        "verdict": "RUNTIME_PAIR_MATCH", "container": container,
+        "required_digest": digest, "found_digest": digest}))
+    project = Path(task["project"])
+    got = bio.collect("rtllm", task["id"], project)
+    task = bd._make_ai_review_task(task["id"], project, got, ROUTING, 0, run, "PROGRAM")
+    _write_review(task, _valid_review(task))
+    drift = [False]
+    real_id, real_run = _ce.container_id, bd.subprocess.run
+    monkeypatch.setattr(_ce, "container_id", lambda name: "bc" * 32 if drift[0] else real_id(name))
+    def recording(argv, *args, **kwargs):
+        cp = real_run(argv, *args, **kwargs)
+        command = argv[-1] if argv[:2] == ["docker", "exec"] else ""
+        if (stage == "compile" and "-g2012" in command) or (
+                stage == "runtime" and "/simv" in command and "-g2012" not in command):
+            drift[0] = True  # Inject readback drift, never recreate the container.
+        return cp
+    monkeypatch.setattr(bd.subprocess, "run", recording)
+    verdict = bd._validate_ai_review(task)
+    assert verdict["status"] == bd._NOT_MEASURED, verdict
+    proof = verdict["challenge_result"]
+    assert proof["status"] == bd._CHALLENGE_UNAVAILABLE
+    command = next(c for c in proof["execution"]["commands"] if c["stage"] == stage)
+    assert command["returncode"] == 0
+    if stage == "runtime":
+        assert "VIBEIC_AI_CHALLENGE=PASS" in command["stdout"]
+    evidence_dir = os.environ.get("VIBEIC_CHALLENGE_PROOF_DIR")
+    if evidence_dir:
+        (Path(evidence_dir) / ("native_drift_" + stage + ".json")).write_text(
+            json.dumps({"task": task, "verdict": verdict, "injection": "CID readback after actual " + stage}, indent=2))

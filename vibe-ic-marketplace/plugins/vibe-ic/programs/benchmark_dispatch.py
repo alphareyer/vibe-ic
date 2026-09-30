@@ -38,6 +38,7 @@ import contextlib
 import fcntl
 import re
 import signal
+import shlex
 import threading
 import uuid
 from dataclasses import dataclass
@@ -47,6 +48,7 @@ from typing import Callable, Iterable, Optional, TypeVar
 from _atomic_artefact import write_json as _atomic_write_json
 from _atomic_artefact import write_text as _atomic_write_text
 import _runtime_pair_preflight as _runtime_pair
+import _container_exec as _challenge_exec
 
 HARNESS = Path(__file__).resolve().parent.parent / "benchmark"
 REGISTRY = HARNESS / "BENCHMARK_REGISTRY.json"
@@ -1428,6 +1430,7 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
         "id": str(problem_id),
         "project": str(project),
         "candidate_origin": candidate_origin,
+        "verification_execution": _challenge_execution_declaration(run_p),
         "public_original_input": public_input,
         "public_original_input_paths": public_paths,
         "candidate_snapshot": candidate,
@@ -2555,8 +2558,84 @@ def _interface_omission_reason(candidate: dict, challenge: dict,
             f"port of the instantiated candidate")
 
 
+def _challenge_execution_declaration(run_p: Path) -> dict:
+    """Bind the challenge to the run's selected runtime, before execution.
+
+    Old standalone callers without a runtime declaration retain their named
+    legacy host mode. A present but unreadable/incomplete pair NEVER selects it.
+    An operator can explicitly select host challenges with
+    VIBEIC_CHALLENGE_BACKEND=host; this does not change the runner's backend.
+    """
+    selected = os.environ.get("VIBEIC_CHALLENGE_BACKEND")
+    if selected == "host":
+        return {"backend": "host", "selection": "VIBEIC_CHALLENGE_BACKEND=host"}
+    if selected not in (None, "native"):
+        return {"backend": selected, "error": "unknown challenge backend"}
+    path = Path(run_p) / _RUNTIME_PAIR_RECORD
+    if (not path.exists() and selected is None
+            and not (Path(run_p) / ".bench_config.json").exists()):
+        return {"backend": "host", "selection": "legacy caller without runtime pair"}
+    try:
+        pair = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return {"backend": "native", "error": f"runtime pair unreadable: {exc}"}
+    if (not isinstance(pair, dict)
+            or pair.get("verdict") != _runtime_pair.RUNTIME_PAIR_MATCH
+            or not pair.get("container")
+            or not pair.get("required_digest")
+            or pair.get("required_digest") != pair.get("found_digest")):
+        return {"backend": "native", "error": "runtime pair is incomplete or mismatched",
+                "runtime_pair": pair}
+    container = str(pair["container"])
+    image_id, why = _runtime_pair._pin.container_image_id(container)
+    return {"backend": "native", "selection": str(path.resolve()),
+            "container": container,
+            "container_id": _challenge_exec.container_id(container),
+            "image_id": image_id, "image_digest": pair["required_digest"],
+            **({"error": why} if why else {})}
+
+
+def _challenge_execution_for_task(task: dict) -> dict:
+    project = Path(str(task.get("project") or ""))
+    run_p = project.parent.parent
+    if "verification_execution" in task:
+        declaration = task["verification_execution"]
+        if (isinstance(declaration, dict) and declaration.get("backend") == "host"
+                and str(declaration.get("selection", "")).startswith("legacy")
+                and ((run_p / _RUNTIME_PAIR_RECORD).exists()
+                     or (run_p / ".bench_config.json").exists())):
+            return {"backend": "native", "error": "canonical task has only a legacy host declaration"}
+        return declaration
+    # Historical tasks are resumed against their original run declaration,
+    # including malformed declarations; absence is the named legacy case only.
+    return _challenge_execution_declaration(run_p)
+
+
+def _challenge_native_identity(declaration: dict) -> tuple[dict, str]:
+    """Read back the exact selected container; no host or alternate CID fallback."""
+    container = str(declaration.get("container") or "")
+    cid = _challenge_exec.container_id(container)
+    image_id, why_id = _runtime_pair._pin.container_image_id(container)
+    digest, why_digest = _runtime_pair._pin.container_image_digest(container)
+    actual = {"container_id": cid, "image_id": image_id, "image_digest": digest}
+    if declaration.get("error"):
+        return actual, str(declaration["error"])
+    for field, value in actual.items():
+        if not declaration.get(field) or not value:
+            return actual, f"native {field} unavailable: {why_id or why_digest}"
+        if value != declaration[field]:
+            return actual, (f"native {field} drift: declared {declaration[field]}, "
+                            f"found {value}")
+    return actual, ""
+
+
 def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
-    """Compile/run one immutable test against one immutable candidate."""
+    """BLOCKING: execute the immutable proof on its declared backend.
+
+    Missing native identity/capability is UNAVAILABLE (acceptance NOT_MEASURED),
+    never a candidate verdict. Legacy direct calls are explicitly labelled host.
+    Raw command/returncode/stdout/stderr records accompany every execution.
+    """
     reasons = _validate_candidate_snapshot(candidate, str(candidate.get("id")))
     if reasons:
         return {"status": "INVALID", "reasons": reasons}
@@ -2570,9 +2649,106 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
     if _challenge_forbidden_hit(source):
         return {"status": "INVALID",
                 "reasons": ["challenge is not self-contained"]}
-    iverilog, vvp = shutil.which("iverilog"), shutil.which("vvp")
-    if not iverilog or not vvp:
-        return {"status": "UNAVAILABLE", "reasons": ["iverilog/vvp unavailable"]}
+    declaration = challenge.get("execution_backend", {
+        "backend": "host", "selection": "legacy standalone caller"})
+    receipt = {"declaration": declaration, "commands": [], "tools": {}}
+
+    def finish(result):
+        return {**result, "execution": receipt}
+
+    if not isinstance(declaration, dict) or declaration.get("backend") not in ("host", "native"):
+        return finish({"status": "UNAVAILABLE", "reasons": ["challenge backend is undeclared or invalid"]})
+    native = declaration["backend"] == "native"
+    mounts = []
+    if native:
+        actual, why = _challenge_native_identity(declaration)
+        receipt["identity_before"] = actual
+        if why:
+            return finish({"status": "UNAVAILABLE", "reasons": [why]})
+        try:
+            inspect_argv = ["docker", "inspect", "--format", "{{json .Mounts}}", declaration["container_id"]]
+            cp = subprocess.run(inspect_argv, capture_output=True, text=True, timeout=30)
+            receipt["commands"].append({"stage": "mounts", "argv": inspect_argv,
+                "returncode": cp.returncode, "stdout": cp.stdout, "stderr": cp.stderr})
+            mounts = json.loads(cp.stdout) if cp.returncode == 0 else []
+            if not isinstance(mounts, list):
+                raise ValueError("container mounts are not a list")
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            return finish({"status": "UNAVAILABLE", "reasons": [f"native mounts unavailable: {exc}"]})
+
+    def mapped(path):
+        absolute = Path(path).resolve()
+        if not native:
+            return str(absolute)
+        choices = []
+        for mount in mounts:
+            if mount.get("Type") != "bind":
+                continue
+            root = Path(mount["Source"]).resolve()
+            if absolute.is_relative_to(root):
+                choices.append((len(root.parts), str(Path(mount["Destination"]) / absolute.relative_to(root))))
+        if not choices:
+            raise ValueError(f"native backend has no bind mount for {absolute}")
+        return max(choices)[1]
+
+    def execute(stage, argv, cwd=None):
+        actual_argv = argv
+        if native:
+            actual, why = _challenge_native_identity(declaration)
+            receipt["identity_before_" + stage] = actual
+            if why:
+                raise ValueError(why)
+            command = shlex.join(argv)
+            if cwd is not None:
+                command = "cd " + shlex.quote(mapped(cwd)) + " && exec " + command
+            actual_argv = _challenge_exec.container_deadline_argv(
+                declaration["container_id"], command, 30,
+                shell=("env", "IIC_OSIC_TOOLS_QUIET=1", "bash", "-lc"))
+        record = {"stage": stage, "tool_argv": argv, "argv": actual_argv, "cwd": cwd}
+        receipt["commands"].append(record)
+        try:
+            cp = subprocess.run(actual_argv, cwd=None if native else cwd,
+                capture_output=True, text=True, timeout=45 if native else 30)
+        except subprocess.TimeoutExpired as exc:
+            record.update(returncode=None,
+                stdout=exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout,
+                stderr=exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr,
+                timed_out=True)
+            raise
+        record.update(returncode=cp.returncode, stdout=cp.stdout, stderr=cp.stderr)
+        if native:
+            actual, why = _challenge_native_identity(declaration)
+            receipt["identity_after_" + stage] = actual
+            if why:
+                raise ValueError(why)
+            if _challenge_exec.image_refusal(cp) or cp.returncode in {124, 126, 127}:
+                raise ValueError(f"native {stage} unavailable: rc={cp.returncode}: {cp.stderr}")
+            if (cp.returncode != 0
+                    and (cp.stderr or "").startswith("Error response from daemon:")):
+                raise ValueError(f"native {stage} transport unavailable: {cp.stderr}")
+        return cp
+
+    try:
+        tools = {}
+        for tool in ("iverilog", "vvp"):
+            if native:
+                probe = execute("locate_" + tool, ["bash", "-c", "command -v " + tool])
+                path = probe.stdout.strip() if probe.returncode == 0 else ""
+            else:
+                path = shutil.which(tool)
+            if not path:
+                return finish({"status": "UNAVAILABLE", "reasons": [f"{tool} unavailable on declared {declaration['backend']} backend"]})
+            tools[tool] = path
+            version = execute("version_" + tool, [path, "-V"])
+            if version.returncode != 0:
+                return finish({"status": "UNAVAILABLE", "reasons": [f"{tool} version probe failed"]})
+            receipt["tools"][tool] = {"path": path, "version_stdout": version.stdout, "version_stderr": version.stderr}
+        iverilog, vvp = tools["iverilog"], tools["vvp"]
+    except subprocess.TimeoutExpired:
+        return finish({"status": "UNAVAILABLE",
+                       "reasons": ["challenge tool version probe timed out"]})
+    except (OSError, ValueError, subprocess.SubprocessError, _challenge_exec.ContainerImageMismatch) as exc:
+        return finish({"status": "UNAVAILABLE", "reasons": [f"challenge backend unavailable: {exc}"]})
     rtl_paths = [str(Path(p)) for p in candidate.get("rtl_paths") or []]
     # ARGUMENT ORDER IS NOT A VERDICT INPUT. `timescale is a compiler
     # directive that applies from its point of appearance FORWARD, across
@@ -2591,30 +2767,42 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
     declared = _declared_timescale(source)
     disagreement = _timescale_disagreement(rtl_paths, declared)
     if disagreement is not None:
-        return {"status": "INVALID", "reasons": [disagreement]}
-    with tempfile.TemporaryDirectory(prefix="vibeic-ai-challenge-") as td:
+        return finish({"status": "INVALID", "reasons": [disagreement]})
+    # Native scratch must be in the candidate's measured bind mount, not the
+    # host's unrelated /tmp. Longest-prefix mapping also supports unlike roots.
+    scratch_root = str(Path(candidate["manifest_path"]).parent) if native else None
+    try:
+        scratch = tempfile.TemporaryDirectory(prefix="vibeic-ai-challenge-", dir=scratch_root)
+    except OSError as exc:
+        return finish({"status": "UNAVAILABLE", "reasons": [f"challenge scratch unavailable: {exc}"]})
+    with scratch as td:
         out = Path(td) / "simv"
         prelude = []
         if declared is not None:
             prelude_path = Path(td) / "_vibeic_timescale.v"
-            prelude_path.write_text(f"`timescale {declared}\n")
+            try:
+                prelude_path.write_text(f"`timescale {declared}\n")
+            except OSError as exc:
+                return finish({"status": "UNAVAILABLE", "reasons": [f"challenge scratch unavailable: {exc}"]})
             prelude = [str(prelude_path)]
         try:
-            comp = subprocess.run(
+            comp = execute("compile",
                 [iverilog, "-g2012", "-s", "vibeic_ai_challenge_tb",
-                 "-o", str(out), *prelude, *rtl_paths, str(test_path)],
-                cwd=td, capture_output=True, text=True, timeout=30)
+                 "-o", mapped(out), *[mapped(p) for p in prelude],
+                 *[mapped(p) for p in rtl_paths], mapped(test_path)], cwd=td)
         except subprocess.TimeoutExpired:
-            return {"status": "INVALID", "reasons": ["challenge compile timed out"]}
+            return finish({"status": "UNAVAILABLE" if native else "INVALID", "reasons": ["challenge compile timed out"]})
+        except (OSError, ValueError, _challenge_exec.ContainerImageMismatch) as exc:
+            return finish({"status": "UNAVAILABLE", "reasons": [f"challenge backend unavailable: {exc}"]})
         if comp.returncode != 0:
             errors = comp.stderr or comp.stdout or ""
             cites_candidate, cites_challenge = _joint_compile_attribution(
-                errors, rtl_paths, str(test_path))
+                errors, [mapped(p) for p in rtl_paths], mapped(test_path))
             if cites_candidate and not cites_challenge:
-                return {"status": _CHALLENGE_CANDIDATE_BROKEN, "reasons": [
+                return finish({"status": _CHALLENGE_CANDIDATE_BROKEN, "reasons": [
                     "joint compile failed; every cited file is candidate RTL",
                     errors[-1200:],
-                ]}
+                ]})
             if cites_challenge and not cites_candidate:
                 # The one case where the CITED FILE is not the broken one: a
                 # required public port the candidate never declared is
@@ -2626,9 +2814,9 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
                 proven = _interface_omission_reason(
                     candidate, challenge, errors)
                 if proven is not None:
-                    return {"status": _CHALLENGE_CANDIDATE_BROKEN,
+                    return finish({"status": _CHALLENGE_CANDIDATE_BROKEN,
                             "interface_proof": challenge["interface_proof"],
-                            "reasons": [proven, errors[-1200:]]}
+                            "reasons": [proven, errors[-1200:]]})
                 cited = "only the challenge file"
             elif cites_candidate:
                 cited = "both candidate RTL and the challenge file"
@@ -2661,33 +2849,33 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
                     "does not carry. Supply it to attribute; do not read this "
                     "INVALID as evidence that the candidate is conforming.",
                 ]
-            return {"status": "INVALID",
+            return finish({"status": "INVALID",
                     "ports_absent_from_candidate": absent,
                     "reasons": [
                         f"joint compile failed; errors cite {cited}",
                         *extra,
                         errors[-1200:],
-                    ]}
+                    ]})
         try:
-            sim = subprocess.run(
-                [vvp, str(out)], cwd=td, capture_output=True, text=True,
-                timeout=30)
+            sim = execute("runtime", [vvp, mapped(out)], cwd=td)
         except subprocess.TimeoutExpired:
-            return {"status": "INVALID", "returncode": None,
-                    "reasons": ["challenge simulation timed out"]}
+            return finish({"status": "UNAVAILABLE" if native else "INVALID", "returncode": None,
+                    "reasons": ["challenge simulation timed out"]})
+        except (OSError, ValueError, _challenge_exec.ContainerImageMismatch) as exc:
+            return finish({"status": "UNAVAILABLE", "reasons": [f"challenge backend unavailable: {exc}"]})
     output = (sim.stdout or "") + (sim.stderr or "")
     # The challenge contract requires printing the FAIL marker, not exiting
     # non-zero: a test that collects its verdict in $finish still fails.
     failed = "VIBEIC_AI_CHALLENGE=FAIL" in output
     passed = (not failed and sim.returncode == 0
               and "VIBEIC_AI_CHALLENGE=PASS" in output)
-    return {
+    return finish({
         "status": ("FAIL" if failed else ("PASS" if passed else "INVALID")),
         "returncode": sim.returncode,
         "output": output[-2000:],
         "candidate_rtl_sha256": candidate.get("rtl_sha256"),
         "challenge_sha256": challenge.get("sha256"),
-    }
+    })
 
 
 def _validate_ai_review(task: dict) -> dict:
@@ -2901,6 +3089,7 @@ def _validate_ai_review(task: dict) -> dict:
     #: are findings against the review or the candidate. The two must never be
     #: mixed: one says "this is wrong", the other says "we did not look".
     unmeasurable: list[str] = []
+    execution_backend = _challenge_execution_for_task(task)
     raw_supersessions = review.get("challenge_supersessions")
     supersession_requested = (
         isinstance(raw_supersessions, list) and bool(raw_supersessions))
@@ -2910,7 +3099,7 @@ def _validate_ai_review(task: dict) -> dict:
         reasons.extend(challenge_reasons)
         if challenge is not None:
             challenge_result = _run_verification_challenge(
-                candidate, challenge)
+                candidate, {**challenge, "execution_backend": execution_backend})
             if challenge_result.get("status") == _CHALLENGE_UNAVAILABLE:
                 unmeasurable.append(
                     "the prompt-derived verification test could not be RUN on "
@@ -2939,7 +3128,7 @@ def _validate_ai_review(task: dict) -> dict:
         reasons.extend(challenge_reasons)
         if challenge is not None:
             challenge_result = _run_verification_challenge(
-                candidate, challenge)
+                candidate, {**challenge, "execution_backend": execution_backend})
             if challenge_result.get("status") == _CHALLENGE_UNAVAILABLE:
                 unmeasurable.append(
                     "the prompt-derived PASS confirmation could not be RUN on "
@@ -2979,7 +3168,8 @@ def _validate_ai_review(task: dict) -> dict:
             inherited_challenge_results.append({
                 "status": "INVALID", "reasons": inherited_reasons})
             continue
-        result = _run_verification_challenge(candidate, inherited)
+        result = _run_verification_challenge(
+            candidate, {**inherited, "execution_backend": execution_backend})
         supersession = supersession_by_hash.get(
             str(inherited.get("sha256") or ""))
         if supersession is not None:

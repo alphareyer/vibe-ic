@@ -379,8 +379,12 @@ def test_a_compile_timeout_is_never_CANDIDATE_BROKEN(tmp_path, monkeypatch):
     monkeypatch.setattr(
         bd.shutil, "which", lambda name, *a, **k: f"/stub/bin/{name}")
 
-    def _times_out(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd="iverilog", timeout=30)
+    def _times_out(argv, *args, **kwargs):
+        # This control is about COMPILATION, not the earlier tool identity
+        # probe. The real version command is allowed to finish first.
+        if "-g2012" in argv:
+            raise subprocess.TimeoutExpired(cmd="iverilog", timeout=30)
+        return subprocess.CompletedProcess(argv, 0, "fixture tool version", "")
 
     monkeypatch.setattr(bd.subprocess, "run", _times_out)
     result = bd._run_verification_challenge(
