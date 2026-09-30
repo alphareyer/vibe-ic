@@ -291,19 +291,18 @@ class _ExecRec:
         return subprocess.CompletedProcess(argv, self.rc, self.stdout, "")
 
 
-def test_a_vanishing_pid_does_not_blind_the_cpu_probe():
-    """THE MEASURED DEFECT, pinned. `cat /proc/[0-9]*/stat` exits NON-ZERO
-    whenever any one pid disappears between the glob and the open — which in a
-    container running an EDA tool is most of the time (measured: 7 of 12 looks
-    against a real `fault atpg`, each carrying 27-38 kB of good stat lines).
-    Judging the reading by that exit code discarded every one of them and left
-    the supervisor watching output alone, silently, in the direction that kills
-    a working job."""
-    ticks = os.sysconf("SC_CLK_TCK")
-    rec = _ExecRec(1, _STAT % (3 * ticks, 1 * ticks))
-    probe = DWD.ephemeral_container_cpu_probe(_FIXTURE_CONTAINER, runner=rec)
+def test_a_vanishing_pid_does_not_blind_the_cpu_probe(monkeypatch, tmp_path):
+    """Exited children remain counted by the bound kernel cgroup aggregate.
+
+    Preserve the original 4-second assertion while migrating the input from
+    a racy live-process census to the production inspect/host-cgroup contract.
+    """
+    from test_p0_production_host_cpu_probe import _host_fixture, NAME
+    fixture = _host_fixture(DWD, monkeypatch, tmp_path)
+    (fixture["scope"] / "cpu.stat").write_text("usage_usec 4000000\n")
+    probe = DWD.ephemeral_container_cpu_probe(NAME, runner=fixture["runner"])
     assert probe(None) == pytest.approx(4.0), (
-        "a non-zero exit with real stat lines was read as NO READING")
+        "exited-child cumulative CPU was read as NO READING")
 
 
 def test_an_absent_container_is_no_reading_not_zero():
