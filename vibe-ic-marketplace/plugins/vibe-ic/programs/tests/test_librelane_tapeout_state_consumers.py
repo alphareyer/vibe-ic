@@ -168,6 +168,31 @@ def test_finished_stream_drc_reads_each_actual_producer(tmp_path, monkeypatch, c
     assert 'klayout-drc/state_out.json' in klayout['source']
 
 
+def test_finished_drc_positive_survives_malformed_own_summary(tmp_path, monkeypatch):
+    import librelane_signoff_evidence as native
+
+    finished_producer(tmp_path, monkeypatch, counts={'magic__drc_error__count': 3})
+    path = tmp_path / 'phase3/librelane/37-magic-final-drc/drc_judgment.json'
+    doc = json.loads(path.read_text())
+    doc['metrics']['magic__drc_error__count']['value'] = 'malformed'
+    put(path, doc)
+
+    result = native.obligation(tmp_path, 'drc')
+    assert result['rows']['magic__drc_error__count']['value'] == 3, result
+    assert result['rows']['klayout__drc_error__count']['value'] == 0, result
+    assert result['verdict'] == 'FAIL', result
+    assert metrics._librelane_state_cell(tmp_path, 'magic__drc_error__count').value == 3
+    checked = ladder.check_tier_1_drc(tmp_path)
+    assert checked.verdict == 'FAIL', checked.details
+    assert checked.details['rows']['magic__drc_error__count']['value'] == 3
+    step = next(s for s in precheck.LADDER if s.step_id == 'Checker.MagicDRC')
+    cached = precheck._blank(step)
+    def no_legacy(*args):
+        pytest.fail('native selected rung ran legacy delegate')
+    precheck._step_delegate(cached, step, tmp_path, no_legacy, precheck._HERE, 60)
+    assert cached.verdict == precheck.FAIL, cached
+
+
 @pytest.mark.parametrize('count,verdict', [(0, 'PASS'), (3, 'FAIL')])
 def test_density_uses_the_finished_stream_receipt(tmp_path, monkeypatch, count, verdict):
     finished_producer(tmp_path, monkeypatch, counts={'klayout__density_error__count': count})

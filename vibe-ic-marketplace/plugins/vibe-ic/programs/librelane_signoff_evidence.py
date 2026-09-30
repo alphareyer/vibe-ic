@@ -324,7 +324,6 @@ def obligation(project: Path, kind: str, layout: Path | None = None) -> dict | N
             arm = _read(project / PROMOTION)['selection']
             lane = project / f'phase3/librelane/37-{arm}-final-drc'
             path = lane / 'drc_judgment.json'
-            record = _read(path)
             for producer, keys in COUNTS['drc'].items():
                 for key in keys:
                     folders = [p for p in lane.iterdir() if p.is_dir()
@@ -332,21 +331,36 @@ def obligation(project: Path, kind: str, layout: Path | None = None) -> dict | N
                                and _member(_read(p / 'vibeic_receipt.json'), 'input').get('step') == producer]
                     row = {'value': NM, 'reason': f'LL_REQUIRED_PRODUCER_MISSING: {producer}'}
                     if len(folders) == 1:
-                        try:
-                            declared = _member(_member(record, 'metrics'), key)
-                        except (ValueError, Refusal) as exc:
-                            rows[key] = {'value': NM, 'reason': str(exc), 'record': str(path)}
-                            continue
                         row = count_row(project, folders[0], producer, key, chosen,
                                         project / 'phase3/librelane/37-config')
-                        if type(row['value']) is int and (
-                                type(declared.get('value')) is not int or
-                                declared.get('value') != row['value'] or
-                                # Step37 judge_step records availability as
-                                # MEASURED; _measured_drc judges the count.
-                                declared.get('status') not in ('MEASURED', 'FAIL')):
-                            row.update(value=NM, reason='LL_JUDGMENT_NOT_CURRENT_PRODUCER')
                     rows[key] = dict(row, record=str(path))
+            # Bind each producer before consulting its summary. A corrupt
+            # summary cannot erase a current violation or credit a clean row.
+            try:
+                record = _read(path)
+            except (OSError, ValueError) as exc:
+                for row in rows.values():
+                    if type(row['value']) is int and row['value'] == 0:
+                        row.update(value=NM, reason=str(exc))
+                raise
+            for key, row in rows.items():
+                try:
+                    declared = _member(_member(record, 'metrics'), key)
+                except (ValueError, Refusal) as exc:
+                    if type(row['value']) is int and row['value'] > 0:
+                        row['reason'] = str(exc)
+                    else:
+                        row.update(value=NM, reason=str(exc))
+                    continue
+                if type(row['value']) is int and (
+                        type(declared.get('value')) is not int or
+                        declared.get('value') != row['value'] or
+                        # Step37 judge_step records availability as
+                        # MEASURED; _measured_drc judges the count.
+                        declared.get('status') not in ('MEASURED', 'FAIL')):
+                    row['reason'] = 'LL_JUDGMENT_NOT_CURRENT_PRODUCER'
+                    if row['value'] == 0:
+                        row['value'] = NM
             # judge_step's aggregate source is the final KLayout State, which
             # carries Magic's metric. Credit Magic from its OWN folder above.
             final = _path(project, record.get('source'))
