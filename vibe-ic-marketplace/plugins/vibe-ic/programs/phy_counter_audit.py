@@ -41,6 +41,7 @@ import re
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
+import _rtl_audit_applicability as _applicability
 from typing import List, Optional
 
 
@@ -414,6 +415,12 @@ def main():
             return 2
 
     report = generate_report(all_findings)
+    report['files_scanned'] = list(args.rtl_files)
+    if not all_findings:
+        applicability = _applicability.from_files(
+            'phy_counter_audit', [Path(p) for p in args.rtl_files])
+        report['applicability'] = applicability
+        report['summary']['verdict'] = applicability['state']
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -439,6 +446,8 @@ def main():
     print(f"Verdict: {verdict}")
     print(f"Report: {report_file}")
 
+    if verdict == _applicability.UNKNOWN:
+        return 2
     return 1 if warnings > 0 else 0
 
 

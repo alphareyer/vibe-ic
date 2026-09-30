@@ -39,6 +39,7 @@ import re
 import sys
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
+import _rtl_audit_applicability as _applicability
 from typing import List, Dict, Set, Tuple, Optional
 
 
@@ -854,10 +855,18 @@ def main():
         },
         'interfaces': [asdict(r) for r in filtered]
     }
+    if not filtered:
+        applicability = _applicability.assess(
+            'interface_encoding_audit', Path(args.rtl_dir),
+            top_module=args.top_module)
+        report['applicability'] = applicability
+        if applicability['state'] == _applicability.NOT_APPLICABLE:
+            report['summary']['verdict'] = _applicability.NOT_APPLICABLE
     report_file.write_text(json.dumps(report, indent=2))
     print(f"\nJSON report written to: {report_file}")
 
-    if _NOTHING_EXAMINED:
+    if _NOTHING_EXAMINED and report.get('applicability', {}).get('state') != \
+            _applicability.NOT_APPLICABLE:
         print(f"VACUOUS_PASS: interface_encoding_audit examined nothing "
               f"(reason: {_NOTHING_EXAMINED[0]}) — this is not a clean audit",
               file=sys.stderr)
