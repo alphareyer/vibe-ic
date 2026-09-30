@@ -1950,6 +1950,40 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
                      "genuine layout-vs-schematic match; the checklist "
                      "cannot certify Step 36 without one.")))
 
+    import librelane_signoff_evidence as native
+    native_evidence = {kind: native.obligation(project_dir, kind)
+                       for kind in ('drc', 'lvs', 'density', 'antenna')}
+    for kind, measured in native_evidence.items():
+        if measured is None:
+            continue
+        if kind in ('density', 'antenna'):
+            result.findings.append(Finding(
+                rule=f'TAPEOUT_{kind.upper()}_NATIVE_STATE',
+                severity='INFO' if measured['verdict'] == 'PASS' else 'ERROR',
+                message=f'{measured["verdict"]}: {measured["reason"]}',
+                file=measured.get('gds', '')))
+            continue
+        # The legacy engines remain available for direct selection. Their
+        # reports/waivers cannot certify a selected native obligation.
+        evidence_count -= int(bool(evidence.get(kind)))
+        evidence[kind] = measured['verdict'] == 'PASS'
+        evidence_count += int(evidence[kind])
+        result.findings = [f for f in result.findings
+                           if not f.rule.startswith(f'TAPEOUT_{kind.upper()}_')]
+        result.findings.append(Finding(
+            rule=f'TAPEOUT_{kind.upper()}_NATIVE_STATE',
+            severity='INFO' if evidence[kind] else 'ERROR',
+            message=f'{measured["verdict"]}: {measured["reason"]}',
+            file=measured.get('gds', '')))
+        if kind == 'drc':
+            drc_library_internal_waived = False
+            drc_die_level_attributed = False
+            drc_die_level_attribution = {}
+        else:
+            lvs_power_pin_waived = False
+            lvs_report = None
+            lvs_verdict = measured['verdict']
+
     threshold = _resolve_threshold(default_strict=5, total=5)
     result.passed = evidence_count >= threshold
 
@@ -1961,6 +1995,8 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
     # This makes the human-facing verdict honest — Step 33 cannot
     # be PASS in absolute terms when DRC didn't actually run.
     env_unavailable_steps = _read_phase3_env_unavailable_steps(project_dir)
+    env_unavailable_steps = [s for s in env_unavailable_steps
+                             if native_evidence.get(s) is None]
     verdict_tier = "PASS" if result.passed else "FAIL"
     if env_unavailable_steps:
         # If DRC slot is missing but DRC step was ENV_UNAVAILABLE,
@@ -2119,7 +2155,12 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
     elif result.passed and si_waived and verdict_tier == "PASS":
         verdict_tier = "PASS_WITH_WAIVERS"
 
+    if any(m is not None and m['verdict'] != 'PASS' for m in native_evidence.values()):
+        result.passed = False
+        verdict_tier = 'FAIL'
+
     result.summary = {
+        "native_evidence": {k: v for k, v in native_evidence.items() if v is not None},
         "evidence": evidence,
         "evidence_count": evidence_count,
         "threshold": threshold,

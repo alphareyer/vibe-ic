@@ -847,6 +847,22 @@ def evaluate(project: Path,
         for sh in (_theirs.retired_shuttles_for_pdk(resolved_pdk)
                    if resolved_pdk else ())]
 
+    # Resolve native-selected finished bytes once and forward them to BOTH
+    # independent authorities. Each arm still runs its own declared checks.
+    import librelane_signoff_evidence as native
+    layout_binding_failure = ''
+    if any(native.tool_selected(project, s) for s in ('26', '31', '34', '37')):
+        try:
+            layout = native.finished_layout(project, layout)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            # Our physical rungs report the binding refusal. The operator
+            # continues to execute its own authority; absence is not its PASS.
+            layout_binding_failure = str(exc)
+            rep.findings.append(Finding(
+                authority=f'{OURS}/{_ours.ATTRIBUTION}', authority_is_ours=True,
+                kind='INPUT_BINDING', step_id=None, verdict=NOT_DETERMINED,
+                message=f'native selected layout unavailable: {exc}', detail={}))
+
     # ---------------- ARM 1 — OURS. No condition. Every design. -------------
     our_authority = f"{OURS}/{_ours.ATTRIBUTION}"
     our_out = project / OUR_ARM_ARTEFACT
@@ -1027,6 +1043,9 @@ def evaluate(project: Path,
         rep.reason = ("arm(s) reached no verdict: "
                       + ", ".join(f"{a.arm} ({a.state})" for a in arm_missing)
                       + ". An arm that did not run is not a pass")
+    elif layout_binding_failure:
+        rep.verdict = NOT_DETERMINED
+        rep.reason = f'the selected finished layout is not bound: {layout_binding_failure}'
     elif any_undet:
         undet = [a.authority for a in rep.arms if a.verdict == NOT_DETERMINED]
         rep.verdict = NOT_DETERMINED

@@ -1023,7 +1023,7 @@ def _librelane_state_cell(project: Path, key: str) -> Optional[Cell]:
     run, so the direct rule below answers.
     """
     import librelane_pv_signoff as _pv
-    row = _pv.state_metric(project, key)
+    row = _pv.state_metric(project, key, current=True)
     if row is None:
         return None
     if row["value"] == _pv.NOT_MEASURED:

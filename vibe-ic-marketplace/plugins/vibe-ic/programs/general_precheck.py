@@ -419,6 +419,7 @@ class PrecheckReport:
     layouts_found: int
     layout: Optional[str] = None
     layout_sha256: Optional[str] = None
+    layout_binding: Dict[str, Any] = field(default_factory=dict)
     declaration: Optional[str] = None
     declaration_present: bool = False
     declaration_refusals: List[Dict[str, Any]] = field(default_factory=list)
@@ -1220,6 +1221,31 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
                    layout: Optional[Path] = None,
                    seal_deliverable: Any = _decl.NOT_DETERMINED,
                    seal_route: str = _decl.NOT_DETERMINED) -> None:
+    import librelane_signoff_evidence as native
+    physical = {'Checker.MagicDRC': ('drc', 'magic__drc_error__count'),
+                'Checker.KLayoutDRC': ('drc', 'klayout__drc_error__count'),
+                'Checker.KLayoutAntenna': ('antenna', 'klayout__antenna_error__count'),
+                'Checker.KLayoutDensity': ('density', 'klayout__density_error__count')}
+    if step.step_id in physical:
+        kind, key = physical[step.step_id]
+        measured = native.obligation(project, kind, layout)
+        if measured is not None:
+            row = measured.get('rows', {}).get(key, {})
+            value = row.get('value', native.NM)
+            ev.verdict = (FAIL if type(value) is int and value > 0 else
+                          PASS if type(value) is int and value == 0 else NOT_DETERMINED)
+            if measured['verdict'] == native.NM and ev.verdict == PASS:
+                ev.verdict = NOT_DETERMINED
+            if kind == 'antenna':
+                # This ladder has ONE antenna rung; the existing producer
+                # requires both independent models, including disagreement.
+                ev.verdict = (NOT_DETERMINED if measured['verdict'] == native.NM
+                              else measured['verdict'])
+            ev.measured = dict(row, selected_gds=measured.get('gds'),
+                               selected_gds_sha256=measured.get('gds_sha256'))
+            ev.evidence = row.get('reason') or measured['reason']
+            ev.note = 'producer State receipt; no delegate or operator verdict is substituted'
+            return
     d = step.delegate
     assert d is not None
     if step.step_id == "General.SealRing":
@@ -1475,6 +1501,17 @@ def evaluate(project: Path,
     rep.layout = str(chosen)
     rep.layout_sha256 = _sha256(chosen)
 
+    import librelane_signoff_evidence as native
+    binding_failure = ''
+    if any(native.tool_selected(project, s) for s in ('26', '31', '34', '37')):
+        try:
+            selected = native.finished_layout(project, chosen)
+            rep.layout_binding = {'verdict': PASS, 'selected': str(selected),
+                                  'sha256': _sha256(selected)}
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            binding_failure = str(exc)
+            rep.layout_binding = {'verdict': NOT_DETERMINED, 'reason': binding_failure}
+
     geom: Optional[Dict[str, Any]] = None
     layers: Optional[Dict[Any, int]] = None
     read_error: Optional[str] = None
@@ -1586,7 +1623,12 @@ def evaluate(project: Path,
         rep.verdict = FAIL
         rep.reason = ("the general precheck refused: " + ", ".join(failed)
                       + " — each refusal is quoted from the measurement or the "
-                        "checker that produced it")
+                        "checker that produced it"
+                      + (f'; selected finished layout is not bound: {binding_failure}'
+                         if binding_failure else ''))
+    elif binding_failure:
+        rep.verdict = NOT_DETERMINED
+        rep.reason = f'the selected finished layout is not bound: {binding_failure}'
     elif undet:
         rep.verdict = NOT_DETERMINED
         rep.reason = ("ladder step(s) produced no verdict: "
