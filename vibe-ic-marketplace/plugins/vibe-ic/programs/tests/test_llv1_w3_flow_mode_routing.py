@@ -58,6 +58,8 @@ OUT_OF_LAYER = {"A6", "A7"}
 #: new dynamic call anywhere, even beside a listed one, fails the census.
 DYNAMIC_SITES = {
     ("librelane_pv_signoff.py", "state_metric", "step"): "STATE_KEYS",
+    # obligation/finished_layout and precheck/state_metric callers use these steps.
+    ("librelane_signoff_evidence.py", "tool_selected", "step"): ("26", "31", "34", "37"),
     ("phase3_one_shot_runner.py", "atpg_librelane_views", "step"): ("DT2", "DT3"),
 }
 
