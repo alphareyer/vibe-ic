@@ -82,6 +82,13 @@ import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 PROGRAMS_DIR = Path(__file__).resolve().parent
 
 
+def _write_runner_summary(out: Path, summary: dict, project: Path) -> None:
+    """Publish the front door's own account with its actual dispatch generation."""
+    from benchmark_dispatch import _bind_runner_report
+    summary = _bind_runner_report(summary, project, __file__, out.name)
+    out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+
+
 def _propagatable_image(container: str,
                         rec: Dict[str, Any]) -> Tuple[Optional[str], str]:
     """`(reference, why_not)` — what to export as `VIBEIC_EDA_IMAGE` for a child
@@ -1802,7 +1809,7 @@ def main() -> int:
                    "stale_downstream": p3_stale}
         out = _pl.report_path(project, "vibe_ic_one_shot.json")
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(summary, indent=2) + "\n")
+        _write_runner_summary(out, summary, project)
         lock.release()
         return rc if p3 else (rc or 2)
 
@@ -2420,7 +2427,7 @@ def main() -> int:
         # PASS, and the unbounded finalize tail must not run after refusal.
         out = _pl.report_path(project, "vibe_ic_one_shot.json")
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({
+        _write_runner_summary(out, {
             "program": "vibe_ic_one_shot_runner", "bounded": False,
             **_delivery_route.report_label(project),
             "window_requested": {"entry_step": args.entry_step,
@@ -2429,7 +2436,7 @@ def main() -> int:
             "reason": "Phase-3 child did not publish a fresh bounded report",
             "phases": [{"name": n, "verdict": v, "rc": rc}
                        for n, v, rc in plan],
-        }, indent=2) + "\n")
+        }, project)
         lock.release()
         return next((rc or 2 for name, _, rc in reversed(plan)
                      if name == "phase3"), 2)
@@ -2460,7 +2467,7 @@ def main() -> int:
         }
         out = _pl.report_path(project, "vibe_ic_one_shot.json")
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(summary, indent=2) + "\n")
+        _write_runner_summary(out, summary, project)
         lock.release()
         return next(rc for name, _, rc in reversed(plan) if name == "phase3")
 
@@ -2698,7 +2705,7 @@ def main() -> int:
 
     out = _pl.report_path(project, "vibe_ic_one_shot.json")
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+    _write_runner_summary(out, summary, project)
 
     print(f"\n{'='*72}")
     print(f"=== vibe_ic_one_shot_runner DONE — {out}")

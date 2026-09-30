@@ -177,12 +177,13 @@ def _gate(monkeypatch, produce: str):
         # turned 111 of this module's tests red — every one of them reporting
         # `candidate_origin == "PROGRAM"` or an unpreserved `pre_gate_input`
         # rather than naming the word that caused it.
-        report.write_text(json.dumps({
+        from design_one_shot_runner import _write_phase2_report
+        _write_phase2_report(report, {
             "verdict": "PASS",
             "steps": [{"name": "rtl_gen", "status": "NOT_APPLICABLE",
                        "declared_by": "--entry-step 2",
                        "detail": "run declared --entry-step 2"}],
-        }))
+        }, project, invocation_context=json.loads(kwargs["env"][bd._RUNNER_CONTEXT_ENV]))
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(bd.subprocess, "run", fake_run)
@@ -300,9 +301,11 @@ def _case(tmp_path, monkeypatch, *, reviewed=False, exit_step="2"):
         report = candidate / "reports/orchestrator/phase2_one_shot.json"
         report.parent.mkdir(parents=True, exist_ok=True)
         # R-0915-85 — the producer's word for a site upstream of --entry-step.
-        report.write_text(json.dumps({"verdict": "FAIL" if state["rc"] else "PASS",
+        from design_one_shot_runner import _write_phase2_report
+        _write_phase2_report(report, {"verdict": "FAIL" if state["rc"] else "PASS",
             "steps": [{"name": "rtl_gen", "status": "NOT_APPLICABLE",
-                       "declared_by": "--entry-step 2"}]}))
+                       "declared_by": "--entry-step 2"}]}, candidate,
+                             invocation_context=json.loads(kwargs["env"][bd._RUNNER_CONTEXT_ENV]))
         if state["on_run"]:
             state["on_run"](candidate)
         assert kwargs["env"]["OMP_NUM_THREADS"] == "1"
