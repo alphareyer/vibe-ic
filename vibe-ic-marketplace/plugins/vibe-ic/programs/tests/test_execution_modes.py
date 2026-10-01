@@ -20,6 +20,7 @@ from programs.tests._hostpaths import require_repo
 
 BASE = 'f88175263d96c3a76b4cb18f72c7714c68ec6627'
 TOOL = Path(__file__).parent / 'fixtures/execution_modes_tool.py'
+ALT_TOOL = Path(__file__).parent / 'fixtures/execution_modes_tool_alt.py'
 OBJECTIVE = {'goal': 'uppercase', 'metric': 'cost', 'direction': 'min'}
 
 
@@ -35,11 +36,12 @@ def validate_text(outputs, binding):
                        report['metrics'])
 
 
-def adapter(arm='a', *, fault='none', duration=.02, cost=5, **kw):
+def adapter(arm='a', *, fault='none', duration=.02, cost=5, implementation=TOOL, **kw):
+    implementation = Path(implementation).resolve()
     source = {str(p.resolve()): em.digest(p.resolve()) for p in
-              (Path(sys.executable), TOOL, Path(__file__))}
+              (Path(sys.executable), implementation, Path(__file__))}
     components = tuple(em.Component(action, (
-        str(Path(sys.executable).resolve()), str(TOOL.resolve()), '{inputs}',
+        str(Path(sys.executable).resolve()), str(implementation), '{inputs}',
         '{outputs}', action, fault, str(duration), str(cost)), timeout_s=2)
         for action in ('transform', 'measure'))
     return em.Adapter(arm, 'neutral_' + arm, '1', BASE, source, sys.version,
@@ -140,6 +142,23 @@ def test_checker_is_not_alternate_producer_and_same_family_disclosed(tmp_path):
         'a': 'READY', 'b': 'SAME_ENGINE_FAMILY', 'checker': 'COMPLEMENTARY_CHECKER'}
 
 
+def test_ultra_deduplicates_relabelled_and_copied_routes_but_keeps_genuine_provider(tmp_path):
+    ctx = context(tmp_path)
+    copied = tmp_path / 'copied_execution_modes_tool.py'
+    copied.write_bytes(TOOL.read_bytes())
+    relabelled = replace(adapter('relabelled'), tool_id='alias_tool',
+                         engine_families=('alias_family',))
+    copied_alias = replace(adapter('copied', implementation=copied),
+                           tool_id='copied_tool', engine_families=('copied_family',))
+    genuine = replace(adapter('genuine', implementation=ALT_TOOL),
+                      tool_id='different_tool', engine_families=('different_family',))
+    plan = controller(adapter('a'), relabelled, copied_alias, genuine).plan(ctx, 'ultra-mode')
+    assert plan['arms'] == ['a', 'genuine']
+    assert {r['arm_id']: r['admission'] for r in plan['portfolio']} == {
+        'a': 'READY', 'relabelled': 'SAME_PRODUCER_ROUTE',
+        'copied': 'SAME_PRODUCER_ROUTE', 'genuine': 'READY'}
+
+
 def test_license_unavailable_is_named_and_not_runnable(tmp_path):
     ctx = context(tmp_path)
     licensed = adapter(license_id='neutral_license')
@@ -210,7 +229,8 @@ def test_real_ram_limit_refuses_allocation_and_keeps_partial_output(tmp_path):
 
 def test_concurrent_isolated_outputs_ordered_components_and_ai_adoption(tmp_path):
     ctx = context(tmp_path)
-    c = controller(adapter('a', duration=.15, cost=8), adapter('b', duration=.15, cost=3))
+    c = controller(adapter('a', duration=.15, cost=8),
+                   adapter('b', implementation=ALT_TOOL, duration=.15, cost=3))
     root = tmp_path / 'run'
     assert c.run(ctx, root, 'ultra-mode')['status'] == 'AWAITING_AI_SELECTION'
     a, b = read(root, 'a'), read(root, 'b')
@@ -239,7 +259,8 @@ def test_budget_serializes_actual_process_intervals(tmp_path, constraint):
     budget = em.Budget(1 if constraint == 'cpu' else 2,
                        128 if constraint == 'ram' else 512,
                        licenses={'seat': 1} if constraint == 'license' else {})
-    c = controller(adapter('a', duration=.06, **kw), adapter('b', duration=.06, **kw), budget=budget)
+    c = controller(adapter('a', duration=.06, **kw),
+                   adapter('b', implementation=ALT_TOOL, duration=.06, **kw), budget=budget)
     root = tmp_path / 'run'
     c.run(ctx, root, 'ultra-mode')
     a, b = read(root, 'a'), read(root, 'b')
@@ -363,7 +384,7 @@ def test_superiority_requires_exact_measured_input_version_and_objective(tmp_pat
     ctx = context(tmp_path)
     # Produce measurements with neutral tools first. Only the separate planner
     # test changes priority labels; runtime never claims an EDA result.
-    a, b = adapter('a', cost=9), adapter('b', cost=3)
+    a, b = adapter('a', cost=9), adapter('b', implementation=ALT_TOOL, cost=3)
     c = controller(a, b)
     root = tmp_path / 'measurements'
     c.run(ctx, root, 'ultra-mode')
