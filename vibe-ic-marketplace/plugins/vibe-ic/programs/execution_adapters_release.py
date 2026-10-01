@@ -354,6 +354,34 @@ def declared_identities(request):
                       'route': values['route']}}
 
 
+def classify(request):
+    """Classify release declarations before constructing ReleaseContext."""
+    from execution_step_protocol import PreparedStep
+    if request.step_id not in STEP_IDS:
+        raise em.Refusal('RELEASE_UNKNOWN_STEP', request.step_id)
+    request.check_source()
+    declaration = declared_identities(request)
+    raw_receipts = request.parameters.get('external_receipts', [])
+    if not isinstance(raw_receipts, list):
+        raise em.Refusal('RELEASE_EXTERNAL_POPULATION_INVALID', request.step_id)
+    facts = dict(declaration['facts'], step_id=request.step_id,
+                 source_sha=request.source_sha,
+                 source_files_sha256=em._hash(dict(request.source_files)),
+                 external_receipt_count=len(raw_receipts))
+    handoff = {'declaration': declaration['declaration'],
+               'declaration_sha256': declaration['declaration_sha256'],
+               'facts': facts}
+    if request.step_id == '37.5ic' and request.parameters['route'] == 'IP':
+        return PreparedStep(None, None, None, 'declared_inapplicable',
+                            'Owner-cited HARDMACRO declaration; IC-only precheck', handoff)
+    if request.step_id in EXTERNAL_IDS:
+        return PreparedStep(None, None, None, 'external_handoff',
+                            'Owner-declared external handoff; live prepare validates receipts', handoff)
+    return PreparedStep(None, None, None, 'execute',
+                        'Source-bound release declaration preflight; live prepare is required',
+                        {'facts': facts})
+
+
 def semantic_consume(project, context, controller, run, adopted):
     """Transactionally import this live issuer's exact selected generation.
 

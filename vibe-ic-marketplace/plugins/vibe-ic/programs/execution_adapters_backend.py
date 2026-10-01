@@ -115,12 +115,47 @@ def _declared_na(step, project, params):
     if expected is not None and expected != snap.sha(declaration):
         raise em.Refusal('BACKEND_DECLARATION_NOT_CURRENT', 'supplied declaration digest changed')
     if declaration.is_file():
-        answers = json.loads(declaration.read_text()).get('answers', {})
+        try:
+            document = json.loads(declaration.read_text())
+            answers = document.get('answers', {})
+            if not isinstance(document, dict) or not isinstance(answers, dict):
+                raise ValueError('owner declaration must contain an answers object')
+        except (OSError, ValueError, TypeError) as exc:
+            raise em.Refusal('BACKEND_DECLARATION_NOT_CURRENT', str(declaration)) from exc
         if answers.get('deliverable') == 'HARDMACRO':
             return {'declaration': str(declaration), 'declaration_sha256': snap.sha(declaration),
                     'facts': {'answers.deliverable': 'HARDMACRO'}}
     # An absent slot/declaration is unknown delivery, never factual N/A.
     return None
+
+
+def classify(request):
+    """Classify backend declarations before any host placement is requested."""
+    from execution_step_protocol import PreparedStep
+    sid = str(request.step_id)
+    if sid not in ROWS:
+        raise em.Refusal('BACKEND_UNKNOWN_STEP', sid)
+    request.check_source()
+    project = Path(request.project).absolute()
+    params = dict(request.parameters)
+    head = subprocess.check_output(
+        ['git', '-C', str(HERE), 'rev-parse', 'HEAD'], text=True).strip()
+    if request.source_sha != head:
+        raise em.Refusal('BACKEND_SOURCE_COMMIT_CHANGED', request.source_sha)
+    if subprocess.run(['git', '-C', str(HERE), 'diff', '--quiet', 'HEAD', '--', '.'],
+                      check=False).returncode:
+        raise em.Refusal('BACKEND_SOURCE_DIRTY', sid)
+    files = _source_files(request)
+    source_facts = {'step_id': sid, 'source_sha': request.source_sha,
+                    'source_files_sha256': em._hash(files)}
+    na = _declared_na(sid, project, params)
+    if na:
+        return PreparedStep(None, None, None, 'declared_inapplicable',
+                            'Current owner declaration states HARDMACRO',
+                            dict(na, facts=dict(source_facts, **na['facts'])))
+    return PreparedStep(None, None, None, 'execute',
+                        'Source-bound backend preflight; live prepare is required',
+                        {'facts': source_facts})
 
 
 def adoption_paths(step, project=None):

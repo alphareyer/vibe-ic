@@ -286,7 +286,10 @@ def _blocks(project: Path, declaration: Path) -> tuple[str, ...]:
             or not declaration.is_file() or any(p.is_symlink() for p in
                 (declaration, *declaration.parents))):
         raise em.Refusal('ANALOG_DECLARATION_REQUIRED', str(declaration_path(project)))
-    data = json.loads(declaration.read_text())
+    try:
+        data = json.loads(declaration.read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        raise em.Refusal('ANALOG_DECLARATION_MALFORMED', str(declaration)) from exc
     rows = data.get('blocks') if isinstance(data, dict) else data
     if not isinstance(rows, list) or any(not isinstance(b, dict) for b in rows):
         raise em.Refusal('ANALOG_DECLARATION_MALFORMED', str(declaration))
@@ -302,7 +305,10 @@ def _blocks(project: Path, declaration: Path) -> tuple[str, ...]:
         if candidate.is_symlink() or any(p.is_symlink() for p in candidate.parents):
             raise em.Refusal('ANALOG_DECLARATION_CONFLICT', rel)
         if candidate.is_file():
-            other = json.loads(candidate.read_text())
+            try:
+                other = json.loads(candidate.read_text())
+            except (OSError, ValueError, TypeError) as exc:
+                raise em.Refusal('ANALOG_DECLARATION_MALFORMED', str(candidate)) from exc
             other = other.get('blocks') if isinstance(other, dict) else other
             if other != rows:
                 raise em.Refusal('ANALOG_DECLARATION_CONFLICT', rel)
@@ -328,6 +334,46 @@ def source_dependencies() -> tuple[Path, ...]:
     # The canonical consumer reads this flow contract outside programs/.
     # Bind its current bytes before issuing the worker, just like gate source.
     return programs + (PROGRAMS.parent / 'flow/phase1_phase2_phase3.yaml',)
+
+
+def classify(request: StepRequest) -> PreparedStep:
+    """Classify the current analog declaration without creating a context."""
+    step, project = request.step_id, request.project
+    if step not in STEP_IDS:
+        raise em.Refusal('ANALOG_STEP_UNKNOWN', step)
+    request.check_source()
+    params = json_parameters(request.parameters)
+    if params.get('project', str(project)) != str(project):
+        raise em.Refusal('ANALOG_FRONTDOOR_PROJECT_DISAGREES', str(params.get('project')))
+    declaration = Path(str(params.get('declaration', '')))
+    blocks = _blocks(project, declaration)
+    requested_block = params.get('block')
+    if requested_block is not None:
+        if (step not in ANALOG_STEPS or not isinstance(requested_block, dict)
+                or not isinstance(requested_block.get('name'), str)
+                or requested_block['name'] not in blocks):
+            raise em.Refusal('ANALOG_BLOCK_INPUT_UNBOUND', repr(requested_block))
+        try:
+            current = json.loads(declaration.read_text())
+        except (OSError, ValueError, TypeError) as exc:
+            raise em.Refusal('ANALOG_DECLARATION_MALFORMED', str(declaration)) from exc
+        current = current.get('blocks') if isinstance(current, dict) else current
+        row = next(b for b in current if b['name'] == requested_block['name'])
+        if any(key not in row or row[key] != value for key, value in requested_block.items()):
+            raise em.Refusal('ANALOG_BLOCK_INPUT_DISAGREES', requested_block['name'])
+        blocks = (requested_block['name'],)
+    facts = {'step_id': step, 'source_sha': request.source_sha,
+             'source_files_sha256': em._hash(dict(request.source_files)),
+             'declaration': str(declaration),
+             'declaration_sha256': em.digest(declaration), 'blocks': list(blocks)}
+    if not blocks:
+        return PreparedStep(None, None, None, 'declared_inapplicable',
+            'Current bound declaration contains zero analog blocks.',
+            {'declaration': str(declaration), 'declaration_sha256': facts['declaration_sha256'],
+             'facts': facts})
+    return PreparedStep(None, None, None, 'execute',
+        'Source-bound analog declaration preflight; live prepare is required',
+        {'facts': facts})
 
 
 def prepare(request: StepRequest) -> PreparedStep:
