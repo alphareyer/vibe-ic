@@ -1990,7 +1990,9 @@ module {m} #(
                 dividend_reg      <= dividend_reg << 1;
                 partial_remainder <= iteration_remainder;
                 quotient_reg      <= (quotient_reg << 1) | trial_ge_divisor;
-                if (count == WIDTH - 1) begin
+                // The request edge already consumed the first trial, so the
+                // remaining busy iterations end at WIDTH-2.
+                if (count == WIDTH - 2) begin
                     {quotient}  <= (quotient_reg << 1) | trial_ge_divisor;
                     {remainder} <= iteration_remainder[WIDTH-1:0];
                     busy <= 1'b0;
@@ -2007,7 +2009,9 @@ module {m} #(
                 divisor_reg       <= {divisor};
                 quotient_reg      <= start_ge_divisor;
                 partial_remainder <= start_remainder;
-                count             <= {{COUNT_WIDTH{{1'b1}}}};
+                // The request edge already performed iteration zero; the next
+                // busy edge is therefore counted from zero through WIDTH-1.
+                count             <= {{COUNT_WIDTH{{1'b0}}}};
                 if (WIDTH == 1) begin
                     {quotient}  <= start_ge_divisor;
                     {remainder} <= start_remainder[WIDTH-1:0];

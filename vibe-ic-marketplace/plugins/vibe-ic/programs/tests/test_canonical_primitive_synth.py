@@ -10,8 +10,10 @@ synchronizer, multi_16bit) must detect_shape -> None (no mis-fire).
 """
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import os
@@ -380,6 +382,182 @@ def test_unsigned_divider_supports_renamed_ports_and_refuses_unsupported_domains
     assert rcs.detect_shape(zero) is None
     assert rcs.route_to_ai_reason(zero)["kind"] == (
         "unsupported_unsigned_iterative_divider")
+
+
+def _native_divider_vectors(width):
+    """Independent legal operands and Python's mathematical / and % oracle."""
+    limit = (1 << width) - 1
+    if width <= 4:
+        pairs = [(a, b) for b in range(1, limit + 1)
+                 for a in range(b, limit + 1)]
+    else:
+        edges = [(b, b) for b in (1, 2, limit // 2, limit - 1, limit)]
+        edges += [(limit, 1), (limit, limit // 2), (limit - 1, 3)]
+        # Deterministic bounded samples keep WIDTH=8/9/12 practical while
+        # preserving the source-declared nonzero a>=b domain.
+        samples = []
+        state = 0x2851 + width
+        for _ in range(32):
+            state = (1103515245 * state + 12345) & 0x7FFFFFFF
+            b = 1 + (state % limit)
+            state = (1103515245 * state + 12345) & 0x7FFFFFFF
+            a = b + (state % (limit - b + 1))
+            samples.append((a, b))
+        pairs = edges + samples
+    return [(a, b, a // b, a % b) for a, b in pairs]
+
+
+def _native_divider_tb(width, vectors):
+    checks = "\n".join(
+        f"        check_div({a}, {b}, {q}, {r});"
+        for a, b, q, r in vectors)
+    reset_a = max(2, (1 << width) - 1)
+    reset_b = 1
+    return f'''`timescale 1ns/1ps
+module tb;
+    localparam integer WIDTH = {width};
+    localparam integer EXPECTED_LATENCY = ((WIDTH & (WIDTH - 1)) == 0)
+        ? WIDTH : WIDTH + 1;
+    reg clk = 1'b0;
+    always #5 clk = ~clk;
+    reg rst = 1'b1;
+    reg start = 1'b0;
+    reg [WIDTH-1:0] dividend = '0;
+    reg [WIDTH-1:0] divisor = '0;
+    wire [WIDTH-1:0] quotient;
+    wire [WIDTH-1:0] remainder;
+    wire valid;
+    integer failures = 0;
+    integer checks = 0;
+
+    unsigned_ratio_unit #(.WIDTH(WIDTH)) dut (
+        .clk(clk), .rst(rst), .start(start), .dividend(dividend),
+        .divisor(divisor), .quotient(quotient), .remainder(remainder),
+        .valid(valid));
+
+    task automatic fail(input [1023:0] why);
+        begin
+            failures = failures + 1;
+            $display("FAIL width=%0d %0s", WIDTH, why);
+        end
+    endtask
+
+    task automatic check_div(input integer a_i, input integer b_i,
+                             input integer q_i, input integer r_i);
+        integer cycles;
+        begin
+            @(negedge clk);
+            dividend = a_i;
+            divisor = b_i;
+            start = 1'b1;
+            @(posedge clk); #1;
+            start = 1'b0;
+            cycles = 1;
+            while (!valid && cycles <= WIDTH + 2) begin
+                @(posedge clk); #1;
+                cycles = cycles + 1;
+            end
+            checks = checks + 1;
+            if (!valid)
+                fail("valid never asserted");
+            else if (cycles != EXPECTED_LATENCY)
+                begin
+                    fail("latency mismatch");
+                    $display("DETAIL width=%0d got=%0d expected=%0d",
+                             WIDTH, cycles, EXPECTED_LATENCY);
+                end
+            else if (quotient !== q_i || remainder !== r_i)
+                fail("independent quotient/remainder oracle mismatch");
+            @(posedge clk); #1;
+            if (valid)
+                fail("valid was wider than one cycle");
+        end
+    endtask
+
+    initial begin
+        #1;
+        rst = 1'b0;
+        #1;
+        if (valid !== 1'b0 || quotient !== '0 || remainder !== '0)
+            fail("initial active-low reset did not clear outputs");
+        rst = 1'b1;
+
+        // Assert reset between edges while a multi-cycle request is busy.
+        if (WIDTH >= 2) begin
+            @(negedge clk);
+            dividend = {reset_a};
+            divisor = {reset_b};
+            start = 1'b1;
+            @(posedge clk); #1;
+            start = 1'b0;
+            #2;
+            rst = 1'b0;
+            #1;
+            if (valid !== 1'b0 || quotient !== '0 || remainder !== '0)
+                fail("asynchronous reset did not clear busy result");
+            @(negedge clk);
+            rst = 1'b1;
+        end
+
+{checks}
+        if (failures != 0)
+            $fatal(1, "native divider checks failed: %0d", failures);
+        $display("PASS width=%0d checks=%0d latency=%0d", WIDTH, checks,
+                 EXPECTED_LATENCY);
+        $finish;
+    end
+endmodule
+'''
+
+
+def _run_native_divider_case(root, rtl_text, width, vectors):
+    rtl = root / f"divider_{width}.v"
+    tb = root / f"tb_{width}.v"
+    sim = root / f"sim_{width}"
+    rtl.write_text(rtl_text)
+    tb.write_text(_native_divider_tb(width, vectors))
+    compile_run = subprocess.run(
+        ["iverilog", "-g2012", "-s", "tb", "-o", str(sim),
+         str(rtl), str(tb)], capture_output=True, text=True)
+    assert compile_run.returncode == 0, compile_run.stdout + compile_run.stderr
+    return subprocess.run(["vvp", str(sim)], capture_output=True, text=True,
+                          timeout=45)
+
+
+def test_unsigned_divider_native_oracle_latency_reset_back_to_back_and_reverse():
+    """Compile the emitted RTL and use unchanged independent / and % checks.
+
+    The final run uses the same generated testbench and oracle against a
+    restoration mutation; a mutation that returns the pre-shift remainder must
+    redden rather than receiving a source-string-only pass.
+    """
+    if shutil.which("iverilog") is None or shutil.which("vvp") is None:
+        pytest.skip("NOT_MEASURED: iverilog/vvp unavailable in canonical image")
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"]
+    rtl = rcs.emit_rtl("unsigned_iterative_restoring_divider", desc)
+    work = Path(tempfile.mkdtemp(prefix="issue2851-native-", dir="/tmp"))
+    try:
+        vectors_by_width = {
+            width: _native_divider_vectors(width)
+            for width in (1, 2, 3, 4, 8, 9, 12)
+        }
+        for width, vectors in vectors_by_width.items():
+            run = _run_native_divider_case(work, rtl, width, vectors)
+            assert run.returncode == 0, run.stdout + run.stderr
+            assert f"PASS width={width}" in run.stdout, run.stdout + run.stderr
+            print(f"NATIVE_PASS width={width} vectors={len(vectors)}")
+
+        mutation = rtl.replace(
+            "        : shifted_remainder;\n",
+            "        : partial_remainder;\n", 1)
+        assert mutation != rtl
+        reverse = _run_native_divider_case(
+            work, mutation, 3, vectors_by_width[3])
+        assert reverse.returncode != 0, reverse.stdout + reverse.stderr
+        assert "FAIL width=3" in reverse.stdout, reverse.stdout + reverse.stderr
+        print("REVERSE_PASS mutation=restore_shifted_remainder caught=oracle")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def test_parallel2serial_dout_is_combinational():
@@ -941,14 +1119,23 @@ def _detector_literals(shape):
     """Every string literal the detector for `shape` tests, read from source.
 
     Introspection, not a hand-maintained list: an edited detector moves this on
-    its own."""
+    its own.  The unsigned divider detector delegates its source contract to a
+    parser helper, so include that helper's literals in the same audit."""
     import ast as _ast
     fn_name = dict(rcs._DETECTORS)[shape].__name__
+    names = {fn_name}
+    if shape == "unsigned_iterative_restoring_divider":
+        names.add("_unsigned_division_observation")
     src = (PROGRAMS / "canonical_primitive_synth.py").read_text()
+    found = set()
+    literals = set()
     for node in _ast.parse(src).body:
-        if isinstance(node, _ast.FunctionDef) and node.name == fn_name:
-            return {n.value.lower() for n in _ast.walk(node)
-                    if isinstance(n, _ast.Constant) and isinstance(n.value, str)}
+        if isinstance(node, _ast.FunctionDef) and node.name in names:
+            found.add(node.name)
+            literals.update(n.value.lower() for n in _ast.walk(node)
+                            if isinstance(n, _ast.Constant) and isinstance(n.value, str))
+    if found == names:
+        return literals
     raise AssertionError(f"detector source for {shape} not found")
 
 
