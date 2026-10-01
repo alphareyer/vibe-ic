@@ -409,7 +409,7 @@ class _Step1CallbackIssuer:
         self.parent.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
         self.thread = None
 
-    def _host_ceiling(self, *, caller=None, source=None, project=None):
+    def _host_ceiling(self, *, caller=None, source=None, project=None, worker_pid=None):
         ceiling = self.cost['ram_mb'] * 1048576
         for name, path in self.context.inputs.items():
             if Path(name).name != 'lease.json':
@@ -440,9 +440,16 @@ class _Step1CallbackIssuer:
                     raise Refusal('ISSUED_CHILD_HOST_SPLIT_UNBOUND', name)
                 if caller is None or source is None or project is None:
                     raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', name)
-                self.fixture_scope.assert_authorized(lease_path=path,
-                    step_id=self.context.step_id, project=project,
-                    caller=caller, source=source)
+                if (caller == __name__ + '.issued_child_scope'
+                        and source == str(Path(__file__).resolve())):
+                    self.fixture_scope.assert_authorized(lease_path=path,
+                        step_id=self.context.step_id, project=project,
+                        caller=caller, source=source)
+                else:
+                    self.fixture_scope.authorize_current_call(
+                        plan_binding=self.plan['binding'], worker_pid=(os.getpid() if worker_pid is None else worker_pid),
+                        step_id=self.context.step_id, project=project,
+                        caller=caller, source=source)
                 ceiling = min(ceiling, lease['ram_mb'] * 1048576)
                 continue
             if (api is None or self.arm.source_files.get(str(Path(api.__file__).resolve())) != digest(Path(api.__file__))
@@ -515,9 +522,16 @@ class _Step1CallbackIssuer:
                                 or not value.get('caller')):
                             raise Refusal('STEP1_CALLBACK_UNBOUND', 'callback source/project')
                         if self.fixture_scope is not None:
-                            self.fixture_scope.authorize(
-                                step_ids=(self.context.step_id,), project=project,
-                                caller=value['caller'], source=filename)
+                            if (value['caller'] == __name__ + '.issued_child_scope'
+                                    and filename == str(Path(__file__).resolve())):
+                                self.fixture_scope.authorize(
+                                    step_ids=(self.context.step_id,), project=project,
+                                    caller=value['caller'], source=filename)
+                            else:
+                                self.fixture_scope.authorize_current_call(
+                                    plan_binding=self.plan['binding'], worker_pid=peer_pid,
+                                    step_id=self.context.step_id, project=project,
+                                    caller=value['caller'], source=filename)
                         if descendant is not None and (self.context.step_id != 'D1'
                                 or filename != str(Path(__file__).resolve().parent/'phase1_doc_one_shot_runner.py')
                                 or value['caller'] != 'phase1_doc_one_shot_runner.main'):
@@ -554,7 +568,7 @@ class _Step1CallbackIssuer:
                         if (not effective['affinity'] or not set(effective['affinity']).issubset(self.cost['affinity'])
                                 or soft <= 0 or hard <= 0 or soft > hard or hard > self._host_ceiling(
                                     caller=value.get('caller'), source=value.get('source_file'),
-                                    project=value.get('project'))):
+                                    project=value.get('project'), worker_pid=peer_pid)):
                             raise Refusal('ISSUED_CHILD_LIMIT_EXCEEDED', self.arm.arm_id)
                         pinned = self.effective_limits if descendant is None else descendant['effective_limits']
                         if pinned is not None and effective != pinned:

@@ -58,6 +58,7 @@ class SourceFixtureScope:
     parent_pid: int
     parent_start_ticks: str
     authorized: tuple | None = None
+    derived_current_call: tuple | None = None
 
     def _manifest(self) -> dict:
         path = self.directory / 'lease.json'
@@ -125,6 +126,61 @@ class SourceFixtureScope:
         if (expected is None
                 or expected != (tuple([step_id]), binding[1], binding[2], binding[3], binding[4])):
             raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'callback is not the live authorized source')
+
+    def authorize_current_call(self, *, plan_binding: Mapping[str, object], worker_pid: int,
+                               step_id: str, project: Path, caller: str, source: str) -> dict:
+        """Issue one derived semantic-call handle from the live bootstrap grant.
+
+        The derived tuple is a single immutable current-call binding.  It is
+        created only by the live callback issuer after its Controller plan and
+        worker checks; it is never reconstructed from a witness or ENV value.
+        """
+        manifest = self._manifest()
+        if not isinstance(plan_binding, Mapping) or not plan_binding:
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'live Controller plan required')
+        if (plan_binding.get('step_id') != step_id
+                or not re.fullmatch(r'[0-9a-f]{40}', str(plan_binding.get('source_sha', '')))
+                or not re.fullmatch(r'[0-9a-f]{64}', str(plan_binding.get('controller_sha256', '')))
+                or not isinstance(plan_binding.get('inputs'), Mapping)
+                or not plan_binding['inputs']):
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'current Controller binding changed')
+        if type(worker_pid) is not int or worker_pid <= 0 or worker_pid == os.getpid():
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'current worker identity required')
+        worker_ticks = start_ticks(worker_pid)
+        state = _process_state(worker_pid, worker_ticks)
+        if state['fate'] != 'live':
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'current worker is not live')
+        owner = (OWNER_ENV + '=' + self.nonce).encode()
+        try:
+            if owner not in Path(f'/proc/{worker_pid}/environ').read_bytes().split(b'\0'):
+                raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'worker lease owner changed')
+        except OSError as exc:
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', str(worker_pid)) from exc
+        if (not isinstance(step_id, str) or not step_id or not isinstance(caller, str) or not caller
+                or not isinstance(source, str) or not source):
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'typed current callable required')
+        project = Path(project).resolve()
+        source_path = Path(source).resolve()
+        if (project.is_symlink() or source_path.is_symlink() or not source_path.is_file()
+                or not project.is_dir()):
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'current project/source changed')
+        source_sha = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        if self.authorized is None or self.authorized[0] != (step_id,) or self.authorized[1] != str(project):
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'bootstrap grant missing')
+        plan_sha = hashlib.sha256(json.dumps(dict(plan_binding), sort_keys=True,
+                                              separators=(',', ':')).encode()).hexdigest()
+        binding = (plan_sha, worker_pid, worker_ticks, step_id, str(project), caller,
+                   str(source_path), source_sha)
+        if self.derived_current_call is None:
+            self.derived_current_call = binding
+        elif self.derived_current_call != binding:
+            raise Refusal('SOURCE_FIXTURE_SCOPE_REBOUND', repr(binding))
+        return dict(kind='SOURCE_FIXTURE_CURRENT_CALL', plan_sha256=plan_sha,
+                    worker_pid=worker_pid, worker_start_ticks=worker_ticks,
+                    step_id=step_id, project=str(project), caller=caller,
+                    source=str(source_path), source_sha256=source_sha,
+                    lease_sha256=hashlib.sha256((self.directory / 'lease.json').read_bytes()).hexdigest(),
+                    nonce=manifest['nonce'])
 
 
 def current_source_fixture_scope() -> SourceFixtureScope | None:
