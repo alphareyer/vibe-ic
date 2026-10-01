@@ -71,7 +71,7 @@ IMAGE_REPO="${IMAGE_REPO:-${VIBEIC_EDA_IMAGE_REPO:-ghcr.io/vibeic/vibeic-eda}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # EDA tool process names used for the in-flight-job guard.
-EDA_PROCS='openroad|yosys|magic|netgen|klayout|iverilog|verilator|ngspice|fault|tclsh'
+EDA_PROCS='openroad|yosys|magic|netgen|klayout|iverilog|verilator|vvp|ngspice|fault|tclsh'
 
 die() { echo "restart-eda: $*" >&2; exit "${2:-1}"; }
 
@@ -186,11 +186,41 @@ if docker container inspect "$NAME" >/dev/null 2>&1; then
   OLD_IMG="$(docker inspect "$NAME" --format '{{.Config.Image}}')"
   echo "== existing container '${NAME}' found (image: ${OLD_IMG}) — cloning its config"
 
-  # in-flight EDA job guard (skip idle sleep/startup/VNC).
-  if docker top "$NAME" -o args 2>/dev/null | grep -iqE "$EDA_PROCS"; then
+  # in-flight EDA job guard (skip idle sleep/startup/VNC).  Capture the
+  # producer's stdout and status independently: a failed `docker top` is not
+  # evidence that the container is idle, even under `set -euo pipefail`.
+  _top_rc=0
+  _top_output="$(docker top "$NAME" -o pid,args 2>/dev/null)" || _top_rc=$?
+  _top_failure=""
+  _top_output_valid() {
+    local _line _header _saw_process=0
+    [[ -n "$_top_output" ]] || return 1
+    _header="${_top_output%%$'\n'*}"
+    [[ "$_header" =~ ^[[:space:]]*[Pp][Ii][Dd]([[:space:]]|$) ]] || return 1
+    while IFS= read -r _line; do
+      [[ -n "$_line" ]] || continue
+      [[ "$_line" =~ ^[[:space:]]*[0-9]+[[:space:]]+.+$ ]] || return 1
+      _saw_process=1
+    done <<< "${_top_output#*$'\n'}"
+    (( _saw_process == 1 ))
+  }
+  if (( _top_rc != 0 )); then
+    _top_failure="docker top process readback failed (rc ${_top_rc})"
+  elif ! _top_output_valid; then
+    _top_failure="docker top process readback was empty or malformed"
+  fi
+  if [[ -n "$_top_failure" ]]; then
+    if [[ "${FORCE:-0}" != "1" ]]; then
+      echo "-- ${_top_failure} inside '${NAME}': refusing to infer idle." >&2
+      [[ -n "$_top_output" ]] && printf '%s\n' "$_top_output" >&2
+      die "refusing to recreate without trustworthy workload readback. Re-run with FORCE=1 to override." 2
+    fi
+    echo "-- FORCE=1: recreating despite unavailable workload readback (${_top_failure})." >&2
+    [[ -n "$_top_output" ]] && printf '%s\n' "$_top_output" >&2
+  elif printf '%s\n' "$_top_output" | grep -iqE "$EDA_PROCS"; then
     if [[ "${FORCE:-0}" != "1" ]]; then
       echo "-- an EDA tool process is running inside '${NAME}':" >&2
-      docker top "$NAME" -o pid,args 2>/dev/null | grep -iE "$EDA_PROCS" >&2 || true
+      printf '%s\n' "$_top_output" | grep -iE "$EDA_PROCS" >&2 || true
       die "refusing to recreate mid-job. Re-run with FORCE=1 to override." 2
     fi
     echo "-- FORCE=1: recreating despite a running EDA job."
