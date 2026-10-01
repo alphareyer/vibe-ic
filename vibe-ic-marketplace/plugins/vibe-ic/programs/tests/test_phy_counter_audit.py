@@ -223,9 +223,13 @@ module rx_only (input clk, input data_in, output reg [7:0] rx_data);
     end
 endmodule
 """
-        _, report = run_cli(tmp_path, sv)
+        result, report = run_cli(tmp_path, sv)
         assert report['summary']['total_counters_analyzed'] == 0
-        assert report['summary']['verdict'] == 'PASS'
+        # The name matcher still finds no TX counters, but the source contains
+        # a recurrent counter. Zero keyword hits cannot prove structural absence.
+        assert report['summary']['verdict'] == 'UNKNOWN'
+        assert report['applicability']['reason'] == 'subject_present_or_role_unknown'
+        assert result.returncode == 2
 
 
 # -----------------------------------------------------------------------

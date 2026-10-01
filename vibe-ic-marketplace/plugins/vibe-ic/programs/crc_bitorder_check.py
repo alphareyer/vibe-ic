@@ -40,6 +40,9 @@ import re
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _rtl_audit_applicability as _applicability
 from typing import List, Optional
 
 
@@ -434,27 +437,39 @@ def main():
         description='Detect CRC bit-ordering mismatches in TX data loading.')
     ap.add_argument('--rtl-files', required=True, nargs='+',
                     help='Verilog/SystemVerilog file(s) to analyze')
-    ap.add_argument('--crc-signal', required=True,
+    ap.add_argument('--crc-signal',
                     help='Name of the CRC result signal (e.g., crc8_result)')
     ap.add_argument('--out-dir', required=True,
                     help='Output directory for JSON report')
     args = ap.parse_args()
+    # No invented signal on a CRC-free design. Without a declared subject,
+    # only the conservative structural absence proof can decide the audit;
+    # otherwise emit UNKNOWN, not a pass over an empty finding population.
 
     all_findings: List[CrcLoadFinding] = []
-    for f in args.rtl_files:
-        all_findings += analyze_file(f, args.crc_signal)
+    if args.crc_signal:
+        for f in args.rtl_files:
+            all_findings += analyze_file(f, args.crc_signal)
 
-    report = build_report(args.crc_signal, args.rtl_files, all_findings)
+    report = build_report(args.crc_signal or '', args.rtl_files, all_findings)
 
     # Write JSON report
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     report_path = out / 'crc_bitorder_report.json'
     report_dict = asdict(report)
+    if not args.crc_signal:
+        applicability = _applicability.from_files(
+            'crc_bitorder_check', [Path(p) for p in args.rtl_files])
+        report_dict['applicability'] = applicability
+        report_dict['summary_status'] = applicability['state']
+        report_dict['summary_message'] = (
+            applicability.get('criterion') or applicability.get('reason'))
     report_path.write_text(json.dumps(report_dict, indent=2))
 
     # Console summary
-    print(f"crc_bitorder_check: [{report.summary_status}] {report.summary_message}")
+    print(f"crc_bitorder_check: [{report_dict['summary_status']}] "
+          f"{report_dict['summary_message']}")
     print(f"  CRC signal : {report.crc_signal}")
     print(f"  Files      : {len(report.files_scanned)}")
     print(f"  Findings   : {len(report.findings)}")
@@ -463,7 +478,9 @@ def main():
               f"→ {f.target_reg} = {f.raw_rhs}")
     print(f"\nReport written to: {report_path}")
 
-    # Exit code: 0 = PASS/INFO, 1 = WARN
+    # An unknown applicability decision did not measure the obligation.
+    if report_dict['summary_status'] == _applicability.UNKNOWN:
+        return 2
     return 1 if report.summary_status == 'WARN' else 0
 
 

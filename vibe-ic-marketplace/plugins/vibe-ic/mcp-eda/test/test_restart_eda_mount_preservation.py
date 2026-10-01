@@ -137,7 +137,10 @@ if verb == "inspect":
             out(c)
     sys.exit(0)
 
-if verb in ("top", "ps", "images"):
+if verb == "top":
+    out("PID                 COMMAND\n123                 sleep infinity")
+    sys.exit(0)
+if verb in ("ps", "images"):
     sys.exit(0)
 if verb in ("rename", "stop", "start", "rm"):
     sys.exit(0)
