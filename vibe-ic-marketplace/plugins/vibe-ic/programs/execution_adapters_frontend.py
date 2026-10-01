@@ -137,6 +137,15 @@ def prepare(request):
     return prepare_frontend(request, PreparedStep)
 
 
+def classify(request):
+    """Source-only disposition pass; resource admission happens later."""
+    from execution_step_protocol import PreparedStep
+    from execution_frontend_worker import prepare_frontend
+    if request.step_id not in STEP_IDS:
+        raise em.Refusal("FRONTEND_STEP_NOT_OWNED", request.step_id)
+    return prepare_frontend(request, PreparedStep, classification=True)
+
+
 def consume(project: Path, context: FrontendContext, controller: em.Controller,
             run: Path, adopted: Mapping[str, object]) -> dict:
     from execution_frontend_worker import consume_frontend

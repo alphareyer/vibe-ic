@@ -443,7 +443,7 @@ def required_gates(step_id: str) -> tuple[str, ...]:
     return canonical_gate_population(step_id, ('canonical_step_consumer', 'native_producer'))
 
 
-def prepare_frontend(request, PreparedStep):
+def prepare_frontend(request, PreparedStep, *, classification=False):
     sid = request.step_id
     project = Path(request.project).resolve(strict=True)
     p = dict(request.parameters)
@@ -509,6 +509,13 @@ def prepare_frontend(request, PreparedStep):
     roots = input_roots(project, dict(p, step_id=sid))
     inputs, pop = lexical_tree(project, roots=roots)
     if not inputs:
+        if classification:
+            return PreparedStep(None, None, None, disposition='current_input_missing',
+                reason='current consumed input population is empty',
+                handoff={'facts': {'step_id': sid, 'population': pop,
+                                   'source_sha': request.source_sha,
+                                   'source_files': own_sources,
+                                   'design_verdict': 'NOT_MEASURED'}})
         raise em.Refusal('FRONTEND_INPUT_EMPTY', sid)
     if source_step1 and 'project/phase1/input_doc/design.md' not in inputs:
         raise em.Refusal('FRONTEND_STEP1_DESIGN_INPUT_NOT_CONSUMED', str(design_input))
@@ -521,6 +528,13 @@ def prepare_frontend(request, PreparedStep):
             raise em.Refusal('FRONTEND_UPSTREAM_JOURNAL_UNSAFE', str(journal))
         journal_checkpoint['provenance.jsonl'] = em.digest(journal)
     if not inputs:
+        if classification:
+            return PreparedStep(None, None, None, disposition='current_input_missing',
+                reason='current consumed input population is empty after exclusions',
+                handoff={'facts': {'step_id': sid, 'population': pop,
+                                   'source_sha': request.source_sha,
+                                   'source_files': own_sources,
+                                   'design_verdict': 'NOT_MEASURED'}})
         raise em.Refusal('FRONTEND_INPUT_EMPTY', sid)
     def current_handoff(facts):
         handoff = declaration_handoff(project, p, facts)
@@ -600,13 +614,22 @@ def prepare_frontend(request, PreparedStep):
         if not isinstance(tools, dict) or not tools or any(
                 not isinstance(v, str) or not re.fullmatch('[0-9a-f]{64}', v) for v in tools.values()):
             raise em.Refusal('FRONTEND_NATIVE_TOOL_IDENTITIES_MISSING', sid)
-    quota = lease_current(Path(request.lease), p)
     if source_software:
         facts_file = facts_sha = None
         deadline = 300
     else:
         facts_file, facts_sha = native_facts(p)
         deadline = native_deadline(p)
+    if classification:
+        return PreparedStep(None, None, None, disposition='execute',
+            reason='source-owned classification selected execution',
+            handoff={'facts': {'step_id': sid, 'route': route,
+                               'source_software': source_software,
+                               'source_sha': request.source_sha,
+                               'source_files': own_sources,
+                               'population': pop,
+                               'design_verdict': 'NOT_MEASURED'}})
+    quota = lease_current(Path(request.lease), p)
     if not source_step1 and sid not in ('D1', '0.5ic'):
         top = nonempty(p.get('top'), 'top')
         if not re.fullmatch('[A-Za-z_$][A-Za-z0-9_$]*', top):

@@ -737,6 +737,44 @@ def prepare(project: Path | protocol.StepRequest, top: str | None = None, pdk=No
     return context, registry
 
 
+def classify(request: protocol.StepRequest) -> protocol.PreparedStep:
+    """Classify Step 9 from source/input facts before host admission.
+
+    Image probing and native producer setup belong to the second call to
+    ``prepare`` under a live production lease.  This pass only rejects a
+    malformed source request or an absent current RTL population.
+    """
+    parameters = request.parameters
+    if (not parameters.get('top') or parameters.get('pdk') is None
+            or not parameters.get('container')):
+        raise em.Refusal('PRODUCTION_SYNTH_PARAMETERS_MISSING', request.step_id)
+    if parameters.get('period_relax', 1.0) != 1.0:
+        raise em.Refusal('PRODUCTION_PERIOD_RELAX_TARGET_PROOF_PENDING', str(parameters['period_relax']))
+    import execution_synthesis_engines as engines
+    engines.require_engine(parameters.get('synthesis_engine', 'librelane-mapped-synthesis'))
+    switch = Path(request.project) / 'phase3/librelane_switch.json'
+    if switch.is_file() and not switch.is_symlink():
+        try:
+            switch_data = json.loads(switch.read_text())
+        except (OSError, ValueError) as exc:
+            raise em.Refusal('PRODUCTION_INPUT_UNMEASURED', str(switch)) from exc
+        if switch_data.get('steps', {}).get('9') == 'direct':
+            raise em.Refusal('PRODUCTION_EXPLICIT_DIRECT_NOT_IMPLEMENTED', str(request.project))
+    rtl = Path(request.project) / 'phase2/stage1/rtl'
+    if not rtl.is_dir() or rtl.is_symlink() or not any(
+            path.is_file() and not path.is_symlink() for path in rtl.rglob('*')):
+        return protocol.PreparedStep(None, None, None, 'current_input_missing',
+            'current Step 9 RTL input population is missing',
+            {'facts': {'step_id': '9', 'source_sha': request.source_sha,
+                       'source_files': dict(request.source_files),
+                       'design_verdict': 'NOT_MEASURED'}})
+    return protocol.PreparedStep(None, None, None, 'execute',
+        'source-owned classification selected execution',
+        {'facts': {'step_id': '9', 'source_sha': request.source_sha,
+                   'source_files': dict(request.source_files),
+                   'design_verdict': 'NOT_MEASURED'}})
+
+
 def gate_verdict(name: str, rc: int, report: dict) -> str:
     """Consume native report semantics: rc0 alone cannot establish a gate."""
     if rc == 1:
@@ -1261,21 +1299,44 @@ def dispatch_step(step_id: str, project: Path, parameters: dict, *, fixture_root
         parameters,extras=frontdoor_parameters(dict(parameters,step_id=step_id,project=project),transport)
         factory_registry = factories()
         import execution_resource_lease as lease_api
+        sha, sources = source_identity(extras)
+        # Classification is source-owned and deliberately lease-free.  It
+        # must be able to report a declaration, missing current input, or an
+        # unavailable provider without asking the host broker to provision a
+        # production cgroup.  An execute marker is only a preflight result;
+        # the full factory is called again below under a live lease.
+        classification_request = protocol.StepRequest(
+            step_id, project, parameters, root / 'unissued-lease.json',
+            root / 'classification-request.json', sha, sources)
+        classified = factory_registry.classify(classification_request)
+        if classified is not None and classified.disposition != 'execute':
+            status = ('NOT_APPLICABLE' if classified.disposition == 'declared_inapplicable'
+                      else 'NOT_MEASURED')
+            handoff = dict(classified.handoff)
+            result = dict(step_id=step_id, status=status, detail=classified.reason,
+                handoff=handoff,
+                output_files=[str(root / 'disposition.json')],
+                reason_class='' if status == 'NOT_APPLICABLE' else ReasonClass.NOT_EXECUTED.value)
+            if handoff.get('declaration') is not None:
+                result['declared_by'] = str(handoff['declaration'])
+            write_json(root / 'disposition.json', result)
+            return result
         if fixture_root is None and not hasattr(lease_api,'prepare_host_scope'):
             raise em.Refusal('RESOURCE_HOST_PLACEMENT_API_UNAVAILABLE','original114 typed host scope required')
         placement = (nullcontext(None) if fixture_root is not None else
             lease_api.prepare_host_scope(budget,expected_source_sha256=em.digest(Path(lease_api.__file__))))
         with placement as host_scope, host_lease(budget, fixture_root=fixture_root) as lease:
-            sha, sources = source_identity(extras)
             request = protocol.StepRequest(step_id, project, parameters, lease.resolve(),
                 root / 'native-request.json', sha, sources)
             prepared = factory_registry.prepare(request)
             if prepared.disposition != 'execute':
                 status = 'NOT_APPLICABLE' if prepared.disposition == 'declared_inapplicable' else 'NOT_MEASURED'
                 result = dict(step_id=step_id, status=status, detail=prepared.reason,
-                    declared_by=str(prepared.handoff['declaration']), handoff=dict(prepared.handoff),
+                    handoff=dict(prepared.handoff),
                     output_files=[str(root / 'disposition.json')], reason_class='' if status == 'NOT_APPLICABLE'
                     else ReasonClass.NOT_EXECUTED.value)
+                if prepared.handoff.get('declaration') is not None:
+                    result['declared_by'] = str(prepared.handoff['declaration'])
                 write_json(root / 'disposition.json', result)
                 return result
             original=prepared.context
@@ -1393,6 +1454,25 @@ def dispatch_site(step_ids: tuple[str, ...], project: Path, parameters: dict) ->
         if not isinstance(caller,str) or not isinstance(source,str):
             raise em.Refusal('PRODUCTION_CHILD_SCOPE_UNBOUND', 'callback callable/source missing')
         callback.authorize(caller,source)
+        return None
+    # Captured/source-only callable controls have a separate live capability.
+    # It is issued by host_lease(fixture_root=...), bound to this exact
+    # callable/source/step/project, and never authorizes a native boundary.
+    import execution_resource_lease as lease_api
+    fixture_scope = lease_api.current_source_fixture_scope()
+    if fixture_scope is not None:
+        if len(step_ids) != 1:
+            raise em.Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'single callable step required')
+        caller, source = parameters.get('native_callable'), parameters.get('native_source')
+        if source is None:
+            frame = inspect.currentframe().f_back
+            try:
+                caller = frame.f_globals['__name__']+'.'+frame.f_code.co_name
+                source = str(Path(frame.f_code.co_filename).resolve())
+            finally:
+                del frame
+        fixture_scope.authorize(step_ids=step_ids, project=Path(project),
+                                caller=caller, source=source)
         return None
     transport = policy.request()
     if os.environ.get('VIBEIC_EXECUTION_NATIVE_STEP') in step_ids:

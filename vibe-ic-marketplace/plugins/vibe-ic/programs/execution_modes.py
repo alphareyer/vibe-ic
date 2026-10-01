@@ -398,6 +398,10 @@ class _Step1CallbackIssuer:
         self.inputs, self.outputs = inputs, outputs
         self.cost = dict(cpus=arm.cpus, ram_mb=arm.ram_mb, affinity=list(cpuset),
                          licenses={} if arm.license_id is None else {arm.license_id:1})
+        resource_api = _sys.modules.get('execution_resource_lease')
+        self.fixture_scope = (resource_api.active_source_fixture_scope()
+                              if resource_api is not None
+                              and hasattr(resource_api, 'active_source_fixture_scope') else None)
         self.effective_limits = None
         self.callers = set()
         self.descendants = {}
@@ -405,7 +409,7 @@ class _Step1CallbackIssuer:
         self.parent.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
         self.thread = None
 
-    def _host_ceiling(self):
+    def _host_ceiling(self, *, caller=None, source=None, project=None):
         ceiling = self.cost['ram_mb'] * 1048576
         for name, path in self.context.inputs.items():
             if Path(name).name != 'lease.json':
@@ -414,6 +418,33 @@ class _Step1CallbackIssuer:
             lease = json.loads(path.read_text())
             api = _sys.modules.get('execution_resource_lease')
             identity = lease.get('issuer_identity') or {}
+            scope = lease.get('resource_scope')
+            # A source-fixture lease is a live, typed source issuer, but it is
+            # deliberately outside the production cgroup/native boundary.
+            # The worker may use its admitted source-only budget; it must not
+            # ask the production placement RPC to manufacture a host domain.
+            if scope == 'source-fixture':
+                if (api is None or self.fixture_scope is None
+                        or path.is_symlink() or (path.parent/'closed.json').exists()
+                        or lease.get('parent_pid') != os.getpid()
+                        or lease.get('parent_start_ticks') != api.start_ticks(os.getpid())
+                        or not re.fullmatch(r'[0-9a-f]{32}', str(lease.get('nonce', '')))
+                        or os.environ.get(api.OWNER_ENV) != lease.get('nonce')
+                        or identity.get('resource_source_sha256') != digest(Path(api.__file__))
+                        or identity.get('parent_pid') != lease.get('parent_pid')
+                        or identity.get('parent_start_ticks') != lease.get('parent_start_ticks')
+                        or any(identity.get(key) != value for key, value in api._host_identity().items())
+                        or any(type(lease.get(key)) is not int or lease[key] <= 0
+                               for key in ('ram_mb', 'host_ram_mb', 'container_ram_mb'))
+                        or lease.get('host_ram_mb') + lease.get('container_ram_mb') != lease.get('ram_mb')):
+                    raise Refusal('ISSUED_CHILD_HOST_SPLIT_UNBOUND', name)
+                if caller is None or source is None or project is None:
+                    raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', name)
+                self.fixture_scope.assert_authorized(lease_path=path,
+                    step_id=self.context.step_id, project=project,
+                    caller=caller, source=source)
+                ceiling = min(ceiling, lease['ram_mb'] * 1048576)
+                continue
             if (api is None or self.arm.source_files.get(str(Path(api.__file__).resolve())) != digest(Path(api.__file__))
                     or path.is_symlink() or (path.parent/'closed.json').exists()
                     or lease.get('parent_pid') != os.getpid()
@@ -483,6 +514,10 @@ class _Step1CallbackIssuer:
                                 or self.arm.source_files.get(filename) != value.get('source_sha256')
                                 or not value.get('caller')):
                             raise Refusal('STEP1_CALLBACK_UNBOUND', 'callback source/project')
+                        if self.fixture_scope is not None:
+                            self.fixture_scope.authorize(
+                                step_ids=(self.context.step_id,), project=project,
+                                caller=value['caller'], source=filename)
                         if descendant is not None and (self.context.step_id != 'D1'
                                 or filename != str(Path(__file__).resolve().parent/'phase1_doc_one_shot_runner.py')
                                 or value['caller'] != 'phase1_doc_one_shot_runner.main'):
@@ -517,7 +552,9 @@ class _Step1CallbackIssuer:
                                          as_limits=list(resource.prlimit(peer_pid,resource.RLIMIT_AS)))
                         soft, hard = effective['as_limits']
                         if (not effective['affinity'] or not set(effective['affinity']).issubset(self.cost['affinity'])
-                                or soft <= 0 or hard <= 0 or soft > hard or hard > self._host_ceiling()):
+                                or soft <= 0 or hard <= 0 or soft > hard or hard > self._host_ceiling(
+                                    caller=value.get('caller'), source=value.get('source_file'),
+                                    project=value.get('project'))):
                             raise Refusal('ISSUED_CHILD_LIMIT_EXCEEDED', self.arm.arm_id)
                         pinned = self.effective_limits if descendant is None else descendant['effective_limits']
                         if pinned is not None and effective != pinned:

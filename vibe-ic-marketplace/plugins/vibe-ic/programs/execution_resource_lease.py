@@ -24,6 +24,7 @@ import tempfile
 import time
 import threading
 import uuid
+from typing import Mapping
 
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -33,10 +34,117 @@ from execution_modes import Budget, Refusal
 
 LABEL = 'io.vibeic.execution-lease'
 OWNER_ENV = 'VIBEIC_RESOURCE_LEASE_OWNER'
+BROKER_ALLOWANCE_MB = 64
 _SELECTED_SHARE = ContextVar('vibeic_issued_command_share', default=None)
 _DAEMON_LOCK = threading.Lock()
 _SHARE_MESSAGE_BYTES = 1048576
 _HOST_SCOPES = {}
+_SOURCE_FIXTURE_SCOPE = ContextVar('vibeic_source_fixture_scope', default=None)
+_SOURCE_FIXTURE_SCOPES = {}
+_SOURCE_FIXTURE_SCOPE_LOCK = threading.RLock()
+
+
+@dataclass
+class SourceFixtureScope:
+    """Live source-owned callable capability for an isolated fixture lease.
+
+    The scope is an in-process handle created by ``host_lease``.  Its lease
+    manifest and issuer identity are revalidated on every authorization; a
+    copied JSON file, stale directory, or generic environment marker cannot
+    manufacture this capability.
+    """
+    directory: Path
+    nonce: str
+    parent_pid: int
+    parent_start_ticks: str
+    authorized: tuple | None = None
+
+    def _manifest(self) -> dict:
+        path = self.directory / 'lease.json'
+        if (self.directory.is_symlink() or path.is_symlink() or
+                (self.directory / 'closed.json').exists() or not path.is_file()):
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', str(self.directory))
+        manifest = json.loads(path.read_text())
+        if (manifest.get('resource_scope') != 'source-fixture'
+                or manifest.get('nonce') != self.nonce
+                or manifest.get('parent_pid') != self.parent_pid
+                or manifest.get('parent_start_ticks') != self.parent_start_ticks
+                or os.getpid() != self.parent_pid
+                or start_ticks(os.getpid()) != self.parent_start_ticks
+                or os.environ.get(OWNER_ENV) != self.nonce):
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', str(self.directory))
+        identity = manifest.get('issuer_identity') or {}
+        source = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        if (identity.get('resource_source_sha256') != source
+                or identity.get('parent_pid') != self.parent_pid
+                or identity.get('parent_start_ticks') != self.parent_start_ticks
+                or any(identity.get(k) != v for k, v in _host_identity().items())):
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'issuer identity changed')
+        return manifest
+
+    def authorize(self, *, step_ids, project: Path, caller: str, source: str) -> None:
+        manifest = self._manifest()
+        if (not isinstance(step_ids, tuple) or not step_ids or
+                any(not isinstance(step, str) or not step for step in step_ids)
+                or not isinstance(caller, str) or not caller
+                or not isinstance(source, str) or not source):
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'typed callable binding required')
+        project = Path(project).resolve()
+        source_path = Path(source).resolve()
+        if (project.is_symlink() or source_path.is_symlink() or not source_path.is_file()):
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'source changed or missing')
+        binding = (tuple(step_ids), str(project), caller, str(source_path),
+                   hashlib.sha256(source_path.read_bytes()).hexdigest())
+        if self.authorized is None:
+            self.authorized = binding
+        elif self.authorized != binding:
+            raise Refusal('SOURCE_FIXTURE_SCOPE_REBOUND', repr(binding))
+        # Keep an explicit source-only budget contract visible to callers;
+        # this scope never grants native Docker or production placement.
+        if (any(type(manifest.get(key)) is not int or manifest[key] <= 0
+                for key in ('ram_mb', 'host_ram_mb', 'container_ram_mb'))
+                or manifest.get('host_ram_mb') + manifest.get('container_ram_mb') != manifest['ram_mb']):
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'invalid admitted source budget')
+
+    def assert_authorized(self, *, lease_path: Path, step_id: str,
+                          project: Path, caller: str, source: str) -> None:
+        """Revalidate the live issuer and exact callable before callback limits."""
+        self._manifest()
+        lease_path = Path(lease_path)
+        active_lease = self.directory / 'lease.json'
+        if (lease_path.is_symlink() or not lease_path.is_file()
+                or hashlib.sha256(lease_path.read_bytes()).hexdigest() !=
+                   hashlib.sha256(active_lease.read_bytes()).hexdigest()):
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'copied lease is not the live issued bytes')
+        source_path = Path(source).resolve()
+        if source_path.is_symlink() or not source_path.is_file():
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', str(source_path))
+        binding = (str(step_id), str(Path(project).resolve()), caller,
+                   str(source_path), hashlib.sha256(source_path.read_bytes()).hexdigest())
+        expected = self.authorized
+        if (expected is None
+                or expected != (tuple([step_id]), binding[1], binding[2], binding[3], binding[4])):
+            raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', 'callback is not the live authorized source')
+
+
+def current_source_fixture_scope() -> SourceFixtureScope | None:
+    scope = _SOURCE_FIXTURE_SCOPE.get()
+    if scope is not None:
+        scope._manifest()
+    return scope
+
+
+def active_source_fixture_scope(directory: Path | None = None) -> SourceFixtureScope | None:
+    """Return a live scope for this issuer process, including child threads."""
+    wanted = None if directory is None else Path(directory).resolve()
+    with _SOURCE_FIXTURE_SCOPE_LOCK:
+        scopes = list(_SOURCE_FIXTURE_SCOPES.values())
+    for scope in scopes:
+        if scope.parent_pid != os.getpid() or (wanted is not None and scope.directory != wanted):
+            continue
+        scope._manifest()
+        return scope
+    return None
 
 
 @dataclass(frozen=True)
@@ -59,6 +167,30 @@ class ShareRequest:
                 or any(not isinstance(key, str) or not key.strip() or type(value) is not int or value <= 0
                        for key, value in self.licenses.items())):
             raise Refusal('RESOURCE_SHARE_REQUEST_INVALID', repr(self))
+
+
+NATIVE_CAPABILITY_TARGET = '/run/vibeic/native-capability.sock'
+
+
+@dataclass(frozen=True)
+class NativeChildBinding:
+    """Typed facts a native child may present to the live resource issuer."""
+    step_id: str
+    source_sha256: str
+    image_id: str
+    input_hashes: Mapping[str, str]
+    output_root: str
+
+    def __post_init__(self):
+        if (not isinstance(self.step_id, str) or not self.step_id
+                or not re.fullmatch(r'[0-9a-f]{40}', self.source_sha256)
+                or not re.fullmatch(r'(?:.+@)?sha256:[0-9a-f]{64}', self.image_id)
+                or not isinstance(self.input_hashes, Mapping) or not self.input_hashes
+                or any(not isinstance(k, str) or not isinstance(v, str)
+                       or not re.fullmatch(r'[0-9a-f]{64}', v)
+                       for k, v in self.input_hashes.items())
+                or not isinstance(self.output_root, str) or not self.output_root.startswith('/')):
+            raise Refusal('RESOURCE_NATIVE_BINDING_INVALID', repr(self))
 
 
 @dataclass(frozen=True)
@@ -103,9 +235,12 @@ def prepare_host_scope(budget: Budget, *, expected_source_sha256: str):
         job = current.parent if existing else current
         broker, host = job/'broker', job/'host'
         limits = _kernel_limits(job)
+        broker_current_mb = int((job/'memory.current').read_text()) // 1048576
         quota, period = limits['cpu.max'].split()
+        required_memory = (budget.ram_mb + BROKER_ALLOWANCE_MB) * 1048576
         if (job == Path('/sys/fs/cgroup') or limits['memory.max'] == 'max'
-                or int(limits['memory.max']) < budget.ram_mb*1048576 or quota == 'max'
+                or int(limits['memory.max']) < required_memory or quota == 'max'
+                or broker_current_mb > BROKER_ALLOWANCE_MB
                 or int(quota) < budget.cpus*int(period) or int(period) <= 0
                 or limits['memory.swap.max'] != '0' or (job/'cgroup.type').read_text().strip() != 'domain'):
             raise Refusal('RESOURCE_HOST_PLACEMENT_UNBOUND', 'finite admitted job limits required')
@@ -157,6 +292,9 @@ def prepare_host_scope(budget: Budget, *, expected_source_sha256: str):
             raise Refusal('RESOURCE_HOST_PLACEMENT_PERMISSION', 'delegated host/common-parent placement permission required')
         payload = dict(parent_pid=os.getpid(), parent_start_ticks=start_ticks(os.getpid()),
                        source_sha256=source, budget=asdict(budget),
+                       broker_allowance_mb=BROKER_ALLOWANCE_MB,
+                       broker_memory_current_mb=broker_current_mb,
+                       required_job_ram_mb=budget.ram_mb + BROKER_ALLOWANCE_MB,
                        scope=_scope_identity(broker, job, host))
         handle = PreparedHostScope(uuid.uuid4().hex, json.dumps(payload, sort_keys=True))
         _HOST_SCOPES[handle.scope_id] = handle
@@ -182,6 +320,13 @@ def _live_host_scope(handle: PreparedHostScope, directory: Path, expected_sha256
             or manifest['parent_start_ticks'] != start_ticks(os.getpid())
             or payload['parent_start_ticks'] != start_ticks(os.getpid())
             or payload['source_sha256'] != hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+            or payload.get('broker_allowance_mb') != BROKER_ALLOWANCE_MB
+            or payload.get('required_job_ram_mb') != payload['budget']['ram_mb'] + BROKER_ALLOWANCE_MB
+            or manifest.get('broker_allowance_mb') != BROKER_ALLOWANCE_MB
+            or manifest.get('required_job_ram_mb') != manifest.get('ram_mb', 0) + BROKER_ALLOWANCE_MB
+            or type(manifest.get('broker_memory_current_mb')) is not int
+            or manifest.get('broker_memory_current_mb') < 0
+            or manifest.get('broker_memory_current_mb') > BROKER_ALLOWANCE_MB
             or manifest['issuer_identity']['resource_source_sha256'] != payload['source_sha256']
             or any(manifest['issuer_identity'].get(key) != value for key,value in _host_identity().items())
             or any(manifest[key] != payload['budget'][key] for key in ('cpus','ram_mb','licenses'))
@@ -189,6 +334,8 @@ def _live_host_scope(handle: PreparedHostScope, directory: Path, expected_sha256
             or manifest['host_ram_mb']+manifest['container_ram_mb'] != manifest['ram_mb']):
         raise Refusal('RESOURCE_HOST_PLACEMENT_UNBOUND', 'current source/issuer/lease/whole budget changed')
     broker = _process_cgroup(os.getpid()); job = broker.parent; host = job/'host'
+    if int((job/'memory.max').read_text()) < (payload['budget']['ram_mb'] + BROKER_ALLOWANCE_MB) * 1048576:
+        raise Refusal('RESOURCE_HOST_PLACEMENT_UNBOUND', 'finite job lacks broker allowance')
     if (str(broker) != manifest['issuer_identity']['cgroup']
             or _scope_identity(broker, job, host) != payload['scope']):
         raise Refusal('RESOURCE_HOST_PLACEMENT_UNBOUND', 'actual pinned broker/job/host changed')
@@ -538,6 +685,12 @@ def _share_issuer(directory: Path, manifest: dict):
     stopped = threading.Event()
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(_share_socket(manifest)); server.listen(); server.settimeout(.1)
+    native_path = directory / 'native-capability.sock'
+    if native_path.exists() or native_path.is_symlink():
+        raise Refusal('RESOURCE_NATIVE_CAPABILITY_CONFLICT', str(native_path))
+    native_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    native_server.bind(str(native_path)); native_server.listen(); native_server.settimeout(.1)
+    native_path.chmod(0o600)
 
     def save(row):
         path = directory/'shares'/(row['share_id']+'.json')
@@ -659,7 +812,7 @@ def _share_issuer(directory: Path, manifest: dict):
             cid_path = Path(message['cid_path'])
             if row['status'] != 'ACTIVE' or row['cid_path'] is not None or row['active_thread_id'] != tid:
                 raise Refusal('RESOURCE_SHARE_DUPLICATE', row['share_id'])
-            if cid_path.parent != directory or not re.fullmatch('[0-9a-f]{32}\.cid',cid_path.name):
+            if cid_path.parent != directory or not re.fullmatch(r'[0-9a-f]{32}\.cid', cid_path.name):
                 raise Refusal('RESOURCE_SHARE_UNBOUND', str(cid_path))
             row['cid_path']=str(cid_path); save(row)
         elif operation == 'close':
@@ -678,6 +831,106 @@ def _share_issuer(directory: Path, manifest: dict):
         elif row['status'] == 'ACTIVE' and row['active_thread_id'] != tid:
             raise Refusal('RESOURCE_SHARE_THREAD_UNBOUND', str(tid))
         return row['payload']
+
+    def native_handle(pid, uid, message):
+        """Authenticate a mounted native child against live Docker state."""
+        if uid != os.getuid() or not isinstance(message, dict) or message.get('operation') != 'native-handshake':
+            raise Refusal('RESOURCE_NATIVE_CHILD_REFUSED', 'typed peer handshake required')
+        if manifest.get('resource_scope') != 'production':
+            raise Refusal('RESOURCE_FIXTURE_NATIVE_FORBIDDEN', str(directory))
+        if hashlib.sha256((directory/'lease.json').read_bytes()).hexdigest() != lease_sha:
+            raise Refusal('RESOURCE_LEASE_CHANGED', str(directory))
+        outer_pid = message.get('outer_pid')
+        if type(outer_pid) is not int:
+            raise Refusal('RESOURCE_NATIVE_CHILD_REFUSED', 'outer worker PID claim missing')
+        worker = _registered_worker(directory, manifest, outer_pid)
+        worker_inputs = _share_inputs(manifest, outer_pid)
+        binding = message.get('binding')
+        if (worker_inputs.get('kind') != 'CURRENT_CONTROLLER_INPUT'
+                or not isinstance(binding, dict) or binding != worker_inputs.get('binding')
+                or message.get('step_id') != binding.get('step_id')
+                or message.get('source_sha256') != binding.get('source_sha')):
+            raise Refusal('RESOURCE_NATIVE_INPUT_UNBOUND', str(outer_pid))
+        image_id = message.get('image_id')
+        if not isinstance(image_id, str) or not re.fullmatch(r'(?:.+@)?sha256:[0-9a-f]{64}', image_id):
+            raise Refusal('RESOURCE_NATIVE_IMAGE_UNBOUND', repr(image_id))
+        claimed_inputs = message.get('inputs')
+        claimed_outputs = message.get('outputs')
+        expected_inputs = binding.get('inputs')
+        if (not isinstance(claimed_inputs, dict) or claimed_inputs != expected_inputs
+                or not isinstance(claimed_outputs, dict)
+                or any(not isinstance(k, str) or not isinstance(v, str)
+                       or not re.fullmatch(r'[0-9a-f]{64}', v)
+                       for k, v in claimed_outputs.items())):
+            raise Refusal('RESOURCE_NATIVE_INPUT_UNBOUND', 'input/output hash map changed')
+        candidates = [row for row in grants.values()
+                      if row['payload'].get('worker', {}).get('pid') == outer_pid
+                      and row['status'] == 'ACTIVE' and row.get('cid_path')]
+        if len(candidates) != 1:
+            raise Refusal('RESOURCE_NATIVE_CID_UNBOUND', str(outer_pid))
+        row = candidates[0]
+        cid_path = Path(row['cid_path'])
+        if cid_path.parent != directory or cid_path.is_symlink() or not cid_path.is_file():
+            raise Refusal('RESOURCE_NATIVE_CID_UNBOUND', str(cid_path))
+        cid = cid_path.read_text().strip()
+        if not re.fullmatch(r'[0-9a-f]{64}', cid):
+            raise Refusal('RESOURCE_NATIVE_CID_UNBOUND', cid)
+        _bind_daemon(directory)
+        inspected = _command(['docker', 'inspect', '--format', '{{json .}}', cid])
+        if inspected.returncode:
+            raise Refusal('RESOURCE_NATIVE_CID_UNBOUND', inspected.stderr[-300:])
+        try:
+            state = json.loads(inspected.stdout)
+        except (ValueError, TypeError) as exc:
+            raise Refusal('RESOURCE_NATIVE_CID_UNBOUND', 'invalid docker inspect') from exc
+        labels = ((state.get('Config') or {}).get('Labels') or {})
+        runtime = state.get('State') or {}
+        host_config = state.get('HostConfig') or {}
+        if (labels.get(LABEL) != manifest.get('nonce') or runtime.get('Running') is not True
+                or type(runtime.get('Pid')) is not int or runtime['Pid'] != pid):
+            raise Refusal('RESOURCE_NATIVE_PEER_UNBOUND', str(pid))
+        observed_image = state.get('Image')
+        expected_image = image_id.split('@', 1)[-1]
+        if observed_image != expected_image and ((state.get('Config') or {}).get('Image') != image_id):
+            raise Refusal('RESOURCE_NATIVE_IMAGE_UNBOUND', str(observed_image))
+        request = row['payload']['request']
+        if (host_config.get('NetworkMode') not in ('none', '')
+                or int(host_config.get('Memory', 0)) != request['container_ram_mb'] * 1048576
+                or int(host_config.get('MemorySwap', 0)) != request['container_ram_mb'] * 1048576):
+            raise Refusal('RESOURCE_NATIVE_LIMITS_UNBOUND', str(cid))
+        peer_state = _process_state(pid, start_ticks(pid))
+        if peer_state['fate'] != 'live':
+            raise Refusal('RESOURCE_NATIVE_PEER_UNBOUND', str(pid))
+        try:
+            peer_group = _process_cgroup(pid)
+            peer_limits = _kernel_limits(peer_group)
+            if (peer_limits['memory.max'] == 'max' or peer_limits['memory.swap.max'] != '0'
+                    or peer_limits['cpu.max'].split()[0] == 'max'
+                    or peer_limits['cpuset.cpus.effective'] == ''):
+                raise Refusal('RESOURCE_NATIVE_LIMITS_UNBOUND', str(peer_group))
+        except (OSError, ValueError, Refusal) as exc:
+            if isinstance(exc, Refusal):
+                raise
+            raise Refusal('RESOURCE_NATIVE_LIMITS_UNBOUND', str(pid)) from exc
+        witness = dict(schema=1, lease_sha256=lease_sha, nonce=manifest['nonce'], cid=cid,
+                       cid_path=str(cid_path), peer_pid=pid, peer_start_ticks=start_ticks(pid),
+                       peer_uid=uid, outer_pid=outer_pid, outer_start_ticks=worker['start_ticks'],
+                       image_id=expected_image, binding=binding,
+                       inputs=claimed_inputs, outputs=claimed_outputs,
+                       docker_limits={'host_config': host_config, 'kernel': peer_limits},
+                       daemon=json.loads((directory/'daemon.json').read_text()),
+                       authenticated_ns=time.monotonic_ns())
+        witness_path = directory / 'native-witness.json'
+        if witness_path.exists() or witness_path.is_symlink():
+            try:
+                old = json.loads(witness_path.read_text())
+            except (OSError, ValueError) as exc:
+                raise Refusal('RESOURCE_NATIVE_WITNESS_CHANGED', str(witness_path)) from exc
+            if old != witness:
+                raise Refusal('RESOURCE_NATIVE_WITNESS_CHANGED', str(witness_path))
+        else:
+            write_json(witness_path, witness)
+        return witness
 
     def serve():
         while not stopped.is_set():
@@ -699,13 +952,41 @@ def _share_issuer(directory: Path, manifest: dict):
                     peer.sendall(json.dumps(result).encode()+b'\n')
                 except OSError:
                     pass  # any allocated grant remains charged in parent memory
+
+    def native_serve():
+        while not stopped.is_set():
+            try:
+                peer, _ = native_server.accept()
+            except socket.timeout:
+                continue
+            with peer:
+                peer.settimeout(30)
+                try:
+                    pid, uid, _ = struct.unpack('3i', peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                    line = peer.makefile('rb').readline(_SHARE_MESSAGE_BYTES + 1)
+                    if len(line) > _SHARE_MESSAGE_BYTES or not line.endswith(b'\n'):
+                        raise Refusal('RESOURCE_NATIVE_CHILD_REFUSED', 'oversized/truncated handshake')
+                    result = dict(status='NATIVE_CHILD_AUTHORIZED', witness=native_handle(pid, uid, json.loads(line)))
+                except (Refusal, OSError, ValueError, KeyError, TypeError) as exc:
+                    result = dict(status='REFUSED', reason=getattr(exc, 'code', 'RESOURCE_NATIVE_CHILD_REFUSED'), detail=str(exc))
+                try:
+                    peer.sendall(json.dumps(result, sort_keys=True).encode() + b'\n')
+                except OSError:
+                    pass
     thread=threading.Thread(target=serve,name='F1-current-lease-issuer',daemon=True)
     thread.start()
+    native_thread=threading.Thread(target=native_serve,name='F1-native-capability-issuer',daemon=True)
+    native_thread.start()
     try:
         yield
     finally:
-        stopped.set(); thread.join(timeout=6); server.close()
-        if thread.is_alive():
+        stopped.set(); thread.join(timeout=6); native_thread.join(timeout=6)
+        server.close(); native_server.close()
+        try:
+            native_path.unlink()
+        except FileNotFoundError:
+            pass
+        if thread.is_alive() or native_thread.is_alive():
             raise Refusal('RESOURCE_SHARE_ISSUER_UNKNOWN', str(directory))
 
 
@@ -1001,6 +1282,7 @@ def _reservation(directory: Path) -> dict | None:
     except (Refusal,OSError,ValueError,KeyError,TypeError) as exc:
         raise Refusal('RESOURCE_RESERVATION_UNBOUND',str(directory)) from exc
     return dict(directory=str(directory),status=status,reason=reason,cpus=held.cpus,ram_mb=held.ram_mb,
+                broker_allowance_mb=int(prior.get('broker_allowance_mb', 0)),
                 licenses=dict(held.licenses),lease_sha256=hashlib.sha256((directory/'lease.json').read_bytes()).hexdigest())
 
 
@@ -1052,16 +1334,34 @@ def host_lease(budget: Budget, *, fixture_root: Path | None = None,
         Budget(1, 1, workers=1, licenses=license_pool)
         held_cpus = sum(row['cpus'] for row in reservations)
         held_ram = sum(row['ram_mb'] for row in reservations)
+        # Broker residency is a shared admission reservation for this finite
+        # namespace.  Count the existing allowance once, while worker leases
+        # remain additive.
+        held_broker_ram = max((row.get('broker_allowance_mb', 0) for row in reservations), default=0)
         held_licenses = {}
         for row in reservations:
             for name, count in row['licenses'].items():
                 held_licenses[name] = held_licenses.get(name, 0) + count
+        broker_allowance_mb = 0 if fixture_root is not None else BROKER_ALLOWANCE_MB
+        broker_current_mb = 0
+        if fixture_root is None:
+            try:
+                broker_current_mb = int((group/'memory.current').read_text()) // 1048576
+            except (OSError, ValueError):
+                raise Refusal('RESOURCE_HOST_CAPACITY_UNAVAILABLE', 'broker memory.current unavailable')
+        incremental_broker_mb = max(0, broker_allowance_mb - held_broker_ram)
+        broker_residual_mb = max(0, incremental_broker_mb - broker_current_mb)
         accounting = dict(total_cpus=total_cpus, available_ram_mb=available_mb,
+            broker_allowance_mb=broker_allowance_mb, broker_memory_current_mb=broker_current_mb,
+            required_job_ram_mb=budget.ram_mb + broker_allowance_mb,
+            broker_incremental_mb=incremental_broker_mb, broker_residual_mb=broker_residual_mb,
             total_licenses=license_pool, reservations=reservations,
-            reserved_cpus=held_cpus, reserved_ram_mb=held_ram, reserved_licenses=held_licenses,
+            reserved_cpus=held_cpus, reserved_ram_mb=held_ram,
+            reserved_broker_ram_mb=held_broker_ram, reserved_licenses=held_licenses,
             requested=dict(cpus=budget.cpus, ram_mb=budget.ram_mb, licenses=dict(budget.licenses)),
             license_authority='explicit admitted pool counts; no license availability inferred')
-        if (held_cpus + budget.cpus > total_cpus or held_ram + budget.ram_mb > available_mb
+        if (held_cpus + budget.cpus > total_cpus
+                or held_ram + budget.ram_mb + broker_residual_mb > available_mb
                 or any(held_licenses.get(name, 0) + count > license_pool.get(name, 0)
                        for name, count in budget.licenses.items() if count)):
             write_json(root/'last-admission.json', dict(status='REFUSED', **accounting))
@@ -1073,6 +1373,9 @@ def host_lease(budget: Budget, *, fixture_root: Path | None = None,
                         cpus=budget.cpus, ram_mb=budget.ram_mb,
                         host_ram_mb=min(512, budget.ram_mb // 2),
                         container_ram_mb=budget.ram_mb - min(512, budget.ram_mb // 2),
+                        broker_allowance_mb=broker_allowance_mb,
+                        broker_memory_current_mb=broker_current_mb,
+                        required_job_ram_mb=budget.ram_mb + broker_allowance_mb,
                         licenses=dict(budget.licenses), issuer_identity=_issuer_identity(),
                         resource_scope='source-fixture' if fixture_root is not None else 'production')
         write_json(directory / 'lease.json', manifest)
@@ -1082,6 +1385,15 @@ def host_lease(budget: Budget, *, fixture_root: Path | None = None,
         fcntl.flock(lock, fcntl.LOCK_UN)
         previous_owner = os.environ.get(OWNER_ENV)
         os.environ[OWNER_ENV] = manifest['nonce']
+        fixture_token = None
+        if fixture_root is not None:
+            fixture_scope = SourceFixtureScope(
+                directory=directory.resolve(), nonce=manifest['nonce'],
+                parent_pid=manifest['parent_pid'],
+                parent_start_ticks=manifest['parent_start_ticks'])
+            fixture_token = _SOURCE_FIXTURE_SCOPE.set(fixture_scope)
+            with _SOURCE_FIXTURE_SCOPE_LOCK:
+                _SOURCE_FIXTURE_SCOPES[id(fixture_scope)] = fixture_scope
         try:
             with _share_issuer(directory, manifest):
                 yield directory
@@ -1097,6 +1409,10 @@ def host_lease(budget: Budget, *, fixture_root: Path | None = None,
                     os.environ.pop(OWNER_ENV, None)
                 else:
                     os.environ[OWNER_ENV] = previous_owner
+                if fixture_token is not None:
+                    with _SOURCE_FIXTURE_SCOPE_LOCK:
+                        _SOURCE_FIXTURE_SCOPES.pop(id(_SOURCE_FIXTURE_SCOPE.get()), None)
+                    _SOURCE_FIXTURE_SCOPE.reset(fixture_token)
 
 
 def _registered_worker(directory: Path, manifest: dict, pid: int) -> dict:
@@ -1142,6 +1458,105 @@ def _selected_share(directory: Path) -> dict | None:
     if selected[0] != Path(directory).resolve():
         raise Refusal('RESOURCE_SHARE_UNBOUND', 'different current lease')
     return _share_value(directory, selected[1])
+
+
+def native_client_contract(directory: Path, *, binding: NativeChildBinding,
+                           expected_lease_sha256: str) -> dict:
+    """Describe the resource-owned child transport; claims do not grant it.
+
+    Frontend and analog clients use this descriptor to build their Docker
+    argv.  The mounted socket is only a locator.  The issuer must authenticate
+    SO_PEERCRED, the owned CID, live Docker state, image and kernel limits,
+    then compare the complete ``NativeChildBinding`` before replying.
+    """
+    if type(binding) is not NativeChildBinding or not re.fullmatch(
+            r'[0-9a-f]{64}', expected_lease_sha256):
+        raise Refusal('RESOURCE_NATIVE_BINDING_INVALID', 'typed binding and lease SHA required')
+    directory = Path(directory).resolve()
+    lease_path = directory / 'lease.json'
+    if (directory.is_symlink() or lease_path.is_symlink() or not lease_path.is_file()
+            or hashlib.sha256(lease_path.read_bytes()).hexdigest() != expected_lease_sha256):
+        raise Refusal('RESOURCE_LEASE_CHANGED', str(directory))
+    lease = json.loads(lease_path.read_text())
+    if lease.get('resource_scope') != 'production':
+        raise Refusal('RESOURCE_FIXTURE_NATIVE_FORBIDDEN', str(directory))
+    _require_process_identity(lease.get('parent_pid'), lease.get('parent_start_ticks'))
+    if (_process_state(lease['parent_pid'], lease['parent_start_ticks'])['fate'] != 'live'
+            or os.environ.get(OWNER_ENV) != lease.get('nonce')):
+        raise Refusal('RESOURCE_PARENT_GONE', str(directory))
+    return dict(socket_host_path=str(directory / 'native-capability.sock'),
+                socket_container_path=NATIVE_CAPABILITY_TARGET,
+                locator_env='VIBEIC_NATIVE_CAPABILITY_SOCKET',
+                locator_value=NATIVE_CAPABILITY_TARGET,
+                owner_env=OWNER_ENV, owner_value=lease['nonce'],
+                outer_pid=os.getpid(), lease_sha256=expected_lease_sha256,
+                binding=asdict(binding),
+                authentication=('live issuer authenticates peer credentials, owned CID label/state, '
+                                'immutable image, binding, cgroup limits, and cleanup'))
+
+
+def native_argv(argv: list[str], directory: Path, *, binding: NativeChildBinding,
+                expected_lease_sha256: str, parent_query: bool = False) -> list[str]:
+    """Build a native argv with the exact read-only capability locator mount."""
+    contract = native_client_contract(directory, binding=binding,
+                                      expected_lease_sha256=expected_lease_sha256)
+    result = bounded_argv(argv, directory, parent_query=parent_query)
+    if len(result) < 2 or result[1] != 'run' or parent_query:
+        return result
+    mount = contract['socket_host_path'] + ':' + contract['socket_container_path'] + ':ro'
+    conflicting = [item for item in result if isinstance(item, str)
+                   and (':' + contract['socket_container_path'] + ':') in item
+                   and item != mount]
+    if conflicting:
+        raise Refusal('RESOURCE_NATIVE_CAPABILITY_CONFLICT', repr(conflicting))
+    if mount not in result:
+        result = [*result[:2], '-v', mount,
+                  '-e', contract['locator_env'] + '=' + contract['locator_value'],
+                  '-e', contract['owner_env'] + '=' + contract['owner_value'],
+                  '-e', 'VIBEIC_NATIVE_OUTER_PID=' + str(contract['outer_pid']), *result[2:]]
+    return result
+
+
+def native_child_handshake(*, step_id: str, source_sha256: str, image_id: str,
+                           binding: Mapping[str, object], inputs: Mapping[str, str],
+                           outputs: Mapping[str, str], socket_path: str | None = None,
+                           outer_pid: int | None = None) -> dict:
+    """Ask the live host issuer to authenticate this native child.
+
+    ``socket_path`` and ``outer_pid`` are transport claims only.  The server
+    rechecks the peer PID/UID, CID, Docker label/state, image, cgroup and the
+    owned worker before returning a witness.  No environment variable is an
+    authority grant.
+    """
+    path = socket_path or os.environ.get('VIBEIC_NATIVE_CAPABILITY_SOCKET')
+    if path != NATIVE_CAPABILITY_TARGET:
+        raise Refusal('RESOURCE_NATIVE_CAPABILITY_UNAVAILABLE', 'exact capability locator required')
+    if type(outer_pid or os.environ.get('VIBEIC_NATIVE_OUTER_PID')) not in (int, str):
+        raise Refusal('RESOURCE_NATIVE_BINDING_INVALID', 'outer PID claim missing')
+    if (not isinstance(binding, Mapping) or not isinstance(inputs, Mapping)
+            or not isinstance(outputs, Mapping)):
+        raise Refusal('RESOURCE_NATIVE_BINDING_INVALID', 'typed binding/input/output maps required')
+    payload = dict(operation='native-handshake', step_id=step_id,
+                   source_sha256=source_sha256, image_id=image_id,
+                   binding=dict(binding), inputs=dict(inputs), outputs=dict(outputs),
+                   outer_pid=int(outer_pid or os.environ['VIBEIC_NATIVE_OUTER_PID']))
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+            peer.settimeout(30)
+            peer.connect(path)
+            peer.sendall(json.dumps(payload, sort_keys=True).encode() + b'\n')
+            line = peer.makefile('rb').readline(_SHARE_MESSAGE_BYTES + 1)
+    except (OSError, ValueError) as exc:
+        raise Refusal('RESOURCE_NATIVE_CAPABILITY_UNAVAILABLE', str(exc)) from exc
+    if len(line) > _SHARE_MESSAGE_BYTES or not line.endswith(b'\n'):
+        raise Refusal('RESOURCE_NATIVE_CAPABILITY_UNAVAILABLE', 'truncated issuer witness')
+    try:
+        response = json.loads(line)
+    except ValueError as exc:
+        raise Refusal('RESOURCE_NATIVE_CAPABILITY_UNAVAILABLE', 'invalid issuer witness') from exc
+    if response.get('status') != 'NATIVE_CHILD_AUTHORIZED' or not isinstance(response.get('witness'), dict):
+        raise Refusal(response.get('reason', 'RESOURCE_NATIVE_CHILD_REFUSED'), response.get('detail', ''))
+    return response['witness']
 
 
 def bounded_argv(argv: list[str], directory: Path, *, parent_query: bool = False) -> list[str]:
@@ -1259,7 +1674,8 @@ def skip_first_argv(argv: list[str]) -> list[str]:
 
 
 @contextmanager
-def native_boundary(directory: Path, expected_sha256: str | None = None):
+def native_boundary(directory: Path, expected_sha256: str | None = None,
+                    *, binding: NativeChildBinding | None = None):
     """Bound both existing native step and image-facts probe executors."""
     if socket.gethostname().split('.')[0].lower() in ('8hd-8',):
         raise Refusal('RESOURCE_HOST_SOURCE_ONLY', socket.gethostname())
@@ -1283,7 +1699,11 @@ def native_boundary(directory: Path, expected_sha256: str | None = None):
         if hashlib.sha256((directory / 'lease.json').read_bytes()).hexdigest() != expected_sha256:
             raise Refusal('RESOURCE_LEASE_CHANGED', str(directory))
         issued = _selected_share(directory)
-        bounded = skip_first_argv(bounded_argv(argv, directory, parent_query=parent_query))
+        bounded = skip_first_argv(
+            native_argv(argv, directory, binding=binding,
+                        expected_lease_sha256=expected_sha256, parent_query=parent_query)
+            if binding is not None else
+            bounded_argv(argv, directory, parent_query=parent_query))
         record = dict(original_native_argv=list(argv), submitted_argv=bounded, worker_pid=os.getpid(),
                       native_route='source-owned LC/facts slot to pinned image --skip; no entrypoint override',
                       started_ns=time.monotonic_ns(), rc=None,
@@ -1293,6 +1713,8 @@ def native_boundary(directory: Path, expected_sha256: str | None = None):
             record.update(issued_share_id=issued['share_id'],
                 issued_share_sha256=hashlib.sha256(_SELECTED_SHARE.get()[1].binding.encode()).hexdigest(),
                 issued_share_binding=issued)
+        if binding is not None:
+            record['native_binding'] = asdict(binding)
         try:
             completed = function(bounded, *args, **kwargs)
             record.update(rc=completed.returncode,

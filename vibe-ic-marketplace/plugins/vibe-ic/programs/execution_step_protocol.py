@@ -209,13 +209,60 @@ class FactoryRegistry:
                            sha256=em.digest(Path(inspect.getsourcefile(factory))))
                 for step, (module, factory) in self._factories.items()}
 
+    def _entry(self, step_id: str):
+        registered = self._factories.get(step_id)
+        if registered is None:
+            raise em.Refusal('PRODUCTION_FACTORY_NOT_REGISTERED', step_id)
+        module, factory = registered
+        filename = str(Path(inspect.getsourcefile(factory)).resolve())
+        return module, factory, filename
+
+    @staticmethod
+    def _validate_classification(request: StepRequest, prepared: PreparedStep) -> PreparedStep:
+        """Validate a source-owned preflight without admitting a worker.
+
+        Classification is deliberately a smaller contract than ``prepare``:
+        it may return only a disposition and source-owned facts.  It never
+        asks for a lease, binds a context, or creates a registry.  A copied
+        disposition therefore cannot create execution authority.
+        """
+        if not isinstance(prepared, PreparedStep):
+            raise em.Refusal('PRODUCTION_CLASSIFICATION_INVALID', request.step_id)
+        allowed = {'execute', 'declared_inapplicable', 'external_handoff',
+                   'current_input_missing', 'provider_unavailable'}
+        if prepared.disposition not in allowed or not prepared.reason:
+            raise em.Refusal('PRODUCTION_CLASSIFICATION_INVALID', request.step_id)
+        if not isinstance(prepared.handoff, Mapping) or not prepared.handoff.get('facts'):
+            raise em.Refusal('PRODUCTION_CLASSIFICATION_UNBOUND', request.step_id)
+        if prepared.disposition in ('declared_inapplicable', 'external_handoff'):
+            declaration = prepared.handoff.get('declaration')
+            expected = prepared.handoff.get('declaration_sha256')
+            if (not declaration or not expected or not Path(declaration).is_file()
+                    or Path(declaration).is_symlink() or em.digest(Path(declaration)) != expected
+                    or str(declaration) != str(request.parameters.get('declaration'))):
+                raise em.Refusal('PRODUCTION_DISPOSITION_UNBOUND', request.step_id)
+        return prepared
+
+    def classify(self, request: StepRequest) -> PreparedStep | None:
+        """Run the source-owned disposition stage before resource admission.
+
+        Factories that do not expose a classifier retain the old full-prepare
+        path; they are still admitted only after the caller has obtained a
+        real host lease.  A classifier returning ``execute`` is only a marker:
+        the caller must invoke ``prepare`` again under that live lease.
+        """
+        request.check_source()
+        module, factory, filename = self._entry(request.step_id)
+        if filename not in request.source_files:
+            raise em.Refusal('PRODUCTION_FACTORY_SOURCE_UNBOUND', filename)
+        classifier = getattr(module, 'classify', None)
+        if not callable(classifier):
+            return None
+        return self._validate_classification(request, classifier(request))
+
     def prepare(self, request: StepRequest) -> PreparedStep:
         request.check_source()
-        registered = self._factories.get(request.step_id)
-        if registered is None:
-            raise em.Refusal('PRODUCTION_FACTORY_NOT_REGISTERED', request.step_id)
-        _, factory = registered
-        filename = str(Path(inspect.getsourcefile(factory)).resolve())
+        _, factory, filename = self._entry(request.step_id)
         if filename not in request.source_files:
             raise em.Refusal('PRODUCTION_FACTORY_SOURCE_UNBOUND', filename)
         prepared = factory(request)
