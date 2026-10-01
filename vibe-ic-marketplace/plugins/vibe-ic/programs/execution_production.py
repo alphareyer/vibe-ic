@@ -1310,13 +1310,17 @@ def dispatch_step(step_id: str, project: Path, parameters: dict, *, fixture_root
             root / 'classification-request.json', sha, sources)
         classified = factory_registry.classify(classification_request)
         if classified is not None and classified.disposition != 'execute':
-            status = ('NOT_APPLICABLE' if classified.disposition == 'declared_inapplicable'
-                      else 'NOT_MEASURED')
             handoff = dict(classified.handoff)
+            measured_external_fail = (classified.disposition == 'external_handoff'
+                                      and handoff.get('design_verdict') == 'FAIL')
+            status = ('NOT_APPLICABLE' if classified.disposition == 'declared_inapplicable'
+                      else 'FAIL' if measured_external_fail else 'NOT_MEASURED')
             result = dict(step_id=step_id, status=status, detail=classified.reason,
                 handoff=handoff,
                 output_files=[str(root / 'disposition.json')],
-                reason_class='' if status == 'NOT_APPLICABLE' else ReasonClass.NOT_EXECUTED.value)
+                reason=('FAIL' if measured_external_fail else 'NOT_MEASURED'
+                        if status == 'NOT_MEASURED' else ''),
+                reason_class='' if status in ('NOT_APPLICABLE', 'FAIL') else ReasonClass.NOT_EXECUTED.value)
             if handoff.get('declaration') is not None:
                 result['declared_by'] = str(handoff['declaration'])
             write_json(root / 'disposition.json', result)
@@ -1330,11 +1334,17 @@ def dispatch_step(step_id: str, project: Path, parameters: dict, *, fixture_root
                 root / 'native-request.json', sha, sources)
             prepared = factory_registry.prepare(request)
             if prepared.disposition != 'execute':
-                status = 'NOT_APPLICABLE' if prepared.disposition == 'declared_inapplicable' else 'NOT_MEASURED'
+                handoff = dict(prepared.handoff)
+                measured_external_fail = (prepared.disposition == 'external_handoff'
+                                          and handoff.get('design_verdict') == 'FAIL')
+                status = ('NOT_APPLICABLE' if prepared.disposition == 'declared_inapplicable'
+                          else 'FAIL' if measured_external_fail else 'NOT_MEASURED')
                 result = dict(step_id=step_id, status=status, detail=prepared.reason,
-                    handoff=dict(prepared.handoff),
-                    output_files=[str(root / 'disposition.json')], reason_class='' if status == 'NOT_APPLICABLE'
-                    else ReasonClass.NOT_EXECUTED.value)
+                    handoff=handoff,
+                    reason=('FAIL' if measured_external_fail else 'NOT_MEASURED'
+                            if status == 'NOT_MEASURED' else ''),
+                    output_files=[str(root / 'disposition.json')],
+                    reason_class='' if status in ('NOT_APPLICABLE', 'FAIL') else ReasonClass.NOT_EXECUTED.value)
                 if prepared.handoff.get('declaration') is not None:
                     result['declared_by'] = str(prepared.handoff['declaration'])
                 write_json(root / 'disposition.json', result)
