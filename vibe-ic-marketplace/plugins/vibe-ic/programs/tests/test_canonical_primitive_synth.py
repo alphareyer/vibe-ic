@@ -384,10 +384,10 @@ def test_unsigned_divider_supports_renamed_ports_and_refuses_unsupported_domains
         "unsupported_unsigned_iterative_divider")
 
 
-def _native_divider_vectors(width):
+def _native_divider_vectors(width, exhaustive=False):
     """Independent legal operands and Python's mathematical / and % oracle."""
     limit = (1 << width) - 1
-    if width <= 6 or width == 8:
+    if width <= 4 or exhaustive:
         pairs = [(a, b) for b in range(1, limit + 1)
                  for a in range(b, limit + 1)]
     else:
@@ -566,7 +566,7 @@ def test_unsigned_divider_native_oracle_latency_reset_back_to_back_and_reverse()
 def _native_width_gap_case(width, include_restore_reverse=True):
     desc = _INLINE_POS["unsigned_iterative_restoring_divider"]
     rtl = rcs.emit_rtl("unsigned_iterative_restoring_divider", desc)
-    vectors = _native_divider_vectors(width)
+    vectors = _native_divider_vectors(width, exhaustive=True)
     work = Path(tempfile.mkdtemp(prefix=f"issue2851-native-w{width}-", dir="/tmp"))
     try:
         run = _run_native_divider_case(work, rtl, width, vectors)
