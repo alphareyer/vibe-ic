@@ -1109,7 +1109,7 @@ def validate_frontend(outputs: Path, binding: dict) -> em.Evidence:
     source_software = spec.get('source_software') is True
     gates = {k: 'NOT_MEASURED' for k in binding['required_gates']}
     required = ('producer.json', 'canonical-consumer.json') if source_step1 or source_software else (
-        'producer.json', 'native.json', 'canonical-consumer.json')
+        'producer.json', 'native.json', 'native-witness.json', 'canonical-consumer.json')
     if source_step1 or source_software:
         required += ('host-software.json',)
     if any(not (outputs/x).is_file() for x in required):
@@ -1240,6 +1240,26 @@ def validate_frontend(outputs: Path, binding: dict) -> em.Evidence:
     if (native.get('binding') != binding or not native.get('cid') or native.get('rc') != 0
             or native.get('cleanup_rc') != 0 or native.get('waited') is not True):
         raise em.Refusal('FRONTEND_NATIVE_IDENTITY_MISSING', str(outputs))
+    try:
+        witness = json.loads((outputs/'native-witness.json').read_text())
+    except (OSError, ValueError) as exc:
+        raise em.Refusal('FRONTEND_NATIVE_WITNESS_INVALID', str(outputs)) from exc
+    native_binding = native.get('native_binding')
+    native_client = native.get('native_client')
+    if (not isinstance(witness, dict) or not isinstance(native_binding, dict)
+            or not isinstance(native_client, dict)
+            or witness != native.get('issuer_witness')
+            or witness.get('binding') != binding
+            or witness.get('inputs') != binding.get('inputs')
+            or native_binding.get('step_id') != spec.get('step_id')
+            or native_binding.get('source_sha256') != spec.get('source_sha')
+            or native_binding.get('input_hashes') != binding.get('inputs')
+            or native_binding.get('output_root') != str(outputs.resolve())
+            or native_client.get('locator_env') != 'VIBEIC_NATIVE_CAPABILITY_SOCKET'
+            or native_client.get('locator_value') != native_client.get('socket_container_path')
+            or native_client.get('lease_sha256') != native.get('lease_sha256')
+            or witness.get('lease_sha256') != native.get('lease_sha256')):
+        raise em.Refusal('FRONTEND_NATIVE_WITNESS_BINDING_MISMATCH', str(outputs))
     raw = producer.get('raw_producer')
     native_verdict = status(raw)
     gates['native_producer'] = native_verdict
@@ -1304,7 +1324,46 @@ def reconsume(project: Path, binding: dict, spec: dict, parent: Path):
     return json.loads((outputs/'canonical-consumer.json').read_text()), transaction
 
 
-def native_argv(inputs: Path, outputs: Path, spec: dict, *, phase='worker') -> list[str]:
+def frontend_native_binding(inputs: Path, outputs: Path, spec: dict,
+                            controller_binding: dict):
+    """Build the shared typed descriptor from the live frontend snapshot.
+
+    The controller binding is the only source of input hashes. The image and
+    output root come from the current request and launch transaction; copied
+    witness JSON never enters this descriptor.
+    """
+    from execution_resource_lease import NativeChildBinding
+    native = spec.get('parameters', {}).get('native')
+    if not isinstance(native, dict):
+        raise em.Refusal('FRONTEND_NATIVE_IDENTITY_MISSING', spec.get('step_id', ''))
+    input_hashes = controller_binding.get('inputs')
+    if output_manifest(inputs) != input_hashes:
+        raise em.Refusal('FRONTEND_NATIVE_INPUT_UNBOUND', str(inputs))
+    return NativeChildBinding(
+        step_id=spec['step_id'],
+        source_sha256=spec['source_sha'],
+        image_id=native.get('image_id'),
+        input_hashes=input_hashes,
+        output_root=str(outputs.resolve()),
+    )
+
+
+def frontend_native_contract(inputs: Path, outputs: Path, spec: dict,
+                             controller_binding: dict):
+    """Return the issuer-owned client descriptor and its lease digest."""
+    from execution_resource_lease import native_client_contract
+    directory = Path(spec['lease_directory']).resolve()
+    lease_path = Path(spec['lease_path']).resolve()
+    expected_lease_sha256 = em.digest(lease_path)
+    binding = frontend_native_binding(inputs, outputs, spec, controller_binding)
+    contract = native_client_contract(directory, binding=binding,
+                                      expected_lease_sha256=expected_lease_sha256)
+    return binding, contract, expected_lease_sha256
+
+
+def native_docker_argv(inputs: Path, outputs: Path, spec: dict, *, phase='worker',
+                       binding=None, expected_lease_sha256=None,
+                       socket_path=None) -> list[str]:
     q = lease_current(Path(spec['lease_directory']), spec['parameters'])
     image = spec['parameters']['native']['image_id']
     image_current(image)
@@ -1329,8 +1388,14 @@ def native_argv(inputs: Path, outputs: Path, spec: dict, *, phase='worker') -> l
         args += ['-v', f'{frozen}:{root}:ro']
     args += [image, '--skip', 'timeout', '-k', '5', str(native_deadline(spec['parameters'])),
              'python3', str(Path(__file__).resolve()), '--phase', phase,
-             '--inputs', str(inputs), '--outputs', str(outputs)]
-    return args
+             '--inputs', str(inputs), '--outputs', str(outputs),
+             '--native-socket-path', socket_path]
+    if (binding is None or not isinstance(expected_lease_sha256, str)
+            or not isinstance(socket_path, str) or not socket_path):
+        raise em.Refusal('FRONTEND_NATIVE_CLIENT_DESCRIPTOR_MISSING', spec['step_id'])
+    from execution_resource_lease import native_argv as resource_native_argv
+    return resource_native_argv(args, Path(spec['lease_directory']), binding=binding,
+                                expected_lease_sha256=expected_lease_sha256)
 
 
 def launch(inputs: Path, outputs: Path, *, phase='worker'):
@@ -1384,7 +1449,13 @@ def launch(inputs: Path, outputs: Path, *, phase='worker'):
         # Keep the real phase1 runner/dispatch path. Its authenticated child
         # capability is a separate F1 API and is not emulated with ENV state.
         raise em.Refusal('FRONTEND_ISSUED_DESCENDANT_API_REQUIRED', 'D1')
-    argv = native_argv(inputs, outputs, spec, phase=phase)
+    controller_binding = json.loads(os.environ['VIBEIC_EXECUTION_BINDING'])
+    native_binding, native_contract, lease_sha256 = frontend_native_contract(
+        inputs, outputs, spec, controller_binding)
+    argv = native_docker_argv(inputs, outputs, spec, phase=phase,
+                              binding=native_binding,
+                              expected_lease_sha256=lease_sha256,
+                              socket_path=native_contract['socket_container_path'])
     name = argv[argv.index('--name') + 1]
     started = time.monotonic_ns()
     cid = None
@@ -1418,10 +1489,22 @@ def launch(inputs: Path, outputs: Path, *, phase='worker'):
         finally:
             cleanup = subprocess.run(['docker', 'rm', '-f', name], capture_output=True, text=True, timeout=10)
             process.wait(timeout=10)
-    receipt = {'binding': json.loads(os.environ['VIBEIC_EXECUTION_BINDING']),
+    witness_path = outputs/'native-witness.json'
+    try:
+        issuer_witness = json.loads(witness_path.read_text())
+    except (OSError, ValueError) as exc:
+        raise em.Refusal('FRONTEND_NATIVE_WITNESS_MISSING', str(witness_path)) from exc
+    if not isinstance(issuer_witness, dict):
+        raise em.Refusal('FRONTEND_NATIVE_WITNESS_INVALID', str(witness_path))
+    receipt = {'binding': controller_binding,
+        'native_binding': asdict(native_binding),
+        'native_client': {key: native_contract[key] for key in (
+            'socket_host_path', 'socket_container_path', 'locator_env',
+            'locator_value', 'lease_sha256')},
+        'issuer_witness': issuer_witness,
         'argv': argv, 'pid': process.pid, 'native_pid': native_pid, 'cid': cid,
         'rc': rc, 'waited': True, 'started_ns': started, 'ended_ns': time.monotonic_ns(),
-        'lease_sha256': em.digest(Path(spec['lease_path'])), 'memory_peak_bytes': peak,
+        'lease_sha256': lease_sha256, 'memory_peak_bytes': peak,
         'cleanup_rc': cleanup.returncode, 'container_state': data}
     write(outputs/'native.json', receipt)
     if (outputs/'producer.json').is_file():
@@ -1435,7 +1518,7 @@ def launch(inputs: Path, outputs: Path, *, phase='worker'):
     return rc
 
 
-def worker(inputs: Path, outputs: Path, *, consuming=False):
+def worker(inputs: Path, outputs: Path, *, consuming=False, native_socket_path=None):
     binding = json.loads(os.environ['VIBEIC_EXECUTION_BINDING'])
     spec = json.loads((inputs/'request.json').read_text())
     if not spec.get('source_sha') or spec['source_sha'] != binding['source_sha']:
@@ -1477,6 +1560,24 @@ def worker(inputs: Path, outputs: Path, *, consuming=False):
     os.environ['F2_OUTPUT_ROOT'] = str(outputs)
     if not source_software and shutil.which('docker'):
         raise em.Refusal('FRONTEND_NESTED_CONTAINER_ROUTE_REFUSED', '')
+    if not source_software:
+        from execution_resource_lease import native_child_handshake
+        native = spec['parameters'].get('native')
+        outer_pid = os.environ.get('VIBEIC_NATIVE_OUTER_PID')
+        if (not isinstance(native, dict) or not isinstance(native_socket_path, str)
+                or not native_socket_path
+                or not isinstance(outer_pid, str) or not outer_pid.isdigit()):
+            raise em.Refusal('FRONTEND_NATIVE_CAPABILITY_UNAVAILABLE', spec['step_id'])
+        # The issuer witness is evidence only. It is deliberately never passed
+        # to execution_modes as a live child scope or callback grant.
+        issuer_witness = native_child_handshake(
+            step_id=spec['step_id'], source_sha256=spec['source_sha'],
+            image_id=native['image_id'], binding=binding,
+            inputs=binding['inputs'], outputs=output_manifest(project),
+            socket_path=native_socket_path, outer_pid=int(outer_pid))
+        if not isinstance(issuer_witness, dict):
+            raise em.Refusal('FRONTEND_NATIVE_WITNESS_INVALID', spec['step_id'])
+        write(outputs/'native-witness.json', issuer_witness)
     before = output_manifest(project)
     def remap(value):
         if isinstance(value, dict):
@@ -1723,10 +1824,12 @@ def main():
     parser.add_argument('--phase', choices=('launch', 'worker', 'consume'), required=True)
     parser.add_argument('--inputs', type=Path, required=True)
     parser.add_argument('--outputs', type=Path, required=True)
+    parser.add_argument('--native-socket-path')
     args = parser.parse_args()
     if args.phase == 'launch':
         return launch(args.inputs, args.outputs)
-    return worker(args.inputs, args.outputs, consuming=args.phase == 'consume')
+    return worker(args.inputs, args.outputs, consuming=args.phase == 'consume',
+                  native_socket_path=args.native_socket_path)
 
 
 if __name__ == '__main__':
