@@ -370,15 +370,15 @@ def _runner_diagnostics(process: _ProcessOutcome, argv: list[str],
     diagnostic["fresh_reports"] = fresh
     binding_reason = _runner_report_binding_reason(receipt, require_phase2=require_phase2)
     if binding_reason:
+        diagnostic = {**diagnostic, "report_binding_error": binding_reason,
+                      "report_binding_status": "REPORT_BINDING_MISMATCH"}
         refusal = _runner_refusal_line(process)
         if refusal:
-            # A fresh report that lost its producer binding remains unusable;
-            # retain that failure beside the actual refusal stream instead of
-            # replacing the runner's truth with a consumer-only label.
-            return {**diagnostic, "status": "REFUSED_PRE_GATE",
-                    "reason_class": refusal[0], "reason": refusal[1],
-                    "report_binding_error": binding_reason,
-                    "report_binding_status": "REPORT_BINDING_MISMATCH"}
+            # A fresh report that lost its producer binding remains unusable.
+            # Keep the binding failure primary while retaining the runner's
+            # actual refusal stream as secondary diagnostic metadata.
+            diagnostic = {**diagnostic, "actual_refusal_class": refusal[0],
+                          "actual_refusal": refusal[1]}
         return {**diagnostic, "status": "REPORT_BINDING_MISMATCH",
                 "reason_class": "RUNNER_REPORT_UNBOUND", "reason": binding_reason}
     if not fresh:
