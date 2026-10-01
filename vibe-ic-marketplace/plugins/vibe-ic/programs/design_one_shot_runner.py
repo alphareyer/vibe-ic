@@ -157,6 +157,7 @@ import _runner_lock  # ORGANIC #588 — single-driver lock (all 4 runners)
 import canonical_run_admission as _canonical_admission
 import rtl_provenance as _rtl_prov  # authored-RTL guard for phase2/stage1/rtl/
 import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch site
+from execution_production import production_step as _production_step
 # v0.2.33 (ORGANIC-20260526-sv-synth-frontend) — shared SV-frontend
 # decision logic (same module Phase-3 step_synth delegates to), so the
 # Phase-2 yosys-synth + reference-TB steps reuse the EXACT same rule
@@ -7904,6 +7905,7 @@ def _supplied_rtl_defining_declared_top(project: Path
     return top, hits
 
 
+@_production_step('1')
 def step_rtl_gen(project: Path, ic_class: str,
                  force_regen: Optional[bool] = None) -> StepResult:
     """Run RTL dispatch in isolation, then CAS-publish its complete delta."""
@@ -10096,6 +10098,7 @@ def step_catalog_synth_safe_params(project: Path) -> StepResult:
                       reason, files)
 
 
+@_production_step('4')
 def step_step4_functional_evidence(project: Path,
                                    ic_class: str = "") -> StepResult:
     """Run Step 4's TB-substance and functional-evidence gates inline.
@@ -12013,6 +12016,7 @@ def step_l10_unit_tb_run(project: Path, container: "str | None") -> StepResult:
                               "sim_executed": bool(rep["executed"])})
 
 
+@_production_step('5')
 def step_full_stack_functional_tb(project: Path,
                                   container: "str | None") -> StepResult:
     """FULLSTACKTB — the FUNCTIONAL full-stack population Step 5 reads.
@@ -13418,6 +13422,7 @@ def step_crosslayer_rewrite_fidelity(project: Path) -> StepResult:
                       extras={"exit_code": rc})
 
 
+@_production_step('2')
 def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
     """Flow Step 2 lint through the tool: LibreLane Verilator.Lint + its gate.
 
@@ -19302,6 +19307,7 @@ def step_otp_image_check(project: Path) -> StepResult:
 # -------------------------------------------------------------------------
 # 5. quartus FPGA compile (Docker)
 # -------------------------------------------------------------------------
+@_production_step('6')
 def step_fpga_compile(project: Path, top_name: str,
                       container: str) -> StepResult:
     """Run Quartus full compile.
@@ -19856,9 +19862,10 @@ def step_phase3(project: Path, top_name: str,
         return StepResult("phase3", "FAIL",
                           time.time() - t0,
                           f"phase3 runner missing: {runner}")
-    rc, out, err = _run(["python3", str(runner), str(project),
+    import execution_policy as _execution
+    rc, out, err = _run(["python3", str(runner), *_execution.child_arguments([str(project),
                          "--top-name", top_name,
-                         "--container", container],
+                         "--container", container])],
                         timeout=7200)
     summary_json = _pl.report_path(project, "phase3_one_shot.json")
     detail_obj: Dict[str, Any] = {}
@@ -21283,6 +21290,7 @@ def _positive_completed_rung_cap(value: str) -> int:
     return parsed
 
 
+@_production_step('11', '12', '13', result_list=True)
 def step_dft_lec_chain(project: Path, top_name: str, container: str,
                        ic_class: str, full_chip: bool = True,
                        lec_max_completed_rungs: Optional[int] = None, *,
@@ -22485,6 +22493,7 @@ def fmeda_producer_command(flow_yaml: Optional[Path] = None) -> Optional[str]:
     return None
 
 
+@_production_step('FS1')
 def step_fmeda_fault_injection(project: Path,
                                flow_yaml: Optional[Path] = None,
                                not_applicable: Optional[str] = None
@@ -22564,6 +22573,7 @@ def step_fmeda_fault_injection(project: Path,
                       extras, reason_class=reason)
 
 
+@_production_step('DT1')
 def step_verilator_coverage(project: Path, top_name: str = "",
                             container: str = "") -> StepResult:
     """MEASURE line / toggle / branch coverage by instrumenting the run's own
@@ -23995,6 +24005,7 @@ def _final_audit_detail(out: str, transcript) -> str:
     return "\n".join(parts)
 
 
+@_production_step('P0')
 def step_final_audit(project: Path, phase: int = 3,
                      skip_analog: bool = False) -> StepResult:
     t0 = time.time()
@@ -24803,7 +24814,10 @@ def main() -> int:
                         "For the operator who wants the roll-ups rebuilt after "
                         "one or more bounded runs. REFUSES together with a "
                         "window: a refresh of the whole flow has no window.")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution.configure(args)
 
     global _FORCE_RTL_REGEN
     _FORCE_RTL_REGEN = bool(args.force_rtl_regen)

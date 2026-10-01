@@ -81,6 +81,14 @@ import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
 
+# These standalone consumers accept their own argv, not phase execution flags.
+# Keep this classification separate from the sites that build checker argv and
+# consume the subprocess return code.
+_STANDALONE_CONSUMERS = (
+    'mixed_signal_top_lvs_run.py', 'analog_acceptance_tb_gen.py',
+    'flow_compliance_check.py',
+)
+
 
 def _write_runner_summary(out: Path, summary: dict, project: Path) -> None:
     """Publish the front door's own account with its actual dispatch generation."""
@@ -638,7 +646,18 @@ def _run_phase(label: str, runner: Path, args: List[str],
     # ORGANIC #588 — pass the re-entrancy env so the spawned standalone
     # phase runner re-enters THIS orchestrator's project lock instead of
     # being refused by it.
-    cp = subprocess.run([sys.executable, str(runner), *args], env=env)
+    import execution_policy as _execution
+    if runner.name not in _STANDALONE_CONSUMERS:
+        args = _execution.child_arguments(args)
+    elif runner.name == 'mixed_signal_top_lvs_run.py':
+        from execution_production import dispatch_site
+        values = dict(zip(args[1::2], args[2::2]))
+        result = dispatch_site(('M1',), Path(args[0]), dict(native_argv=list(args),
+            top=values.get('--top'), pdk=values.get('--pdk'), container=values.get('--container'),
+            declaration=str(Path(args[0])/'input/submission_template/tapeout_declaration.json')))
+        if result is not None:
+            return 0 if result['status'] == 'PASS' else 1
+    cp = subprocess.run([sys.executable, str(runner), *args], env=_execution.child_environment(env))
     return cp.returncode
 
 
@@ -1572,7 +1591,10 @@ def main() -> int:
                         "runs the flow_compliance gate matrix for true "
                         "PASS/SKIP/WAIVED verdicts; TTL-cached ~15s). Slower "
                         "than the default fast file-stat view.")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution.configure(args)
 
     # Was --top-name given on the command line, or is it the historical default?
     # (argparse cannot tell a default from an explicit same-value pass; inspect

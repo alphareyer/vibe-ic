@@ -1361,12 +1361,31 @@ def _a7_stopped_reason(path: Path, before: Optional[tuple], block: str,
 
 
 def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
-                    args=None
-                    ) -> StepResult:
-    """Run one Ai step for one analog block. Most A* steps need an LLM
-    skill (spec extract, topology select, etc.); mark them WAIVED with
-    the skill name if no deterministic program exists.
-    """
+                    args=None) -> StepResult:
+    """Run one current block through the canonical production callable seam."""
+    from execution_adapters_analog import declaration_path
+    from execution_production import dispatch_site
+    _policy_row = dispatch_site((step_name.split('_', 1)[0],), project,
+        dict(block=dict(block), step_name=step_name,
+             native_callable=__name__ + '.step_for_block',
+             native_source=str(Path(__file__).resolve()),
+             container=(getattr(args, 'container', None)
+                        or os.environ.get('VIBEIC_ANALOG_CONTAINER')
+                        or _pin.default_container_name()), args=args,
+             declaration=str(declaration_path(project))))
+    if _policy_row is not None:
+        extra = dict(_policy_row.get('extras') or {})
+        for key in ('expert_handoff', 'expert_handoffs', 'raw_producer',
+                    'execution_rows', 'candidate_statuses', 'handoff'):
+            if key in _policy_row:
+                extra[key] = _policy_row[key]
+        return StepResult(step_name, block.get('name') or block.get('type') or 'unknown',
+            _policy_row['status'], _policy_row.get('duration_s',0), _policy_row['detail'],
+            _policy_row.get('output_files',[]), reason_class=_policy_row.get('reason_class',''),
+            declared_by=_policy_row.get('declared_by',''), extras=extra,
+            waiver_rows=list(_policy_row.get('waiver_rows') or []),
+            attribution=_policy_row.get('attribution',''),
+            disclosures=list(_policy_row.get('disclosures') or []))
     t0 = time.time()
     bname = block.get("name") or block.get("type") or "unknown"
     out_dir = _pl.analog_dir(project) / bname
@@ -2502,12 +2521,18 @@ def step_block_list_schema(project: Path) -> StepResult:
 
 
 def _a9_cosim(project: Path, args=None) -> Dict[str, Any]:
-    """Run `analog_a9_cosim_emit` on the L22-declared scenarios.
-
-    The producer's exit code IS the tier: 0 results written, 2 an honest gap
-    (L22 declares no scenario), 69 the environment refused (an engine the
-    image lacks) — the last is NOT_MEASURED and never a waiver.
-    """
+    """Run the canonical chip-level co-simulation callable seam."""
+    from execution_adapters_analog import declaration_path
+    from execution_production import dispatch_site
+    result = dispatch_site(('M3',), project, dict(args=args, native_callable=__name__ + '._a9_cosim',
+        native_source=str(Path(__file__).resolve()),
+        container=(getattr(args, 'container', None)
+                   or os.environ.get('VIBEIC_ANALOG_CONTAINER')
+                   or _pin.default_container_name()),
+        declaration=str(declaration_path(project))))
+    if result is not None:
+        return dict(producer='execution_production.M3', rc=0 if result['status']=='PASS' else 2,
+            tier=result['status'], detail=result['detail'], execution=result)
     prog = PROGRAMS_DIR / "analog_a9_cosim_emit.py"
     container = (getattr(args, "container", None)
                  or os.environ.get("VIBEIC_ANALOG_CONTAINER")
@@ -2614,7 +2639,10 @@ def main() -> int:
                          "CONTRADICTS the design's own L19 declaration the run "
                          "REFUSES with both named; when it is absent the "
                          "declaration is used; there is no literal default."))
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution.configure(args)
 
     project = args.project.resolve()
     if not project.is_dir():

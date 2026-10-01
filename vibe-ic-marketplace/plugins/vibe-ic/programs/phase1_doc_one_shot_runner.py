@@ -63860,7 +63860,10 @@ def main() -> int:
                         "document whose own timing table is keyed BY PDK "
                         "(a `| <pdk> | <period> |` row per target). Omitted "
                         "or 'auto' leaves every extraction byte-identical.")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution.configure(args)
 
     # ORGANIC #541 — CLI --ic-name is authoritative for docs-mode.
     global _CLI_IC_NAME_OVERRIDE
@@ -63879,6 +63882,13 @@ def main() -> int:
     if not (project / "input" / "docs").is_dir():
         print(f"ERROR: input/docs/ missing under {project}", file=sys.stderr)
         return 2
+
+    from execution_production import dispatch_site
+    _policy_row = dispatch_site(('D1',), project, dict(vars(args),
+        native_callable='phase1_doc_one_shot_runner.main',
+        declaration=str(project/'input/project.json')))
+    if _policy_row is not None:
+        return 0 if _policy_row['status'] == 'PASS' else 1
 
     # Step 1: text extraction
     print(f"[1/15] Extracting text from input/docs/ ...")

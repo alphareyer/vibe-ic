@@ -1,0 +1,903 @@
+"""Isolated analog producer child and substantive fresh artifact consumers.
+
+The child cannot issue adoption authority. Native work requires a separate
+current INPUT-bound capacity reservation, not the source author's budget.
+"""
+from __future__ import annotations
+
+import argparse
+from contextlib import contextmanager, redirect_stdout, redirect_stderr
+from dataclasses import asdict
+import importlib
+import io
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import execution_modes as em
+import _docker_memory as _dmem
+from execution_adapters_analog import (ANALOG_STEPS, CONTRACTS, ENGINE_FAMILIES,
+    PRODUCERS, PROGRAMS, WORKER, covered, gate_specs, write_json, producer_work_contract)
+
+
+def hashes(root: Path) -> dict:
+    return {str(p.relative_to(root)): em.digest(p) for p in root.rglob('*')
+            if p.is_file() and not p.is_symlink()}
+
+
+def producer_result_observations(value, path='') -> list:
+    """Read producer results without granting execution or native admission."""
+    observations = []
+    def visit(value, path):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                location = path + '/' + key
+                if key in ('verdict', 'design_verdict', 'status', 'result', 'raw_sim_verdict', 'lvs') and isinstance(item, str):
+                    observations.append(dict(path=location, verdict=item))
+                elif key == 'rc' and type(item) is int:
+                    observations.append(dict(path=location, rc=item))
+                elif key in ('executed', 'simulator_run', 'full_pvt_sweep_executed') and item is False:
+                    observations.append(dict(path=location, executed=False))
+                visit(item, location)
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                visit(item, path + '/' + str(index))
+    visit(value, path)
+    return observations
+
+
+def producer_result_verdict(observations: list) -> str:
+    """A measured failure in any complement survives clean sibling results."""
+    words = [row['verdict'].strip().upper() for row in observations if 'verdict' in row]
+    if any(word in ('FAIL', 'MISMATCH') for word in words) or any(row.get('rc') == 1 for row in observations):
+        return 'FAIL'
+    if (not observations or any(word not in ('PASS', 'MATCH') for word in words)
+            or any(('rc' in row and row['rc'] != 0) or row.get('executed') is False
+                   for row in observations)):
+        return 'NOT_MEASURED'
+    return 'PASS'
+
+
+def producer_work(calls: list, binding: dict, source_files: dict) -> dict:
+    """Retain every real complementary result; no best-tool reduction."""
+    contract = producer_work_contract(binding['step_id'])
+    allowed = contract['entrypoints'] + contract['optional_entrypoints']
+    observations = []
+    records = []
+    for index, call in enumerate(calls):
+        entrypoint = call.get('entrypoint', '')
+        source = PROGRAMS / (entrypoint.split('.')[0] + '.py')
+        name = str(source.resolve())
+        if (entrypoint not in allowed or type(call.get('pid')) is not int or call['pid'] <= 0
+                or not source.is_file() or source.is_symlink()
+                or source_files.get(name) != em.digest(source)
+                or call.get('source_sha256') != source_files.get(name)):
+            raise em.Refusal('ANALOG_PRODUCER_BRANCH_UNBOUND', entrypoint)
+        observed = producer_result_observations(call, str(index))
+        observations.extend(observed)
+        records.append(dict(entrypoint=entrypoint, pid=call['pid'], source_sha256=source_files[name],
+                            actual_result=call, observations=observed))
+    verdict = producer_result_verdict(observations)
+    incomplete = not records or any(not row['observations'] for row in records)
+    block_steps = ('A3', 'A4', 'A5', 'A6', 'A7', 'A8')
+    expected_blocks = binding['objective']['blocks'] if binding['step_id'] in block_steps else [None]
+    for entrypoint in contract['entrypoints']:
+        for block in expected_blocks:
+            matching = [call for call in calls if call['entrypoint'] == entrypoint
+                        and (block is None or call.get('block') == block)]
+            if len(matching) != 1:
+                incomplete = True
+    if binding['step_id'] == 'A6':
+        incomplete |= any(not isinstance(call.get('result', {}).get(part), dict)
+                          or call['result'][part].get('executed') is not True
+                          for call in calls for part in ('drc', 'lvs'))
+    return dict(binding=binding, contract=contract, records=records,
+        design_verdict='FAIL' if verdict == 'FAIL' else 'NOT_MEASURED' if incomplete else verdict,
+        qualification_is_native_admission=False)
+
+
+def checked_json(path: Path) -> dict:
+    if not path.is_file() or path.is_symlink():
+        raise em.Refusal('ANALOG_SUBSTANTIVE_INPUT_MISSING', str(path))
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise em.Refusal('ANALOG_JSON_OBJECT_REQUIRED', str(path))
+    return data
+
+
+@contextmanager
+def _producer_reentry(project: Path, binding: dict):
+    """Reach existing same-step callables after the worker verified its INPUT.
+
+    Binding equality remains an integrity check. Only the live Controller
+    issuer authenticates this child; the scope grants no native admission.
+    """
+    step = binding.get('step_id')
+    if (step not in CONTRACTS or
+            json.loads(os.environ.get('VIBEIC_EXECUTION_BINDING', '{}')) != binding):
+        raise em.Refusal('ANALOG_PRODUCER_REENTRY_UNBOUND', str(step))
+    with em.issued_child_scope(project, step) as scope:
+        yield scope
+
+
+def _gate_status(rc: int | None, report: dict) -> str:
+    if rc == 1 or report.get('verdict') in ('FAIL', 'INCOMPLETE'):
+        return 'FAIL'
+    if rc != 0 or report.get('verdict') != 'PASS':
+        return 'NOT_MEASURED'
+    if any(f.get('severity') in ('ERROR', 'FAIL') for f in report.get('findings', []) if isinstance(f, dict)):
+        return 'FAIL'
+    return 'PASS'
+
+
+def _advisory_record(row: dict, project: Path, report_path: Path | None,
+                     rc: int | None, report: dict, stdout: str) -> dict:
+    """Use the existing classifier on the actual invocation, never its tier payload."""
+    import flow_compliance_check as compliance
+    name = shlex.split(row['command'])[0]
+    if rc is None:
+        return dict(gate=name, command=row['command'], exit_code=None,
+                    verdict='NOT_MEASURED', structured_verdict=None,
+                    reason_class=None, enforcement='BLOCKING')
+    structured = compliance._report_verdict(report)
+    execution = compliance._ProgramCheckResult(
+        _gate_status(rc, report) == 'PASS', stdout, rc, structured,
+        structured or _gate_status(rc, report), compliance._reason_taxonomy.report_reason_class(report))
+    # Point the shared reader at this invocation's report, including gates
+    # whose canonical command did not originally request a JSON file.
+    command = shlex.join([name, '--json', str(report_path)]) if report_path else name
+    record = compliance._advisory_execution_record(
+        command, sys.maxsize, execution[0], stdout, project, execution)
+    record['command'] = row['command']
+    return record
+
+
+def _m1_observation(outputs: Path, binding: dict, calls: list) -> dict | None:
+    """Only the current producer and actual native process log speak for M1."""
+    path = outputs / 'producer-calls/calls.json'
+    raw = outputs / 'producer-calls/native-processes.jsonl'
+    if binding['step_id'] != 'M1' or not path.is_file() or not raw.is_file():
+        return None
+    if path.is_symlink() or raw.is_symlink() or json.loads(path.read_text()) != calls:
+        raise em.Refusal('ANALOG_M1_PRODUCER_RECORD_CHANGED', str(path))
+    records = [c for c in calls if c.get('entrypoint') == 'mixed_signal_top_lvs_run.run']
+    processes = [json.loads(line) for line in raw.read_text().splitlines() if line.strip()]
+    script = PROGRAMS / 'mixed_signal_top_lvs_run.py'
+    if (len(records) != 1 or not processes or any(
+            type(p.get('pid')) is not int or type(p.get('rc')) is not int
+            or not p.get('argv') or not p.get('started_ns') or not p.get('ended_ns')
+            or p.get('stop') for p in processes)):
+        return None
+    record, result = records[0], records[0].get('result')
+    if (record.get('source_sha256') != em.digest(script) or type(record.get('pid')) is not int
+            or not isinstance(result, dict) or type(result.get('rc')) is not int
+            or not isinstance(result.get('verdict'), str)):
+        return None
+    if result['verdict'] == 'PASS' and (result['rc'] != 0 or any(p['rc'] != 0 for p in processes)):
+        return None
+    raw_files = {str(path): em.digest(path), str(raw): em.digest(raw)}
+    if result['verdict'] == 'PASS':
+        project = outputs / 'project'
+        report_path = project / 'reports/analog/mixed_signal/top_lvs.json'
+        if not report_path.is_file() or report_path.is_symlink():
+            return None
+        measured = checked_json(report_path)
+        if measured.get('verdict') != 'PASS' or any(result.get(k) != v for k, v in measured.items()):
+            return None
+        for relative in (measured.get('lvs_report'), measured.get('extracted_netlist')):
+            if not isinstance(relative, str):
+                return None
+            actual = project / em._relative(relative)
+            if (actual.is_symlink() or not actual.is_file() or not actual.stat().st_size
+                    or not actual.resolve().is_relative_to(project.resolve())):
+                return None
+            raw_files[str(actual)] = em.digest(actual)
+        raw_files[str(report_path)] = em.digest(report_path)
+    return dict(pid=record['pid'], rc=result['rc'], report=result,
+                raw_files=raw_files,
+                producer_call=record, native_processes=processes)
+
+
+def retain_producer_observation(observation: dict | None, root: Path) -> dict | None:
+    if not observation:
+        return None
+    raw_files = {}
+    for name, expected in observation['raw_files'].items():
+        source = Path(name)
+        if source.is_symlink() or em.digest(source) != expected:
+            raise em.Refusal('ANALOG_M1_PRODUCER_RECORD_CHANGED', name)
+        target = root / 'producer-observation' / expected / source.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        if em.digest(source) != expected or em.digest(target) != expected:
+            raise em.Refusal('ANALOG_M1_PRODUCER_RECORD_CHANGED', name)
+        raw_files[str(target)] = expected
+    return {**observation, 'raw_files': raw_files}
+
+
+def semantic_gates(step: str, project: Path, directory: Path, canonical=False,
+                   producer_observation: dict | None = None) -> dict:
+    """Existing blocking/advisory/bench-conditional semantics, with raw rc."""
+    import shlex
+    directory.mkdir(parents=True, exist_ok=True)
+    blocking, advisory, external, receipts = {}, {}, [], []
+    advisory_records, declared_na = [], []
+    for row in gate_specs(step):
+        tokens = shlex.split(row['command'])
+        name = tokens.pop(0)
+        script = PROGRAMS / (name + '.py')
+        destination = advisory if row['kind'] == 'advisory_program_exit_zero' else blocking
+        destination[name] = 'NOT_MEASURED'
+        condition = row.get('condition_files_exist')
+        present = [p for expr in (condition or []) for p in project.glob(expr)]
+        condition_hashes = {str(p.relative_to(project)): em.digest(p) for p in present if p.is_file()}
+        common = dict(gate=name, command=row['command'], kind=row['kind'],
+            program_sha256=em.digest(script), condition_files_exist=condition or [],
+            condition_input_hashes=condition_hashes, applies=not condition or bool(present))
+        if condition and not present:
+            why = row.get('absent_condition_reason', '')
+            external.append(dict(gate=name, reason=why, condition=condition))
+            receipt = dict(common, rc=None, verdict='NOT_MEASURED', raw_files={},
+                           reason='SOURCE_DECLARED_CONDITION_ABSENT')
+            if row['kind'] == 'advisory_program_exit_zero':
+                import flow_compliance_check as compliance
+                advisory_records.append(dict(gate=name, command=row['command'], exit_code=None,
+                    verdict='NOT_APPLICABLE', structured_verdict=None, enforcement='NOT_RUN_DECLARED',
+                    reason_class=compliance._reason_taxonomy.normalise(
+                        row.get('absent_condition_reason_class', 'DESIGN_DECLARED_NA'))))
+            else:
+                declared_na.append(row['command'] + ' — condition_files_exist ' + str(condition)
+                    + ' matched 0 path(s), so the program did not run and nothing was checked. '
+                    + 'Declared not-applicable: ' + (why.strip() if isinstance(why, str) else ''))
+            receipts.append(receipt)
+            continue
+        if name == 'mixed_signal_top_lvs_run':
+            # This canonical advisory clause is itself the native producer.
+            # It ran once in native_produce; consumers do not recursively
+            # remake the selected GDS or modify their bound upstream INPUT.
+            observation = producer_observation or {}
+            observed_report = directory / (name + '.observed.json')
+            raw_files = dict(observation.get('raw_files', {}))
+            if observation:
+                write_json(observed_report, observation['report'])
+                raw_files[str(observed_report)] = em.digest(observed_report)
+            record = _advisory_record(row, project, observed_report if observation else None,
+                                     observation.get('rc'), observation.get('report', {}), '')
+            advisory_records.append(record)
+            destination[name] = ('FAIL' if record['verdict'] == 'FAIL' or record['exit_code'] == 1
+                else 'PASS' if record['verdict'] == 'PASS' and record['exit_code'] == 0
+                else 'NOT_MEASURED')
+            receipts.append(dict(common, rc=observation.get('rc'), verdict=destination[name],
+                advisory_record=record, observation=observation,
+                raw_files=raw_files, reason='ADVISORY_PRODUCER_NOT_REEXECUTED'))
+            continue
+        args, report_path = [], directory / (name + '.json')
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            if token == '--json':
+                report_path = project / tokens[i + 1] if canonical else report_path
+                i += 2
+                continue
+            args.append(str(project) if token == '.' else
+                        str(project / token) if token.startswith('phase') else token)
+            i += 1
+        command = [str(Path(sys.executable).resolve()), str(script), *args, '--json', str(report_path)]
+        out, err = directory / (name + '.stdout'), directory / (name + '.stderr')
+        with out.open('w') as stdout, err.open('w') as stderr:
+            process = subprocess.Popen(command, stdout=stdout, stderr=stderr)
+            try:
+                rc = process.wait(timeout=120)
+            except subprocess.TimeoutExpired:
+                process.kill(); process.wait(); rc = None
+        report = checked_json(report_path) if report_path.is_file() else {}
+        verdict = _gate_status(rc, report)
+        record = None
+        if row['kind'] == 'advisory_program_exit_zero':
+            record = _advisory_record(row, project, report_path, rc, report,
+                                      out.read_text(errors='replace'))
+            advisory_records.append(record)
+            verdict = ('FAIL' if record['verdict'] == 'FAIL' or record['exit_code'] == 1
+                else 'PASS' if record['verdict'] == 'PASS' and record['exit_code'] == 0
+                else 'NOT_MEASURED')
+        destination[name] = verdict
+        receipt = {**common, 'argv': command, 'pid': process.pid,
+            'rc': rc, 'verdict': verdict, 'program_sha256': em.digest(script),
+            'report': report, 'advisory_record': record,
+            'report_sha256': em.digest(report_path) if report_path.is_file() else None,
+            'stdout_sha256': em.digest(out), 'stderr_sha256': em.digest(err),
+            'raw_files': {str(p): em.digest(p) for p in (out, err, report_path) if p.is_file()}}
+        write_json(directory / (name + '.receipt.json'), receipt)
+        receipts.append(receipt)
+    return {'blocking': blocking, 'advisory': advisory, 'external': external, 'receipts': receipts,
+            'advisory_gate_records': advisory_records, 'declared_not_applicable': declared_na}
+
+
+def canonical_report(fresh: dict, binding: dict, project: Path, root: Path,
+                     source_files: dict, producer_verdict: str, producer_work: dict | None = None) -> dict:
+    """One actual step, classified by F1 and emitted after verdict assessment."""
+    import execution_production as production
+    import flow_compliance_check as compliance
+    import _flow_yaml
+    from execution_adapters_analog import CONTRACT_FILE
+    gates = {name: 'NOT_MEASURED' for name in binding['required_gates']}
+    gates.update({k: v for k, v in {**fresh['blocking'], **fresh['advisory']}.items() if k in gates})
+    if em._hash(dict(source_files)) != binding['objective']['source_manifest_sha256']:
+        raise em.Refusal('ANALOG_REPORT_SOURCE_MANIFEST_CHANGED', binding['step_id'])
+    sources = [CONTRACT_FILE, PROGRAMS.parent / 'flow/phase1_phase2_phase3.yaml',
+        Path(production.__file__).resolve(), Path(compliance.__file__).resolve(),
+        *(PROGRAMS / (r['gate'] + '.py') for r in fresh['receipts'])]
+    observed_sources = {}
+    for path in sources:
+        name = str(path.resolve())
+        if path.is_symlink() or source_files.get(name) != em.digest(path):
+            raise em.Refusal('ANALOG_REPORT_SOURCE_UNBOUND', name)
+        observed_sources[name] = em.digest(path)
+    raw_files = {}
+    for receipt in fresh['receipts']:
+        for name, expected in receipt['raw_files'].items():
+            path = Path(name)
+            if not path.is_relative_to(root) or path.is_symlink() or em.digest(path) != expected:
+                raise em.Refusal('ANALOG_GATE_RAW_RECORD_CHANGED', name)
+            raw_files[str(path.relative_to(root))] = expected
+    executions = []
+    for receipt in fresh['receipts']:
+        if receipt.get('rc') is None:
+            continue  # A nonexecuted clause never receives an execution row.
+        advisory = receipt.get('advisory_record')
+        executions.append(dict(cmd=receipt['command'], gate=receipt['gate'],
+            rc=receipt['rc'], exit_code=receipt['rc'],
+            verdict=advisory['verdict'] if advisory else receipt['verdict'],
+            structured_verdict=advisory.get('structured_verdict') if advisory else
+                compliance._report_verdict(receipt.get('report')),
+            reason_class=advisory.get('reason_class') if advisory else
+                compliance._reason_taxonomy.report_reason_class(receipt.get('report')),
+            pid=receipt.get('pid') or receipt.get('observation', {}).get('pid'),
+            program_sha256=receipt['program_sha256'], raw_files=receipt['raw_files']))
+    canonical_row = next(row for row in _flow_yaml.load()['steps']
+                         if str(row['id']) == binding['step_id'])
+    row = dict(id=binding['step_id'], status='NOT_MEASURED', canonical_row=canonical_row,
+        advisory_gate_records=fresh['advisory_gate_records'],
+        declared_not_applicable=fresh['declared_not_applicable'], execution_records=fresh['receipts'],
+        program_execution_records=executions)
+    report = dict(schema=1, binding=binding, step_id=binding['step_id'], source_sha=binding['source_sha'],
+        source_files=dict(source_files), sources=observed_sources, raw_files=raw_files,
+        project_population=hashes(project), gates=gates, fresh=fresh, steps=[row],
+        producer_design_verdict=producer_verdict, gate_execution_ledger=executions)
+    if producer_work is not None:
+        report['producer_work'] = producer_work
+    # The classifier's aggregate precondition needs a disposition view. This
+    # private view is never issued; the actual report receives only the assessed
+    # blocking/producer result, including every failure and nonmeasurement.
+    view = {**report, 'steps': [{**row, 'status': 'PASS'}]}
+    try:
+        primary = production.canonical_gate_obligations(
+            binding['step_id'], tuple(binding['required_gates']), gates, view, project=project,
+            _program_records=executions)
+        status = ('FAIL' if producer_verdict == 'FAIL' or any(gates[g] == 'FAIL' for g in primary)
+            else 'PASS' if producer_verdict == 'PASS' and primary and all(gates[g] == 'PASS' for g in primary)
+            else 'NOT_MEASURED')
+        report['blocking_gates'] = list(primary)
+    except em.Refusal as exc:
+        status = ('FAIL' if producer_verdict == 'FAIL' or exc.code == 'GATE_FAIL'
+                  or any(value == 'FAIL' for value in fresh['blocking'].values()) else 'NOT_MEASURED')
+        report.update(blocking_gates=[], classification_refusal=dict(code=exc.code, detail=str(exc)))
+    row['status'] = status
+    return report
+
+
+def read_canonical_report(root: Path, binding: dict, relative='canonical-gates.json',
+                          expected_sha256: str | None = None) -> dict:
+    """Reopen actual issued bytes, their source identity and complete raw population."""
+    from execution_production import canonical_gate_population
+    import _flow_yaml
+    path = root / em._relative(relative)
+    if not path.is_file() or path.is_symlink():
+        raise em.Refusal('ANALOG_CANONICAL_REPORT_UNBOUND', relative)
+    observed_sha = em.digest(path)
+    report = checked_json(path)
+    if em.digest(path) != observed_sha or expected_sha256 is not None and observed_sha != expected_sha256:
+        raise em.Refusal('ANALOG_CANONICAL_REPORT_CHANGED', relative)
+    if (report.get('binding') != binding or report.get('step_id') != binding['step_id']
+            or report.get('source_sha') != binding['source_sha']
+            or em._hash(report.get('source_files')) != binding['objective']['source_manifest_sha256']
+            or set(report.get('gates', {})) != set(binding['required_gates'])
+            or not set(canonical_gate_population(binding['step_id'])).issubset(report['gates'])):
+        raise em.Refusal('ANALOG_CANONICAL_REPORT_UNBOUND', binding['step_id'])
+    rows = report.get('steps')
+    current_row = next(row for row in _flow_yaml.load()['steps'] if str(row['id']) == binding['step_id'])
+    specs = gate_specs(binding['step_id'])
+    fresh = report.get('fresh', {})
+    receipts = fresh.get('receipts', [])
+    if (not isinstance(rows, list) or len(rows) != 1 or rows[0].get('canonical_row') != current_row
+            or rows[0].get('execution_records') != receipts
+            or len(receipts) != len(specs) or any(
+                r.get('command') != s['command'] or r.get('kind') != s['kind']
+                for r, s in zip(receipts, specs))
+            or rows[0].get('advisory_gate_records') != fresh.get('advisory_gate_records')
+            or rows[0].get('program_execution_records') != report.get('gate_execution_ledger')):
+        raise em.Refusal('ANALOG_CANONICAL_REPORT_POPULATION_CHANGED', binding['step_id'])
+    for name, expected in report.get('sources', {}).items():
+        source = Path(name)
+        if (source.is_symlink() or not source.is_file() or em.digest(source) != expected
+                or report['source_files'].get(name) != expected):
+            raise em.Refusal('ANALOG_REPORT_SOURCE_UNBOUND', name)
+    if not report.get('sources') or not isinstance(report.get('raw_files'), dict):
+        raise em.Refusal('ANALOG_CANONICAL_REPORT_POPULATION_MISSING', relative)
+    for name, expected in report['raw_files'].items():
+        raw = root / em._relative(name)
+        if raw.is_symlink() or not raw.is_file() or em.digest(raw) != expected:
+            raise em.Refusal('ANALOG_GATE_RAW_RECORD_CHANGED', name)
+    return report
+
+
+def report_obligations(report: dict, binding: dict, project: Path) -> tuple[str, ...]:
+    from execution_production import canonical_gate_obligations
+    return canonical_gate_obligations(binding['step_id'], tuple(binding['required_gates']),
+        report['gates'], report, project=project,
+        _program_records=report['steps'][0]['program_execution_records'])
+
+
+def _call(name: str, argv: list[str], directory: Path) -> dict:
+    module = importlib.import_module(name)
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        rc = module.main(argv)
+    record = {'entrypoint': name + '.main', 'argv': argv, 'pid': os.getpid(),
+              'rc': rc, 'source_sha256': em.digest(Path(module.__file__)),
+              'stdout': stdout.getvalue(), 'stderr': stderr.getvalue()}
+    write_json(directory / (name + '.json'), record)
+    return record
+
+
+def _decision(inputs: Path, spec: dict, project: Path) -> None:
+    if spec['step_id'] not in ('A2', 'A3'):
+        return
+    decision = checked_json(inputs / 'decision')
+    required = ('reviewer', 'rationale', 'blocks', 'input_hashes', 'source_sha')
+    if any(k not in decision for k in required) or not decision['reviewer'] or not decision['rationale']:
+        raise em.Refusal('ANALOG_AI_DECISION_INCOMPLETE', spec['step_id'])
+    source_inputs = {k: v for k, v in spec['input_hashes'].items() if k.startswith('project/')}
+    if decision['source_sha'] != spec['source_sha'] or decision['input_hashes'] != source_inputs:
+        raise em.Refusal('ANALOG_AI_DECISION_STALE', spec['step_id'])
+    if set(decision['blocks']) != set(spec['blocks']):
+        raise em.Refusal('ANALOG_AI_BLOCK_POPULATION_CHANGED', spec['step_id'])
+    for block in spec['blocks']:
+        chosen = decision['blocks'][block]
+        if not isinstance(chosen, dict) or not chosen.get('topology') or not chosen.get('sizing_rationale'):
+            raise em.Refusal('ANALOG_AI_TOPOLOGY_DECISION_REQUIRED', block)
+        if spec['step_id'] == 'A3':
+            ir = checked_json(project / f'phase3/analog/{block}/topology.json')
+            if em.digest(project / f'phase3/analog/{block}/topology.json') != chosen.get('topology_sha256'):
+                raise em.Refusal('ANALOG_AI_TOPOLOGY_CHANGED', block)
+
+
+def source_produce(inputs: Path, project: Path, spec: dict, records: Path) -> list[dict]:
+    records.mkdir(parents=True, exist_ok=True)
+    step, params = spec['step_id'], spec['parameters']
+    _decision(inputs, spec, project)
+    result = []
+    for block in spec['blocks']:
+        if step == 'A1':
+            result.append(_call('analog_a1_spec_emit', [str(project), '--block', block], records))
+        elif step == 'A2':
+            result.append(_call('analog_a2_topology_emit', [str(project), '--block', block,
+                           '--pdk', params['pdk_name']], records))
+            path = project / f'phase3/analog/{block}/topology.json'
+            if path.is_file():
+                ir = checked_json(path)
+                chosen = checked_json(inputs / 'decision')['blocks'][block]
+                actual = ir.get('topology') or ir.get('topology_name') or ir.get('name')
+                if actual != chosen['topology']:
+                    raise em.Refusal('ANALOG_AI_TOPOLOGY_NOT_PRODUCED', block + ':' + str(actual))
+    return result
+
+
+def native_produce(inputs: Path, project: Path, spec: dict, records: Path) -> list[dict]:
+    """One ordered complementary engine chain; never the parent flow."""
+    from execution_analog_local_transport import local_transport
+    step, params = spec['step_id'], spec['parameters']
+    records.mkdir(parents=True, exist_ok=True)
+    result = []
+    with local_transport(records / 'native-processes.jsonl', time.monotonic() + params['timeout_s']):
+        _decision(inputs, spec, project)
+        if step == 'A3':
+            for block in spec['blocks']:
+                result.append(_call('analog_a3_netlist_emit', [str(project), '--block', block,
+                    '--pdk', params['pdk_name'], '--container', 'host', '--verify-sim'], records))
+                result[-1]['block'] = block
+        elif step == 'A4':
+            import analog_real_corner_sweep as sweep
+            for block in spec['blocks']:
+                record = sweep.run_block(project, block, 'host', params['pdk_name'], 'auto')
+                report = project / f'phase3/analog/{block}/corner_results.json'
+                result.append({'entrypoint': 'analog_real_corner_sweep.run_block', 'pid': os.getpid(),
+                               'block': block, 'rc': record,
+                               'result': checked_json(report) if report.is_file() else None})
+        elif step == 'A5':
+            for block in spec['blocks']:
+                args = [str(project), '--block', block, '--container', 'host',
+                        '--pdk-root', params['pdk_root'], '--family', params['pdk_name']]
+                for name in ('magicrc', 'gencell_tcl', 'drc_tech', 'magic_tech', 'tech_lef',
+                             'wire_width_um', 'via_pad_half_um'):
+                    if name not in params:
+                        raise em.Refusal('ANALOG_LAYOUT_DECLARATION_REQUIRED', name)
+                    args += ['--' + name.replace('_', '-'), str(params[name])]
+                result.append(_call('analog_a5_layout_emit', args, records))
+                result[-1]['block'] = block
+        elif step == 'A6':
+            import analog_a6_native_pv as pv
+            if not params.get('pv_resolution'):
+                raise em.Refusal('ANALOG_SIGNOFF_DECKS_REQUIRED', step)
+            for block in spec['blocks']:
+                result.append({'entrypoint': 'analog_a6_native_pv.run_block_pv', 'pid': os.getpid(),
+                    'block': block, 'result': pv.run_block_pv(project, block, params['pv_resolution'], 'host')})
+        elif step == 'A7':
+            import analog_a7_post_layout_emit as post
+            for block in spec['blocks']:
+                rc = post.run(project, block, 'host', params['image_id'],
+                              styles=params.get('extraction_styles'))
+                result.append({'entrypoint': 'analog_a7_post_layout_emit.run', 'pid': os.getpid(),
+                               'block': block, 'rc': rc})
+        elif step == 'A8':
+            from execution_analog_mixed_worker import characterize
+            for block in spec['blocks']:
+                result.append(_call('analog_a8_hardmacro_emit', [str(project), '--block', block,
+                    '--container', 'host', '--pdk-root', params['pdk_root']], records))
+                result[-1]['block'] = block
+                result.append(_call('analog_hardmacro_gds_emit', [str(project), '--block', block,
+                    '--container', 'host', '--pdk-root', params['pdk_root']], records))
+                result[-1]['block'] = block
+                if (project / f'phase3/analog/{block}/characterization_plan.json').is_file():
+                    result.append({'block': block, **characterize(project, block, params, records)})
+        elif step in ('A9', 'M3'):
+            import analog_a9_cosim_emit as cosim
+            if not params.get('libvvp') or type(params.get('cycles')) is not int or type(params.get('windows')) is not int:
+                raise em.Refusal('ANALOG_COSIM_NATIVE_PARAMETERS_REQUIRED', step)
+            rc, record = cosim.run(project, engine=cosim.Engine(''), libvvp=params['libvvp'],
+                                   cycles=params['cycles'], windows=params['windows'], launch=True)
+            result.append({'entrypoint': 'analog_a9_cosim_emit.run', 'pid': os.getpid(), 'rc': rc,
+                           'result': record})
+            if step == 'M3':
+                from execution_analog_mixed_worker import interface_si
+                result.append(interface_si(project, params, records))
+        elif step == 'M1':
+            import mixed_signal_top_lvs_run as merged
+            observed = merged.run(project, params['top'], 'host', params['pdk_name'])
+            result.append({'entrypoint': 'mixed_signal_top_lvs_run.run', 'pid': os.getpid(),
+                'source_sha256': em.digest(Path(merged.__file__)), 'result': observed})
+        elif step == 'M2':
+            from execution_analog_mixed_worker import power_domains
+            result.append(power_domains(project, params, records))
+        elif step == 'M4':
+            from execution_analog_mixed_worker import signoff
+            result.append(signoff(project, params, records))
+            result[-1]['result'] = checked_json(project / 'reports/analog/mixed_signal/signoff.json')
+        for call in result:
+            source = PROGRAMS / (call['entrypoint'].split('.')[0] + '.py')
+            call['source_sha256'] = em.digest(source)
+            call.setdefault('pid', os.getpid())
+        write_json(records / 'calls.json', result)
+    return result
+
+
+def _native_launch(inputs: Path, outputs: Path, spec: dict) -> None:
+    """F1/P0 is the only quota/executor authority. No native probe here."""
+    from execution_resource_lease import native_boundary, record_worker
+    import librelane_contract as lc
+    params = spec['parameters']
+    facts = checked_json(inputs / 'native_facts')
+    payload = {k: v for k, v in spec['input_hashes'].items()
+               if k not in ('native_admission', 'native_facts', 'controls/lease.json')}
+    if (facts.get('input_hashes') != payload or facts.get('qualified') is not True
+            or facts.get('available') is not True or not facts.get('measurement')
+            or tuple(facts.get('engine_families', [])) != ENGINE_FAMILIES[spec['step_id']]):
+        raise em.Refusal('ANALOG_NATIVE_ADMISSION_UNBOUND', spec['step_id'])
+    image = params.get('image_id')
+    if not isinstance(image, str) or not re.fullmatch(r'.+@sha256:[0-9a-f]{64}', image) or facts.get('image_id') != image:
+        raise em.Refusal('ANALOG_NATIVE_IMAGE_UNBOUND', str(image))
+    lease = Path(spec['lease'])
+    quota = checked_json(lease / 'lease.json')
+    if (quota.get('cpus') != params['cpus'] or quota.get('ram_mb') != params['ram_mb']
+            or type(quota.get('container_ram_mb')) is not int or quota['container_ram_mb'] <= 0
+            or not quota.get('parent_pid') or not quota.get('parent_start_ticks')
+            or type(params.get('native_deadline_s')) not in (int, float) or params['native_deadline_s'] <= 0):
+        raise em.Refusal('ANALOG_NATIVE_LEASE_BUDGET_MISMATCH', str(lease))
+    command = [str(WORKER), '--inputs', str(inputs), '--outputs', str(outputs), '--native-local']
+    docker = shutil.which('docker')
+    if not docker or str(Path(docker).resolve()) not in spec['source_files']:
+        raise em.Refusal('ANALOG_NATIVE_DOCKER_SOURCE_UNBOUND', str(docker))
+    argv = [docker, 'run', *_dmem.docker_memory_flags(
+                {'VIBEIC_DOCKER_MEMORY': str(quota['container_ram_mb']) + 'm'}),
+            '--rm', '--network', 'none', '--user', f'{os.getuid()}:{os.getgid()}',
+            '-v', str(inputs) + ':' + str(inputs) + ':ro',
+            '-v', str(outputs) + ':' + str(outputs) + ':rw',
+            '-v', str(PROGRAMS) + ':' + str(PROGRAMS) + ':ro',
+            '-v', str(PROGRAMS.parent / 'flow') + ':' + str(PROGRAMS.parent / 'flow') + ':ro',
+            '-e', 'VIBEIC_F5_NATIVE_LOCAL=1', '-e', 'VIBEIC_EXECUTION_BINDING=' + os.environ['VIBEIC_EXECUTION_BINDING']]
+    # PDK contents are the frozen snapshot, mounted at the producer's exact
+    # declared model prefix so selected SPICE includes stay relocatable.
+    argv += ['-v', str(inputs / 'pdk_root') + ':' + params['pdk_root'] + ':ro',
+             image, '--skip', 'python3', *command]
+    record_worker(lease, readonly_mounts=[[str(inputs), str(inputs)]])
+    with native_boundary(lease, expected_sha256=spec['input_hashes']['controls/lease.json']):
+        completed = lc.run_container(argv, probe_deadline_s=params['native_deadline_s'])
+    write_json(outputs / 'native-launch.json', {'argv': argv, 'pid': os.getpid(),
+        'rc': completed.returncode, 'stdout': completed.stdout, 'stderr': completed.stderr,
+        'binding': json.loads(os.environ['VIBEIC_EXECUTION_BINDING']),
+        'lease_sha256': spec['input_hashes']['controls/lease.json'], 'image_id': image})
+    commands = lease / 'commands.jsonl'
+    processes = outputs / 'producer-calls/native-processes.jsonl'
+    if not commands.is_file() or not commands.stat().st_size or not processes.is_file():
+        raise em.Refusal('ANALOG_NATIVE_RAW_RECEIPTS_MISSING', str(lease))
+    shutil.copyfile(commands, outputs / 'native-commands.jsonl')
+    shutil.copyfile(processes, outputs / 'native-processes.jsonl')
+    if completed.returncode != 0:
+        raise em.Refusal('ANALOG_NATIVE_WORKER_FAILED', str(completed.returncode))
+
+
+def validate_products(outputs: Path, binding: dict, producer: dict, manifest: dict) -> None:
+    if producer.get('binding') != binding or manifest.get('binding') != binding:
+        raise em.Refusal('ANALOG_PRODUCER_BINDING_CHANGED', binding['step_id'])
+    if producer.get('step_id') != binding['step_id'] or producer.get('source_sha') != binding['source_sha']:
+        raise em.Refusal('ANALOG_PRODUCER_SOURCE_CHANGED', binding['step_id'])
+    if producer.get('native'):
+        issued = checked_json(outputs / 'canonical-gates.json')
+        branches = checked_json(outputs / 'producer-work.json')
+        calls_file = outputs / 'producer-calls/calls.json'
+        if (calls_file.is_symlink() or not calls_file.is_file()
+                or json.loads(calls_file.read_text()) != producer['calls']
+                or branches != producer_work(producer['calls'], binding, issued['source_files'])
+                or issued.get('producer_work') != branches):
+            raise em.Refusal('ANALOG_PRODUCER_BRANCH_CHANGED', binding['step_id'])
+        if branches['design_verdict'] != 'PASS':
+            raise em.Refusal('GATE_FAIL' if branches['design_verdict'] == 'FAIL'
+                             else 'GATE_NOT_MEASURED', 'complete producer work: ' + binding['step_id'])
+    products = manifest.get('products')
+    if not isinstance(products, dict) or not products:
+        raise em.Refusal('ANALOG_SUBSTANTIVE_OUTPUT_MISSING', binding['step_id'])
+    allowed = tuple(producer['adoption_paths'])
+    for rel, expected in products.items():
+        em._relative(rel)
+        path = outputs / 'project' / rel
+        if (not covered(rel, allowed) or path.is_symlink() or not path.is_file()
+                or em.digest(path) != expected):
+            raise em.Refusal('ANALOG_PRODUCT_CHANGED', rel)
+    _substance(outputs / 'project', binding['step_id'], producer['blocks'])
+
+
+def _substance(project: Path, step: str, blocks: list[str]) -> None:
+    for expr in CONTRACTS[step]['canonical_row']['required_outputs']:
+        if not any(any(p.is_file() and p.stat().st_size for p in project.glob(alt.strip()))
+                   for alt in expr.split(' OR ')):
+            raise em.Refusal('ANALOG_SUBSTANTIVE_OUTPUT_MISSING', expr)
+    if step == 'A1':
+        for block in blocks:
+            candidates = [project / f'{phase}/analog/{block}/spec.json' for phase in ('phase3', 'phase1')]
+            path = next((p for p in candidates if p.is_file()), candidates[0])
+            data = checked_json(path)
+            provenance = data.get('_provenance') or {}
+            if (not data.get('specs') or provenance.get('fields_defaulted') != []
+                    or not (provenance.get('input') or {}).get('sha256')):
+                raise em.Refusal('ANALOG_SPEC_NOT_DOCUMENT_BOUND', block)
+    if step in ('A3', 'A4', 'A7', 'A8'):
+        for block in blocks:
+            # Keep upstream/default/stub disclosure; do not upgrade it through
+            # the new protocol even when a structural legacy gate returns 0.
+            for name in ('netlist_provenance.json', 'corner_results.json', 'pre_vs_post.json'):
+                path = project / f'phase3/analog/{block}/{name}'
+                if path.is_file():
+                    data = checked_json(path)
+                    text = json.dumps(data).lower()
+                    if 'deterministic_stub' in text or 'structure_only' in text or 'library_default' in text:
+                        raise em.Refusal('ANALOG_STRUCTURE_ONLY_NOT_DESIGN_PASS', str(path))
+    if step == 'A8':
+        for block in blocks:
+            hdir = project / f'phase3/analog/hardmacro/{block}'
+            if (hdir / 'characterization.json').is_file():
+                doc = checked_json(hdir / 'characterization.json')
+                if not doc.get('measurements') or doc.get('native_engine') != 'ngspice':
+                    raise em.Refusal('ANALOG_LIBERTY_UNCHARACTERIZED', block)
+            elif 'interface_timing : false' not in (hdir / f'{block}.lib').read_text():
+                raise em.Refusal('ANALOG_UNDECLARED_LIBERTY_TIMING', block)
+    if step in ('M2', 'M3', 'M4'):
+        from execution_analog_mixed_worker import substantive_mixed
+        substantive_mixed(project, step)
+
+
+def validate_outputs(outputs: Path, binding: dict) -> em.Evidence:
+    gates = {name: 'NOT_MEASURED' for name in binding['required_gates']}
+    result, manifest = checked_json(outputs / 'producer.json'), checked_json(outputs / 'products.json')
+    verdict = result.get('design_verdict', 'NOT_MEASURED')
+    issued, issued_sha = None, None
+    report_path = outputs / 'canonical-gates.json'
+    try:
+        validate_products(outputs, binding, result, manifest)
+        if result.get('native'):
+            launch = checked_json(outputs / 'native-launch.json')
+            if launch.get('binding') != binding or launch.get('rc') != 0:
+                raise em.Refusal('ANALOG_NATIVE_LAUNCH_NOT_BOUND', binding['step_id'])
+            for name in ('native-commands.jsonl', 'native-processes.jsonl'):
+                path = outputs / name
+                if not path.is_file() or not path.stat().st_size:
+                    raise em.Refusal('ANALOG_NATIVE_RAW_RECEIPTS_MISSING', name)
+        if not report_path.is_file() or report_path.is_symlink():
+            raise em.Refusal('ANALOG_CANONICAL_REPORT_UNBOUND', str(report_path))
+        issued_sha = em.digest(report_path)
+        issued = read_canonical_report(outputs, binding, expected_sha256=issued_sha)
+        # Revalidation must not rewrite PID-bearing issued bytes or their SHA.
+        # Keep the new real observations in a separate persistent audit view.
+        audit = outputs.parent / ('analog-validation-' + uuid.uuid4().hex)
+        audit.mkdir()
+        project = audit / 'project'
+        shutil.copytree(outputs / 'project', project)
+        observation = retain_producer_observation(
+            _m1_observation(outputs, binding, result['calls']), audit)
+        fresh = semantic_gates(binding['step_id'], project, audit / 'gates',
+                               producer_observation=observation)
+        current = canonical_report(fresh, binding, project, audit,
+                                   issued['source_files'], result['design_verdict'],
+                                   producer_work=issued.get('producer_work'))
+        write_json(audit / 'canonical-gates.json', current)
+        gates.update(current['gates'])
+        verdict = current['steps'][0]['status']
+        if result['design_verdict'] == 'FAIL':
+            verdict = 'FAIL'
+        if verdict == 'PASS':
+            report_obligations(current, binding, project)
+            report_obligations(issued, binding, outputs / 'project')
+            # Evidence describes the immutable issued report. Fresh advisory
+            # observations remain lossless in the audit report above; their
+            # changing PIDs or nonblocking values cannot rewrite that report.
+            gates = dict(issued['gates'])
+        for rel, expected in manifest['products'].items():
+            if em.digest(project / rel) != expected:
+                raise em.Refusal('ANALOG_CONSUMER_REWROTE_SELECTED_PRODUCT', rel)
+        read_canonical_report(outputs, binding, expected_sha256=issued_sha)
+    except em.Refusal as exc:
+        verdict = 'FAIL' if verdict == 'FAIL' or exc.code in (
+            'GATE_FAIL', 'ANALOG_STRUCTURE_ONLY_NOT_DESIGN_PASS', 'ANALOG_MIXED_SUBSTANCE_FAIL') else 'NOT_MEASURED'
+    output_hashes = {'producer.json': em.digest(outputs / 'producer.json'),
+                     'products.json': em.digest(outputs / 'products.json')}
+    output_hashes.update({'project/' + k: v for k, v in manifest.get('products', {}).items()})
+    if report_path.is_file() and not report_path.is_symlink():
+        output_hashes['canonical-gates.json'] = issued_sha or em.digest(report_path)
+    if issued is not None:
+        output_hashes.update(issued['raw_files'])
+    if result.get('native'):
+        for name in ('native-launch.json', 'native-commands.jsonl', 'native-processes.jsonl',
+                     'producer-work.json', 'producer-calls/calls.json'):
+            path = outputs / name
+            if path.is_file():
+                output_hashes[name] = em.digest(path)
+    return em.Evidence(binding, verdict, gates, output_hashes,
+                       {'products': len(manifest.get('products', {}))},
+                       detail=json.dumps({'canonical_gate_report': 'canonical-gates.json',
+                           'sha256': output_hashes.get('canonical-gates.json')}, sort_keys=True))
+
+
+def execute(inputs: Path, outputs: Path, native_local=False) -> dict:
+    spec, binding = checked_json(inputs / 'request.json'), json.loads(os.environ['VIBEIC_EXECUTION_BINDING'])
+    if spec['source_sha'] != binding['source_sha'] or spec['step_id'] != binding['step_id']:
+        raise em.Refusal('ANALOG_WORKER_SOURCE_UNBOUND', str(inputs))
+    if (em._hash(spec['parameters']) != binding['objective'].get('parameters_sha256')
+            or em._hash(spec['source_files']) != binding['objective'].get('source_manifest_sha256')):
+        raise em.Refusal('ANALOG_WORKER_REQUEST_FACTS_CHANGED', str(inputs))
+    actual = {k: v for k, v in binding['inputs'].items() if k != 'request.json'}
+    if spec['input_hashes'] != actual or hashes(inputs) != binding['inputs']:
+        raise em.Refusal('ANALOG_WORKER_INPUT_POPULATION_CHANGED', str(inputs))
+    for name, expected in spec['source_files'].items():
+        path = Path(name)
+        if native_local and not path.is_relative_to(PROGRAMS):
+            continue  # image binaries are separately bound by measured facts
+        if not path.is_file() or path.is_symlink() or em.digest(path) != expected:
+            raise em.Refusal('ADAPTER_SOURCE_MISMATCH', name)
+    native = spec['step_id'] not in ('A1', 'A2')
+    if native and not native_local:
+        _native_launch(inputs, outputs, spec)
+        return checked_json(outputs / 'producer.json')
+    if native_local and os.environ.get('VIBEIC_F5_NATIVE_LOCAL') != '1':
+        raise em.Refusal('ANALOG_NATIVE_LOCAL_BOUNDARY_REQUIRED', str(outputs))
+    project = outputs / 'project'
+    if project.exists():
+        raise em.Refusal('ANALOG_WORKER_OUTPUT_REUSED', str(project))
+    shutil.copytree(inputs / 'project', project)
+    before = hashes(project)
+    records = outputs / 'producer-calls'
+    with _producer_reentry(project, binding):
+        calls = native_produce(inputs, project, spec, records) if native else source_produce(inputs, project, spec, records)
+        # The live issued scope authenticates the established callable after
+        # the fresh producer, without opening another parent-policy dispatch.
+        dispatch = []
+        if spec['step_id'] in ANALOG_STEPS:
+            import analog_one_shot_runner as analog
+            from types import SimpleNamespace
+            args = SimpleNamespace(container='host', image=spec['parameters'].get('image_id'),
+                pdk=spec['parameters'].get('pdk_name'), pdk_root=spec['parameters'].get('pdk_root'))
+            for block in spec['blocks']:
+                # On an honest producer gap, do not let legacy fallback create
+                # template/stub output and disguise the real producer's result.
+                if any(call.get('rc') not in (None, 0) for call in calls):
+                    continue
+                dispatch.append(asdict(analog.step_for_block(project, {'name': block},
+                                                             ANALOG_STEPS[spec['step_id']], args=args)))
+        gates = semantic_gates(spec['step_id'], project, outputs / 'producer-gates', canonical=True,
+            producer_observation=_m1_observation(outputs, binding, calls))
+    products = {k: v for k, v in hashes(project).items() if before.get(k) != v
+                and covered(k, tuple(spec['adoption_paths']))}
+    external = gates['external']
+    if spec['step_id'] == 'A9' and not any(project.glob('phase3/analog/*/hw_measurements.json')):
+        external.append({'kind': 'physical_bench', 'status': 'EXTERNAL_MISSING',
+                         'reason': 'Simulation output cannot establish hardware correlation.'})
+    def native_fail(value):
+        if isinstance(value, dict):
+            return any(k in ('verdict', 'design_verdict', 'status') and v in ('FAIL', 'MISMATCH')
+                for k, v in value.items() if isinstance(v, str)) or any(native_fail(v) for v in value.values())
+        if isinstance(value, list):
+            return any(native_fail(v) for v in value)
+        return False
+    def native_nonverdict(value):
+        if isinstance(value, dict):
+            return any(k in ('verdict', 'design_verdict', 'status') and v not in ('PASS', 'FAIL', 'MISMATCH')
+                for k, v in value.items() if isinstance(v, str)) or any(native_nonverdict(v) for v in value.values())
+        return isinstance(value, list) and any(native_nonverdict(v) for v in value)
+    fail = any(c.get('rc') == 1 for c in calls) or native_fail(calls)
+    incomplete = (not products or native_nonverdict(calls)
+                  or any(c.get('rc') not in (None, 0) for c in calls)
+                  or any(d.get('status') != 'PASS' for d in dispatch))
+    verdict = 'FAIL' if fail else 'NOT_MEASURED' if incomplete else 'PASS'
+    work = None
+    if native:
+        if spec.get('producer_work_contract') != producer_work_contract(spec['step_id']):
+            raise em.Refusal('ANALOG_PRODUCER_CONTRACT_CHANGED', spec['step_id'])
+        work = producer_work(calls, binding, spec['source_files'])
+        verdict = ('FAIL' if work['design_verdict'] == 'FAIL' else 'NOT_MEASURED'
+            if work['design_verdict'] != 'PASS' or not products
+               or any(d.get('status') != 'PASS' for d in dispatch) else 'PASS')
+        write_json(outputs / 'producer-work.json', work)
+    try:
+        _substance(project, spec['step_id'], spec['blocks'])
+    except em.Refusal as exc:
+        verdict = 'FAIL' if verdict == 'FAIL' or exc.code in (
+            'ANALOG_STRUCTURE_ONLY_NOT_DESIGN_PASS', 'ANALOG_MIXED_SUBSTANCE_FAIL') else 'NOT_MEASURED'
+    report = canonical_report(gates, binding, project, outputs, spec['source_files'], verdict,
+                              producer_work=work)
+    verdict = report['steps'][0]['status']
+    producer = {'binding': binding, 'step_id': spec['step_id'], 'source_sha': spec['source_sha'],
+        'blocks': spec['blocks'], 'adoption_paths': spec['adoption_paths'], 'design_verdict': verdict,
+        'calls': calls, 'dispatch': dispatch, 'gates': gates, 'external': external,
+        'native': native, 'qualification_is_design_pass': False}
+    write_json(outputs / 'producer.json', producer)
+    write_json(outputs / 'products.json', {'binding': binding, 'products': products})
+    write_json(outputs / 'canonical-gates.json', report)
+    return producer
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--inputs', type=Path, required=True)
+    parser.add_argument('--outputs', type=Path, required=True)
+    parser.add_argument('--native-local', action='store_true')
+    args = parser.parse_args(argv)
+    try:
+        result = execute(args.inputs.resolve(), args.outputs.resolve(), args.native_local)
+        print(json.dumps({'design_verdict': result['design_verdict']}))
+        return 0  # worker protocol completed; the parent reconsumes real gates
+    except (em.Refusal, OSError, ValueError, KeyError, TypeError) as exc:
+        write_json(args.outputs / 'worker-refusal.json', {'status': 'NOT_MEASURED', 'detail': str(exc)})
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

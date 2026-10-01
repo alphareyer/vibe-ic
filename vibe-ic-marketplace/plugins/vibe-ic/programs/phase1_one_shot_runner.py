@@ -246,6 +246,14 @@ def _detect_input_mode(project: Path) -> str:
     new_input_doc = _pl.input_doc_dir(project) if hasattr(_pl, "input_doc_dir") else None
     if new_input_doc and new_input_doc.is_dir() and any(new_input_doc.iterdir()):
         return "docs"
+    # Path B is also real Phase-1 source input.  Keep it on the unified docs
+    # front door so the existing phase1_doc caller (and its D1 dispatch) sees
+    # the staged prompt rather than falling through to an empty prompt engine.
+    prompt_dir = _pl.input_prompt_dir(project) if hasattr(_pl, "input_prompt_dir") else None
+    if prompt_dir and prompt_dir.is_dir() and any(
+            f.is_file() and not f.is_symlink() and f.stat().st_size > 0
+            for f in prompt_dir.rglob("*")):
+        return "docs"
     # Raw vendor docs under input/docs/ (PDF/DOCX/MD/TXT/…) must go through
     # the doc-extraction track (phase1_doc_one_shot_runner), NOT the
     # phase1_engine "prompt" path: the engine's run-all reverse-extractor
@@ -653,6 +661,35 @@ def _docs_hold_identical_bytes(docs_dir: Path, candidate: Path) -> bool:
     return False
 
 
+def _bridge_phase1_prompt_inputs(project: Path, docs_dir: Path) -> bool:
+    """Stage Path-B source files under input/docs without changing their bytes."""
+    prompt_dir = _pl.input_prompt_dir(project) if hasattr(_pl, "input_prompt_dir") else None
+    if not prompt_dir or not prompt_dir.is_dir() or prompt_dir.is_symlink():
+        return True
+    for source in sorted(prompt_dir.rglob("*")):
+        if not source.is_file() or source.is_symlink():
+            continue
+        rel = source.relative_to(prompt_dir)
+        target = docs_dir / "phase1_input_prompt" / rel
+        try:
+            payload = source.read_bytes()
+            if _docs_hold_identical_bytes(docs_dir, source):
+                continue
+            if target.exists():
+                if not target.is_file() or target.is_symlink() or target.read_bytes() != payload:
+                    print(f"ERROR: Phase-1 prompt bridge collides with {target}",
+                          file=sys.stderr)
+                    return False
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
+        except OSError as exc:
+            print(f"ERROR: cannot bridge Phase-1 prompt input {source}: {exc}",
+                  file=sys.stderr)
+            return False
+    return True
+
+
 def _run_docs_mode(project: Path, ic_name: str,
                    forwarded_args: Optional[List[str]] = None) -> int:
     """Dispatch to phase1_doc_one_shot_runner.main() with the project
@@ -690,6 +727,14 @@ def _run_docs_mode(project: Path, ic_name: str,
         return False
 
     had_real_doc = _has_real_doc(docs_dir)
+
+    # Path B's dialogue/prompt workspace is a declared Phase-1 input just as
+    # Path A's input_doc is.  Copy regular files byte-for-byte into a reserved
+    # subtree so the existing docs runner consumes them through its normal
+    # INPUT/docs path.  Never follow a staged symlink or overwrite a different
+    # file from another input source.
+    if not _bridge_phase1_prompt_inputs(project, docs_dir):
+        return 2
 
     if not had_real_doc:
         structured = project / "input" / "phase1_structured.yaml"
@@ -758,6 +803,8 @@ def _run_docs_mode(project: Path, ic_name: str,
         sys.argv.extend(["--ic-name", ic_name.strip()])
     if forwarded_args:
         sys.argv.extend(forwarded_args)
+    import execution_policy as _execution
+    sys.argv[1:] = _execution.child_arguments(sys.argv[1:])
     try:
         # Reuse the imported _phase1_doc module's main()
         rc = _phase1_doc.main()  # type: ignore[attr-defined]
@@ -1721,7 +1768,10 @@ def main() -> int:
                         "`vibe_ic_one_shot_runner` when a delivered answer is "
                         "on disk and the track's own record says nobody has "
                         "read it.")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args, extras = p.parse_known_args()
+    _execution.configure(args)
     project = args.project.resolve()
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
