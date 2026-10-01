@@ -76,6 +76,11 @@ def _report(project, status="PASS", *, invocation_context=None):
 
 def test_solve_exposes_the_current_refusal_with_stale_scaffolds(tmp_path, monkeypatch):
     import test_issue1970_benchmark_dispatch_parallel as fx
+    # This helper may be imported after an importlib test has replaced the
+    # bare benchmark_dispatch module. Bind both helper modules to the objects
+    # this test patches so its producer argv and stage seam stay aligned.
+    monkeypatch.setattr(fx, "bd", bd)
+    monkeypatch.setattr(fx, "bio", bio)
     real_run = subprocess.run
     fx._install_solve_fakes(monkeypatch, {})
     monkeypatch.setattr(bd.subprocess, "run", real_run)
@@ -167,6 +172,8 @@ def test_diagnostics_cannot_be_rebound_or_replayed(tmp_path, monkeypatch, corrup
 
 def test_resume_keeps_each_projects_invocation(tmp_path, monkeypatch):
     import test_issue1970_benchmark_dispatch_parallel as fx
+    monkeypatch.setattr(fx, "bd", bd)
+    monkeypatch.setattr(fx, "bio", bio)
     fx._install_common_fakes(monkeypatch)
     run = tmp_path / "resume"
     fx._write_resume_fixture(run)
