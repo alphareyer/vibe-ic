@@ -101,8 +101,12 @@ def _fake_runner(*, program_ids: set[str] | None = None,
                  waived_ids: dict[str, str] | None = None):
     programs = set(program_ids or set())
     waived = dict(waived_ids or {})
+    real_run = bd.subprocess.run
 
     def run(argv, **_kwargs):
+        if not any(Path(str(arg)).name == "vibe_ic_one_shot_runner.py"
+                   for arg in argv):
+            return real_run(argv, **_kwargs)
         project = Path(argv[2])
         if _is_d1_frontdoor(argv):
             # Every routed mid-flow entry is preceded by the canonical D1-only

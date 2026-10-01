@@ -32,8 +32,12 @@ def runtime_pair(monkeypatch):
 def _backup(tmp_path, monkeypatch):
     dataset, run = tmp_path / "input-prompts", tmp_path / "run"
     fixture._write_dataset(dataset, {"opaque-task": PROMPT})
+    real_run = bd.subprocess.run
 
     def stage_only(argv, **kwargs):
+        if not any(Path(str(arg)).name == "vibe_ic_one_shot_runner.py"
+                   for arg in argv):
+            return real_run(argv, **kwargs)
         project = Path(argv[2])
         if fixture._is_d1_frontdoor(argv):
             fixture._emit_phase1_docs(project)
@@ -53,6 +57,9 @@ def _backup(tmp_path, monkeypatch):
     calls = []
 
     def regate(argv, **kwargs):
+        if not any(Path(str(arg)).name == "vibe_ic_one_shot_runner.py"
+                   for arg in argv):
+            return real_run(argv, **kwargs)
         calls.append(list(argv))
         fixture._write_rtl_gen_report(
             Path(argv[2]), "PASS",
