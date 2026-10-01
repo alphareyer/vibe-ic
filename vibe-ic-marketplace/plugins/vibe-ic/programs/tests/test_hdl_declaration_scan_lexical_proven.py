@@ -78,6 +78,24 @@ def build(text):
     assert G.scan_source(src, "m") == expected
 
 
+def test_pep709_inline_dictcomp_keeps_the_scanner_lexically_bound():
+    source = (PROGRAMS / "_a6_drc_authority.py").read_text(encoding="utf-8")
+    assert isinstance(G.scan_source(source, "_a6_drc_authority"), list)
+
+
+def test_pep709_comprehension_target_shadows_and_restores_outer_pattern():
+    src = r'''
+import re
+rx = re.compile(r"\bmodule\s+(\w+)")
+def detect(text):
+    code = _strip_comments(text)
+    values = [rx.findall(line) for line in code.splitlines()
+              for rx in (re.compile(r"/container(?=/|$)"),)]
+    return values, rx.findall(text)
+'''
+    assert G.scan_source(src, "m") == ["m::detect::rx(text)"]
+
+
 @pytest.mark.parametrize("keyword", [False, True])
 def test_proven_compiled_argument_reaches_only_its_actual_parameter(keyword):
     src = r'''

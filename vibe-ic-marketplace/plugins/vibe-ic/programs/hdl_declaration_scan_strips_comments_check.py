@@ -315,6 +315,115 @@ def declaration_regexes(tree: ast.AST) -> Dict[str, str]:
             if declares_hdl(pattern)}
 
 
+class _InlineSymbol:
+    """The small symbol-table surface needed by an inlined comprehension."""
+
+    def __init__(self, name: str, local: bool):
+        self._name = name
+        self._local = local
+
+    def get_name(self):
+        return self._name
+
+    def is_global(self):
+        return False
+
+    def is_local(self):
+        return self._local
+
+    def is_parameter(self):
+        return False
+
+
+def _inline_comprehension_names(node: ast.AST,
+                                eager_annotations: bool) -> Tuple[Set[str], Set[str]]:
+    """Names visible in a comprehension whose scope PEP 709 inlined.
+
+    The first iterable is evaluated in the enclosing scope. Every target and
+    the remaining expressions belong to the comprehension scope. Nested scopes
+    retain their own tables; only definition-time expressions and a nested
+    comprehension's first iterable are evaluated here.
+    """
+    local: Set[str] = {
+        name.id
+        for generator in node.generators
+        for name in ast.walk(generator.target)
+        if isinstance(name, ast.Name)
+    }
+    names = set(local)
+
+    class _Names(ast.NodeVisitor):
+        def visit_Name(self, name):  # noqa: N802 — ast visitor spelling
+            names.add(name.id)
+
+        def visit_ListComp(self, child):  # noqa: N802
+            self.visit(child.generators[0].iter)
+
+        def visit_SetComp(self, child):  # noqa: N802
+            self.visit(child.generators[0].iter)
+
+        def visit_DictComp(self, child):  # noqa: N802
+            self.visit(child.generators[0].iter)
+
+        def visit_GeneratorExp(self, child):  # noqa: N802
+            self.visit(child.generators[0].iter)
+
+        def visit_Lambda(self, child):  # noqa: N802
+            for expression in _definition_expressions(child, eager_annotations):
+                self.visit(expression)
+
+        def visit_FunctionDef(self, child):  # noqa: N802
+            for expression in _definition_expressions(child, eager_annotations):
+                self.visit(expression)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_ClassDef(self, child):  # noqa: N802
+            for expression in _definition_expressions(child, eager_annotations):
+                self.visit(expression)
+
+    visitor = _Names()
+    for field in ("elt", "key", "value"):
+        if hasattr(node, field):
+            visitor.visit(getattr(node, field))
+    for index, generator in enumerate(node.generators):
+        visitor.visit(generator.target)
+        if index:
+            visitor.visit(generator.iter)
+        for condition in generator.ifs:
+            visitor.visit(condition)
+    return names, local
+
+
+class _InlineComprehensionScope:
+    """A lexical scope for PEP 709 list/set/dict comprehensions."""
+
+    def __init__(self, node: ast.AST, parent, eager_annotations: bool):
+        self._node = node
+        names, local = _inline_comprehension_names(node, eager_annotations)
+        self._symbols = [_InlineSymbol(name, name in local)
+                         for name in sorted(names)]
+        self._by_name = {symbol.get_name(): symbol for symbol in self._symbols}
+
+    def get_type(self):
+        return "function"
+
+    def get_name(self):
+        return type(self._node).__name__.lower()
+
+    def get_lineno(self):
+        return self._node.lineno
+
+    def get_symbols(self):
+        return list(self._symbols)
+
+    def lookup(self, name):
+        try:
+            return self._by_name[name]
+        except KeyError:
+            raise KeyError(name) from None
+
+
 class _LexicalBindings:
     """Use Python's symbol table to resolve locals, globals and free names.
 
@@ -346,22 +455,34 @@ class _LexicalBindings:
                      ast.SetComp: "setcomp", ast.DictComp: "dictcomp",
                      ast.GeneratorExp: "genexpr"}
 
-        def attach(node, owner=None):
+        def attach(node, owner=None, parent_table=None):
             definitions = isinstance(
                 node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda))
             if definitions:
                 for expression in _definition_expressions(node, self.eager_annotations):
-                    attach(expression, owner)
+                    attach(expression, owner, parent_table)
             elif isinstance(node, _COMPREHENSIONS):
-                attach(node.generators[0].iter, owner)
+                attach(node.generators[0].iter, owner, parent_table)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 owner = node.name
-            if isinstance(node, _SCOPES) and node is not tree:
+            scope_table = parent_table
+            if node is tree:
+                scope_table = self.module
+            elif isinstance(node, _SCOPES):
                 kind = "class" if isinstance(node, ast.ClassDef) else "function"
                 name = getattr(node, "name", anonymous.get(type(node)))
-                table = index[(kind, name, node.lineno)].pop(0)
+                key = (kind, name, node.lineno)
+                try:
+                    table = index[key].pop(0)
+                except (KeyError, IndexError):
+                    if not isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
+                        raise
+                    table = _InlineComprehensionScope(
+                        node, parent_table, self.eager_annotations)
                 self.nodes[table] = node
+                self.parents[table] = parent_table
                 self.owners[table] = owner
+                scope_table = table
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 children = node.body
             elif isinstance(node, ast.Lambda):
@@ -371,16 +492,16 @@ class _LexicalBindings:
                 for child in children:
                     if isinstance(child, ast.comprehension) and child is node.generators[0]:
                         for sub in [child.target] + child.ifs:
-                            attach(sub, owner)
+                            attach(sub, owner, scope_table)
                     else:
-                        attach(child, owner)
+                        attach(child, owner, scope_table)
                 return
             else:
                 children = ast.iter_child_nodes(node)
             for child in children:
-                attach(child, owner)
+                attach(child, owner, scope_table)
 
-        attach(tree)
+        attach(tree, parent_table=None)
         self.patterns = {table: compiled_patterns(node, self.eager_annotations)
                          for table, node in self.nodes.items()}
         self.supplied_patterns = {}
