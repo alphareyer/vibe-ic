@@ -119,6 +119,7 @@ import hashlib
 import heapq
 import json
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -128,6 +129,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 import _path_layout as _pl
 import _atomic_artefact as _aa
+import verdict as _V
 import phase1_protocol_spec_extract as _l15x
 import phase1_port_extract as _ppx
 import _input_corpus_scope as _ics
@@ -173,6 +175,196 @@ import readme_vendor_extractor as _rve
 # family's #491 round-3 CJK tokens are folded into the lexicon role sets
 # (reused, not duplicated). Chip-AGNOSTIC.
 import _header_lexicon as _hlex
+
+
+def _new_d1_call_id() -> str:
+    """Opaque per-invocation identity; never shared through module state."""
+    return secrets.token_hex(16)
+
+
+class Phase1DocDispatchResult(int):
+    """Typed D1 dispatch result that remains a valid process exit code.
+
+    ``execution_production.dispatch_site`` returns the current producer row
+    before the docs extractor runs.  Returning only ``0``/``1`` discarded the
+    producer's real verdict and its receipt/request evidence at this boundary.
+    An ``int`` subclass keeps the CLI contract while carrying that one current
+    invocation through the in-process outer dispatcher.
+    """
+
+    def __new__(cls, rc: int, *, policy_row: Any, invocation: Dict[str, Any],
+                status: str, reason_class: str, detail: str,
+                validated: bool, validation_detail: str):
+        obj = int.__new__(cls, int(rc))
+        obj.policy_row = policy_row
+        obj.invocation = invocation
+        obj.status = status
+        obj.reason_class = reason_class
+        obj.detail = detail
+        obj.validated = bool(validated)
+        obj.validation_detail = validation_detail
+        return obj
+
+    @classmethod
+    def from_policy_row(cls, row: Any, project: Path,
+                        invocation_id: Optional[str] = None
+                        ) -> "Phase1DocDispatchResult":
+        """Validate the live D1 row; malformed evidence stays NOT_MEASURED."""
+        invocation = {
+            "step_id": "D1",
+            "project": str(project.resolve()),
+            "producer": f"{__name__}.main",
+            "call_id": invocation_id or _new_d1_call_id(),
+        }
+        raw = dict(row) if isinstance(row, dict) else row
+        problems: List[str] = []
+        status = None
+        reason_class = ""
+        detail = ""
+        if not isinstance(row, dict):
+            problems.append("producer row is not an object")
+        else:
+            if row.get("step_id") != "D1":
+                problems.append("producer row step_id is not D1")
+            try:
+                status = _V.parse(row.get("status")).value
+            except (ValueError, TypeError):
+                problems.append("producer row has an unknown status")
+            detail = row.get("detail")
+            if not isinstance(detail, str):
+                problems.append("producer row detail is not a string")
+                detail = ""
+            reason_class = row.get("reason_class") or ""
+            if reason_class:
+                try:
+                    _V.ReasonClass(reason_class)
+                except ValueError:
+                    problems.append("producer row reason_class is unknown")
+            if status == _V.Verdict.NOT_MEASURED.value and not reason_class:
+                problems.append("NOT_MEASURED producer row has no reason_class")
+            if status == _V.Verdict.NOT_APPLICABLE.value and not row.get("declared_by"):
+                problems.append("NOT_APPLICABLE producer row has no declared_by")
+            outputs = row.get("output_files")
+            # PASS claims an imported producer result and therefore needs its
+            # current output evidence. Negative producer outcomes can happen
+            # before any output is written; preserve their measured status,
+            # original reason, and detail instead of laundering them into a
+            # generic execution refusal.
+            if status in (_V.Verdict.PASS.value,
+                          _V.Verdict.PASS_WITH_WAIVERS.value) and (
+                not isinstance(outputs, list) or not outputs):
+                problems.append("PASS producer row has no current output evidence")
+
+        if problems:
+            validation_detail = "; ".join(problems)
+            refusal = ("D1 producer result refused: " + validation_detail)
+            refusal_row = {
+                "step_id": "D1",
+                "status": _V.Verdict.NOT_MEASURED.value,
+                "reason_class": _V.ReasonClass.EXECUTION_ERROR.value,
+                "detail": refusal,
+                "raw_policy_row": raw,
+            }
+            return cls(1, policy_row=refusal_row, invocation=invocation,
+                       status=_V.Verdict.NOT_MEASURED.value,
+                       reason_class=_V.ReasonClass.EXECUTION_ERROR.value,
+                       detail=refusal, validated=False,
+                       validation_detail=validation_detail)
+
+        return cls(0 if status in (_V.Verdict.PASS.value,
+                                   _V.Verdict.PASS_WITH_WAIVERS.value) else 1,
+                   policy_row=raw, invocation=invocation,
+                   status=status, reason_class=reason_class, detail=detail,
+                   validated=True, validation_detail="current D1 producer row validated")
+
+    @classmethod
+    def refuse_for_invocation(cls, result: "Phase1DocDispatchResult",
+                              project: Path, invocation_id: str,
+                              detail: str) -> "Phase1DocDispatchResult":
+        """Refuse a typed result that did not come from this live call."""
+        row = {
+            "step_id": "D1",
+            "status": _V.Verdict.NOT_MEASURED.value,
+            "reason_class": _V.ReasonClass.EXECUTION_ERROR.value,
+            "detail": detail,
+            "raw_policy_row": getattr(result, "policy_row", None),
+            "stale_invocation": getattr(result, "invocation", None),
+        }
+        invocation = {
+            "step_id": "D1",
+            "project": str(project.resolve()),
+            "producer": f"{__name__}.main",
+            "call_id": invocation_id,
+        }
+        return cls(1, policy_row=row, invocation=invocation,
+                   status=_V.Verdict.NOT_MEASURED.value,
+                   reason_class=_V.ReasonClass.EXECUTION_ERROR.value,
+                   detail=detail, validated=False,
+                   validation_detail="typed producer result did not bind to this call")
+
+    @classmethod
+    def refuse_missing_payload(cls, project: Path, invocation_id: str,
+                               legacy_rc: Any) -> "Phase1DocDispatchResult":
+        """Refuse an unmarked integer at the production boundary."""
+        detail = "D1 producer returned no structured result for this call"
+        row = {
+            "step_id": "D1",
+            "status": _V.Verdict.NOT_MEASURED.value,
+            "reason_class": _V.ReasonClass.EXECUTION_ERROR.value,
+            "detail": detail,
+            "legacy_rc": legacy_rc,
+        }
+        invocation = {
+            "step_id": "D1",
+            "project": str(project.resolve()),
+            "producer": f"{__name__}.main",
+            "call_id": invocation_id,
+        }
+        return cls(1, policy_row=row, invocation=invocation,
+                   status=_V.Verdict.NOT_MEASURED.value,
+                   reason_class=_V.ReasonClass.EXECUTION_ERROR.value,
+                   detail=detail, validated=False,
+                   validation_detail="unmarked legacy integer at production boundary")
+
+
+class Phase1DocLegacyResult(int):
+    """Explicit marker for the source-owned docs implementation path.
+
+    A bare integer at the outer boundary is ambiguous: it can be an old
+    source return or a production call that lost its structured row.  The
+    source path returns this marker so the outer dispatcher can reject an
+    unmarked integer instead of silently treating missing production evidence
+    as a measured result.
+    """
+
+    def __new__(cls, rc: int, *, policy_row: Dict[str, Any],
+                invocation: Dict[str, Any], status: str, detail: str):
+        obj = int.__new__(cls, int(rc))
+        obj.policy_row = policy_row
+        obj.invocation = invocation
+        obj.status = status
+        obj.reason_class = ""
+        obj.detail = detail
+        obj.validated = True
+        obj.validation_detail = "source-owned legacy docs result"
+        obj.legacy = True
+        return obj
+
+    @classmethod
+    def from_exit(cls, rc: int, project: Path, invocation_id: Optional[str],
+                  detail: str) -> "Phase1DocLegacyResult":
+        status = (_V.Verdict.PASS.value if int(rc) == 0
+                  else _V.Verdict.FAIL.value)
+        invocation = {
+            "step_id": "D1",
+            "project": str(project.resolve()),
+            "producer": f"{__name__}.main",
+            "call_id": invocation_id or _new_d1_call_id(),
+        }
+        return cls(int(rc), policy_row={
+            "step_id": "D1", "status": status, "detail": detail,
+            "output_files": [],
+        }, invocation=invocation, status=status, detail=detail)
 
 
 # ---------------------------------------------------------------------------
@@ -63860,6 +64052,8 @@ def main() -> int:
                         "document whose own timing table is keyed BY PDK "
                         "(a `| <pdk> | <period> |` row per target). Omitted "
                         "or 'auto' leaves every extraction byte-identical.")
+    p.add_argument("--_phase1-invocation-id", dest="_phase1_invocation_id",
+                   default=None, help=argparse.SUPPRESS)
     import execution_policy as _execution
     _execution.add_arguments(p)
     args = p.parse_args()
@@ -63886,9 +64080,15 @@ def main() -> int:
     from execution_production import dispatch_site
     _policy_row = dispatch_site(('D1',), project, dict(vars(args),
         native_callable='phase1_doc_one_shot_runner.main',
+        invocation_id=args._phase1_invocation_id,
         declaration=str(project/'input/project.json')))
     if _policy_row is not None:
-        return 0 if _policy_row['status'] == 'PASS' else 1
+        # Keep the current producer's structured result at the exact boundary
+        # where the docs implementation receives it.  A bare int here made
+        # the outer Phase-1 router relabel resource/environment refusals as
+        # FAIL and lose the receipt/request identity carried by this row.
+        return Phase1DocDispatchResult.from_policy_row(
+            _policy_row, project, args._phase1_invocation_id)
 
     # Step 1: text extraction
     print(f"[1/15] Extracting text from input/docs/ ...")
@@ -68296,7 +68496,9 @@ def main() -> int:
                   f"{len(clock_contract_conflicts)} conflict(s); see "
                   "clock_contract_conflicts[] in generated_docs/L8_*.json")
         _drop_v0_3_7_exit_reason(project)
-        return 1
+        return Phase1DocLegacyResult.from_exit(
+            1, project, args._phase1_invocation_id,
+            "legacy docs producer measured clock contract conflicts")
     if _extraction_gap:
         # BLOCKING, by design, and NARROW. This is not the sufficiency gate
         # being promoted — that would need the corpus sweep the note above
@@ -68315,7 +68517,9 @@ def main() -> int:
               "reports/phase1/phase1_sufficiency.json (ports_reason="
               "extraction_gap)")
         _drop_v0_3_7_exit_reason(project)
-        return 1
+        return Phase1DocLegacyResult.from_exit(
+            1, project, args._phase1_invocation_id,
+            "legacy docs producer measured an extraction gap")
     if cov_gate_failed:
         # layergate-2: this flag is now raised by the l3 opcode-name
         # coverage gate OR by any of the L4/L5/L6 semantic layer gates
@@ -68327,7 +68531,9 @@ def main() -> int:
               "lines above and "
               f"{_pl.report_path(project, 'phase1/x.json').parent.relative_to(project)}"
               "/*.json")
-        return 1
+        return Phase1DocLegacyResult.from_exit(
+            1, project, args._phase1_invocation_id,
+            "legacy docs producer measured a phase1 layer-gate failure")
     if layer_gate_failures:
         # BLOCKING, by design. Each of these means a layer is missing a
         # requirement IN THE LAYER THAT CONSUMES IT, so the downstream
@@ -68337,7 +68543,9 @@ def main() -> int:
               f"{', '.join(layer_gate_failures)} — see "
               f"{_pl.report_path(project, 'phase1/x.json').parent.relative_to(project)}/")
         _drop_v0_3_7_exit_reason(project)
-        return 1
+        return Phase1DocLegacyResult.from_exit(
+            1, project, args._phase1_invocation_id,
+            "legacy docs producer measured semantic layer-gate failures")
     if args.strict and (pct < 80.0 or total_todo > 0):
         reasons = []
         if pct < 80.0:
@@ -68345,8 +68553,12 @@ def main() -> int:
         if total_todo > 0:
             reasons.append(f"todo {total_todo} > 0")
         print(f"--strict: FAIL ({' | '.join(reasons)})")
-        return 1
-    return 0
+        return Phase1DocLegacyResult.from_exit(
+            1, project, args._phase1_invocation_id,
+            "legacy docs producer measured strict coverage or TODO failure")
+    return Phase1DocLegacyResult.from_exit(
+        0, project, args._phase1_invocation_id,
+        "legacy docs producer completed")
 
 
 if __name__ == "__main__":

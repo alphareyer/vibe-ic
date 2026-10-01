@@ -58,6 +58,7 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -789,7 +790,9 @@ def _run_docs_mode(project: Path, ic_name: str,
     # takes the project dir as positional + accepts the standard
     # one-shot flags. Forward any extra runner-specific args.
     orig_argv = sys.argv[:]
+    invocation_id = secrets.token_hex(16)
     sys.argv = ["phase1_doc_one_shot_runner", str(project)]
+    sys.argv.extend(["--_phase1-invocation-id", invocation_id])
     # ORGANIC #583 round-2 — the dispatcher's own argparse CONSUMES
     # --ic-name into args.ic_name (it never lands in `extras`), so the
     # docs runner's #541 authoritative override never fired on the
@@ -821,7 +824,87 @@ def _run_docs_mode(project: Path, ic_name: str,
         rc = cp.returncode
     finally:
         sys.argv = orig_argv
-    return int(rc) if rc is not None else 0
+    if isinstance(rc, (_phase1_doc.Phase1DocDispatchResult,
+                       _phase1_doc.Phase1DocLegacyResult)):
+        actual = (rc.invocation or {}).get("call_id") if isinstance(
+            getattr(rc, "invocation", None), dict) else None
+        if actual != invocation_id:
+            rc = _phase1_doc.Phase1DocDispatchResult.refuse_for_invocation(
+                rc, project, invocation_id,
+                "D1 producer result is not bound to this current invocation")
+    else:
+        # A plain integer is not a source-owned legacy marker. At this
+        # boundary it could be a production result whose structured row was
+        # dropped, so refuse it instead of treating rc=0/1 as a verdict.
+        rc = _phase1_doc.Phase1DocDispatchResult.refuse_missing_payload(
+            project, invocation_id, rc if type(rc) is int else repr(rc))
+    # Preserve the typed in-process D1 result.  The CLI still receives an int
+    # because ``Phase1DocDispatchResult`` subclasses int, while the outer
+    # report can now retain the producer verdict and its current evidence.
+    return rc if isinstance(rc, (_phase1_doc.Phase1DocDispatchResult,
+                                 _phase1_doc.Phase1DocLegacyResult)) else 0
+
+
+def _docs_dispatch_step(result: Any, project: Path, duration_s: float) -> Optional[StepResult]:
+    """Convert one current docs-producer row without laundering its status."""
+    if not isinstance(result, (_phase1_doc.Phase1DocDispatchResult,
+                                _phase1_doc.Phase1DocLegacyResult)):
+        return None
+
+    invocation = getattr(result, "invocation", None)
+    row = getattr(result, "policy_row", None)
+    detail = str(getattr(result, "detail", "") or "")
+    status = str(getattr(result, "status", "") or "")
+    reason_class = str(getattr(result, "reason_class", "") or "")
+    validation_detail = str(getattr(result, "validation_detail", "") or "")
+    problems: List[str] = []
+    try:
+        if not isinstance(invocation, dict):
+            problems.append("producer invocation identity is missing")
+        else:
+            if invocation.get("step_id") != "D1":
+                problems.append("producer invocation is for a different step")
+            if Path(str(invocation.get("project", ""))).resolve() != project.resolve():
+                problems.append("producer invocation is for a different project")
+            if not isinstance(invocation.get("call_id"), str) or not invocation["call_id"]:
+                problems.append("producer invocation call_id is missing")
+        status = _V.parse(status).value
+        if status == _V.Verdict.NOT_MEASURED.value:
+            _V.ReasonClass(reason_class)
+        elif reason_class:
+            _V.ReasonClass(reason_class)
+    except (ValueError, TypeError, OSError):
+        problems.append("producer verdict or reason is not in the canonical taxonomy")
+
+    if problems:
+        detail = "D1 producer result refused at outer boundary: " + "; ".join(problems)
+        status = _V.Verdict.NOT_MEASURED.value
+        reason_class = _V.ReasonClass.EXECUTION_ERROR.value
+        validation_detail = "; ".join(problems)
+
+    extras = {
+        "producer_policy_row": row,
+        "producer_invocation": invocation,
+        "producer_validation": {
+            "status": "validated" if not problems and getattr(result, "validated", False)
+                      else "refused",
+            "detail": validation_detail,
+        },
+    }
+    return StepResult(
+        D1_STEP_NAME,
+        status,
+        float(duration_s),
+        detail,
+        extras=extras,
+        reason_class=reason_class,
+        declared_by=str((row or {}).get("declared_by", "")) if isinstance(row, dict) else "",
+        waiver_rows=list((row or {}).get("waiver_rows", [])) if isinstance(row, dict)
+                     and isinstance((row or {}).get("waiver_rows", []), list) else [],
+        attribution=str((row or {}).get("attribution", "")) if isinstance(row, dict) else "",
+        disclosures=list((row or {}).get("disclosures", [])) if isinstance(row, dict)
+                     and isinstance((row or {}).get("disclosures", []), list) else [],
+    )
 
 
 # ── The second track (both input modes) ────────────────────────────
@@ -1842,14 +1925,26 @@ def main() -> int:
             project, "phase1_one_shot_runner", "doc_extract",
             _preflight_refusal(D1_STEP_NAME),
             _as_the_producer(_run_docs_mode), project, args.ic_name, extras)
-        # `_run_docs_mode` returns an int rc; the refusal factory returns a
-        # StepResult. The TYPE is the discriminator, and it is exact — there is
-        # no rc value that is also a StepResult.
+        # `_run_docs_mode` returns either the typed current producer result or
+        # its legacy int for the in-process extraction path; the refusal
+        # factory returns a StepResult. The types are the discriminators.
         refused = isinstance(_pf, StepResult)
         rc = 1 if refused else int(_pf)
+        _delegate_step = (None if refused else
+                          _docs_dispatch_step(_pf, project, time.time() - t0))
         rc_extract = rc
+        rc_track = None
+        if _delegate_step is not None:
+            rc_extract = (0 if _delegate_step.status in (
+                _V.Verdict.PASS.value, _V.Verdict.PASS_WITH_WAIVERS.value)
+                          else 1)
+            rc = rc_extract
+        pass1_verdict = (_pf.status if refused else
+                         _delegate_step.status if _delegate_step is not None
+                         else ("FAIL" if rc_extract else "PASS"))
+        if rc_route:
+            pass1_verdict = _V.Verdict.FAIL.value
         pass1_rc = max(rc_extract, rc_route)
-        pass1_verdict = "FAIL" if pass1_rc else "PASS"
         if refused:
             # The second track parses the L-docs D1 was supposed to write. D1
             # was never called, so there is nothing for it to examine — running
@@ -1857,6 +1952,14 @@ def main() -> int:
             # one. RECORDED in the summary below rather than skipped silently.
             second_track = ("not run — D1 was REFUSED, so no L-doc exists for "
                             "the expert track to parse")
+        elif (_delegate_step is not None and _delegate_step.status not in (
+                _V.Verdict.PASS.value, _V.Verdict.PASS_WITH_WAIVERS.value)):
+            # A producer refusal or measured producer FAIL is already the D1
+            # result. Running the expert track would create a derived row and
+            # could relabel NOT_MEASURED as FAIL.
+            second_track = (
+                "not run — D1 producer returned "
+                f"{_delegate_step.status}; no new expert-track verdict was measured")
         else:
             rc_track = run_phase1_second_track(project, 0)
             rc = max(rc_extract, rc_track, rc_route)
@@ -1865,8 +1968,16 @@ def main() -> int:
         # callers / tests see a unified entry point regardless of mode.
         reports = project / "reports"
         reports.mkdir(parents=True, exist_ok=True)
-        verdict = (_aggregate_verdict([_pf]) if refused
-                   else ("PASS" if rc == 0 else "FAIL"))
+        if refused:
+            verdict = _aggregate_verdict([_pf])
+            if rc_route:
+                verdict = _V.Verdict.FAIL.value
+        elif _delegate_step is not None:
+            verdict = _delegate_step.status
+            if rc_route or rc_track:
+                verdict = _V.Verdict.FAIL.value
+        else:
+            verdict = "PASS" if rc == 0 else "FAIL"
         summary = {
             "phase": 1,
             "mode": "docs",
@@ -1884,6 +1995,13 @@ def main() -> int:
                       "source": "extraction and route before expert track"},
             "second_track": second_track,
         }
+        if _delegate_step is not None:
+            summary["delegated_verdict"] = _delegate_step.status
+            summary["delegated_reason_class"] = _delegate_step.reason_class
+            summary["delegated_detail"] = _delegate_step.detail
+            summary["delegated_result"] = _delegate_step.extras
+            if verdict == _V.Verdict.NOT_MEASURED.value:
+                summary["reason_class"] = _delegate_step.reason_class
         import ai_signed_judgement as _ai_judgement
         summary["ai_judgements"] = _ai_judgement.pending(project, ("D1",))
         if summary["ai_judgements"] and summary["verdict"] in ("PASS", "PASS_WITH_WAIVERS"):
@@ -1902,6 +2020,13 @@ def main() -> int:
             # returned 1". Same shape as the prompt branch's `steps` list.
             summary["steps"] = [asdict(_pf)]
             summary["preflight_ledger"] = _spf.LEDGER_REL
+        elif _delegate_step is not None:
+            summary["steps"] = [asdict(_delegate_step)]
+            if rc_track is not None:
+                summary["steps"].append(asdict(StepResult(
+                    "phase1_expert_parse_track",
+                    "PASS" if rc_track == 0 else "FAIL", 0.0,
+                    str(second_track)[:400])))
         else:
             summary["steps"] = [
                 asdict(StepResult(
@@ -1923,12 +2048,22 @@ def main() -> int:
         summary["step_0_5ic"] = "ran" if rc_route == 0 else "FAILED to run"
         # R-0915-160 — PASS 1 NAMES THE SIDECAR IT WROTE, so the second pass can carry the name
         # instead of re-deriving it from an ordering that is guaranteed backwards.
-        _name_the_sidecar_this_pass_wrote(project, summary, d1_ran=not refused)
+        # A typed production row means the source-owned docs implementation
+        # did not run in this process; it cannot claim a sidecar from an older
+        # invocation. The explicit source-owned legacy marker does own D1's
+        # coverage sidecar.
+        _name_the_sidecar_this_pass_wrote(
+            project, summary,
+            d1_ran=(not refused and (
+                _delegate_step is None or getattr(_pf, "legacy", False))))
         _p1 = _pl.report_path(project, "phase1_one_shot.json")   # the router, always
         _p1.parent.mkdir(parents=True, exist_ok=True)
         _p1.write_text(
             json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
-        return max(rc, rc_route)
+        return max(rc, rc_route,
+                   0 if summary["verdict"] in (
+                       _V.Verdict.PASS.value,
+                       _V.Verdict.PASS_WITH_WAIVERS.value) else 1)
 
     # Prompt mode: original phase1_engine path
     plan: List[StepResult] = []
