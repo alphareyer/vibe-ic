@@ -13,6 +13,8 @@ import pytest
 import execution_adapters_analog as analog
 import execution_adapters_backend as backend
 import execution_adapters_release as release
+import execution_production as production
+from verdict import ReasonClass
 
 
 class Request:
@@ -180,3 +182,89 @@ def test_release_stale_declaration_digest_refuses(tmp_path):
     params['declaration_sha256'] = 'd' * 64
     with pytest.raises(release.em.Refusal):
         release.classify(Request('39', tmp_path, params))
+
+
+def _outer_transport():
+    return {'mode': 'default', 'cpus': 1, 'ram_mb': 512, 'workers': 1,
+            'licenses': {}, 'factories': list(production.policy.DEFAULT_FACTORIES),
+            'factory_selection': 'default', 'choice': None, 'choice_wait_s': 60,
+            'native_facts': None, 'authority': 'test-source-transport',
+            'native_identity': 'source-only-test'}
+
+
+def _outer_external_project(project, source_sha, *, measured):
+    declaration = _release_declaration(project, 'DIE')
+    subject = {release.DECLARATION: release.em.digest(declaration)}
+    receipts = []
+    raw = project / 'phase3/stage5_manufacturing/htol_results.json'
+    if measured:
+        raw.parent.mkdir(parents=True)
+        raw.write_text('{"units_tested":10,"stress_hours":100,"failures":1,"device_hours":1000}\n')
+        raw_files = {raw.relative_to(project).as_posix(): release.em.digest(raw)}
+    else:
+        raw = project / 'external/nm-measurement.json'
+        raw.parent.mkdir(parents=True)
+        raw.write_text('{"measurement":"unavailable"}\n')
+        raw_files = {raw.relative_to(project).as_posix(): release.em.digest(raw)}
+    identity = {'source_sha': source_sha, 'top': 'top', 'pdk': 'pdk',
+                'route': 'IC', 'image': 'sha256:' + '0' * 64}
+    base = {'schema': 'vibeic.release.external.v1', 'step_id': '44',
+            'identities': identity, 'issuer': 'current-source-fixture',
+            'raw_files': raw_files, 'subject_inputs': subject}
+    if measured:
+        for name, verdict in (('fail', 'FAIL'), ('nm', 'NOT_MEASURED')):
+            receipt = project / ('external/' + name + '.json')
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text(json.dumps(dict(base, measurement_id=name,
+                                               verdict=verdict)) + '\n')
+            receipts.append(str(receipt.relative_to(project)))
+    else:
+        receipt = project / 'external/nm.json'
+        receipt.write_text(json.dumps(dict(base, measurement_id='nm',
+                                           verdict='NOT_MEASURED')) + '\n')
+        receipts.append(str(receipt.relative_to(project)))
+    return declaration, _release_params(declaration, 'IC', project) | {
+        'external_receipts': receipts}
+
+
+def test_outer_dispatch_preserves_measured_external_fail_over_nm(tmp_path, monkeypatch):
+    source_sha, _ = production.source_identity()
+    project = tmp_path / 'external-fail'
+    project.mkdir()
+    declaration, params = _outer_external_project(project, source_sha, measured=True)
+    params['input_roots'] = {'source': project}
+    monkeypatch.setattr(production.policy, 'request', _outer_transport)
+    monkeypatch.setattr(production, 'host_lease',
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            AssertionError('classification attempted placement')))
+    result = production.dispatch_step('44', project, params,
+                                      fixture_root=tmp_path / 'unused-placement-root')
+    assert result['status'] == 'FAIL', result
+    assert result.get('reason_class', '') == '', result
+    assert result['handoff']['design_verdict'] == 'FAIL'
+    assert len(result['handoff']['receipts']) == 2
+    assert any(row.get('verdict') == 'FAIL'
+               for row in result['handoff']['facts']['existing_checkers'])
+    assert result['handoff']['facts']['input_population']['project/' + release.DECLARATION]
+    assert result['declared_by'] == str(declaration)
+
+
+def test_outer_dispatch_all_nm_keeps_not_executed_taxonomy(tmp_path, monkeypatch):
+    source_sha, _ = production.source_identity()
+    project = tmp_path / 'external-nm'
+    project.mkdir()
+    declaration, params = _outer_external_project(project, source_sha, measured=False)
+    params['input_roots'] = {'source': project}
+    monkeypatch.setattr(production.policy, 'request', _outer_transport)
+    monkeypatch.setattr(production, 'host_lease',
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            AssertionError('classification attempted placement')))
+    result = production.dispatch_step('44', project, params,
+                                      fixture_root=tmp_path / 'unused-placement-root')
+    assert result['status'] == 'NOT_MEASURED', result
+    assert result['reason_class'] == ReasonClass.NOT_EXECUTED.value, result
+    assert result['handoff']['design_verdict'] == 'NOT_MEASURED'
+    assert len(result['handoff']['receipts']) == 1
+    assert any(row.get('verdict') == 'NOT_MEASURED'
+               for row in result['handoff']['facts']['existing_checkers'])
+    assert result['declared_by'] == str(declaration)
