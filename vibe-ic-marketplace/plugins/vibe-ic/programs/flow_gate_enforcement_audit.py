@@ -1967,6 +1967,580 @@ def _named_in(names: "set[str]", src: str, stem: str, decide) -> bool:
     return decide(src, stem)
 
 
+# ---------------------------------------------------------------------------
+# THE PRODUCTION FACTORY VENUE — source-owned workers launched by Controller
+# (enhancement70).  This is deliberately a source proof, not an import census.
+# A worker is reachable here only when the current DEFAULT_FACTORIES source is
+# registered by execution_production, its registered factory returns an Adapter
+# Component, and Controller._run_arm launches that component's argv.  A module
+# import, a filename in a string, a copied factory that is not registered, or a
+# component pointed somewhere else contributes no reachability.
+# ---------------------------------------------------------------------------
+def _source_ast(path: Path):
+    try:
+        return ast.parse(path.read_text(errors="replace"), filename=str(path))
+    except (OSError, SyntaxError):
+        return None
+
+
+def _literal_sequence(tree, name: str) -> Optional[List[str]]:
+    """Read a source-owned tuple/list constant; computed values are unknown."""
+    if tree is None:
+        return None
+    for node in tree.body:
+        target = (node.targets[0] if isinstance(node, ast.Assign) and node.targets
+                  else node.target if isinstance(node, ast.AnnAssign) else None)
+        if not isinstance(target, ast.Name) or target.id != name:
+            continue
+        if not isinstance(node.value, (ast.Tuple, ast.List)):
+            return None
+        values = []
+        for item in node.value.elts:
+            if not isinstance(item, ast.Constant) or not isinstance(item.value, str):
+                return None
+            values.append(item.value)
+        return values
+    return None
+
+
+def _binding_repr(tree, name: str) -> Optional[str]:
+    if tree is None:
+        return None
+    for node in tree.body:
+        target = (node.targets[0] if isinstance(node, ast.Assign) and node.targets
+                  else node.target if isinstance(node, ast.AnnAssign) else None)
+        if isinstance(target, ast.Name) and target.id == name:
+            try:
+                return ast.unparse(node.value)
+            except AttributeError:  # pragma: no cover - Python 3.8 fallback
+                return ast.dump(node.value, include_attributes=False)
+    return None
+
+
+def _module_file(programs: Path, module: str) -> Optional[Path]:
+    """Resolve one source-owned module name; no arbitrary caller path escapes."""
+    if not isinstance(module, str) or not re.fullmatch(
+            r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", module):
+        return None
+    parts = module.split(".")
+    path = programs.joinpath(*parts).with_suffix(".py")
+    if path.is_file() and not path.is_symlink():
+        return path
+    package = programs.joinpath(*parts, "__init__.py")
+    return package if package.is_file() and not package.is_symlink() else None
+
+
+def _definitions(tree) -> Dict[str, ast.AST]:
+    if tree is None:
+        return {}
+    return {node.name: node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _class_method(tree, class_name: str, method_name: str) -> Optional[ast.AST]:
+    if tree is None:
+        return None
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return next((child for child in node.body
+                         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         and child.name == method_name), None)
+    return None
+
+
+def _live_walk(root: ast.AST, *, include_root: bool = True):
+    """Walk executable source nodes, excluding nested defs and dead `if False`."""
+    def visit(node: ast.AST, root_node: bool = False):
+        if include_root or root_node:
+            yield node
+        if (not root_node and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                                 ast.ClassDef, ast.Lambda))):
+            return
+        for field in ast.iter_child_nodes(node):
+            if isinstance(field, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                   ast.ClassDef, ast.Lambda)):
+                continue
+            if isinstance(node, ast.If) and node.test is not None:
+                try:
+                    dead = isinstance(node.test, ast.Constant) and not bool(node.test.value)
+                except Exception:  # pragma: no cover - defensive AST guard
+                    dead = False
+                if dead and field in node.body:
+                    continue
+            yield from visit(field, False)
+    yield from visit(root, True)
+
+
+def _assignment_target(node: ast.AST) -> Optional[str]:
+    target = (node.targets[0] if isinstance(node, ast.Assign) and node.targets
+              else node.target if isinstance(node, ast.AnnAssign) else None)
+    return target.id if isinstance(target, ast.Name) else None
+
+
+def _assignments(tree, function: Optional[ast.AST] = None) -> Dict[str, ast.AST]:
+    """Module constants plus assignments in this function's live source cone."""
+    result: Dict[str, ast.AST] = {}
+    if tree is not None:
+        for node in tree.body:
+            name = _assignment_target(node)
+            if name is not None:
+                result[name] = node.value
+    if function is not None:
+        for node in _live_walk(function):
+            name = _assignment_target(node)
+            if name is not None:
+                result[name] = node.value
+    return result
+
+
+def _imports(tree, function: Optional[ast.AST] = None) -> Dict[str, Tuple[str, Optional[str]]]:
+    """Alias map for source calls that can be followed without executing code."""
+    result: Dict[str, Tuple[str, Optional[str]]] = {}
+    if tree is None:
+        return result
+    nodes = list(tree.body)
+    if function is not None:
+        nodes.extend(node for node in _live_walk(function)
+                     if isinstance(node, (ast.Import, ast.ImportFrom)))
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                result[alias.asname or alias.name.split(".")[0]] = (alias.name, None)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for alias in node.names:
+                result[alias.asname or alias.name] = (node.module, alias.name)
+    return result
+
+
+def _resolve_expr(node: Optional[ast.AST], bindings: Dict[str, ast.AST],
+                  seen: Tuple[str, ...] = ()) -> Optional[ast.AST]:
+    if node is None:
+        return None
+    if isinstance(node, ast.Name) and node.id in bindings:
+        if node.id in seen:
+            return None
+        return _resolve_expr(bindings[node.id], bindings, (*seen, node.id))
+    return node
+
+
+def _alias_name(node: Optional[ast.AST], bindings: Dict[str, ast.AST],
+                seen: Tuple[str, ...] = ()) -> Optional[str]:
+    """Resolve only Name aliases; object construction is not a registry identity."""
+    if not isinstance(node, ast.Name) or node.id in seen:
+        return node.id if isinstance(node, ast.Name) else None
+    value = bindings.get(node.id)
+    if isinstance(value, ast.Name):
+        return _alias_name(value, bindings, (*seen, node.id))
+    return node.id
+
+
+def _path_expr(node: ast.AST, current: Path, programs: Path,
+               bindings: Dict[str, ast.AST], seen: Tuple[str, ...] = ()) -> Optional[Path]:
+    """Resolve only executable Path/__file__ expressions, never bare strings."""
+    if isinstance(node, ast.Name):
+        if node.id == "__file__":
+            return current
+        if node.id in seen or node.id not in bindings:
+            return None
+        return _path_expr(bindings[node.id], current, programs, bindings,
+                          (*seen, node.id))
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return None
+    if isinstance(node, (ast.Tuple, ast.List)):
+        for item in node.elts:
+            path = _path_expr(item, current, programs, bindings, seen)
+            if path is not None:
+                return path
+        return None
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "resolve":
+            return _path_expr(func.value, current, programs, bindings, seen)
+        if isinstance(func, ast.Name) and func.id == "str" and node.args:
+            return _path_expr(node.args[0], current, programs, bindings, seen)
+        if isinstance(func, ast.Name) and func.id == "Path" and node.args:
+            return _path_expr(node.args[0], current, programs, bindings, seen)
+        if isinstance(func, ast.Attribute) and func.attr == "joinpath":
+            base = _path_expr(func.value, current, programs, bindings, seen)
+            if base is not None and all(isinstance(arg, ast.Constant)
+                                        and isinstance(arg.value, str)
+                                        for arg in node.args):
+                return base.joinpath(*(str(arg.value) for arg in node.args))
+    if isinstance(node, ast.Attribute) and node.attr == "resolve":
+        return _path_expr(node.value, current, programs, bindings, seen)
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        base = _path_expr(node.value, current, programs, bindings, seen)
+        return None if base is None else base.parent
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        base = _path_expr(node.left, current, programs, bindings, seen)
+        if base is not None and isinstance(node.right, ast.Constant) \
+                and isinstance(node.right.value, str):
+            return base / node.right.value
+    return None
+
+
+def _call_name(node: ast.AST) -> Optional[str]:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _is_call_named(node: ast.AST, name: str) -> bool:
+    return isinstance(node, ast.Call) and _call_name(node.func) == name
+
+
+def _component_target(node: ast.Call, current: Path, programs: Path,
+                      bindings: Dict[str, ast.AST]) -> Optional[Path]:
+    if _call_name(node.func) != "Component":
+        return None
+    argv = next((kw.value for kw in node.keywords if kw.arg == "argv"), None)
+    if argv is None and len(node.args) >= 2:
+        argv = node.args[1]
+    if argv is None:
+        return None
+    argv = _resolve_expr(argv, bindings) or argv
+    if isinstance(argv, (ast.Tuple, ast.List)):
+        paths = [_path_expr(item, current, programs, bindings)
+                 for item in argv.elts]
+        paths = [path for path in paths if path is not None]
+        if paths:
+            return paths[0].resolve()
+        return None
+    path = _path_expr(argv, current, programs, bindings)
+    return None if path is None else path.resolve()
+
+
+def _adapter_components(adapter: ast.AST, bindings: Dict[str, ast.AST]) -> Optional[ast.AST]:
+    adapter = _resolve_expr(adapter, bindings) or adapter
+    if not isinstance(adapter, ast.Call) or _call_name(adapter.func) != "Adapter":
+        return None
+    for keyword in adapter.keywords:
+        if keyword.arg == "components":
+            return _resolve_expr(keyword.value, bindings) or keyword.value
+    # Adapter's source-owned constructor keeps components at positional slot 7.
+    if len(adapter.args) > 7:
+        return _resolve_expr(adapter.args[7], bindings) or adapter.args[7]
+    return None
+
+
+def _prepared_registry(call: ast.Call) -> Optional[ast.AST]:
+    if _call_name(call.func) != "PreparedStep":
+        return None
+    for keyword in call.keywords:
+        if keyword.arg == "registry":
+            return keyword.value
+    return call.args[1] if len(call.args) > 1 else None
+
+
+def _component_calls(expr: ast.AST, bindings: Dict[str, ast.AST]) -> Tuple[List[ast.Call], bool]:
+    """Return Component calls in one resolved components value; unknown is false."""
+    expr = _resolve_expr(expr, bindings) or expr
+    if isinstance(expr, (ast.Tuple, ast.List)):
+        calls: List[ast.Call] = []
+        for item in expr.elts:
+            item = _resolve_expr(item, bindings) or item
+            if not isinstance(item, ast.Call) or _call_name(item.func) != "Component":
+                return [], False
+            calls.append(item)
+        return calls, bool(calls)
+    if isinstance(expr, ast.Call) and _call_name(expr.func) == "Component":
+        return [expr], True
+    return [], False
+
+
+def _controller_component_proof(programs: Path) -> Tuple[bool, List[str]]:
+    path = programs / "execution_modes.py"
+    tree = _source_ast(path)
+    controller = next((node for node in (tree.body if tree is not None else ())
+                       if isinstance(node, ast.ClassDef) and node.name == "Controller"), None)
+    run = _class_method(tree, "Controller", "_run_arm")
+    launch = _class_method(tree, "Controller", "_launch_component")
+    if controller is None or run is None or launch is None:
+        return False, ["execution_modes.Controller launch AST route is unresolved"]
+    launch_loop = None
+    for node in _live_walk(run):
+        if not isinstance(node, ast.For) or not isinstance(node.target, ast.Name) \
+                or node.target.id != "component":
+            continue
+        iterator = node.iter
+        if not (isinstance(iterator, ast.Attribute) and iterator.attr == "components"
+                and isinstance(iterator.value, ast.Name) and iterator.value.id == "arm"):
+            continue
+        has_argv = False
+        has_call = False
+        for inner in _live_walk(node):
+            if isinstance(inner, (ast.Assign, ast.AnnAssign)):
+                target = _assignment_target(inner)
+                value = inner.value
+                if target == "argv" and isinstance(value, ast.ListComp):
+                    has_argv |= any(
+                        isinstance(gen.iter, ast.Attribute) and gen.iter.attr == "argv"
+                        and isinstance(gen.iter.value, ast.Name)
+                        and gen.iter.value.id == "component"
+                        for gen in value.generators)
+            if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute) \
+                    and inner.func.attr == "_launch_component" \
+                    and isinstance(inner.func.value, ast.Name) and inner.func.value.id == "self":
+                if inner.args and isinstance(inner.args[0], ast.Name):
+                    has_call |= inner.args[0].id == "argv"
+                elif inner.args and isinstance(inner.args[0], (ast.List, ast.Tuple)):
+                    has_call |= any(isinstance(item, ast.Starred)
+                                    and isinstance(item.value, ast.Name)
+                                    and item.value.id == "argv"
+                                    for item in inner.args[0].elts)
+        if has_argv and has_call:
+            launch_loop = node
+            break
+    if launch_loop is None:
+        return False, ["execution_modes.Controller._run_arm does not pass component.argv to _launch_component"]
+    popen = any(isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute) and node.func.attr == "Popen"
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"
+                and bool(node.args) and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "argv"
+                for node in _live_walk(launch))
+    if not popen:
+        return False, ["execution_modes.Controller._launch_component does not execute its argv"]
+    return True, []
+
+
+def _production_dispatch_proof(programs: Path) -> Tuple[bool, List[str]]:
+    reasons: List[str] = []
+    policy = _source_ast(programs / "execution_policy.py")
+    production = _source_ast(programs / "execution_production.py")
+    protocol = _source_ast(programs / "execution_step_protocol.py")
+    defaults = _literal_sequence(policy, "DEFAULT_FACTORIES")
+    if defaults is None:
+        reasons.append("execution_policy.DEFAULT_FACTORIES is not a literal source tuple/list")
+    factories = _definitions(production).get("factories")
+    if factories is None:
+        reasons.append("execution_production.factories AST route is unresolved")
+    else:
+        request_call = any(isinstance(node, ast.Call)
+                           and isinstance(node.func, ast.Attribute)
+                           and node.func.attr == "request"
+                           and isinstance(node.func.value, ast.Name)
+                           and node.func.value.id == "policy"
+                           for node in _live_walk(factories))
+        loop = next((node for node in _live_walk(factories)
+                     if isinstance(node, ast.For)
+                     and isinstance(node.target, ast.Name)
+                     and node.target.id == "name"
+                     and isinstance(node.iter, ast.Subscript)
+                     and isinstance(node.iter.value, ast.Name)
+                     and node.iter.value.id == "transport"
+                     and isinstance(node.iter.slice, ast.Constant)
+                     and node.iter.slice.value == "factories"), None)
+        register_call = False
+        if loop is not None:
+            register_call = any(isinstance(node, ast.Call)
+                                and isinstance(node.func, ast.Attribute)
+                                and node.func.attr == "register"
+                                and isinstance(node.func.value, ast.Name)
+                                and node.func.value.id == "registry"
+                                and bool(node.args)
+                                and isinstance(node.args[0], ast.Name)
+                                and node.args[0].id == "name"
+                                for node in _live_walk(loop))
+        if not (request_call and loop is not None and register_call):
+            reasons.append("execution_production.factories does not register policy-selected modules")
+    register = _class_method(protocol, "FactoryRegistry", "register")
+    prepare = _class_method(protocol, "FactoryRegistry", "prepare")
+    if register is None or prepare is None:
+        reasons.append("FactoryRegistry register/prepare AST route is unresolved")
+    else:
+        if not any(isinstance(node, ast.Call)
+                   and isinstance(node.func, ast.Attribute)
+                   and node.func.attr == "import_module"
+                   for node in _live_walk(register)):
+            reasons.append("FactoryRegistry.register does not source-import the registered module")
+        prepared_call = any(isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Name)
+                            and node.func.id == "factory"
+                            for node in _live_walk(prepare))
+        prepared_type = any(isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Name)
+                            and node.func.id == "isinstance"
+                            and len(node.args) >= 2
+                            and _call_name(node.args[1]) == "PreparedStep"
+                            for node in _live_walk(prepare))
+        registry_use = any(isinstance(node, ast.Attribute)
+                           and node.attr == "registry"
+                           and isinstance(node.value, ast.Name)
+                           and node.value.id == "prepared"
+                           for node in _live_walk(prepare))
+        adapters_use = any(isinstance(node, ast.Call)
+                           and isinstance(node.func, ast.Attribute)
+                           and node.func.attr == "adapters"
+                           and isinstance(node.func.value, ast.Attribute)
+                           and node.func.value.attr == "registry"
+                           and isinstance(node.func.value.value, ast.Name)
+                           and node.func.value.value.id == "prepared"
+                           for node in _live_walk(prepare))
+        if not prepared_call:
+            reasons.append("FactoryRegistry.prepare does not call the registered factory")
+        if not (prepared_type and registry_use and adapters_use):
+            reasons.append("FactoryRegistry.prepare does not validate the returned PreparedStep registry")
+    controller_ok, controller_reasons = _controller_component_proof(programs)
+    if not controller_ok:
+        reasons.extend(controller_reasons)
+    return not reasons and defaults is not None, reasons
+
+
+def production_factory_reachability(programs: Path) -> dict:
+    """Prove DEFAULT_FACTORIES -> returned registry -> Adapter.components -> Controller argv."""
+    programs = Path(programs).resolve()
+    dispatch_ok, dispatch_reasons = _production_dispatch_proof(programs)
+    policy = _source_ast(programs / "execution_policy.py")
+    defaults = _literal_sequence(policy, "DEFAULT_FACTORIES") or []
+    candidates: Set[str] = set()
+    routes: List[dict] = []
+    unresolved = list(dispatch_reasons)
+    visited: Set[Tuple[str, str]] = set()
+
+    def record_component(call: ast.Call, path: Path, function: str,
+                         bindings: Dict[str, ast.AST], registered_factory: str,
+                         registered_steps: Optional[str]) -> None:
+        target = _component_target(call, path, programs, bindings)
+        if target is None:
+            unresolved.append(f"{path.name}:{function} returned Adapter.Component argv path is unresolved")
+            return
+        target = target.resolve()
+        try:
+            in_tree = target.is_relative_to(programs)
+        except AttributeError:  # pragma: no cover - Python 3.8 fallback
+            in_tree = str(target).startswith(str(programs) + "/")
+        if not in_tree:
+            unresolved.append(f"{path.name}:{function} Adapter.Component argv path is outside source programs")
+            return
+        # A source-owned but absent worker path is a concrete, non-reaching
+        # binding. It must not become an orphan exemption; the declared worker
+        # is reached only when the bound source file exists.
+        if not target.is_file():
+            return
+        worker = target.stem
+        candidates.add(worker)
+        routes.append({"worker": worker, "factory": path.stem,
+                       "registered_factory": registered_factory,
+                       "registered_steps": registered_steps,
+                       "function": function, "component": "Adapter.Component",
+                       "source": str(path), "bound_path": str(target)})
+
+    def trace(path: Path, function: str, stack: Tuple[Tuple[str, str], ...] = (),
+              registered_factory: Optional[str] = None,
+              registered_steps: Optional[str] = None) -> None:
+        key = (str(path), function)
+        if key in visited or key in stack:
+            return
+        visited.add(key)
+        tree = _source_ast(path)
+        fn = _definitions(tree).get(function)
+        if fn is None:
+            unresolved.append(f"{path.name}:{function} AST route is unresolved")
+            return
+        bindings = _assignments(tree, fn)
+        imports = _imports(tree, fn)
+        live = list(_live_walk(fn))
+        returned_registry: List[ast.AST] = []
+        returned_calls: List[Tuple[ast.Call, str, Optional[str]]] = []
+        for node in live:
+            if not isinstance(node, ast.Return) or node.value is None:
+                continue
+            value = _resolve_expr(node.value, bindings) or node.value
+            if isinstance(value, ast.Call):
+                registry_expr = _prepared_registry(value)
+                if registry_expr is not None and not (
+                        isinstance(registry_expr, ast.Constant)
+                        and registry_expr.value is None):
+                    returned_registry.append(registry_expr)
+                elif _call_name(value.func) != "PreparedStep":
+                    if isinstance(value.func, ast.Name):
+                        imported = imports.get(value.func.id)
+                        if imported:
+                            returned_calls.append((value, imported[0],
+                                                   imported[1] or value.func.id))
+                        elif value.func.id in _definitions(tree):
+                            returned_calls.append((value, "", value.func.id))
+                    elif isinstance(value.func, ast.Attribute) and isinstance(value.func.value, ast.Name):
+                        imported = imports.get(value.func.value.id)
+                        if imported:
+                            returned_calls.append((value, imported[0], value.func.attr))
+        if not returned_registry and not returned_calls:
+            # A registered module whose prepare returns None or an unrelated
+            # value never reaches FactoryRegistry.prepare's PreparedStep route.
+            unresolved.append(f"{path.name}:{function} has no returned PreparedStep registry")
+        for registry_expr in returned_registry:
+            registry_name = _alias_name(registry_expr, bindings)
+            if registry_name is None:
+                unresolved.append(f"{path.name}:{function} returned PreparedStep registry shape is unresolved")
+                continue
+            registers = []
+            for node in live:
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute) \
+                        or node.func.attr != "register" \
+                        or not isinstance(node.func.value, ast.Name) \
+                        or node.func.value.id != registry_name or not node.args:
+                    continue
+                registers.append(node.args[0])
+            if not registers:
+                unresolved.append(f"{path.name}:{function} returned registry has no register(Adapter) route")
+                continue
+            for adapter_expr in registers:
+                components = _adapter_components(adapter_expr, bindings)
+                if components is None:
+                    unresolved.append(f"{path.name}:{function} registered Adapter.components shape is unresolved")
+                    continue
+                component_calls, known = _component_calls(components, bindings)
+                if not known:
+                    unresolved.append(f"{path.name}:{function} registered Adapter.components value is unresolved")
+                    continue
+                for component in component_calls:
+                    record_component(component, path, function, bindings,
+                                     registered_factory or path.stem,
+                                     registered_steps)
+        for _call, module_name, entry in returned_calls:
+            target_file = path if not module_name else _module_file(programs, module_name)
+            if target_file is None:
+                unresolved.append(f"{path.name}:{function} returned helper {module_name}.{entry} is unresolved")
+                continue
+            if entry not in _definitions(_source_ast(target_file)):
+                unresolved.append(f"{target_file.name}:{entry} AST route is unresolved")
+                continue
+            trace(target_file, entry, (*stack, key), registered_factory,
+                  registered_steps)
+
+    for name in defaults:
+        path = _module_file(programs, name)
+        if path is None:
+            unresolved.append(f"default factory {name} source is unresolved")
+            continue
+        tree = _source_ast(path)
+        steps = _binding_repr(tree, "STEP_IDS")
+        if steps is None:
+            unresolved.append(f"registered factory {name} has no source STEP_IDS binding")
+        if "prepare" not in _definitions(tree):
+            unresolved.append(f"registered factory {name} has no prepare(request) AST route")
+            continue
+        trace(path, "prepare", registered_factory=name, registered_steps=steps)
+
+    reachable = candidates if dispatch_ok else set()
+    return {"worker": None, "defaults": defaults, "dispatch_proof": dispatch_ok,
+            "reachable_workers": sorted(reachable), "routes": routes,
+            "unresolved": sorted(set(unresolved)),
+            "venue": "execution_policy.DEFAULT_FACTORIES -> registered factory -> returned PreparedStep.registry -> Adapter.components -> Controller._run_arm(argv)"}
+
+
+def production_worker_reachability(programs: Path, worker: str) -> dict:
+    """Targeted view used by tests and callers that audit one declared worker."""
+    stem = Path(worker).stem
+    report = production_factory_reachability(programs)
+    report.update(worker=stem,
+                  reached=bool(report.get("dispatch_proof")
+                                and stem in report.get("reachable_workers", [])))
+    return report
+
 
 def audit(flow: Path, programs: Path) -> dict:
     clauses = clauses_in_flow(flow)
@@ -2072,6 +2646,8 @@ def audit(flow: Path, programs: Path) -> dict:
     src_ci = repo_gate_source(programs)
     src_gate_runner = repo_gate_runner_source(programs)
     src_skill = skill_doc_source(programs)
+    production = production_factory_reachability(programs)
+    production_workers = set(production.get("reachable_workers") or [])
     # The candidate pass for each venue, computed ONCE — see `_named_in`.
     ci_names = _suite_candidates(src_ci)
     skill_names = _suite_candidates(src_skill)
@@ -2086,6 +2662,12 @@ def audit(flow: Path, programs: Path) -> dict:
         if stem in in_flow or f"{stem}.py" in in_flow:
             continue
         if stem in dispatched:
+            continue
+        # Source-owned production workers have a sixth venue: a current
+        # default factory returns an Adapter Component whose argv is launched
+        # by the real Controller. This clears orphan reachability only; it does
+        # not alter the row's enforcement/wiring classification.
+        if stem in production_workers:
             continue
         if _named_in(ci_names, src_ci, stem, _invoked_by_suite):
             continue
@@ -2128,6 +2710,11 @@ def audit(flow: Path, programs: Path) -> dict:
          "present": bool(dispatched), "reached": sorted(dispatched)},
         {"venue": "skills/**/*.md (an agent runs it by hand)",
          "present": bool(src_skill.strip())},
+        {"venue": production.get("venue"),
+         "present": bool(production.get("dispatch_proof")),
+         "reached": sorted(production_workers),
+         "routes": production.get("routes", []),
+         "unresolved": production.get("unresolved", [])},
     ]
     # See the note beside `declared_weaker_than_wired` in the report below.
     # Computed from the SAME rows the rest of this report is built from, so it
@@ -2139,6 +2726,7 @@ def audit(flow: Path, programs: Path) -> dict:
 
     return {
         "orphan_venues": orphan_venues,
+        "production_reachability": production,
         "total_gates": len(rows),
         "total_clauses": len(clauses),
         "enforced": sum(1 for r in rows if r["enforcement"] == "ENFORCED"),
