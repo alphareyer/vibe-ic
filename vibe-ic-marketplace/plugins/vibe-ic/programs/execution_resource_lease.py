@@ -193,10 +193,19 @@ def current_source_fixture_scope() -> SourceFixtureScope | None:
 def active_source_fixture_scope(directory: Path | None = None) -> SourceFixtureScope | None:
     """Return a live scope for this issuer process, including child threads."""
     wanted = None if directory is None else Path(directory).resolve()
+    owner = os.environ.get(OWNER_ENV)
+    current = _SOURCE_FIXTURE_SCOPE.get()
+    # Nested fixture leases shadow an outer lease.  The ContextVar is the
+    # typed selection when this thread has it; the owner nonce selects the
+    # already-live registry entry for Controller worker threads.
+    ordered = [current] if current is not None else []
     with _SOURCE_FIXTURE_SCOPE_LOCK:
         scopes = list(_SOURCE_FIXTURE_SCOPES.values())
-    for scope in scopes:
-        if scope.parent_pid != os.getpid() or (wanted is not None and scope.directory != wanted):
+    ordered.extend(scope for scope in scopes if scope is not current)
+    for scope in ordered:
+        if (scope.parent_pid != os.getpid()
+                or (wanted is not None and scope.directory != wanted)
+                or (owner is not None and scope.nonce != owner)):
             continue
         scope._manifest()
         return scope

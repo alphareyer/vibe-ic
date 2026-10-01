@@ -409,6 +409,16 @@ class _Step1CallbackIssuer:
         self.parent.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
         self.thread = None
 
+    def _is_bootstrap_callable(self, caller, source):
+        """Bind bootstrap recognition to the current arm's source manifest."""
+        if (caller != 'execution_modes.issued_child_scope' or not isinstance(source, str)):
+            return False
+        path = Path(source).resolve()
+        expected = self.arm.source_files.get(str(path))
+        controller_sha = self.plan.get('binding', {}).get('controller_sha256')
+        return (expected is not None and expected == controller_sha and path.is_file()
+                and digest(path) == expected)
+
     def _host_ceiling(self, *, caller=None, source=None, project=None, worker_pid=None):
         ceiling = self.cost['ram_mb'] * 1048576
         for name, path in self.context.inputs.items():
@@ -440,8 +450,7 @@ class _Step1CallbackIssuer:
                     raise Refusal('ISSUED_CHILD_HOST_SPLIT_UNBOUND', name)
                 if caller is None or source is None or project is None:
                     raise Refusal('SOURCE_FIXTURE_SCOPE_UNBOUND', name)
-                if (caller == __name__ + '.issued_child_scope'
-                        and source == str(Path(__file__).resolve())):
+                if self._is_bootstrap_callable(caller, source):
                     self.fixture_scope.assert_authorized(lease_path=path,
                         step_id=self.context.step_id, project=project,
                         caller=caller, source=source)
@@ -522,8 +531,7 @@ class _Step1CallbackIssuer:
                                 or not value.get('caller')):
                             raise Refusal('STEP1_CALLBACK_UNBOUND', 'callback source/project')
                         if self.fixture_scope is not None:
-                            if (value['caller'] == __name__ + '.issued_child_scope'
-                                    and filename == str(Path(__file__).resolve())):
+                            if self._is_bootstrap_callable(value.get('caller'), filename):
                                 self.fixture_scope.authorize(
                                     step_ids=(self.context.step_id,), project=project,
                                     caller=value['caller'], source=filename)
