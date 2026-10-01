@@ -328,6 +328,20 @@ def _write_phase2_report(out: Path, summary: Any, project: Path, *,
     out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
 
 
+def _runner_invocation_context() -> Optional[dict]:
+    """Read the dispatch context once at the owning producer boundary.
+
+    The dispatcher owns the context schema, while this module owns every
+    phase-2 report write. Passing the parsed value explicitly keeps an early
+    report publication on the same producer generation as the final report;
+    standalone producer calls still retain their ordinary unbound format when
+    no dispatch context was supplied.
+    """
+    from benchmark_dispatch import _RUNNER_CONTEXT_ENV
+    raw = os.environ.get(_RUNNER_CONTEXT_ENV)
+    return json.loads(raw) if raw is not None else None
+
+
 @dataclass
 class StepResult:
     name: str
@@ -24552,7 +24566,8 @@ def run_is_bounded(entry_site, exit_pruned, site_order) -> bool:
 
 
 def _publish_record_before_audit(project: Path, plan: List["StepResult"],
-                                 ic_class: str, evidence: Any) -> Path:
+                                 ic_class: str, evidence: Any, *,
+                                 invocation_context: Optional[dict] = None) -> Path:
     """Publish THIS run's phase-2 record before the final audit reads the tree.
 
     FX_P2 — the audit judges `reports/orchestrator/phase2_one_shot.json`, and
@@ -24590,7 +24605,7 @@ def _publish_record_before_audit(project: Path, plan: List["StepResult"],
         "verdict_reason": FINAL_AUDIT_PENDING_REASON,
         "pre_audit_aggregate": _aggregate_verdict(plan),
         "final_audit_pending": True,
-    }, project)
+    }, project, invocation_context=invocation_context)
     return out
 
 
@@ -24812,6 +24827,11 @@ def main() -> int:
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
+    # Capture the dispatch context before any phase producer publishes a
+    # report. Every write below passes this same value explicitly; a fresh
+    # early refusal report therefore cannot become an unbound witness merely
+    # because it was emitted before the normal finalize tail.
+    _dispatch_invocation_context = _runner_invocation_context()
 
     # ── A DECLARED WINDOW IS A DECLARED PROOF BURDEN (R-0924-1) ─────────────
     # The owner's ask: when a gate is wrong, re-run THAT step -- only it.
@@ -25990,7 +26010,9 @@ def main() -> int:
                 "the gate reports every step's YAML checker re-emits"),
             declared_by=" ".join(_window_flags)))
     else:
-        _publish_record_before_audit(project, plan, ic_class, evidence)
+        _publish_record_before_audit(
+            project, plan, ic_class, evidence,
+            invocation_context=_dispatch_invocation_context)
         plan.append(_audit_after_declared_producers(project, args.skip_analog))
 
     # vibe-ic#2080 — the run's report card, asked by a gate that nothing ran.
@@ -26081,7 +26103,9 @@ def main() -> int:
         project, PROGRAMS_DIR, "design_one_shot_runner", summary,
         "phase2_one_shot.json",
         only_steps=(_window_step_ids() if _bounded else None))
-    _write_phase2_report(out, summary, project)
+    _write_phase2_report(
+        out, summary, project,
+        invocation_context=_dispatch_invocation_context)
     # Record rtl/ as the runner is leaving it, so the NEXT front-door run
     # can tell this tree (generator-produced, safe to regenerate) from one
     # an author has since edited (must be preserved).
@@ -26118,7 +26142,9 @@ def main() -> int:
         # as it was mid-run.
         summary["steps"] = [asdict(s) for s in plan]
         _ai_judgement.demote_runner_rows(summary["steps"], summary["ai_judgements"])
-        _write_phase2_report(out, summary, project)
+        _write_phase2_report(
+            out, summary, project,
+            invocation_context=_dispatch_invocation_context)
     print(f"\n=== design_one_shot_runner DONE — {out}")
     print(f"verdict: {summary['verdict']}")
     for s in plan:

@@ -259,6 +259,16 @@ def _runner_report_binding_reason(receipt: dict, *, require_phase2: bool) -> str
     return None
 
 
+def _runner_refusal_line(process: _ProcessOutcome) -> tuple[str, str] | None:
+    """Return the owning runner's refusal token and verbatim line, if any."""
+    for line in ((process.stderr or "").splitlines()
+                 + (process.stdout or "").splitlines()):
+        refusal = re.match(r"^REFUSED:\s*([A-Z][A-Z0-9_]*)\b", line)
+        if refusal:
+            return refusal[1], line
+    return None
+
+
 def _runner_material_snapshot(project: Path) -> dict:
     """Bind the input and emitted file populations, without opening escapes.
 
@@ -360,14 +370,22 @@ def _runner_diagnostics(process: _ProcessOutcome, argv: list[str],
     diagnostic["fresh_reports"] = fresh
     binding_reason = _runner_report_binding_reason(receipt, require_phase2=require_phase2)
     if binding_reason:
+        refusal = _runner_refusal_line(process)
+        if refusal:
+            # A fresh report that lost its producer binding remains unusable;
+            # retain that failure beside the actual refusal stream instead of
+            # replacing the runner's truth with a consumer-only label.
+            return {**diagnostic, "status": "REFUSED_PRE_GATE",
+                    "reason_class": refusal[0], "reason": refusal[1],
+                    "report_binding_error": binding_reason,
+                    "report_binding_status": "REPORT_BINDING_MISMATCH"}
         return {**diagnostic, "status": "REPORT_BINDING_MISMATCH",
                 "reason_class": "RUNNER_REPORT_UNBOUND", "reason": binding_reason}
     if not fresh:
-        for line in (process.stderr or "").splitlines() + (process.stdout or "").splitlines():
-            refusal = re.match(r"^REFUSED:\s*([A-Z][A-Z0-9_]*)\b", line)
-            if refusal:
-                return {**diagnostic, "status": "REFUSED_PRE_GATE",
-                        "reason_class": refusal[1], "reason": line}
+        refusal = _runner_refusal_line(process)
+        if refusal:
+            return {**diagnostic, "status": "REFUSED_PRE_GATE",
+                    "reason_class": refusal[0], "reason": refusal[1]}
     phase2 = "phase2_one_shot.json"
     if require_phase2 and phase2 in receipt["reports_after"] and phase2 not in fresh:
         return {**diagnostic, "status": "STALE_RUNNER_REPORT",
