@@ -7881,6 +7881,9 @@ def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
             refuse("Program runner failed; original task/project retained: "
                    + str(process.error or got.get("reason")))
         _regate_project_tree(staged)
+        if (ea.phase1_provenance(staged) != task["phase1_provenance"]
+                or _sha256_text((staged / "input" / "phase1_prompt.md").read_text()) != task["prompt_sha256"]):
+            refuse("Program changed bound prompt or Phase-1 inputs")
         candidate_root = _regate_path(
             run_p / "candidate_snapshots" / _safe_problem_id(pid)
             / f"{key}-{_sha256_text(str(got.get('completion') or ''))}", run_p, exists=False)
