@@ -3268,7 +3268,14 @@ def declared_watchdog(project: Path) -> Optional[Dict]:
 def _emit_and_write(shape: str, out_path: Path, desc_text: str = "") -> str:
     rtl = emit_rtl(shape, desc_text)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(rtl)
+    if shape == _UNSIGNED_DIVISION_SHAPE:
+        # Exclusive creation protects both CLI paths, including dangling
+        # symlinks and an output created after detection. Never follow or
+        # truncate an occupied source-bound candidate destination.
+        with out_path.open("x", encoding="utf-8") as output:
+            output.write(rtl)
+    else:
+        out_path.write_text(rtl)
     return str(out_path)
 
 
@@ -3370,14 +3377,13 @@ def main(argv=None) -> int:
         module = module_of_shape(shape, desc)
         written = None
         if a.out:
-            output_path = Path(a.out)
-            if (shape == _UNSIGNED_DIVISION_SHAPE
-                    and (output_path.exists() or output_path.is_symlink())):
+            try:
+                written = _emit_and_write(shape, Path(a.out), desc)
+            except FileExistsError:
                 print(json.dumps({"verdict": "REFUSED", "shape": shape,
                                   "module": module,
                                   "reason": "occupied output preserved"}))
                 return 2
-            written = _emit_and_write(shape, Path(a.out), desc)
         result = {"verdict": "EMIT", "shape": shape,
                   "module": module, "written": written}
         result.update(_source_contract_metadata(shape, desc))
@@ -3413,8 +3419,14 @@ def main(argv=None) -> int:
     module = module_of_shape(shape, desc)
     written = None
     if a.emit:
-        written = _emit_and_write(
-            shape, proj / "phase2" / "stage1" / "rtl" / f"{module}.v", desc)
+        try:
+            written = _emit_and_write(
+                shape, proj / "phase2" / "stage1" / "rtl" / f"{module}.v", desc)
+        except FileExistsError:
+            print(json.dumps({"verdict": "REFUSED", "shape": shape,
+                              "module": module,
+                              "reason": "occupied output preserved"}))
+            return 2
     result = {"verdict": "EMIT", "shape": shape,
               "module": module, "written": written}
     result.update(_source_contract_metadata(shape, desc))

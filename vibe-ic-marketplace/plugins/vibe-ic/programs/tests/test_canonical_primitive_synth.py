@@ -636,6 +636,61 @@ def test_unsigned_divider_normal_consumer_emits_and_preserves_occupied_output(tm
     assert output.read_text() == before
 
 
+@pytest.mark.parametrize("mode", ["project", "direct"])
+@pytest.mark.parametrize("occupied", ["file", "symlink", "dangling_symlink"])
+def test_unsigned_divider_cli_preserves_occupied_output(tmp_path, mode, occupied):
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"]
+    proj = _mk_project(tmp_path / "project", desc)
+    # Use the explicit INPUT location read by the existing project CLI.
+    input_dir = proj / "input"
+    input_dir.mkdir()
+    source = input_dir / "design_description.txt"
+    source.write_text(desc)
+    output = proj / "phase2" / "stage1" / "rtl" / "unsigned_ratio_unit.v"
+    output.parent.mkdir(parents=True)
+    author_bytes = b"// author's supplied RTL\nmodule authored; endmodule\n"
+    target = tmp_path / "author.v"
+    if occupied == "file":
+        output.write_bytes(author_bytes)
+    else:
+        if occupied == "symlink":
+            target.write_bytes(author_bytes)
+        output.symlink_to(target)
+    link_before = os.readlink(output) if output.is_symlink() else None
+    argv = ([str(proj), "--emit"] if mode == "project" else
+            ["--from-desc", str(source), "--out", str(output)])
+    run = subprocess.run([sys.executable, str(PROG), *argv],
+                         capture_output=True, text=True)
+    result = json.loads(run.stdout)
+    preserved = (output.read_bytes() == author_bytes if occupied == "file"
+                 else output.is_symlink() and os.readlink(output) == link_before
+                 and (target.read_bytes() == author_bytes if occupied == "symlink"
+                      else not target.exists()))
+    print(json.dumps({"id": f"occupied_{mode}_{occupied}", "rc": run.returncode,
+                      "verdict": result["verdict"], "preserved": preserved}))
+    assert run.returncode == 2, run.stdout + run.stderr
+    assert result["verdict"] == "REFUSED"
+    assert result["reason"] == "occupied output preserved"
+    assert preserved
+
+
+def test_unsigned_divider_project_cli_emits_fresh_source_bound_output(tmp_path):
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"]
+    proj = _mk_project(tmp_path / "project", desc)
+    input_dir = proj / "input"
+    input_dir.mkdir()
+    (input_dir / "design_description.txt").write_text(desc)
+    run = subprocess.run([sys.executable, str(PROG), str(proj), "--emit"],
+                         capture_output=True, text=True)
+    assert run.returncode == 0, run.stdout + run.stderr
+    result = json.loads(run.stdout)
+    output = proj / "phase2" / "stage1" / "rtl" / "unsigned_ratio_unit.v"
+    assert result["verdict"] == "EMIT"
+    assert result["written"] == str(output)
+    assert output.read_text() == rcs.emit_rtl(rcs._UNSIGNED_DIVISION_SHAPE, desc)
+    assert result["source_sha256"] in output.read_text()
+
+
 # ============================================================================
 # issue #2035, families F6 + F7, and the architecture question underneath them.
 #
