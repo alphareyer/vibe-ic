@@ -21,6 +21,10 @@ recorded as UNVERIFIED and leaves A7 NOT_MEASURED until a match is proved.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+from dataclasses import dataclass
+import hashlib
+import inspect
 import json
 from pathlib import Path
 
@@ -56,6 +60,56 @@ def _provenance(project: Path, **extra) -> None:
 def _record(project: Path) -> dict:
     return json.loads(
         (project / "phase3/analog/blk/a7_post_layout.json").read_text())
+
+
+@dataclass(frozen=True)
+class _SourceFixtureBinding:
+    """Test-local identity witness for one controlled source fixture call.
+
+    The lease is live and typed; this record binds the exact callable, source,
+    project, and step for the call below. It deliberately does not fabricate
+    dispatch_site authority: the shared source-fixture handoff remains a
+    separate API supplied by the owner of that production seam.
+    """
+    lease: Path
+    callable_name: str
+    source: Path
+    source_sha256: str
+    project: Path
+    step_id: str
+
+
+@contextmanager
+def _live_source_fixture(tmp_path: Path, project: Path, step_id: str,
+                         callable):
+    from execution_modes import Budget
+    from execution_resource_lease import host_lease
+
+    source_name = inspect.getsourcefile(callable)
+    if not source_name:
+        raise RuntimeError("source-fixture callable has no regular source")
+    source = Path(source_name).resolve(strict=True)
+    if source.is_symlink() or not source.is_file():
+        raise RuntimeError("source-fixture callable source is not regular")
+    project = Path(project).resolve(strict=True)
+    if project.is_symlink() or not project.is_dir():
+        raise RuntimeError("source-fixture project is not regular")
+    binding_root = tmp_path / ("source-fixture-" + step_id)
+    with host_lease(Budget(1, 256, workers=1), fixture_root=binding_root) as lease:
+        yield _SourceFixtureBinding(
+            lease=Path(lease).resolve(),
+            callable_name=callable.__module__ + "." + callable.__qualname__,
+            source=source,
+            source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+            project=project,
+            step_id=step_id,
+        )
+
+
+def _fixture_step(tmp_path: Path, runner, project: Path, block: dict,
+                  step_id: str, args=None):
+    with _live_source_fixture(tmp_path, project, step_id, runner.step_for_block):
+        return runner.step_for_block(project, block, step_id, args)
 
 
 def test_a_layout_of_another_netlist_is_refused_by_name_before_any_run(stub):
@@ -237,8 +291,8 @@ def _a5_calls(tmp_path, monkeypatch, drawn: str) -> list:
     monkeypatch.setattr(R._pr, "run", fake_run)
     monkeypatch.setattr(R._pin, "container_image_digest",
                         lambda c: (PIN.IMAGE_DIGEST, ""))
-    R.step_for_block(project, {"name": "ldo", "type": "ldo"}, "A5_layout",
-                     None)
+    _fixture_step(tmp_path, R, project, {"name": "ldo", "type": "ldo"},
+                  "A5_layout", None)
     return calls
 
 
@@ -309,8 +363,8 @@ def test_first_a5_draw_uses_the_same_run_pdk(tmp_path, monkeypatch):
                 "pdk_root": "/foundry/gf180mcuD"}
 
     monkeypatch.setattr(APA, "resolve_pdk", resolve)
-    res = R.step_for_block(
-        project, {"name": "b"}, "A5_layout",
+    res = _fixture_step(
+        tmp_path, R, project, {"name": "b"}, "A5_layout",
         SimpleNamespace(pdk="gf180mcuD", container="vibeic-eda"))
     argv = next(a for a in ran.argv
                 if Path(a[1]).name == "analog_a5_layout_emit.py")
@@ -333,8 +387,8 @@ def test_a_named_but_unresolvable_pdk_does_not_draw_in_a_default_family(
     monkeypatch.setattr(R, "_pr", ran)
     monkeypatch.setattr(APA, "resolve_pdk", lambda *a, **k: {
         "available": False, "reason": "selected PDK not installed"})
-    res = R.step_for_block(
-        project, {"name": "b"}, "A5_layout",
+    res = _fixture_step(
+        tmp_path, R, project, {"name": "b"}, "A5_layout",
         SimpleNamespace(pdk="custom_process", container="vibeic-eda"))
     assert res.status == "NOT_MEASURED", (res.status, res.detail)
     assert str(getattr(res.reason_class, "value", res.reason_class)) == \
@@ -376,8 +430,8 @@ def test_stale_redraw_preserves_emitter_outcome_tier(
         raise AssertionError(f"redraw failure should stop before gate: {cmd}")
 
     monkeypatch.setattr(R._pr, "run", fake_run)
-    res = R.step_for_block(
-        project, {"name": "ldo", "type": "ldo"}, "A5_layout",
+    res = _fixture_step(
+        tmp_path, R, project, {"name": "ldo", "type": "ldo"}, "A5_layout",
         SimpleNamespace(pdk="gf180mcuD", container="vibeic-eda"))
     assert res.status == expected, (res.status, res.detail)
     assert str(getattr(res.reason_class, "value", res.reason_class)) == reason_class
@@ -409,8 +463,8 @@ def test_stale_redraw_crash_cannot_reuse_previous_refusal(
         raise AssertionError(f"crashed redraw must stop before gate: {cmd}")
 
     monkeypatch.setattr(R._pr, "run", fake_run)
-    res = R.step_for_block(
-        project, {"name": "ldo", "type": "ldo"}, "A5_layout",
+    res = _fixture_step(
+        tmp_path, R, project, {"name": "ldo", "type": "ldo"}, "A5_layout",
         SimpleNamespace(pdk="gf180mcuD", container="vibeic-eda"))
     assert res.status == "NOT_MEASURED", (res.status, res.detail)
     assert str(getattr(res.reason_class, "value", res.reason_class)) == \
@@ -442,7 +496,7 @@ def test_first_draw_preserves_emitter_outcome_tier(
         report = f"LAYOUT: {emitter_result} [b] 0 deviation(s)\n" + report
     ran = T5._Ran(layout=layout, emit_rc=rc, emit_out=report)
     monkeypatch.setattr(R, "_pr", ran)
-    res = R.step_for_block(project, {"name": "b"}, "A5_layout", None)
+    res = _fixture_step(tmp_path, R, project, {"name": "b"}, "A5_layout", None)
     assert res.status == expected, (res.status, res.detail)
     assert str(getattr(res.reason_class, "value", res.reason_class)) == reason_class
     assert res.extras["producer_rc"] == rc
@@ -461,7 +515,7 @@ def test_first_draw_refusal_cannot_pass_partial_geometry(tmp_path, monkeypatch):
     ran = T5._Ran(layout=layout, emit_rc=1, emit_out=report,
                   writes=lambda: layout.write_text("partial geometry\n"))
     monkeypatch.setattr(R, "_pr", ran)
-    res = R.step_for_block(project, {"name": "b"}, "A5_layout", None)
+    res = _fixture_step(tmp_path, R, project, {"name": "b"}, "A5_layout", None)
     assert (res.status, res.extras["verdict_tier"], res.extras["producer_rc"]) == \
         ("FAIL", "FORBIDDEN", 1)
     assert sum(Path(a[1]).name == "analog_a5_layout_check.py"
@@ -478,7 +532,7 @@ def test_first_draw_does_not_reuse_an_old_refusal_record(tmp_path, monkeypatch):
     layout = bdir / "layout.mag"
     ran = T5._Ran(layout=layout, emit_rc=2, emit_out="")
     monkeypatch.setattr(R, "_pr", ran)
-    res = R.step_for_block(project, {"name": "b"}, "A5_layout", None)
+    res = _fixture_step(tmp_path, R, project, {"name": "b"}, "A5_layout", None)
     assert (res.status, str(getattr(res.reason_class, "value",
                             res.reason_class)), res.extras["verdict_tier"]) == \
         ("NOT_MEASURED", "execution_error", "rc 2")
@@ -505,8 +559,8 @@ def test_rc2_without_a_current_json_report_does_not_read_old_success_as_env(
         raise AssertionError(f"redraw failure should stop before gate: {cmd}")
 
     monkeypatch.setattr(R._pr, "run", fake_run)
-    res = R.step_for_block(
-        project, {"name": "ldo", "type": "ldo"}, "A5_layout",
+    res = _fixture_step(
+        tmp_path, R, project, {"name": "ldo", "type": "ldo"}, "A5_layout",
         SimpleNamespace(pdk="gf180mcuD", container="vibeic-eda"))
     assert res.status == "NOT_MEASURED", (res.status, res.detail)
     assert str(getattr(res.reason_class, "value", res.reason_class)) == \
@@ -547,8 +601,8 @@ def test_the_a5_step_fails_when_the_needed_redraw_is_refused(
     monkeypatch.setattr(R._pr, "run", fake_run)
     monkeypatch.setattr(R._pin, "container_image_digest",
                         lambda c: (PIN.IMAGE_DIGEST, ""))
-    res = R.step_for_block(project, {"name": "ldo", "type": "ldo"},
-                           "A5_layout", None)
+    res = _fixture_step(tmp_path, R, project,
+                        {"name": "ldo", "type": "ldo"}, "A5_layout", None)
     assert res.status == "FAIL", (res.status, res.detail)
     assert "A5_LAYOUT_NOT_REDRAWN" in res.detail
     assert "cap_cmim: refused" in res.detail
@@ -578,8 +632,9 @@ def test_an_a7_refusal_for_a_stale_layout_is_not_measured_not_waived(
     monkeypatch.setattr(R._pr, "run", fake_run)
     monkeypatch.setattr(R._pin, "container_image_digest",
                         lambda c: (PIN.IMAGE_DIGEST, ""))
-    res = R.step_for_block(project, {"name": "ldo", "type": "ldo"},
-                           "A7_post_layout_resim", None)
+    res = _fixture_step(tmp_path, R, project,
+                        {"name": "ldo", "type": "ldo"},
+                        "A7_post_layout_resim", None)
     assert res.status == "NOT_MEASURED", (res.status, res.detail)
     assert str(getattr(res.reason_class, "value", res.reason_class)) == \
         "input_absent"
