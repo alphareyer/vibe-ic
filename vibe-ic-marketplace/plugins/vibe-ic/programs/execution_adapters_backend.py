@@ -398,9 +398,18 @@ def _complete_row_orchestration_reason(sid, params):
 
 
 def _step30_simulators(params):
-    """Return the declared complementary instruments for the complete Step30 producer."""
+    """Return the controller's default or explicitly requested Step30 instruments.
+
+    ``path_spice_tool.SIMULATORS`` keeps the standalone producer's dual-arm
+    default.  The controller's unparameterized row is the primary ngspice
+    provider; an explicit ``simulators`` value is carried through verbatim so
+    a caller asking for Xyce, or for the joint agreement pair, is never
+    silently changed.
+    """
     import path_spice_tool as spice
-    return params.get('simulators', tuple(spice.SIMULATORS))
+    if 'simulators' not in params:
+        return tuple(spice.SIMULATORS[:1])
+    return params['simulators']
 
 
 def _engine_families(sid):

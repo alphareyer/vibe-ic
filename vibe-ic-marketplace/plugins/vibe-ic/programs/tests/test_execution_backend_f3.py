@@ -185,6 +185,8 @@ def test_backend_provider_attribution_uses_current_complete_producer_routes():
     assert backend._provider_route('29', {}) == ('iverilog', ('iverilog',))
     assert backend._provider_route('33', {}) == ('opensta', ('opensta',))
     assert backend._provider_route('37.3', {}) == ('klayout', ('klayout',))
+    # The controller's unparameterized Step30 row is the primary ngspice
+    # provider; an explicit tuple remains the requested joint agreement run.
     assert backend._provider_route('30', {}) == ('ngspice', ('opensta', 'ngspice'))
     assert backend._provider_route('30', {'simulators': ['xyce']}) == (
         'xyce', ('opensta', 'xyce'))
