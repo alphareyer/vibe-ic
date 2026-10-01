@@ -117,8 +117,10 @@ def _declared_na(step, project, params):
     if declaration.is_file():
         try:
             document = json.loads(declaration.read_text())
+            if not isinstance(document, dict):
+                raise ValueError('owner declaration must be a JSON object')
             answers = document.get('answers', {})
-            if not isinstance(document, dict) or not isinstance(answers, dict):
+            if not isinstance(answers, dict):
                 raise ValueError('owner declaration must contain an answers object')
         except (OSError, ValueError, TypeError) as exc:
             raise em.Refusal('BACKEND_DECLARATION_NOT_CURRENT', str(declaration)) from exc

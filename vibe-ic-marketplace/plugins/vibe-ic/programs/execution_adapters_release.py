@@ -354,29 +354,158 @@ def declared_identities(request):
                       'route': values['route']}}
 
 
+def _external_source_snapshot(request):
+    """Build the original external consumer population without a lease.
+
+    ``ReleaseContext`` remains the live path.  This smaller source-only
+    snapshot deliberately mirrors its selected project roots and control roots
+    so ``external_handoff`` sees the same complete project population, rather
+    than a receipt count or an invented admission.
+    """
+    project = Path(request.project).resolve(strict=True)
+    supplied = request.parameters.get('input_roots')
+    if not isinstance(supplied, dict) or not supplied:
+        raise em.Refusal('RELEASE_STEP_INPUT_ROOTS_REQUIRED', request.step_id)
+    selected, controls = [], []
+    for name, value in supplied.items():
+        if not isinstance(name, str) or not name or not isinstance(value, (str, Path)):
+            raise em.Refusal('RELEASE_STEP_INPUT_ROOT_INVALID', str(name))
+        path = Path(value)
+        if not path.is_absolute() or '..' in path.parts:
+            raise em.Refusal('RELEASE_STEP_INPUT_ROOT_ESCAPE', str(path))
+        if path.is_relative_to(project):
+            resolved = path.resolve(strict=False)
+            if not resolved.is_relative_to(project):
+                raise em.Refusal('RELEASE_STEP_INPUT_ROOT_ESCAPE', str(path))
+            selected.append(path.relative_to(project).as_posix() or '.')
+        else:
+            try:
+                resolved = path.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise em.Refusal('RELEASE_STEP_INPUT_ROOT_INVALID', str(path)) from exc
+            controls.append((name, resolved))
+
+    frozen = population(project, selected_roots=tuple(sorted(set(selected))))
+    inputs = {}
+    lexical = {}
+    for relative, entry in frozen.items():
+        lexical['project/' + relative] = dict(entry)
+        if entry.get('kind') == 'file':
+            source = (project / relative).resolve(strict=True)
+            inputs['project/' + relative] = source
+    for name, root in controls:
+        if root.is_dir():
+            if root.is_symlink():
+                raise em.Refusal('RELEASE_DIRECTORY_ALIAS', str(root))
+            entries = population(root)
+            for relative, entry in entries.items():
+                lexical['controls/' + name + '/' + relative] = dict(entry)
+                if entry.get('kind') == 'file':
+                    inputs['controls/' + name + '/' + relative] = (root / relative).resolve(strict=True)
+        elif root.is_file() and not root.is_symlink():
+            relative = 'controls/' + name
+            lexical[relative] = {'kind': 'file', 'resolved': str(root),
+                                 'sha256': em.digest(root), 'bytes': root.stat().st_size}
+            inputs[relative] = root
+        else:
+            raise em.Refusal('RELEASE_INPUT_NOT_REGULAR', str(root))
+    return inputs, lexical
+
+
+class _LeaseFreeExternalContext:
+    """Minimal context accepted by the existing external consumer only."""
+
+    def __init__(self, request, inputs, lexical):
+        self.step_id = request.step_id
+        self.source_sha = request.source_sha
+        self.project = Path(request.project).resolve(strict=True)
+        self.inputs = dict(inputs)
+        self._lexical = dict(lexical)
+        self.parameters_at_prepare = json.dumps(
+            json_parameters(request.parameters), sort_keys=True)
+
+    def binding(self):
+        current_inputs, current_lexical = _external_source_snapshot(
+            _LeaseFreeRequest(self))
+        if current_lexical != self._lexical:
+            raise em.Refusal('RELEASE_INPUT_POPULATION_CHANGED', self.step_id)
+        if set(current_inputs) != set(self.inputs) or any(
+                em.digest(current_inputs[name]) != em.digest(self.inputs[name])
+                for name in self.inputs):
+            raise em.Refusal('RELEASE_INPUT_POPULATION_CHANGED', self.step_id)
+        return {'step_id': self.step_id, 'source_sha': self.source_sha,
+                'inputs': {name: em.digest(path) for name, path in self.inputs.items()},
+                'objective': {'operation': 'external_release_consumer_preflight',
+                              'step_id': self.step_id},
+                'required_gates': ['external_handoff'], 'native_mode': 'direct'}
+
+
+class _LeaseFreeRequest:
+    """Snapshot view used only to recheck the lease-free source population."""
+
+    def __init__(self, context):
+        self.project = context.project
+        self.step_id = context.step_id
+        self.parameters = json.loads(context.parameters_at_prepare)
+
+
+def _external_preflight(request, declaration):
+    inputs, lexical = _external_source_snapshot(request)
+    context = _LeaseFreeExternalContext(request, inputs, lexical)
+    from execution_release_worker import external_handoff
+    handoff = external_handoff(context)
+    handoff.update(declaration)
+    population_facts = dict(handoff.get('binding', {}).get('inputs', {}))
+    facts = dict(declaration['facts'], step_id=request.step_id,
+                 source_sha=request.source_sha,
+                 source_files_sha256=em._hash(dict(request.source_files)),
+                 input_population=population_facts,
+                 external_receipts=handoff.get('receipts', []),
+                 existing_checkers=handoff.get('existing_checkers', []),
+                 design_verdict=handoff.get('design_verdict', 'NOT_MEASURED'))
+    handoff['facts'] = facts
+    return handoff
+
+
 def classify(request):
-    """Classify release declarations before constructing ReleaseContext."""
+    """Classify release declarations with the original external consumer."""
     from execution_step_protocol import PreparedStep
     if request.step_id not in STEP_IDS:
         raise em.Refusal('RELEASE_UNKNOWN_STEP', request.step_id)
     request.check_source()
     declaration = declared_identities(request)
-    raw_receipts = request.parameters.get('external_receipts', [])
-    if not isinstance(raw_receipts, list):
-        raise em.Refusal('RELEASE_EXTERNAL_POPULATION_INVALID', request.step_id)
-    facts = dict(declaration['facts'], step_id=request.step_id,
-                 source_sha=request.source_sha,
-                 source_files_sha256=em._hash(dict(request.source_files)),
-                 external_receipt_count=len(raw_receipts))
-    handoff = {'declaration': declaration['declaration'],
-               'declaration_sha256': declaration['declaration_sha256'],
-               'facts': facts}
     if request.step_id == '37.5ic' and request.parameters['route'] == 'IP':
+        facts = dict(declaration['facts'], step_id=request.step_id,
+                     source_sha=request.source_sha,
+                     source_files_sha256=em._hash(dict(request.source_files)))
+        handoff = dict(declaration, facts=facts)
         return PreparedStep(None, None, None, 'declared_inapplicable',
                             'Owner-cited HARDMACRO declaration; IC-only precheck', handoff)
     if request.step_id in EXTERNAL_IDS:
-        return PreparedStep(None, None, None, 'external_handoff',
-                            'Owner-declared external handoff; live prepare validates receipts', handoff)
+        if not isinstance(request.parameters.get('external_receipts', []), list):
+            raise em.Refusal('RELEASE_EXTERNAL_POPULATION_INVALID', request.step_id)
+        try:
+            handoff = _external_preflight(request, declaration)
+        except em.Refusal as exc:
+            facts = dict(declaration['facts'], step_id=request.step_id,
+                         source_sha=request.source_sha,
+                         source_files_sha256=em._hash(dict(request.source_files)),
+                         design_verdict='NOT_MEASURED',
+                         external_preflight_refusal=str(exc))
+            return PreparedStep(None, None, None, 'current_input_missing',
+                                'Current external consumer population is unavailable: ' + str(exc),
+                                {'declaration': declaration['declaration'],
+                                 'declaration_sha256': declaration['declaration_sha256'],
+                                 'facts': facts})
+        if handoff.get('receipts'):
+            return PreparedStep(None, None, None, 'external_handoff',
+                                handoff['reason'], handoff)
+        return PreparedStep(None, None, None, 'provider_unavailable',
+                            'Current external receipts are unavailable; original checker results remain NOT_MEASURED',
+                            handoff)
+    facts = dict(declaration['facts'], step_id=request.step_id,
+                 source_sha=request.source_sha,
+                 source_files_sha256=em._hash(dict(request.source_files)))
     return PreparedStep(None, None, None, 'execute',
                         'Source-bound release declaration preflight; live prepare is required',
                         {'facts': facts})
