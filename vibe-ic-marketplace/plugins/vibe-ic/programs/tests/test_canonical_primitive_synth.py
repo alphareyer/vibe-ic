@@ -387,7 +387,7 @@ def test_unsigned_divider_supports_renamed_ports_and_refuses_unsupported_domains
 def _native_divider_vectors(width):
     """Independent legal operands and Python's mathematical / and % oracle."""
     limit = (1 << width) - 1
-    if width <= 4:
+    if width <= 6 or width == 8:
         pairs = [(a, b) for b in range(1, limit + 1)
                  for a in range(b, limit + 1)]
     else:
@@ -452,6 +452,9 @@ module tb;
             start = 1'b1;
             @(posedge clk); #1;
             start = 1'b0;
+            // The DUT must use its latched operands after the request edge.
+            dividend = '0;
+            divisor = '0;
             cycles = 1;
             while (!valid && cycles <= WIDTH + 2) begin
                 @(posedge clk); #1;
@@ -558,6 +561,62 @@ def test_unsigned_divider_native_oracle_latency_reset_back_to_back_and_reverse()
         print("REVERSE_PASS mutation=restore_shifted_remainder caught=oracle")
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def _native_width_gap_case(width, include_restore_reverse=True):
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"]
+    rtl = rcs.emit_rtl("unsigned_iterative_restoring_divider", desc)
+    vectors = _native_divider_vectors(width)
+    work = Path(tempfile.mkdtemp(prefix=f"issue2851-native-w{width}-", dir="/tmp"))
+    try:
+        run = _run_native_divider_case(work, rtl, width, vectors)
+        assert run.returncode == 0, run.stdout + run.stderr
+        assert f"PASS width={width}" in run.stdout, run.stdout + run.stderr
+        print(f"NATIVE_PASS width={width} vectors={len(vectors)} latched_operands=PASS")
+
+        if include_restore_reverse:
+            restore = rtl.replace(
+                "        : shifted_remainder;\n",
+                "        : partial_remainder;\n", 1)
+            assert restore != rtl
+            reverse_restore = _run_native_divider_case(
+                work, restore, width, vectors)
+            assert reverse_restore.returncode != 0
+            assert "FAIL width=" + str(width) in reverse_restore.stdout
+            print(f"REVERSE_PASS width={width} mutation=restore_shifted_remainder")
+
+        # Reverse the request-edge trial into a real input-only cycle. The
+        # internal operands are still latched, but every legal result arrives
+        # one edge later, so the unchanged latency/oracle assertions must redden.
+        input_only = rtl
+        input_only = input_only.replace(
+            "if (count == WIDTH - 2) begin",
+            "if (count == WIDTH - 1) begin", 1)
+        input_only = input_only.replace(
+            "dividend_reg      <= dividend << 1;",
+            "dividend_reg      <= dividend;", 1)
+        input_only = input_only.replace(
+            "quotient_reg      <= start_ge_divisor;",
+            "quotient_reg      <= {WIDTH{1'b0}};", 1)
+        input_only = input_only.replace(
+            "partial_remainder <= start_remainder;",
+            "partial_remainder <= {(WIDTH + 1){1'b0}};", 1)
+        assert input_only != rtl
+        reverse_input = _run_native_divider_case(
+            work, input_only, width, vectors)
+        assert reverse_input.returncode != 0
+        assert "latency mismatch" in reverse_input.stdout
+        print(f"REVERSE_PASS width={width} mutation=input_only_cycle")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_unsigned_divider_native_width6_latched_and_reverse_gap():
+    _native_width_gap_case(6)
+
+
+def test_unsigned_divider_native_width8_exhaustive_latched_and_reverse_gap():
+    _native_width_gap_case(8, include_restore_reverse=False)
 
 
 def test_parallel2serial_dout_is_combinational():
