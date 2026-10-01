@@ -88,12 +88,14 @@ def _live_source_fixture(tmp_path: Path, project: Path, step_id: str,
     source_name = inspect.getsourcefile(callable)
     if not source_name:
         raise RuntimeError("source-fixture callable has no regular source")
-    source = Path(source_name).resolve(strict=True)
-    if source.is_symlink() or not source.is_file():
+    source_path = Path(source_name)
+    if source_path.is_symlink() or not source_path.is_file():
         raise RuntimeError("source-fixture callable source is not regular")
-    project = Path(project).resolve(strict=True)
-    if project.is_symlink() or not project.is_dir():
+    source = source_path.resolve(strict=True)
+    project_path = Path(project)
+    if project_path.is_symlink() or not project_path.is_dir():
         raise RuntimeError("source-fixture project is not regular")
+    project = project_path.resolve(strict=True)
     binding_root = tmp_path / ("source-fixture-" + step_id)
     with host_lease(Budget(1, 256, workers=1), fixture_root=binding_root) as lease:
         yield _SourceFixtureBinding(
