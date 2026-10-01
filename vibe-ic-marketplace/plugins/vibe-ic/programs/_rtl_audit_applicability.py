@@ -14,10 +14,12 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _structural_absence import absence
 
 SCHEMA = "vibeic.rtl_audit_applicability.v1"

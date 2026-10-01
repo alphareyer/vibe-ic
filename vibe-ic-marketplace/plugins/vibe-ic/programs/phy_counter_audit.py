@@ -41,6 +41,8 @@ import re
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _rtl_audit_applicability as _applicability
 from typing import List, Optional
 
