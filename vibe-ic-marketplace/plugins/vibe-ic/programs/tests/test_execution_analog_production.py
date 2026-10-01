@@ -69,12 +69,21 @@ class AnalogProductionControls(unittest.TestCase):
         write(self.l5, {'analog_blocks': [{'name': 'ref', 'type': 'bandgap',
              'spec': {'specs': [{'name': 'Vref', 'target': 1.2, 'unit': 'V'}]}}]})
         write(self.project / 'phase1/generated_docs/L1_DATASHEET.json', {'electrical_specs': []})
-        self.lease = self.root / 'lease'
-        # Deliberately a SOURCE-FIXTURE control, never an F1 native admission.
-        write(self.lease / 'lease.json', {'scope': 'source-fixture-only', 'cpus': 1, 'ram_mb': 256})
+        # Keep the source fixture on the existing live typed issuer path.  A
+        # caller-authored lease.json is data, never an authority, and the
+        # worker's live callback must be able to bind this parent lease.
+        from execution_resource_lease import host_lease
+        self.lease_root = self.root / 'lease-root'
+        self.lease_context = host_lease(em.Budget(1, 256, workers=1),
+                                        fixture_root=self.lease_root)
+        self.lease = Path(self.lease_context.__enter__())
 
     def tearDown(self):
-        self.temp.cleanup()
+        try:
+            if hasattr(self, 'lease_context'):
+                self.lease_context.__exit__(None, None, None)
+        finally:
+            self.temp.cleanup()
 
     def request(self, **updates):
         parameters = {'declaration': self.declaration, 'cpus': 1, 'ram_mb': 256,
@@ -98,20 +107,52 @@ class AnalogProductionControls(unittest.TestCase):
         controller.run(prepared.context, run)
         receipt = run / 'analog-a1/receipt.json'
         data = json.loads(receipt.read_text())
-        self.assertEqual(data['status'], 'ELIGIBLE', {k: data.get(k) for k in ('reason', 'detail', 'evidence')})
-        choice = {'arm_id': 'analog-a1', 'receipt_sha256': em.digest(receipt),
-            'binding': prepared.context.binding(), 'reviewer': 'finite-source-control',
-            'rationale': 'Control selects the actual document-bound software artifact, not native acceptance.'}
-        adopted = controller.adopt(prepared.context, run, choice)
-        evidence = os.environ.get('F5_EVIDENCE_ROOT')
+        # Keep the actual worker receipt and component stderr before the
+        # assertion can tear down TemporaryDirectory on a measured refusal.
+        # TMPDIR is the canonical harness-mounted volatile root; callers may
+        # still override it with F5_EVIDENCE_ROOT when that variable is
+        # forwarded by their runner.
+        evidence = os.environ.get('F5_EVIDENCE_ROOT') or str(
+            Path(os.environ.get('TMPDIR', '/tmp')) / 'f5-evidence')
+        proof_path = None
         if evidence:
-            target = Path(evidence) / self._testMethodName
+            # The TemporaryDirectory basename binds this capture to one
+            # invocation and keeps older refusal evidence intact.
+            target = Path(evidence) / self._testMethodName / self.root.name
+            target.mkdir(parents=True)
             shutil.copytree(self.project, target / 'original-input')
             shutil.copytree(run, target / 'controller-run')
             shutil.copyfile(prepared.context.request_record, target / 'request.json')
-            write(target / 'proof-scope.json', {'source_sha': BASE, 'scope': 'SOURCE_FIXTURE',
+            proof_path = target / 'proof-scope.json'
+            write(proof_path, {'fixture_binding_source_sha': BASE, 'scope': 'SOURCE_FIXTURE',
                 'actual_native_jobs': 0, 'independent_AI_integration_qualified': False,
-                'selection': 'explicit control choice of actual eligible A1 software output'})
+                'receipt_status': data.get('status'), 'receipt_reason': data.get('reason'),
+                'receipt_detail': data.get('detail'), 'selection_status': 'NOT_SELECTED',
+                'adoption_status': 'NOT_ATTEMPTED'})
+        self.assertEqual(data['status'], 'ELIGIBLE', {k: data.get(k) for k in ('reason', 'detail', 'evidence')})
+        if proof_path is not None:
+            proof = json.loads(proof_path.read_text())
+            proof.update(selection_status='ELIGIBLE_NOT_SELECTED', adoption_status='PENDING')
+            write(proof_path, proof)
+        choice = {'arm_id': 'analog-a1', 'receipt_sha256': em.digest(receipt),
+            'binding': prepared.context.binding(), 'reviewer': 'finite-source-control',
+            'rationale': 'Control selects the actual document-bound software artifact, not native acceptance.'}
+        try:
+            adopted = controller.adopt(prepared.context, run, choice)
+        except em.Refusal as exc:
+            if proof_path is not None:
+                proof = json.loads(proof_path.read_text())
+                proof.update(selection_status='NOT_SELECTED', adoption_status='REFUSED',
+                             adoption_reason=exc.code, adoption_detail=str(exc))
+                write(proof_path, proof)
+            raise
+        if proof_path is not None:
+            proof = json.loads(proof_path.read_text())
+            proof.update(selection_status=('SELECTED' if adopted.get('selected') else 'NOT_SELECTED'),
+                         adoption_status=adopted.get('status', 'UNKNOWN'),
+                         selected_arm=adopted.get('selected'),
+                         selection_receipt_sha256=choice['receipt_sha256'])
+            write(proof_path, proof)
         return prepared, controller, run, adopted
 
     def private_worker_closure(self):
@@ -161,11 +202,13 @@ class AnalogProductionControls(unittest.TestCase):
         import execution_production as production
         from execution_resource_lease import host_lease
         budget = em.Budget(1, 256, workers=1)
-        evidence = os.environ.get('F5_EVIDENCE_ROOT')
-        target = Path(evidence) / self._testMethodName if evidence else None
+        evidence = os.environ.get('F5_EVIDENCE_ROOT') or str(
+            Path(os.environ.get('TMPDIR', '/tmp')) / 'f5-evidence')
+        target = (Path(evidence) / self._testMethodName / self.root.name
+                  if evidence else None)
         if target:
             shutil.copytree(self.project, target / 'original-input')
-        with host_lease(budget, fixture_root=self.root) as lease:
+        with host_lease(budget, fixture_root=self.root / 'f199-lease-root') as lease:
             parameters, extras = production.frontdoor_parameters(dict(
                 step_id='A1', project=self.project, declaration=self.declaration,
                 objective={'task': 'extract attributed L5 spec preserving V units'},
@@ -192,11 +235,46 @@ class AnalogProductionControls(unittest.TestCase):
             run = self.root / 'f199-run'
             controller.run(context, run)
             receipt = run / 'analog-a1/receipt.json'
+            f199_data = json.loads(receipt.read_text())
+            f199_proof = None
+            if target:
+                shutil.copytree(run, target / 'controller-run')
+                shutil.copyfile(request.record, target / 'request.json')
+                shutil.copyfile(lease / 'lease.json', target / 'issued-source-lease.json')
+                f199_proof = target / 'proof-scope.json'
+                write(f199_proof, {'fixture_binding_source_sha': BASE,
+                    'fixture_shared_contract_sha': 'f1997a38ee6922a301bb7e7d1160df23505c3cd3',
+                    'scope': 'SOURCE_FIXTURE', 'native_jobs': 0,
+                    'independent_AI_integration_qualified': False,
+                    'receipt_status': f199_data.get('status'),
+                    'receipt_reason': f199_data.get('reason'),
+                    'receipt_detail': f199_data.get('detail'),
+                    'selection_status': 'NOT_SELECTED',
+                    'adoption_status': 'NOT_ATTEMPTED'})
             self.assertEqual(json.loads(receipt.read_text())['status'], 'ELIGIBLE')
+            if f199_proof:
+                proof = json.loads(f199_proof.read_text())
+                proof.update(selection_status='ELIGIBLE_NOT_SELECTED', adoption_status='PENDING')
+                write(f199_proof, proof)
             choice = {'arm_id': 'analog-a1', 'receipt_sha256': em.digest(receipt),
                 'binding': context.binding(), 'reviewer': 'finite-f199-source-control',
                 'rationale': 'Explicit source fixture selection; independent AI integration remains pending.'}
-            adopted = controller.adopt(context, run, choice)
+            try:
+                adopted = controller.adopt(context, run, choice)
+            except em.Refusal as exc:
+                if f199_proof:
+                    proof = json.loads(f199_proof.read_text())
+                    proof.update(selection_status='NOT_SELECTED', adoption_status='REFUSED',
+                                 adoption_reason=exc.code, adoption_detail=str(exc))
+                    write(f199_proof, proof)
+                raise
+            if f199_proof:
+                proof = json.loads(f199_proof.read_text())
+                proof.update(selection_status=('SELECTED' if adopted.get('selected') else 'NOT_SELECTED'),
+                             adoption_status=adopted.get('status', 'UNKNOWN'),
+                             selected_arm=adopted.get('selected'),
+                             selection_receipt_sha256=choice['receipt_sha256'])
+                write(f199_proof, proof)
             imported = production._consume(prepared, request, controller, run, adopted)
             self.assertEqual(imported['status'], 'IMPORTED')
             self.assertEqual(imported['selected_generation'], adopted['selected_generation'])
@@ -211,15 +289,10 @@ class AnalogProductionControls(unittest.TestCase):
             self.assertEqual(spec['_provenance']['fields_defaulted'], [])
             self.assertEqual(spec['_provenance']['input']['sha256'], em.digest(self.l5))
             if target:
-                shutil.copytree(run, target / 'controller-run')
                 shutil.copytree(self.project, target / 'canonical-import')
-                shutil.copyfile(request.record, target / 'request.json')
-                shutil.copyfile(lease / 'lease.json', target / 'issued-source-lease.json')
-                write(target / 'proof-scope.json', {'source_sha': BASE,
-                    'shared_sha': 'f1997a38ee6922a301bb7e7d1160df23505c3cd3',
-                    'scope': 'SOURCE_FIXTURE', 'native_jobs': 0,
-                    'independent_AI_integration_qualified': False,
-                    'consumer': 'execution_production._consume -> analog.consume -> real semantic_gates'})
+                proof = json.loads(f199_proof.read_text())
+                proof['consumer'] = 'execution_production._consume -> analog.consume -> real semantic_gates'
+                write(f199_proof, proof)
 
     def test_stale_input_refuses_and_preserves_old_output(self):
         prepared, controller, run, adopted = self.execute()
@@ -304,8 +377,11 @@ class AnalogProductionControls(unittest.TestCase):
         finally:
             worker.semantic_gates = original
         self.assertEqual(target.read_text(), 'old-output')
-        if os.environ.get('F5_EVIDENCE_ROOT'):
-            evidence = Path(os.environ['F5_EVIDENCE_ROOT']) / self._testMethodName
+        evidence = os.environ.get('F5_EVIDENCE_ROOT') or str(
+            Path(os.environ.get('TMPDIR', '/tmp')) / 'f5-evidence')
+        if evidence:
+            evidence = Path(evidence) / self._testMethodName / self.root.name
+            evidence.mkdir(parents=True, exist_ok=True)
             shutil.copytree(run, evidence / 'controller-run-after-refusal')
             write(evidence / 'canonical-after-refusal.json', {
                 'preserved_old_output': target.read_text(), 'design_verdict': failed_import['design_verdict'],
@@ -321,8 +397,11 @@ class AnalogProductionControls(unittest.TestCase):
         self.assertNotEqual(receipt['status'], 'ELIGIBLE')
         self.assertTrue((run / 'analog-a1/outputs/project/phase3/analog/ref/spec_gap.json').is_file())
         self.assertFalse((run / 'analog-a1/outputs/project/phase3/analog/ref/spec.json').exists())
-        if os.environ.get('F5_EVIDENCE_ROOT'):
-            target = Path(os.environ['F5_EVIDENCE_ROOT']) / self._testMethodName
+        evidence = os.environ.get('F5_EVIDENCE_ROOT') or str(
+            Path(os.environ.get('TMPDIR', '/tmp')) / 'f5-evidence')
+        if evidence:
+            target = Path(evidence) / self._testMethodName / self.root.name
+            target.mkdir(parents=True, exist_ok=True)
             shutil.copytree(run, target / 'controller-run')
             shutil.copyfile(prepared.context.request_record, target / 'request.json')
 
