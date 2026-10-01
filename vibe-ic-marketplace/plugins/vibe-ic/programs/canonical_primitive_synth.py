@@ -5,7 +5,7 @@ RTL for SIXTEEN canonical design shapes, keyed on STATED STRUCTURE.
 WHAT IT DOES
 ------------
 Given the natural-language design description of an RTLLM-style task, this program
-detects which — if any — of sixteen canonical design SHAPES the spec describes,
+detects which — if any — of seventeen canonical design SHAPES the spec describes,
 and deterministically emits the corresponding RTL. It is the "program-first"
 capture of designs that the flow otherwise defers to an LLM authoring pass
 (spec-to-rtl). The shapes and their keys:
@@ -18,6 +18,7 @@ capture of designs that the flow otherwise defers to an LLM authoring pass
     combinational_long_divider -> div_16bit        (A/B/result/odd, no clk, combinational)
     traffic_light_fsm          -> traffic_light    (pass_request/clock/red/yellow/green)
     radix2_signed_divider      -> radix2_div       (sign/dividend/divisor/opn_valid/res_valid)
+    unsigned_iterative_restoring_divider -> <stated module> (source-bound unsigned contract)
     ieee754_single_multiplier  -> float_multi      (a/b/z 32-bit, "IEEE 754")
     async_gray_fifo            -> asyn_fifo        (wclk/rclk/wrstn/rrstn, gray-code CDC)
     lfsr4_xnor_left            -> LFSR             (synchronous reset, XNOR feedback)
@@ -37,7 +38,7 @@ input's own:
 
 FAIL-CLOSED CONTRACT
 --------------------
-`detect_shape(desc_text)` returns exactly one of the sixteen shape keys ONLY when the
+`detect_shape(desc_text)` returns exactly one of the seventeen shape keys ONLY when the
 STRUCTURE tightly matches, and returns None otherwise. Each detector requires ALL
 of: (1) the exact "Module name:" token, (2) the declared input/output PORT signature
 (names, and for the few shapes where it matters, widths), and (3) at least one
@@ -83,6 +84,7 @@ Pure Python 3, stdlib only.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -114,6 +116,196 @@ def _has_all(text: str, *subs: str) -> bool:
 def _has_any(text: str, *subs: str) -> bool:
     low = text.lower()
     return any(s.lower() in low for s in subs)
+
+
+# ------------------------------------------------------------------------ source-bound unsigned restoring division
+#
+# This shape is intentionally composed from the input's own names and quoted
+# contract.  A partial match routes to AI authoring; it never falls back to a
+# benchmark-specific spelling or to a guessed width/latency.
+_UNSIGNED_DIVISION_SHAPE = "unsigned_iterative_restoring_divider"
+_UNSIGNED_DIVISION_ROLE_WORDS = {
+    "dividend": ("dividend", "numerator"),
+    "divisor": ("divisor", "denominator"),
+    "quotient": ("quotient", "quot"),
+    "remainder": ("remainder", "residue", "rem"),
+}
+
+
+def _source_port_records(desc_text: str) -> List[Dict[str, str]]:
+    """Return source-declared input/output port records with their exact lines."""
+    records: List[Dict[str, str]] = []
+    direction: Optional[str] = None
+    for raw in (desc_text or "").splitlines():
+        stripped = raw.strip()
+        low = stripped.lower()
+        if re.match(r"^inputs?\s*(ports?|signals?)?\s*[:：]?\s*$", low):
+            direction = "in"
+            continue
+        if re.match(r"^outputs?\s*(ports?|signals?)?\s*[:：]?\s*$", low):
+            direction = "out"
+            continue
+        if re.match(r"^[A-Za-z][A-Za-z /]*[:：]\s*$", stripped):
+            direction = None
+            continue
+        if not direction:
+            continue
+        m = re.match(r"^([A-Za-z_]\w*)\s*(\[[^\]]*\])?\s*[:：]\s*(.*)$",
+                     stripped)
+        if not m:
+            continue
+        records.append({"name": m.group(1), "vector": m.group(2) or "",
+                        "text": m.group(3), "line": stripped,
+                        "direction": direction})
+    return records
+
+
+def _unique_role_record(records: List[Dict[str, str]], role: str,
+                        directions: Optional[set] = None) -> Optional[Dict[str, str]]:
+    words = _UNSIGNED_DIVISION_ROLE_WORDS[role]
+    matches = [r for r in records
+               if (directions is None or r["direction"] in directions)
+               and any(re.search(r"\b" + re.escape(word) + r"\b",
+                                 (r["name"] + " " + r["text"]).lower())
+                       for word in words)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _width_from_parameter(desc_text: str) -> Optional[int]:
+    low = " ".join((desc_text or "").lower().split())
+    patterns = (
+        r"\bparameter\s+width\s+has\s+(?:a\s+)?default\s+(?:value\s+)?of\s+(\d+)\b",
+        r"\bparameter\s+width\s*(?:=|:)\s*(\d+)\b",
+        r"\bwidth\s+(?:defaults?|default(?:s)?\s+to)\s+(\d+)\b",
+    )
+    values = {int(m.group(1)) for p in patterns for m in re.finditer(p, low)}
+    return next(iter(values)) if len(values) == 1 and next(iter(values)) > 0 else None
+
+
+def _width_expression_matches(vector: str, width: int) -> bool:
+    expr = re.sub(r"\s+", "", vector.strip("[]").lower())
+    return expr in {"width-1:0", f"{width - 1}:0"}
+
+
+def _unsigned_division_observation(desc_text: str) -> Tuple[Optional[Dict], List[str]]:
+    """Parse the complete unsigned iterative-divider source contract.
+
+    The returned quotes are verbatim source lines, and the hash covers the
+    complete description.  A non-empty unresolved list is an explicit AI
+    backup route, never permission to guess.
+    """
+    low = " ".join((desc_text or "").lower().split())
+    if not (re.search(r"\brestoring\b", low)
+            and re.search(r"\bdivision\b", low)
+            and re.search(r"\biterative\b", low)):
+        return None, []
+    records = _source_port_records(desc_text)
+    unresolved: List[str] = []
+    module = module_name_of(desc_text)
+    if not module:
+        unresolved.append("module name")
+    width = _width_from_parameter(desc_text)
+    if width is None:
+        unresolved.append("WIDTH default")
+    if re.search(r"\bsigned\b", low):
+        unresolved.append("unsigned operand domain (signed is unsupported)")
+    if not re.search(r"\bnon[- ]?zero\b", low):
+        unresolved.append("nonzero operand domain")
+    if not (re.search(r"\bdividend\b\s*(?:is|must be)?\s*at least\s*\bdivisor\b", low)
+            or re.search(r"\bdividend\b\s*>=\s*\bdivisor\b", low)):
+        unresolved.append("dividend >= divisor domain")
+    if re.search(r"\b(?:zero|0)\s+(?:divisor|denominator)\b", low):
+        unresolved.append("zero divisor is unsupported")
+
+    clock_candidates = [r for r in records if r["direction"] == "in"
+                        and re.search(r"\b(?:posedge|rising[- ]edge)\b", r["text"], re.I)
+                        and re.search(r"\bclock\b", r["text"], re.I)]
+    reset_candidates = [r for r in records if r["direction"] == "in"
+                        and re.search(r"\bactive[- ]low\b", r["text"], re.I)
+                        and re.search(r"\b(?:async|asynchronous)\b", r["text"], re.I)
+                        and re.search(r"\breset\b", r["text"], re.I)]
+    request_candidates = [r for r in records if r["direction"] == "in"
+                          and re.search(r"\bone[- ]cycle\b", r["text"], re.I)
+                          and re.search(r"\b(?:start|request|launch|go)\b",
+                                        r["name"] + " " + r["text"], re.I)]
+    if len(clock_candidates) != 1:
+        unresolved.append("one posedge clock port")
+    if len(reset_candidates) != 1:
+        unresolved.append("one active-low asynchronous reset port")
+    if len(request_candidates) != 1:
+        unresolved.append("one one-cycle request port")
+
+    selected: Dict[str, Dict[str, str]] = {}
+    for role, directions in (("dividend", {"in"}), ("divisor", {"in"}),
+                             ("quotient", {"out"}), ("remainder", {"out"})):
+        record = _unique_role_record(records, role, directions)
+        if record is None:
+            unresolved.append(f"one unambiguous {role} port")
+        else:
+            selected[role] = record
+    valid_candidates = [r for r in records if r["direction"] == "out"
+                        and re.search(r"\b(?:valid|done|completion|complete)\b",
+                                      r["name"] + " " + r["text"], re.I)]
+    if len(valid_candidates) != 1:
+        unresolved.append("one completion-valid output port")
+    else:
+        selected["valid"] = valid_candidates[0]
+
+    if width is not None:
+        for role in ("dividend", "divisor", "quotient", "remainder"):
+            record = selected.get(role)
+            if record is None or not _width_expression_matches(record["vector"], width):
+                unresolved.append(f"{role} width WIDTH")
+
+    required_phrases = (
+        (r"restoring\s+division", "restoring division algorithm"),
+        (r"shifted\s+partial\s+remainder", "shifted partial remainder"),
+        (r"negative\s+trial\s+restores?\s+the\s+shifted\s+partial\s+remainder",
+         "negative trial restoration"),
+        (r"on\s+reset\s+all\s+outputs\s+clear", "reset output clearing"),
+        (r"new\s+inputs\s+are\s+accepted\s+after\s+the\s+previous\s+result",
+         "post-result request acceptance"),
+        (r"completion\s+takes\s+width\s+cycles\s+for\s+power[- ]of[- ]two\s+width\s+and\s+width\s*\+\s*1\s+cycles\s+otherwise",
+         "source-declared completion latency"),
+        (r"no\s+extra\s+input[- ]only\s+cycle", "no input-only cycle"),
+    )
+    for pattern, label in required_phrases:
+        if not re.search(pattern, low):
+            unresolved.append(label)
+
+    if unresolved:
+        return None, sorted(set(unresolved))
+    assert width is not None
+    assert len(clock_candidates) == len(reset_candidates) == len(request_candidates) == 1
+    assert len(valid_candidates) == 1
+    latency = width if (width & (width - 1)) == 0 else width + 1
+    quote_records = {role: selected[role]["line"]
+                     for role in ("dividend", "divisor", "quotient", "remainder", "valid")}
+    quote_records.update(clock=clock_candidates[0]["line"],
+                         reset=reset_candidates[0]["line"],
+                         request=request_candidates[0]["line"])
+    return {
+        "module": module,
+        "clock": clock_candidates[0]["name"],
+        "reset": reset_candidates[0]["name"],
+        "start": request_candidates[0]["name"],
+        "dividend": selected["dividend"]["name"],
+        "divisor": selected["divisor"]["name"],
+        "quotient": selected["quotient"]["name"],
+        "remainder": selected["remainder"]["name"],
+        "valid": selected["valid"]["name"],
+        "width": width,
+        "latency": latency,
+        "source_sha256": hashlib.sha256(desc_text.encode("utf-8")).hexdigest(),
+        "quotes": quote_records,
+    }, []
+
+
+def _is_unsigned_iterative_divider(desc: str, mod: Optional[str], ports: set) -> bool:
+    if not desc or not mod:
+        return False
+    contract, unresolved = _unsigned_division_observation(desc)
+    return contract is not None and not unresolved
 
 
 def _port_tokens(desc_text: str) -> set:
@@ -389,6 +581,7 @@ _DETECTORS: List[Tuple[str, object]] = [
     ("combinational_long_divider", _is_div_16bit),
     ("traffic_light_fsm", _is_traffic_light),
     ("radix2_signed_divider", _is_radix2_div),
+    (_UNSIGNED_DIVISION_SHAPE, _is_unsigned_iterative_divider),
     ("ieee754_single_multiplier", _is_float_multi),
     ("async_gray_fifo", _is_asyn_fifo),
     ("lfsr4_xnor_left", _is_lfsr4_xnor_left),
@@ -401,7 +594,7 @@ _DETECTORS: List[Tuple[str, object]] = [
 
 
 def detect_shape(desc_text: str) -> Optional[str]:
-    """Return one of the SIXTEEN template shape keys, or a CONTRACT-composed shape
+    """Return one of the canonical template shape keys, a source-bound composed shape,
     key, or None (FAIL-CLOSED) if the input states no shape tightly.
 
     Detection reads the STRUCTURE: module-name token + port role set +
@@ -440,6 +633,11 @@ def route_to_ai_reason(desc_text: str) -> Optional[Dict]:
     """
     if detect_shape(desc_text) is not None:
         return None
+    _, unsigned_unresolved = _unsigned_division_observation(desc_text or "")
+    if unsigned_unresolved:
+        return {"route": "ai_author",
+                "kind": "unsupported_unsigned_iterative_divider",
+                "unresolved": unsigned_unresolved}
     mod = module_name_of(desc_text or "")
     ports = _port_tokens(desc_text or "") - _NOISE
     matched = [key for key, det in _DETECTORS if det(desc_text or "", mod, ports)]
@@ -1709,6 +1907,125 @@ _SHAPE_MODULE: Dict[str, str] = {
 }
 
 
+def _emit_unsigned_iterative_divider(contract: Dict) -> str:
+    """Emit the source-bound WIDTH-bit unsigned restoring divider.
+
+    The first trial is performed on the request edge, so the request does not
+    create an input-only bubble.  Non-power-of-two WIDTHs use the source's
+    declared WIDTH+1 completion convention by publishing the already-computed
+    result on the following edge; all arithmetic still takes exactly WIDTH
+    restoring trials.
+    """
+    m = contract["module"]
+    clk, rst, start = contract["clock"], contract["reset"], contract["start"]
+    dividend, divisor = contract["dividend"], contract["divisor"]
+    quotient, remainder, valid = (contract["quotient"], contract["remainder"],
+                                   contract["valid"])
+    width = contract["width"]
+    digest = contract["source_sha256"]
+    return f'''// Source-bound unsigned restoring divider.
+// Input contract SHA-256: {digest}
+// WIDTH={width}; completion is WIDTH cycles for power-of-two WIDTH and
+// WIDTH+1 otherwise. The first restoring trial occurs on the request edge.
+module {m} #(
+    parameter WIDTH = {width}
+) (
+    input  wire                   {clk},
+    input  wire                   {rst},
+    input  wire                   {start},
+    input  wire [WIDTH-1:0]       {dividend},
+    input  wire [WIDTH-1:0]       {divisor},
+    output reg  [WIDTH-1:0]       {quotient},
+    output reg  [WIDTH-1:0]       {remainder},
+    output reg                    {valid}
+);
+    localparam integer COUNT_WIDTH = (WIDTH < 2) ? 1 : $clog2(WIDTH + 1);
+    localparam integer EXTRA_FINAL_CYCLE = ((WIDTH & (WIDTH - 1)) != 0);
+
+    reg [WIDTH-1:0] dividend_reg;
+    reg [WIDTH-1:0] divisor_reg;
+    reg [WIDTH-1:0] quotient_reg;
+    reg [WIDTH:0]   partial_remainder;
+    reg [COUNT_WIDTH-1:0] count;
+    reg busy;
+    reg finish_pending;
+
+    // Every negative trial keeps the SHIFTED remainder. This is the restoring
+    // operation; restoring the previous (unshifted) state is incorrect on the
+    // final trial and changes the mathematical remainder.
+    wire [WIDTH:0] shifted_remainder =
+        {{partial_remainder[WIDTH-1:0], dividend_reg[WIDTH-1]}};
+    wire trial_ge_divisor = shifted_remainder >= {{1'b0, divisor_reg}};
+    wire [WIDTH:0] iteration_remainder = trial_ge_divisor
+        ? shifted_remainder - {{1'b0, divisor_reg}}
+        : shifted_remainder;
+
+    // The request edge is also iteration zero: no input-only cycle is inserted.
+    wire [WIDTH:0] start_shifted_remainder = {dividend}[WIDTH-1];
+    wire start_ge_divisor = start_shifted_remainder >= {{1'b0, {divisor}}};
+    wire [WIDTH:0] start_remainder = start_ge_divisor
+        ? start_shifted_remainder - {{1'b0, {divisor}}}
+        : start_shifted_remainder;
+
+    always @(posedge {clk} or negedge {rst}) begin
+        if (!{rst}) begin
+            dividend_reg     <= {{WIDTH{{1'b0}}}};
+            divisor_reg      <= {{WIDTH{{1'b0}}}};
+            quotient_reg     <= {{WIDTH{{1'b0}}}};
+            partial_remainder <= {{(WIDTH + 1){{1'b0}}}};
+            count            <= {{COUNT_WIDTH{{1'b0}}}};
+            busy             <= 1'b0;
+            finish_pending   <= 1'b0;
+            {quotient}       <= {{WIDTH{{1'b0}}}};
+            {remainder}      <= {{WIDTH{{1'b0}}}};
+            {valid}          <= 1'b0;
+        end else begin
+            {valid} <= 1'b0;
+            if (finish_pending) begin
+                // WIDTH+1 convention: the result was computed on the last
+                // trial, and this edge is the single-cycle valid pulse.
+                {valid} <= 1'b1;
+                finish_pending <= 1'b0;
+            end else if (busy) begin
+                dividend_reg      <= dividend_reg << 1;
+                partial_remainder <= iteration_remainder;
+                quotient_reg      <= (quotient_reg << 1) | trial_ge_divisor;
+                if (count == WIDTH - 1) begin
+                    {quotient}  <= (quotient_reg << 1) | trial_ge_divisor;
+                    {remainder} <= iteration_remainder[WIDTH-1:0];
+                    busy <= 1'b0;
+                    if (EXTRA_FINAL_CYCLE)
+                        finish_pending <= 1'b1;
+                    else
+                        {valid} <= 1'b1;
+                end else begin
+                    count <= count + 1'b1;
+                end
+            end else if ({start}) begin
+                // Latch the legal request and perform its first trial now.
+                dividend_reg      <= {dividend} << 1;
+                divisor_reg       <= {divisor};
+                quotient_reg      <= start_ge_divisor;
+                partial_remainder <= start_remainder;
+                count             <= {{COUNT_WIDTH{{1'b1}}}};
+                if (WIDTH == 1) begin
+                    {quotient}  <= start_ge_divisor;
+                    {remainder} <= start_remainder[WIDTH-1:0];
+                    busy <= 1'b0;
+                    if (EXTRA_FINAL_CYCLE)
+                        finish_pending <= 1'b1;
+                    else
+                        {valid} <= 1'b1;
+                end else begin
+                    busy <= 1'b1;
+                end
+            end
+        end
+    end
+endmodule
+'''
+
+
 # ================================================== architecture-directive layer
 # WHY THIS LAYER EXISTS (measured, 2026-09-06, lane cz2035p, base 764d6b3e5)
 # ------------------------------------------------------------------------
@@ -2869,6 +3186,12 @@ def emit_rtl(shape: str, desc_text: str = "") -> str:
     """
     if shape in _TEMPLATES:
         return _TEMPLATES[shape]
+    if shape == _UNSIGNED_DIVISION_SHAPE:
+        contract, unresolved = _unsigned_division_observation(desc_text or "")
+        if contract is None or unresolved:
+            raise ValueError(f"{shape!r} needs its complete source contract: "
+                             + ", ".join(unresolved))
+        return _emit_unsigned_iterative_divider(contract)
     if shape in _CONTRACT_SHAPES:
         c = extract_handshake_contract(desc_text or "")
         if c is None or c.kind != _CONTRACT_SHAPES[shape]:
@@ -2881,6 +3204,11 @@ def emit_rtl(shape: str, desc_text: str = "") -> str:
 def module_of_shape(shape: str, desc_text: str = "") -> str:
     if shape in _SHAPE_MODULE:
         return _SHAPE_MODULE[shape]
+    if shape == _UNSIGNED_DIVISION_SHAPE:
+        contract, unresolved = _unsigned_division_observation(desc_text or "")
+        if contract is None or unresolved:
+            raise ValueError(f"{shape!r} needs its complete source contract")
+        return contract["module"]
     if shape in _CONTRACT_SHAPES:
         return module_name_of(desc_text or "") or "chip_top"
     raise KeyError(f"unknown shape: {shape!r}")
@@ -2938,6 +3266,32 @@ def _emit_and_write(shape: str, out_path: Path, desc_text: str = "") -> str:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(rtl)
     return str(out_path)
+
+
+def _source_contract_metadata(shape: str, desc_text: str) -> Dict:
+    """JSON-safe provenance for a composed source-bound shape."""
+    if shape != _UNSIGNED_DIVISION_SHAPE:
+        return {}
+    contract, unresolved = _unsigned_division_observation(desc_text)
+    if contract is None or unresolved:
+        raise ValueError("unsigned divider source contract is incomplete")
+    return {
+        "source_sha256": contract["source_sha256"],
+        "contract": {
+            "interface": {k: contract[k] for k in (
+                "clock", "reset", "start", "dividend", "divisor",
+                "quotient", "remainder", "valid")},
+            "width": contract["width"],
+            "domain": "unsigned_nonzero_dividend_ge_divisor",
+            "reset": "active_low_asynchronous_clears_outputs",
+            "request": "one_cycle_start_latched_operands",
+            "latency": {"power_of_two_cycles": "WIDTH",
+                        "otherwise_cycles": "WIDTH+1",
+                        "resolved_cycles": contract["latency"],
+                        "no_input_only_cycle": True},
+            "quotes": contract["quotes"],
+        },
+    }
 
 
 def _publish_declared_watchdog(project: Path) -> Optional[Dict]:
@@ -3012,9 +3366,18 @@ def main(argv=None) -> int:
         module = module_of_shape(shape, desc)
         written = None
         if a.out:
+            output_path = Path(a.out)
+            if (shape == _UNSIGNED_DIVISION_SHAPE
+                    and (output_path.exists() or output_path.is_symlink())):
+                print(json.dumps({"verdict": "REFUSED", "shape": shape,
+                                  "module": module,
+                                  "reason": "occupied output preserved"}))
+                return 2
             written = _emit_and_write(shape, Path(a.out), desc)
-        print(json.dumps({"verdict": "EMIT", "shape": shape,
-                          "module": module, "written": written}))
+        result = {"verdict": "EMIT", "shape": shape,
+                  "module": module, "written": written}
+        result.update(_source_contract_metadata(shape, desc))
+        print(json.dumps(result))
         return 0
 
     # ---- project mode ------------------------------------------------------
@@ -3048,8 +3411,10 @@ def main(argv=None) -> int:
     if a.emit:
         written = _emit_and_write(
             shape, proj / "phase2" / "stage1" / "rtl" / f"{module}.v", desc)
-    print(json.dumps({"verdict": "EMIT", "shape": shape,
-                      "module": module, "written": written}))
+    result = {"verdict": "EMIT", "shape": shape,
+              "module": module, "written": written}
+    result.update(_source_contract_metadata(shape, desc))
+    print(json.dumps(result))
     return 0
 
 

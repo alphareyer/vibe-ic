@@ -252,6 +252,29 @@ _INLINE_POS = {
         "inverted.\n"
         "Input ports:\n clk: Clock.\n rst: Reset.\n"
         "Output ports:\n out: 4-bit register value.\n"),
+    "unsigned_iterative_restoring_divider": (
+        "Design an unsigned iterative arithmetic unit using the restoring division "
+        "algorithm.\n"
+        "Module name: unsigned_ratio_unit\n"
+        "Parameter WIDTH has a default value of 9.\n"
+        "Input ports:\n"
+        "clk: posedge clock.\n"
+        "rst: active-low asynchronous reset.\n"
+        "start: one-cycle request.\n"
+        "dividend[WIDTH-1:0]: unsigned dividend.\n"
+        "divisor[WIDTH-1:0]: unsigned divisor.\n"
+        "Output ports:\n"
+        "quotient[WIDTH-1:0]: unsigned quotient.\n"
+        "remainder[WIDTH-1:0]: unsigned remainder.\n"
+        "valid: one-cycle completion.\n"
+        "Both operands are nonzero, and dividend is at least divisor.\n"
+        "On reset all outputs clear. New inputs are accepted after the previous "
+        "result.\n"
+        "At each restoring iteration append the next dividend bit to the shifted "
+        "partial remainder and subtract the divisor; a negative trial restores "
+        "the shifted partial remainder and produces quotient bit zero.\n"
+        "Completion takes WIDTH cycles for power-of-two WIDTH and WIDTH+1 cycles "
+        "otherwise; no extra input-only cycle.\n"),
 }
 
 # Near-miss descriptions that MUST fail-closed to None (no template mis-fire).
@@ -305,6 +328,58 @@ def test_inline_detect_negative_failclosed(desc):
 
 def test_module_name_extraction():
     assert rcs.module_name_of("Module name:\n    freq_divbyodd\n") == "freq_divbyodd"
+
+
+def test_unsigned_divider_cli_emits_source_bound_contract(tmp_path):
+    desc = tmp_path / "unsigned_ratio_unit_description.txt"
+    desc.write_text(_INLINE_POS["unsigned_iterative_restoring_divider"])
+    out = tmp_path / "unsigned_ratio_unit.sv"
+    run = subprocess.run([sys.executable, str(PROG), "--from-desc", str(desc),
+                          "--out", str(out)], capture_output=True, text=True)
+    assert run.returncode == 0, run.stdout + run.stderr
+    result = json.loads(run.stdout)
+    assert result["shape"] == "unsigned_iterative_restoring_divider"
+    assert result["module"] == "unsigned_ratio_unit"
+    assert result["contract"]["domain"] == (
+        "unsigned_nonzero_dividend_ge_divisor")
+    assert result["contract"]["latency"] == {
+        "power_of_two_cycles": "WIDTH", "otherwise_cycles": "WIDTH+1",
+        "resolved_cycles": 10,
+        "no_input_only_cycle": True}
+    rtl = out.read_text()
+    assert "module unsigned_ratio_unit" in rtl
+    assert result["source_sha256"] in rtl
+    occupied = subprocess.run(
+        [sys.executable, str(PROG), "--from-desc", str(desc), "--out", str(out)],
+        capture_output=True, text=True)
+    assert occupied.returncode == 2
+    assert json.loads(occupied.stdout)["verdict"] == "REFUSED"
+    assert out.read_text() == rtl
+
+
+def test_unsigned_divider_supports_renamed_ports_and_refuses_unsupported_domains():
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"].replace(
+        "unsigned_ratio_unit", "renamed_div").replace("clk:", "clock_i:") \
+        .replace("rst:", "reset_n:").replace("start:", "go_i:") \
+        .replace("dividend[", "numerator_i[").replace("divisor[", "denominator_i[") \
+        .replace("quotient[", "quot_o[").replace("remainder[", "rem_o[") \
+        .replace("valid:", "done_o:")
+    assert rcs.detect_shape(desc) == "unsigned_iterative_restoring_divider"
+    rtl = rcs.emit_rtl(rcs.detect_shape(desc), desc)
+    for name in ("clock_i", "reset_n", "go_i", "numerator_i", "denominator_i",
+                 "quot_o", "rem_o", "done_o"):
+        assert name in rtl
+    signed = desc.replace("unsigned iterative", "signed iterative") \
+        .replace("unsigned dividend", "signed dividend") \
+        .replace("unsigned divisor", "signed divisor")
+    assert rcs.detect_shape(signed) is None
+    assert rcs.route_to_ai_reason(signed)["kind"] == (
+        "unsupported_unsigned_iterative_divider")
+    zero = desc.replace("Both operands are nonzero, and dividend is at least divisor.",
+                        "The divisor may be zero.")
+    assert rcs.detect_shape(zero) is None
+    assert rcs.route_to_ai_reason(zero)["kind"] == (
+        "unsupported_unsigned_iterative_divider")
 
 
 def test_parallel2serial_dout_is_combinational():
@@ -367,6 +442,20 @@ def test_hook_author_guard_never_overwrites(tmp_path):
     (rtl_dir / "existing.v").write_text("module existing(); endmodule\n")
     # RTL already present → the guard must DEFER (never clobber the design's own).
     assert R._try_canonical_primitive_rtl(proj, 0.0) is None
+
+
+def test_unsigned_divider_normal_consumer_emits_and_preserves_occupied_output(tmp_path):
+    R = _load_runner()
+    proj = _mk_project(
+        tmp_path / "project", _INLINE_POS["unsigned_iterative_restoring_divider"])
+    res = R._try_canonical_primitive_rtl(proj, 0.0)
+    assert res is not None and res.status == "PASS"
+    output = proj / "phase2" / "stage1" / "rtl" / "unsigned_ratio_unit.v"
+    assert output.is_file()
+    before = output.read_text()
+    assert "module unsigned_ratio_unit" in before
+    assert R._try_canonical_primitive_rtl(proj, 0.0) is None
+    assert output.read_text() == before
 
 
 # ============================================================================
@@ -438,11 +527,11 @@ _F7_DESC = (
     "input event and emitting the output event are the same cycle's work.\n")
 
 
-def test_sixteen_templates_are_byte_identical_to_their_own_text():
+def test_templates_are_byte_identical_to_their_own_text():
     """The contract layer must not re-author a working emitter: every template
     shape still emits exactly its `_TEMPLATES` entry, and `desc_text` is ignored
     for them. Compared by MEMBERSHIP of the shape-key set, not by count."""
-    assert set(rcs._TEMPLATES) == {k for k, _ in rcs._DETECTORS}
+    assert set(rcs._TEMPLATES) <= {k for k, _ in rcs._DETECTORS}
     for shape, text in rcs._TEMPLATES.items():
         assert rcs.emit_rtl(shape) == text
         assert rcs.emit_rtl(shape, _F6_DESC) == text
@@ -663,6 +752,7 @@ def _flip_reset_pole(desc, pole):
 
 _POLE_CASES = [(shape, pole)
                for shape, desc in _INLINE_POS.items()
+               if shape in rcs._TEMPLATES
                for pole in sorted(p for p in rcs.template_commitments(shape)
                                   if p.endswith("_reset"))
                if _flip_reset_pole(desc, pole) != desc]
@@ -1524,7 +1614,12 @@ def test_the_sixteen_canonical_descriptions_still_emit_their_own_bytes():
     assert set(_INLINE_POS) == {k for k, _ in rcs._DETECTORS}
     for shape, desc in _INLINE_POS.items():
         assert rcs.detect_shape(desc) == shape
-        assert rcs.emit_rtl(shape, desc) == rcs._TEMPLATES[shape]
+        rtl = rcs.emit_rtl(shape, desc)
+        if shape == "unsigned_iterative_restoring_divider":
+            assert "module unsigned_ratio_unit" in rtl
+            assert rcs._unsigned_division_observation(desc)[0]["source_sha256"] in rtl
+        else:
+            assert rtl == rcs._TEMPLATES[shape]
 
 
 def test_the_lfsr_states_a_direction_and_keeps_its_template():
