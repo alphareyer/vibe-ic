@@ -170,6 +170,61 @@ class ShareRequest:
 
 
 NATIVE_CAPABILITY_TARGET = '/run/vibeic/native-capability.sock'
+_NATIVE_SOCKET_PARENT = Path('/tmp')
+_NATIVE_SOCKET_PREFIX = '.vibeic-native-'
+
+
+def _native_socket_path(directory: Path, manifest: dict, *, create_parent: bool = False) -> Path:
+    """Return the bounded source-owned host socket for one production lease.
+
+    The lease directory is an evidence namespace and may be arbitrarily long.
+    Native Docker mounts therefore use a short private parent keyed by the
+    authenticated lease nonce; this is a transport location, never authority.
+    """
+    raw_directory = Path(directory)
+    if not raw_directory.is_absolute() or raw_directory.is_symlink():
+        raise Refusal('RESOURCE_NATIVE_CAPABILITY_UNAVAILABLE', str(raw_directory))
+    directory = raw_directory.resolve()
+    nonce = manifest.get('nonce')
+    if not isinstance(nonce, str) or not re.fullmatch(r'[0-9a-f]{32}', nonce):
+        raise Refusal('RESOURCE_NATIVE_CAPABILITY_UNAVAILABLE', 'missing current nonce')
+    parent = _NATIVE_SOCKET_PARENT / (_NATIVE_SOCKET_PREFIX + str(os.getuid()))
+    if create_parent:
+        if parent.is_symlink():
+            raise Refusal('RESOURCE_NATIVE_CAPABILITY_CONFLICT', str(parent))
+        if not parent.exists():
+            parent.mkdir(mode=0o700)
+        try:
+            stat = parent.stat()
+        except OSError as exc:
+            raise Refusal('RESOURCE_NATIVE_CAPABILITY_UNAVAILABLE', str(parent)) from exc
+        if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+            raise Refusal('RESOURCE_NATIVE_CAPABILITY_UNAVAILABLE', str(parent))
+        parent.chmod(0o700)
+    elif parent.exists():
+        if parent.is_symlink():
+            raise Refusal('RESOURCE_NATIVE_CAPABILITY_CONFLICT', str(parent))
+        stat = parent.stat()
+        if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+            raise Refusal('RESOURCE_NATIVE_CAPABILITY_UNAVAILABLE', str(parent))
+    lease_key = hashlib.sha256((str(directory) + '\0' + nonce).encode()).hexdigest()[:24]
+    path = parent / (nonce + '-' + lease_key + '.sock')
+    if len(os.fsencode(str(path))) >= 104:
+        raise Refusal('RESOURCE_NATIVE_CAPABILITY_UNAVAILABLE', 'bounded socket path exceeded')
+    return path
+
+
+def _cleanup_native_socket(directory: Path, manifest: dict) -> None:
+    """Remove only this lease's source-owned native socket, if present."""
+    if manifest.get('resource_scope') != 'production':
+        return
+    path = _native_socket_path(directory, manifest)
+    if path.is_symlink():
+        raise Refusal('RESOURCE_NATIVE_CAPABILITY_CONFLICT', str(path))
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
 
 
 @dataclass(frozen=True)
@@ -685,12 +740,15 @@ def _share_issuer(directory: Path, manifest: dict):
     stopped = threading.Event()
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(_share_socket(manifest)); server.listen(); server.settimeout(.1)
-    native_path = directory / 'native-capability.sock'
-    if native_path.exists() or native_path.is_symlink():
-        raise Refusal('RESOURCE_NATIVE_CAPABILITY_CONFLICT', str(native_path))
-    native_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    native_server.bind(str(native_path)); native_server.listen(); native_server.settimeout(.1)
-    native_path.chmod(0o600)
+    native_server = None
+    native_path = None
+    if manifest.get('resource_scope') == 'production':
+        native_path = _native_socket_path(directory, manifest, create_parent=True)
+        if native_path.exists() or native_path.is_symlink():
+            raise Refusal('RESOURCE_NATIVE_CAPABILITY_CONFLICT', str(native_path))
+        native_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        native_server.bind(str(native_path)); native_server.listen(); native_server.settimeout(.1)
+        native_path.chmod(0o600)
 
     def save(row):
         path = directory/'shares'/(row['share_id']+'.json')
@@ -954,6 +1012,8 @@ def _share_issuer(directory: Path, manifest: dict):
                     pass  # any allocated grant remains charged in parent memory
 
     def native_serve():
+        if native_server is None:
+            return
         while not stopped.is_set():
             try:
                 peer, _ = native_server.accept()
@@ -975,18 +1035,22 @@ def _share_issuer(directory: Path, manifest: dict):
                     pass
     thread=threading.Thread(target=serve,name='F1-current-lease-issuer',daemon=True)
     thread.start()
-    native_thread=threading.Thread(target=native_serve,name='F1-native-capability-issuer',daemon=True)
-    native_thread.start()
+    native_thread = None
+    if native_server is not None:
+        native_thread=threading.Thread(target=native_serve,name='F1-native-capability-issuer',daemon=True)
+        native_thread.start()
     try:
         yield
     finally:
-        stopped.set(); thread.join(timeout=6); native_thread.join(timeout=6)
-        server.close(); native_server.close()
-        try:
-            native_path.unlink()
-        except FileNotFoundError:
-            pass
-        if thread.is_alive() or native_thread.is_alive():
+        stopped.set(); thread.join(timeout=6)
+        if native_thread is not None:
+            native_thread.join(timeout=6)
+        server.close()
+        if native_server is not None:
+            native_server.close()
+        if native_path is not None:
+            _cleanup_native_socket(directory, manifest)
+        if thread.is_alive() or (native_thread is not None and native_thread.is_alive()):
             raise Refusal('RESOURCE_SHARE_ISSUER_UNKNOWN', str(directory))
 
 
@@ -1137,6 +1201,10 @@ def recover(directory: Path, *, issuer_closing: bool = False) -> list[dict]:
             parent = dict(pid=manifest['parent_pid'], expected_start_ticks=manifest['parent_start_ticks'],
                           fate='recycled-by-host-boot')
         observations.append(dict(handle='parent', **parent))
+        # Recovery owns only the deterministic socket for this lease.  A
+        # missing/stale lease directory never authorizes deleting another
+        # lease's transport.
+        _cleanup_native_socket(directory, manifest)
         workers = [directory/'worker.json', *sorted(directory.glob('workers/*.json'))]
         seen = set()
         for worker in workers:
@@ -1484,7 +1552,7 @@ def native_client_contract(directory: Path, *, binding: NativeChildBinding,
     if (_process_state(lease['parent_pid'], lease['parent_start_ticks'])['fate'] != 'live'
             or os.environ.get(OWNER_ENV) != lease.get('nonce')):
         raise Refusal('RESOURCE_PARENT_GONE', str(directory))
-    return dict(socket_host_path=str(directory / 'native-capability.sock'),
+    return dict(socket_host_path=str(_native_socket_path(directory, lease)),
                 socket_container_path=NATIVE_CAPABILITY_TARGET,
                 locator_env='VIBEIC_NATIVE_CAPABILITY_SOCKET',
                 locator_value=NATIVE_CAPABILITY_TARGET,
