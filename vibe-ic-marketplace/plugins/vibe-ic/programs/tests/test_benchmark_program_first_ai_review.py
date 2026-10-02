@@ -152,6 +152,9 @@ def _task(tmp_path: Path) -> tuple[Path, dict, dict]:
     run = tmp_path / "run"
     (run / "responses").mkdir(parents=True)
     project = _project(tmp_path)
+    prompt = (project / "input/phase1_prompt.md").read_text()
+    source = (project / "phase2/stage1/rtl/dut.v").read_text()
+    bio._stage_public_original("p1", prompt, {"dut.v": source}, project)
     got = bio.collect("rtllm", "p1", project)
     task = bd._make_ai_review_task(
         "p1", project, got, ROUTING, 0, run, "PROGRAM")
@@ -172,6 +175,9 @@ def _valid_review(task: dict) -> dict:
             "rationale": "Ports and combinational behavior match the prompt.",
         },
     }
+    public = task.get("public_original_input") or {}
+    if public.get("source_sha256"):
+        review["source_sha256"] = public["source_sha256"]
     if (task.get("program_verification") or {}).get(
             "functional_confirmation_required") is True:
         review["verification_test"] = _write_direct_assignment_challenge(task)
@@ -1138,8 +1144,14 @@ def _proven_fail_review(task: dict) -> dict:
 
 
 def _write_ai_repair_record(run: Path, task: dict, challenge: dict) -> dict:
-    repaired_hash = bd._sha256_text(bd._candidate_text(
-        bd._rtl_files(Path(task["project"]))))
+    project = Path(task["project"])
+    rtl_files = bd._rtl_files(project)
+    repaired_hash = bd._sha256_text(bd._candidate_text(rtl_files))
+    candidate = rtl_files[0].read_text()
+    public = task["public_original_input"]
+    source_path = public["files"][0]["relative_path"]
+    original = (project / "input/public_original/files" / source_path).read_text()
+    author = {"kind": "AI", "model": "test-repair-model"}
     record = {
         "schema": bd._AI_REPAIR_RECORD_SCHEMA,
         "id": task["id"],
@@ -1147,11 +1159,36 @@ def _write_ai_repair_record(run: Path, task: dict, challenge: dict) -> dict:
         "parent_rtl_sha256": task["rtl_sha256"],
         "repaired_rtl_sha256": repaired_hash,
         "challenge_sha256": challenge["sha256"],
-        "author": {"kind": "AI", "model": "test-repair-model"},
+        "author": author,
         "oracle_accessed": False,
         "rationale": (
             "Replace the proven inversion with the prompt-required direct "
             "assignment, then re-run the immutable challenge."),
+        "repair_contract": {
+            "schema": "vibeic.source_bounded_completion.v1",
+            "prompt_sha256": task["prompt_sha256"],
+            "source_sha256": public["source_sha256"],
+            "parent_rtl_sha256": task["rtl_sha256"],
+            "candidate_sha256": repaired_hash,
+            "challenge_sha256": challenge["sha256"],
+            "author": author, "oracle_accessed": False,
+            "preservation": {
+                "schema": "vibeic.rtl_preservation_declaration.v1",
+                "sources": [{"path": source_path,
+                    "source_sha256": bd._sha256_text(original),
+                    "candidate_sha256": bd._sha256_text(candidate),
+                    "authorized_edit_regions": [],
+                    "preserved_executable_fragments": [{
+                        "id": "module_identity", "quote": "module dut"}]}]},
+            "elaboration_matrix": {
+                "schema": "vibeic.public_elaboration_matrix.v1",
+                "source_path": source_path,
+                "source_sha256": bd._sha256_text(original),
+                "candidate_sha256": bd._sha256_text(candidate),
+                "top": "dut", "supported_macros": [],
+                "supported_parameters": [], "source_quotes": [],
+                "configurations": [{"name": "default"}]},
+        },
     }
     path = bd._repair_record_path(run, task)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1381,6 +1418,10 @@ def test_ai_repair_reenters_at_validation_without_regeneration(
     working_rtl = project / "phase2" / "stage1" / "rtl" / "dut.v"
     working_rtl.write_text(
         "module dut(input wire a, output wire y); assign y = ~a; endmodule\n")
+    bio._stage_public_original(
+        "p1", (project / "input/phase1_prompt.md").read_text(),
+        {"dut.v": "module dut(input wire a, output wire y); assign y = a; endmodule\n"},
+        project)
     got = bio.collect("rtllm", "p1", project)
     task = bd._make_ai_review_task(
         "p1", project, got, ROUTING, 0, run, "PROGRAM")
@@ -1504,6 +1545,12 @@ def test_ai_resigns_exact_candidate_after_program_gate_normalization(tmp_path):
     final_hash = final_task["rtl_sha256"]
     record["pre_gate_ai_rtl_sha256"] = record["repaired_rtl_sha256"]
     record["repaired_rtl_sha256"] = final_hash
+    record["repair_contract"]["candidate_sha256"] = final_hash
+    final_file_hash = bd._sha256_text(working_rtl.read_text())
+    record["repair_contract"]["preservation"]["sources"][0][
+        "candidate_sha256"] = final_file_hash
+    record["repair_contract"]["elaboration_matrix"][
+        "candidate_sha256"] = final_file_hash
     record_path.write_text(json.dumps(record))
     rebound, reasons = bd._refresh_final_repair_provenance(final_task)
     assert reasons == []
@@ -1519,6 +1566,10 @@ def _normalized_repair_with_existing_review(tmp_path, semantic_verdict="PASS"):
     working_rtl = project / "phase2" / "stage1" / "rtl" / "dut.v"
     working_rtl.write_text(
         "module dut(input wire a, output wire y); assign y = ~a; endmodule\n")
+    bio._stage_public_original(
+        "p1", (project / "input/phase1_prompt.md").read_text(),
+        {"dut.v": "module dut(input wire a, output wire y); assign y = a; endmodule\n"},
+        project)
     parent = bd._make_ai_review_task(
         "p1", project, bio.collect("rtllm", "p1", project), ROUTING, 0,
         run, "PROGRAM")
@@ -1565,6 +1616,12 @@ def _normalized_repair_with_existing_review(tmp_path, semantic_verdict="PASS"):
                          else _proven_fail_review(task)))
     record["pre_gate_ai_rtl_sha256"] = record["repaired_rtl_sha256"]
     record["repaired_rtl_sha256"] = task["rtl_sha256"]
+    record["repair_contract"]["candidate_sha256"] = task["rtl_sha256"]
+    final_file_hash = bd._sha256_text(working_rtl.read_text())
+    record["repair_contract"]["preservation"]["sources"][0][
+        "candidate_sha256"] = final_file_hash
+    record["repair_contract"]["elaboration_matrix"][
+        "candidate_sha256"] = final_file_hash
     record_path.write_text(json.dumps(record))
     _solve_report(run, task)
     solve_path = run / "solve_report.json"

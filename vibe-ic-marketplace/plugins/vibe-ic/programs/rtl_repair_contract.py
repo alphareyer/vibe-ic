@@ -666,7 +666,11 @@ def load_json(value: Any) -> Any:
                     raise ValueError(f"duplicate JSON key: {key}")
                 out[key] = item
             return out
-        return json.loads(Path(value).read_text(encoding="utf-8"), object_pairs_hook=reject_duplicates)
+        return json.loads(
+            Path(value).read_text(encoding="utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON constant: {token}")))
     return value
 
 

@@ -506,7 +506,7 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
     # legacy projects, but once present it is checked against the fresh source
     # bytes immediately before the accepted completion is returned.
     contract = repair_contract
-    if contract is None:
+    if contract is None and not require_repair_contract:
         for candidate in (
                 project / "reports" / "rtl_repair_contract.json",
                 project / "reports" / "repair_contract.json",
@@ -517,7 +517,8 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
                 except (OSError, ValueError, TypeError) as exc:
                     contract = {"_load_error": str(exc)}
                 break
-    required_marker = (project / "reports" / "rtl_repair_contract.required").is_file()
+    required_marker = (not require_repair_contract and
+                       (project / "reports" / "rtl_repair_contract.required").is_file())
     if contract is not None or require_repair_contract or required_marker:
         if isinstance(contract, dict) and contract.get("_load_error"):
             repair_report = {"verdict": "REFUSED", "findings": [{
@@ -538,7 +539,14 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
                     if source_path.is_file():
                         original_sources[str(source_path.relative_to(original_root))] = \
                             source_path.read_text(errors="replace")
-            candidate_sources = {name: body for name, body in sources}
+            candidate_sources = {}
+            for name, body in sources:
+                key = name[4:] if name.startswith("rtl/") else name
+                if key in candidate_sources:
+                    repair_report = {"verdict": "REFUSED", "findings": [{
+                        "code": "SOURCE_PATH_COLLISION",
+                        "message": "candidate paths collide after canonical rtl/ normalization"}]}
+                candidate_sources[key] = body
             matrix = contract.get("elaboration_matrix", contract.get("public_elaboration_matrix")) \
                 if isinstance(contract, dict) else None
             top = None
@@ -553,6 +561,7 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
                 if isinstance(wanted, dict):
                     wanted = wanted.get("path")
                 if isinstance(wanted, str):
+                    wanted = wanted[4:] if wanted.startswith("rtl/") else wanted
                     # A source-bound matrix is only meaningful when the exact
                     # declared path is present in both frozen maps.  Never
                     # fall back to a basename, concatenated candidate, or a
@@ -567,11 +576,32 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
                         repair_report = {"verdict": "REFUSED", "findings": [{
                             "code": "SOURCE_PATH_INVALID",
                             "message": "declared source_path is absent from the exact original and candidate maps"}]}
+                    preservation = contract.get("preservation") if isinstance(contract, dict) else None
+                    preservation_paths = set()
+                    if isinstance(preservation, dict):
+                        for row in preservation.get("sources") or []:
+                            if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+                                continue
+                            path_key = row["path"]
+                            preservation_paths.add(
+                                path_key[4:] if path_key.startswith("rtl/") else path_key)
+                    if require_repair_contract and wanted not in preservation_paths:
+                        repair_report = {"verdict": "REFUSED", "findings": [{
+                            "code": "SOURCE_PATH_UNBOUND",
+                            "message": "matrix source_path is absent from preservation sources"}]}
                 if source_for_matrix is None and len(original_sources) == 1:
                     source_for_matrix = next(iter(original_sources.values()))
+                if (matrix_candidate_path is None and not require_repair_contract
+                        and len(rtl) == 1):
+                    matrix_candidate_path = rtl[0]
             with tempfile.TemporaryDirectory(prefix="rtl_repair_consumer_") as temp_dir:
                 candidate_path = Path(temp_dir) / "candidate.sv"
-                candidate_path.write_text(text)
+                if matrix_candidate_path is not None:
+                    # Freeze exactly the selected file once; matrix execution
+                    # must never compile the concatenated multi-file answer.
+                    candidate_path.write_bytes(matrix_candidate_path.read_bytes())
+                else:
+                    candidate_path.write_text("")
                 repair_report = (repair_report if isinstance(repair_report, dict) and repair_report.get("verdict") == "REFUSED" else ({"verdict": "REFUSED", "findings": [{
                     "code": "SOURCE_SYMLINK", "message": "public source manifest contains a symlink"}]}
                     if symlink_refused else validate_normal_repair_contract(

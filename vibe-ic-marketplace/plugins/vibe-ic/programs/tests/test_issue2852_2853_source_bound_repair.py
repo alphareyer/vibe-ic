@@ -24,6 +24,7 @@ from rtl_repair_contract import (
     sha256_text,
     validate_matrix_declaration,
     validate_preservation_declaration,
+    load_json,
 )
 
 
@@ -327,6 +328,32 @@ def test_missing_normal_contract_is_refused_when_required(tmp_path):
     result = bio.collect("rtllm", "neutral", project, require_repair_contract=True)
     assert result["ok"] is False
     assert result["repair_contract"]["verdict"] == "REFUSED"
+
+
+def test_supplied_rtl_is_not_itself_a_source_bounded_claim(tmp_path):
+    project = _project(tmp_path, ORIGINAL, ORIGINAL, {})
+    result = bio.collect("rtllm", "neutral", project, supplied_rtl=True)
+    assert result["ok"] is True
+
+
+def test_strict_collection_never_discovers_an_ambient_contract(tmp_path):
+    project = _project(tmp_path, ORIGINAL, ORIGINAL, {})
+    reports = project / "reports"
+    reports.mkdir(exist_ok=True)
+    (reports / "rtl_repair_contract.json").write_text("{}")
+    result = bio.collect("rtllm", "neutral", project,
+                         supplied_rtl=True, require_repair_contract=True)
+    assert result["ok"] is False
+    assert {f["code"] for f in result["repair_contract"]["findings"]} == {
+        "DECLARATION_MISSING"}
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_contract_json_rejects_nonfinite_constants(tmp_path, constant):
+    path = tmp_path / "contract.json"
+    path.write_text('{"value": ' + constant + "}")
+    with pytest.raises(ValueError, match="non-finite JSON constant"):
+        load_json(path)
 
 
 def test_renamed_public_parameter_mapping_runs_native_standalone(tmp_path):
