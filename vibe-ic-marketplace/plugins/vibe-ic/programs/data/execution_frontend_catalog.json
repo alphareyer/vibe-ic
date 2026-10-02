@@ -1,4 +1,270 @@
 {
+  "contracts": {
+    "0.5ic": {
+      "inputs": [
+        {
+          "check": "none",
+          "from": "external",
+          "what": "the shuttle operator's published project template — the repository or archive that pins the slot geometry, ships the die-identification fixtures, and lists the pads for each slot. Declared as external and unprobed because it is fetched, not produced, and the flow must be able to say it was never fetched."
+        }
+      ],
+      "outputs": [
+        "input/submission_template/slots/*.yaml OR input/submission_template/NO_TEMPLATE.txt OR input/submission_template/SELF_TAPEOUT.txt",
+        "reports/phase1/submission_template.json",
+        "input/submission_template/tapeout_declaration.json",
+        "reports/phase1/tapeout_declaration.json"
+      ]
+    },
+    "1": {
+      "inputs": [
+        {
+          "from": "D1",
+          "outputs": "all"
+        }
+      ],
+      "outputs": [
+        "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
+      ]
+    },
+    "10": {
+      "inputs": [
+        {
+          "from": 9,
+          "path": "phase2/stage2/synth/netlist.v"
+        },
+        {
+          "from": 7,
+          "path": "phase2/stage2/constraints/*.sdc"
+        },
+        {
+          "from": 7,
+          "path": "phase2/stage2/constraints/pvt_matrix.json"
+        }
+      ],
+      "outputs": [
+        "phase3/stage3/sta/pre_pnr_timing.rpt",
+        "reports/phase3/sta/pre_pnr_summary.json"
+      ]
+    },
+    "11": {
+      "inputs": [
+        {
+          "from": 9,
+          "path": "phase2/stage2/synth/netlist.v"
+        }
+      ],
+      "outputs": [
+        "phase2/stage2/dft/scan_netlist.v",
+        "phase2/stage2/dft/atpg_coverage.rpt",
+        "phase2/stage2/dft/transition_atpg_plan.md",
+        "reports/phase2/dft/coverage.json",
+        "reports/phase2/dft/bsdl_plan.json",
+        "phase2/stage2/dft/coverage.yml"
+      ]
+    },
+    "12": {
+      "inputs": [
+        {
+          "from": 11,
+          "path": "phase2/stage2/dft/scan_netlist.v"
+        }
+      ],
+      "outputs": [
+        "phase2/stage2/synth/post_dft_netlist.v"
+      ]
+    },
+    "13": {
+      "inputs": [
+        {
+          "from": 1,
+          "path": "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
+        },
+        {
+          "from": 12,
+          "path": "phase2/stage2/synth/post_dft_netlist.v"
+        }
+      ],
+      "outputs": [
+        "reports/lec.rpt",
+        "reports/lec.json"
+      ]
+    },
+    "2": {
+      "inputs": [
+        {
+          "from": 1,
+          "path": "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
+        }
+      ],
+      "outputs": [
+        "reports/phase2/lint/rtl_hygiene.json",
+        "reports/phase2/lint/rom_init_lint.json",
+        "reports/crosslayer/rewrite_equivalence_check.json"
+      ]
+    },
+    "3": {
+      "inputs": [
+        {
+          "from": 1,
+          "path": "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
+        }
+      ],
+      "outputs": [
+        "reports/phase2/cdc/crossing.json",
+        "reports/phase2/cdc/async_input.json",
+        "reports/phase2/cdc/reset_dep.json"
+      ]
+    },
+    "4": {
+      "inputs": [
+        {
+          "from": 1,
+          "path": "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
+        },
+        {
+          "from": "D1",
+          "path": "phase1/generated_docs/L10_TEST_CASES.json"
+        },
+        {
+          "from": "D1",
+          "path": "phase1/generated_docs/L12_BEHAVIORAL_SEQUENCES.json"
+        }
+      ],
+      "outputs": [
+        "phase2/stage1/sim/*.log OR phase2/stage1/sim/results.xml OR phase2/stage1/sim/pass.flag OR phase2/stage1/sim_professional/**/results.xml",
+        "reports/phase2/coverage/coverage_actual.json",
+        "reports/phase2/coverage/coverage_verilator.json"
+      ]
+    },
+    "5": {
+      "inputs": [
+        {
+          "from": 1,
+          "path": "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
+        }
+      ],
+      "outputs": [
+        "phase2/stage1/formal/*.sby OR phase2/stage1/formal/formal_authoring_request.json OR phase2/stage1/formal/formal_not_applicable.json",
+        "phase2/stage1/formal/results.json OR phase2/stage1/formal/formal_authoring_request.json OR phase2/stage1/formal/formal_not_applicable.json",
+        "phase2/stage1/sim_full_stack/results.json"
+      ]
+    },
+    "6": {
+      "inputs": [
+        {
+          "from": 1,
+          "path": "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
+        }
+      ],
+      "outputs": [
+        "phase2/stage1/fpga/output_files/*.sof",
+        "phase2/stage1/fpga/output_files/*.map.rpt",
+        "reports/phase2/fpga/quartus_map_audit.json"
+      ]
+    },
+    "7": {
+      "inputs": [
+        {
+          "from": "D1",
+          "path": "phase1/generated_docs/L8_TIMING_WAVEFORM.json"
+        },
+        {
+          "from": 1,
+          "path": "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
+        }
+      ],
+      "outputs": [
+        "phase2/stage2/constraints/*.sdc",
+        "phase2/stage2/constraints/pvt_matrix.json"
+      ]
+    },
+    "8": {
+      "inputs": [
+        {
+          "from": 7,
+          "path": "phase2/stage2/constraints/*.sdc"
+        },
+        {
+          "from": 7,
+          "path": "phase2/stage2/constraints/pvt_matrix.json"
+        },
+        {
+          "from": "D1",
+          "path": "phase1/generated_docs/L8_TIMING_WAVEFORM.json"
+        }
+      ],
+      "outputs": [
+        "reports/phase2/sdc_check.json"
+      ]
+    },
+    "D1": {
+      "inputs": [
+        {
+          "from": "external",
+          "path": "phase1/input_prompt/* OR phase1/input_doc/* OR input/docs/* OR input/phase1_prompt.md OR input/phase1_structured.yaml",
+          "what": "the user's natural-language prompt or dialogue fact-graph (Path B) or the supplied datasheets / specs (Path A), at any of the staged entry points this runner reads"
+        }
+      ],
+      "outputs": [
+        "phase1/generated_docs/L1_DATASHEET.json",
+        "phase1/generated_docs/L2_FRS.json",
+        "phase1/generated_docs/L3_CMD_PROTOCOL.json",
+        "phase1/generated_docs/L4_REGMAP.json",
+        "phase1/generated_docs/L5_ADI_SPEC.json",
+        "phase1/generated_docs/L6_CONTROL_LOGIC.json",
+        "phase1/generated_docs/L7_TEST_DEBUG.json",
+        "phase1/generated_docs/L8_TIMING_WAVEFORM.json",
+        "phase1/generated_docs/L8_RTL_CONSTANTS.json",
+        "phase1/generated_docs/L9_INTEGRATION_SPEC.json",
+        "phase1/generated_docs/L10_TEST_CASES.json",
+        "phase1/generated_docs/L11_OTP_CONTENT.json",
+        "phase1/generated_docs/L12_BEHAVIORAL_SEQUENCES.json",
+        "phase1/generated_docs/L13_*.json",
+        "phase1/generated_docs/L19_CONSTRAINTS_PDK.json",
+        "phase1/generated_docs/L21_POWER_INTENT.json",
+        "reports/phase1/extraction_coverage_report.md",
+        "reports/phase1/extraction_coverage_report.json",
+        "reports/audit/phase1/expert_parse_track.json",
+        "phase1/extraction_patterns.json"
+      ]
+    },
+    "DT1": {
+      "inputs": [],
+      "outputs": [
+        "reports/phase2/dft/transition_coverage.json"
+      ]
+    },
+    "DT2": {
+      "inputs": [],
+      "outputs": [
+        "reports/phase2/dft/path_delay_coverage.json"
+      ]
+    },
+    "DT3": {
+      "inputs": [],
+      "outputs": [
+        "reports/phase2/dft/sdd_coverage.json"
+      ]
+    },
+    "FS1": {
+      "inputs": [
+        {
+          "from": 1,
+          "path": "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
+        }
+      ],
+      "outputs": []
+    },
+    "P0": {
+      "inputs": [
+        {
+          "from": 1,
+          "path": "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
+        }
+      ],
+      "outputs": []
+    }
+  },
   "routes": {
     "0.5ic": [
       "submission_template_ingest.main",

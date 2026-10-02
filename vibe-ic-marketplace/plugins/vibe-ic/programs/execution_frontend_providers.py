@@ -45,12 +45,16 @@ def _machine_contracts():
         coverage_doc = json.loads(_COVERAGE_PATH.read_text())
     except (OSError, ValueError, TypeError) as exc:
         raise ValueError('frontend machine-readable contract unavailable') from exc
+    expected_contracts = {r: {'inputs': list(INPUT_CONTRACTS[r]),
+                              'outputs': list(CANONICAL_ROWS[r])} for r in ROWS}
     if (catalog.get('schema') != 'execution_frontend_catalog/1' or
             tuple(catalog.get('rows') or ()) != ROWS or
-            {str(k): tuple(v) for k, v in (catalog.get('routes') or {}).items()} != ROUTES):
+            {str(k): tuple(v) for k, v in (catalog.get('routes') or {}).items()} != ROUTES or
+            catalog.get('contracts') != expected_contracts):
         raise ValueError('frontend catalog is out of sync with source routes')
     if (coverage_doc.get('schema') != 'execution_frontend_coverage/1' or
-            tuple(coverage_doc.get('rows') or ()) != ROWS):
+            tuple(coverage_doc.get('rows') or ()) != ROWS or
+            coverage_doc.get('contracts') != expected_contracts):
         raise ValueError('frontend coverage is out of sync with source rows')
     return catalog, coverage_doc
 

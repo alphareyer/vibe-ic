@@ -640,6 +640,8 @@ class Controller:
                   'manifest_payload', 'manifest_sha256')
         if (completion.get('run_root') != str(root) or
                 completion.get('run_id') != plan['run_id'] or
+                completion.get('manifest_payload') != plan.get('issued_manifest_payload') or
+                completion.get('manifest_sha256') != plan.get('issued_manifest_sha256') or
                 any(completion.get(k) != receipt.get(k) for k in fields)):
             raise Refusal('EXECUTION_AUTHORITY_MISMATCH', arm.arm_id)
         processes = completion['processes']
