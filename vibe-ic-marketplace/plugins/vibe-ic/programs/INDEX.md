@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1399
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1399)
+- **Total programs (excluding helpers / shims):** 1400
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1400)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1390 |
+| `any` | 1391 |
 
 ## Alphabetical listing
 
@@ -817,6 +817,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `mixed_signal_cosim_check` | any | — | deterministic gate for mixed-signal co-simulation |
 | `mixed_signal_interface_si_check` | any | — | M3 interface signal-integrity gate. |
 | `mixed_signal_merge_check` | any | v0.2.84 | M1 gate (v0.2.84: SUBSTANCE, not presence). |
+| `mixed_signal_power_domain_run` | any | — | M2: placed protection-cell evidence from UPF + routed Verilog/DEF. |
 | `mixed_signal_signoff_check` | any | — | gate M4 (hardened, anti-fabrication). |
 | `mixed_signal_top_lvs_run` | any | — | REAL top-level mixed-signal merge + LVS (flow-completeness review P1-2; M1 was a PASS-on-presence stub). |
 | `modbus_protocol_synth` | any | v0.1.84 | Modbus-class protocol synth helper. |
@@ -1471,7 +1472,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1390 programs)
+### `any` (1391 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2259,6 +2260,7 @@ _(no programs in this group)_
 - `mixed_signal_cosim_check` — deterministic gate for mixed-signal co-simulation
 - `mixed_signal_interface_si_check` — M3 interface signal-integrity gate.
 - `mixed_signal_merge_check` — M1 gate (v0.2.84: SUBSTANCE, not presence).  _[v0.2.84]_
+- `mixed_signal_power_domain_run` — M2: placed protection-cell evidence from UPF + routed Verilog/DEF.
 - `mixed_signal_signoff_check` — gate M4 (hardened, anti-fabrication).
 - `mixed_signal_top_lvs_run` — REAL top-level mixed-signal merge + LVS (flow-completeness review P1-2; M1 was a PASS-on-presence stub).
 - `modbus_protocol_synth` — Modbus-class protocol synth helper.  _[v0.1.84]_

@@ -1,0 +1,11 @@
+VERSION 5.8 ;
+DESIGN boundary ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 10000 10000 ) ;
+COMPONENTS 4 ;
+- u_src plain + PLACED ( 1000 1000 ) N ;
+- u_shift shift_cell + PLACED ( 2000 1000 ) N ;
+- u_iso clamp_cell + PLACED ( 3000 1000 ) N ;
+- u_sink plain + PLACED ( 4000 1000 ) N ;
+END COMPONENTS
+END DESIGN

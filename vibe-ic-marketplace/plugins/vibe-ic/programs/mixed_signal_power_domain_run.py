@@ -1,0 +1,454 @@
+#!/usr/bin/env python3
+"""M2: placed protection-cell evidence from UPF + routed Verilog/DEF.
+
+ENFORCEMENT: blocking
+
+Default uses one Yosys read_liberty/read_verilog/hierarchy/write_json invocation.
+The tool does NOT insert cells or simulate power-off behavior. This producer
+derives signal paths and counts only Liberty-identified protection cells on
+those paths, also present and placed in the routed DEF. It binds the merged
+GDS without claiming geometrical, electrical or dynamic power verification.
+
+Supported intent is the literal, flat UPF subset documented in
+flow/mixed_signal_m2.md. Unknown voltages, hierarchy, ambiguous domains, unsupported
+Tcl, unresolved pins/drivers and incomplete protection metadata fail closed.
+No waiver is read. rc 0 verified, 1 invalid/unsafe, 2 missing basis/tool.
+--check-only independently re-derives the evidence from the bound native JSON;
+it never creates the required outputs or admits stale source/output bytes.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _container_exec as ce
+import _progress_run as progress
+import power_domain_signal_crossing_check as intent
+
+PROGRAM = "mixed_signal_power_domain_run"
+DIR = "reports/analog/mixed_signal"
+OUTPUTS = ("power_domain.json", "level_shifter.json", "isolation.json",
+           "pd_connectivity.json")
+RECEIPT = "power_domain_run.json"
+SCHEMA = "vibeic.mixed_signal.m2.v1"
+
+
+class Refusal(ValueError):
+    def __init__(self, rule, message, rc=1):
+        self.rule, self.rc = rule, rc
+        super().__init__(message)
+
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def read_json(path):
+    try:
+        value = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        raise Refusal("MISSING_OR_MALFORMED_OUTPUT", str(exc)) from exc
+    if not isinstance(value, dict):
+        raise Refusal("MALFORMED_OUTPUT", str(path))
+    return value
+
+
+def write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as f:
+        json.dump(value, f, indent=2, sort_keys=True)
+        f.write("\n")
+    Path(f.name).replace(path)
+
+
+def groups(text, kind):
+    """Balanced Liberty groups; braces in strings/comments are not syntax."""
+    text = re.sub(r'/\*.*?\*/|//[^\n]*', '', text, flags=re.S)
+    pattern = re.compile(r'\b' + kind + r'\s*\(\s*"?([^\s"()]+)"?\s*\)\s*\{')
+    for m in pattern.finditer(text):
+        depth, quoted, escaped = 1, False, False
+        for end in range(m.end(), len(text)):
+            ch = text[end]
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                quoted = not quoted
+            elif not quoted:
+                depth += (ch == "{") - (ch == "}")
+                if depth == 0:
+                    yield m.group(1), text[m.end():end]
+                    break
+        else:
+            raise Refusal("MALFORMED_LIBERTY", "unterminated " + kind)
+
+
+def attr(body, name):
+    m = re.search(r'\b' + name + r'\s*:\s*"?([\w]+)"?\s*;', body)
+    return m.group(1) if m else None
+
+
+def library_cells(paths):
+    cells = {}
+    for path in paths:
+        for name, body in groups(path.read_text(), "cell"):
+            if name in cells:
+                raise Refusal("AMBIGUOUS_LIBRARY", name)
+            pins = {p: b for p, b in groups(body, "pin")}
+            kinds = [k for k in ("level_shifter", "isolation_cell")
+                     if attr(body, "is_" + k) == "true"]
+            data = None
+            if kinds:
+                # Combined cells must identify the same data pin for both roles.
+                role_pins = [{p for p, b in pins.items()
+                              if attr(b, k + "_data_pin") == "true"} for k in kinds]
+                if any(len(p) != 1 for p in role_pins) or any(p != role_pins[0] for p in role_pins):
+                    raise Refusal("UNSUPPORTED_PROTECTION_PINS", name)
+                data = next(iter(role_pins[0]))
+                if attr(pins[data], "direction") != "input":
+                    raise Refusal("UNSUPPORTED_PROTECTION_PINS", name)
+                if "isolation_cell" in kinds and not any(
+                        attr(b, "isolation_cell_enable_pin") == "true"
+                        and attr(b, "direction") == "input" for b in pins.values()):
+                    raise Refusal("ISOLATION_CONTROL_UNSTATED", name)
+            cells[name] = {"kinds": kinds, "data": data,
+                           "conversion": attr(body, "level_shifter_type")}
+    if not cells:
+        raise Refusal("NO_LIBRARY_CELLS", "no Liberty cells", 2)
+    return cells
+
+
+def power_model(path, top):
+    text = path.read_text()
+    allowed = {"upf_version", "set_design_top", "create_power_domain",
+               "create_supply_net", "create_supply_port", "connect_supply_net",
+               "set_domain_supply_net", "add_power_state", "set_isolation",
+               "set_level_shifter"}
+    names = []
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.split()[0] not in allowed or re.search(r'[;$\[\]\\"]', line):
+            raise Refusal("UNSUPPORTED_UPF", line)
+        if line.count("{") != line.count("}"):
+            raise Refusal("UNSUPPORTED_UPF", "multiline/nested Tcl: " + line)
+        if line.startswith("set_design_top ") and line.split() != ["set_design_top", top]:
+            raise Refusal("TOP_MISMATCH", line)
+        if line.startswith("create_power_domain "):
+            if "-elements" not in line or "-include_scope" in line:
+                raise Refusal("DOMAIN_ELEMENTS_UNSTATED", line)
+            names.append(line.split()[1].lower())
+        if line.startswith("add_power_state "):
+            # General supply_expr/logic_expr/PST interpretation is not implemented.
+            if not re.fullmatch(r'add_power_state \S+ -state \{(?:ON -voltage [0-9.]+|OFF)\}', line):
+                raise Refusal("UNSUPPORTED_POWER_STATE", line)
+    domains, iso, ls = intent.parse_upf(text)
+    if not names or len(names) != len(set(names)) or set(names) != set(domains):
+        raise Refusal("AMBIGUOUS_DOMAINS", "missing/duplicate/undeclared power domain")
+    for name, d in domains.items():
+        if not d["elements"] or d["voltage"] is None or not math.isfinite(d["voltage"]) or d["voltage"] <= 0:
+            raise Refusal("INCOMPLETE_POWER_INTENT", name)
+        volts = re.findall(r'(?:create_supply_net \S+ -domain ' + re.escape(name) +
+                           r'\b[^\n]*|add_power_state ' + re.escape(name) +
+                           r'\b[^\n]*)-voltage ([0-9.]+)', text, flags=re.I)
+        if len({float(v) for v in volts}) != 1:
+            raise Refusal("UNSUPPORTED_MULTI_VOLTAGE", name)
+    return domains, iso, ls
+
+
+def inputs(project, top, liberties=()):
+    if not re.fullmatch(r'[A-Za-z_][\w$]*', top):
+        raise Refusal("UNSUPPORTED_TOP", top)
+    upfs = sorted((project / "phase2/stage2/constraints").glob("*.upf"))
+    upf = project / f"phase2/stage2/constraints/{top}.upf"
+    if len(upfs) != 1 or upfs[0] != upf:
+        raise Refusal("MISSING_OR_AMBIGUOUS_UPF", str(upf), 2)
+    libs = [Path(p) if Path(p).is_absolute() else project / p for p in liberties]
+    if not libs:
+        libs = sorted((project / "input/pdk/liberty").glob("*.lib"))
+    pnr = project / "phase3/stage3/pnr"
+    paths = {"upf": upf, "netlist": pnr / f"{top}_pnr.v",
+             "def": pnr / "routed.def",
+             "gds": project / "phase3/mixed_signal/top_merged.gds"}
+    if not paths["def"].is_file():
+        paths["def"] = pnr / f"{top}.def"
+    if not libs:
+        raise Refusal("MISSING_LIBERTY", "stage libraries in input/pdk/liberty/", 2)
+    for p in [*paths.values(), *libs]:
+        if not p.is_file() or p.stat().st_size == 0:
+            raise Refusal("MISSING_INPUT", str(p), 2)
+    return paths, libs
+
+
+def binding(paths, libs):
+    return {str(p.resolve()): digest(p) for p in [*paths.values(), *libs]}
+
+
+def derive(paths, libs, top, native):
+    domains, iso_strategy, ls_strategy = power_model(paths["upf"], top)
+    masters = library_cells(libs)
+    modules = native.get("modules", {})
+    if top not in modules or not modules[top].get("cells") or modules[top].get("processes"):
+        raise Refusal("INVALID_NATIVE_NETLIST", "missing/empty/nonstructural top")
+    nl = modules[top]
+    cells = nl["cells"]
+    df = paths["def"].read_text()
+    if not re.search(r'\bDESIGN\s+' + re.escape(top) + r'\s*;', df):
+        raise Refusal("TOP_MISMATCH", "routed DEF")
+    section = re.search(r'\bCOMPONENTS\s+(\d+)\s*;(.*?)END COMPONENTS', df, re.S)
+    placed = {}
+    if section:
+        for row in section.group(2).split(";"):
+            m = re.search(r'^\s*-\s+(\S+)\s+(\S+)\s+.*?\+\s+(?:PLACED|FIXED)\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+(\S+)', row, re.S)
+            if m:
+                if m.group(1) in placed:
+                    raise Refusal("AMBIGUOUS_DEF", m.group(1))
+                placed[m.group(1)] = m.group(2)
+        if len(placed) != int(section.group(1)):
+            raise Refusal("INCOMPLETE_DEF", "unparsed/unplaced component")
+    if set(placed) != set(cells) or any(placed[n] != c["type"] for n, c in cells.items()):
+        raise Refusal("NETLIST_DEF_MISMATCH", "placed instances/types differ")
+
+    def domain(name):
+        matches = []
+        for d, v in domains.items():
+            for e in v["elements"]:
+                e = e.removeprefix(top + "/")
+                if name == e or name.startswith(e.rstrip("/") + "/"):
+                    matches.append(d)
+                    break
+        if len(matches) != 1:
+            raise Refusal("UNRESOLVED_INSTANCE_DOMAIN", name)
+        return matches[0]
+
+    drivers, sinks, cell_domains = {}, [], {}
+    def drive(bit, node):
+        if isinstance(bit, int):
+            if bit in drivers:
+                raise Refusal("MULTIPLE_DRIVERS", str(bit))
+            drivers[bit] = node
+
+    for n, c in cells.items():
+        typ = c["type"]
+        if typ not in masters or not modules.get(typ, {}).get("attributes", {}).get("blackbox"):
+            raise Refusal("UNRESOLVED_OR_HIERARCHICAL_CELL", typ)
+        cell_domains[n] = domain(n)
+        if set(c.get("port_directions", {})) != set(c["connections"]):
+            raise Refusal("UNRESOLVED_PIN_DIRECTION", n)
+        for p, bits in c["connections"].items():
+            direction = c["port_directions"][p]
+            if direction not in ("input", "output"):
+                raise Refusal("UNSUPPORTED_PIN_DIRECTION", n + "/" + p)
+            for i, b in enumerate(bits):
+                if direction == "output":
+                    drive(b, (n, p, i))
+                elif p != masters[typ]["data"]:
+                    sinks.append((n, p, i, b))
+    for p, port in nl.get("ports", {}).items():
+        cell_domains["@" + p] = domain(p)
+        for i, b in enumerate(port["bits"]):
+            if port["direction"] == "input":
+                drive(b, ("@" + p, p, i))
+            elif port["direction"] == "output":
+                sinks.append(("@" + p, p, i, b))
+            else:
+                raise Refusal("UNSUPPORTED_PIN_DIRECTION", p)
+
+    def source(bit, seen=()):
+        if isinstance(bit, str):
+            if bit in ("0", "1"):
+                return None, []
+            raise Refusal("UNKNOWN_SIGNAL", bit)
+        if bit not in drivers or bit in seen:
+            raise Refusal("UNRESOLVED_SIGNAL_PATH", str(bit))
+        node = drivers[bit]
+        n, p, i = node
+        if n.startswith("@"):
+            return node, []
+        meta = masters[cells[n]["type"]]
+        if not meta["kinds"]:
+            return node, []
+        data = cells[n]["connections"].get(meta["data"], [])
+        if len(data) != len(cells[n]["connections"][p]) or i >= len(data):
+            raise Refusal("UNSUPPORTED_PROTECTION_WIDTH", n)
+        origin, chain = source(data[i], (*seen, bit))
+        return origin, chain + [n]
+
+    crossings, shifters, isolators = [], [], []
+    for recv, pin, index, bit in sinks:
+        origin, chain = source(bit)
+        if origin is None:
+            continue
+        drv = origin[0]
+        a, b = cell_domains[drv], cell_domains[recv]
+        if a == b:
+            continue
+        key = f"{drv}/{origin[1]}[{origin[2]}]->{recv}/{pin}[{index}]"
+        av, bv = domains[a], domains[b]
+        c = {"net": key, "driver_domain": a, "receiver_domain": b,
+             "vdd_from": av["voltage"], "vdd_to": bv["voltage"],
+             "from_power_down": av["off_capable"], "to_power_down": bv["off_capable"],
+             "path_cells": chain}
+        crossings.append(c)
+        ls_needed = av["voltage"] != bv["voltage"]
+        iso_needed = av["off_capable"] or bv["off_capable"]
+        conversion = "LH" if av["voltage"] < bv["voltage"] else "HL"
+        for n in chain:
+            typ = cells[n]["type"]
+            meta = masters[typ]
+            entry = {"net": key, "instance": n, "cell": typ, "placed": True}
+            if "level_shifter" in meta["kinds"] and meta["conversion"] in (conversion, "HL_LH"):
+                shifters.append(entry)
+            if "isolation_cell" in meta["kinds"] and not domains[cell_domains[n]]["off_capable"]:
+                isolators.append(entry)
+        if ls_needed and (not any(e["net"] == key for e in shifters) or not {a, b} & ls_strategy):
+            raise Refusal("MISSING_LEVEL_SHIFTER", key)
+        if iso_needed and (not any(e["net"] == key for e in isolators) or not {a, b} & iso_strategy):
+            raise Refusal("MISSING_ISOLATION_CELL", key)
+    # A complete enumerated flat graph may have zero inter-domain edges. The
+    # denominator is actual placed cells/pins, never absent connectivity.
+    return {
+        "power_domain.json": {"schema": SCHEMA, "all_crossings_protected": True,
+                              "examined_cells": len(cells), "crossings": crossings},
+        "level_shifter.json": {"schema": SCHEMA, "all_required_inserted": True, "level_shifters": shifters},
+        "isolation.json": {"schema": SCHEMA, "all_required_inserted": True, "isolation_cells": isolators},
+        "pd_connectivity.json": {"schema": SCHEMA, "crossings": crossings},
+    }
+
+
+def run_tool(script, work, container):
+    command = "yosys -T -s " + shlex.quote(str(script))
+    if container in (None, "", "host"):
+        done = progress.run(["yosys", "-T", "-s", str(script)], capture_output=True, text=True)
+    else:
+        done = ce.run_in_container(container, command, deadline_s=120)
+    (work / "yosys.log").write_text(done.stdout + done.stderr)
+    return done.returncode
+
+
+def verify(project):
+    root = project / DIR
+    receipt = read_json(root / RECEIPT)
+    if receipt.get("schema") != SCHEMA or receipt.get("verdict") != "PASS":
+        raise Refusal("UNVERIFIED_PRODUCER", "no successful M2 production")
+    tool = receipt.get("tool", {})
+    if tool.get("name") != "yosys" or tool.get("exit_code") != 0 or not str(tool.get("creator", "")).startswith("Yosys "):
+        raise Refusal("UNVERIFIED_NATIVE_TOOL", "invalid native tool identity/status")
+    paths, libs = inputs(project, receipt["top"], receipt["liberties"])
+    if binding(paths, libs) != receipt["inputs"]:
+        raise Refusal("STALE_INPUT", "M2 inputs changed")
+    required = {f"{DIR}/{n}" for n in OUTPUTS} | {
+        f"{DIR}/power_domain_tool/{n}" for n in ("netlist.json", "yosys.log", "read.ys")}
+    if set(receipt["outputs"]) != required:
+        raise Refusal("INCOMPLETE_OUTPUT_BINDING", "native/sidecar output set differs")
+    for rel, sha in receipt["outputs"].items():
+        p = project / rel
+        if not p.is_file() or digest(p) != sha:
+            raise Refusal("MISSING_OR_STALE_OUTPUT", rel)
+    native = read_json(root / "power_domain_tool/netlist.json")
+    expected = derive(paths, libs, receipt["top"], native)
+    for name, obj in expected.items():
+        if read_json(root / name) != obj:
+            raise Refusal("CONTRADICTS_NATIVE_OUTPUT", name)
+    if binding(paths, libs) != receipt["inputs"]:
+        raise Refusal("STALE_INPUT", "inputs changed during verification")
+    return receipt
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("project", type=Path)
+    ap.add_argument("--top")
+    ap.add_argument("--liberty", action="append", default=[])
+    ap.add_argument("--container", default="host")
+    ap.add_argument("--check-only", action="store_true")
+    ap.add_argument("--json")
+    args = ap.parse_args(argv)
+    project = args.project.resolve()
+    root = project / DIR
+    report = {"program": PROGRAM, "schema": SCHEMA, "verdict": "FAIL", "findings": []}
+    rc = 1
+    try:
+        if args.check_only:
+            receipt = verify(project)
+            report.update(verdict="PASS", top=receipt["top"])
+        else:
+            # Withdraw the prior admission before examining or invoking anything.
+            for name in (*OUTPUTS, RECEIPT):
+                (root / name).unlink(missing_ok=True)
+            top = args.top
+            if not top:
+                upfs = sorted((project / "phase2/stage2/constraints").glob("*.upf"))
+                if len(upfs) != 1:
+                    raise Refusal("MISSING_OR_AMBIGUOUS_UPF", "need one top UPF", 2)
+                top = upfs[0].stem
+            paths, libs = inputs(project, top, args.liberty)
+            before = binding(paths, libs)
+            power_model(paths["upf"], top)
+            library_cells(libs)
+            work = root / "power_domain_tool"
+            work.mkdir(parents=True, exist_ok=True)
+            native_path = work / "netlist.json"
+            native_path.unlink(missing_ok=True)
+            script = work / "read.ys"
+            quote = lambda p: json.dumps(str(p))
+            script.write_text("\n".join(
+                [f"read_liberty -lib {quote(p)}" for p in libs] +
+                [f"read_verilog {quote(paths['netlist'])}", f"hierarchy -check -top {top}",
+                 f"write_json {quote(native_path)}"]) + "\n")
+            started = time.time_ns()
+            code = run_tool(script, work, args.container)
+            if code:
+                raise Refusal("NATIVE_TOOL_FAILED", f"Yosys rc={code}")
+            if binding(paths, libs) != before:
+                raise Refusal("STALE_INPUT", "inputs changed during tool execution")
+            if native_path.is_file() and native_path.stat().st_mtime_ns < started:
+                raise Refusal("STALE_NATIVE_OUTPUT", "Yosys output predates this invocation")
+            native = read_json(native_path)
+            if not str(native.get("creator", "")).startswith("Yosys "):
+                raise Refusal("INVALID_NATIVE_NETLIST", "no Yosys creator")
+            evidence = derive(paths, libs, top, native)
+            if binding(paths, libs) != before:
+                raise Refusal("STALE_INPUT", "inputs changed during evidence derivation")
+            for name, obj in evidence.items():
+                write_json(root / name, obj)
+            output_paths = [root / n for n in OUTPUTS] + [native_path, work / "yosys.log", script]
+            report.update(verdict="PASS", top=top, inputs=before,
+                          liberties=[str(p.resolve()) for p in libs],
+                          tool={"name": "yosys", "exit_code": code,
+                                "creator": native["creator"], "container": args.container},
+                          scope="placed structural protection paths; no electrical/dynamic signoff",
+                          outputs={str(p.relative_to(project)): digest(p) for p in output_paths})
+            write_json(root / RECEIPT, report)
+        rc = 0
+    except Refusal as exc:
+        rc = exc.rc
+        report.update(verdict="NOT_READY" if rc == 2 else "FAIL",
+                      findings=[{"rule": exc.rule, "message": str(exc)}])
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        report.update(findings=[{"rule": "INVALID_EVIDENCE", "message": str(exc)}])
+    if args.json:
+        out = Path(args.json)
+        if not out.is_absolute():
+            out = project / out
+        if out.resolve() == (root / RECEIPT).resolve():
+            raise ValueError("--json audit path must differ from producer receipt")
+        write_json(out, report)
+    print(f"[{PROGRAM}] {report['verdict']}: {report['findings']}")
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
