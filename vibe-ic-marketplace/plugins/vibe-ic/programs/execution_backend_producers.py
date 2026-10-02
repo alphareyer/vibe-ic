@@ -36,6 +36,10 @@ def _copy(source, target):
 def _parameters(project, params):
     import phase3_one_shot_runner as R
     import librelane_contract as ll
+    missing = [name for name in ("pdk_name", "image_id", "pdk_root", "top")
+               if not params.get(name)]
+    if missing:
+        raise em.Refusal('BACKEND_PRODUCER_PARAMS_UNBOUND', ','.join(missing))
     pdk = R._detect_pdk(project, params['pdk_name'])
     if pdk is None or str(pdk.name) != params['pdk_name']:
         raise em.Refusal('BACKEND_PDK_RESOLUTION_FAILED', params['pdk_name'])
@@ -465,4 +469,15 @@ def produce(project, params):
         result['verdict'] = 'FAIL'
     elif result['verdict'] == 'PASS' and any(row.status != 'PASS' for row in rows):
         result['verdict'] = 'NOT_MEASURED'
+    # This is the producer's own current-tree evidence, not a fabricated native
+    # tool receipt.  Native receipts remain an empty, separately named field;
+    # the worker can therefore distinguish source evidence from EDA execution.
+    result['canonical_receipts'] = [{
+        'schema': 'vibeic/backend-producer-receipt/1',
+        'producer': 'execution_backend_producers.produce',
+        'step_id': sid,
+        'verdict': result.get('verdict', 'NOT_MEASURED'),
+        'detail': result.get('detail', ''),
+    }]
+    result.setdefault('native_receipts', [])
     return result

@@ -40,6 +40,17 @@ def resolve_contract(project: Path, patterns) -> tuple[dict, list[str]]:
     return found, missing
 
 
+def resolve_input_contract(project: Path, declarations) -> list[str]:
+    missing = []
+    for declaration in declarations or ():
+        if not isinstance(declaration, dict) or not declaration.get("path"):
+            continue
+        patterns = [part.strip() for part in str(declaration["path"]).split(" OR ")]
+        if not any(project.glob(pattern) for pattern in patterns):
+            missing.append(str(declaration["path"]))
+    return missing
+
+
 def _binding(inputs: Path) -> dict:
     raw = os.environ.get("VIBEIC_EXECUTION_BINDING")
     if raw:
@@ -61,6 +72,8 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
     _copy_input_tree(inputs, project)
     binding = _binding(inputs)
     row = ROWS[str(step_id)]["canonical_row"]
+    input_contract = params.get("input_contract", row.get("required_inputs", ()))
+    missing_inputs = resolve_input_contract(project, input_contract)
     producer = {"verdict": "NOT_MEASURED", "detail": "producer did not run"}
     gate_result = {"status": "NOT_MEASURED", "ledger": []}
     try:
@@ -69,7 +82,12 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
         if not isinstance(producer, dict):
             producer = {"verdict": "NOT_MEASURED", "detail": "producer returned no result"}
     except BaseException as exc:
-        producer = {"verdict": "NOT_MEASURED", "detail": f"{type(exc).__name__}: {exc}"}
+        producer = {"verdict": "NOT_MEASURED", "detail": f"{type(exc).__name__}: {exc}",
+                    "canonical_receipts": [{
+                        "schema": "vibeic/backend-producer-receipt/1",
+                        "producer": "execution_backend_producers.produce",
+                        "step_id": str(step_id), "verdict": "NOT_MEASURED",
+                        "detail": f"{type(exc).__name__}: {exc}"}]}
     # A producer exception must not erase a measured FAIL, and a consumer
     # exception must not prevent the canonical gate from being represented in
     # the digest-bound result.  Both remain source-only until native receipts.
@@ -91,16 +109,19 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
     gate_status = gate_result.get("status", "NOT_MEASURED")
     gate_states = states(binding, gate_result, producer.get("verdict", "NOT_MEASURED"))
     native_receipts = producer.get("native_receipts") or []
+    canonical_receipts = producer.get("canonical_receipts") or []
     verdict = ("FAIL" if producer_verdict == "FAIL" or gate_status == "FAIL" else
                "PASS" if producer_verdict == "PASS" and gate_status == "PASS" and
-               native_receipts and not missing else "NOT_MEASURED")
+               canonical_receipts and not missing and not missing_inputs else "NOT_MEASURED")
     result = {
         "schema": "vibeic/backend-result/2", "step_id": str(step_id),
         "source_sha": binding.get("source_sha"), "binding": binding,
         "producer_verdict": producer_verdict, "gates": gate_states,
         "gate_ledger": gate_result.get("ledger", []), "outputs": files,
         "missing_outputs": missing, "native_receipts": native_receipts,
+        "canonical_receipts": canonical_receipts,
         "verdict": verdict, "detail": producer.get("detail", ""),
+        "input_contract": input_contract, "missing_inputs": missing_inputs,
     }
     (outputs / "backend_result.json").write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     return result

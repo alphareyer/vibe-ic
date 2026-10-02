@@ -104,6 +104,42 @@ def _summary(items: object) -> tuple[dict, ...]:
                  for x in items if isinstance(x, dict) and x.get("id"))
 
 
+def _route_markers(route_receipt: dict | None) -> set[str]:
+    """Normalize the route receipt's exact file markers without guessing a path."""
+    receipt = route_receipt if isinstance(route_receipt, dict) else {}
+    values = []
+    for key in ("marker", "route_marker", "route_file", "selected_marker"):
+        if receipt.get(key) is not None:
+            values.append(receipt[key])
+    for key in ("markers", "files", "route_files", "required_outputs", "outputs"):
+        value = receipt.get(key)
+        if isinstance(value, (list, tuple, set)):
+            values.extend(value)
+        elif isinstance(value, str):
+            values.append(value)
+    found = set()
+    for value in values:
+        text = str(value).replace("\\", "/")
+        if text.endswith("NO_TEMPLATE.txt") or text == "NO_TEMPLATE":
+            found.add("NO_TEMPLATE")
+        if text.endswith("SELF_TAPEOUT.txt") or text == "SELF_TAPEOUT":
+            found.add("SELF_TAPEOUT")
+        if "/slots/" in "/" + text or text.startswith("slots/") or text == "slots":
+            found.add("slots")
+    return found
+
+
+def _owner_attested(declaration: dict | None, value: object) -> bool:
+    if not isinstance(declaration, dict):
+        return False
+    answers = declaration.get("answers")
+    provenance = declaration.get("answer_provenance")
+    record = provenance.get("deliverable") if isinstance(provenance, dict) else None
+    answered_by = record.get("answered_by") if isinstance(record, dict) else None
+    return (isinstance(answers, dict) and answers.get("deliverable") == value and
+            answered_by in {"owner", "owner_attestation", "OWNER"})
+
+
 def _applicability(step: str, *, release: bool, route_receipt: dict | None = None,
                    declaration: dict | None = None) -> dict[str, str]:
     """Apply the flow's condition boundary from current route evidence.
@@ -113,11 +149,10 @@ def _applicability(step: str, *, release: bool, route_receipt: dict | None = Non
     """
     answers = (declaration or {}).get("answers", {}) if isinstance(declaration, dict) else {}
     deliverable = answers.get("deliverable")
-    marker = (route_receipt or {}).get("marker") if isinstance(route_receipt, dict) else None
-    markers = {"NO_TEMPLATE", "SELF_TAPEOUT", "slots"}
-    condition_seen = marker in markers
+    markers = _route_markers(route_receipt)
+    condition_seen = bool(markers & {"NO_TEMPLATE", "SELF_TAPEOUT", "slots"})
     if step == "37.5ip":
-        if deliverable == "DIE":
+        if deliverable == "DIE" and _owner_attested(declaration, "DIE"):
             return {"IC": "inapplicable: owner-attested DIE", "IP": "inapplicable: owner-attested DIE"}
         if not condition_seen:
             return {"IC": "unknown: route marker and deliverable declaration required",

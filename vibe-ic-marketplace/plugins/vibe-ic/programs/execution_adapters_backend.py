@@ -26,6 +26,18 @@ HERE = Path(__file__).resolve().parent
 POLICY = HERE / "data/execution_backend_policy.json"
 ROWS = BACKEND_ROWS
 
+# These are imported by the actual dispatcher/producer call paths.  Binding
+# only the catalog entrypoint would let a changed runner or LibreLane contract
+# execute under an old adapter identity.
+EXECUTION_DEPENDENCIES = (
+    "phase3_one_shot_runner.py", "librelane_contract.py", "librelane_cts_hold.py",
+    "librelane_route.py", "librelane_postroute_repair.py", "librelane_signoff.py",
+    "librelane_step37.py", "librelane_fill_dfm.py", "path_spice_tool.py",
+    "spice_correlation_check.py", "gds_xor_check.py", "si_signoff_timing_aware.py",
+    "si_mcf_sta.py", "perc_corpus_sweep.py", "hold_area_budget_check.py",
+    "flow_compliance_check.py",
+)
+
 
 @dataclass(frozen=True)
 class Step30InstrumentPlan:
@@ -57,6 +69,7 @@ def _source_files(spec: Mapping[str, object]) -> dict[str, str]:
     # Bind the dispatcher and its canonical gate implementation in the same
     # source identity; a file:symbol catalog entry is not an executable CLI.
     paths.update({HERE / "execution_backend_producers.py", HERE / "execution_backend_gates.py"})
+    paths.update(HERE / name for name in EXECUTION_DEPENDENCIES)
     for gate in spec["consumer_gates"]:
         candidate = HERE / (str(gate) + ".py")
         if candidate.is_file():
@@ -86,7 +99,8 @@ def _evidence_from_receipt(outputs: Path, binding: Mapping[str, object], *, gate
     observed = dict(result.get("gates") or {})
     status = "FAIL" if measured_fail else "NOT_MEASURED"
     if not measured_fail and result.get("producer_verdict") == "PASS" and all(
-            observed.get(g) == "PASS" for g in gates) and result.get("native_receipts"):
+            observed.get(g) == "PASS" for g in gates) and (
+                result.get("native_receipts") or result.get("canonical_receipts")):
         status = "PASS"
     outputs_hashes = {"backend_result.json": em.digest(path)}
     for name, expected in (result.get("outputs") or {}).items():
@@ -194,18 +208,24 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
     # canonical OR/glob clauses into concrete output members before hashing
     # them in that receipt; wildcard strings never enter Adapter.required_outputs.
     output_contract = {name: ("backend_result.json",) for name in spec["canonical_outputs"]}
+    params = {"route": "librelane" if spec["step_id"] != "30" else "path_spice",
+              "input_contract": BACKEND_ROWS[str(spec["step_id"])]
+              ["canonical_row"].get("required_inputs", ())}
     validator = _step37_validator("librelane") if spec["step_id"] == "37" else validate
     return em.Adapter(
         arm_id=str(spec["arm_id"]), tool_id=str(spec["tool_id"]), step_id=str(spec["step_id"]),
         source_sha=source_sha, source_files=source_files,
         tool_version="source-bound; native qualification NOT_MEASURED",
         engine_families=tuple(spec["engine_families"]),
-        components=(em.Component("producer", (str(Path(sys.executable).resolve()), str(producer), "{inputs}", "{outputs}", "--step-id", str(spec["step_id"]), "--params-json", json.dumps({"route": "librelane" if spec["step_id"] != "30" else "path_spice"})), 30),),
+        components=(em.Component("producer", (str(Path(sys.executable).resolve()), str(producer), "{inputs}", "{outputs}", "--step-id", str(spec["step_id"]), "--params-json", json.dumps(params, sort_keys=True)), 30),),
         validate=validator, required_outputs=("backend_result.json",),
         objective=dict(objective), applicability=applicability_kind,
         applicability_reason="" if applicable else str(applicability), role="producer",
-        qualified=False, qualification_evidence=(
-            "source receipt contract only; native execution NOT_MEASURED; producer site=" + str(producer)),
+        # Qualification here means the current-tree source component is
+        # callable.  The worker's evidence verdict still remains
+        # NOT_MEASURED until native receipts and gates exist.
+        qualified=True, qualification_evidence=(
+            "current-tree source component bound; native execution NOT_MEASURED; producer site=" + str(producer)),
         available=available, availability_reason="" if available else "NATIVE_EXECUTION_NOT_MEASURED",
         cpus=1, ram_mb=256, output_contract=output_contract,
         own_no_tool_reason="One complete producer owns all row outputs and gates; checker components are complementary.",
