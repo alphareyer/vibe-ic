@@ -93,6 +93,11 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from rtl_repair_contract import (  # noqa: E402
+    load_json as _load_contract_json,
+    run_elaboration_matrix,
+)
+
 # The scorer's pinned toolchain (cvdp-sim image). Used ONLY to DISCLOSE a
 # host/scorer version skew — never to block. chip-AGNOSTIC (tool versions,
 # not a chip).
@@ -634,7 +639,9 @@ def version_disclosure() -> Dict:
 def selfverify(rtl_path: Path, top: Optional[str],
                tb_path: Optional[Path] = None,
                require_tools: bool = False,
-               lint_advisory: bool = False) -> Dict:
+               lint_advisory: bool = False,
+               elaboration_matrix=None,
+               original_source: Optional[str] = None) -> Dict:
     """Run the three harness-exact self-verify gates over one RTL file.
 
     Returns a report dict with per-gate verdicts, the resolved top, the
@@ -663,6 +670,21 @@ def selfverify(rtl_path: Path, top: Optional[str],
                                 "reason": "cannot resolve harness top: " + why})
         report["emit"] = False
         return report
+    # PUBLIC-MATRIX (issue #2853): a default standalone compile is not evidence
+    # for every source-declared public macro/parameter branch.  The matrix is
+    # optional for legacy callers, but once supplied it is an emit-blocking
+    # source-bound contract.  The helper retains every native invocation and
+    # classifies malformed/stale declarations separately from candidate code
+    # failures.
+    if elaboration_matrix is not None:
+        matrix_report = run_elaboration_matrix(
+            rtl_path, resolved, elaboration_matrix,
+            original_source=original_source)
+        report["public_elaboration_matrix"] = matrix_report
+        if matrix_report.get("verdict") != "PASS":
+            report["emit"] = False
+            report["blocking_gates"] = ["public_elaboration_matrix"]
+            return report
     workdir = Path(tempfile.mkdtemp(prefix="hxsv_"))
     try:
         report["gates"].append(
@@ -712,6 +734,10 @@ def main(argv=None) -> int:
                     help="optional AI-authored functional TB (golden vectors "
                          "from the prompt's worked examples) — gate C RUNS it; "
                          "no TB → gate C is reported skipped, not passed")
+    ap.add_argument("--elaboration-matrix", default=None,
+                    help="source-bound public elaboration matrix JSON")
+    ap.add_argument("--original-source", default=None,
+                    help="fresh original source bytes for matrix source binding")
     ap.add_argument("--emit", default=None,
                     help="on PASS, copy the gate-proven RTL bytes here "
                          "(gate-as-sole-emit-path: the scoring artifact is "
@@ -736,8 +762,24 @@ def main(argv=None) -> int:
         return 2
     tb_path = Path(args.tb) if args.tb else None
 
+    matrix = None
+    if args.elaboration_matrix:
+        try:
+            matrix = _load_contract_json(args.elaboration_matrix)
+        except (OSError, ValueError, TypeError) as exc:
+            matrix = {"_load_error": str(exc)}
+    original_source = None
+    if args.original_source:
+        try:
+            original_source = Path(args.original_source).read_text(errors="replace")
+        except OSError:
+            original_source = None
+    if isinstance(matrix, dict) and matrix.get("_load_error"):
+        matrix = {"schema": "", "_load_error": matrix["_load_error"]}
     report = selfverify(rtl_path, args.top, tb_path, args.require_tools,
-                        lint_advisory=args.lint_advisory)
+                        lint_advisory=args.lint_advisory,
+                        elaboration_matrix=matrix,
+                        original_source=original_source)
 
     if args.report:
         Path(args.report).write_text(json.dumps(report, indent=2,
@@ -748,6 +790,11 @@ def main(argv=None) -> int:
     for g in report["gates"]:
         line = f"{g['gate']}: {g['verdict']} — {g.get('reason','')}"
         print(line, file=sys.stderr)
+    if "public_elaboration_matrix" in report:
+        _pm = report["public_elaboration_matrix"]
+        print(f"public_elaboration_matrix: {_pm.get('verdict')} — "
+              f"{len(_pm.get('configurations', []))} configuration(s)",
+              file=sys.stderr)
 
     # --require-tools: an ERROR verdict from an absent tool is a hard refusal.
     if args.require_tools:

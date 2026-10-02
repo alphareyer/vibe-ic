@@ -41,6 +41,7 @@ import hashlib
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -49,6 +50,10 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 import rtl_final_bundle_integrity as bundle_integrity  # noqa: E402
+from rtl_repair_contract import (  # noqa: E402
+    load_json as _load_repair_json,
+    validate_normal_repair_contract,
+)
 # R-0915-85 — THE VOCABULARY, IMPORTED RATHER THAN SPELLED.
 # This module READS the runner's step table and decides on its words. Spelling
 # them as bare literals is how `SKIPPED-BY-ENTRY` survived here after the word
@@ -324,7 +329,9 @@ def stage(fmt_name: str, problem: Dict[str, Any], project: Path) -> Dict[str, An
 
 def collect(fmt_name: str, problem_id: str, project: Path, *,
             supplied_rtl: bool = False,
-            required_top: Optional[str] = None) -> Dict[str, Any]:
+            required_top: Optional[str] = None,
+            repair_contract=None,
+            require_repair_contract: bool = False) -> Dict[str, Any]:
     """The answer artefact, in the shape the scorer reads — or a refusal.
 
     Always step 1's RTL (`phase2/stage1/rtl/*`) — measured: every open RTL
@@ -489,6 +496,82 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
                     f"{', '.join(cross_file)} in more than one file and does "
                     f"not compile as a set, so this candidate cannot be "
                     f"scored: {str(bundle_compile.get('reason') or '')[:400]}")}
+
+    # NORMAL REPAIR CONSUMER (issues #2852/#2853).  benchmark_dispatch.py
+    # already routes every ordinary completion through this adapter; keeping
+    # the binding here gives the declaration one consumer for both contracts
+    # without changing the dispatcher stack.  A declaration is opt-in for
+    # legacy projects, but once present it is checked against the fresh source
+    # bytes immediately before the accepted completion is returned.
+    contract = repair_contract
+    if contract is None:
+        for candidate in (
+                project / "reports" / "rtl_repair_contract.json",
+                project / "reports" / "repair_contract.json",
+                project / "input" / "rtl_repair_contract.json"):
+            if candidate.is_file():
+                try:
+                    contract = _load_repair_json(candidate)
+                except (OSError, ValueError, TypeError) as exc:
+                    contract = {"_load_error": str(exc)}
+                break
+    required_marker = (project / "reports" / "rtl_repair_contract.required").is_file()
+    if contract is not None or require_repair_contract or required_marker:
+        if isinstance(contract, dict) and contract.get("_load_error"):
+            repair_report = {"verdict": "REFUSED", "findings": [{
+                "code": "DECLARATION_READ_ERROR", "message": contract["_load_error"]}]}
+        else:
+            if isinstance(contract, dict) and contract.get("schema") == "vibeic.rtl_preservation_declaration.v1":
+                contract = {"preservation": contract}
+            elif isinstance(contract, dict) and contract.get("schema") == "vibeic.public_elaboration_matrix.v1":
+                contract = {"elaboration_matrix": contract}
+            original_root = project / "input" / "public_original" / "files"
+            original_sources: Dict[str, str] = {}
+            if original_root.is_dir():
+                for source_path in sorted(original_root.rglob("*")):
+                    if source_path.is_file():
+                        original_sources[str(source_path.relative_to(original_root))] = \
+                            source_path.read_text(errors="replace")
+            candidate_sources = {name: body for name, body in sources}
+            matrix = contract.get("elaboration_matrix", contract.get("public_elaboration_matrix")) \
+                if isinstance(contract, dict) else None
+            top = None
+            if isinstance(matrix, dict):
+                top = matrix.get("top", matrix.get("top_module"))
+            top = top or required_top
+            source_for_matrix = None
+            matrix_candidate_path = None
+            if isinstance(matrix, dict):
+                wanted = matrix.get("source_path", matrix.get("source"))
+                if isinstance(wanted, dict):
+                    wanted = wanted.get("path")
+                if isinstance(wanted, str):
+                    source_for_matrix = original_sources.get(wanted)
+                    wanted_name = Path(wanted).name
+                    for source_path in rtl:
+                        if source_path.name in (wanted, wanted_name):
+                            matrix_candidate_path = source_path
+                            break
+                if source_for_matrix is None and len(original_sources) == 1:
+                    source_for_matrix = next(iter(original_sources.values()))
+            with tempfile.TemporaryDirectory(prefix="rtl_repair_consumer_") as temp_dir:
+                candidate_path = matrix_candidate_path or (Path(temp_dir) / "candidate.sv")
+                if matrix_candidate_path is None:
+                    candidate_path.write_text(text)
+                repair_report = validate_normal_repair_contract(
+                    original_sources, candidate_sources, contract,
+                    candidate_path=candidate_path,
+                    original_source=source_for_matrix,
+                    top=top,
+                    require=True)
+        bundle["repair_contract"] = repair_report
+        if repair_report.get("verdict") != "PASS":
+            return {"id": problem_id, "ok": False,
+                    "rtl_gen": verdict["status"],
+                    "files": [name for name, _body in sources], **bundle,
+                    "reason": ("source-bound RTL repair contract "
+                               f"{repair_report.get('verdict')}: "
+                               f"{str(repair_report.get('findings') or '')[:600]}")}
     return {"id": problem_id, "ok": True, "completion": text,
             "rtl_gen": verdict["status"], "supplied_rtl": supplied_rtl,
             "files": [name for name, _body in sources], **bundle}

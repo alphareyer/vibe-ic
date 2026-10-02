@@ -72,6 +72,11 @@ from typing import Dict, List
 
 # single source for comment stripping among the programs/ emit helpers
 from leaf_typo_alias_emit import _strip_comments  # noqa: E402
+from rtl_repair_contract import (  # noqa: E402
+    SCHEMA_PRESERVATION,
+    load_json as _load_contract_json,
+    validate_preservation_declaration,
+)
 
 _HDL_SUFFIXES = (".v", ".sv", ".svh", ".vh")
 _MODULE_DEF_RE = re.compile(r"\bmodule\s+([A-Za-z_]\w*)")
@@ -109,7 +114,8 @@ def instantiates(text: str, name: str) -> bool:
     return False
 
 
-def check_sets(original: Dict[str, str], emitted: Dict[str, str]) -> List[str]:
+def check_sets(original: Dict[str, str], emitted: Dict[str, str], *,
+               declaration=None, require_declaration: bool = False) -> List[str]:
     """The zero-FP core. `original` = the provided file set, `emitted` = the
     delivered files (relative paths matching `original` where a file is
     overwritten). Returns findings (empty == clean)."""
@@ -130,7 +136,32 @@ def check_sets(original: Dict[str, str], emitted: Dict[str, str]) -> List[str]:
                     f"'{mod}' while the delivered set still instantiates it "
                     f"— extend, don't replace (self-breaking clobber: the "
                     f"design cannot elaborate)")
+    if declaration is not None or require_declaration:
+        report = validate_preservation_declaration(
+            original, emitted, declaration, require=require_declaration)
+        findings.extend(
+            f"{row.get('code', 'DECLARATION')}: {row.get('message', '')}"
+            for row in report.get("findings", [])
+        )
     return findings
+
+
+def check_declared_sets(original: Dict[str, str], emitted: Dict[str, str],
+                        declaration, *, require_declaration: bool = True) -> Dict:
+    """Return the typed source-bound result without widening ``check_sets``."""
+    presence = check_sets(original, emitted)
+    declared = validate_preservation_declaration(
+        original, emitted, declaration, require=require_declaration)
+    return {
+        "schema": SCHEMA_PRESERVATION,
+        "pass": not presence and declared.get("verdict") == "PASS",
+        "presence_findings": presence,
+        "declaration": declared,
+        "findings": presence + [
+            f"{row.get('code', 'DECLARATION')}: {row.get('message', '')}"
+            for row in declared.get("findings", [])
+        ],
+    }
 
 
 def _load_tree(root: Path) -> Dict[str, str]:
@@ -150,6 +181,10 @@ def main(argv=None) -> int:
                     help="directory of the ORIGINAL provided files")
     ap.add_argument("--after", required=True, type=Path,
                     help="directory of the DELIVERED files")
+    ap.add_argument("--declaration", type=Path, default=None,
+                    help="source-bound preserved-fragment declaration JSON")
+    ap.add_argument("--require-declaration", action="store_true",
+                    help="refuse when the source-bound declaration is absent")
     ap.add_argument("--json", action="store_true",
                     help="machine-readable output")
     a = ap.parse_args(argv)
@@ -157,9 +192,38 @@ def main(argv=None) -> int:
         print(f"error: --before/--after must be directories "
               f"({a.before} / {a.after})", file=sys.stderr)
         return 2
-    findings = check_sets(_load_tree(a.before), _load_tree(a.after))
+    original = _load_tree(a.before)
+    emitted = _load_tree(a.after)
+    presence = check_sets(original, emitted)
+    declared = None
+    if a.declaration is not None or a.require_declaration:
+        if a.declaration is None:
+            declaration = None
+        else:
+            try:
+                declaration = _load_contract_json(a.declaration)
+            except (OSError, ValueError, TypeError) as exc:
+                declaration = {"_load_error": str(exc)}
+        if isinstance(declaration, dict) and declaration.get("_load_error"):
+            declared = {"schema": SCHEMA_PRESERVATION, "verdict": "REFUSED",
+                        "findings": [{"code": "DECLARATION_READ_ERROR",
+                                      "message": declaration["_load_error"]}]}
+        else:
+            declared = validate_preservation_declaration(
+                original, emitted, declaration,
+                require=a.require_declaration or a.declaration is not None)
+    findings = list(presence)
+    if declared is not None:
+        findings.extend(
+            f"{row.get('code', 'DECLARATION')}: {row.get('message', '')}"
+            for row in declared.get("findings", [])
+        )
     if a.json:
-        print(json.dumps({"pass": not findings, "findings": findings}))
+        print(json.dumps({"schema": SCHEMA_PRESERVATION,
+                          "pass": not findings and
+                          (declared is None or declared.get("verdict") == "PASS"),
+                          "findings": findings,
+                          "declaration": declared}, ensure_ascii=False))
     else:
         if findings:
             for f in findings:
@@ -168,7 +232,8 @@ def main(argv=None) -> int:
             print("PASS: no self-breaking clobber "
                   "(every overwritten-and-still-instantiated module is "
                   "preserved)")
-    return 1 if findings else 0
+    return 1 if findings or (declared is not None and
+                             declared.get("verdict") != "PASS") else 0
 
 
 if __name__ == "__main__":
