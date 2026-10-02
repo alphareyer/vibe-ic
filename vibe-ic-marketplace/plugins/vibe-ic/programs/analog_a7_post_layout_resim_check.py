@@ -78,13 +78,12 @@ from _analog_a_check_common import (
     BLOCK_LIST_ABSENT_REASON, CONTENT_GATE_OF_RECORD_ARTEFACT,
     CONTENT_STRUCTURE_ONLY,
     CONTENT_UNDISCLOSED, PRE_VS_POST_DERIVED_ARTEFACT, STRUCTURE_ONLY_TOKEN,
+    MAX_DEGRADATION_PCT, parse_pre_vs_post,
     pre_vs_post_content, pre_vs_post_zero_delta, zero_delta_refusal_detail,
     load_block_list, select_blocks, make_argparser, vacuous_pass,
     artefact_missing_for_block, emit_pass, emit_fail,
     emit_incomplete,
 )
-from analog_pre_vs_post_layout_check import MAX_DEGRADATION_PCT
-
 GATE = "analog_a7_post_layout_resim_check"
 SKILL = "analog-extraction-resim"
 # Keep the runner gate on the same q7 owner threshold as the flow-declared
@@ -194,54 +193,11 @@ def _a4_simulator_ran(project: Path, block: str) -> Optional[bool]:
 
 
 def _check_specs(specs: list) -> tuple[list[float], list[tuple]]:
-    """``(deltas, pairs)`` for entries that carry both pre_value and
-    post_value. Skips ill-formed entries.
-
-    `deltas` keeps this gate's historical reading, which PREFERS a `delta_pct`
-    the artefact declares about itself over the one the values imply. `pairs`
-    is the raw ``(pre, post)`` sequence, carried separately because the shared
-    zero-delta rule must read the VALUES: a rule reading the declared field
-    would let an author write a non-zero `delta_pct` beside a copied pair and
-    put this gate back into disagreement with the gate the flow declares over
-    the same file.
-    """
-    deltas: list[float] = []
-    pairs: list[tuple] = []
-    for s in specs:
-        if not isinstance(s, dict):
-            continue
-        pre = s.get("pre_value")
-        post = s.get("post_value")
-        if pre is None or post is None:
-            continue
-        try:
-            pre_f = float(pre)
-            post_f = float(post)
-        except (TypeError, ValueError):
-            continue
-        pairs.append((pre_f, post_f))
-        if str(s.get("metric") or "").lower().startswith("railx_"):
-            try:
-                rail_v = float(s.get("rail_reference_v"))
-            except (TypeError, ValueError):
-                rail_v = 0.0
-            if rail_v > 0:
-                # The producer reports the scale, but the gate computes the
-                # drift from the measured voltages. A copied delta_pct cannot
-                # hide a real rail movement.
-                deltas.append(abs(100.0 * (post_f - pre_f) / rail_v))
-                continue
-        if "delta_pct" in s:
-            try:
-                deltas.append(abs(float(s["delta_pct"])))
-            except (TypeError, ValueError):
-                pass
-            continue
-        if pre_f == 0:
-            deltas.append(0.0 if post_f == 0 else float("inf"))
-            continue
-        deltas.append(abs(100.0 * (post_f - pre_f) / pre_f))
-    return deltas, pairs
+    """Compatibility wrapper around the shared parser used by all A7 paths."""
+    parsed = parse_pre_vs_post({"specs": specs})
+    return ([float(row.delta_pct) for row in parsed.rows
+             if row.has_pair and row.delta_pct is not None],
+            list(parsed.pairs))
 
 
 def _check_block(project: Path, block: str, max_delta_pct: float
@@ -287,40 +243,36 @@ def _check_block(project: Path, block: str, max_delta_pct: float
                        "vacuous without a pre-layout SPICE baseline"),
         }]
 
-    specs = data.get("specs")
-    deltas: list[float]
-    pairs: list[tuple]
-    if isinstance(specs, list) and specs:
-        deltas, pairs = _check_specs(specs)
-    else:
-        # Flat pre/post layout: {"pre": {...}, "post": {...}}
-        pre = data.get("pre")
-        post = data.get("post")
-        if (isinstance(pre, dict) and isinstance(post, dict)
-                and pre and post):
-            built = []
-            for k in pre.keys() & post.keys():
-                try:
-                    built.append({"name": k,
-                                  "pre_value": float(pre[k]),
-                                  "post_value": float(post[k])})
-                except (TypeError, ValueError):
-                    continue
-            deltas, pairs = _check_specs(built)
-            if not built:
-                return "FAIL", [{
-                    "block": block, "rule": "A7_POSTSIM_NO_SPECS",
-                    "rel_path": rel,
-                    "detail": ("`pre` / `post` dicts share no numeric "
-                               "spec keys"),
-                }]
-        else:
-            return "FAIL", [{
-                "block": block, "rule": "A7_POSTSIM_NO_SPECS",
-                "rel_path": rel,
-                "detail": ("neither `specs[]` nor `pre`/`post` dicts "
-                           "present"),
-            }]
+    parsed = parse_pre_vs_post(data)
+    # Delta-only records are retained for the cut-over reader, but A7
+    # certification requires the measured pair itself.
+    deltas = [float(row.delta_pct) for row in parsed.rows
+              if row.has_pair and row.delta_pct is not None]
+    pairs = list(parsed.pairs)
+    if parsed.container_key is None or not deltas:
+        return "FAIL", [{
+            "block": block, "rule": "A7_POSTSIM_NO_SPECS",
+            "rel_path": rel,
+            "detail": ("neither `specs[]`/`comparisons` nor a flat `pre`/`post` "
+                       "pair with numeric values is present"),
+        }]
+    parse_findings = []
+    for error in parsed.errors:
+        parser_rule = str(error.get("rule", "PARSE_ERROR"))
+        gate_rule = {
+            "PRE_VS_POST_DELTA_INCONSISTENT":
+                "A7_POSTSIM_DELTA_INCONSISTENT",
+            "PRE_VS_POST_STATUS_INCONSISTENT":
+                "A7_POSTSIM_STATUS_INCONSISTENT",
+        }.get(parser_rule, "A7_POSTSIM_" + parser_rule)
+        parse_findings.append({
+            "block": block,
+            "rule": gate_rule,
+            "rel_path": rel,
+            "detail": str(error.get("detail") or error.get("rule")),
+        })
+    if parse_findings:
+        return "FAIL", parse_findings
 
     if not deltas:
         return "FAIL", [{

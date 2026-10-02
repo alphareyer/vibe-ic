@@ -119,6 +119,7 @@ Accepted spellings (exactly what the gate parses — nothing else is read):
 | container shape | dict of `{metric: {…}}`, or list of `{"name": …, …}` |
 | pre value | `pre_layout` or `pre` |
 | post value | `post_layout` or `post` |
+| stated delta | `degradation_pct` or `delta_pct` (checked against the pair) |
 
 Both values must be numeric and `pre` must be non-zero, otherwise that metric
 is not counted. A file in which NO metric is comparable FAILs

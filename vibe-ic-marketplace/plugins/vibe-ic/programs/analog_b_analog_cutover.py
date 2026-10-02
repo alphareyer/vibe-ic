@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from _atomic_artefact import write_json
+from _analog_a_check_common import parse_pre_vs_post
 
 PROGRAM = "analog_b_analog_cutover"
 PROGRAMS_DIR = Path(__file__).resolve().parent
@@ -170,7 +171,8 @@ def closed_loop_threshold(step: str, flow_yaml: Path) -> Optional[float]:
     return None
 
 
-def reentries(project: Path, blocks: List[str], threshold: Optional[float]
+def reentries(project: Path, blocks: List[str], threshold: Optional[float],
+              parse_errors: Optional[Dict[str, List[dict]]] = None
               ) -> Dict[str, List[str]]:
     """Per block, the pre_vs_post rows whose |delta| exceeds the declared
     closed-loop threshold (A7 -> A3)."""
@@ -180,12 +182,13 @@ def reentries(project: Path, blocks: List[str], threshold: Optional[float]
     for b in blocks:
         p = project / "phase3" / "analog" / b / "pre_vs_post.json"
         try:
-            specs = json.loads(p.read_text()).get("specs") or []
+            parsed = parse_pre_vs_post(json.loads(p.read_text()))
         except (OSError, ValueError):
             continue
-        hot = [s["name"] for s in specs
-               if isinstance(s.get("delta_pct"), (int, float))
-               and abs(s["delta_pct"]) > threshold]
+        if parsed.errors and parse_errors is not None:
+            parse_errors[b] = [dict(error) for error in parsed.errors]
+        hot = [row.name for row in parsed.rows
+               if row.delta_pct is not None and row.delta_pct > threshold]
         if hot:
             out[b] = hot
     return out
@@ -253,10 +256,23 @@ def compare(base: Dict[str, str], d_proj: Path, t_proj: Path, step: str,
           and all(d["allowed"] for d in diffs)}
     # (b3) closed-loop re-entry
     thr = closed_loop_threshold(step, flow_yaml)
-    ed, et = reentries(d_proj, blocks, thr), reentries(t_proj, blocks, thr)
+    direct_parse_errors: Dict[str, List[dict]] = {}
+    tool_parse_errors: Dict[str, List[dict]] = {}
+    ed = reentries(d_proj, blocks, thr, direct_parse_errors)
+    et = reentries(t_proj, blocks, thr, tool_parse_errors)
     extra = {b: rows for b, rows in et.items() if b not in ed}
     b3 = {"threshold_pct": thr, "direct": ed, "tool": et,
-          "tool_only": extra, "pass": not extra}
+          "tool_only": extra,
+          "parse_errors": {"direct": direct_parse_errors,
+                           "tool": tool_parse_errors},
+          # A valid A7 hot row is an actionable closed-loop re-entry.  A
+          # malformed artifact is rejected above and must not manufacture a
+          # route token from untrusted numbers.
+          "fallback_to": ("A3" if step == "A7" and (ed or et)
+                          and not direct_parse_errors
+                          and not tool_parse_errors else None),
+          "pass": not extra and not direct_parse_errors
+          and not tool_parse_errors}
     ok = b1["pass"] and b2["pass"] and b3["pass"]
     return {"program": PROGRAM, "step": step, "blocks": blocks,
             "b1": b1, "b2": b2, "b3": b3,

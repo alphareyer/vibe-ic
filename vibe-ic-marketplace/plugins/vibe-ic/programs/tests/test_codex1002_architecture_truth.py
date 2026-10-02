@@ -24,6 +24,28 @@ def _step(step_id: str) -> dict:
     return next(s for s in _flow() if str(s["id"]) == step_id)
 
 
+EXPECTED_STEP_ORDER = (
+    "D1", "0.5ic", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    "10", "11", "FS1", "DT1", "12", "13", "A1", "A2", "A3", "A4",
+    "A5", "A6", "A7", "A8", "A9", "14", "15", "15.5ic", "16", "17",
+    "18", "19", "20", "21", "22", "DT2", "DT3", "32", "23", "24",
+    "25", "26", "26.5ic", "27", "28", "29", "30", "33", "34", "35",
+    "37", "37.3", "31", "36", "37.4", "37.5ip", "37.5ic", "38", "39",
+    "M1", "M2", "M3", "M4", "40", "41", "42", "43", "44", "P0",
+)
+EXPECTED_HALF_STEPS = frozenset({
+    "0.5ic", "15.5ic", "26.5ic", "37.5ip", "37.5ic",
+})
+
+
+def test_canonical_flow_order_and_half_steps_are_exact() -> None:
+    ids = tuple(str(step["id"]) for step in _flow())
+    assert ids == EXPECTED_STEP_ORDER
+    assert frozenset(step_id for step_id in ids if ".5" in step_id) == \
+        EXPECTED_HALF_STEPS
+    assert len(ids) == 70
+
+
 def test_route_owner_names_and_ip_applicability_are_truthful() -> None:
     owner = _step("0.5ic")
     ip = _step("37.5ip")
@@ -85,6 +107,7 @@ def _write_boundary_tree(root: Path, pct: float) -> None:
     (block / "pre_vs_post.json").write_text(json.dumps({
         "specs": [{"name": "vout", "pre_value": 100.0,
                    "post_value": post, "delta_pct": -pct}],
+        "overall_status": "NEEDS_RELAYOUT" if pct > 10.0 else "OK",
     }))
     (root / "phase3" / "analog" / "analog_block_list.json").write_text(
         json.dumps({"blocks": ["ldo"]}))
@@ -140,7 +163,16 @@ def test_a7_artifact_status_compatibility_is_separate_from_gate_fail(
     assert "NEEDS_RELAYOUT" in skill and "A7→A3" in skill
     gate_source = (PROGRAMS / "analog_pre_vs_post_layout_check.py").read_text(
         encoding="utf-8")
-    assert "overall_status" not in gate_source
+    runner_source = (PROGRAMS / "analog_a7_post_layout_resim_check.py").read_text(
+        encoding="utf-8")
+    cutover_source = (PROGRAMS / "analog_b_analog_cutover.py").read_text(
+        encoding="utf-8")
+    common_source = (PROGRAMS / "_analog_a_check_common.py").read_text(
+        encoding="utf-8")
+    assert "parse_pre_vs_post" in gate_source
+    assert "parse_pre_vs_post" in runner_source
+    assert "parse_pre_vs_post" in cutover_source
+    assert "overall_status" in common_source
 
     _write_boundary_tree(tmp_path, 10.01)
     pvp = tmp_path / "phase3" / "analog" / "ldo" / "pre_vs_post.json"
@@ -154,6 +186,47 @@ def test_a7_artifact_status_compatibility_is_separate_from_gate_fail(
     assert result.summary["verdict_tier"] == "FAIL"
     assert json.loads(pvp.read_text(encoding="utf-8"))["overall_status"] == \
         "NEEDS_RELAYOUT"
+
+
+@pytest.mark.parametrize("pct,status", [(9.0, "NEEDS_RELAYOUT"),
+                                         (11.0, "OK")])
+def test_a7_reverse_status_mapping_is_rejected_by_both_gates(
+        tmp_path: Path, pct: float, status: str) -> None:
+    import subprocess
+    import analog_a7_post_layout_resim_check as runner_gate
+    import analog_pre_vs_post_layout_check as flow_gate
+
+    _write_boundary_tree(tmp_path, pct)
+    pvp = tmp_path / "phase3/analog/ldo/pre_vs_post.json"
+    doc = json.loads(pvp.read_text(encoding="utf-8"))
+    doc["overall_status"] = status
+    pvp.write_text(json.dumps(doc), encoding="utf-8")
+    for program in (runner_gate.__file__, flow_gate.__file__):
+        report = tmp_path / (Path(program).stem + ".json")
+        cp = subprocess.run([sys.executable, program, str(tmp_path),
+                             "--json", str(report)],
+                            capture_output=True, text=True)
+        assert cp.returncode == 1, (program, pct, status, cp.stdout, cp.stderr)
+
+
+def test_a7_forged_stated_delta_is_rejected_by_both_gates(
+        tmp_path: Path) -> None:
+    import subprocess
+    import analog_a7_post_layout_resim_check as runner_gate
+    import analog_pre_vs_post_layout_check as flow_gate
+
+    _write_boundary_tree(tmp_path, 20.0)
+    pvp = tmp_path / "phase3/analog/ldo/pre_vs_post.json"
+    doc = json.loads(pvp.read_text(encoding="utf-8"))
+    doc["specs"][0]["delta_pct"] = -5.0
+    doc["overall_status"] = "NEEDS_RELAYOUT"
+    pvp.write_text(json.dumps(doc), encoding="utf-8")
+    for program in (runner_gate.__file__, flow_gate.__file__):
+        report = tmp_path / (Path(program).stem + ".json")
+        cp = subprocess.run([sys.executable, program, str(tmp_path),
+                             "--json", str(report)],
+                            capture_output=True, text=True)
+        assert cp.returncode == 1, (program, cp.stdout, cp.stderr)
 
 
 def test_a7_threshold_mutation_is_rejected_by_the_consistency_contract() -> None:
@@ -180,6 +253,8 @@ def test_mixed_signal_metadata_matches_reachable_producers_and_m2_gap(
                             encoding="utf-8"))
     m1 = _step("M1")
     m2 = _step("M2")
+    m3 = _step("M3")
+    m4 = _step("M4")
     runner = (PROGRAMS / "vibe_ic_one_shot_runner.py").read_text(
         encoding="utf-8")
     phase3 = (PROGRAMS / "phase3_one_shot_runner.py").read_text(
@@ -215,17 +290,67 @@ def test_mixed_signal_metadata_matches_reachable_producers_and_m2_gap(
     assert all(not (tmp_path / output).exists()
                for output in m2["required_outputs"])
 
+    m3_truth = truth["mixed_signal"]["m3"]
+    m4_truth = truth["mixed_signal"]["m4"]
+    assert m3_truth["certification"] == "PARTIAL/CANNOT_CERTIFY"
+    assert m3_truth["existing_producers"][
+        "phase3/mixed_signal/cosim/mixed_signal_results.json"] == \
+        "programs/analog_a9_cosim_emit.py"
+    assert m3_truth["missing_producers"][
+        "reports/analog/mixed_signal/interface_si.json"]["producer"] is None
+    assert m3["certification"] == "PARTIAL/CANNOT_CERTIFY"
+    assert "interface_si.json" in m3["known_gap"]
+    assert m4_truth["certification"] == "CANNOT_CERTIFY"
+    assert m4_truth["missing_producers"][
+        "reports/analog/mixed_signal/signoff.json"]["producer"] is None
+    assert m4["certification"] == "CANNOT_CERTIFY"
+    assert "signoff.json" in m4["known_gap"]
+
+    # Ownership test: consumers may mention the path, but no production
+    # source contains a write call that targets either missing artifact.
+    for filename in ("interface_si.json", "signoff.json"):
+        for source in PROGRAMS.glob("*.py"):
+            text = source.read_text(encoding="utf-8", errors="replace")
+            if filename not in text:
+                continue
+            assert not re.search(
+                rf"(?:write_json|write_text|atomic_write_text|open)\([^\n]*"
+                rf"{re.escape(filename)}",
+                text), (filename, source)
+
+    for step in (m3, m4):
+        result = compliance.check_step(tmp_path, step, {})
+        assert result.status != "PASS", step["id"]
+        assert result.reason_class == "missing_artefact", result
+        assert all(not (tmp_path / output).exists()
+                   for output in step["required_outputs"])
+
 
 def test_absent_fpga_evidence_keeps_steps_6_and_39_unmeasured(
         tmp_path: Path) -> None:
-    """Headless runs exclude both board steps; neither is a waiver/pass."""
+    """A disclosed runner receipt synthesizes both excluded rows."""
     import flow_compliance_check as compliance
+    receipt = tmp_path / "reports/phase2/fpga/quartus_map_audit.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(json.dumps({"verdict": "SKIP", "sof_present": False,
+                                   "skip_reason": "not_attempted"}))
+    waivers = compliance._load_waivers(tmp_path)
+    assert waivers[6]["_fpga_skip"] and waivers[39]["_fpga_skip"]
+    results = []
     for sid in ("6", "39"):
-        result = compliance.check_step(
-            tmp_path, _step(sid), {}, skip_hardware=True)
+        result = compliance.check_step(tmp_path, _step(sid), waivers)
+        results.append(result)
         assert result.status == "NOT_MEASURED", (sid, result)
         assert result.excluded_from_verdict, (sid, result)
         assert result.status != "PASS_WITH_WAIVERS"
+
+    # Run the real synthesised-row/tally path and prove both rows are in the
+    # explicit excluded set, rather than merely carrying a local flag.
+    report = tmp_path / "flow.json"
+    compliance.main([str(tmp_path), "--json", str(report)])
+    audit = json.loads(report.read_text(encoding="utf-8"))
+    excluded = {int(row["step_id"]) for row in audit["not_measured_excluded"]}
+    assert {6, 39} <= excluded
 
 
 def test_post_tapeout_steps_keep_their_documentation_only_scope() -> None:

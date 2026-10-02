@@ -31,7 +31,10 @@ run is reachable through `/vibe-ic-all`; the standalone Phase 3 and Phase 23
 entry runners do not dispatch it. M1 still needs a real producer result and the
 blocking `mixed_signal_merge_check` verdict. M2 remains unable to certify: its
 three required evidence files have no producer, and its checkers must not
-manufacture empty reports. The machine-readable scheduling contract is
+manufacture empty reports. M3 is `PARTIAL/CANNOT_CERTIFY`: A9 owns only
+`mixed_signal_results.json` and no production writer owns `interface_si.json`.
+M4 is `CANNOT_CERTIFY`: `mixed_signal_signoff_check` consumes `signoff.json`,
+but no production writer owns it. The machine-readable scheduling contract is
 [`docs/architecture/analog_mixed_signal_truth.json`](docs/architecture/analog_mixed_signal_truth.json).
 
 Flags: `--top-name --container --max-rtl-repair-retries --skip-phase1 --skip-analog --skip-phase3

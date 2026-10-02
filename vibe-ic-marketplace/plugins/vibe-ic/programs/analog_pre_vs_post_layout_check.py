@@ -124,26 +124,26 @@ from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (he
 # appended rather than substituted, so every file that satisfied this gate
 # before still satisfies it byte-for-byte, and the earlier spellings keep
 # priority.
-_CONTAINER_KEYS: tuple = ("comparisons", "specs")
-_PRE_KEYS: tuple = ("pre_layout", "pre", "pre_value")
-_POST_KEYS: tuple = ("post_layout", "post", "post_value")
+_CONTAINER_KEYS: tuple = _acc.PRE_VS_POST_CONTAINER_KEYS
+_PRE_KEYS: tuple = _acc.PRE_VS_POST_PRE_KEYS
+_POST_KEYS: tuple = _acc.PRE_VS_POST_POST_KEYS
 #: The artefact states the delta as well as the two values it is derived from,
 #: so the document can be checked AGAINST ITSELF (vibe-ic D9, criterion 1:
 #: self-consistency). Same disjoint-vocabulary hazard as the pair above, so the
 #: spellings are listed rather than assumed.
-_DELTA_KEYS: tuple = ("delta_pct", "delta_percent", "delta_pc", "change_pct")
+_DELTA_KEYS: tuple = _acc.PRE_VS_POST_DELTA_KEYS
 
 #: Tolerance on the stated-vs-implied delta, in percentage POINTS. Wide on
 #: purpose: this rule exists to catch a delta that does not describe its own
 #: pair at all, never to police rounding. The published artefact states
 #: `delta_pct` to 4 decimal places and agrees to ~1e-4, so 0.5 points is three
 #: orders of magnitude of headroom.
-_DELTA_TOLERANCE_PP = 0.5
+_DELTA_TOLERANCE_PP = _acc.PRE_VS_POST_DELTA_TOLERANCE_PP
 
 # Canonical q7 owner threshold. A7's runner gate imports this constant; the
 # flow YAML carries the same declaration for routing and analog_b_analog_cutover
 # reads that declaration when it proves closed-loop behaviour.
-MAX_DEGRADATION_PCT = 10.0
+MAX_DEGRADATION_PCT = _acc.MAX_DEGRADATION_PCT
 
 
 def _first_key(item: dict, keys: tuple):
@@ -242,19 +242,11 @@ def run_audit(project: Path) -> AuditResult:
             ))
             continue
 
-        # ONLY these container keys are read. `skills/analog-extraction-resim`
-        # documents the same list; when they drift, a spec-compliant result is
-        # scored as zero comparisons, so the drift is named explicitly below
-        # rather than surfacing as a bare "no numeric pre/post pairs".
-        container_key = next(
-            (k for k in _CONTAINER_KEYS if isinstance(data, dict) and k in data),
-            None)
-        comparisons = data.get(container_key) if container_key else None
-        if isinstance(comparisons, list):
-            comp_iter = comparisons
-        elif isinstance(comparisons, dict):
-            comp_iter = [{"name": k, **v} for k, v in comparisons.items()]
-        else:
+        # One parser owns schema normalization, pair-derived deltas, stated
+        # delta consistency, and the artifact-level status mapping.  This is
+        # the same result consumed by the A7 runner and analog cut-over.
+        parsed = _acc.parse_pre_vs_post(data)
+        if parsed.container_key is None:
             if isinstance(data, dict):
                 unreadable_schema.append(
                     f"{block}: top-level keys "
@@ -262,59 +254,26 @@ def run_audit(project: Path) -> AuditResult:
                     f"{list(_CONTAINER_KEYS)} present")
             continue
 
-        for item in comp_iter:
-            if isinstance(item, dict):
-                name = item.get("name", item.get("spec", "?"))
-                pre_val = _first_key(item, _PRE_KEYS)
-                post_val = _first_key(item, _POST_KEYS)
-            else:
-                continue
+        for error in parsed.errors:
+            errors += 1
+            block_errors += 1
+            rule = str(error.get("rule") or "PRE_VS_POST_INVALID_DOCUMENT")
+            detail = str(error.get("detail") or rule)
+            name = error.get("name")
+            prefix = f"Block '{block}'" + (f" spec '{name}'" if name else "")
+            result.findings.append(Finding(rule=rule, severity="ERROR",
+                                           message=f"{prefix}: {detail}",
+                                           file=str(pvp_path)))
 
-            if pre_val is None or post_val is None:
+        block_rows = [row for row in parsed.rows if row.has_pair]
+        total_specs += len(block_rows)
+        block_specs += len(block_rows)
+        block_pairs.extend(parsed.pairs)
+        for row in block_rows:
+            pct = row.delta_pct
+            if pct is None:
                 continue
-            if not isinstance(pre_val, (int, float)) or not isinstance(post_val, (int, float)):
-                continue
-            if pre_val == 0:
-                continue
-
-            total_specs += 1
-            block_specs += 1
-            block_pairs.append((pre_val, post_val))
-            pct = abs(post_val - pre_val) / abs(pre_val) * 100
             max_degradation = max(max_degradation, pct)
-
-            # ── SELF-CONSISTENCY (D9). NO ORACLE, and that is the point ──
-            # The document states `delta_pct` next to the two values it is
-            # derived from. Nothing here knows what the delta OUGHT to be — a
-            # real project ships no answer key — it only asks whether the
-            # document agrees with itself. A stated delta that does not
-            # describe its own (pre, post) pair means the three numbers did
-            # not come from one measurement, and every degradation tier above
-            # is then reasoning about a pair no one computed.
-            #
-            # Measured cause: this gate read `pre_value`/`post_value` and never
-            # read `delta_pct` at all, so scaling every number in the artefact
-            # left the verdict at PASS — the D9 census's EXISTENCE-ONLY verdict
-            # for step A7.
-            stated = _first_key(item, _DELTA_KEYS)
-            if isinstance(stated, (int, float)) and not isinstance(stated, bool):
-                if abs(abs(stated) - pct) > _DELTA_TOLERANCE_PP:
-                    errors += 1
-                    block_errors += 1
-                    result.findings.append(Finding(
-                        rule="PRE_VS_POST_DELTA_INCONSISTENT",
-                        severity="ERROR",
-                        message=(
-                            f"Block '{block}' spec '{name}': the artefact states "
-                            f"delta {stated} but pre={pre_val} and post={post_val} "
-                            f"imply {pct:.4f} (tolerance "
-                            f"{_DELTA_TOLERANCE_PP} points). The document does not "
-                            f"agree with itself, so the three numbers did not come "
-                            f"from one measurement"
-                        ),
-                        file=str(pvp_path),
-                    ))
-
             if pct > MAX_DEGRADATION_PCT:
                 errors += 1
                 block_errors += 1
@@ -322,21 +281,19 @@ def run_audit(project: Path) -> AuditResult:
                     rule="LAYOUT_SEVERE_DEGRADATION",
                     severity="ERROR",
                     message=(
-                        f"Block '{block}' spec '{name}': "
-                        f"pre={pre_val}, post={post_val} "
+                        f"Block '{block}' spec '{row.name}': "
+                        f"pre={row.pre}, post={row.post} "
                         f"({pct:.2f}% degradation — exceeds the canonical "
-                        f"{MAX_DEGRADATION_PCT:.1f}% A7→A3 floor)"
-                    ),
+                        f"{MAX_DEGRADATION_PCT:.1f}% A7→A3 floor)"),
                 ))
             else:
                 result.findings.append(Finding(
                     rule="LAYOUT_ACCEPTABLE",
                     severity="INFO",
                     message=(
-                        f"Block '{block}' spec '{name}': "
-                        f"pre={pre_val}, post={post_val} "
-                        f"({pct:.1f}% — acceptable). OK."
-                    ),
+                        f"Block '{block}' spec '{row.name}': "
+                        f"pre={row.pre}, post={row.post} "
+                        f"({pct:.1f}% — acceptable). OK."),
                 ))
 
         # ── the certification question, asked LAST ────────────────────────

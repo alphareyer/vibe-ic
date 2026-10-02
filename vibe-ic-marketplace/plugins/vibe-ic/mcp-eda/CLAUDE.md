@@ -53,8 +53,12 @@ standalone Phase 3 and Phase 23 entry runners do not dispatch it. M1 is
 reachable through `/vibe-ic-all` and still requires real producer evidence plus
 the blocking `mixed_signal_merge_check`. M2 cannot be certified: its required
 power-domain, level-shifter and isolation reports have no producer. The
-checkers must not emit empty sidecars to make M2 appear green. See
-`docs/architecture/analog_mixed_signal_truth.json` for the validated metadata.
+checkers must not emit empty sidecars to make M2 appear green. M3 is
+`PARTIAL/CANNOT_CERTIFY`: A9 writes only `mixed_signal_results.json`, and no
+production writer owns `interface_si.json`. M4 is `CANNOT_CERTIFY`: the
+sign-off checker consumes `signoff.json`, but no production writer owns it.
+See `docs/architecture/analog_mixed_signal_truth.json` for the validated
+metadata.
 
 Every verdict follows the evidence contract. Programs run before AI review;
 required outputs must come from a pre-audit producer; and a gate must report

@@ -40,9 +40,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
-from typing import List, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, List, NamedTuple, Optional, Sequence, Tuple
 
 
 # ── where the block list actually lives ───────────────────────────────────
@@ -75,6 +76,172 @@ BLOCK_LIST_ABSENT_REASON = (
     " or ".join(f"{r}/" for r in _BLOCK_LIST_ROOTS) +
     ", or it declares no blocks; gate inapplicable."
 )
+
+
+# ── shared A7 pre/post evidence parser ────────────────────────────────────
+# Two gates and the analog cut-over checker certify the same
+# ``pre_vs_post.json``.  Keep the calculation and the document self-check in
+# this module so none of them can prefer an author-stated delta over the
+# measured pre/post pair.
+PRE_VS_POST_CONTAINER_KEYS = ("comparisons", "specs")
+PRE_VS_POST_PRE_KEYS = ("pre_layout", "pre", "pre_value")
+PRE_VS_POST_POST_KEYS = ("post_layout", "post", "post_value")
+PRE_VS_POST_DELTA_KEYS = (
+    "delta_pct", "delta_percent", "delta_pc", "change_pct",
+    "degradation_pct",
+)
+PRE_VS_POST_DELTA_TOLERANCE_PP = 0.5
+MAX_DEGRADATION_PCT = 10.0
+
+
+class PrePostRow(NamedTuple):
+    name: str
+    pre: Optional[float]
+    post: Optional[float]
+    delta_pct: Optional[float]
+    stated_delta_pct: Optional[float]
+    metric: str
+    has_pair: bool
+
+
+class PrePostParseResult(NamedTuple):
+    rows: Tuple[PrePostRow, ...]
+    pairs: Tuple[Tuple[float, float], ...]
+    errors: Tuple[dict, ...]
+    container_key: Optional[str]
+    overall_status: Optional[str]
+    expected_overall_status: Optional[str]
+
+
+def _numeric(value: Any) -> Optional[float]:
+    """Return a real number, excluding booleans and non-finite values."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    # NaN/inf are not useful measured evidence.  An infinity can still be the
+    # honest *computed* result of a non-zero post value against a zero baseline;
+    # that value is produced below from finite inputs, never accepted here.
+    return number if math.isfinite(number) else None
+
+
+def parse_pre_vs_post(data: Any) -> PrePostParseResult:
+    """Normalize one pre/post artifact and validate its authoritative fields.
+
+    The returned ``delta_pct`` is always computed from the pair (or, for a
+    legacy delta-only row, the stated value is retained because no pair exists
+    to recompute).  When both are present, a mismatch is an error.  If
+    ``overall_status`` is present it must be ``OK`` through the 10.0% boundary
+    or ``NEEDS_RELAYOUT`` above it.  Consumers may report these errors in their
+    own gate vocabulary, but they must not ignore them.
+    """
+    if not isinstance(data, dict):
+        return PrePostParseResult((), (), ({
+            "rule": "PRE_VS_POST_INVALID_DOCUMENT",
+            "detail": "top-level value is not a JSON object",
+        },), None, None, None)
+
+    container_key: Optional[str] = None
+    raw = None
+    for key in PRE_VS_POST_CONTAINER_KEYS:
+        if key in data:
+            container_key = key
+            raw = data.get(key)
+            break
+
+    items = []
+    if isinstance(raw, list):
+        items = [(None, item) for item in raw]
+    elif isinstance(raw, dict):
+        items = [(name, item) for name, item in raw.items()]
+    elif isinstance(data.get("pre"), dict) and isinstance(data.get("post"), dict):
+        # Flat form is an accepted schema even without a container key.
+        container_key = "pre/post"
+        pre, post = data["pre"], data["post"]
+        items = [(name, {"pre_value": pre[name], "post_value": post[name]})
+                 for name in pre.keys() & post.keys()]
+    elif raw is None:
+        # A single row is convenient for small producers and is harmless to
+        # accept alongside the documented list/dict containers.
+        if any(k in data for k in PRE_VS_POST_PRE_KEYS + PRE_VS_POST_POST_KEYS
+               + PRE_VS_POST_DELTA_KEYS):
+            container_key = "single"
+            items = [(data.get("name", data.get("spec", "?")), data)]
+
+    rows: List[PrePostRow] = []
+    pairs: List[Tuple[float, float]] = []
+    errors: List[dict] = []
+    for key_name, item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", item.get("spec", key_name or "?")))
+        pre_raw = next((item[k] for k in PRE_VS_POST_PRE_KEYS if k in item), None)
+        post_raw = next((item[k] for k in PRE_VS_POST_POST_KEYS if k in item), None)
+        stated_raw = next((item[k] for k in PRE_VS_POST_DELTA_KEYS if k in item), None)
+        pre = _numeric(pre_raw)
+        post = _numeric(post_raw)
+        stated = _numeric(stated_raw)
+        metric = str(item.get("metric") or "")
+        implied: Optional[float] = None
+        has_pair = pre is not None and post is not None
+        if has_pair:
+            pairs.append((pre, post))
+            try:
+                rail_ref = _numeric(item.get("rail_reference_v"))
+            except Exception:  # pragma: no cover - defensive only
+                rail_ref = None
+            if metric.lower().startswith("railx_") and rail_ref and rail_ref > 0:
+                implied = abs(100.0 * (post - pre) / rail_ref)
+            elif pre == 0:
+                implied = 0.0 if post == 0 else float("inf")
+            else:
+                implied = abs(100.0 * (post - pre) / abs(pre))
+            if stated is not None:
+                mismatch = ((implied == float("inf") and stated != implied)
+                            or (implied != float("inf") and
+                                abs(abs(stated) - implied) >
+                                PRE_VS_POST_DELTA_TOLERANCE_PP))
+                if mismatch:
+                    errors.append({
+                        "rule": "PRE_VS_POST_DELTA_INCONSISTENT",
+                        "name": name,
+                        "detail": (f"stated delta {stated} but pre={pre} and "
+                                   f"post={post} imply {implied:.4f}% "
+                                   f"(tolerance "
+                                   f"{PRE_VS_POST_DELTA_TOLERANCE_PP} points)"),
+                    })
+        elif stated is not None:
+            # Legacy cut-over fixtures and early producer records carried only
+            # the stated field.  They remain measurable, but cannot claim pair
+            # consistency; a forged field is rejected whenever a pair exists.
+            implied = abs(stated)
+        if implied is not None:
+            rows.append(PrePostRow(name, pre, post, implied, stated, metric,
+                                   has_pair))
+
+    deltas = [r.delta_pct for r in rows if r.delta_pct is not None]
+    maximum = max(deltas) if deltas else None
+    expected = ("NEEDS_RELAYOUT" if maximum is not None
+                and maximum > MAX_DEGRADATION_PCT else
+                "OK" if maximum is not None else None)
+    overall = data.get("overall_status")
+    if overall is not None:
+        if not isinstance(overall, str) or overall not in ("OK", "NEEDS_RELAYOUT"):
+            errors.append({
+                "rule": "PRE_VS_POST_STATUS_INCONSISTENT",
+                "detail": (f"overall_status={overall!r}; expected one of "
+                           "OK or NEEDS_RELAYOUT"),
+            })
+        elif expected is not None and overall != expected:
+            errors.append({
+                "rule": "PRE_VS_POST_STATUS_INCONSISTENT",
+                "detail": (f"overall_status={overall!r}, but the measured "
+                           f"maximum degradation maps to {expected!r}"),
+            })
+    return PrePostParseResult(tuple(rows), tuple(pairs), tuple(errors),
+                              container_key, overall, expected)
 
 
 def block_list_path(project: Path) -> Optional[Path]:

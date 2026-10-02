@@ -11,6 +11,7 @@ from pathlib import Path
 
 import _plugin_tree  # noqa: F401 — puts programs/ on sys.path
 import analog_b_analog_cutover as B
+import pytest
 
 FLOW = Path(_plugin_tree.plugin_path("flow")) / "phase1_phase2_phase3.yaml"
 
@@ -46,6 +47,15 @@ _T = {"A6": "FAIL", "A7": "PASS", "A8": "PASS", "A9": "PASS"}
 def _pvp(delta: float) -> str:
     return json.dumps({"specs": [{"name": "vout@ngspice()",
                                   "delta_pct": delta}]})
+
+
+def _pvp_pair(pre: float, post: float, stated: float,
+              status: str) -> str:
+    return json.dumps({"specs": [{"name": "vout@ngspice()",
+                                   "pre_value": pre,
+                                   "post_value": post,
+                                   "delta_pct": stated}],
+                       "overall_status": status})
 
 
 def test_two_arms_that_differ_only_by_the_steps_own_records_pass(tmp_path):
@@ -124,6 +134,26 @@ def test_b3_a_degradation_past_the_declared_threshold_only_in_the_tool_arm_fails
     rec = B.compare(base, d, t, "A7", _drive(_D), _drive(_T), None, FLOW)
     assert rec["b3"]["threshold_pct"] == 10.0     # read from the flow YAML
     assert rec["b3"]["tool_only"] == {"blk": ["vout@ngspice()"]}
+    assert rec["b3"]["fallback_to"] == "A3"
+    assert rec["result"] == "FAIL"
+
+
+@pytest.mark.parametrize("post,stated,status", [
+    (91.0, 9.0, "NEEDS_RELAYOUT"),   # reverse status mapping
+    (89.0, 11.0, "OK"),              # reverse status mapping
+    (80.0, 5.0, "NEEDS_RELAYOUT"),   # forged stated delta
+])
+def test_b3_uses_shared_pair_and_status_parser_before_a3_reentry(
+        tmp_path, post, stated, status):
+    d = _arm(tmp_path, "D")
+    base = B.manifest(d)
+    t = _arm(tmp_path, "T", {
+        "phase3/analog/blk/pre_vs_post.json":
+        _pvp_pair(100.0, post, stated, status),
+    })
+    rec = B.compare(base, d, t, "A7", _drive(_D), _drive(_T), None, FLOW)
+    assert rec["b3"]["parse_errors"]["tool"]["blk"]
+    assert rec["b3"]["pass"] is False
     assert rec["result"] == "FAIL"
 
 
