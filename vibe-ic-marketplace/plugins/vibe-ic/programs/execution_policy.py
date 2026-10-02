@@ -14,8 +14,10 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import socket
 import struct
+import sys
 import tempfile
 import threading
 import uuid
@@ -65,6 +67,34 @@ def _canonical_process_cmdline(pid: int) -> str:
         raise Refusal('REQUEST_CAPABILITY_INVALID', f'process {pid} command line unavailable') from exc
 
 
+def _process_identity(pid: int) -> dict:
+    """Read the live process object, including its exact script invocation.
+
+    A substring in ``/proc/<pid>/cmdline`` is not an authority: an attacker can
+    run ``python - <canonical-runner>`` and make that substring appear while
+    executing code from stdin.  The capability is therefore bound to the
+    executable object, the canonical script object, and the exact argv shape
+    the front door uses (the script must be argv[1], never ``-`` or ``-c``).
+    """
+    try:
+        executable = Path(os.readlink(f'/proc/{pid}/exe')).resolve()
+        raw = Path(f'/proc/{pid}/cmdline').read_bytes()
+        argv = tuple(item.decode() for item in raw.split(b'\0') if item)
+        if not argv:
+            raise ValueError('empty command line')
+        executable_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise Refusal('REQUEST_CAPABILITY_INVALID', f'process {pid} identity unavailable') from exc
+    return dict(pid=pid, start_ticks=_process_start_ticks(pid),
+                source_path=str(_CANONICAL_FRONTDOOR),
+                source_sha256=_canonical_source_sha256(),
+                executable_path=str(executable),
+                executable_sha256=executable_sha,
+                argv=list(argv),
+                argv_sha256=hashlib.sha256(
+                    json.dumps(list(argv), separators=(',', ':')).encode()).hexdigest())
+
+
 def _default_payload() -> dict:
     payload = dict(schema=1, mode='default', mode_label=DEFAULT_MODE,
                    intent_label=PROGRAM_DEFAULT, ultra_match=False,
@@ -85,11 +115,7 @@ def _register_frontdoor_issuer(authority: object) -> None:
     _REGISTERED_ISSUER = authority
     if _ISSUER_CONTEXT is None:
         _ISSUER_CONTEXT = dict(
-            issuer_process=dict(
-                pid=os.getpid(),
-                start_ticks=_process_start_ticks(os.getpid()),
-                source_path=str(_CANONICAL_FRONTDOOR),
-                source_sha256=_canonical_source_sha256()),
+            issuer_process=_process_identity(os.getpid()),
             invocation_id=secrets.token_hex(16),
             issuer_role='canonical-frontdoor')
 
@@ -157,9 +183,23 @@ def _verify_parent_capability(request_digest: str, receipt: dict) -> None:
         sock = socket.socket(fileno=fd)
         peer_pid = struct.unpack('3i', sock.getsockopt(socket.SOL_SOCKET,
                                                         socket.SO_PEERCRED, 12))[0]
+        live = _process_identity(peer_pid)
+        expected_argv = live.get('argv', [])
+        argv0 = Path(expected_argv[0])
+        if not argv0.is_absolute():
+            resolved_argv0 = shutil.which(expected_argv[0])
+            argv0 = Path(resolved_argv0).resolve() if resolved_argv0 else Path('')
         if (peer_pid != process.get('pid') or
-                _process_start_ticks(peer_pid) != str(process.get('start_ticks')) or
-                str(_CANONICAL_FRONTDOOR) not in _canonical_process_cmdline(peer_pid)):
+                live.get('start_ticks') != str(process.get('start_ticks')) or
+                live.get('source_path') != str(_CANONICAL_FRONTDOOR) or
+                live.get('source_sha256') != _canonical_source_sha256() or
+                live.get('executable_path') != process.get('executable_path') or
+                live.get('executable_sha256') != process.get('executable_sha256') or
+                live.get('argv') != process.get('argv') or
+                live.get('argv_sha256') != process.get('argv_sha256') or
+                len(expected_argv) < 2 or
+                str(argv0) != live.get('executable_path') or
+                expected_argv[1] != str(_CANONICAL_FRONTDOOR)):
             raise Refusal('REQUEST_CAPABILITY_INVALID', request_digest)
         nonce = secrets.token_hex(16)
         sock.settimeout(2.0)

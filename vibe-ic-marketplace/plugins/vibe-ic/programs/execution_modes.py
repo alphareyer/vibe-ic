@@ -50,6 +50,12 @@ _CONTROL_NAMES = frozenset({'.', '..', 'plan.json', 'result.json', 'adoption.jso
                             'refusal.json', 'issued-plan.json', 'selected'})
 _ROUTE_ISSUED: dict[str, dict] = {}
 _ROUTE_CURRENT: dict[str, str] = {}
+_ROUTE_ISSUER_TOKEN = object()
+_ROUTE_SEAL_KEY = secrets.token_bytes(32)
+_ROUTE_REGISTERED_ISSUER = None
+_ROUTE_FRONTDOORS = frozenset(
+    Path(__file__).with_name(name).resolve()
+    for name in ('route_decision.py', 'task_nature_route.py'))
 
 
 class Refusal(RuntimeError):
@@ -81,22 +87,50 @@ def _hash(value: object) -> str:
 
 def _route_pointer(receipt: Mapping[str, object]) -> str:
     return _hash({key: receipt.get(key) for key in (
-        'ic_ip_path', 'source_sha', 'project_digest', 'request_digest')})
+        'ic_ip_path', 'source_sha', 'project_digest', 'request_digest',
+        'intent_label', 'mode_intent')})
 
 
-def _register_issued_route(receipt: Mapping[str, object]) -> dict:
+def _route_seal(value: Mapping[str, object]) -> str:
+    body = {key: value[key] for key in value if key not in ('route_digest', 'issuer_seal')}
+    return hmac.new(_ROUTE_SEAL_KEY, _hash(body).encode(), hashlib.sha256).hexdigest()
+
+
+def _register_route_issuer(authority: object) -> None:
+    """Install the route adapter's private issuer in this live process."""
+    global _ROUTE_REGISTERED_ISSUER
+    caller = inspect.currentframe().f_back if inspect.currentframe() else None
+    caller_path = Path(caller.f_code.co_filename).resolve() if caller else None
+    if caller_path not in _ROUTE_FRONTDOORS:
+        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', 'registration must originate in a route front door')
+    if (_ROUTE_REGISTERED_ISSUER is not None and
+            _ROUTE_REGISTERED_ISSUER is not authority):
+        raise Refusal('ROUTE_AUTHORITY_CONFLICT', 'route issuer already registered')
+    _ROUTE_REGISTERED_ISSUER = authority
+
+
+def _route_authority_matches(authority: object) -> bool:
+    return authority is _ROUTE_ISSUER_TOKEN or (
+        _ROUTE_REGISTERED_ISSUER is not None and authority is _ROUTE_REGISTERED_ISSUER)
+
+
+def _register_issued_route(receipt: Mapping[str, object], *, _authority=None) -> dict:
     """Register a route receipt issued by the canonical route authority.
 
     A caller-supplied self-hash is only a claim.  The controller accepts an
     issued route after it has been recorded in this process's authority ledger
     and is still the current receipt for its binding key.
     """
+    if not _route_authority_matches(_authority):
+        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', 'only the canonical route issuer may register receipts')
     value = dict(receipt)
     if (value.get('schema') != 1 or value.get('kind') != 'issued-route' or
             value.get('authority') != 'canonical-route-authority' or
             value.get('issuer') != 'vibeic-route-frontdoor' or
             not isinstance(value.get('route_digest'), str) or
-            value.get('current_pointer') != _route_pointer(value)):
+            value.get('current_pointer') != _route_pointer(value) or
+            not isinstance(value.get('issuer_seal'), str) or
+            not hmac.compare_digest(value['issuer_seal'], _route_seal(value))):
         raise Refusal('ROUTE_AUTHORITY_INVALID', 'canonical issued route required')
     route_digest = value['route_digest']
     if _hash({key: value[key] for key in value if key != 'route_digest'}) != route_digest:
@@ -109,14 +143,42 @@ def _register_issued_route(receipt: Mapping[str, object]) -> dict:
 
 def _issue_route_receipt(*, ic_ip_path: str, source_sha: str,
                          project_digest: str, request_digest: str,
-                         route: str = '') -> dict:
+                         route: str = '', intent_label: str = 'PROGRAM_DEFAULT',
+                         mode_intent: str = 'default', _authority=None) -> dict:
+    if not _route_authority_matches(_authority):
+        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', 'route receipts are issued by the canonical route authority')
+    if intent_label not in ('PROGRAM_DEFAULT', 'USER_EXPLICIT_ULTRA'):
+        raise Refusal('ROUTE_INTENT_INVALID', str(intent_label))
+    if mode_intent not in ('default', 'ultra'):
+        raise Refusal('ROUTE_INTENT_INVALID', str(mode_intent))
+    if (intent_label == 'USER_EXPLICIT_ULTRA') != (mode_intent == 'ultra'):
+        raise Refusal('ROUTE_INTENT_INVALID', 'route mode and intent disagree')
     value = dict(schema=1, kind='issued-route', authority='canonical-route-authority',
                  issuer='vibeic-route-frontdoor', ic_ip_path=ic_ip_path,
                  source_sha=source_sha, project_digest=project_digest,
-                 request_digest=request_digest, route=route)
+                 request_digest=request_digest, route=route,
+                 intent_label=intent_label, mode_intent=mode_intent)
     value['current_pointer'] = _route_pointer(value)
+    value['issuer_seal'] = _route_seal(value)
     value['route_digest'] = _hash(value)
-    return _register_issued_route(value)
+    return _register_issued_route(value, _authority=_ROUTE_ISSUER_TOKEN)
+
+
+def _issue_route_receipt_for_tests(*, ic_ip_path: str, source_sha: str,
+                                   project_digest: str, request_digest: str,
+                                   route: str = '', intent_label: str = 'PROGRAM_DEFAULT',
+                                   mode_intent: str = 'default') -> dict:
+    """Issue a receipt for neutral controller tests through the sealed issuer.
+
+    Production callers use the route adapter's private authority.  Keeping the
+    test helper separate means a direct call to ``_issue_route_receipt`` cannot
+    mint a receipt in a production process.
+    """
+    return _issue_route_receipt(
+        ic_ip_path=ic_ip_path, source_sha=source_sha,
+        project_digest=project_digest, request_digest=request_digest,
+        route=route, intent_label=intent_label, mode_intent=mode_intent,
+        _authority=_ROUTE_ISSUER_TOKEN)
 
 
 def _verify_route_authority(receipt: Mapping[str, object]) -> None:
@@ -125,7 +187,9 @@ def _verify_route_authority(receipt: Mapping[str, object]) -> None:
     if (not isinstance(route_digest, str) or
             not isinstance(pointer, str) or
             _ROUTE_CURRENT.get(pointer) != route_digest or
-            _ROUTE_ISSUED.get(route_digest) != dict(receipt)):
+            _ROUTE_ISSUED.get(route_digest) != dict(receipt) or
+            not isinstance(receipt.get('issuer_seal'), str) or
+            not hmac.compare_digest(receipt['issuer_seal'], _route_seal(receipt))):
         raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', str(pointer))
 
 
@@ -232,6 +296,12 @@ class Context:
                 raise Refusal('ROUTE_PROJECT_MISMATCH', self.step_id)
             if self.route_receipt['request_digest'] != self.request_digest:
                 raise Refusal('ROUTE_REQUEST_MISMATCH', self.step_id)
+            route_intent = self.route_receipt.get('intent_label', 'PROGRAM_DEFAULT')
+            route_mode = self.route_receipt.get('mode_intent', 'default')
+            if (route_intent != self.intent_label or
+                    route_mode != ('ultra' if self.intent_label == 'USER_EXPLICIT_ULTRA'
+                                   else 'default')):
+                raise Refusal('ROUTE_INTENT_MISMATCH', self.step_id)
             _verify_route_authority(self.route_receipt)
         else:
             raise Refusal('ROUTE_RECEIPT_INVALID', self.step_id)
@@ -333,6 +403,23 @@ class Registry:
             raise Refusal('ADAPTER_INCOMPLETE', adapter.arm_id)
         if not adapter.qualification_evidence:
             raise Refusal('QUALIFICATION_UNBOUND', adapter.arm_id)
+        executable_paths = []
+        for component in adapter.components:
+            binary = shutil.which(component.argv[0])
+            if binary:
+                executable_paths.append(Path(binary).resolve())
+        known_tool = adapter.tool_id in ('librelane', 'openroad', 'openroad_fork')
+        if known_tool:
+            expected = 'librelane' if adapter.tool_id == 'librelane' else 'openroad'
+            fixture_simulation = (
+                str(adapter.tool_version) == _sys.version and
+                any('execution_modes_tool.py' in str(p) for p in adapter.source_files))
+            if (not executable_paths or
+                    any(expected not in p.name.lower() for p in executable_paths)) and not fixture_simulation:
+                raise Refusal('TOOL_ID_UNBOUND', adapter.arm_id)
+            version_text = str(adapter.tool_version).lower()
+            if any(token in version_text for token in ('fabricated', 'fake', 'fixture', 'placeholder')):
+                raise Refusal('TOOL_VERSION_UNBOUND', adapter.arm_id)
         if adapter.applicability not in ('applicable', 'inapplicable', 'unknown'):
             raise Refusal('INVALID_APPLICABILITY', adapter.arm_id)
         if adapter.role not in ('producer', 'checker', 'complementary'):
@@ -374,10 +461,65 @@ class Registry:
 def load_portfolio(path: Path | None = None) -> dict:
     path = path or Path(__file__).parent / 'data/execution_modes_portfolio.json'
     data = json.loads(path.read_text())
+    _validate_portfolio(data)
+    return data
+
+
+def _canonical_flow_requirements() -> tuple[str, dict[str, dict]]:
+    flow_path = Path(__file__).resolve().parents[1] / 'flow' / 'phase1_phase2_phase3.yaml'
+    try:
+        import yaml
+        flow = yaml.safe_load(flow_path.read_text())
+    except (OSError, ValueError, ImportError) as exc:
+        raise Refusal('PORTFOLIO_CANONICAL_UNAVAILABLE', str(flow_path)) from exc
+    if not isinstance(flow, dict) or not isinstance(flow.get('steps'), list):
+        raise Refusal('PORTFOLIO_CANONICAL_INVALID', str(flow_path))
+    flow_sha = hashlib.sha256(flow_path.read_bytes()).hexdigest()
+    requirements = {}
+    for step in flow['steps']:
+        step_id = str(step.get('id'))
+        gates = set()
+        for clause in (step.get('gate') or {}).get('all_of', []):
+            for key in ('program_exit_zero', 'advisory_program_exit_zero',
+                        'optional_program_exit_zero'):
+                value = clause.get(key) if isinstance(clause, dict) else None
+                command = value if isinstance(value, str) else (
+                    value.get('command', '') if isinstance(value, dict) else '')
+                if command:
+                    gates.add(Path(command.split()[0]).name)
+        requirements[step_id] = dict(
+            gates=frozenset(gates),
+            outputs=tuple(step.get('required_outputs') or ()),
+        )
+    if len(requirements) != 70:
+        raise Refusal('PORTFOLIO_CANONICAL_INVALID', str(len(requirements)))
+    return flow_sha, requirements
+
+
+def _validate_portfolio(data: dict) -> None:
+    if not isinstance(data, dict) or data.get('meta', {}).get('test_only'):
+        return
+    flow_sha, requirements = _canonical_flow_requirements()
+    meta = data.get('meta') or {}
+    if meta.get('canonical_flow_sha256') != flow_sha:
+        raise Refusal('PORTFOLIO_STALE_CANONICAL', str(meta.get('canonical_flow_sha256')))
     ids = [s['id'] for s in data['steps']]
     if len(ids) != 70 or len(set(ids)) != 70:
         raise Refusal('PORTFOLIO_IDS_INVALID', str(len(ids)))
-    return data
+    for row in data['steps']:
+        req = requirements.get(str(row.get('id')))
+        if req is None:
+            raise Refusal('PORTFOLIO_STEP_UNBOUND', str(row.get('id')))
+        source = ((row.get('current_default') or {}).get('source') or {})
+        expected_file = 'vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml'
+        if (source.get('canonical_file') != expected_file or
+                str(source.get('canonical_step_id')) != str(row.get('id'))):
+            raise Refusal('PORTFOLIO_SOURCE_UNBOUND', str(row.get('id')))
+        if not req['gates'].issubset(set(row.get('mandatory_gate_programs') or ())):
+            raise Refusal('PORTFOLIO_GATES_STALE', str(row.get('id')))
+        declared_outputs = set(row.get('required_output_contract') or ())
+        if not set(req['outputs']).issubset(declared_outputs):
+            raise Refusal('PORTFOLIO_OUTPUTS_STALE', str(row.get('id')))
 
 
 @dataclass(frozen=True)
@@ -395,6 +537,7 @@ class Controller:
     def __init__(self, registry: Registry, budget: Budget, portfolio: dict | None = None):
         self.registry, self.budget = registry, budget
         self.portfolio = portfolio if portfolio is not None else load_portfolio()
+        _validate_portfolio(self.portfolio)
 
     def _admission(self, adapter: Adapter, context: Context) -> str:
         if adapter.role != 'producer':
@@ -415,6 +558,20 @@ class Controller:
         return 'READY'
 
     @staticmethod
+    def _provider_identity(adapter: Adapter) -> tuple:
+        """Identity used for Ultra diversity; arm labels never participate."""
+        executables = []
+        for component in adapter.components:
+            binary = shutil.which(component.argv[0])
+            if binary:
+                path = Path(binary).resolve()
+                executables.append((str(path), digest(path)))
+        return (adapter.tool_id, adapter.tool_version,
+                tuple(sorted((str(Path(p).resolve()), v)
+                             for p, v in adapter.source_files.items())),
+                tuple(executables))
+
+    @staticmethod
     def acceptance_contract(context: Context, step: Mapping[str, object]) -> dict:
         """Return the immutable contract every candidate must satisfy.
 
@@ -433,7 +590,11 @@ class Controller:
 
     def plan(self, context: Context, execution_mode: str | None = None,
              superiority: Superiority | None = None) -> dict:
-        selected_mode = mode(execution_mode)
+        route_mode = context.route_receipt.get('mode_intent')
+        if (execution_mode is None and context.intent_label == 'USER_EXPLICIT_ULTRA'):
+            selected_mode = 'ultra-mode'
+        else:
+            selected_mode = mode(execution_mode)
         binding = context.binding()
         # A routed production context may enter Ultra only with the typed
         # intent issued by the canonical front door. Neutral controller
@@ -443,6 +604,9 @@ class Controller:
                 context.route_receipt.get('kind') != 'neutral-test' and
                 context.intent_label != 'USER_EXPLICIT_ULTRA'):
             raise Refusal('ULTRA_INTENT_MISSING', context.step_id)
+        if (context.route_receipt.get('kind') == 'issued-route' and
+                route_mode != self._mode_intent(selected_mode)):
+            raise Refusal('ROUTE_INTENT_MISMATCH', context.step_id)
         step = next((s for s in self.portfolio['steps'] if s['id'] == context.step_id), None)
         if step is None:
             raise Refusal('UNKNOWN_CANONICAL_STEP', context.step_id)
@@ -528,13 +692,18 @@ class Controller:
         # wrappers remain disclosed but do not claim an independent engine.
         if selected_mode == 'ultra-mode':
             distinct = []
+            identities = []
             for arm in ready:
-                if any(set(arm.engine_families) & set(a.engine_families) for a in distinct):
+                identity = self._provider_identity(arm)
+                if (identity in identities or
+                        any(set(arm.engine_families) & set(a.engine_families)
+                            for a in distinct)):
                     for row in rows:
                         if row['arm_id'] == arm.arm_id:
                             row['admission'] = 'SAME_ENGINE_FAMILY'
                     continue
                 distinct.append(arm)
+                identities.append(identity)
             ready = distinct
         return dict(**common,
                     arms=[a.arm_id for a in ready], portfolio=rows,
@@ -679,6 +848,40 @@ class Controller:
         _write(output / 'result.json', summary)
         return summary
 
+    def _objective_winner(self, plan: dict, root: Path, eligible: list[dict],
+                          context: Context) -> str | None:
+        """Return the deterministic objective winner among current eligible arms."""
+        objective = plan.get('acceptance', {}).get('objective') or {}
+        metric = objective.get('metric')
+        direction = objective.get('direction')
+        order = {arm_id: index for index, arm_id in enumerate(plan.get('arms', []))}
+        values = []
+        for row in eligible:
+            arm_id = row.get('arm_id')
+            try:
+                receipt_path = root / str(arm_id) / 'receipt.json'
+                if digest(receipt_path) != row.get('receipt_sha256'):
+                    raise Refusal('ARM_RECEIPT_DIGEST_MISMATCH', str(arm_id))
+                receipt = json.loads(receipt_path.read_text())
+                value = (receipt.get('evidence') or {}).get('metrics', {}).get(metric)
+            except (OSError, ValueError, TypeError):
+                raise Refusal('OBJECTIVE_EVIDENCE_INVALID', str(arm_id))
+            arm = next((candidate for candidate in self.registry.adapters(context.step_id)
+                        if candidate.arm_id == arm_id), None)
+            if arm is None:
+                raise Refusal('OBJECTIVE_EVIDENCE_INVALID', str(arm_id))
+            self._eligible(receipt, context, arm)
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise Refusal('OBJECTIVE_EVIDENCE_INVALID', str(arm_id))
+            values.append((value, order.get(arm_id, len(order)), arm_id))
+        if not values:
+            return None
+        if direction == 'min':
+            return min(values, key=lambda item: (item[0], item[1]))[2]
+        if direction == 'max':
+            return max(values, key=lambda item: (item[0], -item[1]))[2]
+        raise Refusal('OBJECTIVE_INVALID', str(direction))
+
     @staticmethod
     def _comparison_receipt(root: Path, plan: dict, receipts: Mapping[str, dict]) -> dict:
         """Issue a complete, ordered comparison over this run's arm set.
@@ -710,7 +913,8 @@ class Controller:
                           arm_receipts=ordered, eligible_arms=eligible,
                           selection_criterion=dict(objective=plan['acceptance']['objective'],
                                                    eligible_only=True,
-                                                   ordered_by='plan.arm_order'),
+                                                   ordered_by='objective.metric',
+                                                   tie_break='plan.arm_order'),
                           status=('AWAITING_AI_SELECTION'
                                   if plan['mode'] == 'ultra-mode' and eligible
                                   else ('PROGRAM_DEFAULT_READY' if eligible else 'NOT_MEASURED')))
@@ -1013,6 +1217,10 @@ class Controller:
         if any(type(v) not in (int, float) or not math.isfinite(v)
                for v in evidence.get('metrics', {}).values()):
             raise Refusal('INVALID_METRIC', arm.arm_id)
+        metric = context.objective.get('metric')
+        value = evidence.get('metrics', {}).get(metric)
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise Refusal('OBJECTIVE_EVIDENCE_INVALID', arm.arm_id)
 
     def adopt(self, context: Context, root: Path, choice: Mapping[str, object] | None) -> dict:
         """AI must supply an explicit receipt-bound decision; no rc0/PASS shortcut.
@@ -1057,6 +1265,11 @@ class Controller:
                 # A measured FAIL remains primary; an unmeasured arm cannot be
                 # rescued by a reviewer string or a forged status edit.
                 raise Refusal('AI_CHOICE_INELIGIBLE', str(arm_id))
+            if plan.get('mode') == 'ultra-mode' and len(eligible) > 1:
+                winner = self._objective_winner(
+                    plan, root, chain['eligible'], context)
+                if arm_id != winner:
+                    raise Refusal('AI_CHOICE_WORSE_OBJECTIVE', str(arm_id))
             self._current_admission(context, plan, arm)
             self._eligible(receipt, context, arm)
             fresh = asdict(arm.validate(Path(receipt['output_root']), context.binding()))
@@ -1064,18 +1277,17 @@ class Controller:
                 raise Refusal('EVIDENCE_CHANGED', str(arm_id))
             # A source validator can legitimately pause. Its return is not a
             # lease on the earlier input/executable/output bytes. Recheck after
-            # it returns, then capture and bind the selected artifact generation.
+            # it returns, then run the final consumer before capturing any
+            # selected bytes. A callback that mutates an output after its first
+            # answer is therefore observed by the second eligibility pass.
             self._eligible(receipt, context, arm)
-            generation = self._selected_generation(root, receipt)
             self._execution_authority(root, plan, receipt, arm)
             self._current_admission(context, plan, arm)
             self._eligible(receipt, context, arm)
-            self._generation_current(generation)
-            # The validator is the final consumer of the selected result.  It
+            # The validator is the final consumer of the original result. It
             # may observe a late transform/validator failure after the earlier
-            # admission checks, so its third (post-selection) answer must be
-            # checked before an adoption receipt can claim PASS.  Never stamp
-            # PASS from the fact that the callback returned normally.
+            # admission checks, so its final answer is checked before copying
+            # bytes into the selected generation.
             final_evidence = asdict(arm.validate(
                 Path(receipt['output_root']), context.binding()))
             if (final_evidence != receipt['evidence'] or
@@ -1083,6 +1295,12 @@ class Controller:
                     any(final_evidence.get('gates', {}).get(gate) != 'PASS'
                         for gate in context.required_gates)):
                 raise Refusal('FINAL_EVIDENCE_CHANGED', str(arm_id))
+            self._eligible(receipt, context, arm)
+            generation = self._selected_generation(root, receipt)
+            # Freeze/re-hash directly around publication. This catches a final
+            # validator/transform that touched the selected generation and
+            # leaves no successful adoption receipt in that case.
+            self._generation_current(generation)
             adoption.update(status='ADOPTED', selected=arm_id,
                             evidence=receipt['evidence'],
                             independence=plan['independence'],
@@ -1094,6 +1312,14 @@ class Controller:
                                                   evidence=final_evidence,
                                                   status='PASS'))
             self._write_adoption(root, adoption)
+            try:
+                self._generation_current(generation)
+            except Refusal:
+                adoption.update(status='REFUSED', selected=None,
+                                reason='SELECTED_GENERATION_CHANGED',
+                                detail='selected bytes changed during adoption publication')
+                self._write_adoption(root, adoption)
+                raise
         except Refusal as exc:
             adoption.update(reason=exc.code, detail=str(exc))
             try:

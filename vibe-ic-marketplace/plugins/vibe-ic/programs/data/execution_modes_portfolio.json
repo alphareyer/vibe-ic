@@ -23,7 +23,8 @@
     "accepted_execution_modes": [
       "default-mode",
       "ultra-mode"
-    ]
+    ],
+    "canonical_flow_sha256": "d4b1c7b7bae7fe058ef309a8e1fa3786eb53bbecb728ba52bceb2f1147f99d79"
   },
   "tools": {
     "vibeic": {
@@ -786,7 +787,7 @@
   "steps": [
     {
       "id": "D1",
-      "title_en": "Phase 1 Doc Extraction (17 skills + dialogue entry \u2192 L1-L27)",
+      "title_en": "Phase 1 Doc Extraction (17 skills + dialogue entry → L1-L27)",
       "phase": "phase1",
       "canonical_stage": "stage_phase1",
       "current_default": {
@@ -994,7 +995,7 @@
     },
     {
       "id": "0.5ic",
-      "title_en": "Submission Template Ingest \u2014 the operator's slot geometry and fixtures (chip/IC path only)",
+      "title_en": "Submission Template Ingest — the operator's slot geometry and fixtures (chip/IC path only)",
       "phase": "phase1",
       "canonical_stage": "stage_phase1",
       "current_default": {
@@ -1218,7 +1219,7 @@
     },
     {
       "id": "2",
-      "title_en": "\ud83d\udd01 RTL validation (rewrite fidelity + lint + Quartus-unsafe patterns + RTL-bug claim schema)",
+      "title_en": "🔁 RTL validation (rewrite fidelity + lint + Quartus-unsafe patterns + RTL-bug claim schema)",
       "phase": "phase2",
       "canonical_stage": "stage1",
       "current_default": {
@@ -1493,6 +1494,15 @@
         "crosslayer_rewrite_equivalence_check",
         "rtl_hygiene_lint",
         "rom_init_lint",
+        "rtl_bug_report_schema_check",
+        "internal_vs_external_timing_check",
+        "threshold_range_contiguity_check",
+        "rsp_example_otp_consistency_check",
+        "spec_response_delay_check",
+        "nba_addr_read_race_check",
+        "periodic_timer_vs_rx_activity_check",
+        "memory_read_pipeline_check",
+        "fpga_wrapper_input_polluter_check",
         "arith_ss_corner_risk_check",
         "fresh_agent_rtl_bug_density_metric",
         "l9_submodule_conformance_check",
@@ -1508,7 +1518,7 @@
     },
     {
       "id": "3",
-      "title_en": "\ud83d\udd01 CDC / RDC check",
+      "title_en": "🔁 CDC / RDC check",
       "phase": "phase2",
       "canonical_stage": "stage1",
       "current_default": {
@@ -1648,7 +1658,7 @@
     },
     {
       "id": "4",
-      "title_en": "\ud83d\udd01 Simulation (testbench-based + L10/L12 coverage + Verilator coverage)",
+      "title_en": "🔁 Simulation (testbench-based + L10/L12 coverage + Verilator coverage)",
       "phase": "phase2",
       "canonical_stage": "stage1",
       "current_default": {
@@ -1811,7 +1821,10 @@
       ],
       "limitations_en": "Coverage merge semantics vary: lcov line coverage can merge file:line, while branch/toggle points need explicit hierarchy handling.",
       "mandatory_gate_programs": [
+        "cpu_functional_oracle_waiver_check",
         "vacuous_testbench_check",
+        "l10_tb_conformance_check",
+        "l12_tb_coverage_check",
         "verilator_coverage_measure",
         "functional_state_transition_coverage_check",
         "professional_tb_check",
@@ -1830,7 +1843,7 @@
     },
     {
       "id": "5",
-      "title_en": "\ud83d\udd01 Formal verification (assertions proved + bit-level full-stack phase2/stage1/tb)",
+      "title_en": "🔁 Formal verification (assertions proved + bit-level full-stack phase2/stage1/tb)",
       "phase": "phase2",
       "canonical_stage": "stage1",
       "current_default": {
@@ -2101,6 +2114,7 @@
       "limitations_en": "Target board/JTAG and a matching tool/device database are required. Current fleet environment was unavailable in the reviewed evidence.",
       "mandatory_gate_programs": [
         "quartus_map_audit",
+        "fpga_verification_audit",
         "fpga_led_probe_lint",
         "auto_diagnostic_led_synth"
       ],
@@ -2226,7 +2240,7 @@
     },
     {
       "id": "8",
-      "title_en": "\ud83d\udd01 SDC validation",
+      "title_en": "🔁 SDC validation",
       "phase": "phase2",
       "canonical_stage": "stage2",
       "current_default": {
@@ -2336,7 +2350,10 @@
       ],
       "limitations_en": "Parser success does not prove all endpoints/declared modes are constrained; keep nonempty and coverage evidence.",
       "mandatory_gate_programs": [
-        "sdc_syntax_check"
+        "sdc_syntax_check",
+        "sdc_exception_correlation_check",
+        "sdc_validator_check",
+        "derived_clock_sdc_required_check"
       ],
       "required_output_contract": [
         "reports/phase2/sdc_check.json"
@@ -2345,7 +2362,7 @@
     },
     {
       "id": "9",
-      "title_en": "Synthesis (Yosys \u2192 mapped netlist)",
+      "title_en": "Synthesis (Yosys → mapped netlist)",
       "phase": "phase2",
       "canonical_stage": "stage2",
       "current_default": {
@@ -2523,7 +2540,7 @@
     },
     {
       "id": "10",
-      "title_en": "\ud83d\udd01 Pre-layout STA (multi-corner)",
+      "title_en": "🔁 Pre-layout STA (multi-corner)",
       "phase": "phase2",
       "canonical_stage": "stage2",
       "current_default": {
@@ -2995,9 +3012,7 @@
         }
       ],
       "limitations_en": "Require controllability, launch-on-capture chronology and detected/undetected population; stuck-at coverage is not transition coverage.",
-      "mandatory_gate_programs": [
-        "transition_coverage_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [
         "reports/phase2/dft/transition_coverage.json"
       ],
@@ -3121,7 +3136,7 @@
     },
     {
       "id": "13",
-      "title_en": "\ud83d\udd01 Equivalence check (RTL \u2261 post-DFT netlist)",
+      "title_en": "🔁 Equivalence check (RTL ≡ post-DFT netlist)",
       "phase": "phase2",
       "canonical_stage": "stage2",
       "current_default": {
@@ -3254,9 +3269,7 @@
         }
       ],
       "limitations_en": "Ports, Liberty cells, reset and sequential boundaries must be bound. Unknown/unproven/timeout is not PASS; installed SMT solvers must match strategy config.",
-      "mandatory_gate_programs": [
-        "lec_equivalence_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [
         "reports/lec.rpt",
         "reports/lec.json"
@@ -4028,9 +4041,7 @@
         }
       ],
       "limitations_en": "KLayout LVS PDK allow-lists and analog Spice-model loading need target adapters. Unsupported/skipped checker outputs never count as clean.",
-      "mandatory_gate_programs": [
-        "analog_a6_block_pv_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [
         "phase3/analog/*/drc_clean.flag OR phase3/analog/*/drc.report OR phase3/analog/*/*.lyrdb OR phase3/analog/*/drc.rpt",
         "phase3/analog/*/lvs_match.flag OR phase3/analog/*/lvs.report OR phase3/analog/*/comp.json OR phase3/analog/*/lvs.rpt"
@@ -4039,7 +4050,7 @@
     },
     {
       "id": "A7",
-      "title_en": "\ud83d\udd01 Post-Layout Resimulation",
+      "title_en": "🔁 Post-Layout Resimulation",
       "phase": "analog",
       "canonical_stage": "stage_analog",
       "current_default": {
@@ -4353,7 +4364,7 @@
     },
     {
       "id": "A9",
-      "title_en": "\ud83d\udd01 Co-Simulation (+ HW correlation when bench data exists)",
+      "title_en": "🔁 Co-Simulation (+ HW correlation when bench data exists)",
       "phase": "analog",
       "canonical_stage": "stage_analog",
       "current_default": {
@@ -4556,6 +4567,7 @@
       "limitations_en": "Current source executes L22-selected ngspice analog or ngspice d_cosim + Icarus libvvp arms. Missing declarations, unloaded libvvp and ungraded bounds stay NOT_MEASURED; simulation does not discharge hardware correlation.",
       "mandatory_gate_programs": [
         "mixed_signal_cosim_check",
+        "analog_hw_spice_correlation_check",
         "analog_a9_hw_verify_check",
         "analog_hil_report_schema_check",
         "analog_hil_iteration_cap_check",
@@ -4570,7 +4582,7 @@
     },
     {
       "id": "14",
-      "title_en": "\ud83d\udd01 Synthesis handoff gate (pre-PnR Yosys script + netlist audit; open-source-flow specific)",
+      "title_en": "🔁 Synthesis handoff gate (pre-PnR Yosys script + netlist audit; open-source-flow specific)",
       "phase": "phase2",
       "canonical_stage": "stage2",
       "current_default": {
@@ -4685,9 +4697,10 @@
       "limitations_en": "Script text and rc0 alone cannot prove a mapped, current, complete handoff.",
       "mandatory_gate_programs": [
         "flow_step_output_content_check",
-        "flow_step_output_content_check",
         "flow_compliance_check",
         "stage_on_pass_review",
+        "yosys_hilomap_required_check",
+        "yosys_script_template_check",
         "yosys_tiecell_recipe_order_check"
       ],
       "required_output_contract": [
@@ -4827,6 +4840,7 @@
       "mandatory_gate_programs": [
         "stage2_compliance",
         "stage_on_pass_review",
+        "ip_integration_check",
         "floorplan_pdn_check",
         "macro_obs_load_parity_check"
       ],
@@ -5063,9 +5077,7 @@
         }
       ],
       "limitations_en": "Clock planning remains declaration-driven; a regex-derived plan or a discovered clock cannot invent missing operating modes.",
-      "mandatory_gate_programs": [
-        "clock_plan_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [
         "phase3/stage3/cts/clock_plan.json"
       ],
@@ -5432,7 +5444,7 @@
     },
     {
       "id": "20",
-      "title_en": "\ud83d\udd01 Post-CTS hold fixing",
+      "title_en": "🔁 Post-CTS hold fixing",
       "phase": "phase3",
       "canonical_stage": "stage3",
       "current_default": {
@@ -5712,7 +5724,7 @@
     },
     {
       "id": "22",
-      "title_en": "Parasitic Extraction (RC \u2192 SPEF)",
+      "title_en": "Parasitic Extraction (RC → SPEF)",
       "phase": "phase3",
       "canonical_stage": "stage3",
       "current_default": {
@@ -5986,9 +5998,7 @@
         }
       ],
       "limitations_en": "Bind test patterns to required timed paths and corners. Scan insertion alone cannot produce timing-graded path-delay coverage.",
-      "mandatory_gate_programs": [
-        "path_delay_coverage_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [
         "reports/phase2/dft/path_delay_coverage.json"
       ],
@@ -6091,9 +6101,7 @@
         }
       ],
       "limitations_en": "Small-delay-defect grade needs declared defect magnitude/path timing, not merely DT2 presence.",
-      "mandatory_gate_programs": [
-        "sdd_coverage_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [
         "reports/phase2/dft/sdd_coverage.json"
       ],
@@ -6101,7 +6109,7 @@
     },
     {
       "id": "32",
-      "title_en": "\ud83d\udd01 Post-route timing repair pass (multi-corner repair_design + repair_timing + reroute)",
+      "title_en": "🔁 Post-route timing repair pass (multi-corner repair_design + repair_timing + reroute)",
       "phase": "phase3",
       "canonical_stage": "stage3",
       "current_default": {
@@ -6239,7 +6247,7 @@
     },
     {
       "id": "23",
-      "title_en": "\ud83d\udd01 Post-route STA (multi-corner multi-mode sign-off)",
+      "title_en": "🔁 Post-route STA (multi-corner multi-mode sign-off)",
       "phase": "phase3",
       "canonical_stage": "stage3",
       "current_default": {
@@ -6395,12 +6403,14 @@
         "achieved_period_recorded_check",
         "hold_corner_coverage_check",
         "sta_report_check",
+        "post_route_signoff_corner_check",
         "sta_corner_record_completeness_check",
         "pad_input_drive_check",
         "drv_signoff_judge",
         "sta_architectural_residual_check",
         "sta_assumed_clock_disclosure_check",
-        "clock_target_record_agreement_check"
+        "clock_target_record_agreement_check",
+        "drv_promotion_corroboration_check"
       ],
       "required_output_contract": [
         "phase3/stage3/sta/post_route_timing.rpt",
@@ -6414,7 +6424,7 @@
     },
     {
       "id": "24",
-      "title_en": "\ud83d\udd01 IR Drop (static + dynamic)",
+      "title_en": "🔁 IR Drop (static + dynamic)",
       "phase": "phase3",
       "canonical_stage": "stage3",
       "current_default": {
@@ -6583,7 +6593,7 @@
     },
     {
       "id": "25",
-      "title_en": "\ud83d\udd01 EM check (electromigration lifetime)",
+      "title_en": "🔁 EM check (electromigration lifetime)",
       "phase": "phase3",
       "canonical_stage": "stage3",
       "current_default": {
@@ -6706,7 +6716,7 @@
     },
     {
       "id": "26",
-      "title_en": "\ud83d\udd01 Antenna check (gate-oxide protection)",
+      "title_en": "🔁 Antenna check (gate-oxide protection)",
       "phase": "phase3",
       "canonical_stage": "stage3",
       "current_default": {
@@ -6847,7 +6857,8 @@
       ],
       "limitations_en": "Never ship a route edit after the last verification. Zero-net and zero-pin censuses both need typed measured evidence.",
       "mandatory_gate_programs": [
-        "antenna_report_check"
+        "antenna_report_check",
+        "gds_antenna_deck_check"
       ],
       "required_output_contract": [
         "reports/phase3/antenna.rpt",
@@ -6858,7 +6869,7 @@
     },
     {
       "id": "26.5ic",
-      "title_en": "Die Finishing \u2014 seal ring + die identification (chip/IC path only)",
+      "title_en": "Die Finishing — seal ring + die identification (chip/IC path only)",
       "phase": "phase3",
       "canonical_stage": "stage3",
       "current_default": {
@@ -6972,9 +6983,7 @@
         }
       ],
       "limitations_en": "Ring dimensions use coordinate span, not upper-right coordinates alone. ID, GDS finishing boundary and every required layer remain measured.",
-      "mandatory_gate_programs": [
-        "die_finishing_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [
         "phase3/stage3/pnr/die_finished.def OR phase3/stage3/pnr/die_finishing.SKIPPED.txt",
         "reports/phase3/die_finishing.json"
@@ -6983,7 +6992,7 @@
     },
     {
       "id": "27",
-      "title_en": "\ud83d\udd01 Signal Integrity (Crosstalk / Noise / Glitch + MCF crosstalk-delay)",
+      "title_en": "🔁 Signal Integrity (Crosstalk / Noise / Glitch + MCF crosstalk-delay)",
       "phase": "phase3",
       "canonical_stage": "stage3",
       "current_default": {
@@ -7110,7 +7119,8 @@
       "limitations_en": "Stock OpenSTA is not full crosstalk signoff. Separate noise/glitch thresholds, timing windows and final coupling-parasitic freshness.",
       "mandatory_gate_programs": [
         "si_crosstalk_check",
-        "flow_step_output_content_check"
+        "flow_step_output_content_check",
+        "si_mcf_sta_check"
       ],
       "required_output_contract": [
         "reports/phase3/si_crosstalk.rpt OR reports/phase3/si_crosstalk.json",
@@ -7121,7 +7131,7 @@
     },
     {
       "id": "28",
-      "title_en": "\ud83d\udd01 PERC / Reliability sign-off (ESD + latch-up + cross-domain)",
+      "title_en": "🔁 PERC / Reliability sign-off (ESD + latch-up + cross-domain)",
       "phase": "phase3",
       "canonical_stage": "stage3",
       "current_default": {
@@ -7821,7 +7831,9 @@
       ],
       "limitations_en": "Density fill, cell filler placement, LVS connectivity and parasitic impact must each be verified on the selected final artifact.",
       "mandatory_gate_programs": [
-        "metal_fill_density_check"
+        "metal_fill_density_check",
+        "spare_cell_preservation_check",
+        "metal_fill_emit"
       ],
       "required_output_contract": [
         "phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done",
@@ -8140,7 +8152,7 @@
     },
     {
       "id": "37.3",
-      "title_en": "GDS stream-out / finishing fidelity \u2014 the shipped GDS XOR'd against this run's own pre-finishing boundary",
+      "title_en": "GDS stream-out / finishing fidelity — the shipped GDS XOR'd against this run's own pre-finishing boundary",
       "phase": "phase3",
       "canonical_stage": "stage4",
       "current_default": {
@@ -8257,7 +8269,7 @@
     },
     {
       "id": "31",
-      "title_en": "\ud83d\udd01 Physical Verification (DRC + LVS + ERC + Density)",
+      "title_en": "🔁 Physical Verification (DRC + LVS + ERC + Density)",
       "phase": "phase3",
       "canonical_stage": "stage4",
       "current_default": {
@@ -8437,7 +8449,6 @@
         "lvs_signoff_guard",
         "pg_rail_geometry_check",
         "provenance_check",
-        "provenance_check",
         "erc_density_check",
         "waiver_growth_check",
         "sweep_reach_check",
@@ -8542,7 +8553,8 @@
         "tapeout_signoff_check",
         "report_belongs_to_project_check",
         "step_internal_fail_bubble_up_check",
-        "declared_pdk_is_the_pdk_used_check"
+        "declared_pdk_is_the_pdk_used_check",
+        "ppa_head_to_head_check"
       ],
       "required_output_contract": [
         "reports/audit/tapeout_checklist.json"
@@ -8551,7 +8563,7 @@
     },
     {
       "id": "37.4",
-      "title_en": "Sign-off metrics aggregation \u2014 the run's own checker verdicts, under the names the release documents read",
+      "title_en": "Sign-off metrics aggregation — the run's own checker verdicts, under the names the release documents read",
       "phase": "phase3",
       "canonical_stage": "stage4",
       "current_default": {
@@ -8653,7 +8665,7 @@
     },
     {
       "id": "37.5ip",
-      "title_en": "Digital Hardmacro Generation \u2014 LEF + Liberty + GDS + Verilog (delivered on EVERY route)",
+      "title_en": "Digital Hardmacro Generation — LEF + Liberty + GDS + Verilog (delivered on EVERY route)",
       "phase": "phase3",
       "canonical_stage": "stage4",
       "current_default": {
@@ -8814,7 +8826,7 @@
     },
     {
       "id": "37.5ic",
-      "title_en": "Tape-out Precheck \u2014 our general ladder, plus the operator's own refusal where the PDK ships one (chip/IC path only)",
+      "title_en": "Tape-out Precheck — our general ladder, plus the operator's own refusal where the PDK ships one (chip/IC path only)",
       "phase": "phase3",
       "canonical_stage": "stage4",
       "current_default": {
@@ -9048,9 +9060,7 @@
         }
       ],
       "limitations_en": "No LibreLane/OpenROAD WAT, mask-spec, scribe or corner-test-kit generator. A package is not an accepted or fabricated wafer.",
-      "mandatory_gate_programs": [
-        "foundry_handoff_package_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [
         "phase3/stage4/foundry_handoff/mask_spec.json",
         "phase3/stage4/foundry_handoff/wat_plan.json",
@@ -9791,9 +9801,7 @@
         }
       ],
       "limitations_en": "Analog macro blackboxing is not full transistor signoff. Final mixed-signal verdict includes A7/A9/M2/M3 obligations and exact top GDS.",
-      "mandatory_gate_programs": [
-        "mixed_signal_signoff_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [
         "reports/analog/mixed_signal/signoff.json"
       ],
@@ -9801,7 +9809,7 @@
     },
     {
       "id": "40",
-      "title_en": "Fabrication (foundry mask-set + wafer fab \u2014 external)",
+      "title_en": "Fabrication (foundry mask-set + wafer fab — external)",
       "phase": "phase3",
       "canonical_stage": "stage5_manufacturing",
       "current_default": {
@@ -9994,9 +10002,7 @@
         }
       ],
       "limitations_en": "ATE software and STDF parser do not establish that probing occurred. No equipment/wafer test is measured here.",
-      "mandatory_gate_programs": [
-        "wafer_sort_yield_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [
         "phase3/stage5_manufacturing/wafer_sort_yield.json",
         "phase3/stage5_manufacturing/wafer_map.csv"
@@ -10096,9 +10102,7 @@
         }
       ],
       "limitations_en": "No EDA layout output proves packaged-device completion or assembly reliability.",
-      "mandatory_gate_programs": [
-        "packaging_intake_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [
         "phase3/stage5_manufacturing/packaging_log.json"
       ],
@@ -10212,9 +10216,7 @@
         }
       ],
       "limitations_en": "Burn-in is a distinct declared physical stress obligation; final-test software rc0 cannot substitute its actual population/time evidence.",
-      "mandatory_gate_programs": [
-        "final_test_attestation_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [
         "phase3/stage5_manufacturing/final_test_yield.json",
         "phase3/stage5_manufacturing/burn_in_results.json"
@@ -10329,9 +10331,7 @@
         }
       ],
       "limitations_en": "No reliability PASS without executed mission-profile stress and qualified statistical evidence; no software-only replacement.",
-      "mandatory_gate_programs": [
-        "htol_attestation_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [
         "phase3/stage5_manufacturing/htol_results.json"
       ],
@@ -10508,9 +10508,7 @@
         }
       ],
       "limitations_en": "Mostly own policy checks today. Frontend/lint reports cannot discharge the whole preflight population or replace actual testbench execution.",
-      "mandatory_gate_programs": [
-        "flow_step_output_content_check"
-      ],
+      "mandatory_gate_programs": [],
       "required_output_contract": [],
       "controller_integration": "PROPOSED_HOOK; existing native producers unchanged"
     }

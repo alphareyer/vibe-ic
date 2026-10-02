@@ -16,7 +16,7 @@ from programs.tests import test_execution_modes as H
 
 
 def issued_route(*, path, source_sha, project_digest, request_digest, route='macro'):
-    return em._issue_route_receipt(
+    return em._issue_route_receipt_for_tests(
         ic_ip_path=path, source_sha=source_sha,
         project_digest=project_digest, request_digest=request_digest,
         route=route)
@@ -99,12 +99,12 @@ def test_postfix_chain_passes_and_records_all_links(tmp_path):
     comparison = json.loads((root / 'comparison.json').read_text())
     assert [row['arm_id'] for row in comparison['arm_receipts']] == ['a', 'b']
     assert len(comparison['eligible_arms']) == 2
-    adopted = controller.adopt(ctx, root, H.choice(ctx, root, 'b'))
+    adopted = controller.adopt(ctx, root, H.choice(ctx, root, 'a'))
     assert adopted['status'] == 'ADOPTED'
     assert adopted['frozen_work_digest'] == json.loads((root / 'plan.json').read_text())['frozen_work_digest']
     assert adopted['comparison_digest']
     assert adopted['acceptance_rerun']['status'] == 'PASS'
-    assert controller.verify_adoption(ctx, root)['selected'] == 'b'
+    assert controller.verify_adoption(ctx, root)['selected'] == 'a'
 
 
 def test_final_validator_failure_cannot_publish_adopted_pass(tmp_path):
@@ -578,3 +578,127 @@ def test_ultra_fail_precedes_unmeasured_when_no_arm_is_eligible(tmp_path):
     result = controller.run(ctx, tmp_path / 'ultra', 'ultra-mode')
     assert result['candidate_statuses'] == {'a': 'FAIL', 'b': 'NOT_MEASURED'}
     assert result['status'] == 'FAIL'
+
+
+def test_stdin_runner_cmdline_cannot_answer_canonical_capability(tmp_path):
+    """A process mentioning the runner path but executing stdin is not the issuer."""
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    script = (
+        'import os,sys,json,socket\n'
+        'import execution_policy as p\n'
+        'fd=int(sys.argv[2])\n'
+        's=socket.socket(fileno=fd)\n'
+        'line=s.recv(4096)\n'
+        'req=json.loads(line.split(b"\\n",1)[0])\n'
+        'proc=p._process_identity(os.getpid())\n'
+        's.sendall((json.dumps({"ok":True,"request_digest":req["request_digest"],'
+        '"nonce":req["nonce"],"invocation_id":"forged-invocation-xxxxxxxx",'
+        '"issuer_process":proc}).encode()+b"\\n"))\n'
+    )
+    # The fake process advertises the canonical source in argv, but argv[1] is
+    # '-' and the executable is running stdin rather than the script object.
+    result = subprocess.Popen(
+        [sys.executable, '-', str(policy._CANONICAL_FRONTDOOR), str(child.fileno())],
+        stdin=subprocess.PIPE, pass_fds=(child.fileno(),), text=True,
+        env={**os.environ, 'PYTHONPATH': str(Path(policy.__file__).parent)},
+    )
+    result.stdin.write(script)
+    result.stdin.close()
+    child.close()
+    # The verifier only needs the receipt's process identity; obtain it while
+    # the fake process is live from /proc through its known PID.
+    process = policy._process_identity(result.pid)
+    receipt = dict(issuer_role='canonical-frontdoor', issuer_process=process,
+                   invocation_id='forged-invocation-' + ('x' * 16))
+    old_fd = os.environ.get(policy._CAPABILITY_FD_ENV)
+    os.environ[policy._CAPABILITY_FD_ENV] = str(parent.fileno())
+    try:
+        with pytest.raises(policy.Refusal, match='REQUEST_CAPABILITY_INVALID'):
+            policy._verify_parent_capability('e' * 64, receipt)
+    finally:
+        if old_fd is None:
+            os.environ.pop(policy._CAPABILITY_FD_ENV, None)
+        else:
+            os.environ[policy._CAPABILITY_FD_ENV] = old_fd
+        parent.close()
+        result.kill()
+        result.wait()
+
+
+def test_route_issuer_api_cannot_be_called_by_an_arbitrary_caller():
+    with pytest.raises(em.Refusal, match='ROUTE_AUTHORITY_UNAVAILABLE'):
+        em._issue_route_receipt(ic_ip_path='IC', source_sha=H.BASE,
+                                project_digest='a' * 64,
+                                request_digest='b' * 64)
+
+
+def test_selected_generation_mutation_during_publish_refuses(tmp_path, monkeypatch):
+    ctx = H.context(tmp_path)
+    controller = H.controller(H.adapter('a'))
+    root = tmp_path / 'run'
+    controller.run(ctx, root)
+    original = em.Controller._selected_generation
+
+    def mutate_after_copy(run_root, receipt):
+        generation = original(run_root, receipt)
+        artifact = Path(generation['directory']) / 'value.txt'
+        artifact.chmod(0o644)
+        artifact.write_text('late selected mutation\n')
+        return generation
+
+    monkeypatch.setattr(em.Controller, '_selected_generation', staticmethod(mutate_after_copy))
+    with pytest.raises(em.Refusal, match='SELECTED_GENERATION_CHANGED'):
+        controller.adopt(ctx, root, H.choice(ctx, root))
+    assert json.loads((root / 'adoption.json').read_text())['status'] == 'REFUSED'
+
+
+def test_portfolio_snapshot_missing_current_yaml_gate_is_refused():
+    portfolio = em.load_portfolio()
+    row = next(row for row in portfolio['steps'] if str(row['id']) == '2')
+    row['mandatory_gate_programs'].remove('rtl_bug_report_schema_check')
+    with pytest.raises(em.Refusal, match='PORTFOLIO_GATES_STALE'):
+        em.Controller(em.Registry(), em.Budget(1, 128), portfolio)
+
+
+def test_route_ultra_intent_cannot_be_omitted_or_downgraded(tmp_path):
+    project_digest = 'a' * 64
+    request_digest = 'b' * 64
+    route = em._issue_route_receipt_for_tests(
+        ic_ip_path='IC', source_sha=H.BASE,
+        project_digest=project_digest, request_digest=request_digest,
+        intent_label='USER_EXPLICIT_ULTRA', mode_intent='ultra')
+    ctx = replace(H.context(tmp_path), route_receipt=route,
+                  project_digest=project_digest, request_digest=request_digest,
+                  intent_label='USER_EXPLICIT_ULTRA')
+    controller = H.controller(H.adapter('a'), H.adapter('b'))
+    assert controller.plan(ctx)['mode'] == 'ultra-mode'
+    with pytest.raises(em.Refusal, match='ROUTE_INTENT_MISMATCH'):
+        controller.plan(ctx, 'default-mode')
+    with pytest.raises(em.Refusal, match='ROUTE_INTENT_MISMATCH'):
+        replace(ctx, intent_label='PROGRAM_DEFAULT').binding()
+
+
+def test_ultra_worse_objective_recommendation_is_refused(tmp_path):
+    ctx = H.context(tmp_path)
+    controller = H.controller(H.adapter('a', cost=9), H.adapter('b', cost=1))
+    root = tmp_path / 'run'
+    assert controller.run(ctx, root, 'ultra-mode')['status'] == 'AWAITING_AI_SELECTION'
+    with pytest.raises(em.Refusal, match='AI_CHOICE_WORSE_OBJECTIVE'):
+        controller.adopt(ctx, root, H.choice(ctx, root, 'a'))
+    assert json.loads((root / 'adoption.json').read_text())['status'] == 'REFUSED'
+
+
+def test_ultra_diversity_ignores_arm_labels_when_provider_identity_matches(tmp_path):
+    first = H.adapter('neutral_a')
+    second = replace(H.adapter('neutral_b'), tool_id=first.tool_id,
+                     engine_families=('caller_label_b',))
+    plan = H.controller(first, second).plan(H.context(tmp_path), 'ultra-mode')
+    assert plan['arms'] == ['neutral_a']
+    assert next(row for row in plan['portfolio'] if row['arm_id'] == 'neutral_b')['admission'] == 'SAME_ENGINE_FAMILY'
+
+
+def test_fabricated_known_tool_identity_cannot_register(tmp_path):
+    forged = replace(H.adapter('fake'), tool_id='librelane',
+                     tool_version='fabricated-999')
+    with pytest.raises(em.Refusal, match='TOOL_ID_UNBOUND|TOOL_VERSION_UNBOUND'):
+        em.Registry().register(forged)
