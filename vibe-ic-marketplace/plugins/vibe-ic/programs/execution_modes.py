@@ -241,6 +241,13 @@ def _verified_git_identity(source_files: Mapping[str, str]) -> tuple[str, str]:
             break
     if root is None:
         raise Refusal('SOURCE_TREE_UNAVAILABLE', 'no Git worktree for adapter sources')
+    for path in source_paths:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            other = _git_root(path)
+            if other is not None and other != root:
+                raise Refusal('SOURCE_TREE_AMBIGUOUS', f'{root},{other}')
     try:
         dirty = subprocess.check_output(
             ['git', '-C', str(root), 'status', '--porcelain',

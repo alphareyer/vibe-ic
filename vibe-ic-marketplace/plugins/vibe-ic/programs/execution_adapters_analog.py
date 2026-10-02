@@ -489,6 +489,20 @@ def validate_catalog(catalog: Mapping[str, Mapping[str, object]] | None = None) 
             errors.append("FLOW_TOP_LEVEL_SCHEMA_MISMATCH")
         if portfolio_authority.keys() != {"schema_version", "meta", "tools", "steps"}:
             errors.append("PORTFOLIO_TOP_LEVEL_SCHEMA_MISMATCH")
+        try:
+            import yaml
+            current_flow = yaml.safe_load(FLOW_FILE.read_text(encoding="utf-8"))
+            if not isinstance(current_flow, Mapping) or set(current_flow) != set(flow_authority):
+                errors.append("FLOW_TOP_LEVEL_SCHEMA_MISMATCH")
+        except (ImportError, OSError, ValueError, TypeError):
+            errors.append("FLOW_TOP_LEVEL_SCHEMA_MISMATCH")
+        try:
+            current_portfolio = json.loads(PORTFOLIO_FILE.read_text(encoding="utf-8"))
+            if (not isinstance(current_portfolio, Mapping) or
+                    set(current_portfolio) != set(portfolio_authority)):
+                errors.append("PORTFOLIO_TOP_LEVEL_SCHEMA_MISMATCH")
+        except (OSError, ValueError, TypeError):
+            errors.append("PORTFOLIO_TOP_LEVEL_SCHEMA_MISMATCH")
         expected_rows = {row["step_id"]: row for row in coverage_authority["rows"]}
     except (OSError, ValueError, KeyError, TypeError, em.Refusal):
         return tuple(dict.fromkeys(errors + ["CANONICAL_SOURCE_UNREADABLE"]))
