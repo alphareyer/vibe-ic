@@ -53,7 +53,9 @@ def adapter(arm='a', *, fault='none', duration=.02, cost=5, **kw):
 def context(tmp_path):
     p = tmp_path / 'original.txt'
     p.write_text('one input\n')
-    return em.Context('1', BASE, {'text.txt': p}, OBJECTIVE, ('transform',))
+    return em.Context('1', BASE, {'text.txt': p}, OBJECTIVE, ('transform',),
+                      ic_ip_path='IC', route_receipt={'kind': 'neutral-test',
+                                                      'ic_ip_path': 'IC'})
 
 
 def controller(*arms, budget=None):

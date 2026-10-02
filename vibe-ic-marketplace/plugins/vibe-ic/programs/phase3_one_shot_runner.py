@@ -77389,7 +77389,10 @@ def main() -> int:
     p.add_argument("--exit-step", help="Last canonical Phase-3 step")
     p.add_argument("--diagnostic-continue", action="store_true",
                    help="Retain diagnostic-only reports; a failed pre-stream gate never authorizes GDS or release")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution.configure(args)
     args.density_from_tool_default = not any(
         arg == "--util" or arg.startswith("--util=") for arg in sys.argv[1:])
     if bool(args.entry_step) != bool(args.exit_step):

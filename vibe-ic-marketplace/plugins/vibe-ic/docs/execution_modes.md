@@ -1,9 +1,23 @@
 # Execution modes: standalone contract and proposed runner hooks
 
-This is a partially integrated global controller, not a migration of the 70
-producers. `programs/execution_modes.py` is an executable Python API tested with
-finite neutral text tools. No production runner calls it, and its production
-adapter registry is empty. No EDA result or IC signoff was measured in this lane.
+This is the common execution seam, not a migration of the 70 producers.
+`programs/execution_modes.py` remains the only scheduler and provider registry;
+the five canonical front doors carry a typed request through
+`programs/execution_policy.py`. Each controller run issues a frozen-work,
+issued-arm, AI-comparison and program-adoption receipt chain. Domain adapters
+register with the existing `Registry` and consume the existing `Controller` in
+their own lane. No EDA result or IC signoff was measured in this lane.
+
+Omitted mode is typed `PROGRAM_DEFAULT`/`default-mode` with `ultra_match=false`.
+Only a live `--execution-mode ultra` issues `USER_EXPLICIT_ULTRA` and a
+digest-bound request receipt. Environment labels, category metadata and child
+flags cannot originate or upgrade Ultra; children preserve an issued parent
+receipt through a live inherited capability endpoint or refuse. Every
+production IC/IP context must supply an issued route receipt bound to the
+request, project and source digests; the neutral controller fixture uses an
+explicit `neutral-test` receipt and cannot silently inherit a production route.
+The top-level runner keeps the live issuer object process-local and registers
+the exact request digest; child interpreters have no mint capability.
 
 The public portfolio is `programs/data/execution_modes_portfolio.json`. It imports
 the final source/policy inventory bound to main
@@ -90,11 +104,16 @@ code executing inside the issuer process.
 
 Process rc0 and file existence never establish eligibility. Actual measured
 `FAIL` gates yield `FAIL`; missing/failed execution, stale/unbound evidence and
-`NOT_MEASURED` gates stay `NOT_MEASURED`. No run automatically selects an arm:
-`result.json` reports `AWAITING_AI_SELECTION`. The AI supplies `arm_id`, the
-current binding, exact receipt digest, reviewer identity and rationale to
-`Controller.adopt`. Missing choice, changed inputs/outputs, incomplete gates,
-unmeasured candidates, wrong source or changed tool identity refuse. Adoption
+`NOT_MEASURED` gates stay `NOT_MEASURED`. Default mode executes the one arm
+selected by the program's priority policy and automatically supplies a
+program-issued choice witness to the same sealed `Controller.adopt` chain; a
+successful default run therefore returns terminal `ADOPTED` without a choice
+file, while a failed or unmeasured arm remains unadopted. Ultra mode runs all
+useful distinct families and returns `AWAITING_AI_SELECTION` only when eligible
+arms are available. The AI then supplies `arm_id`, the current binding, exact
+receipt digest, reviewer identity and rationale to `Controller.adopt`.
+Missing choice, changed inputs/outputs, incomplete gates, unmeasured or
+ineligible candidates, wrong source or changed tool identity refuse. Adoption
 reconsumes the actual output validator and persists `adoption.json`; it records
 adoption without publishing into the project's native outputs. This is an API
 blocking boundary, not a claim that a currently unmodified runner stops here.
@@ -121,19 +140,23 @@ refusal, issued-plan and selected-generation names. Legitimate names such as
 `neutral.a` keep their existing output layout. Unavailable output directories or
 adoption records return named finite refusals, rather than raw filesystem errors.
 
-## Proposed integration and explicit remaining work
+## Adapter composition and explicit remaining work
 
-The phase runner owners should add an independent execution-policy request
-field/flag, resolve native identity through its existing implementation switch,
-and build a `Context` from the current frozen project inputs, objective,
-canonical gates and output contract. Their source-owned adapter must freeze
-complete transitive tool/PDK/config inputs, bind the deployed container/image and
+The front doors now add the independent execution-policy request flags and
+propagate them to children. Adapter owners resolve native identity through the
+existing implementation switch and build a `Context` from the current frozen
+project inputs, objective, canonical gates, output contract and
+`execution_policy.controller_fields()` with an explicit issued IC/IP route.
+The resulting `Context` rejects empty, mismatched or digest-invalid route
+receipts. Their source-owned adapter must freeze complete transitive
+tool/PDK/config inputs, bind the deployed container/image and
 license probe, and consume each native report through its real gate. Component
 command rendering must use the arm-local inputs and outputs; dependent producer
 segments cannot run out of order or reuse a mutable shared upstream directory.
 
 The owners can then call `plan`, `run`, obtain an actual AI decision on eligible
-receipts, call `adopt`, and transactionally import the selected outputs through
+Ultra receipts (default mode program-adopts its sole eligible arm), call
+`adopt`, and transactionally import the selected outputs through
 the existing adoption consumer. Every consumer must propagate refusals before
 advancing. This lane proposes those hooks only; native dual-mode semantics,
 image/PDK provenance, real EDA adapters, production AI dispatch, transactional

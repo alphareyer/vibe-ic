@@ -62,7 +62,10 @@ PROGRAMS_DIR = Path(__file__).resolve().parent
 def _run_phase(name: str, runner: Path, args: list[str]
                ) -> tuple[int, dict]:
     print(f"\n{'='*70}\n=== {name} → {runner.name}\n{'='*70}")
-    cp = subprocess.run([sys.executable, str(runner), *args])
+    import execution_policy as _execution
+    args = _execution.child_arguments(args)
+    cp = subprocess.run([sys.executable, str(runner), *args],
+                        pass_fds=_execution.child_pass_fds())
     return cp.returncode, {}
 
 
@@ -232,7 +235,10 @@ def main() -> int:
                         "/loop close-loop monitoring where re-running an "
                         "idempotent PASS_WITH_WAIVERS pipeline burns CI "
                         "without value.")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution.configure(args)
 
     project = args.project.resolve()
     if not project.is_dir():

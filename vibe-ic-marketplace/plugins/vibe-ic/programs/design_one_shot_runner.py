@@ -24818,7 +24818,10 @@ def main() -> int:
                         "For the operator who wants the roll-ups rebuilt after "
                         "one or more bounded runs. REFUSES together with a "
                         "window: a refresh of the whole flow has no window.")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution.configure(args)
 
     global _FORCE_RTL_REGEN
     _FORCE_RTL_REGEN = bool(args.force_rtl_regen)

@@ -80,6 +80,7 @@ import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
+_EXECUTION_ISSUER = object()
 
 
 def _write_runner_summary(out: Path, summary: dict, project: Path) -> None:
@@ -638,7 +639,10 @@ def _run_phase(label: str, runner: Path, args: List[str],
     # ORGANIC #588 — pass the re-entrancy env so the spawned standalone
     # phase runner re-enters THIS orchestrator's project lock instead of
     # being refused by it.
-    cp = subprocess.run([sys.executable, str(runner), *args], env=env)
+    import execution_policy as _execution
+    args = _execution.child_arguments(args)
+    cp = subprocess.run([sys.executable, str(runner), *args], env=env,
+                         pass_fds=_execution.child_pass_fds())
     return cp.returncode
 
 
@@ -1572,7 +1576,11 @@ def main() -> int:
                         "runs the flow_compliance gate matrix for true "
                         "PASS/SKIP/WAIVED verdicts; TTL-cached ~15s). Slower "
                         "than the default fast file-stat view.")
+    import execution_policy as _execution
+    _execution.add_arguments(p)
     args = p.parse_args()
+    _execution._register_frontdoor_issuer(_EXECUTION_ISSUER)
+    _execution.configure(args, _issuer=_EXECUTION_ISSUER)
 
     # Was --top-name given on the command line, or is it the historical default?
     # (argparse cannot tell a default from an explicit same-value pass; inspect

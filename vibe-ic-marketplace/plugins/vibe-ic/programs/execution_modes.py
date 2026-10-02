@@ -1,10 +1,15 @@
-"""Bounded execution-policy controller; BLOCKING at this API boundary.
+"""Bounded execution-policy controller and common receipt chain.
 
-This module has no production runner hooks or built-in EDA executors. Legacy
+This module has no built-in EDA executors or second production scheduler. Legacy
 direct/librelane/dual switches remain owned by librelane_contract. Adapters
 are trusted source-owned code, not executable commands imported from the public
 portfolio. An adapter must validate its actual outputs and every required gate.
 The controller binds that evidence to the inputs, implementation and process.
+
+Production adapters register with the existing ``Registry`` and execute only
+through ``Controller``.  Each run issues the frozen-work, arm, comparison and
+program-adoption receipts below; the receipts add provenance to the controller
+without changing canonical DAG ownership or selecting a step.
 """
 from __future__ import annotations
 
@@ -125,12 +130,57 @@ class Context:
     objective: Mapping[str, object]
     required_gates: tuple[str, ...]
     native_mode: str = 'direct'
+    # Production contexts must resolve both fields at construction.  The
+    # neutral controller fixtures pass an explicit ``neutral-test`` receipt.
+    ic_ip_path: str | None = None
+    route_receipt: Mapping[str, object] = field(default_factory=dict)
+    project_digest: str = ''
+    intent_label: str = 'PROGRAM_DEFAULT'
+    request_digest: str = ''
 
     def binding(self) -> dict:
         if not re.fullmatch(r'[0-9a-f]{40}', self.source_sha):
             raise Refusal('INVALID_SOURCE_SHA', self.source_sha)
         if self.native_mode not in ('direct', 'librelane', 'dual'):
             raise Refusal('AMBIGUOUS_NATIVE_IDENTITY', self.native_mode)
+        if self.ic_ip_path not in ('IC', 'IP'):
+            raise Refusal('INVALID_IC_IP_PATH', self.ic_ip_path)
+        if self.intent_label not in ('PROGRAM_DEFAULT', 'USER_EXPLICIT_ULTRA'):
+            raise Refusal('INVALID_EXECUTION_INTENT', self.intent_label)
+        if self.request_digest and not re.fullmatch(r'[0-9a-f]{64}', self.request_digest):
+            raise Refusal('INVALID_REQUEST_DIGEST', self.request_digest)
+        if self.intent_label == 'USER_EXPLICIT_ULTRA' and not self.request_digest:
+            raise Refusal('REQUEST_INTENT_UNBOUND', 'explicit Ultra needs its issued request digest')
+        if not self.route_receipt:
+            raise Refusal('ROUTE_RECEIPT_REQUIRED', 'IC/IP context needs a bound route receipt')
+        route_path = self.route_receipt.get('ic_ip_path')
+        if route_path != self.ic_ip_path:
+            raise Refusal('IC_IP_ROUTE_MISMATCH', self.step_id)
+        route_kind = self.route_receipt.get('kind')
+        if route_kind == 'neutral-test':
+            if self.ic_ip_path != 'IC' or self.project_digest or self.request_digest:
+                raise Refusal('ROUTE_RECEIPT_INVALID', self.step_id)
+        elif route_kind == 'issued-route':
+            required = ('schema', 'route_digest', 'project_digest', 'source_sha',
+                        'request_digest')
+            if (any(key not in self.route_receipt for key in required) or
+                    self.route_receipt.get('schema') != 1 or
+                    not re.fullmatch(r'[0-9a-f]{64}', str(self.route_receipt['project_digest'])) or
+                    not re.fullmatch(r'[0-9a-f]{64}', str(self.route_receipt['request_digest'])) or
+                    not re.fullmatch(r'[0-9a-f]{64}', str(self.route_receipt['route_digest']))):
+                raise Refusal('ROUTE_RECEIPT_INVALID', self.step_id)
+            route_body = {k: v for k, v in self.route_receipt.items()
+                          if k != 'route_digest'}
+            if _hash(route_body) != self.route_receipt['route_digest']:
+                raise Refusal('ROUTE_RECEIPT_DIGEST_MISMATCH', self.step_id)
+            if self.route_receipt['source_sha'] != self.source_sha:
+                raise Refusal('ROUTE_SOURCE_MISMATCH', self.step_id)
+            if self.route_receipt['project_digest'] != self.project_digest:
+                raise Refusal('ROUTE_PROJECT_MISMATCH', self.step_id)
+            if self.route_receipt['request_digest'] != self.request_digest:
+                raise Refusal('ROUTE_REQUEST_MISMATCH', self.step_id)
+        else:
+            raise Refusal('ROUTE_RECEIPT_INVALID', self.step_id)
         if not self.inputs or not self.objective or not self.required_gates:
             raise Refusal('INCOMPLETE_CONTEXT', self.step_id)
         if len(set(self.required_gates)) != len(self.required_gates):
@@ -145,7 +195,14 @@ class Context:
                     controller_sha256=digest(Path(__file__)),
                     inputs=files, objective=dict(self.objective),
                     required_gates=list(self.required_gates),
-                    native_mode=self.native_mode)
+                    native_mode=self.native_mode,
+                    ic_ip_path=self.ic_ip_path,
+                    route_receipt=dict(self.route_receipt),
+                    project_digest=self.project_digest,
+                    route_receipt_sha256=_hash(self.route_receipt)
+                    if self.route_receipt else None,
+                    intent_label=self.intent_label,
+                    request_digest=self.request_digest)
 
 
 @dataclass(frozen=True)
@@ -303,10 +360,35 @@ class Controller:
             return 'BUDGET_UNAVAILABLE'
         return 'READY'
 
+    @staticmethod
+    def acceptance_contract(context: Context, step: Mapping[str, object]) -> dict:
+        """Return the immutable contract every candidate must satisfy.
+
+        The contract is deliberately derived from the canonical step row and
+        the live request.  It is carried in receipts by digest, so changing a
+        gate, objective, or output obligation cannot reuse an older result.
+        """
+        return dict(step_id=context.step_id,
+                    required_gates=list(context.required_gates),
+                    required_output_contract=list(step['required_output_contract']),
+                    objective=dict(context.objective))
+
+    @staticmethod
+    def _mode_intent(selected_mode: str) -> str:
+        return 'ultra' if selected_mode == 'ultra-mode' else 'default'
+
     def plan(self, context: Context, execution_mode: str | None = None,
              superiority: Superiority | None = None) -> dict:
         selected_mode = mode(execution_mode)
         binding = context.binding()
+        # A routed production context may enter Ultra only with the typed
+        # intent issued by the canonical front door. Neutral controller
+        # fixtures retain their historical direct Ultra API for protocol-only
+        # tests because they carry no production route receipt.
+        if (selected_mode == 'ultra-mode' and
+                context.route_receipt.get('kind') != 'neutral-test' and
+                context.intent_label != 'USER_EXPLICIT_ULTRA'):
+            raise Refusal('ULTRA_INTENT_MISSING', context.step_id)
         step = next((s for s in self.portfolio['steps'] if s['id'] == context.step_id), None)
         if step is None:
             raise Refusal('UNKNOWN_CANONICAL_STEP', context.step_id)
@@ -333,8 +415,16 @@ class Controller:
             for row in rows:
                 if row['tool_id'] == 'vibeic' and row['admission'] == 'READY':
                     row['admission'] = 'OWN_TOOL_NOT_JUSTIFIED'
+        acceptance = self.acceptance_contract(context, step)
+        common = dict(mode=selected_mode, mode_intent=self._mode_intent(selected_mode),
+                      intent_label=context.intent_label, request_digest=context.request_digest,
+                      binding=binding, acceptance=acceptance,
+                      acceptance_digest=_hash(acceptance),
+                      route_receipt=dict(context.route_receipt),
+                      route_receipt_sha256=_hash(context.route_receipt)
+                      if context.route_receipt else None)
         if not ready:
-            return dict(mode=selected_mode, binding=binding, arms=[], portfolio=rows,
+            return dict(**common, arms=[], portfolio=rows,
                         status='NOT_MEASURED', reason='NO_RUNNABLE_ADAPTER')
         if any(dict(a.objective) != dict(context.objective) for a in ready):
             raise Refusal('UNEQUAL_OBJECTIVES', context.step_id)
@@ -392,7 +482,7 @@ class Controller:
                     continue
                 distinct.append(arm)
             ready = distinct
-        return dict(mode=selected_mode, binding=binding,
+        return dict(**common,
                     arms=[a.arm_id for a in ready], portfolio=rows,
                     status='PLANNED', reason=reason,
                     independence={a.arm_id: list(a.engine_families) for a in ready})
@@ -421,10 +511,26 @@ class Controller:
                     superiority=None if superiority is None else {
                         **asdict(superiority),
                         'receipts': {k: str(v) for k, v in superiority.receipts.items()}})
+        frozen = dict(schema=1, run_id=run_id, step_id=context.step_id,
+                      ic_ip_path=context.ic_ip_path,
+                      intent_label=context.intent_label,
+                      request_digest=context.request_digest,
+                      source_sha=context.source_sha,
+                      input_digest=_hash(plan['binding']['inputs']),
+                      input_manifest=dict(plan['binding']['inputs']),
+                      objective_digest=_hash(plan['binding']['objective']),
+                      acceptance_digest=plan['acceptance_digest'],
+                      acceptance=plan['acceptance'],
+                      route_receipt=plan['route_receipt'],
+                      route_receipt_sha256=plan['route_receipt_sha256'],
+                      mode_intent=plan['mode_intent'])
+        _write(output / 'frozen-work.json', frozen)
+        plan['frozen_work_digest'] = digest(output / 'frozen-work.json')
         _write(output / 'plan.json', plan)
         _ISSUED_AUTHORITY[str(output / 'issued-plan.json')] = json.dumps(plan)
         _write(output / 'issued-plan.json', _seal(plan))
         if not plan['arms']:
+            comparison = self._comparison_receipt(output, plan, {})
             _write(output / 'result.json', plan)
             return plan
         arms = {a.arm_id: a for a in self.registry.adapters(context.step_id)}
@@ -467,11 +573,88 @@ class Controller:
             futures = {pool.submit(work, arms[i]): i for i in plan['arms']}
             for future in as_completed(futures):
                 receipts[futures[future]] = future.result()
-        summary = dict(run_id=run_id, status='AWAITING_AI_SELECTION',
-                       candidate_statuses={i: r['status'] for i, r in receipts.items()},
-                       mode=plan['mode'], selected=None)
+        comparison = self._comparison_receipt(output, plan, receipts)
+        candidate_statuses = {i: r['status'] for i, r in receipts.items()}
+        if plan['mode'] == 'default-mode':
+            # Default is program-selected: the planner has already admitted
+            # exactly one priority arm. A sole eligible result follows the
+            # same sealed adoption chain, with a controller-issued choice
+            # witness so no AI choice file or review callback is required.
+            eligible = comparison['eligible_arms']
+            if len(plan['arms']) != 1:
+                raise Refusal('DEFAULT_ARM_CARDINALITY', context.step_id)
+            if len(eligible) == 1:
+                arm_id = eligible[0]['arm_id']
+                choice = dict(arm_id=arm_id,
+                              binding=plan['binding'],
+                              receipt_sha256=eligible[0]['receipt_sha256'],
+                              reviewer='program-default-controller',
+                              rationale='Planner priority selected the sole default arm.')
+                adopted = self.adopt(context, output, choice)
+                adopted.update(candidate_statuses=candidate_statuses,
+                               mode=plan['mode'], mode_intent=plan['mode_intent'])
+                self._write_adoption(output, adopted)
+                _write(output / 'result.json', adopted)
+                return adopted
+            # A measured failure or an unavailable result remains terminal and
+            # cannot be promoted into adoption by the default path.
+            status = candidate_statuses.get(plan['arms'][0], 'NOT_MEASURED')
+            summary = dict(run_id=run_id, status=status, candidate_statuses=candidate_statuses,
+                           mode=plan['mode'], mode_intent=plan['mode_intent'], selected=None,
+                           frozen_work_digest=plan['frozen_work_digest'],
+                           comparison_digest=comparison['digest'])
+            _write(output / 'result.json', summary)
+            return summary
+        summary = dict(run_id=run_id,
+                       status=('AWAITING_AI_SELECTION'
+                               if comparison['eligible_arms'] else 'NOT_MEASURED'),
+                       candidate_statuses=candidate_statuses,
+                       mode=plan['mode'], mode_intent=plan['mode_intent'], selected=None,
+                       frozen_work_digest=plan['frozen_work_digest'],
+                       comparison_digest=comparison['digest'])
         _write(output / 'result.json', summary)
         return summary
+
+    @staticmethod
+    def _comparison_receipt(root: Path, plan: dict, receipts: Mapping[str, dict]) -> dict:
+        """Issue a complete, ordered comparison over this run's arm set.
+
+        The comparison is descriptive until an explicit AI choice arrives.  A
+        missing or edited arm cannot disappear from the ordered set without
+        making adoption refuse.
+        """
+        ordered = []
+        eligible = []
+        for arm_id in plan['arms']:
+            path = root / arm_id / 'receipt.json'
+            if not path.is_file():
+                ordered.append(dict(arm_id=arm_id, receipt_sha256=None, status='NOT_MEASURED'))
+                continue
+            observed = receipts.get(arm_id)
+            if observed is None:
+                observed = json.loads(path.read_text())
+            sha = digest(path)
+            item = dict(arm_id=arm_id, receipt_sha256=sha,
+                        status=observed.get('status', 'NOT_MEASURED'))
+            ordered.append(item)
+            if item['status'] == 'ELIGIBLE':
+                eligible.append(dict(arm_id=arm_id, receipt_sha256=sha))
+        comparison = dict(schema=1, run_id=plan['run_id'], step_id=plan['binding']['step_id'],
+                          frozen_work_digest=plan['frozen_work_digest'],
+                          mode_intent=plan['mode_intent'], intent_label=plan['intent_label'],
+                          request_digest=plan['request_digest'],
+                          arm_receipts=ordered, eligible_arms=eligible,
+                          selection_criterion=dict(objective=plan['acceptance']['objective'],
+                                                   eligible_only=True,
+                                                   ordered_by='plan.arm_order'),
+                          status=('AWAITING_AI_SELECTION'
+                                  if plan['mode'] == 'ultra-mode' and eligible
+                                  else ('PROGRAM_DEFAULT_READY' if eligible else 'NOT_MEASURED')))
+        _write(root / 'comparison.json', comparison)
+        _ISSUED_AUTHORITY[str(root / 'issued-comparison.json')] = json.dumps(comparison)
+        _write(root / 'issued-comparison.json', _seal(comparison))
+        comparison['digest'] = digest(root / 'comparison.json')
+        return comparison
 
     def _run_arm(self, arm: Adapter, context: Context, plan: dict, root: Path,
                  cancel: threading.Event, cpuset: list[int] | None = None) -> dict:
@@ -484,6 +667,15 @@ class Controller:
         inputs.mkdir(); outputs.mkdir()
         receipt = dict(run_id=plan['run_id'], arm_id=arm.arm_id,
                        adapter=arm.identity(), binding=plan['binding'],
+                       frozen_work_digest=plan['frozen_work_digest'],
+                       intent_label=plan['intent_label'], request_digest=plan['request_digest'],
+                       executor=dict(tool_id=arm.tool_id, tool_version=arm.tool_version,
+                                     source_sha=arm.source_sha),
+                       engine_source_families=list(arm.engine_families),
+                       resource_facts=dict(cpus=arm.cpus, ram_mb=arm.ram_mb,
+                                           budget=asdict(self.budget), cpuset=cpuset),
+                       admission=next((row for row in plan['portfolio']
+                                       if row.get('arm_id') == arm.arm_id), {}),
                        output_root=str(outputs), input_root=str(inputs),
                        status='NOT_MEASURED', reason='NOT_STARTED', processes=[],
                        evidence=None, started_ns=time.monotonic_ns())
@@ -572,6 +764,8 @@ class Controller:
         except Exception as exc:
             receipt.update(status='NOT_MEASURED', reason='ADAPTER_ERROR', detail=repr(exc))
         receipt['ended_ns'] = time.monotonic_ns()
+        receipt['honest_verdict'] = receipt['status']
+        receipt['outputs'] = (receipt.get('evidence') or {}).get('outputs', {})
         # This completion is issued from observed Popen.wait results. Gate
         # evidence remains separately reconsumed; a source-issued process rc0
         # does not grant PASS or replace a failed/unmeasured output consumer.
@@ -611,6 +805,62 @@ class Controller:
         current = self.plan(context, plan['mode'], override)
         if arm.arm_id not in current['arms']:
             raise Refusal('CURRENT_POLICY_REJECTED', arm.arm_id)
+
+    @staticmethod
+    def _verify_receipt_chain(root: Path, plan: dict, context: Context) -> dict:
+        frozen_path = root / 'frozen-work.json'
+        comparison_path = root / 'comparison.json'
+        if not frozen_path.is_file() or not comparison_path.is_file():
+            raise Refusal('RECEIPT_CHAIN_INCOMPLETE', plan.get('run_id', ''))
+        if digest(frozen_path) != plan.get('frozen_work_digest'):
+            raise Refusal('FROZEN_WORK_DIGEST_MISMATCH', str(frozen_path))
+        frozen = json.loads(frozen_path.read_text())
+        if (frozen.get('run_id') != plan.get('run_id') or
+                frozen.get('step_id') != context.step_id or
+                frozen.get('source_sha') != context.source_sha or
+                frozen.get('mode_intent') != plan.get('mode_intent') or
+                frozen.get('intent_label') != plan.get('intent_label') or
+                frozen.get('request_digest') != plan.get('request_digest') or
+                frozen.get('acceptance_digest') != plan.get('acceptance_digest') or
+                frozen.get('input_manifest') != plan['binding'].get('inputs')):
+            raise Refusal('FROZEN_WORK_UNBOUND', context.step_id)
+        if context.binding() != plan.get('binding'):
+            raise Refusal('CURRENT_INPUT_CHANGED', context.step_id)
+        try:
+            issued_comparison = _issued(root / 'issued-comparison.json')
+        except Refusal as exc:
+            raise Refusal('COMPARISON_AUTHORITY_INVALID', str(exc)) from exc
+        comparison = json.loads(comparison_path.read_text())
+        if issued_comparison != comparison:
+            raise Refusal('COMPARISON_AUTHORITY_CHANGED', context.step_id)
+        if (comparison.get('run_id') != plan.get('run_id') or
+                comparison.get('frozen_work_digest') != plan.get('frozen_work_digest') or
+                comparison.get('mode_intent') != plan.get('mode_intent') or
+                comparison.get('intent_label') != plan.get('intent_label') or
+                comparison.get('request_digest') != plan.get('request_digest')):
+            raise Refusal('COMPARISON_UNBOUND', context.step_id)
+        rows = comparison.get('arm_receipts')
+        if not isinstance(rows, list) or [row.get('arm_id') for row in rows] != plan.get('arms'):
+            raise Refusal('INCOMPLETE_ARM_SET', context.step_id)
+        eligible = []
+        for row in rows:
+            arm_id = row.get('arm_id')
+            receipt_path = root / str(arm_id) / 'receipt.json'
+            if not receipt_path.is_file():
+                raise Refusal('INCOMPLETE_ARM_SET', str(arm_id))
+            observed = json.loads(receipt_path.read_text())
+            if digest(receipt_path) != row.get('receipt_sha256'):
+                if observed.get('status') == 'ELIGIBLE' and row.get('status') != 'ELIGIBLE':
+                    raise Refusal('EVIDENCE_CHANGED', str(arm_id))
+                raise Refusal('ARM_RECEIPT_DIGEST_MISMATCH', str(arm_id))
+            if observed.get('status') == 'ELIGIBLE':
+                eligible.append(dict(arm_id=arm_id, receipt_sha256=row['receipt_sha256']))
+            elif row.get('status') == 'ELIGIBLE':
+                raise Refusal('COMPARISON_ELIGIBILITY_CHANGED', str(arm_id))
+        if comparison.get('eligible_arms') != eligible:
+            raise Refusal('INCOMPLETE_ARM_SET', context.step_id)
+        return dict(frozen=frozen, comparison=comparison,
+                    comparison_digest=digest(comparison_path), eligible=eligible)
 
     @staticmethod
     def _selected_generation(root: Path, receipt: dict) -> dict:
@@ -657,7 +907,9 @@ class Controller:
     @staticmethod
     def _eligible(receipt: dict, context: Context, arm: Adapter) -> None:
         binding = context.binding()
-        if receipt.get('binding') != binding or receipt.get('adapter') != arm.identity():
+        if (receipt.get('binding') != binding or receipt.get('adapter') != arm.identity() or
+                receipt.get('intent_label') != context.intent_label or
+                receipt.get('request_digest') != context.request_digest):
             raise Refusal('STALE_OR_UNBOUND_RECEIPT', arm.arm_id)
         Controller._source_current(arm)
         processes = receipt.get('processes', [])
@@ -720,7 +972,7 @@ class Controller:
             if arm_id not in plan['arms']:
                 raise Refusal('AI_CHOICE_NOT_CANDIDATE', str(arm_id))
             path = root / str(arm_id) / 'receipt.json'
-            if digest(path) != choice['receipt_sha256']:
+            if not path.is_file() or digest(path) != choice['receipt_sha256']:
                 raise Refusal('AI_RECEIPT_DIGEST_MISMATCH', str(arm_id))
             receipt = json.loads(path.read_text())
             arm = next((a for a in self.registry.adapters(context.step_id) if a.arm_id == arm_id), None)
@@ -730,6 +982,17 @@ class Controller:
                     Path(receipt['input_root']).resolve() != root / str(arm_id) / 'inputs'):
                 raise Refusal('WRONG_ARM_OUTPUT_SPACE', str(arm_id))
             self._execution_authority(root, plan, receipt, arm)
+            chain = self._verify_receipt_chain(root, plan, context)
+            adoption.update(frozen_work_digest=plan.get('frozen_work_digest'),
+                            comparison_digest=chain['comparison_digest'],
+                            arm_receipts=chain['comparison']['arm_receipts'],
+                            intent_label=plan.get('intent_label'),
+                            request_digest=plan.get('request_digest'))
+            eligible = {row['arm_id']: row['receipt_sha256'] for row in chain['eligible']}
+            if arm_id not in eligible or digest(path) != eligible[arm_id]:
+                # A measured FAIL remains primary; an unmeasured arm cannot be
+                # rescued by a reviewer string or a forged status edit.
+                raise Refusal('AI_CHOICE_INELIGIBLE', str(arm_id))
             self._current_admission(context, plan, arm)
             self._eligible(receipt, context, arm)
             fresh = asdict(arm.validate(Path(receipt['output_root']), context.binding()))
@@ -747,12 +1010,20 @@ class Controller:
             adoption.update(status='ADOPTED', selected=arm_id,
                             evidence=receipt['evidence'],
                             independence=plan['independence'],
-                            selected_generation=generation)
-            _write(root / 'adoption.json', adoption)
+                            selected_generation=generation,
+                            winner=dict(arm_id=arm_id, receipt_sha256=choice['receipt_sha256'],
+                                        artifact_outputs=receipt['evidence']['outputs']),
+                            acceptance_rerun=dict(acceptance_digest=plan['acceptance_digest'],
+                                                  binding=context.binding(),
+                                                  evidence=asdict(arm.validate(
+                                                      Path(receipt['output_root']),
+                                                      context.binding())),
+                                                  status='PASS'))
+            self._write_adoption(root, adoption)
         except Refusal as exc:
             adoption.update(reason=exc.code, detail=str(exc))
             try:
-                _write(root / 'adoption.json', adoption)
+                self._write_adoption(root, adoption)
             except OSError as recording:
                 raise Refusal('ADOPTION_RECORD_UNAVAILABLE', f'{exc}; {recording}') from recording
             raise
@@ -760,8 +1031,42 @@ class Controller:
             adoption.update(status='REFUSED', selected=None,
                             reason='INVALID_ADOPTION_EVIDENCE', detail=str(exc))
             try:
-                _write(root / 'adoption.json', adoption)
+                self._write_adoption(root, adoption)
             except OSError as recording:
                 raise Refusal('ADOPTION_RECORD_UNAVAILABLE', f'{exc}; {recording}') from recording
             raise Refusal('INVALID_ADOPTION_EVIDENCE', str(exc)) from exc
+        return adoption
+
+    @staticmethod
+    def _write_adoption(root: Path, adoption: dict) -> None:
+        """Publish the program-adoption receipt and its live issuer witness."""
+        _write(root / 'adoption.json', adoption)
+        _write(root / 'program_adoption.json', adoption)
+        _ISSUED_AUTHORITY[str(root / 'issued-adoption.json')] = json.dumps(adoption)
+        _write(root / 'issued-adoption.json', _seal(adoption))
+
+    def verify_adoption(self, context: Context, root: Path) -> dict:
+        """Reconsume a completed adoption chain without changing project bytes."""
+        root = Path(root).resolve()
+        try:
+            adoption = json.loads((root / 'adoption.json').read_text())
+            program = json.loads((root / 'program_adoption.json').read_text())
+            issued = _issued(root / 'issued-adoption.json')
+        except (OSError, ValueError, KeyError) as exc:
+            raise Refusal('PROGRAM_ADOPTION_INVALID', str(exc)) from exc
+        if adoption != program or adoption != issued:
+            raise Refusal('PROGRAM_ADOPTION_CHANGED', str(root))
+        plan = json.loads((root / 'plan.json').read_text())
+        chain = self._verify_receipt_chain(root, plan, context)
+        if adoption.get('frozen_work_digest') != plan.get('frozen_work_digest') or \
+                adoption.get('comparison_digest') != chain['comparison_digest'] or \
+                adoption.get('intent_label') != plan.get('intent_label') or \
+                adoption.get('request_digest') != plan.get('request_digest'):
+            raise Refusal('PROGRAM_ADOPTION_UNBOUND', context.step_id)
+        winner = adoption.get('winner') or {}
+        row = next((item for item in chain['eligible'] if item['arm_id'] == winner.get('arm_id')), None)
+        if row is None or row['receipt_sha256'] != winner.get('receipt_sha256'):
+            raise Refusal('PROGRAM_ADOPTION_WINNER_MISMATCH', context.step_id)
+        if adoption.get('status') != 'ADOPTED':
+            raise Refusal('PROGRAM_ADOPTION_NOT_ADOPTED', context.step_id)
         return adoption
