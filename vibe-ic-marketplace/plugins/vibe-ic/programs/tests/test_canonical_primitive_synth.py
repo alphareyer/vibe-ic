@@ -3905,3 +3905,95 @@ def test_unsigned_divider_r9_exact_independent(case, expected, interface, domain
                                    "-o", str(tmp_path / "sim.out"), str(rtl)],
                                   capture_output=True, text=True)
         assert compiler.returncode == 0, compiler.stdout + compiler.stderr
+
+
+# R10: explicit target-domain permissions/withdrawals must survive neither
+# the publishing CLI nor the normal production consumer. Each review input
+# has a stable product ID; the broader cases exercise grammar, not string lookup.
+_R10_CONTRADICTIONS = [
+    ("compound_divisor_first", "The divisor and dividend requirements are removed", "nonzero operand domain"),
+    ("all_of_above", "All of the above requirements are removed", "nonzero operand domain"),
+    ("divisor_input_zero", "The divisor input may be zero", "nonzero operand domain"),
+    ("zero_allowed_for_divisor", "Zero is allowed for the divisor", "nonzero operand domain"),
+    ("divisor_allowed_zero", "The divisor is allowed to be zero", "nonzero operand domain"),
+    ("embedded_ordering_removed", "The requirement that dividend is at least divisor has been removed", "dividend >= divisor domain"),
+    ("ordering_no_longer_required", "Dividend is no longer required to be at least divisor", "dividend >= divisor domain"),
+    ("divisor_need_not_nonzero", "The divisor need not be nonzero", "nonzero operand domain"),
+    ("divisor_values_occasional_zero", "Divisor values may occasionally be zero", "nonzero operand domain"),
+]
+_R10_DOMAIN = "The divisor is nonzero. Dividend is at least divisor. "
+
+
+@pytest.mark.parametrize("case,clause,unresolved", _R10_CONTRADICTIONS,
+                         ids=[row[0] for row in _R10_CONTRADICTIONS])
+def test_unsigned_divider_r10_review_contradictions(case, clause, unresolved, tmp_path):
+    domain = _R10_DOMAIN + clause + "."
+    _r5_assert_publication(domain, False, tmp_path)
+    assert unresolved in rcs.route_to_ai_reason(_r5_domain_description(domain))["unresolved"]
+
+
+_R10_VARIANTS = [
+    ("synonym_compound", "The denominator and numerator constraints are waived."),
+    ("input_requirement", "The divisor input requirement is retracted."),
+    ("all_of_preceding", "All of the preceding guarantees have been cancelled."),
+    ("zero_permitted_for", "Zero is permitted for the denominator."),
+    ("zero_valid_input", "Zero is a valid divisor input."),
+    ("denominator_permitted_zero", "The denominator value is permitted to be zero."),
+    ("denominator_could_zero", "The denominator inputs could sometimes be zero."),
+    ("embedded_nonzero_removed", "The requirement that divisor is nonzero is removed."),
+    ("embedded_symbol_ordering", "The constraint that numerator >= denominator is waived."),
+    ("embedded_ordering_inapplicable", "The guarantee that dividend is at least divisor does not apply."),
+    ("nonzero_no_longer_required", "Divisor is no longer required to be positive."),
+    ("nonzero_not_required", "The divisor is not required to be nonzero."),
+    ("ordering_need_not", "Dividend need not be at least divisor."),
+    ("ordering_not_required", "The dividend is not required to be at least the divisor."),
+    ("embedded_not_required", "The requirement that dividend is at least divisor is no longer required."),
+]
+
+
+@pytest.mark.parametrize("case,clause", _R10_VARIANTS, ids=[row[0] for row in _R10_VARIANTS])
+def test_unsigned_divider_r10_semantic_variants(case, clause, tmp_path):
+    _r5_assert_publication(_R10_DOMAIN + clause, False, tmp_path)
+
+
+_R10_CONTROLS = [
+    ("ordinary", ""),
+    ("output_permission", "The quotient output may occasionally be zero."),
+    ("reset_permission", "The reset input is allowed to be zero."),
+    ("unrelated_requirement", "The output requirements are removed."),
+    ("unrelated_embedded_requirement", "The requirement that quotient is at least zero has been removed."),
+    ("unrelated_operand_property", "The divisor input bit-width requirements are removed."),
+    ("negated_compound_withdrawal", "The divisor and dividend requirements are not removed."),
+    ("negated_global_withdrawal", "All of the above requirements have not been removed."),
+    ("negated_embedded_withdrawal", "The requirement that dividend is at least divisor has not been removed."),
+    ("negated_zero_permission", "The divisor input may not be zero."),
+    ("negated_allowed_zero", "The divisor is not allowed to be zero."),
+    ("negated_zero_for", "Zero is not allowed for the divisor."),
+    ("required_nonzero", "The divisor is required to be nonzero."),
+    ("required_ordering", "Dividend is still required to be at least divisor."),
+    ("reference_permission", "The reference model divisor input may be zero."),
+    ("reference_withdrawal", "Another design: The divisor and dividend requirements are removed."),
+    ("quoted_permission", 'The manual quotes "The divisor is allowed to be zero".'),
+    ("conditional_permission", "If test mode is active, the divisor input may be zero."),
+    ("example_permission", "Examples:\n- The divisor input may be zero."),
+    ("unrelated_zero_context", "The quotient is allowed to be zero for the divisor."),
+    ("dividend_zero_denial", "The dividend input may not be zero."),
+]
+
+
+@pytest.mark.parametrize("case,clause", _R10_CONTROLS, ids=[row[0] for row in _R10_CONTROLS])
+def test_unsigned_divider_r10_unrelated_controls(case, clause, tmp_path):
+    import hashlib
+    _r5_assert_publication(_R10_DOMAIN + "\n" + clause, True, tmp_path)
+    rtl = tmp_path / "unit.sv"
+    ordinary = rcs.emit_rtl("unsigned_iterative_restoring_divider",
+                            _r5_domain_description(_R10_DOMAIN))
+    # Prose changes its provenance hash, while leaving every RTL byte intact.
+    digest = hashlib.sha256((tmp_path / "description.txt").read_bytes()).hexdigest()
+    ordinary = re.sub(r"(?m)^// Input contract SHA-256: [0-9a-f]{64}$",
+                      "// Input contract SHA-256: " + digest, ordinary)
+    assert rtl.read_text() == ordinary
+    compiler = subprocess.run(["iverilog", "-g2012", "-s", "unsigned_ratio_unit",
+                               "-o", str(tmp_path / "sim.out"), str(rtl)],
+                              capture_output=True, text=True)
+    assert compiler.returncode == 0, compiler.stdout + compiler.stderr

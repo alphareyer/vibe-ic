@@ -406,17 +406,20 @@ def _division_target_assertion(proposition: _DivisionProposition,
 
 
 def _division_retracted_domains(propositions: List[_DivisionProposition],
-                                events: List[set], denied: Callable[[str], bool]) -> set:
+                                events: List[set], denied: Callable[[str], bool],
+                                invariants: Dict[str, re.Pattern]) -> set:
     """Resolve the subject and polarity of a target-domain withdrawal."""
     retracted = set()
     previous = set()
     antecedents = set()
     carried_subject = None
+    operand_role = r"(?:dividend|numerator|divisor|denominator)"
     referent = re.compile(r"^(?:(?:that|this|these|those|all|both|the)"
-                          r"(?:\s+(?:preceding|above))?\s+"
+                          r"(?:\s+(?:of\s+(?:the\s+)?)?(?:preceding|above))?\s+"
                           r"(?:(?P<domain>non[- ]?zero|divisor|denominator|ordering|"
-                          r"(?:dividend|numerator)(?:\s+and\s+(?:the\s+)?"
-                          r"(?:divisor|denominator))?|(?:both\s+)?operands?)\s+)?"
+                          + operand_role + r"\s+and\s+(?:the\s+)?" + operand_role + r"|"
+                          r"dividend|numerator|(?:both\s+)?operands?)"
+                          r"(?:\s+(?:input|value))?\s+)?"
                           r"(?P<kind>statements?|guarantees?|requirements?|"
                           r"property|properties|rules?|constraints?)|"
                           r"this\s+is|(?P<pronoun>they|it))\b")
@@ -424,7 +427,7 @@ def _division_retracted_domains(propositions: List[_DivisionProposition],
                             r"cancelled|canceled|inapplicable|deprecated|superseded)\b|"
                             r"\bbelongs\s+to\b")
     inapplicable = re.compile(r"\b(?:does|do|did)\s+not\s+apply\b|"
-                              r"\bno\s+longer\s+(?:apply|applies)\b")
+                              r"\bno\s+longer\s+(?:apply|applies|required)\b")
     for proposition, domains in zip(propositions, events):
         subject = referent.search(proposition.text)
         if (subject is None and carried_subject is not None
@@ -458,6 +461,22 @@ def _division_retracted_domains(propositions: List[_DivisionProposition],
         # referent is not mistaken for two independently owned clauses.
         tail = (proposition.text[subject.end():] if referent.search(proposition.text)
                 else proposition.text)
+        embedded_domains = None
+        complement = re.match(r"\s+that\s+", tail)
+        if complement:
+            # Bind an explicit requirement complement to the SAME arithmetic
+            # predicates used for admission. An unrelated output/property
+            # complement must never borrow the preceding operand requirements.
+            embedded_domains = set()
+            body = tail[complement.end():]
+            for domain, pattern in invariants.items():
+                match = pattern.match(body)
+                if match:
+                    embedded_domains.add(domain)
+                    tail = body[match.end():].strip()
+            if not embedded_domains:
+                carried_subject = None
+                continue
         clauses = re.split(r"\s*,?\s*\b(?:but|yet|and|however)\b\s+|"
                            r"\s*[;,]\s*", tail)
         for clause in clauses:
@@ -474,6 +493,8 @@ def _division_retracted_domains(propositions: List[_DivisionProposition],
                         {"ordering" if named in {"ordering", "dividend", "numerator"} else "nonzero"}
                         if named else antecedents if (kind and kind.endswith("s"))
                         or subject.group("pronoun") == "they" else previous)
+            if embedded_domains is not None:
+                matching = embedded_domains
             for predicate in withdrawal.finditer(clause):
                 retires = not denied(clause[:predicate.start()])
                 reassigned = (predicate.group().startswith("belongs") and retires)
@@ -503,11 +524,20 @@ def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
     ordering = re.compile(r"\b(?:the\s+)?" + dividend +
                           r"\s*(?:(?:is|must\s+be|shall\s+be)\s*)?"
                           r"(?:at\s+least\s+|>=\s*|≥\s*)(?:the\s+)?" + divisor + r"\b")
-    operand = r"\b(?:" + both + r"|(?:the\s+)?(?:divisor|denominator|dividend|numerator))"
+    operand = (r"\b(?:" + both + r"|(?:the\s+)?(?:divisor|denominator|dividend|numerator))"
+               r"(?:\s+(?:inputs?|values?))?")
     allowance = re.compile(operand + r"\s+(?:" +
                            _DIVISION_MODAL_BE + r"\s+(?:zero|0|non[- ]?zero|positive)\b|"
+                           r"(?:is|are)\s+(?:allowed|permitted)\s+to\s+be\s+(?:zero|0)\b|"
                            r"(?:is|are)\s+(?:zero|0)\b|"
                            r"(?:is|are|be|must\s+be|shall\s+be)\s+(?:\w+\s+){0,4}" + value + r")")
+    relaxed = r"(?:need\s+not\s+be|(?:is|are)\s+(?:no\s+longer|not)\s+required\s+to\s+be)\s+"
+    relaxed_invariants = {
+        "nonzero": re.compile(operand + r"\s+" + relaxed + value),
+        "ordering": re.compile(r"\b(?:the\s+)?" + dividend +
+                               r"(?:\s+(?:inputs?|values?))?\s+" + relaxed +
+                               r"at\s+least\s+(?:the\s+)?" + divisor + r"\b"),
+    }
     less = re.compile(r"\b(?:the\s+)?" + dividend +
                       r"\s+(?:(?:is|" + _DIVISION_MODAL_BE + r")\s+)?"
                       r"(?:less|smaller)\s+than\s+(?:the\s+)?" + divisor)
@@ -533,6 +563,12 @@ def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
             contradictions.update({"nonzero", "ordering"})
         if not _division_target_evidence(proposition):
             continue
+        for domain, pattern in relaxed_invariants.items():
+            for match in pattern.finditer(proposition.text):
+                # The denial is inside the requirement predicate itself.
+                # Do not spread it from another subject or quoted/reference prose.
+                if not denied(proposition.text[:match.start()]):
+                    contradictions.add(domain)
         def predicate_denied(match: re.Match) -> bool:
             # A denial of the requirement directly governs its complement;
             # a separate subject's output denial does not govern this operand.
@@ -552,7 +588,9 @@ def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
                 zero_allowed = zero_allowed or has_zero
         explicit_zero = re.search(
             r"\b(?:zero|0)\s+is\s+(?:also\s+)?(?:permitted|allowed|valid|accepted)"
-            r"\s+(?:as\s+)?(?:a\s+)?(?:divisor|denominator)\b|"
+            r"\s+(?:(?:as|for)\s+)?(?:(?:a|the)\s+)?(?:divisor|denominator)\b|"
+            r"\b(?:zero|0)\s+is\s+(?:a\s+)?(?:valid|permitted|allowed|accepted)\s+"
+            r"(?:divisor|denominator)\s+(?:input|value)\b|"
             r"\b(?:a\s+)?(?:divisor|denominator)\s+of\s+(?:zero|0)\s+is\s+"
             r"(?:a\s+)?(?:valid|permitted|allowed|accepted)\s+(?:input|value)\b", proposition.text)
         port_zero = re.search(
@@ -564,7 +602,8 @@ def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
         if (any(not predicate_denied(match) for match in less.finditer(proposition.text))
                 or any(predicate_denied(match) for match in ordering.finditer(proposition.text))):
             contradictions.add("ordering")
-    contradictions.update(_division_retracted_domains(propositions, events, denied))
+    contradictions.update(_division_retracted_domains(
+        propositions, events, denied, {"nonzero": positive, "ordering": ordering}))
     return ("nonzero" in positives and "nonzero" not in contradictions,
             "ordering" in positives and "ordering" not in contradictions, zero_allowed)
 
