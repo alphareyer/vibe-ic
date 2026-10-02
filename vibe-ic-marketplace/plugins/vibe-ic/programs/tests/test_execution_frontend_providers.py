@@ -117,3 +117,13 @@ def test_step8_nonzero_and_manifest_mutation_refuse(tmp_path):
     with __import__('pytest').raises(RuntimeError): w.run_row('8',project,tmp_path/'out')
     (project/'input/issued_manifest.json').write_text(json.dumps({'step_id':'9','parameters':{},'files':files}))
     with __import__('pytest').raises(ValueError): w.run_row('8',project,tmp_path/'out2')
+
+def test_05ic_parameter_exclusivity_precedes_tools(tmp_path, monkeypatch):
+    import execution_frontend_worker as w
+    calls=[]
+    monkeypatch.setattr(w.subprocess, 'run', lambda *a, **k: calls.append(a) or None)
+    (tmp_path/'input').mkdir(); (tmp_path/'input/issued_manifest.json').write_text(json.dumps({'step_id':'0.5ic','parameters':{},'files':{}}))
+    for kwargs in ({}, {'template':'P','no_template_reason':'R'}):
+        calls.clear()
+        with __import__('pytest').raises(ValueError): w.produce_05ic(tmp_path,tmp_path/'out',**kwargs)
+        assert calls == []

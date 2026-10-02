@@ -111,6 +111,9 @@ def register_factories(registry):
         if row == '8':
             for name in ('sdc_syntax_check.py','sdc_validator_check.py'):
                 path=Path(source).with_name(name); bound_files[str(path)]=digest(path)
+        if row == '0.5ic':
+            for name in ('submission_template_ingest.py','tapeout_declaration_gen.py'):
+                path=Path(source).with_name(name); bound_files[str(path)]=digest(path)
         registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,bound_files,'current-main',p.engines,(Component('frontend_worker',('python3',worker,'--step',row,'--inputs','{inputs}','--outputs','{outputs}')),),validate,required,{'metric':'source_boundary'},qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required}))
     return tuple(PROVIDERS)
 

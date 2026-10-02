@@ -49,7 +49,28 @@ def _cli(step, project, output, modules, args=()):
 def produce_d1(project,output,**k):
     import design_one_shot_runner as d
     return _record('D1',project,output,'design_one_shot_runner.step_phase1',d.step_phase1,**k)
-def produce_05ic(project,output,**k): return _cli('0.5ic',project,output,('submission_template_ingest','tapeout_declaration_gen'))
+def produce_05ic(project,output,template=None,no_template_reason=None,**k):
+    if bool(template) == bool(no_template_reason):
+        raise ValueError('0.5ic: exactly one of template or no_template_reason is required')
+    _verify_manifest(project, '0.5ic')
+    project, output = Path(project), Path(output)
+    staged = output / 'project'; output.mkdir(parents=True, exist_ok=True)
+    if staged.exists(): shutil.rmtree(staged)
+    shutil.copytree(project, staged, ignore=shutil.ignore_patterns('issued_manifest.json','frontend_outputs'))
+    args1=['python3',str(Path(__file__).with_name('submission_template_ingest.py')),str(staged)]
+    args1 += ['--template',str(template)] if template else ['--no-template-reason',str(no_template_reason)]
+    answers=staged/'input/step_0_5ic_answers.json'
+    if not answers.is_file(): raise ValueError('0.5ic: answers file is required')
+    args2=['python3',str(Path(__file__).with_name('tapeout_declaration_gen.py')),str(staged),'--answers',str(answers)]
+    records=[]
+    for argv in (args1,args2):
+        cp=subprocess.run(argv,capture_output=True,text=True); records.append({'argv':argv,'rc':cp.returncode,'stdout':cp.stdout,'stderr':cp.stderr})
+        if cp.returncode != 0: raise RuntimeError(f'0.5ic producer failed rc={cp.returncode}')
+    for rel in ('reports/phase1/submission_template.json','reports/phase1/tapeout_declaration.json','input/submission_template/tapeout_declaration.json'):
+        src=staged/rel
+        if src.is_file():
+            dst=output/rel; dst.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(src,dst)
+    return output/'reports/phase1/tapeout_declaration.json'
 def produce_1(project,output,ic_class=None,force_regen=False,**k):
     if not ic_class: raise ValueError('1: ic_class is required')
     import design_one_shot_runner as d
