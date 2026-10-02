@@ -432,6 +432,12 @@ def audit(project: Path) -> dict:
                        "errors": tool_ref.get("errors"),
                        "rules": tool_ref.get("rules"),
                        "state_sha256": tool_ref.get("state_sha256"),
+                       "subject_sha256": tool_ref.get("subject_sha256"),
+                       "measurement_verdict": (
+                           "FAIL" if type(tool_ref.get("errors")) is int
+                           and tool_ref["errors"] > 0 else
+                           "PASS" if tool_ref.get("status") == "MEASURED"
+                           and tool_ref.get("errors") == 0 else "NOT_MEASURED"),
                        "step34_pass": (tool_ref.get("status") == "MEASURED"
                                        and tool_ref.get("errors") == 0)}
     elif gate_json.is_file():

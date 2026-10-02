@@ -579,6 +579,14 @@ def measure_density_ratios(project: Path, image: str, pdk_root: Path, pdk: str,
         raise Refusal('LL_DENSITY_RATIOS_UNRESOLVED', str(density_config))
     specs = _density_ratio_specs(deck_text, fill_cfg)
     die = cfg.get('DIE_AREA')
+    if die is None:
+        # Density's step config does not declare DIE_AREA in every tool
+        # release. Read the current physical subject, never a GDS bbox.
+        from librelane_contract import _def_die_area
+        filled = project / 'phase3/stage3/pnr/filled.def'
+        if filled.is_file():
+            validate_fill_consumption(project)
+            die = _def_die_area(filled)
     if not specs or not isinstance(die, list) or len(die) != 4:
         raise Refusal('LL_DENSITY_RATIOS_UNRESOLVED', str(density_config))
     root = project / 'phase3/librelane' / lane
@@ -1027,7 +1035,7 @@ def tool_density(project: Path) -> Optional[Dict[str, Any]]:
         doc = _load(path)
         if doc.get('default_stream'):
             validate_default_stream(project)
-    except (OSError, ValueError, Refusal):
+    except (OSError, ValueError, Refusal, KeyError, TypeError):
         return {'status': 'UNREADABLE', 'source': RECORD_REL}
     arms = doc.get('gds') or {}
     shipped = arms.get('shipped')
