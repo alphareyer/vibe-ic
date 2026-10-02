@@ -246,6 +246,12 @@ _DIE_ROUTE = re.compile(
 _HARDMACRO_ROUTE = re.compile(
     r"\b(?:ip\s+(?:hard[- ]?macro|path|deliverable|block)|"
     r"hard[- ]?macro|macro\s+deliverable)\b", re.I)
+_INTEGRATED_HARDMACRO_ROUTE = re.compile(
+    r"\b(?:integrat(?:e|ed|ing)|inside|within|embedded)\b"
+    r"[^.\n]{0,80}\b(?:ip\s+)?hard[- ]?macro\b|"
+    r"\b(?:ip\s+)?hard[- ]?macro\b[^.\n]{0,80}\b(?:integrat(?:e|ed|ing)|"
+    r"inside|within|embedded)\b",
+    re.I)
 
 
 def prompt_delivery_requirements(prompt: str) -> Dict[str, Any]:
@@ -256,10 +262,20 @@ def prompt_delivery_requirements(prompt: str) -> Dict[str, Any]:
     # classify the hardmacro family first and do not let a view word create a
     # false DIE conflict.
     has_hardmacro = bool(_HARDMACRO_ROUTE.search(text))
-    has_die = bool(_DIE_ROUTE.search(text)) and not has_hardmacro
-    route_hits = (["HARDMACRO"] if has_hardmacro else [])
-    if has_die:
-        route_hits.append("DIE")
+    # A hardmacro mention describes a component.  It lowers the delivery
+    # family only when the requested object is that standalone block.  When
+    # the same component is explicitly integrated into a chip/DIE, the
+    # delivered object remains the complete IC and keeps the IC floor.
+    integrated_hardmacro = bool(_INTEGRATED_HARDMACRO_ROUTE.search(text))
+    has_die = bool(_DIE_ROUTE.search(text)) and (
+        not has_hardmacro or integrated_hardmacro)
+    route_hits = []
+    if has_die and integrated_hardmacro:
+        route_hits = ["DIE"]
+    elif has_hardmacro:
+        route_hits = ["HARDMACRO"]
+    elif has_die:
+        route_hits = ["DIE"]
     matches = []
     for target, rx in _PROMPT_DELIVERY_PATTERNS:
         hit = rx.search(text)

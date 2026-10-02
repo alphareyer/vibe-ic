@@ -64,4 +64,3 @@ def test_r3_ip_hardmacro_views_are_not_a_die_conflict():
 def test_r3_common_dependency_terminals_are_reachable():
     assert rd.dependency_closed_join(["5", "37"])["step"] == "39"
     assert rd.dependency_closed_join(["33", "37"])["step"] == "36"
-
