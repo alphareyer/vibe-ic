@@ -1833,20 +1833,27 @@ def characterise_liberty(project: Path, design: str, container: str,
         f"link_design {design}", f"read_sdc {sdc}", f"read_spef {spef}",
         f"write_timing_model -library_name {design} -cell_name {design} "
         f"{lib_out}", 'puts "TIMING_MODEL_DONE"', "")))
+    import _physical_current as _pc
+    try:
+        inputs = {role: _pc.entry(project, path, external=role.startswith("pdk_"))
+                  for role, path in (("netlist", netlist), ("sdc", sdc),
+                                     ("spef", spef), ("sta_report", rpt),
+                                     ("pdk_liberty", lib), ("recipe", tcl))}
+    except (OSError, ValueError) as exc:
+        rec.update(characterised=False, reason_class="BLOCKED_BY_UPSTREAM", why=str(exc))
+        return None, rec
     cmd = f"export PATH=/foss/tools/bin:$PATH; sta -no_splash -exit {tcl}"
     argv = (["bash", "-lc", cmd] if shutil.which("sta") or not container
             else _ce.docker_exec_argv(container, "bash", "-lc", cmd))
     rc, out, err = _sh(argv)
     text = lib_out.read_text(errors="replace") if lib_out.is_file() else ""
     arcs = len(re.findall(r"\btiming\s*\(", text))
-    import _physical_current as _pc
     log = out_dir / "timing_native.log"
     log.write_text((out or "") + "\n" + (err or ""))
     try:
-        inputs = {role: _pc.entry(project, path, external=role.startswith("pdk_"))
-                  for role, path in (("netlist", netlist), ("sdc", sdc),
-                                     ("spef", spef), ("sta_report", rpt),
-                                     ("pdk_liberty", lib), ("recipe", tcl))}
+        for role, row in inputs.items():
+            if _pc.entry(project, project / row["path"], external=role.startswith("pdk_")) != row:
+                raise ValueError(f"IP_KIT_TIMING_INPUT_CHANGED: {role}")
         rec["current_inputs"] = inputs
         rec["execution"] = {"rc": rc, "argv": argv}
         rec["log"] = _pc.entry(project, log)
@@ -1859,7 +1866,7 @@ def characterise_liberty(project: Path, design: str, container: str,
         except OSError:
             pass
     rec.update(rc=rc, arcs=arcs)
-    if rc != 0 or arcs == 0:
+    if rc != 0 or arcs == 0 or re.search(r"(?m)^Error(?:\s|:)|\[ERROR\]", (out or "") + (err or "")):
         rec.update(characterised=False, reason_class="EXECUTION_ERROR",
                    why=(f"write_timing_model rc={rc}, {arcs} timing arc(s); "
                         + (err or out)[-400:]))
@@ -2239,6 +2246,7 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
                 raise ValueError("IP_KIT_TIMING_NOT_MEASURED")
             inputs.update({("pdk_timing_liberty" if role == "pdk_liberty" else f"timing_{role}"): row
                            for role, row in timing["current_inputs"].items()})
+            inputs["lef_recipe"] = _pc.entry(project, hm / "digital_lef.tcl")
             for role, row in inputs.items():
                 if _pc.entry(project, project / row["path"], external="pdk_" in role) != row:
                     raise ValueError(f"IP_KIT_CURRENT_INPUT_CHANGED: {role}")

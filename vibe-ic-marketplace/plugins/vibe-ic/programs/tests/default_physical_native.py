@@ -57,7 +57,7 @@ def main():
     put(project, "phase3/stage3/pnr/routed.def", definition)
     put(project, f"phase3/stage3/pnr/{top}.def", definition)
     sdc = put(project, "phase2/stage2/constraints/current.sdc",
-              f'create_clock -name {spec["clock"]["name"]} -period {spec["clock"]["period_ns"]} [get_ports A]\n')
+              f'create_clock -name {spec["clock"]["name"]} -period {spec["clock"]["period_ns"]} [get_ports {spec["clock"]["port"]}]\n')
     put(project, "phase3/stage3/pnr/constraint.sdc", sdc.read_text() +
         'set_input_delay 1 -clock system [get_ports A]\nset_output_delay 1 -clock system [get_ports Y]\n')
     plan = project / "phase3/stage3/cts/clock_plan.json"
@@ -96,7 +96,7 @@ def main():
                          "gate_rc": gds_xor_check.main([str(project), "--check", "reports/phase3/gds_xor.json"])}
     # A real geometric tool comparison cannot certify missing connectivity.
     put(project, f"phase3/stage3/pnr/{top}_pnr.v",
-        f"module {top}(input A, output Y);\n"
+        f"module {top}(input A, input CLK, output Y);\n"
         "sky130_fd_sc_hd__buf_1 u_buffer (.A(A), .X(Y));\nendmodule\n")
     # The open width deck is a direct-native screen of this fixture's input
     # property. It is not a replacement for any foundry deck.
@@ -107,7 +107,7 @@ def main():
     pdk.drc_deck = str(deck)
     row = runner.step_drc(project, top, pdk, "")
     results["31"] = {"drc_status": row.status, "detail": row.detail,
-                      "current_reader": pc.check_direct_half(project, "drc")}
+                      "current_reader": pc.read_direct_half(project, "drc")}
     cp = subprocess.run([sys.executable, str(PROGRAMS / "drc_report_check.py"), str(project),
                          "--mode", "drc", "--signoff", "--under", "reports/phase3/drc_signoff.rpt",
                          "--json", str(project / "drc_gate.json")], capture_output=True, text=True)

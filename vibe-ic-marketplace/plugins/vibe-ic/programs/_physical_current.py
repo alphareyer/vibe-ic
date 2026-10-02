@@ -220,6 +220,10 @@ def direct_half(project, top, pdk, half, producer):
         if not deck:
             raise ValueError("CURRENT_NATIVE_DECK_MISSING")
         inputs["pdk_deck"] = entry(project, deck, external=True)
+        declared_pdk, technology = pdk_of(project)
+        if declared_pdk != pdk.name:
+            raise ValueError("CURRENT_PDK_MISMATCH")
+        inputs["technology"] = entry(project, technology)
         design = design_of(pnr / f"{top}.def")
     except (OSError, ValueError, AttributeError, TypeError) as exc:
         refusal = str(exc)
@@ -245,12 +249,14 @@ def direct_half(project, top, pdk, half, producer):
                 raise ValueError(f"CURRENT_INPUT_CHANGED_DURING_TOOL: {role}")
         log = native_report.with_suffix(".log")
         record = build(project, "31", "stage4", design, pdk.name, execution["tool"],
-                       inputs, {"report": entry(project, report), "log": entry(project, log)},
+                       inputs, {"report": entry(project, report), "log": entry(project, log),
+                                "native_report": entry(project, native_report)},
                        {"rc": execution["exit_code"],
                         "argv": [execution.get("command") or execution.get("cmd") or execution["tool"]],
                         "native_invocation": execution})
         write_json(path, record)
         row.extras["current_subject"] = str(path)
+        row.extras["current_reader"] = read_direct_half(project, half)
     except (OSError, ValueError, TypeError) as exc:
         refusal = str(exc)
         write_json(path, {"schema": SCHEMA, "step": "31", "stage": "stage4",
@@ -262,7 +268,7 @@ def direct_half(project, top, pdk, half, producer):
     return row
 
 
-def check_direct_half(project, half):
+def _direct_half_refusal(project, half):
     """Strict reader for the Step-31 declared DRC/LVS gates."""
     project = Path(project)
     try:
@@ -271,8 +277,8 @@ def check_direct_half(project, half):
         return f"CURRENT_NATIVE_RECORD_MISSING: {exc}"
     refusal = validate(project, record, step="31", stage="stage4",
                        tools=("klayout", "magic", "netgen", "svrfdrc"),
-                       required_inputs=("gds", "def", "netlist", "pdk_deck", "pdk_tech_lef", "pdk_cell_lef"),
-                       required_outputs=("report", "log"))
+                       required_inputs=("gds", "def", "netlist", "technology", "pdk_deck", "pdk_tech_lef", "pdk_cell_lef"),
+                       required_outputs=("report", "native_report", "log"))
     if refusal:
         return refusal
     report = project / f"reports/phase3/{'drc_signoff' if half == 'drc' else 'lvs'}.rpt"
@@ -282,12 +288,40 @@ def check_direct_half(project, half):
     if (native.get("tool") != record["tool"] or native.get("measured") is not True
             or native.get("exit_code") != 0):
         return "CURRENT_NATIVE_INVOCATION_MISMATCH"
+    for role in ("native_report", "log"):
+        row = record["outputs"][role]
+        if (native.get("outputs") or {}).get(row["path"]) != "sha256:" + row["sha256"]:
+            return "CURRENT_NATIVE_OUTPUT_UNBOUND"
+    pnr = project / "phase3/stage3/pnr"
+    for role, suffix in (("gds", ".gds"), ("def", ".def"), ("netlist", "_pnr.v")):
+        if record["inputs"][role] != entry(project, pnr / (record["design"] + suffix)):
+            return "CURRENT_NATIVE_SUBJECT_SWAPPED"
     # The report's own invocation must bind the layout, not only its filename.
     want = record["inputs"]["gds"]
     bound = (native.get("inputs") or {}).get(want["path"])
     if bound not in (want["sha256"], "sha256:" + want["sha256"]):
         return "CURRENT_NATIVE_LAYOUT_UNBOUND"
     return ""
+
+
+def check_direct_half(project, half):
+    try:
+        return _direct_half_refusal(project, half)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return f"CURRENT_NATIVE_REFUSED: {exc}"
+
+
+def read_direct_half(project, half):
+    """Explicit strict-reader receipt; an empty refusal is never the evidence."""
+    refusal = check_direct_half(project, half)
+    if refusal:
+        return {"verdict": "NOT_MEASURED", "reason": refusal, "half": half}
+    path = Path(project) / f"reports/phase3/direct_current_{half}.json"
+    record = json.loads(path.read_text())
+    return {"verdict": "CURRENT", "half": half, "subject": entry(project, path),
+            "step": record["step"], "stage": record["stage"], "design": record["design"],
+            "tool": record["tool"], "pdk": record["pdk"],
+            "inputs": record["inputs"], "outputs": record["outputs"]}
 
 
 def check_kit(project):
@@ -300,11 +334,15 @@ def check_kit(project):
             project, record, step="37.5ip", stage="stage4", tools=("magic+opensta",),
             required_inputs=("def", "gds", "route", "technology", "timing_netlist",
                              "timing_sdc", "timing_spef", "timing_sta_report", "timing_recipe",
-                             "pdk_timing_liberty", "pdk_magicrc"),
+                             "pdk_timing_liberty", "pdk_magicrc", "lef_recipe"),
             required_outputs=("lef", "liberty", "gds", "verilog", "log", "timing_log"),
             marker="DIGITAL_LEF_WRITE_DONE")
         if refusal:
             return refusal
+        import digital_hardmacro_gen as producer
+        if (record["inputs"]["def"] != entry(project, producer.find_def(project))
+                or record["inputs"]["gds"] != entry(project, producer.find_signoff_gds(project))):
+            return "IP_KIT_CURRENT_SUBJECT_SWAPPED"
         import _tapeout_declaration as td
         declaration = project / td.DECLARATION_REL
         doc, error = td.load(declaration)

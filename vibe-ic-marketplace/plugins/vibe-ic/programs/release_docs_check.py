@@ -1953,7 +1953,7 @@ def run_audit(project: Path, arm: str) -> Result:
             result.findings.append(Finding("IP_KIT_CURRENT_REFUSED", "ERROR", "", refusal))
             result.passed = False
             result.verdict_tier = "FAIL"
-            result.summary.update(pass_=False, verdict_tier="FAIL")
+            result.summary.update(verdict_tier="FAIL")
             result.summary["pass"] = False
     return result
 
