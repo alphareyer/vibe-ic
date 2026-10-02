@@ -53,29 +53,42 @@ def current_source_tree_identity() -> str:
 
 
 @lru_cache(maxsize=2048)
-def _local_imports(path: str) -> tuple[Path, ...]:
-    """Parse one source file once per process and resolve only local imports."""
-    source = Path(path)
-    if source.suffix != ".py" or not source.is_file() or source.is_symlink():
-        return ()
+def _import_names(text: str) -> tuple[str, ...]:
+    """Cache syntax only; filesystem resolution must remain current."""
     try:
-        tree = ast.parse(source.read_text())
+        tree = ast.parse(text)
     except (OSError, SyntaxError):
         return ()
-    found: set[Path] = set()
+    found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom):
             names = ([node.module] if node.module else
                      [alias.name for alias in node.names])
+        elif (isinstance(node, ast.Call) and node.args and
+              (getattr(node.func, "attr", None) == "import_module" or
+               getattr(node.func, "id", None) == "__import__") and
+              isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+            names = [node.args[0].value]
         else:
             continue
-        for name in names:
-            base = name.split(".")[0]
-            for candidate in (HERE / (base + ".py"), HERE / base / "__init__.py"):
-                if candidate.is_file() and not candidate.is_symlink():
-                    found.add(candidate.resolve())
+        found.update(names)
+    return tuple(sorted(found))
+
+
+def _local_imports(path: str, text: str) -> tuple[Path, ...]:
+    """Resolve sibling helpers and literal imports against today's files."""
+    source = Path(path)
+    found: set[Path] = set()
+    for name in _import_names(text):
+        base = name.split(".")[0]
+        for directory in (source.parent, HERE):
+            candidates = (directory / (base + ".py"), directory / base / "__init__.py")
+            local = [p for p in candidates if p.is_file() and not p.is_symlink()]
+            if local:
+                found.update(p.resolve() for p in local)
+                break
     return tuple(sorted(found))
 
 
@@ -93,7 +106,95 @@ def source_closure(paths: Iterable[Path]) -> set[Path]:
         if path in seen or not path.is_file() or path.is_symlink():
             continue
         seen.add(path)
-        pending.extend(_local_imports(str(path)))
+        pending.extend(_local_imports(str(path), path.read_text()) if path.suffix == ".py" else ())
+    return seen
+
+
+def dispatcher_closure(entry: Path, dispatcher: Path) -> set[Path]:
+    """Prove a transparent Python alias, or refuse opaque dispatch.
+
+    Only imports of ``main``, literal path bootstraps and a direct main call
+    are admitted. Import reachability alone does not prove what executes.
+    Copied workers and arbitrary loader code are refused: their relative
+    import resolution is not proven by matching the entry's bytes.
+    """
+    seen: set[Path] = set()
+
+    def visit(path: Path, *, entrypoint: bool = False):
+        path = path.resolve()
+        if path == dispatcher:
+            seen.add(path)
+            return
+        if path in seen or not path.is_file():
+            raise ValueError(f"unproven dispatcher: {path}")
+        seen.add(path)
+        search = [path.parent]
+        symbols = set()
+        libraries = {}
+        invoked = False
+
+        def call(node):
+            if not isinstance(node, ast.Call) or node.args or node.keywords:
+                raise ValueError(f"unproven main call: {path}")
+            if isinstance(node.func, ast.Name) and node.func.id in symbols:
+                return
+            fn = node.func
+            if (isinstance(fn, ast.Attribute) and fn.attr == "main" and
+                isinstance(fn.value, ast.Call) and not fn.value.keywords and
+                len(fn.value.args) == 1 and isinstance(fn.value.args[0], ast.Constant) and
+                isinstance(fn.value.args[0].value, str) and
+                isinstance(fn.value.func, ast.Attribute) and fn.value.func.attr == "import_module" and
+                isinstance(fn.value.func.value, ast.Name) and
+                libraries.get(fn.value.func.value.id) == "importlib"):
+                imported(fn.value.args[0].value)
+                return
+            raise ValueError(f"unproven main call: {path}")
+
+        def imported(name):
+            if not name.isidentifier():
+                raise ValueError(f"unproven module: {name}")
+            target = next((d / (name + ".py") for d in search if (d / (name + ".py")).is_file()), None)
+            if target is None or target.is_symlink():
+                raise ValueError(f"unresolved module: {name}")
+            visit(target)
+
+        for node in ast.parse(path.read_text()).body:
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                continue
+            if isinstance(node, ast.Import) and all(a.name in ("sys", "importlib") for a in node.names):
+                if any(a.name == "importlib" for a in node.names) and any(
+                        (d / "importlib.py").exists() or (d / "importlib" / "__init__.py").exists() for d in search):
+                    raise ValueError(f"shadowed loader: {path}")
+                libraries.update({a.asname or a.name: a.name for a in node.names})
+            elif (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call) and
+                  isinstance(node.value.func, ast.Attribute) and
+                  ast.unparse(node.value.func) == "sys.path.insert" and libraries.get("sys") == "sys" and
+                  not node.value.keywords and len(node.value.args) == 2 and
+                  isinstance(node.value.args[0], ast.Constant) and node.value.args[0].value == 0 and
+                  isinstance(node.value.args[1], ast.Constant) and isinstance(node.value.args[1].value, str) and
+                  Path(node.value.args[1].value).is_absolute()):
+                search.insert(0, Path(node.value.args[1].value).resolve())
+            elif (isinstance(node, ast.ImportFrom) and node.level == 0 and node.module and
+                  len(node.names) == 1 and node.names[0].name == "main"):
+                imported(node.module)
+                symbols.add(node.names[0].asname or "main")
+            elif (isinstance(node, ast.FunctionDef) and node.name == "main" and
+                  not node.decorator_list and not node.args.args and not node.args.posonlyargs and
+                  not node.args.kwonlyargs and not node.args.vararg and not node.args.kwarg and
+                  node.returns is None and len(node.body) == 1 and isinstance(node.body[0], ast.Return)):
+                call(node.body[0].value)
+                symbols.add("main")
+            elif (entrypoint and isinstance(node, ast.Raise) and node.cause is None and
+                  isinstance(node.exc, ast.Call) and isinstance(node.exc.func, ast.Name) and
+                  node.exc.func.id == "SystemExit" and len(node.exc.args) == 1 and not node.exc.keywords):
+                call(node.exc.args[0])
+                invoked = True
+            else:
+                raise ValueError(f"opaque dispatcher: {path}:{node.lineno}")
+        if not (invoked if entrypoint else "main" in symbols):
+            raise ValueError(f"missing dispatcher call: {path}")
+
+    visit(entry, entrypoint=True)
     return seen
 
 

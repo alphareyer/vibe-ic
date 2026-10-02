@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 import hashlib
 import hmac
 import inspect
+import ast
 import json
 import math
 import os
@@ -127,7 +128,7 @@ def _hash(value: object) -> str:
                                     separators=(',', ':')).encode()).hexdigest()
 
 
-def _provider_identity(adapter: 'Adapter') -> tuple:
+def _provider_identity(adapter: 'Adapter', *, prove_dispatch: bool = True) -> tuple:
     """Executed component roots and their source-owned import closure.
 
     Caller labels and unrelated source-map members cannot establish a distinct
@@ -136,7 +137,7 @@ def _provider_identity(adapter: 'Adapter') -> tuple:
     Transparent wrappers inherit a reachable source-owned dispatcher family.
     Native-engine independence still needs native qualification evidence.
     """
-    from execution_provider_catalog import source_closure, RELEASE_IDS, BACKEND_IDS
+    from execution_provider_catalog import source_closure, dispatcher_closure, RELEASE_IDS, BACKEND_IDS
     roots, executed = [], []
     family = ('execution_release_worker.py' if adapter.step_id in RELEASE_IDS else
               'execution_backend_worker.py' if adapter.step_id in BACKEND_IDS else None)
@@ -144,11 +145,34 @@ def _provider_identity(adapter: 'Adapter') -> tuple:
     for component in adapter.components:
         executable = Path(shutil.which(component.argv[0]) or component.argv[0]).resolve()
         files = [executable]
-        for token in component.argv[1:]:
+        for token in component.argv[1:2]:
             path = Path(token)
             if path.is_absolute() and path.is_file():
                 files.append(path.resolve())
         component_closure = source_closure(files)
+        alias = False
+        if worker is not None and len(files) == 2 and files[1].suffix == '.py':
+            tree = ast.parse(files[1].read_text())
+            alias = digest(files[1]) == digest(worker) or any(
+                isinstance(n, ast.ImportFrom) and any(a.name == 'main' for a in n.names) or
+                isinstance(n, ast.Call) and (getattr(n.func, 'attr', None) in ('import_module', 'run_module', 'run_path') or
+                                            getattr(n.func, 'id', None) in ('__import__', 'exec', 'eval'))
+                for n in ast.walk(tree))
+        if worker is not None and (worker in component_closure or alias):
+            # Bind the actual dispatcher, not a worker merely reachable by an
+            # unused import. Opaque/dynamic resolution is not eligibility.
+            if len(files) != 2 or files[1].suffix != '.py':
+                raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', component.name)
+            if prove_dispatch:
+                try:
+                    component_closure |= dispatcher_closure(files[1], worker)
+                except (OSError, SyntaxError, ValueError) as exc:
+                    raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', str(exc)) from exc
+            elif str(worker) in adapter.source_files:
+                # Planning conservatively collapses possible aliases. Actual
+                # eligibility requires the dispatch proof before any launch,
+                # preserving terminal receipts for refused standalone arms.
+                component_closure.add(worker)
         executed.extend(component_closure)
         # A reachable source-owned dispatcher establishes the producer family.
         # Extra orchestration bytes cannot establish another implementation of
@@ -496,7 +520,7 @@ class Controller:
             distinct = []
             for arm in ready:
                 if any(set(arm.engine_families) & set(a.engine_families) or
-                       _provider_identity(arm) == _provider_identity(a)
+                       _provider_identity(arm, prove_dispatch=False) == _provider_identity(a, prove_dispatch=False)
                        for a in distinct):
                     for row in rows:
                         if row['arm_id'] == arm.arm_id:
@@ -508,7 +532,7 @@ class Controller:
                     arms=[a.arm_id for a in ready], portfolio=rows,
                     status='PLANNED', reason=reason,
                     independence={a.arm_id: {
-                        'sha256': _hash(_provider_identity(a)),
+                        'sha256': _hash(_provider_identity(a, prove_dispatch=False)),
                         'declared_families': list(a.engine_families),
                         'scope': 'SOURCE_COMPONENT_CLOSURE',
                         'native_independence': 'NOT_MEASURED'} for a in ready})
@@ -825,6 +849,10 @@ class Controller:
             path = Path(name)
             if not path.is_file() or path.is_symlink() or digest(path) != expected:
                 raise Refusal('ADAPTER_SOURCE_MISMATCH', name)
+        # Re-resolve the closure at execution and adoption, including newly
+        # introduced helpers. Registration and cached import paths are not
+        # authority for today's executed source bytes.
+        _provider_identity(arm)
 
     @staticmethod
     def _eligible(receipt: dict, context: Context, arm: Adapter) -> None:
