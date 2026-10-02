@@ -343,7 +343,9 @@ def run_step8_controller(controller, context, output, choice, *, core_source_sha
         ic_ip_path=context.ic_ip_path, route_receipt=dict(context.route_receipt))
     if any(getattr(context, key) != value for key, value in fields.items()):
         raise em.Refusal('CORE_CONTEXT_UNBOUND', context.step_id)
-    controller.run(context, output)
+    result = controller.run(context, output)
+    if any(v == 'FAIL' for v in result.get('candidate_statuses', {}).values()):
+        raise em.Refusal('GATE_FAIL', 'measured Step8 failure blocks adoption')
     controller.adopt(context, output, choice)
     return controller.verify_adoption(context, output)
 

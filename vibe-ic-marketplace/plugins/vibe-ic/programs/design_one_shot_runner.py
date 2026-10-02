@@ -19243,7 +19243,8 @@ def step_sdc_validation(project: Path, *, controller=None, context=None,
         return StepResult('sdc_validation', 'PASS', time.time() - t0,
                           result['status'], [str(output)])
     except execution_modes.Refusal as exc:
-        return StepResult('sdc_validation', 'NOT_MEASURED', time.time() - t0,
+        return StepResult('sdc_validation',
+                          'FAIL' if exc.code == 'GATE_FAIL' else 'NOT_MEASURED', time.time() - t0,
                           str(exc), reason_class=_V.ReasonClass.UPSTREAM_FAILED)
 
 

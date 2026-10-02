@@ -146,3 +146,28 @@ def test_current_measured_default_override_remains_adoptable(tmp_path):
     selected_run = tmp_path / 'default-override'
     assert c.run(ctx, selected_run, superiority=superiority)['candidate_statuses'] == {'b': 'ELIGIBLE'}
     assert c.adopt(ctx, selected_run, H.choice(ctx, selected_run, 'b'))['selected'] == 'b'
+
+
+def test_direct_issue_call_cannot_manufacture_controller_observation(tmp_path):
+    with pytest.raises(M.Refusal, match='ISSUED_AUTHORITY_INVALID'):
+        M._issue_authority(tmp_path/'issued-plan.json', {'run_id':'caller'})
+    assert not (tmp_path/'issued-plan.json').exists()
+
+
+def test_caller_rehashed_source_cannot_replace_tracked_git_blob(tmp_path):
+    import subprocess
+    repo=tmp_path/'source'; repo.mkdir()
+    subprocess.run(['git','init','-q',str(repo)],check=True)
+    helper=repo/'helper.py'; helper.write_text('value = 1\n')
+    subprocess.run(['git','-C',str(repo),'add','helper.py'],check=True)
+    subprocess.run(['git','-C',str(repo),'-c','user.name=Neutral fixture',
+                    '-c','user.email=fixture@example.invalid','commit','-qm','source'],check=True)
+    sha=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+    tree=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD^{tree}'],text=True).strip()
+    subprocess.run(['git','-C',str(repo),'update-index','--assume-unchanged','helper.py'],check=True)
+    helper.write_text('value = 99\n')
+    arm=replace(H.adapter(),source_sha=sha,source_tree_sha=tree,
+                source_files={str(helper):M.digest(helper)})
+    assert subprocess.check_output(['git','-C',str(repo),'status','--porcelain'],text=True)==''
+    with pytest.raises(M.Refusal,match='ADAPTER_SOURCE_MISMATCH'):
+        M.Controller._source_current(arm)
