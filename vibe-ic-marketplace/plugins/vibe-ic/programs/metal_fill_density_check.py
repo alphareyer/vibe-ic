@@ -759,6 +759,18 @@ def main(argv: list = None) -> int:
 
     findings, stats = audit(project_dir)
     tool_findings, tool_stats = tool_arm_findings(project_dir)
+    if tool_stats.get("per_layer_density_verified"):
+        # The direct row-utilization disclosure was made before the strict
+        # ordinary tool consumer ran. Replace only that now-stale INFO; every
+        # error, including a measured out-of-window layer, remains unchanged.
+        findings = [f for f in findings if not (
+            f.severity == "INFO" and f.category == "PER_LAYER_DENSITY_NOT_VERIFIED_HERE")]
+        judged = tool_stats["tool_per_layer_density"]
+        findings.append(Finding(
+            "INFO", "PER_LAYER_DENSITY_CONSUMED",
+            f"{judged['consumer']} judged {len(judged['per_layer'])} current metal layers: "
+            f"{judged['verdict']}; adopted GDS sha256={judged['subject_sha256']}",
+            details="per_layer_density_verified=true"))
     findings.extend(tool_findings)
     report = build_report(findings, stats, str(project_dir))
     report["summary"]["step34_mode"] = tool_stats.get("mode")

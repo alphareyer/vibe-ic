@@ -125,6 +125,7 @@ def subject(tmp_path):
                               'shipped_sha256': LC.digest(source)})
     BF.put(p / PROMOTION, record)
     LF.update_record(p, 'default_stream', record)
+    BF.put(p / 'reports/phase3/density.json', {'filler_instances': 7, 'row_utilization_pct': 100})
     assert LF.publish_metal_density(p, arm['ratios'], canonical, 'neutral') is not None
     return p, record, arm
 
@@ -263,10 +264,32 @@ def test_ordinary_primary_and_gate_invoke_existing_per_layer_consumer(tmp_path, 
     assert report['summary']['per_layer_density_verified'] is True
     assert report['summary']['layers_ok'] == 2
     assert report['summary']['filled_gds_density'] == 'PASS'
+    categories = [f['category'] for f in report['findings']]
+    assert 'PER_LAYER_DENSITY_NOT_VERIFIED_HERE' not in categories
+    assert 'PER_LAYER_DENSITY_CONSUMED' in categories
+    consumer = report['tool_per_layer_density']
+    assert 'PDK-stated minimum 0.33' in consumer['window_note']
+    assert 'measured absence of maximum' in consumer['window_note']
+    assert 'generic' not in consumer['window_note'] and '[None,None]' not in consumer['window_note']
+    assert all(row['window'] == [0.33, None] and 'PDK-measured-absence' in row['window_source']
+               for row in consumer['per_layer'].values())
     ref = DFM.audit(p)['density_ref']
     assert ref['step34_pass'] is True
     assert ref['per_layer_consumer']['subject_sha256'] == record['canonical_sha256']
     assert calls == [(str(p / LF.METAL_DENSITY_REL), 'PASS')] * 3
+
+
+def test_unverified_tool_path_retains_disclosure_and_refusal(tmp_path):
+    p, _, _ = subject(tmp_path)
+    (p / LF.METAL_DENSITY_REL).unlink()
+    output = p / 'step34-unverified.json'
+    assert MFD.main([str(p), '--json', str(output)]) == 1
+    report = json.loads(output.read_text())
+    assert report['summary']['pass'] is False
+    assert report['summary']['per_layer_density_verified'] is False
+    categories = [f['category'] for f in report['findings']]
+    assert 'PER_LAYER_DENSITY_NOT_VERIFIED_HERE' in categories
+    assert 'PER_LAYER_DENSITY_CONSUMED' not in categories
 
 
 @pytest.mark.parametrize('mutation', ['missing_report', 'empty_layers', 'missing_layer',
