@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import ast
 from pathlib import Path
-import re
 import sys
 from typing import Mapping
 
@@ -12,7 +11,9 @@ if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import execution_modes as em
-from execution_provider_catalog import RELEASE_IDS, RELEASE_SITES, coverage_rows
+from execution_provider_catalog import (RELEASE_IDS, RELEASE_SITES, coverage_rows,
+                                        current_source_identity, current_source_tree_identity,
+                                        source_closure)
 from execution_release_rows import ROWS
 
 HERE = Path(__file__).resolve().parent
@@ -34,6 +35,7 @@ RELEASE_PARAMETER_DEFAULTS = {
     "source_sha": None, "module_role": None, "container": "",
     "cell_lef": "", "metal_prefix": "met", "full_lef": False,
     "pinonly": False,
+    "source_tree_sha": None,
 }
 
 
@@ -64,7 +66,12 @@ def _source_files(spec: Mapping[str, object]) -> dict[str, str]:
         candidate = HERE / (str(gate) + ".py")
         if candidate.is_file():
             paths.add(candidate)
-    paths = {p.resolve() for p in paths if p.is_file() and not p.is_symlink()}
+    paths.update({HERE / "data/execution_modes_portfolio.json",
+                  HERE.parent / "flow/phase1_phase2_phase3.yaml",
+                  HERE.parent / "benchmark/CAPTURE_ROUTING.json"})
+    paths.update(HERE.glob("_atomic*.py"))
+    paths = source_closure({p.resolve() for p in paths
+                            if p.is_file() and not p.is_symlink()})
     paths.add(Path(sys.executable).resolve())
     return {str(p): em.digest(p) for p in sorted(paths)}
 
@@ -83,12 +90,27 @@ def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
                      report.get("qualification") == "FAIL" or any(
                          row.get("verdict") == "FAIL"
                          for row in report.get("gate_records", ())
-                         if isinstance(row, dict)))
+                         if isinstance(row, dict) and row.get("blocking", True)))
     if report.get("binding") != dict(binding):
         return em.Evidence(binding, "FAIL" if measured_fail else "NOT_MEASURED", {}, {},
                            detail="RELEASE_RESULT_UNBOUND")
-    gates = {str(row.get("gate")): str(row.get("verdict")) for row in report.get("gate_records", ())
-             if isinstance(row, dict) and row.get("gate")}
+    if report.get("step_id") == "39" and report.get("excluded_from_verdict") is not True:
+        return em.Evidence(binding, "NOT_MEASURED", {}, {},
+                           detail="STEP39_EXCLUSION_DECLARATION_MISSING")
+    gates: dict[str, str] = {}
+    for row in report.get("gate_records", ()):
+        if not isinstance(row, dict) or not row.get("gate") or not row.get("blocking", True):
+            continue
+        name, verdict = str(row["gate"]), str(row.get("verdict", "NOT_MEASURED"))
+        previous = gates.get(name)
+        # Duplicate canonical invocations aggregate fail-closed instead of
+        # letting the last invocation hide an earlier failure.
+        if previous == "FAIL" or verdict == "FAIL":
+            gates[name] = "FAIL"
+        elif previous == "NOT_MEASURED" or verdict == "NOT_MEASURED":
+            gates[name] = "NOT_MEASURED"
+        else:
+            gates[name] = "PASS"
     outputs_hashes = {"release-evidence.json": em.digest(path)}
     for name, expected in (report.get("outputs") or {}).items():
         file = Path(outputs) / name
@@ -119,15 +141,24 @@ def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
 
 
 def validate_hardmacro_receipt(receipt: Mapping[str, object], *, route: str = "native") -> str:
-    """Preserve native Magic/OpenSTA receipt and refuse direct-Magic fallback."""
+    """Require the generator's typed Magic/OpenSTA facts; never relabel rc0."""
     if receipt.get("status") == "FAIL":
         return "FAIL"
     if route == "direct_magic":
         raise em.Refusal("RELEASE_DIRECT_MAGIC_FALLBACK_REFUSED",
                          "direct Magic is not an independent hardmacro provider")
     processes = receipt.get("processes") or []
-    binaries = {Path(str(row.get("binary", ""))).name for row in processes if isinstance(row, dict)}
-    if receipt.get("status") != "PASS" or not {"magic", "sta"}.issubset(binaries):
+    binaries = {Path(str(row.get("binary", row.get("tool", "")))).name
+                for row in processes if isinstance(row, dict)}
+    typed = all(isinstance(row, dict) and row.get("rc") == 0 and
+                isinstance(row.get("version"), str) and row.get("version") and
+                isinstance(row.get("argv"), (list, tuple)) and row.get("argv") and
+                isinstance(row.get("output_sha256"), str) and
+                len(row.get("output_sha256")) == 64
+                for row in processes)
+    has_sta = "sta" in binaries or "opensta" in binaries
+    if (receipt.get("status") != "PRODUCED" or
+            "magic" not in binaries or not has_sta or not typed):
         raise em.Refusal("RELEASE_NATIVE_ENGINE_RECEIPT_UNMEASURED", repr(dict(receipt)))
     return "PASS"
 
@@ -137,6 +168,7 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
              declaration: Mapping[str, object] | None,
              parameters: Mapping[str, object] | None = None,
              native_qualified: bool = False) -> em.Adapter:
+    source_sha = current_source_identity()
     from execution_provider_catalog import _applicability
     step_id = str(spec["step_id"])
     app = _applicability(step_id, release=True,
@@ -147,7 +179,6 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
     source_files = _source_files(spec)
     contract = {name: ("release-evidence.json",) for name in spec["canonical_outputs"]}
     params = dict(RELEASE_PARAMETER_DEFAULTS)
-    params["source_sha"] = source_sha
     if parameters:
         for key, value in parameters.items():
             if key not in params:
@@ -155,6 +186,10 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
             if isinstance(value, Path):
                 value = str(value)
             params[key] = value
+    # source identity is controller-derived and cannot be overridden through
+    # the release argv parameter map.
+    params["source_sha"] = source_sha
+    params["source_tree_sha"] = current_source_tree_identity()
     params.update({"route": path, "row": step_id, "runtime_status": "NOT_MEASURED",
                    "external_handoff": step_id in EXTERNAL_IDS,
                    "input_contract": ROWS[step_id].get("canonical", {}).get("required_inputs")})
@@ -193,8 +228,7 @@ def register_release_adapters(registry: em.Registry | None = None, *, source_sha
                               route_receipt: Mapping[str, object] | None = None,
                               declaration: Mapping[str, object] | None = None,
                               parameters: Mapping[str, object] | None = None) -> em.Registry:
-    if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
-        raise em.Refusal("INVALID_SOURCE_SHA", source_sha)
+    source_sha = current_source_identity()
     registry = registry or em.Registry()
     objective = objective or {"metric": "canonical_evidence", "direction": "max"}
     rows = {row["step_id"]: row for row in coverage_rows()}

@@ -22,11 +22,12 @@ from execution_adapters_release import (
     validate,
     validate_hardmacro_receipt,
 )
-from execution_provider_catalog import RELEASE_IDS, coverage_rows
-from execution_release_worker import execute as execute_release
+from execution_provider_catalog import RELEASE_IDS, coverage_rows, current_source_identity
+import execution_release_worker as release_worker
+from execution_release_worker import _call, _canonical_gate_invocations, execute as execute_release
 from execution_release_rows import ROWS
 
-BASE = "59cd75606885b71ca7d11bbe34baf2541671be68"
+BASE = current_source_identity()
 
 
 def _spec(step):
@@ -231,3 +232,94 @@ def test_release_external_rows_are_visible_classifications_without_runtime_succe
         assert adapter.role == "complementary"
         assert adapter.available is False
         assert adapter.availability_reason == "EXTERNAL_HANDOFF_ONLY"
+
+
+def test_canonical_release_gate_argv_preserves_duplicate_and_mode_arguments(tmp_path):
+    invocations = _canonical_gate_invocations("14", tmp_path)
+    commands = [item["command"] for item in invocations]
+    assert commands[:2] == [
+        "flow_step_output_content_check . --mode netlist",
+        "flow_step_output_content_check . --mode stage_analog",
+    ]
+    assert commands.count("flow_step_output_content_check . --mode netlist") == 1
+    assert "flow_compliance_check . --stage-id stage_analog --strict --json reports/analog/stage_analog_compliance.json" in commands
+    assert "tapeout_signoff_check . --mode tapeout --json reports/audit/tapeout_signoff.json" in [
+        item["command"] for item in _canonical_gate_invocations("36", tmp_path)]
+    assert "digital_hardmacro_check . --json reports/phase3/digital_hardmacro.json" in [
+        item["command"] for item in _canonical_gate_invocations("37.5ip", tmp_path)]
+    assert "release_docs_check . --arm ip --json reports/phase3/release_docs.json" in [
+        item["command"] for item in _canonical_gate_invocations("37.5ip", tmp_path)]
+    assert "release_docs_check . --arm ic --json reports/phase3/release_docs_ic.json" in [
+        item["command"] for item in _canonical_gate_invocations("37.5ic", tmp_path)]
+    assert _canonical_gate_invocations("37.4", tmp_path)[0]["command"] == \
+        "signoff_metrics_aggregate . --check"
+
+
+def test_metrics_gate_fail_is_not_rewritten_as_json_pass(tmp_path, monkeypatch):
+    inputs, outputs = tmp_path / "inputs", tmp_path / "outputs"
+    inputs.mkdir()
+    calls = []
+    monkeypatch.setattr(release_worker, "produce", lambda step, project, params: [])
+
+    def failing_call(module, args):
+        calls.append((module, list(args)))
+        return {"program": module, "rc": 1}
+
+    monkeypatch.setattr(release_worker, "_call", failing_call)
+    result = execute_release(inputs, outputs, step_id="37.4", params={"input_contract": []})
+    metrics = [args for module, args in calls if module == "signoff_metrics_aggregate"]
+    assert metrics == [[str(outputs / "project"), "--check"]]
+    assert result["qualification"] == "FAIL"
+    assert result["gate_records"][0]["verdict"] == "FAIL"
+
+
+def test_gate_runner_supports_main_without_argv(tmp_path, monkeypatch):
+    module_name = "r2_no_argv_gate"
+    (tmp_path / (module_name + ".py")).write_text(
+        "import sys\n"
+        "def main():\n"
+        "    open(sys.argv[1], 'w').write('called')\n"
+        "    return 0\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    marker = tmp_path / "called.txt"
+    assert _call(module_name, [marker])["rc"] == 0
+    assert marker.read_text() == "called"
+
+
+def test_hardmacro_produced_requires_typed_magic_and_sta_receipts():
+    typed = {"status": "PRODUCED", "processes": [
+        {"binary": "/opt/magic", "rc": 0, "version": "magic-8.3",
+         "argv": ["magic", "-noconsole"], "output_sha256": "a" * 64},
+        {"binary": "/opt/opensta", "rc": 0, "version": "opensta-2.7",
+         "argv": ["opensta", "-exit"], "output_sha256": "b" * 64},
+    ]}
+    assert validate_hardmacro_receipt(typed) == "PASS"
+    broken = dict(typed, processes=[dict(typed["processes"][0]),
+                                    dict(typed["processes"][1], output_sha256="short")])
+    with pytest.raises(em.Refusal, match="RELEASE_NATIVE_ENGINE_RECEIPT_UNMEASURED"):
+        validate_hardmacro_receipt(broken)
+
+
+def test_hardmacro_produced_without_native_receipts_stays_unmeasured(tmp_path):
+    binding = {"step_id": "37.5ip"}
+    (tmp_path / "release-evidence.json").write_text(json.dumps({
+        "binding": binding, "step_id": "37.5ip", "qualification": "PASS",
+        "producer_verdict": "PASS", "gate_records": [], "outputs": {},
+        "native_receipts": [],
+    }))
+    assert validate(tmp_path, binding).verdict == "NOT_MEASURED"
+
+
+def test_release_catalog_binds_current_ip_producer_not_context_helper():
+    from execution_provider_catalog import RELEASE_SITES
+    assert "phase3_one_shot_runner.py:step_ip_release_docs_gen" in RELEASE_SITES["37.5ip"]
+    assert not any("_write_ip_release_docs_context" in site for site in RELEASE_SITES["37.5ip"])
+
+
+def test_step39_has_structured_exclusion_and_not_measured_status(tmp_path):
+    inputs, outputs = tmp_path / "inputs", tmp_path / "outputs"
+    inputs.mkdir()
+    result = execute_release(inputs, outputs, step_id="39", params={"input_contract": []})
+    assert result["qualification"] == "NOT_MEASURED"
+    assert result["excluded_from_verdict"] is True
+    assert result["producer"][0]["verdict"] == "NOT_MEASURED"
