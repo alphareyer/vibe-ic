@@ -21,7 +21,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 import execution_modes as em
 from execution_provider_catalog import (BACKEND_IDS, BACKEND_ROWS, coverage_rows,
                                         current_source_identity, current_source_tree_identity,
-                                        source_closure)
+                                        source_closure, implementation_closure)
 
 HERE = Path(__file__).resolve().parent
 POLICY = HERE / "data/execution_backend_policy.json"
@@ -98,6 +98,7 @@ def _source_files(spec: Mapping[str, object]) -> dict[str, str]:
     paths.update(HERE.glob("_atomic*.py"))
     paths = source_closure({p.resolve() for p in paths
                             if p.is_file() and not p.is_symlink()})
+    paths.update(implementation_closure(HERE / 'execution_backend_worker.py'))
     paths.add(Path(sys.executable).resolve())
     return {str(p): em.digest(p) for p in sorted(paths)}
 

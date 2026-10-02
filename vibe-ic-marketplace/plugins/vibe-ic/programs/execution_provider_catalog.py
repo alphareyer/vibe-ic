@@ -198,6 +198,281 @@ def dispatcher_closure(entry: Path, dispatcher: Path) -> set[Path]:
     return seen
 
 
+def python_entrypoint(argv: tuple[str, ...], cwd: Path | None) -> Path:
+    """Resolve supported Python script invocations without executing them.
+
+    Options that alter import resolution, inline code and module launch are
+    deliberately unsupported. Refusal precedes launch and identity deduplication.
+    """
+    index = 1
+    while index < len(argv) and argv[index].startswith('-'):
+        option = argv[index]
+        index += 1
+        if option == '--':
+            break
+        if option not in {'-B', '-u', '-q', '-O', '-OO'}:
+            raise ValueError(f'unsupported Python invocation: {option}')
+    if index >= len(argv):
+        raise ValueError('missing Python entrypoint')
+    path = Path(argv[index])
+    if not path.is_absolute():
+        if cwd is None:
+            raise ValueError('Python entrypoint needs execution cwd')
+        path = cwd / path
+    path = path.resolve()
+    if not path.is_file():
+        raise ValueError(f'missing Python entrypoint: {path}')
+    return path
+
+
+def _python_search(entry: Path, cwd: Path | None) -> list[Path]:
+    """Model the local part of the child interpreter's actual search path."""
+    import os
+    search = [entry.parent]
+    for text in os.environ.get('PYTHONPATH', '').split(os.pathsep) if 'PYTHONPATH' in os.environ else ():
+        path = Path(text) if text else Path('.')
+        if not path.is_absolute():
+            if cwd is None:
+                raise ValueError('relative PYTHONPATH needs execution cwd')
+            path = cwd / path
+        search.append(path.resolve())
+    return search
+
+
+def _python_module(name: str, search: list[Path], package: str = '',
+                   level: int = 0) -> list[tuple[Path, str]]:
+    """Resolve complete dotted names with Python package-before-module rules.
+
+    No helper is imported while proving its identity. Namespace packages,
+    local extension modules and unresolved local dotted names fail closed.
+    External modules belong to the separately pinned interpreter/image.
+    """
+    if level:
+        parts = package.split('.') if package else []
+        if level > len(parts):
+            raise ValueError(f'unresolved relative import: {name}')
+        name = '.'.join(parts[:len(parts) - level + 1] + ([name] if name else []))
+    if not name or any(not part.isidentifier() for part in name.split('.')):
+        raise ValueError(f'unresolved Python module: {name}')
+    from importlib.machinery import BuiltinImporter, FrozenImporter, PathFinder
+    import sysconfig
+    top = name.split('.')[0]
+    if BuiltinImporter.find_spec(top) is not None or FrozenImporter.find_spec(top) is not None:
+        return []
+    trusted = {Path(sysconfig.get_path(key)).resolve() for key in ('stdlib', 'platstdlib', 'purelib', 'platlib')}
+    directories = search
+    result = []; prefix = []
+    parts = name.split('.')
+    for index, part in enumerate(parts):
+        prefix.append(part)
+        spec = PathFinder.find_spec(part, [str(d) for d in directories])
+        if spec is None:
+            if result:
+                raise ValueError(f'incomplete local Python module: {name}')
+            return []
+        if spec.origin is None:
+            raise ValueError(f'unsupported namespace Python package: {name}')
+        target = Path(spec.origin)
+        if not result and any(target.resolve().is_relative_to(root) for root in trusted):
+            return []
+        if target.is_symlink() or target.suffix != '.py':
+            raise ValueError(f'unsupported local Python module: {name}')
+        is_package = spec.submodule_search_locations is not None
+        owner = '.'.join(prefix) if is_package else '.'.join(prefix[:-1])
+        result.append((target.resolve(), owner))
+        if not is_package and index < len(parts) - 1:
+            raise ValueError(f'non-package dotted Python module: {name}')
+        directories = [Path(d) for d in spec.submodule_search_locations or []]
+    return result
+
+
+@lru_cache(maxsize=2048)
+def _python_import_specs(text: str) -> tuple:
+    """Cache syntax, never filesystem resolution or dependency bytes."""
+    tree = ast.parse(text)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    found = []
+    for node in ast.walk(tree):
+        optional_relative = False
+        if isinstance(node, ast.Import):
+            found.extend((a.name, 0, (), False) for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            parent = parents.get(node)
+            while parent is not None:
+                if isinstance(parent, ast.Try) and any(
+                        h.type is None or any(isinstance(n, ast.Name) and n.id in
+                            {'ImportError', 'ModuleNotFoundError', 'Exception', 'BaseException'}
+                            for n in ast.walk(h.type)) for h in parent.handlers):
+                    optional_relative = True
+                parent = parents.get(parent)
+            found.append((node.module or '', node.level,
+                          tuple(a.name for a in node.names), optional_relative))
+        elif (isinstance(node, ast.Call) and node.args and
+              (getattr(node.func, 'attr', None) == 'import_module' or
+               getattr(node.func, 'id', None) == '__import__') and
+              isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+            found.append((node.args[0].value, 0, (), False))
+    return tuple(found)
+
+
+def implementation_closure(entry: Path, *, cwd: Path | None = None,
+                           search: list[Path] | None = None) -> set[Path]:
+    """Bind actual local dotted/relative imports using active search paths.
+
+    This is separate from the legacy declaration scanner ``source_closure``;
+    a declaration is not a proof of what the interpreter will execute.
+    """
+    import importlib
+    importlib.invalidate_caches()
+    entry = entry.resolve()
+    search = list(search) if search is not None else _python_search(entry, cwd)
+    pending = [(entry, '')]
+    seen = set()
+    while pending:
+        path, package = pending.pop()
+        if path in seen:
+            continue
+        if not path.is_file():
+            raise ValueError(f'missing Python source: {path}')
+        seen.add(path)
+        for name, level, names, optional_relative in _python_import_specs(path.read_text()):
+            # An unqualified module's relative import raises before executing
+            # any helper. Its explicit ImportError fallback is scanned too.
+            if level and not package and optional_relative:
+                continue
+            try:
+                resolved = _python_module(name, search, package, level)
+            except ValueError as exc:
+                raise ValueError(f'{path}: {exc}') from exc
+            pending.extend(resolved)
+            if names and resolved:
+                base, base_package = resolved[-1]
+                if base.name == '__init__.py':
+                    for alias in names:
+                        if alias != '*':
+                            child = base.parent / (alias + '.py')
+                            child_init = base.parent / alias / '__init__.py'
+                            if child.is_file() or child_init.is_file():
+                                pending.extend(_python_module(base_package + '.' + alias, search))
+    return seen
+
+
+def proven_dispatcher_closure(entry: Path, dispatcher: Path, *,
+                              cwd: Path | None = None) -> set[Path]:
+    """Prove transparent execution through actual packages and active paths.
+
+    Path mutations persist across nested imports, as in the interpreter.
+    Package initializers are executed and checked, including every intermediate
+    package in a dotted import. Opaque initializers cannot qualify a wrapper.
+    """
+    entry, dispatcher = entry.resolve(), dispatcher.resolve()
+    search = _python_search(entry, cwd)
+    seen = set()
+    active = set()
+    exported = {}
+
+    def imported(name, package, level=0):
+        resolved = _python_module(name, search, package, level)
+        if not resolved:
+            raise ValueError(f'unresolved dispatcher module: {name}')
+        for path, owner in resolved[:-1]:
+            visit(path, owner, initializer=True)
+        path, owner = resolved[-1]
+        return visit(path, owner)
+
+    def visit(path, package='', *, entrypoint=False, initializer=False):
+        if path == dispatcher:
+            actual = implementation_closure(path, cwd=cwd, search=search)
+            canonical_search = _python_search(path, cwd)
+            if list(dict.fromkeys(search)) != list(dict.fromkeys(canonical_search)):
+                canonical = implementation_closure(path, cwd=cwd, search=canonical_search)
+                if actual != canonical:
+                    raise ValueError(f'dispatcher dependency resolution differs: {path}')
+            seen.update(actual)
+            return True
+        if path in active:
+            if initializer:
+                return False
+            raise ValueError(f'cyclic dispatcher import: {path}')
+        if path in seen:
+            return exported.get(path, False)
+        active.add(path); seen.add(path)
+        symbols = set(); libraries = {}; invoked = False
+
+        def call(node):
+            if not isinstance(node, ast.Call) or node.args or node.keywords:
+                raise ValueError(f'unproven main call: {path}')
+            if isinstance(node.func, ast.Name) and node.func.id in symbols:
+                return
+            fn = node.func
+            if (isinstance(fn, ast.Attribute) and fn.attr == 'main' and
+                isinstance(fn.value, ast.Call) and not fn.value.keywords and
+                len(fn.value.args) == 1 and isinstance(fn.value.args[0], ast.Constant) and
+                isinstance(fn.value.args[0].value, str) and
+                isinstance(fn.value.func, ast.Attribute) and fn.value.func.attr == 'import_module' and
+                isinstance(fn.value.func.value, ast.Name) and
+                libraries.get(fn.value.func.value.id) == 'importlib'):
+                if imported(fn.value.args[0].value, package):
+                    return
+            raise ValueError(f'unproven main call: {path}')
+
+        for node in ast.parse(path.read_text()).body:
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                continue
+            if isinstance(node, ast.Import) and all(a.name in ('sys', 'importlib') for a in node.names):
+                if any(a.name == 'importlib' for a in node.names) and _python_module('importlib', search):
+                    raise ValueError(f'shadowed loader: {path}')
+                libraries.update({a.asname or a.name: a.name for a in node.names})
+            elif (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call) and
+                  isinstance(node.value.func, ast.Attribute) and
+                  ast.unparse(node.value.func) == 'sys.path.insert' and libraries.get('sys') == 'sys' and
+                  not node.value.keywords and len(node.value.args) == 2 and
+                  isinstance(node.value.args[0], ast.Constant) and node.value.args[0].value == 0 and
+                  isinstance(node.value.args[1], ast.Constant) and isinstance(node.value.args[1].value, str)):
+                directory = Path(node.value.args[1].value)
+                if not directory.is_absolute():
+                    if cwd is None:
+                        raise ValueError('dispatcher search path needs execution cwd')
+                    directory = cwd / directory
+                search.insert(0, directory.resolve())
+            elif (isinstance(node, ast.ImportFrom) and node.module and
+                  len(node.names) == 1 and node.names[0].name == 'main'):
+                if not imported(node.module, package, node.level):
+                    raise ValueError(f'missing imported main: {path}')
+                symbols.add(node.names[0].asname or 'main')
+            elif (isinstance(node, ast.FunctionDef) and node.name == 'main' and
+                  not node.decorator_list and not node.args.args and not node.args.posonlyargs and
+                  not node.args.kwonlyargs and not node.args.vararg and not node.args.kwarg and
+                  node.returns is None and len(node.body) == 1 and isinstance(node.body[0], ast.Return)):
+                call(node.body[0].value); symbols.add('main')
+            elif (entrypoint and isinstance(node, ast.Raise) and node.cause is None and
+                  isinstance(node.exc, ast.Call) and isinstance(node.exc.func, ast.Name) and
+                  node.exc.func.id == 'SystemExit' and len(node.exc.args) == 1 and not node.exc.keywords):
+                call(node.exc.args[0]); invoked = True
+            else:
+                raise ValueError(f'opaque dispatcher: {path}:{node.lineno}')
+        active.remove(path)
+        if not (invoked if entrypoint else initializer or 'main' in symbols):
+            raise ValueError(f'missing dispatcher call: {path}')
+        exported[path] = 'main' in symbols
+        return exported[path]
+
+    if entry != dispatcher and entry.read_bytes() == dispatcher.read_bytes():
+        # A copied worker is transparent only when its actual import resolution
+        # matches the canonical worker, rather than merely matching entry bytes.
+        actual_search = [entry.parent, *search]
+        canonical_search = [dispatcher.parent, *search]
+        actual = implementation_closure(entry, cwd=cwd, search=actual_search) - {entry}
+        canonical = implementation_closure(dispatcher, cwd=cwd, search=canonical_search) - {dispatcher}
+        if actual != canonical:
+            raise ValueError(f'copied worker import resolution differs: {entry}')
+        return {entry, dispatcher, *actual}
+    visit(entry, entrypoint=True)
+    if dispatcher not in seen:
+        raise ValueError(f'actual dispatcher not reached: {entry}')
+    return seen
+
+
 BACKEND_IDS = (
     "15", "15.5ic", "17", "18", "19", "20", "21", "22", "23", "24",
     "25", "26", "26.5ic", "27", "28", "29", "30", "32", "33", "34",

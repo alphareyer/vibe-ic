@@ -128,69 +128,70 @@ def _hash(value: object) -> str:
                                     separators=(',', ':')).encode()).hexdigest()
 
 
-def _provider_identity(adapter: 'Adapter', *, prove_dispatch: bool = True) -> tuple:
-    """Executed component roots and their source-owned import closure.
+def _provider_identity(adapter: 'Adapter', *, cwd: Path | None = None,
+                       include_execution: bool = False) -> tuple:
+    """Identity of proven execution, with all executed local source bytes bound.
 
-    Caller labels and unrelated source-map members cannot establish a distinct
-    implementation. The source map must bind every member of this closure;
-    changing a supplied digest does not change the implementation we observed.
-    Transparent wrappers inherit a reachable source-owned dispatcher family.
-    Native-engine independence still needs native qualification evidence.
+    Replay argv remains unchanged. Interpreter flags cannot invent another
+    producer, and an opaque wrapper has no identity usable for deduplication.
+    The complete execution closure is resolved afresh before launch/adoption.
     """
-    from execution_provider_catalog import source_closure, dispatcher_closure, RELEASE_IDS, BACKEND_IDS
-    roots, executed = [], []
+    from execution_provider_catalog import (source_closure, implementation_closure,
+        proven_dispatcher_closure, python_entrypoint, _python_search, RELEASE_IDS, BACKEND_IDS)
+    roots, executed, search_paths = [], set(), []
     family = ('execution_release_worker.py' if adapter.step_id in RELEASE_IDS else
               'execution_backend_worker.py' if adapter.step_id in BACKEND_IDS else None)
     worker = Path(__file__).resolve().parent / family if family else None
     for component in adapter.components:
         executable = Path(shutil.which(component.argv[0]) or component.argv[0]).resolve()
         files = [executable]
-        for token in component.argv[1:2]:
-            path = Path(token)
-            if path.is_absolute() and path.is_file():
-                files.append(path.resolve())
-        component_closure = source_closure(files)
-        alias = False
-        if worker is not None and len(files) == 2 and files[1].suffix == '.py':
-            tree = ast.parse(files[1].read_text())
-            alias = digest(files[1]) == digest(worker) or any(
-                isinstance(n, ast.ImportFrom) and any(a.name == 'main' for a in n.names) or
-                isinstance(n, ast.Call) and (getattr(n.func, 'attr', None) in ('import_module', 'run_module', 'run_path') or
-                                            getattr(n.func, 'id', None) in ('__import__', 'exec', 'eval'))
-                for n in ast.walk(tree))
-        if worker is not None and (worker in component_closure or alias):
-            # Bind the actual dispatcher, not a worker merely reachable by an
-            # unused import. Opaque/dynamic resolution is not eligibility.
-            if len(files) != 2 or files[1].suffix != '.py':
-                raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', component.name)
-            if prove_dispatch:
-                try:
-                    component_closure |= dispatcher_closure(files[1], worker)
-                except (OSError, SyntaxError, ValueError) as exc:
-                    raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', str(exc)) from exc
-            elif str(worker) in adapter.source_files:
-                # Planning conservatively collapses possible aliases. Actual
-                # eligibility requires the dispatch proof before any launch,
-                # preserving terminal receipts for refused standalone arms.
-                component_closure.add(worker)
-        executed.extend(component_closure)
-        # A reachable source-owned dispatcher establishes the producer family.
-        # Extra orchestration bytes cannot establish another implementation of
-        # that same row; their complete closure is still independently bound.
-        if worker is not None and worker in component_closure:
-            files = [executable, worker]
+        interpreter = Path(_sys.executable).resolve()
+        python = executable.name.startswith('python') or digest(executable) == digest(interpreter)
+        if python and digest(executable) != digest(interpreter):
+            raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', 'unsupported Python interpreter layout')
+        try:
+            if python:
+                entry = python_entrypoint(component.argv, cwd)
+                search_paths.append([str(p) for p in _python_search(entry, cwd)])
+                files.append(entry)
+                # Preserve the existing declaration boundary; declaration-only
+                # failures remain terminal before any output arm is created.
+                for path in source_closure(files):
+                    if adapter.source_files.get(str(path)) != digest(path):
+                        raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', str(path))
+                tree = ast.parse(entry.read_text())
+                alias = worker is not None and (entry == worker or
+                    entry.read_bytes() == worker.read_bytes() or any(
+                        isinstance(n, ast.ImportFrom) and any(a.name == 'main' for a in n.names) or
+                        isinstance(n, ast.Call) and (getattr(n.func, 'attr', None) in
+                            ('import_module', 'run_module', 'run_path') or
+                            getattr(n.func, 'id', None) in ('__import__', 'exec', 'eval'))
+                        for n in ast.walk(tree)))
+                if alias:
+                    component_closure = proven_dispatcher_closure(entry, worker, cwd=cwd)
+                    files = [executable, worker]
+                else:
+                    component_closure = implementation_closure(entry, cwd=cwd)
+                component_closure.add(executable)
+            else:
+                for token in component.argv[1:2]:
+                    path = Path(token)
+                    if path.is_absolute() and path.is_file():
+                        files.append(path.resolve())
+                component_closure = source_closure(files)
+        except (OSError, SyntaxError, ValueError) as exc:
+            raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', str(exc)) from exc
+        executed.update(component_closure)
         roots.append(tuple(str(p) for p in files))
     closure = source_closure(Path(p) for files in roots for p in files)
-    for path in source_closure(executed) | closure:
+    for path in executed | closure:
         if adapter.source_files.get(str(path)) != digest(path):
             raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', str(path))
-    observed = []
-    for path in sorted(closure):
-        actual = digest(path)
-        if adapter.source_files.get(str(path)) != actual:
-            raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', str(path))
-        observed.append((str(path), actual))
-    return tuple(roots), tuple(observed)
+    identity = tuple(roots), tuple((str(path), digest(path)) for path in sorted(closure))
+    if include_execution:
+        return identity + ({'files': {str(path): digest(path) for path in sorted(executed | closure)},
+                            'search_paths': search_paths},)
+    return identity
 
 
 def _seal(value: dict) -> dict:
@@ -437,7 +438,7 @@ class Controller:
         return 'READY' if adapter.qualified else 'READY_SOURCE_BOUND'
 
     def plan(self, context: Context, execution_mode: str | None = None,
-             superiority: Superiority | None = None) -> dict:
+             superiority: Superiority | None = None, *, execution_root: Path | None = None) -> dict:
         selected_mode = mode(execution_mode)
         binding = context.binding()
         step = next((s for s in self.portfolio['steps'] if s['id'] == context.step_id), None)
@@ -475,9 +476,22 @@ class Controller:
         if any(not set(step['required_output_contract']).issubset(a.output_contract)
                for a in ready):
             raise Refusal('OUTPUT_CONTRACT_UNBOUND', context.step_id)
-        rank = lambda a: (0 if a.tool_id == 'librelane' else
-                          1 if a.tool_id in ('openroad', 'openroad_fork') else
-                          3 if a.tool_id == 'vibeic' else 2, a.arm_id)
+        def rank(arm):
+            from execution_provider_catalog import python_entrypoint, RELEASE_IDS, BACKEND_IDS, coverage_rows
+            family = ('execution_release_worker.py' if arm.step_id in RELEASE_IDS else
+                      'execution_backend_worker.py' if arm.step_id in BACKEND_IDS else None)
+            canonical = Path(__file__).resolve().parent / family if family else None
+            direct = False
+            if canonical is not None:
+                try:
+                    direct = all(python_entrypoint(c.argv, None) == canonical for c in arm.components)
+                except ValueError:
+                    pass
+            canonical_id = next((r['arm_id'] for r in coverage_rows() if r['step_id'] == arm.step_id), None)
+            return (0 if arm.tool_id == 'librelane' else
+                    1 if arm.tool_id in ('openroad', 'openroad_fork') else
+                    3 if arm.tool_id == 'vibeic' else 2,
+                    0 if direct and arm.arm_id == canonical_id else 1 if direct else 2, arm.arm_id)
         ready.sort(key=rank)
         reason = 'APPLICABLE_AVAILABLE_QUALIFIED_PRIORITY'
         if selected_mode == 'default-mode':
@@ -514,25 +528,56 @@ class Controller:
                 reason = 'CURRENT_INPUT_MEASURED_SUPERIORITY'
             else:
                 ready = ready[:1]
-        # Ultra executes useful distinct families. Same-family orchestration
-        # wrappers remain disclosed but do not claim an independent engine.
+        # Only successful transparent proofs can exclude another producer.
+        # Refused wrappers remain scoped arms so execution emits their receipts.
+        identities = {}
+        for arm in ready:
+            cwd = execution_root / arm.arm_id / 'outputs' if execution_root else None
+            try:
+                identities[arm.arm_id] = _provider_identity(arm, cwd=cwd)
+            except Refusal as exc:
+                # The existing declaration check remains a terminal boundary.
+                # New execution-proof failures stay visible and cannot dedup.
+                from execution_provider_catalog import source_closure
+                for component in arm.components:
+                    for token in component.argv[:2]:
+                        path = Path(shutil.which(token) or token)
+                        if path.is_absolute() and path.is_file():
+                            for dependency in source_closure([path]):
+                                if arm.source_files.get(str(dependency)) != digest(dependency):
+                                    raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', str(dependency))
+                identities[arm.arm_id] = None
+        cwd_exclusions = []
         if selected_mode == 'ultra-mode':
             distinct = []
             for arm in ready:
-                if any(set(arm.engine_families) & set(a.engine_families) or
-                       _provider_identity(arm, prove_dispatch=False) == _provider_identity(a, prove_dispatch=False)
-                       for a in distinct):
+                identity = identities[arm.arm_id]
+                if identity is not None and any(identities[a.arm_id] is not None and (
+                        set(arm.engine_families) & set(a.engine_families) or
+                        identity == identities[a.arm_id]) for a in distinct):
                     for row in rows:
                         if row['arm_id'] == arm.arm_id:
                             row['admission'] = 'SAME_ENGINE_FAMILY'
+                    # A cwd-dependent arm may have appeared in a caller's
+                    # preflight. Retain its runtime exclusion as a refusal
+                    # receipt, with no execution or adoption authority.
+                    from execution_provider_catalog import python_entrypoint
+                    for component in arm.components:
+                        try:
+                            python_entrypoint(component.argv, None)
+                        except ValueError as exc:
+                            if 'execution cwd' in str(exc):
+                                cwd_exclusions.append(arm.arm_id)
+                                break
                     continue
                 distinct.append(arm)
             ready = distinct
         return dict(mode=selected_mode, binding=binding,
                     arms=[a.arm_id for a in ready], portfolio=rows,
-                    status='PLANNED', reason=reason,
+                    status='PLANNED', reason=reason, cwd_exclusions=cwd_exclusions,
                     independence={a.arm_id: {
-                        'sha256': _hash(_provider_identity(a, prove_dispatch=False)),
+                        'sha256': _hash(identities[a.arm_id]) if identities[a.arm_id] is not None else None,
+                        'dispatch_proof': 'PROVEN' if identities[a.arm_id] is not None else 'REFUSED',
                         'declared_families': list(a.engine_families),
                         'scope': 'SOURCE_COMPONENT_CLOSURE',
                         'native_independence': 'NOT_MEASURED'} for a in ready})
@@ -549,7 +594,7 @@ class Controller:
         run_id = uuid.uuid4().hex
         cancel = cancel or threading.Event()
         try:
-            plan = self.plan(context, execution_mode, superiority)
+            plan = self.plan(context, execution_mode, superiority, execution_root=output)
         except Refusal as exc:
             _write(output / 'refusal.json', dict(status='REFUSED', reason=exc.code,
                                                detail=str(exc), run_id=run_id,
@@ -565,6 +610,11 @@ class Controller:
         _write(output / 'plan.json', plan)
         _issue(output / 'issued-plan.json', json.dumps(plan))
         _write(output / 'issued-plan.json', _seal(plan))
+        for arm_id in plan.get('cwd_exclusions', ()):
+            _write(output / arm_id / 'receipt.json', {
+                'run_id': run_id, 'arm_id': arm_id, 'status': 'REFUSED',
+                'reason': 'SAME_ENGINE_FAMILY', 'processes': [],
+                'dispatch_proof': 'PROVEN', 'adoption_authority': 'NONE'})
         if not plan['arms']:
             _write(output / 'result.json', plan)
             return plan
@@ -639,7 +689,7 @@ class Controller:
                        adapter=arm.identity(), binding=plan['binding'],
                        output_root=str(outputs), input_root=str(inputs),
                        status='NOT_MEASURED', reason='NOT_STARTED', processes=[],
-                       evidence=None, started_ns=time.monotonic_ns())
+                       evidence=None, execution_closure=None, started_ns=time.monotonic_ns())
         def frozen_binding():
             actual = {str(p.relative_to(inputs)): digest(p) for p in inputs.rglob('*') if p.is_file()}
             if actual != plan['binding']['inputs'] or any(p.is_symlink() for p in inputs.rglob('*')):
@@ -658,7 +708,10 @@ class Controller:
             for component in arm.components:
                 if cancel.is_set():
                     raise Refusal('CANCELLED', arm.arm_id)
-                self._source_current(arm)
+                closure = self._source_current(arm, outputs)
+                if receipt['execution_closure'] is not None and receipt['execution_closure'] != closure:
+                    raise Refusal('PROVIDER_CLOSURE_CHANGED', arm.arm_id)
+                receipt['execution_closure'] = closure
                 frozen_binding()
                 argv = [v.replace('{inputs}', str(inputs)).replace('{outputs}', str(outputs))
                         for v in component.argv]
@@ -724,7 +777,8 @@ class Controller:
                 if record['rc'] != 0:
                     raise Refusal('PROCESS_ERROR', f'{component.name}: rc={record["rc"]}')
                 frozen_binding()
-            self._source_current(arm)
+            if self._source_current(arm, outputs) != receipt['execution_closure']:
+                raise Refusal('PROVIDER_CLOSURE_CHANGED', arm.arm_id)
             evidence = arm.validate(outputs, plan['binding'])
             receipt['evidence'] = asdict(evidence)
             receipt['status'] = evidence.verdict
@@ -741,7 +795,7 @@ class Controller:
         # evidence remains separately reconsumed; a source-issued process rc0
         # does not grant PASS or replace a failed/unmeasured output consumer.
         completion = {k: receipt[k] for k in ('run_id', 'arm_id', 'binding',
-                      'adapter', 'processes', 'input_root', 'output_root')}
+                      'adapter', 'processes', 'input_root', 'output_root', 'execution_closure')}
         completion.update(actual_status=receipt['status'], actual_reason=receipt['reason'],
                           evidence=receipt.get('evidence'),
                           ended_ns=receipt['ended_ns'], run_root=str(root))
@@ -757,7 +811,7 @@ class Controller:
             raise Refusal('ISSUED_PLAN_MISMATCH', arm.arm_id)
         completion = _issued(root / arm.arm_id / 'issued-completion.json')
         fields = ('run_id', 'arm_id', 'binding', 'adapter', 'processes', 'input_root',
-                  'output_root')
+                  'output_root', 'execution_closure')
         if (completion.get('run_root') != str(root) or
                 completion.get('run_id') != plan['run_id'] or
                 any(completion.get(k) != receipt.get(k) for k in fields)):
@@ -775,7 +829,7 @@ class Controller:
         if override:
             override = Superiority(**{**override, 'receipts': {
                 k: Path(v) for k, v in override['receipts'].items()}})
-        current = self.plan(context, plan['mode'], override)
+        current = self.plan(context, plan['mode'], override, execution_root=Path(plan['run_root']))
         if arm.arm_id not in current['arms']:
             raise Refusal('CURRENT_POLICY_REJECTED', arm.arm_id)
 
@@ -844,7 +898,7 @@ class Controller:
                 raise Refusal('SELECTED_GENERATION_CHANGED', name)
 
     @staticmethod
-    def _source_current(arm: Adapter) -> None:
+    def _source_current(arm: Adapter, cwd: Path | None = None) -> dict:
         for name, expected in arm.source_files.items():
             path = Path(name)
             if not path.is_file() or path.is_symlink() or digest(path) != expected:
@@ -852,14 +906,15 @@ class Controller:
         # Re-resolve the closure at execution and adoption, including newly
         # introduced helpers. Registration and cached import paths are not
         # authority for today's executed source bytes.
-        _provider_identity(arm)
+        return _provider_identity(arm, cwd=cwd, include_execution=True)[2]
 
     @staticmethod
     def _eligible(receipt: dict, context: Context, arm: Adapter) -> None:
         binding = context.binding()
         if receipt.get('binding') != binding or receipt.get('adapter') != arm.identity():
             raise Refusal('STALE_OR_UNBOUND_RECEIPT', arm.arm_id)
-        Controller._source_current(arm)
+        if Controller._source_current(arm, Path(receipt['output_root'])) != receipt.get('execution_closure'):
+            raise Refusal('PROVIDER_CLOSURE_CHANGED', arm.arm_id)
         processes = receipt.get('processes', [])
         if len(processes) != len(arm.components) or any(
                 p.get('rc') != 0 or p.get('stop_reason') or not p.get('pid') or
