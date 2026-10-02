@@ -405,6 +405,132 @@ def _division_target_assertion(proposition: _DivisionProposition,
                                   r"\((?:a\s+)?required\s+input\s+constraint\))", suffix)))
 
 
+def _division_operand(role: str = "both") -> str:
+    """One bounded operand grammar, including qualifiers on either operand."""
+    word = {"dividend": r"(?:dividend|numerator)",
+            "divisor": r"(?:divisor|denominator)",
+            "both": r"(?:dividend|numerator|divisor|denominator)"}[role]
+    return r"(?:the\s+)?" + word + r"(?:\s+(?:inputs?|values?))?\b"
+
+
+_DIVISION_ORDERED = r"(?:at\s+least\s+|>=\s*|≥\s*)"
+_DIVISION_SMALLER = r"(?:less|smaller)\s+than\s+"
+
+
+def _division_invariants() -> Dict[str, re.Pattern]:
+    dividend, divisor = _division_operand("dividend"), _division_operand("divisor")
+    both = (r"(?:both\s+operands|the\s+operands|(?:both\s+)?" + dividend +
+            r"\s+and\s+" + divisor + r"|(?:both\s+)?" + divisor +
+            r"\s+and\s+" + dividend + r")")
+    nonzero = r"(?:non[- ]?zero|positive|greater\s+than\s+(?:zero|0))\b"
+    ordered = _DIVISION_ORDERED + divisor
+    return {
+        "nonzero": re.compile(r"\b(?:" + both + "|" + divisor + r")\s+"
+                              r"(?:(?:is|are|must\s+be|shall\s+be)\s+" + nonzero +
+                              r"|>\s*0\b)"),
+        "ordering": re.compile(r"\b" + dividend +
+                               r"\s*(?:(?:is|must\s+be|shall\s+be)\s*)?" + ordered),
+    }
+
+
+class _DivisionComparison(NamedTuple):
+    match: re.Match
+    relation: str
+    mode: str
+
+
+def _division_comparisons(text: str) -> List[_DivisionComparison]:
+    """Normalize required, relaxed and possible comparisons with one grammar."""
+    dividend, divisor = _division_operand("dividend"), _division_operand("divisor")
+    link = (r"(?P<link>need\s+not\s+be|(?:is|are)\s+(?:no\s+longer|not)\s+"
+            r"required\s+to\s+be|" + _DIVISION_MODAL_BE +
+            r"|(?:is|are)(?:\s+not)?|must\s+be|shall\s+be)")
+    pattern = re.compile(r"\b" + dividend + r"\s*(?:" + link + r"\s*)?"
+                         r"(?P<comparison>" + _DIVISION_ORDERED + "|" +
+                         _DIVISION_SMALLER + ")" + divisor)
+    facts = []
+    for match in pattern.finditer(text):
+        predicate = match.group("comparison").strip()
+        mode = match.group("link") or ""
+        facts.append(_DivisionComparison(
+            match, "less" if predicate.startswith(("less", "smaller")) else "ordered",
+            "relaxed" if "required" in mode or mode.startswith("need") else
+            "possible" if re.match(r"(?:may|might|could|can)\b", mode) else "required"))
+    return facts
+
+
+def _division_comparison_conflicts(fact: _DivisionComparison,
+                                   denied: Callable[[re.Match], bool]) -> bool:
+    return ((fact.relation == "ordered" and
+             (fact.mode == "relaxed" or denied(fact.match))) or
+            (fact.relation == "less" and not denied(fact.match)))
+
+
+def _division_requirement_complement(body: str, invariants: Dict[str, re.Pattern]
+                                     ) -> Optional[Tuple[set, str]]:
+    """Consume every coordinated domain predicate, keeping withdrawal polarity.
+
+    An unparsed target operand complement cannot leave an earlier guarantee
+    live. Unrelated output/reset complements do not borrow operand antecedents.
+    """
+    facts = sorted((match.start(), match.end(), domain)
+                   for domain, pattern in invariants.items()
+                   for match in pattern.finditer(body))
+    if not re.search(r"\b(?:dividend|numerator|divisor|denominator|operands?)\b", body):
+        return None
+    domains, end = set(), 0
+    for start, stop, domain in facts:
+        if not re.fullmatch(r"\s*(?:(?:,\s*)?(?:and|but|yet)\s+)?", body[end:start]):
+            return {"nonzero", "ordering"}, body
+        domains.add(domain)
+        end = stop
+    tail = body[end:].strip()
+    if not domains or not re.match(_DIVISION_ELIDED_START, tail):
+        return {"nonzero", "ordering"}, body
+    return domains, tail
+
+
+def _division_plural_requirement(text: str, antecedents: set
+                                 ) -> Optional[Tuple[set, str]]:
+    """Resolve a coordinated operand set or plural demonstrative requirement."""
+    operand = _division_operand()
+    operands = r"(?:both\s+)?" + operand + r"(?:\s+and\s+" + operand + r")+"
+    kind = r"(?:requirements|guarantees|constraints|statements|rules|properties)\b"
+    subject = re.match(r"^(?:" + operands + r"\s+" + kind +
+                       r"|(?:the\s+)?" + kind + r"\s+for\s+" + operands +
+                       r"|(?:all\s+of\s+)?(?:these|those)\s+" + kind + r")", text)
+    if subject is None:
+        return None
+    names = subject.group()
+    # An intervening output/timing requirement clears operand antecedents.
+    # A demonstrative must not reinterpret that known unrelated subject.
+    domains = ({"nonzero", "ordering"} if re.search(operand, names) else antecedents)
+    return domains, text[subject.end():]
+
+
+class _DivisionPermission(NamedTuple):
+    match: re.Match
+    direction: str
+
+
+def _division_zero_permissions(text: str) -> List[_DivisionPermission]:
+    """Normalize forward and reverse zero permissions on either operand."""
+    operand, zero = _division_operand(), r"(?:zero|0)\b"
+    forward = re.compile(r"\b" + operand + r"\s+(?:"
+                         r"(?:is|are)\s+(?:not\s+)?(?:allowed|permitted)\s+to\s+"
+                         r"(?:be|equal)\s+|(?:accepts?|permits?|allows?)\s+)" + zero)
+    reverse = re.compile(r"\b" + zero + r"\s+is\s+(?:not\s+)?(?:also\s+)?"
+                         r"(?:permitted|allowed|valid|accepted)\s+"
+                         r"(?:(?:as|for)\s+)?(?:a\s+)?" + operand)
+    return ([_DivisionPermission(m, "forward") for m in forward.finditer(text)] +
+            [_DivisionPermission(m, "reverse") for m in reverse.finditer(text)])
+
+
+def _division_permission_conflicts(fact: _DivisionPermission,
+                                   denied: Callable[[re.Match], bool]) -> bool:
+    return not denied(fact.match)
+
+
 def _division_retracted_domains(propositions: List[_DivisionProposition],
                                 events: List[set], denied: Callable[[str], bool],
                                 invariants: Dict[str, re.Pattern]) -> set:
@@ -429,6 +555,14 @@ def _division_retracted_domains(propositions: List[_DivisionProposition],
     inapplicable = re.compile(r"\b(?:does|do|did)\s+not\s+apply\b|"
                               r"\bno\s+longer\s+(?:apply|applies|required)\b")
     for proposition, domains in zip(propositions, events):
+        plural = _division_plural_requirement(proposition.text, antecedents)
+        if plural is not None and _division_target_evidence(proposition):
+            matching, tail = plural
+            for predicate in withdrawal.finditer(tail):
+                if not denied(tail[:predicate.start()]):
+                    retracted.update(matching)
+            if inapplicable.search(tail):
+                retracted.update(matching)
         subject = referent.search(proposition.text)
         if (subject is None and carried_subject is not None
                 and _division_target_evidence(proposition)
@@ -467,15 +601,21 @@ def _division_retracted_domains(propositions: List[_DivisionProposition],
             # Bind an explicit requirement complement to the SAME arithmetic
             # predicates used for admission. An unrelated output/property
             # complement must never borrow the preceding operand requirements.
-            embedded_domains = set()
             body = tail[complement.end():]
-            for domain, pattern in invariants.items():
-                match = pattern.match(body)
-                if match:
-                    embedded_domains.add(domain)
-                    tail = body[match.end():].strip()
-            if not embedded_domains:
+            resolved = _division_requirement_complement(body, invariants)
+            if resolved is None:
                 carried_subject = None
+                continue
+            embedded_domains, tail = resolved
+            # An unresolved relevant complement still has a withdrawal scope;
+            # do not require its unknown body to look like an elided verb.
+            if tail == body:
+                for predicate in withdrawal.finditer(tail):
+                    if (_division_target_evidence(proposition)
+                            and not denied(tail[:predicate.start()])):
+                        retracted.update(embedded_domains)
+                if _division_target_evidence(proposition) and inapplicable.search(tail):
+                    retracted.update(embedded_domains)
                 continue
         clauses = re.split(r"\s*,?\s*\b(?:but|yet|and|however)\b\s+|"
                            r"\s*[;,]\s*", tail)
@@ -514,16 +654,13 @@ def _division_retracted_domains(propositions: List[_DivisionProposition],
 def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
                             denied: Callable[[str], bool]) -> Tuple[bool, bool, bool]:
     propositions = _division_propositions(desc_text, records)
-    dividend, divisor = r"(?:dividend|numerator)", r"(?:divisor|denominator)"
+    dividend, divisor = _division_operand("dividend"), _division_operand("divisor")
     both = (r"(?:both\s+operands|the\s+operands|(?:both\s+)?(?:the\s+)?" + dividend +
             r"\s+and\s+(?:the\s+)?" + divisor + r"|(?:both\s+)?(?:the\s+)?" + divisor +
             r"\s+and\s+(?:the\s+)?" + dividend + r")")
     value = r"(?:non[- ]?zero|positive|greater\s+than\s+(?:zero|0))\b"
-    positive = re.compile(r"\b(?:" + both + r"|(?:the\s+)?" + divisor + r")\s+"
-                          r"(?:(?:is|are|must\s+be|shall\s+be)\s+" + value + r"|>\s*0\b)")
-    ordering = re.compile(r"\b(?:the\s+)?" + dividend +
-                          r"\s*(?:(?:is|must\s+be|shall\s+be)\s*)?"
-                          r"(?:at\s+least\s+|>=\s*|≥\s*)(?:the\s+)?" + divisor + r"\b")
+    invariants = _division_invariants()
+    positive, ordering = invariants["nonzero"], invariants["ordering"]
     operand = (r"\b(?:" + both + r"|(?:the\s+)?(?:divisor|denominator|dividend|numerator))"
                r"(?:\s+(?:inputs?|values?))?")
     allowance = re.compile(operand + r"\s+(?:" +
@@ -534,13 +671,7 @@ def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
     relaxed = r"(?:need\s+not\s+be|(?:is|are)\s+(?:no\s+longer|not)\s+required\s+to\s+be)\s+"
     relaxed_invariants = {
         "nonzero": re.compile(operand + r"\s+" + relaxed + value),
-        "ordering": re.compile(r"\b(?:the\s+)?" + dividend +
-                               r"(?:\s+(?:inputs?|values?))?\s+" + relaxed +
-                               r"at\s+least\s+(?:the\s+)?" + divisor + r"\b"),
     }
-    less = re.compile(r"\b(?:the\s+)?" + dividend +
-                      r"\s+(?:(?:is|" + _DIVISION_MODAL_BE + r")\s+)?"
-                      r"(?:less|smaller)\s+than\s+(?:the\s+)?" + divisor)
     positives, contradictions, events = set(), set(), []
     zero_allowed = False
     for proposition in propositions:
@@ -551,12 +682,15 @@ def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
                     current.add(name)
                     positives.add(name)
         events.append(current)
+        comparisons = _division_comparisons(proposition.text)
         unresolved_modal = re.search(operand + r"\s+(?:may|might|could|can)\b",
                                      proposition.text)
         if (unresolved_modal and proposition.owner == "target"
                 and proposition.frame in {"assertion", "qualified"}
-                and not re.search(r"\b" + _DIVISION_MODAL_BE + r"\b",
-                                  proposition.text[unresolved_modal.start():])
+                and not any(match.start() == unresolved_modal.start()
+                            for match in allowance.finditer(proposition.text))
+                and not any(fact.match.start() == unresolved_modal.start()
+                            for fact in comparisons)
                 and not denied(proposition.text[unresolved_modal.start():])):
             # A target operand allowance outside the bounded grammar is
             # unresolved, never evidence that the restrictive domain survives.
@@ -576,6 +710,14 @@ def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
             requirement_denied = re.search(
                 r"\bno\s+(?:requirement|guarantee)\s+that\s+(?:the\s+)?$", prefix)
             return bool(requirement_denied) or denied(match.group())
+
+        for fact in comparisons:
+            if _division_comparison_conflicts(fact, predicate_denied):
+                contradictions.add("ordering")
+        for fact in _division_zero_permissions(proposition.text):
+            if _division_permission_conflicts(fact, predicate_denied):
+                contradictions.add("nonzero")
+                zero_allowed = True
 
         for match in allowance.finditer(proposition.text):
             matched = match.group()
@@ -599,11 +741,8 @@ def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
         if any(match and not predicate_denied(match) for match in (explicit_zero, port_zero)):
             contradictions.add("nonzero")
             zero_allowed = True
-        if (any(not predicate_denied(match) for match in less.finditer(proposition.text))
-                or any(predicate_denied(match) for match in ordering.finditer(proposition.text))):
-            contradictions.add("ordering")
     contradictions.update(_division_retracted_domains(
-        propositions, events, denied, {"nonzero": positive, "ordering": ordering}))
+        propositions, events, denied, invariants))
     return ("nonzero" in positives and "nonzero" not in contradictions,
             "ordering" in positives and "ordering" not in contradictions, zero_allowed)
 

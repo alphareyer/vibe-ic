@@ -3997,3 +3997,404 @@ def test_unsigned_divider_r10_unrelated_controls(case, clause, tmp_path):
                                "-o", str(tmp_path / "sim.out"), str(rtl)],
                               capture_output=True, text=True)
     assert compiler.returncode == 0, compiler.stdout + compiler.stderr
+
+
+# R11: exact independent INPUTs and a bounded cross-product of the supported
+# operand/predicate grammar. Both public paths run before any verdict assertion.
+_R11_SPEC = 'Design an unsigned iterative arithmetic unit using the restoring division algorithm.\nModule name: review_ratio_unit\nParameter WIDTH has a default value of 8.\nInput ports:\nclk: posedge clock.\nrst: active-low asynchronous reset.\nstart: one-cycle request.\ndividend[WIDTH-1:0]: unsigned dividend.\ndivisor[WIDTH-1:0]: unsigned divisor.\nOutput ports:\nquotient[WIDTH-1:0]: unsigned quotient.\nremainder[WIDTH-1:0]: unsigned remainder.\nvalid: one-cycle completion.\nThe divisor is nonzero. Dividend is at least divisor.\n{clause}\nOn reset all outputs clear. New inputs are accepted after the previous result.\nAt each restoring iteration append the next dividend bit to the shifted partial remainder and subtract the divisor; a negative trial restores the shifted partial remainder and produces quotient bit zero.\nCompletion takes WIDTH cycles for power-of-two WIDTH and WIDTH+1 cycles otherwise; no extra input-only cycle.\n'
+
+_R11_CASES = [('both_determined_operands',
+  'Both the divisor and the dividend requirements are removed.',
+  'f1170823b8a8daabbf8fba2409b8abe536514e3bc28f7553fe0e7feb5c4abd45'),
+ ('all_those_requirements',
+  'All of those requirements are removed.',
+  '395a59cafcde795207d33f11d8319e4598a993714d8b56ae749ef820ccd82dce'),
+ ('requirements_for_operands',
+  'The requirements for divisor and dividend are removed.',
+  'b858d7b8abd6a6421290e0e3cd9bfd52c74580da5a39531a3410af87c4b511d7'),
+ ('embedded_input_nonzero',
+  'The requirement that the divisor input is nonzero has been removed.',
+  '0beeb5995d552533df0eb39a306d165e262951851c04e92759a2d3bc55758f54'),
+ ('embedded_value_nonzero',
+  'The requirement that the denominator value is nonzero is waived.',
+  '3ffa10f6c84151a1db93646d70b39798b0c375c1aa0cc99194d545e06e01ebf2'),
+ ('embedded_qualified_ordering',
+  'The requirement that dividend input is at least divisor has been removed.',
+  'e205580850ca53e51d7325b85413ada23299584352a1dbded0df2b97b456771f'),
+ ('embedded_compound_nonzero_first',
+  'The requirement that divisor is nonzero and dividend is at least divisor has been removed.',
+  '63343bef2e6c217df10b4accd26c02e9d59481b388779f47eccac0d0050270e8'),
+ ('embedded_compound_order_first',
+  'The requirement that dividend is at least divisor and divisor is nonzero has been removed.',
+  'cf3522363d4bbe0b1be3d460543cc5c7cbf87170424ae8e6134d0d2114e42cc8'),
+ ('relaxed_symbolic_order',
+  'Dividend is not required to be >= divisor.',
+  '7d900f834aafe07d7c1b2bfa3c335e3fd090f7cf2d03d21711ae85a31d1f6a08'),
+ ('relaxed_unicode_order',
+  'Dividend is no longer required to be ≥ divisor.',
+  '2d1fb6050f66af134bbeff82795f5047b15484e9e8a510624f939ef0ebf9f5ae'),
+ ('zero_dividend_reverse',
+  'Zero is allowed for the dividend.',
+  'cde5a2f3e4fb88658d7abc3a46ae0f196c3010640b939e3dbd36174c86e33844'),
+ ('zero_numerator_reverse',
+  'Zero is permitted for the numerator.',
+  '3d9ea82462d68f0aa59e09a576bd01a639e7dd7021ec8259f6fab866ac50ddb7'),
+ ('ordering_dividend_input',
+  'Dividend input may be less than divisor.',
+  'b5e7ba8e9adf88fb118d48059ba05ef87bdb72c1cbabe9bb9f7a180dec20afea'),
+ ('ordering_numerator_values',
+  'Numerator values can sometimes be smaller than denominator.',
+  'e2d91d3432266cb10c583c0379bbee2c3fb5bd44e6146674558d5686d7a43a85'),
+ ('zero_equal_permission',
+  'The divisor is allowed to equal zero.',
+  '0540d020b08797503fafb6ed23b14ea1b92638f83724ce94ba57ad6a33be428a'),
+ ('zero_accept_permission',
+  'The divisor input accepts zero.',
+  '4db8923672d64a472916900a796570b50fdfe8d784ed3f99dfcc666e5de3b359')]
+
+_R11_POSITIVES = [('plain', '', 'e52cbee96c946d4190b4edaab9ee3d068d573ad77e3e324794d49b3ec40088b8'),
+ ('quotient_zero',
+  'The quotient output may occasionally be zero.',
+  '43cbc6526b0fe6eca9c037243c9640fe721e3f307b1f01a26acbe75dbe6bc7b9'),
+ ('reset_zero',
+  'The reset input is allowed to be zero.',
+  'e12c1b3c7c79c3f58dc994928ee42028b4f6f49fc2d25e01e2e384f40be3109f'),
+ ('output_withdraw',
+  'The output requirements are removed.',
+  '20aba95e1e33e4290f91750cb09b3fcc3790b65a180ce30477217d47060298b4'),
+ ('width_withdraw',
+  'The divisor input bit-width requirements are removed.',
+  '4e1f9ce191529f4bf4f9b3876f11052d1b75615c5fd0f4c462d0d52395927315'),
+ ('embedded_quotient_withdraw',
+  'The requirement that quotient is at least zero has been removed.',
+  '8f3581a9ec80de543dc383eea6ac5b9cc6c32edd2de165437a4e477c833be59b'),
+ ('embedded_reset_withdraw',
+  'The requirement that reset is nonzero has been removed.',
+  '0929343cc9e03b4795e73ff1b1f3404141280688bbdd0f0369a083187fb65113'),
+ ('not_required_zero',
+  'The divisor is not required to be zero.',
+  'd621d4e1b955552d9019775b33672001b909f24dff170a3d38d94effbd333aa8'),
+ ('need_not_zero',
+  'The divisor need not be zero.',
+  '81e3076674b5de4e1de6c5a3029f23ba17339255bad27cb32cfb9f1e5590c719'),
+ ('never_removed',
+  'The divisor and dividend requirements have never been removed.',
+  '5de575ab57c171fffd64f5a0d0f2b05ac3e63445783fe9a7aec3933767f6200c'),
+ ('not_waived',
+  'The divisor and dividend requirements are not waived.',
+  'e6b51f4bff07cc95c3d938957d0daa81ce2c8409ab7a4de47079e7bc7b68e3c5'),
+ ('not_compound_removed',
+  'The divisor and the dividend requirements have not been removed.',
+  '6c3d2ab1c9b450cae9a770f352a607a6d2467227b047fbbba1551ce4a72c6c44'),
+ ('not_all_removed',
+  'All of the above requirements have not been removed.',
+  '0d2570bb50c70bf6b8dd13d3166a791e7b3f6b4eda2f7db2f0b85ff34c0a0df9'),
+ ('embedded_not_removed',
+  'The requirement that dividend is at least divisor has not been removed.',
+  '8cad4e88e4e7acd683ff14113cd7102ea2ccae1f428c38d1508674e0796aba54'),
+ ('embedded_not_optional',
+  'The requirement that divisor is nonzero is not optional.',
+  'e0398d6115365256ee62ea38fa8b1424cddc131b60a9163593a9e821cd2ac15a'),
+ ('input_may_not_zero',
+  'The divisor input may not be zero.',
+  '8fe58e4bcba3fd0c2d780ab3e07d48b73b8934547354f79e418783a7f5c45877'),
+ ('values_cannot_zero',
+  'Divisor values cannot occasionally be zero.',
+  '7e84946fe5a3a7a0de4dee560aa665adae2f6fc35009b22091ed679ab280b8c0'),
+ ('not_allowed_zero',
+  'The divisor is not allowed to be zero.',
+  'd59c11ff7caebfd4479adff80e16e6cc9aaeb8f2ba866dcac878aa389aceb248'),
+ ('zero_not_for_divisor',
+  'Zero is not allowed for the divisor.',
+  'b1e969f26b8ef28fde2cf2cdc386831ced2fbc2962104154c9485d6fa9dac12f'),
+ ('positive_retained',
+  'The divisor is still required to be positive.',
+  '58ef00fabf8664f4348ba9b6054c6e584266661d33a54a119fa0d32210eba57e'),
+ ('order_retained',
+  'Dividend is still required to be at least divisor.',
+  '928a602d1a5b7ff0ec8d1fd7328c1d51391dff80e8b038912af264984f8f2fba'),
+ ('external_forward',
+  'The reference model divisor input may be zero.',
+  'e8d84e4130c3a93df339e23149e2ca582402841d64d936aefec08b1670309390'),
+ ('external_withdraw',
+  'Another design: The divisor and dividend requirements are removed.',
+  '03ca0cbf80cefa81bd1ec8bf736461b8e4b5296e36ce2917f2549800301fe06a'),
+ ('conditional_forward',
+  'If test mode is active, the divisor input may be zero.',
+  'e49285f867b517f8a04e187777f2560a0cd64bef861464a56829a468310189dc'),
+ ('example_forward',
+  'Examples:\n- The divisor input may be zero.',
+  'd00579af65390f7dad440391e31ec31940991613c36bbec3636adb899434f4d8'),
+ ('quote_forward',
+  'The manual quotes "The divisor is allowed to be zero".',
+  '2eebc314b084c373edc27cedf731e8254679e1fdeac72b48f9bb07200cd125f1'),
+ ('curly_quote_embedded',
+  'The manual quotes “The requirement that dividend is at least divisor has been removed”.',
+  '30babed7ca98870afc69693672664e0b7369f4fcd09b0031601f72366280da58'),
+ ('code_quote_zero',
+  'The manual quotes `Zero is allowed for the divisor`.',
+  '61f0b5c9a1564a4e241c85f206a95ef0ad4c73e95b3f9284c7d93fc930bfe19d'),
+ ('unrelated_mixed_not_zero',
+  'The quotient may be zero, but divisor input may not be zero.',
+  '25aec762e960a384771747f8aa2553de787ad52fbc7bd3fc8cad0c2cf36209a0'),
+ ('output_nonzero_withdraw',
+  'The quotient is no longer required to be nonzero.',
+  '95a9a8792bfcc06fb72a8ec84d7226d7fe287d12c8826bbc686162f115ddcacd'),
+ ('negated_mixed',
+  'All of the above requirements are not removed and the output may be zero.',
+  '1dbec743dbd18d8aef4a3bda436e2e59eba6bb9228e84ebbae76c227da16fcc8'),
+ ('denied_forward_both',
+  'The divisor is not allowed to be zero and the dividend is not allowed to be zero.',
+  '14e82eac68978e84101521c76c325bcb2af56e97f063764db8103c52b7766a14'),
+ ('unrelated_prefix',
+  'The output is not valid and the divisor is still required to be nonzero.',
+  'b410686fd3c6cd88139ebbcb79e71e2ca9c203db38c23a333b767d19a100ff06'),
+ ('unrelated_permission_reverse',
+  'Zero is allowed for the quotient.',
+  'ffa238505022daa8863e365f157de9fc7794418aefe66c0334ed4165a3b39be3'),
+ ('unrelated_reset_reverse',
+  'Zero is permitted for the reset input.',
+  '5fbe6fd9f99f639bfed329cdf5b9e2f859f984617d711126045b53d23e5eab32'),
+ ('quoted_output_next',
+  'The manual quotes "The divisor is allowed to be zero". The quotient may be zero.',
+  '167de12c7e44c7ef6dfb40e0adc9bac92066a03b18a400d3505a98ee8c962530'),
+ ('same_sentence_output_denial',
+  'The quotient is not always positive and divisor input may not be zero.',
+  '5b5dba623954685ebc10e483f0fbcb9bcad3934c2fad69b6c9ec3e6a54f14599'),
+ ('compound_divisor_first-quoted',
+  'The manual quotes "The divisor and dividend requirements are removed".',
+  '2b2f89b2389a4046b8bf4eff866e0f7aefea01051674c1da9f5a2c76fc4b68e9'),
+ ('compound_divisor_first-external',
+  'The reference design states: The divisor and dividend requirements are removed.',
+  '4313acc834cdb38820d32bf4fc41e6c7b42583e63cefe4779228dfdd32b889a1'),
+ ('compound_divisor_first-example',
+  'Examples:\n- The divisor and dividend requirements are removed.',
+  '935a560d589268bafb9397080b773831c90cd1cc6301aebe555b4b8266985422'),
+ ('all_of_above-quoted',
+  'The manual quotes "All of the above requirements are removed".',
+  'bc8f4e41506a3034917dca553d9c02a87ebc7f775f0f22abe6ca3cf77a40a6f2'),
+ ('all_of_above-external',
+  'The reference design states: All of the above requirements are removed.',
+  'c75f58a0bf33dbd8b6de5d29b0d1e745f4d45a36373564d5e3a1f5b195bb05f4'),
+ ('all_of_above-example',
+  'Examples:\n- All of the above requirements are removed.',
+  '095c5aaa89ae2d7ac97a6af001ac4b6f42ff818a7fe5e5acb457181a5154ebbc'),
+ ('divisor_input_zero-quoted',
+  'The manual quotes "The divisor input may be zero".',
+  '7eb1b716325309a520d1a34a2fe17d173a18cb76bfdf3ef47bb20e4d9673b01a'),
+ ('divisor_input_zero-external',
+  'The reference design states: The divisor input may be zero.',
+  '24da4ff2554cca033ae401bae5c190c0346d07fcb2a2607fde77eb4af8cb361a'),
+ ('divisor_input_zero-example',
+  'Examples:\n- The divisor input may be zero.',
+  'd00579af65390f7dad440391e31ec31940991613c36bbec3636adb899434f4d8'),
+ ('zero_allowed_for_divisor-quoted',
+  'The manual quotes "Zero is allowed for the divisor".',
+  '13ba2a66c3b921999f2b4573cf9970e19d1015d44fcffcdd4f4d31d87f4e52e7'),
+ ('zero_allowed_for_divisor-external',
+  'The reference design states: Zero is allowed for the divisor.',
+  'eaf09d3e5a2afa8b706f51c1aad292e8698be1eb7118d811272debaeb6ab78cd'),
+ ('zero_allowed_for_divisor-example',
+  'Examples:\n- Zero is allowed for the divisor.',
+  '3d06d045d1832b6a05f736ef635479d1fa5c4f09f23aeb1c2cf0246ee8fc77ef'),
+ ('divisor_allowed_zero-quoted',
+  'The manual quotes "The divisor is allowed to be zero".',
+  '2eebc314b084c373edc27cedf731e8254679e1fdeac72b48f9bb07200cd125f1'),
+ ('divisor_allowed_zero-external',
+  'The reference design states: The divisor is allowed to be zero.',
+  '901d8a4f55bde97266dd4fdc1f8d5fe397f313b8afcbb7f190c155323b1ba45d'),
+ ('divisor_allowed_zero-example',
+  'Examples:\n- The divisor is allowed to be zero.',
+  'cb672d9fc5e40248befe82dc3b306f47654662838e91cac93b3f2df46168dde5'),
+ ('embedded_ordering_removed-quoted',
+  'The manual quotes "The requirement that dividend is at least divisor has been removed".',
+  'b0a635c0fe0a63ba3c3b01d561e3df8af02bdc5a9e934c6b9c00baad638a3ca9'),
+ ('embedded_ordering_removed-external',
+  'The reference design states: The requirement that dividend is at least divisor has been removed.',
+  '267b0f1349a66a2b1f233939b26c158c605750e1348a9b1c16235e4fde09dfe9'),
+ ('embedded_ordering_removed-example',
+  'Examples:\n- The requirement that dividend is at least divisor has been removed.',
+  '2e6ca2926dacf0dd8967a9b1a4cbdbc9236345b705d293f14d87789ec5176b3f'),
+ ('ordering_no_longer_required-quoted',
+  'The manual quotes "Dividend is no longer required to be at least divisor".',
+  '2877347e3575958ffdca8b28946b73cfbd9d5e3701d1693b7186db7442f0afb4'),
+ ('ordering_no_longer_required-external',
+  'The reference design states: Dividend is no longer required to be at least divisor.',
+  '850de0434644cc89b8a953138b25b3557af4da4ebe92bb598a1c695e8c4e7424'),
+ ('ordering_no_longer_required-example',
+  'Examples:\n- Dividend is no longer required to be at least divisor.',
+  'f1dc1ec118104722fb1fd03584a0e12ba52ab23d11da84f44816846c72750747'),
+ ('divisor_need_not_nonzero-quoted',
+  'The manual quotes "The divisor need not be nonzero".',
+  '5011aa34037a21511b8d3f382b5bdd7dd5fe4705f2be99a62e9f33670213b7dc'),
+ ('divisor_need_not_nonzero-external',
+  'The reference design states: The divisor need not be nonzero.',
+  'bf07ad9c67b6256a5763c1b9d7f048952f71ecc26c8de52d61056cccb96f5669'),
+ ('divisor_need_not_nonzero-example',
+  'Examples:\n- The divisor need not be nonzero.',
+  '88be78cf7923efdba2af4b18e07e78211ac0a699a01891bc00b3cbb26ea2bd3b'),
+ ('divisor_values_occasional_zero-quoted',
+  'The manual quotes "Divisor values may occasionally be zero".',
+  'ba616494ac2b52a492707289b707a91e7ad37df121ae9497c63b539544dfe696'),
+ ('divisor_values_occasional_zero-external',
+  'The reference design states: Divisor values may occasionally be zero.',
+  'f93cbf23fed1f93c98343a6eb5160e9c807ec1c152e60fd12d943ed512553617'),
+ ('divisor_values_occasional_zero-example',
+  'Examples:\n- Divisor values may occasionally be zero.',
+  'afb19d9f0a8a2de12390d3c107667bda93d7dff28bfdea46e5c318641e9e9500')]
+
+_R11_RTL_HASHES = {'all_of_above-example': '3661da86f15a6cfb4d056465b9c4d82b52ecd2d1e80a854dc6bd1c7e8651c8cc',
+ 'all_of_above-external': '6d8f906ac781c9fd249429362ab721566f5eadb8177fbfee87452574b773f0e4',
+ 'all_of_above-quoted': 'bc1ea347e8ad922aaa3daad233ccc68acd905ca82bd41d282c92d83d9d2bfc47',
+ 'code_quote_zero': '52a9ea9150aacaed1cbce00f73afe3dbbee6eee82908fb1a92a857cac4789a55',
+ 'compound_divisor_first-example': '38d2742efb3a942c85de87a7b8c42f71130b916af9e740210b1cda74e96147ef',
+ 'compound_divisor_first-external': '78f9dbfc2d3d7f6071bcbe12fb3218d426b6d3df7a040b27c77c68eadda3f918',
+ 'compound_divisor_first-quoted': 'a99b692579066f684f0d86574fea231a06c395fea6f67337a8b9c2ad0347be2f',
+ 'conditional_forward': 'c4fbabdfeb537ff756d79f7d04fd347cdd291b7072691f00aaf0ddb03e139fe6',
+ 'curly_quote_embedded': 'fe7431669869d6b1cfafd49977bf183840790ff8993680eaf4980c72518b5fde',
+ 'denied_forward_both': 'e2a8f22279b97153d57a6c117ed9e02a80188deec11f14e7ae181c963794156f',
+ 'divisor_allowed_zero-example': '3cae98cd57028057e16d6f496de5d41c6469c6f400110ffaef9655d1329cce72',
+ 'divisor_allowed_zero-external': '3d0c85ce29aac90f2c3cc3727e3959380b4ad58c9f0ae70459164a44520b329f',
+ 'divisor_allowed_zero-quoted': '16f9f1b76e0b0ebf01a4199e3e0b374840b038566782ed678f5c760a1dcb6a04',
+ 'divisor_input_zero-example': '759d3e2cc128bfe61de7a0a1f0d4e347c5f95fd02db3eac264741a3bfd517b11',
+ 'divisor_input_zero-external': '1055bc45ef516bb22b25f65d79a5630ef35f870628b700c3dad85170c11701f4',
+ 'divisor_input_zero-quoted': 'd6b7d7282b4870f1daafab45c0c8195dd3ccc76c3c7ae7f08afe26e2a9b72250',
+ 'divisor_need_not_nonzero-example': 'bb5118f1a07e1ab0906e6fae61e0d6fc3e7073853839d86b2717a531b1b0d9bb',
+ 'divisor_need_not_nonzero-external': 'a5a2a604dd901189cda55812de9a6c72b5bf677de483b34487c195f8d1332e92',
+ 'divisor_need_not_nonzero-quoted': 'c7dc0f11bf48c5df5c3c0dcc4cbe7ba7ddc2b5c72fa6a57b28874b2023c3f814',
+ 'divisor_values_occasional_zero-example': '5a9a3119b96ea525732fe3073a094bce0c57a992b66f0cb4ac78277730a55842',
+ 'divisor_values_occasional_zero-external': '37b0ad0a13db06d91c3710891c13257e56b5bc9eef2123a37a036cf0951da4ea',
+ 'divisor_values_occasional_zero-quoted': '602571809d0d3502068c651814d1f915e8c56d4275f5aab0704f450337df7a63',
+ 'embedded_not_optional': 'c7817e461a335d43f4d290d83da8c4e931923c514bfd06a47518c79f5dac1b40',
+ 'embedded_not_removed': 'b05d63edd2af3ae398948f44e5293790ce164fa094b0164369a2531ccd98c491',
+ 'embedded_ordering_removed-example': 'f20caad2054c01c88aacb6e1cbda12a43daafa602cce758d7f0b0ef261dd07d1',
+ 'embedded_ordering_removed-external': '64d1c4cb6d975d3b27b791e0655bdc23f80ae2308c0e1d6cb46815076cce34e3',
+ 'embedded_ordering_removed-quoted': 'a1dbc2cf38996306c1dc83b0723a98dd3fecc9df3871d7078ab5940ad932a0c9',
+ 'embedded_quotient_withdraw': '2277a457a62fbea1b74ffb4cc375f0ef7a822e38a04a5a1ab2a5e13100b8fe90',
+ 'embedded_reset_withdraw': '47a6c6fc23b36ad305f5c3fd493d9fe0786e5b89a581c995befd610d507d16b0',
+ 'example_forward': '759d3e2cc128bfe61de7a0a1f0d4e347c5f95fd02db3eac264741a3bfd517b11',
+ 'external_forward': '7d79665eb8e844f358404892a6b7a70e743f4be8ff9142912dc5ef28dc9529b3',
+ 'external_withdraw': '47dd4da6a8e2356f9f135d5c5bec0cc1455fc662bfaadb1d7738f40146e26c2b',
+ 'input_may_not_zero': '06b7cbe57eeafcb040b9b9f44262d7fe679ad9ec04275d715fc5ca6d1c20a0fd',
+ 'need_not_zero': '417c7391cbc213cee9556feb360cc9ba958d28ec21d4158015db4933732ad90d',
+ 'negated_mixed': 'd5152cb9ace0b600e2d93adca4b31bfed29fb2415ff4a623b782d6b0e30a5d80',
+ 'never_removed': 'e9f3c34366fbe6cd186d183be5e3a4961cc59f64d1691043328e7a08d5e45221',
+ 'not_all_removed': '3ff9eccd3695e7c42201366f021e0be89c45b95219d84ccbaacc6356c9359327',
+ 'not_allowed_zero': 'e9a24dcc91681068a9fbe865e5d1f2f8f0c6feea2f5f81640e646134a2b7c19c',
+ 'not_compound_removed': '1de712ac21c85c5d83f3fba01f34f373ed475a4d543f31a29601272e443b7b74',
+ 'not_required_zero': '04e4e2dad81056e73253d263391469b9b1068d17ff5de217d7eb17c2a94aab34',
+ 'not_waived': '31aa027e693904493235cffb6e367c61456ca740999cb76ecd5f0269a5965802',
+ 'order_retained': 'ff767cc7b25507bf9ca7315c2fb4f604f3b4382e979a14f913cf71a672c67964',
+ 'ordering_no_longer_required-example': 'cf287eaff29e4801327f4081932352ddaeb23a6904a97d49aafcd78a3b3554df',
+ 'ordering_no_longer_required-external': '90fac0fb3e334f47611b4bc3e75ca21c570559ccb56b76db928fca5316d32180',
+ 'ordering_no_longer_required-quoted': '242fbdeb322d7c2e287d38c3f3d9b67ddedfb43d7199f1c4ed438d20cad4bae9',
+ 'output_nonzero_withdraw': '3f4e539a8148b389db7709bf6cad0abc37330e42fe4be0a85ac893d4e4d5bc29',
+ 'output_withdraw': 'd19917dc6f52fea2ea7dfb88b553ebbdea45a2da52a1c6ffe3224bfffb4c135c',
+ 'plain': 'f9055e8be6c1e1cb8b1e94784c414b9da205c4ad1bab344ec7504d16c2954e39',
+ 'positive_retained': '5f023faa93830b023508c66341c180d2e1e85e843cec8ac4ce0833342416dc3c',
+ 'quote_forward': '16f9f1b76e0b0ebf01a4199e3e0b374840b038566782ed678f5c760a1dcb6a04',
+ 'quoted_output_next': '1eb57f2fd1d671680a6ff1d61406f5d44d4277cef95f9a5a2cf79e5b36171e47',
+ 'quotient_zero': 'c3bf9e230f1d0598e98c9287f07df0b87140e4a252789afb2edb7733d6cd5906',
+ 'reset_zero': '5945257ce2134c7a1500cd2ff5d305868e16052e84711221869b1c16f56c5ce9',
+ 'same_sentence_output_denial': 'b941324a17941bc4aa2ab60d13113c1e7a4e355453f91f430428eddf07dd9073',
+ 'unrelated_mixed_not_zero': '211b152ba72c5363dd97d1c0c13e2b7f18bfa9b07cbf18bd45819895bfb913fc',
+ 'unrelated_permission_reverse': '3118c82fc31d0e72e43f27aa2289e2d90f74e2eada7013beb64372ba8f3866f0',
+ 'unrelated_prefix': '3ac66aaf51027ad04807bafa2b29958e3f2fcf60706bbcddb396a95c8f64ac8f',
+ 'unrelated_reset_reverse': '2b9bff00f0022ecd9eadca27840c1aee7241e117c20fec3ba73ea9fbe8827c68',
+ 'values_cannot_zero': '2270319648aa569536f1806eb5439b0e92910e03a7d7845ec0ccaf1a6fb18d5d',
+ 'width_withdraw': '4cdf1bb4990b72a6777fd96cef44245e00e5c0819f0ab0681d86628d539abda7',
+ 'zero_allowed_for_divisor-example': 'fbaac2a46f0a3599b6b2cf6794dff72657984a2af2d38b44a00964570071f853',
+ 'zero_allowed_for_divisor-external': '2076489dc365af5db266da0070df954b2809f18b1aa0251c58fa67bea56a9807',
+ 'zero_allowed_for_divisor-quoted': '802635cfdbadbf44abb9a5e0a27ab95e3e4f93032be175987c7be4e12f131119',
+ 'zero_not_for_divisor': 'e60695a1936adec269e85a51363e45bc2de2889c6308a14c79d720f07b4b016b'}
+
+
+def _r11_public_paths(description, expected, tmp_path, rtl_sha256=None):
+    import hashlib
+    source, rtl = tmp_path / "description.txt", tmp_path / "candidate.v"
+    source.write_text(description)
+    cli = subprocess.run([sys.executable, str(PROG), "--from-desc", str(source),
+                          "--out", str(rtl)], capture_output=True, text=True)
+    payload = json.loads(cli.stdout)
+    project = tmp_path / "project"
+    doc = project / "phase1/input_doc/design_description.txt"
+    doc.parent.mkdir(parents=True)
+    doc.write_bytes(source.read_bytes())
+    result = _load_runner()._try_canonical_primitive_rtl(project, time.time())
+    outputs = list(project.rglob("*.v")) + list(project.rglob("*.sv"))
+    assert payload["verdict"] == expected, payload
+    assert cli.returncode == (0 if expected == "EMIT" else 2), cli.stderr
+    assert rtl.exists() == (expected == "EMIT")
+    if expected == "DEFER":
+        assert payload["defer_reason"]["kind"] == "unsupported_unsigned_iterative_divider"
+        assert result is None
+        assert outputs == []
+    else:
+        assert result is not None and result.status == "PASS"
+        assert len(outputs) == 1
+        assert outputs[0].read_bytes() == rtl.read_bytes()
+        if rtl_sha256 is not None:
+            assert hashlib.sha256(rtl.read_bytes()).hexdigest() == rtl_sha256
+        compiler = subprocess.run(["iverilog", "-g2012", "-s", "review_ratio_unit",
+                                   "-o", str(tmp_path / "sim.out"), str(rtl)],
+                                  capture_output=True, text=True)
+        assert compiler.returncode == 0, compiler.stdout + compiler.stderr
+
+
+@pytest.mark.parametrize("case,clause,source_sha256", _R11_CASES, ids=[x[0] for x in _R11_CASES])
+def test_unsigned_divider_r11_exact_review(case, clause, source_sha256, tmp_path):
+    import hashlib
+    description = _R11_SPEC.format(clause=clause)
+    assert hashlib.sha256(description.encode()).hexdigest() == source_sha256
+    _r11_public_paths(description, "DEFER", tmp_path)
+
+
+@pytest.mark.parametrize("case,clause,source_sha256", _R11_POSITIVES, ids=[x[0] for x in _R11_POSITIVES])
+def test_unsigned_divider_r11_positive_boundary(case, clause, source_sha256, tmp_path):
+    import hashlib
+    description = _R11_SPEC.format(clause=clause)
+    assert hashlib.sha256(description.encode()).hexdigest() == source_sha256
+    _r11_public_paths(description, "EMIT", tmp_path, _R11_RTL_HASHES[case])
+
+
+def _r11_grammar_cases():
+    rows = []
+    qualifiers = ("", " input", " value", " values")
+    for dividend, divisor in (("dividend", "divisor"), ("numerator", "denominator")):
+        for qualifier in qualifiers:
+            left, right = dividend + qualifier, divisor + qualifier
+            for comparison in ("at least", ">=", "≥"):
+                stem = f"{left}-{comparison}-{right}"
+                positive = f"The {right} is nonzero. The {left} is {comparison} {right}."
+                rows.append((stem + "-required", positive, "EMIT", True))
+                rows.append((stem + "-relaxed", f"The {left} is not required to be {comparison} {right}.", "DEFER", False))
+                rows.append((stem + "-smaller", f"The {left} can sometimes be smaller than {right}.", "DEFER", False))
+            predicates = (f"{right} is nonzero", f"{left} is at least {right}")
+            for order in (predicates, predicates[::-1]):
+                clause = "The requirement that " + " and ".join(order) + " has been removed."
+                rows.append((stem + "-complement-" + order[0], clause, "DEFER", False))
+    for role in ("divisor", "denominator", "dividend", "numerator"):
+        for qualifier in qualifiers:
+            operand = role + qualifier
+            for verb in ("allowed to equal", "accepts"):
+                clause = f"The {operand} is {verb} zero." if verb != "accepts" else f"The {operand} accepts zero."
+                rows.append((operand + "-" + verb, clause, "DEFER", False))
+            rows.append((operand + "-reverse", f"Zero is permitted for the {operand}.", "DEFER", False))
+            rows.append((operand + "-reverse-denied", f"Zero is not permitted for the {operand}.", "EMIT", False))
+    rows.extend([
+        ("unknown-complement", "The requirement that divisor has an unspecified admissible range has been removed.", "DEFER", False),
+        ("unknown-modal-predicate", "The divisor input may be outside an unspecified range.", "DEFER", False),
+    ])
+    return rows
+
+
+_R11_GRAMMAR = _r11_grammar_cases()
+
+
+@pytest.mark.parametrize("case,clause,expected,replace_domain", _R11_GRAMMAR,
+                         ids=[x[0] for x in _R11_GRAMMAR])
+def test_unsigned_divider_r11_bounded_grammar(case, clause, expected, replace_domain, tmp_path):
+    description = _R11_SPEC.format(clause=clause)
+    if replace_domain:
+        description = description.replace("The divisor is nonzero. Dividend is at least divisor.\n", "")
+    _r11_public_paths(description, expected, tmp_path)
