@@ -55,13 +55,28 @@ def produce_1(project,output,ic_class=None,force_regen=False,**k):
     import design_one_shot_runner as d
     return _record('1',project,output,'design_one_shot_runner.step_rtl_gen',d.step_rtl_gen,ic_class=ic_class,force_regen=force_regen,**k)
 def produce_2(project,output,top=None,clock=None,timeout=None,**k):
+    for name in ('top','clock','timeout','baseline_rtl_dir','candidate_rtl_dir'):
+        if k.get(name) in (None,'') and name not in ('top','clock','timeout'):
+            raise ValueError(f'2: {name} is required')
     if not top or not clock or timeout is None: raise ValueError('2: top, clock and timeout are required')
     import p0_tool_frontend_check as p0
     result=p0.check(Path(project))
-    return _write('2',output,'p0_tool_frontend_check.check+crosslayer_rewrite_equivalence.main',producer_result=result,parameters=dict(top=top,clock=clock,timeout=timeout,**k))
-def produce_3(project,output,top=None,image=None,**k): return _cli('3',project,output,('cdc_crossing_check','cdc_async_input_check','clock_domain_reg_crossing_check','reset_dependency_check'),('--json',))
-def produce_4(project,output,top=None,container=None,**k): return _cli('4',project,output,('verilator_coverage_measure',),('measure-tb','--project',project))
-def produce_5(project,output,top=None,container=None,**k): return _cli('5',project,output,('formal_property_run',),())
+    args=['python3',str(Path(__file__).with_name('crosslayer_rewrite_equivalence.py')),str(project),'--baseline-rtl-dir',str(k['baseline_rtl_dir']),'--candidate-rtl-dir',str(k['candidate_rtl_dir']),'--top',top,'--clock',clock,'--timeout',str(timeout),'--json',str(Path(output)/'crosslayer.json')]
+    cp=subprocess.run(args,capture_output=True,text=True)
+    return _write('2',output,'p0_tool_frontend_check.check+crosslayer_rewrite_equivalence.main',producer_result=result,records=[{'argv':args,'rc':cp.returncode,'stdout':cp.stdout,'stderr':cp.stderr}],parameters=dict(top=top,clock=clock,timeout=timeout,**k))
+def produce_3(project,output,top=None,image=None,**k):
+    if not top: raise ValueError('3: top is required')
+    return _cli('3',project,output,('cdc_crossing_check','cdc_async_input_check','clock_domain_reg_crossing_check','reset_dependency_check'),('--json',str(Path(output)/'cdc.json')))
+def produce_4(project,output,top=None,container=None,**k):
+    if not top or not container: raise ValueError('4: top and container are required')
+    import design_one_shot_runner as d
+    vals=[d.step_professional_tb_gen(Path(project),top,container),d.step_reference_tb(Path(project),top,k.get('ic_class'),container),d.step_l10_unit_tb_run(Path(project),container)]
+    return _cli('4',project,output,('verilator_coverage_measure',),('measure-tb','--project',str(project),'--top',top,'--out',str(Path(output)/'coverage.json')))
+def produce_5(project,output,top=None,container=None,**k):
+    if not top or not container: raise ValueError('5: top and container are required')
+    import formal_harness_gen as h, formal_property_run as f, design_one_shot_runner as d
+    h.generate(Path(project),top=top,container=container); f.run(Path(project),top=top); d.step_full_stack_functional_tb(Path(project),container)
+    return _write('5',output,'formal_harness_gen.generate+formal_property_run.run+step_full_stack_functional_tb',parameters=dict(top=top,container=container))
 def produce_6(project,output,top=None,container=None,**k):
     # The provider is implemented even when the host has no Quartus/board.  In
     # that case retain an explicit exclusion so Controller does not count it
@@ -129,7 +144,7 @@ def produce_p0(project,output,top=None,claim=None,**k):
     return _record('P0',project,output,'p0_tool_frontend_check.check+formal_structural_check.check_claim',p0.check,top=top,claim=claim,**k)
 
 PRODUCERS={'D1':produce_d1,'0.5ic':produce_05ic,'1':produce_1,'2':produce_2,'3':produce_3,'4':produce_4,'5':produce_5,'6':produce_6,'7':produce_7,'8':produce_8,'10':produce_10,'11':produce_11,'FS1':produce_fs1,'DT1':produce_dt1,'12':produce_12,'13':produce_13,'DT2':produce_dt2,'DT3':produce_dt3,'P0':produce_p0}
-REQUIRED_PARAMETERS={'D1':(), '0.5ic':('template_or_no_template_reason',), '1':('ic_class',), '2':('top','clock','timeout'), '3':('top',), '4':('top','container'), '5':('top','container'), '6':('top','container'), '7':('top','pdk','container'), '8':(), '10':('top','pdk','container'), '11':('top','clock','pdk'), 'FS1':('asil',), 'DT1':('top','clock','timeout'), '12':(), '13':('top','container','lec_max_completed_rungs'), 'DT2':('top','clock','timeout'), 'DT3':('top','clock','timeout'), 'P0':('top','claim')}
+REQUIRED_PARAMETERS={'D1':(), '0.5ic':('template_or_no_template_reason',), '1':('ic_class',), '2':('top','clock','timeout','baseline_rtl_dir','candidate_rtl_dir'), '3':('top',), '4':('top','container'), '5':('top','container'), '6':('top','container'), '7':('top','pdk','container'), '8':(), '10':('top','pdk','container'), '11':('top','clock','pdk'), 'FS1':('asil',), 'DT1':('top','clock','timeout'), '12':(), '13':('top','container','lec_max_completed_rungs'), 'DT2':('top','clock','timeout'), 'DT3':('top','clock','timeout'), 'P0':('top','claim')}
 def run_row(step_id,project,output,**kwargs):
     if step_id not in PRODUCERS: raise ValueError(f'unknown frontend row: {step_id}')
     manifest=Path(project)/'input'/'issued_manifest.json'
