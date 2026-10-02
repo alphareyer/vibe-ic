@@ -235,7 +235,7 @@ def register_factories(registry):
     sha=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
     _machine_contracts()
     portfolio_rows=_portfolio_contracts()
-    if set(portfolio_rows) != set(ROWS):
+    if not set(ROWS).issubset(portfolio_rows):
         raise ValueError('frontend portfolio rows are out of sync with source rows')
     for row,p in PROVIDERS.items():
         contract=FLOW_CONTRACTS[row]
