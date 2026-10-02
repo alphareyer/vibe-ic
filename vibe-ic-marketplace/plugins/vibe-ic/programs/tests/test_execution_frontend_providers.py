@@ -104,6 +104,50 @@ def test_05ic_public_controller_eligible_and_adopted(tmp_path):
             'reviewer':'test', 'binding':ctx.binding()}
     assert controller.adopt(ctx,run,choice)['status']=='ADOPTED'
 
+
+@__import__('pytest').mark.parametrize('deliverable,marker', [
+    ('DIE', 'SELF_TAPEOUT.txt'),
+    ('HARDMACRO', 'NO_TEMPLATE.txt'),
+])
+def test_05ic_declared_absence_routes_public_production_and_refuses_na_gate(
+        tmp_path, deliverable, marker):
+    """Both canonical absence routes run both producers and retain NA semantics."""
+    import hashlib, subprocess
+    project=tmp_path/'project'; (project/'input').mkdir(parents=True)
+    fixture=Path(__file__).parent/'fixtures/r0929_dieid_basis_self_tapeout_die/input/step_0_5ic_answers.json'
+    answers=json.loads(fixture.read_text())
+    answers['answers']['deliverable']=deliverable
+    answers['answer_provenance']['synthesis_area_budget']={
+        'answered_by':'owner', 'citation':'bounded frontend absence route fixture'}
+    if deliverable == 'HARDMACRO':
+        answers['answer_provenance']['deliverable']={
+            'answered_by':'owner', 'citation':'bounded frontend IP route fixture'}
+    answers_path=project/'input/step_0_5ic_answers.json'
+    answers_path.write_text(json.dumps(answers, sort_keys=True))
+    registry=em.Registry(); p.register_factories(registry); portfolio=em.load_portfolio()
+    row=next(s for s in portfolio['steps'] if str(s['id'])=='0.5ic')
+    sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=Path(__file__).parents[2],text=True).strip()
+    reason=answers['operator_template']['absent_reason']
+    ctx=em.Context('0.5ic',sha,{'input/step_0_5ic_answers.json':answers_path},
+                   {'template':'input/submission_template_source',
+                    'no_template_reason':reason},
+                   tuple(row['mandatory_gate_programs']))
+    run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,512,1),portfolio)
+    result=controller.run(ctx,run)
+    assert result['candidate_statuses']['frontend_0_5ic']=='NOT_MEASURED'
+    receipt=json.loads((run/'frontend_0_5ic/receipt.json').read_text())
+    assert receipt['reason']=='GATE_NOT_MEASURED'
+    assert receipt['evidence']['gates']=={
+        'submission_template_check':'NOT_MEASURED',
+        'tapeout_declaration_check':'PASS'}
+    assert f'input/submission_template/{marker}' in receipt['evidence']['outputs']
+    choice={'arm_id':'frontend_0_5ic',
+            'receipt_sha256':em.digest(run/'frontend_0_5ic/receipt.json'),
+            'rationale':'declared absence was executed and retained as not applicable',
+            'reviewer':'test', 'binding':ctx.binding()}
+    with __import__('pytest').raises(em.Refusal, match='AI_CHOICE_INELIGIBLE'):
+        controller.adopt(ctx,run,choice)
+
 @__import__('pytest').mark.parametrize('row,required', [
     ('2', ('top','clock','timeout','baseline_rtl_dir','candidate_rtl_dir')),
     ('3', ('top',)), ('4', ('top','container')), ('5', ('top','container')),
@@ -165,10 +209,14 @@ def test_05ic_parameter_exclusivity_precedes_tools(tmp_path, monkeypatch):
     calls=[]
     monkeypatch.setattr(w.subprocess, 'run', lambda *a, **k: calls.append(a) or None)
     (tmp_path/'input').mkdir(); (tmp_path/'input/issued_manifest.json').write_text(json.dumps({'step_id':'0.5ic','parameters':{},'files':{}}))
-    for kwargs in ({}, {'template':'P','no_template_reason':'R'}):
+    for kwargs in ({}, {'no_template_reason':'R'}):
         calls.clear()
         with __import__('pytest').raises(ValueError): w.produce_05ic(tmp_path,tmp_path/'out',**kwargs)
         assert calls == []
+    with __import__('pytest').raises(ValueError):
+        w.produce_05ic(tmp_path, tmp_path/'out', template='P',
+                       no_template_reason='a declared absence with a searched path')
+    assert calls == []
 
 def test_05ic_real_producers_order_and_outputs(tmp_path, monkeypatch):
     import execution_frontend_worker as w
@@ -188,8 +236,10 @@ def test_05ic_real_producers_order_and_outputs(tmp_path, monkeypatch):
             p=Path(argv[2]); (p/'input/submission_template').mkdir(parents=True,exist_ok=True); (p/'input/submission_template/tapeout_declaration.json').write_text(json.dumps({'schema':'tapeout_declaration/1'})); (p/'reports/phase1').mkdir(parents=True,exist_ok=True); (p/'reports/phase1/tapeout_declaration.json').write_text(json.dumps({'schema':'tapeout_declaration/1','passed':True}))
         return Result()
     monkeypatch.setattr(w.subprocess,'run',fake)
-    out=tmp_path/'out'; w.produce_05ic(project,out,no_template_reason='design-neutral IP delivery does not target a shuttle slot')
+    out=tmp_path/'out'; w.produce_05ic(project,out,template='input/submission_template_source',
+                                       no_template_reason='design-neutral IP delivery does not target a shuttle slot')
     assert ['submission_template_ingest.py' in x[1] for x in calls] == [True,False]
+    assert '--template' in calls[0] and '--no-template-reason' in calls[0]
     assert (out/'reports/phase1/submission_template.json').is_file() and (out/'reports/phase1/tapeout_declaration.json').is_file()
     assert not (out/'canonical.json').exists()
 

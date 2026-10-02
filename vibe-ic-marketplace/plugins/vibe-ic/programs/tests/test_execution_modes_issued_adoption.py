@@ -146,3 +146,28 @@ def test_current_measured_default_override_remains_adoptable(tmp_path):
     selected_run = tmp_path / 'default-override'
     assert c.run(ctx, selected_run, superiority=superiority)['candidate_statuses'] == {'b': 'ELIGIBLE'}
     assert c.adopt(ctx, selected_run, H.choice(ctx, selected_run, 'b'))['selected'] == 'b'
+
+
+def test_manifest_route_mutation_cannot_be_bought_with_mutable_receipts(tmp_path):
+    ctx = H.context(tmp_path)
+    c = H.controller(H.adapter())
+    root = tmp_path / 'run'
+    c.run(ctx, root)
+    receipt_path = root / 'a/receipt.json'
+    manifest_path = root / 'a/inputs/issued_manifest.json'
+    receipt = H.read(root)
+    arm = c.registry.adapters(ctx.step_id)[0]
+    mutated = {'step_id': '8', 'parameters': {'route': 'other'}, 'files': {}}
+    manifest_path.chmod(0o644)
+    manifest_path.write_text(json.dumps(mutated, sort_keys=True) + '\n')
+    # The adversary controls the mutable cache, receipt and AI choice digest.
+    M._ISSUED_AUTHORITY[str(manifest_path)] = M.digest(manifest_path)
+    receipt['manifest_payload'] = mutated
+    receipt['manifest_sha256'] = M.digest(manifest_path)
+    receipt_path.write_text(json.dumps(receipt))
+    with pytest.raises(M.Refusal, match='ISSUED_MANIFEST_CHANGED'):
+        M.Controller._eligible(receipt, ctx, arm)
+    choice = H.choice(ctx, root)
+    choice['receipt_sha256'] = M.digest(receipt_path)
+    with pytest.raises(M.Refusal):
+        c.adopt(ctx, root, choice)

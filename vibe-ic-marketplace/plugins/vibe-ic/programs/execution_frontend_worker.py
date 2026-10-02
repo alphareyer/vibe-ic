@@ -125,9 +125,23 @@ def produce_05ic(project,output,template=None,no_template_reason=None,**k):
         if value is not None and key in bound and bound[key] != value:
             raise ValueError(f'0.5ic: {key} disagrees with issued manifest')
     project, output = Path(project), Path(output)
+    answers_source = project / 'input/step_0_5ic_answers.json'
+    if not answers_source.is_file():
+        raise ValueError('0.5ic: answers file is required')
+    try:
+        answers_doc=json.loads(answers_source.read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValueError('0.5ic: answers file is invalid') from exc
+    if not isinstance(answers_doc, dict):
+        raise ValueError('0.5ic: answers file must be a JSON object')
     staged = output / 'project'; output.mkdir(parents=True, exist_ok=True)
     if staged.exists(): shutil.rmtree(staged)
-    shutil.copytree(project, staged, ignore=shutil.ignore_patterns('issued_manifest.json','frontend_outputs'))
+    def _ignore(src, names):
+        ignored=set(shutil.ignore_patterns('issued_manifest.json','frontend_outputs')(src, names))
+        ignored.update(name for name in names
+                       if (Path(src) / name).resolve() == output.resolve())
+        return ignored
+    shutil.copytree(project, staged, ignore=_ignore)
     args1=['python3',str(Path(__file__).with_name('submission_template_ingest.py')),str(staged)]
     if has_template:
         template_path=Path(template)
@@ -145,13 +159,6 @@ def produce_05ic(project,output,template=None,no_template_reason=None,**k):
     if has_template and not declared_absence and slot:
         args1 += ['--slot', str(slot)]
     answers=staged/'input/step_0_5ic_answers.json'
-    if not answers.is_file(): raise ValueError('0.5ic: answers file is required')
-    try:
-        answers_doc=json.loads(answers.read_text())
-    except (OSError, ValueError, TypeError) as exc:
-        raise ValueError('0.5ic: answers file is invalid') from exc
-    if not isinstance(answers_doc, dict):
-        raise ValueError('0.5ic: answers file must be a JSON object')
     if not declared_absence:
         staged_template=Path(args1[args1.index('--template') + 1])
         if not staged_template.is_absolute():
