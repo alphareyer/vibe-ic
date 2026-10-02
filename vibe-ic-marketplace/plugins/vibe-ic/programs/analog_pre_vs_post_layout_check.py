@@ -232,12 +232,36 @@ def run_audit(project: Path) -> AuditResult:
         # by the same reading of it.
         block_pairs: List[tuple] = []
         try:
-            data = json.loads(pvp_path.read_text(errors="replace"))
-        except (json.JSONDecodeError, OSError):
+            raw_text = pvp_path.read_text(errors="replace")
+        except OSError as exc:
             result.findings.append(Finding(
                 rule="PRE_VS_POST_PARSE_ERROR",
                 severity="WARNING",
-                message=f"Cannot parse pre_vs_post.json for block '{block}'",
+                message=(f"Cannot read pre_vs_post.json for block '{block}': "
+                         f"{exc}"),
+                file=str(pvp_path),
+            ))
+            continue
+
+        parsed = _acc.parse_pre_vs_post_json(raw_text)
+        if any(error.get("rule") == "PRE_VS_POST_INVALID_JSON"
+               for error in parsed.errors):
+            for error in parsed.errors:
+                result.findings.append(Finding(
+                    rule=str(error.get("rule") or "PRE_VS_POST_PARSE_ERROR"),
+                    severity="ERROR",
+                    message=(f"Block '{block}': "
+                             f"{error.get('detail') or error.get('rule')}"),
+                    file=str(pvp_path),
+                ))
+            continue
+        try:
+            data = json.loads(raw_text)
+        except (json.JSONDecodeError, TypeError) as exc:  # parser already guards
+            result.findings.append(Finding(
+                rule="PRE_VS_POST_PARSE_ERROR",
+                severity="ERROR",
+                message=f"Cannot parse pre_vs_post.json for block '{block}': {exc}",
                 file=str(pvp_path),
             ))
             continue
@@ -245,7 +269,7 @@ def run_audit(project: Path) -> AuditResult:
         # One parser owns schema normalization, pair-derived deltas, stated
         # delta consistency, and the artifact-level status mapping.  This is
         # the same result consumed by the A7 runner and analog cut-over.
-        parsed = _acc.parse_pre_vs_post(data)
+        # `parsed` is the shared parser result from the raw JSON above.
         if parsed.container_key is None:
             if isinstance(data, dict):
                 unreadable_schema.append(

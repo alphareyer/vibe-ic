@@ -263,6 +263,10 @@ def _check_block(project: Path, block: str, max_delta_pct: float
                 "A7_POSTSIM_NONFINITE_DELTA",
             "PRE_VS_POST_PAIR_REQUIRED":
                 "A7_POSTSIM_PAIR_REQUIRED",
+            "PRE_VS_POST_CONTAINER_REQUIRED":
+                "A7_POSTSIM_NO_SPECS",
+            "PRE_VS_POST_EMPTY_SPECS":
+                "A7_POSTSIM_NO_SPECS",
         }.get(parser_rule, "A7_POSTSIM_" + parser_rule)
         parse_findings.append({
             "block": block,

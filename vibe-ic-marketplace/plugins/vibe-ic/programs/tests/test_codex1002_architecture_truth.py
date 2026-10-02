@@ -320,6 +320,72 @@ def test_a7_delta_only_record_is_rejected_by_all_three_consumers(
     assert record["result"] == "FAIL"
 
 
+@pytest.mark.parametrize("label,artifact,raw", [
+    ("missing_file", None, None),
+    ("missing_section", {"overall_status": "OK"}, None),
+    ("malformed_json", None, "{"),
+    ("empty_object", {}, None),
+    ("empty_specs", {"specs": []}, None),
+    ("wrong_container_scalar", {"specs": 7}, None),
+    ("wrong_container_list", [], None),
+    ("non_dict_row", {"specs": [1]}, None),
+    ("missing_pair", {"specs": [{"name": "vout", "delta_pct": 5.0}]}, None),
+], ids=lambda value: value if isinstance(value, str) else None)
+@pytest.mark.parametrize("invalid_arm", ["direct", "tool"])
+def test_a7_invalid_documents_fail_cutover_and_never_fallback(
+        tmp_path: Path, label: str, artifact: object, raw: str | None,
+        invalid_arm: str) -> None:
+    """Every malformed/missing arm is a b3 FAIL, with no fabricated A3 token."""
+    import analog_b_analog_cutover as cutover
+    import subprocess
+    import analog_a7_post_layout_resim_check as runner_gate
+    import analog_pre_vs_post_layout_check as flow_gate
+
+    # Exercise the two A7 gates on the same malformed tree. Missing evidence
+    # is allowed to be a gate-specific missing/vacuous rc; every other case
+    # must be nonzero, and malformed JSON is explicitly rc=1 in both gates.
+    _write_boundary_tree(tmp_path, 9.0)
+    pvp = tmp_path / "phase3/analog/ldo/pre_vs_post.json"
+    if label == "missing_file":
+        pvp.unlink()
+    elif label == "malformed_json":
+        pvp.write_text(raw or "{", encoding="utf-8")
+    else:
+        pvp.write_text(json.dumps(artifact), encoding="utf-8")
+    for program in (runner_gate.__file__, flow_gate.__file__):
+        report = tmp_path / (Path(program).stem + ".json")
+        cp = subprocess.run([sys.executable, program, str(tmp_path),
+                             "--json", str(report)],
+                            capture_output=True, text=True)
+        if label != "missing_file":
+            assert cp.returncode != 0, (label, program, cp.stdout, cp.stderr)
+        if label == "malformed_json":
+            assert cp.returncode == 1, (label, program, cp.stdout, cp.stderr)
+
+    # The cutover arms carry the same invalid document on exactly one side.
+    valid = {"specs": [{"name": "vout", "pre_value": 100.0,
+                         "post_value": 99.0, "delta_pct": -1.0}],
+             "overall_status": "OK"}
+    direct = _write_cutover_arm(tmp_path / "direct", valid)
+    tool = _write_cutover_arm(tmp_path / "tool", valid)
+    target = direct if invalid_arm == "direct" else tool
+    target_pvp = target / "phase3/analog/blk/pre_vs_post.json"
+    if label == "missing_file":
+        target_pvp.unlink()
+    elif label == "malformed_json":
+        target_pvp.write_text(raw or "{", encoding="utf-8")
+    else:
+        target_pvp.write_text(json.dumps(artifact), encoding="utf-8")
+    record = cutover.compare(cutover.manifest(direct), direct, tool, "A7",
+                             _cutover_drive(), _cutover_drive(), None,
+                             PLUGIN / "flow" / "phase1_phase2_phase3.yaml")
+    side_errors = record["b3"]["parse_errors"][invalid_arm]
+    assert side_errors, (label, invalid_arm, record)
+    assert record["b3"]["fallback_to"] is None
+    assert record["b3"]["pass"] is False
+    assert record["result"] == "FAIL"
+
+
 def test_a7_threshold_mutation_is_rejected_by_the_consistency_contract() -> None:
     """Reverse control: changing the flow declaration to 30% cannot look
     consistent with the executable 10% gates."""

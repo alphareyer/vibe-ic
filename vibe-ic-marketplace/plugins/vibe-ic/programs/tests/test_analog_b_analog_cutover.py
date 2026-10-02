@@ -59,7 +59,9 @@ def _pvp_pair(pre: float, post: float, stated: float,
 
 
 def test_two_arms_that_differ_only_by_the_steps_own_records_pass(tmp_path):
-    d = _arm(tmp_path, "D")
+    d = _arm(tmp_path, "D", {
+        "phase3/analog/blk/pre_vs_post.json": _pvp(0.1),
+    })
     base = B.manifest(d)
     t = _arm(tmp_path, "T", {"phase3/analog/blk/pre_vs_post.json": _pvp(0.1),
                              "phase3/analog/blk/a7_post_layout.json": "{}"})
@@ -128,7 +130,9 @@ def test_b2_a_missing_compliance_record_is_not_a_pass(tmp_path):
 
 def test_b3_a_degradation_past_the_declared_threshold_only_in_the_tool_arm_fails(
         tmp_path):
-    d = _arm(tmp_path, "D")
+    d = _arm(tmp_path, "D", {
+        "phase3/analog/blk/pre_vs_post.json": _pvp(0.1),
+    })
     base = B.manifest(d)
     t = _arm(tmp_path, "T", {"phase3/analog/blk/pre_vs_post.json": _pvp(12.5)})
     rec = B.compare(base, d, t, "A7", _drive(_D), _drive(_T), None, FLOW)

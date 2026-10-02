@@ -64,7 +64,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from _atomic_artefact import write_json
-from _analog_a_check_common import parse_pre_vs_post
+from _analog_a_check_common import PrePostParseResult, parse_pre_vs_post_json
 
 PROGRAM = "analog_b_analog_cutover"
 PROGRAMS_DIR = Path(__file__).resolve().parent
@@ -182,9 +182,12 @@ def reentries(project: Path, blocks: List[str], threshold: Optional[float],
     for b in blocks:
         p = project / "phase3" / "analog" / b / "pre_vs_post.json"
         try:
-            parsed = parse_pre_vs_post(json.loads(p.read_text()))
-        except (OSError, ValueError):
-            continue
+            parsed = parse_pre_vs_post_json(p.read_text())
+        except OSError as exc:
+            parsed = PrePostParseResult((), (), ({
+                    "rule": "PRE_VS_POST_MISSING",
+                    "detail": f"cannot read {p}: {exc}",
+                },), None, None, None)
         if parsed.errors and parse_errors is not None:
             parse_errors[b] = [dict(error) for error in parsed.errors]
         hot = [row.name for row in parsed.rows

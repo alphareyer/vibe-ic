@@ -153,16 +153,39 @@ def parse_pre_vs_post(data: Any) -> PrePostParseResult:
             break
 
     items = []
+    structural_errors: List[dict] = []
     if isinstance(raw, list):
+        if not raw:
+            structural_errors.append({
+                "rule": "PRE_VS_POST_EMPTY_SPECS",
+                "detail": f"{container_key} must contain at least one row",
+            })
         items = [(None, item) for item in raw]
     elif isinstance(raw, dict):
+        if not raw:
+            structural_errors.append({
+                "rule": "PRE_VS_POST_EMPTY_SPECS",
+                "detail": f"{container_key} must contain at least one row",
+            })
         items = [(name, item) for name, item in raw.items()]
+    elif container_key is not None:
+        structural_errors.append({
+            "rule": "PRE_VS_POST_CONTAINER_INVALID",
+            "detail": (f"{container_key} must be a JSON list or object, "
+                       f"got {type(raw).__name__}"),
+        })
     elif isinstance(data.get("pre"), dict) and isinstance(data.get("post"), dict):
         # Flat form is an accepted schema even without a container key.
         container_key = "pre/post"
         pre, post = data["pre"], data["post"]
+        shared = pre.keys() & post.keys()
+        if not shared:
+            structural_errors.append({
+                "rule": "PRE_VS_POST_PAIR_REQUIRED",
+                "detail": "flat pre/post objects share no measured spec",
+            })
         items = [(name, {"pre_value": pre[name], "post_value": post[name]})
-                 for name in pre.keys() & post.keys()]
+                 for name in shared]
     elif raw is None:
         # A single row is convenient for small producers and is harmless to
         # accept alongside the documented list/dict containers.
@@ -170,12 +193,23 @@ def parse_pre_vs_post(data: Any) -> PrePostParseResult:
                + PRE_VS_POST_DELTA_KEYS):
             container_key = "single"
             items = [(data.get("name", data.get("spec", "?")), data)]
+        else:
+            structural_errors.append({
+                "rule": "PRE_VS_POST_CONTAINER_REQUIRED",
+                "detail": ("a comparisons/specs container or a flat finite "
+                           "pre/post evidence pair is required"),
+            })
 
     rows: List[PrePostRow] = []
     pairs: List[Tuple[float, float]] = []
-    errors: List[dict] = []
+    errors: List[dict] = list(structural_errors)
     for key_name, item in items:
         if not isinstance(item, dict):
+            errors.append({
+                "rule": "PRE_VS_POST_ROW_INVALID",
+                "name": str(key_name) if key_name is not None else "?",
+                "detail": "spec row must be a JSON object",
+            })
             continue
         name = str(item.get("name", item.get("spec", key_name or "?")))
         pre_key = next((k for k in PRE_VS_POST_PRE_KEYS if k in item), None)
@@ -267,6 +301,22 @@ def parse_pre_vs_post(data: Any) -> PrePostParseResult:
             })
     return PrePostParseResult(tuple(rows), tuple(pairs), tuple(errors),
                               container_key, overall, expected)
+
+
+def parse_pre_vs_post_json(text: str) -> PrePostParseResult:
+    """Parse JSON text and return a structured error instead of fail-open.
+
+    File consumers use this entry point so malformed JSON is part of the same
+    shared parser verdict as malformed document structure.
+    """
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        return PrePostParseResult((), (), ({
+            "rule": "PRE_VS_POST_INVALID_JSON",
+            "detail": f"invalid JSON: {exc}",
+        },), None, None, None)
+    return parse_pre_vs_post(data)
 
 
 def block_list_path(project: Path) -> Optional[Path]:
