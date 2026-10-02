@@ -900,6 +900,38 @@ def route_task(prompt: str = "",
     return classify_task_nature(prompt, bool(rtl_paths), nature)
 
 
+def semantic_routing_payload(prompt: str, *, context: Optional[Dict[str, Any]] = None,
+                             requested_evidence: Optional[str] = None,
+                             delivery_target: Optional[str] = None) -> Dict[str, Any]:
+    """Return the identity-free payload a semantic route reviewer may read."""
+    from route_decision import build_semantic_payload  # noqa: PLC0415
+    return build_semantic_payload(
+        prompt, context=context, requested_evidence=requested_evidence,
+        delivery_target=delivery_target)
+
+
+def route_decision_receipt(prompt: str, *, nature: str,
+                           requested_evidence: Optional[str] = None,
+                           delivery_target: str = "rtl",
+                           source_sha256: Optional[str] = None,
+                           context: Optional[Dict[str, Any]] = None,
+                           explicit_user_evidence: Any = None) -> Dict[str, Any]:
+    """Derive a typed route receipt from semantic facts, never AI step ids."""
+    from route_decision import make_route_receipt  # noqa: PLC0415
+    payload = semantic_routing_payload(
+        prompt, context=context, requested_evidence=requested_evidence,
+        delivery_target=delivery_target)
+    evidence = requested_evidence or NATURE_ENTRY[nature]["default_evidence"]
+    return make_route_receipt(
+        nature=nature, requested_evidence=evidence,
+        delivery_target=delivery_target,
+        semantic_payload_sha256=payload["semantic_payload_sha256"],
+        source_sha256=source_sha256 or payload["prompt_sha256"],
+        nature_table=NATURE_ENTRY, evidence_table=EVIDENCE_EXIT,
+        delivery_table=DELIVERY_TARGETS,
+        explicit_user_evidence=explicit_user_evidence)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="Which normal plugin entry does this IC task come in at?")

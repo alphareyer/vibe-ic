@@ -4980,7 +4980,12 @@ def _resume_solver_argv(runner: Path, proj: Path, supplied_rtl: bool,
     return _solver_argv(runner, proj, effective_entry, exit_step)
 
 
-def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget) -> dict:
+def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget,
+                             *, force_current: bool = False,
+                             route_receipt: dict | None = None,
+                             task_sha256: str | None = None,
+                             source_sha256: str | None = None,
+                             ldoc_root_handle: str | None = None) -> dict:
     """Materialize canonical Phase-1 provenance before a mid-flow entry.
 
     This prerequisite is BLOCKING: missing or mutable provenance must stop the
@@ -4994,10 +4999,11 @@ def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget) -> dict
     handoff after it has emitted all hash-bound L-docs.
     """
     import emit_attestation as emit_attestation          # noqa: PLC0415
+    import route_decision as rd                          # noqa: PLC0415
 
     project = Path(project).resolve()
     existing = emit_attestation.phase1_provenance(project)
-    if existing.get("ran") is True:
+    if existing.get("ran") is True and not force_current:
         return {"status": "REUSED", "runner_rc": None,
                 "provenance": existing}
 
@@ -5034,8 +5040,314 @@ def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget) -> dict
     if provenance.get("ran") is not True:
         return {"status": "BLOCKED", "runner_rc": process.rc,
                 "reason": "D1-only front door emitted no hash-bound L-doc provenance", **diagnostics}
-    return {"status": "GENERATED", "runner_rc": process.rc,
-            "provenance": provenance, **diagnostics}
+    result = {"status": "GENERATED", "runner_rc": process.rc,
+              "provenance": provenance, **diagnostics}
+    if force_current:
+        # The report producer is the authority for D1's typed verdict.  A
+        # digest and ``ran: true`` alone describe provenance, not gate success.
+        import _path_layout as _pl                    # noqa: PLC0415
+        report_path = _pl.report_path(project, "phase1_one_shot.json")
+        try:
+            report_bytes = report_path.read_bytes()
+            report = json.loads(report_bytes)
+        except (OSError, ValueError, TypeError) as exc:
+            return {**result, "d1_gate_error": f"D1_GATE_REPORT_UNREADABLE: {exc}"}
+        binding = report.get("runner_binding")
+        invocation_id = str(process.invocation_id or "")
+        if (not invocation_id
+                or not isinstance(binding, dict)
+                or binding.get("invocation_id") != invocation_id):
+            return {**result, "d1_gate_error": "D1_GATE_REPORT_NOT_CURRENT_CALL"}
+        if source_sha256 is None or task_sha256 is None or ldoc_root_handle is None:
+            return {**result, "d1_gate_error": "D1_GATE_BINDING_INPUT_MISSING"}
+        result["d1_gate"] = rd.make_d1_gate(
+            verdict=str(report.get("verdict") or ""),
+            route_receipt=route_receipt or {},
+            provenance=provenance,
+            source_sha256=source_sha256,
+            task_sha256=task_sha256,
+            ldoc_root_handle=ldoc_root_handle,
+            invocation_id=invocation_id,
+            report_sha256=hashlib.sha256(report_bytes).hexdigest(),
+            waiver_receipt=(report.get("waiver_receipt")
+                            if isinstance(report.get("waiver_receipt"), dict)
+                            else None))
+    return result
+
+
+def _receipt_store_path(project: Path, kind: str, digest: str) -> Path:
+    """Immutable per-run receipt location; the digest is part of the path."""
+    if not re.fullmatch(r"[0-9a-f]{64}", str(digest)):
+        raise ValueError(f"receipt digest is not canonical: {digest!r}")
+    return (Path(project) / "reports" / "orchestrator" / "receipts" /
+            str(kind) / f"{digest}.json")
+
+
+def _receipt_current_pointer(project: Path, kind: str) -> Path:
+    """Mutable atomic pointer to the latest immutable receipt of ``kind``."""
+    return (Path(project) / "reports" / "orchestrator" / "receipts" /
+            f"{kind}.current.json")
+
+
+_RECEIPT_ENVELOPE_SCHEMA = "vibeic.run_receipt_envelope.v1"
+_RECEIPT_POINTER_SCHEMA = "vibeic.current_receipt_pointer.v2"
+_RECEIPT_UNSET = object()
+
+
+def _receipt_sha256_json(value: object) -> str:
+    return hashlib.sha256(json.dumps(
+        value, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _write_bound_route_record(path: Path, value: dict) -> None:
+    """Publish a route/activation record once; changed bytes are a refusal."""
+    path = Path(path)
+    if path.is_symlink():
+        raise ValueError(f"route record path is linked: {path}")
+    if path.is_file():
+        current = json.loads(path.read_text(errors="replace"))
+        if current != value:
+            raise ValueError(f"route record changed after issue: {path}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(path, value)
+
+
+def _receipt_lock_path(project: Path, kind: str) -> Path:
+    return (Path(project) / "reports" / "orchestrator" / "receipts" /
+            f"{kind}.current.lock")
+
+
+def _read_json_regular(path: Path) -> dict:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"receipt is not a regular file: {path}")
+    try:
+        value = json.loads(path.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"receipt is unreadable: {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"receipt is not an object: {path}")
+    return value
+
+
+def _read_current_receipt(project: Path, kind: str) -> dict:
+    """Read and verify the current pointer and its immutable predecessor chain."""
+    project = Path(project).resolve()
+    pointer_path = _receipt_current_pointer(project, kind)
+    pointer = _read_json_regular(pointer_path)
+    if pointer.get("schema") != _RECEIPT_POINTER_SCHEMA or pointer.get("kind") != kind:
+        raise ValueError("RECEIPT_CURRENT_POINTER_INVALID")
+    try:
+        sequence = int(pointer["sequence"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("RECEIPT_CURRENT_SEQUENCE_INVALID") from None
+    receipt_digest = str(pointer.get("receipt_digest") or "")
+    immutable = _receipt_store_path(project, kind, receipt_digest)
+    if Path(str(pointer.get("receipt_path") or "")).resolve() != immutable.resolve():
+        raise ValueError("RECEIPT_CURRENT_PATH_MISMATCH")
+    envelope = _read_json_regular(immutable)
+    if envelope.get("schema") != _RECEIPT_ENVELOPE_SCHEMA:
+        raise ValueError("RECEIPT_ENVELOPE_INVALID")
+    body = {key: envelope.get(key) for key in (
+        "schema", "kind", "run_id", "sequence", "predecessor_digest",
+        "payload_digest_field", "payload_digest", "payload")}
+    if _receipt_sha256_json(body) != receipt_digest:
+        raise ValueError("RECEIPT_ENVELOPE_DIGEST_MISMATCH")
+    for key in ("kind", "run_id", "sequence", "predecessor_digest",
+                "payload_digest_field", "payload_digest"):
+        if pointer.get(key) != envelope.get(key):
+            raise ValueError(f"RECEIPT_CURRENT_{key.upper()}_MISMATCH")
+    if not isinstance(envelope.get("payload"), dict):
+        raise ValueError("RECEIPT_PAYLOAD_INVALID")
+    payload_field = envelope.get("payload_digest_field")
+    if (not isinstance(payload_field, str)
+            or envelope["payload"].get(payload_field) != envelope.get("payload_digest")):
+        raise ValueError("RECEIPT_PAYLOAD_DIGEST_MISMATCH")
+
+    # A pointer may never be moved back to an older immutable receipt.  Scan
+    # the append-only directory and require the advertised sequence to be the
+    # largest sequence in the predecessor chain.
+    store = immutable.parent
+    sequences = []
+    for candidate in store.glob("*.json"):
+        if candidate.is_symlink() or candidate == pointer_path:
+            continue
+        try:
+            item = _read_json_regular(candidate)
+        except ValueError:
+            continue
+        if (item.get("schema") == _RECEIPT_ENVELOPE_SCHEMA
+                and item.get("kind") == kind):
+            try:
+                sequences.append(int(item.get("sequence")))
+            except (TypeError, ValueError):
+                raise ValueError("RECEIPT_SEQUENCE_INVALID") from None
+    if not sequences or sequence != max(sequences):
+        raise ValueError("RECEIPT_CURRENT_POINTER_ROLLBACK")
+    predecessor = envelope.get("predecessor_digest")
+    if sequence == 1:
+        if predecessor is not None:
+            raise ValueError("RECEIPT_FIRST_PREDECESSOR_INVALID")
+    else:
+        if (not isinstance(predecessor, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", predecessor)):
+            raise ValueError("RECEIPT_PREDECESSOR_INVALID")
+        previous = _receipt_store_path(project, kind, predecessor)
+        prior = _read_json_regular(previous)
+        if prior.get("kind") != kind or int(prior.get("sequence", -1)) != sequence - 1:
+            raise ValueError("RECEIPT_PREDECESSOR_CHAIN_INVALID")
+    return {"pointer": pointer, "envelope": envelope,
+            "receipt": envelope["payload"], "path": immutable}
+
+
+def _publish_current_receipt(project: Path, kind: str, value: dict,
+                             *, digest_field: str, run_id: str | None = None,
+                             expected_predecessor_digest: str | None | object = _RECEIPT_UNSET,
+                             expected_sequence: int | object = _RECEIPT_UNSET) -> Path:
+    """Append one run receipt and CAS-advance its current pointer.
+
+    The semantic payload may repeat across runs, but every immutable envelope
+    has a fresh run id, sequence, and predecessor.  A replayed run id or an
+    A→B→A pointer update is refused while the pointer remains atomically
+    replaceable for a legitimate next invocation.
+    """
+    project = Path(project).resolve()
+    digest = str(value.get(digest_field) or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError(f"receipt digest is not canonical: {digest!r}")
+    run_id = str(run_id or uuid.uuid4().hex)
+    if not run_id or "/" in run_id or "\\" in run_id:
+        raise ValueError("RECEIPT_RUN_ID_INVALID")
+    root = _receipt_current_pointer(project, kind).parent
+    root.mkdir(parents=True, exist_ok=True)
+    lock = _receipt_lock_path(project, kind)
+    with lock.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            pointer = _receipt_current_pointer(project, kind)
+            current = None
+            if pointer.exists():
+                current = _read_current_receipt(project, kind)["pointer"]
+            current_digest = current.get("receipt_digest") if current else None
+            current_sequence = int(current.get("sequence", 0)) if current else 0
+            if (expected_predecessor_digest is not _RECEIPT_UNSET
+                    and expected_predecessor_digest != current_digest):
+                raise ValueError("RECEIPT_PREDECESSOR_COMPARE_FAILED")
+            if (expected_sequence is not _RECEIPT_UNSET
+                    and int(expected_sequence) != current_sequence):
+                raise ValueError("RECEIPT_SEQUENCE_COMPARE_FAILED")
+            store = _receipt_store_path(project, kind, digest).parent
+            store.mkdir(parents=True, exist_ok=True)
+            for candidate in store.glob("*.json"):
+                if candidate.is_symlink() or candidate == pointer:
+                    continue
+                try:
+                    prior = _read_json_regular(candidate)
+                except ValueError:
+                    continue
+                if (prior.get("schema") == _RECEIPT_ENVELOPE_SCHEMA
+                        and prior.get("kind") == str(kind)
+                        and prior.get("run_id") == run_id):
+                    raise ValueError("RECEIPT_RUN_ID_REPLAY")
+            predecessor = current_digest
+            sequence = current_sequence + 1
+            envelope_body = {
+                "schema": _RECEIPT_ENVELOPE_SCHEMA,
+                "kind": str(kind), "run_id": run_id,
+                "sequence": sequence, "predecessor_digest": predecessor,
+                "payload_digest_field": str(digest_field),
+                "payload_digest": digest, "payload": value,
+            }
+            envelope_digest = _receipt_sha256_json(envelope_body)
+            immutable = _receipt_store_path(project, kind, envelope_digest)
+            _write_bound_route_record(immutable, envelope_body)
+            # Re-read the compare point immediately before replacing the
+            # pointer.  Cooperative publishers therefore cannot overwrite a
+            # concurrent advancement with a stale predecessor.
+            if pointer.exists():
+                latest = _read_json_regular(pointer)
+                if (latest.get("receipt_digest") != current_digest
+                        or int(latest.get("sequence", -1)) != current_sequence):
+                    raise ValueError("RECEIPT_CURRENT_COMPARE_FAILED")
+            if pointer.is_symlink():
+                raise ValueError(f"receipt current pointer is linked: {pointer}")
+            pointer_body = {
+                "schema": _RECEIPT_POINTER_SCHEMA, "kind": str(kind),
+                "run_id": run_id, "sequence": sequence,
+                "predecessor_digest": predecessor,
+                "payload_digest_field": str(digest_field),
+                "payload_digest": digest,
+                "receipt_digest": envelope_digest,
+                "receipt_path": str(immutable),
+            }
+            _atomic_write_json(pointer, pointer_body)
+            return immutable
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _activate_route_d1(project: Path, task: dict, route_receipt: dict,
+                       runner: Path, runner_budget) -> tuple[dict, dict, dict]:
+    """Run/consume D1 and return (frontdoor, pending, activation).
+
+    D1 is a two-stage admission: the pending record is visible before the
+    canonical D1-only runner, and activation is published only after the
+    runner emitted current L-doc provenance. A runner refusal or missing
+    provenance therefore cannot unlock any later step.
+    """
+    import emit_attestation as emit_attestation          # noqa: PLC0415
+    import route_decision as rd                            # noqa: PLC0415
+
+    project = Path(project).resolve()
+    source_sha = str(route_receipt.get("source_sha256") or "")
+    if not source_sha:
+        raise ValueError("D1_ACTIVATION_SOURCE_MISSING")
+    task_sha = str(task.get("task_sha256") or "")
+    pending = rd.write_d1_pending(
+        _receipt_current_pointer(project, "d1_pending"), route_receipt=route_receipt,
+        source_sha256=source_sha, task_sha256=task_sha)
+    _publish_current_receipt(project, "d1_pending", pending,
+                             digest_field="activation_sha256",
+                             run_id=f"{task_sha}:d1-pending")
+    pending_current = _read_current_receipt(project, "d1_pending")
+    if pending_current["receipt"].get("activation_sha256") != pending.get("activation_sha256"):
+        raise ValueError("D1_PENDING_CURRENT_POINTER_MISMATCH")
+    rd.admit_canonical_step(
+        step="D1", pending=pending, activation=None,
+        route_receipt=route_receipt, task_sha256=task_sha,
+        source_sha256=source_sha)
+    ldoc_root = project / "phase1" / "generated_docs"
+    ldoc_handle = _sha256_text(str(ldoc_root.resolve()))
+    frontdoor = _ensure_phase1_frontdoor(
+        runner, project, runner_budget, force_current=True,
+        route_receipt=route_receipt, task_sha256=task_sha,
+        source_sha256=source_sha, ldoc_root_handle=ldoc_handle)
+    if frontdoor.get("status") == "BLOCKED":
+        # Keep the named pending state. Never manufacture activation on a
+        # refusal, even if stale L-docs happen to be on disk.
+        raise RuntimeError(
+            "D1_ENTRY_PENDING: canonical D1 did not activate: "
+            f"{frontdoor.get('reason')}")
+    provenance = frontdoor.get("provenance") or emit_attestation.phase1_provenance(project)
+    d1_gate = frontdoor.get("d1_gate")
+    if not isinstance(d1_gate, dict):
+        raise RuntimeError(frontdoor.get("d1_gate_error") or
+                           "D1_ENTRY_PENDING: current D1 gate receipt missing")
+    activation = rd.activate_d1(
+        pending=pending, route_receipt=route_receipt,
+        provenance=provenance, source_sha256=source_sha,
+        task_sha256=task_sha, ldoc_root_handle=ldoc_handle,
+        d1_gate=d1_gate)
+    _publish_current_receipt(project, "d1_activation", activation,
+                             digest_field="activation_sha256",
+                             run_id=(f"{task_sha}:d1-activation:"
+                                     f"{d1_gate.get('invocation_id')}"))
+    activation_current = _read_current_receipt(project, "d1_activation")
+    if (activation_current["receipt"].get("activation_sha256")
+            != activation.get("activation_sha256")):
+        raise ValueError("D1_ACTIVATION_CURRENT_POINTER_MISMATCH")
+    return frontdoor, pending, activation
 
 
 def _declared_route_ai_backup(routing: dict) -> dict:
@@ -5094,19 +5406,42 @@ def _public_input_reasons(task: dict) -> list[str]:
 def _route_contract_sha256() -> str:
     """Bind an AI decision to the general nature-to-flow mapping it selects."""
     import task_nature_route as tnr                       # noqa: PLC0415
+    import route_decision as rd                            # noqa: PLC0415
     return _sha256_text(json.dumps(
-        {"nature_entry": tnr.NATURE_ENTRY, "evidence_exit": tnr.EVIDENCE_EXIT},
+        {"nature_entry": tnr.NATURE_ENTRY,
+         "evidence_exit": tnr.EVIDENCE_EXIT,
+         "delivery_targets": tnr.DELIVERY_TARGETS,
+         "canonical_dag_sha256": rd.canonical_dag()["sha256"]},
         sort_keys=True))
 
 
 def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
-                        proposal: dict, run_p: Path) -> dict:
+                        proposal: dict, run_p: Path,
+                        benchmark: str | None = None) -> dict:
     """Issue an input-only route question before any design runner executes."""
     import task_nature_route as tnr                       # noqa: PLC0415
+    import route_decision as rd                            # noqa: PLC0415
     project, run_p = Path(project).resolve(), Path(run_p).resolve()
     prompt = project / "input" / "phase1_prompt.md"
     prompt_sha = _sha256_text(prompt.read_text(errors="replace"))
     safe = _safe_problem_id(str(problem_id))
+    prompt_text = prompt.read_text(errors="replace")
+    semantic_payload = tnr.semantic_routing_payload(
+        prompt_text,
+        context={"program_proposal": {
+            "nature": proposal.get("nature"),
+            "entry_nature": proposal.get("entry_nature"),
+            "source": proposal.get("source"),
+            "needs_ai_parse": proposal.get("needs_ai_parse"),
+        }})
+    response_path = str((run_p / "ai_routes" / safe /
+                         f"{prompt_sha}.json").resolve())
+    coordinator_binding = rd.build_coordinator_binding(
+        benchmark=benchmark, problem_id=str(problem_id),
+        project_path=str(project), prompt_path=str(prompt),
+        response_path=response_path,
+        semantic_payload_sha256=semantic_payload["semantic_payload_sha256"],
+        harness_digest=None, golden_digest=None, expected_digest=None)
     task = {
         "schema": _ROUTE_TASK_SCHEMA,
         "id": str(problem_id),
@@ -5116,10 +5451,15 @@ def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
         "prompt_chars": int(staged.get("prompt_chars") or 0),
         "public_original_input": staged["public_original_input"],
         "program_proposal": proposal,
+        # This is the semantic handoff.  It contains no benchmark label,
+        # problem id, coordinator path, harness/golden/expected answer, or
+        # other opaque identity.  Those values live in the separate binding.
+        "semantic_payload": semantic_payload,
+        "semantic_payload_sha256": semantic_payload["semantic_payload_sha256"],
+        "coordinator_binding": coordinator_binding,
         "routing_contract_sha256": _route_contract_sha256(),
         "allowed_natures": sorted(tnr.NATURE_ENTRY),
-        "response_path": str((run_p / "ai_routes" / safe /
-                              f"{prompt_sha}.json").resolve()),
+        "response_path": response_path,
         "response_contract": {
             "schema": _AI_ROUTE_SCHEMA,
             "bindings": ["id", "task_sha256", "prompt_sha256",
@@ -5132,6 +5472,13 @@ def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
                                 "only; OVERRIDE needs >=1 exact excerpt whose "
                                 "supports claim names ai_nature"),
             "rationale": "<at least 24 characters>",
+            "semantic_decision": {
+                "nature": "one allowed_natures member",
+                "requested_evidence": "optional evidence class; the Program maps it to a step",
+                "delivery_target": "optional delivery target; the Program maps it to a step",
+                "semantic_payload_sha256": semantic_payload["semantic_payload_sha256"],
+                "step_fields_forbidden": ["entry_step", "answer_step", "verify_through"],
+            },
         },
     }
     task["task_sha256"] = _sha256_text(json.dumps(task, sort_keys=True))
@@ -5150,6 +5497,7 @@ def _claim_names_nature(claim: str, nature: str) -> bool:
 def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]:
     """Fail closed on an unsigned, stale, non-blind, or ungrounded route."""
     import task_nature_route as tnr                       # noqa: PLC0415
+    import route_decision as rd                            # noqa: PLC0415
     run_p = Path(run_p).resolve()
     reasons = _public_input_reasons(task)
     try:
@@ -5169,6 +5517,14 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
             raise ValueError("route prompt changed after issue")
         if task.get("routing_contract_sha256") != _route_contract_sha256():
             raise ValueError("general route table changed after issue")
+        semantic_payload = task.get("semantic_payload")
+        if not isinstance(semantic_payload, dict) or task.get(
+                "semantic_payload_sha256") != semantic_payload.get("semantic_payload_sha256"):
+            raise ValueError("semantic route payload is missing or stale")
+        if rd.sha256_json({k: v for k, v in semantic_payload.items()
+                           if k != "semantic_payload_sha256"}) != semantic_payload.get(
+                               "semantic_payload_sha256"):
+            raise ValueError("semantic route payload digest mismatch")
         response_path = Path(str(task["response_path"]))
         expected_path = (run_p / "ai_routes" / _safe_problem_id(str(task["id"])) /
                          f"{task['prompt_sha256']}.json")
@@ -5210,10 +5566,27 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
         disposition = response.get("disposition")
         if disposition not in {"CONFIRM", "OVERRIDE", "NEEDS_CLARIFICATION"}:
             reasons.append("AI_ROUTE_INVALID: unknown disposition")
-        nature = response.get("ai_nature")
+        semantic = response.get("semantic_decision")
+        typed_route = isinstance(semantic, dict)
+        if semantic is not None and not isinstance(semantic, dict):
+            reasons.append("AI_ROUTE_INVALID: semantic_decision must be an object")
+            semantic = {}
+        semantic = semantic or {}
+        if any(key in semantic for key in ("entry_step", "answer_step", "verify_through")):
+            reasons.append("AI_ROUTE_INVALID: semantic decision may not choose flow steps")
+        if ("semantic_payload_sha256" in semantic
+                and semantic.get("semantic_payload_sha256") != task.get("semantic_payload_sha256")):
+            reasons.append("AI_ROUTE_INVALID: semantic payload binding is stale")
+        nature = semantic.get("nature", response.get("ai_nature"))
+        requested_evidence = semantic.get("requested_evidence") or None
+        delivery_target = semantic.get("delivery_target") or "rtl"
         if disposition != "NEEDS_CLARIFICATION":
             if nature not in tnr.NATURE_ENTRY:
                 reasons.append("AI_ROUTE_INVALID: ai_nature is not a product nature")
+            if requested_evidence is not None and requested_evidence not in tnr.EVIDENCE_EXIT:
+                reasons.append("AI_ROUTE_INVALID: requested_evidence is not a product evidence class")
+            if delivery_target not in tnr.DELIVERY_TARGETS:
+                reasons.append("AI_ROUTE_INVALID: delivery_target is not a product target")
             if (disposition == "CONFIRM"
                     and nature != task["program_proposal"].get("entry_nature")):
                 reasons.append("AI_ROUTE_INVALID: CONFIRM differs from proposal")
@@ -5244,6 +5617,19 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
         if disposition == "NEEDS_CLARIFICATION":
             return None, ["AI_ROUTE_NEEDS_CLARIFICATION: AI could not select a route"]
         entry = tnr.NATURE_ENTRY[nature]
+        requested_evidence = requested_evidence or entry["default_evidence"]
+        # The prompt itself is the only user-owned source available at this
+        # boundary. Reviewer prose and benchmark metadata are never Ultra
+        # evidence. The Program derives all flow steps from this receipt.
+        explicit_ultra = rd.explicit_ultra_evidence(prompt_text, source="user")
+        route_receipt = tnr.route_decision_receipt(
+            prompt_text, nature=nature,
+            requested_evidence=requested_evidence,
+            delivery_target=delivery_target,
+            source_sha256=(task["public_original_input"].get("source_sha256")
+                           or task["prompt_sha256"]),
+            explicit_user_evidence=explicit_ultra,
+            context=semantic_payload.get("context"))
         return {
             "nature": nature, "entry_nature": nature,
             "route": entry["route"], "plugin_entry": entry["plugin_entry"],
@@ -5251,6 +5637,17 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
             "needs_ai_parse": False,
             "ai_route_response_sha256": hashlib.sha256(response_path.read_bytes()).hexdigest(),
             "program_proposal": task["program_proposal"],
+            "requested_evidence": requested_evidence,
+            "delivery_target": delivery_target,
+            "route_receipt": route_receipt,
+            "semantic_payload_sha256": task["semantic_payload_sha256"],
+            "coordinator_binding": task.get("coordinator_binding"),
+            # The Program has normalized both the new semantic object and the
+            # legacy top-level nature into the same typed receipt.  This is
+            # deliberately always true at the execution boundary: callers
+            # cannot choose a weaker barrier by changing response shape.
+            "typed_route": True,
+            "normalized_legacy_semantic": not typed_route,
         }, []
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         return None, reasons + [f"AI_ROUTE_INVALID: {exc}"]
@@ -5597,6 +5994,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
     import benchmark_entry_surface_check as bes           # noqa: PLC0415
     import flow_phase_attribution as fpa                  # noqa: PLC0415
     import task_nature_route as tnr                       # noqa: PLC0415
+    import route_decision as rd                            # noqa: PLC0415
 
     entry_audit = bes.audit(Path(__file__).resolve().parents[1])
     if entry_audit.get("verdict") != "PASS":
@@ -5677,7 +6075,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             route_tasks.append(_make_ai_route_task(
-                pid, proj, staged, proposal, run_p))
+                pid, proj, staged, proposal, run_p, benchmark=bench))
         _write_jsonl(run_p / _ROUTE_WORKLIST, route_tasks)
         for name in (_BACKUP_WORKLIST, _REVIEW_WORKLIST, _REPAIR_WORKLIST):
             _write_jsonl(run_p / name, [])
@@ -5733,6 +6131,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
         route_backup: dict = {"status": "NOT_MEASURED", "skills": []}
         phase1_frontdoor = None
         process = None
+        argv: list[str] = []
         try:
             route_task = task_by_route_id[pid]
             if proj.resolve() != Path(route_task["project"]):
@@ -5759,30 +6158,58 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
 
             verdict = route_decisions[pid]
             nature = verdict["nature"]
-            # `entry_nature` is the NATURE_ENTRY key on every branch; `nature`
-            # may be the disclosing unpinned-transform label, which is not.
-            entry_row = tnr.NATURE_ENTRY[verdict["entry_nature"]]
-            entry = entry_row.get("entry_step")
-            ev = entry_row.get("default_evidence")
-            exit_step = (tnr.EVIDENCE_EXIT.get(ev) or {}).get("exit_step")
+            route_receipt = verdict.get("route_receipt")
+            if not isinstance(route_receipt, dict):
+                raise ValueError("ROUTE_RECEIPT_MISSING")
+            receipt_errors = rd.validate_route_receipt(route_receipt)
+            if receipt_errors:
+                raise ValueError("ROUTE_RECEIPT_INVALID: " + ", ".join(receipt_errors))
+            _publish_current_receipt(
+                proj, "route_decision", route_receipt,
+                digest_field="receipt_sha256",
+                run_id=f"{route_task['task_sha256']}:route")
+            current_route = _read_current_receipt(proj, "route_decision")
+            if (current_route["receipt"].get("receipt_sha256")
+                    != route_receipt.get("receipt_sha256")):
+                raise ValueError("ROUTE_RECEIPT_CURRENT_POINTER_MISMATCH")
+            # `entry_step` and `verify_through` are derived by the Program
+            # receipt. The semantic reviewer never supplies or overrides them.
+            entry = str(route_receipt["entry_step"])
+            ev = str(route_receipt["requested_evidence"])
+            exit_step = str(route_receipt["verify_through"])
             route_backup = _declared_route_ai_backup(verdict)
-
-            if entry != "D1":
-                phase1_frontdoor = _ensure_phase1_frontdoor(
-                    runner, proj, runner_budget)
-                if phase1_frontdoor.get("status") == "BLOCKED":
-                    raise RuntimeError(
-                        "canonical Phase-1 front door failed before routed "
-                        f"entry {entry}: {phase1_frontdoor.get('reason')}")
-
-            argv = _solver_argv(runner, proj, entry, exit_step)
-            process = runner_budget.run(argv)
-            if process.error is not None:
-                raise RuntimeError(process.error)
-            rc = int(process.rc)
-            got = _collect_runner_result(
-                process, argv, fmt, pid, proj,
-                required_top=_required_scorer_top(_entry(bench)))
+            # Every accepted response is normalized into the Program receipt,
+            # and every newly executed route crosses the same two-stage D1
+            # barrier.  Response shape cannot opt into a legacy bypass.
+            phase1_frontdoor, _pending, activation = _activate_route_d1(
+                proj, route_task, route_receipt, runner, runner_budget)
+            if entry == "D1":
+                nature_row = tnr.NATURE_ENTRY[verdict["entry_nature"]]
+                candidates = [str(x) for x in nature_row.get("then") or []]
+                order = {sid: i for i, sid in enumerate(rd.canonical_dag()["steps"])}
+                effective_entry = next(
+                    (sid for sid in candidates
+                     if sid in order and order[sid] <= order[exit_step]), None)
+            else:
+                effective_entry = entry
+            rd.require_d1_activation(
+                activation, route_receipt, task_sha256=route_task["task_sha256"],
+                ldoc_root_handle=_sha256_text(str((proj / "phase1" / "generated_docs").resolve())))
+            if effective_entry is None:
+                # A D1-only proof still has a receipt and activation but no
+                # downstream runner span to launch.
+                process = _ProcessOutcome(rc=0, stdout="", stderr="")
+                got = {"ok": True, "completion": "", "rtl_gen": None}
+                rc = 0
+            else:
+                argv = _solver_argv(runner, proj, effective_entry, exit_step)
+                process = runner_budget.run(argv)
+                if process.error is not None:
+                    raise RuntimeError(process.error)
+                rc = int(process.rc)
+                got = _collect_runner_result(
+                    process, argv, fmt, pid, proj,
+                    required_top=_required_scorer_top(_entry(bench)))
             diagnostic = got.get("runner_diagnostics")
             pre_gate_blocked = bool(diagnostic and diagnostic.get("reason"))
             waive = None if pre_gate_blocked else _rtl_gen_waive(proj)
@@ -5819,6 +6246,9 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 "routing_verdict": verdict, "phases": phases,
                 "public_original_input": staged["public_original_input"],
                 "phase1_frontdoor": phase1_frontdoor,
+                "route_receipt": route_receipt,
+                "d1_activation": activation,
+                "effective_entry": effective_entry,
                 "candidate_origin": (
                     "PROGRAM" if got.get("ok") else
                     ("AI_BACKUP_PENDING" if awaiting_backup else "NONE")),
@@ -5975,12 +6405,17 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
     })
     ok = sum(1 for r in results if r["ok"])
     waiting = sum(1 for r in results if r.get("awaiting_ai"))
+    unmeasured = any(
+        r.get("worker_status") == "ERROR"
+        or any((row or {}).get("status") == "NOT_MEASURED"
+               for row in (r.get("phases") or {}).values())
+        for r in results)
     print(f"\n{ok}/{len(results)} produced a gated candidate; 0 accepted"
           + (f", {waiting} awaiting AI review/backup" if waiting else "")
           + f" -> {run_p}/solve_report.json")
     # 2 = handed off, not failed. Even when every PROGRAM candidate exists, no
     # response is accepted until the blind AI review agrees.
-    return 2 if results and waiting == len(results) else 1
+    return 2 if results and (waiting == len(results) or unmeasured) else 1
 
 
 def cmd_solve(bench: str, dataset: str, run: str, limit: int = 0,
@@ -7076,9 +7511,14 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
     _write_jsonl(run_p / _ENHANCEMENT_WORKLIST, enhancements)
 
     total = len(results)
+    unmeasured_pending = any(
+        r.get("worker_status") == "ERROR"
+        or any((row or {}).get("status") == "NOT_MEASURED"
+               for row in (r.get("phases") or {}).values())
+        for r in results)
     complete = (total > 0 and len(accepted_ids) == total
                 and len(ordered_tasks) == total and not remaining_backup
-                and not repairs)
+                and not repairs and not unmeasured_pending)
     solve.update({
         "solved": sum(1 for r in results if r.get("candidate_ready")),
         "accepted": len(accepted_ids),
@@ -7111,7 +7551,8 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
           f"{acceptance['status']} -> {run_p / _ACCEPTANCE_REPORT}")
     if complete:
         return 0
-    return 2 if (remaining_backup or repairs or ordered_tasks) else 1
+    return 2 if (remaining_backup or repairs or ordered_tasks
+                 or unmeasured_pending) else 1
 
 
 _CORRECTION_REFUSED = "REVIEW_CORRECTION_REFUSED"
