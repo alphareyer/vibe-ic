@@ -76,6 +76,9 @@ def register_factories(registry):
     import execution_modes as em
     from execution_modes import Adapter, Component, Evidence, digest
     source = str(Path(__file__).resolve()); worker = str(Path(__file__).with_name('execution_frontend_worker.py').resolve()); py = str(Path(shutil.which('python3') or sys.executable).resolve()); repo=next(p for p in Path(__file__).resolve().parents if (p/'.git').exists()); sha=__import__('subprocess').check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+    tracked = [Path(source), Path(worker)]
+    if any(__import__('subprocess').run(['git','-C',str(repo),'diff','--quiet','HEAD','--',str(path)], capture_output=True).returncode != 0 for path in tracked):
+        raise ValueError('frontend provider source is dirty; refusing registration')
     for row,p in PROVIDERS.items():
         def validate(project, facts, _row=row):
             import _flow_yaml, flow_compliance_check
@@ -89,14 +92,16 @@ def register_factories(registry):
             # The canonical checker returns a typed StepResult whose overall
             # status also includes optional downstream clauses.  Step 8's
             # mandatory program gate is the two independent producer reports.
-            syntax_ok = False; validator_ok = True
+            syntax_ok = False; validator_ok = False
             try:
-                syntax_ok = bool(json.loads((root/'reports/phase2/sdc_check.json').read_text()).get('passed'))
+                syntax_doc=json.loads((root/'reports/phase2/sdc_check.json').read_text())
+                syntax_ok = type(syntax_doc.get('passed')) is bool and syntax_doc.get('passed') is True and syntax_doc.get('program') == 'sdc_syntax_check'
                 vp = root/'reports/sdc_validator.json'
-                validator_ok = (not vp.exists()) or json.loads(vp.read_text()).get('verdict') == 'PASS'
+                validator_doc=json.loads(vp.read_text())
+                validator_ok = (validator_doc.get('verdict') == 'PASS' and type(validator_doc.get('exit_code')) is int and validator_doc.get('exit_code') == 0 and isinstance(validator_doc.get('issues'), list))
             except (OSError, ValueError, TypeError):
                 syntax_ok = False
-            gate = 'PASS' if syntax_ok and validator_ok else 'FAIL'
+            gate = 'PASS' if str(gate) == 'PASS' and syntax_ok and validator_ok else 'FAIL'
             def gate_names(node):
                 if isinstance(node,str): return [node.split()[0]] if node else []
                 if isinstance(node,dict): return sum((gate_names(v) for v in node.values()),[])
