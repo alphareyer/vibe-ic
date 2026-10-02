@@ -40,6 +40,87 @@ import phase1_doc_one_shot_runner as p1        # noqa: E402
 import phase3_one_shot_runner as p3            # noqa: E402
 
 
+class _PdkBoundaryReached(Exception):
+    """Stop before unrelated layer generation after exercising the L19 producer."""
+
+
+def _front_door_pdk(project, monkeypatch, pdk_args):
+    import phase1_one_shot_runner as front
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(front._runner_lock, "acquire_or_reenter",
+                        lambda *a: SimpleNamespace(release=lambda: None))
+    monkeypatch.setattr(front, "_run_step_0_5ic", lambda *a, **k: 0)
+    monkeypatch.setattr(front, "run_phase1_second_track", lambda *a: 0)
+
+    def affected_boundary(project, **kwargs):
+        p1._emit_l19_to_l23_skeletons(project)
+        raise _PdkBoundaryReached
+
+    monkeypatch.setattr(p1, "extract_text_pipeline", affected_boundary)
+    monkeypatch.setattr(sys, "argv", ["phase1_one_shot_runner.py", str(project),
+                                     "--route", "ic", "--mode", "docs",
+                                     "--ic-name", "example", *pdk_args])
+    try:
+        return front.main()
+    except _PdkBoundaryReached:
+        return None
+
+
+@pytest.mark.parametrize("flag", ["split", "equals"])
+def test_explicit_run_pdk_reaches_phase2_from_normal_front_door(
+        project, monkeypatch, flag):
+    import librelane_contract as lc
+
+    monkeypatch.setattr(p1, "_CLI_PDK", None)
+    args = ["--pdk", "gf180mcuD"] if flag == "split" else ["--pdk=gf180mcuD"]
+    _front_door_pdk(project, monkeypatch, args)
+    selected, source = lc.phase2_pdk(project)
+    assert selected == "gf180mcuD", (selected, source)
+    assert "L19_CONSTRAINTS_PDK.json:fields.pdk_target" in source
+    doc = json.loads((project / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json").read_text())
+    assert doc["fields"]["pdk_target_alternates"] == ["sky130", "gf180mcu"]
+    assert "input/docs/L1_product_metadata.md" in doc["extraction_evidence"]
+    assert any(e["literal"] == "--pdk gf180mcuD"
+               for e in doc["extraction_evidence"].get("command_line", []))
+    assert not (project / "input/project.json").exists()
+
+
+@pytest.mark.parametrize("args", [[], ["--pdk", "auto"]], ids=["omitted", "auto"])
+def test_no_override_resets_previous_run_pdk_and_keeps_document_default(
+        project, monkeypatch, args):
+    import librelane_contract as lc
+
+    monkeypatch.setattr(p1, "_CLI_PDK", "gf180mcuD")
+    _front_door_pdk(project, monkeypatch, args)
+    assert p1._CLI_PDK is None
+    assert lc.phase2_pdk(project)[0] == "sky130"
+
+
+@pytest.mark.parametrize("declared", ["sky130A", "gf180mcuA"])
+def test_explicit_run_pdk_cannot_erase_conflicting_document_declaration(
+        tmp_path, monkeypatch, declared, capsys):
+    docs = tmp_path / "input/docs"
+    docs.mkdir(parents=True)
+    (docs / "spec.md").write_text(f"| target PDK | {declared} |\n")
+    monkeypatch.setattr(p1, "_CLI_PDK", None)
+    rc = _front_door_pdk(tmp_path, monkeypatch, ["--pdk", "gf180mcuD"])
+    assert rc == 2, rc
+    assert "conflicts" in capsys.readouterr().err
+    assert not (tmp_path / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json").exists()
+
+
+def test_explicit_custom_distribution_without_prose_reaches_phase2(tmp_path, monkeypatch):
+    import librelane_contract as lc
+
+    docs = tmp_path / "input/docs"
+    docs.mkdir(parents=True)
+    (docs / "spec.md").write_text("# Example integer core\nNo process named.\n")
+    monkeypatch.setattr(p1, "_CLI_PDK", None)
+    _front_door_pdk(tmp_path, monkeypatch, ["--pdk", "custom_kit_q7"])
+    assert lc.phase2_pdk(tmp_path)[0] == "custom_kit_q7"
+
+
 # A document shaped like a real one: YAML front matter that CITES a tool
 # config file by path, then a target table that DECLARES two processes.
 _DOC = """\
