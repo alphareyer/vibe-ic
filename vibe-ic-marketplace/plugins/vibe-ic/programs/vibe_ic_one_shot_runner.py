@@ -2540,6 +2540,74 @@ def main() -> int:
             _m2_rep = {"verdict": _m2_verdict, "reason": "M1 did not pass; M2 not dispatched"}
         plan.append(("mixed_signal_M2", _m2_verdict, _m2_rc))
         reports["mixed_signal_M2"] = _m2_rep
+        # Fixed M3/M4 dependency sequence. These rows remain independent of
+        # digital completion, but an unmeasured mixed step cannot dispatch its
+        # successor or borrow a passing verdict from missing audit bytes.
+        if _m2_rc == 0 and _m2_verdict == "PASS":
+            _m3_json = project / "reports/analog/mixed_signal/m3_producer_audit.json"
+            _m3_json.unlink(missing_ok=True)
+            _m3_rc = _run_phase(
+                "MIXED-SIGNAL M3 (current simulation / interface SI evidence)",
+                PROGRAMS_DIR / "mixed_signal_m3_run.py",
+                [str(project), "--top", phase3_top, "--container", args.container,
+                 "--json", str(_m3_json)], env=_phase_env)
+            _m3_rep = _read_report(_m3_json)
+            _m3_verdict = "NOT_READY" if _m3_rc == 2 else "FAIL"
+            # Even a producer rc=0 cannot bypass the existing strict gates.
+            _m3_gates_ok = True
+            for _gate, _rel in (
+                    ("mixed_signal_cosim_check", "cosim_audit.json"),
+                    ("mixed_signal_interface_si_check", "interface_si_audit.json")):
+                _gate_json = project / "reports/analog/mixed_signal" / _rel
+                _gate_json.unlink(missing_ok=True)
+                _gate_rc = _run_phase(
+                    "MIXED-SIGNAL M3 (" + _gate + ")", PROGRAMS_DIR / (_gate + ".py"),
+                    [str(project), "--require-current-production", "--json", str(_gate_json)],
+                    env=_phase_env)
+                _gate_rep = _read_report(_gate_json)
+                _m3_gates_ok = (_m3_gates_ok and _gate_rc == 0
+                                and _gate_rep.get("verdict") == "PASS"
+                                and _gate_rep.get("passed") is True)
+            if (_m3_rc == 0 and _m3_rep.get("program") == "mixed_signal_m3_run"
+                    and _m3_rep.get("verdict") == "PASS" and _m3_gates_ok):
+                _m3_verdict = "PASS"
+            elif _m3_rc == 0:
+                _m3_rc = 1
+        else:
+            _m3_rc, _m3_verdict = 2, "NOT_READY"
+            _m3_rep = {"verdict": "NOT_READY", "reason": "M2 did not pass; M3 not dispatched"}
+        plan.append(("mixed_signal_M3", _m3_verdict, _m3_rc))
+        reports["mixed_signal_M3"] = _m3_rep
+        if _m3_rc == 0 and _m3_verdict == "PASS":
+            _m4_json = project / "reports/analog/mixed_signal/signoff_producer_audit.json"
+            _m4_json.unlink(missing_ok=True)
+            _m4_rc = _run_phase(
+                "MIXED-SIGNAL M4 (derived mixed-signal / top-level PV verdict)",
+                PROGRAMS_DIR / "mixed_signal_signoff_run.py",
+                [str(project), "--top", phase3_top, "--json", str(_m4_json)], env=_phase_env)
+            _m4_rep = _read_report(_m4_json)
+            _m4_gate_json = project / "reports/analog/mixed_signal/signoff_audit.json"
+            _m4_gate_json.unlink(missing_ok=True)
+            _m4_gate_rc = _run_phase(
+                "MIXED-SIGNAL M4 (current derivation audit)",
+                PROGRAMS_DIR / "mixed_signal_signoff_check.py",
+                [str(project), "--require-current-production", "--json", str(_m4_gate_json)],
+                env=_phase_env)
+            _m4_gate_rep = _read_report(_m4_gate_json)
+            if (_m4_rc == 0 and _m4_rep.get("program") == "mixed_signal_signoff_run"
+                    and _m4_rep.get("verdict") == "PASS" and _m4_gate_rc == 0
+                    and _m4_gate_rep.get("passed") is True
+                    and _m4_gate_rep.get("verdict") == "PASS"):
+                _m4_verdict = "PASS"
+            else:
+                _m4_verdict = "NOT_READY" if _m4_rc == 2 else "FAIL"
+                if _m4_rc == 0:
+                    _m4_rc = 1
+        else:
+            _m4_rc, _m4_verdict = 2, "NOT_READY"
+            _m4_rep = {"verdict": "NOT_READY", "reason": "M3 did not pass; M4 not dispatched"}
+        plan.append(("mixed_signal_M4", _m4_verdict, _m4_rc))
+        reports["mixed_signal_M4"] = _m4_rep
     else:
         plan.append(("mixed_signal", "SKIPPED", 0))
 
@@ -2571,7 +2639,8 @@ def main() -> int:
 
     # ---------------- Aggregate ----------------
     digital_rows = [(n, v, rc) for n, v, rc in plan
-                    if n not in ("analog", "mixed_signal", "mixed_signal_M2")
+                    if n not in ("analog", "mixed_signal", "mixed_signal_M2",
+                                 "mixed_signal_M3", "mixed_signal_M4")
                     and v != "SKIPPED"]
     _ca_verdicts = _completion_audit_verdicts(project)
     _audit_axis = _completion_audit_axis(

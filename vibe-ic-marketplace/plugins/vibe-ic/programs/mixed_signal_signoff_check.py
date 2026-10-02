@@ -251,7 +251,14 @@ def main(argv=None):
     parser.add_argument("project_dir")
     parser.add_argument("--json", default=None)
     parser.add_argument("--step-label", default=_GATE_LABEL)
+    parser.add_argument("--require-current-production", action="store_true",
+                        help="Default M4: pure derivation audit; no owner claim/waiver path")
     args = parser.parse_args(argv)
+
+    if args.require_current_production:
+        import mixed_signal_signoff_run as production
+        return production.main([str(Path(args.project_dir)), "--check-only",
+                                *(["--json", args.json] if args.json else [])])
 
     project = Path(args.project_dir).resolve()
     if not project.is_dir():
