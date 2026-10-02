@@ -208,6 +208,18 @@ def run_container(argv: list[str], *, probe_deadline_s: float | None = None,
     """
     if (probe_deadline_s is None) == (not supervised):
         raise ValueError('run_container: pass exactly one of probe_deadline_s= or supervised=True')
+    # Use the image's normal environment, with its explicit skip front door.
+    # Overriding ENTRYPOINT bypassed that environment for resolved tool steps.
+    argv = list(argv)
+    if '--entrypoint' in argv:
+        index = argv.index('--entrypoint')
+        entrypoint = argv[index + 1]
+        image_index = next((i for i in range(index + 2, len(argv))
+                            if '@sha256:' in argv[i]), None)
+        if image_index is not None:
+            image = argv[image_index]
+            argv = [*argv[:index], *argv[index + 2:image_index], image,
+                    '--skip', entrypoint, *argv[image_index + 1:]]
     import _docker_watchdog as _dw  # the one naming rule for ephemeral containers
     at = argv.index('run') + 1
     binary = argv[0]

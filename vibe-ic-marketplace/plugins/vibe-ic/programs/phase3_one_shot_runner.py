@@ -49415,6 +49415,22 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     _vac = _vacuous_on_unrouted(project, "gds", t0)
     if _vac is not None:
         return _vac
+    if not candidate and _step34_mode(project) == "librelane":
+        # Default has one primary stream: the admitted filled DEF, then the
+        # actual PDK GDS filler and density deck. Explicit legacy/dual modes
+        # retain their existing diagnostic paths below.
+        import librelane_fill_dfm as _lf
+        from librelane_contract import Refusal, tool_stop_reason
+        try:
+            result = _lf.default_stream(project, top, pdk, container)
+        except (Refusal, OSError, ValueError, KeyError) as exc:
+            stopped = tool_stop_reason(exc.code) if isinstance(exc, Refusal) else None
+            return StepResult("gds", "NOT_MEASURED" if stopped else "FAIL",
+                              time.time() - t0, str(exc), reason_class=stopped or "")
+        return StepResult("gds", "PASS", time.time() - t0,
+                          "KLayout.StreamOut from current filled DEF; PDK density=0",
+                          [result["canonical"]], extras={"streamout_engine": "klayout",
+                          "density_fill": True, "finishing_receipt": result["receipt"]})
     pnr_dir = _pl.pnr_dir(project)
     def_file = pnr_dir / f"{top}.def"
     gds_out = pnr_dir / f"{top}.gds"

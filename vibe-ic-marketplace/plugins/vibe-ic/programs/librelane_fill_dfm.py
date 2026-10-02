@@ -1025,6 +1025,8 @@ def tool_density(project: Path) -> Optional[Dict[str, Any]]:
         return None
     try:
         doc = _load(path)
+        if doc.get('default_stream'):
+            validate_default_stream(project)
     except (OSError, ValueError, Refusal):
         return {'status': 'UNREADABLE', 'source': RECORD_REL}
     arms = doc.get('gds') or {}
@@ -1046,6 +1048,171 @@ def tool_density(project: Path) -> Optional[Dict[str, Any]]:
             'rules': arm.get('rules'), 'runset': arm.get('runset'),
             'source': RECORD_REL, 'state': str(state), 'state_sha256': arm.get('state_sha256'),
             'subject_sha256': arm.get('subject_sha256')}
+
+
+DEFAULT_STREAM_REL = 'phase3/librelane/37-default-promotion.json'
+
+
+def _current_stage(project: Path, state: Path, step: str) -> tuple[dict, dict]:
+    """Check the existing native packet against its current material inputs."""
+    import librelane_signoff_evidence as native
+    folder = state.resolve().parent
+    if state.name != 'state_out.json' or not folder.is_relative_to(
+            (project / 'phase3/librelane').resolve()) or 'attempts' in folder.parts:
+        raise Refusal('LL_FINISHING_WRONG_STAGE', str(state))
+    receipt = validate_step_receipt(folder, step)
+    fp = receipt['input']
+    image = resolve_image(project)
+    switch_path = project / 'phase3/librelane_switch.json'
+    switch = _load(switch_path) if switch_path.is_file() else {}
+    mounts = native._pdk_mounts(project, switch, folder, image)
+    config = project / 'phase3/librelane' / CONFIG_FOLDER / f'{step}.json'
+    before = _load(folder / 'state_in.json')
+    raw = _load(config)
+    if (fp.get('image') != image or fp.get('config') != digest(config)
+            or raw.get('meta', {}).get('step') != step
+            or fp.get('config_files') != config_file_hashes(raw, mounts)
+            or fp.get('state_files') != {str(p): digest(p) for p in _walk_input_views(before)}):
+        raise Refusal('LL_FINISHING_INPUT_CHANGED', str(state))
+    candidates = (project / 'phase3/librelane').rglob('*.json')
+    if not any(p.name.endswith(('state.json', 'state_in.json', 'state_out.json'))
+               and digest(p) == fp.get('state') for p in candidates):
+        raise Refusal('LL_FINISHING_INPUT_STATE_MISSING', str(state))
+    return before, _load(state)
+
+
+def validate_default_stream(project: Path) -> dict:
+    """Bind the filled DEF, actual stream/filler, density and both publications.
+
+    Called by the existing Step-34 gate and Step-35 CMP reader. A valid scalar
+    density result from a different stream cannot replace this chain.
+    """
+    validate_fill_consumption(project)
+    doc = _load(project / RECORD_REL)
+    record = doc['default_stream']
+    if _load(project / DEFAULT_STREAM_REL) != record:
+        raise Refusal('LL_FINISHING_PROMOTION_CHANGED', DEFAULT_STREAM_REL)
+    for key in ('filled_def', 'stream', 'prefill', 'source', 'pnr_gds', 'canonical'):
+        path, sha = Path(record[key]), record[key + '_sha256']
+        if not re.fullmatch('[0-9a-f]{64}', str(sha)) or digest(path) != sha:
+            raise Refusal('LL_FINISHING_BYTES_CHANGED', key)
+    pnr = project / 'phase3/stage3/pnr'
+    filled = pnr / 'filled.def'
+    top = record['file_top']
+    if (Path(record['filled_def']).resolve() != filled.resolve()
+            or record['filled_def_sha256'] != doc['odb']['tool']['filled_def_sha256']
+            or Path(record['pnr_gds']).resolve() != (pnr / f'{top}.gds').resolve()
+            or Path(record['canonical']).resolve() !=
+            (project / 'phase3/stage4/gds' / f'{top}.gds').resolve()):
+        raise Refusal('LL_FINISHING_WRONG_PUBLICATION', str(record))
+    stream_state = Path(record['stream_state'])
+    if digest(stream_state) != record['stream_state_sha256']:
+        raise Refusal('LL_FINISHING_STATE_CHANGED', str(stream_state))
+    before, after = _current_stage(project, stream_state, 'KLayout.StreamOut')
+    config = _load(project / 'phase3/librelane' / CONFIG_FOLDER / 'KLayout.StreamOut.json')
+    if (Path(before['def']).resolve() != filled.resolve()
+            or _def_design_name(filled) != config.get('DESIGN_NAME')
+            or config.get('DESIGN_NAME') != record['design_name']
+            or Path(after['klayout_gds']).resolve() != Path(record['stream']).resolve()):
+        raise Refusal('LL_FILLED_DEF_GDS_MISMATCH', str(stream_state))
+    arm = doc['gds']['librelane']
+    filler = arm['filler']
+    filler_state = Path(filler['state'])
+    if digest(filler_state) != filler['state_sha256']:
+        raise Refusal('LL_FILLER_STATE_CHANGED', str(filler_state))
+    fin, fout = _current_stage(project, filler_state, 'KLayout.Filler')
+    if (Path(fin['gds']).resolve() != Path(record['prefill']).resolve()
+            or digest(Path(fin['gds'])) != filler['gds_in_sha256']
+            or Path(fout['gds']).resolve() != Path(filler['filled_gds']).resolve()
+            or digest(Path(fout['gds'])) != filler['filled_sha256']
+            or doc['gds'].get('shipped') != 'librelane'
+            or doc['gds'].get('shipped_sha256') != record['source_sha256']
+            or record['source_sha256'] != arm['subject_sha256']
+            or record['source_sha256'] != record['canonical_sha256']
+            or record['source_sha256'] != record['pnr_gds_sha256']):
+        raise Refusal('LL_FILLER_GDS_NOT_CONSUMED', str(filler_state))
+    topup = arm.get('density_topup')
+    if topup:
+        for key in ('gds', 'config', 'report'):
+            if digest(Path(topup[key])) != topup[key + '_sha256']:
+                raise Refusal('LL_DENSITY_TOPUP_CHANGED', key)
+        if topup['input_sha256'] != filler['filled_sha256']:
+            raise Refusal('LL_DENSITY_TOPUP_WRONG_INPUT', str(topup))
+    elif arm['subject_sha256'] != filler['filled_sha256']:
+        raise Refusal('LL_DENSITY_NOT_FILLED_SUBJECT', str(arm))
+    current = validate_density_result(project, arm, layout=Path(record['canonical']))
+    if current.get('value') != 0:
+        raise Refusal('LL_FINISHING_DENSITY_NOT_ZERO', str(current))
+    return record
+
+
+def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
+    """One Default KLayout stream of the current filled DEF, then real fill.
+
+    This is the ordinary runner's primary route, without a Step-37 mode
+    switch. The older multi-engine tool arm remains an explicit diagnostic.
+    Signoff, whole-IC admission and shipping are separate obligations.
+    """
+    import phase3_one_shot_runner as runner
+    import librelane_contract as contract
+    project = project.resolve()
+    pnr = project / 'phase3/stage3/pnr'
+    filled = pnr / 'filled.def'
+    try:
+        validate_fill_consumption(project)
+    except (Refusal, OSError, ValueError, KeyError):
+        notes = []
+        if not runner._emit_metal_fill(project, top, pdk, container, filled, notes):
+            raise Refusal('LL_FILL_ODB_NOT_READY', '; '.join(notes))
+        validate_fill_consumption(project)
+    image, root = runner._librelane_step_ctx(project, '34', pdk.name)
+    configs = resolve_step_configs(project, image, pdk.name, ['KLayout.StreamOut'],
+                                   pdk_root=root, folder=CONFIG_FOLDER)
+    odb = _load(project / RECORD_REL)['odb']['tool']
+    state = _load(Path(odb['state']))
+    state['def'] = str(filled)
+    initial = project / 'phase3/librelane/37-default-state.json'
+    write_json(initial, state)
+    folder = run_chain(project, image, [('KLayout.StreamOut', configs['KLayout.StreamOut'], initial)],
+                       mounts=_mounts(root, pdk.name), lane='37-default-stream',
+                       pdk_root=PDK_GUEST_ROOT)[0]
+    before, after = _current_stage(project, folder / 'state_out.json', 'KLayout.StreamOut')
+    stream = Path(after['klayout_gds'])
+    pnr_gds = pnr / f'{top}.gds'
+    # Retain the tool view; finishing never edits the stream-out's output.
+    shutil.copyfile(stream, pnr_gds)
+    ctx = runner._step34_gds_tool_arm(project, pdk, pnr_gds)
+    if ctx is None:
+        raise Refusal('LL_FILL_GDS_NOT_RUN', 'Default finishing requires the primary fill arm')
+    ok, note = runner._step34_gds_ship(project, pnr_gds, ctx, (False, 'direct arm not run'))
+    if not ok:
+        raise Refusal('LL_FILL_GDS_REFUSED', note)
+    arm = ctx['tool']
+    canonical = project / 'phase3/stage4/gds' / f'{top}.gds'
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    # Existing output gates judge the actual filled subject, before promotion.
+    from librelane_step37 import _vibeic_gds_gates
+    gates = _vibeic_gds_gates(project, image, root, pdk.name, pnr_gds, filled,
+                             'default', configs['KLayout.StreamOut'])
+    if any(row['rc'] != 0 or not row['sha256'] for row in gates.values()):
+        raise Refusal('LL_FINISHED_GDS_GATE_FAILED', str(gates))
+    shutil.copyfile(pnr_gds, canonical)
+    record = {'file_top': top, 'design_name': _def_design_name(filled),
+              'image': image, 'pdk': pdk.name, 'gates': gates,
+              'stream_state': str(folder / 'state_out.json'),
+              'stream_state_sha256': digest(folder / 'state_out.json')}
+    for key, path in {'filled_def': filled, 'stream': stream,
+                      'prefill': project / 'phase3/tool_arms/34/prefill.gds',
+                      'source': Path(arm['subject']), 'pnr_gds': pnr_gds,
+                      'canonical': canonical}.items():
+        record[key], record[key + '_sha256'] = str(path), digest(path)
+    write_json(project / DEFAULT_STREAM_REL, record)
+    update_record(project, 'default_stream', record)
+    validate_default_stream(project)
+    publish_metal_density(project, arm.get('ratios') or {}, canonical, pdk.name)
+    # Keep the engine-neutral transcript on the canonical caller boundary.
+    shutil.copyfile(folder / 'invocation.log', pnr / 'stream_out.log')
+    return dict(record, receipt=str(project / DEFAULT_STREAM_REL))
 
 
 STEP37_PROMOTION_REL = 'phase3/librelane/37-promotion.json'
