@@ -592,6 +592,7 @@ class Controller:
             }, sort_keys=True) + '\n')
             manifest.chmod(0o444)
             receipt['manifest_sha256'] = digest(manifest)
+            _ISSUED_AUTHORITY[str(manifest)] = receipt['manifest_sha256']
             frozen_binding()
             for component in arm.components:
                 if cancel.is_set():
@@ -771,7 +772,8 @@ class Controller:
                     raise Refusal('PROCESS_LOG_CHANGED', arm.arm_id)
         frozen = Path(receipt['input_root'])
         manifest = frozen / 'issued_manifest.json'
-        if not manifest.is_file() or receipt.get('manifest_sha256') != digest(manifest):
+        if (not manifest.is_file() or receipt.get('manifest_sha256') != digest(manifest)
+                or _ISSUED_AUTHORITY.get(str(manifest)) != digest(manifest)):
             raise Refusal('ISSUED_MANIFEST_CHANGED', arm.arm_id)
         if not frozen.is_dir() or any(p.is_symlink() for p in frozen.rglob('*')) or {
                 str(p.relative_to(frozen)): digest(p) for p in frozen.rglob('*')
