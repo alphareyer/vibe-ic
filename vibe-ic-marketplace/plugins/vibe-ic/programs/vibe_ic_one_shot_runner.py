@@ -1587,10 +1587,23 @@ def main() -> int:
     p.add_argument('--receipt-channel-fd', type=int, help=argparse.SUPPRESS)
     _execution.add_arguments(p)
     args = p.parse_args()
+    project=args.project.resolve()
+    if not project.is_dir():
+        print(f'ERROR: not a directory: {project}',file=sys.stderr)
+        return 2
+    route_refusal=_delivery_route.admit(project,args.route)
+    if route_refusal:
+        print(_delivery_route.refusal_message(route_refusal),file=sys.stderr)
+        return 2
     if 'VIBEIC_EXECUTION_CAP_FD' not in os.environ:
-        from execution_modes import Refusal
-        raise Refusal('REQUEST_CAPABILITY_REQUIRED', 'enter through the canonical CLI')
-    execution_policy_value = _configure_execution_policy(args)
+        print('REFUSED: REQUEST_CAPABILITY_REQUIRED: enter through the canonical CLI',file=sys.stderr)
+        return 2
+    from execution_modes import Refusal
+    try:
+        execution_policy_value = _configure_execution_policy(args)
+    except Refusal as exc:
+        print('REFUSED: '+str(exc),file=sys.stderr)
+        return 2
 
 
     if args.route_authority_only:
@@ -2790,6 +2803,13 @@ if __name__ == "__main__":
         entry.add_argument('--execution-mode', choices=('default', 'ultra'), default='default')
         entry.add_argument('--receipt-channel-fd', type=int)
         selected, _ = entry.parse_known_args()
+        if not selected.project.is_dir():
+            print(f'ERROR: not a directory: {selected.project}',file=sys.stderr)
+            sys.exit(2)
+        refusal=_delivery_route.admit(selected.project,selected.route)
+        if refusal:
+            print(_delivery_route.refusal_message(refusal),file=sys.stderr)
+            sys.exit(2)
         route = selected.route or _delivery_route.report_label(selected.project)['delivery_route'].lower()
         command = [str(Path(sys.executable).resolve()), '-I', '-S',
                    str(PROGRAMS_DIR / 'execution_authority.py'), '--project', str(selected.project.resolve()),
@@ -2797,4 +2817,9 @@ if __name__ == "__main__":
         if selected.receipt_channel_fd is not None:
             command += ['--channel-fd', str(selected.receipt_channel_fd)]
         os.execv(command[0], command + ['--', *sys.argv[1:]])
-    sys.exit(main())
+    from execution_modes import Refusal
+    try:
+        sys.exit(main())
+    except Refusal as exc:
+        print('REFUSED: '+str(exc),file=sys.stderr)
+        sys.exit(2)

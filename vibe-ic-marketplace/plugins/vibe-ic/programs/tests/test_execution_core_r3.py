@@ -98,7 +98,7 @@ registry=H.em.Registry(); registry.register(arm)
 path=Path(arm.components[0].argv[1])
 path.write_bytes(path.read_bytes()+b'\nMUTATED_TRANSITIVE_SOURCE\n')
 arm.source_files[str(path)]=H.em.digest(path)
-controller=H.em.Controller(registry,H.em.Budget(2,512),H.controller().portfolio)
+controller=H.NeutralController(registry,H.em.Budget(2,512),H.controller().portfolio)
 root=Path(tempfile.mkdtemp())
 result=controller.run(H.context(root),root/'run')
 assert result['status']=='NOT_MEASURED', result

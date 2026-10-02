@@ -784,7 +784,7 @@ def test_unexecuted_canonical_gate_names_cannot_be_validator_pass(tmp_path):
     portfolio = {'meta': {'test_only': True}, 'steps': [
         {'id': '1', 'mandatory_gate_programs': list(gates),
          'required_output_contract': ['value.txt', 'measurement.json']} ]}
-    controller = em.Controller(registry, em.Budget(2, 512), portfolio)
+    controller = H.NeutralController(registry, em.Budget(2, 512), portfolio)
     result = controller.run(ctx, tmp_path / 'run')
     assert result['status'] == 'NOT_MEASURED'
     assert result['candidate_statuses']['gatefake'] == 'NOT_MEASURED'

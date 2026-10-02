@@ -84,6 +84,15 @@ def context(tmp_path):
                          ic_ip_path='IC', route_receipt={'kind': 'neutral-test', 'ic_ip_path': 'IC'})
 
 
+class NeutralController(em.Controller):
+    """Protocol fixture; its neutral boundary cannot acquire user authority."""
+    def _binding(self,context):
+        if (type(context) is NeutralContext and context.route_receipt.get('kind')=='neutral-test' and
+                context.intent_label=='PROGRAM_DEFAULT' and context.request_digest==''):
+            return context.binding()
+        return super()._binding(context)
+
+
 def controller(*arms, budget=None):
     registry = em.Registry()
     for a in arms:
@@ -93,7 +102,7 @@ def controller(*arms, budget=None):
     portfolio = {'meta': {'test_only': True}, 'steps': [
         {'id': '1', 'mandatory_gate_programs': ['transform'],
          'required_output_contract': ['value.txt', 'measurement.json']}]}
-    return em.Controller(registry, budget or em.Budget(2, 512), portfolio)
+    return NeutralController(registry, budget or em.Budget(2, 512), portfolio)
 
 
 def read(root, arm='a'):
@@ -102,7 +111,8 @@ def read(root, arm='a'):
 
 def choice(ctx, root, arm='a'):
     return {'arm_id': arm, 'binding': ctx.binding(),
-            'receipt_sha256': em.digest(root / arm / 'receipt.json'),
+            'receipt_sha256': (em.digest(root / arm / 'receipt.json')
+                               if (root / arm / 'receipt.json').is_file() else ''),
             'reviewer': 'test AI decision consumer',
             'rationale': 'Complete current-input output and measured transform gate; lowest declared cost.'}
 
@@ -426,7 +436,7 @@ def test_real_canonical_portfolio_preserves_final_source_policy_and_blocks_unreg
     assert next(s for s in data['steps'] if s['id'] == 'A4')['policy_default']['tool_ids'] == ['ngspice']
     assert all(not a['controller_runnable'] for s in data['steps'] for a in s['ultra_tools'])
     ctx = replace(context(tmp_path), required_gates=tuple(data['steps'][2]['mandatory_gate_programs']))
-    c = em.Controller(em.Registry(), em.Budget(1, 128), data)
+    c = NeutralController(em.Registry(), em.Budget(1, 128), data)
     assert c.plan(ctx)['status'] == 'NOT_MEASURED'
     assert c.plan(ctx)['reason'] == 'NO_RUNNABLE_ADAPTER'
 

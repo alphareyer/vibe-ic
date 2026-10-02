@@ -86,7 +86,7 @@ def consume():
                 current = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
                 if current != blob:
                     raise ValueError('canonical source drift')
-            owner = Path(payload['route']['project']) / 'input/step_0_5ic_answers.json'
+            owner = Path(payload['route']['project']) / payload['route'].get('owner_input','input/step_0_5ic_answers.json')
             if hashlib.sha256(owner.read_bytes()).hexdigest() != payload['route']['project_digest']:
                 raise ValueError('owner route changed')
             return payload
@@ -132,6 +132,8 @@ def main():
     if refusal:
         raise ValueError(_delivery_route.refusal_message(refusal))
     owner = args.project.resolve() / 'input/step_0_5ic_answers.json'
+    if not owner.exists():
+        owner=args.project.resolve()/_delivery_route._td.DECLARATION_REL
     project_digest = hashlib.sha256(owner.read_bytes()).hexdigest()
     source = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     tree = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
@@ -148,6 +150,7 @@ def main():
     route = dict(schema=1, kind='issued-route', authority='canonical-route-authority',
                  issuer='canonical-isolated-launcher', ic_ip_path=args.route.upper(), route=args.route,
                  source_sha=source, source_tree=tree, project=str(args.project.resolve()),
+                 owner_input=str(owner.relative_to(args.project.resolve())),
                  project_digest=project_digest, request_digest=request['request_digest'],
                  intent_label=request['intent_label'], mode_intent=args.execution_mode,
                  invocation_id=invocation)
@@ -194,4 +197,9 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (ValueError,OSError,KeyError,subprocess.SubprocessError) as exc:
+        message=str(exc)
+        print(message if message.startswith('REFUSED:') else 'REFUSED: REQUEST_CAPABILITY_INVALID: '+message,file=sys.stderr)
+        sys.exit(2)

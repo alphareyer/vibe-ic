@@ -28,10 +28,10 @@ def failed_measurement(tmp_path):
     ctx = H.context(tmp_path)
     arm = H.adapter()
     measure = arm.components[1]
-    wrapper = ('import runpy,sys;sys.argv=sys.argv[1:];'
-               'runpy.run_path(sys.argv[0],run_name="__main__");sys.exit(7)')
-    measure = replace(measure, argv=(measure.argv[0], '-c', wrapper, *measure.argv[1:]))
-    arm = replace(arm, components=(arm.components[0], measure))
+    wrapper = H.TOOL.parent / 'execution_modes_measure_fail.py'
+    measure = replace(measure, argv=(measure.argv[0], str(wrapper.resolve()), *measure.argv[1:]))
+    sources = {**arm.source_files, str(wrapper.resolve()): M.digest(wrapper)}
+    arm = replace(arm, source_files=sources, components=(arm.components[0], measure))
     c = H.controller(arm)
     root = tmp_path / 'run'
     c.run(ctx, root)
@@ -127,7 +127,7 @@ def test_registered_source_manifest_is_immutable_against_caller_rehash(tmp_path)
     assert dict(registry.adapters('1')[0].source_files) == frozen
     with pytest.raises(TypeError):
         registry.adapters('1')[0].source_files[str(tool)] = M.digest(tool)
-    controller = M.Controller(registry, M.Budget(2, 512), H.controller().portfolio)
+    controller = H.NeutralController(registry, M.Budget(2, 512), H.controller().portfolio)
     result = controller.run(ctx, tmp_path / 'run')
     assert result['status'] == 'ADOPTED'
     assert (Path(result['selected_generation']['directory']) / 'value.txt').read_text() == 'ONE INPUT\n'
