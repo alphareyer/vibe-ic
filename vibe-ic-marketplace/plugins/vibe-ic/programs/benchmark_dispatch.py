@@ -44,7 +44,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Optional, TypeVar
+from typing import Callable, Iterable, Mapping, Optional, TypeVar
 
 from _atomic_artefact import write_json as _atomic_write_json
 from _atomic_artefact import write_text as _atomic_write_text
@@ -6559,7 +6559,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
     waiting = sum(1 for r in results if r.get("awaiting_ai"))
     unmeasured = any(
         r.get("worker_status") == "ERROR"
-        or any((row or {}).get("status") == "NOT_MEASURED"
+        or any(isinstance(row, Mapping) and row.get("status") == "NOT_MEASURED"
                for row in (r.get("phases") or {}).values())
         for r in results)
     print(f"\n{ok}/{len(results)} produced a gated candidate; 0 accepted"
@@ -7665,7 +7665,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
     total = len(results)
     unmeasured_pending = any(
         r.get("worker_status") == "ERROR"
-        or any((row or {}).get("status") == "NOT_MEASURED"
+        or any(isinstance(row, Mapping) and row.get("status") == "NOT_MEASURED"
                for row in (r.get("phases") or {}).values())
         for r in results)
     complete = (total > 0 and len(accepted_ids) == total

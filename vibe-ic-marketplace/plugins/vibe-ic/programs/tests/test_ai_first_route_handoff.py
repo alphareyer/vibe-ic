@@ -1,6 +1,7 @@
 """AI route choice must precede the ordinary design runner for every input."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 import benchmark_dispatch as bd  # noqa: E402
 import task_nature_route as tnr  # noqa: E402
+import _path_layout as path_layout  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _runtime_pair_fixture as runtime_pair  # noqa: E402
@@ -66,6 +68,56 @@ def _write_answer(task: dict, answer: dict) -> None:
     path.write_text(json.dumps(answer))
 
 
+def _typed_d1_runner(calls):
+    """Fixture runner that emits the same bound artifacts as canonical D1."""
+    def run(argv, *args, **kwargs):
+        calls.append(argv)
+        context = json.loads(kwargs["env"][bd._RUNNER_CONTEXT_ENV])
+        project = Path(context["project"])
+        generated_docs = project / "phase1" / "generated_docs"
+        generated_docs.mkdir(parents=True, exist_ok=True)
+        (generated_docs / "L1.json").write_text(json.dumps({
+            "schema": "fixture.phase1.ldoc.v1",
+            "invocation_id": context["invocation_id"],
+        }, sort_keys=True))
+        producer = Path(context["source"]["runner"]["path"])
+        report = {
+            "schema": "fixture.phase1.report.v1",
+            "verdict": "PASS",
+            "runner_binding": {
+                "schema": "vibeic.runner_report_binding.v1",
+                "invocation_id": context["invocation_id"],
+                "project": context["project"],
+                "argv": context["argv"],
+                "source": context["source"],
+                "report_name": "phase1_one_shot.json",
+                "producer": {
+                    "path": str(producer),
+                    "sha256": hashlib.sha256(producer.read_bytes()).hexdigest(),
+                },
+                "material": bd._runner_material_snapshot(project),
+            },
+        }
+        report_path = path_layout.report_path(project, "phase1_one_shot.json")
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, sort_keys=True))
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+    return run
+
+
+def _record_canonical_frontdoor(monkeypatch, calls):
+    frontdoors = []
+    original = bd._ensure_phase1_frontdoor
+
+    def wrapped(*args, **kwargs):
+        frontdoors.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(bd, "_ensure_phase1_frontdoor", wrapped)
+    monkeypatch.setattr(bd.subprocess, "run", _typed_d1_runner(calls))
+    return frontdoors
+
+
 def test_no_ai_route_means_no_design_runner(tmp_path, monkeypatch):
     dataset, run = _dataset(tmp_path), tmp_path / "run"
     calls = []
@@ -109,19 +161,15 @@ def test_confirmed_ai_route_enters_only_its_derived_product_path(tmp_path,
                                                                    monkeypatch):
     dataset, run = _dataset(tmp_path), tmp_path / "run"
     calls = []
-
-    def fake_runner(argv, *args, **kwargs):
-        calls.append(argv)
-        return SimpleNamespace(returncode=1)
-
-    monkeypatch.setattr(bd.subprocess, "run", fake_runner)
+    _record_canonical_frontdoor(monkeypatch, calls)
     assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
     task = _task(run)
     _write_answer(task, _answer(task, "spec_generation"))
     assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert "--entry-step" not in calls[0]  # D1 is the normal front door.
-    assert calls[0][calls[0].index("--exit-step") + 1] == "2"
+    assert calls[0][calls[0].index("--exit-step") + 1] == "D1"
+    assert calls[1][calls[1].index("--exit-step") + 1] == "2"
     assert bd._read_jsonl(run / bd._BACKUP_WORKLIST)[0]["skill"] == "spec-to-rtl"
     result = json.loads((run / "solve_report.json").read_text())["results"][0]
     assert result["routing_verdict"]["source"] == "ai_confirmed"
@@ -151,16 +199,7 @@ def test_ai_override_selects_derived_midflow_entry(tmp_path, monkeypatch):
         **original(PROMPT, False, "spec_generation"),
         "source": "synthetic_misroute_control"})
     calls = []
-    frontdoors = []
-    monkeypatch.setattr(bd, "_ensure_phase1_frontdoor",
-                        lambda *_a: frontdoors.append(1) or {
-                            "status": "GENERATED", "provenance": {"ran": True}})
-
-    def fake_runner(argv, *args, **kwargs):
-        calls.append(argv)
-        return SimpleNamespace(returncode=1)
-
-    monkeypatch.setattr(bd.subprocess, "run", fake_runner)
+    frontdoors = _record_canonical_frontdoor(monkeypatch, calls)
     assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
     task = _task(run)
     answer = _answer(task, "debug", "OVERRIDE")
@@ -177,9 +216,10 @@ def test_ai_override_selects_derived_midflow_entry(tmp_path, monkeypatch):
     _write_answer(task, answer)
     assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
     assert frontdoors == [1]
-    assert len(calls) == 1
-    assert calls[0][calls[0].index("--entry-step") + 1] == "4"
-    assert calls[0][calls[0].index("--exit-step") + 1] == "4"
+    assert len(calls) == 2
+    assert calls[0][calls[0].index("--exit-step") + 1] == "D1"
+    assert calls[1][calls[1].index("--entry-step") + 1] == "4"
+    assert calls[1][calls[1].index("--exit-step") + 1] == "4"
     result = json.loads((run / "solve_report.json").read_text())["results"][0]
     assert result["routing_verdict"]["source"] == "ai_override"
     assert result["routing_verdict"]["nature"] == "debug"
@@ -290,12 +330,7 @@ def _override_run(tmp_path, monkeypatch, prompt: str):
     dataset, run = _dataset(tmp_path), tmp_path / "run"
     (dataset / "generic_pulse_prompt.txt").write_text(prompt)
     calls = []
-    monkeypatch.setattr(bd, "_ensure_phase1_frontdoor",
-                        lambda *_a: {"status": "GENERATED",
-                                     "provenance": {"ran": True}})
-    monkeypatch.setattr(
-        bd.subprocess, "run",
-        lambda argv, **_kwargs: calls.append(argv) or SimpleNamespace(returncode=1))
+    _record_canonical_frontdoor(monkeypatch, calls)
     assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
     return dataset, run, calls, _task(run)
 
@@ -368,5 +403,25 @@ def test_grounded_override_with_short_rationale_is_accepted(tmp_path,
     decision, reasons = bd._validate_ai_route(task, run)
     assert reasons == [] and decision["source"] == "ai_override"
     assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
-    assert len(calls) == 1
-    assert calls[0][calls[0].index("--entry-step") + 1] == "4"
+    assert len(calls) == 2
+    assert calls[0][calls[0].index("--exit-step") + 1] == "D1"
+    assert calls[1][calls[1].index("--entry-step") + 1] == "4"
+
+
+def test_untyped_legacy_frontdoor_cannot_activate_d1(tmp_path, monkeypatch):
+    dataset, run = _dataset(tmp_path), tmp_path / "run"
+    calls = []
+    monkeypatch.setattr(
+        bd, "_ensure_phase1_frontdoor",
+        lambda *_args, **_kwargs: {
+            "status": "GENERATED",
+            "provenance": {"ran": True, "digest": "a" * 64},
+        })
+    monkeypatch.setattr(bd.subprocess, "run", _typed_d1_runner(calls))
+    assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
+    task = _task(run)
+    _write_answer(task, _answer(task, "spec_generation"))
+    assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
+    assert calls == []
+    result = json.loads((run / "solve_report.json").read_text())["results"][0]
+    assert "current D1 gate receipt missing" in result["worker_error"]
