@@ -33,7 +33,7 @@ import time
 from typing import Callable, Mapping
 from types import MappingProxyType
 import uuid
-from functools import lru_cache
+from functools import lru_cache, wraps
 
 import os as _os                                                    # noqa: E402
 import sys as _sys                                                  # noqa: E402
@@ -403,15 +403,26 @@ def _canonical_issuer_consumer():
                 raise Refusal('ISSUER_IMPLEMENTATION_UNTRUSTED', name)
         return consume()
 
-    return require
+    def bind(consumer):
+        @wraps(consumer)
+        def bound(*args, **kwargs):
+            # Each authority boundary retains the verifier in its own closure.
+            # There is no mutable module-level consumer slot to look up, and
+            # a caller cannot supply this keyword as authority.
+            kwargs['_issuer'] = require
+            return consumer(*args, **kwargs)
+        return bound
+
+    return bind
 
 
-_consume_canonical_issuer = _canonical_issuer_consumer()
+_bind_canonical_issuer = _canonical_issuer_consumer()
 
 
-def _verify_route_authority(receipt: Mapping[str, object]) -> None:
+@_bind_canonical_issuer
+def _verify_route_authority(receipt: Mapping[str, object], *, _issuer) -> None:
     try:
-        issued = _consume_canonical_issuer()['route']
+        issued = _issuer()['route']
     except Refusal as exc:
         raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', str(exc)) from exc
     if dict(receipt) != issued:
@@ -857,7 +868,8 @@ class Controller:
         self.portfolio = portfolio if portfolio is not None else load_portfolio()
         _validate_portfolio(self.portfolio)
 
-    def _context_binding(self, context: Context) -> dict:
+    @_bind_canonical_issuer
+    def _context_binding(self, context: Context, *, _issuer) -> dict:
         """BLOCKING: foreign implementations cannot speak for a live issuer.
 
         The tracked neutral protocol fixture has no production authority. Its
@@ -883,7 +895,7 @@ class Controller:
             if type(context) is neutral_type:
                 return binding_method(context)
         try:
-            issued = _consume_canonical_issuer()
+            issued = _issuer()
         except Refusal as exc:
             raise Refusal('CONTROLLER_ISSUANCE_REQUIRED', str(exc)) from exc
         binding = concrete.binding(context)
@@ -893,14 +905,15 @@ class Controller:
             raise Refusal('CONTROLLER_ISSUANCE_REQUIRED', 'context differs from canonical issued request')
         return binding
 
-    def _execution_issuance(self, context: Context, plan: dict) -> dict:
+    @_bind_canonical_issuer
+    def _execution_issuance(self, context: Context, plan: dict, *, _issuer) -> dict:
         binding = self._context_binding(context)
         if binding != plan['binding']:
             raise Refusal('CURRENT_INPUT_CHANGED', context.step_id)
         body = {k: v for k, v in plan.items() if k != 'execution_issuance'}
         if context.route_receipt.get('kind') == 'neutral-test':
             return dict(kind='neutral-protocol-only', plan_digest=_hash(body))
-        issued = _consume_canonical_issuer()
+        issued = _issuer()
         return dict(kind='canonical-controller-issuance',
                     invocation_id=issued['request']['invocation_id'],
                     request_digest=issued['request']['request_digest'],

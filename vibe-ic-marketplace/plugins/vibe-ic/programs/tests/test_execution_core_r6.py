@@ -99,6 +99,21 @@ def test_CAPABILITY_FROM_OTHER_INVOCATION_REFUSED(tmp_path):
     assert result['reason'] == 'ROUTE_AUTHORITY_UNAVAILABLE'
 
 
+def test_RUNTIME_CONSUMER_SLOT_DOES_NOT_AUTHORIZE(tmp_path, monkeypatch):
+    ctx = issued_context(tmp_path, 'default')
+    monkeypatch.delenv(authority.FD_ENV)
+    calls = []
+    def substituted():
+        calls.append(True)
+        raise AssertionError('a module consumer slot must never authorize a controller')
+    monkeypatch.setattr(em, '_consume_canonical_issuer', substituted, raising=False)
+    controller = H.controller(H.adapter('a'))
+    refused(controller, ctx, tmp_path / 'run')
+    with pytest.raises(em.Refusal, match='REQUEST_CAPABILITY_INVALID'):
+        controller._context_binding(ctx, _issuer=substituted)
+    assert calls == []
+
+
 @pytest.mark.parametrize('field', ['token', 'nonce', 'invocation_id', 'request_digest', 'route_digest'])
 def test_LIVE_CHALLENGE_INVALID_FIELD_REFUSED(tmp_path, field):
     real_entry('IC', 'default', tmp_path)
