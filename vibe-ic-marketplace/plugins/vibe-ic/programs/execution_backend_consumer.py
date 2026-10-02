@@ -25,6 +25,10 @@ def import_selected(project, context, controller, run, adopted):
         bound = em._issued(manifest)
     except (OSError, ValueError, KeyError, em.Refusal) as exc:
         raise em.Refusal("BACKEND_SELECTED_MANIFEST_UNBOUND", str(exc)) from exc
+    if (bound.get("status") != "PROVISIONAL" or bound.get("binding") != context.binding() or
+            bound.get("directory") != str(selected_dir) or project != selected_dir or
+            selected_dir.parent != run / "selected"):
+        raise em.Refusal("BACKEND_PROVISIONAL_GENERATION_UNBOUND", context.step_id)
     if bound.get("run_id") != adopted.get("run_id") or bound.get("arm_id") != adopted.get("selected"):
         raise em.Refusal("BACKEND_SELECTED_MANIFEST_MISMATCH", context.step_id)
     result_path = selected_dir / "backend_result.json"

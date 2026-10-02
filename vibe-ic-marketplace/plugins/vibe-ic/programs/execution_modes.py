@@ -71,6 +71,9 @@ def _make_authority_ledger():
             def issue(path, payload):
                 path = str(path)
                 with lock:
+                    if payload is None:
+                        entries.pop(path, None)
+                        return
                     if path in entries and entries[path] != payload:
                         raise Refusal('ISSUED_AUTHORITY_REWRITE', path)
                     entries[path] = payload
@@ -130,10 +133,14 @@ def _provider_identity(adapter: 'Adapter') -> tuple:
     Caller labels and unrelated source-map members cannot establish a distinct
     implementation. The source map must bind every member of this closure;
     changing a supplied digest does not change the implementation we observed.
+    Transparent wrappers inherit a reachable source-owned dispatcher family.
     Native-engine independence still needs native qualification evidence.
     """
-    from execution_provider_catalog import source_closure
-    roots = []
+    from execution_provider_catalog import source_closure, RELEASE_IDS, BACKEND_IDS
+    roots, executed = [], []
+    family = ('execution_release_worker.py' if adapter.step_id in RELEASE_IDS else
+              'execution_backend_worker.py' if adapter.step_id in BACKEND_IDS else None)
+    worker = Path(__file__).resolve().parent / family if family else None
     for component in adapter.components:
         executable = Path(shutil.which(component.argv[0]) or component.argv[0]).resolve()
         files = [executable]
@@ -141,8 +148,18 @@ def _provider_identity(adapter: 'Adapter') -> tuple:
             path = Path(token)
             if path.is_absolute() and path.is_file():
                 files.append(path.resolve())
+        component_closure = source_closure(files)
+        executed.extend(component_closure)
+        # A reachable source-owned dispatcher establishes the producer family.
+        # Extra orchestration bytes cannot establish another implementation of
+        # that same row; their complete closure is still independently bound.
+        if worker is not None and worker in component_closure:
+            files = [executable, worker]
         roots.append(tuple(str(p) for p in files))
     closure = source_closure(Path(p) for files in roots for p in files)
+    for path in source_closure(executed) | closure:
+        if adapter.source_files.get(str(path)) != digest(path):
+            raise Refusal('PROVIDER_DEPENDENCY_UNBOUND', str(path))
     observed = []
     for path in sorted(closure):
         actual = digest(path)
@@ -159,14 +176,14 @@ def _seal(value: dict) -> dict:
 
 
 def _issued(path: Path) -> dict:
+    observed = _authority_payload(path)
+    if observed is None:
+        raise Refusal('ISSUED_AUTHORITY_UNAVAILABLE', str(path))
     document = json.loads(path.read_text())
     expected = hmac.new(_COMPLETION_KEY, _hash(document['payload']).encode(), hashlib.sha256).hexdigest()
     if not isinstance(document.get('signature'), str) or not hmac.compare_digest(
             expected, document['signature']):
         raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
-    observed = _authority_payload(path)
-    if observed is None:
-        raise Refusal('ISSUED_AUTHORITY_UNAVAILABLE', str(path))
     if json.loads(observed) != document['payload']:
         raise Refusal('ISSUED_AUTHORITY_CHANGED', str(path))
     return document['payload']
@@ -747,21 +764,50 @@ class Controller:
         generation = uuid.uuid4().hex
         target = parent / generation
         target.mkdir()
-        hashes = receipt['evidence']['outputs']
-        for name, expected in hashes.items():
-            source = Path(receipt['output_root']) / _relative(name)
-            content = source.read_bytes()
-            if hashlib.sha256(content).hexdigest() != expected:
-                raise Refusal('SELECTED_ARTIFACT_CHANGED', name)
-            dest = target / _relative(name)
-            write_bytes(dest, content)
-            dest.chmod(0o444)
-        manifest = dict(generation=generation, directory=str(target),
-                        run_id=receipt['run_id'], arm_id=receipt['arm_id'],
-                        binding=receipt['binding'], outputs=hashes)
-        _issue(target / 'manifest.json', json.dumps(manifest))
-        _write(target / 'manifest.json', _seal(manifest))
-        return manifest
+        try:
+            hashes = receipt['evidence']['outputs']
+            for name, expected in hashes.items():
+                source = Path(receipt['output_root']) / _relative(name)
+                content = source.read_bytes()
+                if hashlib.sha256(content).hexdigest() != expected:
+                    raise Refusal('SELECTED_ARTIFACT_CHANGED', name)
+                dest = target / _relative(name)
+                write_bytes(dest, content)
+                dest.chmod(0o444)
+            manifest = dict(generation=generation, directory=str(target), status='PROVISIONAL',
+                            run_id=receipt['run_id'], arm_id=receipt['arm_id'],
+                            binding=receipt['binding'], outputs=hashes)
+            _issue(target / 'manifest.json', json.dumps(manifest))
+            _write(target / 'manifest.json', _seal(manifest))
+            return manifest
+        except Exception:
+            _issue(target / 'manifest.json', None)
+            shutil.rmtree(target)
+            raise
+
+    @staticmethod
+    def _discard_generation(root: Path, generation: dict | None, _issue) -> dict | None:
+        if generation is None:
+            return None
+        directory = Path(generation['directory'])
+        if directory.parent != root / 'selected' or directory.name != generation['generation']:
+            raise Refusal('SELECTED_NAMESPACE_UNSAFE', str(directory))
+        # Revoke before removing files; restoring a valid signature cannot
+        # resurrect this supervisor's rejected generation. Older commits stay.
+        _issue(directory / 'manifest.json', None)
+        shutil.rmtree(directory)
+        return dict(generation=generation['generation'], directory=str(directory),
+                    status='INVALIDATED', authority='REVOKED', removed=True)
+
+    @staticmethod
+    def _commit_generation(generation: dict, _issue) -> dict:
+        Controller._generation_current(generation)
+        committed = dict(generation, status='ADOPTED')
+        path = Path(generation['directory']) / 'manifest.json'
+        _issue(path, None)
+        _issue(path, json.dumps(committed))
+        _write(path, _seal(committed))
+        return committed
 
     @staticmethod
     def _generation_current(generation: dict) -> None:
@@ -835,6 +881,7 @@ class Controller:
         root = Path(root).resolve()
         adoption = dict(run_id=None, status='REFUSED', selected=None,
                         ai_choice=dict(choice) if choice is not None else None)
+        generation = None
         try:
             plan = json.loads((root / 'plan.json').read_text())
             adoption['run_id'] = plan['run_id']
@@ -890,9 +937,11 @@ class Controller:
                 if not isinstance(consumer, dict) or consumer.get('status') != 'CONSUMED':
                     raise Refusal('BACKEND_CANONICAL_CONSUMER_REFUSED', str(arm_id))
                 adoption['consumer'] = consumer
+            adoption['selected_generation'] = self._commit_generation(generation, _issue)
             adoption['status'] = 'ADOPTED'
             _write(root / 'adoption.json', adoption)
         except Refusal as exc:
+            adoption['discarded_generation'] = self._discard_generation(root, generation, _issue)
             adoption.update(status='REFUSED', selected=None, reason=exc.code, detail=str(exc))
             adoption.pop('selected_generation', None)
             try:
@@ -901,6 +950,7 @@ class Controller:
                 raise Refusal('ADOPTION_RECORD_UNAVAILABLE', f'{exc}; {recording}') from recording
             raise
         except Exception as exc:
+            adoption['discarded_generation'] = self._discard_generation(root, generation, _issue)
             adoption.pop('selected_generation', None)
             adoption.update(status='REFUSED', selected=None,
                             reason='INVALID_ADOPTION_EVIDENCE', detail=str(exc))

@@ -91,9 +91,10 @@ def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
                          row.get("verdict") == "FAIL"
                          for row in report.get("gate_records", ())
                          if isinstance(row, dict) and row.get("blocking", True)))
-    native_required = report.get("step_id") == "37.5ip"
+    # Requirements come from the issued context, never a mutable report label.
+    native_required = binding.get("step_id") == "37.5ip"
     native_verdicts = []
-    if native_required:
+    if native_required or report.get("native_receipts"):
         native_receipts = report.get("native_receipts") or []
         if not isinstance(native_receipts, list):
             native_receipts = [None]
@@ -107,7 +108,10 @@ def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
     if report.get("binding") != dict(binding):
         return em.Evidence(binding, "FAIL" if measured_fail else "NOT_MEASURED", {}, {},
                            detail="RELEASE_RESULT_UNBOUND")
-    if report.get("step_id") == "39" and report.get("excluded_from_verdict") is not True:
+    if report.get("step_id") != binding.get("step_id"):
+        return em.Evidence(binding, "FAIL" if measured_fail else "NOT_MEASURED", {}, {},
+                           detail="RELEASE_STEP_IDENTITY_MISMATCH")
+    if binding.get("step_id") == "39" and report.get("excluded_from_verdict") is not True:
         return em.Evidence(binding, "NOT_MEASURED", {}, {},
                            detail="STEP39_EXCLUSION_DECLARATION_MISSING")
     gates: dict[str, str] = {}

@@ -592,3 +592,122 @@ def test_r3_coverage_census_matches_registered_streamout_identity():
     row = next(r for r in table['rows'] if r['step_id'] == '37')
     arm = backend._adapter(row, current_source_identity(), {'metric':'canonical_evidence','direction':'max'}, path='IC', available=False)
     assert row['arm_id'] == arm.arm_id == 'backend_37_librelane'
+
+
+# R4 controls extend the reviewed test module without changing earlier cases.
+@pytest.mark.parametrize('style', ['direct', 'alias'])
+def test_r4_transparent_wrapper_has_one_real_producer(tmp_path, release_arm, style):
+    ctx = context16(tmp_path)
+    release_arm = replace(release_arm, tool_id='source_worker_16')
+    wrapper = tmp_path / 'transparent.py'
+    symbol = 'main as invoke' if style == 'alias' else 'main'
+    invocation = 'invoke' if style == 'alias' else 'main'
+    wrapper.write_text('import sys\nsys.path.insert(0, ' + repr(str(PROGRAMS)) + ')\n'
+                       'from execution_release_worker import ' + symbol + '\n'
+                       'raise SystemExit(' + invocation + '())\n')
+    component = release_arm.components[0]
+    sources = {**release_arm.source_files, str(wrapper): em.digest(wrapper)}
+    wrapped = replace(release_arm, arm_id='wrapped_release_16', tool_id='wrapper_label',
+        engine_families=('caller_distinct_label',), source_files=sources,
+        components=(replace(component, argv=(component.argv[0], str(wrapper), *component.argv[2:])),))
+    registry = em.Registry(); registry.register(release_arm); registry.register(wrapped)
+    controller = em.Controller(registry, em.Budget(2, 1024, workers=2))
+    plan = controller.plan(ctx, 'ultra-mode')
+    assert len(plan['arms']) == 1
+    assert controller.run(ctx, tmp_path / 'wrapper-run', 'ultra-mode')['candidate_statuses'] == {
+        plan['arms'][0]: 'ELIGIBLE'}
+
+
+@pytest.mark.parametrize('label', ['16', '39', None])
+def test_r4_native_fail_survives_report_step_relabel(tmp_path, label):
+    hardmacro_report(tmp_path, [{'status':'FAIL','processes':[]}])
+    report = json.loads((tmp_path / 'release-evidence.json').read_text())
+    binding = report['binding']
+    before = release.validate(tmp_path, binding)
+    report['step_id'] = label
+    dump(tmp_path / 'release-evidence.json', report)
+    after = release.validate(tmp_path, binding)
+    assert (before.verdict, after.verdict) == ('FAIL', 'FAIL')
+    assert after.detail == 'RELEASE_STEP_IDENTITY_MISMATCH'
+
+
+@pytest.mark.parametrize('native', [None, {}, {'status':'PASS','processes':[]}])
+def test_r4_relabel_cannot_drop_native_requirement(tmp_path, native):
+    hardmacro_report(tmp_path, [] if native is None else [native])
+    report = json.loads((tmp_path / 'release-evidence.json').read_text())
+    binding = report['binding']
+    report['step_id'] = '16'
+    dump(tmp_path / 'release-evidence.json', report)
+    evidence = release.validate(tmp_path, binding)
+    assert evidence.verdict == 'NOT_MEASURED'
+    assert evidence.detail == 'RELEASE_STEP_IDENTITY_MISMATCH'
+
+
+def test_r4_refused_generation_is_removed_and_revoked(tmp_path, monkeypatch):
+    controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'refused'
+    original = consumer.import_selected
+    captured = {}
+    def consume(project, context, ctl, run, adoption):
+        captured.update(generation=dict(adoption['selected_generation']), adoption=dict(adoption),
+                        manifest=(Path(project) / 'manifest.json').read_bytes())
+        return original(project, context, ctl, run, adoption)
+    monkeypatch.setattr(consumer, 'import_selected', consume)
+    assert controller.run(ctx, root)['candidate_statuses'][arm.arm_id] == 'ELIGIBLE'
+    assert observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))) == 'REFUSED:GATE_FAIL'
+    assert len(list((root / 'selected').iterdir())) == 0
+    generation = captured['generation']; directory = Path(generation['directory'])
+    # Restoring a saved valid signature must not restore revoked issuance.
+    directory.mkdir()
+    (directory / 'manifest.json').write_bytes(captured['manifest'])
+    assert observed(lambda: em._issued(directory / 'manifest.json')) == 'REFUSED:ISSUED_AUTHORITY_UNAVAILABLE'
+    assert observed(lambda: original(directory, ctx, controller, root, captured['adoption'])) == 'REFUSED:BACKEND_SELECTED_MANIFEST_UNBOUND'
+    refusal = json.loads((root / 'adoption.json').read_text())
+    assert refusal['discarded_generation']['status'] == 'INVALIDATED'
+
+
+@pytest.mark.parametrize('answer', [None, {'status':'REFUSED'}, 'ERROR'])
+def test_r4_consumer_failure_cleans_only_new_generation(tmp_path, monkeypatch, answer):
+    controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'rollback'
+    controller.run(ctx, root)
+    monkeypatch.setattr(consumer, 'import_selected', lambda *args: {'status':'CONSUMED'})
+    accepted = controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))
+    previous = Path(accepted['selected_generation']['directory'])
+    snapshot = {str(p.relative_to(previous)): (p.read_bytes(), p.stat().st_mode & 0o777)
+                for p in previous.rglob('*') if p.is_file()}
+    def refuse(*args):
+        if answer == 'ERROR':
+            raise RuntimeError('consumer failure after provisional selection')
+        return answer
+    monkeypatch.setattr(consumer, 'import_selected', refuse)
+    assert observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))).startswith('REFUSED:')
+    assert list((root / 'selected').iterdir()) == [previous]
+    assert snapshot == {str(p.relative_to(previous)): (p.read_bytes(), p.stat().st_mode & 0o777)
+                        for p in previous.rglob('*') if p.is_file()}
+    controller._generation_current(accepted['selected_generation'])
+
+
+def test_r4_partial_generation_copy_rolls_back(tmp_path, monkeypatch):
+    ctx = H.context(tmp_path); controller = H.controller(H.adapter()); root = tmp_path / 'partial'
+    controller.run(ctx, root)
+    original = em.write_bytes; count = []
+    def fail_second(path, content):
+        count.append(path)
+        if len(count) == 2:
+            raise OSError('selected copy fault')
+        return original(path, content)
+    monkeypatch.setattr(em, 'write_bytes', fail_second)
+    assert observed(lambda: controller.adopt(ctx, root, H.choice(ctx, root))) == 'REFUSED:INVALID_ADOPTION_EVIDENCE'
+    assert len(list((root / 'selected').iterdir())) == 0
+
+
+def test_r4_manifest_is_provisional_until_consumer_success(tmp_path, monkeypatch):
+    controller, ctx, arm = finite_backend(tmp_path); root = tmp_path / 'commit'
+    controller.run(ctx, root); captured = []
+    def consume(project, context, ctl, run, adoption):
+        captured.append(em._issued(Path(project) / 'manifest.json')['status'])
+        return {'status':'CONSUMED'}
+    monkeypatch.setattr(consumer, 'import_selected', consume)
+    accepted = controller.adopt(ctx, root, H.choice(ctx, root, arm.arm_id))
+    assert captured == ['PROVISIONAL']
+    generation = accepted['selected_generation']
+    assert generation['status'] == em._issued(Path(generation['directory']) / 'manifest.json')['status'] == 'ADOPTED'
