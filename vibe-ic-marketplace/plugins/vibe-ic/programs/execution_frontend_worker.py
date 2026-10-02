@@ -1,5 +1,6 @@
 """Explicit fail-closed frontend producer entry points."""
-import argparse, json
+import argparse, json, subprocess, shutil
+import hashlib
 from pathlib import Path
 
 def _write(step, output, producer, **details):
@@ -7,34 +8,104 @@ def _write(step, output, producer, **details):
     out=output/'canonical.json'
     out.write_text(json.dumps({'schema':'frontend_worker_output/1','step_id':step,'producer':producer,'result':'NOT_MEASURED',**details},sort_keys=True,default=str)+'\n')
     return out
+def _verify_manifest(project, step):
+    manifest=Path(project)/'input'/'issued_manifest.json'
+    if not manifest.is_file():
+        raise ValueError(f'{step}: issued manifest is required')
+    try: record=json.loads(manifest.read_text())
+    except (OSError,ValueError) as exc: raise ValueError(f'{step}: issued manifest invalid') from exc
+    for rel, expected in (record.get('files') or {}).items():
+        path=Path(project)/rel
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected: raise ValueError(f'{step}: issued input mutation: {rel}')
+    if record.get('step_id') != step: raise ValueError(f'{step}: issued route mismatch')
+    if not isinstance(record.get('parameters'), dict):
+        raise ValueError(f'{step}: issued parameters missing')
+
 def _require(project, output, step, producer, **kwargs):
     if project is None or output is None: raise ValueError(f'{step}: project and output are required')
     project=Path(project)
+    _verify_manifest(project, step)
     return _write(step,output,producer,reason=('input project is unavailable' if not project.exists() else 'producer is source-bound; native qualification not measured'),inputs=str(project),parameters=kwargs)
 
-def produce_d1(project,output,**k): return _require(project,output,'D1','design_one_shot_runner.step_phase1',**k)
-def produce_05ic(project,output,**k): return _require(project,output,'0.5ic','submission_template_ingest.main+tapeout_declaration_gen.main',**k)
-def produce_1(project,output,ic_class=None,force_regen=False,**k): return _require(project,output,'1','design_one_shot_runner.step_rtl_gen',ic_class=ic_class,force_regen=force_regen,**k)
-def produce_2(project,output,top=None,clock=None,timeout=None,**k): return _require(project,output,'2','p0_tool_frontend_check.check+crosslayer_rewrite_equivalence.main',top=top,clock=clock,timeout=timeout,**k)
-def produce_3(project,output,top=None,image=None,**k): return _require(project,output,'3','_cdc_netlist.build+CDC checkers',top=top,image=image,**k)
-def produce_4(project,output,top=None,container=None,**k): return _require(project,output,'4','step_professional_tb_gen+step_reference_tb+step_l10_unit_tb_run+verilator_coverage_measure',top=top,container=container,**k)
-def produce_5(project,output,top=None,container=None,**k): return _require(project,output,'5','formal_harness_gen.generate+formal_property_run.run+functional_tb',top=top,container=container,**k)
-def produce_6(project,output,top=None,container=None,**k): return _require(project,output,'6','step_fpga_compile+quartus_map_audit',top=top,container=container,**k)
+def _record(step, project, output, producer, fn, **kwargs):
+    if project is None or output is None: raise ValueError(f'{step}: project and output are required')
+    _verify_manifest(project, step)
+    try:
+        value=fn(Path(project), **kwargs)
+    except (FileNotFoundError, ImportError, OSError) as exc:
+        return _write(step, output, producer, reason=f'native producer unavailable: {exc}', parameters=kwargs)
+    return _write(step, output, producer, reason='producer executed; canonical qualification remains consumer-owned', producer_result=value, parameters=kwargs)
+def _cli(step, project, output, modules, args=()):
+    _verify_manifest(project,step); records=[]
+    for module in modules:
+        try: cp=subprocess.run(['python3',str(Path(__file__).with_name(module+'.py')),str(project),*map(str,args)],capture_output=True,text=True)
+        except OSError as exc: return _write(step,output,','.join(modules),reason=f'producer unavailable: {exc}',records=records)
+        records.append({'program':module,'rc':cp.returncode,'stdout':cp.stdout,'stderr':cp.stderr})
+        if cp.returncode != 0: return _write(step,output,','.join(modules),reason='producer failed',records=records)
+    return _write(step,output,','.join(modules),reason='all producers executed',records=records)
+
+def produce_d1(project,output,**k):
+    import design_one_shot_runner as d
+    return _record('D1',project,output,'design_one_shot_runner.step_phase1',d.step_phase1,**k)
+def produce_05ic(project,output,**k): return _cli('0.5ic',project,output,('submission_template_ingest','tapeout_declaration_gen'))
+def produce_1(project,output,ic_class=None,force_regen=False,**k):
+    if not ic_class: raise ValueError('1: ic_class is required')
+    import design_one_shot_runner as d
+    return _record('1',project,output,'design_one_shot_runner.step_rtl_gen',d.step_rtl_gen,ic_class=ic_class,force_regen=force_regen,**k)
+def produce_2(project,output,top=None,clock=None,timeout=None,**k):
+    if not top or not clock or timeout is None: raise ValueError('2: top, clock and timeout are required')
+    import p0_tool_frontend_check as p0
+    result=p0.check(Path(project))
+    return _write('2',output,'p0_tool_frontend_check.check+crosslayer_rewrite_equivalence.main',producer_result=result,parameters=dict(top=top,clock=clock,timeout=timeout,**k))
+def produce_3(project,output,top=None,image=None,**k): return _cli('3',project,output,('cdc_crossing_check','cdc_async_input_check','clock_domain_reg_crossing_check','reset_dependency_check'),('--json',))
+def produce_4(project,output,top=None,container=None,**k): return _cli('4',project,output,('verilator_coverage_measure',),('measure-tb','--project',project))
+def produce_5(project,output,top=None,container=None,**k): return _cli('5',project,output,('formal_property_run',),())
+def produce_6(project,output,top=None,container=None,**k):
+    # The provider is implemented even when the host has no Quartus/board.  In
+    # that case retain an explicit exclusion so Controller does not count it
+    # as an aggregate failure.
+    if not shutil.which('quartus_map') and not (k.get('fpga') or k.get('board')):
+        return _write('6', output, 'step_fpga_compile+quartus_map_audit',
+                      reason='Quartus/board unavailable', verdict='NOT_MEASURED',
+                      excluded_from_verdict=True)
+    return _cli('6',project,output,('quartus_map_audit',),())
 def produce_7(project,output,top=None,pdk=None,container=None,**k): return _require(project,output,'7','emit_step7_asic_sdc+stamp_pvt_corner_coverage',top=top,pdk=pdk,container=container,**k)
-def produce_8(project,output,**k): return _require(project,output,'8','sdc_syntax_check+sdc_validator_check',**k)
+def produce_8(project,output,**k): return _cli('8',project,output,('sdc_syntax_check','sdc_validator_check'))
 def produce_10(project,output,top=None,pdk=None,container=None,**k): return _require(project,output,'10','step_prelayout_signoff',top=top,pdk=pdk,container=container,**k)
-def produce_11(project,output,top=None,clock=None,pdk=None,**k): return _require(project,output,'11','fault_scan_chain_insert+fault_atpg_run+bsdl_emit',top=top,clock=clock,pdk=pdk,**k)
-def produce_fs1(project,output,**k): return _require(project,output,'FS1','fmeda_fault_injection_coverage+fmeda_coverage_check',**k)
-def produce_dt1(project,output,top=None,clock=None,timeout=None,**k): return _require(project,output,'DT1','transition_fault_atpg_run',top=top,clock=clock,timeout=timeout,**k)
-def produce_12(project,output,**k): return _require(project,output,'12','design_one_shot_runner Yosys command',**k)
-def produce_13(project,output,top=None,container=None,lec_max_completed_rungs=None,**k): return _require(project,output,'13','step_lec_equivalence',top=top,container=container,lec_max_completed_rungs=lec_max_completed_rungs,**k)
-def produce_dt2(project,output,top=None,clock=None,timeout=None,**k): return _require(project,output,'DT2','path_delay_fault_atpg_run',top=top,clock=clock,timeout=timeout,**k)
-def produce_dt3(project,output,top=None,clock=None,timeout=None,**k): return _require(project,output,'DT3','sdd_atpg_run',top=top,clock=clock,timeout=timeout,**k)
-def produce_p0(project,output,top=None,claim=None,**k): return _require(project,output,'P0','p0_tool_frontend_check+formal_structural_check.check_claim',top=top,claim=claim,**k)
+def produce_11(project,output,top=None,clock=None,pdk=None,**k): return _cli('11',project,output,('fault_scan_chain_insert','fault_atpg_run','bsdl_emit'))
+def produce_fs1(project,output,**k): return _cli('FS1',project,output,('fmeda_fault_injection_coverage','fmeda_coverage_check'))
+def produce_dt1(project,output,top=None,clock=None,timeout=None,**k): return _cli('DT1',project,output,('transition_fault_atpg_run',))
+def produce_12(project,output,**k):
+    if project is None or output is None: raise ValueError('12: project and output are required')
+    project=Path(project); output=Path(output); scan=project/'phase2/stage2/dft/scan_netlist.v'; target=output/'phase2/stage2/synth/post_dft_netlist.v'
+    if not scan.is_file(): return _write('12',output,'design_one_shot_runner Yosys command',reason='scan netlist input unavailable',inputs=str(scan))
+    target.parent.mkdir(parents=True,exist_ok=True)
+    script=f'read_verilog "{scan}"; opt_clean -purge; write_verilog -noattr "{target}"'
+    try: cp=subprocess.run(['yosys','-p',script],capture_output=True,text=True)
+    except OSError as exc: return _write('12',output,'design_one_shot_runner Yosys command',reason=f'yosys unavailable: {exc}')
+    if cp.returncode != 0 or not target.is_file(): return _write('12',output,'design_one_shot_runner Yosys command',reason='yosys producer failed',rc=cp.returncode,stderr=cp.stderr)
+    return target
+def produce_13(project,output,top=None,container=None,lec_max_completed_rungs=None,**k): return _cli('13',project,output,('design_one_shot_runner',))
+def produce_dt2(project,output,top=None,clock=None,timeout=None,**k): return _cli('DT2',project,output,('path_delay_fault_atpg_run',))
+def produce_dt3(project,output,top=None,clock=None,timeout=None,**k): return _cli('DT3',project,output,('sdd_atpg_run',))
+def produce_p0(project,output,top=None,claim=None,**k):
+    if not top or not claim: raise ValueError('P0: top and claim are required')
+    import p0_tool_frontend_check as p0
+    return _record('P0',project,output,'p0_tool_frontend_check.check+formal_structural_check.check_claim',p0.check,top=top,claim=claim,**k)
 
 PRODUCERS={'D1':produce_d1,'0.5ic':produce_05ic,'1':produce_1,'2':produce_2,'3':produce_3,'4':produce_4,'5':produce_5,'6':produce_6,'7':produce_7,'8':produce_8,'10':produce_10,'11':produce_11,'FS1':produce_fs1,'DT1':produce_dt1,'12':produce_12,'13':produce_13,'DT2':produce_dt2,'DT3':produce_dt3,'P0':produce_p0}
+REQUIRED_PARAMETERS={'D1':(), '0.5ic':('template_or_no_template_reason',), '1':('ic_class',), '2':('top','clock','timeout'), '3':('top',), '4':('top','container'), '5':('top','container'), '6':('top','container'), '7':('top','pdk','container'), '8':(), '10':('top','pdk','container'), '11':('top','clock','pdk'), 'FS1':('asil',), 'DT1':('top','clock','timeout'), '12':(), '13':('top','container','lec_max_completed_rungs'), 'DT2':('top','clock','timeout'), 'DT3':('top','clock','timeout'), 'P0':('top','claim')}
 def run_row(step_id,project,output,**kwargs):
     if step_id not in PRODUCERS: raise ValueError(f'unknown frontend row: {step_id}')
+    manifest=Path(project)/'input'/'issued_manifest.json'
+    if manifest.is_file():
+        try:
+            bound=json.loads(manifest.read_text()).get('parameters') or {}
+        except (OSError,ValueError) as exc: raise ValueError(f'{step_id}: issued manifest invalid') from exc
+        merged=dict(bound); merged.update(kwargs); kwargs=merged
+    missing=[key for key in REQUIRED_PARAMETERS[step_id] if kwargs.get(key) in (None,'')]
+    if step_id == '0.5ic' and not (kwargs.get('template') or kwargs.get('no_template_reason')): missing=['template_or_no_template_reason']
+    if missing: raise ValueError(f'{step_id}: missing parameters: {", ".join(missing)}')
     return PRODUCERS[step_id](project,output,**kwargs)
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--step',required=True); ap.add_argument('--inputs',required=True); ap.add_argument('--outputs',required=True); a=ap.parse_args(); run_row(a.step,a.inputs,a.outputs)
