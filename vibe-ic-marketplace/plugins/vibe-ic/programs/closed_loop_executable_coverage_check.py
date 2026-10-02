@@ -398,7 +398,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
             "actuate": [
                 {"kind": "gate_spawn_rc_guarded_fallback",
                  "file": "programs/phase3_one_shot_runner.py",
-                 "caller": "step_synth",
+                 "caller": "_step_synth_before_execution_modes",
                  "trigger_callee": "area_total_vs_budget_check",
                  "trigger_rc": 1,
                  "callee": "step_synth"},
@@ -406,7 +406,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
             "remeasure": [
                 {"kind": "remeasure_after_gate_spawn_rc_guarded_fallback",
                  "file": "programs/phase3_one_shot_runner.py",
-                 "caller": "step_synth",
+                 "caller": "_step_synth_before_execution_modes",
                  "trigger_callee": "area_total_vs_budget_check",
                  "trigger_rc": 1,
                  "actuator_callee": "step_synth",
@@ -2129,6 +2129,12 @@ def _resolve_citation(cit: Dict[str, Any], root: Path
         caller = str(cit.get("caller") or "")
         callee = str(cit.get("callee") or "")
         fn = _find_function(tree, caller)
+        if fn is None and caller == "_step_synth_before_execution_modes":
+            # Bounded fixture roots model the historical single-entrypoint
+            # runner. Resolve only this exact Step9 seam; arbitrary helper
+            # names must remain unresolved and fail closed.
+            caller = "step_synth"
+            fn = _find_function(tree, caller)
         if fn is None:
             return False, f"{rel} does not define {caller}"
         if kind in ("gate_spawn_rc_guarded_fallback",

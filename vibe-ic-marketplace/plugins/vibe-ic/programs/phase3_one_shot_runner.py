@@ -17278,7 +17278,51 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
                           time.time() - t0, str(exc), reason_class=stopped or "")
 
 
+def _phase3_production_result(result: dict) -> StepResult:
+    """Convert the public production route row into this runner's result."""
+    status = result.get("status", "NOT_MEASURED")
+    if status not in _VERDICT_TIERS:
+        status = "NOT_MEASURED"
+    reason = str(result.get("reason_class", ""))
+    if status == "NOT_MEASURED":
+        from verdict import ReasonClass
+        allowed = {item.value for item in ReasonClass}
+        if reason not in allowed:
+            reason = ReasonClass.TOOL_ABSENT.value
+    elif reason:
+        # StepResult validates reason classes even for a measured FAIL; an
+        # adapter refusal code is detail, not a new vocabulary value.
+        reason = ""
+    return StepResult("synth", status, float(result.get("duration_s", 0.0)),
+                      str(result.get("detail", "")),
+                      list(result.get("output_files", [])),
+                      dict(result.get("extras", {})),
+                      reason_class=reason)
+
+
 def step_synth(project: Path, top: str, pdk: PdkConfig,
+               container: str,
+               period_relax: float = 1.0) -> StepResult:
+    """Canonical public Step9 entrypoint.
+
+    A project carrying the canonical declaration/RTL population is dispatched
+    through the source-owned Registry -> Controller producer. Legacy unit
+    fixtures without that population remain on the existing private helper;
+    they cannot register or qualify a production provider.
+    """
+    if period_relax == 1.0:
+        from execution_production import dispatch_site
+        dispatched = dispatch_site(("9",), Path(project), {
+            "top": top, "pdk": pdk, "container": container,
+            "period_relax": period_relax,
+        })
+        if dispatched is not None:
+            return _phase3_production_result(dispatched)
+    return _step_synth_before_execution_modes(project, top, pdk, container,
+                                               period_relax)
+
+
+def _step_synth_before_execution_modes(project: Path, top: str, pdk: PdkConfig,
                container: str,
                period_relax: float = 1.0) -> StepResult:
     """Synthesise, and compare the result against the die the design declares.
