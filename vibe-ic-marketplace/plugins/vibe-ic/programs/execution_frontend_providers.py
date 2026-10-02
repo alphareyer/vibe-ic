@@ -10,22 +10,18 @@ import hashlib, json, shutil, sys
 from typing import Callable
 
 ROWS = ('D1','0.5ic','1','2','3','4','5','6','7','8','10','11','FS1','DT1','12','13','DT2','DT3','P0')
-ROUTES = {'D1':('design_one_shot_runner.step_phase1','phase1_doc_presence_check.check'),'0.5ic':('submission_template_ingest.main','tapeout_declaration_gen.main'),'1':('design_one_shot_runner.step_rtl_gen',),'2':('p0_tool_frontend_check.check','crosslayer_rewrite_equivalence.main'),'3':('_cdc_netlist.build','cdc_crossing_check.main'),'4':('design_one_shot_runner.step_professional_tb_gen','design_one_shot_runner.step_reference_tb'),'5':('formal_harness_gen.generate','formal_property_run.run'),'6':('design_one_shot_runner.step_fpga_compile','quartus_map_audit.main'),'7':('_ppa.timing.emit_step7_asic_sdc','phase3_one_shot_runner.stamp_pvt_corner_coverage'),'8':('sdc_syntax_check.main','sdc_validator_check.main'),'10':('phase3_one_shot_runner.step_prelayout_signoff',),'11':('fault_scan_chain_insert.main','fault_atpg_run.main','bsdl_emit.main'),'FS1':('fmeda_fault_injection_coverage.main','fmeda_coverage_check.main'),'DT1':('transition_fault_atpg_run.main',),'12':('execution_frontend_worker.run_row',),'13':('design_one_shot_runner.step_lec_equivalence',),'DT2':('path_delay_fault_atpg_run.main',),'DT3':('sdd_atpg_run.main',),'P0':('p0_tool_frontend_check.check','formal_structural_check.check_claim')}
-ROW_CONTRACTS = {
- 'D1':('input/docs','reports/phase1/doc_presence.json'), '0.5ic':('input','phase1/generated_docs'),
- '1':('phase1/generated_docs','phase2/stage1/rtl'), '2':('phase2/stage1/rtl','reports/phase2/lint'),
- '3':('phase2/stage1/rtl','reports/phase2/cdc'), '4':('phase2/stage1/rtl','phase2/stage1/sim/results.xml'),
- '5':('phase2/stage1/rtl','phase2/stage1/formal/results.json'), '6':('phase2/stage1/rtl','phase2/stage1/fpga'),
- '7':('phase2/stage1/rtl','phase2/stage2/constraints'), '8':('phase2/stage2/constraints','reports/phase2/sdc_check.json'),
- '10':('phase2/stage2/constraints','reports/phase3/sta/pre_pnr_summary.json'), '11':('phase2/stage2','reports/phase2/dft'),
- 'FS1':('phase2/stage1/rtl','reports/phase2/safety'), 'DT1':('phase2/stage2/dft','reports/phase2/dft/transition_coverage.json'),
- '12':('phase2/stage2','phase3/stage3/pnr'), '13':('phase2/stage2','reports/phase2/lec'),
- 'DT2':('phase3/stage3','reports/phase3/dt2'), 'DT3':('phase3/stage3','reports/phase3/dt3'),
- 'P0':('phase1/generated_docs','reports/phase2/p0'),
-}
+ROUTES = {'D1':('design_one_shot_runner.step_phase1',),'0.5ic':('submission_template_ingest.main','tapeout_declaration_gen.main'),'1':('design_one_shot_runner.step_rtl_gen',),'2':('p0_tool_frontend_check.check','crosslayer_rewrite_equivalence.main'),'3':('_cdc_netlist.build','cdc_crossing_check.main','cdc_async_input_check.main','clock_domain_reg_crossing_check.main','reset_dependency_check.main'),'4':('design_one_shot_runner.step_professional_tb_gen','design_one_shot_runner.step_reference_tb','design_one_shot_runner.step_l10_unit_tb_run','verilator_coverage_measure.main'),'5':('formal_harness_gen.generate','formal_property_run.run','design_one_shot_runner.step_full_stack_functional_tb'),'6':('design_one_shot_runner.step_fpga_compile','quartus_map_audit.main'),'7':('_ppa.timing.emit_step7_asic_sdc','phase3_one_shot_runner.stamp_pvt_corner_coverage'),'8':('sdc_syntax_check.main','sdc_validator_check.main'),'10':('phase3_one_shot_runner.step_prelayout_signoff',),'11':('fault_scan_chain_insert.main','fault_atpg_run.main','bsdl_emit.main'),'FS1':('fmeda_fault_injection_coverage.main','fmeda_coverage_check.main'),'DT1':('transition_fault_atpg_run.main',),'12':('execution_frontend_worker.produce',),'13':('design_one_shot_runner.step_lec_equivalence',),'DT2':('path_delay_fault_atpg_run.main',),'DT3':('sdd_atpg_run.main'),'P0':('p0_tool_frontend_check.check','formal_structural_check.check_claim')}
+def _contracts():
+    try:
+        import _flow_yaml
+        rows={str(s['id']): tuple(s.get('required_outputs') or ('canonical.json',)) for s in _flow_yaml.load().get('steps',())}
+        return {r:rows.get(r,('canonical.json',)) for r in ROWS}
+    except Exception:
+        return {r:('canonical.json',) for r in ROWS}
+CANONICAL_ROWS = _contracts()
 ENGINES = {r: ('source-bound',) for r in ROWS}; ENGINES.update({'2':('yosys','verilator'),'4':('iverilog','verilator'),'5':('yosys','sby'),'6':('quartus',),'11':('fault','yosys'),'DT1':('yosys',),'DT2':('yosys','openroad'),'DT3':('yosys','openroad')})
 APPLICABILITY = {r:'IC+IP' for r in ROWS}; APPLICABILITY['0.5ic']='IC+IP route authority'; APPLICABILITY['6']='IC only; FPGA evidence optional'
-DOWNSTREAM = {r: f'consumer:{out}' for r,(_,out) in ROW_CONTRACTS.items()}
+DOWNSTREAM = {r: f'consumer:{";".join(outs)}' for r,outs in CANONICAL_ROWS.items()}
 
 @dataclass(frozen=True)
 class ProviderResult:
@@ -44,17 +40,14 @@ def _produce(step_id, project, **kwargs):
     if not project.exists():
         return ProviderResult(step_id, 'NOT_IMPLEMENTED', f'missing input: {project}')
     if step_id not in CALLABLES: return ProviderResult(step_id, 'NOT_IMPLEMENTED', 'unknown frontend row')
-    if step_id == 'D1':
-        source = project / 'input' / 'docs'
-        from phase1_doc_presence_check import check
-        findings = check(source, strict=False)
-        out = project / 'reports' / 'phase1' / 'doc_presence.json'; out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({'schema':'phase1_doc_presence/1','step_id':'D1','producer':CALLABLES['D1'],'findings':[getattr(f,'__dict__',str(f)) for f in findings],'verdict':'NOT_MEASURED'}, sort_keys=True)+'\n')
-        return ProviderResult(step_id, 'NOT_MEASURED', 'source boundary executed; native/EDA qualification not measured', (str(out.relative_to(project)),))
     from execution_frontend_worker import run_row
     out = project / 'frontend_outputs' / step_id.replace('.', '_')
     artifact = run_row(step_id, project, out, **kwargs)
-    return ProviderResult(step_id, 'NOT_MEASURED', 'source boundary executed; native/EDA qualification not measured', (str(Path(artifact).relative_to(project)),))
+    if not Path(artifact).is_file() or Path(artifact).name == 'canonical.json':
+        return ProviderResult(step_id, 'NOT_MEASURED', 'real producer did not emit a canonical flow artifact', ())
+    try: rel=Path(artifact).relative_to(project)
+    except ValueError: rel=Path(artifact).relative_to(out)
+    return ProviderResult(step_id, 'NOT_MEASURED', 'real producer executed; canonical gate remains unmeasured', (str(rel),))
 
 def _tree_sha(path):
     h=hashlib.sha256()
@@ -66,10 +59,12 @@ def _tree_sha(path):
 def _factory(step_id):
     return lambda project, **kwargs: _produce(step_id, project, **kwargs)
 
-PROVIDERS = {r: FrontendProvider(r, _factory(r), ROW_CONTRACTS[r][:1], ROW_CONTRACTS[r][1:], DOWNSTREAM[r], APPLICABILITY[r], ENGINES[r], i) for i,r in enumerate(ROWS)}
+PROVIDERS = {r: FrontendProvider(r, _factory(r), CANONICAL_ROWS[r][:1], CANONICAL_ROWS[r][1:], DOWNSTREAM[r], APPLICABILITY[r], ENGINES[r], i) for i,r in enumerate(ROWS)}
 
 def coverage():
-    return {r:{'step_id':p.step_id,'canonical_input':p.inputs,'canonical_output':p.outputs,'producer':'execution_frontend_providers._factory','downstream':p.downstream,'applicability':p.applicability,'engine_family':p.engines,'default_rank':p.default_rank} for r,p in PROVIDERS.items()}
+    import _flow_yaml
+    rows={str(s['id']):s for s in _flow_yaml.load().get('steps',())}
+    return {r:{'step_id':p.step_id,'producer':ROUTES[r],'parameter_source':'issued manifest + Controller substitutions','canonical_output':tuple(rows.get(r,{}).get('required_outputs',())),'gates':rows.get(r,{}).get('gate',{}),'availability':'source callable bound; runtime capability checked at execution','downstream':p.downstream,'applicability':p.applicability,'engine_family':p.engines,'default_rank':p.default_rank} for r,p in PROVIDERS.items()}
 
 def choose(step_id):
     if step_id not in PROVIDERS: return None
@@ -80,16 +75,26 @@ def register_factories(registry):
     if not hasattr(registry, 'register'): raise TypeError('registry must provide register')
     import execution_modes as em
     from execution_modes import Adapter, Component, Evidence, digest
-    source = str(Path(__file__).resolve()); py = str(Path(shutil.which('python3') or sys.executable).resolve()); repo=next(p for p in Path(__file__).resolve().parents if (p/'.git').exists()); sha=__import__('subprocess').check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+    source = str(Path(__file__).resolve()); worker = str(Path(__file__).with_name('execution_frontend_worker.py').resolve()); py = str(Path(shutil.which('python3') or sys.executable).resolve()); repo=next(p for p in Path(__file__).resolve().parents if (p/'.git').exists()); sha=__import__('subprocess').check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
     for row,p in PROVIDERS.items():
         def validate(project, facts, _row=row):
-            output=Path(project)/'canonical.json'
-            if not output.is_file(): raise ValueError('canonical output missing')
-            payload=json.loads(output.read_text())
-            if payload.get('step_id') != _row or payload.get('schema') != 'frontend_worker_output/1': raise ValueError('canonical output schema mismatch')
-            return Evidence(facts, 'NOT_MEASURED', {'source_boundary':'NOT_MEASURED'}, {'canonical.json':digest(output)}, detail='worker output schema validated')
+            import _flow_yaml, flow_compliance_check
+            contract=next(s for s in _flow_yaml.load()['steps'] if str(s['id']) == _row)
+            root=Path(project)
+            required=tuple(contract.get('required_outputs') or ())
+            artifacts={p:digest(root/p) for p in required if '*' not in p and (root/p).is_file()}
+            if required and len(artifacts) < len([p for p in required if '*' not in p]): raise ValueError('canonical flow artifacts missing')
+            gate=flow_compliance_check.check_step(root, contract, {}, strict_step_binding=True)
+            def gate_names(node):
+                if isinstance(node,str): return [node.split()[0]] if node else []
+                if isinstance(node,dict): return sum((gate_names(v) for v in node.values()),[])
+                if isinstance(node,list): return sum((gate_names(v) for v in node),[])
+                return []
+            names=gate_names(contract.get('gate',{})); gates={n:('PASS' if gate not in ('FAIL','NOT_MEASURED') else str(gate)) for n in names}
+            verdict='ELIGIBLE' if artifacts and gates and all(v=='PASS' for v in gates.values()) else 'NOT_MEASURED'
+            return Evidence(facts, verdict, gates, artifacts, detail='real canonical artifacts and canonical gate validated')
         required=tuple(next(s for s in em.load_portfolio()['steps'] if s['id']==row)['required_output_contract']) or ('canonical.json',)
-        registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,{source:digest(Path(source)),py:digest(Path(py))},'current-main',p.engines,(Component('frontend_worker',('python3',str(Path(__file__).with_name('execution_frontend_worker.py')),'--step',row,'--inputs','{inputs}','--outputs','{outputs}')),),validate,required,{'metric':'source_boundary'},qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required}))
+        registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,{source:digest(Path(source)),worker:digest(Path(worker)),py:digest(Path(py))},'current-main',p.engines,(Component('frontend_worker',('python3',worker,'--step',row,'--inputs','{inputs}','--outputs','{outputs}')),),validate,required,{'metric':'source_boundary'},qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required}))
     return tuple(PROVIDERS)
 
 def dedupe_by_engine():
