@@ -4219,6 +4219,10 @@ steps:
       trigger: "Performance degradation > 10% post-extraction"
     skills: [analog-extraction-resim]
     mcp_tools: [eda_spice_corner]
+    # The runner owns the fixed Magic.RCX + ngspice producer. The A7 gate
+    # below remains read-only and certifies only its typed pre_vs_post.json.
+    programs:
+      - analog_a7_post_layout_emit
     condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
