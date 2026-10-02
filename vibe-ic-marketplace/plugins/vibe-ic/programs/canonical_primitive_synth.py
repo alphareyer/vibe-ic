@@ -259,7 +259,7 @@ def _division_propositions(desc_text: str,
     # Frames are inherited, not reconstructed from the sentence containing a
     # value. This is what prevents a list marker from erasing an Examples title.
     sections: List[Tuple[int, Tuple[str, str]]] = []
-    list_frame: Optional[Tuple[str, str]] = None
+    colon_frames: List[Tuple[int, Tuple[str, str]]] = []
     bullet_frames: List[Tuple[int, Tuple[str, str]]] = []
     pending: List[str] = []
     pending_frame = ("target", "assertion")
@@ -289,7 +289,11 @@ def _division_propositions(desc_text: str,
                 frame = pending_frame[1]
             if question:
                 frame = "question"
-            clauses = re.split(r";\s*|,\s*(?:and|but|yet|however)\s+", sentence)
+            # Keep coordinated predicates with an elided subject together;
+            # the withdrawal resolver supplies their common referent.
+            clauses = re.split(r";\s*|,\s*(?:and|but|yet|however)\s+"
+                               r"(?!(?:is|are|was|were|has|have|had|does|do|did|"
+                               r"not|no|still)\b)", sentence)
             for clause in clauses:
                 clause = clause.strip().removeprefix("and ")
                 if not clause:
@@ -313,20 +317,27 @@ def _division_propositions(desc_text: str,
             while sections and sections[-1][0] >= level:
                 sections.pop()
             sections.append((level, _division_frame(markdown.group(2))))
-            list_frame = None
+            colon_frames.clear()
             bullet_frames.clear()
             continue
         bullet = re.match(r"\s*(?:[-*+]\s+|\d+[.)]\s+)(.*)", line)
-        if stripped.endswith((":", "：", "?", "？")) and not bullet:
-            flush()
-            list_frame = _division_frame(stripped)
-            continue
         if not stripped:
             flush()
             continue
         indent = len(line.expandtabs()) - len(line.expandtabs().lstrip())
         while bullet_frames and bullet_frames[-1][0] >= indent:
             bullet_frames.pop()
+        if stripped.endswith((":", "：", "?", "？")) and not bullet:
+            flush()
+            while colon_frames and colon_frames[-1][0] >= indent:
+                colon_frames.pop()
+            colon_frames.append((indent, _division_frame(stripped)))
+            continue
+        # An unindented bullet belongs to its colon heading. A sibling colon
+        # heading or a prose paragraph closes that frame; a deeper heading
+        # inherits it. Blanks and masked quotations never change ancestry.
+        while colon_frames and colon_frames[-1][0] > indent:
+            colon_frames.pop()
         structural = bool(re.match(r"(?: {4}|\t|\s*>)", raw)) and not bullet
         port = next((r for r in records if raw.strip() == r["line"].lower()), None)
         structural = structural or port is not None
@@ -338,11 +349,10 @@ def _division_propositions(desc_text: str,
                     port_role = role
                     break
         if not bullet and not line[:1].isspace():
-            list_frame = None
+            colon_frames.clear()
         frames = [frame for _, frame in sections]
         frames.extend(frame for _, frame in bullet_frames)
-        if bullet and list_frame:
-            frames.append(list_frame)
+        frames.extend(frame for _, frame in colon_frames)
         enclosing = ("external" if any(owner != "target" for owner, _ in frames) else "target",
                      next((frame for _, frame in frames if frame != "assertion"), "assertion"))
         if (bullet or structural or pending_structural or enclosing != pending_frame):
@@ -387,37 +397,56 @@ def _division_retracted_domains(propositions: List[_DivisionProposition],
     """Resolve the subject and polarity of a target-domain withdrawal."""
     retracted = set()
     previous = set()
-    referent = re.compile(r"^(?:(?:that|this|the(?:\s+preceding)?)\s+"
+    antecedents = set()
+    referent = re.compile(r"^(?:(?:that|this|these|those|the(?:\s+preceding)?)\s+"
                           r"(?:(?P<domain>non[- ]?zero|divisor|denominator|ordering)\s+)?"
-                          r"(?:statement|guarantee|requirement|property|rule|constraint)|"
+                          r"(?P<kind>statements?|guarantees?|requirements?|"
+                          r"property|properties|rules?|constraints?)|"
                           r"this\s+is)\b")
     withdrawal = re.compile(r"\b(?:waived|removed|obsolete|optional|retracted|"
                             r"cancelled|canceled|inapplicable|deprecated|superseded)\b|"
                             r"\bbelongs\s+to\b")
     inapplicable = re.compile(r"\b(?:does|do|did)\s+not\s+apply\b|"
-                              r"\bno\s+longer\s+applies\b")
+                              r"\bno\s+longer\s+(?:apply|applies)\b")
     for proposition, domains in zip(propositions, events):
         subject = referent.search(proposition.text)
-        predicate = withdrawal.search(proposition.text)
-        # Consult denial on the predicate's prefix: "not removed" preserves
-        # the fact, whereas "does not apply" positively withdraws it. Looking
-        # for any denial in the entire sentence conflates those two meanings.
-        retires = bool(predicate and not denied(proposition.text[:predicate.start()]))
-        reassigned = (subject and retires and predicate.group() == "belongs to" and
-                      proposition.frame == "assertion" and not proposition.structural)
-        if not _division_target_evidence(proposition) and not reassigned:
+        if not subject:
+            if _division_target_evidence(proposition) and domains:
+                antecedents.update(domains)
+                previous = domains
+            else:
+                antecedents = set()
+                previous = set()
+            continue
+        if proposition.frame != "assertion" or proposition.structural:
+            antecedents = set()
             previous = set()
             continue
-        if subject:
-            named = subject.group("domain")
+        # Every coordinated predicate has its own polarity. The referent is
+        # inherited only by an elided verb phrase, never by another subject.
+        clauses = re.split(r"\s*,?\s*\b(?:but|yet|and|however)\b\s+", proposition.text)
+        for clause in clauses:
+            explicit = referent.search(clause)
+            if explicit:
+                subject = explicit
+            elif not re.match(r"^(?:is|are|was|were|has|have|had|does|do|did|"
+                              r"not|no|still)\b", clause) and not withdrawal.match(clause):
+                continue
+            named, kind = subject.group("domain", "kind")
             matching = ({"ordering" if named == "ordering" else "nonzero"}
-                        if named else previous)
-            if retires or inapplicable.search(proposition.text):
+                        if named else antecedents if kind and kind.endswith("s") else previous)
+            for predicate in withdrawal.finditer(clause):
+                retires = not denied(clause[:predicate.start()])
+                reassigned = (predicate.group().startswith("belongs") and retires)
+                if retires and (_division_target_evidence(proposition) or reassigned):
+                    retracted.update(matching)
+            if _division_target_evidence(proposition) and inapplicable.search(clause):
                 retracted.update(matching)
-            # A preserved referent still denotes the preceding requirement.
-            # An unrelated sentence cannot establish that same link.
-        else:
-            previous = domains
+        if not _division_target_evidence(proposition):
+            # A following demonstrative must not borrow a target antecedent
+            # through an intervening requirement owned by another design.
+            antecedents = set()
+            previous = set()
     return retracted
 
 
@@ -440,7 +469,8 @@ def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
                            r"(?:is|are)\s+(?:zero|0)\b|"
                            r"(?:is|are|be|must\s+be|shall\s+be)\s+(?:\w+\s+){0,4}" + value + r")")
     less = re.compile(r"\b(?:the\s+)?" + dividend +
-                      r"\s+(?:(?:is|may\s+be|can\s+be)\s+)?less\s+than\s+(?:the\s+)?" + divisor)
+                      r"\s+(?:(?:is|(?:may|can|could|might)\s+be)\s+)?"
+                      r"less\s+than\s+(?:the\s+)?" + divisor)
     positives, contradictions, events = set(), set(), []
     zero_allowed = False
     for proposition in propositions:
@@ -2290,6 +2320,26 @@ def _emit_unsigned_iterative_divider(contract: Dict) -> str:
                                    contract["valid"])
     width = contract["width"]
     digest = contract["source_sha256"]
+    # Reserve the complete declared interface before allocating any local.
+    # A collision changes only the internal identifier, never a source port.
+    taken = {m, "WIDTH", clk, rst, start, dividend, divisor, quotient, remainder, valid}
+
+    def allocate(wanted: str) -> str:
+        name, index = wanted, 1
+        while name in taken:
+            index += 1
+            name = f"{wanted}_{index}"
+        taken.add(name)
+        return name
+
+    (COUNT_WIDTH, EXTRA_FINAL_CYCLE, dividend_reg, divisor_reg, quotient_reg,
+     partial_remainder, count, busy, finish_pending, shifted_remainder,
+     trial_ge_divisor, iteration_remainder, start_shifted_remainder,
+     start_ge_divisor, start_remainder) = (allocate(name) for name in (
+         "COUNT_WIDTH", "EXTRA_FINAL_CYCLE", "dividend_reg", "divisor_reg",
+         "quotient_reg", "partial_remainder", "count", "busy", "finish_pending",
+         "shifted_remainder", "trial_ge_divisor", "iteration_remainder",
+         "start_shifted_remainder", "start_ge_divisor", "start_remainder"))
     return f'''// Source-bound unsigned restoring divider.
 // Input contract SHA-256: {digest}
 // WIDTH={width}; completion is WIDTH cycles for power-of-two WIDTH and
@@ -2306,95 +2356,96 @@ module {m} #(
     output reg  [WIDTH-1:0]       {remainder},
     output reg                    {valid}
 );
-    localparam integer COUNT_WIDTH = (WIDTH < 2) ? 1 : $clog2(WIDTH + 1);
-    localparam integer EXTRA_FINAL_CYCLE = ((WIDTH & (WIDTH - 1)) != 0);
+    localparam integer {COUNT_WIDTH} = (WIDTH < 2) ? 1 : $clog2(WIDTH + 1);
+    localparam integer {EXTRA_FINAL_CYCLE} = ((WIDTH & (WIDTH - 1)) != 0);
 
-    reg [WIDTH-1:0] dividend_reg;
-    reg [WIDTH-1:0] divisor_reg;
-    reg [WIDTH-1:0] quotient_reg;
-    reg [WIDTH:0]   partial_remainder;
-    reg [COUNT_WIDTH-1:0] count;
-    reg busy;
-    reg finish_pending;
+    reg [WIDTH-1:0] {dividend_reg};
+    reg [WIDTH-1:0] {divisor_reg};
+    reg [WIDTH-1:0] {quotient_reg};
+    reg [WIDTH:0]   {partial_remainder};
+    reg [{COUNT_WIDTH}-1:0] {count};
+    reg {busy};
+    reg {finish_pending};
 
     // Every negative trial keeps the SHIFTED remainder. This is the restoring
     // operation; restoring the previous (unshifted) state is incorrect on the
     // final trial and changes the mathematical remainder.
-    wire [WIDTH:0] shifted_remainder =
-        {{partial_remainder[WIDTH-1:0], dividend_reg[WIDTH-1]}};
-    wire trial_ge_divisor = shifted_remainder >= {{1'b0, divisor_reg}};
-    wire [WIDTH:0] iteration_remainder = trial_ge_divisor
-        ? shifted_remainder - {{1'b0, divisor_reg}}
-        : shifted_remainder;
+    wire [WIDTH:0] {shifted_remainder} =
+        {{{partial_remainder}[WIDTH-1:0], {dividend_reg}[WIDTH-1]}};
+    wire {trial_ge_divisor} = {shifted_remainder} >= {{1'b0, {divisor_reg}}};
+    wire [WIDTH:0] {iteration_remainder} = {trial_ge_divisor}
+        ? {shifted_remainder} - {{1'b0, {divisor_reg}}}
+        : {shifted_remainder};
 
     // The request edge is also iteration zero: no input-only cycle is inserted.
-    wire [WIDTH:0] start_shifted_remainder = {dividend}[WIDTH-1];
-    wire start_ge_divisor = start_shifted_remainder >= {{1'b0, {divisor}}};
-    wire [WIDTH:0] start_remainder = start_ge_divisor
-        ? start_shifted_remainder - {{1'b0, {divisor}}}
-        : start_shifted_remainder;
+    wire [WIDTH:0] {start_shifted_remainder} = {dividend}[WIDTH-1];
+    wire {start_ge_divisor} = {start_shifted_remainder} >= {{1'b0, {divisor}}};
+    wire [WIDTH:0] {start_remainder} = {start_ge_divisor}
+        ? {start_shifted_remainder} - {{1'b0, {divisor}}}
+        : {start_shifted_remainder};
 
     always @(posedge {clk} or negedge {rst}) begin
         if (!{rst}) begin
-            dividend_reg     <= {{WIDTH{{1'b0}}}};
-            divisor_reg      <= {{WIDTH{{1'b0}}}};
-            quotient_reg     <= {{WIDTH{{1'b0}}}};
-            partial_remainder <= {{(WIDTH + 1){{1'b0}}}};
-            count            <= {{COUNT_WIDTH{{1'b0}}}};
-            busy             <= 1'b0;
-            finish_pending   <= 1'b0;
+            {dividend_reg}     <= {{WIDTH{{1'b0}}}};
+            {divisor_reg}      <= {{WIDTH{{1'b0}}}};
+            {quotient_reg}     <= {{WIDTH{{1'b0}}}};
+            {partial_remainder} <= {{(WIDTH + 1){{1'b0}}}};
+            {count}            <= {{{COUNT_WIDTH}{{1'b0}}}};
+            {busy}             <= 1'b0;
+            {finish_pending}   <= 1'b0;
             {quotient}       <= {{WIDTH{{1'b0}}}};
             {remainder}      <= {{WIDTH{{1'b0}}}};
             {valid}          <= 1'b0;
         end else begin
             {valid} <= 1'b0;
-            if (finish_pending) begin
+            if ({finish_pending}) begin
                 // WIDTH+1 convention: the result was computed on the last
                 // trial, and this edge is the single-cycle valid pulse.
                 {valid} <= 1'b1;
-                finish_pending <= 1'b0;
-            end else if (busy) begin
-                dividend_reg      <= dividend_reg << 1;
-                partial_remainder <= iteration_remainder;
-                quotient_reg      <= (quotient_reg << 1) | trial_ge_divisor;
+                {finish_pending} <= 1'b0;
+            end else if ({busy}) begin
+                {dividend_reg}      <= {dividend_reg} << 1;
+                {partial_remainder} <= {iteration_remainder};
+                {quotient_reg}      <= ({quotient_reg} << 1) | {trial_ge_divisor};
                 // The request edge already consumed the first trial, so the
-                // remaining busy iterations end at WIDTH-2.
-                if (count == WIDTH - 2) begin
-                    {quotient}  <= (quotient_reg << 1) | trial_ge_divisor;
-                    {remainder} <= iteration_remainder[WIDTH-1:0];
-                    busy <= 1'b0;
-                    if (EXTRA_FINAL_CYCLE)
-                        finish_pending <= 1'b1;
+                // remaining {busy} iterations end at WIDTH-2.
+                if ({count} == WIDTH - 2) begin
+                    {quotient}  <= ({quotient_reg} << 1) | {trial_ge_divisor};
+                    {remainder} <= {iteration_remainder}[WIDTH-1:0];
+                    {busy} <= 1'b0;
+                    if ({EXTRA_FINAL_CYCLE})
+                        {finish_pending} <= 1'b1;
                     else
                         {valid} <= 1'b1;
                 end else begin
-                    count <= count + 1'b1;
+                    {count} <= {count} + 1'b1;
                 end
             end else if ({start}) begin
                 // Latch the legal request and perform its first trial now.
-                dividend_reg      <= {dividend} << 1;
-                divisor_reg       <= {divisor};
-                quotient_reg      <= start_ge_divisor;
-                partial_remainder <= start_remainder;
+                {dividend_reg}      <= {dividend} << 1;
+                {divisor_reg}       <= {divisor};
+                {quotient_reg}      <= {start_ge_divisor};
+                {partial_remainder} <= {start_remainder};
                 // The request edge already performed iteration zero; the next
-                // busy edge is therefore counted from zero through WIDTH-1.
-                count             <= {{COUNT_WIDTH{{1'b0}}}};
+                // {busy} edge is therefore counted from zero through WIDTH-1.
+                {count}             <= {{{COUNT_WIDTH}{{1'b0}}}};
                 if (WIDTH == 1) begin
-                    {quotient}  <= start_ge_divisor;
-                    {remainder} <= start_remainder[WIDTH-1:0];
-                    busy <= 1'b0;
-                    if (EXTRA_FINAL_CYCLE)
-                        finish_pending <= 1'b1;
+                    {quotient}  <= {start_ge_divisor};
+                    {remainder} <= {start_remainder}[WIDTH-1:0];
+                    {busy} <= 1'b0;
+                    if ({EXTRA_FINAL_CYCLE})
+                        {finish_pending} <= 1'b1;
                     else
                         {valid} <= 1'b1;
                 end else begin
-                    busy <= 1'b1;
+                    {busy} <= 1'b1;
                 end
             end
         end
     end
 endmodule
 '''
+
 
 
 # ================================================== architecture-directive layer

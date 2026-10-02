@@ -871,6 +871,190 @@ def test_unsigned_divider_r6_preserved_referent_can_be_withdrawn(tmp_path):
                            False, tmp_path)
 
 
+
+@pytest.mark.parametrize("heading", [
+    "Reference model only:", "Examples:", "If an optional guard is installed:",
+], ids=["reference", "example", "conditional"])
+@pytest.mark.parametrize("layout", ["tight", "blank", "mixed", "deep", "tab"])
+def test_unsigned_divider_r7_f1_nested_colon_scope(heading, layout, tmp_path):
+    indent = "\t" if layout == "tab" else "  "
+    gap = "\n" if layout == "blank" else ""
+    child = indent + "Input constraints:\n"
+    if layout == "deep":
+        child += indent + "  Operand constraints:\n"
+        indent += "  "
+    first, second = ("1.", "*") if layout == "mixed" else ("-", "-")
+    domain = (heading + "\n" + gap + child + gap + indent + first +
+              " The divisor is nonzero.\n" + indent + second +
+              " Dividend is at least divisor.")
+    _r5_assert_publication(domain, False, tmp_path)
+
+
+@pytest.mark.parametrize("heading", [
+    "Reference model only:", "Examples:", "If an optional guard is installed:",
+], ids=["reference", "example", "conditional"])
+def test_unsigned_divider_r7_f1_dedent_target(heading, tmp_path):
+    _r5_assert_publication(heading + "\n  Input constraints:\n"
+                           "  - The divisor may be zero.\nTarget constraints:\n"
+                           "- The divisor is nonzero.\n- Dividend is at least divisor.",
+                           True, tmp_path)
+
+
+@pytest.mark.parametrize("domain", [
+    "Target constraints:\n  Operand constraints:\n  - The divisor is nonzero.\n  - Dividend is at least divisor.",
+    "- Reference model only:\n  Input constraints:\n  - The divisor may be zero.\n- Target constraints:\n  Input constraints:\n  - The divisor is nonzero.\n  - Dividend is at least divisor.",
+    "Reference model only:\n  Input constraints:\n  - The divisor may be zero.\nThe divisor is nonzero. Dividend is at least divisor.",
+    'Reference model only:\n"Discarded note"\n\n  Input constraints:\n  - The divisor is nonzero.\n  - Dividend is at least divisor.',
+], ids=["target_child", "bullet_sibling", "paragraph_boundary", "quote_blank"])
+def test_unsigned_divider_r7_f1_scope_boundaries(domain, tmp_path):
+    _r5_assert_publication(domain, not domain.startswith('Reference model only:\n"'), tmp_path)
+
+
+@pytest.mark.parametrize("withdrawal", [
+    "The nonzero constraints are waived.",
+    "The divisor requirements are removed.",
+    "The denominator constraints are retracted.",
+    "The ordering requirements are cancelled.",
+    "These requirements are removed.",
+    "Those constraints no longer apply to this design.",
+    "THE NONZERO CONSTRAINTS ARE WAIVED.",
+    "The preceding requirements were removed.",
+    "These properties have been retracted.",
+    "Those statements are obsolete.",
+    "The non-zero guarantees are waived.",
+    "These rules are optional.",
+], ids=["nonzero", "divisor", "denominator", "ordering", "these", "those",
+        "uppercase", "preceding", "properties", "statements", "hyphen", "rules"])
+def test_unsigned_divider_r7_f2_plural_withdrawals(withdrawal, tmp_path):
+    _r5_assert_publication("The divisor is nonzero. Dividend is at least divisor. "
+                           + withdrawal, False, tmp_path)
+
+
+@pytest.mark.parametrize("other", [
+    "The nonzero constraints are not waived.",
+    "The ordering requirements were not removed.",
+    "These requirements are not optional.",
+    "Those constraints have never been retracted.",
+    "The output requirements are waived.",
+    "The nonzero constraints are waived in the reference model.",
+    'A discarded example says "these requirements were removed".',
+    "If a diagnostic guard is installed, these requirements are removed.",
+], ids=["not_waived", "not_removed", "not_optional", "never", "unrelated",
+        "external", "quoted", "conditional"])
+def test_unsigned_divider_r7_f2_plural_preservation(other, tmp_path):
+    _r5_assert_publication("The divisor is nonzero. Dividend is at least divisor. "
+                           + other, True, tmp_path)
+
+
+@pytest.mark.parametrize("withdrawal,emit", [
+    ("The nonzero requirement was not waived but was removed.", False),
+    ("The ordering constraint is not obsolete but is cancelled.", False),
+    ("That requirement is not waived but was removed.", False),
+    ("Those requirements are not waived but were removed.", False),
+    ("The nonzero requirement was not waived, but was removed.", False),
+    ("The nonzero requirement was not waived yet was obsolete.", False),
+    ("The nonzero requirement was not waived and was removed.", False),
+    ("The nonzero requirement was waived but was not removed.", False),
+    ("The ordering requirement is not optional but no longer applies to this design.", False),
+    ("The nonzero requirement was not waived but was not removed.", True),
+    ("The nonzero requirement was not waived, and was not removed.", True),
+    ("The nonzero requirement was not waived but the output requirements were removed.", True),
+    ("The nonzero requirement was not waived but was removed in the reference model.", True),
+    ('A discarded example says "the nonzero requirement was not waived but was removed".', True),
+    ("If a diagnostic guard is installed, the requirement is not waived but is removed.", True),
+], ids=["removed", "cancelled", "unnamed", "plural", "comma", "yet", "and",
+        "first_positive", "no_longer", "both_denied", "comma_denied", "other_subject",
+        "external", "quoted", "conditional"])
+def test_unsigned_divider_r7_f3_mixed_predicates(withdrawal, emit, tmp_path):
+    _r5_assert_publication("The divisor is nonzero. Dividend is at least divisor. "
+                           + withdrawal, emit, tmp_path)
+
+
+_R7_INTERFACE_CASES = [
+    ("neutral", {"dividend": "numerator_i"}, 3),
+    ("review_dividend", {"dividend": "dividend_reg"}, 3),
+    ("review_divisor", {"divisor": "divisor_reg"}, 3),
+    ("review_quotient", {"quotient": "quotient_reg"}, 3),
+    ("review_valid", {"valid": "busy"}, 3),
+    ("review_start", {"start": "finish_pending"}, 3),
+] + [("internal_" + name, {"dividend": name}, 3) for name in (
+    "COUNT_WIDTH", "EXTRA_FINAL_CYCLE", "dividend_reg", "divisor_reg",
+    "quotient_reg", "partial_remainder", "count", "busy", "finish_pending",
+    "shifted_remainder", "trial_ge_divisor", "iteration_remainder",
+    "start_shifted_remainder", "start_ge_divisor", "start_remainder",
+)] + [
+    ("combined_suffix_chain", {
+        "clk": "COUNT_WIDTH", "rst": "EXTRA_FINAL_CYCLE",
+        "start": "finish_pending", "dividend": "dividend_reg",
+        "divisor": "dividend_reg_2", "quotient": "quotient_reg",
+        "remainder": "partial_remainder", "valid": "busy",
+    }, 6),
+    ("case_sensitive_control", {"dividend": "DIVIDEND_REG", "valid": "Busy"}, 8),
+]
+
+
+@pytest.mark.parametrize("label,renames,width", _R7_INTERFACE_CASES,
+                         ids=[row[0] for row in _R7_INTERFACE_CASES])
+def test_unsigned_divider_r7_f4_interface_compiles_and_behaves(label, renames, width, tmp_path):
+    if shutil.which("iverilog") is None or shutil.which("vvp") is None:
+        pytest.skip("NOT_VERIFIED: iverilog/vvp unavailable for interface evidence")
+    description = _INLINE_POS["unsigned_iterative_restoring_divider"]
+    for before, after in renames.items():
+        description = re.sub(r"\b" + before + r"(?=\[|:)", after, description)
+    source, rtl = tmp_path / "description.txt", tmp_path / "unit.v"
+    source.write_text(description)
+    run = subprocess.run([sys.executable, str(PROG), "--from-desc", str(source),
+                          "--out", str(rtl)], capture_output=True, text=True)
+    assert json.loads(run.stdout)["verdict"] == "EMIT"
+    assert run.returncode == 0, run.stdout + run.stderr
+    import design_one_shot_runner as runner
+    project = tmp_path / "project"
+    prompt = project / "phase1/input_doc/design_description.txt"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text(description)
+    step = runner._try_canonical_primitive_rtl(project, time.time())
+    assert step is not None and step.status == "PASS"
+    consumer_rtl = list(project.glob("phase2/stage1/rtl/*.v"))
+    assert len(consumer_rtl) == 1
+    assert consumer_rtl[0].read_bytes() == rtl.read_bytes()
+    vectors = _native_divider_vectors(width, exhaustive=width == 6)
+    tb_text = _native_divider_tb(width, vectors)
+    for before, after in renames.items():
+        tb_text = tb_text.replace("." + before + "(", "." + after + "(")
+    tb, sim = tmp_path / "tb.v", tmp_path / "sim"
+    tb.write_text(tb_text)
+    compile_run = subprocess.run(["iverilog", "-g2012", "-s", "tb", "-o", str(sim),
+                                  str(rtl), str(tb)], capture_output=True, text=True)
+    assert compile_run.returncode == 0, compile_run.stdout + compile_run.stderr
+    native = subprocess.run(["vvp", str(sim)], capture_output=True, text=True, timeout=45)
+    assert native.returncode == 0, native.stdout + native.stderr
+    assert f"PASS width={width}" in native.stdout, native.stdout + native.stderr
+    print(f"INTERFACE_NATIVE_PASS case={label} width={width} vectors={len(vectors)}")
+
+
+@pytest.mark.parametrize("modal", ["may", "can", "could", "might"])
+@pytest.mark.parametrize("synonyms", [False, True], ids=["roles", "synonyms"])
+def test_unsigned_divider_r7_f5_modal_ordering_allowance(modal, synonyms, tmp_path):
+    lhs, rhs = ("numerator", "denominator") if synonyms else ("dividend", "divisor")
+    _r5_assert_publication("The divisor is nonzero. Dividend is at least divisor. "
+                           f"The {lhs} {modal} be less than the {rhs}.", False, tmp_path)
+
+
+@pytest.mark.parametrize("modal", ["could", "might"])
+@pytest.mark.parametrize("scope", ["denied", "quoted", "reference", "conditional"])
+def test_unsigned_divider_r7_f5_scoped_allowance(modal, scope, tmp_path):
+    if scope == "denied":
+        allowance = f"The dividend {modal} not be less than divisor."
+    elif scope == "quoted":
+        allowance = f'A discarded example says "the dividend {modal} be less than divisor".'
+    elif scope == "reference":
+        allowance = f"The dividend {modal} be less than divisor in the reference model."
+    else:
+        allowance = f"If a diagnostic guard is installed, dividend {modal} be less than divisor."
+    _r5_assert_publication("The divisor is nonzero. Dividend is at least divisor. "
+                           + allowance, True, tmp_path)
+
+
 def _r2_unsigned_divider_variants():
     desc = _INLINE_POS["unsigned_iterative_restoring_divider"]
     return [
