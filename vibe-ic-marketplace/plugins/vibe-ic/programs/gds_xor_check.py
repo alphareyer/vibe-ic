@@ -356,7 +356,7 @@ begin
     puts "XOR_ERROR no top cell"
     exit 3
   end
-  puts "XOR_TOOL klayout #{RBA::Application.instance.version}"
+  puts "XOR_TOOL klayout"
   puts "XOR_TOP shipped=#{top_s.name} reference=#{top_r.name}"
   # THE FAITHFULNESS CENSUS, printed before any difference is counted. A
   # reference that is missing libraries produces a CONFIDENT WRONG ANSWER, and
@@ -1116,7 +1116,7 @@ def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
         tops = re.findall(r"(?m)^XOR_TOP shipped=(\S+) reference=(\S+)$", text)
         if not done or not counts or tops != [(current["design"], current["design"])]:
             refusal = "XOR_NATIVE_SUBJECT_OR_EXECUTION_MISMATCH"
-        if "XOR_TOOL klayout " not in text:
+        if not re.search(r"(?m)^XOR_TOOL klayout(?:\s|$)", text):
             refusal = "XOR_NATIVE_TOOL_MISSING"
         fill, seal, _ = declared_finishing_layers(project)
         native_design, native_finishing, total = partition(counts, fill, seal)

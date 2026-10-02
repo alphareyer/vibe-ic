@@ -30,14 +30,14 @@ def main():
     spec = json.loads(source.read_text())
     top = spec["design"]
     pdk = runner._detect_pdk(project, spec["pdk"])
-    runner._PROV_SINK = project / "provenance.jsonl"
+    runner.set_invocation_provenance_sink(project)
     runner._RUN_STARTED_AT = __import__("time").time()
     put(project, "input/README.md", spec["scope"] + "\n")
     put(project, "input/source.json", source.read_text())
     put(project, "reports/phase3/technology_units.json", json.dumps({"pdk": spec["pdk"]}))
     declaration = td.blank_declaration()
     declaration["answers"]["deliverable"] = spec["route"]
-    declaration["owner_attestation"] = {"deliverable": {
+    declaration[td.PROVENANCE_KEY] = {"deliverable": {
         "declares": True, "answered_by": "owner", "citation": "input/source.json: route=HARDMACRO (tool fixture)"}}
     put(project, td.DECLARATION_REL, json.dumps(declaration))
     put(project, "phase1/generated_docs/L1_IC_SPEC.json", json.dumps({"pdk": spec["pdk"], "design_name": top}))
@@ -100,7 +100,7 @@ def main():
         "sky130_fd_sc_hd__buf_1 u_buffer (.A(A), .X(Y));\nendmodule\n")
     # The open width deck is a direct-native screen of this fixture's input
     # property. It is not a replacement for any foundry deck.
-    deck = put(project, "input/pdk/open_width.lydrc",
+    deck = put(project, "input/pdk/open_width.drc",
                'source($input, $top_cell)\nreport("open fixture width", $report)\n'
                f'input(68,20).width({spec["drc_min_width_um"]}).output("met1.width", "input width")\n'
                'puts "DIRECT_DRC_NATIVE_DONE"\n')
