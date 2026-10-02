@@ -44,6 +44,7 @@ def adapter(arm='a', *, fault='none', duration=.02, cost=5, **kw):
     variant = VARIANTS / f'{arm}.py'
     selected_tool = variant if variant.is_file() else TOOL
     source[str(selected_tool.resolve())] = em.digest(selected_tool)
+    source.update({str(p): em.digest(p) for p in em._source_closure(source)})
     components = tuple(em.Component(action, (
         str(Path(sys.executable).resolve()), str(selected_tool.resolve()), '{inputs}',
         '{outputs}', action, fault, str(duration), str(cost)), timeout_s=2)
@@ -101,6 +102,11 @@ def read(root, arm='a'):
 
 
 def choice(ctx, root, arm='a'):
+    # A refused run has no arm receipt to choose. Keep the staged independent
+    # caller's run/adopt sequence meaningful without inventing missing evidence.
+    refusal = root / 'refusal.json'
+    if refusal.is_file() and not (root / arm / 'receipt.json').exists():
+        return None
     return {'arm_id': arm, 'binding': ctx.binding(),
             'receipt_sha256': em.digest(root / arm / 'receipt.json'),
             'reviewer': 'test AI decision consumer',
@@ -352,7 +358,20 @@ def test_cancel_deadline_actual_rc_partial_logs_reaped(tmp_path, stop):
     c = controller(a)
     root = tmp_path / 'run'
     cancel = threading.Event()
-    timer = threading.Timer(.12, cancel.set) if stop == 'cancel' else None
+    def cancel_partial_process():
+        # Admission now verifies more source before Popen. Keep the original
+        # cancellation delay relative to the real tool start, so this control
+        # still measures reaping a running process with preserved partial output.
+        stdout = root / 'a/transform.stdout'
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if stdout.is_file() and 'neutral tool started' in stdout.read_text():
+                time.sleep(.12)
+                cancel.set()
+                return
+            time.sleep(.001)
+        cancel.set()
+    timer = threading.Thread(target=cancel_partial_process) if stop == 'cancel' else None
     if timer:
         timer.start()
     try:

@@ -1476,6 +1476,16 @@ ENTRY_STEP_ENTERABLE_RUNNERS = ("phase1_one_shot_runner",
 
 
 def main() -> int:
+    """Canonical CLI contract: fail-closed authority refusal is always rc=2."""
+    from execution_modes import Refusal
+    try:
+        return _main()
+    except Refusal as exc:
+        print(f'REFUSED: {exc}', file=sys.stderr)
+        return 2
+
+
+def _main() -> int:
     _line_buffer_own_stream()
     p = argparse.ArgumentParser()
     p.add_argument("project", type=Path)
@@ -1587,6 +1597,16 @@ def main() -> int:
     p.add_argument('--receipt-channel-fd', type=int, help=argparse.SUPPRESS)
     _execution.add_arguments(p)
     args = p.parse_args()
+    # The owner answer is recorded/validated before checking execution authority.
+    # Imported API calls may express a route, but cannot start any producer.
+    project = args.project.resolve()
+    if not project.is_dir():
+        print(f'ERROR: not a directory: {project}', file=sys.stderr)
+        return 2
+    route_refusal = _delivery_route.admit(project, args.route)
+    if route_refusal:
+        print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
+        return 2
     if 'VIBEIC_EXECUTION_CAP_FD' not in os.environ:
         from execution_modes import Refusal
         raise Refusal('REQUEST_CAPABILITY_REQUIRED', 'enter through the canonical CLI')
@@ -2790,6 +2810,10 @@ if __name__ == "__main__":
         entry.add_argument('--execution-mode', choices=('default', 'ultra'), default='default')
         entry.add_argument('--receipt-channel-fd', type=int)
         selected, _ = entry.parse_known_args()
+        route_refusal = _delivery_route.admit(selected.project.resolve(), selected.route)
+        if route_refusal:
+            print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
+            sys.exit(2)
         route = selected.route or _delivery_route.report_label(selected.project)['delivery_route'].lower()
         command = [str(Path(sys.executable).resolve()), '-I', '-S',
                    str(PROGRAMS_DIR / 'execution_authority.py'), '--project', str(selected.project.resolve()),

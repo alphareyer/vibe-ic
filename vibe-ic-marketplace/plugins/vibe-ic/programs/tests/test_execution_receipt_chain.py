@@ -178,6 +178,7 @@ def test_final_validator_failure_cannot_publish_adopted_pass(tmp_path):
 
     source_files = dict(H.adapter('a').source_files)
     source_files[str(Path(__file__).resolve())] = em.digest(Path(__file__).resolve())
+    source_files.update({str(p): em.digest(p) for p in em._source_closure(source_files)})
     arm = replace(H.adapter('a'), validate=late_failure, source_files=source_files)
     controller = H.controller(arm)
     root = tmp_path / 'run'
@@ -773,6 +774,7 @@ def test_unexecuted_canonical_gate_names_cannot_be_validator_pass(tmp_path):
     arm = H.adapter('gatefake')
     source_files = dict(arm.source_files)
     source_files[str(Path(__file__).resolve())] = em.digest(Path(__file__).resolve())
+    source_files.update({str(p): em.digest(p) for p in em._source_closure(source_files)})
 
     def dishonest(outputs, binding):
         evidence = H.validate_text(outputs, binding)

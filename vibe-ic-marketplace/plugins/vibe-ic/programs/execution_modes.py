@@ -205,22 +205,42 @@ def _canonical_flow_authority(flow_path: Path) -> str:
 
 
 def _local_python_imports(path: Path) -> set[Path]:
-    """Return directly imported sibling Python objects for source closure."""
+    """Resolve local modules, packages and relative imports without importing."""
     try:
         tree = ast.parse(path.read_text(), filename=str(path))
     except (OSError, SyntaxError):
         return set()
-    names = set()
+    requests = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            names.update(alias.name.split('.')[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            names.add(node.module.split('.')[0])
+            requests.extend((0, alias.name) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            requests.append((node.level, node.module or ''))
+            requests.extend((node.level, '.'.join(filter(None, (node.module, alias.name))))
+                            for alias in node.names if alias.name != '*')
     result = set()
-    for name in names:
-        candidate = path.parent / f'{name}.py'
-        if candidate.is_file() and not candidate.is_symlink():
-            result.add(candidate.resolve())
+    programs = Path(__file__).resolve().parent
+    for level, name in requests:
+        roots = [path.parent]
+        if level:
+            roots = [path.parent.joinpath(*(['..'] * (level - 1))).resolve()]
+        else:
+            roots += [programs, programs.parent]
+        for root in roots:
+            parts = name.split('.') if name else []
+            candidate = root.joinpath(*parts)
+            module = candidate.with_suffix('.py') if parts else candidate / '__init__.py'
+            package = candidate / '__init__.py'
+            if any(p.is_symlink() for p in (module, package)):
+                raise Refusal('ENTRY_SOURCE_UNBOUND', str(candidate))
+            found = {p.resolve() for p in (module, package) if p.is_file()}
+            if found:
+                result.update(found)
+                for i in range(1, len(parts)):
+                    init = root.joinpath(*parts[:i], '__init__.py')
+                    if init.is_file():
+                        result.add(init.resolve())
+                break
     return result
 
 
@@ -234,6 +254,59 @@ def _source_closure(paths: Mapping[str, str]) -> set[Path]:
         closure.add(path)
         pending.extend(_local_python_imports(path) - closure)
     return closure
+
+
+def _source_method(context_type: type, source: Path, method: str) -> Callable:
+    """Require the method object itself to match its current tracked source."""
+    _tracked_clean_file(source)
+    compiled = compile(source.read_bytes(), str(source), 'exec', dont_inherit=True)
+    def nested(code, name):
+        return next(c for c in code.co_consts if inspect.iscode(c) and c.co_name == name)
+    try:
+        expected = nested(nested(compiled, context_type.__name__), method)
+        actual = getattr(context_type, method)
+        if actual.__code__ != expected:
+            raise ValueError('method source identity changed')
+    except (StopIteration, AttributeError, ValueError) as exc:
+        raise Refusal('CONTEXT_IMPLEMENTATION_UNTRUSTED', context_type.__name__) from exc
+    return actual
+
+
+def _invocation_sources(component: Component) -> dict:
+    """Bind executable, entry and every static file argument before execution.
+
+    Extra argv files are reproduction inputs, not new independent engines.
+    Interpreter code from stdin, inline code or an unresolved module is refused.
+    """
+    if not component.argv:
+        raise Refusal('INVALID_COMPONENT', component.name)
+    binary = shutil.which(component.argv[0])
+    if not binary:
+        raise Refusal('EXECUTABLE_UNBOUND', component.argv[0])
+    executable = Path(binary).resolve()
+    if not executable.is_relative_to(_REPO_ROOT) and executable != Path(_sys.executable).resolve():
+        raise Refusal('EXECUTABLE_SOURCE_UNBOUND', str(executable))
+    files = []
+    for argument in component.argv[1:]:
+        if '{inputs}' in argument or '{outputs}' in argument:
+            continue
+        value = argument.split('=', 1)[1] if argument.startswith('-') and '=' in argument else argument
+        path = Path(value)
+        if path.is_file():
+            if path.is_symlink() or not path.is_absolute():
+                raise Refusal('ENTRY_SOURCE_UNBOUND', value)
+            files.append(path.resolve())
+    interpreter = executable.name.lower().startswith(('python', 'pypy')) or executable.name in ('sh', 'bash', 'dash')
+    if interpreter and (not files or any(v in ('-', '-c', '-m') for v in component.argv[1:])):
+        raise Refusal('ENTRY_SOURCE_UNBOUND', component.name)
+    entry = files[0] if interpreter else executable
+    implementation = _source_closure({str(entry): digest(entry)}) if entry.suffix == '.py' else {entry}
+    arguments = set(files)
+    closure = arguments | _source_closure({str(p): digest(p) for p in arguments})
+    return dict(executable=str(executable), executable_sha256=digest(executable),
+                argv=list(component.argv), entry=str(entry),
+                implementation={str(p): digest(p) for p in sorted(implementation)},
+                argument_sources={str(p): digest(p) for p in sorted(closure)})
 
 
 def _route_pointer(receipt: Mapping[str, object]) -> str:
@@ -418,6 +491,7 @@ class Adapter:
 
     verified_source_blobs: Mapping[str, str] = field(default_factory=dict)
     executable_receipts: Mapping[str, object] = field(default_factory=dict)
+    invocation_sources: Mapping[str, object] = field(default_factory=dict)
 
     def identity(self) -> dict:
         return dict(arm_id=self.arm_id, tool_id=self.tool_id,
@@ -425,6 +499,7 @@ class Adapter:
                     source_files=dict(self.source_files),
                     verified_source_blobs=dict(self.verified_source_blobs),
                     executable_receipts=dict(self.executable_receipts),
+                    invocation_sources=dict(self.invocation_sources),
                     tool_version=self.tool_version,
                     engine_families=list(self.engine_families),
                     components=[dict(name=c.name, argv=list(c.argv),
@@ -439,6 +514,7 @@ class Registry:
     """Explicit source-bound executors. The shipped production registry is empty."""
     def __init__(self):
         self._adapters: dict[str, Adapter] = {}
+        self._version_lock = threading.Lock()
 
     def register(self, adapter: Adapter) -> None:
         if adapter.arm_id in self._adapters:
@@ -466,6 +542,7 @@ class Registry:
             # Native installations require an independently issued install
             # receipt; this source-only controller has no such issuer wired.
             raise Refusal('TOOL_ID_UNBOUND', 'verified native installation receipt required')
+        invocations = {component.name: _invocation_sources(component) for component in adapter.components}
         if adapter.applicability not in ('applicable', 'inapplicable', 'unknown'):
             raise Refusal('INVALID_APPLICABILITY', adapter.arm_id)
         if adapter.role not in ('producer', 'checker', 'complementary'):
@@ -503,6 +580,13 @@ class Registry:
             binary = shutil.which(component.argv[0])
             if not binary or str(Path(binary).resolve()) not in adapter.source_files:
                 raise Refusal('EXECUTABLE_UNBOUND', component.argv[0])
+            invocation = invocations[component.name]
+            for name, expected in invocation['argument_sources'].items():
+                path = Path(name)
+                if not path.is_relative_to(_REPO_ROOT) or adapter.source_files.get(name) != expected:
+                    raise Refusal('ENTRY_SOURCE_UNBOUND', name)
+                _tracked_clean_file(path)
+            invocations[component.name] = invocation
         validator_file = inspect.getsourcefile(adapter.validate)
         if not validator_file or str(Path(validator_file).resolve()) not in adapter.source_files:
             raise Refusal('VALIDATOR_SOURCE_UNBOUND', adapter.arm_id)
@@ -511,23 +595,13 @@ class Registry:
         # The caller's dataclass may be frozen while its nested mappings remain
         # mutable.  Publish an immutable registration snapshot so a later
         # ``arm.source_files[path] = new_digest`` cannot rehash authority.
-        tool_receipts = {}
-        for path in set(executable_paths):
-            try:
-                measured = subprocess.run([str(path), '--version'], capture_output=True, text=True, timeout=2)
-            except (OSError, subprocess.SubprocessError) as exc:
-                raise Refusal('TOOL_VERSION_UNBOUND', str(path)) from exc
-            version = (measured.stdout + measured.stderr).strip()
-            if measured.returncode != 0 or not version:
-                raise Refusal('TOOL_VERSION_UNBOUND', str(path))
-            tool_receipts[str(path)] = dict(executable_sha256=digest(path), version=version,
-                                            argv=[str(path), '--version'], rc=measured.returncode)
         source_blobs = {str(p): _git_blob_at_commit(adapter.source_sha, str(p.relative_to(_REPO_ROOT)))
                         for p in declared_sources - external}
         snapshot = replace(
             adapter,
             verified_source_blobs=MappingProxyType(source_blobs),
-            executable_receipts=MappingProxyType(tool_receipts),
+            executable_receipts=MappingProxyType({}),
+            invocation_sources=MappingProxyType(invocations),
             source_files=MappingProxyType(dict(adapter.source_files)),
             engine_families=tuple(adapter.engine_families),
             components=tuple(adapter.components),
@@ -631,6 +705,104 @@ class Controller:
         self.portfolio = portfolio if portfolio is not None else load_portfolio()
         _validate_portfolio(self.portfolio)
 
+    def _context_binding(self, context: Context) -> dict:
+        """BLOCKING: foreign implementations cannot speak for a live issuer.
+
+        The tracked neutral protocol fixture has no production authority. Its
+        exact implementation may exercise a test-only portfolio with default,
+        empty transport fields; it cannot turn caller labels into a request.
+        """
+        context_type = type(context)
+        fixture = _sys.modules.get('programs.tests.test_execution_modes')
+        neutral_type = getattr(fixture, 'NeutralContext', None) if fixture else None
+        neutral = (neutral_type is not None and context_type is neutral_type and
+                   (self.portfolio.get('meta', {}).get('test_only') is True or
+                    not self.registry.adapters(context.step_id)))
+        if context_type is not Context and not neutral:
+            raise Refusal('CONTEXT_IMPLEMENTATION_UNTRUSTED', context_type.__name__)
+        if neutral:
+            source = Path(inspect.getsourcefile(neutral_type)).resolve()
+            expected = Path(__file__).parent / 'tests/test_execution_modes.py'
+            if source != expected.resolve():
+                raise Refusal('CONTEXT_IMPLEMENTATION_UNTRUSTED', str(source))
+            binding_method = _source_method(neutral_type, source, 'binding')
+            if context.route_receipt.get('kind') != 'neutral-test':
+                context = Context(**{name: getattr(context, name) for name in Context.__dataclass_fields__})
+            elif context.intent_label != 'PROGRAM_DEFAULT' or context.request_digest or context.project_digest:
+                raise Refusal('CONTROLLER_ISSUANCE_REQUIRED', 'neutral fixture has no execution authority')
+            if type(context) is neutral_type:
+                return binding_method(context)
+        from execution_authority import consume
+        try:
+            issued = consume()
+        except Refusal as exc:
+            raise Refusal('CONTROLLER_ISSUANCE_REQUIRED', str(exc)) from exc
+        binding = Context.binding(context)
+        if (dict(context.route_receipt) != issued['route'] or
+                context.request_digest != issued['request']['request_digest'] or
+                context.intent_label != issued['request']['intent_label']):
+            raise Refusal('CONTROLLER_ISSUANCE_REQUIRED', 'context differs from canonical issued request')
+        return binding
+
+    def _execution_issuance(self, context: Context, plan: dict) -> dict:
+        binding = self._context_binding(context)
+        if binding != plan['binding']:
+            raise Refusal('CURRENT_INPUT_CHANGED', context.step_id)
+        body = {k: v for k, v in plan.items() if k != 'execution_issuance'}
+        if context.route_receipt.get('kind') == 'neutral-test':
+            return dict(kind='neutral-protocol-only', plan_digest=_hash(body))
+        from execution_authority import consume
+        issued = consume()
+        return dict(kind='canonical-controller-issuance',
+                    invocation_id=issued['request']['invocation_id'],
+                    request_digest=issued['request']['request_digest'],
+                    route_digest=issued['route']['route_digest'],
+                    source_sha=issued['route']['source_sha'],
+                    source_blobs=issued['source_blobs'], plan_digest=_hash(body),
+                    inputs=dict(binding['inputs']),
+                    argv_digest=_hash({row['arm_id']: row['components'] for row in plan['portfolio']}),
+                    implementation_digest=_hash({row['arm_id']: row['invocation_sources'] for row in plan['portfolio']}))
+
+    def _verify_execution_issuance(self, context: Context, plan: dict) -> None:
+        if plan.get('execution_issuance') != self._execution_issuance(context, plan):
+            raise Refusal('CONTROLLER_ISSUANCE_CHANGED', context.step_id)
+
+    @staticmethod
+    def _authority_refusal(root: Path, exc: Refusal) -> dict:
+        result = dict(status='REFUSED', reason=exc.code, detail=str(exc),
+                      selected=None, candidate_statuses={})
+        _write(root / 'refusal.json', result)
+        _write(root / 'result.json', result)
+        return result
+
+    def _measure_versions(self, context: Context) -> None:
+        # Even a --version process waits for admission. Registry construction
+        # only binds files; a caller-authored Context cannot start a tool there.
+        self._context_binding(context)
+        with self.registry._version_lock:
+            for arm in self.registry.adapters(context.step_id):
+                if arm.executable_receipts:
+                    continue
+                receipts = {}
+                for invocation in arm.invocation_sources.values():
+                    path = Path(invocation['executable'])
+                    if str(path) in receipts:
+                        continue
+                    if digest(path) != arm.source_files[str(path)]:
+                        raise Refusal('ADAPTER_SOURCE_MISMATCH', str(path))
+                    try:
+                        measured = subprocess.run([str(path), '--version'], capture_output=True,
+                                                  text=True, timeout=2)
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        raise Refusal('TOOL_VERSION_UNBOUND', str(path)) from exc
+                    version = (measured.stdout + measured.stderr).strip()
+                    if measured.returncode != 0 or not version:
+                        raise Refusal('TOOL_VERSION_UNBOUND', str(path))
+                    receipts[str(path)] = dict(executable_sha256=digest(path), version=version,
+                                              argv=[str(path), '--version'], rc=measured.returncode)
+                self.registry._adapters[arm.arm_id] = replace(
+                    arm, executable_receipts=MappingProxyType(receipts))
+
     def _validate_live_portfolio(self, plan: Mapping[str, object] | None = None) -> None:
         _validate_portfolio(self.portfolio)
         if (plan is not None and not self.portfolio.get('meta', {}).get('test_only') and
@@ -658,23 +830,13 @@ class Controller:
 
     @staticmethod
     def _provider_identity(adapter: Adapter) -> tuple:
-        """Identity used for Ultra diversity; arm labels never participate."""
-        executables = []
+        """Underlying entry closure; aliases and appended files add no engine."""
+        identities = set()
         for component in adapter.components:
-            binary = shutil.which(component.argv[0])
-            if binary:
-                path = Path(binary).resolve()
-                executables.append((str(path), digest(path)))
-        # Arguments and caller aliases are reproduction data only. Only the
-        # engine object and independently verified implementation blobs count.
-        implementation = set()
-        for component in adapter.components:
-            for argument in component.argv[1:]:
-                path = Path(argument)
-                if path.is_file() and path.suffix == '.py':
-                    implementation |= _source_closure({str(path.resolve()): digest(path)})
-        return (tuple(sorted(set(d for _, d in executables))),
-                tuple(sorted(digest(p) for p in implementation)))
+            invocation = _invocation_sources(component)
+            identities.add((invocation['executable_sha256'],
+                            tuple(sorted(invocation['implementation'].values()))))
+        return tuple(sorted(identities))
 
     @staticmethod
     def acceptance_contract(context: Context, step: Mapping[str, object]) -> dict:
@@ -696,12 +858,12 @@ class Controller:
     def plan(self, context: Context, execution_mode: str | None = None,
              superiority: Superiority | None = None) -> dict:
         self._validate_live_portfolio()
+        binding = self._context_binding(context)
         route_mode = context.route_receipt.get('mode_intent')
         if (execution_mode is None and context.intent_label == 'USER_EXPLICIT_ULTRA'):
             selected_mode = 'ultra-mode'
         else:
             selected_mode = mode(execution_mode)
-        binding = context.binding()
         # A routed production context may enter Ultra only with the typed
         # intent issued by the canonical front door. Neutral controller
         # fixtures retain their historical direct Ultra API for protocol-only
@@ -718,6 +880,7 @@ class Controller:
             raise Refusal('UNKNOWN_CANONICAL_STEP', context.step_id)
         if not set(step['mandatory_gate_programs']).issubset(context.required_gates):
             raise Refusal('REQUIRED_GATES_DROPPED', context.step_id)
+        self._measure_versions(context)
         adapters = self.registry.adapters(context.step_id)
         rows = [{**a.identity(), 'admission': self._admission(a, context),
                  'applicability': a.applicability,
@@ -832,6 +995,8 @@ class Controller:
             _write(output / 'refusal.json', dict(status='REFUSED', reason=exc.code,
                                                detail=str(exc), run_id=run_id,
                                                portfolio=self.portfolio))
+            if exc.code in ('CONTROLLER_ISSUANCE_REQUIRED', 'CONTEXT_IMPLEMENTATION_UNTRUSTED'):
+                return self._authority_refusal(output, exc)
             raise
         plan.update(run_id=run_id, budget=asdict(self.budget),
                     public_portfolio=self.portfolio,
@@ -855,6 +1020,7 @@ class Controller:
                       mode_intent=plan['mode_intent'])
         _write(output / 'frozen-work.json', frozen)
         plan['frozen_work_digest'] = digest(output / 'frozen-work.json')
+        plan['execution_issuance'] = self._execution_issuance(context, plan)
         _write(output / 'plan.json', plan)
         _write(output / 'issued-plan.json', _issue_sealed(output / 'issued-plan.json', plan))
         if not plan['arms']:
@@ -1055,7 +1221,8 @@ class Controller:
             if actual != plan['binding']['inputs'] or any(p.is_symlink() for p in inputs.rglob('*')):
                 raise Refusal('FROZEN_INPUT_CHANGED', arm.arm_id)
         try:
-            if context.binding() != plan['binding']:
+            self._verify_execution_issuance(context, plan)
+            if self._context_binding(context) != plan['binding']:
                 raise Refusal('CURRENT_INPUT_CHANGED', arm.arm_id)
             for name, source in context.inputs.items():
                 target = inputs / _relative(name)
@@ -1067,6 +1234,7 @@ class Controller:
                 if cancel.is_set():
                     raise Refusal('CANCELLED', arm.arm_id)
                 self._source_current(arm)
+                self._verify_execution_issuance(context, plan)
                 frozen_binding()
                 argv = [v.replace('{inputs}', str(inputs)).replace('{outputs}', str(outputs))
                         for v in component.argv]
@@ -1199,6 +1367,7 @@ class Controller:
 
     def _verify_receipt_chain(self, root: Path, plan: dict, context: Context) -> dict:
         self._validate_live_portfolio(plan)
+        self._verify_execution_issuance(context, plan)
         frozen_path = root / 'frozen-work.json'
         comparison_path = root / 'comparison.json'
         if not frozen_path.is_file() or not comparison_path.is_file():
@@ -1215,7 +1384,7 @@ class Controller:
                 frozen.get('acceptance_digest') != plan.get('acceptance_digest') or
                 frozen.get('input_manifest') != plan['binding'].get('inputs')):
             raise Refusal('FROZEN_WORK_UNBOUND', context.step_id)
-        if context.binding() != plan.get('binding'):
+        if self._context_binding(context) != plan.get('binding'):
             raise Refusal('CURRENT_INPUT_CHANGED', context.step_id)
         try:
             issued_comparison = _issued(root / 'issued-comparison.json')
@@ -1299,10 +1468,12 @@ class Controller:
             path = Path(name)
             if not path.is_file() or path.is_symlink() or digest(path) != expected:
                 raise Refusal('ADAPTER_SOURCE_MISMATCH', name)
+        for component in arm.components:
+            if arm.invocation_sources.get(component.name) != _invocation_sources(component):
+                raise Refusal('ENTRY_SOURCE_CHANGED', component.name)
 
-    @staticmethod
-    def _eligible(receipt: dict, context: Context, arm: Adapter) -> None:
-        binding = context.binding()
+    def _eligible(self, receipt: dict, context: Context, arm: Adapter) -> None:
+        binding = self._context_binding(context)
         if (receipt.get('binding') != binding or receipt.get('adapter') != arm.identity() or
                 receipt.get('intent_label') != context.intent_label or
                 receipt.get('request_digest') != context.request_digest):
@@ -1400,12 +1571,13 @@ class Controller:
             published = True
 
         try:
+            self._context_binding(context)
             plan = json.loads((root / 'plan.json').read_text())
             adoption['run_id'] = plan['run_id']
             if not choice or not all(isinstance(choice.get(k), str) and choice[k].strip()
                                      for k in ('arm_id', 'receipt_sha256', 'rationale', 'reviewer')):
                 raise Refusal('AI_CHOICE_MISSING', context.step_id)
-            if choice.get('binding') != context.binding() or plan['binding'] != context.binding():
+            if choice.get('binding') != self._context_binding(context) or plan['binding'] != self._context_binding(context):
                 raise Refusal('AI_CHOICE_UNBOUND', context.step_id)
             arm_id = choice['arm_id']
             if arm_id not in plan['arms']:
@@ -1457,7 +1629,7 @@ class Controller:
                     raise Refusal('AI_CHOICE_WORSE_OBJECTIVE', str(arm_id))
             self._current_admission(context, plan, arm)
             self._eligible(receipt, context, arm)
-            fresh = asdict(arm.validate(Path(receipt['output_root']), context.binding()))
+            fresh = asdict(arm.validate(Path(receipt['output_root']), self._context_binding(context)))
             if fresh != receipt['evidence']:
                 raise Refusal('EVIDENCE_CHANGED', str(arm_id))
             # A source validator can legitimately pause. Its return is not a
@@ -1474,7 +1646,7 @@ class Controller:
             # admission checks, so its final answer is checked before copying
             # bytes into the selected generation.
             final_evidence = asdict(arm.validate(
-                Path(receipt['output_root']), context.binding()))
+                Path(receipt['output_root']), self._context_binding(context)))
             if (final_evidence != receipt['evidence'] or
                     final_evidence.get('verdict') != 'PASS' or
                     any(final_evidence.get('gates', {}).get(gate) != 'PASS'
@@ -1495,7 +1667,7 @@ class Controller:
                             winner=dict(arm_id=arm_id, receipt_sha256=choice['receipt_sha256'],
                                         artifact_outputs=receipt['evidence']['outputs']),
                             acceptance_rerun=dict(acceptance_digest=plan['acceptance_digest'],
-                                                  binding=context.binding(),
+                                                  binding=self._context_binding(context),
                                                   evidence=final_evidence,
                                                   status='PASS'))
             if _candidate_statuses is not None:
@@ -1511,6 +1683,8 @@ class Controller:
                 raise
         except Refusal as exc:
             adoption.update(reason=exc.code, detail=str(exc))
+            if exc.code in ('CONTROLLER_ISSUANCE_REQUIRED', 'CONTEXT_IMPLEMENTATION_UNTRUSTED'):
+                return self._authority_refusal(root, exc)
             if not published:
                 try:
                     publish(adoption)
@@ -1547,6 +1721,7 @@ class Controller:
     def verify_adoption(self, context: Context, root: Path) -> dict:
         """Reconsume a completed adoption chain without changing project bytes."""
         root = Path(root).resolve()
+        self._context_binding(context)
         try:
             adoption = json.loads((root / 'adoption.json').read_text())
             program = json.loads((root / 'program_adoption.json').read_text())
@@ -1598,7 +1773,7 @@ class Controller:
         self._execution_authority(root, plan, receipt, arm)
         self._current_admission(context, plan, arm)
         self._eligible(receipt, context, arm)
-        final_evidence = asdict(arm.validate(Path(receipt['output_root']), context.binding()))
+        final_evidence = asdict(arm.validate(Path(receipt['output_root']), self._context_binding(context)))
         if (final_evidence != receipt.get('evidence') or
                 final_evidence.get('verdict') != 'PASS' or
                 any(final_evidence.get('gates', {}).get(gate) != 'PASS'

@@ -194,4 +194,8 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        print('REFUSED: CANONICAL_ISSUANCE_INVALID: ' + str(exc), file=sys.stderr)
+        sys.exit(2)

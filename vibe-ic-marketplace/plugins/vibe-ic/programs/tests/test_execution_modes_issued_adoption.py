@@ -28,10 +28,12 @@ def failed_measurement(tmp_path):
     ctx = H.context(tmp_path)
     arm = H.adapter()
     measure = arm.components[1]
-    wrapper = ('import runpy,sys;sys.argv=sys.argv[1:];'
-               'runpy.run_path(sys.argv[0],run_name="__main__");sys.exit(7)')
-    measure = replace(measure, argv=(measure.argv[0], '-c', wrapper, *measure.argv[1:]))
-    arm = replace(arm, components=(arm.components[0], measure))
+    # Keep the same real rc7 after producing measurement, with a tracked entry
+    # instead of an unbound inline interpreter program.
+    wrapper = Path(__file__).parent / 'fixtures/execution_measure_failure.py'
+    measure = replace(measure, argv=(measure.argv[0], str(wrapper.resolve()), *measure.argv[1:]))
+    sources = dict(arm.source_files, **{str(wrapper.resolve()): M.digest(wrapper)})
+    arm = replace(arm, components=(arm.components[0], measure), source_files=sources)
     c = H.controller(arm)
     root = tmp_path / 'run'
     c.run(ctx, root)
