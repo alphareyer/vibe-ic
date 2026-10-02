@@ -19,6 +19,7 @@ Paths below are relative to `vibe-ic-marketplace/plugins/vibe-ic/`.
 | Boundary | Current source callsites |
 | --- | --- |
 | User entry | [commands/vibe-ic-phase1.md:18](../vibe-ic-marketplace/plugins/vibe-ic/commands/vibe-ic-phase1.md#L18) invokes the normal Phase-1 runner. |
+| Benchmark routing | [programs/benchmark_dispatch.py:6059](../vibe-ic-marketplace/plugins/vibe-ic/programs/benchmark_dispatch.py#L6059) validates all issued AI task-nature responses before launching design runners; `:5778` builds the ordinary solver arguments. This existing routing contract remains required. |
 | Phase dispatch | [programs/vibe_ic_one_shot_runner.py:324](../vibe-ic-marketplace/plugins/vibe-ic/programs/vibe_ic_one_shot_runner.py#L324) resolves phase runner filenames; `:641` launches them, with Phase 1 at `:1976`, Phase 2 at `:2299`, and Phase 3 at `:2404`. |
 | Phase implementations | [programs/phase1_one_shot_runner.py:92](../vibe-ic-marketplace/plugins/vibe-ic/programs/phase1_one_shot_runner.py#L92) imports the document producer and `:763` calls its `main`; [programs/phase2_one_shot_runner.py:46](../vibe-ic-marketplace/plugins/vibe-ic/programs/phase2_one_shot_runner.py#L46) imports `design_one_shot_runner.main`. |
 | Native tool selection | [programs/librelane_contract.py:1893](../vibe-ic-marketplace/plugins/vibe-ic/programs/librelane_contract.py#L1893) resolves implementation records, per-step switches, production/class defaults, then `direct`. Actual callers include [programs/design_one_shot_runner.py:13448](../vibe-ic-marketplace/plugins/vibe-ic/programs/design_one_shot_runner.py#L13448) and [programs/phase3_one_shot_runner.py:17291](../vibe-ic-marketplace/plugins/vibe-ic/programs/phase3_one_shot_runner.py#L17291). |
@@ -39,7 +40,8 @@ administrative handoff custody are progress metadata, not prerequisites to
 Default execution or landing. A preparation-only assembler's refusal and a
 unified-controller ledger's `0/70` or `0/1179` do not reset existing Default
 progress. Proposed R0 route/activation receipts remain a planned integration
-contract, not a requirement imposed by the inspected normal runners.
+contract, not a requirement imposed by the inspected normal runners. This does
+not waive the existing benchmark task-nature review shown above.
 
 Existing typed, present, current, source-bound tool-output evidence and all nine
 levels of artifact gates remain required for their applicable acceptance claims.
