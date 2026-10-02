@@ -257,3 +257,84 @@ def test_real_declared_row_gate_consumes_the_current_report(tmp_path, monkeypatc
     (folder / 'invocation.log').unlink()
     clause = FC._check_program_exit_zero(p, command)
     assert clause[0] is False, clause
+
+
+def spice_produce(p, folder, lib, monkeypatch, *, verdict='PASS'):
+    write(p / 'fixture_pdk/neutral/libs.tech/ngspice/model.sp', '.model neutral nmos level=1\n')
+    def run(project, image, root, pdk_name, **kwargs):
+        detail = {}
+        for variant in ('base', 'mutated'):
+            directory = p / 'phase3/tool_arms/30/ngspice' / variant
+            script = write(directory / 'arm.tcl', 'read_spef current\nwrite_path_spice\n')
+            sta_log = write(directory / 'sta.log', 'SOURCE_FIXTURE_ONLY OpenSTA write_path_spice\n')
+            deck = write(directory / 'path_1.sp', '* SOURCE_FIXTURE_ONLY tool deck\n.end\n')
+            runnable = write(directory / 'path_1.run.sp', '* SOURCE_FIXTURE_ONLY simulator deck\n.end\n')
+            sim_log = write(directory / 'path_1.log', 'SOURCE_FIXTURE_ONLY measured 1 ns\n')
+            detail[variant] = {'sta_execution': {'tool': 'OpenSTA', 'rc': 0,
+                'argv': ['sta', '-exit', str(script)], 'script': str(script), 'log': str(sta_log)},
+                'paths': [{'deck': str(deck), 'status': 'MEASURED', 'spice_ns': 1,
+                    'simulator_execution': {'tool': 'ngspice', 'rc': 0,
+                        'argv': ['ngspice', '-b', str(runnable)],
+                        'script': str(runnable), 'log': str(sim_log)}}]}
+        doc = {'step': '30', 'corner': 'nom_typ', 'verdict': verdict,
+               'arms': {'ngspice': {'verdict': 'CORRELATED' if verdict == 'PASS' else 'MISMATCH'}},
+               'detail': {'ngspice': detail}}
+        put(p / 'reports/phase3/spice_path_tool.json', doc)
+        return doc
+    monkeypatch.setattr(PST, 'run_step30', run)
+    monkeypatch.setattr(LC, 'resolve_image', lambda *a, **k: BF.IMAGE)
+    monkeypatch.setattr(LC, 'pdk_root_resolution', lambda *a, **k: {'path': str(p / 'fixture_pdk')})
+    return SC.run_installed_pdk_path_correlation(p, str(lib))
+
+
+def test_step30_ordinary_caller_adopts_the_existing_tool_product(tmp_path, monkeypatch):
+    p, folder, lib = project(tmp_path)
+    result = spice_produce(p, folder, lib, monkeypatch)
+    assert result['status'] == 'RAN', result
+    assert SC.main([str(p), '--json', str(p / 'spice-gate.json')]) == 0
+    assert (p / 'phase3/stage3/spice/correlation.spice').read_bytes() == (p / 'phase3/tool_arms/30/ngspice/base/path_1.sp').read_bytes()
+
+
+@pytest.mark.parametrize('mutation', ['netlist', 'spef', 'sdc', 'liberty', 'corner', 'models',
+    'execution', 'report_replay', 'wrong_project', 'wrong_stage', 'wrong_path', 'consumption'])
+def test_step30_gate_refuses_current_byte_and_consumer_mutations(tmp_path, monkeypatch, mutation):
+    p, folder, lib = project(tmp_path)
+    assert spice_produce(p, folder, lib, monkeypatch)['status'] == 'RAN'
+    assert SC.main([str(p), '--no-spice', '--json', str(p / 'spice-gate.json')]) == 0
+    if mutation in ('netlist', 'spef', 'sdc', 'liberty', 'models'):
+        path = {'netlist': p / 'phase3/stage3/pnr/neutral_pnr.v',
+                'spef': p / 'phase3/stage3/extracted/neutral.spef',
+                'sdc': p / 'phase3/stage3/pnr/constraint.sdc', 'liberty': lib,
+                'models': p / 'fixture_pdk/neutral/libs.tech/ngspice/model.sp'}[mutation]
+        path.write_text(path.read_text() + '\n ')
+    elif mutation == 'corner':
+        path = p / LP.STEP23_RECORD
+        doc = json.loads(path.read_text())
+        doc['judgment']['worst_setup']['corner'] = 'other'
+        put(path, doc)
+    elif mutation == 'execution':
+        (p / 'phase3/tool_arms/30/ngspice/base/path_1.log').unlink()
+    elif mutation == 'report_replay':
+        path = p / 'reports/phase3/spice_path_tool.json'
+        path.write_text(path.read_text() + '\n ')
+    else:
+        path = p / 'reports/phase3/spice_correlation.current.json'
+        doc = json.loads(path.read_text())
+        if mutation == 'wrong_project':
+            doc['project'] = str(tmp_path / 'other')
+        elif mutation == 'wrong_stage':
+            doc['stage'] = 'pre_layout'
+        elif mutation == 'wrong_path':
+            doc['outputs'][0]['path'] = str(tmp_path / 'outside.sp')
+        else:
+            doc['outputs'] = []
+        put(path, doc)
+    assert SC.main([str(p), '--no-spice', '--json', str(p / 'spice-gate.json')]) == 1
+
+
+def test_step30_current_measured_fail_is_still_fail(tmp_path, monkeypatch):
+    p, folder, lib = project(tmp_path)
+    result = spice_produce(p, folder, lib, monkeypatch, verdict='FAIL')
+    assert result['status'] == 'RAN'
+    assert SC.main([str(p), '--json', str(p / 'spice-gate.json')]) == 1
+    assert json.loads((p / 'spice-gate.json').read_text())['summary']['measurement'] == 'MEASURED'
