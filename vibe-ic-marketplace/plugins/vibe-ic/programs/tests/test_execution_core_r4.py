@@ -173,3 +173,18 @@ def test_imported_main_catches_capability_refusal_and_preserves_route_input(tmp_
     assert document['answers'] == {'other': 'keep', 'deliverable': 'HARDMACRO'}
     assert document['answer_provenance']['deliverable']['answered_by'] == 'owner'
     assert not (tmp_path / 'phase1/generated_docs').exists()
+
+
+def test_measured_fail_survives_unauthorized_adoption(tmp_path, monkeypatch):
+    ctx = issued_context(tmp_path, 'default')
+    controller = H.controller(H.adapter('a', fault='fail_gate'))
+    root = tmp_path / 'run'
+    assert controller.run(ctx, root)['status'] == 'FAIL'
+    original_result = (root / 'result.json').read_bytes()
+    original_comparison = (root / 'comparison.json').read_bytes()
+    monkeypatch.delenv(policy._CAPABILITY_FD_ENV)
+    assert controller.adopt(ctx, root, None)['status'] == 'REFUSED'
+    assert json.loads((root / 'result.json').read_text())['status'] == 'FAIL'
+    assert (root / 'result.json').read_bytes() == original_result
+    assert (root / 'comparison.json').read_bytes() == original_comparison
+    assert not (root / 'selected').exists()

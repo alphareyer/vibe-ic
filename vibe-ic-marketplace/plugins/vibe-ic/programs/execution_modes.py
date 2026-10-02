@@ -772,7 +772,10 @@ class Controller:
         result = dict(status='REFUSED', reason=exc.code, detail=str(exc),
                       selected=None, candidate_statuses={})
         _write(root / 'refusal.json', result)
-        _write(root / 'result.json', result)
+        # A later consumer refusal cannot replace the producer's measured
+        # terminal verdict. Preserve its receipt and record this call separately.
+        if not (root / 'result.json').exists():
+            _write(root / 'result.json', result)
         return result
 
     def _measure_versions(self, context: Context) -> None:
