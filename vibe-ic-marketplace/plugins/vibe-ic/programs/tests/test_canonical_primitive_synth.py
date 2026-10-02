@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import os
@@ -606,6 +607,169 @@ def test_unsigned_divider_r4_ordering_must_be_unconditional(ordering):
         "The divisor is positive.\n" + ordering)
     assert rcs.detect_shape(desc) is None
     assert "dividend >= divisor domain" in rcs.route_to_ai_reason(desc)["unresolved"]
+
+
+def _r5_domain_description(domain):
+    return _INLINE_POS["unsigned_iterative_restoring_divider"].replace(
+        "Both operands are nonzero, and dividend is at least divisor.", domain)
+
+
+def _r5_assert_publication(domain, emit, tmp_path):
+    """Check the detector, publishing CLI and the existing normal consumer."""
+    description = _r5_domain_description(domain)
+    source, output = tmp_path / "description.txt", tmp_path / "unit.sv"
+    source.write_text(description)
+    run = subprocess.run([sys.executable, str(PROG), "--from-desc", str(source),
+                          "--out", str(output)], capture_output=True, text=True)
+    response = json.loads(run.stdout)
+    assert response["verdict"] == ("EMIT" if emit else "DEFER")
+    assert run.returncode == (0 if emit else 2), run.stdout + run.stderr
+    assert output.exists() == emit
+    if not emit:
+        assert response["defer_reason"]["unresolved"]
+    observed = rcs.detect_shape(description)
+    assert observed == ("unsigned_iterative_restoring_divider" if emit else None)
+    reason = rcs.route_to_ai_reason(description)
+    assert (reason is None) == emit
+    import design_one_shot_runner as runner
+    project = tmp_path / "project"
+    input_file = project / "phase1/input_doc/design_description.txt"
+    input_file.parent.mkdir(parents=True)
+    input_file.write_text(description)
+    result = runner._try_canonical_primitive_rtl(project, time.time())
+    files = list(project.glob("phase2/stage1/rtl/*.v"))
+    assert bool(files) == emit
+    assert (result is not None and result.status == "PASS") == emit
+
+
+@pytest.mark.parametrize("withdrawal", [
+    "That statement does not apply to this design.",
+    "This guarantee is waived.",
+    "The preceding requirement is obsolete.",
+    "That requirement was removed.",
+    "This is optional, not an input requirement.",
+    "This property belongs to the reference model; the target accepts zero.",
+    "Zero is also permitted as a divisor.",
+    "A divisor of zero is a valid input.",
+], ids=["frozen_retraction", "waived", "obsolete", "removed", "optional",
+        "owner_reassigned", "zero_permitted", "zero_valid"])
+def test_unsigned_divider_r5_resolves_target_retractions(withdrawal, tmp_path):
+    _r5_assert_publication("The divisor is nonzero. " + withdrawal +
+                           " Dividend is at least divisor.", False, tmp_path)
+
+
+@pytest.mark.parametrize("withdrawal", [
+    "That ordering constraint does not apply to this design.",
+    "Dividend may be less than divisor.",
+    "Dividend is less than divisor.",
+])
+def test_unsigned_divider_r5_resolves_ordering_retractions(withdrawal, tmp_path):
+    _r5_assert_publication("The divisor is nonzero. Dividend is at least divisor. "
+                           + withdrawal, False, tmp_path)
+
+
+@pytest.mark.parametrize("assertion", [
+    "The divisor is nonzero in the reference model; this design permits zero.",
+    "The divisor is nonzero in the reference model. This design permits zero.",
+    "The divisor is positive in the comparison implementation; this unit accepts zero.",
+    "The divisor is nonzero on the diagnostic channel; functional requests permit zero.",
+    "The divisor is nonzero only in diagnostic mode; ordinary requests permit zero.",
+    "The divisor is nonzero as long as the optional guard is enabled.",
+    "The divisor is nonzero (a sample trace only).",
+    "The divisor is nonzero (only in diagnostic mode).",
+    "The divisor is nonzero, probably.",
+    "The divisor is nonzero, presumably.",
+    "The divisor is nonzero, according to the obsolete reference.",
+    "The divisor is nonzero; this guarantee is waived.",
+    "The divisor is nonzero; this constraint is optional.",
+])
+def test_unsigned_divider_r5_requires_target_proposition_owner(assertion, tmp_path):
+    _r5_assert_publication(assertion + " Dividend is at least divisor.", False, tmp_path)
+
+
+@pytest.mark.parametrize("heading", [
+    "Examples:", "Reference model only:", "Hypothetical mode:",
+    "If an optional guard is installed:", "Is the following true?",
+    "## Examples", "## Reference model", "## Hypothetical mode",
+    "## Examples\n### Input constraints",
+    "## Reference model\n### Input constraints",
+    "## Examples\nInput constraints:",
+])
+@pytest.mark.parametrize("marker", ["-", "*", "1."])
+def test_unsigned_divider_r5_carries_list_and_section_framing(heading, marker, tmp_path):
+    _r5_assert_publication(heading + "\n" + marker + " The divisor is nonzero.\n"
+                           + marker + " Dividend is at least divisor.", False, tmp_path)
+
+
+@pytest.mark.parametrize("other", [
+    'A rejected example says "the divisor may be zero".',
+    'The reference manual says "the denominator may be zero"; that refers to another design.',
+    'A rejected example says “the divisor may be zero”.',
+    'A rejected example says «the divisor may be zero».',
+    'A rejected example says ‘the divisor may be zero’.',
+    "The reference model's divisor may be zero.",
+    "The divisor may be zero in the reference model.",
+    "For example, the divisor may be zero in another design.",
+    "If the divisor were zero, the request would be invalid.",
+    "The divisor cannot be zero.",
+    "The output is not saturated.",
+    "\n> That statement does not apply to this design.\n",
+    "\n## Rejected examples\n- That statement does not apply to this design.\n## Target constraints\n",
+    "The divisor may be zero in another design. That statement is obsolete.",
+])
+def test_unsigned_divider_r5_scopes_contradictory_evidence(other, tmp_path):
+    _r5_assert_publication("The divisor is nonzero. " + other +
+                           " Dividend is at least divisor.", True, tmp_path)
+
+
+@pytest.mark.parametrize("allowance", [
+    "The divisor may be zero.", "The denominator is zero.",
+    "Zero is permitted as a divisor.", "A divisor of zero is a valid input.",
+])
+def test_unsigned_divider_r5_keeps_target_zero_allowance_refusal(allowance, tmp_path):
+    _r5_assert_publication("The divisor is nonzero. " + allowance +
+                           " Dividend is at least divisor.", False, tmp_path)
+
+
+@pytest.mark.parametrize("domain", [
+    "The divisor is nonzero. The output is not saturated. Dividend is at least divisor.",
+    "The divisor is nonzero, and the output is not saturated. Dividend is at least divisor.",
+    "- The divisor is nonzero.\n- Dividend is at least divisor.",
+    "* The divisor is nonzero.\n* Dividend is at least divisor.",
+    "1. The divisor is nonzero.\n2. Dividend is at least divisor.",
+    "Input constraints:\n- The divisor is nonzero.\n- Dividend is at least divisor.",
+    "The divisor is nonzero (a required input constraint). Dividend is at least divisor.",
+    "The divisor is nonzero in this design. Dividend is at least divisor.",
+    "## Examples\n- The divisor may be zero.\n## Target input constraints\n"
+    "- The divisor is nonzero.\n- Dividend is at least divisor.",
+])
+def test_unsigned_divider_r5_preserves_target_assertions(domain, tmp_path):
+    _r5_assert_publication(domain, True, tmp_path)
+
+
+def test_unsigned_divider_r5_port_zero_allowance_is_target_evidence(tmp_path):
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"].replace(
+        "divisor[WIDTH-1:0]: unsigned divisor.",
+        "divisor[WIDTH-1:0]: unsigned divisor; zero is a permitted value.")
+    assert rcs.detect_shape(desc) is None
+    assert "nonzero operand domain" in rcs.route_to_ai_reason(desc)["unresolved"]
+
+
+def test_unsigned_divider_r5_loads_by_path_outside_programs(tmp_path):
+    source = tmp_path / "description.txt"
+    source.write_text(_INLINE_POS["unsigned_iterative_restoring_divider"])
+    script = (
+        "import importlib.util, pathlib, sys\n"
+        "spec = importlib.util.spec_from_file_location('independent_producer', sys.argv[1])\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "sys.modules[spec.name] = module\n"
+        "spec.loader.exec_module(module)\n"
+        "text = pathlib.Path(sys.argv[2]).read_text()\n"
+        "assert module.detect_shape(text) == 'unsigned_iterative_restoring_divider'\n"
+        "assert module.emit_rtl(module.detect_shape(text), text)\n")
+    run = subprocess.run([sys.executable, "-I", "-c", script, str(PROG), str(source)],
+                         cwd=tmp_path, capture_output=True, text=True)
+    assert run.returncode == 0, run.stdout + run.stderr
 
 
 def _r2_unsigned_divider_variants():

@@ -89,13 +89,12 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-from _prose_polarity import LINE_END_BREAKS, is_denied, sentence_scope
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROGRAMS_DIR))
 
+from _prose_polarity import LINE_END_BREAKS, is_denied, sentence_scope  # noqa: E402
 from _design_module_set import strip_comments  # noqa: E402 - vibe-ic#731
 
 
@@ -201,6 +200,265 @@ def _contains_any(text: str, patterns: Tuple[str, ...]) -> bool:
     return any(re.search(pattern, text, re.I) for pattern in patterns)
 
 
+class _DivisionProposition(NamedTuple):
+    """A bounded source proposition, including its enclosing document frame."""
+    text: str
+    owner: str
+    frame: str
+    structural: bool
+    port_role: Optional[str]
+
+
+def _division_frame(text: str) -> Tuple[str, str]:
+    """Classify attribution and assertion framing, independently of polarity.
+
+    This is a small grammar for the supported contract language, not general
+    natural-language inference. Unrecognised positive qualifiers are refused
+    by _division_target_assertion rather than added to a word blacklist.
+    """
+    owner = "external" if re.search(
+        r"\b(?:reference|comparison|another|other)\s+"
+        r"(?:model|implementation|design|unit|manual|divisor|denominator)\b|"
+        r"\b(?:obsolete|old)\s+reference\b", text) else "target"
+    if re.search(r"[?？]", text):
+        return owner, "question"
+    if re.search(r"\b(?:examples?|sample|hypothetical|hypothesis|consider|such\s+as)\b|"
+                 r"\be\.g\.", text):
+        return owner, "illustration"
+    if re.search(r"\b(?:if|when|provided|assuming|suppose|unless|whether|in\s+case|"
+                 r"as\s+long\s+as)\b|"
+                 r"\bonly\s+(?:describes?|in)\b|"
+                 r"\b(?:in|on)\s+(?:\w+\s+){0,3}(?:mode|channel)\b", text):
+        return owner, "conditional"
+    if re.search(r"\b(?:probably|presumably|possibly|likely|uncertain|unknown|"
+                 r"previously|formerly|historically)\b|"
+                 r"\b(?:previous|prior|old)\s+(?:rule|requirement)\b", text):
+        return owner, "qualified"
+    return owner, "assertion"
+
+
+def _division_propositions(desc_text: str,
+                           records: List[Dict[str, str]]) -> List[_DivisionProposition]:
+    """Keep list/section frames while separating propositions and quotations.
+
+    Newlines are soft wraps unless they introduce a heading, list item or
+    structural port record. The shared sentence_scope still owns punctuation.
+    A colon heading governs its list; a Markdown heading governs its section
+    until the next heading at that level. Quotes remain explicit excluded
+    propositions, so positive and contradictory evidence share one scope.
+    """
+    text = (desc_text or "").lower().replace("\r\n", "\n").replace("\u2011", "-")
+    quote_re = re.compile(
+        r'```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z)|'
+        r'"[^"]*(?:"|\Z)|“[^”]*(?:”|\Z)|«[^»]*(?:»|\Z)|‘[^’]*(?:’|\Z)|'
+        r"(?<!\w)'[^'\n]*'(?!\w)|`[^`\n]*(?:`|\Z)")
+    quotes = list(quote_re.finditer(text))
+    clean = quote_re.sub(lambda m: "".join("\n" if c == "\n" else " "
+                                          for c in m.group()), text)
+    propositions: List[_DivisionProposition] = []
+    # Frames are inherited, not reconstructed from the sentence containing a
+    # value. This is what prevents a list marker from erasing an Examples title.
+    sections: List[Tuple[int, Tuple[str, str]]] = []
+    list_frame: Optional[Tuple[str, str]] = None
+    pending: List[str] = []
+    pending_frame = ("target", "assertion")
+    pending_structural = False
+    pending_role: Optional[str] = None
+
+    def flush() -> None:
+        if not pending:
+            return
+        block = "\n".join(pending)
+        scope = re.sub(r"\be\.g\.", "e_g_", block)
+        scope = re.sub(r"\b\d+\.(?=\d)", lambda m: m.group().replace(".", "_"), scope)
+        spans = set()
+        for token in re.finditer(r"\w+|>=|≥|>", scope):
+            spans.add(sentence_scope(scope, token.start(), token.end(),
+                                     before=len(scope), after=len(scope),
+                                     extra_breaks=LINE_END_BREAKS +
+                                     ("。", "！", "？")))
+        for lo, hi in sorted(spans):
+            sentence = block[lo:hi].strip().rstrip(".!。！")
+            question = scope[hi:hi + 1] in {"?", "？"}
+            # Split independent clauses, retaining the enclosing sentence's
+            # conditional framing. An unrelated output denial is its own
+            # proposition and cannot retract an operand declaration.
+            _, frame = _division_frame(sentence)
+            if pending_frame[1] != "assertion":
+                frame = pending_frame[1]
+            if question:
+                frame = "question"
+            clauses = re.split(r";\s*|,\s*(?:and|but|yet|however)\s+", sentence)
+            for clause in clauses:
+                clause = clause.strip().removeprefix("and ")
+                if not clause:
+                    continue
+                clause_owner, clause_frame = _division_frame(clause)
+                # Attribution belongs to the proposition, not its neighbours.
+                # Conditional/question/illustrative framing governs the sentence.
+                propositions.append(_DivisionProposition(
+                    clause, pending_frame[0] if pending_frame[0] != "target" else clause_owner,
+                    frame if frame in {"conditional", "question", "illustration"}
+                    else (pending_frame[1] if pending_frame[1] != "assertion" else clause_frame),
+                    pending_structural, pending_role))
+        pending.clear()
+
+    for raw, line in zip(text.splitlines(), clean.splitlines()):
+        stripped = line.strip()
+        markdown = re.match(r"\s*(#{1,6})\s+(.+)", stripped)
+        if markdown:
+            flush()
+            level = len(markdown.group(1))
+            while sections and sections[-1][0] >= level:
+                sections.pop()
+            sections.append((level, _division_frame(markdown.group(2))))
+            list_frame = None
+            continue
+        bullet = re.match(r"\s*(?:[-*+]\s+|\d+[.)]\s+)(.*)", line)
+        if stripped.endswith((":", "：", "?", "？")) and not bullet:
+            flush()
+            list_frame = _division_frame(stripped)
+            continue
+        if not stripped:
+            flush()
+            list_frame = None
+            continue
+        structural = bool(re.match(r"(?: {4}|\t|\s*>)", raw)) and not bullet
+        port = next((r for r in records if raw.strip() == r["line"].lower()), None)
+        structural = structural or port is not None
+        port_role = None
+        if port is not None:
+            for role in ("divisor", "dividend"):
+                if any(re.search(r"\b" + word + r"\b", port["text"].lower())
+                       for word in _UNSIGNED_DIVISION_ROLE_WORDS[role]):
+                    port_role = role
+                    break
+        if not bullet and not line[:1].isspace():
+            list_frame = None
+        frames = [frame for _, frame in sections]
+        if bullet and list_frame:
+            frames.append(list_frame)
+        enclosing = ("external" if any(owner != "target" for owner, _ in frames) else "target",
+                     next((frame for _, frame in frames if frame != "assertion"), "assertion"))
+        if (bullet or structural or pending_structural or enclosing != pending_frame):
+            flush()
+        pending_frame, pending_structural, pending_role = enclosing, structural, port_role
+        pending.append(bullet.group(1) if bullet else stripped)
+        if bullet or structural:
+            flush()
+    flush()
+    # Quotation content is represented for the same evidence filter as every
+    # other proposition. It cannot authorize or contradict the target contract.
+    for quote in quotes:
+        content = quote.group().strip('"“”«»‘’\'`~').strip()
+        propositions.append(_DivisionProposition(content, "external", "quotation", False, None))
+    return propositions
+
+
+def _division_target_evidence(proposition: _DivisionProposition) -> bool:
+    """Apply identical owner and framing scope to positive and negative facts."""
+    return (proposition.owner == "target" and proposition.frame == "assertion"
+            and (not proposition.structural or proposition.port_role is not None))
+
+
+def _division_target_assertion(proposition: _DivisionProposition,
+                               match: re.Match, denied: Callable[[str], bool]) -> bool:
+    if not _division_target_evidence(proposition) or proposition.structural:
+        return False
+    prefix, suffix = proposition.text[:match.start()].strip(), proposition.text[match.end():].strip()
+    # Accept only an operand-subject assertion and supported target qualifiers.
+    # Arbitrary suffixes cannot turn a reference/mode/sample into a contract.
+    return (not prefix and not denied(proposition.text)
+            and bool(re.fullmatch(r"(?:[.!]?|in\s+(?:this|the\s+target)\s+(?:design|unit)|"
+                                  r"\((?:a\s+)?required\s+input\s+constraint\))", suffix)))
+
+
+def _division_retracted_domains(propositions: List[_DivisionProposition],
+                                events: List[set], denied: Callable[[str], bool]) -> set:
+    """Resolve demonstrative withdrawals against the preceding proposition."""
+    retracted = set()
+    previous = set()
+    referent = re.compile(r"^(?:(?:that|this|the\s+preceding)\s+"
+                          r"(?:statement|guarantee|requirement|property|rule|constraint|"
+                          r"ordering\s+constraint)|this\s+is)\b")
+    for proposition, domains in zip(propositions, events):
+        reassigned = (referent.search(proposition.text) and
+                      re.search(r"\bbelongs\s+to\b", proposition.text) and
+                      proposition.frame == "assertion" and not proposition.structural)
+        if not _division_target_evidence(proposition) and not reassigned:
+            previous = set()
+            continue
+        if referent.search(proposition.text) and (
+                denied(proposition.text)
+                or re.search(r"\b(?:waived|optional)\b|\bbelongs\s+to\b", proposition.text)):
+            if "ordering" in proposition.text:
+                retracted.add("ordering")
+            else:
+                retracted.update(previous)
+        previous = domains
+    return retracted
+
+
+def _division_domain_status(desc_text: str, records: List[Dict[str, str]],
+                            denied: Callable[[str], bool]) -> Tuple[bool, bool, bool]:
+    propositions = _division_propositions(desc_text, records)
+    dividend, divisor = r"(?:dividend|numerator)", r"(?:divisor|denominator)"
+    both = (r"(?:both\s+operands|the\s+operands|(?:both\s+)?(?:the\s+)?" + dividend +
+            r"\s+and\s+(?:the\s+)?" + divisor + r"|(?:both\s+)?(?:the\s+)?" + divisor +
+            r"\s+and\s+(?:the\s+)?" + dividend + r")")
+    value = r"(?:non[- ]?zero|positive|greater\s+than\s+(?:zero|0))\b"
+    positive = re.compile(r"\b(?:" + both + r"|(?:the\s+)?" + divisor + r")\s+"
+                          r"(?:(?:is|are|must\s+be|shall\s+be)\s+" + value + r"|>\s*0\b)")
+    ordering = re.compile(r"\b(?:the\s+)?" + dividend +
+                          r"\s*(?:(?:is|must\s+be|shall\s+be)\s*)?"
+                          r"(?:at\s+least\s+|>=\s*|≥\s*)(?:the\s+)?" + divisor + r"\b")
+    operand = r"\b(?:" + both + r"|(?:the\s+)?(?:divisor|denominator|dividend|numerator))"
+    allowance = re.compile(operand + r"\s+(?:"
+                           r"(?:may|might|could|can)\s+be\s+(?:zero|0|non[- ]?zero|positive)\b|"
+                           r"(?:is|are)\s+(?:zero|0)\b|"
+                           r"(?:is|are|be|must\s+be|shall\s+be)\s+(?:\w+\s+){0,4}" + value + r")")
+    less = re.compile(r"\b(?:the\s+)?" + dividend +
+                      r"\s+(?:(?:is|may\s+be|can\s+be)\s+)?less\s+than\s+(?:the\s+)?" + divisor)
+    positives, contradictions, events = set(), set(), []
+    zero_allowed = False
+    for proposition in propositions:
+        current = set()
+        for name, pattern in (("nonzero", positive), ("ordering", ordering)):
+            for match in pattern.finditer(proposition.text):
+                if _division_target_assertion(proposition, match, denied):
+                    current.add(name)
+                    positives.add(name)
+        events.append(current)
+        if not _division_target_evidence(proposition):
+            continue
+        is_denied_here = denied(proposition.text)
+        for match in allowance.finditer(proposition.text):
+            matched = match.group()
+            has_zero = bool(re.search(r"\b(?:be|is|are)\s+(?:zero|0)\b", matched))
+            # A denied zero allowance is a prohibition, not a contradiction.
+            if (has_zero and not is_denied_here) or (not has_zero and (
+                    is_denied_here or re.search(r"\b(?:may|might|could|can)\b", matched))):
+                contradictions.add("nonzero")
+                zero_allowed = zero_allowed or has_zero
+        explicit_zero = bool(re.search(
+            r"\b(?:zero|0)\s+is\s+(?:also\s+)?(?:permitted|allowed|valid|accepted)"
+            r"\s+(?:as\s+)?(?:a\s+)?(?:divisor|denominator)\b|"
+            r"\b(?:a\s+)?(?:divisor|denominator)\s+of\s+(?:zero|0)\s+is\s+"
+            r"(?:a\s+)?(?:valid|permitted|allowed|accepted)\s+(?:input|value)\b", proposition.text))
+        port_zero = proposition.port_role in {"divisor", "dividend"} and bool(re.search(
+            r"\b(?:zero|0)\s+is\s+(?:a\s+)?(?:permitted|allowed|valid|accepted)\s+"
+            r"(?:input|value)\b", proposition.text))
+        if (explicit_zero or port_zero) and not is_denied_here:
+            contradictions.add("nonzero")
+            zero_allowed = True
+        if (less.search(proposition.text) and not is_denied_here) or (
+                ordering.search(proposition.text) and is_denied_here):
+            contradictions.add("ordering")
+    contradictions.update(_division_retracted_domains(propositions, events, denied))
+    return ("nonzero" in positives and "nonzero" not in contradictions,
+            "ordering" in positives and "ordering" not in contradictions, zero_allowed)
+
+
 def _unsigned_division_observation(desc_text: str) -> Tuple[Optional[Dict], List[str]]:
     """Parse the complete unsigned iterative-divider source contract.
 
@@ -230,103 +488,19 @@ def _unsigned_division_observation(desc_text: str) -> Tuple[Optional[Dict], List
             r"\bnot\s+unsigned\b", r"\bunsigned\s+is\s+not\b",
             r"\b(?:signed|signedness)\b"))):
         unresolved.append("unsigned operand domain (signed is unsupported)")
-    # Domain evidence is a declaration in its own sentence, never a keyword
-    # anywhere in the document. Keep the original line/quote boundaries;
-    # normalized whitespace would let headings and examples authorize RTL.
-    domain_text = (desc_text or "").lower().replace("\r\n", "\n")
-    # e.g. is example framing, not two full stops ending that framing.
-    scope_text = re.sub(r"\be\.g\.", "e_g_", domain_text)
-    # A closing quote after sentence punctuation does not join the following
-    # declaration. Preserve offsets while exposing that end to the helper.
-    scope_text = re.sub(r'''([.!?])["”'`](?=\s|\Z)''', r"\1 ", scope_text)
-    quoted = [(m.start(), m.end()) for m in re.finditer(
-        r'```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z)|'
-        r'"[^"]*(?:"|\Z)|“[^”]*(?:”|\Z)|'
-        r"(?<!\w)'[^'\n]*'(?!\w)|`[^`\n]*(?:`|\Z)", domain_text)]
-    # Only divider-domain framing lives here. All denial/retirement words
-    # continue to come from the canonical prose-polarity vocabulary.
-    domain_frame = re.compile(
-        r"\b(?:if|when|provided|assuming|suppose|unless|in\s+case|"
-        r"examples?|hypothetical|such\s+as|consider|"
-        r"may|might|could|can|uncertain|unknown|whether|"
-        r"but|however|whereas|yet|although|instead|rather\s+than|"
-        r"previous(?:ly)?|formerly|historical(?:ly)?|prior\s+(?:rule|requirement)|"
-        r"old\s+(?:rule|requirement))\b|\be\.g\.")
-    both_roles = (
-        r"(?:both\s+operands|the\s+operands|"
-        r"(?:both\s+)?(?:the\s+)?dividend\s+and\s+(?:the\s+)?divisor|"
-        r"(?:both\s+)?(?:the\s+)?divisor\s+and\s+(?:the\s+)?dividend|"
-        r"(?:both\s+)?(?:the\s+)?numerator\s+and\s+(?:the\s+)?denominator|"
-        r"(?:both\s+)?(?:the\s+)?denominator\s+and\s+(?:the\s+)?numerator)"
-    )
-    divisor_role = r"(?:the\s+)?(?:divisor|denominator)"
-    value = r"(?:non[- ]?zero|positive|greater\s+than\s+(?:zero|0))\b"
-    predicate = r"(?:(?:is|are|must\s+be|shall\s+be)\s+" + value + r"|>\s*0\b)"
-    positive_pattern = r"\b(?:" + both_roles + "|" + divisor_role + r")\s+" + predicate
-
-    def _domain_scope(match: re.Match) -> Tuple[int, int]:
-        lo, hi = sentence_scope(scope_text, match.start(), match.end(),
-                                before=len(scope_text), after=len(scope_text),
-                                extra_breaks=LINE_END_BREAKS)
-        return lo, hi
-
-    def _sentence(match: re.Match) -> str:
-        lo, hi = _domain_scope(match)
-        return domain_text[lo:hi]
-
-    def _quoted_or_structural(match: re.Match) -> bool:
-        if any(lo <= match.start() < hi for lo, hi in quoted):
-            return True
-        start = domain_text.rfind("\n", 0, match.start()) + 1
-        end = domain_text.find("\n", match.start())
-        line = domain_text[start:end if end != -1 else len(domain_text)]
-        return bool(re.match(r"(?: {4}|\t|\s*[#>])", line)
-                    or re.match(r"\s*[a-z_]\w*\s*(?:\[[^\]]*\])?\s*[:：]", line))
-
-    def _denied(sentence: str) -> bool:
-        # non-zero is the value being asserted, not a denial prefix. Normalize
-        # only that value; qualifiers such as '(not guaranteed)' still count.
-        return is_denied(re.sub(r"\bnon[- ]zero\b", "nonzero", sentence),
+    def domain_denied(text: str) -> bool:
+        # The extraction boundary owns its polarity consult. Pass this exact
+        # predicate to assertion, contradiction and retraction analysis; never
+        # apply a whole-document denial to unrelated propositions.
+        return is_denied(re.sub(r"\bnon[- ]zero\b", "nonzero", text),
                          ignore_bracketed=False) is not None
 
-    def _unconditional(match: re.Match) -> bool:
-        lo, hi = _domain_scope(match)
-        prefix = domain_text[lo:match.start()].strip()
-        # A role must start its own declarative clause. A value attributed to
-        # another role ("quotient says divisor is ...") cannot bind this one.
-        clause_start = not prefix or re.search(r"[,;]\s*(?:and\s*)?$", prefix)
-        sentence = _sentence(match)
-        return (bool(clause_start) and not _quoted_or_structural(match)
-                and domain_text[hi:hi + 1] != "?"
-                and not sentence.rstrip().endswith("?")
-                and not domain_frame.search(sentence) and not _denied(sentence))
-
-    nonzero_positive = any(_unconditional(m)
-                           for m in re.finditer(positive_pattern, domain_text))
-    # A separate positive cannot erase a source allowance of zero or a denied
-    # guarantee. This scan covers the complete description and binds the
-    # value to operand roles, so a zero quotient cannot retract the domain.
-    operand_role = (r"\b(?:" + both_roles
-                    + r"|(?:the\s+)?(?:divisor|denominator|dividend|numerator))")
-    allowance_pattern = operand_role + (
-        r"\s+(?:(?:may|might|could|can)\s+be\s+(?:zero|0|non[- ]?zero|positive)\b|"
-        r"(?:is|are)\s+(?:zero|0)\b|"
-        r"(?:is|are|be|must\s+be|shall\s+be)\s+(?:\w+\s+){0,4}" + value + ")")
-    nonzero_contradiction = any(
-        (_denied(_sentence(m))
-             or re.search(r"\b(?:may|might|could|can)\b|\b(?:is|are)\s+(?:zero|0)\b",
-                          m.group(0)))
-        for m in re.finditer(allowance_pattern, domain_text))
-    if not nonzero_positive or nonzero_contradiction:
+    nonzero, ordered, zero_allowed = _division_domain_status(desc_text, records, domain_denied)
+    if not nonzero:
         unresolved.append("nonzero operand domain")
-    ordering_pattern = (
-        r"\b(?:the\s+)?dividend\s*(?:(?:is|must\s+be)\s*)?at\s+least\s+divisor\b|"
-        r"\b(?:the\s+)?dividend\s*>=\s*divisor\b")
-    if not any(_unconditional(m) for m in re.finditer(ordering_pattern, domain_text)):
+    if not ordered:
         unresolved.append("dividend >= divisor domain")
-    if _contains_any(low, (
-            r"\b(?:zero|0)\s+(?:divisor|denominator)\b",
-            r"\b(?:divisor|denominator)\s+(?:may|can|could|might)\s+be\s+zero\b")):
+    if zero_allowed:
         unresolved.append("zero divisor is unsupported")
 
     clock_candidates = [r for r in records if r["direction"] == "in"
