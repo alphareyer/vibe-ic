@@ -139,17 +139,6 @@ def _regions(row: Mapping[str, Any], text: str) -> Tuple[List[Tuple[int, int]], 
 
 
 def _raw_fragment_span(text: str, quote: str, hint: Optional[Mapping[str, Any]] = None) -> Optional[Tuple[int, int]]:
-    if hint and isinstance(hint.get("start"), int) and isinstance(hint.get("end"), int):
-        start, end = int(hint["start"]), int(hint["end"])
-        if 0 <= start <= end <= len(text):
-            return start, end
-    if hint and isinstance(hint.get("start_line"), int) and isinstance(hint.get("end_line"), int):
-        lines = text.splitlines(keepends=True)
-        start_line, end_line = int(hint["start_line"]), int(hint["end_line"])
-        if 1 <= start_line <= end_line <= len(lines):
-            start = sum(len(x) for x in lines[:start_line - 1])
-            end = sum(len(x) for x in lines[:end_line])
-            return start, end
     exact = [m.span() for m in re.finditer(re.escape(quote), text)]
     if len(exact) == 1:
         return exact[0]
@@ -260,10 +249,7 @@ def validate_preservation_declaration(
             refuse(f"source {path!r} has no preserved executable fragments",
                    "DECLARATION_INCOMPLETE")
             continue
-        keys = [(x.get("id", x.get("name")), x.get("quote", x.get("text")))
-                for x in fragments if isinstance(x, Mapping)]
-        if len(keys) != len(set(keys)):
-            refuse(f"source {path!r} contains duplicate preserved fragments", "FRAGMENT_DUPLICATE")
+        spans_seen = set()
         for fidx, fragment in enumerate(fragments):
             if not isinstance(fragment, Mapping):
                 refuse(f"source {path!r} fragment {fidx} is not an object", "FRAGMENT_UNSUPPORTED")
@@ -300,11 +286,35 @@ def validate_preservation_declaration(
                 refuse(f"source {path!r} fragment {fidx} renames are not an object",
                        "FRAGMENT_UNSUPPORTED")
                 continue
+            if any(not _IDENT.fullmatch(str(k)) or not _IDENT.fullmatch(str(v))
+                   for k, v in renames.items()):
+                refuse(f"source {path!r} fragment {fidx} has non-identifier rename bindings", "RENAME_UNSAFE")
+                continue
+            if span in spans_seen:
+                refuse(f"source {path!r} reuses a preserved source span", "FRAGMENT_DUPLICATE")
+                continue
+            spans_seen.add(span)
             # A preserved executable fragment must remain at its bound source
             # span.  Searching the whole candidate would accept moved or
             # duplicated logic and is not source-preservation evidence.
             candidate_span = candidate[span[0]:span[1]] if span[1] <= len(candidate) else ""
             found = _fragment_match(candidate_span, quote, renames)
+            if not found:
+                # Permit whitespace-only formatting and identifier renames,
+                # while retaining the source token position.  This rejects a
+                # moved fragment even when its text still occurs once.
+                source_tokens = _normalised_tokens(source)
+                candidate_tokens = _normalised_tokens(candidate)
+                q_tokens = _normalised_tokens(quote)
+                mapped = [str(renames.get(t, t)) for t in q_tokens]
+                try:
+                    source_at = next(i for i in range(len(source_tokens) - len(q_tokens) + 1)
+                                     if source_tokens[i:i + len(q_tokens)] == q_tokens)
+                    candidate_at = next(i for i in range(len(candidate_tokens) - len(mapped) + 1)
+                                       if candidate_tokens[i:i + len(mapped)] == mapped)
+                    found = source_at == candidate_at
+                except StopIteration:
+                    found = False
             if found and candidate_span.count(quote) > 1:
                 refuse(f"source {path!r} fragment {fidx} is duplicated", "FRAGMENT_DUPLICATE")
             if renames:
@@ -428,6 +438,8 @@ def validate_matrix_declaration(
     if isinstance(declaration.get("source_path"), str) and isinstance(original_source, Mapping):
         if declaration["source_path"] not in original_source:
             refuse("declared source_path is absent from the bound source map", "SOURCE_PATH_INVALID")
+    if isinstance(declaration.get("source_path"), str) and not _safe_path(declaration["source_path"]):
+        refuse("declared source_path is unsafe", "SOURCE_PATH_INVALID")
     expected_source = declaration.get("source_sha256", declaration.get("original_sha256"))
     expected_hashes = ([expected_source] if isinstance(expected_source, str)
                        else expected_source if isinstance(expected_source, list) else [])
@@ -460,6 +472,8 @@ def validate_matrix_declaration(
     if not isinstance(parameter_bindings, Mapping):
         refuse("parameter_bindings must be an object", "MAPPING_UNSUPPORTED")
         parameter_bindings = {}
+    if len({str(v) for v in macro_bindings.values()}) != len(macro_bindings):
+        refuse("macro bindings must be injective", "MAPPING_NONINJECTIVE")
     for source_name, candidate_name in list(macro_bindings.items()) + list(parameter_bindings.items()):
         if not _IDENT.fullmatch(str(source_name)) or not _IDENT.fullmatch(str(candidate_name)):
             refuse("a source-to-candidate public binding is not a legal identifier",
@@ -505,6 +519,8 @@ def validate_matrix_declaration(
     if not rows:
         refuse("public elaboration matrix has no configurations", "MATRIX_INCOMPLETE")
         return report
+    if not any(not _macro_names(row) and not _parameter_values(row) for row in rows):
+        refuse("public elaboration matrix must include a default configuration", "MATRIX_INCOMPLETE")
     seen_names: set[str] = set()
     macro_presence: Dict[str, set[bool]] = {name: set() for name in supported_macros}
     param_seen: set[str] = set()
@@ -594,6 +610,7 @@ def run_elaboration_matrix(
     compiler_sha256 = hashlib.sha256(Path(compiler).read_bytes()).hexdigest()
     macro_bindings = declaration.get("macro_bindings", {})
     parameter_bindings = declaration.get("parameter_bindings", {})
+    aggregate = "PASS"
     with tempfile.TemporaryDirectory(prefix="rtl_matrix_") as td:
         for row in rows:
             name = str(row.get("name", row.get("id")))
@@ -610,7 +627,8 @@ def run_elaboration_matrix(
                 rc = completed.returncode
                 stdout, stderr = completed.stdout, completed.stderr
             except subprocess.TimeoutExpired as exc:
-                report["verdict"] = "NOT_MEASURED"
+                if aggregate == "PASS":
+                    aggregate = "NOT_MEASURED"
                 report["findings"].append({"code": "TIMEOUT", "message": f"configuration {name!r} timed out"})
                 report["configurations"].append({"name": name, "command": command,
                                                  "returncode": 124, "stdout": (exc.stdout or ""),
@@ -628,16 +646,25 @@ def run_elaboration_matrix(
                           "verdict": "PASS" if rc == 0 else "FAIL"}
             report["configurations"].append(row_report)
             if rc != 0:
-                report["verdict"] = "FAIL"
+                aggregate = "FAIL"
                 report["findings"].append({"code": "CANDIDATE_ELABORATION_FAILED",
                                            "configuration": name,
                                            "message": (stderr or stdout or "iverilog failed").strip()[-800:]})
+    if aggregate == "FAIL" or (aggregate == "NOT_MEASURED" and report["verdict"] != "FAIL"):
+        report["verdict"] = aggregate
     return report
 
 
 def load_json(value: Any) -> Any:
     if isinstance(value, (str, Path)):
-        return json.loads(Path(value).read_text(encoding="utf-8"))
+        def reject_duplicates(pairs):
+            out = {}
+            for key, item in pairs:
+                if key in out:
+                    raise ValueError(f"duplicate JSON key: {key}")
+                out[key] = item
+            return out
+        return json.loads(Path(value).read_text(encoding="utf-8"), object_pairs_hook=reject_duplicates)
     return value
 
 

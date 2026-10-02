@@ -331,7 +331,7 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
             supplied_rtl: bool = False,
             required_top: Optional[str] = None,
             repair_contract=None,
-            require_repair_contract: bool = True) -> Dict[str, Any]:
+            require_repair_contract: bool = False) -> Dict[str, Any]:
     """The answer artefact, in the shape the scorer reads — or a refusal.
 
     Always step 1's RTL (`phase2/stage1/rtl/*`) — measured: every open RTL
@@ -388,6 +388,8 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
     project = Path(project)
     rtl_dir = project / "phase2" / "stage1" / "rtl"
     rtl = sorted(list(rtl_dir.glob("*.sv")) + list(rtl_dir.glob("*.v")))
+    if any(p.is_symlink() or any(parent.is_symlink() for parent in p.parents) for p in rtl):
+        return {"id": problem_id, "ok": False, "reason": "candidate RTL contains a symlink"}
     if not rtl:
         return {"id": problem_id, "ok": False,
                 "reason": "no RTL at phase2/stage1/rtl/ — nothing to hand back"}
@@ -553,15 +555,14 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
                     source_for_matrix = original_sources.get(wanted)
                     wanted_name = Path(wanted).name
                     for source_path in rtl:
-                        if source_path.name in (wanted, wanted_name):
+                        if str(source_path.relative_to(rtl_dir)) == wanted:
                             matrix_candidate_path = source_path
                             break
                 if source_for_matrix is None and len(original_sources) == 1:
                     source_for_matrix = next(iter(original_sources.values()))
             with tempfile.TemporaryDirectory(prefix="rtl_repair_consumer_") as temp_dir:
-                candidate_path = matrix_candidate_path or (Path(temp_dir) / "candidate.sv")
-                if matrix_candidate_path is None:
-                    candidate_path.write_text(text)
+                candidate_path = Path(temp_dir) / "candidate.sv"
+                candidate_path.write_text(text)
                 repair_report = ({"verdict": "REFUSED", "findings": [{
                     "code": "SOURCE_SYMLINK", "message": "public source manifest contains a symlink"}]}
                     if symlink_refused else validate_normal_repair_contract(

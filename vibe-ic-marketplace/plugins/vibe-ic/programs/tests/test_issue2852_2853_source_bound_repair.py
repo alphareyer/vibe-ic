@@ -104,6 +104,7 @@ def test_checked_in_rtl_artifact_is_bound_to_its_fresh_source_bytes():
         "sources": [{
             "path": artifact.name,
             "source_sha256": sha256_text(source),
+            "candidate_sha256": sha256_text(source),
             "authorized_edit_regions": [],
             "preserved_executable_fragments": [{"quote": quote}],
         }],
@@ -148,10 +149,12 @@ def test_formatting_renamed_fsm_and_unchanged_helper_are_preserved():
     helper_decl = {
         "schema": SCHEMA_PRESERVATION,
         "sources": [
-            {"path": "state_unit.sv", "source_sha256": sha256_text(ORIGINAL),
+                {"path": "state_unit.sv", "source_sha256": sha256_text(ORIGINAL),
+                 "candidate_sha256": sha256_text(ORIGINAL),
              "authorized_edit_regions": [],
              "preserved_executable_fragments": [{"quote": "else if (recover) flag <= 1'b0;"}]},
-            {"path": "helper.sv", "source_sha256": sha256_text(HELPER),
+                {"path": "helper.sv", "source_sha256": sha256_text(HELPER),
+                 "candidate_sha256": sha256_text(HELPER),
              "authorized_edit_regions": [],
              "preserved_executable_fragments": [{"quote": "assign y = a;"}]},
         ],
