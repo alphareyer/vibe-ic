@@ -1157,6 +1157,7 @@ def current_metal_density(project: Path, arm: dict, promotion: dict) -> dict:
     if set(judged.get('per_layer') or {}) != set(layers):
         raise Refusal('LL_METAL_DENSITY_CONSUMER_COVERAGE', str(judged))
     return dict(judged, consumer='metal_layer_density_check.check',
+                generic_bounds={'minimum': None, 'maximum': None},
                 report_sha256=digest(report), subject_sha256=sha,
                 measurement_scope='whole-die extent', region_um=region,
                 denominator_um2=area, executed_rules=sorted(executed),

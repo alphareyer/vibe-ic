@@ -312,9 +312,9 @@ def test_zero_errors_cannot_replace_the_current_per_layer_consumer(tmp_path, mut
     if mutation != 'missing_report':
         BF.put(path, doc)
     findings, stats = MFD.tool_arm_findings(p)
-    assert any(f.severity == 'ERROR' for f in findings), findings
     ref = DFM.audit(p)['density_ref']
     assert ref['step34_pass'] is False
+    assert any(f.severity == 'ERROR' for f in findings), findings
     assert ref['measurement_verdict'] != 'PASS'
     if mutation == 'below_floor':
         assert stats['density_errors'] == 0
