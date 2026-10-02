@@ -1721,7 +1721,12 @@ DESIGN_CLASS_CHIP_PAD_RING = 'chip_pad_ring'
 #: or HARDMACRO design has no Chip-flow segment (LL_FLOORPLAN_CORE_ONLY_UNSUPPORTED),
 #: so it keeps `direct`. A step-wide `PRODUCTION_DEFAULTS` entry outranks these.
 CLASS_PRODUCTION_DEFAULTS: dict[str, dict[str, str]] = {
-    DESIGN_CLASS_CHIP_PAD_RING: {'15': 'librelane', '15.5ic': 'librelane',
+    DESIGN_CLASS_CHIP_PAD_RING: {# Step 7 reuses the fixed 8/10 prelayout call:
+                                 # its PVT matrix is the tool's resolved
+                                 # STA_CORNERS, not a staged Liberty glob.
+                                 # Source: cut-7 82e200e3632b (default hunk).
+                                 '7': 'librelane',
+                                 '15': 'librelane', '15.5ic': 'librelane',
                                  '17': 'librelane', '18': 'librelane',
                                  '19': 'librelane', '20': 'librelane',
                                  # T99 + T102 r4 (owner ruling, CUT-OVER rule):
