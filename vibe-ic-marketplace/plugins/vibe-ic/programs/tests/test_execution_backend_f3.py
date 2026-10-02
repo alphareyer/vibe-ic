@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 import subprocess
 import sys
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import pytest
 
