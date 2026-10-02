@@ -70,7 +70,34 @@ def produce_6(project,output,top=None,container=None,**k):
                       excluded_from_verdict=True)
     return _cli('6',project,output,('quartus_map_audit',),())
 def produce_7(project,output,top=None,pdk=None,container=None,**k): return _require(project,output,'7','emit_step7_asic_sdc+stamp_pvt_corner_coverage',top=top,pdk=pdk,container=container,**k)
-def produce_8(project,output,**k): return _cli('8',project,output,('sdc_syntax_check','sdc_validator_check'))
+def produce_8(project,output,**k):
+    """Run the complete Step-8 contract against the staged project."""
+    _verify_manifest(project, '8')
+    project, output = Path(project), Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    # Stage only immutable design inputs; all reports are private outputs.
+    staged = output / 'project'
+    if staged.exists(): shutil.rmtree(staged)
+    def _ignore(src, names):
+        return {n for n in names if n in {'issued_manifest.json', 'out', 'frontend_outputs'}
+                or (Path(src) / n).resolve() == output.resolve()}
+    shutil.copytree(project, staged, ignore=_ignore)
+    report = output / 'reports/phase2/sdc_check.json'
+    report.parent.mkdir(parents=True, exist_ok=True)
+    l8 = k.get('l8') or next(staged.rglob('L8_TIMING_WAVEFORM.json'), None)
+    commands = [
+        ['python3', str(Path(__file__).with_name('sdc_syntax_check.py')), str(staged), '--json', str(report)],
+        ['python3', str(Path(__file__).with_name('sdc_validator_check.py')), str(staged), '--l8', str(l8), '--json', str(report)],
+    ]
+    records=[]
+    for argv in commands:
+        if l8 is None and '--l8' in argv:
+            return _write('8', output, 'sdc_syntax_check+sdc_validator_check', reason='L8 fixture missing', records=records)
+        cp=subprocess.run(argv, capture_output=True, text=True)
+        records.append({'argv':argv, 'rc':cp.returncode, 'stdout':cp.stdout, 'stderr':cp.stderr})
+        if cp.returncode not in (0, 2):
+            return _write('8', output, 'sdc_syntax_check+sdc_validator_check', reason='producer failed', records=records)
+    return report
 def produce_10(project,output,top=None,pdk=None,container=None,**k): return _require(project,output,'10','step_prelayout_signoff',top=top,pdk=pdk,container=container,**k)
 def produce_11(project,output,top=None,clock=None,pdk=None,**k): return _cli('11',project,output,('fault_scan_chain_insert','fault_atpg_run','bsdl_emit'))
 def produce_fs1(project,output,**k): return _cli('FS1',project,output,('fmeda_fault_injection_coverage','fmeda_coverage_check'))
@@ -94,7 +121,7 @@ def produce_p0(project,output,top=None,claim=None,**k):
     return _record('P0',project,output,'p0_tool_frontend_check.check+formal_structural_check.check_claim',p0.check,top=top,claim=claim,**k)
 
 PRODUCERS={'D1':produce_d1,'0.5ic':produce_05ic,'1':produce_1,'2':produce_2,'3':produce_3,'4':produce_4,'5':produce_5,'6':produce_6,'7':produce_7,'8':produce_8,'10':produce_10,'11':produce_11,'FS1':produce_fs1,'DT1':produce_dt1,'12':produce_12,'13':produce_13,'DT2':produce_dt2,'DT3':produce_dt3,'P0':produce_p0}
-REQUIRED_PARAMETERS={'D1':(), '0.5ic':('template_or_no_template_reason',), '1':('ic_class',), '2':('top','clock','timeout'), '3':('top',), '4':('top','container'), '5':('top','container'), '6':('top','container'), '7':('top','pdk','container'), '8':(), '10':('top','pdk','container'), '11':('top','clock','pdk'), 'FS1':('asil',), 'DT1':('top','clock','timeout'), '12':(), '13':('top','container','lec_max_completed_rungs'), 'DT2':('top','clock','timeout'), 'DT3':('top','clock','timeout'), 'P0':('top','claim')}
+REQUIRED_PARAMETERS={'D1':(), '0.5ic':('template_or_no_template_reason',), '1':('ic_class',), '2':('top','clock','timeout'), '3':('top',), '4':('top','container'), '5':('top','container'), '6':('top','container'), '7':('top','pdk','container'), '8':('l8',), '10':('top','pdk','container'), '11':('top','clock','pdk'), 'FS1':('asil',), 'DT1':('top','clock','timeout'), '12':(), '13':('top','container','lec_max_completed_rungs'), 'DT2':('top','clock','timeout'), 'DT3':('top','clock','timeout'), 'P0':('top','claim')}
 def run_row(step_id,project,output,**kwargs):
     if step_id not in PRODUCERS: raise ValueError(f'unknown frontend row: {step_id}')
     manifest=Path(project)/'input'/'issued_manifest.json'
