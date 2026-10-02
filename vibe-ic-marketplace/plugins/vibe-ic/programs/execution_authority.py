@@ -60,15 +60,18 @@ def source_closure():
     head = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     prior = _SOURCE_CLOSURES.get(head)
     if prior is not None:
+        blobs, candidates = prior
+        if any((ROOT / relative).is_file() and relative not in blobs for relative in candidates):
+            raise ValueError('canonical importer closure changed')
         # Cache only the graph belonging to a verified commit. Every live
         # challenge still rechecks each file's bytes and symlink status.
-        for relative, blob in prior.items():
+        for relative, blob in blobs.items():
             path = ROOT / relative
             content = path.read_bytes()
             current = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
             if path.is_symlink() or current != blob:
                 raise ValueError('canonical source drift: ' + relative)
-        return dict(prior)
+        return dict(blobs)
     pending = [HERE / name for name in ('execution_authority.py', '_delivery_route.py',
                'execution_policy.py', 'execution_modes.py', 'vibe_ic_one_shot_runner.py')]
     objects = subprocess.check_output(
@@ -76,6 +79,7 @@ def source_closure():
     by_path = dict((path, blob) for blob, path in
                    (line.split(' ', 1) for line in objects.splitlines()))
     blobs = {}
+    candidates = set()
     while pending:
         path = pending.pop()
         relative = str(path.relative_to(ROOT))
@@ -91,11 +95,12 @@ def source_closure():
                      [node.module] if isinstance(node, ast.ImportFrom) and node.module else [])
             for name in names:
                 dependency = HERE / (name.split('.')[0] + '.py')
+                candidates.add(str(dependency.relative_to(ROOT)))
                 if dependency.is_file():
                     pending.append(dependency)
     flow = HERE.parent / 'flow/phase1_phase2_phase3.yaml'
     blobs[str(flow.relative_to(ROOT))] = tracked(flow)
-    _SOURCE_CLOSURES[head] = dict(blobs)
+    _SOURCE_CLOSURES[head] = (dict(blobs), frozenset(candidates))
     return dict(blobs)
 
 
