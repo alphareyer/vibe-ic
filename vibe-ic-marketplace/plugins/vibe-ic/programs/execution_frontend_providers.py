@@ -318,7 +318,7 @@ def register_factories(registry):
                 '_flow_yaml.py','flow_compliance_check.py',
                 'submission_template_check.py','tapeout_declaration_check.py'))
             closure=_source_closure(seeds)
-            closure += (_FLOW_PATH,)
+            closure += (_FLOW_PATH, _COVERAGE_PATH, _CATALOG_PATH, _PORTFOLIO_PATH)
         if row == '8':
             closure += tuple(source_path.with_name(name) for name in ('sdc_syntax_check.py','sdc_validator_check.py'))
         bound_files={str(path):digest(path) for path in closure if path.is_file()}
