@@ -91,6 +91,19 @@ def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
                          row.get("verdict") == "FAIL"
                          for row in report.get("gate_records", ())
                          if isinstance(row, dict) and row.get("blocking", True)))
+    native_required = report.get("step_id") == "37.5ip"
+    native_verdicts = []
+    if native_required:
+        native_receipts = report.get("native_receipts") or []
+        if not isinstance(native_receipts, list):
+            native_receipts = [None]
+        for native in native_receipts:
+            try:
+                value = validate_hardmacro_receipt(native)
+                native_verdicts.append(value if value in ("PASS", "FAIL") else "NOT_MEASURED")
+            except (em.Refusal, AttributeError, TypeError, ValueError):
+                native_verdicts.append("NOT_MEASURED")
+        measured_fail = measured_fail or "FAIL" in native_verdicts
     if report.get("binding") != dict(binding):
         return em.Evidence(binding, "FAIL" if measured_fail else "NOT_MEASURED", {}, {},
                            detail="RELEASE_RESULT_UNBOUND")
@@ -122,20 +135,10 @@ def validate(outputs: Path, binding: Mapping[str, object]) -> em.Evidence:
         else:
             return em.Evidence(binding, "NOT_MEASURED", gates, outputs_hashes,
                                detail="RELEASE_OUTPUT_UNMEASURED: " + str(name))
-    native_required = report.get("step_id") == "37.5ip"
-    if native_required:
-        native_receipts = report.get("native_receipts") or []
-        if native_receipts:
-            try:
-                for native in native_receipts:
-                    validate_hardmacro_receipt(native)
-            except em.Refusal as exc:
-                return em.Evidence(binding, "FAIL" if measured_fail else "NOT_MEASURED",
-                                   gates, outputs_hashes,
-                                   detail=f"RELEASE_NATIVE_ENGINE_RECEIPT_UNMEASURED: {exc}")
     verdict = "FAIL" if measured_fail else (
         "PASS" if report.get("qualification") == "PASS" and not report.get("missing_outputs") and
-        (not native_required or report.get("native_receipts")) else "NOT_MEASURED")
+        (not native_required or native_verdicts and all(v == "PASS" for v in native_verdicts))
+        else "NOT_MEASURED")
     return em.Evidence(binding, verdict, gates, outputs_hashes,
                        detail=str(report.get("reason", "")))
 

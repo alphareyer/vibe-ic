@@ -256,7 +256,7 @@ def _backend(step: str) -> dict:
     return {
         "family": "backend",
         "step_id": step,
-        "arm_id": "backend_" + step.replace(".", "_"),
+        "arm_id": "backend_37_librelane" if step == "37" else "backend_" + step.replace(".", "_"),
         "tool_id": "opensta" if step == "33" else "ngspice" if step == "30" else "klayout" if step == "37.3" else "vibeic" if step == "31" else "librelane",
         "engine_families": list(ENGINE_FAMILIES[step]),
         "default_rank": 0,

@@ -107,7 +107,8 @@ def _step37_route(params):
     route = {'backend_37_librelane': 'librelane',
              'backend_37_direct': 'direct'}.get(arm)
     issued = os.environ.get('VIBEIC_STEP37_ROUTE')
-    if route is None or issued != route:
+    if (route is None or issued != route or
+            params.get('route') != route or params.get('streamout_route') != route):
         raise em.Refusal('BACKEND_STEP37_ROUTE_UNBOUND', arm)
     return route
 

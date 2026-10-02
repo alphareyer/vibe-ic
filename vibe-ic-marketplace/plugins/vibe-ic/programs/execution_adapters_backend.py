@@ -193,6 +193,11 @@ def _typed_parameters(spec: Mapping[str, object], source_sha: str,
         "source_sha": source_sha,
         "source_tree_sha": current_source_tree_identity(),
     })
+    if str(spec["step_id"]) == "37":
+        route = params["streamout_route"] or "librelane"
+        if route != "librelane":
+            raise em.Refusal("BACKEND_DIRECT_MAGIC_FALLBACK_REFUSED", str(route))
+        params["streamout_route"] = params["route"] = route
     return params
 
 

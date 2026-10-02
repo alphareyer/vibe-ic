@@ -1433,7 +1433,7 @@
         "IC": "applicable",
         "IP": "applicable"
       },
-      "arm_id": "backend_37",
+      "arm_id": "backend_37_librelane",
       "canonical_outputs": [
         "phase3/stage4/gds/*.gds",
         "phase3/stage3/pnr/*stream_out.log",
@@ -1618,6 +1618,7 @@
         "lvs_signoff_guard",
         "pg_rail_geometry_check",
         "provenance_check",
+        "provenance_check",
         "erc_density_check",
         "waiver_growth_check",
         "sweep_reach_check",
@@ -1715,6 +1716,7 @@
         "reports/analog/stage_analog_compliance.json"
       ],
       "consumer_gates": [
+        "flow_step_output_content_check",
         "flow_step_output_content_check",
         "flow_compliance_check",
         "stage_on_pass_review",
@@ -2038,7 +2040,7 @@
       "notes": "Magic WriteLEF/write_abstract_lef plus STAPostPNR; preserve PG annotation because GDS route drops USE. Native engine receipt required.",
       "producer_sites": [
         "digital_hardmacro_gen.py:run",
-        "phase3_one_shot_runner.py:_write_ip_release_docs_context"
+        "phase3_one_shot_runner.py:step_ip_release_docs_gen"
       ],
       "runtime_status": "NOT_MEASURED",
       "step_id": "37.5ip",

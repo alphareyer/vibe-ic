@@ -12,7 +12,7 @@ from execution_adapters_backend import ROWS
 def import_selected(project, context, controller, run, adopted):
     """Re-read current canonical gates without importing another runner stack."""
     project, run = Path(project), Path(run)
-    if adopted.get("status") != "ADOPTED":
+    if adopted.get("status") != "PROVISIONAL":
         raise em.Refusal("BACKEND_ADOPTION_UNBOUND", str(project))
     generation = adopted.get("selected_generation") or {}
     selected_dir = Path(generation.get("directory", ""))
