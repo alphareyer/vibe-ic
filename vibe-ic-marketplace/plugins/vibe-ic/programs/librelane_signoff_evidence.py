@@ -219,6 +219,12 @@ def count_row(project: Path, folder: Path, step: str, key: str,
         # when its name is a container path. Older receipts lacking these
         # material bindings remain incomplete; root owns producer API repair.
         for path in _walk_paths(raw_config):
+            if (step == 'KLayout.Density' and str(path) == raw_config.get('PDK_ROOT')
+                    == _read(folder / 'pdk_root.json').get('cli_pdk_root')):
+                # The CLI root is a directory supplied by the validated child
+                # mount, not a file on the host at /pdk. _pdk_mounts above
+                # already binds the real declared/resolved PDK tree.
+                continue
             translated = path
             for host, guest in mounts:
                 if path.is_relative_to(guest):
