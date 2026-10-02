@@ -10,7 +10,7 @@ import hashlib, json, shutil, sys
 from typing import Callable
 
 ROWS = ('D1','0.5ic','1','2','3','4','5','6','7','8','10','11','FS1','DT1','12','13','DT2','DT3','P0')
-ROUTES = {'D1':('design_one_shot_runner.step_phase1',),'0.5ic':('submission_template_ingest.main','tapeout_declaration_gen.main'),'1':('design_one_shot_runner.step_rtl_gen',),'2':('p0_tool_frontend_check.check','crosslayer_rewrite_equivalence.main'),'3':('_cdc_netlist.build','cdc_crossing_check.main'),'4':('design_one_shot_runner.step_professional_tb_gen','design_one_shot_runner.step_reference_tb'),'5':('formal_harness_gen.generate','formal_property_run.run'),'6':('design_one_shot_runner.step_fpga_compile','quartus_map_audit.main'),'7':('_ppa.timing.emit_step7_asic_sdc','phase3_one_shot_runner.stamp_pvt_corner_coverage'),'8':('sdc_syntax_check.main','sdc_validator_check.main'),'10':('phase3_one_shot_runner.step_prelayout_signoff',),'11':('fault_scan_chain_insert.main','fault_atpg_run.main','bsdl_emit.main'),'FS1':('fmeda_fault_injection_coverage.main','fmeda_coverage_check.main'),'DT1':('transition_fault_atpg_run.main',),'12':('execution_frontend_worker.run_row',),'13':('design_one_shot_runner.step_lec_equivalence',),'DT2':('path_delay_fault_atpg_run.main',),'DT3':('sdd_atpg_run.main',),'P0':('p0_tool_frontend_check.check','formal_structural_check.check_claim')}
+ROUTES = {'D1':('design_one_shot_runner.step_phase1','phase1_doc_presence_check.check'),'0.5ic':('submission_template_ingest.main','tapeout_declaration_gen.main'),'1':('design_one_shot_runner.step_rtl_gen',),'2':('p0_tool_frontend_check.check','crosslayer_rewrite_equivalence.main'),'3':('_cdc_netlist.build','cdc_crossing_check.main'),'4':('design_one_shot_runner.step_professional_tb_gen','design_one_shot_runner.step_reference_tb'),'5':('formal_harness_gen.generate','formal_property_run.run'),'6':('design_one_shot_runner.step_fpga_compile','quartus_map_audit.main'),'7':('_ppa.timing.emit_step7_asic_sdc','phase3_one_shot_runner.stamp_pvt_corner_coverage'),'8':('sdc_syntax_check.main','sdc_validator_check.main'),'10':('phase3_one_shot_runner.step_prelayout_signoff',),'11':('fault_scan_chain_insert.main','fault_atpg_run.main','bsdl_emit.main'),'FS1':('fmeda_fault_injection_coverage.main','fmeda_coverage_check.main'),'DT1':('transition_fault_atpg_run.main',),'12':('execution_frontend_worker.run_row',),'13':('design_one_shot_runner.step_lec_equivalence',),'DT2':('path_delay_fault_atpg_run.main',),'DT3':('sdd_atpg_run.main',),'P0':('p0_tool_frontend_check.check','formal_structural_check.check_claim')}
 ROW_CONTRACTS = {
  'D1':('input/docs','reports/phase1/doc_presence.json'), '0.5ic':('input','phase1/generated_docs'),
  '1':('phase1/generated_docs','phase2/stage1/rtl'), '2':('phase2/stage1/rtl','reports/phase2/lint'),
@@ -79,15 +79,18 @@ def choose(step_id):
 def register_factories(registry):
     """Register real source adapters in the existing Registry."""
     if not hasattr(registry, 'register'): raise TypeError('registry must provide register')
+    import execution_modes as em
     from execution_modes import Adapter, Component, Evidence, digest
     source = str(Path(__file__).resolve()); py = str(Path(shutil.which('python3') or sys.executable).resolve()); repo=next(p for p in Path(__file__).resolve().parents if (p/'.git').exists()); sha=__import__('subprocess').check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
     for row,p in PROVIDERS.items():
         def validate(project, facts, _row=row):
-            result=_produce(_row, Path(project));
-            if not result.outputs: raise ValueError(result.reason)
-            output=Path(project)/result.outputs[0]
-            return Evidence(facts, 'NOT_MEASURED', {'source_boundary':'NOT_MEASURED'}, {result.outputs[0]:digest(output)}, detail=result.reason)
-        registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,{source:digest(Path(source)),py:digest(Path(py))},'current-main',p.engines,(Component('frontend_worker',('python3',str(Path(__file__).with_name('execution_frontend_worker.py')),'--step',row,'--project','PROJECT','--out',ROW_CONTRACTS[row][1])),),validate,(ROW_CONTRACTS[row][1],),{},qualification_evidence='route callable bound; native qualification not measured',output_contract={'canonical':(ROW_CONTRACTS[row][1],)}))
+            output=Path(project)/'canonical.json'
+            if not output.is_file(): raise ValueError('canonical output missing')
+            payload=json.loads(output.read_text())
+            if payload.get('step_id') != _row or payload.get('schema') != 'frontend_worker_output/1': raise ValueError('canonical output schema mismatch')
+            return Evidence(facts, 'NOT_MEASURED', {'source_boundary':'NOT_MEASURED'}, {'canonical.json':digest(output)}, detail='worker output schema validated')
+        required=tuple(next(s for s in em.load_portfolio()['steps'] if s['id']==row)['required_output_contract']) or ('canonical.json',)
+        registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,{source:digest(Path(source)),py:digest(Path(py))},'current-main',p.engines,(Component('frontend_worker',('python3',str(Path(__file__).with_name('execution_frontend_worker.py')),'--step',row,'--inputs','{inputs}','--outputs','{outputs}')),),validate,required,{'metric':'source_boundary'},qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required}))
     return tuple(PROVIDERS)
 
 def dedupe_by_engine():
