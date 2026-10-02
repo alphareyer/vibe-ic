@@ -493,15 +493,18 @@ def require_safe_default_sources(project: Path, image: str, state: Path,
 def run_ir(project: Path, image: str, pdk_root: Path, pdk: str, *, routed_def: Path,
            netlist: Path, sdc: Path, spef: Path, budget_pct: Optional[float],
            budget_source: str, lane: str = '24', decap_f: Optional[float] = None,
-           decap_source: Optional[str] = None) -> Dict[str, Any]:
+           decap_source: Optional[str] = None,
+           supply_nets: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
     """Bridge the shipped route, run IRDropReport + Vibeic.IRDropChecker, then
     the cross-check.  Returns the record `judge_ir` reads.
 
     `decap_f` (farads, with its declared `decap_source`) is the on-die decap
     `Vibeic.TransientIR` models; the step converts it to the session's unit,
     reads it back and measures its effect.  None: quasi-static."""
+    overlay = ({key: (value, 'current routed DEF SPECIALNETS USE POWER/GROUND')
+                for key, value in supply_nets.items()} if supply_nets is not None else None)
     configs = resolve_step_configs(project, image, pdk, list(IR_STEPS), pdk_root=pdk_root,
-                                   folder='24-config')
+                                   folder='24-config', overlay=overlay)
     # The budget is the checker's own variable, which the Chip flow's resolver
     # does not know; it is written into the checker's resolved config with its
     # source beside it.  None stays None: the checker then refuses, never passes.

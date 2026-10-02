@@ -45,7 +45,12 @@ def build(tmp_path, monkeypatch, *, via=False, stress=False, direct=False):
     for name in ("unit.def", "routed.def"):
         (pnr / name).write_text(layout)
     (pnr / "constraint.sdc").write_text("set_load 0.02 [get_ports output]\n")
+    extracted = R._pl.extracted_dir(project)
+    extracted.mkdir(parents=True)
+    (extracted / "unit.spef").write_text('*SPEF "IEEE 1481-1998"\n*DESIGN "unit"\n')
     tech = tmp_path / "authority.tlef"; tech.write_text(TECH)
+    stage = project / "phase3/pdk_stage"
+    stage.mkdir(); (stage / "authority.tlef").write_text(TECH)
     cell = tmp_path / "cells.lef"; cell.write_text("VERSION 5.8 ;\n")
     lib = tmp_path / "cells.lib"; lib.write_text("library(unit) {}\n")
     pdk = SimpleNamespace(name="declared-open-kit", tech_lef=str(tech), cell_lef=str(cell),
@@ -111,6 +116,7 @@ def test_default_invokes_native_checker_and_existing_librelane_route(tmp_path, m
 @pytest.mark.parametrize("subject", ["DEF", "SDC", "PDK", "CSV", "REPORT", "EXECUTION", "CONSUMER", "AUTHORITY", "LIMIT", "VIA_SUBSTITUTION", "OUTPUT_BINDING", "BASIS"])
 def test_current_gate_refuses_each_reverse(tmp_path, monkeypatch, subject):
     project, pdk, _ = build(tmp_path, monkeypatch, direct=True)
+    assert authority(project, pdk)[0] == "PASS"
     rpt = project / "reports/phase3"
     doc_path = rpt / "em_openroad_density.json"
     doc = json.loads(doc_path.read_text())
@@ -120,7 +126,7 @@ def test_current_gate_refuses_each_reverse(tmp_path, monkeypatch, subject):
                   "REPORT": rpt / "em.rpt", "AUTHORITY": rpt / "em_native_authority.tlef"}[subject]
         # On base there is no staged native authority; change its selected
         # actual authority instead, so this remains a VALUE control.
-        if subject == "AUTHORITY" and not target.exists():
+        if subject in ("AUTHORITY", "CSV") and not target.exists():
             target = Path(pdk.tech_lef)
         target.write_text(target.read_text() + "\n# changed bytes\n")
     elif subject == "EXECUTION":
@@ -176,3 +182,18 @@ def test_real_canonical_row_runs_existing_consumer(tmp_path, monkeypatch):
     result = F.check_step(project, {"id": "25", "name": row["name"],
                                    "gate": {"all_of": [clause]}}, {})
     assert result.status != "PASS", result
+
+
+@pytest.mark.parametrize("removed", [False, True])
+def test_existing_ir_gate_refuses_missing_or_unadopted_primary(tmp_path, monkeypatch, removed):
+    import ir_drop_report_check as I
+    project, _, _ = build(tmp_path, monkeypatch)
+    if removed:
+        (project / "reports/phase3" / R._LL_IR_RECORD).unlink()
+    assert I._run_and_emit([str(project), "--json", str(project / "reports/phase3/ir_drop_signoff.json")]) == 2
+
+
+def test_existing_ir_gate_preserves_bound_stress_failure(tmp_path, monkeypatch):
+    import ir_drop_report_check as I
+    project, _, _ = build(tmp_path, monkeypatch, via=True, stress=True)
+    assert I._run_and_emit([str(project)]) == 1

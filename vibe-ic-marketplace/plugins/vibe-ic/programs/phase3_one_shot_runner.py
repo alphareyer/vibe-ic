@@ -67480,7 +67480,9 @@ def _librelane_step24_record(project: Path, top: str, pdk: PdkConfig, mode: str,
                   "ir_drop_budget_check._DEFAULT_BUDGET_PCT (the direct verdict's budget)")
         record = _la.run_ir(project, image, root, pdk.name, routed_def=routed,
                             netlist=pnr / f"{top}_pnr.v", sdc=pnr / "constraint.sdc",
-                            spef=spef, budget_pct=budget, budget_source=source)
+                            spef=spef, budget_pct=budget, budget_source=source,
+                            supply_nets=dict(zip(("VDD_NETS", "GND_NETS"),
+                                                  _discover_power_nets(routed))))
         doc["record"] = record
         doc["judgment"] = _la.judge_ir(record)
         folder = Path(record["tool_state"]).parent
@@ -67663,6 +67665,9 @@ def _step24_adopt_primary(project: Path, basis: Dict[str, Any],
         _aa.write_json(rpt / "ir_drop.json", refused)
         notes.append(f"Step24 primary NOT_MEASURED: {doc['judgment'].get('reasons')}")
     doc["adopted"] = bool(valid)
+    doc["source_identity"] = emc.native_source_identity()
+    doc["published"] = {str(path.relative_to(project)): emc._native_sha(path)
+                         for path in (rpt / "ir_drop.json", rpt / "ir_drop.rpt")}
     _aa.write_json(rpt / _LL_IR_RECORD, doc)
     return doc
 
@@ -70857,6 +70862,22 @@ def _step24_basis_inputs(project: Path, def_file: Path, pdk: PdkConfig) -> Dict[
         extra = _sta_extra_liberties(project, pdk, pdk.liberty) if liberty else []
     except AttributeError:  # a duck-typed PDK stub with no library lists
         extra = []
+    # Once the primary ran, both static EM and the transient tier consume its
+    # actual library population, including the PDK's IO timing views. Merely
+    # repeating the standard-cell library is not the tool's power basis.
+    try:
+        ll_doc = json.loads((_pl.reports_phase3_dir(project) / _LL_IR_RECORD).read_text())
+        ll_libs = ll_doc["native_basis"]["liberties"]
+        if (_step24_primary_mode(project) != "direct"
+                and ll_doc["inputs"]["def"]["sha256"] == _sha256_file(def_file)
+                and ll_doc["inputs"]["sdc"]["sha256"] == _sha256_file(sdc)
+                and not spef_reason
+                and ll_doc["inputs"]["spef"]["sha256"] == _sha256_file(spef)
+                and ll_libs and all(_sha256_file(Path(row["path"])) == row["sha256"] for row in ll_libs)):
+            liberty = ll_libs[0]["path"]
+            extra = [row["path"] for row in ll_libs[1:]]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
     return {"def": def_file, "sdc": sdc if sdc.is_file() else None,
             "spef": None if spef_reason else spef, "spef_reason": spef_reason,
             "liberty": liberty,
@@ -71050,10 +71071,14 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     if _primary_ir_mode != "direct":
         _librelane_step24_record(project, top, pdk, _primary_ir_mode,
                                   _basis["spef"] or (_pl.extracted_dir(project) / f"{top}.spef"), [])
+        _basis = _step24_basis_inputs(project, def_file, pdk)
+        liberty_c = _to_container_path(_basis["liberty"], container)
+        _oc = _liberty_operating_condition(_basis["liberty"], container)
+        _oc_tcl = (f"catch {{set_operating_conditions {_oc}}}\n" if _oc else "")
     _source_identity = _emcd.native_source_identity()
     _native_inputs = {}
     _input_paths = {"layout": str(def_file), "tech_lef": str(pdk.tech_lef),
-                    "cell_lef": str(pdk.cell_lef), "liberty0": str(pdk.liberty)}
+                    "cell_lef": str(pdk.cell_lef), "liberty0": _basis["liberty"]}
     for role in ("sdc", "spef"):
         if _basis[role]:
             _input_paths[role] = str(_basis[role])
@@ -71141,7 +71166,7 @@ catch {{set_wire_rc -clock -layer {mp}5}}
     # dynamic_ir.json reports the static number only under the same id.
     _basis_record = _dyn_basis.power_basis(
         def_file, _basis["sdc"], _basis["spef"],
-        [str(pdk.liberty), *_basis["extra_liberties"]],
+        [_basis["liberty"], *_basis["extra_liberties"]],
         spef_reason=_basis["spef_reason"], log=log)
     if rc != 0:
         # A failed native invocation cannot attest values from stdout or stale reports.

@@ -976,7 +976,8 @@ def native_source_identity() -> Dict[str, str]:
             result[node.name] = hashlib.sha256(
                 "".join(lines[node.lineno - 1:node.end_lineno]).encode()).hexdigest()
     for name in ("em_current_density_check.py", "em_peak_current_authority_check.py",
-                 "librelane_ir_antenna.py", "dynamic_ir_vectored_emit.py"):
+                 "librelane_ir_antenna.py", "dynamic_ir_vectored_emit.py",
+                 "ir_drop_report_check.py"):
         result[name] = hashlib.sha256((root / name).read_bytes()).hexdigest()
     return result
 
@@ -1007,6 +1008,46 @@ def native_project(em_path: Path) -> Optional[Path]:
         except OSError:
             pass
     return None
+
+
+def validate_primary_ir(project: Path) -> Dict[str, Any]:
+    """Step-24's existing gate consumes the adopted current tool result.
+
+    This validates the IR producer's own state and publication, independently
+    of Step-25 density coverage. A partial EM result cannot retire a static IR
+    measurement, nor can report keywords substitute for primary adoption.
+    """
+    try:
+        doc = json.loads((project / "reports/phase3/ir_drop_librelane.json").read_text())
+        if not doc.get("adopted") or doc.get("source_identity") != native_source_identity():
+            raise ValueError("LibreLane IR primary was not adopted by current source")
+        if (not {"def", "netlist", "sdc", "spef"}.issubset(doc["inputs"])
+                or not {"reports/phase3/ir_drop.json", "reports/phase3/ir_drop.rpt"}.issubset(doc["published"])):
+            raise ValueError("LibreLane IR required input/publication binding removed")
+        for population in ("inputs", "artifacts", "published"):
+            rows = doc[population]
+            if not rows:
+                raise ValueError(f"LibreLane IR {population} population absent")
+            for key, row in rows.items():
+                name, digest = (row["path"], row["sha256"]) if population == "inputs" else (key, row)
+                path = Path(name)
+                if path.is_absolute() or ".." in path.parts or not digest or _native_sha(project / path) != digest:
+                    raise ValueError(f"LibreLane IR current bytes changed: {name}")
+        record = doc["record"]
+        if _native_sha(Path(record["tool_state"])) != record["tool_state_sha256"]:
+            raise ValueError("LibreLane IR tool state changed")
+        for row in [doc["native_basis"][key] for key in ("odb", "sdc", "spef", "tech_lef")] + doc["native_basis"]["liberties"]:
+            if not row["sha256"] or _native_sha(Path(row["path"])) != row["sha256"]:
+                raise ValueError("LibreLane IR native basis changed")
+        import librelane_ir_antenna as la
+        judged = la.judge_ir(record)
+        if judged != doc["judgment"] or judged["verdict"] not in ("PASS", "FAIL"):
+            raise ValueError("LibreLane IR measurement/coverage unavailable")
+        return {"valid": True, "verdict": judged["verdict"],
+                "producer": doc["producer"], "tool_state_sha256": record["tool_state_sha256"]}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return {"valid": False, "verdict": "NOT_MEASURED",
+                "reason": str(exc), "rule": "LL_IR_CURRENT_BINDING_INVALID"}
 
 
 def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN
