@@ -93,6 +93,11 @@ import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+# By-path loaders do not add this flat programs directory to sys.path.
+_PROGRAMS_DIR = str(Path(__file__).resolve().parent)
+if _PROGRAMS_DIR not in sys.path:
+    sys.path.insert(0, _PROGRAMS_DIR)
+
 from rtl_repair_contract import (  # noqa: E402
     load_json as _load_contract_json,
     run_elaboration_matrix,
