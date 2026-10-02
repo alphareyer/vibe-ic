@@ -432,6 +432,182 @@ def test_unsigned_divider_accepts_explicit_divisor_or_both_operand_grounding(dom
     assert rcs.route_to_ai_reason(desc) is None
 
 
+@pytest.mark.parametrize("domain,emit", [
+    ('If the divisor is nonzero, the operation is supported.', False),
+    ('For example, "the divisor is nonzero" describes one valid case.', False),
+    ('The divisor is positive.', True),
+], ids=["conditional", "quoted_example", "explicit_positive"])
+def test_unsigned_divider_r4_exact_router_regression(domain, emit, tmp_path):
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"].replace(
+        "Both operands are nonzero, and dividend is at least divisor.",
+        domain + "\nDividend is at least divisor.")
+    expected = "unsigned_iterative_restoring_divider" if emit else None
+    assert rcs.detect_shape(desc) == expected
+    if not emit:
+        assert "nonzero operand domain" in rcs.route_to_ai_reason(desc)["unresolved"]
+    source, out = tmp_path / "description.txt", tmp_path / "unit.sv"
+    source.write_text(desc)
+    run = subprocess.run([sys.executable, str(PROG), "--from-desc", str(source),
+                          "--out", str(out)], capture_output=True, text=True)
+    assert run.returncode == (0 if emit else 2), run.stdout + run.stderr
+    assert json.loads(run.stdout)["verdict"] == ("EMIT" if emit else "DEFER")
+    assert out.exists() == emit
+
+
+@pytest.mark.parametrize("subject,verb", [
+    ("The divisor", "is"), ("The denominator", "is"),
+    ("Both operands", "are"), ("The operands", "are"),
+    ("Dividend and divisor", "are"), ("Divisor and dividend", "are"),
+    ("The dividend and the divisor", "are"),
+    ("Numerator and denominator", "are"),
+    ("Both dividend and divisor", "are"),
+    ("Denominator and numerator", "are"),
+])
+@pytest.mark.parametrize("predicate", [
+    "{verb} nonzero", "must be nonzero", "shall be nonzero",
+    "{verb} positive", "must be positive", "shall be positive",
+    "{verb} greater than zero", "> 0",
+    "{verb} non-zero",
+])
+def test_unsigned_divider_r4_unconditional_positive_forms(subject, verb, predicate):
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"].replace(
+        "Both operands are nonzero, and dividend is at least divisor.",
+        subject + " " + predicate.format(verb=verb) + ".\nDividend >= divisor.")
+    assert rcs.detect_shape(desc) == "unsigned_iterative_restoring_divider"
+    assert rcs.route_to_ai_reason(desc) is None
+
+
+@pytest.mark.parametrize("domain", [
+    "If the divisor is nonzero, the operation is supported.",
+    "When the divisor is nonzero, the operation is supported.",
+    "Provided the divisor is positive, the operation is supported.",
+    "Assuming the divisor is nonzero, the operation is supported.",
+    "Suppose the divisor is positive.",
+    "Unless the divisor is positive, the operation is unsupported.",
+    "In case the divisor is nonzero, the operation is supported.",
+    "The divisor is nonzero if a restricted mode is selected.",
+    "For example, the divisor is nonzero.",
+    "The divisor is nonzero as an example.",
+    "The divisor is positive?",
+    "E.g. the divisor is nonzero.",
+    "Such as the divisor is nonzero.",
+    "Consider that the divisor is positive.",
+    '"The divisor is nonzero."', "'The divisor is nonzero.'",
+    "“The divisor is positive.”", "`The divisor is nonzero.`",
+    "```text\nThe divisor is nonzero.\n```",
+    "~~~\nThe divisor is positive.\n~~~",
+    "    The divisor is nonzero.",
+    "> The divisor is nonzero.",
+    "# The divisor is nonzero",
+    "Domain: the divisor is nonzero.",
+    "The divisor may be nonzero.", "The divisor might be positive.",
+    "The divisor could be positive.", "The divisor can be nonzero.",
+    "The divisor is not guaranteed nonzero.",
+    "The divisor is not necessarily positive.",
+    "There is no requirement that the divisor be positive.",
+    "Do not assume the divisor is nonzero.",
+    "The divisor is nonzero (not guaranteed).",
+    "The divisor is positive, but this only describes a restricted case.",
+    "Previously the divisor is nonzero.",
+    "The divisor is nonzero, historically.",
+    "The divisor is positive in a previous requirement.",
+    "The divisor is positive, yet this is only an example.",
+    "The old requirement says the divisor is nonzero.",
+    "The divisor is nonzero; this rule is superseded.",
+    "The dividend is positive.", "The dividend > 0.",
+    "The quotient is nonzero.", "The remainder is positive.",
+    "The divisor and quotient are nonzero.",
+    "The quotient reports the divisor is positive.",
+    "The quotient and the divisor is nonzero.",
+    "If " + "a restricted mode is selected and " * 15 + "the divisor is positive.",
+    "The dividend is nonzero, and dividend is at least divisor.",
+])
+def test_unsigned_divider_r4_context_and_role_scopes_defer(domain):
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"].replace(
+        "Both operands are nonzero, and dividend is at least divisor.",
+        domain + "\nDividend is at least divisor.")
+    assert rcs.detect_shape(desc) is None
+    assert "nonzero operand domain" in rcs.route_to_ai_reason(desc)["unresolved"]
+
+
+@pytest.mark.parametrize("allowance", [
+    "The divisor may be zero.", "The denominator might be zero.",
+    "The divisor could be zero.", "The divisor can be zero.",
+    "The divisor is not guaranteed nonzero.",
+    "The divisor is not necessarily positive.",
+    "No requirement that divisor be positive.",
+    "There is no requirement that the denominator be nonzero.",
+    "Both operands may be zero.", "The dividend may be zero.",
+    "The divisor is zero.", "The divisor is not positive.",
+])
+@pytest.mark.parametrize("position", ["before", "after"])
+def test_unsigned_divider_r4_contradiction_overrides_separate_positive(allowance, position):
+    positive = "The divisor is positive.\nDividend is at least divisor."
+    domain = (allowance + "\n" + positive if position == "before"
+              else positive + "\n" + allowance)
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"].replace(
+        "Both operands are nonzero, and dividend is at least divisor.", domain)
+    assert rcs.detect_shape(desc) is None
+    assert "nonzero operand domain" in rcs.route_to_ai_reason(desc)["unresolved"]
+
+
+@pytest.mark.parametrize("domain", [
+    "If the quotient is nonzero, it is retained.\nThe divisor is positive.",
+    "The old quotation is superseded.\nThe divisor is positive.",
+    "The divisor is positive.\nFor example, the quotient may be zero.",
+    "For example, the quotient may be zero.\nThe divisor is positive.",
+    "For example, the divisor is nonzero.\nThe divisor is positive.",
+    '"The divisor is nonzero."\nThe divisor is positive.',
+    "The divisor is\npositive.",
+    "The divisor is positive!\nThe quotient may be zero.",
+])
+def test_unsigned_divider_r4_sentence_boundaries_preserve_positive(domain):
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"].replace(
+        "Both operands are nonzero, and dividend is at least divisor.",
+        domain + "\nDividend is at least divisor.")
+    assert rcs.detect_shape(desc) == "unsigned_iterative_restoring_divider"
+
+
+@pytest.mark.parametrize("prefix", [
+    'Note: "the divisor is nonzero".',
+    "The divisor is nonzero.",
+])
+def test_unsigned_divider_r4_port_description_cannot_ground_domain(prefix):
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"].replace(
+        "Both operands are nonzero, and dividend is at least divisor.",
+        "Dividend is at least divisor.").replace(
+            "dividend[WIDTH-1:0]: unsigned dividend.",
+            "dividend[WIDTH-1:0]: unsigned dividend. " + prefix)
+    assert rcs.detect_shape(desc) is None
+
+
+@pytest.mark.parametrize("allowance", [
+    "The divisor may be zero.",
+    "The divisor is not guaranteed nonzero.",
+    "No requirement that divisor be positive.",
+])
+def test_unsigned_divider_r4_port_allowance_overrides_positive(allowance):
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"].replace(
+        "divisor[WIDTH-1:0]: unsigned divisor.",
+        "divisor[WIDTH-1:0]: unsigned divisor. " + allowance)
+    assert rcs.detect_shape(desc) is None
+    assert "nonzero operand domain" in rcs.route_to_ai_reason(desc)["unresolved"]
+
+
+@pytest.mark.parametrize("ordering", [
+    "If dividend is at least divisor, the operation is supported.",
+    'For example, "dividend >= divisor" describes one case.',
+    "Do not assume dividend is at least divisor.",
+    "Dividend may be at least divisor.",
+])
+def test_unsigned_divider_r4_ordering_must_be_unconditional(ordering):
+    desc = _INLINE_POS["unsigned_iterative_restoring_divider"].replace(
+        "Both operands are nonzero, and dividend is at least divisor.",
+        "The divisor is positive.\n" + ordering)
+    assert rcs.detect_shape(desc) is None
+    assert "dividend >= divisor domain" in rcs.route_to_ai_reason(desc)["unresolved"]
+
+
 def _r2_unsigned_divider_variants():
     desc = _INLINE_POS["unsigned_iterative_restoring_divider"]
     return [

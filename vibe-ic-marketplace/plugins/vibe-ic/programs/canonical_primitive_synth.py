@@ -91,7 +91,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from _prose_polarity import is_denied, sentence_scope
+from _prose_polarity import LINE_END_BREAKS, is_denied, sentence_scope
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROGRAMS_DIR))
@@ -230,46 +230,99 @@ def _unsigned_division_observation(desc_text: str) -> Tuple[Optional[Dict], List
             r"\bnot\s+unsigned\b", r"\bunsigned\s+is\s+not\b",
             r"\b(?:signed|signedness)\b"))):
         unresolved.append("unsigned operand domain (signed is unsupported)")
-    # The restoring template is only sound for a domain that excludes zero
-    # for BOTH operands.  A dividend-only statement is insufficient: the
-    # ordering relation does not imply a nonzero divisor (0 <= 0 is legal).
-    # Keep the positive forms deliberately explicit and role-bound so a
-    # modal, negated, or relational-only sentence cannot authorize emission.
-    both_nonzero_positive = re.search(
-        r"\b(?:both\s+operands|the\s+operands|"
-        r"dividend\s+and\s+divisor|divisor\s+and\s+dividend)\s+"
-        r"(?:are|must\s+be|shall\s+be)\s+non[- ]?zero\b", low)
-    divisor_nonzero_positive = re.search(
-        r"\b(?:the\s+)?(?:divisor|denominator)\s+"
-        r"(?:is|must\s+be|shall\s+be)\s+non[- ]?zero\b", low)
-    def _positive_grounding_is_undeniated(match: Optional[re.Match]) -> bool:
-        if match is None:
-            return False
-        lo, hi = sentence_scope(low, match.start(), match.end())
-        return is_denied(low[lo:hi]) is None
+    # Domain evidence is a declaration in its own sentence, never a keyword
+    # anywhere in the document. Keep the original line/quote boundaries;
+    # normalized whitespace would let headings and examples authorize RTL.
+    domain_text = (desc_text or "").lower().replace("\r\n", "\n")
+    # e.g. is example framing, not two full stops ending that framing.
+    scope_text = re.sub(r"\be\.g\.", "e_g_", domain_text)
+    # A closing quote after sentence punctuation does not join the following
+    # declaration. Preserve offsets while exposing that end to the helper.
+    scope_text = re.sub(r'''([.!?])["”'`](?=\s|\Z)''', r"\1 ", scope_text)
+    quoted = [(m.start(), m.end()) for m in re.finditer(
+        r'```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z)|'
+        r'"[^"]*(?:"|\Z)|“[^”]*(?:”|\Z)|'
+        r"(?<!\w)'[^'\n]*'(?!\w)|`[^`\n]*(?:`|\Z)", domain_text)]
+    # Only divider-domain framing lives here. All denial/retirement words
+    # continue to come from the canonical prose-polarity vocabulary.
+    domain_frame = re.compile(
+        r"\b(?:if|when|provided|assuming|suppose|unless|in\s+case|"
+        r"examples?|hypothetical|such\s+as|consider|"
+        r"may|might|could|can|uncertain|unknown|whether|"
+        r"but|however|whereas|yet|although|instead|rather\s+than|"
+        r"previous(?:ly)?|formerly|historical(?:ly)?|prior\s+(?:rule|requirement)|"
+        r"old\s+(?:rule|requirement))\b|\be\.g\.")
+    both_roles = (
+        r"(?:both\s+operands|the\s+operands|"
+        r"(?:both\s+)?(?:the\s+)?dividend\s+and\s+(?:the\s+)?divisor|"
+        r"(?:both\s+)?(?:the\s+)?divisor\s+and\s+(?:the\s+)?dividend|"
+        r"(?:both\s+)?(?:the\s+)?numerator\s+and\s+(?:the\s+)?denominator|"
+        r"(?:both\s+)?(?:the\s+)?denominator\s+and\s+(?:the\s+)?numerator)"
+    )
+    divisor_role = r"(?:the\s+)?(?:divisor|denominator)"
+    value = r"(?:non[- ]?zero|positive|greater\s+than\s+(?:zero|0))\b"
+    predicate = r"(?:(?:is|are|must\s+be|shall\s+be)\s+" + value + r"|>\s*0\b)"
+    positive_pattern = r"\b(?:" + both_roles + "|" + divisor_role + r")\s+" + predicate
 
-    nonzero_positive = (_positive_grounding_is_undeniated(both_nonzero_positive)
-                        or _positive_grounding_is_undeniated(
-                            divisor_nonzero_positive))
-    nonzero_uncertain = _contains_any(low, (
-        r"\b(?:do\s+not|don't|does\s+not)\s+assume\b[^.\n]{0,60}"
-            r"\bnon[- ]?zero\b",
-        r"\b(?:may|can|could|might)\s+be\s+zero\b",
-        r"\b(?:the\s+)?(?:divisor|denominator)\s+"
-            r"(?:may|can|could|might)\s+be\s+non[- ]?zero\b",
-        r"\b(?:the\s+)?(?:divisor|denominator)\s+"
-            r"(?:is|are)\s+zero\b",
-        r"\b(?:the\s+)?(?:divisor|denominator)\s+"
-            r"(?:is|are)\s+not\s+non[- ]?zero\b",
-        r"\b(?:both\s+operands|the\s+operands)\s+"
-            r"(?:may|can|could|might)\s+be\s+non[- ]?zero\b",
-        r"\b(?:both\s+operands|the\s+operands)\s+"
-            r"(?:are|is)\s+not\s+non[- ]?zero\b",
-        r"\bzero\s+(?:divisor|denominator)\b"))
-    if not nonzero_positive or nonzero_uncertain:
+    def _domain_scope(match: re.Match) -> Tuple[int, int]:
+        lo, hi = sentence_scope(scope_text, match.start(), match.end(),
+                                before=len(scope_text), after=len(scope_text),
+                                extra_breaks=LINE_END_BREAKS)
+        return lo, hi
+
+    def _sentence(match: re.Match) -> str:
+        lo, hi = _domain_scope(match)
+        return domain_text[lo:hi]
+
+    def _quoted_or_structural(match: re.Match) -> bool:
+        if any(lo <= match.start() < hi for lo, hi in quoted):
+            return True
+        start = domain_text.rfind("\n", 0, match.start()) + 1
+        end = domain_text.find("\n", match.start())
+        line = domain_text[start:end if end != -1 else len(domain_text)]
+        return bool(re.match(r"(?: {4}|\t|\s*[#>])", line)
+                    or re.match(r"\s*[a-z_]\w*\s*(?:\[[^\]]*\])?\s*[:：]", line))
+
+    def _denied(sentence: str) -> bool:
+        # non-zero is the value being asserted, not a denial prefix. Normalize
+        # only that value; qualifiers such as '(not guaranteed)' still count.
+        return is_denied(re.sub(r"\bnon[- ]zero\b", "nonzero", sentence),
+                         ignore_bracketed=False) is not None
+
+    def _unconditional(match: re.Match) -> bool:
+        lo, hi = _domain_scope(match)
+        prefix = domain_text[lo:match.start()].strip()
+        # A role must start its own declarative clause. A value attributed to
+        # another role ("quotient says divisor is ...") cannot bind this one.
+        clause_start = not prefix or re.search(r"[,;]\s*(?:and\s*)?$", prefix)
+        sentence = _sentence(match)
+        return (bool(clause_start) and not _quoted_or_structural(match)
+                and domain_text[hi:hi + 1] != "?"
+                and not sentence.rstrip().endswith("?")
+                and not domain_frame.search(sentence) and not _denied(sentence))
+
+    nonzero_positive = any(_unconditional(m)
+                           for m in re.finditer(positive_pattern, domain_text))
+    # A separate positive cannot erase a source allowance of zero or a denied
+    # guarantee. This scan covers the complete description and binds the
+    # value to operand roles, so a zero quotient cannot retract the domain.
+    operand_role = (r"\b(?:" + both_roles
+                    + r"|(?:the\s+)?(?:divisor|denominator|dividend|numerator))")
+    allowance_pattern = operand_role + (
+        r"\s+(?:(?:may|might|could|can)\s+be\s+(?:zero|0|non[- ]?zero|positive)\b|"
+        r"(?:is|are)\s+(?:zero|0)\b|"
+        r"(?:is|are|be|must\s+be|shall\s+be)\s+(?:\w+\s+){0,4}" + value + ")")
+    nonzero_contradiction = any(
+        (_denied(_sentence(m))
+             or re.search(r"\b(?:may|might|could|can)\b|\b(?:is|are)\s+(?:zero|0)\b",
+                          m.group(0)))
+        for m in re.finditer(allowance_pattern, domain_text))
+    if not nonzero_positive or nonzero_contradiction:
         unresolved.append("nonzero operand domain")
-    if not (re.search(r"\bdividend\b\s*(?:is|must be)?\s*at least\s*\bdivisor\b", low)
-            or re.search(r"\bdividend\b\s*>=\s*\bdivisor\b", low)):
+    ordering_pattern = (
+        r"\b(?:the\s+)?dividend\s*(?:(?:is|must\s+be)\s*)?at\s+least\s+divisor\b|"
+        r"\b(?:the\s+)?dividend\s*>=\s*divisor\b")
+    if not any(_unconditional(m) for m in re.finditer(ordering_pattern, domain_text)):
         unresolved.append("dividend >= divisor domain")
     if _contains_any(low, (
             r"\b(?:zero|0)\s+(?:divisor|denominator)\b",
