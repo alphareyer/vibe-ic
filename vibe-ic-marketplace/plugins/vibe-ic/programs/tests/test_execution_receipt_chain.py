@@ -12,14 +12,37 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import execution_modes as em
 import execution_policy as policy
+import _delivery_route
+from programs.tests._route_fixture import stage_owner_route
 from programs.tests import test_execution_modes as H
 
 
+def _live_frontdoor_fixture(front, args):
+    """Test-only harness enters the policy seam without a production mint API."""
+    token = object()
+    policy._REGISTERED_ISSUER = None
+    policy._ISSUER_CONTEXT = None
+    previous = policy._ACTIVE_ENTRY_CAPABILITY
+    policy._ACTIVE_ENTRY_CAPABILITY = token
+    try:
+        return front._configure_execution_policy(args, _entry_capability=token)
+    finally:
+        policy._ACTIVE_ENTRY_CAPABILITY = previous
+
+
 def issued_route(*, path, source_sha, project_digest, request_digest, route='macro'):
-    return em._issue_route_receipt_for_tests(
-        ic_ip_path=path, source_sha=source_sha,
-        project_digest=project_digest, request_digest=request_digest,
-        route=route)
+    authority = object()
+    previous_capability = em._ACTIVE_ROUTE_ENTRY_CAPABILITY
+    token = object()
+    em._ACTIVE_ROUTE_ENTRY_CAPABILITY = token
+    try:
+        em._register_route_issuer(authority, _entry_capability=token)
+        return em._issue_route_receipt(
+            ic_ip_path=path, source_sha=source_sha,
+            project_digest=project_digest, request_digest=request_digest,
+            route=route, _authority=authority)
+    finally:
+        em._ACTIVE_ROUTE_ENTRY_CAPABILITY = previous_capability
 
 
 def test_default_omitted_is_one_existing_controller_plan(tmp_path):
@@ -139,7 +162,7 @@ def test_verify_adoption_rehashes_selected_artifacts(tmp_path):
     ctx = H.context(tmp_path)
     controller = H.controller(H.adapter('a'))
     root = tmp_path / 'run'
-    controller.run(ctx, root)
+    controller.run(ctx, root, 'ultra-mode')
     controller.adopt(ctx, root, H.choice(ctx, root))
     generation = json.loads((root / 'adoption.json').read_text())['selected_generation']
     artifact = Path(generation['directory']) / 'value.txt'
@@ -147,6 +170,40 @@ def test_verify_adoption_rehashes_selected_artifacts(tmp_path):
     artifact.write_text('mutated after adoption\n')
     with pytest.raises(em.Refusal, match='SELECTED_GENERATION_CHANGED'):
         controller.verify_adoption(ctx, root)
+
+
+def test_resealed_selected_generation_cannot_replace_original_producer_evidence(tmp_path):
+    ctx = H.context(tmp_path)
+    controller = H.controller(H.adapter('a'))
+    root = tmp_path / 'run'
+    controller.run(ctx, root)
+    adopted = controller.adopt(ctx, root, H.choice(ctx, root))
+    generation = dict(adopted['selected_generation'])
+    selected = Path(generation['directory']) / 'value.txt'
+    selected.chmod(0o644)
+    selected.write_text('forged selected bytes\n')
+    generation['outputs']['value.txt'] = em.digest(selected)
+    manifest_path = Path(generation['directory']) / 'manifest.json'
+    with pytest.raises(em.Refusal, match='ISSUED_AUTHORITY_REISSUE'):
+        em._issue_sealed(manifest_path, generation)
+    forged = dict(adopted)
+    forged['selected_generation'] = generation
+    forged['winner'] = dict(forged['winner'], artifact_outputs=dict(generation['outputs']))
+    # The production writer is intentionally not importable.  Co-updating the
+    # two public adoption documents leaves the original sealed issuer record
+    # untouched and must be rejected before the winner can be consumed.
+    (root / 'adoption.json').write_text(json.dumps(forged))
+    (root / 'program_adoption.json').write_text(json.dumps(forged))
+    with pytest.raises(em.Refusal, match='PROGRAM_ADOPTION_CHANGED'):
+        controller.verify_adoption(ctx, root)
+
+
+def test_legacy_seal_and_imported_adoption_writer_cannot_issue_authority():
+    # The former mutable authority globals and writer were the exact seam used
+    # to co-update a selected generation, winner and adoption receipt.
+    assert not hasattr(em, '_ISSUED_AUTHORITY')
+    assert not hasattr(em, '_seal')
+    assert not hasattr(em.Controller, '_write_adoption')
 
 
 def test_reverse_mutation_of_frozen_work_is_refused(tmp_path):
@@ -242,7 +299,9 @@ def test_ultra_requires_explicit_user_evidence_and_children_preserve_it(monkeypa
                                  execution_licenses=None, execution_choice=None,
                                  execution_choice_wait_s=0))()
     import vibe_ic_one_shot_runner as front
-    value = front._configure_execution_policy(args)
+    with pytest.raises(em.Refusal, match='ULTRA_ISSUER_NOT_ALLOWED'):
+        front._configure_execution_policy(args)
+    value = _live_frontdoor_fixture(front, args)
     assert value['authority'] == 'USER_EXPLICIT_ULTRA'
     assert '--execution-mode' in policy.child_arguments(['project'])
     assert policy.require_explicit_ultra()['authority'] == 'USER_EXPLICIT_ULTRA'
@@ -311,7 +370,7 @@ def test_issued_ultra_receipt_preserves_authority_and_tamper_refuses(monkeypatch
                                 execution_licenses=None, execution_choice=None,
                                 execution_choice_wait_s=0))()
     import vibe_ic_one_shot_runner as front
-    issued = front._configure_execution_policy(top)
+    issued = _live_frontdoor_fixture(front, top)
     assert issued['request_digest']
     env = dict(os.environ)
     env[policy.ENV] = json.dumps(issued, sort_keys=True)
@@ -435,7 +494,7 @@ def test_controller_fields_requires_resolved_route_and_preserves_ip(monkeypatch)
     with pytest.raises(em.Refusal, match='PRODUCTION_ROUTE_REQUIRED'):
         policy.controller_fields()
     fields_route = issued_route(
-        path='IP', source_sha='a' * 40, project_digest='b' * 64,
+        path='IP', source_sha=H.BASE, project_digest='b' * 64,
         request_digest=policy.request()['request_digest'], route='macro-v1')
     fields = policy.controller_fields(ic_ip_path='IP', route_receipt=fields_route)
     assert fields['ic_ip_path'] == 'IP'
@@ -446,7 +505,7 @@ def test_controller_fields_requires_resolved_route_and_preserves_ip(monkeypatch)
 def test_controller_fields_rejects_silent_ic_route_for_ip(monkeypatch):
     monkeypatch.delenv(policy.ENV, raising=False)
     fields_route = issued_route(
-        path='IP', source_sha='a' * 40, project_digest='b' * 64,
+        path='IP', source_sha=H.BASE, project_digest='b' * 64,
         request_digest=policy.request()['request_digest'], route='macro-v1')
     with pytest.raises(em.Refusal, match='IC_IP_ROUTE_MISMATCH'):
         policy.controller_fields(
@@ -566,7 +625,7 @@ def test_ultra_waits_for_digest_bound_choice_and_rejects_ineligible_arm(tmp_path
     controller = H.controller(H.adapter('a'), H.adapter('b', fault='fail_gate'))
     root = tmp_path / 'ultra'
     result = controller.run(ctx, root, 'ultra-mode')
-    assert result['status'] == 'AWAITING_AI_SELECTION'
+    assert result['status'] == 'FAIL'
     with pytest.raises(em.Refusal, match='AI_CHOICE_INELIGIBLE'):
         controller.adopt(ctx, root, H.choice(ctx, root, 'b'))
 
@@ -578,6 +637,9 @@ def test_ultra_fail_precedes_unmeasured_when_no_arm_is_eligible(tmp_path):
     result = controller.run(ctx, tmp_path / 'ultra', 'ultra-mode')
     assert result['candidate_statuses'] == {'a': 'FAIL', 'b': 'NOT_MEASURED'}
     assert result['status'] == 'FAIL'
+    comparison = json.loads((tmp_path / 'ultra/comparison.json').read_text())
+    issued = json.loads((tmp_path / 'ultra/issued-comparison.json').read_text())
+    assert comparison['status'] == issued['payload']['status'] == 'FAIL'
 
 
 def test_stdin_runner_cmdline_cannot_answer_canonical_capability(tmp_path):
@@ -632,11 +694,110 @@ def test_route_issuer_api_cannot_be_called_by_an_arbitrary_caller():
                                 request_digest='b' * 64)
 
 
+def test_compiled_route_frame_spoof_cannot_register_or_issue(tmp_path):
+    script = (
+        'import execution_modes as p\n'
+        'a=object()\n'
+        'try:\n'
+        ' exec(compile("p._register_route_issuer(a)", str(p.__file__), "exec"), {"p":p,"a":a})\n'
+        ' print("ISSUED")\n'
+        'except Exception as e:\n'
+        ' print(type(e).__name__+":"+getattr(e,"code",""))\n')
+    result = subprocess.run([sys.executable, '-'], input=script, text=True,
+                            capture_output=True,
+                            env={**os.environ, 'PYTHONPATH': str(Path(em.__file__).parent)})
+    assert 'ROUTE_AUTHORITY_UNAVAILABLE' in result.stdout
+    assert 'ISSUED' not in result.stdout
+
+
+def test_real_owner_route_entry_issues_typed_receipt_after_admission(tmp_path):
+    stage_owner_route(tmp_path, 'ic')
+    assert _delivery_route.admit(tmp_path) is None
+    authority = object()
+    previous_capability = em._ACTIVE_ROUTE_ENTRY_CAPABILITY
+    token = object()
+    em._ACTIVE_ROUTE_ENTRY_CAPABILITY = token
+    try:
+        em._register_route_issuer(authority, _entry_capability=token)
+        receipt = _delivery_route.issue_typed_receipt(
+            tmp_path, 'ic', authority=authority,
+            request_digest=policy.request()['request_digest'])
+    finally:
+        em._ACTIVE_ROUTE_ENTRY_CAPABILITY = previous_capability
+    assert receipt['kind'] == 'issued-route'
+    assert receipt['ic_ip_path'] == 'IC'
+
+
+def test_public_neutral_test_sentinel_without_fixture_boundary_refuses(tmp_path):
+    source = tmp_path / 'input.txt'
+    source.write_text('input\n')
+    context = em.Context('1', H.BASE, {'text.txt': source}, H.OBJECTIVE,
+                         ('transform',), ic_ip_path='IC',
+                         route_receipt={'kind': 'neutral-test', 'ic_ip_path': 'IC'})
+    with pytest.raises(em.Refusal, match='ROUTE_RECEIPT_INVALID'):
+        context.binding()
+
+
+def test_route_issuer_rejects_none_digest_fields():
+    authority = object()
+    previous_capability = em._ACTIVE_ROUTE_ENTRY_CAPABILITY
+    token = object()
+    em._ACTIVE_ROUTE_ENTRY_CAPABILITY = token
+    try:
+        em._register_route_issuer(authority, _entry_capability=token)
+        with pytest.raises(em.Refusal, match='ROUTE_RECEIPT_INVALID'):
+            em._issue_route_receipt(ic_ip_path='IC', source_sha=None,
+                                    project_digest=None, request_digest=None,
+                                    _authority=authority)
+    finally:
+        em._ACTIVE_ROUTE_ENTRY_CAPABILITY = previous_capability
+
+
+def test_unexecuted_canonical_gate_names_cannot_be_validator_pass(tmp_path):
+    source = tmp_path / 'input.txt'
+    source.write_text('input\n')
+    gates = ('flow_step_output_content_check', 'catalog_synth_safe_params_check')
+    ctx = replace(H.context(tmp_path), required_gates=gates)
+    arm = H.adapter('gatefake')
+    source_files = dict(arm.source_files)
+    source_files[str(Path(__file__).resolve())] = em.digest(Path(__file__).resolve())
+
+    def dishonest(outputs, binding):
+        evidence = H.validate_text(outputs, binding)
+        return em.Evidence(evidence.binding, 'PASS', {gate: 'PASS' for gate in gates},
+                           evidence.outputs, {'cost': 1})
+
+    arm = replace(arm, validate=dishonest, source_files=source_files)
+    registry = em.Registry(); registry.register(arm)
+    portfolio = {'meta': {'test_only': True}, 'steps': [
+        {'id': '1', 'mandatory_gate_programs': list(gates),
+         'required_output_contract': ['value.txt', 'measurement.json']} ]}
+    controller = em.Controller(registry, em.Budget(2, 512), portfolio)
+    result = controller.run(ctx, tmp_path / 'run')
+    assert result['status'] == 'NOT_MEASURED'
+    assert result['candidate_statuses']['gatefake'] == 'NOT_MEASURED'
+
+
+def test_imported_frontdoor_wrapper_cannot_mint_ultra(tmp_path):
+    script = (
+        'import argparse, vibe_ic_one_shot_runner as f\n'
+        'a=argparse.Namespace(execution_mode="ultra", execution_cpus=1, '
+        'execution_ram_mb=128, execution_workers=1, execution_licenses=None, '
+        'execution_choice=None, execution_choice_wait_s=0)\n'
+        'try: f._configure_execution_policy(a)\n'
+        'except Exception as e: print(getattr(e,"code",""))\n')
+    result = subprocess.run([sys.executable, '-'], input=script, text=True,
+                            capture_output=True,
+                            env={**os.environ, 'PYTHONPATH': str(Path(em.__file__).parent)})
+    assert result.returncode == 0
+    assert 'ULTRA_ISSUER_NOT_ALLOWED' in result.stdout
+
+
 def test_selected_generation_mutation_during_publish_refuses(tmp_path, monkeypatch):
     ctx = H.context(tmp_path)
     controller = H.controller(H.adapter('a'))
     root = tmp_path / 'run'
-    controller.run(ctx, root)
+    controller.run(ctx, root, 'ultra-mode')
     original = em.Controller._selected_generation
 
     def mutate_after_copy(run_root, receipt):
@@ -660,13 +821,32 @@ def test_portfolio_snapshot_missing_current_yaml_gate_is_refused():
         em.Controller(em.Registry(), em.Budget(1, 128), portfolio)
 
 
+def test_rehashed_portfolio_source_sha_cannot_authenticate_canonical_yaml(tmp_path):
+    portfolio = em.load_portfolio()
+    row = portfolio['steps'][0]
+    row['current_default']['source']['sha'] = '0' * 40
+    path = tmp_path / 'portfolio.json'
+    path.write_text(json.dumps(portfolio))
+    with pytest.raises(em.Refusal, match='PORTFOLIO_SOURCE_UNBOUND'):
+        em.load_portfolio(path)
+
+
 def test_route_ultra_intent_cannot_be_omitted_or_downgraded(tmp_path):
     project_digest = 'a' * 64
     request_digest = 'b' * 64
-    route = em._issue_route_receipt_for_tests(
-        ic_ip_path='IC', source_sha=H.BASE,
-        project_digest=project_digest, request_digest=request_digest,
-        intent_label='USER_EXPLICIT_ULTRA', mode_intent='ultra')
+    authority = object()
+    previous_capability = em._ACTIVE_ROUTE_ENTRY_CAPABILITY
+    token = object()
+    em._ACTIVE_ROUTE_ENTRY_CAPABILITY = token
+    try:
+        em._register_route_issuer(authority, _entry_capability=token)
+        route = em._issue_route_receipt(
+            ic_ip_path='IC', source_sha=H.BASE,
+            project_digest=project_digest, request_digest=request_digest,
+            route='macro', intent_label='USER_EXPLICIT_ULTRA', mode_intent='ultra',
+            _authority=authority)
+    finally:
+        em._ACTIVE_ROUTE_ENTRY_CAPABILITY = previous_capability
     ctx = replace(H.context(tmp_path), route_receipt=route,
                   project_digest=project_digest, request_digest=request_digest,
                   intent_label='USER_EXPLICIT_ULTRA')
@@ -690,7 +870,7 @@ def test_ultra_worse_objective_recommendation_is_refused(tmp_path):
 
 def test_ultra_diversity_ignores_arm_labels_when_provider_identity_matches(tmp_path):
     first = H.adapter('neutral_a')
-    second = replace(H.adapter('neutral_b'), tool_id=first.tool_id,
+    second = replace(H.adapter('neutral_a'), arm_id='neutral_b', tool_id=first.tool_id,
                      engine_families=('caller_label_b',))
     plan = H.controller(first, second).plan(H.context(tmp_path), 'ultra-mode')
     assert plan['arms'] == ['neutral_a']
@@ -701,4 +881,11 @@ def test_fabricated_known_tool_identity_cannot_register(tmp_path):
     forged = replace(H.adapter('fake'), tool_id='librelane',
                      tool_version='fabricated-999')
     with pytest.raises(em.Refusal, match='TOOL_ID_UNBOUND|TOOL_VERSION_UNBOUND'):
+        em.Registry().register(forged)
+
+
+def test_unrelated_git_source_commit_cannot_authenticate_fixture_bytes():
+    forged = replace(H.adapter('fake'),
+                     source_sha='f88175263d96c3a76b4cb18f72c7714c68ec6627')
+    with pytest.raises(em.Refusal, match='SOURCE_AUTHORITY_STALE'):
         em.Registry().register(forged)

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
 import threading
 import time
 
@@ -18,8 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import execution_modes as em
 from programs.tests._hostpaths import require_repo
 
-BASE = 'f88175263d96c3a76b4cb18f72c7714c68ec6627'
+BASE = subprocess.check_output(
+    ['git', '-C', str(require_repo()), 'rev-parse', 'HEAD'], text=True).strip()
 TOOL = Path(__file__).parent / 'fixtures/execution_modes_tool.py'
+VARIANTS = Path(__file__).parent / 'fixtures/provider_variants'
 OBJECTIVE = {'goal': 'uppercase', 'metric': 'cost', 'direction': 'min'}
 
 
@@ -38,6 +41,9 @@ def validate_text(outputs, binding):
 def adapter(arm='a', *, fault='none', duration=.02, cost=5, **kw):
     source = {str(p.resolve()): em.digest(p.resolve()) for p in
               (Path(sys.executable), TOOL, Path(__file__))}
+    variant = VARIANTS / f'{arm}.py'
+    if variant.is_file():
+        source[str(variant.resolve())] = em.digest(variant)
     components = tuple(em.Component(action, (
         str(Path(sys.executable).resolve()), str(TOOL.resolve()), '{inputs}',
         '{outputs}', action, fault, str(duration), str(cost)), timeout_s=2)
@@ -55,7 +61,8 @@ def context(tmp_path):
     p.write_text('one input\n')
     return em.Context('1', BASE, {'text.txt': p}, OBJECTIVE, ('transform',),
                       ic_ip_path='IC', route_receipt={'kind': 'neutral-test',
-                                                      'ic_ip_path': 'IC'})
+                                                      'ic_ip_path': 'IC'},
+                      test_boundary=em._TEST_CONTEXT_TOKEN)
 
 
 def controller(*arms, budget=None):
@@ -95,17 +102,13 @@ def test_invalid_alias_refused(value):
 
 def test_default_picks_exactly_one_ranked_available_applicable_primary(tmp_path):
     ctx = context(tmp_path)
-    # Policy labels only, no EDA command is run in this planner test.
-    ll, native, other = [replace(adapter(x), tool_id=t) for x, t in
-                         [('ll', 'librelane'), ('or', 'openroad'), ('other', 'qualified_other')]]
-    c = controller(other, native, ll)
-    assert c.plan(ctx)['arms'] == ['ll']
-    c = controller(other, native, replace(ll, applicability='inapplicable',
-                                        applicability_reason='No compatible input adapter'))
-    assert c.plan(ctx)['arms'] == ['or']
-    c = controller(other, replace(native, available=False, availability_reason='Missing executable'),
-                   replace(ll, available=False, availability_reason='Missing executable'))
-    assert c.plan(ctx)['arms'] == ['other']
+    # A caller cannot relabel the Python fixture as a known EDA tool.  The
+    # production registry refuses those labels before planning; neutral tools
+    # remain deterministic by arm order.
+    ll = replace(adapter('ll'), tool_id='librelane')
+    with pytest.raises(em.Refusal, match='TOOL_ID_UNBOUND'):
+        controller(ll)
+    assert controller(adapter('other')).plan(ctx)['arms'] == ['other']
 
 
 @pytest.mark.parametrize('state', ['unavailable', 'unknown', 'applicable'])
@@ -171,9 +174,8 @@ def test_source_mismatch_cannot_register(tmp_path):
 
 def test_wrong_source_is_not_admitted(tmp_path):
     ctx = context(tmp_path)
-    plan = controller(replace(adapter(), source_sha='0' * 40)).plan(ctx)
-    assert plan['arms'] == []
-    assert plan['portfolio'][0]['admission'] == 'WRONG_SOURCE'
+    with pytest.raises(em.Refusal, match='SOURCE_AUTHORITY_UNAVAILABLE'):
+        controller(replace(adapter(), source_sha='0' * 40))
 
 
 def test_unequal_objective_and_ambiguous_native_identity_fail_closed(tmp_path):
@@ -396,7 +398,8 @@ def test_real_canonical_portfolio_preserves_final_source_policy_and_blocks_unreg
     assert len(data['tools']) == 63
     assert sum(len(s['ultra_tools']) for s in data['steps']) == 333
     assert data['meta']['inventory_sha256'] == 'd364f39fc37b77f5ba711cea7cab879345de56c157784cf847a66108ebc518bc'
-    assert data['meta']['source_commit'] == BASE
+    assert data['meta']['source_commit'] == subprocess.check_output(
+        ['git', '-C', str(require_repo()), 'rev-parse', 'HEAD'], text=True).strip()
     assert data['meta']['policy_globally_implemented'] is False
     a9 = next(s for s in data['steps'] if s['id'] == 'A9')
     assert a9['policy_default']['tool_ids'] == ['ngspice']

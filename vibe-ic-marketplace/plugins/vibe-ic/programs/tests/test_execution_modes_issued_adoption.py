@@ -64,8 +64,8 @@ def test_a_signature_alone_cannot_create_source_owned_completion(tmp_path):
     payload['processes'][-1]['rc'] = 0
     # Even signature plumbing does not replace the immutable transcript
     # captured at Popen.wait. The source run, not the signer, issues authority.
-    path.write_text(json.dumps(M._seal(payload)))
-    assert observed(c, ctx, root, H.choice(ctx, root)) == 'REFUSED:ISSUED_AUTHORITY_CHANGED'
+    path.write_text(json.dumps(dict(payload=payload, signature=M._hash(payload))))
+    assert observed(c, ctx, root, H.choice(ctx, root)) == 'REFUSED:ISSUED_AUTHORITY_INVALID'
 
 
 @pytest.mark.parametrize('resource', ['cpu', 'ram'])
@@ -88,9 +88,9 @@ def test_current_default_policy_is_bound_to_the_original_run(tmp_path):
     original = H.controller(arm)
     root = tmp_path / 'run'
     original.run(ctx, root)
-    preferred = replace(H.adapter('ll'), tool_id='librelane')
+    preferred = replace(H.adapter('0ll'), arm_id='0ll', tool_id='neutral_ll')
     current = H.controller(arm, preferred)
-    assert current.plan(ctx)['arms'] == ['ll']
+    assert current.plan(ctx)['arms'] == ['0ll']
     assert observed(current, ctx, root, H.choice(ctx, root)) == 'REFUSED:CURRENT_POLICY_REJECTED'
 
 
@@ -110,6 +110,33 @@ def test_adoption_commits_the_exact_validated_artifact_generation(tmp_path):
     (root / 'a/outputs/value.txt').write_text('later mutable native candidate output')
     assert (directory / 'value.txt').read_text() == 'ONE INPUT\n'
     c._generation_current(generation)
+
+
+def test_registered_source_manifest_is_immutable_against_caller_rehash(tmp_path):
+    ctx = H.context(tmp_path)
+    arm = H.adapter()
+    tool = tmp_path / 'execution_modes_tool.py'
+    tool.write_bytes(Path(next(p for p in arm.source_files if p.endswith('execution_modes_tool.py'))).read_bytes())
+    source = {p: value for p, value in arm.source_files.items()
+              if not p.endswith('execution_modes_tool.py')}
+    source[str(tool)] = M.digest(tool)
+    components = tuple(replace(component, argv=(component.argv[0], str(tool), *component.argv[2:]))
+                       for component in arm.components)
+    arm = replace(arm, source_files=source, components=components)
+    registry = M.Registry()
+    registry.register(arm)
+    original = dict(arm.source_files)
+    path = tool
+    before = path.read_bytes()
+    try:
+        path.write_bytes(before + b'\nMUTATED_TRANSITIVE_SOURCE\n')
+        arm.source_files[str(path)] = M.digest(path)
+        controller = M.Controller(registry, M.Budget(2, 512), H.controller().portfolio)
+        result = controller.run(ctx, tmp_path / 'run')
+        assert result['status'] == 'NOT_MEASURED'
+        assert result.get('candidate_statuses', {}).get('a') == 'NOT_MEASURED'
+    finally:
+        path.write_bytes(before)
 
 
 @pytest.mark.parametrize('arm_id', ['issued-plan.json', 'refusal.json', 'selected'])

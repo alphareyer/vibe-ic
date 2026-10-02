@@ -80,14 +80,22 @@ import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
-_EXECUTION_ISSUER = object()
+def _configure_execution_policy(args, *, _entry_capability=None):
+    """Configure policy only during the live top-level CLI entry.
 
-
-def _configure_execution_policy(args):
-    """Register and configure policy from this canonical front-door module."""
+    The capability is a local object created after ``main`` has parsed its
+    arguments.  Importing this module, spoofing its filename, or calling this
+    wrapper from a child therefore has no minting authority.
+    """
     import execution_policy as _execution
-    _execution._register_frontdoor_issuer(_EXECUTION_ISSUER)
-    return _execution.configure(args, _issuer=_EXECUTION_ISSUER)
+    if _entry_capability is None:
+        from execution_modes import Refusal
+        raise Refusal('ULTRA_ISSUER_NOT_ALLOWED', 'live canonical CLI entry required')
+    issuer = object()
+    _execution._register_frontdoor_issuer(
+        issuer, _entry_capability=_entry_capability)
+    return _execution.configure(
+        args, _issuer=issuer, _entry_capability=_entry_capability)
 
 
 def _write_runner_summary(out: Path, summary: dict, project: Path) -> None:
@@ -1589,7 +1597,19 @@ def main() -> int:
     import execution_policy as _execution
     _execution.add_arguments(p)
     args = p.parse_args()
-    _configure_execution_policy(args)
+    # This object is deliberately local to the real CLI invocation.  It is
+    # never a module-level boolean or an argv/co_filename assertion that an
+    # imported caller can replay.
+    entry_capability = object()
+    _execution._ACTIVE_ENTRY_CAPABILITY = entry_capability
+    try:
+        execution_policy_value = _configure_execution_policy(
+            args, _entry_capability=entry_capability)
+    finally:
+        # The live mint capability exists only for the canonical handoff.  Do
+        # not leave a readable module global behind for an imported caller in
+        # this interpreter to replay.
+        _execution._ACTIVE_ENTRY_CAPABILITY = None
 
     # Was --top-name given on the command line, or is it the historical default?
     # (argparse cannot tell a default from an explicit same-value pass; inspect
@@ -1618,6 +1638,30 @@ def main() -> int:
         print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
         lock.release()
         return 2
+    # Route authority is armed only after the owner route has been validated.
+    # The entry object is local to this CLI invocation and cannot be replayed
+    # by an imported wrapper or a compiled frame with a spoofed filename.
+    import execution_modes as _execution_modes
+    route_entry_capability = object()
+    route_authority = object()
+    try:
+        _execution_modes._ACTIVE_ROUTE_ENTRY_CAPABILITY = route_entry_capability
+        _execution_modes._register_route_issuer(
+            route_authority, _entry_capability=route_entry_capability)
+        resolved_route = args.route
+        if resolved_route is None:
+            resolved_route = ('ic' if _delivery_route.report_label(project)['delivery_route'] == 'IC'
+                              else 'ip')
+        _route_receipt = _delivery_route.issue_typed_receipt(
+            project, resolved_route, authority=route_authority,
+            request_digest=execution_policy_value['request_digest'],
+            intent_label=execution_policy_value['intent_label'],
+            mode_intent=execution_policy_value['mode_intent'])
+    except (OSError, ValueError, _execution_modes.Refusal) as exc:
+        print(f"REFUSED: ROUTE_RECEIPT_INVALID: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        _execution_modes._ACTIVE_ROUTE_ENTRY_CAPABILITY = None
     # ---------------- Container IMAGE provenance (capture always) ----------
     # Every containerised step downstream is dispatched as
     # `docker exec <container> ...`, so `--container` selects a CONTAINER and

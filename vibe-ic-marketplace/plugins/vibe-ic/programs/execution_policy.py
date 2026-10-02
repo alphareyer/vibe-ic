@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import inspect
 import json
 import os
 from pathlib import Path
@@ -20,6 +19,7 @@ import struct
 import sys
 import tempfile
 import threading
+import time
 import uuid
 
 from execution_modes import Budget, Refusal, _verify_route_authority
@@ -32,6 +32,7 @@ DEFAULT_MODE = 'default-mode'
 ULTRA_MODE = 'ultra-mode'
 _REGISTERED_ISSUER = None
 _ISSUER_CONTEXT: dict | None = None
+_ACTIVE_ENTRY_CAPABILITY = None
 _ISSUED_REQUESTS: dict[str, dict] = {}
 _ISSUED_CAPABILITIES: dict[str, tuple[object, socket.socket]] = {}
 _CANONICAL_FRONTDOOR = (Path(__file__).with_name('vibe_ic_one_shot_runner.py').resolve())
@@ -78,18 +79,36 @@ def _process_identity(pid: int) -> dict:
     """
     try:
         executable = Path(os.readlink(f'/proc/{pid}/exe')).resolve()
-        raw = Path(f'/proc/{pid}/cmdline').read_bytes()
+        raw = b''
+        for _ in range(10):
+            raw = Path(f'/proc/{pid}/cmdline').read_bytes()
+            if raw:
+                break
+            time.sleep(.01)
         argv = tuple(item.decode() for item in raw.split(b'\0') if item)
         if not argv:
             raise ValueError('empty command line')
         executable_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise Refusal('REQUEST_CAPABILITY_INVALID', f'process {pid} identity unavailable') from exc
+    # A canonical issuer must not be running with an import-injection path.
+    # ``sitecustomize`` executes before the runner's first line and can answer
+    # a socket challenge while presenting the runner's argv.  The live process
+    # environment is therefore part of the process object and any injected
+    # Python search path is refused before a capability handshake.
+    try:
+        environment = Path(f'/proc/{pid}/environ').read_bytes().split(b'\0')
+        environment_names = tuple(sorted(
+            item.split(b'=', 1)[0].decode(errors='ignore')
+            for item in environment if b'=' in item))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise Refusal('REQUEST_CAPABILITY_INVALID', f'process {pid} environment unavailable') from exc
     return dict(pid=pid, start_ticks=_process_start_ticks(pid),
                 source_path=str(_CANONICAL_FRONTDOOR),
                 source_sha256=_canonical_source_sha256(),
                 executable_path=str(executable),
                 executable_sha256=executable_sha,
+                environment_names=list(environment_names),
                 argv=list(argv),
                 argv_sha256=hashlib.sha256(
                     json.dumps(list(argv), separators=(',', ':')).encode()).hexdigest())
@@ -103,13 +122,12 @@ def _default_payload() -> dict:
     return payload
 
 
-def _register_frontdoor_issuer(authority: object) -> None:
+def _register_frontdoor_issuer(authority: object, *, _entry_capability=None) -> None:
     """Install the canonical runner's process-local private authority."""
     global _REGISTERED_ISSUER, _ISSUER_CONTEXT
-    caller = inspect.currentframe().f_back if inspect.currentframe() else None
-    caller_path = Path(caller.f_code.co_filename).resolve() if caller else None
-    if caller_path != _CANONICAL_FRONTDOOR:
-        raise Refusal('ULTRA_ISSUER_NOT_ALLOWED', 'registration must originate in the canonical front door')
+    if (_entry_capability is None or _ACTIVE_ENTRY_CAPABILITY is None or
+            _entry_capability is not _ACTIVE_ENTRY_CAPABILITY):
+        raise Refusal('ULTRA_ISSUER_NOT_ALLOWED', 'canonical entry capability required')
     if _REGISTERED_ISSUER is not None and _REGISTERED_ISSUER is not authority:
         raise Refusal('ULTRA_ISSUER_CONFLICT', 'front-door issuer already registered')
     _REGISTERED_ISSUER = authority
@@ -198,9 +216,12 @@ def _verify_parent_capability(request_digest: str, receipt: dict) -> None:
                 live.get('argv') != process.get('argv') or
                 live.get('argv_sha256') != process.get('argv_sha256') or
                 len(expected_argv) < 2 or
-                str(argv0) != live.get('executable_path') or
+                str(argv0.resolve()) != live.get('executable_path') or
                 expected_argv[1] != str(_CANONICAL_FRONTDOOR)):
             raise Refusal('REQUEST_CAPABILITY_INVALID', request_digest)
+        forbidden = {'PYTHONPATH', 'PYTHONHOME', 'PYTHONINSPECT', 'PYTHONSTARTUP'}
+        if forbidden.intersection(live.get('environment_names', ())):
+            raise Refusal('REQUEST_CAPABILITY_INVALID', 'import-injected issuer environment')
         nonce = secrets.token_hex(16)
         sock.settimeout(2.0)
         sock.sendall(json.dumps(dict(request_digest=request_digest,
@@ -354,7 +375,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--execution-request-receipt', default=None, help=argparse.SUPPRESS)
 
 
-def configure(args: argparse.Namespace, *, _issuer=None) -> dict:
+def configure(args: argparse.Namespace, *, _issuer=None, _entry_capability=None) -> dict:
     """Normalize the live request and transport it to a child.
 
     ``vibe_ic_one_shot_runner`` is the only issuer. Its live private authority
@@ -416,7 +437,8 @@ def configure(args: argparse.Namespace, *, _issuer=None) -> dict:
         # Only the canonical top-level Phase-1 front door may issue Ultra
         # authority. A child must receive an already-issued digest-bound
         # receipt and the live parent capability endpoint.
-        if _issuer is None or _issuer is not _REGISTERED_ISSUER:
+        if (_issuer is None or _issuer is not _REGISTERED_ISSUER or
+                _entry_capability is None or _entry_capability is not _ACTIVE_ENTRY_CAPABILITY):
             raise Refusal('ULTRA_ISSUER_NOT_ALLOWED', 'child')
         if _ISSUER_CONTEXT is None:
             raise Refusal('ULTRA_ISSUER_NOT_ALLOWED', 'front-door invocation is not registered')
@@ -493,6 +515,10 @@ def controller_fields(*, ic_ip_path: str | None = None,
         raise Refusal('ROUTE_RECEIPT_DIGEST_MISMATCH', ic_ip_path)
     _verify_route_authority(route_receipt)
     value = request()
+    if (route_receipt.get('intent_label') != value['intent_label'] or
+            route_receipt.get('mode_intent') != value['mode_intent'] or
+            route_receipt.get('request_digest') != value['request_digest']):
+        raise Refusal('ROUTE_INTENT_MISMATCH', ic_ip_path)
     return dict(ic_ip_path=ic_ip_path,
                 route_receipt=dict(route_receipt or {}),
                 intent_label=value['intent_label'],

@@ -14,10 +14,11 @@ without changing canonical DAG ownership or selecting a step.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import hmac
 import inspect
+import ast
 import json
 import math
 import os
@@ -30,6 +31,7 @@ import subprocess
 import threading
 import time
 from typing import Callable, Mapping
+from types import MappingProxyType
 import uuid
 
 import os as _os                                                    # noqa: E402
@@ -44,18 +46,71 @@ from _atomic_artefact import write_bytes, write_json
 # The issuer is owned by this live controller process, never a caller-supplied
 # digest or a secret serialized beside editable run receipts. A new interpreter
 # cannot adopt a previous issuer's run: durable external supervision is not wired.
-_COMPLETION_KEY = secrets.token_bytes(32)
-_ISSUED_AUTHORITY: dict[str, str] = {}
 _CONTROL_NAMES = frozenset({'.', '..', 'plan.json', 'result.json', 'adoption.json',
                             'refusal.json', 'issued-plan.json', 'selected'})
-_ROUTE_ISSUED: dict[str, dict] = {}
-_ROUTE_CURRENT: dict[str, str] = {}
-_ROUTE_ISSUER_TOKEN = object()
 _ROUTE_SEAL_KEY = secrets.token_bytes(32)
-_ROUTE_REGISTERED_ISSUER = None
-_ROUTE_FRONTDOORS = frozenset(
-    Path(__file__).with_name(name).resolve()
-    for name in ('route_decision.py', 'task_nature_route.py'))
+_ACTIVE_ROUTE_ENTRY_CAPABILITY = None
+_TEST_CONTEXT_TOKEN = object()
+
+
+def _sealed_authority_store():
+    key = secrets.token_bytes(32)
+    ledger = {}
+
+    def issue(path: Path, payload: dict) -> dict:
+        document = json.loads(json.dumps(payload))
+        prior = ledger.get(str(path))
+        if prior is not None and prior != document:
+            raise Refusal('ISSUED_AUTHORITY_REISSUE', str(path))
+        ledger[str(path)] = document
+        signature = hmac.new(key, _hash(document).encode(), hashlib.sha256).hexdigest()
+        return dict(payload=document, signature=signature)
+
+    def consume(path: Path) -> dict:
+        document = json.loads(path.read_text())
+        issued = ledger.get(str(path))
+        if issued is not None and issued != document.get('payload'):
+            if document.get('signature') == _hash(document.get('payload')):
+                raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
+            raise Refusal('ISSUED_AUTHORITY_CHANGED', str(path))
+        expected = hmac.new(key, _hash(document['payload']).encode(), hashlib.sha256).hexdigest()
+        if (not isinstance(document.get('signature'), str) or
+                not hmac.compare_digest(expected, document['signature']) or
+                issued != document['payload']):
+            raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
+        return document['payload']
+
+    return issue, consume
+
+
+_issue_sealed, _consume_sealed = _sealed_authority_store()
+
+
+def _route_authority_store():
+    issued, current = {}, {}
+    registered = None
+
+    def register(authority: object) -> None:
+        nonlocal registered
+        registered = authority
+
+    def matches(authority: object) -> bool:
+        return registered is not None and authority is registered
+
+    def record(value: dict) -> None:
+        route_digest = value['route_digest']
+        issued[route_digest] = json.loads(json.dumps(value))
+        current[value['current_pointer']] = route_digest
+
+    def verify(receipt: Mapping[str, object]) -> bool:
+        return (current.get(receipt.get('current_pointer')) == receipt.get('route_digest') and
+                issued.get(receipt.get('route_digest')) == dict(receipt))
+
+    return register, matches, record, verify
+
+
+_register_route_authority, _route_authority_matches, _record_route, _verify_recorded_route = (
+    _route_authority_store())
 
 
 class Refusal(RuntimeError):
@@ -82,7 +137,145 @@ def digest(path: Path) -> str:
 
 def _hash(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True,
-                                    separators=(',', ':')).encode()).hexdigest()
+                                     separators=(',', ':')).encode()).hexdigest()
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _git_source_authority(source_sha: str) -> tuple[str, str]:
+    """Resolve a source commit and tree from the clean repository object DB."""
+    if not isinstance(source_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', source_sha):
+        raise Refusal('INVALID_SOURCE_SHA', str(source_sha))
+    try:
+        commit = subprocess.run(
+            ['git', '-C', str(_REPO_ROOT), 'rev-parse', '--verify', f'{source_sha}^{{commit}}'],
+            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+        tree = subprocess.run(
+            ['git', '-C', str(_REPO_ROOT), 'rev-parse', '--verify', f'{source_sha}^{{tree}}'],
+            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', source_sha) from exc
+    return commit, tree
+
+
+def _git_blob_at_commit(source_sha: str, relative: str) -> str:
+    """Return a tracked blob only from the verified source commit.
+
+    A caller-editable portfolio and a caller-rehashed working file cannot
+    authenticate one another.  The source commit must itself contain the
+    canonical object that is currently being consumed.
+    """
+    if (not isinstance(relative, str) or not relative or relative.startswith('/') or
+            '..' in Path(relative).parts):
+        raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', relative)
+    try:
+        return subprocess.run(
+            ['git', '-C', str(_REPO_ROOT), 'rev-parse', '--verify',
+             f'{source_sha}:{relative}'],
+            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', f'{source_sha}:{relative}') from exc
+
+
+def _verified_current_source_commit(source_sha: str) -> str:
+    """Require the source commit to contain this checkout's canonical flow.
+
+    A well-formed commit id is only an object reference.  Binding it to the
+    current canonical YAML prevents a caller from placing an unrelated
+    historical or fabricated source id around an otherwise valid fixture.
+    """
+    commit, _ = _git_source_authority(source_sha)
+    canonical = _canonical_flow_path()
+    relative = str(canonical.relative_to(_REPO_ROOT))
+    try:
+        current_blob = subprocess.run(
+            ['git', '-C', str(_REPO_ROOT), 'hash-object', str(canonical)],
+            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', relative) from exc
+    if _git_blob_at_commit(commit, relative) != current_blob:
+        raise Refusal('SOURCE_AUTHORITY_STALE', source_sha)
+    return commit
+
+
+def _canonical_flow_path() -> Path:
+    return _REPO_ROOT / 'vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml'
+
+
+def _canonical_flow_authority(flow_path: Path) -> str:
+    """Require the canonical flow to be the clean tracked object, not a copy."""
+    flow_path = flow_path.resolve()
+    canonical = _canonical_flow_path().resolve()
+    if flow_path != canonical or not flow_path.is_file() or flow_path.is_symlink():
+        raise Refusal('PORTFOLIO_CANONICAL_UNAVAILABLE', str(flow_path))
+    try:
+        relative = flow_path.relative_to(_REPO_ROOT)
+        status = subprocess.run(
+            ['git', '-C', str(_REPO_ROOT), 'status', '--porcelain', '--', str(relative)],
+            check=True, capture_output=True, text=True, timeout=5)
+        blob = subprocess.run(
+            ['git', '-C', str(_REPO_ROOT), 'rev-parse', f'HEAD:{relative}'],
+            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+        observed = subprocess.run(
+            ['git', '-C', str(_REPO_ROOT), 'hash-object', str(flow_path)],
+            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refusal('PORTFOLIO_CANONICAL_UNAVAILABLE', str(flow_path)) from exc
+    if status.stdout.strip() or blob != observed:
+        raise Refusal('PORTFOLIO_CANONICAL_UNTRUSTED', str(flow_path))
+    return hashlib.sha256(flow_path.read_bytes()).hexdigest()
+
+
+def _tracked_clean_file(path: Path) -> None:
+    path = path.resolve()
+    try:
+        relative = path.relative_to(_REPO_ROOT)
+        status = subprocess.run(
+            ['git', '-C', str(_REPO_ROOT), 'status', '--porcelain', '--', str(relative)],
+            check=True, capture_output=True, text=True, timeout=5)
+        blob = subprocess.run(
+            ['git', '-C', str(_REPO_ROOT), 'rev-parse', f'HEAD:{relative}'],
+            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+        observed = subprocess.run(
+            ['git', '-C', str(_REPO_ROOT), 'hash-object', str(path)],
+            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refusal('SOURCE_AUTHORITY_UNAVAILABLE', str(path)) from exc
+    if status.stdout.strip() or blob != observed:
+        raise Refusal('SOURCE_AUTHORITY_DIRTY', str(path))
+
+
+def _local_python_imports(path: Path) -> set[Path]:
+    """Return directly imported sibling Python objects for source closure."""
+    try:
+        tree = ast.parse(path.read_text(), filename=str(path))
+    except (OSError, SyntaxError):
+        return set()
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split('.')[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            names.add(node.module.split('.')[0])
+    result = set()
+    for name in names:
+        candidate = path.parent / f'{name}.py'
+        if candidate.is_file() and not candidate.is_symlink():
+            result.add(candidate.resolve())
+    return result
+
+
+def _source_closure(paths: Mapping[str, str]) -> set[Path]:
+    closure = set()
+    pending = [Path(path).resolve() for path in paths if str(path).endswith('.py')]
+    while pending:
+        path = pending.pop()
+        if path in closure:
+            continue
+        closure.add(path)
+        pending.extend(_local_python_imports(path) - closure)
+    return closure
 
 
 def _route_pointer(receipt: Mapping[str, object]) -> str:
@@ -96,22 +289,17 @@ def _route_seal(value: Mapping[str, object]) -> str:
     return hmac.new(_ROUTE_SEAL_KEY, _hash(body).encode(), hashlib.sha256).hexdigest()
 
 
-def _register_route_issuer(authority: object) -> None:
-    """Install the route adapter's private issuer in this live process."""
-    global _ROUTE_REGISTERED_ISSUER
-    caller = inspect.currentframe().f_back if inspect.currentframe() else None
-    caller_path = Path(caller.f_code.co_filename).resolve() if caller else None
-    if caller_path not in _ROUTE_FRONTDOORS:
-        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', 'registration must originate in a route front door')
-    if (_ROUTE_REGISTERED_ISSUER is not None and
-            _ROUTE_REGISTERED_ISSUER is not authority):
-        raise Refusal('ROUTE_AUTHORITY_CONFLICT', 'route issuer already registered')
-    _ROUTE_REGISTERED_ISSUER = authority
+def _register_route_issuer(authority: object, *, _entry_capability=None) -> None:
+    """Install the route issuer after the real front door validated routing.
 
-
-def _route_authority_matches(authority: object) -> bool:
-    return authority is _ROUTE_ISSUER_TOKEN or (
-        _ROUTE_REGISTERED_ISSUER is not None and authority is _ROUTE_REGISTERED_ISSUER)
+    No frame name or path is an authority.  The top-level runner creates the
+    entry capability after parsing and route admission; callers that merely
+    compile code with a canonical ``co_filename`` cannot supply it.
+    """
+    if (_entry_capability is None or _ACTIVE_ROUTE_ENTRY_CAPABILITY is None or
+            _entry_capability is not _ACTIVE_ROUTE_ENTRY_CAPABILITY):
+        raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', 'validated live route entry required')
+    _register_route_authority(authority)
 
 
 def _register_issued_route(receipt: Mapping[str, object], *, _authority=None) -> dict:
@@ -128,6 +316,11 @@ def _register_issued_route(receipt: Mapping[str, object], *, _authority=None) ->
             value.get('authority') != 'canonical-route-authority' or
             value.get('issuer') != 'vibeic-route-frontdoor' or
             not isinstance(value.get('route_digest'), str) or
+            not re.fullmatch(r'[0-9a-f]{64}', str(value.get('route_digest'))) or
+            not re.fullmatch(r'[0-9a-f]{40}', str(value.get('source_sha'))) or
+            not re.fullmatch(r'[0-9a-f]{64}', str(value.get('project_digest'))) or
+            not re.fullmatch(r'[0-9a-f]{64}', str(value.get('request_digest'))) or
+            not re.fullmatch(r'[0-9a-f]{64}', str(value.get('current_pointer'))) or
             value.get('current_pointer') != _route_pointer(value) or
             not isinstance(value.get('issuer_seal'), str) or
             not hmac.compare_digest(value['issuer_seal'], _route_seal(value))):
@@ -136,8 +329,7 @@ def _register_issued_route(receipt: Mapping[str, object], *, _authority=None) ->
     if _hash({key: value[key] for key in value if key != 'route_digest'}) != route_digest:
         raise Refusal('ROUTE_RECEIPT_DIGEST_MISMATCH', str(value.get('ic_ip_path')))
     pointer = value['current_pointer']
-    _ROUTE_ISSUED[route_digest] = json.loads(json.dumps(value))
-    _ROUTE_CURRENT[pointer] = route_digest
+    _record_route(value)
     return json.loads(json.dumps(value))
 
 
@@ -147,6 +339,13 @@ def _issue_route_receipt(*, ic_ip_path: str, source_sha: str,
                          mode_intent: str = 'default', _authority=None) -> dict:
     if not _route_authority_matches(_authority):
         raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', 'route receipts are issued by the canonical route authority')
+    if (ic_ip_path not in ('IC', 'IP') or
+            not isinstance(source_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', source_sha) or
+            not isinstance(project_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', project_digest) or
+            not isinstance(request_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', request_digest) or
+            not isinstance(route, str) or not route.strip()):
+        raise Refusal('ROUTE_RECEIPT_INVALID', 'typed nonempty route fields are required')
+    _git_source_authority(source_sha)
     if intent_label not in ('PROGRAM_DEFAULT', 'USER_EXPLICIT_ULTRA'):
         raise Refusal('ROUTE_INTENT_INVALID', str(intent_label))
     if mode_intent not in ('default', 'ultra'):
@@ -161,56 +360,24 @@ def _issue_route_receipt(*, ic_ip_path: str, source_sha: str,
     value['current_pointer'] = _route_pointer(value)
     value['issuer_seal'] = _route_seal(value)
     value['route_digest'] = _hash(value)
-    return _register_issued_route(value, _authority=_ROUTE_ISSUER_TOKEN)
-
-
-def _issue_route_receipt_for_tests(*, ic_ip_path: str, source_sha: str,
-                                   project_digest: str, request_digest: str,
-                                   route: str = '', intent_label: str = 'PROGRAM_DEFAULT',
-                                   mode_intent: str = 'default') -> dict:
-    """Issue a receipt for neutral controller tests through the sealed issuer.
-
-    Production callers use the route adapter's private authority.  Keeping the
-    test helper separate means a direct call to ``_issue_route_receipt`` cannot
-    mint a receipt in a production process.
-    """
-    return _issue_route_receipt(
-        ic_ip_path=ic_ip_path, source_sha=source_sha,
-        project_digest=project_digest, request_digest=request_digest,
-        route=route, intent_label=intent_label, mode_intent=mode_intent,
-        _authority=_ROUTE_ISSUER_TOKEN)
+    return _register_issued_route(value, _authority=_authority)
 
 
 def _verify_route_authority(receipt: Mapping[str, object]) -> None:
     route_digest = receipt.get('route_digest')
     pointer = receipt.get('current_pointer')
     if (not isinstance(route_digest, str) or
+            not re.fullmatch(r'[0-9a-f]{64}', route_digest) or
             not isinstance(pointer, str) or
-            _ROUTE_CURRENT.get(pointer) != route_digest or
-            _ROUTE_ISSUED.get(route_digest) != dict(receipt) or
+            not re.fullmatch(r'[0-9a-f]{64}', pointer) or
+            not _verify_recorded_route(receipt) or
             not isinstance(receipt.get('issuer_seal'), str) or
             not hmac.compare_digest(receipt['issuer_seal'], _route_seal(receipt))):
         raise Refusal('ROUTE_AUTHORITY_UNAVAILABLE', str(pointer))
 
 
-def _seal(value: dict) -> dict:
-    payload = json.loads(json.dumps(value))
-    signature = hmac.new(_COMPLETION_KEY, _hash(payload).encode(), hashlib.sha256).hexdigest()
-    return dict(payload=payload, signature=signature)
-
-
 def _issued(path: Path) -> dict:
-    document = json.loads(path.read_text())
-    expected = hmac.new(_COMPLETION_KEY, _hash(document['payload']).encode(), hashlib.sha256).hexdigest()
-    if not isinstance(document.get('signature'), str) or not hmac.compare_digest(
-            expected, document['signature']):
-        raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
-    observed = _ISSUED_AUTHORITY.get(str(path))
-    if observed is None:
-        raise Refusal('ISSUED_AUTHORITY_UNAVAILABLE', str(path))
-    if json.loads(observed) != document['payload']:
-        raise Refusal('ISSUED_AUTHORITY_CHANGED', str(path))
-    return document['payload']
+    return _consume_sealed(path)
 
 
 def _relative(value: str) -> Path:
@@ -253,6 +420,10 @@ class Context:
     project_digest: str = ''
     intent_label: str = 'PROGRAM_DEFAULT'
     request_digest: str = ''
+    # Only the repository's explicit neutral test fixture may use the
+    # compatibility route.  A caller-authored ``kind=neutral-test`` mapping
+    # is not production authorization and cannot qualify or adopt.
+    test_boundary: object | None = field(default=None, repr=False, compare=False)
 
     def binding(self) -> dict:
         if not re.fullmatch(r'[0-9a-f]{40}', self.source_sha):
@@ -274,7 +445,8 @@ class Context:
             raise Refusal('IC_IP_ROUTE_MISMATCH', self.step_id)
         route_kind = self.route_receipt.get('kind')
         if route_kind == 'neutral-test':
-            if (self.ic_ip_path != 'IC' or self.project_digest or
+            if (self.test_boundary is not _TEST_CONTEXT_TOKEN or
+                    self.ic_ip_path != 'IC' or self.project_digest or
                     self.request_digest or self.intent_label != 'PROGRAM_DEFAULT'):
                 raise Refusal('ROUTE_RECEIPT_INVALID', self.step_id)
         elif route_kind == 'issued-route':
@@ -303,6 +475,7 @@ class Context:
                                    else 'default')):
                 raise Refusal('ROUTE_INTENT_MISMATCH', self.step_id)
             _verify_route_authority(self.route_receipt)
+            _git_source_authority(self.source_sha)
         else:
             raise Refusal('ROUTE_RECEIPT_INVALID', self.step_id)
         if not self.inputs or not self.objective or not self.required_gates:
@@ -403,6 +576,7 @@ class Registry:
             raise Refusal('ADAPTER_INCOMPLETE', adapter.arm_id)
         if not adapter.qualification_evidence:
             raise Refusal('QUALIFICATION_UNBOUND', adapter.arm_id)
+        _verified_current_source_commit(adapter.source_sha)
         executable_paths = []
         for component in adapter.components:
             binary = shutil.which(component.argv[0])
@@ -411,11 +585,8 @@ class Registry:
         known_tool = adapter.tool_id in ('librelane', 'openroad', 'openroad_fork')
         if known_tool:
             expected = 'librelane' if adapter.tool_id == 'librelane' else 'openroad'
-            fixture_simulation = (
-                str(adapter.tool_version) == _sys.version and
-                any('execution_modes_tool.py' in str(p) for p in adapter.source_files))
             if (not executable_paths or
-                    any(expected not in p.name.lower() for p in executable_paths)) and not fixture_simulation:
+                    any(expected not in p.name.lower() for p in executable_paths)):
                 raise Refusal('TOOL_ID_UNBOUND', adapter.arm_id)
             version_text = str(adapter.tool_version).lower()
             if any(token in version_text for token in ('fabricated', 'fake', 'fixture', 'placeholder')):
@@ -439,6 +610,10 @@ class Registry:
             p = Path(path)
             if not p.is_file() or p.is_symlink() or digest(p) != expected:
                 raise Refusal('ADAPTER_SOURCE_MISMATCH', path)
+        declared_sources = {Path(path).resolve() for path in adapter.source_files}
+        missing_dependencies = _source_closure(adapter.source_files) - declared_sources
+        if missing_dependencies:
+            raise Refusal('ADAPTER_SOURCE_CLOSURE_INCOMPLETE', str(sorted(missing_dependencies)[0]))
         for component in adapter.components:
             _relative(component.name)
             if len(Path(component.name).parts) != 1 or not component.argv or (
@@ -452,7 +627,20 @@ class Registry:
             raise Refusal('VALIDATOR_SOURCE_UNBOUND', adapter.arm_id)
         if len({c.name for c in adapter.components}) != len(adapter.components):
             raise Refusal('DUPLICATE_COMPONENT', adapter.arm_id)
-        self._adapters[adapter.arm_id] = adapter
+        # The caller's dataclass may be frozen while its nested mappings remain
+        # mutable.  Publish an immutable registration snapshot so a later
+        # ``arm.source_files[path] = new_digest`` cannot rehash authority.
+        snapshot = replace(
+            adapter,
+            source_files=MappingProxyType(dict(adapter.source_files)),
+            engine_families=tuple(adapter.engine_families),
+            components=tuple(adapter.components),
+            required_outputs=tuple(adapter.required_outputs),
+            objective=MappingProxyType(dict(adapter.objective)),
+            output_contract=MappingProxyType({k: tuple(v)
+                                              for k, v in adapter.output_contract.items()}),
+        )
+        self._adapters[adapter.arm_id] = snapshot
 
     def adapters(self, step_id: str) -> list[Adapter]:
         return [a for a in self._adapters.values() if a.step_id == step_id]
@@ -466,7 +654,7 @@ def load_portfolio(path: Path | None = None) -> dict:
 
 
 def _canonical_flow_requirements() -> tuple[str, dict[str, dict]]:
-    flow_path = Path(__file__).resolve().parents[1] / 'flow' / 'phase1_phase2_phase3.yaml'
+    flow_path = _canonical_flow_path()
     try:
         import yaml
         flow = yaml.safe_load(flow_path.read_text())
@@ -474,7 +662,7 @@ def _canonical_flow_requirements() -> tuple[str, dict[str, dict]]:
         raise Refusal('PORTFOLIO_CANONICAL_UNAVAILABLE', str(flow_path)) from exc
     if not isinstance(flow, dict) or not isinstance(flow.get('steps'), list):
         raise Refusal('PORTFOLIO_CANONICAL_INVALID', str(flow_path))
-    flow_sha = hashlib.sha256(flow_path.read_bytes()).hexdigest()
+    flow_sha = _canonical_flow_authority(flow_path)
     requirements = {}
     for step in flow['steps']:
         step_id = str(step.get('id'))
@@ -513,8 +701,25 @@ def _validate_portfolio(data: dict) -> None:
         source = ((row.get('current_default') or {}).get('source') or {})
         expected_file = 'vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml'
         if (source.get('canonical_file') != expected_file or
-                str(source.get('canonical_step_id')) != str(row.get('id'))):
+                str(source.get('canonical_step_id')) != str(row.get('id')) or
+                not re.fullmatch(r'[0-9a-f]{40}', str(source.get('sha'))) or
+                source.get('sha') != meta.get('source_commit')):
             raise Refusal('PORTFOLIO_SOURCE_UNBOUND', str(row.get('id')))
+        source_commit = _verified_current_source_commit(str(source['sha']))
+        canonical_path = _canonical_flow_path()
+        relative = str(canonical_path.relative_to(_REPO_ROOT))
+        try:
+            current_blob = subprocess.run(
+                ['git', '-C', str(_REPO_ROOT), 'hash-object', str(canonical_path)],
+                check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise Refusal('PORTFOLIO_CANONICAL_UNAVAILABLE', relative) from exc
+        if (_git_blob_at_commit(source_commit, relative) != current_blob or
+                source_commit != meta.get('source_commit')):
+            raise Refusal('PORTFOLIO_SOURCE_UNBOUND', str(row.get('id')))
+        for program in source.get('programs') or ():
+            program_path = _REPO_ROOT / 'vibe-ic-marketplace/plugins/vibe-ic/programs' / f'{program}.py'
+            _tracked_clean_file(program_path)
         if not req['gates'].issubset(set(row.get('mandatory_gate_programs') or ())):
             raise Refusal('PORTFOLIO_GATES_STALE', str(row.get('id')))
         declared_outputs = set(row.get('required_output_contract') or ())
@@ -538,6 +743,13 @@ class Controller:
         self.registry, self.budget = registry, budget
         self.portfolio = portfolio if portfolio is not None else load_portfolio()
         _validate_portfolio(self.portfolio)
+
+    def _validate_live_portfolio(self, plan: Mapping[str, object] | None = None) -> None:
+        _validate_portfolio(self.portfolio)
+        if (plan is not None and not self.portfolio.get('meta', {}).get('test_only') and
+                (plan.get('public_portfolio_sha256') != _hash(self.portfolio) or
+                 plan.get('public_portfolio') != self.portfolio)):
+            raise Refusal('PORTFOLIO_AUTHORITY_CHANGED', str(plan.get('step_id')))
 
     def _admission(self, adapter: Adapter, context: Context) -> str:
         if adapter.role != 'producer':
@@ -566,10 +778,15 @@ class Controller:
             if binary:
                 path = Path(binary).resolve()
                 executables.append((str(path), digest(path)))
-        return (adapter.tool_id, adapter.tool_version,
-                tuple(sorted((str(Path(p).resolve()), v)
-                             for p, v in adapter.source_files.items())),
-                tuple(executables))
+        # Diversity is based on the implementation object and the exact
+        # component invocation, never on arm/tool/version/family labels a
+        # caller can rewrite after registration.
+        invocations = tuple(
+            (str(Path(shutil.which(c.argv[0])).resolve()), *c.argv[1:])
+            if shutil.which(c.argv[0]) else tuple(c.argv)
+            for c in adapter.components)
+        return (tuple(sorted(adapter.source_files.values())),
+                tuple(executables), invocations)
 
     @staticmethod
     def acceptance_contract(context: Context, step: Mapping[str, object]) -> dict:
@@ -590,6 +807,7 @@ class Controller:
 
     def plan(self, context: Context, execution_mode: str | None = None,
              superiority: Superiority | None = None) -> dict:
+        self._validate_live_portfolio()
         route_mode = context.route_receipt.get('mode_intent')
         if (execution_mode is None and context.intent_label == 'USER_EXPLICIT_ULTRA'):
             selected_mode = 'ultra-mode'
@@ -750,8 +968,7 @@ class Controller:
         _write(output / 'frozen-work.json', frozen)
         plan['frozen_work_digest'] = digest(output / 'frozen-work.json')
         _write(output / 'plan.json', plan)
-        _ISSUED_AUTHORITY[str(output / 'issued-plan.json')] = json.dumps(plan)
-        _write(output / 'issued-plan.json', _seal(plan))
+        _write(output / 'issued-plan.json', _issue_sealed(output / 'issued-plan.json', plan))
         if not plan['arms']:
             comparison = self._comparison_receipt(output, plan, {})
             _write(output / 'result.json', plan)
@@ -814,7 +1031,8 @@ class Controller:
                               reviewer='program-default-controller',
                               rationale='Planner priority selected the sole default arm.')
                 try:
-                    adopted = self.adopt(context, output, choice)
+                    adopted = self.adopt(context, output, choice,
+                                         _candidate_statuses=candidate_statuses)
                 except Refusal as exc:
                     refusal = json.loads((output / 'adoption.json').read_text())
                     refusal.update(candidate_statuses=candidate_statuses,
@@ -822,9 +1040,6 @@ class Controller:
                                    selected=None, reason=exc.code)
                     _write(output / 'result.json', refusal)
                     return refusal
-                adopted.update(candidate_statuses=candidate_statuses,
-                               mode=plan['mode'], mode_intent=plan['mode_intent'])
-                self._write_adoption(output, adopted)
                 _write(output / 'result.json', adopted)
                 return adopted
             # A measured failure or an unavailable result remains terminal and
@@ -836,8 +1051,8 @@ class Controller:
                            comparison_digest=comparison['digest'])
             _write(output / 'result.json', summary)
             return summary
-        terminal_status = ('AWAITING_AI_SELECTION' if comparison['eligible_arms']
-                           else ('FAIL' if 'FAIL' in candidate_statuses.values()
+        terminal_status = ('FAIL' if 'FAIL' in candidate_statuses.values()
+                           else ('AWAITING_AI_SELECTION' if comparison['eligible_arms']
                                  else 'NOT_MEASURED'))
         summary = dict(run_id=run_id,
                        status=terminal_status,
@@ -915,12 +1130,12 @@ class Controller:
                                                    eligible_only=True,
                                                    ordered_by='objective.metric',
                                                    tie_break='plan.arm_order'),
-                          status=('AWAITING_AI_SELECTION'
-                                  if plan['mode'] == 'ultra-mode' and eligible
-                                  else ('PROGRAM_DEFAULT_READY' if eligible else 'NOT_MEASURED')))
+                          status=('FAIL' if any(item['status'] == 'FAIL' for item in ordered)
+                                  else ('AWAITING_AI_SELECTION'
+                                        if plan['mode'] == 'ultra-mode' and eligible
+                                        else ('PROGRAM_DEFAULT_READY' if eligible else 'NOT_MEASURED'))))
         _write(root / 'comparison.json', comparison)
-        _ISSUED_AUTHORITY[str(root / 'issued-comparison.json')] = json.dumps(comparison)
-        _write(root / 'issued-comparison.json', _seal(comparison))
+        _write(root / 'issued-comparison.json', _issue_sealed(root / 'issued-comparison.json', comparison))
         comparison['digest'] = digest(root / 'comparison.json')
         return comparison
 
@@ -972,6 +1187,8 @@ class Controller:
                     raise Refusal('EXECUTABLE_UNBOUND', argv[0])
                 argv[0] = str(Path(executable).resolve())
                 record = dict(component=component.name, argv=argv, rc=None,
+                              executable_path=argv[0],
+                              executable_sha256=digest(Path(argv[0])),
                               started_ns=time.monotonic_ns())
                 receipt['processes'].append(record)
                 stdout = directory / (component.name + '.stdout')
@@ -1024,6 +1241,20 @@ class Controller:
             receipt['evidence'] = asdict(evidence)
             receipt['status'] = evidence.verdict
             receipt['reason'] = 'ADAPTER_EVIDENCE'
+            output_digest = _hash(receipt['evidence'].get('outputs', {}))
+            receipt['gate_receipts'] = {
+                process['component']: dict(
+                    gate=process['component'], argv=list(process['argv']),
+                    argv_sha256=_hash(process['argv']),
+                    executable_path=process.get('executable_path'),
+                    executable_sha256=process.get('executable_sha256'),
+                    source_sha=arm.source_sha, tool_id=arm.tool_id,
+                    tool_version=arm.tool_version,
+                    source_manifest_sha256=_hash(dict(arm.source_files)),
+                    inputs=dict(plan['binding']['inputs']), rc=process['rc'],
+                    output_digest=output_digest)
+                for process in receipt['processes']
+            }
             self._eligible(receipt, context, arm)
             receipt['status'] = 'ELIGIBLE'
         except Refusal as exc:
@@ -1039,10 +1270,11 @@ class Controller:
         # does not grant PASS or replace a failed/unmeasured output consumer.
         completion = {k: receipt[k] for k in ('run_id', 'arm_id', 'binding',
                       'adapter', 'processes', 'input_root', 'output_root')}
+        completion['evidence'] = receipt.get('evidence')
+        completion['gate_receipts'] = receipt.get('gate_receipts')
         completion.update(actual_status=receipt['status'], actual_reason=receipt['reason'],
                           ended_ns=receipt['ended_ns'], run_root=str(root))
-        _ISSUED_AUTHORITY[str(directory / 'issued-completion.json')] = json.dumps(completion)
-        _write(directory / 'issued-completion.json', _seal(completion))
+        _write(directory / 'issued-completion.json', _issue_sealed(directory / 'issued-completion.json', completion))
         _write(directory / 'receipt.json', receipt)
         return receipt
 
@@ -1062,6 +1294,9 @@ class Controller:
                 p.get('rc') != 0 or p.get('stop_reason') or not p.get('pid') or
                 not p.get('ended_ns') for p in processes):
             raise Refusal('ISSUED_EXECUTION_INCOMPLETE', arm.arm_id)
+        if (completion.get('evidence') != receipt.get('evidence') or
+                completion.get('gate_receipts') != receipt.get('gate_receipts')):
+            raise Refusal('EVIDENCE_CHANGED', arm.arm_id)
 
     def _current_admission(self, context: Context, plan: dict, arm: Adapter) -> None:
         if self._admission(arm, context) != 'READY':
@@ -1074,8 +1309,8 @@ class Controller:
         if arm.arm_id not in current['arms']:
             raise Refusal('CURRENT_POLICY_REJECTED', arm.arm_id)
 
-    @staticmethod
-    def _verify_receipt_chain(root: Path, plan: dict, context: Context) -> dict:
+    def _verify_receipt_chain(self, root: Path, plan: dict, context: Context) -> dict:
+        self._validate_live_portfolio(plan)
         frozen_path = root / 'frozen-work.json'
         comparison_path = root / 'comparison.json'
         if not frozen_path.is_file() or not comparison_path.is_file():
@@ -1127,6 +1362,9 @@ class Controller:
                 raise Refusal('COMPARISON_ELIGIBILITY_CHANGED', str(arm_id))
         if comparison.get('eligible_arms') != eligible:
             raise Refusal('INCOMPLETE_ARM_SET', context.step_id)
+        if (comparison.get('status') == 'FAIL' and
+                any(row.get('status') == 'FAIL' for row in rows)):
+            raise Refusal('GATE_FAIL', context.step_id)
         return dict(frozen=frozen, comparison=comparison,
                     comparison_digest=digest(comparison_path), eligible=eligible)
 
@@ -1151,8 +1389,7 @@ class Controller:
         manifest = dict(generation=generation, directory=str(target),
                         run_id=receipt['run_id'], arm_id=receipt['arm_id'],
                         binding=receipt['binding'], outputs=hashes)
-        _ISSUED_AUTHORITY[str(target / 'manifest.json')] = json.dumps(manifest)
-        _write(target / 'manifest.json', _seal(manifest))
+        _write(target / 'manifest.json', _issue_sealed(target / 'manifest.json', manifest))
         return manifest
 
     @staticmethod
@@ -1200,6 +1437,25 @@ class Controller:
             raise Refusal('EVIDENCE_UNBOUND', arm.arm_id)
         gates = evidence.get('gates', {})
         verdict = evidence.get('verdict')
+        gate_receipts = receipt.get('gate_receipts') or {}
+        for gate in context.required_gates:
+            gate_receipt = gate_receipts.get(gate)
+            if not isinstance(gate_receipt, dict):
+                raise Refusal('GATE_EXECUTION_UNBOUND', gate)
+            matching = next((process for process in processes
+                             if process.get('component') == gate), None)
+            if (matching is None or gate_receipt.get('argv') != matching.get('argv') or
+                    gate_receipt.get('argv_sha256') != _hash(matching.get('argv')) or
+                    gate_receipt.get('executable_path') != matching.get('executable_path') or
+                    gate_receipt.get('executable_sha256') != matching.get('executable_sha256') or
+                    gate_receipt.get('source_sha') != arm.source_sha or
+                    gate_receipt.get('tool_id') != arm.tool_id or
+                    gate_receipt.get('tool_version') != arm.tool_version or
+                    gate_receipt.get('source_manifest_sha256') != _hash(dict(arm.source_files)) or
+                    gate_receipt.get('inputs') != binding['inputs'] or
+                    gate_receipt.get('rc') != 0 or
+                    gate_receipt.get('output_digest') != _hash(evidence.get('outputs', {}))):
+                raise Refusal('GATE_EXECUTION_UNBOUND', gate)
         if verdict == 'FAIL' or any(gates.get(k) == 'FAIL' for k in context.required_gates):
             raise Refusal('GATE_FAIL', arm.arm_id)
         if verdict != 'PASS' or any(gates.get(k) != 'PASS' for k in context.required_gates):
@@ -1222,7 +1478,8 @@ class Controller:
         if type(value) not in (int, float) or not math.isfinite(value):
             raise Refusal('OBJECTIVE_EVIDENCE_INVALID', arm.arm_id)
 
-    def adopt(self, context: Context, root: Path, choice: Mapping[str, object] | None) -> dict:
+    def adopt(self, context: Context, root: Path, choice: Mapping[str, object] | None,
+              *, _candidate_statuses: Mapping[str, str] | None = None) -> dict:
         """AI must supply an explicit receipt-bound decision; no rc0/PASS shortcut.
 
         All evidence is reconsumed at adoption, including the adapter's actual
@@ -1232,6 +1489,25 @@ class Controller:
         root = Path(root).resolve()
         adoption = dict(run_id=None, status='REFUSED', selected=None,
                         ai_choice=dict(choice) if choice is not None else None)
+        published = False
+
+        def publish(value: dict) -> None:
+            """Issue adoption exactly once from this live controller call.
+
+            There is deliberately no importable writer.  Re-signing an
+            existing path would let a caller co-update a selected manifest,
+            winner and adoption document after the original producer receipt.
+            The sealed store rejects any second payload for the same path.
+            """
+            nonlocal published
+            if published:
+                raise Refusal('ISSUED_AUTHORITY_REISSUE', str(root))
+            _write(root / 'adoption.json', value)
+            _write(root / 'program_adoption.json', value)
+            _write(root / 'issued-adoption.json',
+                   _issue_sealed(root / 'issued-adoption.json', value))
+            published = True
+
         try:
             plan = json.loads((root / 'plan.json').read_text())
             adoption['run_id'] = plan['run_id']
@@ -1246,6 +1522,24 @@ class Controller:
             path = root / str(arm_id) / 'receipt.json'
             if not path.is_file() or digest(path) != choice['receipt_sha256']:
                 raise Refusal('AI_RECEIPT_DIGEST_MISMATCH', str(arm_id))
+            # A default run may already have completed the program adoption
+            # chain.  Re-consuming that immutable chain is allowed; issuing a
+            # second payload for the same path is not.  Only take this fast
+            # path when all three public adoption documents still equal the
+            # original sealed payload.
+            adoption_path = root / 'adoption.json'
+            issued_path = root / 'issued-adoption.json'
+            if adoption_path.is_file() and issued_path.is_file():
+                try:
+                    existing = _issued(issued_path)
+                    current = json.loads(adoption_path.read_text())
+                    program = json.loads((root / 'program_adoption.json').read_text())
+                except (OSError, ValueError, KeyError):
+                    existing = None
+                if (isinstance(existing, dict) and existing.get('status') == 'ADOPTED' and
+                        current == existing and program == existing):
+                    self.verify_adoption(context, root)
+                    return existing
             receipt = json.loads(path.read_text())
             arm = next((a for a in self.registry.adapters(context.step_id) if a.arm_id == arm_id), None)
             if arm is None or receipt.get('run_id') != plan['run_id'] or receipt.get('status') != 'ELIGIBLE':
@@ -1301,6 +1595,8 @@ class Controller:
             # validator/transform that touched the selected generation and
             # leaves no successful adoption receipt in that case.
             self._generation_current(generation)
+            if generation.get('outputs') != receipt['evidence'].get('outputs'):
+                raise Refusal('SELECTED_GENERATION_UNBOUND', str(arm_id))
             adoption.update(status='ADOPTED', selected=arm_id,
                             evidence=receipt['evidence'],
                             independence=plan['independence'],
@@ -1311,39 +1607,51 @@ class Controller:
                                                   binding=context.binding(),
                                                   evidence=final_evidence,
                                                   status='PASS'))
-            self._write_adoption(root, adoption)
+            if _candidate_statuses is not None:
+                adoption.update(candidate_statuses=dict(_candidate_statuses),
+                                mode=plan['mode'], mode_intent=plan['mode_intent'])
+            publish(adoption)
             try:
                 self._generation_current(generation)
             except Refusal:
                 adoption.update(status='REFUSED', selected=None,
                                 reason='SELECTED_GENERATION_CHANGED',
                                 detail='selected bytes changed during adoption publication')
-                self._write_adoption(root, adoption)
                 raise
         except Refusal as exc:
             adoption.update(reason=exc.code, detail=str(exc))
-            try:
-                self._write_adoption(root, adoption)
-            except OSError as recording:
-                raise Refusal('ADOPTION_RECORD_UNAVAILABLE', f'{exc}; {recording}') from recording
+            if not published:
+                try:
+                    publish(adoption)
+                except Refusal as recording:
+                    if recording.code == 'ISSUED_AUTHORITY_REISSUE':
+                        # Preserve a visible refusal for a second consumer
+                        # attempt without replacing the original issued PASS.
+                        _write(root / 'adoption.json', adoption)
+                        _write(root / 'program_adoption.json', adoption)
+                    else:
+                        raise Refusal('ADOPTION_RECORD_UNAVAILABLE',
+                                      f'{exc}; {recording}') from recording
+                except OSError as recording:
+                    raise Refusal('ADOPTION_RECORD_UNAVAILABLE', f'{exc}; {recording}') from recording
             raise
         except (OSError, ValueError, KeyError, TypeError) as exc:
             adoption.update(status='REFUSED', selected=None,
                             reason='INVALID_ADOPTION_EVIDENCE', detail=str(exc))
-            try:
-                self._write_adoption(root, adoption)
-            except OSError as recording:
-                raise Refusal('ADOPTION_RECORD_UNAVAILABLE', f'{exc}; {recording}') from recording
+            if not published:
+                try:
+                    publish(adoption)
+                except Refusal as recording:
+                    if recording.code == 'ISSUED_AUTHORITY_REISSUE':
+                        _write(root / 'adoption.json', adoption)
+                        _write(root / 'program_adoption.json', adoption)
+                    else:
+                        raise Refusal('ADOPTION_RECORD_UNAVAILABLE',
+                                      f'{exc}; {recording}') from recording
+                except OSError as recording:
+                    raise Refusal('ADOPTION_RECORD_UNAVAILABLE', f'{exc}; {recording}') from recording
             raise Refusal('INVALID_ADOPTION_EVIDENCE', str(exc)) from exc
         return adoption
-
-    @staticmethod
-    def _write_adoption(root: Path, adoption: dict) -> None:
-        """Publish the program-adoption receipt and its live issuer witness."""
-        _write(root / 'adoption.json', adoption)
-        _write(root / 'program_adoption.json', adoption)
-        _ISSUED_AUTHORITY[str(root / 'issued-adoption.json')] = json.dumps(adoption)
-        _write(root / 'issued-adoption.json', _seal(adoption))
 
     def verify_adoption(self, context: Context, root: Path) -> dict:
         """Reconsume a completed adoption chain without changing project bytes."""
@@ -1392,6 +1700,10 @@ class Controller:
                 Path(receipt.get('output_root', '')).resolve() != root / str(arm_id) / 'outputs' or
                 Path(receipt.get('input_root', '')).resolve() != root / str(arm_id) / 'inputs'):
             raise Refusal('PROGRAM_ADOPTION_EXECUTION_INVALID', context.step_id)
+        original_outputs = (receipt.get('evidence') or {}).get('outputs')
+        if (winner.get('artifact_outputs') != original_outputs or
+                generation.get('outputs') != original_outputs):
+            raise Refusal('PROGRAM_ADOPTION_GENERATION_UNBOUND', context.step_id)
         self._execution_authority(root, plan, receipt, arm)
         self._current_admission(context, plan, arm)
         self._eligible(receipt, context, arm)
