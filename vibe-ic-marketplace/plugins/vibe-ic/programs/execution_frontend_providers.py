@@ -11,7 +11,7 @@ from typing import Callable
 
 ROWS = ('D1','0.5ic','1','2','3','4','5','6','7','8','10','11','FS1','DT1','12','13','DT2','DT3','P0')
 ROW_CONTRACTS = {
- 'D1':('input/docs','phase1/generated_docs'), '0.5ic':('input','phase1/generated_docs'),
+ 'D1':('input/docs','reports/phase1/doc_presence.json'), '0.5ic':('input','phase1/generated_docs'),
  '1':('phase1/generated_docs','phase2/stage1/rtl'), '2':('phase2/stage1/rtl','reports/phase2/lint'),
  '3':('phase2/stage1/rtl','reports/phase2/cdc'), '4':('phase2/stage1/rtl','phase2/stage1/sim/results.xml'),
  '5':('phase2/stage1/rtl','phase2/stage1/formal/results.json'), '6':('phase2/stage1/rtl','phase2/stage1/fpga'),
@@ -35,18 +35,25 @@ class FrontendProvider:
     step_id: str; factory: Callable; inputs: tuple[str,...]; outputs: tuple[str,...]
     downstream: str; applicability: str; engines: tuple[str,...]; default_rank: int
 
-CALLABLES = {r: ('execution_frontend_providers', 'produce') for r in ROWS}
+CALLABLES = {r: None for r in ROWS}
+CALLABLES['D1'] = ('phase1_doc_presence_check', 'check')
 
 def _produce(step_id, project, **kwargs):
-    """Execute the real source boundary: consume one declared input and emit a receipt."""
+    """Execute only a bound current-main producer; absent routes refuse."""
     project = Path(project)
     source = project / ROW_CONTRACTS[step_id][0]
+    callable_id = CALLABLES.get(step_id)
+    if callable_id is None: return ProviderResult(step_id, 'NOT_IMPLEMENTED', 'no compatible current-main callable bound')
     if not source.exists(): return ProviderResult(step_id, 'NOT_IMPLEMENTED', f'missing input: {source}')
-    out = project / 'reports' / 'frontend' / f'{step_id.replace(".", "_")}.json'
+    out = project / ROW_CONTRACTS[step_id][1]
     out.parent.mkdir(parents=True, exist_ok=True)
-    payload = {'schema':'frontend_provider_receipt/1','step_id':step_id,'producer':CALLABLES[step_id],
-               'input':str(source.relative_to(project)),'input_sha256':_tree_sha(source),
-               'output_contract':ROW_CONTRACTS[step_id][1],'verdict':'NOT_MEASURED'}
+    if step_id == 'D1':
+        from phase1_doc_presence_check import check
+        findings = check(source, strict=False)
+        payload = {'schema':'phase1_doc_presence/1','step_id':step_id,'producer':callable_id,
+                   'input':str(source.relative_to(project)),'input_sha256':_tree_sha(source),
+                   'findings':[getattr(f,'__dict__',str(f)) for f in findings], 'verdict':'NOT_MEASURED'}
+    else: return ProviderResult(step_id, 'NOT_IMPLEMENTED', 'no compatible current-main callable bound')
     out.write_text(json.dumps(payload, sort_keys=True)+'\n')
     return ProviderResult(step_id, 'NOT_MEASURED', 'source boundary executed; native/EDA qualification not measured', (str(out.relative_to(project)),))
 
@@ -73,15 +80,16 @@ def register_factories(registry):
     """Register real source adapters in the existing Registry."""
     if not hasattr(registry, 'register'): raise TypeError('registry must provide register')
     from execution_modes import Adapter, Component, Evidence, digest
-    source = str(Path(__file__).resolve()); py = str(Path(sys.executable).resolve()); sha='0'*40
+    source = str(Path(__file__).resolve()); py = str(Path(shutil.which('python3') or sys.executable).resolve()); repo=next(p for p in Path(__file__).resolve().parents if (p/'.git').exists()); sha=__import__('subprocess').check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
     for row,p in PROVIDERS.items():
+        if CALLABLES[row] is None: continue
         def validate(project, facts, _row=row):
             result=_produce(_row, Path(project));
             if not result.outputs: raise ValueError(result.reason)
             output=Path(project)/result.outputs[0]
             return Evidence(facts, 'NOT_MEASURED', {'source_boundary':'NOT_MEASURED'}, {result.outputs[0]:digest(output)}, detail=result.reason)
-        registry.register(Adapter('frontend_'+row.replace('.','_'),'source-bound',row,sha,{source:digest(Path(source)),py:digest(Path(py))},'python-source',p.engines,(Component('python',('python3',)),),validate,(f'reports/frontend/{row.replace(".","_")}.json',),{'input':list(p.inputs)},qualification_evidence='source boundary only; not native qualification',available=row!='6',availability_reason='FPGA hardware absent' if row=='6' else '',output_contract={'source_boundary':(f'reports/frontend/{row.replace(".","_")}.json',)}))
-    return tuple(PROVIDERS)
+        registry.register(Adapter('frontend_'+row.replace('.','_'),'phase1-doc-presence',row,sha,{source:digest(Path(source)),py:digest(Path(py))},'current-main',p.engines,(Component('python',('python3',)),),validate,(ROW_CONTRACTS[row][1],),{},qualification_evidence='source callable bound; native qualification not measured',output_contract={'canonical':(ROW_CONTRACTS[row][1],)}))
+    return tuple(r for r in PROVIDERS if CALLABLES[r] is not None)
 
 def dedupe_by_engine():
     result={}
