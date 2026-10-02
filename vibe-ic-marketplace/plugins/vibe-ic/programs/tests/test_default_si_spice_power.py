@@ -93,11 +93,11 @@ def project(tmp_path):
     lib = write(p / 'fixture_pdk/neutral/neutral.lib', 'library(neutral_typ) { default_operating_conditions: typ; }\n')
     corner = 'nom_typ'
     guest = '/pdk/neutral/neutral.lib'
-    write(folder / corner / 'sta.log', f"SOURCE_FIXTURE_ONLY: Reading cell library for the '{corner}' corner at '{guest}'\n")
+    write(folder / corner / 'sta.log', f"SOURCE_FIXTURE_ONLY\nReading cell library for the '{corner}' corner at '{guest}'\n")
     write(folder / corner / 'power.rpt', POWER)
     config = p / 'phase3/librelane/22-config/OpenROAD.STAPostPNR.json'
     raw = json.loads(config.read_text())
-    raw['LIB'] = {'*': [guest]}
+    raw['CELL_LIBS'] = {'*': [guest]}
     put(config, raw)
     put(folder / 'config.json', raw)
     fp = json.loads((folder / 'input_fingerprint.json').read_text())
