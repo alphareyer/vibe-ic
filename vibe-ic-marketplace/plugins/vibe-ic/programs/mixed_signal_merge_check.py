@@ -18,7 +18,8 @@ Behaviour
   no A+D top to merge), `BLOCKED_BY_UPSTREAM` when it does and the merge
   producer has not run. See the note above `main` for the measurement.
 * WAIVED (rc=0) — `waivers.json` declares step waived (evidence + ticket).
-* PASS (rc=0) — merged GDS present AND top-level LVS verdict PASS.
+* PASS (rc=0) — current typed M1 receipt binds inputs/output/execution AND
+  a bound top-level LVS verdict PASS. Unbound historical PASS refuses.
 * FAIL (rc=1) — merged GDS present but top-level LVS missing or FAIL
   (presence is not substance).
 
@@ -154,6 +155,8 @@ def main(argv=None):
             if cand.is_file():
                 try:
                     top_lvs = json.loads(cand.read_text(errors="replace"))
+                    if not isinstance(top_lvs, dict):
+                        top_lvs = {"verdict": "UNPARSEABLE"}
                 except (OSError, ValueError):
                     top_lvs = {"verdict": "UNPARSEABLE"}
                 break
@@ -167,11 +170,16 @@ def main(argv=None):
                                       "claim without LVS is presence, "
                                       "not substance (v0.2.84)")}]
         elif str(top_lvs.get("verdict")) == "PASS":
-            verdict, rc = "PASS", 0
-            findings = [{"severity": "INFO", "rule": "MERGE_LVS_OK",
-                          "message": ("merged GDS present + top-level "
-                                      "netgen LVS PASS "
-                                      f"({top_lvs.get('lvs_report', '?')})")}]
+            from mixed_signal_top_lvs_run import validate_current_receipt
+            stale = validate_current_receipt(project, top_lvs)
+            if stale:
+                verdict, rc = "FAIL", 1
+                findings = [{"severity": "ERROR", "rule": "MERGE_NOT_CURRENT",
+                             "message": stale}]
+            else:
+                verdict, rc = "PASS", 0
+                findings = [{"severity": "INFO", "rule": "MERGE_LVS_OK",
+                             "message": "current M1 merge receipt + bound top-level netgen LVS PASS"}]
         elif str(top_lvs.get("verdict")) == "SKIP":
             # vibe-ic#614 — a SKIP means NO COMPARISON WAS PERFORMED, and this
             # branch used to publish it as "the merged layout does not match

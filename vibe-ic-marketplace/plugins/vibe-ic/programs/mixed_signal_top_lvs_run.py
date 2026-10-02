@@ -6,8 +6,8 @@ What it does (chip-AGNOSTIC; PDK paths derived from --pdk):
   1. MERGE: digital sign-off GDS + every analog hardmacro GDS into
      `phase3/mixed_signal/top_merged.gds` via a KLayout batch script
      (cells coexist in one layout; the digital DEF's macro instances
-     resolve against the merged cell names). Skipped when the merged
-     GDS already exists.
+     resolve against the merged cell names). Regenerated on every invocation;
+     the current inputs, placement and output are bound in an M1 receipt.
   2. EXTRACT: Magic `extract all` + `ext2spice lvs` (hierarchy
      preserved — macros stay subckts) on the merged GDS, with the
      PDK's own magicrc.
@@ -39,8 +39,8 @@ a wasted round; a stale PASS carried the same way is a false clean by
 the identical mechanism. Each tool step now requires its OWN log to
 have been (re)written by THIS invocation and to carry the completion
 marker the tool prints on success, and `compared` is set from that
-rather than assumed. A reused `top_merged.gds` is reported by name in
-`merge_provenance` instead of passing as this run's own work.
+rather than assumed. The merged GDS is regenerated; a receipt binds its
+bytes to the current subject, inputs, placement and KLayout execution.
 
 ENFORCEMENT: advisory
   This is a PRODUCER, not a verdict. It is invoked in M1's
@@ -64,10 +64,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shlex
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -316,6 +318,11 @@ def own_shapes(ly, name):
 
 ly = pya.Layout()
 ly.read(os.environ["DIGITAL_GDS"])
+design_top = os.environ["DESIGN_TOP"]
+digital_tops = [ly.cell(i).name for i in ly.each_top_cell()]
+if digital_tops != [design_top]:
+    print("KLAYOUT_MERGE_WRONG_DIGITAL_TOP", digital_tops, design_top)
+    raise SystemExit(3)
 
 record = []
 for g in os.environ["MACRO_GDS"].split(";"):
@@ -325,6 +332,10 @@ for g in os.environ["MACRO_GDS"].split(";"):
     probe = pya.Layout()
     probe.read(g)
     tops = [probe.cell(i).name for i in probe.each_top_cell()]
+    expected = os.path.splitext(os.path.basename(g))[0]
+    if tops != [expected] or not any(own_shapes(probe, c.name) for c in probe.each_cell()):
+        print("KLAYOUT_MERGE_WRONG_MACRO_CELL", g, tops, expected)
+        raise SystemExit(3)
     for name in tops:
         before = own_shapes(ly, name)
         if before is None:
@@ -332,12 +343,17 @@ for g in os.environ["MACRO_GDS"].split(";"):
         elif before == 0:
             action = "filled"         # an abstract placeholder — today's intent
         else:
-            action = "kept_digital"   # already a real body: reading would double it
+            action = "replaced_digital"   # replace an older embedded A8 view without appending
         record.append({"macro": name, "file": g, "action": action,
                        "shapes_before": before})
-    if all(r["action"] != "kept_digital"
-           for r in record if r["file"] == g):
-        ly.read(g)
+    # Replace the consumed macro hierarchy from the current A8 view. Merely
+    # retaining a nonempty digital body can retain an older macro generation.
+    # copy_tree preserves existing references to the destination root.
+    source = probe.cell(probe.cell_by_name(expected))
+    destination = ly.cell(ly.cell_by_name(expected)) if ly.has_cell(expected) else ly.create_cell(expected)
+    destination.prune_subcells(-1)
+    destination.clear()
+    destination.copy_tree(source)
     for r in record:
         if r["file"] == g:
             r["shapes_after"] = own_shapes(ly, r["macro"])
@@ -365,6 +381,32 @@ placed = []
 design_top = os.environ.get("DESIGN_TOP", "").strip()
 if design_top and ly.has_cell(design_top):
     top = ly.cell(ly.cell_by_name(design_top))
+    # OpenROAD stream-out may already have instantiated the macros. Validate
+    # those transforms, then replace just those references rather than double
+    # their placement. Abstract-only stream-outs are populated from the DEF.
+    wanted = {r["macro"] for r in record}
+    for name in wanted:
+        if any(parent != top.cell_index() for parent in ly.cell(name).each_parent_cell()):
+            print("KLAYOUT_MERGE_NESTED_MACRO", name)
+            raise SystemExit(3)
+    existing = {}
+    for inst in top.each_inst():
+        name = ly.cell(inst.cell_index).name
+        if name in wanted:
+            if inst.is_regular_array():
+                print("KLAYOUT_MERGE_MACRO_ARRAY", name)
+                raise SystemExit(3)
+            existing.setdefault(name, []).append(inst.trans)
+    for name, transforms in existing.items():
+        expected = [pya.Trans(int(pl["rot"]), bool(pl["mirror"]),
+                             int(round(pl["x_um"] / ly.dbu)),
+                             int(round(pl["y_um"] / ly.dbu))) for pl in placements.get(name, [])]
+        if sorted(str(t) for t in transforms) != sorted(str(t) for t in expected):
+            print("KLAYOUT_MERGE_DEF_MISMATCH", name, transforms, expected)
+            raise SystemExit(3)
+    for inst in list(top.each_inst()):
+        if ly.cell(inst.cell_index).name in wanted:
+            inst.delete()
     for r in record:
         for pl in placements.get(r["macro"], []):
             if not ly.has_cell(r["macro"]):
@@ -400,7 +442,7 @@ for q in placed:
     print("KLAYOUT_MERGE_PLACED", q["macro"], q["inst"], q["orient"],
           q["x_um"], q["y_um"])
 print("KLAYOUT_MERGE_TOPS", ",".join(tops_after))
-if len(tops_after) != 1:
+if tops_after != [design_top]:
     # LOUD, not silent. Emitting the file and reporting DONE would let a
     # multi-top GDS travel downstream as an "integrated" design.
     print("KLAYOUT_MERGE_MULTITOP " + ",".join(tops_after))
@@ -555,13 +597,19 @@ def resolve_top(project: Path, requested: "str | None" = None):
     """
     if requested:
         return requested, "explicit --top"
+    names = {}
     for d in sorted(_pl.pnr_dir(project).glob("*.def")):
         try:
             m = _DEF_DESIGN_RE.search(d.read_text(errors="replace"))
         except OSError:
             continue
         if m:
-            return m.group(1), f"DEF DESIGN line ({d.name})"
+            names.setdefault(m.group(1), []).append(d.name)
+    if len(names) == 1:
+        name = next(iter(names))
+        return name, f"DEF DESIGN line ({', '.join(names[name])})"
+    if len(names) > 1:
+        return None, "ambiguous DEF DESIGN names: " + ", ".join(sorted(names))
     # Second lane: the synthesis product is named after the top by construction.
     for v in sorted(_pl.synth_dir(project).glob("*_synth.v")):
         return v.stem[: -len("_synth")], f"synth netlist stem ({v.name})"
@@ -677,6 +725,193 @@ def lvs_failure_verdict(report_written: bool, rc: int, transcript: str) -> dict:
             "transcript_tail": (transcript or "")[-800:]}
 
 
+class InputRefusal(ValueError):
+    """The current subject does not provide a unique, matching merge input."""
+
+
+def _digest(path):
+    h = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _uncomment(text):
+    return re.sub(r"/\*.*?\*/|//[^\n]*", "", text, flags=re.S)
+
+
+def current_merge_inputs(project, top):
+    """Resolve canonical OpenROAD delivery files, never a first-file fallback.
+
+    Direct step_gds delivers <top>.gds from <top>.def in pnr/. The stage4
+    delivery lane uses the same exact top stem and routed.def. Conflicting
+    copies refuse. Earlier stage DEFs are not eligible delivery sources.
+    """
+    if not top or not re.fullmatch(r"[A-Za-z_][\w$]*", top):
+        raise InputRefusal("top is missing, ambiguous or unsupported")
+    pnr = _pl.pnr_dir(project)
+    # Physical top and delivery filename may differ after top wrapping. Only
+    # an exact same-stem DEF declaring this physical top can justify that alias.
+    named_defs = [path for path in pnr.glob("*.def")
+                  if path.name != "routed.def" and def_design_name(path.read_text()) == top
+                  and any((root / (path.stem + ".gds")).is_file()
+                          for root in (pnr, _pl.gds_dir(project)))]
+    stems = {top, *(path.stem for path in named_defs)}
+    candidates = [root / f"{stem}.gds" for root in (pnr, _pl.gds_dir(project)) for stem in sorted(stems)]
+    candidates = list(dict.fromkeys(p for p in candidates if p.is_file()))
+    if not candidates:
+        raise InputRefusal("current digital GDS absent for exact top " + top)
+    if len({_digest(p) for p in candidates}) != 1:
+        raise InputRefusal("ambiguous current digital GDS copies for " + top)
+    digital = candidates[0]
+    defs = list(dict.fromkeys([*sorted(named_defs), *[p for p in (pnr / f"{top}.def", pnr / "routed.def") if p.is_file()]]))
+    if not defs:
+        raise InputRefusal("matching routed DEF absent")
+    # The named DEF is step_gds's actual source. A routed alias must describe
+    # the same design; a different generation cannot silently supply placement.
+    for path in defs:
+        if def_design_name(path.read_text(errors="strict")) != top:
+            raise InputRefusal("wrong top in routed DEF: " + path.name)
+    if len({_digest(p) for p in defs}) != 1:
+        raise InputRefusal("ambiguous routed DEF generations")
+    routed = defs[0]
+    # A stream older than its source cannot be this source's delivery.
+    if digital.stat().st_mtime_ns < routed.stat().st_mtime_ns:
+        raise InputRefusal("digital GDS is stale relative to its routed DEF")
+    macros = sorted((project / "phase3/analog/hardmacro").rglob("*.gds"))
+    views = sorted((project / "phase3/analog/hardmacro").rglob("*.v"))
+    cells = [p.stem for p in macros]
+    if not cells or len(set(cells)) != len(cells):
+        raise InputRefusal("missing or duplicate A8 hardmacro GDS cells")
+    modules = {}
+    for path in views:
+        names = re.findall(r"\bmodule\s+([A-Za-z_][\w$]*)\b", _uncomment(path.read_text()))
+        if len(names) != 1 or names[0] in modules:
+            raise InputRefusal("missing, ambiguous or duplicate A8 Verilog module: " + path.name)
+        modules[names[0]] = path
+    if set(modules) != set(cells):
+        raise InputRefusal("A8 GDS cells and Verilog modules disagree")
+    netlists = [root / f"{stem}{suffix}" for root, suffix in ((pnr, "_pnr.v"), (_pl.synth_dir(project), "_synth.v"))
+                for stem in dict.fromkeys((digital.stem, top))]
+    netlist = next((p for p in netlists if p.is_file()), netlists[0])
+    if not netlist.is_file():
+        raise InputRefusal("matching gate netlist absent")
+    source = _uncomment(netlist.read_text())
+    body = re.search(r"\bmodule\s+" + re.escape(top) + r"\b(.*?)\bendmodule\b", source, re.S)
+    if not body:
+        raise InputRefusal("gate netlist does not declare the requested top")
+    def_text = routed.read_text()
+    section = re.search(r"\bCOMPONENTS\s+(\d+)\s*;(.*?)END COMPONENTS", def_text, re.S)
+    if not section:
+        raise InputRefusal("routed DEF COMPONENTS section absent")
+    rows = [row.strip() for row in section.group(2).split(";") if row.strip()]
+    parsed_rows = [re.match(r"-\s+(\S+)\s+(\S+)(?:\s|$)", row) for row in rows]
+    if len(rows) != int(section.group(1)) or not all(parsed_rows):
+        raise InputRefusal("routed DEF COMPONENTS count/records disagree")
+    row_instances = [row.group(1) for row in parsed_rows]
+    if len(set(row_instances)) != len(row_instances):
+        raise InputRefusal("duplicate COMPONENTS instance in routed DEF")
+    placement, refusals = def_macro_placements(def_text, cells)
+    if refusals:
+        raise InputRefusal("placement did not complete in THIS run: " + "; ".join(refusals))
+    instances = [(p["inst"], c) for c, items in placement.items() for p in items]
+    if len({inst for inst, _ in instances}) != len(instances):
+        raise InputRefusal("duplicate macro instance in routed DEF")
+    schematic = []
+    for cell in cells:
+        expression = r"\b" + re.escape(cell) + r"\s+(?:#\s*\([^;]*?\)\s*)?([A-Za-z_][\w$]*)\s*\("
+        schematic.extend((inst, cell) for inst in re.findall(expression, body.group(1)))
+    if sorted(schematic) != sorted(instances):
+        raise InputRefusal("routed DEF macro instances/types disagree with gate netlist")
+    detail = {"placements": placement, "refusals": [], "disclosures": [],
+              "def_source": routed.name, "defs_considered": [p.name for p in defs],
+              "defs_disagreeing": []}
+    paths = [*candidates, *defs, *macros, *views, netlist]
+    for path in paths:
+        if not path.stat().st_size or not path.resolve().is_relative_to(project.resolve()):
+            raise InputRefusal("empty or outside-subject input: " + str(path))
+    hashes = {str(p.relative_to(project)): _digest(p) for p in paths}
+    return digital, macros, views, netlist, detail, hashes
+
+
+def _producer_binding():
+    return {"program": "mixed_signal_top_lvs_run", "sha256": _digest(__file__),
+            "merge_script_sha256": hashlib.sha256(_KLAYOUT_MERGE_PY.encode()).hexdigest()}
+
+
+def _tool_identity(container):
+    script = ("import hashlib,json,shutil,subprocess; "
+              "p=shutil.which('klayout'); "
+              "print(json.dumps({'executable':p,'sha256':hashlib.sha256(open(p,'rb').read()).hexdigest(),"
+              "'version':subprocess.check_output([p,'-v'],text=True).strip()}))")
+    rc, out, err = _docker_exec(container, "M1_TOOL_IDENTITY=1 python3 -c " + shlex.quote(script))
+    try:
+        value = json.loads(out)
+        if rc or not isinstance(value, dict) or not value.get("executable") or not value.get("version") \
+                or not re.fullmatch(r"[0-9a-f]{64}", value.get("sha256", "")):
+            raise ValueError("incomplete tool identity")
+        return value
+    except (ValueError, TypeError) as exc:
+        raise InputRefusal("KLayout identity unavailable: " + str(exc) + " " + err[-200:]) from exc
+
+
+def validate_current_receipt(project, top_lvs):
+    """M1's blocking consumer validates current bytes without executing EDA.
+
+    Receipts describe actual producer execution; they are not owner signoff.
+    Every invocation regenerates, so no receipt can license blind reuse.
+    """
+    try:
+        receipt_path = project / "phase3/mixed_signal/m1_merge_receipt.json"
+        receipt = json.loads(receipt_path.read_text())
+        if receipt.get("schema") != "vibeic.mixed_signal.m1.v1" \
+                or receipt.get("subject") != str(project.resolve()) \
+                or receipt.get("producer") != _producer_binding():
+            return "M1 receipt schema, subject or producer changed"
+        top = receipt["top"]
+        _, _, _, _, detail, hashes = current_merge_inputs(project, top)
+        if receipt.get("inputs") != hashes or receipt.get("placements") != detail["placements"]:
+            return "M1 current input or placement binding changed"
+        tool = receipt.get("tool")
+        if not isinstance(tool, dict) or not isinstance(tool.get("executable"), str) \
+                or not tool.get("executable") or not isinstance(tool.get("version"), str) or not tool.get("version") \
+                or not re.fullmatch(r"[0-9a-f]{64}", tool.get("sha256", "")):
+            return "M1 tool identity missing or malformed"
+        if not isinstance(receipt.get("execution"), dict) or type(receipt["execution"].get("rc")) is not int \
+                or receipt["execution"].get("rc") != 0 \
+                or not re.fullmatch(r"[0-9a-f]{32}", receipt["execution"].get("invocation", "")):
+            return "M1 successful tool execution missing"
+        artifacts = receipt.get("artifacts")
+        required = {"phase3/mixed_signal/top_merged.gds", "phase3/mixed_signal/merge.log",
+                    "phase3/mixed_signal/merge.json", "phase3/mixed_signal/macro_placements.json",
+                    "phase3/mixed_signal/klayout_merge.py"}
+        if not isinstance(artifacts, dict) or set(artifacts) != required:
+            return "M1 artifact roster incomplete"
+        for rel, digest in artifacts.items():
+            if _digest(project / rel) != digest:
+                return "M1 output or execution artifact changed: " + rel
+        if not isinstance(top_lvs, dict) or top_lvs.get("m1_receipt_sha256") != _digest(receipt_path):
+            return "LVS result is not bound to this M1 receipt"
+        if top_lvs.get("layout") != "phase3/mixed_signal/top_merged.gds" or top_lvs.get("layout_top") not in (top, top + "_flat"):
+            return "LVS result top or layout disagrees with M1"
+        lvs_artifacts = top_lvs.get("lvs_artifacts")
+        expected_lvs = {f"phase3/mixed_signal/{top}_merged_extracted.sp",
+                        "phase3/mixed_signal/ext2spice_merged.log",
+                        "phase3/mixed_signal/ext2spice_merged.tcl",
+                        "phase3/mixed_signal/top_lvs.tcl",
+                        "reports/analog/mixed_signal/top_lvs.rpt"}
+        if not isinstance(lvs_artifacts, dict) or set(lvs_artifacts) != expected_lvs:
+            return "bound extraction and LVS evidence roster incomplete"
+        for rel, digest in lvs_artifacts.items():
+            path = project / rel
+            if not path.resolve().is_relative_to(project.resolve()) or _digest(path) != digest:
+                return "LVS artifact changed: " + rel
+        return None
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        return "M1 current receipt unavailable: " + str(exc)
+
+
 def run(project: Path, top: str, container: str, pdk: str,
         *, pdk_source: str = "", top_source: str = "") -> dict:
     # C5: `top`/`pdk` may be None when the project does not state them. That is
@@ -686,132 +921,95 @@ def run(project: Path, top: str, container: str, pdk: str,
     rpt_dir = project / "reports" / "analog" / "mixed_signal"
     merged = ms_dir / "top_merged.gds"
 
-    # inputs --------------------------------------------------------------
-    dig_cands = (sorted((_pl.gds_dir(project)).glob("*.gds"))
-                 + sorted(_pl.pnr_dir(project).glob("*.gds")))
-    digital_gds = next((g for g in dig_cands if top in g.stem), None) \
-        or (dig_cands[0] if dig_cands else None)
-    macro_gds = sorted(
-        (project / "phase3" / "analog" / "hardmacro").rglob("*.gds"))
-    macro_v = sorted(
-        (project / "phase3" / "analog" / "hardmacro").rglob("*.v"))
-    netlist = _pl.synth_dir(project) / f"{top}_synth.v"
-    if not netlist.is_file():
-        nl = sorted(_pl.synth_dir(project).glob("*.v"))
-        netlist = nl[0] if nl else netlist
-
-    missing_inputs = []
-    if digital_gds is None:
-        missing_inputs.append("digital GDS")
-    if not macro_gds:
-        missing_inputs.append("hardmacro GDS (A8)")
-    if not netlist.is_file():
-        missing_inputs.append("gate netlist")
-    if missing_inputs:
-        return {"verdict": "SKIP", "rc": 2,
-                "reason": "inputs missing: " + ", ".join(missing_inputs)}
-
-    missing_tools = [t for t in ("klayout", "magic", "netgen")
-                     if not _tool_ok(container, t)]
-    if missing_tools:
-        return {"verdict": "SKIP", "rc": 2,
-                "reason": ("tools missing in container: "
-                           + ", ".join(missing_tools))}
-    # A tool that exists but cannot see the design is not a tool that ran.
+    # The normal caller keeps its shape. Input/tool absence remains a named
+    # SKIP; ambiguous or contradictory evidence is a refusal.
+    if not any((project / "phase3/analog/hardmacro").rglob("*.gds")):
+        return {"verdict": "SKIP", "rc": 2, "reason": "inputs missing: hardmacro GDS (A8)"}
+    if not _tool_ok(container, "klayout"):
+        return {"verdict": "SKIP", "rc": 2, "reason": "tools missing in container: klayout"}
     if not _project_reachable(container, project):
         return {"verdict": "SKIP", "rc": 2,
-                "reason": (f"project dir is not reachable inside container "
-                           f"'{container}': {project} — the tools would run "
-                           f"against paths that do not exist there and every "
-                           f"output would be a carried-forward file, not a "
-                           f"result of this run")}
-    # ── C5: the tech rung. An unresolved top/PDK SKIPs HERE, naming which one
-    # and why — it never falls back to some other design's PDK or cell name.
-    # This is the rung "PDK tech missing" already occupies, so the SKIP ladder
-    # keeps its shape and the producer stays dispatchable (M1's wiring
-    # contract; guarded by tests/test_m1_top_lvs_producer_wiring.py).
-    if not pdk or not top:
-        unresolved = []
-        if not top:
-            unresolved.append(f"top cell ({top_source})")
-        if not pdk:
-            unresolved.append(f"PDK ({pdk_source})")
-        return {"verdict": "SKIP", "rc": 2,
-                "reason": ("cannot identify what to extract — "
-                           + "; ".join(unresolved)),
-                "top": top, "top_source": top_source,
-                "pdk": pdk, "pdk_source": pdk_source}
-    magicrc = f"{PDKS_IN_CONTAINER}/{pdk}/libs.tech/magic/{pdk}.magicrc"
-    netgen_setup = (f"{PDKS_IN_CONTAINER}/{pdk}/libs.tech/netgen/"
-                    f"{pdk}_setup.tcl")
-    missing_tech = [p for p in (magicrc, netgen_setup)
-                    if _docker_exec(container,
-                                    f"test -f {shlex.quote(p)}",
-                                    timeout=10)[0] != 0]
-    if missing_tech:
-        return {"verdict": "SKIP", "rc": 2,
-                "reason": "PDK tech missing: " + ", ".join(missing_tech)}
+                "reason": f"project dir is not reachable inside container '{container}': {project}"}
+    receipt_path = ms_dir / "m1_merge_receipt.json"
+    # Invalidate prior execution authority even on a subsequent refusal.
+    receipt_path.unlink(missing_ok=True)
+    try:
+        digital_gds, macro_gds, macro_v, netlist, placement, input_hashes = current_merge_inputs(project, top)
+        tool = _tool_identity(container)
+    except (InputRefusal, OSError, UnicodeError) as exc:
+        return {"verdict": "FAIL", "rc": 1, "compared": False,
+                "reason": ("M1 current input did not complete in THIS run: " + str(exc)
+                           + ". Nothing was compared — this is NOT an LVS mismatch")}
 
     ms_dir.mkdir(parents=True, exist_ok=True)
     rpt_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1) merge ------------------------------------------------------------
-    # A pre-existing top_merged.gds is REUSED, not re-derived — that is
-    # deliberate (the merge is expensive) but it must be SAID, because a merged
-    # GDS produced by something other than this program, in another directory,
-    # is exactly what two rounds of M1 were judged on.
+    invocation = uuid.uuid4().hex
+    pending = ms_dir / ("top_merged.current-" + invocation + ".gds")
     merge_log = ms_dir / "merge.log"
-    merge_provenance = "reused: top_merged.gds already present, merge not re-run"
-    if not merged.is_file():
-        merge_log_before = _mtime_or_none(merge_log)
-        merge_py = ms_dir / "klayout_merge.py"
-        merge_py.write_text(_KLAYOUT_MERGE_PY)
-        # vibe-ic#612 — the placement half of "A+D GDS merge + macro placement".
-        # Read from the design's OWN DEF; a macro the DEF does not place, or
-        # places at an orientation the merge cannot back, is refused by name and
-        # the merge then fails on the multi-top check rather than shipping a
-        # file whose design top has no children.
-        # #626 — `top` is passed so the DEF is picked by the DESIGN'S OWN NAME
-        # and not by alphabetical glob position, and the artefact records WHICH
-        # DEF was read plus any sibling DEF that disagrees with it.
-        _pl_res = resolve_macro_placements_detailed(
-            project, [g.stem for g in macro_gds], top)
-        _pl_map, _pl_refusals = _pl_res["placements"], _pl_res["refusals"]
-        _pl_json = ms_dir / "macro_placements.json"
-        _pl_json.write_text(json.dumps(_pl_res, indent=2) + "\n")
-        for _r in _pl_refusals:
-            print(f"      M1 placement REFUSED: {_r}")
-        for _d in _pl_res.get("disclosures", []):
-            print(f"      M1 placement DISCLOSED: {_d}")
-        if _pl_res.get("def_source"):
-            print(f"      M1 placements read from {_pl_res['def_source']} "
-                  f"(of {len(_pl_res['defs_considered'])} DEF(s) that place "
-                  f"these macros)")
-        env = (f"export DESIGN_TOP={top} "
-               f"PLACEMENTS_JSON={_to_container_path(_pl_json, container)} "
-               f"DIGITAL_GDS={_to_container_path(digital_gds, container)} "
-               f"MACRO_GDS=\"{';'.join(_to_container_path(g, container) for g in macro_gds)}\" "
-               f"MERGED_OUT={_to_container_path(merged, container)} "
-               # Per-macro branch record (#597). Written by the merge itself,
-               # so a doubled body is visible in an artefact rather than
-               # inferred from an LVS device-count mismatch two steps later.
-               f"MERGE_JSON={_to_container_path(ms_dir / 'merge.json', container)} && ")
-        # C5 pipefail — see the note at the Magic site below. Without it the rc
-        # this branch reports is `tee`'s, so a KLayout that died mid-merge is
-        # indistinguishable from one that merged nothing.
-        cmd = (env + "set -o pipefail && " + f"klayout -b -r "
-               f"{_to_container_path(merge_py, container)} 2>&1 | "
-               f"tee {_to_container_path(ms_dir, container)}/merge.log")
-        rc, out, err = _docker_exec(
-            container, cmd, marker=_to_container_path(merge_py, container))
-        if not merged.is_file() or merged.stat().st_size == 0 \
-                or not _ran_fresh(merge_log, "KLAYOUT_MERGE_DONE",
-                                  merge_log_before):
-            return {"verdict": "FAIL", "rc": 1,
-                    "reason": (f"KLayout merge did not complete in THIS run "
-                               f"(rc={rc}); see phase3/mixed_signal/merge.log"),
-                    "transcript_tail": (out + err)[-600:]}
-        merge_provenance = "produced by this invocation"
+    merge_log_before = _mtime_or_none(merge_log)
+    merge_record_before = _mtime_or_none(ms_dir / "merge.json")
+    merge_py = ms_dir / "klayout_merge.py"
+    merge_py.write_text(_KLAYOUT_MERGE_PY)
+    _pl_json = ms_dir / "macro_placements.json"
+    _aa.write_text(_pl_json, json.dumps(placement, indent=2) + "\n")
+    # Keep the original resolver available for its existing positive callers:
+    # resolve_macro_placements(project, cells, top). The producer uses the
+    # exact resolved delivery DEF, rather than another independent scan.
+    merge_record = ms_dir / "merge.json"
+    env = (f"export DESIGN_TOP={top} "
+           f"PLACEMENTS_JSON={shlex.quote(_to_container_path(_pl_json, container))} "
+           f"DIGITAL_GDS={shlex.quote(_to_container_path(digital_gds, container))} "
+           f"MACRO_GDS={shlex.quote(';'.join(_to_container_path(g, container) for g in macro_gds))} "
+           f"MERGED_OUT={shlex.quote(_to_container_path(pending, container))} "
+           f"MERGE_JSON={shlex.quote(_to_container_path(merge_record, container))} && ")
+    cmd = (env + "set -o pipefail && klayout -b -r "
+           + shlex.quote(_to_container_path(merge_py, container)) + " 2>&1 | tee "
+           + shlex.quote(_to_container_path(merge_log, container)))
+    rc, out, err = _docker_exec(container, cmd, marker=_to_container_path(merge_py, container))
+    try:
+        if rc != 0 or not pending.is_file() or not pending.stat().st_size \
+                or not _ran_fresh(merge_log, "KLAYOUT_MERGE_DONE", merge_log_before):
+            raise InputRefusal(f"KLayout merge did not complete in THIS run (rc={rc})")
+        record = json.loads(merge_record.read_text())
+        expected = sorted((p["inst"], c, p["orient"], p["x_um"], p["y_um"])
+                          for c, items in placement["placements"].items() for p in items)
+        observed = sorted((p["inst"], p["macro"], p["orient"], p["x_um"], p["y_um"])
+                          for p in record["placed"])
+        if not _ran_fresh(merge_record, "", merge_record_before) \
+                or record.get("design_top") != top or record.get("single_top") is not True \
+                or record.get("top_cells_after") != [top] or observed != expected:
+            raise InputRefusal("KLayout output top/placement mapping disagrees with current DEF")
+        if current_merge_inputs(project, top)[-1] != input_hashes:
+            raise InputRefusal("M1 inputs changed during KLayout execution")
+        pending.replace(merged)
+        artifacts = [merged, merge_log, merge_record, _pl_json, merge_py]
+        receipt = {"schema": "vibeic.mixed_signal.m1.v1", "subject": str(project.resolve()),
+                   "top": top, "pdk": pdk, "producer": _producer_binding(), "tool": tool,
+                   "inputs": input_hashes, "placements": placement["placements"],
+                   "execution": {"invocation": invocation, "rc": rc, "command": cmd},
+                   "artifacts": {str(p.relative_to(project)): _digest(p) for p in artifacts}}
+        _aa.write_text(receipt_path, json.dumps(receipt, indent=2) + "\n")
+    except (InputRefusal, OSError, ValueError, KeyError, TypeError) as exc:
+        pending.unlink(missing_ok=True)
+        return {"verdict": "FAIL", "rc": 1, "compared": False,
+                "reason": str(exc), "transcript_tail": (out + err)[-600:]}
+    merge_provenance = "produced by this invocation; exact current inputs bound"
+
+    # M1 can merge with actual KLayout before the PDK-dependent LVS rung.
+    missing_tools = [t for t in ("magic", "netgen") if not _tool_ok(container, t)]
+    if missing_tools:
+        return {"verdict": "SKIP", "rc": 2, "reason": "tools missing in container: " + ", ".join(missing_tools),
+                "merge_provenance": merge_provenance, "m1_receipt_sha256": _digest(receipt_path)}
+    if not pdk:
+        return {"verdict": "SKIP", "rc": 2, "reason": "cannot identify PDK (" + pdk_source + ")",
+                "merge_provenance": merge_provenance, "m1_receipt_sha256": _digest(receipt_path)}
+    magicrc = f"{PDKS_IN_CONTAINER}/{pdk}/libs.tech/magic/{pdk}.magicrc"
+    netgen_setup = f"{PDKS_IN_CONTAINER}/{pdk}/libs.tech/netgen/{pdk}_setup.tcl"
+    missing_tech = [p for p in (magicrc, netgen_setup)
+                    if _docker_exec(container, f"test -f {shlex.quote(p)}", timeout=10)[0] != 0]
+    if missing_tech:
+        return {"verdict": "SKIP", "rc": 2, "reason": "PDK tech missing: " + ", ".join(missing_tech),
+                "merge_provenance": merge_provenance, "m1_receipt_sha256": _digest(receipt_path)}
 
     # 2) extract ----------------------------------------------------------
     spice_out = ms_dir / f"{top}_merged_extracted.sp"
@@ -841,7 +1039,7 @@ def run(project: Path, top: str, container: str, pdk: str,
                 "reason": (f"Magic ext2spice on the MERGED GDS produced no "
                            f"netlist (rc={rc})"),
                 "transcript_tail": (out + err)[-600:]}
-    if not _ran_fresh(ext_log, "MAGIC_EXT2SPICE_DONE", ext_log_before):
+    if rc != 0 or not _ran_fresh(ext_log, "MAGIC_EXT2SPICE_DONE", ext_log_before):
         return {"verdict": "FAIL", "rc": 1,
                 "reason": (f"Magic ext2spice did not complete in THIS run "
                            f"(rc={rc}): {ext_log.name} carries no "
@@ -903,7 +1101,11 @@ def run(project: Path, top: str, container: str, pdk: str,
     # property-error terminal FAIL, 失配 and the Final-result truncation guard,
     # all missing from the old inline copy) so this site can never drift from
     # the Step-31 gate again.
-    lvs_pass = _lvt.classify(blob) == "MATCH"
+    lvs_pass = rc == 0 and _lvt.classify(blob) == "MATCH"
+    if current_merge_inputs(project, top)[-1] != input_hashes:
+        receipt_path.unlink(missing_ok=True)
+        return {"verdict": "FAIL", "rc": 1, "compared": False,
+                "reason": "M1 inputs changed during extraction/compare"}
 
     # 4) emit M1/M4 artifacts ----------------------------------------------
     top_lvs = {
@@ -917,7 +1119,15 @@ def run(project: Path, top: str, container: str, pdk: str,
         "lvs_report": str(lvs_rpt.relative_to(project)),
         "tool": "magic ext2spice + netgen (PDK setup)",
         "merge_provenance": merge_provenance,
+        "m1_receipt_sha256": _digest(receipt_path),
+        "lvs_artifacts": {str(p.relative_to(project)): _digest(p)
+                          for p in (spice_out, ext_log, tcl, lvs_tcl, lvs_rpt)},
     }
+    stale = validate_current_receipt(project, top_lvs)
+    if stale:
+        receipt_path.unlink(missing_ok=True)
+        return {"verdict": "FAIL", "rc": 1, "compared": False,
+                "reason": "current M1 evidence changed during LVS: " + stale}
     (rpt_dir / "top_lvs.json").write_text(
         json.dumps(top_lvs, indent=2) + "\n")
     _aa.write_text(rpt_dir / "merge.json", json.dumps({
@@ -979,7 +1189,7 @@ def main(argv=None) -> int:
     # (guarded by tests/test_m1_top_lvs_producer_wiring.py, which proves the
     # declared producer really writes its verdict evidence) WITHOUT restoring
     # any guess about which PDK or which top cell the design uses.
-    if rep.get("verdict") == "SKIP":
+    if rep.get("verdict") in ("SKIP", "FAIL"):
         _ev = project / "reports" / "analog" / "mixed_signal" / "top_lvs.json"
         _ev.parent.mkdir(parents=True, exist_ok=True)
         # vibe-ic#614 — C5's reason above is right (a SKIP must leave verdict
@@ -1000,7 +1210,7 @@ def main(argv=None) -> int:
                 _prior = None
         _compared = isinstance(_prior, dict) and bool(_prior.get("lvs_report"))
         _payload = {k: v for k, v in rep.items() if k != "rc"}
-        if _compared:
+        if _compared and rep.get("verdict") == "SKIP":
             _alt = _ev.with_name("top_lvs_skipped.json")
             _payload["preserved"] = (
                 f"an existing {_ev.name} records a COMPLETED comparison "
