@@ -1039,11 +1039,12 @@ def tool_density(project: Path) -> Optional[Dict[str, Any]]:
     path = project / RECORD_REL
     if not path.is_file():
         return None
+    promotion = None
     try:
         doc = _load(path)
         if doc.get('default_stream') or (project / DEFAULT_STREAM_REL).is_file() \
                 or (project / 'phase3/librelane' / CONFIG_FOLDER / 'KLayout.StreamOut.json').is_file():
-            validate_default_stream(project)
+            promotion = validate_default_stream(project)
     except (OSError, ValueError, Refusal, KeyError, TypeError):
         return {'status': 'UNREADABLE', 'source': RECORD_REL}
     arms = doc.get('gds') or {}
@@ -1061,13 +1062,105 @@ def tool_density(project: Path) -> Optional[Dict[str, Any]]:
     if row.get('value') != count or row.get('value') == 'NOT_MEASURED':
         return {'status': 'NOT_MEASURED', 'source': RECORD_REL,
                 'reason': row.get('reason') or 'density record differs from tool output'}
-    return {'status': 'MEASURED', 'errors': count, 'arm': shipped,
+    result = {'status': 'MEASURED', 'errors': count, 'arm': shipped,
             'rules': arm.get('rules'), 'runset': arm.get('runset'),
             'source': RECORD_REL, 'state': str(state), 'state_sha256': arm.get('state_sha256'),
             'subject_sha256': arm.get('subject_sha256')}
+    if promotion is not None:
+        try:
+            result['per_layer'] = current_metal_density(project, arm, promotion)
+        except (OSError, ValueError, Refusal, KeyError, TypeError) as exc:
+            result['per_layer'] = {'verdict': 'NOT_MEASURED', 'reason': str(exc),
+                                   'consumer': 'metal_layer_density_check.check'}
+    return result
 
 
 DEFAULT_STREAM_REL = 'phase3/librelane/37-default-promotion.json'
+
+
+def current_metal_density(project: Path, arm: dict, promotion: dict) -> dict:
+    """Run the existing per-layer consumer on the adopted current stream.
+
+    The native count, executed rules and per-rule area report remain separate
+    facts. Neither a zero count nor a report's own GDS claim supplies adoption.
+    No generic bounds or local-window results are passed to the consumer.
+    """
+    import metal_layer_density_check as mld
+    import librelane_signoff_evidence as native
+    canonical = Path(promotion['canonical'])
+    sha = digest(canonical)
+    ratios = arm['ratios']
+    ratio_report = Path(ratios['report'])
+    measured = _load(ratio_report)
+    report = project / METAL_DENSITY_REL
+    published = _load(report)
+    if (sha != arm['subject_sha256'] or sha != ratios['subject_sha256']
+            or digest(Path(measured['gds'])) != sha
+            or digest(ratio_report) != ratios['report_sha256']
+            or measured.get('status') != 'MEASURED'
+            or measured.get('layers') != ratios['layers']
+            or published.get('gds_sha256') != sha
+            or (project / published['gds']).resolve() != canonical.resolve()
+            or published.get('source') != {'report': str(ratio_report),
+                                           'report_sha256': digest(ratio_report)}):
+        raise Refusal('LL_METAL_DENSITY_SUBJECT_UNBOUND', str(report))
+    state = Path(arm['state'])
+    image = resolve_image(project)
+    switch = _load(project / 'phase3/librelane_switch.json')
+    mounts = native._pdk_mounts(project, switch, state.parent, image)
+    pdk = _load(project / 'phase3/librelane' / CONFIG_FOLDER / 'KLayout.Density.json')['PDK']
+    root = next((Path(host) if guest == '/pdk' else Path(host).parent
+                 for host, guest in mounts if guest in ('/pdk', f'/pdk/{pdk}')), None)
+    if root is None:
+        raise Refusal('LL_METAL_DENSITY_PDK_UNBOUND', str(mounts))
+    cfg, map_text, lef_text, deck_text = _density_source(
+        root, pdk, project / 'phase3/librelane' / CONFIG_FOLDER / 'KLayout.Density.json')
+    if (published.get('pdk') != pdk or not measured.get('extent_from_deck')
+            or not re.search(r'\bchip_area\s*=\s*extent(?:\.sized\(0(?:\.0)?\))?\.area\b',
+                             _dla.deck_code_only(deck_text))):
+        raise Refusal('LL_METAL_DENSITY_SCOPE_UNBOUND', str(report))
+    specs = _density_ratio_specs(deck_text, build_metal_fill_config(map_text, lef_text, deck_text))
+    required = {rule: row for rule, row in specs.items()
+                if mld._METAL_RE.fullmatch(str(row.get('identifier') or ''))}
+    executed = set(re.findall(r'\bExecuting rule\s+(\S+)',
+                             (state.parent / 'invocation.log').read_text()))
+    if not required or not set(required) <= executed:
+        raise Refusal('LL_METAL_DENSITY_RULES_NOT_EXECUTED', str(sorted(set(required) - executed)))
+    layers, rules = {}, {}
+    for rule, spec in required.items():
+        row = measured['layers'][rule]
+        if (row.get('status') != 'MEASURED' or row.get('identifier') != spec['identifier']
+                or row.get('layers') != spec['layers'] or not spec.get('layers')
+                or type(row.get('ratio')) not in (int, float)
+                or not math.isfinite(row['ratio']) or not 0 <= row['ratio'] <= 1):
+            raise Refusal('LL_METAL_DENSITY_LAYER_NOT_MEASURED', rule)
+        name = spec['identifier'].lower()
+        if name in layers and layers[name] != row['ratio']:
+            raise Refusal('LL_METAL_DENSITY_LAYER_CONFLICT', name)
+        layers[name], rules[name] = row['ratio'], rule
+    area = measured.get('die_area_um2')
+    region = measured.get('die')
+    if (type(area) not in (int, float) or not math.isfinite(area) or area <= 0
+            or not isinstance(region, list) or len(region) != 4
+            or not all(type(x) in (int, float) and math.isfinite(x) for x in region)
+            or not (region[0] < region[2] and region[1] < region[3])
+            or not math.isclose(area, (region[2] - region[0]) * (region[3] - region[1]))
+            or published.get('die_area_um2') != area
+            or published.get('layers') != layers or published.get('layer_rules') != rules
+            or published.get('measurement') != 'per_rule_drawn_plus_dummy_area_over_die_extent'
+            or any(k in published for k in ('windows', 'limits'))):
+        raise Refusal('LL_METAL_DENSITY_POPULATION_UNBOUND', str(report))
+    windows, provenance = mld.pdk_windows_for(pdk)
+    if not str(provenance.get('scope', '')).lower().startswith(('whole-die', 'global (whole-die)')):
+        raise Refusal('LL_METAL_DENSITY_WINDOW_SCOPE_UNBOUND', str(provenance))
+    judged = mld.check(report, windows, None, None, provenance, set(windows))
+    if set(judged.get('per_layer') or {}) != set(layers):
+        raise Refusal('LL_METAL_DENSITY_CONSUMER_COVERAGE', str(judged))
+    return dict(judged, consumer='metal_layer_density_check.check',
+                report_sha256=digest(report), subject_sha256=sha,
+                measurement_scope='whole-die extent', region_um=region,
+                denominator_um2=area, executed_rules=sorted(executed),
+                layer_rules=rules, layer_gds_map={r: required[r]['layers'] for r in required})
 
 
 def _current_stage(project: Path, state: Path, step: str) -> tuple[dict, dict]:
@@ -1109,6 +1202,13 @@ def validate_default_stream(project: Path) -> dict:
     record = doc['default_stream']
     if _load(project / DEFAULT_STREAM_REL) != record:
         raise Refusal('LL_FINISHING_PROMOTION_CHANGED', DEFAULT_STREAM_REL)
+    if record.get('image') != resolve_image(project):
+        raise Refusal('LL_FINISHING_IMAGE_CHANGED', str(record.get('image')))
+    gates = record['gates']
+    if set(gates) != {'substance', 'port_labels'} or any(
+            row.get('rc') != 0 or digest(Path(row['report'])) != row.get('sha256')
+            or _load(Path(row['report'])).get('verdict') != 'PASS' for row in gates.values()):
+        raise Refusal('LL_FINISHING_OUTPUT_GATE_CHANGED', str(gates))
     for key in ('filled_def', 'stream', 'prefill', 'source', 'pnr_gds', 'canonical'):
         path, sha = Path(record[key]), record[key + '_sha256']
         if not re.fullmatch('[0-9a-f]{64}', str(sha)) or digest(path) != sha:
@@ -1159,8 +1259,8 @@ def validate_default_stream(project: Path) -> dict:
     elif arm['subject_sha256'] != filler['filled_sha256']:
         raise Refusal('LL_DENSITY_NOT_FILLED_SUBJECT', str(arm))
     current = validate_density_result(project, arm, layout=Path(record['canonical']))
-    if current.get('value') != 0:
-        raise Refusal('LL_FINISHING_DENSITY_NOT_ZERO', str(current))
+    if current.get('value') != _count(arm.get(DENSITY_METRIC)) or current.get('value') == 'NOT_MEASURED':
+        raise Refusal('LL_FINISHING_DENSITY_NOT_MEASURED', str(current))
     return record
 
 
@@ -1174,6 +1274,18 @@ def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
     import phase3_one_shot_runner as runner
     import librelane_contract as contract
     project = project.resolve()
+    # Adopt a retained current primary result before starting another producer.
+    # Every ordinary consumer still rechecks its bytes and runs the per-layer
+    # judge; the receipt alone is never sufficient for reuse.
+    if (project / DEFAULT_STREAM_REL).is_file():
+        record = validate_default_stream(project)
+        if record['file_top'] != top or record.get('pdk') != pdk.name:
+            raise Refusal('LL_FINISHING_WRONG_DECLARATION', str(record))
+        arm = _load(project / RECORD_REL)['gds']['librelane']
+        judged = current_metal_density(project, arm, record)
+        if arm.get(DENSITY_METRIC) != 0 or judged.get('verdict') != 'PASS':
+            raise Refusal('LL_METAL_DENSITY_CONSUMER_FAILED', str(judged))
+        return dict(record, receipt=str(project / DEFAULT_STREAM_REL))
     pnr = project / 'phase3/stage3/pnr'
     filled = pnr / 'filled.def'
     try:
@@ -1226,8 +1338,11 @@ def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
         record[key], record[key + '_sha256'] = str(path), digest(path)
     write_json(project / DEFAULT_STREAM_REL, record)
     update_record(project, 'default_stream', record)
-    validate_default_stream(project)
     publish_metal_density(project, arm.get('ratios') or {}, canonical, pdk.name)
+    validate_default_stream(project)
+    per_layer = current_metal_density(project, arm, record)
+    if per_layer.get('verdict') != 'PASS':
+        raise Refusal('LL_METAL_DENSITY_CONSUMER_FAILED', str(per_layer))
     # Keep the engine-neutral transcript on the canonical caller boundary.
     shutil.copyfile(folder / 'invocation.log', pnr / 'stream_out.log')
     return dict(record, receipt=str(project / DEFAULT_STREAM_REL))

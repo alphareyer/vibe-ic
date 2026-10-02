@@ -12,8 +12,64 @@ import librelane_fill_dfm as LF
 import metal_fill_density_check as MFD
 import dfm_screen_check as DFM
 import phase3_one_shot_runner as R
+import metal_layer_density_check as MLD
+import pdk_metal_density_windows as WINDOWS
+from test_metal_fill_config_gen import _LAYERMAP, _TECHLEF, _DECK
 
 PROMOTION = 'phase3/librelane/37-default-promotion.json'
+_DENSITY_DECK = ('chip_area = extent.sized(0.0).area\n' + _DECK).replace(
+    'if (metal1.area', '# Rule M1.4: synthetic whole-die metal1\nif (metal1.area').replace(
+    'if (metal2.area', '# Rule M2.4: synthetic whole-die metal2\nif (metal2.area')
+
+
+@pytest.fixture(autouse=True)
+def neutral_declared_windows(tmp_path, monkeypatch):
+    # Source controls use the existing synthetic PDK input, never a foundry
+    # threshold disguised as a design-specific production default.
+    registry = BF.put(tmp_path / 'source-fixture-pdk-registry.json', {'pdks': [{
+        'name': 'neutral', 'metal_density_windows': {
+            'layers': {'metal1': [0.33, None], 'metal2': [0.33, None]},
+            '_scope': 'WHOLE-DIE synthetic input deck',
+            '_source': 'SOURCE_FIXTURE _DECK states 33 percent and no maximum'}}]})
+    monkeypatch.setattr(WINDOWS, '_REGISTRY_PATH', registry)
+
+
+def refresh_receipt(folder):
+    receipt = json.loads((folder / 'vibeic_receipt.json').read_text())
+    receipt['input'] = json.loads((folder / 'input_fingerprint.json').read_text())
+    receipt['sha256'] = {str(f.relative_to(folder)): LC.digest(f)
+                        for f in folder.rglob('*') if f.is_file() and f.name != 'vibeic_receipt.json'}
+    BF.put(folder / 'vibeic_receipt.json', receipt)
+
+
+def density_recipe(p, arm):
+    root = p / 'fixture_pdk/neutral'
+    for name, text in {'layers.map': _LAYERMAP, 'tech.lef': _TECHLEF,
+                       'density.rb': _DENSITY_DECK}.items():
+        (root / name).write_text(text)
+    config = p / 'phase3/librelane/34-config/KLayout.Density.json'
+    cfg = json.loads(config.read_text())
+    cfg.update(KLAYOUT_DEF_LAYER_MAP='/pdk/neutral/layers.map',
+               TECH_LEFS={'nominal': '/pdk/neutral/tech.lef'},
+               KLAYOUT_DENSITY_RUNSET='/pdk/neutral/density.rb')
+    BF.put(config, cfg)
+    folder = Path(arm['state']).parent
+    BF.put(folder / 'config.json', cfg)
+    fp = json.loads((folder / 'input_fingerprint.json').read_text())
+    fp.update(config=LC.digest(config), config_files=LC.config_file_hashes(
+        cfg, [(root, '/pdk/neutral')]))
+    BF.put(folder / 'input_fingerprint.json', fp)
+    (folder / 'invocation.log').write_text('SOURCE_FIXTURE: substituted native process\n'
+                                          'Executing rule M1.4\nExecuting rule M2.4\n')
+    refresh_receipt(folder)
+    specs = LF._density_ratio_specs(_DENSITY_DECK,
+                                   LF.build_metal_fill_config(_LAYERMAP, _TECHLEF, _DECK))
+    rows = {rule: dict(spec, ratio=0.40) for rule, spec in specs.items()}
+    report = BF.put(p / 'phase3/librelane/34-fill-ratios/density_ratios.json', {
+        'status': 'MEASURED', 'gds': arm['subject'], 'die_area_um2': 100.0,
+        'die': [0, 0, 10, 10], 'extent_from_deck': True, 'layers': rows})
+    arm['ratios'] = {'report': str(report), 'report_sha256': LC.digest(report),
+                     'subject_sha256': arm['subject_sha256'], 'layers': rows}
 
 
 def subject(tmp_path):
@@ -43,6 +99,7 @@ def subject(tmp_path):
     ff, _ = BF.producer(p, 'KLayout.Filler', {'gds': str(prefill), 'metrics': {}},
         {'gds': str(source), 'metrics': {}}, lane='34-fill/01-klayout-filler')
     arm = BF.density_record(p, source, 0)
+    density_recipe(p, arm)
     arm['filler'] = {'state': str(ff / 'state_out.json'),
         'state_sha256': LC.digest(ff / 'state_out.json'), 'gds_in': str(prefill),
         'gds_in_sha256': LC.digest(prefill), 'filled_gds': str(source),
@@ -53,15 +110,22 @@ def subject(tmp_path):
     pnr_gds = pnr / 'top.gds'
     pnr_gds.write_bytes(source.read_bytes())
     record = {'file_top': 'top', 'design_name': LC._def_design_name(filled),
+        'image': BF.IMAGE, 'pdk': 'neutral',
         'stream_state': str(folder / 'state_out.json'),
         'stream_state_sha256': LC.digest(folder / 'state_out.json')}
     for key, path in dict(filled_def=filled, stream=stream, prefill=prefill,
                           source=source, pnr_gds=pnr_gds, canonical=canonical).items():
         record[key], record[key + '_sha256'] = str(path), LC.digest(path)
+    record['gates'] = {}
+    for name in ('substance', 'port_labels'):
+        report = BF.put(p / 'phase3/librelane' / f'37-default-{name}.json',
+                        {'verdict': 'PASS', 'evidence_kind': 'SOURCE_FIXTURE'})
+        record['gates'][name] = {'rc': 0, 'report': str(report), 'sha256': LC.digest(report)}
     LF.update_record(p, 'gds', {'shipped': 'librelane', 'librelane': arm,
                               'shipped_sha256': LC.digest(source)})
     BF.put(p / PROMOTION, record)
     LF.update_record(p, 'default_stream', record)
+    assert LF.publish_metal_density(p, arm['ratios'], canonical, 'neutral') is not None
     return p, record, arm
 
 
@@ -69,10 +133,13 @@ def test_current_finished_bytes_are_consumed_by_both_existing_rows(tmp_path):
     p, record, arm = subject(tmp_path)
     findings, stats = MFD.tool_arm_findings(p)
     assert findings == [] and stats['density_errors'] == 0
+    assert stats['per_layer_density_verified'] is True and stats['layers_ok'] == 2
     ref = DFM.audit(p)['density_ref']
     assert ref['step34_pass'] is True
     assert ref.get('subject_sha256') == record['canonical_sha256']
     assert ref.get('measurement_verdict') == 'PASS'
+    assert ref['per_layer_consumer']['consumer'] == 'metal_layer_density_check.check'
+    assert ref['per_layer_consumer']['subject_sha256'] == record['canonical_sha256']
 
 
 @pytest.mark.parametrize('mutation', ['stream_execution', 'filler_execution', 'filled_def',
@@ -174,3 +241,82 @@ def test_default_ordinary_caller_uses_one_primary_without_a_mode_switch(tmp_path
     except LC.Refusal:
         pass
     assert calls == ['primary']
+
+
+def test_ordinary_primary_and_gate_invoke_existing_per_layer_consumer(tmp_path, monkeypatch):
+    p, record, _ = subject(tmp_path)
+    monkeypatch.setattr(R, '_layout_basis', lambda *a: ('current', None))
+    monkeypatch.setattr(R._ga, 'stream_refusal', lambda *a: None)
+    monkeypatch.setattr(R, '_vacuous_on_unrouted', lambda *a: None)
+    # The retained current result must be adopted without another producer.
+    monkeypatch.setattr(LF, 'run_chain', lambda *a, **k: pytest.fail('duplicate producer'))
+    calls, original = [], MLD.check
+    def observed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        calls.append((str(args[0]), result['verdict']))
+        return result
+    monkeypatch.setattr(MLD, 'check', observed)
+    result = R.step_gds(p, 'top', R.PdkConfig('neutral', '', '', '', None, '', None), '')
+    assert result.status == 'PASS'
+    assert MFD.main([str(p), '--json', str(p / 'step34.json')]) == 0
+    report = json.loads((p / 'step34.json').read_text())
+    assert report['summary']['per_layer_density_verified'] is True
+    assert report['summary']['layers_ok'] == 2
+    assert report['summary']['filled_gds_density'] == 'PASS'
+    ref = DFM.audit(p)['density_ref']
+    assert ref['step34_pass'] is True
+    assert ref['per_layer_consumer']['subject_sha256'] == record['canonical_sha256']
+    assert calls == [(str(p / LF.METAL_DENSITY_REL), 'PASS')] * 3
+
+
+@pytest.mark.parametrize('mutation', ['missing_report', 'empty_layers', 'missing_layer',
+    'prefill_subject', 'wrong_ratio_source', 'unexecuted_rules', 'below_floor',
+    'wrong_denominator', 'invented_window', 'unknown_windows', 'changed_output_gate'])
+def test_zero_errors_cannot_replace_the_current_per_layer_consumer(tmp_path, mutation):
+    p, record, arm = subject(tmp_path)
+    path = p / LF.METAL_DENSITY_REL
+    doc = json.loads(path.read_text())
+    if mutation == 'missing_report':
+        path.unlink()
+    elif mutation in ('empty_layers', 'missing_layer'):
+        doc['layers'] = {} if mutation == 'empty_layers' else {'metal1': doc['layers']['metal1']}
+    elif mutation == 'prefill_subject':
+        doc.update(gds=record['prefill'], gds_sha256=record['prefill_sha256'])
+    elif mutation == 'wrong_ratio_source':
+        doc['source']['report_sha256'] = '0' * 64
+    elif mutation == 'invented_window':
+        doc['windows'] = {'metal1': [0, 1], 'metal2': [0, 1]}
+    elif mutation == 'unexecuted_rules':
+        folder = Path(arm['state']).parent
+        (folder / 'invocation.log').write_text('SOURCE_FIXTURE: 0 errors, no executed rules\n')
+        refresh_receipt(folder)
+    elif mutation == 'unknown_windows':
+        BF.put(WINDOWS._REGISTRY_PATH, {'pdks': []})
+    elif mutation == 'changed_output_gate':
+        Path(record['gates']['substance']['report']).write_text('{"verdict":"FAIL"}')
+    else:
+        raw_path = Path(arm['ratios']['report'])
+        raw = json.loads(raw_path.read_text())
+        if mutation == 'below_floor':
+            raw['layers']['M2.4']['ratio'] = 0.10
+            arm['ratios']['layers'] = raw['layers']
+            doc['layers']['metal2'] = 0.10
+        else:
+            raw['die_area_um2'] = 50.0
+            doc['die_area_um2'] = 50.0
+        BF.put(raw_path, raw)
+        arm['ratios']['report_sha256'] = LC.digest(raw_path)
+        doc['source']['report_sha256'] = LC.digest(raw_path)
+        LF.update_record(p, 'gds', {'shipped': 'librelane', 'librelane': arm,
+                                  'shipped_sha256': arm['subject_sha256']})
+    if mutation != 'missing_report':
+        BF.put(path, doc)
+    findings, stats = MFD.tool_arm_findings(p)
+    assert any(f.severity == 'ERROR' for f in findings), findings
+    ref = DFM.audit(p)['density_ref']
+    assert ref['step34_pass'] is False
+    assert ref['measurement_verdict'] != 'PASS'
+    if mutation == 'below_floor':
+        assert stats['density_errors'] == 0
+        assert ref['measurement_verdict'] == 'FAIL'
+        assert ref['per_layer_consumer']['per_layer']['metal2']['status'] == 'FAIL'
