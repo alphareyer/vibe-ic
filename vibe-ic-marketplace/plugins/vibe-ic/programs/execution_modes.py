@@ -233,16 +233,14 @@ def _verified_git_identity(source_files: Mapping[str, str]) -> tuple[str, str]:
     not an identity for the bytes a provider will execute while the worktree is
     dirty, and an untracked helper is part of the source surface too.
     """
-    roots = []
-    for raw in source_files:
-        root = _git_root(Path(raw).resolve())
-        if root is not None and root not in roots:
-            roots.append(root)
-    if not roots:
+    source_paths = [Path(raw).resolve() for raw in source_files]
+    root = None
+    for path in source_paths:
+        root = _git_root(path)
+        if root is not None:
+            break
+    if root is None:
         raise Refusal('SOURCE_TREE_UNAVAILABLE', 'no Git worktree for adapter sources')
-    if len(roots) != 1:
-        raise Refusal('SOURCE_TREE_AMBIGUOUS', ','.join(map(str, roots)))
-    root = roots[0]
     try:
         dirty = subprocess.check_output(
             ['git', '-C', str(root), 'status', '--porcelain',
