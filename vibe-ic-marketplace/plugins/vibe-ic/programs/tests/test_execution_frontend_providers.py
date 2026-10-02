@@ -20,6 +20,9 @@ def test_factory_reachability_reverse_and_dedup():
     assert all(len(registry.adapters(row)) == 1 for row in EXPECTED)
     assert all(a.components[0].argv[0]=='python3' and '--step' in a.components[0].argv for row in EXPECTED for a in registry.adapters(row))
     assert p.choose('7') is p.choose('7'); assert p.choose('7').factory is not p.choose('8').factory
+    eight=registry.adapters('8')[0]
+    assert any(x.endswith('sdc_syntax_check.py') for x in eight.source_files)
+    assert any(x.endswith('sdc_validator_check.py') for x in eight.source_files)
 
 def test_real_boundary_consumes_output_and_reverse_red(tmp_path):
     source=tmp_path/'input'/'docs'; source.mkdir(parents=True); (source/'L1.md').write_text('# doc\n')
@@ -102,3 +105,15 @@ def test_rows_2_to_5_spy_order_and_argv(tmp_path, monkeypatch):
     (tmp_path/'input/issued_manifest.json').write_text(json.dumps({'step_id':'5','parameters':base,'files':{}}))
     calls.clear(); w.produce_5(tmp_path,tmp_path/'o5',top='chip_top',container='img')
     assert [x[0] for x in calls] == ['formal_harness_gen.generate','formal_property_run.run','step_full_stack_functional_tb','write']
+
+def test_step8_nonzero_and_manifest_mutation_refuse(tmp_path):
+    import hashlib
+    project=tmp_path/'p'; sdc=project/'phase2/stage2/constraints/top.sdc'; sdc.parent.mkdir(parents=True)
+    sdc.write_text('create_clock -period 10 [get_ports clk]\nset_input_delay 1 -clock clk [all_inputs]\n')
+    l8=project/'phase1/generated_docs/L8_TIMING_WAVEFORM.json'; l8.parent.mkdir(parents=True); l8.write_text(json.dumps({'clocks':[{'name':'clk','period_ns':11}]}))
+    files={str(x.relative_to(project)):hashlib.sha256(x.read_bytes()).hexdigest() for x in (sdc,l8)}
+    (project/'input').mkdir(); (project/'input/issued_manifest.json').write_text(json.dumps({'step_id':'8','parameters':{},'files':files}))
+    import execution_frontend_worker as w
+    with __import__('pytest').raises(RuntimeError): w.run_row('8',project,tmp_path/'out')
+    (project/'input/issued_manifest.json').write_text(json.dumps({'step_id':'9','parameters':{},'files':files}))
+    with __import__('pytest').raises(ValueError): w.run_row('8',project,tmp_path/'out2')

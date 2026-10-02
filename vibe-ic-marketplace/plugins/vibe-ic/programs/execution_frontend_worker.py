@@ -108,9 +108,10 @@ def produce_8(project,output,**k):
             l8 = staged / l8
         elif l8.exists() and str(l8).startswith(str(project)):
             l8 = staged / l8.relative_to(project)
+    validator_report = output / 'reports/sdc_validator.json'
     commands = [
         ['python3', str(Path(__file__).with_name('sdc_syntax_check.py')), str(staged), '--json', str(report)],
-        ['python3', str(Path(__file__).with_name('sdc_validator_check.py')), str(staged), '--l8', str(l8), '--json', str(report)],
+        ['python3', str(Path(__file__).with_name('sdc_validator_check.py')), str(staged), '--l8', str(l8), '--json', str(validator_report)],
     ]
     records=[]
     for argv in commands:
@@ -118,8 +119,8 @@ def produce_8(project,output,**k):
             return _write('8', output, 'sdc_syntax_check+sdc_validator_check', reason='L8 fixture missing', records=records)
         cp=subprocess.run(argv, capture_output=True, text=True)
         records.append({'argv':argv, 'rc':cp.returncode, 'stdout':cp.stdout, 'stderr':cp.stderr})
-        if cp.returncode not in (0, 2):
-            return _write('8', output, 'sdc_syntax_check+sdc_validator_check', reason='producer failed', records=records)
+        if cp.returncode != 0:
+            raise RuntimeError(f'Step8 producer failed rc={cp.returncode}: {argv[0]}')
     return report
 def produce_10(project,output,top=None,pdk=None,container=None,**k): return _require(project,output,'10','step_prelayout_signoff',top=top,pdk=pdk,container=container,**k)
 def produce_11(project,output,top=None,clock=None,pdk=None,**k): return _cli('11',project,output,('fault_scan_chain_insert','fault_atpg_run','bsdl_emit'))

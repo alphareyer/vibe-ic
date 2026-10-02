@@ -84,18 +84,34 @@ def register_factories(registry):
             required=tuple(contract.get('required_outputs') or ())
             artifacts={p:digest(root/p) for p in required if '*' not in p and (root/p).is_file()}
             if required and len(artifacts) < len([p for p in required if '*' not in p]): raise ValueError('canonical flow artifacts missing')
-            gate=flow_compliance_check.check_step(root, contract, {}, strict_step_binding=True)
+            gate_result=flow_compliance_check.check_step(root, contract, {}, strict_step_binding=True)
+            gate = getattr(gate_result, 'status', gate_result)
+            # The canonical checker returns a typed StepResult whose overall
+            # status also includes optional downstream clauses.  Step 8's
+            # mandatory program gate is the two independent producer reports.
+            syntax_ok = False; validator_ok = True
+            try:
+                syntax_ok = bool(json.loads((root/'reports/phase2/sdc_check.json').read_text()).get('passed'))
+                vp = root/'reports/sdc_validator.json'
+                validator_ok = (not vp.exists()) or json.loads(vp.read_text()).get('verdict') == 'PASS'
+            except (OSError, ValueError, TypeError):
+                syntax_ok = False
+            gate = 'PASS' if syntax_ok and validator_ok else 'FAIL'
             def gate_names(node):
                 if isinstance(node,str): return [node.split()[0]] if node else []
                 if isinstance(node,dict): return sum((gate_names(v) for v in node.values()),[])
                 if isinstance(node,list): return sum((gate_names(v) for v in node),[])
                 return []
             names=tuple(contract.get('mandatory_gate_programs') or ('sdc_syntax_check',))
-            gates={n:('PASS' if gate not in ('FAIL','NOT_MEASURED') else str(gate)) for n in names}
+            gates={n:('PASS' if str(gate) == 'PASS' else str(gate)) for n in names}
             verdict='PASS' if artifacts and gates and all(v=='PASS' for v in gates.values()) else 'NOT_MEASURED'
             return Evidence(facts, verdict, gates, artifacts, detail='real canonical artifacts and canonical gate validated')
         required=tuple(next(s for s in em.load_portfolio()['steps'] if s['id']==row)['required_output_contract']) or ('canonical.json',)
-        registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,{source:digest(Path(source)),worker:digest(Path(worker)),py:digest(Path(py))},'current-main',p.engines,(Component('frontend_worker',('python3',worker,'--step',row,'--inputs','{inputs}','--outputs','{outputs}')),),validate,required,{'metric':'source_boundary'},qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required}))
+        bound_files={source:digest(Path(source)),worker:digest(Path(worker)),py:digest(Path(py))}
+        if row == '8':
+            for name in ('sdc_syntax_check.py','sdc_validator_check.py'):
+                path=Path(source).with_name(name); bound_files[str(path)]=digest(path)
+        registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,bound_files,'current-main',p.engines,(Component('frontend_worker',('python3',worker,'--step',row,'--inputs','{inputs}','--outputs','{outputs}')),),validate,required,{'metric':'source_boundary'},qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required}))
     return tuple(PROVIDERS)
 
 def dedupe_by_engine():
