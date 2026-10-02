@@ -191,9 +191,13 @@ class Adapter:
     license_id: str | None = None
     own_no_tool_reason: str | None = None
     output_contract: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # Source-bound adapters may carry the exact Git tree they were issued
+    # from.  Legacy neutral fixtures leave this unset and retain their
+    # existing source_sha-only contract.
+    source_tree: str | None = None
 
     def identity(self) -> dict:
-        return dict(arm_id=self.arm_id, tool_id=self.tool_id,
+        identity = dict(arm_id=self.arm_id, tool_id=self.tool_id,
                     step_id=self.step_id, source_sha=self.source_sha,
                     source_files=dict(self.source_files),
                     tool_version=self.tool_version,
@@ -204,6 +208,62 @@ class Adapter:
                     output_contract={k: list(v) for k, v in self.output_contract.items()},
                     objective=dict(self.objective), role=self.role,
                     qualification_evidence=self.qualification_evidence)
+        if self.source_tree is not None:
+            identity['source_tree'] = self.source_tree
+        return identity
+
+
+def _git_root(path: Path) -> Path | None:
+    """Find the Git worktree owning ``path`` without trusting its revision."""
+    try:
+        value = subprocess.check_output(
+            ['git', '-C', str(path.parent if path.is_file() else path),
+             'rev-parse', '--show-toplevel'],
+            text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    root = Path(value).resolve()
+    return root if root.is_dir() else None
+
+
+def _verified_git_identity(source_files: Mapping[str, str]) -> tuple[str, str]:
+    """Return a clean worktree's commit/tree identity.
+
+    The cleanliness check deliberately precedes ``rev-parse``.  A HEAD hash is
+    not an identity for the bytes a provider will execute while the worktree is
+    dirty, and an untracked helper is part of the source surface too.
+    """
+    roots = []
+    for raw in source_files:
+        root = _git_root(Path(raw).resolve())
+        if root is not None and root not in roots:
+            roots.append(root)
+    if not roots:
+        raise Refusal('SOURCE_TREE_UNAVAILABLE', 'no Git worktree for adapter sources')
+    if len(roots) != 1:
+        raise Refusal('SOURCE_TREE_AMBIGUOUS', ','.join(map(str, roots)))
+    root = roots[0]
+    try:
+        dirty = subprocess.check_output(
+            ['git', '-C', str(root), 'status', '--porcelain',
+             '--untracked-files=all', '--'],
+            text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refusal('SOURCE_TREE_UNAVAILABLE', str(root)) from exc
+    if dirty:
+        raise Refusal('SOURCE_TREE_DIRTY', str(root))
+    try:
+        commit = subprocess.check_output(
+            ['git', '-C', str(root), 'rev-parse', 'HEAD'],
+            text=True, stderr=subprocess.DEVNULL).strip()
+        tree = subprocess.check_output(
+            ['git', '-C', str(root), 'rev-parse', 'HEAD^{tree}'],
+            text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refusal('SOURCE_TREE_UNAVAILABLE', str(root)) from exc
+    if not re.fullmatch(r'[0-9a-f]{40}', commit) or not re.fullmatch(r'[0-9a-f]{40}', tree):
+        raise Refusal('SOURCE_TREE_IDENTITY_INVALID', str(root))
+    return commit, tree
 
 
 class Registry:
@@ -241,6 +301,12 @@ class Registry:
             p = Path(path)
             if not p.is_file() or p.is_symlink() or digest(p) != expected:
                 raise Refusal('ADAPTER_SOURCE_MISMATCH', path)
+        if adapter.source_tree is not None:
+            if not re.fullmatch(r'[0-9a-f]{40}', adapter.source_tree):
+                raise Refusal('SOURCE_TREE_IDENTITY_INVALID', adapter.arm_id)
+            commit, tree = _verified_git_identity(adapter.source_files)
+            if adapter.source_sha != commit or adapter.source_tree != tree:
+                raise Refusal('ADAPTER_SOURCE_IDENTITY_MISMATCH', adapter.arm_id)
         for component in adapter.components:
             _relative(component.name)
             if len(Path(component.name).parts) != 1 or not component.argv or (
@@ -321,6 +387,15 @@ class Controller:
                  'own_no_tool_reason': a.own_no_tool_reason,
                  'cpus': a.cpus, 'ram_mb': a.ram_mb,
                  'license_id': a.license_id} for a in adapters]
+        # A source-bound arm is only eligible while its issued Git identity and
+        # every manifest digest still describe the bytes on disk.  A mutation
+        # after registration is therefore a named non-candidate, never a path
+        # to qualification or adoption.
+        for arm, row in zip(adapters, rows):
+            try:
+                self._source_current(arm)
+            except Refusal as exc:
+                row['admission'] = exc.code
         ready = [a for a, row in zip(adapters, rows) if row['admission'] == 'READY']
         external = [a for a in adapters if a.role == 'producer' and a.tool_id != 'vibeic']
         own = [a for a in ready if a.tool_id == 'vibeic']
@@ -649,6 +724,12 @@ class Controller:
 
     @staticmethod
     def _source_current(arm: Adapter) -> None:
+        if arm.source_tree is not None:
+            if not re.fullmatch(r'[0-9a-f]{40}', arm.source_tree):
+                raise Refusal('SOURCE_TREE_IDENTITY_INVALID', arm.arm_id)
+            commit, tree = _verified_git_identity(arm.source_files)
+            if arm.source_sha != commit or arm.source_tree != tree:
+                raise Refusal('ADAPTER_SOURCE_IDENTITY_MISMATCH', arm.arm_id)
         for name, expected in arm.source_files.items():
             path = Path(name)
             if not path.is_file() or path.is_symlink() or digest(path) != expected:

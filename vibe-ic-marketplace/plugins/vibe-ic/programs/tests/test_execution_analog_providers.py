@@ -6,6 +6,7 @@ import copy
 import math
 from pathlib import Path
 import sys
+import subprocess
 
 import pytest
 
@@ -50,6 +51,9 @@ def test_registered_routes_bind_real_sources_and_keep_one_engine_chain():
         assert adapter.components[0].argv[0] == "python3"
         assert adapter.components[0].argv[2:4] == ("--step", step)
         assert len(adapter.engine_families) >= 1
+        assert adapter.source_tree and len(adapter.source_tree) == 40
+        assert str(PROGRAMS / "_analog_producer_common.py") in adapter.source_files
+        assert str(PROGRAMS / "data/execution_modes_portfolio.json") in adapter.source_files
 
 
 def test_m1_registration_is_backed_by_the_canonical_all_runner():
@@ -134,6 +138,57 @@ def test_catalog_reverse_control_rejects_a_false_m2_producer_and_bad_a7_route():
 
 def test_catalog_reverse_control_rejects_an_explicit_empty_catalog():
     assert "CATALOG_EMPTY" in analog.validate_catalog({})
+
+
+def test_catalog_authorities_are_bound_to_declared_git_blobs_and_schema(monkeypatch):
+    original = analog._authority_documents
+
+    def mutated(commit):
+        coverage, flow, portfolio = original(commit)
+        coverage = dict(coverage)
+        coverage["schema"] = "execution_analog_coverage/attacker"
+        return coverage, flow, portfolio
+
+    monkeypatch.setattr(analog, "_authority_documents", mutated)
+    defects = analog.validate_catalog()
+    assert "COVERAGE_SCHEMA_MISMATCH" in defects
+
+
+def test_registration_ignores_caller_source_sha_and_issues_clean_commit_tree():
+    registry = em.Registry()
+    analog.register_factories(registry, source_sha="a" * 40)
+    observed = registry.adapters("A1")[0]
+    commit = subprocess.check_output(
+        ["git", "-C", str(PROGRAMS), "rev-parse", "HEAD"], text=True).strip()
+    tree = subprocess.check_output(
+        ["git", "-C", str(PROGRAMS), "rev-parse", "HEAD^{tree}"], text=True).strip()
+    assert observed.source_sha == commit
+    assert observed.source_tree == tree
+    assert observed.source_sha != "a" * 40
+
+
+def test_transitive_source_mutation_becomes_a_named_non_candidate(tmp_path):
+    registry = em.Registry()
+    analog.register_factories(registry)
+    source_sha = analog._repo_source_sha()
+    source = PROGRAMS / "_analog_producer_common.py"
+    original = source.read_bytes()
+    try:
+        source.write_bytes(original + b"\n# post-registration mutation\n")
+        input_file = tmp_path / "input.json"
+        input_file.write_text("{}\n", encoding="utf-8")
+        context = em.Context(
+            "A1", source_sha,
+            {"input.json": input_file},
+            {"step_id": "A1", "canonical_outputs": list(analog.PROVIDERS["A1"].canonical_outputs)},
+            tuple(next(s for s in em.load_portfolio()["steps"] if s["id"] == "A1")["mandatory_gate_programs"]),
+        )
+        planned = em.Controller(registry, em.Budget(1, 256, 1)).plan(context)
+        assert planned["arms"] == []
+        assert planned["status"] == "NOT_MEASURED"
+        assert any(row["admission"] == "SOURCE_TREE_DIRTY" for row in planned["portfolio"])
+    finally:
+        source.write_bytes(original)
 
 
 @pytest.mark.parametrize(

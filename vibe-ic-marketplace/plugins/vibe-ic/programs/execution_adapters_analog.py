@@ -30,6 +30,7 @@ from _analog_a_check_common import MAX_DEGRADATION_PCT
 
 PROGRAMS = Path(__file__).resolve().parent
 COVERAGE_FILE = PROGRAMS / "data" / "execution_analog_coverage.json"
+PORTFOLIO_FILE = PROGRAMS / "data" / "execution_modes_portfolio.json"
 WORKER = PROGRAMS / "execution_analog_worker.py"
 FLOW_FILE = PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml"
 ROWS = tuple(json.loads(COVERAGE_FILE.read_text(encoding="utf-8"))["rows"])
@@ -118,17 +119,96 @@ ENGINE_FAMILIES = {step_id: provider.engine_family for step_id, provider in PROV
 
 
 def _repo_source_sha() -> str:
-    """Return the current source revision without inventing a runtime result."""
+    """Return the issued commit only when the source tree is clean."""
+    source_files = {str(Path(__file__).resolve()): em.digest(Path(__file__).resolve())}
+    commit, _ = em._verified_git_identity(source_files)
+    return commit
+
+
+def _source_identity() -> tuple[str, str]:
+    """Return the clean commit/tree identity used for provider issuance."""
+    source_files = {str(Path(__file__).resolve()): em.digest(Path(__file__).resolve())}
+    return em._verified_git_identity(source_files)
+
+
+def _head_identity() -> tuple[str, str]:
+    """Read the declared HEAD/tree for validation diagnostics only.
+
+    Qualification uses ``_source_identity`` and therefore refuses a dirty
+    tree.  Validation may still inspect a dirty tree so it can name the
+    authority blob that diverged instead of silently treating it as current.
+    """
+    try:
+        commit = subprocess.check_output(
+            ["git", "-C", str(PROGRAMS), "rev-parse", "HEAD"],
+            text=True, stderr=subprocess.DEVNULL).strip()
+        tree = subprocess.check_output(
+            ["git", "-C", str(PROGRAMS), "rev-parse", "HEAD^{tree}"],
+            text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise em.Refusal("ANALOG_PROVIDER_SOURCE_UNAVAILABLE", str(PROGRAMS)) from exc
+    if len(commit) != 40 or len(tree) != 40:
+        raise em.Refusal("ANALOG_PROVIDER_SOURCE_IDENTITY_INVALID", str(PROGRAMS))
+    return commit, tree
+
+
+def _repo_root() -> Path:
     try:
         value = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=PROGRAMS, text=True,
-            stderr=subprocess.DEVNULL,
+            ["git", "-C", str(PROGRAMS), "rev-parse", "--show-toplevel"],
+            text=True, stderr=subprocess.DEVNULL,
         ).strip()
-        if len(value) == 40 and all(c in "0123456789abcdef" for c in value):
-            return value
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return hashlib.sha1(Path(__file__).read_bytes()).hexdigest()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise em.Refusal("ANALOG_PROVIDER_SOURCE_UNAVAILABLE", str(PROGRAMS)) from exc
+    root = Path(value).resolve()
+    if not root.is_dir():
+        raise em.Refusal("ANALOG_PROVIDER_SOURCE_UNAVAILABLE", str(root))
+    return root
+
+
+def _git_blob(commit: str, path: Path) -> bytes:
+    root = _repo_root()
+    try:
+        relative = path.resolve().relative_to(root).as_posix()
+    except ValueError as exc:
+        raise em.Refusal("ANALOG_PROVIDER_SOURCE_OUTSIDE_REPO", str(path)) from exc
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(root), "show", f"{commit}:{relative}"],
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise em.Refusal("ANALOG_PROVIDER_AUTHORITY_MISSING", relative) from exc
+
+
+def _authority_documents(commit: str) -> tuple[dict, dict, dict]:
+    """Load coverage, flow and portfolio from the declared Git commit."""
+    try:
+        coverage = json.loads(_git_blob(commit, COVERAGE_FILE).decode("utf-8"))
+        import yaml
+        flow = yaml.safe_load(_git_blob(commit, FLOW_FILE).decode("utf-8"))
+        portfolio = json.loads(_git_blob(commit, PORTFOLIO_FILE).decode("utf-8"))
+    except (ImportError, UnicodeDecodeError, ValueError, TypeError) as exc:
+        raise em.Refusal("ANALOG_PROVIDER_AUTHORITY_INVALID", str(exc)) from exc
+    if not isinstance(coverage, Mapping) or not isinstance(flow, Mapping) or not isinstance(portfolio, Mapping):
+        raise em.Refusal("ANALOG_PROVIDER_AUTHORITY_INVALID", "top-level authority is not a mapping")
+    return dict(coverage), dict(flow), dict(portfolio)
+
+
+def _authority_source_errors(commit: str) -> list[str]:
+    """Reject any working-tree authority bytes outside the issued Git blobs."""
+    errors: list[str] = []
+    for label, path in (("COVERAGE", COVERAGE_FILE), ("FLOW", FLOW_FILE),
+                        ("PORTFOLIO", PORTFOLIO_FILE)):
+        try:
+            expected = _git_blob(commit, path)
+            actual = path.read_bytes()
+        except OSError:
+            errors.append(label + "_AUTHORITY_UNREADABLE")
+            continue
+        if actual != expected:
+            errors.append(label + "_AUTHORITY_BLOB_MISMATCH")
+    return errors
 
 
 def _source_path(name: str) -> Path:
@@ -138,10 +218,81 @@ def _source_path(name: str) -> Path:
     return path
 
 
+def _local_import_path(module: str, current: Path, level: int = 0) -> Path | None:
+    """Resolve a statically named import to a local ``programs`` module."""
+    if level:
+        try:
+            relative = current.resolve().relative_to(PROGRAMS.resolve())
+        except ValueError:
+            return None
+        parts = list(relative.with_suffix("").parts)
+        if parts and parts[-1] == "__init__":
+            parts.pop()
+        package = parts[:-1]
+        if level > len(package) + 1:
+            return None
+        parts = package[:len(package) - (level - 1)] + ([module] if module else [])
+    else:
+        parts = module.split(".") if module else []
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        return None
+    candidate = PROGRAMS.joinpath(*parts)
+    for path in (candidate.with_suffix(".py"), candidate / "__init__.py"):
+        if path.is_file() and not path.is_symlink():
+            return path.resolve()
+    return None
+
+
+_IMPORT_CACHE: dict[str, tuple[Path, ...]] = {}
+
+
+def _python_import_closure(paths: list[Path]) -> tuple[Path, ...]:
+    """Return the complete local Python import closure for a source route."""
+    def closure(seed: Path) -> tuple[Path, ...]:
+        key = str(seed.resolve())
+        cached = _IMPORT_CACHE.get(key)
+        if cached is not None:
+            return cached
+        pending = [seed.resolve()]
+        seen: dict[str, Path] = {}
+        while pending:
+            path = pending.pop()
+            key = str(path)
+            if key in seen:
+                continue
+            seen[key] = path
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            except (OSError, SyntaxError, UnicodeError):
+                continue
+            imports: list[tuple[str, int]] = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imports.extend((alias.name, 0) for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    imports.append((node.module or "", node.level))
+            for module, level in imports:
+                target = _local_import_path(module, path, level)
+                if target is not None and str(target) not in seen:
+                    pending.append(target)
+        result = tuple(seen.values())
+        _IMPORT_CACHE[str(seed.resolve())] = result
+        return result
+
+    merged: dict[str, Path] = {}
+    for seed in paths:
+        if seed.suffix == ".py":
+            merged.update({str(path): path for path in closure(seed)})
+    return tuple(merged.values())
+
+
 def _source_manifest(provider: AnalogProvider) -> dict[str, str]:
-    paths = [Path(__file__), WORKER, COVERAGE_FILE, FLOW_FILE]
+    paths = [Path(__file__), WORKER, COVERAGE_FILE, FLOW_FILE, PORTFOLIO_FILE]
     paths.extend(_source_path(name) for name in provider.source_files)
     paths.extend(_source_path(gate + ".py") for gate in provider.mandatory_gates)
+    paths.append(_source_path("execution_modes.py"))
+    non_python = [path for path in paths if path.suffix != ".py"]
+    paths = non_python + list(_python_import_closure(paths))
     python = shutil.which("python3") or sys.executable
     paths.append(Path(python).resolve())
     return {str(path.resolve()): em.digest(path.resolve()) for path in dict.fromkeys(paths)}
@@ -213,7 +364,8 @@ def _fresh_rows() -> tuple[dict, ...]:
     candidate against the checked-in source contract instead of comparing it
     with another projection of that same candidate.
     """
-    payload = json.loads(COVERAGE_FILE.read_text(encoding="utf-8"))
+    commit, _ = _source_identity()
+    payload, _, _ = _authority_documents(commit)
     rows = payload.get("rows")
     if not isinstance(rows, list):
         raise ValueError("analog coverage rows must be a list")
@@ -310,9 +462,28 @@ def validate_catalog(catalog: Mapping[str, Mapping[str, object]] | None = None) 
         errors.append("CANONICAL_ROW_ORDER")
 
     try:
-        expected_rows = {row["step_id"]: row for row in _fresh_rows()}
-    except (OSError, ValueError, KeyError, TypeError):
-        return tuple(errors + ["CANONICAL_SOURCE_UNREADABLE"])
+        commit, tree = _head_identity()
+        coverage_authority, flow_authority, portfolio_authority = _authority_documents(commit)
+        errors.extend(_authority_source_errors(commit))
+        if coverage_authority.keys() != {"schema", "rows"}:
+            errors.append("COVERAGE_TOP_LEVEL_SCHEMA_MISMATCH")
+        if coverage_authority.get("schema") != "execution_analog_coverage/1":
+            errors.append("COVERAGE_SCHEMA_MISMATCH")
+        try:
+            current_coverage = json.loads(COVERAGE_FILE.read_text(encoding="utf-8"))
+            if (set(current_coverage) != set(coverage_authority) or
+                    current_coverage.get("schema") != coverage_authority.get("schema")):
+                errors.append("COVERAGE_SCHEMA_MISMATCH")
+        except (OSError, ValueError, AttributeError):
+            errors.append("COVERAGE_TOP_LEVEL_SCHEMA_MISMATCH")
+        if flow_authority.keys() != {"version", "flow_name", "total_steps",
+                                     "analog_steps", "stages", "steps", "final_gate"}:
+            errors.append("FLOW_TOP_LEVEL_SCHEMA_MISMATCH")
+        if portfolio_authority.keys() != {"schema_version", "meta", "tools", "steps"}:
+            errors.append("PORTFOLIO_TOP_LEVEL_SCHEMA_MISMATCH")
+        expected_rows = {row["step_id"]: row for row in coverage_authority["rows"]}
+    except (OSError, ValueError, KeyError, TypeError, em.Refusal):
+        return tuple(dict.fromkeys(errors + ["CANONICAL_SOURCE_UNREADABLE"]))
 
     for step_id in STEP_IDS:
         expected = expected_rows.get(step_id)
@@ -323,6 +494,10 @@ def validate_catalog(catalog: Mapping[str, Mapping[str, object]] | None = None) 
         if not isinstance(actual, Mapping):
             errors.append(step_id + ":ROW_INVALID")
             continue
+
+        expected_public_keys = set(expected) | {"known_gap", "fallback", "source_family", "provider_module"}
+        if set(actual) != expected_public_keys:
+            errors.append(step_id + ":ROW_SCHEMA_MISMATCH")
 
         # These are the public fields whose mutation can change the route or
         # make a row look complete while detaching it from the source flow.
@@ -361,7 +536,7 @@ def validate_catalog(catalog: Mapping[str, Mapping[str, object]] | None = None) 
     # Bind the adapter view to both machine-readable execution authorities.
     try:
         import yaml
-        flow = yaml.safe_load(FLOW_FILE.read_text(encoding="utf-8"))
+        flow = flow_authority
         flow_rows = {
             row.get("id"): row for row in flow.get("steps", ())
             if isinstance(row, Mapping) and row.get("id") in STEP_IDS
@@ -370,7 +545,7 @@ def validate_catalog(catalog: Mapping[str, Mapping[str, object]] | None = None) 
         flow_rows = {}
         errors.append("YAML_BINDING_UNREADABLE")
     try:
-        portfolio = json.loads((PROGRAMS / "data" / "execution_modes_portfolio.json").read_text(encoding="utf-8"))
+        portfolio = portfolio_authority
         portfolio_rows = {
             row.get("id"): row for row in portfolio.get("steps", ())
             if isinstance(row, Mapping) and row.get("id") in STEP_IDS
@@ -471,12 +646,14 @@ def register_factories(registry: em.Registry, *, source_sha: str | None = None) 
     """Register only complete, reachable source routes with the public Registry."""
     if not hasattr(registry, "register"):
         raise TypeError("registry must provide register")
+    # ``source_sha`` remains a source-compatible keyword for older callers,
+    # but it is intentionally ignored.  Production identity is issued from a
+    # clean commit/tree after the authority and source manifests are checked;
+    # callers cannot inject an arbitrary revision into an adapter.
+    source_revision, source_tree = _source_identity()
     defects = validate_catalog()
     if defects:
         raise em.Refusal("ANALOG_CATALOG_INVALID", ",".join(defects))
-    source_revision = source_sha or _repo_source_sha()
-    if len(source_revision) != 40 or any(c not in "0123456789abcdef" for c in source_revision):
-        raise em.Refusal("ANALOG_PROVIDER_SOURCE_SHA_INVALID", source_revision)
     registered = []
     for step_id in IMPLEMENTED_STEPS:
         provider = PROVIDERS[step_id]
@@ -494,6 +671,7 @@ def register_factories(registry: em.Registry, *, source_sha: str | None = None) 
             step_id=step_id,
             source_sha=source_revision,
             source_files=manifest,
+            source_tree=source_tree,
             tool_version="source-only",
             engine_families=provider.engine_family,
             components=(component,),
