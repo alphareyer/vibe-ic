@@ -30,3 +30,18 @@ def test_real_boundary_consumes_output_and_reverse_red(tmp_path):
 def test_step6_explicitly_not_measured_without_fpga():
     result=p.produce('6', Path('/missing'), fpga=False)
     assert result.state=='NOT_IMPLEMENTED'
+
+def test_controller_executes_worker_and_validator_reddens_on_output_mutation(tmp_path):
+    project=tmp_path/'project'; src=project/'input'/'docs'; src.mkdir(parents=True); f=src/'L1.md'; f.write_text('# design\n')
+    registry=em.Registry(); p.register_factories(registry); portfolio=em.load_portfolio(); row=next(s for s in portfolio['steps'] if s['id']=='D1')
+    import subprocess
+    sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=Path(__file__).parents[2],text=True).strip()
+    context=em.Context('D1',sha,{'input/docs/L1.md':f},{},tuple(row['mandatory_gate_programs']))
+    # Context requires a non-empty objective; use the canonical gate objective.
+    context=em.Context('D1',sha,{'input/docs/L1.md':f},{'metric':'source_boundary'},tuple(row['mandatory_gate_programs']))
+    run=tmp_path/'run'; result=em.Controller(registry,em.Budget(1,512,1),portfolio).run(context,run)
+    assert result['status']=='AWAITING_AI_SELECTION'
+    out=next((run/'frontend_D1'/'outputs').glob('canonical.json'))
+    assert json.loads(out.read_text())['schema']=='frontend_worker_output/1'
+    out.write_text('{}\n')
+    with __import__('pytest').raises(ValueError): registry.adapters('D1')[0].validate(out.parent,{})
