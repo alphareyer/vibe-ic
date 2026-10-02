@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import threading
 import time
@@ -36,10 +37,16 @@ def validate_text(outputs, binding):
 
 
 def adapter(arm='a', *, fault='none', duration=.02, cost=5, **kw):
+    # Each named neutral arm is an explicit source fixture.  This keeps the
+    # test's two independent producers distinct by source bytes while the
+    # production controller remains immune to tool_id relabeling.
+    fixture = Path('/tmp') / ('execution_modes_tool_' + re.sub(r'[^A-Za-z0-9_.-]', '_', str(arm)) + '.py')
+    if not fixture.is_file() or fixture.read_bytes() != TOOL.read_bytes():
+        shutil.copyfile(TOOL, fixture)
     source = {str(p.resolve()): em.digest(p.resolve()) for p in
-              (Path(sys.executable), TOOL, Path(__file__))}
+              (Path(sys.executable), TOOL, fixture, Path(__file__))}
     components = tuple(em.Component(action, (
-        str(Path(sys.executable).resolve()), str(TOOL.resolve()), '{inputs}',
+        str(Path(sys.executable).resolve()), str(fixture.resolve()), '{inputs}',
         '{outputs}', action, fault, str(duration), str(cost)), timeout_s=2)
         for action in ('transform', 'measure'))
     return em.Adapter(arm, 'neutral_' + arm, '1', BASE, source, sys.version,
@@ -138,6 +145,17 @@ def test_checker_is_not_alternate_producer_and_same_family_disclosed(tmp_path):
     assert plan['arms'] == ['a']
     assert {r['arm_id']: r['admission'] for r in plan['portfolio']} == {
         'a': 'READY', 'b': 'SAME_ENGINE_FAMILY', 'checker': 'COMPLEMENTARY_CHECKER'}
+
+
+def test_ultra_deduplicates_same_implementation_after_tool_relabel(tmp_path):
+    ctx = context(tmp_path)
+    first = adapter('same-implementation')
+    relabelled = replace(first, arm_id='relabelled', tool_id='invented-tool',
+                         engine_families=('invented-family',))
+    plan = controller(first, relabelled).plan(ctx, 'ultra-mode')
+    assert len(plan['arms']) == 1
+    discarded = next(row for row in plan['portfolio'] if row['arm_id'] not in plan['arms'])
+    assert discarded['admission'] == 'SAME_ENGINE_FAMILY'
 
 
 def test_license_unavailable_is_named_and_not_runnable(tmp_path):

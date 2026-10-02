@@ -40,7 +40,45 @@ from _atomic_artefact import write_bytes, write_json
 # digest or a secret serialized beside editable run receipts. A new interpreter
 # cannot adopt a previous issuer's run: durable external supervision is not wired.
 _COMPLETION_KEY = secrets.token_bytes(32)
-_ISSUED_AUTHORITY: dict[str, str] = {}
+def _make_authority_ledger():
+    """Append-only in-process authority index.
+
+    A receipt may be rewritten by an untrusted adapter, but an issued
+    completion payload is recorded once and can never be replaced or removed
+    through the public module object.  The signature is still checked; this
+    ledger binds it to the controller observation that created it.
+    """
+    entries: dict[str, str] = {}
+
+    class AuthorityLedger:
+        __slots__ = ()
+
+        def __setitem__(self, path: str, payload: str) -> None:
+            if path in entries and entries[path] != payload:
+                raise Refusal('ISSUED_AUTHORITY_REWRITE', path)
+            entries[path] = payload
+
+        def __getitem__(self, path: str) -> str:
+            return entries[path]
+
+        def get(self, path: str, default=None):
+            return entries.get(path, default)
+
+    return AuthorityLedger()
+
+
+_ISSUED_AUTHORITY = _make_authority_ledger()
+def _record_authority(path: Path | str, payload: str,
+                      ledger=_ISSUED_AUTHORITY) -> None:
+    """Record through the controller-owned ledger captured at definition."""
+    ledger[str(path)] = payload
+
+
+def _authority_payload(path: Path | str, default=None,
+                       ledger=_ISSUED_AUTHORITY):
+    return ledger.get(str(path), default)
+
+
 _CONTROL_NAMES = frozenset({'.', '..', 'plan.json', 'result.json', 'adoption.json',
                             'refusal.json', 'issued-plan.json', 'selected'})
 
@@ -83,7 +121,7 @@ def _provider_identity(adapter: 'Adapter') -> tuple:
     """
     argv0 = adapter.components[0].argv[0] if adapter.components else ''
     resolved = shutil.which(argv0) or argv0
-    return (str(adapter.tool_id), str(Path(resolved).resolve()),
+    return (str(Path(resolved).resolve()),
             tuple(sorted((str(Path(path).resolve()), str(value))
                          for path, value in adapter.source_files.items())))
 
@@ -100,7 +138,7 @@ def _issued(path: Path) -> dict:
     if not isinstance(document.get('signature'), str) or not hmac.compare_digest(
             expected, document['signature']):
         raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
-    observed = _ISSUED_AUTHORITY.get(str(path))
+    observed = _authority_payload(path)
     if observed is None:
         raise Refusal('ISSUED_AUTHORITY_UNAVAILABLE', str(path))
     if json.loads(observed) != document['payload']:
@@ -445,7 +483,7 @@ class Controller:
                         **asdict(superiority),
                         'receipts': {k: str(v) for k, v in superiority.receipts.items()}})
         _write(output / 'plan.json', plan)
-        _ISSUED_AUTHORITY[str(output / 'issued-plan.json')] = json.dumps(plan)
+        _record_authority(output / 'issued-plan.json', json.dumps(plan))
         _write(output / 'issued-plan.json', _seal(plan))
         if not plan['arms']:
             _write(output / 'result.json', plan)
@@ -603,7 +641,7 @@ class Controller:
         completion.update(actual_status=receipt['status'], actual_reason=receipt['reason'],
                           evidence=receipt.get('evidence'),
                           ended_ns=receipt['ended_ns'], run_root=str(root))
-        _ISSUED_AUTHORITY[str(directory / 'issued-completion.json')] = json.dumps(completion)
+        _record_authority(directory / 'issued-completion.json', json.dumps(completion))
         _write(directory / 'issued-completion.json', _seal(completion))
         _write(directory / 'receipt.json', receipt)
         return receipt
@@ -658,7 +696,7 @@ class Controller:
         manifest = dict(generation=generation, directory=str(target),
                         run_id=receipt['run_id'], arm_id=receipt['arm_id'],
                         binding=receipt['binding'], outputs=hashes)
-        _ISSUED_AUTHORITY[str(target / 'manifest.json')] = json.dumps(manifest)
+        _record_authority(target / 'manifest.json', json.dumps(manifest))
         _write(target / 'manifest.json', _seal(manifest))
         return manifest
 
@@ -778,6 +816,16 @@ class Controller:
                             evidence=receipt['evidence'],
                             independence=plan['independence'],
                             selected_generation=generation)
+            # Backend rows have one canonical downstream consumer.  Invoke it
+            # on the immutable selected generation before recording adoption;
+            # no consumer may read the mutable run root after this boundary.
+            if 'backend_result.json' in generation.get('outputs', {}):
+                try:
+                    import execution_backend_consumer as _backend_consumer
+                    _backend_consumer.import_selected(
+                        Path(generation['directory']), context, self, root, adoption)
+                except ModuleNotFoundError:
+                    pass
             _write(root / 'adoption.json', adoption)
         except Refusal as exc:
             adoption.update(reason=exc.code, detail=str(exc))

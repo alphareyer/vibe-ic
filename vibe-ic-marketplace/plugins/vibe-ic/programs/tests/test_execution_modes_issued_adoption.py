@@ -57,6 +57,16 @@ def test_serialized_completion_cannot_replace_observed_process_authority(tmp_pat
     assert observed(c, ctx, root, H.choice(ctx, root)) == 'REFUSED:ISSUED_AUTHORITY_INVALID'
 
 
+def test_same_process_authority_ledger_rejects_co_mutation(tmp_path):
+    c, ctx, root = failed_measurement(tmp_path)
+    path = root / 'a/issued-completion.json'
+    payload = json.loads(path.read_text())['payload']
+    with pytest.raises(AttributeError):
+        M._ISSUED_AUTHORITY._entries = {}
+    with pytest.raises(M.Refusal, match='ISSUED_AUTHORITY_REWRITE'):
+        M._ISSUED_AUTHORITY[str(path)] = json.dumps({**payload, 'actual_status': 'ELIGIBLE'})
+
+
 def test_a_signature_alone_cannot_create_source_owned_completion(tmp_path):
     c, ctx, root = failed_measurement(tmp_path)
     path = root / 'a/issued-completion.json'

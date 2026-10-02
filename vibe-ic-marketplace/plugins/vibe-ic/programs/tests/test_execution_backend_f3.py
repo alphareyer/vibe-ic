@@ -21,14 +21,17 @@ from execution_adapters_backend import (
     validate,
     validate_streamout_receipt,
 )
-from execution_provider_catalog import BACKEND_IDS, coverage_rows, coverage_table
+from execution_backend_worker import resolve_input_contract
+import execution_backend_consumer
+from execution_provider_catalog import BACKEND_IDS, coverage_rows, coverage_table, current_source_identity
 
-BASE = "59cd75606885b71ca7d11bbe34baf2541671be68"
+BASE = current_source_identity()
+PRE_FIX_BASE = "59cd75606885b71ca7d11bbe34baf2541671be68"
 
 
 def test_pre_fix_base_could_not_reach_backend_factory(tmp_path):
     path = "vibe-ic-marketplace/plugins/vibe-ic/programs/execution_adapters_backend.py"
-    assert subprocess.run(["git", "cat-file", "-e", f"{BASE}:{path}"]).returncode != 0
+    assert subprocess.run(["git", "cat-file", "-e", f"{PRE_FIX_BASE}:{path}"]).returncode != 0
     proc = subprocess.run([sys.executable, "-c", "import execution_adapters_backend"],
                           cwd=tmp_path, env={"PATH": "/usr/bin:/bin", "PYTHONPATH": ""},
                           text=True, capture_output=True)
@@ -81,6 +84,7 @@ def test_backend_argv_binds_complete_typed_parameter_envelope():
     assert params["top"] == "chip_top"
     assert params["die_um"] == [100, 100] and params["util"] == 0.55
     assert "input_contract" in params and "source_sha" in params
+    assert len(params["source_sha"]) == len(params["source_tree_sha"]) == 40
 
 
 def test_backend_component_calls_real_worker_and_records_gate_boundary(tmp_path):
@@ -102,6 +106,82 @@ def test_backend_component_calls_real_worker_and_records_gate_boundary(tmp_path)
     assert result["step_id"] == "15"
     assert "gate_ledger" in result and result["verdict"] in {"NOT_MEASURED", "FAIL"}
     assert result["canonical_receipts"][0]["producer"] == "execution_backend_producers.produce"
+
+
+def test_required_input_zero_byte_is_missing_but_nonempty_or_alternate_is_valid(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    zero = project / "empty.v"
+    zero.write_bytes(b"")
+    assert resolve_input_contract(project, [{"path": "empty.v"}]) == ["empty.v"]
+    alternate = project / "real.sv"
+    alternate.write_text("module top; endmodule\n")
+    assert resolve_input_contract(project, [{"path": "empty.v OR real.sv"}]) == []
+
+
+def test_source_identity_binds_worker_runner_and_librelane_contract():
+    adapter = register_backend_adapters(source_sha=BASE, available=False).adapters("19")[0]
+    names = {Path(path).name for path in adapter.source_files}
+    assert {"execution_backend_worker.py", "execution_backend_producers.py",
+            "phase3_one_shot_runner.py", "librelane_contract.py",
+            "librelane_cts_hold.py"}.issubset(names)
+
+
+def test_controller_adoption_calls_selected_backend_consumer(tmp_path, monkeypatch):
+    # A finite source fixture gives the public controller a real eligible arm;
+    # the consumer spy proves adoption passes the immutable selected generation
+    # rather than the mutable run root.
+    script = tmp_path / "backend_fixture.py"
+    script.write_text(
+        "import json, os, pathlib, sys\n"
+        "inputs, outputs = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])\n"
+        "binding = json.loads(os.environ['VIBEIC_EXECUTION_BINDING'])\n"
+        "result = {'binding': binding, 'step_id': '15', 'producer_verdict': 'PASS',\n"
+        " 'gates': {g: 'PASS' for g in binding['required_gates']},\n"
+        " 'canonical_receipts': [{'producer': 'backend_fixture'}],\n"
+        " 'outputs': {}, 'verdict': 'PASS'}\n"
+        "(outputs / 'backend_result.json').write_text(json.dumps(result))\n")
+    source = tmp_path / "seed.txt"
+    source.write_text("fixture\n")
+    row = next(r for r in coverage_rows() if r["step_id"] == "15")
+    context = em.Context("15", BASE, {"project/input/seed.txt": source},
+                         {"metric": "canonical_evidence", "direction": "max"},
+                         tuple(row["consumer_gates"]), "librelane")
+
+    def validator(outputs, binding):
+        result = json.loads((outputs / "backend_result.json").read_text())
+        return em.Evidence(binding, result["verdict"], result["gates"],
+                           {"backend_result.json": em.digest(outputs / "backend_result.json")})
+
+    adapter = em.Adapter(
+        "backend_consumer_fixture", "fixture", "15", BASE,
+        {str(Path(sys.executable).resolve()): em.digest(Path(sys.executable)),
+         str(script.resolve()): em.digest(script), str(Path(__file__).resolve()): em.digest(Path(__file__))},
+        sys.version, ("fixture",),
+        (em.Component("producer", (str(Path(sys.executable).resolve()), str(script),
+                                    "{inputs}", "{outputs}"), 5),), validator,
+        ("backend_result.json",), {"metric": "canonical_evidence", "direction": "max"},
+        output_contract={name: ("backend_result.json",) for name in row["canonical_outputs"]},
+        qualification_evidence="R2 finite producer fixture", available=True)
+    registry = em.Registry(); registry.register(adapter)
+    controller = em.Controller(registry, em.Budget(cpus=1, ram_mb=512, workers=1))
+    seen = {}
+
+    def consume(selected, ctx, ctl, run, adopted):
+        seen.update(selected=Path(selected), run=Path(run), status=adopted["status"])
+        return {"status": "CONSUMED"}
+
+    monkeypatch.setattr(execution_backend_consumer, "import_selected", consume)
+    root = tmp_path / "consumer-run"
+    assert controller.run(context, root)["candidate_statuses"][adapter.arm_id] == "ELIGIBLE"
+    receipt_path = root / adapter.arm_id / "receipt.json"
+    choice = {"arm_id": adapter.arm_id, "binding": context.binding(),
+              "receipt_sha256": em.digest(receipt_path), "reviewer": "R2 test",
+              "rationale": "selected-generation consumer control"}
+    assert controller.adopt(context, root, choice)["status"] == "ADOPTED"
+    assert seen["status"] == "ADOPTED"
+    assert seen["selected"].parent == root / "selected"
+    assert seen["selected"] != root / adapter.arm_id / "outputs"
 
 
 def test_public_controller_refuses_changed_actual_producer_call(tmp_path):

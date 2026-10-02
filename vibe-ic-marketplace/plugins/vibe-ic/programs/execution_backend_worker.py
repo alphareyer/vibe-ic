@@ -24,7 +24,10 @@ def _copy_input_tree(inputs: Path, project: Path) -> None:
     if source.is_dir():
         shutil.copytree(source, project)
     else:
-        shutil.copytree(inputs, project, ignore=shutil.ignore_patterns("*.json"))
+        # The controller's input binding is authoritative; JSON is a valid
+        # canonical input (netlist metadata, route declarations, manifests),
+        # so do not silently drop it in the compatibility layout.
+        shutil.copytree(inputs, project)
 
 
 def resolve_contract(project: Path, patterns) -> tuple[dict, list[str]]:
@@ -46,7 +49,13 @@ def resolve_input_contract(project: Path, declarations) -> list[str]:
         if not isinstance(declaration, dict) or not declaration.get("path"):
             continue
         patterns = [part.strip() for part in str(declaration["path"]).split(" OR ")]
-        if not any(project.glob(pattern) for pattern in patterns):
+        # A declared path is substantive only when it resolves to a regular,
+        # non-empty file.  Preserve OR semantics: one non-empty alternate is
+        # sufficient, while a zero-byte placeholder is still missing.
+        present = any(
+            p.is_file() and not p.is_symlink() and p.stat().st_size > 0
+            for pattern in patterns for p in project.glob(pattern))
+        if not present:
             missing.append(str(declaration["path"]))
     return missing
 

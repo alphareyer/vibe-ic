@@ -6,6 +6,7 @@ import json
 
 import execution_modes as em
 from execution_backend_gates import evaluate
+from execution_adapters_backend import ROWS
 
 
 def import_selected(project, context, controller, run, adopted):
@@ -13,15 +14,38 @@ def import_selected(project, context, controller, run, adopted):
     project, run = Path(project), Path(run)
     if adopted.get("status") != "ADOPTED":
         raise em.Refusal("BACKEND_ADOPTION_UNBOUND", str(project))
-    result_path = run / "backend_result.json"
+    generation = adopted.get("selected_generation") or {}
+    selected_dir = Path(generation.get("directory", ""))
+    if not selected_dir.is_dir() or selected_dir.is_symlink():
+        raise em.Refusal("BACKEND_SELECTED_GENERATION_UNBOUND", context.step_id)
+    manifest = selected_dir / "manifest.json"
+    if not manifest.is_file() or manifest.is_symlink():
+        raise em.Refusal("BACKEND_SELECTED_MANIFEST_MISSING", context.step_id)
+    try:
+        bound = em._issued(manifest)
+    except (OSError, ValueError, KeyError, em.Refusal) as exc:
+        raise em.Refusal("BACKEND_SELECTED_MANIFEST_UNBOUND", str(exc)) from exc
+    if bound.get("run_id") != adopted.get("run_id") or bound.get("arm_id") != adopted.get("selected"):
+        raise em.Refusal("BACKEND_SELECTED_MANIFEST_MISMATCH", context.step_id)
+    result_path = selected_dir / "backend_result.json"
     if not result_path.is_file():
         raise em.Refusal("BACKEND_SELECTED_SUBSTANCE_REFUSED", context.step_id)
     result = json.loads(result_path.read_text())
+    expected = (bound.get("outputs") or {}).get("backend_result.json")
+    if not expected or em.digest(result_path) != expected:
+        raise em.Refusal("BACKEND_SELECTED_DIGEST_MISMATCH", context.step_id)
     if result.get("verdict") == "FAIL":
         raise em.Refusal("GATE_FAIL", context.step_id)
     if result.get("verdict") != "PASS":
         raise em.Refusal("BACKEND_CANONICAL_CONSUMER_REFUSED", context.step_id)
-    gates = evaluate(project, {"id": context.step_id, "gate": {}})
+    # The selected generation is the production consumer's source of truth;
+    # never fall back to the mutable run root or the original project tree.
+    # Re-run the exact row-owned consumer against the immutable generation.
+    # Passing an empty synthetic row would turn the consumer into a census
+    # call; the canonical row carries the declared gate and output semantics.
+    gates = evaluate(selected_dir, ROWS[str(context.step_id)]["canonical_row"])
+    if gates.get("status") == "FAIL":
+        raise em.Refusal("GATE_FAIL", context.step_id)
     return {"status": "CONSUMED", "step_id": context.step_id,
             "source_sha": context.source_sha, "consumer": gates,
             "design_verdict": "PASS"}

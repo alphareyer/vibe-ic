@@ -7,8 +7,11 @@ qualification ``NOT_MEASURED`` until a current receipt exists.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import ast
+from functools import lru_cache
 import json
 from pathlib import Path
+import subprocess
 from typing import Iterable
 
 HERE = Path(__file__).resolve().parent
@@ -19,6 +22,79 @@ try:
     from execution_release_rows import ROWS as RELEASE_ROWS
 except ModuleNotFoundError:  # backend-first commit remains independently importable
     RELEASE_ROWS = {}
+
+
+@lru_cache(maxsize=1)
+def current_source_identity() -> str:
+    """Return the current checked-out commit identity; caller labels are ignored."""
+    try:
+        value = subprocess.check_output(
+            ["git", "-C", str(HERE), "rev-parse", "HEAD"],
+            text=True, stderr=subprocess.DEVNULL).strip().lower()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("SOURCE_IDENTITY_UNAVAILABLE") from exc
+    if len(value) != 40 or any(ch not in "0123456789abcdef" for ch in value):
+        raise RuntimeError("SOURCE_IDENTITY_INVALID")
+    return value
+
+
+@lru_cache(maxsize=1)
+def current_source_tree_identity() -> str:
+    """Return the HEAD tree identity used beside the commit binding."""
+    try:
+        value = subprocess.check_output(
+            ["git", "-C", str(HERE), "rev-parse", "HEAD^{tree}"],
+            text=True, stderr=subprocess.DEVNULL).strip().lower()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("SOURCE_TREE_IDENTITY_UNAVAILABLE") from exc
+    if len(value) != 40 or any(ch not in "0123456789abcdef" for ch in value):
+        raise RuntimeError("SOURCE_TREE_IDENTITY_INVALID")
+    return value
+
+
+@lru_cache(maxsize=2048)
+def _local_imports(path: str) -> tuple[Path, ...]:
+    """Parse one source file once per process and resolve only local imports."""
+    source = Path(path)
+    if source.suffix != ".py" or not source.is_file() or source.is_symlink():
+        return ()
+    try:
+        tree = ast.parse(source.read_text())
+    except (OSError, SyntaxError):
+        return ()
+    found: set[Path] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = ([node.module] if node.module else
+                     [alias.name for alias in node.names])
+        else:
+            continue
+        for name in names:
+            base = name.split(".")[0]
+            for candidate in (HERE / (base + ".py"), HERE / base / "__init__.py"):
+                if candidate.is_file() and not candidate.is_symlink():
+                    found.add(candidate.resolve())
+    return tuple(sorted(found))
+
+
+def source_closure(paths: Iterable[Path]) -> set[Path]:
+    """Collect local Python imports reachable from the supplied entrypoints.
+
+    The closure is source identity, so every transitive local import remains
+    bound, while the per-file parse cache keeps registering the 37 adapters
+    from repeatedly reparsing the same runner modules.
+    """
+    pending = [Path(p).resolve() for p in paths]
+    seen: set[Path] = set()
+    while pending:
+        path = pending.pop()
+        if path in seen or not path.is_file() or path.is_symlink():
+            continue
+        seen.add(path)
+        pending.extend(_local_imports(str(path)))
+    return seen
 
 
 BACKEND_IDS = (
@@ -187,7 +263,7 @@ def _backend(step: str) -> dict:
         "disposition": "implemented",
         "runtime_status": "NOT_MEASURED",
         "producer_sites": list(BACKEND_SITES[step]),
-        "consumer_gates": list(dict.fromkeys(p["mandatory_gate_programs"])),
+        "consumer_gates": list(p["mandatory_gate_programs"]),
         "canonical_outputs": list(row["canonical_row"].get("required_outputs", ())),
         "applicability": _applicability(step, release=False),
         "harvest": list(_summary(row.get("original_harvest"))),
@@ -209,7 +285,7 @@ def _release(step: str) -> dict:
         "engine_families": list(RELEASE_FAMILIES[step]), "default_rank": 0,
         "disposition": disposition, "runtime_status": "NOT_MEASURED",
         "producer_sites": list(RELEASE_SITES[step]),
-        "consumer_gates": list(dict.fromkeys(p["mandatory_gate_programs"])),
+        "consumer_gates": list(p["mandatory_gate_programs"]),
         "canonical_outputs": list(row["canonical"].get("required_outputs", ())),
         "applicability": _applicability(step, release=True),
         "harvest": list(_summary(row.get("harvest"))), "notes": notes,

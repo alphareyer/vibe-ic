@@ -12,7 +12,6 @@ from dataclasses import dataclass
 import ast
 import json
 from pathlib import Path
-import re
 import sys
 from typing import Mapping
 
@@ -20,7 +19,9 @@ if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import execution_modes as em
-from execution_provider_catalog import BACKEND_IDS, BACKEND_ROWS, coverage_rows
+from execution_provider_catalog import (BACKEND_IDS, BACKEND_ROWS, coverage_rows,
+                                        current_source_identity, current_source_tree_identity,
+                                        source_closure)
 
 HERE = Path(__file__).resolve().parent
 POLICY = HERE / "data/execution_backend_policy.json"
@@ -34,6 +35,7 @@ BACKEND_PARAMETER_DEFAULTS = {
     "container": "", "die_um": None, "util": None, "state_in": None,
     "overlay": {}, "streamout_route": None, "simulators": None,
     "spice_paths": 1, "timeout_s": 60,
+    "source_tree_sha": None,
 }
 
 # These are imported by the actual dispatcher/producer call paths.  Binding
@@ -79,6 +81,7 @@ def _source_files(spec: Mapping[str, object]) -> dict[str, str]:
     # Bind the dispatcher and its canonical gate implementation in the same
     # source identity; a file:symbol catalog entry is not an executable CLI.
     paths.update({HERE / "execution_backend_producers.py", HERE / "execution_backend_gates.py"})
+    paths.add(HERE / "execution_backend_consumer.py")
     paths.update(HERE / name for name in EXECUTION_DEPENDENCIES)
     for gate in spec["consumer_gates"]:
         candidate = HERE / (str(gate) + ".py")
@@ -86,7 +89,15 @@ def _source_files(spec: Mapping[str, object]) -> dict[str, str]:
             paths.add(candidate)
     paths.add(HERE / "execution_backend_snapshot.py")
     paths.add(HERE / "execution_backend_worker.py")
-    paths = {p.resolve() for p in paths if p.is_file() and not p.is_symlink()}
+    # Policy/index and canonical routing are executable authority, not merely
+    # descriptive documentation. Bind them and every local Python import they
+    # reach before a receipt can be adopted.
+    paths.update({POLICY, HERE / "data/execution_modes_portfolio.json",
+                  HERE.parent / "flow/phase1_phase2_phase3.yaml",
+                  HERE.parent / "benchmark/CAPTURE_ROUTING.json"})
+    paths.update(HERE.glob("_atomic*.py"))
+    paths = source_closure({p.resolve() for p in paths
+                            if p.is_file() and not p.is_symlink()})
     paths.add(Path(sys.executable).resolve())
     return {str(p): em.digest(p) for p in sorted(paths)}
 
@@ -180,6 +191,7 @@ def _typed_parameters(spec: Mapping[str, object], source_sha: str,
         "input_contract": BACKEND_ROWS[str(spec["step_id"])]
         ["canonical_row"].get("required_inputs", ()),
         "source_sha": source_sha,
+        "source_tree_sha": current_source_tree_identity(),
     })
     return params
 
@@ -231,6 +243,7 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
              path: str, available: bool,
              parameters: Mapping[str, object] | None = None,
              native_qualified: bool = False) -> em.Adapter:
+    source_sha = current_source_identity()
     applicability = spec["applicability"].get(path, "inapplicable: path not declared")
     applicable = applicability == "applicable"
     applicability_kind = ("applicable" if applicable else
@@ -242,7 +255,7 @@ def _adapter(spec: Mapping[str, object], source_sha: str, objective: Mapping[str
     # canonical OR/glob clauses into concrete output members before hashing
     # them in that receipt; wildcard strings never enter Adapter.required_outputs.
     output_contract = {name: ("backend_result.json",) for name in spec["canonical_outputs"]}
-    params = _typed_parameters(spec, source_sha, parameters)
+    params = _typed_parameters(spec, current_source_identity(), parameters)
     validator = _step37_validator("librelane") if spec["step_id"] == "37" else validate
     return em.Adapter(
         arm_id=str(spec["arm_id"]), tool_id=str(spec["tool_id"]), step_id=str(spec["step_id"]),
@@ -271,8 +284,7 @@ def register_backend_adapters(registry: em.Registry | None = None, *, source_sha
                               route_receipt: Mapping[str, object] | None = None,
                               declaration: Mapping[str, object] | None = None,
                               parameters: Mapping[str, object] | None = None) -> em.Registry:
-    if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
-        raise em.Refusal("INVALID_SOURCE_SHA", source_sha)
+    source_sha = current_source_identity()
     registry = registry or em.Registry()
     objective = objective or {"metric": "canonical_evidence", "direction": "max"}
     rows = {row["step_id"]: row for row in coverage_rows()}
