@@ -208,6 +208,7 @@ def _typed_derived_report(path: Path) -> bool:
 def _step8_evidence(root, facts, required, contract):
     """BLOCKING: consume fresh, digest-bound producer reports before auditing."""
     from execution_modes import Evidence, digest
+    from _execution_manifest import issued_manifest_path
     import flow_compliance_check
     names = tuple(contract.get('mandatory_gate_programs') or ('sdc_syntax_check',))
     authority = root / 'canonical.json'
@@ -217,7 +218,7 @@ def _step8_evidence(root, facts, required, contract):
         if (marker['step_id'] != '8' or
                 marker['manifest_authority'] != 'controller-issued' or
                 marker['issued_manifest_sha256'] != digest(
-                    root.parent / 'inputs/issued_manifest.json')):
+                    issued_manifest_path(root.parent / 'inputs'))):
             raise ValueError('worker issuance does not match frozen manifest')
         consumers = {'sdc_syntax_check': _typed_syntax_report,
                      'sdc_validator_check': _typed_validator_report,

@@ -26,7 +26,8 @@ def _issued_worker_fixture(project, monkeypatch):
     manifest = project/'input/issued_manifest.json'
     manifest.parent.mkdir(exist_ok=True)
     manifest.write_text(json.dumps(doc, sort_keys=True)+'\n')
-    for name, value in {'VIBEIC_MANIFEST_SHA256':em.digest(manifest),
+    for name, value in {'VIBEIC_ISSUED_MANIFEST_PATH':str(manifest),
+                        'VIBEIC_MANIFEST_SHA256':em.digest(manifest),
                         'VIBEIC_CANONICAL_ROUTE':json.dumps(doc['route']),
                         'VIBEIC_EXECUTION_BINDING':json.dumps(binding),
                         'VIBEIC_SOURCE_SHA':sha, 'VIBEIC_SOURCE_TREE_SHA':tree}.items():

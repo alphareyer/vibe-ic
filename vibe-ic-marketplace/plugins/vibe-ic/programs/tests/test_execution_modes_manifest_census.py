@@ -83,6 +83,12 @@ def test_input_subdirectory_manifest_is_ordinary_bound_input(tmp_path):
     ordinary = frozen / 'input/issued_manifest.json'
     assert ordinary.is_file()
     assert receipt['manifest']['files']['input/issued_manifest.json'] == em.digest(ordinary)
+    staged = Path(receipt['output_root']) / 'project/input/issued_manifest.json'
+    assert staged.read_bytes() == ordinary.read_bytes()
+    marker = json.loads((Path(receipt['output_root']) / 'canonical.json').read_text())
+    assert [r['program'] for r in marker['records']] == [
+        'sdc_syntax_check', 'sdc_validator_check', 'derived_clock_sdc_required_check']
+    assert all(r['rc'] == 0 for r in marker['records'])
     argv = receipt['processes'][0]['argv']
     assert argv[argv.index('--manifest') + 1] == str(frozen / 'issued_manifest.json')
     assert adoption(context, arm, controller, root)['status'] == 'ADOPTED'

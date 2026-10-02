@@ -36,6 +36,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 
 from _atomic_artefact import write_bytes, write_json
+from _execution_manifest import ISSUED_MANIFEST_ENV, issued_manifest_path
 
 
 # Authority belongs to the live Controller issuer. Editable files, content
@@ -641,7 +642,7 @@ class Controller:
             raise Refusal('ARM_OUTPUT_UNAVAILABLE', str(directory)) from exc
         inputs, outputs = directory / 'inputs', directory / 'outputs'
         inputs.mkdir(); outputs.mkdir()
-        manifest = inputs / 'issued_manifest.json'
+        manifest = issued_manifest_path(inputs)
         receipt = dict(run_id=plan['run_id'], arm_id=arm.arm_id,
                        adapter=arm.identity(), binding=plan['binding'],
                        output_root=str(outputs), input_root=str(inputs),
@@ -726,7 +727,7 @@ class Controller:
                              'OPENBLAS_NUM_THREADS': str(arm.cpus),
                              'VIBEIC_EXECUTION_BINDING': json.dumps(plan['binding']),
                              'VIBEIC_ARM_ID': arm.arm_id,
-                             'VIBEIC_ISSUED_MANIFEST_PATH': str(manifest),
+                             ISSUED_MANIFEST_ENV: str(manifest),
                              'VIBEIC_MANIFEST_SHA256': receipt['manifest_sha256'],
                              'VIBEIC_CANONICAL_ROUTE': json.dumps(list(arm.route)),
                              'VIBEIC_SOURCE_SHA': arm.source_sha,
@@ -931,7 +932,7 @@ class Controller:
                 if not p.is_file() or digest(p) != process[channel + '_sha256']:
                     raise Refusal('PROCESS_LOG_CHANGED', arm.arm_id)
         frozen = Path(receipt['input_root'])
-        manifest = frozen / 'issued_manifest.json'
+        manifest = issued_manifest_path(frozen)
         if (not manifest.is_file() or receipt.get('manifest_sha256') != digest(manifest)):
             raise Refusal('ISSUED_MANIFEST_CHANGED', arm.arm_id)
         try:

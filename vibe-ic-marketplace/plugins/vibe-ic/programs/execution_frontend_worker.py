@@ -4,35 +4,35 @@ import hashlib
 import time
 from contextvars import ContextVar
 from pathlib import Path
+from _execution_manifest import ISSUED_MANIFEST_ENV, issued_manifest_path
 
 _STEP8_PRODUCER_TIMEOUT_S = 30
 _STEP8_DISPATCH = ContextVar('step8_dispatch', default=False)
-_ISSUED_MANIFEST_ENV = 'VIBEIC_ISSUED_MANIFEST_PATH'
+_MANIFEST_AUTHORITY = ContextVar('manifest_authority', default=None)
 
 
 def _issued_manifest_path(project, authority_path=None):
     """Resolve the one Controller-issued authority path for a worker run.
 
     Controller dispatch binds this path explicitly in both argv and the
-    environment. The legacy fallback is retained only for direct, unissued
-    helper tests; a Controller arm always carries ``VIBEIC_ARM_ID`` and must
-    provide the bound path.
+    environment. Without an explicit path, only the input-root authority is
+    consumed. No nested same-basename input can select worker authority.
     """
     project = Path(project)
-    raw = authority_path or os.environ.get(_ISSUED_MANIFEST_ENV)
-    if raw:
-        path = Path(raw)
-    elif os.environ.get('VIBEIC_ARM_ID'):
-        raise ValueError('issued manifest authority path is required')
-    else:
-        # Compatibility for direct legacy helper callers. The normal
-        # Controller path above is exact and cannot select a nested input.
-        path = project / 'issued_manifest.json'
-        if not path.is_file():
-            path = project / 'input' / 'issued_manifest.json'
+    bound = os.environ.get(ISSUED_MANIFEST_ENV)
+    raw = authority_path or _MANIFEST_AUTHORITY.get() or bound
+    path = Path(raw) if raw else issued_manifest_path(project)
+    if bound and path.absolute() != Path(bound).absolute():
+        raise ValueError('issued manifest authority path mismatch')
     if path.is_symlink() or not path.is_file():
         raise ValueError('issued manifest authority path is required')
     return path
+
+
+def _request_manifest_path(project):
+    """Legacy helper requests are data and never Controller authority."""
+    root = issued_manifest_path(project)
+    return root if root.is_file() else Path(project) / 'input/issued_manifest.json'
 
 def _canonical_route(step: str) -> tuple[str, ...]:
     # Kept in the worker boundary so a caller cannot replace the route by
@@ -62,7 +62,9 @@ def _write(step, output, producer, **details):
 
 def _verify_manifest(project, step, authority_path=None):
     try:
-        manifest = _issued_manifest_path(project, authority_path)
+        explicit = authority_path or _MANIFEST_AUTHORITY.get() or os.environ.get(ISSUED_MANIFEST_ENV)
+        manifest = (_issued_manifest_path(project, explicit) if explicit or _strict_issuance()
+                    else _request_manifest_path(project))
     except ValueError as exc:
         raise ValueError(f'{step}: issued manifest is required') from exc
     try: record=json.loads(manifest.read_text())
@@ -220,10 +222,13 @@ def produce_8(project,output,**k):
     # Stage only immutable design inputs; all reports are private outputs.
     staged = output / 'project'
     if staged.exists(): shutil.rmtree(staged)
-    def _ignore(src, names):
-        return {n for n in names if n in {'issued_manifest.json', 'out', 'frontend_outputs'}
-                or (Path(src) / n).resolve() == output.resolve()}
-    shutil.copytree(project, staged, ignore=_ignore)
+    staged.mkdir()
+    # Copy the bound ordinary census, including nested authority basenames.
+    # The root metadata file is excluded by issuance, never by basename.
+    for rel in manifest['files']:
+        target = staged / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(project / rel, target)
     # Canonical consumer addresses the staged project root; expose immutable
     # staged inputs there while keeping the private reconstruction directory.
     for rel in ('phase1', 'phase2'):
@@ -379,7 +384,8 @@ def run_row(step_id,project,output,authority_path=None,**kwargs):
     if step_id not in PRODUCERS: raise ValueError(f'unknown frontend row: {step_id}')
     manifest = None
     try:
-        manifest = _issued_manifest_path(project, authority_path)
+        manifest = (_issued_manifest_path(project, authority_path) if _strict_issuance()
+                    else _request_manifest_path(project))
     except ValueError:
         # Rows without an issued authority retain their existing typed
         # parameter validation. Step 8 itself fails closed below.
@@ -387,8 +393,7 @@ def run_row(step_id,project,output,authority_path=None,**kwargs):
             raise
     if manifest is not None:
         try:
-            record=json.loads(manifest.read_text())
-            _verify_manifest(project, step_id, manifest)
+            record = _verify_manifest(project, step_id, manifest)
             bound=record.get('parameters') or {}
         except (OSError,ValueError) as exc: raise ValueError(f'{step_id}: issued manifest invalid') from exc
         if _strict_issuance() and kwargs and kwargs != bound:
@@ -401,10 +406,18 @@ def run_row(step_id,project,output,authority_path=None,**kwargs):
         if not _strict_issuance():
             return _step8_controller_request(project, output, kwargs)
         token = _STEP8_DISPATCH.set(True)
+        authority_token = _MANIFEST_AUTHORITY.set(manifest)
         try:
             return PRODUCERS[step_id](project,output,**kwargs)
         finally:
+            _MANIFEST_AUTHORITY.reset(authority_token)
             _STEP8_DISPATCH.reset(token)
+    if manifest is not None:
+        authority_token = _MANIFEST_AUTHORITY.set(manifest)
+        try:
+            return PRODUCERS[step_id](project,output,**kwargs)
+        finally:
+            _MANIFEST_AUTHORITY.reset(authority_token)
     return PRODUCERS[step_id](project,output,**kwargs)
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--step',required=True); ap.add_argument('--inputs',required=True); ap.add_argument('--outputs',required=True); ap.add_argument('--manifest',default=None); a=ap.parse_args(); run_row(a.step,a.inputs,a.outputs,a.manifest)
