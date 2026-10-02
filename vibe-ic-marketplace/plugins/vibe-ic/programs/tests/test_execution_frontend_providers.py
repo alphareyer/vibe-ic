@@ -16,8 +16,9 @@ def test_missing_provider_is_typed_and_no_pass():
     assert p.produce('opaque', Path('.')).state=='NOT_IMPLEMENTED'
 
 def test_factory_reachability_reverse_and_dedup():
-    registry=em.Registry(); assert p.register_factories(registry) == ('D1',)
-    assert len(registry.adapters('D1')) == 1 and len(registry.adapters('1')) == 0
+    registry=em.Registry(); assert p.register_factories(registry) == EXPECTED
+    assert all(len(registry.adapters(row)) == 1 for row in EXPECTED)
+    assert all(a.components[0].argv[0]=='python3' and '--step' in a.components[0].argv for row in EXPECTED for a in registry.adapters(row))
     assert p.choose('7') is p.choose('7'); assert p.choose('7').factory is not p.choose('8').factory
 
 def test_real_boundary_consumes_output_and_reverse_red(tmp_path):
