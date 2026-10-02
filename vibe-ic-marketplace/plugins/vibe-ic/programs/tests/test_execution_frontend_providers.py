@@ -6,6 +6,33 @@ import execution_modes as em
 
 EXPECTED=('D1','0.5ic','1','2','3','4','5','6','7','8','10','11','FS1','DT1','12','13','DT2','DT3','P0')
 
+
+def _issued_worker_fixture(project, monkeypatch):
+    """Supply the full issued contract to worker seam controls."""
+    import subprocess
+    matrix = project/'phase2/stage2/constraints/pvt_matrix.json'
+    matrix.parent.mkdir(parents=True, exist_ok=True)
+    matrix.write_text(json.dumps({'corners': []}))
+    files = {str(f.relative_to(project)): f for f in project.rglob('*')
+             if f.is_file() and f.name != 'issued_manifest.json'}
+    sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+    tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+    ctx = em.Context('8', sha, files, {'metric': 'source_boundary'}, ('sdc_syntax_check',))
+    binding = ctx.binding()
+    doc = dict(schema='execution-issued-manifest/v2', step_id='8',
+               route=list(p.ROUTES['8']), parameters=dict(ctx.objective),
+               files=binding['inputs'], source_sha=sha, source_tree_sha=tree,
+               controller_sha256=binding['controller_sha256'], plan_sha256='0'*64)
+    manifest = project/'input/issued_manifest.json'
+    manifest.parent.mkdir(exist_ok=True)
+    manifest.write_text(json.dumps(doc, sort_keys=True)+'\n')
+    for name, value in {'VIBEIC_MANIFEST_SHA256':em.digest(manifest),
+                        'VIBEIC_CANONICAL_ROUTE':json.dumps(doc['route']),
+                        'VIBEIC_EXECUTION_BINDING':json.dumps(binding),
+                        'VIBEIC_SOURCE_SHA':sha, 'VIBEIC_SOURCE_TREE_SHA':tree}.items():
+        monkeypatch.setenv(name, value)
+    return manifest
+
 def test_machine_readable_coverage_and_default():
     c=p.coverage(); assert tuple(c)==EXPECTED; assert all(c[r]['default_rank']==i for i,r in enumerate(EXPECTED)); assert c['0.5ic']['applicability']=='IC+IP route authority'
 
@@ -49,10 +76,11 @@ def test_step8_public_controller_eligible_and_adopted(tmp_path):
     sdc.write_text('create_clock -period 10 [get_ports clk]\nset_input_delay 1 -clock clk [all_inputs]\nset_output_delay 1 -clock clk [all_outputs]\n')
     l8=project/'phase1/generated_docs/L8_TIMING_WAVEFORM.json'; l8.parent.mkdir(parents=True)
     l8.write_text(json.dumps({'clocks': {'clk': {'period_ns': 10}}}))
+    matrix=sdc.with_name('pvt_matrix.json'); matrix.write_text(json.dumps({'corners': []}))
     registry=em.Registry(); p.register_factories(registry); portfolio=em.load_portfolio()
     row=next(s for s in portfolio['steps'] if str(s['id'])=='8')
     sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=Path(__file__).parents[2],text=True).strip()
-    ctx=em.Context('8',sha,{'phase2/stage2/constraints/top.sdc':sdc,'phase1/generated_docs/L8_TIMING_WAVEFORM.json':l8},{'metric':'source_boundary'},tuple(row['mandatory_gate_programs']))
+    ctx=em.Context('8',sha,{'phase2/stage2/constraints/top.sdc':sdc,'phase2/stage2/constraints/pvt_matrix.json':matrix,'phase1/generated_docs/L8_TIMING_WAVEFORM.json':l8},{'metric':'source_boundary'},tuple(row['mandatory_gate_programs']))
     run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,512,1),portfolio); controller.run(ctx,run)
     receipt=json.loads((run/'frontend_8/receipt.json').read_text())
     assert receipt['status']=='ELIGIBLE'; assert set(receipt['evidence']['gates'])==set(row['mandatory_gate_programs'])
@@ -106,7 +134,7 @@ def test_rows_2_to_5_spy_order_and_argv(tmp_path, monkeypatch):
     calls.clear(); w.produce_5(tmp_path,tmp_path/'o5',top='chip_top',container='img')
     assert [x[0] for x in calls] == ['formal_harness_gen.generate','formal_property_run.run','step_full_stack_functional_tb','write']
 
-def test_step8_nonzero_and_manifest_mutation_refuse(tmp_path):
+def test_step8_nonzero_and_manifest_mutation_refuse(tmp_path, monkeypatch):
     import hashlib
     project=tmp_path/'p'; sdc=project/'phase2/stage2/constraints/top.sdc'; sdc.parent.mkdir(parents=True)
     sdc.write_text('create_clock -period 10 [get_ports clk]\nset_input_delay 1 -clock clk [all_inputs]\n')
@@ -114,6 +142,7 @@ def test_step8_nonzero_and_manifest_mutation_refuse(tmp_path):
     files={str(x.relative_to(project)):hashlib.sha256(x.read_bytes()).hexdigest() for x in (sdc,l8)}
     (project/'input').mkdir(); (project/'input/issued_manifest.json').write_text(json.dumps({'step_id':'8','parameters':{},'files':files}))
     import execution_frontend_worker as w
+    manifest=_issued_worker_fixture(project, monkeypatch)
     with __import__('pytest').raises(RuntimeError): w.run_row('8',project,tmp_path/'out')
     (project/'input/issued_manifest.json').write_text(json.dumps({'step_id':'9','parameters':{},'files':files}))
     with __import__('pytest').raises(ValueError): w.run_row('8',project,tmp_path/'out2')
@@ -128,6 +157,7 @@ def test_step8_worker_timeout_fails_closed(tmp_path, monkeypatch):
         json.dumps({'step_id':'8','parameters':{},'files':{}}))
     def hang(*args, **kwargs):
         raise w.subprocess.TimeoutExpired(args[0], kwargs['timeout'])
+    _issued_worker_fixture(project, monkeypatch)
     monkeypatch.setattr(w.subprocess, 'run', hang)
     with __import__('pytest').raises(RuntimeError, match='timed out'):
         w.run_row('8', project, tmp_path/'out')

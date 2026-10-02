@@ -181,6 +181,85 @@ def _typed_validator_report(path: Path) -> bool:
         raise ValueError('sdc_validator_check: verdict/issues conflict')
     return verdict == 'PASS'
 
+
+def _typed_derived_report(path: Path) -> bool:
+    doc = _exact_dict(json.loads(path.read_text()),
+                      {'target', 'sdc', 'errors', 'findings', 'verdict'},
+                      'derived_clock_sdc_required_check')
+    if (not isinstance(doc['target'], str) or not isinstance(doc['sdc'], str) or
+            type(doc['errors']) is not int or doc['errors'] < 0 or
+            doc['verdict'] not in {'PASS', 'FAIL'} or
+            (doc['verdict'] == 'FAIL') != (doc['errors'] > 0) or
+            not isinstance(doc['findings'], list)):
+        raise ValueError('derived clock report: verdict/types conflict')
+    for row in doc['findings']:
+        _exact_dict(row, {'severity', 'rule', 'file', 'line', 'message'},
+                    'derived clock finding')
+        if (type(row['line']) is not int or
+                row['severity'] not in {'ERROR', 'WARNING', 'INFO'} or
+                any(not isinstance(row[k], str)
+                    for k in ('severity', 'rule', 'file', 'message'))):
+            raise ValueError('derived clock finding: invalid types')
+    if doc['errors'] != sum(f['severity'] == 'ERROR' for f in doc['findings']):
+        raise ValueError('derived clock report: error count conflict')
+    return doc['verdict'] == 'PASS'
+
+
+def _step8_evidence(root, facts, required, contract):
+    """BLOCKING: consume fresh, digest-bound producer reports before auditing."""
+    from execution_modes import Evidence, digest
+    import flow_compliance_check
+    names = tuple(contract.get('mandatory_gate_programs') or ('sdc_syntax_check',))
+    authority = root / 'canonical.json'
+    artifacts, gates = {}, {n: 'NOT_MEASURED' for n in names}
+    try:
+        marker = json.loads(authority.read_text())
+        if (marker['step_id'] != '8' or
+                marker['manifest_authority'] != 'controller-issued' or
+                marker['issued_manifest_sha256'] != digest(
+                    root.parent / 'inputs/issued_manifest.json')):
+            raise ValueError('worker issuance does not match frozen manifest')
+        consumers = {'sdc_syntax_check': _typed_syntax_report,
+                     'sdc_validator_check': _typed_validator_report,
+                     'derived_clock_sdc_required_check': _typed_derived_report}
+        failed = False
+        programs = []
+        for record in marker['records']:
+            rel = record['output']
+            path = root / rel
+            if (path.is_symlink() or not path.is_file() or not path.stat().st_size or
+                    not path.resolve().is_relative_to(root.resolve()) or
+                    digest(path) != record['output_sha256'] or
+                    not (record['started_ns'] <= record['output_mtime_ns'] <= record['ended_ns'])):
+                raise ValueError('producer output is missing, stale or changed')
+            passed = consumers[record['program']](path)
+            programs.append(record['program'])
+            if record['rc'] != (0 if passed else 1):
+                raise ValueError('producer report contradicts measured return code')
+            artifacts[rel] = digest(path)
+            failed |= not passed
+            if record['program'] in gates:
+                gates[record['program']] = 'PASS' if passed else 'FAIL'
+        artifacts['canonical.json'] = digest(authority)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        return Evidence(facts, 'NOT_MEASURED', gates, artifacts, detail=str(exc))
+    if failed:
+        return Evidence(facts, 'FAIL', {n: 'FAIL' for n in names}, artifacts,
+                        detail='measured checker FAIL')
+    if programs != [r.split('.')[0] for r in ROUTES['8']] or any(v != 'PASS' for v in gates.values()):
+        return Evidence(facts, 'NOT_MEASURED', gates, artifacts,
+                        detail='producer sequence incomplete')
+    gate_result = flow_compliance_check.check_step(
+        root, contract, {}, strict_step_binding=True)
+    if gate_result.status == 'FAIL':
+        return Evidence(facts, 'FAIL', {n: 'FAIL' for n in names}, artifacts,
+                        detail='; '.join(gate_result.reasons))
+    if any(p not in artifacts for p in required if '*' not in p):
+        return Evidence(facts, 'NOT_MEASURED', gates, artifacts,
+                        detail='canonical flow artifact missing')
+    return Evidence(facts, 'PASS', gates, artifacts,
+                    detail='real canonical artifacts and gate validated')
+
 def _produce(step_id, project, **kwargs):
     """Dispatch through the explicit worker entry point for this row."""
     project = Path(project)
@@ -217,6 +296,57 @@ def choose(step_id):
     if step_id not in PROVIDERS: return None
     return PROVIDERS[step_id]
 
+
+def validate_core_dependency(core_source_sha):
+    """BLOCKING: production must bind an independently accepted Core revision."""
+    import execution_modes as em
+    path = Path(__file__).with_name('data') / 'execution_frontend_core_dependency.json'
+    dependency = json.loads(path.read_text())
+    repo = _repo_root(path)
+    head, _ = _git_identity(repo)
+    relative = str(path.relative_to(repo))
+    if em._tracked_digest(str(repo), head, relative) != em.digest(path):
+        raise em.Refusal('CORE_DEPENDENCY_CHANGED', relative)
+    accepted = dependency['accepted_core_sha']
+    if not accepted or core_source_sha != accepted:
+        raise em.Refusal('CORE_REBIND_REQUIRED',
+                         'accepted Core R3 commit and replay are required')
+    import execution_policy
+    import inspect
+    for module in (em, execution_policy):
+        source = Path(module.__file__).resolve()
+        if em._tracked_digest(str(repo), accepted, str(source.relative_to(repo))) != em.digest(source):
+            raise em.Refusal('CORE_SOURCE_MISMATCH', str(source))
+    for name in dependency['controller_methods']:
+        if not callable(getattr(em.Controller, name, None)):
+            raise em.Refusal('CORE_API_MISMATCH', name)
+    for name in dependency['context_fields']:
+        if name not in em.Context.__dataclass_fields__:
+            raise em.Refusal('CORE_API_MISMATCH', name)
+    for name in dependency['adapter_fields']:
+        if name not in em.Adapter.__dataclass_fields__:
+            raise em.Refusal('CORE_API_MISMATCH', name)
+    if set(inspect.signature(execution_policy.controller_fields).parameters) != {
+            'ic_ip_path', 'route_receipt'}:
+        raise em.Refusal('CORE_API_MISMATCH', 'controller_fields')
+    return dependency
+
+
+def run_step8_controller(controller, context, output, choice, *, core_source_sha):
+    """Production composition seam; standalone fixture adoption cannot enter it."""
+    import execution_modes as em
+    validate_core_dependency(core_source_sha)
+    import execution_policy
+    if context.step_id != '8':
+        raise em.Refusal('WRONG_CANONICAL_STEP', context.step_id)
+    fields = execution_policy.controller_fields(
+        ic_ip_path=context.ic_ip_path, route_receipt=dict(context.route_receipt))
+    if any(getattr(context, key) != value for key, value in fields.items()):
+        raise em.Refusal('CORE_CONTEXT_UNBOUND', context.step_id)
+    controller.run(context, output)
+    controller.adopt(context, output, choice)
+    return controller.verify_adoption(context, output)
+
 def register_factories(registry):
     """Register real source adapters in the existing Registry."""
     if not hasattr(registry, 'register'): raise TypeError('registry must provide register')
@@ -237,6 +367,8 @@ def register_factories(registry):
             contract=next(s for s in _flow_yaml.load()['steps'] if str(s['id']) == _row)
             root=Path(project)
             required=tuple(contract.get('required_outputs') or ())
+            if _row == '8':
+                return _step8_evidence(root, facts, required, contract)
             artifacts={p:digest(root/p) for p in required if '*' not in p and (root/p).is_file()}
             if required and len(artifacts) < len([p for p in required if '*' not in p]): raise ValueError('canonical flow artifacts missing')
             gate_result=flow_compliance_check.check_step(root, contract, {}, strict_step_binding=True)
@@ -285,9 +417,11 @@ def register_factories(registry):
             verdict='PASS' if artifacts and gates and all(v=='PASS' for v in gates.values()) else 'NOT_MEASURED'
             return Evidence(facts, verdict, gates, artifacts, detail='real canonical artifacts and canonical gate validated')
         required=tuple(next(s for s in em.load_portfolio()['steps'] if s['id']==row)['required_output_contract']) or ('canonical.json',)
-        start = [provider_path, worker_path]
+        start = [provider_path, worker_path, Path(em.__file__).resolve()]
         start += [provider_path.with_name(name) for name in {
-            'sdc_syntax_check.py', 'sdc_validator_check.py'} if row == '8']
+            'sdc_syntax_check.py', 'sdc_validator_check.py',
+            'derived_clock_sdc_required_check.py', 'flow_compliance_check.py',
+            'step_write_ledger.py'} if row == '8']
         # The worker dispatches the remaining rows through their canonical
         # runner modules at execution time.  Binding the entire import graph of
         # those legacy runners would walk thousands of unrelated programs; the
@@ -295,6 +429,11 @@ def register_factories(registry):
         # closure is required here (including _path_layout.py).
         closure = _source_closure(tuple(start), programs, tree_sha)
         bound_files={str(path):digest(path) for path in closure}
+        for path in (programs.parent / 'flow/phase1_phase2_phase3.yaml',
+                     programs / 'data/execution_modes_portfolio.json',
+                     programs / 'data/execution_frontend_coverage.json',
+                     programs / 'data/execution_frontend_core_dependency.json'):
+            bound_files[str(path.resolve())] = digest(path)
         bound_files[py] = digest(py_path)
         registry.register(Adapter(
             'frontend_'+row.replace('.','_'), 'frontend-worker', row, sha,

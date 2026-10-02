@@ -19228,6 +19228,25 @@ def step_qsf_gen(project: Path, top_name: str = "chip_top",
                       f"rc={rc} out={_evidence_tail(out, 500)} err={_evidence_tail(err, 500)}")
 
 
+def step_sdc_validation(project: Path, *, controller=None, context=None,
+                        output=None, choice=None, core_source_sha=None) -> StepResult:
+    """Step8 Controller boundary; BLOCKING until accepted Core is composed."""
+    import execution_frontend_providers
+    import execution_modes
+    t0 = time.time()
+    try:
+        execution_frontend_providers.validate_core_dependency(core_source_sha)
+        if controller is None or context is None or output is None:
+            raise execution_modes.Refusal('CORE_CONTEXT_UNBOUND', str(project))
+        result = execution_frontend_providers.run_step8_controller(
+            controller, context, output, choice, core_source_sha=core_source_sha)
+        return StepResult('sdc_validation', 'PASS', time.time() - t0,
+                          result['status'], [str(output)])
+    except execution_modes.Refusal as exc:
+        return StepResult('sdc_validation', 'NOT_MEASURED', time.time() - t0,
+                          str(exc), reason_class=_V.ReasonClass.UPSTREAM_FAILED)
+
+
 def step_sdc_gen(project: Path, top_name: str = "chip_top",
                  ic_class: Optional[str] = None) -> StepResult:
     # v1.6.97 (issue #29 Bug 3, P0) — always force-regenerate the SDC.
@@ -25732,6 +25751,7 @@ def main() -> int:
     # so the QSF/SDC artefacts are present for downstream lints/audits.
     plan.append(step_qsf_gen(project, args.top_name, ic_class))
     plan.append(step_sdc_gen(project, args.top_name, ic_class))
+    plan.append(step_sdc_validation(project))
 
     if not args.skip_hardware:
         otp_sr = step_otp_image_check(project)

@@ -9,8 +9,10 @@ The controller binds that evidence to the inputs, implementation and process.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
+from functools import lru_cache
 import hashlib
+import hmac
 import inspect
 import json
 import math
@@ -24,6 +26,8 @@ import threading
 import time
 from typing import Callable, Mapping
 import uuid
+import secrets
+from types import MappingProxyType
 
 import os as _os                                                    # noqa: E402
 import sys as _sys                                                  # noqa: E402
@@ -34,13 +38,9 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 from _atomic_artefact import write_bytes, write_json
 
 
-# Authority records are deterministic, content-addressed receipts.  The old
-# implementation kept a process-global digest map and an interpreter-local HMAC
-# key; both made a valid run disappear after restart and let a caller who could
-# rewrite the cache choose which bytes the current process trusted.  The accepted
-# core authority will add an external issuer signature after this candidate is
-# reviewed.  Until then, every consumer independently recomputes this record and
-# binds it to the current source/input/plan identities.
+# Authority belongs to the live Controller issuer. Editable files, content
+# hashes and worker environment values cannot create an observed run. Restart
+# loses this authority and requires a new run; no durable issuer is implemented.
 _AUTHORITY_SCHEMA = 'execution-authority/v2'
 _CONTROL_NAMES = frozenset({'.', '..', 'plan.json', 'result.json', 'adoption.json',
                             'refusal.json', 'issued-plan.json', 'selected'})
@@ -73,38 +73,62 @@ def _hash(value: object) -> str:
                                     separators=(',', ':')).encode()).hexdigest()
 
 
-def _issued(path: Path) -> dict:
-    """Read a deterministic authority receipt in a fresh process.
-
-    A receipt is not trusted because it carries a caller-chosen signature.  Its
-    schema and content hash are checked here, and each caller then binds the
-    returned payload to the current context.  Legacy ``_seal``-shaped records
-    are intentionally rejected; the compatibility helper below exists only for
-    old negative controls and is never accepted as authority.
-    """
+@lru_cache(maxsize=8192)
+def _tracked_digest(repo: str, commit: str, relative: str) -> str:
+    """Cache only immutable Git object bytes, never live file digests."""
     try:
-        document = json.loads(path.read_text())
-    except (OSError, ValueError, TypeError) as exc:
-        raise Refusal('ISSUED_AUTHORITY_INVALID', str(path)) from exc
-    if isinstance(document, dict) and set(document) == {'payload', 'signature'}:
-        raise Refusal('ISSUED_AUTHORITY_CHANGED', str(path))
-    if not isinstance(document, dict) or set(document) != {
-            'schema', 'authority', 'payload', 'payload_sha256'}:
-        raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
-    if document.get('schema') != _AUTHORITY_SCHEMA or document.get('authority') != 'controller':
-        raise Refusal('ISSUED_AUTHORITY_CHANGED', str(path))
-    payload = document.get('payload')
-    expected = _hash(payload)
-    if not isinstance(payload, dict) or document.get('payload_sha256') != expected:
-        raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
-    return payload
+        content = subprocess.check_output(
+            ['git', '-C', repo, 'cat-file', 'blob', f'{commit}:{relative}'])
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise Refusal('ADAPTER_SOURCE_MISMATCH', relative) from exc
+    return hashlib.sha256(content).hexdigest()
 
 
-def _authority_record(value: dict) -> dict:
-    """Build the source-written deterministic receipt envelope."""
-    payload = json.loads(json.dumps(value, sort_keys=True))
-    return dict(schema=_AUTHORITY_SCHEMA, authority='controller', payload=payload,
-                payload_sha256=_hash(payload))
+def _authority_store():
+    key, observations = secrets.token_bytes(32), {}
+    lock = threading.Lock()
+
+    def issue(path: Path, value: dict) -> None:
+        payload = json.loads(json.dumps(value, sort_keys=True))
+        name = str(path.resolve())
+        with lock:
+            if name in observations:
+                raise Refusal('ISSUED_AUTHORITY_REISSUE', name)
+            observations[name] = _hash(payload)
+        document = dict(schema=_AUTHORITY_SCHEMA, authority='controller',
+                        payload=payload, payload_sha256=_hash(payload),
+                        signature=hmac.new(key, _hash(payload).encode(),
+                                           hashlib.sha256).hexdigest())
+        _write(path, document)
+
+    def consume(path: Path) -> dict:
+        try:
+            document = json.loads(path.read_text())
+        except (OSError, ValueError, TypeError) as exc:
+            raise Refusal('ISSUED_AUTHORITY_INVALID', str(path)) from exc
+        if isinstance(document, dict) and set(document) == {'payload', 'signature'}:
+            raise Refusal('ISSUED_AUTHORITY_CHANGED', str(path))
+        if not isinstance(document, dict) or set(document) != {
+                'schema', 'authority', 'payload', 'payload_sha256', 'signature'}:
+            raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
+        payload = document['payload']
+        if not isinstance(payload, dict):
+            raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
+        expected = _hash(payload)
+        signature = hmac.new(key, expected.encode(), hashlib.sha256).hexdigest()
+        if (document['schema'] != _AUTHORITY_SCHEMA or
+                document['authority'] != 'controller' or
+                document['payload_sha256'] != expected or
+                not isinstance(document['signature'], str) or
+                not hmac.compare_digest(document['signature'], signature) or
+                observations.get(str(path.resolve())) != expected):
+            raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
+        return payload
+
+    return issue, consume
+
+
+_issue_authority, _issued = _authority_store()
 
 
 def _seal(value: dict) -> dict:
@@ -290,7 +314,12 @@ class Registry:
             raise Refusal('VALIDATOR_SOURCE_UNBOUND', adapter.arm_id)
         if len({c.name for c in adapter.components}) != len(adapter.components):
             raise Refusal('DUPLICATE_COMPONENT', adapter.arm_id)
-        self._adapters[adapter.arm_id] = adapter
+        if adapter.source_tree_sha:
+            Controller._source_current(adapter)
+        self._adapters[adapter.arm_id] = replace(
+            adapter, source_files=MappingProxyType(dict(adapter.source_files)),
+            objective=MappingProxyType(dict(adapter.objective)),
+            output_contract=MappingProxyType(dict(adapter.output_contract)))
 
     def adapters(self, step_id: str) -> list[Adapter]:
         return [a for a in self._adapters.values() if a.step_id == step_id]
@@ -319,7 +348,9 @@ class Superiority:
 class Controller:
     def __init__(self, registry: Registry, budget: Budget, portfolio: dict | None = None):
         self.registry, self.budget = registry, budget
-        self.portfolio = portfolio if portfolio is not None else load_portfolio()
+        self.portfolio = json.loads(json.dumps(
+            portfolio if portfolio is not None else load_portfolio()))
+        self._portfolio_sha256 = _hash(self.portfolio)
 
     def _admission(self, adapter: Adapter, context: Context) -> str:
         if adapter.role != 'producer':
@@ -342,6 +373,8 @@ class Controller:
     def plan(self, context: Context, execution_mode: str | None = None,
              superiority: Superiority | None = None) -> dict:
         selected_mode = mode(execution_mode)
+        if _hash(self.portfolio) != self._portfolio_sha256:
+            raise Refusal('PORTFOLIO_CHANGED', context.step_id)
         binding = context.binding()
         step = next((s for s in self.portfolio['steps'] if s['id'] == context.step_id), None)
         if step is None:
@@ -458,7 +491,7 @@ class Controller:
                         **asdict(superiority),
                         'receipts': {k: str(v) for k, v in superiority.receipts.items()}})
         _write(output / 'plan.json', plan)
-        _write(output / 'issued-plan.json', _authority_record(plan))
+        _issue_authority(output / 'issued-plan.json', plan)
         if not plan['arms']:
             _write(output / 'result.json', plan)
             return plan
@@ -616,6 +649,15 @@ class Controller:
                 if stop:
                     raise Refusal(stop, component.name)
                 if record['rc'] != 0:
+                    # A typed, digest-bound checker FAIL is measured even if
+                    # the worker exits nonzero. Other process errors remain
+                    # unmeasured; rc alone cannot supply a gate verdict.
+                    evidence = arm.validate(outputs, plan['binding'])
+                    receipt['evidence'] = asdict(evidence)
+                    if evidence.verdict == 'FAIL' or any(
+                            evidence.gates.get(k) == 'FAIL'
+                            for k in context.required_gates):
+                        raise Refusal('GATE_FAIL', evidence.detail)
                     raise Refusal('PROCESS_ERROR', f'{component.name}: rc={record["rc"]}')
                 frozen_binding()
             self._source_current(arm)
@@ -638,7 +680,7 @@ class Controller:
                       'adapter', 'processes', 'input_root', 'output_root')}
         completion.update(actual_status=receipt['status'], actual_reason=receipt['reason'],
                           ended_ns=receipt['ended_ns'], run_root=str(root))
-        _write(directory / 'issued-completion.json', _authority_record(completion))
+        _issue_authority(directory / 'issued-completion.json', completion)
         _write(directory / 'receipt.json', receipt)
         return receipt
 
@@ -651,6 +693,8 @@ class Controller:
         fields = ('run_id', 'arm_id', 'binding', 'adapter', 'processes', 'input_root', 'output_root')
         if (completion.get('run_root') != str(root) or
                 completion.get('run_id') != plan['run_id'] or
+                completion.get('actual_status') != receipt.get('status') or
+                completion.get('actual_reason') != receipt.get('reason') or
                 any(completion.get(k) != receipt.get(k) for k in fields)):
             raise Refusal('EXECUTION_AUTHORITY_MISMATCH', arm.arm_id)
         processes = completion['processes']
@@ -682,7 +726,10 @@ class Controller:
             override = Superiority(**{**override, 'receipts': {
                 k: Path(v) for k, v in override['receipts'].items()}})
         current = self.plan(context, plan.get('mode'), override)
-        for key in ('mode', 'binding', 'arms', 'reason', 'independence'):
+        if (plan.get('public_portfolio') != self.portfolio or
+                plan.get('public_portfolio_sha256') != self._portfolio_sha256):
+            raise Refusal('ISSUED_PLAN_MISMATCH', context.step_id)
+        for key in ('mode', 'binding', 'arms', 'reason', 'independence', 'portfolio'):
             if plan.get(key) != current.get(key):
                 raise Refusal('ISSUED_PLAN_MISMATCH', context.step_id)
 
@@ -707,7 +754,7 @@ class Controller:
         manifest = dict(generation=generation, directory=str(target),
                         run_id=receipt['run_id'], arm_id=receipt['arm_id'],
                         binding=receipt['binding'], outputs=hashes)
-        _write(target / 'manifest.json', _authority_record(manifest))
+        _issue_authority(target / 'manifest.json', manifest)
         return manifest
 
     @staticmethod
@@ -722,10 +769,8 @@ class Controller:
 
     @staticmethod
     def _source_current(arm: Adapter) -> None:
-        # A clean repository at the bound commit/tree proves every tracked
-        # source byte in the closure. Hash the out-of-tree executable
-        # binding separately; hashing hundreds of repository files on every
-        # adoption made the authority check needlessly expensive.
+        # Git status can hide modified bytes with assume-unchanged. Independently
+        # compare every live implementation with its digest AND tracked blob.
         repo = next((Path(name).resolve().parents[i]
                      for name in arm.source_files
                      for i in range(len(Path(name).resolve().parents))
@@ -751,10 +796,12 @@ class Controller:
                 raise Refusal('ADAPTER_SOURCE_MISMATCH', arm.arm_id)
         for name, expected in arm.source_files.items():
             path = Path(name)
-            if (not path.is_file() or path.is_symlink() or
-                    (repo is None or not path.resolve().is_relative_to(repo)) and
-                    digest(path) != expected):
+            if not path.is_file() or path.is_symlink() or digest(path) != expected:
                 raise Refusal('ADAPTER_SOURCE_MISMATCH', name)
+            if arm.source_tree_sha and path.resolve().is_relative_to(repo):
+                relative = str(path.resolve().relative_to(repo))
+                if _tracked_digest(str(repo), arm.source_sha, relative) != expected:
+                    raise Refusal('ADAPTER_SOURCE_MISMATCH', name)
 
     @staticmethod
     def _eligible(receipt: dict, context: Context, arm: Adapter) -> None:
