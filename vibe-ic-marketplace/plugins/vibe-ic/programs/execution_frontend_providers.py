@@ -12,19 +12,52 @@ import fnmatch
 from typing import Callable
 
 ROWS = ('D1','0.5ic','1','2','3','4','5','6','7','8','10','11','FS1','DT1','12','13','DT2','DT3','P0')
-ROUTES = {'D1':('design_one_shot_runner.step_phase1',),'0.5ic':('submission_template_ingest.main','tapeout_declaration_gen.main'),'1':('design_one_shot_runner.step_rtl_gen',),'2':('p0_tool_frontend_check.check','crosslayer_rewrite_equivalence.main'),'3':('_cdc_netlist.build','cdc_crossing_check.main','cdc_async_input_check.main','clock_domain_reg_crossing_check.main','reset_dependency_check.main'),'4':('design_one_shot_runner.step_professional_tb_gen','design_one_shot_runner.step_reference_tb','design_one_shot_runner.step_l10_unit_tb_run','verilator_coverage_measure.main'),'5':('formal_harness_gen.generate','formal_property_run.run','design_one_shot_runner.step_full_stack_functional_tb'),'6':('design_one_shot_runner.step_fpga_compile','quartus_map_audit.main'),'7':('_ppa.timing.emit_step7_asic_sdc','phase3_one_shot_runner.stamp_pvt_corner_coverage'),'8':('sdc_syntax_check.main','sdc_validator_check.main'),'10':('phase3_one_shot_runner.step_prelayout_signoff',),'11':('fault_scan_chain_insert.main','fault_atpg_run.main','bsdl_emit.main'),'FS1':('fmeda_fault_injection_coverage.main','fmeda_coverage_check.main'),'DT1':('transition_fault_atpg_run.main',),'12':('execution_frontend_worker.produce',),'13':('design_one_shot_runner.step_lec_equivalence',),'DT2':('path_delay_fault_atpg_run.main',),'DT3':('sdd_atpg_run.main'),'P0':('p0_tool_frontend_check.check','formal_structural_check.check_claim')}
+ROUTES = {'D1':('design_one_shot_runner.step_phase1',),'0.5ic':('submission_template_ingest.main','tapeout_declaration_gen.main'),'1':('design_one_shot_runner.step_rtl_gen',),'2':('p0_tool_frontend_check.check','crosslayer_rewrite_equivalence.main'),'3':('_cdc_netlist.build','cdc_crossing_check.main','cdc_async_input_check.main','clock_domain_reg_crossing_check.main','reset_dependency_check.main'),'4':('design_one_shot_runner.step_professional_tb_gen','design_one_shot_runner.step_reference_tb','design_one_shot_runner.step_l10_unit_tb_run','verilator_coverage_measure.main'),'5':('formal_harness_gen.generate','formal_property_run.run','design_one_shot_runner.step_full_stack_functional_tb'),'6':('design_one_shot_runner.step_fpga_compile','quartus_map_audit.main'),'7':('_ppa.timing.emit_step7_asic_sdc','phase3_one_shot_runner.stamp_pvt_corner_coverage'),'8':('sdc_syntax_check.main','sdc_validator_check.main'),'10':('phase3_one_shot_runner.step_prelayout_signoff',),'11':('fault_scan_chain_insert.main','fault_atpg_run.main','bsdl_emit.main'),'FS1':('fmeda_fault_injection_coverage.main','fmeda_coverage_check.main'),'DT1':('transition_fault_atpg_run.main',),'12':('execution_frontend_worker.produce',),'13':('design_one_shot_runner.step_lec_equivalence',),'DT2':('path_delay_fault_atpg_run.main',),'DT3':('sdd_atpg_run.main',),'P0':('p0_tool_frontend_check.check','formal_structural_check.check_claim')}
+_DATA_DIR = Path(__file__).resolve().parent / 'data'
+_FLOW_PATH = Path(__file__).resolve().parent.parent / 'flow' / 'phase1_phase2_phase3.yaml'
+_COVERAGE_PATH = _DATA_DIR / 'execution_frontend_coverage.json'
+_CATALOG_PATH = _DATA_DIR / 'execution_frontend_catalog.json'
+_PORTFOLIO_PATH = _DATA_DIR / 'execution_modes_portfolio.json'
+
+
 def _contracts():
     import _flow_yaml
-    rows={str(s['id']): tuple(s.get('required_outputs') or ())
+    rows={str(s['id']): dict(s)
           for s in _flow_yaml.load().get('steps',())}
     missing=[r for r in ROWS if r not in rows]
     if missing:
-        raise ValueError(f'canonical flow output contract missing: {missing}')
+        raise ValueError(f'canonical flow contract missing: {missing}')
     return {r:rows[r] for r in ROWS}
-CANONICAL_ROWS = _contracts()
+
+
+FLOW_CONTRACTS = _contracts()
+CANONICAL_ROWS = {r: tuple(FLOW_CONTRACTS[r].get('required_outputs') or ()) for r in ROWS}
+INPUT_CONTRACTS = {r: tuple(FLOW_CONTRACTS[r].get('required_inputs') or ()) for r in ROWS}
 ENGINES = {r: ('source-bound',) for r in ROWS}; ENGINES.update({'2':('yosys','verilator'),'4':('iverilog','verilator'),'5':('yosys','sby'),'6':('quartus',),'11':('fault','yosys'),'DT1':('yosys',),'DT2':('yosys','openroad'),'DT3':('yosys','openroad')})
 APPLICABILITY = {r:'IC+IP' for r in ROWS}; APPLICABILITY['0.5ic']='IC+IP route authority'; APPLICABILITY['6']='IC only; FPGA evidence optional'
 DOWNSTREAM = {r: f'consumer:{";".join(outs)}' for r,outs in CANONICAL_ROWS.items()}
+
+
+def _machine_contracts():
+    """Consume the checked-in catalog and coverage declarations as inputs."""
+    try:
+        catalog = json.loads(_CATALOG_PATH.read_text())
+        coverage_doc = json.loads(_COVERAGE_PATH.read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValueError('frontend machine-readable contract unavailable') from exc
+    if (catalog.get('schema') != 'execution_frontend_catalog/1' or
+            tuple(catalog.get('rows') or ()) != ROWS or
+            {str(k): tuple(v) for k, v in (catalog.get('routes') or {}).items()} != ROUTES):
+        raise ValueError('frontend catalog is out of sync with source routes')
+    if (coverage_doc.get('schema') != 'execution_frontend_coverage/1' or
+            tuple(coverage_doc.get('rows') or ()) != ROWS):
+        raise ValueError('frontend coverage is out of sync with source rows')
+    return catalog, coverage_doc
+
+
+def _portfolio_contracts():
+    data = json.loads(_PORTFOLIO_PATH.read_text())
+    return {str(row['id']): row for row in data.get('steps', ())}
 
 @dataclass(frozen=True)
 class ProviderResult:
@@ -32,7 +65,7 @@ class ProviderResult:
 
 @dataclass(frozen=True)
 class FrontendProvider:
-    step_id: str; factory: Callable; inputs: tuple[str,...]; outputs: tuple[str,...]
+    step_id: str; factory: Callable; inputs: tuple[object,...]; outputs: tuple[str,...]
     downstream: str; applicability: str; engines: tuple[str,...]; default_rank: int
 
 CALLABLES = {r: ROUTES[r][0] for r in ROWS}
@@ -172,12 +205,19 @@ def _run_gate(program, root, source_dir):
             return 'FAIL'
         return 'NOT_MEASURED'
 
-PROVIDERS = {r: FrontendProvider(r, _factory(r), CANONICAL_ROWS[r][:1], CANONICAL_ROWS[r][1:], DOWNSTREAM[r], APPLICABILITY[r], ENGINES[r], i) for i,r in enumerate(ROWS)}
+PROVIDERS = {r: FrontendProvider(r, _factory(r), INPUT_CONTRACTS[r], CANONICAL_ROWS[r], DOWNSTREAM[r], APPLICABILITY[r], ENGINES[r], i) for i,r in enumerate(ROWS)}
 
 def coverage():
-    import _flow_yaml
-    rows={str(s['id']):s for s in _flow_yaml.load().get('steps',())}
-    return {r:{'step_id':p.step_id,'producer':ROUTES[r],'parameter_source':'issued manifest + Controller substitutions','canonical_output':tuple(rows.get(r,{}).get('required_outputs',())),'gates':rows.get(r,{}).get('gate',{}),'availability':'source callable bound; runtime capability checked at execution','downstream':p.downstream,'applicability':p.applicability,'engine_family':p.engines,'default_rank':p.default_rank} for r,p in PROVIDERS.items()}
+    _machine_contracts()
+    return {r:{'step_id':p.step_id,'producer':ROUTES[r],
+               'parameter_source':'issued manifest + Controller substitutions',
+               'canonical_input':p.inputs, 'input_contract':p.inputs,
+               'canonical_output':p.outputs, 'output_contract':p.outputs,
+               'gates':FLOW_CONTRACTS[r].get('gate',{}),
+               'availability':'source callable bound; runtime capability checked at execution',
+               'downstream':p.downstream,'applicability':p.applicability,
+               'engine_family':p.engines,'default_rank':p.default_rank}
+            for r,p in PROVIDERS.items()}
 
 def choose(step_id):
     if step_id not in PROVIDERS: return None
@@ -193,7 +233,21 @@ def register_factories(registry):
     py_path=Path(shutil.which('python3') or sys.executable).resolve(); py=str(py_path)
     repo=next(p for p in source_path.parents if (p/'.git').exists())
     sha=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+    _machine_contracts()
+    portfolio_rows=_portfolio_contracts()
+    if set(portfolio_rows) != set(ROWS):
+        raise ValueError('frontend portfolio rows are out of sync with source rows')
     for row,p in PROVIDERS.items():
+        contract=FLOW_CONTRACTS[row]
+        portfolio_row=portfolio_rows[row]
+        yaml_outputs=tuple(contract.get('required_outputs') or ())
+        portfolio_outputs=tuple(portfolio_row.get('required_output_contract') or ())
+        if portfolio_outputs != yaml_outputs:
+            raise ValueError(f'frontend output contract parity mismatch: {row}')
+        yaml_gates=tuple(_gate_reports(contract))
+        portfolio_gates=tuple(portfolio_row.get('mandatory_gate_programs') or ())
+        if row == '0.5ic' and portfolio_gates != yaml_gates:
+            raise ValueError(f'frontend gate contract parity mismatch: {row}')
         def validate(project, facts, _row=row):
             import _flow_yaml, flow_compliance_check
             contract=next(s for s in _flow_yaml.load()['steps'] if str(s['id']) == _row)
@@ -252,7 +306,11 @@ def register_factories(registry):
             gates={n:('PASS' if str(gate) == 'PASS' else str(gate)) for n in names}
             verdict='PASS' if artifacts and gates and all(v=='PASS' for v in gates.values()) else 'NOT_MEASURED'
             return Evidence(facts, verdict, gates, artifacts, detail='real canonical artifacts and canonical gate validated')
-        required=tuple(next(s for s in em.load_portfolio()['steps'] if s['id']==row)['required_output_contract'])
+        required=portfolio_outputs
+        # The canonical YAML and its machine-readable consumers are part of
+        # the adapter identity. A changed contract must force re-registration.
+        closure=(source_path, worker_path, _FLOW_PATH, _COVERAGE_PATH,
+                 _CATALOG_PATH, _PORTFOLIO_PATH)
         if row == '0.5ic':
             seeds=[source_path, worker_path]
             seeds.extend(source_path.with_name(name) for name in (
@@ -260,9 +318,7 @@ def register_factories(registry):
                 '_flow_yaml.py','flow_compliance_check.py',
                 'submission_template_check.py','tapeout_declaration_check.py'))
             closure=_source_closure(seeds)
-            closure += (source_path.parent.parent / 'flow' / 'phase1_phase2_phase3.yaml',)
-        else:
-            closure=(source_path, worker_path)
+            closure += (_FLOW_PATH,)
         if row == '8':
             closure += tuple(source_path.with_name(name) for name in ('sdc_syntax_check.py','sdc_validator_check.py'))
         bound_files={str(path):digest(path) for path in closure if path.is_file()}
@@ -273,7 +329,7 @@ def register_factories(registry):
             raise ValueError('frontend provider source is dirty; refusing registration')
         objective=({'parameters_from':'issued_manifest'} if row == '0.5ic'
                     else {'metric':'source_boundary'})
-        registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,bound_files,'current-main',p.engines,(Component('frontend_worker',('python3',worker,'--step',row,'--inputs','{inputs}','--outputs','{outputs}')),),validate,required,objective,qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required}))
+        registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,bound_files,'current-main',p.engines,(Component('frontend_worker',('python3',worker,'--step',row,'--inputs','{inputs}','--outputs','{outputs}')),),validate,required,objective,qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required},input_contract=INPUT_CONTRACTS[row]))
     return tuple(PROVIDERS)
 
 def dedupe_by_engine():

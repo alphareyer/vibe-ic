@@ -73,6 +73,22 @@ def _hash(value: object) -> str:
                                     separators=(',', ':')).encode()).hexdigest()
 
 
+def _issued_manifest_payload(context: 'Context') -> dict:
+    """Return the complete worker manifest from immutable controller input."""
+    binding = context.binding()
+    return {'step_id': context.step_id,
+            'parameters': dict(context.objective),
+            'files': dict(binding['inputs'])}
+
+
+def _issued_manifest_bytes(payload: dict) -> bytes:
+    return (json.dumps(payload, sort_keys=True) + '\n').encode()
+
+
+def _issued_manifest_digest(payload: dict) -> str:
+    return hashlib.sha256(_issued_manifest_bytes(payload)).hexdigest()
+
+
 def _seal(value: dict) -> dict:
     payload = json.loads(json.dumps(value))
     signature = hmac.new(_COMPLETION_KEY, _hash(payload).encode(), hashlib.sha256).hexdigest()
@@ -192,6 +208,7 @@ class Adapter:
     license_id: str | None = None
     own_no_tool_reason: str | None = None
     output_contract: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    input_contract: tuple[object, ...] = field(default_factory=tuple)
 
     def identity(self) -> dict:
         return dict(arm_id=self.arm_id, tool_id=self.tool_id,
@@ -203,6 +220,7 @@ class Adapter:
                                      timeout_s=c.timeout_s) for c in self.components],
                     required_outputs=list(self.required_outputs),
                     output_contract={k: list(v) for k, v in self.output_contract.items()},
+                    input_contract=list(self.input_contract),
                     objective=dict(self.objective), role=self.role,
                     qualification_evidence=self.qualification_evidence)
 
@@ -235,6 +253,8 @@ class Registry:
             raise Refusal('INVALID_ARM_BUDGET', adapter.arm_id)
         for name in adapter.required_outputs:
             _relative(name)
+        if not isinstance(adapter.input_contract, tuple):
+            raise Refusal('INPUT_CONTRACT_INVALID', adapter.arm_id)
         if any(not paths or not set(paths).issubset(adapter.required_outputs)
                for paths in adapter.output_contract.values()):
             raise Refusal('OUTPUT_CONTRACT_UNBOUND', adapter.arm_id)
@@ -424,6 +444,9 @@ class Controller:
                     superiority=None if superiority is None else {
                         **asdict(superiority),
                         'receipts': {k: str(v) for k, v in superiority.receipts.items()}})
+        manifest_payload = _issued_manifest_payload(context)
+        plan.update(issued_manifest_payload=manifest_payload,
+                    issued_manifest_sha256=_issued_manifest_digest(manifest_payload))
         _write(output / 'plan.json', plan)
         _ISSUED_AUTHORITY[str(output / 'issued-plan.json')] = json.dumps(plan)
         _write(output / 'issued-plan.json', _seal(plan))
@@ -489,7 +512,8 @@ class Controller:
                        adapter=arm.identity(), binding=plan['binding'],
                        output_root=str(outputs), input_root=str(inputs),
                        status='NOT_MEASURED', reason='NOT_STARTED', processes=[],
-                       evidence=None, started_ns=time.monotonic_ns())
+                       evidence=None, manifest_payload=None, manifest_sha256=None,
+                       started_ns=time.monotonic_ns())
         def frozen_binding():
             actual = {str(p.relative_to(inputs)): digest(p) for p in inputs.rglob('*')
                       if p.is_file() and p.name != 'issued_manifest.json'}
@@ -507,15 +531,18 @@ class Controller:
             # input copy.  This manifest is metadata, not a mutable project
             # input, and is excluded from the byte-for-byte frozen census.
             manifest = inputs / 'issued_manifest.json'
-            manifest.write_text(json.dumps({
-                'step_id': context.step_id,
-                'parameters': dict(context.objective),
-                'files': {name: digest(inputs / _relative(name))
-                          for name in context.inputs},
-            }, sort_keys=True) + '\n')
+            manifest_payload = plan.get('issued_manifest_payload')
+            manifest_sha256 = plan.get('issued_manifest_sha256')
+            if (not isinstance(manifest_payload, dict) or
+                    manifest_payload != _issued_manifest_payload(context) or
+                    manifest_sha256 != _issued_manifest_digest(manifest_payload)):
+                raise Refusal('ISSUED_MANIFEST_PLAN_MISMATCH', arm.arm_id)
+            manifest.write_bytes(_issued_manifest_bytes(manifest_payload))
             manifest.chmod(0o444)
+            receipt['manifest_payload'] = manifest_payload
             receipt['manifest_sha256'] = digest(manifest)
-            _ISSUED_AUTHORITY[str(manifest)] = receipt['manifest_sha256']
+            if receipt['manifest_sha256'] != manifest_sha256:
+                raise Refusal('ISSUED_MANIFEST_DIGEST_MISMATCH', arm.arm_id)
             frozen_binding()
             for component in arm.components:
                 if cancel.is_set():
@@ -594,7 +621,8 @@ class Controller:
         # evidence remains separately reconsumed; a source-issued process rc0
         # does not grant PASS or replace a failed/unmeasured output consumer.
         completion = {k: receipt[k] for k in ('run_id', 'arm_id', 'binding',
-                      'adapter', 'processes', 'input_root', 'output_root')}
+                      'adapter', 'processes', 'input_root', 'output_root',
+                      'manifest_payload', 'manifest_sha256')}
         completion.update(actual_status=receipt['status'], actual_reason=receipt['reason'],
                           ended_ns=receipt['ended_ns'], run_root=str(root))
         _ISSUED_AUTHORITY[str(directory / 'issued-completion.json')] = json.dumps(completion)
@@ -608,7 +636,8 @@ class Controller:
         if issued_plan != plan or plan.get('run_root') != str(root):
             raise Refusal('ISSUED_PLAN_MISMATCH', arm.arm_id)
         completion = _issued(root / arm.arm_id / 'issued-completion.json')
-        fields = ('run_id', 'arm_id', 'binding', 'adapter', 'processes', 'input_root', 'output_root')
+        fields = ('run_id', 'arm_id', 'binding', 'adapter', 'processes', 'input_root', 'output_root',
+                  'manifest_payload', 'manifest_sha256')
         if (completion.get('run_root') != str(root) or
                 completion.get('run_id') != plan['run_id'] or
                 any(completion.get(k) != receipt.get(k) for k in fields)):
@@ -690,8 +719,16 @@ class Controller:
                     raise Refusal('PROCESS_LOG_CHANGED', arm.arm_id)
         frozen = Path(receipt['input_root'])
         manifest = frozen / 'issued_manifest.json'
-        if (not manifest.is_file() or receipt.get('manifest_sha256') != digest(manifest)
-                or _ISSUED_AUTHORITY.get(str(manifest)) != digest(manifest)):
+        expected_manifest = _issued_manifest_payload(context)
+        expected_manifest_sha256 = _issued_manifest_digest(expected_manifest)
+        try:
+            observed_manifest = json.loads(manifest.read_text())
+        except (OSError, ValueError, TypeError):
+            observed_manifest = None
+        if (not manifest.is_file() or observed_manifest != expected_manifest or
+                receipt.get('manifest_payload') != expected_manifest or
+                receipt.get('manifest_sha256') != expected_manifest_sha256 or
+                digest(manifest) != expected_manifest_sha256):
             raise Refusal('ISSUED_MANIFEST_CHANGED', arm.arm_id)
         if not frozen.is_dir() or any(p.is_symlink() for p in frozen.rglob('*')) or {
                 str(p.relative_to(frozen)): digest(p) for p in frozen.rglob('*')
