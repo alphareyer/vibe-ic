@@ -691,8 +691,61 @@ def emit_synthesis_config(project: Path, pdk: str, output: Path,
     return result
 
 
+def phase2_pdk(project: Path) -> tuple[str, str]:
+    """Read the existing Phase-2 PDK declaration, refusing ambiguous evidence.
+
+    The shared declaration accessor selects the source. This stricter tool
+    input boundary checks its providers for malformed or conflicting values;
+    a prose target is not an executable PDK distribution name.
+    """
+    import declared_pdk_is_the_pdk_used_check as declared
+
+    paths = [project / 'phase1/pdk_staging_read.json',
+             project / 'phase1/merged_docs/L19_CONSTRAINTS_PDK.json',
+             project / 'phase1/L19_CONSTRAINTS_PDK.json',
+             project / 'input/project.json']
+    paths += sorted((project / 'phase1/generated_docs').glob('L19_*.json'))
+    values: set[str] = set()
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            doc = json.loads(path.read_text())
+            if not isinstance(doc, dict):
+                raise ValueError('declaration must be an object')
+            scopes = [doc]
+            if 'fields' in doc:
+                if not isinstance(doc['fields'], dict):
+                    raise ValueError('fields must be an object')
+                scopes.append(doc['fields'])
+            keys = ('adopted_pdk_target', 'staged_identifier') if path.name == 'pdk_staging_read.json' else (
+                ('pdk', 'target_pdk', 'pdk_target') if path.name == 'project.json' else declared._L19_KEYS)
+            for scope in scopes:
+                for key in keys:
+                    value = scope.get(key)
+                    if value is None or value == '':
+                        continue
+                    if not isinstance(value, str) or not _PDK_NAME.fullmatch(value.strip()):
+                        raise ValueError(f'{key} must name an exact PDK distribution')
+                    values.add(value.strip())
+        except (OSError, ValueError) as exc:
+            raise Refusal('LL_PHASE2_PDK_INVALID', f'{path.relative_to(project)}: {exc}') from exc
+    pdk, source = declared.declared_target(project)
+    if not pdk or not source or not values:
+        raise Refusal('LL_PHASE2_PDK_UNDECLARED', 'declare PDK in Phase-2 L19 or input/project.json')
+    if values != {pdk}:
+        raise Refusal('LL_PHASE2_PDK_CONFLICT', 'Phase-2 PDK declarations disagree')
+    switch = project / 'phase3/librelane_switch.json'
+    if switch.is_file():
+        selected = _load(switch).get('pdk')
+        if selected is not None and selected != pdk:
+            raise Refusal('LL_PHASE2_PDK_CONFLICT', 'switch.pdk disagrees with Phase-2 declaration')
+    return pdk, source
+
+
 def emit_lint_config(project: Path, pdk: str, output: Path, top: str,
-                     rtl_files: list[Path], top_source: str) -> dict:
+                     rtl_files: list[Path], top_source: str,
+                     pdk_source: str = 'phase3/librelane_switch.json.pdk') -> dict:
     """Bind Verilator.Lint to the design's own RTL and declared top.
 
     Step 2 runs before any Phase-3 artefact exists, so this reads nothing
@@ -705,7 +758,7 @@ def emit_lint_config(project: Path, pdk: str, output: Path, top: str,
     result: dict[str, Any] = {'meta': {'step': 'Verilator.Lint'}}
     sources: dict[str, str] = {}
     _set(result, sources, 'DESIGN_NAME', top, top_source)
-    _set(result, sources, 'PDK', pdk, 'phase3/librelane_switch.json.pdk')
+    _set(result, sources, 'PDK', pdk, pdk_source)
     _set(result, sources, 'VERILOG_FILES', [str(path.resolve()) for path in rtl_files],
          '_rtl_include_hub.silicon_rtl_selection (the step-9 synthesis input)')
     write_json(output, result)
@@ -1706,7 +1759,7 @@ def derive_step_config(config: Path, output: Path, updates: dict[str, tuple[Any,
 #: criteria (a) and (b), or b-analog for an analog observer step). A step not
 #: named here defaults to `direct`. A project opts out of a cut-over default by
 #: naming the step `direct` in `phase3/librelane_switch.json`.
-PRODUCTION_DEFAULTS: dict[str, str] = {'3': 'librelane'}
+PRODUCTION_DEFAULTS: dict[str, str] = {'2': 'librelane', '3': 'librelane'}
 
 #: The chip path: a die that carries its own pad ring
 #: (`_tapeout_declaration.requests_pad_ring`, the condition of step 15.5ic).
@@ -1726,6 +1779,9 @@ CLASS_PRODUCTION_DEFAULTS: dict[str, dict[str, str]] = {
                                  # STA_CORNERS, not a staged Liberty glob.
                                  # Source: cut-7 82e200e3632b (default hunk).
                                  '7': 'librelane',
+                                 # Existing synthesis producer, now bound to
+                                 # the Phase2/3 and Step14 product consumers.
+                                 '9': 'librelane',
                                  '15': 'librelane', '15.5ic': 'librelane',
                                  '17': 'librelane', '18': 'librelane',
                                  '19': 'librelane', '20': 'librelane',

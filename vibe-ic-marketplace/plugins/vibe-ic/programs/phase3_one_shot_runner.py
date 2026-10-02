@@ -17105,6 +17105,15 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
 
     t0 = time.time()
     set_invocation_provenance_sink(project)
+    # A failed new attempt cannot leave an older handoff credited by Step14.
+    _inputs = _pl.synth_dir(project) / "synth_inputs.json"
+    if _inputs.is_file():
+        try:
+            _old_inputs = json.loads(_inputs.read_text())
+            _old_inputs.pop("librelane_synthesis", None)
+            _ll.write_json(_inputs, _old_inputs)
+        except (OSError, ValueError, AttributeError):
+            pass  # the existing handoff gate refuses an unreadable sidecar
     # A project under the `--librelane` flow selects this step with no switch
     # file (librelane_contract.impl_step_modes); the file's only use here is
     # the optional development source mount below.
@@ -17137,6 +17146,19 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
         # resolved from the image > refused, naming its cause).
         pdk_root_host = _ll.pdk_root_resolution(project, str(pdk.name),
                                                 image=image)["path"]
+        # The explicit PDK resolver can name an image path. Its exact relative
+        # path is present in the resolver's materialised host tree; do not pick
+        # a different library or infer a distribution from filenames.
+        if not liberty_path.is_file() and pdk_root_host:
+            try:
+                relative_liberty = liberty_path.relative_to(Path(PDKS_IN_CONTAINER))
+            except ValueError:
+                relative_liberty = None
+            if relative_liberty is not None:
+                liberty_path = Path(pdk_root_host) / relative_liberty
+                if not liberty_path.is_file():
+                    raise _ll.Refusal("LL_PDK_LIB_MISSING", str(liberty_path))
+                pdk.liberty = str(liberty_path)
         if pdk_root_host and liberty_path.is_relative_to(Path(pdk_root_host)):
             liberty_guest = "/pdk/" + str(liberty_path.relative_to(Path(pdk_root_host)))
         else:
@@ -17264,6 +17286,11 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
             capture_output=True, text=True)
         if handoff_gate.returncode:
             raise _ll.Refusal("LL_HANDOFF_NETLIST_FAILED", handoff_gate.stdout[-500:])
+        import synth_handoff_netlist_check as _handoff
+        _handoff.publish_handoff(project, folder, netlist, top)
+        _log_surviving_artefact([str(netlist.parent / "netlist.v")],
+                                produced_by="LibreLane.Yosys.Synthesis",
+                                tool="yosys", exit_code=0)
         return StepResult("synth", "PASS", time.time() - t0,
                           f"LibreLane Yosys.Synthesis: {netlist.name}; "
                           f"area gate rc={gate.returncode}; "
@@ -36198,6 +36225,12 @@ def pnr_input_netlist(project: Path, top: str) -> Tuple[Path, str, bool]:
     into the PnR step record either way, so a run that routed a chainless
     netlist says so instead of looking like an ordinary run.
     """
+    import synth_handoff_netlist_check as _handoff
+    bound = _handoff.bound_handoff(project)
+    if bound is not None and (bound['verdict'] != 'PASS' or
+                             Path(bound['mapped']).name != f"{top}_synth.v"):
+        raise ValueError('LL_SYNTH_HANDOFF_INVALID: ' +
+                         ('; '.join(bound['findings']) or 'consumer top differs from producer top'))
     synth = _pl.synth_dir(project)
     pre_dft = synth / f"{top}_synth.v"
     post_dft = synth / "post_dft_netlist.v"
@@ -38666,7 +38699,10 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     out_dir.mkdir(parents=True, exist_ok=True)
     import declared_knob_applied_parity as _knob_parity
     _knob_parity.write_pending_pnr_report(project, out_dir / "pnr.tcl")
-    netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
+    try:
+        netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
+    except ValueError as exc:
+        return StepResult("pnr", "FAIL", time.time() - t0, str(exc))
     print(f"[pnr] netlist: {_nl_note}", flush=True)
     if not netlist.is_file():
         return StepResult("pnr", "FAIL", time.time() - t0,
