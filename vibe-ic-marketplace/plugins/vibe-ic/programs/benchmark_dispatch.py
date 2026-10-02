@@ -59,6 +59,27 @@ EXPERT_AGENT_MD = Path(__file__).resolve().parent.parent / "agents" / "ic-expert
 _COORDINATOR_LOCK = ".benchmark_dispatch.coordinator.lock"
 
 
+def _reject_duplicate_json_pairs(pairs):
+    """Build one JSON object while refusing every repeated member name.
+
+    ``json.loads`` otherwise applies last-key-wins semantics.  Route responses
+    are signed evidence, so a payload whose meaning depends on that overwrite
+    is malformed at every object depth, including nested metadata and evidence
+    records.
+    """
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key!r}")
+        result[key] = value
+    return result
+
+
+def _strict_json_loads(raw):
+    """Parse JSON evidence without permitting duplicate object members."""
+    return json.loads(raw, object_pairs_hook=_reject_duplicate_json_pairs)
+
+
 class _CoordinatorBusy(RuntimeError):
     """A second solve/resume coordinator targeted the same run root."""
 
@@ -5648,7 +5669,7 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
         if _sha256_text(json.dumps(body, sort_keys=True)) != task_hash:
             raise ValueError("issued route task identity changed")
         issued = run_p / "ai_route_tasks" / f"{task_hash}.json"
-        if json.loads(issued.read_text()) != task:
+        if _strict_json_loads(issued.read_text()) != task:
             raise ValueError("route task differs from coordinator issue")
         project = Path(str(task["project"])).resolve()
         if project != run_p / "projects" / _safe_problem_id(str(task["id"])):
@@ -5680,7 +5701,7 @@ def _validate_ai_route(task: dict, run_p: Path) -> tuple[dict | None, list[str]]
             raise ValueError("route response path is not coordinator-owned regular path")
         if not response_path.is_file():
             return None, reasons + ["AI_ROUTE_PENDING: no response"]
-        response = json.loads(response_path.read_text(errors="replace"))
+        response = _strict_json_loads(response_path.read_text(errors="replace"))
         if not isinstance(response, dict):
             raise ValueError("route response must be an object")
         required = {

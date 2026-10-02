@@ -68,6 +68,21 @@ def _write_answer(task: dict, answer: dict) -> None:
     path.write_text(json.dumps(answer))
 
 
+def _write_raw_answer(task: dict, raw: str) -> None:
+    path = Path(task["response_path"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(raw)
+
+
+def _route_response_run(tmp_path, monkeypatch, *, prompt: str = PROMPT):
+    dataset, run = _dataset(tmp_path), tmp_path / "run"
+    (dataset / "generic_pulse_prompt.txt").write_text(prompt)
+    calls = []
+    _record_canonical_frontdoor(monkeypatch, calls)
+    assert bd.cmd_solve("verilogeval-human", str(dataset), str(run)) == 2
+    return dataset, run, calls, _task(run)
+
+
 def _typed_d1_runner(calls):
     """Fixture runner that emits the same bound artifacts as canonical D1."""
     def run(argv, *args, **kwargs):
@@ -155,6 +170,90 @@ def test_invalid_ai_route_still_launches_no_runner(tmp_path, monkeypatch, tamper
     assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
     assert calls == []
     assert json.loads((run / "solve_report.json").read_text())["routing_phase"] == "PENDING"
+
+
+@pytest.mark.parametrize("prompt", [
+    pytest.param(PROMPT, id="program-default"),
+    pytest.param("Please use ultra mode.", id="user-explicit-ultra"),
+])
+def test_duplicate_top_level_disposition_is_rejected_by_public_frontdoors(
+        tmp_path, monkeypatch, prompt):
+    dataset, run, calls, task = _route_response_run(
+        tmp_path, monkeypatch, prompt=prompt)
+    raw = json.dumps(_answer(task, "spec_generation"), separators=(",", ":"))
+    raw = raw.replace(
+        '"disposition":"CONFIRM"',
+        '"disposition":"NEEDS_CLARIFICATION","disposition":"CONFIRM"',
+        1)
+    _write_raw_answer(task, raw)
+    decision, reasons = bd._validate_ai_route(task, run)
+    assert decision is None
+    assert any("duplicate JSON key: 'disposition'" in reason
+               for reason in reasons)
+    assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
+    assert calls == []
+    assert json.loads((run / "solve_report.json").read_text())[
+        "routing_phase"] == "PENDING"
+
+
+@pytest.mark.parametrize(
+    ("field", "needle", "replacement"),
+    [
+        pytest.param(
+            "metadata",
+            '"model":"general-review-model"',
+            '"model":"general-review-model","model":"forged-model"',
+            id="nested-metadata",
+        ),
+        pytest.param(
+            "evidence",
+            '"excerpt":"Design a pulse stretcher named top_module"',
+            '"excerpt":"Design a pulse stretcher named top_module",'
+            '"excerpt":"forged excerpt"',
+            id="nested-evidence",
+        ),
+    ],
+)
+def test_duplicate_nested_route_evidence_is_rejected_before_decision(
+        tmp_path, monkeypatch, field, needle, replacement):
+    dataset, run, calls, task = _route_response_run(tmp_path, monkeypatch)
+    raw = json.dumps(_answer(task, "spec_generation"), separators=(",", ":"))
+    assert needle in raw
+    _write_raw_answer(task, raw.replace(needle, replacement, 1))
+    decision, reasons = bd._validate_ai_route(task, run)
+    assert decision is None
+    key = "model" if field == "metadata" else "excerpt"
+    assert any(f"duplicate JSON key: '{key}'" in reason
+               for reason in reasons)
+    assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
+    assert calls == []
+    assert json.loads((run / "solve_report.json").read_text())[
+        "routing_phase"] == "PENDING"
+
+
+@pytest.mark.parametrize("prompt,expected_authority", [
+    pytest.param(PROMPT, "PROGRAM_DEFAULT", id="default-control"),
+    pytest.param("Please use ultra mode.",
+                 "USER_EXPLICIT_ULTRA", id="ultra-control"),
+])
+def test_unique_byte_equivalent_route_control_reaches_public_frontdoor(
+        tmp_path, monkeypatch, prompt, expected_authority):
+    dataset, run, calls, task = _route_response_run(
+        tmp_path, monkeypatch, prompt=prompt)
+    answer = _answer(task, "spec_generation")
+    if expected_authority == "USER_EXPLICIT_ULTRA":
+        answer["prompt_evidence"] = [{
+            "excerpt": prompt,
+            "supports": "The user explicitly selects Ultra execution mode.",
+        }]
+    raw = json.dumps(answer, separators=(",", ":"))
+    _write_raw_answer(task, raw)
+    assert json.loads(raw) == answer
+    assert bd.cmd_resume("verilogeval-human", str(dataset), str(run)) == 2
+    assert len(calls) == 2
+    result = json.loads((run / "solve_report.json").read_text())["results"][0]
+    assert result["routing_verdict"]["route_receipt"]["mode_intent"][
+        "authority"] == expected_authority
 
 
 def test_confirmed_ai_route_enters_only_its_derived_product_path(tmp_path,
