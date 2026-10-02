@@ -118,6 +118,21 @@ def test_step8_nonzero_and_manifest_mutation_refuse(tmp_path):
     (project/'input/issued_manifest.json').write_text(json.dumps({'step_id':'9','parameters':{},'files':files}))
     with __import__('pytest').raises(ValueError): w.run_row('8',project,tmp_path/'out2')
 
+def test_step8_worker_timeout_fails_closed(tmp_path, monkeypatch):
+    import execution_frontend_worker as w
+    project=tmp_path/'p'; sdc=project/'phase2/stage2/constraints/top.sdc'; sdc.parent.mkdir(parents=True)
+    sdc.write_text('create_clock -period 10 [get_ports clk]\nset_input_delay 1 -clock clk [all_inputs]\nset_output_delay 1 -clock clk [all_outputs]\n')
+    l8=project/'phase1/generated_docs/L8_TIMING_WAVEFORM.json'; l8.parent.mkdir(parents=True)
+    l8.write_text(json.dumps({'clocks': {'clk': {'period_ns': 10}}}))
+    (project/'input').mkdir(); (project/'input/issued_manifest.json').write_text(
+        json.dumps({'step_id':'8','parameters':{},'files':{}}))
+    def hang(*args, **kwargs):
+        raise w.subprocess.TimeoutExpired(args[0], kwargs['timeout'])
+    monkeypatch.setattr(w.subprocess, 'run', hang)
+    with __import__('pytest').raises(RuntimeError, match='timed out'):
+        w.run_row('8', project, tmp_path/'out')
+    assert not (tmp_path/'out/canonical.json').exists()
+
 def test_05ic_parameter_exclusivity_precedes_tools(tmp_path, monkeypatch):
     import execution_frontend_worker as w
     calls=[]
