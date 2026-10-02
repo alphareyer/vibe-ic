@@ -698,6 +698,7 @@ class Controller:
                 self._source_current(arm)
                 frozen_binding()
                 argv = [v.replace('{inputs}', str(inputs)).replace('{outputs}', str(outputs))
+                          .replace('{manifest}', str(manifest))
                         for v in component.argv]
                 executable = shutil.which(argv[0])
                 if not executable or str(Path(executable).resolve()) not in arm.source_files:
@@ -725,6 +726,7 @@ class Controller:
                              'OPENBLAS_NUM_THREADS': str(arm.cpus),
                              'VIBEIC_EXECUTION_BINDING': json.dumps(plan['binding']),
                              'VIBEIC_ARM_ID': arm.arm_id,
+                             'VIBEIC_ISSUED_MANIFEST_PATH': str(manifest),
                              'VIBEIC_MANIFEST_SHA256': receipt['manifest_sha256'],
                              'VIBEIC_CANONICAL_ROUTE': json.dumps(list(arm.route)),
                              'VIBEIC_SOURCE_SHA': arm.source_sha,

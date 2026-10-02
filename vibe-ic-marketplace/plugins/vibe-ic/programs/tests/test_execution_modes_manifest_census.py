@@ -74,6 +74,20 @@ def test_declared_same_basename_is_bound_and_adoptable(tmp_path, name):
     assert adoption(context, arm, controller, root)['status'] == 'ADOPTED'
 
 
+def test_input_subdirectory_manifest_is_ordinary_bound_input(tmp_path):
+    """The normal registered worker must consume only Controller authority."""
+    context, arm, controller, root = setup(tmp_path, ('input/issued_manifest.json',))
+    receipt = run(context, arm, controller, root)
+    assert receipt['status'] == 'ELIGIBLE', receipt
+    frozen = Path(receipt['input_root'])
+    ordinary = frozen / 'input/issued_manifest.json'
+    assert ordinary.is_file()
+    assert receipt['manifest']['files']['input/issued_manifest.json'] == em.digest(ordinary)
+    argv = receipt['processes'][0]['argv']
+    assert argv[argv.index('--manifest') + 1] == str(frozen / 'issued_manifest.json')
+    assert adoption(context, arm, controller, root)['status'] == 'ADOPTED'
+
+
 @pytest.mark.parametrize('name,reason', [
     ('issued_manifest.json', 'RESERVED_INPUT_PATH'),
     ('./issued_manifest.json', 'RESERVED_INPUT_PATH'),

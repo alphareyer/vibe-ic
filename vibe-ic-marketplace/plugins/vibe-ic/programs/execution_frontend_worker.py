@@ -7,6 +7,32 @@ from pathlib import Path
 
 _STEP8_PRODUCER_TIMEOUT_S = 30
 _STEP8_DISPATCH = ContextVar('step8_dispatch', default=False)
+_ISSUED_MANIFEST_ENV = 'VIBEIC_ISSUED_MANIFEST_PATH'
+
+
+def _issued_manifest_path(project, authority_path=None):
+    """Resolve the one Controller-issued authority path for a worker run.
+
+    Controller dispatch binds this path explicitly in both argv and the
+    environment. The legacy fallback is retained only for direct, unissued
+    helper tests; a Controller arm always carries ``VIBEIC_ARM_ID`` and must
+    provide the bound path.
+    """
+    project = Path(project)
+    raw = authority_path or os.environ.get(_ISSUED_MANIFEST_ENV)
+    if raw:
+        path = Path(raw)
+    elif os.environ.get('VIBEIC_ARM_ID'):
+        raise ValueError('issued manifest authority path is required')
+    else:
+        # Compatibility for direct legacy helper callers. The normal
+        # Controller path above is exact and cannot select a nested input.
+        path = project / 'issued_manifest.json'
+        if not path.is_file():
+            path = project / 'input' / 'issued_manifest.json'
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('issued manifest authority path is required')
+    return path
 
 def _canonical_route(step: str) -> tuple[str, ...]:
     # Kept in the worker boundary so a caller cannot replace the route by
@@ -34,12 +60,11 @@ def _write(step, output, producer, **details):
     return out
 
 
-def _verify_manifest(project, step):
-    manifest=Path(project)/'input'/'issued_manifest.json'
-    if not manifest.is_file():
-        manifest = Path(project) / 'issued_manifest.json'
-    if not manifest.is_file():
-        raise ValueError(f'{step}: issued manifest is required')
+def _verify_manifest(project, step, authority_path=None):
+    try:
+        manifest = _issued_manifest_path(project, authority_path)
+    except ValueError as exc:
+        raise ValueError(f'{step}: issued manifest is required') from exc
     try: record=json.loads(manifest.read_text())
     except (OSError,ValueError) as exc: raise ValueError(f'{step}: issued manifest invalid') from exc
     strict = _strict_issuance()
@@ -350,13 +375,20 @@ def _step8_controller_request(project, output, parameters):
     return output / 'reports/phase2/sdc_check.json'
 
 
-def run_row(step_id,project,output,**kwargs):
+def run_row(step_id,project,output,authority_path=None,**kwargs):
     if step_id not in PRODUCERS: raise ValueError(f'unknown frontend row: {step_id}')
-    manifest=Path(project)/'input'/'issued_manifest.json'
-    if manifest.is_file():
+    manifest = None
+    try:
+        manifest = _issued_manifest_path(project, authority_path)
+    except ValueError:
+        # Rows without an issued authority retain their existing typed
+        # parameter validation. Step 8 itself fails closed below.
+        if step_id == '8':
+            raise
+    if manifest is not None:
         try:
             record=json.loads(manifest.read_text())
-            _verify_manifest(project, step_id)
+            _verify_manifest(project, step_id, manifest)
             bound=record.get('parameters') or {}
         except (OSError,ValueError) as exc: raise ValueError(f'{step_id}: issued manifest invalid') from exc
         if _strict_issuance() and kwargs and kwargs != bound:
@@ -375,5 +407,5 @@ def run_row(step_id,project,output,**kwargs):
             _STEP8_DISPATCH.reset(token)
     return PRODUCERS[step_id](project,output,**kwargs)
 def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('--step',required=True); ap.add_argument('--inputs',required=True); ap.add_argument('--outputs',required=True); a=ap.parse_args(); run_row(a.step,a.inputs,a.outputs)
+    ap=argparse.ArgumentParser(); ap.add_argument('--step',required=True); ap.add_argument('--inputs',required=True); ap.add_argument('--outputs',required=True); ap.add_argument('--manifest',default=None); a=ap.parse_args(); run_row(a.step,a.inputs,a.outputs,a.manifest)
 if __name__=='__main__': main()
