@@ -736,11 +736,17 @@ class Controller:
                     # A typed, digest-bound checker FAIL is measured even if
                     # the worker exits nonzero. Other process errors remain
                     # unmeasured; rc alone cannot supply a gate verdict.
-                    evidence = arm.validate(outputs, plan['binding'])
-                    receipt['evidence'] = asdict(evidence)
-                    if evidence.verdict == 'FAIL' or any(
-                            evidence.gates.get(k) == 'FAIL'
-                            for k in context.required_gates):
+                    try:
+                        evidence = arm.validate(outputs, plan['binding'])
+                    except Exception as validation_error:
+                        receipt['validation_error'] = repr(validation_error)
+                        evidence = None
+                    if evidence is not None:
+                        receipt['evidence'] = asdict(evidence)
+                    if evidence is not None and dict(evidence.binding) == plan['binding'] and (
+                            evidence.verdict == 'FAIL' or any(
+                                evidence.gates.get(k) == 'FAIL'
+                                for k in context.required_gates)):
                         raise Refusal('GATE_FAIL', evidence.detail)
                     raise Refusal('PROCESS_ERROR', f'{component.name}: rc={record["rc"]}')
                 frozen_binding()
@@ -775,6 +781,8 @@ class Controller:
         if issued_plan != plan or plan.get('run_root') != str(root):
             raise Refusal('ISSUED_PLAN_MISMATCH', arm.arm_id)
         completion = _issued(root / arm.arm_id / 'issued-completion.json')
+        if completion.get('evidence') != receipt.get('evidence'):
+            raise Refusal('EVIDENCE_CHANGED', arm.arm_id)
         fields = ('run_id', 'arm_id', 'binding', 'adapter', 'processes',
                   'input_root', 'output_root', 'evidence', 'manifest', 'manifest_sha256')
         if (completion.get('run_root') != str(root) or
