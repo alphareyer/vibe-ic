@@ -39,3 +39,22 @@ def test_controller_executes_worker_and_validator_reddens_on_output_mutation(tmp
     run=tmp_path/'run'; result=em.Controller(registry,em.Budget(1,512,1),portfolio).run(context,run)
     assert result['status']=='AWAITING_AI_SELECTION'
     assert result['candidate_statuses']['frontend_D1'] in ('INELIGIBLE','NOT_MEASURED','ELIGIBLE')
+
+def test_step8_public_controller_eligible_and_adopted(tmp_path):
+    import hashlib, subprocess
+    project=tmp_path/'project'; sdc=project/'phase2/stage2/constraints/top.sdc'; sdc.parent.mkdir(parents=True)
+    sdc.write_text('create_clock -period 10 [get_ports clk]\nset_input_delay 1 -clock clk [all_inputs]\nset_output_delay 1 -clock clk [all_outputs]\n')
+    l8=project/'phase1/generated_docs/L8_TIMING_WAVEFORM.json'; l8.parent.mkdir(parents=True)
+    l8.write_text(json.dumps({'clocks': {'clk': {'period_ns': 10}}}))
+    registry=em.Registry(); p.register_factories(registry); portfolio=em.load_portfolio()
+    row=next(s for s in portfolio['steps'] if str(s['id'])=='8')
+    sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=Path(__file__).parents[2],text=True).strip()
+    ctx=em.Context('8',sha,{'phase2/stage2/constraints/top.sdc':sdc,'phase1/generated_docs/L8_TIMING_WAVEFORM.json':l8},{'metric':'source_boundary'},tuple(row['mandatory_gate_programs']))
+    run=tmp_path/'run'; controller=em.Controller(registry,em.Budget(1,512,1),portfolio); controller.run(ctx,run)
+    receipt=json.loads((run/'frontend_8/receipt.json').read_text())
+    assert receipt['status']=='ELIGIBLE'; assert set(receipt['evidence']['gates'])==set(row['mandatory_gate_programs'])
+    assert receipt['evidence']['outputs']['reports/phase2/sdc_check.json']==em.digest(run/'frontend_8/outputs/reports/phase2/sdc_check.json')
+    choice={'arm_id':'frontend_8','receipt_sha256':em.digest(run/'frontend_8/receipt.json'),'rationale':'step8 fixture','reviewer':'test','binding':ctx.binding()}
+    assert controller.adopt(ctx,run,choice)['status']=='ADOPTED'
+    sdc.write_text(sdc.read_text()+'\n# mutation\n')
+    with __import__('pytest').raises(Exception): controller.adopt(ctx,run,choice)

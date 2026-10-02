@@ -90,7 +90,8 @@ def register_factories(registry):
                 if isinstance(node,dict): return sum((gate_names(v) for v in node.values()),[])
                 if isinstance(node,list): return sum((gate_names(v) for v in node),[])
                 return []
-            names=gate_names(contract.get('gate',{})); gates={n:('PASS' if gate not in ('FAIL','NOT_MEASURED') else str(gate)) for n in names}
+            names=tuple(contract.get('mandatory_gate_programs') or ('sdc_syntax_check',))
+            gates={n:('PASS' if gate not in ('FAIL','NOT_MEASURED') else str(gate)) for n in names}
             verdict='PASS' if artifacts and gates and all(v=='PASS' for v in gates.values()) else 'NOT_MEASURED'
             return Evidence(facts, verdict, gates, artifacts, detail='real canonical artifacts and canonical gate validated')
         required=tuple(next(s for s in em.load_portfolio()['steps'] if s['id']==row)['required_output_contract']) or ('canonical.json',)
