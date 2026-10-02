@@ -11,6 +11,8 @@ def _write(step, output, producer, **details):
 def _verify_manifest(project, step):
     manifest=Path(project)/'input'/'issued_manifest.json'
     if not manifest.is_file():
+        manifest = Path(project) / 'issued_manifest.json'
+    if not manifest.is_file():
         raise ValueError(f'{step}: issued manifest is required')
     try: record=json.loads(manifest.read_text())
     except (OSError,ValueError) as exc: raise ValueError(f'{step}: issued manifest invalid') from exc
@@ -85,6 +87,12 @@ def produce_8(project,output,**k):
     report = output / 'reports/phase2/sdc_check.json'
     report.parent.mkdir(parents=True, exist_ok=True)
     l8 = k.get('l8') or next(staged.rglob('L8_TIMING_WAVEFORM.json'), None)
+    if l8 is not None:
+        l8 = Path(l8)
+        if not l8.is_absolute():
+            l8 = staged / l8
+        elif l8.exists() and str(l8).startswith(str(project)):
+            l8 = staged / l8.relative_to(project)
     commands = [
         ['python3', str(Path(__file__).with_name('sdc_syntax_check.py')), str(staged), '--json', str(report)],
         ['python3', str(Path(__file__).with_name('sdc_validator_check.py')), str(staged), '--l8', str(l8), '--json', str(report)],
@@ -121,7 +129,7 @@ def produce_p0(project,output,top=None,claim=None,**k):
     return _record('P0',project,output,'p0_tool_frontend_check.check+formal_structural_check.check_claim',p0.check,top=top,claim=claim,**k)
 
 PRODUCERS={'D1':produce_d1,'0.5ic':produce_05ic,'1':produce_1,'2':produce_2,'3':produce_3,'4':produce_4,'5':produce_5,'6':produce_6,'7':produce_7,'8':produce_8,'10':produce_10,'11':produce_11,'FS1':produce_fs1,'DT1':produce_dt1,'12':produce_12,'13':produce_13,'DT2':produce_dt2,'DT3':produce_dt3,'P0':produce_p0}
-REQUIRED_PARAMETERS={'D1':(), '0.5ic':('template_or_no_template_reason',), '1':('ic_class',), '2':('top','clock','timeout'), '3':('top',), '4':('top','container'), '5':('top','container'), '6':('top','container'), '7':('top','pdk','container'), '8':('l8',), '10':('top','pdk','container'), '11':('top','clock','pdk'), 'FS1':('asil',), 'DT1':('top','clock','timeout'), '12':(), '13':('top','container','lec_max_completed_rungs'), 'DT2':('top','clock','timeout'), 'DT3':('top','clock','timeout'), 'P0':('top','claim')}
+REQUIRED_PARAMETERS={'D1':(), '0.5ic':('template_or_no_template_reason',), '1':('ic_class',), '2':('top','clock','timeout'), '3':('top',), '4':('top','container'), '5':('top','container'), '6':('top','container'), '7':('top','pdk','container'), '8':(), '10':('top','pdk','container'), '11':('top','clock','pdk'), 'FS1':('asil',), 'DT1':('top','clock','timeout'), '12':(), '13':('top','container','lec_max_completed_rungs'), 'DT2':('top','clock','timeout'), 'DT3':('top','clock','timeout'), 'P0':('top','claim')}
 def run_row(step_id,project,output,**kwargs):
     if step_id not in PRODUCERS: raise ValueError(f'unknown frontend row: {step_id}')
     manifest=Path(project)/'input'/'issued_manifest.json'
