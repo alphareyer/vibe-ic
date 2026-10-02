@@ -39,23 +39,22 @@ class FrontendProvider:
 CALLABLES = {r: ROUTES[r][0] for r in ROWS}
 
 def _produce(step_id, project, **kwargs):
-    """Execute only a bound current-main producer; absent routes refuse."""
+    """Dispatch through the explicit worker entry point for this row."""
     project = Path(project)
-    source = project / ROW_CONTRACTS[step_id][0]
-    callable_id = CALLABLES.get(step_id)
-    if callable_id is None: return ProviderResult(step_id, 'NOT_IMPLEMENTED', 'no compatible current-main callable bound')
-    if not source.exists(): return ProviderResult(step_id, 'NOT_IMPLEMENTED', f'missing input: {source}')
-    out = project / ROW_CONTRACTS[step_id][1]
-    out.parent.mkdir(parents=True, exist_ok=True)
+    if not project.exists():
+        return ProviderResult(step_id, 'NOT_IMPLEMENTED', f'missing input: {project}')
+    if step_id not in CALLABLES: return ProviderResult(step_id, 'NOT_IMPLEMENTED', 'unknown frontend row')
     if step_id == 'D1':
+        source = project / 'input' / 'docs'
         from phase1_doc_presence_check import check
         findings = check(source, strict=False)
-        payload = {'schema':'phase1_doc_presence/1','step_id':step_id,'producer':callable_id,
-                   'input':str(source.relative_to(project)),'input_sha256':_tree_sha(source),
-                   'findings':[getattr(f,'__dict__',str(f)) for f in findings], 'verdict':'NOT_MEASURED'}
-    else: return ProviderResult(step_id, 'NOT_IMPLEMENTED', 'worker execution requires full canonical inputs/tool admission')
-    out.write_text(json.dumps(payload, sort_keys=True)+'\n')
-    return ProviderResult(step_id, 'NOT_MEASURED', 'source boundary executed; native/EDA qualification not measured', (str(out.relative_to(project)),))
+        out = project / 'reports' / 'phase1' / 'doc_presence.json'; out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({'schema':'phase1_doc_presence/1','step_id':'D1','producer':CALLABLES['D1'],'findings':[getattr(f,'__dict__',str(f)) for f in findings],'verdict':'NOT_MEASURED'}, sort_keys=True)+'\n')
+        return ProviderResult(step_id, 'NOT_MEASURED', 'source boundary executed; native/EDA qualification not measured', (str(out.relative_to(project)),))
+    from execution_frontend_worker import run_row
+    out = project / 'frontend_outputs' / step_id.replace('.', '_')
+    artifact = run_row(step_id, project, out, **kwargs)
+    return ProviderResult(step_id, 'NOT_MEASURED', 'source boundary executed; native/EDA qualification not measured', (str(Path(artifact).relative_to(project)),))
 
 def _tree_sha(path):
     h=hashlib.sha256()
