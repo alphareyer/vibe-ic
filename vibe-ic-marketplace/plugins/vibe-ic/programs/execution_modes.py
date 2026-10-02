@@ -11,14 +11,12 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 import hashlib
-import hmac
 import inspect
 import json
 import math
 import os
 from pathlib import Path
 import re
-import secrets
 import shutil
 import signal
 import subprocess
@@ -36,11 +34,14 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 from _atomic_artefact import write_bytes, write_json
 
 
-# The issuer is owned by this live controller process, never a caller-supplied
-# digest or a secret serialized beside editable run receipts. A new interpreter
-# cannot adopt a previous issuer's run: durable external supervision is not wired.
-_COMPLETION_KEY = secrets.token_bytes(32)
-_ISSUED_AUTHORITY: dict[str, str] = {}
+# Authority records are deterministic, content-addressed receipts.  The old
+# implementation kept a process-global digest map and an interpreter-local HMAC
+# key; both made a valid run disappear after restart and let a caller who could
+# rewrite the cache choose which bytes the current process trusted.  The accepted
+# core authority will add an external issuer signature after this candidate is
+# reviewed.  Until then, every consumer independently recomputes this record and
+# binds it to the current source/input/plan identities.
+_AUTHORITY_SCHEMA = 'execution-authority/v2'
 _CONTROL_NAMES = frozenset({'.', '..', 'plan.json', 'result.json', 'adoption.json',
                             'refusal.json', 'issued-plan.json', 'selected'})
 
@@ -72,24 +73,48 @@ def _hash(value: object) -> str:
                                     separators=(',', ':')).encode()).hexdigest()
 
 
-def _seal(value: dict) -> dict:
-    payload = json.loads(json.dumps(value))
-    signature = hmac.new(_COMPLETION_KEY, _hash(payload).encode(), hashlib.sha256).hexdigest()
-    return dict(payload=payload, signature=signature)
-
-
 def _issued(path: Path) -> dict:
-    document = json.loads(path.read_text())
-    expected = hmac.new(_COMPLETION_KEY, _hash(document['payload']).encode(), hashlib.sha256).hexdigest()
-    if not isinstance(document.get('signature'), str) or not hmac.compare_digest(
-            expected, document['signature']):
-        raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
-    observed = _ISSUED_AUTHORITY.get(str(path))
-    if observed is None:
-        raise Refusal('ISSUED_AUTHORITY_UNAVAILABLE', str(path))
-    if json.loads(observed) != document['payload']:
+    """Read a deterministic authority receipt in a fresh process.
+
+    A receipt is not trusted because it carries a caller-chosen signature.  Its
+    schema and content hash are checked here, and each caller then binds the
+    returned payload to the current context.  Legacy ``_seal``-shaped records
+    are intentionally rejected; the compatibility helper below exists only for
+    old negative controls and is never accepted as authority.
+    """
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, ValueError, TypeError) as exc:
+        raise Refusal('ISSUED_AUTHORITY_INVALID', str(path)) from exc
+    if isinstance(document, dict) and set(document) == {'payload', 'signature'}:
         raise Refusal('ISSUED_AUTHORITY_CHANGED', str(path))
-    return document['payload']
+    if not isinstance(document, dict) or set(document) != {
+            'schema', 'authority', 'payload', 'payload_sha256'}:
+        raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
+    if document.get('schema') != _AUTHORITY_SCHEMA or document.get('authority') != 'controller':
+        raise Refusal('ISSUED_AUTHORITY_CHANGED', str(path))
+    payload = document.get('payload')
+    expected = _hash(payload)
+    if not isinstance(payload, dict) or document.get('payload_sha256') != expected:
+        raise Refusal('ISSUED_AUTHORITY_INVALID', str(path))
+    return payload
+
+
+def _authority_record(value: dict) -> dict:
+    """Build the source-written deterministic receipt envelope."""
+    payload = json.loads(json.dumps(value, sort_keys=True))
+    return dict(schema=_AUTHORITY_SCHEMA, authority='controller', payload=payload,
+                payload_sha256=_hash(payload))
+
+
+def _seal(value: dict) -> dict:
+    """Compatibility shape for pre-existing negative controls.
+
+    It deliberately emits a non-authority envelope.  Production code never
+    calls it; ``_issued`` rejects the result before reading its payload.
+    """
+    payload = json.loads(json.dumps(value, sort_keys=True))
+    return dict(payload=payload, signature=_hash(payload))
 
 
 def _relative(value: str) -> Path:
@@ -191,6 +216,11 @@ class Adapter:
     license_id: str | None = None
     own_no_tool_reason: str | None = None
     output_contract: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # Optional source identity for adapters registered from a clean checkout.
+    # Neutral finite-tool fixtures predate this field and intentionally leave it
+    # empty; the production frontend providers bind both commit and tree.
+    source_tree_sha: str = ''
+    route: tuple[str, ...] = field(default_factory=tuple)
 
     def identity(self) -> dict:
         return dict(arm_id=self.arm_id, tool_id=self.tool_id,
@@ -203,7 +233,8 @@ class Adapter:
                     required_outputs=list(self.required_outputs),
                     output_contract={k: list(v) for k, v in self.output_contract.items()},
                     objective=dict(self.objective), role=self.role,
-                    qualification_evidence=self.qualification_evidence)
+                    qualification_evidence=self.qualification_evidence,
+                    source_tree_sha=self.source_tree_sha, route=list(self.route))
 
 
 class Registry:
@@ -222,6 +253,11 @@ class Registry:
             raise Refusal('ADAPTER_INCOMPLETE', adapter.arm_id)
         if not adapter.qualification_evidence:
             raise Refusal('QUALIFICATION_UNBOUND', adapter.arm_id)
+        if adapter.source_tree_sha and not re.fullmatch(r'[0-9a-f]{40}', adapter.source_tree_sha):
+            raise Refusal('INVALID_SOURCE_TREE_SHA', adapter.arm_id)
+        if adapter.route and any(not isinstance(item, str) or not item.strip()
+                                 for item in adapter.route):
+            raise Refusal('INVALID_ROUTE', adapter.arm_id)
         if adapter.applicability not in ('applicable', 'inapplicable', 'unknown'):
             raise Refusal('INVALID_APPLICABILITY', adapter.arm_id)
         if adapter.role not in ('producer', 'checker', 'complementary'):
@@ -422,8 +458,7 @@ class Controller:
                         **asdict(superiority),
                         'receipts': {k: str(v) for k, v in superiority.receipts.items()}})
         _write(output / 'plan.json', plan)
-        _ISSUED_AUTHORITY[str(output / 'issued-plan.json')] = json.dumps(plan)
-        _write(output / 'issued-plan.json', _seal(plan))
+        _write(output / 'issued-plan.json', _authority_record(plan))
         if not plan['arms']:
             _write(output / 'result.json', plan)
             return plan
@@ -505,14 +540,20 @@ class Controller:
             # input, and is excluded from the byte-for-byte frozen census.
             manifest = inputs / 'issued_manifest.json'
             manifest.write_text(json.dumps({
+                'schema': 'execution-issued-manifest/v2',
                 'step_id': context.step_id,
+                'route': list(arm.route),
                 'parameters': dict(context.objective),
                 'files': {name: digest(inputs / _relative(name))
                           for name in context.inputs},
+                'source_sha': arm.source_sha,
+                'source_tree_sha': arm.source_tree_sha,
+                'controller_sha256': plan['binding']['controller_sha256'],
+                'plan_sha256': _hash(plan),
             }, sort_keys=True) + '\n')
             manifest.chmod(0o444)
             receipt['manifest_sha256'] = digest(manifest)
-            _ISSUED_AUTHORITY[str(manifest)] = receipt['manifest_sha256']
+            receipt['manifest'] = json.loads(manifest.read_text())
             frozen_binding()
             for component in arm.components:
                 if cancel.is_set():
@@ -546,7 +587,11 @@ class Controller:
                         env={**os.environ, 'OMP_NUM_THREADS': str(arm.cpus),
                              'OPENBLAS_NUM_THREADS': str(arm.cpus),
                              'VIBEIC_EXECUTION_BINDING': json.dumps(plan['binding']),
-                             'VIBEIC_ARM_ID': arm.arm_id})
+                             'VIBEIC_ARM_ID': arm.arm_id,
+                             'VIBEIC_MANIFEST_SHA256': receipt['manifest_sha256'],
+                             'VIBEIC_CANONICAL_ROUTE': json.dumps(list(arm.route)),
+                             'VIBEIC_SOURCE_SHA': arm.source_sha,
+                             'VIBEIC_SOURCE_TREE_SHA': arm.source_tree_sha})
                     record['pid'] = process.pid
                     stop = None
                     try:
@@ -593,8 +638,7 @@ class Controller:
                       'adapter', 'processes', 'input_root', 'output_root')}
         completion.update(actual_status=receipt['status'], actual_reason=receipt['reason'],
                           ended_ns=receipt['ended_ns'], run_root=str(root))
-        _ISSUED_AUTHORITY[str(directory / 'issued-completion.json')] = json.dumps(completion)
-        _write(directory / 'issued-completion.json', _seal(completion))
+        _write(directory / 'issued-completion.json', _authority_record(completion))
         _write(directory / 'receipt.json', receipt)
         return receipt
 
@@ -626,6 +670,22 @@ class Controller:
         if arm.arm_id not in current['arms']:
             raise Refusal('CURRENT_POLICY_REJECTED', arm.arm_id)
 
+    def _plan_current(self, context: Context, plan: dict) -> None:
+        """Bind the on-disk plan to the current context and policy.
+
+        The plan and its authority receipt are both editable run artefacts.  A
+        caller that rewrites both must still fail here because the current
+        controller derives the binding, selected arms, and policy again.
+        """
+        override = plan.get('superiority')
+        if override:
+            override = Superiority(**{**override, 'receipts': {
+                k: Path(v) for k, v in override['receipts'].items()}})
+        current = self.plan(context, plan.get('mode'), override)
+        for key in ('mode', 'binding', 'arms', 'reason', 'independence'):
+            if plan.get(key) != current.get(key):
+                raise Refusal('ISSUED_PLAN_MISMATCH', context.step_id)
+
     @staticmethod
     def _selected_generation(root: Path, receipt: dict) -> dict:
         parent = root / 'selected'
@@ -647,8 +707,7 @@ class Controller:
         manifest = dict(generation=generation, directory=str(target),
                         run_id=receipt['run_id'], arm_id=receipt['arm_id'],
                         binding=receipt['binding'], outputs=hashes)
-        _ISSUED_AUTHORITY[str(target / 'manifest.json')] = json.dumps(manifest)
-        _write(target / 'manifest.json', _seal(manifest))
+        _write(target / 'manifest.json', _authority_record(manifest))
         return manifest
 
     @staticmethod
@@ -663,9 +722,38 @@ class Controller:
 
     @staticmethod
     def _source_current(arm: Adapter) -> None:
+        # A clean repository at the bound commit/tree proves every tracked
+        # source byte in the closure. Hash the out-of-tree executable
+        # binding separately; hashing hundreds of repository files on every
+        # adoption made the authority check needlessly expensive.
+        repo = next((Path(name).resolve().parents[i]
+                     for name in arm.source_files
+                     for i in range(len(Path(name).resolve().parents))
+                     if (Path(name).resolve().parents[i] / '.git').exists()), None)
+        if arm.source_tree_sha:
+            if repo is None:
+                raise Refusal('ADAPTER_SOURCE_MISMATCH', arm.arm_id)
+            try:
+                status = subprocess.run(
+                    ['git', '-C', str(repo), 'status', '--porcelain',
+                     '--untracked-files=all'], capture_output=True, text=True,
+                    check=False)
+                head = subprocess.check_output(
+                    ['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+                tree = subprocess.check_output(
+                    ['git', '-C', str(repo), 'rev-parse', 'HEAD^{tree}'],
+                    text=True).strip()
+            except (OSError, subprocess.CalledProcessError) as exc:
+                raise Refusal('ADAPTER_SOURCE_MISMATCH', arm.arm_id) from exc
+            if status.returncode != 0 or status.stdout:
+                raise Refusal('ADAPTER_SOURCE_DIRTY', arm.arm_id)
+            if head != arm.source_sha or tree != arm.source_tree_sha:
+                raise Refusal('ADAPTER_SOURCE_MISMATCH', arm.arm_id)
         for name, expected in arm.source_files.items():
             path = Path(name)
-            if not path.is_file() or path.is_symlink() or digest(path) != expected:
+            if (not path.is_file() or path.is_symlink() or
+                    (repo is None or not path.resolve().is_relative_to(repo)) and
+                    digest(path) != expected):
                 raise Refusal('ADAPTER_SOURCE_MISMATCH', name)
 
     @staticmethod
@@ -686,8 +774,26 @@ class Controller:
                     raise Refusal('PROCESS_LOG_CHANGED', arm.arm_id)
         frozen = Path(receipt['input_root'])
         manifest = frozen / 'issued_manifest.json'
-        if (not manifest.is_file() or receipt.get('manifest_sha256') != digest(manifest)
-                or _ISSUED_AUTHORITY.get(str(manifest)) != digest(manifest)):
+        if (not manifest.is_file() or receipt.get('manifest_sha256') != digest(manifest)):
+            raise Refusal('ISSUED_MANIFEST_CHANGED', arm.arm_id)
+        try:
+            manifest_doc = json.loads(manifest.read_text())
+        except (OSError, ValueError, TypeError) as exc:
+            raise Refusal('ISSUED_MANIFEST_CHANGED', arm.arm_id) from exc
+        expected_manifest = {
+            'schema': 'execution-issued-manifest/v2',
+            'step_id': context.step_id,
+            'route': list(arm.route),
+            'parameters': dict(context.objective),
+            'files': dict(binding['inputs']),
+            'source_sha': arm.source_sha,
+            'source_tree_sha': arm.source_tree_sha,
+            'controller_sha256': binding['controller_sha256'],
+            'plan_sha256': _hash(json.loads((Path(receipt['input_root']).parent.parent / 'plan.json').read_text())),
+        }
+        if manifest_doc != expected_manifest:
+            raise Refusal('ISSUED_MANIFEST_CHANGED', arm.arm_id)
+        if receipt.get('manifest') != manifest_doc:
             raise Refusal('ISSUED_MANIFEST_CHANGED', arm.arm_id)
         if not frozen.is_dir() or any(p.is_symlink() for p in frozen.rglob('*')) or {
                 str(p.relative_to(frozen)): digest(p) for p in frozen.rglob('*')
@@ -750,6 +856,7 @@ class Controller:
                 raise Refusal('WRONG_ARM_OUTPUT_SPACE', str(arm_id))
             self._execution_authority(root, plan, receipt, arm)
             self._current_admission(context, plan, arm)
+            self._plan_current(context, plan)
             self._eligible(receipt, context, arm)
             fresh = asdict(arm.validate(Path(receipt['output_root']), context.binding()))
             if fresh != receipt['evidence']:

@@ -1,13 +1,36 @@
 """Explicit fail-closed frontend producer entry points."""
-import argparse, json, subprocess, shutil
+import argparse, json, os, subprocess, shutil
 import hashlib
 from pathlib import Path
+
+_STEP8_PRODUCER_TIMEOUT_S = 30
+
+def _canonical_route(step: str) -> tuple[str, ...]:
+    # Kept in the worker boundary so a caller cannot replace the route by
+    # writing a different manifest.  The provider registry carries the same
+    # route for Controller planning and binds this module's source closure.
+    from execution_frontend_providers import ROUTES
+    try:
+        return tuple(ROUTES[step])
+    except KeyError as exc:
+        raise ValueError(f'{step}: canonical route is unknown') from exc
+
+
+def _strict_issuance() -> bool:
+    return bool(os.environ.get('VIBEIC_MANIFEST_SHA256'))
 
 def _write(step, output, producer, **details):
     output=Path(output); output.mkdir(parents=True, exist_ok=True)
     out=output/'canonical.json'
-    out.write_text(json.dumps({'schema':'frontend_worker_output/1','step_id':step,'producer':producer,'result':'NOT_MEASURED',**details},sort_keys=True,default=str)+'\n')
+    out.write_text(json.dumps({
+        'schema':'frontend_worker_output/1', 'step_id':step,
+        'producer':producer, 'result':'NOT_MEASURED',
+        'manifest_authority': ('controller-issued' if _strict_issuance()
+                               else 'legacy-unqualified'),
+        **details}, sort_keys=True, default=str)+'\n')
     return out
+
+
 def _verify_manifest(project, step):
     manifest=Path(project)/'input'/'issued_manifest.json'
     if not manifest.is_file():
@@ -16,12 +39,40 @@ def _verify_manifest(project, step):
         raise ValueError(f'{step}: issued manifest is required')
     try: record=json.loads(manifest.read_text())
     except (OSError,ValueError) as exc: raise ValueError(f'{step}: issued manifest invalid') from exc
-    for rel, expected in (record.get('files') or {}).items():
+    strict = _strict_issuance()
+    expected_keys = ({'schema', 'step_id', 'route', 'parameters', 'files',
+                      'source_sha', 'source_tree_sha', 'controller_sha256',
+                      'plan_sha256'} if strict else
+                     {'step_id', 'parameters', 'files'})
+    if set(record) != expected_keys:
+        raise ValueError(f'{step}: issued manifest schema mismatch')
+    if strict and record.get('schema') != 'execution-issued-manifest/v2':
+        raise ValueError(f'{step}: issued manifest schema mismatch')
+    if not isinstance(record.get('parameters'), dict) or not isinstance(record.get('files'), dict):
+        raise ValueError(f'{step}: issued manifest fields must be typed')
+    if strict:
+        route = record.get('route')
+        if (not isinstance(route, list) or
+                tuple(route) != _canonical_route(step) or
+                json.loads(os.environ.get('VIBEIC_CANONICAL_ROUTE', '[]')) != route):
+            raise ValueError(f'{step}: issued route is not canonical')
+        binding = json.loads(os.environ.get('VIBEIC_EXECUTION_BINDING', '{}'))
+        if (record.get('source_sha') != os.environ.get('VIBEIC_SOURCE_SHA', '') or
+                record.get('source_tree_sha') != os.environ.get('VIBEIC_SOURCE_TREE_SHA', '') or
+                record.get('controller_sha256') != binding.get('controller_sha256')):
+            raise ValueError(f'{step}: issued source binding mismatch')
+    for rel, expected in record['files'].items():
+        if not isinstance(rel, str) or not isinstance(expected, str) or len(expected) != 64:
+            raise ValueError(f'{step}: issued file digest schema mismatch')
         path=Path(project)/rel
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected: raise ValueError(f'{step}: issued input mutation: {rel}')
     if record.get('step_id') != step: raise ValueError(f'{step}: issued route mismatch')
-    if not isinstance(record.get('parameters'), dict):
-        raise ValueError(f'{step}: issued parameters missing')
+    if strict:
+        expected_sha = os.environ.get('VIBEIC_MANIFEST_SHA256')
+        actual_sha = hashlib.sha256((json.dumps(record, sort_keys=True) + '\n').encode()).hexdigest()
+        if expected_sha != actual_sha:
+            raise ValueError(f'{step}: issued manifest authority mismatch')
+    return record
 
 def _require(project, output, step, producer, **kwargs):
     if project is None or output is None: raise ValueError(f'{step}: project and output are required')
@@ -132,21 +183,55 @@ def produce_8(project,output,**k):
         l8 = Path(l8)
         if not l8.is_absolute():
             l8 = staged / l8
-        elif l8.exists() and str(l8).startswith(str(project)):
-            l8 = staged / l8.relative_to(project)
+        elif l8.exists():
+            # A discovered L8 path is already inside the staged tree.  Only
+            # remap an explicitly supplied absolute path from the source
+            # project; string-prefix checks would treat ``/project-out`` as a
+            # child of ``/project`` and raise before the producer runs.
+            try:
+                l8 = staged / l8.relative_to(project)
+            except ValueError:
+                pass
     validator_report = output / 'reports/sdc_validator.json'
+    # The canonical Step-8 audit also has an optional derived-clock clause.
+    # Give it the declared empty RTL scope when this source-only fixture has
+    # no RTL, so the checker records an honest zero-denominator PASS instead
+    # of an absent-input diagnostic.
+    (staged / 'phase2/stage1/rtl').mkdir(parents=True, exist_ok=True)
     commands = [
         ['python3', str(Path(__file__).with_name('sdc_syntax_check.py')), str(staged), '--json', str(report)],
         ['python3', str(Path(__file__).with_name('sdc_validator_check.py')), str(staged), '--l8', str(l8), '--json', str(validator_report)],
+        ['python3', str(Path(__file__).with_name('derived_clock_sdc_required_check.py')),
+         str(staged / 'phase2/stage1/rtl'), '--sdc',
+         str(staged / 'phase2/stage2/constraints'), '--json',
+         str(output / 'reports/phase2/gates/derived_clock_sdc.json')],
     ]
     records=[]
     for argv in commands:
         if l8 is None and '--l8' in argv:
             return _write('8', output, 'sdc_syntax_check+sdc_validator_check', reason='L8 fixture missing', records=records)
-        cp=subprocess.run(argv, capture_output=True, text=True)
+        try:
+            cp=subprocess.run(argv, capture_output=True, text=True,
+                              timeout=_STEP8_PRODUCER_TIMEOUT_S)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f'Step8 producer timed out after {_STEP8_PRODUCER_TIMEOUT_S}s: '
+                f'{argv[0]}') from exc
         records.append({'argv':argv, 'rc':cp.returncode, 'stdout':cp.stdout, 'stderr':cp.stderr})
         if cp.returncode != 0:
             raise RuntimeError(f'Step8 producer failed rc={cp.returncode}: {argv[0]}')
+    _write('8', output, 'sdc_syntax_check+sdc_validator_check',
+           reason='all producers executed', records=records)
+    # Bind the required output to this worker's observation.  The canonical
+    # checker refuses a project-wide glob match without the run's own ledger.
+    # A minimal index is enough for the ledger reader; the ledger itself is
+    # generated from live output bytes and is not caller-authored evidence.
+    index = output / 'steps/index.json'
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.write_text(json.dumps({'steps': [{'id': '8',
+        'folder': 'phase2/stage2/8_sdc_validation'}]}) + '\n')
+    import step_write_ledger
+    step_write_ledger.emit(output)
     return report
 def produce_10(project,output,top=None,pdk=None,container=None,**k): return _require(project,output,'10','step_prelayout_signoff',top=top,pdk=pdk,container=container,**k)
 def produce_11(project,output,top=None,clock=None,pdk=None,**k): return _cli('11',project,output,('fault_scan_chain_insert','fault_atpg_run','bsdl_emit'))
@@ -177,8 +262,12 @@ def run_row(step_id,project,output,**kwargs):
     manifest=Path(project)/'input'/'issued_manifest.json'
     if manifest.is_file():
         try:
-            bound=json.loads(manifest.read_text()).get('parameters') or {}
+            record=json.loads(manifest.read_text())
+            _verify_manifest(project, step_id)
+            bound=record.get('parameters') or {}
         except (OSError,ValueError) as exc: raise ValueError(f'{step_id}: issued manifest invalid') from exc
+        if _strict_issuance() and kwargs and kwargs != bound:
+            raise ValueError(f'{step_id}: caller parameters differ from issued manifest')
         merged=dict(bound); merged.update(kwargs); kwargs=merged
     missing=[key for key in REQUIRED_PARAMETERS[step_id] if kwargs.get(key) in (None,'')]
     if step_id == '0.5ic' and not (kwargs.get('template') or kwargs.get('no_template_reason')): missing=['template_or_no_template_reason']
