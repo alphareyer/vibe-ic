@@ -343,10 +343,11 @@ def test_renamed_public_parameter_mapping_runs_native_standalone(tmp_path):
         "supported_parameters": [{"name": "DURATION", "required": True}],
         "parameter_bindings": {"DURATION": "SPAN"},
         "source_quotes": ["parameter DURATION=4"],
-        "configurations": [{"name": "integer", "parameters": {"DURATION": 9}}],
+        "configurations": [{"name": "default"},
+                            {"name": "integer", "parameters": {"DURATION": 9}}],
     }
     report = selfverify.selfverify(path, "count_mode", elaboration_matrix=matrix,
                                    original_source=original)
     assert report["public_elaboration_matrix"]["verdict"] == "PASS"
-    command = report["public_elaboration_matrix"]["configurations"][0]["command"]
+    command = report["public_elaboration_matrix"]["configurations"][1]["command"]
     assert "-Pcount_mode.SPAN=9" in command

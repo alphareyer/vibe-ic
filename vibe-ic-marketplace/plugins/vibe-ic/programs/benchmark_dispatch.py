@@ -403,6 +403,11 @@ def _collect_runner_result(process: _ProcessOutcome, argv: list[str],
                            fmt: str, pid: str, project: Path, **kwargs) -> dict:
     """One producer/consumer boundary shared by solve, resume and regate."""
     import benchmark_io_adapter as bio
+    # Supplied AI backup/repair bytes are a repair re-entry.  The strict
+    # two-contract consumer is mandatory at this boundary; ordinary generated
+    # completions leave the flag absent and retain legacy compatibility.
+    if kwargs.get("supplied_rtl"):
+        kwargs["require_repair_contract"] = True
     diagnostic = _runner_diagnostics(process, argv, project)
     if diagnostic and diagnostic.get("reason"):
         return {"id": pid, "ok": False, "reason": diagnostic["reason"],
@@ -6183,6 +6188,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         try:
             got = _collect_runner_result(
                 process, argv, fmt, pid, proj, supplied_rtl=supplied_rtl,
+                require_repair_contract=bool(supplied_rtl),
                 required_top=_required_scorer_top(_entry(bench)))
             payload = json.dumps(got)
         except Exception as exc:                          # noqa: BLE001
@@ -6931,6 +6937,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         got = bio.collect(
             fmt, pid, Path(str(task.get("project") or "")),
             supplied_rtl=supplied_rtl,
+            require_repair_contract=bool(supplied_rtl),
             required_top=_required_scorer_top(_entry(bench)))
         if (not got.get("ok")
                 or _sha256_text(str(got.get("completion") or ""))

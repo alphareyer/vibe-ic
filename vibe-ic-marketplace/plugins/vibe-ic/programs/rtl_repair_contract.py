@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -538,6 +539,7 @@ def validate_matrix_declaration(
             for value in raw_macros.values():
                 if value not in (None, True, "") and (isinstance(value, bool) or
                         not isinstance(value, (str, int, float)) or
+                        (isinstance(value, float) and not math.isfinite(value)) or
                         not _SAFE_VALUE.fullmatch(str(value))):
                     refuse(f"configuration {name!r} has an unsupported macro value", "MAPPING_UNSUPPORTED")
         for macro in supported_macros:

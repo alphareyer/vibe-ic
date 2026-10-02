@@ -547,30 +547,39 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
             top = top or required_top
             source_for_matrix = None
             matrix_candidate_path = None
+            repair_report = None
             if isinstance(matrix, dict):
                 wanted = matrix.get("source_path", matrix.get("source"))
                 if isinstance(wanted, dict):
                     wanted = wanted.get("path")
                 if isinstance(wanted, str):
-                    source_for_matrix = original_sources.get(wanted)
-                    wanted_name = Path(wanted).name
-                    for source_path in rtl:
-                        if str(source_path.relative_to(rtl_dir)) == wanted:
-                            matrix_candidate_path = source_path
-                            break
+                    # A source-bound matrix is only meaningful when the exact
+                    # declared path is present in both frozen maps.  Never
+                    # fall back to a basename, concatenated candidate, or a
+                    # different preservation source.
+                    if wanted in original_sources and wanted in candidate_sources:
+                        source_for_matrix = original_sources[wanted]
+                        for source_path in rtl:
+                            if str(source_path.relative_to(rtl_dir)) == wanted:
+                                matrix_candidate_path = source_path
+                                break
+                    else:
+                        repair_report = {"verdict": "REFUSED", "findings": [{
+                            "code": "SOURCE_PATH_INVALID",
+                            "message": "declared source_path is absent from the exact original and candidate maps"}]}
                 if source_for_matrix is None and len(original_sources) == 1:
                     source_for_matrix = next(iter(original_sources.values()))
             with tempfile.TemporaryDirectory(prefix="rtl_repair_consumer_") as temp_dir:
                 candidate_path = Path(temp_dir) / "candidate.sv"
                 candidate_path.write_text(text)
-                repair_report = ({"verdict": "REFUSED", "findings": [{
+                repair_report = (repair_report if isinstance(repair_report, dict) and repair_report.get("verdict") == "REFUSED" else ({"verdict": "REFUSED", "findings": [{
                     "code": "SOURCE_SYMLINK", "message": "public source manifest contains a symlink"}]}
                     if symlink_refused else validate_normal_repair_contract(
                         original_sources, candidate_sources, contract,
                         candidate_path=candidate_path,
                         original_source=source_for_matrix,
                         top=top,
-                        require=True))
+                        require=True)))
         # Ordinary benchmark dispatch must consume both independently-bound
         # contracts immediately before completion; a single opt-in half is not
         # sufficient evidence for a repair candidate.
