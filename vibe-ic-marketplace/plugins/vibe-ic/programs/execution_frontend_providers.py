@@ -91,7 +91,7 @@ def register_factories(registry):
                 if isinstance(node,list): return sum((gate_names(v) for v in node),[])
                 return []
             names=gate_names(contract.get('gate',{})); gates={n:('PASS' if gate not in ('FAIL','NOT_MEASURED') else str(gate)) for n in names}
-            verdict='ELIGIBLE' if artifacts and gates and all(v=='PASS' for v in gates.values()) else 'NOT_MEASURED'
+            verdict='PASS' if artifacts and gates and all(v=='PASS' for v in gates.values()) else 'NOT_MEASURED'
             return Evidence(facts, verdict, gates, artifacts, detail='real canonical artifacts and canonical gate validated')
         required=tuple(next(s for s in em.load_portfolio()['steps'] if s['id']==row)['required_output_contract']) or ('canonical.json',)
         registry.register(Adapter('frontend_'+row.replace('.','_'),'frontend-worker',row,sha,{source:digest(Path(source)),worker:digest(Path(worker)),py:digest(Path(py))},'current-main',p.engines,(Component('frontend_worker',('python3',worker,'--step',row,'--inputs','{inputs}','--outputs','{outputs}')),),validate,required,{'metric':'source_boundary'},qualification_evidence='route callable bound; native qualification not measured',output_contract={path:(path,) for path in required}))
