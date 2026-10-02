@@ -108,10 +108,14 @@ def _write_step_binding(root, step, paths):
 
 
 def produce_05ic(project,output,template=None,no_template_reason=None,**k):
+    if isinstance(template, os.PathLike):
+        template = os.fspath(template)
     has_template = isinstance(template, str) and bool(template.strip())
     has_reason = isinstance(no_template_reason, str) and bool(no_template_reason.strip())
     if not has_template:
         raise ValueError('0.5ic: a searched template path is required')
+    if no_template_reason is not None and not has_reason:
+        raise ValueError('0.5ic: no_template_reason must be non-empty text')
     # A declared absence is deliberately a two-part fact: the searched path
     # and the owner's reason.  A template path with no reason is the shuttle
     # route; the same path with a reason is the explicit absence route.
@@ -125,6 +129,9 @@ def produce_05ic(project,output,template=None,no_template_reason=None,**k):
         if value is not None and key in bound and bound[key] != value:
             raise ValueError(f'0.5ic: {key} disagrees with issued manifest')
     project, output = Path(project), Path(output)
+    bound_slot = bound.get('slot', k.get('slot'))
+    if declared_absence and bound_slot not in (None, ''):
+        raise ValueError('0.5ic: declared absence cannot name a shuttle slot')
     answers_source = project / 'input/step_0_5ic_answers.json'
     if not answers_source.is_file():
         raise ValueError('0.5ic: answers file is required')
@@ -155,7 +162,7 @@ def produce_05ic(project,output,template=None,no_template_reason=None,**k):
         args1 += ['--template',str(template_path)]
     if declared_absence:
         args1 += ['--no-template-reason',str(no_template_reason).strip()]
-    slot=bound.get('slot', k.get('slot'))
+    slot=bound_slot
     if has_template and not declared_absence and slot:
         args1 += ['--slot', str(slot)]
     answers=staged/'input/step_0_5ic_answers.json'
@@ -299,6 +306,9 @@ PRODUCERS={'D1':produce_d1,'0.5ic':produce_05ic,'1':produce_1,'2':produce_2,'3':
 REQUIRED_PARAMETERS={'D1':(), '0.5ic':(), '1':('ic_class',), '2':('top','clock','timeout','baseline_rtl_dir','candidate_rtl_dir'), '3':('top',), '4':('top','container'), '5':('top','container'), '6':('top','container'), '7':('top','pdk','container'), '8':(), '10':('top','pdk','container'), '11':('top','clock','pdk'), 'FS1':('asil',), 'DT1':('top','clock','timeout'), '12':(), '13':('top','container','lec_max_completed_rungs'), 'DT2':('top','clock','timeout'), 'DT3':('top','clock','timeout'), 'P0':('top','claim')}
 def run_row(step_id,project,output,**kwargs):
     if step_id not in PRODUCERS: raise ValueError(f'unknown frontend row: {step_id}')
+    if isinstance(kwargs.get('template'), os.PathLike):
+        kwargs = dict(kwargs)
+        kwargs['template'] = os.fspath(kwargs['template'])
     manifest=Path(project)/'input'/'issued_manifest.json'
     if not manifest.is_file():
         manifest=Path(project)/'issued_manifest.json'
@@ -314,10 +324,15 @@ def run_row(step_id,project,output,**kwargs):
     if step_id == '0.5ic':
         template = kwargs.get('template')
         reason = kwargs.get('no_template_reason')
+        if isinstance(template, os.PathLike):
+            template = os.fspath(template)
+            kwargs['template'] = template
         has_template = isinstance(template, str) and bool(template.strip())
         has_reason = isinstance(reason, str) and bool(reason.strip())
         if not has_template:
             missing=['searched_template_path']
+        elif reason is not None and not has_reason:
+            missing=['no_template_reason']
         elif kwargs.get('slot') not in (None, '') and has_reason:
             raise ValueError('0.5ic: declared absence cannot name a shuttle slot')
     if missing: raise ValueError(f'{step_id}: missing parameters: {", ".join(missing)}')
