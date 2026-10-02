@@ -786,6 +786,12 @@ def config_file_hashes(config: dict, mounts: list) -> dict[str, str]:
                 break
         if source.is_file():
             result[str(path)] = digest(source)
+            # Density decks load their rule/layer definitions from Ruby
+            # siblings. Bind those executable inputs before running/caching.
+            if str(path) == config.get('KLAYOUT_DENSITY_RUNSET'):
+                for dependency in sorted(source.parent.rglob('*.rb')):
+                    guest = path.parent / dependency.relative_to(source.parent)
+                    result[str(guest)] = digest(dependency)
     return result
 
 

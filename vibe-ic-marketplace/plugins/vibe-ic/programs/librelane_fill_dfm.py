@@ -603,6 +603,11 @@ def measure_density_ratios(project: Path, image: str, pdk_root: Path, pdk: str,
            '--gds', str(gds), '--specs', str(specs_path),
            '--die', json.dumps(die), '--out', str(report),
            '--cell', str(cfg.get('DESIGN_NAME') or '')]
+    # Match the same foundry instrument, rather than calling its extent a
+    # DEF die. Other denominator grammars retain the strict equality check.
+    if re.search(r'\bchip_area\s*=\s*extent(?:\.sized\(0(?:\.0)?\))?\.area\b',
+                 _dla.deck_code_only(deck_text)):
+        cmd.append('--extent-from-deck')
     result = _run_logged(cmd, root / 'density_ratios.log')
     if not report.is_file():
         raise Refusal('LL_DENSITY_RATIOS_NOT_MEASURED',
@@ -618,6 +623,8 @@ def measure_density_ratios(project: Path, image: str, pdk_root: Path, pdk: str,
         raise Refusal('LL_DENSITY_RATIOS_NOT_MEASURED', str(report))
     return {'report': str(report), 'report_sha256': digest(report),
             'subject': str(gds), 'subject_sha256': before,
+            'denominator': {k: measured.get(k) for k in
+                            ('die', 'declared_die', 'extent_from_deck', 'extent_matches_declared_die')},
             'layers': measured['layers']}
 
 
@@ -1237,6 +1244,14 @@ def validate_density_result(project: Path, arm: dict, *, layout: Path | None = N
         if digest(state) != arm['state_sha256'] or digest(subject) != arm['subject_sha256']:
             raise ValueError('density state or measured stream changed')
         row = _current_density_row(project, state, CONFIG_FOLDER, layout=layout)
+        import librelane_signoff_evidence as native
+        receipt = validate_step_receipt(state.parent, 'KLayout.Density')
+        switch_path = project / 'phase3/librelane_switch.json'
+        switch = _load(switch_path) if switch_path.is_file() else {}
+        mounts = native._pdk_mounts(project, switch, state.parent, resolve_image(project))
+        config = _load(project / 'phase3/librelane' / CONFIG_FOLDER / 'KLayout.Density.json')
+        if receipt['input'].get('config_files') != config_file_hashes(config, mounts):
+            raise ValueError('density PDK material population changed')
         if row.get('value') != _count(arm.get(DENSITY_METRIC)):
             raise ValueError(row.get('reason') or 'density record differs from tool output')
         return row
