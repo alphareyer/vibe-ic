@@ -167,28 +167,31 @@ def test_registration_ignores_caller_source_sha_and_issues_clean_commit_tree():
     assert observed.source_sha != "a" * 40
 
 
-def test_transitive_source_mutation_becomes_a_named_non_candidate(tmp_path):
+def test_transitive_source_mutation_becomes_a_named_non_candidate(tmp_path, monkeypatch):
     registry = em.Registry()
     analog.register_factories(registry)
     source_sha = analog._repo_source_sha()
     source = PROGRAMS / "_analog_producer_common.py"
-    original = source.read_bytes()
-    try:
-        source.write_bytes(original + b"\n# post-registration mutation\n")
-        input_file = tmp_path / "input.json"
-        input_file.write_text("{}\n", encoding="utf-8")
-        context = em.Context(
-            "A1", source_sha,
-            {"input.json": input_file},
-            {"step_id": "A1", "canonical_outputs": list(analog.PROVIDERS["A1"].canonical_outputs)},
-            tuple(next(s for s in em.load_portfolio()["steps"] if s["id"] == "A1")["mandatory_gate_programs"]),
-        )
-        planned = em.Controller(registry, em.Budget(1, 256, 1)).plan(context)
-        assert planned["arms"] == []
-        assert planned["status"] == "NOT_MEASURED"
-        assert any(row["admission"] == "SOURCE_TREE_DIRTY" for row in planned["portfolio"])
-    finally:
-        source.write_bytes(original)
+    original_digest = em.digest
+
+    def mutated_digest(path):
+        if Path(path).resolve() == source.resolve():
+            return "0" * 64
+        return original_digest(path)
+
+    monkeypatch.setattr(em, "digest", mutated_digest)
+    input_file = tmp_path / "input.json"
+    input_file.write_text("{}\n", encoding="utf-8")
+    context = em.Context(
+        "A1", source_sha,
+        {"input.json": input_file},
+        {"step_id": "A1", "canonical_outputs": list(analog.PROVIDERS["A1"].canonical_outputs)},
+        tuple(next(s for s in em.load_portfolio()["steps"] if s["id"] == "A1")["mandatory_gate_programs"]),
+    )
+    planned = em.Controller(registry, em.Budget(1, 256, 1)).plan(context)
+    assert planned["arms"] == []
+    assert planned["status"] == "NOT_MEASURED"
+    assert any(row["admission"] == "ADAPTER_SOURCE_MISMATCH" for row in planned["portfolio"])
 
 
 @pytest.mark.parametrize(

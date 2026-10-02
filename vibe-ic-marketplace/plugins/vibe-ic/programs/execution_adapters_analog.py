@@ -244,6 +244,7 @@ def _local_import_path(module: str, current: Path, level: int = 0) -> Path | Non
 
 
 _IMPORT_CACHE: dict[str, tuple[Path, ...]] = {}
+_DIRECT_IMPORT_CACHE: dict[str, tuple[Path, ...]] = {}
 
 
 def _python_import_closure(paths: list[Path]) -> tuple[Path, ...]:
@@ -261,18 +262,25 @@ def _python_import_closure(paths: list[Path]) -> tuple[Path, ...]:
             if key in seen:
                 continue
             seen[key] = path
-            try:
-                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            except (OSError, SyntaxError, UnicodeError):
-                continue
-            imports: list[tuple[str, int]] = []
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    imports.extend((alias.name, 0) for alias in node.names)
-                elif isinstance(node, ast.ImportFrom):
-                    imports.append((node.module or "", node.level))
-            for module, level in imports:
-                target = _local_import_path(module, path, level)
+            direct = _DIRECT_IMPORT_CACHE.get(key)
+            if direct is None:
+                try:
+                    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                except (OSError, SyntaxError, UnicodeError):
+                    direct = ()
+                else:
+                    imports: list[tuple[str, int]] = []
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Import):
+                            imports.extend((alias.name, 0) for alias in node.names)
+                        elif isinstance(node, ast.ImportFrom):
+                            imports.append((node.module or "", node.level))
+                    direct = tuple(
+                        target for module, level in imports
+                        if (target := _local_import_path(module, path, level)) is not None
+                    )
+                _DIRECT_IMPORT_CACHE[key] = direct
+            for target in direct:
                 if target is not None and str(target) not in seen:
                     pending.append(target)
         result = tuple(seen.values())
