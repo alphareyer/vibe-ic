@@ -6141,6 +6141,10 @@ def _run_yosys_gates(project: Path) -> tuple[bool, List[str]]:
     Yosys script typically means the project is using a different
     synthesiser and the canonical check does not apply.
     """
+    from synth_handoff_netlist_check import bound_handoff
+    tool = bound_handoff(project)
+    if tool is not None:
+        return tool['verdict'] == 'PASS', tool['findings']
     ys_path = _find_synth_ys(project)
     if ys_path is None:
         # No .ys file — the project may still have synthesised via the

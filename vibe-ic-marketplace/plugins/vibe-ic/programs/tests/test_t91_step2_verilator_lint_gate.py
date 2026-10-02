@@ -150,6 +150,7 @@ def _design(tmp_path, mode, log, errors, warnings):
         '    always @(negedge clk) q <= ~a;\nendmodule\n'))
     rtl(tmp_path, 'cal_pos_tb.v', 'module cal_pos_tb; endmodule\n')
     put(project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json', {'top_module': 'cal_pos'})
+    put(project / 'input/project.json', {'pdk': 'pdkA'})
     if mode:
         # The stated environment: image AND PDK root declared, so the
         # contract's resolvers answer without asking this host's docker.
@@ -225,7 +226,7 @@ def test_step2_books_the_shared_supervisor_refusal(tmp_path, monkeypatch,
 
 
 def test_direct_mode_is_unchanged_and_adds_no_row(tmp_path, monkeypatch):
-    project, _, calls, tool = _design(tmp_path, None, NEG, 0, 1)
+    project, _, calls, tool = _design(tmp_path, 'direct', NEG, 0, 1)
     runner, step = _runner(monkeypatch, tool)
     assert step is not None and step(project) is None and calls == []
 

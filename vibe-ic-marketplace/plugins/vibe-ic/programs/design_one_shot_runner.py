@@ -13435,9 +13435,9 @@ def step_crosslayer_rewrite_fidelity(project: Path) -> StepResult:
 def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
     """Flow Step 2 lint through the tool: LibreLane Verilator.Lint + its gate.
 
-    Opt-in per `phase3/librelane_switch.json` `{"steps": {"2": ...}}`, with
-    the PDK declared there; the image is `librelane_contract.resolve_image` and
-    the PDK root `pdk_root_resolution`. `direct` (the default) returns None and
+    Default selects LibreLane with the PDK declared by Phase 2; the image is
+    `librelane_contract.resolve_image` and the PDK root `pdk_root_resolution`.
+    An explicit `direct` selection returns None and
     the step is unchanged. `librelane` judges Verilator.Lint with
     `verilator_lint_gate`; `dual` also runs `rtl_hygiene_lint --severity ERROR`
     and blocks on the union, recording which arm found what. The linted files
@@ -13456,11 +13456,8 @@ def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
     out_dir = project / "reports/phase2/lint"
     gate_json = out_dir / "verilator_lint_gate.json"
     try:
-        switch = json.loads((project / "phase3/librelane_switch.json").read_text())
-        image, pdk = _ll.resolve_image(project), switch.get("pdk")
-        if not pdk:
-            raise _ll.Refusal("LL_SWITCH_INCOMPLETE",
-                              "step 2 needs pdk in phase3/librelane_switch.json")
+        pdk, pdk_source = _ll.phase2_pdk(project)
+        image = _ll.resolve_image(project)
         l9 = _rcvar_l9_top_ports(project)
         top = l9[0] if l9 else None
         rtl = silicon_rtl_selection(_pl.rtl_dir(project))
@@ -13468,7 +13465,7 @@ def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
         config_dir.mkdir(parents=True, exist_ok=True)
         _ll.emit_lint_config(project, str(pdk), config_dir / "lint_config.json",
                              str(top or ""), rtl,
-                             "L9_INTEGRATION_SPEC.top_module")
+                             "L9_INTEGRATION_SPEC.top_module", pdk_source=pdk_source)
         # The PDK root through the one resolver (declared > resolved from the
         # image > refused, naming its cause); never read from the switch here.
         root = _ll.pdk_root_resolution(project, str(pdk), image=image)["path"]
@@ -18330,6 +18327,21 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
                 _prune_advisory = _adv
     except Exception:  # nosec — preflight is best-effort, never masks synth
         pass
+    # The fixed Phase-2 synthesis call owns the same Step9 producer as Phase3.
+    # No generic pre-tool netlist may masquerade as the mapped handoff.
+    import librelane_contract as _ll
+    try:
+        if _ll.selected_mode(project, "9") == "librelane":
+            import phase3_one_shot_runner as _p3
+            declared_pdk, _ = _ll.phase2_pdk(project)
+            pdk = _p3._detect_pdk(project, declared_pdk)
+            if pdk is None or pdk.name != declared_pdk:
+                raise _ll.Refusal("LL_PHASE2_PDK_UNRESOLVED", "declared PDK did not resolve exactly")
+            row = _p3.step_synth(project, synth_top, pdk, container)
+            row.name = "yosys_synth"
+            return row
+    except (_ll.Refusal, OSError, ValueError) as exc:
+        return StepResult("yosys_synth", "FAIL", time.time() - t0, str(exc))
     # Stage stub OTP hex inside synth_dir so $readmemh resolves at synth.
     for stem in ("apple.hex", "otp_image.hex"):
         stub = synth_dir / stem
@@ -22142,6 +22154,11 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
     this step's row.
     """
     results = list(results or [])
+    import synth_handoff_netlist_check as _handoff
+    bound = _handoff.bound_handoff(project)
+    if bound is not None and bound['verdict'] != 'PASS':
+        return results + [StepResult("lec_equivalence", "FAIL", 0.0,
+                                     'LL_SYNTH_HANDOFF_INVALID: ' + '; '.join(bound['findings']))]
     reports_dir = project / "reports"
     # lec_run's retries share ONE total deadline, and the runner reads that
     # budget from the producer rather than restating it. It is now RECORDED,
@@ -25331,8 +25348,7 @@ def main() -> int:
             "rather than a silence; gating it is a separate decision.")
     plan.append(step_crosslayer_rewrite_fidelity(project))
 
-    # Flow Step 2 lint through LibreLane Verilator.Lint, when the design's
-    # switch selects it for step 2. The default (direct) adds no row.
+    # Fixed Step 2 call: selected_mode owns the production default and opt-out.
     _tool_lint = step_rtl_lint_tool(project)
     if _tool_lint is not None:
         plan.append(_tool_lint)

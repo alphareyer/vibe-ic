@@ -25,6 +25,7 @@ Exit: 0 PASS, 1 FAIL, 2 NOT_MEASURED (unreadable input).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -79,6 +80,123 @@ def check(netlist: Path, resolved: dict) -> dict:
             "verdict": "FAIL" if findings else "PASS", "netlist": str(netlist),
             "tie_cells": ties, "constants": constants[:50],
             "constant_count": len(constants), "findings": findings}
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _native_synthesis(project: Path, folder: Path, top: str) -> tuple[Path, dict, dict]:
+    """Verify the existing run_chain receipt against its consumed/output bytes."""
+    import librelane_contract as LC
+    from _rtl_include_hub import silicon_rtl_selection
+
+    folder = folder.resolve()
+    if not folder.is_relative_to((project / 'phase3/librelane').resolve()):
+        raise ValueError('tool folder is outside the production LibreLane directory')
+    receipt = json.loads((folder / 'vibeic_receipt.json').read_text())
+    cfg = json.loads((folder / 'config.json').read_text())
+    state = json.loads((folder / 'state_out.json').read_text())
+    inp = receipt['input']
+    if inp['step'] != 'Yosys.Synthesis' or cfg['meta']['step'] != inp['step']:
+        raise ValueError('not a Yosys.Synthesis producer')
+    raw = Path(state['nl']).resolve()
+    if not raw.is_relative_to(folder):
+        raise ValueError('native netlist is outside its producer folder')
+    for rel in ('state_out.json', 'config.json', 'reports/stat.json', str(raw.relative_to(folder))):
+        if receipt['sha256'].get(rel) != _sha(folder / rel):
+            raise ValueError(f'native receipt mismatch: {rel}')
+    if inp['config'] != _sha(project / 'phase3/librelane/synthesis_resolved.json'):
+        raise ValueError('producer consumed a different resolved config')
+    pdk, _ = LC.phase2_pdk(project)
+    if cfg.get('PDK') != pdk or cfg.get('DESIGN_NAME') != top:
+        raise ValueError('producer PDK/top differs from declared input')
+    rtl = silicon_rtl_selection(project / 'phase2/stage1/rtl')
+    paths = [str(p.resolve()) for p in rtl]
+    if not paths or cfg.get('VERILOG_FILES') != paths:
+        raise ValueError('producer RTL file set differs from current synthesis input')
+    for path in rtl:
+        if inp['config_files'].get(str(path.resolve())) != _sha(path):
+            raise ValueError('producer consumed stale RTL bytes')
+    for kind in ('config_files', 'state_files'):
+        for path, recorded in inp[kind].items():
+            if recorded != _sha(Path(path)):
+                raise ValueError(f'producer consumed stale {kind}: {path}')
+    stat = json.loads((folder / 'reports/stat.json').read_text())
+    modules = stat.get('modules')
+    module = (modules.get('\\' + top) or modules.get(top)) if isinstance(modules, dict) else None
+    if not module or len(modules) != 1 or module.get('num_submodules') != 0:
+        raise ValueError('native stat does not establish a flattened top')
+    metrics = state.get('metrics', {})
+    if metrics.get('design__instance_unmapped__count') != 0 or metrics.get('synthesis__check_error__count') != 0:
+        raise ValueError('native synthesis checks did not measure zero errors')
+    report = check(raw, cfg)
+    if report['verdict'] != 'PASS':
+        raise ValueError('; '.join(report['findings']))
+    return raw, cfg, report
+
+
+def publish_handoff(project: Path, folder: Path, mapped: Path, top: str) -> dict:
+    """Publish exactly the checked native bytes into the existing handoff contract."""
+    raw, _, _ = _native_synthesis(project, folder, top)
+    if mapped.read_bytes() != raw.read_bytes():
+        raise ValueError('mapped copy differs from native output')
+    canonical = mapped.parent / 'netlist.v'
+    canonical.write_bytes(raw.read_bytes())
+    sidecar = mapped.parent / 'synth_inputs.json'
+    doc = json.loads(sidecar.read_text())
+    doc['librelane_synthesis'] = {
+        'schema': 'vibe-ic/librelane-synthesis-handoff/1', 'top': top,
+        'folder': str(folder.relative_to(project)),
+        'mapped': str(mapped.relative_to(project)),
+        'netlist_sha256': _sha(raw),
+        'receipt_sha256': _sha(folder / 'vibeic_receipt.json')}
+    write_json(sidecar, doc)
+    return doc['librelane_synthesis']
+
+
+def bound_handoff(project: Path) -> Optional[dict]:
+    """Step14's existing gates and PnR/LEC judge the same current tool product.
+
+    None retains the direct producer's existing recipe gate. A tool-selected
+    project never falls back to an older .ys script or generic netlist.
+    """
+    import librelane_contract as LC
+    sidecar = project / 'phase2/stage2/synth/synth_inputs.json'
+    try:
+        doc = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
+        binding = doc.get('librelane_synthesis')
+        if LC.selected_mode(project, '9') != 'librelane' and binding is None:
+            return None
+        if not isinstance(binding, dict) or binding.get('schema') != 'vibe-ic/librelane-synthesis-handoff/1':
+            raise ValueError('current LibreLane synthesis handoff is absent')
+        from l_doc_consumer_contract import l_doc_fields
+        l9 = l_doc_fields(LC._ldoc(project / 'phase1/generated_docs', 'L9_INTEGRATION_SPEC.json'))
+        declared_top = l9.get('top_module')
+        current_top = declared_top.strip() if isinstance(declared_top, str) else None
+        if not current_top or current_top != binding['top']:
+            raise ValueError(f'current L9 subject {declared_top!r} differs from '
+                             f'published synthesis top {binding["top"]!r}')
+        folder = project / binding['folder']
+        mapped = project / binding['mapped']
+        expected = project / 'phase2/stage2/synth' / (binding['top'] + '_synth.v')
+        if mapped.resolve() != expected.resolve() or doc.get('netlist') != mapped.name:
+            raise ValueError('handoff does not name the production mapped netlist')
+        raw, _, report = _native_synthesis(project, folder, binding['top'])
+        if binding['receipt_sha256'] != _sha(folder / 'vibeic_receipt.json'):
+            raise ValueError('native producer receipt changed after publication')
+        canonical = mapped.parent / 'netlist.v'
+        if any(_sha(p) != binding['netlist_sha256'] for p in (raw, mapped, canonical)):
+            raise ValueError('native/mapped/canonical handoff bytes disagree')
+        report.update({'producer': 'LibreLane.Yosys.Synthesis',
+                       'canonical': str(canonical), 'mapped': str(mapped),
+                       'netlist_sha256': binding['netlist_sha256'],
+                       'flattened': True, 'reason_class': 'tool_handoff_verified'})
+        return report
+    except (LC.Refusal, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return {'program': 'synth_handoff_netlist_check', 'step': '14',
+                'verdict': 'FAIL', 'reason_class': 'tool_handoff_invalid',
+                'findings': [str(exc)]}
 
 
 def main(argv: Optional[list[str]] = None) -> int:

@@ -398,6 +398,15 @@ def main(argv: list[str] | None = None) -> int:
     if not project.is_dir():
         print(f"error: project dir not found: {project}", file=sys.stderr)
         return 2
+    from synth_handoff_netlist_check import bound_handoff
+    tool = bound_handoff(project)
+    if tool is not None:
+        if args.json:
+            out = _Path(args.json)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(_json.dumps(tool, indent=2) + "\n")
+        print(f"{tool['verdict']}: LibreLane synthesis product; " + "; ".join(tool['findings']))
+        return 0 if tool['verdict'] == 'PASS' else 1
     ys_globs = ["phase2/stage2/synth/*.ys", "phase2/stage2/synth/**/*.ys",
                 "phase3/synth/*.ys", "phase3/**/*.ys",
                 "scripts/*.ys", "scripts/**/*.ys"]

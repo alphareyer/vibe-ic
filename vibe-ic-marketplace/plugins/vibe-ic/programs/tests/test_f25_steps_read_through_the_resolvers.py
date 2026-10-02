@@ -168,6 +168,8 @@ def _pdk():
 def step2(env, monkeypatch):
     runner = importlib.import_module('design_one_shot_runner')
     _switch_pdk(env.project)
+    (env.project / 'input').mkdir(exist_ok=True)
+    (env.project / 'input/project.json').write_text(json.dumps({'pdk': PDK}))
     _rtl(env.project)
     (env.project / 'phase1/generated_docs').mkdir(parents=True)
     (env.project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json').write_text(

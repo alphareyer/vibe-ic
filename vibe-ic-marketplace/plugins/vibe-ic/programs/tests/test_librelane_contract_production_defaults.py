@@ -62,7 +62,7 @@ _T102_MEMBERS = {"21", "32"}
 _CUTW2_MEMBERS = {"22", "23"}
 #: R-0929-TOOL-DEFAULT Wave 1 (CUT_W1A): 8 dual, 10/26/26.5ic on the tool.
 _W1A_MODES = {"8": "dual", "10": "librelane", "26": "librelane", "26.5ic": "librelane"}
-_FRONTEND_MODES = {"7": "librelane"}
+_FRONTEND_MODES = {"7": "librelane", "9": "librelane"}
 
 
 def _chip(tmp_path, deliverable="DIE", *, marker="SELF_TAPEOUT.txt"):
@@ -93,7 +93,7 @@ def test_the_chip_path_runs_15_to_21_and_32_on_librelane_with_no_switch(tmp_path
     assert {s: LC.selected_mode(project, s) for s in _W1A_MODES} == _W1A_MODES
     assert {s: LC.selected_mode(project, s) for s in _FRONTEND_MODES} == _FRONTEND_MODES
     # outside the cut-over, nothing moves
-    for step in ("9", "16", "37"):
+    for step in ("16", "37"):
         assert LC.selected_mode(project, step) == "direct"
 
 
