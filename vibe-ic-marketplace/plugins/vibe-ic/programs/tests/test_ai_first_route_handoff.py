@@ -89,6 +89,8 @@ def _typed_d1_runner(calls):
     """Fixture runner that emits the same bound artifacts as canonical D1."""
     def run(argv, *args, **kwargs):
         calls.append(argv)
+        if argv[argv.index("--exit-step") + 1] != "D1":
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
         context = json.loads(kwargs["env"][bd._RUNNER_CONTEXT_ENV])
         project = Path(context["project"])
         generated_docs = project / "phase1" / "generated_docs"

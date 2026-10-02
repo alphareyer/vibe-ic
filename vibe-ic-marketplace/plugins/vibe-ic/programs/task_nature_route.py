@@ -223,7 +223,7 @@ DELIVERY_TARGETS: Dict[str, Dict[str, Any]] = {
 # metadata never select a physical route, and vague prose must not silently
 # upgrade or downgrade a run.
 PROMPT_DELIVERY_REQUIREMENTS_SCHEMA = "vibeic.prompt_delivery_requirements.v1"
-PROMPT_DELIVERY_RULES_VERSION = "r3"
+PROMPT_DELIVERY_RULES_VERSION = "r5"
 _DELIVERY_ORDER = {
     "rtl": 0,
     "gds": 1,
@@ -238,7 +238,7 @@ _PROMPT_DELIVERY_PATTERNS = (
     ("gds", re.compile(
         r"\b(?:stream[- ]?out\s+gds(?:ii)?|produce\s+(?:a\s+)?gds(?:ii)?|"
         r"deliver\s+(?:a\s+)?gds(?:ii)?|gds(?:ii)?\s+delivery|"
-        r"generate\s+gds(?:ii)?)\b", re.I)),
+        r"generate\s+gds(?:ii)?|as\s+gds(?:ii)?)\b", re.I)),
 )
 _DIE_ROUTE = re.compile(
     r"\b(?:die|chip|integrated\s+circuit|ic|tape[- ]?out|shuttle|gdsii?)\b",
@@ -246,36 +246,65 @@ _DIE_ROUTE = re.compile(
 _HARDMACRO_ROUTE = re.compile(
     r"\b(?:ip\s+(?:hard[- ]?macro|path|deliverable|block)|"
     r"hard[- ]?macro|macro\s+deliverable)\b", re.I)
-_INTEGRATED_HARDMACRO_ROUTE = re.compile(
-    r"\b(?:integrat(?:e|ed|ing)|inside|within|embedded)\b"
-    r"[^.\n]{0,80}\b(?:ip\s+)?hard[- ]?macro\b|"
-    r"\b(?:ip\s+)?hard[- ]?macro\b[^.\n]{0,80}\b(?:integrat(?:e|ed|ing)|"
-    r"inside|within|embedded)\b",
-    re.I)
+# Requested objects are independent of component and later use-site nouns.
+_DIE_OBJECT = r"(?:die|chip|ic|integrated\s+circuit)"
+_IP_OBJECT = r"(?:ip\s+)?hard[- ]?macro"
+_REQUESTED_DIE = re.compile(
+    r"\b(?:design|build|create|deliver|produce|complete|output(?:\s+is)?)\s+"
+    r"(?:(?:a|an|the)\s+)?(?:(?:complete|whole|full|standalone)\s+)?"
+    + _DIE_OBJECT + r"\b", re.I)
+_REQUESTED_IP = re.compile(
+    r"\b(?:deliver|produce|output(?:\s+is)?)\s+"
+    r"(?:(?:a|an|the|separate)\s+)*(?:standalone\s+)?"
+    + _IP_OBJECT + r"\b", re.I)
+_STANDALONE_IP = re.compile(r"\bstandalone\s+" + _IP_OBJECT + r"\b", re.I)
+_CHIP_CONTAINMENT = re.compile(
+    _DIE_OBJECT + r"\b[^.;]*\b(?:contain(?:s|ing)?|incorporat(?:e|es|ing)|"
+    r"includ(?:e|es|ing))\b[^.;]*" + _IP_OBJECT, re.I)
+_CHIP_INTEGRATION = re.compile(
+    r"\b(?:integrat(?:e|ed|ing)|inside|within|into)\b[^.;]*"
+    + _DIE_OBJECT + r"\b", re.I)
+
+
+def _delivered_object_families(text: str) -> list[str]:
+    """Conservative object selection; unresolved physical choices are blocking."""
+    text = " ".join(text.split())
+    hardmacro = bool(_HARDMACRO_ROUTE.search(text))
+    die = bool(_REQUESTED_DIE.search(text))
+    ip = bool(_REQUESTED_IP.search(text))
+    standalone = bool(_STANDALONE_IP.search(text))
+    if hardmacro and re.search(r"\b(?:either|not\s+(?:yet\s+)?chosen|"
+                              r"has\s+not\s+chosen)\b", text, re.I):
+        return ["DIE", "HARDMACRO"]
+    if hardmacro and re.search(
+            r"\b(?:chip|die|ic)\b[^.;]*\bor\b[^.;]*hard[- ]?macro|"
+            r"hard[- ]?macro\b[^.;]*\bor\b[^.;]*\b(?:chip|die|ic)\b",
+            text, re.I):
+        return ["DIE", "HARDMACRO"]
+    if die:
+        # A separately requested block is a second delivered object. A block
+        # nested in the requested chip does not select a second route.
+        if ip or re.search(r"\b(?:and\s+a\s+separate|separately\s+deliver)\b",
+                           text, re.I) and standalone:
+            return ["DIE", "HARDMACRO"]
+        return ["DIE"]
+    if standalone or ip:
+        return ["HARDMACRO"]
+    if hardmacro:
+        if _CHIP_CONTAINMENT.search(text) or _CHIP_INTEGRATION.search(text):
+            return ["DIE"]
+        # GDS, LEF and Liberty describe block views, not a host chip. A bare
+        # host noun without an object/use-site relationship stays unresolved.
+        if re.search(r"\b" + _DIE_OBJECT + r"\b", text, re.I):
+            return ["DIE", "HARDMACRO"]
+        return ["HARDMACRO"]
+    return ["DIE"] if _DIE_ROUTE.search(text) else []
 
 
 def prompt_delivery_requirements(prompt: str) -> Dict[str, Any]:
     """Derive an immutable delivery floor from explicit user prompt language."""
     text = str(prompt or "")
-    # An IP hardmacro may explicitly contain GDS/GDSII, LEF, Liberty and
-    # Verilog views.  Those are views of the block, not a request for a DIE;
-    # classify the hardmacro family first and do not let a view word create a
-    # false DIE conflict.
-    has_hardmacro = bool(_HARDMACRO_ROUTE.search(text))
-    # A hardmacro mention describes a component.  It lowers the delivery
-    # family only when the requested object is that standalone block.  When
-    # the same component is explicitly integrated into a chip/DIE, the
-    # delivered object remains the complete IC and keeps the IC floor.
-    integrated_hardmacro = bool(_INTEGRATED_HARDMACRO_ROUTE.search(text))
-    has_die = bool(_DIE_ROUTE.search(text)) and (
-        not has_hardmacro or integrated_hardmacro)
-    route_hits = []
-    if has_die and integrated_hardmacro:
-        route_hits = ["DIE"]
-    elif has_hardmacro:
-        route_hits = ["HARDMACRO"]
-    elif has_die:
-        route_hits = ["DIE"]
+    route_hits = _delivered_object_families(text)
     matches = []
     for target, rx in _PROMPT_DELIVERY_PATTERNS:
         hit = rx.search(text)
