@@ -170,6 +170,13 @@ def bound_handoff(project: Path) -> Optional[dict]:
             return None
         if not isinstance(binding, dict) or binding.get('schema') != 'vibe-ic/librelane-synthesis-handoff/1':
             raise ValueError('current LibreLane synthesis handoff is absent')
+        from l_doc_consumer_contract import l_doc_fields
+        l9 = l_doc_fields(LC._ldoc(project / 'phase1/generated_docs', 'L9_INTEGRATION_SPEC.json'))
+        declared_top = l9.get('top_module')
+        current_top = declared_top.strip() if isinstance(declared_top, str) else None
+        if not current_top or current_top != binding['top']:
+            raise ValueError(f'current L9 subject {declared_top!r} differs from '
+                             f'published synthesis top {binding["top"]!r}')
         folder = project / binding['folder']
         mapped = project / binding['mapped']
         expected = project / 'phase2/stage2/synth' / (binding['top'] + '_synth.v')
