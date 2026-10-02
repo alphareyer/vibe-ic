@@ -510,7 +510,6 @@ def test_capability_peer_eof_refuses_without_an_empty_read_loop(monkeypatch):
     receipt = dict(issuer_role='canonical-frontdoor', issuer_process=process,
                    invocation_id='invocation-' + ('x' * 20))
     monkeypatch.setenv(policy._CAPABILITY_FD_ENV, str(parent.fileno()))
-    monkeypatch.setattr(policy, '_ancestor_pids', lambda: {os.getpid()})
     monkeypatch.setattr(policy, '_canonical_process_cmdline',
                         lambda pid: str(policy._CANONICAL_FRONTDOOR))
     with pytest.raises(em.Refusal, match='REQUEST_CAPABILITY_INVALID'):

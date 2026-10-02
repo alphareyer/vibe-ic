@@ -138,20 +138,6 @@ class _CapabilityServer:
             return
 
 
-def _ancestor_pids() -> set[int]:
-    """Return live ancestors; this is supplemental FD peer evidence only."""
-    result = set()
-    pid = os.getppid()
-    while pid > 1 and pid not in result:
-        result.add(pid)
-        try:
-            tail = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
-            pid = int(tail[1])
-        except (OSError, IndexError, ValueError):
-            break
-    return result
-
-
 def _verify_parent_capability(request_digest: str, receipt: dict) -> None:
     """Require the registered issuer's live endpoint for this invocation."""
     raw_fd = os.environ.get(_CAPABILITY_FD_ENV)
@@ -171,8 +157,7 @@ def _verify_parent_capability(request_digest: str, receipt: dict) -> None:
         sock = socket.socket(fileno=fd)
         peer_pid = struct.unpack('3i', sock.getsockopt(socket.SOL_SOCKET,
                                                         socket.SO_PEERCRED, 12))[0]
-        if (peer_pid not in _ancestor_pids() or
-                peer_pid != process.get('pid') or
+        if (peer_pid != process.get('pid') or
                 _process_start_ticks(peer_pid) != str(process.get('start_ticks')) or
                 str(_CANONICAL_FRONTDOOR) not in _canonical_process_cmdline(peer_pid)):
             raise Refusal('REQUEST_CAPABILITY_INVALID', request_digest)
