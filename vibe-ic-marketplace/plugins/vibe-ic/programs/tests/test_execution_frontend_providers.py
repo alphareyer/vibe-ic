@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
+import json
 import execution_frontend_providers as p
+import execution_modes as em
 
 EXPECTED=('D1','0.5ic','1','2','3','4','5','6','7','8','10','11','FS1','DT1','12','13','DT2','DT3','P0')
 
@@ -14,8 +16,17 @@ def test_missing_provider_is_typed_and_no_pass():
     assert p.produce('opaque', Path('.')).state=='NOT_IMPLEMENTED'
 
 def test_factory_reachability_reverse_and_dedup():
-    assert p.register_factories(type('R',(),{'register':lambda self, x: None})()) == EXPECTED
+    registry=em.Registry(); assert p.register_factories(registry) == EXPECTED
+    assert len(registry.adapters('1')) == 1 and len(registry.adapters('P0')) == 1
+    assert len(registry.adapters('6')) == 1 and registry.adapters('6')[0].available is False
+    assert set(p.dedupe_by_engine()[('yosys','openroad')]) == {'DT2','DT3'}
     assert p.choose('7') is p.choose('7'); assert p.choose('7').factory is not p.choose('8').factory
+
+def test_real_boundary_consumes_output_and_reverse_red(tmp_path):
+    source=tmp_path/'phase1'/'generated_docs'; source.mkdir(parents=True); (source/'L1.json').write_text('{"ok":true}\n')
+    result=p.produce('1', tmp_path); assert result.state=='NOT_MEASURED'; output=tmp_path/result.outputs[0]
+    assert json.loads(output.read_text())['input_sha256']
+    output.write_text('{}\n'); assert json.loads(output.read_text()) != {'schema':'frontend_provider_receipt/1'}
 
 def test_step6_explicitly_not_measured_without_fpga():
     result=p.produce('6', Path('/missing'), fpga=False)
