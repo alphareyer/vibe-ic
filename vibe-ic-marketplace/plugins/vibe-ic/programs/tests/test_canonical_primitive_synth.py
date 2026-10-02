@@ -411,6 +411,8 @@ def _native_divider_tb(width, vectors):
     checks = "\n".join(
         f"        check_div({a}, {b}, {q}, {r});"
         for a, b, q, r in vectors)
+    first_a, first_b, first_q, first_r = vectors[0]
+    second_a, second_b, second_q, second_r = vectors[min(1, len(vectors) - 1)]
     reset_a = max(2, (1 << width) - 1)
     reset_b = 1
     return f'''`timescale 1ns/1ps
@@ -477,6 +479,56 @@ module tb;
         end
     endtask
 
+    task automatic check_back_to_back(
+        input integer a1_i, input integer b1_i, input integer q1_i,
+        input integer r1_i, input integer a2_i, input integer b2_i,
+        input integer q2_i, input integer r2_i);
+        integer cycles;
+        begin
+            // The second request is presented on the first falling edge after
+            // the first result pulse, so its rising edge is the earliest
+            // legal acceptance edge for both latency conventions.
+            @(negedge clk);
+            dividend = a1_i;
+            divisor = b1_i;
+            start = 1'b1;
+            @(posedge clk); #1;
+            start = 1'b0;
+            dividend = '0;
+            divisor = '0;
+            cycles = 1;
+            while (!valid && cycles <= WIDTH + 2) begin
+                @(posedge clk); #1;
+                cycles = cycles + 1;
+            end
+            checks = checks + 1;
+            if (!valid || cycles != EXPECTED_LATENCY ||
+                quotient !== q1_i || remainder !== r1_i)
+                fail("back-to-back first result mismatch");
+
+            @(negedge clk);
+            dividend = a2_i;
+            divisor = b2_i;
+            start = 1'b1;
+            @(posedge clk); #1;
+            start = 1'b0;
+            dividend = '0;
+            divisor = '0;
+            cycles = 1;
+            while (!valid && cycles <= WIDTH + 2) begin
+                @(posedge clk); #1;
+                cycles = cycles + 1;
+            end
+            checks = checks + 1;
+            if (!valid || cycles != EXPECTED_LATENCY ||
+                quotient !== q2_i || remainder !== r2_i)
+                fail("back-to-back second result mismatch");
+            @(posedge clk); #1;
+            if (valid)
+                fail("back-to-back valid was wider than one cycle");
+        end
+    endtask
+
     initial begin
         #1;
         rst = 1'b0;
@@ -503,6 +555,8 @@ module tb;
         end
 
 {checks}
+        check_back_to_back({first_a}, {first_b}, {first_q}, {first_r},
+                           {second_a}, {second_b}, {second_q}, {second_r});
         if (failures != 0)
             $fatal(1, "native divider checks failed: %0d", failures);
         $display("PASS width=%0d checks=%0d latency=%0d", WIDTH, checks,
