@@ -191,3 +191,96 @@ def test_fixed_runner_never_admits_absent_measurement(tmp_path, monkeypatch, fau
     assert row["verdict"] == ("NOT_READY" if fault == "m1_failed" else "FAIL")
     assert row["rc"] != 0
     assert calls.count("mixed_signal_power_domain_run") == (0 if fault == "m1_failed" else 1)
+
+
+def m2_gate(project):
+    import flow_compliance_check as flow
+    step = next(s for s in yaml.safe_load(FLOW.read_text())["steps"] if s["id"] == "M2")
+    return flow.check_step(project, step, {}).status
+
+
+def replace_input(project, relative, old, new):
+    path = project / relative
+    text = path.read_text()
+    assert old in text
+    path.write_text(text.replace(old, new))
+
+
+NETLIST = "phase3/stage3/pnr/boundary_pnr.v"
+UPF = "phase2/stage2/constraints/boundary.upf"
+
+
+def assert_m2_refused(project):
+    assert invoke(project) == 1
+    assert invoke(project, "--check-only") == 1
+    assert m2_gate(project) == "FAIL"
+
+
+def test_b01_hidden_intermediate_domain_crossing(tmp_path):
+    project = fixture(tmp_path)
+    assert invoke(project) == 0
+    replace_input(project, UPF, "{u_src}", "{u_src u_iso u_sink enable result}")
+    replace_input(project, UPF, "{u_shift u_iso u_sink enable result}", "{u_shift}")
+    assert_m2_refused(project)
+    cells = json.loads((project / REPORTS / "power_domain_tool/netlist.json").read_text())["modules"]["boundary"]["cells"]
+    assert cells["u_shift"]["connections"]["Y"] == cells["u_iso"]["connections"]["A"]
+    assert cells["u_iso"]["type"] == "clamp_cell"
+
+
+def test_b02_disconnected_isolation_enable(tmp_path):
+    project = fixture(tmp_path)
+    assert invoke(project) == 0
+    replace_input(project, NETLIST, ".EN(enable), ", "")
+    assert_m2_refused(project)
+    cells = json.loads((project / REPORTS / "power_domain_tool/netlist.json").read_text())["modules"]["boundary"]["cells"]
+    assert "EN" not in cells["u_iso"]["connections"]
+
+
+def test_b03_invalid_strategy_direction(tmp_path):
+    project = fixture(tmp_path)
+    assert invoke(project) == 0
+    replace_input(project, UPF, "-applies_to outputs", "-applies_to undefined_direction")
+    assert_m2_refused(project)
+
+
+def test_b04_malformed_allowed_command(tmp_path):
+    project = fixture(tmp_path)
+    assert invoke(project) == 0
+    path = project / UPF
+    path.write_text(path.read_text() + "connect_supply_net\n")
+    assert_m2_refused(project)
+
+
+def test_b05_unsupported_strategy_option(tmp_path):
+    project = fixture(tmp_path)
+    assert invoke(project) == 0
+    replace_input(project, UPF, "-clamp_value 0", "-clamp_value 0 -exclude_elements {u_sink}")
+    assert_m2_refused(project)
+
+
+def producer_output_bytes(project):
+    import mixed_signal_power_domain_run as producer
+    root = project / REPORTS
+    return {str(p.relative_to(root)): p.read_bytes() for p in
+            [*(root / n for n in (*producer.OUTPUTS, producer.RECEIPT)),
+             *(root / "power_domain_tool" / n for n in ("netlist.json", "read.ys", "yosys.log"))]}
+
+
+@pytest.mark.parametrize("names", [("PD_SWITCHED", "PD_LIVE"),
+                                  ("PD_BATTERY", "PD_STANDBY")])
+def test_b07_pd_prefixed_domain_names(tmp_path, names):
+    project = fixture(tmp_path)
+    replace_input(project, UPF, "SWITCHED", names[0])
+    replace_input(project, UPF, "LIVE", names[1])
+    assert invoke(project) == 0
+    before = producer_output_bytes(project)
+    assert invoke(project, "--check-only") == 0
+    assert m2_gate(project) == "PASS"
+    assert producer_output_bytes(project) == before
+
+
+def test_b07_canonical_domain_alias_still_ambiguous(tmp_path):
+    project = fixture(tmp_path)
+    path = project / UPF
+    path.write_text(path.read_text() + "create_power_domain PD_SWITCHED -elements {u_src}\n")
+    assert_m2_refused(project)

@@ -108,7 +108,7 @@ def library_cells(paths):
             pins = {p: b for p, b in groups(body, "pin")}
             kinds = [k for k in ("level_shifter", "isolation_cell")
                      if attr(body, "is_" + k) == "true"]
-            data = None
+            data, controls = None, []
             if kinds:
                 # Combined cells must identify the same data pin for both roles.
                 role_pins = [{p for p, b in pins.items()
@@ -122,48 +122,103 @@ def library_cells(paths):
                         attr(b, "isolation_cell_enable_pin") == "true"
                         and attr(b, "direction") == "input" for b in pins.values()):
                     raise Refusal("ISOLATION_CONTROL_UNSTATED", name)
+                controls = [p for p, b in pins.items() if any(
+                    attr(b, k + "_enable_pin") == "true" for k in kinds)]
+                if any(p == data or attr(pins[p], "direction") != "input" for p in controls):
+                    raise Refusal("UNSUPPORTED_PROTECTION_PINS", name)
             cells[name] = {"kinds": kinds, "data": data,
+                           "controls": controls,
                            "conversion": attr(body, "level_shifter_type")}
     if not cells:
         raise Refusal("NO_LIBRARY_CELLS", "no Liberty cells", 2)
     return cells
 
 
+def upf_command(line):
+    """Validate only the supported literal flat command/option/arity subset.
+
+    Supply commands bind declarations, without certifying supply connectivity.
+    Strategy direction/rule variants whose semantics are not implemented are
+    refused rather than accepted as a declaration with ignored options.
+    """
+    schema = {
+        "upf_version": (set(), set()),
+        "set_design_top": (set(), set()),
+        "create_power_domain": ({"-elements"}, {"-elements"}),
+        "create_supply_net": ({"-domain", "-voltage"}, {"-domain"}),
+        "create_supply_port": ({"-domain", "-direction"}, set()),
+        "connect_supply_net": ({"-ports"}, {"-ports"}),
+        "set_domain_supply_net": ({"-primary_power_net", "-primary_ground_net"},
+                                  {"-primary_power_net", "-primary_ground_net"}),
+        "add_power_state": ({"-state"}, {"-state"}),
+        "set_isolation": ({"-domain", "-applies_to", "-clamp_value"}, {"-domain"}),
+        "set_level_shifter": ({"-domain", "-applies_to", "-rule"}, {"-domain"}),
+    }
+    tokens = re.findall(r'\{[^{}]*\}|[^\s{}]+', line)
+    if (len(tokens) < 2 or tokens[0] not in schema
+            or re.search(r'[;$\[\]\\"]', line)
+            or " ".join(tokens).split() != line.split()
+            or tokens[1].startswith(("-", "{"))):
+        raise Refusal("UNSUPPORTED_UPF", line)
+    command, name, *rest = tokens
+    allowed, required = schema[command]
+    options = {}
+    if len(rest) % 2:
+        raise Refusal("UNSUPPORTED_UPF", line)
+    for flag, value in zip(rest[::2], rest[1::2]):
+        if flag not in allowed or flag in options or value.startswith("-"):
+            raise Refusal("UNSUPPORTED_UPF", line)
+        options[flag] = value
+    if not required <= options.keys():
+        raise Refusal("UNSUPPORTED_UPF", line)
+    for flag, value in options.items():
+        if flag in ("-elements", "-ports", "-state"):
+            if not value.startswith("{") or not value[1:-1].strip():
+                raise Refusal("UNSUPPORTED_UPF", line)
+        elif len(value.split()) != 1 or "{" in value:
+            raise Refusal("UNSUPPORTED_UPF", line)
+        if flag == "-applies_to" and value != "outputs":
+            raise Refusal("UNSUPPORTED_UPF", line)
+        if flag == "-rule" and value != "both":
+            raise Refusal("UNSUPPORTED_UPF", line)
+        if flag == "-clamp_value" and value not in ("0", "1"):
+            raise Refusal("UNSUPPORTED_UPF", line)
+        if flag == "-direction" and value not in ("in", "out"):
+            raise Refusal("UNSUPPORTED_UPF", line)
+        if flag == "-voltage" and not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value):
+            raise Refusal("UNSUPPORTED_UPF", line)
+    if command == "upf_version" and not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', name):
+        raise Refusal("UNSUPPORTED_UPF", line)
+    if command == "add_power_state" and not re.fullmatch(
+            r'\{(?:ON -voltage [0-9]+(?:\.[0-9]+)?|OFF)\}', options["-state"]):
+        raise Refusal("UNSUPPORTED_POWER_STATE", line)
+    return command, name, options
+
+
 def power_model(path, top):
     text = path.read_text()
-    allowed = {"upf_version", "set_design_top", "create_power_domain",
-               "create_supply_net", "create_supply_port", "connect_supply_net",
-               "set_domain_supply_net", "add_power_state", "set_isolation",
-               "set_level_shifter"}
-    names = []
+    names, voltages = [], {}
     for raw in text.splitlines():
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
-        if line.split()[0] not in allowed or re.search(r'[;$\[\]\\"]', line):
-            raise Refusal("UNSUPPORTED_UPF", line)
-        if line.count("{") != line.count("}"):
-            raise Refusal("UNSUPPORTED_UPF", "multiline/nested Tcl: " + line)
-        if line.startswith("set_design_top ") and line.split() != ["set_design_top", top]:
+        command, name, options = upf_command(line)
+        if command == "set_design_top" and name != top:
             raise Refusal("TOP_MISMATCH", line)
-        if line.startswith("create_power_domain "):
-            if "-elements" not in line or "-include_scope" in line:
-                raise Refusal("DOMAIN_ELEMENTS_UNSTATED", line)
-            names.append(line.split()[1].lower())
-        if line.startswith("add_power_state "):
-            # General supply_expr/logic_expr/PST interpretation is not implemented.
-            if not re.fullmatch(r'add_power_state \S+ -state \{(?:ON -voltage [0-9.]+|OFF)\}', line):
-                raise Refusal("UNSUPPORTED_POWER_STATE", line)
+        if command == "create_power_domain":
+            names.append(intent._norm(name))
+        if command in ("create_supply_net", "add_power_state"):
+            dom = intent._norm(options["-domain"] if command == "create_supply_net" else name)
+            value = re.search(r'-voltage ([0-9.]+)', line)
+            if value:
+                voltages.setdefault(dom, set()).add(float(value.group(1)))
     domains, iso, ls = intent.parse_upf(text)
     if not names or len(names) != len(set(names)) or set(names) != set(domains):
         raise Refusal("AMBIGUOUS_DOMAINS", "missing/duplicate/undeclared power domain")
     for name, d in domains.items():
         if not d["elements"] or d["voltage"] is None or not math.isfinite(d["voltage"]) or d["voltage"] <= 0:
             raise Refusal("INCOMPLETE_POWER_INTENT", name)
-        volts = re.findall(r'(?:create_supply_net \S+ -domain ' + re.escape(name) +
-                           r'\b[^\n]*|add_power_state ' + re.escape(name) +
-                           r'\b[^\n]*)-voltage ([0-9.]+)', text, flags=re.I)
-        if len({float(v) for v in volts}) != 1:
+        if len(voltages.get(name, set())) != 1:
             raise Refusal("UNSUPPORTED_MULTI_VOLTAGE", name)
     return domains, iso, ls
 
@@ -247,6 +302,10 @@ def derive(paths, libs, top, native):
         cell_domains[n] = domain(n)
         if set(c.get("port_directions", {})) != set(c["connections"]):
             raise Refusal("UNRESOLVED_PIN_DIRECTION", n)
+        for control in masters[typ]["controls"]:
+            if (not c["connections"].get(control)
+                    or c["port_directions"].get(control) != "input"):
+                raise Refusal("UNCONNECTED_PROTECTION_CONTROL", n + "/" + control)
         for p, bits in c["connections"].items():
             direction = c["port_directions"][p]
             if direction not in ("input", "output"):
@@ -292,6 +351,20 @@ def derive(paths, libs, top, native):
         if origin is None:
             continue
         drv = origin[0]
+        # A transparent chain may leave and re-enter the endpoint domain.
+        # Check each actual adjacent edge before considering endpoint equality.
+        nodes = [drv, *chain, recv]
+        for sender, receiver in zip(nodes, nodes[1:]):
+            a, b = cell_domains[sender], cell_domains[receiver]
+            av, bv = domains[a], domains[b]
+            if a == b or av["voltage"] == bv["voltage"]:
+                continue
+            conversion = "LH" if av["voltage"] < bv["voltage"] else "HL"
+            adjacent = [n for n in (sender, receiver) if n in chain]
+            if not any("level_shifter" in masters[cells[n]["type"]]["kinds"]
+                       and masters[cells[n]["type"]]["conversion"] in (conversion, "HL_LH")
+                       for n in adjacent) or not {a, b} & ls_strategy:
+                raise Refusal("MISSING_LEVEL_SHIFTER", sender + "->" + receiver)
         a, b = cell_domains[drv], cell_domains[recv]
         if a == b:
             continue
