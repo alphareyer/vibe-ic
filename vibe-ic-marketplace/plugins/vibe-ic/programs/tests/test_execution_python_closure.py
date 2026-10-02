@@ -199,3 +199,53 @@ def test_bound_shadow_dependency_cannot_claim_transparent_execution(tmp_path):
     receipt = json.loads((root / candidate.arm_id / 'receipt.json').read_text())
     assert receipt['reason'] == 'PROVIDER_DEPENDENCY_UNBOUND'
     assert receipt['processes'] == []
+
+
+@pytest.mark.parametrize('cached', [False, True])
+def test_timestamp_valid_stale_package_cache_uses_current_source(tmp_path, cached):
+    import py_compile
+
+    candidate, helper, entry = package_arm(tmp_path)
+    assert candidate.components[0].argv[1] == str(entry)
+    nominal = helper.read_text()
+    previous = nominal + '\nfrom pathlib import Path\nPath("previous-helper-executed.txt").write_text("stale")\n'
+    current = nominal + '\n#' + ' ' * (len(previous.encode()) - len(nominal.encode()) - 2)
+    helper.write_text(previous)
+    cache = Path(py_compile.compile(str(helper), doraise=True,
+        invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP))
+    stamp = helper.stat()
+    helper.write_text(current)
+    os.utime(helper, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    assert cache.read_bytes()[4:8] == b'\0\0\0\0'
+    assert helper.stat().st_size == len(previous.encode())
+    stale_bytes = cache.read_bytes()
+    if not cached:
+        cache.unlink()
+    candidate = replace(candidate, source_files={**candidate.source_files, str(helper): em.digest(helper)})
+    ctl = controller(candidate); ctx = fixtures.context16(tmp_path); root = tmp_path / 'run'
+    assert ctl.run(ctx, root, 'ultra-mode')['candidate_statuses'] == {candidate.arm_id: 'ELIGIBLE'}
+    assert not (root / candidate.arm_id / 'outputs/previous-helper-executed.txt').exists()
+    accepted = ctl.adopt(ctx, root, decisions.choice(ctx, root, candidate.arm_id))
+    assert accepted['status'] == 'ADOPTED'
+    if cached:
+        receipt = json.loads((root / candidate.arm_id / 'receipt.json').read_text())
+        prefix = Path(receipt['processes'][0]['issued_environment']['PYTHONPYCACHEPREFIX'])
+        assert prefix.is_dir() and not list(prefix.iterdir())
+        # Put the applicable old helper cache into the issued private prefix
+        # after eligibility. Adoption must revoke this execution proof while
+        # preserving the earlier committed generation and canonical inputs.
+        poison = prefix / str(helper.parent).lstrip('/') / cache.name
+        poison.parent.mkdir(parents=True); poison.write_bytes(stale_bytes)
+        prior = Path(accepted['selected_generation']['directory'])
+        snapshot = {str(p.relative_to(prior)): (em.digest(p), p.stat().st_mode)
+                    for p in prior.rglob('*') if p.is_file()}
+        inputs = {name: em.digest(path) for name, path in ctx.inputs.items()}
+        with pytest.raises(em.Refusal, match='PYTHON_BYTECODE_POLICY_CHANGED'):
+            ctl.adopt(ctx, root, decisions.choice(ctx, root, candidate.arm_id))
+        refused = json.loads((root / 'adoption.json').read_text())
+        assert refused['status'] == 'REFUSED' and refused['selected'] is None
+        assert list((root / 'selected').iterdir()) == [prior]
+        assert snapshot == {str(p.relative_to(prior)): (em.digest(p), p.stat().st_mode)
+                            for p in prior.rglob('*') if p.is_file()}
+        assert inputs == {name: em.digest(path) for name, path in ctx.inputs.items()}
+        ctl._generation_current(accepted['selected_generation'])

@@ -235,8 +235,33 @@ def _provider_identity(adapter: 'Adapter', *, cwd: Path | None = None,
     identity = tuple(roots), tuple((str(path), bound_digest(path)) for path in sorted(closure))
     if include_execution:
         return identity + ({'files': {str(path): bound_digest(path) for path in sorted(executed | closure)},
-                            'search_paths': search_paths},)
+                            'search_paths': search_paths,
+                            'python_import_policy': 'isolated-source-only-v1'},)
     return identity
+
+
+def _python_cache_policy(outputs: Path, process: dict | None = None) -> dict:
+    """Force source imports without changing the issued caller argv.
+
+    -B alone still reads timestamp-valid stale bytecode. A fresh private
+    prefix redirects cache lookup before interpreter startup; disabling
+    writes keeps that prefix empty. Recheck the issued prefix at eligibility
+    and adoption instead of trusting source text to describe cached code.
+    """
+    if process is None:
+        prefix = outputs.parent / ('.python-cache-' + uuid.uuid4().hex)
+        prefix.mkdir(mode=0o700)
+        return {'PYTHONPYCACHEPREFIX': str(prefix), 'PYTHONDONTWRITEBYTECODE': '1'}
+    environment = process.get('issued_environment', {})
+    value = environment.get('PYTHONPYCACHEPREFIX')
+    if not isinstance(value, str) or environment.get('PYTHONDONTWRITEBYTECODE') != '1':
+        raise Refusal('PYTHON_BYTECODE_POLICY_CHANGED', str(outputs))
+    prefix = Path(value)
+    if (prefix.parent != outputs.parent or not prefix.name.startswith('.python-cache-') or
+            prefix.is_symlink() or not prefix.is_dir() or
+            prefix.stat().st_mode & 0o077 or any(prefix.iterdir())):
+        raise Refusal('PYTHON_BYTECODE_POLICY_CHANGED', value)
+    return {'PYTHONPYCACHEPREFIX': value, 'PYTHONDONTWRITEBYTECODE': '1'}
 
 
 def _seal(value: dict) -> dict:
@@ -786,6 +811,7 @@ class Controller:
                              'OPENBLAS_NUM_THREADS': str(arm.cpus),
                              'VIBEIC_EXECUTION_BINDING': json.dumps(plan['binding']),
                              'VIBEIC_ARM_ID': arm.arm_id}
+                child_env.update(_python_cache_policy(outputs))
                 child_env.pop('VIBEIC_STEP37_ROUTE', None)
                 if arm.step_id == '37':
                     params = json.loads(component.argv[component.argv.index('--params-json') + 1])
@@ -794,7 +820,8 @@ class Controller:
                         raise Refusal('BACKEND_STEP37_ROUTE_UNBOUND', arm.arm_id)
                     child_env['VIBEIC_STEP37_ROUTE'] = route
                 record['issued_environment'] = {k: child_env[k] for k in
-                    ('VIBEIC_ARM_ID', 'VIBEIC_STEP37_ROUTE') if k in child_env}
+                    ('VIBEIC_ARM_ID', 'VIBEIC_STEP37_ROUTE',
+                     'PYTHONPYCACHEPREFIX', 'PYTHONDONTWRITEBYTECODE') if k in child_env}
                 with stdout.open('wb') as out, stderr.open('wb') as err:
                     process = subprocess.Popen(
                         [sys.executable, '-c', launcher, str(arm.ram_mb * 1024 * 1024),
@@ -971,6 +998,7 @@ class Controller:
                 not p.get('ended_ns') for p in processes):
             raise Refusal('PROCESS_NOT_COMPLETE', arm.arm_id)
         for process in processes:
+            _python_cache_policy(Path(receipt['output_root']), process)
             for channel in ('stdout', 'stderr'):
                 p = Path(process[channel])
                 if not p.is_file() or digest(p) != process[channel + '_sha256']:
