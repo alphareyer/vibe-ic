@@ -303,6 +303,16 @@ class Registry:
             binary = shutil.which(component.argv[0])
             if not binary or str(Path(binary).resolve()) not in adapter.source_files:
                 raise Refusal('EXECUTABLE_UNBOUND', component.argv[0])
+            # Python workers and shell launchers carry their real script or
+            # executable as a later absolute argv member.  Bind those files
+            # too; checking argv[0] alone would let a changed producer run
+            # under an unchanged interpreter identity.
+            for token in component.argv[1:]:
+                candidate = Path(token)
+                if candidate.is_absolute() and candidate.is_file() and not candidate.is_symlink():
+                    resolved = str(candidate.resolve())
+                    if resolved not in adapter.source_files or digest(candidate) != adapter.source_files[resolved]:
+                        raise Refusal('EXECUTABLE_UNBOUND', token)
         validator_file = inspect.getsourcefile(adapter.validate)
         if not validator_file or str(Path(validator_file).resolve()) not in adapter.source_files:
             raise Refusal('VALIDATOR_SOURCE_UNBOUND', adapter.arm_id)
