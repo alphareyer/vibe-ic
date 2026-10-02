@@ -472,6 +472,15 @@ class Controller:
                  'own_no_tool_reason': a.own_no_tool_reason,
                  'cpus': a.cpus, 'ram_mb': a.ram_mb,
                  'license_id': a.license_id} for a in adapters]
+        # A source-bound arm is only eligible while its issued Git identity and
+        # every manifest digest still describe the bytes on disk.  A mutation
+        # after registration is therefore a named non-candidate, never a path
+        # to qualification or adoption.
+        for arm, row in zip(adapters, rows):
+            try:
+                self._source_current(arm)
+            except Refusal as exc:
+                row['admission'] = exc.code
         ready = [a for a, row in zip(adapters, rows) if row['admission'] == 'READY']
         external = [a for a in adapters if a.role == 'producer' and a.tool_id != 'vibeic']
         own = [a for a in ready if a.tool_id == 'vibeic']
