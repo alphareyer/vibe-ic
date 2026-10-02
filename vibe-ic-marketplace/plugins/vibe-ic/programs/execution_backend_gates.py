@@ -1,0 +1,67 @@
+"""Execute the unchanged canonical clauses; retain advisory/conditional facts."""
+from __future__ import annotations
+import json
+import sys
+from pathlib import Path
+
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import execution_backend_snapshot as snap
+import execution_modes as em
+
+
+def evaluate(project: Path, row: dict) -> dict:
+    import flow_compliance_check as fcc
+    # Capture the actual semantic consumer and its lossless gate ledger. No
+    # custom parser substitutes for a declared gate or changes its thresholds.
+    start = len(fcc._GATE_LEDGER)
+    verdict = fcc.check_step(project, row, {})
+    if str(row['id']) == '20':
+        import hold_area_budget_check as area
+        area_rc = area.main([str(project), '--json', str(project / 'reports/phase3/hold_area_budget.json')])
+        fcc._record_gate_execution('hold_area_budget_check', area_rc,
+                                  'PASS' if area_rc == 0 else 'FAIL' if area_rc == 1 else 'NOT_MEASURED')
+        if area_rc:
+            verdict.status = 'FAIL' if area_rc == 1 else 'NOT_MEASURED'
+    ledger = fcc._GATE_LEDGER[start:]
+    from dataclasses import asdict
+    return {'step': asdict(verdict), 'ledger': ledger, 'status': verdict.status}
+
+
+def contracts(project: Path, row: dict) -> dict:
+    """Resolve canonical any-of/glob contracts to substantive exact file hashes."""
+    import flow_compliance_check as fcc
+    result = {}
+    for spec in row.get('required_outputs', []):
+        condition = (row.get('output_conditions') or {}).get(spec)
+        if condition:
+            met, _ = fcc._evaluate_gate(project, condition)
+            if not met:
+                continue
+        files = []
+        for pattern in spec.split(' OR '):
+            for p in sorted(project.glob(pattern.strip())):
+                if p.is_file() and not p.is_symlink() and p.stat().st_size:
+                    files.append(str(p.relative_to(project)))
+        if not files:
+            raise em.Refusal('BACKEND_SUBSTANTIVE_CONTRACT_MISSING', spec)
+        result[spec] = {name: snap.sha(project / name) for name in files}
+    return result
+
+
+def states(binding, gate_result, producer):
+    values = {'backend_canonical': 'PASS' if gate_result['status'] == 'PASS' else
+              'FAIL' if gate_result['status'] == 'FAIL' else 'NOT_MEASURED',
+              'backend_native_substance': 'PASS' if producer == 'PASS' else
+              'FAIL' if producer == 'FAIL' else 'NOT_MEASURED'}
+    for name in binding['required_gates']:
+        if name in values:
+            continue
+        observed = [x for x in gate_result['ledger'] if x.get('gate') == name]
+        # Preserve raw advisory FAIL too. F1 must not demand a fake PASS for a
+        # program the canonical policy explicitly makes advisory/conditional.
+        values[name] = ('FAIL' if any(x.get('rc') == 1 or x.get('verdict') == 'FAIL' for x in observed)
+                        else 'PASS' if observed and all(x.get('rc') == 0 and x.get('verdict') == 'PASS' for x in observed)
+                        else 'NOT_MEASURED')
+    return values
