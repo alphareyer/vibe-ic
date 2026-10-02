@@ -32,7 +32,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 # ---------------------------------------------------------------------------
 
-import argparse, atexit, hashlib, json, os, shutil, subprocess, sys, tempfile
+import argparse, atexit, hashlib, hmac, json, os, secrets, shutil, subprocess, sys, tempfile
 import concurrent.futures
 import contextlib
 import fcntl
@@ -5083,14 +5083,23 @@ def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget,
         report_path = _pl.report_path(project, "phase1_one_shot.json")
         try:
             report_bytes = report_path.read_bytes()
-            report = json.loads(report_bytes)
+            report = _strict_json_loads(report_bytes.decode("utf-8"))
         except (OSError, ValueError, TypeError) as exc:
             return {**result, "d1_gate_error": f"D1_GATE_REPORT_UNREADABLE: {exc}"}
+        if not isinstance(report, dict) or not isinstance(report.get("verdict"), str):
+            return {**result, "d1_gate_error": "D1_GATE_REPORT_SCHEMA_INVALID"}
         binding = report.get("runner_binding")
         invocation_id = str(process.invocation_id or "")
-        if (not invocation_id
-                or not isinstance(binding, dict)
-                or binding.get("invocation_id") != invocation_id):
+        if (not invocation_id or not isinstance(binding, dict)
+                or binding.get("schema") != "vibeic.runner_report_binding.v1"
+                or binding.get("invocation_id") != invocation_id
+                or binding.get("project") != str(project)
+                or binding.get("report_name") != "phase1_one_shot.json"
+                or not isinstance(binding.get("argv"), list)
+                or any(not isinstance(arg, str) for arg in binding.get("argv"))
+                or not isinstance(binding.get("source"), dict)
+                or not isinstance(binding.get("producer"), dict)
+                or not isinstance(binding.get("material"), dict)):
             return {**result, "d1_gate_error": "D1_GATE_REPORT_NOT_CURRENT_CALL"}
         if source_sha256 is None or task_sha256 is None or ldoc_root_handle is None:
             return {**result, "d1_gate_error": "D1_GATE_BINDING_INPUT_MISSING"}
@@ -5673,7 +5682,7 @@ def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
 
 def _route_input_anchor(bench: str, fmt: str, dataset: Path,
                         route_tasks: list[dict]) -> dict:
-    """Create the coordinator-owned input/task anchor used by resume."""
+    """Create the owner-visible input/task anchor body used by resume."""
     body = {
         "schema": "vibeic.route_input_anchor.v1",
         "benchmark": str(bench),
@@ -5695,17 +5704,77 @@ def _route_input_anchor(bench: str, fmt: str, dataset: Path,
     return body
 
 
+def _route_anchor_dir(run_p: Path) -> Path:
+    """Return the owner-controlled anchor directory outside the run root.
+
+    Worker projects and generated artefacts live below ``run_p``.  The anchor
+    and its process capability deliberately live in a sibling namespace so a
+    worker that can rewrite every run-root file cannot rewrite the authority it
+    is being checked against.
+    """
+    run_p = Path(run_p).resolve()
+    run_key = hashlib.sha256(str(run_p).encode("utf-8")).hexdigest()
+    return run_p.parent / ".vibeic_route_anchors" / run_key
+
+
+def _route_anchor_paths(run_p: Path) -> tuple[Path, Path]:
+    root = _route_anchor_dir(run_p)
+    return root / "anchor.json", root / "capability.bin"
+
+
+def _publish_route_input_anchor(run_p: Path, anchor: dict) -> None:
+    """Publish an immutable, HMAC-bound anchor outside the worker root."""
+    anchor_path, capability_path = _route_anchor_paths(run_p)
+    anchor_path.parent.mkdir(parents=True, exist_ok=True)
+    if capability_path.is_symlink() or anchor_path.is_symlink():
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: linked authority")
+    if capability_path.is_file():
+        capability = capability_path.read_bytes()
+    else:
+        capability = secrets.token_bytes(32)
+        fd = os.open(str(capability_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, capability)
+        finally:
+            os.close(fd)
+    if len(capability) != 32:
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: capability")
+    body = {k: v for k, v in anchor.items()
+            if k not in {"anchor_mac", "capability_sha256"}}
+    body["capability_sha256"] = hashlib.sha256(capability).hexdigest()
+    body_bytes = json.dumps(body, sort_keys=True).encode("utf-8")
+    body["anchor_mac"] = hmac.new(capability, body_bytes, hashlib.sha256).hexdigest()
+    _write_immutable_json(anchor_path, body)
+
+
 def _validate_route_input_anchor(bench: str, fmt: str, dataset: Path,
                                  run_p: Path, route_tasks: list[dict]) -> None:
-    """Reject co-mutated run-root copies before any route can execute."""
-    path = Path(run_p).resolve() / _ROUTE_INPUT_ANCHOR
+    """Reject co-mutated inputs against the external capability-bound anchor."""
+    path, capability_path = _route_anchor_paths(run_p)
+    if (path.is_symlink() or capability_path.is_symlink()
+            or not path.is_file() or not capability_path.is_file()):
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: authority missing")
+    capability = capability_path.read_bytes()
+    if len(capability) != 32:
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: capability")
     anchor = _strict_json_loads(path.read_text(errors="replace"))
     if not isinstance(anchor, dict) or anchor.get("schema") != "vibeic.route_input_anchor.v1":
         raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: schema")
     digest = anchor.get("anchor_sha256")
-    body = {k: v for k, v in anchor.items() if k != "anchor_sha256"}
+    mac = anchor.get("anchor_mac")
+    cap_digest = anchor.get("capability_sha256")
+    body = {k: v for k, v in anchor.items()
+            if k not in {"anchor_sha256", "anchor_mac", "capability_sha256"}}
     if not isinstance(digest, str) or _sha256_text(json.dumps(body, sort_keys=True)) != digest:
         raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: digest")
+    signed = {k: v for k, v in anchor.items() if k != "anchor_mac"}
+    if (cap_digest != hashlib.sha256(capability).hexdigest()
+            or not isinstance(mac, str)
+            or not hmac.compare_digest(
+                mac, hmac.new(capability,
+                              json.dumps(signed, sort_keys=True).encode("utf-8"),
+                              hashlib.sha256).hexdigest())):
+        raise ValueError("ROUTE_INPUT_ANCHOR_INVALID: capability binding")
     if (anchor.get("benchmark") != str(bench)
             or anchor.get("format") != str(fmt)
             or anchor.get("dataset_handle") != hashlib.sha256(
@@ -5923,8 +5992,11 @@ def _validate_ai_route(task: dict, run_p: Path, *,
             prompt_text, nature=nature,
             requested_evidence=requested_evidence,
             delivery_target=delivery_target,
-            source_sha256=(task["public_original_input"].get("source_sha256")
-                           or task["prompt_sha256"]),
+            # The route receipt is semantic evidence.  Bind it to the visible
+            # prompt bytes so opaque benchmark IDs and staging paths cannot
+            # alter the route decision; public-input identity remains sealed
+            # separately by the task/coordinator binding and its digest.
+            source_sha256=str(task["prompt_sha256"]),
             explicit_user_evidence=explicit_ultra,
             context=semantic_payload.get("context"))
         return {
@@ -6376,8 +6448,8 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
             route_tasks.append(_make_ai_route_task(
                 pid, proj, staged, proposal, run_p, benchmark=bench,
                 dataset_path=ds))
-        _write_immutable_json(run_p / _ROUTE_INPUT_ANCHOR,
-                              _route_input_anchor(bench, fmt, ds, route_tasks))
+        _publish_route_input_anchor(
+            run_p, _route_input_anchor(bench, fmt, ds, route_tasks))
         _write_jsonl(run_p / _ROUTE_WORKLIST, route_tasks)
         for name in (_BACKUP_WORKLIST, _REVIEW_WORKLIST, _REPAIR_WORKLIST):
             _write_jsonl(run_p / name, [])
@@ -6421,6 +6493,9 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
         ev = None
         exit_step = None
         verdict: dict = {}
+        route_receipt = None
+        activation = None
+        effective_entry = None
         # Two facts a failing row must still report. The route-level
         # AI-backup declaration is a pure function of the routing verdict, so
         # it is known the moment routing returns; the Phase-1 front door's
@@ -6630,6 +6705,10 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 "routing_verdict": verdict,
                 "phases": _phase_error_attribution(),
                 "phase1_frontdoor": phase1_frontdoor,
+                "route_receipt": route_receipt,
+                "delivery_route": verdict.get("delivery_route") or "ip",
+                "d1_activation": activation,
+                "effective_entry": effective_entry,
                 "candidate_origin": "NONE",
                 "route_ai_backup": route_backup,
                 "program_first_ai_review": {"status": "NOT_MEASURED"},
@@ -6847,6 +6926,60 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         print("ERROR: duplicate problem id in solve report or review worklist",
               file=sys.stderr)
         return 2
+    try:
+        route_worklist = _read_jsonl(run_p / _ROUTE_WORKLIST)
+    except ValueError:
+        route_worklist = []
+    route_task_by_id = {str(t.get("id")): t for t in route_worklist}
+
+    def _route_reentry_state(pid: str, result: dict, *, allow_d1_only: bool) -> dict:
+        """Re-check the immutable route/input/D1 boundary before re-entry."""
+        task = route_task_by_id.get(str(pid))
+        if not isinstance(task, dict):
+            return {"status": "REFUSED", "reason": "ROUTE_REENTRY_TASK_MISSING"}
+        try:
+            _validate_route_input_anchor(
+                bench, fmt, Path(dataset).resolve(), run_p, list(route_worklist))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            return {"status": "REFUSED", "reason": f"ROUTE_REENTRY_ANCHOR_INVALID: {exc}"}
+        project = Path(str(task.get("project") or "")).resolve()
+        expected_project = run_p / "projects" / _safe_problem_id(str(pid))
+        if project != expected_project:
+            return {"status": "REFUSED", "reason": "ROUTE_REENTRY_PROJECT_INVALID"}
+        receipt = result.get("route_receipt")
+        if not isinstance(receipt, dict):
+            receipt = (result.get("routing_verdict") or {}).get("route_receipt")
+        if not isinstance(receipt, dict):
+            return {"status": "REFUSED", "reason": "ROUTE_REENTRY_ROUTE_RECEIPT_MISSING"}
+        import route_decision as _rd                       # noqa: PLC0415
+        errors = _rd.validate_route_receipt(receipt)
+        if errors:
+            return {"status": "REFUSED",
+                    "reason": "ROUTE_REENTRY_ROUTE_INVALID: " + ", ".join(errors)}
+        try:
+            current_route = _read_current_receipt(project, "route_decision")
+            if current_route["receipt"].get("receipt_sha256") != receipt.get("receipt_sha256"):
+                raise ValueError("ROUTE_REENTRY_ROUTE_POINTER_MISMATCH")
+        except (OSError, ValueError, TypeError) as exc:
+            return {"status": "REFUSED", "reason": str(exc)}
+        activation = result.get("d1_activation")
+        try:
+            current_activation = _read_current_receipt(project, "d1_activation")
+            if current_activation["receipt"].get("route_receipt_sha256") != receipt.get("receipt_sha256"):
+                raise ValueError("ROUTE_REENTRY_D1_ROUTE_MISMATCH")
+            activation = current_activation["receipt"]
+            _rd.require_d1_activation(
+                activation, receipt, task_sha256=str(task.get("task_sha256") or ""),
+                ldoc_root_handle=_sha256_text(
+                    str((project / "phase1" / "generated_docs").resolve())))
+        except (OSError, ValueError, TypeError) as exc:
+            if allow_d1_only:
+                return {"status": "D1_ONLY", "reason": str(exc),
+                        "route_receipt": receipt, "task": task,
+                        "project": project}
+            return {"status": "REFUSED", "reason": f"ROUTE_REENTRY_D1_INVALID: {exc}"}
+        return {"status": "ACTIVE", "route_receipt": receipt, "task": task,
+                "project": project, "activation": activation}
 
     refreshed_obligation_ids = [
         pid for pid, task in task_by_id.items()
@@ -6923,8 +7056,40 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         if isinstance(task, dict):
             task["phase1_provenance"] = current
     def _run_and_collect(job) -> _ResumeRunnerOutcome:
-        pid, proj, supplied_rtl, entry, exit_step, delivery_route = (
-            (*job, "ip") if len(job) == 5 else job)
+        if len(job) == 5:
+            pid, proj, supplied_rtl, entry, exit_step = job
+            delivery_route, d1_only = "ip", False
+        elif len(job) == 6:
+            pid, proj, supplied_rtl, entry, exit_step, delivery_route = job
+            d1_only = False
+        else:
+            pid, proj, supplied_rtl, entry, exit_step, delivery_route, d1_only = job
+        if d1_only:
+            # A retry after an unactivated D1 failure may perform D1 again, but
+            # it is forbidden to collect or launch any later product span.
+            argv = _solver_argv(runner, proj, "D1", "D1", delivery_route)
+            process = runner_budget.run(argv)
+            diagnostic = _runner_diagnostics(process, argv, proj)
+            diagnostics_json = json.dumps(diagnostic) if diagnostic else None
+            if process.error is not None:
+                return _ResumeRunnerOutcome(
+                    problem_id=pid, rc=process.rc, collected_json=None,
+                    error=process.error, diagnostics_json=diagnostics_json,
+                    invocation=getattr(process, "invocation", None))
+            return _ResumeRunnerOutcome(
+                problem_id=pid, rc=process.rc, collected_json=None,
+                error="D1_ONLY_REENTRY_COMPLETED_WITHOUT_ACTIVATION",
+                diagnostics_json=diagnostics_json,
+                invocation=getattr(process, "invocation", None))
+        # The caller performs a state check before constructing a job. Repeat
+        # it here at the actual fan-out seam so a pointer/anchor mutation after
+        # planning cannot turn a valid plan into a later-span bypass.
+        state = _route_reentry_state(str(pid), result_by_id.get(str(pid)) or {},
+                                     allow_d1_only=False)
+        if state.get("status") != "ACTIVE":
+            return _ResumeRunnerOutcome(
+                problem_id=pid, rc=None, collected_json=None,
+                error=str(state.get("reason") or "ROUTE_REENTRY_REFUSED"))
         # AI backup/repair has already authored the candidate. Re-enter at the
         # first RTL-validation step so program-first does not author again and
         # overwrite the hash whose semantics the AI just repaired. The routed
@@ -6996,21 +7161,34 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
     # that Program invocation; successful projects already committed in the
     # solve report are never discarded or re-authored.
     retry_plans = []
+    retry_blocked = []
     for result in results:
         if (result.get("worker_status") == "ERROR"
                 and result.get("worker_retryable") is True):
             pid = str(result.get("id"))
+            reentry_state = _route_reentry_state(pid, result, allow_d1_only=True)
+            if reentry_state.get("status") == "REFUSED":
+                retry_blocked.append((pid, str(reentry_state.get("reason"))))
+                result.update({"accepted": False, "candidate_ready": False,
+                               "worker_error": str(reentry_state.get("reason")),
+                               "worker_retryable": False})
+                continue
             retry_plans.append({
                 "id": pid, "result": result,
                 "project": (run_p / "projects" /
                             re.sub(r"[^\w.-]", "_", pid)),
+                "reentry_state": reentry_state,
             })
+    for pid, reason in retry_blocked:
+        repairs.append({"id": pid, "status": "ROUTE_REENTRY_BLOCKED",
+                        "reasons": [reason]})
     gate_rc = _runtime_pair_before_fan_out(retry_plans, run_p, "resume:retry")
     if gate_rc is not None:
         return gate_rc
     retry_outcomes = _ordered_parallel_map(
         [(p["id"], p["project"], False, p["result"].get("entry"),
-          p["result"].get("exit"), p["result"].get("delivery_route", "ip"))
+          p["result"].get("exit"), p["result"].get("delivery_route", "ip"),
+          p["reentry_state"].get("status") == "D1_ONLY")
          for p in retry_plans], _run_and_collect, jobs)
     existing_backup_ids = {str(item.get("id")) for item in backup}
     for plan, outcome in zip(retry_plans, retry_outcomes):
@@ -7145,9 +7323,19 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             backup_plans.append({"kind": "no_rtl", "item": item, "id": pid,
                                  "result": result, "reasons": [str(exc)]})
             continue
+        reentry_state = _route_reentry_state(pid, result, allow_d1_only=False)
+        if reentry_state.get("status") != "ACTIVE":
+            backup_plans.append({
+                "kind": "route_blocked", "item": item, "id": pid,
+                "result": result,
+                "reasons": [str(reentry_state.get("reason") or
+                                 "ROUTE_REENTRY_D1_INVALID")],
+            })
+            continue
         backup_plans.append({
             "kind": "run", "item": item, "id": pid, "result": result,
             "project": proj, "rtl_dir": rtl_dir, "provenance": provenance,
+            "reentry_state": reentry_state,
         })
 
     backup_run_plans = [p for p in backup_plans if p["kind"] == "run"]
@@ -7194,6 +7382,15 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                                                     "reasons": plan["reasons"]}})
             print(f"  {pid:44s} AI backup completion PENDING: "
                   + "; ".join(plan["reasons"]))
+            continue
+        if kind == "route_blocked":
+            remaining_backup.append(item)
+            result.update({"accepted": False, "awaiting_ai_backup": True,
+                           "awaiting_ai_review": False, "awaiting_ai": True,
+                           "route_reentry_blocked": plan["reasons"]})
+            repairs.append({"id": pid, "status": "ROUTE_REENTRY_BLOCKED",
+                            "reasons": plan["reasons"]})
+            print(f"  {pid:44s} AI backup blocked by route/D1 boundary")
             continue
         outcome = next(backup_outcomes)
         if outcome.error is not None:
@@ -7280,6 +7477,20 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             continue
         invocation_reason = _runner_reentry_reason(task, result)
         if invocation_reason:
+            reentry_state = _route_reentry_state(pid, result, allow_d1_only=False)
+            if reentry_state.get("status") != "ACTIVE":
+                reason = str(reentry_state.get("reason") or
+                             "ROUTE_REENTRY_D1_INVALID")
+                repair_plans.append({"kind": "report", "id": pid,
+                                     "repair": {
+                                         "id": pid,
+                                         "status": "ROUTE_REENTRY_BLOCKED",
+                                         "reasons": [reason],
+                                     }})
+                result.update({"accepted": False, "candidate_ready": False,
+                               "awaiting_ai_review": False,
+                               "route_reentry_blocked": [reason]})
+                continue
             # A legacy pre-run refusal is not a completed gate invocation.
             # Re-enter the SAME frozen bytes; no edit or author signature is
             # authorised here. Keep old review/test/task records for audit.
@@ -7318,6 +7529,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             repair_plans.append({
                 "kind": "regate", "id": pid, "task": task, "result": result,
                 "project": proj, "challenge": None, "review_key": key,
+                "reentry_state": reentry_state,
                 "archive": archive, "repair_parent_candidate": task.get("repair_parent_candidate_snapshot"),
                 "repair_provenance": task.get("repair_provenance"),
                 "repair_input_candidate": task.get("repair_input_candidate_snapshot"),
@@ -7429,6 +7641,22 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                 },
             })
             continue
+        reentry_state = _route_reentry_state(pid, result, allow_d1_only=False)
+        if reentry_state.get("status") != "ACTIVE":
+            reason = str(reentry_state.get("reason") or
+                         "ROUTE_REENTRY_D1_INVALID")
+            repair_plans.append({"kind": "report", "id": pid,
+                                 "pre_logs": pre_logs,
+                                 "repair": {
+                                     "id": pid,
+                                     "status": "ROUTE_REENTRY_BLOCKED",
+                                     "reasons": [reason],
+                                 }})
+            result.update({"accepted": False, "awaiting_ai": True,
+                           "awaiting_ai_review": False,
+                           "ai_repair_required": True,
+                           "route_reentry_blocked": [reason]})
+            continue
         # Freeze the signed bytes BEFORE the gates can normalize them in
         # place.  Without this the only copy of what the author signed is
         # destroyed, and a later Program fix has nothing to re-enter from.
@@ -7454,6 +7682,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         repair_plans.append({
             "kind": "run", "id": pid, "pre_logs": pre_logs,
             "task": task, "result": result, "project": proj,
+            "reentry_state": reentry_state,
             "challenge": challenge, "repair_provenance": repair_provenance,
             "repair_parent_candidate": task.get("candidate_snapshot"),
             "pre_gate_input": preserved,

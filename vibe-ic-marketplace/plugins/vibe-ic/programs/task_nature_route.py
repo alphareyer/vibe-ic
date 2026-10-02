@@ -223,7 +223,7 @@ DELIVERY_TARGETS: Dict[str, Dict[str, Any]] = {
 # metadata never select a physical route, and vague prose must not silently
 # upgrade or downgrade a run.
 PROMPT_DELIVERY_REQUIREMENTS_SCHEMA = "vibeic.prompt_delivery_requirements.v1"
-PROMPT_DELIVERY_RULES_VERSION = "r2"
+PROMPT_DELIVERY_RULES_VERSION = "r3"
 _DELIVERY_ORDER = {
     "rtl": 0,
     "gds": 1,
@@ -236,21 +236,30 @@ _PROMPT_DELIVERY_PATTERNS = (
     ("shippable_gds", re.compile(
         r"\b(?:shippable\s+gds|tape[- ]?out\s+precheck|tape[- ]?out\s+ready\s+gds)\b", re.I)),
     ("gds", re.compile(
-        r"\b(?:stream[- ]?out\s+gds|produce\s+(?:a\s+)?gds|deliver\s+(?:a\s+)?gds|gds\s+delivery)\b", re.I)),
+        r"\b(?:stream[- ]?out\s+gds(?:ii)?|produce\s+(?:a\s+)?gds(?:ii)?|"
+        r"deliver\s+(?:a\s+)?gds(?:ii)?|gds(?:ii)?\s+delivery|"
+        r"generate\s+gds(?:ii)?)\b", re.I)),
 )
-_DIE_ROUTE = re.compile(r"\b(?:die|chip|tape[- ]?out|shuttle)\b", re.I)
+_DIE_ROUTE = re.compile(
+    r"\b(?:die|chip|integrated\s+circuit|ic|tape[- ]?out|shuttle|gdsii?)\b",
+    re.I)
 _HARDMACRO_ROUTE = re.compile(
-    r"\b(?:ip\s+(?:path|deliverable|block)|hard[- ]?macro|macro\s+deliverable)\b", re.I)
+    r"\b(?:ip\s+(?:hard[- ]?macro|path|deliverable|block)|"
+    r"hard[- ]?macro|macro\s+deliverable)\b", re.I)
 
 
 def prompt_delivery_requirements(prompt: str) -> Dict[str, Any]:
     """Derive an immutable delivery floor from explicit user prompt language."""
     text = str(prompt or "")
-    route_hits = []
-    if _DIE_ROUTE.search(text):
+    # An IP hardmacro may explicitly contain GDS/GDSII, LEF, Liberty and
+    # Verilog views.  Those are views of the block, not a request for a DIE;
+    # classify the hardmacro family first and do not let a view word create a
+    # false DIE conflict.
+    has_hardmacro = bool(_HARDMACRO_ROUTE.search(text))
+    has_die = bool(_DIE_ROUTE.search(text)) and not has_hardmacro
+    route_hits = (["HARDMACRO"] if has_hardmacro else [])
+    if has_die:
         route_hits.append("DIE")
-    if _HARDMACRO_ROUTE.search(text):
-        route_hits.append("HARDMACRO")
     matches = []
     for target, rx in _PROMPT_DELIVERY_PATTERNS:
         hit = rx.search(text)
@@ -271,14 +280,20 @@ def prompt_delivery_requirements(prompt: str) -> Dict[str, Any]:
         minimum_target = strongest["target"]
         if status == "UNSPECIFIED":
             status = "DELIVERY_ONLY"
-        if route_family == "HARDMACRO" and minimum_target != "ip_hardmacro":
-            status = "CONFLICT"
-            reasons.append("HARDMACRO prompt cannot request a DIE delivery target")
+        if route_family == "HARDMACRO":
+            # GDS/GDSII and similar tokens are valid hardmacro view names.
+            # The family decision above already separated them from DIE.
+            pass
         elif route_family == "DIE" and minimum_target == "ip_hardmacro":
             status = "CONFLICT"
             reasons.append("DIE prompt cannot request an IP delivery target")
     if route_family == "HARDMACRO":
         minimum_target = "ip_hardmacro"
+    elif route_family == "DIE" and not minimum_target:
+        # "for tapeout" is an owner-visible shippability request even when it
+        # does not repeat the words GDS or precheck.
+        if re.search(r"\btape[- ]?out\b", text, re.I):
+            minimum_target = "shippable_gds"
     payload = {
         "schema": PROMPT_DELIVERY_REQUIREMENTS_SCHEMA,
         "rules_version": PROMPT_DELIVERY_RULES_VERSION,
@@ -302,6 +317,8 @@ def resolve_prompt_delivery_target(requirements: Dict[str, Any],
         return {"ok": False, "reason": "prompt delivery requirements missing"}
     if requirements.get("schema") != PROMPT_DELIVERY_REQUIREMENTS_SCHEMA:
         return {"ok": False, "reason": "prompt delivery requirements schema invalid"}
+    if requirements.get("rules_version") != PROMPT_DELIVERY_RULES_VERSION:
+        return {"ok": False, "reason": "prompt delivery requirements rules version invalid"}
     if requirements.get("requirements_sha256") != hashlib.sha256(json.dumps(
             {k: v for k, v in requirements.items() if k != "requirements_sha256"},
             sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest():
@@ -334,6 +351,9 @@ def resolve_prompt_delivery_target(requirements: Dict[str, Any],
             source = "ai_compatible"
     else:
         target = target or "rtl"
+        if requested_target is not None and target != "rtl":
+            return {"ok": False,
+                    "reason": "physical delivery requires owner-visible prompt evidence"}
         source = "ai_compatible" if requested_target is not None else "default"
     if family == "DIE" and target == "ip_hardmacro":
         return {"ok": False, "reason": "AI target flips DIE to an IP route"}

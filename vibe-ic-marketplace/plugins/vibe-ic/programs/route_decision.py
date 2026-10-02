@@ -148,10 +148,13 @@ def _closure(step: str, deps: Mapping[str, list[str]], seen: set[str] | None = N
 def dependency_closed_join(minimums: Iterable[str], *, dag: dict | None = None) -> dict:
     """Join lower bounds and return the dependency-closed proof population.
 
-    The returned ``step`` is the latest lower bound in canonical order.  The
-    closure includes every transitive prerequisite of every bound and of the
-    join, so a consumer can never mistake the scalar join for permission to
-    omit an earlier branch.
+    The returned ``step`` is the least canonical common descendant whose
+    dependency closure contains every bound.  A scalar maximum is not a join
+    in a DAG: two branches can be ordered later in the YAML while remaining
+    unrelated.
+    The closure includes every transitive prerequisite of every bound and of
+    the selected terminal, so a consumer can never mistake the scalar join for
+    permission to omit an earlier branch.
     """
     dag = dag or canonical_dag()
     order = {sid: i for i, sid in enumerate(dag["steps"])}
@@ -161,7 +164,15 @@ def dependency_closed_join(minimums: Iterable[str], *, dag: dict | None = None) 
     unknown = sorted(set(values) - set(order))
     if unknown:
         raise ValueError(f"unknown lower-bound step(s): {unknown}")
-    join = max(values, key=lambda sid: order[sid])
+    # Select the first common descendant in declaration order.  This gives
+    # the least canonical join, rather than whichever minimum happens to
+    # appear latest in the YAML; e.g. proof+GDS joins at 39 while power+GDS
+    # joins at 36 in the canonical flow.
+    candidates = [sid for sid in dag["steps"]
+                  if set(values).issubset(_closure(sid, dag["blocks_on"]))]
+    if not candidates:
+        raise ValueError("no canonical step contains every lower-bound dependency")
+    join = min(candidates, key=lambda sid: order[sid])
     closed: set[str] = set()
     for sid in values:
         closed |= _closure(sid, dag["blocks_on"])
@@ -272,6 +283,25 @@ def _minimum_from_maps(nature: str, evidence: str, target: str,
     delivery = delivery_table[target]
     target_step = str(delivery.get("verify_through") or delivery["answer_step"])
     return entry, evidence_step, target_step, str(delivery["answer_step"])
+
+
+def _route_join(minimums: Iterable[str], *, dag: dict) -> dict:
+    """Join route minima while retaining the physical-delivery terminal rule.
+
+    The canonical physical GDS terminal is the owner-visible delivery gate;
+    behavioural simulation is still retained in ``closed_steps`` but is not a
+    reason to promote a GDS handoff to the later cross-branch proof terminal.
+    Proof+GDS and power+GDS do require their common terminals (39 and 36).
+    """
+    values = [str(v) for v in minimums if v is not None]
+    if set(values) >= {"4", "37"} and "5" not in values and "33" not in values:
+        physical = dependency_closed_join(("37",), dag=dag)
+        closed = set(physical["closed_steps"])
+        for sid in values:
+            closed |= _closure(sid, dag["blocks_on"])
+        return {**physical, "minimums": values,
+                "closed_steps": [sid for sid in dag["steps"] if sid in closed]}
+    return dependency_closed_join(values, dag=dag)
 
 
 @dataclass(frozen=True)
@@ -412,7 +442,7 @@ def make_route_receipt(*, nature: str, requested_evidence: str,
     entry, evidence_min, target_min, answer = _minimum_from_maps(
         nature, requested_evidence, delivery_target,
         nature_table, evidence_table, delivery_table)
-    joined = dependency_closed_join((entry, evidence_min, target_min), dag=dag)
+    joined = _route_join((entry, evidence_min, target_min), dag=dag)
     mode = mode_intent(
         semantic_request={"nature": nature, "requested_evidence": requested_evidence,
                           "delivery_target": delivery_target,
@@ -458,7 +488,7 @@ def validate_route_receipt(receipt: Mapping[str, Any], *, dag: dict | None = Non
             str(receipt.get("requested_evidence")),
             str(receipt.get("delivery_target")),
             _tnr.NATURE_ENTRY, _tnr.EVIDENCE_EXIT, _tnr.DELIVERY_TARGETS)
-        trusted_join = dependency_closed_join(
+        trusted_join = _route_join(
             (entry, evidence_min, target_min), dag=dag)
     except (ImportError, KeyError, TypeError, ValueError):
         errors.append("ROUTE_RECEIPT_TRUSTED_TABLES_INVALID")
@@ -567,7 +597,9 @@ def activate_d1(*, pending: Mapping[str, Any], route_receipt: Mapping[str, Any],
         raise ValueError("D1_ACTIVATION_LDOC_ROOT_MISSING")
     if pending.get("task_sha256") != str(task_sha256):
         raise ValueError("D1_ACTIVATION_TASK_MISMATCH")
-    if provenance.get("ran") is not True or not _HEX64.fullmatch(str(provenance.get("digest") or "")):
+    if (not isinstance(provenance, Mapping)
+            or provenance.get("ran") is not True
+            or not _HEX64.fullmatch(str(provenance.get("digest") or ""))):
         raise ValueError("D1_ACTIVATION_PROVENANCE_MISSING")
     _validate_d1_gate(
         d1_gate, route_receipt=route_receipt, provenance=provenance,
